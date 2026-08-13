@@ -1,0 +1,8 @@
+{
+  "name": "works.kenan.pi-runtime",
+  "private": true,
+  "version": "1.0.0",
+  "dependencies": {
+    "@earendil-works/pi-coding-agent": "0.84.1"
+  }
+}

@@ -1,0 +1,10 @@
+#!/usr/bin/env bash
+set -euo pipefail
+cd "$(dirname "$0")"
+npm ci --ignore-scripts
+install -d -m 700 "$HOME/.local/bin"
+ln -sfn "$PWD/node_modules/.bin/pi" "$HOME/.local/bin/pi"
+"$HOME/.local/bin/pi" update --extensions
+version=$("$HOME/.local/bin/pi" --version)
+[[ "$version" == "0.84.1" ]] || { echo "unexpected Pi version: $version" >&2; exit 1; }
+echo "Pi $version deployed"
