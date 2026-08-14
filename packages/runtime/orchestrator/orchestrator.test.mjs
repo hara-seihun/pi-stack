@@ -59,9 +59,10 @@ test("completed, delayed, and saturated tasks are ineligible", () => {
 
 test("resource governor admits until CPU, RAM, or the operator cap is reached", () => {
   const config = loadConfig();
-  assert.equal(resourceSlots(config, 2, 30_000, 60_000, 20), 300);
+  assert.equal(resourceSlots(config, 2, 30_000, 60_000, 20), 298);
   assert.equal(resourceSlots(config, 2, 6_000, 60_000, 20), 0);
   assert.equal(resourceSlots(config, 2, 30_000, 60_000, 90), 0);
   assert.equal(resourceSlots({ ...config, maxSessions: 4 }, 2, 30_000, 60_000, 20), 2);
+  assert.equal(resourceSlots(config, 600, 50_000, 60_000, 20, 2_000), 0);
   assert.equal(cpuPercent({ idle: 100, total: 200 }, { idle: 125, total: 300 }), 75);
 });

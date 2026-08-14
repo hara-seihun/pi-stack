@@ -154,10 +154,12 @@ export function chooseTask(tasks, activeTotal) {
   return rankTasks(tasks, activeTotal)[0] ?? null;
 }
 
-export function resourceSlots(config, activeCount, memAvailableMiB, memTotalMiB, cpuPercent) {
+export function resourceSlots(config, activeCount, memAvailableMiB, memTotalMiB, cpuPercent, agentMemoryMiB = 0) {
   if (cpuPercent >= config.maxCpuPercent) return 0;
   const usedMiB = memTotalMiB - memAvailableMiB;
-  const memoryHeadroomMiB = memTotalMiB * config.maxMemoryPercent / 100 - usedMiB;
+  const nonAgentUsedMiB = Math.max(0, usedMiB - agentMemoryMiB);
+  const committedAgentMiB = Math.max(agentMemoryMiB, activeCount * config.estimatedSessionMiB);
+  const memoryHeadroomMiB = memTotalMiB * config.maxMemoryPercent / 100 - nonAgentUsedMiB - committedAgentMiB;
   const memorySlots = Math.max(0, Math.floor(memoryHeadroomMiB / config.estimatedSessionMiB));
   const operatorSlots = Math.max(0, config.maxSessions - activeCount);
   return Math.min(operatorSlots, memorySlots);
@@ -172,6 +174,11 @@ function memoryMiB() {
     if (values.MemTotal && values.MemAvailable) return { total: values.MemTotal, available: values.MemAvailable };
   } catch {}
   return { total: os.totalmem() / 1048576, available: os.freemem() / 1048576 };
+}
+
+function agentMemoryMiB() {
+  try { return Number(fs.readFileSync("/sys/fs/cgroup/system.slice/agent-orchestrator.service/memory.current", "utf8")) / 1048576; }
+  catch { return 0; }
 }
 
 function cpuTotals() {
@@ -380,7 +387,7 @@ class Controller {
     const currentCpuPercent = cpuPercent(this.previousCpu, currentCpu);
     this.previousCpu = currentCpu;
     const memory = memoryMiB();
-    const slots = resourceSlots(this.config, this.active.size, memory.available, memory.total, currentCpuPercent);
+    const slots = resourceSlots(this.config, this.active.size, memory.available, memory.total, currentCpuPercent, agentMemoryMiB());
     const launchCount = Math.min(slots, this.config.launchesPerTick);
     for (let launchIndex = 0; launchIndex < launchCount; launchIndex++) {
       let launched = false;
@@ -539,7 +546,7 @@ async function main(argv = process.argv.slice(2)) {
     const active = Number(db.prepare("SELECT count(*) count FROM run WHERE status='running'").get().count);
     const resources = {
       active,
-      slots: resourceSlots(config, active, memory.available, memory.total, utilization),
+      slots: resourceSlots(config, active, memory.available, memory.total, utilization, agentMemoryMiB()),
       cpuPercent: Number(utilization.toFixed(1)),
       maxCpuPercent: config.maxCpuPercent,
       memoryPercent: Number(((memory.total - memory.available) * 100 / memory.total).toFixed(1)),
