@@ -26,11 +26,13 @@ const AUTH_PATH = path.join(getAgentDir(), "auth.json");
 const TICK_MS = 1000;
 
 const DEFAULT_CONFIG = {
-  maxSessions: 64,
-  reserveMemoryMiB: 12288,
-  estimatedSessionMiB: 256,
-  maxLoadPerCpu: 1.0,
+  maxSessions: 4096,
+  maxMemoryPercent: 90,
+  maxCpuPercent: 90,
+  estimatedSessionMiB: 80,
+  launchesPerTick: 4,
   quota: {
+    enabled: false,
     pollSeconds: 120,
     targetFraction: 0.5,
     creditsPerPercent: 504,
@@ -61,13 +63,19 @@ export function ensureLayout() {
 export function loadConfig() {
   ensureLayout();
   const config = JSON.parse(fs.readFileSync(CONFIG_PATH, "utf8"));
-  for (const key of ["maxSessions", "reserveMemoryMiB", "estimatedSessionMiB", "maxLoadPerCpu"]) {
-    if (!(Number.isFinite(config[key]) && config[key] > 0)) fail(`invalid config.${key}`);
+  for (const key of ["maxSessions", "estimatedSessionMiB", "launchesPerTick"]) {
+    if (!(Number.isInteger(config[key]) && config[key] > 0)) fail(`invalid config.${key}`);
   }
-  if (!(Number.isFinite(config.quota?.pollSeconds) && config.quota.pollSeconds > 0)) fail("invalid config.quota.pollSeconds");
-  if (!(Number.isFinite(config.quota?.targetFraction) && config.quota.targetFraction > 0 && config.quota.targetFraction <= 1)) fail("invalid config.quota.targetFraction");
-  if (!(Number.isFinite(config.quota?.creditsPerPercent) && config.quota.creditsPerPercent > 0)) fail("invalid config.quota.creditsPerPercent");
-  if (!config.quota.modelCreditsPerHour || typeof config.quota.modelCreditsPerHour !== "object") fail("missing config.quota.modelCreditsPerHour");
+  for (const key of ["maxMemoryPercent", "maxCpuPercent"]) {
+    if (!(Number.isFinite(config[key]) && config[key] > 0 && config[key] <= 100)) fail(`invalid config.${key}`);
+  }
+  if (typeof config.quota?.enabled !== "boolean") fail("invalid config.quota.enabled");
+  if (config.quota.enabled) {
+    if (!(Number.isFinite(config.quota.pollSeconds) && config.quota.pollSeconds > 0)) fail("invalid config.quota.pollSeconds");
+    if (!(Number.isFinite(config.quota.targetFraction) && config.quota.targetFraction > 0 && config.quota.targetFraction <= 1)) fail("invalid config.quota.targetFraction");
+    if (!(Number.isFinite(config.quota.creditsPerPercent) && config.quota.creditsPerPercent > 0)) fail("invalid config.quota.creditsPerPercent");
+    if (!config.quota.modelCreditsPerHour || typeof config.quota.modelCreditsPerHour !== "object") fail("missing config.quota.modelCreditsPerHour");
+  }
   return config;
 }
 
@@ -146,19 +154,35 @@ export function chooseTask(tasks, activeTotal) {
   return rankTasks(tasks, activeTotal)[0] ?? null;
 }
 
-export function resourceSlots(config, activeCount, memAvailableMiB, load1, load5, cpuCount = os.cpus().length) {
-  const memorySlots = Math.max(0, Math.floor((memAvailableMiB - config.reserveMemoryMiB) / config.estimatedSessionMiB));
-  const loadAllows = load1 / cpuCount <= config.maxLoadPerCpu && load5 / cpuCount <= config.maxLoadPerCpu;
-  const total = loadAllows ? Math.min(config.maxSessions, memorySlots) : activeCount;
-  return Math.max(0, total - activeCount);
+export function resourceSlots(config, activeCount, memAvailableMiB, memTotalMiB, cpuPercent) {
+  if (cpuPercent >= config.maxCpuPercent) return 0;
+  const usedMiB = memTotalMiB - memAvailableMiB;
+  const memoryHeadroomMiB = memTotalMiB * config.maxMemoryPercent / 100 - usedMiB;
+  const memorySlots = Math.max(0, Math.floor(memoryHeadroomMiB / config.estimatedSessionMiB));
+  const operatorSlots = Math.max(0, config.maxSessions - activeCount);
+  return Math.min(operatorSlots, memorySlots);
 }
 
-function availableMemoryMiB() {
+function memoryMiB() {
   try {
-    const line = fs.readFileSync("/proc/meminfo", "utf8").split("\n").find((item) => item.startsWith("MemAvailable:"));
-    if (line) return Number(line.split(/\s+/)[1]) / 1024;
+    const values = Object.fromEntries(fs.readFileSync("/proc/meminfo", "utf8").split("\n").flatMap((line) => {
+      const match = line.match(/^(MemTotal|MemAvailable):\s+(\d+)/);
+      return match ? [[match[1], Number(match[2]) / 1024]] : [];
+    }));
+    if (values.MemTotal && values.MemAvailable) return { total: values.MemTotal, available: values.MemAvailable };
   } catch {}
-  return os.freemem() / 1048576;
+  return { total: os.totalmem() / 1048576, available: os.freemem() / 1048576 };
+}
+
+function cpuTotals() {
+  const fields = fs.readFileSync("/proc/stat", "utf8").split("\n", 1)[0].trim().split(/\s+/).slice(1).map(Number);
+  return { idle: (fields[3] ?? 0) + (fields[4] ?? 0), total: fields.reduce((sum, value) => sum + value, 0) };
+}
+
+export function cpuPercent(before, after) {
+  const total = after.total - before.total;
+  const idle = after.idle - before.idle;
+  return total > 0 ? Math.max(0, Math.min(100, (total - idle) * 100 / total)) : 0;
 }
 
 function runModelKey(task) { return `${task.model}:${task.thinking}`; }
@@ -240,6 +264,7 @@ class Controller {
     this.stopping = false;
     this.lastGovernorEvent = { at: 0, detail: "" };
     this.lastControllerError = { at: 0, detail: "" };
+    this.previousCpu = cpuTotals();
   }
 
   recover() {
@@ -351,21 +376,34 @@ class Controller {
   async tick() {
     const tasks = taskRows(this.db);
     const activeTasks = [...this.active.values()].map((item) => item.task);
-    const [load1, load5] = os.loadavg();
-    const slots = resourceSlots(this.config, this.active.size, availableMemoryMiB(), load1, load5);
-    if (slots <= 0) return;
-    for (const task of rankTasks(tasks, this.active.size)) {
-      let governed;
-      try { governed = await this.quota.allows(task, activeTasks); }
-      catch (error) {
-        this.governorBlocked(String(error.message ?? error), task.id);
-        return;
-      }
-      if (governed.ok) {
+    const currentCpu = cpuTotals();
+    const currentCpuPercent = cpuPercent(this.previousCpu, currentCpu);
+    this.previousCpu = currentCpu;
+    const memory = memoryMiB();
+    const slots = resourceSlots(this.config, this.active.size, memory.available, memory.total, currentCpuPercent);
+    const launchCount = Math.min(slots, this.config.launchesPerTick);
+    for (let launchIndex = 0; launchIndex < launchCount; launchIndex++) {
+      let launched = false;
+      for (const task of rankTasks(tasks, this.active.size)) {
+        if (this.config.quota.enabled) {
+          let governed;
+          try { governed = await this.quota.allows(task, activeTasks); }
+          catch (error) {
+            this.governorBlocked(String(error.message ?? error), task.id);
+            return;
+          }
+          if (!governed.ok) {
+            this.governorBlocked(`quota live=${governed.live.toFixed(3)} candidate=${governed.candidate.toFixed(3)} allowed=${governed.quota.allowedPercentPerHour.toFixed(3)}`, task.id);
+            continue;
+          }
+        }
         await this.launch(task);
-        return;
+        task.active = Number(task.active) + 1;
+        activeTasks.push(task);
+        launched = true;
+        break;
       }
-      this.governorBlocked(`quota live=${governed.live.toFixed(3)} candidate=${governed.candidate.toFixed(3)} allowed=${governed.quota.allowedPercentPerHour.toFixed(3)}`, task.id);
+      if (!launched) return;
     }
   }
 
@@ -444,7 +482,7 @@ function check(db) {
   for (const task of taskRows(db)) {
     if (!fs.existsSync(task.cwd)) fail(`task ${task.id} cwd is missing: ${task.cwd}`);
     const key = runModelKey(task);
-    if (!(key in config.quota.modelCreditsPerHour)) fail(`task ${task.id} has no quota rate for ${key}`);
+    if (config.quota.enabled && !(key in config.quota.modelCreditsPerHour)) fail(`task ${task.id} has no quota rate for ${key}`);
   }
   console.log(`ok: ${taskRows(db).length} tasks; database and configuration valid`);
 }
@@ -493,8 +531,23 @@ async function main(argv = process.argv.slice(2)) {
     return;
   }
   if (command === "governor") {
-    const snapshot = await new QuotaGovernor(loadConfig()).refresh();
-    console.log(JSON.stringify(snapshot, null, 2));
+    const config = loadConfig();
+    const memory = memoryMiB();
+    const before = cpuTotals();
+    await sleep(250);
+    const utilization = cpuPercent(before, cpuTotals());
+    const active = Number(db.prepare("SELECT count(*) count FROM run WHERE status='running'").get().count);
+    const resources = {
+      active,
+      slots: resourceSlots(config, active, memory.available, memory.total, utilization),
+      cpuPercent: Number(utilization.toFixed(1)),
+      maxCpuPercent: config.maxCpuPercent,
+      memoryPercent: Number(((memory.total - memory.available) * 100 / memory.total).toFixed(1)),
+      maxMemoryPercent: config.maxMemoryPercent,
+      maxSessions: config.maxSessions,
+    };
+    const quota = config.quota.enabled ? await new QuotaGovernor(config).refresh() : { enabled: false };
+    console.log(JSON.stringify({ resources, quota }, null, 2));
     return;
   }
   if (command === "check") return check(db);

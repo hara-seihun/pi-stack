@@ -6,7 +6,7 @@ import test from "node:test";
 
 const temporary = fs.mkdtempSync(path.join(os.tmpdir(), "agent-orchestrator-test-"));
 process.env.AGENT_ORCHESTRATOR_DATA = temporary;
-const { chooseTask, insertRun, loadConfig, openDb, rankTasks, resourceSlots } = await import("./orchestrator.mjs");
+const { chooseTask, cpuPercent, insertRun, loadConfig, openDb, rankTasks, resourceSlots } = await import("./orchestrator.mjs");
 
 test.after(() => fs.rmSync(temporary, { recursive: true, force: true }));
 
@@ -57,9 +57,11 @@ test("completed, delayed, and saturated tasks are ineligible", () => {
   assert.equal(chooseTask(tasks, 1), null);
 });
 
-test("resource governor respects memory, load, and operator cap", () => {
+test("resource governor admits until CPU, RAM, or the operator cap is reached", () => {
   const config = loadConfig();
-  assert.equal(resourceSlots(config, 2, 30_000, 1, 1, 32), 62);
-  assert.equal(resourceSlots(config, 2, 13_000, 1, 1, 32), 0);
-  assert.equal(resourceSlots(config, 2, 60_000, 40, 40, 32), 0);
+  assert.equal(resourceSlots(config, 2, 30_000, 60_000, 20), 300);
+  assert.equal(resourceSlots(config, 2, 6_000, 60_000, 20), 0);
+  assert.equal(resourceSlots(config, 2, 30_000, 60_000, 90), 0);
+  assert.equal(resourceSlots({ ...config, maxSessions: 4 }, 2, 30_000, 60_000, 20), 2);
+  assert.equal(cpuPercent({ idle: 100, total: 200 }, { idle: 125, total: 300 }), 75);
 });

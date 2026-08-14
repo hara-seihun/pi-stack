@@ -18,18 +18,20 @@ Each agent receives `task_complete`. It must report validated artifacts and whet
 
 ## Governor
 
-Before each launch one governor checks:
+Before launching a bounded batch, one governor checks:
 
-1. the operator concurrency cap;
-2. available RAM and CPU load;
-3. current Codex subscription headroom against explicit measured model burn rates.
+1. the operator emergency concurrency cap;
+2. measured whole-machine CPU utilization;
+3. measured whole-machine available RAM;
+4. Codex subscription headroom when that check is enabled.
 
-Missing or stale quota evidence blocks launching visibly; it never selects a fallback model. Pi's configured provider runtime owns account authentication and routing.
+The production resource thresholds admit agents until either CPU or RAM reaches 90%. The emergency cap is deliberately far above expected resource capacity and is not the normal limiter. Quota admission is currently disabled by explicit operator configuration; when enabled, missing quota evidence blocks launching visibly and never selects a fallback model. Pi's configured provider runtime owns account authentication and routing.
 
 ## Operations
 
 ```bash
 orchestrator check
+orchestrator governor
 orchestrator status
 orchestrator runs [TASK_ID]
 orchestrator task show TASK_ID
