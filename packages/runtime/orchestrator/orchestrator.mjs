@@ -220,6 +220,11 @@ class QuotaGovernor {
 function randomId() { return crypto.randomUUID(); }
 function backoffMs(streak) { return Math.min(30 * 60_000, 30_000 * (2 ** Math.min(6, Math.max(0, streak - 1)))); }
 
+export function insertRun(db, runId, taskId, startedAt = now()) {
+  db.prepare("INSERT INTO run(id,task_id,status,started_at) VALUES(?,?,?,?)")
+    .run(runId, taskId, "running", startedAt);
+}
+
 class Controller {
   constructor(db, config) {
     this.db = db;
@@ -229,6 +234,7 @@ class Controller {
     this.active = new Map();
     this.stopping = false;
     this.lastGovernorEvent = { at: 0, detail: "" };
+    this.lastControllerError = { at: 0, detail: "" };
   }
 
   recover() {
@@ -247,7 +253,7 @@ class Controller {
 
   async launch(task) {
     const runId = randomId();
-    this.db.prepare("INSERT INTO run(id,task_id,status,started_at) VALUES(?,?,\"running\",?)").run(runId, task.id, now());
+    insertRun(this.db, runId, task.id);
     event(this.db, "run-started", runModelKey(task), task.id, runId);
     const promise = this.execute(task, runId).finally(() => this.active.delete(runId));
     this.active.set(runId, { task, promise });
@@ -323,6 +329,13 @@ class Controller {
     }
   }
 
+  controllerError(detail) {
+    if (detail !== this.lastControllerError.detail || now() - this.lastControllerError.at >= 60_000) {
+      event(this.db, "controller-error", detail);
+      this.lastControllerError = { at: now(), detail };
+    }
+  }
+
   governorBlocked(detail, taskId) {
     if (detail !== this.lastGovernorEvent.detail || now() - this.lastGovernorEvent.at >= 60_000) {
       event(this.db, "governor-blocked", detail, taskId);
@@ -354,7 +367,7 @@ class Controller {
   async run() {
     while (!this.stopping) {
       try { await this.tick(); }
-      catch (error) { event(this.db, "controller-error", String(error.stack ?? error)); }
+      catch (error) { this.controllerError(String(error.stack ?? error)); }
       await sleep(TICK_MS);
     }
     await Promise.allSettled([...this.active.values()].map(async ({ promise }) => promise));

@@ -6,7 +6,7 @@ import test from "node:test";
 
 const temporary = fs.mkdtempSync(path.join(os.tmpdir(), "agent-orchestrator-test-"));
 process.env.AGENT_ORCHESTRATOR_DATA = temporary;
-const { chooseTask, loadConfig, openDb, resourceSlots } = await import("./orchestrator.mjs");
+const { chooseTask, insertRun, loadConfig, openDb, resourceSlots } = await import("./orchestrator.mjs");
 
 test.after(() => fs.rmSync(temporary, { recursive: true, force: true }));
 
@@ -14,6 +14,16 @@ test("database initializes with integrity", () => {
   const db = openDb(path.join(temporary, "test.sqlite3"));
   assert.equal(db.prepare("PRAGMA integrity_check").get().integrity_check, "ok");
   assert.deepEqual(db.prepare("SELECT name FROM sqlite_master WHERE type='table' ORDER BY name").all().map((row) => row.name), ["event", "run", "task"]);
+  db.close();
+});
+
+test("a launch is recorded with a literal running status", () => {
+  const db = openDb(path.join(temporary, "run.sqlite3"));
+  const timestamp = Date.now();
+  db.prepare(`INSERT INTO task(id,prompt,cwd,model,thinking,completion_condition,max_parallel,launch_share,not_before,next_eligible_at,created_at)
+    VALUES(?,?,?,?,?,?,?,?,?,?,?)`).run("task", "prompt", temporary, "provider/model", "high", "done", 1, 1, timestamp, timestamp, timestamp);
+  insertRun(db, "run", "task", timestamp);
+  assert.equal(db.prepare("SELECT status FROM run WHERE id=?").get("run").status, "running");
   db.close();
 });
 
