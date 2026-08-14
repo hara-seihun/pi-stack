@@ -262,7 +262,7 @@ class QuotaGovernor {
 function randomId() { return crypto.randomUUID(); }
 function backoffMs(streak) { return Math.min(30 * 60_000, 30_000 * (2 ** Math.min(6, Math.max(0, streak - 1)))); }
 export function nextIncompleteState(streak, failed) {
-  if (!failed) return { streak: 0, delayMs: backoffMs(1) };
+  if (!failed) return { streak: 0, delayMs: 0 };
   const nextStreak = Number(streak) + 1;
   return { streak: nextStreak, delayMs: backoffMs(nextStreak) };
 }
@@ -401,12 +401,11 @@ class Controller {
           SELECT t.incomplete_streak,t.next_eligible_at,r.started_at
           FROM task t JOIN run r ON r.task_id=t.id
           WHERE t.id=? AND r.id=?`).get(task.id, runId);
-        // Concurrent siblings belong to one launch wave. Only the first result
-        // from that wave advances eligibility. A normal complete=false report is
-        // productive persistent work, so it resets the failure streak and takes
-        // only the base pause. Runs that end without a report retain exponential
-        // failure backoff.
-        if (shouldAdvanceBackoff(row.next_eligible_at, row.started_at)) {
+        // A normal complete=false report is productive persistent work: it
+        // immediately restores eligibility and clears any sibling failure's
+        // pause. Runs that end without a report retain exponential backoff, and
+        // only the first failure from one concurrent launch wave advances it.
+        if (error === null || shouldAdvanceBackoff(row.next_eligible_at, row.started_at)) {
           const next = nextIncompleteState(row.incomplete_streak, error !== null);
           this.db.prepare("UPDATE task SET incomplete_streak=?,next_eligible_at=? WHERE id=?")
             .run(next.streak, now() + next.delayMs, task.id);

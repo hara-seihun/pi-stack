@@ -110,7 +110,7 @@ test("one concurrent launch wave advances task backoff only once", () => {
 });
 
 test("productive persistent work resets failure backoff", () => {
-  assert.deepEqual(nextIncompleteState(6, false), { streak: 0, delayMs: 30_000 });
+  assert.deepEqual(nextIncompleteState(6, false), { streak: 0, delayMs: 0 });
   assert.deepEqual(nextIncompleteState(2, true), { streak: 3, delayMs: 120_000 });
 });
 

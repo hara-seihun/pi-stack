@@ -14,7 +14,7 @@ Tasks may declare:
 - a relative launch share among eligible persistent work;
 - an optional time at which it first becomes eligible.
 
-Each agent receives `task_complete`. It must report validated artifacts and whether the task itself is complete. When a machine completion check is configured, `complete=true` is only advisory until that command exits successfully; a failed check records the launch as incomplete. The tool terminates that launch immediately, preventing queued continuations from turning one launch into multiple work units. A productive `complete=false` result leaves the task eligible after the fixed base pause and resets any failure streak; a launch that ends without a completion report receives bounded exponential backoff. There are no standing/scheduled/once/review/retry task types and no priorities.
+Each agent receives `task_complete`. It must report validated artifacts and whether the task itself is complete. When a machine completion check is configured, `complete=true` is only advisory until that command exits successfully; a failed check records the launch as incomplete. The tool terminates that launch immediately, preventing queued continuations from turning one launch into multiple work units. A productive `complete=false` result immediately restores task eligibility and resets any failure streak; a launch that ends without a completion report receives bounded exponential backoff. There are no standing/scheduled/once/review/retry task types and no priorities.
 
 ## Governor
 
