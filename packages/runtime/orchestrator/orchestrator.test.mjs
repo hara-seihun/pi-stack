@@ -6,7 +6,7 @@ import test from "node:test";
 
 const temporary = fs.mkdtempSync(path.join(os.tmpdir(), "agent-orchestrator-test-"));
 process.env.AGENT_ORCHESTRATOR_DATA = temporary;
-const { chooseTask, completionToolResult, cpuPercent, insertRun, loadConfig, openDb, rankTasks, resourceSlots, shouldAdvanceBackoff, stopSession } = await import("./orchestrator.mjs");
+const { chooseTask, completionToolResult, cpuPercent, insertRun, loadConfig, openDb, rankTasks, resourceSlots, setTaskOptions, shouldAdvanceBackoff, stopSession } = await import("./orchestrator.mjs");
 
 test.after(() => fs.rmSync(temporary, { recursive: true, force: true }));
 
@@ -24,6 +24,20 @@ test("a launch is recorded with a literal running status", () => {
     VALUES(?,?,?,?,?,?,?,?,?,?,?)`).run("task", "prompt", temporary, "provider/model", "high", "done", 1, 1, timestamp, timestamp, timestamp);
   insertRun(db, "run", "task", timestamp);
   assert.equal(db.prepare("SELECT status FROM run WHERE id=?").get("run").status, "running");
+  db.close();
+});
+
+test("task prompts can be updated through the governed task interface", () => {
+  const db = openDb(path.join(temporary, "task-set.sqlite3"));
+  const timestamp = Date.now();
+  db.prepare(`INSERT INTO task(id,prompt,cwd,model,thinking,completion_condition,max_parallel,launch_share,not_before,next_eligible_at,created_at)
+    VALUES(?,?,?,?,?,?,?,?,?,?,?)`).run("task", "old", temporary, "provider/model", "high", "done", 1, 1, timestamp, timestamp, timestamp);
+  const promptFile = path.join(temporary, "prompt.md");
+  fs.writeFileSync(promptFile, "new governed prompt\n");
+  setTaskOptions(db, "task", { "prompt-file": promptFile, "max-parallel": "3" });
+  const updated = db.prepare("SELECT prompt,max_parallel FROM task WHERE id=?").get("task");
+  assert.equal(updated.prompt, "new governed prompt");
+  assert.equal(updated.max_parallel, 3);
   db.close();
 });
 

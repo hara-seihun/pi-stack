@@ -492,6 +492,29 @@ function createTask(db, options) {
   console.log(`created ${options.id}`);
 }
 
+export function setTaskOptions(db, id, options) {
+  if (!db.prepare("SELECT 1 FROM task WHERE id=?").get(id)) fail(`unknown task ${id}`);
+  if (!Object.keys(options).length) fail("task set requires --max-parallel, --share, and/or --prompt-file");
+  const unknown = Object.keys(options).filter((key) => !["max-parallel", "share", "prompt-file"].includes(key));
+  if (unknown.length) fail(`task set does not support ${unknown.map((key) => `--${key}`).join(", ")}`);
+  if (options["max-parallel"] !== undefined) {
+    const value = Number(options["max-parallel"]);
+    if (!(Number.isInteger(value) && value > 0)) fail("--max-parallel must be a positive integer");
+    db.prepare("UPDATE task SET max_parallel=? WHERE id=?").run(value, id);
+  }
+  if (options.share !== undefined) {
+    const value = Number(options.share);
+    if (!(Number.isFinite(value) && value > 0)) fail("--share must be positive");
+    db.prepare("UPDATE task SET launch_share=? WHERE id=?").run(value, id);
+  }
+  if (options["prompt-file"] !== undefined) {
+    const prompt = fs.readFileSync(options["prompt-file"], "utf8").trim();
+    if (!prompt) fail("--prompt-file must contain a nonempty prompt");
+    db.prepare("UPDATE task SET prompt=? WHERE id=?").run(prompt, id);
+  }
+  event(db, "task-set", JSON.stringify(options), id);
+}
+
 function printTasks(db) {
   for (const row of taskRows(db)) {
     const state = row.cancelled_at ? "cancelled" : row.completed_at ? "complete" : row.not_before > now() ? `eligible ${iso(row.not_before)}` : row.next_eligible_at > now() ? `backoff ${iso(row.next_eligible_at)}` : "eligible";
@@ -525,19 +548,8 @@ async function main(argv = process.argv.slice(2)) {
   }
   if (command === "task" && subcommand === "set") {
     const id = rest.shift(); if (!id) fail("task set requires ID");
-    const options = parseOptions(rest);
-    if (!Object.keys(options).length) fail("task set requires --max-parallel and/or --share");
-    if (options["max-parallel"] !== undefined) {
-      const value = Number(options["max-parallel"]);
-      if (!(Number.isInteger(value) && value > 0)) fail("--max-parallel must be a positive integer");
-      db.prepare("UPDATE task SET max_parallel=? WHERE id=?").run(value, id);
-    }
-    if (options.share !== undefined) {
-      const value = Number(options.share);
-      if (!(Number.isFinite(value) && value > 0)) fail("--share must be positive");
-      db.prepare("UPDATE task SET launch_share=? WHERE id=?").run(value, id);
-    }
-    event(db, "task-set", JSON.stringify(options), id); console.log(`updated ${id}`); return;
+    setTaskOptions(db, id, parseOptions(rest));
+    console.log(`updated ${id}`); return;
   }
   if (command === "task" && ["cancel", "reopen"].includes(subcommand)) {
     const id = rest[0]; if (!id) fail(`task ${subcommand} requires ID`);
@@ -588,7 +600,7 @@ async function main(argv = process.argv.slice(2)) {
   orchestrator task create --id ID --cwd DIR --model PROVIDER/MODEL --thinking LEVEL --condition TEXT [--max-parallel N] [--share N] [--not-before ISO] (--prompt TEXT | --prompt-file FILE)
   orchestrator task list
   orchestrator task show ID
-  orchestrator task set ID [--max-parallel N] [--share N]
+  orchestrator task set ID [--max-parallel N] [--share N] [--prompt-file FILE]
   orchestrator task cancel ID
   orchestrator task reopen ID
   orchestrator status
