@@ -6,7 +6,7 @@ import test from "node:test";
 
 const temporary = fs.mkdtempSync(path.join(os.tmpdir(), "agent-orchestrator-test-"));
 process.env.AGENT_ORCHESTRATOR_DATA = temporary;
-const { cancelTask, chooseTask, completionToolResult, cpuPercent, insertRun, loadConfig, openDb, rankTasks, resourceSlots, setTaskOptions, shouldAdvanceBackoff, stopSession, validateCompletion } = await import("./orchestrator.mjs");
+const { cancelTask, chooseTask, completionToolResult, cpuPercent, insertRun, loadConfig, nextIncompleteState, openDb, rankTasks, resourceSlots, setTaskOptions, shouldAdvanceBackoff, stopSession, validateCompletion } = await import("./orchestrator.mjs");
 
 test.after(() => fs.rmSync(temporary, { recursive: true, force: true }));
 
@@ -107,6 +107,11 @@ test("one concurrent launch wave advances task backoff only once", () => {
   assert.equal(shouldAdvanceBackoff(100, 100), true);
   assert.equal(shouldAdvanceBackoff(100, 101), true);
   assert.equal(shouldAdvanceBackoff(200, 101), false);
+});
+
+test("productive persistent work resets failure backoff", () => {
+  assert.deepEqual(nextIncompleteState(6, false), { streak: 0, delayMs: 30_000 });
+  assert.deepEqual(nextIncompleteState(2, true), { streak: 3, delayMs: 120_000 });
 });
 
 test("operator cancellation safely overrides a mistaken completion", () => {

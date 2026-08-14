@@ -261,6 +261,11 @@ class QuotaGovernor {
 
 function randomId() { return crypto.randomUUID(); }
 function backoffMs(streak) { return Math.min(30 * 60_000, 30_000 * (2 ** Math.min(6, Math.max(0, streak - 1)))); }
+export function nextIncompleteState(streak, failed) {
+  if (!failed) return { streak: 0, delayMs: backoffMs(1) };
+  const nextStreak = Number(streak) + 1;
+  return { streak: nextStreak, delayMs: backoffMs(nextStreak) };
+}
 export function completionToolResult(text, details) {
   return { content: [{ type: "text", text }], details, terminate: true };
 }
@@ -397,12 +402,14 @@ class Controller {
           FROM task t JOIN run r ON r.task_id=t.id
           WHERE t.id=? AND r.id=?`).get(task.id, runId);
         // Concurrent siblings belong to one launch wave. Only the first result
-        // from that wave advances task backoff; otherwise hundreds of nearly
-        // simultaneous completions amplify one 30-second pause into 30 minutes.
+        // from that wave advances eligibility. A normal complete=false report is
+        // productive persistent work, so it resets the failure streak and takes
+        // only the base pause. Runs that end without a report retain exponential
+        // failure backoff.
         if (shouldAdvanceBackoff(row.next_eligible_at, row.started_at)) {
-          const streak = Number(row.incomplete_streak) + 1;
+          const next = nextIncompleteState(row.incomplete_streak, error !== null);
           this.db.prepare("UPDATE task SET incomplete_streak=?,next_eligible_at=? WHERE id=?")
-            .run(streak, now() + backoffMs(streak), task.id);
+            .run(next.streak, now() + next.delayMs, task.id);
         }
       }
       event(this.db, `run-${status}`, error ?? summary ?? "", task.id, runId);
