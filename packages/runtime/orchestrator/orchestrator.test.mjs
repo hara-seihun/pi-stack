@@ -6,7 +6,7 @@ import test from "node:test";
 
 const temporary = fs.mkdtempSync(path.join(os.tmpdir(), "agent-orchestrator-test-"));
 process.env.AGENT_ORCHESTRATOR_DATA = temporary;
-const { chooseTask, cpuPercent, insertRun, loadConfig, openDb, rankTasks, resourceSlots, shouldAdvanceBackoff } = await import("./orchestrator.mjs");
+const { chooseTask, completionToolResult, cpuPercent, insertRun, loadConfig, openDb, rankTasks, resourceSlots, shouldAdvanceBackoff, stopSession } = await import("./orchestrator.mjs");
 
 test.after(() => fs.rmSync(temporary, { recursive: true, force: true }));
 
@@ -45,6 +45,23 @@ test("task selection uses launch shares without priority modes", () => {
     { ...base, id: "wide", launch_share: 4, active: 1 },
     { ...base, id: "narrow", launch_share: 1, active: 1 }
   ], 2).map((task) => task.id), ["wide", "narrow"]);
+});
+
+test("completion tools terminate the launch immediately", () => {
+  assert.deepEqual(completionToolResult("done", { complete: false }), {
+    content: [{ type: "text", text: "done" }],
+    details: { complete: false },
+    terminate: true,
+  });
+});
+
+test("controller shutdown clears queued continuations before aborting", async () => {
+  const calls = [];
+  await stopSession({
+    clearQueue() { calls.push("clear"); },
+    async abort() { calls.push("abort"); },
+  });
+  assert.deepEqual(calls, ["clear", "abort"]);
 });
 
 test("one concurrent launch wave advances task backoff only once", () => {

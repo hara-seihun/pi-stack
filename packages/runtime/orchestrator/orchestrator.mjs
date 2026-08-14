@@ -255,6 +255,14 @@ class QuotaGovernor {
 
 function randomId() { return crypto.randomUUID(); }
 function backoffMs(streak) { return Math.min(30 * 60_000, 30_000 * (2 ** Math.min(6, Math.max(0, streak - 1)))); }
+export function completionToolResult(text, details) {
+  return { content: [{ type: "text", text }], details, terminate: true };
+}
+export async function stopSession(session) {
+  if (!session) return;
+  session.clearQueue();
+  await session.abort();
+}
 export function shouldAdvanceBackoff(nextEligibleAt, runStartedAt) { return Number(nextEligibleAt) <= Number(runStartedAt); }
 
 export function insertRun(db, runId, taskId, startedAt = now()) {
@@ -314,9 +322,9 @@ class Controller {
           artifacts: Type.Optional(Type.Array(Type.String()))
         }),
         execute: async (_id, parameters) => {
-          if (report) return { content: [{ type: "text", text: "This launch has already reported completion." }], details: {} };
+          if (report) return completionToolResult("This launch has already reported completion.", {});
           report = { complete: parameters.complete, summary: parameters.summary, artifacts: parameters.artifacts ?? [] };
-          return { content: [{ type: "text", text: parameters.complete ? "Task completion recorded." : "Launch output recorded; the task remains eligible." }], details: report };
+          return completionToolResult(parameters.complete ? "Task completion recorded." : "Launch output recorded; the task remains eligible.", report);
         }
       });
       const loader = new DefaultResourceLoader({ cwd: task.cwd, agentDir: getAgentDir() });
@@ -434,7 +442,7 @@ class Controller {
 
   async stop() {
     this.stopping = true;
-    await Promise.allSettled([...this.active.values()].map(async ({ session }) => session?.abort()));
+    await Promise.allSettled([...this.active.values()].map(async ({ session }) => stopSession(session)));
     await Promise.allSettled([...this.active.values()].map(async ({ promise }) => promise));
   }
 }
