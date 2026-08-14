@@ -6,7 +6,7 @@ import test from "node:test";
 
 const temporary = fs.mkdtempSync(path.join(os.tmpdir(), "agent-orchestrator-test-"));
 process.env.AGENT_ORCHESTRATOR_DATA = temporary;
-const { chooseTask, insertRun, loadConfig, openDb, resourceSlots } = await import("./orchestrator.mjs");
+const { chooseTask, insertRun, loadConfig, openDb, rankTasks, resourceSlots } = await import("./orchestrator.mjs");
 
 test.after(() => fs.rmSync(temporary, { recursive: true, force: true }));
 
@@ -41,6 +41,10 @@ test("task selection uses launch shares without priority modes", () => {
     { ...base, id: "narrow", launch_share: 1, active: 1 }
   ], 2);
   assert.equal(selected.id, "wide");
+  assert.deepEqual(rankTasks([
+    { ...base, id: "wide", launch_share: 4, active: 1 },
+    { ...base, id: "narrow", launch_share: 1, active: 1 }
+  ], 2).map((task) => task.id), ["wide", "narrow"]);
 });
 
 test("completed, delayed, and saturated tasks are ineligible", () => {
@@ -55,7 +59,7 @@ test("completed, delayed, and saturated tasks are ineligible", () => {
 
 test("resource governor respects memory, load, and operator cap", () => {
   const config = loadConfig();
-  assert.equal(resourceSlots(config, 2, 30_000, 1, 1, 32), 10);
+  assert.equal(resourceSlots(config, 2, 30_000, 1, 1, 32), 62);
   assert.equal(resourceSlots(config, 2, 13_000, 1, 1, 32), 0);
   assert.equal(resourceSlots(config, 2, 60_000, 40, 40, 32), 0);
 });

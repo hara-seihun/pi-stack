@@ -26,9 +26,9 @@ const AUTH_PATH = path.join(getAgentDir(), "auth.json");
 const TICK_MS = 1000;
 
 const DEFAULT_CONFIG = {
-  maxSessions: 12,
+  maxSessions: 64,
   reserveMemoryMiB: 12288,
-  estimatedSessionMiB: 1024,
+  estimatedSessionMiB: 256,
   maxLoadPerCpu: 1.0,
   quota: {
     pollSeconds: 120,
@@ -129,16 +129,21 @@ function taskRows(db) {
   `).all();
 }
 
-export function chooseTask(tasks, activeTotal) {
+export function rankTasks(tasks, activeTotal) {
   const eligible = tasks.filter((task) =>
     task.completed_at === null && task.cancelled_at === null &&
     task.not_before <= now() && task.next_eligible_at <= now() &&
     Number(task.active) < task.max_parallel);
-  if (!eligible.length) return null;
+  if (!eligible.length) return [];
   const totalShare = eligible.reduce((sum, task) => sum + task.launch_share, 0);
   return eligible
     .map((task) => ({ task, deficit: (task.launch_share / totalShare) * (activeTotal + 1) - Number(task.active) }))
-    .sort((a, b) => b.deficit - a.deficit || a.task.created_at - b.task.created_at)[0].task;
+    .sort((a, b) => b.deficit - a.deficit || a.task.created_at - b.task.created_at)
+    .map((item) => item.task);
+}
+
+export function chooseTask(tasks, activeTotal) {
+  return rankTasks(tasks, activeTotal)[0] ?? null;
 }
 
 export function resourceSlots(config, activeCount, memAvailableMiB, load1, load5, cpuCount = os.cpus().length) {
@@ -349,19 +354,19 @@ class Controller {
     const [load1, load5] = os.loadavg();
     const slots = resourceSlots(this.config, this.active.size, availableMemoryMiB(), load1, load5);
     if (slots <= 0) return;
-    const task = chooseTask(tasks, this.active.size);
-    if (!task) return;
-    let governed;
-    try { governed = await this.quota.allows(task, activeTasks); }
-    catch (error) {
-      this.governorBlocked(String(error.message ?? error), task.id);
-      return;
-    }
-    if (!governed.ok) {
+    for (const task of rankTasks(tasks, this.active.size)) {
+      let governed;
+      try { governed = await this.quota.allows(task, activeTasks); }
+      catch (error) {
+        this.governorBlocked(String(error.message ?? error), task.id);
+        return;
+      }
+      if (governed.ok) {
+        await this.launch(task);
+        return;
+      }
       this.governorBlocked(`quota live=${governed.live.toFixed(3)} candidate=${governed.candidate.toFixed(3)} allowed=${governed.quota.allowedPercentPerHour.toFixed(3)}`, task.id);
-      return;
     }
-    await this.launch(task);
   }
 
   async run() {
@@ -450,6 +455,22 @@ async function main(argv = process.argv.slice(2)) {
   const [command, subcommand, ...rest] = argv;
   if (command === "task" && subcommand === "create") return createTask(db, parseOptions(rest));
   if (command === "task" && subcommand === "list") return printTasks(db);
+  if (command === "task" && subcommand === "set") {
+    const id = rest.shift(); if (!id) fail("task set requires ID");
+    const options = parseOptions(rest);
+    if (!Object.keys(options).length) fail("task set requires --max-parallel and/or --share");
+    if (options["max-parallel"] !== undefined) {
+      const value = Number(options["max-parallel"]);
+      if (!(Number.isInteger(value) && value > 0)) fail("--max-parallel must be a positive integer");
+      db.prepare("UPDATE task SET max_parallel=? WHERE id=?").run(value, id);
+    }
+    if (options.share !== undefined) {
+      const value = Number(options.share);
+      if (!(Number.isFinite(value) && value > 0)) fail("--share must be positive");
+      db.prepare("UPDATE task SET launch_share=? WHERE id=?").run(value, id);
+    }
+    event(db, "task-set", JSON.stringify(options), id); console.log(`updated ${id}`); return;
+  }
   if (command === "task" && ["cancel", "reopen"].includes(subcommand)) {
     const id = rest[0]; if (!id) fail(`task ${subcommand} requires ID`);
     if (subcommand === "cancel") db.prepare("UPDATE task SET cancelled_at=? WHERE id=? AND completed_at IS NULL").run(now(), id);
@@ -475,6 +496,7 @@ async function main(argv = process.argv.slice(2)) {
   console.log(`Usage:
   orchestrator task create --id ID --cwd DIR --model PROVIDER/MODEL --thinking LEVEL --condition TEXT [--max-parallel N] [--share N] [--not-before ISO] (--prompt TEXT | --prompt-file FILE)
   orchestrator task list
+  orchestrator task set ID [--max-parallel N] [--share N]
   orchestrator task cancel ID
   orchestrator task reopen ID
   orchestrator status
