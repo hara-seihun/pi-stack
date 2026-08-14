@@ -455,6 +455,12 @@ async function main(argv = process.argv.slice(2)) {
   const [command, subcommand, ...rest] = argv;
   if (command === "task" && subcommand === "create") return createTask(db, parseOptions(rest));
   if (command === "task" && subcommand === "list") return printTasks(db);
+  if (command === "task" && subcommand === "show") {
+    const id = rest[0]; if (!id) fail("task show requires ID");
+    const task = db.prepare("SELECT * FROM task WHERE id=?").get(id);
+    if (!task) fail(`unknown task ${id}`);
+    console.log(JSON.stringify(task, null, 2)); return;
+  }
   if (command === "task" && subcommand === "set") {
     const id = rest.shift(); if (!id) fail("task set requires ID");
     const options = parseOptions(rest);
@@ -478,6 +484,14 @@ async function main(argv = process.argv.slice(2)) {
     event(db, `task-${subcommand}`, "operator command", id); console.log(`${subcommand} ${id}`); return;
   }
   if (command === "status") return printTasks(db);
+  if (command === "runs") {
+    const id = subcommand;
+    const rows = id
+      ? db.prepare("SELECT * FROM run WHERE task_id=? ORDER BY started_at DESC LIMIT 50").all(id)
+      : db.prepare("SELECT * FROM run ORDER BY started_at DESC LIMIT 50").all();
+    for (const row of rows) console.log(`${row.id}\t${row.task_id}\t${row.status}\t${iso(row.started_at)}\t${row.summary ?? row.error ?? ""}`);
+    return;
+  }
   if (command === "governor") {
     const snapshot = await new QuotaGovernor(loadConfig()).refresh();
     console.log(JSON.stringify(snapshot, null, 2));
@@ -496,10 +510,12 @@ async function main(argv = process.argv.slice(2)) {
   console.log(`Usage:
   orchestrator task create --id ID --cwd DIR --model PROVIDER/MODEL --thinking LEVEL --condition TEXT [--max-parallel N] [--share N] [--not-before ISO] (--prompt TEXT | --prompt-file FILE)
   orchestrator task list
+  orchestrator task show ID
   orchestrator task set ID [--max-parallel N] [--share N]
   orchestrator task cancel ID
   orchestrator task reopen ID
   orchestrator status
+  orchestrator runs [TASK_ID]
   orchestrator governor
   orchestrator check
   orchestrator run`);

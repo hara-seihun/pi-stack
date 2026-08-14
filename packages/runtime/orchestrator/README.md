@@ -31,6 +31,8 @@ Missing or stale quota evidence blocks launching visibly; it never selects a fal
 ```bash
 orchestrator check
 orchestrator status
+orchestrator runs [TASK_ID]
+orchestrator task show TASK_ID
 orchestrator task create \
   --id example \
   --cwd /home/kenan/project \
@@ -40,6 +42,7 @@ orchestrator task create \
   --max-parallel 4 \
   --share 2 \
   --prompt-file /home/kenan/project/task.md
+orchestrator task set example --max-parallel 8 --share 2
 orchestrator task cancel example
 orchestrator task reopen example
 ```
