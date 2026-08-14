@@ -6,7 +6,7 @@ import test from "node:test";
 
 const temporary = fs.mkdtempSync(path.join(os.tmpdir(), "agent-orchestrator-test-"));
 process.env.AGENT_ORCHESTRATOR_DATA = temporary;
-const { chooseTask, completionToolResult, cpuPercent, insertRun, loadConfig, openDb, rankTasks, resourceSlots, setTaskOptions, shouldAdvanceBackoff, stopSession } = await import("./orchestrator.mjs");
+const { cancelTask, chooseTask, completionToolResult, cpuPercent, insertRun, loadConfig, openDb, rankTasks, resourceSlots, setTaskOptions, shouldAdvanceBackoff, stopSession, validateCompletion } = await import("./orchestrator.mjs");
 
 test.after(() => fs.rmSync(temporary, { recursive: true, force: true }));
 
@@ -34,10 +34,11 @@ test("task prompts can be updated through the governed task interface", () => {
     VALUES(?,?,?,?,?,?,?,?,?,?,?)`).run("task", "old", temporary, "provider/model", "high", "done", 1, 1, timestamp, timestamp, timestamp);
   const promptFile = path.join(temporary, "prompt.md");
   fs.writeFileSync(promptFile, "new governed prompt\n");
-  setTaskOptions(db, "task", { "prompt-file": promptFile, "max-parallel": "3" });
-  const updated = db.prepare("SELECT prompt,max_parallel FROM task WHERE id=?").get("task");
+  setTaskOptions(db, "task", { "prompt-file": promptFile, "max-parallel": "3", "completion-check": "python3 verify.py" });
+  const updated = db.prepare("SELECT prompt,max_parallel,completion_check FROM task WHERE id=?").get("task");
   assert.equal(updated.prompt, "new governed prompt");
   assert.equal(updated.max_parallel, 3);
+  assert.equal(updated.completion_check, "python3 verify.py");
   db.close();
 });
 
@@ -69,6 +70,22 @@ test("completion tools terminate the launch immediately", () => {
   });
 });
 
+test("machine completion checks override an agent's completion opinion", async () => {
+  const task = { cwd: temporary, completion_check: "python3 verify.py" };
+  assert.deepEqual(
+    await validateCompletion(task, async () => ({ stdout: "frontier empty\n" })),
+    { ok: true, detail: "frontier empty" },
+  );
+  assert.deepEqual(
+    await validateCompletion(task, async () => {
+      const error = new Error("exit 1");
+      error.stdout = "remaining_claims=3\n";
+      throw error;
+    }),
+    { ok: false, detail: "remaining_claims=3" },
+  );
+});
+
 test("controller shutdown clears queued continuations before aborting", async () => {
   const calls = [];
   await stopSession({
@@ -82,6 +99,18 @@ test("one concurrent launch wave advances task backoff only once", () => {
   assert.equal(shouldAdvanceBackoff(100, 100), true);
   assert.equal(shouldAdvanceBackoff(100, 101), true);
   assert.equal(shouldAdvanceBackoff(200, 101), false);
+});
+
+test("operator cancellation safely overrides a mistaken completion", () => {
+  const db = openDb(path.join(temporary, "task-cancel.sqlite3"));
+  const timestamp = Date.now();
+  db.prepare(`INSERT INTO task(id,prompt,cwd,model,thinking,completion_condition,max_parallel,launch_share,not_before,next_eligible_at,created_at,completed_at)
+    VALUES(?,?,?,?,?,?,?,?,?,?,?,?)`).run("task", "prompt", temporary, "provider/model", "high", "done", 1, 1, timestamp, timestamp, timestamp, timestamp);
+  cancelTask(db, "task", timestamp + 1);
+  const cancelled = db.prepare("SELECT completed_at,cancelled_at FROM task WHERE id='task'").get();
+  assert.equal(cancelled.completed_at, null);
+  assert.equal(cancelled.cancelled_at, timestamp + 1);
+  db.close();
 });
 
 test("completed, delayed, and saturated tasks are ineligible", () => {

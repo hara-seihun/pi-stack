@@ -1,10 +1,12 @@
 #!/usr/bin/env node
 import fs from "node:fs";
 import os from "node:os";
+import { execFile } from "node:child_process";
 import path from "node:path";
 import process from "node:process";
 import { DatabaseSync } from "node:sqlite";
 import { fileURLToPath, pathToFileURL } from "node:url";
+import { promisify } from "node:util";
 import { Type } from "typebox";
 import {
   createAgentSession,
@@ -24,6 +26,7 @@ const SESSIONS = path.join(DATA, "sessions");
 const LOCK = path.join(DATA, "controller.lock");
 const AUTH_PATH = path.join(getAgentDir(), "auth.json");
 const TICK_MS = 1000;
+const execFileAsync = promisify(execFile);
 
 const DEFAULT_CONFIG = {
   maxSessions: 4096,
@@ -91,6 +94,7 @@ export function openDb(file = DB_PATH) {
       model TEXT NOT NULL,
       thinking TEXT NOT NULL,
       completion_condition TEXT NOT NULL,
+      completion_check TEXT,
       max_parallel INTEGER NOT NULL CHECK(max_parallel > 0),
       launch_share REAL NOT NULL CHECK(launch_share > 0),
       not_before INTEGER NOT NULL,
@@ -121,6 +125,8 @@ export function openDb(file = DB_PATH) {
       detail TEXT NOT NULL
     );
   `);
+  const taskColumns = new Set(db.prepare("PRAGMA table_info(task)").all().map((row) => row.name));
+  if (!taskColumns.has("completion_check")) db.exec("ALTER TABLE task ADD COLUMN completion_check TEXT");
   return db;
 }
 
@@ -258,6 +264,20 @@ function backoffMs(streak) { return Math.min(30 * 60_000, 30_000 * (2 ** Math.mi
 export function completionToolResult(text, details) {
   return { content: [{ type: "text", text }], details, terminate: true };
 }
+export async function validateCompletion(task, runner = execFileAsync) {
+  if (!task.completion_check) return { ok: true, detail: "no completion check configured" };
+  try {
+    const result = await runner("bash", ["-lc", task.completion_check], {
+      cwd: task.cwd,
+      timeout: 120_000,
+      maxBuffer: 1024 * 1024,
+    });
+    return { ok: true, detail: String(result.stdout ?? "").trim() || "completion check passed" };
+  } catch (error) {
+    const output = [error?.stdout, error?.stderr].map((value) => String(value ?? "").trim()).filter(Boolean).join("\n");
+    return { ok: false, detail: output || String(error?.message ?? error) };
+  }
+}
 export async function stopSession(session) {
   if (!session) return;
   session.clearQueue();
@@ -323,8 +343,18 @@ class Controller {
         }),
         execute: async (_id, parameters) => {
           if (report) return completionToolResult("This launch has already reported completion.", {});
-          report = { complete: parameters.complete, summary: parameters.summary, artifacts: parameters.artifacts ?? [] };
-          return completionToolResult(parameters.complete ? "Task completion recorded." : "Launch output recorded; the task remains eligible.", report);
+          const validation = parameters.complete ? await validateCompletion(task) : null;
+          const complete = parameters.complete && validation.ok;
+          const summary = parameters.complete && !validation.ok
+            ? `${parameters.summary}\nCompletion validation failed: ${validation.detail}`
+            : parameters.summary;
+          report = { complete, summary, artifacts: parameters.artifacts ?? [], validation };
+          const text = complete
+            ? "Task completion recorded after the configured machine check passed."
+            : parameters.complete
+              ? `Task completion rejected by the configured machine check: ${validation.detail}`
+              : "Launch output recorded; the task remains eligible.";
+          return completionToolResult(text, report);
         }
       });
       const loader = new DefaultResourceLoader({ cwd: task.cwd, agentDir: getAgentDir() });
@@ -477,6 +507,7 @@ function parseOptions(args) {
 function createTask(db, options) {
   for (const key of ["id", "cwd", "model", "thinking", "condition"]) if (!options[key]) fail(`task create requires --${key}`);
   const prompt = options["prompt-file"] ? fs.readFileSync(options["prompt-file"], "utf8").trim() : options.prompt;
+  const completionCheck = options["completion-check"]?.trim() || null;
   if (!prompt) fail("task create requires --prompt or --prompt-file");
   const cwd = path.resolve(options.cwd);
   if (!fs.statSync(cwd).isDirectory()) fail(`task cwd is not a directory: ${cwd}`);
@@ -486,16 +517,16 @@ function createTask(db, options) {
   if (!(Number.isFinite(share) && share > 0)) fail("--share must be positive");
   const notBefore = options["not-before"] ? Date.parse(options["not-before"]) : now();
   if (!Number.isFinite(notBefore)) fail("--not-before must be an ISO timestamp");
-  db.prepare(`INSERT INTO task(id,prompt,cwd,model,thinking,completion_condition,max_parallel,launch_share,not_before,next_eligible_at,created_at)
-    VALUES(?,?,?,?,?,?,?,?,?,?,?)`).run(options.id, prompt, cwd, options.model, options.thinking, options.condition, maxParallel, share, notBefore, notBefore, now());
+  db.prepare(`INSERT INTO task(id,prompt,cwd,model,thinking,completion_condition,completion_check,max_parallel,launch_share,not_before,next_eligible_at,created_at)
+    VALUES(?,?,?,?,?,?,?,?,?,?,?,?)`).run(options.id, prompt, cwd, options.model, options.thinking, options.condition, completionCheck, maxParallel, share, notBefore, notBefore, now());
   event(db, "task-created", options.condition, options.id);
   console.log(`created ${options.id}`);
 }
 
 export function setTaskOptions(db, id, options) {
   if (!db.prepare("SELECT 1 FROM task WHERE id=?").get(id)) fail(`unknown task ${id}`);
-  if (!Object.keys(options).length) fail("task set requires --max-parallel, --share, and/or --prompt-file");
-  const unknown = Object.keys(options).filter((key) => !["max-parallel", "share", "prompt-file"].includes(key));
+  if (!Object.keys(options).length) fail("task set requires --max-parallel, --share, --prompt-file, and/or --completion-check");
+  const unknown = Object.keys(options).filter((key) => !["max-parallel", "share", "prompt-file", "completion-check"].includes(key));
   if (unknown.length) fail(`task set does not support ${unknown.map((key) => `--${key}`).join(", ")}`);
   if (options["max-parallel"] !== undefined) {
     const value = Number(options["max-parallel"]);
@@ -512,7 +543,16 @@ export function setTaskOptions(db, id, options) {
     if (!prompt) fail("--prompt-file must contain a nonempty prompt");
     db.prepare("UPDATE task SET prompt=? WHERE id=?").run(prompt, id);
   }
+  if (options["completion-check"] !== undefined) {
+    const check = options["completion-check"].trim();
+    if (!check) fail("--completion-check must be nonempty");
+    db.prepare("UPDATE task SET completion_check=? WHERE id=?").run(check, id);
+  }
   event(db, "task-set", JSON.stringify(options), id);
+}
+
+export function cancelTask(db, id, at = now()) {
+  db.prepare("UPDATE task SET cancelled_at=?,completed_at=NULL WHERE id=?").run(at, id);
 }
 
 function printTasks(db) {
@@ -553,7 +593,7 @@ async function main(argv = process.argv.slice(2)) {
   }
   if (command === "task" && ["cancel", "reopen"].includes(subcommand)) {
     const id = rest[0]; if (!id) fail(`task ${subcommand} requires ID`);
-    if (subcommand === "cancel") db.prepare("UPDATE task SET cancelled_at=? WHERE id=? AND completed_at IS NULL").run(now(), id);
+    if (subcommand === "cancel") cancelTask(db, id);
     else db.prepare("UPDATE task SET cancelled_at=NULL,completed_at=NULL,next_eligible_at=?,incomplete_streak=0 WHERE id=?").run(now(), id);
     event(db, `task-${subcommand}`, "operator command", id); console.log(`${subcommand} ${id}`); return;
   }
@@ -597,10 +637,10 @@ async function main(argv = process.argv.slice(2)) {
     return;
   }
   console.log(`Usage:
-  orchestrator task create --id ID --cwd DIR --model PROVIDER/MODEL --thinking LEVEL --condition TEXT [--max-parallel N] [--share N] [--not-before ISO] (--prompt TEXT | --prompt-file FILE)
+  orchestrator task create --id ID --cwd DIR --model PROVIDER/MODEL --thinking LEVEL --condition TEXT [--completion-check COMMAND] [--max-parallel N] [--share N] [--not-before ISO] (--prompt TEXT | --prompt-file FILE)
   orchestrator task list
   orchestrator task show ID
-  orchestrator task set ID [--max-parallel N] [--share N] [--prompt-file FILE]
+  orchestrator task set ID [--max-parallel N] [--share N] [--prompt-file FILE] [--completion-check COMMAND]
   orchestrator task cancel ID
   orchestrator task reopen ID
   orchestrator status
