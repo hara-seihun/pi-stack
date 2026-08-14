@@ -14,7 +14,7 @@ Tasks may declare:
 - a relative launch share among eligible persistent work;
 - an optional time at which it first becomes eligible.
 
-Each agent receives `task_complete`. It must report validated artifacts and whether the task itself is complete. An incomplete result leaves the task eligible after bounded backoff. There are no standing/scheduled/once/review/retry task types and no priorities.
+Each agent receives `task_complete`. It must report validated artifacts and whether the task itself is complete. The tool terminates that launch immediately, preventing queued continuations from turning one launch into multiple work units. An incomplete result leaves the task eligible after bounded backoff. There are no standing/scheduled/once/review/retry task types and no priorities.
 
 ## Governor
 
@@ -44,7 +44,7 @@ orchestrator task create \
   --max-parallel 4 \
   --share 2 \
   --prompt-file /home/kenan/project/task.md
-orchestrator task set example --max-parallel 8 --share 2
+orchestrator task set example --max-parallel 8 --share 2 --prompt-file /home/kenan/project/revised-task.md
 orchestrator task cancel example
 orchestrator task reopen example
 ```
