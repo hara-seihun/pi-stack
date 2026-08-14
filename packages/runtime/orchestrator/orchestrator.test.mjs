@@ -14,6 +14,13 @@ test("database initializes with integrity", () => {
   const db = openDb(path.join(temporary, "test.sqlite3"));
   assert.equal(db.prepare("PRAGMA integrity_check").get().integrity_check, "ok");
   assert.deepEqual(db.prepare("SELECT name FROM sqlite_master WHERE type='table' ORDER BY name").all().map((row) => row.name), ["event", "run", "task"]);
+  for (const table of ["event", "run", "task"]) {
+    const columns = db.prepare(`PRAGMA table_info(${table})`).all().map((row) => row.name);
+    assert.ok(columns.includes("created_at"));
+    assert.ok(columns.includes("updated_at"));
+    assert.ok(db.prepare("SELECT 1 FROM sqlite_master WHERE type='trigger' AND name=?").get(`auto_timestamp_${table}_insert`));
+    assert.ok(db.prepare("SELECT 1 FROM sqlite_master WHERE type='trigger' AND name=?").get(`auto_timestamp_${table}_update`));
+  }
   db.close();
 });
 
@@ -23,7 +30,13 @@ test("a launch is recorded with a literal running status", () => {
   db.prepare(`INSERT INTO task(id,prompt,cwd,model,thinking,completion_condition,max_parallel,launch_share,not_before,next_eligible_at,created_at)
     VALUES(?,?,?,?,?,?,?,?,?,?,?)`).run("task", "prompt", temporary, "provider/model", "high", "done", 1, 1, timestamp, timestamp, timestamp);
   insertRun(db, "run", "task", timestamp);
-  assert.equal(db.prepare("SELECT status FROM run WHERE id=?").get("run").status, "running");
+  const inserted = db.prepare("SELECT status,created_at,updated_at FROM run WHERE id=?").get("run");
+  assert.equal(inserted.status, "running");
+  assert.ok(inserted.created_at > 0);
+  assert.ok(inserted.updated_at > 0);
+  db.prepare("UPDATE run SET updated_at=1 WHERE id=?").run("run");
+  db.prepare("UPDATE run SET status='incomplete' WHERE id=?").run("run");
+  assert.ok(db.prepare("SELECT updated_at FROM run WHERE id=?").get("run").updated_at > 1);
   db.close();
 });
 

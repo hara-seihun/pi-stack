@@ -50,7 +50,7 @@ orchestrator task cancel example
 orchestrator task reopen example
 ```
 
-The systemd service is `agent-orchestrator.service`. Runtime state is canonical in `/home/kenan/data/agent-orchestrator/orchestrator.sqlite3`; Pi session JSONL is retained under `sessions/`. The SQLite database uses WAL and records tasks, launches, completion reports, and bounded controller events.
+The systemd service is `agent-orchestrator.service`. Runtime state is canonical in `/home/kenan/data/agent-orchestrator/orchestrator.sqlite3`; Pi session JSONL is retained under `sessions/`. The SQLite database uses WAL and records tasks, launches, completion reports, and bounded controller events. Every table has automatic millisecond `created_at` and `updated_at` columns maintained by SQLite triggers; existing rows are backfilled from their original event times.
 
 ## Validation
 

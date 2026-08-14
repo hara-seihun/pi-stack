@@ -82,6 +82,43 @@ export function loadConfig() {
   return config;
 }
 
+const SQLITE_NOW_MS = "CAST((julianday('now') - 2440587.5) * 86400000 AS INTEGER)";
+
+function ensureTableTimestamps(db, table) {
+  const quote = (value) => `"${value.replaceAll('"', '""')}"`;
+  const columns = db.prepare(`PRAGMA table_info(${quote(table)})`).all().map((row) => row.name);
+  if (!columns.includes("created_at")) {
+    db.exec(`ALTER TABLE ${quote(table)} ADD COLUMN created_at INTEGER`);
+    columns.push("created_at");
+  }
+  if (!columns.includes("updated_at")) {
+    db.exec(`ALTER TABLE ${quote(table)} ADD COLUMN updated_at INTEGER`);
+    columns.push("updated_at");
+  }
+  const first = (candidates) => candidates.find((name) => columns.includes(name));
+  const createdSource = first(["started_at", "at"]) ?? null;
+  const updatedSource = first(["finished_at", "completed_at", "cancelled_at", "started_at", "at"]) ?? null;
+  db.exec(`UPDATE ${quote(table)} SET created_at=coalesce(created_at,${createdSource ? quote(createdSource) : SQLITE_NOW_MS},${SQLITE_NOW_MS}) WHERE created_at IS NULL`);
+  db.exec(`UPDATE ${quote(table)} SET updated_at=coalesce(updated_at,${updatedSource ? quote(updatedSource) : "created_at"},created_at,${SQLITE_NOW_MS}) WHERE updated_at IS NULL`);
+  const domainColumns = columns.filter((name) => !["created_at", "updated_at"].includes(name));
+  db.exec(`
+    CREATE TRIGGER IF NOT EXISTS ${quote(`auto_timestamp_${table}_insert`)}
+    AFTER INSERT ON ${quote(table)}
+    WHEN NEW.created_at IS NULL OR NEW.updated_at IS NULL
+    BEGIN
+      UPDATE ${quote(table)} SET
+        created_at=coalesce(NEW.created_at,${SQLITE_NOW_MS}),
+        updated_at=coalesce(NEW.updated_at,NEW.created_at,${SQLITE_NOW_MS})
+      WHERE rowid=NEW.rowid;
+    END;
+    CREATE TRIGGER IF NOT EXISTS ${quote(`auto_timestamp_${table}_update`)}
+    AFTER UPDATE OF ${domainColumns.map(quote).join(",")} ON ${quote(table)}
+    BEGIN
+      UPDATE ${quote(table)} SET updated_at=${SQLITE_NOW_MS} WHERE rowid=NEW.rowid;
+    END;
+  `);
+}
+
 export function openDb(file = DB_PATH) {
   ensureLayout();
   const db = new DatabaseSync(file);
@@ -102,7 +139,8 @@ export function openDb(file = DB_PATH) {
       incomplete_streak INTEGER NOT NULL DEFAULT 0,
       created_at INTEGER NOT NULL,
       completed_at INTEGER,
-      cancelled_at INTEGER
+      cancelled_at INTEGER,
+      updated_at INTEGER NOT NULL DEFAULT (CAST((julianday('now') - 2440587.5) * 86400000 AS INTEGER))
     );
     CREATE TABLE IF NOT EXISTS run (
       id TEXT PRIMARY KEY,
@@ -113,7 +151,9 @@ export function openDb(file = DB_PATH) {
       finished_at INTEGER,
       summary TEXT,
       artifacts_json TEXT NOT NULL DEFAULT '[]',
-      error TEXT
+      error TEXT,
+      created_at INTEGER NOT NULL DEFAULT (CAST((julianday('now') - 2440587.5) * 86400000 AS INTEGER)),
+      updated_at INTEGER NOT NULL DEFAULT (CAST((julianday('now') - 2440587.5) * 86400000 AS INTEGER))
     );
     CREATE INDEX IF NOT EXISTS run_task_status ON run(task_id,status);
     CREATE TABLE IF NOT EXISTS event (
@@ -122,9 +162,12 @@ export function openDb(file = DB_PATH) {
       kind TEXT NOT NULL,
       task_id TEXT,
       run_id TEXT,
-      detail TEXT NOT NULL
+      detail TEXT NOT NULL,
+      created_at INTEGER NOT NULL DEFAULT (CAST((julianday('now') - 2440587.5) * 86400000 AS INTEGER)),
+      updated_at INTEGER NOT NULL DEFAULT (CAST((julianday('now') - 2440587.5) * 86400000 AS INTEGER))
     );
   `);
+  for (const table of ["task", "run", "event"]) ensureTableTimestamps(db, table);
   const taskColumns = new Set(db.prepare("PRAGMA table_info(task)").all().map((row) => row.name));
   if (!taskColumns.has("completion_check")) db.exec("ALTER TABLE task ADD COLUMN completion_check TEXT");
   return db;
