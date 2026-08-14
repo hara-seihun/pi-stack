@@ -52,13 +52,15 @@ test("task prompts can be updated through the governed task interface", () => {
     thinking: "max",
     "prompt-file": promptFile,
     "max-parallel": "3",
+    condition: "new completion condition",
     "completion-check": "python3 verify.py",
   });
-  const updated = db.prepare("SELECT prompt,model,thinking,max_parallel,completion_check FROM task WHERE id=?").get("task");
+  const updated = db.prepare("SELECT prompt,model,thinking,max_parallel,completion_condition,completion_check FROM task WHERE id=?").get("task");
   assert.equal(updated.prompt, "new governed prompt");
   assert.equal(updated.model, "provider/better-model");
   assert.equal(updated.thinking, "max");
   assert.equal(updated.max_parallel, 3);
+  assert.equal(updated.completion_condition, "new completion condition");
   assert.equal(updated.completion_check, "python3 verify.py");
   db.close();
 });

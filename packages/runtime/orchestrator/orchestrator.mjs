@@ -574,8 +574,8 @@ function createTask(db, options) {
 
 export function setTaskOptions(db, id, options) {
   if (!db.prepare("SELECT 1 FROM task WHERE id=?").get(id)) fail(`unknown task ${id}`);
-  if (!Object.keys(options).length) fail("task set requires --model, --thinking, --max-parallel, --share, --prompt-file, and/or --completion-check");
-  const unknown = Object.keys(options).filter((key) => !["model", "thinking", "max-parallel", "share", "prompt-file", "completion-check"].includes(key));
+  if (!Object.keys(options).length) fail("task set requires --model, --thinking, --max-parallel, --share, --prompt-file, --condition, and/or --completion-check");
+  const unknown = Object.keys(options).filter((key) => !["model", "thinking", "max-parallel", "share", "prompt-file", "condition", "completion-check"].includes(key));
   if (unknown.length) fail(`task set does not support ${unknown.map((key) => `--${key}`).join(", ")}`);
   if (options.model !== undefined) {
     const model = options.model.trim();
@@ -601,6 +601,11 @@ export function setTaskOptions(db, id, options) {
     const prompt = fs.readFileSync(options["prompt-file"], "utf8").trim();
     if (!prompt) fail("--prompt-file must contain a nonempty prompt");
     db.prepare("UPDATE task SET prompt=? WHERE id=?").run(prompt, id);
+  }
+  if (options.condition !== undefined) {
+    const condition = options.condition.trim();
+    if (!condition) fail("--condition must be nonempty");
+    db.prepare("UPDATE task SET completion_condition=? WHERE id=?").run(condition, id);
   }
   if (options["completion-check"] !== undefined) {
     const check = options["completion-check"].trim();
@@ -699,7 +704,7 @@ async function main(argv = process.argv.slice(2)) {
   orchestrator task create --id ID --cwd DIR --model PROVIDER/MODEL --thinking LEVEL --condition TEXT [--completion-check COMMAND] [--max-parallel N] [--share N] [--not-before ISO] (--prompt TEXT | --prompt-file FILE)
   orchestrator task list
   orchestrator task show ID
-  orchestrator task set ID [--model PROVIDER/MODEL] [--thinking LEVEL] [--max-parallel N] [--share N] [--prompt-file FILE] [--completion-check COMMAND]
+  orchestrator task set ID [--model PROVIDER/MODEL] [--thinking LEVEL] [--max-parallel N] [--share N] [--prompt-file FILE] [--condition TEXT] [--completion-check COMMAND]
   orchestrator task cancel ID
   orchestrator task reopen ID
   orchestrator status

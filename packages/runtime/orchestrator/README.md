@@ -45,7 +45,7 @@ orchestrator task create \
   --max-parallel 4 \
   --share 2 \
   --prompt-file /home/kenan/project/task.md
-orchestrator task set example --model openai-codex/gpt-5.6-sol --thinking xhigh --max-parallel 8 --share 2 --prompt-file /home/kenan/project/revised-task.md
+orchestrator task set example --model openai-codex/gpt-5.6-sol --thinking xhigh --max-parallel 8 --share 2 --prompt-file /home/kenan/project/revised-task.md --condition 'Exact target is admitted' --completion-check 'python3 verify-target.py'
 orchestrator task cancel example
 orchestrator task reopen example
 ```
