@@ -255,6 +255,7 @@ class QuotaGovernor {
 
 function randomId() { return crypto.randomUUID(); }
 function backoffMs(streak) { return Math.min(30 * 60_000, 30_000 * (2 ** Math.min(6, Math.max(0, streak - 1)))); }
+export function shouldAdvanceBackoff(nextEligibleAt, runStartedAt) { return Number(nextEligibleAt) <= Number(runStartedAt); }
 
 export function insertRun(db, runId, taskId, startedAt = now()) {
   db.prepare("INSERT INTO run(id,task_id,status,started_at) VALUES(?,?,?,?)")
@@ -353,10 +354,18 @@ class Controller {
       if (status === "complete") {
         this.db.prepare("UPDATE task SET completed_at=?,incomplete_streak=0 WHERE id=? AND completed_at IS NULL").run(now(), task.id);
       } else {
-        const row = this.db.prepare("SELECT incomplete_streak FROM task WHERE id=?").get(task.id);
-        const streak = Number(row.incomplete_streak) + 1;
-        this.db.prepare("UPDATE task SET incomplete_streak=?,next_eligible_at=? WHERE id=?")
-          .run(streak, now() + backoffMs(streak), task.id);
+        const row = this.db.prepare(`
+          SELECT t.incomplete_streak,t.next_eligible_at,r.started_at
+          FROM task t JOIN run r ON r.task_id=t.id
+          WHERE t.id=? AND r.id=?`).get(task.id, runId);
+        // Concurrent siblings belong to one launch wave. Only the first result
+        // from that wave advances task backoff; otherwise hundreds of nearly
+        // simultaneous completions amplify one 30-second pause into 30 minutes.
+        if (shouldAdvanceBackoff(row.next_eligible_at, row.started_at)) {
+          const streak = Number(row.incomplete_streak) + 1;
+          this.db.prepare("UPDATE task SET incomplete_streak=?,next_eligible_at=? WHERE id=?")
+            .run(streak, now() + backoffMs(streak), task.id);
+        }
       }
       event(this.db, `run-${status}`, error ?? summary ?? "", task.id, runId);
       this.db.exec("COMMIT");
