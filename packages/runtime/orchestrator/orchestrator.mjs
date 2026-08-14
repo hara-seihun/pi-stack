@@ -525,9 +525,19 @@ function createTask(db, options) {
 
 export function setTaskOptions(db, id, options) {
   if (!db.prepare("SELECT 1 FROM task WHERE id=?").get(id)) fail(`unknown task ${id}`);
-  if (!Object.keys(options).length) fail("task set requires --max-parallel, --share, --prompt-file, and/or --completion-check");
-  const unknown = Object.keys(options).filter((key) => !["max-parallel", "share", "prompt-file", "completion-check"].includes(key));
+  if (!Object.keys(options).length) fail("task set requires --model, --thinking, --max-parallel, --share, --prompt-file, and/or --completion-check");
+  const unknown = Object.keys(options).filter((key) => !["model", "thinking", "max-parallel", "share", "prompt-file", "completion-check"].includes(key));
   if (unknown.length) fail(`task set does not support ${unknown.map((key) => `--${key}`).join(", ")}`);
+  if (options.model !== undefined) {
+    const model = options.model.trim();
+    if (!model) fail("--model must be nonempty");
+    db.prepare("UPDATE task SET model=? WHERE id=?").run(model, id);
+  }
+  if (options.thinking !== undefined) {
+    const thinking = options.thinking.trim();
+    if (!thinking) fail("--thinking must be nonempty");
+    db.prepare("UPDATE task SET thinking=? WHERE id=?").run(thinking, id);
+  }
   if (options["max-parallel"] !== undefined) {
     const value = Number(options["max-parallel"]);
     if (!(Number.isInteger(value) && value > 0)) fail("--max-parallel must be a positive integer");
@@ -640,7 +650,7 @@ async function main(argv = process.argv.slice(2)) {
   orchestrator task create --id ID --cwd DIR --model PROVIDER/MODEL --thinking LEVEL --condition TEXT [--completion-check COMMAND] [--max-parallel N] [--share N] [--not-before ISO] (--prompt TEXT | --prompt-file FILE)
   orchestrator task list
   orchestrator task show ID
-  orchestrator task set ID [--max-parallel N] [--share N] [--prompt-file FILE] [--completion-check COMMAND]
+  orchestrator task set ID [--model PROVIDER/MODEL] [--thinking LEVEL] [--max-parallel N] [--share N] [--prompt-file FILE] [--completion-check COMMAND]
   orchestrator task cancel ID
   orchestrator task reopen ID
   orchestrator status

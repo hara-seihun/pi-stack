@@ -34,9 +34,17 @@ test("task prompts can be updated through the governed task interface", () => {
     VALUES(?,?,?,?,?,?,?,?,?,?,?)`).run("task", "old", temporary, "provider/model", "high", "done", 1, 1, timestamp, timestamp, timestamp);
   const promptFile = path.join(temporary, "prompt.md");
   fs.writeFileSync(promptFile, "new governed prompt\n");
-  setTaskOptions(db, "task", { "prompt-file": promptFile, "max-parallel": "3", "completion-check": "python3 verify.py" });
-  const updated = db.prepare("SELECT prompt,max_parallel,completion_check FROM task WHERE id=?").get("task");
+  setTaskOptions(db, "task", {
+    model: "provider/better-model",
+    thinking: "max",
+    "prompt-file": promptFile,
+    "max-parallel": "3",
+    "completion-check": "python3 verify.py",
+  });
+  const updated = db.prepare("SELECT prompt,model,thinking,max_parallel,completion_check FROM task WHERE id=?").get("task");
   assert.equal(updated.prompt, "new governed prompt");
+  assert.equal(updated.model, "provider/better-model");
+  assert.equal(updated.thinking, "max");
   assert.equal(updated.max_parallel, 3);
   assert.equal(updated.completion_check, "python3 verify.py");
   db.close();
