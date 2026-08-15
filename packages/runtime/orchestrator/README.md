@@ -10,22 +10,26 @@ Tasks may declare:
 
 - a prompt, observable completion condition, and optional machine completion check;
 - an exact working directory, model, and thinking level;
-- maximum concurrent launches;
 - a relative launch share among eligible persistent work;
 - an optional time at which it first becomes eligible.
 
-Each agent receives `task_complete`. It must report validated artifacts and whether the task itself is complete. When a machine completion check is configured, `complete=true` is only advisory until that command exits successfully; a failed check records the launch as incomplete. The tool terminates that launch immediately, preventing queued continuations from turning one launch into multiple work units. A productive `complete=false` result immediately restores task eligibility and resets any failure streak; a launch that ends without a completion report receives bounded exponential backoff. There are no standing/scheduled/once/review/retry task types and no priorities.
+Tasks have no concurrency limit. Every eligible task can receive work whenever the governor admits another agent.
+
+Each agent receives `task_complete`. It must report validated artifacts and whether the task itself is complete. When a machine completion check is configured, `complete=true` is only advisory until that command exits successfully; a failed check records the launch as incomplete. The tool terminates that launch immediately, preventing queued continuations from turning one launch into multiple work units. A productive `complete=false` result restores task eligibility and resets any earlier failure streak unless an idle/error sibling from the same concurrent launch wave has already established a later pause. If no claimable work unit exists, the agent reports `productive=false`; that idle result receives bounded exponential backoff without being mislabeled as an execution error. A launch that ends without a completion report receives the same bounded backoff. Only a terminal result whose launch began after the previous eligibility time may update the shared schedule, so late siblings cannot erase or repeatedly advance one wave's pause. There are no standing/scheduled/once/review/retry task types and no priorities.
 
 ## Governor
 
-Before launching a bounded batch, one governor checks:
+Before every launch, one governor checks:
 
-1. the operator emergency concurrency cap;
-2. measured whole-machine CPU utilization;
-3. measured whole-machine available RAM;
-4. Codex subscription headroom when that check is enabled.
+1. measured whole-machine CPU utilization;
+2. measured whole-machine available RAM;
+3. measured Codex plan consumption.
 
-The production resource thresholds admit agents until either CPU or RAM reaches 90%. The emergency cap is deliberately far above expected resource capacity and is not the normal limiter. Quota admission is currently disabled by explicit operator configuration; when enabled, missing quota evidence blocks launching visibly and never selects a fallback model. Pi's configured provider runtime owns account authentication and routing.
+There is no numeric agent cap in task state, operator configuration, or the launch interface. The governor alone decides whether another agent fits.
+
+The plan-consumption estimator queries every configured Codex account's five-hour and weekly windows, paces all remaining capacity to each reset, and uses the tighter rate for each account. Those account allowances are summed rather than averaged. Calibrated model burn from the live Codex fleet plus the candidate must fit within that pool allowance; multi-pass owns account rotation. Missing or malformed plan evidence fails closed, while an unhealthy account contributes no capacity.
+
+The recovered `chatgpt-pro` provider fail-closes fully assembled, text-only GPT-5.6 mathematical moonshots against persisted execution evidence. Its endpoint exposes no plan-usage counter, so the governor derives capacity from live non-cooling account entitlements and the provider's one-in-flight lease per account. It has no task/operator concurrency number or the predecessor's four-stream circuit. GPT-5.5 is banned by task validation. The campaign Pro task is currently cancelled because every present OAuth transport resolves to GPT-5.5 Mini; do not reopen it until a live Pi turn proves the full GPT-5.6 Pro invariant. Verified Pro response text is recorded directly in the run ledger; tool-capable models continue to report through `task_complete`. CPU and RAM independently fail closed at their configured utilization thresholds.
 
 ## Operations
 
@@ -42,15 +46,28 @@ orchestrator task create \
   --thinking max \
   --condition 'All imported records pass the project verifier.' \
   --completion-check 'python3 tools/verify-complete.py' \
-  --max-parallel 4 \
   --share 2 \
   --prompt-file /home/kenan/project/task.md
-orchestrator task set example --model openai-codex/gpt-5.6-sol --thinking xhigh --max-parallel 8 --share 2 --prompt-file /home/kenan/project/revised-task.md --condition 'Exact target is admitted' --completion-check 'python3 verify-target.py'
+orchestrator task set example --model openai-codex/gpt-5.6-sol --thinking xhigh --share 2 --prompt-file /home/kenan/project/revised-task.md --condition 'Exact target is admitted' --completion-check 'python3 verify-target.py'
 orchestrator task cancel example
 orchestrator task reopen example
 ```
 
-The systemd service is `agent-orchestrator.service`. Runtime state is canonical in `/home/kenan/data/agent-orchestrator/orchestrator.sqlite3`; Pi session JSONL is retained under `sessions/`. The SQLite database uses WAL and records tasks, launches, completion reports, and bounded controller events. Every table has automatic millisecond `created_at` and `updated_at` columns maintained by SQLite triggers; existing rows are backfilled from their original event times.
+A fully assembled text-only moonshot uses the same task interface:
+
+```bash
+orchestrator task create \
+  --id moonshot \
+  --cwd /home/kenan/projects-research \
+  --model chatgpt-pro/gpt-5-6-pro-literal \
+  --thinking max \
+  --condition 'Operator cancels after enough verified candidate analyses are recorded.' \
+  --prompt-file /home/kenan/projects-research/tasks/assembled-moonshot.md
+```
+
+Each verified response is an incomplete persistent-task result, so the governor replenishes the task while account entitlement and machine resources permit. Cancel the task to stop replenishment.
+
+The systemd service is `agent-orchestrator.service`. Runtime state is canonical in `/home/kenan/data/agent-orchestrator/orchestrator.sqlite3`; Pi session JSONL is retained under `sessions/`. The SQLite database uses WAL and records tasks, launches, completion reports, whether each launch processed a real work unit, and bounded controller events. Every table has automatic millisecond `created_at` and `updated_at` columns maintained by SQLite triggers; existing rows are backfilled from their original event times.
 
 ## Validation
 

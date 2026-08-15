@@ -25,23 +25,20 @@ const CONFIG_PATH = path.join(DATA, "config.json");
 const SESSIONS = path.join(DATA, "sessions");
 const LOCK = path.join(DATA, "controller.lock");
 const AUTH_PATH = path.join(getAgentDir(), "auth.json");
+const CHATGPT_PRO_POOL_PATH = path.join(getAgentDir(), "chatgpt-pro-pool.json");
+const CHATGPT_PRO_PROVIDER = "chatgpt-pro";
 const TICK_MS = 1000;
 const execFileAsync = promisify(execFile);
 
 const DEFAULT_CONFIG = {
-  maxSessions: 4096,
   maxMemoryPercent: 90,
   maxCpuPercent: 90,
   estimatedSessionMiB: 80,
-  launchesPerTick: 4,
-  quota: {
-    enabled: false,
+  plan: {
     pollSeconds: 120,
-    targetFraction: 0.5,
-    creditsPerPercent: 504,
-    modelCreditsPerHour: {
-      "openai-codex/gpt-5.6-sol:xhigh": 293.55,
-      "openai-codex/gpt-5.6-luna:max": 12.64
+    modelBurnPercentPerHour: {
+      "openai-codex/gpt-5.6-sol:xhigh": 0.5824404761904762,
+      "openai-codex/gpt-5.6-luna:max": 0.02507936507936508
     }
   }
 };
@@ -66,19 +63,12 @@ export function ensureLayout() {
 export function loadConfig() {
   ensureLayout();
   const config = JSON.parse(fs.readFileSync(CONFIG_PATH, "utf8"));
-  for (const key of ["maxSessions", "estimatedSessionMiB", "launchesPerTick"]) {
-    if (!(Number.isInteger(config[key]) && config[key] > 0)) fail(`invalid config.${key}`);
-  }
+  if (!(Number.isInteger(config.estimatedSessionMiB) && config.estimatedSessionMiB > 0)) fail("invalid config.estimatedSessionMiB");
   for (const key of ["maxMemoryPercent", "maxCpuPercent"]) {
     if (!(Number.isFinite(config[key]) && config[key] > 0 && config[key] <= 100)) fail(`invalid config.${key}`);
   }
-  if (typeof config.quota?.enabled !== "boolean") fail("invalid config.quota.enabled");
-  if (config.quota.enabled) {
-    if (!(Number.isFinite(config.quota.pollSeconds) && config.quota.pollSeconds > 0)) fail("invalid config.quota.pollSeconds");
-    if (!(Number.isFinite(config.quota.targetFraction) && config.quota.targetFraction > 0 && config.quota.targetFraction <= 1)) fail("invalid config.quota.targetFraction");
-    if (!(Number.isFinite(config.quota.creditsPerPercent) && config.quota.creditsPerPercent > 0)) fail("invalid config.quota.creditsPerPercent");
-    if (!config.quota.modelCreditsPerHour || typeof config.quota.modelCreditsPerHour !== "object") fail("missing config.quota.modelCreditsPerHour");
-  }
+  if (!(Number.isFinite(config.plan?.pollSeconds) && config.plan.pollSeconds > 0)) fail("invalid config.plan.pollSeconds");
+  if (!config.plan.modelBurnPercentPerHour || typeof config.plan.modelBurnPercentPerHour !== "object") fail("missing config.plan.modelBurnPercentPerHour");
   return config;
 }
 
@@ -132,7 +122,6 @@ export function openDb(file = DB_PATH) {
       thinking TEXT NOT NULL,
       completion_condition TEXT NOT NULL,
       completion_check TEXT,
-      max_parallel INTEGER NOT NULL CHECK(max_parallel > 0),
       launch_share REAL NOT NULL CHECK(launch_share > 0),
       not_before INTEGER NOT NULL,
       next_eligible_at INTEGER NOT NULL,
@@ -152,6 +141,7 @@ export function openDb(file = DB_PATH) {
       summary TEXT,
       artifacts_json TEXT NOT NULL DEFAULT '[]',
       error TEXT,
+      productive INTEGER CHECK(productive IN (0,1)),
       created_at INTEGER NOT NULL DEFAULT (CAST((julianday('now') - 2440587.5) * 86400000 AS INTEGER)),
       updated_at INTEGER NOT NULL DEFAULT (CAST((julianday('now') - 2440587.5) * 86400000 AS INTEGER))
     );
@@ -167,9 +157,22 @@ export function openDb(file = DB_PATH) {
       updated_at INTEGER NOT NULL DEFAULT (CAST((julianday('now') - 2440587.5) * 86400000 AS INTEGER))
     );
   `);
+  let taskColumns = new Set(db.prepare("PRAGMA table_info(task)").all().map((row) => row.name));
+  if (taskColumns.has("max_parallel")) {
+    db.exec("DROP TRIGGER IF EXISTS auto_timestamp_task_insert; DROP TRIGGER IF EXISTS auto_timestamp_task_update; ALTER TABLE task DROP COLUMN max_parallel;");
+    taskColumns = new Set(db.prepare("PRAGMA table_info(task)").all().map((row) => row.name));
+  }
+  if (!taskColumns.has("completion_check")) {
+    db.exec("DROP TRIGGER IF EXISTS auto_timestamp_task_insert; DROP TRIGGER IF EXISTS auto_timestamp_task_update; ALTER TABLE task ADD COLUMN completion_check TEXT");
+  }
+  const runColumns = new Set(db.prepare("PRAGMA table_info(run)").all().map((row) => row.name));
+  if (!runColumns.has("provider")) {
+    db.exec("DROP TRIGGER IF EXISTS auto_timestamp_run_insert; DROP TRIGGER IF EXISTS auto_timestamp_run_update; ALTER TABLE run ADD COLUMN provider TEXT");
+  }
+  if (!runColumns.has("productive")) {
+    db.exec("DROP TRIGGER IF EXISTS auto_timestamp_run_insert; DROP TRIGGER IF EXISTS auto_timestamp_run_update; ALTER TABLE run ADD COLUMN productive INTEGER CHECK(productive IN (0,1))");
+  }
   for (const table of ["task", "run", "event"]) ensureTableTimestamps(db, table);
-  const taskColumns = new Set(db.prepare("PRAGMA table_info(task)").all().map((row) => row.name));
-  if (!taskColumns.has("completion_check")) db.exec("ALTER TABLE task ADD COLUMN completion_check TEXT");
   return db;
 }
 
@@ -189,8 +192,7 @@ function taskRows(db) {
 export function rankTasks(tasks, activeTotal) {
   const eligible = tasks.filter((task) =>
     task.completed_at === null && task.cancelled_at === null &&
-    task.not_before <= now() && task.next_eligible_at <= now() &&
-    Number(task.active) < task.max_parallel);
+    task.not_before <= now() && task.next_eligible_at <= now());
   if (!eligible.length) return [];
   const totalShare = eligible.reduce((sum, task) => sum + task.launch_share, 0);
   return eligible
@@ -209,9 +211,7 @@ export function resourceSlots(config, activeCount, memAvailableMiB, memTotalMiB,
   const nonAgentUsedMiB = Math.max(0, usedMiB - agentMemoryMiB);
   const committedAgentMiB = Math.max(agentMemoryMiB, activeCount * config.estimatedSessionMiB);
   const memoryHeadroomMiB = memTotalMiB * config.maxMemoryPercent / 100 - nonAgentUsedMiB - committedAgentMiB;
-  const memorySlots = Math.max(0, Math.floor(memoryHeadroomMiB / config.estimatedSessionMiB));
-  const operatorSlots = Math.max(0, config.maxSessions - activeCount);
-  return Math.min(operatorSlots, memorySlots);
+  return Math.max(0, Math.floor(memoryHeadroomMiB / config.estimatedSessionMiB));
 }
 
 function memoryMiB() {
@@ -242,12 +242,50 @@ export function cpuPercent(before, after) {
 }
 
 function runModelKey(task) { return `${task.model}:${task.thinking}`; }
+function providerOf(model) { return String(model).split("/", 1)[0]; }
+function modelIdOf(model) { return String(model).slice(String(model).indexOf("/") + 1); }
+export function validateModelPolicy(model) {
+  if (/^gpt-5-5(?:-|$)/.test(modelIdOf(model))) fail("GPT-5.5 models are banned; use GPT-5.6");
+}
+function isChatGptProTask(task) { return providerOf(task.model) === CHATGPT_PRO_PROVIDER; }
 
-class QuotaGovernor {
+export function proEntitlementSnapshot(at = now(), auth = null, state = null) {
+  const credentials = auth ?? JSON.parse(fs.readFileSync(AUTH_PATH, "utf8"));
+  let pool = state;
+  if (pool === null) {
+    try { pool = JSON.parse(fs.readFileSync(CHATGPT_PRO_POOL_PATH, "utf8")); }
+    catch { pool = {}; }
+  }
+  const accounts = Object.entries(credentials).filter(([name, value]) =>
+    (name === "openai-codex" || name.startsWith("openai-codex-")) && (value?.access || value?.refresh));
+  const eligible = accounts.filter(([name]) =>
+    Number(pool?.cooldowns?.[name] ?? 0) <= at && Number(pool?.proQuotaExhaustedUntil?.[name] ?? 0) <= at);
+  const inFlight = eligible.filter(([name]) => Number(pool?.inFlight?.[name] ?? 0) > at).length;
+  return { configured: accounts.length, eligible: eligible.length, inFlight };
+}
+
+export function proLaunchAvailability(entitlement, active) {
+  return Math.max(0, entitlement.eligible - Math.max(active, entitlement.inFlight));
+}
+
+export function planAllows(allowed, activeRates, candidate) {
+  return activeRates.reduce((sum, rate) => sum + rate, 0) + candidate <= allowed;
+}
+
+export function planWindowBurnPerHour(window, at = now()) {
+  const used = Number(window?.used_percent);
+  const resetAt = Number(window?.reset_at) * 1000;
+  if (!Number.isFinite(used) || !Number.isFinite(resetAt)) return null;
+  const hours = Math.max(0, resetAt - at) / 3600000;
+  if (hours <= 0) return 0;
+  return Math.max(0, 100 - used) / hours;
+}
+
+export class PlanGovernor {
   constructor(config) { this.config = config; this.snapshot = null; this.refreshing = null; }
 
   async refresh() {
-    if (this.snapshot && now() - this.snapshot.at < this.config.quota.pollSeconds * 1000) return this.snapshot;
+    if (this.snapshot && now() - this.snapshot.at < this.config.plan.pollSeconds * 1000) return this.snapshot;
     if (this.refreshing) return this.refreshing;
     this.refreshing = this.fetch().finally(() => { this.refreshing = null; });
     return this.refreshing;
@@ -255,11 +293,11 @@ class QuotaGovernor {
 
   async fetch() {
     const auth = JSON.parse(fs.readFileSync(AUTH_PATH, "utf8"));
-    const accounts = Object.entries(auth).filter(([name, value]) =>
+    const configured = Object.entries(auth).filter(([name, value]) =>
       (name === "openai-codex" || name.startsWith("openai-codex-")) && value?.access);
-    if (!accounts.length) fail("quota governor found no Codex OAuth accounts");
+    if (!configured.length) fail("plan governor found no Codex OAuth accounts");
     const endpoint = `${(process.env.CHATGPT_BASE_URL ?? "https://chatgpt.com/backend-api").replace(/\/$/, "")}/wham/usage`;
-    const results = await Promise.all(accounts.map(async ([, credential]) => {
+    const results = await Promise.all(configured.map(async ([provider, credential]) => {
       try {
         const response = await fetch(endpoint, {
           signal: AbortSignal.timeout(10000),
@@ -273,32 +311,54 @@ class QuotaGovernor {
         if (!response.ok) return null;
         const body = await response.json();
         const rate = body.rate_limit ?? {};
-        const windows = [rate.primary_window, rate.secondary_window].filter(Boolean);
+        const windows = [rate.primary_window, rate.secondary_window]
+          .map((window) => planWindowBurnPerHour(window))
+          .filter((value) => value !== null);
         if (!windows.length) return null;
-        return Math.min(...windows.map((window) => {
-          const remaining = Math.max(0, 100 - Number(window.used_percent ?? 100));
-          const hours = Math.max(0, Number(window.reset_at ?? 0) * 1000 - now()) / 3600000;
-          return hours > 0 ? remaining * this.config.quota.targetFraction / hours : 0;
-        }));
+        return { provider, allowedBurnPercentPerHour: Math.min(...windows) };
       } catch { return null; }
     }));
-    const healthy = results.filter((value) => value !== null);
-    if (!healthy.length) fail("quota governor could not read any Codex account");
-    this.snapshot = { at: now(), healthy: healthy.length, accounts: accounts.length, allowedPercentPerHour: healthy.reduce((a, b) => a + b, 0) };
+    const accounts = results.filter((value) => value !== null);
+    if (!accounts.length) fail("plan governor could not read any Codex account");
+    this.snapshot = {
+      at: now(),
+      healthy: accounts.length,
+      configured: configured.length,
+      allowedBurnPercentPerHour: accounts.reduce((sum, account) => sum + account.allowedBurnPercentPerHour, 0),
+      accounts,
+    };
     return this.snapshot;
   }
 
   modelRate(task) {
-    const credits = this.config.quota.modelCreditsPerHour[runModelKey(task)];
-    if (!(Number.isFinite(credits) && credits >= 0)) fail(`no quota rate configured for ${runModelKey(task)}`);
-    return credits / this.config.quota.creditsPerPercent;
+    const rate = this.config.plan.modelBurnPercentPerHour[runModelKey(task)];
+    if (!(Number.isFinite(rate) && rate >= 0)) fail(`no plan burn rate configured for ${runModelKey(task)}`);
+    return rate;
   }
 
-  async allows(task, activeTasks) {
-    const quota = await this.refresh();
-    const live = activeTasks.reduce((sum, item) => sum + this.modelRate(item), 0);
+  async allows(task, activeAssignments) {
+    if (isChatGptProTask(task)) {
+      const entitlement = proEntitlementSnapshot();
+      const active = activeAssignments.filter((item) => isChatGptProTask(item.task)).length;
+      const reserved = Math.max(active, entitlement.inFlight);
+      const available = proLaunchAvailability(entitlement, active);
+      return {
+        ok: available > 0,
+        provider: available > 0 ? CHATGPT_PRO_PROVIDER : null,
+        detail: `ChatGPT Pro eligible=${entitlement.eligible} reserved=${reserved} available=${available}`,
+      };
+    }
+    const plan = await this.refresh();
     const candidate = this.modelRate(task);
-    return { ok: live + candidate <= quota.allowedPercentPerHour, live, candidate, quota };
+    const codexAssignments = activeAssignments.filter((item) => !isChatGptProTask(item.task));
+    const rates = codexAssignments.map((item) => this.modelRate(item.task));
+    const live = rates.reduce((sum, rate) => sum + rate, 0);
+    const ok = planAllows(plan.allowedBurnPercentPerHour, rates, candidate);
+    return {
+      ok,
+      provider: ok ? providerOf(task.model) : null,
+      detail: `Codex plan live=${live.toFixed(3)} candidate=${candidate.toFixed(3)} allowed=${plan.allowedBurnPercentPerHour.toFixed(3)}`,
+    };
   }
 }
 
@@ -333,9 +393,9 @@ export async function stopSession(session) {
 }
 export function shouldAdvanceBackoff(nextEligibleAt, runStartedAt) { return Number(nextEligibleAt) <= Number(runStartedAt); }
 
-export function insertRun(db, runId, taskId, startedAt = now()) {
-  db.prepare("INSERT INTO run(id,task_id,status,started_at) VALUES(?,?,?,?)")
-    .run(runId, taskId, "running", startedAt);
+export function insertRun(db, runId, taskId, provider = null, startedAt = now()) {
+  db.prepare("INSERT INTO run(id,task_id,status,started_at,provider) VALUES(?,?,?,?,?)")
+    .run(runId, taskId, "running", startedAt, provider);
 }
 
 class Controller {
@@ -343,17 +403,17 @@ class Controller {
     this.db = db;
     this.config = config;
     this.modelRuntime = null;
-    this.quota = new QuotaGovernor(config);
+    this.plan = new PlanGovernor(config);
     this.active = new Map();
     this.stopping = false;
-    this.lastGovernorEvent = { at: 0, detail: "" };
+    this.lastGovernorEvents = new Map();
     this.lastControllerError = { at: 0, detail: "" };
     this.previousCpu = cpuTotals();
   }
 
   recover() {
     const interrupted = this.db.prepare("SELECT id,task_id FROM run WHERE status='running'").all();
-    const finish = this.db.prepare("UPDATE run SET status='interrupted',finished_at=?,error=? WHERE id=?");
+    const finish = this.db.prepare("UPDATE run SET status='interrupted',finished_at=?,error=?,productive=0 WHERE id=?");
     for (const row of interrupted) {
       finish.run(now(), "controller restarted while run was active", row.id);
       event(this.db, "run-interrupted", "controller restart", row.task_id, row.id);
@@ -362,30 +422,33 @@ class Controller {
 
   async init() {
     this.recover();
+    for (const task of taskRows(this.db)) validateModelPolicy(task.model);
     this.modelRuntime = await ModelRuntime.create({ signal: AbortSignal.timeout(15000) });
   }
 
-  async launch(task) {
+  async launch(task, provider) {
     const runId = randomId();
-    insertRun(this.db, runId, task.id);
-    event(this.db, "run-started", runModelKey(task), task.id, runId);
-    const promise = this.execute(task, runId).finally(() => this.active.delete(runId));
-    this.active.set(runId, { task, promise });
+    insertRun(this.db, runId, task.id, provider);
+    event(this.db, "run-started", `${runModelKey(task)} via ${provider}`, task.id, runId);
+    const promise = this.execute(task, runId, provider).finally(() => this.active.delete(runId));
+    this.active.set(runId, { task, provider, promise });
   }
 
-  async execute(task, runId) {
+  async execute(task, runId, provider) {
     let session;
     let report = null;
     let sessionId = null;
     try {
-      const resolved = resolveCliModel({ cliModel: `${task.model}:${task.thinking}`, modelRuntime: this.modelRuntime });
-      if (resolved.error || !resolved.model) fail(resolved.error ?? `cannot resolve ${runModelKey(task)}`);
+      const bootstrap = isChatGptProTask(task) ? `openai-codex/gpt-5.6-sol:${task.thinking}` : `${task.model}:${task.thinking}`;
+      const resolved = resolveCliModel({ cliModel: bootstrap, modelRuntime: this.modelRuntime });
+      if (resolved.error || !resolved.model) fail(resolved.error ?? `cannot resolve bootstrap for ${runModelKey(task)}`);
       const completionTool = defineTool({
         name: "task_complete",
         label: "Complete task launch",
-        description: "Report this launch's validated output. Set complete=true only when the task completion condition is now satisfied; otherwise the persistent task remains eligible.",
+        description: "Report this launch's validated output. Set complete=true only when the task completion condition is now satisfied. Set productive=false only when no claimable work unit existed; idle reports receive bounded backoff instead of immediately launching another agent.",
         parameters: Type.Object({
           complete: Type.Boolean(),
+          productive: Type.Optional(Type.Boolean({ description: "Whether this launch claimed and processed a real work unit. Defaults to true." })),
           summary: Type.String({ minLength: 1 }),
           artifacts: Type.Optional(Type.Array(Type.String()))
         }),
@@ -396,7 +459,13 @@ class Controller {
           const summary = parameters.complete && !validation.ok
             ? `${parameters.summary}\nCompletion validation failed: ${validation.detail}`
             : parameters.summary;
-          report = { complete, summary, artifacts: parameters.artifacts ?? [], validation };
+          report = {
+            complete,
+            productive: parameters.productive ?? true,
+            summary,
+            artifacts: parameters.artifacts ?? [],
+            validation,
+          };
           const text = complete
             ? "Task completion recorded after the configured machine check passed."
             : parameters.complete
@@ -418,25 +487,47 @@ class Controller {
         customTools: [completionTool],
         sessionManager: SessionManager.create(task.cwd, SESSIONS)
       }));
+      const targetProvider = isChatGptProTask(task) ? providerOf(task.model) : provider;
+      const targetModelId = isChatGptProTask(task) ? modelIdOf(task.model) : resolved.model.id;
+      if (targetProvider !== resolved.model.provider || targetModelId !== resolved.model.id) {
+        const routed = (await this.modelRuntime.getAvailable()).find((model) => model.provider === targetProvider && model.id === targetModelId);
+        if (!routed) fail(`governor-selected model unavailable after extension load: ${targetProvider}/${targetModelId}`);
+        await session.setModel(routed);
+        session.setThinkingLevel(task.thinking);
+      }
       this.active.get(runId).session = session;
       sessionId = session.sessionId;
       this.db.prepare("UPDATE run SET session_id=? WHERE id=?").run(sessionId, runId);
-      const prompt = `${task.prompt}\n\n## Orchestrated task contract\nTask: ${task.id}\nCompletion condition: ${task.completion_condition}\nThis task may run repeatedly or concurrently. Make external effects idempotent where possible. Before finishing, call task_complete exactly once with the validated result. Set complete=true only if the completion condition is satisfied.`;
+      const prompt = isChatGptProTask(task)
+        ? task.prompt
+        : `${task.prompt}\n\n## Orchestrated task contract\nTask: ${task.id}\nCompletion condition: ${task.completion_condition}\nThis task may run repeatedly or concurrently. Make external effects idempotent where possible. Before finishing, call task_complete exactly once with the validated result. Set complete=true only if the completion condition is satisfied. Set productive=false only if no claimable work unit existed; otherwise omit it or set productive=true.`;
       await session.prompt(prompt);
-      if (!report) fail("agent ended without task_complete");
-      this.finish(task, runId, report.complete ? "complete" : "incomplete", report.summary, report.artifacts, null);
+      if (!report && isChatGptProTask(task)) {
+        const assistant = [...session.messages].reverse().find((message) => message.role === "assistant");
+        const text = assistant?.content?.filter((part) => part.type === "text").map((part) => part.text).join("\n").trim();
+        if (text) report = { complete: false, summary: text, artifacts: [], validation: null };
+        else if (assistant?.errorMessage) fail(`ChatGPT Pro failed: ${assistant.errorMessage}`);
+      }
+      if (!report) fail(isChatGptProTask(task) ? "ChatGPT Pro returned no verified text" : "agent ended without task_complete");
+      this.finish(
+        task, runId, report.complete ? "complete" : "incomplete",
+        report.summary, report.artifacts, null, report.productive,
+      );
     } catch (error) {
-      this.finish(task, runId, "incomplete", report?.summary ?? null, report?.artifacts ?? [], String(error?.message ?? error));
+      this.finish(
+        task, runId, "incomplete", report?.summary ?? null,
+        report?.artifacts ?? [], String(error?.message ?? error), false,
+      );
     } finally {
       session?.dispose();
     }
   }
 
-  finish(task, runId, status, summary, artifacts, error) {
+  finish(task, runId, status, summary, artifacts, error, productive = true) {
     this.db.exec("BEGIN IMMEDIATE");
     try {
-      this.db.prepare("UPDATE run SET status=?,finished_at=?,summary=?,artifacts_json=?,error=? WHERE id=?")
-        .run(status, now(), summary, JSON.stringify(artifacts), error, runId);
+      this.db.prepare("UPDATE run SET status=?,finished_at=?,summary=?,artifacts_json=?,error=?,productive=? WHERE id=?")
+        .run(status, now(), summary, JSON.stringify(artifacts), error, productive ? 1 : 0, runId);
       if (status === "complete") {
         this.db.prepare("UPDATE task SET completed_at=?,incomplete_streak=0 WHERE id=? AND completed_at IS NULL").run(now(), task.id);
       } else {
@@ -444,12 +535,14 @@ class Controller {
           SELECT t.incomplete_streak,t.next_eligible_at,r.started_at
           FROM task t JOIN run r ON r.task_id=t.id
           WHERE t.id=? AND r.id=?`).get(task.id, runId);
-        // A normal complete=false report is productive persistent work: it
-        // immediately restores eligibility and clears any sibling failure's
-        // pause. Runs that end without a report retain exponential backoff, and
-        // only the first failure from one concurrent launch wave advances it.
-        if (error === null || shouldAdvanceBackoff(row.next_eligible_at, row.started_at)) {
-          const next = nextIncompleteState(row.incomplete_streak, error !== null);
+        // Real persistent work restores eligibility unless an idle/error sibling
+        // from the same concurrent launch wave has already established a later
+        // pause. A no-unit launch uses bounded backoff without being mislabeled
+        // as an execution error. Only the first terminal result that began after
+        // the previous eligibility time may update the shared schedule.
+        const idleOrFailed = error !== null || productive === false;
+        if (shouldAdvanceBackoff(row.next_eligible_at, row.started_at)) {
+          const next = nextIncompleteState(row.incomplete_streak, idleOrFailed);
           this.db.prepare("UPDATE task SET incomplete_streak=?,next_eligible_at=? WHERE id=?")
             .run(next.streak, now() + next.delayMs, task.id);
         }
@@ -470,39 +563,38 @@ class Controller {
   }
 
   governorBlocked(detail, taskId) {
-    if (detail !== this.lastGovernorEvent.detail || now() - this.lastGovernorEvent.at >= 60_000) {
+    const previous = this.lastGovernorEvents.get(taskId) ?? { at: 0, detail: "" };
+    if (detail !== previous.detail || now() - previous.at >= 60_000) {
+      const at = now();
       event(this.db, "governor-blocked", detail, taskId);
-      this.lastGovernorEvent = { at: now(), detail };
+      this.lastGovernorEvents.set(taskId, { at, detail });
     }
   }
 
   async tick() {
     const tasks = taskRows(this.db);
-    const activeTasks = [...this.active.values()].map((item) => item.task);
+    const activeAssignments = [...this.active.values()].map(({ task, provider }) => ({ task, provider }));
     const currentCpu = cpuTotals();
     const currentCpuPercent = cpuPercent(this.previousCpu, currentCpu);
     this.previousCpu = currentCpu;
     const memory = memoryMiB();
     const slots = resourceSlots(this.config, this.active.size, memory.available, memory.total, currentCpuPercent, agentMemoryMiB());
-    const launchCount = Math.min(slots, this.config.launchesPerTick);
-    for (let launchIndex = 0; launchIndex < launchCount; launchIndex++) {
+    for (let launchIndex = 0; launchIndex < slots; launchIndex++) {
       let launched = false;
       for (const task of rankTasks(tasks, this.active.size)) {
-        if (this.config.quota.enabled) {
-          let governed;
-          try { governed = await this.quota.allows(task, activeTasks); }
-          catch (error) {
-            this.governorBlocked(String(error.message ?? error), task.id);
-            return;
-          }
-          if (!governed.ok) {
-            this.governorBlocked(`quota live=${governed.live.toFixed(3)} candidate=${governed.candidate.toFixed(3)} allowed=${governed.quota.allowedPercentPerHour.toFixed(3)}`, task.id);
-            continue;
-          }
+        let governed;
+        try { governed = await this.plan.allows(task, activeAssignments); }
+        catch (error) {
+          this.governorBlocked(String(error.message ?? error), task.id);
+          return;
         }
-        await this.launch(task);
+        if (!governed.ok) {
+          this.governorBlocked(governed.detail, task.id);
+          continue;
+        }
+        await this.launch(task, governed.provider);
         task.active = Number(task.active) + 1;
-        activeTasks.push(task);
+        activeAssignments.push({ task, provider: governed.provider });
         launched = true;
         break;
       }
@@ -554,43 +646,40 @@ function parseOptions(args) {
 }
 
 function createTask(db, options) {
+  const unknown = Object.keys(options).filter((key) => !["id", "cwd", "model", "thinking", "condition", "completion-check", "share", "not-before", "prompt", "prompt-file"].includes(key));
+  if (unknown.length) fail(`task create does not support ${unknown.map((key) => `--${key}`).join(", ")}`);
   for (const key of ["id", "cwd", "model", "thinking", "condition"]) if (!options[key]) fail(`task create requires --${key}`);
+  validateModelPolicy(options.model);
   const prompt = options["prompt-file"] ? fs.readFileSync(options["prompt-file"], "utf8").trim() : options.prompt;
   const completionCheck = options["completion-check"]?.trim() || null;
   if (!prompt) fail("task create requires --prompt or --prompt-file");
   const cwd = path.resolve(options.cwd);
   if (!fs.statSync(cwd).isDirectory()) fail(`task cwd is not a directory: ${cwd}`);
-  const maxParallel = Number(options["max-parallel"] ?? 1);
   const share = Number(options.share ?? 1);
-  if (!(Number.isInteger(maxParallel) && maxParallel > 0)) fail("--max-parallel must be a positive integer");
   if (!(Number.isFinite(share) && share > 0)) fail("--share must be positive");
   const notBefore = options["not-before"] ? Date.parse(options["not-before"]) : now();
   if (!Number.isFinite(notBefore)) fail("--not-before must be an ISO timestamp");
-  db.prepare(`INSERT INTO task(id,prompt,cwd,model,thinking,completion_condition,completion_check,max_parallel,launch_share,not_before,next_eligible_at,created_at)
-    VALUES(?,?,?,?,?,?,?,?,?,?,?,?)`).run(options.id, prompt, cwd, options.model, options.thinking, options.condition, completionCheck, maxParallel, share, notBefore, notBefore, now());
+  db.prepare(`INSERT INTO task(id,prompt,cwd,model,thinking,completion_condition,completion_check,launch_share,not_before,next_eligible_at,created_at)
+    VALUES(?,?,?,?,?,?,?,?,?,?,?)`).run(options.id, prompt, cwd, options.model, options.thinking, options.condition, completionCheck, share, notBefore, notBefore, now());
   event(db, "task-created", options.condition, options.id);
   console.log(`created ${options.id}`);
 }
 
 export function setTaskOptions(db, id, options) {
   if (!db.prepare("SELECT 1 FROM task WHERE id=?").get(id)) fail(`unknown task ${id}`);
-  if (!Object.keys(options).length) fail("task set requires --model, --thinking, --max-parallel, --share, --prompt-file, --condition, and/or --completion-check");
-  const unknown = Object.keys(options).filter((key) => !["model", "thinking", "max-parallel", "share", "prompt-file", "condition", "completion-check"].includes(key));
+  if (!Object.keys(options).length) fail("task set requires --model, --thinking, --share, --prompt-file, --condition, and/or --completion-check");
+  const unknown = Object.keys(options).filter((key) => !["model", "thinking", "share", "prompt-file", "condition", "completion-check"].includes(key));
   if (unknown.length) fail(`task set does not support ${unknown.map((key) => `--${key}`).join(", ")}`);
   if (options.model !== undefined) {
     const model = options.model.trim();
     if (!model) fail("--model must be nonempty");
+    validateModelPolicy(model);
     db.prepare("UPDATE task SET model=? WHERE id=?").run(model, id);
   }
   if (options.thinking !== undefined) {
     const thinking = options.thinking.trim();
     if (!thinking) fail("--thinking must be nonempty");
     db.prepare("UPDATE task SET thinking=? WHERE id=?").run(thinking, id);
-  }
-  if (options["max-parallel"] !== undefined) {
-    const value = Number(options["max-parallel"]);
-    if (!(Number.isInteger(value) && value > 0)) fail("--max-parallel must be a positive integer");
-    db.prepare("UPDATE task SET max_parallel=? WHERE id=?").run(value, id);
   }
   if (options.share !== undefined) {
     const value = Number(options.share);
@@ -622,7 +711,7 @@ export function cancelTask(db, id, at = now()) {
 function printTasks(db) {
   for (const row of taskRows(db)) {
     const state = row.cancelled_at ? "cancelled" : row.completed_at ? "complete" : row.not_before > now() ? `eligible ${iso(row.not_before)}` : row.next_eligible_at > now() ? `backoff ${iso(row.next_eligible_at)}` : "eligible";
-    console.log(`${row.id}\t${state}\tactive=${row.active}/${row.max_parallel}\tshare=${row.launch_share}\t${row.model}:${row.thinking}`);
+    console.log(`${row.id}\t${state}\tactive=${row.active}\tshare=${row.launch_share}\t${row.model}:${row.thinking}`);
   }
 }
 
@@ -631,9 +720,10 @@ function check(db) {
   if (integrity !== "ok") fail(`database integrity: ${integrity}`);
   const config = loadConfig();
   for (const task of taskRows(db)) {
+    validateModelPolicy(task.model);
     if (!fs.existsSync(task.cwd)) fail(`task ${task.id} cwd is missing: ${task.cwd}`);
     const key = runModelKey(task);
-    if (config.quota.enabled && !(key in config.quota.modelCreditsPerHour)) fail(`task ${task.id} has no quota rate for ${key}`);
+    if (!isChatGptProTask(task) && !(key in config.plan.modelBurnPercentPerHour)) fail(`task ${task.id} has no plan burn rate for ${key}`);
   }
   console.log(`ok: ${taskRows(db).length} tasks; database and configuration valid`);
 }
@@ -684,10 +774,16 @@ async function main(argv = process.argv.slice(2)) {
       maxCpuPercent: config.maxCpuPercent,
       memoryPercent: Number(((memory.total - memory.available) * 100 / memory.total).toFixed(1)),
       maxMemoryPercent: config.maxMemoryPercent,
-      maxSessions: config.maxSessions,
     };
-    const quota = config.quota.enabled ? await new QuotaGovernor(config).refresh() : { enabled: false };
-    console.log(JSON.stringify({ resources, quota }, null, 2));
+    const snapshot = await new PlanGovernor(config).refresh();
+    const plan = {
+      at: snapshot.at,
+      healthyAccounts: snapshot.healthy,
+      configuredAccounts: snapshot.configured,
+      allowedBurnPercentPerHour: snapshot.allowedBurnPercentPerHour,
+    };
+    const pro = proEntitlementSnapshot();
+    console.log(JSON.stringify({ resources, plan, chatgptPro: pro }, null, 2));
     return;
   }
   if (command === "check") return check(db);
@@ -701,10 +797,10 @@ async function main(argv = process.argv.slice(2)) {
     return;
   }
   console.log(`Usage:
-  orchestrator task create --id ID --cwd DIR --model PROVIDER/MODEL --thinking LEVEL --condition TEXT [--completion-check COMMAND] [--max-parallel N] [--share N] [--not-before ISO] (--prompt TEXT | --prompt-file FILE)
+  orchestrator task create --id ID --cwd DIR --model PROVIDER/MODEL --thinking LEVEL --condition TEXT [--completion-check COMMAND] [--share N] [--not-before ISO] (--prompt TEXT | --prompt-file FILE)
   orchestrator task list
   orchestrator task show ID
-  orchestrator task set ID [--model PROVIDER/MODEL] [--thinking LEVEL] [--max-parallel N] [--share N] [--prompt-file FILE] [--condition TEXT] [--completion-check COMMAND]
+  orchestrator task set ID [--model PROVIDER/MODEL] [--thinking LEVEL] [--share N] [--prompt-file FILE] [--condition TEXT] [--completion-check COMMAND]
   orchestrator task cancel ID
   orchestrator task reopen ID
   orchestrator status
