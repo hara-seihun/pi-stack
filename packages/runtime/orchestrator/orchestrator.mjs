@@ -268,8 +268,26 @@ export function proLaunchAvailability(entitlement, active) {
   return Math.max(0, entitlement.eligible - Math.max(active, entitlement.inFlight));
 }
 
-export function planAllows(allowed, activeRates, candidate) {
-  return activeRates.reduce((sum, rate) => sum + rate, 0) + candidate <= allowed;
+export function choosePlanProvider(accounts, activeRates, candidate) {
+  const liveByProvider = new Map();
+  for (const assignment of activeRates) {
+    liveByProvider.set(
+      assignment.provider,
+      (liveByProvider.get(assignment.provider) ?? 0) + assignment.rate,
+    );
+  }
+  return accounts
+    .map((account) => {
+      const live = liveByProvider.get(account.provider) ?? 0;
+      return {
+        provider: account.provider,
+        live,
+        allowed: account.allowedBurnPercentPerHour,
+        remaining: account.allowedBurnPercentPerHour - live - candidate,
+      };
+    })
+    .filter((account) => account.remaining >= 0)
+    .sort((left, right) => right.remaining - left.remaining || left.provider.localeCompare(right.provider))[0] ?? null;
 }
 
 export function planWindowBurnPerHour(window, at = now()) {
@@ -350,14 +368,17 @@ export class PlanGovernor {
     }
     const plan = await this.refresh();
     const candidate = this.modelRate(task);
-    const codexAssignments = activeAssignments.filter((item) => !isChatGptProTask(item.task));
-    const rates = codexAssignments.map((item) => this.modelRate(item.task));
-    const live = rates.reduce((sum, rate) => sum + rate, 0);
-    const ok = planAllows(plan.allowedBurnPercentPerHour, rates, candidate);
+    const codexAssignments = activeAssignments
+      .filter((item) => !isChatGptProTask(item.task))
+      .map((item) => ({ provider: item.provider, rate: this.modelRate(item.task) }));
+    const selected = choosePlanProvider(plan.accounts, codexAssignments, candidate);
+    const live = codexAssignments.reduce((sum, item) => sum + item.rate, 0);
     return {
-      ok,
-      provider: ok ? providerOf(task.model) : null,
-      detail: `Codex plan live=${live.toFixed(3)} candidate=${candidate.toFixed(3)} allowed=${plan.allowedBurnPercentPerHour.toFixed(3)}`,
+      ok: selected !== null,
+      provider: selected?.provider ?? null,
+      detail: selected
+        ? `Codex account=${selected.provider} live=${selected.live.toFixed(3)} candidate=${candidate.toFixed(3)} allowed=${selected.allowed.toFixed(3)}`
+        : `Codex accounts full: fleet live=${live.toFixed(3)} candidate=${candidate.toFixed(3)} pool allowed=${plan.allowedBurnPercentPerHour.toFixed(3)}`,
     };
   }
 }
@@ -502,12 +523,12 @@ class Controller {
         ? task.prompt
         : `${task.prompt}\n\n## Orchestrated task contract\nTask: ${task.id}\nCompletion condition: ${task.completion_condition}\nThis task may run repeatedly or concurrently. Make external effects idempotent where possible. Before finishing, call task_complete exactly once with the validated result. Set complete=true only if the completion condition is satisfied. Set productive=false only if no claimable work unit existed; otherwise omit it or set productive=true.`;
       await session.prompt(prompt);
+      const assistant = [...session.messages].reverse().find((message) => message.role === "assistant");
       if (!report && isChatGptProTask(task)) {
-        const assistant = [...session.messages].reverse().find((message) => message.role === "assistant");
         const text = assistant?.content?.filter((part) => part.type === "text").map((part) => part.text).join("\n").trim();
         if (text) report = { complete: false, summary: text, artifacts: [], validation: null };
-        else if (assistant?.errorMessage) fail(`ChatGPT Pro failed: ${assistant.errorMessage}`);
       }
+      if (!report && assistant?.errorMessage) fail(`provider turn failed: ${assistant.errorMessage}`);
       if (!report) fail(isChatGptProTask(task) ? "ChatGPT Pro returned no verified text" : "agent ended without task_complete");
       this.finish(
         task, runId, report.complete ? "complete" : "incomplete",

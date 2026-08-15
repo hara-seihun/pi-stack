@@ -7,7 +7,7 @@ import test from "node:test";
 
 const temporary = fs.mkdtempSync(path.join(os.tmpdir(), "agent-orchestrator-test-"));
 process.env.AGENT_ORCHESTRATOR_DATA = temporary;
-const { cancelTask, chooseTask, completionToolResult, cpuPercent, insertRun, loadConfig, nextIncompleteState, openDb, planAllows, planWindowBurnPerHour, proEntitlementSnapshot, proLaunchAvailability, rankTasks, resourceSlots, setTaskOptions, shouldAdvanceBackoff, stopSession, validateCompletion, validateModelPolicy } = await import("./orchestrator.mjs");
+const { cancelTask, choosePlanProvider, chooseTask, completionToolResult, cpuPercent, insertRun, loadConfig, nextIncompleteState, openDb, planWindowBurnPerHour, proEntitlementSnapshot, proLaunchAvailability, rankTasks, resourceSlots, setTaskOptions, shouldAdvanceBackoff, stopSession, validateCompletion, validateModelPolicy } = await import("./orchestrator.mjs");
 
 test.after(() => fs.rmSync(temporary, { recursive: true, force: true }));
 
@@ -206,7 +206,26 @@ test("ChatGPT Pro capacity comes from live account entitlement rather than a num
   assert.equal(proLaunchAvailability(entitlement, 10), 0);
 });
 
-test("Codex plan governor sums pool allowance and predicted fleet burn", () => {
-  assert.equal(planAllows(3.25, [0.58, 0.58, 0.58, 0.58], 0.58), true);
-  assert.equal(planAllows(3.25, [0.58, 0.58, 0.58, 0.58, 0.58], 0.58), false);
+test("Codex plan governor assigns a concrete account without exceeding it", () => {
+  const accounts = [
+    { provider: "openai-codex", allowedBurnPercentPerHour: 0 },
+    { provider: "openai-codex-2", allowedBurnPercentPerHour: 1.2 },
+    { provider: "openai-codex-3", allowedBurnPercentPerHour: 2.0 },
+  ];
+  const selected = choosePlanProvider(accounts, [
+    { provider: "openai-codex-2", rate: 0.58 },
+    { provider: "openai-codex-3", rate: 0.58 },
+  ], 0.58);
+  assert.equal(selected.provider, "openai-codex-3");
+  assert.equal(selected.live, 0.58);
+  assert.equal(selected.allowed, 2.0);
+  assert.ok(Math.abs(selected.remaining - 0.84) < 1e-12);
+  assert.equal(
+    choosePlanProvider(accounts, [
+      { provider: "openai-codex-2", rate: 0.58 },
+      { provider: "openai-codex-2", rate: 0.58 },
+      { provider: "openai-codex-3", rate: 1.74 },
+    ], 0.58),
+    null,
+  );
 });
