@@ -487,6 +487,7 @@ test("only exact research frontier tasks receive the Pro delegation tool", async
     assert.equal(prompt, "exact problem");
     assert.deepEqual(options.auditContext, { taskId: "research-frontier", runId: "run-1" });
     options.onStatus({ capacity: { configured: 1, inFlight: 1, maxParallel: 4 } });
+    options.onStatus({ phase: "submitted", browserProfile: "limmy-google", nextCheckMs: 1_000 });
     return {
       text: "candidate proof",
       evidence: { pro_execution_verified: true },
@@ -494,7 +495,8 @@ test("only exact research frontier tasks receive the Pro delegation tool", async
     };
   });
   const result = await tool.execute("call", { prompt: "exact problem" }, undefined, (value) => { update = value; });
-  assert.match(update.content[0].text, /1\/4 machine-wide/);
+  assert.equal(update.content[0].text, "GPT-5.6 Pro is submitted.");
+  assert.equal(update.details.browserProfile, "limmy-google");
   assert.equal(result.content[0].text, "candidate proof");
   assert.equal(result.details.executionVerified, true);
   assert.equal(result.details.auditPath, "/audit.json");

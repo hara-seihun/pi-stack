@@ -517,10 +517,16 @@ export function createProDelegateTool(task, runId, runner = completeInKernelBrow
       const completion = await runner(params.prompt, {
         signal,
         auditContext: { taskId: task.id, runId },
-        onStatus: ({ capacity }) => onUpdate?.({
-          content: [{ type: "text", text: `GPT-5.6 Pro is running (${capacity.inFlight}/${capacity.maxParallel} machine-wide; ${capacity.configured} authenticated entitlement${capacity.configured === 1 ? "" : "s"}).` }],
-          details: { phase: "running", capacity, taskId: task.id, runId },
-        }),
+        onStatus: (status) => {
+          const capacity = status.capacity;
+          const text = capacity
+            ? `GPT-5.6 Pro is running (${capacity.inFlight}/${capacity.maxParallel} machine-wide; ${capacity.configured} authenticated entitlement${capacity.configured === 1 ? "" : "s"}).`
+            : `GPT-5.6 Pro is ${status.phase}.`;
+          onUpdate?.({
+            content: [{ type: "text", text }],
+            details: { ...status, taskId: task.id, runId },
+          });
+        },
       });
       const truncated = truncateHead(completion.text, { maxBytes: DEFAULT_MAX_BYTES, maxLines: DEFAULT_MAX_LINES });
       const auditPath = completion.audit?.auditPath ?? null;
