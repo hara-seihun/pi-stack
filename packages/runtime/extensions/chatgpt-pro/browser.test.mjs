@@ -157,6 +157,8 @@ test("skipped or incomplete Pro work is rejected", () => {
 
 test("transport horizons accommodate multi-hour Pro reasoning without lease overlap", () => {
   assert.ok(PRO_TRANSPORT_HORIZONS.responseWaitMs >= 60 * 60_000);
+  assert.equal(PRO_TRANSPORT_HORIZONS.persistedPollMs, 60_000);
+  assert.ok(PRO_TRANSPORT_HORIZONS.persistedPollMs < PRO_TRANSPORT_HORIZONS.stalledWorkMs);
   assert.ok(PRO_TRANSPORT_HORIZONS.stalledWorkMs < PRO_TRANSPORT_HORIZONS.responseWaitMs);
   assert.ok(PRO_TRANSPORT_HORIZONS.browserTimeoutSeconds * 1000 > PRO_TRANSPORT_HORIZONS.responseWaitMs);
   assert.ok(PRO_TRANSPORT_HORIZONS.accountLeaseMs >= PRO_TRANSPORT_HORIZONS.browserTimeoutSeconds * 1000);

@@ -27,6 +27,7 @@ const MODEL_ID = "gpt-5-6-pro";
 export const PRO_TRANSPORT_HORIZONS = Object.freeze({
   responseWaitMs: 2 * 60 * 60_000 + 45 * 60_000,
   stalledWorkMs: 45 * 60_000,
+  persistedPollMs: 60_000,
   browserTimeoutSeconds: 3 * 60 * 60,
   accountLeaseMs: 3 * 60 * 60_000,
 });
@@ -601,7 +602,12 @@ async function waitForStreamEvidence(page, submitted, signal, maxWaitMs = MAX_WA
         break;
       }
     }
-    await sleep(Math.min(5_000, remaining()), signal);
+    // ChatGPT permits an initial burst of conversation reads, then throttles
+    // sustained five-second polling to roughly one successful read per minute.
+    // Poll at that durable rate instead of producing a stream of 429s; persisted
+    // state remains authoritative and one-minute completion latency is harmless
+    // for Pro turns that routinely run for hours.
+    await sleep(Math.min(PRO_TRANSPORT_HORIZONS.persistedPollMs, remaining()), signal);
   }
   if (!persisted) throw new Error("ChatGPT conversation could not be read back with the signed browser session");
 
