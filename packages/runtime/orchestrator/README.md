@@ -67,7 +67,9 @@ orchestrator task create \
 
 Each verified response is an incomplete persistent-task result, so the governor replenishes the task while account entitlement and machine resources permit. Cancel the task to stop replenishment.
 
-The systemd service is `agent-orchestrator.service`. A planned SIGTERM or restart stops new launches and drains every active SDK session to its normal completion report; it does not call Pi's abort API. The unit allows the drain up to the research lease horizon. Its cgroup has `OOMPolicy=continue`, so the kernel can kill a single runaway child computation at the memory boundary without stopping the controller and aborting unrelated sessions.
+The systemd service is `agent-orchestrator.service`. A planned SIGTERM or restart stops new launches and drains every active SDK session to its normal completion report; it does not call Pi's abort API. The unit allows the drain up to the research lease horizon.
+
+Every autonomous SDK `bash` call uses [`tool-shell`](tool-shell), which runs that invocation in a transient `pi-tools.slice` scope with `MemoryMax=12G`, zero swap, and `OOMPolicy=kill`. An OOM therefore terminates that tool call and returns a failed tool result while the controller and unrelated agent sessions continue. The parent user slice has an aggregate 40G/48G high/max boundary for simultaneous tool scopes. The orchestrator service itself retains `OOMPolicy=continue` as a final containment boundary.
 
 Runtime state is canonical in `/home/kenan/data/agent-orchestrator/orchestrator.sqlite3`; Pi session JSONL is retained under `sessions/`. The SQLite database uses WAL and records tasks, launches, completion reports, whether each launch processed a real work unit, and bounded controller events. Every table has automatic millisecond `created_at` and `updated_at` columns maintained by SQLite triggers; existing rows are backfilled from their original event times.
 

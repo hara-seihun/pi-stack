@@ -2,12 +2,13 @@ import assert from "node:assert/strict";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
+import { spawnSync } from "node:child_process";
 import { DatabaseSync } from "node:sqlite";
 import test from "node:test";
 
 const temporary = fs.mkdtempSync(path.join(os.tmpdir(), "agent-orchestrator-test-"));
 process.env.AGENT_ORCHESTRATOR_DATA = temporary;
-const { cancelTask, choosePlanProvider, chooseTask, completionToolResult, Controller, cpuPercent, insertRun, launchBatchSize, loadConfig, nextIncompleteState, openDb, planWindowBurnPerHour, proEntitlementSnapshot, proLaunchAvailability, rankTasks, resourceSlots, setTaskOptions, shouldAdvanceBackoff, validateCompletion, validateModelPolicy } = await import("./orchestrator.mjs");
+const { cancelTask, choosePlanProvider, chooseTask, completionToolResult, Controller, cpuPercent, insertRun, launchBatchSize, loadConfig, nextIncompleteState, openDb, planWindowBurnPerHour, proEntitlementSnapshot, proLaunchAvailability, rankTasks, resourceSlots, setTaskOptions, shouldAdvanceBackoff, taskSettings, TOOL_SHELL, validateCompletion, validateModelPolicy } = await import("./orchestrator.mjs");
 
 test.after(() => fs.rmSync(temporary, { recursive: true, force: true }));
 
@@ -145,6 +146,22 @@ test("controller shutdown drains active sessions without aborting them", async (
   release();
   await stopping;
   assert.equal(drained, true);
+});
+
+test("autonomous bash tools use the OOM-isolated shell", () => {
+  const settings = taskSettings(temporary, temporary);
+  assert.equal(settings.getShellPath(), TOOL_SHELL);
+  assert.ok(fs.statSync(TOOL_SHELL).mode & 0o100);
+});
+
+test("the tool shell contains an OOM to the tool call", () => {
+  const result = spawnSync(TOOL_SHELL, ["-c", "python3 -c 'x=bytearray(100*1024*1024)'"], {
+    encoding: "utf8",
+    env: { ...process.env, PI_TOOL_MEMORY_MAX: "64M" },
+    timeout: 10_000,
+  });
+  assert.notEqual(result.status, 0);
+  assert.equal(result.signal, "SIGKILL");
 });
 
 test("one concurrent launch wave advances task backoff only once", () => {

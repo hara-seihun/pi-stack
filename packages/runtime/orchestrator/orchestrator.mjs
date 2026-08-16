@@ -16,6 +16,7 @@ import {
   ModelRuntime,
   resolveCliModel,
   SessionManager,
+  SettingsManager,
 } from "@earendil-works/pi-coding-agent";
 
 const HOME = os.homedir();
@@ -27,6 +28,7 @@ const LOCK = path.join(DATA, "controller.lock");
 const AUTH_PATH = path.join(getAgentDir(), "auth.json");
 const CHATGPT_PRO_POOL_PATH = path.join(getAgentDir(), "chatgpt-pro-pool.json");
 const CHATGPT_PRO_PROVIDER = "chatgpt-pro";
+export const TOOL_SHELL = fileURLToPath(new URL("./tool-shell", import.meta.url));
 const TICK_MS = 5000;
 const execFileAsync = promisify(execFile);
 
@@ -410,6 +412,11 @@ export async function validateCompletion(task, runner = execFileAsync) {
 export function launchBatchSize(resourceSlotCount) {
   return resourceSlotCount > 0 ? 1 : 0;
 }
+export function taskSettings(cwd, agentDir = getAgentDir()) {
+  const settingsManager = SettingsManager.create(cwd, agentDir);
+  settingsManager.applyOverrides({ shellPath: TOOL_SHELL });
+  return settingsManager;
+}
 export function shouldAdvanceBackoff(nextEligibleAt, runStartedAt) { return Number(nextEligibleAt) <= Number(runStartedAt); }
 
 export function insertRun(db, runId, taskId, provider = null, startedAt = now()) {
@@ -493,7 +500,12 @@ export class Controller {
           return completionToolResult(text, report);
         }
       });
-      const loader = new DefaultResourceLoader({ cwd: task.cwd, agentDir: getAgentDir() });
+      const settingsManager = taskSettings(task.cwd);
+      const loader = new DefaultResourceLoader({
+        cwd: task.cwd,
+        agentDir: getAgentDir(),
+        settingsManager,
+      });
       await loader.reload();
       const extensionErrors = loader.getExtensions().errors;
       if (extensionErrors.length) fail(`extension loading failed: ${extensionErrors.map((item) => item.error).join("; ")}`);
@@ -504,7 +516,8 @@ export class Controller {
         thinkingLevel: resolved.thinkingLevel,
         resourceLoader: loader,
         customTools: [completionTool],
-        sessionManager: SessionManager.create(task.cwd, SESSIONS)
+        sessionManager: SessionManager.create(task.cwd, SESSIONS),
+        settingsManager,
       }));
       const targetProvider = isChatGptProTask(task) ? providerOf(task.model) : provider;
       const targetModelId = isChatGptProTask(task) ? modelIdOf(task.model) : resolved.model.id;

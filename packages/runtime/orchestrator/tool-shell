@@ -1,0 +1,19 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+if [[ $# -ne 2 || "$1" != "-c" ]]; then
+  echo "tool-shell expects exactly: -c COMMAND" >&2
+  exit 2
+fi
+
+memory_max=${PI_TOOL_MEMORY_MAX:-12G}
+
+# Every SDK bash invocation owns a transient scope outside the orchestrator
+# service cgroup. OOMPolicy=kill terminates this scope as one failed tool call;
+# it cannot stop the controller or unrelated agent sessions.
+exec systemd-run --user --scope --quiet --collect \
+  --slice=pi-tools.slice \
+  --property="MemoryMax=$memory_max" \
+  --property=MemorySwapMax=0 \
+  --property=OOMPolicy=kill \
+  -- bash -c "$2"
