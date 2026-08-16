@@ -323,6 +323,21 @@ test("only exact research frontier tasks receive the Pro delegation tool", async
   assert.equal(result.details.auditPath, "/audit.json");
 });
 
+test("Codex plan governor keeps one baseline worker on every healthy account", () => {
+  const selected = choosePlanProvider([
+    { provider: "openai-codex", allowedBurnPercentPerHour: 0.448 },
+  ], [], 0.45);
+  assert.equal(selected.provider, "openai-codex");
+  assert.equal(selected.baseline, true);
+  assert.ok(selected.remaining < 0);
+  assert.equal(choosePlanProvider([
+    { provider: "openai-codex", allowedBurnPercentPerHour: 0 },
+  ], [], 0.45), null);
+  assert.equal(choosePlanProvider([
+    { provider: "openai-codex", allowedBurnPercentPerHour: 0.448 },
+  ], [{ provider: "openai-codex", rate: 0.45 }], 0.45), null);
+});
+
 test("Codex plan governor assigns a concrete account without exceeding it", () => {
   const accounts = [
     { provider: "openai-codex", allowedBurnPercentPerHour: 0 },
