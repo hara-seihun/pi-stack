@@ -188,6 +188,14 @@ test("controller shutdown drains active sessions without aborting them", async (
   assert.equal(drained, true);
 });
 
+test("noninteractive deployment resolves its newly installed Pi commands", () => {
+  const deploy = fs.readFileSync(path.resolve(import.meta.dirname, "../deploy"), "utf8");
+  const installAt = deploy.indexOf('install -d -m 700 "$HOME/.local/bin"');
+  const pathAt = deploy.indexOf('export PATH="$HOME/.local/bin:$PATH"');
+  const proCheckAt = deploy.indexOf('"$HOME/.local/bin/pro" --version');
+  assert.ok(installAt >= 0 && pathAt > installAt && proCheckAt > pathAt);
+});
+
 test("autonomous bash tools retain the OOM-isolated shell after resource reload", async () => {
   const settings = taskSettings(temporary, temporary);
   settings.applyOverrides({ shellPath: TOOL_SHELL });

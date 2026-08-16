@@ -3,6 +3,7 @@ set -euo pipefail
 cd "$(dirname "$0")"
 npm ci --ignore-scripts
 install -d -m 700 "$HOME/.local/bin" "$HOME/.pi/agent/extensions"
+export PATH="$HOME/.local/bin:$PATH"
 ln -sfn "$PWD/node_modules/.bin/pi" "$HOME/.local/bin/pi"
 ln -sfn "$PWD/orchestrator/orchestrator.mjs" "$HOME/.local/bin/orchestrator"
 ln -sfn "$PWD/extensions/chatgpt-pro/pro" "$HOME/.local/bin/pro"
