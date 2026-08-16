@@ -8,7 +8,7 @@ import test from "node:test";
 
 const temporary = fs.mkdtempSync(path.join(os.tmpdir(), "agent-orchestrator-test-"));
 process.env.AGENT_ORCHESTRATOR_DATA = temporary;
-const { cancelTask, choosePlanProvider, chooseTask, completionToolResult, Controller, cpuPercent, createProDelegateTool, evaluateWorkCheck, insertRun, isolateTaskShell, isProDelegatingFrontierTask, launchBatchSize, loadConfig, nextIncompleteState, openDb, PlanGovernor, planWindowBurnPerHour, proEntitlementSnapshot, proLaunchAvailability, rankTasks, resourceSlots, setTaskOptions, shouldAdvanceBackoff, taskSettings, TOOL_SHELL, validateCompletion, validateModelPolicy, WORK_CHECK_TTL_MS, workCheckStale, workReady } = await import("./orchestrator.mjs");
+const { cancelTask, choosePlanProvider, chooseTask, completionToolResult, Controller, cpuPercent, createProDelegateTool, evaluateWorkCheck, insertRun, isolateTaskShell, isProDelegatingFrontierTask, launchBatchSize, loadConfig, nextIncompleteState, openDb, orchestratedTaskPrompt, PlanGovernor, planWindowBurnPerHour, proEntitlementSnapshot, proLaunchAvailability, rankTasks, resourceSlots, setTaskOptions, shouldAdvanceBackoff, taskSettings, TOOL_SHELL, validateCompletion, validateModelPolicy, WORK_CHECK_TTL_MS, workCheckStale, workReady } = await import("./orchestrator.mjs");
 
 test.after(() => fs.rmSync(temporary, { recursive: true, force: true }));
 
@@ -145,6 +145,18 @@ test("serial provider capacity rotates without lifetime-history starvation", () 
   ]);
   tasks[1].last_started_at = Date.now();
   assert.equal(chooseTask(tasks, 0).id, "historical");
+});
+
+test("the generic task contract preserves lane-owned cadence without an endless-work restriction", () => {
+  const prompt = orchestratedTaskPrompt({
+    id: "slack-lane",
+    prompt: "Sweep Slack now.",
+    completion_condition: "persistent",
+  });
+  assert.match(prompt, /Follow the task's stated cadence/);
+  assert.match(prompt, /preserve directly resumable state/);
+  assert.doesNotMatch(prompt, /stop only when no claimable work remains/);
+  assert.doesNotMatch(prompt, /Process as many work units/);
 });
 
 test("completion reports do not terminate the launch", () => {
