@@ -16,6 +16,7 @@ import {
   defineTool,
   getAgentDir,
   ModelRuntime,
+  readStoredCredential,
   resolveCliModel,
   SessionManager,
   SettingsManager,
@@ -352,7 +353,44 @@ export function planWindowBurnPerHour(window, at = now()) {
 }
 
 export class PlanGovernor {
-  constructor(config) { this.config = config; this.snapshot = null; this.refreshing = null; }
+  constructor(config, { modelRuntime = null, authPath = AUTH_PATH, fetcher = fetch, readCredential = readStoredCredential } = {}) {
+    this.config = config;
+    this.modelRuntime = modelRuntime;
+    this.authPath = authPath;
+    this.fetcher = fetcher;
+    this.readCredential = readCredential;
+    this.snapshot = null;
+    this.refreshing = null;
+  }
+
+  setModelRuntime(modelRuntime) { this.modelRuntime = modelRuntime; }
+
+  async authRuntime() {
+    if (!this.modelRuntime) this.modelRuntime = await ModelRuntime.create({ signal: AbortSignal.timeout(15000) });
+    return this.modelRuntime;
+  }
+
+  async resolveCredential(provider, stored) {
+    const minimumValidityMs = Math.max(5 * 60_000, this.config.plan.pollSeconds * 2_000);
+    if (Number(stored.expires) - now() >= minimumValidityMs) {
+      return { access: stored.access, accountId: stored.accountId ?? "" };
+    }
+    const runtime = await this.authRuntime();
+    if (!runtime.getProvider(provider)) {
+      const base = runtime.getProvider("openai-codex");
+      if (!base) fail("plan governor could not resolve the Codex OAuth provider");
+      // Multi-Pass aliases use the same OAuth protocol as the base provider but
+      // keep independent credentials under their exact provider ids.
+      runtime.registerNativeProvider({ ...base, id: provider, name: provider });
+    }
+    const resolved = await runtime.getAuth(provider, {
+      minOAuthValidityMs: minimumValidityMs,
+      signal: AbortSignal.timeout(15000),
+    });
+    const latest = this.readCredential(provider, this.authPath);
+    if (!resolved?.auth?.apiKey || latest?.type !== "oauth") return null;
+    return { access: resolved.auth.apiKey, accountId: latest.accountId ?? "" };
+  }
 
   async refresh() {
     if (this.snapshot && now() - this.snapshot.at < this.config.plan.pollSeconds * 1000) return this.snapshot;
@@ -362,18 +400,23 @@ export class PlanGovernor {
   }
 
   async fetch() {
-    const auth = JSON.parse(fs.readFileSync(AUTH_PATH, "utf8"));
+    const auth = JSON.parse(fs.readFileSync(this.authPath, "utf8"));
     const configured = Object.entries(auth).filter(([name, value]) =>
-      (name === "openai-codex" || name.startsWith("openai-codex-")) && value?.access);
+      (name === "openai-codex" || name.startsWith("openai-codex-")) && value?.type === "oauth" && value?.access);
     if (!configured.length) fail("plan governor found no Codex OAuth accounts");
     const endpoint = `${(process.env.CHATGPT_BASE_URL ?? "https://chatgpt.com/backend-api").replace(/\/$/, "")}/wham/usage`;
     const results = await Promise.all(configured.map(async ([provider, credential]) => {
       try {
-        const response = await fetch(endpoint, {
+        // Resolve near-expiry OAuth through Pi's locked credential path before
+        // trusting /wham/usage. A still-valid access token does not prove that
+        // its one-use refresh token remains usable.
+        const usable = await this.resolveCredential(provider, credential);
+        if (!usable) return null;
+        const response = await this.fetcher(endpoint, {
           signal: AbortSignal.timeout(10000),
           headers: {
-            Authorization: `Bearer ${credential.access}`,
-            "chatgpt-account-id": credential.accountId ?? "",
+            Authorization: `Bearer ${usable.access}`,
+            "chatgpt-account-id": usable.accountId,
             Accept: "application/json",
             "User-Agent": "works.kenan.agent-orchestrator"
           }
@@ -583,6 +626,7 @@ export class Controller {
     this.recover();
     for (const task of taskRows(this.db)) validateModelPolicy(task.model);
     this.modelRuntime = await ModelRuntime.create({ signal: AbortSignal.timeout(15000) });
+    this.plan.setModelRuntime(this.modelRuntime);
   }
 
   async launch(task, provider) {

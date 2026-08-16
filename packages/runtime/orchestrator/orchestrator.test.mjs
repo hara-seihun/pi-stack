@@ -8,7 +8,7 @@ import test from "node:test";
 
 const temporary = fs.mkdtempSync(path.join(os.tmpdir(), "agent-orchestrator-test-"));
 process.env.AGENT_ORCHESTRATOR_DATA = temporary;
-const { cancelTask, choosePlanProvider, chooseTask, completionToolResult, Controller, cpuPercent, createProDelegateTool, evaluateWorkCheck, insertRun, isolateTaskShell, isProDelegatingFrontierTask, launchBatchSize, loadConfig, nextIncompleteState, openDb, planWindowBurnPerHour, proEntitlementSnapshot, proLaunchAvailability, rankTasks, resourceSlots, setTaskOptions, shouldAdvanceBackoff, taskSettings, TOOL_SHELL, validateCompletion, validateModelPolicy, WORK_CHECK_TTL_MS, workCheckStale, workReady } = await import("./orchestrator.mjs");
+const { cancelTask, choosePlanProvider, chooseTask, completionToolResult, Controller, cpuPercent, createProDelegateTool, evaluateWorkCheck, insertRun, isolateTaskShell, isProDelegatingFrontierTask, launchBatchSize, loadConfig, nextIncompleteState, openDb, PlanGovernor, planWindowBurnPerHour, proEntitlementSnapshot, proLaunchAvailability, rankTasks, resourceSlots, setTaskOptions, shouldAdvanceBackoff, taskSettings, TOOL_SHELL, validateCompletion, validateModelPolicy, WORK_CHECK_TTL_MS, workCheckStale, workReady } = await import("./orchestrator.mjs");
 
 test.after(() => fs.rmSync(temporary, { recursive: true, force: true }));
 
@@ -373,6 +373,41 @@ test("plan estimator paces all remaining capacity to window reset", () => {
   assert.equal(planWindowBurnPerHour({ used_percent: 40, reset_at: (at + 10 * 3600_000) / 1000 }, at), 6);
   assert.equal(planWindowBurnPerHour({ used_percent: 40, reset_at: at / 1000 }, at), 0);
   assert.equal(planWindowBurnPerHour({}, at), null);
+});
+
+test("plan governor excludes an account whose near-expiry OAuth cannot refresh", async () => {
+  const authPath = path.join(temporary, "governor-auth.json");
+  const expiresLater = Date.now() + 60 * 60_000;
+  fs.writeFileSync(authPath, JSON.stringify({
+    "openai-codex": { type: "oauth", access: "healthy-access", refresh: "healthy-refresh", expires: expiresLater, accountId: "healthy" },
+    "openai-codex-10": { type: "oauth", access: "expiring-access", refresh: "broken-refresh", expires: Date.now() + 60_000, accountId: "broken" },
+  }));
+  const registered = new Map([["openai-codex", { id: "openai-codex", auth: {} }]]);
+  const runtime = {
+    getProvider: (provider) => registered.get(provider),
+    registerNativeProvider: (provider) => registered.set(provider.id, provider),
+    getAuth: async (provider) => { throw new Error(`OAuth refresh failed for ${provider}: refresh_token_reused`); },
+  };
+  const requestedTokens = [];
+  const governor = new PlanGovernor({ plan: { pollSeconds: 120 } }, {
+    modelRuntime: runtime,
+    authPath,
+    fetcher: async (_url, options) => {
+      requestedTokens.push(options.headers.Authorization);
+      return {
+        ok: true,
+        json: async () => ({ rate_limit: {
+          primary_window: { used_percent: 20, reset_at: (Date.now() + 3600_000) / 1000 },
+          secondary_window: { used_percent: 20, reset_at: (Date.now() + 7200_000) / 1000 },
+        } }),
+      };
+    },
+  });
+  const snapshot = await governor.refresh();
+  assert.equal(snapshot.configured, 2);
+  assert.equal(snapshot.healthy, 1);
+  assert.deepEqual(snapshot.accounts.map((account) => account.provider), ["openai-codex"]);
+  assert.deepEqual(requestedTokens, ["Bearer healthy-access"]);
 });
 
 test("GPT-5.5 models are banned", () => {
