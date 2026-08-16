@@ -23,7 +23,9 @@ const PROVIDER_AUDIT_DIR = join(HOME, "data", "agent-orchestrator", "pro", "prov
 const PROFILE_NAME = process.env.CHATGPT_PRO_BROWSER_PROFILE || "limmy-google";
 const MODEL_ID = "gpt-5-6-pro";
 const ACCOUNT_LEASE_MS = 45 * 60_000;
-const FALLBACK_COOLDOWN_MS = 5 * 60_000;
+const FALLBACK_COOLDOWN_BASE_MS = 15 * 60_000;
+const FALLBACK_COOLDOWN_MAX_MS = 4 * 60 * 60_000;
+const FALLBACK_STREAK_RESET_MS = 24 * 60 * 60_000;
 const OPERATIONAL_COOLDOWN_MS = 60_000;
 const RATE_LIMIT_COOLDOWN_MS = 15 * 60_000;
 const MAX_WAIT_MS = 35 * 60_000;
@@ -76,6 +78,8 @@ export function defaultPoolState() {
     inFlightUntil: 0,
     cooldownUntil: 0,
     cooldownReason: null,
+    fallbackStreak: 0,
+    lastFallbackAt: null,
     lastVerifiedAt: null,
   };
 }
@@ -88,6 +92,8 @@ export function normalizePoolState(raw) {
     inFlightUntil: Number(raw.inFlightUntil) || 0,
     cooldownUntil: Number(raw.cooldownUntil) || 0,
     cooldownReason: typeof raw.cooldownReason === "string" ? raw.cooldownReason : null,
+    fallbackStreak: Number.isInteger(raw.fallbackStreak) && raw.fallbackStreak >= 0 ? raw.fallbackStreak : 0,
+    lastFallbackAt: typeof raw.lastFallbackAt === "string" ? raw.lastFallbackAt : null,
     lastVerifiedAt: typeof raw.lastVerifiedAt === "string" ? raw.lastVerifiedAt : null,
   };
 }
@@ -98,6 +104,17 @@ function readPoolState() {
   } catch {
     return defaultPoolState();
   }
+}
+
+export function nextFallbackCooldown(state, now = Date.now()) {
+  const lastFallbackMs = Date.parse(state.lastFallbackAt ?? "");
+  const streak = Number.isFinite(lastFallbackMs) && now - lastFallbackMs < FALLBACK_STREAK_RESET_MS
+    ? state.fallbackStreak + 1
+    : 1;
+  return {
+    streak,
+    cooldownMs: Math.min(FALLBACK_COOLDOWN_BASE_MS * (2 ** Math.max(0, streak - 1)), FALLBACK_COOLDOWN_MAX_MS),
+  };
 }
 
 async function acquireProfile(signal) {
@@ -123,9 +140,18 @@ async function finishProfile({ verified = false, cooldownMs = 0, reason = null }
     if (verified) {
       state.cooldownUntil = 0;
       state.cooldownReason = null;
+      state.fallbackStreak = 0;
+      state.lastFallbackAt = null;
       state.lastVerifiedAt = new Date().toISOString();
     } else if (cooldownMs > 0) {
-      state.cooldownUntil = Date.now() + cooldownMs;
+      let effectiveCooldownMs = cooldownMs;
+      if (reason === "pro-fallback") {
+        const fallback = nextFallbackCooldown(state);
+        state.fallbackStreak = fallback.streak;
+        state.lastFallbackAt = new Date().toISOString();
+        effectiveCooldownMs = fallback.cooldownMs;
+      }
+      state.cooldownUntil = Date.now() + effectiveCooldownMs;
       state.cooldownReason = reason ?? "provider failure";
     }
     writeJsonAtomic(POOL_PATH, state);
@@ -165,6 +191,23 @@ async function deleteBrowser(sessionId) {
   } catch {}
 }
 
+function completedProWork(evidence) {
+  if (evidence.pro_progress === 100 && evidence.pro_skipped === false) return true;
+  const turnId = evidence.leaf_working_turn_id;
+  return evidence.pro_work_model_slug === MODEL_ID &&
+    evidence.pro_work_status === "finished_successfully" &&
+    evidence.pro_skipped === false &&
+    Number.isFinite(evidence.pro_finished_duration_sec) &&
+    evidence.pro_finished_duration_sec > 0 &&
+    evidence.reasoning_status === "reasoning_ended" &&
+    Number.isFinite(evidence.reasoning_start_time) &&
+    Number.isFinite(evidence.reasoning_end_time) &&
+    evidence.reasoning_end_time >= evidence.reasoning_start_time &&
+    typeof turnId === "string" && turnId.length > 0 &&
+    evidence.pro_working_turn_id === turnId &&
+    evidence.reasoning_working_turn_id === turnId;
+}
+
 export function conversationModelEvidence(data) {
   const mapping = data?.mapping && typeof data.mapping === "object" ? data.mapping : {};
   const current = data?.current_node;
@@ -178,6 +221,7 @@ export function conversationModelEvidence(data) {
     evidence.message_status = leaf.status;
     evidence.message_end_turn = leaf.end_turn;
     evidence.current_node_is_leaf = Array.isArray(mapping[current]?.children) && mapping[current].children.length === 0;
+    if (typeof metadata.working_turn_id === "string") evidence.leaf_working_turn_id = metadata.working_turn_id;
   }
   evidence.conversation_async_status = data && Object.hasOwn(data, "async_status") ? data.async_status : undefined;
   for (const node of Object.values(mapping)) {
@@ -185,11 +229,22 @@ export function conversationModelEvidence(data) {
     if (!message || typeof message !== "object") continue;
     const md = message.metadata || {};
     if (message.author?.role === "user" && md.resolved_model_slug) evidence.resolved_model_slug = md.resolved_model_slug;
-    if (md.pro_progress !== undefined) {
-      evidence.pro_progress = md.pro_progress;
-      evidence.pro_skipped = md.pro_skipped;
+    if (md.pro_progress !== undefined) evidence.pro_progress = md.pro_progress;
+    if (md.pro_skipped !== undefined) evidence.pro_skipped = md.pro_skipped;
+    if (md.pro_progress !== undefined || md.pro_skipped !== undefined) {
+      evidence.pro_finished_duration_sec = md.finished_duration_sec;
+      evidence.pro_finished_text = md.finished_text;
       evidence.finished_duration_sec = md.finished_duration_sec;
       evidence.finished_text = md.finished_text;
+      evidence.pro_work_model_slug = md.model_slug;
+      evidence.pro_work_status = message.status;
+      evidence.pro_working_turn_id = md.working_turn_id;
+    }
+    if (message.author?.role === "assistant" && md.reasoning_status !== undefined) {
+      evidence.reasoning_status = md.reasoning_status;
+      evidence.reasoning_start_time = md.reasoning_start_time;
+      evidence.reasoning_end_time = md.reasoning_end_time;
+      evidence.reasoning_working_turn_id = md.working_turn_id;
     }
   }
   const completionVerified = evidence.is_complete === true ||
@@ -197,8 +252,7 @@ export function conversationModelEvidence(data) {
   evidence.pro_execution_verified =
     evidence.resolved_model_slug === MODEL_ID &&
     evidence.model_slug === MODEL_ID &&
-    evidence.pro_progress === 100 &&
-    evidence.pro_skipped === false &&
+    completedProWork(evidence) &&
     evidence.message_status === "finished_successfully" &&
     evidence.message_end_turn === true &&
     completionVerified;
@@ -222,15 +276,29 @@ export function conversationStreamEvidence(body) {
     if (role === "user" && typeof metadata.resolved_model_slug === "string") {
       evidence.resolved_model_slug = metadata.resolved_model_slug;
     }
-    if (metadata.pro_progress !== undefined) {
-      evidence.pro_progress = metadata.pro_progress;
-      evidence.pro_skipped = metadata.pro_skipped;
+    if (metadata.pro_progress !== undefined) evidence.pro_progress = metadata.pro_progress;
+    if (metadata.pro_skipped !== undefined) evidence.pro_skipped = metadata.pro_skipped;
+    if (metadata.pro_progress !== undefined || metadata.pro_skipped !== undefined) {
+      evidence.pro_finished_duration_sec = metadata.finished_duration_sec;
+      evidence.pro_finished_text = metadata.finished_text;
       evidence.finished_duration_sec = metadata.finished_duration_sec;
       evidence.finished_text = metadata.finished_text;
+      evidence.pro_work_model_slug = metadata.model_slug;
+      evidence.pro_work_status = message.status;
+      evidence.pro_working_turn_id = metadata.working_turn_id;
     }
     if (role === "assistant") {
       for (const key of ["model_slug", "default_model_slug", "finish_details", "is_complete"]) {
         if (metadata[key] !== undefined && metadata[key] !== null) evidence[key] = metadata[key];
+      }
+      if (metadata.reasoning_status !== undefined) {
+        evidence.reasoning_status = metadata.reasoning_status;
+        evidence.reasoning_start_time = metadata.reasoning_start_time;
+        evidence.reasoning_end_time = metadata.reasoning_end_time;
+        evidence.reasoning_working_turn_id = metadata.working_turn_id;
+      }
+      if (metadata.model_slug === MODEL_ID && typeof metadata.working_turn_id === "string") {
+        evidence.leaf_working_turn_id = metadata.working_turn_id;
       }
       if (message.status !== undefined) evidence.message_status = message.status;
       if (message.end_turn !== undefined) evidence.message_end_turn = message.end_turn;
@@ -262,8 +330,7 @@ export function conversationStreamEvidence(body) {
   evidence.pro_execution_verified =
     evidence.resolved_model_slug === MODEL_ID &&
     evidence.model_slug === MODEL_ID &&
-    evidence.pro_progress === 100 &&
-    evidence.pro_skipped === false &&
+    completedProWork(evidence) &&
     evidence.message_status === "finished_successfully" &&
     evidence.message_end_turn === true &&
     evidence.is_complete === true;
@@ -462,13 +529,13 @@ function recordProviderAudit(value, responseText) {
 }
 
 function verificationFailure(evidence) {
-  return `Pro browser execution failed verification: resolved=${String(evidence.resolved_model_slug)} executed=${String(evidence.model_slug)} progress=${String(evidence.pro_progress)} skipped=${String(evidence.pro_skipped)}`;
+  return `Pro browser execution failed verification: resolved=${String(evidence.resolved_model_slug)} executed=${String(evidence.model_slug)} progress=${String(evidence.pro_progress)} skipped=${String(evidence.pro_skipped)} work=${String(evidence.pro_work_status)} reasoning=${String(evidence.reasoning_status)}`;
 }
 
 function failureCooldown(error, evidence, warning) {
   const message = `${error instanceof Error ? error.message : String(error)} ${warning}`;
   if (evidence?.resolved_model_slug && evidence.resolved_model_slug !== MODEL_ID) {
-    return { cooldownMs: FALLBACK_COOLDOWN_MS, reason: "pro-fallback" };
+    return { cooldownMs: FALLBACK_COOLDOWN_BASE_MS, reason: "pro-fallback" };
   }
   if (/rate.?limit|usage limit|quota|too many requests|temporarily unavailable/i.test(message)) {
     return { cooldownMs: RATE_LIMIT_COOLDOWN_MS, reason: "rate-limit" };

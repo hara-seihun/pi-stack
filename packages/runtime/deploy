@@ -5,6 +5,7 @@ npm ci --ignore-scripts
 install -d -m 700 "$HOME/.local/bin" "$HOME/.pi/agent/extensions"
 ln -sfn "$PWD/node_modules/.bin/pi" "$HOME/.local/bin/pi"
 ln -sfn "$PWD/orchestrator/orchestrator.mjs" "$HOME/.local/bin/orchestrator"
+ln -sfn "$PWD/extensions/chatgpt-pro/pro" "$HOME/.local/bin/pro"
 rm -f "$HOME/.pi/agent/extensions/chatgpt-pro.ts" "$HOME/.pi/agent/extensions/chatgpt-pro.md"
 rm -rf "$HOME/.pi/agent/extensions/chatgpt-pro-support" "$HOME/.pi/agent/extensions/chatgpt-pro"
 ln -s "$PWD/extensions/chatgpt-pro" "$HOME/.pi/agent/extensions/chatgpt-pro"
@@ -13,5 +14,6 @@ npm test
 "$HOME/.local/bin/pi" --list-models chatgpt-pro | grep -q 'gpt-5-6-pro-literal'
 version=$("$HOME/.local/bin/pi" --version)
 [[ "$version" == "0.84.1" ]] || { echo "unexpected Pi version: $version" >&2; exit 1; }
+[[ $("$HOME/.local/bin/pro" --version) == "$version" ]] || { echo "Pro launcher does not resolve to deployed Pi" >&2; exit 1; }
 "$HOME/.local/bin/orchestrator" check
 echo "Pi $version and agent orchestrator deployed"

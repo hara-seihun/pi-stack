@@ -5,6 +5,7 @@ import {
   conversationModelEvidence,
   conversationStreamEvidence,
   defaultPoolState,
+  nextFallbackCooldown,
   normalizePoolState,
 } from "./browser.mjs";
 
@@ -59,6 +60,71 @@ test("current persisted schema proves completion without the removed is_complete
   assert.equal(conversationModelEvidence(data).pro_execution_verified, false);
 });
 
+test("reasoning-completion schema proves Pro work when progress is omitted", () => {
+  const turn = "turn-1";
+  const data = {
+    current_node: "answer",
+    async_status: 4,
+    mapping: {
+      user: {
+        message: {
+          author: { role: "user" },
+          metadata: { resolved_model_slug: "gpt-5-6-pro", working_turn_id: turn },
+        },
+      },
+      work: {
+        message: {
+          author: { role: "tool" },
+          status: "finished_successfully",
+          metadata: {
+            model_slug: "gpt-5-6-pro",
+            pro_skipped: false,
+            finished_duration_sec: 7,
+            reasoning_start_time: 100,
+            working_turn_id: turn,
+          },
+        },
+      },
+      reasoning: {
+        message: {
+          author: { role: "assistant" },
+          status: "finished_successfully",
+          end_turn: true,
+          metadata: {
+            reasoning_status: "reasoning_ended",
+            reasoning_start_time: 100,
+            reasoning_end_time: 107,
+            working_turn_id: turn,
+          },
+        },
+      },
+      answer: {
+        children: [],
+        message: {
+          author: { role: "assistant" },
+          status: "finished_successfully",
+          end_turn: true,
+          content: { parts: ["answer"] },
+          metadata: {
+            model_slug: "gpt-5-6-pro",
+            default_model_slug: "gpt-5-6-pro",
+            working_turn_id: turn,
+          },
+        },
+      },
+    },
+  };
+  const evidence = conversationModelEvidence(data);
+  assert.equal(evidence.pro_progress, undefined);
+  assert.equal(evidence.pro_execution_verified, true);
+
+  data.mapping.work.message.metadata.pro_skipped = true;
+  assert.equal(conversationModelEvidence(data).pro_execution_verified, false);
+  data.mapping.work.message.metadata.pro_skipped = false;
+  data.mapping.reasoning.message.metadata.working_turn_id = "other-turn";
+  assert.equal(conversationModelEvidence(data).pro_execution_verified, false);
+});
+
 test("completed conversation SSE supplies the same execution invariant", () => {
   const events = [
     { message: { author: { role: "user" }, metadata: { resolved_model_slug: "gpt-5-6-pro" } } },
@@ -89,14 +155,30 @@ test("browser pool state has one profile entitlement and drops obsolete OAuth sh
   assert.equal(initial.version, 3);
   assert.equal(initial.browserProfile, "limmy-google");
   assert.equal(initial.inFlightUntil, 0);
+  assert.equal(initial.fallbackStreak, 0);
   assert.deepEqual(normalizePoolState({ version: 2, cooldowns: { account: 1 } }), initial);
-  assert.equal(normalizePoolState({
+  const normalized = normalizePoolState({
     version: 3,
     browserProfile: "limmy-google",
     selectionCount: 4,
     inFlightUntil: 9,
     cooldownUntil: 10,
     cooldownReason: "rate-limit",
+    fallbackStreak: 2,
+    lastFallbackAt: "2026-08-16T00:00:00.000Z",
     lastVerifiedAt: "2026-08-16T00:00:00.000Z",
-  }).selectionCount, 4);
+  });
+  assert.equal(normalized.selectionCount, 4);
+  assert.equal(normalized.fallbackStreak, 2);
+});
+
+test("routed fallbacks back off exponentially and reset after a quiet day", () => {
+  const now = Date.parse("2026-08-16T12:00:00.000Z");
+  assert.deepEqual(nextFallbackCooldown(defaultPoolState(), now), { streak: 1, cooldownMs: 15 * 60_000 });
+  const recent = { ...defaultPoolState(), fallbackStreak: 2, lastFallbackAt: "2026-08-16T11:59:00.000Z" };
+  assert.deepEqual(nextFallbackCooldown(recent, now), { streak: 3, cooldownMs: 60 * 60_000 });
+  const capped = { ...recent, fallbackStreak: 12 };
+  assert.deepEqual(nextFallbackCooldown(capped, now), { streak: 13, cooldownMs: 4 * 60 * 60_000 });
+  const old = { ...recent, lastFallbackAt: "2026-08-14T11:59:00.000Z" };
+  assert.deepEqual(nextFallbackCooldown(old, now), { streak: 1, cooldownMs: 15 * 60_000 });
 });
