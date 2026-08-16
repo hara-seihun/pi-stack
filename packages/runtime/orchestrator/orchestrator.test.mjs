@@ -182,22 +182,18 @@ test("machine completion checks override an agent's completion opinion", async (
   );
 });
 
-test("controller shutdown drains active sessions without aborting them", async () => {
+test("controller shutdown aborts recoverable sessions instead of freezing replacement launches", async () => {
   const controller = new Controller(null, {});
   let release;
+  let aborted = false;
   const promise = new Promise((resolve) => { release = resolve; });
   controller.active.set("run", {
     promise,
-    session: { abort() { assert.fail("planned shutdown must not abort the session"); } },
+    session: { abort() { aborted = true; release(); } },
   });
-  let drained = false;
-  const stopping = controller.stop().then(() => { drained = true; });
-  await new Promise((resolve) => setTimeout(resolve, 0));
+  await controller.stop();
   assert.equal(controller.stopping, true);
-  assert.equal(drained, false);
-  release();
-  await stopping;
-  assert.equal(drained, true);
+  assert.equal(aborted, true);
 });
 
 test("noninteractive deployment resolves its newly installed Pi commands", () => {

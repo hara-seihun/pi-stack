@@ -868,10 +868,12 @@ export class Controller {
   }
 
   async stop() {
-    // SIGTERM is a planned drain boundary: stop replenishing tasks and preserve
-    // every active session through its normal completion report. A process that
-    // actually dies is recovered separately as an interrupted run on startup.
+    // Persistent tasks make every run recoverable, while multi-hour drains make
+    // systemd unable to start the replacement controller and silently freeze
+    // the whole fleet. Stop replenishing, abort in-flight SDK sessions, let
+    // their execute() paths record terminal custody, and restart promptly.
     this.stopping = true;
+    for (const { session } of this.active.values()) session?.abort();
     await Promise.allSettled([...this.active.values()].map(async ({ promise }) => promise));
   }
 }
