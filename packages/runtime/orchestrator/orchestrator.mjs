@@ -325,15 +325,21 @@ export function choosePlanProvider(accounts, activeRates, candidate) {
   return accounts
     .map((account) => {
       const live = liveByProvider.get(account.provider) ?? 0;
+      const allowed = account.allowedBurnPercentPerHour;
       return {
         provider: account.provider,
         live,
-        allowed: account.allowedBurnPercentPerHour,
-        remaining: account.allowedBurnPercentPerHour - live - candidate,
+        allowed,
+        remaining: allowed - live - candidate,
+        // A healthy account with positive headroom always owns one baseline
+        // worker. Usage-window estimates fluctuate around calibrated model burn
+        // and must govern extra concurrency, not turn a live autonomous system
+        // into an idle one because of a rounding-sized deficit.
+        baseline: live === 0 && allowed > 0,
       };
     })
-    .filter((account) => account.remaining >= 0)
-    .sort((left, right) => right.remaining - left.remaining || left.provider.localeCompare(right.provider))[0] ?? null;
+    .filter((account) => account.baseline || account.remaining >= 0)
+    .sort((left, right) => Number(right.baseline) - Number(left.baseline) || right.remaining - left.remaining || left.provider.localeCompare(right.provider))[0] ?? null;
 }
 
 export function planWindowBurnPerHour(window, at = now()) {
