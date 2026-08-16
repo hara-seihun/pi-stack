@@ -490,6 +490,10 @@ export function completionToolResult(text, details) {
   return { content: [{ type: "text", text }], details };
 }
 
+export function orchestratedTaskPrompt(task) {
+  return `${task.prompt}\n\n## Orchestrated task contract\nTask: ${task.id}\nCompletion condition: ${task.completion_condition}\nThis task runs repeatedly and may run concurrently with other launches; make external effects idempotent and use the project's claim/lease tools. Follow the task's stated cadence and own the session boundary: complete coherent work, preserve directly resumable state for larger follow-on work, and return promptly when extending this turn would delay the next heartbeat or another useful lane. Explore whatever files, state, or tools help you do the work well, and exercise initiative: retry transient failures, and repair broken tooling at its owning layer instead of reporting around it. Before finishing, call task_complete with the validated result; calling it again replaces the earlier report, so keep it current if you continue working. Set complete=true only if the completion condition is satisfied. Set productive=false only if this launch processed no work unit at all; otherwise omit it or set productive=true.`;
+}
+
 const PRO_DELEGATING_FRONTIER_TASKS = new Set([
   "research-frontier",
   "research-cayley-ci",
@@ -711,7 +715,7 @@ export class Controller {
       this.db.prepare("UPDATE run SET session_id=? WHERE id=?").run(sessionId, runId);
       const prompt = isChatGptProTask(task)
         ? task.prompt
-        : `${task.prompt}\n\n## Orchestrated task contract\nTask: ${task.id}\nCompletion condition: ${task.completion_condition}\nThis task runs repeatedly and concurrently with other launches of itself; make external effects idempotent and use the project's claim/lease tools. Process as many work units as you can productively handle in this launch: after finishing one, claim the next, and stop only when no claimable work remains or your remaining context is too small to do the next unit well. Explore whatever files, state, or tools help you do the work well, and exercise initiative: retry transient failures, and repair broken tooling at its owning layer instead of reporting around it. Before finishing, call task_complete with the validated result; calling it again replaces the earlier report, so keep it current if you continue working. Set complete=true only if the completion condition is satisfied. Set productive=false only if this launch processed no work unit at all; otherwise omit it or set productive=true.`;
+        : orchestratedTaskPrompt(task);
       await session.prompt(prompt);
       const assistant = [...session.messages].reverse().find((message) => message.role === "assistant");
       if (!report && isChatGptProTask(task)) {
