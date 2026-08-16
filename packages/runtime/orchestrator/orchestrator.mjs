@@ -251,19 +251,21 @@ export function validateModelPolicy(model) {
 }
 function isChatGptProTask(task) { return providerOf(task.model) === CHATGPT_PRO_PROVIDER; }
 
-export function proEntitlementSnapshot(at = now(), auth = null, state = null) {
-  const credentials = auth ?? JSON.parse(fs.readFileSync(AUTH_PATH, "utf8"));
+export function proEntitlementSnapshot(at = now(), state = null) {
   let pool = state;
   if (pool === null) {
     try { pool = JSON.parse(fs.readFileSync(CHATGPT_PRO_POOL_PATH, "utf8")); }
     catch { pool = {}; }
   }
-  const accounts = Object.entries(credentials).filter(([name, value]) =>
-    (name === "openai-codex" || name.startsWith("openai-codex-")) && (value?.access || value?.refresh));
-  const eligible = accounts.filter(([name]) =>
-    Number(pool?.cooldowns?.[name] ?? 0) <= at && Number(pool?.proQuotaExhaustedUntil?.[name] ?? 0) <= at);
-  const inFlight = eligible.filter(([name]) => Number(pool?.inFlight?.[name] ?? 0) > at).length;
-  return { configured: accounts.length, eligible: eligible.length, inFlight };
+  // There is one material ChatGPT entitlement: the signed-in Kernel browser
+  // profile. OAuth account count is irrelevant because OAuth did not admit Pro.
+  // A pre-browser pool file is treated as an idle profile and is replaced by
+  // provider state on first acquisition.
+  const cooldownUntil = pool?.version === 3 ? Number(pool.cooldownUntil ?? 0) : 0;
+  const inFlightUntil = pool?.version === 3 ? Number(pool.inFlightUntil ?? 0) : 0;
+  const eligible = cooldownUntil <= at ? 1 : 0;
+  const inFlight = eligible && inFlightUntil > at ? 1 : 0;
+  return { configured: 1, eligible, inFlight };
 }
 
 export function proLaunchAvailability(entitlement, active) {

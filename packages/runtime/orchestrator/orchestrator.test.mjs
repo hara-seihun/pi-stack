@@ -222,17 +222,34 @@ test("GPT-5.5 models are banned", () => {
   assert.doesNotThrow(() => validateModelPolicy("chatgpt-pro/gpt-5-6-pro-literal"));
 });
 
-test("ChatGPT Pro capacity comes from live account entitlement rather than a numeric cap", () => {
-  const auth = Object.fromEntries(Array.from({ length: 12 }, (_, index) => [index ? `openai-codex-${index + 1}` : "openai-codex", { access: "present" }]));
+test("ChatGPT Pro capacity comes from the signed-in browser entitlement rather than a numeric cap", () => {
   const at = 10_000;
-  const entitlement = proEntitlementSnapshot(at, auth, {
-    cooldowns: { "openai-codex-2": at + 1 },
-    proQuotaExhaustedUntil: { "openai-codex-3": at + 1 },
-    inFlight: { "openai-codex-4": at + 1, "openai-codex-5": at + 1 },
+  const idle = proEntitlementSnapshot(at, {
+    version: 3,
+    browserProfile: "kenan-personal",
+    cooldownUntil: 0,
+    inFlightUntil: 0,
   });
-  assert.deepEqual(entitlement, { configured: 12, eligible: 10, inFlight: 2 });
-  assert.equal(proLaunchAvailability(entitlement, 7), 3);
-  assert.equal(proLaunchAvailability(entitlement, 10), 0);
+  assert.deepEqual(idle, { configured: 1, eligible: 1, inFlight: 0 });
+  assert.equal(proLaunchAvailability(idle, 0), 1);
+  assert.equal(proLaunchAvailability(idle, 1), 0);
+
+  const leased = proEntitlementSnapshot(at, {
+    version: 3,
+    browserProfile: "kenan-personal",
+    cooldownUntil: 0,
+    inFlightUntil: at + 1,
+  });
+  assert.deepEqual(leased, { configured: 1, eligible: 1, inFlight: 1 });
+  assert.equal(proLaunchAvailability(leased, 0), 0);
+
+  const cooling = proEntitlementSnapshot(at, {
+    version: 3,
+    browserProfile: "kenan-personal",
+    cooldownUntil: at + 1,
+    inFlightUntil: 0,
+  });
+  assert.deepEqual(cooling, { configured: 1, eligible: 0, inFlight: 0 });
 });
 
 test("Codex plan governor assigns a concrete account without exceeding it", () => {
