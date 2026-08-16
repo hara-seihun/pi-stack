@@ -8,6 +8,13 @@ fi
 
 memory_max=${PI_TOOL_MEMORY_MAX:-12G}
 
+# System services do not inherit a login session bus environment. Resolve the
+# owning user's runtime paths here so the same launcher works from the
+# orchestrator, Pi Remote, and an interactive shell.
+uid=$(id -u)
+export XDG_RUNTIME_DIR=${XDG_RUNTIME_DIR:-/run/user/$uid}
+export DBUS_SESSION_BUS_ADDRESS=${DBUS_SESSION_BUS_ADDRESS:-unix:path=$XDG_RUNTIME_DIR/bus}
+
 # Every SDK bash invocation owns a transient scope outside the orchestrator
 # service cgroup. OOMPolicy=kill terminates this scope as one failed tool call;
 # it cannot stop the controller or unrelated agent sessions.

@@ -481,7 +481,11 @@ export function launchBatchSize(resourceSlotCount) {
   return resourceSlotCount > 0 ? 1 : 0;
 }
 export function taskSettings(cwd, agentDir = getAgentDir()) {
-  const settingsManager = SettingsManager.create(cwd, agentDir);
+  return SettingsManager.create(cwd, agentDir);
+}
+export function isolateTaskShell(settingsManager) {
+  // DefaultResourceLoader.reload() reloads SettingsManager and clears runtime
+  // overrides. Apply containment only after resource discovery has finished.
   settingsManager.applyOverrides({ shellPath: TOOL_SHELL });
   return settingsManager;
 }
@@ -577,6 +581,7 @@ export class Controller {
         settingsManager,
       });
       await loader.reload();
+      isolateTaskShell(settingsManager);
       const extensionErrors = loader.getExtensions().errors;
       if (extensionErrors.length) fail(`extension loading failed: ${extensionErrors.map((item) => item.error).join("; ")}`);
       ({ session } = await createAgentSession({

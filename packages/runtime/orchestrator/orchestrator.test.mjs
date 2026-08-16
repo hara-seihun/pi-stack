@@ -8,7 +8,7 @@ import test from "node:test";
 
 const temporary = fs.mkdtempSync(path.join(os.tmpdir(), "agent-orchestrator-test-"));
 process.env.AGENT_ORCHESTRATOR_DATA = temporary;
-const { cancelTask, choosePlanProvider, chooseTask, completionToolResult, Controller, cpuPercent, createProDelegateTool, insertRun, isProDelegatingFrontierTask, launchBatchSize, loadConfig, nextIncompleteState, openDb, planWindowBurnPerHour, proEntitlementSnapshot, proLaunchAvailability, rankTasks, resourceSlots, setTaskOptions, shouldAdvanceBackoff, taskSettings, TOOL_SHELL, validateCompletion, validateModelPolicy } = await import("./orchestrator.mjs");
+const { cancelTask, choosePlanProvider, chooseTask, completionToolResult, Controller, cpuPercent, createProDelegateTool, insertRun, isolateTaskShell, isProDelegatingFrontierTask, launchBatchSize, loadConfig, nextIncompleteState, openDb, planWindowBurnPerHour, proEntitlementSnapshot, proLaunchAvailability, rankTasks, resourceSlots, setTaskOptions, shouldAdvanceBackoff, taskSettings, TOOL_SHELL, validateCompletion, validateModelPolicy } = await import("./orchestrator.mjs");
 
 test.after(() => fs.rmSync(temporary, { recursive: true, force: true }));
 
@@ -189,16 +189,23 @@ test("controller shutdown drains active sessions without aborting them", async (
   assert.equal(drained, true);
 });
 
-test("autonomous bash tools use the OOM-isolated shell", () => {
+test("autonomous bash tools retain the OOM-isolated shell after resource reload", async () => {
   const settings = taskSettings(temporary, temporary);
+  settings.applyOverrides({ shellPath: TOOL_SHELL });
+  await settings.reload();
+  assert.equal(settings.getShellPath(), undefined, "resource reload clears runtime overrides");
+  isolateTaskShell(settings);
   assert.equal(settings.getShellPath(), TOOL_SHELL);
   assert.ok(fs.statSync(TOOL_SHELL).mode & 0o100);
 });
 
-test("the tool shell contains an OOM to the tool call", () => {
+test("the tool shell contains an OOM to the tool call from a system-service environment", () => {
+  const environment = { ...process.env, PI_TOOL_MEMORY_MAX: "64M" };
+  delete environment.XDG_RUNTIME_DIR;
+  delete environment.DBUS_SESSION_BUS_ADDRESS;
   const result = spawnSync(TOOL_SHELL, ["-c", "python3 -c 'x=bytearray(100*1024*1024)'"], {
     encoding: "utf8",
-    env: { ...process.env, PI_TOOL_MEMORY_MAX: "64M" },
+    env: environment,
     timeout: 10_000,
   });
   assert.notEqual(result.status, 0);
