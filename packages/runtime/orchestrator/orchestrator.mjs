@@ -407,10 +407,8 @@ export async function validateCompletion(task, runner = execFileAsync) {
     return { ok: false, detail: output || String(error?.message ?? error) };
   }
 }
-export async function stopSession(session) {
-  if (!session) return;
-  session.clearQueue();
-  await session.abort();
+export function launchBatchSize(resourceSlotCount) {
+  return resourceSlotCount > 0 ? 1 : 0;
 }
 export function shouldAdvanceBackoff(nextEligibleAt, runStartedAt) { return Number(nextEligibleAt) <= Number(runStartedAt); }
 
@@ -419,7 +417,7 @@ export function insertRun(db, runId, taskId, provider = null, startedAt = now())
     .run(runId, taskId, "running", startedAt, provider);
 }
 
-class Controller {
+export class Controller {
   constructor(db, config) {
     this.db = db;
     this.config = config;
@@ -600,7 +598,11 @@ class Controller {
     this.previousCpu = currentCpu;
     const memory = memoryMiB();
     const slots = resourceSlots(this.config, this.active.size, memory.available, memory.total, currentCpuPercent, agentMemoryMiB());
-    for (let launchIndex = 0; launchIndex < slots; launchIndex++) {
+    // Admit only one session per measurement tick. SDK sessions and child tools
+    // take time to appear in CPU/RAM telemetry; filling every computed slot from
+    // one stale snapshot can create a launch stampede before the governor can
+    // observe either real resource use or a task's first no-work backoff.
+    for (let launchIndex = 0; launchIndex < launchBatchSize(slots); launchIndex++) {
       let launched = false;
       for (const task of rankTasks(tasks, this.active.size)) {
         let governed;
@@ -633,8 +635,10 @@ class Controller {
   }
 
   async stop() {
+    // SIGTERM is a planned drain boundary: stop replenishing tasks and preserve
+    // every active session through its normal completion report. A process that
+    // actually dies is recovered separately as an interrupted run on startup.
     this.stopping = true;
-    await Promise.allSettled([...this.active.values()].map(async ({ session }) => stopSession(session)));
     await Promise.allSettled([...this.active.values()].map(async ({ promise }) => promise));
   }
 }

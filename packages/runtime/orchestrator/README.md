@@ -25,7 +25,7 @@ Before every launch, one governor checks:
 2. measured whole-machine available RAM;
 3. measured Codex plan consumption.
 
-There is no numeric agent cap in task state, operator configuration, or the launch interface. The governor alone decides whether another agent fits.
+There is no numeric agent cap in task state, operator configuration, or the launch interface. The governor alone decides whether another agent fits. It admits at most one new SDK session per one-second measurement tick: session startup and child-tool memory are not visible in the snapshot that precedes them, so filling all calculated slots from one snapshot would create a stale-telemetry launch wave and outrun no-work backoff.
 
 The plan-consumption estimator queries every configured Codex account's five-hour and weekly windows, paces all remaining capacity to each reset, and uses the tighter rate for each account. Every launch is assigned to a concrete account only when that account's own allowance can hold its calibrated active burn plus the candidate. The service disables multi-pass initial spreading so the extension cannot override this governed assignment; runtime rate-limit rotation remains available. Missing or malformed plan evidence fails closed, while an unhealthy or exhausted account receives no launch.
 
@@ -67,7 +67,9 @@ orchestrator task create \
 
 Each verified response is an incomplete persistent-task result, so the governor replenishes the task while account entitlement and machine resources permit. Cancel the task to stop replenishment.
 
-The systemd service is `agent-orchestrator.service`. Runtime state is canonical in `/home/kenan/data/agent-orchestrator/orchestrator.sqlite3`; Pi session JSONL is retained under `sessions/`. The SQLite database uses WAL and records tasks, launches, completion reports, whether each launch processed a real work unit, and bounded controller events. Every table has automatic millisecond `created_at` and `updated_at` columns maintained by SQLite triggers; existing rows are backfilled from their original event times.
+The systemd service is `agent-orchestrator.service`. A planned SIGTERM or restart stops new launches and drains every active SDK session to its normal completion report; it does not call Pi's abort API. The unit allows the drain up to the research lease horizon. Its cgroup has `OOMPolicy=continue`, so the kernel can kill a single runaway child computation at the memory boundary without stopping the controller and aborting unrelated sessions.
+
+Runtime state is canonical in `/home/kenan/data/agent-orchestrator/orchestrator.sqlite3`; Pi session JSONL is retained under `sessions/`. The SQLite database uses WAL and records tasks, launches, completion reports, whether each launch processed a real work unit, and bounded controller events. Every table has automatic millisecond `created_at` and `updated_at` columns maintained by SQLite triggers; existing rows are backfilled from their original event times.
 
 ## Validation
 

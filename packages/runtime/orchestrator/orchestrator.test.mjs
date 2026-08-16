@@ -7,7 +7,7 @@ import test from "node:test";
 
 const temporary = fs.mkdtempSync(path.join(os.tmpdir(), "agent-orchestrator-test-"));
 process.env.AGENT_ORCHESTRATOR_DATA = temporary;
-const { cancelTask, choosePlanProvider, chooseTask, completionToolResult, cpuPercent, insertRun, loadConfig, nextIncompleteState, openDb, planWindowBurnPerHour, proEntitlementSnapshot, proLaunchAvailability, rankTasks, resourceSlots, setTaskOptions, shouldAdvanceBackoff, stopSession, validateCompletion, validateModelPolicy } = await import("./orchestrator.mjs");
+const { cancelTask, choosePlanProvider, chooseTask, completionToolResult, Controller, cpuPercent, insertRun, launchBatchSize, loadConfig, nextIncompleteState, openDb, planWindowBurnPerHour, proEntitlementSnapshot, proLaunchAvailability, rankTasks, resourceSlots, setTaskOptions, shouldAdvanceBackoff, validateCompletion, validateModelPolicy } = await import("./orchestrator.mjs");
 
 test.after(() => fs.rmSync(temporary, { recursive: true, force: true }));
 
@@ -129,13 +129,22 @@ test("machine completion checks override an agent's completion opinion", async (
   );
 });
 
-test("controller shutdown clears queued continuations before aborting", async () => {
-  const calls = [];
-  await stopSession({
-    clearQueue() { calls.push("clear"); },
-    async abort() { calls.push("abort"); },
+test("controller shutdown drains active sessions without aborting them", async () => {
+  const controller = new Controller(null, {});
+  let release;
+  const promise = new Promise((resolve) => { release = resolve; });
+  controller.active.set("run", {
+    promise,
+    session: { abort() { assert.fail("planned shutdown must not abort the session"); } },
   });
-  assert.deepEqual(calls, ["clear", "abort"]);
+  let drained = false;
+  const stopping = controller.stop().then(() => { drained = true; });
+  await new Promise((resolve) => setTimeout(resolve, 0));
+  assert.equal(controller.stopping, true);
+  assert.equal(drained, false);
+  release();
+  await stopping;
+  assert.equal(drained, true);
 });
 
 test("one concurrent launch wave advances task backoff only once", () => {
@@ -177,6 +186,9 @@ test("resource governor admits until CPU or RAM is reached without a numeric age
   assert.equal(resourceSlots(config, 2, 6_000, 60_000, 20), 0);
   assert.equal(resourceSlots(config, 2, 30_000, 60_000, 90), 0);
   assert.equal(resourceSlots(config, 600, 50_000, 60_000, 20, 2_000), 0);
+  assert.equal(launchBatchSize(298), 1);
+  assert.equal(launchBatchSize(1), 1);
+  assert.equal(launchBatchSize(0), 0);
   assert.equal(cpuPercent({ idle: 100, total: 200 }, { idle: 125, total: 300 }), 75);
 });
 
