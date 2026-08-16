@@ -4,11 +4,13 @@ import {
   conversationActivityMarker,
   conversationLeafText,
   conversationModelEvidence,
+  browserPoolCapacitySnapshot,
   conversationStreamEvidence,
   defaultPoolState,
   isTerminalConversationEvidence,
   nextFallbackCooldown,
   normalizePoolState,
+  PRO_MAX_PARALLEL,
   PRO_TRANSPORT_HORIZONS,
 } from "./browser.mjs";
 
@@ -199,13 +201,13 @@ test("persisted activity markers advance on progress or new work nodes", () => {
   assert.notEqual(first, conversationActivityMarker(advanced, { pro_progress: 12, pro_work_status: "in_progress" }));
 });
 
-test("browser pool state has one profile entitlement and drops obsolete OAuth shape", () => {
-  const initial = defaultPoolState();
-  assert.equal(initial.version, 3);
-  assert.equal(initial.browserProfile, "limmy-google");
-  assert.equal(initial.inFlightUntil, 0);
-  assert.equal(initial.fallbackStreak, 0);
-  assert.deepEqual(normalizePoolState({ version: 2, cooldowns: { account: 1 } }), initial);
+test("browser pool migrates one entitlement and admits no more than four configured profiles", () => {
+  const initial = defaultPoolState(["limmy-google"]);
+  assert.equal(initial.version, 4);
+  assert.equal(initial.maxParallel, 4);
+  assert.equal(initial.profiles[0].browserProfile, "limmy-google");
+  assert.equal(initial.profiles[0].inFlightUntil, 0);
+  assert.deepEqual(normalizePoolState({ version: 2, cooldowns: { account: 1 } }, ["limmy-google"]), initial);
   const normalized = normalizePoolState({
     version: 3,
     browserProfile: "limmy-google",
@@ -216,15 +218,33 @@ test("browser pool state has one profile entitlement and drops obsolete OAuth sh
     fallbackStreak: 2,
     lastFallbackAt: "2026-08-16T00:00:00.000Z",
     lastVerifiedAt: "2026-08-16T00:00:00.000Z",
+  }, ["limmy-google"]);
+  assert.equal(normalized.profiles[0].selectionCount, 4);
+  assert.equal(normalized.profiles[0].fallbackStreak, 2);
+  assert.equal(PRO_MAX_PARALLEL, 4);
+});
+
+test("browser capacity exposes running Pro agents and never exceeds four", () => {
+  const at = 1_000;
+  const names = ["pro-1", "pro-2", "pro-3", "pro-4"];
+  const state = defaultPoolState(names);
+  state.profiles[0].inFlightUntil = 2_000;
+  state.profiles[1].inFlightUntil = 2_000;
+  state.profiles[2].cooldownUntil = 2_000;
+  assert.deepEqual(browserPoolCapacitySnapshot(state, at, names), {
+    configured: 4,
+    eligible: 3,
+    inFlight: 2,
+    available: 1,
+    maxParallel: 4,
   });
-  assert.equal(normalized.selectionCount, 4);
-  assert.equal(normalized.fallbackStreak, 2);
 });
 
 test("routed fallbacks back off exponentially and reset after a quiet day", () => {
   const now = Date.parse("2026-08-16T12:00:00.000Z");
-  assert.deepEqual(nextFallbackCooldown(defaultPoolState(), now), { streak: 1, cooldownMs: 15 * 60_000 });
-  const recent = { ...defaultPoolState(), fallbackStreak: 2, lastFallbackAt: "2026-08-16T11:59:00.000Z" };
+  const initial = defaultPoolState(["limmy-google"]).profiles[0];
+  assert.deepEqual(nextFallbackCooldown(initial, now), { streak: 1, cooldownMs: 15 * 60_000 });
+  const recent = { ...initial, fallbackStreak: 2, lastFallbackAt: "2026-08-16T11:59:00.000Z" };
   assert.deepEqual(nextFallbackCooldown(recent, now), { streak: 3, cooldownMs: 60 * 60_000 });
   const capped = { ...recent, fallbackStreak: 12 };
   assert.deepEqual(nextFallbackCooldown(capped, now), { streak: 13, cooldownMs: 4 * 60 * 60_000 });

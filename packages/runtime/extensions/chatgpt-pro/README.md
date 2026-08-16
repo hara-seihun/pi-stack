@@ -22,7 +22,7 @@ pi --model chatgpt-pro/gpt-5-6-pro:max --no-tools
 
 ## Transport and verification
 
-The provider acquires the one reusable Kernel profile `limmy-google`, launches a direct-egress browser, attaches with Playwright over Kernel's CDP URL, and drives the genuine ChatGPT page. Kernel stealth mode is deliberately off: both its default proxy and direct egress have been tested, and direct egress avoids making proxy reputation another routing variable. It verifies the authenticated `/api/auth/session`, moves the live Intelligence slider to **Pro**, and requires the picker to show both **GPT-5.6 Sol** and **Effort Pro** before submitting.
+The provider acquires one eligible profile from the admitted Kernel pool (currently `limmy-google`), launches a direct-egress browser, attaches with Playwright over Kernel's CDP URL, and drives the genuine ChatGPT page. Kernel stealth mode is deliberately off: both its default proxy and direct egress have been tested, and direct egress avoids making proxy reputation another routing variable. It verifies the authenticated `/api/auth/session`, moves the live Intelligence slider to **Pro**, and requires the picker to show both **GPT-5.6 Sol** and **Effort Pro** before submitting.
 
 A picker label is only request intent. Returned text is accepted only when ChatGPT's persisted conversation has all of:
 
@@ -35,7 +35,7 @@ Current ChatGPT responses no longer always carry `pro_progress`, and no longer c
 
 The browser session is deleted in every outcome. Deletion saves profile changes. The response wait is 2 hours 45 minutes inside a three-hour Kernel browser lifetime and matching three-hour entitlement lease, so an hour-scale Pro turn neither times out early nor permits an overlapping launch. Persisted progress, work-node creation, and message timestamps drive an activity marker; 45 minutes with no activity is treated as a server stall, the visible response is stopped before cleanup, and the entitlement cools for four hours. Verified and rejected provider evidence is owner-only under `/home/kenan/data/agent-orchestrator/pro/provider-audit/`; unverified text never reaches Pi as an answer.
 
-`~/.pi/agent/chatgpt-pro-pool.json` is generated owner-only state for this one material browser/account entitlement. It holds the in-flight lease, cooldown, fallback streak, and last verified time. The orchestrator reads the same state, so it does not launch a second Pro turn while this profile is occupied. A persisted route to another model is rejected and starts an exponential allowance-probe cooldown (15 minutes up to four hours); one verified Pro turn resets that backoff. There is no unrelated numeric stream limit.
+`~/.pi/agent/chatgpt-pro-profiles.json` is the owner-only admitted entitlement list. It accepts one to four unique Kernel profile names and rejects any larger configuration. `~/.pi/agent/chatgpt-pro-pool.json` is generated owner-only state for those profiles; each profile independently holds its in-flight lease, cooldown, fallback streak, and last verified time. The orchestrator and frontier `launch_pro` tool read and mutate the same locked state. The machine-wide ceiling is four simultaneous Pro agents by operator request, while actual concurrency is the smaller count of independently authenticated eligible profiles. A persisted route to another model is rejected and starts a per-profile exponential allowance-probe cooldown (15 minutes up to four hours); one verified Pro turn resets that profile's backoff.
 
 ## Authentication
 
@@ -65,7 +65,7 @@ A second OAuth-pool identity, isolated in `limmy-google` because the two simulta
 
 ## Capacity expansion
 
-Only `limmy-google` is an admitted Pro entitlement. Other locally owned Limmy login records exist in canonical Proton Pass custody but have not proved a Pro subscription. Kernel currently permits three managed-auth connections, all used by the Pro profile, primary Google, and Wealthsimple. Candidate credentials created during investigation were deleted rather than retained without an owning connection, and existing operational connections were not displaced. A future additional profile requires a real managed-auth slot and the same persisted-conversation canary before it may enter provider capacity.
+All twelve Codex OAuth subscriptions report a Pro plan, and a direct model canary on 2026-08-16 succeeded on eleven; the remaining subscription was correctly authenticated but externally quota-exhausted until its reported reset. Codex OAuth plan identity is not browser execution proof. Only `limmy-google` is currently an admitted browser Pro entitlement. Kernel permits three managed-auth connections on the current plan, all used by the Pro profile, primary Google, and Wealthsimple, so existing operational connections were not displaced merely to probe more identities. A future profile requires a real managed-auth slot, unattended reauthentication, and the same persisted-conversation canary before it enters `chatgpt-pro-profiles.json` or provider capacity.
 
 ## Deployment and validation
 

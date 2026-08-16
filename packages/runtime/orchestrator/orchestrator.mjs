@@ -10,6 +10,8 @@ import { promisify } from "node:util";
 import { Type } from "typebox";
 import {
   createAgentSession,
+  DEFAULT_MAX_BYTES,
+  DEFAULT_MAX_LINES,
   DefaultResourceLoader,
   defineTool,
   getAgentDir,
@@ -17,7 +19,13 @@ import {
   resolveCliModel,
   SessionManager,
   SettingsManager,
+  truncateHead,
 } from "@earendil-works/pi-coding-agent";
+import {
+  browserPoolCapacitySnapshot,
+  completeInKernelBrowser,
+  PRO_MAX_PARALLEL,
+} from "../extensions/chatgpt-pro/browser.mjs";
 
 const HOME = os.homedir();
 const DATA = process.env.AGENT_ORCHESTRATOR_DATA ?? path.join(HOME, "data/agent-orchestrator");
@@ -263,19 +271,15 @@ export function proEntitlementSnapshot(at = now(), state = null) {
     try { pool = JSON.parse(fs.readFileSync(CHATGPT_PRO_POOL_PATH, "utf8")); }
     catch { pool = {}; }
   }
-  // There is one material ChatGPT entitlement: the signed-in Kernel browser
-  // profile. OAuth account count is irrelevant because OAuth did not admit Pro.
-  // A pre-browser pool file is treated as an idle profile and is replaced by
-  // provider state on first acquisition.
-  const cooldownUntil = pool?.version === 3 ? Number(pool.cooldownUntil ?? 0) : 0;
-  const inFlightUntil = pool?.version === 3 ? Number(pool.inFlightUntil ?? 0) : 0;
-  const eligible = cooldownUntil <= at ? 1 : 0;
-  const inFlight = eligible && inFlightUntil > at ? 1 : 0;
-  return { configured: 1, eligible, inFlight };
+  return browserPoolCapacitySnapshot(pool, at);
 }
 
 export function proLaunchAvailability(entitlement, active) {
-  return Math.max(0, entitlement.eligible - Math.max(active, entitlement.inFlight));
+  const activeWithoutLease = Math.max(0, active - entitlement.inFlight);
+  return Math.max(0, Math.min(
+    entitlement.available - activeWithoutLease,
+    entitlement.maxParallel - active,
+  ));
 }
 
 export function choosePlanProvider(accounts, activeRates, candidate) {
@@ -351,6 +355,7 @@ export class PlanGovernor {
     this.snapshot = {
       at: now(),
       healthy: accounts.length,
+      withHeadroom: accounts.filter((account) => account.allowedBurnPercentPerHour > 0).length,
       configured: configured.length,
       allowedBurnPercentPerHour: accounts.reduce((sum, account) => sum + account.allowedBurnPercentPerHour, 0),
       accounts,
@@ -403,6 +408,55 @@ export function nextIncompleteState(streak, failed) {
 export function completionToolResult(text, details) {
   return { content: [{ type: "text", text }], details, terminate: true };
 }
+
+const PRO_DELEGATING_FRONTIER_TASKS = new Set([
+  "research-frontier",
+  "research-cayley-ci",
+  "research-cayley-ci-synthesis",
+]);
+
+export function isProDelegatingFrontierTask(task) {
+  return task?.cwd === "/home/kenan/projects-research" && PRO_DELEGATING_FRONTIER_TASKS.has(task?.id);
+}
+
+export function createProDelegateTool(task, runId, runner = completeInKernelBrowser) {
+  return defineTool({
+    name: "launch_pro",
+    label: "Launch GPT-5.6 Pro",
+    description: `Launch one isolated, text-only GPT-5.6 Pro long-horizon attack on a self-contained mathematical prompt. The authenticated pool visibly leases each running Pro agent and enforces a machine-wide maximum of ${PRO_MAX_PARALLEL}; fewer run when fewer genuine entitlements are available. A turn can take hours. Do not retry an unavailable or failed launch inside the same frontier run. Validate every returned argument with tool-capable checks before using it as research authority.`,
+    promptSnippet: "Delegate one self-contained exact mathematical proof attack to authenticated GPT-5.6 Pro",
+    parameters: Type.Object({
+      prompt: Type.String({ minLength: 1, description: "Self-contained exact problem, fidelity boundary, established context, and requested proof attack" }),
+    }),
+    execute: async (_toolCallId, params, signal, onUpdate) => {
+      const completion = await runner(params.prompt, {
+        signal,
+        auditContext: { taskId: task.id, runId },
+        onStatus: ({ capacity }) => onUpdate?.({
+          content: [{ type: "text", text: `GPT-5.6 Pro is running (${capacity.inFlight}/${capacity.maxParallel} machine-wide; ${capacity.configured} authenticated entitlement${capacity.configured === 1 ? "" : "s"}).` }],
+          details: { phase: "running", capacity, taskId: task.id, runId },
+        }),
+      });
+      const truncated = truncateHead(completion.text, { maxBytes: DEFAULT_MAX_BYTES, maxLines: DEFAULT_MAX_LINES });
+      const auditPath = completion.audit?.auditPath ?? null;
+      const text = truncated.truncated
+        ? `${truncated.content}\n\n[Pro output truncated for parent context; full verified response: ${completion.audit?.responsePath ?? "provider audit"}]`
+        : truncated.content;
+      return {
+        content: [{ type: "text", text }],
+        details: {
+          phase: "complete",
+          model: "gpt-5-6-pro",
+          executionVerified: completion.evidence?.pro_execution_verified === true,
+          evidence: completion.evidence,
+          auditPath,
+          maxParallel: PRO_MAX_PARALLEL,
+        },
+      };
+    },
+  });
+}
+
 export async function validateCompletion(task, runner = execFileAsync) {
   if (!task.completion_check) return { ok: true, detail: "no completion check configured" };
   try {
@@ -508,6 +562,8 @@ export class Controller {
           return completionToolResult(text, report);
         }
       });
+      const customTools = [completionTool];
+      if (isProDelegatingFrontierTask(task)) customTools.push(createProDelegateTool(task, runId));
       const settingsManager = taskSettings(task.cwd);
       const loader = new DefaultResourceLoader({
         cwd: task.cwd,
@@ -523,7 +579,7 @@ export class Controller {
         model: resolved.model,
         thinkingLevel: resolved.thinkingLevel,
         resourceLoader: loader,
-        customTools: [completionTool],
+        customTools,
         sessionManager: SessionManager.create(task.cwd, SESSIONS),
         settingsManager,
       }));
@@ -825,6 +881,7 @@ async function main(argv = process.argv.slice(2)) {
     const plan = {
       at: snapshot.at,
       healthyAccounts: snapshot.healthy,
+      accountsWithHeadroom: snapshot.withHeadroom,
       configuredAccounts: snapshot.configured,
       allowedBurnPercentPerHour: snapshot.allowedBurnPercentPerHour,
     };

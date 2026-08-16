@@ -20,7 +20,9 @@ const AGENT_DIR = join(HOME, ".pi", "agent");
 const POOL_PATH = join(AGENT_DIR, "chatgpt-pro-pool.json");
 const POOL_LOCK = join(AGENT_DIR, ".chatgpt-pro-pool.lock");
 const PROVIDER_AUDIT_DIR = join(HOME, "data", "agent-orchestrator", "pro", "provider-audit");
-const PROFILE_NAME = process.env.CHATGPT_PRO_BROWSER_PROFILE || "limmy-google";
+export const PRO_PROFILE_CONFIG_PATH = join(AGENT_DIR, "chatgpt-pro-profiles.json");
+export const PRO_MAX_PARALLEL = 4;
+const DEFAULT_PROFILE_NAME = "limmy-google";
 const MODEL_ID = "gpt-5-6-pro";
 export const PRO_TRANSPORT_HORIZONS = Object.freeze({
   responseWaitMs: 2 * 60 * 60_000 + 45 * 60_000,
@@ -76,10 +78,26 @@ function writeJsonAtomic(path, value) {
   renameSync(temporary, path);
 }
 
-export function defaultPoolState() {
+export function configuredProfileNames() {
+  let names = [DEFAULT_PROFILE_NAME];
+  try {
+    const raw = JSON.parse(readFileSync(PRO_PROFILE_CONFIG_PATH, "utf8"));
+    if (raw?.version !== 1 || !Array.isArray(raw.profiles)) throw new Error("expected version 1 with a profiles array");
+    names = raw.profiles;
+  } catch (error) {
+    if (error?.code !== "ENOENT") throw new Error(`Invalid ChatGPT Pro profile config: ${error.message}`);
+  }
+  if (names.length < 1 || names.length > PRO_MAX_PARALLEL ||
+      names.some((name) => typeof name !== "string" || !/^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$/.test(name)) ||
+      new Set(names).size !== names.length) {
+    throw new Error(`ChatGPT Pro profile config must contain 1-${PRO_MAX_PARALLEL} unique Kernel profile names`);
+  }
+  return names;
+}
+
+function defaultProfileState(browserProfile) {
   return {
-    version: 3,
-    browserProfile: PROFILE_NAME,
+    browserProfile,
     selectionCount: 0,
     inFlightUntil: 0,
     cooldownUntil: 0,
@@ -90,26 +108,55 @@ export function defaultPoolState() {
   };
 }
 
-export function normalizePoolState(raw) {
-  if (raw?.version !== 3 || raw?.browserProfile !== PROFILE_NAME) return defaultPoolState();
+export function defaultPoolState(profileNames = configuredProfileNames()) {
   return {
-    ...defaultPoolState(),
-    selectionCount: Number.isInteger(raw.selectionCount) ? raw.selectionCount : 0,
-    inFlightUntil: Number(raw.inFlightUntil) || 0,
-    cooldownUntil: Number(raw.cooldownUntil) || 0,
-    cooldownReason: typeof raw.cooldownReason === "string" ? raw.cooldownReason : null,
-    fallbackStreak: Number.isInteger(raw.fallbackStreak) && raw.fallbackStreak >= 0 ? raw.fallbackStreak : 0,
-    lastFallbackAt: typeof raw.lastFallbackAt === "string" ? raw.lastFallbackAt : null,
-    lastVerifiedAt: typeof raw.lastVerifiedAt === "string" ? raw.lastVerifiedAt : null,
+    version: 4,
+    maxParallel: PRO_MAX_PARALLEL,
+    profiles: profileNames.map(defaultProfileState),
+  };
+}
+
+function normalizeProfile(raw, browserProfile) {
+  return {
+    ...defaultProfileState(browserProfile),
+    selectionCount: Number.isInteger(raw?.selectionCount) ? raw.selectionCount : 0,
+    inFlightUntil: Number(raw?.inFlightUntil) || 0,
+    cooldownUntil: Number(raw?.cooldownUntil) || 0,
+    cooldownReason: typeof raw?.cooldownReason === "string" ? raw.cooldownReason : null,
+    fallbackStreak: Number.isInteger(raw?.fallbackStreak) && raw.fallbackStreak >= 0 ? raw.fallbackStreak : 0,
+    lastFallbackAt: typeof raw?.lastFallbackAt === "string" ? raw.lastFallbackAt : null,
+    lastVerifiedAt: typeof raw?.lastVerifiedAt === "string" ? raw.lastVerifiedAt : null,
+  };
+}
+
+export function normalizePoolState(raw, profileNames = configuredProfileNames()) {
+  const existing = raw?.version === 4 && Array.isArray(raw.profiles)
+    ? raw.profiles
+    : raw?.version === 3 && typeof raw.browserProfile === "string"
+      ? [raw]
+      : [];
+  return {
+    ...defaultPoolState(profileNames),
+    profiles: profileNames.map((browserProfile) =>
+      normalizeProfile(existing.find((profile) => profile?.browserProfile === browserProfile), browserProfile)),
   };
 }
 
 function readPoolState() {
   try {
     return normalizePoolState(JSON.parse(readFileSync(POOL_PATH, "utf8")));
-  } catch {
-    return defaultPoolState();
+  } catch (error) {
+    if (error instanceof SyntaxError || error?.code === "ENOENT") return defaultPoolState();
+    throw error;
   }
+}
+
+export function browserPoolCapacitySnapshot(raw, at = Date.now(), profileNames = configuredProfileNames()) {
+  const state = normalizePoolState(raw, profileNames);
+  const inFlight = state.profiles.filter((profile) => profile.inFlightUntil > at).length;
+  const eligible = state.profiles.filter((profile) => profile.cooldownUntil <= at).length;
+  const available = state.profiles.filter((profile) => profile.cooldownUntil <= at && profile.inFlightUntil <= at).length;
+  return { configured: state.profiles.length, eligible, inFlight, available, maxParallel: PRO_MAX_PARALLEL };
 }
 
 export function nextFallbackCooldown(state, now = Date.now()) {
@@ -124,41 +171,50 @@ export function nextFallbackCooldown(state, now = Date.now()) {
 }
 
 async function acquireProfile(signal) {
-  await withDirectoryLock(POOL_LOCK, signal, () => {
+  return withDirectoryLock(POOL_LOCK, signal, () => {
     const state = readPoolState();
-    const now = Date.now();
-    if (state.cooldownUntil > now) {
-      throw new Error(`ChatGPT Pro browser profile is cooling until ${new Date(state.cooldownUntil).toISOString()}: ${state.cooldownReason ?? "provider failure"}`);
+    const at = Date.now();
+    const selected = state.profiles
+      .filter((profile) => profile.cooldownUntil <= at && profile.inFlightUntil <= at)
+      .sort((left, right) => left.selectionCount - right.selectionCount || left.browserProfile.localeCompare(right.browserProfile))[0];
+    if (!selected) {
+      const snapshot = browserPoolCapacitySnapshot(state, at, state.profiles.map((profile) => profile.browserProfile));
+      const nextCooldown = state.profiles
+        .map((profile) => profile.cooldownUntil)
+        .filter((until) => until > at)
+        .sort((left, right) => left - right)[0];
+      const next = nextCooldown ? `; next cooldown ends ${new Date(nextCooldown).toISOString()}` : "";
+      throw new Error(`No ChatGPT Pro entitlement is available (active ${snapshot.inFlight}/${PRO_MAX_PARALLEL}, configured ${snapshot.configured}${next})`);
     }
-    if (state.inFlightUntil > now) {
-      throw new Error(`ChatGPT Pro browser profile is already in flight until ${new Date(state.inFlightUntil).toISOString()}`);
-    }
-    state.selectionCount += 1;
-    state.inFlightUntil = now + ACCOUNT_LEASE_MS;
+    selected.selectionCount += 1;
+    selected.inFlightUntil = at + ACCOUNT_LEASE_MS;
     writeJsonAtomic(POOL_PATH, state);
+    return selected.browserProfile;
   });
 }
 
-async function finishProfile({ verified = false, cooldownMs = 0, reason = null } = {}, signal) {
+async function finishProfile(browserProfile, { verified = false, cooldownMs = 0, reason = null } = {}, signal) {
   await withDirectoryLock(POOL_LOCK, signal, () => {
     const state = readPoolState();
-    state.inFlightUntil = 0;
+    const selected = state.profiles.find((profile) => profile.browserProfile === browserProfile);
+    if (!selected) throw new Error(`ChatGPT Pro profile left configured custody while in flight: ${browserProfile}`);
+    selected.inFlightUntil = 0;
     if (verified) {
-      state.cooldownUntil = 0;
-      state.cooldownReason = null;
-      state.fallbackStreak = 0;
-      state.lastFallbackAt = null;
-      state.lastVerifiedAt = new Date().toISOString();
+      selected.cooldownUntil = 0;
+      selected.cooldownReason = null;
+      selected.fallbackStreak = 0;
+      selected.lastFallbackAt = null;
+      selected.lastVerifiedAt = new Date().toISOString();
     } else if (cooldownMs > 0) {
       let effectiveCooldownMs = cooldownMs;
       if (reason === "pro-fallback") {
-        const fallback = nextFallbackCooldown(state);
-        state.fallbackStreak = fallback.streak;
-        state.lastFallbackAt = new Date().toISOString();
+        const fallback = nextFallbackCooldown(selected);
+        selected.fallbackStreak = fallback.streak;
+        selected.lastFallbackAt = new Date().toISOString();
         effectiveCooldownMs = fallback.cooldownMs;
       }
-      state.cooldownUntil = Date.now() + effectiveCooldownMs;
-      state.cooldownReason = reason ?? "provider failure";
+      selected.cooldownUntil = Date.now() + effectiveCooldownMs;
+      selected.cooldownReason = reason ?? "provider failure";
     }
     writeJsonAtomic(POOL_PATH, state);
   });
@@ -174,10 +230,10 @@ async function kernel(args, { signal, timeout = 60_000 } = {}) {
   return result.stdout;
 }
 
-async function createBrowser(signal) {
+async function createBrowser(browserProfile, signal) {
   const stdout = await kernel([
     "browsers", "create",
-    "--profile-name", PROFILE_NAME,
+    "--profile-name", browserProfile,
     "--save-changes",
     "--start-url", "https://chatgpt.com/",
     "--timeout", String(PRO_TRANSPORT_HORIZONS.browserTimeoutSeconds),
@@ -591,8 +647,10 @@ function recordProviderAudit(value, responseText) {
   mkdirSync(PROVIDER_AUDIT_DIR, { recursive: true, mode: 0o700 });
   const stem = `${new Date().toISOString().replace(/[:.]/g, "-")}-${randomUUID().slice(0, 8)}`;
   const responsePath = join(PROVIDER_AUDIT_DIR, `${stem}.response.md`);
+  const auditPath = join(PROVIDER_AUDIT_DIR, `${stem}.json`);
   writeFileSync(responsePath, responseText, { mode: 0o600 });
-  writeJsonAtomic(join(PROVIDER_AUDIT_DIR, `${stem}.json`), { ...value, response_path: responsePath });
+  writeJsonAtomic(auditPath, { ...value, response_path: responsePath });
+  return { auditPath, responsePath };
 }
 
 function verificationFailure(evidence) {
@@ -613,17 +671,26 @@ function failureCooldown(error, evidence, warning) {
   return { cooldownMs: OPERATIONAL_COOLDOWN_MS, reason: "browser-operation" };
 }
 
-export async function completeInKernelBrowser(prompt, { signal, maxWaitMs = MAX_WAIT_MS } = {}) {
-  await acquireProfile(signal);
+export async function completeInKernelBrowser(prompt, { signal, maxWaitMs = MAX_WAIT_MS, onStatus, auditContext = null } = {}) {
+  const browserProfile = await acquireProfile(signal);
+  try {
+    const state = readPoolState();
+    onStatus?.({
+      phase: "running",
+      browserProfile,
+      capacity: browserPoolCapacitySnapshot(state, Date.now(), state.profiles.map((profile) => profile.browserProfile)),
+    });
+  } catch {}
   let kernelBrowser = null;
   let playwrightBrowser = null;
   let page = null;
   let evidence = {};
   let responseText = "";
   let warning = "";
+  let audit = null;
   const started = Date.now();
   try {
-    kernelBrowser = await createBrowser(signal);
+    kernelBrowser = await createBrowser(browserProfile, signal);
     playwrightBrowser = await chromium.connectOverCDP(kernelBrowser.cdpUrl, { timeout: 60_000 });
     const context = playwrightBrowser.contexts()[0];
     if (!context) throw new Error("Kernel CDP endpoint exposed no browser context");
@@ -641,18 +708,19 @@ export async function completeInKernelBrowser(prompt, { signal, maxWaitMs = MAX_
         picker_selected: selection.selected,
         picker_model: "GPT-5.6 Sol",
         picker_effort: "Pro",
-        browser_profile: PROFILE_NAME,
+        browser_profile: browserProfile,
       };
     } finally {
       submitted.remove();
     }
     warning = await visibleProviderWarning(page);
-    recordProviderAudit({
+    audit = recordProviderAudit({
       at: new Date().toISOString(),
       transport: "kernel-browser-playwright",
-      browser_profile: PROFILE_NAME,
+      browser_profile: browserProfile,
       conversation_id: conversationIdFromUrl(page.url()),
       requested_model: MODEL_ID,
+      caller: auditContext,
       elapsed_sec: (Date.now() - started) / 1000,
       prompt_sha256: createHash("sha256").update(prompt).digest("hex"),
       response_chars: responseText.length,
@@ -660,16 +728,17 @@ export async function completeInKernelBrowser(prompt, { signal, maxWaitMs = MAX_
       provider_warning: warning || null,
     }, responseText);
     if (evidence.pro_execution_verified !== true) throw new Error(verificationFailure(evidence));
-    await finishProfile({ verified: true }, signal);
-    return { text: responseText, evidence };
+    await finishProfile(browserProfile, { verified: true }, signal);
+    return { text: responseText, evidence, audit };
   } catch (error) {
     warning ||= page ? await visibleProviderWarning(page) : "";
     if (!responseText || Object.keys(evidence).length === 0) {
       recordProviderAudit({
         at: new Date().toISOString(),
         transport: "kernel-browser-playwright",
-        browser_profile: PROFILE_NAME,
+        browser_profile: browserProfile,
         requested_model: MODEL_ID,
+        caller: auditContext,
         elapsed_sec: (Date.now() - started) / 1000,
         prompt_sha256: createHash("sha256").update(prompt).digest("hex"),
         response_chars: responseText.length,
@@ -679,7 +748,7 @@ export async function completeInKernelBrowser(prompt, { signal, maxWaitMs = MAX_
       }, responseText);
     }
     const cooldown = failureCooldown(error, evidence, warning);
-    try { await finishProfile(cooldown, signal?.aborted ? undefined : signal); } catch {}
+    try { await finishProfile(browserProfile, cooldown, signal?.aborted ? undefined : signal); } catch {}
     throw error;
   } finally {
     // Kernel owns browser termination and profile persistence. Deleting the

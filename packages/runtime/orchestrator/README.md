@@ -29,7 +29,7 @@ There is no numeric agent cap in task state, operator configuration, or the laun
 
 The plan-consumption estimator queries every configured Codex account's five-hour and weekly windows, paces all remaining capacity to each reset, and uses the tighter rate for each account. Every launch is assigned to a concrete account only when that account's own allowance can hold its calibrated active burn plus the candidate. The service disables multi-pass initial spreading so the extension cannot override this governed assignment; runtime rate-limit rotation remains available. Missing or malformed plan evidence fails closed, while an unhealthy or exhausted account receives no launch.
 
-The `chatgpt-pro` provider fail-closes fully assembled, text-only GPT-5.6 mathematical moonshots against authenticated persisted-conversation evidence. Kernel supplies one Pro-routed signed browser profile, so the governor derives capacity from that material entitlement and the provider's one in-flight lease or cooldown. It has no task/operator concurrency number or four-stream circuit. GPT-5.5 is banned by task validation. A live Pi turn on 2026-08-15 proved the full GPT-5.6 Pro invariant end to end; the campaign Pro task remains cancelled solely under operator activation policy. Verified Pro response text is recorded directly in the run ledger; tool-capable models continue to report through `task_complete`. CPU and RAM independently fail closed at their configured utilization thresholds.
+The `chatgpt-pro` provider fail-closes fully assembled, text-only GPT-5.6 mathematical moonshots against authenticated persisted-conversation evidence. Kernel browser profiles are admitted individually, and the governor derives capacity from their live leases and cooldowns. By operator request there is a machine-wide ceiling of four simultaneous Pro agents; actual concurrency is lower whenever fewer than four independently authenticated profiles are eligible. GPT-5.5 is banned by task validation. The active oracle-area Pro lane has completed a verified 135-minute turn. Tool-capable oracle-area frontier, Cayley-CI cell, and Cayley-CI synthesis agents also receive `launch_pro`: it runs an isolated Pro attack, streams the visible machine-wide lease count, and returns only verified text to the parent for mathematical validation. Intake agents do not receive it. Verified standing-lane response text is recorded directly in the run ledger; tool-capable models continue to report through `task_complete`. CPU and RAM independently fail closed at their configured utilization thresholds.
 
 ## Operations
 
@@ -65,7 +65,7 @@ orchestrator task create \
   --prompt-file /home/kenan/projects-research/tasks/assembled-moonshot.md
 ```
 
-Each verified response is an incomplete persistent-task result, so the governor replenishes the task while account entitlement and machine resources permit. Cancel the task to stop replenishment.
+Each verified standing-lane response is an incomplete persistent-task result, so the governor replenishes the task while account entitlement and machine resources permit. Cancel the task to stop replenishment. Nested `launch_pro` calls instead return one verified response to the invoking frontier agent and share the same profile leases and four-agent machine ceiling.
 
 The systemd service is `agent-orchestrator.service`. A planned SIGTERM or restart stops new launches and drains every active SDK session to its normal completion report; it does not call Pi's abort API. The unit allows the drain up to the research lease horizon.
 

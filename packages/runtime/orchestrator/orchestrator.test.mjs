@@ -8,7 +8,7 @@ import test from "node:test";
 
 const temporary = fs.mkdtempSync(path.join(os.tmpdir(), "agent-orchestrator-test-"));
 process.env.AGENT_ORCHESTRATOR_DATA = temporary;
-const { cancelTask, choosePlanProvider, chooseTask, completionToolResult, Controller, cpuPercent, insertRun, launchBatchSize, loadConfig, nextIncompleteState, openDb, planWindowBurnPerHour, proEntitlementSnapshot, proLaunchAvailability, rankTasks, resourceSlots, setTaskOptions, shouldAdvanceBackoff, taskSettings, TOOL_SHELL, validateCompletion, validateModelPolicy } = await import("./orchestrator.mjs");
+const { cancelTask, choosePlanProvider, chooseTask, completionToolResult, Controller, cpuPercent, createProDelegateTool, insertRun, isProDelegatingFrontierTask, launchBatchSize, loadConfig, nextIncompleteState, openDb, planWindowBurnPerHour, proEntitlementSnapshot, proLaunchAvailability, rankTasks, resourceSlots, setTaskOptions, shouldAdvanceBackoff, taskSettings, TOOL_SHELL, validateCompletion, validateModelPolicy } = await import("./orchestrator.mjs");
 
 test.after(() => fs.rmSync(temporary, { recursive: true, force: true }));
 
@@ -248,7 +248,7 @@ test("GPT-5.5 models are banned", () => {
   assert.doesNotThrow(() => validateModelPolicy("chatgpt-pro/gpt-5-6-pro-literal"));
 });
 
-test("ChatGPT Pro capacity comes from the signed-in browser entitlement rather than a numeric cap", () => {
+test("ChatGPT Pro capacity uses authenticated entitlements under the four-agent ceiling", () => {
   const at = 10_000;
   const idle = proEntitlementSnapshot(at, {
     version: 3,
@@ -256,7 +256,7 @@ test("ChatGPT Pro capacity comes from the signed-in browser entitlement rather t
     cooldownUntil: 0,
     inFlightUntil: 0,
   });
-  assert.deepEqual(idle, { configured: 1, eligible: 1, inFlight: 0 });
+  assert.deepEqual(idle, { configured: 1, eligible: 1, inFlight: 0, available: 1, maxParallel: 4 });
   assert.equal(proLaunchAvailability(idle, 0), 1);
   assert.equal(proLaunchAvailability(idle, 1), 0);
 
@@ -266,7 +266,7 @@ test("ChatGPT Pro capacity comes from the signed-in browser entitlement rather t
     cooldownUntil: 0,
     inFlightUntil: at + 1,
   });
-  assert.deepEqual(leased, { configured: 1, eligible: 1, inFlight: 1 });
+  assert.deepEqual(leased, { configured: 1, eligible: 1, inFlight: 1, available: 0, maxParallel: 4 });
   assert.equal(proLaunchAvailability(leased, 0), 0);
 
   const cooling = proEntitlementSnapshot(at, {
@@ -275,7 +275,31 @@ test("ChatGPT Pro capacity comes from the signed-in browser entitlement rather t
     cooldownUntil: at + 1,
     inFlightUntil: 0,
   });
-  assert.deepEqual(cooling, { configured: 1, eligible: 0, inFlight: 0 });
+  assert.deepEqual(cooling, { configured: 1, eligible: 0, inFlight: 0, available: 0, maxParallel: 4 });
+});
+
+test("only exact research frontier tasks receive the Pro delegation tool", async () => {
+  const task = { id: "research-frontier", cwd: "/home/kenan/projects-research" };
+  assert.equal(isProDelegatingFrontierTask(task), true);
+  assert.equal(isProDelegatingFrontierTask({ ...task, id: "research-frontier-intake" }), false);
+  assert.equal(isProDelegatingFrontierTask({ ...task, cwd: temporary }), false);
+
+  let update = null;
+  const tool = createProDelegateTool(task, "run-1", async (prompt, options) => {
+    assert.equal(prompt, "exact problem");
+    assert.deepEqual(options.auditContext, { taskId: "research-frontier", runId: "run-1" });
+    options.onStatus({ capacity: { configured: 1, inFlight: 1, maxParallel: 4 } });
+    return {
+      text: "candidate proof",
+      evidence: { pro_execution_verified: true },
+      audit: { auditPath: "/audit.json", responsePath: "/response.md" },
+    };
+  });
+  const result = await tool.execute("call", { prompt: "exact problem" }, undefined, (value) => { update = value; });
+  assert.match(update.content[0].text, /1\/4 machine-wide/);
+  assert.equal(result.content[0].text, "candidate proof");
+  assert.equal(result.details.executionVerified, true);
+  assert.equal(result.details.auditPath, "/audit.json");
 });
 
 test("Codex plan governor assigns a concrete account without exceeding it", () => {
