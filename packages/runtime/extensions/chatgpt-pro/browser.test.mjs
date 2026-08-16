@@ -1,12 +1,15 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import {
+  conversationActivityMarker,
   conversationLeafText,
   conversationModelEvidence,
   conversationStreamEvidence,
   defaultPoolState,
+  isTerminalConversationEvidence,
   nextFallbackCooldown,
   normalizePoolState,
+  PRO_TRANSPORT_HORIZONS,
 } from "./browser.mjs";
 
 function conversation({ resolved = "gpt-5-6-pro", executed = "gpt-5-6-pro", progress = 100, skipped = false } = {}) {
@@ -148,6 +151,52 @@ test("picker-compatible assistant metadata cannot hide a routed fallback", () =>
 test("skipped or incomplete Pro work is rejected", () => {
   assert.equal(conversationModelEvidence(conversation({ skipped: true })).pro_execution_verified, false);
   assert.equal(conversationModelEvidence(conversation({ progress: 95 })).pro_execution_verified, false);
+});
+
+test("transport horizons accommodate multi-hour Pro reasoning without lease overlap", () => {
+  assert.ok(PRO_TRANSPORT_HORIZONS.responseWaitMs >= 60 * 60_000);
+  assert.ok(PRO_TRANSPORT_HORIZONS.stalledWorkMs < PRO_TRANSPORT_HORIZONS.responseWaitMs);
+  assert.ok(PRO_TRANSPORT_HORIZONS.browserTimeoutSeconds * 1000 > PRO_TRANSPORT_HORIZONS.responseWaitMs);
+  assert.ok(PRO_TRANSPORT_HORIZONS.accountLeaseMs >= PRO_TRANSPORT_HORIZONS.browserTimeoutSeconds * 1000);
+});
+
+test("async Pro stream updates are not mistaken for a completed turn", () => {
+  for (const partial of [
+    { message_end_turn: null },
+    { message_end_turn: true, pro_progress: 12, pro_work_status: "in_progress", reasoning_status: "is_reasoning" },
+  ]) assert.equal(isTerminalConversationEvidence({
+    model_slug: "gpt-5-6-pro",
+    resolved_model_slug: "gpt-5-6-pro",
+    message_status: "finished_successfully",
+    current_node_is_leaf: true,
+    conversation_async_status: 3,
+    pro_execution_verified: false,
+    ...partial,
+  }), false);
+  assert.equal(isTerminalConversationEvidence({
+    model_slug: "gpt-5-5-mini",
+    resolved_model_slug: "gpt-5-5-mini",
+    message_status: "finished_successfully",
+    message_end_turn: true,
+    current_node_is_leaf: true,
+    pro_execution_verified: false,
+  }), true);
+});
+
+test("persisted activity markers advance on progress or new work nodes", () => {
+  const base = {
+    current_node: "work-1",
+    mapping: {
+      "work-1": { message: { create_time: 10, update_time: 11 } },
+    },
+  };
+  const first = conversationActivityMarker(base, { pro_progress: 12, pro_work_status: "in_progress" });
+  assert.equal(first, conversationActivityMarker(structuredClone(base), { pro_progress: 12, pro_work_status: "in_progress" }));
+  assert.notEqual(first, conversationActivityMarker(base, { pro_progress: 18, pro_work_status: "in_progress" }));
+  const advanced = structuredClone(base);
+  advanced.current_node = "work-2";
+  advanced.mapping["work-2"] = { message: { create_time: 20 } };
+  assert.notEqual(first, conversationActivityMarker(advanced, { pro_progress: 12, pro_work_status: "in_progress" }));
 });
 
 test("browser pool state has one profile entitlement and drops obsolete OAuth shape", () => {

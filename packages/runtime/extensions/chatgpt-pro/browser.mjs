@@ -22,13 +22,19 @@ const POOL_LOCK = join(AGENT_DIR, ".chatgpt-pro-pool.lock");
 const PROVIDER_AUDIT_DIR = join(HOME, "data", "agent-orchestrator", "pro", "provider-audit");
 const PROFILE_NAME = process.env.CHATGPT_PRO_BROWSER_PROFILE || "limmy-google";
 const MODEL_ID = "gpt-5-6-pro";
-const ACCOUNT_LEASE_MS = 45 * 60_000;
+export const PRO_TRANSPORT_HORIZONS = Object.freeze({
+  responseWaitMs: 2 * 60 * 60_000 + 45 * 60_000,
+  stalledWorkMs: 45 * 60_000,
+  browserTimeoutSeconds: 3 * 60 * 60,
+  accountLeaseMs: 3 * 60 * 60_000,
+});
+const ACCOUNT_LEASE_MS = PRO_TRANSPORT_HORIZONS.accountLeaseMs;
 const FALLBACK_COOLDOWN_BASE_MS = 15 * 60_000;
 const FALLBACK_COOLDOWN_MAX_MS = 4 * 60 * 60_000;
 const FALLBACK_STREAK_RESET_MS = 24 * 60 * 60_000;
 const OPERATIONAL_COOLDOWN_MS = 60_000;
 const RATE_LIMIT_COOLDOWN_MS = 15 * 60_000;
-const MAX_WAIT_MS = 35 * 60_000;
+const MAX_WAIT_MS = PRO_TRANSPORT_HORIZONS.responseWaitMs;
 
 function sleep(ms, signal) {
   return new Promise((resolve, reject) => {
@@ -174,7 +180,7 @@ async function createBrowser(signal) {
     "--profile-name", PROFILE_NAME,
     "--save-changes",
     "--start-url", "https://chatgpt.com/",
-    "--timeout", "2400",
+    "--timeout", String(PRO_TRANSPORT_HORIZONS.browserTimeoutSeconds),
     "--viewport", "1440x900@25",
     "--telemetry=console,network,page,interaction",
     "--output", "json",
@@ -472,37 +478,95 @@ async function withDeadline(promise, maxWaitMs, signal) {
   return Promise.race([promise, timeout, aborted]);
 }
 
-async function waitForStreamEvidence(page, submitted, signal, maxWaitMs = MAX_WAIT_MS) {
-  const response = await withDeadline(submitted.responsePromise, Math.min(maxWaitMs, 120_000), signal);
-  await withDeadline(response.finished(), maxWaitMs, signal);
-  const body = (await response.body()).toString("utf8");
-  const streamed = conversationStreamEvidence(body);
-  const assistant = page.locator('[data-message-author-role="assistant"]').last();
-  await assistant.waitFor({ state: "visible", timeout: 30_000 });
-  const domText = (await assistant.locator(".markdown").count())
-    ? await assistant.locator(".markdown").last().innerText()
-    : await assistant.innerText();
-  const domModel = await assistant.getAttribute("data-message-model-slug");
-  const proFeedback = await page.getByRole("button", { name: /Pro feedback/i }).count();
+export function isTerminalConversationEvidence(evidence) {
+  if (evidence.pro_execution_verified === true) return true;
+  const messageFinished = evidence.message_status === "finished_successfully" &&
+    evidence.message_end_turn === true && evidence.current_node_is_leaf === true;
+  const routedModel = evidence.resolved_model_slug ?? evidence.model_slug;
+  return messageFinished && (
+    (typeof routedModel === "string" && routedModel !== MODEL_ID) ||
+    evidence.pro_skipped === true
+  );
+}
 
+export function conversationActivityMarker(data, evidence = conversationModelEvidence(data)) {
+  let latestMessageTime = 0;
+  let messageCount = 0;
+  for (const node of Object.values(data?.mapping ?? {})) {
+    const message = node?.message;
+    if (!message) continue;
+    messageCount += 1;
+    latestMessageTime = Math.max(latestMessageTime, Number(message.update_time) || 0, Number(message.create_time) || 0);
+  }
+  return JSON.stringify([
+    data?.current_node ?? null,
+    messageCount,
+    latestMessageTime,
+    evidence.pro_progress ?? null,
+    evidence.pro_work_status ?? null,
+    evidence.reasoning_status ?? null,
+  ]);
+}
+
+async function stopActiveResponse(page) {
+  const stop = page.locator('[data-testid="stop-button"], button[aria-label*="Stop" i]').first();
+  if (!await stop.isVisible().catch(() => false)) return false;
+  await stop.click();
+  return true;
+}
+
+async function waitForStreamEvidence(page, submitted, signal, maxWaitMs = MAX_WAIT_MS) {
+  const deadline = Date.now() + maxWaitMs;
+  const remaining = () => Math.max(1, deadline - Date.now());
+  const response = await withDeadline(submitted.responsePromise, Math.min(remaining(), 120_000), signal);
   let persisted = null;
-  const persistedDeadline = Date.now() + Math.min(120_000, maxWaitMs);
-  while (Date.now() < persistedDeadline) {
+  let activityMarker = null;
+  let lastActivityAt = Date.now();
+  let stalled = false;
+  let stopRequested = false;
+  while (Date.now() < deadline) {
     signal?.throwIfAborted();
-    // ChatGPT may first route the tab through a transient WEB:* id and replace
-    // it with the durable conversation id only after the Pro stream finishes.
+    // A Pro POST stream can finish while the server-side reasoning turn remains
+    // async. The persisted conversation, not stream closure or early DOM text,
+    // decides when the turn has actually ended.
     const durableConversationId = conversationIdFromUrl(page.url()) ?? submitted.conversationId;
     const result = await readPersistedConversation(page, durableConversationId);
     if (result.data) {
       persisted = result.data;
       const candidate = conversationModelEvidence(result.data);
-      if (candidate.pro_execution_verified === true) break;
-      if (candidate.resolved_model_slug && candidate.resolved_model_slug !== MODEL_ID &&
-          candidate.message_status === "finished_successfully" && candidate.message_end_turn === true) break;
+      if (isTerminalConversationEvidence(candidate)) break;
+      const marker = conversationActivityMarker(result.data, candidate);
+      if (marker !== activityMarker) {
+        activityMarker = marker;
+        lastActivityAt = Date.now();
+      } else if (Date.now() - lastActivityAt >= PRO_TRANSPORT_HORIZONS.stalledWorkMs) {
+        stopRequested = await stopActiveResponse(page);
+        stalled = true;
+        break;
+      }
     }
-    await sleep(2_000, signal);
+    await sleep(Math.min(5_000, remaining()), signal);
   }
   if (!persisted) throw new Error("ChatGPT conversation could not be read back with the signed browser session");
+
+  let body = "";
+  let streamError = null;
+  try {
+    await withDeadline(response.finished(), Math.min(remaining(), stalled ? 60_000 : remaining()), signal);
+    body = (await response.body()).toString("utf8");
+  } catch (error) {
+    streamError = error instanceof Error ? error.message : String(error);
+  }
+  const streamed = conversationStreamEvidence(body);
+  const assistant = page.locator('[data-message-author-role="assistant"]').last();
+  const assistantVisible = await assistant.isVisible().catch(() => false);
+  const domText = assistantVisible
+    ? (await assistant.locator(".markdown").count()
+      ? await assistant.locator(".markdown").last().innerText()
+      : await assistant.innerText())
+    : "";
+  const domModel = assistantVisible ? await assistant.getAttribute("data-message-model-slug") : null;
+  const proFeedback = await page.getByRole("button", { name: /Pro feedback/i }).count();
   const authoritative = conversationModelEvidence(persisted);
   const persistedText = conversationLeafText(persisted);
   return {
@@ -516,6 +580,9 @@ async function waitForStreamEvidence(page, submitted, signal, maxWaitMs = MAX_WA
       dom_model_slug: domModel,
       pro_feedback_control: proFeedback > 0,
       response_stream_bytes: Buffer.byteLength(body),
+      transport_stalled: stalled,
+      transport_stop_requested: stopRequested,
+      response_stream_error: streamError,
     },
   };
 }
@@ -534,6 +601,9 @@ function verificationFailure(evidence) {
 
 function failureCooldown(error, evidence, warning) {
   const message = `${error instanceof Error ? error.message : String(error)} ${warning}`;
+  if (evidence?.transport_stalled === true) {
+    return { cooldownMs: FALLBACK_COOLDOWN_MAX_MS, reason: "pro-stalled" };
+  }
   if (evidence?.resolved_model_slug && evidence.resolved_model_slug !== MODEL_ID) {
     return { cooldownMs: FALLBACK_COOLDOWN_BASE_MS, reason: "pro-fallback" };
   }
