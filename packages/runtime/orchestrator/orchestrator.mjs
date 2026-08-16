@@ -620,8 +620,11 @@ export class Controller {
   recover() {
     const interrupted = this.db.prepare("SELECT id,task_id FROM run WHERE status='running'").all();
     const finish = this.db.prepare("UPDATE run SET status='interrupted',finished_at=?,error=?,productive=0 WHERE id=?");
+    const resume = this.db.prepare("UPDATE task SET incomplete_streak=0,next_eligible_at=min(next_eligible_at,?) WHERE id=?");
     for (const row of interrupted) {
-      finish.run(now(), "controller restarted while run was active", row.id);
+      const at = now();
+      finish.run(at, "controller restarted while run was active", row.id);
+      resume.run(at, row.task_id);
       event(this.db, "run-interrupted", "controller restart", row.task_id, row.id);
     }
   }
@@ -729,22 +732,28 @@ export class Controller {
         report.summary, report.artifacts, null, report.productive,
       );
     } catch (error) {
+      const interrupted = this.stopping;
       this.finish(
         task, runId, "incomplete", report?.summary ?? null,
-        report?.artifacts ?? [], String(error?.message ?? error), false,
+        report?.artifacts ?? [],
+        interrupted ? "controller shutdown interrupted run" : String(error?.message ?? error),
+        false, interrupted,
       );
     } finally {
       session?.dispose();
     }
   }
 
-  finish(task, runId, status, summary, artifacts, error, productive = true) {
+  finish(task, runId, status, summary, artifacts, error, productive = true, suppressBackoff = false) {
     this.db.exec("BEGIN IMMEDIATE");
     try {
       this.db.prepare("UPDATE run SET status=?,finished_at=?,summary=?,artifacts_json=?,error=?,productive=? WHERE id=?")
         .run(status, now(), summary, JSON.stringify(artifacts), error, productive ? 1 : 0, runId);
       if (status === "complete") {
         this.db.prepare("UPDATE task SET completed_at=?,incomplete_streak=0 WHERE id=? AND completed_at IS NULL").run(now(), task.id);
+      } else if (suppressBackoff) {
+        this.db.prepare("UPDATE task SET incomplete_streak=0,next_eligible_at=min(next_eligible_at,?) WHERE id=?")
+          .run(now(), task.id);
       } else {
         const row = this.db.prepare(`
           SELECT t.incomplete_streak,t.next_eligible_at,r.started_at

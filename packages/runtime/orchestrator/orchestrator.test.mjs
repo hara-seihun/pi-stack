@@ -196,6 +196,28 @@ test("controller shutdown aborts recoverable sessions instead of freezing replac
   assert.equal(aborted, true);
 });
 
+test("shutdown and crash recovery never turn interruption into task backoff", () => {
+  const db = openDb(path.join(temporary, "shutdown-recovery.sqlite3"));
+  const timestamp = Date.now();
+  db.prepare(`INSERT INTO task(id,prompt,cwd,model,thinking,completion_condition,launch_share,not_before,next_eligible_at,incomplete_streak,created_at)
+    VALUES(?,?,?,?,?,?,?,?,?,?,?)`).run("task", "prompt", temporary, "provider/model", "high", "done", 1, timestamp, timestamp + 600_000, 5, timestamp);
+  insertRun(db, "planned", "task", "provider", timestamp);
+  const controller = new Controller(db, {});
+  controller.finish({ id: "task" }, "planned", "incomplete", null, [], "controller shutdown interrupted run", false, true);
+  let task = db.prepare("SELECT incomplete_streak,next_eligible_at FROM task WHERE id='task'").get();
+  assert.equal(task.incomplete_streak, 0);
+  assert.ok(task.next_eligible_at <= Date.now());
+
+  db.prepare("UPDATE task SET incomplete_streak=6,next_eligible_at=? WHERE id='task'").run(Date.now() + 600_000);
+  insertRun(db, "crash", "task", "provider", Date.now());
+  controller.recover();
+  task = db.prepare("SELECT incomplete_streak,next_eligible_at FROM task WHERE id='task'").get();
+  assert.equal(task.incomplete_streak, 0);
+  assert.ok(task.next_eligible_at <= Date.now());
+  assert.equal(db.prepare("SELECT status FROM run WHERE id='crash'").get().status, "interrupted");
+  db.close();
+});
+
 test("noninteractive deployment resolves its newly installed Pi commands", () => {
   const deploy = fs.readFileSync(path.resolve(import.meta.dirname, "../deploy"), "utf8");
   const installAt = deploy.indexOf('install -d -m 700 "$HOME/.local/bin"');
