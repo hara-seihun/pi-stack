@@ -83,6 +83,9 @@ export function loadConfig() {
 }
 
 const SQLITE_NOW_MS = "CAST((julianday('now') - 2440587.5) * 86400000 AS INTEGER)";
+// Work-probe bookkeeping columns are scheduler telemetry, not domain mutations;
+// they must not churn updated_at every probe interval.
+const AUTO_TIMESTAMP_EXCLUDED = new Set(["created_at", "updated_at", "work_state", "work_checked_at"]);
 
 function ensureTableTimestamps(db, table) {
   const quote = (value) => `"${value.replaceAll('"', '""')}"`;
@@ -100,7 +103,7 @@ function ensureTableTimestamps(db, table) {
   const updatedSource = first(["finished_at", "completed_at", "cancelled_at", "started_at", "at"]) ?? null;
   db.exec(`UPDATE ${quote(table)} SET created_at=coalesce(created_at,${createdSource ? quote(createdSource) : SQLITE_NOW_MS},${SQLITE_NOW_MS}) WHERE created_at IS NULL`);
   db.exec(`UPDATE ${quote(table)} SET updated_at=coalesce(updated_at,${updatedSource ? quote(updatedSource) : "created_at"},created_at,${SQLITE_NOW_MS}) WHERE updated_at IS NULL`);
-  const domainColumns = columns.filter((name) => !["created_at", "updated_at"].includes(name));
+  const domainColumns = columns.filter((name) => !AUTO_TIMESTAMP_EXCLUDED.has(name));
   db.exec(`
     CREATE TRIGGER IF NOT EXISTS ${quote(`auto_timestamp_${table}_insert`)}
     AFTER INSERT ON ${quote(table)}
@@ -175,6 +178,15 @@ export function openDb(file = DB_PATH) {
   if (!taskColumns.has("completion_check")) {
     db.exec("DROP TRIGGER IF EXISTS auto_timestamp_task_insert; DROP TRIGGER IF EXISTS auto_timestamp_task_update; ALTER TABLE task ADD COLUMN completion_check TEXT");
   }
+  if (!taskColumns.has("work_check")) {
+    db.exec(`
+      DROP TRIGGER IF EXISTS auto_timestamp_task_insert;
+      DROP TRIGGER IF EXISTS auto_timestamp_task_update;
+      ALTER TABLE task ADD COLUMN work_check TEXT;
+      ALTER TABLE task ADD COLUMN work_state TEXT CHECK(work_state IN ('work','no-work','error'));
+      ALTER TABLE task ADD COLUMN work_checked_at INTEGER NOT NULL DEFAULT 0;
+    `);
+  }
   const runColumns = new Set(db.prepare("PRAGMA table_info(run)").all().map((row) => row.name));
   if (!runColumns.has("provider")) {
     db.exec("DROP TRIGGER IF EXISTS auto_timestamp_run_insert; DROP TRIGGER IF EXISTS auto_timestamp_run_update; ALTER TABLE run ADD COLUMN provider TEXT");
@@ -202,11 +214,19 @@ function taskRows(db) {
   `).all();
 }
 
+// A declared work probe is the launch gate: a task whose probe most recently
+// reported no claimable work is simply not launched. There is no idle launch to
+// discover the emptiness and no timed backoff to wait out; the probe refresh
+// notices new work and restores eligibility immediately.
+export function workReady(task) {
+  return !task.work_check || task.work_state !== "no-work";
+}
+
 export function rankTasks(tasks, _activeTotal) {
   const at = now();
   const eligible = tasks.filter((task) =>
     task.completed_at === null && task.cancelled_at === null &&
-    task.not_before <= at && task.next_eligible_at <= at);
+    task.not_before <= at && task.next_eligible_at <= at && workReady(task));
   return eligible
     // Active/share is the durable concurrency allocation: fast lanes that finish
     // must regain a slot instead of gradually yielding the whole fleet to long
@@ -469,6 +489,36 @@ export function createProDelegateTool(task, runId, runner = completeInKernelBrow
   });
 }
 
+export const WORK_CHECK_TTL_MS = 15_000;
+export const WORK_CHECK_TIMEOUT_MS = 30_000;
+
+// Exit 0: claimable work exists. Exit 1: no claimable work. Any other outcome
+// (spawn failure, other exit codes, timeout) is a probe defect: fail open so a
+// broken probe degrades to launch-and-discover instead of silently starving
+// the task, and surface the defect as a controller event.
+export async function evaluateWorkCheck(task, runner = execFileAsync) {
+  try {
+    const result = await runner("bash", ["-lc", task.work_check], {
+      cwd: task.cwd,
+      timeout: WORK_CHECK_TIMEOUT_MS,
+      maxBuffer: 1024 * 1024,
+    });
+    return { state: "work", detail: String(result.stdout ?? "").trim() || "work available" };
+  } catch (error) {
+    const output = [error?.stdout, error?.stderr].map((value) => String(value ?? "").trim()).filter(Boolean).join("\n");
+    if (error?.code === 1 && !error?.killed) {
+      return { state: "no-work", detail: output || "no claimable work" };
+    }
+    return { state: "error", detail: output || String(error?.message ?? error) };
+  }
+}
+
+export function workCheckStale(task, at = now()) {
+  return Boolean(task.work_check) &&
+    (task.work_state === null || task.work_state === undefined ||
+      at - Number(task.work_checked_at ?? 0) >= WORK_CHECK_TTL_MS);
+}
+
 export async function validateCompletion(task, runner = execFileAsync) {
   if (!task.completion_check) return { ok: true, detail: "no completion check configured" };
   try {
@@ -509,7 +559,7 @@ export class Controller {
     this.plan = new PlanGovernor(config);
     this.active = new Map();
     this.stopping = false;
-    this.lastGovernorEvents = new Map();
+    this.lastThrottledEvents = new Map();
     this.lastControllerError = { at: 0, detail: "" };
     this.previousCpu = cpuTotals();
   }
@@ -673,17 +723,54 @@ export class Controller {
     }
   }
 
-  governorBlocked(detail, taskId) {
-    const previous = this.lastGovernorEvents.get(taskId) ?? { at: 0, detail: "" };
+  throttledEvent(kind, detail, taskId) {
+    const key = `${kind}:${taskId}`;
+    const previous = this.lastThrottledEvents.get(key) ?? { at: 0, detail: "" };
     if (detail !== previous.detail || now() - previous.at >= 60_000) {
       const at = now();
-      event(this.db, "governor-blocked", detail, taskId);
-      this.lastGovernorEvents.set(taskId, { at, detail });
+      event(this.db, kind, detail, taskId);
+      this.lastThrottledEvents.set(key, { at, detail });
+    }
+  }
+
+  governorBlocked(detail, taskId) {
+    this.throttledEvent("governor-blocked", detail, taskId);
+  }
+
+  // Refresh stale work probes for every live probe-carrying task, including
+  // tasks currently in idle backoff: the arrival of new work — not the passage
+  // of time — is what makes such a task launchable again, so a no-work→work
+  // transition clears the timed pause established while the queue was empty.
+  async refreshWorkChecks(tasks, runner = execFileAsync) {
+    const at = now();
+    const due = tasks.filter((task) =>
+      task.completed_at === null && task.cancelled_at === null &&
+      task.not_before <= at && workCheckStale(task, at));
+    if (!due.length) return;
+    const results = await Promise.all(due.map(async (task) => ({ task, result: await evaluateWorkCheck(task, runner) })));
+    for (const { task, result } of results) {
+      const previous = task.work_state ?? null;
+      const checkedAt = now();
+      this.db.prepare("UPDATE task SET work_state=?,work_checked_at=? WHERE id=?")
+        .run(result.state, checkedAt, task.id);
+      task.work_state = result.state;
+      task.work_checked_at = checkedAt;
+      if (result.state === "error") {
+        this.throttledEvent("work-check-error", result.detail, task.id);
+      } else if (result.state === "work" && previous === "no-work") {
+        this.db.prepare("UPDATE task SET next_eligible_at=min(next_eligible_at,?),incomplete_streak=0 WHERE id=?")
+          .run(checkedAt, task.id);
+        task.next_eligible_at = Math.min(Number(task.next_eligible_at), checkedAt);
+        task.incomplete_streak = 0;
+        event(this.db, "work-available", result.detail, task.id);
+      }
     }
   }
 
   async tick() {
     const tasks = taskRows(this.db);
+    try { await this.refreshWorkChecks(tasks); }
+    catch (error) { this.controllerError(String(error.stack ?? error)); }
     const activeAssignments = [...this.active.values()].map(({ task, provider }) => ({ task, provider }));
     const currentCpu = cpuTotals();
     const currentCpuPercent = cpuPercent(this.previousCpu, currentCpu);
@@ -763,7 +850,7 @@ function parseOptions(args) {
 }
 
 function createTask(db, options) {
-  const unknown = Object.keys(options).filter((key) => !["id", "cwd", "model", "thinking", "condition", "completion-check", "share", "not-before", "prompt", "prompt-file"].includes(key));
+  const unknown = Object.keys(options).filter((key) => !["id", "cwd", "model", "thinking", "condition", "completion-check", "work-check", "share", "not-before", "prompt", "prompt-file"].includes(key));
   if (unknown.length) fail(`task create does not support ${unknown.map((key) => `--${key}`).join(", ")}`);
   for (const key of ["id", "cwd", "model", "thinking", "condition"]) if (!options[key]) fail(`task create requires --${key}`);
   validateModelPolicy(options.model);
@@ -776,16 +863,17 @@ function createTask(db, options) {
   if (!(Number.isFinite(share) && share > 0)) fail("--share must be positive");
   const notBefore = options["not-before"] ? Date.parse(options["not-before"]) : now();
   if (!Number.isFinite(notBefore)) fail("--not-before must be an ISO timestamp");
-  db.prepare(`INSERT INTO task(id,prompt,cwd,model,thinking,completion_condition,completion_check,launch_share,not_before,next_eligible_at,created_at)
-    VALUES(?,?,?,?,?,?,?,?,?,?,?)`).run(options.id, prompt, cwd, options.model, options.thinking, options.condition, completionCheck, share, notBefore, notBefore, now());
+  const workCheck = options["work-check"]?.trim() || null;
+  db.prepare(`INSERT INTO task(id,prompt,cwd,model,thinking,completion_condition,completion_check,work_check,launch_share,not_before,next_eligible_at,created_at)
+    VALUES(?,?,?,?,?,?,?,?,?,?,?,?)`).run(options.id, prompt, cwd, options.model, options.thinking, options.condition, completionCheck, workCheck, share, notBefore, notBefore, now());
   event(db, "task-created", options.condition, options.id);
   console.log(`created ${options.id}`);
 }
 
 export function setTaskOptions(db, id, options) {
   if (!db.prepare("SELECT 1 FROM task WHERE id=?").get(id)) fail(`unknown task ${id}`);
-  if (!Object.keys(options).length) fail("task set requires --model, --thinking, --share, --prompt-file, --condition, and/or --completion-check");
-  const unknown = Object.keys(options).filter((key) => !["model", "thinking", "share", "prompt-file", "condition", "completion-check"].includes(key));
+  if (!Object.keys(options).length) fail("task set requires --model, --thinking, --share, --prompt-file, --condition, --completion-check, and/or --work-check");
+  const unknown = Object.keys(options).filter((key) => !["model", "thinking", "share", "prompt-file", "condition", "completion-check", "work-check"].includes(key));
   if (unknown.length) fail(`task set does not support ${unknown.map((key) => `--${key}`).join(", ")}`);
   if (options.model !== undefined) {
     const model = options.model.trim();
@@ -818,6 +906,11 @@ export function setTaskOptions(db, id, options) {
     if (!check) fail("--completion-check must be nonempty");
     db.prepare("UPDATE task SET completion_check=? WHERE id=?").run(check, id);
   }
+  if (options["work-check"] !== undefined) {
+    // An empty value removes the probe; the task returns to launch-and-discover.
+    const check = options["work-check"].trim() || null;
+    db.prepare("UPDATE task SET work_check=?,work_state=NULL,work_checked_at=0 WHERE id=?").run(check, id);
+  }
   event(db, "task-set", JSON.stringify(options), id);
 }
 
@@ -827,7 +920,12 @@ export function cancelTask(db, id, at = now()) {
 
 function printTasks(db) {
   for (const row of taskRows(db)) {
-    const state = row.cancelled_at ? "cancelled" : row.completed_at ? "complete" : row.not_before > now() ? `eligible ${iso(row.not_before)}` : row.next_eligible_at > now() ? `backoff ${iso(row.next_eligible_at)}` : "eligible";
+    const state = row.cancelled_at ? "cancelled"
+      : row.completed_at ? "complete"
+      : row.not_before > now() ? `eligible ${iso(row.not_before)}`
+      : !workReady(row) ? "no-work"
+      : row.next_eligible_at > now() ? `backoff ${iso(row.next_eligible_at)}`
+      : "eligible";
     console.log(`${row.id}\t${state}\tactive=${row.active}\tshare=${row.launch_share}\t${row.model}:${row.thinking}`);
   }
 }
@@ -865,7 +963,7 @@ async function main(argv = process.argv.slice(2)) {
   if (command === "task" && ["cancel", "reopen"].includes(subcommand)) {
     const id = rest[0]; if (!id) fail(`task ${subcommand} requires ID`);
     if (subcommand === "cancel") cancelTask(db, id);
-    else db.prepare("UPDATE task SET cancelled_at=NULL,completed_at=NULL,next_eligible_at=?,incomplete_streak=0 WHERE id=?").run(now(), id);
+    else db.prepare("UPDATE task SET cancelled_at=NULL,completed_at=NULL,next_eligible_at=?,incomplete_streak=0,work_state=NULL,work_checked_at=0 WHERE id=?").run(now(), id);
     event(db, `task-${subcommand}`, "operator command", id); console.log(`${subcommand} ${id}`); return;
   }
   if (command === "status") return printTasks(db);
@@ -915,10 +1013,10 @@ async function main(argv = process.argv.slice(2)) {
     return;
   }
   console.log(`Usage:
-  orchestrator task create --id ID --cwd DIR --model PROVIDER/MODEL --thinking LEVEL --condition TEXT [--completion-check COMMAND] [--share N] [--not-before ISO] (--prompt TEXT | --prompt-file FILE)
+  orchestrator task create --id ID --cwd DIR --model PROVIDER/MODEL --thinking LEVEL --condition TEXT [--completion-check COMMAND] [--work-check COMMAND] [--share N] [--not-before ISO] (--prompt TEXT | --prompt-file FILE)
   orchestrator task list
   orchestrator task show ID
-  orchestrator task set ID [--model PROVIDER/MODEL] [--thinking LEVEL] [--share N] [--prompt-file FILE] [--condition TEXT] [--completion-check COMMAND]
+  orchestrator task set ID [--model PROVIDER/MODEL] [--thinking LEVEL] [--share N] [--prompt-file FILE] [--condition TEXT] [--completion-check COMMAND] [--work-check COMMAND, '' clears]
   orchestrator task cancel ID
   orchestrator task reopen ID
   orchestrator status

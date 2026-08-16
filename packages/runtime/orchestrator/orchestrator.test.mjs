@@ -8,7 +8,7 @@ import test from "node:test";
 
 const temporary = fs.mkdtempSync(path.join(os.tmpdir(), "agent-orchestrator-test-"));
 process.env.AGENT_ORCHESTRATOR_DATA = temporary;
-const { cancelTask, choosePlanProvider, chooseTask, completionToolResult, Controller, cpuPercent, createProDelegateTool, insertRun, isolateTaskShell, isProDelegatingFrontierTask, launchBatchSize, loadConfig, nextIncompleteState, openDb, planWindowBurnPerHour, proEntitlementSnapshot, proLaunchAvailability, rankTasks, resourceSlots, setTaskOptions, shouldAdvanceBackoff, taskSettings, TOOL_SHELL, validateCompletion, validateModelPolicy } = await import("./orchestrator.mjs");
+const { cancelTask, choosePlanProvider, chooseTask, completionToolResult, Controller, cpuPercent, createProDelegateTool, evaluateWorkCheck, insertRun, isolateTaskShell, isProDelegatingFrontierTask, launchBatchSize, loadConfig, nextIncompleteState, openDb, planWindowBurnPerHour, proEntitlementSnapshot, proLaunchAvailability, rankTasks, resourceSlots, setTaskOptions, shouldAdvanceBackoff, taskSettings, TOOL_SHELL, validateCompletion, validateModelPolicy, WORK_CHECK_TTL_MS, workCheckStale, workReady } = await import("./orchestrator.mjs");
 
 test.after(() => fs.rmSync(temporary, { recursive: true, force: true }));
 
@@ -231,6 +231,110 @@ test("operator cancellation safely overrides a mistaken completion", () => {
   const cancelled = db.prepare("SELECT completed_at,cancelled_at FROM task WHERE id='task'").get();
   assert.equal(cancelled.completed_at, null);
   assert.equal(cancelled.cancelled_at, timestamp + 1);
+  db.close();
+});
+
+test("work probes gate launches instead of launch-and-discover", async () => {
+  const task = { cwd: temporary, work_check: "probe" };
+  assert.deepEqual(
+    await evaluateWorkCheck(task, async () => ({ stdout: "pending=3\n" })),
+    { state: "work", detail: "pending=3" },
+  );
+  assert.deepEqual(
+    await evaluateWorkCheck(task, async () => {
+      const error = new Error("exit 1");
+      error.code = 1;
+      throw error;
+    }),
+    { state: "no-work", detail: "no claimable work" },
+  );
+  // A broken or timed-out probe fails open: the task degrades to
+  // launch-and-discover instead of being silently starved.
+  const broken = await evaluateWorkCheck(task, async () => {
+    const error = new Error("boom");
+    error.code = 2;
+    error.stderr = "probe crashed";
+    throw error;
+  });
+  assert.equal(broken.state, "error");
+  const timedOut = await evaluateWorkCheck(task, async () => {
+    const error = new Error("killed");
+    error.code = null;
+    error.killed = true;
+    throw error;
+  });
+  assert.equal(timedOut.state, "error");
+});
+
+test("a no-work probe result excludes the task from ranking", () => {
+  const base = {
+    completed_at: null,
+    cancelled_at: null,
+    not_before: 0,
+    next_eligible_at: 0,
+    active: 0,
+    launch_share: 1,
+    created_at: 1,
+  };
+  const tasks = [
+    { ...base, id: "empty", work_check: "probe", work_state: "no-work" },
+    { ...base, id: "ready", work_check: "probe", work_state: "work", created_at: 2 },
+    { ...base, id: "unprobed", work_check: "probe", work_state: null, created_at: 3 },
+    { ...base, id: "probeless", created_at: 4 },
+  ];
+  assert.deepEqual(rankTasks(tasks, 0).map((task) => task.id).sort(), ["probeless", "ready", "unprobed"]);
+  assert.equal(workReady(tasks[0]), false);
+  assert.equal(workCheckStale({ work_check: "probe", work_state: null }), true);
+  assert.equal(workCheckStale({ work_check: "probe", work_state: "no-work", work_checked_at: Date.now() }), false);
+  assert.equal(workCheckStale({ work_check: "probe", work_state: "no-work", work_checked_at: Date.now() - WORK_CHECK_TTL_MS }), true);
+  assert.equal(workCheckStale({ work_check: null, work_state: null }), false);
+});
+
+test("new work clears idle backoff without waiting out the timer", async () => {
+  const db = openDb(path.join(temporary, "work-transition.sqlite3"));
+  const timestamp = Date.now();
+  const backoffUntil = timestamp + 30 * 60_000;
+  db.prepare(`INSERT INTO task(id,prompt,cwd,model,thinking,completion_condition,work_check,work_state,work_checked_at,launch_share,not_before,next_eligible_at,incomplete_streak,created_at)
+    VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?)`)
+    .run("probe-task", "prompt", temporary, "provider/model", "high", "done", "probe", "no-work", 1, 1, timestamp, backoffUntil, 3, timestamp);
+  const controller = new Controller(db, {});
+  const tasks = db.prepare("SELECT * FROM task").all();
+  await controller.refreshWorkChecks(tasks, async () => ({ stdout: "pending=2\n" }));
+  const updated = db.prepare("SELECT work_state,next_eligible_at,incomplete_streak FROM task WHERE id='probe-task'").get();
+  assert.equal(updated.work_state, "work");
+  assert.ok(updated.next_eligible_at <= Date.now());
+  assert.equal(updated.incomplete_streak, 0);
+  assert.equal(tasks[0].work_state, "work");
+  assert.ok(db.prepare("SELECT 1 FROM event WHERE kind='work-available' AND task_id='probe-task'").get());
+
+  // A repeated no-work verdict keeps the task unlaunched but never fabricates
+  // a work-available transition.
+  await new Promise((resolve) => setTimeout(resolve, 1));
+  db.prepare("UPDATE task SET work_checked_at=0 WHERE id='probe-task'").run();
+  tasks[0].work_checked_at = 0;
+  await controller.refreshWorkChecks(tasks, async () => {
+    const error = new Error("exit 1");
+    error.code = 1;
+    throw error;
+  });
+  assert.equal(db.prepare("SELECT work_state FROM task WHERE id='probe-task'").get().work_state, "no-work");
+  assert.equal(db.prepare("SELECT count(*) count FROM event WHERE kind='work-available'").get().count, 1);
+  db.close();
+});
+
+test("work checks are configurable and clearable through the task interface", () => {
+  const db = openDb(path.join(temporary, "work-check-set.sqlite3"));
+  const timestamp = Date.now();
+  db.prepare(`INSERT INTO task(id,prompt,cwd,model,thinking,completion_condition,launch_share,not_before,next_eligible_at,created_at)
+    VALUES(?,?,?,?,?,?,?,?,?,?)`).run("task", "prompt", temporary, "provider/model", "high", "done", 1, timestamp, timestamp, timestamp);
+  setTaskOptions(db, "task", { "work-check": "python3 probe.py" });
+  assert.equal(db.prepare("SELECT work_check FROM task WHERE id='task'").get().work_check, "python3 probe.py");
+  db.prepare("UPDATE task SET work_state='no-work',work_checked_at=? WHERE id='task'").run(timestamp);
+  setTaskOptions(db, "task", { "work-check": "" });
+  const cleared = db.prepare("SELECT work_check,work_state,work_checked_at FROM task WHERE id='task'").get();
+  assert.equal(cleared.work_check, null);
+  assert.equal(cleared.work_state, null);
+  assert.equal(cleared.work_checked_at, 0);
   db.close();
 });
 

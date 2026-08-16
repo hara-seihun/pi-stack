@@ -9,11 +9,14 @@ There is one concept: a **task**. A task remains eligible until an agent reports
 Tasks may declare:
 
 - a prompt, observable completion condition, and optional machine completion check;
+- an optional work-availability probe (`--work-check`);
 - an exact working directory, model, and thinking level;
 - a relative launch share among eligible persistent work;
 - an optional time at which it first becomes eligible.
 
 Tasks have no concurrency limit. Every eligible task can receive work whenever the governor admits another agent.
+
+A work check is a cheap command run in the task's working directory that reports whether claimable work exists right now: exit 0 means work exists, exit 1 means none. The controller refreshes each probe on a short cadence (15 s cache) and simply does not launch a task whose probe last reported no work — no agent is spent discovering an empty queue, and no timed backoff must elapse. Because probes also run while a task sits in idle backoff, a no-work→work transition clears that backoff immediately: the arrival of work, not the passage of time, restores eligibility (recorded as a `work-available` event). Any other probe outcome — timeout, crash, unexpected exit code — fails open: the task degrades to ordinary launch-and-discover and the defect is surfaced as a throttled `work-check-error` event, so a broken probe can never silently starve its task. Idle-report backoff remains as the secondary guard when a probe claims work that agents cannot actually claim. `orchestrator status` shows probe-gated tasks as `no-work`, and `task reopen` resets the probe cache for an immediate re-check.
 
 Each agent receives `task_complete`. It must report validated artifacts and whether the task itself is complete. When a machine completion check is configured, `complete=true` is only advisory until that command exits successfully; a failed check records the launch as incomplete. Reporting does not terminate the launch: an agent processes as many claimable work units as it can productively handle in one session and may call `task_complete` again to replace its earlier report; the final report is authoritative. A productive `complete=false` result restores task eligibility and resets any earlier failure streak unless an idle/error sibling from the same concurrent launch wave has already established a later pause. If no claimable work unit exists, the agent reports `productive=false`; that idle result receives bounded exponential backoff without being mislabeled as an execution error. Provider-turn errors are recorded from Pi's assistant error rather than being misreported as a missing `task_complete`; a genuine launch that ends normally without a completion report receives the same bounded backoff. Only a terminal result whose launch began after the previous eligibility time may update the shared schedule, so late siblings cannot erase or repeatedly advance one wave's pause. There are no standing/scheduled/once/review/retry task types and no priorities.
 
@@ -46,9 +49,11 @@ orchestrator task create \
   --thinking max \
   --condition 'All imported records pass the project verifier.' \
   --completion-check 'python3 tools/verify-complete.py' \
+  --work-check 'python3 tools/claimable-work.py' \
   --share 2 \
   --prompt-file /home/kenan/project/task.md
 orchestrator task set example --model openai-codex/gpt-5.6-sol --thinking xhigh --share 2 --prompt-file /home/kenan/project/revised-task.md --condition 'Exact target is admitted' --completion-check 'python3 verify-target.py'
+orchestrator task set example --work-check 'python3 tools/claimable-work.py'   # '' clears the probe
 orchestrator task cancel example
 orchestrator task reopen example
 ```
