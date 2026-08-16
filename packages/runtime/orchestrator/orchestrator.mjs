@@ -272,12 +272,18 @@ export function validateModelPolicy(model) {
 function isChatGptProTask(task) { return providerOf(task.model) === CHATGPT_PRO_PROVIDER; }
 
 export function proEntitlementSnapshot(at = now(), state = null) {
+  const suppliedState = state !== null;
   let pool = state;
   if (pool === null) {
     try { pool = JSON.parse(fs.readFileSync(CHATGPT_PRO_POOL_PATH, "utf8")); }
     catch { pool = {}; }
   }
-  return browserPoolCapacitySnapshot(pool, at);
+  const configuredProfiles = suppliedState
+    ? (pool?.version === 4
+      ? pool.profiles?.map((profile) => profile.browserProfile)
+      : pool?.version === 3 && pool.browserProfile ? [pool.browserProfile] : [])
+    : undefined;
+  return browserPoolCapacitySnapshot(pool, at, configuredProfiles);
 }
 
 export function proLaunchAvailability(entitlement, active) {

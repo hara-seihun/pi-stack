@@ -729,7 +729,7 @@ export async function completeInKernelBrowser(prompt, { signal, maxWaitMs = MAX_
     }, responseText);
     if (evidence.pro_execution_verified !== true) throw new Error(verificationFailure(evidence));
     await finishProfile(browserProfile, { verified: true }, signal);
-    return { text: responseText, evidence, audit };
+    return { text: responseText, evidence, audit, browserProfile };
   } catch (error) {
     warning ||= page ? await visibleProviderWarning(page) : "";
     if (!responseText || Object.keys(evidence).length === 0) {
