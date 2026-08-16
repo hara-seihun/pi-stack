@@ -45,6 +45,20 @@ test("persisted conversation proves the complete GPT-5.6 Pro invariant", () => {
   assert.equal(conversationLeafText(data), "proved text");
 });
 
+test("current persisted schema proves completion without the removed is_complete metadata", () => {
+  const data = conversation();
+  delete data.mapping.assistant.message.metadata.is_complete;
+  data.mapping.assistant.children = [];
+  data.async_status = 4;
+  const evidence = conversationModelEvidence(data);
+  assert.equal(evidence.current_node_is_leaf, true);
+  assert.equal(evidence.conversation_async_status, 4);
+  assert.equal(evidence.pro_execution_verified, true);
+
+  data.mapping.assistant.children = ["later"];
+  assert.equal(conversationModelEvidence(data).pro_execution_verified, false);
+});
+
 test("completed conversation SSE supplies the same execution invariant", () => {
   const events = [
     { message: { author: { role: "user" }, metadata: { resolved_model_slug: "gpt-5-6-pro" } } },
@@ -73,12 +87,12 @@ test("skipped or incomplete Pro work is rejected", () => {
 test("browser pool state has one profile entitlement and drops obsolete OAuth shape", () => {
   const initial = defaultPoolState();
   assert.equal(initial.version, 3);
-  assert.equal(initial.browserProfile, "kenan-personal");
+  assert.equal(initial.browserProfile, "limmy-google");
   assert.equal(initial.inFlightUntil, 0);
   assert.deepEqual(normalizePoolState({ version: 2, cooldowns: { account: 1 } }), initial);
   assert.equal(normalizePoolState({
     version: 3,
-    browserProfile: "kenan-personal",
+    browserProfile: "limmy-google",
     selectionCount: 4,
     inFlightUntil: 9,
     cooldownUntil: 10,

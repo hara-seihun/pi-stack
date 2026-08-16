@@ -9,7 +9,7 @@ The literal model sends a single user prompt unchanged. It is the model used for
 
 ## Transport and verification
 
-The provider acquires the one reusable Kernel profile `kenan-personal`, launches a direct-egress browser, attaches with Playwright over Kernel's CDP URL, and drives the genuine ChatGPT page. Kernel stealth mode is deliberately off: both its default proxy and direct egress have been tested, and direct egress avoids making proxy reputation another routing variable. It verifies the authenticated `/api/auth/session`, moves the live Intelligence slider to **Pro**, and requires the picker to show both **GPT-5.6 Sol** and **Effort Pro** before submitting.
+The provider acquires the one reusable Kernel profile `limmy-google`, launches a direct-egress browser, attaches with Playwright over Kernel's CDP URL, and drives the genuine ChatGPT page. Kernel stealth mode is deliberately off: both its default proxy and direct egress have been tested, and direct egress avoids making proxy reputation another routing variable. It verifies the authenticated `/api/auth/session`, moves the live Intelligence slider to **Pro**, and requires the picker to show both **GPT-5.6 Sol** and **Effort Pro** before submitting.
 
 A picker label is only request intent. Returned text is accepted only when ChatGPT's persisted conversation has all of:
 
@@ -17,7 +17,7 @@ A picker label is only request intent. Returned text is accepted only when ChatG
 - assistant `model_slug=gpt-5-6-pro`;
 - `pro_progress=100`;
 - `pro_skipped=false`;
-- a complete, successful end-turn leaf.
+- a complete, successful end-turn leaf. Current ChatGPT responses no longer carry the older `metadata.is_complete`; the equivalent persisted proof is a `current_node` with no children plus `status=finished_successfully` and `end_turn=true`, read only after the response stream itself has finished. `async_status` can remain `4` until the active browser closes and then normalize to `null`, so it is retained as diagnostics rather than misclassified as message incompleteness.
 
 The browser session is deleted in every outcome. Deletion saves profile changes. Verified and rejected provider evidence is owner-only under `/home/kenan/data/agent-orchestrator/pro/provider-audit/`; unverified text never reaches Pi as an answer.
 
@@ -25,7 +25,7 @@ The browser session is deleted in every outcome. Deletion saves profile changes.
 
 ## Authentication
 
-Kernel Managed Auth owns the `chatgpt.com` connection attached to `kenan-personal`. It uses the shared Google credential and has health checks plus automatic reauthentication enabled. Locate it by domain rather than persisting its generated connection id:
+Kernel Managed Auth owns the `chatgpt.com` connection attached to `limmy-google`. It uses the dedicated Limmy Google credential and has health checks plus automatic reauthentication enabled. Locate it by domain rather than persisting its generated connection id:
 
 ```bash
 kernel auth connections list --domain chatgpt.com -o json
@@ -45,9 +45,9 @@ This provider takes the smallest useful combination: Kernel supplies the maintai
 
 ## Current routing status
 
-The browser implementation is operational but the currently authenticated ChatGPT account is still routed to GPT-5.5 Mini. On 2026-08-15, two real Pi turns selected and verified **GPT-5.6 Sol / Pro** in the web UI and sent `model=gpt-5-6-pro`. Kernel's stealth proxy produced persisted `resolved_model_slug=gpt-5-5-mini`. Direct egress briefly reported Pro in the response stream and rendered `data-message-model-slug=gpt-5-6-pro` plus a Pro feedback control, but the authenticated persisted conversation still resolved to `gpt-5-5-mini`. This demonstrates why visible picker, DOM model attributes, response speed, and intermediate stream metadata are not sufficient acceptance evidence.
+The original `kenan-personal` ChatGPT identity remains routed to GPT-5.5 Mini. On 2026-08-15, real Pi turns selected and verified **GPT-5.6 Sol / Pro** in the web UI and sent `model=gpt-5-6-pro`; both Kernel proxy and direct egress still persisted `resolved_model_slug=gpt-5-5-mini`. One direct stream briefly reported Pro and rendered `data-message-model-slug=gpt-5-6-pro` plus a Pro feedback control, while the authenticated persisted conversation proved the Mini route. This demonstrates why visible picker, DOM model attributes, response speed, and intermediate stream metadata are not sufficient acceptance evidence.
 
-The provider therefore remains fail-closed and the campaign Pro task remains cancelled. The likely remaining boundaries are account-side allowance/restriction or server routing, not missing browser mechanics. A different genuinely entitled ChatGPT web account is now a clean test: attach its managed-auth connection to a separate Kernel profile and require the same persisted invariant before adding it to capacity.
+A second OAuth-pool identity, isolated in `limmy-google` because the two simultaneous website identities are incompatible, reports a Pro plan and has completed a persisted genuine GPT-5.6 Pro turn (`resolved_model_slug=model_slug=gpt-5-6-pro`, progress 100, not skipped, successful complete end turn). It is the canonical browser profile for this provider. A subsequent live Pi turn reproduced the full invariant end to end and recorded `pro_execution_verified=true` in provider audit. The campaign task remains cancelled solely because Hara has not activated that lane.
 
 ## Deployment and validation
 

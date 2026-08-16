@@ -20,7 +20,7 @@ const AGENT_DIR = join(HOME, ".pi", "agent");
 const POOL_PATH = join(AGENT_DIR, "chatgpt-pro-pool.json");
 const POOL_LOCK = join(AGENT_DIR, ".chatgpt-pro-pool.lock");
 const PROVIDER_AUDIT_DIR = join(HOME, "data", "agent-orchestrator", "pro", "provider-audit");
-const PROFILE_NAME = "kenan-personal";
+const PROFILE_NAME = process.env.CHATGPT_PRO_BROWSER_PROFILE || "limmy-google";
 const MODEL_ID = "gpt-5-6-pro";
 const ACCOUNT_LEASE_MS = 45 * 60_000;
 const FALLBACK_COOLDOWN_MS = 5 * 60_000;
@@ -177,7 +177,9 @@ export function conversationModelEvidence(data) {
   if (leaf) {
     evidence.message_status = leaf.status;
     evidence.message_end_turn = leaf.end_turn;
+    evidence.current_node_is_leaf = Array.isArray(mapping[current]?.children) && mapping[current].children.length === 0;
   }
+  evidence.conversation_async_status = data && Object.hasOwn(data, "async_status") ? data.async_status : undefined;
   for (const node of Object.values(mapping)) {
     const message = node?.message;
     if (!message || typeof message !== "object") continue;
@@ -190,6 +192,8 @@ export function conversationModelEvidence(data) {
       evidence.finished_text = md.finished_text;
     }
   }
+  const completionVerified = evidence.is_complete === true ||
+    (evidence.is_complete === undefined && evidence.current_node_is_leaf === true);
   evidence.pro_execution_verified =
     evidence.resolved_model_slug === MODEL_ID &&
     evidence.model_slug === MODEL_ID &&
@@ -197,7 +201,7 @@ export function conversationModelEvidence(data) {
     evidence.pro_skipped === false &&
     evidence.message_status === "finished_successfully" &&
     evidence.message_end_turn === true &&
-    evidence.is_complete === true;
+    completionVerified;
   return evidence;
 }
 
@@ -415,15 +419,19 @@ async function waitForStreamEvidence(page, submitted, signal, maxWaitMs = MAX_WA
   const proFeedback = await page.getByRole("button", { name: /Pro feedback/i }).count();
 
   let persisted = null;
-  const persistedDeadline = Date.now() + Math.min(60_000, maxWaitMs);
+  const persistedDeadline = Date.now() + Math.min(120_000, maxWaitMs);
   while (Date.now() < persistedDeadline) {
     signal?.throwIfAborted();
-    const result = await readPersistedConversation(page, submitted.conversationId);
+    // ChatGPT may first route the tab through a transient WEB:* id and replace
+    // it with the durable conversation id only after the Pro stream finishes.
+    const durableConversationId = conversationIdFromUrl(page.url()) ?? submitted.conversationId;
+    const result = await readPersistedConversation(page, durableConversationId);
     if (result.data) {
       persisted = result.data;
       const candidate = conversationModelEvidence(result.data);
-      if (candidate.pro_execution_verified === true ||
-          (candidate.message_status === "finished_successfully" && candidate.message_end_turn === true && candidate.is_complete === true)) break;
+      if (candidate.pro_execution_verified === true) break;
+      if (candidate.resolved_model_slug && candidate.resolved_model_slug !== MODEL_ID &&
+          candidate.message_status === "finished_successfully" && candidate.message_end_turn === true) break;
     }
     await sleep(2_000, signal);
   }

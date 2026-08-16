@@ -226,7 +226,7 @@ test("ChatGPT Pro capacity comes from the signed-in browser entitlement rather t
   const at = 10_000;
   const idle = proEntitlementSnapshot(at, {
     version: 3,
-    browserProfile: "kenan-personal",
+    browserProfile: "limmy-google",
     cooldownUntil: 0,
     inFlightUntil: 0,
   });
@@ -236,7 +236,7 @@ test("ChatGPT Pro capacity comes from the signed-in browser entitlement rather t
 
   const leased = proEntitlementSnapshot(at, {
     version: 3,
-    browserProfile: "kenan-personal",
+    browserProfile: "limmy-google",
     cooldownUntil: 0,
     inFlightUntil: at + 1,
   });
@@ -245,7 +245,7 @@ test("ChatGPT Pro capacity comes from the signed-in browser entitlement rather t
 
   const cooling = proEntitlementSnapshot(at, {
     version: 3,
-    browserProfile: "kenan-personal",
+    browserProfile: "limmy-google",
     cooldownUntil: at + 1,
     inFlightUntil: 0,
   });
