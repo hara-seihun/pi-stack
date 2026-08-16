@@ -87,7 +87,8 @@ test("task prompts can be updated through the governed task interface", () => {
   db.close();
 });
 
-test("task selection uses durable weighted launch fairness without priority modes", () => {
+test("task selection uses durable weighted launch age without priority modes", () => {
+  const at = Date.now();
   const base = {
     completed_at: null,
     cancelled_at: null,
@@ -96,40 +97,54 @@ test("task selection uses durable weighted launch fairness without priority mode
     created_at: 1
   };
   const selected = chooseTask([
-    { ...base, id: "wide", launch_share: 4, active: 1, launches: 4 },
-    { ...base, id: "narrow", launch_share: 1, active: 1, launches: 2 }
+    { ...base, id: "wide", launch_share: 4, last_started_at: at - 100, launches: 10_000 },
+    { ...base, id: "narrow", launch_share: 1, last_started_at: at - 200, launches: 2 }
   ], 2);
   assert.equal(selected.id, "wide");
-  assert.deepEqual(rankTasks([
-    { ...base, id: "wide", launch_share: 4, active: 1, launches: 4 },
-    { ...base, id: "narrow", launch_share: 1, active: 1, launches: 2 }
-  ], 2).map((task) => task.id), ["wide", "narrow"]);
 });
 
-test("serial provider capacity rotates across persistent lanes", () => {
+test("short persistent lanes retain concurrency beside long sessions", () => {
+  const at = Date.now();
+  const base = {
+    completed_at: null,
+    cancelled_at: null,
+    not_before: 0,
+    next_eligible_at: 0,
+    launch_share: 1,
+    created_at: 1,
+  };
+  assert.equal(chooseTask([
+    { ...base, id: "long", active: 1, last_started_at: at - 60_000 },
+    { ...base, id: "short", active: 0, last_started_at: at - 1_000 },
+  ], 1).id, "short");
+  assert.equal(chooseTask([
+    { ...base, id: "wide", active: 1, launch_share: 4, last_started_at: at - 1_000 },
+    { ...base, id: "narrow", active: 1, last_started_at: at - 60_000 },
+  ], 2).id, "wide");
+});
+
+test("serial provider capacity rotates without lifetime-history starvation", () => {
+  const at = Date.now();
   const base = {
     completed_at: null,
     cancelled_at: null,
     not_before: 0,
     next_eligible_at: 0,
     active: 0,
+    launch_share: 1,
   };
   const tasks = [
-    { ...base, id: "slack", launch_share: 2, launches: 9, created_at: 1 },
-    { ...base, id: "execution", launch_share: 2, launches: 0, created_at: 2 },
-    { ...base, id: "repair", launch_share: 1, launches: 0, created_at: 3 },
-    { ...base, id: "chief-of-staff", launch_share: 1, launches: 0, created_at: 4 },
+    { ...base, id: "historical", launches: 10_000, last_started_at: at - 4_000, created_at: 1 },
+    { ...base, id: "new", launches: 0, last_started_at: null, created_at: 2 },
+    { ...base, id: "recent", launches: 10, last_started_at: at - 1_000, created_at: 3 },
   ];
   assert.deepEqual(rankTasks(tasks, 0).map((task) => task.id), [
-    "execution",
-    "repair",
-    "chief-of-staff",
-    "slack",
+    "new",
+    "historical",
+    "recent",
   ]);
-  tasks[1].launches += 1;
-  assert.equal(chooseTask(tasks, 0).id, "repair");
-  tasks[2].launches += 1;
-  assert.equal(chooseTask(tasks, 0).id, "chief-of-staff");
+  tasks[1].last_started_at = Date.now();
+  assert.equal(chooseTask(tasks, 0).id, "historical");
 });
 
 test("completion tools terminate the launch immediately", () => {

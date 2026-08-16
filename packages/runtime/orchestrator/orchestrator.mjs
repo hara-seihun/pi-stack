@@ -195,25 +195,31 @@ function taskRows(db) {
   return db.prepare(`
     SELECT t.*,
       count(CASE WHEN r.status='running' THEN 1 END) AS active,
-      count(r.id) AS launches
+      count(r.id) AS launches,
+      max(r.started_at) AS last_started_at
     FROM task t LEFT JOIN run r ON r.task_id=t.id
     GROUP BY t.id ORDER BY t.created_at,t.id
   `).all();
 }
 
 export function rankTasks(tasks, _activeTotal) {
+  const at = now();
   const eligible = tasks.filter((task) =>
     task.completed_at === null && task.cancelled_at === null &&
-    task.not_before <= now() && task.next_eligible_at <= now());
+    task.not_before <= at && task.next_eligible_at <= at);
   return eligible
-    // Weighted fair queueing must use durable launch history, not only active
-    // sessions. With one provider slot, active counts return to zero between
-    // launches and would otherwise let the oldest high-share task win forever.
+    // Active/share is the durable concurrency allocation: fast lanes that finish
+    // must regain a slot instead of gradually yielding the whole fleet to long
+    // sessions. Weighted age breaks equal-allocation ties and rotates correctly
+    // even with one provider slot. Lifetime launches remain observability only.
     .map((task) => ({
       task,
-      normalizedLaunches: Number(task.launches ?? task.active ?? 0) / Number(task.launch_share),
+      normalizedActive: Number(task.active ?? 0) / Number(task.launch_share),
+      debt: task.last_started_at === null || task.last_started_at === undefined
+        ? Number.POSITIVE_INFINITY
+        : Math.max(0, at - Number(task.last_started_at)) * Number(task.launch_share),
     }))
-    .sort((a, b) => a.normalizedLaunches - b.normalizedLaunches || a.task.created_at - b.task.created_at)
+    .sort((a, b) => a.normalizedActive - b.normalizedActive || b.debt - a.debt || a.task.created_at - b.task.created_at)
     .map((item) => item.task);
 }
 
