@@ -87,7 +87,7 @@ test("task prompts can be updated through the governed task interface", () => {
   db.close();
 });
 
-test("task selection uses launch shares without priority modes", () => {
+test("task selection uses durable weighted launch fairness without priority modes", () => {
   const base = {
     completed_at: null,
     cancelled_at: null,
@@ -96,14 +96,40 @@ test("task selection uses launch shares without priority modes", () => {
     created_at: 1
   };
   const selected = chooseTask([
-    { ...base, id: "wide", launch_share: 4, active: 1 },
-    { ...base, id: "narrow", launch_share: 1, active: 1 }
+    { ...base, id: "wide", launch_share: 4, active: 1, launches: 4 },
+    { ...base, id: "narrow", launch_share: 1, active: 1, launches: 2 }
   ], 2);
   assert.equal(selected.id, "wide");
   assert.deepEqual(rankTasks([
-    { ...base, id: "wide", launch_share: 4, active: 1 },
-    { ...base, id: "narrow", launch_share: 1, active: 1 }
+    { ...base, id: "wide", launch_share: 4, active: 1, launches: 4 },
+    { ...base, id: "narrow", launch_share: 1, active: 1, launches: 2 }
   ], 2).map((task) => task.id), ["wide", "narrow"]);
+});
+
+test("serial provider capacity rotates across persistent lanes", () => {
+  const base = {
+    completed_at: null,
+    cancelled_at: null,
+    not_before: 0,
+    next_eligible_at: 0,
+    active: 0,
+  };
+  const tasks = [
+    { ...base, id: "slack", launch_share: 2, launches: 9, created_at: 1 },
+    { ...base, id: "execution", launch_share: 2, launches: 0, created_at: 2 },
+    { ...base, id: "repair", launch_share: 1, launches: 0, created_at: 3 },
+    { ...base, id: "chief-of-staff", launch_share: 1, launches: 0, created_at: 4 },
+  ];
+  assert.deepEqual(rankTasks(tasks, 0).map((task) => task.id), [
+    "execution",
+    "repair",
+    "chief-of-staff",
+    "slack",
+  ]);
+  tasks[1].launches += 1;
+  assert.equal(chooseTask(tasks, 0).id, "repair");
+  tasks[2].launches += 1;
+  assert.equal(chooseTask(tasks, 0).id, "chief-of-staff");
 });
 
 test("completion tools terminate the launch immediately", () => {

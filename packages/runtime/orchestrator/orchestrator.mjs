@@ -185,21 +185,27 @@ function event(db, kind, detail, taskId = null, runId = null) {
 
 function taskRows(db) {
   return db.prepare(`
-    SELECT t.*, count(CASE WHEN r.status='running' THEN 1 END) AS active
+    SELECT t.*,
+      count(CASE WHEN r.status='running' THEN 1 END) AS active,
+      count(r.id) AS launches
     FROM task t LEFT JOIN run r ON r.task_id=t.id
     GROUP BY t.id ORDER BY t.created_at,t.id
   `).all();
 }
 
-export function rankTasks(tasks, activeTotal) {
+export function rankTasks(tasks, _activeTotal) {
   const eligible = tasks.filter((task) =>
     task.completed_at === null && task.cancelled_at === null &&
     task.not_before <= now() && task.next_eligible_at <= now());
-  if (!eligible.length) return [];
-  const totalShare = eligible.reduce((sum, task) => sum + task.launch_share, 0);
   return eligible
-    .map((task) => ({ task, deficit: (task.launch_share / totalShare) * (activeTotal + 1) - Number(task.active) }))
-    .sort((a, b) => b.deficit - a.deficit || a.task.created_at - b.task.created_at)
+    // Weighted fair queueing must use durable launch history, not only active
+    // sessions. With one provider slot, active counts return to zero between
+    // launches and would otherwise let the oldest high-share task win forever.
+    .map((task) => ({
+      task,
+      normalizedLaunches: Number(task.launches ?? task.active ?? 0) / Number(task.launch_share),
+    }))
+    .sort((a, b) => a.normalizedLaunches - b.normalizedLaunches || a.task.created_at - b.task.created_at)
     .map((item) => item.task);
 }
 
