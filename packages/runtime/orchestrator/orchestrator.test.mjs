@@ -147,11 +147,10 @@ test("serial provider capacity rotates without lifetime-history starvation", () 
   assert.equal(chooseTask(tasks, 0).id, "historical");
 });
 
-test("completion tools terminate the launch immediately", () => {
+test("completion reports do not terminate the launch", () => {
   assert.deepEqual(completionToolResult("done", { complete: false }), {
     content: [{ type: "text", text: "done" }],
     details: { complete: false },
-    terminate: true,
   });
 });
 

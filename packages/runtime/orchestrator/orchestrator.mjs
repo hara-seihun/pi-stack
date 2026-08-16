@@ -412,7 +412,7 @@ export function nextIncompleteState(streak, failed) {
   return { streak: nextStreak, delayMs: backoffMs(nextStreak) };
 }
 export function completionToolResult(text, details) {
-  return { content: [{ type: "text", text }], details, terminate: true };
+  return { content: [{ type: "text", text }], details };
 }
 
 const PRO_DELEGATING_FRONTIER_TASKS = new Set([
@@ -468,8 +468,7 @@ export async function validateCompletion(task, runner = execFileAsync) {
   try {
     const result = await runner("bash", ["-lc", task.completion_check], {
       cwd: task.cwd,
-      timeout: 120_000,
-      maxBuffer: 1024 * 1024,
+      maxBuffer: 16 * 1024 * 1024,
     });
     return { ok: true, detail: String(result.stdout ?? "").trim() || "completion check passed" };
   } catch (error) {
@@ -543,7 +542,7 @@ export class Controller {
       const completionTool = defineTool({
         name: "task_complete",
         label: "Complete task launch",
-        description: "Report this launch's validated output. Set complete=true only when the task completion condition is now satisfied. Set productive=false only when no claimable work unit existed; idle reports receive bounded backoff instead of immediately launching another agent.",
+        description: "Report this launch's validated output. Call it when your work is done; if you keep working afterward, call it again and the newest report replaces the old one. Set complete=true only when the task completion condition is now satisfied. Set productive=false only when this launch processed no work unit at all; idle reports receive bounded backoff instead of immediately launching another agent.",
         parameters: Type.Object({
           complete: Type.Boolean(),
           productive: Type.Optional(Type.Boolean({ description: "Whether this launch claimed and processed a real work unit. Defaults to true." })),
@@ -551,7 +550,6 @@ export class Controller {
           artifacts: Type.Optional(Type.Array(Type.String()))
         }),
         execute: async (_id, parameters) => {
-          if (report) return completionToolResult("This launch has already reported completion.", {});
           const validation = parameters.complete ? await validateCompletion(task) : null;
           const complete = parameters.complete && validation.ok;
           const summary = parameters.complete && !validation.ok
@@ -568,7 +566,7 @@ export class Controller {
             ? "Task completion recorded after the configured machine check passed."
             : parameters.complete
               ? `Task completion rejected by the configured machine check: ${validation.detail}`
-              : "Launch output recorded; the task remains eligible.";
+              : "Launch output recorded; the task remains eligible. If you continue working, call task_complete again to update this report.";
           return completionToolResult(text, report);
         }
       });
@@ -607,7 +605,7 @@ export class Controller {
       this.db.prepare("UPDATE run SET session_id=? WHERE id=?").run(sessionId, runId);
       const prompt = isChatGptProTask(task)
         ? task.prompt
-        : `${task.prompt}\n\n## Orchestrated task contract\nTask: ${task.id}\nCompletion condition: ${task.completion_condition}\nThis task may run repeatedly or concurrently. Make external effects idempotent where possible. Before finishing, call task_complete exactly once with the validated result. Set complete=true only if the completion condition is satisfied. Set productive=false only if no claimable work unit existed; otherwise omit it or set productive=true.`;
+        : `${task.prompt}\n\n## Orchestrated task contract\nTask: ${task.id}\nCompletion condition: ${task.completion_condition}\nThis task runs repeatedly and concurrently with other launches of itself; make external effects idempotent and use the project's claim/lease tools. Process as many work units as you can productively handle in this launch: after finishing one, claim the next, and stop only when no claimable work remains or your remaining context is too small to do the next unit well. Explore whatever files, state, or tools help you do the work well, and exercise initiative: retry transient failures, and repair broken tooling at its owning layer instead of reporting around it. Before finishing, call task_complete with the validated result; calling it again replaces the earlier report, so keep it current if you continue working. Set complete=true only if the completion condition is satisfied. Set productive=false only if this launch processed no work unit at all; otherwise omit it or set productive=true.`;
       await session.prompt(prompt);
       const assistant = [...session.messages].reverse().find((message) => message.role === "assistant");
       if (!report && isChatGptProTask(task)) {
