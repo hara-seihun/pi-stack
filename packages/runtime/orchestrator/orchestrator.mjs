@@ -27,7 +27,7 @@ const LOCK = path.join(DATA, "controller.lock");
 const AUTH_PATH = path.join(getAgentDir(), "auth.json");
 const CHATGPT_PRO_POOL_PATH = path.join(getAgentDir(), "chatgpt-pro-pool.json");
 const CHATGPT_PRO_PROVIDER = "chatgpt-pro";
-const TICK_MS = 1000;
+const TICK_MS = 5000;
 const execFileAsync = promisify(execFile);
 
 const DEFAULT_CONFIG = {

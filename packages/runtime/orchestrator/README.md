@@ -25,7 +25,7 @@ Before every launch, one governor checks:
 2. measured whole-machine available RAM;
 3. measured Codex plan consumption.
 
-There is no numeric agent cap in task state, operator configuration, or the launch interface. The governor alone decides whether another agent fits. It admits at most one new SDK session per one-second measurement tick: session startup and child-tool memory are not visible in the snapshot that precedes them, so filling all calculated slots from one snapshot would create a stale-telemetry launch wave and outrun no-work backoff.
+There is no numeric agent cap in task state, operator configuration, or the launch interface. The governor alone decides whether another agent fits. It admits at most one new SDK session per five-second measurement tick: session startup and child-tool memory are not visible in the snapshot that precedes them, so filling all calculated slots from one snapshot would create a stale-telemetry launch wave and outrun no-work backoff.
 
 The plan-consumption estimator queries every configured Codex account's five-hour and weekly windows, paces all remaining capacity to each reset, and uses the tighter rate for each account. Every launch is assigned to a concrete account only when that account's own allowance can hold its calibrated active burn plus the candidate. The service disables multi-pass initial spreading so the extension cannot override this governed assignment; runtime rate-limit rotation remains available. Missing or malformed plan evidence fails closed, while an unhealthy or exhausted account receives no launch.
 
