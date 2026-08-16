@@ -25,11 +25,11 @@ export const PRO_MAX_PARALLEL = 4;
 const DEFAULT_PROFILE_NAME = "limmy-google";
 const MODEL_ID = "gpt-5-6-pro";
 export const PRO_TRANSPORT_HORIZONS = Object.freeze({
-  responseWaitMs: 2 * 60 * 60_000 + 45 * 60_000,
-  stalledWorkMs: 45 * 60_000,
-  persistedPollMs: 60_000,
-  browserTimeoutSeconds: 3 * 60 * 60,
-  accountLeaseMs: 3 * 60 * 60_000,
+  responseWaitMs: 3 * 60 * 60_000,
+  stalledWorkMs: 60 * 60_000,
+  persistedPollMs: 20 * 60_000,
+  browserTimeoutSeconds: 5 * 60,
+  accountLeaseMs: 3 * 60 * 60_000 + 20 * 60_000,
 });
 const ACCOUNT_LEASE_MS = PRO_TRANSPORT_HORIZONS.accountLeaseMs;
 const FALLBACK_COOLDOWN_BASE_MS = 15 * 60_000;
@@ -231,12 +231,12 @@ async function kernel(args, { signal, timeout = 60_000 } = {}) {
   return result.stdout;
 }
 
-async function createBrowser(browserProfile, signal) {
+async function createBrowser(browserProfile, signal, startUrl = "https://chatgpt.com/") {
   const stdout = await kernel([
     "browsers", "create",
     "--profile-name", browserProfile,
     "--save-changes",
-    "--start-url", "https://chatgpt.com/",
+    "--start-url", startUrl,
     "--timeout", String(PRO_TRANSPORT_HORIZONS.browserTimeoutSeconds),
     "--viewport", "1440x900@25",
     "--telemetry=console,network,page,interaction",
@@ -249,9 +249,17 @@ async function createBrowser(browserProfile, signal) {
 
 async function deleteBrowser(sessionId) {
   if (!sessionId) return;
-  try {
-    await kernel(["browsers", "delete", sessionId], { timeout: 60_000 });
-  } catch {}
+  let failure;
+  for (let attempt = 1; attempt <= 3; attempt++) {
+    try {
+      await kernel(["browsers", "delete", sessionId], { timeout: 60_000 });
+      return;
+    } catch (error) {
+      failure = error;
+      if (attempt < 3) await sleep(1_000 * attempt);
+    }
+  }
+  throw new Error(`Could not delete billable Kernel browser ${sessionId}: ${failure instanceof Error ? failure.message : String(failure)}`);
 }
 
 function completedProWork(evidence) {
@@ -327,77 +335,6 @@ export function conversationLeafText(data) {
   const leaf = data?.current_node && mapping[data.current_node]?.message;
   const parts = leaf?.content?.parts;
   return Array.isArray(parts) ? parts.filter((part) => typeof part === "string").join("\n") : "";
-}
-
-export function conversationStreamEvidence(body) {
-  const evidence = {};
-  let text = "";
-  const inspectMessage = (message) => {
-    if (!message || typeof message !== "object") return;
-    const role = message.author?.role;
-    const metadata = message.metadata && typeof message.metadata === "object" ? message.metadata : {};
-    if (role === "user" && typeof metadata.resolved_model_slug === "string") {
-      evidence.resolved_model_slug = metadata.resolved_model_slug;
-    }
-    if (metadata.pro_progress !== undefined) evidence.pro_progress = metadata.pro_progress;
-    if (metadata.pro_skipped !== undefined) evidence.pro_skipped = metadata.pro_skipped;
-    if (metadata.pro_progress !== undefined || metadata.pro_skipped !== undefined) {
-      evidence.pro_finished_duration_sec = metadata.finished_duration_sec;
-      evidence.pro_finished_text = metadata.finished_text;
-      evidence.finished_duration_sec = metadata.finished_duration_sec;
-      evidence.finished_text = metadata.finished_text;
-      evidence.pro_work_model_slug = metadata.model_slug;
-      evidence.pro_work_status = message.status;
-      evidence.pro_working_turn_id = metadata.working_turn_id;
-    }
-    if (role === "assistant") {
-      for (const key of ["model_slug", "default_model_slug", "finish_details", "is_complete"]) {
-        if (metadata[key] !== undefined && metadata[key] !== null) evidence[key] = metadata[key];
-      }
-      if (metadata.reasoning_status !== undefined) {
-        evidence.reasoning_status = metadata.reasoning_status;
-        evidence.reasoning_start_time = metadata.reasoning_start_time;
-        evidence.reasoning_end_time = metadata.reasoning_end_time;
-        evidence.reasoning_working_turn_id = metadata.working_turn_id;
-      }
-      if (metadata.model_slug === MODEL_ID && typeof metadata.working_turn_id === "string") {
-        evidence.leaf_working_turn_id = metadata.working_turn_id;
-      }
-      if (message.status !== undefined) evidence.message_status = message.status;
-      if (message.end_turn !== undefined) evidence.message_end_turn = message.end_turn;
-      const parts = message.content?.parts;
-      if (Array.isArray(parts)) {
-        const candidate = parts.filter((part) => typeof part === "string").join("\n");
-        if (candidate) text = candidate;
-      }
-    }
-  };
-  const walk = (value, depth = 0) => {
-    if (!value || typeof value !== "object" || depth > 12) return;
-    if (value.author?.role) inspectMessage(value);
-    if (value.message?.author?.role) inspectMessage(value.message);
-    for (const [key, child] of Object.entries(value)) {
-      if (key === "message" && child?.author?.role) continue;
-      if (Array.isArray(child)) child.forEach((item) => walk(item, depth + 1));
-      else if (child && typeof child === "object") walk(child, depth + 1);
-    }
-  };
-  for (const block of String(body).split(/\r?\n\r?\n/)) {
-    const payload = block.split(/\r?\n/)
-      .filter((line) => line.startsWith("data:"))
-      .map((line) => line.slice(5).trim())
-      .join("\n");
-    if (!payload || payload === "[DONE]") continue;
-    try { walk(JSON.parse(payload)); } catch {}
-  }
-  evidence.pro_execution_verified =
-    evidence.resolved_model_slug === MODEL_ID &&
-    evidence.model_slug === MODEL_ID &&
-    completedProWork(evidence) &&
-    evidence.message_status === "finished_successfully" &&
-    evidence.message_end_turn === true &&
-    evidence.is_complete === true;
-  return { evidence, text };
 }
 
 function conversationIdFromUrl(url) {
@@ -572,79 +509,76 @@ async function stopActiveResponse(page) {
   return true;
 }
 
-async function waitForStreamEvidence(page, submitted, signal, maxWaitMs = MAX_WAIT_MS) {
-  const deadline = Date.now() + maxWaitMs;
-  const remaining = () => Math.max(1, deadline - Date.now());
-  const response = await withDeadline(submitted.responsePromise, Math.min(remaining(), 120_000), signal);
+async function waitForPersistedEvidence(browserProfile, submitted, signal, maxWaitMs = MAX_WAIT_MS) {
+  const started = Date.now();
+  const deadline = started + maxWaitMs;
   let persisted = null;
+  let evidence = {};
   let activityMarker = null;
-  let lastActivityAt = Date.now();
+  let lastActivityAt = started;
   let stalled = false;
+  let timedOut = false;
   let stopRequested = false;
+  let warning = "";
+  let pollCount = 0;
+
+  // ChatGPT continues Pro reasoning server-side after the submitting browser is
+  // deleted. Keep only the logical entitlement lease between observations:
+  // every twenty minutes, open a short-lived browser, read the authoritative
+  // persisted conversation once, and delete the browser immediately.
   while (Date.now() < deadline) {
+    await sleep(Math.min(PRO_TRANSPORT_HORIZONS.persistedPollMs, deadline - Date.now()), signal);
     signal?.throwIfAborted();
-    // A Pro POST stream can finish while the server-side reasoning turn remains
-    // async. The persisted conversation, not stream closure or early DOM text,
-    // decides when the turn has actually ended.
-    const durableConversationId = conversationIdFromUrl(page.url()) ?? submitted.conversationId;
-    const result = await readPersistedConversation(page, durableConversationId);
-    if (result.data) {
-      persisted = result.data;
-      const candidate = conversationModelEvidence(result.data);
-      if (isTerminalConversationEvidence(candidate)) break;
-      const marker = conversationActivityMarker(result.data, candidate);
-      if (marker !== activityMarker) {
-        activityMarker = marker;
-        lastActivityAt = Date.now();
-      } else if (Date.now() - lastActivityAt >= PRO_TRANSPORT_HORIZONS.stalledWorkMs) {
+    pollCount += 1;
+    let kernelBrowser = null;
+    let page = null;
+    try {
+      const conversationUrl = `https://chatgpt.com/c/${encodeURIComponent(submitted.conversationId)}`;
+      kernelBrowser = await createBrowser(browserProfile, signal, conversationUrl);
+      const playwrightBrowser = await chromium.connectOverCDP(kernelBrowser.cdpUrl, { timeout: 60_000 });
+      const context = playwrightBrowser.contexts()[0];
+      if (!context) throw new Error("Kernel CDP endpoint exposed no browser context during Pro status poll");
+      page = context.pages()[0] ?? await context.newPage();
+      await page.goto(conversationUrl, { waitUntil: "domcontentloaded", timeout: 60_000 });
+      await checkAuthentication(page);
+      const result = await readPersistedConversation(page, submitted.conversationId);
+      warning ||= await visibleProviderWarning(page);
+      if (result.data) {
+        persisted = result.data;
+        evidence = conversationModelEvidence(result.data);
+        if (isTerminalConversationEvidence(evidence)) break;
+        const marker = conversationActivityMarker(result.data, evidence);
+        if (marker !== activityMarker) {
+          activityMarker = marker;
+          lastActivityAt = Date.now();
+        } else if (Date.now() - lastActivityAt >= PRO_TRANSPORT_HORIZONS.stalledWorkMs) {
+          stalled = true;
+          stopRequested = await stopActiveResponse(page);
+          break;
+        }
+      }
+      if (Date.now() >= deadline) {
+        timedOut = true;
         stopRequested = await stopActiveResponse(page);
-        stalled = true;
         break;
       }
+    } finally {
+      await deleteBrowser(kernelBrowser?.sessionId);
     }
-    // ChatGPT permits an initial burst of conversation reads, then throttles
-    // sustained five-second polling to roughly one successful read per minute.
-    // Poll at that durable rate instead of producing a stream of 429s; persisted
-    // state remains authoritative and one-minute completion latency is harmless
-    // for Pro turns that routinely run for hours.
-    await sleep(Math.min(PRO_TRANSPORT_HORIZONS.persistedPollMs, remaining()), signal);
   }
-  if (!persisted) throw new Error("ChatGPT conversation could not be read back with the signed browser session");
 
-  let body = "";
-  let streamError = null;
-  try {
-    await withDeadline(response.finished(), Math.min(remaining(), stalled ? 60_000 : remaining()), signal);
-    body = (await response.body()).toString("utf8");
-  } catch (error) {
-    streamError = error instanceof Error ? error.message : String(error);
-  }
-  const streamed = conversationStreamEvidence(body);
-  const assistant = page.locator('[data-message-author-role="assistant"]').last();
-  const assistantVisible = await assistant.isVisible().catch(() => false);
-  const domText = assistantVisible
-    ? (await assistant.locator(".markdown").count()
-      ? await assistant.locator(".markdown").last().innerText()
-      : await assistant.innerText())
-    : "";
-  const domModel = assistantVisible ? await assistant.getAttribute("data-message-model-slug") : null;
-  const proFeedback = await page.getByRole("button", { name: /Pro feedback/i }).count();
-  const authoritative = conversationModelEvidence(persisted);
-  const persistedText = conversationLeafText(persisted);
+  if (!persisted) throw new Error("ChatGPT conversation could not be read back during periodic signed-browser checks");
   return {
-    text: persistedText.trim() || domText.trim() || streamed.text,
+    text: conversationLeafText(persisted).trim(),
+    warning,
     evidence: {
-      ...authoritative,
-      stream_resolved_model_slug: streamed.evidence.resolved_model_slug,
-      stream_model_slug: streamed.evidence.model_slug,
-      stream_pro_progress: streamed.evidence.pro_progress,
-      stream_pro_skipped: streamed.evidence.pro_skipped,
-      dom_model_slug: domModel,
-      pro_feedback_control: proFeedback > 0,
-      response_stream_bytes: Buffer.byteLength(body),
+      ...evidence,
+      submission_response_status: submitted.responseStatus,
+      transport_poll_interval_ms: PRO_TRANSPORT_HORIZONS.persistedPollMs,
+      transport_poll_count: pollCount,
       transport_stalled: stalled,
+      transport_timed_out: timedOut,
       transport_stop_requested: stopRequested,
-      response_stream_error: streamError,
     },
   };
 }
@@ -665,8 +599,11 @@ function verificationFailure(evidence) {
 
 function failureCooldown(error, evidence, warning) {
   const message = `${error instanceof Error ? error.message : String(error)} ${warning}`;
-  if (evidence?.transport_stalled === true) {
-    return { cooldownMs: FALLBACK_COOLDOWN_MAX_MS, reason: "pro-stalled" };
+  if (evidence?.transport_stalled === true || evidence?.transport_timed_out === true) {
+    return {
+      cooldownMs: FALLBACK_COOLDOWN_MAX_MS,
+      reason: evidence.transport_stalled === true ? "pro-stalled" : "pro-timeout",
+    };
   }
   if (evidence?.resolved_model_slug && evidence.resolved_model_slug !== MODEL_ID) {
     return { cooldownMs: FALLBACK_COOLDOWN_BASE_MS, reason: "pro-fallback" };
@@ -687,44 +624,62 @@ export async function completeInKernelBrowser(prompt, { signal, maxWaitMs = MAX_
       capacity: browserPoolCapacitySnapshot(state, Date.now(), state.profiles.map((profile) => profile.browserProfile)),
     });
   } catch {}
-  let kernelBrowser = null;
-  let playwrightBrowser = null;
-  let page = null;
+  let submitted = null;
+  let selection = null;
   let evidence = {};
   let responseText = "";
   let warning = "";
   let audit = null;
   const started = Date.now();
   try {
-    kernelBrowser = await createBrowser(browserProfile, signal);
-    playwrightBrowser = await chromium.connectOverCDP(kernelBrowser.cdpUrl, { timeout: 60_000 });
-    const context = playwrightBrowser.contexts()[0];
-    if (!context) throw new Error("Kernel CDP endpoint exposed no browser context");
-    page = context.pages()[0] ?? await context.newPage();
-    await page.goto("https://chatgpt.com/", { waitUntil: "domcontentloaded", timeout: 60_000 });
-    await checkAuthentication(page);
-    const selection = await ensureProSelection(page);
-    const submitted = await submitPrompt(page, prompt);
+    let submissionBrowser = null;
     try {
-      const verified = await waitForStreamEvidence(page, submitted, signal, maxWaitMs);
-      responseText = verified.text;
-      evidence = {
-        ...verified.evidence,
-        outgoing_model: submitted.observed.requestedModel,
-        picker_selected: selection.selected,
-        picker_model: "GPT-5.6 Sol",
-        picker_effort: "Pro",
-        browser_profile: browserProfile,
-      };
+      submissionBrowser = await createBrowser(browserProfile, signal);
+      const playwrightBrowser = await chromium.connectOverCDP(submissionBrowser.cdpUrl, { timeout: 60_000 });
+      const context = playwrightBrowser.contexts()[0];
+      if (!context) throw new Error("Kernel CDP endpoint exposed no browser context");
+      const page = context.pages()[0] ?? await context.newPage();
+      await page.goto("https://chatgpt.com/", { waitUntil: "domcontentloaded", timeout: 60_000 });
+      await checkAuthentication(page);
+      selection = await ensureProSelection(page);
+      submitted = await submitPrompt(page, prompt);
+      try {
+        const response = await withDeadline(submitted.responsePromise, 120_000, signal);
+        submitted.responseStatus = response.status();
+        if (submitted.responseStatus < 200 || submitted.responseStatus >= 300) {
+          throw new Error(`ChatGPT rejected the Pro submission with HTTP ${submitted.responseStatus}`);
+        }
+        if (submitted.observed.requestedModel !== MODEL_ID) {
+          throw new Error(`ChatGPT submitted unexpected model ${String(submitted.observed.requestedModel)}`);
+        }
+        warning = await visibleProviderWarning(page);
+      } finally {
+        submitted.remove();
+      }
     } finally {
-      submitted.remove();
+      // The POST has been accepted and ChatGPT owns the asynchronous work. End
+      // the billable Kernel minute immediately; never hold this browser while
+      // Pro reasons server-side.
+      await deleteBrowser(submissionBrowser?.sessionId);
     }
-    warning = await visibleProviderWarning(page);
+
+    onStatus?.({ phase: "submitted", browserProfile, nextCheckMs: PRO_TRANSPORT_HORIZONS.persistedPollMs });
+    const verified = await waitForPersistedEvidence(browserProfile, submitted, signal, maxWaitMs);
+    responseText = verified.text;
+    warning ||= verified.warning;
+    evidence = {
+      ...verified.evidence,
+      outgoing_model: submitted.observed.requestedModel,
+      picker_selected: selection.selected,
+      picker_model: "GPT-5.6 Sol",
+      picker_effort: "Pro",
+      browser_profile: browserProfile,
+    };
     audit = recordProviderAudit({
       at: new Date().toISOString(),
-      transport: "kernel-browser-playwright",
+      transport: "kernel-browser-submit-periodic-poll",
       browser_profile: browserProfile,
-      conversation_id: conversationIdFromUrl(page.url()),
+      conversation_id: submitted.conversationId,
       requested_model: MODEL_ID,
       caller: auditContext,
       elapsed_sec: (Date.now() - started) / 1000,
@@ -737,12 +692,12 @@ export async function completeInKernelBrowser(prompt, { signal, maxWaitMs = MAX_
     await finishProfile(browserProfile, { verified: true }, signal);
     return { text: responseText, evidence, audit, browserProfile };
   } catch (error) {
-    warning ||= page ? await visibleProviderWarning(page) : "";
     if (!responseText || Object.keys(evidence).length === 0) {
       recordProviderAudit({
         at: new Date().toISOString(),
-        transport: "kernel-browser-playwright",
+        transport: "kernel-browser-submit-periodic-poll",
         browser_profile: browserProfile,
+        conversation_id: submitted?.conversationId ?? null,
         requested_model: MODEL_ID,
         caller: auditContext,
         elapsed_sec: (Date.now() - started) / 1000,
@@ -756,10 +711,5 @@ export async function completeInKernelBrowser(prompt, { signal, maxWaitMs = MAX_
     const cooldown = failureCooldown(error, evidence, warning);
     try { await finishProfile(browserProfile, cooldown, signal?.aborted ? undefined : signal); } catch {}
     throw error;
-  } finally {
-    // Kernel owns browser termination and profile persistence. Deleting the
-    // session also drops the CDP connection; Playwright must not send
-    // Browser.close first because that can bypass Kernel's save lifecycle.
-    await deleteBrowser(kernelBrowser?.sessionId);
   }
 }

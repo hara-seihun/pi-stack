@@ -5,7 +5,6 @@ import {
   conversationLeafText,
   conversationModelEvidence,
   browserPoolCapacitySnapshot,
-  conversationStreamEvidence,
   defaultPoolState,
   isTerminalConversationEvidence,
   nextFallbackCooldown,
@@ -130,19 +129,6 @@ test("reasoning-completion schema proves Pro work when progress is omitted", () 
   assert.equal(conversationModelEvidence(data).pro_execution_verified, false);
 });
 
-test("completed conversation SSE supplies the same execution invariant", () => {
-  const events = [
-    { message: { author: { role: "user" }, metadata: { resolved_model_slug: "gpt-5-6-pro" } } },
-    { message: { author: { role: "system" }, metadata: { pro_progress: 100, pro_skipped: false, finished_duration_sec: 44 } } },
-    { message: { author: { role: "assistant" }, status: "finished_successfully", end_turn: true, content: { parts: ["answer"] }, metadata: { model_slug: "gpt-5-6-pro", is_complete: true } } },
-  ];
-  const body = `${events.map((event) => `data: ${JSON.stringify(event)}\n\n`).join("")}data: [DONE]\n\n`;
-  const parsed = conversationStreamEvidence(body);
-  assert.equal(parsed.evidence.pro_execution_verified, true);
-  assert.equal(parsed.evidence.finished_duration_sec, 44);
-  assert.equal(parsed.text, "answer");
-});
-
 test("picker-compatible assistant metadata cannot hide a routed fallback", () => {
   const evidence = conversationModelEvidence(conversation({ resolved: "gpt-5-5-mini" }));
   assert.equal(evidence.model_slug, "gpt-5-6-pro");
@@ -155,13 +141,14 @@ test("skipped or incomplete Pro work is rejected", () => {
   assert.equal(conversationModelEvidence(conversation({ progress: 95 })).pro_execution_verified, false);
 });
 
-test("transport horizons accommodate multi-hour Pro reasoning without lease overlap", () => {
-  assert.ok(PRO_TRANSPORT_HORIZONS.responseWaitMs >= 60 * 60_000);
-  assert.equal(PRO_TRANSPORT_HORIZONS.persistedPollMs, 60_000);
+test("transport closes billable browsers between twenty-minute Pro checks", () => {
+  assert.equal(PRO_TRANSPORT_HORIZONS.persistedPollMs, 20 * 60_000);
+  assert.equal(PRO_TRANSPORT_HORIZONS.browserTimeoutSeconds, 5 * 60);
+  assert.ok(PRO_TRANSPORT_HORIZONS.browserTimeoutSeconds * 1000 < PRO_TRANSPORT_HORIZONS.persistedPollMs);
+  assert.equal(PRO_TRANSPORT_HORIZONS.responseWaitMs % PRO_TRANSPORT_HORIZONS.persistedPollMs, 0);
   assert.ok(PRO_TRANSPORT_HORIZONS.persistedPollMs < PRO_TRANSPORT_HORIZONS.stalledWorkMs);
   assert.ok(PRO_TRANSPORT_HORIZONS.stalledWorkMs < PRO_TRANSPORT_HORIZONS.responseWaitMs);
-  assert.ok(PRO_TRANSPORT_HORIZONS.browserTimeoutSeconds * 1000 > PRO_TRANSPORT_HORIZONS.responseWaitMs);
-  assert.ok(PRO_TRANSPORT_HORIZONS.accountLeaseMs >= PRO_TRANSPORT_HORIZONS.browserTimeoutSeconds * 1000);
+  assert.ok(PRO_TRANSPORT_HORIZONS.accountLeaseMs > PRO_TRANSPORT_HORIZONS.responseWaitMs);
 });
 
 test("async Pro stream updates are not mistaken for a completed turn", () => {
