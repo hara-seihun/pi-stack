@@ -1832,9 +1832,24 @@ export class Controller {
     // observe either real resource use or a task's first no-work backoff.
     for (let launchIndex = 0; launchIndex < launchBatchSize(slots); launchIndex++) {
       let launched = false;
-      for (const task of rankTasks(tasks, this.active.size)) {
+      const rankedTasks = rankTasks(tasks, this.active.size);
+      const eligibleTaskIds = new Set(rankedTasks.map((task) => task.id));
+      const specificLeases = this.db.prepare(`SELECT id,task_id FROM quota_lease
+        WHERE state='available' AND expires_at>? AND task_id IS NOT NULL`).all(now());
+      for (const lease of specificLeases) {
+        if (!eligibleTaskIds.has(lease.task_id)) {
+          this.db.prepare("UPDATE quota_lease SET task_id=NULL,heartbeat_at=? WHERE id=?").run(now(), lease.id);
+        }
+      }
+      const taskLeaseIds = new Set(specificLeases.filter((lease) => eligibleTaskIds.has(lease.task_id)).map((lease) => lease.task_id));
+      const ranked = rankedTasks.sort((left, right) => Number(taskLeaseIds.has(right.id)) - Number(taskLeaseIds.has(left.id)));
+      for (const task of ranked) {
+        if (taskLeaseIds.size && !taskLeaseIds.has(task.id)) continue;
         let governed;
-        try { governed = await this.restoreQuotaLease(task, activeAssignments) ?? await this.plan.allows(task, activeAssignments); }
+        try {
+          const restored = await this.restoreQuotaLease(task, activeAssignments);
+          governed = restored ?? (taskLeaseIds.has(task.id) ? { ok: false, detail: "task-specific quota lease is not currently restorable" } : await this.plan.allows(task, activeAssignments));
+        }
         catch (error) {
           this.governorBlocked(String(error.message ?? error), task.id);
           return;
@@ -1850,6 +1865,11 @@ export class Controller {
           const dispatchMs = now() - dispatchStarted;
           if (dispatched.state === "no-work") {
             const checkedAt = now();
+            if (governed.leaseId) {
+              this.db.prepare("UPDATE quota_lease SET task_id=NULL,heartbeat_at=? WHERE id=? AND state='available'")
+                .run(checkedAt, governed.leaseId);
+              event(this.db, "quota-lease-released", "task had no claimable work; lease returned to its model lane", task.id);
+            }
             this.db.prepare("UPDATE task SET work_state='no-work',work_checked_at=? WHERE id=?").run(checkedAt, task.id);
             task.work_state = "no-work";
             task.work_checked_at = checkedAt;

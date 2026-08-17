@@ -97,6 +97,31 @@ test("quota leases survive controller restarts and productive session boundaries
   db.close();
 });
 
+test("restart handoffs are restored before unrelated cold admission", async () => {
+  const db = openDb(path.join(temporary, "quota-lease-priority.sqlite3"));
+  const at = Date.now();
+  const insert = db.prepare(`INSERT INTO task(id,prompt,cwd,model,thinking,completion_condition,launch_share,not_before,next_eligible_at,created_at)
+    VALUES(?,?,?,?,?,?,?,?,?,?)`);
+  insert.run("unleased", "prompt", temporary, "openai-codex/gpt-5.6-sol", "xhigh", "done", 1, at, at, at);
+  insert.run("leased", "prompt", temporary, "openai-codex/gpt-5.6-sol", "xhigh", "done", 1, at, at, at + 1);
+  const config = loadConfig();
+  grantQuotaLease(db, config, {
+    provider: "openai-codex-3", model: "openai-codex/gpt-5.6-sol", thinking: "xhigh", taskId: "leased", hours: 1,
+  }, at);
+  const controller = new Controller(db, config);
+  let normalAdmissions = 0;
+  controller.plan = {
+    restores: async (lease) => ({ ok: true, provider: lease.provider, model: lease.model, thinking: lease.thinking }),
+    allows: async () => { normalAdmissions++; return { ok: false, detail: "not expected" }; },
+  };
+  let launched = null;
+  controller.launch = async (task, assignment) => { launched = { task: task.id, provider: assignment.provider }; };
+  await controller.tick();
+  assert.deepEqual(launched, { task: "leased", provider: "openai-codex-3" });
+  assert.equal(normalAdmissions, 0);
+  db.close();
+});
+
 test("task prompts can be updated through the governed task interface", () => {
   const db = openDb(path.join(temporary, "task-set.sqlite3"));
   const timestamp = Date.now();
