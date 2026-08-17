@@ -718,10 +718,9 @@ test("frontier agents have no Pro delegation tool; Pro runs as its own moonshot 
   assert.ok(!source.includes("launch_pro"));
 });
 
-test("the service locks governor-assigned providers against hidden Multi-Pass rotation", () => {
-  const nix = fs.readFileSync("/etc/nixos/configuration.nix", "utf8");
+test("the controller locks governor-assigned providers against hidden Multi-Pass rotation", () => {
   const multiPass = fs.readFileSync("/home/kenan/tools/pi-multi-pass/extensions/multi-sub.ts", "utf8");
-  assert.match(nix, /PI_MULTI_PASS_LOCK_ASSIGNED_PROVIDER = "1"/);
+  assert.equal(process.env.PI_MULTI_PASS_LOCK_ASSIGNED_PROVIDER, "1");
   assert.match(multiPass, /PI_MULTI_PASS_LOCK_ASSIGNED_PROVIDER === "1"/);
 });
 

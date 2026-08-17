@@ -1,6 +1,7 @@
 import { appendFileSync, existsSync, readFileSync } from "node:fs";
 import { join } from "node:path";
 import { type ExtensionAPI, getAgentDir, type MarkdownTransformContext } from "@earendil-works/pi-coding-agent";
+import { isAnthropicProvider } from "./provider.js";
 
 // ============================================================================
 // Types
@@ -113,10 +114,6 @@ function isPlainObject(value: unknown): value is Record<string, unknown> {
 
 function lower(name: string | undefined): string {
 	return (name ?? "").trim().toLowerCase();
-}
-
-function isAnthropicProvider(provider: string | undefined): boolean {
-	return provider === "anthropic" || /^anthropic-\d+$/.test(provider ?? "");
 }
 
 function refreshAliasMap(userToolAliases: ToolAliasPair[], derivedPairs: ToolAliasPair[] = []): void {

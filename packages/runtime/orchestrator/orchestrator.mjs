@@ -50,6 +50,11 @@ export const TOOL_SHELL = fileURLToPath(new URL("./tool-shell", import.meta.url)
 const TICK_MS = 5000;
 const execFileAsync = promisify(execFile);
 
+// Per-account feedback and causal attribution are invalid if Multi-Pass rotates
+// a governor-pinned run after admission, so the controller owns this invariant
+// even on hosts whose systemd unit does not duplicate the environment setting.
+process.env.PI_MULTI_PASS_LOCK_ASSIGNED_PROVIDER = "1";
+
 const DEFAULT_CONFIG = {
   maxMemoryPercent: 90,
   maxCpuPercent: 90,
