@@ -8,7 +8,7 @@ import test from "node:test";
 
 const temporary = fs.mkdtempSync(path.join(os.tmpdir(), "agent-orchestrator-test-"));
 process.env.AGENT_ORCHESTRATOR_DATA = temporary;
-const { cancelTask, choosePlanProvider, chooseTask, codexSubscriptionLifecycle, completionToolResult, Controller, cpuPercent, createProDelegateTool, DISPATCH_NO_WORK_TTL_MS, dispatchedTaskPrompt, evaluateDispatch, evaluateWorkCheck, insertRun, isolateTaskShell, isEligibleCodexPlan, isProDelegatingFrontierTask, launchBatchSize, loadConfig, nextIncompleteState, openDb, orchestratedTaskPrompt, PlanGovernor, planWindowBurnPerHour, proEntitlementSnapshot, proLaunchAvailability, rankTasks, resourceSlots, setTaskOptions, shouldAdvanceBackoff, taskSettings, TOOL_SHELL, validateCompletion, validateModelPolicy, WORK_CHECK_TTL_MS, workCheckStale, workReady } = await import("./orchestrator.mjs");
+const { cancelTask, choosePlanProvider, chooseTask, codexSubscriptionLifecycle, completionToolResult, Controller, cpuPercent, DISPATCH_NO_WORK_TTL_MS, dispatchedTaskPrompt, evaluateDispatch, evaluateWorkCheck, insertRun, isolateTaskShell, isEligibleCodexPlan, launchBatchSize, loadConfig, nextIncompleteState, openDb, orchestratedTaskPrompt, PlanGovernor, planWindowBurnPerHour, proEntitlementSnapshot, proLaunchAvailability, rankTasks, resourceSlots, setTaskOptions, shouldAdvanceBackoff, taskSettings, TOOL_SHELL, validateCompletion, validateModelPolicy, WORK_CHECK_TTL_MS, workCheckStale, workReady } = await import("./orchestrator.mjs");
 
 test.after(() => fs.rmSync(temporary, { recursive: true, force: true }));
 
@@ -573,30 +573,9 @@ test("ChatGPT Pro capacity uses authenticated entitlements under the four-agent 
   assert.deepEqual(cooling, { configured: 1, eligible: 0, inFlight: 0, available: 0, maxParallel: 4 });
 });
 
-test("only exact research frontier tasks receive the Pro delegation tool", async () => {
-  const task = { id: "research-frontier", cwd: "/home/kenan/projects-research" };
-  assert.equal(isProDelegatingFrontierTask(task), true);
-  assert.equal(isProDelegatingFrontierTask({ ...task, id: "research-frontier-intake" }), false);
-  assert.equal(isProDelegatingFrontierTask({ ...task, cwd: temporary }), false);
-
-  let update = null;
-  const tool = createProDelegateTool(task, "run-1", async (prompt, options) => {
-    assert.equal(prompt, "exact problem");
-    assert.deepEqual(options.auditContext, { taskId: "research-frontier", runId: "run-1" });
-    options.onStatus({ capacity: { configured: 1, inFlight: 1, maxParallel: 4 } });
-    options.onStatus({ phase: "submitted", browserProfile: "limmy-google", nextCheckMs: 1_000 });
-    return {
-      text: "candidate proof",
-      evidence: { pro_execution_verified: true },
-      audit: { auditPath: "/audit.json", responsePath: "/response.md" },
-    };
-  });
-  const result = await tool.execute("call", { prompt: "exact problem" }, undefined, (value) => { update = value; });
-  assert.equal(update.content[0].text, "GPT-5.6 Pro is submitted.");
-  assert.equal(update.details.browserProfile, "limmy-google");
-  assert.equal(result.content[0].text, "candidate proof");
-  assert.equal(result.details.executionVerified, true);
-  assert.equal(result.details.auditPath, "/audit.json");
+test("frontier agents have no Pro delegation tool; Pro runs as its own moonshot lane", async () => {
+  const source = await import("node:fs").then((fs) => fs.readFileSync(new URL("./orchestrator.mjs", import.meta.url), "utf8"));
+  assert.ok(!source.includes("launch_pro"));
 });
 
 test("Codex plan governor keeps one baseline worker on every healthy account", () => {

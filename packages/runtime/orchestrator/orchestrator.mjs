@@ -10,8 +10,6 @@ import { promisify } from "node:util";
 import { Type } from "typebox";
 import {
   createAgentSession,
-  DEFAULT_MAX_BYTES,
-  DEFAULT_MAX_LINES,
   DefaultResourceLoader,
   defineTool,
   getAgentDir,
@@ -20,7 +18,6 @@ import {
   resolveCliModel,
   SessionManager,
   SettingsManager,
-  truncateHead,
 } from "@earendil-works/pi-coding-agent";
 import {
   browserPoolCapacitySnapshot,
@@ -551,60 +548,6 @@ export function orchestratedTaskPrompt(task) {
   return `${task.prompt}\n\n## Orchestrated task contract\nTask: ${task.id}\nCompletion condition: ${task.completion_condition}\nThis task runs repeatedly and may run concurrently with other launches; make external effects idempotent and use the project's claim/lease tools. Follow the task's stated cadence and own the session boundary: complete coherent work, preserve directly resumable state for larger follow-on work, and return promptly when extending this turn would delay the next heartbeat or another useful lane. Explore whatever files, state, or tools help you do the work well, and exercise initiative: retry transient failures, and repair broken tooling at its owning layer instead of reporting around it. Before finishing, call task_complete with the validated result; calling it again replaces the earlier report, so keep it current if you continue working. Set complete=true only if the completion condition is satisfied. Set productive=false only if this launch processed no work unit at all; otherwise omit it or set productive=true.`;
 }
 
-const PRO_DELEGATING_FRONTIER_TASKS = new Set([
-  "research-frontier",
-  "research-cayley-ci",
-  "research-cayley-ci-synthesis",
-]);
-
-export function isProDelegatingFrontierTask(task) {
-  return task?.cwd === "/home/kenan/projects-research" && PRO_DELEGATING_FRONTIER_TASKS.has(task?.id);
-}
-
-export function createProDelegateTool(task, runId, runner = completeInKernelBrowser) {
-  return defineTool({
-    name: "launch_pro",
-    label: "Launch GPT-5.6 Pro",
-    description: `Launch one isolated, text-only GPT-5.6 Pro long-horizon attack on a self-contained mathematical prompt. The authenticated pool visibly leases each running Pro agent and enforces a machine-wide maximum of ${PRO_MAX_PARALLEL}; fewer run when fewer genuine entitlements are available. A turn can take hours. Do not retry an unavailable or failed launch inside the same frontier run. Validate every returned argument with tool-capable checks before using it as research authority.`,
-    promptSnippet: "Delegate one self-contained exact mathematical proof attack to authenticated GPT-5.6 Pro",
-    parameters: Type.Object({
-      prompt: Type.String({ minLength: 1, description: "Self-contained exact problem, fidelity boundary, established context, and requested proof attack" }),
-    }),
-    execute: async (_toolCallId, params, signal, onUpdate) => {
-      const completion = await runner(params.prompt, {
-        signal,
-        auditContext: { taskId: task.id, runId },
-        onStatus: (status) => {
-          const capacity = status.capacity;
-          const text = capacity
-            ? `GPT-5.6 Pro is running (${capacity.inFlight}/${capacity.maxParallel} machine-wide; ${capacity.configured} authenticated entitlement${capacity.configured === 1 ? "" : "s"}).`
-            : `GPT-5.6 Pro is ${status.phase}.`;
-          onUpdate?.({
-            content: [{ type: "text", text }],
-            details: { ...status, taskId: task.id, runId },
-          });
-        },
-      });
-      const truncated = truncateHead(completion.text, { maxBytes: DEFAULT_MAX_BYTES, maxLines: DEFAULT_MAX_LINES });
-      const auditPath = completion.audit?.auditPath ?? null;
-      const text = truncated.truncated
-        ? `${truncated.content}\n\n[Pro output truncated for parent context; full verified response: ${completion.audit?.responsePath ?? "provider audit"}]`
-        : truncated.content;
-      return {
-        content: [{ type: "text", text }],
-        details: {
-          phase: "complete",
-          model: "gpt-5-6-pro",
-          executionVerified: completion.evidence?.pro_execution_verified === true,
-          evidence: completion.evidence,
-          auditPath,
-          maxParallel: PRO_MAX_PARALLEL,
-        },
-      };
-    },
-  });
-}
-
 export const WORK_CHECK_TTL_MS = 15_000;
 export const WORK_CHECK_TIMEOUT_MS = 30_000;
 export const DISPATCH_TIMEOUT_MS = 120_000;
@@ -784,7 +727,6 @@ export class Controller {
         }
       });
       const customTools = [completionTool];
-      if (isProDelegatingFrontierTask(task)) customTools.push(createProDelegateTool(task, runId));
       const settingsManager = taskSettings(task.cwd);
       const loader = new DefaultResourceLoader({
         cwd: task.cwd,
