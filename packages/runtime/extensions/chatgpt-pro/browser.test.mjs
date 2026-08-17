@@ -9,6 +9,7 @@ import {
   isTerminalConversationEvidence,
   nextFallbackCooldown,
   normalizePoolState,
+  profileNamesAllowedByLifecycle,
   PRO_MAX_PARALLEL,
   PRO_TRANSPORT_HORIZONS,
 } from "./browser.mjs";
@@ -211,6 +212,24 @@ test("browser pool migrates one entitlement and admits no more than four configu
   assert.equal(normalized.profiles[0].selectionCount, 4);
   assert.equal(normalized.profiles[0].fallbackStreak, 2);
   assert.equal(PRO_MAX_PARALLEL, 4);
+});
+
+test("cancelled Codex-backed browser profiles stop taking leases before paid access ends", () => {
+  const at = Date.UTC(2026, 7, 23, 12);
+  const end = at + PRO_TRANSPORT_HORIZONS.accountLeaseMs;
+  const config = { subscriptions: [
+    { provider: "openai-codex", index: 6, lifecycle: { state: "cancelled", accessUntil: new Date(end).toISOString() } },
+  ] };
+  const names = ["unmapped", "codex-06"];
+  const mapping = { "codex-06": "openai-codex-6" };
+  assert.deepEqual(profileNamesAllowedByLifecycle(names, mapping, config, at), names);
+  assert.deepEqual(
+    profileNamesAllowedByLifecycle(names, mapping, config, at, PRO_TRANSPORT_HORIZONS.accountLeaseMs),
+    ["unmapped"],
+  );
+  assert.throws(() => profileNamesAllowedByLifecycle(names, mapping, {
+    subscriptions: [{ provider: "openai-codex", index: 6, lifecycle: { state: "cancelled", accessUntil: "bad" } }],
+  }, at), /invalid subscription accessUntil/);
 });
 
 test("browser capacity exposes running Pro agents and never exceeds four", () => {

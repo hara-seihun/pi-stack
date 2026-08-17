@@ -8,7 +8,7 @@ import test from "node:test";
 
 const temporary = fs.mkdtempSync(path.join(os.tmpdir(), "agent-orchestrator-test-"));
 process.env.AGENT_ORCHESTRATOR_DATA = temporary;
-const { cancelTask, choosePlanProvider, chooseTask, completionToolResult, Controller, cpuPercent, createProDelegateTool, DISPATCH_NO_WORK_TTL_MS, dispatchedTaskPrompt, evaluateDispatch, evaluateWorkCheck, insertRun, isolateTaskShell, isProDelegatingFrontierTask, launchBatchSize, loadConfig, nextIncompleteState, openDb, orchestratedTaskPrompt, PlanGovernor, planWindowBurnPerHour, proEntitlementSnapshot, proLaunchAvailability, rankTasks, resourceSlots, setTaskOptions, shouldAdvanceBackoff, taskSettings, TOOL_SHELL, validateCompletion, validateModelPolicy, WORK_CHECK_TTL_MS, workCheckStale, workReady } = await import("./orchestrator.mjs");
+const { cancelTask, choosePlanProvider, chooseTask, codexSubscriptionLifecycle, completionToolResult, Controller, cpuPercent, createProDelegateTool, DISPATCH_NO_WORK_TTL_MS, dispatchedTaskPrompt, evaluateDispatch, evaluateWorkCheck, insertRun, isolateTaskShell, isEligibleCodexPlan, isProDelegatingFrontierTask, launchBatchSize, loadConfig, nextIncompleteState, openDb, orchestratedTaskPrompt, PlanGovernor, planWindowBurnPerHour, proEntitlementSnapshot, proLaunchAvailability, rankTasks, resourceSlots, setTaskOptions, shouldAdvanceBackoff, taskSettings, TOOL_SHELL, validateCompletion, validateModelPolicy, WORK_CHECK_TTL_MS, workCheckStale, workReady } = await import("./orchestrator.mjs");
 
 test.after(() => fs.rmSync(temporary, { recursive: true, force: true }));
 
@@ -447,6 +447,25 @@ test("plan estimator paces all remaining capacity to window reset", () => {
   assert.equal(planWindowBurnPerHour({}, at), null);
 });
 
+test("cancelled Codex subscriptions retire exactly at their access deadline", () => {
+  const at = Date.UTC(2026, 7, 23, 12);
+  const future = new Date(at + 60_000).toISOString();
+  const lifecycle = codexSubscriptionLifecycle({ subscriptions: [
+    { provider: "openai-codex", index: 5, lifecycle: { state: "cancelled", accessUntil: new Date(at).toISOString() } },
+    { provider: "openai-codex", index: 6, lifecycle: { state: "cancelled", accessUntil: future } },
+    { provider: "anthropic", index: 2, lifecycle: { state: "cancelled", accessUntil: "invalid" } },
+  ] }, at);
+  assert.deepEqual(lifecycle.retiredProviders, ["openai-codex-5"]);
+  assert.equal(lifecycle.nextRetirementAt, at + 60_000);
+  assert.throws(() => codexSubscriptionLifecycle({ subscriptions: [
+    { provider: "openai-codex", index: 7, lifecycle: { state: "cancelled", accessUntil: "invalid" } },
+  ] }, at), /invalid subscription accessUntil/);
+  assert.equal(isEligibleCodexPlan("pro"), true);
+  assert.equal(isEligibleCodexPlan("plus"), true);
+  assert.equal(isEligibleCodexPlan("free"), false);
+  assert.equal(isEligibleCodexPlan("unknown"), false);
+});
+
 test("plan governor excludes an account whose near-expiry OAuth cannot refresh", async () => {
   const authPath = path.join(temporary, "governor-auth.json");
   const expiresLater = Date.now() + 60 * 60_000;
@@ -468,7 +487,7 @@ test("plan governor excludes an account whose near-expiry OAuth cannot refresh",
       requestedTokens.push(options.headers.Authorization);
       return {
         ok: true,
-        json: async () => ({ rate_limit: {
+        json: async () => ({ plan_type: "pro", rate_limit: {
           primary_window: { used_percent: 20, reset_at: (Date.now() + 3600_000) / 1000 },
           secondary_window: { used_percent: 20, reset_at: (Date.now() + 7200_000) / 1000 },
         } }),
@@ -480,6 +499,42 @@ test("plan governor excludes an account whose near-expiry OAuth cannot refresh",
   assert.equal(snapshot.healthy, 1);
   assert.deepEqual(snapshot.accounts.map((account) => account.provider), ["openai-codex"]);
   assert.deepEqual(requestedTokens, ["Bearer healthy-access"]);
+});
+
+test("plan governor excludes retired lifecycle entries and inactive provider plans", async () => {
+  const authPath = path.join(temporary, "lifecycle-auth.json");
+  const lifecyclePath = path.join(temporary, "lifecycle.json");
+  const expiresLater = Date.now() + 60 * 60_000;
+  fs.writeFileSync(authPath, JSON.stringify({
+    "openai-codex": { type: "oauth", access: "base", expires: expiresLater, accountId: "base" },
+    "openai-codex-5": { type: "oauth", access: "retired", expires: expiresLater, accountId: "retired" },
+    "openai-codex-6": { type: "oauth", access: "free", expires: expiresLater, accountId: "free" },
+  }));
+  fs.writeFileSync(lifecyclePath, JSON.stringify({ subscriptions: [
+    { provider: "openai-codex", index: 5, lifecycle: { state: "cancelled", accessUntil: new Date(Date.now() - 1).toISOString() } },
+  ] }));
+  const requested = [];
+  const governor = new PlanGovernor({ plan: { pollSeconds: 120 } }, {
+    authPath,
+    lifecyclePath,
+    fetcher: async (_url, options) => {
+      requested.push(options.headers.Authorization);
+      const planType = options.headers.Authorization === "Bearer free" ? "free" : "pro";
+      return { ok: true, json: async () => ({
+        plan_type: planType,
+        rate_limit: {
+          primary_window: { used_percent: 10, reset_at: (Date.now() + 3600_000) / 1000 },
+          secondary_window: { used_percent: 10, reset_at: (Date.now() + 7200_000) / 1000 },
+        },
+      }) };
+    },
+  });
+  const snapshot = await governor.refresh();
+  assert.equal(snapshot.configured, 3);
+  assert.equal(snapshot.retired, 1);
+  assert.deepEqual(snapshot.retiredProviders, ["openai-codex-5"]);
+  assert.deepEqual(snapshot.accounts.map((account) => account.provider), ["openai-codex"]);
+  assert.deepEqual(requested.sort(), ["Bearer base", "Bearer free"]);
 });
 
 test("GPT-5.5 models are banned", () => {

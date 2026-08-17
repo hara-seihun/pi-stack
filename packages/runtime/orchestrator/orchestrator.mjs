@@ -35,6 +35,7 @@ const CONFIG_PATH = path.join(DATA, "config.json");
 const SESSIONS = path.join(DATA, "sessions");
 const LOCK = path.join(DATA, "controller.lock");
 const AUTH_PATH = path.join(getAgentDir(), "auth.json");
+const MULTI_PASS_PATH = path.join(getAgentDir(), "multi-pass.json");
 const CHATGPT_PRO_POOL_PATH = path.join(getAgentDir(), "chatgpt-pro-pool.json");
 const CHATGPT_PRO_PROVIDER = "chatgpt-pro";
 export const TOOL_SHELL = fileURLToPath(new URL("./tool-shell", import.meta.url));
@@ -354,6 +355,39 @@ export function choosePlanProvider(accounts, activeRates, candidate) {
     .sort((left, right) => Number(right.baseline) - Number(left.baseline) || right.remaining - left.remaining || left.provider.localeCompare(right.provider))[0] ?? null;
 }
 
+export function isEligibleCodexPlan(planType) {
+  const normalized = typeof planType === "string" ? planType.trim().toLowerCase() : "";
+  return normalized === "pro" || normalized === "plus";
+}
+
+export function codexSubscriptionLifecycle(raw, at = now()) {
+  const subscriptions = Array.isArray(raw?.subscriptions) ? raw.subscriptions : [];
+  const retiredProviders = [];
+  let nextRetirementAt = Number.POSITIVE_INFINITY;
+  for (const entry of subscriptions) {
+    if (entry?.provider !== "openai-codex" || !Number.isInteger(entry.index) || entry.index < 2) continue;
+    if (entry.lifecycle === undefined) continue;
+    if (entry.lifecycle?.state !== "cancelled" || typeof entry.lifecycle?.accessUntil !== "string") {
+      fail(`invalid subscription lifecycle for openai-codex-${entry.index}`);
+    }
+    const accessUntil = Date.parse(entry.lifecycle.accessUntil);
+    if (!Number.isFinite(accessUntil)) fail(`invalid subscription accessUntil for openai-codex-${entry.index}`);
+    const provider = `openai-codex-${entry.index}`;
+    if (accessUntil <= at) retiredProviders.push(provider);
+    else nextRetirementAt = Math.min(nextRetirementAt, accessUntil);
+  }
+  return { retiredProviders, nextRetirementAt };
+}
+
+function readCodexSubscriptionLifecycle(file, at = now()) {
+  try {
+    return codexSubscriptionLifecycle(JSON.parse(fs.readFileSync(file, "utf8")), at);
+  } catch (error) {
+    if (error?.code === "ENOENT") return { retiredProviders: [], nextRetirementAt: Number.POSITIVE_INFINITY };
+    throw error;
+  }
+}
+
 export function planWindowBurnPerHour(window, at = now()) {
   const used = Number(window?.used_percent);
   const resetAt = Number(window?.reset_at) * 1000;
@@ -364,10 +398,11 @@ export function planWindowBurnPerHour(window, at = now()) {
 }
 
 export class PlanGovernor {
-  constructor(config, { modelRuntime = null, authPath = AUTH_PATH, fetcher = fetch, readCredential = readStoredCredential } = {}) {
+  constructor(config, { modelRuntime = null, authPath = AUTH_PATH, lifecyclePath = MULTI_PASS_PATH, fetcher = fetch, readCredential = readStoredCredential } = {}) {
     this.config = config;
     this.modelRuntime = modelRuntime;
     this.authPath = authPath;
+    this.lifecyclePath = lifecyclePath;
     this.fetcher = fetcher;
     this.readCredential = readCredential;
     this.snapshot = null;
@@ -404,7 +439,7 @@ export class PlanGovernor {
   }
 
   async refresh() {
-    if (this.snapshot && now() - this.snapshot.at < this.config.plan.pollSeconds * 1000) return this.snapshot;
+    if (this.snapshot && now() < this.snapshot.expiresAt) return this.snapshot;
     if (this.refreshing) return this.refreshing;
     this.refreshing = this.fetch().finally(() => { this.refreshing = null; });
     return this.refreshing;
@@ -415,8 +450,12 @@ export class PlanGovernor {
     const configured = Object.entries(auth).filter(([name, value]) =>
       (name === "openai-codex" || name.startsWith("openai-codex-")) && value?.type === "oauth" && value?.access);
     if (!configured.length) fail("plan governor found no Codex OAuth accounts");
+    const fetchedAt = now();
+    const lifecycle = readCodexSubscriptionLifecycle(this.lifecyclePath, fetchedAt);
+    const retired = new Set(lifecycle.retiredProviders);
+    const routable = configured.filter(([provider]) => !retired.has(provider));
     const endpoint = `${(process.env.CHATGPT_BASE_URL ?? "https://chatgpt.com/backend-api").replace(/\/$/, "")}/wham/usage`;
-    const results = await Promise.all(configured.map(async ([provider, credential]) => {
+    const results = await Promise.all(routable.map(async ([provider, credential]) => {
       try {
         // Resolve near-expiry OAuth through Pi's locked credential path before
         // trusting /wham/usage. A still-valid access token does not prove that
@@ -434,21 +473,26 @@ export class PlanGovernor {
         });
         if (!response.ok) return null;
         const body = await response.json();
+        if (!isEligibleCodexPlan(body.plan_type)) return null;
         const rate = body.rate_limit ?? {};
         const windows = [rate.primary_window, rate.secondary_window]
           .map((window) => planWindowBurnPerHour(window))
           .filter((value) => value !== null);
         if (!windows.length) return null;
-        return { provider, allowedBurnPercentPerHour: Math.min(...windows) };
+        return { provider, planType: body.plan_type.trim().toLowerCase(), allowedBurnPercentPerHour: Math.min(...windows) };
       } catch { return null; }
     }));
     const accounts = results.filter((value) => value !== null);
     if (!accounts.length) fail("plan governor could not read any Codex account");
+    const snapshotAt = now();
     this.snapshot = {
-      at: now(),
+      at: snapshotAt,
+      expiresAt: Math.min(snapshotAt + this.config.plan.pollSeconds * 1000, lifecycle.nextRetirementAt),
       healthy: accounts.length,
       withHeadroom: accounts.filter((account) => account.allowedBurnPercentPerHour > 0).length,
       configured: configured.length,
+      retired: lifecycle.retiredProviders.length,
+      retiredProviders: lifecycle.retiredProviders,
       allowedBurnPercentPerHour: accounts.reduce((sum, account) => sum + account.allowedBurnPercentPerHour, 0),
       accounts,
     };
@@ -1148,6 +1192,8 @@ async function main(argv = process.argv.slice(2)) {
       healthyAccounts: snapshot.healthy,
       accountsWithHeadroom: snapshot.withHeadroom,
       configuredAccounts: snapshot.configured,
+      retiredAccounts: snapshot.retired,
+      retiredProviders: snapshot.retiredProviders,
       allowedBurnPercentPerHour: snapshot.allowedBurnPercentPerHour,
     };
     const pro = proEntitlementSnapshot();

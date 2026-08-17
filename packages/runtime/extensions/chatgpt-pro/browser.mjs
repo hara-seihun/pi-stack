@@ -18,6 +18,7 @@ const execFileAsync = promisify(execFile);
 const HOME = homedir();
 const AGENT_DIR = join(HOME, ".pi", "agent");
 const POOL_PATH = join(AGENT_DIR, "chatgpt-pro-pool.json");
+const MULTI_PASS_PATH = join(AGENT_DIR, "multi-pass.json");
 const POOL_LOCK = join(AGENT_DIR, ".chatgpt-pro-pool.lock");
 const PROVIDER_AUDIT_DIR = join(HOME, "data", "agent-orchestrator", "pro", "provider-audit");
 export const PRO_PROFILE_CONFIG_PATH = join(AGENT_DIR, "chatgpt-pro-profiles.json");
@@ -79,21 +80,54 @@ function writeJsonAtomic(path, value) {
   renameSync(temporary, path);
 }
 
-export function configuredProfileNames() {
+export function profileNamesAllowedByLifecycle(
+  names,
+  profileProviders,
+  lifecycleConfig,
+  at = Date.now(),
+  minimumRemainingMs = 0,
+) {
+  const accessUntilByProvider = new Map();
+  for (const entry of Array.isArray(lifecycleConfig?.subscriptions) ? lifecycleConfig.subscriptions : []) {
+    if (entry?.provider !== "openai-codex" || !Number.isInteger(entry.index) || entry.index < 2 || entry.lifecycle === undefined) continue;
+    if (entry.lifecycle?.state !== "cancelled" || typeof entry.lifecycle?.accessUntil !== "string") {
+      throw new Error(`invalid subscription lifecycle for openai-codex-${entry.index}`);
+    }
+    const accessUntil = Date.parse(entry.lifecycle.accessUntil);
+    if (!Number.isFinite(accessUntil)) throw new Error(`invalid subscription accessUntil for openai-codex-${entry.index}`);
+    accessUntilByProvider.set(`openai-codex-${entry.index}`, accessUntil);
+  }
+  return names.filter((name) => {
+    const provider = profileProviders?.[name];
+    const accessUntil = provider ? accessUntilByProvider.get(provider) : undefined;
+    return accessUntil === undefined || accessUntil > at + minimumRemainingMs;
+  });
+}
+
+export function configuredProfileNames(at = Date.now(), minimumRemainingMs = 0) {
   let names = [DEFAULT_PROFILE_NAME];
+  let profileProviders = {};
   try {
     const raw = JSON.parse(readFileSync(PRO_PROFILE_CONFIG_PATH, "utf8"));
     if (raw?.version !== 1 || !Array.isArray(raw.profiles)) throw new Error("expected version 1 with a profiles array");
     names = raw.profiles;
+    profileProviders = raw.profileProviders ?? {};
   } catch (error) {
     if (error?.code !== "ENOENT") throw new Error(`Invalid ChatGPT Pro profile config: ${error.message}`);
   }
   if (names.length < 1 || names.length > PRO_MAX_PARALLEL ||
       names.some((name) => typeof name !== "string" || !/^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$/.test(name)) ||
-      new Set(names).size !== names.length) {
-    throw new Error(`ChatGPT Pro profile config must contain 1-${PRO_MAX_PARALLEL} unique Kernel profile names`);
+      new Set(names).size !== names.length ||
+      !profileProviders || typeof profileProviders !== "object" || Array.isArray(profileProviders) ||
+      Object.entries(profileProviders).some(([name, provider]) => !names.includes(name) || !/^openai-codex-[2-9][0-9]*$/.test(provider))) {
+    throw new Error(`ChatGPT Pro profile config must contain 1-${PRO_MAX_PARALLEL} unique Kernel profile names and valid Codex provider mappings`);
   }
-  return names;
+  let lifecycleConfig = {};
+  try { lifecycleConfig = JSON.parse(readFileSync(MULTI_PASS_PATH, "utf8")); }
+  catch (error) { if (error?.code !== "ENOENT") throw new Error(`Invalid subscription lifecycle config: ${error.message}`); }
+  const allowed = profileNamesAllowedByLifecycle(names, profileProviders, lifecycleConfig, at, minimumRemainingMs);
+  if (allowed.length === 0) return [];
+  return allowed;
 }
 
 function defaultProfileState(browserProfile) {
@@ -152,11 +186,14 @@ function readPoolState() {
   }
 }
 
-export function browserPoolCapacitySnapshot(raw, at = Date.now(), profileNames = configuredProfileNames()) {
-  const state = normalizePoolState(raw, profileNames);
+export function browserPoolCapacitySnapshot(raw, at = Date.now(), profileNames) {
+  const suppliedNames = profileNames !== undefined;
+  const activeNames = suppliedNames ? profileNames : configuredProfileNames(at);
+  const leaseEligible = new Set(suppliedNames ? activeNames : configuredProfileNames(at, ACCOUNT_LEASE_MS));
+  const state = normalizePoolState(raw, activeNames);
   const inFlight = state.profiles.filter((profile) => profile.inFlightUntil > at).length;
-  const eligible = state.profiles.filter((profile) => profile.cooldownUntil <= at).length;
-  const available = state.profiles.filter((profile) => profile.cooldownUntil <= at && profile.inFlightUntil <= at).length;
+  const eligible = state.profiles.filter((profile) => leaseEligible.has(profile.browserProfile) && profile.cooldownUntil <= at).length;
+  const available = state.profiles.filter((profile) => leaseEligible.has(profile.browserProfile) && profile.cooldownUntil <= at && profile.inFlightUntil <= at).length;
   return { configured: state.profiles.length, eligible, inFlight, available, maxParallel: PRO_MAX_PARALLEL };
 }
 
@@ -175,11 +212,12 @@ async function acquireProfile(signal) {
   return withDirectoryLock(POOL_LOCK, signal, () => {
     const state = readPoolState();
     const at = Date.now();
+    const leaseEligible = new Set(configuredProfileNames(at, ACCOUNT_LEASE_MS));
     const selected = state.profiles
-      .filter((profile) => profile.cooldownUntil <= at && profile.inFlightUntil <= at)
+      .filter((profile) => leaseEligible.has(profile.browserProfile) && profile.cooldownUntil <= at && profile.inFlightUntil <= at)
       .sort((left, right) => left.selectionCount - right.selectionCount || left.browserProfile.localeCompare(right.browserProfile))[0];
     if (!selected) {
-      const snapshot = browserPoolCapacitySnapshot(state, at, state.profiles.map((profile) => profile.browserProfile));
+      const snapshot = browserPoolCapacitySnapshot(state, at);
       const nextCooldown = state.profiles
         .map((profile) => profile.cooldownUntil)
         .filter((until) => until > at)
@@ -621,7 +659,7 @@ export async function completeInKernelBrowser(prompt, { signal, maxWaitMs = MAX_
     onStatus?.({
       phase: "running",
       browserProfile,
-      capacity: browserPoolCapacitySnapshot(state, Date.now(), state.profiles.map((profile) => profile.browserProfile)),
+      capacity: browserPoolCapacitySnapshot(state, Date.now()),
     });
   } catch {}
   let submitted = null;
