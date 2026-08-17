@@ -8,7 +8,7 @@ import test from "node:test";
 
 const temporary = fs.mkdtempSync(path.join(os.tmpdir(), "agent-orchestrator-test-"));
 process.env.AGENT_ORCHESTRATOR_DATA = temporary;
-const { AnthropicGovernor, anthropicOpusHasHeadroom, anthropicWeeklyCapacity, cancelTask, chooseMixedVariant, chooseTask, codexSubscriptionLifecycle, completionToolResult, Controller, cpuPercent, DISPATCH_NO_WORK_TTL_MS, dispatchedTaskPrompt, DistributedQuotaFeedback, evaluateDispatch, evaluateWorkCheck, insertRun, isolateTaskShell, isEligibleCodexPlan, launchBatchSize, loadConfig, nextIncompleteState, openDb, orchestratedTaskPrompt, parseAnthropicUsage, PlanGovernor, planWindowBurnPerHour, proEntitlementSnapshot, proLaunchAvailability, rankTasks, resourceSlots, setTaskOptions, shouldAdvanceBackoff, taskSettings, TOOL_SHELL, validateCompletion, validateModelPolicy, WORK_CHECK_TTL_MS, workCheckStale, workReady } = await import("./orchestrator.mjs");
+const { AnthropicGovernor, anthropicOpusHasHeadroom, anthropicWeeklyCapacity, cancelTask, chooseIndependentAssignment, chooseTask, codexSubscriptionLifecycle, completionToolResult, Controller, cpuPercent, DISPATCH_NO_WORK_TTL_MS, dispatchedTaskPrompt, DistributedQuotaFeedback, evaluateDispatch, evaluateWorkCheck, insertRun, isolateTaskShell, isEligibleCodexPlan, launchBatchSize, loadConfig, nextIncompleteState, openDb, orchestratedTaskPrompt, parseAnthropicUsage, PlanGovernor, planWindowBurnPerHour, proEntitlementSnapshot, proLaunchAvailability, rankTasks, resourceSlots, setTaskOptions, shouldAdvanceBackoff, taskSettings, TOOL_SHELL, validateCompletion, validateModelPolicy, WORK_CHECK_TTL_MS, workCheckStale, workReady } = await import("./orchestrator.mjs");
 
 test.after(() => fs.rmSync(temporary, { recursive: true, force: true }));
 
@@ -479,27 +479,17 @@ test("plan estimator paces all remaining capacity to window reset", () => {
   assert.equal(planWindowBurnPerHour({}, at), null);
 });
 
-test("Sol-grade scheduling derives its active Opus ratio from healthy accounts", () => {
-  const task = { model: "openai-codex/gpt-5.6-sol", thinking: "xhigh" };
-  const mix = { alternateModel: "anthropic/claude-opus-5", alternateThinking: "xhigh" };
-  const assignment = (model, provider) => ({ model, thinking: "xhigh", provider, task });
-  const fourSol = Array.from({ length: 4 }, (_, index) => assignment(task.model, `openai-codex-${index + 1}`));
-  assert.equal(chooseMixedVariant(task, mix, fourSol, 10, 2).model, task.model);
-  const fiveSol = [...fourSol, assignment(task.model, "openai-codex-5")];
-  assert.equal(chooseMixedVariant(task, mix, fiveSol, 10, 2).model, "anthropic/claude-opus-5");
-
-  const elevenSol = Array.from({ length: 11 }, (_, index) => assignment(task.model, `openai-codex-${index + 1}`));
-  assert.equal(chooseMixedVariant(task, mix, elevenSol, 12, 1).model, task.model);
-
-  const twelveSol = Array.from({ length: 12 }, (_, index) => assignment(task.model, `openai-codex-${index + 1}`));
-  assert.equal(chooseMixedVariant(task, mix, twelveSol, 12, 2).model, "anthropic/claude-opus-5");
-  const oneOpus = [...twelveSol, assignment("anthropic/claude-opus-5", "anthropic")];
-  assert.equal(chooseMixedVariant(task, mix, oneOpus, 12, 2).model, "anthropic/claude-opus-5");
-  const twoOpus = [...oneOpus, assignment("anthropic/claude-opus-5", "anthropic-2")];
-  assert.equal(chooseMixedVariant(task, mix, twoOpus, 12, 2).model, task.model);
+test("mixed models choose independently admitted provider capacity", () => {
+  const sol = { ok: true, provider: "openai-codex", pressure: 1.4 };
+  const opus = { ok: true, provider: "anthropic", pressure: 0.8 };
+  assert.equal(chooseIndependentAssignment(sol, opus), opus);
+  assert.equal(chooseIndependentAssignment({ ...sol, pressure: 0.4 }, opus).provider, "openai-codex");
+  assert.equal(chooseIndependentAssignment({ ...sol, ok: false }, opus), opus);
+  assert.equal(chooseIndependentAssignment(sol, { ...opus, ok: false }), sol);
+  assert.equal(chooseIndependentAssignment({ ...sol, ok: false }, { ...opus, ok: false }), null);
 });
 
-test("an independent Opus account remains usable when Codex is full before the target ratio", async () => {
+test("independent Opus capacity remains usable when Codex is full", async () => {
   const config = loadConfig();
   const anthropic = {
     setModelRuntime() {},
@@ -562,7 +552,11 @@ test("Anthropic Opus admission preserves enough shared weekly capacity for Fable
   governor.feedback.state.share = 1;
   governor.feedback.state.accountShares["anthropic-2"] = 1;
   governor.snapshot = {
-    at, expiresAt: at + 1000, configured: 2, healthy: 2, withHeadroom: 1, distributed: { share: 1 },
+    at, expiresAt: at + 1000, configured: 2, healthy: 2, withHeadroom: 1,
+    distributed: { share: 1, accounts: {
+      anthropic: { sustainableRate: 1 },
+      "anthropic-2": { sustainableRate: 1 },
+    } },
     accounts: [
       account("anthropic", 0, 50, 0),
       account("anthropic-2", 0, 50, 100),

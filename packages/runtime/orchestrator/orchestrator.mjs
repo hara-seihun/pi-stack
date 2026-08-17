@@ -69,7 +69,7 @@ const DEFAULT_CONFIG = {
       "openai-codex/gpt-5.6-sol:xhigh": {
         alternateModel: "anthropic/claude-opus-5",
         alternateThinking: "xhigh",
-        ratio: "healthy-accounts"
+        strategy: "independent-capacity"
       }
     },
     distributed: {
@@ -148,7 +148,7 @@ export function loadConfig() {
   }
   for (const [base, mix] of Object.entries(config.plan.modelMixes)) {
     if (!base.includes(":") || typeof mix?.alternateModel !== "string" || !mix.alternateModel.includes("/") ||
-        typeof mix?.alternateThinking !== "string" || mix.ratio !== "healthy-accounts") fail(`invalid model mix ${base}`);
+        typeof mix?.alternateThinking !== "string" || mix.strategy !== "independent-capacity") fail(`invalid model mix ${base}`);
     validateModelPolicy(mix.alternateModel);
   }
   return config;
@@ -386,19 +386,12 @@ function providerFamily(provider) {
   if (provider === ANTHROPIC_PROVIDER || provider.startsWith(`${ANTHROPIC_PROVIDER}-`)) return ANTHROPIC_PROVIDER;
   return provider;
 }
-function assignmentKey(item) {
-  return item.model && item.thinking ? runModelKey(item) : runModelKey(item.task);
-}
 function taskMix(config, task) { return config.plan.modelMixes[runModelKey(task)] ?? null; }
-export function chooseMixedVariant(task, mix, activeAssignments, healthyCodex, healthyAnthropic) {
-  const primary = { model: task.model, thinking: task.thinking, family: CODEX_PROVIDER };
-  if (!mix || healthyAnthropic <= 0) return primary;
-  const alternate = { model: mix.alternateModel, thinking: mix.alternateThinking, family: ANTHROPIC_PROVIDER };
-  const primaryActive = activeAssignments.filter((item) => assignmentKey(item) === runModelKey(primary)).length;
-  const alternateActive = activeAssignments.filter((item) => assignmentKey(item) === runModelKey(alternate)).length;
-  const primaryPressure = (primaryActive + 1) / Math.max(1, healthyCodex);
-  const alternatePressure = (alternateActive + 1) / healthyAnthropic;
-  return alternatePressure < primaryPressure ? alternate : primary;
+export function chooseIndependentAssignment(primary, alternate) {
+  if (primary.ok && alternate.ok) {
+    return Number(primary.pressure) <= Number(alternate.pressure) ? primary : alternate;
+  }
+  return primary.ok ? primary : alternate.ok ? alternate : null;
 }
 export function validateModelPolicy(model) {
   if (/^gpt-5-5(?:-|$)/.test(modelIdOf(model))) fail("GPT-5.5 models are banned; use GPT-5.6");
@@ -1031,20 +1024,22 @@ export class AnthropicGovernor {
     const eligible = usage.accounts
       .filter((account) => anthropicOpusHasHeadroom(account) && (this.cooldowns.get(account.provider) ?? 0) <= now() &&
         (activeByProvider.get(account.provider) ?? 0) < limit);
+    const candidate = this.config.plan.anthropic.predictedPercentPerActiveHour ?? DEFAULT_CONFIG.plan.anthropic.predictedPercentPerActiveHour;
     const localActive = [...activeByProvider.values()].reduce((sum, value) => sum + value, 0);
+    const localBurn = localActive * candidate;
     const syntheticAccounts = usage.accounts.filter(anthropicOpusHasHeadroom).map((account) => ({
       ...account,
-      allowedBurnPercentPerHour: (usage.distributed?.accounts?.[account.provider]?.sustainableRate ?? 1) > 0 ? 1 : 0,
+      allowedBurnPercentPerHour: usage.distributed?.accounts?.[account.provider]?.sustainableRate ?? 0,
     }));
     const allowance = this.feedback.totalAllowance(syntheticAccounts);
-    const admitted = this.feedback.admitsAccounts(localActive, 1, syntheticAccounts, runModelKey(variant));
-    const syntheticActive = [...activeByProvider.entries()].map(([provider, active]) => ({ provider, rate: active }));
+    const admitted = this.feedback.admitsAccounts(localBurn, candidate, syntheticAccounts, runModelKey(variant));
+    const syntheticActive = [...activeByProvider.entries()].map(([provider, active]) => ({ provider, rate: active * candidate }));
     const eligibleProviders = new Set(eligible.map((account) => account.provider));
     const routed = admitted ? this.feedback.selectAccount(
       syntheticAccounts.filter((account) => eligibleProviders.has(account.provider)),
       syntheticActive,
       runModelKey(variant),
-      1,
+      candidate,
     ) : null;
     const selected = routed ? { account: routed.account, active: activeByProvider.get(routed.account.provider) ?? 0, ...routed } : null;
     const distributed = usage.distributed ?? this.feedback.status;
@@ -1055,9 +1050,10 @@ export class AnthropicGovernor {
       thinking: variant.thinking,
       instrumentBlock: selected?.block ?? null,
       instrumentSign: selected?.sign ?? null,
+      pressure: allowance > 0 ? (localBurn + candidate) / allowance : Number.POSITIVE_INFINITY,
       detail: selected
-        ? `Anthropic account=${selected.account.provider} active=${selected.active} allowance=${allowance.toFixed(3)} share=${distributed.share.toFixed(3)} healthy=${usage.healthy} headroom=${usage.withHeadroom}`
-        : `Anthropic distributed gate closed: local=${localActive} candidate=1.000 allowance=${allowance.toFixed(3)} share=${distributed.share.toFixed(3)} healthy=${usage.healthy} headroom=${usage.withHeadroom}`,
+        ? `Anthropic account=${selected.account.provider} active=${selected.active} local=${localBurn.toFixed(3)} candidate=${candidate.toFixed(3)} allowance=${allowance.toFixed(3)} share=${distributed.share.toFixed(3)} healthy=${usage.healthy} headroom=${usage.withHeadroom}`
+        : `Anthropic distributed gate closed: local=${localBurn.toFixed(3)} candidate=${candidate.toFixed(3)} allowance=${allowance.toFixed(3)} share=${distributed.share.toFixed(3)} healthy=${usage.healthy} headroom=${usage.withHeadroom}`,
     };
   }
 }
@@ -1223,6 +1219,7 @@ export class PlanGovernor {
       thinking: variant.thinking,
       instrumentBlock: selected?.block ?? null,
       instrumentSign: selected?.sign ?? null,
+      pressure: allowance > 0 ? (live + candidate) / allowance : Number.POSITIVE_INFINITY,
       detail: selected
         ? `Codex account=${selected.account.provider} local=${live.toFixed(3)} candidate=${candidate.toFixed(3)} allowance=${allowance.toFixed(3)} share=${snapshot.distributed.share.toFixed(3)} sustainable=${snapshot.distributed.sustainableRate.toFixed(3)}`
         : `Codex distributed gate closed: local=${live.toFixed(3)} candidate=${candidate.toFixed(3)} allowance=${allowance.toFixed(3)} share=${snapshot.distributed.share.toFixed(3)} sustainable=${snapshot.distributed.sustainableRate.toFixed(3)} observed=${snapshot.distributed.observedRate?.toFixed(3) ?? "unknown"}`,
@@ -1258,23 +1255,15 @@ export class PlanGovernor {
       return this.allowsCodex({ model: task.model, thinking: task.thinking }, activeAssignments);
     }
     const [codex, anthropic] = await Promise.all([this.refresh(activeAssignments), this.anthropic.refresh(activeAssignments)]);
-    const variant = chooseMixedVariant(task, mix, activeAssignments, codex.healthy, anthropic.withHeadroom);
-    if (variant.family === ANTHROPIC_PROVIDER) {
-      const governed = await this.anthropic.allows(variant, activeAssignments, anthropic);
-      if (governed.ok) return governed;
-      const primary = { model: task.model, thinking: task.thinking };
-      const fallback = await this.allowsCodex(primary, activeAssignments, codex);
-      return fallback.ok
-        ? { ...fallback, detail: `${governed.detail}; mix deferred; ${fallback.detail}` }
-        : { ...governed, detail: `${governed.detail}; ${fallback.detail}` };
-    }
-    const governed = await this.allowsCodex(variant, activeAssignments, codex);
-    if (governed.ok) return governed;
-    const alternateVariant = { model: mix.alternateModel, thinking: mix.alternateThinking, family: ANTHROPIC_PROVIDER };
-    const alternate = await this.anthropic.allows(alternateVariant, activeAssignments, anthropic);
-    return alternate.ok
-      ? { ...alternate, detail: `${governed.detail}; primary provider full; ${alternate.detail}` }
-      : { ...governed, detail: `${governed.detail}; ${alternate.detail}` };
+    const primaryVariant = { model: task.model, thinking: task.thinking };
+    const alternateVariant = { model: mix.alternateModel, thinking: mix.alternateThinking };
+    const [primary, alternate] = await Promise.all([
+      this.allowsCodex(primaryVariant, activeAssignments, codex),
+      this.anthropic.allows(alternateVariant, activeAssignments, anthropic),
+    ]);
+    const selected = chooseIndependentAssignment(primary, alternate);
+    const detail = `independent provider gates; ${primary.detail}; ${alternate.detail}`;
+    return selected ? { ...selected, detail } : { ...primary, detail };
   }
 }
 
