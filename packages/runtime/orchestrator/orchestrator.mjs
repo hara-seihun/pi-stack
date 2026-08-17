@@ -398,6 +398,9 @@ export function chooseMixedVariant(task, mix, activeAssignments, healthyCodex, h
 }
 export function validateModelPolicy(model) {
   if (/^gpt-5-5(?:-|$)/.test(modelIdOf(model))) fail("GPT-5.5 models are banned; use GPT-5.6");
+  if (providerFamily(providerOf(model)) === ANTHROPIC_PROVIDER && /^claude-fable(?:-|$)/.test(modelIdOf(model))) {
+    fail("Fable is reserved for interactive use; autonomous tasks must use Opus");
+  }
 }
 function isChatGptProTask(task) { return providerOf(task.model) === CHATGPT_PRO_PROVIDER; }
 

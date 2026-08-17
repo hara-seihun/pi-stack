@@ -677,9 +677,12 @@ test("plan governor excludes retired lifecycle entries and inactive provider pla
   assert.deepEqual(requested.sort(), ["Bearer base", "Bearer free"]);
 });
 
-test("GPT-5.5 models are banned", () => {
+test("forbidden autonomous models are rejected", () => {
   assert.throws(() => validateModelPolicy("chatgpt-pro/gpt-5-5-pro"), /banned/);
   assert.throws(() => validateModelPolicy("chatgpt-pro/gpt-5-5-pro-deep-research"), /banned/);
+  assert.throws(() => validateModelPolicy("anthropic/claude-fable-5"), /interactive use/);
+  assert.throws(() => validateModelPolicy("anthropic-2/claude-fable-5"), /interactive use/);
+  assert.doesNotThrow(() => validateModelPolicy("anthropic/claude-opus-5"));
   assert.doesNotThrow(() => validateModelPolicy("chatgpt-pro/gpt-5-6-pro-literal"));
 });
 
