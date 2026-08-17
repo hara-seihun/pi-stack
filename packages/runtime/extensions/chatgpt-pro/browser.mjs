@@ -37,9 +37,9 @@ export const PRO_TRANSPORT_HORIZONS = Object.freeze({
   accountLeaseMs: 3 * 60 * 60_000 + 20 * 60_000,
 });
 const ACCOUNT_LEASE_MS = PRO_TRANSPORT_HORIZONS.accountLeaseMs;
-const FALLBACK_COOLDOWN_BASE_MS = 15 * 60_000;
-const FALLBACK_COOLDOWN_MAX_MS = 4 * 60 * 60_000;
-const FALLBACK_STREAK_RESET_MS = 24 * 60 * 60_000;
+// A mini-routed Pro submission means the account's Pro allowance is exhausted;
+// rest the account for a full day and round-robin the others.
+export const FALLBACK_COOLDOWN_MS = 24 * 60 * 60_000;
 const OPERATIONAL_COOLDOWN_MS = 60_000;
 const RATE_LIMIT_COOLDOWN_MS = 15 * 60_000;
 const MAX_WAIT_MS = PRO_TRANSPORT_HORIZONS.responseWaitMs;
@@ -141,7 +141,6 @@ function defaultProfileState(browserProfile) {
     inFlightUntil: 0,
     cooldownUntil: 0,
     cooldownReason: null,
-    fallbackStreak: 0,
     lastFallbackAt: null,
     lastVerifiedAt: null,
   };
@@ -162,7 +161,6 @@ function normalizeProfile(raw, browserProfile) {
     inFlightUntil: Number(raw?.inFlightUntil) || 0,
     cooldownUntil: Number(raw?.cooldownUntil) || 0,
     cooldownReason: typeof raw?.cooldownReason === "string" ? raw.cooldownReason : null,
-    fallbackStreak: Number.isInteger(raw?.fallbackStreak) && raw.fallbackStreak >= 0 ? raw.fallbackStreak : 0,
     lastFallbackAt: typeof raw?.lastFallbackAt === "string" ? raw.lastFallbackAt : null,
     lastVerifiedAt: typeof raw?.lastVerifiedAt === "string" ? raw.lastVerifiedAt : null,
   };
@@ -201,17 +199,6 @@ export function browserPoolCapacitySnapshot(raw, at = Date.now(), profileNames) 
   return { configured: state.profiles.length, eligible, inFlight, available, maxParallel: PRO_MAX_PARALLEL };
 }
 
-export function nextFallbackCooldown(state, now = Date.now()) {
-  const lastFallbackMs = Date.parse(state.lastFallbackAt ?? "");
-  const streak = Number.isFinite(lastFallbackMs) && now - lastFallbackMs < FALLBACK_STREAK_RESET_MS
-    ? state.fallbackStreak + 1
-    : 1;
-  return {
-    streak,
-    cooldownMs: Math.min(FALLBACK_COOLDOWN_BASE_MS * (2 ** Math.max(0, streak - 1)), FALLBACK_COOLDOWN_MAX_MS),
-  };
-}
-
 async function acquireProfile(signal) {
   return withDirectoryLock(POOL_LOCK, signal, () => {
     const state = readPoolState();
@@ -245,18 +232,11 @@ async function finishProfile(browserProfile, { verified = false, cooldownMs = 0,
     if (verified) {
       selected.cooldownUntil = 0;
       selected.cooldownReason = null;
-      selected.fallbackStreak = 0;
       selected.lastFallbackAt = null;
       selected.lastVerifiedAt = new Date().toISOString();
     } else if (cooldownMs > 0) {
-      let effectiveCooldownMs = cooldownMs;
-      if (reason === "pro-fallback") {
-        const fallback = nextFallbackCooldown(selected);
-        selected.fallbackStreak = fallback.streak;
-        selected.lastFallbackAt = new Date().toISOString();
-        effectiveCooldownMs = fallback.cooldownMs;
-      }
-      selected.cooldownUntil = Date.now() + effectiveCooldownMs;
+      if (reason === "pro-fallback") selected.lastFallbackAt = new Date().toISOString();
+      selected.cooldownUntil = Date.now() + cooldownMs;
       selected.cooldownReason = reason ?? "provider failure";
     }
     writeJsonAtomic(POOL_PATH, state);
@@ -700,12 +680,12 @@ function failureCooldown(error, evidence, warning) {
   const message = `${error instanceof Error ? error.message : String(error)} ${warning}`;
   if (evidence?.transport_stalled === true || evidence?.transport_timed_out === true) {
     return {
-      cooldownMs: FALLBACK_COOLDOWN_MAX_MS,
+      cooldownMs: 4 * 60 * 60_000,
       reason: evidence.transport_stalled === true ? "pro-stalled" : "pro-timeout",
     };
   }
   if (evidence?.resolved_model_slug && evidence.resolved_model_slug !== MODEL_ID) {
-    return { cooldownMs: FALLBACK_COOLDOWN_BASE_MS, reason: "pro-fallback" };
+    return { cooldownMs: FALLBACK_COOLDOWN_MS, reason: "pro-fallback" };
   }
   if (/rate.?limit|usage limit|quota|too many requests|temporarily unavailable/i.test(message)) {
     return { cooldownMs: RATE_LIMIT_COOLDOWN_MS, reason: "rate-limit" };
@@ -842,7 +822,7 @@ async function attemptProTurn(browserProfile, prompt, { signal, maxWaitMs, onSta
       }, responseText);
     }
     const cooldown = error instanceof ProFallbackError
-      ? { cooldownMs: FALLBACK_COOLDOWN_BASE_MS, reason: "pro-fallback" }
+      ? { cooldownMs: FALLBACK_COOLDOWN_MS, reason: "pro-fallback" }
       : failureCooldown(error, evidence, warning);
     try { await finishProfile(browserProfile, cooldown, signal?.aborted ? undefined : signal); } catch {}
     throw error;

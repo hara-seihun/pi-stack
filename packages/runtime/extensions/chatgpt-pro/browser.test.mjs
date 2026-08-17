@@ -7,7 +7,7 @@ import {
   browserPoolCapacitySnapshot,
   defaultPoolState,
   isTerminalConversationEvidence,
-  nextFallbackCooldown,
+  FALLBACK_COOLDOWN_MS,
   normalizePoolState,
   profileNamesAllowedByLifecycle,
   PRO_MAX_PARALLEL,
@@ -205,12 +205,10 @@ test("browser pool migrates one entitlement and admits no more than four configu
     inFlightUntil: 9,
     cooldownUntil: 10,
     cooldownReason: "rate-limit",
-    fallbackStreak: 2,
     lastFallbackAt: "2026-08-16T00:00:00.000Z",
     lastVerifiedAt: "2026-08-16T00:00:00.000Z",
   }, ["limmy-google"]);
   assert.equal(normalized.profiles[0].selectionCount, 4);
-  assert.equal(normalized.profiles[0].fallbackStreak, 2);
   assert.equal(PRO_MAX_PARALLEL, 4);
 });
 
@@ -248,16 +246,8 @@ test("browser capacity exposes running Pro agents and never exceeds four", () =>
   });
 });
 
-test("routed fallbacks back off exponentially and reset after a quiet day", () => {
-  const now = Date.parse("2026-08-16T12:00:00.000Z");
-  const initial = defaultPoolState(["limmy-google"]).profiles[0];
-  assert.deepEqual(nextFallbackCooldown(initial, now), { streak: 1, cooldownMs: 15 * 60_000 });
-  const recent = { ...initial, fallbackStreak: 2, lastFallbackAt: "2026-08-16T11:59:00.000Z" };
-  assert.deepEqual(nextFallbackCooldown(recent, now), { streak: 3, cooldownMs: 60 * 60_000 });
-  const capped = { ...recent, fallbackStreak: 12 };
-  assert.deepEqual(nextFallbackCooldown(capped, now), { streak: 13, cooldownMs: 4 * 60 * 60_000 });
-  const old = { ...recent, lastFallbackAt: "2026-08-14T11:59:00.000Z" };
-  assert.deepEqual(nextFallbackCooldown(old, now), { streak: 1, cooldownMs: 15 * 60_000 });
+test("an exhausted Pro allowance rests the account for a full day", () => {
+  assert.equal(FALLBACK_COOLDOWN_MS, 24 * 60 * 60_000);
 });
 
 test("the submission stream reveals a router fallback within seconds", async () => {
