@@ -1036,6 +1036,7 @@ export class AnthropicGovernor {
       ...account,
       allowedBurnPercentPerHour: (usage.distributed?.accounts?.[account.provider]?.sustainableRate ?? 1) > 0 ? 1 : 0,
     }));
+    const allowance = this.feedback.totalAllowance(syntheticAccounts);
     const admitted = this.feedback.admitsAccounts(localActive, 1, syntheticAccounts, runModelKey(variant));
     const syntheticActive = [...activeByProvider.entries()].map(([provider, active]) => ({ provider, rate: active }));
     const eligibleProviders = new Set(eligible.map((account) => account.provider));
@@ -1055,8 +1056,8 @@ export class AnthropicGovernor {
       instrumentBlock: selected?.block ?? null,
       instrumentSign: selected?.sign ?? null,
       detail: selected
-        ? `Anthropic account=${selected.account.provider} active=${selected.active} share=${distributed.share.toFixed(3)} healthy=${usage.healthy} headroom=${usage.withHeadroom}`
-        : `Anthropic distributed gate closed: local=${localActive} share=${distributed.share.toFixed(3)} healthy=${usage.healthy} headroom=${usage.withHeadroom}`,
+        ? `Anthropic account=${selected.account.provider} active=${selected.active} allowance=${allowance.toFixed(3)} share=${distributed.share.toFixed(3)} healthy=${usage.healthy} headroom=${usage.withHeadroom}`
+        : `Anthropic distributed gate closed: local=${localActive} candidate=1.000 allowance=${allowance.toFixed(3)} share=${distributed.share.toFixed(3)} healthy=${usage.healthy} headroom=${usage.withHeadroom}`,
     };
   }
 }
@@ -1212,6 +1213,7 @@ export class PlanGovernor {
       .filter((item) => providerFamily(item.provider) === CODEX_PROVIDER)
       .map((item) => ({ provider: item.provider, rate: this.modelRate(item.model ? item : item.task) }));
     const live = codexAssignments.reduce((sum, item) => sum + item.rate, 0);
+    const allowance = this.feedback.totalAllowance(snapshot.accounts);
     const admitted = this.feedback.admitsAccounts(live, candidate, snapshot.accounts, runModelKey(variant));
     const selected = admitted ? this.feedback.selectAccount(snapshot.accounts, codexAssignments, runModelKey(variant), candidate) : null;
     return {
@@ -1222,8 +1224,8 @@ export class PlanGovernor {
       instrumentBlock: selected?.block ?? null,
       instrumentSign: selected?.sign ?? null,
       detail: selected
-        ? `Codex account=${selected.account.provider} local=${live.toFixed(3)} candidate=${candidate.toFixed(3)} share=${snapshot.distributed.share.toFixed(3)} sustainable=${snapshot.distributed.sustainableRate.toFixed(3)}`
-        : `Codex distributed gate closed: local=${live.toFixed(3)} candidate=${candidate.toFixed(3)} share=${snapshot.distributed.share.toFixed(3)} sustainable=${snapshot.distributed.sustainableRate.toFixed(3)} observed=${snapshot.distributed.observedRate?.toFixed(3) ?? "unknown"}`,
+        ? `Codex account=${selected.account.provider} local=${live.toFixed(3)} candidate=${candidate.toFixed(3)} allowance=${allowance.toFixed(3)} share=${snapshot.distributed.share.toFixed(3)} sustainable=${snapshot.distributed.sustainableRate.toFixed(3)}`
+        : `Codex distributed gate closed: local=${live.toFixed(3)} candidate=${candidate.toFixed(3)} allowance=${allowance.toFixed(3)} share=${snapshot.distributed.share.toFixed(3)} sustainable=${snapshot.distributed.sustainableRate.toFixed(3)} observed=${snapshot.distributed.observedRate?.toFixed(3) ?? "unknown"}`,
     };
   }
 
@@ -1262,7 +1264,9 @@ export class PlanGovernor {
       if (governed.ok) return governed;
       const primary = { model: task.model, thinking: task.thinking };
       const fallback = await this.allowsCodex(primary, activeAssignments, codex);
-      return fallback.ok ? { ...fallback, detail: `${governed.detail}; mix deferred; ${fallback.detail}` } : governed;
+      return fallback.ok
+        ? { ...fallback, detail: `${governed.detail}; mix deferred; ${fallback.detail}` }
+        : { ...governed, detail: `${governed.detail}; ${fallback.detail}` };
     }
     const governed = await this.allowsCodex(variant, activeAssignments, codex);
     if (governed.ok) return governed;
@@ -1270,7 +1274,7 @@ export class PlanGovernor {
     const alternate = await this.anthropic.allows(alternateVariant, activeAssignments, anthropic);
     return alternate.ok
       ? { ...alternate, detail: `${governed.detail}; primary provider full; ${alternate.detail}` }
-      : governed;
+      : { ...governed, detail: `${governed.detail}; ${alternate.detail}` };
   }
 }
 

@@ -516,6 +516,21 @@ test("an independent Opus account remains usable when Codex is full before the t
   assert.equal(assignment.model, "anthropic/claude-opus-5");
 });
 
+test("mixed-provider rejection reports both quota gates", async () => {
+  const config = loadConfig();
+  const anthropic = {
+    setModelRuntime() {},
+    refresh: async () => ({ healthy: 3, withHeadroom: 3 }),
+    allows: async (variant) => ({ ok: false, provider: null, model: variant.model, thinking: variant.thinking, detail: "Anthropic allowance=0.300" }),
+  };
+  const governor = new PlanGovernor(config, { anthropic });
+  governor.refresh = async () => ({ healthy: 12, accounts: [], allowedBurnPercentPerHour: 0 });
+  governor.allowsCodex = async (variant) => ({ ok: false, provider: null, model: variant.model, thinking: variant.thinking, detail: "Codex allowance=0.301" });
+  const result = await governor.allows({ model: "openai-codex/gpt-5.6-sol", thinking: "xhigh" }, []);
+  assert.match(result.detail, /Codex allowance=0\.301/);
+  assert.match(result.detail, /Anthropic allowance=0\.300/);
+});
+
 test("Anthropic Opus admission preserves enough shared weekly capacity for Fable", async () => {
   const at = Date.UTC(2026, 7, 17, 6);
   const usage = (session, shared, fable, extraUsagePercent = 0) => parseAnthropicUsage({
