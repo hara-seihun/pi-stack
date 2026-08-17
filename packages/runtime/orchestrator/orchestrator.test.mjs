@@ -8,7 +8,7 @@ import test from "node:test";
 
 const temporary = fs.mkdtempSync(path.join(os.tmpdir(), "agent-orchestrator-test-"));
 process.env.AGENT_ORCHESTRATOR_DATA = temporary;
-const { cancelTask, choosePlanProvider, chooseTask, codexSubscriptionLifecycle, completionToolResult, Controller, cpuPercent, DISPATCH_NO_WORK_TTL_MS, dispatchedTaskPrompt, evaluateDispatch, evaluateWorkCheck, insertRun, isolateTaskShell, isEligibleCodexPlan, launchBatchSize, loadConfig, nextIncompleteState, openDb, orchestratedTaskPrompt, PlanGovernor, planWindowBurnPerHour, proEntitlementSnapshot, proLaunchAvailability, rankTasks, resourceSlots, setTaskOptions, shouldAdvanceBackoff, taskSettings, TOOL_SHELL, validateCompletion, validateModelPolicy, WORK_CHECK_TTL_MS, workCheckStale, workReady } = await import("./orchestrator.mjs");
+const { AnthropicGovernor, cancelTask, chooseMixedVariant, choosePlanProvider, chooseTask, codexSubscriptionLifecycle, completionToolResult, Controller, cpuPercent, DISPATCH_NO_WORK_TTL_MS, dispatchedTaskPrompt, evaluateDispatch, evaluateWorkCheck, insertRun, isolateTaskShell, isEligibleCodexPlan, launchBatchSize, loadConfig, nextIncompleteState, openDb, orchestratedTaskPrompt, parseAnthropicUsage, PlanGovernor, planWindowBurnPerHour, proEntitlementSnapshot, proLaunchAvailability, rankTasks, resourceSlots, setTaskOptions, shouldAdvanceBackoff, taskSettings, TOOL_SHELL, validateCompletion, validateModelPolicy, WORK_CHECK_TTL_MS, workCheckStale, workReady } = await import("./orchestrator.mjs");
 
 test.after(() => fs.rmSync(temporary, { recursive: true, force: true }));
 
@@ -223,7 +223,8 @@ test("noninteractive deployment resolves its newly installed Pi commands", () =>
   const installAt = deploy.indexOf('install -d -m 700 "$HOME/.local/bin"');
   const pathAt = deploy.indexOf('export PATH="$HOME/.local/bin:$PATH"');
   const proCheckAt = deploy.indexOf('"$HOME/.local/bin/pro" --version');
-  assert.ok(installAt >= 0 && pathAt > installAt && proCheckAt > pathAt);
+  const restartAt = deploy.indexOf("sudo systemctl restart agent-orchestrator.service");
+  assert.ok(installAt >= 0 && pathAt > installAt && proCheckAt > pathAt && restartAt > proCheckAt);
 });
 
 test("autonomous bash tools retain the OOM-isolated shell after resource reload", async () => {
@@ -447,6 +448,73 @@ test("plan estimator paces all remaining capacity to window reset", () => {
   assert.equal(planWindowBurnPerHour({}, at), null);
 });
 
+test("Sol-grade scheduling derives its active Opus ratio from healthy accounts", () => {
+  const task = { model: "openai-codex/gpt-5.6-sol", thinking: "xhigh" };
+  const mix = { alternateModel: "anthropic/claude-opus-5", alternateThinking: "xhigh" };
+  const assignment = (model, provider) => ({ model, thinking: "xhigh", provider, task });
+  const fourSol = Array.from({ length: 4 }, (_, index) => assignment(task.model, `openai-codex-${index + 1}`));
+  assert.equal(chooseMixedVariant(task, mix, fourSol, 10, 2).model, task.model);
+  const fiveSol = [...fourSol, assignment(task.model, "openai-codex-5")];
+  assert.equal(chooseMixedVariant(task, mix, fiveSol, 10, 2).model, "anthropic/claude-opus-5");
+
+  const elevenSol = Array.from({ length: 11 }, (_, index) => assignment(task.model, `openai-codex-${index + 1}`));
+  assert.equal(chooseMixedVariant(task, mix, elevenSol, 12, 1).model, task.model);
+
+  const twelveSol = Array.from({ length: 12 }, (_, index) => assignment(task.model, `openai-codex-${index + 1}`));
+  assert.equal(chooseMixedVariant(task, mix, twelveSol, 12, 2).model, "anthropic/claude-opus-5");
+  const oneOpus = [...twelveSol, assignment("anthropic/claude-opus-5", "anthropic")];
+  assert.equal(chooseMixedVariant(task, mix, oneOpus, 12, 2).model, "anthropic/claude-opus-5");
+  const twoOpus = [...oneOpus, assignment("anthropic/claude-opus-5", "anthropic-2")];
+  assert.equal(chooseMixedVariant(task, mix, twoOpus, 12, 2).model, task.model);
+});
+
+test("an independent Opus account remains usable when Codex is full before the target ratio", async () => {
+  const config = loadConfig();
+  const anthropic = {
+    setModelRuntime() {},
+    refresh: async () => ({ healthy: 2, withHeadroom: 1 }),
+    allows: async (variant) => ({ ok: true, provider: "anthropic", model: variant.model, thinking: variant.thinking, detail: "available" }),
+  };
+  const governor = new PlanGovernor(config, { anthropic });
+  governor.refresh = async () => ({ healthy: 12, accounts: [], allowedBurnPercentPerHour: 0 });
+  governor.allowsCodex = async (variant) => ({ ok: false, provider: null, model: variant.model, thinking: variant.thinking, detail: "Codex full" });
+  const task = { model: "openai-codex/gpt-5.6-sol", thinking: "xhigh" };
+  const assignment = await governor.allows(task, []);
+  assert.equal(assignment.ok, true);
+  assert.equal(assignment.provider, "anthropic");
+  assert.equal(assignment.model, "anthropic/claude-opus-5");
+});
+
+test("Anthropic usage parsing and account admission fail closed on exhausted windows", async () => {
+  const at = Date.UTC(2026, 7, 17, 6);
+  const parsed = parseAnthropicUsage({
+    five_hour: { utilization: 20, resets_at: new Date(at + 3600_000).toISOString() },
+    seven_day: { utilization: 40, resets_at: new Date(at + 86400_000).toISOString() },
+    seven_day_opus: { utilization: 60, resets_at: new Date(at + 86400_000).toISOString() },
+  }, at);
+  assert.equal(parsed.windows.fiveHour.utilization, 20);
+  assert.equal(parsed.windows.opusWeekly.utilization, 60);
+  assert.equal(parseAnthropicUsage({ five_hour: null, seven_day: null }, at), null);
+  assert.equal(parseAnthropicUsage({
+    five_hour: { utilization: 0 }, seven_day: { utilization: 0 }, spend: { enabled: true, percent: 100 },
+  }, at).spendExhausted, true);
+
+  const config = loadConfig();
+  const governor = new AnthropicGovernor(config);
+  governor.snapshot = {
+    at, expiresAt: at + 1000, configured: 2, healthy: 2, withHeadroom: 1,
+    accounts: [
+      { provider: "anthropic", stale: false, spendExhausted: false, windows: parsed.windows },
+      { provider: "anthropic-2", stale: false, spendExhausted: true, windows: parsed.windows },
+    ],
+  };
+  const variant = { model: "anthropic/claude-opus-5", thinking: "xhigh" };
+  assert.equal((await governor.allows(variant, [], governor.snapshot)).provider, "anthropic");
+  assert.equal((await governor.allows(variant, [{ provider: "anthropic", model: variant.model, thinking: variant.thinking }], governor.snapshot)).ok, false);
+  governor.noteFailure("anthropic", new Error("429 usage limit reached"), Date.now());
+  assert.equal((await governor.allows(variant, [], governor.snapshot)).ok, false);
+});
+
 test("cancelled Codex subscriptions retire exactly at their access deadline", () => {
   const at = Date.UTC(2026, 7, 23, 12);
   const future = new Date(at + 60_000).toISOString();
@@ -576,6 +644,13 @@ test("ChatGPT Pro capacity uses authenticated entitlements under the four-agent 
 test("frontier agents have no Pro delegation tool; Pro runs as its own moonshot lane", async () => {
   const source = await import("node:fs").then((fs) => fs.readFileSync(new URL("./orchestrator.mjs", import.meta.url), "utf8"));
   assert.ok(!source.includes("launch_pro"));
+});
+
+test("the service locks governor-assigned providers against hidden Multi-Pass rotation", () => {
+  const nix = fs.readFileSync("/etc/nixos/configuration.nix", "utf8");
+  const multiPass = fs.readFileSync("/home/kenan/tools/pi-multi-pass/extensions/multi-sub.ts", "utf8");
+  assert.match(nix, /PI_MULTI_PASS_LOCK_ASSIGNED_PROVIDER = "1"/);
+  assert.match(multiPass, /PI_MULTI_PASS_LOCK_ASSIGNED_PROVIDER === "1"/);
 });
 
 test("Codex plan governor keeps one baseline worker on every healthy account", () => {

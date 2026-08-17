@@ -37,6 +37,9 @@ const AUTH_PATH = path.join(getAgentDir(), "auth.json");
 const MULTI_PASS_PATH = path.join(getAgentDir(), "multi-pass.json");
 const CHATGPT_PRO_POOL_PATH = path.join(getAgentDir(), "chatgpt-pro-pool.json");
 const CHATGPT_PRO_PROVIDER = "chatgpt-pro";
+const CODEX_PROVIDER = "openai-codex";
+const ANTHROPIC_PROVIDER = "anthropic";
+const ANTHROPIC_USAGE_ENDPOINT = "https://api.anthropic.com/api/oauth/usage";
 export const TOOL_SHELL = fileURLToPath(new URL("./tool-shell", import.meta.url));
 const TICK_MS = 5000;
 const execFileAsync = promisify(execFile);
@@ -50,6 +53,18 @@ const DEFAULT_CONFIG = {
     modelBurnPercentPerHour: {
       "openai-codex/gpt-5.6-sol:xhigh": 0.5824404761904762,
       "openai-codex/gpt-5.6-luna:max": 0.02507936507936508
+    },
+    modelMixes: {
+      "openai-codex/gpt-5.6-sol:xhigh": {
+        alternateModel: "anthropic/claude-opus-5",
+        alternateThinking: "xhigh",
+        ratio: "healthy-accounts"
+      }
+    },
+    anthropic: {
+      pollSeconds: 300,
+      maxStaleSeconds: 3600,
+      maxActivePerAccount: 1
     }
   }
 };
@@ -80,6 +95,18 @@ export function loadConfig() {
   }
   if (!(Number.isFinite(config.plan?.pollSeconds) && config.plan.pollSeconds > 0)) fail("invalid config.plan.pollSeconds");
   if (!config.plan.modelBurnPercentPerHour || typeof config.plan.modelBurnPercentPerHour !== "object") fail("missing config.plan.modelBurnPercentPerHour");
+  if (!config.plan.modelMixes || typeof config.plan.modelMixes !== "object") config.plan.modelMixes = {};
+  const anthropic = config.plan.anthropic;
+  if (!anthropic || !(Number.isFinite(anthropic.pollSeconds) && anthropic.pollSeconds > 0) ||
+      !(Number.isFinite(anthropic.maxStaleSeconds) && anthropic.maxStaleSeconds >= anthropic.pollSeconds) ||
+      !(Number.isInteger(anthropic.maxActivePerAccount) && anthropic.maxActivePerAccount > 0)) {
+    fail("invalid config.plan.anthropic");
+  }
+  for (const [base, mix] of Object.entries(config.plan.modelMixes)) {
+    if (!base.includes(":") || typeof mix?.alternateModel !== "string" || !mix.alternateModel.includes("/") ||
+        typeof mix?.alternateThinking !== "string" || mix.ratio !== "healthy-accounts") fail(`invalid model mix ${base}`);
+    validateModelPolicy(mix.alternateModel);
+  }
   return config;
 }
 
@@ -156,6 +183,9 @@ export function openDb(file = DB_PATH) {
       artifacts_json TEXT NOT NULL DEFAULT '[]',
       error TEXT,
       productive INTEGER CHECK(productive IN (0,1)),
+      provider TEXT,
+      model TEXT,
+      thinking TEXT,
       created_at INTEGER NOT NULL DEFAULT (CAST((julianday('now') - 2440587.5) * 86400000 AS INTEGER)),
       updated_at INTEGER NOT NULL DEFAULT (CAST((julianday('now') - 2440587.5) * 86400000 AS INTEGER))
     );
@@ -202,6 +232,15 @@ export function openDb(file = DB_PATH) {
   if (!runColumns.has("dispatched")) {
     db.exec("DROP TRIGGER IF EXISTS auto_timestamp_run_insert; DROP TRIGGER IF EXISTS auto_timestamp_run_update; ALTER TABLE run ADD COLUMN dispatched INTEGER CHECK(dispatched IN (0,1))");
   }
+  if (!runColumns.has("model")) {
+    db.exec("DROP TRIGGER IF EXISTS auto_timestamp_run_insert; DROP TRIGGER IF EXISTS auto_timestamp_run_update; ALTER TABLE run ADD COLUMN model TEXT; ALTER TABLE run ADD COLUMN thinking TEXT");
+  }
+  db.exec(`
+    UPDATE run SET
+      model=coalesce(model,(SELECT model FROM task WHERE task.id=run.task_id)),
+      thinking=coalesce(thinking,(SELECT thinking FROM task WHERE task.id=run.task_id))
+    WHERE model IS NULL OR thinking IS NULL;
+  `);
   for (const table of ["task", "run", "event"]) ensureTableTimestamps(db, table);
   return db;
 }
@@ -295,9 +334,28 @@ export function cpuPercent(before, after) {
   return total > 0 ? Math.max(0, Math.min(100, (total - idle) * 100 / total)) : 0;
 }
 
-function runModelKey(task) { return `${task.model}:${task.thinking}`; }
+function runModelKey(value) { return `${value.model}:${value.thinking}`; }
 function providerOf(model) { return String(model).split("/", 1)[0]; }
 function modelIdOf(model) { return String(model).slice(String(model).indexOf("/") + 1); }
+function providerFamily(provider) {
+  if (provider === CODEX_PROVIDER || provider.startsWith(`${CODEX_PROVIDER}-`)) return CODEX_PROVIDER;
+  if (provider === ANTHROPIC_PROVIDER || provider.startsWith(`${ANTHROPIC_PROVIDER}-`)) return ANTHROPIC_PROVIDER;
+  return provider;
+}
+function assignmentKey(item) {
+  return item.model && item.thinking ? runModelKey(item) : runModelKey(item.task);
+}
+function taskMix(config, task) { return config.plan.modelMixes[runModelKey(task)] ?? null; }
+export function chooseMixedVariant(task, mix, activeAssignments, healthyCodex, healthyAnthropic) {
+  const primary = { model: task.model, thinking: task.thinking, family: CODEX_PROVIDER };
+  if (!mix || healthyAnthropic <= 0) return primary;
+  const alternate = { model: mix.alternateModel, thinking: mix.alternateThinking, family: ANTHROPIC_PROVIDER };
+  const primaryActive = activeAssignments.filter((item) => assignmentKey(item) === runModelKey(primary)).length;
+  const alternateActive = activeAssignments.filter((item) => assignmentKey(item) === runModelKey(alternate)).length;
+  const primaryPressure = (primaryActive + 1) / Math.max(1, healthyCodex);
+  const alternatePressure = (alternateActive + 1) / healthyAnthropic;
+  return alternatePressure < primaryPressure ? alternate : primary;
+}
 export function validateModelPolicy(model) {
   if (/^gpt-5-5(?:-|$)/.test(modelIdOf(model))) fail("GPT-5.5 models are banned; use GPT-5.6");
 }
@@ -387,24 +445,69 @@ function readCodexSubscriptionLifecycle(file, at = now()) {
   }
 }
 
-export function planWindowBurnPerHour(window, at = now()) {
-  const used = Number(window?.used_percent);
-  const resetAt = Number(window?.reset_at) * 1000;
-  if (!Number.isFinite(used) || !Number.isFinite(resetAt)) return null;
-  const hours = Math.max(0, resetAt - at) / 3600000;
-  if (hours <= 0) return 0;
-  return Math.max(0, 100 - used) / hours;
+function configuredOAuthAccounts(auth, baseProvider) {
+  return Object.entries(auth).filter(([name, value]) =>
+    (name === baseProvider || name.startsWith(`${baseProvider}-`)) && value?.type === "oauth" && value?.access);
 }
 
-export class PlanGovernor {
-  constructor(config, { modelRuntime = null, authPath = AUTH_PATH, lifecyclePath = MULTI_PASS_PATH, fetcher = fetch, readCredential = readStoredCredential } = {}) {
+async function resolveOAuthCredential({ modelRuntime, provider, baseProvider, stored, authPath, pollSeconds, readCredential }) {
+  const minimumValidityMs = Math.max(5 * 60_000, pollSeconds * 2_000);
+  if (Number(stored.expires) - now() >= minimumValidityMs) return { access: stored.access, accountId: stored.accountId ?? "" };
+  if (!modelRuntime.getProvider(provider)) {
+    const base = modelRuntime.getProvider(baseProvider);
+    if (!base) fail(`could not resolve OAuth provider ${baseProvider}`);
+    modelRuntime.registerNativeProvider({ ...base, id: provider, name: provider });
+  }
+  const resolved = await modelRuntime.getAuth(provider, {
+    minOAuthValidityMs: minimumValidityMs,
+    signal: AbortSignal.timeout(15000),
+  });
+  const latest = readCredential(provider, authPath);
+  if (!resolved?.auth?.apiKey || latest?.type !== "oauth") return null;
+  return { access: resolved.auth.apiKey, accountId: latest.accountId ?? "" };
+}
+
+function anthropicWindow(raw, durationHours, fetchedAt) {
+  if (!raw || typeof raw !== "object") return null;
+  const utilization = Number(raw.utilization);
+  if (!Number.isFinite(utilization)) return null;
+  const parsedReset = raw.resets_at ? Date.parse(raw.resets_at) : Number.NaN;
+  return {
+    utilization: Math.max(0, Math.min(100, utilization)),
+    resetsAt: Number.isFinite(parsedReset) ? parsedReset : fetchedAt + durationHours * 3600_000,
+    reportedReset: Number.isFinite(parsedReset),
+  };
+}
+
+export function parseAnthropicUsage(body, fetchedAt = now()) {
+  const windows = {
+    fiveHour: anthropicWindow(body?.five_hour, 5, fetchedAt),
+    weekly: anthropicWindow(body?.seven_day, 7 * 24, fetchedAt),
+    opusWeekly: anthropicWindow(body?.seven_day_opus, 7 * 24, fetchedAt),
+  };
+  if (!windows.fiveHour || !windows.weekly) return null;
+  const spendPercent = Number(body?.spend?.percent ?? body?.extra_usage?.utilization);
+  return {
+    windows,
+    spendExhausted: (body?.spend?.enabled === true || body?.extra_usage?.is_enabled === true) &&
+      Number.isFinite(spendPercent) && spendPercent >= 99,
+  };
+}
+
+function anthropicHasHeadroom(account) {
+  return !account.spendExhausted && Object.values(account.windows).filter(Boolean).every((window) => window.utilization < 100);
+}
+
+export class AnthropicGovernor {
+  constructor(config, { modelRuntime = null, authPath = AUTH_PATH, fetcher = fetch, readCredential = readStoredCredential } = {}) {
     this.config = config;
     this.modelRuntime = modelRuntime;
     this.authPath = authPath;
-    this.lifecyclePath = lifecyclePath;
     this.fetcher = fetcher;
     this.readCredential = readCredential;
     this.snapshot = null;
+    this.lastGood = new Map();
+    this.cooldowns = new Map();
     this.refreshing = null;
   }
 
@@ -415,26 +518,37 @@ export class PlanGovernor {
     return this.modelRuntime;
   }
 
-  async resolveCredential(provider, stored) {
-    const minimumValidityMs = Math.max(5 * 60_000, this.config.plan.pollSeconds * 2_000);
-    if (Number(stored.expires) - now() >= minimumValidityMs) {
-      return { access: stored.access, accountId: stored.accountId ?? "" };
+  async accountUsage(provider, credential, fetchedAt) {
+    try {
+      const usable = await resolveOAuthCredential({
+        modelRuntime: await this.authRuntime(),
+        provider,
+        baseProvider: ANTHROPIC_PROVIDER,
+        stored: credential,
+        authPath: this.authPath,
+        pollSeconds: this.config.plan.anthropic.pollSeconds,
+        readCredential: this.readCredential,
+      });
+      if (!usable) return { account: null, error: "OAuth credential unavailable" };
+      const response = await this.fetcher(ANTHROPIC_USAGE_ENDPOINT, {
+        signal: AbortSignal.timeout(10000),
+        headers: {
+          Authorization: `Bearer ${usable.access}`,
+          Accept: "application/json",
+          "anthropic-version": "2023-06-01",
+          "anthropic-beta": "oauth-2025-04-20",
+          "User-Agent": "works.kenan.agent-orchestrator",
+        },
+      });
+      if (!response.ok) return { account: null, error: `usage endpoint HTTP ${response.status}` };
+      const usage = parseAnthropicUsage(await response.json(), fetchedAt);
+      if (!usage) return { account: null, error: "usage endpoint returned malformed windows" };
+      const account = { provider, windows: usage.windows, spendExhausted: usage.spendExhausted, fetchedAt, stale: false };
+      this.lastGood.set(provider, account);
+      return { account, error: null };
+    } catch (error) {
+      return { account: null, error: String(error?.message ?? error) };
     }
-    const runtime = await this.authRuntime();
-    if (!runtime.getProvider(provider)) {
-      const base = runtime.getProvider("openai-codex");
-      if (!base) fail("plan governor could not resolve the Codex OAuth provider");
-      // Multi-Pass aliases use the same OAuth protocol as the base provider but
-      // keep independent credentials under their exact provider ids.
-      runtime.registerNativeProvider({ ...base, id: provider, name: provider });
-    }
-    const resolved = await runtime.getAuth(provider, {
-      minOAuthValidityMs: minimumValidityMs,
-      signal: AbortSignal.timeout(15000),
-    });
-    const latest = this.readCredential(provider, this.authPath);
-    if (!resolved?.auth?.apiKey || latest?.type !== "oauth") return null;
-    return { access: resolved.auth.apiKey, accountId: latest.accountId ?? "" };
   }
 
   async refresh() {
@@ -446,8 +560,124 @@ export class PlanGovernor {
 
   async fetch() {
     const auth = JSON.parse(fs.readFileSync(this.authPath, "utf8"));
-    const configured = Object.entries(auth).filter(([name, value]) =>
-      (name === "openai-codex" || name.startsWith("openai-codex-")) && value?.type === "oauth" && value?.access);
+    const configured = configuredOAuthAccounts(auth, ANTHROPIC_PROVIDER);
+    const fetchedAt = now();
+    const accounts = [];
+    const errors = [];
+    for (const [provider, credential] of configured) {
+      const result = await this.accountUsage(provider, credential, fetchedAt);
+      if (result.account) {
+        accounts.push(result.account);
+        continue;
+      }
+      const cached = this.lastGood.get(provider);
+      if (cached && fetchedAt - cached.fetchedAt <= this.config.plan.anthropic.maxStaleSeconds * 1000) {
+        accounts.push({ ...cached, stale: true });
+        errors.push({ provider, error: result.error, recoveredFromCache: true });
+      } else {
+        errors.push({ provider, error: result.error, recoveredFromCache: false });
+      }
+    }
+    this.snapshot = {
+      at: fetchedAt,
+      expiresAt: fetchedAt + this.config.plan.anthropic.pollSeconds * 1000,
+      configured: configured.length,
+      healthy: accounts.length,
+      withHeadroom: accounts.filter(anthropicHasHeadroom).length,
+      accounts,
+      errors,
+    };
+    return this.snapshot;
+  }
+
+  noteFailure(provider, error, at = now()) {
+    if (!/(?:429|rate.?limit|usage limit|exhausted)/i.test(String(error?.message ?? error))) return;
+    this.cooldowns.set(provider, at + 5 * 60_000);
+  }
+
+  async allows(variant, activeAssignments, snapshot = null) {
+    const usage = snapshot ?? await this.refresh();
+    const activeByProvider = new Map();
+    for (const item of activeAssignments) {
+      if (providerFamily(item.provider) !== ANTHROPIC_PROVIDER) continue;
+      activeByProvider.set(item.provider, (activeByProvider.get(item.provider) ?? 0) + 1);
+    }
+    const limit = this.config.plan.anthropic.maxActivePerAccount;
+    const selected = usage.accounts
+      .filter((account) => anthropicHasHeadroom(account) && (this.cooldowns.get(account.provider) ?? 0) <= now())
+      .map((account) => ({ account, active: activeByProvider.get(account.provider) ?? 0 }))
+      .filter((item) => item.active < limit)
+      .sort((left, right) => left.active - right.active ||
+        Math.max(...Object.values(left.account.windows).filter(Boolean).map((window) => window.utilization)) -
+        Math.max(...Object.values(right.account.windows).filter(Boolean).map((window) => window.utilization)) ||
+        left.account.provider.localeCompare(right.account.provider))[0] ?? null;
+    return {
+      ok: selected !== null,
+      provider: selected?.account.provider ?? null,
+      model: variant.model,
+      thinking: variant.thinking,
+      detail: selected
+        ? `Anthropic account=${selected.account.provider} active=${selected.active} healthy=${usage.healthy} headroom=${usage.withHeadroom}`
+        : `Anthropic accounts full: healthy=${usage.healthy} headroom=${usage.withHeadroom}`,
+    };
+  }
+}
+
+export function planWindowBurnPerHour(window, at = now()) {
+  const used = Number(window?.used_percent);
+  const resetAt = Number(window?.reset_at) * 1000;
+  if (!Number.isFinite(used) || !Number.isFinite(resetAt)) return null;
+  const hours = Math.max(0, resetAt - at) / 3600000;
+  if (hours <= 0) return 0;
+  return Math.max(0, 100 - used) / hours;
+}
+
+export class PlanGovernor {
+  constructor(config, { modelRuntime = null, authPath = AUTH_PATH, lifecyclePath = MULTI_PASS_PATH, fetcher = fetch, readCredential = readStoredCredential, anthropic = null } = {}) {
+    this.config = config;
+    this.modelRuntime = modelRuntime;
+    this.authPath = authPath;
+    this.lifecyclePath = lifecyclePath;
+    this.fetcher = fetcher;
+    this.readCredential = readCredential;
+    this.snapshot = null;
+    this.refreshing = null;
+    this.anthropic = anthropic ?? new AnthropicGovernor(config, { modelRuntime, authPath, fetcher, readCredential });
+  }
+
+  setModelRuntime(modelRuntime) {
+    this.modelRuntime = modelRuntime;
+    this.anthropic.setModelRuntime(modelRuntime);
+  }
+
+  async authRuntime() {
+    if (!this.modelRuntime) this.setModelRuntime(await ModelRuntime.create({ signal: AbortSignal.timeout(15000) }));
+    return this.modelRuntime;
+  }
+
+  async resolveCredential(provider, stored) {
+    const runtime = await this.authRuntime();
+    return resolveOAuthCredential({
+      modelRuntime: runtime,
+      provider,
+      baseProvider: CODEX_PROVIDER,
+      stored,
+      authPath: this.authPath,
+      pollSeconds: this.config.plan.pollSeconds,
+      readCredential: this.readCredential,
+    });
+  }
+
+  async refresh() {
+    if (this.snapshot && now() < this.snapshot.expiresAt) return this.snapshot;
+    if (this.refreshing) return this.refreshing;
+    this.refreshing = this.fetch().finally(() => { this.refreshing = null; });
+    return this.refreshing;
+  }
+
+  async fetch() {
+    const auth = JSON.parse(fs.readFileSync(this.authPath, "utf8"));
+    const configured = configuredOAuthAccounts(auth, CODEX_PROVIDER);
     if (!configured.length) fail("plan governor found no Codex OAuth accounts");
     const fetchedAt = now();
     const lifecycle = readCodexSubscriptionLifecycle(this.lifecyclePath, fetchedAt);
@@ -498,10 +728,36 @@ export class PlanGovernor {
     return this.snapshot;
   }
 
-  modelRate(task) {
-    const rate = this.config.plan.modelBurnPercentPerHour[runModelKey(task)];
-    if (!(Number.isFinite(rate) && rate >= 0)) fail(`no plan burn rate configured for ${runModelKey(task)}`);
+  modelRate(value) {
+    const rate = this.config.plan.modelBurnPercentPerHour[runModelKey(value)];
+    if (!(Number.isFinite(rate) && rate >= 0)) fail(`no plan burn rate configured for ${runModelKey(value)}`);
     return rate;
+  }
+
+  async allowsCodex(variant, activeAssignments, plan = null) {
+    const snapshot = plan ?? await this.refresh();
+    const candidate = this.modelRate(variant);
+    const codexAssignments = activeAssignments
+      .filter((item) => providerFamily(item.provider) === CODEX_PROVIDER)
+      .map((item) => ({ provider: item.provider, rate: this.modelRate(item.model ? item : item.task) }));
+    const selected = choosePlanProvider(snapshot.accounts, codexAssignments, candidate);
+    const live = codexAssignments.reduce((sum, item) => sum + item.rate, 0);
+    return {
+      ok: selected !== null,
+      provider: selected?.provider ?? null,
+      model: variant.model,
+      thinking: variant.thinking,
+      detail: selected
+        ? `Codex account=${selected.provider} live=${selected.live.toFixed(3)} candidate=${candidate.toFixed(3)} allowed=${selected.allowed.toFixed(3)}`
+        : `Codex accounts full: fleet live=${live.toFixed(3)} candidate=${candidate.toFixed(3)} pool allowed=${snapshot.allowedBurnPercentPerHour.toFixed(3)}`,
+    };
+  }
+
+  noteFailure(assignment, error) {
+    if (providerFamily(assignment.provider) === ANTHROPIC_PROVIDER) this.anthropic.noteFailure(assignment.provider, error);
+    if (providerFamily(assignment.provider) === CODEX_PROVIDER && /(?:429|rate.?limit|usage limit|exhausted)/i.test(String(error?.message ?? error))) {
+      this.snapshot = null;
+    }
   }
 
   async allows(task, activeAssignments) {
@@ -513,23 +769,34 @@ export class PlanGovernor {
       return {
         ok: available > 0,
         provider: available > 0 ? CHATGPT_PRO_PROVIDER : null,
+        model: task.model,
+        thinking: task.thinking,
         detail: `ChatGPT Pro eligible=${entitlement.eligible} reserved=${reserved} available=${available}`,
       };
     }
-    const plan = await this.refresh();
-    const candidate = this.modelRate(task);
-    const codexAssignments = activeAssignments
-      .filter((item) => !isChatGptProTask(item.task))
-      .map((item) => ({ provider: item.provider, rate: this.modelRate(item.task) }));
-    const selected = choosePlanProvider(plan.accounts, codexAssignments, candidate);
-    const live = codexAssignments.reduce((sum, item) => sum + item.rate, 0);
-    return {
-      ok: selected !== null,
-      provider: selected?.provider ?? null,
-      detail: selected
-        ? `Codex account=${selected.provider} live=${selected.live.toFixed(3)} candidate=${candidate.toFixed(3)} allowed=${selected.allowed.toFixed(3)}`
-        : `Codex accounts full: fleet live=${live.toFixed(3)} candidate=${candidate.toFixed(3)} pool allowed=${plan.allowedBurnPercentPerHour.toFixed(3)}`,
-    };
+    const mix = taskMix(this.config, task);
+    if (!mix) {
+      if (providerOf(task.model) === ANTHROPIC_PROVIDER) {
+        return this.anthropic.allows({ model: task.model, thinking: task.thinking }, activeAssignments);
+      }
+      return this.allowsCodex({ model: task.model, thinking: task.thinking }, activeAssignments);
+    }
+    const [codex, anthropic] = await Promise.all([this.refresh(), this.anthropic.refresh()]);
+    const variant = chooseMixedVariant(task, mix, activeAssignments, codex.healthy, anthropic.withHeadroom);
+    if (variant.family === ANTHROPIC_PROVIDER) {
+      const governed = await this.anthropic.allows(variant, activeAssignments, anthropic);
+      if (governed.ok) return governed;
+      const primary = { model: task.model, thinking: task.thinking };
+      const fallback = await this.allowsCodex(primary, activeAssignments, codex);
+      return fallback.ok ? { ...fallback, detail: `${governed.detail}; mix deferred; ${fallback.detail}` } : governed;
+    }
+    const governed = await this.allowsCodex(variant, activeAssignments, codex);
+    if (governed.ok) return governed;
+    const alternateVariant = { model: mix.alternateModel, thinking: mix.alternateThinking, family: ANTHROPIC_PROVIDER };
+    const alternate = await this.anthropic.allows(alternateVariant, activeAssignments, anthropic);
+    return alternate.ok
+      ? { ...alternate, detail: `${governed.detail}; primary provider full; ${alternate.detail}` }
+      : governed;
   }
 }
 
@@ -636,9 +903,9 @@ export function isolateTaskShell(settingsManager) {
 }
 export function shouldAdvanceBackoff(nextEligibleAt, runStartedAt) { return Number(nextEligibleAt) <= Number(runStartedAt); }
 
-export function insertRun(db, runId, taskId, provider = null, startedAt = now()) {
-  db.prepare("INSERT INTO run(id,task_id,status,started_at,provider) VALUES(?,?,?,?,?)")
-    .run(runId, taskId, "running", startedAt, provider);
+export function insertRun(db, runId, taskId, provider = null, startedAt = now(), model = null, thinking = null) {
+  db.prepare("INSERT INTO run(id,task_id,status,started_at,provider,model,thinking) VALUES(?,?,?,?,?,?,?)")
+    .run(runId, taskId, "running", startedAt, provider, model, thinking);
 }
 
 export class Controller {
@@ -678,21 +945,21 @@ export class Controller {
     }).catch((error) => this.controllerError(`pro recovery failed: ${String(error?.message ?? error)}`));
   }
 
-  async launch(task, provider, runId = randomId(), packet = null, dispatchMs = null) {
-    insertRun(this.db, runId, task.id, provider);
+  async launch(task, assignment, runId = randomId(), packet = null, dispatchMs = null) {
+    insertRun(this.db, runId, task.id, assignment.provider, now(), assignment.model, assignment.thinking);
     this.db.prepare("UPDATE run SET dispatched=? WHERE id=?").run(packet === null ? 0 : 1, runId);
     const note = packet === null ? "" : ` (dispatched ${dispatchMs ?? "?"}ms, ${packet.length}B)`;
-    event(this.db, "run-started", `${runModelKey(task)} via ${provider}${note}`, task.id, runId);
-    const promise = this.execute(task, runId, provider, packet).finally(() => this.active.delete(runId));
-    this.active.set(runId, { task, provider, promise });
+    event(this.db, "run-started", `${runModelKey(assignment)} via ${assignment.provider}${note}`, task.id, runId);
+    const promise = this.execute(task, runId, assignment, packet).finally(() => this.active.delete(runId));
+    this.active.set(runId, { task, ...assignment, promise });
   }
 
-  async execute(task, runId, provider, packet = null) {
+  async execute(task, runId, assignment, packet = null) {
     let session;
     let report = null;
     let sessionId = null;
     try {
-      const bootstrap = isChatGptProTask(task) ? `openai-codex/gpt-5.6-sol:${task.thinking}` : `${task.model}:${task.thinking}`;
+      const bootstrap = isChatGptProTask(task) ? `openai-codex/gpt-5.6-sol:${assignment.thinking}` : runModelKey(assignment);
       const resolved = resolveCliModel({ cliModel: bootstrap, modelRuntime: this.modelRuntime });
       if (resolved.error || !resolved.model) fail(resolved.error ?? `cannot resolve bootstrap for ${runModelKey(task)}`);
       const completionTool = defineTool({
@@ -747,13 +1014,13 @@ export class Controller {
         sessionManager: SessionManager.create(task.cwd, SESSIONS),
         settingsManager,
       }));
-      const targetProvider = isChatGptProTask(task) ? providerOf(task.model) : provider;
-      const targetModelId = isChatGptProTask(task) ? modelIdOf(task.model) : resolved.model.id;
+      const targetProvider = isChatGptProTask(task) ? providerOf(assignment.model) : assignment.provider;
+      const targetModelId = modelIdOf(assignment.model);
       if (targetProvider !== resolved.model.provider || targetModelId !== resolved.model.id) {
         const routed = (await this.modelRuntime.getAvailable()).find((model) => model.provider === targetProvider && model.id === targetModelId);
         if (!routed) fail(`governor-selected model unavailable after extension load: ${targetProvider}/${targetModelId}`);
         await session.setModel(routed);
-        session.setThinkingLevel(task.thinking);
+        session.setThinkingLevel(assignment.thinking);
       }
       this.active.get(runId).session = session;
       sessionId = session.sessionId;
@@ -779,6 +1046,7 @@ export class Controller {
       );
     } catch (error) {
       const interrupted = this.stopping;
+      if (!interrupted) this.plan.noteFailure(assignment, error);
       this.finish(
         task, runId, "incomplete", report?.summary ?? null,
         report?.artifacts ?? [],
@@ -892,7 +1160,7 @@ export class Controller {
     const tasks = taskRows(this.db);
     try { await this.refreshWorkChecks(tasks); }
     catch (error) { this.controllerError(String(error.stack ?? error)); }
-    const activeAssignments = [...this.active.values()].map(({ task, provider }) => ({ task, provider }));
+    const activeAssignments = [...this.active.values()].map(({ task, provider, model, thinking }) => ({ task, provider, model, thinking }));
     const currentCpu = cpuTotals();
     const currentCpuPercent = cpuPercent(this.previousCpu, currentCpu);
     this.previousCpu = currentCpu;
@@ -930,15 +1198,15 @@ export class Controller {
           }
           if (dispatched.state === "error") {
             this.throttledEvent("dispatch-error", dispatched.detail, task.id);
-            await this.launch(task, governed.provider);
+            await this.launch(task, governed);
           } else {
-            await this.launch(task, governed.provider, runId, dispatched.packet, dispatchMs);
+            await this.launch(task, governed, runId, dispatched.packet, dispatchMs);
           }
         } else {
-          await this.launch(task, governed.provider);
+          await this.launch(task, governed);
         }
         task.active = Number(task.active) + 1;
-        activeAssignments.push({ task, provider: governed.provider });
+        activeAssignments.push({ task, provider: governed.provider, model: governed.model, thinking: governed.thinking });
         launched = true;
         break;
       }
@@ -1068,7 +1336,13 @@ export function cancelTask(db, id, at = now()) {
   db.prepare("UPDATE task SET cancelled_at=?,completed_at=NULL WHERE id=?").run(at, id);
 }
 
+function taskModelLabel(task, config) {
+  const mix = taskMix(config, task);
+  return mix ? `${runModelKey(task)} + ${mix.alternateModel}:${mix.alternateThinking}` : runModelKey(task);
+}
+
 function printTasks(db) {
+  const config = loadConfig();
   for (const row of taskRows(db)) {
     const state = row.cancelled_at ? "cancelled"
       : row.completed_at ? "complete"
@@ -1076,7 +1350,7 @@ function printTasks(db) {
       : !workReady(row) ? "no-work"
       : row.next_eligible_at > now() ? `backoff ${iso(row.next_eligible_at)}`
       : "eligible";
-    console.log(`${row.id}\t${state}\tactive=${row.active}\tshare=${row.launch_share}\t${row.model}:${row.thinking}`);
+    console.log(`${row.id}\t${state}\tactive=${row.active}\tshare=${row.launch_share}\t${taskModelLabel(row, config)}`);
   }
 }
 
@@ -1088,7 +1362,7 @@ function check(db) {
     validateModelPolicy(task.model);
     if (!fs.existsSync(task.cwd)) fail(`task ${task.id} cwd is missing: ${task.cwd}`);
     const key = runModelKey(task);
-    if (!isChatGptProTask(task) && !(key in config.plan.modelBurnPercentPerHour)) fail(`task ${task.id} has no plan burn rate for ${key}`);
+    if (!isChatGptProTask(task) && providerOf(task.model) === CODEX_PROVIDER && !(key in config.plan.modelBurnPercentPerHour)) fail(`task ${task.id} has no plan burn rate for ${key}`);
   }
   console.log(`ok: ${taskRows(db).length} tasks; database and configuration valid`);
 }
@@ -1122,7 +1396,7 @@ async function main(argv = process.argv.slice(2)) {
     const rows = id
       ? db.prepare("SELECT * FROM run WHERE task_id=? ORDER BY started_at DESC LIMIT 50").all(id)
       : db.prepare("SELECT * FROM run ORDER BY started_at DESC LIMIT 50").all();
-    for (const row of rows) console.log(`${row.id}\t${row.task_id}\t${row.status}\t${iso(row.started_at)}\t${row.summary ?? row.error ?? ""}`);
+    for (const row of rows) console.log(`${row.id}\t${row.task_id}\t${row.status}\t${iso(row.started_at)}\t${row.model ?? "?"}:${row.thinking ?? "?"}\t${row.summary ?? row.error ?? ""}`);
     return;
   }
   if (command === "governor") {
@@ -1150,8 +1424,25 @@ async function main(argv = process.argv.slice(2)) {
       retiredProviders: snapshot.retiredProviders,
       allowedBurnPercentPerHour: snapshot.allowedBurnPercentPerHour,
     };
+    const anthropicSnapshot = await new AnthropicGovernor(config).refresh();
+    const anthropic = {
+      at: anthropicSnapshot.at,
+      healthyAccounts: anthropicSnapshot.healthy,
+      accountsWithHeadroom: anthropicSnapshot.withHeadroom,
+      configuredAccounts: anthropicSnapshot.configured,
+      errors: anthropicSnapshot.errors,
+      accounts: anthropicSnapshot.accounts.map((account) => ({
+        provider: account.provider,
+        stale: account.stale,
+        spendExhausted: account.spendExhausted,
+        windows: Object.fromEntries(Object.entries(account.windows).filter(([, value]) => value).map(([name, value]) => [name, {
+          utilization: value.utilization,
+          resetsAt: value.resetsAt,
+        }])),
+      })),
+    };
     const pro = proEntitlementSnapshot();
-    console.log(JSON.stringify({ resources, plan, chatgptPro: pro }, null, 2));
+    console.log(JSON.stringify({ resources, plan, anthropic, chatgptPro: pro }, null, 2));
     return;
   }
   if (command === "pro-recover") {

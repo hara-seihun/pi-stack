@@ -19,4 +19,8 @@ version=$("$HOME/.local/bin/pi" --version)
 [[ $("$HOME/.local/bin/pro" --version) == "$version" ]] || { echo "Pro launcher does not resolve to deployed Pi" >&2; exit 1; }
 "$HOME/.local/bin/prompt-eval" --help | grep -q '^prompt-eval'
 "$HOME/.local/bin/orchestrator" check
+if systemctl is-enabled --quiet agent-orchestrator.service 2>/dev/null; then
+  sudo systemctl restart agent-orchestrator.service
+  systemctl is-active --quiet agent-orchestrator.service
+fi
 echo "Pi $version, prompt evaluator, and agent orchestrator deployed"
