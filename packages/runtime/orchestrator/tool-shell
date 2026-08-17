@@ -15,10 +15,30 @@ uid=$(id -u)
 export XDG_RUNTIME_DIR=${XDG_RUNTIME_DIR:-/run/user/$uid}
 export DBUS_SESSION_BUS_ADDRESS=${DBUS_SESSION_BUS_ADDRESS:-unix:path=$XDG_RUNTIME_DIR/bus}
 
+# A user-manager restart can leave the stable bus socket briefly refusing
+# connections. Do not fail an otherwise valid tool call during that transition.
+bus_ready=false
+for _ in {1..12}; do
+  if busctl --user --timeout=200ms --quiet call \
+      org.freedesktop.systemd1 /org/freedesktop/systemd1 \
+      org.freedesktop.DBus.Peer Ping; then
+    bus_ready=true
+    break
+  fi
+  sleep 0.05
+done
+if [[ $bus_ready != true ]]; then
+  echo "tool-shell could not reach the user systemd manager" >&2
+  exit 1
+fi
+
 # Every SDK bash invocation owns a transient scope outside the orchestrator
 # service cgroup. OOMPolicy=kill terminates this scope as one failed tool call;
-# it cannot stop the controller or unrelated agent sessions.
+# it cannot stop the controller or unrelated agent sessions. An explicit ID
+# avoids systemd-run's process-derived scope-name collisions under concurrency.
+unit="pi-tool-$(systemd-id128 new)"
 exec systemd-run --user --scope --quiet --collect \
+  --unit="$unit" \
   --slice=pi-tools.slice \
   --property="MemoryMax=$memory_max" \
   --property=MemorySwapMax=0 \

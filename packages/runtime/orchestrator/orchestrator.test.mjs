@@ -250,6 +250,20 @@ test("the tool shell contains an OOM to the tool call from a system-service envi
   assert.equal(result.signal, "SIGKILL");
 });
 
+test("the tool shell waits through a transiently unavailable user bus", () => {
+  const delayedBus = path.join(temporary, "delayed-user-bus");
+  const realBus = process.env.DBUS_SESSION_BUS_ADDRESS?.replace(/^unix:path=/, "")
+    ?? path.join("/run/user", String(process.getuid()), "bus");
+  const command = `(sleep 0.15; ln -s ${JSON.stringify(realBus)} ${JSON.stringify(delayedBus)}) & exec ${JSON.stringify(TOOL_SHELL)} -c 'printf bus-recovered'`;
+  const result = spawnSync("bash", ["-c", command], {
+    encoding: "utf8",
+    env: { ...process.env, DBUS_SESSION_BUS_ADDRESS: `unix:path=${delayedBus}` },
+    timeout: 10_000,
+  });
+  assert.equal(result.status, 0, result.stderr);
+  assert.equal(result.stdout, "bus-recovered");
+});
+
 test("one concurrent launch wave advances task backoff only once", () => {
   assert.equal(shouldAdvanceBackoff(100, 100), true);
   assert.equal(shouldAdvanceBackoff(100, 101), true);
