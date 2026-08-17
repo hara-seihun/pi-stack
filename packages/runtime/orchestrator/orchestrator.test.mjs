@@ -239,6 +239,8 @@ test("noninteractive deployment resolves its newly installed Pi commands", () =>
   const proCheckAt = deploy.indexOf('"$HOME/.local/bin/pro" --version');
   const restartAt = deploy.indexOf("sudo systemctl restart agent-orchestrator.service");
   assert.ok(installAt >= 0 && pathAt > installAt && proCheckAt > pathAt && restartAt > proCheckAt);
+  assert.match(deploy, /claude_extension_configured=.*any/);
+  assert.match(deploy, /if \[\[ "\$claude_extension_configured" == true \]\]/);
 });
 
 test("autonomous bash tools retain the OOM-isolated shell after resource reload", async () => {

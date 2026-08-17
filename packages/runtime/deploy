@@ -13,18 +13,20 @@ rm -rf "$HOME/.pi/agent/extensions/chatgpt-pro-support" "$HOME/.pi/agent/extensi
 ln -s "$PWD/extensions/chatgpt-pro" "$HOME/.pi/agent/extensions/chatgpt-pro"
 npm test
 claude_extension="$PWD/extensions/pi-claude-code-use/extensions/index.ts"
-claude_extension_hash=$(sha256sum "$claude_extension" | cut -d' ' -f1)
 settings="$HOME/.pi/agent/settings.json"
-jq -e '.packages | any(. == "../../tools/pi-runtime/extensions/pi-claude-code-use" or . == "/home/kenan/tools/pi-runtime/extensions/pi-claude-code-use")' "$settings" >/dev/null
+claude_extension_configured=$(jq -r '.packages | any(. == "../../tools/pi-runtime/extensions/pi-claude-code-use" or . == "/home/kenan/tools/pi-runtime/extensions/pi-claude-code-use")' "$settings")
 if jq -e '.packages | any(type == "string" and startswith("npm:@benvargas/pi-claude-code-use"))' "$settings" >/dev/null; then
   echo "npm pi-claude-code-use must not replace the locally owned extension" >&2
   exit 1
 fi
+if [[ "$claude_extension_configured" == true ]]; then
+  claude_extension_hash=$(sha256sum "$claude_extension" | cut -d' ' -f1)
+fi
 "$HOME/.local/bin/pi" update --extensions
-[[ $(sha256sum "$claude_extension" | cut -d' ' -f1) == "$claude_extension_hash" ]] || {
+if [[ "$claude_extension_configured" == true && $(sha256sum "$claude_extension" | cut -d' ' -f1) != "$claude_extension_hash" ]]; then
   echo "package update modified the locally owned Claude extension" >&2
   exit 1
-}
+fi
 "$HOME/.local/bin/pi" --list-models chatgpt-pro | grep -q 'gpt-5-6-pro-literal'
 version=$("$HOME/.local/bin/pi" --version)
 [[ "$version" == "0.84.1" ]] || { echo "unexpected Pi version: $version" >&2; exit 1; }
