@@ -91,20 +91,43 @@ function streamChatGPTPro(model: Model<any>, context: Context, options?: SimpleS
   };
 
   (async () => {
+    // A Pro turn runs for minutes to hours; stream transport phases as a
+    // thinking block so interactive sessions and transcripts show live state.
+    let thinking = "";
+    const think = (line: string) => {
+      const delta = `${new Date().toISOString().slice(11, 19)}Z ${line}\n`;
+      thinking += delta;
+      output.content = [{ type: "thinking", thinking }];
+      stream.push({ type: "thinking_delta", contentIndex: 0, delta, partial: output });
+    };
     try {
       stream.push({ type: "start", partial: output });
+      output.content = [{ type: "thinking", thinking }];
+      stream.push({ type: "thinking_start", contentIndex: 0, partial: output });
       const prompt = contextToPrompt(context, model.id === LITERAL_MODEL_ID);
-      const completion = await completeInKernelBrowser(prompt, { signal: options?.signal });
+      const completion = await completeInKernelBrowser(prompt, {
+        signal: options?.signal,
+        onStatus: (status: any) => {
+          if (status.phase === "running" || status.phase === "retrying-after-fallback") {
+            const capacity = status.capacity;
+            think(`${status.phase} on ${status.browserProfile}${capacity ? ` (${capacity.inFlight}/${capacity.maxParallel} machine-wide)` : ""}`);
+          } else if (status.phase === "submitted") {
+            think(`submitted on ${status.browserProfile}; ChatGPT reasons server-side, next persisted check in ${Math.round((status.nextCheckMs ?? 0) / 60000)}min`);
+          }
+        },
+      });
+      think(`verified GPT-5.6 Pro execution on ${completion.browserProfile}`);
       const text = completion.text;
-      output.content = [{ type: "text", text }];
+      stream.push({ type: "thinking_end", contentIndex: 0, content: thinking, partial: output });
+      output.content = [{ type: "thinking", thinking }, { type: "text", text }];
       output.usage.input = estimatedTokens(prompt);
       output.usage.output = estimatedTokens(text);
       output.usage.totalTokens = output.usage.input + output.usage.output;
       output.stopReason = "stop";
 
-      stream.push({ type: "text_start", contentIndex: 0, partial: output });
-      if (text) stream.push({ type: "text_delta", contentIndex: 0, delta: text, partial: output });
-      stream.push({ type: "text_end", contentIndex: 0, content: text, partial: output });
+      stream.push({ type: "text_start", contentIndex: 1, partial: output });
+      if (text) stream.push({ type: "text_delta", contentIndex: 1, delta: text, partial: output });
+      stream.push({ type: "text_end", contentIndex: 1, content: text, partial: output });
       stream.push({ type: "done", reason: "stop", message: output });
       stream.end();
     } catch (error) {

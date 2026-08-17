@@ -103,3 +103,10 @@ record survives: the controller harvests it automatically at startup, and
 prompt SHA-256 against the account's recent history). Verified recovered
 responses become ordinary provider audits plus advisory artifacts under
 `~/data/projects-research/pro/recovered/`.
+
+## Live progress streaming
+
+The provider streams transport phases (entitlement selection, submission,
+poll cadence, verification) as a thinking block, so interactive `pro` sessions
+and orchestrator transcripts show live state during a multi-hour turn instead
+of silence.

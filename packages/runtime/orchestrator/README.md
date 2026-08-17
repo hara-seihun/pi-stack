@@ -90,3 +90,22 @@ npm test
 orchestrator check
 systemctl status agent-orchestrator --no-pager
 ```
+
+## The Pro question queue
+
+`orchestrator/pro-questions.mjs` owns the standing GPT-5.6 Pro lane's work:
+
+```bash
+node orchestrator/pro-questions.mjs add my-question.md --id my-question
+node orchestrator/pro-questions.mjs list
+```
+
+A question is one fully-assembled, self-contained, text-only prompt. The
+`pro-questions` task claims one question per available Pro entitlement through
+its dispatch command; for a Pro task the dispatched packet **is** the literal
+prompt. Its work-check gates on both a nonempty queue and an available
+entitlement, so no launch is spent when every account is resting. A question
+whose run ends without a verified response requeues automatically; a verified
+response moves it to `done/` with the run id, and the response text lives in
+the run summary and the provider audit trail. Responses are advisory
+mathematics: tool-capable campaign agents must validate anything load-bearing.

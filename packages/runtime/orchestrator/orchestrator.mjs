@@ -758,8 +758,10 @@ export class Controller {
       this.active.get(runId).session = session;
       sessionId = session.sessionId;
       this.db.prepare("UPDATE run SET session_id=? WHERE id=?").run(sessionId, runId);
+      // A Pro task's dispatched packet IS the literal text-only prompt (one
+      // claimed question from the queue); the task prompt is only the fallback.
       const prompt = isChatGptProTask(task)
-        ? task.prompt
+        ? (packet ?? task.prompt)
         : packet !== null
           ? dispatchedTaskPrompt(task, packet)
           : orchestratedTaskPrompt(task);
