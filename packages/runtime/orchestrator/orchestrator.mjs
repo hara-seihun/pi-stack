@@ -172,6 +172,10 @@ export function openDb(file = DB_PATH) {
     );
   `);
   let taskColumns = new Set(db.prepare("PRAGMA table_info(task)").all().map((row) => row.name));
+  if (!taskColumns.has("dispatch")) {
+    db.exec("DROP TRIGGER IF EXISTS auto_timestamp_task_insert; DROP TRIGGER IF EXISTS auto_timestamp_task_update; ALTER TABLE task ADD COLUMN dispatch TEXT");
+    taskColumns = new Set(db.prepare("PRAGMA table_info(task)").all().map((row) => row.name));
+  }
   if (taskColumns.has("max_parallel")) {
     db.exec("DROP TRIGGER IF EXISTS auto_timestamp_task_insert; DROP TRIGGER IF EXISTS auto_timestamp_task_update; ALTER TABLE task DROP COLUMN max_parallel;");
     taskColumns = new Set(db.prepare("PRAGMA table_info(task)").all().map((row) => row.name));
@@ -194,6 +198,9 @@ export function openDb(file = DB_PATH) {
   }
   if (!runColumns.has("productive")) {
     db.exec("DROP TRIGGER IF EXISTS auto_timestamp_run_insert; DROP TRIGGER IF EXISTS auto_timestamp_run_update; ALTER TABLE run ADD COLUMN productive INTEGER CHECK(productive IN (0,1))");
+  }
+  if (!runColumns.has("dispatched")) {
+    db.exec("DROP TRIGGER IF EXISTS auto_timestamp_run_insert; DROP TRIGGER IF EXISTS auto_timestamp_run_update; ALTER TABLE run ADD COLUMN dispatched INTEGER CHECK(dispatched IN (0,1))");
   }
   for (const table of ["task", "run", "event"]) ensureTableTimestamps(db, table);
   return db;
@@ -218,16 +225,20 @@ function taskRows(db) {
 // A declared work probe is the launch gate: a task whose probe most recently
 // reported no claimable work is simply not launched. There is no idle launch to
 // discover the emptiness and no timed backoff to wait out; the probe refresh
-// notices new work and restores eligibility immediately.
-export function workReady(task) {
-  return !task.work_check || task.work_state !== "no-work";
+// notices new work and restores eligibility immediately. A dispatch-only task
+// (no separate probe) retries its dispatch after a short pause instead.
+export const DISPATCH_NO_WORK_TTL_MS = 60_000;
+export function workReady(task, at = now()) {
+  if (task.work_state !== "no-work") return true;
+  if (task.work_check) return false;
+  return at - Number(task.work_checked_at ?? 0) >= DISPATCH_NO_WORK_TTL_MS;
 }
 
 export function rankTasks(tasks, _activeTotal) {
   const at = now();
   const eligible = tasks.filter((task) =>
     task.completed_at === null && task.cancelled_at === null &&
-    task.not_before <= at && task.next_eligible_at <= at && workReady(task));
+    task.not_before <= at && task.next_eligible_at <= at && workReady(task, at));
   return eligible
     // Active/share is the durable concurrency allocation: fast lanes that finish
     // must regain a slot instead of gradually yielding the whole fleet to long
@@ -550,6 +561,37 @@ export function createProDelegateTool(task, runId, runner = completeInKernelBrow
 
 export const WORK_CHECK_TTL_MS = 15_000;
 export const WORK_CHECK_TIMEOUT_MS = 30_000;
+export const DISPATCH_TIMEOUT_MS = 120_000;
+
+// A dispatch command claims one work unit for the imminent launch (worker id =
+// the run id) and prints a complete context packet on stdout, so the agent's
+// first tokens go to the work instead of orientation. Exit 0: packet ready.
+// Exit 1: nothing claimable (a work-check race). Anything else is a dispatch
+// defect: fail open to launch-and-discover so a broken dispatcher can never
+// starve its task.
+export async function evaluateDispatch(task, runId, runner = execFileAsync) {
+  try {
+    const result = await runner("bash", ["-lc", task.dispatch], {
+      cwd: task.cwd,
+      timeout: DISPATCH_TIMEOUT_MS,
+      maxBuffer: 16 * 1024 * 1024,
+      env: { ...process.env, ORCHESTRATOR_RUN_ID: runId },
+    });
+    const packet = String(result.stdout ?? "").trim();
+    if (!packet) return { state: "error", detail: "dispatch produced an empty packet" };
+    return { state: "packet", packet };
+  } catch (error) {
+    const output = [error?.stdout, error?.stderr].map((value) => String(value ?? "").trim()).filter(Boolean).join("\n");
+    if (error?.code === 1 && !error?.killed) {
+      return { state: "no-work", detail: output || "no claimable work" };
+    }
+    return { state: "error", detail: output || String(error?.message ?? error) };
+  }
+}
+
+export function dispatchedTaskPrompt(task, packet) {
+  return `${orchestratedTaskPrompt(task)}\n\n## Dispatched work unit\n\nThe controller has already claimed one work unit for this launch and assembled its context below. Do not repeat the claim step; begin working this unit directly. Treat any truncated section as regenerable through the printed command.\n\n${packet}`;
+}
 
 // Exit 0: claimable work exists. Exit 1: no claimable work. Any other outcome
 // (spawn failure, other exit codes, timeout) is a probe defect: fail open so a
@@ -642,15 +684,15 @@ export class Controller {
     this.plan.setModelRuntime(this.modelRuntime);
   }
 
-  async launch(task, provider) {
-    const runId = randomId();
+  async launch(task, provider, runId = randomId(), packet = null) {
     insertRun(this.db, runId, task.id, provider);
-    event(this.db, "run-started", `${runModelKey(task)} via ${provider}`, task.id, runId);
-    const promise = this.execute(task, runId, provider).finally(() => this.active.delete(runId));
+    this.db.prepare("UPDATE run SET dispatched=? WHERE id=?").run(packet === null ? 0 : 1, runId);
+    event(this.db, "run-started", `${runModelKey(task)} via ${provider}${packet === null ? "" : " (dispatched)"}`, task.id, runId);
+    const promise = this.execute(task, runId, provider, packet).finally(() => this.active.delete(runId));
     this.active.set(runId, { task, provider, promise });
   }
 
-  async execute(task, runId, provider) {
+  async execute(task, runId, provider, packet = null) {
     let session;
     let report = null;
     let sessionId = null;
@@ -724,7 +766,9 @@ export class Controller {
       this.db.prepare("UPDATE run SET session_id=? WHERE id=?").run(sessionId, runId);
       const prompt = isChatGptProTask(task)
         ? task.prompt
-        : orchestratedTaskPrompt(task);
+        : packet !== null
+          ? dispatchedTaskPrompt(task, packet)
+          : orchestratedTaskPrompt(task);
       await session.prompt(prompt);
       const assistant = [...session.messages].reverse().find((message) => message.role === "assistant");
       if (!report && isChatGptProTask(task)) {
@@ -792,10 +836,13 @@ export class Controller {
     }
   }
 
-  throttledEvent(kind, detail, taskId) {
+  throttledEvent(kind, detail, taskId, intervalOnly = false) {
     const key = `${kind}:${taskId}`;
     const previous = this.lastThrottledEvents.get(key) ?? { at: 0, detail: "" };
-    if (detail !== previous.detail || now() - previous.at >= 60_000) {
+    const due = intervalOnly
+      ? now() - previous.at >= 300_000
+      : detail !== previous.detail || now() - previous.at >= 60_000;
+    if (due) {
       const at = now();
       event(this.db, kind, detail, taskId);
       this.lastThrottledEvents.set(key, { at, detail });
@@ -803,7 +850,15 @@ export class Controller {
   }
 
   governorBlocked(detail, taskId) {
-    this.throttledEvent("governor-blocked", detail, taskId);
+    // Blocked details embed live burn numbers that change every launch; a
+    // detail-sensitive throttle would record one event per tick forever.
+    this.throttledEvent("governor-blocked", detail, taskId, true);
+  }
+
+  purgeOldEvents() {
+    if (now() - (this.lastEventPurge ?? 0) < 6 * 3600_000) return;
+    this.lastEventPurge = now();
+    this.db.prepare("DELETE FROM event WHERE at < ?").run(now() - 14 * 86400_000);
   }
 
   // Refresh stale work probes for every live probe-carrying task, including
@@ -837,6 +892,7 @@ export class Controller {
   }
 
   async tick() {
+    this.purgeOldEvents();
     const tasks = taskRows(this.db);
     try { await this.refreshWorkChecks(tasks); }
     catch (error) { this.controllerError(String(error.stack ?? error)); }
@@ -863,7 +919,26 @@ export class Controller {
           this.governorBlocked(governed.detail, task.id);
           continue;
         }
-        await this.launch(task, governed.provider);
+        if (task.dispatch) {
+          const runId = randomId();
+          const dispatched = await evaluateDispatch(task, runId);
+          if (dispatched.state === "no-work") {
+            const checkedAt = now();
+            this.db.prepare("UPDATE task SET work_state='no-work',work_checked_at=? WHERE id=?").run(checkedAt, task.id);
+            task.work_state = "no-work";
+            task.work_checked_at = checkedAt;
+            this.throttledEvent("dispatch-no-work", dispatched.detail, task.id);
+            continue;
+          }
+          if (dispatched.state === "error") {
+            this.throttledEvent("dispatch-error", dispatched.detail, task.id);
+            await this.launch(task, governed.provider);
+          } else {
+            await this.launch(task, governed.provider, runId, dispatched.packet);
+          }
+        } else {
+          await this.launch(task, governed.provider);
+        }
         task.active = Number(task.active) + 1;
         activeAssignments.push({ task, provider: governed.provider });
         launched = true;
@@ -921,7 +996,7 @@ function parseOptions(args) {
 }
 
 function createTask(db, options) {
-  const unknown = Object.keys(options).filter((key) => !["id", "cwd", "model", "thinking", "condition", "completion-check", "work-check", "share", "not-before", "prompt", "prompt-file"].includes(key));
+  const unknown = Object.keys(options).filter((key) => !["id", "cwd", "model", "thinking", "condition", "completion-check", "work-check", "dispatch", "share", "not-before", "prompt", "prompt-file"].includes(key));
   if (unknown.length) fail(`task create does not support ${unknown.map((key) => `--${key}`).join(", ")}`);
   for (const key of ["id", "cwd", "model", "thinking", "condition"]) if (!options[key]) fail(`task create requires --${key}`);
   validateModelPolicy(options.model);
@@ -935,16 +1010,17 @@ function createTask(db, options) {
   const notBefore = options["not-before"] ? Date.parse(options["not-before"]) : now();
   if (!Number.isFinite(notBefore)) fail("--not-before must be an ISO timestamp");
   const workCheck = options["work-check"]?.trim() || null;
-  db.prepare(`INSERT INTO task(id,prompt,cwd,model,thinking,completion_condition,completion_check,work_check,launch_share,not_before,next_eligible_at,created_at)
-    VALUES(?,?,?,?,?,?,?,?,?,?,?,?)`).run(options.id, prompt, cwd, options.model, options.thinking, options.condition, completionCheck, workCheck, share, notBefore, notBefore, now());
+  const dispatch = options.dispatch?.trim() || null;
+  db.prepare(`INSERT INTO task(id,prompt,cwd,model,thinking,completion_condition,completion_check,work_check,dispatch,launch_share,not_before,next_eligible_at,created_at)
+    VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?)`).run(options.id, prompt, cwd, options.model, options.thinking, options.condition, completionCheck, workCheck, dispatch, share, notBefore, notBefore, now());
   event(db, "task-created", options.condition, options.id);
   console.log(`created ${options.id}`);
 }
 
 export function setTaskOptions(db, id, options) {
   if (!db.prepare("SELECT 1 FROM task WHERE id=?").get(id)) fail(`unknown task ${id}`);
-  if (!Object.keys(options).length) fail("task set requires --model, --thinking, --share, --prompt-file, --condition, --completion-check, and/or --work-check");
-  const unknown = Object.keys(options).filter((key) => !["model", "thinking", "share", "prompt-file", "condition", "completion-check", "work-check"].includes(key));
+  if (!Object.keys(options).length) fail("task set requires --model, --thinking, --share, --prompt-file, --condition, --completion-check, --work-check, and/or --dispatch");
+  const unknown = Object.keys(options).filter((key) => !["model", "thinking", "share", "prompt-file", "condition", "completion-check", "work-check", "dispatch"].includes(key));
   if (unknown.length) fail(`task set does not support ${unknown.map((key) => `--${key}`).join(", ")}`);
   if (options.model !== undefined) {
     const model = options.model.trim();
@@ -981,6 +1057,11 @@ export function setTaskOptions(db, id, options) {
     // An empty value removes the probe; the task returns to launch-and-discover.
     const check = options["work-check"].trim() || null;
     db.prepare("UPDATE task SET work_check=?,work_state=NULL,work_checked_at=0 WHERE id=?").run(check, id);
+  }
+  if (options.dispatch !== undefined) {
+    // An empty value removes pre-launch dispatch; agents claim their own work.
+    const dispatch = options.dispatch.trim() || null;
+    db.prepare("UPDATE task SET dispatch=?,work_state=NULL,work_checked_at=0 WHERE id=?").run(dispatch, id);
   }
   event(db, "task-set", JSON.stringify(options), id);
 }
@@ -1084,10 +1165,10 @@ async function main(argv = process.argv.slice(2)) {
     return;
   }
   console.log(`Usage:
-  orchestrator task create --id ID --cwd DIR --model PROVIDER/MODEL --thinking LEVEL --condition TEXT [--completion-check COMMAND] [--work-check COMMAND] [--share N] [--not-before ISO] (--prompt TEXT | --prompt-file FILE)
+  orchestrator task create --id ID --cwd DIR --model PROVIDER/MODEL --thinking LEVEL --condition TEXT [--completion-check COMMAND] [--work-check COMMAND] [--dispatch COMMAND] [--share N] [--not-before ISO] (--prompt TEXT | --prompt-file FILE)
   orchestrator task list
   orchestrator task show ID
-  orchestrator task set ID [--model PROVIDER/MODEL] [--thinking LEVEL] [--share N] [--prompt-file FILE] [--condition TEXT] [--completion-check COMMAND] [--work-check COMMAND, '' clears]
+  orchestrator task set ID [--model PROVIDER/MODEL] [--thinking LEVEL] [--share N] [--prompt-file FILE] [--condition TEXT] [--completion-check COMMAND] [--work-check COMMAND, '' clears] [--dispatch COMMAND, '' clears]
   orchestrator task cancel ID
   orchestrator task reopen ID
   orchestrator status

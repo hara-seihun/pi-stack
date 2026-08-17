@@ -8,7 +8,7 @@ import test from "node:test";
 
 const temporary = fs.mkdtempSync(path.join(os.tmpdir(), "agent-orchestrator-test-"));
 process.env.AGENT_ORCHESTRATOR_DATA = temporary;
-const { cancelTask, choosePlanProvider, chooseTask, completionToolResult, Controller, cpuPercent, createProDelegateTool, evaluateWorkCheck, insertRun, isolateTaskShell, isProDelegatingFrontierTask, launchBatchSize, loadConfig, nextIncompleteState, openDb, orchestratedTaskPrompt, PlanGovernor, planWindowBurnPerHour, proEntitlementSnapshot, proLaunchAvailability, rankTasks, resourceSlots, setTaskOptions, shouldAdvanceBackoff, taskSettings, TOOL_SHELL, validateCompletion, validateModelPolicy, WORK_CHECK_TTL_MS, workCheckStale, workReady } = await import("./orchestrator.mjs");
+const { cancelTask, choosePlanProvider, chooseTask, completionToolResult, Controller, cpuPercent, createProDelegateTool, DISPATCH_NO_WORK_TTL_MS, dispatchedTaskPrompt, evaluateDispatch, evaluateWorkCheck, insertRun, isolateTaskShell, isProDelegatingFrontierTask, launchBatchSize, loadConfig, nextIncompleteState, openDb, orchestratedTaskPrompt, PlanGovernor, planWindowBurnPerHour, proEntitlementSnapshot, proLaunchAvailability, rankTasks, resourceSlots, setTaskOptions, shouldAdvanceBackoff, taskSettings, TOOL_SHELL, validateCompletion, validateModelPolicy, WORK_CHECK_TTL_MS, workCheckStale, workReady } = await import("./orchestrator.mjs");
 
 test.after(() => fs.rmSync(temporary, { recursive: true, force: true }));
 
@@ -326,6 +326,48 @@ test("a no-work probe result excludes the task from ranking", () => {
   assert.equal(workCheckStale({ work_check: "probe", work_state: "no-work", work_checked_at: Date.now() }), false);
   assert.equal(workCheckStale({ work_check: "probe", work_state: "no-work", work_checked_at: Date.now() - WORK_CHECK_TTL_MS }), true);
   assert.equal(workCheckStale({ work_check: null, work_state: null }), false);
+});
+
+test("dispatch claims a work unit for the launch and injects its packet", async () => {
+  const task = { id: "lane", cwd: temporary, dispatch: "dispatch-command", prompt: "Do the work.", completion_condition: "queue empty" };
+  let seenEnvironment = null;
+  const packet = await evaluateDispatch(task, "run-123", async (_bash, args, options) => {
+    seenEnvironment = options.env.ORCHESTRATOR_RUN_ID;
+    assert.equal(args[1], "dispatch-command");
+    return { stdout: "### Lease grant\nHANDLE=example\n" };
+  });
+  assert.equal(seenEnvironment, "run-123");
+  assert.equal(packet.state, "packet");
+  const prompt = dispatchedTaskPrompt(task, packet.packet);
+  assert.match(prompt, /## Dispatched work unit/);
+  assert.match(prompt, /HANDLE=example/);
+  assert.match(prompt, /## Orchestrated task contract/);
+
+  const idle = await evaluateDispatch(task, "run-124", async () => {
+    const error = new Error("exit 1");
+    error.code = 1;
+    throw error;
+  });
+  assert.equal(idle.state, "no-work");
+  // A broken dispatcher fails open to launch-and-discover.
+  const broken = await evaluateDispatch(task, "run-125", async () => {
+    const error = new Error("crash");
+    error.code = 3;
+    error.stderr = "claim tool missing";
+    throw error;
+  });
+  assert.equal(broken.state, "error");
+  const empty = await evaluateDispatch(task, "run-126", async () => ({ stdout: "" }));
+  assert.equal(empty.state, "error");
+});
+
+test("a dispatch-only task retries after its no-work pause instead of freezing", () => {
+  const at = Date.now();
+  const task = { work_check: null, dispatch: "cmd", work_state: "no-work", work_checked_at: at };
+  assert.equal(workReady(task, at), false);
+  assert.equal(workReady(task, at + DISPATCH_NO_WORK_TTL_MS), true);
+  // With a probe configured, the probe refresh owns the transition back.
+  assert.equal(workReady({ ...task, work_check: "probe" }, at + DISPATCH_NO_WORK_TTL_MS), false);
 });
 
 test("new work clears idle backoff without waiting out the timer", async () => {

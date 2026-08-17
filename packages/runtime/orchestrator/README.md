@@ -10,11 +10,14 @@ Tasks may declare:
 
 - a prompt, observable completion condition, and optional machine completion check;
 - an optional work-availability probe (`--work-check`);
+- an optional pre-launch dispatch command (`--dispatch`);
 - an exact working directory, model, and thinking level;
 - a relative launch share among eligible persistent work;
 - an optional time at which it first becomes eligible.
 
 Tasks have no concurrency limit. Every eligible task can receive work whenever the governor admits another agent.
+
+A dispatch command inverts launch-and-discover: after the governor admits a launch, the controller runs the command in the task's working directory with `ORCHESTRATOR_RUN_ID` set to the imminent run id. The command atomically claims one work unit under that id and prints a complete context packet on stdout; the controller appends it to the task prompt under `## Dispatched work unit`, so the session's first tokens go to the work instead of claiming and orientation. Exit 1 means nothing was claimable (the task is marked no-work; a dispatch-only task re-probes after a one-minute pause). Any other failure fails open to an ordinary launch and surfaces a throttled `dispatch-error` event. Because the claim's worker id is the run id, project reapers can free work stranded by a launch that ends without a terminal decision. Runs record whether they were dispatched, and `research-bench` tracks the dispatched fraction.
 
 A work check is a cheap command run in the task's working directory that reports whether claimable work exists right now: exit 0 means work exists, exit 1 means none. The controller refreshes each probe on a short cadence (15 s cache) and simply does not launch a task whose probe last reported no work — no agent is spent discovering an empty queue, and no timed backoff must elapse. Because probes also run while a task sits in idle backoff, a no-work→work transition clears that backoff immediately: the arrival of work, not the passage of time, restores eligibility (recorded as a `work-available` event). Any other probe outcome — timeout, crash, unexpected exit code — fails open: the task degrades to ordinary launch-and-discover and the defect is surfaced as a throttled `work-check-error` event, so a broken probe can never silently starve its task. Idle-report backoff remains as the secondary guard when a probe claims work that agents cannot actually claim. `orchestrator status` shows probe-gated tasks as `no-work`, and `task reopen` resets the probe cache for an immediate re-check.
 
@@ -76,7 +79,7 @@ The systemd service is `agent-orchestrator.service`. SIGTERM or restart stops ne
 
 Every autonomous SDK `bash` call uses [`tool-shell`](tool-shell), which runs that invocation in a transient `pi-tools.slice` scope with `MemoryMax=12G`, zero swap, and `OOMPolicy=kill`. An OOM therefore terminates that tool call and returns a failed tool result while the controller and unrelated agent sessions continue. The parent user slice has an aggregate 40G/48G high/max boundary for simultaneous tool scopes. The orchestrator reapplies the shell override after resource loading because Pi reloads `SettingsManager` during discovery; the machine-global `shellPath` setting supplies the same boundary to newly created sessions before a controller restart. `tool-shell` resolves the user bus itself when called from a system service. Tests cover override survival and an actual scope-contained OOM. The orchestrator service itself retains `OOMPolicy=continue` as a final containment boundary.
 
-Runtime state is canonical in `/home/kenan/data/agent-orchestrator/orchestrator.sqlite3`; Pi session JSONL is retained under `sessions/`. The SQLite database uses WAL and records tasks, launches, completion reports, whether each launch processed a real work unit, and bounded controller events. Every table has automatic millisecond `created_at` and `updated_at` columns maintained by SQLite triggers; existing rows are backfilled from their original event times.
+Runtime state is canonical in `/home/kenan/data/agent-orchestrator/orchestrator.sqlite3`; Pi session JSONL is retained under `sessions/`. The SQLite database uses WAL and records tasks, launches, completion reports, whether each launch processed a real work unit and was dispatched, and bounded controller events. `governor-blocked` logging is interval-throttled (details embed live burn numbers, so detail-sensitive throttling would log every tick), and events older than fourteen days are purged on a six-hour cadence. Every table has automatic millisecond `created_at` and `updated_at` columns maintained by SQLite triggers; existing rows are backfilled from their original event times.
 
 ## Validation
 
