@@ -40,6 +40,8 @@ const CHATGPT_PRO_PROVIDER = "chatgpt-pro";
 const CODEX_PROVIDER = "openai-codex";
 const ANTHROPIC_PROVIDER = "anthropic";
 const ANTHROPIC_USAGE_ENDPOINT = "https://api.anthropic.com/api/oauth/usage";
+const ANTHROPIC_PROFILE_ENDPOINT = "https://api.anthropic.com/api/oauth/profile";
+const ANTHROPIC_CLIENT_USER_AGENT = "claude-code/2.1.80";
 const ANTHROPIC_USAGE_CACHE_PATH = path.join(DATA, "anthropic-plan-usage.json");
 export const TOOL_SHELL = fileURLToPath(new URL("./tool-shell", import.meta.url));
 const TICK_MS = 5000;
@@ -509,6 +511,14 @@ export function anthropicOpusHasHeadroom(account) {
   return 2 * sharedRemaining > fableRemaining;
 }
 
+export function anthropicWeeklyCapacity(profile) {
+  const rateLimitTier = String(profile?.organization?.rate_limit_tier ?? "").trim().toLowerCase();
+  const weeklyCapacityWeight = rateLimitTier === "default_claude_max_20x"
+    ? 2
+    : rateLimitTier === "default_claude_max_5x" ? 1 : null;
+  return { rateLimitTier: rateLimitTier || null, weeklyCapacityWeight };
+}
+
 export class AnthropicGovernor {
   constructor(config, { modelRuntime = null, authPath = AUTH_PATH, fetcher = fetch, readCredential = readStoredCredential, cachePath = ANTHROPIC_USAGE_CACHE_PATH } = {}) {
     this.config = config;
@@ -550,20 +560,24 @@ export class AnthropicGovernor {
         readCredential: this.readCredential,
       });
       if (!usable) return { account: null, error: "OAuth credential unavailable" };
-      const response = await this.fetcher(ANTHROPIC_USAGE_ENDPOINT, {
-        signal: AbortSignal.timeout(10000),
-        headers: {
-          Authorization: `Bearer ${usable.access}`,
-          Accept: "application/json",
-          "anthropic-version": "2023-06-01",
-          "anthropic-beta": "oauth-2025-04-20",
-          "User-Agent": "works.kenan.agent-orchestrator",
-        },
-      });
+      const headers = {
+        Authorization: `Bearer ${usable.access}`,
+        Accept: "application/json",
+        "anthropic-version": "2023-06-01",
+        "anthropic-beta": "oauth-2025-04-20",
+        "User-Agent": ANTHROPIC_CLIENT_USER_AGENT,
+      };
+      const [response, profileResponse] = await Promise.all([
+        this.fetcher(ANTHROPIC_USAGE_ENDPOINT, { signal: AbortSignal.timeout(10000), headers }),
+        this.fetcher(ANTHROPIC_PROFILE_ENDPOINT, { signal: AbortSignal.timeout(10000), headers }),
+      ]);
       if (!response.ok) return { account: null, error: `usage endpoint HTTP ${response.status}` };
+      if (!profileResponse.ok) return { account: null, error: `profile endpoint HTTP ${profileResponse.status}` };
       const usage = parseAnthropicUsage(await response.json(), fetchedAt);
       if (!usage) return { account: null, error: "usage endpoint returned malformed windows" };
-      const account = { provider, windows: usage.windows, extraUsageExhausted: usage.extraUsageExhausted, fetchedAt, stale: false };
+      const capacity = anthropicWeeklyCapacity(await profileResponse.json());
+      if (capacity.weeklyCapacityWeight === null) return { account: null, error: `weekly capacity is not configured for Anthropic rate-limit tier ${capacity.rateLimitTier ?? "missing"}` };
+      const account = { provider, windows: usage.windows, extraUsageExhausted: usage.extraUsageExhausted, ...capacity, fetchedAt, stale: false };
       this.lastGood.set(provider, account);
       return { account, error: null };
     } catch (error) {
@@ -1476,6 +1490,8 @@ async function main(argv = process.argv.slice(2)) {
         provider: account.provider,
         stale: account.stale,
         extraUsageExhausted: account.extraUsageExhausted,
+        rateLimitTier: account.rateLimitTier,
+        weeklyCapacityWeight: account.weeklyCapacityWeight,
         windows: Object.fromEntries(Object.entries(account.windows).filter(([, value]) => value).map(([name, value]) => [name, {
           utilization: value.utilization,
           resetsAt: value.resetsAt,
