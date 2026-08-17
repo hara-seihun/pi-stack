@@ -1,0 +1,22 @@
+{
+  "name": "@works-kenan/pi-claude-code-use",
+  "private": true,
+  "version": "2.1.0-works.1",
+  "description": "Anthropic OAuth subscription payload adaptation for Pi and Multi-Pass accounts",
+  "type": "module",
+  "keywords": [
+    "pi-package",
+    "pi-extension",
+    "anthropic",
+    "claude-code",
+    "oauth"
+  ],
+  "pi": {
+    "extensions": [
+      "./extensions/index.ts"
+    ]
+  },
+  "peerDependencies": {
+    "@earendil-works/pi-coding-agent": "*"
+  }
+}
