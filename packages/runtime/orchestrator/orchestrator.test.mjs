@@ -241,6 +241,7 @@ test("noninteractive deployment resolves its newly installed Pi commands", () =>
   assert.ok(installAt >= 0 && pathAt > installAt && proCheckAt > pathAt && restartAt > proCheckAt);
   assert.match(deploy, /claude_extension_configured=.*any/);
   assert.match(deploy, /if \[\[ "\$claude_extension_configured" == true \]\]/);
+  assert.match(deploy, /PI_RUNTIME_SKIP_RESTART:-0/);
 });
 
 test("autonomous bash tools retain the OOM-isolated shell after resource reload", async () => {
