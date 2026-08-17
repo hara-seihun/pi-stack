@@ -9,7 +9,7 @@ import path from "node:path";
 import process from "node:process";
 import { DatabaseSync } from "node:sqlite";
 import { fileURLToPath } from "node:url";
-import { browserPoolCapacitySnapshot } from "../extensions/chatgpt-pro/browser.mjs";
+import { currentPoolCapacity } from "../extensions/chatgpt-pro/browser.mjs";
 
 const DATA = process.env.AGENT_ORCHESTRATOR_DATA ?? path.join(os.homedir(), "data/agent-orchestrator");
 const BASE = path.join(DATA, "pro", "questions");
@@ -72,7 +72,7 @@ function probe() {
     console.log("queue empty");
     return 1;
   }
-  const capacity = browserPoolCapacitySnapshot(null, Date.now());
+  const capacity = currentPoolCapacity();
   if (capacity.available < 1) {
     console.log(`queued=${pending.length} but no Pro entitlement available (${capacity.inFlight}/${capacity.maxParallel} in flight, ${capacity.eligible} eligible)`);
     return 1;

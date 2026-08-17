@@ -188,6 +188,10 @@ function readPoolState() {
   }
 }
 
+export function currentPoolCapacity(at = Date.now()) {
+  return browserPoolCapacitySnapshot(readPoolState(), at);
+}
+
 export function browserPoolCapacitySnapshot(raw, at = Date.now(), profileNames) {
   const suppliedNames = profileNames !== undefined;
   const activeNames = suppliedNames ? profileNames : configuredProfileNames(at);
