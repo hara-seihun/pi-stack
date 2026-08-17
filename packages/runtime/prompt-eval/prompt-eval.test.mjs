@@ -12,7 +12,7 @@ const cli = new URL("./prompt-eval.mjs", import.meta.url).pathname;
 async function fakePi(root) {
   const file = path.join(root, "fake-pi.mjs");
   await writeFile(file, `#!/usr/bin/env node
-import { readFile, writeFile } from "node:fs/promises";
+import { mkdir, readFile, writeFile } from "node:fs/promises";
 const args = process.argv.slice(2);
 if (args[0] === "--version") { console.log("pi-test-1"); process.exit(0); }
 if (args[0] === "--list-models") { console.log("provider model"); process.exit(0); }
@@ -23,6 +23,8 @@ const system = await readFile(process.env.PROMPT_EVAL_SYSTEM_PROMPT, "utf8");
 if (system.includes("SLOW")) await new Promise((resolve) => setTimeout(resolve, 5000));
 const label = system.includes("SECOND") ? "second" : "first";
 await writeFile("artifact.txt", label + ":" + task.trim() + "\\n");
+await mkdir("node_modules", { recursive: true });
+await writeFile("node_modules/generated.txt", "generated-" + label + "\\n");
 console.log(JSON.stringify({type:"session",version:3,id:"test",cwd:process.cwd()}));
 console.log(JSON.stringify({type:"message_end",message:{role:"assistant",content:[{type:"text",text:"final-" + label}],stopReason:"stop",usage:{input:2,output:1}}}));
 `);
@@ -69,15 +71,22 @@ test("run captures isolated artifacts, transcripts, metadata, and comparisons", 
   assert.equal(manifest.status, "completed");
   assert.deepEqual(manifest.cases.map((entry) => entry.status), ["completed", "completed"]);
   const first = JSON.parse(await readFile(path.join(runDirectory, "cases", "first", "result.json"), "utf8"));
-  assert.deepEqual(first.changes, { created: ["artifact.txt"], modified: [], deleted: [] });
+  assert.deepEqual(first.changes, { created: ["artifact.txt", "node_modules/generated.txt"], modified: [], deleted: [] });
+  assert.equal(
+    await readFile(path.join(runDirectory, "cases", "first", "workspace", "node_modules", "generated.txt"), "utf8"),
+    "generated-first\n",
+  );
   assert.equal(first.usage.input, 2);
   const report = await readFile(path.join(runDirectory, "comparison.md"), "utf8");
   assert.match(report, /first vs second/u);
   assert.match(report, /final-first/u);
   assert.match(report, /final-second/u);
+  assert.match(report, /Omitted generated/u);
+  assert.doesNotMatch(report, /generated\.txt/u);
   const patch = await readFile(path.join(runDirectory, "comparisons", "first--second-workspace.patch"), "utf8");
   assert.match(patch, /-first:make a thing/u);
   assert.match(patch, /\+second:make a thing/u);
+  assert.doesNotMatch(patch, /generated-(?:first|second)/u);
   assert.ok((await readdir(path.join(runDirectory, "cases", "first"))).includes("events.jsonl"));
 });
 

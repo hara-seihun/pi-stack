@@ -86,7 +86,9 @@ RUN/
     CASE--CASE-workspace.patch
 ```
 
-`inputs/` is the immutable snapshot used by the run. `cases/*/workspace/` contains the actual files each agent left behind. `result.json` records created, modified, and deleted paths relative to the seed plus a SHA-256 inventory. `events.jsonl` is the authoritative Pi event stream; `final.md` is the last completed assistant text message extracted from it.
+`inputs/` is the immutable snapshot used by the run. `cases/*/workspace/` contains every file each agent left behind. `result.json` records every created, modified, and deleted path relative to the seed plus a complete SHA-256 inventory. `events.jsonl` is the authoritative Pi event stream; `final.md` is the last completed assistant text message extracted from it.
+
+For readable comparisons, `comparison.md` and workspace patches omit generated dependency, cache, and build trees (`node_modules`, `dist`, `.lake`, `.venv`, cache/coverage directories, Python bytecode). Those files remain untouched in the case workspace and complete `result.json`; only the derived comparison view excludes them. Long path lists in the Markdown view are capped, with the complete list retained in metadata.
 
 A failed or timed-out case does not discard successful siblings. The command finishes all configured cases, writes the comparison, and exits nonzero when any case did not complete.
 

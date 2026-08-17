@@ -3,14 +3,17 @@ import { createHash, randomUUID } from "node:crypto";
 import { spawn, spawnSync } from "node:child_process";
 import {
   cp,
+  link,
   lstat,
   mkdir,
+  mkdtemp,
   readFile,
   readdir,
   readlink,
   rename,
   rm,
   stat,
+  symlink,
   writeFile,
 } from "node:fs/promises";
 import { createReadStream, createWriteStream } from "node:fs";
@@ -21,6 +24,18 @@ import { fileURLToPath } from "node:url";
 
 const THINKING_LEVELS = new Set(["off", "minimal", "low", "medium", "high", "xhigh", "max"]);
 const DEFAULT_TOOLS = ["read", "bash", "edit", "write"];
+const COMPARISON_IGNORED_SEGMENTS = new Set([
+  ".cache",
+  ".git",
+  ".lake",
+  ".nyc_output",
+  ".pytest_cache",
+  ".venv",
+  "__pycache__",
+  "coverage",
+  "dist",
+  "node_modules",
+]);
 const MAX_CASES = 20;
 const PI = process.env.PROMPT_EVAL_PI || "pi";
 const EXACT_PROMPT_EXTENSION = fileURLToPath(new URL("./exact-system-prompt.ts", import.meta.url));
@@ -403,6 +418,35 @@ function markdownCell(value) {
   return String(value ?? "").replace(/\|/gu, "\\|").replace(/\n/gu, " ");
 }
 
+function comparisonIgnored(relativePath) {
+  const segments = relativePath.split("/");
+  return segments.some((segment) => COMPARISON_IGNORED_SEGMENTS.has(segment)) || relativePath.endsWith(".pyc");
+}
+
+function comparisonInventory(fullInventory) {
+  return Object.fromEntries(Object.entries(fullInventory).filter(([name]) => !comparisonIgnored(name)));
+}
+
+function comparisonChanges(changes) {
+  const visible = {
+    created: changes.created.filter((name) => !comparisonIgnored(name)),
+    modified: changes.modified.filter((name) => !comparisonIgnored(name)),
+    deleted: changes.deleted.filter((name) => !comparisonIgnored(name)),
+  };
+  const omitted = changes.created.length + changes.modified.length + changes.deleted.length
+    - visible.created.length - visible.modified.length - visible.deleted.length;
+  return { ...visible, omitted };
+}
+
+async function materializeComparisonTree(source, target, fileInventory) {
+  for (const [relative, entry] of Object.entries(fileInventory)) {
+    const destination = path.join(target, relative);
+    await mkdir(path.dirname(destination), { recursive: true });
+    if (entry.type === "file") await link(path.join(source, relative), destination);
+    else if (entry.type === "symlink") await symlink(entry.target, destination);
+  }
+}
+
 function artifactDifference(left, right) {
   const onlyLeft = [];
   const onlyRight = [];
@@ -416,7 +460,9 @@ function artifactDifference(left, right) {
 }
 
 function listOrNone(values) {
-  return values.length ? values.map((value) => `\`${value}\``).join(", ") : "none";
+  if (!values.length) return "none";
+  const shown = values.slice(0, 40).map((value) => `\`${value}\``).join(", ");
+  return values.length <= 40 ? shown : `${shown}, … **${values.length - 40} more** (complete list in result metadata)`;
 }
 
 async function generateComparison(runDirectory) {
@@ -436,26 +482,46 @@ async function generateComparison(runDirectory) {
   const comparisonDirectory = path.join(runDirectory, "comparisons");
   await rm(comparisonDirectory, { recursive: true, force: true });
   await mkdir(comparisonDirectory, { recursive: true });
+  const filteredRoot = await mkdtemp(path.join(runDirectory, ".comparison-"));
+  const filteredInventories = new Map();
   const pairs = [];
-  for (let leftIndex = 0; leftIndex < available.length; leftIndex += 1) {
-    for (let rightIndex = leftIndex + 1; rightIndex < available.length; rightIndex += 1) {
-      const left = available[leftIndex];
-      const right = available[rightIndex];
-      const pairName = `${left.name}--${right.name}`;
-      const workspacePatch = path.join(comparisonDirectory, `${pairName}-workspace.patch`);
-      const finalPatch = path.join(comparisonDirectory, `${pairName}-final.patch`);
-      const workspaceDiff = await commandOutput("git", [
-        "diff", "--no-index", "--no-ext-diff", "--no-renames", "--",
-        `cases/${left.name}/workspace`, `cases/${right.name}/workspace`,
-      ], runDirectory, workspacePatch);
-      if (![0, 1].includes(workspaceDiff.code)) fail(`git workspace diff failed for ${pairName}`);
-      const finalDiff = await commandOutput("git", [
-        "diff", "--no-index", "--no-ext-diff", "--no-renames", "--",
-        `cases/${left.name}/final.md`, `cases/${right.name}/final.md`,
-      ], runDirectory, finalPatch);
-      if (![0, 1].includes(finalDiff.code)) fail(`git final diff failed for ${pairName}`);
-      pairs.push({ left, right, pairName, difference: artifactDifference(left.result.inventory, right.result.inventory) });
+  try {
+    for (const entry of available) {
+      const filtered = comparisonInventory(entry.result.inventory);
+      filteredInventories.set(entry.name, filtered);
+      await materializeComparisonTree(
+        path.join(runDirectory, "cases", entry.name, "workspace"),
+        path.join(filteredRoot, "cases", entry.name, "workspace"),
+        filtered,
+      );
     }
+    for (let leftIndex = 0; leftIndex < available.length; leftIndex += 1) {
+      for (let rightIndex = leftIndex + 1; rightIndex < available.length; rightIndex += 1) {
+        const left = available[leftIndex];
+        const right = available[rightIndex];
+        const pairName = `${left.name}--${right.name}`;
+        const workspacePatch = path.join(comparisonDirectory, `${pairName}-workspace.patch`);
+        const finalPatch = path.join(comparisonDirectory, `${pairName}-final.patch`);
+        const workspaceDiff = await commandOutput("git", [
+          "diff", "--no-index", "--no-ext-diff", "--no-renames", "--",
+          `cases/${left.name}/workspace`, `cases/${right.name}/workspace`,
+        ], filteredRoot, workspacePatch);
+        if (![0, 1].includes(workspaceDiff.code)) fail(`git workspace diff failed for ${pairName}`);
+        const finalDiff = await commandOutput("git", [
+          "diff", "--no-index", "--no-ext-diff", "--no-renames", "--",
+          `cases/${left.name}/final.md`, `cases/${right.name}/final.md`,
+        ], runDirectory, finalPatch);
+        if (![0, 1].includes(finalDiff.code)) fail(`git final diff failed for ${pairName}`);
+        pairs.push({
+          left,
+          right,
+          pairName,
+          difference: artifactDifference(filteredInventories.get(left.name), filteredInventories.get(right.name)),
+        });
+      }
+    }
+  } finally {
+    await rm(filteredRoot, { recursive: true, force: true });
   }
   const lines = [
     `# ${manifest.name} comparison`,
@@ -466,14 +532,17 @@ async function generateComparison(runDirectory) {
     "",
     "## Results",
     "",
-    "| Case | Model | Thinking | Status | Duration | Created | Modified | Deleted |",
-    "|---|---|---:|---:|---:|---:|---:|---:|",
+    "Generated dependency, cache, and build directories are retained in each workspace and complete inventory, but omitted from this report and workspace patches.",
+    "",
+    "| Case | Model | Thinking | Status | Duration | Created | Modified | Deleted | Omitted generated |",
+    "|---|---|---:|---:|---:|---:|---:|---:|---:|",
   ];
   for (const entry of available) {
-    const changes = entry.result.changes;
-    lines.push(`| [${markdownCell(entry.name)}](cases/${entry.name}/) | ${markdownCell(entry.model)} | ${markdownCell(entry.thinking)} | ${markdownCell(entry.result.status)} | ${entry.result.durationSeconds}s | ${changes.created.length} | ${changes.modified.length} | ${changes.deleted.length} |`);
+    const changes = comparisonChanges(entry.result.changes);
+    lines.push(`| [${markdownCell(entry.name)}](cases/${entry.name}/) | ${markdownCell(entry.model)} | ${markdownCell(entry.thinking)} | ${markdownCell(entry.result.status)} | ${entry.result.durationSeconds}s | ${changes.created.length} | ${changes.modified.length} | ${changes.deleted.length} | ${changes.omitted} |`);
   }
   for (const entry of available) {
+    const changes = comparisonChanges(entry.result.changes);
     lines.push(
       "",
       `## ${entry.name}`,
@@ -483,11 +552,13 @@ async function generateComparison(runDirectory) {
       `Metadata: [cases/${entry.name}/result.json](cases/${entry.name}/result.json)  `,
       `Workspace: [cases/${entry.name}/workspace/](cases/${entry.name}/workspace/)`,
       "",
-      `Created: ${listOrNone(entry.result.changes.created)}`,
+      `Created: ${listOrNone(changes.created)}`,
       "",
-      `Modified: ${listOrNone(entry.result.changes.modified)}`,
+      `Modified: ${listOrNone(changes.modified)}`,
       "",
-      `Deleted: ${listOrNone(entry.result.changes.deleted)}`,
+      `Deleted: ${listOrNone(changes.deleted)}`,
+      "",
+      `Generated paths omitted here: ${changes.omitted} (retained in workspace and result metadata)`,
       "",
       "### Final response",
       "",
@@ -501,7 +572,7 @@ async function generateComparison(runDirectory) {
       `## ${pair.left.name} vs ${pair.right.name}`,
       "",
       `- Final-response diff: [${pair.pairName}-final.patch](comparisons/${pair.pairName}-final.patch)`,
-      `- Workspace diff: [${pair.pairName}-workspace.patch](comparisons/${pair.pairName}-workspace.patch)`,
+      `- Workspace diff (generated paths omitted): [${pair.pairName}-workspace.patch](comparisons/${pair.pairName}-workspace.patch)`,
       `- Only ${pair.left.name}: ${listOrNone(pair.difference.onlyLeft)}`,
       `- Only ${pair.right.name}: ${listOrNone(pair.difference.onlyRight)}`,
       `- Different in both: ${listOrNone(pair.difference.different)}`,
