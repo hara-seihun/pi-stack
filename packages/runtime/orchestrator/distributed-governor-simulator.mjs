@@ -583,6 +583,7 @@ export function runRoutingCalibration(raw = {}) {
     for (let host = 0; host < config.hosts; host++) {
       const z = Array.from({ length: config.accounts }, () => Array(costs.length).fill(0));
       const x = Array.from({ length: config.accounts }, () => Array(costs.length).fill(0));
+      const availableAccounts = config.hostAccountSets?.[host] ?? Array.from({ length: config.accounts }, (_, account) => account);
       for (let model = 0; model < costs.length; model++) {
         let signs;
         if (config.instrumentFailure === "identical" && host > 0) {
@@ -590,11 +591,13 @@ export function runRoutingCalibration(raw = {}) {
         } else if (config.instrumentFailure === "anti-mimic" && host > 0) {
           signs = firstHostSigns.map((row) => -row[model]);
         } else {
-          signs = balancedSigns(config.accounts, randoms[host]);
+          const availableSigns = balancedSigns(availableAccounts.length, randoms[host]);
+          signs = Array(config.accounts).fill(0);
+          availableAccounts.forEach((account, index) => { signs[account] = availableSigns[index]; });
         }
-        for (let account = 0; account < config.accounts; account++) {
+        for (const account of availableAccounts) {
           z[account][model] = signs[account];
-          x[account][model] = demand[model] / config.accounts * Math.max(0, 1 + config.excitation * signs[account]);
+          x[account][model] = demand[model] / availableAccounts.length * Math.max(0, 1 + config.excitation * signs[account]);
           accountRate[account] += x[account][model] * costs[model];
         }
       }
@@ -684,6 +687,163 @@ export function runRoutingCalibration(raw = {}) {
     debug: config.debug ? { observed, instruments, activities } : undefined,
   };
 }
+
+export function anthropicWeeklyMeters(opusUsage, fableUsage, weeklyCapacityWeight = 1) {
+  const sharedCapacity = 100 * weeklyCapacityWeight;
+  const fableCapacity = sharedCapacity / 2;
+  return {
+    sharedPercent: 100 * (opusUsage + fableUsage) / sharedCapacity,
+    fablePercent: 100 * fableUsage / fableCapacity,
+  };
+}
+
+export function runAnthropicScenario(raw = {}) {
+  const config = {
+    name: "Anthropic coupled meters",
+    seed: 201,
+    hosts: 2,
+    durationHours: 168,
+    dtMinutes: 5,
+    accountWeights: [2, 1, 2],
+    fiveHourCapacityPerWeight: 18,
+    opusDemandPerHost: 1.2,
+    fableRate: (hour) => 0.22 * (0.4 + 0.6 * (1 + Math.sin(hour * 0.37)) / 2),
+    targetPercent: 92,
+    initialShare: 0.08,
+    controlGain: 0.18,
+    additiveRamp: 0.01,
+    ...raw,
+  };
+  const dtHours = config.dtMinutes / 60;
+  const steps = Math.ceil(config.durationHours / dtHours);
+  const random = new Random(config.seed);
+  const accounts = config.accountWeights.map((weight) => ({
+    weight,
+    sharedCapacity: 100 * weight,
+    fableCapacity: 50 * weight,
+    fiveCapacity: config.fiveHourCapacityPerWeight * weight,
+    sharedUsed: 0,
+    fableUsed: 0,
+    fiveUsed: 0,
+  }));
+  const shares = Array(config.hosts).fill(config.initialShare);
+  let previousTotalShared = 0;
+  let previousTotalFive = 0;
+  let maxFivePercent = 0;
+  let maxSharedPercent = 0;
+  let maxFablePercent = 0;
+  let minimumReserve = Number.POSITIVE_INFINITY;
+  let rejectedOpus = 0;
+
+  for (let step = 0; step < steps; step++) {
+    const hour = step * dtHours;
+    if (step > 0 && Math.floor(hour / 5) !== Math.floor((hour - dtHours) / 5)) {
+      for (const account of accounts) account.fiveUsed = 0;
+      previousTotalFive = 0;
+    }
+    if (step > 0 && Math.floor(hour / 168) !== Math.floor((hour - dtHours) / 168)) {
+      for (const account of accounts) {
+        account.sharedUsed = 0;
+        account.fableUsed = 0;
+      }
+      previousTotalShared = 0;
+    }
+
+    const totalShared = accounts.reduce((sum, account) => sum + account.sharedUsed, 0);
+    const totalFive = accounts.reduce((sum, account) => sum + account.fiveUsed, 0);
+    const observedRate = Math.max(0, Math.max(
+      (totalShared - previousTotalShared) / dtHours,
+      (totalFive - previousTotalFive) / dtHours,
+    ));
+    previousTotalShared = totalShared;
+    previousTotalFive = totalFive;
+    const fiveReset = Math.max(dtHours, (Math.floor(hour / 5) + 1) * 5 - hour);
+    const weeklyReset = Math.max(dtHours, (Math.floor(hour / 168) + 1) * 168 - hour);
+    const sustainableFive = accounts.reduce((sum, account) =>
+      sum + Math.max(0, config.targetPercent / 100 * account.fiveCapacity - account.fiveUsed) / fiveReset, 0);
+    const sustainableWeekly = accounts.reduce((sum, account) => {
+      const reservedForFable = Math.max(0, account.fableCapacity - account.fableUsed);
+      const targetShared = config.targetPercent / 100 * account.sharedCapacity;
+      return sum + Math.max(0, targetShared - account.sharedUsed - reservedForFable) / weeklyReset;
+    }, 0);
+    const sustainable = Math.min(sustainableFive, sustainableWeekly);
+    if (step % Math.max(1, Math.round(20 / config.dtMinutes)) === 0) {
+      for (let host = 0; host < shares.length; host++) {
+        if (observedRate <= 1e-9) shares[host] = Math.min(1, shares[host] + config.additiveRamp);
+        else {
+          const ratio = clamp(sustainable / observedRate, 0.25, 2);
+          shares[host] = clamp(shares[host] * Math.exp(config.controlGain * Math.log(ratio)), 0, 1);
+        }
+      }
+    }
+
+    const fableBurn = Math.max(0, config.fableRate(hour, step)) * dtHours;
+    let fableRemaining = fableBurn;
+    for (const account of [...accounts].sort((left, right) =>
+      left.fableUsed / left.fableCapacity - right.fableUsed / right.fableCapacity)) {
+      const room = Math.min(account.fableCapacity - account.fableUsed, account.sharedCapacity - account.sharedUsed, account.fiveCapacity - account.fiveUsed);
+      const admitted = Math.max(0, Math.min(fableRemaining, room));
+      account.fableUsed += admitted;
+      account.sharedUsed += admitted;
+      account.fiveUsed += admitted;
+      fableRemaining -= admitted;
+    }
+
+    const planned = accounts.map(() => 0);
+    for (let host = 0; host < config.hosts; host++) {
+      const desired = config.opusDemandPerHost * (0.85 + 0.3 * random.next()) * shares[host];
+      const selected = accounts
+        .map((account, index) => ({
+          index,
+          pressure: (account.sharedUsed + planned[index] * dtHours) / account.sharedCapacity,
+          weeklyRoom: account.sharedCapacity - account.sharedUsed - (account.fableCapacity - account.fableUsed),
+          fiveRoom: account.fiveCapacity - account.fiveUsed,
+        }))
+        .filter((item) => item.weeklyRoom > 0 && item.fiveRoom > 0)
+        .sort((left, right) => left.pressure - right.pressure)[0];
+      if (!selected) {
+        rejectedOpus += desired * dtHours;
+        continue;
+      }
+      planned[selected.index] += desired;
+    }
+    for (let index = 0; index < accounts.length; index++) {
+      const account = accounts[index];
+      const reserve = account.sharedCapacity - account.sharedUsed - (account.fableCapacity - account.fableUsed);
+      const admitted = Math.max(0, Math.min(planned[index] * dtHours, reserve, account.fiveCapacity - account.fiveUsed));
+      rejectedOpus += planned[index] * dtHours - admitted;
+      account.sharedUsed += admitted;
+      account.fiveUsed += admitted;
+    }
+
+    for (const account of accounts) {
+      const meters = anthropicWeeklyMeters(account.sharedUsed - account.fableUsed, account.fableUsed, account.weight);
+      maxFivePercent = Math.max(maxFivePercent, 100 * account.fiveUsed / account.fiveCapacity);
+      maxSharedPercent = Math.max(maxSharedPercent, meters.sharedPercent);
+      maxFablePercent = Math.max(maxFablePercent, meters.fablePercent);
+      minimumReserve = Math.min(minimumReserve,
+        account.sharedCapacity - account.sharedUsed - (account.fableCapacity - account.fableUsed));
+    }
+  }
+
+  return {
+    config,
+    maxFivePercent,
+    maxSharedPercent,
+    maxFablePercent,
+    minimumReserve,
+    rejectedOpus,
+    finalShares: shares,
+    safe: maxFivePercent <= 100 + 1e-9 && maxSharedPercent <= 100 + 1e-9 &&
+      maxFablePercent <= 100 + 1e-9 && minimumReserve >= -1e-9,
+  };
+}
+
+export const ANTHROPIC_SCENARIOS = [
+  { name: "A1 two hosts, three tier-weighted accounts", seed: 201 },
+  { name: "A2 bursty interactive Fable pressure", seed: 202, fableRate: (hour) => Math.sin(hour * 1.9) > 0.72 ? 1.8 : 0.04 },
+  { name: "A3 twenty autonomous hosts", seed: 203, hosts: 20, initialShare: 0.02, opusDemandPerHost: 0.8 },
+];
 
 export const SCENARIOS = [
   {
@@ -881,6 +1041,7 @@ export const CALIBRATION_SCENARIOS = [
   { name: "C10 adversary anti-mimics the first host", seed: 110, hosts: 2, meterQuantum: 1, durationHours: 168 * 4, instrumentFailure: "anti-mimic" },
   { name: "C11 model costs double after calibration starts", seed: 111, hosts: 2, meterQuantum: 1, durationHours: 168 * 4, costDrift: { atHour: 336, multipliers: [2, 2] } },
   { name: "C12 five-percent meters", seed: 112, hosts: 2, meterQuantum: 5, durationHours: 168 * 8 },
+  { name: "C13 overlapping account subsets", seed: 113, hosts: 2, meterQuantum: 1, durationHours: 168 * 4, hostAccountSets: [Array.from({ length: 12 }, (_, account) => account), [0, 7, 8, 9, 10, 11]] },
 ];
 
 function classification(result) {
@@ -903,7 +1064,7 @@ function calibrationClassification(result) {
   return "NOT IDENTIFIABLE";
 }
 
-export function markdownReport(results, calibrations = []) {
+export function markdownReport(results, calibrations = [], anthropicResults = []) {
   const lines = [
     "| Scenario | Result | Used | Quota overshoot | Max pace lead | Single-meter attribution p90 | Fairness |",
     "|---|---:|---:|---:|---:|---:|---:|",
@@ -917,6 +1078,12 @@ export function markdownReport(results, calibrations = []) {
       lines.push(`| ${result.config.name} | ${calibrationClassification(result)} | ${formatNumber(result.p90CoefficientError * 100)}% | ${formatNumber(result.p90AttributionError * 100)}% |`);
     }
   }
+  if (anthropicResults.length) {
+    lines.push("", "| Anthropic scenario | Result | Five-hour peak | Shared-weekly peak | Fable-weekly peak | Minimum reserved capacity |", "|---|---:|---:|---:|---:|---:|");
+    for (const result of anthropicResults) {
+      lines.push(`| ${result.config.name} | ${result.safe ? "WORKS" : "UNSAFE"} | ${formatNumber(result.maxFivePercent)}% | ${formatNumber(result.maxSharedPercent)}% | ${formatNumber(result.maxFablePercent)}% | ${formatNumber(result.minimumReserve, 2)} |`);
+    }
+  }
   return lines.join("\n");
 }
 
@@ -928,13 +1095,17 @@ async function main() {
   const calibrationScenarios = selected.length
     ? CALIBRATION_SCENARIOS.filter((scenario) => selected.some((term) => scenario.name.includes(term)))
     : CALIBRATION_SCENARIOS;
-  if (!scenarios.length && !calibrationScenarios.length) {
+  const anthropicScenarios = selected.length
+    ? ANTHROPIC_SCENARIOS.filter((scenario) => selected.some((term) => scenario.name.includes(term)))
+    : ANTHROPIC_SCENARIOS;
+  if (!scenarios.length && !calibrationScenarios.length && !anthropicScenarios.length) {
     throw new Error(`no scenarios matched: ${selected.join(", ")}`);
   }
   const results = scenarios.map(runScenario);
   const calibrations = calibrationScenarios.map(runRoutingCalibration);
-  if (process.env.SIMULATOR_JSON === "1") console.log(JSON.stringify({ control: results, calibration: calibrations }, null, 2));
-  else console.log(markdownReport(results, calibrations));
+  const anthropicResults = anthropicScenarios.map(runAnthropicScenario);
+  if (process.env.SIMULATOR_JSON === "1") console.log(JSON.stringify({ control: results, calibration: calibrations, anthropic: anthropicResults }, null, 2));
+  else console.log(markdownReport(results, calibrations, anthropicResults));
 }
 
 if (import.meta.url === `file://${process.argv[1]}`) {

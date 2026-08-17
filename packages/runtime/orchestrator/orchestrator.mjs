@@ -2,6 +2,7 @@
 import fs from "node:fs";
 import os from "node:os";
 import { execFile } from "node:child_process";
+import { createHash, randomBytes } from "node:crypto";
 import path from "node:path";
 import process from "node:process";
 import { DatabaseSync } from "node:sqlite";
@@ -43,6 +44,8 @@ const ANTHROPIC_USAGE_ENDPOINT = "https://api.anthropic.com/api/oauth/usage";
 const ANTHROPIC_PROFILE_ENDPOINT = "https://api.anthropic.com/api/oauth/profile";
 const ANTHROPIC_CLIENT_USER_AGENT = "claude-code/2.1.80";
 const ANTHROPIC_USAGE_CACHE_PATH = path.join(DATA, "anthropic-plan-usage.json");
+const CODEX_GOVERNOR_STATE_PATH = path.join(DATA, "codex-distributed-governor.json");
+const ANTHROPIC_GOVERNOR_STATE_PATH = path.join(DATA, "anthropic-distributed-governor.json");
 export const TOOL_SHELL = fileURLToPath(new URL("./tool-shell", import.meta.url));
 const TICK_MS = 5000;
 const execFileAsync = promisify(execFile);
@@ -64,10 +67,27 @@ const DEFAULT_CONFIG = {
         ratio: "healthy-accounts"
       }
     },
+    distributed: {
+      targetPercent: 92,
+      slopeWindowHours: 2,
+      safetyDelayHours: 0.5,
+      initialShare: 0.08,
+      minimumShare: 0.001,
+      blindDecay: 0.94,
+      controlGain: 0.18,
+      additiveRamp: 0.01,
+      minimumRatio: 0.25,
+      maximumRatio: 2,
+      rateFloor: 0.01,
+      consistencyLimitPercent: 2,
+      routingExcitation: 0.35,
+      routingBlockMinutes: 5
+    },
     anthropic: {
       pollSeconds: 300,
       maxStaleSeconds: 3600,
-      maxActivePerAccount: 1
+      maxActivePerAccount: 1,
+      predictedPercentPerActiveHour: 0.25
     }
   }
 };
@@ -99,10 +119,22 @@ export function loadConfig() {
   if (!(Number.isFinite(config.plan?.pollSeconds) && config.plan.pollSeconds > 0)) fail("invalid config.plan.pollSeconds");
   if (!config.plan.modelBurnPercentPerHour || typeof config.plan.modelBurnPercentPerHour !== "object") fail("missing config.plan.modelBurnPercentPerHour");
   if (!config.plan.modelMixes || typeof config.plan.modelMixes !== "object") config.plan.modelMixes = {};
+  config.plan.distributed = { ...DEFAULT_CONFIG.plan.distributed, ...config.plan.distributed };
+  const distributed = config.plan.distributed;
+  for (const key of ["targetPercent", "slopeWindowHours", "safetyDelayHours", "initialShare", "minimumShare", "blindDecay", "controlGain", "additiveRamp", "minimumRatio", "maximumRatio", "rateFloor", "consistencyLimitPercent", "routingExcitation", "routingBlockMinutes"]) {
+    if (!(Number.isFinite(distributed[key]) && distributed[key] >= 0)) fail(`invalid config.plan.distributed.${key}`);
+  }
+  if (distributed.targetPercent <= 0 || distributed.targetPercent > 100 || distributed.initialShare > 1 ||
+      distributed.minimumShare > distributed.initialShare || distributed.blindDecay > 1 || distributed.routingExcitation > 1 ||
+      distributed.minimumRatio > distributed.maximumRatio || distributed.routingBlockMinutes <= 0) {
+    fail("invalid config.plan.distributed bounds");
+  }
   const anthropic = config.plan.anthropic;
   if (!anthropic || !(Number.isFinite(anthropic.pollSeconds) && anthropic.pollSeconds > 0) ||
       !(Number.isFinite(anthropic.maxStaleSeconds) && anthropic.maxStaleSeconds >= anthropic.pollSeconds) ||
-      !(Number.isInteger(anthropic.maxActivePerAccount) && anthropic.maxActivePerAccount > 0)) {
+      !(Number.isInteger(anthropic.maxActivePerAccount) && anthropic.maxActivePerAccount > 0) ||
+      !(Number.isFinite(anthropic.predictedPercentPerActiveHour ?? DEFAULT_CONFIG.plan.anthropic.predictedPercentPerActiveHour) &&
+        (anthropic.predictedPercentPerActiveHour ?? DEFAULT_CONFIG.plan.anthropic.predictedPercentPerActiveHour) > 0)) {
     fail("invalid config.plan.anthropic");
   }
   for (const [base, mix] of Object.entries(config.plan.modelMixes)) {
@@ -387,32 +419,341 @@ export function proLaunchAvailability(entitlement, active) {
   ));
 }
 
-export function choosePlanProvider(accounts, activeRates, candidate) {
-  const liveByProvider = new Map();
-  for (const assignment of activeRates) {
-    liveByProvider.set(
-      assignment.provider,
-      (liveByProvider.get(assignment.provider) ?? 0) + assignment.rate,
-    );
+function slope(points) {
+  if (points.length < 2) return null;
+  const x = points.reduce((sum, point) => sum + point.at, 0) / points.length;
+  const y = points.reduce((sum, point) => sum + point.value, 0) / points.length;
+  let numerator = 0;
+  let denominator = 0;
+  for (const point of points) {
+    numerator += (point.at - x) * (point.value - y);
+    denominator += (point.at - x) ** 2;
   }
-  return accounts
-    .map((account) => {
-      const live = liveByProvider.get(account.provider) ?? 0;
-      const allowed = account.allowedBurnPercentPerHour;
-      return {
-        provider: account.provider,
-        live,
-        allowed,
-        remaining: allowed - live - candidate,
-        // A healthy account with positive headroom always owns one baseline
-        // worker. Usage-window estimates fluctuate around calibrated model burn
-        // and must govern extra concurrency, not turn a live autonomous system
-        // into an idle one because of a rounding-sized deficit.
-        baseline: live === 0 && allowed > 0,
+  return denominator > 0 ? numerator / denominator * 3600_000 : null;
+}
+
+function bounded(value, minimum, maximum) {
+  return Math.max(minimum, Math.min(maximum, value));
+}
+
+export class DistributedQuotaFeedback {
+  constructor(config, statePath, persist = true) {
+    this.config = { ...DEFAULT_CONFIG.plan.distributed, ...config.plan?.distributed };
+    this.statePath = statePath;
+    this.persist = persist;
+    this.state = {
+      version: 1,
+      seed: randomBytes(16).toString("hex"),
+      share: this.config.initialShare,
+      previous: {},
+      cumulative: {},
+      history: {},
+      samples: [],
+      estimates: {},
+      accountShares: {},
+      accountCumulative: {},
+      accountHistory: {},
+      accountUnconfirmed: {},
+      accountSensorInconsistent: {},
+      unconfirmed: 0,
+      sensorInconsistent: false,
+      lastObservedAt: 0,
+      lastControlAt: 0,
+    };
+    try {
+      const parsed = JSON.parse(fs.readFileSync(statePath, "utf8"));
+      if (parsed?.version === 1 && typeof parsed.seed === "string" && Number.isFinite(parsed.share)) {
+        this.state = { ...this.state, ...parsed };
+      }
+    } catch {}
+    this.status = { share: this.state.share, sustainableRate: 0, observedRate: null, sensorInconsistent: this.state.sensorInconsistent };
+  }
+
+  score(key, block = Math.floor(now() / (this.config.routingBlockMinutes * 60_000))) {
+    const digest = createHash("sha256").update(`${this.state.seed}:${block}:${key}`).digest();
+    return digest.readUIntBE(0, 6) / 2 ** 48;
+  }
+
+  pattern(accounts, modelKey, block) {
+    const ranked = accounts.map((provider) => ({
+      provider,
+      score: this.score(`route:${modelKey}:${provider}`, block),
+    })).sort((left, right) => left.score - right.score || left.provider.localeCompare(right.provider));
+    const signs = new Map();
+    const positive = Math.floor(ranked.length / 2);
+    ranked.forEach((item, index) => signs.set(item.provider, index < positive ? 1 : index < positive * 2 ? -1 : 0));
+    return signs;
+  }
+
+  estimate(modelKey, prior) {
+    const learned = this.state.estimates?.[modelKey];
+    return Number.isFinite(learned?.upper) ? Math.max(prior, learned.upper) : prior;
+  }
+
+  calibrate(accountDeltas, calibration, elapsedHours, at) {
+    if (!calibration || elapsedHours <= 0) return;
+    const providers = calibration.accounts.map((account) => account.provider).sort();
+    const modelKeys = [...new Set(calibration.assignments.map((item) => runModelKey(item.model ? item : item.task)))];
+    const x = {};
+    const patterns = {};
+    for (const assignment of calibration.assignments) {
+      const modelKey = runModelKey(assignment.model ? assignment : assignment.task);
+      const rate = calibration.rate(assignment.model ? assignment : assignment.task);
+      x[assignment.provider] ??= {};
+      x[assignment.provider][modelKey] = (x[assignment.provider][modelKey] ?? 0) + rate;
+      patterns[modelKey] ??= [];
+      patterns[modelKey].push(assignment.instrumentBlock ?? Math.floor(at / (this.config.routingBlockMinutes * 60_000)));
+    }
+    const z = {};
+    for (const provider of providers) {
+      z[provider] = {};
+      for (const modelKey of modelKeys) {
+        const blocks = patterns[modelKey] ?? [];
+        z[provider][modelKey] = blocks.length
+          ? blocks.reduce((sum, block) => sum + (this.pattern(providers, modelKey, block).get(provider) ?? 0), 0) / blocks.length
+          : 0;
+      }
+    }
+    this.state.samples.push({ at, y: Object.fromEntries(Object.entries(accountDeltas).map(([provider, delta]) => [provider, delta / elapsedHours])), x, z });
+    const cutoff = at - 28 * 24 * 3600_000;
+    this.state.samples = this.state.samples.filter((sample) => sample.at >= cutoff).slice(-20_000);
+    if (this.state.samples.length < 30) return;
+    const maxLag = Math.max(0, Math.ceil(30 * 60_000 / Math.max(1, at - this.state.samples.at(-2).at)));
+    for (const modelKey of Object.keys(calibration.priors ?? {})) {
+      let selected = null;
+      for (let lag = 0; lag <= maxLag; lag++) {
+        let numerator = 0;
+        let denominator = 0;
+        const moments = [];
+        for (let index = lag; index < this.state.samples.length; index++) {
+          const observed = this.state.samples[index];
+          const source = this.state.samples[index - lag];
+          let sampleNumerator = 0;
+          let sampleDenominator = 0;
+          for (const provider of providers) {
+            const instrument = source.z?.[provider]?.[modelKey] ?? 0;
+            sampleNumerator += instrument * (observed.y?.[provider] ?? 0);
+            sampleDenominator += instrument * (source.x?.[provider]?.[modelKey] ?? 0);
+          }
+          numerator += sampleNumerator;
+          denominator += sampleDenominator;
+          moments.push({ numerator: sampleNumerator, denominator: sampleDenominator });
+        }
+        if (denominator > 1e-6 && (!selected || numerator > selected.numerator)) selected = { lag, numerator, denominator, moments };
+      }
+      if (!selected) continue;
+      const estimate = Math.max(0, selected.numerator / selected.denominator);
+      const residuals = selected.moments.map((moment) => moment.numerator - estimate * moment.denominator);
+      const residualMean = residuals.reduce((sum, value) => sum + value, 0) / residuals.length;
+      const variance = residuals.length > 1
+        ? residuals.reduce((sum, value) => sum + (value - residualMean) ** 2, 0) / (residuals.length - 1)
+        : Number.POSITIVE_INFINITY;
+      const denominatorMean = selected.denominator / residuals.length;
+      const standardError = denominatorMean > 0 ? Math.sqrt(variance / residuals.length) / denominatorMean : Number.POSITIVE_INFINITY;
+      if (Number.isFinite(estimate) && Number.isFinite(standardError)) {
+        this.state.estimates[modelKey] = {
+          estimate,
+          upper: estimate + 2 * standardError,
+          standardError,
+          samples: residuals.length,
+          lagMinutes: selected.lag * Math.max(1, at - this.state.samples.at(-2).at) / 60_000,
+          at,
+        };
+      }
+    }
+  }
+
+  observe(resources, localPredictedRate = 0, calibration = null, at = now()) {
+    const previousAt = this.state.lastObservedAt;
+    const elapsedHours = previousAt > 0 ? Math.max(0, at - previousAt) / 3600_000 : 0;
+    const localByProvider = typeof localPredictedRate === "object" && localPredictedRate !== null ? localPredictedRate : {};
+    const scalarPredicted = typeof localPredictedRate === "number" ? localPredictedRate : Object.values(localByProvider).reduce((sum, value) => sum + value, 0);
+    if (elapsedHours > 0) this.state.unconfirmed += scalarPredicted * elapsedHours;
+    const accountDeltas = {};
+    const resourceDeltas = {};
+    const advancedProviders = new Set();
+    let meterAdvanced = false;
+    for (const resource of resources) {
+      const previous = this.state.previous[resource.id];
+      let delta = 0;
+      if (previous && previous.resetAt === resource.resetAt && resource.used >= previous.used) {
+        delta = (resource.used - previous.used) * resource.weight;
+      }
+      if (delta > 1e-9) {
+        meterAdvanced = true;
+        advancedProviders.add(resource.provider);
+      }
+      resourceDeltas[`${resource.provider}:${resource.group}`] = delta;
+      accountDeltas[resource.provider] = (accountDeltas[resource.provider] ?? 0) + delta;
+      this.state.cumulative[resource.group] = (this.state.cumulative[resource.group] ?? 0) + delta;
+      this.state.previous[resource.id] = { used: resource.used, resetAt: resource.resetAt, at };
+    }
+    if (meterAdvanced) {
+      this.state.unconfirmed = 0;
+      this.state.sensorInconsistent = false;
+    }
+    for (const provider of new Set(resources.map((resource) => resource.provider))) {
+      this.state.accountShares[provider] ??= this.config.initialShare;
+      this.state.accountUnconfirmed[provider] ??= 0;
+      if (elapsedHours > 0) this.state.accountUnconfirmed[provider] += (localByProvider[provider] ?? 0) * elapsedHours;
+      if (advancedProviders.has(provider)) {
+        this.state.accountUnconfirmed[provider] = 0;
+        this.state.accountSensorInconsistent[provider] = false;
+      }
+    }
+    this.state.lastObservedAt = at;
+    const groups = [...new Set(resources.map((resource) => resource.group))];
+    const rates = {};
+    const sustainable = {};
+    for (const group of groups) {
+      this.state.history[group] ??= [];
+      this.state.history[group].push({ at, value: this.state.cumulative[group] ?? 0 });
+      const cutoff = at - this.config.slopeWindowHours * 2 * 3600_000;
+      this.state.history[group] = this.state.history[group].filter((point) => point.at >= cutoff);
+      const recent = this.state.history[group].filter((point) => point.at >= at - this.config.slopeWindowHours * 3600_000);
+      rates[group] = recent.length >= 4 ? Math.max(0, slope(recent) ?? 0) : null;
+      sustainable[group] = resources.filter((resource) => resource.group === group).reduce((sum, resource) => {
+        const hours = Math.max(1 / 60, (resource.resetAt - at) / 3600_000);
+        return sum + Math.max(0, resource.available) / hours;
+      }, 0);
+    }
+    const providerStatus = {};
+    for (const provider of new Set(resources.map((resource) => resource.provider))) {
+      const providerResources = resources.filter((resource) => resource.provider === provider);
+      const providerGroups = [...new Set(providerResources.map((resource) => resource.group))];
+      const providerRates = {};
+      const providerSustainable = {};
+      for (const group of providerGroups) {
+        const key = `${provider}:${group}`;
+        this.state.accountCumulative[key] = (this.state.accountCumulative[key] ?? 0) + (resourceDeltas[key] ?? 0);
+        this.state.accountHistory[key] ??= [];
+        this.state.accountHistory[key].push({ at, value: this.state.accountCumulative[key] });
+        const cutoff = at - this.config.slopeWindowHours * 2 * 3600_000;
+        this.state.accountHistory[key] = this.state.accountHistory[key].filter((point) => point.at >= cutoff);
+        const recent = this.state.accountHistory[key].filter((point) => point.at >= at - this.config.slopeWindowHours * 3600_000);
+        providerRates[group] = recent.length >= 4 ? Math.max(0, slope(recent) ?? 0) : null;
+        providerSustainable[group] = providerResources.filter((resource) => resource.group === group).reduce((sum, resource) => {
+          const hours = Math.max(1 / 60, (resource.resetAt - at) / 3600_000);
+          return sum + Math.max(0, resource.available) / hours;
+        }, 0);
+      }
+      providerStatus[provider] = {
+        rates: providerRates,
+        sustainable: providerSustainable,
+        sustainableRate: providerGroups.length ? Math.min(...providerGroups.map((group) => providerSustainable[group])) : 0,
       };
-    })
-    .filter((account) => account.baseline || account.remaining >= 0)
-    .sort((left, right) => Number(right.baseline) - Number(left.baseline) || right.remaining - left.remaining || left.provider.localeCompare(right.provider))[0] ?? null;
+    }
+    this.calibrate(accountDeltas, calibration, elapsedHours, at);
+    if (at - this.state.lastControlAt >= 20 * 60_000) {
+      this.state.lastControlAt = at;
+      for (const [provider, status] of Object.entries(providerStatus)) {
+        if (this.state.accountUnconfirmed[provider] >= this.config.consistencyLimitPercent) {
+          this.state.accountShares[provider] = 0;
+          this.state.accountSensorInconsistent[provider] = true;
+          continue;
+        }
+        const observed = Object.keys(status.rates).filter((group) => status.rates[group] !== null && status.rates[group] > this.config.rateFloor);
+        if (observed.length) {
+          const ratio = Math.min(...observed.map((group) => status.sustainable[group] / status.rates[group]));
+          this.state.accountShares[provider] = bounded(
+            this.state.accountShares[provider] * Math.exp(this.config.controlGain * Math.log(bounded(ratio, this.config.minimumRatio, this.config.maximumRatio))),
+            this.config.minimumShare,
+            1,
+          );
+        } else if ((localByProvider[provider] ?? 0) > 0) {
+          this.state.accountShares[provider] = Math.max(this.config.minimumShare, this.state.accountShares[provider] * this.config.blindDecay);
+        } else {
+          this.state.accountShares[provider] = Math.min(1, this.state.accountShares[provider] + this.config.additiveRamp);
+        }
+      }
+      if (this.state.unconfirmed >= this.config.consistencyLimitPercent) {
+        this.state.share = 0;
+        this.state.sensorInconsistent = true;
+      } else {
+        const observedGroups = groups.filter((group) => rates[group] !== null && rates[group] > this.config.rateFloor);
+        if (observedGroups.length) {
+          const ratio = Math.min(...observedGroups.map((group) => sustainable[group] / rates[group]));
+          this.state.share = bounded(
+            this.state.share * Math.exp(this.config.controlGain * Math.log(bounded(ratio, this.config.minimumRatio, this.config.maximumRatio))),
+            this.config.minimumShare,
+            1,
+          );
+        } else if (scalarPredicted > 0) {
+          this.state.share = Math.max(this.config.minimumShare, this.state.share * this.config.blindDecay);
+        } else {
+          this.state.share = Math.min(1, this.state.share + this.config.additiveRamp);
+        }
+      }
+    }
+    const sustainableRate = groups.length ? Math.min(...groups.map((group) => sustainable[group])) : 0;
+    const observedValues = groups.map((group) => rates[group]).filter(Number.isFinite);
+    const providerValues = Object.entries(providerStatus);
+    const weightedAllowance = providerValues.reduce((sum, [provider, status]) => sum + (this.state.accountShares[provider] ?? 0) * status.sustainableRate, 0);
+    const totalSustainable = providerValues.reduce((sum, [, status]) => sum + status.sustainableRate, 0);
+    this.status = {
+      share: totalSustainable > 0 ? weightedAllowance / totalSustainable : this.state.share,
+      sustainableRate,
+      observedRate: observedValues.length ? Math.max(...observedValues) : null,
+      rates,
+      sustainable,
+      unconfirmed: this.state.unconfirmed,
+      sensorInconsistent: this.state.sensorInconsistent,
+      estimates: this.state.estimates,
+      accounts: Object.fromEntries(providerValues.map(([provider, status]) => [provider, {
+        ...status,
+        share: this.state.accountShares[provider],
+        unconfirmed: this.state.accountUnconfirmed[provider],
+        sensorInconsistent: this.state.accountSensorInconsistent[provider] === true,
+      }])),
+    };
+    if (this.persist) atomicWrite(this.statePath, `${JSON.stringify(this.state)}\n`);
+    return this.status;
+  }
+
+  admits(localLoad, candidate, capacity, key, at = now()) {
+    if (this.state.sensorInconsistent || capacity <= 0 || candidate <= 0) return false;
+    const allowance = this.state.share * capacity;
+    if (localLoad + candidate <= allowance + 1e-9) return true;
+    if (localLoad > 1e-9 || allowance <= 0) return false;
+    return this.score(`admit:${key}`, Math.floor(at / (this.config.routingBlockMinutes * 60_000))) < Math.min(1, allowance / candidate);
+  }
+
+  totalAllowance(accounts) {
+    return accounts.reduce((sum, account) => sum +
+      (this.state.accountSensorInconsistent[account.provider] ? 0 : (this.state.accountShares[account.provider] ?? this.config.initialShare)) *
+      account.allowedBurnPercentPerHour, 0);
+  }
+
+  admitsAccounts(localLoad, candidate, accounts, key, at = now()) {
+    const allowance = this.totalAllowance(accounts);
+    if (allowance <= 0 || candidate <= 0) return false;
+    if (localLoad + candidate <= allowance + 1e-9) return true;
+    if (localLoad > 1e-9) return false;
+    return this.score(`admit-pool:${key}`, Math.floor(at / (this.config.routingBlockMinutes * 60_000))) < Math.min(1, allowance / candidate);
+  }
+
+  selectAccount(accounts, activeRates, modelKey, candidate, at = now()) {
+    const providers = accounts.map((account) => account.provider).sort();
+    const block = Math.floor(at / (this.config.routingBlockMinutes * 60_000));
+    const signs = this.pattern(providers, modelKey, block);
+    const live = new Map();
+    for (const assignment of activeRates) live.set(assignment.provider, (live.get(assignment.provider) ?? 0) + assignment.rate);
+    const selected = accounts
+      .filter((account) => account.allowedBurnPercentPerHour > 0 && !this.state.accountSensorInconsistent[account.provider])
+      .map((account) => ({
+        account,
+        live: live.get(account.provider) ?? 0,
+        sign: signs.get(account.provider) ?? 0,
+      }))
+      .sort((left, right) => {
+        const leftAllowance = (this.state.accountShares[left.account.provider] ?? this.config.initialShare) * left.account.allowedBurnPercentPerHour;
+        const rightAllowance = (this.state.accountShares[right.account.provider] ?? this.config.initialShare) * right.account.allowedBurnPercentPerHour;
+        const leftPressure = left.live / Math.max(candidate, leftAllowance) - this.config.routingExcitation * left.sign;
+        const rightPressure = right.live / Math.max(candidate, rightAllowance) - this.config.routingExcitation * right.sign;
+        return leftPressure - rightPressure || left.account.provider.localeCompare(right.account.provider);
+      })[0] ?? null;
+    return selected ? { ...selected, block } : null;
+  }
 }
 
 export function isEligibleCodexPlan(planType) {
@@ -520,13 +861,15 @@ export function anthropicWeeklyCapacity(profile) {
 }
 
 export class AnthropicGovernor {
-  constructor(config, { modelRuntime = null, authPath = AUTH_PATH, fetcher = fetch, readCredential = readStoredCredential, cachePath = ANTHROPIC_USAGE_CACHE_PATH } = {}) {
+  constructor(config, { modelRuntime = null, authPath = AUTH_PATH, fetcher = fetch, readCredential = readStoredCredential, cachePath = ANTHROPIC_USAGE_CACHE_PATH, feedback = null } = {}) {
     this.config = config;
     this.modelRuntime = modelRuntime;
     this.authPath = authPath;
     this.fetcher = fetcher;
     this.readCredential = readCredential;
     this.cachePath = cachePath;
+    this.feedback = feedback ?? new DistributedQuotaFeedback(config, ANTHROPIC_GOVERNOR_STATE_PATH);
+    this.pendingAssignments = [];
     this.snapshot = null;
     this.lastGood = new Map();
     this.cooldowns = new Map();
@@ -585,7 +928,8 @@ export class AnthropicGovernor {
     }
   }
 
-  async refresh() {
+  async refresh(activeAssignments = null) {
+    if (activeAssignments) this.pendingAssignments = activeAssignments;
     if (this.snapshot && now() < this.snapshot.expiresAt) return this.snapshot;
     if (this.refreshing) return this.refreshing;
     this.refreshing = this.fetch().finally(() => { this.refreshing = null; });
@@ -612,12 +956,42 @@ export class AnthropicGovernor {
         errors.push({ provider, error: result.error, recoveredFromCache: false });
       }
     }
+    const target = this.config.plan.distributed.targetPercent;
+    const resources = accounts.flatMap((account) => [
+      {
+        id: `five:${account.provider}`,
+        provider: account.provider,
+        group: "fiveHour",
+        used: account.windows.fiveHour.utilization,
+        resetAt: account.windows.fiveHour.resetsAt,
+        weight: 1,
+        available: Math.max(0, target - account.windows.fiveHour.utilization),
+      },
+      {
+        id: `weekly:${account.provider}`,
+        provider: account.provider,
+        group: "weekly",
+        used: account.windows.sharedWeekly.utilization,
+        resetAt: account.windows.sharedWeekly.resetsAt,
+        weight: account.weeklyCapacityWeight,
+        available: account.weeklyCapacityWeight * Math.max(0,
+          target - account.windows.sharedWeekly.utilization - (100 - account.windows.fableWeekly.utilization) / 2),
+      },
+    ]);
+    const activeByProvider = Object.fromEntries(accounts.map((account) => [account.provider, 0]));
+    for (const item of this.pendingAssignments.filter((assignment) => providerFamily(assignment.provider) === ANTHROPIC_PROVIDER)) {
+      activeByProvider[item.provider] = (activeByProvider[item.provider] ?? 0) + 1;
+    }
+    const predictedRate = this.config.plan.anthropic.predictedPercentPerActiveHour ?? DEFAULT_CONFIG.plan.anthropic.predictedPercentPerActiveHour;
+    const predicted = Object.fromEntries(Object.entries(activeByProvider).map(([provider, active]) => [provider, active * predictedRate]));
+    const distributed = this.feedback.observe(resources, predicted, null, fetchedAt);
     this.snapshot = {
       at: fetchedAt,
       expiresAt: fetchedAt + this.config.plan.anthropic.pollSeconds * 1000,
       configured: configured.length,
       healthy: accounts.length,
       withHeadroom: accounts.filter(anthropicOpusHasHeadroom).length,
+      distributed,
       accounts,
       errors,
     };
@@ -631,29 +1005,43 @@ export class AnthropicGovernor {
   }
 
   async allows(variant, activeAssignments, snapshot = null) {
-    const usage = snapshot ?? await this.refresh();
+    this.pendingAssignments = activeAssignments;
+    const usage = snapshot ?? await this.refresh(activeAssignments);
     const activeByProvider = new Map();
     for (const item of activeAssignments) {
       if (providerFamily(item.provider) !== ANTHROPIC_PROVIDER) continue;
       activeByProvider.set(item.provider, (activeByProvider.get(item.provider) ?? 0) + 1);
     }
     const limit = this.config.plan.anthropic.maxActivePerAccount;
-    const selected = usage.accounts
-      .filter((account) => anthropicOpusHasHeadroom(account) && (this.cooldowns.get(account.provider) ?? 0) <= now())
-      .map((account) => ({ account, active: activeByProvider.get(account.provider) ?? 0 }))
-      .filter((item) => item.active < limit)
-      .sort((left, right) => left.active - right.active ||
-        Math.max(...Object.values(left.account.windows).filter(Boolean).map((window) => window.utilization)) -
-        Math.max(...Object.values(right.account.windows).filter(Boolean).map((window) => window.utilization)) ||
-        left.account.provider.localeCompare(right.account.provider))[0] ?? null;
+    const eligible = usage.accounts
+      .filter((account) => anthropicOpusHasHeadroom(account) && (this.cooldowns.get(account.provider) ?? 0) <= now() &&
+        (activeByProvider.get(account.provider) ?? 0) < limit);
+    const localActive = [...activeByProvider.values()].reduce((sum, value) => sum + value, 0);
+    const syntheticAccounts = usage.accounts.filter(anthropicOpusHasHeadroom).map((account) => ({
+      ...account,
+      allowedBurnPercentPerHour: (usage.distributed?.accounts?.[account.provider]?.sustainableRate ?? 1) > 0 ? 1 : 0,
+    }));
+    const admitted = this.feedback.admitsAccounts(localActive, 1, syntheticAccounts, runModelKey(variant));
+    const syntheticActive = [...activeByProvider.entries()].map(([provider, active]) => ({ provider, rate: active }));
+    const eligibleProviders = new Set(eligible.map((account) => account.provider));
+    const routed = admitted ? this.feedback.selectAccount(
+      syntheticAccounts.filter((account) => eligibleProviders.has(account.provider)),
+      syntheticActive,
+      runModelKey(variant),
+      1,
+    ) : null;
+    const selected = routed ? { account: routed.account, active: activeByProvider.get(routed.account.provider) ?? 0, ...routed } : null;
+    const distributed = usage.distributed ?? this.feedback.status;
     return {
       ok: selected !== null,
       provider: selected?.account.provider ?? null,
       model: variant.model,
       thinking: variant.thinking,
+      instrumentBlock: selected?.block ?? null,
+      instrumentSign: selected?.sign ?? null,
       detail: selected
-        ? `Anthropic account=${selected.account.provider} active=${selected.active} healthy=${usage.healthy} headroom=${usage.withHeadroom}`
-        : `Anthropic accounts full: healthy=${usage.healthy} headroom=${usage.withHeadroom}`,
+        ? `Anthropic account=${selected.account.provider} active=${selected.active} share=${distributed.share.toFixed(3)} healthy=${usage.healthy} headroom=${usage.withHeadroom}`
+        : `Anthropic distributed gate closed: local=${localActive} share=${distributed.share.toFixed(3)} healthy=${usage.healthy} headroom=${usage.withHeadroom}`,
     };
   }
 }
@@ -668,7 +1056,7 @@ export function planWindowBurnPerHour(window, at = now()) {
 }
 
 export class PlanGovernor {
-  constructor(config, { modelRuntime = null, authPath = AUTH_PATH, lifecyclePath = MULTI_PASS_PATH, fetcher = fetch, readCredential = readStoredCredential, anthropic = null } = {}) {
+  constructor(config, { modelRuntime = null, authPath = AUTH_PATH, lifecyclePath = MULTI_PASS_PATH, fetcher = fetch, readCredential = readStoredCredential, anthropic = null, feedback = null } = {}) {
     this.config = config;
     this.modelRuntime = modelRuntime;
     this.authPath = authPath;
@@ -677,6 +1065,8 @@ export class PlanGovernor {
     this.readCredential = readCredential;
     this.snapshot = null;
     this.refreshing = null;
+    this.pendingAssignments = [];
+    this.feedback = feedback ?? new DistributedQuotaFeedback(config, CODEX_GOVERNOR_STATE_PATH);
     this.anthropic = anthropic ?? new AnthropicGovernor(config, { modelRuntime, authPath, fetcher, readCredential });
   }
 
@@ -703,7 +1093,8 @@ export class PlanGovernor {
     });
   }
 
-  async refresh() {
+  async refresh(activeAssignments = null) {
+    if (activeAssignments) this.pendingAssignments = activeAssignments;
     if (this.snapshot && now() < this.snapshot.expiresAt) return this.snapshot;
     if (this.refreshing) return this.refreshing;
     this.refreshing = this.fetch().finally(() => { this.refreshing = null; });
@@ -739,15 +1130,42 @@ export class PlanGovernor {
         const body = await response.json();
         if (!isEligibleCodexPlan(body.plan_type)) return null;
         const rate = body.rate_limit ?? {};
-        const windows = [rate.primary_window, rate.secondary_window]
-          .map((window) => planWindowBurnPerHour(window))
-          .filter((value) => value !== null);
+        const windows = [rate.primary_window, rate.secondary_window].filter(Boolean).map((window) => ({
+          used: Number(window.used_percent),
+          resetAt: Number(window.reset_at) * 1000,
+          durationSeconds: Number(window.limit_window_seconds),
+          allowedBurnPercentPerHour: planWindowBurnPerHour(window, fetchedAt),
+        })).filter((window) => Number.isFinite(window.used) && Number.isFinite(window.resetAt) && window.allowedBurnPercentPerHour !== null);
         if (!windows.length) return null;
-        return { provider, planType: body.plan_type.trim().toLowerCase(), allowedBurnPercentPerHour: Math.min(...windows) };
+        const binding = [...windows].sort((left, right) => left.allowedBurnPercentPerHour - right.allowedBurnPercentPerHour)[0];
+        const hours = Math.max(1 / 60, (binding.resetAt - fetchedAt) / 3600_000);
+        const target = this.config.plan.distributed?.targetPercent ?? DEFAULT_CONFIG.plan.distributed.targetPercent;
+        const allowedBurnPercentPerHour = Math.max(0, target - binding.used) / hours;
+        return { provider, planType: body.plan_type.trim().toLowerCase(), allowedBurnPercentPerHour, binding, windows };
       } catch { return null; }
     }));
     const accounts = results.filter((value) => value !== null);
     if (!accounts.length) fail("plan governor could not read any Codex account");
+    const localAssignments = this.pendingAssignments.filter((item) => providerFamily(item.provider) === CODEX_PROVIDER);
+    const localPredictedRate = Object.fromEntries(accounts.map((account) => [account.provider, 0]));
+    for (const item of localAssignments) {
+      localPredictedRate[item.provider] = (localPredictedRate[item.provider] ?? 0) + this.modelRate(item.model ? item : item.task);
+    }
+    const resources = accounts.map((account) => ({
+      id: account.provider,
+      provider: account.provider,
+      group: "codex",
+      used: account.binding.used,
+      resetAt: account.binding.resetAt,
+      weight: 1,
+      available: Math.max(0, (this.config.plan.distributed?.targetPercent ?? DEFAULT_CONFIG.plan.distributed.targetPercent) - account.binding.used),
+    }));
+    const distributed = this.feedback.observe(resources, localPredictedRate, {
+      accounts,
+      assignments: localAssignments,
+      priors: this.config.plan.modelBurnPercentPerHour,
+      rate: (value) => this.config.plan.modelBurnPercentPerHour[runModelKey(value)] ?? 0,
+    }, fetchedAt);
     const snapshotAt = now();
     this.snapshot = {
       at: snapshotAt,
@@ -758,33 +1176,39 @@ export class PlanGovernor {
       retired: lifecycle.retiredProviders.length,
       retiredProviders: lifecycle.retiredProviders,
       allowedBurnPercentPerHour: accounts.reduce((sum, account) => sum + account.allowedBurnPercentPerHour, 0),
+      distributed,
       accounts,
     };
     return this.snapshot;
   }
 
   modelRate(value) {
-    const rate = this.config.plan.modelBurnPercentPerHour[runModelKey(value)];
-    if (!(Number.isFinite(rate) && rate >= 0)) fail(`no plan burn rate configured for ${runModelKey(value)}`);
-    return rate;
+    const key = runModelKey(value);
+    const prior = this.config.plan.modelBurnPercentPerHour[key];
+    if (!(Number.isFinite(prior) && prior >= 0)) fail(`no plan burn rate configured for ${key}`);
+    return this.feedback.estimate(key, prior);
   }
 
   async allowsCodex(variant, activeAssignments, plan = null) {
-    const snapshot = plan ?? await this.refresh();
+    this.pendingAssignments = activeAssignments;
+    const snapshot = plan ?? await this.refresh(activeAssignments);
     const candidate = this.modelRate(variant);
     const codexAssignments = activeAssignments
       .filter((item) => providerFamily(item.provider) === CODEX_PROVIDER)
       .map((item) => ({ provider: item.provider, rate: this.modelRate(item.model ? item : item.task) }));
-    const selected = choosePlanProvider(snapshot.accounts, codexAssignments, candidate);
     const live = codexAssignments.reduce((sum, item) => sum + item.rate, 0);
+    const admitted = this.feedback.admitsAccounts(live, candidate, snapshot.accounts, runModelKey(variant));
+    const selected = admitted ? this.feedback.selectAccount(snapshot.accounts, codexAssignments, runModelKey(variant), candidate) : null;
     return {
       ok: selected !== null,
-      provider: selected?.provider ?? null,
+      provider: selected?.account.provider ?? null,
       model: variant.model,
       thinking: variant.thinking,
+      instrumentBlock: selected?.block ?? null,
+      instrumentSign: selected?.sign ?? null,
       detail: selected
-        ? `Codex account=${selected.provider} live=${selected.live.toFixed(3)} candidate=${candidate.toFixed(3)} allowed=${selected.allowed.toFixed(3)}`
-        : `Codex accounts full: fleet live=${live.toFixed(3)} candidate=${candidate.toFixed(3)} pool allowed=${snapshot.allowedBurnPercentPerHour.toFixed(3)}`,
+        ? `Codex account=${selected.account.provider} local=${live.toFixed(3)} candidate=${candidate.toFixed(3)} share=${snapshot.distributed.share.toFixed(3)} sustainable=${snapshot.distributed.sustainableRate.toFixed(3)}`
+        : `Codex distributed gate closed: local=${live.toFixed(3)} candidate=${candidate.toFixed(3)} share=${snapshot.distributed.share.toFixed(3)} sustainable=${snapshot.distributed.sustainableRate.toFixed(3)} observed=${snapshot.distributed.observedRate?.toFixed(3) ?? "unknown"}`,
     };
   }
 
@@ -816,7 +1240,7 @@ export class PlanGovernor {
       }
       return this.allowsCodex({ model: task.model, thinking: task.thinking }, activeAssignments);
     }
-    const [codex, anthropic] = await Promise.all([this.refresh(), this.anthropic.refresh()]);
+    const [codex, anthropic] = await Promise.all([this.refresh(activeAssignments), this.anthropic.refresh(activeAssignments)]);
     const variant = chooseMixedVariant(task, mix, activeAssignments, codex.healthy, anthropic.withHeadroom);
     if (variant.family === ANTHROPIC_PROVIDER) {
       const governed = await this.anthropic.allows(variant, activeAssignments, anthropic);
@@ -1196,7 +1620,7 @@ export class Controller {
     const tasks = taskRows(this.db);
     try { await this.refreshWorkChecks(tasks); }
     catch (error) { this.controllerError(String(error.stack ?? error)); }
-    const activeAssignments = [...this.active.values()].map(({ task, provider, model, thinking }) => ({ task, provider, model, thinking }));
+    const activeAssignments = [...this.active.values()].map(({ task, provider, model, thinking, instrumentBlock, instrumentSign }) => ({ task, provider, model, thinking, instrumentBlock, instrumentSign }));
     const currentCpu = cpuTotals();
     const currentCpuPercent = cpuPercent(this.previousCpu, currentCpu);
     this.previousCpu = currentCpu;
@@ -1242,7 +1666,7 @@ export class Controller {
           await this.launch(task, governed);
         }
         task.active = Number(task.active) + 1;
-        activeAssignments.push({ task, provider: governed.provider, model: governed.model, thinking: governed.thinking });
+        activeAssignments.push({ task, provider: governed.provider, model: governed.model, thinking: governed.thinking, instrumentBlock: governed.instrumentBlock, instrumentSign: governed.instrumentSign });
         launched = true;
         break;
       }
@@ -1469,7 +1893,8 @@ async function main(argv = process.argv.slice(2)) {
       memoryPercent: Number(((memory.total - memory.available) * 100 / memory.total).toFixed(1)),
       maxMemoryPercent: config.maxMemoryPercent,
     };
-    const snapshot = await new PlanGovernor(config).refresh();
+    const codexFeedback = new DistributedQuotaFeedback(config, CODEX_GOVERNOR_STATE_PATH, false);
+    const snapshot = await new PlanGovernor(config, { feedback: codexFeedback }).refresh();
     const plan = {
       at: snapshot.at,
       healthyAccounts: snapshot.healthy,
@@ -1478,13 +1903,22 @@ async function main(argv = process.argv.slice(2)) {
       retiredAccounts: snapshot.retired,
       retiredProviders: snapshot.retiredProviders,
       allowedBurnPercentPerHour: snapshot.allowedBurnPercentPerHour,
+      distributed: snapshot.distributed,
+      accounts: snapshot.accounts.map((account) => ({
+        provider: account.provider,
+        usedPercent: account.binding.used,
+        resetsAt: account.binding.resetAt,
+        allowedBurnPercentPerHour: account.allowedBurnPercentPerHour,
+      })),
     };
-    const anthropicSnapshot = await new AnthropicGovernor(config).refresh();
+    const anthropicFeedback = new DistributedQuotaFeedback(config, ANTHROPIC_GOVERNOR_STATE_PATH, false);
+    const anthropicSnapshot = await new AnthropicGovernor(config, { feedback: anthropicFeedback }).refresh();
     const anthropic = {
       at: anthropicSnapshot.at,
       healthyAccounts: anthropicSnapshot.healthy,
       accountsWithHeadroom: anthropicSnapshot.withHeadroom,
       configuredAccounts: anthropicSnapshot.configured,
+      distributed: anthropicSnapshot.distributed,
       errors: anthropicSnapshot.errors,
       accounts: anthropicSnapshot.accounts.map((account) => ({
         provider: account.provider,

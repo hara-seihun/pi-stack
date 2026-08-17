@@ -8,7 +8,7 @@ import test from "node:test";
 
 const temporary = fs.mkdtempSync(path.join(os.tmpdir(), "agent-orchestrator-test-"));
 process.env.AGENT_ORCHESTRATOR_DATA = temporary;
-const { AnthropicGovernor, anthropicOpusHasHeadroom, anthropicWeeklyCapacity, cancelTask, chooseMixedVariant, choosePlanProvider, chooseTask, codexSubscriptionLifecycle, completionToolResult, Controller, cpuPercent, DISPATCH_NO_WORK_TTL_MS, dispatchedTaskPrompt, evaluateDispatch, evaluateWorkCheck, insertRun, isolateTaskShell, isEligibleCodexPlan, launchBatchSize, loadConfig, nextIncompleteState, openDb, orchestratedTaskPrompt, parseAnthropicUsage, PlanGovernor, planWindowBurnPerHour, proEntitlementSnapshot, proLaunchAvailability, rankTasks, resourceSlots, setTaskOptions, shouldAdvanceBackoff, taskSettings, TOOL_SHELL, validateCompletion, validateModelPolicy, WORK_CHECK_TTL_MS, workCheckStale, workReady } = await import("./orchestrator.mjs");
+const { AnthropicGovernor, anthropicOpusHasHeadroom, anthropicWeeklyCapacity, cancelTask, chooseMixedVariant, chooseTask, codexSubscriptionLifecycle, completionToolResult, Controller, cpuPercent, DISPATCH_NO_WORK_TTL_MS, dispatchedTaskPrompt, DistributedQuotaFeedback, evaluateDispatch, evaluateWorkCheck, insertRun, isolateTaskShell, isEligibleCodexPlan, launchBatchSize, loadConfig, nextIncompleteState, openDb, orchestratedTaskPrompt, parseAnthropicUsage, PlanGovernor, planWindowBurnPerHour, proEntitlementSnapshot, proLaunchAvailability, rankTasks, resourceSlots, setTaskOptions, shouldAdvanceBackoff, taskSettings, TOOL_SHELL, validateCompletion, validateModelPolicy, WORK_CHECK_TTL_MS, workCheckStale, workReady } = await import("./orchestrator.mjs");
 
 test.after(() => fs.rmSync(temporary, { recursive: true, force: true }));
 
@@ -541,8 +541,10 @@ test("Anthropic Opus admission preserves enough shared weekly capacity for Fable
 
   const config = loadConfig();
   const governor = new AnthropicGovernor(config);
+  governor.feedback.state.share = 1;
+  governor.feedback.state.accountShares["anthropic-2"] = 1;
   governor.snapshot = {
-    at, expiresAt: at + 1000, configured: 2, healthy: 2, withHeadroom: 1,
+    at, expiresAt: at + 1000, configured: 2, healthy: 2, withHeadroom: 1, distributed: { share: 1 },
     accounts: [
       account("anthropic", 0, 50, 0),
       account("anthropic-2", 0, 50, 100),
@@ -721,41 +723,38 @@ test("the service locks governor-assigned providers against hidden Multi-Pass ro
   assert.match(multiPass, /PI_MULTI_PASS_LOCK_ASSIGNED_PROVIDER === "1"/);
 });
 
-test("Codex plan governor keeps one baseline worker on every healthy account", () => {
-  const selected = choosePlanProvider([
-    { provider: "openai-codex", allowedBurnPercentPerHour: 0.448 },
-  ], [], 0.45);
-  assert.equal(selected.provider, "openai-codex");
-  assert.equal(selected.baseline, true);
-  assert.ok(selected.remaining < 0);
-  assert.equal(choosePlanProvider([
-    { provider: "openai-codex", allowedBurnPercentPerHour: 0 },
-  ], [], 0.45), null);
-  assert.equal(choosePlanProvider([
-    { provider: "openai-codex", allowedBurnPercentPerHour: 0.448 },
-  ], [{ provider: "openai-codex", rate: 0.45 }], 0.45), null);
+test("distributed quota feedback has no unconditional per-machine baseline", () => {
+  const feedback = new DistributedQuotaFeedback(loadConfig(), path.join(temporary, "distributed-admission.json"));
+  feedback.state.share = 0.5;
+  assert.equal(feedback.admits(0, 0.58, 2, "sol", 0), true);
+  assert.equal(feedback.admits(0.58, 0.58, 2, "sol", 0), false);
+  assert.equal(feedback.admits(0, 0.58, 0, "sol", 0), false);
 });
 
-test("Codex plan governor assigns a concrete account without exceeding it", () => {
+test("private balanced routing instruments assign a concrete healthy account", () => {
+  const feedback = new DistributedQuotaFeedback(loadConfig(), path.join(temporary, "distributed-routing.json"));
+  feedback.state.share = 0.5;
+  feedback.state.seed = "local-private-seed";
   const accounts = [
     { provider: "openai-codex", allowedBurnPercentPerHour: 0 },
     { provider: "openai-codex-2", allowedBurnPercentPerHour: 1.2 },
     { provider: "openai-codex-3", allowedBurnPercentPerHour: 2.0 },
   ];
-  const selected = choosePlanProvider(accounts, [
-    { provider: "openai-codex-2", rate: 0.58 },
-    { provider: "openai-codex-3", rate: 0.58 },
-  ], 0.58);
-  assert.equal(selected.provider, "openai-codex-3");
-  assert.equal(selected.live, 0.58);
-  assert.equal(selected.allowed, 2.0);
-  assert.ok(Math.abs(selected.remaining - 0.84) < 1e-12);
-  assert.equal(
-    choosePlanProvider(accounts, [
-      { provider: "openai-codex-2", rate: 0.58 },
-      { provider: "openai-codex-2", rate: 0.58 },
-      { provider: "openai-codex-3", rate: 1.74 },
-    ], 0.58),
-    null,
-  );
+  const selected = feedback.selectAccount(accounts, [{ provider: "openai-codex-2", rate: 0.58 }], "openai-codex/gpt-5.6-sol:xhigh", 0.58, 0);
+  assert.ok(["openai-codex-2", "openai-codex-3"].includes(selected.account.provider));
+  assert.ok([-1, 0, 1].includes(selected.sign));
+  assert.equal(Number.isInteger(selected.block), true);
+});
+
+test("a frozen provider meter trips and a later advance clears the consistency circuit", () => {
+  const config = loadConfig();
+  const feedback = new DistributedQuotaFeedback(config, path.join(temporary, "distributed-circuit.json"));
+  const start = 1_000_000;
+  const resetAt = start + 168 * 3600_000;
+  const resource = (used) => [{ id: "account", provider: "account", group: "weekly", used, resetAt, weight: 1, available: 92 - used }];
+  feedback.observe(resource(0), 6, null, start);
+  feedback.observe(resource(0), 6, null, start + 21 * 60_000);
+  assert.equal(feedback.status.sensorInconsistent, true);
+  feedback.observe(resource(1), 0, null, start + 42 * 60_000);
+  assert.equal(feedback.status.sensorInconsistent, false);
 });

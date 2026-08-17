@@ -1,14 +1,18 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import {
+  ANTHROPIC_SCENARIOS,
   CALIBRATION_SCENARIOS,
   SCENARIOS,
+  anthropicWeeklyMeters,
+  runAnthropicScenario,
   runRoutingCalibration,
   runScenario,
 } from "./distributed-governor-simulator.mjs";
 
 const scenario = (prefix) => SCENARIOS.find((item) => item.name.startsWith(prefix));
 const calibration = (prefix) => CALIBRATION_SCENARIOS.find((item) => item.name.startsWith(prefix));
+const anthropic = (prefix) => ANTHROPIC_SCENARIOS.find((item) => item.name.startsWith(prefix));
 
 test("shared-meter control stays within the paced window for twenty unknown peers", () => {
   const result = runScenario(scenario("03"));
@@ -33,6 +37,12 @@ test("private instruments recover a bounded unknown reporting delay", () => {
   assert.ok(result.p90AttributionError < 0.2);
 });
 
+test("private instruments remain identifiable with overlapping account subsets", () => {
+  const result = runRoutingCalibration(calibration("C13"));
+  assert.ok(result.p90AttributionError < 0.2);
+  assert.ok(result.p90CoefficientError < 0.35);
+});
+
 test("ordinary hidden consumption is noise rather than attribution bias", () => {
   const result = runRoutingCalibration(calibration("C7"));
   assert.ok(result.p90AttributionError < 0.2);
@@ -54,6 +64,18 @@ test("cloned identities and an anti-mimicking consumer are not identifiable", ()
   const antiMimic = runRoutingCalibration(calibration("C10"));
   assert.ok(cloned.p90AttributionError > 1);
   assert.ok(antiMimic.p90AttributionError > 0.9);
+});
+
+test("Anthropic meters preserve the coupled Fable and Opus limits", () => {
+  assert.deepEqual(anthropicWeeklyMeters(0, 50), { sharedPercent: 50, fablePercent: 100 });
+  assert.deepEqual(anthropicWeeklyMeters(100, 0), { sharedPercent: 100, fablePercent: 0 });
+  const ordinary = runAnthropicScenario(anthropic("A1"));
+  const bursty = runAnthropicScenario(anthropic("A2"));
+  const manyHosts = runAnthropicScenario(anthropic("A3"));
+  assert.ok(ordinary.safe);
+  assert.ok(bursty.safe);
+  assert.ok(manyHosts.safe);
+  assert.ok(Math.min(ordinary.minimumReserve, bursty.minimumReserve, manyHosts.minimumReserve) >= 0);
 });
 
 test("simulation is reproducible from its declared seed", () => {
