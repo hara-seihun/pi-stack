@@ -1715,7 +1715,7 @@ export class Controller {
           this.db.prepare("UPDATE quota_lease SET state='available',task_id=?,run_id=NULL,expires_at=max(expires_at,?),heartbeat_at=? WHERE id=?")
             .run(task.id, restartUntil, now(), lease.id);
         } else if (status === "incomplete" && productive && lease.expires_at > now()) {
-          this.db.prepare("UPDATE quota_lease SET state='available',task_id=?,run_id=NULL,heartbeat_at=? WHERE id=?")
+          this.db.prepare("UPDATE quota_lease SET state='available',task_id=?,provider=NULL,run_id=NULL,heartbeat_at=? WHERE id=?")
             .run(task.id, now(), lease.id);
         } else {
           this.db.prepare("DELETE FROM quota_lease WHERE id=?").run(lease.id);

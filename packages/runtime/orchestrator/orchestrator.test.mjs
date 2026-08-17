@@ -93,7 +93,7 @@ test("quota leases survive controller restarts and productive session boundaries
     leaseId, provider: "openai-codex-3", model: task.model, thinking: task.thinking,
   }, "run-2", at + 1);
   controller.finish(task, "run-2", "incomplete", "productive", [], null, true);
-  assert.equal(db.prepare("SELECT state FROM quota_lease WHERE id=?").get(leaseId).state, "available");
+  assert.deepEqual({ ...db.prepare("SELECT state,provider FROM quota_lease WHERE id=?").get(leaseId) }, { state: "available", provider: null });
   db.close();
 });
 
