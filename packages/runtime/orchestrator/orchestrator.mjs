@@ -48,6 +48,8 @@ const CODEX_GOVERNOR_STATE_PATH = path.join(DATA, "codex-distributed-governor.js
 const ANTHROPIC_GOVERNOR_STATE_PATH = path.join(DATA, "anthropic-distributed-governor.json");
 export const TOOL_SHELL = fileURLToPath(new URL("./tool-shell", import.meta.url));
 const TICK_MS = 5000;
+const DISTRIBUTED_ALLOCATION_VERSION = 1;
+const DISTRIBUTED_CALIBRATION_VERSION = 1;
 const execFileAsync = promisify(execFile);
 
 // Per-account feedback and causal attribution are invalid if Multi-Pass rotates
@@ -88,7 +90,9 @@ const DEFAULT_CONFIG = {
       routingExcitation: 0.35,
       routingBlockMinutes: 5,
       calibrationMinSamples: 2000,
-      calibrationMinHours: 120
+      calibrationMinHours: 120,
+      leaseHours: 2,
+      restartLeaseMinutes: 10
     },
     anthropic: {
       pollSeconds: 300,
@@ -128,14 +132,14 @@ export function loadConfig() {
   if (!config.plan.modelMixes || typeof config.plan.modelMixes !== "object") config.plan.modelMixes = {};
   config.plan.distributed = { ...DEFAULT_CONFIG.plan.distributed, ...config.plan.distributed };
   const distributed = config.plan.distributed;
-  for (const key of ["targetPercent", "slopeWindowHours", "safetyDelayHours", "initialShare", "minimumShare", "blindDecay", "controlGain", "additiveRamp", "minimumRatio", "maximumRatio", "rateFloor", "consistencyLimitPercent", "routingExcitation", "routingBlockMinutes", "calibrationMinSamples", "calibrationMinHours"]) {
+  for (const key of ["targetPercent", "slopeWindowHours", "safetyDelayHours", "initialShare", "minimumShare", "blindDecay", "controlGain", "additiveRamp", "minimumRatio", "maximumRatio", "rateFloor", "consistencyLimitPercent", "routingExcitation", "routingBlockMinutes", "calibrationMinSamples", "calibrationMinHours", "leaseHours", "restartLeaseMinutes"]) {
     if (!(Number.isFinite(distributed[key]) && distributed[key] >= 0)) fail(`invalid config.plan.distributed.${key}`);
   }
   if (distributed.targetPercent <= 0 || distributed.targetPercent > 100 || distributed.initialShare > 1 ||
       distributed.minimumShare > distributed.initialShare || distributed.blindDecay > 1 || distributed.routingExcitation > 1 ||
       distributed.minimumRatio > distributed.maximumRatio || distributed.routingBlockMinutes <= 0 ||
       !Number.isInteger(distributed.calibrationMinSamples) || distributed.calibrationMinSamples < 100 ||
-      distributed.calibrationMinHours < 24) {
+      distributed.calibrationMinHours < 24 || distributed.leaseHours <= 0 || distributed.restartLeaseMinutes <= 0) {
     fail("invalid config.plan.distributed bounds");
   }
   const anthropic = config.plan.anthropic;
@@ -234,6 +238,23 @@ export function openDb(file = DB_PATH) {
       updated_at INTEGER NOT NULL DEFAULT (CAST((julianday('now') - 2440587.5) * 86400000 AS INTEGER))
     );
     CREATE INDEX IF NOT EXISTS run_task_status ON run(task_id,status);
+    CREATE TABLE IF NOT EXISTS quota_lease (
+      id TEXT PRIMARY KEY,
+      task_id TEXT REFERENCES task(id),
+      provider TEXT,
+      model TEXT NOT NULL,
+      thinking TEXT NOT NULL,
+      state TEXT NOT NULL CHECK(state IN ('available','active')),
+      run_id TEXT,
+      source TEXT NOT NULL CHECK(source IN ('governor','operator')),
+      issued_at INTEGER NOT NULL,
+      expires_at INTEGER NOT NULL,
+      heartbeat_at INTEGER NOT NULL,
+      created_at INTEGER NOT NULL DEFAULT (CAST((julianday('now') - 2440587.5) * 86400000 AS INTEGER)),
+      updated_at INTEGER NOT NULL DEFAULT (CAST((julianday('now') - 2440587.5) * 86400000 AS INTEGER))
+    );
+    CREATE UNIQUE INDEX IF NOT EXISTS quota_lease_run ON quota_lease(run_id) WHERE run_id IS NOT NULL;
+    CREATE INDEX IF NOT EXISTS quota_lease_availability ON quota_lease(state,expires_at,task_id);
     CREATE TABLE IF NOT EXISTS event (
       id INTEGER PRIMARY KEY,
       at INTEGER NOT NULL,
@@ -285,7 +306,7 @@ export function openDb(file = DB_PATH) {
       thinking=coalesce(thinking,(SELECT thinking FROM task WHERE task.id=run.task_id))
     WHERE model IS NULL OR thinking IS NULL;
   `);
-  for (const table of ["task", "run", "event"]) ensureTableTimestamps(db, table);
+  for (const table of ["task", "run", "quota_lease", "event"]) ensureTableTimestamps(db, table);
   return db;
 }
 
@@ -387,6 +408,11 @@ function providerFamily(provider) {
   return provider;
 }
 function taskMix(config, task) { return config.plan.modelMixes[runModelKey(task)] ?? null; }
+export function taskSupportsAssignment(config, task, assignment) {
+  if (runModelKey(task) === runModelKey(assignment)) return true;
+  const mix = taskMix(config, task);
+  return mix !== null && `${mix.alternateModel}:${mix.alternateThinking}` === runModelKey(assignment);
+}
 export function chooseIndependentAssignment(primary, alternate) {
   if (primary.ok && alternate.ok) {
     return Number(primary.pressure) <= Number(alternate.pressure) ? primary : alternate;
@@ -447,7 +473,9 @@ export class DistributedQuotaFeedback {
     this.statePath = statePath;
     this.persist = persist;
     this.state = {
-      version: 2,
+      version: 3,
+      allocationVersion: DISTRIBUTED_ALLOCATION_VERSION,
+      calibrationVersion: DISTRIBUTED_CALIBRATION_VERSION,
       seed: randomBytes(16).toString("hex"),
       share: this.config.initialShare,
       previous: {},
@@ -467,8 +495,17 @@ export class DistributedQuotaFeedback {
     };
     try {
       const parsed = JSON.parse(fs.readFileSync(statePath, "utf8"));
-      if (parsed?.version === 2 && typeof parsed.seed === "string" && Number.isFinite(parsed.share)) {
-        this.state = { ...this.state, ...parsed };
+      const allocationVersion = parsed?.version === 2 ? 1 : parsed?.allocationVersion;
+      const calibrationVersion = parsed?.version === 2 ? 1 : parsed?.calibrationVersion;
+      if (allocationVersion === DISTRIBUTED_ALLOCATION_VERSION &&
+          typeof parsed.seed === "string" && Number.isFinite(parsed.share)) {
+        for (const key of ["seed", "share", "previous", "cumulative", "history", "accountShares", "accountCumulative", "accountHistory", "accountUnconfirmed", "accountSensorInconsistent", "unconfirmed", "sensorInconsistent", "lastObservedAt", "lastControlAt"]) {
+          if (parsed[key] !== undefined) this.state[key] = parsed[key];
+        }
+      }
+      if (calibrationVersion === DISTRIBUTED_CALIBRATION_VERSION) {
+        if (Array.isArray(parsed.samples)) this.state.samples = parsed.samples;
+        if (parsed.estimates && typeof parsed.estimates === "object") this.state.estimates = parsed.estimates;
       }
     } catch {}
     this.status = { share: this.state.share, sustainableRate: 0, observedRate: null, sensorInconsistent: this.state.sensorInconsistent };
@@ -1233,6 +1270,58 @@ export class PlanGovernor {
     }
   }
 
+  async restores(lease, activeAssignments) {
+    const family = providerFamily(lease.provider ?? providerOf(lease.model));
+    const variant = { model: lease.model, thinking: lease.thinking };
+    if (family === CODEX_PROVIDER) {
+      const snapshot = await this.refresh(activeAssignments);
+      if (snapshot.distributed.sensorInconsistent) return { ok: false, detail: "Codex sensor circuit blocks quota lease restoration" };
+      const activeRates = activeAssignments
+        .filter((item) => providerFamily(item.provider) === CODEX_PROVIDER)
+        .map((item) => ({ provider: item.provider, rate: this.modelRate(item.model ? item : item.task) }));
+      const accounts = snapshot.accounts.filter((account) => account.allowedBurnPercentPerHour > 0 &&
+        !snapshot.distributed.accounts?.[account.provider]?.sensorInconsistent &&
+        (lease.provider === null || lease.provider === undefined || account.provider === lease.provider));
+      const selected = this.feedback.selectAccount(accounts, activeRates, runModelKey(variant), this.modelRate(variant));
+      return selected ? {
+        ok: true,
+        provider: selected.account.provider,
+        ...variant,
+        instrumentBlock: selected.block,
+        instrumentSign: selected.sign,
+        pressure: 0,
+        detail: `restored Codex quota lease on ${selected.account.provider}`,
+      } : { ok: false, detail: `Codex quota lease account unavailable: ${lease.provider ?? "any"}` };
+    }
+    if (family === ANTHROPIC_PROVIDER) {
+      const usage = await this.anthropic.refresh(activeAssignments);
+      if (usage.distributed.sensorInconsistent) return { ok: false, detail: "Anthropic sensor circuit blocks quota lease restoration" };
+      const activeByProvider = new Map();
+      for (const item of activeAssignments.filter((item) => providerFamily(item.provider) === ANTHROPIC_PROVIDER)) {
+        activeByProvider.set(item.provider, (activeByProvider.get(item.provider) ?? 0) + 1);
+      }
+      const accounts = usage.accounts.filter((account) => anthropicOpusHasHeadroom(account) &&
+        (this.anthropic.cooldowns.get(account.provider) ?? 0) <= now() &&
+        (activeByProvider.get(account.provider) ?? 0) < this.config.plan.anthropic.maxActivePerAccount &&
+        !usage.distributed.accounts?.[account.provider]?.sensorInconsistent &&
+        (lease.provider === null || lease.provider === undefined || account.provider === lease.provider))
+        .map((account) => ({ ...account, allowedBurnPercentPerHour: usage.distributed.accounts?.[account.provider]?.sustainableRate ?? 0 }));
+      const candidate = this.config.plan.anthropic.predictedPercentPerActiveHour ?? DEFAULT_CONFIG.plan.anthropic.predictedPercentPerActiveHour;
+      const activeRates = [...activeByProvider.entries()].map(([provider, active]) => ({ provider, rate: active * candidate }));
+      const selected = this.anthropic.feedback.selectAccount(accounts, activeRates, runModelKey(variant), candidate);
+      return selected ? {
+        ok: true,
+        provider: selected.account.provider,
+        ...variant,
+        instrumentBlock: selected.block,
+        instrumentSign: selected.sign,
+        pressure: 0,
+        detail: `restored Anthropic quota lease on ${selected.account.provider}`,
+      } : { ok: false, detail: `Anthropic quota lease account unavailable: ${lease.provider ?? "any"}` };
+    }
+    return { ok: false, detail: `quota leases do not support provider family ${family}` };
+  }
+
   async allows(task, activeAssignments) {
     if (isChatGptProTask(task)) {
       const entitlement = proEntitlementSnapshot();
@@ -1375,6 +1464,30 @@ export function insertRun(db, runId, taskId, provider = null, startedAt = now(),
     .run(runId, taskId, "running", startedAt, provider, model, thinking);
 }
 
+export function grantQuotaLease(db, config, { provider, model, thinking, taskId = null, hours = null }, at = now()) {
+  if (!(typeof provider === "string" && provider.length > 0)) fail("quota lease requires an exact provider");
+  if (!(typeof model === "string" && model.includes("/") && typeof thinking === "string" && thinking.length > 0)) {
+    fail("quota lease requires a model and thinking level");
+  }
+  validateModelPolicy(model);
+  const family = providerFamily(provider);
+  if (family !== providerFamily(providerOf(model))) fail(`provider ${provider} cannot run ${model}`);
+  if (![CODEX_PROVIDER, ANTHROPIC_PROVIDER].includes(family)) fail(`quota leases do not support provider family ${family}`);
+  if (taskId !== null) {
+    const task = db.prepare("SELECT * FROM task WHERE id=?").get(taskId);
+    if (!task) fail(`unknown task ${taskId}`);
+    if (!taskSupportsAssignment(config, task, { model, thinking })) fail(`task ${taskId} cannot consume ${model}:${thinking}`);
+  }
+  const leaseHours = hours === null ? config.plan.distributed.leaseHours : Number(hours);
+  if (!(Number.isFinite(leaseHours) && leaseHours > 0)) fail("quota lease hours must be positive");
+  const id = randomId();
+  db.prepare(`INSERT INTO quota_lease(id,task_id,provider,model,thinking,state,run_id,source,issued_at,expires_at,heartbeat_at)
+    VALUES(?,?,?,?,?,'available',NULL,'operator',?,?,?)`)
+    .run(id, taskId, provider, model, thinking, at, at + leaseHours * 3600_000, at);
+  event(db, "quota-lease-granted", `${model}:${thinking} via ${provider}; expires ${iso(at + leaseHours * 3600_000)}`, taskId);
+  return id;
+}
+
 export class Controller {
   constructor(db, config) {
     this.db = db;
@@ -1390,15 +1503,33 @@ export class Controller {
   }
 
   recover() {
-    const interrupted = this.db.prepare("SELECT id,task_id FROM run WHERE status='running'").all();
+    const at = now();
+    const restartWindow = (this.config.plan?.distributed?.restartLeaseMinutes ?? DEFAULT_CONFIG.plan.distributed.restartLeaseMinutes) * 60_000;
+    const interrupted = this.db.prepare("SELECT id,task_id,provider,model,thinking,started_at FROM run WHERE status='running'").all();
     const finish = this.db.prepare("UPDATE run SET status='interrupted',finished_at=?,error=?,productive=0 WHERE id=?");
     const resume = this.db.prepare("UPDATE task SET incomplete_streak=0,next_eligible_at=min(next_eligible_at,?) WHERE id=?");
     for (const row of interrupted) {
-      const at = now();
+      const lease = this.db.prepare("SELECT * FROM quota_lease WHERE run_id=?").get(row.id);
+      if (lease && lease.heartbeat_at >= at - restartWindow) {
+        this.db.prepare("UPDATE quota_lease SET state='available',task_id=?,run_id=NULL,expires_at=max(expires_at,?),heartbeat_at=? WHERE id=?")
+          .run(row.task_id, at + restartWindow, at, lease.id);
+        event(this.db, "quota-lease-handoff", `${row.model}:${row.thinking} via ${row.provider}`, row.task_id, row.id);
+      } else if (!lease && row.provider && row.model && row.thinking && row.started_at >= at - restartWindow) {
+        const id = randomId();
+        this.db.prepare(`INSERT INTO quota_lease(id,task_id,provider,model,thinking,state,run_id,source,issued_at,expires_at,heartbeat_at)
+          VALUES(?,?,?,?,?,'available',NULL,'governor',?,?,?)`)
+          .run(id, row.task_id, row.provider, row.model, row.thinking, at, at + restartWindow, at);
+        event(this.db, "quota-lease-handoff", `${row.model}:${row.thinking} via ${row.provider}`, row.task_id, row.id);
+      } else if (lease) {
+        this.db.prepare("DELETE FROM quota_lease WHERE id=?").run(lease.id);
+      }
       finish.run(at, "controller restarted while run was active", row.id);
       resume.run(at, row.task_id);
       event(this.db, "run-interrupted", "controller restart", row.task_id, row.id);
     }
+    this.db.prepare("DELETE FROM quota_lease WHERE state='available' AND expires_at<=?").run(at);
+    this.db.prepare(`DELETE FROM quota_lease WHERE state='active' AND
+      (run_id IS NULL OR NOT EXISTS (SELECT 1 FROM run WHERE run.id=quota_lease.run_id AND run.status='running'))`).run();
   }
 
   async init() {
@@ -1413,13 +1544,59 @@ export class Controller {
     }).catch((error) => this.controllerError(`pro recovery failed: ${String(error?.message ?? error)}`));
   }
 
+  async restoreQuotaLease(task, activeAssignments) {
+    const leases = this.db.prepare(`SELECT * FROM quota_lease
+      WHERE state='available' AND expires_at>? AND (task_id=? OR task_id IS NULL)
+      ORDER BY CASE WHEN task_id=? THEN 0 ELSE 1 END,issued_at,id`).all(now(), task.id, task.id);
+    for (const lease of leases) {
+      if (!taskSupportsAssignment(this.config, task, lease)) continue;
+      const restored = await this.plan.restores(lease, activeAssignments);
+      if (restored.ok) return { ...restored, leaseId: lease.id };
+      this.throttledEvent("quota-lease-blocked", restored.detail, task.id);
+    }
+    return null;
+  }
+
+  activateQuotaLease(task, assignment, runId, at) {
+    if (isChatGptProTask(task)) return null;
+    if (assignment.leaseId) {
+      const changed = this.db.prepare(`UPDATE quota_lease SET state='active',task_id=?,provider=?,run_id=?,heartbeat_at=?
+        WHERE id=? AND state='available' AND expires_at>?`)
+        .run(task.id, assignment.provider, runId, at, assignment.leaseId, at).changes;
+      if (changed !== 1) fail(`quota lease ${assignment.leaseId} is no longer available`);
+      return assignment.leaseId;
+    }
+    const id = randomId();
+    const expiresAt = at + (this.config.plan?.distributed?.leaseHours ?? DEFAULT_CONFIG.plan.distributed.leaseHours) * 3600_000;
+    this.db.prepare(`INSERT INTO quota_lease(id,task_id,provider,model,thinking,state,run_id,source,issued_at,expires_at,heartbeat_at)
+      VALUES(?,?,?,?,?,'active',?,'governor',?,?,?)`)
+      .run(id, task.id, assignment.provider, assignment.model, assignment.thinking, runId, at, expiresAt, at);
+    return id;
+  }
+
+  heartbeatQuotaLeases(at = now()) {
+    if (!this.active.size) return;
+    this.db.prepare(`UPDATE quota_lease SET heartbeat_at=? WHERE state='active' AND run_id IN
+      (SELECT id FROM run WHERE status='running')`).run(at);
+  }
+
   async launch(task, assignment, runId = randomId(), packet = null, dispatchMs = null) {
-    insertRun(this.db, runId, task.id, assignment.provider, now(), assignment.model, assignment.thinking);
-    this.db.prepare("UPDATE run SET dispatched=? WHERE id=?").run(packet === null ? 0 : 1, runId);
-    const note = packet === null ? "" : ` (dispatched ${dispatchMs ?? "?"}ms, ${packet.length}B)`;
-    event(this.db, "run-started", `${runModelKey(assignment)} via ${assignment.provider}${note}`, task.id, runId);
+    const startedAt = now();
+    this.db.exec("BEGIN IMMEDIATE");
+    let leaseId;
+    try {
+      insertRun(this.db, runId, task.id, assignment.provider, startedAt, assignment.model, assignment.thinking);
+      this.db.prepare("UPDATE run SET dispatched=? WHERE id=?").run(packet === null ? 0 : 1, runId);
+      leaseId = this.activateQuotaLease(task, assignment, runId, startedAt);
+      const note = packet === null ? "" : ` (dispatched ${dispatchMs ?? "?"}ms, ${packet.length}B)`;
+      event(this.db, "run-started", `${runModelKey(assignment)} via ${assignment.provider}${note}`, task.id, runId);
+      this.db.exec("COMMIT");
+    } catch (error) {
+      this.db.exec("ROLLBACK");
+      throw error;
+    }
     const promise = this.execute(task, runId, assignment, packet).finally(() => this.active.delete(runId));
-    this.active.set(runId, { task, ...assignment, promise });
+    this.active.set(runId, { task, ...assignment, leaseId, promise });
   }
 
   async execute(task, runId, assignment, packet = null) {
@@ -1531,6 +1708,19 @@ export class Controller {
     try {
       this.db.prepare("UPDATE run SET status=?,finished_at=?,summary=?,artifacts_json=?,error=?,productive=? WHERE id=?")
         .run(status, now(), summary, JSON.stringify(artifacts), error, productive ? 1 : 0, runId);
+      const lease = this.db.prepare("SELECT * FROM quota_lease WHERE run_id=?").get(runId);
+      if (lease) {
+        if (suppressBackoff) {
+          const restartUntil = now() + (this.config.plan?.distributed?.restartLeaseMinutes ?? DEFAULT_CONFIG.plan.distributed.restartLeaseMinutes) * 60_000;
+          this.db.prepare("UPDATE quota_lease SET state='available',task_id=?,run_id=NULL,expires_at=max(expires_at,?),heartbeat_at=? WHERE id=?")
+            .run(task.id, restartUntil, now(), lease.id);
+        } else if (status === "incomplete" && productive && lease.expires_at > now()) {
+          this.db.prepare("UPDATE quota_lease SET state='available',task_id=?,run_id=NULL,heartbeat_at=? WHERE id=?")
+            .run(task.id, now(), lease.id);
+        } else {
+          this.db.prepare("DELETE FROM quota_lease WHERE id=?").run(lease.id);
+        }
+      }
       if (status === "complete") {
         this.db.prepare("UPDATE task SET completed_at=?,incomplete_streak=0 WHERE id=? AND completed_at IS NULL").run(now(), task.id);
       } else if (suppressBackoff) {
@@ -1625,6 +1815,8 @@ export class Controller {
 
   async tick() {
     this.purgeOldEvents();
+    this.heartbeatQuotaLeases();
+    this.db.prepare("DELETE FROM quota_lease WHERE state='available' AND expires_at<=?").run(now());
     const tasks = taskRows(this.db);
     try { await this.refreshWorkChecks(tasks); }
     catch (error) { this.controllerError(String(error.stack ?? error)); }
@@ -1642,7 +1834,7 @@ export class Controller {
       let launched = false;
       for (const task of rankTasks(tasks, this.active.size)) {
         let governed;
-        try { governed = await this.plan.allows(task, activeAssignments); }
+        try { governed = await this.restoreQuotaLease(task, activeAssignments) ?? await this.plan.allows(task, activeAssignments); }
         catch (error) {
           this.governorBlocked(String(error.message ?? error), task.id);
           return;
@@ -1841,6 +2033,13 @@ function printTasks(db) {
   }
 }
 
+function printQuotaLeases(db) {
+  const rows = db.prepare("SELECT * FROM quota_lease ORDER BY state,expires_at,id").all();
+  for (const row of rows) {
+    console.log(`${row.id}\t${row.state}\t${row.source}\t${row.task_id ?? "*"}\t${row.model}:${row.thinking}\t${row.provider ?? "any"}\texpires=${iso(row.expires_at)}`);
+  }
+}
+
 function check(db) {
   const integrity = db.prepare("PRAGMA integrity_check").get().integrity_check;
   if (integrity !== "ok") fail(`database integrity: ${integrity}`);
@@ -1878,6 +2077,28 @@ async function main(argv = process.argv.slice(2)) {
     event(db, `task-${subcommand}`, "operator command", id); console.log(`${subcommand} ${id}`); return;
   }
   if (command === "status") return printTasks(db);
+  if (command === "quota" && subcommand === "grant") {
+    const options = parseOptions(rest);
+    const unknown = Object.keys(options).filter((key) => !["provider", "model", "thinking", "task", "hours"].includes(key));
+    if (unknown.length) fail(`quota grant does not support ${unknown.map((key) => `--${key}`).join(", ")}`);
+    const id = grantQuotaLease(db, loadConfig(), {
+      provider: options.provider,
+      model: options.model,
+      thinking: options.thinking,
+      taskId: options.task ?? null,
+      hours: options.hours ?? null,
+    });
+    console.log(`granted ${id}`); return;
+  }
+  if (command === "quota" && subcommand === "list") return printQuotaLeases(db);
+  if (command === "quota" && subcommand === "revoke") {
+    const id = rest[0]; if (!id) fail("quota revoke requires LEASE_ID");
+    const lease = db.prepare("SELECT * FROM quota_lease WHERE id=?").get(id);
+    if (!lease) fail(`unknown quota lease ${id}`);
+    db.prepare("DELETE FROM quota_lease WHERE id=?").run(id);
+    event(db, "quota-lease-revoked", `${lease.model}:${lease.thinking} via ${lease.provider ?? "any"}`, lease.task_id);
+    console.log(`revoked ${id}`); return;
+  }
   if (command === "runs") {
     const id = subcommand;
     const rows = id
@@ -1984,6 +2205,9 @@ async function main(argv = process.argv.slice(2)) {
   orchestrator task cancel ID
   orchestrator task reopen ID
   orchestrator status
+  orchestrator quota grant --provider EXACT_PROVIDER --model PROVIDER/MODEL --thinking LEVEL [--task TASK_ID] [--hours N]
+  orchestrator quota list
+  orchestrator quota revoke LEASE_ID
   orchestrator runs [TASK_ID]
   orchestrator governor
   orchestrator pro-recover [--from-audits DAYS]

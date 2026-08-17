@@ -8,19 +8,19 @@ import test from "node:test";
 
 const temporary = fs.mkdtempSync(path.join(os.tmpdir(), "agent-orchestrator-test-"));
 process.env.AGENT_ORCHESTRATOR_DATA = temporary;
-const { AnthropicGovernor, anthropicOpusHasHeadroom, anthropicWeeklyCapacity, cancelTask, chooseIndependentAssignment, chooseTask, codexSubscriptionLifecycle, completionToolResult, Controller, cpuPercent, DISPATCH_NO_WORK_TTL_MS, dispatchedTaskPrompt, DistributedQuotaFeedback, evaluateDispatch, evaluateWorkCheck, insertRun, isolateTaskShell, isEligibleCodexPlan, launchBatchSize, loadConfig, nextIncompleteState, openDb, orchestratedTaskPrompt, parseAnthropicUsage, PlanGovernor, planWindowBurnPerHour, proEntitlementSnapshot, proLaunchAvailability, rankTasks, resourceSlots, setTaskOptions, shouldAdvanceBackoff, taskSettings, TOOL_SHELL, validateCompletion, validateModelPolicy, WORK_CHECK_TTL_MS, workCheckStale, workReady } = await import("./orchestrator.mjs");
+const { AnthropicGovernor, anthropicOpusHasHeadroom, anthropicWeeklyCapacity, cancelTask, chooseIndependentAssignment, chooseTask, codexSubscriptionLifecycle, completionToolResult, Controller, cpuPercent, DISPATCH_NO_WORK_TTL_MS, dispatchedTaskPrompt, DistributedQuotaFeedback, evaluateDispatch, evaluateWorkCheck, grantQuotaLease, insertRun, isolateTaskShell, isEligibleCodexPlan, launchBatchSize, loadConfig, nextIncompleteState, openDb, orchestratedTaskPrompt, parseAnthropicUsage, PlanGovernor, planWindowBurnPerHour, proEntitlementSnapshot, proLaunchAvailability, rankTasks, resourceSlots, setTaskOptions, shouldAdvanceBackoff, taskSettings, taskSupportsAssignment, TOOL_SHELL, validateCompletion, validateModelPolicy, WORK_CHECK_TTL_MS, workCheckStale, workReady } = await import("./orchestrator.mjs");
 
 test.after(() => fs.rmSync(temporary, { recursive: true, force: true }));
 
 test("database initializes with integrity", () => {
   const db = openDb(path.join(temporary, "test.sqlite3"));
   assert.equal(db.prepare("PRAGMA integrity_check").get().integrity_check, "ok");
-  assert.deepEqual(db.prepare("SELECT name FROM sqlite_master WHERE type='table' ORDER BY name").all().map((row) => row.name), ["event", "run", "task"]);
+  assert.deepEqual(db.prepare("SELECT name FROM sqlite_master WHERE type='table' ORDER BY name").all().map((row) => row.name), ["event", "quota_lease", "run", "task"]);
   assert.ok(!db.prepare("PRAGMA table_info(task)").all().some((column) => column.name === "max_parallel"));
   assert.ok(db.prepare("PRAGMA table_info(run)").all().some((column) => column.name === "provider"));
   assert.ok(db.prepare("PRAGMA table_info(run)").all().some((column) => column.name === "productive"));
   assert.match(db.prepare("SELECT sql FROM sqlite_master WHERE type='trigger' AND name='auto_timestamp_run_update'").get().sql, /productive/);
-  for (const table of ["event", "run", "task"]) {
+  for (const table of ["event", "quota_lease", "run", "task"]) {
     const columns = db.prepare(`PRAGMA table_info(${table})`).all().map((row) => row.name);
     assert.ok(columns.includes("created_at"));
     assert.ok(columns.includes("updated_at"));
@@ -60,6 +60,40 @@ test("a launch is recorded with a literal running status", () => {
   db.prepare("UPDATE run SET updated_at=1 WHERE id=?").run("run");
   db.prepare("UPDATE run SET status='incomplete' WHERE id=?").run("run");
   assert.ok(db.prepare("SELECT updated_at FROM run WHERE id=?").get("run").updated_at > 1);
+  db.close();
+});
+
+test("quota leases survive controller restarts and productive session boundaries", () => {
+  const db = openDb(path.join(temporary, "quota-lease.sqlite3"));
+  const at = Date.now();
+  db.prepare(`INSERT INTO task(id,prompt,cwd,model,thinking,completion_condition,launch_share,not_before,next_eligible_at,created_at)
+    VALUES(?,?,?,?,?,?,?,?,?,?)`).run("task", "prompt", temporary, "openai-codex/gpt-5.6-sol", "xhigh", "done", 1, at, at, at);
+  const config = loadConfig();
+  const leaseId = grantQuotaLease(db, config, {
+    provider: "openai-codex-3", model: "openai-codex/gpt-5.6-sol", thinking: "xhigh", taskId: "task", hours: 1,
+  }, at);
+  const task = db.prepare("SELECT * FROM task WHERE id='task'").get();
+  assert.equal(taskSupportsAssignment(config, task, { model: "openai-codex/gpt-5.6-sol", thinking: "xhigh" }), true);
+  assert.equal(taskSupportsAssignment(config, task, { model: "anthropic/claude-opus-5", thinking: "xhigh" }), true);
+
+  const controller = new Controller(db, config);
+  insertRun(db, "run-1", task.id, "openai-codex-3", at, task.model, task.thinking);
+  controller.activateQuotaLease(task, {
+    leaseId, provider: "openai-codex-3", model: task.model, thinking: task.thinking,
+  }, "run-1", at);
+  assert.equal(db.prepare("SELECT state FROM quota_lease WHERE id=?").get(leaseId).state, "active");
+
+  new Controller(db, config).recover();
+  const recovered = db.prepare("SELECT state,task_id,run_id FROM quota_lease WHERE id=?").get(leaseId);
+  assert.deepEqual({ ...recovered }, { state: "available", task_id: "task", run_id: null });
+  assert.equal(db.prepare("SELECT status FROM run WHERE id='run-1'").get().status, "interrupted");
+
+  insertRun(db, "run-2", task.id, "openai-codex-3", at + 1, task.model, task.thinking);
+  controller.activateQuotaLease(task, {
+    leaseId, provider: "openai-codex-3", model: task.model, thinking: task.thinking,
+  }, "run-2", at + 1);
+  controller.finish(task, "run-2", "incomplete", "productive", [], null, true);
+  assert.equal(db.prepare("SELECT state FROM quota_lease WHERE id=?").get(leaseId).state, "available");
   db.close();
 });
 
@@ -758,6 +792,26 @@ test("private balanced routing instruments assign a concrete healthy account", (
   assert.ok(["openai-codex-2", "openai-codex-3"].includes(selected.account.provider));
   assert.ok([-1, 0, 1].includes(selected.sign));
   assert.equal(Number.isInteger(selected.block), true);
+});
+
+test("calibration schema changes do not erase valid allocation state", () => {
+  const statePath = path.join(temporary, "distributed-state-v2.json");
+  fs.writeFileSync(statePath, JSON.stringify({
+    version: 2,
+    seed: "preserved-seed",
+    share: 0.61,
+    accountShares: { a: 0.7 },
+    sensorInconsistent: false,
+    samples: [{ at: 1 }],
+    estimates: { model: { upper: 2 } },
+  }));
+  const feedback = new DistributedQuotaFeedback(loadConfig(), statePath);
+  assert.equal(feedback.state.version, 3);
+  assert.equal(feedback.state.seed, "preserved-seed");
+  assert.equal(feedback.state.share, 0.61);
+  assert.deepEqual(feedback.state.accountShares, { a: 0.7 });
+  assert.deepEqual(feedback.state.samples, [{ at: 1 }]);
+  assert.deepEqual(feedback.state.estimates, { model: { upper: 2 } });
 });
 
 test("premature calibration state cannot poison model admission", () => {
