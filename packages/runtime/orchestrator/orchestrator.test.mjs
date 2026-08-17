@@ -8,7 +8,7 @@ import test from "node:test";
 
 const temporary = fs.mkdtempSync(path.join(os.tmpdir(), "agent-orchestrator-test-"));
 process.env.AGENT_ORCHESTRATOR_DATA = temporary;
-const { AnthropicGovernor, anthropicOpusHasHeadroom, cancelTask, chooseMixedVariant, choosePlanProvider, chooseTask, codexSubscriptionLifecycle, completionToolResult, Controller, cpuPercent, DISPATCH_NO_WORK_TTL_MS, dispatchedTaskPrompt, evaluateDispatch, evaluateWorkCheck, insertRun, isolateTaskShell, isEligibleCodexPlan, launchBatchSize, loadConfig, nextIncompleteState, openDb, orchestratedTaskPrompt, parseAnthropicUsage, PlanGovernor, planWindowBurnPerHour, proEntitlementSnapshot, proLaunchAvailability, rankTasks, resourceSlots, setTaskOptions, shouldAdvanceBackoff, taskSettings, TOOL_SHELL, validateCompletion, validateModelPolicy, WORK_CHECK_TTL_MS, workCheckStale, workReady } = await import("./orchestrator.mjs");
+const { AnthropicGovernor, anthropicOpusHasHeadroom, anthropicPlanCapacity, cancelTask, chooseMixedVariant, choosePlanProvider, chooseTask, codexSubscriptionLifecycle, completionToolResult, Controller, cpuPercent, DISPATCH_NO_WORK_TTL_MS, dispatchedTaskPrompt, evaluateDispatch, evaluateWorkCheck, insertRun, isolateTaskShell, isEligibleCodexPlan, launchBatchSize, loadConfig, nextIncompleteState, openDb, orchestratedTaskPrompt, parseAnthropicUsage, PlanGovernor, planWindowBurnPerHour, proEntitlementSnapshot, proLaunchAvailability, rankTasks, resourceSlots, setTaskOptions, shouldAdvanceBackoff, taskSettings, TOOL_SHELL, validateCompletion, validateModelPolicy, WORK_CHECK_TTL_MS, workCheckStale, workReady } = await import("./orchestrator.mjs");
 
 test.after(() => fs.rmSync(temporary, { recursive: true, force: true }));
 
@@ -553,6 +553,19 @@ test("Anthropic Opus admission preserves enough shared weekly capacity for Fable
   assert.equal((await governor.allows(variant, [{ provider: "anthropic-2", model: variant.model, thinking: variant.thinking }], governor.snapshot)).ok, false);
   governor.noteFailure("anthropic-2", new Error("429 usage limit reached"), Date.now());
   assert.equal((await governor.allows(variant, [], governor.snapshot)).ok, false);
+});
+
+test("Anthropic plan capacity is derived from the OAuth profile tier", () => {
+  assert.deepEqual(anthropicPlanCapacity({ organization: { rate_limit_tier: "default_claude_max_20x" } }), {
+    rateLimitTier: "default_claude_max_20x", capacityWeight: 20,
+  });
+  assert.deepEqual(anthropicPlanCapacity({ organization: { rate_limit_tier: "default_claude_max_5x" } }), {
+    rateLimitTier: "default_claude_max_5x", capacityWeight: 5,
+  });
+  assert.deepEqual(anthropicPlanCapacity({ organization: { rate_limit_tier: "default_claude_pro" } }), {
+    rateLimitTier: "default_claude_pro", capacityWeight: 1,
+  });
+  assert.equal(anthropicPlanCapacity({ organization: { rate_limit_tier: "unexpected" } }).capacityWeight, null);
 });
 
 test("Anthropic governor restores per-account usage across controller restarts", () => {
