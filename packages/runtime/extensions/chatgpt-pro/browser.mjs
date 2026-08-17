@@ -3,10 +3,12 @@ import { execFile } from "node:child_process";
 import {
   chmodSync,
   mkdirSync,
+  readdirSync,
   readFileSync,
   renameSync,
   rmSync,
   statSync,
+  unlinkSync,
   writeFileSync,
 } from "node:fs";
 import { homedir } from "node:os";
@@ -21,6 +23,8 @@ const POOL_PATH = join(AGENT_DIR, "chatgpt-pro-pool.json");
 const MULTI_PASS_PATH = join(AGENT_DIR, "multi-pass.json");
 const POOL_LOCK = join(AGENT_DIR, ".chatgpt-pro-pool.lock");
 const PROVIDER_AUDIT_DIR = join(HOME, "data", "agent-orchestrator", "pro", "provider-audit");
+const PENDING_DIR = join(HOME, "data", "agent-orchestrator", "pro", "pending");
+const RECOVERED_DIR = join(HOME, "data", "projects-research", "pro", "recovered");
 export const PRO_PROFILE_CONFIG_PATH = join(AGENT_DIR, "chatgpt-pro-profiles.json");
 export const PRO_MAX_PARALLEL = 4;
 const DEFAULT_PROFILE_NAME = "limmy-google";
@@ -435,6 +439,30 @@ async function ensureProSelection(page) {
   return { selected, pickerText };
 }
 
+function pendingPath(conversationId) {
+  return join(PENDING_DIR, `${conversationId.replaceAll("/", "_").replaceAll(":", "_")}.json`);
+}
+
+function writePendingConversation(entry) {
+  mkdirSync(PENDING_DIR, { recursive: true, mode: 0o700 });
+  writeJsonAtomic(pendingPath(entry.conversationId), entry);
+}
+
+function clearPendingConversation(conversationId) {
+  try { unlinkSync(pendingPath(conversationId)); } catch {}
+}
+
+export function listPendingConversations() {
+  let names = [];
+  try { names = readdirSync(PENDING_DIR); } catch { return []; }
+  const entries = [];
+  for (const name of names) {
+    if (!name.endsWith(".json")) continue;
+    try { entries.push(JSON.parse(readFileSync(join(PENDING_DIR, name), "utf8"))); } catch {}
+  }
+  return entries.filter((entry) => entry?.conversationId && entry?.browserProfile);
+}
+
 async function submitPrompt(page, prompt) {
   const observed = { requestedModel: null };
   let resolveResponse;
@@ -474,6 +502,8 @@ async function submitPrompt(page, prompt) {
 }
 
 async function readPersistedConversation(page, conversationId) {
+  // New web conversations carry a WEB: URL prefix that the backend API rejects.
+  conversationId = conversationId.replace(/^WEB:/i, "");
   return page.evaluate(async ({ conversationId }) => {
     const sessionResponse = await fetch("/api/auth/session", { credentials: "include" });
     const session = await sessionResponse.json().catch(() => null);
@@ -487,6 +517,37 @@ async function readPersistedConversation(page, conversationId) {
     });
     return { status: response.status, data: response.ok ? await response.json() : null };
   }, { conversationId });
+}
+
+async function listRecentConversations(page, limit = 50) {
+  return page.evaluate(async ({ limit }) => {
+    const sessionResponse = await fetch("/api/auth/session", { credentials: "include" });
+    const session = await sessionResponse.json().catch(() => null);
+    if (!session?.accessToken) return { status: 401, items: [] };
+    const response = await fetch(`/backend-api/conversations?offset=0&limit=${limit}&order=updated`, {
+      credentials: "include",
+      headers: {
+        Authorization: `Bearer ${session.accessToken}`,
+        "chatgpt-account-id": session.account?.id || "",
+      },
+    });
+    const body = response.ok ? await response.json() : null;
+    return { status: response.status, items: Array.isArray(body?.items) ? body.items.map((item) => item.id) : [] };
+  }, { limit });
+}
+
+export function firstUserMessageText(data) {
+  let earliest = null;
+  for (const node of Object.values(data?.mapping ?? {})) {
+    const message = node?.message;
+    if (!message || message.author?.role !== "user") continue;
+    const time = Number(message.create_time) || 0;
+    if (earliest === null || time < earliest.time) {
+      const parts = message.content?.parts;
+      earliest = { time, text: Array.isArray(parts) ? parts.filter((part) => typeof part === "string").join("\n") : "" };
+    }
+  }
+  return earliest?.text ?? "";
 }
 
 async function visibleProviderWarning(page) {
@@ -652,25 +713,38 @@ function failureCooldown(error, evidence, warning) {
   return { cooldownMs: OPERATIONAL_COOLDOWN_MS, reason: "browser-operation" };
 }
 
-export async function completeInKernelBrowser(prompt, { signal, maxWaitMs = MAX_WAIT_MS, onStatus, auditContext = null } = {}) {
-  const browserProfile = await acquireProfile(signal);
-  try {
-    const state = readPoolState();
-    onStatus?.({
-      phase: "running",
-      browserProfile,
-      capacity: browserPoolCapacitySnapshot(state, Date.now()),
-    });
-  } catch {}
+// The router can silently resolve a submission to a non-Pro model. The POST
+// /conversation SSE body reveals resolved_model_slug within seconds; reading
+// it here converts a would-be twenty-minute poll discovery into an immediate
+// tagged failure the caller can retry on another entitlement.
+export function streamResolvedModel(streamText) {
+  return streamText?.match(/"resolved_model_slug"\s*:\s*"([^"]+)"/)?.[1] ?? null;
+}
+
+// The /c/WEB:... URL segment is an optimistic client placeholder; only the
+// submission SSE stream carries the server conversation id that the backend
+// API accepts.
+export function streamConversationId(streamText) {
+  return streamText?.match(/"conversation_id"\s*:\s*"([0-9a-f-]{36})"/i)?.[1] ?? null;
+}
+
+class ProFallbackError extends Error {
+  constructor(resolved) {
+    super(`ChatGPT router resolved ${resolved} instead of ${MODEL_ID}; the Pro turn never ran`);
+    this.code = "pro-fallback-early";
+    this.resolved = resolved;
+  }
+}
+
+async function attemptProTurn(browserProfile, prompt, { signal, maxWaitMs, onStatus, auditContext, started }) {
   let submitted = null;
   let selection = null;
   let evidence = {};
   let responseText = "";
   let warning = "";
-  let audit = null;
-  const started = Date.now();
   try {
     let submissionBrowser = null;
+    let streamText = "";
     try {
       submissionBrowser = await createBrowser(browserProfile, signal);
       const playwrightBrowser = await chromium.connectOverCDP(submissionBrowser.cdpUrl, { timeout: 60_000 });
@@ -690,6 +764,7 @@ export async function completeInKernelBrowser(prompt, { signal, maxWaitMs = MAX_
         if (submitted.observed.requestedModel !== MODEL_ID) {
           throw new Error(`ChatGPT submitted unexpected model ${String(submitted.observed.requestedModel)}`);
         }
+        try { streamText = await withDeadline(response.text(), 90_000, signal); } catch {}
         warning = await visibleProviderWarning(page);
       } finally {
         submitted.remove();
@@ -701,19 +776,35 @@ export async function completeInKernelBrowser(prompt, { signal, maxWaitMs = MAX_
       await deleteBrowser(submissionBrowser?.sessionId);
     }
 
+    const resolvedEarly = streamResolvedModel(streamText);
+    if (resolvedEarly && resolvedEarly !== MODEL_ID) {
+      evidence = { resolved_model_slug: resolvedEarly, stream_resolved_model_slug: resolvedEarly };
+      throw new ProFallbackError(resolvedEarly);
+    }
+    const serverConversationId = streamConversationId(streamText);
+    if (serverConversationId) submitted.conversationId = serverConversationId;
+
+    writePendingConversation({
+      conversationId: submitted.conversationId,
+      browserProfile,
+      caller: auditContext,
+      prompt_sha256: createHash("sha256").update(prompt).digest("hex"),
+      submittedAt: new Date().toISOString(),
+    });
     onStatus?.({ phase: "submitted", browserProfile, nextCheckMs: PRO_TRANSPORT_HORIZONS.persistedPollMs });
     const verified = await waitForPersistedEvidence(browserProfile, submitted, signal, maxWaitMs);
     responseText = verified.text;
     warning ||= verified.warning;
     evidence = {
       ...verified.evidence,
+      stream_resolved_model_slug: streamResolvedModel(streamText) ?? undefined,
       outgoing_model: submitted.observed.requestedModel,
       picker_selected: selection.selected,
       picker_model: "GPT-5.6 Sol",
       picker_effort: "Pro",
       browser_profile: browserProfile,
     };
-    audit = recordProviderAudit({
+    const audit = recordProviderAudit({
       at: new Date().toISOString(),
       transport: "kernel-browser-submit-periodic-poll",
       browser_profile: browserProfile,
@@ -726,11 +817,15 @@ export async function completeInKernelBrowser(prompt, { signal, maxWaitMs = MAX_
       evidence,
       provider_warning: warning || null,
     }, responseText);
+    clearPendingConversation(submitted.conversationId);
     if (evidence.pro_execution_verified !== true) throw new Error(verificationFailure(evidence));
     await finishProfile(browserProfile, { verified: true }, signal);
     return { text: responseText, evidence, audit, browserProfile };
   } catch (error) {
-    if (!responseText || Object.keys(evidence).length === 0) {
+    // An abort mid-poll leaves the pending record in place on purpose: the
+    // conversation keeps reasoning server-side and pro-recover harvests it.
+    if (submitted?.conversationId && !(signal?.aborted)) clearPendingConversation(submitted.conversationId);
+    if (!responseText || Object.keys(evidence).length === 0 || error instanceof ProFallbackError) {
       recordProviderAudit({
         at: new Date().toISOString(),
         transport: "kernel-browser-submit-periodic-poll",
@@ -746,8 +841,191 @@ export async function completeInKernelBrowser(prompt, { signal, maxWaitMs = MAX_
         error: error instanceof Error ? error.message : String(error),
       }, responseText);
     }
-    const cooldown = failureCooldown(error, evidence, warning);
+    const cooldown = error instanceof ProFallbackError
+      ? { cooldownMs: FALLBACK_COOLDOWN_BASE_MS, reason: "pro-fallback" }
+      : failureCooldown(error, evidence, warning);
     try { await finishProfile(browserProfile, cooldown, signal?.aborted ? undefined : signal); } catch {}
     throw error;
   }
+}
+
+export async function completeInKernelBrowser(prompt, { signal, maxWaitMs = MAX_WAIT_MS, onStatus, auditContext = null } = {}) {
+  const started = Date.now();
+  const tried = new Set();
+  // Router fallbacks are account-transient: rotate through distinct
+  // entitlements before conceding, so one flaky resolution does not fail a
+  // whole delegated attack.
+  for (let attempt = 1; attempt <= 3; attempt++) {
+    const browserProfile = await acquireProfile(signal);
+    tried.add(browserProfile);
+    try {
+      const state = readPoolState();
+      onStatus?.({
+        phase: attempt === 1 ? "running" : "retrying-after-fallback",
+        browserProfile,
+        capacity: browserPoolCapacitySnapshot(state, Date.now()),
+      });
+    } catch {}
+    try {
+      return await attemptProTurn(browserProfile, prompt, { signal, maxWaitMs, onStatus, auditContext, started });
+    } catch (error) {
+      if (!(error instanceof ProFallbackError) || attempt === 3) throw error;
+      signal?.throwIfAborted();
+    }
+  }
+  throw new Error("unreachable: Pro attempt loop exited");
+}
+
+// Audits are the historical record of submissions that predate the pending
+// registry. A conversation is orphaned when its only records are aborts or
+// nonterminal errors: no verified, recovered, or terminal-fallback audit.
+export function orphanedConversationsFromAudits(days = 7, auditDir = PROVIDER_AUDIT_DIR) {
+  let names = [];
+  try { names = readdirSync(auditDir); } catch { return []; }
+  const cutoff = Date.now() - days * 86_400_000;
+  const byConversation = new Map();
+  for (const name of names) {
+    if (!name.endsWith(".json")) continue;
+    let record;
+    try { record = JSON.parse(readFileSync(join(auditDir, name), "utf8")); } catch { continue; }
+    const conversationId = record?.conversation_id;
+    if (!conversationId) continue;
+    const at = Date.parse(record.at ?? "");
+    const entry = byConversation.get(conversationId) ?? { terminal: false, latest: null, latestAt: 0 };
+    const evidence = record.evidence ?? {};
+    if (evidence.pro_execution_verified === true || record.recovered === true ||
+        (evidence.resolved_model_slug && evidence.resolved_model_slug !== "gpt-5-6-pro")) {
+      entry.terminal = true;
+    }
+    if (Number.isFinite(at) && at > entry.latestAt) {
+      entry.latestAt = at;
+      entry.latest = record;
+    }
+    byConversation.set(conversationId, entry);
+  }
+  const orphans = [];
+  for (const [conversationId, entry] of byConversation) {
+    if (entry.terminal || entry.latestAt < cutoff || !entry.latest?.browser_profile) continue;
+    orphans.push({
+      conversationId,
+      browserProfile: entry.latest.browser_profile,
+      caller: entry.latest.caller ?? null,
+      prompt_sha256: entry.latest.prompt_sha256 ?? null,
+    });
+  }
+  return orphans;
+}
+
+// Harvest conversations whose submitting launch died (controller restart,
+// abort) while ChatGPT kept reasoning server-side. Verified responses become
+// ordinary provider audits plus research-visible recovered artifacts.
+export async function recoverPendingProConversations({ signal, extra = [], log = () => {} } = {}) {
+  const seen = new Set();
+  const candidates = [];
+  for (const entry of [...listPendingConversations(), ...extra]) {
+    if (!entry?.conversationId || seen.has(entry.conversationId)) continue;
+    seen.add(entry.conversationId);
+    candidates.push(entry);
+  }
+  const results = [];
+  const consumed = new Set();
+  for (const entry of candidates) {
+    signal?.throwIfAborted();
+    let kernelBrowser = null;
+    let outcome = "unreadable";
+    try {
+      const conversationUrl = `https://chatgpt.com/c/${encodeURIComponent(entry.conversationId)}`;
+      kernelBrowser = await createBrowser(entry.browserProfile, signal, conversationUrl);
+      const playwrightBrowser = await chromium.connectOverCDP(kernelBrowser.cdpUrl, { timeout: 60_000 });
+      const context = playwrightBrowser.contexts()[0];
+      if (!context) throw new Error("Kernel CDP endpoint exposed no browser context during Pro recovery");
+      const page = context.pages()[0] ?? await context.newPage();
+      await page.goto(conversationUrl, { waitUntil: "domcontentloaded", timeout: 60_000 });
+      await checkAuthentication(page);
+      let result = await readPersistedConversation(page, entry.conversationId);
+      // Placeholder ids cannot be read directly; find the real conversation by
+      // matching the recorded prompt hash against the account's recent history.
+      if (!result.data && entry.prompt_sha256) {
+        const listing = await listRecentConversations(page);
+        for (const candidateId of listing.items) {
+          if (consumed.has(candidateId)) continue;
+          const candidate = await readPersistedConversation(page, candidateId);
+          if (!candidate.data) continue;
+          const sha = createHash("sha256").update(firstUserMessageText(candidate.data)).digest("hex");
+          if (sha === entry.prompt_sha256) {
+            result = candidate;
+            entry.matchedConversationId = candidateId;
+            consumed.add(candidateId);
+            break;
+          }
+        }
+      }
+      if (!result.data) throw new Error(`persisted conversation read returned HTTP ${result.status}`);
+      const evidence = conversationModelEvidence(result.data);
+      const text = conversationLeafText(result.data).trim();
+      const recoveredId = entry.matchedConversationId ?? entry.conversationId;
+      if (evidence.pro_execution_verified === true) {
+        outcome = "recovered-verified";
+        const audit = recordProviderAudit({
+          at: new Date().toISOString(),
+          transport: "pro-recovery-poll",
+          recovered: true,
+          browser_profile: entry.browserProfile,
+          conversation_id: recoveredId,
+          placeholder_conversation_id: entry.matchedConversationId ? entry.conversationId : undefined,
+          requested_model: MODEL_ID,
+          caller: entry.caller ?? null,
+          prompt_sha256: entry.prompt_sha256 ?? null,
+          response_chars: text.length,
+          evidence,
+        }, text);
+        mkdirSync(RECOVERED_DIR, { recursive: true, mode: 0o700 });
+        const recoveredPath = join(RECOVERED_DIR,
+          `${new Date().toISOString().replace(/[:.]/g, "-")}-${recoveredId.slice(-8)}.md`);
+        writeFileSync(recoveredPath, [
+          "# Recovered GPT-5.6 Pro response",
+          "",
+          `- Conversation: ${recoveredId}`,
+          `- Browser profile: ${entry.browserProfile}`,
+          `- Caller: ${JSON.stringify(entry.caller ?? null)}`,
+          `- Prompt SHA-256: ${entry.prompt_sha256 ?? "unknown"}`,
+          `- Verified evidence: pro_execution_verified=true (audit: ${audit.auditPath})`,
+          "- Standing: advisory only; every load-bearing step requires tool-capable validation.",
+          "",
+          "## Response",
+          "",
+          text,
+        ].join("\n"), { mode: 0o600 });
+        clearPendingConversation(entry.conversationId);
+        try { await finishProfile(entry.browserProfile, { verified: true }, signal); } catch {}
+        results.push({ conversationId: recoveredId, outcome, recoveredPath, auditPath: audit.auditPath, chars: text.length });
+      } else if (isTerminalConversationEvidence(evidence)) {
+        outcome = "terminal-not-pro";
+        recordProviderAudit({
+          at: new Date().toISOString(),
+          transport: "pro-recovery-poll",
+          recovered: true,
+          browser_profile: entry.browserProfile,
+          conversation_id: recoveredId,
+          requested_model: MODEL_ID,
+          caller: entry.caller ?? null,
+          prompt_sha256: entry.prompt_sha256 ?? null,
+          response_chars: text.length,
+          evidence,
+          error: verificationFailure(evidence),
+        }, text);
+        clearPendingConversation(entry.conversationId);
+        results.push({ conversationId: entry.conversationId, outcome, chars: text.length });
+      } else {
+        outcome = "still-working";
+        results.push({ conversationId: entry.conversationId, outcome });
+      }
+    } catch (error) {
+      results.push({ conversationId: entry.conversationId, outcome: "error", error: error instanceof Error ? error.message : String(error) });
+    } finally {
+      try { await deleteBrowser(kernelBrowser?.sessionId); } catch {}
+      log(results[results.length - 1]);
+    }
+  }
+  return results;
 }

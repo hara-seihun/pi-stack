@@ -25,7 +25,9 @@ import {
 import {
   browserPoolCapacitySnapshot,
   completeInKernelBrowser,
+  orphanedConversationsFromAudits,
   PRO_MAX_PARALLEL,
+  recoverPendingProConversations,
 } from "../extensions/chatgpt-pro/browser.mjs";
 
 const HOME = os.homedir();
@@ -726,6 +728,11 @@ export class Controller {
     for (const task of taskRows(this.db)) validateModelPolicy(task.model);
     this.modelRuntime = await ModelRuntime.create({ signal: AbortSignal.timeout(15000) });
     this.plan.setModelRuntime(this.modelRuntime);
+    // A restart aborts in-flight Pro polls while ChatGPT keeps reasoning
+    // server-side; harvest those conversations instead of stranding them.
+    void recoverPendingProConversations({
+      log: (result) => event(this.db, "pro-recovery", JSON.stringify(result)),
+    }).catch((error) => this.controllerError(`pro recovery failed: ${String(error?.message ?? error)}`));
   }
 
   async launch(task, provider, runId = randomId(), packet = null, dispatchMs = null) {
@@ -1203,6 +1210,18 @@ async function main(argv = process.argv.slice(2)) {
     console.log(JSON.stringify({ resources, plan, chatgptPro: pro }, null, 2));
     return;
   }
+  if (command === "pro-recover") {
+    const days = Number(parseOptions(subcommand === undefined ? [] : [subcommand, ...rest])["from-audits"] ?? 0);
+    const extra = days > 0 ? orphanedConversationsFromAudits(days) : [];
+    const results = await recoverPendingProConversations({
+      extra,
+      log: (result) => console.log(JSON.stringify(result)),
+    });
+    const recovered = results.filter((result) => result.outcome === "recovered-verified").length;
+    console.log(`pro-recover: ${results.length} conversation(s) checked, ${recovered} verified response(s) recovered`);
+    for (const result of results) event(db, "pro-recovery", JSON.stringify(result));
+    return;
+  }
   if (command === "check") return check(db);
   if (command === "run") {
     const release = acquireLock();
@@ -1223,6 +1242,7 @@ async function main(argv = process.argv.slice(2)) {
   orchestrator status
   orchestrator runs [TASK_ID]
   orchestrator governor
+  orchestrator pro-recover [--from-audits DAYS]
   orchestrator check
   orchestrator run`);
   if (command) process.exitCode = 2;

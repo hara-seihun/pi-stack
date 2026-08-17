@@ -259,3 +259,37 @@ test("routed fallbacks back off exponentially and reset after a quiet day", () =
   const old = { ...recent, lastFallbackAt: "2026-08-14T11:59:00.000Z" };
   assert.deepEqual(nextFallbackCooldown(old, now), { streak: 1, cooldownMs: 15 * 60_000 });
 });
+
+test("the submission stream reveals a router fallback within seconds", async () => {
+  const { streamResolvedModel } = await import("./browser.mjs");
+  assert.equal(streamResolvedModel('data: {"resolved_model_slug":"gpt-5-5-mini","x":1}'), "gpt-5-5-mini");
+  assert.equal(streamResolvedModel('{"resolved_model_slug": "gpt-5-6-pro"}'), "gpt-5-6-pro");
+  assert.equal(streamResolvedModel("no marker here"), null);
+  assert.equal(streamResolvedModel(""), null);
+});
+
+test("audit history yields exactly the orphaned conversations", async (t) => {
+  const { orphanedConversationsFromAudits } = await import("./browser.mjs");
+  const { mkdtempSync, writeFileSync, rmSync } = await import("node:fs");
+  const { tmpdir } = await import("node:os");
+  const { join } = await import("node:path");
+  const dir = mkdtempSync(join(tmpdir(), "pro-audit-test-"));
+  t.after(() => rmSync(dir, { recursive: true, force: true }));
+  const now = new Date(Date.now() - 1000).toISOString();
+  const record = (name, value) => writeFileSync(join(dir, name), JSON.stringify(value));
+  // Orphan: submitted, aborted, never terminal.
+  record("a.json", { at: now, conversation_id: "WEB:orphan", browser_profile: "p1", caller: { taskId: "t" }, prompt_sha256: "abc", error: "Request was aborted" });
+  // Verified conversation: not an orphan.
+  record("b.json", { at: now, conversation_id: "WEB:done", browser_profile: "p1", evidence: { pro_execution_verified: true } });
+  // Fallback-terminal conversation: not an orphan.
+  record("c.json", { at: now, conversation_id: "WEB:mini", browser_profile: "p2", evidence: { resolved_model_slug: "gpt-5-5-mini" } });
+  // Orphan later recovered: not an orphan.
+  record("d1.json", { at: now, conversation_id: "WEB:rec", browser_profile: "p3", error: "Request was aborted" });
+  record("d2.json", { at: now, conversation_id: "WEB:rec", browser_profile: "p3", recovered: true });
+  const orphans = orphanedConversationsFromAudits(7, dir);
+  assert.deepEqual(orphans.map((o) => o.conversationId), ["WEB:orphan"]);
+  assert.equal(orphans[0].browserProfile, "p1");
+  assert.equal(orphans[0].prompt_sha256, "abc");
+  // Old records outside the window are ignored.
+  assert.deepEqual(orphanedConversationsFromAudits(0, dir), []);
+});

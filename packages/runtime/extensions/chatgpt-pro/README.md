@@ -86,3 +86,20 @@ orchestrator governor
 A live validation must be a Pi request and must leave `pro_execution_verified=true` in the newest provider-audit JSON. The active research lane uses the same invariant and remains unavailable while the entitlement lease or cooldown is occupied.
 
 Removal means deleting this source directory and its Pi extension and `~/.local/bin/pro` deploy links, removing `playwright-core` if unused, deleting the generated pool/audit state, deleting the Kernel `chatgpt.com` managed-auth connection if no other workflow uses it, and deploying again.
+
+## Durable turns and recovery
+
+A submission's server conversation id is captured from the POST SSE stream
+(the `/c/WEB:...` URL segment is an optimistic client placeholder the backend
+API rejects) and registered under
+`~/data/agent-orchestrator/pro/pending/` until the turn reaches a terminal
+outcome. A router fallback (`resolved_model_slug` ≠ `gpt-5-6-pro`) is detected
+from the same stream within seconds and retried on another entitlement (up to
+three) instead of failing the delegation. If a controller restart or abort
+kills the polling side, ChatGPT keeps reasoning server-side and the pending
+record survives: the controller harvests it automatically at startup, and
+`orchestrator pro-recover [--from-audits DAYS]` does the same on demand
+(audit-era orphans with placeholder ids are matched to real conversations by
+prompt SHA-256 against the account's recent history). Verified recovered
+responses become ordinary provider audits plus advisory artifacts under
+`~/data/projects-research/pro/recovered/`.
