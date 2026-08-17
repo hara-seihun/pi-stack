@@ -751,6 +751,32 @@ test("private balanced routing instruments assign a concrete healthy account", (
   assert.equal(Number.isInteger(selected.block), true);
 });
 
+test("premature calibration state cannot poison model admission", () => {
+  const statePath = path.join(temporary, "distributed-state-migration.json");
+  fs.writeFileSync(statePath, JSON.stringify({
+    version: 1,
+    seed: "bad-state",
+    share: 0,
+    sensorInconsistent: true,
+    estimates: { "openai-codex/gpt-5.6-sol:xhigh": { upper: 68.6 } },
+  }));
+  const feedback = new DistributedQuotaFeedback(loadConfig(), statePath);
+  assert.equal(feedback.state.share, loadConfig().plan.distributed.initialShare);
+  assert.equal(feedback.state.sensorInconsistent, false);
+  assert.deepEqual(feedback.state.estimates, {});
+
+  const calibration = {
+    accounts: [{ provider: "a" }, { provider: "b" }],
+    assignments: [{ provider: "a", model: "openai-codex/gpt-5.6-sol", thinking: "xhigh", instrumentBlock: 0 }],
+    priors: { "openai-codex/gpt-5.6-sol:xhigh": 0.58 },
+    rate: () => 0.58,
+  };
+  for (let sample = 0; sample < feedback.config.calibrationMinSamples - 1; sample++) {
+    feedback.calibrate({ a: sample % 2, b: (sample + 1) % 2 }, calibration, 1 / 12, sample * 300_000);
+  }
+  assert.deepEqual(feedback.state.estimates, {});
+});
+
 test("a frozen provider meter trips and a later advance clears the consistency circuit", () => {
   const config = loadConfig();
   const feedback = new DistributedQuotaFeedback(config, path.join(temporary, "distributed-circuit.json"));

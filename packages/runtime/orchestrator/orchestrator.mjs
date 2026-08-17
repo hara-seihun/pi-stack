@@ -86,7 +86,8 @@ const DEFAULT_CONFIG = {
       rateFloor: 0.01,
       consistencyLimitPercent: 2,
       routingExcitation: 0.35,
-      routingBlockMinutes: 5
+      routingBlockMinutes: 5,
+      calibrationMinSamples: 1000
     },
     anthropic: {
       pollSeconds: 300,
@@ -126,12 +127,13 @@ export function loadConfig() {
   if (!config.plan.modelMixes || typeof config.plan.modelMixes !== "object") config.plan.modelMixes = {};
   config.plan.distributed = { ...DEFAULT_CONFIG.plan.distributed, ...config.plan.distributed };
   const distributed = config.plan.distributed;
-  for (const key of ["targetPercent", "slopeWindowHours", "safetyDelayHours", "initialShare", "minimumShare", "blindDecay", "controlGain", "additiveRamp", "minimumRatio", "maximumRatio", "rateFloor", "consistencyLimitPercent", "routingExcitation", "routingBlockMinutes"]) {
+  for (const key of ["targetPercent", "slopeWindowHours", "safetyDelayHours", "initialShare", "minimumShare", "blindDecay", "controlGain", "additiveRamp", "minimumRatio", "maximumRatio", "rateFloor", "consistencyLimitPercent", "routingExcitation", "routingBlockMinutes", "calibrationMinSamples"]) {
     if (!(Number.isFinite(distributed[key]) && distributed[key] >= 0)) fail(`invalid config.plan.distributed.${key}`);
   }
   if (distributed.targetPercent <= 0 || distributed.targetPercent > 100 || distributed.initialShare > 1 ||
       distributed.minimumShare > distributed.initialShare || distributed.blindDecay > 1 || distributed.routingExcitation > 1 ||
-      distributed.minimumRatio > distributed.maximumRatio || distributed.routingBlockMinutes <= 0) {
+      distributed.minimumRatio > distributed.maximumRatio || distributed.routingBlockMinutes <= 0 ||
+      !Number.isInteger(distributed.calibrationMinSamples) || distributed.calibrationMinSamples < 100) {
     fail("invalid config.plan.distributed bounds");
   }
   const anthropic = config.plan.anthropic;
@@ -450,7 +452,7 @@ export class DistributedQuotaFeedback {
     this.statePath = statePath;
     this.persist = persist;
     this.state = {
-      version: 1,
+      version: 2,
       seed: randomBytes(16).toString("hex"),
       share: this.config.initialShare,
       previous: {},
@@ -470,7 +472,7 @@ export class DistributedQuotaFeedback {
     };
     try {
       const parsed = JSON.parse(fs.readFileSync(statePath, "utf8"));
-      if (parsed?.version === 1 && typeof parsed.seed === "string" && Number.isFinite(parsed.share)) {
+      if (parsed?.version === 2 && typeof parsed.seed === "string" && Number.isFinite(parsed.share)) {
         this.state = { ...this.state, ...parsed };
       }
     } catch {}
@@ -525,7 +527,7 @@ export class DistributedQuotaFeedback {
     this.state.samples.push({ at, y: Object.fromEntries(Object.entries(accountDeltas).map(([provider, delta]) => [provider, delta / elapsedHours])), x, z });
     const cutoff = at - 28 * 24 * 3600_000;
     this.state.samples = this.state.samples.filter((sample) => sample.at >= cutoff).slice(-20_000);
-    if (this.state.samples.length < 30) return;
+    if (this.state.samples.length < this.config.calibrationMinSamples) return;
     const maxLag = Math.max(0, Math.ceil(30 * 60_000 / Math.max(1, at - this.state.samples.at(-2).at)));
     for (const modelKey of Object.keys(calibration.priors ?? {})) {
       let selected = null;
@@ -550,19 +552,21 @@ export class DistributedQuotaFeedback {
         if (denominator > 1e-6 && (!selected || numerator > selected.numerator)) selected = { lag, numerator, denominator, moments };
       }
       if (!selected) continue;
-      const estimate = Math.max(0, selected.numerator / selected.denominator);
-      const residuals = selected.moments.map((moment) => moment.numerator - estimate * moment.denominator);
+      const multiplier = Math.max(0, selected.numerator / selected.denominator);
+      const residuals = selected.moments.map((moment) => moment.numerator - multiplier * moment.denominator);
       const residualMean = residuals.reduce((sum, value) => sum + value, 0) / residuals.length;
       const variance = residuals.length > 1
         ? residuals.reduce((sum, value) => sum + (value - residualMean) ** 2, 0) / (residuals.length - 1)
         : Number.POSITIVE_INFINITY;
       const denominatorMean = selected.denominator / residuals.length;
       const standardError = denominatorMean > 0 ? Math.sqrt(variance / residuals.length) / denominatorMean : Number.POSITIVE_INFINITY;
-      if (Number.isFinite(estimate) && Number.isFinite(standardError)) {
+      const prior = calibration.priors[modelKey];
+      if (Number.isFinite(multiplier) && Number.isFinite(standardError) && Number.isFinite(prior) && prior > 0) {
         this.state.estimates[modelKey] = {
-          estimate,
-          upper: estimate + 2 * standardError,
-          standardError,
+          estimate: prior * multiplier,
+          upper: prior * (multiplier + 2 * standardError),
+          standardError: prior * standardError,
+          multiplier,
           samples: residuals.length,
           lagMinutes: selected.lag * Math.max(1, at - this.state.samples.at(-2).at) / 60_000,
           at,
