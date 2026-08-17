@@ -8,7 +8,7 @@ import test from "node:test";
 
 const temporary = fs.mkdtempSync(path.join(os.tmpdir(), "agent-orchestrator-test-"));
 process.env.AGENT_ORCHESTRATOR_DATA = temporary;
-const { AnthropicGovernor, cancelTask, chooseMixedVariant, choosePlanProvider, chooseTask, codexSubscriptionLifecycle, completionToolResult, Controller, cpuPercent, DISPATCH_NO_WORK_TTL_MS, dispatchedTaskPrompt, evaluateDispatch, evaluateWorkCheck, insertRun, isolateTaskShell, isEligibleCodexPlan, launchBatchSize, loadConfig, nextIncompleteState, openDb, orchestratedTaskPrompt, parseAnthropicUsage, PlanGovernor, planWindowBurnPerHour, proEntitlementSnapshot, proLaunchAvailability, rankTasks, resourceSlots, setTaskOptions, shouldAdvanceBackoff, taskSettings, TOOL_SHELL, validateCompletion, validateModelPolicy, WORK_CHECK_TTL_MS, workCheckStale, workReady } = await import("./orchestrator.mjs");
+const { AnthropicGovernor, anthropicOpusHasHeadroom, cancelTask, chooseMixedVariant, choosePlanProvider, chooseTask, codexSubscriptionLifecycle, completionToolResult, Controller, cpuPercent, DISPATCH_NO_WORK_TTL_MS, dispatchedTaskPrompt, evaluateDispatch, evaluateWorkCheck, insertRun, isolateTaskShell, isEligibleCodexPlan, launchBatchSize, loadConfig, nextIncompleteState, openDb, orchestratedTaskPrompt, parseAnthropicUsage, PlanGovernor, planWindowBurnPerHour, proEntitlementSnapshot, proLaunchAvailability, rankTasks, resourceSlots, setTaskOptions, shouldAdvanceBackoff, taskSettings, TOOL_SHELL, validateCompletion, validateModelPolicy, WORK_CHECK_TTL_MS, workCheckStale, workReady } = await import("./orchestrator.mjs");
 
 test.after(() => fs.rmSync(temporary, { recursive: true, force: true }));
 
@@ -194,6 +194,20 @@ test("controller shutdown aborts recoverable sessions instead of freezing replac
   await controller.stop();
   assert.equal(controller.stopping, true);
   assert.equal(aborted, true);
+});
+
+test("controller shutdown has an internal deadline when an SDK session never settles", async () => {
+  const controller = new Controller(null, {});
+  let disposed = false;
+  controller.active.set("hung", {
+    promise: new Promise(() => {}),
+    session: { abort() {}, dispose() { disposed = true; } },
+  });
+  const started = Date.now();
+  await controller.stop(10);
+  assert.ok(Date.now() - started < 1000);
+  assert.equal(disposed, true);
+  assert.equal(controller.active.size, 0);
 });
 
 test("shutdown and crash recovery never turn interruption into task backoff", () => {
@@ -499,33 +513,45 @@ test("an independent Opus account remains usable when Codex is full before the t
   assert.equal(assignment.model, "anthropic/claude-opus-5");
 });
 
-test("Anthropic usage parsing and account admission fail closed on exhausted windows", async () => {
+test("Anthropic Opus admission preserves enough shared weekly capacity for Fable", async () => {
   const at = Date.UTC(2026, 7, 17, 6);
-  const parsed = parseAnthropicUsage({
-    five_hour: { utilization: 20, resets_at: new Date(at + 3600_000).toISOString() },
-    seven_day: { utilization: 40, resets_at: new Date(at + 86400_000).toISOString() },
-    seven_day_opus: { utilization: 60, resets_at: new Date(at + 86400_000).toISOString() },
+  const usage = (session, shared, fable, extraUsagePercent = 0) => parseAnthropicUsage({
+    limits: [
+      { kind: "session", percent: session, resets_at: new Date(at + 3600_000).toISOString() },
+      { kind: "weekly_all", percent: shared, resets_at: new Date(at + 86400_000).toISOString() },
+      { kind: "weekly_scoped", percent: fable, resets_at: new Date(at + 86400_000).toISOString(), scope: { model: { display_name: "Fable" } } },
+    ],
+    spend: { enabled: extraUsagePercent > 0, percent: extraUsagePercent },
   }, at);
+  const parsed = usage(20, 40, 60);
   assert.equal(parsed.windows.fiveHour.utilization, 20);
-  assert.equal(parsed.windows.opusWeekly.utilization, 60);
-  assert.equal(parseAnthropicUsage({ five_hour: null, seven_day: null }, at), null);
-  assert.equal(parseAnthropicUsage({
-    five_hour: { utilization: 0 }, seven_day: { utilization: 0 }, spend: { enabled: true, percent: 100 },
-  }, at).spendExhausted, true);
+  assert.equal(parsed.windows.sharedWeekly.utilization, 40);
+  assert.equal(parsed.windows.fableWeekly.utilization, 60);
+  assert.equal(parseAnthropicUsage({ five_hour: { utilization: 0 }, seven_day: { utilization: 0 } }, at), null);
+
+  const account = (provider, session, shared, fable, extraUsagePercent = 0) => ({
+    provider, stale: false, ...usage(session, shared, fable, extraUsagePercent),
+  });
+  assert.equal(anthropicOpusHasHeadroom(account("anthropic", 0, 50, 0)), false);
+  assert.equal(anthropicOpusHasHeadroom(account("anthropic", 0, 49, 0)), true);
+  assert.equal(anthropicOpusHasHeadroom(account("anthropic", 0, 50, 100)), true);
+  assert.equal(anthropicOpusHasHeadroom(account("anthropic", 0, 100, 100)), false);
+  assert.equal(anthropicOpusHasHeadroom(account("anthropic", 100, 0, 100)), false);
+  assert.equal(anthropicOpusHasHeadroom(account("anthropic", 0, 0, 0, 100)), true, "spent extra-usage credits must not hide untouched plan capacity");
 
   const config = loadConfig();
   const governor = new AnthropicGovernor(config);
   governor.snapshot = {
     at, expiresAt: at + 1000, configured: 2, healthy: 2, withHeadroom: 1,
     accounts: [
-      { provider: "anthropic", stale: false, spendExhausted: false, windows: parsed.windows },
-      { provider: "anthropic-2", stale: false, spendExhausted: true, windows: parsed.windows },
+      account("anthropic", 0, 50, 0),
+      account("anthropic-2", 0, 50, 100),
     ],
   };
   const variant = { model: "anthropic/claude-opus-5", thinking: "xhigh" };
-  assert.equal((await governor.allows(variant, [], governor.snapshot)).provider, "anthropic");
-  assert.equal((await governor.allows(variant, [{ provider: "anthropic", model: variant.model, thinking: variant.thinking }], governor.snapshot)).ok, false);
-  governor.noteFailure("anthropic", new Error("429 usage limit reached"), Date.now());
+  assert.equal((await governor.allows(variant, [], governor.snapshot)).provider, "anthropic-2");
+  assert.equal((await governor.allows(variant, [{ provider: "anthropic-2", model: variant.model, thinking: variant.thinking }], governor.snapshot)).ok, false);
+  governor.noteFailure("anthropic-2", new Error("429 usage limit reached"), Date.now());
   assert.equal((await governor.allows(variant, [], governor.snapshot)).ok, false);
 });
 

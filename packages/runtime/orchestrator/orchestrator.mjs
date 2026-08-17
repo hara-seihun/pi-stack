@@ -469,7 +469,7 @@ async function resolveOAuthCredential({ modelRuntime, provider, baseProvider, st
 
 function anthropicWindow(raw, durationHours, fetchedAt) {
   if (!raw || typeof raw !== "object") return null;
-  const utilization = Number(raw.utilization);
+  const utilization = Number(raw.utilization ?? raw.percent);
   if (!Number.isFinite(utilization)) return null;
   const parsedReset = raw.resets_at ? Date.parse(raw.resets_at) : Number.NaN;
   return {
@@ -479,23 +479,33 @@ function anthropicWindow(raw, durationHours, fetchedAt) {
   };
 }
 
+function anthropicLimit(body, kind, displayName = null) {
+  const limits = Array.isArray(body?.limits) ? body.limits : [];
+  return limits.find((limit) => limit?.kind === kind && (displayName === null ||
+    String(limit?.scope?.model?.display_name ?? "").trim().toLowerCase() === displayName.toLowerCase())) ?? null;
+}
+
 export function parseAnthropicUsage(body, fetchedAt = now()) {
   const windows = {
-    fiveHour: anthropicWindow(body?.five_hour, 5, fetchedAt),
-    weekly: anthropicWindow(body?.seven_day, 7 * 24, fetchedAt),
-    opusWeekly: anthropicWindow(body?.seven_day_opus, 7 * 24, fetchedAt),
+    fiveHour: anthropicWindow(anthropicLimit(body, "session") ?? body?.five_hour, 5, fetchedAt),
+    sharedWeekly: anthropicWindow(anthropicLimit(body, "weekly_all") ?? body?.seven_day, 7 * 24, fetchedAt),
+    fableWeekly: anthropicWindow(anthropicLimit(body, "weekly_scoped", "Fable"), 7 * 24, fetchedAt),
   };
-  if (!windows.fiveHour || !windows.weekly) return null;
+  if (Object.values(windows).some((window) => window === null)) return null;
   const spendPercent = Number(body?.spend?.percent ?? body?.extra_usage?.utilization);
   return {
     windows,
-    spendExhausted: (body?.spend?.enabled === true || body?.extra_usage?.is_enabled === true) &&
+    extraUsageExhausted: (body?.spend?.enabled === true || body?.extra_usage?.is_enabled === true) &&
       Number.isFinite(spendPercent) && spendPercent >= 99,
   };
 }
 
-function anthropicHasHeadroom(account) {
-  return !account.spendExhausted && Object.values(account.windows).filter(Boolean).every((window) => window.utilization < 100);
+export function anthropicOpusHasHeadroom(account) {
+  const { fiveHour, sharedWeekly, fableWeekly } = account.windows ?? {};
+  if (!fiveHour || !sharedWeekly || !fableWeekly || fiveHour.utilization >= 100 || sharedWeekly.utilization >= 100) return false;
+  const sharedRemaining = 100 - sharedWeekly.utilization;
+  const fableRemaining = 100 - fableWeekly.utilization;
+  return 2 * sharedRemaining > fableRemaining;
 }
 
 export class AnthropicGovernor {
@@ -543,7 +553,7 @@ export class AnthropicGovernor {
       if (!response.ok) return { account: null, error: `usage endpoint HTTP ${response.status}` };
       const usage = parseAnthropicUsage(await response.json(), fetchedAt);
       if (!usage) return { account: null, error: "usage endpoint returned malformed windows" };
-      const account = { provider, windows: usage.windows, spendExhausted: usage.spendExhausted, fetchedAt, stale: false };
+      const account = { provider, windows: usage.windows, extraUsageExhausted: usage.extraUsageExhausted, fetchedAt, stale: false };
       this.lastGood.set(provider, account);
       return { account, error: null };
     } catch (error) {
@@ -583,7 +593,7 @@ export class AnthropicGovernor {
       expiresAt: fetchedAt + this.config.plan.anthropic.pollSeconds * 1000,
       configured: configured.length,
       healthy: accounts.length,
-      withHeadroom: accounts.filter(anthropicHasHeadroom).length,
+      withHeadroom: accounts.filter(anthropicOpusHasHeadroom).length,
       accounts,
       errors,
     };
@@ -604,7 +614,7 @@ export class AnthropicGovernor {
     }
     const limit = this.config.plan.anthropic.maxActivePerAccount;
     const selected = usage.accounts
-      .filter((account) => anthropicHasHeadroom(account) && (this.cooldowns.get(account.provider) ?? 0) <= now())
+      .filter((account) => anthropicOpusHasHeadroom(account) && (this.cooldowns.get(account.provider) ?? 0) <= now())
       .map((account) => ({ account, active: activeByProvider.get(account.provider) ?? 0 }))
       .filter((item) => item.active < limit)
       .sort((left, right) => left.active - right.active ||
@@ -916,6 +926,7 @@ export class Controller {
     this.plan = new PlanGovernor(config);
     this.active = new Map();
     this.stopping = false;
+    this.stopPromise = null;
     this.lastThrottledEvents = new Map();
     this.lastControllerError = { at: 0, detail: "" };
     this.previousCpu = cpuTotals();
@@ -1220,17 +1231,36 @@ export class Controller {
       catch (error) { this.controllerError(String(error.stack ?? error)); }
       await sleep(TICK_MS);
     }
-    await Promise.allSettled([...this.active.values()].map(async ({ promise }) => promise));
+    await this.stop();
   }
 
-  async stop() {
-    // Persistent tasks make every run recoverable, while multi-hour drains make
-    // systemd unable to start the replacement controller and silently freeze
-    // the whole fleet. Stop replenishing, abort in-flight SDK sessions, let
-    // their execute() paths record terminal custody, and restart promptly.
+  async stop(timeoutMs = 5000) {
+    if (this.stopPromise) return this.stopPromise;
     this.stopping = true;
-    for (const { session } of this.active.values()) session?.abort();
-    await Promise.allSettled([...this.active.values()].map(async ({ promise }) => promise));
+    const active = [...this.active.entries()];
+    this.stopPromise = (async () => {
+      for (const [, { session }] of active) {
+        try {
+          const aborting = session?.abort();
+          if (aborting && typeof aborting.catch === "function") void aborting.catch(() => {});
+        } catch {}
+      }
+      const settled = await Promise.race([
+        Promise.allSettled(active.map(([, { promise }]) => promise)).then(() => true),
+        sleep(timeoutMs).then(() => false),
+      ]);
+      if (settled) return;
+      for (const [runId, { task, session }] of active) {
+        try { session?.dispose(); } catch {}
+        if (!this.db) continue;
+        const row = this.db.prepare("SELECT status FROM run WHERE id=?").get(runId);
+        if (row?.status === "running") {
+          this.finish(task, runId, "interrupted", null, [], "controller shutdown timed out", false, true);
+        }
+      }
+      this.active.clear();
+    })();
+    return this.stopPromise;
   }
 }
 
@@ -1434,7 +1464,7 @@ async function main(argv = process.argv.slice(2)) {
       accounts: anthropicSnapshot.accounts.map((account) => ({
         provider: account.provider,
         stale: account.stale,
-        spendExhausted: account.spendExhausted,
+        extraUsageExhausted: account.extraUsageExhausted,
         windows: Object.fromEntries(Object.entries(account.windows).filter(([, value]) => value).map(([name, value]) => [name, {
           utilization: value.utilization,
           resetsAt: value.resetsAt,
@@ -1461,8 +1491,18 @@ async function main(argv = process.argv.slice(2)) {
   if (command === "run") {
     const release = acquireLock();
     const controller = new Controller(db, loadConfig());
-    const stop = async () => { await controller.stop(); };
-    process.once("SIGTERM", stop); process.once("SIGINT", stop);
+    const terminate = async () => {
+      try {
+        await controller.stop();
+        release();
+        db.close();
+        process.exit(0);
+      } catch (error) {
+        console.error(error.stack ?? error);
+        process.exit(1);
+      }
+    };
+    process.once("SIGTERM", terminate); process.once("SIGINT", terminate);
     try { await controller.init(); await controller.run(); }
     finally { release(); }
     return;
