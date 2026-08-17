@@ -728,10 +728,11 @@ export class Controller {
     this.plan.setModelRuntime(this.modelRuntime);
   }
 
-  async launch(task, provider, runId = randomId(), packet = null) {
+  async launch(task, provider, runId = randomId(), packet = null, dispatchMs = null) {
     insertRun(this.db, runId, task.id, provider);
     this.db.prepare("UPDATE run SET dispatched=? WHERE id=?").run(packet === null ? 0 : 1, runId);
-    event(this.db, "run-started", `${runModelKey(task)} via ${provider}${packet === null ? "" : " (dispatched)"}`, task.id, runId);
+    const note = packet === null ? "" : ` (dispatched ${dispatchMs ?? "?"}ms, ${packet.length}B)`;
+    event(this.db, "run-started", `${runModelKey(task)} via ${provider}${note}`, task.id, runId);
     const promise = this.execute(task, runId, provider, packet).finally(() => this.active.delete(runId));
     this.active.set(runId, { task, provider, promise });
   }
@@ -965,7 +966,9 @@ export class Controller {
         }
         if (task.dispatch) {
           const runId = randomId();
+          const dispatchStarted = now();
           const dispatched = await evaluateDispatch(task, runId);
+          const dispatchMs = now() - dispatchStarted;
           if (dispatched.state === "no-work") {
             const checkedAt = now();
             this.db.prepare("UPDATE task SET work_state='no-work',work_checked_at=? WHERE id=?").run(checkedAt, task.id);
@@ -978,7 +981,7 @@ export class Controller {
             this.throttledEvent("dispatch-error", dispatched.detail, task.id);
             await this.launch(task, governed.provider);
           } else {
-            await this.launch(task, governed.provider, runId, dispatched.packet);
+            await this.launch(task, governed.provider, runId, dispatched.packet, dispatchMs);
           }
         } else {
           await this.launch(task, governed.provider);
