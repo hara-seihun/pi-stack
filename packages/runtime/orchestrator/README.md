@@ -87,6 +87,22 @@ Every autonomous SDK `bash` call uses [`tool-shell`](tool-shell), which runs tha
 
 Runtime state is canonical in `/home/kenan/data/agent-orchestrator/orchestrator.sqlite3`; Pi session JSONL is retained under `sessions/`. The SQLite database uses WAL and records tasks, each run's actual model and exact provider assignment, completion reports, whether each launch processed a real work unit and was dispatched, and bounded controller events. `governor-blocked` logging is interval-throttled (details embed live burn numbers, so detail-sensitive throttling would log every tick), and events older than fourteen days are purged on a six-hour cadence. Every table has automatic millisecond `created_at` and `updated_at` columns maintained by SQLite triggers; existing rows are backfilled from their original event times.
 
+## Distributed-governor simulator
+
+[`distributed-governor-simulator.mjs`](distributed-governor-simulator.mjs) tests quota control and causal attribution when an unknown number of machines share the same account pool but exchange no runtime state. It contains two experiments:
+
+- shared-meter feedback tests whether every installation independently scaling against the same aggregate burn keeps quota consumption paced to reset;
+- private, balanced account-routing instruments test whether one installation can recover model costs and its own contribution from quantized per-account meters while every other installation is latent noise.
+
+The control experiment deliberately shows that a single integer aggregate meter can govern total burn but cannot practically attribute model costs. The calibration experiment adds zero-sum routing excitation across the independently metered accounts, pooling enough equations to recover the expected two-machine case without consuming extra quota.
+
+The adversarial suite includes arrivals and departures, synchronized bursts, changing model costs, delayed and missing meter updates, hidden non-Pi consumption, 100 and 1,000 simultaneous cold starts, a frozen-meter consistency circuit, cloned machine identities, a consumer deliberately correlated or anti-correlated with another machine's private routing code, and an unbounded-population first-pulse counterexample. It records unsafe and non-identifiable cases rather than weakening their assertions.
+
+```bash
+node orchestrator/distributed-governor-simulator.mjs
+node --test orchestrator/distributed-governor-simulator.test.mjs
+```
+
 ## Validation
 
 ```bash
