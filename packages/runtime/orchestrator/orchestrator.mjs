@@ -40,6 +40,7 @@ const CHATGPT_PRO_PROVIDER = "chatgpt-pro";
 const CODEX_PROVIDER = "openai-codex";
 const ANTHROPIC_PROVIDER = "anthropic";
 const ANTHROPIC_USAGE_ENDPOINT = "https://api.anthropic.com/api/oauth/usage";
+const ANTHROPIC_USAGE_CACHE_PATH = path.join(DATA, "anthropic-plan-usage.json");
 export const TOOL_SHELL = fileURLToPath(new URL("./tool-shell", import.meta.url));
 const TICK_MS = 5000;
 const execFileAsync = promisify(execFile);
@@ -509,16 +510,25 @@ export function anthropicOpusHasHeadroom(account) {
 }
 
 export class AnthropicGovernor {
-  constructor(config, { modelRuntime = null, authPath = AUTH_PATH, fetcher = fetch, readCredential = readStoredCredential } = {}) {
+  constructor(config, { modelRuntime = null, authPath = AUTH_PATH, fetcher = fetch, readCredential = readStoredCredential, cachePath = ANTHROPIC_USAGE_CACHE_PATH } = {}) {
     this.config = config;
     this.modelRuntime = modelRuntime;
     this.authPath = authPath;
     this.fetcher = fetcher;
     this.readCredential = readCredential;
+    this.cachePath = cachePath;
     this.snapshot = null;
     this.lastGood = new Map();
     this.cooldowns = new Map();
     this.refreshing = null;
+    try {
+      const cached = JSON.parse(fs.readFileSync(this.cachePath, "utf8"));
+      for (const account of Array.isArray(cached?.accounts) ? cached.accounts : []) {
+        if (typeof account?.provider === "string" && Number.isFinite(account?.fetchedAt) && account?.windows) {
+          this.lastGood.set(account.provider, account);
+        }
+      }
+    } catch {}
   }
 
   setModelRuntime(modelRuntime) { this.modelRuntime = modelRuntime; }
@@ -597,6 +607,7 @@ export class AnthropicGovernor {
       accounts,
       errors,
     };
+    atomicWrite(this.cachePath, `${JSON.stringify(this.snapshot, null, 2)}\n`);
     return this.snapshot;
   }
 

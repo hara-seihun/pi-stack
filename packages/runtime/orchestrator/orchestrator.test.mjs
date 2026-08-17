@@ -555,6 +555,23 @@ test("Anthropic Opus admission preserves enough shared weekly capacity for Fable
   assert.equal((await governor.allows(variant, [], governor.snapshot)).ok, false);
 });
 
+test("Anthropic governor restores per-account usage across controller restarts", () => {
+  const cachePath = path.join(temporary, "anthropic-usage-cache.json");
+  const account = {
+    provider: "anthropic-2",
+    fetchedAt: Date.now(),
+    stale: false,
+    windows: {
+      fiveHour: { utilization: 0 },
+      sharedWeekly: { utilization: 20 },
+      fableWeekly: { utilization: 40 },
+    },
+  };
+  fs.writeFileSync(cachePath, JSON.stringify({ accounts: [account] }));
+  const governor = new AnthropicGovernor(loadConfig(), { cachePath });
+  assert.deepEqual(governor.lastGood.get("anthropic-2"), account);
+});
+
 test("cancelled Codex subscriptions retire exactly at their access deadline", () => {
   const at = Date.UTC(2026, 7, 23, 12);
   const future = new Date(at + 60_000).toISOString();
