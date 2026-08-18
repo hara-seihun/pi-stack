@@ -375,6 +375,24 @@ test("the tool shell waits through a transiently unavailable user bus", () => {
   assert.equal(result.stdout, "bus-recovered");
 });
 
+test("the tool shell thaws a frozen shared tool slice before launching", () => {
+  const mockBin = fs.mkdtempSync(path.join(temporary, "tool-shell-mock-"));
+  const calls = path.join(mockBin, "systemctl.calls");
+  const executable = 0o755;
+  fs.writeFileSync(path.join(mockBin, "busctl"), "#!/usr/bin/env bash\nexit 0\n", { mode: executable });
+  fs.writeFileSync(path.join(mockBin, "systemd-id128"), "#!/usr/bin/env bash\nprintf '00000000000000000000000000000001\\n'\n", { mode: executable });
+  fs.writeFileSync(path.join(mockBin, "systemctl"), `#!/usr/bin/env bash\nprintf '%s\\n' "$*" >> ${JSON.stringify(calls)}\nif [[ " $* " == *" show "* ]]; then printf 'frozen\\n'; fi\n`, { mode: executable });
+  fs.writeFileSync(path.join(mockBin, "systemd-run"), "#!/usr/bin/env bash\nwhile [[ $# -gt 0 && $1 != -- ]]; do shift; done\nshift\nexec \"$@\"\n", { mode: executable });
+  const result = spawnSync(TOOL_SHELL, ["-c", "printf slice-recovered"], {
+    encoding: "utf8",
+    env: { ...process.env, PATH: `${mockBin}:${process.env.PATH}` },
+    timeout: 10_000,
+  });
+  assert.equal(result.status, 0, result.stderr);
+  assert.equal(result.stdout, "slice-recovered");
+  assert.match(fs.readFileSync(calls, "utf8"), /--user thaw pi-tools\.slice/);
+});
+
 test("one concurrent launch wave advances task backoff only once", () => {
   assert.equal(shouldAdvanceBackoff(100, 100), true);
   assert.equal(shouldAdvanceBackoff(100, 101), true);

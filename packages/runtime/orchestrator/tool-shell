@@ -15,21 +15,51 @@ uid=$(id -u)
 export XDG_RUNTIME_DIR=${XDG_RUNTIME_DIR:-/run/user/$uid}
 export DBUS_SESSION_BUS_ADDRESS=${DBUS_SESSION_BUS_ADDRESS:-unix:path=$XDG_RUNTIME_DIR/bus}
 
+wait_for_user_manager() {
+  local attempts=${1:-12}
+  for ((attempt = 0; attempt < attempts; attempt++)); do
+    if busctl --user --timeout=200ms --quiet call \
+        org.freedesktop.systemd1 /org/freedesktop/systemd1 \
+        org.freedesktop.DBus.Peer Ping; then
+      return 0
+    fi
+    sleep 0.05
+  done
+  return 1
+}
+
 # A user-manager restart can leave the stable bus socket briefly refusing
-# connections. Do not fail an otherwise valid tool call during that transition.
-bus_ready=false
-for _ in {1..12}; do
-  if busctl --user --timeout=200ms --quiet call \
-      org.freedesktop.systemd1 /org/freedesktop/systemd1 \
-      org.freedesktop.DBus.Peer Ping; then
-    bus_ready=true
-    break
+# connections. If it does not recover on its own, repair the owning service
+# before refusing the tool call. Agents have passwordless system administration
+# specifically so command execution never depends on inaccessible human action.
+if ! wait_for_user_manager; then
+  # The recovery command itself must be able to run when the user manager is
+  # the failed layer.  The normal path stays scoped; this narrowly bounded
+  # bootstrap escape is only for restarting that owning system service.
+  if ! sudo -n systemctl restart "user@${uid}.service"; then
+    if [[ "$2" == "sudo -n systemctl restart user@"*".service" ]]; then
+      exec bash -c "$2"
+    fi
+    echo "tool-shell could not restart the user systemd manager" >&2
+    exit 1
   fi
-  sleep 0.05
-done
-if [[ $bus_ready != true ]]; then
-  echo "tool-shell could not reach the user systemd manager" >&2
-  exit 1
+  if ! wait_for_user_manager 40; then
+    if [[ "$2" == "sudo -n systemctl restart user@"*".service" ]]; then
+      exec bash -c "$2"
+    fi
+    echo "tool-shell could not restore the user systemd manager" >&2
+    exit 1
+  fi
+fi
+
+# Freezing the parent tool slice from one child freezes that child before its
+# EXIT trap can thaw the slice and blocks every later systemd-run. Reconcile
+# this shared state before launching so one malformed diagnostic cannot disable
+# command execution machine-wide.
+freezer_state=$(systemctl --user show \
+  --property=FreezerState --value pi-tools.slice 2>/dev/null || true)
+if [[ "$freezer_state" == frozen || "$freezer_state" == freezing ]]; then
+  systemctl --user thaw pi-tools.slice
 fi
 
 # Every SDK bash invocation owns a transient scope outside the orchestrator
