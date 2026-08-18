@@ -122,7 +122,7 @@ test("governor leases resume interrupted work then rotate after productive bound
   const task = db.prepare("SELECT * FROM task WHERE id='task'").get();
   assert.equal(taskSupportsAssignment(config, task, { model: "openai-codex/gpt-5.6-sol", thinking: "xhigh" }), true);
   assert.equal(taskSupportsAssignment(config, task, { model: "anthropic/claude-opus-5", thinking: "xhigh" }), true);
-  assert.equal(taskSupportsAssignment(config, task, { model: "cursor/grok-4.6-max", thinking: "xhigh" }), true);
+  assert.equal(taskSupportsAssignment(config, task, { model: "cursor/grok-4.6", thinking: "xhigh" }), true);
 
   const controller = new Controller(db, config);
   insertRun(db, "run-1", task.id, "openai-codex-3", at, task.model, task.thinking);
@@ -843,28 +843,39 @@ test("Anthropic Opus admission preserves enough shared weekly capacity for Fable
   assert.equal((await governor.allows(variant, [], governor.snapshot)).ok, false);
 });
 
-test("Cursor plan usage admits one paid-account Grok lane with a reserve", async () => {
+test("Cursor plan usage dynamically admits Grok load from sustainable burn", async () => {
   const at = Date.UTC(2026, 7, 18, 12);
   assert.deepEqual(parseCursorUsage({
+    billingCycleStart: at - 86400_000,
     billingCycleEnd: at + 86400_000,
     planUsage: { totalPercentUsed: 25 },
     spendLimitUsage: { limitType: "user" },
-  }, at), { used: 25, resetAt: at + 86400_000, membershipType: "pro" });
+  }, at), {
+    used: 25,
+    startAt: at - 86400_000,
+    resetAt: at + 86400_000,
+    reportedReset: true,
+    membershipType: "pro",
+  });
   assert.equal(parseCursorUsage({ planUsage: {} }, at), null);
 
   const config = loadConfig();
-  const runtime = { getModel: (provider, id) => provider === "cursor" && id === "grok-4.6-max" ? { provider, id } : undefined };
-  const governor = new CursorGovernor(config, { modelRuntime: runtime });
+  const runtime = { getModel: (provider, id) => provider === "cursor" && id === "grok-4.6" ? { provider, id } : undefined };
+  const feedback = new DistributedQuotaFeedback(config, path.join(temporary, "cursor-feedback.json"), false);
+  feedback.state.accountShares.cursor = 1;
+  const governor = new CursorGovernor(config, { modelRuntime: runtime, feedback, cachePath: path.join(temporary, "cursor-cache.json") });
   governor.snapshot = {
     at,
     expiresAt: Date.now() + 1000,
     healthy: 1,
-    usage: { used: 25, resetAt: at + 86400_000, membershipType: "pro" },
+    usage: { used: 25, startAt: at - 86400_000, resetAt: at + 86400_000, reportedReset: true, membershipType: "pro" },
+    distributed: { share: 1, accounts: { cursor: { sustainableRate: 1 } } },
     error: null,
   };
-  const variant = { model: "cursor/grok-4.6-max", thinking: "xhigh" };
-  assert.equal((await governor.allows(variant, [], governor.snapshot)).provider, "cursor");
-  assert.equal((await governor.allows(variant, [{ provider: "cursor", ...variant }], governor.snapshot)).ok, false);
+  const variant = { model: "cursor/grok-4.6", thinking: "xhigh" };
+  const active = (count) => Array.from({ length: count }, () => ({ provider: "cursor", ...variant }));
+  assert.equal((await governor.allows(variant, active(3), governor.snapshot)).provider, "cursor");
+  assert.equal((await governor.allows(variant, active(4), governor.snapshot)).ok, false);
   governor.snapshot.usage.used = 99;
   assert.equal((await governor.allows(variant, [], governor.snapshot)).ok, false);
 });

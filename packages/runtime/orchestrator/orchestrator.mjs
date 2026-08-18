@@ -48,8 +48,10 @@ const ANTHROPIC_USAGE_ENDPOINT = "https://api.anthropic.com/api/oauth/usage";
 const ANTHROPIC_PROFILE_ENDPOINT = "https://api.anthropic.com/api/oauth/profile";
 const ANTHROPIC_CLIENT_USER_AGENT = "claude-code/2.1.80";
 const ANTHROPIC_USAGE_CACHE_PATH = path.join(DATA, "anthropic-plan-usage.json");
+const CURSOR_USAGE_CACHE_PATH = path.join(DATA, "cursor-plan-usage.json");
 const CODEX_GOVERNOR_STATE_PATH = path.join(DATA, "codex-distributed-governor.json");
 const ANTHROPIC_GOVERNOR_STATE_PATH = path.join(DATA, "anthropic-distributed-governor.json");
+const CURSOR_GOVERNOR_STATE_PATH = path.join(DATA, "cursor-distributed-governor.json");
 const BOOSTED_ALLOWANCE_MULTIPLIER = 5;
 export const TOOL_SHELL = fileURLToPath(new URL("./tool-shell", import.meta.url));
 const TICK_MS = 5000;
@@ -77,7 +79,7 @@ const DEFAULT_CONFIG = {
       "openai-codex/gpt-5.6-sol:xhigh": {
         alternatives: [
           { model: "anthropic/claude-opus-5", thinking: "xhigh" },
-          { model: "cursor/grok-4.6-max", thinking: "xhigh" }
+          { model: "cursor/grok-4.6", thinking: "xhigh" }
         ],
         strategy: "independent-capacity"
       }
@@ -109,8 +111,9 @@ const DEFAULT_CONFIG = {
     },
     cursor: {
       pollSeconds: 300,
-      maxParallel: 1,
-      reservePercent: 2
+      maxStaleSeconds: 3600,
+      reservePercent: 2,
+      predictedPercentPerActiveHour: 0.25
     }
   }
 };
@@ -178,8 +181,9 @@ export function loadConfig() {
   config.plan.cursor = { ...DEFAULT_CONFIG.plan.cursor, ...config.plan.cursor };
   const cursor = config.plan.cursor;
   if (!(Number.isFinite(cursor.pollSeconds) && cursor.pollSeconds > 0) ||
-      !Number.isInteger(cursor.maxParallel) || cursor.maxParallel <= 0 ||
-      !(Number.isFinite(cursor.reservePercent) && cursor.reservePercent >= 0 && cursor.reservePercent < 100)) {
+      !(Number.isFinite(cursor.maxStaleSeconds) && cursor.maxStaleSeconds >= cursor.pollSeconds) ||
+      !(Number.isFinite(cursor.reservePercent) && cursor.reservePercent >= 0 && cursor.reservePercent < 100) ||
+      !(Number.isFinite(cursor.predictedPercentPerActiveHour) && cursor.predictedPercentPerActiveHour > 0)) {
     fail("invalid config.plan.cursor");
   }
   return config;
@@ -1200,88 +1204,141 @@ export function planWindowBurnPerHour(window, at = now()) {
   return Math.max(0, 100 - used) / hours;
 }
 
+function cursorEpoch(value) {
+  if (value === null || value === undefined || value === "") return Number.NaN;
+  if (typeof value === "string" && !/^\d+(?:\.\d+)?$/.test(value)) return Date.parse(value);
+  const numeric = Number(value);
+  return numeric < 10_000_000_000 ? numeric * 1000 : numeric;
+}
+
 export function parseCursorUsage(body, fetchedAt = now()) {
   const rawUsed = body?.planUsage?.totalPercentUsed;
   if (rawUsed === null || rawUsed === undefined || rawUsed === "") return null;
   const used = Number(rawUsed);
   if (!Number.isFinite(used)) return null;
-  const rawReset = body?.billingCycleEnd;
-  const numericReset = Number(rawReset);
-  const parsedReset = typeof rawReset === "string" && !/^\d+(?:\.\d+)?$/.test(rawReset)
-    ? Date.parse(rawReset)
-    : numericReset < 10_000_000_000 ? numericReset * 1000 : numericReset;
+  const parsedStart = cursorEpoch(body?.billingCycleStart);
+  const parsedReset = cursorEpoch(body?.billingCycleEnd);
   const limitType = String(body?.spendLimitUsage?.limitType ?? "").trim().toLowerCase();
   const membershipType = String(body?.membershipType ?? (limitType === "team" ? "team" : "pro")).trim().toLowerCase();
   return {
     used: Math.max(0, Math.min(100, used)),
+    startAt: Number.isFinite(parsedStart) ? parsedStart : null,
     resetAt: Number.isFinite(parsedReset) ? parsedReset : fetchedAt + 30 * 24 * 3600_000,
+    reportedReset: Number.isFinite(parsedReset),
     membershipType,
   };
 }
 
 export class CursorGovernor {
-  constructor(config, { modelRuntime = null, authPath = AUTH_PATH, fetcher = fetch, readCredential = readStoredCredential } = {}) {
+  constructor(config, {
+    modelRuntime = null,
+    authPath = AUTH_PATH,
+    fetcher = fetch,
+    readCredential = readStoredCredential,
+    cachePath = CURSOR_USAGE_CACHE_PATH,
+    feedback = null,
+  } = {}) {
     this.config = config;
     this.modelRuntime = modelRuntime;
     this.authPath = authPath;
     this.fetcher = fetcher;
     this.readCredential = readCredential;
+    this.cachePath = cachePath;
+    this.feedback = feedback ?? new DistributedQuotaFeedback(config, CURSOR_GOVERNOR_STATE_PATH);
+    this.pendingAssignments = [];
     this.snapshot = null;
+    this.lastGood = null;
     this.refreshing = null;
     this.cooldownUntil = 0;
+    try {
+      const cached = JSON.parse(fs.readFileSync(this.cachePath, "utf8"));
+      const usageFetchedAt = Number(cached?.usageFetchedAt ?? cached?.at);
+      if (cached?.usage && Number.isFinite(usageFetchedAt)) this.lastGood = { usage: cached.usage, fetchedAt: usageFetchedAt };
+    } catch {}
   }
 
   setModelRuntime(modelRuntime) { this.modelRuntime = modelRuntime; }
 
-  async refresh() {
+  async refresh(activeAssignments = null) {
+    if (activeAssignments) this.pendingAssignments = activeAssignments;
     if (this.snapshot && now() < this.snapshot.expiresAt) return this.snapshot;
     if (this.refreshing) return this.refreshing;
     this.refreshing = this.fetch().finally(() => { this.refreshing = null; });
     return this.refreshing;
   }
 
+  async readUsage(fetchedAt) {
+    const stored = this.readCredential(CURSOR_PROVIDER, this.authPath);
+    if (stored?.type !== "oauth" || !stored.access) throw new Error("Cursor OAuth credential unavailable");
+    if (!this.modelRuntime?.getProvider(CURSOR_PROVIDER)) throw new Error("Cursor provider extension is not loaded");
+    const usable = await resolveOAuthCredential({
+      modelRuntime: this.modelRuntime,
+      provider: CURSOR_PROVIDER,
+      baseProvider: CURSOR_PROVIDER,
+      stored,
+      authPath: this.authPath,
+      pollSeconds: this.config.plan.cursor.pollSeconds,
+      readCredential: this.readCredential,
+    });
+    if (!usable) throw new Error("Cursor OAuth credential could not be refreshed");
+    const response = await this.fetcher(CURSOR_USAGE_ENDPOINT, {
+      method: "POST",
+      headers: { Authorization: `Bearer ${usable.access}`, "Content-Type": "application/json" },
+      body: "{}",
+      signal: AbortSignal.timeout(10_000),
+    });
+    if (!response.ok) throw new Error(`Cursor usage endpoint HTTP ${response.status}`);
+    const usage = parseCursorUsage(await response.json(), fetchedAt);
+    if (!usage) throw new Error("Cursor usage endpoint returned malformed plan usage");
+    return usage;
+  }
+
   async fetch() {
     const fetchedAt = now();
+    let usage = null;
+    let usageFetchedAt = fetchedAt;
+    let stale = false;
+    let error = null;
     try {
-      const stored = this.readCredential(CURSOR_PROVIDER, this.authPath);
-      if (stored?.type !== "oauth" || !stored.access) throw new Error("Cursor OAuth credential unavailable");
-      if (!this.modelRuntime?.getProvider(CURSOR_PROVIDER)) throw new Error("Cursor provider extension is not loaded");
-      const usable = await resolveOAuthCredential({
-        modelRuntime: this.modelRuntime,
-        provider: CURSOR_PROVIDER,
-        baseProvider: CURSOR_PROVIDER,
-        stored,
-        authPath: this.authPath,
-        pollSeconds: this.config.plan.cursor.pollSeconds,
-        readCredential: this.readCredential,
-      });
-      if (!usable) throw new Error("Cursor OAuth credential could not be refreshed");
-      const response = await this.fetcher(CURSOR_USAGE_ENDPOINT, {
-        method: "POST",
-        headers: { Authorization: `Bearer ${usable.access}`, "Content-Type": "application/json" },
-        body: "{}",
-        signal: AbortSignal.timeout(10_000),
-      });
-      if (!response.ok) throw new Error(`Cursor usage endpoint HTTP ${response.status}`);
-      const usage = parseCursorUsage(await response.json(), fetchedAt);
-      if (!usage) throw new Error("Cursor usage endpoint returned malformed plan usage");
-      const paid = ["pro", "pro+", "ultra", "team", "enterprise"].includes(usage.membershipType);
-      this.snapshot = {
-        at: fetchedAt,
-        expiresAt: fetchedAt + this.config.plan.cursor.pollSeconds * 1000,
-        healthy: paid ? 1 : 0,
-        usage,
-        error: paid ? null : `Cursor membership is not paid: ${usage.membershipType || "missing"}`,
-      };
-    } catch (error) {
-      this.snapshot = {
-        at: fetchedAt,
-        expiresAt: fetchedAt + this.config.plan.cursor.pollSeconds * 1000,
-        healthy: 0,
-        usage: null,
-        error: String(error?.message ?? error),
-      };
+      usage = await this.readUsage(fetchedAt);
+      this.lastGood = { usage, fetchedAt };
+    } catch (cause) {
+      error = String(cause?.message ?? cause);
+      if (this.lastGood && fetchedAt - this.lastGood.fetchedAt <= this.config.plan.cursor.maxStaleSeconds * 1000) {
+        usage = this.lastGood.usage;
+        usageFetchedAt = this.lastGood.fetchedAt;
+        stale = true;
+      }
     }
+    const paid = usage !== null && ["pro", "pro+", "ultra", "team", "enterprise"].includes(usage.membershipType);
+    if (usage && !paid) error = `Cursor membership is not paid: ${usage.membershipType || "missing"}`;
+    const target = 100 - this.config.plan.cursor.reservePercent;
+    const resources = paid ? [{
+      id: CURSOR_PROVIDER,
+      provider: CURSOR_PROVIDER,
+      group: "cursor",
+      used: usage.used,
+      resetAt: usage.resetAt,
+      reportedReset: usage.reportedReset,
+      weight: 1,
+      available: Math.max(0, target - usage.used),
+    }] : [];
+    const active = this.pendingAssignments.filter((assignment) => providerFamily(assignment.provider) === CURSOR_PROVIDER).length;
+    const candidate = this.config.plan.cursor.predictedPercentPerActiveHour;
+    const distributed = resources.length
+      ? this.feedback.observe(resources, { [CURSOR_PROVIDER]: active * candidate }, null, fetchedAt)
+      : this.feedback.status;
+    this.snapshot = {
+      at: fetchedAt,
+      usageFetchedAt,
+      expiresAt: fetchedAt + this.config.plan.cursor.pollSeconds * 1000,
+      healthy: paid ? 1 : 0,
+      usage,
+      stale,
+      distributed,
+      error,
+    };
+    atomicWrite(this.cachePath, `${JSON.stringify(this.snapshot, null, 2)}\n`);
     return this.snapshot;
   }
 
@@ -1293,21 +1350,36 @@ export class CursorGovernor {
   }
 
   async allows(variant, activeAssignments, snapshot = null) {
-    const usage = snapshot ?? await this.refresh();
+    this.pendingAssignments = activeAssignments;
+    const usage = snapshot ?? await this.refresh(activeAssignments);
     const active = activeAssignments.filter((assignment) => providerFamily(assignment.provider) === CURSOR_PROVIDER).length;
+    const candidate = this.config.plan.cursor.predictedPercentPerActiveHour;
+    const localBurn = active * candidate;
     const modelAvailable = this.modelRuntime?.getModel(CURSOR_PROVIDER, modelIdOf(variant.model)) !== undefined;
+    const sustainable = usage.distributed?.accounts?.[CURSOR_PROVIDER]?.sustainableRate ?? 0;
+    const account = { provider: CURSOR_PROVIDER, allowedBurnPercentPerHour: sustainable };
+    const eligible = usage.healthy === 1 && modelAvailable && now() >= this.cooldownUntil &&
+      usage.usage?.used < 100 - this.config.plan.cursor.reservePercent;
+    const accounts = eligible ? [account] : [];
+    const allowance = this.feedback.totalAllowance(accounts);
+    const admitted = this.feedback.admitsAccounts(localBurn, candidate, accounts, runModelKey(variant), now());
+    const selected = admitted ? this.feedback.selectAccount(
+      accounts,
+      active > 0 ? [{ provider: CURSOR_PROVIDER, rate: localBurn }] : [],
+      runModelKey(variant),
+      candidate,
+      now(),
+    ) : null;
     const remaining = usage.usage ? 100 - usage.usage.used : 0;
-    const available = usage.healthy === 1 && modelAvailable && now() >= this.cooldownUntil &&
-      remaining > this.config.plan.cursor.reservePercent && active < this.config.plan.cursor.maxParallel;
     return {
-      ok: available,
-      provider: available ? CURSOR_PROVIDER : null,
+      ok: selected !== null,
+      provider: selected ? CURSOR_PROVIDER : null,
       model: variant.model,
       thinking: variant.thinking,
-      pressure: usage.usage ? (usage.usage.used + active * (100 / this.config.plan.cursor.maxParallel)) / 100 : Number.POSITIVE_INFINITY,
-      detail: available
-        ? `Cursor account active=${active} used=${usage.usage.used.toFixed(1)}% remaining=${remaining.toFixed(1)}% resets=${iso(usage.usage.resetAt)}`
-        : `Cursor gate closed: active=${active}/${this.config.plan.cursor.maxParallel} used=${usage.usage?.used?.toFixed(1) ?? "unknown"}% model=${modelAvailable ? "available" : "missing"} error=${usage.error ?? "none"}`,
+      pressure: allowance > 0 ? (localBurn + candidate) / allowance : Number.POSITIVE_INFINITY,
+      detail: selected
+        ? `Cursor dynamic gate active=${active} local=${localBurn.toFixed(3)} candidate=${candidate.toFixed(3)} allowance=${allowance.toFixed(3)} share=${usage.distributed.share.toFixed(3)} used=${usage.usage.used.toFixed(3)}% remaining=${remaining.toFixed(3)}% resets=${iso(usage.usage.resetAt)}`
+        : `Cursor dynamic gate closed: active=${active} local=${localBurn.toFixed(3)} candidate=${candidate.toFixed(3)} allowance=${allowance.toFixed(3)} share=${usage.distributed.share.toFixed(3)} used=${usage.usage?.used?.toFixed(3) ?? "unknown"}% model=${modelAvailable ? "available" : "missing"} error=${usage.error ?? "none"}`,
     };
   }
 }
@@ -2469,7 +2541,9 @@ async function main(argv = process.argv.slice(2)) {
     const usageMultiplier = (providerFamily) => governorAllowanceMultiplier(db, providerFamily);
     const modelRuntime = await ModelRuntime.create({ signal: AbortSignal.timeout(15_000) });
     const bootstrap = await loadExtensionProviders(modelRuntime);
-    const governor = new PlanGovernor(config, { modelRuntime, feedback: codexFeedback, usageMultiplier });
+    const cursorFeedback = new DistributedQuotaFeedback(config, CURSOR_GOVERNOR_STATE_PATH, false);
+    const cursorGovernor = new CursorGovernor(config, { modelRuntime, feedback: cursorFeedback });
+    const governor = new PlanGovernor(config, { modelRuntime, cursor: cursorGovernor, feedback: codexFeedback, usageMultiplier });
     const snapshot = await governor.refresh();
     const plan = {
       at: snapshot.at,
@@ -2515,9 +2589,17 @@ async function main(argv = process.argv.slice(2)) {
       usedPercent: cursorSnapshot.usage?.used ?? null,
       resetsAt: cursorSnapshot.usage?.resetAt ?? null,
       membershipType: cursorSnapshot.usage?.membershipType ?? null,
-      modelAvailable: modelRuntime.getModel(CURSOR_PROVIDER, "grok-4.6-max") !== undefined,
-      maxParallel: config.plan.cursor.maxParallel,
+      modelAvailable: modelRuntime.getModel(CURSOR_PROVIDER, "grok-4.6") !== undefined,
+      active: Number(db.prepare("SELECT count(*) count FROM run WHERE status='running' AND provider=?").get(CURSOR_PROVIDER).count),
+      predictedPercentPerActiveHour: config.plan.cursor.predictedPercentPerActiveHour,
+      allowedBurnPercentPerHour: cursorSnapshot.distributed?.accounts?.[CURSOR_PROVIDER]?.sustainableRate ?? 0,
+      localAllowancePercentPerHour: governor.cursor.feedback.totalAllowance(cursorSnapshot.healthy ? [{
+        provider: CURSOR_PROVIDER,
+        allowedBurnPercentPerHour: cursorSnapshot.distributed?.accounts?.[CURSOR_PROVIDER]?.sustainableRate ?? 0,
+      }] : []),
+      share: cursorSnapshot.distributed?.share ?? 0,
       reservePercent: config.plan.cursor.reservePercent,
+      stale: cursorSnapshot.stale,
       error: cursorSnapshot.error,
     };
     bootstrap.dispose();
