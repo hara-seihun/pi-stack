@@ -231,8 +231,15 @@ export function burn(series) {
   };
 }
 
-/** The bucket that governs a plan over a window: the one that burned most. */
+/**
+ * The denominator for plan economics. The all-models weekly window is the true
+ * sustained constraint on both providers, so prefer it whenever it exists;
+ * comparing a five-hour bucket against a weekly one would divide by windows of
+ * different length and produce meaningless "full plan" figures. Fall back to the
+ * heaviest-burning window only when no weekly bucket is reported.
+ */
 export function bindingBucket(byBucket) {
+  if (byBucket.weekly) return "weekly";
   let best = null;
   for (const [bucket, stats] of Object.entries(byBucket)) {
     if (bucket === "credits" || bucket === "overage") continue;

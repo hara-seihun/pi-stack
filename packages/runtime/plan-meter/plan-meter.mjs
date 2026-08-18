@@ -97,20 +97,25 @@ function localSamples(lo, hi, dbPath = DEFAULT_DB_PATH) {
   return rows.map((row) => ({ ...row, host: "local" }));
 }
 
-function remote(script, args) {
+/**
+ * ssh flattens its command arguments into one remote shell string, so a program
+ * passed with `node -e` is re-parsed by that shell and corrupted. Feed the
+ * source over stdin to `node -` instead and inline the window bounds.
+ */
+function remote(script) {
   try {
-    return execFileSync("ssh", ["-o", "BatchMode=yes", "-o", "ConnectTimeout=15", REMOTE_HOST, "node", "-e", script, "--", ...args],
-      { encoding: "utf8", timeout: 120_000, maxBuffer: 64 * 1024 * 1024 });
+    return execFileSync("ssh", ["-o", "BatchMode=yes", "-o", "ConnectTimeout=15", REMOTE_HOST, "node", "-"],
+      { input: script, encoding: "utf8", timeout: 120_000, maxBuffer: 64 * 1024 * 1024, stdio: ["pipe", "pipe", "pipe"] });
   } catch (error) {
     console.error(`plan-meter: ${REMOTE_HOST} unreachable, reporting local data only (${error?.code ?? "error"})`);
     return null;
   }
 }
 
-const REMOTE_SCRIPT = `
+const remoteScript = (lo, hi) => `
 const { DatabaseSync } = require("node:sqlite");
 const os = require("node:os");
-const [lo, hi] = process.argv.slice(2).map(Number);
+const lo = ${Number(lo)}, hi = ${Number(hi)};
 const out = { tokens: {}, samples: [] };
 try {
   const db = new DatabaseSync(os.homedir() + "/data/pi-usage/usage.sqlite3", { readOnly: true });
@@ -147,7 +152,7 @@ function report(args) {
 
   let remoteData = null;
   if (!localOnly) {
-    const raw = remote(REMOTE_SCRIPT, [String(lo), String(hi)]);
+    const raw = remote(remoteScript(lo, hi));
     if (raw) { try { remoteData = JSON.parse(raw); } catch { remoteData = null; } }
   }
 
@@ -253,9 +258,10 @@ function report(args) {
     { label: "FullPlan sum", value: (row) => fmt(row.planTokens) },
   ]);
 
-  const thin = rows.filter((row) => row.samples < 2);
+  const thin = rows.filter((row) => row.samples < 2 || row.burned === null || row.burned <= 0);
   if (thin.length) {
-    console.log(`\n${thin.length} account(s) have fewer than two samples in this window; their burn is unmeasurable.`);
+    console.log(`\n${thin.length}/${rows.length} account(s) show no measurable meter movement yet`
+      + " (idle, saturated, or sampled too recently); their per-token plan cost is unmeasurable.");
   }
   const saturated = rows.flatMap((row) =>
     Object.entries(row.buckets).filter(([, stats]) => (stats.end ?? 0) >= 99).map(([bucket]) => `${row.provider}:${bucket}`));

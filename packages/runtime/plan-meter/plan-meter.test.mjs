@@ -100,13 +100,24 @@ test("burn sums positive deltas and recovers usage across a reset", () => {
   assert.equal(wrapped.end, 15);
 });
 
-test("the binding bucket is the one that burned most, ignoring credit balances", () => {
+test("the weekly window is the economics denominator even when it burned less", () => {
+  // A five-hour window refills several times a day. Dividing tokens by its burn
+  // and scaling to 100% would describe a different period than a weekly plan.
+  assert.equal(bindingBucket({
+    session: { burned: 60 },
+    weekly: { burned: 4 },
+    credits: { burned: 900 },
+  }), "weekly");
+});
+
+test("without a weekly window the heaviest burn wins, ignoring balances", () => {
   assert.equal(bindingBucket({
     session: { burned: 5 },
-    weekly: { burned: 41 },
+    window_43200: { burned: 41 },
     credits: { burned: 900 },
     overage: { burned: 800 },
-  }), "weekly");
+  }), "window_43200");
+  assert.equal(bindingBucket({ credits: { burned: 5 } }), null);
 });
 
 test("account discovery matches the alias family and skips non-oauth entries", () => {
