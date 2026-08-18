@@ -63,8 +63,54 @@ test("a launch is recorded with a literal running status", () => {
   db.close();
 });
 
-test("quota leases survive controller restarts and productive session boundaries", () => {
+test("governor leases resume interrupted work then rotate after productive boundaries", async () => {
   const db = openDb(path.join(temporary, "quota-lease.sqlite3"));
+  const at = Date.now();
+  const insertTask = db.prepare(`INSERT INTO task(id,prompt,cwd,model,thinking,completion_condition,launch_share,not_before,next_eligible_at,created_at)
+    VALUES(?,?,?,?,?,?,?,?,?,?)`);
+  insertTask.run("task", "prompt", temporary, "openai-codex/gpt-5.6-sol", "xhigh", "done", 1, at, at, at);
+  insertTask.run("waiting", "prompt", temporary, "openai-codex/gpt-5.6-sol", "xhigh", "done", 1, at, at, at + 1);
+  const config = loadConfig();
+  const task = db.prepare("SELECT * FROM task WHERE id='task'").get();
+  assert.equal(taskSupportsAssignment(config, task, { model: "openai-codex/gpt-5.6-sol", thinking: "xhigh" }), true);
+  assert.equal(taskSupportsAssignment(config, task, { model: "anthropic/claude-opus-5", thinking: "xhigh" }), true);
+
+  const controller = new Controller(db, config);
+  insertRun(db, "run-1", task.id, "openai-codex-3", at, task.model, task.thinking);
+  const leaseId = controller.activateQuotaLease(task, {
+    provider: "openai-codex-3", model: task.model, thinking: task.thinking,
+  }, "run-1", at);
+  assert.equal(db.prepare("SELECT state FROM quota_lease WHERE id=?").get(leaseId).state, "active");
+
+  new Controller(db, config).recover();
+  const recovered = db.prepare("SELECT state,task_id,provider,run_id FROM quota_lease WHERE id=?").get(leaseId);
+  assert.deepEqual({ ...recovered }, { state: "available", task_id: "task", provider: "openai-codex-3", run_id: null });
+  assert.equal(db.prepare("SELECT status FROM run WHERE id='run-1'").get().status, "interrupted");
+
+  insertRun(db, "run-2", task.id, "openai-codex-3", at + 1, task.model, task.thinking);
+  controller.activateQuotaLease(task, {
+    leaseId, provider: "openai-codex-3", model: task.model, thinking: task.thinking,
+  }, "run-2", at + 1);
+  controller.finish(task, "run-2", "incomplete", "productive", [], null, true);
+  assert.deepEqual(
+    { ...db.prepare("SELECT state,task_id,provider FROM quota_lease WHERE id=?").get(leaseId) },
+    { state: "available", task_id: null, provider: null },
+  );
+
+  const next = new Controller(db, config);
+  next.plan = {
+    restores: async (lease) => ({ ok: true, provider: "openai-codex-4", model: lease.model, thinking: lease.thinking }),
+    allows: async () => ({ ok: false, detail: "cold admission not expected" }),
+  };
+  let launched = null;
+  next.launch = async (selected) => { launched = selected.id; };
+  await next.tick();
+  assert.equal(launched, "waiting");
+  db.close();
+});
+
+test("operator quota leases retain their declared task and provider constraints", () => {
+  const db = openDb(path.join(temporary, "operator-quota-lease.sqlite3"));
   const at = Date.now();
   db.prepare(`INSERT INTO task(id,prompt,cwd,model,thinking,completion_condition,launch_share,not_before,next_eligible_at,created_at)
     VALUES(?,?,?,?,?,?,?,?,?,?)`).run("task", "prompt", temporary, "openai-codex/gpt-5.6-sol", "xhigh", "done", 1, at, at, at);
@@ -73,27 +119,16 @@ test("quota leases survive controller restarts and productive session boundaries
     provider: "openai-codex-3", model: "openai-codex/gpt-5.6-sol", thinking: "xhigh", taskId: "task", hours: 1,
   }, at);
   const task = db.prepare("SELECT * FROM task WHERE id='task'").get();
-  assert.equal(taskSupportsAssignment(config, task, { model: "openai-codex/gpt-5.6-sol", thinking: "xhigh" }), true);
-  assert.equal(taskSupportsAssignment(config, task, { model: "anthropic/claude-opus-5", thinking: "xhigh" }), true);
-
   const controller = new Controller(db, config);
-  insertRun(db, "run-1", task.id, "openai-codex-3", at, task.model, task.thinking);
+  insertRun(db, "run", task.id, "openai-codex-3", at, task.model, task.thinking);
   controller.activateQuotaLease(task, {
     leaseId, provider: "openai-codex-3", model: task.model, thinking: task.thinking,
-  }, "run-1", at);
-  assert.equal(db.prepare("SELECT state FROM quota_lease WHERE id=?").get(leaseId).state, "active");
-
-  new Controller(db, config).recover();
-  const recovered = db.prepare("SELECT state,task_id,run_id FROM quota_lease WHERE id=?").get(leaseId);
-  assert.deepEqual({ ...recovered }, { state: "available", task_id: "task", run_id: null });
-  assert.equal(db.prepare("SELECT status FROM run WHERE id='run-1'").get().status, "interrupted");
-
-  insertRun(db, "run-2", task.id, "openai-codex-3", at + 1, task.model, task.thinking);
-  controller.activateQuotaLease(task, {
-    leaseId, provider: "openai-codex-3", model: task.model, thinking: task.thinking,
-  }, "run-2", at + 1);
-  controller.finish(task, "run-2", "incomplete", "productive", [], null, true);
-  assert.deepEqual({ ...db.prepare("SELECT state,provider FROM quota_lease WHERE id=?").get(leaseId) }, { state: "available", provider: null });
+  }, "run", at);
+  controller.finish(task, "run", "incomplete", "productive", [], null, true);
+  assert.deepEqual(
+    { ...db.prepare("SELECT state,task_id,provider FROM quota_lease WHERE id=?").get(leaseId) },
+    { state: "available", task_id: "task", provider: "openai-codex-3" },
+  );
   db.close();
 });
 
