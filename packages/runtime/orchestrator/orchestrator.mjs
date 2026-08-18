@@ -35,6 +35,7 @@ const DB_PATH = path.join(DATA, "orchestrator.sqlite3");
 const CONFIG_PATH = path.join(DATA, "config.json");
 const SESSIONS = path.join(DATA, "sessions");
 const LOCK = path.join(DATA, "controller.lock");
+const SCRIPT_PATH = fileURLToPath(import.meta.url);
 const AUTH_PATH = path.join(getAgentDir(), "auth.json");
 const MULTI_PASS_PATH = path.join(getAgentDir(), "multi-pass.json");
 const CHATGPT_PRO_POOL_PATH = path.join(getAgentDir(), "chatgpt-pro-pool.json");
@@ -2025,13 +2026,35 @@ export class Controller {
   }
 }
 
+export function controllerProcessIdentity(pid, status, commandLine) {
+  const tgid = Number(status.match(/^Tgid:\s+(\d+)$/m)?.[1] ?? 0);
+  const args = commandLine.split("\0").filter(Boolean);
+  if (tgid !== pid || args.at(-1) !== "run" || !args[1]) return false;
+  try { return fs.realpathSync(args[1]) === SCRIPT_PATH; }
+  catch { return false; }
+}
+
+function controllerProcessExists(pid) {
+  if (!Number.isInteger(pid) || pid <= 0) return false;
+  try {
+    return controllerProcessIdentity(
+      pid,
+      fs.readFileSync(`/proc/${pid}/status`, "utf8"),
+      fs.readFileSync(`/proc/${pid}/cmdline`, "utf8"),
+    );
+  } catch (error) {
+    if (error.code === "ENOENT") return false;
+    throw error;
+  }
+}
+
 function acquireLock() {
   try { fs.mkdirSync(LOCK, { mode: 0o700 }); }
   catch (error) {
     if (error.code !== "EEXIST") throw error;
     const pidFile = path.join(LOCK, "pid");
     const pid = Number(fs.existsSync(pidFile) ? fs.readFileSync(pidFile, "utf8") : 0);
-    if (pid > 0 && fs.existsSync(`/proc/${pid}`)) fail(`controller already running as pid ${pid}`);
+    if (controllerProcessExists(pid)) fail(`controller already running as pid ${pid}`);
     fs.rmSync(LOCK, { recursive: true, force: true });
     fs.mkdirSync(LOCK, { mode: 0o700 });
   }
@@ -2342,6 +2365,6 @@ async function main(argv = process.argv.slice(2)) {
 }
 
 const invokedPath = process.argv[1] && fs.existsSync(process.argv[1]) ? fs.realpathSync(process.argv[1]) : null;
-if (invokedPath === fileURLToPath(import.meta.url)) {
+if (invokedPath === SCRIPT_PATH) {
   main().catch((error) => { console.error(error.stack ?? error); process.exitCode = 1; });
 }
