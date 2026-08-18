@@ -1353,6 +1353,25 @@ export class CursorGovernor {
     }
   }
 
+  async restores(variant, activeAssignments, snapshot = null) {
+    this.pendingAssignments = activeAssignments;
+    const usage = snapshot ?? await this.refresh(activeAssignments);
+    const modelAvailable = this.modelRuntime?.getModel(CURSOR_PROVIDER, modelIdOf(variant.model)) !== undefined;
+    const sensorHealthy = usage.distributed?.accounts?.[CURSOR_PROVIDER]?.sensorInconsistent !== true;
+    const available = usage.healthy === 1 && modelAvailable && sensorHealthy && now() >= this.cooldownUntil &&
+      usage.usage?.used < 100 - this.config.plan.cursor.reservePercent;
+    return {
+      ok: available,
+      provider: available ? CURSOR_PROVIDER : null,
+      model: variant.model,
+      thinking: variant.thinking,
+      pressure: 0,
+      detail: available
+        ? `restored Cursor quota lease at ${usage.usage.used.toFixed(3)}% used`
+        : `Cursor quota lease unavailable: used=${usage.usage?.used?.toFixed(3) ?? "unknown"}% model=${modelAvailable ? "available" : "missing"} sensor=${sensorHealthy ? "healthy" : "inconsistent"} error=${usage.error ?? "none"}`,
+    };
+  }
+
   async allows(variant, activeAssignments, snapshot = null) {
     this.pendingAssignments = activeAssignments;
     const usage = snapshot ?? await this.refresh(activeAssignments);
@@ -1587,7 +1606,7 @@ export class PlanGovernor {
       } : { ok: false, detail: `Codex quota lease account unavailable: ${lease.provider ?? "any"}` };
     }
     if (family === CURSOR_PROVIDER) {
-      return this.cursor.allows(variant, activeAssignments);
+      return this.cursor.restores(variant, activeAssignments);
     }
     if (family === ANTHROPIC_PROVIDER) {
       const usage = await this.anthropic.refresh(activeAssignments);

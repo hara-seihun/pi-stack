@@ -885,6 +885,8 @@ test("Cursor plan usage dynamically admits Grok load from sustainable burn", asy
   const active = (count) => Array.from({ length: count }, () => ({ provider: "cursor", ...variant }));
   assert.equal((await governor.allows(variant, active(3), governor.snapshot)).provider, "cursor");
   assert.equal((await governor.allows(variant, active(4), governor.snapshot)).ok, false);
+  assert.equal((await governor.restores(variant, active(10), governor.snapshot)).provider, "cursor",
+    "an explicit quota lease bypasses adaptive allowance while retaining raw plan and sensor checks");
   governor.snapshot.usage.used = 99;
   assert.equal((await governor.allows(variant, [], governor.snapshot)).ok, false);
 });
