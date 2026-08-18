@@ -8,7 +8,7 @@ import test from "node:test";
 
 const temporary = fs.mkdtempSync(path.join(os.tmpdir(), "agent-orchestrator-test-"));
 process.env.AGENT_ORCHESTRATOR_DATA = temporary;
-const { AnthropicGovernor, anthropicOpusHasHeadroom, anthropicWeeklyCapacity, cancelTask, chooseIndependentAssignment, chooseTask, codexSubscriptionLifecycle, completionToolResult, controllerProcessIdentity, Controller, cpuPercent, DISPATCH_NO_WORK_TTL_MS, dispatchedTaskPrompt, DistributedQuotaFeedback, evaluateDispatch, evaluateWorkCheck, governorAllowanceMultiplier, governorControls, grantQuotaLease, insertRun, isolateTaskShell, isEligibleCodexPlan, launchBatchSize, loadConfig, nextIncompleteState, openDb, orchestratedTaskPrompt, parseAnthropicUsage, PlanGovernor, planWindowBurnPerHour, proEntitlementSnapshot, proLaunchAvailability, rankTasks, resourceSlots, setGovernorBoost, setTaskOptions, shouldAdvanceBackoff, taskSettings, taskSupportsAssignment, TOOL_SHELL, validateCompletion, validateModelPolicy, WORK_CHECK_TTL_MS, workCheckStale, workReady } = await import("./orchestrator.mjs");
+const { AnthropicGovernor, anthropicOpusHasHeadroom, anthropicWeeklyCapacity, cancelTask, chooseIndependentAssignment, chooseTask, codexSubscriptionLifecycle, completionToolResult, controllerProcessIdentity, Controller, cpuPercent, CursorGovernor, DISPATCH_NO_WORK_TTL_MS, dispatchedTaskPrompt, DistributedQuotaFeedback, evaluateDispatch, evaluateWorkCheck, governorAllowanceMultiplier, governorControls, grantQuotaLease, insertRun, isolateTaskShell, isEligibleCodexPlan, launchBatchSize, loadConfig, nextIncompleteState, openDb, orchestratedTaskPrompt, parseAnthropicUsage, parseCursorUsage, PlanGovernor, planWindowBurnPerHour, proEntitlementSnapshot, proLaunchAvailability, rankTasks, resourceSlots, setGovernorBoost, setTaskOptions, shouldAdvanceBackoff, taskSettings, taskSupportsAssignment, TOOL_SHELL, validateCompletion, validateModelPolicy, WORK_CHECK_TTL_MS, workCheckStale, workReady } = await import("./orchestrator.mjs");
 
 test.after(() => fs.rmSync(temporary, { recursive: true, force: true }));
 
@@ -122,6 +122,7 @@ test("governor leases resume interrupted work then rotate after productive bound
   const task = db.prepare("SELECT * FROM task WHERE id='task'").get();
   assert.equal(taskSupportsAssignment(config, task, { model: "openai-codex/gpt-5.6-sol", thinking: "xhigh" }), true);
   assert.equal(taskSupportsAssignment(config, task, { model: "anthropic/claude-opus-5", thinking: "xhigh" }), true);
+  assert.equal(taskSupportsAssignment(config, task, { model: "cursor/grok-4.6-max", thinking: "xhigh" }), true);
 
   const controller = new Controller(db, config);
   insertRun(db, "run-1", task.id, "openai-codex-3", at, task.model, task.thinking);
@@ -738,8 +739,10 @@ test("plan estimator paces all remaining capacity to 100% at window reset", () =
 test("mixed models choose independently admitted provider capacity", () => {
   const sol = { ok: true, provider: "openai-codex", pressure: 1.4 };
   const opus = { ok: true, provider: "anthropic", pressure: 0.8 };
+  const grok = { ok: true, provider: "cursor", pressure: 0.6 };
   assert.equal(chooseIndependentAssignment(sol, opus), opus);
-  assert.equal(chooseIndependentAssignment({ ...sol, pressure: 0.4 }, opus).provider, "openai-codex");
+  assert.equal(chooseIndependentAssignment(sol, opus, grok), grok);
+  assert.equal(chooseIndependentAssignment({ ...sol, pressure: 0.4 }, opus, grok).provider, "openai-codex");
   assert.equal(chooseIndependentAssignment({ ...sol, ok: false }, opus), opus);
   assert.equal(chooseIndependentAssignment(sol, { ...opus, ok: false }), sol);
   assert.equal(chooseIndependentAssignment({ ...sol, ok: false }, { ...opus, ok: false }), null);
@@ -752,7 +755,11 @@ test("independent Opus capacity remains usable when Codex is full", async () => 
     refresh: async () => ({ healthy: 2, withHeadroom: 1 }),
     allows: async (variant) => ({ ok: true, provider: "anthropic", model: variant.model, thinking: variant.thinking, detail: "available" }),
   };
-  const governor = new PlanGovernor(config, { anthropic });
+  const cursor = {
+    setModelRuntime() {},
+    allows: async (variant) => ({ ok: false, provider: null, model: variant.model, thinking: variant.thinking, detail: "Cursor full" }),
+  };
+  const governor = new PlanGovernor(config, { anthropic, cursor });
   governor.refresh = async () => ({ healthy: 12, accounts: [], allowedBurnPercentPerHour: 0 });
   governor.allowsCodex = async (variant) => ({ ok: false, provider: null, model: variant.model, thinking: variant.thinking, detail: "Codex full" });
   const task = { model: "openai-codex/gpt-5.6-sol", thinking: "xhigh" };
@@ -769,7 +776,11 @@ test("mixed-provider rejection reports both quota gates", async () => {
     refresh: async () => ({ healthy: 3, withHeadroom: 3 }),
     allows: async (variant) => ({ ok: false, provider: null, model: variant.model, thinking: variant.thinking, detail: "Anthropic allowance=0.300" }),
   };
-  const governor = new PlanGovernor(config, { anthropic });
+  const cursor = {
+    setModelRuntime() {},
+    allows: async (variant) => ({ ok: false, provider: null, model: variant.model, thinking: variant.thinking, detail: "Cursor allowance=0.302" }),
+  };
+  const governor = new PlanGovernor(config, { anthropic, cursor });
   governor.refresh = async () => ({ healthy: 12, accounts: [], allowedBurnPercentPerHour: 0 });
   governor.allowsCodex = async (variant) => ({ ok: false, provider: null, model: variant.model, thinking: variant.thinking, detail: "Codex allowance=0.301" });
   const result = await governor.allows({ model: "openai-codex/gpt-5.6-sol", thinking: "xhigh" }, []);
@@ -829,6 +840,32 @@ test("Anthropic Opus admission preserves enough shared weekly capacity for Fable
   assert.equal((await governor.allows(variant, active(19), governor.snapshot)).provider, "anthropic-2");
   assert.equal((await governor.allows(variant, active(20), governor.snapshot)).ok, false);
   governor.noteFailure("anthropic-2", new Error("429 usage limit reached"), Date.now());
+  assert.equal((await governor.allows(variant, [], governor.snapshot)).ok, false);
+});
+
+test("Cursor plan usage admits one paid-account Grok lane with a reserve", async () => {
+  const at = Date.UTC(2026, 7, 18, 12);
+  assert.deepEqual(parseCursorUsage({
+    billingCycleEnd: at + 86400_000,
+    planUsage: { totalPercentUsed: 25 },
+    spendLimitUsage: { limitType: "user" },
+  }, at), { used: 25, resetAt: at + 86400_000, membershipType: "pro" });
+  assert.equal(parseCursorUsage({ planUsage: {} }, at), null);
+
+  const config = loadConfig();
+  const runtime = { getModel: (provider, id) => provider === "cursor" && id === "grok-4.6-max" ? { provider, id } : undefined };
+  const governor = new CursorGovernor(config, { modelRuntime: runtime });
+  governor.snapshot = {
+    at,
+    expiresAt: Date.now() + 1000,
+    healthy: 1,
+    usage: { used: 25, resetAt: at + 86400_000, membershipType: "pro" },
+    error: null,
+  };
+  const variant = { model: "cursor/grok-4.6-max", thinking: "xhigh" };
+  assert.equal((await governor.allows(variant, [], governor.snapshot)).provider, "cursor");
+  assert.equal((await governor.allows(variant, [{ provider: "cursor", ...variant }], governor.snapshot)).ok, false);
+  governor.snapshot.usage.used = 99;
   assert.equal((await governor.allows(variant, [], governor.snapshot)).ok, false);
 });
 

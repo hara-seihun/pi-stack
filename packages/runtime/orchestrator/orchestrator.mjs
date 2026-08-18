@@ -42,6 +42,8 @@ const CHATGPT_PRO_POOL_PATH = path.join(getAgentDir(), "chatgpt-pro-pool.json");
 const CHATGPT_PRO_PROVIDER = "chatgpt-pro";
 const CODEX_PROVIDER = "openai-codex";
 const ANTHROPIC_PROVIDER = "anthropic";
+const CURSOR_PROVIDER = "cursor";
+const CURSOR_USAGE_ENDPOINT = "https://api2.cursor.sh/aiserver.v1.DashboardService/GetCurrentPeriodUsage";
 const ANTHROPIC_USAGE_ENDPOINT = "https://api.anthropic.com/api/oauth/usage";
 const ANTHROPIC_PROFILE_ENDPOINT = "https://api.anthropic.com/api/oauth/profile";
 const ANTHROPIC_CLIENT_USER_AGENT = "claude-code/2.1.80";
@@ -73,8 +75,10 @@ const DEFAULT_CONFIG = {
     },
     modelMixes: {
       "openai-codex/gpt-5.6-sol:xhigh": {
-        alternateModel: "anthropic/claude-opus-5",
-        alternateThinking: "xhigh",
+        alternatives: [
+          { model: "anthropic/claude-opus-5", thinking: "xhigh" },
+          { model: "cursor/grok-4.6-max", thinking: "xhigh" }
+        ],
         strategy: "independent-capacity"
       }
     },
@@ -102,6 +106,11 @@ const DEFAULT_CONFIG = {
       pollSeconds: 300,
       maxStaleSeconds: 3600,
       predictedPercentPerActiveHour: 0.25
+    },
+    cursor: {
+      pollSeconds: 300,
+      maxParallel: 1,
+      reservePercent: 2
     }
   }
 };
@@ -153,9 +162,25 @@ export function loadConfig() {
     fail("invalid config.plan.anthropic");
   }
   for (const [base, mix] of Object.entries(config.plan.modelMixes)) {
-    if (!base.includes(":") || typeof mix?.alternateModel !== "string" || !mix.alternateModel.includes("/") ||
-        typeof mix?.alternateThinking !== "string" || mix.strategy !== "independent-capacity") fail(`invalid model mix ${base}`);
-    validateModelPolicy(mix.alternateModel);
+    if (!base.includes(":") || !Array.isArray(mix?.alternatives) || mix.alternatives.length === 0 ||
+        mix.strategy !== "independent-capacity") fail(`invalid model mix ${base}`);
+    const keys = new Set([base]);
+    for (const variant of mix.alternatives) {
+      if (typeof variant?.model !== "string" || !variant.model.includes("/") || typeof variant?.thinking !== "string") {
+        fail(`invalid model mix variant ${base}`);
+      }
+      const key = runModelKey(variant);
+      if (keys.has(key)) fail(`duplicate model mix variant ${key}`);
+      keys.add(key);
+      validateModelPolicy(variant.model);
+    }
+  }
+  config.plan.cursor = { ...DEFAULT_CONFIG.plan.cursor, ...config.plan.cursor };
+  const cursor = config.plan.cursor;
+  if (!(Number.isFinite(cursor.pollSeconds) && cursor.pollSeconds > 0) ||
+      !Number.isInteger(cursor.maxParallel) || cursor.maxParallel <= 0 ||
+      !(Number.isFinite(cursor.reservePercent) && cursor.reservePercent >= 0 && cursor.reservePercent < 100)) {
+    fail("invalid config.plan.cursor");
   }
   return config;
 }
@@ -464,16 +489,17 @@ function providerFamily(provider) {
   return provider;
 }
 function taskMix(config, task) { return config.plan.modelMixes[runModelKey(task)] ?? null; }
-export function taskSupportsAssignment(config, task, assignment) {
-  if (runModelKey(task) === runModelKey(assignment)) return true;
-  const mix = taskMix(config, task);
-  return mix !== null && `${mix.alternateModel}:${mix.alternateThinking}` === runModelKey(assignment);
+function taskVariants(config, task) {
+  const primary = { model: task.model, thinking: task.thinking };
+  return [primary, ...(taskMix(config, task)?.alternatives ?? [])];
 }
-export function chooseIndependentAssignment(primary, alternate) {
-  if (primary.ok && alternate.ok) {
-    return Number(primary.pressure) <= Number(alternate.pressure) ? primary : alternate;
-  }
-  return primary.ok ? primary : alternate.ok ? alternate : null;
+export function taskSupportsAssignment(config, task, assignment) {
+  return taskVariants(config, task).some((variant) => runModelKey(variant) === runModelKey(assignment));
+}
+export function chooseIndependentAssignment(...assignments) {
+  const admitted = assignments.flat().filter((assignment) => assignment?.ok);
+  if (admitted.length === 0) return null;
+  return admitted.sort((left, right) => Number(left.pressure) - Number(right.pressure))[0];
 }
 export function validateModelPolicy(model) {
   if (/^gpt-5-5(?:-|$)/.test(modelIdOf(model))) fail("GPT-5.5 models are banned; use GPT-5.6");
@@ -915,8 +941,8 @@ async function resolveOAuthCredential({ modelRuntime, provider, baseProvider, st
     signal: AbortSignal.timeout(15000),
   });
   const latest = readCredential(provider, authPath);
-  if (!resolved?.auth?.apiKey || latest?.type !== "oauth") return null;
-  return { access: resolved.auth.apiKey, accountId: latest.accountId ?? "" };
+  if (!resolved?.auth?.apiKey || latest?.type !== "oauth" || !latest.access) return null;
+  return { access: latest.access, accountId: latest.accountId ?? "" };
 }
 
 function anthropicWindow(raw, durationHours, fetchedAt) {
@@ -1174,8 +1200,120 @@ export function planWindowBurnPerHour(window, at = now()) {
   return Math.max(0, 100 - used) / hours;
 }
 
+export function parseCursorUsage(body, fetchedAt = now()) {
+  const rawUsed = body?.planUsage?.totalPercentUsed;
+  if (rawUsed === null || rawUsed === undefined || rawUsed === "") return null;
+  const used = Number(rawUsed);
+  if (!Number.isFinite(used)) return null;
+  const rawReset = body?.billingCycleEnd;
+  const numericReset = Number(rawReset);
+  const parsedReset = typeof rawReset === "string" && !/^\d+(?:\.\d+)?$/.test(rawReset)
+    ? Date.parse(rawReset)
+    : numericReset < 10_000_000_000 ? numericReset * 1000 : numericReset;
+  const limitType = String(body?.spendLimitUsage?.limitType ?? "").trim().toLowerCase();
+  const membershipType = String(body?.membershipType ?? (limitType === "team" ? "team" : "pro")).trim().toLowerCase();
+  return {
+    used: Math.max(0, Math.min(100, used)),
+    resetAt: Number.isFinite(parsedReset) ? parsedReset : fetchedAt + 30 * 24 * 3600_000,
+    membershipType,
+  };
+}
+
+export class CursorGovernor {
+  constructor(config, { modelRuntime = null, authPath = AUTH_PATH, fetcher = fetch, readCredential = readStoredCredential } = {}) {
+    this.config = config;
+    this.modelRuntime = modelRuntime;
+    this.authPath = authPath;
+    this.fetcher = fetcher;
+    this.readCredential = readCredential;
+    this.snapshot = null;
+    this.refreshing = null;
+    this.cooldownUntil = 0;
+  }
+
+  setModelRuntime(modelRuntime) { this.modelRuntime = modelRuntime; }
+
+  async refresh() {
+    if (this.snapshot && now() < this.snapshot.expiresAt) return this.snapshot;
+    if (this.refreshing) return this.refreshing;
+    this.refreshing = this.fetch().finally(() => { this.refreshing = null; });
+    return this.refreshing;
+  }
+
+  async fetch() {
+    const fetchedAt = now();
+    try {
+      const stored = this.readCredential(CURSOR_PROVIDER, this.authPath);
+      if (stored?.type !== "oauth" || !stored.access) throw new Error("Cursor OAuth credential unavailable");
+      if (!this.modelRuntime?.getProvider(CURSOR_PROVIDER)) throw new Error("Cursor provider extension is not loaded");
+      const usable = await resolveOAuthCredential({
+        modelRuntime: this.modelRuntime,
+        provider: CURSOR_PROVIDER,
+        baseProvider: CURSOR_PROVIDER,
+        stored,
+        authPath: this.authPath,
+        pollSeconds: this.config.plan.cursor.pollSeconds,
+        readCredential: this.readCredential,
+      });
+      if (!usable) throw new Error("Cursor OAuth credential could not be refreshed");
+      const response = await this.fetcher(CURSOR_USAGE_ENDPOINT, {
+        method: "POST",
+        headers: { Authorization: `Bearer ${usable.access}`, "Content-Type": "application/json" },
+        body: "{}",
+        signal: AbortSignal.timeout(10_000),
+      });
+      if (!response.ok) throw new Error(`Cursor usage endpoint HTTP ${response.status}`);
+      const usage = parseCursorUsage(await response.json(), fetchedAt);
+      if (!usage) throw new Error("Cursor usage endpoint returned malformed plan usage");
+      const paid = ["pro", "pro+", "ultra", "team", "enterprise"].includes(usage.membershipType);
+      this.snapshot = {
+        at: fetchedAt,
+        expiresAt: fetchedAt + this.config.plan.cursor.pollSeconds * 1000,
+        healthy: paid ? 1 : 0,
+        usage,
+        error: paid ? null : `Cursor membership is not paid: ${usage.membershipType || "missing"}`,
+      };
+    } catch (error) {
+      this.snapshot = {
+        at: fetchedAt,
+        expiresAt: fetchedAt + this.config.plan.cursor.pollSeconds * 1000,
+        healthy: 0,
+        usage: null,
+        error: String(error?.message ?? error),
+      };
+    }
+    return this.snapshot;
+  }
+
+  noteFailure(error, at = now()) {
+    if (/(?:429|rate.?limit|usage limit|exhausted)/i.test(String(error?.message ?? error))) {
+      this.cooldownUntil = at + 5 * 60_000;
+      this.snapshot = null;
+    }
+  }
+
+  async allows(variant, activeAssignments, snapshot = null) {
+    const usage = snapshot ?? await this.refresh();
+    const active = activeAssignments.filter((assignment) => providerFamily(assignment.provider) === CURSOR_PROVIDER).length;
+    const modelAvailable = this.modelRuntime?.getModel(CURSOR_PROVIDER, modelIdOf(variant.model)) !== undefined;
+    const remaining = usage.usage ? 100 - usage.usage.used : 0;
+    const available = usage.healthy === 1 && modelAvailable && now() >= this.cooldownUntil &&
+      remaining > this.config.plan.cursor.reservePercent && active < this.config.plan.cursor.maxParallel;
+    return {
+      ok: available,
+      provider: available ? CURSOR_PROVIDER : null,
+      model: variant.model,
+      thinking: variant.thinking,
+      pressure: usage.usage ? (usage.usage.used + active * (100 / this.config.plan.cursor.maxParallel)) / 100 : Number.POSITIVE_INFINITY,
+      detail: available
+        ? `Cursor account active=${active} used=${usage.usage.used.toFixed(1)}% remaining=${remaining.toFixed(1)}% resets=${iso(usage.usage.resetAt)}`
+        : `Cursor gate closed: active=${active}/${this.config.plan.cursor.maxParallel} used=${usage.usage?.used?.toFixed(1) ?? "unknown"}% model=${modelAvailable ? "available" : "missing"} error=${usage.error ?? "none"}`,
+    };
+  }
+}
+
 export class PlanGovernor {
-  constructor(config, { modelRuntime = null, authPath = AUTH_PATH, lifecyclePath = MULTI_PASS_PATH, fetcher = fetch, readCredential = readStoredCredential, anthropic = null, feedback = null, usageMultiplier = () => 1 } = {}) {
+  constructor(config, { modelRuntime = null, authPath = AUTH_PATH, lifecyclePath = MULTI_PASS_PATH, fetcher = fetch, readCredential = readStoredCredential, anthropic = null, cursor = null, feedback = null, usageMultiplier = () => 1 } = {}) {
     this.config = config;
     this.usageMultiplier = usageMultiplier;
     this.modelRuntime = modelRuntime;
@@ -1188,11 +1326,13 @@ export class PlanGovernor {
     this.pendingAssignments = [];
     this.feedback = feedback ?? new DistributedQuotaFeedback(config, CODEX_GOVERNOR_STATE_PATH);
     this.anthropic = anthropic ?? new AnthropicGovernor(config, { modelRuntime, authPath, fetcher, readCredential, usageMultiplier });
+    this.cursor = cursor ?? new CursorGovernor(config, { modelRuntime, authPath, fetcher, readCredential });
   }
 
   setModelRuntime(modelRuntime) {
     this.modelRuntime = modelRuntime;
     this.anthropic.setModelRuntime(modelRuntime);
+    this.cursor.setModelRuntime(modelRuntime);
   }
 
   async authRuntime() {
@@ -1340,6 +1480,7 @@ export class PlanGovernor {
 
   noteFailure(assignment, error) {
     if (providerFamily(assignment.provider) === ANTHROPIC_PROVIDER) this.anthropic.noteFailure(assignment.provider, error);
+    if (providerFamily(assignment.provider) === CURSOR_PROVIDER) this.cursor.noteFailure(error);
     if (providerFamily(assignment.provider) === CODEX_PROVIDER && /(?:429|rate.?limit|usage limit|exhausted)/i.test(String(error?.message ?? error))) {
       this.snapshot = null;
     }
@@ -1368,6 +1509,9 @@ export class PlanGovernor {
         pressure: 0,
         detail: `restored Codex quota lease on ${selected.account.provider}`,
       } : { ok: false, detail: `Codex quota lease account unavailable: ${lease.provider ?? "any"}` };
+    }
+    if (family === CURSOR_PROVIDER) {
+      return this.cursor.allows(variant, activeAssignments);
     }
     if (family === ANTHROPIC_PROVIDER) {
       const usage = await this.anthropic.refresh(activeAssignments);
@@ -1412,23 +1556,24 @@ export class PlanGovernor {
         detail: `ChatGPT Pro eligible=${entitlement.eligible} reserved=${reserved} available=${available}`,
       };
     }
-    const mix = taskMix(this.config, task);
-    if (!mix) {
-      if (providerOf(task.model) === ANTHROPIC_PROVIDER) {
-        return this.anthropic.allows({ model: task.model, thinking: task.thinking }, activeAssignments);
-      }
-      return this.allowsCodex({ model: task.model, thinking: task.thinking }, activeAssignments);
-    }
-    const [codex, anthropic] = await Promise.all([this.refresh(activeAssignments), this.anthropic.refresh(activeAssignments)]);
-    const primaryVariant = { model: task.model, thinking: task.thinking };
-    const alternateVariant = { model: mix.alternateModel, thinking: mix.alternateThinking };
-    const [primary, alternate] = await Promise.all([
-      this.allowsCodex(primaryVariant, activeAssignments, codex),
-      this.anthropic.allows(alternateVariant, activeAssignments, anthropic),
-    ]);
-    const selected = chooseIndependentAssignment(primary, alternate);
-    const detail = `independent provider gates; ${primary.detail}; ${alternate.detail}`;
-    return selected ? { ...selected, detail } : { ...primary, detail };
+    const evaluate = (variant) => {
+      const family = providerFamily(providerOf(variant.model));
+      if (family === CODEX_PROVIDER) return this.allowsCodex(variant, activeAssignments);
+      if (family === ANTHROPIC_PROVIDER) return this.anthropic.allows(variant, activeAssignments);
+      if (family === CURSOR_PROVIDER) return this.cursor.allows(variant, activeAssignments);
+      return Promise.resolve({
+        ok: false,
+        provider: null,
+        model: variant.model,
+        thinking: variant.thinking,
+        pressure: Number.POSITIVE_INFINITY,
+        detail: `No quota governor for provider family ${family}`,
+      });
+    };
+    const results = await Promise.all(taskVariants(this.config, task).map(evaluate));
+    const selected = chooseIndependentAssignment(results);
+    const detail = `independent provider gates; ${results.map((result) => result.detail).join("; ")}`;
+    return selected ? { ...selected, detail } : { ...results[0], detail };
   }
 }
 
@@ -1548,7 +1693,7 @@ export function grantQuotaLease(db, config, { provider, model, thinking, taskId 
   validateModelPolicy(model);
   const family = providerFamily(provider);
   if (family !== providerFamily(providerOf(model))) fail(`provider ${provider} cannot run ${model}`);
-  if (![CODEX_PROVIDER, ANTHROPIC_PROVIDER].includes(family)) fail(`quota leases do not support provider family ${family}`);
+  if (![CODEX_PROVIDER, ANTHROPIC_PROVIDER, CURSOR_PROVIDER].includes(family)) fail(`quota leases do not support provider family ${family}`);
   if (taskId !== null) {
     const task = db.prepare("SELECT * FROM task WHERE id=?").get(taskId);
     if (!task) fail(`unknown task ${taskId}`);
@@ -1562,6 +1707,25 @@ export function grantQuotaLease(db, config, { provider, model, thinking, taskId 
     .run(id, taskId, provider, model, thinking, at, at + leaseHours * 3600_000, at);
   event(db, "quota-lease-granted", `${model}:${thinking} via ${provider}; expires ${iso(at + leaseHours * 3600_000)}`, taskId);
   return id;
+}
+
+async function loadExtensionProviders(modelRuntime, cwd = HOME) {
+  const settingsManager = SettingsManager.create(cwd, getAgentDir());
+  const loader = new DefaultResourceLoader({ cwd, agentDir: getAgentDir(), settingsManager });
+  await loader.reload();
+  const loaded = await createAgentSession({
+    cwd,
+    modelRuntime,
+    resourceLoader: loader,
+    settingsManager,
+    sessionManager: SessionManager.inMemory(cwd),
+    noTools: "all",
+  });
+  if (loaded.extensionsResult.errors.length) {
+    loaded.session.dispose();
+    fail(`extension loading failed: ${loaded.extensionsResult.errors.map((item) => item.error).join("; ")}`);
+  }
+  return loaded.session;
 }
 
 export class Controller {
@@ -1617,6 +1781,8 @@ export class Controller {
     this.recover();
     for (const task of taskRows(this.db)) validateModelPolicy(task.model);
     this.modelRuntime = await ModelRuntime.create({ signal: AbortSignal.timeout(15000) });
+    const bootstrap = await loadExtensionProviders(this.modelRuntime);
+    bootstrap.dispose();
     this.plan.setModelRuntime(this.modelRuntime);
     // A restart aborts in-flight Pro polls while ChatGPT keeps reasoning
     // server-side; harvest those conversations instead of stranding them.
@@ -2184,7 +2350,7 @@ export function cancelTask(db, id, at = now()) {
 
 function taskModelLabel(task, config) {
   const mix = taskMix(config, task);
-  return mix ? `${runModelKey(task)} + ${mix.alternateModel}:${mix.alternateThinking}` : runModelKey(task);
+  return mix ? taskVariants(config, task).map(runModelKey).join(" + ") : runModelKey(task);
 }
 
 function printTasks(db) {
@@ -2301,7 +2467,10 @@ async function main(argv = process.argv.slice(2)) {
     };
     const codexFeedback = new DistributedQuotaFeedback(config, CODEX_GOVERNOR_STATE_PATH, false);
     const usageMultiplier = (providerFamily) => governorAllowanceMultiplier(db, providerFamily);
-    const snapshot = await new PlanGovernor(config, { feedback: codexFeedback, usageMultiplier }).refresh();
+    const modelRuntime = await ModelRuntime.create({ signal: AbortSignal.timeout(15_000) });
+    const bootstrap = await loadExtensionProviders(modelRuntime);
+    const governor = new PlanGovernor(config, { modelRuntime, feedback: codexFeedback, usageMultiplier });
+    const snapshot = await governor.refresh();
     const plan = {
       at: snapshot.at,
       healthyAccounts: snapshot.healthy,
@@ -2339,8 +2508,21 @@ async function main(argv = process.argv.slice(2)) {
         }])),
       })),
     };
+    const cursorSnapshot = await governor.cursor.refresh();
+    const cursor = {
+      at: cursorSnapshot.at,
+      healthyAccounts: cursorSnapshot.healthy,
+      usedPercent: cursorSnapshot.usage?.used ?? null,
+      resetsAt: cursorSnapshot.usage?.resetAt ?? null,
+      membershipType: cursorSnapshot.usage?.membershipType ?? null,
+      modelAvailable: modelRuntime.getModel(CURSOR_PROVIDER, "grok-4.6-max") !== undefined,
+      maxParallel: config.plan.cursor.maxParallel,
+      reservePercent: config.plan.cursor.reservePercent,
+      error: cursorSnapshot.error,
+    };
+    bootstrap.dispose();
     const pro = proEntitlementSnapshot();
-    console.log(JSON.stringify({ resources, controls: governorControls(db), plan, anthropic, chatgptPro: pro }, null, 2));
+    console.log(JSON.stringify({ resources, controls: governorControls(db), plan, anthropic, cursor, chatgptPro: pro }, null, 2));
     return;
   }
   if (command === "pro-recover") {
