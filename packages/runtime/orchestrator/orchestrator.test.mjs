@@ -566,7 +566,8 @@ test("resource governor admits until CPU or RAM is reached without a numeric age
   assert.equal(cpuPercent({ idle: 100, total: 200 }, { idle: 125, total: 300 }), 75);
 });
 
-test("plan estimator paces all remaining capacity to window reset", () => {
+test("plan estimator paces all remaining capacity to 100% at window reset", () => {
+  assert.equal(loadConfig().plan.distributed.targetPercent, 100);
   const at = Date.UTC(2026, 7, 14, 12);
   assert.equal(planWindowBurnPerHour({ used_percent: 40, reset_at: (at + 10 * 3600_000) / 1000 }, at), 6);
   assert.equal(planWindowBurnPerHour({ used_percent: 40, reset_at: at / 1000 }, at), 0);

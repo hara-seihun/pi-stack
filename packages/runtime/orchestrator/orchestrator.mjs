@@ -75,7 +75,7 @@ const DEFAULT_CONFIG = {
       }
     },
     distributed: {
-      targetPercent: 92,
+      targetPercent: 100,
       slopeWindowHours: 2,
       safetyDelayHours: 0.5,
       initialShare: 0.08,
