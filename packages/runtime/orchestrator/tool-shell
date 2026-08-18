@@ -85,6 +85,13 @@ fi
 
 memory_max=${PI_TOOL_MEMORY_MAX:-12G}
 
+# A command with no wall-clock boundary holds its agent lane and its share of
+# the tool slice forever. One malformed exhaustive search has already blocked a
+# lane for hours while saturating seventeen cores, so the scope carries a hard
+# runtime ceiling alongside its memory ceiling. Genuinely long builds raise it
+# explicitly; agents still set their own far tighter per-command timeouts.
+runtime_max=${PI_TOOL_TIMEOUT_SECONDS:-3600}
+
 # System services do not inherit a login session bus environment. Resolve the
 # owning user's runtime paths here so the same launcher works from the
 # orchestrator, Pi Remote, and an interactive shell.
@@ -150,4 +157,5 @@ exec systemd-run --user --scope --quiet --collect \
   --property="MemoryMax=$memory_max" \
   --property=MemorySwapMax=0 \
   --property=OOMPolicy=kill \
+  --property="RuntimeMaxSec=$runtime_max" \
   -- "$0" --guard "$2"

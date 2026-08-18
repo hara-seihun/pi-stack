@@ -480,6 +480,16 @@ test("the tool shell contains an OOM to the tool call from a system-service envi
   assert.equal(result.signal, "SIGKILL");
 });
 
+test("the tool shell terminates a command that outruns its scope ceiling", () => {
+  const result = spawnSync(TOOL_SHELL, ["-c", "printf started; sleep 60"], {
+    encoding: "utf8",
+    env: { ...process.env, PI_TOOL_TIMEOUT_SECONDS: "2" },
+    timeout: 30_000,
+  });
+  assert.equal(result.stdout, "started");
+  assert.notEqual(result.status, 0);
+});
+
 test("the tool shell rejects and kills detached command processes", () => {
   const pidFile = path.join(temporary, "detached.pid");
   const command = `sleep 60 & printf '%s' $! > ${JSON.stringify(pidFile)}; printf launched`;
