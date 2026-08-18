@@ -8,19 +8,19 @@ import test from "node:test";
 
 const temporary = fs.mkdtempSync(path.join(os.tmpdir(), "agent-orchestrator-test-"));
 process.env.AGENT_ORCHESTRATOR_DATA = temporary;
-const { AnthropicGovernor, anthropicOpusHasHeadroom, anthropicWeeklyCapacity, cancelTask, chooseIndependentAssignment, chooseTask, codexSubscriptionLifecycle, completionToolResult, Controller, cpuPercent, DISPATCH_NO_WORK_TTL_MS, dispatchedTaskPrompt, DistributedQuotaFeedback, evaluateDispatch, evaluateWorkCheck, grantQuotaLease, insertRun, isolateTaskShell, isEligibleCodexPlan, launchBatchSize, loadConfig, nextIncompleteState, openDb, orchestratedTaskPrompt, parseAnthropicUsage, PlanGovernor, planWindowBurnPerHour, proEntitlementSnapshot, proLaunchAvailability, rankTasks, resourceSlots, setTaskOptions, shouldAdvanceBackoff, taskSettings, taskSupportsAssignment, TOOL_SHELL, validateCompletion, validateModelPolicy, WORK_CHECK_TTL_MS, workCheckStale, workReady } = await import("./orchestrator.mjs");
+const { AnthropicGovernor, anthropicOpusHasHeadroom, anthropicWeeklyCapacity, cancelTask, chooseIndependentAssignment, chooseTask, codexSubscriptionLifecycle, completionToolResult, Controller, cpuPercent, DISPATCH_NO_WORK_TTL_MS, dispatchedTaskPrompt, DistributedQuotaFeedback, evaluateDispatch, evaluateWorkCheck, governorAllowanceMultiplier, governorControls, grantQuotaLease, insertRun, isolateTaskShell, isEligibleCodexPlan, launchBatchSize, loadConfig, nextIncompleteState, openDb, orchestratedTaskPrompt, parseAnthropicUsage, PlanGovernor, planWindowBurnPerHour, proEntitlementSnapshot, proLaunchAvailability, rankTasks, resourceSlots, setGovernorBoost, setTaskOptions, shouldAdvanceBackoff, taskSettings, taskSupportsAssignment, TOOL_SHELL, validateCompletion, validateModelPolicy, WORK_CHECK_TTL_MS, workCheckStale, workReady } = await import("./orchestrator.mjs");
 
 test.after(() => fs.rmSync(temporary, { recursive: true, force: true }));
 
 test("database initializes with integrity", () => {
   const db = openDb(path.join(temporary, "test.sqlite3"));
   assert.equal(db.prepare("PRAGMA integrity_check").get().integrity_check, "ok");
-  assert.deepEqual(db.prepare("SELECT name FROM sqlite_master WHERE type='table' ORDER BY name").all().map((row) => row.name), ["event", "quota_lease", "run", "task"]);
+  assert.deepEqual(db.prepare("SELECT name FROM sqlite_master WHERE type='table' ORDER BY name").all().map((row) => row.name), ["event", "governor_control", "quota_lease", "run", "task"]);
   assert.ok(!db.prepare("PRAGMA table_info(task)").all().some((column) => column.name === "max_parallel"));
   assert.ok(db.prepare("PRAGMA table_info(run)").all().some((column) => column.name === "provider"));
   assert.ok(db.prepare("PRAGMA table_info(run)").all().some((column) => column.name === "productive"));
   assert.match(db.prepare("SELECT sql FROM sqlite_master WHERE type='trigger' AND name='auto_timestamp_run_update'").get().sql, /productive/);
-  for (const table of ["event", "quota_lease", "run", "task"]) {
+  for (const table of ["event", "governor_control", "quota_lease", "run", "task"]) {
     const columns = db.prepare(`PRAGMA table_info(${table})`).all().map((row) => row.name);
     assert.ok(columns.includes("created_at"));
     assert.ok(columns.includes("updated_at"));
@@ -28,6 +28,26 @@ test("database initializes with integrity", () => {
     assert.ok(db.prepare("SELECT 1 FROM sqlite_master WHERE type='trigger' AND name=?").get(`auto_timestamp_${table}_update`));
   }
   db.close();
+});
+
+test("provider allowance boosts are local, persistent, and independently toggleable", () => {
+  const file = path.join(temporary, "governor-controls.sqlite3");
+  const db = openDb(file);
+  assert.deepEqual(governorControls(db), {
+    openai: { boosted: false, multiplier: 1 },
+    anthropic: { boosted: false, multiplier: 1 },
+  });
+  assert.deepEqual(setGovernorBoost(db, "openai", true), {
+    openai: { boosted: true, multiplier: 5 },
+    anthropic: { boosted: false, multiplier: 1 },
+  });
+  assert.equal(governorAllowanceMultiplier(db, "openai-codex"), 5);
+  assert.equal(db.prepare("SELECT count(*) count FROM event WHERE kind='governor-control'").get().count, 1);
+  db.close();
+  const reopened = openDb(file);
+  assert.equal(governorAllowanceMultiplier(reopened, "openai"), 5);
+  assert.equal(governorAllowanceMultiplier(reopened, "anthropic"), 1);
+  reopened.close();
 });
 
 test("legacy task concurrency caps are deleted during migration", () => {
@@ -71,6 +91,8 @@ test("governor leases resume interrupted work then rotate after productive bound
   insertTask.run("task", "prompt", temporary, "openai-codex/gpt-5.6-sol", "xhigh", "done", 1, at, at, at);
   insertTask.run("waiting", "prompt", temporary, "openai-codex/gpt-5.6-sol", "xhigh", "done", 1, at, at, at + 1);
   const config = loadConfig();
+  config.maxCpuPercent = 101;
+  config.maxMemoryPercent = 101;
   const task = db.prepare("SELECT * FROM task WHERE id='task'").get();
   assert.equal(taskSupportsAssignment(config, task, { model: "openai-codex/gpt-5.6-sol", thinking: "xhigh" }), true);
   assert.equal(taskSupportsAssignment(config, task, { model: "anthropic/claude-opus-5", thinking: "xhigh" }), true);
@@ -140,6 +162,8 @@ test("restart handoffs are restored before unrelated cold admission", async () =
   insert.run("unleased", "prompt", temporary, "openai-codex/gpt-5.6-sol", "xhigh", "done", 1, at, at, at);
   insert.run("leased", "prompt", temporary, "openai-codex/gpt-5.6-sol", "xhigh", "done", 1, at, at, at + 1);
   const config = loadConfig();
+  config.maxCpuPercent = 101;
+  config.maxMemoryPercent = 101;
   grantQuotaLease(db, config, {
     provider: "openai-codex-3", model: "openai-codex/gpt-5.6-sol", thinking: "xhigh", taskId: "leased", hours: 1,
   }, at);
@@ -155,6 +179,75 @@ test("restart handoffs are restored before unrelated cold admission", async () =
   assert.deepEqual(launched, { task: "leased", provider: "openai-codex-3" });
   assert.equal(normalAdmissions, 0);
   db.close();
+});
+
+test("an unsafe interrupted governor lease returns to its model lane instead of blocking healthy cold capacity", async () => {
+  const db = openDb(path.join(temporary, "unsafe-handoff.sqlite3"));
+  const at = Date.now();
+  db.prepare(`INSERT INTO task(id,prompt,cwd,model,thinking,completion_condition,launch_share,not_before,next_eligible_at,created_at)
+    VALUES(?,?,?,?,?,?,?,?,?,?)`).run("task", "prompt", temporary, "openai-codex/gpt-5.6-sol", "xhigh", "done", 1, at, at, at);
+  const insertLease = db.prepare(`INSERT INTO quota_lease(id,task_id,provider,model,thinking,state,run_id,source,issued_at,expires_at,heartbeat_at)
+    VALUES(?,?,?,?,?,'available',NULL,'governor',?,?,?)`);
+  insertLease.run("handoff", "task", "anthropic-2", "anthropic/claude-opus-5", "xhigh", at, at + 3600_000, at);
+  insertLease.run("other-model", null, "openai-codex-3", "openai-codex/gpt-5.6-luna", "max", at, at + 3600_000, at);
+  const config = loadConfig();
+  config.maxCpuPercent = 101;
+  config.maxMemoryPercent = 101;
+  const controller = new Controller(db, config);
+  let coldAdmissions = 0;
+  controller.plan = {
+    restores: async () => ({ ok: false, detail: "account sensor circuit is closed" }),
+    allows: async (task) => {
+      coldAdmissions++;
+      return { ok: true, provider: "anthropic-3", model: "anthropic/claude-opus-5", thinking: task.thinking };
+    },
+  };
+  let launched = null;
+  controller.launch = async (task, assignment) => { launched = { task: task.id, provider: assignment.provider }; };
+  await controller.tick();
+  assert.deepEqual(launched, { task: "task", provider: "anthropic-3" });
+  assert.equal(coldAdmissions, 1);
+  assert.deepEqual(
+    { ...db.prepare("SELECT task_id,provider,state FROM quota_lease WHERE id='handoff'").get() },
+    { task_id: null, provider: null, state: "available" },
+  );
+  assert.deepEqual(
+    { ...db.prepare("SELECT task_id,provider,state FROM quota_lease WHERE id='other-model'").get() },
+    { task_id: null, provider: "openai-codex-3", state: "available" },
+  );
+  db.close();
+});
+
+test("a healthy exact account can restore while another account holds the aggregate sensor circuit open", async () => {
+  const config = loadConfig();
+  const account = {
+    provider: "anthropic-3",
+    windows: {
+      fiveHour: { utilization: 0 },
+      sharedWeekly: { utilization: 20 },
+      fableWeekly: { utilization: 20 },
+    },
+  };
+  const anthropic = {
+    cooldowns: new Map(),
+    refresh: async () => ({
+      distributed: {
+        sensorInconsistent: true,
+        accounts: { "anthropic-3": { sensorInconsistent: false, sustainableRate: 1 } },
+      },
+      accounts: [account],
+    }),
+    feedback: {
+      selectAccount: (accounts) => accounts.length ? { account: accounts[0], block: 1, sign: 0 } : null,
+    },
+    setModelRuntime() {},
+  };
+  const governor = new PlanGovernor(config, { anthropic });
+  const restored = await governor.restores({
+    provider: "anthropic-3", model: "anthropic/claude-opus-5", thinking: "xhigh",
+  }, []);
+  assert.equal(restored.ok, true);
+  assert.equal(restored.provider, "anthropic-3");
 });
 
 test("task prompts can be updated through the governed task interface", () => {
@@ -690,8 +783,15 @@ test("Anthropic Opus admission preserves enough shared weekly capacity for Fable
     ],
   };
   const variant = { model: "anthropic/claude-opus-5", thinking: "xhigh" };
+  const active = (count) => Array.from({ length: count }, () => ({
+    provider: "anthropic-2", model: variant.model, thinking: variant.thinking,
+  }));
   assert.equal((await governor.allows(variant, [], governor.snapshot)).provider, "anthropic-2");
-  assert.equal((await governor.allows(variant, [{ provider: "anthropic-2", model: variant.model, thinking: variant.thinking }], governor.snapshot)).ok, false);
+  assert.equal((await governor.allows(variant, active(3), governor.snapshot)).provider, "anthropic-2");
+  assert.equal((await governor.allows(variant, active(4), governor.snapshot)).ok, false);
+  governor.usageMultiplier = () => 5;
+  assert.equal((await governor.allows(variant, active(19), governor.snapshot)).provider, "anthropic-2");
+  assert.equal((await governor.allows(variant, active(20), governor.snapshot)).ok, false);
   governor.noteFailure("anthropic-2", new Error("429 usage limit reached"), Date.now());
   assert.equal((await governor.allows(variant, [], governor.snapshot)).ok, false);
 });
@@ -872,6 +972,17 @@ test("distributed quota feedback has no unconditional per-machine baseline", () 
   assert.equal(feedback.admits(0, 0.58, 0, "sol", 0), false);
 });
 
+test("boosted mode multiplies the final local allowance without bypassing headroom", () => {
+  const feedback = new DistributedQuotaFeedback(loadConfig(), path.join(temporary, "distributed-boost.json"));
+  feedback.state.accountShares.account = 0.1;
+  const accounts = [{ provider: "account", allowedBurnPercentPerHour: 1 }];
+  assert.equal(feedback.totalAllowance(accounts), 0.1);
+  assert.equal(feedback.totalAllowance(accounts, 5), 0.5);
+  assert.equal(feedback.admitsAccounts(0.2, 0.2, accounts, "model", 0, 1), false);
+  assert.equal(feedback.admitsAccounts(0.2, 0.2, accounts, "model", 0, 5), true);
+  assert.equal(feedback.admitsAccounts(0, 0.2, [{ provider: "account", allowedBurnPercentPerHour: 0 }], "model", 0, 5), false);
+});
+
 test("private balanced routing instruments assign a concrete healthy account", () => {
   const feedback = new DistributedQuotaFeedback(loadConfig(), path.join(temporary, "distributed-routing.json"));
   feedback.state.share = 0.5;
@@ -891,6 +1002,7 @@ test("calibration schema changes do not erase valid allocation state", () => {
   const statePath = path.join(temporary, "distributed-state-v2.json");
   fs.writeFileSync(statePath, JSON.stringify({
     version: 2,
+    meterIdentityVersion: 2,
     seed: "preserved-seed",
     share: 0.61,
     accountShares: { a: 0.7 },
@@ -944,4 +1056,44 @@ test("a frozen provider meter trips and a later advance clears the consistency c
   assert.equal(feedback.status.sensorInconsistent, true);
   feedback.observe(resource(1), 0, null, start + 42 * 60_000);
   assert.equal(feedback.status.sensorInconsistent, false);
+});
+
+test("a monotone rolling meter advance is recognized when the provider omits reset timestamps", () => {
+  const config = loadConfig();
+  const feedback = new DistributedQuotaFeedback(config, path.join(temporary, "distributed-rolling-meter.json"));
+  const start = 1_000_000;
+  const resource = (used, at) => [{
+    id: "account", provider: "account", group: "weekly", used,
+    resetAt: at + 168 * 3600_000, reportedReset: false, weight: 1, available: 92 - used,
+  }];
+  feedback.observe(resource(0, start), 6, null, start);
+  feedback.observe(resource(1, start + 21 * 60_000), 6, null, start + 21 * 60_000);
+  assert.equal(feedback.status.sensorInconsistent, false);
+  assert.equal(feedback.status.unconfirmed, 0);
+  assert.equal(feedback.state.cumulative.weekly, 1);
+});
+
+test("meter identity migration discards circuits produced by incomparable fallback reset times", () => {
+  const statePath = path.join(temporary, "distributed-meter-migration.json");
+  fs.writeFileSync(statePath, JSON.stringify({
+    version: 3,
+    allocationVersion: 1,
+    calibrationVersion: 1,
+    seed: "preserved-seed",
+    share: 0,
+    accountShares: { account: 0 },
+    accountUnconfirmed: { account: 3 },
+    accountSensorInconsistent: { account: true },
+    unconfirmed: 3,
+    sensorInconsistent: true,
+    samples: [{ at: 1 }],
+    estimates: { model: { upper: 2 } },
+  }));
+  const feedback = new DistributedQuotaFeedback(loadConfig(), statePath);
+  assert.equal(feedback.state.seed, "preserved-seed");
+  assert.equal(feedback.state.share, loadConfig().plan.distributed.initialShare);
+  assert.deepEqual(feedback.state.accountShares, {});
+  assert.equal(feedback.state.sensorInconsistent, false);
+  assert.deepEqual(feedback.state.samples, []);
+  assert.deepEqual(feedback.state.estimates, {});
 });

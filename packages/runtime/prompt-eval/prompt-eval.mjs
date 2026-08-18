@@ -39,6 +39,7 @@ const COMPARISON_IGNORED_SEGMENTS = new Set([
 const MAX_CASES = 20;
 const PI = process.env.PROMPT_EVAL_PI || "pi";
 const EXACT_PROMPT_EXTENSION = fileURLToPath(new URL("./exact-system-prompt.ts", import.meta.url));
+const USAGE_LOGGER_EXTENSION = fileURLToPath(new URL("../extensions/pi-usage-logger/logger.mjs", import.meta.url));
 
 function usage() {
   return `prompt-eval — run isolated system-prompt experiments with Pi
@@ -295,7 +296,7 @@ async function runCase({ experiment, runDirectory, caseConfig, seedInventory, ma
     "--no-approve",
     "--extension", EXACT_PROMPT_EXTENSION,
   ];
-  if (!experiment.extensions) args.push("--no-extensions");
+  if (!experiment.extensions) args.push("--no-extensions", "--extension", USAGE_LOGGER_EXTENSION);
   args.push(
     "--model", caseConfig.model,
     "--thinking", caseConfig.thinking,
@@ -309,7 +310,13 @@ async function runCase({ experiment, runDirectory, caseConfig, seedInventory, ma
   const child = spawn(PI, args, {
     cwd: workspace,
     detached: true,
-    env: { ...process.env, PROMPT_EVAL_SYSTEM_PROMPT: promptSnapshot },
+    env: {
+      ...process.env,
+      PROMPT_EVAL_SYSTEM_PROMPT: promptSnapshot,
+      PI_USAGE_OWNER_KIND: "prompt-eval",
+      PI_USAGE_OWNER_ID: `${experiment.name}/${caseConfig.name}/${manifest.runId ?? path.basename(runDirectory)}`,
+      PI_USAGE_OWNER_LABEL: `${experiment.name}/${caseConfig.name}`,
+    },
     stdio: ["pipe", "pipe", "pipe"],
   });
   let timedOut = false;

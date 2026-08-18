@@ -7,6 +7,7 @@ export PATH="$HOME/.local/bin:$PATH"
 ln -sfn "$PWD/node_modules/.bin/pi" "$HOME/.local/bin/pi"
 ln -sfn "$PWD/orchestrator/orchestrator.mjs" "$HOME/.local/bin/orchestrator"
 ln -sfn "$PWD/prompt-eval/prompt-eval.mjs" "$HOME/.local/bin/prompt-eval"
+ln -sfn "$PWD/usage/pi-usage.mjs" "$HOME/.local/bin/pi-usage"
 ln -sfn "$PWD/extensions/chatgpt-pro/pro" "$HOME/.local/bin/pro"
 rm -f "$HOME/.pi/agent/extensions/chatgpt-pro.ts" "$HOME/.pi/agent/extensions/chatgpt-pro.md"
 rm -rf "$HOME/.pi/agent/extensions/chatgpt-pro-support" "$HOME/.pi/agent/extensions/chatgpt-pro"
@@ -15,6 +16,8 @@ npm test
 claude_extension="$PWD/extensions/pi-claude-code-use/extensions/index.ts"
 settings="$HOME/.pi/agent/settings.json"
 claude_extension_configured=$(jq -r '.packages | any(. == "../../tools/pi-runtime/extensions/pi-claude-code-use" or . == "/home/kenan/tools/pi-runtime/extensions/pi-claude-code-use")' "$settings")
+usage_logger_configured=$(jq -r '.packages | any(. == "../../tools/pi-runtime/extensions/pi-usage-logger" or . == "/home/kenan/tools/pi-runtime/extensions/pi-usage-logger")' "$settings")
+[[ "$usage_logger_configured" == true ]] || { echo "locally owned Pi usage logger is not configured" >&2; exit 1; }
 if jq -e '.packages | any(type == "string" and startswith("npm:@benvargas/pi-claude-code-use"))' "$settings" >/dev/null; then
   echo "npm pi-claude-code-use must not replace the locally owned extension" >&2
   exit 1
@@ -32,6 +35,7 @@ version=$("$HOME/.local/bin/pi" --version)
 [[ "$version" == "0.84.1" ]] || { echo "unexpected Pi version: $version" >&2; exit 1; }
 [[ $("$HOME/.local/bin/pro" --version) == "$version" ]] || { echo "Pro launcher does not resolve to deployed Pi" >&2; exit 1; }
 "$HOME/.local/bin/prompt-eval" --help | grep -q '^prompt-eval'
+"$HOME/.local/bin/pi-usage" --help | grep -q '^Usage:'
 "$HOME/.local/bin/orchestrator" check
 if [[ "${PI_RUNTIME_SKIP_RESTART:-0}" != 1 ]] && systemctl is-enabled --quiet agent-orchestrator.service 2>/dev/null; then
   sudo systemctl restart agent-orchestrator.service

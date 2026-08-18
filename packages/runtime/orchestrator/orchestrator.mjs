@@ -20,6 +20,7 @@ import {
   SessionManager,
   SettingsManager,
 } from "@earendil-works/pi-coding-agent";
+import { createUsageLogger } from "../extensions/pi-usage-logger/logger.mjs";
 import {
   browserPoolCapacitySnapshot,
   completeInKernelBrowser,
@@ -46,10 +47,12 @@ const ANTHROPIC_CLIENT_USER_AGENT = "claude-code/2.1.80";
 const ANTHROPIC_USAGE_CACHE_PATH = path.join(DATA, "anthropic-plan-usage.json");
 const CODEX_GOVERNOR_STATE_PATH = path.join(DATA, "codex-distributed-governor.json");
 const ANTHROPIC_GOVERNOR_STATE_PATH = path.join(DATA, "anthropic-distributed-governor.json");
+const BOOSTED_ALLOWANCE_MULTIPLIER = 5;
 export const TOOL_SHELL = fileURLToPath(new URL("./tool-shell", import.meta.url));
 const TICK_MS = 5000;
 const DISTRIBUTED_ALLOCATION_VERSION = 1;
 const DISTRIBUTED_CALIBRATION_VERSION = 1;
+const DISTRIBUTED_METER_IDENTITY_VERSION = 2;
 const execFileAsync = promisify(execFile);
 
 // Per-account feedback and causal attribution are invalid if Multi-Pass rotates
@@ -97,7 +100,6 @@ const DEFAULT_CONFIG = {
     anthropic: {
       pollSeconds: 300,
       maxStaleSeconds: 3600,
-      maxActivePerAccount: 1,
       predictedPercentPerActiveHour: 0.25
     }
   }
@@ -145,7 +147,6 @@ export function loadConfig() {
   const anthropic = config.plan.anthropic;
   if (!anthropic || !(Number.isFinite(anthropic.pollSeconds) && anthropic.pollSeconds > 0) ||
       !(Number.isFinite(anthropic.maxStaleSeconds) && anthropic.maxStaleSeconds >= anthropic.pollSeconds) ||
-      !(Number.isInteger(anthropic.maxActivePerAccount) && anthropic.maxActivePerAccount > 0) ||
       !(Number.isFinite(anthropic.predictedPercentPerActiveHour ?? DEFAULT_CONFIG.plan.anthropic.predictedPercentPerActiveHour) &&
         (anthropic.predictedPercentPerActiveHour ?? DEFAULT_CONFIG.plan.anthropic.predictedPercentPerActiveHour) > 0)) {
     fail("invalid config.plan.anthropic");
@@ -255,6 +256,13 @@ export function openDb(file = DB_PATH) {
     );
     CREATE UNIQUE INDEX IF NOT EXISTS quota_lease_run ON quota_lease(run_id) WHERE run_id IS NOT NULL;
     CREATE INDEX IF NOT EXISTS quota_lease_availability ON quota_lease(state,expires_at,task_id);
+    CREATE TABLE IF NOT EXISTS governor_control (
+      provider_family TEXT PRIMARY KEY CHECK(provider_family IN ('openai','anthropic')),
+      allowance_multiplier INTEGER NOT NULL CHECK(allowance_multiplier IN (1,5)),
+      created_at INTEGER NOT NULL DEFAULT (CAST((julianday('now') - 2440587.5) * 86400000 AS INTEGER)),
+      updated_at INTEGER NOT NULL DEFAULT (CAST((julianday('now') - 2440587.5) * 86400000 AS INTEGER))
+    );
+    INSERT OR IGNORE INTO governor_control(provider_family,allowance_multiplier) VALUES('openai',1),('anthropic',1);
     CREATE TABLE IF NOT EXISTS event (
       id INTEGER PRIMARY KEY,
       at INTEGER NOT NULL,
@@ -265,6 +273,15 @@ export function openDb(file = DB_PATH) {
       created_at INTEGER NOT NULL DEFAULT (CAST((julianday('now') - 2440587.5) * 86400000 AS INTEGER)),
       updated_at INTEGER NOT NULL DEFAULT (CAST((julianday('now') - 2440587.5) * 86400000 AS INTEGER))
     );
+  `);
+  db.exec(`
+    CREATE TRIGGER IF NOT EXISTS log_governor_control_update
+    AFTER UPDATE OF allowance_multiplier ON governor_control
+    WHEN OLD.allowance_multiplier <> NEW.allowance_multiplier
+    BEGIN
+      INSERT INTO event(at,kind,detail)
+      VALUES(${SQLITE_NOW_MS},'governor-control',NEW.provider_family || ' allowance multiplier set to ' || NEW.allowance_multiplier);
+    END;
   `);
   let taskColumns = new Set(db.prepare("PRAGMA table_info(task)").all().map((row) => row.name));
   if (!taskColumns.has("dispatch")) {
@@ -306,13 +323,41 @@ export function openDb(file = DB_PATH) {
       thinking=coalesce(thinking,(SELECT thinking FROM task WHERE task.id=run.task_id))
     WHERE model IS NULL OR thinking IS NULL;
   `);
-  for (const table of ["task", "run", "quota_lease", "event"]) ensureTableTimestamps(db, table);
+  for (const table of ["task", "run", "quota_lease", "governor_control", "event"]) ensureTableTimestamps(db, table);
   return db;
 }
 
 function event(db, kind, detail, taskId = null, runId = null) {
   db.prepare("INSERT INTO event(at,kind,task_id,run_id,detail) VALUES(?,?,?,?,?)")
     .run(now(), kind, taskId, runId, detail);
+}
+
+function governorControlKey(providerFamily) {
+  if (providerFamily === CODEX_PROVIDER || providerFamily === "openai") return "openai";
+  if (providerFamily === ANTHROPIC_PROVIDER) return "anthropic";
+  fail(`unsupported governor provider family ${providerFamily}`);
+}
+
+export function governorAllowanceMultiplier(db, providerFamily) {
+  const key = governorControlKey(providerFamily);
+  const value = Number(db.prepare("SELECT allowance_multiplier FROM governor_control WHERE provider_family=?").get(key)?.allowance_multiplier);
+  if (value !== 1 && value !== BOOSTED_ALLOWANCE_MULTIPLIER) fail(`invalid ${key} governor allowance multiplier`);
+  return value;
+}
+
+export function governorControls(db) {
+  return Object.fromEntries(["openai", "anthropic"].map((provider) => {
+    const multiplier = governorAllowanceMultiplier(db, provider);
+    return [provider, { boosted: multiplier === BOOSTED_ALLOWANCE_MULTIPLIER, multiplier }];
+  }));
+}
+
+export function setGovernorBoost(db, providerFamily, boosted) {
+  const key = governorControlKey(providerFamily);
+  const multiplier = boosted ? BOOSTED_ALLOWANCE_MULTIPLIER : 1;
+  const result = db.prepare("UPDATE governor_control SET allowance_multiplier=? WHERE provider_family=?").run(multiplier, key);
+  if (result.changes !== 1) fail(`missing ${key} governor control`);
+  return governorControls(db);
 }
 
 function taskRows(db) {
@@ -476,6 +521,7 @@ export class DistributedQuotaFeedback {
       version: 3,
       allocationVersion: DISTRIBUTED_ALLOCATION_VERSION,
       calibrationVersion: DISTRIBUTED_CALIBRATION_VERSION,
+      meterIdentityVersion: DISTRIBUTED_METER_IDENTITY_VERSION,
       seed: randomBytes(16).toString("hex"),
       share: this.config.initialShare,
       previous: {},
@@ -497,13 +543,15 @@ export class DistributedQuotaFeedback {
       const parsed = JSON.parse(fs.readFileSync(statePath, "utf8"));
       const allocationVersion = parsed?.version === 2 ? 1 : parsed?.allocationVersion;
       const calibrationVersion = parsed?.version === 2 ? 1 : parsed?.calibrationVersion;
-      if (allocationVersion === DISTRIBUTED_ALLOCATION_VERSION &&
-          typeof parsed.seed === "string" && Number.isFinite(parsed.share)) {
-        for (const key of ["seed", "share", "previous", "cumulative", "history", "accountShares", "accountCumulative", "accountHistory", "accountUnconfirmed", "accountSensorInconsistent", "unconfirmed", "sensorInconsistent", "lastObservedAt", "lastControlAt"]) {
+      const meterIdentityCompatible = parsed?.meterIdentityVersion === DISTRIBUTED_METER_IDENTITY_VERSION;
+      if (typeof parsed.seed === "string") this.state.seed = parsed.seed;
+      if (meterIdentityCompatible && allocationVersion === DISTRIBUTED_ALLOCATION_VERSION &&
+          Number.isFinite(parsed.share)) {
+        for (const key of ["share", "previous", "cumulative", "history", "accountShares", "accountCumulative", "accountHistory", "accountUnconfirmed", "accountSensorInconsistent", "unconfirmed", "sensorInconsistent", "lastObservedAt", "lastControlAt"]) {
           if (parsed[key] !== undefined) this.state[key] = parsed[key];
         }
       }
-      if (calibrationVersion === DISTRIBUTED_CALIBRATION_VERSION) {
+      if (meterIdentityCompatible && calibrationVersion === DISTRIBUTED_CALIBRATION_VERSION) {
         if (Array.isArray(parsed.samples)) this.state.samples = parsed.samples;
         if (parsed.estimates && typeof parsed.estimates === "object") this.state.estimates = parsed.estimates;
       }
@@ -608,7 +656,7 @@ export class DistributedQuotaFeedback {
     }
   }
 
-  observe(resources, localPredictedRate = 0, calibration = null, at = now()) {
+  observe(resources, localPredictedRate = 0, calibration = null, at = now(), allowanceMultiplier = 1) {
     const previousAt = this.state.lastObservedAt;
     const elapsedHours = previousAt > 0 ? Math.max(0, at - previousAt) / 3600_000 : 0;
     const localByProvider = typeof localPredictedRate === "object" && localPredictedRate !== null ? localPredictedRate : {};
@@ -621,7 +669,11 @@ export class DistributedQuotaFeedback {
     for (const resource of resources) {
       const previous = this.state.previous[resource.id];
       let delta = 0;
-      if (previous && previous.resetAt === resource.resetAt && resource.used >= previous.used) {
+      const reportedReset = resource.reportedReset !== false;
+      const previousReportedReset = previous?.reportedReset !== false;
+      const sameWindow = previous && reportedReset === previousReportedReset &&
+        (!reportedReset || previous.resetAt === resource.resetAt);
+      if (sameWindow && resource.used >= previous.used) {
         delta = (resource.used - previous.used) * resource.weight;
       }
       if (delta > 1e-9) {
@@ -631,7 +683,7 @@ export class DistributedQuotaFeedback {
       resourceDeltas[`${resource.provider}:${resource.group}`] = delta;
       accountDeltas[resource.provider] = (accountDeltas[resource.provider] ?? 0) + delta;
       this.state.cumulative[resource.group] = (this.state.cumulative[resource.group] ?? 0) + delta;
-      this.state.previous[resource.id] = { used: resource.used, resetAt: resource.resetAt, at };
+      this.state.previous[resource.id] = { used: resource.used, resetAt: resource.resetAt, reportedReset, at };
     }
     if (meterAdvanced) {
       this.state.unconfirmed = 0;
@@ -699,7 +751,7 @@ export class DistributedQuotaFeedback {
         }
         const observed = Object.keys(status.rates).filter((group) => status.rates[group] !== null && status.rates[group] > this.config.rateFloor);
         if (observed.length) {
-          const ratio = Math.min(...observed.map((group) => status.sustainable[group] / status.rates[group]));
+          const ratio = Math.min(...observed.map((group) => allowanceMultiplier * status.sustainable[group] / status.rates[group]));
           this.state.accountShares[provider] = bounded(
             this.state.accountShares[provider] * Math.exp(this.config.controlGain * Math.log(bounded(ratio, this.config.minimumRatio, this.config.maximumRatio))),
             this.config.minimumShare,
@@ -717,7 +769,7 @@ export class DistributedQuotaFeedback {
       } else {
         const observedGroups = groups.filter((group) => rates[group] !== null && rates[group] > this.config.rateFloor);
         if (observedGroups.length) {
-          const ratio = Math.min(...observedGroups.map((group) => sustainable[group] / rates[group]));
+          const ratio = Math.min(...observedGroups.map((group) => allowanceMultiplier * sustainable[group] / rates[group]));
           this.state.share = bounded(
             this.state.share * Math.exp(this.config.controlGain * Math.log(bounded(ratio, this.config.minimumRatio, this.config.maximumRatio))),
             this.config.minimumShare,
@@ -763,21 +815,21 @@ export class DistributedQuotaFeedback {
     return this.score(`admit:${key}`, Math.floor(at / (this.config.routingBlockMinutes * 60_000))) < Math.min(1, allowance / candidate);
   }
 
-  totalAllowance(accounts) {
-    return accounts.reduce((sum, account) => sum +
+  totalAllowance(accounts, allowanceMultiplier = 1) {
+    return allowanceMultiplier * accounts.reduce((sum, account) => sum +
       (this.state.accountSensorInconsistent[account.provider] ? 0 : (this.state.accountShares[account.provider] ?? this.config.initialShare)) *
       account.allowedBurnPercentPerHour, 0);
   }
 
-  admitsAccounts(localLoad, candidate, accounts, key, at = now()) {
-    const allowance = this.totalAllowance(accounts);
+  admitsAccounts(localLoad, candidate, accounts, key, at = now(), allowanceMultiplier = 1) {
+    const allowance = this.totalAllowance(accounts, allowanceMultiplier);
     if (allowance <= 0 || candidate <= 0) return false;
     if (localLoad + candidate <= allowance + 1e-9) return true;
     if (localLoad > 1e-9) return false;
     return this.score(`admit-pool:${key}`, Math.floor(at / (this.config.routingBlockMinutes * 60_000))) < Math.min(1, allowance / candidate);
   }
 
-  selectAccount(accounts, activeRates, modelKey, candidate, at = now()) {
+  selectAccount(accounts, activeRates, modelKey, candidate, at = now(), allowanceMultiplier = 1) {
     const providers = accounts.map((account) => account.provider).sort();
     const block = Math.floor(at / (this.config.routingBlockMinutes * 60_000));
     const signs = this.pattern(providers, modelKey, block);
@@ -791,8 +843,8 @@ export class DistributedQuotaFeedback {
         sign: signs.get(account.provider) ?? 0,
       }))
       .sort((left, right) => {
-        const leftAllowance = (this.state.accountShares[left.account.provider] ?? this.config.initialShare) * left.account.allowedBurnPercentPerHour;
-        const rightAllowance = (this.state.accountShares[right.account.provider] ?? this.config.initialShare) * right.account.allowedBurnPercentPerHour;
+        const leftAllowance = allowanceMultiplier * (this.state.accountShares[left.account.provider] ?? this.config.initialShare) * left.account.allowedBurnPercentPerHour;
+        const rightAllowance = allowanceMultiplier * (this.state.accountShares[right.account.provider] ?? this.config.initialShare) * right.account.allowedBurnPercentPerHour;
         const leftPressure = left.live / Math.max(candidate, leftAllowance) - this.config.routingExcitation * left.sign;
         const rightPressure = right.live / Math.max(candidate, rightAllowance) - this.config.routingExcitation * right.sign;
         return leftPressure - rightPressure || left.account.provider.localeCompare(right.account.provider);
@@ -906,9 +958,10 @@ export function anthropicWeeklyCapacity(profile) {
 }
 
 export class AnthropicGovernor {
-  constructor(config, { modelRuntime = null, authPath = AUTH_PATH, fetcher = fetch, readCredential = readStoredCredential, cachePath = ANTHROPIC_USAGE_CACHE_PATH, feedback = null } = {}) {
+  constructor(config, { modelRuntime = null, authPath = AUTH_PATH, fetcher = fetch, readCredential = readStoredCredential, cachePath = ANTHROPIC_USAGE_CACHE_PATH, feedback = null, usageMultiplier = () => 1 } = {}) {
     this.config = config;
     this.modelRuntime = modelRuntime;
+    this.usageMultiplier = usageMultiplier;
     this.authPath = authPath;
     this.fetcher = fetcher;
     this.readCredential = readCredential;
@@ -975,7 +1028,8 @@ export class AnthropicGovernor {
 
   async refresh(activeAssignments = null) {
     if (activeAssignments) this.pendingAssignments = activeAssignments;
-    if (this.snapshot && now() < this.snapshot.expiresAt) return this.snapshot;
+    const allowanceMultiplier = this.usageMultiplier(ANTHROPIC_PROVIDER);
+    if (this.snapshot && this.snapshot.allowanceMultiplier === allowanceMultiplier && now() < this.snapshot.expiresAt) return this.snapshot;
     if (this.refreshing) return this.refreshing;
     this.refreshing = this.fetch().finally(() => { this.refreshing = null; });
     return this.refreshing;
@@ -1009,6 +1063,7 @@ export class AnthropicGovernor {
         group: "fiveHour",
         used: account.windows.fiveHour.utilization,
         resetAt: account.windows.fiveHour.resetsAt,
+        reportedReset: account.windows.fiveHour.reportedReset,
         weight: 1,
         available: Math.max(0, target - account.windows.fiveHour.utilization),
       },
@@ -1018,6 +1073,7 @@ export class AnthropicGovernor {
         group: "weekly",
         used: account.windows.sharedWeekly.utilization,
         resetAt: account.windows.sharedWeekly.resetsAt,
+        reportedReset: account.windows.sharedWeekly.reportedReset,
         weight: account.weeklyCapacityWeight,
         available: account.weeklyCapacityWeight * Math.max(0,
           target - account.windows.sharedWeekly.utilization - (100 - account.windows.fableWeekly.utilization) / 2),
@@ -1029,9 +1085,11 @@ export class AnthropicGovernor {
     }
     const predictedRate = this.config.plan.anthropic.predictedPercentPerActiveHour ?? DEFAULT_CONFIG.plan.anthropic.predictedPercentPerActiveHour;
     const predicted = Object.fromEntries(Object.entries(activeByProvider).map(([provider, active]) => [provider, active * predictedRate]));
-    const distributed = this.feedback.observe(resources, predicted, null, fetchedAt);
+    const allowanceMultiplier = this.usageMultiplier(ANTHROPIC_PROVIDER);
+    const distributed = this.feedback.observe(resources, predicted, null, fetchedAt, allowanceMultiplier);
     this.snapshot = {
       at: fetchedAt,
+      allowanceMultiplier,
       expiresAt: fetchedAt + this.config.plan.anthropic.pollSeconds * 1000,
       configured: configured.length,
       healthy: accounts.length,
@@ -1057,19 +1115,18 @@ export class AnthropicGovernor {
       if (providerFamily(item.provider) !== ANTHROPIC_PROVIDER) continue;
       activeByProvider.set(item.provider, (activeByProvider.get(item.provider) ?? 0) + 1);
     }
-    const limit = this.config.plan.anthropic.maxActivePerAccount;
     const eligible = usage.accounts
-      .filter((account) => anthropicOpusHasHeadroom(account) && (this.cooldowns.get(account.provider) ?? 0) <= now() &&
-        (activeByProvider.get(account.provider) ?? 0) < limit);
+      .filter((account) => anthropicOpusHasHeadroom(account) && (this.cooldowns.get(account.provider) ?? 0) <= now());
     const candidate = this.config.plan.anthropic.predictedPercentPerActiveHour ?? DEFAULT_CONFIG.plan.anthropic.predictedPercentPerActiveHour;
+    const allowanceMultiplier = this.usageMultiplier(ANTHROPIC_PROVIDER);
     const localActive = [...activeByProvider.values()].reduce((sum, value) => sum + value, 0);
     const localBurn = localActive * candidate;
     const syntheticAccounts = usage.accounts.filter(anthropicOpusHasHeadroom).map((account) => ({
       ...account,
       allowedBurnPercentPerHour: usage.distributed?.accounts?.[account.provider]?.sustainableRate ?? 0,
     }));
-    const allowance = this.feedback.totalAllowance(syntheticAccounts);
-    const admitted = this.feedback.admitsAccounts(localBurn, candidate, syntheticAccounts, runModelKey(variant));
+    const allowance = this.feedback.totalAllowance(syntheticAccounts, allowanceMultiplier);
+    const admitted = this.feedback.admitsAccounts(localBurn, candidate, syntheticAccounts, runModelKey(variant), now(), allowanceMultiplier);
     const syntheticActive = [...activeByProvider.entries()].map(([provider, active]) => ({ provider, rate: active * candidate }));
     const eligibleProviders = new Set(eligible.map((account) => account.provider));
     const routed = admitted ? this.feedback.selectAccount(
@@ -1077,6 +1134,8 @@ export class AnthropicGovernor {
       syntheticActive,
       runModelKey(variant),
       candidate,
+      now(),
+      allowanceMultiplier,
     ) : null;
     const selected = routed ? { account: routed.account, active: activeByProvider.get(routed.account.provider) ?? 0, ...routed } : null;
     const distributed = usage.distributed ?? this.feedback.status;
@@ -1089,8 +1148,8 @@ export class AnthropicGovernor {
       instrumentSign: selected?.sign ?? null,
       pressure: allowance > 0 ? (localBurn + candidate) / allowance : Number.POSITIVE_INFINITY,
       detail: selected
-        ? `Anthropic account=${selected.account.provider} active=${selected.active} local=${localBurn.toFixed(3)} candidate=${candidate.toFixed(3)} allowance=${allowance.toFixed(3)} share=${distributed.share.toFixed(3)} healthy=${usage.healthy} headroom=${usage.withHeadroom}`
-        : `Anthropic distributed gate closed: local=${localBurn.toFixed(3)} candidate=${candidate.toFixed(3)} allowance=${allowance.toFixed(3)} share=${distributed.share.toFixed(3)} healthy=${usage.healthy} headroom=${usage.withHeadroom}`,
+        ? `Anthropic account=${selected.account.provider} active=${selected.active} local=${localBurn.toFixed(3)} candidate=${candidate.toFixed(3)} allowance=${allowance.toFixed(3)} multiplier=${allowanceMultiplier} share=${distributed.share.toFixed(3)} healthy=${usage.healthy} headroom=${usage.withHeadroom}`
+        : `Anthropic distributed gate closed: local=${localBurn.toFixed(3)} candidate=${candidate.toFixed(3)} allowance=${allowance.toFixed(3)} multiplier=${allowanceMultiplier} share=${distributed.share.toFixed(3)} healthy=${usage.healthy} headroom=${usage.withHeadroom}`,
     };
   }
 }
@@ -1105,8 +1164,9 @@ export function planWindowBurnPerHour(window, at = now()) {
 }
 
 export class PlanGovernor {
-  constructor(config, { modelRuntime = null, authPath = AUTH_PATH, lifecyclePath = MULTI_PASS_PATH, fetcher = fetch, readCredential = readStoredCredential, anthropic = null, feedback = null } = {}) {
+  constructor(config, { modelRuntime = null, authPath = AUTH_PATH, lifecyclePath = MULTI_PASS_PATH, fetcher = fetch, readCredential = readStoredCredential, anthropic = null, feedback = null, usageMultiplier = () => 1 } = {}) {
     this.config = config;
+    this.usageMultiplier = usageMultiplier;
     this.modelRuntime = modelRuntime;
     this.authPath = authPath;
     this.lifecyclePath = lifecyclePath;
@@ -1116,7 +1176,7 @@ export class PlanGovernor {
     this.refreshing = null;
     this.pendingAssignments = [];
     this.feedback = feedback ?? new DistributedQuotaFeedback(config, CODEX_GOVERNOR_STATE_PATH);
-    this.anthropic = anthropic ?? new AnthropicGovernor(config, { modelRuntime, authPath, fetcher, readCredential });
+    this.anthropic = anthropic ?? new AnthropicGovernor(config, { modelRuntime, authPath, fetcher, readCredential, usageMultiplier });
   }
 
   setModelRuntime(modelRuntime) {
@@ -1144,7 +1204,8 @@ export class PlanGovernor {
 
   async refresh(activeAssignments = null) {
     if (activeAssignments) this.pendingAssignments = activeAssignments;
-    if (this.snapshot && now() < this.snapshot.expiresAt) return this.snapshot;
+    const allowanceMultiplier = this.usageMultiplier(CODEX_PROVIDER);
+    if (this.snapshot && this.snapshot.allowanceMultiplier === allowanceMultiplier && now() < this.snapshot.expiresAt) return this.snapshot;
     if (this.refreshing) return this.refreshing;
     this.refreshing = this.fetch().finally(() => { this.refreshing = null; });
     return this.refreshing;
@@ -1209,15 +1270,17 @@ export class PlanGovernor {
       weight: 1,
       available: Math.max(0, (this.config.plan.distributed?.targetPercent ?? DEFAULT_CONFIG.plan.distributed.targetPercent) - account.binding.used),
     }));
+    const allowanceMultiplier = this.usageMultiplier(CODEX_PROVIDER);
     const distributed = this.feedback.observe(resources, localPredictedRate, {
       accounts,
       assignments: localAssignments,
       priors: this.config.plan.modelBurnPercentPerHour,
       rate: (value) => this.config.plan.modelBurnPercentPerHour[runModelKey(value)] ?? 0,
-    }, fetchedAt);
+    }, fetchedAt, allowanceMultiplier);
     const snapshotAt = now();
     this.snapshot = {
       at: snapshotAt,
+      allowanceMultiplier,
       expiresAt: Math.min(snapshotAt + this.config.plan.pollSeconds * 1000, lifecycle.nextRetirementAt),
       healthy: accounts.length,
       withHeadroom: accounts.filter((account) => account.allowedBurnPercentPerHour > 0).length,
@@ -1242,13 +1305,14 @@ export class PlanGovernor {
     this.pendingAssignments = activeAssignments;
     const snapshot = plan ?? await this.refresh(activeAssignments);
     const candidate = this.modelRate(variant);
+    const allowanceMultiplier = this.usageMultiplier(CODEX_PROVIDER);
     const codexAssignments = activeAssignments
       .filter((item) => providerFamily(item.provider) === CODEX_PROVIDER)
       .map((item) => ({ provider: item.provider, rate: this.modelRate(item.model ? item : item.task) }));
     const live = codexAssignments.reduce((sum, item) => sum + item.rate, 0);
-    const allowance = this.feedback.totalAllowance(snapshot.accounts);
-    const admitted = this.feedback.admitsAccounts(live, candidate, snapshot.accounts, runModelKey(variant));
-    const selected = admitted ? this.feedback.selectAccount(snapshot.accounts, codexAssignments, runModelKey(variant), candidate) : null;
+    const allowance = this.feedback.totalAllowance(snapshot.accounts, allowanceMultiplier);
+    const admitted = this.feedback.admitsAccounts(live, candidate, snapshot.accounts, runModelKey(variant), now(), allowanceMultiplier);
+    const selected = admitted ? this.feedback.selectAccount(snapshot.accounts, codexAssignments, runModelKey(variant), candidate, now(), allowanceMultiplier) : null;
     return {
       ok: selected !== null,
       provider: selected?.account.provider ?? null,
@@ -1258,8 +1322,8 @@ export class PlanGovernor {
       instrumentSign: selected?.sign ?? null,
       pressure: allowance > 0 ? (live + candidate) / allowance : Number.POSITIVE_INFINITY,
       detail: selected
-        ? `Codex account=${selected.account.provider} local=${live.toFixed(3)} candidate=${candidate.toFixed(3)} allowance=${allowance.toFixed(3)} share=${snapshot.distributed.share.toFixed(3)} sustainable=${snapshot.distributed.sustainableRate.toFixed(3)}`
-        : `Codex distributed gate closed: local=${live.toFixed(3)} candidate=${candidate.toFixed(3)} allowance=${allowance.toFixed(3)} share=${snapshot.distributed.share.toFixed(3)} sustainable=${snapshot.distributed.sustainableRate.toFixed(3)} observed=${snapshot.distributed.observedRate?.toFixed(3) ?? "unknown"}`,
+        ? `Codex account=${selected.account.provider} local=${live.toFixed(3)} candidate=${candidate.toFixed(3)} allowance=${allowance.toFixed(3)} multiplier=${allowanceMultiplier} share=${snapshot.distributed.share.toFixed(3)} sustainable=${snapshot.distributed.sustainableRate.toFixed(3)}`
+        : `Codex distributed gate closed: local=${live.toFixed(3)} candidate=${candidate.toFixed(3)} allowance=${allowance.toFixed(3)} multiplier=${allowanceMultiplier} share=${snapshot.distributed.share.toFixed(3)} sustainable=${snapshot.distributed.sustainableRate.toFixed(3)} observed=${snapshot.distributed.observedRate?.toFixed(3) ?? "unknown"}`,
     };
   }
 
@@ -1275,14 +1339,15 @@ export class PlanGovernor {
     const variant = { model: lease.model, thinking: lease.thinking };
     if (family === CODEX_PROVIDER) {
       const snapshot = await this.refresh(activeAssignments);
-      if (snapshot.distributed.sensorInconsistent) return { ok: false, detail: "Codex sensor circuit blocks quota lease restoration" };
       const activeRates = activeAssignments
         .filter((item) => providerFamily(item.provider) === CODEX_PROVIDER)
         .map((item) => ({ provider: item.provider, rate: this.modelRate(item.model ? item : item.task) }));
       const accounts = snapshot.accounts.filter((account) => account.allowedBurnPercentPerHour > 0 &&
         !snapshot.distributed.accounts?.[account.provider]?.sensorInconsistent &&
         (lease.provider === null || lease.provider === undefined || account.provider === lease.provider));
-      const selected = this.feedback.selectAccount(accounts, activeRates, runModelKey(variant), this.modelRate(variant));
+      const selected = this.feedback.selectAccount(
+        accounts, activeRates, runModelKey(variant), this.modelRate(variant), now(), this.usageMultiplier(CODEX_PROVIDER),
+      );
       return selected ? {
         ok: true,
         provider: selected.account.provider,
@@ -1295,20 +1360,20 @@ export class PlanGovernor {
     }
     if (family === ANTHROPIC_PROVIDER) {
       const usage = await this.anthropic.refresh(activeAssignments);
-      if (usage.distributed.sensorInconsistent) return { ok: false, detail: "Anthropic sensor circuit blocks quota lease restoration" };
       const activeByProvider = new Map();
       for (const item of activeAssignments.filter((item) => providerFamily(item.provider) === ANTHROPIC_PROVIDER)) {
         activeByProvider.set(item.provider, (activeByProvider.get(item.provider) ?? 0) + 1);
       }
       const accounts = usage.accounts.filter((account) => anthropicOpusHasHeadroom(account) &&
         (this.anthropic.cooldowns.get(account.provider) ?? 0) <= now() &&
-        (activeByProvider.get(account.provider) ?? 0) < this.config.plan.anthropic.maxActivePerAccount &&
         !usage.distributed.accounts?.[account.provider]?.sensorInconsistent &&
         (lease.provider === null || lease.provider === undefined || account.provider === lease.provider))
         .map((account) => ({ ...account, allowedBurnPercentPerHour: usage.distributed.accounts?.[account.provider]?.sustainableRate ?? 0 }));
       const candidate = this.config.plan.anthropic.predictedPercentPerActiveHour ?? DEFAULT_CONFIG.plan.anthropic.predictedPercentPerActiveHour;
       const activeRates = [...activeByProvider.entries()].map(([provider, active]) => ({ provider, rate: active * candidate }));
-      const selected = this.anthropic.feedback.selectAccount(accounts, activeRates, runModelKey(variant), candidate);
+      const selected = this.anthropic.feedback.selectAccount(
+        accounts, activeRates, runModelKey(variant), candidate, now(), this.usageMultiplier(ANTHROPIC_PROVIDER),
+      );
       return selected ? {
         ok: true,
         provider: selected.account.provider,
@@ -1493,7 +1558,9 @@ export class Controller {
     this.db = db;
     this.config = config;
     this.modelRuntime = null;
-    this.plan = new PlanGovernor(config);
+    this.plan = new PlanGovernor(config, {
+      usageMultiplier: (providerFamily) => governorAllowanceMultiplier(this.db, providerFamily),
+    });
     this.active = new Map();
     this.stopping = false;
     this.stopPromise = null;
@@ -1549,10 +1616,22 @@ export class Controller {
       WHERE state='available' AND expires_at>? AND (task_id=? OR task_id IS NULL)
       ORDER BY CASE WHEN task_id=? THEN 0 ELSE 1 END,issued_at,id`).all(now(), task.id, task.id);
     for (const lease of leases) {
-      if (!taskSupportsAssignment(this.config, task, lease)) continue;
+      if (!taskSupportsAssignment(this.config, task, lease)) {
+        if (lease.source === "governor" && lease.task_id === task.id) {
+          this.db.prepare("UPDATE quota_lease SET task_id=NULL,provider=NULL,heartbeat_at=? WHERE id=? AND state='available'")
+            .run(now(), lease.id);
+          event(this.db, "quota-lease-released", "interrupted assignment no longer matches its task; lease returned to its model lane", task.id);
+        }
+        continue;
+      }
       const restored = await this.plan.restores(lease, activeAssignments);
       if (restored.ok) return { ...restored, leaseId: lease.id };
       this.throttledEvent("quota-lease-blocked", restored.detail, task.id);
+      if (lease.source === "governor" && lease.task_id === task.id) {
+        this.db.prepare("UPDATE quota_lease SET task_id=NULL,provider=NULL,heartbeat_at=? WHERE id=? AND state='available'")
+          .run(now(), lease.id);
+        event(this.db, "quota-lease-released", "unsafe interrupted assignment returned to its model lane", task.id);
+      }
     }
     return null;
   }
@@ -1644,6 +1723,10 @@ export class Controller {
         cwd: task.cwd,
         agentDir: getAgentDir(),
         settingsManager,
+        extensionFactories: [{
+          name: "pi-usage-logger",
+          factory: createUsageLogger({ owner: { kind: "orchestrator", id: runId, label: task.id } }),
+        }],
       });
       await loader.reload();
       isolateTaskShell(settingsManager);
@@ -1853,7 +1936,11 @@ export class Controller {
         let governed;
         try {
           const restored = await this.restoreQuotaLease(task, activeAssignments);
-          governed = restored ?? (taskLeaseIds.has(task.id) ? { ok: false, detail: "task-specific quota lease is not currently restorable" } : await this.plan.allows(task, activeAssignments));
+          const pinnedOperatorLease = this.db.prepare(`SELECT 1 FROM quota_lease
+            WHERE state='available' AND expires_at>? AND task_id=? AND source='operator' LIMIT 1`).get(now(), task.id);
+          governed = restored ?? (pinnedOperatorLease
+            ? { ok: false, detail: "task-specific operator quota lease is not currently restorable" }
+            : await this.plan.allows(task, activeAssignments));
         }
         catch (error) {
           this.governorBlocked(String(error.message ?? error), task.id);
@@ -2069,6 +2156,7 @@ function check(db) {
   const integrity = db.prepare("PRAGMA integrity_check").get().integrity_check;
   if (integrity !== "ok") fail(`database integrity: ${integrity}`);
   const config = loadConfig();
+  governorControls(db);
   for (const task of taskRows(db)) {
     validateModelPolicy(task.model);
     if (!fs.existsSync(task.cwd)) fail(`task ${task.id} cwd is missing: ${task.cwd}`);
@@ -2102,6 +2190,15 @@ async function main(argv = process.argv.slice(2)) {
     event(db, `task-${subcommand}`, "operator command", id); console.log(`${subcommand} ${id}`); return;
   }
   if (command === "status") return printTasks(db);
+  if (command === "governor-control" && subcommand === "status") {
+    console.log(JSON.stringify(governorControls(db), null, 2)); return;
+  }
+  if (command === "governor-control" && subcommand === "set") {
+    const provider = rest[0];
+    const mode = rest[1];
+    if (!provider || !["on", "off"].includes(mode)) fail("governor-control set requires PROVIDER on|off");
+    console.log(JSON.stringify(setGovernorBoost(db, provider, mode === "on"), null, 2)); return;
+  }
   if (command === "quota" && subcommand === "grant") {
     const options = parseOptions(rest);
     const unknown = Object.keys(options).filter((key) => !["provider", "model", "thinking", "task", "hours"].includes(key));
@@ -2148,7 +2245,8 @@ async function main(argv = process.argv.slice(2)) {
       maxMemoryPercent: config.maxMemoryPercent,
     };
     const codexFeedback = new DistributedQuotaFeedback(config, CODEX_GOVERNOR_STATE_PATH, false);
-    const snapshot = await new PlanGovernor(config, { feedback: codexFeedback }).refresh();
+    const usageMultiplier = (providerFamily) => governorAllowanceMultiplier(db, providerFamily);
+    const snapshot = await new PlanGovernor(config, { feedback: codexFeedback, usageMultiplier }).refresh();
     const plan = {
       at: snapshot.at,
       healthyAccounts: snapshot.healthy,
@@ -2166,7 +2264,7 @@ async function main(argv = process.argv.slice(2)) {
       })),
     };
     const anthropicFeedback = new DistributedQuotaFeedback(config, ANTHROPIC_GOVERNOR_STATE_PATH, false);
-    const anthropicSnapshot = await new AnthropicGovernor(config, { feedback: anthropicFeedback }).refresh();
+    const anthropicSnapshot = await new AnthropicGovernor(config, { feedback: anthropicFeedback, usageMultiplier }).refresh();
     const anthropic = {
       at: anthropicSnapshot.at,
       healthyAccounts: anthropicSnapshot.healthy,
@@ -2187,7 +2285,7 @@ async function main(argv = process.argv.slice(2)) {
       })),
     };
     const pro = proEntitlementSnapshot();
-    console.log(JSON.stringify({ resources, plan, anthropic, chatgptPro: pro }, null, 2));
+    console.log(JSON.stringify({ resources, controls: governorControls(db), plan, anthropic, chatgptPro: pro }, null, 2));
     return;
   }
   if (command === "pro-recover") {
@@ -2230,6 +2328,8 @@ async function main(argv = process.argv.slice(2)) {
   orchestrator task cancel ID
   orchestrator task reopen ID
   orchestrator status
+  orchestrator governor-control status
+  orchestrator governor-control set openai|anthropic on|off
   orchestrator quota grant --provider EXACT_PROVIDER --model PROVIDER/MODEL --thinking LEVEL [--task TASK_ID] [--hours N]
   orchestrator quota list
   orchestrator quota revoke LEASE_ID
