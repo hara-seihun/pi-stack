@@ -57,7 +57,7 @@ export const TOOL_SHELL = fileURLToPath(new URL("./tool-shell", import.meta.url)
 const TICK_MS = 5000;
 const DISTRIBUTED_ALLOCATION_VERSION = 1;
 const DISTRIBUTED_CALIBRATION_VERSION = 1;
-const DISTRIBUTED_METER_IDENTITY_VERSION = 2;
+const DISTRIBUTED_METER_IDENTITY_VERSION = 3;
 const execFileAsync = promisify(execFile);
 
 // Per-account feedback and causal attribution are invalid if Multi-Pass rotates
@@ -954,10 +954,14 @@ function anthropicWindow(raw, durationHours, fetchedAt) {
   const utilization = Number(raw.utilization ?? raw.percent);
   if (!Number.isFinite(utilization)) return null;
   const parsedReset = raw.resets_at ? Date.parse(raw.resets_at) : Number.NaN;
+  // Anthropic reconstructs reset timestamps from a countdown and commonly
+  // alternates by one second between polls. Normalize reported boundaries to
+  // their intended minute so one rolling window retains one meter identity.
+  const normalizedReset = Number.isFinite(parsedReset) ? Math.round(parsedReset / 60_000) * 60_000 : Number.NaN;
   return {
     utilization: Math.max(0, Math.min(100, utilization)),
-    resetsAt: Number.isFinite(parsedReset) ? parsedReset : fetchedAt + durationHours * 3600_000,
-    reportedReset: Number.isFinite(parsedReset),
+    resetsAt: Number.isFinite(normalizedReset) ? normalizedReset : fetchedAt + durationHours * 3600_000,
+    reportedReset: Number.isFinite(normalizedReset),
   };
 }
 

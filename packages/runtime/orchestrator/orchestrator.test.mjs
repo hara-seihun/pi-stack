@@ -802,6 +802,15 @@ test("Anthropic Opus admission preserves enough shared weekly capacity for Fable
   assert.equal(parsed.windows.fiveHour.utilization, 20);
   assert.equal(parsed.windows.sharedWeekly.utilization, 40);
   assert.equal(parsed.windows.fableWeekly.utilization, 60);
+  const jittered = parseAnthropicUsage({
+    limits: [
+      { kind: "session", percent: 21, resets_at: new Date(at + 3600_000 - 1000).toISOString() },
+      { kind: "weekly_all", percent: 41, resets_at: new Date(at + 86400_000 - 1000).toISOString() },
+      { kind: "weekly_scoped", percent: 61, resets_at: new Date(at + 86400_000 - 1000).toISOString(), scope: { model: { display_name: "Fable" } } },
+    ],
+  }, at);
+  assert.equal(jittered.windows.fiveHour.resetsAt, parsed.windows.fiveHour.resetsAt);
+  assert.equal(jittered.windows.sharedWeekly.resetsAt, parsed.windows.sharedWeekly.resetsAt);
   assert.equal(parseAnthropicUsage({ five_hour: { utilization: 0 }, seven_day: { utilization: 0 } }, at), null);
 
   const account = (provider, session, shared, fable, extraUsagePercent = 0) => ({
@@ -1086,7 +1095,7 @@ test("calibration schema changes do not erase valid allocation state", () => {
   const statePath = path.join(temporary, "distributed-state-v2.json");
   fs.writeFileSync(statePath, JSON.stringify({
     version: 2,
-    meterIdentityVersion: 2,
+    meterIdentityVersion: 3,
     seed: "preserved-seed",
     share: 0.61,
     accountShares: { a: 0.7 },
