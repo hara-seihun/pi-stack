@@ -240,6 +240,16 @@ export function openDb(file = DB_PATH) {
       updated_at INTEGER NOT NULL DEFAULT (CAST((julianday('now') - 2440587.5) * 86400000 AS INTEGER))
     );
     CREATE INDEX IF NOT EXISTS run_task_status ON run(task_id,status);
+    CREATE TABLE IF NOT EXISTS dispatch_reservation (
+      run_id TEXT PRIMARY KEY,
+      task_id TEXT NOT NULL REFERENCES task(id),
+      state TEXT NOT NULL CHECK(state IN ('active','terminal')),
+      reserved_at INTEGER NOT NULL,
+      finished_at INTEGER,
+      created_at INTEGER NOT NULL DEFAULT (CAST((julianday('now') - 2440587.5) * 86400000 AS INTEGER)),
+      updated_at INTEGER NOT NULL DEFAULT (CAST((julianday('now') - 2440587.5) * 86400000 AS INTEGER))
+    );
+    CREATE INDEX IF NOT EXISTS dispatch_reservation_state ON dispatch_reservation(state);
     CREATE TABLE IF NOT EXISTS quota_lease (
       id TEXT PRIMARY KEY,
       task_id TEXT REFERENCES task(id),
@@ -324,7 +334,7 @@ export function openDb(file = DB_PATH) {
       thinking=coalesce(thinking,(SELECT thinking FROM task WHERE task.id=run.task_id))
     WHERE model IS NULL OR thinking IS NULL;
   `);
-  for (const table of ["task", "run", "quota_lease", "governor_control", "event"]) ensureTableTimestamps(db, table);
+  for (const table of ["task", "run", "dispatch_reservation", "quota_lease", "governor_control", "event"]) ensureTableTimestamps(db, table);
   return db;
 }
 
@@ -1572,6 +1582,9 @@ export class Controller {
 
   recover() {
     const at = now();
+    this.db.prepare(
+      "UPDATE dispatch_reservation SET state='terminal',finished_at=? WHERE state='active'"
+    ).run(at);
     const restartWindow = (this.config.plan?.distributed?.restartLeaseMinutes ?? DEFAULT_CONFIG.plan.distributed.restartLeaseMinutes) * 60_000;
     const interrupted = this.db.prepare("SELECT id,task_id,provider,model,thinking,started_at FROM run WHERE status='running'").all();
     const finish = this.db.prepare("UPDATE run SET status='interrupted',finished_at=?,error=?,productive=0 WHERE id=?");
@@ -1667,12 +1680,23 @@ export class Controller {
     try {
       insertRun(this.db, runId, task.id, assignment.provider, startedAt, assignment.model, assignment.thinking);
       this.db.prepare("UPDATE run SET dispatched=? WHERE id=?").run(packet === null ? 0 : 1, runId);
+      if (packet !== null) {
+        const transferred = this.db.prepare(
+          "DELETE FROM dispatch_reservation WHERE run_id=? AND state='active'"
+        ).run(runId).changes;
+        if (transferred !== 1) fail(`missing active dispatch reservation ${runId}`);
+      }
       leaseId = this.activateQuotaLease(task, assignment, runId, startedAt);
       const note = packet === null ? "" : ` (dispatched ${dispatchMs ?? "?"}ms, ${packet.length}B)`;
       event(this.db, "run-started", `${runModelKey(assignment)} via ${assignment.provider}${note}`, task.id, runId);
       this.db.exec("COMMIT");
     } catch (error) {
       this.db.exec("ROLLBACK");
+      if (packet !== null) {
+        this.db.prepare(
+          "UPDATE dispatch_reservation SET state='terminal',finished_at=? WHERE run_id=?"
+        ).run(now(), runId);
+      }
       throw error;
     }
     const promise = this.execute(task, runId, assignment, packet).finally(() => this.active.delete(runId));
@@ -1954,10 +1978,15 @@ export class Controller {
         if (task.dispatch) {
           const runId = randomId();
           const dispatchStarted = now();
+          this.db.prepare(
+            "INSERT INTO dispatch_reservation(run_id,task_id,state,reserved_at) " +
+            "VALUES(?,?,'active',?)"
+          ).run(runId, task.id, dispatchStarted);
           const dispatched = await evaluateDispatch(task, runId);
           const dispatchMs = now() - dispatchStarted;
           if (dispatched.state === "no-work") {
             const checkedAt = now();
+            this.db.prepare("DELETE FROM dispatch_reservation WHERE run_id=?").run(runId);
             if (governed.leaseId) {
               this.db.prepare("UPDATE quota_lease SET task_id=NULL,heartbeat_at=? WHERE id=? AND state='available'")
                 .run(checkedAt, governed.leaseId);
@@ -1970,6 +1999,9 @@ export class Controller {
             continue;
           }
           if (dispatched.state === "error") {
+            this.db.prepare(
+              "UPDATE dispatch_reservation SET state='terminal',finished_at=? WHERE run_id=?"
+            ).run(now(), runId);
             this.throttledEvent("dispatch-error", dispatched.detail, task.id);
             await this.launch(task, governed);
           } else {

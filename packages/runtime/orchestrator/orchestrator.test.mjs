@@ -24,12 +24,12 @@ test("controller identity distinguishes process leaders from stale thread IDs", 
 test("database initializes with integrity", () => {
   const db = openDb(path.join(temporary, "test.sqlite3"));
   assert.equal(db.prepare("PRAGMA integrity_check").get().integrity_check, "ok");
-  assert.deepEqual(db.prepare("SELECT name FROM sqlite_master WHERE type='table' ORDER BY name").all().map((row) => row.name), ["event", "governor_control", "quota_lease", "run", "task"]);
+  assert.deepEqual(db.prepare("SELECT name FROM sqlite_master WHERE type='table' ORDER BY name").all().map((row) => row.name), ["dispatch_reservation", "event", "governor_control", "quota_lease", "run", "task"]);
   assert.ok(!db.prepare("PRAGMA table_info(task)").all().some((column) => column.name === "max_parallel"));
   assert.ok(db.prepare("PRAGMA table_info(run)").all().some((column) => column.name === "provider"));
   assert.ok(db.prepare("PRAGMA table_info(run)").all().some((column) => column.name === "productive"));
   assert.match(db.prepare("SELECT sql FROM sqlite_master WHERE type='trigger' AND name='auto_timestamp_run_update'").get().sql, /productive/);
-  for (const table of ["event", "governor_control", "quota_lease", "run", "task"]) {
+  for (const table of ["dispatch_reservation", "event", "governor_control", "quota_lease", "run", "task"]) {
     const columns = db.prepare(`PRAGMA table_info(${table})`).all().map((row) => row.name);
     assert.ok(columns.includes("created_at"));
     assert.ok(columns.includes("updated_at"));
@@ -73,6 +73,23 @@ test("legacy task concurrency caps are deleted during migration", () => {
   const migrated = openDb(file);
   assert.ok(!migrated.prepare("PRAGMA table_info(task)").all().some((column) => column.name === "max_parallel"));
   migrated.close();
+});
+
+test("controller recovery terminalizes pre-launch dispatch ownership", () => {
+  const db = openDb(path.join(temporary, "dispatch-reservation.sqlite3"));
+  const at = Date.now();
+  db.prepare(`INSERT INTO task(id,prompt,cwd,model,thinking,completion_condition,launch_share,not_before,next_eligible_at,created_at)
+    VALUES(?,?,?,?,?,?,?,?,?,?)`).run("task", "prompt", temporary, "provider/model", "high", "done", 1, at, at, at);
+  db.prepare(
+    "INSERT INTO dispatch_reservation(run_id,task_id,state,reserved_at) VALUES(?,?,'active',?)"
+  ).run("reserved-run", "task", at);
+  new Controller(db, loadConfig()).recover();
+  const reservation = db.prepare(
+    "SELECT state,finished_at FROM dispatch_reservation WHERE run_id='reserved-run'"
+  ).get();
+  assert.equal(reservation.state, "terminal");
+  assert.ok(reservation.finished_at >= at);
+  db.close();
 });
 
 test("a launch is recorded with a literal running status", () => {
