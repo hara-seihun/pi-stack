@@ -1,6 +1,83 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
+scope_process_file() {
+  local hierarchy
+  local _controllers
+  local cgroup
+  while IFS=: read -r hierarchy _controllers cgroup; do
+    if [[ "$hierarchy" == 0 ]]; then
+      printf '%s' "/sys/fs/cgroup${cgroup}/cgroup.procs"
+      return 0
+    fi
+  done < /proc/self/cgroup
+  return 1
+}
+
+collect_scope_descendants() {
+  local process_file=$1
+  local pid
+  leftovers=()
+  while IFS= read -r pid; do
+    [[ "$pid" == "$$" ]] || leftovers+=("$pid")
+  done < "$process_file"
+}
+
+terminate_scope_descendants() {
+  local process_file=$1
+  local signal=$2
+  local pid
+  while IFS= read -r pid; do
+    [[ "$pid" == "$$" ]] && continue
+    kill "-$signal" "$pid" 2>/dev/null || true
+  done < "$process_file"
+}
+
+guard_command() {
+  local command=$1
+  local process_file
+  local status
+  local -a leftovers=()
+  process_file=$(scope_process_file)
+
+  trap 'terminate_scope_descendants "$process_file" TERM; exit 143' TERM HUP
+  trap 'terminate_scope_descendants "$process_file" INT; exit 130' INT
+
+  set +e
+  bash -c "$command" &
+  local command_pid=$!
+  wait "$command_pid"
+  status=$?
+  set -e
+
+  collect_scope_descendants "$process_file"
+  for _ in {1..20}; do
+    (( ${#leftovers[@]} == 0 )) && break
+    sleep 0.05
+    collect_scope_descendants "$process_file"
+  done
+  if (( ${#leftovers[@]} == 0 )); then
+    return "$status"
+  fi
+
+  terminate_scope_descendants "$process_file" TERM
+  for _ in {1..20}; do
+    sleep 0.05
+    collect_scope_descendants "$process_file"
+    (( ${#leftovers[@]} == 0 )) && break
+  done
+  if (( ${#leftovers[@]} != 0 )); then
+    terminate_scope_descendants "$process_file" KILL
+  fi
+  echo "tool-shell rejected a detached process left after the command exited" >&2
+  return 125
+}
+
+if [[ $# -eq 2 && "$1" == "--guard" ]]; then
+  guard_command "$2"
+  exit $?
+fi
+
 if [[ $# -ne 2 || "$1" != "-c" ]]; then
   echo "tool-shell expects exactly: -c COMMAND" >&2
   exit 2
@@ -73,4 +150,4 @@ exec systemd-run --user --scope --quiet --collect \
   --property="MemoryMax=$memory_max" \
   --property=MemorySwapMax=0 \
   --property=OOMPolicy=kill \
-  -- bash -c "$2"
+  -- "$0" --guard "$2"

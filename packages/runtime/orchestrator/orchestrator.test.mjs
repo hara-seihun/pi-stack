@@ -361,6 +361,20 @@ test("the tool shell contains an OOM to the tool call from a system-service envi
   assert.equal(result.signal, "SIGKILL");
 });
 
+test("the tool shell rejects and kills detached command processes", () => {
+  const pidFile = path.join(temporary, "detached.pid");
+  const command = `sleep 60 & printf '%s' $! > ${JSON.stringify(pidFile)}; printf launched`;
+  const result = spawnSync(TOOL_SHELL, ["-c", command], {
+    encoding: "utf8",
+    timeout: 10_000,
+  });
+  assert.equal(result.status, 125);
+  assert.equal(result.stdout, "launched");
+  assert.match(result.stderr, /rejected a detached process/);
+  const surviving = spawnSync("kill", ["-0", fs.readFileSync(pidFile, "utf8")], { encoding: "utf8" });
+  assert.equal(surviving.status, 1, surviving.stderr);
+});
+
 test("the tool shell waits through a transiently unavailable user bus", () => {
   const delayedBus = path.join(temporary, "delayed-user-bus");
   const realBus = process.env.DBUS_SESSION_BUS_ADDRESS?.replace(/^unix:path=/, "")
@@ -382,7 +396,7 @@ test("the tool shell thaws a frozen shared tool slice before launching", () => {
   fs.writeFileSync(path.join(mockBin, "busctl"), "#!/usr/bin/env bash\nexit 0\n", { mode: executable });
   fs.writeFileSync(path.join(mockBin, "systemd-id128"), "#!/usr/bin/env bash\nprintf '00000000000000000000000000000001\\n'\n", { mode: executable });
   fs.writeFileSync(path.join(mockBin, "systemctl"), `#!/usr/bin/env bash\nprintf '%s\\n' "$*" >> ${JSON.stringify(calls)}\nif [[ " $* " == *" show "* ]]; then printf 'frozen\\n'; fi\n`, { mode: executable });
-  fs.writeFileSync(path.join(mockBin, "systemd-run"), "#!/usr/bin/env bash\nwhile [[ $# -gt 0 && $1 != -- ]]; do shift; done\nshift\nexec \"$@\"\n", { mode: executable });
+  fs.writeFileSync(path.join(mockBin, "systemd-run"), "#!/usr/bin/env bash\nwhile [[ $# -gt 0 && $1 != -- ]]; do shift; done\nshift\nif [[ $2 == --guard ]]; then exec bash -c \"$3\"; fi\nexec \"$@\"\n", { mode: executable });
   const result = spawnSync(TOOL_SHELL, ["-c", "printf slice-recovered"], {
     encoding: "utf8",
     env: { ...process.env, PATH: `${mockBin}:${process.env.PATH}` },
