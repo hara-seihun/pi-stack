@@ -8,6 +8,7 @@ ln -sfn "$PWD/node_modules/.bin/pi" "$HOME/.local/bin/pi"
 ln -sfn "$PWD/orchestrator/orchestrator.mjs" "$HOME/.local/bin/orchestrator"
 ln -sfn "$PWD/prompt-eval/prompt-eval.mjs" "$HOME/.local/bin/prompt-eval"
 ln -sfn "$PWD/usage/pi-usage.mjs" "$HOME/.local/bin/pi-usage"
+ln -sfn "$PWD/plan-meter/plan-meter.mjs" "$HOME/.local/bin/plan-meter"
 ln -sfn "$PWD/extensions/chatgpt-pro/pro" "$HOME/.local/bin/pro"
 rm -f "$HOME/.pi/agent/extensions/chatgpt-pro.ts" "$HOME/.pi/agent/extensions/chatgpt-pro.md"
 rm -rf "$HOME/.pi/agent/extensions/chatgpt-pro-support" "$HOME/.pi/agent/extensions/chatgpt-pro"
@@ -36,6 +37,7 @@ version=$("$HOME/.local/bin/pi" --version)
 [[ $("$HOME/.local/bin/pro" --version) == "$version" ]] || { echo "Pro launcher does not resolve to deployed Pi" >&2; exit 1; }
 "$HOME/.local/bin/prompt-eval" --help | grep -q '^prompt-eval'
 "$HOME/.local/bin/pi-usage" --help | grep -q '^Usage:'
+"$HOME/.local/bin/plan-meter" --help | grep -q '^Usage:'
 "$HOME/.local/bin/orchestrator" check
 if [[ "${PI_RUNTIME_SKIP_RESTART:-0}" != 1 ]] && systemctl is-enabled --quiet agent-orchestrator.service 2>/dev/null; then
   sudo systemctl restart agent-orchestrator.service
