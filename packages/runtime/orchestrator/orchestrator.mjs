@@ -431,6 +431,14 @@ export function openDb(file = DB_PATH) {
       ALTER TABLE task ADD COLUMN work_checked_at INTEGER NOT NULL DEFAULT 0;
     `);
   }
+  // A prompt authored in a project file and copied here once is two sources of
+  // truth, and the copy silently ages: edits to the file changed nothing for
+  // months of launches. A task now remembers the file it came from, `task
+  // sync` reapplies it, and `check` refuses to pass while any task disagrees
+  // with its own source.
+  if (!taskColumns.has("prompt_file")) {
+    db.exec("DROP TRIGGER IF EXISTS auto_timestamp_task_insert; DROP TRIGGER IF EXISTS auto_timestamp_task_update; ALTER TABLE task ADD COLUMN prompt_file TEXT");
+  }
   const runColumns = new Set(db.prepare("PRAGMA table_info(run)").all().map((row) => row.name));
   if (!runColumns.has("provider")) {
     db.exec("DROP TRIGGER IF EXISTS auto_timestamp_run_insert; DROP TRIGGER IF EXISTS auto_timestamp_run_update; ALTER TABLE run ADD COLUMN provider TEXT");
@@ -1821,7 +1829,7 @@ export function completionToolResult(text, details) {
 }
 
 export function orchestratedTaskPrompt(task) {
-  return `${task.prompt}\n\n## Orchestrated task contract\nTask: ${task.id}\nCompletion condition: ${task.completion_condition}\nThis task runs repeatedly and may run concurrently with other launches; make external effects idempotent and use the project's claim/lease tools. Follow the task's stated cadence and own the session boundary: complete coherent work, preserve directly resumable state for larger follow-on work, and return promptly when extending this turn would delay the next heartbeat or another useful lane. Explore whatever files, state, or tools help you do the work well, and exercise initiative: retry transient failures, and repair broken tooling at its owning layer instead of reporting around it. Before finishing, call task_complete with the validated result; calling it again replaces the earlier report, so keep it current if you continue working. Set complete=true only if the completion condition is satisfied. Set productive=false only if this launch processed no work unit at all; otherwise omit it or set productive=true.`;
+  return `${task.prompt}\n\n## Orchestrated task contract\nTask: ${task.id}\nCompletion condition: ${task.completion_condition}\nThis task runs repeatedly and may run concurrently with other launches; make external effects idempotent and use the project's claim/lease tools. Follow the task's stated cadence and finish the work that cadence gives you: complete coherent work and preserve directly resumable state for larger follow-on work. Never ration effort against remaining context, session length, token cost, heartbeat timing, or another lane's turn: context compaction is automatic, and a later launch is not a reason to review, attack, verify, or repair less now. Explore whatever files, state, or tools help you do the work well, and exercise initiative: retry transient failures, and repair broken tooling at its owning layer instead of reporting around it. Before finishing, call task_complete with the validated result; calling it again replaces the earlier report, so keep it current if you continue working. Set complete=true only if the completion condition is satisfied. Set productive=false only if this launch processed no work unit at all; otherwise omit it or set productive=true.`;
 }
 
 export const WORK_CHECK_TTL_MS = 15_000;
@@ -3227,7 +3235,8 @@ function createTask(db, options) {
   if (unknown.length) fail(`task create does not support ${unknown.map((key) => `--${key}`).join(", ")}`);
   for (const key of ["id", "cwd", "model", "thinking", "condition"]) if (!options[key]) fail(`task create requires --${key}`);
   validateModelPolicy(options.model);
-  const prompt = options["prompt-file"] ? fs.readFileSync(options["prompt-file"], "utf8").trim() : options.prompt;
+  const promptFile = options["prompt-file"] ? path.resolve(options["prompt-file"]) : null;
+  const prompt = promptFile ? fs.readFileSync(promptFile, "utf8").trim() : options.prompt;
   const completionCheck = options["completion-check"]?.trim() || null;
   if (!prompt) fail("task create requires --prompt or --prompt-file");
   const cwd = path.resolve(options.cwd);
@@ -3238,8 +3247,8 @@ function createTask(db, options) {
   if (!Number.isFinite(notBefore)) fail("--not-before must be an ISO timestamp");
   const workCheck = options["work-check"]?.trim() || null;
   const dispatch = options.dispatch?.trim() || null;
-  db.prepare(`INSERT INTO task(id,prompt,cwd,model,thinking,completion_condition,completion_check,work_check,dispatch,launch_share,not_before,next_eligible_at,created_at)
-    VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?)`).run(options.id, prompt, cwd, options.model, options.thinking, options.condition, completionCheck, workCheck, dispatch, share, notBefore, notBefore, now());
+  db.prepare(`INSERT INTO task(id,prompt,prompt_file,cwd,model,thinking,completion_condition,completion_check,work_check,dispatch,launch_share,not_before,next_eligible_at,created_at)
+    VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?)`).run(options.id, prompt, promptFile, cwd, options.model, options.thinking, options.condition, completionCheck, workCheck, dispatch, share, notBefore, notBefore, now());
   event(db, "task-created", options.condition, options.id);
   console.log(`created ${options.id}`);
 }
@@ -3266,9 +3275,10 @@ export function setTaskOptions(db, id, options) {
     db.prepare("UPDATE task SET launch_share=? WHERE id=?").run(value, id);
   }
   if (options["prompt-file"] !== undefined) {
-    const prompt = fs.readFileSync(options["prompt-file"], "utf8").trim();
+    const promptFile = path.resolve(options["prompt-file"]);
+    const prompt = fs.readFileSync(promptFile, "utf8").trim();
     if (!prompt) fail("--prompt-file must contain a nonempty prompt");
-    db.prepare("UPDATE task SET prompt=? WHERE id=?").run(prompt, id);
+    db.prepare("UPDATE task SET prompt=?,prompt_file=? WHERE id=?").run(prompt, promptFile, id);
   }
   if (options.condition !== undefined) {
     const condition = options.condition.trim();
@@ -3347,10 +3357,49 @@ function checkAgentLauncher() {
   }
 }
 
+// A task whose prompt came from a file is authored in that file. Reading it
+// back is the only way an edit reaches a launch, so drift is a defect rather
+// than a preference: the file wins, always.
+export function promptDrift(db, reader = (file) => fs.readFileSync(file, "utf8")) {
+  const drift = [];
+  for (const task of db.prepare("SELECT id,prompt,prompt_file FROM task WHERE prompt_file IS NOT NULL AND completed_at IS NULL AND cancelled_at IS NULL").all()) {
+    let authored;
+    try {
+      authored = String(reader(task.prompt_file)).trim();
+    } catch (error) {
+      drift.push({ id: task.id, file: task.prompt_file, detail: `unreadable: ${String(error?.message ?? error)}` });
+      continue;
+    }
+    if (!authored) {
+      drift.push({ id: task.id, file: task.prompt_file, detail: "prompt file is empty" });
+      continue;
+    }
+    if (authored !== String(task.prompt).trim()) {
+      drift.push({ id: task.id, file: task.prompt_file, detail: "task prompt differs from its source file", prompt: authored });
+    }
+  }
+  return drift;
+}
+
+export function syncPrompts(db, reader = (file) => fs.readFileSync(file, "utf8")) {
+  const applied = [];
+  for (const entry of promptDrift(db, reader)) {
+    if (!entry.prompt) fail(`task ${entry.id} prompt file ${entry.file} is ${entry.detail}`);
+    db.prepare("UPDATE task SET prompt=? WHERE id=?").run(entry.prompt, entry.id);
+    event(db, "task-prompt-synced", entry.file, entry.id);
+    applied.push(entry.id);
+  }
+  return applied;
+}
+
 function check(db) {
   const integrity = db.prepare("PRAGMA integrity_check").get().integrity_check;
   if (integrity !== "ok") fail(`database integrity: ${integrity}`);
   const config = loadConfig();
+  const drift = promptDrift(db);
+  if (drift.length) {
+    fail(`task prompts disagree with their source files (run 'orchestrator task sync'):\n${drift.map((entry) => `  ${entry.id}: ${entry.detail} (${entry.file})`).join("\n")}`);
+  }
   governorControls(db);
   checkAgentLauncher();
   for (const task of taskRows(db)) {
@@ -3378,6 +3427,16 @@ async function main(argv = process.argv.slice(2)) {
     const id = rest.shift(); if (!id) fail("task set requires ID");
     setTaskOptions(db, id, parseOptions(rest));
     console.log(`updated ${id}`); return;
+  }
+  if (command === "task" && subcommand === "sync") {
+    if (rest[0] === "--check") {
+      const drift = promptDrift(db);
+      if (drift.length) fail(`task prompts disagree with their source files:\n${drift.map((entry) => `  ${entry.id}: ${entry.detail} (${entry.file})`).join("\n")}`);
+      console.log("ok: every task prompt matches its source file"); return;
+    }
+    const applied = syncPrompts(db);
+    console.log(applied.length ? `synced ${applied.length} task prompt(s): ${applied.join(", ")}` : "ok: every task prompt already matches its source file");
+    return;
   }
   if (command === "task" && ["cancel", "reopen"].includes(subcommand)) {
     const id = rest[0]; if (!id) fail(`task ${subcommand} requires ID`);
@@ -3578,6 +3637,7 @@ async function main(argv = process.argv.slice(2)) {
   orchestrator task list
   orchestrator task show ID
   orchestrator task set ID [--model PROVIDER/MODEL] [--thinking LEVEL] [--share N] [--prompt-file FILE] [--condition TEXT] [--completion-check COMMAND] [--work-check COMMAND, '' clears] [--dispatch COMMAND, '' clears]
+  orchestrator task sync [--check]        reapply every task's --prompt-file source (--check reports drift without writing)
   orchestrator task cancel ID
   orchestrator task reopen ID
   orchestrator status

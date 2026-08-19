@@ -106,9 +106,18 @@ orchestrator task create \
   --prompt-file /home/kenan/project/task.md
 orchestrator task set example --model openai-codex/gpt-5.6-sol --thinking xhigh --share 2 --prompt-file /home/kenan/project/revised-task.md --condition 'Exact target is admitted' --completion-check 'python3 verify-target.py'
 orchestrator task set example --work-check 'python3 tools/claimable-work.py'   # '' clears the probe
+orchestrator task sync                                                        # reapply every prompt file
+orchestrator task sync --check                                                # report drift without writing
 orchestrator task cancel example
 orchestrator task reopen example
 ```
+
+A task created or updated from `--prompt-file` records that file, and the file
+stays the prompt's single source of truth. `task sync` reapplies every recorded
+file, and `orchestrator check` fails while a live task disagrees with its own
+source, so editing a lane prompt in its project is enough to change what the
+next launch receives. Prompts given inline with `--prompt` have no source file
+and are left alone.
 
 A fully assembled text-only moonshot uses the same task interface:
 

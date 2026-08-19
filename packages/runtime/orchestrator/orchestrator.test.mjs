@@ -8,7 +8,7 @@ import test from "node:test";
 
 const temporary = fs.mkdtempSync(path.join(os.tmpdir(), "agent-orchestrator-test-"));
 process.env.AGENT_ORCHESTRATOR_DATA = temporary;
-const { AgentHost, agentHostCommand, agentHostUnit, agentSliceMemoryPath, AGENT_SLICE, AnthropicGovernor, anthropicOpusHasHeadroom, anthropicWeeklyCapacity, applyRunStreamEvent, cancelTask, chooseIndependentAssignment, chooseTask, codeFingerprint, codexSubscriptionLifecycle, completionToolResult, controllerProcessIdentity, Controller, cpuPercent, CursorGovernor, DISPATCH_NO_WORK_TTL_MS, dispatchedTaskPrompt, DistributedQuotaFeedback, evaluateDispatch, evaluateWorkCheck, finishRun, governorAllowanceMultiplier, governorControls, grantQuotaLease, hostAlive, HOST_STALE_MS, insertRun, interruptRun, isolateTaskShell, isEligibleCodexPlan, launchBatchSize, loadConfig, loadProviderManifest, nextIncompleteState, openDb, orchestratedTaskPrompt, parseAnthropicUsage, parseCursorUsage, PlanGovernor, planWindowBurnPerHour, proEntitlementSnapshot, proLaunchAvailability, purgeRunStreams, rankTasks, recordAgentHost, resourceSlots, RunEventStream, setGovernorBoost, setTaskOptions, shouldAdvanceBackoff, taskSettings, taskSupportsAssignment, TOOL_SHELL, validateCompletion, validateModelPolicy, WORK_CHECK_TTL_MS, workCheckStale, workReady } = await import("./orchestrator.mjs");
+const { AgentHost, agentHostCommand, agentHostUnit, agentSliceMemoryPath, AGENT_SLICE, AnthropicGovernor, anthropicOpusHasHeadroom, anthropicWeeklyCapacity, applyRunStreamEvent, cancelTask, chooseIndependentAssignment, chooseTask, codeFingerprint, codexSubscriptionLifecycle, completionToolResult, controllerProcessIdentity, Controller, cpuPercent, CursorGovernor, DISPATCH_NO_WORK_TTL_MS, dispatchedTaskPrompt, DistributedQuotaFeedback, evaluateDispatch, evaluateWorkCheck, finishRun, governorAllowanceMultiplier, governorControls, grantQuotaLease, hostAlive, HOST_STALE_MS, insertRun, interruptRun, isolateTaskShell, isEligibleCodexPlan, launchBatchSize, loadConfig, loadProviderManifest, nextIncompleteState, openDb, orchestratedTaskPrompt, promptDrift, syncPrompts, parseAnthropicUsage, parseCursorUsage, PlanGovernor, planWindowBurnPerHour, proEntitlementSnapshot, proLaunchAvailability, purgeRunStreams, rankTasks, recordAgentHost, resourceSlots, RunEventStream, setGovernorBoost, setTaskOptions, shouldAdvanceBackoff, taskSettings, taskSupportsAssignment, TOOL_SHELL, validateCompletion, validateModelPolicy, WORK_CHECK_TTL_MS, workCheckStale, workReady } = await import("./orchestrator.mjs");
 
 test.after(() => fs.rmSync(temporary, { recursive: true, force: true }));
 
@@ -57,6 +57,31 @@ test("database initializes with integrity", () => {
     assert.ok(db.prepare("SELECT 1 FROM sqlite_master WHERE type='trigger' AND name=?").get(`auto_timestamp_${table}_insert`));
     assert.ok(db.prepare("SELECT 1 FROM sqlite_master WHERE type='trigger' AND name=?").get(`auto_timestamp_${table}_update`));
   }
+  db.close();
+});
+
+test("a file-authored prompt stays the task's single source of truth", () => {
+  const db = openDb(path.join(temporary, "prompt-sync.sqlite3"));
+  const file = path.join(temporary, "lane-prompt.md");
+  fs.writeFileSync(file, "Original lane instructions.\n");
+  const at = Date.now();
+  db.prepare(`INSERT INTO task(id,prompt,prompt_file,cwd,model,thinking,completion_condition,launch_share,not_before,next_eligible_at,created_at)
+    VALUES(?,?,?,?,?,?,?,?,?,?,?)`).run("lane", "Original lane instructions.", file, temporary, "provider/model", "high", "done", 1, at, at, at);
+  db.prepare(`INSERT INTO task(id,prompt,cwd,model,thinking,completion_condition,launch_share,not_before,next_eligible_at,created_at)
+    VALUES(?,?,?,?,?,?,?,?,?,?)`).run("inline", "Inline prompt.", temporary, "provider/model", "high", "done", 1, at, at, at);
+
+  assert.deepEqual(promptDrift(db), []);
+  assert.deepEqual(syncPrompts(db), []);
+
+  fs.writeFileSync(file, "Edited lane instructions.\n");
+  assert.deepEqual(promptDrift(db).map((entry) => entry.id), ["lane"]);
+  assert.deepEqual(syncPrompts(db), ["lane"]);
+  assert.equal(db.prepare("SELECT prompt FROM task WHERE id=?").get("lane").prompt, "Edited lane instructions.");
+  assert.equal(db.prepare("SELECT prompt FROM task WHERE id=?").get("inline").prompt, "Inline prompt.");
+  assert.deepEqual(promptDrift(db), []);
+
+  fs.rmSync(file);
+  assert.match(promptDrift(db)[0].detail, /unreadable/);
   db.close();
 });
 
@@ -385,7 +410,7 @@ test("serial provider capacity rotates without lifetime-history starvation", () 
   assert.equal(chooseTask(tasks, 0).id, "historical");
 });
 
-test("the generic task contract preserves lane-owned cadence without an endless-work restriction", () => {
+test("the generic task contract keeps lane-owned cadence and forbids rationing effort", () => {
   const prompt = orchestratedTaskPrompt({
     id: "slack-lane",
     prompt: "Sweep Slack now.",
@@ -393,8 +418,10 @@ test("the generic task contract preserves lane-owned cadence without an endless-
   });
   assert.match(prompt, /Follow the task's stated cadence/);
   assert.match(prompt, /preserve directly resumable state/);
+  assert.match(prompt, /Never ration effort against remaining context/);
   assert.doesNotMatch(prompt, /stop only when no claimable work remains/);
   assert.doesNotMatch(prompt, /Process as many work units/);
+  assert.doesNotMatch(prompt, /return promptly/);
 });
 
 test("completion reports do not terminate the launch", () => {
