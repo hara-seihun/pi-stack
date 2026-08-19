@@ -59,6 +59,8 @@ Per-provider rows pool tokens over summed weekly-equivalent burn before multiply
 
 Meters are server-side and global. An account configured on both hosts returns the same reading from each, so the reporter deduplicates meters by account while summing tokens across hosts.
 
+Balances that moved during the window — Codex credits, Cursor's retail value — print below the table with the tokens each unit bought.
+
 Tokens are counted over each account's own first-to-last sample span rather than the report window. An account first sampled two minutes ago has two minutes of meter movement, and dividing hours of tokens by it would report a plan orders of magnitude larger than it is. The footer names any account measured over less than half the window.
 
 ## Limits

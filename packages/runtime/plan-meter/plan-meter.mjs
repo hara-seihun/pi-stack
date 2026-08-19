@@ -75,7 +75,7 @@ const TOKENS_QUERY = `
 
 const SAMPLES_QUERY = `
   SELECT s.provider, s.family, s.at, s.status, s.plan, s.tier, s.account_key,
-         b.bucket, b.used_percent, b.resets_at, b.window_seconds
+         b.bucket, b.used_percent, b.resets_at, b.window_seconds, b.used_units, b.limit_units
   FROM sample s LEFT JOIN bucket b ON b.sample_id = s.sample_id
   WHERE s.at >= ? AND s.at <= ? AND s.status = 'ok'
   ORDER BY s.at`;
@@ -205,24 +205,47 @@ function mergeTokens(...parts) {
 function accountSeries(samples) {
   const accounts = new Map();
   for (const row of samples) {
-    if (!row.bucket || row.used_percent === null) continue;
+    if (!row.bucket) continue;
     const account = accounts.get(row.provider) ?? {
-      provider: row.provider, family: row.family, plan: row.plan, tier: row.tier, buckets: new Map(),
+      provider: row.provider, family: row.family, plan: row.plan, tier: row.tier,
+      buckets: new Map(), balances: new Map(),
     };
+    accounts.set(row.provider, account);
     account.plan ??= row.plan;
     account.tier ??= row.tier;
+    if (row.used_percent === null) {
+      if (row.used_units === null) continue;
+      const series = account.balances.get(row.bucket) ?? new Map();
+      series.set(row.at, { at: row.at, units: Number(row.used_units), limit: row.limit_units });
+      account.balances.set(row.bucket, series);
+      continue;
+    }
     const series = account.buckets.get(row.bucket) ?? new Map();
     series.set(row.at, { at: row.at, used: Number(row.used_percent), resetsAt: row.resets_at, windowSeconds: row.window_seconds });
     account.buckets.set(row.bucket, series);
-    accounts.set(row.provider, account);
   }
   return accounts;
+}
+
+/** Unit balances such as Codex credits and Cursor's retail-value estimate. */
+function balanceRows(accounts) {
+  const rows = [];
+  for (const account of accounts.values()) {
+    for (const [bucket, series] of account.balances) {
+      const points = [...series.values()].sort((left, right) => left.at - right.at);
+      const first = points.at(0), last = points.at(-1);
+      if (first.units === last.units) continue;
+      rows.push({ provider: account.provider, bucket, from: first.units, to: last.units, limit: last.limit });
+    }
+  }
+  return rows;
 }
 
 function observedSpans(accounts) {
   const spans = {};
   for (const account of accounts.values()) {
-    const times = [...account.buckets.values()].flatMap((series) => [...series.keys()]).map(Number);
+    const times = [...account.buckets, ...account.balances]
+      .flatMap(([, series]) => [...series.keys()]).map(Number);
     if (times.length) spans[account.provider] = { lo: Math.min(...times), hi: Math.max(...times) };
   }
   return spans;
@@ -333,6 +356,7 @@ function report(args) {
   const samples = [...localSamples(lo, hi), ...(remoteSamples ?? []).map((row) => ({ ...row, host: REMOTE_HOST }))];
   const accounts = accountSeries(samples);
   const spans = observedSpans(accounts);
+  const balances = balanceRows(accounts);
   const tokens = mergeTokens(localTokens(spans),
     localOnly || !Object.keys(spans).length ? null : remoteJson(remoteTokensScript(spans)));
   const rows = accountRows(accounts, spans, tokens);
@@ -346,6 +370,7 @@ function report(args) {
       weeklyTokens: totalRow(families).weekly,
       families,
       accounts: rows,
+      balances,
     }, null, 1));
     return;
   }
@@ -385,6 +410,14 @@ function report(args) {
     { label: "Tok/week", value: (row) => row.weekly === null ? "n/a" : fmt(row.weekly) },
     { label: "Resets in", value: (row) => row.resetsAt === null ? "n/a" : duration(row.resetsAt - hi) },
   ]);
+
+  for (const balance of balances) {
+    const tokens = rows.find((row) => row.provider === balance.provider)?.total ?? 0;
+    const moved = balance.to - balance.from;
+    const leverage = moved > 0 && tokens > 0 ? ` = ${fmt((tokens / moved) * 100)} tokens per retail $` : "";
+    console.log(`\n${balance.provider} ${balance.bucket}: ${balance.from} -> ${balance.to}`
+      + `${balance.limit ? ` of ${balance.limit}` : ""} units${leverage}`);
+  }
 
   const short = rows.filter((row) => row.weekly !== null && row.observedHours < hours / 2);
   if (short.length) {
