@@ -229,8 +229,8 @@ export class Ledger {
          VALUES (?, ?, ?, ?, ?)
          ON CONFLICT (id) DO UPDATE SET
            provider = excluded.provider,
-           label = excluded.label,
-           access_until = excluded.access_until`,
+           label = COALESCE(excluded.label, account.label),
+           access_until = COALESCE(excluded.access_until, account.access_until)`,
       )
       .run(a.id, a.provider, a.label ?? null, a.accessUntil ?? null, Date.now());
   }
@@ -261,6 +261,15 @@ export class Ledger {
   }
 
   /** A cooling account is skipped by admission until the deadline passes. */
+  /** Explicit lifecycle transition: upsertAccount coalesces missing fields
+   * (usage attribution must never erase registration metadata), so clearing
+   * a cancelled subscription's deadline on reactivation needs this setter. */
+  setAccountAccessUntil(id: string, until: number | undefined): void {
+    this.db
+      .prepare("UPDATE account SET access_until = ? WHERE id = ?")
+      .run(until ?? null, id);
+  }
+
   setAccountCooldown(id: string, until: number | undefined): void {
     this.db
       .prepare("UPDATE account SET cooldown_until = ? WHERE id = ?")

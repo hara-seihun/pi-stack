@@ -173,3 +173,21 @@ describe("ledger", () => {
     ledger.close();
   });
 });
+
+describe("account metadata custody", () => {
+  it("a bare usage-attribution upsert never erases label or access_until", () => {
+    const ledger = Ledger.open(":memory:");
+    ledger.upsertAccount({ id: "codex-6", provider: "openai-codex", label: "apple.village", accessUntil: 500 });
+    ledger.upsertAccount({ id: "codex-6", provider: "openai-codex" });
+    const account = ledger.accounts().find((a) => a.id === "codex-6");
+    expect(account?.label).toBe("apple.village");
+    expect(account?.accessUntil).toBe(500);
+  });
+
+  it("reactivation clears the deadline explicitly", () => {
+    const ledger = Ledger.open(":memory:");
+    ledger.upsertAccount({ id: "codex-6", provider: "openai-codex", accessUntil: 500 });
+    ledger.setAccountAccessUntil("codex-6", undefined);
+    expect(ledger.accounts().find((a) => a.id === "codex-6")?.accessUntil).toBeUndefined();
+  });
+});
