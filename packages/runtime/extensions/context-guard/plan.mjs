@@ -18,8 +18,11 @@ export const CFG = {
    *  the model sees ~50k real tokens regardless of how far the byte estimator
    *  undercounts for its tokenizer. */
   tailTokens: 50_000,
-  /** If rungs 1-2 would land above this, escalate to a handoff summary. */
-  residueMax: 140_000,
+  /** If rungs 1-2 would land above this, escalate to a handoff summary.
+   *  The transformed-message estimate excludes roughly 10-20k tokens of
+   *  provider-visible system/tool overhead, so 125k is the largest safe view
+   *  under the 150k measured-floor guard. */
+  residueMax: 125_000,
   /** Alert if even a summary cut cannot land below trigger - floorHeadroom. */
   floorHeadroom: 100_000,
   /** Two cuts within this many LLM calls is thrashing: alert loudly. */
@@ -195,6 +198,29 @@ export function summaryMessage(text, transcriptPath, timestamp) {
   return {
     role: "user",
     content: [{ type: "text", text: `${headline}\n\n${text}` }],
+    timestamp,
+  };
+}
+
+/**
+ * A provider-independent last rung. If the model cannot write a handoff (for
+ * example because that account became exhausted during the run), omit the
+ * same old span deterministically instead of violating the cap and thrashing.
+ * Original user messages and the verbatim tail remain in the view, and the
+ * transcript pointer keeps every omitted artifact recoverable.
+ */
+export function fallbackMessage(transcriptPath, timestamp) {
+  const pointer = transcriptPath
+    ? ` Recover omitted details by grepping: ${transcriptPath}`
+    : " Recover omitted details from the full session transcript.";
+  return {
+    role: "user",
+    content: [{
+      type: "text",
+      text:
+        "[Context hard-compaction fallback — the handoff model returned no usable text, so old " +
+        `assistant/tool messages were omitted to keep the session healthy.${pointer}]`,
+    }],
     timestamp,
   };
 }

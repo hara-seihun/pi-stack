@@ -16,7 +16,7 @@ function alerts() {
   return readdirSync(ALERTS);
 }
 
-function makeHarness({ completeText = "SUMMARY BODY" } = {}) {
+function makeHarness({ completeText = "SUMMARY BODY", modelAvailable = true } = {}) {
   const handlers = new Map();
   const pi = { on: (name, fn) => handlers.set(name, fn) };
   guard(pi);
@@ -29,7 +29,7 @@ function makeHarness({ completeText = "SUMMARY BODY" } = {}) {
       getSessionId: () => "sess-test",
     },
     getContextUsage: () => (anchor === null ? undefined : { tokens: anchor, contextWindow: 1_000_000, percent: null }),
-    model: { id: "test-model", provider: "test" },
+    model: modelAvailable ? { id: "test-model", provider: "test" } : null,
     modelRegistry: {
       complete: async (model, context, options) => {
         completeCalls++;
@@ -162,7 +162,7 @@ test("escalates to a handoff summary when residue exceeds the cap", async () => 
   assert.ok(result.messages.length < msgs.length / 2);
 });
 
-test("an empty handoff summary falls back to eviction without corrupting the view", async () => {
+test("an empty handoff summary deterministically compacts below the floor", async () => {
   const h = makeHarness({ completeText: "" });
   const msgs = [user("task packet")];
   for (let i = 0; i < 30; i++) {
@@ -179,14 +179,37 @@ test("an empty handoff summary falls back to eviction without corrupting the vie
   h.setAnchor(300_000);
   const result = await h.fire(msgs);
   assert.equal(h.getCompleteCalls(), 1, "expected the summary attempt");
-  const summary = result.messages.find(
-    (m) => m.role === "user" && m.content[0]?.text?.includes("Context handoff summary"),
+  assert.equal(
+    result.messages.some((m) => m.content[0]?.text?.includes("Context handoff summary")),
+    false,
+    "no model summary may be fabricated from empty text",
   );
-  assert.equal(summary, undefined, "no summary message may be fabricated from empty text");
-  assert.ok(
-    result.messages.some((m) => m.role === "toolResult" && m.content[0]?.text?.includes("evicted")),
-    "rungs 1-2 must still apply",
+  const fallback = result.messages.find(
+    (m) => m.role === "user" && m.content[0]?.text?.includes("Context hard-compaction fallback"),
   );
+  assert.ok(fallback, "expected the provider-independent hard-compaction marker");
+  assert.match(fallback.content[0].text, /\/tmp\/session\.jsonl/);
+  assert.ok(result.messages.length < msgs.length / 2, "the high-residue span must be omitted");
+  assert.ok(result.messages.some((m) => m.content[0]?.text === "task packet"), "user intent must survive");
+});
+
+test("a missing handoff model uses the same deterministic compaction", async () => {
+  const h = makeHarness({ modelAvailable: false });
+  const msgs = [user("task packet")];
+  for (let i = 0; i < 30; i++) {
+    msgs.push({
+      role: "assistant",
+      timestamp: 300 + i,
+      usage: {},
+      content: [{ type: "text", text: "t".repeat(24_000) }],
+    }, ...turn(i, "small"));
+  }
+  h.setAnchor(300_000);
+  const result = await h.fire(msgs);
+  assert.equal(h.getCompleteCalls(), 0);
+  assert.ok(result.messages.some(
+    (m) => m.role === "user" && m.content[0]?.text?.includes("Context hard-compaction fallback"),
+  ));
 });
 
 test("a smaller billed-tail budget moves the boundary later", () => {

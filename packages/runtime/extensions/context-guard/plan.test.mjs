@@ -5,6 +5,7 @@ import {
   baseCallId,
   buildView,
   estimateView,
+  fallbackMessage,
   findTailBoundary,
   planCut,
   summaryMessage,
@@ -111,6 +112,13 @@ test("buildView returns null when untouched and is deterministic when cut", () =
   for (const m of oldAssistants) {
     assert.equal(m.content.some((c) => c.type === "thinking"), false);
   }
+});
+
+test("fallback message names the recoverable transcript without claiming a summary", () => {
+  const message = fallbackMessage("/tmp/s.jsonl", 9);
+  assert.match(message.content[0].text, /hard-compaction fallback/);
+  assert.match(message.content[0].text, /\/tmp\/s\.jsonl/);
+  assert.doesNotMatch(message.content[0].text, /handoff summary/);
 });
 
 test("summary replaces span but preserves user-ish messages verbatim", () => {

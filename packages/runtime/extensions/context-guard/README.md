@@ -30,15 +30,19 @@ fires for them):
   (`thinkingSignature`, `textSignature`, `|item-id` suffixes on tool-call ids).
   Legal on both providers: Anthropic validates only the latest assistant
   message; OpenAI validates only ID-bearing replays.
-- **Rung 3 — handoff summary** when rungs 1–2 would land above **140k**
+- **Rung 3 — handoff summary** when rungs 1–2 would land above **125k**
   (unevictable residue accumulates ~10% of throughput; only marathon runs hit
-  this). The model writes a structured handoff *in-conversation* (cache-hot,
-  sees full tool results), which then replaces the summarized span. User
-  messages in that span are preserved verbatim. The summary call requests
-  **low reasoning effort**: at the session's own effort (research lanes run
-  xhigh) reasoning can consume the entire output budget and return zero text,
-  which was observed on gpt-5.6-sol and silently landed the cut on the floor.
-  An empty summary now logs its stopReason and falls back to eviction.
+  this). The lower threshold reserves the measured 10–20k of provider-visible
+  system/tool overhead that is absent from the transformed-message estimate.
+  The model writes a structured handoff *in-conversation* (cache-hot, sees full
+  tool results), which then replaces the summarized span. User messages in
+  that span are preserved verbatim. The summary call requests **low reasoning
+  effort**: at the session's own effort (research lanes run xhigh) reasoning
+  can consume the entire output budget and return zero text. If the account is
+  exhausted, the call errors, or it returns no text, a provider-independent
+  hard-compaction message replaces the same span. The original user messages,
+  50k verbatim tail, and transcript pointer remain; cap enforcement never
+  depends on a second successful provider call.
 - **Verbatim tail:** the most recent **50k billed** tokens cross every cut
   byte-identical — thinking blocks, signatures, and item IDs included. The
   planner accumulates estimator units, so the guard divides the tail budget by
@@ -46,27 +50,13 @@ fires for them):
   turned the "50k" tail into ~93k billed and pushed the floor to ~154k (the
   2026-08-19 floor breach). The tail boundary never separates a tool result
   from its call.
-- **Deep and rare:** cuts land at ~100–130k, then stay quiet for ~30+ steps.
+- **Deep and rare:** ordinary cuts land at ~100–125k; a failed handoff lands
+  near the 50k tail instead of above the floor. Cuts then stay quiet for ~30+
+  steps.
   Transforms are monotone and deterministic, so the edited prefix is stable:
   one cache miss per cut, then the provider cache re-forms.
 
 ## Guards (both write to the alerts inbox, `/home/kenan/data/alerts/inbox/`)
-
-> **Stale-generation alerts (2026-08-19, self-expiring).** The floor/thrash
-> defects below were fixed in `dab575d`, but sessions already running on agent
-> host `380a000f` (code fingerprint `e6cf4c6b65b27e5b`) keep the pre-fix guard
-> until they finish. A floor or thrash alert whose session belongs to that host
-> is known-stale: delete the alert file and do not investigate. Test:
->
-> ```bash
-> sqlite3 ~/data/agent-orchestrator/orchestrator.sqlite3 \
->   "SELECT h.fingerprint FROM run r JOIN agent_host h ON r.host_id=h.id
->    WHERE r.session_id='<session id from the alert>'"
-> # e6cf4c6b65b27e5b -> stale alert, delete it; anything newer -> investigate.
-> ```
->
-> Delete this whole block once that host is gone
-> (`SELECT state FROM agent_host WHERE id LIKE '380a000f%'` returns `gone`).
 
 - **Thrash:** two cuts within 10 LLM calls in one session. This is the
   failure mode of Anthropic's 2026-04-23 Claude Code postmortem (a `keep:1`
@@ -96,7 +86,7 @@ estimate instead of the anchor.
 |---|---|---|
 | trigger | 250k | 272k tier − margin; inside the 239–453k quality plateau; sim: 55% of uncapped Sol cost |
 | tail | 50k billed (÷ calibration ratio at cut time) | LangWatch: 30–60k verbatim tail is the single biggest quality lever; +2.5 cost points vs 20k |
-| residueMax | 140k | keeps ≥ ~25 clean steps per cycle; rmax 100k–180k within 0.6 cost points |
+| residueMax | 125k transformed messages | leaves room for measured provider-visible system/tool overhead below the 150k floor; still inside the simulation's flat 100k–180k range |
 | floorHeadroom | 100k | Opus@150k/80k-tail simulated at 160% of uncapped — thrash territory |
 | quietSteps | 10 | thrash guard window |
 

@@ -10,7 +10,7 @@
  * Mechanism (uniform across providers), evidence in README.md:
  *   rung 1  evict tool-result bodies older than the 50k verbatim tail
  *   rung 2  strip old thinking/reasoning blocks and validation metadata
- *   rung 3  in-context handoff summary when residue alone exceeds 140k
+ *   rung 3  handoff summary above 125k, or deterministic hard compaction
  * Cuts are deep and rare (land ~100-130k, then ~30+ quiet steps); the tail
  * crosses every cut byte-identical, signatures included; every placeholder and
  * summary points at the greppable session transcript.
@@ -25,6 +25,7 @@ import {
   CFG,
   buildView,
   estimateView,
+  fallbackMessage,
   handoffInstruction,
   planCut,
   summaryMessage,
@@ -148,57 +149,71 @@ export default function (pi) {
     const { boundary, landEstimate } = planCut(messages, state, estimateTokens, cutCfg, note);
     const landTokens = landEstimate * state.ratio;
 
-    if (landTokens > CFG.residueMax && !state.summarizing && ctx.model) {
-      // Rung 3: handoff summary over the live (cache-hot) conversation.
+    if (landTokens > CFG.residueMax && !state.summarizing) {
+      // Rung 3: handoff summary over the live (cache-hot) conversation. The
+      // deterministic fallback below is load-bearing: provider exhaustion is
+      // exactly when another billable summary call may be unavailable, and a
+      // failed summary must not leave the session above its healthy floor.
       state.summarizing = true;
+      let summarized = false;
       try {
-        const view = buildView(messages, state, estimateTokens, note) ?? messages;
-        const ask = {
-          role: "user",
-          content: [{ type: "text", text: handoffInstruction(transcript) }],
-          timestamp: Date.now(),
-        };
-        const controller = new AbortController();
-        const timer = setTimeout(() => controller.abort(), 240_000);
-        try {
-          const response = await ctx.modelRegistry.complete(
-            ctx.model,
-            { messages: [...view, ask] },
-            {
-              maxTokens: CFG.summaryMaxTokens,
-              signal: controller.signal,
-              sessionId: ctx.sessionManager?.getSessionId?.(),
-              // The summary is transcription, not derivation. At the session's
-              // own effort (research lanes run xhigh) reasoning can consume the
-              // entire output budget and return zero text — observed on
-              // gpt-5.6-sol 2026-08-19: an 84s summary call yielded no text and
-              // the guard silently landed on the floor. Ignored by APIs that
-              // don't know the option.
-              reasoningEffort: "low",
-            },
-          );
-          const text = (response.content ?? [])
-            .filter((c) => c.type === "text")
-            .map((c) => c.text)
-            .join("\n")
-            .trim();
-          if (text) {
-            state.summary = {
-              message: summaryMessage(text, transcript, Date.now()),
-              coversUpTo: boundary,
-            };
-          } else {
-            console.error(
-              `context-guard: handoff summary returned no text (stopReason ${response.stopReason ?? "unknown"}` +
-              `${response.errorMessage ? `, error: ${response.errorMessage}` : ""}); falling back to eviction.`,
+        if (ctx.model) {
+          const view = buildView(messages, state, estimateTokens, note) ?? messages;
+          const ask = {
+            role: "user",
+            content: [{ type: "text", text: handoffInstruction(transcript) }],
+            timestamp: Date.now(),
+          };
+          const controller = new AbortController();
+          const timer = setTimeout(() => controller.abort(), 240_000);
+          try {
+            const response = await ctx.modelRegistry.complete(
+              ctx.model,
+              { messages: [...view, ask] },
+              {
+                maxTokens: CFG.summaryMaxTokens,
+                signal: controller.signal,
+                sessionId: ctx.sessionManager?.getSessionId?.(),
+                // The summary is transcription, not derivation. At the session's
+                // own effort (research lanes run xhigh) reasoning can consume the
+                // entire output budget and return zero text — observed on
+                // gpt-5.6-sol 2026-08-19: an 84s summary call yielded no text.
+                // Ignored by APIs that don't know the option.
+                reasoningEffort: "low",
+              },
             );
+            const text = (response.content ?? [])
+              .filter((c) => c.type === "text")
+              .map((c) => c.text)
+              .join("\n")
+              .trim();
+            if (text) {
+              state.summary = {
+                message: summaryMessage(text, transcript, Date.now()),
+                coversUpTo: boundary,
+              };
+              summarized = true;
+            } else {
+              console.error(
+                `context-guard: handoff summary returned no text (stopReason ${response.stopReason ?? "unknown"}` +
+                `${response.errorMessage ? `, error: ${response.errorMessage}` : ""}); using deterministic hard compaction.`,
+              );
+            }
+          } finally {
+            clearTimeout(timer);
           }
-        } finally {
-          clearTimeout(timer);
+        } else {
+          console.error("context-guard: no handoff model is available; using deterministic hard compaction.");
         }
       } catch (error) {
-        console.error(`context-guard: handoff summary failed, falling back to eviction: ${error?.message ?? error}`);
+        console.error(`context-guard: handoff summary failed; using deterministic hard compaction: ${error?.message ?? error}`);
       } finally {
+        if (!summarized) {
+          state.summary = {
+            message: fallbackMessage(transcript, Date.now()),
+            coversUpTo: boundary,
+          };
+        }
         state.summarizing = false;
       }
     }
