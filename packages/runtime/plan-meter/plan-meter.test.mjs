@@ -5,7 +5,7 @@ import os from "node:os";
 import path from "node:path";
 import {
   bindingBucket, burn, classify, codexBucketName, openDatabase, oauthAccounts,
-  parseAnthropic, parseCodex, recordSample, sampleAll,
+  parseAnthropic, parseCodex, parseCursor, recordSample, sampleAll, weeklyTokens,
 } from "./meters.mjs";
 
 const SECRET = "sk-ant-oat01-DO-NOT-PERSIST-abcdef";
@@ -100,24 +100,46 @@ test("burn sums positive deltas and recovers usage across a reset", () => {
   assert.equal(wrapped.end, 15);
 });
 
-test("the weekly window is the economics denominator even when it burned less", () => {
-  // A five-hour window refills several times a day. Dividing tokens by its burn
-  // and scaling to 100% would describe a different period than a weekly plan.
+test("the binding bucket is the one that exhausts first, not the one that burned most", () => {
+  // A five-hour window refills 33.6 times a week, so heavy session burn buys far
+  // more weekly throughput than light weekly burn does.
   assert.equal(bindingBucket({
-    session: { burned: 60 },
-    weekly: { burned: 4 },
-    credits: { burned: 900 },
+    session: { burned: 60, windowSeconds: 18000 },
+    weekly: { burned: 4, windowSeconds: 604800 },
+    credits: { burned: 900, windowSeconds: null },
   }), "weekly");
+  // A scoped weekly bucket burning faster than the headline bar is the real wall.
+  assert.equal(bindingBucket({
+    weekly: { burned: 4, windowSeconds: 604800 },
+    weekly_opus: { burned: 9, windowSeconds: 604800 },
+  }), "weekly_opus");
+  assert.equal(bindingBucket({ credits: { burned: 5, windowSeconds: null } }), null);
 });
 
-test("without a weekly window the heaviest burn wins, ignoring balances", () => {
-  assert.equal(bindingBucket({
-    session: { burned: 5 },
-    window_43200: { burned: 41 },
-    credits: { burned: 900 },
-    overage: { burned: 800 },
-  }), "window_43200");
-  assert.equal(bindingBucket({ credits: { burned: 5 } }), null);
+test("capacity is normalized to seven days across window lengths", () => {
+  // 10M tokens for 1% of a weekly window is 1B tokens per week.
+  assert.equal(weeklyTokens({ burned: 1, windowSeconds: 604800 }, 10e6), 1e9);
+  // The same rate against a 28-day cycle is a quarter of that per week.
+  assert.equal(weeklyTokens({ burned: 1, windowSeconds: 4 * 604800 }, 10e6), 250e6);
+  assert.equal(weeklyTokens({ burned: 0, windowSeconds: 604800 }, 10e6), null);
+  assert.equal(weeklyTokens({ burned: 5, windowSeconds: null }, 10e6), null);
+});
+
+test("cursor reports two disagreeing cycle counters and both are captured", () => {
+  const parsed = parseCursor({
+    billingCycleStart: "1787092762000",
+    billingCycleEnd: "1789771162000",
+    spendLimitUsage: { limitType: "user" },
+    planUsage: { totalSpend: 2405, limit: 7000, totalPercentUsed: 2.642857142857143 },
+  });
+  const byName = Object.fromEntries(parsed.buckets.map((bucket) => [bucket.bucket, bucket]));
+  assert.equal(parsed.plan, "pro");
+  assert.equal(byName.monthly.usedPercent, 2.642857142857143);
+  assert.equal(byName.monthly_included.usedPercent, (2405 / 7000) * 100);
+  assert.equal(byName.monthly_included.limitUnits, 7000);
+  assert.equal(byName.monthly.resetsAt, 1789771162000);
+  assert.equal(byName.monthly.windowSeconds, 2678400);
+  assert.equal(parseCursor({ planUsage: {} }), null);
 });
 
 test("account discovery matches the alias family and skips non-oauth entries", () => {
@@ -149,8 +171,15 @@ test("a full sampling round records readings, gaps, and no credential material",
       "openai-codex": { type: "oauth", access: SECRET, accountId: "acct-1", expires: Date.now() + 3_600_000 },
       "openai-codex-2": { type: "oauth", access: SECRET, accountId: "acct-2", expires: Date.now() - 1000 },
       "anthropic": { type: "oauth", access: SECRET, expires: Date.now() + 3_600_000 },
+      "cursor": { type: "oauth", access: SECRET, expires: Date.now() + 3_600_000 },
     };
     const fetcher = async (url) => {
+      if (url.includes("cursor.sh")) {
+        return { ok: true, json: async () => ({
+          billingCycleStart: "1787092762000", billingCycleEnd: "1789771162000",
+          planUsage: { totalSpend: 700, limit: 7000, totalPercentUsed: 0.8 },
+        }) };
+      }
       if (url.includes("wham/usage")) {
         return { ok: true, json: async () => ({
           plan_type: "pro", account_id: "acct-1",
@@ -167,8 +196,10 @@ test("a full sampling round records readings, gaps, and no credential material",
     assert.equal(results.find((row) => row.provider === "openai-codex-2").status, "expired");
     assert.equal(results.find((row) => row.provider === "anthropic").plan, "max_20x");
 
+    assert.equal(results.find((row) => row.provider === "cursor").status, "ok");
     const stored = db.prepare("SELECT provider, status, plan FROM sample ORDER BY provider").all();
-    assert.equal(stored.length, 3);
+    assert.equal(stored.length, 4);
+    assert.equal(db.prepare("SELECT used_percent FROM bucket WHERE bucket='monthly_included'").get().used_percent, 10);
     assert.equal(db.prepare("SELECT used_percent FROM bucket WHERE bucket='weekly' AND used_percent=61").all().length, 1);
     db.close();
 

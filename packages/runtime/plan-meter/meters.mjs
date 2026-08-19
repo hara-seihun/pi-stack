@@ -10,6 +10,9 @@ export const DEFAULT_DB_PATH = process.env.PLAN_METER_DB
 export const CODEX_USAGE_ENDPOINT = `${(process.env.CHATGPT_BASE_URL ?? "https://chatgpt.com/backend-api").replace(/\/$/, "")}/wham/usage`;
 export const ANTHROPIC_USAGE_ENDPOINT = "https://api.anthropic.com/api/oauth/usage";
 export const ANTHROPIC_PROFILE_ENDPOINT = "https://api.anthropic.com/api/oauth/profile";
+export const CURSOR_USAGE_ENDPOINT = "https://api2.cursor.sh/aiserver.v1.DashboardService/GetCurrentPeriodUsage";
+
+export const WEEK_SECONDS = 7 * 86400;
 
 /**
  * The sampler is deliberately read-only over Pi's credential file. Refresh
@@ -207,6 +210,35 @@ export function parseAnthropic(body, profile = null) {
 }
 
 /**
+ * Normalize a Cursor GetCurrentPeriodUsage body. Cursor reports two disagreeing
+ * counters over one monthly cycle: `totalPercentUsed` against a large bonus
+ * allowance, and `totalSpend` against the `limit` its own dashboard calls
+ * included usage. They differ by more than an order of magnitude, so both are
+ * captured and the reporter takes whichever implies the smaller capacity.
+ */
+export function parseCursor(body) {
+  const usage = body?.planUsage;
+  const start = numberOrNull(body?.billingCycleStart);
+  const end = numberOrNull(body?.billingCycleEnd);
+  const windowSeconds = start !== null && end !== null && end > start ? Math.round((end - start) / 1000) : null;
+  const buckets = [];
+  const push = (bucket, usedPercent, extra = {}) => {
+    if (usedPercent === null) return;
+    buckets.push({ bucket, usedPercent, resetsAt: end, windowSeconds, usedUnits: null, limitUnits: null, ...extra });
+  };
+  push("monthly", numberOrNull(usage?.totalPercentUsed));
+  const spend = numberOrNull(usage?.totalSpend);
+  const limit = numberOrNull(usage?.limit);
+  if (spend !== null && limit !== null && limit > 0) {
+    push("monthly_included", (spend / limit) * 100, { usedUnits: spend, limitUnits: limit });
+  }
+  if (!buckets.length) return null;
+  const limitType = String(body?.spendLimitUsage?.limitType ?? "").trim().toLowerCase();
+  const plan = String(body?.membershipType ?? (limitType === "team" ? "team" : "pro")).trim().toLowerCase();
+  return { plan, accountKey: null, tier: null, buckets };
+}
+
+/**
  * Accumulate burn as the sum of positive deltas between consecutive samples.
  * A decrease means the provider reset the window, so a naive end-minus-start
  * would silently under-report any period that spans a reset.
@@ -232,18 +264,26 @@ export function burn(series) {
 }
 
 /**
- * The denominator for plan economics. The all-models weekly window is the true
- * sustained constraint on both providers, so prefer it whenever it exists;
- * comparing a five-hour bucket against a weekly one would divide by windows of
- * different length and produce meaningless "full plan" figures. Fall back to the
- * heaviest-burning window only when no weekly bucket is reported.
+ * Tokens a bucket is worth per week: its full window scaled to seven days.
+ * A five-hour window refills 33.6 times a week and a Cursor cycle only 0.23
+ * times, so this is the only figure that compares plans of different period.
+ */
+export function weeklyTokens(stats, tokens) {
+  if (!stats || !(stats.burned > 0) || !(stats.windowSeconds > 0)) return null;
+  return (tokens / stats.burned) * 100 * (WEEK_SECONDS / stats.windowSeconds);
+}
+
+/**
+ * The bucket that runs out first, which is the one plan capacity must be
+ * measured against. Capacity is proportional to 1/(burn x window length), so
+ * the binding bucket is the largest `burned * windowSeconds` and is well defined
+ * without any token count. Balance buckets carry no window and are skipped.
  */
 export function bindingBucket(byBucket) {
-  if (byBucket.weekly) return "weekly";
   let best = null;
   for (const [bucket, stats] of Object.entries(byBucket)) {
-    if (bucket === "credits" || bucket === "overage") continue;
-    if (!best || stats.burned > byBucket[best].burned) best = bucket;
+    if (!(stats.burned > 0) || !(stats.windowSeconds > 0)) continue;
+    if (!best || stats.burned * stats.windowSeconds > byBucket[best].burned * byBucket[best].windowSeconds) best = bucket;
   }
   return best;
 }
@@ -299,12 +339,33 @@ export async function sampleAnthropicAccount(provider, credential, { fetcher = f
   return { status: "ok", ...parsed };
 }
 
+export async function sampleCursorAccount(provider, credential, { fetcher = fetch, at = Date.now() } = {}) {
+  if (Number(credential?.expires) <= at) return { status: "expired", detail: "access token expired" };
+  const response = await fetcher(CURSOR_USAGE_ENDPOINT, {
+    method: "POST",
+    signal: AbortSignal.timeout(20000),
+    headers: {
+      Authorization: `Bearer ${credential.access}`,
+      "Content-Type": "application/json",
+      Accept: "application/json",
+      "User-Agent": "works.kenan.plan-meter",
+    },
+    body: "{}",
+  });
+  if (!response.ok) return { status: "error", detail: `http_${response.status}` };
+  const parsed = parseCursor(await response.json());
+  if (!parsed) return { status: "error", detail: "no_buckets" };
+  return { status: "ok", ...parsed };
+}
+
 export async function sampleAll(db, { auth, host = os.hostname(), fetcher = fetch, at = Date.now() } = {}) {
   const work = [
     ...oauthAccounts(auth, "openai-codex").map(([provider, credential]) =>
       ({ provider, family: "codex", credential, run: sampleCodexAccount })),
     ...oauthAccounts(auth, "anthropic").map(([provider, credential]) =>
       ({ provider, family: "anthropic", credential, run: sampleAnthropicAccount })),
+    ...oauthAccounts(auth, "cursor").map(([provider, credential]) =>
+      ({ provider, family: "cursor", credential, run: sampleCursorAccount })),
   ];
   const results = await Promise.all(work.map(async ({ provider, family, credential, run }) => {
     try {
