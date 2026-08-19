@@ -11,6 +11,7 @@ export const CODEX_USAGE_ENDPOINT = `${(process.env.CHATGPT_BASE_URL ?? "https:/
 export const ANTHROPIC_USAGE_ENDPOINT = "https://api.anthropic.com/api/oauth/usage";
 export const ANTHROPIC_PROFILE_ENDPOINT = "https://api.anthropic.com/api/oauth/profile";
 export const CURSOR_USAGE_ENDPOINT = "https://api2.cursor.sh/aiserver.v1.DashboardService/GetCurrentPeriodUsage";
+export const CURSOR_TOKENS_ENDPOINT = "https://api2.cursor.sh/aiserver.v1.DashboardService/GetAggregatedUsageEvents";
 
 export const WEEK_SECONDS = 7 * 86400;
 
@@ -209,6 +210,29 @@ export function parseAnthropic(body, profile = null) {
   };
 }
 
+/**
+ * Cursor's own token accounting for the cycle. The agent wire protocol carries
+ * only `ConversationTokenDetails{used_tokens, max_tokens}` — a context-size
+ * gauge with no cache split — so a harness that meters the stream records every
+ * context token as fresh input and reports a cache hit rate of zero. This
+ * dashboard RPC is where the real split lives, and it is the only way to see
+ * whether Cursor is actually caching for us.
+ */
+export function parseCursorTokens(body) {
+  const fields = [
+    ["tokens_input", body?.totalInputTokens],
+    ["tokens_cache_read", body?.totalCacheReadTokens],
+    ["tokens_output", body?.totalOutputTokens],
+  ];
+  const buckets = [];
+  for (const [bucket, raw] of fields) {
+    const units = numberOrNull(raw);
+    if (units === null) continue;
+    buckets.push({ bucket, usedPercent: null, resetsAt: null, windowSeconds: null, usedUnits: units, limitUnits: null });
+  }
+  return buckets;
+}
+
 /** Cursor's included allocation in cents, which identifies the paid tier. */
 const CURSOR_TIERS = new Map([[2000, "pro"], [7000, "pro+"], [40000, "ultra"]]);
 
@@ -362,6 +386,18 @@ export async function sampleCursorAccount(provider, credential, { fetcher = fetc
   if (!response.ok) return { status: "error", detail: `http_${response.status}` };
   const parsed = parseCursor(await response.json());
   if (!parsed) return { status: "error", detail: "no_buckets" };
+  const tokens = await fetcher(CURSOR_TOKENS_ENDPOINT, {
+    method: "POST",
+    signal: AbortSignal.timeout(20000),
+    headers: {
+      Authorization: `Bearer ${credential.access}`,
+      "Content-Type": "application/json",
+      Accept: "application/json",
+      "User-Agent": "works.kenan.plan-meter",
+    },
+    body: "{}",
+  });
+  if (tokens.ok) parsed.buckets.push(...parseCursorTokens(await tokens.json()));
   return { status: "ok", ...parsed };
 }
 

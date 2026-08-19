@@ -48,6 +48,7 @@ The default `auto` window starts at the latest point where **every** contributin
 | `Burn%` | Sum of positive deltas between consecutive samples. |
 | `Rst` | Window resets observed inside the period. |
 | `Tokens / Fresh+out` | Usage-ledger totals for the same account and period, summed across hosts. |
+| `Cache%` | Share of context served from cache. `vendor` accounting where the provider publishes it, otherwise the stream's own numbers. |
 | `Tok/1%` | Tokens per one percent of the binding bucket. |
 | `Tok/week` | Tokens seven days of that plan buys at the observed rate — the comparison figure. |
 | `$/mo` | What that plan costs, read from [`plan-prices.json`](plan-prices.json). |
@@ -83,6 +84,14 @@ Tokens are counted over each account's own first-to-last sample span rather than
 - `retail_value` — `totalSpend` in cents with `limit` as its nominal size, recorded as a balance with no percentage so it can never be selected as a binding window. Cursor support states plainly that this is "an informational estimate of the retail value of what you've consumed", that it routinely exceeds the allocation's dollar size because the allocation is worth more than the subscription price, and that it triggers no limit ([forum](https://forum.cursor.com/t/pro-plan-confused-about-included-usage-vs-dollar-amount/159902)).
 
 The cents figure still earns its place in the record: it is the only direct measure of what this traffic would cost at retail, and its ratio to `monthly` tells you how much leverage the subscription provides. `limit` also identifies the tier — $20 Pro, $70 Pro+, $400 Ultra — which the endpoint does not otherwise report.
+
+## Cursor's stream cannot report caching; its dashboard can
+
+Cursor's agent protocol carries exactly one usage message, `ConversationTokenDetails{used_tokens, max_tokens}`. There is no input/output/cache split anywhere in the schema, so a harness metering the stream books the whole context as fresh input and records a cache hit rate of zero. That is a reporting gap, not a caching failure.
+
+`GetAggregatedUsageEvents` on the same dashboard service publishes the real accounting — `totalInputTokens`, `totalCacheReadTokens`, `totalOutputTokens`, `totalCostCents` — and `GetFilteredUsageEvents` breaks it down per request with a `conversationId`. The sampler records the three token totals as balances and the reporter uses their ratio to correct the ledger's fresh/cached split for Cursor accounts.
+
+The ratio is read cumulatively rather than as a window delta on purpose: Cursor's usage events land minutes after the traffic, so a short window would show almost no fresh tokens and read as a spurious 100% hit rate. Token *totals* still come from the Pi usage ledger, which is real-time and consistent across providers; only the split is vendor-corrected.
 
 ## Validation
 

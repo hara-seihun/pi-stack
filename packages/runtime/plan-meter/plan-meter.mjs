@@ -246,11 +246,31 @@ function balanceRows(accounts) {
     for (const [bucket, series] of account.balances) {
       const points = [...series.values()].sort((left, right) => left.at - right.at);
       const first = points.at(0), last = points.at(-1);
-      if (first.units === last.units) continue;
+      if (first.units === last.units || bucket.startsWith("tokens_")) continue;
       rows.push({ provider: account.provider, bucket, from: first.units, to: last.units, limit: last.limit });
     }
   }
   return rows;
+}
+
+/**
+ * The share of context the provider served from cache, cycle to date, from its
+ * own accounting. Cursor's agent stream exposes only a context-size gauge with
+ * no cache split, so a harness metering that stream books every context token
+ * as fresh; only this figure says whether Cursor is actually caching. It is
+ * read cumulatively rather than as a window delta because Cursor's usage events
+ * land minutes late, which would make any short window read as a cache miss.
+ */
+function vendorCacheShare(account) {
+  const latest = (bucket) => {
+    const series = account.balances.get(bucket);
+    if (!series) return null;
+    return [...series.values()].sort((left, right) => left.at - right.at).at(-1).units;
+  };
+  const input = latest("tokens_input");
+  const cacheRead = latest("tokens_cache_read");
+  if (input === null || cacheRead === null || input + cacheRead <= 0) return null;
+  return cacheRead / (input + cacheRead);
 }
 
 function observedSpans(accounts) {
@@ -271,7 +291,12 @@ function accountRows(accounts, spans, tokens, prices) {
     const binding = bindingBucket(byBucket);
     const stats = binding ? byBucket[binding] : null;
     const used = tokens[account.provider] ?? { requests: 0, input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 };
-    const fresh = used.input + used.output + used.cacheWrite;
+    const context = used.input + used.cacheRead + used.cacheWrite;
+    const vendorShare = vendorCacheShare(account);
+    const cacheShare = vendorShare ?? (context > 0 ? used.cacheRead / context : null);
+    const fresh = vendorShare === null
+      ? used.input + used.output + used.cacheWrite
+      : used.input * (1 - vendorShare) + used.output + used.cacheWrite;
     const span = spans[account.provider];
     const plan = account.plan ?? account.tier ?? "?";
     const price = prices[`${account.family}:${plan}`] ?? null;
@@ -279,6 +304,8 @@ function accountRows(accounts, spans, tokens, prices) {
     rows.push({
       provider: account.provider,
       observedHours: span ? (span.hi - span.lo) / 3_600_000 : 0,
+      cacheShare,
+      cacheSource: vendorShare === null ? "stream" : "vendor",
       family: account.family,
       plan,
       price,
@@ -436,6 +463,7 @@ function report(args) {
     { label: "Rst", value: (row) => String(row.resets) },
     { label: "Reqs", value: (row) => String(row.requests) },
     { label: "Tokens", value: (row) => fmt(row.total) },
+    { label: "Cache%", value: (row) => row.cacheShare === null ? "n/a" : (row.cacheShare * 100).toFixed(0) },
     { label: "Tok/1%", value: (row) => row.perPercent === null ? "n/a" : fmt(row.perPercent) },
     { label: "Tok/week", value: (row) => row.weekly === null ? "n/a" : fmt(row.weekly) },
     { label: "$/mo", value: (row) => row.price === null ? "n/a" : `$${row.price}` },
