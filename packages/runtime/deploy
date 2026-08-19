@@ -53,6 +53,24 @@ version=$("$HOME/.local/bin/pi" --version)
 "$HOME/.local/bin/pi-usage" --help | grep -q '^Usage:'
 "$HOME/.local/bin/plan-meter" --help | grep -q '^Usage:'
 "$HOME/.local/bin/orchestrator" check
+# The superseded npm Cursor provider stays installed until no host can still spawn its bridge:
+# h2-bridge.mjs is exec'd from the bundle directory on every stream, so removing it under a
+# draining host would break that host's live Cursor sessions. Draining hosts exit once empty, so
+# this prunes itself on a later deploy.
+npm_state="$HOME/.pi/agent/npm/package.json"
+if [[ -f "$npm_state" ]] && jq -e '.dependencies["@rahularya01/pi-cursor"] // empty' "$npm_state" >/dev/null 2>&1; then
+  current_fingerprint=$("$HOME/.local/bin/orchestrator" check | sed -n 's/.*(code \([0-9a-f]*\)).*/\1/p')
+  stale_hosts=0
+  while read -r host_fingerprint; do
+    [[ -n "$host_fingerprint" && "$host_fingerprint" != "$current_fingerprint" ]] && stale_hosts=$((stale_hosts + 1))
+  done < <(pgrep -af 'orchestrator\.mjs agent-host' | sed -n 's/.*--fingerprint \([0-9a-f]*\).*/\1/p')
+  if [[ -n "$current_fingerprint" && "$stale_hosts" -eq 0 ]]; then
+    "$HOME/.local/bin/pi" remove npm:@rahularya01/pi-cursor
+    echo "pruned superseded npm Cursor provider"
+  else
+    echo "superseded npm Cursor provider retained: $stale_hosts draining host(s) can still spawn its bridge"
+  fi
+fi
 if [[ "${PI_RUNTIME_SKIP_RESTART:-0}" != 1 ]] && systemctl is-enabled --quiet agent-orchestrator.service 2>/dev/null; then
   sudo systemctl restart agent-orchestrator.service
   systemctl is-active --quiet agent-orchestrator.service
