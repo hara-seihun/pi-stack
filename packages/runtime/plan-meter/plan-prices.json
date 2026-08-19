@@ -1,0 +1,13 @@
+{
+  "comment": "Monthly subscription price in USD per family:plan, as actually paid for this machine's accounts. Edit here when a plan changes; the reporter derives every Tok/$ figure from this file and shows the price it assumed.",
+  "prices": {
+    "codex:pro": 200,
+    "codex:plus": 20,
+    "anthropic:max_20x": 200,
+    "anthropic:max_5x": 100,
+    "anthropic:pro": 20,
+    "cursor:pro": 20,
+    "cursor:pro+": 60,
+    "cursor:ultra": 200
+  }
+}

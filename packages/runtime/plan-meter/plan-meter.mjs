@@ -1,5 +1,8 @@
 #!/usr/bin/env node
 import os from "node:os";
+import fs from "node:fs";
+import path from "node:path";
+import { fileURLToPath } from "node:url";
 import { execFileSync } from "node:child_process";
 import { DatabaseSync } from "node:sqlite";
 import {
@@ -9,6 +12,13 @@ import {
 import { DEFAULT_DB_PATH as USAGE_DB_PATH } from "../extensions/pi-usage-logger/database.mjs";
 
 const REMOTE_HOST = process.env.PLAN_METER_REMOTE ?? "converge-kenan";
+const PRICES_PATH = path.join(path.dirname(fileURLToPath(import.meta.url)), "plan-prices.json");
+const WEEKS_PER_MONTH = 365.25 / 12 / 7;
+
+/** What each plan costs per month, so capacity can be quoted per dollar. */
+function planPrices() {
+  return JSON.parse(fs.readFileSync(PRICES_PATH, "utf8")).prices;
+}
 
 function fail(message) {
   console.error(`plan-meter: ${message}`);
@@ -211,8 +221,10 @@ function accountSeries(samples) {
       buckets: new Map(), balances: new Map(),
     };
     accounts.set(row.provider, account);
-    account.plan ??= row.plan;
-    account.tier ??= row.tier;
+    // Samples arrive oldest-first, so the newest label wins: a plan renamed or
+    // corrected today must not be reported under what it was called this morning.
+    account.plan = row.plan ?? account.plan;
+    account.tier = row.tier ?? account.tier;
     if (row.used_percent === null) {
       if (row.used_units === null) continue;
       const series = account.balances.get(row.bucket) ?? new Map();
@@ -251,7 +263,7 @@ function observedSpans(accounts) {
   return spans;
 }
 
-function accountRows(accounts, spans, tokens) {
+function accountRows(accounts, spans, tokens, prices) {
   const rows = [];
   for (const account of accounts.values()) {
     const byBucket = {};
@@ -261,11 +273,16 @@ function accountRows(accounts, spans, tokens) {
     const used = tokens[account.provider] ?? { requests: 0, input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 };
     const fresh = used.input + used.output + used.cacheWrite;
     const span = spans[account.provider];
+    const plan = account.plan ?? account.tier ?? "?";
+    const price = prices[`${account.family}:${plan}`] ?? null;
+    const weekly = weeklyTokens(stats, used.total);
     rows.push({
       provider: account.provider,
       observedHours: span ? (span.hi - span.lo) / 3_600_000 : 0,
       family: account.family,
-      plan: account.plan ?? account.tier ?? "?",
+      plan,
+      price,
+      perDollar: weekly === null || !price ? null : (weekly * WEEKS_PER_MONTH) / price,
       bucket: binding ?? "-",
       start: stats?.start ?? null,
       end: stats?.end ?? null,
@@ -299,7 +316,7 @@ function familyRows(rows) {
   const families = {};
   for (const row of rows) {
     const family = families[row.family] ??= {
-      family: row.family, accounts: 0, measured: 0, total: 0, fresh: 0,
+      family: row.family, accounts: 0, measured: 0, total: 0, fresh: 0, price: 0,
       pooledTokens: 0, pooledFresh: 0, pooledBurn: 0, limits: new Set(),
     };
     family.accounts += 1;
@@ -307,29 +324,38 @@ function familyRows(rows) {
     family.fresh += row.fresh;
     if (row.weekly === null) continue;
     family.measured += 1;
+    family.price += row.price ?? 0;
     family.pooledTokens += row.total;
     family.pooledFresh += row.fresh;
     family.pooledBurn += row.burned * (row.windowSeconds / WEEK_SECONDS);
     family.limits.add(row.bucket);
   }
-  return Object.values(families).map((family) => ({
-    ...family,
-    weekly: family.pooledBurn > 0 ? (family.pooledTokens / family.pooledBurn) * 100 * family.measured : null,
-    weeklyFresh: family.pooledBurn > 0 ? (family.pooledFresh / family.pooledBurn) * 100 * family.measured : null,
-    limits: [...family.limits].join(", ") || "-",
-  }));
+  return Object.values(families).map((family) => {
+    const weekly = family.pooledBurn > 0 ? (family.pooledTokens / family.pooledBurn) * 100 * family.measured : null;
+    return {
+      ...family,
+      weekly,
+      weeklyFresh: family.pooledBurn > 0 ? (family.pooledFresh / family.pooledBurn) * 100 * family.measured : null,
+      perDollar: weekly === null || !family.price ? null : (weekly * WEEKS_PER_MONTH) / family.price,
+      limits: [...family.limits].join(", ") || "-",
+    };
+  });
 }
 
 function totalRow(families) {
   const sum = (key) => families.reduce((value, family) => value + (family[key] ?? 0), 0);
+  const weekly = sum("weekly");
+  const price = sum("price");
   return {
     family: "TOTAL",
     accounts: sum("accounts"),
     measured: sum("measured"),
     total: sum("total"),
     fresh: sum("fresh"),
-    weekly: sum("weekly"),
+    weekly,
     weeklyFresh: sum("weeklyFresh"),
+    price,
+    perDollar: price ? (weekly * WEEKS_PER_MONTH) / price : null,
     limits: "-",
   };
 }
@@ -353,13 +379,14 @@ function report(args) {
   }
 
   const remoteSamples = localOnly ? null : remoteJson(remoteSamplesScript(lo, hi));
-  const samples = [...localSamples(lo, hi), ...(remoteSamples ?? []).map((row) => ({ ...row, host: REMOTE_HOST }))];
+  const samples = [...localSamples(lo, hi), ...(remoteSamples ?? []).map((row) => ({ ...row, host: REMOTE_HOST }))]
+    .sort((left, right) => left.at - right.at);
   const accounts = accountSeries(samples);
   const spans = observedSpans(accounts);
   const balances = balanceRows(accounts);
   const tokens = mergeTokens(localTokens(spans),
     localOnly || !Object.keys(spans).length ? null : remoteJson(remoteTokensScript(spans)));
-  const rows = accountRows(accounts, spans, tokens);
+  const rows = accountRows(accounts, spans, tokens, planPrices());
   const families = familyRows(rows);
   const hours = (hi - lo) / 3_600_000;
 
@@ -384,12 +411,15 @@ function report(args) {
   }
 
   console.log("Weekly capacity per plan (tokens a full 7 days buys at the observed workload)");
+  console.log(`Tok/$ is one month of that capacity per subscription dollar; prices from ${PRICES_PATH}`);
   printTable([...families, totalRow(families)], [
     { label: "Provider", value: (row) => row.family },
     { label: "Accts", value: (row) => `${row.measured}/${row.accounts}` },
     { label: "Tokens", value: (row) => fmt(row.total) },
     { label: "Tok/week", value: (row) => row.weekly ? fmt(row.weekly) : "n/a" },
     { label: "Fresh/week", value: (row) => row.weeklyFresh ? fmt(row.weeklyFresh) : "n/a" },
+    { label: "$/mo", value: (row) => row.price ? `$${row.price}` : "n/a" },
+    { label: "Tok/$", value: (row) => row.perDollar ? fmt(row.perDollar) : "n/a" },
     { label: "Binding limits", value: (row) => row.limits },
   ]);
 
@@ -408,6 +438,8 @@ function report(args) {
     { label: "Tokens", value: (row) => fmt(row.total) },
     { label: "Tok/1%", value: (row) => row.perPercent === null ? "n/a" : fmt(row.perPercent) },
     { label: "Tok/week", value: (row) => row.weekly === null ? "n/a" : fmt(row.weekly) },
+    { label: "$/mo", value: (row) => row.price === null ? "n/a" : `$${row.price}` },
+    { label: "Tok/$", value: (row) => row.perDollar === null ? "n/a" : fmt(row.perDollar) },
     { label: "Resets in", value: (row) => row.resetsAt === null ? "n/a" : duration(row.resetsAt - hi) },
   ]);
 
