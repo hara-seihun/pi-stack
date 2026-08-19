@@ -43,6 +43,7 @@ The default `auto` window starts at the latest point where **every** contributin
 | --- | --- |
 | `Bucket` | The limit that exhausts first, which is what capacity must be measured against. |
 | `Win` | That bucket's window length: 5h, 7d, or Cursor's ~31d cycle. |
+| `Obs` | How long that account was actually observed, which may be shorter than the report window. |
 | `Start% / End%` | Meter reading at the first and last sample inside the window. |
 | `Burn%` | Sum of positive deltas between consecutive samples. |
 | `Rst` | Window resets observed inside the period. |
@@ -57,6 +58,8 @@ The binding bucket is the largest `burn x window length`, because capacity is pr
 Per-provider rows pool tokens over summed weekly-equivalent burn before multiplying by the account count. Meters tick in whole percent, so a single account measured over a few hours divides its tokens by a 1-2% reading and inherits that rounding; pooling twelve Codex accounts does not.
 
 Meters are server-side and global. An account configured on both hosts returns the same reading from each, so the reporter deduplicates meters by account while summing tokens across hosts.
+
+Tokens are counted over each account's own first-to-last sample span rather than the report window. An account first sampled two minutes ago has two minutes of meter movement, and dividing hours of tokens by it would report a plan orders of magnitude larger than it is. The footer names any account measured over less than half the window.
 
 ## Limits
 

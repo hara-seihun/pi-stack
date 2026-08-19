@@ -57,17 +57,21 @@ function printTable(values, columns) {
   }
 }
 
+/**
+ * Tokens are counted over each account's own first-to-last sample span, not the
+ * report window. An account first sampled two minutes ago has meter movement
+ * for two minutes; dividing hours of tokens by it would report a plan many
+ * times larger than it is.
+ */
 const TOKENS_QUERY = `
-  SELECT provider,
-         COUNT(*) AS requests,
+  SELECT COUNT(*) AS requests,
          COALESCE(SUM(input_tokens),0) AS input,
          COALESCE(SUM(output_tokens),0) AS output,
          COALESCE(SUM(cache_read_tokens),0) AS cache_read,
          COALESCE(SUM(cache_write_tokens),0) AS cache_write,
          COALESCE(SUM(total_tokens),0) AS total
   FROM request
-  WHERE started_at >= ? AND started_at < ? AND provider IS NOT NULL
-  GROUP BY provider`;
+  WHERE provider = ? AND started_at >= ? AND started_at <= ?`;
 
 const SAMPLES_QUERY = `
   SELECT s.provider, s.family, s.at, s.status, s.plan, s.tier, s.account_key,
@@ -93,12 +97,14 @@ function shapeTokens(row) {
 }
 
 /** Content-free token totals per provider alias from the Pi usage ledger. */
-function localTokens(lo, hi, dbPath = process.env.PI_USAGE_DB ?? USAGE_DB_PATH) {
+function localTokens(spans, dbPath = process.env.PI_USAGE_DB ?? USAGE_DB_PATH) {
   const db = openReadOnly(dbPath);
   if (!db) return {};
-  const rows = db.prepare(TOKENS_QUERY).all(lo, hi);
+  const query = db.prepare(TOKENS_QUERY);
+  const tokens = Object.fromEntries(Object.entries(spans)
+    .map(([provider, span]) => [provider, shapeTokens(query.get(provider, span.lo, span.hi))]));
   db.close();
-  return Object.fromEntries(rows.map((row) => [row.provider, shapeTokens(row)]));
+  return tokens;
 }
 
 function localSamples(lo, hi, dbPath = DEFAULT_DB_PATH) {
@@ -163,15 +169,21 @@ const out = {
 process.stdout.write(JSON.stringify(out));
 `;
 
-const remoteDataScript = (lo, hi) => `${REMOTE_PRELUDE}
-const lo = ${Number(lo)}, hi = ${Number(hi)};
-const out = { tokens: {}, samples: [] };
+const remoteSamplesScript = (lo, hi) => `${REMOTE_PRELUDE}
+const rows = meter ? meter.prepare(${JSON.stringify(SAMPLES_QUERY)}).all(${Number(lo)}, ${Number(hi)}) : [];
+process.stdout.write(JSON.stringify(rows));
+`;
+
+const remoteTokensScript = (spans) => `${REMOTE_PRELUDE}
+const spans = ${JSON.stringify(spans)};
+const out = {};
 if (usage) {
-  for (const row of usage.prepare(${JSON.stringify(TOKENS_QUERY)}).all(lo, hi)) {
-    out.tokens[row.provider] = { requests: Number(row.requests), input: Number(row.input), output: Number(row.output), cacheRead: Number(row.cache_read), cacheWrite: Number(row.cache_write), total: Number(row.total) };
+  const query = usage.prepare(${JSON.stringify(TOKENS_QUERY)});
+  for (const [provider, span] of Object.entries(spans)) {
+    const row = query.get(provider, span.lo, span.hi);
+    out[provider] = { requests: Number(row.requests), input: Number(row.input), output: Number(row.output), cacheRead: Number(row.cache_read), cacheWrite: Number(row.cache_write), total: Number(row.total) };
   }
 }
-if (meter) out.samples = meter.prepare(${JSON.stringify(SAMPLES_QUERY)}).all(lo, hi);
 process.stdout.write(JSON.stringify(out));
 `;
 
@@ -186,9 +198,11 @@ function mergeTokens(...parts) {
   return total;
 }
 
-function accountRows(samples, tokens) {
-  // Meters are server-side and global, so identical readings observed from two
-  // hosts describe one account. Deduplicate on provider+bucket+timestamp.
+/**
+ * Meters are server-side and global, so identical readings observed from two
+ * hosts describe one account. Deduplicate on provider+bucket+timestamp.
+ */
+function accountSeries(samples) {
   const accounts = new Map();
   for (const row of samples) {
     if (!row.bucket || row.used_percent === null) continue;
@@ -202,7 +216,19 @@ function accountRows(samples, tokens) {
     account.buckets.set(row.bucket, series);
     accounts.set(row.provider, account);
   }
+  return accounts;
+}
 
+function observedSpans(accounts) {
+  const spans = {};
+  for (const account of accounts.values()) {
+    const times = [...account.buckets.values()].flatMap((series) => [...series.keys()]).map(Number);
+    if (times.length) spans[account.provider] = { lo: Math.min(...times), hi: Math.max(...times) };
+  }
+  return spans;
+}
+
+function accountRows(accounts, spans, tokens) {
   const rows = [];
   for (const account of accounts.values()) {
     const byBucket = {};
@@ -211,8 +237,10 @@ function accountRows(samples, tokens) {
     const stats = binding ? byBucket[binding] : null;
     const used = tokens[account.provider] ?? { requests: 0, input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 };
     const fresh = used.input + used.output + used.cacheWrite;
+    const span = spans[account.provider];
     rows.push({
       provider: account.provider,
+      observedHours: span ? (span.hi - span.lo) / 3_600_000 : 0,
       family: account.family,
       plan: account.plan ?? account.tier ?? "?",
       bucket: binding ?? "-",
@@ -301,10 +329,13 @@ function report(args) {
     lo = since(window);
   }
 
-  const remoteData = localOnly ? null : remoteJson(remoteDataScript(lo, hi));
-  const tokens = mergeTokens(localTokens(lo, hi), remoteData?.tokens);
-  const samples = [...localSamples(lo, hi), ...(remoteData?.samples ?? []).map((row) => ({ ...row, host: REMOTE_HOST }))];
-  const rows = accountRows(samples, tokens);
+  const remoteSamples = localOnly ? null : remoteJson(remoteSamplesScript(lo, hi));
+  const samples = [...localSamples(lo, hi), ...(remoteSamples ?? []).map((row) => ({ ...row, host: REMOTE_HOST }))];
+  const accounts = accountSeries(samples);
+  const spans = observedSpans(accounts);
+  const tokens = mergeTokens(localTokens(spans),
+    localOnly || !Object.keys(spans).length ? null : remoteJson(remoteTokensScript(spans)));
+  const rows = accountRows(accounts, spans, tokens);
   const families = familyRows(rows);
   const hours = (hi - lo) / 3_600_000;
 
@@ -343,6 +374,7 @@ function report(args) {
     { label: "Plan", value: (row) => row.plan },
     { label: "Bucket", value: (row) => row.bucket },
     { label: "Win", value: (row) => row.windowSeconds ? duration(row.windowSeconds * 1000) : "n/a" },
+    { label: "Obs", value: (row) => `${row.observedHours.toFixed(1)}h` },
     { label: "Start%", value: (row) => row.start === null ? "n/a" : row.start.toFixed(1) },
     { label: "End%", value: (row) => row.end === null ? "n/a" : row.end.toFixed(1) },
     { label: "Burn%", value: (row) => row.burned === null ? "n/a" : row.burned.toFixed(1) },
@@ -354,6 +386,11 @@ function report(args) {
     { label: "Resets in", value: (row) => row.resetsAt === null ? "n/a" : duration(row.resetsAt - hi) },
   ]);
 
+  const short = rows.filter((row) => row.weekly !== null && row.observedHours < hours / 2);
+  if (short.length) {
+    console.log(`\nMeasured over less than half the window (tokens counted only inside each account's own`
+      + ` sample span): ${short.map((row) => `${row.provider} ${row.observedHours.toFixed(2)}h`).join(", ")}.`);
+  }
   const thin = rows.filter((row) => row.weekly === null);
   if (thin.length) {
     console.log(`\n${thin.length}/${rows.length} account(s) show no measurable meter movement yet`
