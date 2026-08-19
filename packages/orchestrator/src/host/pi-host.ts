@@ -81,6 +81,7 @@ export class PiHost implements HostManager {
       agentDir: this.options.agentDir,
       // The SDK's Model type is provider-internal; the resolver returns one.
       model: this.options.resolveModel(spec) as never,
+      thinkingLevel: spec.thinking as never,
       customTools: [taskComplete],
     });
     this.sessions.set(spec.runId, session);

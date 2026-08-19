@@ -67,6 +67,7 @@ export class Runner implements HostEvents {
           cwd: task.cwd,
           provider: run.provider,
           model: run.model,
+          thinking: run.thinking,
           accountId: run.accountId,
         };
         this.engine.launch(spec);

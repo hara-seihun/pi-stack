@@ -14,6 +14,8 @@ import { TIERS, type Tier } from "../tasks/types.js";
 export interface ModelCandidate {
   readonly provider: string;
   readonly model: string;
+  /** pi thinking level for launches of this candidate. */
+  readonly thinking?: string;
 }
 
 export interface BrokerConfig {
@@ -34,8 +36,13 @@ export interface BrokerConfig {
   /** Upper bound on advertised slots per tier per cycle. */
   readonly maxSlotsPerTier: number;
   readonly calibrator?: Partial<CalibratorConfig>;
-  /** Maps stored usage classes onto calibration classes at replay time. */
-  readonly transform?: (classId: string, tokens: number) => { classId: string; tokens: number };
+  /** Maps stored usage classes onto calibration classes at replay time,
+   * per provider family (weights are family-specific prices). */
+  readonly transform?: (
+    provider: string,
+    classId: string,
+    tokens: number,
+  ) => { classId: string; tokens: number };
 }
 
 export const BROKER_DEFAULTS = {
@@ -50,6 +57,7 @@ export interface Admission {
   readonly accountId: string;
   readonly provider: string;
   readonly model: string;
+  readonly thinking?: string;
 }
 
 interface AccountView {
@@ -131,11 +139,12 @@ export class Broker {
   sustainableRate(accountId: string, provider: string, now: number): number | undefined {
     const specs = this.cfg.meters[provider];
     if (specs === undefined || specs.length === 0) return undefined;
+    const transform = this.cfg.transform;
     const cal = this.ledger.replayCalibrator(
       accountId,
       specs,
       this.cfg.calibrator,
-      this.cfg.transform,
+      transform === undefined ? undefined : (c, t) => transform(provider, c, t),
     );
     let min: number | undefined;
     for (const spec of specs) {
@@ -197,7 +206,12 @@ export class Broker {
         if (best === undefined || v.capacity - v.active > best.capacity - best.active) best = v;
       }
       if (best !== undefined) {
-        return { accountId: best.id, provider: candidate.provider, model: candidate.model };
+        return {
+          accountId: best.id,
+          provider: candidate.provider,
+          model: candidate.model,
+          thinking: candidate.thinking,
+        };
       }
     }
     return undefined;

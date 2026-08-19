@@ -10,6 +10,7 @@ export interface LaunchSpec {
   readonly cwd: string | undefined;
   readonly provider: string;
   readonly model: string;
+  readonly thinking: string | undefined;
   readonly accountId: string;
 }
 

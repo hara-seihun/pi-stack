@@ -141,7 +141,11 @@ CREATE INDEX run_task_started ON run (task_id, started_at);
 INSERT INTO control (key, value) VALUES ('runner_generation', '1');
 `;
 
-const MIGRATIONS: readonly string[] = [SCHEMA, TASK_SCHEMA, RUN_SCHEMA, RUNNER_SCHEMA];
+const THINKING_SCHEMA = `
+ALTER TABLE run ADD COLUMN thinking TEXT;
+`;
+
+const MIGRATIONS: readonly string[] = [SCHEMA, TASK_SCHEMA, RUN_SCHEMA, RUNNER_SCHEMA, THINKING_SCHEMA];
 
 export interface AccountRow {
   readonly id: string;
@@ -165,6 +169,7 @@ export interface RunRow {
   readonly accountId: string;
   readonly model: string;
   readonly provider: string;
+  readonly thinking: string | undefined;
   readonly state: RunState;
   readonly startedAt: number;
   readonly claimedAt: number | undefined;
@@ -546,15 +551,16 @@ export class Ledger {
     accountId: string;
     model: string;
     provider: string;
+    thinking?: string;
     at: number;
   }): string {
     const id = crypto.randomUUID();
     this.db
       .prepare(
-        `INSERT INTO run (id, task_id, tier, account_id, model, provider, state, started_at)
-         VALUES (?, ?, ?, ?, ?, ?, 'pending', ?)`,
+        `INSERT INTO run (id, task_id, tier, account_id, model, provider, thinking, state, started_at)
+         VALUES (?, ?, ?, ?, ?, ?, ?, 'pending', ?)`,
       )
-      .run(id, r.taskId, r.tier, r.accountId, r.model, r.provider, r.at);
+      .run(id, r.taskId, r.tier, r.accountId, r.model, r.provider, r.thinking ?? null, r.at);
     return id;
   }
 
@@ -610,7 +616,7 @@ export class Ledger {
   private runRows(clause: string, params: (string | number)[]): RunRow[] {
     const rows = this.db
       .prepare(
-        `SELECT id, task_id, tier, account_id, model, provider, state, started_at,
+        `SELECT id, task_id, tier, account_id, model, provider, thinking, state, started_at,
                 claimed_at, runner_id, ended_at, heartbeat_at, abort_requested, productive, complete, detail
          FROM run ${clause}`,
       )
@@ -621,6 +627,7 @@ export class Ledger {
       account_id: string;
       model: string;
       provider: string;
+      thinking: string | null;
       state: RunState;
       started_at: number;
       claimed_at: number | null;
@@ -639,6 +646,7 @@ export class Ledger {
       accountId: r.account_id,
       model: r.model,
       provider: r.provider,
+      thinking: r.thinking ?? undefined,
       state: r.state,
       startedAt: r.started_at,
       claimedAt: r.claimed_at ?? undefined,

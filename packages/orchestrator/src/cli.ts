@@ -1,10 +1,13 @@
 #!/usr/bin/env node
 import { homedir, hostname } from "node:os";
 import { join } from "node:path";
+import { Broker } from "./broker/broker.js";
+import { Controller } from "./controller/controller.js";
 import { Ledger } from "./ledger/ledger.js";
 import { Runner, bumpRunnerGeneration } from "./host/runner.js";
 import { Scheduler } from "./tasks/scheduler.js";
 import { TIERS, type Tier } from "./tasks/types.js";
+import { brokerConfig, defaultConfigPath, loadConfig } from "./config.js";
 import type { LaunchSpec } from "./host/types.js";
 
 /**
@@ -64,6 +67,33 @@ async function status(ledger: Ledger): Promise<void> {
     );
   }
   if (evaluation.tasks.length === 0) console.log("no tasks");
+}
+
+/** Controller daemon: the launch loop. Tier→model maps and meter topology
+ * come from operator config; everything else is measured. */
+async function daemon(ledger: Ledger, args: string[]): Promise<void> {
+  const { named } = flags(args);
+  const cfg = loadConfig();
+  const controller = new Controller(
+    ledger,
+    new Scheduler(ledger),
+    new Broker(ledger, brokerConfig(cfg)),
+  );
+  const intervalMs = Number(named.get("interval") ?? 30_000);
+  console.log(`controller started (config: ${defaultConfigPath()})`);
+  for (;;) {
+    try {
+      const report = await controller.tick();
+      for (const run of report.created) {
+        console.log(`created ${run.id.slice(0, 8)}: ${run.taskId} -> ${run.accountId} (${run.model})`);
+      }
+      for (const id of report.reaped) console.log(`reaped ${id.slice(0, 8)}: heartbeat timeout`);
+      for (const id of report.expired) console.log(`expired ${id.slice(0, 8)}: unclaimed`);
+    } catch (thrown) {
+      console.error(`tick failed: ${String(thrown)}`);
+    }
+    await new Promise((r) => setTimeout(r, intervalMs));
+  }
 }
 
 /**
@@ -170,6 +200,9 @@ async function main(): Promise<void> {
         console.log(`abort requested for ${runId}`);
         break;
       }
+      case "daemon":
+        await daemon(ledger, args);
+        break;
       case "runner":
         await runner(ledger, args);
         break;
@@ -186,6 +219,7 @@ async function main(): Promise<void> {
             "  task list | task delete <id>",
             "  pause | resume               durable launch control (a ledger row)",
             "  abort <runId>                request a running session stop",
+            "  daemon [--interval MS]       controller loop (config: ~/.config/pi-orchestrator)",
             "  runner [--id NAME] [--max-sessions N] [--interval MS]",
             "                               host claimed runs as embedded pi sessions",
             "  drain-runners                bump generation: runners finish and exit",
