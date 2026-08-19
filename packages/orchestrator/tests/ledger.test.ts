@@ -110,31 +110,24 @@ describe("ledger", () => {
     ledger.close();
   });
 
-  it("dedupes idle high-frequency readings to hourly anchors without losing semantics", () => {
-    const ledger = Ledger.open(join(dir, "dedupe.sqlite3"));
+  it("stores idle high-frequency readings verbatim without corrupting calibration", () => {
+    const ledger = Ledger.open(join(dir, "idle.sqlite3"));
     const history = generateHistory(3, 11);
     feedLedger(ledger, "codex-b", history);
-    const activeReadings = ledger.counts("codex-b").readings;
     const idleStart = Date.UTC(2026, 7, 6, 9);
-    let offered = 0;
-    let stored = 0;
     const lastPercent = history.filter((e) => e.kind === "reading").at(-1)?.usedPercent ?? 0;
     for (let m = 0; m < 2 * 24 * 12; m++) {
-      offered++;
-      const r = ledger.recordReading("codex-b", "codex-weekly", {
+      ledger.recordReading("codex-b", "codex-weekly", {
         at: idleStart + m * 5 * 60_000,
         usedPercent: lastPercent,
         resetAt: Date.UTC(2026, 7, 10, 8),
       });
-      if (r.stored) stored++;
     }
-    expect(stored).toBeLessThanOrEqual(offered / 10);
     const cal = ledger.replayCalibrator("codex-b", SPECS);
     const stats = cal.stats("codex-weekly");
     expect(Math.abs(stats.leakPercentPerDay)).toBeLessThan(0.7);
     expect(stats.classes[0].tokensPerPercent).toBeGreaterThan(0.85e6);
     expect(stats.classes[0].tokensPerPercent).toBeLessThan(1.2e6);
-    expect(activeReadings).toBeGreaterThan(0);
     ledger.close();
   });
 

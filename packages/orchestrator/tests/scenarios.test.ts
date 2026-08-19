@@ -108,7 +108,7 @@ describe("core calibrator scenarios", () => {
   it("S4 measures the fable budget as half the weekly budget from drain rates", () => {
     const rng = mulberry32(44);
     const sim = new SimAccount(anthropicMeters());
-    steady(sim, { days: 4, classId: "fable", probPerHour: 0.5, meanTokens: 2e5, rng });
+    steady(sim, { days: 6, classId: "fable", probPerHour: 0.3, meanTokens: 2e5, rng });
     const weeklyFable = classStat(sim, "anthropic-weekly", "fable");
     const fableMeter = classStat(sim, "anthropic-fable-weekly", "fable");
     const budgetRatio = (fableMeter.planTokens ?? 0) / (weeklyFable.planTokens ?? 1);

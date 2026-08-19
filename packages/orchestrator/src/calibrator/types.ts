@@ -42,11 +42,25 @@ export interface PlanShift {
   readonly tokensPerPercentRatio: number;
 }
 
+/**
+ * Percent drained across idle gaps (no recorded usage for idleSplitMs).
+ * On a fully instrumented machine this is a direct, model-free alarm:
+ * `percent` should stay near zero, and a sustained excess means usage is
+ * escaping instrumentation (or the account is used off-machine).
+ */
+export interface IdleDrain {
+  readonly percent: number;
+  readonly hours: number;
+  readonly tokens: number;
+  readonly observations: number;
+}
+
 export interface MeterStats {
   readonly meterId: MeterId;
   readonly classes: readonly ClassStats[];
   readonly leakPercentPerDay: number;
   readonly leakConfidence: Confidence;
+  readonly idleDrain: IdleDrain;
   readonly windowsObserved: number;
   readonly totalObservedPercent: number;
   readonly tokensBySource: Readonly<Record<UsageSource, number>>;
@@ -98,6 +112,10 @@ export interface CalibratorConfig {
   readonly minObservationPercent: number;
   /** Segments older than this close regardless of delta (anchors zero/slow drain). */
   readonly maxSegmentMs: number;
+  /** A reading arriving after this long without recorded usage closes the
+   * pending segment at the idle boundary, isolating the gap as its own
+   * observation and feeding the idle-drain alarm. */
+  readonly idleSplitMs: number;
   /** Percent drop deeper than this, absent a crossed resetAt, is a surprise reset. */
   readonly resetTolerancePercent: number;
   /** Per-window signal required before a window participates in plan-change detection. */

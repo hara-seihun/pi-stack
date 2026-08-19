@@ -28,6 +28,7 @@ const DAY = 24 * HOUR;
 export const defaultConfig: CalibratorConfig = {
   minObservationPercent: 2,
   maxSegmentMs: 12 * HOUR,
+  idleSplitMs: 3 * HOUR,
   resetTolerancePercent: 1,
   changeSignalPercent: 10,
   changeDetectRatio: 1.6,
@@ -39,6 +40,10 @@ interface Segment {
   startAt: number;
   startPercent: number;
   tokens: number[];
+  /** Tokens recorded since the most recent reading (the idle-split tail). */
+  sinceLast: number[];
+  /** Readings observed while this segment was open. */
+  readings: number;
 }
 
 interface WindowAccum {
@@ -54,7 +59,12 @@ interface MeterState {
   spec: MeterSpec;
   classIndex: Map<UsageClassId, number>;
   lastReading: MeterReading | undefined;
+  lastUsageAt: number | undefined;
+  /** Estimated fractional percent at the last segment boundary. Carrying it
+   * forward makes chained integer deltas telescope to the unbiased total. */
+  fracCarry: number;
   seg: Segment | undefined;
+  idle: { percent: number; hours: number; tokens: number; observations: number };
   windowStartAt: number | undefined;
   observedStartAt: number | undefined;
   lastObservedAt: number | undefined;
@@ -144,7 +154,10 @@ export class AccountCalibrator {
         spec,
         classIndex,
         lastReading: undefined,
+        lastUsageAt: undefined,
+        fracCarry: 0.5,
         seg: undefined,
+        idle: { percent: 0, hours: 0, tokens: 0, observations: 0 },
         windowStartAt: undefined,
         observedStartAt: undefined,
         lastObservedAt: undefined,
@@ -167,7 +180,9 @@ export class AccountCalibrator {
       const idx = st.classIndex.get(e.classId);
       if (idx === undefined) continue;
       st.seg.tokens[idx] += e.tokens;
+      st.seg.sinceLast[idx] += e.tokens;
       st.tokensBySource[e.source] += e.tokens;
+      st.lastUsageAt = Math.max(st.lastUsageAt ?? 0, e.at);
     }
   }
 
@@ -196,6 +211,7 @@ export class AccountCalibrator {
         unspentPercent: Math.max(0, 100 - prev.usedPercent),
       };
       st.resets.push(ev);
+      st.fracCarry = 0; // Providers reset to exactly zero.
       st.windows.push(newAccum(cols, st.spec.drainedBy.length));
       st.windowStartAt = boundaryAt;
       // The segment spanning the boundary is discarded: its tokens cannot be
@@ -206,11 +222,46 @@ export class AccountCalibrator {
     }
     const seg = st.seg;
     if (seg) {
+      const idleFrom = Math.max(st.lastUsageAt ?? 0, seg.startAt);
+      if (r.at - idleFrom >= this.cfg.idleSplitMs) {
+        if (prev.at > seg.startAt) {
+          const tokensBefore = seg.tokens.map((t, i) => t - seg.sinceLast[i]);
+          this.finalize(
+            st,
+            this.correctedDelta(st, prev.usedPercent - seg.startPercent, "time", 0),
+            (prev.at - seg.startAt) / HOUR,
+            tokensBefore,
+          );
+          this.finalizeIdle(
+            st,
+            this.correctedDelta(st, r.usedPercent - prev.usedPercent, "time", 0),
+            (r.at - prev.at) / HOUR,
+            seg.sinceLast,
+          );
+        } else {
+          this.finalizeIdle(
+            st,
+            this.correctedDelta(st, r.usedPercent - seg.startPercent, "time", 0),
+            (r.at - seg.startAt) / HOUR,
+            seg.tokens,
+          );
+        }
+        st.seg = this.freshSeg(st, r);
+        st.lastReading = r;
+        return undefined;
+      }
+      seg.readings += 1;
       const eff = r.usedPercent - seg.startPercent;
       const elapsed = r.at - seg.startAt;
-      if (eff >= this.cfg.minObservationPercent || elapsed >= this.cfg.maxSegmentMs) {
-        this.finalize(st, Math.max(0, eff), elapsed / HOUR, seg.tokens);
+      if (eff >= this.cfg.minObservationPercent) {
+        const y = this.correctedDelta(st, eff, "threshold", seg.readings);
+        this.finalize(st, y, elapsed / HOUR, seg.tokens);
         st.seg = this.freshSeg(st, r);
+      } else if (elapsed >= this.cfg.maxSegmentMs) {
+        this.finalize(st, this.correctedDelta(st, eff, "time", 0), elapsed / HOUR, seg.tokens);
+        st.seg = this.freshSeg(st, r);
+      } else {
+        seg.sinceLast = zeros(seg.sinceLast.length);
       }
     }
     st.lastReading = r;
@@ -233,6 +284,7 @@ export class AccountCalibrator {
       })),
       leakPercentPerDay: 0,
       leakConfidence: "none",
+      idleDrain: { ...st.idle },
       windowsObserved: windows.length,
       totalObservedPercent: 0,
       tokensBySource: { ...st.tokensBySource },
@@ -306,6 +358,7 @@ export class AccountCalibrator {
       classes,
       leakPercentPerDay: leakBeta * 24,
       leakConfidence,
+      idleDrain: { ...st.idle },
       windowsObserved: windows.length,
       totalObservedPercent: windows.reduce((s, w) => s + w.totalPercent, 0),
       tokensBySource: { ...st.tokensBySource },
@@ -379,7 +432,42 @@ export class AccountCalibrator {
   }
 
   private freshSeg(st: MeterState, r: MeterReading): Segment {
-    return { startAt: r.at, startPercent: r.usedPercent, tokens: zeros(st.spec.drainedBy.length) };
+    const n = st.spec.drainedBy.length;
+    return {
+      startAt: r.at,
+      startPercent: r.usedPercent,
+      tokens: zeros(n),
+      sinceLast: zeros(n),
+      readings: 0,
+    };
+  }
+
+  /**
+   * Integer deltas are biased by the fractional percent hidden at each
+   * boundary. A threshold-triggered close sits just past an integer (end
+   * fraction ~ half the per-reading step); a time-triggered close is uniform
+   * (0.5). Correcting by estimated end minus carried start fraction makes
+   * chains of segments telescope to the exact total.
+   */
+  private correctedDelta(
+    st: MeterState,
+    eff: number,
+    trigger: "threshold" | "time",
+    readings: number,
+  ): number {
+    const endFrac =
+      trigger === "threshold" ? Math.min(0.5, eff / (2 * Math.max(1, readings))) : 0.5;
+    const y = Math.max(0, eff + endFrac - st.fracCarry);
+    st.fracCarry = endFrac;
+    return y;
+  }
+
+  private finalizeIdle(st: MeterState, y: number, hours: number, tokens: number[]): void {
+    this.finalize(st, y, hours, tokens);
+    st.idle.percent += y;
+    st.idle.hours += hours;
+    st.idle.tokens += tokens.reduce((a, b) => a + b, 0);
+    st.idle.observations += 1;
   }
 
   private finalize(st: MeterState, y: number, hours: number, tokens: number[]): void {

@@ -17,8 +17,6 @@ import type {
  * retroactively to all recorded history.
  */
 
-const READING_ANCHOR_MS = 3_600_000;
-
 const SCHEMA = `
 CREATE TABLE account (
   id TEXT PRIMARY KEY,
@@ -126,30 +124,20 @@ export class Ledger {
   }
 
   /**
-   * Stores a reading unless it is identical to the previous one and less than
-   * an hour old; hourly anchors are always kept so replay still closes
-   * zero-drain segments during idle periods.
+   * Stores a reading verbatim. Every reading is a fact and segment semantics
+   * depend on exact boundaries, so nothing is deduplicated; `prune` bounds
+   * growth instead. Out-of-order readings (concurrent writers racing) are
+   * rejected loudly; callers may drop the redundant loser.
    */
-  recordReading(accountId: string, meterId: MeterId, r: MeterReading): { stored: boolean } {
+  recordReading(accountId: string, meterId: MeterId, r: MeterReading): void {
     const last = this.db
       .prepare(
-        `SELECT at, used_percent, reset_at FROM meter_reading
+        `SELECT at FROM meter_reading
          WHERE account_id = ? AND meter_id = ? ORDER BY at DESC LIMIT 1`,
       )
-      .get(accountId, meterId) as
-      | { at: number; used_percent: number; reset_at: number | null }
-      | undefined;
-    if (last) {
-      if (r.at <= last.at) {
-        throw new Error(`out-of-order reading for ${accountId}/${meterId}: ${r.at} <= ${last.at}`);
-      }
-      if (
-        last.used_percent === r.usedPercent &&
-        last.reset_at === (r.resetAt ?? null) &&
-        r.at - last.at < READING_ANCHOR_MS
-      ) {
-        return { stored: false };
-      }
+      .get(accountId, meterId) as { at: number } | undefined;
+    if (last && r.at <= last.at) {
+      throw new Error(`out-of-order reading for ${accountId}/${meterId}: ${r.at} <= ${last.at}`);
     }
     this.db
       .prepare(
@@ -157,7 +145,6 @@ export class Ledger {
          VALUES (?, ?, ?, ?, ?)`,
       )
       .run(accountId, meterId, r.at, r.usedPercent, r.resetAt ?? null);
-    return { stored: true };
   }
 
   recordUsage(accountId: string, e: LoggedUsageEvent): void {
@@ -180,11 +167,17 @@ export class Ledger {
     }
   }
 
-  /** Rebuilds an account's calibrator by folding stored facts in time order. */
+  /**
+   * Rebuilds an account's calibrator by folding stored facts in time order.
+   * `transform` maps stored usage facts onto calibration classes (e.g. raw
+   * token components onto price-weighted cost units); because it runs at
+   * replay time, corrected weights apply retroactively to all history.
+   */
   replayCalibrator(
     accountId: string,
     specs: readonly MeterSpec[],
     cfg?: Partial<CalibratorConfig>,
+    transform?: (classId: string, tokens: number) => { classId: string; tokens: number },
   ): AccountCalibrator {
     const cal = new AccountCalibrator(specs, cfg);
     const readings = this.db
@@ -209,22 +202,20 @@ export class Ledger {
       tokens: number;
       source: "orchestrator" | "machine";
     }[];
+    const fold = (e: { class_id: string; at: number; tokens: number; source: "orchestrator" | "machine" }) => {
+      const t = transform ? transform(e.class_id, e.tokens) : { classId: e.class_id, tokens: e.tokens };
+      cal.recordUsage({ at: e.at, classId: t.classId, tokens: t.tokens, source: e.source });
+    };
     let u = 0;
     for (const r of readings) {
-      while (u < usage.length && usage[u].at <= r.at) {
-        const e = usage[u++];
-        cal.recordUsage({ at: e.at, classId: e.class_id, tokens: e.tokens, source: e.source });
-      }
+      while (u < usage.length && usage[u].at <= r.at) fold(usage[u++]);
       cal.recordReading(r.meter_id, {
         at: r.at,
         usedPercent: r.used_percent,
         resetAt: r.reset_at ?? undefined,
       });
     }
-    while (u < usage.length) {
-      const e = usage[u++];
-      cal.recordUsage({ at: e.at, classId: e.class_id, tokens: e.tokens, source: e.source });
-    }
+    while (u < usage.length) fold(usage[u++]);
     return cal;
   }
 

@@ -5,8 +5,9 @@ multi-account usage calibration, quota governance, tiered model routing, and
 task scheduling. Built on pi's SDK — pi is the engine, this is the fleet
 layer.
 
-Status: early. The core calibrator and ledger are implemented; the broker,
-agent host, controller, and pi extensions follow.
+Status: early. The core calibrator, ledger, and usage-logger extension are
+implemented; the broker, agent host, controller, and operator extension
+follow.
 
 ## Design
 
@@ -39,6 +40,43 @@ Learns, per account and meter, what providers refuse to tell you:
   hazard (see [docs/openai-reset-statistics.md](docs/openai-reset-statistics.md));
 - **plan-size change detection**: silent allowance cuts between windows are
   detected and calibration restarts from the new regime.
+
+Two estimator details matter for accuracy. Integer deltas are corrected by
+carrying the estimated fractional percent across segment boundaries, so
+chained observations telescope to the exact total (threshold-triggered
+closes otherwise systematically overstate drain). And a reading that arrives
+after an idle gap (no recorded usage for `idleSplitMs`) closes the pending
+segment at the idle boundary, isolating the gap as its own observation.
+
+## Fully instrumented machines
+
+On a machine where every pi session loads the usage-logger extension, drain
+is observed, not estimated:
+
+- **Cost normalization**: component price ratios (input/output/cache) are
+  known facts from provider pricing, so usage facts are mapped to cost units
+  at replay time and each meter calibrates a single scale (cost units per
+  percent). This is mix-shift invariant by construction. Estimating free
+  per-component weights from integer-quantized aggregate segments is
+  deliberately not attempted: it is under-identified (proven in the test
+  suite by failure).
+- **The idle-drain alarm**: percent drained across zero-usage gaps is
+  accounted directly and model-free (`MeterStats.idleDrain`). Near zero is
+  the invariant; a sustained excess means usage is escaping instrumentation
+  or the account is being used off-machine.
+- Accuracy is then quantization-limited: the instrumented simulation
+  recovers the true scale within ~0.3% after two weeks of fleet traffic.
+
+## Usage-logger extension (`src/extension/`)
+
+Records every pi session on the machine into the ledger: one usage event per
+token component per assistant message, attributed to the provider alias
+(which is the account identity under multi-account setups), and provider
+rate-limit response headers parsed into meter readings with exact timestamps
+-- no polling. Anthropic exposes all three meters (5h, 7d, 7d_oi) on every
+response; header names are verified against recorded production traffic.
+Ledger location: `PI_ORCHESTRATOR_LEDGER` or
+`~/.local/share/pi-orchestrator/ledger.sqlite3`.
 
 ## Ledger (`src/ledger/`)
 
