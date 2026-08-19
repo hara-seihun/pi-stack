@@ -52,6 +52,22 @@ fires for them):
 
 ## Guards (both write to the alerts inbox, `/home/kenan/data/alerts/inbox/`)
 
+> **Stale-generation alerts (2026-08-19, self-expiring).** The floor/thrash
+> defects below were fixed in `dab575d`, but sessions already running on agent
+> host `380a000f` (code fingerprint `e6cf4c6b65b27e5b`) keep the pre-fix guard
+> until they finish. A floor or thrash alert whose session belongs to that host
+> is known-stale: delete the alert file and do not investigate. Test:
+>
+> ```bash
+> sqlite3 ~/data/agent-orchestrator/orchestrator.sqlite3 \
+>   "SELECT h.fingerprint FROM run r JOIN agent_host h ON r.host_id=h.id
+>    WHERE r.session_id='<session id from the alert>'"
+> # e6cf4c6b65b27e5b -> stale alert, delete it; anything newer -> investigate.
+> ```
+>
+> Delete this whole block once that host is gone
+> (`SELECT state FROM agent_host WHERE id LIKE '380a000f%'` returns `gone`).
+
 - **Thrash:** two cuts within 10 LLM calls in one session. This is the
   failure mode of Anthropic's 2026-04-23 Claude Code postmortem (a `keep:1`
   thinking-clear that fired every turn). The cap stays enforced; the alert
