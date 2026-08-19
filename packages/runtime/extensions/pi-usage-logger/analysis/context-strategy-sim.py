@@ -1,24 +1,17 @@
 #!/usr/bin/env python3
-"""Replay real lane sessions under candidate mid-run context strategies.
+"""Replay real lane sessions under mid-run context strategies, v2.
 
-Drives each strategy with the recorded per-step context growth (the work
-stream) and prices requests with each provider's caching semantics:
-  - OpenAI: cached tokens at cacheRead rate, new tokens at input rate,
-    whole-request 2x/1.5x tier above 272k prompt tokens. Cache re-forms
-    automatically; a cut makes everything after the head uncached once.
-  - Anthropic: cached tokens at cacheRead, newly cached tokens at cacheWrite
-    (1.25x input), no tier. A cut rewrites everything after the head once.
+v2 models rung depletion honestly: new content splits into an evictable
+share (tool-result bodies + thinking, ~90%) and an unevictable share
+(tool args + assistant conclusions, ~10%). Rungs 1-2 remove only the
+evictable mass outside the tail; the unevictable residue accumulates
+across cuts and is only reset by a rung-3 handoff summary, which fires
+when residue exceeds RESIDUE_MAX.
 
-Strategies:
-  uncapped              status quo mid-run (no check until run end)
-  ladder@T              evict tool results + strip old reasoning at trigger T,
-                        land at head + 10% residue + 50k verbatim tail;
-                        falls back to in-context summary when residue > 140k
-  shallow@250k          evict only enough to get 30k under the trigger
-                        (the anti-pattern: frequent cuts, same invalidation)
-  summary_incontext@250 always summarize via appended prompt (cache-hot read)
-  summary_fresh@250     pi-style: serialize ~70% of context as fresh uncached
-                        input to a separate call
+Pricing per provider:
+  OpenAI:    cached @ cacheRead, new @ input, whole-request 2x/1.5x tier
+             above 272k prompt tokens; a cut un-caches everything after head.
+  Anthropic: cached @ cacheRead, new @ cacheWrite (1.25x input), no tier.
 """
 import sqlite3
 from collections import defaultdict
@@ -28,14 +21,13 @@ DB = sqlite3.connect("file:/home/kenan/data/pi-usage/usage.sqlite3?mode=ro", uri
 MODELS = {
     "gpt-5.6-sol": dict(
         inp=5e-6, out=30e-6, cr=0.5e-6, cw=None,
-        tier=272_000, tin=2.0, tout=1.5,
-        head=30_000, keep=0.10),
+        tier=272_000, tin=2.0, tout=1.5, head=30_000),
     "claude-opus-5": dict(
         inp=5e-6, out=25e-6, cr=0.5e-6, cw=6.25e-6,
-        tier=None, tin=1.0, tout=1.0,
-        head=47_000, keep=0.10),
+        tier=None, tin=1.0, tout=1.0, head=47_000),
 }
-TAIL, SUMMARY_OUT, RESIDUE_MAX = 50_000, 5_000, 140_000
+EVICTABLE_SHARE = 0.90
+SUMMARY_OUT = 5_000
 
 
 def load(model):
@@ -55,7 +47,7 @@ def load(model):
         prev, steps = 0, []
         for ctx, out in seq:
             d = ctx - prev
-            if d <= 0:          # a recorded compaction/reset: nominal step
+            if d <= 0:
                 d = 2_000
             steps.append((d, out))
             prev = ctx
@@ -65,90 +57,78 @@ def load(model):
 
 def rates(m, prompt):
     over = m["tier"] and prompt > m["tier"]
-    f_in = m["tin"] if over else 1.0
-    f_out = m["tout"] if over else 1.0
-    return m["inp"] * f_in, m["cr"] * f_in, (m["cw"] * f_in if m["cw"] else None), m["out"] * f_out
+    fi = m["tin"] if over else 1.0
+    fo = m["tout"] if over else 1.0
+    return m["inp"] * fi, m["cr"] * fi, (m["cw"] * fi if m["cw"] else None), m["out"] * fo
 
 
-def request_cost(m, prompt, cached, out_toks):
+def req_cost(m, prompt, cached, out_toks):
     inp, cr, cw, out = rates(m, prompt)
-    new = prompt - cached
-    new_rate = cw if cw else inp
-    return cached * cr + new * new_rate + out_toks * out
+    return cached * cr + (prompt - cached) * (cw or inp) + out_toks * out
 
 
-def ladder_land(m, C):
-    tail = min(TAIL, max(C - m["head"], 0))
-    residue = m["head"] + m["keep"] * max(C - m["head"] - tail, 0)
-    return residue + tail, residue
-
-
-def summary_cost_incontext(m, C):
+def summary_call(m, C):
     inp, cr, cw, out = rates(m, C)
-    return C * cr + 500 * (cw if cw else inp) + SUMMARY_OUT * out
+    return C * cr + 500 * (cw or inp) + SUMMARY_OUT * out
 
 
-def summary_cost_fresh(m, C):
-    serialized = 0.7 * C
-    inp, cr, cw, out = rates(m, serialized)
-    return serialized * inp + SUMMARY_OUT * out
-
-
-def replay(m, runs, kind, trigger):
-    usd = cuts = summaries = 0
-    peak = 0
+def replay(m, runs, trigger, tail, residue_max, kind="ladder"):
+    usd = cuts = sums = 0
+    peak = land_total = land_n = 0
     for steps in runs:
-        C = cached = 0.0
+        E = U = pinned = 0.0   # evictable / unevictable / pinned head+packet
+        cached = 0.0
+        first = True
         for d, o in steps:
-            nxt = C + d
-            if trigger and nxt >= trigger and C > m["head"] + TAIL:
-                if kind == "ladder":
-                    land, residue = ladder_land(m, C)
-                    if residue > RESIDUE_MAX:
-                        usd += summary_cost_incontext(m, C)
-                        land = m["head"] + SUMMARY_OUT + min(TAIL, C - m["head"])
-                        summaries += 1
-                    else:
-                        cuts += 1
+            if first:
+                pinned, first = d, False   # head + task packet: pinned, never cut
+            else:
+                E += d * EVICTABLE_SHARE
+                U += d * (1 - EVICTABLE_SHARE)
+            C = pinned + E + U
+            if trigger and C >= trigger and E + U > tail:
+                tail_E = tail * EVICTABLE_SHARE
+                tail_U = tail * (1 - EVICTABLE_SHARE)
+                land_12 = pinned + U + tail_E      # what rungs 1-2 land at
+                if kind == "sum_always" or land_12 > residue_max:
+                    usd += summary_call(m, C)
+                    E, U = tail_E, SUMMARY_OUT + tail_U
+                    sums += 1
                 elif kind == "shallow":
-                    land = trigger - 30_000
+                    need = C - (trigger - 30_000)
+                    E = max(E - need, tail_E)
                     cuts += 1
-                elif kind == "sum_ic":
-                    usd += summary_cost_incontext(m, C)
-                    land = m["head"] + SUMMARY_OUT + min(TAIL, C - m["head"])
-                    summaries += 1
-                elif kind == "sum_fresh":
-                    usd += summary_cost_fresh(m, C)
-                    land = m["head"] + SUMMARY_OUT + 20_000
-                    summaries += 1
-                C, cached = land, m["head"]
-                nxt = C + d
-            usd += request_cost(m, nxt, cached, o)
-            C = cached = nxt
-            peak = max(peak, nxt)
-    return usd, cuts, summaries, peak
+                else:                               # ladder rungs 1-2
+                    E = tail_E
+                    cuts += 1
+                C = pinned + E + U
+                cached = pinned
+                land_total += C
+                land_n += 1
+            usd += req_cost(m, C, cached, o)
+            cached = C
+            peak = max(peak, C)
+    land = land_total / land_n if land_n else 0
+    return usd, cuts, sums, land, peak
 
-
-STRATS = [
-    ("uncapped", None, None),
-    ("ladder", "ladder", 150_000),
-    ("ladder", "ladder", 200_000),
-    ("ladder", "ladder", 250_000),
-    ("ladder", "ladder", 300_000),
-    ("shallow", "shallow", 250_000),
-    ("sum_ic", "sum_ic", 250_000),
-    ("sum_fresh", "sum_fresh", 250_000),
-]
 
 for model, m in MODELS.items():
     runs = load(model)
-    n_steps = sum(len(r) for r in runs)
-    print(f"\n=== {model}: {len(runs)} sessions, {n_steps} steps replayed ===")
-    print(f"{'strategy':>22s} {'sim $':>9s} {'vs uncapped':>12s} {'cuts':>6s} {'summaries':>10s} {'peak ctx':>9s}")
-    base = None
-    for name, kind, trig in STRATS:
-        usd, cuts, sums, peak = replay(m, runs, kind, trig)
-        if base is None:
-            base = usd
-        label = name if not trig else f"{name}@{trig//1000}k"
-        print(f"{label:>22s} {usd:>9.2f} {usd/base:>11.2%} {cuts:>6d} {sums:>10d} {peak/1000:>8.0f}k")
+    print(f"\n=== {model}: {len(runs)} sessions, {sum(len(r) for r in runs)} steps ===")
+    hdr = f"{'config':>28s} {'sim $':>8s} {'vs unc':>8s} {'cuts':>5s} {'sums':>5s} {'avg land':>9s} {'peak':>6s}"
+    print(hdr)
+    base = replay(m, runs, None, 0, 0)[0]
+    print(f"{'uncapped':>28s} {base:>8.2f} {'100%':>8s} {'-':>5s} {'-':>5s} {'-':>9s} {'-':>6s}")
+    grid = [(t, tl, 140_000) for t in (150_000, 200_000, 250_000) for tl in (20_000, 50_000, 80_000)]
+    for trig, tl, rmax in grid:
+        usd, cuts, sums, land, peak = replay(m, runs, trig, tl, rmax)
+        print(f"{'ladder@%dk tail=%dk' % (trig//1000, tl//1000):>28s} {usd:>8.2f} "
+              f"{usd/base:>7.1%} {cuts:>5d} {sums:>5d} {land/1000:>8.0f}k {peak/1000:>5.0f}k")
+    for rmax in (100_000, 180_000):
+        usd, cuts, sums, land, peak = replay(m, runs, 250_000, 50_000, rmax)
+        print(f"{'ladder@250k rmax=%dk' % (rmax//1000):>28s} {usd:>8.2f} "
+              f"{usd/base:>7.1%} {cuts:>5d} {sums:>5d} {land/1000:>8.0f}k {peak/1000:>5.0f}k")
+    for kind, label in (("sum_always", "summary-always@250k"), ("shallow", "shallow@250k")):
+        usd, cuts, sums, land, peak = replay(m, runs, 250_000, 50_000, 140_000, kind)
+        print(f"{label:>28s} {usd:>8.2f} {usd/base:>7.1%} {cuts:>5d} {sums:>5d} "
+              f"{land/1000:>8.0f}k {peak/1000:>5.0f}k")

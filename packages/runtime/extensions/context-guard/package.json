@@ -1,0 +1,22 @@
+{
+  "name": "@works-kenan/context-guard",
+  "private": true,
+  "version": "1.0.0",
+  "type": "module",
+  "description": "Mid-run context cap: evict old tool results and reasoning, keep a verbatim tail, escalate to an in-context handoff summary. Holds every request under the configured trigger.",
+  "keywords": [
+    "pi-package",
+    "pi-extension"
+  ],
+  "pi": {
+    "extensions": [
+      "./index.mjs"
+    ]
+  },
+  "peerDependencies": {
+    "@earendil-works/pi-coding-agent": "*"
+  },
+  "scripts": {
+    "test": "node --test plan.test.mjs"
+  }
+}
