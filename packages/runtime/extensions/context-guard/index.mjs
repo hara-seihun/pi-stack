@@ -30,7 +30,7 @@ import {
   summaryMessage,
 } from "./plan.mjs";
 
-const ALERTS_DIR = "/home/kenan/data/alerts/inbox";
+const ALERTS_DIR = process.env.PI_CONTEXT_GUARD_ALERTS ?? "/home/kenan/data/alerts/inbox";
 
 function writeAlert(title, body) {
   try {
@@ -55,6 +55,8 @@ export default function (pi) {
     lastAnchor: null,
     /** Set while the usage anchor predates the last cut and overstates context. */
     pendingCut: null, // { preCutAnchor }
+    /** Set after a cut until the provider bills the cut prompt. */
+    floorProbe: null, // { step }
     alerted: { thrash: false, floor: false },
     lastLen: 0,
     headStamp: null,
@@ -66,6 +68,7 @@ export default function (pi) {
     state.summary = null;
     state.lastCutStep = -Infinity;
     state.pendingCut = null;
+    state.floorProbe = null;
     state.lastLen = 0;
     state.headStamp = null;
   };
@@ -95,6 +98,20 @@ export default function (pi) {
 
     if (anchor !== null && anchor !== state.lastAnchor) {
       state.lastAnchor = anchor;
+      // The floor guard reads the prompt the provider actually billed for the
+      // cut request: a fresh anchor at a later step is that measurement. An
+      // estimate scaled by the uncalibrated initial ratio cannot tell a healthy
+      // landing from a real floor problem, and alerting on it demands agent
+      // investigation of a session that is behaving exactly as designed.
+      if (state.floorProbe && state.step > state.floorProbe.step) {
+        state.floorProbe = null;
+        if (anchor > CFG.trigger - CFG.floorHeadroom && !state.alerted.floor) {
+          state.alerted.floor = true;
+          const msg = `context-guard cut, and the provider still billed ~${anchor.toLocaleString()} prompt tokens (> trigger - ${CFG.floorHeadroom.toLocaleString()}) in session ${ctx.sessionManager?.getSessionId?.() ?? "unknown"} (${transcript ?? "no file"}). The pinned head or unevictable residue is too large relative to the ${CFG.trigger.toLocaleString()} trigger; expect thrashing until this is fixed.`;
+          console.error(msg);
+          writeAlert("context-guard floor too high", msg);
+        }
+      }
       if (state.pendingCut && anchor < state.pendingCut.preCutAnchor * 0.8) {
         state.pendingCut = null; // anchor now reflects a post-cut request
       }
@@ -172,16 +189,11 @@ export default function (pi) {
     state.watermark = boundary;
     state.lastCutStep = state.step;
     state.pendingCut = { preCutAnchor: anchor ?? projected };
+    state.floorProbe = { step: state.step };
 
     const view = buildView(messages, state, estimateTokens, note);
-    const finalTokens = view ? estimateView(messages, state, estimateTokens, note) * state.ratio : projected;
-
-    if (finalTokens > CFG.trigger - CFG.floorHeadroom && !state.alerted.floor) {
-      state.alerted.floor = true;
-      const msg = `context-guard landed at ~${Math.round(finalTokens).toLocaleString()} tokens (> trigger - ${CFG.floorHeadroom.toLocaleString()}) in session ${ctx.sessionManager?.getSessionId?.() ?? "unknown"}. The pinned head or unevictable residue is too large relative to the ${CFG.trigger.toLocaleString()} trigger; expect thrashing until this is fixed.`;
-      console.error(msg);
-      writeAlert("context-guard floor too high", msg);
-    }
+    const landed = view ? estimateView(messages, state, estimateTokens, note) * state.ratio : projected;
+    console.error(`context-guard cut at step ${state.step}: projected ~${Math.round(projected).toLocaleString()} -> estimated ~${Math.round(landed).toLocaleString()} tokens (ratio ${state.ratio.toFixed(2)}).`);
 
     return view ? { messages: view } : undefined;
   });

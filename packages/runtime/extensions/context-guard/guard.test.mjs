@@ -1,6 +1,19 @@
 import assert from "node:assert/strict";
+import { mkdtempSync, readdirSync, rmSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import { test } from "node:test";
-import guard from "./index.mjs";
+
+// The alerts inbox is a real machine surface, so every test in this file writes
+// to a throwaway directory instead of `/home/kenan/data/alerts/inbox`.
+const ALERTS = mkdtempSync(join(tmpdir(), "context-guard-alerts-"));
+process.env.PI_CONTEXT_GUARD_ALERTS = ALERTS;
+process.on("exit", () => rmSync(ALERTS, { recursive: true, force: true }));
+const { default: guard } = await import("./index.mjs");
+
+function alerts() {
+  return readdirSync(ALERTS);
+}
 
 function makeHarness({ completeText = "SUMMARY BODY" } = {}) {
   const handlers = new Map();
@@ -128,6 +141,36 @@ test("escalates to a handoff summary when residue exceeds the cap", async () => 
   assert.match(summary.content[0].text, /## Intent/);
   // Summarized span dropped: view must be much shorter than the source.
   assert.ok(result.messages.length < msgs.length / 2);
+});
+
+test("a healthy landing does not alert, and a measured floor breach does", async () => {
+  const healthy = makeHarness();
+  const msgs = session(12);
+  healthy.setAnchor(260_000);
+  await healthy.fire(msgs);
+  // The provider bills the cut prompt on the next call: comfortably under the
+  // floor, so the uncalibrated estimate must not raise an alert by itself.
+  msgs.push(...turn(12, "small"));
+  healthy.setAnchor(129_000);
+  await healthy.fire(msgs);
+  assert.deepEqual(alerts(), [], "a healthy deep cut must not write an alert");
+
+  const stuck = makeHarness();
+  const pinned = session(12);
+  stuck.setAnchor(260_000);
+  await stuck.fire(pinned);
+  // The cut barely helped: the provider still bills above trigger - headroom.
+  pinned.push(...turn(12, "small"));
+  stuck.setAnchor(210_000);
+  await stuck.fire(pinned);
+  assert.equal(alerts().length, 1, "a measured floor breach must write exactly one alert");
+  assert.match(alerts()[0], /context-guard-floor-too-high/);
+  // One-shot per session: a second breach must not fill the inbox.
+  pinned.push(...turn(13, "small"));
+  stuck.setAnchor(215_000);
+  await stuck.fire(pinned);
+  assert.equal(alerts().length, 1);
+  rmSync(join(ALERTS, alerts()[0]));
 });
 
 test("PI_CONTEXT_GUARD=off disables everything", async () => {

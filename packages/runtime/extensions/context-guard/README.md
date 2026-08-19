@@ -46,8 +46,14 @@ fires for them):
   failure mode of Anthropic's 2026-04-23 Claude Code postmortem (a `keep:1`
   thinking-clear that fired every turn). The cap stays enforced; the alert
   demands investigation.
-- **Floor:** even a summary cut cannot land below trigger − 100k, i.e. the
-  pinned head or residue is too large. Expect thrashing until fixed.
+- **Floor:** after a cut, the provider *actually bills* more than trigger − 100k,
+  i.e. the pinned head or residue is too large. Expect thrashing until fixed.
+  The check waits for the next real `getContextUsage()` anchor rather than
+  scaling its own view estimate by the ratio: at the first cut of a session the
+  ratio is still the uncalibrated 1.6 prior, which overstated one measured
+  Opus landing (129k billed) as 154k and raised a false alert. Every cut logs
+  its projection and estimated landing to stderr, so the journal still shows
+  near-floor cuts that never breached.
 
 ## Calibration
 
@@ -77,6 +83,9 @@ estimate instead of the anchor.
 - State is in-memory per session process. After a host restart/adoption the
   guard re-derives the cut on the first context event (deterministic; costs
   one extra cache miss).
+- The floor guard needs one post-cut usage anchor, so a session that ends
+  immediately after its cut is never judged. That is deliberate: without a
+  billed measurement there is no evidence of a floor problem.
 - pi-usage-logger's `context_bytes` measures the transformed view (this
   package loads before it in `settings.json`), but its `context_hash`
   fingerprints change on each cut boundary advance.
