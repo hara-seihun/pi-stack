@@ -2,6 +2,30 @@
 
 This is the machine's one path for autonomous Pi task execution. It embeds many independent Pi SDK sessions in one Node process and shares the pinned `ModelRuntime` from [`../package.json`](../package.json).
 
+That process is an **agent host**, and it is deliberately not the controller. The controller decides launches and owns the SQLite ledger; agent hosts own the sessions and run as transient user services under `pi-agents.slice`. Restarting or redeploying the controller therefore adopts running agents instead of ending them.
+
+## Agent hosts
+
+One host holds every session of its code generation. This is load-bearing: a peak wave is hundreds of simultaneous agents — the system is expected to reach roughly 700 — and one Node process per agent would cost an order of magnitude more memory than the machine has. Sessions share one process, one `ModelRuntime`, and one extension load; the host is the unit of code generation, not the unit of agent.
+
+A host is pinned to a **code fingerprint**: a hash of the orchestrator sources, provider manifest, pinned runtime manifest/lockfile, and loaded extensions. The controller keeps exactly one host accepting launches per fingerprint:
+
+- a live host whose fingerprint matches is the current host;
+- a live host whose fingerprint differs is marked `draining` — it keeps its sessions, claims nothing new, and exits once empty;
+- if no current host exists, the controller starts one and launches wait one or two ticks for it.
+
+The entire control plane is this ledger, not IPC. A host claims `pending` runs addressed to it, heartbeats itself and its runs, honours an operator abort recorded on a run, and self-retires when idle (ten minutes normally, five seconds while draining). Because control is data, a host started by an earlier controller incarnation — running earlier code — remains fully governable by the replacement, and a controller crash cannot end a single agent.
+
+Liveness is a heartbeat plus, only for an already-stale row, one bounded `systemctl --user is-active` check, so a host paused under heavy load is never mistaken for a dead one. A host that really stopped without retiring has its runs interrupted and its quota handed back for the restart window. A `pending` run that no host claims within three minutes is interrupted the same way.
+
+`pi-agents.slice` is declared in `/etc/nixos/configuration.nix` and inherits the exact memory boundary this session population already had inside the controller; a tighter bound would be a new binding limit whose OOM victim is a host holding every session of its generation. The controller itself keeps a much smaller bound because it no longer holds sessions, and agent tool calls remain in `pi-tools.slice`, so the agent slice covers session context rather than child computations. Resource governing sums the controller cgroup and the agent slice — derived from the slice's nested cgroup path, since systemd reads each dash in `pi-agents.slice` as a level — so admission still measures every agent.
+
+## Observation streams
+
+Each run gets an append-only transcript at `~/data/agent-orchestrator/runs/<run-id>/events.jsonl`: the dispatched prompt, thinking, assistant messages, timed tool calls with bounded output, notices, and a terminal `settled` entry. Appends are buffered per run, so hundreds of simultaneous agents cost one buffered write per active run.
+
+Partial (pre-message) output is **demand-driven**. A reader touches `watch` in the run directory; only while that marker is fresh does the host publish `live.json` with the current activity, live text, live thinking, and active tools. Nobody watching costs nothing. Pi Remote is the reader: see [its agent observation surface](../../../projects/pi-remote/README.md). Streams are purged with the fourteen-day event retention.
+
 ## Model
 
 There is one concept: a **task**. A task remains eligible until an agent reports that its declared completion condition is satisfied. Every launch is another execution of that same task, not a retry or a scheduler mode.
@@ -67,6 +91,8 @@ orchestrator quota grant --provider openai-codex-3 --model openai-codex/gpt-5.6-
 orchestrator quota grant --provider cursor --model cursor/grok-4.6 --thinking xhigh --hours 2
 orchestrator quota revoke LEASE_ID
 orchestrator runs [TASK_ID]
+orchestrator agents            # live hosts, their code generation, and every running agent
+orchestrator agent stop RUN_ID # ask the owning host to abort one agent
 orchestrator task show TASK_ID
 orchestrator task create \
   --id example \
@@ -98,11 +124,11 @@ orchestrator task create \
 
 Each verified standing-lane response is an incomplete persistent-task result, so the governor replenishes the task while account entitlement and machine resources permit. Cancel the task to stop replenishment. Nested `launch_pro` calls instead return one verified response to the invoking frontier agent and share the same profile leases and four-agent machine ceiling.
 
-The systemd service is `agent-orchestrator.service`. SIGTERM or restart stops new launches and aborts active SDK sessions through Pi before exiting; persistent tasks make work units recoverable, while active quota leases become short-lived handoffs that restore recently established provider occupancy. Operator quota grants use the same bounded lease path, remain subject to exact-account raw headroom and consistency circuits, and are visible/revocable through `orchestrator quota`; they are explicit capacity assertions, not an unconditional cold-start baseline. This keeps a long Pro turn from holding systemd in `stop-sigterm` and freezing every replacement Sol/Luna launch. The service has a bounded stop timeout as final containment. `PI_RUNTIME_SKIP_RESTART=1 ./deploy` validates and installs source without disrupting the running controller; systemd masking is not a substitute because an enabled masked unit still reports enabled on these hosts. On `converge-kenan`, `agent-orchestrator-keeper.service` uses systemd `Upholds=` to restore the controller after an ordinary stop; a maintenance window must stop the keeper and controller together, then start the keeper to resume normal operation.
+The systemd service is `agent-orchestrator.service`. SIGTERM or restart stops new launches and exits; it does **not** touch agent hosts, so every running agent keeps working, writes its own result into this ledger, and is adopted by the replacement controller. A deployment that changes code starts a fresh host generation and lets the superseded one drain as it empties. Interrupting an agent is now an explicit act: `orchestrator agent stop RUN_ID` records the request and its host aborts that session, and stopping a host unit aborts only its own sessions. Persistent tasks still make work units recoverable, and a genuinely lost host's active quota leases become short-lived handoffs that restore recently established provider occupancy. Operator quota grants use the same bounded lease path, remain subject to exact-account raw headroom and consistency circuits, and are visible/revocable through `orchestrator quota`; they are explicit capacity assertions, not an unconditional cold-start baseline. Because a long Pro turn now lives in a host rather than the controller, it can never hold systemd in `stop-sigterm` and freeze replacement Sol/Luna launches. The service has a bounded stop timeout as final containment. `PI_RUNTIME_SKIP_RESTART=1 ./deploy` validates and installs source without disrupting the running controller; systemd masking is not a substitute because an enabled masked unit still reports enabled on these hosts. On `converge-kenan`, `agent-orchestrator-keeper.service` uses systemd `Upholds=` to restore the controller after an ordinary stop; a maintenance window must stop the keeper and controller together, then start the keeper to resume normal operation.
 
-Every autonomous SDK `bash` call uses [`tool-shell`](tool-shell), which runs that invocation in a transient `pi-tools.slice` scope with `MemoryMax=12G`, zero swap, `OOMPolicy=kill`, and `RuntimeMaxSec=3600`. An OOM or an exhausted wall-clock ceiling therefore terminates that tool call and returns a failed tool result while the controller and unrelated agent sessions continue. Raise the ceiling for a genuinely long build with `PI_TOOL_TIMEOUT_SECONDS`; the ceiling exists so no single command can hold an agent lane and its share of the tool slice indefinitely, and does not replace the far tighter per-command timeouts agents set themselves. The parent user slice has an aggregate 24-core CPU quota and 40G/48G memory high/max boundary for simultaneous tool scopes, preserving eight logical CPUs for agents and host services. The command guard treats processes remaining after the command shell exits as an invalid detached job, terminates them inside their existing scope, and fails the tool call; durable background work must instead be an owned systemd service or orchestrator task. The orchestrator reapplies the shell override after resource loading because Pi reloads `SettingsManager` during discovery; the machine-global `shellPath` setting supplies the same boundary to newly created sessions before a controller restart. `tool-shell` resolves the user bus itself when called from a system service, restarts an unavailable owning user manager, and thaws a shared tool slice left frozen by a malformed diagnostic before launching the next scope. Tests cover override survival, transient-bus recovery, frozen-slice recovery, detached-job rejection, and an actual scope-contained OOM. The orchestrator service itself retains `OOMPolicy=continue` as a final containment boundary.
+Every autonomous SDK `bash` call uses [`tool-shell`](tool-shell), which runs that invocation in a transient `pi-tools.slice` scope with `MemoryMax=12G`, zero swap, `OOMPolicy=kill`, and `RuntimeMaxSec=3600`. An OOM or an exhausted wall-clock ceiling therefore terminates that tool call and returns a failed tool result while its agent host, the controller, and unrelated agent sessions continue. Raise the ceiling for a genuinely long build with `PI_TOOL_TIMEOUT_SECONDS`; the ceiling exists so no single command can hold an agent lane and its share of the tool slice indefinitely, and does not replace the far tighter per-command timeouts agents set themselves. The parent user slice has an aggregate 24-core CPU quota and 40G/48G memory high/max boundary for simultaneous tool scopes, preserving eight logical CPUs for agents and host services. The command guard treats processes remaining after the command shell exits as an invalid detached job, terminates them inside their existing scope, and fails the tool call; durable background work must instead be an owned systemd service or orchestrator task. The orchestrator reapplies the shell override after resource loading because Pi reloads `SettingsManager` during discovery; the machine-global `shellPath` setting supplies the same boundary to newly created sessions before a controller restart. `tool-shell` resolves the user bus itself when called from a system service, restarts an unavailable owning user manager, and thaws a shared tool slice left frozen by a malformed diagnostic before launching the next scope. Tests cover override survival, transient-bus recovery, frozen-slice recovery, detached-job rejection, and an actual scope-contained OOM. The orchestrator service itself retains `OOMPolicy=continue` as a final containment boundary.
 
-Runtime state is canonical in `/home/kenan/data/agent-orchestrator/orchestrator.sqlite3`; its `governor_control` rows own the machine-local `1×`/`5×` provider settings. Pi session JSONL is retained under `sessions/`. The SQLite database uses WAL and records tasks, each run's actual model and exact provider assignment, completion reports, whether each launch processed a real work unit and was dispatched, and bounded controller events. `governor-blocked` logging is interval-throttled (details embed live burn numbers, so detail-sensitive throttling would log every tick), and events older than fourteen days are purged on a six-hour cadence. Every table has automatic millisecond `created_at` and `updated_at` columns maintained by SQLite triggers; existing rows are backfilled from their original event times.
+Runtime state is canonical in `/home/kenan/data/agent-orchestrator/orchestrator.sqlite3`; its `governor_control` rows own the machine-local `1×`/`5×` provider settings, and its `agent_host` rows plus each run's `host_id`/`host_state`/`heartbeat_at` own host custody and launch delivery. Pi session JSONL is retained under `sessions/`, and read-only observation transcripts under `runs/`. The SQLite database uses WAL and records tasks, each run's actual model and exact provider assignment, completion reports, whether each launch processed a real work unit and was dispatched, and bounded controller events. `governor-blocked` logging is interval-throttled (details embed live burn numbers, so detail-sensitive throttling would log every tick), and events older than fourteen days are purged on a six-hour cadence. Every table has automatic millisecond `created_at` and `updated_at` columns maintained by SQLite triggers; existing rows are backfilled from their original event times.
 
 ## Distributed-governor simulator
 
@@ -127,9 +153,13 @@ node --test orchestrator/distributed-governor-simulator.test.mjs
 cd /home/kenan/tools/pi-runtime
 npm test
 ./deploy
-orchestrator check
+orchestrator check   # includes a real transient-unit launch through the agent host launcher
+orchestrator agents
 systemctl status agent-orchestrator --no-pager
+systemctl --user list-units 'pi-agent-host-*'
 ```
+
+`orchestrator check` fails closed when the user manager, `pi-agents.slice`, or the transient-unit path is unusable, so the controller cannot end up deciding launches it has no way to perform.
 
 ## The Pro question queue
 

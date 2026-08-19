@@ -8,9 +8,27 @@ import test from "node:test";
 
 const temporary = fs.mkdtempSync(path.join(os.tmpdir(), "agent-orchestrator-test-"));
 process.env.AGENT_ORCHESTRATOR_DATA = temporary;
-const { AnthropicGovernor, anthropicOpusHasHeadroom, anthropicWeeklyCapacity, cancelTask, chooseIndependentAssignment, chooseTask, codexSubscriptionLifecycle, completionToolResult, controllerProcessIdentity, Controller, cpuPercent, CursorGovernor, DISPATCH_NO_WORK_TTL_MS, dispatchedTaskPrompt, DistributedQuotaFeedback, evaluateDispatch, evaluateWorkCheck, governorAllowanceMultiplier, governorControls, grantQuotaLease, insertRun, isolateTaskShell, isEligibleCodexPlan, launchBatchSize, loadConfig, loadProviderManifest, nextIncompleteState, openDb, orchestratedTaskPrompt, parseAnthropicUsage, parseCursorUsage, PlanGovernor, planWindowBurnPerHour, proEntitlementSnapshot, proLaunchAvailability, rankTasks, resourceSlots, setGovernorBoost, setTaskOptions, shouldAdvanceBackoff, taskSettings, taskSupportsAssignment, TOOL_SHELL, validateCompletion, validateModelPolicy, WORK_CHECK_TTL_MS, workCheckStale, workReady } = await import("./orchestrator.mjs");
+const { AgentHost, agentHostCommand, agentHostUnit, agentSliceMemoryPath, AGENT_SLICE, AnthropicGovernor, anthropicOpusHasHeadroom, anthropicWeeklyCapacity, applyRunStreamEvent, cancelTask, chooseIndependentAssignment, chooseTask, codeFingerprint, codexSubscriptionLifecycle, completionToolResult, controllerProcessIdentity, Controller, cpuPercent, CursorGovernor, DISPATCH_NO_WORK_TTL_MS, dispatchedTaskPrompt, DistributedQuotaFeedback, evaluateDispatch, evaluateWorkCheck, finishRun, governorAllowanceMultiplier, governorControls, grantQuotaLease, hostAlive, HOST_STALE_MS, insertRun, interruptRun, isolateTaskShell, isEligibleCodexPlan, launchBatchSize, loadConfig, loadProviderManifest, nextIncompleteState, openDb, orchestratedTaskPrompt, parseAnthropicUsage, parseCursorUsage, PlanGovernor, planWindowBurnPerHour, proEntitlementSnapshot, proLaunchAvailability, purgeRunStreams, rankTasks, recordAgentHost, resourceSlots, RunEventStream, setGovernorBoost, setTaskOptions, shouldAdvanceBackoff, taskSettings, taskSupportsAssignment, TOOL_SHELL, validateCompletion, validateModelPolicy, WORK_CHECK_TTL_MS, workCheckStale, workReady } = await import("./orchestrator.mjs");
 
 test.after(() => fs.rmSync(temporary, { recursive: true, force: true }));
+
+// Every launch is addressed to a live agent host; tests that exercise the
+// launch path register one instead of starting a real transient unit.
+function registerTestHost(db, controller, state = "active") {
+  return recordAgentHost(db, { fingerprint: controller.fingerprint, state, pid: process.pid });
+}
+
+// Tests never start real transient units; they record what would have started.
+function testController(db, config, options = {}) {
+  const started = [];
+  const controller = new Controller(db, config, {
+    unitActive: () => false,
+    startHost: async (hostId, fingerprint) => { started.push({ hostId, fingerprint }); return hostId; },
+    ...options,
+  });
+  controller.startedHosts = started;
+  return controller;
+}
 
 test("controller identity distinguishes process leaders from stale thread IDs", () => {
   const pid = 1338;
@@ -24,12 +42,15 @@ test("controller identity distinguishes process leaders from stale thread IDs", 
 test("database initializes with integrity", () => {
   const db = openDb(path.join(temporary, "test.sqlite3"));
   assert.equal(db.prepare("PRAGMA integrity_check").get().integrity_check, "ok");
-  assert.deepEqual(db.prepare("SELECT name FROM sqlite_master WHERE type='table' ORDER BY name").all().map((row) => row.name), ["dispatch_reservation", "event", "governor_control", "quota_lease", "run", "task"]);
+  assert.deepEqual(db.prepare("SELECT name FROM sqlite_master WHERE type='table' ORDER BY name").all().map((row) => row.name), ["agent_host", "dispatch_reservation", "event", "governor_control", "quota_lease", "run", "task"]);
   assert.ok(!db.prepare("PRAGMA table_info(task)").all().some((column) => column.name === "max_parallel"));
   assert.ok(db.prepare("PRAGMA table_info(run)").all().some((column) => column.name === "provider"));
   assert.ok(db.prepare("PRAGMA table_info(run)").all().some((column) => column.name === "productive"));
+  for (const column of ["host_id", "host_state", "packet", "heartbeat_at", "abort_requested_at", "instrument_block", "instrument_sign"]) {
+    assert.ok(db.prepare("PRAGMA table_info(run)").all().some((row) => row.name === column), `run.${column}`);
+  }
   assert.match(db.prepare("SELECT sql FROM sqlite_master WHERE type='trigger' AND name='auto_timestamp_run_update'").get().sql, /productive/);
-  for (const table of ["dispatch_reservation", "event", "governor_control", "quota_lease", "run", "task"]) {
+  for (const table of ["agent_host", "dispatch_reservation", "event", "governor_control", "quota_lease", "run", "task"]) {
     const columns = db.prepare(`PRAGMA table_info(${table})`).all().map((row) => row.name);
     assert.ok(columns.includes("created_at"));
     assert.ok(columns.includes("updated_at"));
@@ -146,7 +167,8 @@ test("governor leases resume interrupted work then rotate after productive bound
     { state: "available", task_id: null, provider: null },
   );
 
-  const next = new Controller(db, config);
+  const next = testController(db, config);
+  registerTestHost(db, next);
   next.plan = {
     restores: async (lease) => ({ ok: true, provider: "openai-codex-4", model: lease.model, thinking: lease.thinking }),
     allows: async () => ({ ok: false, detail: "cold admission not expected" }),
@@ -194,7 +216,8 @@ test("restart handoffs are restored before unrelated cold admission", async () =
   grantQuotaLease(db, config, {
     provider: "openai-codex-3", model: "openai-codex/gpt-5.6-sol", thinking: "xhigh", taskId: "leased", hours: 1,
   }, at);
-  const controller = new Controller(db, config);
+  const controller = testController(db, config);
+  registerTestHost(db, controller);
   let normalAdmissions = 0;
   controller.plan = {
     restores: async (lease) => ({ ok: true, provider: lease.provider, model: lease.model, thinking: lease.thinking }),
@@ -220,7 +243,8 @@ test("an unsafe interrupted governor lease returns to its model lane instead of 
   const config = loadConfig();
   config.maxCpuPercent = 101;
   config.maxMemoryPercent = 101;
-  const controller = new Controller(db, config);
+  const controller = testController(db, config);
+  registerTestHost(db, controller);
   let coldAdmissions = 0;
   controller.plan = {
     restores: async () => ({ ok: false, detail: "account sensor circuit is closed" }),
@@ -396,32 +420,155 @@ test("machine completion checks override an agent's completion opinion", async (
   );
 });
 
-test("controller shutdown aborts recoverable sessions instead of freezing replacement launches", async () => {
-  const controller = new Controller(null, {});
-  let release;
-  let aborted = false;
-  const promise = new Promise((resolve) => { release = resolve; });
-  controller.active.set("run", {
-    promise,
-    session: { abort() { aborted = true; release(); } },
-  });
+test("a controller restart with new code adopts surviving agents instead of killing them", async () => {
+  const db = openDb(path.join(temporary, "host-adoption.sqlite3"));
+  const at = Date.now();
+  db.prepare(`INSERT INTO task(id,prompt,cwd,model,thinking,completion_condition,launch_share,not_before,next_eligible_at,created_at)
+    VALUES(?,?,?,?,?,?,?,?,?,?)`).run("task", "prompt", temporary, "openai-codex/gpt-5.6-sol", "xhigh", "done", 1, at, at, at);
+  const config = loadConfig();
+  const controller = testController(db, config, { fingerprint: "old-code" });
+  const hostId = recordAgentHost(db, { fingerprint: "old-code", state: "active", at });
+  insertRun(db, "live", "task", "openai-codex-3", at, "openai-codex/gpt-5.6-sol", "xhigh", { hostId });
+  db.prepare("UPDATE run SET host_state='active',heartbeat_at=? WHERE id='live'").run(at);
+  const leaseId = controller.activateQuotaLease(
+    db.prepare("SELECT * FROM task WHERE id='task'").get(),
+    { provider: "openai-codex-3", model: "openai-codex/gpt-5.6-sol", thinking: "xhigh" }, "live", at,
+  );
+
+  // Stopping the controller never touches the host or its sessions.
   await controller.stop();
-  assert.equal(controller.stopping, true);
-  assert.equal(aborted, true);
+  assert.equal(db.prepare("SELECT status FROM run WHERE id='live'").get().status, "running");
+
+  // The replacement runs new code: the live run is adopted, its lease stays
+  // active, and only the superseded host is asked to drain.
+  const replacement = testController(db, config, { fingerprint: "new-code" });
+  replacement.recover();
+  assert.equal(db.prepare("SELECT status FROM run WHERE id='live'").get().status, "running");
+  assert.equal(db.prepare("SELECT state FROM quota_lease WHERE id=?").get(leaseId).state, "active");
+  assert.equal(await replacement.ensureAgentHost(), null, "a new generation waits for its own host");
+  assert.equal(db.prepare("SELECT state FROM agent_host WHERE id=?").get(hostId).state, "draining");
+  assert.deepEqual(replacement.startedHosts.map((host) => host.fingerprint), ["new-code"]);
+  assert.equal(db.prepare("SELECT count(*) count FROM agent_host WHERE fingerprint='new-code' AND state='starting'").get().count, 1);
+  db.close();
 });
 
-test("controller shutdown has an internal deadline when an SDK session never settles", async () => {
-  const controller = new Controller(null, {});
-  let disposed = false;
-  controller.active.set("hung", {
-    promise: new Promise(() => {}),
-    session: { abort() {}, dispose() { disposed = true; } },
+test("an agent host that stops without retiring returns its runs and capacity", () => {
+  const db = openDb(path.join(temporary, "host-loss.sqlite3"));
+  const at = Date.now();
+  db.prepare(`INSERT INTO task(id,prompt,cwd,model,thinking,completion_condition,launch_share,not_before,next_eligible_at,incomplete_streak,created_at)
+    VALUES(?,?,?,?,?,?,?,?,?,?,?)`).run("task", "prompt", temporary, "openai-codex/gpt-5.6-sol", "xhigh", "done", 1, at, at + 600_000, 4, at);
+  const config = loadConfig();
+  const controller = testController(db, config, { fingerprint: "code" });
+  const hostId = recordAgentHost(db, { fingerprint: "code", state: "active", at: at - HOST_STALE_MS - 1000 });
+  insertRun(db, "lost", "task", "openai-codex-3", at, "openai-codex/gpt-5.6-sol", "xhigh", { hostId });
+  db.prepare("UPDATE run SET host_state='active' WHERE id='lost'").run();
+  assert.equal(hostAlive(db.prepare("SELECT * FROM agent_host WHERE id=?").get(hostId)), false);
+  controller.reapAgentHosts();
+  assert.equal(db.prepare("SELECT state FROM agent_host WHERE id=?").get(hostId).state, "gone");
+  assert.equal(db.prepare("SELECT status FROM run WHERE id='lost'").get().status, "interrupted");
+  const task = db.prepare("SELECT incomplete_streak,next_eligible_at FROM task WHERE id='task'").get();
+  assert.equal(task.incomplete_streak, 0);
+  assert.ok(task.next_eligible_at <= Date.now());
+  const lease = db.prepare("SELECT state,task_id,provider FROM quota_lease WHERE task_id='task'").get();
+  assert.deepEqual({ ...lease }, { state: "available", task_id: "task", provider: "openai-codex-3" });
+  db.close();
+});
+
+test("an empty superseded host retires while a busy one keeps its sessions", () => {
+  const db = openDb(path.join(temporary, "host-drain.sqlite3"));
+  const at = Date.now();
+  db.prepare(`INSERT INTO task(id,prompt,cwd,model,thinking,completion_condition,launch_share,not_before,next_eligible_at,created_at)
+    VALUES(?,?,?,?,?,?,?,?,?,?)`).run("task", "prompt", temporary, "openai-codex/gpt-5.6-sol", "xhigh", "done", 1, at, at, at);
+  const config = loadConfig();
+  const busy = new AgentHost(db, config, { id: "busy", fingerprint: "old", streamRoot: path.join(temporary, "streams") });
+  busy.register();
+  insertRun(db, "run", "task", "openai-codex-3", at, "openai-codex/gpt-5.6-sol", "xhigh", { hostId: "busy" });
+  db.prepare("UPDATE run SET host_state='active' WHERE id='run'").run();
+  assert.equal(busy.retire("drained"), false);
+  assert.equal(db.prepare("SELECT state FROM agent_host WHERE id='busy'").get().state, "starting");
+  db.prepare("UPDATE run SET status='incomplete',host_state='terminal' WHERE id='run'").run();
+  assert.equal(busy.retire("drained"), true);
+  assert.equal(db.prepare("SELECT state FROM agent_host WHERE id='busy'").get().state, "gone");
+  db.close();
+});
+
+test("agent hosts run outside the controller cgroup in their own resource slice", () => {
+  const command = agentHostCommand("host-id", "fingerprint", {
+    env: { HOME: "/home/kenan", PATH: "/bin", AGENT_ORCHESTRATOR_DATA: temporary, XDG_RUNTIME_DIR: "/run/user/1000" },
+    node: "/usr/bin/node", script: "/opt/orchestrator.mjs",
   });
-  const started = Date.now();
-  await controller.stop(10);
-  assert.ok(Date.now() - started < 1000);
-  assert.equal(disposed, true);
-  assert.equal(controller.active.size, 0);
+  assert.equal(command[0], "systemd-run");
+  assert.ok(command.includes("--user"));
+  assert.ok(command.includes("--collect"));
+  assert.ok(command.includes(`--unit=${agentHostUnit("host-id")}`));
+  assert.ok(command.includes(`--slice=${AGENT_SLICE}`));
+  assert.ok(command.includes("--setenv=AGENT_ORCHESTRATOR_DATA=" + temporary));
+  assert.ok(command.includes("--setenv=DBUS_SESSION_BUS_ADDRESS=unix:path=/run/user/1000/bus"));
+  assert.deepEqual(command.slice(-8), ["--", "/usr/bin/node", "/opt/orchestrator.mjs", "agent-host", "--id", "host-id", "--fingerprint", "fingerprint"]);
+});
+
+test("agent memory accounting follows systemd's nested slice path", () => {
+  assert.equal(
+    agentSliceMemoryPath("pi-agents.slice", 1000),
+    "/sys/fs/cgroup/user.slice/user-1000.slice/user@1000.service/pi.slice/pi-agents.slice/memory.current",
+  );
+});
+
+test("a code change starts a new host generation", () => {
+  const root = fs.mkdtempSync(path.join(temporary, "fingerprint-"));
+  fs.writeFileSync(path.join(root, "orchestrator.mjs"), "one");
+  const first = codeFingerprint(root);
+  assert.equal(codeFingerprint(root), first);
+  fs.writeFileSync(path.join(root, "orchestrator.mjs"), "two");
+  assert.notEqual(codeFingerprint(root), first);
+});
+
+test("observation streams record a readable transcript without a watcher", async () => {
+  const root = path.join(temporary, "observation");
+  const stream = new RunEventStream("run-observed", { root, liveIntervalMs: 0 });
+  stream.append("user", { text: "do the work" });
+  applyRunStreamEvent(stream, { type: "agent_start" });
+  applyRunStreamEvent(stream, { type: "message_update", assistantMessageEvent: { type: "thinking_delta", delta: "weighing" } });
+  applyRunStreamEvent(stream, { type: "message_update", assistantMessageEvent: { type: "thinking_end", content: "" } });
+  applyRunStreamEvent(stream, { type: "tool_execution_start", toolCallId: "t1", toolName: "bash", args: { command: "ls" } });
+  applyRunStreamEvent(stream, { type: "tool_execution_end", toolCallId: "t1", toolName: "bash", result: { content: [{ type: "text", text: "a.txt" }] } });
+  applyRunStreamEvent(stream, { type: "message_end", message: { role: "assistant", content: [{ type: "text", text: "done" }] } });
+  await stream.close("incomplete", "summary");
+  const events = fs.readFileSync(path.join(root, "run-observed", "events.jsonl"), "utf8").trim().split("\n").map((line) => JSON.parse(line));
+  assert.deepEqual(events.map((entry) => entry.type), ["user", "thinking", "tool_start", "tool_end", "assistant", "settled"]);
+  assert.equal(events[0].payload.text, "do the work");
+  assert.equal(events[1].payload.text, "weighing");
+  assert.equal(events[3].payload.output, "a.txt");
+  assert.deepEqual(events.map((entry) => entry.seq), [1, 2, 3, 4, 5, 6]);
+  const live = JSON.parse(fs.readFileSync(path.join(root, "run-observed", "live.json"), "utf8"));
+  assert.equal(live.activity, "IDLE");
+  assert.equal(live.status, "incomplete");
+});
+
+test("partial output is published only while a reader is watching", async () => {
+  const root = path.join(temporary, "observation-live");
+  const stream = new RunEventStream("run-live", { root });
+  stream.appendLiveText("partial answer");
+  await stream.flush();
+  assert.equal(fs.existsSync(path.join(root, "run-live", "live.json")), false, "unwatched runs cost no live writes");
+  fs.writeFileSync(path.join(root, "run-live", "watch"), "");
+  stream.watchCheckedAt = 0;
+  stream.lastLiveWrite = 0;
+  stream.appendLiveText(" continues");
+  await stream.flush();
+  const live = JSON.parse(fs.readFileSync(path.join(root, "run-live", "live.json"), "utf8"));
+  assert.equal(live.liveText, "partial answer continues");
+});
+
+test("observation streams are purged on the retention boundary", () => {
+  const root = fs.mkdtempSync(path.join(temporary, "purge-"));
+  fs.mkdirSync(path.join(root, "old"));
+  fs.mkdirSync(path.join(root, "new"));
+  const old = Date.now() - 20 * 86400_000;
+  fs.utimesSync(path.join(root, "old"), old / 1000, old / 1000);
+  assert.equal(purgeRunStreams(root), 1);
+  assert.equal(fs.existsSync(path.join(root, "old")), false);
+  assert.equal(fs.existsSync(path.join(root, "new")), true);
 });
 
 test("shutdown and crash recovery never turn interruption into task backoff", () => {

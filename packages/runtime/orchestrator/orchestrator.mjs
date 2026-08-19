@@ -1,7 +1,7 @@
 #!/usr/bin/env node
 import fs from "node:fs";
 import os from "node:os";
-import { execFile } from "node:child_process";
+import { execFile, spawnSync } from "node:child_process";
 import { createHash, randomBytes } from "node:crypto";
 import path from "node:path";
 import process from "node:process";
@@ -34,6 +34,7 @@ const DATA = process.env.AGENT_ORCHESTRATOR_DATA ?? path.join(HOME, "data/agent-
 const DB_PATH = path.join(DATA, "orchestrator.sqlite3");
 const CONFIG_PATH = path.join(DATA, "config.json");
 const SESSIONS = path.join(DATA, "sessions");
+export const RUN_STREAMS = path.join(DATA, "runs");
 const LOCK = path.join(DATA, "controller.lock");
 const SCRIPT_PATH = fileURLToPath(import.meta.url);
 const PROVIDER_MANIFEST_PATH = process.env.AGENT_ORCHESTRATOR_PROVIDER_MANIFEST ?? path.join(path.dirname(SCRIPT_PATH), "providers.json");
@@ -56,6 +57,25 @@ const CURSOR_GOVERNOR_STATE_PATH = path.join(DATA, "cursor-distributed-governor.
 const BOOSTED_ALLOWANCE_MULTIPLIER = 5;
 export const TOOL_SHELL = fileURLToPath(new URL("./tool-shell", import.meta.url));
 const TICK_MS = 5000;
+// Agent sessions live in agent-host processes outside this service's cgroup, so
+// a controller restart with new code cannot end running work. Hosts keep many
+// sessions in one Node process because a peak wave is hundreds of simultaneous
+// agents; per-agent processes would be an order of magnitude more memory.
+export const AGENT_SLICE = "pi-agents.slice";
+export const HOST_UNIT_PREFIX = "pi-agent-host-";
+const HOST_POLL_MS = 250;
+const HOST_HEARTBEAT_MS = 10_000;
+export const HOST_STALE_MS = 60_000;
+const HOST_START_GRACE_MS = 120_000;
+const HOST_SPAWN_RETRY_MS = 30_000;
+// An empty host is disposable: the controller starts one on demand, so idling
+// forever only holds memory. A superseded generation leaves as soon as it empties.
+const HOST_IDLE_EXIT_MS = 10 * 60_000;
+const HOST_DRAIN_IDLE_EXIT_MS = 5_000;
+const RUN_HEARTBEAT_MS = 15_000;
+export const RUN_STALE_MS = 90_000;
+const RUN_CLAIM_TIMEOUT_MS = 180_000;
+const RUN_STREAM_RETENTION_MS = 14 * 86400_000;
 const DISTRIBUTED_ALLOCATION_VERSION = 1;
 const DISTRIBUTED_CALIBRATION_VERSION = 1;
 const DISTRIBUTED_METER_IDENTITY_VERSION = 3;
@@ -180,6 +200,7 @@ function atomicWrite(file, value, mode = 0o600) {
 export function ensureLayout() {
   fs.mkdirSync(DATA, { recursive: true, mode: 0o700 });
   fs.mkdirSync(SESSIONS, { recursive: true, mode: 0o700 });
+  fs.mkdirSync(RUN_STREAMS, { recursive: true, mode: 0o700 });
   if (!fs.existsSync(CONFIG_PATH)) atomicWrite(CONFIG_PATH, `${JSON.stringify(DEFAULT_CONFIG, null, 2)}\n`);
 }
 
@@ -238,9 +259,9 @@ export function loadConfig() {
 }
 
 const SQLITE_NOW_MS = "CAST((julianday('now') - 2440587.5) * 86400000 AS INTEGER)";
-// Work-probe bookkeeping columns are scheduler telemetry, not domain mutations;
-// they must not churn updated_at every probe interval.
-const AUTO_TIMESTAMP_EXCLUDED = new Set(["created_at", "updated_at", "work_state", "work_checked_at"]);
+// Work-probe bookkeeping and liveness columns are scheduler telemetry, not
+// domain mutations; they must not churn updated_at on every probe or heartbeat.
+const AUTO_TIMESTAMP_EXCLUDED = new Set(["created_at", "updated_at", "work_state", "work_checked_at", "heartbeat_at"]);
 
 function ensureTableTimestamps(db, table) {
   const quote = (value) => `"${value.replaceAll('"', '""')}"`;
@@ -259,6 +280,10 @@ function ensureTableTimestamps(db, table) {
   db.exec(`UPDATE ${quote(table)} SET created_at=coalesce(created_at,${createdSource ? quote(createdSource) : SQLITE_NOW_MS},${SQLITE_NOW_MS}) WHERE created_at IS NULL`);
   db.exec(`UPDATE ${quote(table)} SET updated_at=coalesce(updated_at,${updatedSource ? quote(updatedSource) : "created_at"},created_at,${SQLITE_NOW_MS}) WHERE updated_at IS NULL`);
   const domainColumns = columns.filter((name) => !AUTO_TIMESTAMP_EXCLUDED.has(name));
+  // The update trigger names its domain columns, so it must be rebuilt whenever
+  // the table gains one; a stale IF NOT EXISTS definition would silently stop
+  // timestamping the new column.
+  db.exec(`DROP TRIGGER IF EXISTS ${quote(`auto_timestamp_${table}_update`)}`);
   db.exec(`
     CREATE TRIGGER IF NOT EXISTS ${quote(`auto_timestamp_${table}_insert`)}
     AFTER INSERT ON ${quote(table)}
@@ -269,7 +294,7 @@ function ensureTableTimestamps(db, table) {
         updated_at=coalesce(NEW.updated_at,NEW.created_at,${SQLITE_NOW_MS})
       WHERE rowid=NEW.rowid;
     END;
-    CREATE TRIGGER IF NOT EXISTS ${quote(`auto_timestamp_${table}_update`)}
+    CREATE TRIGGER ${quote(`auto_timestamp_${table}_update`)}
     AFTER UPDATE OF ${domainColumns.map(quote).join(",")} ON ${quote(table)}
     BEGIN
       UPDATE ${quote(table)} SET updated_at=${SQLITE_NOW_MS} WHERE rowid=NEW.rowid;
@@ -317,6 +342,20 @@ export function openDb(file = DB_PATH) {
       updated_at INTEGER NOT NULL DEFAULT (CAST((julianday('now') - 2440587.5) * 86400000 AS INTEGER))
     );
     CREATE INDEX IF NOT EXISTS run_task_status ON run(task_id,status);
+    CREATE TABLE IF NOT EXISTS agent_host (
+      id TEXT PRIMARY KEY,
+      unit TEXT NOT NULL,
+      pid INTEGER,
+      fingerprint TEXT NOT NULL,
+      state TEXT NOT NULL CHECK(state IN ('starting','active','draining','gone')),
+      started_at INTEGER NOT NULL,
+      heartbeat_at INTEGER NOT NULL,
+      finished_at INTEGER,
+      detail TEXT,
+      created_at INTEGER NOT NULL DEFAULT (CAST((julianday('now') - 2440587.5) * 86400000 AS INTEGER)),
+      updated_at INTEGER NOT NULL DEFAULT (CAST((julianday('now') - 2440587.5) * 86400000 AS INTEGER))
+    );
+    CREATE INDEX IF NOT EXISTS agent_host_state ON agent_host(state,heartbeat_at);
     CREATE TABLE IF NOT EXISTS dispatch_reservation (
       run_id TEXT PRIMARY KEY,
       task_id TEXT NOT NULL REFERENCES task(id),
@@ -405,13 +444,30 @@ export function openDb(file = DB_PATH) {
   if (!runColumns.has("model")) {
     db.exec("DROP TRIGGER IF EXISTS auto_timestamp_run_insert; DROP TRIGGER IF EXISTS auto_timestamp_run_update; ALTER TABLE run ADD COLUMN model TEXT; ALTER TABLE run ADD COLUMN thinking TEXT");
   }
+  // Agent execution moved out of the controller process: a run now names the
+  // host that owns its session, carries the dispatched packet that host must
+  // replay, and reports its own liveness so an abandoned launch is observable.
+  if (!runColumns.has("host_id")) {
+    db.exec(`
+      DROP TRIGGER IF EXISTS auto_timestamp_run_insert;
+      DROP TRIGGER IF EXISTS auto_timestamp_run_update;
+      ALTER TABLE run ADD COLUMN host_id TEXT;
+      ALTER TABLE run ADD COLUMN host_state TEXT CHECK(host_state IN ('pending','active','terminal'));
+      ALTER TABLE run ADD COLUMN packet TEXT;
+      ALTER TABLE run ADD COLUMN heartbeat_at INTEGER NOT NULL DEFAULT 0;
+      ALTER TABLE run ADD COLUMN abort_requested_at INTEGER;
+      ALTER TABLE run ADD COLUMN instrument_block INTEGER;
+      ALTER TABLE run ADD COLUMN instrument_sign INTEGER;
+      CREATE INDEX IF NOT EXISTS run_host_state ON run(host_id,host_state);
+    `);
+  }
   db.exec(`
     UPDATE run SET
       model=coalesce(model,(SELECT model FROM task WHERE task.id=run.task_id)),
       thinking=coalesce(thinking,(SELECT thinking FROM task WHERE task.id=run.task_id))
     WHERE model IS NULL OR thinking IS NULL;
   `);
-  for (const table of ["task", "run", "dispatch_reservation", "quota_lease", "governor_control", "event"]) ensureTableTimestamps(db, table);
+  for (const table of ["task", "run", "dispatch_reservation", "quota_lease", "governor_control", "event", "agent_host"]) ensureTableTimestamps(db, table);
   return db;
 }
 
@@ -516,9 +572,22 @@ function memoryMiB() {
   return { total: os.totalmem() / 1048576, available: os.freemem() / 1048576 };
 }
 
+// Agent memory is the controller plus every agent host; hosts live in the user
+// manager's agent slice, so reading only this service would under-report by the
+// entire session population.
 function agentMemoryMiB() {
-  try { return Number(fs.readFileSync("/sys/fs/cgroup/system.slice/agent-orchestrator.service/memory.current", "utf8")) / 1048576; }
-  catch { return 0; }
+  let total = 0;
+  for (const file of ["/sys/fs/cgroup/system.slice/agent-orchestrator.service/memory.current", agentSliceMemoryPath()]) {
+    try { total += Number(fs.readFileSync(file, "utf8")); } catch {}
+  }
+  return total / 1048576;
+}
+
+// systemd nests slices by dashed name, so pi-agents.slice lives under pi.slice.
+export function agentSliceMemoryPath(slice = AGENT_SLICE, uid = typeof process.getuid === "function" ? process.getuid() : 1000) {
+  const parts = slice.replace(/\.slice$/, "").split("-");
+  const nested = parts.map((_, index) => `${parts.slice(0, index + 1).join("-")}.slice`).join("/");
+  return `/sys/fs/cgroup/user.slice/user-${uid}.slice/user@${uid}.service/${nested}/memory.current`;
 }
 
 function cpuTotals() {
@@ -1843,9 +1912,12 @@ export function isolateTaskShell(settingsManager) {
 }
 export function shouldAdvanceBackoff(nextEligibleAt, runStartedAt) { return Number(nextEligibleAt) <= Number(runStartedAt); }
 
-export function insertRun(db, runId, taskId, provider = null, startedAt = now(), model = null, thinking = null) {
-  db.prepare("INSERT INTO run(id,task_id,status,started_at,provider,model,thinking) VALUES(?,?,?,?,?,?,?)")
-    .run(runId, taskId, "running", startedAt, provider, model, thinking);
+export function insertRun(db, runId, taskId, provider = null, startedAt = now(), model = null, thinking = null, host = {}) {
+  db.prepare(`INSERT INTO run(id,task_id,status,started_at,provider,model,thinking,host_id,host_state,packet,heartbeat_at,instrument_block,instrument_sign)
+    VALUES(?,?,'running',?,?,?,?,?,?,?,?,?,?)`)
+    .run(runId, taskId, startedAt, provider, model, thinking,
+      host.hostId ?? null, host.hostId ? "pending" : null, host.packet ?? null, startedAt,
+      host.instrumentBlock ?? null, host.instrumentSign ?? null);
 }
 
 export function grantQuotaLease(db, config, { provider, model, thinking, taskId = null, hours = null }, at = now()) {
@@ -1872,6 +1944,442 @@ export function grantQuotaLease(db, config, { provider, model, thinking, taskId 
   return id;
 }
 
+// ---------------------------------------------------------------------------
+// Agent hosts
+//
+// The controller decides launches; independent agent-host processes own the SDK
+// sessions. Hosts run as transient user services under `pi-agents.slice`, so
+// restarting (or deploying) the controller cannot end running agents, while a
+// single host still holds hundreds of sessions in one Node process because peak
+// waves are hundreds of simultaneous agents. Control flows entirely through this
+// SQLite ledger, so a host started by an earlier controller incarnation — and
+// running earlier code — remains fully governable by the replacement.
+// ---------------------------------------------------------------------------
+
+export function agentHostUnit(hostId) { return `${HOST_UNIT_PREFIX}${hostId}`; }
+
+function userBusEnvironment(env = process.env) {
+  const uid = typeof process.getuid === "function" ? process.getuid() : 1000;
+  const runtimeDir = env.XDG_RUNTIME_DIR || `/run/user/${uid}`;
+  return {
+    XDG_RUNTIME_DIR: runtimeDir,
+    DBUS_SESSION_BUS_ADDRESS: env.DBUS_SESSION_BUS_ADDRESS || `unix:path=${runtimeDir}/bus`,
+  };
+}
+
+// A host is pinned to the exact source it started with. Any change to the
+// controller source, provider manifest, pinned runtime, or loaded extensions
+// starts a new generation instead of silently mixing code across sessions.
+export function codeFingerprint(root = path.dirname(SCRIPT_PATH)) {
+  const files = [];
+  const collect = (directory, depth) => {
+    let entries;
+    try { entries = fs.readdirSync(directory, { withFileTypes: true }); }
+    catch { return; }
+    for (const entry of entries) {
+      const full = path.join(directory, entry.name);
+      if (entry.isDirectory()) {
+        if (depth > 0 && entry.name !== "node_modules") collect(full, depth - 1);
+      } else if (!entry.name.includes(".test.") && (/\.(mjs|js|json)$/.test(entry.name) || entry.name === "tool-shell")) {
+        files.push(full);
+      }
+    }
+  };
+  collect(root, 0);
+  const runtimeRoot = path.dirname(root);
+  for (const name of ["package.json", "package-lock.json"]) {
+    const candidate = path.join(runtimeRoot, name);
+    if (fs.existsSync(candidate)) files.push(candidate);
+  }
+  collect(path.join(runtimeRoot, "extensions"), 3);
+  const hash = createHash("sha256");
+  for (const file of files.sort()) {
+    hash.update(file);
+    try { hash.update(fs.readFileSync(file)); } catch { hash.update("unreadable"); }
+  }
+  return hash.digest("hex").slice(0, 16);
+}
+
+export const HOST_ENVIRONMENT_KEYS = [
+  "HOME", "PATH", "LANG", "TZ", "NODE_OPTIONS", "NIX_PATH",
+  "AGENT_ORCHESTRATOR_DATA", "AGENT_ORCHESTRATOR_PROVIDER_MANIFEST",
+  "PI_CODING_AGENT_DIR", "PI_MULTI_PASS_DISABLE_INITIAL_SPREAD", "PI_MULTI_PASS_LOCK_ASSIGNED_PROVIDER",
+];
+
+export function agentHostCommand(hostId, fingerprint, { env = process.env, node = process.execPath, script = SCRIPT_PATH } = {}) {
+  const environment = {
+    ...userBusEnvironment(env),
+    ...Object.fromEntries(HOST_ENVIRONMENT_KEYS.flatMap((key) => env[key] === undefined ? [] : [[key, env[key]]])),
+  };
+  return [
+    "systemd-run", "--user", "--quiet", "--collect",
+    `--unit=${agentHostUnit(hostId)}`,
+    `--slice=${AGENT_SLICE}`,
+    "--service-type=exec",
+    "--property=OOMPolicy=continue",
+    "--property=TasksMax=infinity",
+    ...Object.entries(environment).map(([key, value]) => `--setenv=${key}=${value}`),
+    "--", node, script, "agent-host", "--id", hostId, "--fingerprint", fingerprint,
+  ];
+}
+
+export async function startAgentHostUnit(hostId, fingerprint) {
+  const command = agentHostCommand(hostId, fingerprint);
+  await execFileAsync(command[0], command.slice(1), {
+    timeout: 30_000,
+    env: { ...process.env, ...userBusEnvironment() },
+  });
+  return hostId;
+}
+
+function systemdUnitActive(unit, runner = spawnSync) {
+  try {
+    const result = runner("systemctl", ["--user", "is-active", unit], {
+      encoding: "utf8",
+      timeout: 5000,
+      env: { ...process.env, ...userBusEnvironment() },
+    });
+    const state = String(result?.stdout ?? "").trim();
+    return ["active", "activating", "deactivating", "reloading"].includes(state);
+  } catch { return false; }
+}
+
+export function recordAgentHost(db, { id = randomId(), unit = null, pid = null, fingerprint, state = "starting", at = now() }) {
+  db.prepare(`INSERT INTO agent_host(id,unit,pid,fingerprint,state,started_at,heartbeat_at)
+    VALUES(?,?,?,?,?,?,?)
+    ON CONFLICT(id) DO UPDATE SET unit=excluded.unit,pid=excluded.pid,state=excluded.state,heartbeat_at=excluded.heartbeat_at`)
+    .run(id, unit ?? agentHostUnit(id), pid, fingerprint, state, at, at);
+  return id;
+}
+
+// A starting host has not heartbeated yet; its registration timestamp carries a
+// longer grace so a slow provider/extension bootstrap is not mistaken for death.
+export function hostAlive(host, at = now()) {
+  if (!host || host.state === "gone") return false;
+  const grace = host.state === "starting" ? HOST_START_GRACE_MS : HOST_STALE_MS;
+  return at - Number(host.heartbeat_at ?? 0) < grace;
+}
+
+function boundedText(value, limit = 20_000) {
+  const text = String(value ?? "");
+  return text.length <= limit ? text : `${text.slice(0, limit)}\n… truncated in the observation stream`;
+}
+function boundedValue(value, limit = 8_000) {
+  try {
+    const encoded = JSON.stringify(value ?? {});
+    if (encoded.length <= limit) return value ?? {};
+    return { truncated: true, preview: `${encoded.slice(0, limit)}…` };
+  } catch { return { unavailable: true }; }
+}
+function messageText(message) {
+  if (!message || message.role !== "assistant" || !Array.isArray(message.content)) return "";
+  return message.content.filter((part) => part?.type === "text").map((part) => part.text ?? "").join("");
+}
+function messageFailure(message) {
+  if (!message || message.role !== "assistant") return "";
+  const stopReason = String(message.stopReason ?? "");
+  if (stopReason !== "error" && stopReason !== "aborted") return "";
+  const label = stopReason === "aborted" ? "Model response aborted" : "Model response failed";
+  const detail = String(message.errorMessage ?? "").trim();
+  return boundedText(detail ? `${label}: ${detail}` : label, 2_000);
+}
+function toolResultText(result) {
+  const blocks = Array.isArray(result?.content) ? result.content : [];
+  return boundedText(blocks.map((block) => {
+    if (block?.type === "text") return String(block.text ?? "");
+    if (block?.type === "image") return `[image${block.mimeType ? ` · ${block.mimeType}` : ""}]`;
+    return block ? JSON.stringify(block) : "";
+  }).filter(Boolean).join("\n"), 20_000);
+}
+
+// One append-only transcript per run, plus an optional live tail that is only
+// written while a reader has recently touched `watch`. Hundreds of simultaneous
+// agents therefore cost one buffered append per active run, and partial-token
+// streaming costs nothing at all unless somebody is actually watching.
+export class RunEventStream {
+  constructor(runId, { root = RUN_STREAMS, maxBytes = 64 * 1024 * 1024, watchWindowMs = 20_000, liveIntervalMs = 700 } = {}) {
+    this.runId = runId;
+    this.directory = path.join(root, runId);
+    fs.mkdirSync(this.directory, { recursive: true, mode: 0o700 });
+    this.file = path.join(this.directory, "events.jsonl");
+    this.livePath = path.join(this.directory, "live.json");
+    this.watchPath = path.join(this.directory, "watch");
+    this.maxBytes = maxBytes;
+    this.watchWindowMs = watchWindowMs;
+    this.liveIntervalMs = liveIntervalMs;
+    this.seq = 0;
+    this.bytes = 0;
+    this.capped = false;
+    this.buffer = [];
+    this.writing = null;
+    this.activity = "STARTING";
+    this.liveText = "";
+    this.liveThinking = "";
+    this.tools = new Map();
+    this.liveDirty = true;
+    this.lastLiveWrite = 0;
+    this.watchedAt = 0;
+    this.watchCheckedAt = 0;
+    this.closed = false;
+  }
+
+  append(type, payload = {}) {
+    if (this.closed) return 0;
+    if (this.capped && type !== "settled") return 0;
+    const line = `${JSON.stringify({ seq: ++this.seq, time: iso(now()), type, payload })}\n`;
+    this.bytes += line.length;
+    this.buffer.push(line);
+    if (!this.capped && this.bytes >= this.maxBytes) {
+      this.capped = true;
+      this.buffer.push(`${JSON.stringify({ seq: ++this.seq, time: iso(now()), type: "notice", payload: { text: "Observation stream reached its size limit; later detail is omitted." } })}\n`);
+    }
+    this.liveDirty = true;
+    return this.seq;
+  }
+
+  setActivity(activity) {
+    if (this.activity === activity) return;
+    this.activity = activity;
+    this.liveDirty = true;
+  }
+  appendLiveText(delta) { this.liveText += String(delta ?? ""); this.liveDirty = true; }
+  startThinking() { this.liveThinking = ""; this.liveDirty = true; }
+  appendLiveThinking(delta) { this.liveThinking += String(delta ?? ""); this.liveDirty = true; }
+  endThinking(content) {
+    const text = this.liveThinking || String(content ?? "");
+    if (text) this.append("thinking", { text: boundedText(text) });
+    this.liveThinking = "";
+    this.liveDirty = true;
+  }
+  clearLive() { this.liveText = ""; this.liveThinking = ""; this.liveDirty = true; }
+
+  startTool(event) {
+    const toolCallId = String(event.toolCallId ?? randomId());
+    const name = String(event.toolName ?? "tool");
+    this.tools.set(toolCallId, name);
+    this.setActivity("WAITING_ON_TOOL");
+    this.append("tool_start", { toolCallId, name, args: boundedValue(event.args) });
+  }
+  endTool(event) {
+    const toolCallId = String(event.toolCallId ?? "");
+    this.tools.delete(toolCallId);
+    if (!this.tools.size) this.setActivity("WORKING");
+    this.append("tool_end", {
+      toolCallId,
+      name: String(event.toolName ?? "tool"),
+      output: toolResultText(event.result),
+      error: Boolean(event.isError),
+    });
+  }
+
+  watched(at = now()) {
+    if (at - this.watchCheckedAt >= 1000) {
+      this.watchCheckedAt = at;
+      try { this.watchedAt = fs.statSync(this.watchPath).mtimeMs; }
+      catch { this.watchedAt = 0; }
+    }
+    return at - this.watchedAt < this.watchWindowMs;
+  }
+
+  liveSnapshot(status = null) {
+    return {
+      runId: this.runId,
+      activity: this.activity,
+      liveText: boundedText(this.liveText, 40_000),
+      liveThinking: boundedText(this.liveThinking, 40_000),
+      tools: [...this.tools.entries()].map(([toolCallId, name]) => ({ toolCallId, name })),
+      status,
+      updatedAt: iso(now()),
+    };
+  }
+
+  async flush(at = now(), { force = false } = {}) {
+    if (this.writing) return this.writing;
+    const lines = this.buffer;
+    const writeLive = this.liveDirty && (force || (at - this.lastLiveWrite >= this.liveIntervalMs && this.watched(at)));
+    if (!lines.length && !writeLive) return;
+    this.buffer = [];
+    if (writeLive) { this.liveDirty = false; this.lastLiveWrite = at; }
+    this.writing = (async () => {
+      try {
+        if (lines.length) await fs.promises.appendFile(this.file, lines.join(""), { mode: 0o600 });
+        if (writeLive) {
+          const temporary = `${this.livePath}.tmp`;
+          await fs.promises.writeFile(temporary, `${JSON.stringify(this.liveSnapshot())}\n`, { mode: 0o600 });
+          await fs.promises.rename(temporary, this.livePath);
+        }
+      } catch {
+        // Observation is never allowed to break execution; a failed append is
+        // simply missing transcript, and the run ledger remains authoritative.
+      } finally { this.writing = null; }
+    })();
+    return this.writing;
+  }
+
+  async close(status, summary = null) {
+    if (this.closed) return;
+    this.append("settled", { status, summary: summary === null ? null : boundedText(summary, 8_000) });
+    this.setActivity("IDLE");
+    this.clearLive();
+    await this.flush(now(), { force: true });
+    await this.writing;
+    this.closed = true;
+    try {
+      const temporary = `${this.livePath}.tmp`;
+      fs.writeFileSync(temporary, `${JSON.stringify({ ...this.liveSnapshot(status), activity: "IDLE" })}\n`, { mode: 0o600 });
+      fs.renameSync(temporary, this.livePath);
+    } catch {}
+  }
+}
+
+export function applyRunStreamEvent(stream, event) {
+  const assistant = event?.assistantMessageEvent;
+  switch (event?.type) {
+    case "agent_start":
+      stream.setActivity("WORKING");
+      return;
+    case "message_update":
+      if (assistant?.type === "text_delta") stream.appendLiveText(assistant.delta);
+      else if (assistant?.type === "thinking_start") { stream.setActivity("THINKING"); stream.startThinking(); }
+      else if (assistant?.type === "thinking_delta") stream.appendLiveThinking(assistant.delta);
+      else if (assistant?.type === "thinking_end") { stream.endThinking(assistant.content); stream.setActivity("WORKING"); }
+      return;
+    case "message_end": {
+      const text = messageText(event.message);
+      if (text) stream.append("assistant", { text: boundedText(text) });
+      const failure = messageFailure(event.message);
+      if (failure) stream.append("notice", { text: failure });
+      stream.clearLive();
+      return;
+    }
+    case "tool_execution_start":
+      stream.startTool(event);
+      return;
+    case "tool_execution_end":
+      stream.endTool(event);
+      return;
+    case "auto_retry_start":
+      stream.append("notice", { text: "Retrying…" });
+      return;
+    case "auto_retry_end":
+      if (event.success === false && event.finalError) stream.append("notice", { text: boundedText(`Retry failed: ${String(event.finalError)}`, 2_000) });
+      return;
+    case "compaction_start":
+      stream.append("notice", { text: "Compacting context…" });
+      return;
+    case "compaction_end":
+      stream.append("notice", {
+        text: event.aborted ? "Context compaction cancelled"
+          : event.result ? "Context compacted"
+          : event.willRetry ? "Context compaction failed; retrying…"
+          : `Context compaction failed${event.errorMessage ? `: ${String(event.errorMessage)}` : ""}`,
+      });
+      return;
+    case "agent_settled":
+      stream.setActivity("IDLE");
+      return;
+    default:
+  }
+}
+
+export function purgeRunStreams(root = RUN_STREAMS, at = now(), retentionMs = RUN_STREAM_RETENTION_MS) {
+  let removed = 0;
+  let entries;
+  try { entries = fs.readdirSync(root, { withFileTypes: true }); }
+  catch { return removed; }
+  for (const entry of entries) {
+    if (!entry.isDirectory()) continue;
+    const directory = path.join(root, entry.name);
+    try {
+      if (at - fs.statSync(directory).mtimeMs < retentionMs) continue;
+      fs.rmSync(directory, { recursive: true, force: true });
+      removed++;
+    } catch {}
+  }
+  return removed;
+}
+
+// One terminal result for a launch, written by whichever process owns it: an
+// agent host for ordinary completion, the controller when it reaps an abandoned
+// run. Lease custody and task backoff are decided here so both paths agree.
+export function finishRun(db, config, task, runId, status, summary, artifacts, error, productive = true, suppressBackoff = false) {
+  db.exec("BEGIN IMMEDIATE");
+  try {
+    db.prepare("UPDATE run SET status=?,finished_at=?,summary=?,artifacts_json=?,error=?,productive=?,host_state='terminal' WHERE id=?")
+      .run(status, now(), summary, JSON.stringify(artifacts), error, productive ? 1 : 0, runId);
+    const lease = db.prepare("SELECT * FROM quota_lease WHERE run_id=?").get(runId);
+    if (lease) {
+      if (suppressBackoff) {
+        const restartUntil = now() + (config.plan?.distributed?.restartLeaseMinutes ?? DEFAULT_CONFIG.plan.distributed.restartLeaseMinutes) * 60_000;
+        db.prepare("UPDATE quota_lease SET state='available',task_id=?,run_id=NULL,expires_at=max(expires_at,?),heartbeat_at=? WHERE id=?")
+          .run(task.id, restartUntil, now(), lease.id);
+      } else if (status === "incomplete" && productive && lease.expires_at > now()) {
+        db.prepare(`UPDATE quota_lease SET
+          state='available',
+          task_id=CASE WHEN source='governor' THEN NULL ELSE task_id END,
+          provider=CASE WHEN source='governor' THEN NULL ELSE provider END,
+          run_id=NULL,
+          heartbeat_at=?
+          WHERE id=?`).run(now(), lease.id);
+      } else {
+        db.prepare("DELETE FROM quota_lease WHERE id=?").run(lease.id);
+      }
+    }
+    if (status === "complete") {
+      db.prepare("UPDATE task SET completed_at=?,incomplete_streak=0 WHERE id=? AND completed_at IS NULL").run(now(), task.id);
+    } else if (suppressBackoff) {
+      db.prepare("UPDATE task SET incomplete_streak=0,next_eligible_at=min(next_eligible_at,?) WHERE id=?")
+        .run(now(), task.id);
+    } else {
+      const row = db.prepare(`
+        SELECT t.incomplete_streak,t.next_eligible_at,r.started_at
+        FROM task t JOIN run r ON r.task_id=t.id
+        WHERE t.id=? AND r.id=?`).get(task.id, runId);
+      // Real persistent work restores eligibility unless an idle/error sibling
+      // from the same concurrent launch wave has already established a later
+      // pause. A no-unit launch uses bounded backoff without being mislabeled
+      // as an execution error. Only the first terminal result that began after
+      // the previous eligibility time may update the shared schedule.
+      const idleOrFailed = error !== null || productive === false;
+      if (row && shouldAdvanceBackoff(row.next_eligible_at, row.started_at)) {
+        const next = nextIncompleteState(row.incomplete_streak, idleOrFailed);
+        db.prepare("UPDATE task SET incomplete_streak=?,next_eligible_at=? WHERE id=?")
+          .run(next.streak, now() + next.delayMs, task.id);
+      }
+    }
+    event(db, `run-${status}`, error ?? summary ?? "", task.id, runId);
+    db.exec("COMMIT");
+  } catch (failure) {
+    db.exec("ROLLBACK");
+    throw failure;
+  }
+}
+
+// A launch whose owner disappeared: hand its quota lease back for the short
+// restart window and restore task eligibility without inventing failure backoff.
+export function interruptRun(db, config, row, detail) {
+  const at = now();
+  const restartWindow = (config?.plan?.distributed?.restartLeaseMinutes ?? DEFAULT_CONFIG.plan.distributed.restartLeaseMinutes) * 60_000;
+  const lease = db.prepare("SELECT * FROM quota_lease WHERE run_id=?").get(row.id);
+  if (lease && lease.heartbeat_at >= at - restartWindow) {
+    db.prepare("UPDATE quota_lease SET state='available',task_id=?,run_id=NULL,expires_at=max(expires_at,?),heartbeat_at=? WHERE id=?")
+      .run(row.task_id, at + restartWindow, at, lease.id);
+    event(db, "quota-lease-handoff", `${row.model}:${row.thinking} via ${row.provider}`, row.task_id, row.id);
+  } else if (!lease && row.provider && row.model && row.thinking && row.started_at >= at - restartWindow) {
+    const id = randomId();
+    db.prepare(`INSERT INTO quota_lease(id,task_id,provider,model,thinking,state,run_id,source,issued_at,expires_at,heartbeat_at)
+      VALUES(?,?,?,?,?,'available',NULL,'governor',?,?,?)`)
+      .run(id, row.task_id, row.provider, row.model, row.thinking, at, at + restartWindow, at);
+    event(db, "quota-lease-handoff", `${row.model}:${row.thinking} via ${row.provider}`, row.task_id, row.id);
+  } else if (lease) {
+    db.prepare("DELETE FROM quota_lease WHERE id=?").run(lease.id);
+  }
+  db.prepare("UPDATE run SET status='interrupted',finished_at=?,error=?,productive=0,host_state='terminal' WHERE id=?")
+    .run(at, detail, row.id);
+  db.prepare("UPDATE task SET incomplete_streak=0,next_eligible_at=min(next_eligible_at,?) WHERE id=?").run(at, row.task_id);
+  event(db, "run-interrupted", detail, row.task_id, row.id);
+}
+
 async function loadExtensionProviders(modelRuntime, cwd = HOME) {
   const settingsManager = SettingsManager.create(cwd, getAgentDir());
   const loader = new DefaultResourceLoader({ cwd, agentDir: getAgentDir(), settingsManager });
@@ -1891,53 +2399,429 @@ async function loadExtensionProviders(modelRuntime, cwd = HOME) {
   return loaded.session;
 }
 
+// The agent host owns SDK sessions for one code generation. It takes its work
+// from the run ledger, reports liveness there, and exits once it is empty, so
+// controller restarts, deployments, and crashes never end a running agent.
+export class AgentHost {
+  constructor(db, config, { id = randomId(), fingerprint = null, idleExitMs = HOST_IDLE_EXIT_MS, drainIdleExitMs = HOST_DRAIN_IDLE_EXIT_MS, streamRoot = RUN_STREAMS } = {}) {
+    this.db = db;
+    this.config = config;
+    this.id = id;
+    this.fingerprint = fingerprint ?? codeFingerprint();
+    this.unit = agentHostUnit(this.id);
+    this.idleExitMs = idleExitMs;
+    this.drainIdleExitMs = drainIdleExitMs;
+    this.streamRoot = streamRoot;
+    this.modelRuntime = null;
+    this.runs = new Map();
+    this.stopping = false;
+    this.stopPromise = null;
+    this.idleSince = now();
+    this.lastHeartbeat = 0;
+    this.lastAbortScan = 0;
+  }
+
+  register(at = now()) {
+    recordAgentHost(this.db, {
+      id: this.id, unit: this.unit, pid: process.pid, fingerprint: this.fingerprint, state: "starting", at,
+    });
+  }
+
+  async init() {
+    this.register();
+    this.modelRuntime = await ModelRuntime.create({ signal: AbortSignal.timeout(15000) });
+    const bootstrap = await loadExtensionProviders(this.modelRuntime);
+    bootstrap.dispose();
+    this.db.prepare("UPDATE agent_host SET state='active',pid=?,heartbeat_at=? WHERE id=? AND state='starting'")
+      .run(process.pid, now(), this.id);
+    event(this.db, "agent-host-ready", `${this.unit} pid ${process.pid} fingerprint ${this.fingerprint}`);
+    // A host death abandons in-flight Pro polls while ChatGPT keeps reasoning
+    // server-side. Only recover when no other host is alive, so a superseded
+    // host still polling its own conversations is never double-polled.
+    if (!this.otherLiveHosts().length) {
+      void recoverPendingProConversations({
+        log: (result) => event(this.db, "pro-recovery", JSON.stringify(result)),
+      }).catch((error) => event(this.db, "agent-host-error", `pro recovery failed: ${String(error?.message ?? error)}`));
+    }
+  }
+
+  otherLiveHosts(at = now()) {
+    return this.db.prepare("SELECT * FROM agent_host WHERE id<>? AND state<>'gone'").all(this.id)
+      .filter((host) => hostAlive(host, at));
+  }
+
+  hostRow() { return this.db.prepare("SELECT * FROM agent_host WHERE id=?").get(this.id); }
+
+  heartbeat(at = now()) {
+    if (at - this.lastHeartbeat < HOST_HEARTBEAT_MS) return;
+    this.lastHeartbeat = at;
+    this.db.prepare("UPDATE agent_host SET heartbeat_at=?,pid=? WHERE id=?").run(at, process.pid, this.id);
+    this.db.prepare("UPDATE run SET heartbeat_at=? WHERE host_id=? AND status='running'").run(at, this.id);
+  }
+
+  claimPendingRuns() {
+    const pending = this.db.prepare(
+      "SELECT * FROM run WHERE host_id=? AND host_state='pending' AND status='running' ORDER BY started_at LIMIT 50"
+    ).all(this.id);
+    for (const run of pending) {
+      const claimed = this.db.prepare("UPDATE run SET host_state='active',heartbeat_at=? WHERE id=? AND host_state='pending'")
+        .run(now(), run.id).changes;
+      if (claimed !== 1) continue;
+      const task = this.db.prepare("SELECT * FROM task WHERE id=?").get(run.task_id);
+      if (!task) {
+        finishRun(this.db, this.config, { id: run.task_id }, run.id, "incomplete", null, [], "task no longer exists", false, true);
+        continue;
+      }
+      const record = { run, task, session: null, stream: null, aborting: false };
+      this.runs.set(run.id, record);
+      this.idleSince = now();
+      void this.execute(record).finally(() => {
+        this.runs.delete(run.id);
+        this.idleSince = now();
+      });
+    }
+  }
+
+  applyAbortRequests() {
+    if (!this.runs.size) return;
+    const requested = this.db.prepare(
+      "SELECT id FROM run WHERE host_id=? AND status='running' AND abort_requested_at IS NOT NULL"
+    ).all(this.id);
+    for (const row of requested) {
+      const record = this.runs.get(row.id);
+      if (!record || record.aborting) continue;
+      record.aborting = true;
+      record.stream?.append("notice", { text: "Stop requested by the operator" });
+      try {
+        const aborting = record.session?.abort();
+        if (aborting?.catch) void aborting.catch(() => {});
+      } catch {}
+    }
+  }
+
+  async flushStreams(at = now()) {
+    const pending = [];
+    for (const record of this.runs.values()) if (record.stream) pending.push(record.stream.flush(at));
+    if (pending.length) await Promise.allSettled(pending);
+  }
+
+  async execute(record) {
+    const { run, task } = record;
+    const runId = run.id;
+    const assignment = { provider: run.provider, model: run.model, thinking: run.thinking };
+    const packet = run.packet ?? null;
+    const stream = new RunEventStream(runId, { root: this.streamRoot });
+    record.stream = stream;
+    let session;
+    let report = null;
+    try {
+      const bootstrap = isChatGptProTask(task) ? `openai-codex/gpt-5.6-sol:${assignment.thinking}` : runModelKey(assignment);
+      const resolved = resolveCliModel({ cliModel: bootstrap, modelRuntime: this.modelRuntime });
+      if (resolved.error || !resolved.model) fail(resolved.error ?? `cannot resolve bootstrap for ${runModelKey(task)}`);
+      const completionTool = defineTool({
+        name: "task_complete",
+        label: "Complete task launch",
+        description: "Report this launch's validated output. Call it when your work is done; if you keep working afterward, call it again and the newest report replaces the old one. Set complete=true only when the task completion condition is now satisfied. Set productive=false only when this launch processed no work unit at all; idle reports receive bounded backoff instead of immediately launching another agent.",
+        parameters: Type.Object({
+          complete: Type.Boolean(),
+          productive: Type.Optional(Type.Boolean({ description: "Whether this launch claimed and processed a real work unit. Defaults to true." })),
+          summary: Type.String({ minLength: 1 }),
+          artifacts: Type.Optional(Type.Array(Type.String()))
+        }),
+        execute: async (_id, parameters) => {
+          const validation = parameters.complete ? await validateCompletion(task) : null;
+          const complete = parameters.complete && validation.ok;
+          const summary = parameters.complete && !validation.ok
+            ? `${parameters.summary}\nCompletion validation failed: ${validation.detail}`
+            : parameters.summary;
+          report = {
+            complete,
+            productive: parameters.productive ?? true,
+            summary,
+            artifacts: parameters.artifacts ?? [],
+            validation,
+          };
+          const text = complete
+            ? "Task completion recorded after the configured machine check passed."
+            : parameters.complete
+              ? `Task completion rejected by the configured machine check: ${validation.detail}`
+              : "Launch output recorded; the task remains eligible. If you continue working, call task_complete again to update this report.";
+          return completionToolResult(text, report);
+        }
+      });
+      const settingsManager = taskSettings(task.cwd);
+      const loader = new DefaultResourceLoader({
+        cwd: task.cwd,
+        agentDir: getAgentDir(),
+        settingsManager,
+        extensionFactories: [{
+          name: "pi-usage-logger",
+          factory: createUsageLogger({ owner: { kind: "orchestrator", id: runId, label: task.id } }),
+        }],
+      });
+      await loader.reload();
+      isolateTaskShell(settingsManager);
+      const extensionErrors = loader.getExtensions().errors;
+      if (extensionErrors.length) fail(`extension loading failed: ${extensionErrors.map((item) => item.error).join("; ")}`);
+      ({ session } = await createAgentSession({
+        cwd: task.cwd,
+        modelRuntime: this.modelRuntime,
+        model: resolved.model,
+        thinkingLevel: resolved.thinkingLevel,
+        resourceLoader: loader,
+        customTools: [completionTool],
+        sessionManager: SessionManager.create(task.cwd, SESSIONS),
+        settingsManager,
+      }));
+      const targetProvider = isChatGptProTask(task) ? providerOf(assignment.model) : assignment.provider;
+      const targetModelId = modelIdOf(assignment.model);
+      if (targetProvider !== resolved.model.provider || targetModelId !== resolved.model.id) {
+        const routed = (await this.modelRuntime.getAvailable()).find((model) => model.provider === targetProvider && model.id === targetModelId);
+        if (!routed) fail(`governor-selected model unavailable after extension load: ${targetProvider}/${targetModelId}`);
+        await session.setModel(routed);
+        session.setThinkingLevel(assignment.thinking);
+      }
+      record.session = session;
+      if (record.aborting) {
+        const aborting = session.abort();
+        if (aborting?.catch) void aborting.catch(() => {});
+      }
+      const sessionId = session.sessionId;
+      this.db.prepare("UPDATE run SET session_id=? WHERE id=?").run(sessionId, runId);
+      // A Pro task's dispatched packet IS the literal text-only prompt (one
+      // claimed question from the queue); the task prompt is only the fallback.
+      const prompt = isChatGptProTask(task)
+        ? (packet ?? task.prompt)
+        : packet !== null
+          ? dispatchedTaskPrompt(task, packet)
+          : orchestratedTaskPrompt(task);
+      stream.append("user", { text: boundedText(prompt) });
+      stream.setActivity("WORKING");
+      session.subscribe((sessionEvent) => {
+        try { applyRunStreamEvent(stream, sessionEvent); } catch {}
+      });
+      await session.prompt(prompt);
+      const assistant = [...session.messages].reverse().find((message) => message.role === "assistant");
+      if (!report && isChatGptProTask(task)) {
+        const text = assistant?.content?.filter((part) => part.type === "text").map((part) => part.text).join("\n").trim();
+        if (text) report = { complete: false, summary: text, artifacts: [], validation: null };
+      }
+      if (!report && assistant?.errorMessage) fail(`provider turn failed: ${assistant.errorMessage}`);
+      if (!report) fail(isChatGptProTask(task) ? "ChatGPT Pro returned no verified text" : "agent ended without task_complete");
+      const status = report.complete ? "complete" : "incomplete";
+      finishRun(this.db, this.config, task, runId, status, report.summary, report.artifacts, null, report.productive);
+      await stream.close(status, report.summary);
+    } catch (error) {
+      const interrupted = this.stopping;
+      const detail = interrupted ? "agent host shutdown interrupted run" : String(error?.message ?? error);
+      finishRun(
+        this.db, this.config, task, runId, "incomplete", report?.summary ?? null,
+        report?.artifacts ?? [], detail, false, interrupted,
+      );
+      await stream.close("incomplete", detail);
+    } finally {
+      session?.dispose();
+    }
+  }
+
+  retire(detail) {
+    let retired = false;
+    this.db.exec("BEGIN IMMEDIATE");
+    try {
+      const owned = Number(this.db.prepare(
+        "SELECT count(*) count FROM run WHERE host_id=? AND status='running'"
+      ).get(this.id).count);
+      if (!owned) {
+        this.db.prepare("UPDATE agent_host SET state='gone',finished_at=?,detail=? WHERE id=?").run(now(), detail, this.id);
+        retired = true;
+      }
+      this.db.exec("COMMIT");
+    } catch (error) {
+      this.db.exec("ROLLBACK");
+      throw error;
+    }
+    if (retired) {
+      event(this.db, "agent-host-retired", `${this.unit}: ${detail}`);
+      this.stopping = true;
+    }
+    return retired;
+  }
+
+  async poll(at = now()) {
+    this.heartbeat(at);
+    const row = this.hostRow();
+    if (!row || row.state === "gone") {
+      await this.stop("agent host was retired by the controller");
+      return;
+    }
+    if (row.state !== "draining") this.claimPendingRuns();
+    if (at - this.lastAbortScan >= 2000) {
+      this.lastAbortScan = at;
+      this.applyAbortRequests();
+    }
+    await this.flushStreams(at);
+    if (this.runs.size) { this.idleSince = at; return; }
+    const idleLimit = row.state === "draining" ? this.drainIdleExitMs : this.idleExitMs;
+    if (at - this.idleSince >= idleLimit) {
+      this.retire(row.state === "draining" ? "superseded agent host drained" : "idle agent host exited");
+    }
+  }
+
+  async run() {
+    while (!this.stopping) {
+      try { await this.poll(); }
+      catch (error) { event(this.db, "agent-host-error", String(error?.stack ?? error)); }
+      await sleep(HOST_POLL_MS);
+    }
+  }
+
+  // SIGTERM means this host itself is going away (operator stop, reboot, or a
+  // deliberate drain). Abort its sessions so their work is recoverable instead
+  // of being lost to an unexplained process death.
+  async stop(detail = "agent host stopped", timeoutMs = 10_000) {
+    if (this.stopPromise) return this.stopPromise;
+    this.stopping = true;
+    const records = [...this.runs.values()];
+    this.stopPromise = (async () => {
+      for (const record of records) {
+        try {
+          const aborting = record.session?.abort();
+          if (aborting?.catch) void aborting.catch(() => {});
+        } catch {}
+      }
+      const deadline = now() + timeoutMs;
+      while (this.runs.size && now() < deadline) await sleep(100);
+      for (const record of records) {
+        const row = this.db.prepare("SELECT status FROM run WHERE id=?").get(record.run.id);
+        if (row?.status !== "running") continue;
+        finishRun(this.db, this.config, record.task, record.run.id, "incomplete", null, [], detail, false, true);
+        try { record.session?.dispose(); } catch {}
+        await record.stream?.close("incomplete", detail);
+      }
+      this.runs.clear();
+      this.db.prepare("UPDATE agent_host SET state='gone',finished_at=?,detail=? WHERE id=? AND state<>'gone'")
+        .run(now(), detail, this.id);
+      event(this.db, "agent-host-stopped", `${this.unit}: ${detail}`);
+    })();
+    return this.stopPromise;
+  }
+}
+
 export class Controller {
-  constructor(db, config) {
+  constructor(db, config, { fingerprint = null, unitActive = systemdUnitActive, startHost = startAgentHostUnit } = {}) {
     this.db = db;
     this.config = config;
     this.modelRuntime = null;
     this.plan = new PlanGovernor(config, {
       usageMultiplier: (providerFamily) => governorAllowanceMultiplier(this.db, providerFamily),
     });
-    this.active = new Map();
+    this.fingerprint = fingerprint ?? codeFingerprint();
+    this.unitActive = unitActive;
+    this.startHost = startHost;
     this.stopping = false;
     this.stopPromise = null;
     this.lastThrottledEvents = new Map();
     this.lastControllerError = { at: 0, detail: "" };
     this.previousCpu = cpuTotals();
+    this.lastHostSpawn = 0;
+    this.failureCursor = now();
   }
 
+  // A controller restart adopts every agent host that is still alive, including
+  // hosts running superseded code: their sessions keep working and their results
+  // land in this ledger. Only launches whose owner is provably gone are
+  // interrupted, and their capacity is handed back for the restart window.
   recover() {
     const at = now();
     this.db.prepare(
       "UPDATE dispatch_reservation SET state='terminal',finished_at=? WHERE state='active'"
     ).run(at);
-    const restartWindow = (this.config.plan?.distributed?.restartLeaseMinutes ?? DEFAULT_CONFIG.plan.distributed.restartLeaseMinutes) * 60_000;
-    const interrupted = this.db.prepare("SELECT id,task_id,provider,model,thinking,started_at FROM run WHERE status='running'").all();
-    const finish = this.db.prepare("UPDATE run SET status='interrupted',finished_at=?,error=?,productive=0 WHERE id=?");
-    const resume = this.db.prepare("UPDATE task SET incomplete_streak=0,next_eligible_at=min(next_eligible_at,?) WHERE id=?");
-    for (const row of interrupted) {
-      const lease = this.db.prepare("SELECT * FROM quota_lease WHERE run_id=?").get(row.id);
-      if (lease && lease.heartbeat_at >= at - restartWindow) {
-        this.db.prepare("UPDATE quota_lease SET state='available',task_id=?,run_id=NULL,expires_at=max(expires_at,?),heartbeat_at=? WHERE id=?")
-          .run(row.task_id, at + restartWindow, at, lease.id);
-        event(this.db, "quota-lease-handoff", `${row.model}:${row.thinking} via ${row.provider}`, row.task_id, row.id);
-      } else if (!lease && row.provider && row.model && row.thinking && row.started_at >= at - restartWindow) {
-        const id = randomId();
-        this.db.prepare(`INSERT INTO quota_lease(id,task_id,provider,model,thinking,state,run_id,source,issued_at,expires_at,heartbeat_at)
-          VALUES(?,?,?,?,?,'available',NULL,'governor',?,?,?)`)
-          .run(id, row.task_id, row.provider, row.model, row.thinking, at, at + restartWindow, at);
-        event(this.db, "quota-lease-handoff", `${row.model}:${row.thinking} via ${row.provider}`, row.task_id, row.id);
-      } else if (lease) {
-        this.db.prepare("DELETE FROM quota_lease WHERE id=?").run(lease.id);
-      }
-      finish.run(at, "controller restarted while run was active", row.id);
-      resume.run(at, row.task_id);
-      event(this.db, "run-interrupted", "controller restart", row.task_id, row.id);
+    this.reapAgentHosts(at);
+    for (const row of this.db.prepare("SELECT * FROM run WHERE status='running' AND host_id IS NULL").all()) {
+      interruptRun(this.db, this.config, row, "controller restarted while an in-process run was active");
     }
+    const adopted = Number(this.db.prepare("SELECT count(*) count FROM run WHERE status='running'").get().count);
+    if (adopted) event(this.db, "runs-adopted", `${adopted} run(s) continue in surviving agent hosts`);
     this.db.prepare("DELETE FROM quota_lease WHERE state='available' AND expires_at<=?").run(at);
     this.db.prepare(`DELETE FROM quota_lease WHERE state='active' AND
       (run_id IS NULL OR NOT EXISTS (SELECT 1 FROM run WHERE run.id=quota_lease.run_id AND run.status='running'))`).run();
+  }
+
+  // Liveness is a heartbeat plus, only for a stale row, one bounded systemd
+  // query: a host paused by heavy load must not have its work declared dead.
+  reapAgentHosts(at = now()) {
+    const hosts = new Map();
+    for (const host of this.db.prepare("SELECT * FROM agent_host").all()) {
+      hosts.set(host.id, host);
+      if (host.state === "gone" || hostAlive(host, at)) continue;
+      if (this.unitActive(host.unit)) continue;
+      this.db.prepare("UPDATE agent_host SET state='gone',finished_at=?,detail=coalesce(detail,'host stopped without retiring') WHERE id=?")
+        .run(at, host.id);
+      host.state = "gone";
+      event(this.db, "agent-host-lost", `${host.unit} stopped without retiring`);
+    }
+    for (const row of this.db.prepare("SELECT * FROM run WHERE status='running' AND host_id IS NOT NULL").all()) {
+      const host = hosts.get(row.host_id);
+      if (hostAlive(host, at)) {
+        if (row.host_state === "pending" && at - Number(row.started_at) >= RUN_CLAIM_TIMEOUT_MS) {
+          interruptRun(this.db, this.config, row, "agent host did not claim this launch");
+        }
+        continue;
+      }
+      interruptRun(this.db, this.config, row, "agent host stopped while the run was active");
+    }
+  }
+
+  // Provider failures are observed from finished runs because the failing turn
+  // happens in another process; cooldowns still belong to this governor.
+  applyRunFailures() {
+    const rows = this.db.prepare(
+      "SELECT provider,model,thinking,error,finished_at FROM run WHERE finished_at>? AND error IS NOT NULL AND provider IS NOT NULL ORDER BY finished_at LIMIT 200"
+    ).all(this.failureCursor);
+    for (const row of rows) {
+      this.failureCursor = Math.max(this.failureCursor, Number(row.finished_at));
+      this.plan.noteFailure(row, { message: row.error });
+    }
+  }
+
+  liveHosts(at = now()) {
+    return this.db.prepare("SELECT * FROM agent_host WHERE state<>'gone' ORDER BY started_at").all()
+      .filter((host) => hostAlive(host, at));
+  }
+
+  // Exactly one accepting host per code generation. A host from another
+  // generation is told to drain: it keeps its sessions and leaves when empty.
+  async ensureAgentHost(at = now()) {
+    const hosts = this.liveHosts(at);
+    for (const host of hosts) {
+      if (host.fingerprint === this.fingerprint || host.state === "draining") continue;
+      this.db.prepare("UPDATE agent_host SET state='draining' WHERE id=? AND state IN ('starting','active')").run(host.id);
+      event(this.db, "agent-host-draining", `${host.unit} runs superseded code ${host.fingerprint}`);
+    }
+    const current = hosts.find((host) => host.fingerprint === this.fingerprint && ["starting", "active"].includes(host.state));
+    if (current?.state === "active") return current;
+    if (current) return null;
+    if (at - this.lastHostSpawn < HOST_SPAWN_RETRY_MS) return null;
+    this.lastHostSpawn = at;
+    await this.spawnAgentHost();
+    return null;
+  }
+
+  async spawnAgentHost() {
+    const hostId = randomId();
+    const at = now();
+    this.db.prepare("INSERT INTO agent_host(id,unit,fingerprint,state,started_at,heartbeat_at) VALUES(?,?,?,'starting',?,?)")
+      .run(hostId, agentHostUnit(hostId), this.fingerprint, at, at);
+    try {
+      await this.startHost(hostId, this.fingerprint);
+    } catch (error) {
+      const detail = [error?.stderr, error?.stdout, error?.message].map((value) => String(value ?? "").trim()).filter(Boolean).join(" ").slice(0, 500);
+      this.db.prepare("UPDATE agent_host SET state='gone',finished_at=?,detail=? WHERE id=?").run(now(), detail, hostId);
+      this.controllerError(`could not start an agent host: ${detail}`);
+      return null;
+    }
+    event(this.db, "agent-host-launched", `${agentHostUnit(hostId)} fingerprint ${this.fingerprint}`);
+    return hostId;
   }
 
   async init() {
@@ -1947,11 +2831,8 @@ export class Controller {
     const bootstrap = await loadExtensionProviders(this.modelRuntime);
     bootstrap.dispose();
     this.plan.setModelRuntime(this.modelRuntime);
-    // A restart aborts in-flight Pro polls while ChatGPT keeps reasoning
-    // server-side; harvest those conversations instead of stranding them.
-    void recoverPendingProConversations({
-      log: (result) => event(this.db, "pro-recovery", JSON.stringify(result)),
-    }).catch((error) => this.controllerError(`pro recovery failed: ${String(error?.message ?? error)}`));
+    // Pro conversation recovery belongs to the agent host: it owns the polls,
+    // and a controller restart no longer interrupts them.
   }
 
   async restoreQuotaLease(task, activeAssignments) {
@@ -1997,17 +2878,31 @@ export class Controller {
   }
 
   heartbeatQuotaLeases(at = now()) {
-    if (!this.active.size) return;
     this.db.prepare(`UPDATE quota_lease SET heartbeat_at=? WHERE state='active' AND run_id IN
       (SELECT id FROM run WHERE status='running')`).run(at);
   }
 
-  async launch(task, assignment, runId = randomId(), packet = null, dispatchMs = null) {
+  activeRuns() {
+    return this.db.prepare(
+      "SELECT id,task_id,provider,model,thinking,instrument_block,instrument_sign FROM run WHERE status='running'"
+    ).all();
+  }
+
+  // A launch is a durable ledger record addressed to a live agent host. The
+  // host claims it within a poll interval and owns the session from there.
+  async launch(task, assignment, runId = randomId(), packet = null, dispatchMs = null, host = null) {
     const startedAt = now();
     this.db.exec("BEGIN IMMEDIATE");
-    let leaseId;
     try {
-      insertRun(this.db, runId, task.id, assignment.provider, startedAt, assignment.model, assignment.thinking);
+      if (!host) fail("a launch requires a live agent host");
+      const state = this.db.prepare("SELECT state FROM agent_host WHERE id=?").get(host.id)?.state;
+      if (state !== "active") fail(`agent host ${host.id} is not accepting launches`);
+      insertRun(this.db, runId, task.id, assignment.provider, startedAt, assignment.model, assignment.thinking, {
+        hostId: host.id,
+        packet,
+        instrumentBlock: assignment.instrumentBlock ?? null,
+        instrumentSign: assignment.instrumentSign ?? null,
+      });
       this.db.prepare("UPDATE run SET dispatched=? WHERE id=?").run(packet === null ? 0 : 1, runId);
       if (packet !== null) {
         const transferred = this.db.prepare(
@@ -2015,7 +2910,7 @@ export class Controller {
         ).run(runId).changes;
         if (transferred !== 1) fail(`missing active dispatch reservation ${runId}`);
       }
-      leaseId = this.activateQuotaLease(task, assignment, runId, startedAt);
+      this.activateQuotaLease(task, assignment, runId, startedAt);
       const note = packet === null ? "" : ` (dispatched ${dispatchMs ?? "?"}ms, ${packet.length}B)`;
       event(this.db, "run-started", `${runModelKey(assignment)} via ${assignment.provider}${note}`, task.id, runId);
       this.db.exec("COMMIT");
@@ -2028,169 +2923,12 @@ export class Controller {
       }
       throw error;
     }
-    const promise = this.execute(task, runId, assignment, packet).finally(() => this.active.delete(runId));
-    this.active.set(runId, { task, ...assignment, leaseId, promise });
   }
 
-  async execute(task, runId, assignment, packet = null) {
-    let session;
-    let report = null;
-    let sessionId = null;
-    try {
-      const bootstrap = isChatGptProTask(task) ? `openai-codex/gpt-5.6-sol:${assignment.thinking}` : runModelKey(assignment);
-      const resolved = resolveCliModel({ cliModel: bootstrap, modelRuntime: this.modelRuntime });
-      if (resolved.error || !resolved.model) fail(resolved.error ?? `cannot resolve bootstrap for ${runModelKey(task)}`);
-      const completionTool = defineTool({
-        name: "task_complete",
-        label: "Complete task launch",
-        description: "Report this launch's validated output. Call it when your work is done; if you keep working afterward, call it again and the newest report replaces the old one. Set complete=true only when the task completion condition is now satisfied. Set productive=false only when this launch processed no work unit at all; idle reports receive bounded backoff instead of immediately launching another agent.",
-        parameters: Type.Object({
-          complete: Type.Boolean(),
-          productive: Type.Optional(Type.Boolean({ description: "Whether this launch claimed and processed a real work unit. Defaults to true." })),
-          summary: Type.String({ minLength: 1 }),
-          artifacts: Type.Optional(Type.Array(Type.String()))
-        }),
-        execute: async (_id, parameters) => {
-          const validation = parameters.complete ? await validateCompletion(task) : null;
-          const complete = parameters.complete && validation.ok;
-          const summary = parameters.complete && !validation.ok
-            ? `${parameters.summary}\nCompletion validation failed: ${validation.detail}`
-            : parameters.summary;
-          report = {
-            complete,
-            productive: parameters.productive ?? true,
-            summary,
-            artifacts: parameters.artifacts ?? [],
-            validation,
-          };
-          const text = complete
-            ? "Task completion recorded after the configured machine check passed."
-            : parameters.complete
-              ? `Task completion rejected by the configured machine check: ${validation.detail}`
-              : "Launch output recorded; the task remains eligible. If you continue working, call task_complete again to update this report.";
-          return completionToolResult(text, report);
-        }
-      });
-      const customTools = [completionTool];
-      const settingsManager = taskSettings(task.cwd);
-      const loader = new DefaultResourceLoader({
-        cwd: task.cwd,
-        agentDir: getAgentDir(),
-        settingsManager,
-        extensionFactories: [{
-          name: "pi-usage-logger",
-          factory: createUsageLogger({ owner: { kind: "orchestrator", id: runId, label: task.id } }),
-        }],
-      });
-      await loader.reload();
-      isolateTaskShell(settingsManager);
-      const extensionErrors = loader.getExtensions().errors;
-      if (extensionErrors.length) fail(`extension loading failed: ${extensionErrors.map((item) => item.error).join("; ")}`);
-      ({ session } = await createAgentSession({
-        cwd: task.cwd,
-        modelRuntime: this.modelRuntime,
-        model: resolved.model,
-        thinkingLevel: resolved.thinkingLevel,
-        resourceLoader: loader,
-        customTools,
-        sessionManager: SessionManager.create(task.cwd, SESSIONS),
-        settingsManager,
-      }));
-      const targetProvider = isChatGptProTask(task) ? providerOf(assignment.model) : assignment.provider;
-      const targetModelId = modelIdOf(assignment.model);
-      if (targetProvider !== resolved.model.provider || targetModelId !== resolved.model.id) {
-        const routed = (await this.modelRuntime.getAvailable()).find((model) => model.provider === targetProvider && model.id === targetModelId);
-        if (!routed) fail(`governor-selected model unavailable after extension load: ${targetProvider}/${targetModelId}`);
-        await session.setModel(routed);
-        session.setThinkingLevel(assignment.thinking);
-      }
-      this.active.get(runId).session = session;
-      sessionId = session.sessionId;
-      this.db.prepare("UPDATE run SET session_id=? WHERE id=?").run(sessionId, runId);
-      // A Pro task's dispatched packet IS the literal text-only prompt (one
-      // claimed question from the queue); the task prompt is only the fallback.
-      const prompt = isChatGptProTask(task)
-        ? (packet ?? task.prompt)
-        : packet !== null
-          ? dispatchedTaskPrompt(task, packet)
-          : orchestratedTaskPrompt(task);
-      await session.prompt(prompt);
-      const assistant = [...session.messages].reverse().find((message) => message.role === "assistant");
-      if (!report && isChatGptProTask(task)) {
-        const text = assistant?.content?.filter((part) => part.type === "text").map((part) => part.text).join("\n").trim();
-        if (text) report = { complete: false, summary: text, artifacts: [], validation: null };
-      }
-      if (!report && assistant?.errorMessage) fail(`provider turn failed: ${assistant.errorMessage}`);
-      if (!report) fail(isChatGptProTask(task) ? "ChatGPT Pro returned no verified text" : "agent ended without task_complete");
-      this.finish(
-        task, runId, report.complete ? "complete" : "incomplete",
-        report.summary, report.artifacts, null, report.productive,
-      );
-    } catch (error) {
-      const interrupted = this.stopping;
-      if (!interrupted) this.plan.noteFailure(assignment, error);
-      this.finish(
-        task, runId, "incomplete", report?.summary ?? null,
-        report?.artifacts ?? [],
-        interrupted ? "controller shutdown interrupted run" : String(error?.message ?? error),
-        false, interrupted,
-      );
-    } finally {
-      session?.dispose();
-    }
-  }
-
+  // Terminal results are written by whichever process owns the launch; the
+  // controller keeps this entry point for reaping and for operator commands.
   finish(task, runId, status, summary, artifacts, error, productive = true, suppressBackoff = false) {
-    this.db.exec("BEGIN IMMEDIATE");
-    try {
-      this.db.prepare("UPDATE run SET status=?,finished_at=?,summary=?,artifacts_json=?,error=?,productive=? WHERE id=?")
-        .run(status, now(), summary, JSON.stringify(artifacts), error, productive ? 1 : 0, runId);
-      const lease = this.db.prepare("SELECT * FROM quota_lease WHERE run_id=?").get(runId);
-      if (lease) {
-        if (suppressBackoff) {
-          const restartUntil = now() + (this.config.plan?.distributed?.restartLeaseMinutes ?? DEFAULT_CONFIG.plan.distributed.restartLeaseMinutes) * 60_000;
-          this.db.prepare("UPDATE quota_lease SET state='available',task_id=?,run_id=NULL,expires_at=max(expires_at,?),heartbeat_at=? WHERE id=?")
-            .run(task.id, restartUntil, now(), lease.id);
-        } else if (status === "incomplete" && productive && lease.expires_at > now()) {
-          this.db.prepare(`UPDATE quota_lease SET
-            state='available',
-            task_id=CASE WHEN source='governor' THEN NULL ELSE task_id END,
-            provider=CASE WHEN source='governor' THEN NULL ELSE provider END,
-            run_id=NULL,
-            heartbeat_at=?
-            WHERE id=?`).run(now(), lease.id);
-        } else {
-          this.db.prepare("DELETE FROM quota_lease WHERE id=?").run(lease.id);
-        }
-      }
-      if (status === "complete") {
-        this.db.prepare("UPDATE task SET completed_at=?,incomplete_streak=0 WHERE id=? AND completed_at IS NULL").run(now(), task.id);
-      } else if (suppressBackoff) {
-        this.db.prepare("UPDATE task SET incomplete_streak=0,next_eligible_at=min(next_eligible_at,?) WHERE id=?")
-          .run(now(), task.id);
-      } else {
-        const row = this.db.prepare(`
-          SELECT t.incomplete_streak,t.next_eligible_at,r.started_at
-          FROM task t JOIN run r ON r.task_id=t.id
-          WHERE t.id=? AND r.id=?`).get(task.id, runId);
-        // Real persistent work restores eligibility unless an idle/error sibling
-        // from the same concurrent launch wave has already established a later
-        // pause. A no-unit launch uses bounded backoff without being mislabeled
-        // as an execution error. Only the first terminal result that began after
-        // the previous eligibility time may update the shared schedule.
-        const idleOrFailed = error !== null || productive === false;
-        if (shouldAdvanceBackoff(row.next_eligible_at, row.started_at)) {
-          const next = nextIncompleteState(row.incomplete_streak, idleOrFailed);
-          this.db.prepare("UPDATE task SET incomplete_streak=?,next_eligible_at=? WHERE id=?")
-            .run(next.streak, now() + next.delayMs, task.id);
-        }
-      }
-      event(this.db, `run-${status}`, error ?? summary ?? "", task.id, runId);
-      this.db.exec("COMMIT");
-    } catch (failure) {
-      this.db.exec("ROLLBACK");
-      throw failure;
-    }
+    finishRun(this.db, this.config, task, runId, status, summary, artifacts, error, productive, suppressBackoff);
   }
 
   controllerError(detail) {
@@ -2223,6 +2961,9 @@ export class Controller {
     if (now() - (this.lastEventPurge ?? 0) < 6 * 3600_000) return;
     this.lastEventPurge = now();
     this.db.prepare("DELETE FROM event WHERE at < ?").run(now() - 14 * 86400_000);
+    this.db.prepare("DELETE FROM agent_host WHERE state='gone' AND coalesce(finished_at,started_at) < ?")
+      .run(now() - 14 * 86400_000);
+    purgeRunStreams();
   }
 
   // Refresh stale work probes for every live probe-carrying task, including
@@ -2258,23 +2999,44 @@ export class Controller {
   async tick() {
     this.purgeOldEvents();
     this.heartbeatQuotaLeases();
+    this.reapAgentHosts();
+    this.applyRunFailures();
     this.db.prepare("DELETE FROM quota_lease WHERE state='available' AND expires_at<=?").run(now());
     const tasks = taskRows(this.db);
     try { await this.refreshWorkChecks(tasks); }
     catch (error) { this.controllerError(String(error.stack ?? error)); }
-    const activeAssignments = [...this.active.values()].map(({ task, provider, model, thinking, instrumentBlock, instrumentSign }) => ({ task, provider, model, thinking, instrumentBlock, instrumentSign }));
+    const taskById = new Map(tasks.map((task) => [task.id, task]));
+    const activeAssignments = this.activeRuns().map((run) => ({
+      task: taskById.get(run.task_id) ?? { id: run.task_id },
+      provider: run.provider,
+      model: run.model,
+      thinking: run.thinking,
+      instrumentBlock: run.instrument_block,
+      instrumentSign: run.instrument_sign,
+    }));
+    const activeCount = activeAssignments.length;
     const currentCpu = cpuTotals();
     const currentCpuPercent = cpuPercent(this.previousCpu, currentCpu);
     this.previousCpu = currentCpu;
     const memory = memoryMiB();
-    const slots = resourceSlots(this.config, this.active.size, memory.available, memory.total, currentCpuPercent, agentMemoryMiB());
+    const slots = resourceSlots(this.config, activeCount, memory.available, memory.total, currentCpuPercent, agentMemoryMiB());
     // Admit only one session per measurement tick. SDK sessions and child tools
     // take time to appear in CPU/RAM telemetry; filling every computed slot from
     // one stale snapshot can create a launch stampede before the governor can
     // observe either real resource use or a task's first no-work backoff.
+    if (launchBatchSize(slots) === 0) return;
+    // Sessions live in an agent host, so a launch needs one that is accepting
+    // work. Starting a host is cheap and only happens when work is waiting.
+    const host = await this.ensureAgentHost();
+    if (!host) {
+      if (tasks.some((task) => workReady(task) && task.completed_at === null && task.cancelled_at === null)) {
+        this.throttledEvent("agent-host-starting", "waiting for an agent host to accept launches", null, true);
+      }
+      return;
+    }
     for (let launchIndex = 0; launchIndex < launchBatchSize(slots); launchIndex++) {
       let launched = false;
-      const rankedTasks = rankTasks(tasks, this.active.size);
+      const rankedTasks = rankTasks(tasks, activeCount);
       const eligibleTaskIds = new Set(rankedTasks.map((task) => task.id));
       const specificLeases = this.db.prepare(`SELECT id,task_id FROM quota_lease
         WHERE state='available' AND expires_at>? AND task_id IS NOT NULL`).all(now());
@@ -2332,12 +3094,12 @@ export class Controller {
               "UPDATE dispatch_reservation SET state='terminal',finished_at=? WHERE run_id=?"
             ).run(now(), runId);
             this.throttledEvent("dispatch-error", dispatched.detail, task.id);
-            await this.launch(task, governed);
+            await this.launch(task, governed, randomId(), null, null, host);
           } else {
-            await this.launch(task, governed, runId, dispatched.packet, dispatchMs);
+            await this.launch(task, governed, runId, dispatched.packet, dispatchMs, host);
           }
         } else {
-          await this.launch(task, governed);
+          await this.launch(task, governed, randomId(), null, null, host);
         }
         task.active = Number(task.active) + 1;
         activeAssignments.push({ task, provider: governed.provider, model: governed.model, thinking: governed.thinking, instrumentBlock: governed.instrumentBlock, instrumentSign: governed.instrumentSign });
@@ -2357,32 +3119,18 @@ export class Controller {
     await this.stop();
   }
 
-  async stop(timeoutMs = 5000) {
+  // Stopping the controller — including a deployment restart with new code —
+  // deliberately leaves every agent host and its sessions running. Their work
+  // continues, their results land in this ledger, and the replacement adopts
+  // them; only superseded generations are asked to drain as they empty.
+  async stop() {
     if (this.stopPromise) return this.stopPromise;
     this.stopping = true;
-    const active = [...this.active.entries()];
-    this.stopPromise = (async () => {
-      for (const [, { session }] of active) {
-        try {
-          const aborting = session?.abort();
-          if (aborting && typeof aborting.catch === "function") void aborting.catch(() => {});
-        } catch {}
-      }
-      const settled = await Promise.race([
-        Promise.allSettled(active.map(([, { promise }]) => promise)).then(() => true),
-        sleep(timeoutMs).then(() => false),
-      ]);
-      if (settled) return;
-      for (const [runId, { task, session }] of active) {
-        try { session?.dispose(); } catch {}
-        if (!this.db) continue;
-        const row = this.db.prepare("SELECT status FROM run WHERE id=?").get(runId);
-        if (row?.status === "running") {
-          this.finish(task, runId, "interrupted", null, [], "controller shutdown timed out", false, true);
-        }
-      }
-      this.active.clear();
-    })();
+    this.stopPromise = Promise.resolve();
+    if (this.db) {
+      const running = Number(this.db.prepare("SELECT count(*) count FROM run WHERE status='running'").get().count);
+      if (running) event(this.db, "controller-stopped", `${running} agent run(s) continue in their hosts`);
+    }
     return this.stopPromise;
   }
 }
@@ -2536,18 +3284,44 @@ function printQuotaLeases(db) {
   }
 }
 
+function printAgentHosts(db) {
+  const at = now();
+  for (const host of db.prepare("SELECT * FROM agent_host WHERE state<>'gone' ORDER BY started_at").all()) {
+    const runs = Number(db.prepare("SELECT count(*) count FROM run WHERE host_id=? AND status='running'").get(host.id).count);
+    console.log(`${host.id}\t${host.state}${hostAlive(host, at) ? "" : " (stale)"}\tfingerprint=${host.fingerprint}\tpid=${host.pid ?? "?"}\truns=${runs}\tstarted=${iso(host.started_at)}`);
+  }
+  for (const row of db.prepare("SELECT * FROM run WHERE status='running' ORDER BY started_at").all()) {
+    console.log(`${row.id}\t${row.task_id}\t${row.host_state ?? "in-process"}\t${row.model ?? "?"}:${row.thinking ?? "?"}\tvia ${row.provider ?? "?"}\thost=${row.host_id ?? "-"}\tstarted=${iso(row.started_at)}`);
+  }
+}
+
+// The agent launcher is a real dependency: without a working user manager,
+// slice, and transient-unit path the controller can decide launches it cannot
+// perform. Validate it directly rather than discovering it under load.
+function checkAgentLauncher() {
+  const unit = `${HOST_UNIT_PREFIX}check-${randomBytes(4).toString("hex")}`;
+  const result = spawnSync("systemd-run", [
+    "--user", "--quiet", "--collect", `--unit=${unit}`, `--slice=${AGENT_SLICE}`,
+    "--service-type=exec", "--wait", "--", "true",
+  ], { encoding: "utf8", timeout: 30_000, env: { ...process.env, ...userBusEnvironment() } });
+  if (result.status !== 0) {
+    fail(`agent host launcher unavailable: ${String(result.stderr ?? result.error?.message ?? "").trim() || `exit ${result.status}`}`);
+  }
+}
+
 function check(db) {
   const integrity = db.prepare("PRAGMA integrity_check").get().integrity_check;
   if (integrity !== "ok") fail(`database integrity: ${integrity}`);
   const config = loadConfig();
   governorControls(db);
+  checkAgentLauncher();
   for (const task of taskRows(db)) {
     validateModelPolicy(task.model);
     if (!fs.existsSync(task.cwd)) fail(`task ${task.id} cwd is missing: ${task.cwd}`);
     const key = runModelKey(task);
     if (!isChatGptProTask(task) && providerOf(task.model) === CODEX_PROVIDER && !(key in config.plan.modelBurnPercentPerHour)) fail(`task ${task.id} has no plan burn rate for ${key}`);
   }
-  console.log(`ok: ${taskRows(db).length} tasks; database and configuration valid`);
+  console.log(`ok: ${taskRows(db).length} tasks; database, configuration, and agent host launcher valid (code ${codeFingerprint()})`);
 }
 
 async function main(argv = process.argv.slice(2)) {
@@ -2574,6 +3348,16 @@ async function main(argv = process.argv.slice(2)) {
     event(db, `task-${subcommand}`, "operator command", id); console.log(`${subcommand} ${id}`); return;
   }
   if (command === "status") return printTasks(db);
+  if (command === "agents") return printAgentHosts(db);
+  if (command === "agent" && subcommand === "stop") {
+    const id = rest[0]; if (!id) fail("agent stop requires RUN_ID");
+    const row = db.prepare("SELECT * FROM run WHERE id=?").get(id);
+    if (!row) fail(`unknown run ${id}`);
+    if (row.status !== "running") fail(`run ${id} is already ${row.status}`);
+    db.prepare("UPDATE run SET abort_requested_at=? WHERE id=?").run(now(), id);
+    event(db, "run-abort-requested", "operator command", row.task_id, id);
+    console.log(`stop requested for ${id}`); return;
+  }
   if (command === "governor-control" && subcommand === "status") {
     console.log(JSON.stringify(governorControls(db), null, 2)); return;
   }
@@ -2711,6 +3495,27 @@ async function main(argv = process.argv.slice(2)) {
     return;
   }
   if (command === "check") return check(db);
+  if (command === "agent-host") {
+    const options = parseOptions([subcommand, ...rest].filter((value) => value !== undefined));
+    const unknown = Object.keys(options).filter((key) => !["id", "fingerprint"].includes(key));
+    if (unknown.length) fail(`agent-host does not support ${unknown.map((key) => `--${key}`).join(", ")}`);
+    if (!options.id) fail("agent-host requires --id");
+    const host = new AgentHost(db, loadConfig(), { id: options.id, fingerprint: options.fingerprint ?? codeFingerprint() });
+    const terminate = async () => {
+      try {
+        await host.stop("agent host received a stop signal");
+        db.close();
+        process.exit(0);
+      } catch (error) {
+        console.error(error.stack ?? error);
+        process.exit(1);
+      }
+    };
+    process.once("SIGTERM", terminate); process.once("SIGINT", terminate);
+    await host.init();
+    await host.run();
+    return;
+  }
   if (command === "run") {
     const release = acquireLock();
     const controller = new Controller(db, loadConfig());
@@ -2744,6 +3549,8 @@ async function main(argv = process.argv.slice(2)) {
   orchestrator quota list
   orchestrator quota revoke LEASE_ID
   orchestrator runs [TASK_ID]
+  orchestrator agents
+  orchestrator agent stop RUN_ID
   orchestrator governor
   orchestrator pro-recover [--from-audits DAYS]
   orchestrator check
