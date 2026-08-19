@@ -390,6 +390,8 @@ export function openDb(file = DB_PATH) {
       state TEXT NOT NULL CHECK(state IN ('available','active')),
       run_id TEXT,
       source TEXT NOT NULL CHECK(source IN ('governor','operator')),
+      actor TEXT,
+      reason TEXT,
       issued_at INTEGER NOT NULL,
       expires_at INTEGER NOT NULL,
       heartbeat_at INTEGER NOT NULL,
@@ -481,6 +483,18 @@ export function openDb(file = DB_PATH) {
       ALTER TABLE run ADD COLUMN failover_at INTEGER;
     `);
   }
+  // Every session this machine has ever run is persisted, so a launch that died
+  // without reporting is not lost work — it is unfinished work whose transcript
+  // still exists. A resumed launch continues that exact session.
+  if (!runColumns.has("resume_of")) {
+    db.exec(`
+      DROP TRIGGER IF EXISTS auto_timestamp_run_insert;
+      DROP TRIGGER IF EXISTS auto_timestamp_run_update;
+      ALTER TABLE run ADD COLUMN resume_of TEXT;
+      ALTER TABLE run ADD COLUMN resume_requested_at INTEGER;
+      CREATE INDEX IF NOT EXISTS run_resume_requested ON run(resume_requested_at) WHERE resume_requested_at IS NOT NULL;
+    `);
+  }
   // Agent execution moved out of the controller process: a run now names the
   // host that owns its session, carries the dispatched packet that host must
   // replay, and reports its own liveness so an abandoned launch is observable.
@@ -496,6 +510,19 @@ export function openDb(file = DB_PATH) {
       ALTER TABLE run ADD COLUMN instrument_block INTEGER;
       ALTER TABLE run ADD COLUMN instrument_sign INTEGER;
       CREATE INDEX IF NOT EXISTS run_host_state ON run(host_id,host_state);
+    `);
+  }
+  // An operator grant overrides the decentralized governor with real shared
+  // quota, so who asserted the capacity and why must survive in the ledger.
+  // Journald scope names decay and hold only the command line; the lease row is
+  // the durable record every later host and agent reads.
+  const leaseColumns = new Set(db.prepare("PRAGMA table_info(quota_lease)").all().map((row) => row.name));
+  if (!leaseColumns.has("actor")) {
+    db.exec(`
+      DROP TRIGGER IF EXISTS auto_timestamp_quota_lease_insert;
+      DROP TRIGGER IF EXISTS auto_timestamp_quota_lease_update;
+      ALTER TABLE quota_lease ADD COLUMN actor TEXT;
+      ALTER TABLE quota_lease ADD COLUMN reason TEXT;
     `);
   }
   db.exec(`
@@ -1926,6 +1953,34 @@ export function turnFailureIsRecoverable(detail) {
   return RECOVERABLE_TURN_FAILURE.test(text);
 }
 
+// A session file is named `<timestamp>_<session-id>.jsonl`, so a run's recorded
+// session id is enough to find the transcript it left behind.
+export function sessionFileFor(sessionId, root = SESSIONS) {
+  if (!sessionId) return null;
+  try {
+    const match = fs.readdirSync(root).find((name) => name.endsWith(`_${sessionId}.jsonl`));
+    return match ? path.join(root, match) : null;
+  } catch { return null; }
+}
+
+// A launch that died without reporting left a complete session behind. Resuming
+// it hands the agent its own reasoning, tool results, and half-finished proof
+// back, which is categorically different from launching a fresh agent at the
+// same task: the work is continued rather than repeated. What the resumed agent
+// cannot know is everything that happened while it was gone, so the prompt is
+// about elapsed time and lost claims, not about the task.
+export function resumedTaskPrompt(task, source, runId, at = now()) {
+  const minutes = Math.max(1, Math.round((at - Number(source.finished_at ?? source.started_at)) / 60_000));
+  const elapsed = minutes < 90 ? `${minutes} minutes` : `${(minutes / 60).toFixed(1)} hours`;
+  return [
+    "## Recovered session",
+    `This session was interrupted ${elapsed} ago and is being resumed now, with your full transcript above intact. The interruption was not your doing: ${boundedText(source.error ?? "the launch ended without a report", 300)}`,
+    `You are the same agent on the same task (${task.id}), but this is a new launch: your worker id is now ${runId}, and any lease, claim, or work unit you held under ${source.id} was released when that launch ended.`,
+    "The machine did not stand still. Other agents may have worked the same queue, the repository and the ledger may have moved, and files you wrote may have been superseded. Before writing anything, re-verify the current state of whatever you were working on, and re-claim the work unit if it is still claimable and still yours to finish.",
+    "Do not restart or re-derive what you already established, and do not repeat durable work that is already recorded. Finish what you were doing, record it where it belongs, and call task_complete.",
+  ].join("\n\n");
+}
+
 // The moved session keeps every message it had, so this prompt only has to
 // explain the discontinuity the agent can see in its own transcript.
 export function failoverResumePrompt(assignment, failure) {
@@ -1994,8 +2049,40 @@ export function insertRun(db, runId, taskId, provider = null, startedAt = now(),
       host.instrumentBlock ?? null, host.instrumentSign ?? null);
 }
 
-export function grantQuotaLease(db, config, { provider, model, thinking, taskId = null, hours = null }, at = now()) {
+// Attribution for a manual capacity assertion. An autonomous agent reaches this
+// command through its own pi session, so `PI_SESSION_ID` names the session and
+// the run ledger names the launch and task it belongs to; a dispatch command
+// carries `ORCHESTRATOR_RUN_ID` directly; an interactive shell falls back to the
+// user, host, and parent process. Every branch produces something a later reader
+// can follow back to a transcript.
+export function callerIdentity(db = null, env = process.env) {
+  const parts = [];
+  const sessionId = typeof env.PI_SESSION_ID === "string" ? env.PI_SESSION_ID.trim() : "";
+  const envRunId = typeof env.ORCHESTRATOR_RUN_ID === "string" ? env.ORCHESTRATOR_RUN_ID.trim() : "";
+  if (sessionId) parts.push(`session:${sessionId}`);
+  let runId = envRunId;
+  let taskId = null;
+  if (db && sessionId && !runId) {
+    let row = null;
+    try {
+      row = db.prepare("SELECT id,task_id FROM run WHERE session_id=? ORDER BY started_at DESC LIMIT 1").get(sessionId);
+    } catch { row = null; }
+    if (row) { runId = row.id; taskId = row.task_id; }
+  }
+  if (runId) parts.push(`run:${runId}`);
+  if (taskId) parts.push(`task:${taskId}`);
+  let user = "unknown";
+  try { user = os.userInfo().username; } catch { user = String(env.USER ?? "unknown"); }
+  parts.push(`${user}@${os.hostname()}`);
+  parts.push(`ppid:${process.ppid}`);
+  if (env.SSH_CONNECTION) parts.push("over-ssh");
+  return parts.join(" ");
+}
+
+export function grantQuotaLease(db, config, { provider, model, thinking, taskId = null, hours = null, reason = null, actor = null }, at = now()) {
   if (!(typeof provider === "string" && provider.length > 0)) fail("quota lease requires an exact provider");
+  const grantReason = typeof reason === "string" ? reason.trim() : "";
+  if (grantReason.length === 0) fail("quota lease requires --reason explaining the override");
   if (!(typeof model === "string" && model.includes("/") && typeof thinking === "string" && thinking.length > 0)) {
     fail("quota lease requires a model and thinking level");
   }
@@ -2011,10 +2098,13 @@ export function grantQuotaLease(db, config, { provider, model, thinking, taskId 
   const leaseHours = hours === null ? config.plan.distributed.leaseHours : Number(hours);
   if (!(Number.isFinite(leaseHours) && leaseHours > 0)) fail("quota lease hours must be positive");
   const id = randomId();
-  db.prepare(`INSERT INTO quota_lease(id,task_id,provider,model,thinking,state,run_id,source,issued_at,expires_at,heartbeat_at)
-    VALUES(?,?,?,?,?,'available',NULL,'operator',?,?,?)`)
-    .run(id, taskId, provider, model, thinking, at, at + leaseHours * 3600_000, at);
-  event(db, "quota-lease-granted", `${model}:${thinking} via ${provider}; expires ${iso(at + leaseHours * 3600_000)}`, taskId);
+  const grantActor = (typeof actor === "string" && actor.trim().length > 0) ? actor.trim() : callerIdentity(db);
+  db.prepare(`INSERT INTO quota_lease(id,task_id,provider,model,thinking,state,run_id,source,actor,reason,issued_at,expires_at,heartbeat_at)
+    VALUES(?,?,?,?,?,'available',NULL,'operator',?,?,?,?,?)`)
+    .run(id, taskId, provider, model, thinking, grantActor, grantReason, at, at + leaseHours * 3600_000, at);
+  event(db, "quota-lease-granted",
+    `${model}:${thinking} via ${provider}; expires ${iso(at + leaseHours * 3600_000)}; by ${grantActor}; reason: ${grantReason}`,
+    taskId);
   return id;
 }
 
@@ -2696,6 +2786,12 @@ export class AgentHost {
       isolateTaskShell(settingsManager);
       const extensionErrors = loader.getExtensions().errors;
       if (extensionErrors.length) fail(`extension loading failed: ${extensionErrors.map((item) => item.error).join("; ")}`);
+      // A resumed launch continues the exact session its predecessor left
+      // behind, so the agent starts with its own transcript rather than with a
+      // blank context and a task description.
+      const source = run.resume_of ? this.db.prepare("SELECT * FROM run WHERE id=?").get(run.resume_of) : null;
+      const sourceFile = source ? sessionFileFor(source.session_id) : null;
+      if (source && !sourceFile) fail(`session for resumed run ${run.resume_of} is no longer on disk`);
       ({ session } = await createAgentSession({
         cwd: task.cwd,
         modelRuntime: this.modelRuntime,
@@ -2703,9 +2799,14 @@ export class AgentHost {
         thinkingLevel: resolved.thinkingLevel,
         resourceLoader: loader,
         customTools: [completionTool],
-        sessionManager: SessionManager.create(task.cwd, SESSIONS),
+        sessionManager: sourceFile
+          ? SessionManager.open(sourceFile, SESSIONS, task.cwd)
+          : SessionManager.create(task.cwd, SESSIONS),
         settingsManager,
       }));
+      // The turn that killed the predecessor is still the last thing in that
+      // session, and no provider will accept a request that ends in it.
+      if (sourceFile) dropFailedTurn(session);
       const targetProvider = isChatGptProTask(task) ? providerOf(assignment.model) : assignment.provider;
       const targetModelId = modelIdOf(assignment.model);
       if (targetProvider !== resolved.model.provider || targetModelId !== resolved.model.id) {
@@ -2723,11 +2824,13 @@ export class AgentHost {
       this.db.prepare("UPDATE run SET session_id=? WHERE id=?").run(sessionId, runId);
       // A Pro task's dispatched packet IS the literal text-only prompt (one
       // claimed question from the queue); the task prompt is only the fallback.
-      const prompt = isChatGptProTask(task)
-        ? (packet ?? task.prompt)
-        : packet !== null
-          ? dispatchedTaskPrompt(task, packet)
-          : orchestratedTaskPrompt(task);
+      const prompt = source
+        ? resumedTaskPrompt(task, source, runId)
+        : isChatGptProTask(task)
+          ? (packet ?? task.prompt)
+          : packet !== null
+            ? dispatchedTaskPrompt(task, packet)
+            : orchestratedTaskPrompt(task);
       stream.append("user", { text: boundedText(prompt) });
       stream.setActivity("WORKING");
       session.subscribe((sessionEvent) => {
@@ -3150,9 +3253,38 @@ export class Controller {
     event(this.db, "run-failover-denied", detail, row.task_id, row.id);
   }
 
+  // Launch one requested session recovery. A resumed launch is pinned to the
+  // model that produced the session, because another model in the same mix can
+  // have a smaller context window than the transcript it would inherit, and it
+  // is preferred over a fresh launch of the same task: continuing an hour of
+  // established work is worth more than starting that hour again.
+  async serviceResumes(activeAssignments, host) {
+    const row = this.db.prepare(`SELECT * FROM run
+      WHERE resume_requested_at IS NOT NULL AND status<>'running' ORDER BY resume_requested_at LIMIT 1`).get();
+    if (!row) return false;
+    const clear = (detail) => {
+      this.db.prepare("UPDATE run SET resume_requested_at=NULL WHERE id=?").run(row.id);
+      event(this.db, "run-resume-abandoned", detail, row.task_id, row.id);
+      return false;
+    };
+    const task = this.db.prepare("SELECT * FROM task WHERE id=?").get(row.task_id);
+    if (!task) return clear("task no longer exists");
+    if (task.cancelled_at !== null) return clear("task is cancelled");
+    if (!sessionFileFor(row.session_id)) return clear("session transcript is no longer on disk");
+    let governed;
+    try { governed = await this.plan.allows({ ...task, model: row.model, thinking: row.thinking }, activeAssignments); }
+    catch (error) { this.throttledEvent("resume-blocked", String(error.message ?? error), task.id); return false; }
+    if (!governed.ok) { this.throttledEvent("resume-blocked", governed.detail, task.id); return false; }
+    const runId = randomId();
+    await this.launch(task, governed, runId, null, null, host, row.id);
+    this.db.prepare("UPDATE run SET resume_requested_at=NULL WHERE id=?").run(row.id);
+    event(this.db, "run-resumed", `${runModelKey(governed)} via ${governed.provider} continues session ${row.session_id}`, task.id, runId);
+    return true;
+  }
+
   // A launch is a durable ledger record addressed to a live agent host. The
   // host claims it within a poll interval and owns the session from there.
-  async launch(task, assignment, runId = randomId(), packet = null, dispatchMs = null, host = null) {
+  async launch(task, assignment, runId = randomId(), packet = null, dispatchMs = null, host = null, resumeOf = null) {
     const startedAt = now();
     this.db.exec("BEGIN IMMEDIATE");
     try {
@@ -3165,7 +3297,7 @@ export class Controller {
         instrumentBlock: assignment.instrumentBlock ?? null,
         instrumentSign: assignment.instrumentSign ?? null,
       });
-      this.db.prepare("UPDATE run SET dispatched=? WHERE id=?").run(packet === null ? 0 : 1, runId);
+      this.db.prepare("UPDATE run SET dispatched=?,resume_of=? WHERE id=?").run(packet === null ? 0 : 1, resumeOf, runId);
       if (packet !== null) {
         const transferred = this.db.prepare(
           "DELETE FROM dispatch_reservation WHERE run_id=? AND state='active'"
@@ -3173,7 +3305,8 @@ export class Controller {
         if (transferred !== 1) fail(`missing active dispatch reservation ${runId}`);
       }
       this.activateQuotaLease(task, assignment, runId, startedAt);
-      const note = packet === null ? "" : ` (dispatched ${dispatchMs ?? "?"}ms, ${packet.length}B)`;
+      const note = resumeOf ? ` (resuming ${resumeOf})`
+        : packet === null ? "" : ` (dispatched ${dispatchMs ?? "?"}ms, ${packet.length}B)`;
       event(this.db, "run-started", `${runModelKey(assignment)} via ${assignment.provider}${note}`, task.id, runId);
       this.db.exec("COMMIT");
     } catch (error) {
@@ -3301,6 +3434,10 @@ export class Controller {
       }
       return;
     }
+    // A recovery uses the tick's one admitted session, ahead of any fresh
+    // launch: the machine has already paid for the work it would continue.
+    try { if (await this.serviceResumes(activeAssignments, host)) return; }
+    catch (error) { this.controllerError(String(error.stack ?? error)); }
     for (let launchIndex = 0; launchIndex < launchBatchSize(slots); launchIndex++) {
       let launched = false;
       const rankedTasks = rankTasks(tasks, activeCount);
@@ -3549,7 +3686,10 @@ function printTasks(db) {
 function printQuotaLeases(db) {
   const rows = db.prepare("SELECT * FROM quota_lease ORDER BY state,expires_at,id").all();
   for (const row of rows) {
-    console.log(`${row.id}\t${row.state}\t${row.source}\t${row.task_id ?? "*"}\t${row.model}:${row.thinking}\t${row.provider ?? "any"}\texpires=${iso(row.expires_at)}`);
+    const attribution = row.source === "operator"
+      ? `\tby=${row.actor ?? "unrecorded"}\treason=${row.reason ?? "unrecorded"}`
+      : "";
+    console.log(`${row.id}\t${row.state}\t${row.source}\t${row.task_id ?? "*"}\t${row.model}:${row.thinking}\t${row.provider ?? "any"}\texpires=${iso(row.expires_at)}${attribution}`);
   }
 }
 
@@ -3669,6 +3809,44 @@ async function main(argv = process.argv.slice(2)) {
   }
   if (command === "status") return printTasks(db);
   if (command === "agents") return printAgentHosts(db);
+  // Recovery of a launch that died without reporting: the session it left
+  // behind is complete, so the work can be continued instead of repeated.
+  if (command === "run" && subcommand === "resume") {
+    if (!rest.length) fail("run resume requires RUN_ID [RUN_ID...]");
+    for (const id of rest) {
+      const row = db.prepare("SELECT * FROM run WHERE id=?").get(id);
+      if (!row) fail(`unknown run ${id}`);
+      if (row.status === "running") fail(`run ${id} is still running`);
+      if (!db.prepare("SELECT 1 FROM task WHERE id=? AND cancelled_at IS NULL").get(row.task_id)) fail(`task ${row.task_id} is cancelled or gone`);
+      const file = sessionFileFor(row.session_id);
+      if (!file) fail(`run ${id} has no session transcript on disk`);
+      const resumed = db.prepare("SELECT id FROM run WHERE resume_of=?").get(id);
+      if (resumed) fail(`run ${id} was already resumed as ${resumed.id}`);
+      db.prepare("UPDATE run SET resume_requested_at=? WHERE id=?").run(now(), id);
+      event(db, "run-resume-requested", "operator command", row.task_id, id);
+      console.log(`resume queued for ${id} (${row.task_id}, ${row.model}:${row.thinking}, ${(fs.statSync(file).size / 1e6).toFixed(1)}MB session)`);
+    }
+    return;
+  }
+  if (command === "run" && subcommand === "resumable") {
+    const rows = rest[0]
+      ? db.prepare("SELECT * FROM run WHERE task_id=? AND status<>'running' AND error IS NOT NULL ORDER BY started_at DESC LIMIT 500").all(rest[0])
+      : db.prepare("SELECT * FROM run WHERE status<>'running' AND error IS NOT NULL ORDER BY started_at DESC LIMIT 500").all();
+    const recoverable = [];
+    for (const row of rows) {
+      const file = sessionFileFor(row.session_id);
+      if (!file) continue;
+      if (db.prepare("SELECT 1 FROM run WHERE resume_of=?").get(row.id)) continue;
+      recoverable.push({ row, bytes: fs.statSync(file).size });
+    }
+    // Transcript size is the cheap proxy for how much established work a dead
+    // launch is holding, and it is what makes triage possible at all.
+    recoverable.sort((left, right) => right.bytes - left.bytes);
+    for (const { row, bytes } of recoverable.slice(0, 50)) {
+      console.log(`${row.id}\t${row.task_id}\t${(bytes / 1e6).toFixed(2)}MB\t${Math.round((row.finished_at - row.started_at) / 60000)}min\t${row.model ?? "?"}:${row.thinking ?? "?"}\t${iso(row.started_at)}\t${boundedText(row.error, 90)}`);
+    }
+    return;
+  }
   if (command === "agent" && subcommand === "stop") {
     const id = rest[0]; if (!id) fail("agent stop requires RUN_ID");
     const row = db.prepare("SELECT * FROM run WHERE id=?").get(id);
@@ -3689,25 +3867,29 @@ async function main(argv = process.argv.slice(2)) {
   }
   if (command === "quota" && subcommand === "grant") {
     const options = parseOptions(rest);
-    const unknown = Object.keys(options).filter((key) => !["provider", "model", "thinking", "task", "hours"].includes(key));
+    const unknown = Object.keys(options).filter((key) => !["provider", "model", "thinking", "task", "hours", "reason"].includes(key));
     if (unknown.length) fail(`quota grant does not support ${unknown.map((key) => `--${key}`).join(", ")}`);
+    const actor = callerIdentity(db);
     const id = grantQuotaLease(db, loadConfig(), {
       provider: options.provider,
       model: options.model,
       thinking: options.thinking,
       taskId: options.task ?? null,
       hours: options.hours ?? null,
+      reason: options.reason ?? null,
+      actor,
     });
-    console.log(`granted ${id}`); return;
+    console.log(`granted ${id} by ${actor}`); return;
   }
   if (command === "quota" && subcommand === "list") return printQuotaLeases(db);
   if (command === "quota" && subcommand === "revoke") {
     const id = rest[0]; if (!id) fail("quota revoke requires LEASE_ID");
     const lease = db.prepare("SELECT * FROM quota_lease WHERE id=?").get(id);
     if (!lease) fail(`unknown quota lease ${id}`);
+    const actor = callerIdentity(db);
     db.prepare("DELETE FROM quota_lease WHERE id=?").run(id);
-    event(db, "quota-lease-revoked", `${lease.model}:${lease.thinking} via ${lease.provider ?? "any"}`, lease.task_id);
-    console.log(`revoked ${id}`); return;
+    event(db, "quota-lease-revoked", `${lease.model}:${lease.thinking} via ${lease.provider ?? "any"}; by ${actor}`, lease.task_id);
+    console.log(`revoked ${id} by ${actor}`); return;
   }
   if (command === "runs") {
     const id = subcommand;
@@ -3866,7 +4048,7 @@ async function main(argv = process.argv.slice(2)) {
   orchestrator status
   orchestrator governor-control status
   orchestrator governor-control set openai|anthropic on|off
-  orchestrator quota grant --provider EXACT_PROVIDER --model PROVIDER/MODEL --thinking LEVEL [--task TASK_ID] [--hours N]
+  orchestrator quota grant --provider EXACT_PROVIDER --model PROVIDER/MODEL --thinking LEVEL --reason TEXT [--task TASK_ID] [--hours N]
   orchestrator quota list
   orchestrator quota revoke LEASE_ID
   orchestrator runs [TASK_ID]

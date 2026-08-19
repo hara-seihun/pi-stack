@@ -8,7 +8,7 @@ import test from "node:test";
 
 const temporary = fs.mkdtempSync(path.join(os.tmpdir(), "agent-orchestrator-test-"));
 process.env.AGENT_ORCHESTRATOR_DATA = temporary;
-const { AgentHost, agentHostCommand, agentHostUnit, agentSliceMemoryPath, AGENT_SLICE, AnthropicGovernor, anthropicOpusHasHeadroom, anthropicWeeklyCapacity, applyRunStreamEvent, cancelTask, chooseIndependentAssignment, chooseTask, codeFingerprint, codexSubscriptionLifecycle, completionToolResult, controllerProcessIdentity, Controller, cpuPercent, CursorGovernor, DISPATCH_NO_WORK_TTL_MS, dispatchedTaskPrompt, DistributedQuotaFeedback, evaluateDispatch, evaluateWorkCheck, failoverResumePrompt, FAILOVER_MAX, turnFailureIsRecoverable, finishRun, governorAllowanceMultiplier, governorControls, grantQuotaLease, hostAlive, HOST_STALE_MS, insertRun, interruptRun, isolateTaskShell, isEligibleCodexPlan, launchBatchSize, loadConfig, loadProviderManifest, nextIncompleteState, openDb, orchestratedTaskPrompt, promptDrift, syncPrompts, parseAnthropicUsage, parseCursorUsage, PlanGovernor, planWindowBurnPerHour, proEntitlementSnapshot, proLaunchAvailability, purgeRunStreams, rankTasks, recordAgentHost, resourceSlots, RunEventStream, setGovernorBoost, setTaskOptions, shouldAdvanceBackoff, taskSettings, taskSupportsAssignment, TOOL_SHELL, validateCompletion, validateModelPolicy, WORK_CHECK_TTL_MS, workCheckStale, workReady } = await import("./orchestrator.mjs");
+const { AgentHost, agentHostCommand, agentHostUnit, agentSliceMemoryPath, AGENT_SLICE, AnthropicGovernor, anthropicOpusHasHeadroom, anthropicWeeklyCapacity, applyRunStreamEvent, cancelTask, callerIdentity, chooseIndependentAssignment, chooseTask, codeFingerprint, codexSubscriptionLifecycle, completionToolResult, controllerProcessIdentity, Controller, cpuPercent, CursorGovernor, DISPATCH_NO_WORK_TTL_MS, dispatchedTaskPrompt, DistributedQuotaFeedback, evaluateDispatch, evaluateWorkCheck, failoverResumePrompt, FAILOVER_MAX, turnFailureIsRecoverable, resumedTaskPrompt, sessionFileFor, finishRun, governorAllowanceMultiplier, governorControls, grantQuotaLease, hostAlive, HOST_STALE_MS, insertRun, interruptRun, isolateTaskShell, isEligibleCodexPlan, launchBatchSize, loadConfig, loadProviderManifest, nextIncompleteState, openDb, orchestratedTaskPrompt, promptDrift, syncPrompts, parseAnthropicUsage, parseCursorUsage, PlanGovernor, planWindowBurnPerHour, proEntitlementSnapshot, proLaunchAvailability, purgeRunStreams, rankTasks, recordAgentHost, resourceSlots, RunEventStream, setGovernorBoost, setTaskOptions, shouldAdvanceBackoff, taskSettings, taskSupportsAssignment, TOOL_SHELL, validateCompletion, validateModelPolicy, WORK_CHECK_TTL_MS, workCheckStale, workReady } = await import("./orchestrator.mjs");
 
 test.after(() => fs.rmSync(temporary, { recursive: true, force: true }));
 
@@ -205,6 +205,40 @@ test("governor leases resume interrupted work then rotate after productive bound
   db.close();
 });
 
+test("an operator quota grant records who asserted the capacity and why", () => {
+  const db = openDb(path.join(temporary, "operator-quota-attribution.sqlite3"));
+  const at = Date.now();
+  db.prepare(`INSERT INTO task(id,prompt,cwd,model,thinking,completion_condition,launch_share,not_before,next_eligible_at,created_at)
+    VALUES(?,?,?,?,?,?,?,?,?,?)`).run("lane", "prompt", temporary, "openai-codex/gpt-5.6-sol", "xhigh", "done", 1, at, at, at);
+  db.prepare("INSERT INTO run(id,task_id,session_id,status,started_at) VALUES(?,?,?,?,?)")
+    .run("run-1", "lane", "session-1", "running", at);
+  const config = loadConfig();
+
+  // A grant without a stated reason is refused: the override is exactly the
+  // decision a later reader needs explained.
+  assert.throws(() => grantQuotaLease(db, config, {
+    provider: "openai-codex-3", model: "openai-codex/gpt-5.6-sol", thinking: "xhigh", taskId: "lane", hours: 1,
+  }, at), /--reason/);
+
+  const actor = callerIdentity(db, { PI_SESSION_ID: "session-1" });
+  assert.match(actor, /session:session-1/);
+  assert.match(actor, /run:run-1/);
+  assert.match(actor, /task:lane/);
+
+  const leaseId = grantQuotaLease(db, config, {
+    provider: "openai-codex-3", model: "openai-codex/gpt-5.6-sol", thinking: "xhigh", taskId: "lane", hours: 1,
+    reason: "lane starved by a closed gate", actor,
+  }, at);
+  const lease = db.prepare("SELECT actor,reason,source FROM quota_lease WHERE id=?").get(leaseId);
+  assert.equal(lease.source, "operator");
+  assert.equal(lease.actor, actor);
+  assert.equal(lease.reason, "lane starved by a closed gate");
+  const granted = db.prepare("SELECT detail FROM event WHERE kind='quota-lease-granted' ORDER BY at DESC LIMIT 1").get();
+  assert.match(granted.detail, /by session:session-1/);
+  assert.match(granted.detail, /reason: lane starved by a closed gate/);
+  db.close();
+});
+
 test("operator quota leases retain their declared task and provider constraints", () => {
   const db = openDb(path.join(temporary, "operator-quota-lease.sqlite3"));
   const at = Date.now();
@@ -213,6 +247,7 @@ test("operator quota leases retain their declared task and provider constraints"
   const config = loadConfig();
   const leaseId = grantQuotaLease(db, config, {
     provider: "openai-codex-3", model: "openai-codex/gpt-5.6-sol", thinking: "xhigh", taskId: "task", hours: 1,
+    reason: "test",
   }, at);
   const task = db.prepare("SELECT * FROM task WHERE id='task'").get();
   const controller = new Controller(db, config);
@@ -240,6 +275,7 @@ test("restart handoffs are restored before unrelated cold admission", async () =
   config.maxMemoryPercent = 101;
   grantQuotaLease(db, config, {
     provider: "openai-codex-3", model: "openai-codex/gpt-5.6-sol", thinking: "xhigh", taskId: "leased", hours: 1,
+    reason: "test",
   }, at);
   const controller = testController(db, config);
   registerTestHost(db, controller);
@@ -1565,5 +1601,79 @@ test("the host moves its live session onto the provider the controller assigns",
     .trim().split("\n").map((line) => JSON.parse(line)).filter((entry) => entry.type === "notice");
   assert.match(notices[0].payload.text, /holding this session for reassignment/);
   assert.match(notices[1].payload.text, /continues on openai-codex\/gpt-5.6-sol:xhigh via openai-codex-3/);
+  db.close();
+});
+
+// Nothing about a launch that died without reporting is lost: its session is on
+// disk, so the work can be continued rather than repeated from a blank context.
+test("a dead launch is recovered by continuing its own session", async () => {
+  const db = openDb(path.join(temporary, "resume.sqlite3"));
+  const at = Date.now();
+  const sessions = path.join(temporary, "sessions");
+  fs.mkdirSync(sessions, { recursive: true });
+  db.prepare(`INSERT INTO task(id,prompt,cwd,model,thinking,completion_condition,launch_share,not_before,next_eligible_at,created_at)
+    VALUES(?,?,?,?,?,?,?,?,?,?)`).run("task", "prompt", temporary, "openai-codex/gpt-5.6-sol", "xhigh", "done", 1, at, at, at);
+  const config = loadConfig();
+  const controller = testController(db, config, { fingerprint: "code" });
+  const host = { id: recordAgentHost(db, { fingerprint: "code", state: "active", at }) };
+  db.prepare("UPDATE agent_host SET state='active' WHERE id=?").run(host.id);
+  insertRun(db, "dead", "task", "anthropic-2", at - 7_200_000, "anthropic/claude-opus-5", "xhigh", { hostId: host.id });
+  db.prepare("UPDATE run SET status='incomplete',finished_at=?,error=?,session_id=? WHERE id='dead'")
+    .run(at - 3_600_000, "provider turn failed: 429 monthly spend limit", "session-abc");
+  const sessionFile = path.join(sessions, "2026-08-19T01-41-08-262Z_session-abc.jsonl");
+  fs.writeFileSync(sessionFile, "{}\n");
+  assert.equal(sessionFileFor("session-abc", sessions), sessionFile);
+  assert.equal(sessionFileFor("session-missing", sessions), null);
+
+  // The resumed launch is pinned to the model that produced the session: a
+  // smaller context window in the same mix could not hold the transcript.
+  let requested = null;
+  controller.plan.allows = async (pinned) => {
+    requested = [pinned.model, pinned.thinking].join(":");
+    return { ok: true, provider: "anthropic-3", model: pinned.model, thinking: pinned.thinking, detail: "admitted" };
+  };
+  db.prepare("UPDATE run SET resume_requested_at=? WHERE id='dead'").run(at);
+  assert.equal(await controller.serviceResumes([], host), true);
+  assert.equal(requested, "anthropic/claude-opus-5:xhigh");
+
+  const resumed = db.prepare("SELECT * FROM run WHERE resume_of='dead'").get();
+  assert.equal(resumed.status, "running");
+  assert.equal(resumed.provider, "anthropic-3");
+  assert.equal(resumed.model, "anthropic/claude-opus-5");
+  assert.equal(db.prepare("SELECT resume_requested_at FROM run WHERE id='dead'").get().resume_requested_at, null);
+
+  // The resumed agent is told what it cannot see: elapsed time, its new worker
+  // id, and that its claims were released while it was gone.
+  const dead = db.prepare("SELECT * FROM run WHERE id='dead'").get();
+  const prompt = resumedTaskPrompt({ id: "task" }, dead, resumed.id, at);
+  assert.match(prompt, /interrupted 60 minutes ago/);
+  assert.match(resumedTaskPrompt({ id: "task" }, dead, resumed.id, at + 18_000_000), /interrupted 6.0 hours ago/);
+  assert.match(prompt, /429 monthly spend limit/);
+  assert.match(prompt, new RegExp("worker id is now " + resumed.id));
+  assert.match(prompt, /released when that launch ended/);
+  assert.match(prompt, /re-verify the current state/);
+  assert.match(prompt, /task_complete/);
+  db.close();
+});
+
+test("a recovery request nobody can satisfy is abandoned rather than retried forever", async () => {
+  const db = openDb(path.join(temporary, "resume-abandon.sqlite3"));
+  const at = Date.now();
+  db.prepare(`INSERT INTO task(id,prompt,cwd,model,thinking,completion_condition,launch_share,not_before,next_eligible_at,created_at)
+    VALUES(?,?,?,?,?,?,?,?,?,?)`).run("task", "prompt", temporary, "openai-codex/gpt-5.6-sol", "xhigh", "done", 1, at, at, at);
+  const controller = testController(db, loadConfig(), { fingerprint: "code" });
+  const host = { id: recordAgentHost(db, { fingerprint: "code", state: "active", at }) };
+  insertRun(db, "dead", "task", "openai-codex-3", at, "openai-codex/gpt-5.6-sol", "xhigh", {});
+  db.prepare("UPDATE run SET status='incomplete',finished_at=?,error='x',session_id='gone',resume_requested_at=? WHERE id='dead'").run(at, at);
+  controller.plan.allows = async () => { throw new Error("governor must not be consulted for an unrecoverable session"); };
+  assert.equal(await controller.serviceResumes([], host), false);
+  assert.equal(db.prepare("SELECT resume_requested_at FROM run WHERE id='dead'").get().resume_requested_at, null);
+  assert.equal(db.prepare("SELECT count(*) c FROM event WHERE kind='run-resume-abandoned'").get().c, 1);
+
+  // A closed governor is not an abandonment: the request waits for capacity.
+  db.prepare("UPDATE run SET resume_requested_at=?,session_id=NULL WHERE id='dead'").run(at);
+  db.prepare("UPDATE task SET cancelled_at=? WHERE id='task'").run(at);
+  assert.equal(await controller.serviceResumes([], host), false);
+  assert.equal(db.prepare("SELECT count(*) c FROM event WHERE kind='run-resume-abandoned'").get().c, 2);
   db.close();
 });
