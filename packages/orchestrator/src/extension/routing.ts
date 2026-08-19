@@ -22,26 +22,14 @@ import { baseProvider, defaultLedgerPath } from "./usage-logger.js";
  *   account with a resume prompt. Stickiness yields only to failure.
  *
  * Orchestrator-launched sessions set PI_ORCHESTRATOR_ASSIGNED=1: the broker
- * owns their account custody, and this extension stays out entirely — one
- * brain per decision.
+ * owns their account custody, so binding and failover stay out — one brain
+ * per decision. Alias provider registration still happens there, because it
+ * is credential plumbing (auth.json[alias] via the family's OAuth), not a
+ * routing decision, and broker-assigned aliases must resolve.
  */
 
-const COOLDOWN_MS = 10 * 60_000;
-
-const RATE_LIMIT_PATTERNS = [
-  /usage.?limit/i,
-  /rate.?limit/i,
-  /limit.*reached/i,
-  /too many requests/i,
-  /overloaded/i,
-  /capacity/i,
-  /\b429\b/,
-  /quota/i,
-];
-
-export function isRateLimitError(message: string): boolean {
-  return RATE_LIMIT_PATTERNS.some((p) => p.test(message));
-}
+export { isRateLimitError } from "../rate-limit.js";
+import { ACCOUNT_COOLDOWN_MS, isRateLimitError } from "../rate-limit.js";
 
 /** An alias provider: the family's models, transport, and OAuth under the
  * account's own id, so credentials resolve from auth.json[aliasId]. */
@@ -70,7 +58,6 @@ export function failoverPrompt(failure: string, account: string): string {
 }
 
 export default function routing(pi: ExtensionAPI): void {
-  if (process.env.PI_ORCHESTRATOR_ASSIGNED === "1") return;
   const ledger = Ledger.open(defaultLedgerPath());
   const families = new Map(builtinProviders().map((p) => [p.id, p]));
 
@@ -78,6 +65,13 @@ export default function routing(pi: ExtensionAPI): void {
     if (account.id === account.provider) continue;
     const family = families.get(account.provider);
     if (family !== undefined) pi.registerProvider(aliasProvider(family, account.id, account.label));
+  }
+
+  if (process.env.PI_ORCHESTRATOR_ASSIGNED === "1") {
+    pi.on("session_shutdown", async () => {
+      ledger.close();
+    });
+    return;
   }
 
   /** The family model re-homed onto an account's alias provider. */
@@ -125,7 +119,7 @@ export default function routing(pi: ExtensionAPI): void {
     const failing = ctx.model?.provider;
     if (failing === undefined) return;
     if (ledger.accounts().some((a) => a.id === failing)) {
-      ledger.setAccountCooldown(failing, Date.now() + COOLDOWN_MS);
+      ledger.setAccountCooldown(failing, Date.now() + ACCOUNT_COOLDOWN_MS);
     }
     const moved = await bind(ctx, new Set([failing]));
     if (moved !== undefined) {

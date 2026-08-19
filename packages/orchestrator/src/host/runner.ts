@@ -1,4 +1,5 @@
 import type { Ledger } from "../ledger/ledger.js";
+import { ACCOUNT_COOLDOWN_MS, isRateLimitError } from "../rate-limit.js";
 import type { HostEvents, HostManager, HostRunResult, LaunchSpec } from "./types.js";
 
 /**
@@ -91,6 +92,12 @@ export class Runner implements HostEvents {
     if (run === undefined) return;
     this.ledger.finishRun(runId, result, at);
     this.ledger.taskFinished(run.taskId);
+    // An exhausted account fails every launch it gets; cool it down so the
+    // broker moves the task's next run to a sibling account instead of
+    // burning the breaker window on the same dead meter.
+    if (result.state === "error" && isRateLimitError(result.detail ?? "")) {
+      this.ledger.setAccountCooldown(run.accountId, at + ACCOUNT_COOLDOWN_MS);
+    }
   }
 
   heartbeat(runId: string, at = Date.now()): void {

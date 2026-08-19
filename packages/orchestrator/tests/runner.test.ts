@@ -119,3 +119,26 @@ describe("runner generations", () => {
     expect(engine.aborted).toEqual([spec.runId]);
   });
 });
+
+describe("runner result classification", () => {
+  it("a rate-limited error run cools the account down for broker admission", () => {
+    const ledger = Ledger.open(":memory:");
+    const [runId] = seed(ledger, 1);
+    const runner = new Runner(ledger, new FakeEngine(), { runnerId: "r1", maxSessions: 5 });
+    runner.tick(100);
+    runner.runFinished(runId, { state: "error", detail: "Codex error: The usage limit has been reached" }, 200);
+    const account = ledger.accounts().find((a) => a.id === "anth-1");
+    expect(account?.cooldownUntil).toBeGreaterThan(200);
+    expect(ledger.run(runId)?.state).toBe("error");
+  });
+
+  it("an ordinary error run does not cool the account", () => {
+    const ledger = Ledger.open(":memory:");
+    const [runId] = seed(ledger, 1);
+    const runner = new Runner(ledger, new FakeEngine(), { runnerId: "r1", maxSessions: 5 });
+    runner.tick(100);
+    runner.runFinished(runId, { state: "error", detail: "TypeError: cannot read properties" }, 200);
+    const account = ledger.accounts().find((a) => a.id === "anth-1");
+    expect(account?.cooldownUntil ?? 0).toBe(0);
+  });
+});

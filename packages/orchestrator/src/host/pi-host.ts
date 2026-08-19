@@ -91,6 +91,19 @@ export class PiHost implements HostManager {
     );
     try {
       await session.prompt(spec.prompt);
+      // prompt() resolves even when the turn failed provider-side; the
+      // truth is on the final assistant message. An errored turn must be an
+      // error run (circuit breaker, account cooldown), never quiet
+      // unproductive-done — that combination relaunches every tick.
+      const last = [...session.messages]
+        .reverse()
+        .find((m): m is typeof m & { stopReason?: string; errorMessage?: string } => m.role === "assistant");
+      if (report === undefined && last?.stopReason === "error") {
+        return { state: "error", detail: last.errorMessage ?? "assistant turn errored" };
+      }
+      if (report === undefined && last?.stopReason === "aborted") {
+        return { state: "aborted", detail: "session aborted" };
+      }
       if (report === undefined) {
         return { state: "done", productive: false, detail: "no task_complete report" };
       }
