@@ -1,4 +1,5 @@
 #!/usr/bin/env node
+import { readFileSync } from "node:fs";
 import { homedir, hostname } from "node:os";
 import { join } from "node:path";
 import { Broker } from "./broker/broker.js";
@@ -69,6 +70,34 @@ async function status(ledger: Ledger): Promise<void> {
   if (evaluation.tasks.length === 0) console.log("no tasks");
 }
 
+/** Models served by pi extension providers (cursor) are not in the builtin
+ * catalog; build a minimal Model from the extension's cached discovery. The
+ * embedded session's own extension runtime registers the provider and owns
+ * streaming; this object only names the model. */
+function extensionModel(provider: string, modelId: string): Record<string, unknown> | undefined {
+  if (provider !== "cursor") return undefined;
+  try {
+    const raw = readFileSync(join(homedir(), ".cache", "pi-cursor", "model-catalog.json"), "utf8");
+    const entry = (JSON.parse(raw).rawModels as { id: string; name?: string; reasoning?: boolean; contextWindow?: number; maxTokens?: number }[])
+      .find((m) => m.id === modelId);
+    if (entry === undefined) return undefined;
+    return {
+      id: entry.id,
+      provider: "cursor",
+      name: entry.name ?? entry.id,
+      api: "openai-completions",
+      baseUrl: "",
+      reasoning: entry.reasoning ?? false,
+      input: ["text"],
+      cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+      contextWindow: entry.contextWindow ?? 200_000,
+      maxTokens: entry.maxTokens ?? 32_000,
+    };
+  } catch {
+    return undefined;
+  }
+}
+
 /** Controller daemon: the launch loop. Tier→model maps and meter topology
  * come from operator config; everything else is measured. */
 async function daemon(ledger: Ledger, args: string[]): Promise<void> {
@@ -111,7 +140,9 @@ async function runner(ledger: Ledger, args: string[]): Promise<void> {
   const { builtinProviders } = await import("@earendil-works/pi-ai/providers/all");
   const families = new Map(builtinProviders().map((p) => [p.id, p]));
   const resolveModel = (spec: LaunchSpec): unknown => {
-    const model = families.get(spec.provider)?.getModels().find((m) => m.id === spec.model);
+    const model =
+      families.get(spec.provider)?.getModels().find((m) => m.id === spec.model) ??
+      extensionModel(spec.provider, spec.model);
     if (model === undefined) throw new Error(`unknown model ${spec.provider}/${spec.model}`);
     return spec.accountId === spec.provider ? model : { ...model, provider: spec.accountId };
   };
