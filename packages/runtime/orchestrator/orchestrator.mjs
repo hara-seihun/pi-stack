@@ -36,6 +36,7 @@ const CONFIG_PATH = path.join(DATA, "config.json");
 const SESSIONS = path.join(DATA, "sessions");
 const LOCK = path.join(DATA, "controller.lock");
 const SCRIPT_PATH = fileURLToPath(import.meta.url);
+const PROVIDER_MANIFEST_PATH = process.env.AGENT_ORCHESTRATOR_PROVIDER_MANIFEST ?? path.join(path.dirname(SCRIPT_PATH), "providers.json");
 const AUTH_PATH = path.join(getAgentDir(), "auth.json");
 const MULTI_PASS_PATH = path.join(getAgentDir(), "multi-pass.json");
 const CHATGPT_PRO_POOL_PATH = path.join(getAgentDir(), "chatgpt-pro-pool.json");
@@ -65,6 +66,62 @@ const execFileAsync = promisify(execFile);
 // even on hosts whose systemd unit does not duplicate the environment setting.
 process.env.PI_MULTI_PASS_LOCK_ASSIGNED_PROVIDER = "1";
 
+export function loadProviderManifest(file = PROVIDER_MANIFEST_PATH) {
+  const manifest = JSON.parse(fs.readFileSync(file, "utf8"));
+  if (manifest?.version !== 1 || !Array.isArray(manifest.providers) || !Array.isArray(manifest.models) ||
+      !Array.isArray(manifest.mixes) || !Array.isArray(manifest.plans) || !Array.isArray(manifest.agentOrder)) {
+    fail("invalid provider manifest structure");
+  }
+  const providers = new Set();
+  for (const provider of manifest.providers) {
+    if (typeof provider?.id !== "string" || !provider.id || providers.has(provider.id) ||
+        typeof provider.prefix !== "string" || !provider.prefix || typeof provider.governor !== "string") {
+      fail("invalid provider manifest provider");
+    }
+    providers.add(provider.id);
+  }
+  const models = new Map();
+  for (const model of manifest.models) {
+    if (typeof model?.id !== "string" || !model.id || models.has(model.id) || !providers.has(model.provider) ||
+        typeof model.model !== "string" || !model.model.includes("/") || typeof model.thinking !== "string" ||
+        typeof model.label !== "string" || !Array.isArray(model.aliases)) fail("invalid provider manifest model");
+    models.set(model.id, model);
+  }
+  for (const mix of manifest.mixes) {
+    if (!models.has(mix?.base) || !Array.isArray(mix.alternatives) || mix.alternatives.length === 0 ||
+        mix.alternatives.some((id) => !models.has(id)) || mix.strategy !== "independent-capacity") {
+      fail("invalid provider manifest mix");
+    }
+  }
+  const planIds = new Set();
+  for (const plan of manifest.plans) {
+    if (typeof plan?.id !== "string" || planIds.has(plan.id) || typeof plan.label !== "string" ||
+        typeof plan.icon !== "string" || !Array.isArray(plan.metrics) || plan.metrics.length === 0 ||
+        plan.metrics.some((metric) => typeof metric?.id !== "string" || typeof metric.field !== "string" ||
+          (metric.paceField !== undefined && typeof metric.paceField !== "string"))) {
+      fail("invalid provider manifest plan");
+    }
+    planIds.add(plan.id);
+  }
+  return manifest;
+}
+
+function manifestModelMixes(manifest) {
+  const models = new Map(manifest.models.map((model) => [model.id, model]));
+  return Object.fromEntries(manifest.mixes.map((mix) => {
+    const base = models.get(mix.base);
+    return [`${base.model}:${base.thinking}`, {
+      alternatives: mix.alternatives.map((id) => {
+        const model = models.get(id);
+        return { model: model.model, thinking: model.thinking };
+      }),
+      strategy: mix.strategy,
+    }];
+  }));
+}
+
+const PROVIDER_MANIFEST = loadProviderManifest();
+
 const DEFAULT_CONFIG = {
   maxMemoryPercent: 90,
   maxCpuPercent: 90,
@@ -74,15 +131,6 @@ const DEFAULT_CONFIG = {
     modelBurnPercentPerHour: {
       "openai-codex/gpt-5.6-sol:xhigh": 0.5824404761904762,
       "openai-codex/gpt-5.6-luna:max": 0.02507936507936508
-    },
-    modelMixes: {
-      "openai-codex/gpt-5.6-sol:xhigh": {
-        alternatives: [
-          { model: "anthropic/claude-opus-5", thinking: "xhigh" },
-          { model: "cursor/grok-4.6", thinking: "xhigh" }
-        ],
-        strategy: "independent-capacity"
-      }
     },
     distributed: {
       targetPercent: 100,
@@ -144,7 +192,7 @@ export function loadConfig() {
   }
   if (!(Number.isFinite(config.plan?.pollSeconds) && config.plan.pollSeconds > 0)) fail("invalid config.plan.pollSeconds");
   if (!config.plan.modelBurnPercentPerHour || typeof config.plan.modelBurnPercentPerHour !== "object") fail("missing config.plan.modelBurnPercentPerHour");
-  if (!config.plan.modelMixes || typeof config.plan.modelMixes !== "object") config.plan.modelMixes = {};
+  config.plan.modelMixes = manifestModelMixes(PROVIDER_MANIFEST);
   config.plan.distributed = { ...DEFAULT_CONFIG.plan.distributed, ...config.plan.distributed };
   const distributed = config.plan.distributed;
   for (const key of ["targetPercent", "slopeWindowHours", "safetyDelayHours", "initialShare", "minimumShare", "blindDecay", "controlGain", "additiveRamp", "minimumRatio", "maximumRatio", "rateFloor", "consistencyLimitPercent", "routingExcitation", "routingBlockMinutes", "calibrationMinSamples", "calibrationMinHours", "leaseHours", "restartLeaseMinutes"]) {
@@ -487,11 +535,12 @@ export function cpuPercent(before, after) {
 function runModelKey(value) { return `${value.model}:${value.thinking}`; }
 function providerOf(model) { return String(model).split("/", 1)[0]; }
 function modelIdOf(model) { return String(model).slice(String(model).indexOf("/") + 1); }
-function providerFamily(provider) {
-  if (provider === CODEX_PROVIDER || provider.startsWith(`${CODEX_PROVIDER}-`)) return CODEX_PROVIDER;
-  if (provider === ANTHROPIC_PROVIDER || provider.startsWith(`${ANTHROPIC_PROVIDER}-`)) return ANTHROPIC_PROVIDER;
-  return provider;
+function providerDefinition(provider) {
+  return PROVIDER_MANIFEST.providers.find((candidate) =>
+    provider === candidate.prefix || provider.startsWith(`${candidate.prefix}-`)) ?? null;
 }
+function providerFamily(provider) { return providerDefinition(provider)?.id ?? provider; }
+function governorKind(provider) { return providerDefinition(provider)?.governor ?? providerFamily(provider); }
 function taskMix(config, task) { return config.plan.modelMixes[runModelKey(task)] ?? null; }
 function taskVariants(config, task) {
   const primary = { model: task.model, thinking: task.thinking };
@@ -870,6 +919,22 @@ export class DistributedQuotaFeedback {
     return this.score(`admit-pool:${key}`, Math.floor(at / (this.config.routingBlockMinutes * 60_000))) < Math.min(1, allowance / candidate);
   }
 
+  adaptiveAssignment(accounts, activeRates, modelKey, candidate, at = now(), allowanceMultiplier = 1) {
+    const localLoad = activeRates.reduce((sum, assignment) => sum + assignment.rate, 0);
+    const allowance = this.totalAllowance(accounts, allowanceMultiplier);
+    const admitted = this.admitsAccounts(localLoad, candidate, accounts, modelKey, at, allowanceMultiplier);
+    const selected = admitted
+      ? this.selectAccount(accounts, activeRates, modelKey, candidate, at, allowanceMultiplier)
+      : null;
+    return {
+      selected,
+      localLoad,
+      candidate,
+      allowance,
+      pressure: allowance > 0 ? (localLoad + candidate) / allowance : Number.POSITIVE_INFINITY,
+    };
+  }
+
   selectAccount(accounts, activeRates, modelKey, candidate, at = now(), allowanceMultiplier = 1) {
     const providers = accounts.map((account) => account.provider).sort();
     const block = Math.floor(at / (this.config.routingBlockMinutes * 60_000));
@@ -1164,24 +1229,21 @@ export class AnthropicGovernor {
       .filter((account) => anthropicOpusHasHeadroom(account) && (this.cooldowns.get(account.provider) ?? 0) <= now());
     const candidate = this.config.plan.anthropic.predictedPercentPerActiveHour ?? DEFAULT_CONFIG.plan.anthropic.predictedPercentPerActiveHour;
     const allowanceMultiplier = this.usageMultiplier(ANTHROPIC_PROVIDER);
-    const localActive = [...activeByProvider.values()].reduce((sum, value) => sum + value, 0);
-    const localBurn = localActive * candidate;
     const syntheticAccounts = usage.accounts.filter(anthropicOpusHasHeadroom).map((account) => ({
       ...account,
       allowedBurnPercentPerHour: usage.distributed?.accounts?.[account.provider]?.sustainableRate ?? 0,
     }));
-    const allowance = this.feedback.totalAllowance(syntheticAccounts, allowanceMultiplier);
-    const admitted = this.feedback.admitsAccounts(localBurn, candidate, syntheticAccounts, runModelKey(variant), now(), allowanceMultiplier);
     const syntheticActive = [...activeByProvider.entries()].map(([provider, active]) => ({ provider, rate: active * candidate }));
     const eligibleProviders = new Set(eligible.map((account) => account.provider));
-    const routed = admitted ? this.feedback.selectAccount(
+    const adaptive = this.feedback.adaptiveAssignment(
       syntheticAccounts.filter((account) => eligibleProviders.has(account.provider)),
       syntheticActive,
       runModelKey(variant),
       candidate,
       now(),
       allowanceMultiplier,
-    ) : null;
+    );
+    const routed = adaptive.selected;
     const selected = routed ? { account: routed.account, active: activeByProvider.get(routed.account.provider) ?? 0, ...routed } : null;
     const distributed = usage.distributed ?? this.feedback.status;
     return {
@@ -1191,10 +1253,10 @@ export class AnthropicGovernor {
       thinking: variant.thinking,
       instrumentBlock: selected?.block ?? null,
       instrumentSign: selected?.sign ?? null,
-      pressure: allowance > 0 ? (localBurn + candidate) / allowance : Number.POSITIVE_INFINITY,
+      pressure: adaptive.pressure,
       detail: selected
-        ? `Anthropic account=${selected.account.provider} active=${selected.active} local=${localBurn.toFixed(3)} candidate=${candidate.toFixed(3)} allowance=${allowance.toFixed(3)} multiplier=${allowanceMultiplier} share=${distributed.share.toFixed(3)} healthy=${usage.healthy} headroom=${usage.withHeadroom}`
-        : `Anthropic distributed gate closed: local=${localBurn.toFixed(3)} candidate=${candidate.toFixed(3)} allowance=${allowance.toFixed(3)} multiplier=${allowanceMultiplier} share=${distributed.share.toFixed(3)} healthy=${usage.healthy} headroom=${usage.withHeadroom}`,
+        ? `Anthropic account=${selected.account.provider} active=${selected.active} local=${adaptive.localLoad.toFixed(3)} candidate=${candidate.toFixed(3)} allowance=${adaptive.allowance.toFixed(3)} multiplier=${allowanceMultiplier} share=${distributed.share.toFixed(3)} healthy=${usage.healthy} headroom=${usage.withHeadroom}`
+        : `Anthropic distributed gate closed: local=${adaptive.localLoad.toFixed(3)} candidate=${candidate.toFixed(3)} allowance=${adaptive.allowance.toFixed(3)} multiplier=${allowanceMultiplier} share=${distributed.share.toFixed(3)} healthy=${usage.healthy} headroom=${usage.withHeadroom}`,
     };
   }
 }
@@ -1384,25 +1446,24 @@ export class CursorGovernor {
     const eligible = usage.healthy === 1 && modelAvailable && now() >= this.cooldownUntil &&
       usage.usage?.used < 100 - this.config.plan.cursor.reservePercent;
     const accounts = eligible ? [account] : [];
-    const allowance = this.feedback.totalAllowance(accounts);
-    const admitted = this.feedback.admitsAccounts(localBurn, candidate, accounts, runModelKey(variant), now());
-    const selected = admitted ? this.feedback.selectAccount(
+    const adaptive = this.feedback.adaptiveAssignment(
       accounts,
       active > 0 ? [{ provider: CURSOR_PROVIDER, rate: localBurn }] : [],
       runModelKey(variant),
       candidate,
       now(),
-    ) : null;
+    );
+    const selected = adaptive.selected;
     const remaining = usage.usage ? 100 - usage.usage.used : 0;
     return {
       ok: selected !== null,
       provider: selected ? CURSOR_PROVIDER : null,
       model: variant.model,
       thinking: variant.thinking,
-      pressure: allowance > 0 ? (localBurn + candidate) / allowance : Number.POSITIVE_INFINITY,
+      pressure: adaptive.pressure,
       detail: selected
-        ? `Cursor dynamic gate active=${active} local=${localBurn.toFixed(3)} candidate=${candidate.toFixed(3)} allowance=${allowance.toFixed(3)} share=${usage.distributed.share.toFixed(3)} used=${usage.usage.used.toFixed(3)}% remaining=${remaining.toFixed(3)}% resets=${iso(usage.usage.resetAt)}`
-        : `Cursor dynamic gate closed: active=${active} local=${localBurn.toFixed(3)} candidate=${candidate.toFixed(3)} allowance=${allowance.toFixed(3)} share=${usage.distributed.share.toFixed(3)} used=${usage.usage?.used?.toFixed(3) ?? "unknown"}% model=${modelAvailable ? "available" : "missing"} error=${usage.error ?? "none"}`,
+        ? `Cursor dynamic gate active=${active} local=${adaptive.localLoad.toFixed(3)} candidate=${candidate.toFixed(3)} allowance=${adaptive.allowance.toFixed(3)} share=${usage.distributed.share.toFixed(3)} used=${usage.usage.used.toFixed(3)}% remaining=${remaining.toFixed(3)}% resets=${iso(usage.usage.resetAt)}`
+        : `Cursor dynamic gate closed: active=${active} local=${adaptive.localLoad.toFixed(3)} candidate=${candidate.toFixed(3)} allowance=${adaptive.allowance.toFixed(3)} share=${usage.distributed.share.toFixed(3)} used=${usage.usage?.used?.toFixed(3) ?? "unknown"}% model=${modelAvailable ? "available" : "missing"} error=${usage.error ?? "none"}`,
     };
   }
 }
@@ -1555,10 +1616,15 @@ export class PlanGovernor {
     const codexAssignments = activeAssignments
       .filter((item) => providerFamily(item.provider) === CODEX_PROVIDER)
       .map((item) => ({ provider: item.provider, rate: this.modelRate(item.model ? item : item.task) }));
-    const live = codexAssignments.reduce((sum, item) => sum + item.rate, 0);
-    const allowance = this.feedback.totalAllowance(snapshot.accounts, allowanceMultiplier);
-    const admitted = this.feedback.admitsAccounts(live, candidate, snapshot.accounts, runModelKey(variant), now(), allowanceMultiplier);
-    const selected = admitted ? this.feedback.selectAccount(snapshot.accounts, codexAssignments, runModelKey(variant), candidate, now(), allowanceMultiplier) : null;
+    const adaptive = this.feedback.adaptiveAssignment(
+      snapshot.accounts,
+      codexAssignments,
+      runModelKey(variant),
+      candidate,
+      now(),
+      allowanceMultiplier,
+    );
+    const selected = adaptive.selected;
     return {
       ok: selected !== null,
       provider: selected?.account.provider ?? null,
@@ -1566,10 +1632,10 @@ export class PlanGovernor {
       thinking: variant.thinking,
       instrumentBlock: selected?.block ?? null,
       instrumentSign: selected?.sign ?? null,
-      pressure: allowance > 0 ? (live + candidate) / allowance : Number.POSITIVE_INFINITY,
+      pressure: adaptive.pressure,
       detail: selected
-        ? `Codex account=${selected.account.provider} local=${live.toFixed(3)} candidate=${candidate.toFixed(3)} allowance=${allowance.toFixed(3)} multiplier=${allowanceMultiplier} share=${snapshot.distributed.share.toFixed(3)} sustainable=${snapshot.distributed.sustainableRate.toFixed(3)}`
-        : `Codex distributed gate closed: local=${live.toFixed(3)} candidate=${candidate.toFixed(3)} allowance=${allowance.toFixed(3)} multiplier=${allowanceMultiplier} share=${snapshot.distributed.share.toFixed(3)} sustainable=${snapshot.distributed.sustainableRate.toFixed(3)} observed=${snapshot.distributed.observedRate?.toFixed(3) ?? "unknown"}`,
+        ? `Codex account=${selected.account.provider} local=${adaptive.localLoad.toFixed(3)} candidate=${candidate.toFixed(3)} allowance=${adaptive.allowance.toFixed(3)} multiplier=${allowanceMultiplier} share=${snapshot.distributed.share.toFixed(3)} sustainable=${snapshot.distributed.sustainableRate.toFixed(3)}`
+        : `Codex distributed gate closed: local=${adaptive.localLoad.toFixed(3)} candidate=${candidate.toFixed(3)} allowance=${adaptive.allowance.toFixed(3)} multiplier=${allowanceMultiplier} share=${snapshot.distributed.share.toFixed(3)} sustainable=${snapshot.distributed.sustainableRate.toFixed(3)} observed=${snapshot.distributed.observedRate?.toFixed(3) ?? "unknown"}`,
     };
   }
 
@@ -1583,8 +1649,9 @@ export class PlanGovernor {
 
   async restores(lease, activeAssignments) {
     const family = providerFamily(lease.provider ?? providerOf(lease.model));
+    const governor = governorKind(lease.provider ?? providerOf(lease.model));
     const variant = { model: lease.model, thinking: lease.thinking };
-    if (family === CODEX_PROVIDER) {
+    if (governor === "codex") {
       const snapshot = await this.refresh(activeAssignments);
       const activeRates = activeAssignments
         .filter((item) => providerFamily(item.provider) === CODEX_PROVIDER)
@@ -1605,10 +1672,10 @@ export class PlanGovernor {
         detail: `restored Codex quota lease on ${selected.account.provider}`,
       } : { ok: false, detail: `Codex quota lease account unavailable: ${lease.provider ?? "any"}` };
     }
-    if (family === CURSOR_PROVIDER) {
+    if (governor === "cursor") {
       return this.cursor.restores(variant, activeAssignments);
     }
-    if (family === ANTHROPIC_PROVIDER) {
+    if (governor === "anthropic") {
       const usage = await this.anthropic.refresh(activeAssignments);
       const activeByProvider = new Map();
       for (const item of activeAssignments.filter((item) => providerFamily(item.provider) === ANTHROPIC_PROVIDER)) {
@@ -1653,9 +1720,10 @@ export class PlanGovernor {
     }
     const evaluate = (variant) => {
       const family = providerFamily(providerOf(variant.model));
-      if (family === CODEX_PROVIDER) return this.allowsCodex(variant, activeAssignments);
-      if (family === ANTHROPIC_PROVIDER) return this.anthropic.allows(variant, activeAssignments);
-      if (family === CURSOR_PROVIDER) return this.cursor.allows(variant, activeAssignments);
+      const governor = governorKind(providerOf(variant.model));
+      if (governor === "codex") return this.allowsCodex(variant, activeAssignments);
+      if (governor === "anthropic") return this.anthropic.allows(variant, activeAssignments);
+      if (governor === "cursor") return this.cursor.allows(variant, activeAssignments);
       return Promise.resolve({
         ok: false,
         provider: null,
@@ -1788,7 +1856,7 @@ export function grantQuotaLease(db, config, { provider, model, thinking, taskId 
   validateModelPolicy(model);
   const family = providerFamily(provider);
   if (family !== providerFamily(providerOf(model))) fail(`provider ${provider} cannot run ${model}`);
-  if (![CODEX_PROVIDER, ANTHROPIC_PROVIDER, CURSOR_PROVIDER].includes(family)) fail(`quota leases do not support provider family ${family}`);
+  if (!["codex", "anthropic", "cursor"].includes(governorKind(provider))) fail(`quota leases do not support provider family ${family}`);
   if (taskId !== null) {
     const task = db.prepare("SELECT * FROM task WHERE id=?").get(taskId);
     if (!task) fail(`unknown task ${taskId}`);

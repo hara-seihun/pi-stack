@@ -8,7 +8,7 @@ import test from "node:test";
 
 const temporary = fs.mkdtempSync(path.join(os.tmpdir(), "agent-orchestrator-test-"));
 process.env.AGENT_ORCHESTRATOR_DATA = temporary;
-const { AnthropicGovernor, anthropicOpusHasHeadroom, anthropicWeeklyCapacity, cancelTask, chooseIndependentAssignment, chooseTask, codexSubscriptionLifecycle, completionToolResult, controllerProcessIdentity, Controller, cpuPercent, CursorGovernor, DISPATCH_NO_WORK_TTL_MS, dispatchedTaskPrompt, DistributedQuotaFeedback, evaluateDispatch, evaluateWorkCheck, governorAllowanceMultiplier, governorControls, grantQuotaLease, insertRun, isolateTaskShell, isEligibleCodexPlan, launchBatchSize, loadConfig, nextIncompleteState, openDb, orchestratedTaskPrompt, parseAnthropicUsage, parseCursorUsage, PlanGovernor, planWindowBurnPerHour, proEntitlementSnapshot, proLaunchAvailability, rankTasks, resourceSlots, setGovernorBoost, setTaskOptions, shouldAdvanceBackoff, taskSettings, taskSupportsAssignment, TOOL_SHELL, validateCompletion, validateModelPolicy, WORK_CHECK_TTL_MS, workCheckStale, workReady } = await import("./orchestrator.mjs");
+const { AnthropicGovernor, anthropicOpusHasHeadroom, anthropicWeeklyCapacity, cancelTask, chooseIndependentAssignment, chooseTask, codexSubscriptionLifecycle, completionToolResult, controllerProcessIdentity, Controller, cpuPercent, CursorGovernor, DISPATCH_NO_WORK_TTL_MS, dispatchedTaskPrompt, DistributedQuotaFeedback, evaluateDispatch, evaluateWorkCheck, governorAllowanceMultiplier, governorControls, grantQuotaLease, insertRun, isolateTaskShell, isEligibleCodexPlan, launchBatchSize, loadConfig, loadProviderManifest, nextIncompleteState, openDb, orchestratedTaskPrompt, parseAnthropicUsage, parseCursorUsage, PlanGovernor, planWindowBurnPerHour, proEntitlementSnapshot, proLaunchAvailability, rankTasks, resourceSlots, setGovernorBoost, setTaskOptions, shouldAdvanceBackoff, taskSettings, taskSupportsAssignment, TOOL_SHELL, validateCompletion, validateModelPolicy, WORK_CHECK_TTL_MS, workCheckStale, workReady } = await import("./orchestrator.mjs");
 
 test.after(() => fs.rmSync(temporary, { recursive: true, force: true }));
 
@@ -734,6 +734,16 @@ test("plan estimator paces all remaining capacity to 100% at window reset", () =
   assert.equal(planWindowBurnPerHour({ used_percent: 40, reset_at: (at + 10 * 3600_000) / 1000 }, at), 6);
   assert.equal(planWindowBurnPerHour({ used_percent: 40, reset_at: at / 1000 }, at), 0);
   assert.equal(planWindowBurnPerHour({}, at), null);
+});
+
+test("provider manifest is the sole model-mix declaration", () => {
+  const manifest = loadProviderManifest();
+  assert.deepEqual(manifest.mixes, [{ base: "sol", alternatives: ["opus", "grok"], strategy: "independent-capacity" }]);
+  const config = loadConfig();
+  assert.deepEqual(config.plan.modelMixes["openai-codex/gpt-5.6-sol:xhigh"].alternatives, [
+    { model: "anthropic/claude-opus-5", thinking: "xhigh" },
+    { model: "cursor/grok-4.6", thinking: "xhigh" },
+  ]);
 });
 
 test("mixed models choose independently admitted provider capacity", () => {
