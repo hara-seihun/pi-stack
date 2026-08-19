@@ -57,6 +57,14 @@ Before answering, the controller reports the failure to the failing account's ow
 
 Both bounds are explicit: a host waits twenty minutes for an assignment that may never come, and one run may be moved at most four times. After either bound the launch settles as an ordinary incomplete run whose error is the provider failure. A turn that fails because the provider refused this exact request — invalid request, moderation, unusable credentials, an operator abort — is never moved, because every other provider would refuse it identically. `orchestrator agents` shows a waiting session as `awaiting-provider` and reports how often a run has already been moved.
 
+## Session recovery
+
+Every session this machine has ever run is persisted under `~/data/agent-orchestrator/sessions/`, and nothing prunes them. A launch that ended without reporting therefore did not lose its work; it left a complete transcript, including the reasoning and tool results that were never summarized anywhere else. `orchestrator run resume RUN_ID` continues that exact session: a new run is launched for the same task, the host opens the predecessor's session file instead of creating one, drops the turn that killed it, and prompts the agent to finish. The agent starts with its own half-finished proof rather than with a task description.
+
+A resumed launch is pinned to the model that produced the session, because another model in the same mix can have a smaller context window than the transcript it would inherit. It is admitted by the same governor as any launch, and it takes the tick's one admitted session ahead of a fresh launch, since continuing established work is worth more than starting it again. The resume prompt states what the agent cannot see for itself: how long it was gone, that this is a new launch with a new worker id, that every lease and claim it held was released, and that the repository, ledger, and other agents have moved on, so it must re-verify before writing.
+
+`orchestrator run resumable [TASK_ID]` ranks dead launches by transcript size, which is the cheap proxy for how much established work each is holding. A request is abandoned, with an event, when its task is gone or cancelled or its transcript is no longer on disk; a closed governor is not abandonment, and the request waits for capacity. A run can be resumed once.
+
 ## Governor
 
 Before every launch, one governor checks:
@@ -85,6 +93,19 @@ Each installation also owns persistent OpenAI and Anthropic allowance controls i
 
 The `chatgpt-pro` provider fail-closes fully assembled, text-only GPT-5.6 mathematical moonshots against authenticated persisted-conversation evidence. Kernel browser profiles are admitted individually, and the governor derives capacity from their live logical leases and cooldowns. A billable browser exists only long enough to submit or perform one scheduled persisted-state read: submission browsers close immediately after successful response headers, polling occurs every twenty minutes, every polling browser closes immediately, and Kernel enforces a five-minute safety timeout. By operator request there is a machine-wide ceiling of four simultaneous Pro agents; actual concurrency is lower whenever fewer than four independently authenticated profiles are eligible. GPT-5.5 is banned by task validation. The active oracle-area Pro lane has completed a verified 135-minute turn. Pro runs only as independently governed moonshot lanes; tool-capable frontier agents do not receive an embedded Pro delegation tool. Verified standing-lane response text is recorded directly in the run ledger; tool-capable models continue to report through `task_complete`. CPU and RAM independently fail closed at their configured utilization thresholds.
 
+## Paused (2026-08-19)
+
+The controller is disabled on GMKtec by operator request until the
+[context-guard](../extensions/context-guard/README.md) thrashing defect is
+fixed (`Fix context-guard thrashing` in `~/hara/todos.md`). `enable = false` on
+`systemd.services.agent-orchestrator` in `/etc/nixos/configuration.nix` renders
+the unit masked; stopping it is not enough, because
+`research-action-reconciler.service` runs every minute with
+`Wants=agent-orchestrator.service` and pulls it straight back up. No agent
+hosts are running: each live run was ended with `orchestrator agent stop` and
+every host exited. Resume by removing that line and rebuilding
+([machine/operations.md](/home/kenan/machine/operations.md)).
+
 ## Operations
 
 ```bash
@@ -99,6 +120,8 @@ orchestrator quota grant --provider openai-codex-3 --model openai-codex/gpt-5.6-
 orchestrator quota grant --provider cursor --model cursor/grok-4.6 --thinking xhigh --hours 2
 orchestrator quota revoke LEASE_ID
 orchestrator runs [TASK_ID]
+orchestrator run resumable [TASK_ID]   # dead launches whose session can still be continued
+orchestrator run resume RUN_ID         # continue that launch's own session
 orchestrator agents            # live hosts, their code generation, and every running agent
 orchestrator agent stop RUN_ID # ask the owning host to abort one agent
 orchestrator task show TASK_ID
