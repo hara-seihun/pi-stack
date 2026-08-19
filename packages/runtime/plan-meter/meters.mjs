@@ -209,32 +209,39 @@ export function parseAnthropic(body, profile = null) {
   };
 }
 
+/** Cursor's included allocation in cents, which identifies the paid tier. */
+const CURSOR_TIERS = new Map([[2000, "pro"], [7000, "pro+"], [40000, "ultra"]]);
+
 /**
- * Normalize a Cursor GetCurrentPeriodUsage body. Cursor reports two disagreeing
- * counters over one monthly cycle: `totalPercentUsed` against a large bonus
- * allowance, and `totalSpend` against the `limit` its own dashboard calls
- * included usage. They differ by more than an order of magnitude, so both are
- * captured and the reporter takes whichever implies the smaller capacity.
+ * Normalize a Cursor GetCurrentPeriodUsage body. Cursor reports two counters
+ * over one monthly cycle that disagree by an order of magnitude, and only one
+ * of them is a limit: `totalPercentUsed` is the quota that stops work, while
+ * `totalSpend` against `limit` is a retail-value estimate of what was consumed
+ * that routinely exceeds the allocation's price and never blocks. The spend
+ * figure is therefore recorded as a balance, like Codex credits, so it can
+ * never be mistaken for the binding window.
  */
 export function parseCursor(body) {
   const usage = body?.planUsage;
   const start = numberOrNull(body?.billingCycleStart);
   const end = numberOrNull(body?.billingCycleEnd);
   const windowSeconds = start !== null && end !== null && end > start ? Math.round((end - start) / 1000) : null;
-  const buckets = [];
-  const push = (bucket, usedPercent, extra = {}) => {
-    if (usedPercent === null) return;
-    buckets.push({ bucket, usedPercent, resetsAt: end, windowSeconds, usedUnits: null, limitUnits: null, ...extra });
-  };
-  push("monthly", numberOrNull(usage?.totalPercentUsed));
+  const used = numberOrNull(usage?.totalPercentUsed);
+  if (used === null) return null;
+  const buckets = [{
+    bucket: "monthly", usedPercent: used, resetsAt: end, windowSeconds, usedUnits: null, limitUnits: null,
+  }];
   const spend = numberOrNull(usage?.totalSpend);
   const limit = numberOrNull(usage?.limit);
-  if (spend !== null && limit !== null && limit > 0) {
-    push("monthly_included", (spend / limit) * 100, { usedUnits: spend, limitUnits: limit });
+  if (spend !== null) {
+    buckets.push({
+      bucket: "retail_value", usedPercent: null, resetsAt: end, windowSeconds: null,
+      usedUnits: spend, limitUnits: limit,
+    });
   }
-  if (!buckets.length) return null;
   const limitType = String(body?.spendLimitUsage?.limitType ?? "").trim().toLowerCase();
-  const plan = String(body?.membershipType ?? (limitType === "team" ? "team" : "pro")).trim().toLowerCase();
+  const plan = String(body?.membershipType ?? "").trim().toLowerCase()
+    || (limitType === "team" ? "team" : CURSOR_TIERS.get(limit) ?? "paid");
   return { plan, accountKey: null, tier: null, buckets };
 }
 

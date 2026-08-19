@@ -69,14 +69,14 @@ Tokens are counted over each account's own first-to-last sample span rather than
 - Cache reads dominate agent traffic, so compare `Fresh+out` when reasoning about marginal cost and `Tokens` when reasoning about throughput.
 - Capacity is measured at the *observed* workload. Cursor bills cached prefixes cheaply while the ledger counts them as full input tokens, so a Cursor figure derived from long-prefix agent sessions overstates what short, diverse sessions would buy.
 
-## Cursor reports two disagreeing counters
+## Cursor reports two disagreeing counters and only one is a limit
 
-`GetCurrentPeriodUsage` returns both `planUsage.totalPercentUsed` and `planUsage.totalSpend` against `planUsage.limit`, over the same monthly cycle, differing by roughly 13x. They are recorded as two buckets:
+`GetCurrentPeriodUsage` returns both `planUsage.totalPercentUsed` and `planUsage.totalSpend` against `planUsage.limit` for the same monthly cycle, differing by roughly 13x. Cursor's own dashboard shows the dollar figure ("You've used 34% of your included usage") while the percentage bar reads 3%, which invites exactly the wrong conclusion.
 
-- `monthly` — `totalPercentUsed`, the counter the agent orchestrator gates admission on.
-- `monthly_included` — `totalSpend / limit`, the pool Cursor's own dashboard calls included usage (`displayMessage`: "You've used 34% of your included usage"). `used_units` and `limit_units` hold the raw cents.
+- `monthly` — `totalPercentUsed`. This is the quota. At 100% the cycle's allocation is spent and work stops unless on-demand spending is enabled. It is what the agent orchestrator gates admission on.
+- `retail_value` — `totalSpend` in cents with `limit` as its nominal size, recorded as a balance with no percentage so it can never be selected as a binding window. Cursor support states plainly that this is "an informational estimate of the retail value of what you've consumed", that it routinely exceeds the allocation's dollar size because the allocation is worth more than the subscription price, and that it triggers no limit ([forum](https://forum.cursor.com/t/pro-plan-confused-about-included-usage-vs-dollar-amount/159902)).
 
-Both track the same spend against different denominators, so `monthly_included` always burns faster and is therefore the binding bucket. Reporting it is the conservative reading and the one that matches what a Cursor user sees.
+The cents figure still earns its place in the record: it is the only direct measure of what this traffic would cost at retail, and its ratio to `monthly` tells you how much leverage the subscription provides. `limit` also identifies the tier — $20 Pro, $70 Pro+, $400 Ultra — which the endpoint does not otherwise report.
 
 ## Validation
 

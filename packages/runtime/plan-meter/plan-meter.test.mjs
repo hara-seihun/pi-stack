@@ -125,7 +125,7 @@ test("capacity is normalized to seven days across window lengths", () => {
   assert.equal(weeklyTokens({ burned: 5, windowSeconds: null }, 10e6), null);
 });
 
-test("cursor reports two disagreeing cycle counters and both are captured", () => {
+test("cursor spend is a retail-value balance, never a limit", () => {
   const parsed = parseCursor({
     billingCycleStart: "1787092762000",
     billingCycleEnd: "1789771162000",
@@ -133,12 +133,18 @@ test("cursor reports two disagreeing cycle counters and both are captured", () =
     planUsage: { totalSpend: 2405, limit: 7000, totalPercentUsed: 2.642857142857143 },
   });
   const byName = Object.fromEntries(parsed.buckets.map((bucket) => [bucket.bucket, bucket]));
-  assert.equal(parsed.plan, "pro");
+  assert.equal(parsed.plan, "pro+");
   assert.equal(byName.monthly.usedPercent, 2.642857142857143);
-  assert.equal(byName.monthly_included.usedPercent, (2405 / 7000) * 100);
-  assert.equal(byName.monthly_included.limitUnits, 7000);
   assert.equal(byName.monthly.resetsAt, 1789771162000);
   assert.equal(byName.monthly.windowSeconds, 2678400);
+  // 34% of the dollar figure with 2.6% of the quota spent: only the quota binds.
+  assert.equal(byName.retail_value.usedPercent, null);
+  assert.equal(byName.retail_value.windowSeconds, null);
+  assert.equal(byName.retail_value.usedUnits, 2405);
+  assert.equal(bindingBucket({
+    monthly: { burned: 0.02, windowSeconds: 2678400 },
+    retail_value: { burned: 0, windowSeconds: null },
+  }), "monthly");
   assert.equal(parseCursor({ planUsage: {} }), null);
 });
 
@@ -177,7 +183,7 @@ test("a full sampling round records readings, gaps, and no credential material",
       if (url.includes("cursor.sh")) {
         return { ok: true, json: async () => ({
           billingCycleStart: "1787092762000", billingCycleEnd: "1789771162000",
-          planUsage: { totalSpend: 700, limit: 7000, totalPercentUsed: 0.8 },
+          planUsage: { totalSpend: 700, limit: 2000, totalPercentUsed: 0.8 },
         }) };
       }
       if (url.includes("wham/usage")) {
@@ -199,7 +205,8 @@ test("a full sampling round records readings, gaps, and no credential material",
     assert.equal(results.find((row) => row.provider === "cursor").status, "ok");
     const stored = db.prepare("SELECT provider, status, plan FROM sample ORDER BY provider").all();
     assert.equal(stored.length, 4);
-    assert.equal(db.prepare("SELECT used_percent FROM bucket WHERE bucket='monthly_included'").get().used_percent, 10);
+    assert.equal(db.prepare("SELECT used_units FROM bucket WHERE bucket='retail_value'").get().used_units, 700);
+    assert.equal(results.find((row) => row.provider === "cursor").plan, "pro");
     assert.equal(db.prepare("SELECT used_percent FROM bucket WHERE bucket='weekly' AND used_percent=61").all().length, 1);
     db.close();
 
