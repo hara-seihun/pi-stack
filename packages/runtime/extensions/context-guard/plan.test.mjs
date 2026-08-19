@@ -47,12 +47,14 @@ test("baseCallId strips provider item-id suffix only", () => {
   assert.equal(baseCallId(undefined), undefined);
 });
 
-test("transformOldMessage evicts tool results with a pointer to the transcript", () => {
+test("transformOldMessage evicts tool results with a pointer to the notice", () => {
   const t = transformOldMessage(toolResult("call_1|fc_1", bigText), "/tmp/s.jsonl", est);
   assert.equal(t.toolCallId, "call_1");
   assert.equal(t.content.length, 1);
   assert.match(t.content[0].text, /evicted this bash result/);
-  assert.match(t.content[0].text, /\/tmp\/s\.jsonl/);
+  // The transcript path lives once in the notice, not in every placeholder.
+  assert.match(t.content[0].text, /notice above/);
+  assert.ok(!t.content[0].text.includes("/tmp/s.jsonl"));
   assert.ok(est(t) < est(toolResult("call_1|fc_1", bigText)));
 });
 
@@ -97,6 +99,10 @@ test("buildView returns null when untouched and is deterministic when cut", () =
   const a = buildView(msgs, state, est, "/tmp/s.jsonl");
   const b = buildView(msgs, state, est, "/tmp/s.jsonl");
   assert.deepEqual(a, b);
+  // Exactly one notice carries the transcript path for all placeholders.
+  const notices = a.filter((m) => m.role === "user" && m.content[0]?.text?.includes("context-guard notice"));
+  assert.equal(notices.length, 1);
+  assert.match(notices[0].content[0].text, /\/tmp\/s\.jsonl/);
   // Tail is byte-identical: same object references as the source array.
   assert.equal(a[a.length - 1], msgs[msgs.length - 1]);
   // Old thinking is gone from the view.

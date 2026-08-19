@@ -21,7 +21,9 @@ fires for them):
   Guarantees Sol/Luna never bill the 272k tier (22k margin covers estimator
   error and single-step bursts).
 - **Rung 1 — evict tool results** older than the tail: body replaced by a
-  placeholder naming the tool and pointing at the greppable transcript.
+  short placeholder naming the tool. A single notice message after the head
+  carries the greppable transcript path once for the whole view — repeating
+  the path in hundreds of placeholders measurably raised the post-cut floor.
   Tool-call arguments are kept verbatim (they are the artifact trail).
 - **Rung 2 — strip old reasoning**: thinking blocks removed from old
   assistant messages, along with all provider validation metadata
@@ -32,10 +34,18 @@ fires for them):
   (unevictable residue accumulates ~10% of throughput; only marathon runs hit
   this). The model writes a structured handoff *in-conversation* (cache-hot,
   sees full tool results), which then replaces the summarized span. User
-  messages in that span are preserved verbatim.
-- **Verbatim tail:** the most recent **50k** tokens cross every cut
+  messages in that span are preserved verbatim. The summary call requests
+  **low reasoning effort**: at the session's own effort (research lanes run
+  xhigh) reasoning can consume the entire output budget and return zero text,
+  which was observed on gpt-5.6-sol and silently landed the cut on the floor.
+  An empty summary now logs its stopReason and falls back to eviction.
+- **Verbatim tail:** the most recent **50k billed** tokens cross every cut
   byte-identical — thinking blocks, signatures, and item IDs included. The
-  tail boundary never separates a tool result from its call.
+  planner accumulates estimator units, so the guard divides the tail budget by
+  its calibration ratio; without that, Sol's ~1.9× estimate→billed ratio
+  turned the "50k" tail into ~93k billed and pushed the floor to ~154k (the
+  2026-08-19 floor breach). The tail boundary never separates a tool result
+  from its call.
 - **Deep and rare:** cuts land at ~100–130k, then stay quiet for ~30+ steps.
   Transforms are monotone and deterministic, so the edited prefix is stable:
   one cache miss per cut, then the provider cache re-forms.
@@ -69,7 +79,7 @@ estimate instead of the anchor.
 | knob | value | provenance |
 |---|---|---|
 | trigger | 250k | 272k tier − margin; inside the 239–453k quality plateau; sim: 55% of uncapped Sol cost |
-| tail | 50k | LangWatch: 30–60k verbatim tail is the single biggest quality lever; +2.5 cost points vs 20k |
+| tail | 50k billed (÷ calibration ratio at cut time) | LangWatch: 30–60k verbatim tail is the single biggest quality lever; +2.5 cost points vs 20k |
 | residueMax | 140k | keeps ≥ ~25 clean steps per cycle; rmax 100k–180k within 0.6 cost points |
 | floorHeadroom | 100k | Opus@150k/80k-tail simulated at 160% of uncapped — thrash territory |
 | quietSteps | 10 | thrash guard window |
@@ -112,5 +122,15 @@ the trigger (better compactor ⇒ lower optimum), don't raise it.
 ## Tests
 
 ```bash
-node --test plan.test.mjs
+node --test
 ```
+
+## Rollout
+
+Agent hosts load this extension at process start and cache it for their
+lifetime. After changing this package, deploy (`~/tools/pi-runtime/deploy`) or
+restart `agent-orchestrator.service`: the replacement controller computes a new
+code fingerprint, marks hosts on the old fingerprint draining, and starts a
+fresh host generation. An edited file on disk does **not** reach lanes running
+in an existing host — the 2026-08-19 floor alerts kept firing for 15 minutes
+after the fix was committed because the host predated the commit.

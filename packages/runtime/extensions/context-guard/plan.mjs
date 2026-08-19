@@ -13,7 +13,10 @@
 export const CFG = {
   /** Cut before any request is projected to reach this many prompt tokens. */
   trigger: 250_000,
-  /** Verbatim tail preserved byte-identical across every cut. */
+  /** Verbatim tail preserved byte-identical across every cut, in BILLED
+   *  tokens: the caller divides by its calibration ratio before planning, so
+   *  the model sees ~50k real tokens regardless of how far the byte estimator
+   *  undercounts for its tokenizer. */
   tailTokens: 50_000,
   /** If rungs 1-2 would land above this, escalate to a handoff summary. */
   residueMax: 140_000,
@@ -47,8 +50,8 @@ export function transformOldMessage(m, note, estimate) {
   if (m.role === "toolResult") {
     const tokens = estimate ? estimate(m) : 0;
     const text =
-      `[context-guard evicted this ${m.toolName} result (~${Math.round(tokens).toLocaleString()} tokens). ` +
-      `Re-run the tool if you need it again${note ? `, or grep the full transcript: ${note}` : ""}.]`;
+      `[context-guard evicted this ${m.toolName} result (~${Math.round(tokens).toLocaleString()} tokens); ` +
+      `re-run it if needed${note ? ", or grep the transcript named in the context-guard notice above" : ""}.]`;
     return {
       ...m,
       toolCallId: baseCallId(m.toolCallId),
@@ -100,9 +103,26 @@ export function findTailBoundary(messages, minIndex, estimate, tailTokens) {
 }
 
 /**
+ * One notice per view carries the transcript path, so the (potentially
+ * hundreds of) eviction placeholders don't each repeat it.
+ */
+export function noticeMessage(note, timestamp) {
+  return {
+    role: "user",
+    content: [{
+      type: "text",
+      text:
+        "[context-guard notice: older tool results and reasoning were evicted from this view to cap context. " +
+        `The full session transcript remains greppable at: ${note}]`,
+    }],
+    timestamp,
+  };
+}
+
+/**
  * Build the transformed view for the current state.
- * Layout: [ head(msg 0) | summary? | verbatim user-ish from summarized span |
- *           rung-1/2-transformed old messages | verbatim tail ].
+ * Layout: [ head(msg 0) | summary? | notice? | verbatim user-ish from summarized
+ *           span | rung-1/2-transformed old messages | verbatim tail ].
  * Returns null when the state implies no modification.
  */
 export function buildView(messages, state, estimate, note) {
@@ -111,6 +131,7 @@ export function buildView(messages, state, estimate, note) {
   const out = [messages[0]];
   if (summary) out.push(summary.message);
   const summaryEnd = summary ? summary.coversUpTo : 1;
+  if (note && watermark > summaryEnd) out.push(noticeMessage(note, messages[0]?.timestamp));
   for (let i = 1; i < Math.min(watermark, messages.length); i++) {
     const m = messages[i];
     if (i < summaryEnd) {

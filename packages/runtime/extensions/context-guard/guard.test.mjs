@@ -10,6 +10,7 @@ const ALERTS = mkdtempSync(join(tmpdir(), "context-guard-alerts-"));
 process.env.PI_CONTEXT_GUARD_ALERTS = ALERTS;
 process.on("exit", () => rmSync(ALERTS, { recursive: true, force: true }));
 const { default: guard } = await import("./index.mjs");
+const { CFG, planCut } = await import("./plan.mjs");
 
 function alerts() {
   return readdirSync(ALERTS);
@@ -21,6 +22,7 @@ function makeHarness({ completeText = "SUMMARY BODY" } = {}) {
   guard(pi);
   let anchor = null;
   let completeCalls = 0;
+  let lastCompleteOptions = null;
   const ctx = {
     sessionManager: {
       getSessionFile: () => "/tmp/session.jsonl",
@@ -29,8 +31,9 @@ function makeHarness({ completeText = "SUMMARY BODY" } = {}) {
     getContextUsage: () => (anchor === null ? undefined : { tokens: anchor, contextWindow: 1_000_000, percent: null }),
     model: { id: "test-model", provider: "test" },
     modelRegistry: {
-      complete: async () => {
+      complete: async (model, context, options) => {
         completeCalls++;
+        lastCompleteOptions = options;
         return { content: [{ type: "text", text: completeText }], usage: {} };
       },
     },
@@ -39,6 +42,7 @@ function makeHarness({ completeText = "SUMMARY BODY" } = {}) {
     fire: (messages) => handlers.get("context")({ type: "context", messages }, ctx),
     setAnchor: (t) => { anchor = t; },
     getCompleteCalls: () => completeCalls,
+    getLastCompleteOptions: () => lastCompleteOptions,
   };
 }
 
@@ -84,12 +88,22 @@ test("cuts when the usage anchor crosses the trigger, and the view shrinks", asy
   h.setAnchor(260_000);
   const result = await h.fire(msgs);
   assert.ok(result?.messages, "expected a replacement view");
-  assert.ok(result.messages.length <= msgs.length);
+  // Rungs 1-2 preserve message count; the view adds at most the one notice.
+  assert.ok(result.messages.length <= msgs.length + 1);
   const old = result.messages.filter(
     (m) => m.role === "toolResult" && m.content[0]?.text?.includes("context-guard evicted"),
   );
   assert.ok(old.length > 0, "expected evicted tool results");
-  assert.match(old[0].content[0].text, /\/tmp\/session\.jsonl/);
+  // The transcript path appears once, in the notice — not in every placeholder.
+  const notice = result.messages.find(
+    (m) => m.role === "user" && m.content[0]?.text?.includes("context-guard notice"),
+  );
+  assert.ok(notice, "expected the transcript notice");
+  assert.match(notice.content[0].text, /\/tmp\/session\.jsonl/);
+  assert.ok(
+    !old[0].content[0].text.includes("/tmp/session.jsonl"),
+    "placeholders must not each repeat the transcript path",
+  );
   // Tail survives verbatim: the last toolResult still has its full payload.
   const last = result.messages[result.messages.length - 1];
   assert.equal(last.role, "toolResult");
@@ -134,6 +148,11 @@ test("escalates to a handoff summary when residue exceeds the cap", async () => 
   h.setAnchor(300_000);
   const result = await h.fire(msgs);
   assert.equal(h.getCompleteCalls(), 1, "expected exactly one summary call");
+  assert.equal(
+    h.getLastCompleteOptions()?.reasoningEffort,
+    "low",
+    "the summary call must request low reasoning effort so reasoning cannot consume the output budget",
+  );
   const summary = result.messages.find(
     (m) => m.role === "user" && m.content[0]?.text?.includes("Context handoff summary"),
   );
@@ -141,6 +160,44 @@ test("escalates to a handoff summary when residue exceeds the cap", async () => 
   assert.match(summary.content[0].text, /## Intent/);
   // Summarized span dropped: view must be much shorter than the source.
   assert.ok(result.messages.length < msgs.length / 2);
+});
+
+test("an empty handoff summary falls back to eviction without corrupting the view", async () => {
+  const h = makeHarness({ completeText: "" });
+  const msgs = [user("task packet")];
+  for (let i = 0; i < 30; i++) {
+    msgs.push(
+      {
+        role: "assistant",
+        timestamp: 300 + i,
+        usage: {},
+        content: [{ type: "text", text: "t".repeat(24_000) }],
+      },
+      ...turn(i, "small"),
+    );
+  }
+  h.setAnchor(300_000);
+  const result = await h.fire(msgs);
+  assert.equal(h.getCompleteCalls(), 1, "expected the summary attempt");
+  const summary = result.messages.find(
+    (m) => m.role === "user" && m.content[0]?.text?.includes("Context handoff summary"),
+  );
+  assert.equal(summary, undefined, "no summary message may be fabricated from empty text");
+  assert.ok(
+    result.messages.some((m) => m.role === "toolResult" && m.content[0]?.text?.includes("evicted")),
+    "rungs 1-2 must still apply",
+  );
+});
+
+test("a smaller billed-tail budget moves the boundary later", () => {
+  const est = (m) => JSON.stringify(m).length / 4;
+  const msgs = session(12);
+  const wide = planCut(msgs, { watermark: 1, summary: null }, est, { ...CFG, tailTokens: 50_000 }, "");
+  const narrow = planCut(msgs, { watermark: 1, summary: null }, est, { ...CFG, tailTokens: 50_000 / 2 }, "");
+  assert.ok(
+    narrow.boundary > wide.boundary,
+    "dividing tailTokens by the calibration ratio must shrink the verbatim tail",
+  );
 });
 
 test("a healthy landing does not alert, and a measured floor breach does", async () => {

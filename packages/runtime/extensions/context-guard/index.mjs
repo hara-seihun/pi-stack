@@ -140,7 +140,12 @@ export default function (pi) {
       writeAlert("context-guard thrashing", msg);
     }
 
-    const { boundary, landEstimate } = planCut(messages, state, estimateTokens, CFG, note);
+    // tailTokens is denominated in billed tokens; the planner accumulates
+    // estimator units, so convert by the session's calibration ratio. Without
+    // this, a tokenizer the byte estimator undercounts by ~1.9x (measured on
+    // GPT-5.6 Sol) receives a ~93k-billed tail and lands near the floor.
+    const cutCfg = { ...CFG, tailTokens: CFG.tailTokens / state.ratio };
+    const { boundary, landEstimate } = planCut(messages, state, estimateTokens, cutCfg, note);
     const landTokens = landEstimate * state.ratio;
 
     if (landTokens > CFG.residueMax && !state.summarizing && ctx.model) {
@@ -163,6 +168,13 @@ export default function (pi) {
               maxTokens: CFG.summaryMaxTokens,
               signal: controller.signal,
               sessionId: ctx.sessionManager?.getSessionId?.(),
+              // The summary is transcription, not derivation. At the session's
+              // own effort (research lanes run xhigh) reasoning can consume the
+              // entire output budget and return zero text — observed on
+              // gpt-5.6-sol 2026-08-19: an 84s summary call yielded no text and
+              // the guard silently landed on the floor. Ignored by APIs that
+              // don't know the option.
+              reasoningEffort: "low",
             },
           );
           const text = (response.content ?? [])
@@ -175,6 +187,11 @@ export default function (pi) {
               message: summaryMessage(text, transcript, Date.now()),
               coversUpTo: boundary,
             };
+          } else {
+            console.error(
+              `context-guard: handoff summary returned no text (stopReason ${response.stopReason ?? "unknown"}` +
+              `${response.errorMessage ? `, error: ${response.errorMessage}` : ""}); falling back to eviction.`,
+            );
           }
         } finally {
           clearTimeout(timer);
