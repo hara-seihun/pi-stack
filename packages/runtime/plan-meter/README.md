@@ -50,6 +50,8 @@ The default `auto` window starts at the latest point where **every** contributin
 | `Tokens / Fresh+out` | Usage-ledger totals for the same account and period, summed across hosts. |
 | `Tok/1%` | Tokens per one percent of the binding bucket. |
 | `Tok/week` | Tokens seven days of that plan buys at the observed rate — the comparison figure. |
+| `$/mo` | What that plan costs, read from [`plan-prices.json`](plan-prices.json). |
+| `Tok/$` | One month of capacity per subscription dollar — the cost-effectiveness figure. |
 
 Burn accumulates positive deltas rather than subtracting start from end, so a period spanning a reset is measured instead of reported as negative.
 
@@ -58,6 +60,8 @@ The binding bucket is the largest `burn x window length`, because capacity is pr
 Per-provider rows pool tokens over summed weekly-equivalent burn before multiplying by the account count. Meters tick in whole percent, so a single account measured over a few hours divides its tokens by a 1-2% reading and inherits that rounding; pooling twelve Codex accounts does not.
 
 Meters are server-side and global. An account configured on both hosts returns the same reading from each, so the reporter deduplicates meters by account while summing tokens across hosts.
+
+`plan-prices.json` is the sole source of subscription prices, keyed `family:plan`, and holds what this machine actually pays rather than list price — the two Anthropic Max 20x accounts are $200 and the Max 5x is $100. Edit that file when a plan changes; the reporter prints the price it assumed beside every figure derived from it, and an unpriced plan reports `n/a` instead of guessing.
 
 Balances that moved during the window — Codex credits, Cursor's retail value — print below the table with the tokens each unit bought.
 
