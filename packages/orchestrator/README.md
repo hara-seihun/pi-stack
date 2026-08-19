@@ -5,9 +5,13 @@ multi-account usage calibration, quota governance, tiered model routing, and
 task scheduling. Built on pi's SDK — pi is the engine, this is the fleet
 layer.
 
-Status: early. The core calibrator, ledger, usage-logger extension, and task
-eligibility layer are implemented; the broker, agent host, controller, and
-operator extension follow.
+Status: the core calibrator, ledger, usage-logger extension, task
+eligibility layer, broker, controller, in-process agent host, and operator
+CLI are implemented. Deferred: the in-session routing extension (multi-pass
+successor, provider failover for interactive sessions) — it needs a live
+failure-interception design against pi's extension API and will land as its
+own part; and daemon wiring for the controller loop (deployment
+configuration: tier→model maps and meter topology as operator config).
 
 ## Design
 
@@ -116,6 +120,52 @@ describe scheduling:
 The machine-wide pause is the root of the same mechanism: a `control` row
 (`launches = enabled|paused`) in the ledger, honoured by every evaluation
 regardless of who restarts which process.
+
+## Broker (`src/broker/`)
+
+The broker owns account custody: which account and model a launch runs on,
+how many concurrent sessions each account sustains, and where a failing
+session moves. Everything it knows is derived from ledger facts at decision
+time — sustainable percent/hour from the replayed calibrator's hazard-paced
+plan (most binding meter wins), per-session burn measured from observed
+meter drain over recorded session-hours. There are no hand-configured burn
+constants anywhere.
+
+An uncalibrated account is in **bootstrap**: exactly one concurrent session,
+so the calibrator gets data without risking a stampede; measurement then
+earns concurrency. `slotsByTier` advertises capacity for one allocation
+cycle by virtually admitting scarcest-tier-first (so shared accounts are
+never double-counted), capped by what eligible tasks actually demand (so a
+scarce tier never hoards an account nothing wants). `failover` cools the
+failing account down and re-admits the run elsewhere.
+
+## Controller and host (`src/controller/`, `src/host/`)
+
+The controller is the launch loop. Each tick: reap runs with stale
+heartbeats (a crashed host needs no other recovery protocol), forward abort
+requests, evaluate the scheduler, net demand against in-flight runs (a
+backlog of 3 with 2 agents on it wants one more agent, not three), allocate
+broker slots, admit, record the run, launch. A per-task circuit breaker
+skips tasks with repeated recent errors so a crashing task cannot hot-loop
+through plan capacity. The controller holds no state of its own — every
+fact lives in the ledger, so restarts lose nothing.
+
+Run custody lives in the ledger's `run` table (launch-side only: `tier` is
+recorded there for capacity accounting and never reaches a host). A task
+without a `prompt` is a pure demand signal for gates and is never launched.
+
+The host boundary is two small interfaces (`HostManager`, `HostEvents`);
+`PiHost` is the thin pi-SDK adapter: one launch = one embedded
+`AgentSession`, the task prompt as first user message, a `task_complete`
+custom tool for the result report, a 30-second heartbeat, `dispose` on the
+way out. All policy lives upstream; the adapter contains no decisions.
+
+## Operator CLI (`src/cli.ts`)
+
+`pi-orchestrator status | task set/list/delete | pause | resume | abort` —
+thin reads and writes against the ledger (path from
+`PI_ORCHESTRATOR_LEDGER`, default `~/.local/share/pi-orchestrator/`).
+`npm run build` emits `dist/` for the `pi-orchestrator` bin.
 
 ## Development
 

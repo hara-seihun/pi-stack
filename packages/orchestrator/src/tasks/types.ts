@@ -16,6 +16,11 @@ export interface TaskSpec {
   readonly demandConstant?: number;
   readonly gate?: string;
   readonly tiers: readonly Tier[];
+  /** The agent's task prompt. A task without one is a pure demand signal
+   * (referenced by gates) and is never launched. */
+  readonly prompt?: string;
+  /** Working directory for launched sessions. */
+  readonly cwd?: string;
 }
 
 export interface DemandState {

@@ -77,14 +77,70 @@ CREATE TABLE task_demand (
 ) STRICT;
 `;
 
-const MIGRATIONS: readonly string[] = [SCHEMA, TASK_SCHEMA];
+const RUN_SCHEMA = `
+ALTER TABLE task ADD COLUMN prompt TEXT;
+ALTER TABLE task ADD COLUMN cwd TEXT;
+ALTER TABLE account ADD COLUMN cooldown_until INTEGER;
+
+CREATE TABLE run (
+  id TEXT PRIMARY KEY,
+  task_id TEXT NOT NULL,
+  tier TEXT NOT NULL,
+  account_id TEXT NOT NULL,
+  model TEXT NOT NULL,
+  provider TEXT NOT NULL,
+  state TEXT NOT NULL CHECK (state IN ('running', 'done', 'error', 'aborted')),
+  started_at INTEGER NOT NULL,
+  ended_at INTEGER,
+  heartbeat_at INTEGER,
+  abort_requested INTEGER NOT NULL DEFAULT 0,
+  productive INTEGER,
+  complete INTEGER,
+  detail TEXT
+) STRICT;
+
+CREATE INDEX run_state ON run (state);
+CREATE INDEX run_task_started ON run (task_id, started_at);
+`;
+
+const MIGRATIONS: readonly string[] = [SCHEMA, TASK_SCHEMA, RUN_SCHEMA];
 
 export interface AccountRow {
   readonly id: string;
   readonly provider: string;
   readonly label: string | undefined;
   readonly accessUntil: number | undefined;
+  readonly cooldownUntil: number | undefined;
   readonly createdAt: number;
+}
+
+export type RunState = "running" | "done" | "error" | "aborted";
+
+/** Launch-side custody of one agent session. `tier` lives here for capacity
+ * accounting and statistics only; it must never reach agent-visible surfaces.
+ * Deliberately no FK to task: run history outlives deleted tasks. */
+export interface RunRow {
+  readonly id: string;
+  readonly taskId: string;
+  readonly tier: Tier;
+  readonly accountId: string;
+  readonly model: string;
+  readonly provider: string;
+  readonly state: RunState;
+  readonly startedAt: number;
+  readonly endedAt: number | undefined;
+  readonly heartbeatAt: number | undefined;
+  readonly abortRequested: boolean;
+  readonly productive: boolean | undefined;
+  readonly complete: boolean | undefined;
+  readonly detail: string | undefined;
+}
+
+export interface RunResult {
+  readonly state: Exclude<RunState, "running">;
+  readonly productive?: boolean;
+  readonly complete?: boolean;
+  readonly detail?: string;
 }
 
 export interface LoggedUsageEvent extends UsageEvent {
@@ -135,12 +191,15 @@ export class Ledger {
 
   accounts(): AccountRow[] {
     const rows = this.db
-      .prepare("SELECT id, provider, label, access_until, created_at FROM account ORDER BY id")
+      .prepare(
+        "SELECT id, provider, label, access_until, cooldown_until, created_at FROM account ORDER BY id",
+      )
       .all() as {
       id: string;
       provider: string;
       label: string | null;
       access_until: number | null;
+      cooldown_until: number | null;
       created_at: number;
     }[];
     return rows.map((r) => ({
@@ -148,8 +207,16 @@ export class Ledger {
       provider: r.provider,
       label: r.label ?? undefined,
       accessUntil: r.access_until ?? undefined,
+      cooldownUntil: r.cooldown_until ?? undefined,
       createdAt: r.created_at,
     }));
+  }
+
+  /** A cooling account is skipped by admission until the deadline passes. */
+  setAccountCooldown(id: string, until: number | undefined): void {
+    this.db
+      .prepare("UPDATE account SET cooldown_until = ? WHERE id = ?")
+      .run(until ?? null, id);
   }
 
   /**
@@ -270,13 +337,15 @@ export class Ledger {
     if (t.gate !== undefined) parseGate(t.gate); // Validate syntax at write time.
     this.db
       .prepare(
-        `INSERT INTO task (id, demand_command, demand_constant, gate, tiers, created_at)
-         VALUES (?, ?, ?, ?, ?, ?)
+        `INSERT INTO task (id, demand_command, demand_constant, gate, tiers, prompt, cwd, created_at)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?)
          ON CONFLICT (id) DO UPDATE SET
            demand_command = excluded.demand_command,
            demand_constant = excluded.demand_constant,
            gate = excluded.gate,
-           tiers = excluded.tiers`,
+           tiers = excluded.tiers,
+           prompt = excluded.prompt,
+           cwd = excluded.cwd`,
       )
       .run(
         t.id,
@@ -284,6 +353,8 @@ export class Ledger {
         t.demandConstant ?? null,
         t.gate ?? null,
         JSON.stringify(t.tiers),
+        t.prompt ?? null,
+        t.cwd ?? null,
         Date.now(),
       );
   }
@@ -294,13 +365,17 @@ export class Ledger {
 
   tasks(): TaskSpec[] {
     const rows = this.db
-      .prepare("SELECT id, demand_command, demand_constant, gate, tiers FROM task ORDER BY id")
+      .prepare(
+        "SELECT id, demand_command, demand_constant, gate, tiers, prompt, cwd FROM task ORDER BY id",
+      )
       .all() as {
       id: string;
       demand_command: string | null;
       demand_constant: number | null;
       gate: string | null;
       tiers: string;
+      prompt: string | null;
+      cwd: string | null;
     }[];
     return rows.map((r) => ({
       id: r.id,
@@ -308,6 +383,8 @@ export class Ledger {
       demandConstant: r.demand_constant ?? undefined,
       gate: r.gate ?? undefined,
       tiers: JSON.parse(r.tiers) as Tier[],
+      prompt: r.prompt ?? undefined,
+      cwd: r.cwd ?? undefined,
     }));
   }
 
@@ -397,6 +474,167 @@ export class Ledger {
         this.invalidateDemand(t.id);
       }
     }
+  }
+
+  createRun(r: {
+    taskId: string;
+    tier: Tier;
+    accountId: string;
+    model: string;
+    provider: string;
+    at: number;
+  }): string {
+    const id = crypto.randomUUID();
+    this.db
+      .prepare(
+        `INSERT INTO run (id, task_id, tier, account_id, model, provider, state, started_at, heartbeat_at)
+         VALUES (?, ?, ?, ?, ?, ?, 'running', ?, ?)`,
+      )
+      .run(id, r.taskId, r.tier, r.accountId, r.model, r.provider, r.at, r.at);
+    return id;
+  }
+
+  run(id: string): RunRow | undefined {
+    return this.runRows("WHERE id = ?", [id])[0];
+  }
+
+  runs(filter?: { state?: RunState }): RunRow[] {
+    return filter?.state !== undefined
+      ? this.runRows("WHERE state = ? ORDER BY started_at", [filter.state])
+      : this.runRows("ORDER BY started_at", []);
+  }
+
+  private runRows(clause: string, params: (string | number)[]): RunRow[] {
+    const rows = this.db
+      .prepare(
+        `SELECT id, task_id, tier, account_id, model, provider, state, started_at,
+                ended_at, heartbeat_at, abort_requested, productive, complete, detail
+         FROM run ${clause}`,
+      )
+      .all(...params) as {
+      id: string;
+      task_id: string;
+      tier: Tier;
+      account_id: string;
+      model: string;
+      provider: string;
+      state: RunState;
+      started_at: number;
+      ended_at: number | null;
+      heartbeat_at: number | null;
+      abort_requested: number;
+      productive: number | null;
+      complete: number | null;
+      detail: string | null;
+    }[];
+    return rows.map((r) => ({
+      id: r.id,
+      taskId: r.task_id,
+      tier: r.tier,
+      accountId: r.account_id,
+      model: r.model,
+      provider: r.provider,
+      state: r.state,
+      startedAt: r.started_at,
+      endedAt: r.ended_at ?? undefined,
+      heartbeatAt: r.heartbeat_at ?? undefined,
+      abortRequested: r.abort_requested !== 0,
+      productive: r.productive === null ? undefined : r.productive !== 0,
+      complete: r.complete === null ? undefined : r.complete !== 0,
+      detail: r.detail ?? undefined,
+    }));
+  }
+
+  finishRun(id: string, result: RunResult, at: number): void {
+    this.db
+      .prepare(
+        `UPDATE run SET state = ?, ended_at = ?, productive = ?, complete = ?, detail = ?
+         WHERE id = ? AND state = 'running'`,
+      )
+      .run(
+        result.state,
+        at,
+        result.productive === undefined ? null : result.productive ? 1 : 0,
+        result.complete === undefined ? null : result.complete ? 1 : 0,
+        result.detail ?? null,
+        id,
+      );
+  }
+
+  heartbeatRun(id: string, at: number): void {
+    this.db.prepare("UPDATE run SET heartbeat_at = ? WHERE id = ?").run(at, id);
+  }
+
+  requestAbort(id: string): void {
+    this.db.prepare("UPDATE run SET abort_requested = 1 WHERE id = ?").run(id);
+  }
+
+  /** Failover moves a running session's assignment; history keeps only the
+   * final assignment because per-hop provenance lives in `detail`. */
+  reassignRun(id: string, a: { accountId: string; model: string; provider: string }): void {
+    this.db
+      .prepare("UPDATE run SET account_id = ?, model = ?, provider = ? WHERE id = ?")
+      .run(a.accountId, a.model, a.provider, id);
+  }
+
+  activeRunCount(accountId: string): number {
+    const row = this.db
+      .prepare("SELECT COUNT(*) AS n FROM run WHERE account_id = ? AND state = 'running'")
+      .get(accountId) as { n: number };
+    return row.n;
+  }
+
+  /** Session-hours this account served inside [since, now]. */
+  runHours(accountId: string, since: number, now: number): number {
+    const rows = this.db
+      .prepare(
+        `SELECT started_at, ended_at FROM run
+         WHERE account_id = ? AND (ended_at IS NULL OR ended_at > ?) AND started_at < ?`,
+      )
+      .all(accountId, since, now) as { started_at: number; ended_at: number | null }[];
+    let ms = 0;
+    for (const r of rows) {
+      ms += Math.max(0, Math.min(r.ended_at ?? now, now) - Math.max(r.started_at, since));
+    }
+    return ms / 3_600_000;
+  }
+
+  /** Error runs for a task since the cutoff; the controller's circuit breaker. */
+  recentErrorCount(taskId: string, since: number): number {
+    const row = this.db
+      .prepare(
+        "SELECT COUNT(*) AS n FROM run WHERE task_id = ? AND state = 'error' AND ended_at >= ?",
+      )
+      .get(taskId, since) as { n: number };
+    return row.n;
+  }
+
+  /**
+   * Observed percent drained since the cutoff, from meter readings: the sum of
+   * positive used-percent deltas per meter (resets appear as negative deltas
+   * and are skipped), taking the most binding meter. This is a fact-level
+   * aggregate for burn measurement, deliberately simpler than calibration.
+   */
+  drainSince(accountId: string, since: number): number {
+    const rows = this.db
+      .prepare(
+        `SELECT meter_id, at, used_percent FROM meter_reading
+         WHERE account_id = ? AND at >= ? ORDER BY meter_id, at`,
+      )
+      .all(accountId, since) as { meter_id: string; at: number; used_percent: number }[];
+    const drain = new Map<string, { last: number; sum: number }>();
+    for (const r of rows) {
+      const d = drain.get(r.meter_id);
+      if (d === undefined) {
+        drain.set(r.meter_id, { last: r.used_percent, sum: 0 });
+      } else {
+        if (r.used_percent > d.last) d.sum += r.used_percent - d.last;
+        d.last = r.used_percent;
+      }
+    }
+    let max = 0;
+    for (const d of drain.values()) max = Math.max(max, d.sum);
+    return max;
   }
 
   /** Deletes facts older than the cutoff; calibration only needs recent windows. */
