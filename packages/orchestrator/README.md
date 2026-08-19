@@ -5,8 +5,8 @@ multi-account usage calibration, quota governance, tiered model routing, and
 task scheduling. Built on pi's SDK — pi is the engine, this is the fleet
 layer.
 
-Status: early. The core calibrator is implemented; the ledger, broker, agent
-host, controller, and pi extensions follow.
+Status: early. The core calibrator and ledger are implemented; the broker,
+agent host, controller, and pi extensions follow.
 
 ## Design
 
@@ -39,6 +39,16 @@ Learns, per account and meter, what providers refuse to tell you:
   hazard (see [docs/openai-reset-statistics.md](docs/openai-reset-statistics.md));
 - **plan-size change detection**: silent allowance cuts between windows are
   detected and calibration restarts from the new regime.
+
+## Ledger (`src/ledger/`)
+
+SQLite (via `node:sqlite`, zero dependencies) storing **facts, not
+conclusions**: accounts, meter readings, usage events. Calibration is always
+rebuilt by replaying stored facts through the calibrator — there is no
+serialized model state, so one source of truth and calibrator improvements
+apply retroactively to recorded history. Idle high-frequency readings are
+deduplicated to hourly anchors; old facts are prunable because calibration
+only weights recent windows.
 
 ## Development
 
