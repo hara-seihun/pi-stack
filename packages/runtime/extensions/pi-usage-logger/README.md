@@ -30,6 +30,13 @@ pi-usage doctor
 
 `summary` separates cache reads from non-cache-read tokens plus output and reports HTTP retries and transport diagnostics. `top` identifies outlier session owners without exposing content. `failures` groups request, HTTP, and transport failures without printing raw errors. `doctor` verifies schema, integrity, WAL mode, and unfinished requests.
 
+## Analyses
+
+`analysis/` holds two re-runnable studies over the ledger, kept because both answer questions that recur whenever context or spend is discussed. Each is a plain `python3 analysis/<file>` with no arguments.
+
+- `context-composition.py` regresses reported context tokens on measured session bytes to attribute the context window to reasoning text, opaque reasoning payloads (Anthropic thinking signatures, Codex encrypted reasoning), tool results, and tool-call arguments. The per-message byte buckets in the `request` table exclude tool-call arguments and opaque reasoning, so composition questions need the session JSONL rather than the table alone.
+- `compaction-cost-model.py` replays real orchestrator sessions turn by turn under different compaction caps, pricing each turn from `models-store.json` including long-context tiers, and reports spend, prefix tokens processed, and compaction count per cap. Its uncapped column reproduces recorded spend within about 15%, which is the check that the replay is faithful.
+
 A provider request inserted before completion remains unfinished when the process dies. This is deliberate evidence of interruption; requests older than one hour are reported as stale by `doctor`.
 
 ## Validation
