@@ -75,6 +75,21 @@ const HOST_DRAIN_IDLE_EXIT_MS = 5_000;
 const RUN_HEARTBEAT_MS = 15_000;
 export const RUN_STALE_MS = 90_000;
 const RUN_CLAIM_TIMEOUT_MS = 180_000;
+// A provider that dies mid-session used to end the run and throw away every
+// tool result the agent had already produced — an hour of computation lost to a
+// five-second meter boundary. A session is the expensive artifact, so a failed
+// turn asks the governor for another provider and the live session continues
+// there. The wait is bounded because holding a session forever is also a cost,
+// and the handoff budget is bounded because a session that cannot make progress
+// on any provider must eventually settle.
+const FAILOVER_POLL_MS = 3_000;
+const FAILOVER_WAIT_MS = 20 * 60_000;
+// The lane that just failed is admissible again, because a meter or a transport
+// can recover in seconds, but never immediately: an instant re-entry would spend
+// the whole handoff budget on the same wall while a healthy alternative was one
+// tick away.
+const FAILOVER_SETTLE_MS = 60_000;
+export const FAILOVER_MAX = 4;
 const RUN_STREAM_RETENTION_MS = 14 * 86400_000;
 const DISTRIBUTED_ALLOCATION_VERSION = 1;
 const DISTRIBUTED_CALIBRATION_VERSION = 1;
@@ -451,6 +466,20 @@ export function openDb(file = DB_PATH) {
   }
   if (!runColumns.has("model")) {
     db.exec("DROP TRIGGER IF EXISTS auto_timestamp_run_insert; DROP TRIGGER IF EXISTS auto_timestamp_run_update; ALTER TABLE run ADD COLUMN model TEXT; ALTER TABLE run ADD COLUMN thinking TEXT");
+  }
+  // Mid-session provider failover is a ledger handshake like every other piece
+  // of control: the host records what failed, the controller answers with an
+  // assignment from the same governor, and the count bounds how often one run
+  // may be moved.
+  if (!runColumns.has("failover_state")) {
+    db.exec(`
+      DROP TRIGGER IF EXISTS auto_timestamp_run_insert;
+      DROP TRIGGER IF EXISTS auto_timestamp_run_update;
+      ALTER TABLE run ADD COLUMN failover_state TEXT CHECK(failover_state IN ('requested','assigned','denied'));
+      ALTER TABLE run ADD COLUMN failover_detail TEXT;
+      ALTER TABLE run ADD COLUMN failover_count INTEGER NOT NULL DEFAULT 0;
+      ALTER TABLE run ADD COLUMN failover_at INTEGER;
+    `);
   }
   // Agent execution moved out of the controller process: a run now names the
   // host that owns its session, carries the dispatched packet that host must
@@ -1866,6 +1895,43 @@ export function dispatchedTaskPrompt(task, packet) {
   return `${orchestratedTaskPrompt(task)}\n\n## Dispatched work unit\n\nThe controller has already claimed one work unit for this launch and assembled its context below. Do not repeat the claim step; begin working this unit directly. Treat any truncated section as regenerable through the printed command.\n\n${packet}`;
 }
 
+// A turn can die for two entirely different reasons, and only one of them says
+// anything about the session. A provider that is throttled, exhausted, briefly
+// unreachable, or whose transport dropped will serve the very same conversation
+// from another account or another model, so that session is worth moving. A
+// prompt the provider actually refuses (invalid request, moderation, a context
+// that cannot be rebuilt, unusable credentials) would be refused identically
+// everywhere, so moving it would only burn a second provider's capacity.
+const UNRECOVERABLE_TURN_FAILURE = /abort|invalid[_ ]?request|invalid prompt|\bflagged\b|moderation|not supported|unsupported|context (?:length|window)|too long|\b40[0-46]\b|unauthorized|forbidden/i;
+const RECOVERABLE_TURN_FAILURE = new RegExp([
+  // Provider capacity: throttles, plan/window exhaustion, and spend ceilings.
+  // Anthropic reports an exhausted extra-usage cap as a 429 rate-limit error
+  // naming a "monthly spend limit"; it is durable for that account and routine
+  // for the next one.
+  "\\b429\\b", "rate.?limit", "too many requests", "overloaded", "quota", "usage limit", "spend limit", "capacity", "exhausted",
+  // Server-side transients.
+  "\\b(?:5\\d\\d)\\b", "service.?unavailable", "server.?error", "internal.?error", "provider.?returned.?error",
+  // Transport: sockets, proxies, streams, and credential refresh.
+  "fetch failed", "connection", "network", "socket", "ECONN", "EAI_AGAIN", "getaddrinfo", "upstream",
+  "timed? out", "timeout", "terminated", "stream ended", "token refresh", "oauth refresh",
+  // Provider-side session state this host cannot rebuild in place, but which a
+  // different provider simply does not have.
+  "bridge is no longer available", "continuation was lost", "blob store",
+].join("|"), "i");
+
+export function turnFailureIsRecoverable(detail) {
+  const text = String(detail ?? "").trim();
+  if (!text) return false;
+  if (UNRECOVERABLE_TURN_FAILURE.test(text)) return false;
+  return RECOVERABLE_TURN_FAILURE.test(text);
+}
+
+// The moved session keeps every message it had, so this prompt only has to
+// explain the discontinuity the agent can see in its own transcript.
+export function failoverResumePrompt(assignment, failure) {
+  return `## Provider failover\n\nYour previous turn did not complete: ${boundedText(failure, 500)}\n\nThis session has been reassigned to ${assignment.model}:${assignment.thinking} via ${assignment.provider}. Nothing was lost: your reasoning, tool calls, and tool results above are all still here, and the work units you claimed are still yours. Continue exactly where you stopped rather than restarting or re-planning, verify any tool call whose result you never saw, and report through task_complete before you finish.`;
+}
+
 // Exit 0: claimable work exists. Exit 1: no claimable work. Any other outcome
 // (spawn failure, other exit codes, timeout) is a probe defect: fail open so a
 // broken probe degrades to launch-and-discover instead of silently starving
@@ -2129,6 +2195,27 @@ function messageFailure(message) {
   const detail = String(message.errorMessage ?? "").trim();
   return boundedText(detail ? `${label}: ${detail}` : label, 2_000);
 }
+// The error text of the turn that just ended, or "" when it ended normally.
+function lastTurnFailure(session) {
+  const assistant = [...session.messages].reverse().find((message) => message.role === "assistant");
+  if (!assistant || assistant.stopReason !== "error") return "";
+  return String(assistant.errorMessage ?? "").trim() || "provider turn ended without a message";
+}
+
+// The SDK leaves the failed assistant turn in agent state (its own retry path
+// removes it the same way before continuing). Prompting on top of it would send
+// the next provider an assistant message with no content, or a tool call whose
+// result never arrived, and that request is rejected outright.
+function dropFailedTurn(session) {
+  const state = session?.agent?.state;
+  const messages = Array.isArray(state?.messages) ? state.messages : null;
+  if (!messages?.length) return;
+  const last = messages[messages.length - 1];
+  if (last?.role === "assistant" && (last.stopReason === "error" || last.stopReason === "aborted")) {
+    state.messages = messages.slice(0, -1);
+  }
+}
+
 function toolResultText(result) {
   const blocks = Array.isArray(result?.content) ? result.content : [];
   return boundedText(blocks.map((block) => {
@@ -2646,7 +2733,18 @@ export class AgentHost {
       session.subscribe((sessionEvent) => {
         try { applyRunStreamEvent(stream, sessionEvent); } catch {}
       });
-      await session.prompt(prompt);
+      // A failed turn is not necessarily a failed session. While the provider
+      // is the thing that broke, the conversation is still worth continuing, so
+      // the run asks for another one and prompts again on the same session.
+      for (let turn = prompt; ;) {
+        await session.prompt(turn);
+        if (report) break;
+        const failure = lastTurnFailure(session);
+        if (!failure) break;
+        const moved = await this.failover(record, session, failure);
+        if (!moved) break;
+        turn = failoverResumePrompt(moved, failure);
+      }
       const assistant = [...session.messages].reverse().find((message) => message.role === "assistant");
       if (!report && isChatGptProTask(task)) {
         const text = assistant?.content?.filter((part) => part.type === "text").map((part) => part.text).join("\n").trim();
@@ -2668,6 +2766,73 @@ export class AgentHost {
     } finally {
       session?.dispose();
     }
+  }
+
+  // Ask the controller's governor for another provider for a session that is
+  // still alive, then move the session onto whatever it admits. This is the
+  // same ledger handshake as a launch: the host states what failed, the
+  // controller alone decides whether any capacity may be spent, and a request
+  // nobody can answer simply expires.
+  async failover(record, session, failure, { waitMs = FAILOVER_WAIT_MS, pollMs = FAILOVER_POLL_MS } = {}) {
+    const { run, task, stream } = record;
+    if (this.stopping || record.aborting) return null;
+    // Pro runs are one browser-executed question with their own recovery path;
+    // there is no second provider that can continue that conversation.
+    if (isChatGptProTask(task) || !turnFailureIsRecoverable(failure)) return null;
+    const detail = boundedText(failure, 500);
+    const requested = this.db.prepare(`UPDATE run SET failover_state='requested',failover_detail=?,failover_at=?
+      WHERE id=? AND status='running' AND abort_requested_at IS NULL AND failover_count<?`)
+      .run(detail, now(), run.id, FAILOVER_MAX).changes;
+    if (!requested) return null;
+    event(this.db, "run-failover-requested", detail, task.id, run.id);
+    stream.append("notice", { text: `Provider turn failed; holding this session for reassignment: ${detail}` });
+    const assignment = await this.awaitFailover(run.id, waitMs, pollMs);
+    if (!assignment) {
+      stream.append("notice", { text: "No provider capacity was reassigned; this session ends here" });
+      return null;
+    }
+    const routed = (await this.modelRuntime.getAvailable())
+      .find((model) => model.provider === assignment.provider && model.id === modelIdOf(assignment.model));
+    if (!routed) return this.denyFailover(run.id, `reassigned model unavailable in this host: ${assignment.provider}/${assignment.model}`, task.id, stream);
+    try {
+      dropFailedTurn(session);
+      await session.setModel(routed);
+      session.setThinkingLevel(assignment.thinking);
+    } catch (error) {
+      return this.denyFailover(run.id, `could not move the session: ${String(error?.message ?? error)}`, task.id, stream);
+    }
+    this.db.prepare("UPDATE run SET failover_state=NULL WHERE id=? AND failover_state='assigned'").run(run.id);
+    stream.append("notice", { text: `Session continues on ${assignment.model}:${assignment.thinking} via ${assignment.provider}` });
+    event(this.db, "run-failover-resumed", `${assignment.model}:${assignment.thinking} via ${assignment.provider}`, task.id, run.id);
+    return assignment;
+  }
+
+  // Waiting costs one held session and no provider capacity at all, so it is
+  // worth far more than the hour of tool results the alternative discards. It
+  // is still bounded: an assignment that never arrives has to end the run.
+  async awaitFailover(runId, waitMs = FAILOVER_WAIT_MS, pollMs = FAILOVER_POLL_MS) {
+    const deadline = now() + waitMs;
+    for (;;) {
+      const row = this.db.prepare(
+        "SELECT status,failover_state,provider,model,thinking,abort_requested_at FROM run WHERE id=?"
+      ).get(runId);
+      if (!row || row.status !== "running" || row.abort_requested_at !== null || this.stopping) return null;
+      if (row.failover_state === "assigned") return { provider: row.provider, model: row.model, thinking: row.thinking };
+      if (row.failover_state !== "requested") return null;
+      if (now() >= deadline) {
+        this.db.prepare("UPDATE run SET failover_state='denied',failover_detail=? WHERE id=? AND failover_state='requested'")
+          .run("no provider capacity was reassigned within the failover window", runId);
+        return null;
+      }
+      await sleep(pollMs);
+    }
+  }
+
+  denyFailover(runId, detail, taskId, stream) {
+    this.db.prepare("UPDATE run SET failover_state='denied',failover_detail=? WHERE id=?").run(detail, runId);
+    stream?.append("notice", { text: `Provider failover failed: ${detail}` });
+    event(this.db, "run-failover-denied", detail, taskId, runId);
+    return null;
   }
 
   retire(detail) {
@@ -2930,8 +3095,59 @@ export class Controller {
 
   activeRuns() {
     return this.db.prepare(
-      "SELECT id,task_id,provider,model,thinking,instrument_block,instrument_sign FROM run WHERE status='running'"
+      "SELECT id,task_id,provider,model,thinking,instrument_block,instrument_sign,failover_state FROM run WHERE status='running'"
     ).all();
+  }
+
+  // Answer the sessions whose provider died under them. The governor that
+  // admits launches decides here too, so a failover can never exceed a quota
+  // gate; nothing is admitted, nothing moves, and the host's own window ends
+  // the run. Resource slots are deliberately not consulted: the session already
+  // exists, and refusing it capacity only destroys work already paid for.
+  async serviceFailovers(activeAssignments) {
+    const rows = this.db.prepare(
+      "SELECT * FROM run WHERE status='running' AND failover_state='requested' ORDER BY failover_at LIMIT 20"
+    ).all();
+    let moved = 0;
+    for (const row of rows) {
+      const task = this.db.prepare("SELECT * FROM task WHERE id=?").get(row.task_id);
+      if (!task) { this.denyFailover(row, "task no longer exists"); continue; }
+      if (Number(row.failover_count) >= FAILOVER_MAX) { this.denyFailover(row, `failover budget of ${FAILOVER_MAX} is exhausted`); continue; }
+      // The failing account's own governor learns about the failure before it is
+      // asked for a replacement, so its cooldown steers this run elsewhere.
+      this.plan.noteFailure(row, { message: row.failover_detail ?? "" });
+      let governed;
+      try { governed = await this.plan.allows(task, activeAssignments); }
+      catch (error) { this.throttledEvent("failover-blocked", String(error.message ?? error), task.id); continue; }
+      if (!governed.ok) { this.throttledEvent("failover-blocked", governed.detail, task.id); continue; }
+      const at = now();
+      const sameLane = governed.provider === row.provider && runModelKey(governed) === runModelKey(row);
+      if (sameLane && at - Number(row.failover_at) < FAILOVER_SETTLE_MS) continue;
+      this.db.exec("BEGIN IMMEDIATE");
+      try {
+        this.db.prepare("DELETE FROM quota_lease WHERE run_id=?").run(row.id);
+        this.activateQuotaLease(task, governed, row.id, at);
+        const claimed = this.db.prepare(`UPDATE run SET provider=?,model=?,thinking=?,
+          failover_state='assigned',failover_count=failover_count+1,failover_at=?
+          WHERE id=? AND status='running' AND failover_state='requested'`)
+          .run(governed.provider, governed.model, governed.thinking, at, row.id).changes;
+        if (claimed !== 1) fail(`run ${row.id} stopped waiting for a failover`);
+        this.db.exec("COMMIT");
+      } catch (error) {
+        this.db.exec("ROLLBACK");
+        this.throttledEvent("failover-blocked", String(error.message ?? error), task.id);
+        continue;
+      }
+      moved++;
+      activeAssignments.push({ task, provider: governed.provider, model: governed.model, thinking: governed.thinking, instrumentBlock: governed.instrumentBlock, instrumentSign: governed.instrumentSign });
+      event(this.db, "run-failover", `${row.model}:${row.thinking} via ${row.provider} → ${runModelKey(governed)} via ${governed.provider}`, task.id, row.id);
+    }
+    return moved;
+  }
+
+  denyFailover(row, detail) {
+    this.db.prepare("UPDATE run SET failover_state='denied',failover_detail=? WHERE id=? AND failover_state='requested'").run(detail, row.id);
+    event(this.db, "run-failover-denied", detail, row.task_id, row.id);
   }
 
   // A launch is a durable ledger record addressed to a live agent host. The
@@ -3052,7 +3268,10 @@ export class Controller {
     try { await this.refreshWorkChecks(tasks); }
     catch (error) { this.controllerError(String(error.stack ?? error)); }
     const taskById = new Map(tasks.map((task) => [task.id, task]));
-    const activeAssignments = this.activeRuns().map((run) => ({
+    const running = this.activeRuns();
+    // A session waiting for another provider still holds memory but burns no
+    // provider capacity, so it counts against resources and not against meters.
+    const activeAssignments = running.filter((run) => run.failover_state !== "requested").map((run) => ({
       task: taskById.get(run.task_id) ?? { id: run.task_id },
       provider: run.provider,
       model: run.model,
@@ -3060,7 +3279,9 @@ export class Controller {
       instrumentBlock: run.instrument_block,
       instrumentSign: run.instrument_sign,
     }));
-    const activeCount = activeAssignments.length;
+    const activeCount = running.length;
+    try { await this.serviceFailovers(activeAssignments); }
+    catch (error) { this.controllerError(String(error.stack ?? error)); }
     const currentCpu = cpuTotals();
     const currentCpuPercent = cpuPercent(this.previousCpu, currentCpu);
     this.previousCpu = currentCpu;
@@ -3339,7 +3560,9 @@ function printAgentHosts(db) {
     console.log(`${host.id}\t${host.state}${hostAlive(host, at) ? "" : " (stale)"}\tfingerprint=${host.fingerprint}\tpid=${host.pid ?? "?"}\truns=${runs}\tstarted=${iso(host.started_at)}`);
   }
   for (const row of db.prepare("SELECT * FROM run WHERE status='running' ORDER BY started_at").all()) {
-    console.log(`${row.id}\t${row.task_id}\t${row.host_state ?? "in-process"}\t${row.model ?? "?"}:${row.thinking ?? "?"}\tvia ${row.provider ?? "?"}\thost=${row.host_id ?? "-"}\tstarted=${iso(row.started_at)}`);
+    const failover = row.failover_state === "requested" ? `\tawaiting-provider(${row.failover_count}): ${row.failover_detail ?? ""}`
+      : Number(row.failover_count) ? `\tfailovers=${row.failover_count}` : "";
+    console.log(`${row.id}\t${row.task_id}\t${row.host_state ?? "in-process"}\t${row.model ?? "?"}:${row.thinking ?? "?"}\tvia ${row.provider ?? "?"}\thost=${row.host_id ?? "-"}\tstarted=${iso(row.started_at)}${failover}`);
   }
 }
 

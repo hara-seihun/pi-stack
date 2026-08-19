@@ -8,7 +8,7 @@ import test from "node:test";
 
 const temporary = fs.mkdtempSync(path.join(os.tmpdir(), "agent-orchestrator-test-"));
 process.env.AGENT_ORCHESTRATOR_DATA = temporary;
-const { AgentHost, agentHostCommand, agentHostUnit, agentSliceMemoryPath, AGENT_SLICE, AnthropicGovernor, anthropicOpusHasHeadroom, anthropicWeeklyCapacity, applyRunStreamEvent, cancelTask, chooseIndependentAssignment, chooseTask, codeFingerprint, codexSubscriptionLifecycle, completionToolResult, controllerProcessIdentity, Controller, cpuPercent, CursorGovernor, DISPATCH_NO_WORK_TTL_MS, dispatchedTaskPrompt, DistributedQuotaFeedback, evaluateDispatch, evaluateWorkCheck, finishRun, governorAllowanceMultiplier, governorControls, grantQuotaLease, hostAlive, HOST_STALE_MS, insertRun, interruptRun, isolateTaskShell, isEligibleCodexPlan, launchBatchSize, loadConfig, loadProviderManifest, nextIncompleteState, openDb, orchestratedTaskPrompt, promptDrift, syncPrompts, parseAnthropicUsage, parseCursorUsage, PlanGovernor, planWindowBurnPerHour, proEntitlementSnapshot, proLaunchAvailability, purgeRunStreams, rankTasks, recordAgentHost, resourceSlots, RunEventStream, setGovernorBoost, setTaskOptions, shouldAdvanceBackoff, taskSettings, taskSupportsAssignment, TOOL_SHELL, validateCompletion, validateModelPolicy, WORK_CHECK_TTL_MS, workCheckStale, workReady } = await import("./orchestrator.mjs");
+const { AgentHost, agentHostCommand, agentHostUnit, agentSliceMemoryPath, AGENT_SLICE, AnthropicGovernor, anthropicOpusHasHeadroom, anthropicWeeklyCapacity, applyRunStreamEvent, cancelTask, chooseIndependentAssignment, chooseTask, codeFingerprint, codexSubscriptionLifecycle, completionToolResult, controllerProcessIdentity, Controller, cpuPercent, CursorGovernor, DISPATCH_NO_WORK_TTL_MS, dispatchedTaskPrompt, DistributedQuotaFeedback, evaluateDispatch, evaluateWorkCheck, failoverResumePrompt, FAILOVER_MAX, turnFailureIsRecoverable, finishRun, governorAllowanceMultiplier, governorControls, grantQuotaLease, hostAlive, HOST_STALE_MS, insertRun, interruptRun, isolateTaskShell, isEligibleCodexPlan, launchBatchSize, loadConfig, loadProviderManifest, nextIncompleteState, openDb, orchestratedTaskPrompt, promptDrift, syncPrompts, parseAnthropicUsage, parseCursorUsage, PlanGovernor, planWindowBurnPerHour, proEntitlementSnapshot, proLaunchAvailability, purgeRunStreams, rankTasks, recordAgentHost, resourceSlots, RunEventStream, setGovernorBoost, setTaskOptions, shouldAdvanceBackoff, taskSettings, taskSupportsAssignment, TOOL_SHELL, validateCompletion, validateModelPolicy, WORK_CHECK_TTL_MS, workCheckStale, workReady } = await import("./orchestrator.mjs");
 
 test.after(() => fs.rmSync(temporary, { recursive: true, force: true }));
 
@@ -1397,4 +1397,173 @@ test("meter identity migration discards circuits produced by incomparable fallba
   assert.equal(feedback.state.sensorInconsistent, false);
   assert.deepEqual(feedback.state.samples, []);
   assert.deepEqual(feedback.state.estimates, {});
+});
+
+test("a provider failure that another provider would not repeat is recoverable", () => {
+  // The exact 429 that ended an hour of Opus work: an account whose extra-usage
+  // spend cap is exhausted, which another account simply does not have.
+  assert.equal(turnFailureIsRecoverable(
+    '429 {"type":"error","error":{"type":"rate_limit_error","message":"This request would exceed your account\'s monthly spend limit. Please try again later."}}',
+  ), true);
+  assert.equal(turnFailureIsRecoverable('{"type":"error","error":{"type":"overloaded_error"}}'), true);
+  assert.equal(turnFailureIsRecoverable("fetch failed"), true);
+  assert.equal(turnFailureIsRecoverable("Connection error."), true);
+  assert.equal(turnFailureIsRecoverable("OAuth refresh failed for openai-codex-9: Codex token refresh rejected"), true);
+  assert.equal(turnFailureIsRecoverable("Cursor tool continuation was lost because the live upstream bridge is no longer available"), true);
+  assert.equal(turnFailureIsRecoverable("Cursor blob store exceeds the 512 entry limit"), true);
+  // A refusal of this exact prompt, an operator abort, and an empty error are
+  // not capacity problems; spending a second provider on them would only lose
+  // that capacity too.
+  assert.equal(turnFailureIsRecoverable("Request was aborted"), false);
+  assert.equal(turnFailureIsRecoverable('400 {"type":"error","error":{"type":"invalid_request_error"}}'), false);
+  assert.equal(turnFailureIsRecoverable("Codex error: Invalid prompt: your prompt was flagged"), false);
+  assert.equal(turnFailureIsRecoverable(""), false);
+});
+
+// A run whose provider died mid-session keeps its session and asks the governor
+// for another one, so an exhausted meter costs one turn instead of every tool
+// result the agent had already produced.
+test("a failed provider turn moves the live session instead of ending the run", async () => {
+  const db = openDb(path.join(temporary, "failover.sqlite3"));
+  const at = Date.now();
+  db.prepare(`INSERT INTO task(id,prompt,cwd,model,thinking,completion_condition,launch_share,not_before,next_eligible_at,created_at)
+    VALUES(?,?,?,?,?,?,?,?,?,?)`).run("task", "prompt", temporary, "openai-codex/gpt-5.6-sol", "xhigh", "done", 1, at, at, at);
+  const config = loadConfig();
+  const controller = testController(db, config, { fingerprint: "code" });
+  const hostId = recordAgentHost(db, { fingerprint: "code", state: "active", at });
+  insertRun(db, "run", "task", "anthropic-2", at, "anthropic/claude-opus-5", "xhigh", { hostId });
+  db.prepare("UPDATE run SET host_state='active',heartbeat_at=? WHERE id='run'").run(at);
+  const task = db.prepare("SELECT * FROM task WHERE id='task'").get();
+  const leaseId = controller.activateQuotaLease(task, { provider: "anthropic-2", model: "anthropic/claude-opus-5", thinking: "xhigh" }, "run", at);
+
+  const failure = '429 rate_limit_error: monthly spend limit';
+  const host = new AgentHost(db, config, { id: hostId, fingerprint: "code", streamRoot: path.join(temporary, "streams") });
+  db.prepare("UPDATE run SET failover_state='requested',failover_detail=?,failover_at=? WHERE id='run'").run(failure, at - 120_000);
+
+  // The governor decides every failover exactly as it decides a launch.
+  const noted = [];
+  controller.plan.noteFailure = (assignment, error) => noted.push([assignment.provider, String(error.message)].join(": "));
+  controller.plan.allows = async () => ({ ok: true, provider: "openai-codex-3", model: "openai-codex/gpt-5.6-sol", thinking: "xhigh", detail: "admitted" });
+  assert.equal(await controller.serviceFailovers([]), 1);
+  assert.equal(noted.length, 1);
+  assert.match(noted[0], /^anthropic-2: 429/);
+
+  const moved = db.prepare("SELECT * FROM run WHERE id='run'").get();
+  assert.equal(moved.status, "running", "the session is still alive");
+  assert.equal(moved.failover_state, "assigned");
+  assert.equal(moved.failover_count, 1);
+  assert.equal(moved.provider, "openai-codex-3");
+  assert.equal(moved.model, "openai-codex/gpt-5.6-sol");
+  // Capacity follows the session: the failed lane's lease is gone and the run
+  // holds exactly one active lease on the provider that is now serving it.
+  assert.equal(db.prepare("SELECT count(*) count FROM quota_lease WHERE id=?").get(leaseId).count, 0);
+  const lease = db.prepare("SELECT provider,state,run_id FROM quota_lease WHERE run_id='run'").get();
+  assert.deepEqual({ ...lease }, { provider: "openai-codex-3", state: "active", run_id: "run" });
+
+  // The host is waiting on the ledger for exactly this answer.
+  assert.deepEqual(
+    await host.awaitFailover("run", 60_000, 1),
+    { provider: "openai-codex-3", model: "openai-codex/gpt-5.6-sol", thinking: "xhigh" },
+  );
+  const resume = failoverResumePrompt({ provider: "openai-codex-3", model: "openai-codex/gpt-5.6-sol", thinking: "xhigh" }, failure);
+  assert.match(resume, /Continue exactly where you stopped/);
+  assert.match(resume, /task_complete/);
+  db.close();
+});
+
+test("a failover nobody can answer expires instead of holding the session forever", async () => {
+  const db = openDb(path.join(temporary, "failover-expiry.sqlite3"));
+  const at = Date.now();
+  db.prepare(`INSERT INTO task(id,prompt,cwd,model,thinking,completion_condition,launch_share,not_before,next_eligible_at,created_at)
+    VALUES(?,?,?,?,?,?,?,?,?,?)`).run("task", "prompt", temporary, "openai-codex/gpt-5.6-sol", "xhigh", "done", 1, at, at, at);
+  const config = loadConfig();
+  const controller = testController(db, config, { fingerprint: "code" });
+  const hostId = recordAgentHost(db, { fingerprint: "code", state: "active", at });
+  insertRun(db, "run", "task", "anthropic-2", at, "anthropic/claude-opus-5", "xhigh", { hostId });
+  db.prepare("UPDATE run SET host_state='active',failover_state='requested',failover_detail='429',failover_at=? WHERE id='run'").run(at);
+  const host = new AgentHost(db, config, { id: hostId, fingerprint: "code", streamRoot: path.join(temporary, "streams") });
+
+  // No capacity anywhere: the request stays open and no quota is spent.
+  controller.plan.noteFailure = () => {};
+  controller.plan.allows = async () => ({ ok: false, detail: "every provider gate is closed" });
+  assert.equal(await controller.serviceFailovers([]), 0);
+  assert.equal(db.prepare("SELECT failover_state FROM run WHERE id='run'").get().failover_state, "requested");
+
+  // The host's own bounded window ends the wait, and the run then settles the
+  // way any incomplete launch does.
+  assert.equal(await host.awaitFailover("run", 0, 1), null);
+  assert.equal(db.prepare("SELECT failover_state FROM run WHERE id='run'").get().failover_state, "denied");
+
+  // A session that has already been moved its full budget is not moved again.
+  db.prepare("UPDATE run SET failover_state='requested',failover_count=? WHERE id='run'").run(FAILOVER_MAX);
+  assert.equal(await controller.serviceFailovers([]), 0);
+  assert.equal(db.prepare("SELECT failover_state FROM run WHERE id='run'").get().failover_state, "denied");
+  db.close();
+});
+
+test("a session waiting for another provider burns no provider capacity", () => {
+  const db = openDb(path.join(temporary, "failover-accounting.sqlite3"));
+  const at = Date.now();
+  db.prepare(`INSERT INTO task(id,prompt,cwd,model,thinking,completion_condition,launch_share,not_before,next_eligible_at,created_at)
+    VALUES(?,?,?,?,?,?,?,?,?,?)`).run("task", "prompt", temporary, "openai-codex/gpt-5.6-sol", "xhigh", "done", 1, at, at, at);
+  insertRun(db, "burning", "task", "anthropic-2", at, "anthropic/claude-opus-5", "xhigh", {});
+  insertRun(db, "waiting", "task", "anthropic-2", at, "anthropic/claude-opus-5", "xhigh", {});
+  db.prepare("UPDATE run SET failover_state='requested' WHERE id='waiting'").run();
+  const controller = testController(db, loadConfig(), { fingerprint: "code" });
+  const running = controller.activeRuns();
+  assert.equal(running.length, 2, "both sessions still occupy the machine");
+  assert.deepEqual(running.filter((run) => run.failover_state !== "requested").map((run) => run.id), ["burning"]);
+  db.close();
+});
+
+// The whole handshake, end to end: the host holds a live session, asks the
+// ledger for another provider, the controller answers through the governor, and
+// the host moves that session and keeps its transcript.
+test("the host moves its live session onto the provider the controller assigns", async () => {
+  const db = openDb(path.join(temporary, "failover-handshake.sqlite3"));
+  const at = Date.now();
+  db.prepare(`INSERT INTO task(id,prompt,cwd,model,thinking,completion_condition,launch_share,not_before,next_eligible_at,created_at)
+    VALUES(?,?,?,?,?,?,?,?,?,?)`).run("task", "prompt", temporary, "openai-codex/gpt-5.6-sol", "xhigh", "done", 1, at, at, at);
+  const config = loadConfig();
+  const controller = testController(db, config, { fingerprint: "code" });
+  const hostId = recordAgentHost(db, { fingerprint: "code", state: "active", at });
+  insertRun(db, "run", "task", "anthropic-2", at, "anthropic/claude-opus-5", "xhigh", { hostId });
+  db.prepare("UPDATE run SET host_state='active',heartbeat_at=? WHERE id='run'").run(at);
+  const task = db.prepare("SELECT * FROM task WHERE id='task'").get();
+  controller.activateQuotaLease(task, { provider: "anthropic-2", model: "anthropic/claude-opus-5", thinking: "xhigh" }, "run", at);
+
+  const host = new AgentHost(db, config, { id: hostId, fingerprint: "code", streamRoot: path.join(temporary, "streams") });
+  host.modelRuntime = { getAvailable: async () => [{ provider: "openai-codex-3", id: "gpt-5.6-sol" }] };
+  // A live session carrying real work: an errored final turn the next provider
+  // must not be shown, and the tool results that make the session worth saving.
+  const priorWork = [{ role: "user" }, { role: "assistant" }, { role: "user" }];
+  const session = {
+    agent: { state: { messages: [...priorWork, { role: "assistant", stopReason: "error" }] } },
+    setModel: async (model) => { session.model = model; },
+    setThinkingLevel: (level) => { session.thinking = level; },
+  };
+  const stream = new RunEventStream("run", { root: path.join(temporary, "streams") });
+  const record = { run: db.prepare("SELECT * FROM run WHERE id='run'").get(), task, stream, aborting: false };
+
+  const moving = host.failover(record, session, "429 rate_limit_error: monthly spend limit", { waitMs: 30_000, pollMs: 5 });
+  assert.equal(db.prepare("SELECT failover_state FROM run WHERE id='run'").get().failover_state, "requested");
+  controller.plan.noteFailure = () => {};
+  controller.plan.allows = async () => ({ ok: true, provider: "openai-codex-3", model: "openai-codex/gpt-5.6-sol", thinking: "xhigh", detail: "admitted" });
+  await controller.serviceFailovers([]);
+  const assignment = await moving;
+
+  assert.deepEqual(assignment, { provider: "openai-codex-3", model: "openai-codex/gpt-5.6-sol", thinking: "xhigh" });
+  assert.deepEqual(session.model, { provider: "openai-codex-3", id: "gpt-5.6-sol" });
+  assert.equal(session.thinking, "xhigh");
+  // The dead turn is gone and nothing else is: a provider shown an assistant
+  // message with no content, or a tool call with no result, rejects the request.
+  assert.deepEqual(session.agent.state.messages, priorWork);
+  const resumed = db.prepare("SELECT status,failover_state,failover_count,provider FROM run WHERE id='run'").get();
+  assert.deepEqual({ ...resumed }, { status: "running", failover_state: null, failover_count: 1, provider: "openai-codex-3" });
+  await stream.close("incomplete", "test");
+  const notices = fs.readFileSync(path.join(temporary, "streams", "run", "events.jsonl"), "utf8")
+    .trim().split("\n").map((line) => JSON.parse(line)).filter((entry) => entry.type === "notice");
+  assert.match(notices[0].payload.text, /holding this session for reassignment/);
+  assert.match(notices[1].payload.text, /continues on openai-codex\/gpt-5.6-sol:xhigh via openai-codex-3/);
+  db.close();
 });
