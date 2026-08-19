@@ -129,7 +129,9 @@ export default function routing(pi: ExtensionAPI): void {
     }
     const moved = await bind(ctx, new Set([failing]));
     if (moved !== undefined) {
-      pi.sendUserMessage(failoverPrompt(errorMessage, moved));
+      // agent_end can fire while the loop is still winding down; followUp
+      // queues the retry instead of racing it.
+      pi.sendUserMessage(failoverPrompt(errorMessage, moved), { deliverAs: "followUp" });
     }
   });
 
