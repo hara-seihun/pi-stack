@@ -523,6 +523,28 @@ test("a code change starts a new host generation", () => {
   assert.notEqual(codeFingerprint(root), first);
 });
 
+test("a locally owned package change starts a new host generation", () => {
+  const root = fs.mkdtempSync(path.join(temporary, "fingerprint-local-"));
+  fs.writeFileSync(path.join(root, "orchestrator.mjs"), "controller");
+  const agentDir = fs.mkdtempSync(path.join(temporary, "agentdir-"));
+  const packageRoot = fs.mkdtempSync(path.join(temporary, "package-"));
+  fs.mkdirSync(path.join(packageRoot, "dist"), { recursive: true });
+  fs.writeFileSync(
+    path.join(packageRoot, "package.json"),
+    JSON.stringify({ name: "owned", pi: { extensions: ["./dist/index.js"] } }),
+  );
+  fs.writeFileSync(path.join(packageRoot, "dist", "index.js"), "provider one");
+  fs.writeFileSync(
+    path.join(agentDir, "settings.json"),
+    JSON.stringify({ packages: [packageRoot, "npm:@vendor/ignored"] }),
+  );
+
+  const first = codeFingerprint(root, agentDir);
+  assert.equal(codeFingerprint(root, agentDir), first);
+  fs.writeFileSync(path.join(packageRoot, "dist", "index.js"), "provider two");
+  assert.notEqual(codeFingerprint(root, agentDir), first);
+});
+
 test("observation streams record a readable transcript without a watcher", async () => {
   const root = path.join(temporary, "observation");
   const stream = new RunEventStream("run-observed", { root, liveIntervalMs: 0 });

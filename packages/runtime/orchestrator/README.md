@@ -8,7 +8,7 @@ That process is an **agent host**, and it is deliberately not the controller. Th
 
 One host holds every session of its code generation. This is load-bearing: a peak wave is hundreds of simultaneous agents — the system is expected to reach roughly 700 — and one Node process per agent would cost an order of magnitude more memory than the machine has. Sessions share one process, one `ModelRuntime`, and one extension load; the host is the unit of code generation, not the unit of agent.
 
-A host is pinned to a **code fingerprint**: a hash of the orchestrator sources, provider manifest, pinned runtime manifest/lockfile, and loaded extensions. The controller keeps exactly one host accepting launches per fingerprint:
+A host is pinned to a **code fingerprint**: a hash of the orchestrator sources, provider manifest, pinned runtime manifest/lockfile, loaded extensions, and every local-path package pi loads from `settings.json` (its manifest plus the extension and skill paths that manifest declares). Local packages are included because they are first-party code that runs inside every session while living outside the runtime tree: a repaired provider whose bundle is not fingerprinted would leave every live host silently running the superseded copy. The controller keeps exactly one host accepting launches per fingerprint:
 
 - a live host whose fingerprint matches is the current host;
 - a live host whose fingerprint differs is marked `draining` — it keeps its sessions, claims nothing new, and exits once empty;

@@ -19,6 +19,20 @@ settings="$HOME/.pi/agent/settings.json"
 claude_extension_configured=$(jq -r '.packages | any(. == "../../tools/pi-runtime/extensions/pi-claude-code-use" or . == "/home/kenan/tools/pi-runtime/extensions/pi-claude-code-use")' "$settings")
 usage_logger_configured=$(jq -r '.packages | any(. == "../../tools/pi-runtime/extensions/pi-usage-logger" or . == "/home/kenan/tools/pi-runtime/extensions/pi-usage-logger")' "$settings")
 [[ "$usage_logger_configured" == true ]] || { echo "locally owned Pi usage logger is not configured" >&2; exit 1; }
+cursor_provider="$HOME/tools/pi-cursor"
+cursor_configured=$(jq -r --arg p "$cursor_provider" '.packages | any(. == $p)' "$settings")
+[[ "$cursor_configured" == true ]] || { echo "locally owned Cursor provider is not configured" >&2; exit 1; }
+if jq -e '.packages | any(type == "string" and startswith("npm:@rahularya01/pi-cursor"))' "$settings" >/dev/null; then
+  echo "npm pi-cursor must not replace the locally owned provider" >&2
+  exit 1
+fi
+# The bundle is what pi loads and what the host code fingerprint hashes, so a source edge left
+# unbuilt would deploy the superseded provider without anything reporting a stale generation.
+[[ -f "$cursor_provider/dist/index.js" ]] || { echo "Cursor provider bundle is missing; run npm run build in $cursor_provider" >&2; exit 1; }
+if [[ -n $(find "$cursor_provider/src" "$cursor_provider/package.json" -newer "$cursor_provider/dist/index.js" -print -quit) ]]; then
+  echo "Cursor provider bundle is older than its source; run npm run build in $cursor_provider" >&2
+  exit 1
+fi
 if jq -e '.packages | any(type == "string" and startswith("npm:@benvargas/pi-claude-code-use"))' "$settings" >/dev/null; then
   echo "npm pi-claude-code-use must not replace the locally owned extension" >&2
   exit 1

@@ -1970,7 +1970,38 @@ function userBusEnvironment(env = process.env) {
 // A host is pinned to the exact source it started with. Any change to the
 // controller source, provider manifest, pinned runtime, or loaded extensions
 // starts a new generation instead of silently mixing code across sessions.
-export function codeFingerprint(root = path.dirname(SCRIPT_PATH)) {
+// Local-path packages in pi's settings are first-party code this controller loads, but they live
+// outside the runtime tree. Without them a fix to an owned provider package would leave every
+// live host running the superseded copy, with nothing reporting a stale generation.
+export function localPackageCodePaths(agentDir = getAgentDir()) {
+  const settingsPath = path.join(agentDir, "settings.json");
+  let declared;
+  try { declared = JSON.parse(fs.readFileSync(settingsPath, "utf8")).packages; }
+  catch { return []; }
+  if (!Array.isArray(declared)) return [];
+  const roots = [];
+  for (const entry of declared) {
+    const source = typeof entry === "string" ? entry : entry?.source;
+    if (typeof source !== "string" || !/^[./]/.test(source)) continue;
+    const packageRoot = path.resolve(agentDir, source);
+    const manifestPath = path.join(packageRoot, "package.json");
+    let manifest;
+    try { manifest = JSON.parse(fs.readFileSync(manifestPath, "utf8")); }
+    catch { continue; }
+    roots.push(manifestPath);
+    const declaredResources = manifest.pi ?? {};
+    const resourceEntries = [
+      ...(Array.isArray(declaredResources.extensions) ? declaredResources.extensions : []),
+      ...(Array.isArray(declaredResources.skills) ? declaredResources.skills : []),
+    ].filter((value) => typeof value === "string" && !value.startsWith("!"));
+    // No manifest means pi auto-discovers conventional directories.
+    const candidates = resourceEntries.length > 0 ? resourceEntries : ["extensions", "skills"];
+    for (const candidate of candidates) roots.push(path.resolve(packageRoot, candidate));
+  }
+  return roots;
+}
+
+export function codeFingerprint(root = path.dirname(SCRIPT_PATH), agentDir = getAgentDir()) {
   const files = [];
   const collect = (directory, depth) => {
     let entries;
@@ -1992,6 +2023,13 @@ export function codeFingerprint(root = path.dirname(SCRIPT_PATH)) {
     if (fs.existsSync(candidate)) files.push(candidate);
   }
   collect(path.join(runtimeRoot, "extensions"), 3);
+  for (const candidate of localPackageCodePaths(agentDir)) {
+    let stats;
+    try { stats = fs.statSync(candidate); }
+    catch { continue; }
+    if (stats.isDirectory()) collect(candidate, 3);
+    else files.push(candidate);
+  }
   const hash = createHash("sha256");
   for (const file of files.sort()) {
     hash.update(file);
