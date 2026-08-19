@@ -62,6 +62,18 @@ Per-provider rows pool tokens over summed weekly-equivalent burn before multiply
 
 Meters are server-side and global. An account configured on both hosts returns the same reading from each, so the reporter deduplicates meters by account while summing tokens across hosts.
 
+## What one model costs
+
+A meter measures an account, not a model, and every account here runs several models at once, so no single account reveals what one model costs. Across accounts the mixes differ, which makes it an ordinary regression: each account contributes one equation, `burn = sum over models of rate(model) x tokens(model)`, solved by non-negative least squares.
+
+Three properties matter:
+
+- **Scoped buckets attribute themselves.** A window only one model consumes yields a rate near zero for every other model, so Anthropic's Fable-only weekly window is identified without naming Fable anywhere in the code.
+- **The fit is per plan, not per provider.** One percent of a Max 20x account and one percent of a Max 5x account are different numbers of tokens; pooling them would average two unrelated denominators. `codex pro`, `anthropic max_20x`, `anthropic max_5x` and `cursor pro+` are each fitted separately, which is also the grouping the report presents.
+- **Saturated observations are dropped.** A bucket pinned at 100% cannot move however many tokens run against it, and including it would price the model at zero.
+
+`Tok/week` on that table is the capacity of every metered account of that plan if all of them ran only that model for a week, and `Accts` shows how many accounts' meter movement actually constrained the estimate. A `1/2` there means one account carried the fit; treat the figure as indicative until more accounts contribute.
+
 `plan-prices.json` is the sole source of subscription prices, keyed `family:plan`, and holds what this machine actually pays rather than list price — the two Anthropic Max 20x accounts are $200 and the Max 5x is $100. Edit that file when a plan changes; the reporter prints the price it assumed beside every figure derived from it, and an unpriced plan reports `n/a` instead of guessing.
 
 Balances that moved during the window — Codex credits, Cursor's retail value — print below the table with the tokens each unit bought.

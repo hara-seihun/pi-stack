@@ -7,7 +7,7 @@ import { execFileSync } from "node:child_process";
 import { DatabaseSync } from "node:sqlite";
 import {
   DEFAULT_DB_PATH, SCHEMA_VERSION, WEEK_SECONDS, openDatabase, readAuth, sampleAll, burn,
-  bindingBucket, weeklyTokens,
+  bindingBucket, weeklyTokens, nnls,
 } from "./meters.mjs";
 import { DEFAULT_DB_PATH as USAGE_DB_PATH } from "../extensions/pi-usage-logger/database.mjs";
 
@@ -74,14 +74,16 @@ function printTable(values, columns) {
  * times larger than it is.
  */
 const TOKENS_QUERY = `
-  SELECT COUNT(*) AS requests,
+  SELECT COALESCE(model,'?') AS model,
+         COUNT(*) AS requests,
          COALESCE(SUM(input_tokens),0) AS input,
          COALESCE(SUM(output_tokens),0) AS output,
          COALESCE(SUM(cache_read_tokens),0) AS cache_read,
          COALESCE(SUM(cache_write_tokens),0) AS cache_write,
          COALESCE(SUM(total_tokens),0) AS total
   FROM request
-  WHERE provider = ? AND started_at >= ? AND started_at <= ?`;
+  WHERE provider = ? AND started_at >= ? AND started_at <= ?
+  GROUP BY model`;
 
 const SAMPLES_QUERY = `
   SELECT s.provider, s.family, s.at, s.status, s.plan, s.tier, s.account_key,
@@ -106,13 +108,29 @@ function shapeTokens(row) {
   };
 }
 
+function emptyTokens() {
+  return { requests: 0, input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 };
+}
+
+function addTokens(target, value) {
+  for (const key of Object.keys(target)) target[key] += Number(value[key] ?? 0);
+  return target;
+}
+
+/** Collapse an account's per-model counts into one account total. */
+function sumModels(byModel) {
+  return Object.values(byModel ?? {}).reduce(addTokens, emptyTokens());
+}
+
 /** Content-free token totals per provider alias from the Pi usage ledger. */
 function localTokens(spans, dbPath = process.env.PI_USAGE_DB ?? USAGE_DB_PATH) {
   const db = openReadOnly(dbPath);
   if (!db) return {};
   const query = db.prepare(TOKENS_QUERY);
-  const tokens = Object.fromEntries(Object.entries(spans)
-    .map(([provider, span]) => [provider, shapeTokens(query.get(provider, span.lo, span.hi))]));
+  const tokens = Object.fromEntries(Object.entries(spans).map(([provider, span]) => [
+    provider,
+    Object.fromEntries(query.all(provider, span.lo, span.hi).map((row) => [row.model, shapeTokens(row)])),
+  ]));
   db.close();
   return tokens;
 }
@@ -190,8 +208,10 @@ const out = {};
 if (usage) {
   const query = usage.prepare(${JSON.stringify(TOKENS_QUERY)});
   for (const [provider, span] of Object.entries(spans)) {
-    const row = query.get(provider, span.lo, span.hi);
-    out[provider] = { requests: Number(row.requests), input: Number(row.input), output: Number(row.output), cacheRead: Number(row.cache_read), cacheWrite: Number(row.cache_write), total: Number(row.total) };
+    out[provider] = {};
+    for (const row of query.all(provider, span.lo, span.hi)) {
+      out[provider][row.model] = { requests: Number(row.requests), input: Number(row.input), output: Number(row.output), cacheRead: Number(row.cache_read), cacheWrite: Number(row.cache_write), total: Number(row.total) };
+    }
   }
 }
 process.stdout.write(JSON.stringify(out));
@@ -200,9 +220,11 @@ process.stdout.write(JSON.stringify(out));
 function mergeTokens(...parts) {
   const total = {};
   for (const part of parts) {
-    for (const [provider, value] of Object.entries(part ?? {})) {
-      const entry = total[provider] ??= { requests: 0, input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 };
-      for (const key of Object.keys(entry)) entry[key] += Number(value[key] ?? 0);
+    for (const [provider, models] of Object.entries(part ?? {})) {
+      const account = total[provider] ??= {};
+      for (const [model, value] of Object.entries(models)) {
+        addTokens(account[model] ??= emptyTokens(), value);
+      }
     }
   }
   return total;
@@ -290,7 +312,8 @@ function accountRows(accounts, spans, tokens, prices) {
     for (const [bucket, series] of account.buckets) byBucket[bucket] = burn([...series.values()]);
     const binding = bindingBucket(byBucket);
     const stats = binding ? byBucket[binding] : null;
-    const used = tokens[account.provider] ?? { requests: 0, input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 };
+    const byModel = tokens[account.provider] ?? {};
+    const used = sumModels(byModel);
     const context = used.input + used.cacheRead + used.cacheWrite;
     const vendorShare = vendorCacheShare(account);
     const cacheShare = vendorShare ?? (context > 0 ? used.cacheRead / context : null);
@@ -306,6 +329,8 @@ function accountRows(accounts, spans, tokens, prices) {
       observedHours: span ? (span.hi - span.lo) / 3_600_000 : 0,
       cacheShare,
       cacheSource: vendorShare === null ? "stream" : "vendor",
+      byModel,
+      vendorShare,
       family: account.family,
       plan,
       price,
@@ -369,6 +394,106 @@ function familyRows(rows) {
   });
 }
 
+/**
+ * Quota cost per token, per model, per bucket, solved from meter movement.
+ *
+ * A meter measures an account, not a model, and accounts run several models at
+ * once, so no single account reveals what one model costs. Across accounts the
+ * mixes differ, which makes it an ordinary regression: each account contributes
+ * `burn = sum over models of rate(model) * tokens(model)`. Scoped buckets fall
+ * out of the same fit without naming any model — a bucket only Fable consumes
+ * gets a rate near zero for every other model.
+ *
+ * Saturated observations are dropped. A bucket pinned at 100% cannot move no
+ * matter how many tokens run against it, so including it would report the
+ * model as free.
+ */
+function planGroups(rows) {
+  const groups = new Map();
+  for (const row of rows) {
+    const key = `${row.family} ${row.plan}`;
+    (groups.get(key) ?? groups.set(key, []).get(key)).push(row);
+  }
+  return groups;
+}
+
+function modelRates(rows) {
+  const rates = {};
+  for (const [key, accounts] of planGroups(rows)) {
+    const models = [...new Set(accounts.flatMap((row) => Object.keys(row.byModel)))].sort();
+    if (!models.length) continue;
+    const buckets = new Set(accounts.flatMap((row) => Object.keys(row.buckets)));
+    for (const bucket of buckets) {
+      const usable = accounts.filter((row) => {
+        const stats = row.buckets[bucket];
+        return stats && stats.windowSeconds > 0 && (stats.end ?? 0) < 99 && (stats.start ?? 0) < 99;
+      });
+      if (usable.length < 1) continue;
+      const design = usable.map((row) => models.map((model) => row.byModel[model]?.total ?? 0));
+      const observed = usable.map((row) => row.buckets[bucket].burned);
+      const solved = nnls(design, observed, models.length);
+      // Coordinate descent leaves float dust on models that never touch the
+      // bucket; a rate of 1e-13 would otherwise read as near-infinite capacity.
+      const floor = Math.max(...solved) * 1e-6;
+      for (const [index, model] of models.entries()) {
+        if (!(solved[index] > floor)) continue;
+        (rates[`${key}:${model}`] ??= {})[bucket] = {
+          rate: solved[index],
+          windowSeconds: usable[0].buckets[bucket].windowSeconds,
+          accounts: usable.length,
+        };
+      }
+    }
+  }
+  return rates;
+}
+
+/**
+ * What one plan buys if a whole week ran on a single model. The binding bucket
+ * is per model here: Fable burns the shared weekly window at roughly the same
+ * rate as Opus but also burns a half-sized Fable-only window, so that scoped
+ * window is what actually limits it.
+ */
+function modelRows(rows, rates) {
+  const result = [];
+  for (const [key, accounts] of planGroups(rows)) {
+    const models = [...new Set(accounts.flatMap((row) => Object.keys(row.byModel)))].sort();
+    for (const model of models) {
+      const tokens = accounts.map((row) => row.byModel[model]).filter(Boolean).reduce(addTokens, emptyTokens());
+      const share = accounts.find((row) => row.vendorShare !== null)?.vendorShare ?? null;
+      const context = tokens.input + tokens.cacheRead + tokens.cacheWrite;
+      const measured = rates[`${key}:${model}`] ?? {};
+      let binding = null;
+      for (const [bucket, stats] of Object.entries(measured)) {
+        const weekly = (100 / stats.rate) * (WEEK_SECONDS / stats.windowSeconds);
+        if (!binding || weekly < binding.weekly) binding = { bucket, weekly, ...stats };
+      }
+      const eligible = binding
+        ? accounts.filter((row) => row.buckets[binding.bucket] && (row.buckets[binding.bucket].end ?? 0) < 99)
+        : [];
+      const weekly = binding ? binding.weekly * eligible.length : null;
+      const fit = eligible.filter((row) => (row.byModel[model]?.total ?? 0) > 0).length;
+      const price = eligible.reduce((sum, row) => sum + (row.price ?? 0), 0);
+      result.push({
+        plan: key,
+        family: accounts[0].family,
+        model,
+        accounts: eligible.length,
+        fit,
+        requests: tokens.requests,
+        total: tokens.total,
+        cacheShare: share ?? (context > 0 ? tokens.cacheRead / context : null),
+        bucket: binding?.bucket ?? "-",
+        percentPerMillion: binding ? binding.rate * 1e6 : null,
+        weekly,
+        perDollar: weekly === null || !price ? null : (weekly * WEEKS_PER_MONTH) / price,
+      });
+    }
+  }
+  return result.sort((left, right) =>
+    left.plan.localeCompare(right.plan, "en") || (right.weekly ?? 0) - (left.weekly ?? 0));
+}
+
 function totalRow(families) {
   const sum = (key) => families.reduce((value, family) => value + (family[key] ?? 0), 0);
   const weekly = sum("weekly");
@@ -415,6 +540,8 @@ function report(args) {
     localOnly || !Object.keys(spans).length ? null : remoteJson(remoteTokensScript(spans)));
   const rows = accountRows(accounts, spans, tokens, planPrices());
   const families = familyRows(rows);
+  const rates = modelRates(rows);
+  const models = modelRows(rows, rates);
   const hours = (hi - lo) / 3_600_000;
 
   if (json) {
@@ -423,7 +550,8 @@ function report(args) {
       hosts: localOnly ? ["local"] : ["local", REMOTE_HOST],
       weeklyTokens: totalRow(families).weekly,
       families,
-      accounts: rows,
+      models,
+      accounts: rows.map(({ byModel, ...rest }) => ({ ...rest, models: byModel })),
       balances,
     }, null, 1));
     return;
@@ -448,6 +576,21 @@ function report(args) {
     { label: "$/mo", value: (row) => row.price ? `$${row.price}` : "n/a" },
     { label: "Tok/$", value: (row) => row.perDollar ? fmt(row.perDollar) : "n/a" },
     { label: "Binding limits", value: (row) => row.limits },
+  ]);
+
+  console.log("\nPer account type and model (Tok/week = capacity if every metered account of that plan"
+    + " ran the model for a whole week; Accts = accounts whose meter movement constrained the estimate)");
+  printTable(models, [
+    { label: "Plan", value: (row) => row.plan },
+    { label: "Model", value: (row) => row.model },
+    { label: "Accts", value: (row) => `${row.fit}/${row.accounts}` },
+    { label: "Reqs", value: (row) => String(row.requests) },
+    { label: "Tokens", value: (row) => fmt(row.total) },
+    { label: "Cache%", value: (row) => row.cacheShare === null ? "n/a" : (row.cacheShare * 100).toFixed(0) },
+    { label: "Binds on", value: (row) => row.bucket },
+    { label: "%/1M tok", value: (row) => row.percentPerMillion === null ? "n/a" : row.percentPerMillion.toFixed(3) },
+    { label: "Tok/week", value: (row) => row.weekly === null ? "n/a" : fmt(row.weekly) },
+    { label: "Tok/$", value: (row) => row.perDollar === null ? "n/a" : fmt(row.perDollar) },
   ]);
 
   console.log("\nPer account (Bucket = the limit that exhausts first, which sets capacity)");

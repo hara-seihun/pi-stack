@@ -5,7 +5,7 @@ import os from "node:os";
 import path from "node:path";
 import {
   bindingBucket, burn, classify, codexBucketName, openDatabase, oauthAccounts,
-  parseAnthropic, parseCodex, parseCursor, recordSample, sampleAll, weeklyTokens,
+  parseAnthropic, parseCodex, parseCursor, recordSample, sampleAll, weeklyTokens, nnls,
 } from "./meters.mjs";
 
 const SECRET = "sk-ant-oat01-DO-NOT-PERSIST-abcdef";
@@ -114,6 +114,23 @@ test("the binding bucket is the one that exhausts first, not the one that burned
     weekly_opus: { burned: 9, windowSeconds: 604800 },
   }), "weekly_opus");
   assert.equal(bindingBucket({ credits: { burned: 5, windowSeconds: null } }), null);
+});
+
+test("per-model quota cost is recoverable from accounts that mix models differently", () => {
+  // Three accounts, two models, true cost 0.01%/M for the cheap model and
+  // 0.05%/M for the expensive one. No single account reveals either rate.
+  const mixes = [[40e6, 10e6], [10e6, 30e6], [25e6, 25e6]];
+  const burns = mixes.map(([cheap, dear]) => cheap * 1e-8 + dear * 5e-8);
+  const [cheapRate, dearRate] = nnls(mixes, burns, 2);
+  assert.ok(Math.abs(cheapRate - 1e-8) < 1e-11, `cheap rate ${cheapRate}`);
+  assert.ok(Math.abs(dearRate - 5e-8) < 1e-11, `dear rate ${dearRate}`);
+
+  // A bucket only the second model consumes must not charge the first,
+  // which is what keeps a scoped weekly window attributable without naming it.
+  const scoped = mixes.map(([, dear]) => dear * 2e-7);
+  const [unused, scopedRate] = nnls(mixes, scoped, 2);
+  assert.ok(unused < scopedRate * 1e-4, `non-consuming model charged ${unused}`);
+  assert.ok(Math.abs(scopedRate - 2e-7) < 1e-10);
 });
 
 test("capacity is normalized to seven days across window lengths", () => {

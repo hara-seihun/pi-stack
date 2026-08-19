@@ -270,6 +270,37 @@ export function parseCursor(body) {
 }
 
 /**
+ * Non-negative least squares by coordinate descent. Quota cost per token cannot
+ * be negative, and an unconstrained fit on a few accounts routinely produces a
+ * negative rate for the minority model, which would then read as "this model
+ * refunds quota". Small problem, so plain coordinate descent converges long
+ * before the iteration cap.
+ */
+export function nnls(rows, targets, columns, iterations = 500) {
+  const weights = new Array(columns).fill(0);
+  const norms = [];
+  for (let column = 0; column < columns; column += 1) {
+    norms.push(rows.reduce((sum, row) => sum + row[column] * row[column], 0));
+  }
+  for (let pass = 0; pass < iterations; pass += 1) {
+    let moved = 0;
+    for (let column = 0; column < columns; column += 1) {
+      if (norms[column] <= 0) continue;
+      let numerator = 0;
+      for (const [index, row] of rows.entries()) {
+        const predicted = row.reduce((sum, value, other) => sum + value * weights[other], 0);
+        numerator += row[column] * (targets[index] - predicted + row[column] * weights[column]);
+      }
+      const next = Math.max(0, numerator / norms[column]);
+      moved = Math.max(moved, Math.abs(next - weights[column]));
+      weights[column] = next;
+    }
+    if (moved < 1e-12) break;
+  }
+  return weights;
+}
+
+/**
  * Accumulate burn as the sum of positive deltas between consecutive samples.
  * A decrease means the provider reset the window, so a naive end-minus-start
  * would silently under-report any period that spans a reset.
