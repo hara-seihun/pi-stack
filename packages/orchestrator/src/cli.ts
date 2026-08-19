@@ -1,9 +1,11 @@
 #!/usr/bin/env node
-import { homedir } from "node:os";
+import { homedir, hostname } from "node:os";
 import { join } from "node:path";
 import { Ledger } from "./ledger/ledger.js";
+import { Runner, bumpRunnerGeneration } from "./host/runner.js";
 import { Scheduler } from "./tasks/scheduler.js";
 import { TIERS, type Tier } from "./tasks/types.js";
+import type { LaunchSpec } from "./host/types.js";
 
 /**
  * Operator CLI. Thin by design: every command is a small read or write
@@ -53,11 +55,58 @@ async function status(ledger: Ledger): Promise<void> {
     if (t.error !== undefined) parts.push(`error=${t.error}`);
     console.log(`task ${t.taskId}: ${parts.join(" ")}`);
   }
-  const running = ledger.runs({ state: "running" });
-  for (const r of running) {
-    console.log(`run ${r.id.slice(0, 8)}: ${r.taskId} on ${r.accountId} (${r.model})`);
+  for (const r of ledger.runs({ state: "pending" })) {
+    console.log(`pending ${r.id.slice(0, 8)}: ${r.taskId} awaiting runner`);
+  }
+  for (const r of ledger.runs({ state: "running" })) {
+    console.log(
+      `run ${r.id.slice(0, 8)}: ${r.taskId} on ${r.accountId} (${r.model}) runner=${r.runnerId}`,
+    );
   }
   if (evaluation.tasks.length === 0) console.log("no tasks");
+}
+
+/**
+ * Runner process: claims pending runs and hosts them as embedded pi
+ * sessions. Separate from the controller so orchestrator updates never kill
+ * agents; drains (finishes current sessions, claims nothing) when the
+ * runner generation is bumped, then exits.
+ */
+async function runner(ledger: Ledger, args: string[]): Promise<void> {
+  const { named } = flags(args);
+  // Hosted sessions must never be re-routed by the interactive routing
+  // extension: the broker assigned their account.
+  process.env.PI_ORCHESTRATOR_ASSIGNED = "1";
+  const { PiHost } = await import("./host/pi-host.js");
+  const { builtinProviders } = await import("@earendil-works/pi-ai/providers/all");
+  const families = new Map(builtinProviders().map((p) => [p.id, p]));
+  const resolveModel = (spec: LaunchSpec): unknown => {
+    const model = families.get(spec.provider)?.getModels().find((m) => m.id === spec.model);
+    if (model === undefined) throw new Error(`unknown model ${spec.provider}/${spec.model}`);
+    return spec.accountId === spec.provider ? model : { ...model, provider: spec.accountId };
+  };
+  const runnerId = named.get("id") ?? `${hostname()}-${process.pid}`;
+  const engine: InstanceType<typeof PiHost> = new PiHost(
+    // The runner is constructed below; PiHost only needs the event surface.
+    { runFinished: (id, result, at) => live.runFinished(id, result, at),
+      heartbeat: (id, at) => live.heartbeat(id, at) },
+    { resolveModel },
+  );
+  const live = new Runner(ledger, engine, {
+    runnerId,
+    maxSessions: Number(named.get("max-sessions") ?? 100),
+  });
+  const intervalMs = Number(named.get("interval") ?? 5000);
+  console.log(`runner ${runnerId} started`);
+  for (;;) {
+    const report = live.tick();
+    for (const spec of report.claimed) console.log(`claimed ${spec.runId}: ${spec.taskId}`);
+    if (live.drained()) {
+      console.log(`runner ${runnerId} drained, exiting`);
+      return;
+    }
+    await new Promise((r) => setTimeout(r, intervalMs));
+  }
 }
 
 function taskSet(ledger: Ledger, args: string[]): void {
@@ -121,6 +170,12 @@ async function main(): Promise<void> {
         console.log(`abort requested for ${runId}`);
         break;
       }
+      case "runner":
+        await runner(ledger, args);
+        break;
+      case "drain-runners":
+        console.log(`runner generation is now ${bumpRunnerGeneration(ledger)}; live runners will drain`);
+        break;
       default:
         console.log(
           [
@@ -131,6 +186,9 @@ async function main(): Promise<void> {
             "  task list | task delete <id>",
             "  pause | resume               durable launch control (a ledger row)",
             "  abort <runId>                request a running session stop",
+            "  runner [--id NAME] [--max-sessions N] [--interval MS]",
+            "                               host claimed runs as embedded pi sessions",
+            "  drain-runners                bump generation: runners finish and exit",
           ].join("\n"),
         );
         if (command !== undefined && command !== "help") process.exit(1);

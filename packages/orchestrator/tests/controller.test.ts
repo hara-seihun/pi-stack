@@ -2,6 +2,7 @@ import { describe, expect, it } from "vitest";
 import { Broker } from "../src/broker/broker.js";
 import { Controller } from "../src/controller/controller.js";
 import { Ledger } from "../src/ledger/ledger.js";
+import { Runner } from "../src/host/runner.js";
 import { Scheduler } from "../src/tasks/scheduler.js";
 import type { HostManager, LaunchSpec } from "../src/host/types.js";
 import type { MeterSpec } from "../src/calibrator/types.js";
@@ -9,7 +10,7 @@ import type { MeterSpec } from "../src/calibrator/types.js";
 const HOUR = 3_600_000;
 const METERS: MeterSpec[] = [{ id: "weekly", drainedBy: ["cost"], nominalWindowMs: 7 * 24 * HOUR }];
 
-class FakeHost implements HostManager {
+class FakeEngine implements HostManager {
   launched: LaunchSpec[] = [];
   aborted: string[] = [];
   launch(spec: LaunchSpec): void {
@@ -40,15 +41,23 @@ function build(probes: Record<string, number | (() => number)> = {}) {
     },
     meters: { anthropic: METERS, "openai-codex": METERS },
   });
-  const host = new FakeHost();
-  const controller = new Controller(ledger, scheduler, broker, host);
-  return { ledger, controller, host };
+  const engine = new FakeEngine();
+  const controller = new Controller(ledger, scheduler, broker);
+  const runner = new Runner(ledger, engine, { runnerId: "r1", maxSessions: 100 });
+  /** One full dispatch cycle: controller creates pending runs, runner claims
+   * and launches them. Returns the specs launched this cycle. */
+  const cycle = async (now: number) => {
+    const tick = await controller.tick(now);
+    const claimed = runner.tick(now).claimed;
+    return { tick, claimed };
+  };
+  return { ledger, controller, runner, engine, cycle };
 }
 
-describe("controller launch loop", () => {
-  it("end to end: demand -> allocation -> admission -> launch -> completion -> reprobe", async () => {
+describe("dispatch cycle", () => {
+  it("end to end: demand -> pending run -> claim -> launch -> completion -> reprobe", async () => {
     let backlog = 2;
-    const { ledger, controller, host } = build({ "probe ingest": () => backlog });
+    const { ledger, runner, cycle } = build({ "probe ingest": () => backlog });
     ledger.upsertTask({
       id: "ingest",
       demandCommand: "probe ingest",
@@ -57,49 +66,50 @@ describe("controller launch loop", () => {
       cwd: "/tmp",
     });
 
-    const first = await controller.tick(0);
+    const first = await cycle(0);
     // Two bootstrap accounts serve the standard tier: both work units launch.
-    expect(first.launched).toHaveLength(2);
-    const spec = first.launched[0];
+    expect(first.claimed).toHaveLength(2);
+    const spec = first.claimed[0];
     expect(spec.prompt).toBe("Ingest the queue.");
     expect(spec.cwd).toBe("/tmp");
     expect((spec as unknown as Record<string, unknown>).tier).toBeUndefined(); // leak check
     expect(ledger.runs({ state: "running" })).toHaveLength(2);
 
-    // While both accounts are saturated, another tick launches nothing.
-    const second = await controller.tick(1000);
-    expect(second.launched).toHaveLength(0);
+    // While both accounts are saturated, another cycle launches nothing.
+    const second = await cycle(1000);
+    expect(second.claimed).toHaveLength(0);
 
-    // One session finishes productively; demand is invalidated and re-probed
-    // (backlog now 1), and the freed account takes the remaining unit.
+    // One session finishes; demand is re-probed (backlog 1) and netted
+    // against the still-running session: no further launch.
     backlog = 1;
-    controller.runFinished(spec.runId, { state: "done", productive: true, complete: false }, 2000);
+    runner.runFinished(spec.runId, { state: "done", productive: true, complete: false }, 2000);
     expect(ledger.run(spec.runId)?.state).toBe("done");
-    const third = await controller.tick(3000);
-    expect(third.launched).toHaveLength(0); // 1 unit, 1 already running
+    const third = await cycle(3000);
+    expect(third.claimed).toHaveLength(0);
     expect(ledger.runs({ state: "running" })).toHaveLength(1);
   });
 
   it("a task without a prompt is a pure demand signal and never launches", async () => {
-    const { ledger, controller } = build({ "probe signal": 5 });
+    const { ledger, cycle } = build({ "probe signal": 5 });
     ledger.upsertTask({ id: "signal", demandCommand: "probe signal", tiers: ["standard"] });
-    const report = await controller.tick(0);
-    expect(report.evaluation.tasks[0]?.eligible).toBe(true);
-    expect(report.launched).toHaveLength(0);
+    const { tick, claimed } = await cycle(0);
+    expect(tick.evaluation.tasks[0]?.eligible).toBe(true);
+    expect(tick.created).toHaveLength(0);
+    expect(claimed).toHaveLength(0);
   });
 
   it("pause is honoured before any launch", async () => {
-    const { ledger, controller } = build();
+    const { ledger, cycle } = build();
     ledger.upsertTask({ id: "t", demandConstant: 3, tiers: ["standard"], prompt: "Work." });
     ledger.setControl("launches", "paused");
-    const report = await controller.tick(0);
-    expect(report.evaluation.launches).toBe("paused");
-    expect(report.launched).toHaveLength(0);
+    const { tick } = await cycle(0);
+    expect(tick.evaluation.launches).toBe("paused");
+    expect(tick.created).toHaveLength(0);
   });
 
   it("gated ingest-before-produce: producer launches only when ingest is drained", async () => {
     let queue = 3;
-    const { ledger, controller } = build({ "probe queue": () => queue });
+    const { ledger, runner, cycle } = build({ "probe queue": () => queue });
     ledger.upsertTask({
       id: "ingest",
       demandCommand: "probe queue",
@@ -113,75 +123,91 @@ describe("controller launch loop", () => {
       tiers: ["standard", "light"],
       prompt: "Produce.",
     });
-    const first = await controller.tick(0);
-    expect(first.launched.map((l) => l.taskId)).toEqual(["ingest", "ingest"]);
-    for (const l of first.launched) controller.runFinished(l.runId, { state: "done" }, 1000);
+    const first = await cycle(0);
+    expect(first.claimed.map((l) => l.taskId)).toEqual(["ingest", "ingest"]);
+    for (const l of first.claimed) runner.runFinished(l.runId, { state: "done" }, 1000);
     queue = 0;
-    const second = await controller.tick(2000);
-    expect(new Set(second.launched.map((l) => l.taskId))).toEqual(new Set(["produce"]));
+    const second = await cycle(2000);
+    expect(new Set(second.claimed.map((l) => l.taskId))).toEqual(new Set(["produce"]));
   });
 });
 
-describe("controller custody", () => {
+describe("run custody", () => {
   it("reaps a run whose heartbeat went stale and frees its account", async () => {
-    const { ledger, controller } = build();
+    const { ledger, cycle } = build();
     ledger.upsertTask({ id: "t", demandConstant: 1, tiers: ["expert"], prompt: "Work." });
-    const first = await controller.tick(0);
-    expect(first.launched).toHaveLength(1);
-    const runId = first.launched[0].runId;
+    const first = await cycle(0);
+    expect(first.claimed).toHaveLength(1);
+    const runId = first.claimed[0].runId;
     // 11 minutes of silence: past the 10-minute default timeout.
     const later = 11 * 60_000;
-    const report = await controller.tick(later);
-    expect(report.reaped).toEqual([runId]);
+    const report = await cycle(later);
+    expect(report.tick.reaped).toEqual([runId]);
     expect(ledger.run(runId)?.state).toBe("error");
     expect(ledger.run(runId)?.detail).toBe("heartbeat timeout");
     // The account is free again; the invalidated demand re-launches.
-    expect(report.launched).toHaveLength(1);
+    expect(report.claimed).toHaveLength(1);
   });
 
   it("heartbeats keep a long run alive", async () => {
-    const { ledger, controller } = build();
+    const { ledger, runner, cycle } = build();
     ledger.upsertTask({ id: "t", demandConstant: 1, tiers: ["expert"], prompt: "Work." });
-    const first = await controller.tick(0);
-    const runId = first.launched[0].runId;
-    controller.heartbeat(runId, 9 * 60_000);
-    const report = await controller.tick(11 * 60_000);
-    expect(report.reaped).toHaveLength(0);
+    const first = await cycle(0);
+    const runId = first.claimed[0].runId;
+    runner.heartbeat(runId, 9 * 60_000);
+    const report = await cycle(11 * 60_000);
+    expect(report.tick.reaped).toHaveLength(0);
     expect(ledger.run(runId)?.state).toBe("running");
   });
 
-  it("abort requests are forwarded to the host", async () => {
-    const { ledger, controller, host } = build();
+  it("a pending run no runner claims expires without tripping the circuit breaker", async () => {
+    const { ledger, controller } = build();
     ledger.upsertTask({ id: "t", demandConstant: 1, tiers: ["expert"], prompt: "Work." });
     const first = await controller.tick(0);
-    const runId = first.launched[0].runId;
+    expect(first.created).toHaveLength(1);
+    const runId = first.created[0].id;
+    // No runner exists. Past the 2-minute claim timeout the run is aborted,
+    // the account reservation is released, and the task relaunches.
+    const later = await controller.tick(3 * 60_000);
+    expect(later.expired).toEqual([runId]);
+    expect(ledger.run(runId)?.state).toBe("aborted");
+    expect(ledger.run(runId)?.detail).toBe("unclaimed");
+    expect(later.created).toHaveLength(1);
+    expect(later.skipped).toHaveLength(0);
+  });
+
+  it("abort requests are forwarded by the owning runner", async () => {
+    const { ledger, engine, runner, cycle } = build();
+    ledger.upsertTask({ id: "t", demandConstant: 1, tiers: ["expert"], prompt: "Work." });
+    const first = await cycle(0);
+    const runId = first.claimed[0].runId;
     ledger.requestAbort(runId);
-    await controller.tick(1000);
-    expect(host.aborted).toEqual([runId]);
+    runner.tick(1000);
+    expect(engine.aborted).toEqual([runId]);
   });
 
   it("circuit breaker: a crashing task stops launching inside the error window", async () => {
-    const { ledger, controller } = build();
+    const { ledger, runner, cycle } = build();
     ledger.upsertTask({ id: "crashy", demandConstant: 5, tiers: ["standard"], prompt: "Work." });
     let now = 0;
     for (let i = 0; i < 3; i++) {
-      const report = await controller.tick(now);
-      for (const l of report.launched) {
-        controller.runFinished(l.runId, { state: "error", detail: "boom" }, now + 500);
+      const report = await cycle(now);
+      for (const l of report.claimed) {
+        runner.runFinished(l.runId, { state: "error", detail: "boom" }, now + 500);
       }
       now += 60_000;
     }
-    const blocked = await controller.tick(now);
-    expect(blocked.launched).toHaveLength(0);
-    expect(blocked.skipped).toContainEqual({ taskId: "crashy", reason: "error-backoff" });
+    const blocked = await cycle(now);
+    expect(blocked.claimed).toHaveLength(0);
+    expect(blocked.tick.skipped).toContainEqual({ taskId: "crashy", reason: "error-backoff" });
     // Outside the 30-minute window the breaker closes again.
-    const recovered = await controller.tick(now + 31 * 60_000);
-    expect(recovered.launched.length).toBeGreaterThan(0);
+    const recovered = await cycle(now + 31 * 60_000);
+    expect(recovered.claimed.length).toBeGreaterThan(0);
   });
 
   it("a finished run wakes tasks gated on it", async () => {
     let queue = 1;
-    const { ledger, controller } = build({ "probe queue": () => queue });
+    const { ledger, runner, cycle } = build({ "probe queue": () => queue });
     ledger.upsertTask({
       id: "ingest",
       demandCommand: "probe queue",
@@ -195,13 +221,13 @@ describe("controller custody", () => {
       tiers: ["light", "standard"],
       prompt: "Produce.",
     });
-    const first = await controller.tick(0);
-    const ingestRun = first.launched.find((l) => l.taskId === "ingest")!;
+    const first = await cycle(0);
+    const ingestRun = first.claimed.find((l) => l.taskId === "ingest")!;
     queue = 0;
     // Well inside the demand TTL: without invalidation the stale backlog
     // would keep the gate closed until expiry.
-    controller.runFinished(ingestRun.runId, { state: "done" }, 10_000);
-    const second = await controller.tick(20_000);
-    expect(second.launched.some((l) => l.taskId === "produce")).toBe(true);
+    runner.runFinished(ingestRun.runId, { state: "done" }, 10_000);
+    const second = await cycle(20_000);
+    expect(second.claimed.some((l) => l.taskId === "produce")).toBe(true);
   });
 });

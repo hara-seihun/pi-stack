@@ -30,8 +30,10 @@ export class PiHost implements HostManager {
     private readonly options: {
       /** pi agent dir (auth.json, models.json). Default: SDK default. */
       readonly agentDir?: string;
-      /** Resolve a launch's provider/model to a pi Model object. */
-      readonly resolveModel: (provider: string, model: string) => unknown;
+      /** Resolve a launch to a pi Model object. Alias accounts re-home the
+       * family model onto the account's provider alias so credentials
+       * resolve per account. */
+      readonly resolveModel: (spec: LaunchSpec) => unknown;
     },
   ) {}
 
@@ -78,7 +80,7 @@ export class PiHost implements HostManager {
       cwd: spec.cwd,
       agentDir: this.options.agentDir,
       // The SDK's Model type is provider-internal; the resolver returns one.
-      model: this.options.resolveModel(spec.provider, spec.model) as never,
+      model: this.options.resolveModel(spec) as never,
       customTools: [taskComplete],
     });
     this.sessions.set(spec.runId, session);

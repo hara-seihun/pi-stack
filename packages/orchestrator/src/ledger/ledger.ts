@@ -103,7 +103,45 @@ CREATE INDEX run_state ON run (state);
 CREATE INDEX run_task_started ON run (task_id, started_at);
 `;
 
-const MIGRATIONS: readonly string[] = [SCHEMA, TASK_SCHEMA, RUN_SCHEMA];
+/**
+ * Runs become ledger-mediated: the controller creates them 'pending', runner
+ * processes claim them atomically. The table is rebuilt because the state
+ * CHECK cannot be altered in place; claimed_at backfills from started_at.
+ */
+const RUNNER_SCHEMA = `
+ALTER TABLE account ADD COLUMN last_bound_at INTEGER;
+
+CREATE TABLE run_next (
+  id TEXT PRIMARY KEY,
+  task_id TEXT NOT NULL,
+  tier TEXT NOT NULL,
+  account_id TEXT NOT NULL,
+  model TEXT NOT NULL,
+  provider TEXT NOT NULL,
+  state TEXT NOT NULL CHECK (state IN ('pending', 'running', 'done', 'error', 'aborted')),
+  started_at INTEGER NOT NULL,
+  claimed_at INTEGER,
+  runner_id TEXT,
+  ended_at INTEGER,
+  heartbeat_at INTEGER,
+  abort_requested INTEGER NOT NULL DEFAULT 0,
+  productive INTEGER,
+  complete INTEGER,
+  detail TEXT
+) STRICT;
+INSERT INTO run_next (id, task_id, tier, account_id, model, provider, state, started_at,
+                      claimed_at, ended_at, heartbeat_at, abort_requested, productive, complete, detail)
+  SELECT id, task_id, tier, account_id, model, provider, state, started_at,
+         started_at, ended_at, heartbeat_at, abort_requested, productive, complete, detail FROM run;
+DROP TABLE run;
+ALTER TABLE run_next RENAME TO run;
+CREATE INDEX run_state ON run (state);
+CREATE INDEX run_task_started ON run (task_id, started_at);
+
+INSERT INTO control (key, value) VALUES ('runner_generation', '1');
+`;
+
+const MIGRATIONS: readonly string[] = [SCHEMA, TASK_SCHEMA, RUN_SCHEMA, RUNNER_SCHEMA];
 
 export interface AccountRow {
   readonly id: string;
@@ -111,10 +149,11 @@ export interface AccountRow {
   readonly label: string | undefined;
   readonly accessUntil: number | undefined;
   readonly cooldownUntil: number | undefined;
+  readonly lastBoundAt: number | undefined;
   readonly createdAt: number;
 }
 
-export type RunState = "running" | "done" | "error" | "aborted";
+export type RunState = "pending" | "running" | "done" | "error" | "aborted";
 
 /** Launch-side custody of one agent session. `tier` lives here for capacity
  * accounting and statistics only; it must never reach agent-visible surfaces.
@@ -128,6 +167,8 @@ export interface RunRow {
   readonly provider: string;
   readonly state: RunState;
   readonly startedAt: number;
+  readonly claimedAt: number | undefined;
+  readonly runnerId: string | undefined;
   readonly endedAt: number | undefined;
   readonly heartbeatAt: number | undefined;
   readonly abortRequested: boolean;
@@ -137,7 +178,7 @@ export interface RunRow {
 }
 
 export interface RunResult {
-  readonly state: Exclude<RunState, "running">;
+  readonly state: "done" | "error" | "aborted";
   readonly productive?: boolean;
   readonly complete?: boolean;
   readonly detail?: string;
@@ -192,7 +233,7 @@ export class Ledger {
   accounts(): AccountRow[] {
     const rows = this.db
       .prepare(
-        "SELECT id, provider, label, access_until, cooldown_until, created_at FROM account ORDER BY id",
+        "SELECT id, provider, label, access_until, cooldown_until, last_bound_at, created_at FROM account ORDER BY id",
       )
       .all() as {
       id: string;
@@ -200,6 +241,7 @@ export class Ledger {
       label: string | null;
       access_until: number | null;
       cooldown_until: number | null;
+      last_bound_at: number | null;
       created_at: number;
     }[];
     return rows.map((r) => ({
@@ -208,6 +250,7 @@ export class Ledger {
       label: r.label ?? undefined,
       accessUntil: r.access_until ?? undefined,
       cooldownUntil: r.cooldown_until ?? undefined,
+      lastBoundAt: r.last_bound_at ?? undefined,
       createdAt: r.created_at,
     }));
   }
@@ -217,6 +260,25 @@ export class Ledger {
     this.db
       .prepare("UPDATE account SET cooldown_until = ? WHERE id = ?")
       .run(until ?? null, id);
+  }
+
+  /** Session-binding fact for least-used round-robin tie-breaking. */
+  setAccountLastBound(id: string, at: number): void {
+    this.db.prepare("UPDATE account SET last_bound_at = ? WHERE id = ?").run(at, id);
+  }
+
+  /** Freshest provider-reported utilization: max over meters of the latest
+   * used_percent reading. Undefined when the account has no readings. */
+  latestUsedPercent(accountId: string): number | undefined {
+    const row = this.db
+      .prepare(
+        `SELECT MAX(used_percent) AS p FROM meter_reading r
+         WHERE account_id = ?
+           AND at = (SELECT MAX(at) FROM meter_reading
+                     WHERE account_id = r.account_id AND meter_id = r.meter_id)`,
+      )
+      .get(accountId) as { p: number | null };
+    return row.p ?? undefined;
   }
 
   /**
@@ -455,9 +517,11 @@ export class Ledger {
   }
 
   invalidateDemand(taskId: string): void {
+    // No-op for deleted tasks: a run can finish after its task is removed.
     this.db
       .prepare(
-        `INSERT INTO task_demand (task_id, invalidated) VALUES (?, 1)
+        `INSERT INTO task_demand (task_id, invalidated)
+         SELECT id, 1 FROM task WHERE id = ?
          ON CONFLICT (task_id) DO UPDATE SET invalidated = 1`,
       )
       .run(taskId);
@@ -487,28 +551,67 @@ export class Ledger {
     const id = crypto.randomUUID();
     this.db
       .prepare(
-        `INSERT INTO run (id, task_id, tier, account_id, model, provider, state, started_at, heartbeat_at)
-         VALUES (?, ?, ?, ?, ?, ?, 'running', ?, ?)`,
+        `INSERT INTO run (id, task_id, tier, account_id, model, provider, state, started_at)
+         VALUES (?, ?, ?, ?, ?, ?, 'pending', ?)`,
       )
-      .run(id, r.taskId, r.tier, r.accountId, r.model, r.provider, r.at, r.at);
+      .run(id, r.taskId, r.tier, r.accountId, r.model, r.provider, r.at);
     return id;
+  }
+
+  /**
+   * Atomically claims up to `limit` pending runs for a runner (oldest first).
+   * A single UPDATE statement, so concurrent runners never claim the same
+   * run. Returns the claimed rows.
+   */
+  claimRuns(runnerId: string, limit: number, at: number): RunRow[] {
+    if (limit <= 0) return [];
+    const ids = this.db
+      .prepare(
+        `UPDATE run SET state = 'running', runner_id = ?, claimed_at = ?, heartbeat_at = ?
+         WHERE state = 'pending' AND id IN
+           (SELECT id FROM run WHERE state = 'pending' ORDER BY started_at LIMIT ?)
+         RETURNING id`,
+      )
+      .all(runnerId, at, at, limit) as { id: string }[];
+    return ids.map((r) => this.run(r.id)!);
+  }
+
+  /** Pending runs no runner claimed in time: aborted, not error, so a runner
+   * outage never trips task circuit breakers. */
+  expireUnclaimed(before: number, at: number): RunRow[] {
+    const ids = this.db
+      .prepare(
+        `UPDATE run SET state = 'aborted', ended_at = ?, detail = 'unclaimed'
+         WHERE state = 'pending' AND started_at < ? RETURNING id`,
+      )
+      .all(at, before) as { id: string }[];
+    return ids.map((r) => this.run(r.id)!);
   }
 
   run(id: string): RunRow | undefined {
     return this.runRows("WHERE id = ?", [id])[0];
   }
 
-  runs(filter?: { state?: RunState }): RunRow[] {
-    return filter?.state !== undefined
-      ? this.runRows("WHERE state = ? ORDER BY started_at", [filter.state])
-      : this.runRows("ORDER BY started_at", []);
+  runs(filter?: { state?: RunState; runnerId?: string }): RunRow[] {
+    const clauses: string[] = [];
+    const params: (string | number)[] = [];
+    if (filter?.state !== undefined) {
+      clauses.push("state = ?");
+      params.push(filter.state);
+    }
+    if (filter?.runnerId !== undefined) {
+      clauses.push("runner_id = ?");
+      params.push(filter.runnerId);
+    }
+    const where = clauses.length > 0 ? `WHERE ${clauses.join(" AND ")} ` : "";
+    return this.runRows(`${where}ORDER BY started_at`, params);
   }
 
   private runRows(clause: string, params: (string | number)[]): RunRow[] {
     const rows = this.db
       .prepare(
         `SELECT id, task_id, tier, account_id, model, provider, state, started_at,
-                ended_at, heartbeat_at, abort_requested, productive, complete, detail
+                claimed_at, runner_id, ended_at, heartbeat_at, abort_requested, productive, complete, detail
          FROM run ${clause}`,
       )
       .all(...params) as {
@@ -520,6 +623,8 @@ export class Ledger {
       provider: string;
       state: RunState;
       started_at: number;
+      claimed_at: number | null;
+      runner_id: string | null;
       ended_at: number | null;
       heartbeat_at: number | null;
       abort_requested: number;
@@ -536,6 +641,8 @@ export class Ledger {
       provider: r.provider,
       state: r.state,
       startedAt: r.started_at,
+      claimedAt: r.claimed_at ?? undefined,
+      runnerId: r.runner_id ?? undefined,
       endedAt: r.ended_at ?? undefined,
       heartbeatAt: r.heartbeat_at ?? undefined,
       abortRequested: r.abort_requested !== 0,
@@ -549,7 +656,7 @@ export class Ledger {
     this.db
       .prepare(
         `UPDATE run SET state = ?, ended_at = ?, productive = ?, complete = ?, detail = ?
-         WHERE id = ? AND state = 'running'`,
+         WHERE id = ? AND state IN ('pending', 'running')`,
       )
       .run(
         result.state,
@@ -577,9 +684,12 @@ export class Ledger {
       .run(a.accountId, a.model, a.provider, id);
   }
 
+  /** Pending runs reserve the account just like running ones. */
   activeRunCount(accountId: string): number {
     const row = this.db
-      .prepare("SELECT COUNT(*) AS n FROM run WHERE account_id = ? AND state = 'running'")
+      .prepare(
+        "SELECT COUNT(*) AS n FROM run WHERE account_id = ? AND state IN ('pending', 'running')",
+      )
       .get(accountId) as { n: number };
     return row.n;
   }
@@ -588,13 +698,14 @@ export class Ledger {
   runHours(accountId: string, since: number, now: number): number {
     const rows = this.db
       .prepare(
-        `SELECT started_at, ended_at FROM run
-         WHERE account_id = ? AND (ended_at IS NULL OR ended_at > ?) AND started_at < ?`,
+        `SELECT COALESCE(claimed_at, started_at) AS s, ended_at FROM run
+         WHERE account_id = ? AND state != 'pending'
+           AND (ended_at IS NULL OR ended_at > ?) AND COALESCE(claimed_at, started_at) < ?`,
       )
-      .all(accountId, since, now) as { started_at: number; ended_at: number | null }[];
+      .all(accountId, since, now) as { s: number; ended_at: number | null }[];
     let ms = 0;
     for (const r of rows) {
-      ms += Math.max(0, Math.min(r.ended_at ?? now, now) - Math.max(r.started_at, since));
+      ms += Math.max(0, Math.min(r.ended_at ?? now, now) - Math.max(r.s, since));
     }
     return ms / 3_600_000;
   }

@@ -183,6 +183,7 @@ describe("broker failover", () => {
     const broker = new Broker(ledger, { ...CONFIG, cooldownMs: 10 * 60_000 });
     const first = broker.admit("standard", 0)!;
     const runId = ledger.createRun({ taskId: "t", tier: "standard", at: 0, ...first });
+    ledger.claimRuns("r1", 1, 500); // failover applies to live, claimed sessions
     const moved = broker.failover(runId, 1000);
     expect(moved?.accountId).toBe("codex-1");
     expect(ledger.run(runId)?.accountId).toBe("codex-1");
@@ -197,6 +198,7 @@ describe("broker failover", () => {
     const broker = new Broker(ledger, CONFIG);
     const a = broker.admit("expert", 0)!;
     const runId = ledger.createRun({ taskId: "t", tier: "expert", at: 0, ...a });
+    ledger.claimRuns("r1", 1, 500);
     expect(broker.failover(runId, 1000)).toBeUndefined();
     expect(ledger.run(runId)?.accountId).toBe("anth-1");
   });

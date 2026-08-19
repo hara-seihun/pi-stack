@@ -6,12 +6,11 @@ task scheduling. Built on pi's SDK — pi is the engine, this is the fleet
 layer.
 
 Status: the core calibrator, ledger, usage-logger extension, task
-eligibility layer, broker, controller, in-process agent host, and operator
-CLI are implemented. Deferred: the in-session routing extension (multi-pass
-successor, provider failover for interactive sessions) — it needs a live
-failure-interception design against pi's extension API and will land as its
-own part; and daemon wiring for the controller loop (deployment
-configuration: tier→model maps and meter topology as operator config).
+eligibility layer, broker, controller, out-of-process runners, pi-SDK agent
+host, routing extension (multi-pass successor), and operator CLI are
+implemented. Deferred: controller daemon wiring (deployment configuration:
+tier→model maps and meter topology as operator config) and live validation
+of alias-account auth inside SDK-hosted sessions.
 
 ## Design
 
@@ -139,33 +138,70 @@ never double-counted), capped by what eligible tasks actually demand (so a
 scarce tier never hoards an account nothing wants). `failover` cools the
 failing account down and re-admits the run elsewhere.
 
-## Controller and host (`src/controller/`, `src/host/`)
+## Controller and runners (`src/controller/`, `src/host/`)
 
 The controller is the launch loop. Each tick: reap runs with stale
-heartbeats (a crashed host needs no other recovery protocol), forward abort
-requests, evaluate the scheduler, net demand against in-flight runs (a
-backlog of 3 with 2 agents on it wants one more agent, not three), allocate
-broker slots, admit, record the run, launch. A per-task circuit breaker
-skips tasks with repeated recent errors so a crashing task cannot hot-loop
-through plan capacity. The controller holds no state of its own — every
-fact lives in the ledger, so restarts lose nothing.
+heartbeats, expire pending runs no runner claimed (aborted, not error — a
+runner outage never trips task circuit breakers), evaluate the scheduler,
+net demand against in-flight runs (a backlog of 3 with 2 agents on it wants
+one more agent, not three), allocate broker slots, admit, and write
+`pending` run rows. A per-task circuit breaker skips tasks with repeated
+recent errors so a crashing task cannot hot-loop through plan capacity. The
+controller holds no state of its own — every fact lives in the ledger, so
+restarts lose nothing.
+
+Runners are **separate processes** from the controller, so an orchestrator
+update or crash never kills an agent, and each runner hosts **many**
+embedded sessions in one node process (700 concurrent agents must not mean
+700 node processes). The ledger is the only channel: the controller writes
+pending runs, runners claim them with one atomic UPDATE (two runners can
+never claim the same run), heartbeats and results flow back as row updates.
+Runner updates use generation draining: `drain-runners` bumps a control
+row; live runners stop claiming and exit when their last session ends,
+while freshly started runners claim under the new generation. Nothing is
+ever killed mid-run.
 
 Run custody lives in the ledger's `run` table (launch-side only: `tier` is
 recorded there for capacity accounting and never reaches a host). A task
 without a `prompt` is a pure demand signal for gates and is never launched.
 
-The host boundary is two small interfaces (`HostManager`, `HostEvents`);
-`PiHost` is the thin pi-SDK adapter: one launch = one embedded
-`AgentSession`, the task prompt as first user message, a `task_complete`
-custom tool for the result report, a 30-second heartbeat, `dispose` on the
-way out. All policy lives upstream; the adapter contains no decisions.
+`PiHost` is the thin pi-SDK adapter behind the `HostManager`/`HostEvents`
+interfaces: one launch = one embedded `AgentSession`, the task prompt as
+first user message, a `task_complete` custom tool for the result report, a
+30-second heartbeat, `dispose` on the way out. All policy lives upstream.
+
+## Routing extension — the multi-pass successor (`src/extension/routing.ts`)
+
+Multi-account routing for interactive pi sessions, driven entirely by the
+ledger — the account table is the registry (there is no `multi-pass.json`),
+and the extension replaces the old 6,000-line multi-pass with three rules:
+
+- Every account whose id differs from its family (`anthropic-2`, ...) is
+  registered as an **alias provider** delegating models, transport, and
+  OAuth to the family's builtin provider; credentials resolve from pi's
+  auth.json under the alias id.
+- A fresh session binds to the **least-used** account of its model's family
+  (max latest used-percent across meters; unread accounts sort first;
+  integer-percent ties round-robin by least-recently-bound) and then stays
+  **sticky**: provider prompt caches are per-account, and a mid-session
+  switch throws the cache away. Resume, fork, and reload never rebind.
+- Stickiness yields only to failure: on a rate-limit error the account
+  cools down in the ledger (broker admission honours the same fact) and the
+  session moves to the next account with a resume prompt.
+
+Orchestrator-launched sessions set `PI_ORCHESTRATOR_ASSIGNED=1` and the
+extension stays out entirely — the broker owns their custody, so exactly
+one brain routes any given session. Load it by adding this repository to
+`packages` in pi settings (the package also carries the usage logger).
 
 ## Operator CLI (`src/cli.ts`)
 
-`pi-orchestrator status | task set/list/delete | pause | resume | abort` —
-thin reads and writes against the ledger (path from
-`PI_ORCHESTRATOR_LEDGER`, default `~/.local/share/pi-orchestrator/`).
-`npm run build` emits `dist/` for the `pi-orchestrator` bin.
+`pi-orchestrator status | task set/list/delete | pause | resume | abort |
+runner | drain-runners` — thin reads and writes against the ledger (path
+from `PI_ORCHESTRATOR_LEDGER`, default `~/.local/share/pi-orchestrator/`).
+`runner --max-sessions N` starts a runner process; `drain-runners` rolls
+runner generations for zero-kill updates. `npm run build` emits `dist/` for
+the `pi-orchestrator` bin.
 
 ## Development
 
