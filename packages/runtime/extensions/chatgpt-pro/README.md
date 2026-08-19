@@ -57,6 +57,72 @@ Codex OAuth tokens expose the Pro model in the catalog but ChatGPT routed every 
 
 This provider takes the smallest useful combination: Kernel supplies the maintained authenticated browser/profile lifecycle, Playwright supplies semantic UI control, and persisted ChatGPT conversation metadata supplies stronger execution proof than picker state or model self-identification. OpenAI's current documentation identifies Pro as GPT-5.6 Sol Pro and notes that manually selected reasoning can fall back after allowances are reached: <https://help.openai.com/en/articles/20001354-gpt-56-in-chatgpt>.
 
+## 2026-08-17 mini-routing episode and the 2026-08-19 interstitial (resolved)
+
+Two distinct failures overlapped and were untangled on 2026-08-19.
+
+**Mini fast-routing (2026-08-17T04:53Z – 2026-08-18):** every submission on all
+four profiles ended with `ChatGPT router resolved gpt-5-5-mini instead of
+gpt-5-6-pro`. All probing during the episode used trivial canary prompts
+(`Reply with exactly: PROBE-OK`), which ChatGPT is entitled to Pro-skip. The
+decisive experiment — a real heavy research prompt — ran on 2026-08-19T16:32:52Z
+(conversation `6a85daaa…` on `chatgpt-codex-06`, the queued A3 rank-6/7
+question): the user message persisted `resolved_model_slug=gpt-5-6-pro`, Pro
+work `in_progress` with real progress percentage, `reasoning_status=is_reasoning`,
+all tool/assistant messages `model_slug=gpt-5-6-pro`. The fast-route condition
+does not fire on real prompts; the episode either ended on its own or never
+applied to genuine workloads. The four `pro-fallback`/`browser-operation`
+cooldowns expired naturally. **The model-verification invariant stands as
+written**: `resolved_model_slug` on the persisted user message still means the
+route the backend actually took, and `pro_execution_verified` still requires
+it to equal `gpt-5-6-pro`.
+
+Residual anomalies from the episode, kept for the record: during canary probes
+the stream's `server_ste_metadata` reported `fast_convo: true` with
+`model_slug: gpt-5-5-mini` while assistant messages carried
+`model_slug: gpt-5-6-pro`, and the composer's new `thinking_effort` request
+field stayed `"standard"` across genuine slider transitions. Neither pattern
+appeared on the real-prompt run. If mini-routing recurs on a real prompt,
+re-run the reproduction recipe below before touching the invariant.
+
+**Send-click interstitial (2026-08-19T16:30–16:32Z):** three consecutive turn
+attempts on `chatgpt-codex-06`/`-09`/`-08` died with
+`locator.click: Timeout 30000ms exceeded` on the send button: a one-time
+account interstitial rendered a full-screen `#modal-beacon` backdrop
+(`data-state="open"`) that intercepted pointer events. The picker had verified
+Pro correctly; only the send click was blocked. The modal was gone from all
+profiles ~15 minutes later (interstitials are marked shown server-side after
+first render) and never appeared on `limmy-google`. The fourth attempt
+submitted cleanly.
+
+Hardening shipped 2026-08-19 in response (`browser.mjs`):
+
+1. **`ProUiChangedError`** (`code: "pro-ui-changed"`): every element-shape
+   failure — missing composer, picker button, picker content, Power menu item,
+   broken slider, changed verification labels, non-Pro close state, missing or
+   disabled send button, blocked send click — raises this dedicated class with
+   the observed DOM text, a screenshot under
+   `~/data/agent-orchestrator/pro/provider-audit/ui-changed-*.png`, and an
+   alert written to `/home/kenan/data/alerts/inbox/`. The audit record carries
+   `error_code`, `ui_stage`, and `ui_screenshot`. Navigation and
+   authentication failures stay generic.
+2. **Deliberate modal dismissal** (`dismissBlockingModals`): before the picker
+   click and before the send click, any open `#modal-beacon`/full-screen
+   backdrop is dismissed via close buttons, benign-text buttons
+   (Close/Dismiss/Got it/…), then Escape. An intercepted send click gets one
+   dismissal-and-retry; an undismissable modal or second interception raises
+   the loud `pro-ui-changed` failure. The cooldown reason `pro-ui-changed`
+   is distinct from `browser-operation`.
+
+Reproduction recipe for router questions: create a Kernel browser with
+`kernel browsers create --profile-name limmy-google --save-changes --start-url
+https://chatgpt.com/ --output json`, attach with `playwright-core` over
+`cdp_ws_url`, drive the picker exactly as `ensureProSelection` does, capture
+the `POST .../conversation` request body and the full SSE response text, and
+read `server_ste_metadata` from the tail of the stream. Judge Pro execution
+only from the persisted conversation (`pro_execution_verified`), never from
+picker state, DOM attributes, or response speed.
+
 ## Current routing status
 
 The original `kenan-personal` ChatGPT identity remains routed to GPT-5.5 Mini. On 2026-08-15, real Pi turns selected and verified **GPT-5.6 Sol / Pro** in the web UI and sent `model=gpt-5-6-pro`; both Kernel proxy and direct egress still persisted `resolved_model_slug=gpt-5-5-mini`. One direct stream briefly reported Pro and rendered `data-message-model-slug=gpt-5-6-pro` plus a Pro feedback control, while the authenticated persisted conversation proved the Mini route. This demonstrates why visible picker, DOM model attributes, response speed, and intermediate stream metadata are not sufficient acceptance evidence.

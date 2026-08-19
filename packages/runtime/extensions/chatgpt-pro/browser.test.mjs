@@ -283,3 +283,31 @@ test("audit history yields exactly the orphaned conversations", async (t) => {
   // Old records outside the window are ignored.
   assert.deepEqual(orphanedConversationsFromAudits(0, dir), []);
 });
+
+test("a UI-shape failure is loud, distinct, and carries its evidence", async () => {
+  const { ProUiChangedError, failureCooldown } = await import("./browser.mjs");
+  const error = new ProUiChangedError("send-click-blocked", "backdrop intercepts pointer events", {
+    screenshotPath: "/tmp/shot.png",
+  });
+  assert.equal(error.code, "pro-ui-changed");
+  assert.equal(error.stage, "send-click-blocked");
+  assert.equal(error.screenshotPath, "/tmp/shot.png");
+  assert.match(error.message, /send-click-blocked/);
+  assert.match(error.message, /backdrop intercepts/);
+  const cooldown = failureCooldown(error, {}, "");
+  assert.equal(cooldown.reason, "pro-ui-changed");
+  assert.ok(cooldown.cooldownMs > 0 && cooldown.cooldownMs < FALLBACK_COOLDOWN_MS);
+});
+
+test("ui-changed classification never masks a router fallback or stall", async () => {
+  const { failureCooldown } = await import("./browser.mjs");
+  assert.equal(
+    failureCooldown(new Error("x"), { resolved_model_slug: "gpt-5-5-mini" }, "").reason,
+    "pro-fallback",
+  );
+  assert.equal(
+    failureCooldown(new Error("x"), { transport_stalled: true }, "").reason,
+    "pro-stalled",
+  );
+  assert.equal(failureCooldown(new Error("boring"), {}, "").reason, "browser-operation");
+});

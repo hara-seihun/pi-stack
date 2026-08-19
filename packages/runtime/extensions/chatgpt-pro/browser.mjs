@@ -23,6 +23,7 @@ const POOL_PATH = join(AGENT_DIR, "chatgpt-pro-pool.json");
 const MULTI_PASS_PATH = join(AGENT_DIR, "multi-pass.json");
 const POOL_LOCK = join(AGENT_DIR, ".chatgpt-pro-pool.lock");
 const PROVIDER_AUDIT_DIR = join(HOME, "data", "agent-orchestrator", "pro", "provider-audit");
+const ALERTS_INBOX = join(HOME, "data", "alerts", "inbox");
 const PENDING_DIR = join(HOME, "data", "agent-orchestrator", "pro", "pending");
 const RECOVERED_DIR = join(HOME, "data", "projects-research", "pro", "recovered");
 export const PRO_PROFILE_CONFIG_PATH = join(AGENT_DIR, "chatgpt-pro-profiles.json");
@@ -372,6 +373,99 @@ function conversationIdFromUrl(url) {
   }
 }
 
+// A ChatGPT web-UI shape change (missing picker, changed labels, blocking
+// modal) must fail loudly and distinctly — not as a generic browser-operation
+// error that quietly cools down and retries. The 2026-08-19 incident burned
+// three entitlements in three minutes on an undetected one-time interstitial
+// whose backdrop intercepted the send click.
+export class ProUiChangedError extends Error {
+  constructor(stage, detail, { screenshotPath = null } = {}) {
+    super(`ChatGPT UI changed at ${stage}: ${detail}`);
+    this.code = "pro-ui-changed";
+    this.stage = stage;
+    this.screenshotPath = screenshotPath;
+  }
+}
+
+function writeUiChangeAlert(error, browserProfile) {
+  mkdirSync(ALERTS_INBOX, { recursive: true });
+  const path = join(ALERTS_INBOX,
+    `chatgpt-pro-ui-changed-${new Date().toISOString().replace(/[:.]/g, "-")}-${randomUUID().slice(0, 8)}.md`);
+  writeFileSync(path, [
+    "# ChatGPT Pro UI changed",
+    "",
+    `- At: ${new Date().toISOString()}`,
+    `- Stage: ${error.stage}`,
+    `- Browser profile: ${browserProfile ?? "unknown"}`,
+    `- Screenshot: ${error.screenshotPath ?? "unavailable"}`,
+    "",
+    "## Observed",
+    "",
+    error.message,
+    "",
+    "The chatgpt.com web UI no longer matches what the chatgpt-pro provider",
+    "expects at this stage. Every Pro moonshot lane is likely broken until the",
+    "provider is updated. See the UI contract in",
+    "`/home/kenan/tools/pi-runtime/extensions/chatgpt-pro/README.md` and repair",
+    "`browser.mjs` against the current DOM (the screenshot shows the observed",
+    "state).",
+  ].join("\n"), { mode: 0o600 });
+}
+
+async function uiChangedError(page, stage, detail, browserProfile = null) {
+  let screenshotPath = null;
+  try {
+    mkdirSync(PROVIDER_AUDIT_DIR, { recursive: true, mode: 0o700 });
+    screenshotPath = join(PROVIDER_AUDIT_DIR,
+      `ui-changed-${new Date().toISOString().replace(/[:.]/g, "-")}-${randomUUID().slice(0, 8)}.png`);
+    await page.screenshot({ path: screenshotPath, timeout: 10_000 });
+  } catch {
+    screenshotPath = null;
+  }
+  const error = new ProUiChangedError(stage, detail, { screenshotPath });
+  try { writeUiChangeAlert(error, browserProfile); } catch {}
+  return error;
+}
+
+// Anything shaped like a full-screen dialog backdrop. ChatGPT renders one-time
+// interstitials (announcements, onboarding) under #modal-beacon with a
+// data-state="open" backdrop that intercepts pointer events page-wide.
+const MODAL_BACKDROP = '#modal-beacon [data-state="open"], div[data-state="open"].fixed.inset-0';
+const MODAL_CLOSE_BUTTONS = [
+  '#modal-beacon [data-testid="close-button"], [role="dialog"] [data-testid="close-button"]',
+  '#modal-beacon button[aria-label*="close" i], [role="dialog"] button[aria-label*="close" i], button[aria-label*="dismiss" i]',
+];
+const MODAL_BENIGN_TEXT = /^(Close|Dismiss|Got it|OK|Okay|Continue|Maybe later|Not now|Skip|No thanks)$/i;
+
+async function dismissBlockingModals(page, stage, browserProfile = null) {
+  const backdrop = page.locator(MODAL_BACKDROP).first();
+  if (!(await backdrop.isVisible().catch(() => false))) return false;
+  const modalText = ((await page.locator("#modal-beacon").innerText().catch(() => "")) ||
+    (await page.locator('[role="dialog"]').first().innerText().catch(() => "")))
+    .replace(/\s+/g, " ").trim().slice(0, 500);
+  for (const selector of MODAL_CLOSE_BUTTONS) {
+    const button = page.locator(selector).first();
+    if (await button.isVisible().catch(() => false)) {
+      await button.click({ timeout: 5_000 }).catch(() => {});
+      await page.waitForTimeout(500);
+      if (!(await backdrop.isVisible().catch(() => false))) return true;
+    }
+  }
+  const benign = page.locator('#modal-beacon button, [role="dialog"] button')
+    .filter({ hasText: MODAL_BENIGN_TEXT }).first();
+  if (await benign.isVisible().catch(() => false)) {
+    await benign.click({ timeout: 5_000 }).catch(() => {});
+    await page.waitForTimeout(500);
+    if (!(await backdrop.isVisible().catch(() => false))) return true;
+  }
+  await page.keyboard.press("Escape");
+  await page.waitForTimeout(500);
+  if (!(await backdrop.isVisible().catch(() => false))) return true;
+  throw await uiChangedError(page, stage,
+    `blocking modal could not be dismissed (close buttons and Escape all failed): ${modalText || "(no dialog text)"}`,
+    browserProfile);
+}
+
 async function checkAuthentication(page) {
   const auth = await page.evaluate(async () => {
     try {
@@ -387,39 +481,65 @@ async function checkAuthentication(page) {
   }
 }
 
-async function ensureProSelection(page) {
+// Element-shape steps: a timeout or mismatch here means the web UI no longer
+// matches the provider's contract, which is a loud ProUiChangedError — never a
+// generic failure. Navigation and authentication failures stay generic.
+async function uiStep(page, stage, detail, action, browserProfile) {
+  try {
+    return await action();
+  } catch (error) {
+    if (error instanceof ProUiChangedError) throw error;
+    throw await uiChangedError(page, stage, `${detail}: ${error?.message ?? String(error)}`, browserProfile);
+  }
+}
+
+async function ensureProSelection(page, browserProfile = null) {
   const composer = page.locator("#prompt-textarea");
-  await composer.waitFor({ state: "visible", timeout: 30_000 });
+  await uiStep(page, "composer", "prompt textarea did not appear",
+    () => composer.waitFor({ state: "visible", timeout: 30_000 }), browserProfile);
+  await dismissBlockingModals(page, "before-picker", browserProfile);
   const picker = page.getByRole("button", { name: /^(Instant|Medium|High|Extra High|Pro)$/ }).last();
-  await picker.waitFor({ state: "visible", timeout: 15_000 });
-  await picker.click();
+  await uiStep(page, "model-picker-button", "intelligence picker button missing",
+    () => picker.waitFor({ state: "visible", timeout: 15_000 }), browserProfile);
+  await uiStep(page, "model-picker-button", "picker button click blocked",
+    () => picker.click({ timeout: 15_000 }), browserProfile);
   const content = page.locator('[data-testid="composer-intelligence-picker-content"]');
-  await content.waitFor({ state: "visible", timeout: 10_000 });
+  await uiStep(page, "picker-content", "picker content did not open",
+    () => content.waitFor({ state: "visible", timeout: 10_000 }), browserProfile);
   const power = page.getByRole("menuitem", { name: "Power" });
-  await power.waitFor({ state: "visible", timeout: 10_000 });
+  await uiStep(page, "power-menuitem", "Power menu item missing from picker",
+    () => power.waitFor({ state: "visible", timeout: 10_000 }), browserProfile);
   const slider = power.locator('[role="slider"]');
   let value = Number(await slider.getAttribute("aria-valuenow"));
   const max = Number(await slider.getAttribute("aria-valuemax"));
   if (!Number.isInteger(value) || !Number.isInteger(max) || max < 1) {
-    throw new Error("ChatGPT power slider did not expose a verifiable value range");
+    throw await uiChangedError(page, "power-slider",
+      `slider exposed no verifiable value range (valuenow=${value}, valuemax=${max})`, browserProfile);
   }
   await power.focus();
   while (value < max) {
     await power.press("ArrowRight");
     await page.waitForTimeout(200);
     const next = Number(await slider.getAttribute("aria-valuenow"));
-    if (!Number.isInteger(next) || next <= value) throw new Error("ChatGPT power slider did not advance toward Pro");
+    if (!Number.isInteger(next) || next <= value) {
+      throw await uiChangedError(page, "power-slider",
+        `slider did not advance toward Pro (stuck at ${value} of ${max})`, browserProfile);
+    }
     value = next;
   }
   await page.waitForTimeout(500);
   const pickerText = (await content.innerText()).replace(/\s+/g, " ").trim();
   if (!/Pro,\s*5 of 5/i.test(pickerText) || !/GPT-5\.6 Sol/i.test(pickerText) || !/Effort\s+Pro/i.test(pickerText)) {
-    throw new Error(`ChatGPT picker did not verify GPT-5.6 Sol Pro: ${pickerText.slice(0, 500)}`);
+    throw await uiChangedError(page, "picker-verification",
+      `picker did not verify GPT-5.6 Sol Pro: ${pickerText.slice(0, 500)}`, browserProfile);
   }
   await page.keyboard.press("Escape");
   await page.waitForTimeout(300);
   const selected = (await page.getByRole("button", { name: /^(Instant|Medium|High|Extra High|Pro)$/ }).last().innerText()).trim();
-  if (selected !== "Pro") throw new Error(`ChatGPT picker closed on ${JSON.stringify(selected)}, not Pro`);
+  if (selected !== "Pro") {
+    throw await uiChangedError(page, "picker-close",
+      `picker closed on ${JSON.stringify(selected)}, not Pro`, browserProfile);
+  }
   return { selected, pickerText };
 }
 
@@ -447,7 +567,7 @@ export function listPendingConversations() {
   return entries.filter((entry) => entry?.conversationId && entry?.browserProfile);
 }
 
-async function submitPrompt(page, prompt) {
+async function submitPrompt(page, prompt, browserProfile = null) {
   const observed = { requestedModel: null };
   let resolveResponse;
   const responsePromise = new Promise((resolve) => { resolveResponse = resolve; });
@@ -474,9 +594,25 @@ async function submitPrompt(page, prompt) {
     const composer = page.locator("#prompt-textarea");
     await composer.fill(prompt);
     const send = page.locator('[data-testid="send-button"], button[aria-label*="Send" i]').first();
-    await send.waitFor({ state: "visible", timeout: 15_000 });
-    if (!(await send.isEnabled())) throw new Error("ChatGPT send button remained disabled after prompt insertion");
-    await send.click();
+    await uiStep(page, "send-button", "send button did not appear after prompt insertion",
+      () => send.waitFor({ state: "visible", timeout: 15_000 }), browserProfile);
+    if (!(await send.isEnabled())) {
+      throw await uiChangedError(page, "send-button",
+        "send button remained disabled after prompt insertion", browserProfile);
+    }
+    await dismissBlockingModals(page, "before-send", browserProfile);
+    try {
+      await send.click({ timeout: 30_000 });
+    } catch (clickError) {
+      if (clickError instanceof ProUiChangedError) throw clickError;
+      // A backdrop can open between the sweep and the click (the 2026-08-19
+      // interstitial did exactly this). Dismiss deliberately and retry once;
+      // a second interception is a loud UI-change failure.
+      await dismissBlockingModals(page, "send-click-intercepted", browserProfile);
+      await uiStep(page, "send-click-blocked",
+        `send click still blocked after modal dismissal (first failure: ${clickError?.message?.split("\n")[0] ?? clickError})`,
+        () => send.click({ timeout: 15_000 }), browserProfile);
+    }
     await page.waitForURL((url) => conversationIdFromUrl(url.toString()) !== null, { timeout: 120_000 });
     return { conversationId: conversationIdFromUrl(page.url()), observed, responsePromise, remove };
   } catch (error) {
@@ -680,8 +816,13 @@ function verificationFailure(evidence) {
   return `Pro browser execution failed verification: resolved=${String(evidence.resolved_model_slug)} executed=${String(evidence.model_slug)} progress=${String(evidence.pro_progress)} skipped=${String(evidence.pro_skipped)} work=${String(evidence.pro_work_status)} reasoning=${String(evidence.reasoning_status)}`;
 }
 
-function failureCooldown(error, evidence, warning) {
+export function failureCooldown(error, evidence, warning) {
   const message = `${error instanceof Error ? error.message : String(error)} ${warning}`;
+  if (error?.code === "pro-ui-changed") {
+    // Loud and distinct: the alert is already in the inbox; the short cooldown
+    // only stops a tight retry loop against a UI the provider cannot drive.
+    return { cooldownMs: OPERATIONAL_COOLDOWN_MS, reason: "pro-ui-changed" };
+  }
   if (evidence?.transport_stalled === true || evidence?.transport_timed_out === true) {
     return {
       cooldownMs: 4 * 60 * 60_000,
@@ -737,8 +878,8 @@ async function attemptProTurn(browserProfile, prompt, { signal, maxWaitMs, onSta
       const page = context.pages()[0] ?? await context.newPage();
       await page.goto("https://chatgpt.com/", { waitUntil: "domcontentloaded", timeout: 60_000 });
       await checkAuthentication(page);
-      selection = await ensureProSelection(page);
-      submitted = await submitPrompt(page, prompt);
+      selection = await ensureProSelection(page, browserProfile);
+      submitted = await submitPrompt(page, prompt, browserProfile);
       try {
         const response = await withDeadline(submitted.responsePromise, 120_000, signal);
         submitted.responseStatus = response.status();
@@ -823,6 +964,9 @@ async function attemptProTurn(browserProfile, prompt, { signal, maxWaitMs, onSta
         evidence,
         provider_warning: warning || null,
         error: error instanceof Error ? error.message : String(error),
+        error_code: error?.code ?? null,
+        ui_stage: error?.stage ?? undefined,
+        ui_screenshot: error?.screenshotPath ?? undefined,
       }, responseText);
     }
     const cooldown = error instanceof ProFallbackError
