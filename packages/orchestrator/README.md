@@ -5,9 +5,9 @@ multi-account usage calibration, quota governance, tiered model routing, and
 task scheduling. Built on pi's SDK — pi is the engine, this is the fleet
 layer.
 
-Status: early. The core calibrator, ledger, and usage-logger extension are
-implemented; the broker, agent host, controller, and operator extension
-follow.
+Status: early. The core calibrator, ledger, usage-logger extension, and task
+eligibility layer are implemented; the broker, agent host, controller, and
+operator extension follow.
 
 ## Design
 
@@ -87,6 +87,35 @@ serialized model state, so one source of truth and calibrator improvements
 apply retroactively to recorded history. Idle high-frequency readings are
 deduplicated to hourly anchors; old facts are prunable because calibration
 only weights recent windows.
+
+## Tasks: demand, gates, tiers (`src/tasks/`)
+
+A task is an action plus two observable predicates: **demand** (is there
+work right now?) and, eventually, completion. Three launch-side fields
+describe scheduling:
+
+- `demand`: a constant or a cheap read-only probe command whose last stdout
+  line is a work-unit count. `0` means no work; agents are never launched to
+  discover idleness. Results are cached with a TTL and invalidated by task
+  completion (`taskFinished` invalidates the finisher's demand and every
+  gate that references it).
+- `gate`: a deliberately tiny expression over other tasks' demand
+  (`ingest.demand == 0`, thresholds, `and`/`or`, parentheses — nothing
+  else). Gates reference demand values only, never other gates, so cycles
+  are impossible by construction. An unevaluable gate (unknown upstream
+  demand, failed probe) is closed, never open. A debounce window stops
+  flapping gates from launching agents prematurely.
+- `tiers`: a preference-ordered subset of `light`/`standard`/`expert` — the
+  substitution set the governor may satisfy a launch with. Allocation across
+  eligible tasks is proportional to demand by largest remainder, honours
+  tier preference with spill, never assigns more agents than work units, and
+  redistributes capacity a tier-restricted task cannot use. Tier labels live
+  only in launch-side tables; prompt assembly and agent-visible surfaces
+  have no read path to them.
+
+The machine-wide pause is the root of the same mechanism: a `control` row
+(`launches = enabled|paused`) in the ledger, honoured by every evaluation
+regardless of who restarts which process.
 
 ## Development
 
