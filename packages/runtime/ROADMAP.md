@@ -11,6 +11,8 @@ implemented (and its behavior is documented in the owning component README) or w
 
 **Requested by Hara, 2026-08-19. Not started.**
 
+**Decided:** publication is **public**, under the GitHub account **[`hara-seihun`](https://github.com/hara-seihun)** (already authenticated here through `gh`, and the owner of the public `hara-seihun/pi-cursor` fork). The present private `owi-link/pi-runtime` remote is a work-side deployment channel, not the publication home. Because the artifact is public, **all machine-specific behavior must be factored out**, not merely made overridable: nothing in the published packages may assume this host, this user, these accounts, this systemd layout, or NixOS.
+
 Everything in this repository is currently consumed by copying a Git checkout onto a host and running
 [`deploy`](deploy), which symlinks executables and extension directories straight out of the working
 tree. Two installations already exist — GMKtec and `converge-kenan` — and they drift: on 2026-08-19
@@ -41,10 +43,10 @@ directly today), while separate packages let a pi user adopt one extension witho
 
 ### Requirements
 
-1. **Published artifact.** Choose and document the registry (public npm under a Kenan scope, GitHub
-   Packages against `owi-link/pi-runtime`, or Artifact Registry). *Open question for Hara: is this
-   published publicly, or privately for our own hosts?* The answer changes naming, licensing, and how
-   much machine-specific behavior must first be factored out.
+1. **Published artifact.** Public npm packages, source public on `hara-seihun`. Needs a package scope,
+   a licence, a public README per package written for a reader with none of our context, and a
+   contribution/issue posture. Our two installations then consume the same public versions as anyone
+   else; there is no private fork path.
 2. **Semantic versions and a release command.** One command tests, versions, publishes, and tags. A host
    updates by installing a version, never by pulling a branch; `orchestrator check` reports the running
    package version alongside the existing code fingerprint.
@@ -60,19 +62,46 @@ directly today), while separate packages let a pi user adopt one extension witho
    additive-first — a mixed-version window is normal here, because a draining host runs older code
    against the same database while the new controller runs the new code. Add a test that opens every
    historical schema and migrates it forward.
-5. **Machine-independent code, machine-local state.** The package must not assume this host. Config and
-   state stay outside it: `~/data/agent-orchestrator/{config.json,orchestrator.sqlite3,...}` (already
-   overridable through `AGENT_ORCHESTRATOR_DATA`), `providers.json`, `~/.pi/agent/*`, credentials, and
-   the systemd units in `/etc/nixos`. Audit the remaining hard-coded paths first — currently the alerts
-   inbox in `extensions/context-guard/index.mjs`, `extensions/pi-usage-logger/database.mjs`, and
-   `extensions/chatgpt-pro/browser.mjs` — and give each one an environment or config override with a
-   documented default.
+5. **Factor out every machine-specific behavior.** Config and state stay outside the package —
+   `~/data/agent-orchestrator/{config.json,orchestrator.sqlite3,…}` (already overridable through
+   `AGENT_ORCHESTRATOR_DATA`), `providers.json`, `~/.pi/agent/*`, credentials, and the systemd units in
+   `/etc/nixos`. A published default may point at a conventional location, but no code path may depend
+   on this machine. Known items to remove or generalize:
+
+   - **Absolute local paths.** `/home/kenan/data/alerts/inbox` in `extensions/context-guard/index.mjs`;
+     the `/home/kenan` fallback in `extensions/pi-usage-logger/database.mjs`; the
+     `/home/kenan/tools/pi-runtime/...` documentation path quoted in `extensions/chatgpt-pro/browser.mjs`
+     failure text; the two hard-coded settings-path spellings inside [`deploy`](deploy).
+   - **This household's hosts.** `plan-meter` defaults its remote to `converge-kenan`; the roll-up and
+     its docs assume a second named machine reachable by SSH alias. A published tool takes peers from
+     configuration or has none.
+   - **Alerts inbox as a machine surface.** context-guard writes to a private directory this machine's
+     agents poll. Published behavior needs a general reporting hook (callback, log, or configured path)
+     with the inbox as one local configuration.
+   - **systemd and cgroup assumptions.** `pi-agents.slice`, `pi-tools.slice`,
+     `agent-orchestrator.service`, `/sys/fs/cgroup/system.slice/...` memory reads, `systemd-run --user`
+     transient hosts, and [`tool-shell`](orchestrator/tool-shell) are Linux+systemd specific. Either
+     declare that dependency explicitly as a supported execution backend and provide a portable
+     fallback, or ship the units as documented examples rather than hard-coded strings.
+   - **Our account naming and subscription policy.** `openai-codex-N` provider-index conventions,
+     Multi-Pass pool assumptions, `chatgpt-pro-profiles.json`, the Kernel browser bridge, and
+     model-policy bans on specific models belong in configuration and the provider manifest, not in
+     package code.
+   - **Our operating policy in prompts and docs.** Component READMEs quote this machine's paths,
+     research campaigns, and quota anecdotes. Public docs describe the mechanism; machine-specific
+     operating detail moves to [`machine/pi.md`](../../machine/pi.md) and this repository's private
+     deployment notes.
+   - **Secrets and identities.** Verify no account label, subscription identity, tailnet name, IP, or
+     credential path reaches the public artifact — including test fixtures and committed sample state.
 6. **Pinned upstream compatibility.** The package declares which `@earendil-works/pi-coding-agent`
    versions it supports and fails clearly on an unsupported one, so a runtime upgrade cannot silently
    break the extension API surface the orchestrator depends on.
 7. **Validation on both installations.** After the switch, GMKtec and `converge-kenan` both install by
    version, both report the same version and schema, neither loses a session across an upgrade, and
    `machine/pi.md` plus each component README describe the new install/update path instead of `deploy`.
+8. **Prove the factoring worked.** A clean checkout must pass its tests on a host with a different user,
+   home directory, and hostname, with no `/home/kenan` present. Grepping the published tree for this
+   machine's paths, hostnames, account labels, and unit names returns nothing.
 
 ### Why now
 
