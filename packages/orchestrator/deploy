@@ -18,7 +18,10 @@ rsync -a --delete --chmod=D755,F644 dist src node_modules package.json "$dest/"
 chmod 755 "$dest/dist/cli.js"
 ln -sfn "$dest/dist/cli.js" "$HOME/.local/bin/pi-orchestrator"
 
-node "$dest/dist/cli.js" help >/dev/null
+# Through the symlink on PATH, and asserting output: a CLI that exits 0 while
+# printing nothing is the failure mode worth catching here.
+"$HOME/.local/bin/pi-orchestrator" help | grep -q "^usage: pi-orchestrator"
+"$HOME/.local/bin/pi-orchestrator" task list | grep -q ":"
 echo "deployed to $dest"
 echo "runner update: pi-orchestrator drain-runners (never systemctl restart pi-orchestrator-runner)"
 echo "controller update: sudo systemctl restart pi-orchestrator"

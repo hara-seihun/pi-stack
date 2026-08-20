@@ -1,6 +1,8 @@
 #!/usr/bin/env node
 import { homedir, hostname } from "node:os";
 import { join } from "node:path";
+import { realpathSync } from "node:fs";
+import { pathToFileURL } from "node:url";
 import { Broker } from "./broker/broker.js";
 import { Controller } from "./controller/controller.js";
 import { Ledger } from "./ledger/ledger.js";
@@ -23,9 +25,11 @@ const LEDGER_PATH =
   process.env.PI_ORCHESTRATOR_LEDGER ??
   join(homedir(), ".local", "share", "pi-orchestrator", "ledger.sqlite3");
 
+/** A usage error. Thrown rather than exited, so commands stay testable. */
+class UsageError extends Error {}
+
 function fail(message: string): never {
-  console.error(`pi-orchestrator: ${message}`);
-  process.exit(1);
+  throw new UsageError(message);
 }
 
 function flags(args: string[]): { positional: string[]; named: Map<string, string> } {
@@ -206,24 +210,46 @@ function boostCommand(ledger: Ledger, args: string[]): void {
   console.log(`${family}: ${multiplier}x allowance`);
 }
 
-function taskSet(ledger: Ledger, args: string[]): void {
+// Editing one field of a live task must not silently discard the others, so
+// flags are merged over the existing row. A field is cleared by passing it
+// empty (--gate ""), which is the only way to say "remove this" out loud.
+export function taskSet(ledger: Ledger, args: string[]): void {
   const { positional, named } = flags(args);
   const id = positional[0] ?? fail("task set <id> --tiers ... required");
-  const tiers = (named.get("tiers") ?? fail("--tiers required")).split(",") as Tier[];
+  const current = ledger.tasks().find((t) => t.id === id);
+  const pick = (flag: string, fallback: string | undefined): string | undefined => {
+    if (!named.has(flag)) return fallback;
+    const value = named.get(flag);
+    return value === "" ? undefined : value;
+  };
+
+  const tiers =
+    (named.get("tiers")?.split(",") as Tier[] | undefined) ??
+    current?.tiers ??
+    fail(`--tiers required: ${id} does not exist yet`);
   for (const t of tiers) if (!TIERS.includes(t)) fail(`unknown tier ${t}`);
+
+  // The two demand forms are exclusive, so naming one clears the other.
+  const demandCommand = pick(
+    "demand-command",
+    named.has("demand-constant") ? undefined : current?.demandCommand,
+  );
   const demandConstant = named.has("demand-constant")
     ? Number(named.get("demand-constant"))
-    : undefined;
+    : named.has("demand-command")
+      ? undefined
+      : current?.demandConstant;
+
   ledger.upsertTask({
     id,
     tiers,
-    demandCommand: named.get("demand-command"),
+    demandCommand,
     demandConstant,
-    gate: named.get("gate"),
-    prompt: named.get("prompt"),
-    cwd: named.get("cwd"),
+    gate: pick("gate", current?.gate),
+    prompt: pick("prompt", current?.prompt),
+    cwd: pick("cwd", current?.cwd),
   });
-  console.log(`task ${id} saved`);
+  console.log(`task ${id} ${current ? "updated" : "created"}`);
 }
 
 async function main(): Promise<void> {
@@ -304,9 +330,17 @@ async function main(): Promise<void> {
         );
         if (command !== undefined && command !== "help") process.exit(1);
     }
+  } catch (error) {
+    if (!(error instanceof UsageError)) throw error;
+    console.error(`pi-orchestrator: ${error.message}`);
+    process.exitCode = 1;
   } finally {
     ledger.close();
   }
 }
 
-void main();
+// Only when run as the CLI, so command implementations stay importable by
+// tests. Compare real paths: this is invoked through a symlink on PATH, and a
+// mismatch here makes every command silently do nothing and exit 0.
+const invokedAs = process.argv[1] ? pathToFileURL(realpathSync(process.argv[1])).href : undefined;
+if (invokedAs === import.meta.url) void main();
