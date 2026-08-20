@@ -238,6 +238,11 @@ one brain routes any given session. Load it by adding this repository to
 
 ## Operator CLI (`src/cli.ts`)
 
+Standing math lane launches are paused, and the lane contract these tasks carry
+is the first item in
+[`../math-research/docs/agent-research-capability.md`](../math-research/docs/agent-research-capability.md):
+run transcripts show agents ending a session at the first publishable fact.
+
 `pi-orchestrator status | task set/list/delete | account list/add/domain |
 pause | resume | boost | abort | runner | drain-runners` — thin reads and
 writes against the ledger (path from `PI_ORCHESTRATOR_LEDGER`, default
