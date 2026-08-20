@@ -14,7 +14,7 @@ npm test
 claude_extension="$PWD/extensions/pi-claude-code-use/extensions/index.ts"
 settings="$HOME/.pi/agent/settings.json"
 claude_extension_configured=$(jq -r '.packages | any(. == "../../tools/pi-runtime/extensions/pi-claude-code-use" or . == "/home/kenan/tools/pi-runtime/extensions/pi-claude-code-use")' "$settings")
-orchestrator_configured=$(jq -r '.packages | any(. == "/home/kenan/projects/pi-orchestrator")' "$settings")
+orchestrator_configured=$(jq -r '.packages | any(. == "/srv/pi/pi-orchestrator")' "$settings")
 [[ "$orchestrator_configured" == true ]] || { echo "pi-orchestrator extension package is not configured" >&2; exit 1; }
 cursor_provider="$HOME/tools/pi-cursor"
 cursor_configured=$(jq -r --arg p "$cursor_provider" '.packages | any(. == $p)' "$settings")
@@ -47,4 +47,16 @@ version=$("$HOME/.local/bin/pi" --version)
 [[ "$version" == "0.84.1" ]] || { echo "unexpected Pi version: $version" >&2; exit 1; }
 [[ $("$HOME/.local/bin/pro" --version) == "$version" ]] || { echo "Pro launcher does not resolve to deployed Pi" >&2; exit 1; }
 "$HOME/.local/bin/prompt-eval" --help | grep -q '^prompt-eval'
-echo "Pi $version, prompt evaluator, and extensions deployed"
+
+# Orchestrator-hosted sessions run as the orchestrator user, which cannot
+# read this repository inside a 0700 home. /srv/pi carries world-readable
+# deploy artifacts of the shared pi packages; the orchestrator user's pi
+# settings load them from there.
+shared=/srv/pi
+install -d -m 755 "$shared/extensions" "$shared/pi-cursor/node_modules"
+rsync -a --delete --chmod=D755,F644 \
+  "$PWD/extensions/pi-claude-code-use" "$PWD/extensions/context-guard" "$shared/extensions/"
+rsync -a --delete --chmod=D755,F644 "$cursor_provider/dist" "$cursor_provider/package.json" "$shared/pi-cursor/"
+rsync -a --delete --chmod=D755,F644 "$cursor_provider/node_modules/@bufbuild" "$shared/pi-cursor/node_modules/"
+
+echo "Pi $version, prompt evaluator, extensions, and /srv/pi shared packages deployed"
