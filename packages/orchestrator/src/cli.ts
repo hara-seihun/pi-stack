@@ -183,6 +183,14 @@ function accountCommand(ledger: Ledger, args: string[]): void {
     if (domain !== undefined && !DOMAINS.includes(domain)) fail(`unknown domain ${domain}`);
     ledger.upsertAccount({ id, provider, label: named.get("label"), domain });
     console.log(`account ${id} saved`);
+  } else if (sub === "remove") {
+    const id = rest[0] ?? fail("usage: account remove <id>");
+    const removed = ledger.removeAccount(id);
+    console.log(
+      `account ${id} removed with ${removed.usageEvents} usage events and ` +
+        `${removed.meterReadings} meter readings. Delete its auth.json entry here too — ` +
+        "an account's credential lives on exactly one machine.",
+    );
   } else if (sub === "domain") {
     const [id, domain] = rest;
     if (id === undefined || !DOMAINS.includes(domain as AccountDomain))
@@ -193,7 +201,11 @@ function accountCommand(ledger: Ledger, args: string[]): void {
         `${domain === "orchestrator" ? "orchestrator user's" : "interactive user's"} agent dir — ` +
         "refresh tokens rotate, so exactly one copy may exist.",
     );
-  } else fail("usage: account list | account add <id> --provider F [--label L] [--domain D] | account domain <id> <domain>");
+  } else
+    fail(
+      "usage: account list | account add <id> --provider F [--label L] [--domain D] | " +
+        "account remove <id> | account domain <id> <domain>",
+    );
 }
 
 /** The 5× the Pi Remote drawer controls: one deliberate, durable multiplier
@@ -326,6 +338,7 @@ async function main(): Promise<void> {
             "               [--gate EXPR] [--prompt TEXT] [--cwd DIR]",
             "  task list | task delete <id>",
             "  account list | account add <id> --provider F [--label L] [--domain D]",
+            "  account remove <id>          drop an account that left this machine",
             "  account domain <id> interactive|orchestrator",
             "                               credential-custody domain (see README)",
             "  pause | resume               durable launch control (a ledger row)",

@@ -271,6 +271,27 @@ export class Ledger {
       );
   }
 
+  /** An account belongs to exactly one machine, so when its credential moves
+   * away this ledger must stop knowing it: a row left behind would keep being
+   * bound by the routing extension and admitted by the broker with no auth.json
+   * entry to run on. Its recorded facts go with it — they calibrate that
+   * account's plan, which is now another machine's business — so the removal
+   * is a delete, not a tombstone. In-flight runs block it: capacity accounting
+   * would lose its subject mid-run. */
+  removeAccount(id: string): { usageEvents: number; meterReadings: number } {
+    const known = this.db.prepare("SELECT 1 FROM account WHERE id = ?").get(id);
+    if (known === undefined) throw new Error(`unknown account ${id}`);
+    const inFlight = this.db
+      .prepare("SELECT COUNT(*) AS n FROM run WHERE account_id = ? AND state IN ('pending', 'running')")
+      .get(id) as { n: number };
+    if (inFlight.n > 0)
+      throw new Error(`account ${id} has ${inFlight.n} in-flight run(s); abort or let them finish first`);
+    const usageEvents = this.db.prepare("DELETE FROM usage_event WHERE account_id = ?").run(id).changes;
+    const meterReadings = this.db.prepare("DELETE FROM meter_reading WHERE account_id = ?").run(id).changes;
+    this.db.prepare("DELETE FROM account WHERE id = ?").run(id);
+    return { usageEvents: Number(usageEvents), meterReadings: Number(meterReadings) };
+  }
+
   setAccountDomain(id: string, domain: AccountDomain): void {
     const changed = this.db
       .prepare("UPDATE account SET domain = ? WHERE id = ?")

@@ -201,4 +201,38 @@ describe("account metadata custody", () => {
     ledger.setAccountAccessUntil("codex-6", undefined);
     expect(ledger.accounts().find((a) => a.id === "codex-6")?.accessUntil).toBeUndefined();
   });
+
+  it("an account that moved to another machine leaves with its facts", () => {
+    const ledger = Ledger.open(":memory:");
+    ledger.upsertAccount({ id: "codex-7", provider: "openai-codex" });
+    ledger.upsertAccount({ id: "codex-8", provider: "openai-codex" });
+    ledger.recordReading("codex-7", "codex-weekly", { at: 10, usedPercent: 4 });
+    ledger.recordUsage("codex-7", { at: 20, classId: "sol", tokens: 100, source: "machine" });
+    ledger.recordReading("codex-8", "codex-weekly", { at: 30, usedPercent: 9 });
+
+    const removed = ledger.removeAccount("codex-7");
+
+    expect(removed).toEqual({ usageEvents: 1, meterReadings: 1 });
+    expect(ledger.accounts().map((a) => a.id)).toEqual(["codex-8"]);
+    // The machine that kept its account keeps everything calibration needs.
+    expect(ledger.counts("codex-8")).toEqual({ readings: 1, usageEvents: 0 });
+    expect(() => ledger.removeAccount("codex-7")).toThrow(/unknown account/);
+  });
+
+  it("refuses to remove an account with work still on it", () => {
+    const ledger = Ledger.open(":memory:");
+    ledger.upsertAccount({ id: "codex-7", provider: "openai-codex" });
+    ledger.upsertTask({ id: "lane", tiers: ["standard"], demandConstant: 1, prompt: "go" });
+    ledger.createRun({
+      taskId: "lane",
+      tier: "standard",
+      accountId: "codex-7",
+      model: "gpt",
+      provider: "openai-codex",
+      at: 1,
+    });
+
+    expect(() => ledger.removeAccount("codex-7")).toThrow(/in-flight/);
+    expect(ledger.accounts().map((a) => a.id)).toEqual(["codex-7"]);
+  });
 });
