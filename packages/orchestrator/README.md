@@ -236,6 +236,33 @@ extension stays out entirely — the broker owns their custody, so exactly
 one brain routes any given session. Load it by adding this repository to
 `packages` in pi settings (the package also carries the usage logger).
 
+## GPT-Live voice (`src/voice/`)
+
+GPT-Live (`gpt-live-1-codex`) exposed as an API on top of the account
+ledger. The account pool is the ledger: eligibility is Codex account rows
+that are not cooling and not past paid access, intersected with the OAuth
+credentials actually present in the local pi `auth.json` (custody is the
+filter). Calls are spread round-robin with no per-account leases — one
+account accepts concurrent GPT-Live calls — and a quota-exhausted account is
+skipped until its window resets. Token refresh interoperates with pi's own
+`auth.json.lock` convention.
+
+Three consumption modes, all exported as `pi-orchestrator/voice`:
+
+- **Library** — `VoiceBroker.negotiate(sdp, instructions)` turns a WebRTC
+  SDP offer into an answer on a pooled account. The ledger rows are an
+  injected `accounts` source, so any SQLite driver (node:sqlite, bun:sqlite)
+  works. pi-remote consumes it this way, in-process.
+- **Daemon** — `pi-orchestrator voice-broker [--listen 127.0.0.1:2457]`
+  serves `GET /v1/voice` and `POST /v1/voice/offer` (`{ sdp, instructions,
+  voice?, model? }` → `{ sdp, account }`) on loopback. Processes without
+  credential custody — for example a read-only container on the host
+  network — negotiate calls without ever seeing an OAuth token. The Converge
+  meeting runtime consumes it this way.
+- **Protocol helpers** — pure functions for the negotiated data channel:
+  `parseDelegationCreated`, `parseTurnTranscript`, `contextAppendEvents`,
+  `utf8Chunks` (500-byte context chunking).
+
 ## Operator CLI (`src/cli.ts`)
 
 Standing math lane launches are paused, and the lane contract these tasks carry
@@ -244,7 +271,8 @@ is the first item in
 run transcripts show agents ending a session at the first publishable fact.
 
 `pi-orchestrator status | task set/list/delete | account list/add/domain |
-pause | resume | boost | abort | runner | drain-runners` — thin reads and
+pause | resume | boost | abort | runner | drain-runners | voice-broker` —
+thin reads and
 writes against the ledger (path from `PI_ORCHESTRATOR_LEDGER`, default
 `~/.local/share/pi-orchestrator/`).
 `runner --max-sessions N` starts a runner process; `drain-runners` rolls

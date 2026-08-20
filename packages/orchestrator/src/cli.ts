@@ -11,6 +11,8 @@ import { Scheduler } from "./tasks/scheduler.js";
 import { TIERS, type Tier } from "./tasks/types.js";
 import type { AccountDomain } from "./ledger/ledger.js";
 import { brokerConfig, defaultConfigPath, loadConfig } from "./config.js";
+import { VoiceBroker } from "./voice/broker.js";
+import { createVoiceServer } from "./voice/server.js";
 import type { LaunchSpec } from "./host/types.js";
 
 /**
@@ -109,6 +111,34 @@ async function daemon(ledger: Ledger, args: string[]): Promise<void> {
     }
     await new Promise((r) => setTimeout(r, intervalMs));
   }
+}
+
+/**
+ * GPT-Live voice broker: a loopback HTTP service turning WebRTC SDP offers
+ * into answers on this machine's pooled Codex accounts. Runs as the
+ * credential-custody user; callers (pi-remote, the Converge meeting
+ * runtime, any local script) never see OAuth tokens.
+ */
+async function voiceBroker(ledger: Ledger, args: string[]): Promise<void> {
+  const { named } = flags(args);
+  const listen = named.get("listen") ?? "127.0.0.1:2457";
+  const separator = listen.lastIndexOf(":");
+  const host = separator > 0 ? listen.slice(0, separator) : "127.0.0.1";
+  const port = Number(listen.slice(separator + 1));
+  if (!Number.isInteger(port) || port < 1 || port > 65535) fail(`voice-broker: invalid --listen ${listen}`);
+  const agentDir = process.env.PI_AGENT_DIR ?? join(homedir(), ".pi", "agent");
+  const broker = new VoiceBroker({ agentDir, accounts: () => ledger.accounts() });
+  const server = createVoiceServer(broker);
+  await new Promise<void>((resolve, reject) => {
+    server.once("error", reject);
+    server.listen(port, host, () => resolve());
+  });
+  const initial = broker.status();
+  console.log(`voice broker listening on ${host}:${port} (${initial.accountCount} eligible accounts, agentDir ${agentDir})`);
+  await new Promise<void>((resolve) => {
+    for (const signal of ["SIGINT", "SIGTERM"] as const) process.once(signal, () => resolve());
+  });
+  server.close();
 }
 
 /**
@@ -329,6 +359,9 @@ async function main(): Promise<void> {
       case "drain-runners":
         console.log(`runner generation is now ${bumpRunnerGeneration(ledger)}; live runners will drain`);
         break;
+      case "voice-broker":
+        await voiceBroker(ledger, args);
+        break;
       default:
         console.log(
           [
@@ -348,6 +381,8 @@ async function main(): Promise<void> {
             "  runner [--id NAME] [--max-sessions N] [--interval MS]",
             "                               host claimed runs as embedded pi sessions",
             "  drain-runners                bump generation: runners finish and exit",
+            "  voice-broker [--listen H:P]  GPT-Live SDP negotiation on the pooled accounts",
+            "                               (default 127.0.0.1:2457; see src/voice/)",
           ].join("\n"),
         );
         if (command !== undefined && command !== "help") process.exit(1);

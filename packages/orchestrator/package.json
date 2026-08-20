@@ -8,6 +8,13 @@
   "bin": {
     "pi-orchestrator": "dist/cli.js"
   },
+  "exports": {
+    "./voice": {
+      "types": "./src/voice/index.ts",
+      "bun": "./src/voice/index.ts",
+      "default": "./dist/voice/index.js"
+    }
+  },
   "pi": {
     "extensions": [
       "./src/extension/usage-logger.ts",
