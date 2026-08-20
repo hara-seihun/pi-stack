@@ -59,7 +59,7 @@ fires for them):
   Transforms are monotone and deterministic, so the edited prefix is stable:
   one cache miss per cut, then the provider cache re-forms.
 
-## Guards (both write to the alerts inbox, `/home/kenan/data/alerts/inbox/`)
+## Guards (both write to the alerts inbox, `/var/lib/machine-alerts/inbox/`)
 
 - **Thrash:** two cuts within 10 LLM calls in one session. This is the
   failure mode of Anthropic's 2026-04-23 Claude Code postmortem (a `keep:1`

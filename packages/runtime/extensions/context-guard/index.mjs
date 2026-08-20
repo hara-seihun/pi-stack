@@ -12,7 +12,7 @@ import {
   summaryMessage,
 } from "./plan.mjs";
 
-const ALERTS_DIR = process.env.PI_CONTEXT_GUARD_ALERTS ?? "/home/kenan/data/alerts/inbox";
+const ALERTS_DIR = process.env.PI_CONTEXT_GUARD_ALERTS ?? "/var/lib/machine-alerts/inbox";
 
 function writeAlert(title, body) {
   try {

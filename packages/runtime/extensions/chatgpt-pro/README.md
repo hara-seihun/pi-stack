@@ -103,7 +103,7 @@ Hardening shipped 2026-08-19 in response (`browser.mjs`):
    disabled send button, blocked send click — raises this dedicated class with
    the observed DOM text, a screenshot under
    `~/data/chatgpt-pro/provider-audit/ui-changed-*.png`, and an
-   alert written to `/home/kenan/data/alerts/inbox/`. The audit record carries
+   alert written to `/var/lib/machine-alerts/inbox/`. The audit record carries
    `error_code`, `ui_stage`, and `ui_screenshot`. Navigation and
    authentication failures stay generic.
 2. **Deliberate modal dismissal** (`dismissBlockingModals`): before the picker
