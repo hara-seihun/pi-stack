@@ -9,6 +9,8 @@ their agent's skill directory.
 
 - [`software-engineering`](software-engineering/SKILL.md) — mandatory
   software-engineering principles and defaults for agents.
+- [`charisma`](charisma/SKILL.md) — how a voice agent should behave in live
+  meetings and calls: register, hedging, agreement, humour, and pacing.
 
 ## Deployment on a machine
 
