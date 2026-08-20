@@ -361,6 +361,20 @@ export class Ledger {
     return row.p ?? undefined;
   }
 
+  /** Most recent reading for one account meter, or undefined when the meter
+   * has never been read. Pollers use it to space their sampling. */
+  latestReading(accountId: string, meterId: MeterId): MeterReading | undefined {
+    const row = this.db
+      .prepare(
+        `SELECT at, used_percent, reset_at FROM meter_reading
+         WHERE account_id = ? AND meter_id = ? ORDER BY at DESC LIMIT 1`,
+      )
+      .get(accountId, meterId) as { at: number; used_percent: number; reset_at: number | null } | undefined;
+    return row === undefined
+      ? undefined
+      : { at: row.at, usedPercent: row.used_percent, ...(row.reset_at === null ? {} : { resetAt: row.reset_at }) };
+  }
+
   /**
    * Stores a reading verbatim. Every reading is a fact and segment semantics
    * depend on exact boundaries, so nothing is deduplicated; `prune` bounds
@@ -368,12 +382,7 @@ export class Ledger {
    * rejected loudly; callers may drop the redundant loser.
    */
   recordReading(accountId: string, meterId: MeterId, r: MeterReading): void {
-    const last = this.db
-      .prepare(
-        `SELECT at FROM meter_reading
-         WHERE account_id = ? AND meter_id = ? ORDER BY at DESC LIMIT 1`,
-      )
-      .get(accountId, meterId) as { at: number } | undefined;
+    const last = this.latestReading(accountId, meterId);
     if (last && r.at <= last.at) {
       throw new Error(`out-of-order reading for ${accountId}/${meterId}: ${r.at} <= ${last.at}`);
     }

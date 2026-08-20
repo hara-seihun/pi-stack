@@ -94,6 +94,20 @@ response; header names are verified against recorded production traffic.
 Ledger location: `PI_ORCHESTRATOR_LEDGER` or
 `~/.local/share/pi-orchestrator/ledger.sqlite3`.
 
+## Meter sampling (`src/meters/`)
+
+Providers that publish no rate-limit headers need a poller, or their meters
+have no source at all. Cursor is the case: its Connect stream carries no
+quota state, so the controller daemon samples the dashboard period-usage RPC
+for every Cursor account whose credential lives in its own `auth.json` and
+writes ordinary meter readings. Readings are spaced by a sampling interval,
+only the percentage is recorded (the dollar "included usage" figure gates
+nothing — see [docs/provider-meter-notes.md](docs/provider-meter-notes.md)),
+and the sampler never refreshes OAuth: an expired access token is recorded as
+a gap rather than a token-family revocation. Everything downstream —
+calibration, broker admission, Pi Remote's Cursor plan card — then reads the
+same ledger facts it reads for header-instrumented providers.
+
 ## Ledger (`src/ledger/`)
 
 SQLite (via `node:sqlite`, zero dependencies) storing **facts, not

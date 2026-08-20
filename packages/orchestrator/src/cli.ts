@@ -11,6 +11,7 @@ import { Scheduler } from "./tasks/scheduler.js";
 import { TIERS, type Tier } from "./tasks/types.js";
 import type { AccountDomain } from "./ledger/ledger.js";
 import { brokerConfig, defaultConfigPath, loadConfig } from "./config.js";
+import { CURSOR_PROVIDER, CursorMeterSampler } from "./meters/cursor.js";
 import { VoiceBroker } from "./voice/broker.js";
 import { createVoiceServer } from "./voice/server.js";
 import type { LaunchSpec } from "./host/types.js";
@@ -26,6 +27,14 @@ import type { LaunchSpec } from "./host/types.js";
 const LEDGER_PATH =
   process.env.PI_ORCHESTRATOR_LEDGER ??
   join(homedir(), ".local", "share", "pi-orchestrator", "ledger.sqlite3");
+
+/** pi agent directory of the user this process runs as: its auth.json is the
+ * credential custody for this process's accounts. */
+function agentDirPath(): string {
+  return (
+    process.env.PI_AGENT_DIR ?? process.env.PI_CODING_AGENT_DIR ?? join(homedir(), ".pi", "agent")
+  );
+}
 
 /** A usage error. Thrown rather than exited, so commands stay testable. */
 class UsageError extends Error {}
@@ -97,9 +106,23 @@ async function daemon(ledger: Ledger, args: string[]): Promise<void> {
     new Broker(ledger, brokerConfig(cfg)),
   );
   const intervalMs = Number(named.get("interval") ?? 30_000);
+  // Cursor publishes no meter headers, so its monthly meter is polled here
+  // rather than observed by the usage-logger extension. The daemon runs as
+  // the credential-custody user, so it can read the token without moving it.
+  const cursorMeter = cfg.providers[CURSOR_PROVIDER]?.meters[0];
+  const cursorSampler = cursorMeter
+    ? new CursorMeterSampler(ledger, { agentDir: agentDirPath(), meterId: cursorMeter.id })
+    : undefined;
   console.log(`controller started (config: ${defaultConfigPath()})`);
   for (;;) {
     try {
+      for (const sample of (await cursorSampler?.sample()) ?? []) {
+        if (sample.outcome === "recorded") {
+          console.log(`meter ${sample.accountId}/${cursorMeter?.id}: ${sample.usedPercent}% used`);
+        } else if (sample.outcome !== "not-due") {
+          console.error(`meter ${sample.accountId}/${cursorMeter?.id}: ${sample.outcome}${sample.detail ? ` (${sample.detail})` : ""}`);
+        }
+      }
       const report = await controller.tick();
       for (const run of report.created) {
         console.log(`created ${run.id.slice(0, 8)}: ${run.taskId} -> ${run.accountId} (${run.model})`);
@@ -126,7 +149,7 @@ async function voiceBroker(ledger: Ledger, args: string[]): Promise<void> {
   const host = separator > 0 ? listen.slice(0, separator) : "127.0.0.1";
   const port = Number(listen.slice(separator + 1));
   if (!Number.isInteger(port) || port < 1 || port > 65535) fail(`voice-broker: invalid --listen ${listen}`);
-  const agentDir = process.env.PI_AGENT_DIR ?? join(homedir(), ".pi", "agent");
+  const agentDir = agentDirPath();
   const broker = new VoiceBroker({ agentDir, accounts: () => ledger.accounts() });
   const server = createVoiceServer(broker);
   await new Promise<void>((resolve, reject) => {
