@@ -29,7 +29,7 @@ import { baseProvider, defaultLedgerPath } from "./usage-logger.js";
  */
 
 export { isRateLimitError } from "../rate-limit.js";
-import { ACCOUNT_COOLDOWN_MS, isRateLimitError } from "../rate-limit.js";
+import { isRateLimitError, rateLimitCooldownMs } from "../rate-limit.js";
 
 /** An alias provider: the family's models, transport, and OAuth under the
  * account's own id, so credentials resolve from auth.json[aliasId]. */
@@ -119,7 +119,7 @@ export default function routing(pi: ExtensionAPI): void {
     const failing = ctx.model?.provider;
     if (failing === undefined) return;
     if (ledger.accounts().some((a) => a.id === failing)) {
-      ledger.setAccountCooldown(failing, Date.now() + ACCOUNT_COOLDOWN_MS);
+      ledger.setAccountCooldown(failing, Date.now() + rateLimitCooldownMs(errorMessage));
     }
     const moved = await bind(ctx, new Set([failing]));
     if (moved !== undefined) {

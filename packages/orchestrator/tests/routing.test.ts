@@ -2,6 +2,7 @@ import { describe, expect, it } from "vitest";
 import { Ledger, type AccountRow } from "../src/ledger/ledger.js";
 import { pickAccount } from "../src/extension/select-account.js";
 import { isRateLimitError } from "../src/extension/routing.js";
+import { rateLimitCooldownMs } from "../src/rate-limit.js";
 
 function account(partial: Partial<AccountRow> & { id: string }): AccountRow {
   return {
@@ -107,5 +108,22 @@ describe("failover triggers", () => {
     ]) {
       expect(isRateLimitError(message)).toBe(false);
     }
+  });
+});
+
+describe("rate limit cooldown classes", () => {
+  it("a monthly spend ceiling cools for a day, not ten minutes", () => {
+    const message =
+      '429 {"type":"error","error":{"type":"rate_limit_error","message":"This request would exceed your account\'s monthly spend limit. Please try again later."}}';
+    expect(rateLimitCooldownMs(message)).toBe(24 * 60 * 60_000);
+  });
+
+  it("a weekly window cools for hours", () => {
+    expect(rateLimitCooldownMs("weekly usage limit reached")).toBe(6 * 60 * 60_000);
+  });
+
+  it("a transient 429 cools for minutes", () => {
+    expect(rateLimitCooldownMs("429 too many requests")).toBe(10 * 60_000);
+    expect(rateLimitCooldownMs("Codex error: The usage limit has been reached")).toBe(10 * 60_000);
   });
 });

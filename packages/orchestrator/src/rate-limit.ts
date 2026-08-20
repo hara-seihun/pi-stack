@@ -21,4 +21,15 @@ export function isRateLimitError(message: string): boolean {
   return RATE_LIMIT_PATTERNS.some((p) => p.test(message));
 }
 
-export const ACCOUNT_COOLDOWN_MS = 10 * 60_000;
+/**
+ * Cooldown scaled to the limit class the provider named. A transient 429
+ * clears in minutes, but a monthly spend ceiling will still be exhausted ten
+ * minutes from now — retrying it every cooldown burns a failed turn per task
+ * wave for the rest of the month. Long classes still expire (limits get
+ * raised, windows roll over), just on the cadence of the window itself.
+ */
+export function rateLimitCooldownMs(message: string): number {
+  if (/monthly|per.month|spend.?limit/i.test(message)) return 24 * 60 * 60_000;
+  if (/weekly|per.week|seven.?day|7.?day/i.test(message)) return 6 * 60 * 60_000;
+  return 10 * 60_000;
+}
