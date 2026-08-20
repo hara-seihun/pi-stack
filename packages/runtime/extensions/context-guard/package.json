@@ -17,6 +17,6 @@
     "@earendil-works/pi-coding-agent": "*"
   },
   "scripts": {
-    "test": "node --test plan.test.mjs"
+    "test": "node --test plan.test.mjs guard.test.mjs"
   }
 }

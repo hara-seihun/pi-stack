@@ -33,17 +33,19 @@ fires for them):
   message; OpenAI validates only ID-bearing replays.
 - **Rung 3 — handoff summary** when rungs 1–2 would land above **125k**
   (unevictable residue accumulates ~10% of throughput; only marathon runs hit
-  this). The lower threshold reserves the measured 10–20k of provider-visible
-  system/tool overhead that is absent from the transformed-message estimate.
-  The model writes a structured handoff *in-conversation* (cache-hot, sees full
-  tool results), which then replaces the summarized span. User messages in
-  that span are preserved verbatim. The summary call requests **low reasoning
-  effort**: at the session's own effort (research lanes run xhigh) reasoning
-  can consume the entire output budget and return zero text. If the account is
-  exhausted, the call errors, or it returns no text, a provider-independent
-  hard-compaction message replaces the same span. The original user messages,
-  50k verbatim tail, and transcript pointer remain; cap enforcement never
-  depends on a second successful provider call.
+  this). The lower threshold reserves provider-visible system/tool overhead
+  that is absent from the transformed-message estimate. The model writes a
+  structured handoff from the already transformed rungs-1–2 candidate, which
+  then replaces the summarized span. The auxiliary call never receives the
+  oversized raw history; if even the transformed candidate projects above the
+  250k trigger, the guard skips that call and hard-compacts deterministically.
+  User messages in the span are preserved verbatim. The summary call requests
+  **low reasoning effort**: at the session's own effort (research lanes run
+  xhigh) reasoning can consume the entire output budget and return zero text.
+  If the account is exhausted, the call errors, or it returns no text, a
+  provider-independent hard-compaction message replaces the same span. The
+  original user messages, 50k verbatim tail, and transcript pointer remain;
+  cap enforcement never depends on a second successful provider call.
 - **Verbatim tail:** the most recent **50k billed** tokens cross every cut
   byte-identical — thinking blocks, signatures, and item IDs included. The
   planner accumulates estimator units, so the guard divides the tail budget by
@@ -63,23 +65,26 @@ fires for them):
   failure mode of Anthropic's 2026-04-23 Claude Code postmortem (a `keep:1`
   thinking-clear that fired every turn). The cap stays enforced; the alert
   demands investigation.
-- **Floor:** after a cut, the provider *actually bills* more than trigger − 100k,
-  i.e. the pinned head or residue is too large. Expect thrashing until fixed.
-  The check waits for the next real `getContextUsage()` anchor rather than
-  scaling its own view estimate by the ratio: at the first cut of a session the
-  ratio is still the uncalibrated 1.6 prior, which overstated one measured
-  Opus landing (129k billed) as 154k and raised a false alert. Every cut logs
-  its projection and estimated landing to stderr, so the journal still shows
+- **Floor:** after a cut, the cut request *actually bills* more than trigger −
+  100k, i.e. the pinned head or residue is too large. Expect thrashing until
+  fixed. Each outgoing view is paired with the very next persisted assistant
+  response, and prompt tokens are read directly as input + cache read + cache
+  write. Error and aborted responses still count because providers bill their
+  prompt; this avoids both estimating a floor from an uncalibrated ratio and
+  mistaking an older successful response for the cut. Every cut logs its
+  projection and estimated landing to stderr, so the journal still shows
   near-floor cuts that never breached.
 
 ## Calibration
 
 Byte-based token estimates undercount (Anthropic bills ~1.5–2.5× the byte/4
-estimate). The guard calibrates an estimate→billed ratio per session from real
-usage (`ctx.getContextUsage()`), blended 50/50 per observation, clamped to
-[1.0, 3.0], initialized at 1.6. While the usage anchor is stale (right after a
-cut, before the next response), the guard dead-reckons from its own view
-estimate instead of the anchor.
+estimate). The guard pairs each outgoing transformed view with the next
+assistant response and calibrates estimate→billed-prompt ratio from that exact
+pair, blended 50/50 after the first observation and clamped to [1.0, 3.0]. It
+never calibrates a raw resumed view against historical usage from a different,
+previously transformed view. A fresh session starts at the 1.6 prior; an
+existing session adopted after restart/reload starts conservatively at 3.0
+until its first matched response. Model switches invalidate calibration.
 
 ## Parameters (in `plan.mjs`)
 
@@ -90,6 +95,7 @@ estimate instead of the anchor.
 | residueMax | 125k transformed messages | leaves room for measured provider-visible system/tool overhead below the 150k floor; still inside the simulation's flat 100k–180k range |
 | floorHeadroom | 100k | Opus@150k/80k-tail simulated at 160% of uncapped — thrash territory |
 | quietSteps | 10 | thrash guard window |
+| initialRatio | 1.6 fresh / 3.0 adopted history | normal prior for a new session; fail-safe until a resumed view has one matched response |
 
 ## Escape hatch
 
@@ -100,31 +106,25 @@ estimate instead of the anchor.
 - State is in-memory per session process. After a host restart/adoption the
   guard re-derives the cut on the first context event (deterministic; costs
   one extra cache miss).
-- The floor guard needs one post-cut usage anchor, so a session that ends
-  immediately after its cut is never judged. That is deliberate: without a
-  billed measurement there is no evidence of a floor problem.
-- pi-usage-logger's `context_bytes` measures the transformed view (this
-  package loads before it in `settings.json`), but its `context_hash`
-  fingerprints change on each cut boundary advance.
+- The floor guard needs the assistant response to the cut request, so a session
+  that ends before any response is persisted is never judged. That is
+  deliberate: without billed usage there is no evidence of a floor problem.
 - The rung-3 summary call routes through the session's model registry with
-  the same session id; on Anthropic the prefix cache is content-addressed so
-  the call is cache-hot, on Codex cache affinity follows `prompt_cache_key`.
+  the same session id and receives the transformed candidate rather than the
+  oversized raw history. On Codex cache affinity follows `prompt_cache_key`.
 
-## Validation (passive)
+## Runtime validation
 
-```sql
--- must be zero after rollout
-SELECT COUNT(*) FROM request
-WHERE model LIKE 'gpt-5.6%' AND input_tokens + cache_read_tokens > 272000
-  AND started_at > <rollout_ms>;
+Inspect cut projections, measured floor alerts, and thrash alerts in the owning
+service journal:
 
--- overflow compactions should collapse to ~zero
-SELECT reason, COUNT(*) FROM usage_event
-WHERE kind='compaction' AND at > <rollout_ms> GROUP BY reason;
+```bash
+journalctl -u pi-remote --since today --no-pager | rg 'context-guard'
 ```
 
-Watch lane verdict rates in research-bench. If Opus quality dips, **lower**
-the trigger (better compactor ⇒ lower optimum), don't raise it.
+The session JSONL assistant usage is the billing source of truth for a specific
+request: prompt tokens are `input + cacheRead + cacheWrite`, including on
+`error` and `aborted` responses.
 
 ## Tests
 
