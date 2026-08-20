@@ -142,7 +142,7 @@ async function acquireAuthLock(authPath: string, signal: AbortSignal): Promise<(
   while (true) {
     signal.throwIfAborted();
     try {
-      mkdirSync(lockPath, { mode: 0o700 });
+      mkdirSync(lockPath, { mode: 0o770 });
       const heartbeat = setInterval(() => {
         try {
           const time = new Date();
