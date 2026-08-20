@@ -1,0 +1,24 @@
+#!/usr/bin/env bash
+# Deploys this repository to /srv/pi/pi-orchestrator, the world-readable
+# artifact both the interactive user and the orchestrator service user run
+# from (the orchestrator user cannot read this repo inside a 0700 home).
+# The controller restarts on the new build automatically; the runner must be
+# rolled with `pi-orchestrator drain-runners`, never restarted.
+set -euo pipefail
+cd "$(dirname "$0")"
+
+npm ci --ignore-scripts
+npm run typecheck
+npm run build
+npm test
+
+dest=/srv/pi/pi-orchestrator
+install -d -m 755 "$dest"
+rsync -a --delete --chmod=D755,F644 dist src node_modules package.json "$dest/"
+chmod 755 "$dest/dist/cli.js"
+ln -sfn "$dest/dist/cli.js" "$HOME/.local/bin/pi-orchestrator"
+
+node "$dest/dist/cli.js" help >/dev/null
+echo "deployed to $dest"
+echo "runner update: pi-orchestrator drain-runners (never systemctl restart pi-orchestrator-runner)"
+echo "controller update: sudo systemctl restart pi-orchestrator"

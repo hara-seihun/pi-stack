@@ -23,8 +23,8 @@ class FakeEngine implements HostManager {
 
 function build(probes: Record<string, number | (() => number)> = {}) {
   const ledger = Ledger.open(":memory:");
-  ledger.upsertAccount({ id: "anth-1", provider: "anthropic" });
-  ledger.upsertAccount({ id: "codex-1", provider: "openai-codex" });
+  ledger.upsertAccount({ id: "anth-1", provider: "anthropic", domain: "orchestrator" });
+  ledger.upsertAccount({ id: "codex-1", provider: "openai-codex", domain: "orchestrator" });
   const scheduler = new Scheduler(ledger, { demandTtlMs: 60_000, gateDebounceMs: 0 }, async (cmd) => {
     const probe = probes[cmd];
     if (probe === undefined) throw new Error(`unexpected probe ${cmd}`);

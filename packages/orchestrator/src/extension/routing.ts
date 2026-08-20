@@ -61,8 +61,12 @@ export default function routing(pi: ExtensionAPI): void {
   const ledger = Ledger.open(defaultLedgerPath());
   const families = new Map(builtinProviders().map((p) => [p.id, p]));
 
+  // Aliases are registered per credential-custody domain: this process can
+  // only authenticate accounts whose credentials live in its own auth.json.
+  const domain = process.env.PI_ORCHESTRATOR_ASSIGNED === "1" ? "orchestrator" : "interactive";
   for (const account of ledger.accounts()) {
     if (account.id === account.provider) continue;
+    if (account.domain !== domain) continue;
     const family = families.get(account.provider);
     if (family !== undefined) pi.registerProvider(aliasProvider(family, account.id, account.label));
   }

@@ -171,6 +171,9 @@ export class Broker {
       .accounts()
       .filter(
         (a) =>
+          // Broker custody covers only orchestrator-domain accounts: the
+          // runner can only authenticate credentials in its own auth.json.
+          a.domain === "orchestrator" &&
           (a.accessUntil === undefined || a.accessUntil > now) &&
           (a.cooldownUntil === undefined || a.cooldownUntil <= now),
       )

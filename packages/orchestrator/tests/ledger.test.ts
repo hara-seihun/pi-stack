@@ -148,6 +148,17 @@ describe("ledger", () => {
     second.close();
   });
 
+  it("usage-attribution upserts never reset the custody domain", () => {
+    const ledger = Ledger.open(":memory:");
+    ledger.upsertAccount({ id: "codex-2", provider: "openai-codex", domain: "orchestrator" });
+    // The usage-logger extension upserts without a domain on every session.
+    ledger.upsertAccount({ id: "codex-2", provider: "openai-codex" });
+    expect(ledger.accounts()[0]?.domain).toBe("orchestrator");
+    ledger.setAccountDomain("codex-2", "interactive");
+    expect(ledger.accounts()[0]?.domain).toBe("interactive");
+    expect(() => ledger.setAccountDomain("missing", "orchestrator")).toThrow();
+  });
+
   it("prune keeps recent windows calibratable", () => {
     const ledger = Ledger.open(join(dir, "prune.sqlite3"));
     const history = generateHistory(12, 17);

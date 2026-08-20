@@ -24,6 +24,17 @@ Usage that does not flow through the orchestrator still drains the same plans
 machine usage; the calibrator consumes both streams. Accounts are assigned to
 exactly one machine — there is no cross-machine coordination by design.
 
+Accounts additionally carry a **credential-custody domain**. Provider OAuth
+refresh rotates refresh tokens, so an account's credential can live in
+exactly one `auth.json`; on deployments where fleet sessions run as a
+different OS user than interactive sessions (a privacy boundary), each
+account row is either `interactive` (bindable by the routing extension,
+credential in the interactive user's auth.json) or `orchestrator` (admittable
+by the broker, credential in the fleet user's auth.json). Calibration stays
+machine-wide across both domains. `pi-orchestrator account list` /
+`account domain <id> <domain>` manage the assignment; moving the auth.json
+entry between users is the operator's paired step.
+
 ## Core calibrator (`src/calibrator/`)
 
 Learns, per account and meter, what providers refuse to tell you:
@@ -198,9 +209,10 @@ one brain routes any given session. Load it by adding this repository to
 
 ## Operator CLI (`src/cli.ts`)
 
-`pi-orchestrator status | task set/list/delete | pause | resume | abort |
-runner | drain-runners` — thin reads and writes against the ledger (path
-from `PI_ORCHESTRATOR_LEDGER`, default `~/.local/share/pi-orchestrator/`).
+`pi-orchestrator status | task set/list/delete | account list/add/domain |
+pause | resume | abort | runner | drain-runners` — thin reads and writes
+against the ledger (path from `PI_ORCHESTRATOR_LEDGER`, default
+`~/.local/share/pi-orchestrator/`).
 `runner --max-sessions N` starts a runner process; `drain-runners` rolls
 runner generations for zero-kill updates. `npm run build` emits `dist/` for
 the `pi-orchestrator` bin.

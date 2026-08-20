@@ -11,6 +11,7 @@ function account(partial: Partial<AccountRow> & { id: string }): AccountRow {
     accessUntil: undefined,
     cooldownUntil: undefined,
     lastBoundAt: undefined,
+    domain: "interactive",
     createdAt: 0,
     ...partial,
   };
@@ -70,6 +71,19 @@ describe("interactive account selection", () => {
 
   it("no eligible account yields undefined rather than a bad binding", () => {
     expect(pickAccount([account({ id: "anthropic", cooldownUntil: 99 })], "anthropic", 0, () => 0)).toBeUndefined();
+  });
+
+  it("orchestrator-custody accounts are invisible to interactive binding", () => {
+    const picked = pickAccount(
+      [account({ id: "anthropic", domain: "orchestrator" }), account({ id: "anthropic-2" })],
+      "anthropic",
+      0,
+      () => 50,
+    );
+    expect(picked?.id).toBe("anthropic-2");
+    expect(
+      pickAccount([account({ id: "anthropic", domain: "orchestrator" })], "anthropic", 0, () => 0),
+    ).toBeUndefined();
   });
 });
 

@@ -8,7 +8,10 @@ import type { AccountRow } from "../ledger/ledger.js";
  * first and starts earning calibration. Ties (integer percents make them
  * common) break by least-recently-bound, which is what makes this a round
  * robin rather than a pile-on; the final tie-break is the id, for
- * determinism. Cooling and expired accounts are skipped entirely.
+ * determinism. Cooling and expired accounts are skipped entirely, as are
+ * orchestrator-domain accounts: their credentials live in the orchestrator
+ * user's auth.json, so an interactive session could not authenticate on
+ * them anyway.
  *
  * Selection happens once per session: sessions stay sticky to their account
  * because provider-side prompt caches are per-account, and a mid-session
@@ -25,6 +28,7 @@ export function pickAccount(
   const candidates = accounts
     .filter(
       (a) =>
+        a.domain === "interactive" &&
         a.provider === family &&
         !exclude?.has(a.id) &&
         (a.accessUntil === undefined || a.accessUntil > now) &&

@@ -8,6 +8,7 @@ import { Ledger } from "./ledger/ledger.js";
 import { Runner, bumpRunnerGeneration } from "./host/runner.js";
 import { Scheduler } from "./tasks/scheduler.js";
 import { TIERS, type Tier } from "./tasks/types.js";
+import type { AccountDomain } from "./ledger/ledger.js";
 import { brokerConfig, defaultConfigPath, loadConfig } from "./config.js";
 import type { LaunchSpec } from "./host/types.js";
 
@@ -170,6 +171,40 @@ async function runner(ledger: Ledger, args: string[]): Promise<void> {
   }
 }
 
+const DOMAINS: readonly AccountDomain[] = ["interactive", "orchestrator"];
+
+function accountCommand(ledger: Ledger, args: string[]): void {
+  const [sub, ...rest] = args;
+  if (sub === "list") {
+    for (const a of ledger.accounts()) {
+      const parts = [`provider=${a.provider}`, `domain=${a.domain}`];
+      if (a.label !== undefined) parts.push(`label=${a.label}`);
+      if (a.accessUntil !== undefined) parts.push(`access_until=${new Date(a.accessUntil).toISOString()}`);
+      if (a.cooldownUntil !== undefined && a.cooldownUntil > Date.now())
+        parts.push(`cooling_until=${new Date(a.cooldownUntil).toISOString()}`);
+      console.log(`${a.id}: ${parts.join(" ")}`);
+    }
+  } else if (sub === "add") {
+    const { positional, named } = flags(rest);
+    const id = positional[0] ?? fail("account add <id> --provider FAMILY required");
+    const provider = named.get("provider") ?? fail("--provider required");
+    const domain = named.get("domain") as AccountDomain | undefined;
+    if (domain !== undefined && !DOMAINS.includes(domain)) fail(`unknown domain ${domain}`);
+    ledger.upsertAccount({ id, provider, label: named.get("label"), domain });
+    console.log(`account ${id} saved`);
+  } else if (sub === "domain") {
+    const [id, domain] = rest;
+    if (id === undefined || !DOMAINS.includes(domain as AccountDomain))
+      fail("usage: account domain <id> interactive|orchestrator");
+    ledger.setAccountDomain(id, domain as AccountDomain);
+    console.log(
+      `account ${id} custody is now ${domain}. Move its auth.json credential to the ` +
+        `${domain === "orchestrator" ? "orchestrator user's" : "interactive user's"} agent dir — ` +
+        "refresh tokens rotate, so exactly one copy may exist.",
+    );
+  } else fail("usage: account list | account add <id> --provider F [--label L] [--domain D] | account domain <id> <domain>");
+}
+
 function taskSet(ledger: Ledger, args: string[]): void {
   const { positional, named } = flags(args);
   const id = positional[0] ?? fail("task set <id> --tiers ... required");
@@ -205,6 +240,9 @@ async function main(): Promise<void> {
       case "resume":
         ledger.setControl("launches", "enabled");
         console.log("launches enabled");
+        break;
+      case "account":
+        accountCommand(ledger, args);
         break;
       case "task": {
         const [sub, ...rest] = args;
@@ -248,6 +286,9 @@ async function main(): Promise<void> {
             "  task set <id> --tiers light,standard [--demand-command CMD | --demand-constant N]",
             "               [--gate EXPR] [--prompt TEXT] [--cwd DIR]",
             "  task list | task delete <id>",
+            "  account list | account add <id> --provider F [--label L] [--domain D]",
+            "  account domain <id> interactive|orchestrator",
+            "                               credential-custody domain (see README)",
             "  pause | resume               durable launch control (a ledger row)",
             "  abort <runId>                request a running session stop",
             "  daemon [--interval MS]       controller loop (config: ~/.config/pi-orchestrator)",

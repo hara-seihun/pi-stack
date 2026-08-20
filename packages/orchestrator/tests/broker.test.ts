@@ -73,8 +73,8 @@ function feedRuns(
 
 function openLedger(): Ledger {
   const ledger = Ledger.open(":memory:");
-  ledger.upsertAccount({ id: "anth-1", provider: "anthropic" });
-  ledger.upsertAccount({ id: "codex-1", provider: "openai-codex" });
+  ledger.upsertAccount({ id: "anth-1", provider: "anthropic", domain: "orchestrator" });
+  ledger.upsertAccount({ id: "codex-1", provider: "openai-codex", domain: "orchestrator" });
   return ledger;
 }
 
@@ -133,15 +133,24 @@ describe("broker admission", () => {
 
   it("expired accounts are never admitted", () => {
     const ledger = Ledger.open(":memory:");
-    ledger.upsertAccount({ id: "anth-1", provider: "anthropic", accessUntil: 100 });
+    ledger.upsertAccount({ id: "anth-1", provider: "anthropic", accessUntil: 100, domain: "orchestrator" });
     const broker = new Broker(ledger, CONFIG);
     expect(broker.admit("expert", 200)).toBeUndefined();
     expect(broker.admit("expert", 50)?.accountId).toBe("anth-1");
   });
 
-  it("tier restriction: a light launch never lands on a provider outside its tier", () => {
+  it("interactive-custody accounts are never admitted", () => {
     const ledger = Ledger.open(":memory:");
     ledger.upsertAccount({ id: "anth-1", provider: "anthropic" });
+    const broker = new Broker(ledger, CONFIG);
+    expect(broker.admit("expert", 0)).toBeUndefined();
+    ledger.setAccountDomain("anth-1", "orchestrator");
+    expect(broker.admit("expert", 0)?.accountId).toBe("anth-1");
+  });
+
+  it("tier restriction: a light launch never lands on a provider outside its tier", () => {
+    const ledger = Ledger.open(":memory:");
+    ledger.upsertAccount({ id: "anth-1", provider: "anthropic", domain: "orchestrator" });
     const broker = new Broker(ledger, CONFIG);
     // Only an anthropic account exists but light maps only to openai-codex.
     expect(broker.admit("light", 0)).toBeUndefined();
@@ -166,7 +175,7 @@ describe("broker slots", () => {
     const now = 48 * HOUR;
     for (let i = 0; i < 4; i++) {
       const id = `anth-${i}`;
-      ledger.upsertAccount({ id, provider: "anthropic" });
+      ledger.upsertAccount({ id, provider: "anthropic", domain: "orchestrator" });
       feedHistory(ledger, id, { percentPerHour: 0.2, hours: 48 });
       feedRuns(ledger, id, { count: 6, hoursEach: 8, endAt: now });
     }
@@ -194,7 +203,7 @@ describe("broker failover", () => {
 
   it("failover with no alternative reports undefined and keeps the run assignment", () => {
     const ledger = Ledger.open(":memory:");
-    ledger.upsertAccount({ id: "anth-1", provider: "anthropic" });
+    ledger.upsertAccount({ id: "anth-1", provider: "anthropic", domain: "orchestrator" });
     const broker = new Broker(ledger, CONFIG);
     const a = broker.admit("expert", 0)!;
     const runId = ledger.createRun({ taskId: "t", tier: "expert", at: 0, ...a });

@@ -145,7 +145,28 @@ const THINKING_SCHEMA = `
 ALTER TABLE run ADD COLUMN thinking TEXT;
 `;
 
-const MIGRATIONS: readonly string[] = [SCHEMA, TASK_SCHEMA, RUN_SCHEMA, RUNNER_SCHEMA, THINKING_SCHEMA];
+/**
+ * Credential custody domain. Provider OAuth refresh rotates refresh tokens,
+ * so an account's credential can live in exactly one auth.json — the
+ * interactive user's or the orchestrator user's. Interactive routing binds
+ * only interactive accounts; broker admission uses only orchestrator
+ * accounts. Calibration stays machine-wide regardless of domain.
+ */
+const DOMAIN_SCHEMA = `
+ALTER TABLE account ADD COLUMN domain TEXT NOT NULL DEFAULT 'interactive'
+  CHECK (domain IN ('interactive', 'orchestrator'));
+`;
+
+const MIGRATIONS: readonly string[] = [
+  SCHEMA,
+  TASK_SCHEMA,
+  RUN_SCHEMA,
+  RUNNER_SCHEMA,
+  THINKING_SCHEMA,
+  DOMAIN_SCHEMA,
+];
+
+export type AccountDomain = "interactive" | "orchestrator";
 
 export interface AccountRow {
   readonly id: string;
@@ -154,6 +175,7 @@ export interface AccountRow {
   readonly accessUntil: number | undefined;
   readonly cooldownUntil: number | undefined;
   readonly lastBoundAt: number | undefined;
+  readonly domain: AccountDomain;
   readonly createdAt: number;
 }
 
@@ -222,23 +244,40 @@ export class Ledger {
     provider: string;
     label?: string;
     accessUntil?: number;
+    domain?: AccountDomain;
   }): void {
     this.db
       .prepare(
-        `INSERT INTO account (id, provider, label, access_until, created_at)
-         VALUES (?, ?, ?, ?, ?)
+        `INSERT INTO account (id, provider, label, access_until, domain, created_at)
+         VALUES (?, ?, ?, ?, COALESCE(?, 'interactive'), ?)
          ON CONFLICT (id) DO UPDATE SET
            provider = excluded.provider,
            label = COALESCE(excluded.label, account.label),
-           access_until = COALESCE(excluded.access_until, account.access_until)`,
+           access_until = COALESCE(excluded.access_until, account.access_until),
+           domain = COALESCE(?, account.domain)`,
       )
-      .run(a.id, a.provider, a.label ?? null, a.accessUntil ?? null, Date.now());
+      .run(
+        a.id,
+        a.provider,
+        a.label ?? null,
+        a.accessUntil ?? null,
+        a.domain ?? null,
+        Date.now(),
+        a.domain ?? null,
+      );
+  }
+
+  setAccountDomain(id: string, domain: AccountDomain): void {
+    const changed = this.db
+      .prepare("UPDATE account SET domain = ? WHERE id = ?")
+      .run(domain, id);
+    if (changed.changes === 0) throw new Error(`unknown account ${id}`);
   }
 
   accounts(): AccountRow[] {
     const rows = this.db
       .prepare(
-        "SELECT id, provider, label, access_until, cooldown_until, last_bound_at, created_at FROM account ORDER BY id",
+        "SELECT id, provider, label, access_until, cooldown_until, last_bound_at, domain, created_at FROM account ORDER BY id",
       )
       .all() as {
       id: string;
@@ -247,6 +286,7 @@ export class Ledger {
       access_until: number | null;
       cooldown_until: number | null;
       last_bound_at: number | null;
+      domain: AccountDomain;
       created_at: number;
     }[];
     return rows.map((r) => ({
@@ -256,6 +296,7 @@ export class Ledger {
       accessUntil: r.access_until ?? undefined,
       cooldownUntil: r.cooldown_until ?? undefined,
       lastBoundAt: r.last_bound_at ?? undefined,
+      domain: r.domain,
       createdAt: r.created_at,
     }));
   }
