@@ -41,6 +41,8 @@ Learns, per account and meter, what providers refuse to tell you:
   budget accounting, and a per-account surprise hazard rate;
 - **hazard-aware pacing**: spend plans front-loaded by the measured reset
   hazard (see [docs/openai-reset-statistics.md](docs/openai-reset-statistics.md));
+  provider meter quirks that constrain collection are recorded in
+  [docs/provider-meter-notes.md](docs/provider-meter-notes.md);
 - **plan-size change detection**: silent allowance cuts between windows are
   detected and calibration restarts from the new regime.
 
