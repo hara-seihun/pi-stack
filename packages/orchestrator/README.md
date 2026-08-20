@@ -8,9 +8,9 @@ layer.
 Status: the core calibrator, ledger, usage-logger extension, task
 eligibility layer, broker, controller, out-of-process runners, pi-SDK agent
 host, routing extension (multi-pass successor), and operator CLI are
-implemented. Deferred: controller daemon wiring (deployment configuration:
-tier→model maps and meter topology as operator config) and live validation
-of alias-account auth inside SDK-hosted sessions.
+implemented, wired to operator config (tier→model maps and meter topology),
+and running in production, including alias-account auth and extension-provider
+models inside SDK-hosted sessions.
 
 ## Design
 
@@ -143,6 +143,14 @@ plan (most binding meter wins), per-session burn measured from observed
 meter drain over recorded session-hours. There are no hand-configured burn
 constants anywhere.
 
+An **operator boost** (`boost <family> on`, a `boost:<family>` control row) is
+the one deliberate lever over that arithmetic: it multiplies the paced
+sustainable rate for one provider family, so a boosted family spends its real
+measured headroom faster rather than acquiring invented capacity. Everything
+underneath keeps working — measurement, hazard pacing, cooldowns — and an
+uncalibrated account stays in bootstrap however high the boost, because there
+is nothing measured to spend faster.
+
 An uncalibrated account is in **bootstrap**: exactly one concurrent session,
 so the calibrator gets data without risking a stampede; measurement then
 earns concurrency. `slotsByTier` advertises capacity for one allocation
@@ -183,6 +191,27 @@ interfaces: one launch = one embedded `AgentSession`, the task prompt as
 first user message, a `task_complete` custom tool for the result report, a
 30-second heartbeat, `dispose` on the way out. All policy lives upstream.
 
+Models resolve in two places for one reason. Builtin-family models resolve
+before the session exists, because an alias account re-homes the family model
+onto its own provider id so credentials resolve per account. A model served by
+an **extension provider** cannot: the extension that registers it is loaded per
+session, so it exists only in that session's `modelRuntime`, and `PiHost`
+resolves it there and applies the launch's thinking level. Re-homing such a
+model onto an alias id is refused rather than approximated — stripping an
+extension provider off a model silently sends the request to the family's
+public API instead.
+
+## Run transcripts (`src/host/transcript.ts`)
+
+The ledger says what a run *is*; the transcript says what the agent *did*.
+Each launch appends `{seq, time, type, payload}` lines to
+`<runs>/<runId>/events.jsonl` (`PI_ORCHESTRATOR_RUNS`, default
+`~/.local/share/pi-orchestrator/runs`), so a reader follows a long agent with a
+byte cursor rather than re-reading the file. The in-flight turn is published to
+`live.json` **only** while an observer's `watch` marker is fresh: watching costs
+a file touch, and nobody watching costs nothing. Transcript failure never fails
+a run, and transcripts older than a week are pruned when a runner starts.
+
 ## Routing extension — the multi-pass successor (`src/extension/routing.ts`)
 
 Multi-account routing for interactive pi sessions, driven entirely by the
@@ -210,8 +239,8 @@ one brain routes any given session. Load it by adding this repository to
 ## Operator CLI (`src/cli.ts`)
 
 `pi-orchestrator status | task set/list/delete | account list/add/domain |
-pause | resume | abort | runner | drain-runners` — thin reads and writes
-against the ledger (path from `PI_ORCHESTRATOR_LEDGER`, default
+pause | resume | boost | abort | runner | drain-runners` — thin reads and
+writes against the ledger (path from `PI_ORCHESTRATOR_LEDGER`, default
 `~/.local/share/pi-orchestrator/`).
 `runner --max-sessions N` starts a runner process; `drain-runners` rolls
 runner generations for zero-kill updates. `npm run build` emits `dist/` for

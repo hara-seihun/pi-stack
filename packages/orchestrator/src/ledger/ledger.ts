@@ -215,6 +215,10 @@ export interface LoggedUsageEvent extends UsageEvent {
   readonly sessionId?: string;
 }
 
+function boostKey(provider: string): string {
+  return `boost:${provider}`;
+}
+
 export class Ledger {
   private constructor(private readonly db: DatabaseSync) {}
 
@@ -519,6 +523,35 @@ export class Ledger {
          ON CONFLICT (key) DO UPDATE SET value = excluded.value`,
       )
       .run(key, value);
+  }
+
+  /**
+   * Operator boost: a deliberate multiplier on how hard one provider family's
+   * plans may be drawn down. It scales the measured sustainable rate the
+   * broker paces against, so it spends real headroom faster rather than
+   * inventing capacity — measurement, hazard pacing, and cooldowns all keep
+   * working underneath. `1` is the normal, unboosted state.
+   */
+  boost(provider: string): number {
+    const raw = Number(this.getControl(boostKey(provider)));
+    return Number.isFinite(raw) && raw >= 1 ? raw : 1;
+  }
+
+  setBoost(provider: string, multiplier: number): void {
+    if (!Number.isFinite(multiplier) || multiplier < 1) {
+      throw new Error(`boost multiplier must be >= 1, got ${multiplier}`);
+    }
+    this.setControl(boostKey(provider), String(multiplier));
+  }
+
+  /** Every family currently boosted above 1, for status and client display. */
+  boosts(): { provider: string; multiplier: number }[] {
+    const rows = this.db
+      .prepare("SELECT key, value FROM control WHERE key LIKE 'boost:%' ORDER BY key")
+      .all() as { key: string; value: string }[];
+    return rows
+      .map((r) => ({ provider: r.key.slice("boost:".length), multiplier: Number(r.value) }))
+      .filter((b) => Number.isFinite(b.multiplier) && b.multiplier > 1);
   }
 
   demandState(taskId: string): DemandState | undefined {

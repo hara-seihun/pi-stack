@@ -1,6 +1,7 @@
 import { createAgentSession, type AgentSession } from "@earendil-works/pi-coding-agent";
 import { Type } from "typebox";
 import type { HostEvents, HostManager, HostRunResult, LaunchSpec } from "./types.js";
+import { RunTranscript } from "./transcript.js";
 
 /**
  * In-process host: each launch is one embedded pi AgentSession. This file is
@@ -32,15 +33,31 @@ export class PiHost implements HostManager {
       readonly agentDir?: string;
       /** Resolve a launch to a pi Model object. Alias accounts re-home the
        * family model onto the account's provider alias so credentials
-       * resolve per account. */
+       * resolve per account. Returning undefined defers to the session's own
+       * model runtime, which is the only place extension-registered
+       * providers (cursor) exist. */
       readonly resolveModel: (spec: LaunchSpec) => unknown;
+      /** Directory root for per-run transcripts; omit to disable them. */
+      readonly runsRoot?: string;
     },
   ) {}
 
   launch(spec: LaunchSpec): void {
-    void this.run(spec)
+    const transcript =
+      this.options.runsRoot === undefined
+        ? undefined
+        : new RunTranscript(spec.runId, this.options.runsRoot);
+    void this.run(spec, transcript)
       .catch((thrown: unknown): HostRunResult => ({ state: "error", detail: String(thrown) }))
-      .then((result) => this.events.runFinished(spec.runId, result, Date.now()));
+      .then((result) => {
+        // The closing notice is the transcript's own terminal fact; the run
+        // row remains the authority on outcome.
+        transcript?.append("notice", {
+          text: `Run ${result.state}${result.detail ? `: ${result.detail}` : ""}`,
+        });
+        transcript?.live({ activity: "IDLE" }, { force: true });
+        this.events.runFinished(spec.runId, result, Date.now());
+      });
   }
 
   abort(runId: string): void {
@@ -52,7 +69,7 @@ export class PiHost implements HostManager {
     return this.sessions.has(runId);
   }
 
-  private async run(spec: LaunchSpec): Promise<HostRunResult> {
+  private async run(spec: LaunchSpec, transcript: RunTranscript | undefined): Promise<HostRunResult> {
     let report: CompletionReport | undefined;
     const taskComplete = {
       name: "task_complete",
@@ -76,15 +93,42 @@ export class PiHost implements HostManager {
       },
     };
 
+    // A builtin family resolves before the session exists; an extension
+    // provider (cursor) exists only inside the session's own model runtime,
+    // because the extension that registers it is loaded per session.
+    const preresolved = this.options.resolveModel(spec);
     const { session } = await createAgentSession({
       cwd: spec.cwd,
       agentDir: this.options.agentDir,
       // The SDK's Model type is provider-internal; the resolver returns one.
-      model: this.options.resolveModel(spec) as never,
+      model: preresolved as never,
       thinkingLevel: spec.thinking as never,
       customTools: [taskComplete],
     });
     this.sessions.set(spec.runId, session);
+    if (preresolved === undefined) {
+      const model = session.modelRuntime.getModel(spec.provider, spec.model);
+      if (model === undefined) {
+        session.dispose();
+        this.sessions.delete(spec.runId);
+        return { state: "error", detail: `unknown model ${spec.provider}/${spec.model}` };
+      }
+      // Extension providers own their transport; re-homing the model onto an
+      // alias id would strip it and leak the request to the family's public
+      // API. Such an account is a configuration error, not a runtime fallback.
+      if (spec.accountId !== spec.provider) {
+        session.dispose();
+        this.sessions.delete(spec.runId);
+        return {
+          state: "error",
+          detail: `account ${spec.accountId} cannot alias extension provider ${spec.provider}`,
+        };
+      }
+      await session.setModel(model);
+      if (spec.thinking !== undefined) session.setThinkingLevel(spec.thinking as never);
+    }
+    const unsubscribe = transcript === undefined ? undefined : this.publish(transcript, session);
+    transcript?.append("user", { text: spec.prompt });
     const heartbeat = setInterval(
       () => this.events.heartbeat(spec.runId, Date.now()),
       HEARTBEAT_MS,
@@ -116,7 +160,109 @@ export class PiHost implements HostManager {
     } finally {
       clearInterval(heartbeat);
       this.sessions.delete(spec.runId);
+      unsubscribe?.();
       session.dispose();
     }
   }
+
+  /**
+   * Mirrors the session onto its transcript. Settled events are appended
+   * unconditionally (they are the record of the run); the in-flight turn is
+   * published only while an observer's watch marker is fresh.
+   */
+  private publish(transcript: RunTranscript, session: AgentSession): () => void {
+    let liveText = "";
+    let liveThinking = "";
+    const live = (force = false) => transcript.live({ liveText, liveThinking }, { force });
+    return session.subscribe((event: any) => {
+      switch (event.type) {
+        case "message_update": {
+          const update = event.assistantMessageEvent;
+          if (update?.type === "text_delta") liveText += update.delta ?? "";
+          else if (update?.type === "thinking_start") liveThinking = "";
+          else if (update?.type === "thinking_delta") liveThinking += update.delta ?? "";
+          else if (update?.type === "thinking_end") {
+            const text = liveThinking || String(update.content ?? "");
+            if (text) transcript.append("thinking", { text });
+            liveThinking = "";
+          } else return;
+          live();
+          return;
+        }
+        case "message_end": {
+          const text = messageText(event.message);
+          if (text) transcript.append("assistant", { text });
+          if (liveThinking) transcript.append("thinking", { text: liveThinking });
+          liveText = "";
+          liveThinking = "";
+          live(true);
+          return;
+        }
+        case "tool_execution_start":
+          transcript.append("tool_start", {
+            toolCallId: String(event.toolCallId ?? ""),
+            name: String(event.toolName ?? "tool"),
+            args: bounded(event.args),
+          });
+          return;
+        case "tool_execution_end":
+          transcript.append("tool_end", {
+            toolCallId: String(event.toolCallId ?? ""),
+            name: String(event.toolName ?? "tool"),
+            output: bounded(toolOutput(event.result)),
+            error: Boolean(event.isError),
+          });
+          return;
+        case "auto_retry_start":
+          transcript.append("notice", { text: `Retrying: ${String(event.errorMessage ?? "provider error")}` });
+          return;
+        case "auto_retry_end":
+          if (!event.success) {
+            transcript.append("notice", { text: `Retry failed: ${String(event.finalError ?? "provider error")}` });
+          }
+          return;
+        case "compaction_start":
+          transcript.append("notice", { text: "Compacting context…" });
+          return;
+        case "compaction_end":
+          transcript.append("notice", {
+            text: event.result ? "Context compacted" : "Context compaction failed",
+          });
+          return;
+        default:
+          return;
+      }
+    });
+  }
+}
+
+/** Transcript payloads are for a human reader, not a second data authority:
+ * an enormous tool argument or result is truncated rather than mirrored. */
+const MAX_PAYLOAD = 8_000;
+
+function bounded(value: unknown): string {
+  const text = typeof value === "string" ? value : JSON.stringify(value ?? "") ?? "";
+  return text.length > MAX_PAYLOAD ? `${text.slice(0, MAX_PAYLOAD)}… [truncated]` : text;
+}
+
+function messageText(message: any): string {
+  if (message?.role !== "assistant" || !Array.isArray(message.content)) return "";
+  return message.content
+    .filter((part: any) => part?.type === "text")
+    .map((part: any) => String(part.text ?? ""))
+    .join("")
+    .trim();
+}
+
+function toolOutput(result: any): string {
+  if (result === undefined || result === null) return "";
+  if (typeof result === "string") return result;
+  if (Array.isArray(result.content)) {
+    return result.content
+      .filter((part: any) => part?.type === "text")
+      .map((part: any) => String(part.text ?? ""))
+      .join("\n")
+      .trim();
+  }
+  return JSON.stringify(result);
 }

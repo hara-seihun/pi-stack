@@ -1,5 +1,4 @@
 #!/usr/bin/env node
-import { readFileSync } from "node:fs";
 import { homedir, hostname } from "node:os";
 import { join } from "node:path";
 import { Broker } from "./broker/broker.js";
@@ -49,6 +48,7 @@ function flags(args: string[]): { positional: string[]; named: Map<string, strin
 async function status(ledger: Ledger): Promise<void> {
   console.log(`ledger: ${LEDGER_PATH}`);
   console.log(`launches: ${ledger.getControl("launches") ?? "enabled"}`);
+  for (const b of ledger.boosts()) console.log(`boost ${b.provider}: ${b.multiplier}x allowance`);
   const evaluation = await new Scheduler(ledger).evaluate();
   for (const t of evaluation.tasks) {
     const parts = [
@@ -69,34 +69,6 @@ async function status(ledger: Ledger): Promise<void> {
     );
   }
   if (evaluation.tasks.length === 0) console.log("no tasks");
-}
-
-/** Models served by pi extension providers (cursor) are not in the builtin
- * catalog; build a minimal Model from the extension's cached discovery. The
- * embedded session's own extension runtime registers the provider and owns
- * streaming; this object only names the model. */
-function extensionModel(provider: string, modelId: string): Record<string, unknown> | undefined {
-  if (provider !== "cursor") return undefined;
-  try {
-    const raw = readFileSync(join(homedir(), ".cache", "pi-cursor", "model-catalog.json"), "utf8");
-    const entry = (JSON.parse(raw).rawModels as { id: string; name?: string; reasoning?: boolean; contextWindow?: number; maxTokens?: number }[])
-      .find((m) => m.id === modelId);
-    if (entry === undefined) return undefined;
-    return {
-      id: entry.id,
-      provider: "cursor",
-      name: entry.name ?? entry.id,
-      api: "openai-completions",
-      baseUrl: "",
-      reasoning: entry.reasoning ?? false,
-      input: ["text"],
-      cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
-      contextWindow: entry.contextWindow ?? 200_000,
-      maxTokens: entry.maxTokens ?? 32_000,
-    };
-  } catch {
-    return undefined;
-  }
 }
 
 /** Controller daemon: the launch loop. Tier→model maps and meter topology
@@ -138,21 +110,27 @@ async function runner(ledger: Ledger, args: string[]): Promise<void> {
   // extension: the broker assigned their account.
   process.env.PI_ORCHESTRATOR_ASSIGNED = "1";
   const { PiHost } = await import("./host/pi-host.js");
+  const { DEFAULT_RUNS_ROOT, pruneTranscripts } = await import("./host/transcript.js");
   const { builtinProviders } = await import("@earendil-works/pi-ai/providers/all");
   const families = new Map(builtinProviders().map((p) => [p.id, p]));
+  // Builtin family models resolve here so an alias account can be re-homed
+  // onto them before the session exists. Anything else — a model served by an
+  // extension provider — is left to the session's own model runtime, the only
+  // place that provider is registered.
   const resolveModel = (spec: LaunchSpec): unknown => {
-    const model =
-      families.get(spec.provider)?.getModels().find((m) => m.id === spec.model) ??
-      extensionModel(spec.provider, spec.model);
-    if (model === undefined) throw new Error(`unknown model ${spec.provider}/${spec.model}`);
+    const model = families.get(spec.provider)?.getModels().find((m) => m.id === spec.model);
+    if (model === undefined) return undefined;
     return spec.accountId === spec.provider ? model : { ...model, provider: spec.accountId };
   };
+  const runsRoot = DEFAULT_RUNS_ROOT;
+  const pruned = pruneTranscripts(runsRoot);
+  if (pruned > 0) console.log(`pruned ${pruned} expired run transcript(s)`);
   const runnerId = named.get("id") ?? `${hostname()}-${process.pid}`;
   const engine: InstanceType<typeof PiHost> = new PiHost(
     // The runner is constructed below; PiHost only needs the event surface.
     { runFinished: (id, result, at) => live.runFinished(id, result, at),
       heartbeat: (id, at) => live.heartbeat(id, at) },
-    { resolveModel },
+    { resolveModel, runsRoot },
   );
   const live = new Runner(ledger, engine, {
     runnerId,
@@ -205,6 +183,29 @@ function accountCommand(ledger: Ledger, args: string[]): void {
   } else fail("usage: account list | account add <id> --provider F [--label L] [--domain D] | account domain <id> <domain>");
 }
 
+/** The 5× the Pi Remote drawer controls: one deliberate, durable multiplier
+ * on a family's paced spend, honoured by every broker decision. */
+const DEFAULT_BOOST = 5;
+
+function boostCommand(ledger: Ledger, args: string[]): void {
+  const [family, value] = args;
+  if (family === undefined) {
+    const boosts = ledger.boosts();
+    if (boosts.length === 0) console.log("no family is boosted");
+    for (const b of boosts) console.log(`${b.provider}: ${b.multiplier}x`);
+    return;
+  }
+  if (value === undefined) {
+    console.log(`${family}: ${ledger.boost(family)}x`);
+    return;
+  }
+  const multiplier =
+    value === "on" ? DEFAULT_BOOST : value === "off" ? 1 : Number(value);
+  if (!Number.isFinite(multiplier) || multiplier < 1) fail("usage: boost <family> [on|off|N>=1]");
+  ledger.setBoost(family, multiplier);
+  console.log(`${family}: ${multiplier}x allowance`);
+}
+
 function taskSet(ledger: Ledger, args: string[]): void {
   const { positional, named } = flags(args);
   const id = positional[0] ?? fail("task set <id> --tiers ... required");
@@ -243,6 +244,9 @@ async function main(): Promise<void> {
         break;
       case "account":
         accountCommand(ledger, args);
+        break;
+      case "boost":
+        boostCommand(ledger, args);
         break;
       case "task": {
         const [sub, ...rest] = args;
@@ -290,6 +294,7 @@ async function main(): Promise<void> {
             "  account domain <id> interactive|orchestrator",
             "                               credential-custody domain (see README)",
             "  pause | resume               durable launch control (a ledger row)",
+            `  boost <family> [on|off|N]    scale a family's spend pace (on = ${DEFAULT_BOOST}x)`,
             "  abort <runId>                request a running session stop",
             "  daemon [--interval MS]       controller loop (config: ~/.config/pi-orchestrator)",
             "  runner [--id NAME] [--max-sessions N] [--interval MS]",

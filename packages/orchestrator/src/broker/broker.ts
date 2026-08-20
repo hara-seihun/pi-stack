@@ -135,8 +135,15 @@ export class Broker {
   }
 
   /** Sustainable percent/hour for an account: the most binding meter's
-   * hazard-paced plan rate. Undefined until calibration exists. */
+   * hazard-paced plan rate, scaled by the family's operator boost. Undefined
+   * until calibration exists — an uncalibrated account stays in bootstrap
+   * whatever the boost, because there is nothing measured to spend faster. */
   sustainableRate(accountId: string, provider: string, now: number): number | undefined {
+    const paced = this.pacedRate(accountId, provider, now);
+    return paced === undefined ? undefined : paced * this.ledger.boost(provider);
+  }
+
+  private pacedRate(accountId: string, provider: string, now: number): number | undefined {
     const specs = this.cfg.meters[provider];
     if (specs === undefined || specs.length === 0) return undefined;
     const transform = this.cfg.transform;

@@ -212,3 +212,46 @@ describe("broker failover", () => {
     expect(ledger.run(runId)?.accountId).toBe("anth-1");
   });
 });
+
+describe("operator boost", () => {
+  it("scales measured capacity for one family and leaves the others alone", () => {
+    const ledger = openLedger();
+    const now = feedHistory(ledger, "anth-1", { percentPerHour: 0.2, hours: 48 });
+    feedRuns(ledger, "anth-1", { count: 6, hoursEach: 8, endAt: now });
+    const broker = new Broker(ledger, CONFIG);
+    const normal = broker.sustainableRate("anth-1", "anthropic", now)!;
+
+    ledger.setBoost("anthropic", 5);
+    expect(broker.sustainableRate("anth-1", "anthropic", now)).toBeCloseTo(normal * 5, 9);
+    expect(ledger.boosts()).toEqual([{ provider: "anthropic", multiplier: 5 }]);
+    // A boosted family admits proportionally more concurrent sessions.
+    let boosted = 0;
+    for (;;) {
+      const a = broker.admit("standard", now);
+      if (a === undefined || a.accountId !== "anth-1") break;
+      ledger.createRun({ taskId: "t", tier: "standard", at: now, ...a });
+      boosted++;
+    }
+    expect(boosted).toBeGreaterThan(Math.floor(normal / broker.sessionBurn("anth-1", now)));
+
+    ledger.setBoost("anthropic", 1);
+    expect(broker.sustainableRate("anth-1", "anthropic", now)).toBeCloseTo(normal, 9);
+    expect(ledger.boosts()).toEqual([]);
+  });
+
+  it("never invents capacity for an uncalibrated account", () => {
+    const ledger = openLedger();
+    ledger.setBoost("anthropic", 5);
+    const broker = new Broker(ledger, CONFIG);
+    expect(broker.sustainableRate("anth-1", "anthropic", 0)).toBeUndefined();
+    const first = broker.admit("standard", 0)!;
+    ledger.createRun({ taskId: "t", tier: "standard", at: 0, ...first });
+    // Bootstrap is still exactly one session: measurement earns concurrency.
+    expect(broker.admit("standard", 0)?.accountId).toBe("codex-1");
+  });
+
+  it("refuses a multiplier below one", () => {
+    const ledger = openLedger();
+    expect(() => ledger.setBoost("anthropic", 0)).toThrow();
+  });
+});
