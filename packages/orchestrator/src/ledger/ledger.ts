@@ -146,15 +146,30 @@ ALTER TABLE run ADD COLUMN thinking TEXT;
 `;
 
 /**
- * Credential custody domain. Provider OAuth refresh rotates refresh tokens,
- * so an account's credential can live in exactly one auth.json — the
- * interactive user's or the orchestrator user's. Interactive routing binds
- * only interactive accounts; broker admission uses only orchestrator
- * accounts. Calibration stays machine-wide regardless of domain.
+ * Exclusive credential custody domain. Shared custody is added separately:
+ * exclusive accounts use one user's auth.json, while shared Codex accounts
+ * use the central locked store and are eligible in both runtimes.
  */
 const DOMAIN_SCHEMA = `
 ALTER TABLE account ADD COLUMN domain TEXT NOT NULL DEFAULT 'interactive'
   CHECK (domain IN ('interactive', 'orchestrator'));
+`;
+
+/** Shared credentials let interactive and orchestrated sessions draw from the
+ * same account. Interactive turns publish leases here so broker admission and
+ * per-session burn include work outside the fleet runner. */
+const SHARED_ACCOUNT_SCHEMA = `
+ALTER TABLE account ADD COLUMN shared INTEGER NOT NULL DEFAULT 0 CHECK (shared IN (0, 1));
+
+CREATE TABLE session_lease (
+  id TEXT PRIMARY KEY,
+  account_id TEXT NOT NULL REFERENCES account(id),
+  started_at INTEGER NOT NULL,
+  heartbeat_at INTEGER NOT NULL,
+  ended_at INTEGER
+) STRICT;
+CREATE INDEX session_lease_account_started ON session_lease (account_id, started_at);
+CREATE INDEX session_lease_active ON session_lease (account_id, ended_at, heartbeat_at);
 `;
 
 const MIGRATIONS: readonly string[] = [
@@ -164,6 +179,7 @@ const MIGRATIONS: readonly string[] = [
   RUNNER_SCHEMA,
   THINKING_SCHEMA,
   DOMAIN_SCHEMA,
+  SHARED_ACCOUNT_SCHEMA,
 ];
 
 export type AccountDomain = "interactive" | "orchestrator";
@@ -176,6 +192,7 @@ export interface AccountRow {
   readonly cooldownUntil: number | undefined;
   readonly lastBoundAt: number | undefined;
   readonly domain: AccountDomain;
+  readonly shared: boolean;
   readonly createdAt: number;
 }
 
@@ -249,16 +266,18 @@ export class Ledger {
     label?: string;
     accessUntil?: number;
     domain?: AccountDomain;
+    shared?: boolean;
   }): void {
     this.db
       .prepare(
-        `INSERT INTO account (id, provider, label, access_until, domain, created_at)
-         VALUES (?, ?, ?, ?, COALESCE(?, 'interactive'), ?)
+        `INSERT INTO account (id, provider, label, access_until, domain, shared, created_at)
+         VALUES (?, ?, ?, ?, COALESCE(?, 'interactive'), COALESCE(?, 0), ?)
          ON CONFLICT (id) DO UPDATE SET
            provider = excluded.provider,
            label = COALESCE(excluded.label, account.label),
            access_until = COALESCE(excluded.access_until, account.access_until),
-           domain = COALESCE(?, account.domain)`,
+           domain = COALESCE(?, account.domain),
+           shared = COALESCE(?, account.shared)`,
       )
       .run(
         a.id,
@@ -266,8 +285,10 @@ export class Ledger {
         a.label ?? null,
         a.accessUntil ?? null,
         a.domain ?? null,
+        a.shared === undefined ? null : a.shared ? 1 : 0,
         Date.now(),
         a.domain ?? null,
+        a.shared === undefined ? null : a.shared ? 1 : 0,
       );
   }
 
@@ -286,23 +307,38 @@ export class Ledger {
       .get(id) as { n: number };
     if (inFlight.n > 0)
       throw new Error(`account ${id} has ${inFlight.n} in-flight run(s); abort or let them finish first`);
+    const interactive = this.db
+      .prepare(
+        "SELECT COUNT(*) AS n FROM session_lease WHERE account_id = ? AND ended_at IS NULL AND heartbeat_at >= ?",
+      )
+      .get(id, Date.now() - 2 * 60_000) as { n: number };
+    if (interactive.n > 0)
+      throw new Error(`account ${id} has ${interactive.n} active interactive session(s); let them finish first`);
     const usageEvents = this.db.prepare("DELETE FROM usage_event WHERE account_id = ?").run(id).changes;
     const meterReadings = this.db.prepare("DELETE FROM meter_reading WHERE account_id = ?").run(id).changes;
+    this.db.prepare("DELETE FROM session_lease WHERE account_id = ?").run(id);
     this.db.prepare("DELETE FROM account WHERE id = ?").run(id);
     return { usageEvents: Number(usageEvents), meterReadings: Number(meterReadings) };
   }
 
   setAccountDomain(id: string, domain: AccountDomain): void {
     const changed = this.db
-      .prepare("UPDATE account SET domain = ? WHERE id = ?")
+      .prepare("UPDATE account SET domain = ?, shared = 0 WHERE id = ?")
       .run(domain, id);
+    if (changed.changes === 0) throw new Error(`unknown account ${id}`);
+  }
+
+  setAccountShared(id: string, shared: boolean): void {
+    const changed = this.db
+      .prepare("UPDATE account SET shared = ? WHERE id = ?")
+      .run(shared ? 1 : 0, id);
     if (changed.changes === 0) throw new Error(`unknown account ${id}`);
   }
 
   accounts(): AccountRow[] {
     const rows = this.db
       .prepare(
-        "SELECT id, provider, label, access_until, cooldown_until, last_bound_at, domain, created_at FROM account ORDER BY id",
+        "SELECT id, provider, label, access_until, cooldown_until, last_bound_at, domain, shared, created_at FROM account ORDER BY id",
       )
       .all() as {
       id: string;
@@ -312,6 +348,7 @@ export class Ledger {
       cooldown_until: number | null;
       last_bound_at: number | null;
       domain: AccountDomain;
+      shared: number;
       created_at: number;
     }[];
     return rows.map((r) => ({
@@ -322,6 +359,7 @@ export class Ledger {
       cooldownUntil: r.cooldown_until ?? undefined,
       lastBoundAt: r.last_bound_at ?? undefined,
       domain: r.domain,
+      shared: r.shared !== 0,
       createdAt: r.created_at,
     }));
   }
@@ -815,18 +853,63 @@ export class Ledger {
     return row.n;
   }
 
-  /** Session-hours this account served inside [since, now]. */
-  runHours(accountId: string, since: number, now: number): number {
-    const rows = this.db
+  beginSessionLease(accountId: string, at: number): string {
+    const id = crypto.randomUUID();
+    this.db
       .prepare(
-        `SELECT COALESCE(claimed_at, started_at) AS s, ended_at FROM run
+        "INSERT INTO session_lease (id, account_id, started_at, heartbeat_at) VALUES (?, ?, ?, ?)",
+      )
+      .run(id, accountId, at, at);
+    return id;
+  }
+
+  heartbeatSessionLease(id: string, at: number): void {
+    this.db
+      .prepare("UPDATE session_lease SET heartbeat_at = ? WHERE id = ? AND ended_at IS NULL")
+      .run(at, id);
+  }
+
+  endSessionLease(id: string, at: number): void {
+    this.db
+      .prepare("UPDATE session_lease SET heartbeat_at = ?, ended_at = ? WHERE id = ? AND ended_at IS NULL")
+      .run(at, at, id);
+  }
+
+  activeSessionLeaseCount(accountId: string, now: number, timeoutMs: number): number {
+    const row = this.db
+      .prepare(
+        `SELECT COUNT(*) AS n FROM session_lease
+         WHERE account_id = ? AND ended_at IS NULL AND heartbeat_at >= ?`,
+      )
+      .get(accountId, now - timeoutMs) as { n: number };
+    return row.n;
+  }
+
+  /** Concurrent session-hours this account served inside [since, now], from
+   * both fleet runs and instrumented interactive turns. A crashed interactive
+   * process accrues only through its final heartbeat plus the lease timeout. */
+  sessionHours(accountId: string, since: number, now: number, leaseTimeoutMs: number): number {
+    const runs = this.db
+      .prepare(
+        `SELECT COALESCE(claimed_at, started_at) AS s, ended_at AS e FROM run
          WHERE account_id = ? AND state != 'pending'
            AND (ended_at IS NULL OR ended_at > ?) AND COALESCE(claimed_at, started_at) < ?`,
       )
-      .all(accountId, since, now) as { s: number; ended_at: number | null }[];
+      .all(accountId, since, now) as { s: number; e: number | null }[];
+    const leases = this.db
+      .prepare(
+        `SELECT started_at AS s, heartbeat_at, ended_at AS e FROM session_lease
+         WHERE account_id = ? AND started_at < ?
+           AND (ended_at IS NULL OR ended_at > ?)`,
+      )
+      .all(accountId, now, since) as { s: number; heartbeat_at: number; e: number | null }[];
     let ms = 0;
-    for (const r of rows) {
-      ms += Math.max(0, Math.min(r.ended_at ?? now, now) - Math.max(r.s, since));
+    for (const row of runs) {
+      ms += Math.max(0, Math.min(row.e ?? now, now) - Math.max(row.s, since));
+    }
+    for (const row of leases) {
+      const ended = row.e ?? Math.min(now, row.heartbeat_at + leaseTimeoutMs);
+      ms += Math.max(0, Math.min(ended, now) - Math.max(row.s, since));
     }
     return ms / 3_600_000;
   }

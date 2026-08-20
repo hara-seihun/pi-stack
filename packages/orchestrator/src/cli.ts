@@ -15,6 +15,11 @@ import { CURSOR_PROVIDER, CursorMeterSampler } from "./meters/cursor.js";
 import { VoiceBroker } from "./voice/broker.js";
 import { createVoiceServer } from "./voice/server.js";
 import type { LaunchSpec } from "./host/types.js";
+import { builtinProviders } from "@earendil-works/pi-ai/providers/all";
+import {
+  defaultSharedCodexAuthPath,
+  SharedCodexAuth,
+} from "./auth/shared-codex.js";
 
 /**
  * Operator CLI. Thin by design: every command is a small read or write
@@ -149,15 +154,15 @@ async function voiceBroker(ledger: Ledger, args: string[]): Promise<void> {
   const host = separator > 0 ? listen.slice(0, separator) : "127.0.0.1";
   const port = Number(listen.slice(separator + 1));
   if (!Number.isInteger(port) || port < 1 || port > 65535) fail(`voice-broker: invalid --listen ${listen}`);
-  const agentDir = agentDirPath();
-  const broker = new VoiceBroker({ agentDir, accounts: () => ledger.accounts() });
+  const authPath = defaultSharedCodexAuthPath(LEDGER_PATH);
+  const broker = new VoiceBroker({ authPath, accounts: () => ledger.accounts() });
   const server = createVoiceServer(broker);
   await new Promise<void>((resolve, reject) => {
     server.once("error", reject);
     server.listen(port, host, () => resolve());
   });
   const initial = broker.status();
-  console.log(`voice broker listening on ${host}:${port} (${initial.accountCount} eligible accounts, agentDir ${agentDir})`);
+  console.log(`voice broker listening on ${host}:${port} (${initial.accountCount} eligible accounts, auth ${authPath})`);
   await new Promise<void>((resolve) => {
     for (const signal of ["SIGINT", "SIGTERM"] as const) process.once(signal, () => resolve());
   });
@@ -217,11 +222,21 @@ async function runner(ledger: Ledger, args: string[]): Promise<void> {
 
 const DOMAINS: readonly AccountDomain[] = ["interactive", "orchestrator"];
 
-function accountCommand(ledger: Ledger, args: string[]): void {
+function sharedCodexAuth(): SharedCodexAuth {
+  const oauth = builtinProviders().find((provider) => provider.id === "openai-codex")?.auth.oauth;
+  if (oauth === undefined) throw new Error("OpenAI Codex OAuth is unavailable");
+  return new SharedCodexAuth({
+    path: defaultSharedCodexAuthPath(LEDGER_PATH),
+    refresh: (credential, signal) => oauth.refresh(credential, signal),
+    toAuth: (credential) => oauth.toAuth(credential),
+  });
+}
+
+async function accountCommand(ledger: Ledger, args: string[]): Promise<void> {
   const [sub, ...rest] = args;
   if (sub === "list") {
     for (const a of ledger.accounts()) {
-      const parts = [`provider=${a.provider}`, `domain=${a.domain}`];
+      const parts = [`provider=${a.provider}`, `custody=${a.shared ? "shared" : a.domain}`];
       if (a.label !== undefined) parts.push(`label=${a.label}`);
       if (a.accessUntil !== undefined) parts.push(`access_until=${new Date(a.accessUntil).toISOString()}`);
       if (a.cooldownUntil !== undefined && a.cooldownUntil > Date.now())
@@ -234,30 +249,72 @@ function accountCommand(ledger: Ledger, args: string[]): void {
     const provider = named.get("provider") ?? fail("--provider required");
     const domain = named.get("domain") as AccountDomain | undefined;
     if (domain !== undefined && !DOMAINS.includes(domain)) fail(`unknown domain ${domain}`);
-    ledger.upsertAccount({ id, provider, label: named.get("label"), domain });
+    const shared = named.get("shared");
+    if (shared !== undefined && shared !== "true" && shared !== "false") fail("--shared must be true or false");
+    if (shared === "true" && provider !== "openai-codex") fail("shared credentials currently support openai-codex only");
+    ledger.upsertAccount({
+      id,
+      provider,
+      label: named.get("label"),
+      domain,
+      shared: shared === undefined ? undefined : shared === "true",
+    });
     console.log(`account ${id} saved`);
   } else if (sub === "remove") {
     const id = rest[0] ?? fail("usage: account remove <id>");
     const removed = ledger.removeAccount(id);
     console.log(
       `account ${id} removed with ${removed.usageEvents} usage events and ` +
-        `${removed.meterReadings} meter readings. Delete its auth.json entry here too — ` +
-        "an account's credential lives on exactly one machine.",
+        `${removed.meterReadings} meter readings. Delete its credential from its owning ` +
+        "local or shared auth store too.",
     );
+  } else if (sub === "share") {
+    const [id, value = "on"] = rest;
+    if (id === undefined || (value !== "on" && value !== "off")) fail("usage: account share <id> [on|off]");
+    const account = ledger.accounts().find((row) => row.id === id) ?? fail(`unknown account ${id}`);
+    if (account.provider !== "openai-codex") fail("shared credentials currently support openai-codex only");
+    if (value === "on" && !sharedCodexAuth().has(id)) {
+      fail(`${id} has no credential in ${defaultSharedCodexAuthPath(LEDGER_PATH)}; run account login ${id}`);
+    }
+    ledger.setAccountShared(id, value === "on");
+    console.log(`account ${id} custody is now ${value === "on" ? "shared" : account.domain}`);
+  } else if (sub === "login") {
+    const id = rest[0] ?? fail("usage: account login <id>");
+    const account = ledger.accounts().find((row) => row.id === id) ?? fail(`unknown account ${id}`);
+    if (account.provider !== "openai-codex") fail("shared login currently supports openai-codex only");
+    const oauth = builtinProviders().find((provider) => provider.id === "openai-codex")?.auth.oauth;
+    if (oauth === undefined) throw new Error("OpenAI Codex OAuth is unavailable");
+    const credential = await oauth.login({
+      signal: new AbortController().signal,
+      prompt: async (prompt) => {
+        if (prompt.type === "select" && prompt.options.some((option) => option.id === "device_code")) {
+          return "device_code";
+        }
+        throw new Error(`Unexpected Codex login prompt: ${prompt.message}`);
+      },
+      notify: (event) => {
+        if (event.type === "device_code") {
+          console.log(`Open ${event.verificationUri} and enter code ${event.userCode}`);
+        } else if (event.type === "auth_url") {
+          console.log(`Open ${event.url}`);
+        } else if (event.type === "progress" || event.type === "info") {
+          console.log(event.message);
+        }
+      },
+    });
+    await sharedCodexAuth().set(id, credential);
+    ledger.setAccountShared(id, true);
+    console.log(`account ${id} authenticated into shared custody`);
   } else if (sub === "domain") {
     const [id, domain] = rest;
     if (id === undefined || !DOMAINS.includes(domain as AccountDomain))
       fail("usage: account domain <id> interactive|orchestrator");
     ledger.setAccountDomain(id, domain as AccountDomain);
-    console.log(
-      `account ${id} custody is now ${domain}. Move its auth.json credential to the ` +
-        `${domain === "orchestrator" ? "orchestrator user's" : "interactive user's"} agent dir — ` +
-        "refresh tokens rotate, so exactly one copy may exist.",
-    );
+    console.log(`account ${id} custody is now ${domain}; shared custody is disabled`);
   } else
     fail(
-      "usage: account list | account add <id> --provider F [--label L] [--domain D] | " +
-        "account remove <id> | account domain <id> <domain>",
+      "usage: account list | account add <id> --provider F [--label L] [--domain D] [--shared true] | " +
+        "account remove <id> | account domain <id> <domain> | account share <id> [on|off] | account login <id>",
     );
 }
 
@@ -343,7 +400,7 @@ async function main(): Promise<void> {
         console.log("launches enabled");
         break;
       case "account":
-        accountCommand(ledger, args);
+        await accountCommand(ledger, args);
         break;
       case "boost":
         boostCommand(ledger, args);
@@ -393,10 +450,12 @@ async function main(): Promise<void> {
             "  task set <id> --tiers light,standard [--demand-command CMD | --demand-constant N]",
             "               [--gate EXPR] [--prompt TEXT] [--cwd DIR]",
             "  task list | task delete <id>",
-            "  account list | account add <id> --provider F [--label L] [--domain D]",
+            "  account list | account add <id> --provider F [--label L] [--domain D] [--shared true]",
             "  account remove <id>          drop an account that left this machine",
             "  account domain <id> interactive|orchestrator",
-            "                               credential-custody domain (see README)",
+            "                               exclusive credential custody",
+            "  account share <id> [on|off]  share a Codex account across both runtimes",
+            "  account login <id>           device-login a Codex account into shared custody",
             "  pause | resume               durable launch control (a ledger row)",
             `  boost <family> [on|off|N]    scale a family's spend pace (on = ${DEFAULT_BOOST}x)`,
             "  abort <runId>                request a running session stop",

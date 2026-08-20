@@ -139,13 +139,23 @@ describe("broker admission", () => {
     expect(broker.admit("expert", 50)?.accountId).toBe("anth-1");
   });
 
-  it("interactive-custody accounts are never admitted", () => {
+  it("interactive-custody accounts are never admitted unless shared", () => {
     const ledger = Ledger.open(":memory:");
     ledger.upsertAccount({ id: "anth-1", provider: "anthropic" });
     const broker = new Broker(ledger, CONFIG);
     expect(broker.admit("expert", 0)).toBeUndefined();
-    ledger.setAccountDomain("anth-1", "orchestrator");
+    ledger.setAccountShared("anth-1", true);
     expect(broker.admit("expert", 0)?.accountId).toBe("anth-1");
+  });
+
+  it("an active interactive lease consumes shared broker capacity", () => {
+    const ledger = Ledger.open(":memory:");
+    ledger.upsertAccount({ id: "anth-1", provider: "anthropic", shared: true });
+    const broker = new Broker(ledger, CONFIG);
+    const lease = ledger.beginSessionLease("anth-1", 1000);
+    expect(broker.admit("expert", 1000)).toBeUndefined();
+    ledger.endSessionLease(lease, 2000);
+    expect(broker.admit("expert", 2000)?.accountId).toBe("anth-1");
   });
 
   it("tier restriction: a light launch never lands on a provider outside its tier", () => {

@@ -2,6 +2,11 @@ import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-a
 import type { Model, Provider } from "@earendil-works/pi-ai";
 import { builtinProviders } from "@earendil-works/pi-ai/providers/all";
 import { Ledger } from "../ledger/ledger.js";
+import {
+  defaultSharedCodexAuthPath,
+  SharedCodexAuth,
+  sharedCodexProvider,
+} from "../auth/shared-codex.js";
 import { pickAccount } from "./select-account.js";
 import { baseProvider, defaultLedgerPath } from "./usage-logger.js";
 
@@ -9,11 +14,10 @@ import { baseProvider, defaultLedgerPath } from "./usage-logger.js";
  * The multi-pass successor: multi-account routing for interactive pi
  * sessions, driven entirely by the orchestrator ledger.
  *
- * - Every ledger account whose id differs from its provider family is
- *   registered as an alias provider (`anthropic-2`, ...) delegating models,
- *   transport, and OAuth to the family's builtin provider. Credentials live
- *   in pi's auth.json under the alias id — the account table is the only
- *   registry; there is no multi-pass.json.
+ * - Exclusive aliases delegate models, transport, and OAuth to their builtin
+ *   family and use the owning user's auth.json. Shared Codex accounts use the
+ *   central credential store beside the ledger, including the unsuffixed
+ *   family id. The account table is the only registry.
  * - At session start the session binds to the least-used account of its
  *   model's family (round-robin among ties) and then stays sticky: provider
  *   prompt caches are per-account, so rebinding mid-session wastes them.
@@ -24,8 +28,8 @@ import { baseProvider, defaultLedgerPath } from "./usage-logger.js";
  * Orchestrator-launched sessions set PI_ORCHESTRATOR_ASSIGNED=1: the broker
  * owns their account custody, so binding and failover stay out — one brain
  * per decision. Alias provider registration still happens there, because it
- * is credential plumbing (auth.json[alias] via the family's OAuth), not a
- * routing decision, and broker-assigned aliases must resolve.
+ * is credential plumbing, not a routing decision, and broker-assigned aliases
+ * must resolve.
  */
 
 export { isRateLimitError } from "../rate-limit.js";
@@ -58,17 +62,33 @@ export function failoverPrompt(failure: string, account: string): string {
 }
 
 export default function routing(pi: ExtensionAPI): void {
-  const ledger = Ledger.open(defaultLedgerPath());
+  const ledgerPath = defaultLedgerPath();
+  const ledger = Ledger.open(ledgerPath);
   const families = new Map(builtinProviders().map((p) => [p.id, p]));
+  const codex = families.get("openai-codex")?.auth.oauth;
+  const sharedAuth = codex === undefined
+    ? undefined
+    : new SharedCodexAuth({
+        path: defaultSharedCodexAuthPath(ledgerPath),
+        refresh: (credential, signal) => codex.refresh(credential, signal),
+        toAuth: (credential) => codex.toAuth(credential),
+      });
 
-  // Aliases are registered per credential-custody domain: this process can
-  // only authenticate accounts whose credentials live in its own auth.json.
   const domain = process.env.PI_ORCHESTRATOR_ASSIGNED === "1" ? "orchestrator" : "interactive";
   for (const account of ledger.accounts()) {
-    if (account.id === account.provider) continue;
-    if (account.domain !== domain) continue;
+    if (!account.shared && account.id === account.provider) continue;
+    if (!account.shared && account.domain !== domain) continue;
     const family = families.get(account.provider);
-    if (family !== undefined) pi.registerProvider(aliasProvider(family, account.id, account.label));
+    if (family === undefined) continue;
+    if (account.shared) {
+      if (account.provider !== "openai-codex" || sharedAuth === undefined) {
+        console.error(`pi-orchestrator: shared auth is unavailable for ${account.id}`);
+        continue;
+      }
+      pi.registerProvider(sharedCodexProvider(family, account.id, account.label, sharedAuth));
+    } else {
+      pi.registerProvider(aliasProvider(family, account.id, account.label));
+    }
   }
 
   if (process.env.PI_ORCHESTRATOR_ASSIGNED === "1") {

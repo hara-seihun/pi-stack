@@ -150,13 +150,26 @@ describe("ledger", () => {
 
   it("usage-attribution upserts never reset the custody domain", () => {
     const ledger = Ledger.open(":memory:");
-    ledger.upsertAccount({ id: "codex-2", provider: "openai-codex", domain: "orchestrator" });
+    ledger.upsertAccount({ id: "codex-2", provider: "openai-codex", domain: "orchestrator", shared: true });
     // The usage-logger extension upserts without a domain on every session.
     ledger.upsertAccount({ id: "codex-2", provider: "openai-codex" });
     expect(ledger.accounts()[0]?.domain).toBe("orchestrator");
+    expect(ledger.accounts()[0]?.shared).toBe(true);
     ledger.setAccountDomain("codex-2", "interactive");
     expect(ledger.accounts()[0]?.domain).toBe("interactive");
+    expect(ledger.accounts()[0]?.shared).toBe(false);
     expect(() => ledger.setAccountDomain("missing", "orchestrator")).toThrow();
+  });
+
+  it("interactive leases contribute live capacity and bounded historical session-hours", () => {
+    const ledger = Ledger.open(":memory:");
+    ledger.upsertAccount({ id: "codex-2", provider: "openai-codex", shared: true });
+    const lease = ledger.beginSessionLease("codex-2", 1000);
+    ledger.heartbeatSessionLease(lease, 31_000);
+    expect(ledger.activeSessionLeaseCount("codex-2", 40_000, 20_000)).toBe(1);
+    expect(ledger.activeSessionLeaseCount("codex-2", 60_000, 20_000)).toBe(0);
+    expect(ledger.sessionHours("codex-2", 0, 100_000, 20_000)).toBeCloseTo(50_000 / HOUR);
+    ledger.close();
   });
 
   it("prune keeps recent windows calibratable", () => {

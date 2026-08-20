@@ -19,6 +19,7 @@ import type { MeterReading } from "../calibrator/types.js";
  */
 
 const COMPONENTS = ["input", "output", "cacheRead", "cacheWrite"] as const;
+const LEASE_HEARTBEAT_MS = 30_000;
 
 export function defaultLedgerPath(): string {
   return (
@@ -61,6 +62,8 @@ export function anthropicMeterReadings(
 export default function usageLogger(pi: ExtensionAPI): void {
   let ledger: Ledger | undefined;
   let lastErrorLog = 0;
+  let activeLease: string | undefined;
+  let leaseHeartbeat: ReturnType<typeof setInterval> | undefined;
   const knownAccounts = new Set<string>();
 
   const open = (): Ledger => (ledger ??= Ledger.open(defaultLedgerPath()));
@@ -81,6 +84,33 @@ export default function usageLogger(pi: ExtensionAPI): void {
     l.upsertAccount({ id: providerAlias, provider: baseProvider(providerAlias) });
     knownAccounts.add(providerAlias);
   };
+
+  const endLease = (): void => {
+    if (leaseHeartbeat !== undefined) clearInterval(leaseHeartbeat);
+    leaseHeartbeat = undefined;
+    if (activeLease !== undefined) {
+      const id = activeLease;
+      activeLease = undefined;
+      guard(() => open().endSessionLease(id, Date.now()));
+    }
+  };
+
+  if (process.env.PI_ORCHESTRATOR_ASSIGNED !== "1") {
+    pi.on("agent_start", async (_event, ctx) => {
+      endLease();
+      const providerAlias = ctx.model?.provider;
+      if (providerAlias === undefined) return;
+      guard(() => {
+        const l = open();
+        ensureAccount(l, providerAlias);
+        activeLease = l.beginSessionLease(providerAlias, Date.now());
+        leaseHeartbeat = setInterval(() => {
+          if (activeLease !== undefined) guard(() => open().heartbeatSessionLease(activeLease!, Date.now()));
+        }, LEASE_HEARTBEAT_MS);
+      });
+    });
+    pi.on("agent_end", async () => endLease());
+  }
 
   pi.on("message_end", async (event, ctx) => {
     if (event.message.role !== "assistant") return;
@@ -118,6 +148,7 @@ export default function usageLogger(pi: ExtensionAPI): void {
   });
 
   pi.on("session_shutdown", async () => {
+    endLease();
     ledger?.close();
     ledger = undefined;
   });

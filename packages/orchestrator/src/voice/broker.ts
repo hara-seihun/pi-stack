@@ -13,7 +13,7 @@ import { dirname, join } from "node:path";
 /**
  * GPT-Live call brokering on top of this machine's account custody: the
  * orchestrator ledger says which Codex accounts exist here and whether they
- * are cooling or past paid access; pi's auth.json owns the OAuth
+ * are cooling or past paid access; one supplied auth path owns the OAuth
  * credentials. The broker intersects the two, keeps calls spread across the
  * pool (accounts accept concurrent calls — see the operator's GPT-Live
  * concurrency memory — so there are no per-account leases), refreshes
@@ -74,8 +74,10 @@ export interface VoiceNegotiateOptions {
 }
 
 export interface VoiceBrokerOptions {
-  /** pi agent directory holding auth.json (credential custody). */
-  agentDir: string;
+  /** Canonical Codex credential store. */
+  authPath?: string;
+  /** Local pi agent directory fallback for callers not using shared custody. */
+  agentDir?: string;
   /** Codex account rows from the orchestrator ledger. */
   accounts: VoiceAccountsSource;
   fetch?: FetchLike;
@@ -204,8 +206,9 @@ async function refreshCredential(
     const next: VoiceCredential = { type: "oauth", access, refresh, expires: now() + expiresIn * 1000, accountId };
     auth[alias] = next;
     const temporary = join(dirname(authPath), `.auth.json.voice-${crypto.randomUUID()}`);
-    writeFileSync(temporary, JSON.stringify(auth, null, 2), { encoding: "utf8", mode: 0o600 });
-    chmodSync(temporary, 0o600);
+    const mode = statSync(authPath).mode & 0o777;
+    writeFileSync(temporary, JSON.stringify(auth, null, 2), { encoding: "utf8", mode });
+    chmodSync(temporary, mode);
     renameSync(temporary, authPath);
     return next;
   } finally {
@@ -247,7 +250,7 @@ function numericSuffix(id: string): number {
 }
 
 export class VoiceBroker {
-  readonly #agentDir: string;
+  readonly #authPath: string;
   readonly #accounts: VoiceAccountsSource;
   readonly #fetch: FetchLike;
   readonly #now: () => number;
@@ -257,7 +260,10 @@ export class VoiceBroker {
   #cursor = 0;
 
   constructor(options: VoiceBrokerOptions) {
-    this.#agentDir = options.agentDir;
+    if (options.authPath === undefined && options.agentDir === undefined) {
+      throw new Error("VoiceBroker requires authPath or agentDir");
+    }
+    this.#authPath = options.authPath ?? join(options.agentDir!, "auth.json");
     this.#accounts = options.accounts;
     this.#fetch = options.fetch ?? fetch;
     this.#now = options.now ?? Date.now;
@@ -267,13 +273,11 @@ export class VoiceBroker {
 
   /**
    * Codex accounts registered in the ledger, alive (not past paid access,
-   * not cooling), whose credentials live in this agent directory's
-   * auth.json. Custody is the filter: ledger rows whose credential belongs
-   * to another OS user are simply invisible here.
+   * not cooling), whose credentials exist in the configured auth store.
    */
   eligibleAccounts(): string[] {
     const now = this.#now();
-    const auth = readJson(join(this.#agentDir, "auth.json"));
+    const auth = readJson(this.#authPath);
     return this.#accounts()
       .filter(
         (account) =>
@@ -293,7 +297,7 @@ export class VoiceBroker {
 
   async negotiate(sdp: string, instructions: string, options?: VoiceNegotiateOptions): Promise<VoiceOfferResult> {
     if (!boundedSdp(sdp)) return { ok: false, status: 400, error: "A valid bounded WebRTC SDP offer is required" };
-    const authPath = join(this.#agentDir, "auth.json");
+    const authPath = this.#authPath;
     const accounts = this.eligibleAccounts();
     if (!accounts.length) return { ok: false, status: 503, error: "No eligible Codex voice accounts are configured" };
     const start = this.#cursor % accounts.length;

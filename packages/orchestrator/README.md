@@ -24,16 +24,14 @@ Usage that does not flow through the orchestrator still drains the same plans
 machine usage; the calibrator consumes both streams. Accounts are assigned to
 exactly one machine — there is no cross-machine coordination by design.
 
-Accounts additionally carry a **credential-custody domain**. Provider OAuth
-refresh rotates refresh tokens, so an account's credential can live in
-exactly one `auth.json`; on deployments where fleet sessions run as a
-different OS user than interactive sessions (a privacy boundary), each
-account row is either `interactive` (bindable by the routing extension,
-credential in the interactive user's auth.json) or `orchestrator` (admittable
-by the broker, credential in the fleet user's auth.json). Calibration stays
-machine-wide across both domains. `pi-orchestrator account list` /
-`account domain <id> <domain>` manage the assignment; moving the auth.json
-entry between users is the operator's paired step.
+Accounts carry a **credential-custody mode**. Exclusive `interactive` and
+`orchestrator` domains remain available for providers whose credential lives
+in one user's `auth.json`. A shared Codex account instead keeps its only OAuth
+credential in the central store beside the ledger (`auth.json`, or
+`PI_ORCHESTRATOR_AUTH`): both runtimes resolve and refresh it under one
+cross-process lock, so rotating refresh tokens are never duplicated.
+`account share <id>` enables this mode and `account login <id>` performs a
+headless device login directly into the shared store.
 
 ## Core calibrator (`src/calibrator/`)
 
@@ -89,9 +87,12 @@ Records every pi session on the machine into the ledger: one usage event per
 token component per assistant message, attributed to the provider alias
 (which is the account identity under multi-account setups), and provider
 rate-limit response headers parsed into meter readings with exact timestamps
--- no polling. Anthropic exposes all three meters (5h, 7d, 7d_oi) on every
-response; header names are verified against recorded production traffic.
-Ledger location: `PI_ORCHESTRATOR_LEDGER` or
+-- no polling. Interactive agent turns also hold heartbeat-backed session
+leases while active. The broker counts those leases against shared-account
+capacity and includes their elapsed time in measured per-session burn; a
+crashed process stops counting after the lease timeout. Anthropic exposes all
+three meters (5h, 7d, 7d_oi) on every response. Ledger location:
+`PI_ORCHESTRATOR_LEDGER` or
 `~/.local/share/pi-orchestrator/ledger.sqlite3`.
 
 ## Meter sampling (`src/meters/`)
@@ -154,8 +155,9 @@ how many concurrent sessions each account sustains, and where a failing
 session moves. Everything it knows is derived from ledger facts at decision
 time — sustainable percent/hour from the replayed calibrator's hazard-paced
 plan (most binding meter wins), per-session burn measured from observed
-meter drain over recorded session-hours. There are no hand-configured burn
-constants anywhere.
+meter drain over both fleet run-hours and interactive lease-hours. Active
+interactive leases consume the same shared-account slots as fleet runs.
+There are no hand-configured burn constants anywhere.
 
 An **operator boost** (`boost <family> on`, a `boost:<family>` control row) is
 the one deliberate lever over that arithmetic: it multiplies the paced
@@ -232,10 +234,10 @@ Multi-account routing for interactive pi sessions, driven entirely by the
 ledger — the account table is the registry (there is no `multi-pass.json`),
 and the extension replaces the old 6,000-line multi-pass with three rules:
 
-- Every account whose id differs from its family (`anthropic-2`, ...) is
-  registered as an **alias provider** delegating models, transport, and
-  OAuth to the family's builtin provider; credentials resolve from pi's
-  auth.json under the alias id.
+- Exclusive accounts whose id differs from their family (`anthropic-2`, ...)
+  are ordinary alias providers over the local `auth.json`. Shared Codex
+  accounts, including the unsuffixed family id, are providers over the central
+  credential store; both runtimes use the same locked refresh-token lineage.
 - A fresh session binds to the **least-used** account of its model's family
   (max latest used-percent across meters; unread accounts sort first;
   integer-percent ties round-robin by least-recently-bound) and then stays
@@ -255,8 +257,7 @@ one brain routes any given session. Load it by adding this repository to
 GPT-Live (`gpt-live-1-codex`) exposed as an API on top of the account
 ledger. The account pool is the ledger: eligibility is Codex account rows
 that are not cooling and not past paid access, intersected with the OAuth
-credentials actually present in the local pi `auth.json` (custody is the
-filter). Calls are spread round-robin with no per-account leases — one
+credentials in the central shared store. Calls are spread round-robin with no per-account leases — one
 account accepts concurrent GPT-Live calls — and a quota-exhausted account is
 skipped until its window resets. Token refresh interoperates with pi's own
 `auth.json.lock` convention.
@@ -284,7 +285,7 @@ is the first item in
 [`../math-research/docs/agent-research-capability.md`](../math-research/docs/agent-research-capability.md):
 run transcripts show agents ending a session at the first publishable fact.
 
-`pi-orchestrator status | task set/list/delete | account list/add/domain |
+`pi-orchestrator status | task set/list/delete | account list/add/domain/share/login |
 pause | resume | boost | abort | runner | drain-runners | voice-broker` —
 thin reads and
 writes against the ledger (path from `PI_ORCHESTRATOR_LEDGER`, default

@@ -35,6 +35,9 @@ export interface BrokerConfig {
   readonly cooldownMs: number;
   /** Upper bound on advertised slots per tier per cycle. */
   readonly maxSlotsPerTier: number;
+  /** Interactive lease heartbeat age after which a crashed session releases
+   * capacity and stops accruing session-hours. */
+  readonly sessionLeaseTimeoutMs: number;
   readonly calibrator?: Partial<CalibratorConfig>;
   /** Maps stored usage classes onto calibration classes at replay time,
    * per provider family (weights are family-specific prices). */
@@ -51,6 +54,7 @@ export const BROKER_DEFAULTS = {
   minMeasuredSessionHours: 6,
   cooldownMs: 10 * 60_000,
   maxSlotsPerTier: 8,
+  sessionLeaseTimeoutMs: 2 * 60_000,
 };
 
 export interface Admission {
@@ -167,7 +171,7 @@ export class Broker {
    * hours exist. */
   sessionBurn(accountId: string, now: number): number {
     const since = now - this.cfg.measurementWindowMs;
-    const hours = this.ledger.runHours(accountId, since, now);
+    const hours = this.ledger.sessionHours(accountId, since, now, this.cfg.sessionLeaseTimeoutMs);
     if (hours < this.cfg.minMeasuredSessionHours) return this.cfg.bootstrapSessionPercentPerHour;
     const burn = this.ledger.drainSince(accountId, since) / hours;
     return burn > 0 ? burn : this.cfg.bootstrapSessionPercentPerHour;
@@ -178,9 +182,9 @@ export class Broker {
       .accounts()
       .filter(
         (a) =>
-          // Broker custody covers only orchestrator-domain accounts: the
-          // runner can only authenticate credentials in its own auth.json.
-          a.domain === "orchestrator" &&
+          // Shared accounts are authenticated from the central credential
+          // store and can fund both interactive and orchestrated sessions.
+          (a.shared || a.domain === "orchestrator") &&
           (a.accessUntil === undefined || a.accessUntil > now) &&
           (a.cooldownUntil === undefined || a.cooldownUntil <= now),
       )
@@ -197,7 +201,9 @@ export class Broker {
           sustainable,
           sessionBurn,
           capacity,
-          active: this.ledger.activeRunCount(a.id),
+          active:
+            this.ledger.activeRunCount(a.id) +
+            this.ledger.activeSessionLeaseCount(a.id, now, this.cfg.sessionLeaseTimeoutMs),
         };
       });
   }
