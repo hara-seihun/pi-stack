@@ -72,7 +72,16 @@ async function status(ledger: Ledger): Promise<void> {
       `run ${r.id.slice(0, 8)}: ${r.taskId} on ${r.accountId} (${r.model}) runner=${r.runnerId}`,
     );
   }
-  if (evaluation.tasks.length === 0) console.log("no tasks");
+  // Pausing skips evaluation entirely, so an empty list here means "not
+  // evaluated", not "nothing defined" — say which, or the lanes look deleted.
+  if (evaluation.tasks.length === 0) {
+    const defined = ledger.tasks().length;
+    console.log(
+      defined === 0
+        ? "no tasks"
+        : `${defined} task(s) defined, not evaluated while launches are paused (pi-orchestrator task list)`,
+    );
+  }
 }
 
 /** Controller daemon: the launch loop. Tier→model maps and meter topology
