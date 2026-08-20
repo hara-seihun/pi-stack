@@ -13,6 +13,7 @@ import {
 } from "node:fs";
 import { homedir } from "node:os";
 import { join } from "node:path";
+import { DatabaseSync } from "node:sqlite";
 import { promisify } from "node:util";
 import { chromium } from "playwright-core";
 
@@ -20,11 +21,11 @@ const execFileAsync = promisify(execFile);
 const HOME = homedir();
 const AGENT_DIR = join(HOME, ".pi", "agent");
 const POOL_PATH = join(AGENT_DIR, "chatgpt-pro-pool.json");
-const MULTI_PASS_PATH = join(AGENT_DIR, "multi-pass.json");
+const ORCHESTRATOR_LEDGER_PATH = join(HOME, ".local", "share", "pi-orchestrator", "ledger.sqlite3");
 const POOL_LOCK = join(AGENT_DIR, ".chatgpt-pro-pool.lock");
-const PROVIDER_AUDIT_DIR = join(HOME, "data", "agent-orchestrator", "pro", "provider-audit");
+const PROVIDER_AUDIT_DIR = join(HOME, "data", "chatgpt-pro", "provider-audit");
 const ALERTS_INBOX = join(HOME, "data", "alerts", "inbox");
-const PENDING_DIR = join(HOME, "data", "agent-orchestrator", "pro", "pending");
+const PENDING_DIR = join(HOME, "data", "chatgpt-pro", "pending");
 const RECOVERED_DIR = join(HOME, "data", "projects-research", "pro", "recovered");
 export const PRO_PROFILE_CONFIG_PATH = join(AGENT_DIR, "chatgpt-pro-profiles.json");
 export const PRO_MAX_PARALLEL = 4;
@@ -85,6 +86,38 @@ function writeJsonAtomic(path, value) {
   renameSync(temporary, path);
 }
 
+// Subscription lifecycle custody lives in the pi-orchestrator account ledger
+// (account.access_until on cancelled subscriptions). A missing ledger means no
+// lifecycle information, matching the historical missing-file tolerance; a
+// present but unreadable ledger is a real error and must not silently admit a
+// profile whose paired subscription lapses mid-turn.
+export function subscriptionLifecycleFromLedger(path = ORCHESTRATOR_LEDGER_PATH) {
+  let db;
+  try {
+    db = new DatabaseSync(path, { readOnly: true });
+  } catch {
+    return {};
+  }
+  try {
+    const rows = db
+      .prepare("SELECT id, access_until FROM account WHERE provider = 'openai-codex' AND access_until IS NOT NULL")
+      .all();
+    const subscriptions = [];
+    for (const row of rows) {
+      const match = /^openai-codex-([0-9]+)$/.exec(String(row.id));
+      if (match === null) continue;
+      subscriptions.push({
+        provider: "openai-codex",
+        index: Number(match[1]),
+        lifecycle: { state: "cancelled", accessUntil: new Date(Number(row.access_until)).toISOString() },
+      });
+    }
+    return { subscriptions };
+  } finally {
+    db.close();
+  }
+}
+
 export function profileNamesAllowedByLifecycle(
   names,
   profileProviders,
@@ -127,9 +160,7 @@ export function configuredProfileNames(at = Date.now(), minimumRemainingMs = 0) 
       Object.entries(profileProviders).some(([name, provider]) => !names.includes(name) || !/^openai-codex-[2-9][0-9]*$/.test(provider))) {
     throw new Error(`ChatGPT Pro profile config must contain 1-${PRO_MAX_PARALLEL} unique Kernel profile names and valid Codex provider mappings`);
   }
-  let lifecycleConfig = {};
-  try { lifecycleConfig = JSON.parse(readFileSync(MULTI_PASS_PATH, "utf8")); }
-  catch (error) { if (error?.code !== "ENOENT") throw new Error(`Invalid subscription lifecycle config: ${error.message}`); }
+  const lifecycleConfig = subscriptionLifecycleFromLedger();
   const allowed = profileNamesAllowedByLifecycle(names, profileProviders, lifecycleConfig, at, minimumRemainingMs);
   if (allowed.length === 0) return [];
   return allowed;

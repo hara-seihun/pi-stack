@@ -17,6 +17,7 @@ import {
   writeFile,
 } from "node:fs/promises";
 import { createReadStream, createWriteStream } from "node:fs";
+import os from "node:os";
 import path from "node:path";
 import process from "node:process";
 import { finished } from "node:stream/promises";
@@ -39,7 +40,9 @@ const COMPARISON_IGNORED_SEGMENTS = new Set([
 const MAX_CASES = 20;
 const PI = process.env.PROMPT_EVAL_PI || "pi";
 const EXACT_PROMPT_EXTENSION = fileURLToPath(new URL("./exact-system-prompt.ts", import.meta.url));
-const USAGE_LOGGER_EXTENSION = fileURLToPath(new URL("../extensions/pi-usage-logger/logger.mjs", import.meta.url));
+// Machine-wide usage custody lives in the pi-orchestrator ledger; isolated
+// experiment sessions still load its usage logger so their spend is measured.
+const USAGE_LOGGER_EXTENSION = path.join(os.homedir(), "projects", "pi-orchestrator", "src", "extension", "usage-logger.ts");
 
 function usage() {
   return `prompt-eval — run isolated system-prompt experiments with Pi

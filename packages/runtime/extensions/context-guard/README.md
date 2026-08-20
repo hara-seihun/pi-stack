@@ -8,8 +8,9 @@ measured effective-context knee. This extension enforces a cap at the `context`
 event, which fires before **every** LLM call, including the first call of a
 resumed or forked session.
 
-Strategy evidence and simulations: [`memory/agent-context-compaction.md`](/home/kenan/memory/agent-context-compaction.md)
-and [`pi-usage-logger/analysis/context-strategy-sim.py`](../pi-usage-logger/analysis/context-strategy-sim.py).
+Strategy evidence and simulations: [`memory/agent-context-compaction.md`](/home/kenan/memory/agent-context-compaction.md).
+(The strategy simulation scripts were deleted with the superseded Pi usage
+telemetry ledger they read; their conclusions are recorded in that memory file.)
 
 ## Behavior
 
@@ -133,10 +134,10 @@ node --test
 
 ## Rollout
 
-Agent hosts load this extension at process start and cache it for their
-lifetime. After changing this package, deploy (`~/tools/pi-runtime/deploy`) or
-restart `agent-orchestrator.service`: the replacement controller computes a new
-code fingerprint, marks hosts on the old fingerprint draining, and starts a
-fresh host generation. An edited file on disk does **not** reach lanes running
-in an existing host — the 2026-08-19 floor alerts kept firing for 15 minutes
-after the fix was committed because the host predated the commit.
+Sessions load this extension at start and cache it for their lifetime. After
+changing this package, new interactive sessions pick it up immediately, and
+orchestrator-hosted sessions pick it up after `pi-orchestrator drain-runners`
+cycles the runner onto fresh code. An edited file on disk does **not** reach
+lanes running in an existing session host — the 2026-08-19 floor alerts kept
+firing for 15 minutes after the fix was committed because the host predated
+the commit.
