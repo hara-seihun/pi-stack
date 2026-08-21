@@ -11,6 +11,8 @@ their agent's skill directory.
   software-engineering principles and defaults for agents.
 - [`charisma`](charisma/SKILL.md) — how a voice agent should behave in live
   meetings and calls: register, hedging, agreement, humour, and pacing.
+- [`unslop`](unslop/SKILL.md) — cut AI tells from any prose a person will
+  read, and put a voice back in. Applies to every register.
 
 ## Deployment on a machine
 
