@@ -346,7 +346,9 @@ transcript evidence that shaped it live in
 The deployed task ledger is the source of truth for definitions. In addition
 to research, survey, formalization, and review, `math-curation` keeps one
 light-tier work unit improving high-notability ledger titles and summaries via
-T0 amendment proposals; `math-review` independently applies or rejects them.
+T0 amendment proposals and filling the reviewed reach/advance/closure impact
+rubric in coherent batches; `math-review` independently applies or rejects
+both proposal kinds.
 
 `pi-orchestrator status | task set/list/delete | account list/add/domain/share/login |
 pause | resume | boost | abort | say | runner | drain-runners | voice-broker` —
