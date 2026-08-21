@@ -19,6 +19,9 @@ class FakeEngine implements HostManager {
   abort(runId: string): void {
     this.aborted.push(runId);
   }
+  message(): boolean {
+    return true;
+  }
 }
 
 function build(probes: Record<string, number | (() => number)> = {}) {

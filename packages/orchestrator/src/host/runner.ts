@@ -52,6 +52,13 @@ export class Runner implements HostEvents {
     const owned = this.ledger.runs({ state: "running", runnerId: this.cfg.runnerId });
     for (const run of owned) {
       if (run.abortRequested) this.engine.abort(run.id);
+      // Operator messages are delivered exactly once: a message the host no
+      // longer holds a session for stays queued rather than being lost, and
+      // is retired with the run below.
+      for (const message of this.ledger.pendingRunMessages(run.id)) {
+        if (!this.engine.message(run.id, message.text)) break;
+        this.ledger.markRunMessageDelivered(message.id, now);
+      }
     }
 
     const claimed: LaunchSpec[] = [];

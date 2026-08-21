@@ -25,6 +25,7 @@ interface CompletionReport {
 
 export class PiHost implements HostManager {
   private readonly sessions = new Map<string, AgentSession>();
+  private readonly transcripts = new Map<string, RunTranscript>();
 
   constructor(
     private readonly events: HostEvents,
@@ -62,6 +63,20 @@ export class PiHost implements HostManager {
 
   abort(runId: string): void {
     void this.sessions.get(runId)?.abort();
+  }
+
+  /**
+   * Deliver an operator message into a live session as a user turn. Queued
+   * as a follow-up so it lands at the end of whatever the agent is doing
+   * rather than shredding an in-flight turn, and mirrored into the
+   * transcript so the run's record shows why the agent changed course.
+   */
+  message(runId: string, text: string): boolean {
+    const session = this.sessions.get(runId);
+    if (session === undefined) return false;
+    this.transcripts.get(runId)?.append("user", { text });
+    void session.sendUserMessage(text, { deliverAs: "followUp" });
+    return true;
   }
 
   /** Whether a session for this run is still live in this process. */
@@ -127,6 +142,9 @@ export class PiHost implements HostManager {
       await session.setModel(model);
       if (spec.thinking !== undefined) session.setThinkingLevel(spec.thinking as never);
     }
+    // Registered only past the model-resolution returns above: a session
+    // that never runs must not be addressable by an operator message.
+    if (transcript !== undefined) this.transcripts.set(spec.runId, transcript);
     const unsubscribe = transcript === undefined ? undefined : this.publish(transcript, session);
     transcript?.append("user", { text: spec.prompt });
     const heartbeat = setInterval(
@@ -160,6 +178,7 @@ export class PiHost implements HostManager {
     } finally {
       clearInterval(heartbeat);
       this.sessions.delete(spec.runId);
+      this.transcripts.delete(spec.runId);
       unsubscribe?.();
       session.dispose();
     }

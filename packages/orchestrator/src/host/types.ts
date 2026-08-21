@@ -25,10 +25,14 @@ export interface HostRunResult {
 /**
  * A host runs agent sessions. `launch` must not throw and must eventually
  * cause exactly one `runFinished` report for the run; `abort` is best-effort.
+ * `message` delivers an operator turn into a live session and reports whether
+ * this host still holds it — killing an agent must not be the only way to
+ * change what it is doing.
  */
 export interface HostManager {
   launch(spec: LaunchSpec): void;
   abort(runId: string): void;
+  message(runId: string, text: string): boolean;
 }
 
 /** How the host reports back; implemented by the controller. */

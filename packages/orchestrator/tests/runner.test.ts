@@ -12,6 +12,13 @@ class FakeEngine implements HostManager {
   abort(runId: string): void {
     this.aborted.push(runId);
   }
+  messages: { runId: string; text: string }[] = [];
+  /** Live sessions only: a run this engine never launched cannot be told anything. */
+  message(runId: string, text: string): boolean {
+    if (!this.launched.some((spec) => spec.runId === runId)) return false;
+    this.messages.push({ runId, text });
+    return true;
+  }
 }
 
 function seed(ledger: Ledger, count: number): string[] {
@@ -158,5 +165,48 @@ describe("credential failures are the account's, not the task's", () => {
     expect(ledger.run(runId)?.detail).toMatch(/No API key found/);
     expect(ledger.recentErrorCount("t", 0)).toBe(0); // cannot trip the task breaker
     expect(ledger.accounts().find((a) => a.id === "anth-1")?.cooldownUntil).toBeGreaterThan(200);
+  });
+});
+
+describe("operator messages reach a live session", () => {
+  it("delivers queued messages once, in order, to the owning runner's sessions", () => {
+    const ledger = Ledger.open(":memory:");
+    const [runId] = seed(ledger, 1);
+    const engine = new FakeEngine();
+    const runner = new Runner(ledger, engine, { runnerId: "r1", maxSessions: 5 });
+    runner.tick(100);
+
+    ledger.queueRunMessage(runId, "Keep every command under a minute.", 150);
+    ledger.queueRunMessage(runId, "Timeout everything.", 160);
+    runner.tick(200);
+    expect(engine.messages.map((m) => m.text)).toEqual([
+      "Keep every command under a minute.",
+      "Timeout everything.",
+    ]);
+
+    // Delivery is recorded, so the next tick does not repeat itself.
+    runner.tick(300);
+    expect(engine.messages).toHaveLength(2);
+    expect(ledger.pendingRunMessages(runId)).toEqual([]);
+  });
+
+  it("a message for a session this runner does not hold stays queued", () => {
+    const ledger = Ledger.open(":memory:");
+    const [runId] = seed(ledger, 1);
+    const owner = new Runner(ledger, new FakeEngine(), { runnerId: "r1", maxSessions: 5 });
+    owner.tick(100);
+
+    // A second runner sees the run row but hosts no session for it: the
+    // message must not be marked delivered by a process that cannot deliver.
+    const bystander = new Runner(ledger, new FakeEngine(), { runnerId: "r1", maxSessions: 5 });
+    ledger.queueRunMessage(runId, "Stop that.", 150);
+    bystander.tick(200);
+    expect(ledger.pendingRunMessages(runId).map((m) => m.text)).toEqual(["Stop that."]);
+  });
+
+  it("an empty message is a mistake, not a turn", () => {
+    const ledger = Ledger.open(":memory:");
+    const [runId] = seed(ledger, 1);
+    expect(() => ledger.queueRunMessage(runId, "   ")).toThrow();
   });
 });

@@ -10,6 +10,9 @@ class FakeEngine implements HostManager {
     this.launched.push(spec);
   }
   abort(): void {}
+  message(): boolean {
+    return true;
+  }
 }
 
 function seed(ledger: Ledger, count: number): void {

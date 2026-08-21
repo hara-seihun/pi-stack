@@ -172,6 +172,20 @@ CREATE INDEX session_lease_account_started ON session_lease (account_id, started
 CREATE INDEX session_lease_active ON session_lease (account_id, ended_at, heartbeat_at);
 `;
 
+/** An operator watching a live agent could only kill it. A queued message is
+ * the other half of that control: the runner delivers it into the session as
+ * a user turn, so a drifting agent can be corrected instead of discarded. */
+const RUN_MESSAGE_SCHEMA = `
+CREATE TABLE run_message (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  run_id TEXT NOT NULL,
+  text TEXT NOT NULL,
+  created_at INTEGER NOT NULL,
+  delivered_at INTEGER
+) STRICT;
+CREATE INDEX run_message_undelivered ON run_message (run_id, delivered_at);
+`;
+
 const MIGRATIONS: readonly string[] = [
   SCHEMA,
   TASK_SCHEMA,
@@ -180,6 +194,7 @@ const MIGRATIONS: readonly string[] = [
   THINKING_SCHEMA,
   DOMAIN_SCHEMA,
   SHARED_ACCOUNT_SCHEMA,
+  RUN_MESSAGE_SCHEMA,
 ];
 
 export type AccountDomain = "interactive" | "orchestrator";
@@ -837,6 +852,34 @@ export class Ledger {
 
   requestAbort(id: string): void {
     this.db.prepare("UPDATE run SET abort_requested = 1 WHERE id = ?").run(id);
+  }
+
+  /** Queue an operator message for a live run. Delivery is the runner's job;
+   * the row is the request, `delivered_at` the receipt. */
+  queueRunMessage(runId: string, text: string, at = Date.now()): number {
+    const trimmed = text.trim();
+    if (trimmed === "") throw new Error("a run message cannot be empty");
+    const row = this.db
+      .prepare(
+        "INSERT INTO run_message (run_id, text, created_at) VALUES (?, ?, ?) RETURNING id",
+      )
+      .get(runId, trimmed, at) as { id: number };
+    return row.id;
+  }
+
+  /** Undelivered messages for a run, oldest first. */
+  pendingRunMessages(runId: string): { id: number; text: string; createdAt: number }[] {
+    return (
+      this.db
+        .prepare(
+          "SELECT id, text, created_at FROM run_message WHERE run_id = ? AND delivered_at IS NULL ORDER BY id",
+        )
+        .all(runId) as { id: number; text: string; created_at: number }[]
+    ).map((r) => ({ id: r.id, text: r.text, createdAt: r.created_at }));
+  }
+
+  markRunMessageDelivered(id: number, at = Date.now()): void {
+    this.db.prepare("UPDATE run_message SET delivered_at = ? WHERE id = ?").run(at, id);
   }
 
   /** Failover moves a running session's assignment; history keeps only the

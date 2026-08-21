@@ -323,10 +323,16 @@ is the first item in
 run transcripts show agents ending a session at the first publishable fact.
 
 `pi-orchestrator status | task set/list/delete | account list/add/domain/share/login |
-pause | resume | boost | abort | runner | drain-runners | voice-broker` —
+pause | resume | boost | abort | say | runner | drain-runners | voice-broker` —
 thin reads and
 writes against the ledger (path from `PI_ORCHESTRATOR_LEDGER`, default
 `~/.local/share/pi-orchestrator/`).
+`say <runId> <text>` is the counterpart of `abort`: it queues an operator
+message in `run_message`, the runner that owns the session delivers it as a
+follow-up user turn (and mirrors it into the transcript), and the CLI waits
+for the `delivered_at` receipt before claiming anything. A drifting agent can
+be corrected mid-run instead of thrown away with its context, and a message
+is never marked delivered by a process that does not hold the session.
 `supervisor --max-sessions N` runs the process a service unit should own
 (it spawns and replaces `runner` workers); `runner --max-sessions N` starts
 a single worker directly. `drain-runners` rolls runner generations for

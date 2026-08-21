@@ -269,6 +269,34 @@ async function supervisor(ledger: Ledger, args: string[]): Promise<void> {
   }
 }
 
+/**
+ * Say something to a live agent. Aborting used to be the only lever an
+ * operator had over a running session, which made every correction cost the
+ * agent's whole context. The queued row is the request; the runner that owns
+ * the session delivers it as a user turn, so this waits for the receipt
+ * rather than reporting a write as if it were an arrival.
+ */
+async function say(ledger: Ledger, args: string[]): Promise<void> {
+  const [runId, ...words] = args;
+  if (runId === undefined || words.length === 0) fail("say <runId> <text...>");
+  const run = ledger.run(runId as string) ?? fail(`unknown run ${runId as string}`);
+  if (run.state !== "running") fail(`run ${run.id} is ${run.state}; only a running session listens`);
+  const id = ledger.queueRunMessage(run.id, words.join(" "));
+  // A runner ticks about once a second; wait a few of those before saying
+  // anything, because "queued" and "the agent has it" are different facts.
+  for (let waited = 0; waited < 15_000; waited += 500) {
+    if (!ledger.pendingRunMessages(run.id).some((m) => m.id === id)) {
+      console.log(`delivered to ${run.id} (${run.taskId} on ${run.accountId})`);
+      return;
+    }
+    await new Promise((r) => setTimeout(r, 500));
+  }
+  console.log(
+    `queued for ${run.id}, not yet delivered: its runner may be down, or the run ended. ` +
+      `It is delivered when the owning runner next ticks, and never after the run finishes.`,
+  );
+}
+
 const DOMAINS: readonly AccountDomain[] = ["interactive", "orchestrator"];
 
 /** Taking an account into shared custody moves its credential there; a
@@ -491,6 +519,9 @@ async function main(): Promise<void> {
         console.log(`abort requested for ${runId}`);
         break;
       }
+      case "say":
+        await say(ledger, args);
+        break;
       case "daemon":
         await daemon(ledger, args);
         break;
@@ -523,6 +554,8 @@ async function main(): Promise<void> {
             "  pause | resume               durable launch control (a ledger row)",
             `  boost <family> [on|off|N]    scale a family's spend pace (on = ${DEFAULT_BOOST}x)`,
             "  abort <runId>                request a running session stop",
+            "  say <runId> <text...>        deliver an operator message into a live",
+            "                               session as a user turn",
             "  daemon [--interval MS]       controller loop (config: ~/.config/pi-orchestrator)",
             "  runner [--id NAME] [--max-sessions N] [--interval MS]",
             "                               host claimed runs as embedded pi sessions",
