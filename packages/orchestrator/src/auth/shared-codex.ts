@@ -210,6 +210,24 @@ export class SharedCodexAuth {
   }
 }
 
+/**
+ * Custody is a move, not a copy: once an alias is served from the shared
+ * store, the per-user copy is a second source of truth for the same secret
+ * and is deleted. Returns whether one was there.
+ */
+export function dropLocalCredential(agentAuthPath: string, alias: string): boolean {
+  let auth: Record<string, unknown>;
+  try {
+    auth = readAuth(agentAuthPath);
+  } catch {
+    return false;
+  }
+  if (!(alias in auth)) return false;
+  delete auth[alias];
+  writeAuth(agentAuthPath, auth);
+  return true;
+}
+
 export function sharedCodexProvider(
   family: Provider,
   alias: string,
@@ -230,6 +248,23 @@ export function sharedCodexProvider(
         async resolve({ signal }) {
           return { auth: await auth.resolve(alias, signal), source: "shared OAuth" };
         },
+      },
+      // A credential stored under this alias in a per-user auth.json owns the
+      // provider as far as the SDK's resolver is concerned: with no oauth
+      // branch here it would resolve to nothing at all ("No API key found"),
+      // and with the family's branch it would rotate the shared refresh token
+      // from a stale copy. Both are answered by making shared custody the
+      // only source of tokens, whatever a leftover per-user copy holds.
+      oauth: {
+        name: "Shared OpenAI Codex OAuth",
+        isSubscription: family.auth.oauth?.isSubscription,
+        async login(): Promise<never> {
+          throw new Error(
+            `${alias} is in shared custody: log in with \`pi-orchestrator account login ${alias}\``,
+          );
+        },
+        refresh: (_credential, signal) => auth.credential(alias, signal),
+        toAuth: () => auth.resolve(alias, new AbortController().signal),
       },
     },
     getModels: () => family.getModels().map((model) => ({

@@ -1,5 +1,10 @@
 import type { Ledger } from "../ledger/ledger.js";
-import { isRateLimitError, rateLimitCooldownMs } from "../rate-limit.js";
+import {
+  CREDENTIAL_COOLDOWN_MS,
+  isCredentialError,
+  isRateLimitError,
+  rateLimitCooldownMs,
+} from "../rate-limit.js";
 import type { HostEvents, HostManager, HostRunResult, LaunchSpec } from "./types.js";
 
 /**
@@ -90,13 +95,22 @@ export class Runner implements HostEvents {
   runFinished(runId: string, result: HostRunResult, at = Date.now()): void {
     const run = this.ledger.run(runId);
     if (run === undefined) return;
-    this.ledger.finishRun(runId, result, at);
+    const detail = result.detail ?? "";
+    // An account that cannot authenticate is not a failing task: recorded as
+    // aborted (like an unclaimed run) so it never trips a task's circuit
+    // breaker, and cooled down so waves stop being spent on it.
+    const credential = result.state === "error" && isCredentialError(detail);
+    this.ledger.finishRun(runId, credential ? { ...result, state: "aborted" } : result, at);
     this.ledger.taskFinished(run.taskId);
+    if (credential) {
+      this.ledger.setAccountCooldown(run.accountId, at + CREDENTIAL_COOLDOWN_MS);
+      return;
+    }
     // An exhausted account fails every launch it gets; cool it down so the
     // broker moves the task's next run to a sibling account instead of
     // burning the breaker window on the same dead meter.
-    if (result.state === "error" && isRateLimitError(result.detail ?? "")) {
-      this.ledger.setAccountCooldown(run.accountId, at + rateLimitCooldownMs(result.detail ?? ""));
+    if (result.state === "error" && isRateLimitError(detail)) {
+      this.ledger.setAccountCooldown(run.accountId, at + rateLimitCooldownMs(detail));
     }
   }
 

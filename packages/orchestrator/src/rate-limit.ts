@@ -33,3 +33,27 @@ export function rateLimitCooldownMs(message: string): number {
   if (/weekly|per.week|seven.?day|7.?day/i.test(message)) return 6 * 60 * 60_000;
   return 10 * 60_000;
 }
+
+const CREDENTIAL_PATTERNS = [
+  /no api key found/i,
+  /has no shared codex oauth credential/i,
+  /oauth refresh failed/i,
+  /credential store modify failed/i,
+  /\b401\b|unauthorized|invalid[_ ]?(api[_ ]?key|token|grant)/i,
+];
+
+/**
+ * The account cannot authenticate at all: a missing, shadowed, or rejected
+ * credential. It is a property of the account, never of the task the run
+ * carried, so it must cool the account rather than count toward a task's
+ * circuit breaker — an unauthenticated account otherwise trips every task it
+ * touches and stops the fleet (observed 2026-08-20, when a leftover per-user
+ * Codex credential shadowed shared custody).
+ */
+export function isCredentialError(message: string): boolean {
+  return CREDENTIAL_PATTERNS.some((p) => p.test(message));
+}
+
+/** Long enough that a broken account stops eating waves, short enough that a
+ * repaired credential returns without operator action. */
+export const CREDENTIAL_COOLDOWN_MS = 30 * 60_000;

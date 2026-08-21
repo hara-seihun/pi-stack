@@ -18,6 +18,7 @@ import type { LaunchSpec } from "./host/types.js";
 import { builtinProviders } from "@earendil-works/pi-ai/providers/all";
 import {
   defaultSharedCodexAuthPath,
+  dropLocalCredential,
   SharedCodexAuth,
 } from "./auth/shared-codex.js";
 
@@ -270,6 +271,16 @@ async function supervisor(ledger: Ledger, args: string[]): Promise<void> {
 
 const DOMAINS: readonly AccountDomain[] = ["interactive", "orchestrator"];
 
+/** Taking an account into shared custody moves its credential there; a
+ * per-user copy left behind is a duplicate of the same secret. */
+function reportLocalCopy(id: string): void {
+  const local = join(agentDirPath(), "auth.json");
+  if (dropLocalCredential(local, id)) console.log(`removed the superseded copy in ${local}`);
+  console.log(
+    `if ${id} was ever logged in as another user, delete its entry from that user's auth.json too`,
+  );
+}
+
 function sharedCodexAuth(): SharedCodexAuth {
   const oauth = builtinProviders().find((provider) => provider.id === "openai-codex")?.auth.oauth;
   if (oauth === undefined) throw new Error("OpenAI Codex OAuth is unavailable");
@@ -326,6 +337,7 @@ async function accountCommand(ledger: Ledger, args: string[]): Promise<void> {
     }
     ledger.setAccountShared(id, value === "on");
     console.log(`account ${id} custody is now ${value === "on" ? "shared" : account.domain}`);
+    if (value === "on") reportLocalCopy(id);
   } else if (sub === "login") {
     const id = rest[0] ?? fail("usage: account login <id>");
     const account = ledger.accounts().find((row) => row.id === id) ?? fail(`unknown account ${id}`);
@@ -353,6 +365,7 @@ async function accountCommand(ledger: Ledger, args: string[]): Promise<void> {
     await sharedCodexAuth().set(id, credential);
     ledger.setAccountShared(id, true);
     console.log(`account ${id} authenticated into shared custody`);
+    reportLocalCopy(id);
   } else if (sub === "domain") {
     const [id, domain] = rest;
     if (id === undefined || !DOMAINS.includes(domain as AccountDomain))

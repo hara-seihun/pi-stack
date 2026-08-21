@@ -142,3 +142,21 @@ describe("runner result classification", () => {
     expect(account?.cooldownUntil ?? 0).toBe(0);
   });
 });
+
+describe("credential failures are the account's, not the task's", () => {
+  it("an unauthenticated account aborts the run and cools down, sparing the breaker", () => {
+    const ledger = Ledger.open(":memory:");
+    const [runId] = seed(ledger, 1);
+    const runner = new Runner(ledger, new FakeEngine(), { runnerId: "r1", maxSessions: 5 });
+    runner.tick(100);
+    runner.runFinished(
+      runId,
+      { state: "error", detail: "Error: No API key found for openai-codex-9." },
+      200,
+    );
+    expect(ledger.run(runId)?.state).toBe("aborted");
+    expect(ledger.run(runId)?.detail).toMatch(/No API key found/);
+    expect(ledger.recentErrorCount("t", 0)).toBe(0); // cannot trip the task breaker
+    expect(ledger.accounts().find((a) => a.id === "anth-1")?.cooldownUntil).toBeGreaterThan(200);
+  });
+});

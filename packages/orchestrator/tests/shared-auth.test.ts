@@ -2,7 +2,12 @@ import { mkdtempSync, readFileSync, rmSync, statSync, writeFileSync } from "node
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
-import { SharedCodexAuth, codexCredential } from "../src/auth/shared-codex.js";
+import {
+  SharedCodexAuth,
+  codexCredential,
+  dropLocalCredential,
+  sharedCodexProvider,
+} from "../src/auth/shared-codex.js";
 
 const dirs: string[] = [];
 
@@ -74,5 +79,68 @@ describe("shared Codex auth", () => {
       expires: 20_000,
       accountId: "account-1",
     })).rejects.toThrow(/already stored/);
+  });
+});
+
+describe("shared custody is the only source of tokens", () => {
+  const family = {
+    id: "openai-codex",
+    name: "OpenAI Codex",
+    auth: { oauth: { isSubscription: true } },
+    getModels: () => [{ id: "gpt", name: "GPT", provider: "openai-codex" }],
+    stream: () => undefined,
+    streamSimple: () => undefined,
+  } as unknown as Parameters<typeof sharedCodexProvider>[0];
+
+  function provider(path: string) {
+    return sharedCodexProvider(
+      family,
+      "openai-codex",
+      "label",
+      new SharedCodexAuth({
+        path,
+        refresh: async (credential) => credential,
+        toAuth: async (credential) => ({ apiKey: credential.access }),
+      }),
+    );
+  }
+
+  // A per-user auth.json entry owns the provider in the SDK resolver: without
+  // an oauth branch the account resolves to nothing ("No API key found").
+  it("serves the shared token even when a stale per-user credential is passed in", async () => {
+    const oauth = provider(fixture(1_000_000)).auth.oauth!;
+    const stale = {
+      type: "oauth" as const,
+      access: "stale-access",
+      refresh: "stale-refresh",
+      expires: 1,
+      accountId: "account-1",
+    };
+    expect(await oauth.toAuth(stale)).toEqual({ apiKey: "access-1" });
+  });
+
+  it("never rotates the shared refresh token from a stale copy", async () => {
+    const oauth = provider(fixture(1_000_000)).auth.oauth!;
+    const refreshed = await oauth.refresh(
+      { type: "oauth", access: "stale", refresh: "stale", expires: 1 },
+      new AbortController().signal,
+    );
+    expect(refreshed.refresh).toBe("refresh-1");
+  });
+
+  it("sends interactive login for a shared alias to the operator CLI", async () => {
+    const oauth = provider(fixture(1_000_000)).auth.oauth!;
+    await expect(oauth.login({} as never)).rejects.toThrow(/pi-orchestrator account login/);
+  });
+
+  it("dropLocalCredential removes only the named per-user copy", () => {
+    const path = fixture(1_000_000);
+    writeFileSync(path, JSON.stringify({
+      "openai-codex": { type: "oauth", access: "a", refresh: "r", expires: 1, accountId: "x" },
+      anthropic: { type: "oauth", access: "b", refresh: "r", expires: 1 },
+    }), { mode: 0o660 });
+    expect(dropLocalCredential(path, "openai-codex")).toBe(true);
+    expect(dropLocalCredential(path, "openai-codex")).toBe(false);
+    expect(Object.keys(JSON.parse(readFileSync(path, "utf8")))).toEqual(["anthropic"]);
   });
 });
