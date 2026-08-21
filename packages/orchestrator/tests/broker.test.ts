@@ -240,6 +240,20 @@ describe("broker admission", () => {
     expect(broker.admit("expert", now)).toBeUndefined();
   });
 
+  it("burn is measured over the span the meters observed, not the whole window", () => {
+    const ledger = openLedger();
+    // Two days of session history, but the sampler has only been reading this
+    // account's meter for the last twelve hours. 6% drained across those
+    // twelve session-hours is a 0.5%/h session; spreading the same drain over
+    // the window's other thirty-six unobserved session-hours would price the
+    // session at a quarter of what it costs, and admit four times too many.
+    const now = 48 * HOUR;
+    feedHistory(ledger, "anth-1", { percentPerHour: 0.5, hours: 12, start: now - 12 * HOUR });
+    feedRuns(ledger, "anth-1", { count: 6, hoursEach: 8, endAt: now });
+    const broker = new Broker(ledger, CONFIG);
+    expect(broker.sessionBurn("anth-1", now)).toBeCloseTo(0.5, 2);
+  });
+
   it("expired accounts are never admitted", () => {
     const ledger = Ledger.open(":memory:");
     ledger.upsertAccount({ id: "anth-1", provider: "anthropic", accessUntil: 100, domain: "orchestrator" });

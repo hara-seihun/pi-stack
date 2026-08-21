@@ -272,12 +272,24 @@ export class Broker {
   }
 
   /** The measurement itself, or undefined while the account has too few
-   * recorded session-hours to have measured anything. */
+   * observed session-hours to have measured anything.
+   *
+   * Numerator and denominator are taken over the same interval: the span the
+   * account's meters actually reported across, not the whole measurement
+   * window. Session-hours the meters never priced would otherwise dilute
+   * observed drain into a burn several times too low, and concurrency is its
+   * reciprocal. */
   private measuredSessionBurn(accountId: string, now: number): number | undefined {
-    const since = now - this.cfg.measurementWindowMs;
-    const hours = this.ledger.sessionHours(accountId, since, now, this.cfg.sessionLeaseTimeoutMs);
+    const observed = this.ledger.drainWindow(accountId, now - this.cfg.measurementWindowMs, now);
+    if (observed === undefined) return undefined;
+    const hours = this.ledger.sessionHours(
+      accountId,
+      observed.from,
+      observed.to,
+      this.cfg.sessionLeaseTimeoutMs,
+    );
     if (hours < this.cfg.minMeasuredSessionHours) return undefined;
-    const burn = this.ledger.drainSince(accountId, since) / hours;
+    const burn = observed.percent / hours;
     return burn > 0 ? burn : undefined;
   }
 

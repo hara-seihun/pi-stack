@@ -252,6 +252,18 @@ meter drain over both fleet run-hours and interactive lease-hours. Active
 interactive leases consume the same shared-account slots as fleet runs.
 There are no hand-configured burn constants anywhere.
 
+Burn is a quotient, so both halves are taken over the **same interval**: the
+span the account's meters actually reported across, never the nominal
+measurement window. A window's session-hours that no reading priced dilute
+observed drain by exactly the coverage ratio, and concurrency is drain's
+reciprocal — so on 2026-08-21 a Codex fleet with four hours of sampler
+history behind a 48-hour window read one account's sessions as 0.05%/h
+instead of 0.51%/h and advertised eleven slots where the evidence supported
+one. A fresh sampler, a sampling outage, a pruned ledger, and a newly added
+account all open that gap; aligning the numerator's span with the
+denominator's closes it, and the session-hour minimum is then a real
+evidence threshold rather than a clock.
+
 "Most binding meter" means the meters the launch can actually drain, from
 the topology's `drainedBy` classes. Anthropic's scoped weekly bucket is
 Fable's alone, so an account whose Fable week is spent still has whatever

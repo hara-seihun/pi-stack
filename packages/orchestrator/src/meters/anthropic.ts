@@ -278,10 +278,11 @@ export class AnthropicMeterSampler {
       for (const value of usage.buckets) {
         const previous = this.ledger.latestReading(account.id, value.meterId);
         const at = Date.now();
-        // A pi session on this account writes header readings continuously,
-        // so losing this race is ordinary: the header reading is the same
-        // fact, already stored.
-        if (previous && at <= previous.at) {
+        // A header reading is not this fact: it reports the windows one
+        // response was metered against, which is why this poll exists. So an
+        // equal instant is a correction the ledger applies, and only a
+        // genuinely newer stored reading makes this one stale.
+        if (previous && at < previous.at) {
           reports.push({ accountId: account.id, meterId: value.meterId, outcome: "stale-reading" });
           continue;
         }

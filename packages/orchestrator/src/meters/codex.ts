@@ -299,7 +299,7 @@ export class CodexMeterSampler {
         }
         const previous = this.ledger.latestReading(account.id, meterId);
         const at = Date.now();
-        if (previous && at <= previous.at) {
+        if (previous && at < previous.at) {
           reports.push({ accountId: account.id, meterId, outcome: "stale-reading" });
           continue;
         }

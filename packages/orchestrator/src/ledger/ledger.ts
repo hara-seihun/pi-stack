@@ -490,16 +490,28 @@ export class Ledger {
    * depend on exact boundaries, so nothing is deduplicated; `prune` bounds
    * growth instead. Out-of-order readings (concurrent writers racing) are
    * rejected loudly; callers may drop the redundant loser.
+   *
+   * Two writers can land on the same instant, and readings of one meter at
+   * one instant are one fact, so the later write corrects the earlier value
+   * rather than being refused as a duplicate. That case is not hypothetical:
+   * the usage-logger records a response's headers and then polls the account
+   * usage endpoint, and the endpoint answers for buckets the headers cannot
+   * describe at all. Refusing the equal timestamp kept the header's partial
+   * view and discarded the account-wide truth that was fetched to replace
+   * it.
    */
   recordReading(accountId: string, meterId: MeterId, r: MeterReading): void {
     const last = this.latestReading(accountId, meterId);
-    if (last && r.at <= last.at) {
-      throw new Error(`out-of-order reading for ${accountId}/${meterId}: ${r.at} <= ${last.at}`);
+    if (last && r.at < last.at) {
+      throw new Error(`out-of-order reading for ${accountId}/${meterId}: ${r.at} < ${last.at}`);
     }
     this.db
       .prepare(
         `INSERT INTO meter_reading (account_id, meter_id, at, used_percent, reset_at)
-         VALUES (?, ?, ?, ?, ?)`,
+         VALUES (?, ?, ?, ?, ?)
+         ON CONFLICT (account_id, meter_id, at) DO UPDATE SET
+           used_percent = excluded.used_percent,
+           reset_at = excluded.reset_at`,
       )
       .run(accountId, meterId, r.at, r.usedPercent, r.resetAt ?? null);
   }
@@ -1083,31 +1095,53 @@ export class Ledger {
   }
 
   /**
-   * Observed percent drained since the cutoff, from meter readings: the sum of
-   * positive used-percent deltas per meter (resets appear as negative deltas
-   * and are skipped), taking the most binding meter. This is a fact-level
-   * aggregate for burn measurement, deliberately simpler than calibration.
+   * Observed drain inside `[since, now]` **and the span of meter evidence
+   * that observed it**: per meter, the sum of positive used-percent deltas
+   * (resets appear as negative deltas and are skipped), taking the most
+   * binding meter and reporting the first and last reading that priced it.
+   * This is a fact-level aggregate for burn measurement, deliberately
+   * simpler than calibration.
+   *
+   * The span is the point. Burn is a quotient, and a quotient only measures
+   * anything when both halves describe the same interval. Readings covering
+   * four hours of a forty-eight-hour window say nothing about the
+   * session-hours before the first one, so dividing their drain by the whole
+   * window's session-hours understates burn by exactly the coverage ratio —
+   * which the broker then inverts into that many times too much concurrency.
+   * A fresh sampler, a sampling outage, a pruned ledger, and a newly added
+   * account all produce that gap. Undefined when no meter has two readings
+   * in the window, because a single reading prices no interval at all.
    */
-  drainSince(accountId: string, since: number): number {
+  drainWindow(
+    accountId: string,
+    since: number,
+    now: number,
+  ): { percent: number; from: number; to: number } | undefined {
     const rows = this.db
       .prepare(
         `SELECT meter_id, at, used_percent FROM meter_reading
-         WHERE account_id = ? AND at >= ? ORDER BY meter_id, at`,
+         WHERE account_id = ? AND at >= ? AND at <= ? ORDER BY meter_id, at`,
       )
-      .all(accountId, since) as { meter_id: string; at: number; used_percent: number }[];
-    const drain = new Map<string, { last: number; sum: number }>();
+      .all(accountId, since, now) as { meter_id: string; at: number; used_percent: number }[];
+    const drain = new Map<string, { from: number; to: number; last: number; sum: number }>();
     for (const r of rows) {
       const d = drain.get(r.meter_id);
       if (d === undefined) {
-        drain.set(r.meter_id, { last: r.used_percent, sum: 0 });
+        drain.set(r.meter_id, { from: r.at, to: r.at, last: r.used_percent, sum: 0 });
       } else {
         if (r.used_percent > d.last) d.sum += r.used_percent - d.last;
         d.last = r.used_percent;
+        d.to = r.at;
       }
     }
-    let max = 0;
-    for (const d of drain.values()) max = Math.max(max, d.sum);
-    return max;
+    let binding: { percent: number; from: number; to: number } | undefined;
+    for (const d of drain.values()) {
+      if (d.to === d.from) continue;
+      if (binding === undefined || d.sum > binding.percent) {
+        binding = { percent: d.sum, from: d.from, to: d.to };
+      }
+    }
+    return binding;
   }
 
   /** Deletes facts older than the cutoff; calibration only needs recent windows. */
