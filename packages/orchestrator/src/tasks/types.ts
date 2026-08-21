@@ -42,6 +42,14 @@ export interface TaskSpec {
   readonly prompt?: string;
   /** Working directory for launched sessions. */
   readonly cwd?: string;
+  /** End the shift as soon as this lane's demand reaches zero, instead of
+   * re-prompting the session until its budget is spent. A research lane is
+   * never done and keeps its warm context; a queue lane (review) can empty
+   * its queue mid-shift, and re-prompting it then asserts work that no
+   * longer exists. Unknown demand — an unprobed, stale, or failed probe —
+   * never ends a shift, because "I cannot see the queue" is not "the queue
+   * is empty". */
+  readonly exitWhenDrained?: boolean;
 }
 
 export interface DemandState {
@@ -60,6 +68,9 @@ export interface TaskSnapshot {
   readonly units: number | undefined;
   readonly gateOpen: boolean;
   readonly eligible: boolean;
+  /** Lane-scoped launch control: this lane is held even though the machine
+   * is launching. Omitted by callers that do not track it. */
+  readonly paused?: boolean;
   readonly error: string | undefined;
   /** Launches this task has already had inside the fairness window. What
    * makes allocation proportional across cycles instead of only within one;

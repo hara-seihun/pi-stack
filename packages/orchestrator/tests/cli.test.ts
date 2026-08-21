@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { taskSet } from "../src/cli.js";
+import { launchControl, taskSet } from "../src/cli.js";
 import { Ledger } from "../src/ledger/ledger.js";
 
 const open = (): Ledger => Ledger.open(":memory:");
@@ -69,6 +69,33 @@ describe("task set", () => {
   it("still requires tiers for a task that does not exist yet", () => {
     const ledger = open();
     expect(() => taskSet(ledger, ["fresh", "--demand-constant", "1"])).toThrow(/--tiers required/);
+    ledger.close();
+  });
+});
+
+describe("launch control", () => {
+  it("holds one lane, holds every other lane, and releases again", () => {
+    const ledger = open();
+    taskSet(ledger, ["review", "--tiers", "standard", "--demand-constant", "5"]);
+    taskSet(ledger, ["frontier", "--tiers", "standard", "--demand-constant", "5"]);
+    taskSet(ledger, ["survey", "--tiers", "light", "--demand-constant", "5"]);
+
+    launchControl(ledger, "pause", ["--except", "review"]);
+    expect(ledger.taskPaused("review")).toBe(false);
+    expect(ledger.taskPaused("frontier")).toBe(true);
+    expect(ledger.taskPaused("survey")).toBe(true);
+    // Machine-wide control is a different row: holding lanes never pauses it.
+    expect(ledger.getControl("launches")).toBe("enabled");
+
+    launchControl(ledger, "resume", ["frontier"]);
+    expect(ledger.taskPaused("frontier")).toBe(false);
+    expect(() => launchControl(ledger, "pause", ["nosuch"])).toThrow(/unknown task/);
+    expect(() => launchControl(ledger, "resume", ["--except", "review"])).toThrow(/--except/);
+
+    // A held lane's row goes with it, so a reused id does not inherit a hold.
+    ledger.deleteTask("survey");
+    taskSet(ledger, ["survey", "--tiers", "light", "--demand-constant", "5"]);
+    expect(ledger.taskPaused("survey")).toBe(false);
     ledger.close();
   });
 });

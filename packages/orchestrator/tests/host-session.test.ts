@@ -21,7 +21,10 @@ interface FakeTurn {
   readonly tookMs?: number;
 }
 
-function harness(turns: FakeTurn[], options: { sessionBudgetMs?: number } = {}) {
+function harness(
+  turns: FakeTurn[],
+  options: { sessionBudgetMs?: number; laneDrained?: () => boolean } = {},
+) {
   const prompts: string[] = [];
   let clock = 0;
   const messages: { role: string; stopReason?: string; errorMessage?: string }[] = [];
@@ -51,7 +54,11 @@ function harness(turns: FakeTurn[], options: { sessionBudgetMs?: number } = {}) 
   };
   const results: HostRunResult[] = [];
   const host = new PiHost(
-    { runFinished: (_id, result) => results.push(result), heartbeat: () => {} },
+    {
+      runFinished: (_id, result) => results.push(result),
+      heartbeat: () => {},
+      laneDrained: options.laneDrained ?? (() => false),
+    },
     {
       resolveModel: () => ({}),
       sessionBudgetMs: options.sessionBudgetMs,
@@ -145,6 +152,19 @@ describe("host shift loop", () => {
     const result = await banked.finished;
     expect(banked.prompts).toHaveLength(2);
     expect(result).toMatchObject({ state: "done", detail: "report 1.0" });
+  });
+
+  it("a lane that drains mid-shift ends instead of being re-prompted about work it no longer has", async () => {
+    let queue = 2;
+    const { host, spec, prompts, finished } = harness(
+      [{ reports: 1 }, { reports: 1 }, { reports: 1 }],
+      { laneDrained: () => --queue <= 0 },
+    );
+    host.launch(spec);
+    const result = await finished;
+    // Two turns, then the queue is empty: banked work is still the record.
+    expect(prompts).toHaveLength(2);
+    expect(result).toMatchObject({ state: "done", productive: true, detail: "report 2.0" });
   });
 
   it("an operator abort ends the shift immediately", async () => {

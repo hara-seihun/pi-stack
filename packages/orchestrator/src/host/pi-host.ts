@@ -227,6 +227,13 @@ export class PiHost implements HostManager {
         }
         idle = reports > before ? 0 : idle + 1;
         if (idle >= MAX_IDLE_TURNS || Date.now() >= deadline) break;
+        // A queue lane can empty its queue mid-shift, and CONTINUE would then
+        // assert work that no longer exists. Ending the shift is the honest
+        // answer; the runner decides which lanes work that way.
+        if (this.events.laneDrained(spec.taskId)) {
+          transcript?.append("notice", { text: "Lane drained: no work left, ending the shift." });
+          break;
+        }
       }
       if (report === undefined) {
         return { state: "done", productive: false, detail: "no task_complete report" };

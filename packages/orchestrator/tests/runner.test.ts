@@ -211,3 +211,32 @@ describe("operator messages reach a live session", () => {
     expect(() => ledger.queueRunMessage(runId, "   ")).toThrow();
   });
 });
+
+describe("a drained queue lane ends its shift", () => {
+  it("only for lanes that asked, and only against a current, successful probe", () => {
+    const ledger = Ledger.open(":memory:");
+    ledger.upsertAccount({ id: "anth-1", provider: "anthropic" });
+    ledger.upsertTask({ id: "review", demandCommand: "queue", tiers: mix("standard"), prompt: "Review.", exitWhenDrained: true });
+    ledger.upsertTask({ id: "frontier", demandCommand: "queue", tiers: mix("standard"), prompt: "Attack." });
+    const runner = new Runner(ledger, new FakeEngine(), { runnerId: "r1", maxSessions: 5 });
+
+    // Nothing probed yet: an unobserved queue is not an empty one.
+    expect(runner.laneDrained("review", 10_000)).toBe(false);
+
+    ledger.recordDemand("review", { units: 3 }, 10_000);
+    expect(runner.laneDrained("review", 10_000)).toBe(false);
+
+    ledger.recordDemand("review", { units: 0 }, 20_000);
+    expect(runner.laneDrained("review", 20_000)).toBe(true);
+    // The same reading five minutes later says nothing about the queue now.
+    expect(runner.laneDrained("review", 20_000 + 6 * 60_000)).toBe(false);
+
+    ledger.recordDemand("review", { error: "probe failed" }, 30_000);
+    expect(runner.laneDrained("review", 30_000)).toBe(false);
+
+    // A research lane keeps its warm context however quiet its probe goes.
+    ledger.recordDemand("frontier", { units: 0 }, 30_000);
+    expect(runner.laneDrained("frontier", 30_000)).toBe(false);
+    ledger.close();
+  });
+});

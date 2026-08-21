@@ -35,8 +35,13 @@ export interface HostManager {
   message(runId: string, text: string): boolean;
 }
 
-/** How the host reports back; implemented by the controller. */
+/** How the host reports back, and the one question it asks: implemented by
+ * the runner, which owns the ledger. */
 export interface HostEvents {
   runFinished(runId: string, result: HostRunResult, at: number): void;
   heartbeat(runId: string, at: number): void;
+  /** True when this lane has run out of work and its shift should end rather
+   * than be re-prompted. The policy (which lanes end this way, and what
+   * counts as drained) lives in the runner; the host only asks. */
+  laneDrained(taskId: string): boolean;
 }

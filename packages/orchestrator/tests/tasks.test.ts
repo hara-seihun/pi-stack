@@ -140,6 +140,31 @@ describe("scheduler", () => {
     ledger.close();
   });
 
+  it("a held lane never launches, but still feeds the gates that read it", async () => {
+    const ledger = openLedger();
+    ledger.upsertTask({ id: "ingest", demandCommand: "count-pending", tiers: mix("standard") });
+    ledger.upsertTask({
+      id: "produce",
+      demandConstant: 5,
+      gate: "ingest.demand == 0",
+      tiers: mix("standard"),
+    });
+    const probes = fakeProbes({ "count-pending": 4 });
+    const sched = new Scheduler(ledger, { demandTtlMs: 1000 }, probes.runner);
+    ledger.setTaskPaused("ingest", true);
+
+    const r = await sched.evaluate(1000);
+    expect(snap(r, "ingest").paused).toBe(true);
+    expect(snap(r, "ingest").eligible).toBe(false);
+    expect(snap(r, "ingest").units).toBe(4);
+    // Held is not unknown: the gate downstream still reads a real demand.
+    expect(snap(r, "produce").gateOpen).toBe(false);
+
+    ledger.setTaskPaused("ingest", false);
+    expect(snap(await sched.evaluate(3000), "ingest").eligible).toBe(true);
+    ledger.close();
+  });
+
   it("T2 caches probes for the TTL and re-probes on invalidation", async () => {
     const ledger = openLedger();
     ledger.upsertTask({ id: "a", demandCommand: "probe-a", tiers: mix("light") });

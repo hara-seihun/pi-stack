@@ -205,6 +205,14 @@ const TASK_SHARE_SCHEMA = `
 ALTER TABLE task ADD COLUMN share REAL NOT NULL DEFAULT 1;
 `;
 
+/** A queue lane can empty its queue mid-shift. Research lanes are never done
+ * and must keep their warm context to the end of the budget, so the choice is
+ * a property of the lane rather than of the host. */
+const EXIT_WHEN_DRAINED_SCHEMA = `
+ALTER TABLE task ADD COLUMN exit_when_drained INTEGER NOT NULL DEFAULT 0
+  CHECK (exit_when_drained IN (0, 1));
+`;
+
 const MIGRATIONS: readonly string[] = [
   SCHEMA,
   TASK_SCHEMA,
@@ -216,6 +224,7 @@ const MIGRATIONS: readonly string[] = [
   RUN_MESSAGE_SCHEMA,
   TIER_WEIGHT_SCHEMA,
   TASK_SHARE_SCHEMA,
+  EXIT_WHEN_DRAINED_SCHEMA,
 ];
 
 export type AccountDomain = "interactive" | "orchestrator";
@@ -270,6 +279,14 @@ export interface LoggedUsageEvent extends UsageEvent {
 
 function boostKey(provider: string): string {
   return `boost:${provider}`;
+}
+
+/** Launch control, scoped to one lane. The machine-wide pause is a control
+ * row; holding a single lane is the same lever named for one task, so
+ * "run only the review lane" is a durable operator decision rather than a
+ * set of deleted task definitions. */
+function taskPauseKey(taskId: string): string {
+  return `launches:${taskId}`;
 }
 
 export class Ledger {
@@ -573,8 +590,9 @@ export class Ledger {
     if (t.gate !== undefined) parseGate(t.gate); // Validate syntax at write time.
     this.db
       .prepare(
-        `INSERT INTO task (id, demand_command, demand_constant, gate, tiers, share, prompt, cwd, created_at)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+        `INSERT INTO task (id, demand_command, demand_constant, gate, tiers, share, prompt, cwd,
+                           exit_when_drained, created_at)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
          ON CONFLICT (id) DO UPDATE SET
            demand_command = excluded.demand_command,
            demand_constant = excluded.demand_constant,
@@ -582,7 +600,8 @@ export class Ledger {
            tiers = excluded.tiers,
            share = excluded.share,
            prompt = excluded.prompt,
-           cwd = excluded.cwd`,
+           cwd = excluded.cwd,
+           exit_when_drained = excluded.exit_when_drained`,
       )
       .run(
         t.id,
@@ -593,18 +612,22 @@ export class Ledger {
         t.share ?? 1,
         t.prompt ?? null,
         t.cwd ?? null,
+        t.exitWhenDrained ? 1 : 0,
         Date.now(),
       );
   }
 
   deleteTask(id: string): void {
     this.db.prepare("DELETE FROM task WHERE id = ?").run(id);
+    this.db.prepare("DELETE FROM control WHERE key = ?").run(taskPauseKey(id));
   }
 
   tasks(): TaskSpec[] {
     const rows = this.db
       .prepare(
-        "SELECT id, demand_command, demand_constant, gate, tiers, share, prompt, cwd FROM task ORDER BY id",
+        `SELECT id, demand_command, demand_constant, gate, tiers, share, prompt, cwd,
+                exit_when_drained
+         FROM task ORDER BY id`,
       )
       .all() as {
       id: string;
@@ -615,6 +638,7 @@ export class Ledger {
       share: number;
       prompt: string | null;
       cwd: string | null;
+      exit_when_drained: number;
     }[];
     return rows.map((r) => ({
       id: r.id,
@@ -625,7 +649,18 @@ export class Ledger {
       share: r.share,
       prompt: r.prompt ?? undefined,
       cwd: r.cwd ?? undefined,
+      exitWhenDrained: r.exit_when_drained !== 0,
     }));
+  }
+
+  /** True when this one lane is held, whatever the machine-wide control says. */
+  taskPaused(taskId: string): boolean {
+    return this.getControl(taskPauseKey(taskId)) === "paused";
+  }
+
+  setTaskPaused(taskId: string, paused: boolean): void {
+    if (paused) this.setControl(taskPauseKey(taskId), "paused");
+    else this.db.prepare("DELETE FROM control WHERE key = ?").run(taskPauseKey(taskId));
   }
 
   getControl(key: string): string | undefined {

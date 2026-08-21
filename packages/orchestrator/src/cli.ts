@@ -74,11 +74,11 @@ async function status(ledger: Ledger): Promise<void> {
   const evaluation = await new Scheduler(ledger).evaluate();
   for (const t of evaluation.tasks) {
     const parts = [
-      t.eligible ? "eligible" : "waiting",
+      t.paused ? "held" : t.eligible ? "eligible" : "waiting",
       `units=${t.units ?? "?"}`,
       `gate=${t.gateOpen ? "open" : "closed"}`,
       `tiers=${formatTiers(t.tiers)}`,
-      `share=${sharePercent(t.share, evaluation.tasks)}`,
+      `share=${sharePercent(t, evaluation.tasks)}`,
     ];
     if (t.error !== undefined) parts.push(`error=${t.error}`);
     console.log(`task ${t.taskId}: ${parts.join(" ")}`);
@@ -226,7 +226,8 @@ async function runner(ledger: Ledger, args: string[]): Promise<void> {
   const engine: InstanceType<typeof PiHost> = new PiHost(
     // The runner is constructed below; PiHost only needs the event surface.
     { runFinished: (id, result, at) => live.runFinished(id, result, at),
-      heartbeat: (id, at) => live.heartbeat(id, at) },
+      heartbeat: (id, at) => live.heartbeat(id, at),
+      laneDrained: (taskId) => live.laneDrained(taskId) },
     {
       resolveModel,
       runsRoot,
@@ -485,11 +486,53 @@ const formatTiers = (tiers: readonly TierShare[]): string =>
 
 /** A lane's share is only meaningful against the other eligible lanes, so it
  * is shown as the fraction of the fleet it is currently claiming rather than
- * as a bare weight an operator would have to normalize by hand. */
-function sharePercent(share: number | undefined, tasks: readonly { share?: number; eligible: boolean }[]): string {
+ * as a bare weight an operator would have to normalize by hand. A lane that
+ * is not claiming anything — held, gated, out of work — gets no percentage:
+ * normalizing a bystander against the eligible lanes printed "share=14
+ * (700%)" for a lane launching nothing at all. */
+function sharePercent(
+  task: { share?: number; eligible: boolean },
+  tasks: readonly { share?: number; eligible: boolean }[],
+): string {
+  const weight = task.share ?? 1;
+  if (!task.eligible) return `${weight}`;
   const total = tasks.filter((t) => t.eligible).reduce((sum, t) => sum + (t.share ?? 1), 0);
-  const weight = share ?? 1;
   return total > 0 ? `${weight} (${Math.round((100 * weight) / total)}%)` : `${weight}`;
+}
+
+/**
+ * Launch control at two scopes, one lever. `pause` holds the machine,
+ * `pause <lane>` holds one lane, and `pause --except <lane>` holds every
+ * other defined lane, which is how the whole fleet is pointed at one lane
+ * without deleting the definitions of the rest. A held lane is still probed
+ * and still feeds other lanes' gates; it simply never launches.
+ */
+export function launchControl(ledger: Ledger, command: "pause" | "resume", args: string[]): void {
+  const { positional, named } = flags(args);
+  const defined = ledger.tasks().map((t) => t.id);
+  const holding = command === "pause";
+  const except = named.get("except");
+  if (except !== undefined) {
+    if (!holding) fail("--except belongs to pause: resume <task...> releases named lanes");
+    if (positional.length > 0) fail("pause takes task ids or --except, not both");
+    const kept = new Set(except.split(",").map((id) => id.trim()));
+    for (const id of kept) if (!defined.includes(id)) fail(`unknown task ${id}`);
+    for (const id of defined) ledger.setTaskPaused(id, !kept.has(id));
+    console.log(
+      `lanes held except ${[...kept].join(", ")}; a lane defined later starts unheld`,
+    );
+    return;
+  }
+  if (positional.length === 0) {
+    ledger.setControl("launches", holding ? "paused" : "enabled");
+    console.log(holding ? "launches paused (running agents unaffected)" : "launches enabled");
+    return;
+  }
+  for (const id of positional) {
+    if (!defined.includes(id)) fail(`unknown task ${id}`);
+    ledger.setTaskPaused(id, holding);
+    console.log(`lane ${id} ${holding ? "held (running agents unaffected)" : "released"}`);
+  }
 }
 
 // Editing one field of a live task must not silently discard the others, so
@@ -526,6 +569,12 @@ export function taskSet(ledger: Ledger, args: string[]): void {
       ? undefined
       : current?.demandConstant;
 
+  const drained = named.get("exit-when-drained");
+  if (drained !== undefined && drained !== "true" && drained !== "false") {
+    fail("--exit-when-drained must be true or false");
+  }
+  const exitWhenDrained = drained === undefined ? current?.exitWhenDrained : drained === "true";
+
   ledger.upsertTask({
     id,
     tiers,
@@ -535,6 +584,7 @@ export function taskSet(ledger: Ledger, args: string[]): void {
     gate: pick("gate", current?.gate),
     prompt: pick("prompt", current?.prompt),
     cwd: pick("cwd", current?.cwd),
+    ...(exitWhenDrained === undefined ? {} : { exitWhenDrained }),
   });
   console.log(`task ${id} ${current ? "updated" : "created"}`);
 }
@@ -548,12 +598,8 @@ async function main(): Promise<void> {
         await status(ledger);
         break;
       case "pause":
-        ledger.setControl("launches", "paused");
-        console.log("launches paused (running agents unaffected)");
-        break;
       case "resume":
-        ledger.setControl("launches", "enabled");
-        console.log("launches enabled");
+        launchControl(ledger, command, args);
         break;
       case "account":
         await accountCommand(ledger, args);
@@ -570,6 +616,8 @@ async function main(): Promise<void> {
             console.log(
               `${t.id}: tiers=${formatTiers(t.tiers)} share=${t.share ?? 1} demand=[${demand}]` +
                 (t.gate !== undefined ? ` gate=[${t.gate}]` : "") +
+                (t.exitWhenDrained ? " exit-when-drained" : "") +
+                (ledger.taskPaused(t.id) ? " HELD" : "") +
                 (t.prompt === undefined ? " (signal only)" : ""),
             );
           }
@@ -612,7 +660,7 @@ async function main(): Promise<void> {
             "usage: pi-orchestrator <command>",
             "  status                       tasks, gates, eligibility, running sessions",
             "  task set <id> --tiers light:20,standard [--share N] [--demand-command CMD | --demand-constant N]",
-            "               [--gate EXPR] [--prompt TEXT] [--cwd DIR]",
+            "               [--gate EXPR] [--prompt TEXT] [--cwd DIR] [--exit-when-drained true|false]",
             "  task list | task delete <id>",
             "  account list | account add <id> --provider F [--label L] [--domain D] [--shared true]",
             "  account remove <id>          drop an account that left this machine",
@@ -620,7 +668,10 @@ async function main(): Promise<void> {
             "                               exclusive credential custody",
             "  account share <id> [on|off]  share a Codex account across both runtimes",
             "  account login <id>           device-login a Codex account into shared custody",
-            "  pause | resume               durable launch control (a ledger row)",
+            "  pause | resume [task...]     durable launch control (ledger rows): the",
+            "                               machine, or the named lanes",
+            "  pause --except <task,...>    hold every other lane, so the fleet's whole",
+            "                               capacity goes to the named ones",
             `  boost <family> [on|off|N]    scale a family's spend pace (on = ${DEFAULT_BOOST}x)`,
             "  abort <runId>                request a running session stop",
             "  say <runId> <text...>        deliver an operator message into a live",

@@ -16,7 +16,7 @@ function harness(runId: string) {
   const dir = mkdtempSync(join(tmpdir(), "pi-orchestrator-host-"));
   const transcript = new RunTranscript(runId, dir);
   const host = new PiHost(
-    { runFinished: () => {}, heartbeat: () => {} },
+    { runFinished: () => {}, heartbeat: () => {}, laneDrained: () => false },
     { resolveModel: () => undefined },
   );
   let emit: (event: unknown) => void = () => {};

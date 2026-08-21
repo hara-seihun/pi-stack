@@ -211,9 +211,21 @@ which models those launches use. Turning one lane up to 70% and boosting the
 family it runs on fills the machine with that lane's cheap tier without
 touching a prompt or a task definition.
 
-The machine-wide pause is the root of the same mechanism: a `control` row
-(`launches = enabled|paused`) in the ledger, honoured by every evaluation
-regardless of who restarts which process.
+- `exitWhenDrained`: end a shift as soon as the lane's demand reaches zero
+  instead of re-prompting until the session budget is spent. A research lane
+  is never done and must keep its warm context; a queue lane empties its
+  queue mid-shift, and `CONTINUE` then asserts work that no longer exists.
+  Unknown demand — unprobed, stale (>5min), or a failed probe — never ends a
+  shift: "I cannot see the queue" is not "the queue is empty". The host asks
+  (`HostEvents.laneDrained`); the runner, which holds the ledger, answers.
+
+Launch control is one lever at two scopes, both `control` rows in the ledger
+and honoured by every evaluation regardless of who restarts which process:
+`launches = enabled|paused` for the machine, `launches:<taskId> = paused` for
+one lane. `pause --except math-review` holds every other defined lane, which
+is how the fleet's whole capacity is pointed at one lane without deleting the
+others' definitions. A held lane is still probed — its demand is a signal
+other lanes' gates read — and running agents are never touched.
 
 ## Broker (`src/broker/`)
 
@@ -300,8 +312,9 @@ fix that, because the instruction addresses an agent that no longer exists by
 the time it would apply. The host therefore re-prompts the same live session
 (`CONTINUE` in `src/host/pi-host.ts`, a pointer back to the blocker rather
 than a pep talk) until the session budget (4h) is spent, the turn errors, an
-operator aborts, or two consecutive turns report nothing — the last being how
-a lane with an exhausted queue ends itself. Work already banked in a
+operator aborts, two consecutive turns report nothing, or the lane declares
+itself drained (`exitWhenDrained`, checked against current demand before each
+re-prompt). Work already banked in a
 `task_complete` report survives a late error: the report is the run's record,
 and only a shift that banked nothing reports as an error run.
 

@@ -98,13 +98,18 @@ export class Scheduler {
       if (openSince !== prevOpenSince) this.ledger.setGateOpenSince(t.id, openSince);
       const gateOpen =
         rawOpen && openSince !== undefined && now - openSince >= this.cfg.gateDebounceMs;
+      // A held lane is still probed: its demand is a signal other lanes' gates
+      // read, and a gate that went unevaluable because an unrelated lane was
+      // paused would close lanes nobody held.
+      const paused = this.ledger.taskPaused(t.id);
       return {
         taskId: t.id,
         tiers: t.tiers,
         share: t.share,
         units,
         gateOpen,
-        eligible: gateOpen && units !== undefined && units > 0,
+        eligible: !paused && gateOpen && units !== undefined && units > 0,
+        paused,
         error: errorOf.get(t.id),
       };
     });
