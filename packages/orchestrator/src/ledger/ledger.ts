@@ -242,9 +242,13 @@ export class Ledger {
   static open(path: string): Ledger {
     if (path !== ":memory:") mkdirSync(dirname(path), { recursive: true });
     const db = new DatabaseSync(path);
+    // busy_timeout first: setting the journal mode takes a brief exclusive
+    // lock, so two processes opening the ledger at once (boot, or a runner
+    // worker starting beside its supervisor) would otherwise race and one
+    // would die with SQLITE_BUSY before any timeout applied.
+    db.exec("PRAGMA busy_timeout = 5000");
     db.exec("PRAGMA journal_mode = WAL");
     db.exec("PRAGMA synchronous = NORMAL");
-    db.exec("PRAGMA busy_timeout = 5000");
     db.exec("PRAGMA foreign_keys = ON");
     const row = db.prepare("PRAGMA user_version").get() as { user_version: number };
     for (let v = row.user_version; v < MIGRATIONS.length; v++) {

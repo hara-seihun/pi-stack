@@ -198,6 +198,21 @@ row; live runners stop claiming and exit when their last session ends,
 while freshly started runners claim under the new generation. Nothing is
 ever killed mid-run.
 
+Draining needs two runner processes alive at once, which is what the
+**supervisor** (`src/host/supervisor.ts`) is for. It is the process a
+service unit runs: it hosts nothing, and keeps exactly one worker of the
+current generation alive as a child, spawned from the deployed CLI path so
+every worker starts on the newest build. A generation bump spawns the
+successor on the next tick while the superseded worker drains beside it, so
+claiming never stops. Without it a drained runner *is* the unit's main
+process: its replacement cannot start until its longest session ends, and
+every run created in the meantime expires unclaimed — the fleet stops
+launching agents while looking healthy (observed 2026-08-20, 80 minutes of
+silently dropped work). Workers get distinct ids, so a crashed worker's
+running rows (reaped on heartbeat timeout) never count against the
+replacement's capacity. Only a supervisor update needs a full drain first,
+which is why it holds no policy.
+
 Run custody lives in the ledger's `run` table (launch-side only: `tier` is
 recorded there for capacity accounting and never reaches a host). A task
 without a `prompt` is a pure demand signal for gates and is never launched.
@@ -290,8 +305,10 @@ pause | resume | boost | abort | runner | drain-runners | voice-broker` —
 thin reads and
 writes against the ledger (path from `PI_ORCHESTRATOR_LEDGER`, default
 `~/.local/share/pi-orchestrator/`).
-`runner --max-sessions N` starts a runner process; `drain-runners` rolls
-runner generations for zero-kill updates. `npm run build` emits `dist/` for
+`supervisor --max-sessions N` runs the process a service unit should own
+(it spawns and replaces `runner` workers); `runner --max-sessions N` starts
+a single worker directly. `drain-runners` rolls runner generations for
+zero-kill, zero-gap updates. `npm run build` emits `dist/` for
 the `pi-orchestrator` bin.
 
 ## Development

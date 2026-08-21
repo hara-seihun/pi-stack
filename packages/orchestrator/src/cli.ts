@@ -220,6 +220,54 @@ async function runner(ledger: Ledger, args: string[]): Promise<void> {
   }
 }
 
+/**
+ * Runner supervisor: the long-lived process a service unit should run.
+ * It hosts no session itself, and keeps exactly one runner worker of the
+ * current generation alive as a child process, so a `drain-runners` bump
+ * starts the successor immediately instead of waiting for the drained
+ * process to exit. Workers are spawned from this same CLI path, which is
+ * the deployed artifact, so each new worker starts on the newest build.
+ */
+async function supervisor(ledger: Ledger, args: string[]): Promise<void> {
+  const { named } = flags(args);
+  const { RunnerSupervisor } = await import("./host/supervisor.js");
+  const { spawn } = await import("node:child_process");
+  const entry = process.argv[1] ?? fail("supervisor cannot resolve its own CLI path");
+  const intervalMs = Number(named.get("interval") ?? 5000);
+  const live: InstanceType<typeof RunnerSupervisor> = new RunnerSupervisor(
+    ledger,
+    (spec) => {
+      const child = spawn(
+        process.execPath,
+        [
+          entry,
+          "runner",
+          "--id", spec.workerId,
+          "--max-sessions", String(spec.maxSessions),
+          "--interval", String(intervalMs),
+        ],
+        { stdio: "inherit" },
+      );
+      console.log(`spawned worker ${spec.workerId} (generation ${spec.generation}) pid ${child.pid}`);
+      const ended = (detail: string): void => {
+        console.log(`worker ${spec.workerId} ended: ${detail}`);
+        live.workerExited(spec.workerId);
+      };
+      child.once("error", (error) => ended(String(error)));
+      child.once("exit", (code, signal) => ended(signal ?? `exit ${code ?? 0}`));
+    },
+    {
+      runnerId: named.get("id") ?? hostname(),
+      maxSessions: Number(named.get("max-sessions") ?? 100),
+    },
+  );
+  console.log(`runner supervisor started (interval ${intervalMs}ms)`);
+  for (;;) {
+    live.tick();
+    await new Promise((r) => setTimeout(r, intervalMs));
+  }
+}
+
 const DOMAINS: readonly AccountDomain[] = ["interactive", "orchestrator"];
 
 function sharedCodexAuth(): SharedCodexAuth {
@@ -436,6 +484,9 @@ async function main(): Promise<void> {
       case "runner":
         await runner(ledger, args);
         break;
+      case "supervisor":
+        await supervisor(ledger, args);
+        break;
       case "drain-runners":
         console.log(`runner generation is now ${bumpRunnerGeneration(ledger)}; live runners will drain`);
         break;
@@ -462,7 +513,10 @@ async function main(): Promise<void> {
             "  daemon [--interval MS]       controller loop (config: ~/.config/pi-orchestrator)",
             "  runner [--id NAME] [--max-sessions N] [--interval MS]",
             "                               host claimed runs as embedded pi sessions",
-            "  drain-runners                bump generation: runners finish and exit",
+            "  supervisor [--id NAME] [--max-sessions N] [--interval MS]",
+            "                               keep one worker of the live generation running",
+            "  drain-runners                bump generation: the supervisor starts the",
+            "                               successor at once, drained workers exit",
             "  voice-broker [--listen H:P]  GPT-Live SDP negotiation on the pooled accounts",
             "                               (default 127.0.0.1:2457; see src/voice/)",
           ].join("\n"),
