@@ -66,16 +66,21 @@ export class PiHost implements HostManager {
   }
 
   /**
-   * Deliver an operator message into a live session as a user turn. Queued
-   * as a follow-up so it lands at the end of whatever the agent is doing
-   * rather than shredding an in-flight turn, and mirrored into the
-   * transcript so the run's record shows why the agent changed course.
+   * Deliver an operator message into a live session as a user turn, and
+   * mirror it into the transcript so the run's record shows why the agent
+   * changed course. Steered, not queued as a follow-up: an operator
+   * correcting a running agent means "from the next turn on", and a
+   * follow-up would sit unread behind however many hours of tool calls the
+   * agent has left — which is exactly the behaviour worth correcting.
    */
   message(runId: string, text: string): boolean {
     const session = this.sessions.get(runId);
     if (session === undefined) return false;
     this.transcripts.get(runId)?.append("user", { text });
-    void session.sendUserMessage(text, { deliverAs: "followUp" });
+    void session.sendUserMessage(text, { deliverAs: "steer" }).catch(() => {
+      // A session that ended between the tick and delivery is not an error
+      // worth killing a runner over; the run row already tells that story.
+    });
     return true;
   }
 

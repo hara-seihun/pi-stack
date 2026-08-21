@@ -328,9 +328,11 @@ thin reads and
 writes against the ledger (path from `PI_ORCHESTRATOR_LEDGER`, default
 `~/.local/share/pi-orchestrator/`).
 `say <runId> <text>` is the counterpart of `abort`: it queues an operator
-message in `run_message`, the runner that owns the session delivers it as a
-follow-up user turn (and mirrors it into the transcript), and the CLI waits
-for the `delivered_at` receipt before claiming anything. A drifting agent can
+message in `run_message`, the runner that owns the session steers it in as a
+user turn (and mirrors it into the transcript), and the CLI waits for the
+`delivered_at` receipt before claiming anything. Steered rather than queued
+behind the current run, because an operator correcting an agent means "from
+the next turn on". A drifting agent can
 be corrected mid-run instead of thrown away with its context, and a message
 is never marked delivered by a process that does not hold the session.
 `supervisor --max-sessions N` runs the process a service unit should own
