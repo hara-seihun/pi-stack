@@ -46,5 +46,25 @@ tests).
 
 ## OpenAI
 
+- Codex publishes no meter state pi can observe: the default transport is a
+  WebSocket, so there is no HTTP response carrying rate-limit headers. The
+  account plan is readable only by polling
+  `GET https://chatgpt.com/backend-api/codex/usage`, which returns each
+  window's integer used-percent, its length in seconds, and its reset
+  instant. Window length is the only reliable meter identity: a Pro account
+  reports one weekly window and no five-hour window at all.
+- `additional_rate_limits` in that response meters individual models
+  (`GPT-5.3-Codex-Spark`), not the account plan. Pacing against it would
+  price one model's allowance as the whole subscription.
+- The endpoint sits behind a bot filter that judges how the connection is
+  opened, not who is calling. The first request on a fresh node `fetch`
+  (undici) connection is answered 403 with perfectly valid credentials; a
+  second request on the same warm socket succeeds, so a poller walking a
+  fleet of accounts sees failures that look intermittent and per-account. The
+  identical request through node's own `https` module succeeds cold, every
+  time — so the transport is the fix, not a retry. A default
+  `User-Agent: node` is refused the same way; send a real client name.
+  Expect any new node client of a chatgpt.com backend route to need both.
+
 Randomized/early usage resets and their exploitation statistics are covered
 in [openai-reset-statistics.md](openai-reset-statistics.md).

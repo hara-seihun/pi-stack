@@ -2,22 +2,78 @@ import type { AllocationResult, Assignment, TaskSnapshot, Tier } from "./types.j
 import { TIERS } from "./types.js";
 
 /**
- * Distributes launch slots across eligible tasks proportional to demand,
- * honouring each task's preference-ordered tier substitution set. Largest
- * remainder keeps proportionality exact; a task never receives more agents
- * than it has work units; leftover capacity from tier-restricted mismatches
- * is redistributed greedily to the task furthest behind its share.
- * Deterministic: ties break by demand then task id.
+ * Which tier a task's next slot should come from, given what it has already
+ * been launched on inside the fairness window.
+ *
+ * Weighted fair queueing: the winner is the tier whose next launch falls
+ * earliest in virtual time, `(served + 1) / weight`. A 20:1 mix therefore
+ * comes out as twenty light launches and then a standard one, out of a long
+ * run of cycles that each hand out a single slot and could never express a
+ * ratio individually. Sharing out each cycle's slots by proportion instead
+ * would round the minority tier to zero every time and it would never launch
+ * at all.
+ *
+ * The mix is a ceiling, not merely a preference: a tier is passed over once
+ * it holds its rounded-up share of the launches so far. That is what stops a
+ * light-heavy lane from quietly becoming a standard lane whenever light
+ * capacity is short — the free standard slot goes to a lane that actually
+ * wants standard sessions instead. Within the ceiling the list is still a
+ * substitution set: a tier with no free capacity loses its turn rather than
+ * holding the lane up. Ties break by weight then declaration order, so the
+ * choice is deterministic.
+ */
+function tierForNextSlot(
+  task: TaskSnapshot,
+  assigned: ReadonlyMap<Tier, number>,
+  capacity: Readonly<Record<Tier, number>>,
+): Tier | undefined {
+  const totalWeight = task.tiers.reduce((sum, share) => sum + share.weight, 0);
+  const servedOf = (tier: Tier): number =>
+    (task.recentLaunchesByTier?.[tier] ?? 0) + (assigned.get(tier) ?? 0);
+  const totalServed = task.tiers.reduce((sum, share) => sum + servedOf(share.tier), 0);
+  let best: { tier: Tier; virtualTime: number; weight: number } | undefined;
+  for (const share of task.tiers) {
+    if ((capacity[share.tier] ?? 0) <= 0 || share.weight <= 0) continue;
+    const served = servedOf(share.tier);
+    const ceiling = Math.ceil(((totalServed + 1) * share.weight) / totalWeight);
+    if (served + 1 > ceiling) continue;
+    const virtualTime = (served + 1) / share.weight;
+    if (
+      best === undefined ||
+      virtualTime < best.virtualTime - 1e-9 ||
+      (virtualTime < best.virtualTime + 1e-9 && share.weight > best.weight)
+    ) {
+      best = { tier: share.tier, virtualTime, weight: share.weight };
+    }
+  }
+  return best?.tier;
+}
+
+/**
+ * Distributes launch slots across eligible tasks in proportion to their
+ * declared shares, honouring each task's weighted tier set. Largest remainder
+ * keeps proportionality exact; a task never receives more agents than it has
+ * work units; leftover capacity — from tier mismatches, or from lanes with
+ * less demand than share — is redistributed greedily to the task furthest
+ * behind. Deterministic: ties break by demand then task id.
+ *
+ * Share, not demand, is the basis. Demand answers whether a lane can absorb
+ * another agent and caps how many; it is a work-unit count in whatever unit
+ * each probe chose, so using it to divide the fleet made a lane that counts
+ * problems in sixes outrank a lane that counts review items singly — a split
+ * no operator ever chose. An operator who wants the frontier lane to hold
+ * most of the fleet now says so, and the lanes that cannot use their share
+ * still give it back rather than idling capacity.
  *
  * Proportionality has to be measured across cycles, not inside one. Slots
  * free one session at a time, and with a single slot every task's integer
  * quota floors to zero, so the whole decision is the remainder order — which,
- * on demand alone, is the largest task every time. A 60% task took 100% of
- * the common cycle and a 15% task launched only when three slots happened to
- * free together. So each task's recent launch history comes in with it, and
- * the ordering key is its shortfall: demand share minus served share. With no
- * history supplied the shortfall is zero everywhere and the order falls back
- * to demand, which is what the pure-function tests pin.
+ * on one cycle's arithmetic alone, is the largest lane every time. A 60% lane
+ * took 100% of the common cycle and a 15% lane launched only when three slots
+ * happened to free together. So each task's recent launch history comes in
+ * with it, and the ordering key is its shortfall: target share minus served
+ * share. With no history supplied the shortfall is zero everywhere and the
+ * order falls back to demand, which is what the pure-function tests pin.
  */
 export function allocate(
   tasks: readonly TaskSnapshot[],
@@ -29,6 +85,8 @@ export function allocate(
   const capacity: Record<Tier, number> = { ...slots };
   const totalSlots = TIERS.reduce((s, tier) => s + (capacity[tier] ?? 0), 0);
   const totalUnits = eligible.reduce((s, t) => s + (t.units ?? 0), 0);
+  const shareOf = (t: TaskSnapshot): number => t.share ?? 1;
+  const totalShare = eligible.reduce((s, t) => s + shareOf(t), 0);
   const assigned = new Map<string, Map<Tier, number>>();
   if (totalSlots === 0 || totalUnits === 0) {
     return { assignments: [], unusedSlots: capacity };
@@ -37,14 +95,14 @@ export function allocate(
   // Proportional quotas by largest remainder, capped at each task's units.
   const totalServed = eligible.reduce((s, t) => s + (t.recentLaunches ?? 0), 0);
   const shortfallOf = (t: TaskSnapshot): number =>
-    totalServed === 0 ? 0 : (t.units ?? 0) / totalUnits - (t.recentLaunches ?? 0) / totalServed;
+    totalServed === 0 ? 0 : shareOf(t) / totalShare - (t.recentLaunches ?? 0) / totalServed;
 
   const quota = new Map<string, number>();
   const remainders: { taskId: string; units: number; frac: number; shortfall: number }[] = [];
   let used = 0;
   for (const t of eligible) {
     const units = t.units ?? 0;
-    const ideal = (totalSlots * units) / totalUnits;
+    const ideal = (totalSlots * shareOf(t)) / totalShare;
     const base = Math.min(Math.floor(ideal), Math.ceil(units));
     quota.set(t.taskId, base);
     used += base;
@@ -79,16 +137,15 @@ export function allocate(
   const assignedCount = (taskId: string): number =>
     [...(assigned.get(taskId)?.values() ?? [])].reduce((a, b) => a + b, 0);
 
-  // First pass: satisfy quotas along each task's tier preference order.
+  // First pass: satisfy quotas one slot at a time, each going to the tier
+  // furthest behind the task's declared mix.
   for (const t of eligible) {
     let want = quota.get(t.taskId) ?? 0;
-    for (const tier of t.tiers) {
-      if (want <= 0) break;
-      const take = Math.min(want, capacity[tier] ?? 0);
-      if (take > 0) {
-        give(t.taskId, tier, take);
-        want -= take;
-      }
+    while (want > 0) {
+      const tier = tierForNextSlot(t, assigned.get(t.taskId) ?? new Map(), capacity);
+      if (tier === undefined) break;
+      give(t.taskId, tier, 1);
+      want--;
     }
   }
 
@@ -105,7 +162,7 @@ export function allocate(
     progressed = false;
     for (const t of byShortfall) {
       if (assignedCount(t.taskId) >= Math.ceil(t.units ?? 0)) continue;
-      const tier = t.tiers.find((candidate) => (capacity[candidate] ?? 0) > 0);
+      const tier = tierForNextSlot(t, assigned.get(t.taskId) ?? new Map(), capacity);
       if (tier === undefined) continue;
       give(t.taskId, tier, 1);
       progressed = true;
@@ -114,9 +171,9 @@ export function allocate(
 
   const assignments: Assignment[] = [];
   for (const t of eligible) {
-    for (const tier of t.tiers) {
-      const count = assigned.get(t.taskId)?.get(tier) ?? 0;
-      if (count > 0) assignments.push({ taskId: t.taskId, tier, count });
+    for (const share of t.tiers) {
+      const count = assigned.get(t.taskId)?.get(share.tier) ?? 0;
+      if (count > 0) assignments.push({ taskId: t.taskId, tier: share.tier, count });
     }
   }
   return { assignments, unusedSlots: capacity };

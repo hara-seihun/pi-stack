@@ -106,12 +106,23 @@ export class Controller {
             ? undefined
             : Math.max(0, t.units - (activeByTask.get(t.taskId) ?? 0)),
         recentLaunches: this.ledger.recentLaunchCount(t.taskId, now - this.cfg.fairnessWindowMs),
+        recentLaunchesByTier: this.ledger.recentLaunchCountByTier(
+          t.taskId,
+          now - this.cfg.fairnessWindowMs,
+        ),
       }));
 
+    // Demand is split by the task's tier weights, not repeated whole into
+    // every tier it allows. The broker advertises scarce tiers first, so a
+    // lane that wants one standard session per twenty light ones must ask
+    // for one — asking for twenty-one would let it reserve, and waste, every
+    // scarce slot on the machine.
     const demandByTier: Partial<Record<Tier, number>> = {};
     for (const t of launchable) {
-      for (const tier of t.tiers) {
-        demandByTier[tier] = (demandByTier[tier] ?? 0) + Math.ceil(t.units ?? 0);
+      const totalWeight = t.tiers.reduce((sum, share) => sum + share.weight, 0);
+      for (const share of t.tiers) {
+        const units = ((t.units ?? 0) * share.weight) / totalWeight;
+        demandByTier[share.tier] = (demandByTier[share.tier] ?? 0) + Math.ceil(units);
       }
     }
     const created: RunRow[] = [];

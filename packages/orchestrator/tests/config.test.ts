@@ -43,6 +43,10 @@ describe("operator config", () => {
     expect(wired.transform!("openai-codex", "gpt-5.6-sol:output", 10).tokens).toBe(80);
     expect(wired.meters["anthropic"].map((m) => m.id)).toEqual(["anthropic-5h", "anthropic-7d_oi"]);
     expect(wired.meters["anthropic"][1].nominalWindowMs).toBe(168 * 3_600_000);
+    // Machine limits are deployment facts, and a config that names none
+    // leaves the broker's own defaults in place rather than passing zero.
+    expect(wired.maxConcurrentSessions).toBeUndefined();
+    expect(brokerConfig({ ...CONFIG, maxConcurrentSessions: 24 }).maxConcurrentSessions).toBe(24);
   });
 
   it("rejects a tier referencing an unconfigured provider", () => {

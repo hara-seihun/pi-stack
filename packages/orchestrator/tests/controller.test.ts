@@ -5,6 +5,7 @@ import { Ledger } from "../src/ledger/ledger.js";
 import { Runner } from "../src/host/runner.js";
 import { Scheduler } from "../src/tasks/scheduler.js";
 import type { HostManager, LaunchSpec } from "../src/host/types.js";
+import { mix } from "./harness.js";
 import type { MeterSpec } from "../src/calibrator/types.js";
 
 const HOUR = 3_600_000;
@@ -64,7 +65,7 @@ describe("dispatch cycle", () => {
     ledger.upsertTask({
       id: "ingest",
       demandCommand: "probe ingest",
-      tiers: ["standard"],
+      tiers: mix("standard"),
       prompt: "Ingest the queue.",
       cwd: "/tmp",
     });
@@ -94,7 +95,7 @@ describe("dispatch cycle", () => {
 
   it("a task without a prompt is a pure demand signal and never launches", async () => {
     const { ledger, cycle } = build({ "probe signal": 5 });
-    ledger.upsertTask({ id: "signal", demandCommand: "probe signal", tiers: ["standard"] });
+    ledger.upsertTask({ id: "signal", demandCommand: "probe signal", tiers: mix("standard") });
     const { tick, claimed } = await cycle(0);
     expect(tick.evaluation.tasks[0]?.eligible).toBe(true);
     expect(tick.created).toHaveLength(0);
@@ -103,7 +104,7 @@ describe("dispatch cycle", () => {
 
   it("pause is honoured before any launch", async () => {
     const { ledger, cycle } = build();
-    ledger.upsertTask({ id: "t", demandConstant: 3, tiers: ["standard"], prompt: "Work." });
+    ledger.upsertTask({ id: "t", demandConstant: 3, tiers: mix("standard"), prompt: "Work." });
     ledger.setControl("launches", "paused");
     const { tick } = await cycle(0);
     expect(tick.evaluation.launches).toBe("paused");
@@ -116,14 +117,14 @@ describe("dispatch cycle", () => {
     ledger.upsertTask({
       id: "ingest",
       demandCommand: "probe queue",
-      tiers: ["standard"],
+      tiers: mix("standard"),
       prompt: "Ingest.",
     });
     ledger.upsertTask({
       id: "produce",
       demandConstant: 4,
       gate: "ingest.demand == 0",
-      tiers: ["standard", "light"],
+      tiers: mix("standard", "light"),
       prompt: "Produce.",
     });
     const first = await cycle(0);
@@ -138,7 +139,7 @@ describe("dispatch cycle", () => {
 describe("run custody", () => {
   it("reaps a run whose heartbeat went stale and frees its account", async () => {
     const { ledger, cycle } = build();
-    ledger.upsertTask({ id: "t", demandConstant: 1, tiers: ["expert"], prompt: "Work." });
+    ledger.upsertTask({ id: "t", demandConstant: 1, tiers: mix("expert"), prompt: "Work." });
     const first = await cycle(0);
     expect(first.claimed).toHaveLength(1);
     const runId = first.claimed[0].runId;
@@ -154,7 +155,7 @@ describe("run custody", () => {
 
   it("heartbeats keep a long run alive", async () => {
     const { ledger, runner, cycle } = build();
-    ledger.upsertTask({ id: "t", demandConstant: 1, tiers: ["expert"], prompt: "Work." });
+    ledger.upsertTask({ id: "t", demandConstant: 1, tiers: mix("expert"), prompt: "Work." });
     const first = await cycle(0);
     const runId = first.claimed[0].runId;
     runner.heartbeat(runId, 9 * 60_000);
@@ -165,7 +166,7 @@ describe("run custody", () => {
 
   it("a pending run no runner claims expires without tripping the circuit breaker", async () => {
     const { ledger, controller } = build();
-    ledger.upsertTask({ id: "t", demandConstant: 1, tiers: ["expert"], prompt: "Work." });
+    ledger.upsertTask({ id: "t", demandConstant: 1, tiers: mix("expert"), prompt: "Work." });
     const first = await controller.tick(0);
     expect(first.created).toHaveLength(1);
     const runId = first.created[0].id;
@@ -181,7 +182,7 @@ describe("run custody", () => {
 
   it("abort requests are forwarded by the owning runner", async () => {
     const { ledger, engine, runner, cycle } = build();
-    ledger.upsertTask({ id: "t", demandConstant: 1, tiers: ["expert"], prompt: "Work." });
+    ledger.upsertTask({ id: "t", demandConstant: 1, tiers: mix("expert"), prompt: "Work." });
     const first = await cycle(0);
     const runId = first.claimed[0].runId;
     ledger.requestAbort(runId);
@@ -191,7 +192,7 @@ describe("run custody", () => {
 
   it("circuit breaker: a crashing task stops launching inside the error window", async () => {
     const { ledger, runner, cycle } = build();
-    ledger.upsertTask({ id: "crashy", demandConstant: 5, tiers: ["standard"], prompt: "Work." });
+    ledger.upsertTask({ id: "crashy", demandConstant: 5, tiers: mix("standard"), prompt: "Work." });
     let now = 0;
     for (let i = 0; i < 3; i++) {
       const report = await cycle(now);
@@ -208,20 +209,62 @@ describe("run custody", () => {
     expect(recovered.claimed.length).toBeGreaterThan(0);
   });
 
+  it("a light-heavy lane launches its mix, and leaves the standard tier to the lane that wants it", async () => {
+    // The operator asks for one standard session per twenty light ones on the
+    // research lane. Two things have to hold through a real dispatch cycle:
+    // the ratio itself, which no single cycle can express, and that the
+    // light-heavy lane does not reserve the scarce standard capacity that the
+    // review lane exists to use.
+    const { ledger, runner, cycle } = build();
+    ledger.upsertTask({
+      id: "frontier",
+      demandConstant: 40,
+      tiers: mix("light:20", "standard:1"),
+      prompt: "Attack.",
+    });
+    ledger.upsertTask({
+      id: "review",
+      demandConstant: 40,
+      tiers: mix("standard"),
+      prompt: "Review.",
+    });
+
+    const launched: { taskId: string; model: string }[] = [];
+    let now = 0;
+    for (let i = 0; i < 40; i++) {
+      const { claimed } = await cycle(now);
+      for (const l of claimed) {
+        launched.push({ taskId: l.taskId, model: l.model });
+        runner.runFinished(l.runId, { state: "done" }, now + 100);
+      }
+      now += 60_000;
+    }
+
+    const frontier = launched.filter((l) => l.taskId === "frontier");
+    const frontierLight = frontier.filter((l) => l.model === "gpt-5.6-luna").length;
+    expect(frontierLight / frontier.length).toBeGreaterThan(0.9);
+    // Not a single-model lane either: the standard share is real, just small.
+    expect(frontier.length - frontierLight).toBeGreaterThan(0);
+    // The review lane still gets the standard capacity it asked for.
+    expect(launched.filter((l) => l.taskId === "review").length).toBeGreaterThan(0);
+    // Tier labels stay launch-side: the agent only ever sees a model.
+    expect(launched.every((l) => l.model !== undefined)).toBe(true);
+  });
+
   it("a finished run wakes tasks gated on it", async () => {
     let queue = 1;
     const { ledger, runner, cycle } = build({ "probe queue": () => queue });
     ledger.upsertTask({
       id: "ingest",
       demandCommand: "probe queue",
-      tiers: ["standard"],
+      tiers: mix("standard"),
       prompt: "Ingest.",
     });
     ledger.upsertTask({
       id: "produce",
       demandConstant: 2,
       gate: "ingest.demand == 0",
-      tiers: ["light", "standard"],
+      tiers: mix("light", "standard"),
       prompt: "Produce.",
     });
     const first = await cycle(0);

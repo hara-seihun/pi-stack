@@ -8,10 +8,11 @@ import { Controller } from "./controller/controller.js";
 import { Ledger } from "./ledger/ledger.js";
 import { Runner, bumpRunnerGeneration } from "./host/runner.js";
 import { Scheduler } from "./tasks/scheduler.js";
-import { TIERS, type Tier } from "./tasks/types.js";
+import { TIERS, type Tier, type TierShare } from "./tasks/types.js";
 import type { AccountDomain } from "./ledger/ledger.js";
 import { brokerConfig, defaultConfigPath, loadConfig } from "./config.js";
 import { CURSOR_PROVIDER, CursorMeterSampler } from "./meters/cursor.js";
+import { CODEX_PROVIDER, CodexMeterSampler } from "./meters/codex.js";
 import { VoiceBroker } from "./voice/broker.js";
 import { createVoiceServer } from "./voice/server.js";
 import type { LaunchSpec } from "./host/types.js";
@@ -76,7 +77,8 @@ async function status(ledger: Ledger): Promise<void> {
       t.eligible ? "eligible" : "waiting",
       `units=${t.units ?? "?"}`,
       `gate=${t.gateOpen ? "open" : "closed"}`,
-      `tiers=${t.tiers.join(",")}`,
+      `tiers=${formatTiers(t.tiers)}`,
+      `share=${sharePercent(t.share, evaluation.tasks)}`,
     ];
     if (t.error !== undefined) parts.push(`error=${t.error}`);
     console.log(`task ${t.taskId}: ${parts.join(" ")}`);
@@ -119,6 +121,21 @@ async function daemon(ledger: Ledger, args: string[]): Promise<void> {
   const cursorSampler = cursorMeter
     ? new CursorMeterSampler(ledger, { agentDir: agentDirPath(), meterId: cursorMeter.id })
     : undefined;
+  // Codex publishes no meter headers to pi's WebSocket transport either, so
+  // its windows are polled from the account usage endpoint. Credentials are
+  // read (never refreshed) from the shared store first, then this user's own
+  // agent dir for any Codex account whose custody was never moved.
+  const codexMeters = cfg.providers[CODEX_PROVIDER]?.meters ?? [];
+  const codexSampler =
+    codexMeters.length > 0
+      ? new CodexMeterSampler(ledger, {
+          authPaths: [
+            defaultSharedCodexAuthPath(LEDGER_PATH),
+            join(agentDirPath(), "auth.json"),
+          ],
+          meters: codexMeters,
+        })
+      : undefined;
   console.log(`controller started (config: ${defaultConfigPath()})`);
   for (;;) {
     try {
@@ -127,6 +144,14 @@ async function daemon(ledger: Ledger, args: string[]): Promise<void> {
           console.log(`meter ${sample.accountId}/${cursorMeter?.id}: ${sample.usedPercent}% used`);
         } else if (sample.outcome !== "not-due") {
           console.error(`meter ${sample.accountId}/${cursorMeter?.id}: ${sample.outcome}${sample.detail ? ` (${sample.detail})` : ""}`);
+        }
+      }
+      for (const sample of (await codexSampler?.sample()) ?? []) {
+        const meter = `${sample.accountId}/${sample.meterId ?? "?"}`;
+        if (sample.outcome === "recorded") {
+          console.log(`meter ${meter}: ${sample.usedPercent}% used`);
+        } else if (sample.outcome !== "not-due") {
+          console.error(`meter ${meter}: ${sample.outcome}${sample.detail ? ` (${sample.detail})` : ""}`);
         }
       }
       const report = await controller.tick();
@@ -202,7 +227,13 @@ async function runner(ledger: Ledger, args: string[]): Promise<void> {
     // The runner is constructed below; PiHost only needs the event surface.
     { runFinished: (id, result, at) => live.runFinished(id, result, at),
       heartbeat: (id, at) => live.heartbeat(id, at) },
-    { resolveModel, runsRoot },
+    {
+      resolveModel,
+      runsRoot,
+      ...(named.has("session-budget-hours")
+        ? { sessionBudgetMs: Number(named.get("session-budget-hours")) * 3_600_000 }
+        : {}),
+    },
   );
   const live = new Runner(ledger, engine, {
     runnerId,
@@ -430,6 +461,37 @@ function boostCommand(ledger: Ledger, args: string[]): void {
   console.log(`${family}: ${multiplier}x allowance`);
 }
 
+/**
+ * `light:20,standard` — a tier list with optional relative weights, which is
+ * how a lane asks to be worked by a mix ("twenty light sessions per standard
+ * one") rather than by substitution alone. An unweighted tier is weight 1, so
+ * the plain `light,standard` form means an even split.
+ */
+function parseTiers(value: string | undefined): TierShare[] | undefined {
+  if (value === undefined) return undefined;
+  return value.split(",").map((entry) => {
+    const [name, weight] = entry.split(":");
+    const tier = name.trim() as Tier;
+    if (!TIERS.includes(tier)) fail(`unknown tier ${name}`);
+    if (weight === undefined) return { tier, weight: 1 };
+    const parsed = Number(weight);
+    if (!Number.isFinite(parsed) || parsed <= 0) fail(`tier ${tier}: weight must be positive`);
+    return { tier, weight: parsed };
+  });
+}
+
+const formatTiers = (tiers: readonly TierShare[]): string =>
+  tiers.map((s) => (tiers.length === 1 ? s.tier : `${s.tier}:${s.weight}`)).join(",");
+
+/** A lane's share is only meaningful against the other eligible lanes, so it
+ * is shown as the fraction of the fleet it is currently claiming rather than
+ * as a bare weight an operator would have to normalize by hand. */
+function sharePercent(share: number | undefined, tasks: readonly { share?: number; eligible: boolean }[]): string {
+  const total = tasks.filter((t) => t.eligible).reduce((sum, t) => sum + (t.share ?? 1), 0);
+  const weight = share ?? 1;
+  return total > 0 ? `${weight} (${Math.round((100 * weight) / total)}%)` : `${weight}`;
+}
+
 // Editing one field of a live task must not silently discard the others, so
 // flags are merged over the existing row. A field is cleared by passing it
 // empty (--gate ""), which is the only way to say "remove this" out loud.
@@ -444,10 +506,14 @@ export function taskSet(ledger: Ledger, args: string[]): void {
   };
 
   const tiers =
-    (named.get("tiers")?.split(",") as Tier[] | undefined) ??
+    parseTiers(named.get("tiers")) ??
     current?.tiers ??
     fail(`--tiers required: ${id} does not exist yet`);
-  for (const t of tiers) if (!TIERS.includes(t)) fail(`unknown tier ${t}`);
+
+  const share = named.has("share") ? Number(named.get("share")) : current?.share;
+  if (share !== undefined && (!Number.isFinite(share) || share <= 0)) {
+    fail("--share must be a positive number");
+  }
 
   // The two demand forms are exclusive, so naming one clears the other.
   const demandCommand = pick(
@@ -463,6 +529,7 @@ export function taskSet(ledger: Ledger, args: string[]): void {
   ledger.upsertTask({
     id,
     tiers,
+    ...(share === undefined ? {} : { share }),
     demandCommand,
     demandConstant,
     gate: pick("gate", current?.gate),
@@ -501,7 +568,7 @@ async function main(): Promise<void> {
           for (const t of ledger.tasks()) {
             const demand = t.demandCommand ?? `constant ${t.demandConstant}`;
             console.log(
-              `${t.id}: tiers=${t.tiers.join(",")} demand=[${demand}]` +
+              `${t.id}: tiers=${formatTiers(t.tiers)} share=${t.share ?? 1} demand=[${demand}]` +
                 (t.gate !== undefined ? ` gate=[${t.gate}]` : "") +
                 (t.prompt === undefined ? " (signal only)" : ""),
             );
@@ -515,8 +582,10 @@ async function main(): Promise<void> {
       }
       case "abort": {
         const runId = args[0] ?? fail("abort <runId>");
-        ledger.requestAbort(runId);
-        console.log(`abort requested for ${runId}`);
+        const run = ledger.run(runId) ?? fail(`unknown run ${runId}`);
+        if (run.state !== "running") fail(`run ${run.id} is ${run.state}; only a running session can abort`);
+        ledger.requestAbort(run.id);
+        console.log(`abort requested for ${run.id} (${run.taskId} on ${run.accountId})`);
         break;
       }
       case "say":
@@ -542,7 +611,7 @@ async function main(): Promise<void> {
           [
             "usage: pi-orchestrator <command>",
             "  status                       tasks, gates, eligibility, running sessions",
-            "  task set <id> --tiers light,standard [--demand-command CMD | --demand-constant N]",
+            "  task set <id> --tiers light:20,standard [--share N] [--demand-command CMD | --demand-constant N]",
             "               [--gate EXPR] [--prompt TEXT] [--cwd DIR]",
             "  task list | task delete <id>",
             "  account list | account add <id> --provider F [--label L] [--domain D] [--shared true]",

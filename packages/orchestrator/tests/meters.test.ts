@@ -4,6 +4,7 @@ import { join } from "node:path";
 import { afterAll, describe, expect, it } from "vitest";
 import { Ledger } from "../src/ledger/ledger.js";
 import { CursorMeterSampler, parseCursorPeriodUsage } from "../src/meters/cursor.js";
+import { CodexMeterSampler, parseCodexUsage } from "../src/meters/codex.js";
 
 const dirs: string[] = [];
 afterAll(() => {
@@ -127,6 +128,215 @@ describe("cursor meter sampler", () => {
       agentDir,
       meterId: "cursor-month",
       fetch: async () => usageResponse(PERIOD_USAGE),
+    });
+
+    expect(await sampler.sample()).toEqual([]);
+  });
+});
+
+const CODEX_METERS = [
+  { id: "codex-5h", windowHours: 5 },
+  { id: "codex-7d", windowHours: 168 },
+];
+const RESET_AT = Math.floor(Date.now() / 1000) + 559_357;
+const CODEX_USAGE = {
+  plan_type: "pro",
+  rate_limit: {
+    primary_window: {
+      used_percent: 11,
+      limit_window_seconds: 604_800,
+      reset_after_seconds: 559_357,
+      reset_at: RESET_AT,
+    },
+    secondary_window: null,
+  },
+  // Model-scoped allowances are not the account plan and must not be read.
+  additional_rate_limits: [
+    {
+      limit_name: "GPT-5.3-Codex-Spark",
+      rate_limit: { primary_window: { used_percent: 40, limit_window_seconds: 18_000 } },
+    },
+  ],
+};
+
+function codexWorkspace(auth: Record<string, unknown>): { ledger: Ledger; authPath: string } {
+  const dir = mkdtempSync(join(tmpdir(), "pi-orch-codex-"));
+  dirs.push(dir);
+  const authPath = join(dir, "auth.json");
+  writeFileSync(authPath, JSON.stringify(auth));
+  const ledger = Ledger.open(join(dir, "ledger.sqlite3"));
+  ledger.upsertAccount({ id: "openai-codex-8", provider: "openai-codex", domain: "orchestrator" });
+  return { ledger, authPath };
+}
+
+const CODEX_CREDENTIAL = {
+  type: "oauth",
+  access: "token",
+  refresh: "refresh",
+  expires: Date.now() + 3_600_000,
+  accountId: "chatgpt-account",
+};
+
+describe("codex usage parsing", () => {
+  it("reads each plan window with its length and reset instant", () => {
+    expect(parseCodexUsage(CODEX_USAGE)).toEqual([
+      { usedPercent: 11, windowSeconds: 604_800, resetAt: RESET_AT * 1000 },
+    ]);
+  });
+
+  it("falls back to the relative reset when no absolute one is given", () => {
+    const now = 1_000_000;
+    expect(
+      parseCodexUsage(
+        { rate_limit: { primary_window: { used_percent: 4, limit_window_seconds: 18_000, reset_after_seconds: 60 } } },
+        now,
+      ),
+    ).toEqual([{ usedPercent: 4, windowSeconds: 18_000, resetAt: now + 60_000 }]);
+  });
+
+  it("treats a response without a usable window as a gap, not a zero reading", () => {
+    expect(parseCodexUsage({ rate_limit: { primary_window: null, secondary_window: null } })).toEqual([]);
+    expect(parseCodexUsage({ rate_limit: { primary_window: { used_percent: 5 } } })).toEqual([]);
+    expect(parseCodexUsage({})).toEqual([]);
+    expect(parseCodexUsage(null)).toEqual([]);
+  });
+});
+
+describe("codex meter sampler", () => {
+  it("records the polled window against the meter of that window length", async () => {
+    const { ledger, authPath } = codexWorkspace({ "openai-codex-8": CODEX_CREDENTIAL });
+    let headers: Headers | undefined;
+    const sampler = new CodexMeterSampler(ledger, {
+      authPaths: [authPath],
+      meters: CODEX_METERS,
+      fetch: async (_input, init) => {
+        headers = new Headers(init?.headers);
+        return usageResponse(CODEX_USAGE);
+      },
+    });
+
+    expect(await sampler.sample()).toEqual([
+      { accountId: "openai-codex-8", meterId: "codex-7d", outcome: "recorded", usedPercent: 11 },
+    ]);
+    expect(headers?.get("authorization")).toBe("Bearer token");
+    expect(headers?.get("chatgpt-account-id")).toBe("chatgpt-account");
+    // Not decoration: the endpoint's bot filter answers node's default
+    // user-agent with 403, so a named client is what makes the call work.
+    expect(headers?.get("user-agent")).toBe("pi-orchestrator");
+    const reading = ledger.latestReading("openai-codex-8", "codex-7d");
+    expect(reading?.usedPercent).toBe(11);
+    expect(reading?.resetAt).toBe(RESET_AT * 1000);
+    // The account reports no five-hour window, so that meter stays sourceless
+    // rather than being invented at zero.
+    expect(ledger.latestReading("openai-codex-8", "codex-5h")).toBeUndefined();
+  });
+
+  it("records both windows when the plan has two", async () => {
+    const { ledger, authPath } = codexWorkspace({ "openai-codex-8": CODEX_CREDENTIAL });
+    const sampler = new CodexMeterSampler(ledger, {
+      authPaths: [authPath],
+      meters: CODEX_METERS,
+      fetch: async () =>
+        usageResponse({
+          rate_limit: {
+            primary_window: { used_percent: 62, limit_window_seconds: 18_000 },
+            secondary_window: { used_percent: 30, limit_window_seconds: 604_800 },
+          },
+        }),
+    });
+
+    expect((await sampler.sample()).map((r) => [r.meterId, r.usedPercent])).toEqual([
+      ["codex-5h", 62],
+      ["codex-7d", 30],
+    ]);
+  });
+
+  it("reports a window no meter is declared for instead of guessing one", async () => {
+    const { ledger, authPath } = codexWorkspace({ "openai-codex-8": CODEX_CREDENTIAL });
+    const sampler = new CodexMeterSampler(ledger, {
+      authPaths: [authPath],
+      meters: [{ id: "codex-7d", windowHours: 168 }],
+      fetch: async () =>
+        usageResponse({ rate_limit: { primary_window: { used_percent: 62, limit_window_seconds: 18_000 } } }),
+    });
+
+    const [report] = await sampler.sample();
+    expect(report?.outcome).toBe("unmapped-window");
+    expect(report?.detail).toContain("5h");
+    expect(ledger.latestReading("openai-codex-8", "codex-7d")).toBeUndefined();
+  });
+
+  it("spaces readings by the sampling interval", async () => {
+    const { ledger, authPath } = codexWorkspace({ "openai-codex-8": CODEX_CREDENTIAL });
+    let calls = 0;
+    const sampler = new CodexMeterSampler(ledger, {
+      authPaths: [authPath],
+      meters: CODEX_METERS,
+      intervalMs: 5 * 60_000,
+      fetch: async () => {
+        calls++;
+        return usageResponse(CODEX_USAGE);
+      },
+    });
+
+    expect((await sampler.sample())[0]?.outcome).toBe("recorded");
+    expect((await sampler.sample())[0]?.outcome).toBe("not-due");
+    expect(calls).toBe(1);
+  });
+
+  it("never refreshes an expired credential; the window is recorded as a gap", async () => {
+    const { ledger, authPath } = codexWorkspace({
+      "openai-codex-8": { ...CODEX_CREDENTIAL, expires: Date.now() - 1 },
+    });
+    const sampler = new CodexMeterSampler(ledger, {
+      authPaths: [authPath],
+      meters: CODEX_METERS,
+      fetch: async () => {
+        throw new Error("sampler must not call the provider without a live token");
+      },
+    });
+
+    expect(await sampler.sample()).toEqual([
+      { accountId: "openai-codex-8", outcome: "expired-credential" },
+    ]);
+    expect(ledger.latestReading("openai-codex-8", "codex-7d")).toBeUndefined();
+  });
+
+  it("falls through to the next credential store", async () => {
+    const { ledger, authPath } = codexWorkspace({ "someone-else": CODEX_CREDENTIAL });
+    const other = join(mkdtempSync(join(tmpdir(), "pi-orch-codex-alt-")), "auth.json");
+    dirs.push(other);
+    writeFileSync(other, JSON.stringify({ "openai-codex-8": CODEX_CREDENTIAL }));
+    const sampler = new CodexMeterSampler(ledger, {
+      authPaths: [authPath, other],
+      meters: CODEX_METERS,
+      fetch: async () => usageResponse(CODEX_USAGE),
+    });
+
+    expect((await sampler.sample())[0]?.outcome).toBe("recorded");
+  });
+
+  it("reports a provider failure without throwing or writing a reading", async () => {
+    const { ledger, authPath } = codexWorkspace({ "openai-codex-8": CODEX_CREDENTIAL });
+    const sampler = new CodexMeterSampler(ledger, {
+      authPaths: [authPath],
+      meters: CODEX_METERS,
+      fetch: async () => usageResponse({ detail: "unauthenticated" }, 401),
+    });
+
+    const [report] = await sampler.sample();
+    expect(report?.outcome).toBe("request-failed");
+    expect(report?.detail).toContain("401");
+    expect(ledger.latestReading("openai-codex-8", "codex-7d")).toBeUndefined();
+  });
+
+  it("ignores accounts past their paid access", async () => {
+    const { ledger, authPath } = codexWorkspace({ "openai-codex-8": CODEX_CREDENTIAL });
+    ledger.setAccountAccessUntil("openai-codex-8", Date.now() - 1);
+    const sampler = new CodexMeterSampler(ledger, {
+      authPaths: [authPath],
+      meters: CODEX_METERS,
+      fetch: async () => usageResponse(CODEX_USAGE),
     });
 
     expect(await sampler.sample()).toEqual([]);

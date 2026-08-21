@@ -95,17 +95,14 @@ export interface SpendPlan {
   readonly pSurpriseBeforeScheduledReset: number;
   readonly percentPerHour: number;
   readonly naivePercentPerHour: number;
+  /** Only the classes whose tokens-per-percent is calibrated. Empty means
+   * the rate is known but nothing can price it in tokens yet. */
   readonly tokensPerHourByClass: Readonly<Record<UsageClassId, number>>;
   readonly dailyPercentSchedule: readonly number[];
 }
 
 export type PlanError = {
-  readonly reason:
-    | "unknown-meter"
-    | "no-reading"
-    | "no-reset-schedule"
-    | "stale-reading"
-    | "insufficient-calibration";
+  readonly reason: "unknown-meter" | "no-reading" | "no-reset-schedule" | "stale-reading";
 };
 
 export interface CalibratorConfig {

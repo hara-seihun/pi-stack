@@ -5,7 +5,7 @@ import { afterAll, describe, expect, it } from "vitest";
 import { AccountCalibrator } from "../src/calibrator/calibrator.js";
 import type { MeterSpec } from "../src/calibrator/types.js";
 import { Ledger } from "../src/ledger/ledger.js";
-import { DAY, HOUR, mulberry32 } from "./harness.js";
+import { DAY, HOUR, mix, mulberry32 } from "./harness.js";
 
 const SPECS: MeterSpec[] = [
   { id: "codex-weekly", drainedBy: ["sol"], nominalWindowMs: 7 * DAY },
@@ -232,10 +232,32 @@ describe("account metadata custody", () => {
     expect(() => ledger.removeAccount("codex-7")).toThrow(/unknown account/);
   });
 
+  it("resolves runs by unique id prefix and rejects ambiguity", () => {
+    const ledger = Ledger.open(":memory:");
+    ledger.upsertAccount({ id: "codex-7", provider: "openai-codex" });
+    ledger.upsertTask({ id: "lane", tiers: mix("standard"), demandConstant: 1, prompt: "go" });
+    const spec = {
+      taskId: "lane",
+      tier: "standard",
+      accountId: "codex-7",
+      model: "gpt",
+      provider: "openai-codex",
+      at: 1,
+    } as const;
+    const ids = [ledger.createRun(spec), ledger.createRun(spec)];
+    const target = ids[0]!;
+
+    expect(ledger.run(target)?.id).toBe(target);
+    // status prints 8-char prefixes; operators paste them back in.
+    expect(ledger.run(target.slice(0, 8))?.id).toBe(target);
+    expect(ledger.run("no-such-run")).toBeUndefined();
+    expect(() => ledger.run("")).toThrow(/ambiguous/);
+  });
+
   it("refuses to remove an account with work still on it", () => {
     const ledger = Ledger.open(":memory:");
     ledger.upsertAccount({ id: "codex-7", provider: "openai-codex" });
-    ledger.upsertTask({ id: "lane", tiers: ["standard"], demandConstant: 1, prompt: "go" });
+    ledger.upsertTask({ id: "lane", tiers: mix("standard"), demandConstant: 1, prompt: "go" });
     ledger.createRun({
       taskId: "lane",
       tier: "standard",

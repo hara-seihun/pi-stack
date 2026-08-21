@@ -101,6 +101,7 @@ export class Scheduler {
       return {
         taskId: t.id,
         tiers: t.tiers,
+        share: t.share,
         units,
         gateOpen,
         eligible: gateOpen && units !== undefined && units > 0,

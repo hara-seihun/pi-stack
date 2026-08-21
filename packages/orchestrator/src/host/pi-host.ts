@@ -16,6 +16,34 @@ import { RunTranscript } from "./transcript.js";
 
 const HEARTBEAT_MS = 30_000;
 
+/**
+ * How long a session may keep working before the host stops re-prompting it,
+ * and how many consecutive turns may pass with nothing reported before the
+ * host accepts that the lane is spent.
+ */
+export const SESSION_BUDGET_MS = 4 * 3_600_000;
+const MAX_IDLE_TURNS = 2;
+
+/**
+ * What the host says to a session that stopped talking while its budget and
+ * its lane still have room.
+ *
+ * A model ends its turn the moment it writes a summary, and a turn ending
+ * used to end the run: standing research lanes whose prompts say "submitting
+ * is a checkpoint, not an exit" were being torn down at the first checkpoint,
+ * half an hour in, and the next launch started again from an empty context.
+ * No wording in a task prompt can fix that, because the instruction is
+ * addressed to an agent that no longer exists by the time it would apply.
+ * A pointer, not a pep talk: the work is where the agent left it.
+ */
+const CONTINUE =
+  "Your session is still live and this lane still has work. You are not finished. " +
+  "Go back to the blocker you just named and take the next architecture on it, or " +
+  "pick the next target in scope and attack that; re-read your own trail if you need " +
+  "to recover where you were. Call task_complete again as a running report each time " +
+  "you land something. If the lane genuinely has nothing left to work on, say so " +
+  "plainly and stop.";
+
 interface CompletionReport {
   complete: boolean;
   productive?: boolean;
@@ -40,6 +68,11 @@ export class PiHost implements HostManager {
       readonly resolveModel: (spec: LaunchSpec) => unknown;
       /** Directory root for per-run transcripts; omit to disable them. */
       readonly runsRoot?: string;
+      /** How long one session may keep working. Default 4h. */
+      readonly sessionBudgetMs?: number;
+      /** Session factory. Defaults to the pi SDK; a test supplies its own to
+       * exercise the shift loop without a provider. */
+      readonly openSession?: typeof createAgentSession;
     },
   ) {}
 
@@ -91,6 +124,7 @@ export class PiHost implements HostManager {
 
   private async run(spec: LaunchSpec, transcript: RunTranscript | undefined): Promise<HostRunResult> {
     let report: CompletionReport | undefined;
+    let reports = 0;
     const taskComplete = {
       name: "task_complete",
       label: "Complete task",
@@ -110,6 +144,7 @@ export class PiHost implements HostManager {
       }),
       execute: async (_id: string, params: CompletionReport) => {
         report = params;
+        reports++;
         return { content: [{ type: "text" as const, text: "Report recorded." }], details: undefined };
       },
     };
@@ -118,7 +153,7 @@ export class PiHost implements HostManager {
     // provider (cursor) exists only inside the session's own model runtime,
     // because the extension that registers it is loaded per session.
     const preresolved = this.options.resolveModel(spec);
-    const { session } = await createAgentSession({
+    const { session } = await (this.options.openSession ?? createAgentSession)({
       cwd: spec.cwd,
       agentDir: this.options.agentDir,
       // The SDK's Model type is provider-internal; the resolver returns one.
@@ -157,20 +192,41 @@ export class PiHost implements HostManager {
       () => this.events.heartbeat(spec.runId, Date.now()),
       HEARTBEAT_MS,
     );
+    const deadline = Date.now() + (this.options.sessionBudgetMs ?? SESSION_BUDGET_MS);
     try {
-      await session.prompt(spec.prompt);
-      // prompt() resolves even when the turn failed provider-side; the
-      // truth is on the final assistant message. An errored turn must be an
-      // error run (circuit breaker, account cooldown), never quiet
-      // unproductive-done — that combination relaunches every tick.
-      const last = [...session.messages]
-        .reverse()
-        .find((m): m is typeof m & { stopReason?: string; errorMessage?: string } => m.role === "assistant");
-      if (report === undefined && last?.stopReason === "error") {
-        return { state: "error", detail: last.errorMessage ?? "assistant turn errored" };
-      }
-      if (report === undefined && last?.stopReason === "aborted") {
-        return { state: "aborted", detail: "session aborted" };
+      // A launch is a shift, not a single turn. The host keeps prompting the
+      // same session — same context, same working directory, same trail —
+      // until the session's budget runs out, the turn fails, an operator
+      // aborts, or the agent has twice had nothing to report. Ending at the
+      // first quiet turn threw away a warm context that had just paid for
+      // itself and made every lane restart from scratch.
+      let idle = 0;
+      for (let turn = 0; ; turn++) {
+        const before = reports;
+        if (turn > 0) transcript?.append("user", { text: CONTINUE });
+        await session.prompt(turn === 0 ? spec.prompt : CONTINUE);
+        // prompt() resolves even when the turn failed provider-side; the
+        // truth is on the final assistant message. An errored turn must be an
+        // error run (circuit breaker, account cooldown), never quiet
+        // unproductive-done — that combination relaunches every tick.
+        const last = [...session.messages]
+          .reverse()
+          .find(
+            (m): m is typeof m & { stopReason?: string; errorMessage?: string } =>
+              m.role === "assistant",
+          );
+        if (last?.stopReason === "error") {
+          if (report === undefined) {
+            return { state: "error", detail: last.errorMessage ?? "assistant turn errored" };
+          }
+          break; // Work already banked: report it rather than lose it.
+        }
+        if (last?.stopReason === "aborted") {
+          if (report === undefined) return { state: "aborted", detail: "session aborted" };
+          break;
+        }
+        idle = reports > before ? 0 : idle + 1;
+        if (idle >= MAX_IDLE_TURNS || Date.now() >= deadline) break;
       }
       if (report === undefined) {
         return { state: "done", productive: false, detail: "no task_complete report" };

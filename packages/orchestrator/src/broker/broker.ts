@@ -29,6 +29,10 @@ export interface BrokerConfig {
   readonly bootstrapSessionPercentPerHour: number;
   /** Window for measuring per-session burn from readings and run history. */
   readonly measurementWindowMs: number;
+  /** Hard ceiling on concurrent sessions across the whole machine. The
+   * estimator paces provider quota; it knows nothing about the RAM a session
+   * occupies, and the sessions are hosted in-process. */
+  readonly maxConcurrentSessions: number;
   /** Session-hours inside the window required before trusting measurement. */
   readonly minMeasuredSessionHours: number;
   /** How long a failed-over account stays out of admission. */
@@ -54,6 +58,7 @@ export const BROKER_DEFAULTS = {
   minMeasuredSessionHours: 6,
   cooldownMs: 10 * 60_000,
   maxSlotsPerTier: 8,
+  maxConcurrentSessions: 40,
   sessionLeaseTimeoutMs: 2 * 60_000,
 };
 
@@ -76,7 +81,7 @@ interface AccountView {
   active: number;
 }
 
-/** Scarcer capacity is reserved first when advertising slots. */
+/** Scarcer capacity wins ties when advertising slots. */
 const SLOT_ORDER: readonly Tier[] = [...TIERS].reverse();
 
 export class Broker {
@@ -100,27 +105,52 @@ export class Broker {
 
   /**
    * Advertises launch slots per tier for one allocation cycle by virtually
-   * admitting until refusal, scarcest tier first, so shared accounts are
-   * never double-counted across tiers. `demand` caps each tier at what
-   * eligible tasks can actually use, so a scarce tier never hoards an
-   * account that nothing wants.
+   * admitting until refusal, so shared accounts are never double-counted
+   * across tiers. `demand` caps each tier at what eligible tasks can actually
+   * use, so a tier never hoards an account that nothing wants.
+   *
+   * Slots are handed out in demand-proportional turns — weighted fair
+   * queueing over the tiers, ties to the scarcer tier — rather than filling
+   * the scarcest tier to exhaustion first. Draining in strict tier order was
+   * fine while tiers meant separate account pools, but tiers now share
+   * accounts: with light and standard both drawing on the same Codex
+   * subscriptions, filling standard first took every account every cycle and
+   * the light tier was advertised zero slots forever, whatever any task
+   * asked for.
    */
   slotsByTier(now: number, demand?: Readonly<Partial<Record<Tier, number>>>): Record<Tier, number> {
     const views = this.views(now);
     const slots = { light: 0, standard: 0, expert: 0 } as Record<Tier, number>;
-    for (const tier of SLOT_ORDER) {
-      const cap = Math.min(
+    /** Hard ceiling: never advertise a slot no task could use. */
+    const limit = (tier: Tier): number =>
+      Math.min(
         this.cfg.maxSlotsPerTier,
         demand === undefined ? Number.POSITIVE_INFINITY : (demand[tier] ?? 0),
       );
-      while (slots[tier] < cap) {
-        const admission = this.pick(views, tier);
-        if (admission === undefined) break;
-        for (const v of views) if (v.id === admission.accountId) v.active++;
-        slots[tier]++;
+    /** Share of the turns. A caller that names no demand wants plain
+     * round-robin, scarcer tier first. */
+    const weight = (tier: Tier): number => (demand === undefined ? 1 : (demand[tier] ?? 0));
+    const exhausted = new Set<Tier>();
+    for (;;) {
+      let next: Tier | undefined;
+      let bestTime = Number.POSITIVE_INFINITY;
+      for (const tier of SLOT_ORDER) {
+        if (exhausted.has(tier) || slots[tier] >= limit(tier) || weight(tier) <= 0) continue;
+        const virtualTime = (slots[tier] + 1) / weight(tier);
+        if (virtualTime < bestTime - 1e-9) {
+          next = tier;
+          bestTime = virtualTime;
+        }
       }
+      if (next === undefined) return slots;
+      const admission = this.pick(views, next);
+      if (admission === undefined) {
+        exhausted.add(next);
+        continue;
+      }
+      for (const v of views) if (v.id === admission.accountId) v.active++;
+      slots[next]++;
     }
-    return slots;
   }
 
   /**
@@ -171,11 +201,17 @@ export class Broker {
    * meter drain over recorded session-hours; bootstrap value until enough
    * hours exist. */
   sessionBurn(accountId: string, now: number): number {
+    return this.measuredSessionBurn(accountId, now) ?? this.cfg.bootstrapSessionPercentPerHour;
+  }
+
+  /** The measurement itself, or undefined while the account has too few
+   * recorded session-hours to have measured anything. */
+  private measuredSessionBurn(accountId: string, now: number): number | undefined {
     const since = now - this.cfg.measurementWindowMs;
     const hours = this.ledger.sessionHours(accountId, since, now, this.cfg.sessionLeaseTimeoutMs);
-    if (hours < this.cfg.minMeasuredSessionHours) return this.cfg.bootstrapSessionPercentPerHour;
+    if (hours < this.cfg.minMeasuredSessionHours) return undefined;
     const burn = this.ledger.drainSince(accountId, since) / hours;
-    return burn > 0 ? burn : this.cfg.bootstrapSessionPercentPerHour;
+    return burn > 0 ? burn : undefined;
   }
 
   private views(now: number): AccountView[] {
@@ -191,11 +227,20 @@ export class Broker {
       )
       .map((a) => {
         const sustainable = this.sustainableRate(a.id, a.provider, now);
-        const sessionBurn = this.sessionBurn(a.id, now);
-        // Without calibration the account is in bootstrap: one session, so
-        // the calibrator gets data without risking a multi-session stampede.
+        const measured = this.measuredSessionBurn(a.id, now);
+        const sessionBurn = measured ?? this.cfg.bootstrapSessionPercentPerHour;
+        // Concurrency is a measurement, not a constant: what the plan
+        // sustains, divided by what one session actually costs. Both halves
+        // have to be observed for the quotient to mean anything, so an
+        // account missing either one runs a single session until it has
+        // earned the evidence. That bootstrap is a floor for the unmeasured,
+        // never a cap on the measured — and never a floor under a measured
+        // account that plainly cannot afford another session, which is why a
+        // fully measured quotient of zero is honoured.
         const capacity =
-          sustainable === undefined ? 1 : Math.floor(sustainable / sessionBurn);
+          sustainable === undefined || measured === undefined
+            ? 1
+            : Math.floor(sustainable / sessionBurn);
         return {
           id: a.id,
           provider: a.provider,
@@ -214,6 +259,12 @@ export class Broker {
     tier: Tier,
     exclude?: ReadonlySet<string>,
   ): Admission | undefined {
+    // Quota is not the only finite resource: sessions are hosted in the
+    // runner's own process, and 24 of them once reached 22.8 GiB and were
+    // OOM-killed. The estimator cannot see that, so the machine ceiling is
+    // enforced here, over every tier and account at once.
+    const active = views.reduce((sum, v) => sum + v.active, 0);
+    if (active >= this.cfg.maxConcurrentSessions) return undefined;
     for (const candidate of this.cfg.tiers[tier] ?? []) {
       let best: AccountView | undefined;
       for (const v of views) {

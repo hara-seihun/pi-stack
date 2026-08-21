@@ -70,9 +70,16 @@ describe("core calibrator scenarios", () => {
     };
     tinyBurstPhase(6);
     expect(classStat(sim, "codex-weekly", "sol").confidence).toBe("none");
+    // The rate is still known this early — it is remaining percent over the
+    // hazard-discounted horizon, which the provider's own reading supplies.
+    // What is missing is the token price of that rate, and the plan says so
+    // by pricing no class at all rather than by refusing to exist.
     const early = sim.cal.plan("codex-weekly", sim.now);
-    expect(early.ok).toBe(false);
-    if (!early.ok) expect(early.error.reason).toBe("insufficient-calibration");
+    expect(early.ok).toBe(true);
+    if (early.ok) {
+      expect(early.value.percentPerHour).toBeGreaterThan(0);
+      expect(early.value.tokensPerHourByClass).toEqual({});
+    }
     tinyBurstPhase(6 * 24);
     const s = classStat(sim, "codex-weekly", "sol");
     expect(s.confidence).not.toBe("none");

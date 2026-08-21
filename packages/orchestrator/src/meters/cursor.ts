@@ -5,11 +5,11 @@ import type { Ledger } from "../ledger/ledger.js";
 /**
  * Cursor meter sampling.
  *
- * Anthropic and Codex publish rate-limit state on every response, so the
- * usage-logger extension records their meters for free. Cursor's Connect
+ * Anthropic publishes rate-limit state on every response, so the
+ * usage-logger extension records its meters for free. Cursor's Connect
  * stream carries no meter headers at all, so its one monthly meter has no
  * source unless something polls the dashboard RPC. This sampler is that
- * source: it runs inside the controller daemon, which already runs as the
+ * source (Codex has the same problem and its own sampler beside this one): it runs inside the controller daemon, which already runs as the
  * credential-custody user for orchestrator-domain accounts, and writes
  * ordinary meter readings into the ledger — the same facts the calibrator,
  * the broker, and Pi Remote's plan cards read for every other provider.

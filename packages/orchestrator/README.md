@@ -107,16 +107,31 @@ three meters (5h, 7d, 7d_oi) on every response. Ledger location:
 ## Meter sampling (`src/meters/`)
 
 Providers that publish no rate-limit headers need a poller, or their meters
-have no source at all. Cursor is the case: its Connect stream carries no
-quota state, so the controller daemon samples the dashboard period-usage RPC
-for every Cursor account whose credential lives in its own `auth.json` and
-writes ordinary meter readings. Readings are spaced by a sampling interval,
-only the percentage is recorded (the dollar "included usage" figure gates
-nothing — see [docs/provider-meter-notes.md](docs/provider-meter-notes.md)),
-and the sampler never refreshes OAuth: an expired access token is recorded as
-a gap rather than a token-family revocation. Everything downstream —
-calibration, broker admission, Pi Remote's Cursor plan card — then reads the
-same ledger facts it reads for header-instrumented providers.
+have no source at all. Only Anthropic publishes them; Cursor's Connect stream
+carries no quota state, and pi talks to Codex over a WebSocket by default, so
+there is no HTTP response to carry headers there either. The controller daemon
+therefore samples both: Cursor's dashboard period-usage RPC, and Codex's
+account usage endpoint (`/backend-api/codex/usage`), writing ordinary meter
+readings for each.
+
+Codex was the expensive case to have missed. With no meter source at all, every
+Codex account was permanently uncalibrated, which the broker correctly reads as
+bootstrap and holds to one concurrent session per account — seven Pro accounts
+at 8–23% of their weekly plans were the whole fleet's ceiling until the sampler
+existed. Codex reports its windows with a length, so **window length names the
+meter**: the operator config declares meters by window hours, a reported window
+is matched to the meter of that length, and an undeclared window is reported
+rather than guessed at, because a mis-named meter would calibrate one plan's
+drain against another's allowance. Model-scoped `additional_rate_limits` are
+not the account plan and are not read.
+
+Readings are spaced by a sampling interval, only percentages are recorded (the
+dollar "included usage" figure Cursor reports gates nothing — see
+[docs/provider-meter-notes.md](docs/provider-meter-notes.md)), and neither
+sampler ever refreshes OAuth: an expired access token is recorded as a gap
+rather than a token-family revocation. Everything downstream — calibration,
+broker admission, Pi Remote's plan cards — then reads the same ledger facts it
+reads for header-instrumented providers.
 
 ## Ledger (`src/ledger/`)
 
@@ -138,28 +153,63 @@ describe scheduling:
   line is a work-unit count. `0` means no work; agents are never launched to
   discover idleness. Results are cached with a TTL and invalidated by task
   completion (`taskFinished` invalidates the finisher's demand and every
-  gate that references it).
+  gate that references it). Demand answers *whether* a lane can absorb
+  another agent, and caps how many it may hold at once.
+- `share`: this lane's relative claim on the fleet, default 1 — *how* the
+  scarce slots are divided among the lanes that want them.
+  `--share 14` against four lanes at 1 and 2 makes the frontier lane 70% of
+  every launch. It is a claim, not a reservation: a lane with less work than
+  share gives the remainder back the same cycle. Share and demand were one
+  number until it became clear they answer different questions — a lane whose
+  probe counted problems in sixes outranked a lane counting review items one
+  by one, and the fleet's split was an artefact of each probe's unit rather
+  than a decision anyone made.
 - `gate`: a deliberately tiny expression over other tasks' demand
   (`ingest.demand == 0`, thresholds, `and`/`or`, parentheses — nothing
   else). Gates reference demand values only, never other gates, so cycles
   are impossible by construction. An unevaluable gate (unknown upstream
   demand, failed probe) is closed, never open. A debounce window stops
   flapping gates from launching agents prematurely.
-- `tiers`: a preference-ordered subset of `light`/`standard`/`expert` — the
-  substitution set the governor may satisfy a launch with. Allocation across
-  eligible tasks is proportional to demand by largest remainder, honours
-  tier preference with spill, never assigns more agents than work units, and
-  redistributes capacity a tier-restricted task cannot use. Tier labels live
-  only in launch-side tables; prompt assembly and agent-visible surfaces
-  have no read path to them.
+- `tiers`: a weighted subset of `light`/`standard`/`expert` — the set the
+  governor may satisfy a launch with, and in what proportion.
+  `--tiers light:20,standard` says "one standard session per twenty light
+  ones", which is how a research lane is run mostly on a cheap model with a
+  deliberate trickle of an expensive one to compare against; an unweighted
+  tier is weight 1, so `--tiers standard` is the ordinary single-tier lane.
+  Allocation across eligible tasks is proportional to share by largest
+  remainder, never assigns more agents than work units, and redistributes
+  capacity a tier-restricted task cannot use. Tier labels live only in
+  launch-side tables; prompt assembly and agent-visible surfaces have no read
+  path to them.
+- The mix is a **ceiling, not a preference**. A tier is passed over once it
+  holds its rounded-up share of the lane's recent launches, so a light-heavy
+  lane cannot quietly become a standard lane the moment light capacity runs
+  short — the free standard slot goes to a lane that actually asked for
+  standard sessions. Within that ceiling the list is still a substitution
+  set: a tier with no free capacity loses its turn rather than holding the
+  lane up.
+- Like task shares, a tier mix is **held across cycles**: 20:1 is invisible
+  inside a cycle that hands out one slot, so each lane's launches inside the
+  fairness window are counted per tier and the next slot goes to the tier
+  whose turn is earliest in virtual time (`(served + 1) / weight`). Splitting
+  each cycle's slots proportionally instead would round the minority tier to
+  zero every time and it would never launch at all.
 - Proportional **across cycles**, not inside one. Sessions end one at a time,
   so the common cycle offers a single slot, every integer quota floors to
-  zero, and demand alone would hand that slot to the largest task every time
-  — a 60% task took 100% of ordinary cycles and a 15% task launched only when
-  three slots happened to free together. Each task therefore carries its
-  launch count over a fairness window (6h) into the decision, and slots go to
-  the task furthest below its own share. Repeated single-slot cycles converge
-  on the demand split.
+  zero, and one cycle's arithmetic alone would hand that slot to the largest
+  claim every time — a 60% lane took 100% of ordinary cycles and a 15% lane
+  launched only when three slots happened to free together. Each task
+  therefore carries its launch count over a fairness window (6h) into the
+  decision, and slots go to the task furthest below its own share. Repeated
+  single-slot cycles converge on the declared split.
+
+The two levers compose, which is the point: `share` decides who gets the
+fleet, `boost <family> 5` decides how large the fleet is (it multiplies the
+paced sustainable rate, so a family spends its real measured headroom faster
+rather than acquiring invented capacity), and the lane's tier mix decides
+which models those launches use. Turning one lane up to 70% and boosting the
+family it runs on fills the machine with that lane's cheap tier without
+touching a prompt or a task definition.
 
 The machine-wide pause is the root of the same mechanism: a `control` row
 (`launches = enabled|paused`) in the ledger, honoured by every evaluation
@@ -184,20 +234,39 @@ underneath keeps working — measurement, hazard pacing, cooldowns — and an
 uncalibrated account stays in bootstrap however high the boost, because there
 is nothing measured to spend faster.
 
-An uncalibrated account is in **bootstrap**: exactly one concurrent session,
-so the calibrator gets data without risking a stampede; measurement then
-earns concurrency. Calibration is complete only when every meter already
-observed on that account has a current reset schedule and enough signal. A
-fresh short-window reset must never let the broker ignore an unread weekly
-meter and infer dozens of slots from the short window alone. On 2026-08-20
-that exact path launched 21 Opus sessions; the 24-session worker (including
-five Codex sessions) reached 22.8 GiB and the kernel OOM-killed it. The stale
-runs were classified as infrastructure aborts, and the corrected broker
-launched no replacement Opus sessions. `slotsByTier` advertises capacity for one allocation
-cycle by virtually admitting scarcest-tier-first (so shared accounts are
-never double-counted), capped by what eligible tasks actually demand (so a
-scarce tier never hoards an account nothing wants). `failover` cools the
-failing account down and re-admits the run elsewhere.
+Concurrency per account is a quotient of two measurements: what the plan
+sustains (percent/hour) over what one session actually costs (percent/hour of
+meter drain per session-hour). An account missing **either** half runs a
+single **bootstrap** session until it has earned the evidence — never as a cap
+on an account that has it. Pacing itself needs no token calibration: remaining
+percent over a hazard-discounted horizon is arithmetic on the provider's own
+reading, and the token coefficients only ever priced that rate in tokens.
+Requiring them held the whole Codex fleet at one session per account
+indefinitely, because Codex publishes no per-request meter headers to pi's
+transport and so never calibrates a usage class at all — seven subscriptions
+with a week of headroom each, running seven agents. The plan is now always
+issued; an unpriced class simply appears in no budget.
+
+Pacing still uses the **most binding** meter, and calibration confidence still
+gates the token budgets. A fresh short-window reset must never let the broker
+ignore an unread weekly meter and infer dozens of slots from the short window
+alone. On 2026-08-20 that exact path launched 21 Opus sessions; the
+24-session worker (including five Codex sessions) reached 22.8 GiB and the
+kernel OOM-killed it. That episode is also why quota is not the only bound:
+sessions are hosted inside the runner's own process, the estimator can only
+see provider allowance, and so a machine-wide `maxConcurrentSessions` ceiling
+(operator config; systemd `--max-sessions` is the independent backstop) caps
+every tier and account at once. `slotsByTier` advertises capacity for
+one allocation cycle by virtually admitting until refusal (so shared accounts
+are never double-counted), capped by what eligible tasks actually demand (so a
+tier never hoards an account nothing wants), and handing out the turns in
+demand-proportional order — weighted fair queueing over the tiers, ties to the
+scarcer one. Draining the scarcest tier to exhaustion first was right while
+tiers meant separate account pools; once `light` and `standard` both drew on
+the same Codex subscriptions it meant standard took every account every cycle
+and the light tier was advertised zero slots forever, whatever any task asked
+for. `failover` cools the failing account down and re-admits the run
+elsewhere.
 
 ## Controller and runners (`src/controller/`, `src/host/`)
 
@@ -221,6 +290,20 @@ Runner updates use generation draining: `drain-runners` bumps a control
 row; live runners stop claiming and exit when their last session ends,
 while freshly started runners claim under the new generation. Nothing is
 ever killed mid-run.
+
+A launch is a **shift**, not a turn. A model ends its turn as soon as it
+writes a summary, and the host used to end the run with it: standing research
+lanes whose prompts say "submitting is a checkpoint, not an exit" were torn
+down at the first checkpoint — 27 to 57 minutes in — and relaunched from an
+empty context, paying re-orientation cost over and over. No prompt wording can
+fix that, because the instruction addresses an agent that no longer exists by
+the time it would apply. The host therefore re-prompts the same live session
+(`CONTINUE` in `src/host/pi-host.ts`, a pointer back to the blocker rather
+than a pep talk) until the session budget (4h) is spent, the turn errors, an
+operator aborts, or two consecutive turns report nothing — the last being how
+a lane with an exhausted queue ends itself. Work already banked in a
+`task_complete` report survives a late error: the report is the run's record,
+and only a shift that banked nothing reports as an error run.
 
 Draining needs two runner processes alive at once, which is what the
 **supervisor** (`src/host/supervisor.ts`) is for. It is the process a

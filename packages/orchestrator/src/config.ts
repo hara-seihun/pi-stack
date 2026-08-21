@@ -30,6 +30,13 @@ export interface ProviderConfig {
 export interface OrchestratorConfig {
   readonly tiers: Readonly<Record<Tier, readonly ModelCandidate[]>>;
   readonly providers: Readonly<Record<string, ProviderConfig>>;
+  /** Concurrent sessions this machine will host, whatever provider quota is
+   * left. Sessions run inside the runner process, so this is a memory bound
+   * and belongs to the deployment, not to any plan. */
+  readonly maxConcurrentSessions?: number;
+  /** Launches advertised per tier per cycle: a ramp limiter, not a
+   * concurrency limit. */
+  readonly maxSlotsPerTier?: number;
 }
 
 export function defaultConfigPath(): string {
@@ -82,7 +89,8 @@ export function meterSpecs(cfg: OrchestratorConfig, family: string): MeterSpec[]
  * family at replay time; meters are per family. */
 export function brokerConfig(
   cfg: OrchestratorConfig,
-): Pick<BrokerConfig, "tiers" | "meters" | "transform"> {
+): Pick<BrokerConfig, "tiers" | "meters" | "transform"> &
+  Partial<Pick<BrokerConfig, "maxConcurrentSessions" | "maxSlotsPerTier">> {
   const meters: Record<string, MeterSpec[]> = {};
   const transforms = new Map<string, (c: string, t: number) => { classId: string; tokens: number }>();
   for (const family of Object.keys(cfg.providers)) {
@@ -92,6 +100,10 @@ export function brokerConfig(
   return {
     tiers: cfg.tiers,
     meters,
+    ...(cfg.maxConcurrentSessions === undefined
+      ? {}
+      : { maxConcurrentSessions: cfg.maxConcurrentSessions }),
+    ...(cfg.maxSlotsPerTier === undefined ? {} : { maxSlotsPerTier: cfg.maxSlotsPerTier }),
     transform: (provider, classId, tokens) =>
       transforms.get(provider)?.(classId, tokens) ?? { classId, tokens },
   };

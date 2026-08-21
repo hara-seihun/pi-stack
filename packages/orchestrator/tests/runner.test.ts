@@ -2,6 +2,7 @@ import { describe, expect, it } from "vitest";
 import { Ledger } from "../src/ledger/ledger.js";
 import { Runner, bumpRunnerGeneration } from "../src/host/runner.js";
 import type { HostManager, LaunchSpec } from "../src/host/types.js";
+import { mix } from "./harness.js";
 
 class FakeEngine implements HostManager {
   launched: LaunchSpec[] = [];
@@ -23,7 +24,7 @@ class FakeEngine implements HostManager {
 
 function seed(ledger: Ledger, count: number): string[] {
   ledger.upsertAccount({ id: "anth-1", provider: "anthropic" });
-  ledger.upsertTask({ id: "t", demandConstant: 10, tiers: ["standard"], prompt: "Work." });
+  ledger.upsertTask({ id: "t", demandConstant: 10, tiers: mix("standard"), prompt: "Work." });
   const ids: string[] = [];
   for (let i = 0; i < count; i++) {
     ids.push(

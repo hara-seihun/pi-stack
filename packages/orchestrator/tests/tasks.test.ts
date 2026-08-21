@@ -8,6 +8,7 @@ import { allocate } from "../src/tasks/allocate.js";
 import { evalGate, gateRefs, parseGate } from "../src/tasks/gate.js";
 import { Scheduler } from "../src/tasks/scheduler.js";
 import type { TaskSnapshot, Tier } from "../src/tasks/types.js";
+import { mix } from "./harness.js";
 
 const dir = mkdtempSync(join(tmpdir(), "pi-orch-tasks-"));
 afterAll(() => rmSync(dir, { recursive: true, force: true }));
@@ -69,24 +70,32 @@ describe("gate expressions", () => {
 describe("task custody", () => {
   it("validates tasks at write time", () => {
     const ledger = openLedger();
-    expect(() => ledger.upsertTask({ id: "x", tiers: ["light"] })).toThrow(/exactly one/);
+    expect(() => ledger.upsertTask({ id: "x", tiers: mix("light") })).toThrow(/exactly one/);
     expect(() =>
-      ledger.upsertTask({ id: "x", demandConstant: 1, demandCommand: "true", tiers: ["light"] }),
+      ledger.upsertTask({ id: "x", demandConstant: 1, demandCommand: "true", tiers: mix("light") }),
     ).toThrow(/exactly one/);
     expect(() => ledger.upsertTask({ id: "x", demandConstant: 1, tiers: [] })).toThrow(/non-empty/);
     expect(() =>
-      ledger.upsertTask({ id: "x", demandConstant: 1, tiers: ["light", "light"] }),
+      ledger.upsertTask({ id: "x", demandConstant: 1, tiers: mix("light", "light") }),
     ).toThrow(/duplicates/);
     expect(() =>
-      ledger.upsertTask({ id: "x", demandConstant: 1, gate: "broken ==", tiers: ["light"] }),
+      ledger.upsertTask({ id: "x", demandConstant: 1, gate: "broken ==", tiers: mix("light") }),
     ).toThrow(/gate syntax/);
     ledger.upsertTask({
       id: "x",
       demandCommand: "probe",
       gate: "y.demand == 0",
-      tiers: ["expert", "standard"],
+      tiers: mix("expert", "standard"),
     });
-    expect(ledger.tasks()[0].tiers).toEqual(["expert", "standard"]); // Preference order kept.
+    // Declaration order and weights both survive the round trip.
+    expect(ledger.tasks()[0].tiers).toEqual(mix("expert", "standard"));
+    expect(() =>
+      ledger.upsertTask({
+        id: "x",
+        demandConstant: 1,
+        tiers: [{ tier: "light", weight: 0 }],
+      }),
+    ).toThrow(/positive weight/);
     ledger.close();
   });
 
@@ -98,7 +107,7 @@ describe("task custody", () => {
     old.close();
     const ledger = Ledger.open(path);
     expect(ledger.getControl("launches")).toBe("enabled");
-    ledger.upsertTask({ id: "t", demandConstant: 1, tiers: ["light"] });
+    ledger.upsertTask({ id: "t", demandConstant: 1, tiers: mix("light") });
     expect(ledger.tasks()).toHaveLength(1);
     ledger.close();
   });
@@ -107,12 +116,12 @@ describe("task custody", () => {
 describe("scheduler", () => {
   it("T1 the ingest/produce story: production parks while ingestion has work", async () => {
     const ledger = openLedger();
-    ledger.upsertTask({ id: "ingest", demandCommand: "count-pending", tiers: ["standard"] });
+    ledger.upsertTask({ id: "ingest", demandCommand: "count-pending", tiers: mix("standard") });
     ledger.upsertTask({
       id: "produce",
       demandConstant: 1e9, // Effectively unbounded frontier work.
       gate: "ingest.demand == 0",
-      tiers: ["expert", "standard"],
+      tiers: mix("expert", "standard"),
     });
     const probes = fakeProbes({ "count-pending": 7 });
     const sched = new Scheduler(ledger, { demandTtlMs: 1000 }, probes.runner);
@@ -133,7 +142,7 @@ describe("scheduler", () => {
 
   it("T2 caches probes for the TTL and re-probes on invalidation", async () => {
     const ledger = openLedger();
-    ledger.upsertTask({ id: "a", demandCommand: "probe-a", tiers: ["light"] });
+    ledger.upsertTask({ id: "a", demandCommand: "probe-a", tiers: mix("light") });
     const probes = fakeProbes({ "probe-a": 5 });
     const sched = new Scheduler(ledger, { demandTtlMs: 60_000 }, probes.runner);
     await sched.evaluate(0);
@@ -150,9 +159,9 @@ describe("scheduler", () => {
 
   it("T3 taskFinished invalidates the finisher and gate-dependents only", () => {
     const ledger = openLedger();
-    ledger.upsertTask({ id: "ingest", demandCommand: "p1", tiers: ["light"] });
-    ledger.upsertTask({ id: "produce", demandCommand: "p2", gate: "ingest.demand == 0", tiers: ["light"] });
-    ledger.upsertTask({ id: "unrelated", demandCommand: "p3", tiers: ["light"] });
+    ledger.upsertTask({ id: "ingest", demandCommand: "p1", tiers: mix("light") });
+    ledger.upsertTask({ id: "produce", demandCommand: "p2", gate: "ingest.demand == 0", tiers: mix("light") });
+    ledger.upsertTask({ id: "unrelated", demandCommand: "p3", tiers: mix("light") });
     ledger.recordDemand("ingest", { units: 1 }, 0);
     ledger.recordDemand("produce", { units: 1 }, 0);
     ledger.recordDemand("unrelated", { units: 1 }, 0);
@@ -165,8 +174,8 @@ describe("scheduler", () => {
 
   it("T4 probe failure fails closed: task ineligible, dependent gates closed, error surfaced", async () => {
     const ledger = openLedger();
-    ledger.upsertTask({ id: "ingest", demandCommand: "boom", tiers: ["light"] });
-    ledger.upsertTask({ id: "produce", demandConstant: 10, gate: "ingest.demand == 0", tiers: ["light"] });
+    ledger.upsertTask({ id: "ingest", demandCommand: "boom", tiers: mix("light") });
+    ledger.upsertTask({ id: "produce", demandConstant: 10, gate: "ingest.demand == 0", tiers: mix("light") });
     const probes = fakeProbes({ boom: new Error("db locked") });
     const sched = new Scheduler(ledger, {}, probes.runner);
     const r = await sched.evaluate(0);
@@ -178,7 +187,7 @@ describe("scheduler", () => {
 
   it("T5 machine pause gates everything and runs no probes", async () => {
     const ledger = openLedger();
-    ledger.upsertTask({ id: "a", demandCommand: "probe-a", tiers: ["light"] });
+    ledger.upsertTask({ id: "a", demandCommand: "probe-a", tiers: mix("light") });
     const probes = fakeProbes({ "probe-a": 5 });
     const sched = new Scheduler(ledger, {}, probes.runner);
     ledger.setControl("launches", "paused");
@@ -193,12 +202,12 @@ describe("scheduler", () => {
 
   it("T6 debounce: a gate must stay open for the window; flapping resets it", async () => {
     const ledger = openLedger();
-    ledger.upsertTask({ id: "ingest", demandCommand: "pending", tiers: ["light"] });
+    ledger.upsertTask({ id: "ingest", demandCommand: "pending", tiers: mix("light") });
     ledger.upsertTask({
       id: "produce",
       demandConstant: 10,
       gate: "ingest.demand == 0",
-      tiers: ["light"],
+      tiers: mix("light"),
     });
     const probes = fakeProbes({ pending: 0 });
     const sched = new Scheduler(ledger, { demandTtlMs: 1, gateDebounceMs: 600_000 }, probes.runner);
@@ -226,11 +235,20 @@ describe("allocation", () => {
   const task = (
     taskId: string,
     units: number,
-    tiers: Tier[],
+    tiers: (Tier | `${Tier}:${number}`)[],
     eligible = true,
-  ): TaskSnapshot => ({ taskId, tiers, units, gateOpen: eligible, eligible, error: undefined });
+    share?: number,
+  ): TaskSnapshot => ({
+    taskId,
+    tiers: mix(...tiers),
+    units,
+    ...(share === undefined ? {} : { share }),
+    gateOpen: eligible,
+    eligible,
+    error: undefined,
+  });
 
-  it("A1 distributes proportionally to demand with tier preference and spill", () => {
+  it("A1 distributes proportionally to demand across a task's tiers, with spill", () => {
     const result = allocate(
       [
         task("heavy", 60, ["standard", "expert"]),
@@ -262,7 +280,7 @@ describe("allocation", () => {
   });
 
   it("A3 never assigns more agents than work units", () => {
-    const result = allocate([task("tiny", 2, ["light", "standard"])], { light: 5, standard: 5, expert: 0 });
+    const result = allocate([task("tiny", 2, ["light"])], { light: 5, standard: 5, expert: 0 });
     expect(result.assignments).toEqual([{ taskId: "tiny", tier: "light", count: 2 }]);
     expect(result.unusedSlots.light).toBe(3);
   });
@@ -276,42 +294,80 @@ describe("allocation", () => {
     expect(result.unusedSlots.light).toBe(3);
   });
 
+  it("A11 share, not demand size, divides the fleet", () => {
+    // Ten slots, and a lane whose probe counts problems in sixes against
+    // lanes that count items one by one. On demand alone the counting unit
+    // decided the split; the operator's declared share decides it now.
+    const result = allocate(
+      [
+        task("frontier", 120, ["standard"], true, 7),
+        task("review", 40, ["standard"], true, 2),
+        task("survey", 30, ["standard"], true, 1),
+      ],
+      { light: 0, standard: 10, expert: 0 },
+    );
+    expect(result.assignments).toEqual([
+      { taskId: "frontier", tier: "standard", count: 7 },
+      { taskId: "review", tier: "standard", count: 2 },
+      { taskId: "survey", tier: "standard", count: 1 },
+    ]);
+  });
+
+  it("A12 a lane with less work than share gives the remainder back", () => {
+    // Share is a claim, not a reservation: an idle majority lane must not
+    // hold slots that another lane can use right now.
+    const result = allocate(
+      [
+        task("frontier", 1, ["standard"], true, 7),
+        task("review", 40, ["standard"], true, 2),
+        task("survey", 40, ["standard"], true, 1),
+      ],
+      { light: 0, standard: 10, expert: 0 },
+    );
+    const count = (id: string) =>
+      result.assignments.find((a) => a.taskId === id)?.count ?? 0;
+    expect(count("frontier")).toBe(1);
+    expect(count("review") + count("survey")).toBe(9);
+    expect(count("review")).toBeGreaterThan(count("survey"));
+    expect(result.unusedSlots.standard).toBe(0);
+  });
+
   it("A6 one free slot goes to the task furthest behind its share, not the biggest", () => {
     // The production regime: sessions end one at a time, so almost every cycle
-    // offers a single slot. On demand alone the 60% task wins all of them and
-    // the 15% task never launches; with history it takes its turn.
-    const history = (taskId: string, units: number, recentLaunches: number): TaskSnapshot => ({
-      ...task(taskId, units, ["standard"]),
+    // offers a single slot. Inside one cycle the 60% lane wins every time and
+    // the 15% lane never launches; with history it takes its turn.
+    const history = (taskId: string, share: number, recentLaunches: number): TaskSnapshot => ({
+      ...task(taskId, 120, ["standard"], true, share),
       recentLaunches,
     });
     const slots = { light: 0, standard: 1, expert: 0 };
     // Served exactly in proportion so far (60/25/15 of 100 launches): the next
     // slot still goes to the largest, because nobody is behind.
     expect(
-      allocate([history("big", 120, 60), history("mid", 50, 25), history("small", 30, 15)], slots)
+      allocate([history("big", 60, 60), history("mid", 25, 25), history("small", 15, 15)], slots)
         .assignments,
     ).toEqual([{ taskId: "big", tier: "standard", count: 1 }]);
     // Now the big task has taken everything. The slot goes to whoever is
     // furthest below its own share, which is mid (owed 25%, served 2%) rather
     // than the smallest task (owed 15%, served 0%).
     expect(
-      allocate([history("big", 120, 98), history("mid", 50, 2), history("small", 30, 0)], slots)
+      allocate([history("big", 60, 98), history("mid", 25, 2), history("small", 15, 0)], slots)
         .assignments,
     ).toEqual([{ taskId: "mid", tier: "standard", count: 1 }]);
     // Starved outright, the smallest still gets its turn.
     expect(
-      allocate([history("big", 120, 80), history("mid", 50, 20), history("small", 30, 0)], slots)
+      allocate([history("big", 60, 80), history("mid", 25, 20), history("small", 15, 0)], slots)
         .assignments,
     ).toEqual([{ taskId: "small", tier: "standard", count: 1 }]);
-    // Repeated single-slot cycles converge on the demand split rather than
+    // Repeated single-slot cycles converge on the declared split rather than
     // handing every slot to the same task.
     const served = new Map<string, number>([["big", 0], ["mid", 0], ["small", 0]]);
     for (let i = 0; i < 100; i++) {
       const [a] = allocate(
         [
-          history("big", 120, served.get("big")!),
-          history("mid", 50, served.get("mid")!),
-          history("small", 30, served.get("small")!),
+          history("big", 60, served.get("big")!),
+          history("mid", 25, served.get("mid")!),
+          history("small", 15, served.get("small")!),
         ],
         slots,
       ).assignments;
@@ -320,6 +376,80 @@ describe("allocation", () => {
     expect(served.get("big")).toBe(60);
     expect(served.get("mid")).toBe(25);
     expect(served.get("small")).toBe(15);
+  });
+
+  it("A7 holds a weighted tier mix across single-slot cycles", () => {
+    // The point of weights: "one standard session per twenty light ones" is a
+    // ratio no single cycle can express, and the production regime hands out
+    // one slot at a time (demand is netted against running sessions, so a
+    // busy lane asks for one more agent, not twenty). Without per-tier
+    // history every one of those cycles picks the same tier and the mix never
+    // materialises.
+    const served: Partial<Record<Tier, number>> = {};
+    const slots = { light: 1, standard: 1, expert: 0 };
+    for (let i = 0; i < 63; i++) {
+      const [a] = allocate(
+        [{ ...task("frontier", 1, ["light:20", "standard:1"]), recentLaunchesByTier: served }],
+        slots,
+      ).assignments;
+      served[a!.tier] = (served[a!.tier] ?? 0) + 1;
+    }
+    expect(served).toEqual({ light: 60, standard: 3 });
+  });
+
+  it("A8 a mixed lane spends its whole quota on the tiers that have capacity", () => {
+    // Weights say what to prefer, not what to wait for: with no standard
+    // slots the ratio yields and the light tier takes the lot.
+    const result = allocate([task("frontier", 40, ["light:20", "standard:1"])], {
+      light: 4,
+      standard: 0,
+      expert: 0,
+    });
+    expect(result.assignments).toEqual([{ taskId: "frontier", tier: "light", count: 4 }]);
+  });
+
+  it("A10 a light-heavy lane does not become a standard lane when light is short", () => {
+    // The failure this rules out: light capacity dries up, the lane
+    // substitutes into every free standard slot, and "one standard per twenty
+    // light" silently becomes all-standard. It may take its one standard
+    // share and no more; the rest of the scarce tier is left for lanes that
+    // asked for it.
+    const result = allocate(
+      [
+        task("frontier", 40, ["light:20", "standard:1"]),
+        task("review", 10, ["standard"]),
+      ],
+      { light: 0, standard: 6, expert: 0 },
+    );
+    expect(result.assignments).toEqual([
+      { taskId: "frontier", tier: "standard", count: 1 },
+      { taskId: "review", tier: "standard", count: 5 },
+    ]);
+
+    // And a lane already at its standard share this window declines outright.
+    const saturated = allocate(
+      [
+        {
+          ...task("frontier", 40, ["light:20", "standard:1"]),
+          recentLaunchesByTier: { light: 3, standard: 1 },
+        },
+      ],
+      { light: 0, standard: 6, expert: 0 },
+    );
+    expect(saturated.assignments).toEqual([]);
+    expect(saturated.unusedSlots.standard).toBe(6);
+  });
+
+  it("A9 splits one cycle's quota by weight when the slots are there", () => {
+    const result = allocate([task("frontier", 40, ["light:3", "standard:1"])], {
+      light: 40,
+      standard: 40,
+      expert: 0,
+    });
+    expect(result.assignments).toEqual([
+      { taskId: "frontier", tier: "light", count: 30 },
+      { taskId: "frontier", tier: "standard", count: 10 },
+    ]);
   });
 
   it("A5 is deterministic under equal demand (ties break by id)", () => {

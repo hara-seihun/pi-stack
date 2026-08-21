@@ -3,7 +3,7 @@ import { dirname } from "node:path";
 import { DatabaseSync } from "node:sqlite";
 import { AccountCalibrator } from "../calibrator/calibrator.js";
 import { gateRefs, parseGate } from "../tasks/gate.js";
-import { TIERS, type DemandState, type TaskSpec, type Tier } from "../tasks/types.js";
+import { TIERS, type DemandState, type TaskSpec, type Tier, type TierShare } from "../tasks/types.js";
 import type {
   CalibratorConfig,
   MeterId,
@@ -186,6 +186,25 @@ CREATE TABLE run_message (
 CREATE INDEX run_message_undelivered ON run_message (run_id, delivered_at);
 `;
 
+/** A task's tier list gains relative weights, so one lane can be worked by a
+ * deliberate mix of tiers ("one standard session per twenty light ones")
+ * rather than only by substitution. Existing single-tier lists carry over at
+ * weight 1, where the weight means nothing and the behaviour is unchanged. */
+const TIER_WEIGHT_SCHEMA = `
+UPDATE task SET tiers = (
+  SELECT json_group_array(json_object('tier', value, 'weight', 1))
+  FROM json_each(task.tiers)
+);
+`;
+
+/** A lane gains an explicit claim on the fleet's launches. Existing lanes
+ * carry over at 1, an even split capped by demand, because the alternative —
+ * inferring intent from whatever numbers each demand probe happens to emit —
+ * is what made the split accidental in the first place. */
+const TASK_SHARE_SCHEMA = `
+ALTER TABLE task ADD COLUMN share REAL NOT NULL DEFAULT 1;
+`;
+
 const MIGRATIONS: readonly string[] = [
   SCHEMA,
   TASK_SCHEMA,
@@ -195,6 +214,8 @@ const MIGRATIONS: readonly string[] = [
   DOMAIN_SCHEMA,
   SHARED_ACCOUNT_SCHEMA,
   RUN_MESSAGE_SCHEMA,
+  TIER_WEIGHT_SCHEMA,
+  TASK_SHARE_SCHEMA,
 ];
 
 export type AccountDomain = "interactive" | "orchestrator";
@@ -536,22 +557,30 @@ export class Ledger {
     if ((t.demandCommand === undefined) === (t.demandConstant === undefined)) {
       throw new Error(`task ${t.id}: exactly one of demandCommand/demandConstant required`);
     }
-    if (t.tiers.length === 0 || new Set(t.tiers).size !== t.tiers.length) {
+    const tiers = t.tiers.map((share) => share.tier);
+    if (tiers.length === 0 || new Set(tiers).size !== tiers.length) {
       throw new Error(`task ${t.id}: tiers must be a non-empty list without duplicates`);
     }
-    for (const tier of t.tiers) {
-      if (!TIERS.includes(tier)) throw new Error(`task ${t.id}: unknown tier ${tier}`);
+    for (const share of t.tiers) {
+      if (!TIERS.includes(share.tier)) throw new Error(`task ${t.id}: unknown tier ${share.tier}`);
+      if (!Number.isFinite(share.weight) || share.weight <= 0) {
+        throw new Error(`task ${t.id}: tier ${share.tier} needs a positive weight`);
+      }
+    }
+    if (t.share !== undefined && (!Number.isFinite(t.share) || t.share <= 0)) {
+      throw new Error(`task ${t.id}: share must be positive`);
     }
     if (t.gate !== undefined) parseGate(t.gate); // Validate syntax at write time.
     this.db
       .prepare(
-        `INSERT INTO task (id, demand_command, demand_constant, gate, tiers, prompt, cwd, created_at)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+        `INSERT INTO task (id, demand_command, demand_constant, gate, tiers, share, prompt, cwd, created_at)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
          ON CONFLICT (id) DO UPDATE SET
            demand_command = excluded.demand_command,
            demand_constant = excluded.demand_constant,
            gate = excluded.gate,
            tiers = excluded.tiers,
+           share = excluded.share,
            prompt = excluded.prompt,
            cwd = excluded.cwd`,
       )
@@ -561,6 +590,7 @@ export class Ledger {
         t.demandConstant ?? null,
         t.gate ?? null,
         JSON.stringify(t.tiers),
+        t.share ?? 1,
         t.prompt ?? null,
         t.cwd ?? null,
         Date.now(),
@@ -574,7 +604,7 @@ export class Ledger {
   tasks(): TaskSpec[] {
     const rows = this.db
       .prepare(
-        "SELECT id, demand_command, demand_constant, gate, tiers, prompt, cwd FROM task ORDER BY id",
+        "SELECT id, demand_command, demand_constant, gate, tiers, share, prompt, cwd FROM task ORDER BY id",
       )
       .all() as {
       id: string;
@@ -582,6 +612,7 @@ export class Ledger {
       demand_constant: number | null;
       gate: string | null;
       tiers: string;
+      share: number;
       prompt: string | null;
       cwd: string | null;
     }[];
@@ -590,7 +621,8 @@ export class Ledger {
       demandCommand: r.demand_command ?? undefined,
       demandConstant: r.demand_constant ?? undefined,
       gate: r.gate ?? undefined,
-      tiers: JSON.parse(r.tiers) as Tier[],
+      tiers: JSON.parse(r.tiers) as TierShare[],
+      share: r.share,
       prompt: r.prompt ?? undefined,
       cwd: r.cwd ?? undefined,
     }));
@@ -764,8 +796,16 @@ export class Ledger {
     return ids.map((r) => this.run(r.id)!);
   }
 
-  run(id: string): RunRow | undefined {
-    return this.runRows("WHERE id = ?", [id])[0];
+  /** Operators read truncated ids from `status` output, so a unique prefix
+   * resolves like the full id. Ambiguity is an error, never a guess. */
+  run(idOrPrefix: string): RunRow | undefined {
+    const exact = this.runRows("WHERE id = ?", [idOrPrefix])[0];
+    if (exact !== undefined) return exact;
+    const matches = this.runRows("WHERE id LIKE ? || '%' LIMIT 3", [idOrPrefix]);
+    if (matches.length > 1) {
+      throw new Error(`run id prefix ${idOrPrefix} is ambiguous`);
+    }
+    return matches[0];
   }
 
   runs(filter?: { state?: RunState; runnerId?: string }): RunRow[] {
@@ -970,6 +1010,17 @@ export class Ledger {
       .prepare("SELECT COUNT(*) AS n FROM run WHERE task_id = ? AND started_at >= ?")
       .get(taskId, since) as { n: number };
     return row.n;
+  }
+
+  /** The same launch history split by tier, which is what lets a weighted
+   * tier mix hold across cycles that each hand out a single slot. */
+  recentLaunchCountByTier(taskId: string, since: number): Partial<Record<Tier, number>> {
+    const rows = this.db
+      .prepare(
+        "SELECT tier, COUNT(*) AS n FROM run WHERE task_id = ? AND started_at >= ? GROUP BY tier",
+      )
+      .all(taskId, since) as { tier: Tier; n: number }[];
+    return Object.fromEntries(rows.map((r) => [r.tier, r.n]));
   }
 
   recentErrorCount(taskId: string, since: number): number {

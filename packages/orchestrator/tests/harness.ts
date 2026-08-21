@@ -1,4 +1,5 @@
 import { AccountCalibrator } from "../src/calibrator/calibrator.js";
+import type { Tier, TierShare } from "../src/tasks/types.js";
 import type {
   MeterId,
   MeterSpec,
@@ -9,6 +10,18 @@ import type {
 
 export const HOUR = 3_600_000;
 export const DAY = 24 * HOUR;
+
+/**
+ * A task's tier list, written the way the CLI takes it: `mix("light")` for
+ * the ordinary single-tier lane, `mix("light:20", "standard")` for a lane
+ * that wants twenty light sessions per standard one.
+ */
+export function mix(...entries: (Tier | `${Tier}:${number}`)[]): TierShare[] {
+  return entries.map((entry) => {
+    const [tier, weight] = entry.split(":");
+    return { tier: tier as Tier, weight: weight === undefined ? 1 : Number(weight) };
+  });
+}
 
 export function mulberry32(seed: number): () => number {
   let a = seed >>> 0;

@@ -18,7 +18,32 @@ describe("task set", () => {
     expect(t.prompt).toBe("Attack the central problem.");
     expect(t.demandCommand).toBe("probe"); // silently dropping this would strand the lane
     expect(t.cwd).toBe("/work");
-    expect(t.tiers).toEqual(["standard"]);
+    expect(t.tiers).toEqual([{ tier: "standard", weight: 1 }]);
+    ledger.close();
+  });
+
+  it("reads a weighted tier mix, and defaults an unweighted tier to 1", () => {
+    const ledger = open();
+    taskSet(ledger, ["frontier", "--tiers", "light:20,standard", "--demand-constant", "9"]);
+    expect(task(ledger, "frontier")!.tiers).toEqual([
+      { tier: "light", weight: 20 },
+      { tier: "standard", weight: 1 },
+    ]);
+    expect(() => taskSet(ledger, ["frontier", "--tiers", "light:0"])).toThrow(/positive/);
+    expect(() => taskSet(ledger, ["frontier", "--tiers", "heavy:2"])).toThrow(/unknown tier/);
+    ledger.close();
+  });
+
+  it("carries a lane's share, defaults it to 1, and refuses a meaningless one", () => {
+    const ledger = open();
+    taskSet(ledger, ["frontier", "--tiers", "light:20,standard", "--demand-constant", "9"]);
+    expect(task(ledger, "frontier")!.share).toBe(1);
+    taskSet(ledger, ["frontier", "--share", "14"]);
+    expect(task(ledger, "frontier")!.share).toBe(14);
+    // An unrelated edit must not quietly reset the fleet's split.
+    taskSet(ledger, ["frontier", "--prompt", "go"]);
+    expect(task(ledger, "frontier")!.share).toBe(14);
+    expect(() => taskSet(ledger, ["frontier", "--share", "0"])).toThrow(/positive/);
     ledger.close();
   });
 

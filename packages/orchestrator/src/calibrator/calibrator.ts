@@ -390,6 +390,21 @@ export class AccountCalibrator {
     };
   }
 
+  /**
+   * How fast this meter can be spent right now.
+   *
+   * Pacing is percent-space arithmetic — what is left, over how long it has
+   * to last, discounted by the reset hazard — and a provider reading with a
+   * reset schedule is all it needs. Class calibration is what converts that
+   * rate into tokens, so an uncalibrated meter still gets a plan; its
+   * `tokensPerHourByClass` is simply empty until the coefficients exist.
+   *
+   * Withholding the whole plan until every class was calibrated is what kept
+   * the fleet at one session per account: Codex accounts publish no meter
+   * headers, so they never calibrated, so the broker read them as bootstrap
+   * forever and ran seven agents on seven subscriptions that were 8–23%
+   * consumed with a week left to run.
+   */
   plan(meterId: MeterId, now: number): Result<SpendPlan, PlanError> {
     const st = this.meters.get(meterId);
     if (!st) return err({ reason: "unknown-meter" });
@@ -401,7 +416,6 @@ export class AccountCalibrator {
     const usable = stats.classes.filter(
       (c) => c.confidence !== "none" && c.tokensPerPercent !== undefined,
     );
-    if (usable.length === 0) return err({ reason: "insufficient-calibration" });
     const rs = this.resetStats(meterId);
     const remaining = Math.min(100, Math.max(0, 100 - r.usedPercent));
     const horizonHours = Math.max((r.resetAt - now) / HOUR, 1 / 60);

@@ -117,7 +117,7 @@ describe("broker admission", () => {
     expect(capacity).toBeGreaterThan(0);
   });
 
-  it("keeps bootstrap capacity until every observed meter is calibrated", () => {
+  it("paces on the most binding meter, and runs one session until burn is measured", () => {
     const ledger = Ledger.open(":memory:");
     ledger.upsertAccount({ id: "anth-1", provider: "anthropic", domain: "orchestrator" });
     const fast = { id: "fast", drainedBy: ["cost"], nominalWindowMs: 5 * HOUR };
@@ -135,10 +135,88 @@ describe("broker admission", () => {
       meters: { ...CONFIG.meters, anthropic: [fast, weekly] },
     });
 
-    expect(broker.sustainableRate("anth-1", "anthropic", now)).toBeUndefined();
+    // The nearly-spent weekly meter binds (19% over 42h), not the fresh
+    // five-hour one, even though neither has calibrated token coefficients:
+    // pacing is percent-space arithmetic and needs none.
+    const rate = broker.sustainableRate("anth-1", "anthropic", now)!;
+    expect(rate).toBeGreaterThan(0.4);
+    expect(rate).toBeLessThan(0.5);
+    // Concurrency is still one, because the other half of the quotient — what
+    // a session costs — has not been measured on this account yet.
     const first = broker.admit("standard", now)!;
     ledger.createRun({ taskId: "t", tier: "standard", at: now, ...first });
     expect(broker.admit("expert", now)).toBeUndefined();
+  });
+
+  it("a metered account with no token calibration still earns real concurrency", () => {
+    // The Codex case, and the bug this rules out. Codex publishes no meter
+    // headers to pi's transport, so its usage classes never calibrate; the
+    // broker used to read that as bootstrap and run one session per account
+    // on a subscription with a week of headroom. Percent readings alone are
+    // enough to pace, and with burn measured the account carries a fleet.
+    const ledger = Ledger.open(":memory:");
+    ledger.upsertAccount({ id: "codex-1", provider: "openai-codex", domain: "orchestrator" });
+    const now = 48 * HOUR;
+    // A week's plan, 10% spent, no usage events at all to attribute it to.
+    ledger.recordReading("codex-1", "weekly", {
+      at: now - 24 * HOUR,
+      usedPercent: 9,
+      resetAt: now + 5 * 24 * HOUR,
+    });
+    ledger.recordReading("codex-1", "weekly", {
+      at: now,
+      usedPercent: 10,
+      resetAt: now + 5 * 24 * HOUR,
+    });
+    for (let i = 0; i < 6; i++) {
+      const started = now - (i + 1) * 4 * HOUR;
+      const id = ledger.createRun({
+        taskId: "t",
+        tier: "light",
+        accountId: "codex-1",
+        model: "gpt-5.6-luna",
+        provider: "openai-codex",
+        at: started,
+      });
+      ledger.finishRun(id, { state: "done" }, started + 4 * HOUR);
+    }
+    const broker = new Broker(ledger, CONFIG);
+
+    expect(broker.sustainableRate("codex-1", "openai-codex", now)).toBeGreaterThan(0);
+    let admitted = 0;
+    for (;;) {
+      const a = broker.admit("light", now);
+      if (a === undefined) break;
+      ledger.createRun({ taskId: "t", tier: "light", at: now, ...a });
+      admitted++;
+    }
+    expect(admitted).toBeGreaterThan(1);
+  });
+
+  it("stops at the machine's session ceiling however much quota is left", () => {
+    // Provider quota is not the only finite resource: sessions live in the
+    // runner's own process, and 24 of them once reached 22.8 GiB and were
+    // OOM-killed. A plan with room for hundreds must not be allowed to ask
+    // for them.
+    const ledger = openLedger();
+    const now = feedHistory(ledger, "anth-1", { percentPerHour: 0.1, hours: 48 });
+    feedRuns(ledger, "anth-1", { count: 6, hoursEach: 8, endAt: now });
+    const broker = new Broker(ledger, { ...CONFIG, maxConcurrentSessions: 3 });
+    let admitted = 0;
+    for (;;) {
+      const a = broker.admit("standard", now);
+      if (a === undefined) break;
+      ledger.createRun({ taskId: "t", tier: "standard", at: now, ...a });
+      admitted++;
+    }
+    expect(admitted).toBe(3);
+    // The same ceiling bounds what a cycle advertises, across all tiers.
+    const ledger2 = openLedger();
+    const now2 = feedHistory(ledger2, "anth-1", { percentPerHour: 0.1, hours: 48 });
+    feedRuns(ledger2, "anth-1", { count: 6, hoursEach: 8, endAt: now2 });
+    const broker2 = new Broker(ledger2, { ...CONFIG, maxConcurrentSessions: 3 });
+    const slots = broker2.slotsByTier(now2, { light: 10, standard: 10, expert: 10 });
+    expect(slots.light + slots.standard + slots.expert).toBe(3);
   });
 
   it("refuses calibration from a reading whose reset already passed", () => {
@@ -209,6 +287,25 @@ describe("broker slots", () => {
     expect(slots.standard).toBe(1);
     expect(slots.light).toBe(0);
     expect(slots.expert + slots.standard + slots.light).toBe(2);
+  });
+
+  it("advertises slots in proportion to demand, not scarcest tier first", () => {
+    // Tiers share accounts: light and standard both draw on Codex here.
+    // Draining the scarcer tier first took every account every cycle, so a
+    // light-heavy machine was advertised no light slots at all.
+    const ledger = openLedger();
+    const broker = new Broker(ledger, CONFIG);
+    const slots = broker.slotsByTier(0, { light: 40, standard: 2, expert: 0 });
+    expect(slots.expert).toBe(0); // nothing wants it, so it reserves nothing
+    expect(slots.light).toBe(1);
+    expect(slots.standard).toBe(1);
+
+    // Demand still caps each tier: two accounts, but only one wants a slot.
+    expect(broker.slotsByTier(0, { light: 1, standard: 0, expert: 0 })).toEqual({
+      light: 1,
+      standard: 0,
+      expert: 0,
+    });
   });
 
   it("slot advertisement is bounded per tier", () => {
