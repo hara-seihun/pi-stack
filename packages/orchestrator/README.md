@@ -152,6 +152,14 @@ describe scheduling:
   redistributes capacity a tier-restricted task cannot use. Tier labels live
   only in launch-side tables; prompt assembly and agent-visible surfaces
   have no read path to them.
+- Proportional **across cycles**, not inside one. Sessions end one at a time,
+  so the common cycle offers a single slot, every integer quota floors to
+  zero, and demand alone would hand that slot to the largest task every time
+  — a 60% task took 100% of ordinary cycles and a 15% task launched only when
+  three slots happened to free together. Each task therefore carries its
+  launch count over a fairness window (6h) into the decision, and slots go to
+  the task furthest below its own share. Repeated single-slot cycles converge
+  on the demand split.
 
 The machine-wide pause is the root of the same mechanism: a `control` row
 (`launches = enabled|paused`) in the ledger, honoured by every evaluation

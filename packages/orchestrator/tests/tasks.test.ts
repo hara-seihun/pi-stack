@@ -276,6 +276,52 @@ describe("allocation", () => {
     expect(result.unusedSlots.light).toBe(3);
   });
 
+  it("A6 one free slot goes to the task furthest behind its share, not the biggest", () => {
+    // The production regime: sessions end one at a time, so almost every cycle
+    // offers a single slot. On demand alone the 60% task wins all of them and
+    // the 15% task never launches; with history it takes its turn.
+    const history = (taskId: string, units: number, recentLaunches: number): TaskSnapshot => ({
+      ...task(taskId, units, ["standard"]),
+      recentLaunches,
+    });
+    const slots = { light: 0, standard: 1, expert: 0 };
+    // Served exactly in proportion so far (60/25/15 of 100 launches): the next
+    // slot still goes to the largest, because nobody is behind.
+    expect(
+      allocate([history("big", 120, 60), history("mid", 50, 25), history("small", 30, 15)], slots)
+        .assignments,
+    ).toEqual([{ taskId: "big", tier: "standard", count: 1 }]);
+    // Now the big task has taken everything. The slot goes to whoever is
+    // furthest below its own share, which is mid (owed 25%, served 2%) rather
+    // than the smallest task (owed 15%, served 0%).
+    expect(
+      allocate([history("big", 120, 98), history("mid", 50, 2), history("small", 30, 0)], slots)
+        .assignments,
+    ).toEqual([{ taskId: "mid", tier: "standard", count: 1 }]);
+    // Starved outright, the smallest still gets its turn.
+    expect(
+      allocate([history("big", 120, 80), history("mid", 50, 20), history("small", 30, 0)], slots)
+        .assignments,
+    ).toEqual([{ taskId: "small", tier: "standard", count: 1 }]);
+    // Repeated single-slot cycles converge on the demand split rather than
+    // handing every slot to the same task.
+    const served = new Map<string, number>([["big", 0], ["mid", 0], ["small", 0]]);
+    for (let i = 0; i < 100; i++) {
+      const [a] = allocate(
+        [
+          history("big", 120, served.get("big")!),
+          history("mid", 50, served.get("mid")!),
+          history("small", 30, served.get("small")!),
+        ],
+        slots,
+      ).assignments;
+      served.set(a!.taskId, served.get(a!.taskId)! + 1);
+    }
+    expect(served.get("big")).toBe(60);
+    expect(served.get("mid")).toBe(25);
+    expect(served.get("small")).toBe(15);
+  });
+
   it("A5 is deterministic under equal demand (ties break by id)", () => {
     const a = allocate([task("b", 10, ["light"]), task("a", 10, ["light"])], {
       light: 3,

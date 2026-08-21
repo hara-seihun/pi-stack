@@ -38,6 +38,10 @@ export interface TaskSnapshot {
   readonly gateOpen: boolean;
   readonly eligible: boolean;
   readonly error: string | undefined;
+  /** Launches this task has already had inside the fairness window. What
+   * makes allocation proportional across cycles instead of only within one;
+   * omitted by callers that do not track it. */
+  readonly recentLaunches?: number;
 }
 
 export interface EvaluateResult {

@@ -22,6 +22,10 @@ export interface ControllerConfig {
    * skipped, so a crashing task cannot hot-loop through plan capacity. */
   readonly errorWindowMs: number;
   readonly errorThreshold: number;
+  /** How far back the allocator looks when measuring what share of launches a
+   * task has already had. Long enough to smooth single-slot cycles, short
+   * enough that a demand change is honoured within a shift. */
+  readonly fairnessWindowMs: number;
 }
 
 export const CONTROLLER_DEFAULTS: ControllerConfig = {
@@ -29,6 +33,7 @@ export const CONTROLLER_DEFAULTS: ControllerConfig = {
   claimTimeoutMs: 2 * 60_000,
   errorWindowMs: 30 * 60_000,
   errorThreshold: 3,
+  fairnessWindowMs: 6 * 60 * 60_000,
 };
 
 export interface TickReport {
@@ -100,6 +105,7 @@ export class Controller {
           t.units === undefined
             ? undefined
             : Math.max(0, t.units - (activeByTask.get(t.taskId) ?? 0)),
+        recentLaunches: this.ledger.recentLaunchCount(t.taskId, now - this.cfg.fairnessWindowMs),
       }));
 
     const demandByTier: Partial<Record<Tier, number>> = {};

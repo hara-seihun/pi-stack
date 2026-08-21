@@ -962,6 +962,16 @@ export class Ledger {
   }
 
   /** Error runs for a task since the cutoff; the controller's circuit breaker. */
+  /** Launches a task has had since a cutoff, whatever became of them. The
+   *  allocator's memory: proportional shares are only proportional if what a
+   *  task already received counts against what it is owed next. */
+  recentLaunchCount(taskId: string, since: number): number {
+    const row = this.db
+      .prepare("SELECT COUNT(*) AS n FROM run WHERE task_id = ? AND started_at >= ?")
+      .get(taskId, since) as { n: number };
+    return row.n;
+  }
+
   recentErrorCount(taskId: string, since: number): number {
     const row = this.db
       .prepare(

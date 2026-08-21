@@ -6,8 +6,18 @@ import { TIERS } from "./types.js";
  * honouring each task's preference-ordered tier substitution set. Largest
  * remainder keeps proportionality exact; a task never receives more agents
  * than it has work units; leftover capacity from tier-restricted mismatches
- * is redistributed greedily to the highest-demand task that can use it.
+ * is redistributed greedily to the task furthest behind its share.
  * Deterministic: ties break by demand then task id.
+ *
+ * Proportionality has to be measured across cycles, not inside one. Slots
+ * free one session at a time, and with a single slot every task's integer
+ * quota floors to zero, so the whole decision is the remainder order — which,
+ * on demand alone, is the largest task every time. A 60% task took 100% of
+ * the common cycle and a 15% task launched only when three slots happened to
+ * free together. So each task's recent launch history comes in with it, and
+ * the ordering key is its shortfall: demand share minus served share. With no
+ * history supplied the shortfall is zero everywhere and the order falls back
+ * to demand, which is what the pure-function tests pin.
  */
 export function allocate(
   tasks: readonly TaskSnapshot[],
@@ -25,8 +35,12 @@ export function allocate(
   }
 
   // Proportional quotas by largest remainder, capped at each task's units.
+  const totalServed = eligible.reduce((s, t) => s + (t.recentLaunches ?? 0), 0);
+  const shortfallOf = (t: TaskSnapshot): number =>
+    totalServed === 0 ? 0 : (t.units ?? 0) / totalUnits - (t.recentLaunches ?? 0) / totalServed;
+
   const quota = new Map<string, number>();
-  const remainders: { taskId: string; units: number; frac: number }[] = [];
+  const remainders: { taskId: string; units: number; frac: number; shortfall: number }[] = [];
   let used = 0;
   for (const t of eligible) {
     const units = t.units ?? 0;
@@ -34,10 +48,19 @@ export function allocate(
     const base = Math.min(Math.floor(ideal), Math.ceil(units));
     quota.set(t.taskId, base);
     used += base;
-    remainders.push({ taskId: t.taskId, units, frac: ideal - Math.floor(ideal) });
+    remainders.push({
+      taskId: t.taskId,
+      units,
+      frac: ideal - Math.floor(ideal),
+      shortfall: shortfallOf(t),
+    });
   }
   remainders.sort(
-    (a, b) => b.frac - a.frac || b.units - a.units || a.taskId.localeCompare(b.taskId),
+    (a, b) =>
+      b.shortfall - a.shortfall ||
+      b.frac - a.frac ||
+      b.units - a.units ||
+      a.taskId.localeCompare(b.taskId),
   );
   for (const r of remainders) {
     if (used >= totalSlots) break;
@@ -69,12 +92,18 @@ export function allocate(
     }
   }
 
-  // Second pass: leftover capacity goes one slot at a time to the
-  // highest-demand task that allows the tier and still has work headroom.
+  // Second pass: leftover capacity goes one slot at a time to the task
+  // furthest behind its share that allows the tier and still has work headroom.
+  const byShortfall = [...eligible].sort(
+    (a, b) =>
+      shortfallOf(b) - shortfallOf(a) ||
+      (b.units ?? 0) - (a.units ?? 0) ||
+      a.taskId.localeCompare(b.taskId),
+  );
   let progressed = true;
   while (progressed) {
     progressed = false;
-    for (const t of eligible) {
+    for (const t of byShortfall) {
       if (assignedCount(t.taskId) >= Math.ceil(t.units ?? 0)) continue;
       const tier = t.tiers.find((candidate) => (capacity[candidate] ?? 0) > 0);
       if (tier === undefined) continue;
