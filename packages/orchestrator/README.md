@@ -31,7 +31,16 @@ credential in the central store beside the ledger (`auth.json`, or
 `PI_ORCHESTRATOR_AUTH`): both runtimes resolve and refresh it under one
 cross-process lock, so rotating refresh tokens are never duplicated.
 `account share <id>` enables this mode and `account login <id>` performs a
-headless device login directly into the shared store.
+headless device login directly into the shared store; both delete the
+invoking user's copy of that credential, because custody is a move.
+
+Shared custody must be exclusive, and the provider enforces it rather than
+trusting it. Pi's resolver lets a credential stored under a provider id own
+that provider: a leftover per-user `auth.json` entry for a shared alias would
+otherwise resolve to no auth at all (`No API key found`), and letting the
+family's own OAuth branch see that stale copy would rotate — and invalidate —
+the live shared refresh token. The shared provider therefore answers both
+branches from the shared store and ignores whatever copy it is handed.
 
 ## Core calibrator (`src/calibrator/`)
 
@@ -212,6 +221,13 @@ silently dropped work). Workers get distinct ids, so a crashed worker's
 running rows (reaped on heartbeat timeout) never count against the
 replacement's capacity. Only a supervisor update needs a full drain first,
 which is why it holds no policy.
+
+Run outcomes are classified by whose failure they are. A rate-limited
+account cools down so the next run goes to a sibling. An account that cannot
+authenticate at all — missing, shadowed, or rejected credential — is recorded
+`aborted` (like an unclaimed run) and cooled down, never `error`: it is a
+property of the account, and counting it against the task would let one dead
+credential trip every task's circuit breaker and stop the fleet.
 
 Run custody lives in the ledger's `run` table (launch-side only: `tier` is
 recorded there for capacity accounting and never reaches a host). A task
