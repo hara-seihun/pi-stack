@@ -95,10 +95,11 @@ export class PiHost implements HostManager {
       name: "task_complete",
       label: "Complete task",
       description:
-        "Report this launch's validated result. Call it when your work is done; " +
-        "calling it again replaces the earlier report. Set complete=true only when " +
-        "the task's completion condition is satisfied. Set productive=false only " +
-        "when this launch processed no work unit at all.",
+        "Running report of this launch's validated results. Call it with an updated " +
+        "cumulative summary every time you land something, then keep working; each " +
+        "call replaces the earlier report and the newest is the record. Set " +
+        "complete=true only when the task's completion condition is satisfied. Set " +
+        "productive=false only when this launch processed no work unit at all.",
       parameters: Type.Object({
         complete: Type.Boolean(),
         productive: Type.Optional(
