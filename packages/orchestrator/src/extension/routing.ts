@@ -23,7 +23,11 @@ import { baseProvider, defaultLedgerPath } from "./usage-logger.js";
  *   prompt caches are per-account, so rebinding mid-session wastes them.
  * - On a rate-limit error the failing account cools down in the ledger
  *   (which broker admission also honours) and the session moves to the next
- *   account with a resume prompt. Stickiness yields only to failure.
+ *   account. Stickiness yields only to failure. pi's own auto-retry then
+ *   replays the interrupted turn on the account we just moved to, so the
+ *   resume prompt is held back until `agent_settled` proves no retry
+ *   rescued the turn — an injected "your turn did not complete" after a
+ *   completed reply is a lie the agent has to reason around.
  *
  * Orchestrator-launched sessions set PI_ORCHESTRATOR_ASSIGNED=1: the broker
  * owns their account custody, so binding and failover stay out — one brain
@@ -134,7 +138,14 @@ export default function routing(pi: ExtensionAPI): void {
     await bind(ctx);
   });
 
+  /** A move that still owes the agent an explanation, if the run stays dead.
+   * Only the most recent agent_end's verdict counts: a later successful run
+   * (pi's auto-retry on the new account) clears it, and a later failure
+   * replaces it. */
+  let unresolved: { failure: string; account: string } | undefined;
+
   pi.on("agent_end", async (event, ctx) => {
+    unresolved = undefined;
     const last = event.messages[event.messages.length - 1];
     if (last?.role !== "assistant") return;
     const { stopReason, errorMessage } = last as { stopReason?: string; errorMessage?: string };
@@ -145,12 +156,21 @@ export default function routing(pi: ExtensionAPI): void {
     if (ledger.accounts().some((a) => a.id === failing)) {
       ledger.setAccountCooldown(failing, Date.now() + rateLimitCooldownMs(errorMessage));
     }
+    // Move now, before pi's auto-retry fires: the retry inherits the new
+    // account, which is what usually saves the turn without the agent ever
+    // knowing a provider fell over.
     const moved = await bind(ctx, new Set([failing]));
-    if (moved !== undefined) {
-      // agent_end can fire while the loop is still winding down; followUp
-      // queues the retry instead of racing it.
-      pi.sendUserMessage(failoverPrompt(errorMessage, moved), { deliverAs: "followUp" });
-    }
+    if (moved !== undefined) unresolved = { failure: errorMessage, account: moved };
+  });
+
+  // agent_settled means pi will not retry, compact, or continue on its own.
+  // Only here is the turn genuinely lost, so only here does the agent need
+  // to be told to resume it.
+  pi.on("agent_settled", async () => {
+    const notice = unresolved;
+    unresolved = undefined;
+    if (notice === undefined) return;
+    pi.sendUserMessage(failoverPrompt(notice.failure, notice.account));
   });
 
   pi.on("session_shutdown", async () => {

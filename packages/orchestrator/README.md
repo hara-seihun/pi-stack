@@ -260,7 +260,13 @@ and the extension replaces the old 6,000-line multi-pass with three rules:
   switch throws the cache away. Resume, fork, and reload never rebind.
 - Stickiness yields only to failure: on a rate-limit error the account
   cools down in the ledger (broker admission honours the same fact) and the
-  session moves to the next account with a resume prompt.
+  session moves to the next account. The move happens on `agent_end`, before
+  pi's own auto-retry fires, so the retry replays the interrupted turn on the
+  healthy account and the agent usually never notices. The resume prompt is
+  held for `agent_settled` — the point where pi guarantees no retry,
+  compaction, or queued continuation is left — and is sent only if the run
+  is still dead there. Telling an agent its turn "did not complete" after a
+  retry already delivered the reply is a lie it then has to reason around.
 
 Orchestrator-launched sessions set `PI_ORCHESTRATOR_ASSIGNED=1` and the
 extension stays out entirely — the broker owns their custody, so exactly
