@@ -107,12 +107,26 @@ three meters (5h, 7d, 7d_oi) on every response. Ledger location:
 ## Meter sampling (`src/meters/`)
 
 Providers that publish no rate-limit headers need a poller, or their meters
-have no source at all. Only Anthropic publishes them; Cursor's Connect stream
-carries no quota state, and pi talks to Codex over a WebSocket by default, so
-there is no HTTP response to carry headers there either. The controller daemon
-therefore samples both: Cursor's dashboard period-usage RPC, and Codex's
-account usage endpoint (`/backend-api/codex/usage`), writing ordinary meter
-readings for each.
+have no source at all. Cursor's Connect stream carries no quota state, and pi
+talks to Codex over a WebSocket by default, so there is no HTTP response to
+carry headers there either. The controller daemon therefore samples both:
+Cursor's dashboard period-usage RPC, and Codex's account usage endpoint
+(`/backend-api/codex/usage`), writing ordinary meter readings for each.
+
+Anthropic does publish headers, and they are still recorded for free by the
+usage-logger — but they describe *one response*, not the account, and both
+blind spots overstate headroom. The scoped weekly header
+(`7d_oi`, Fable's) rides only on traffic scoped to that model, so an Opus
+account has no Fable meter in the ledger at all; and no header can report a
+drain that happened on another machine, so an account shared with an
+off-machine client reads as idle. Both were live: the Opus account's Fable
+week was fully spent and invisible, and Pi Remote's Fable card averaged the
+two accounts that had a reading and presented 87% as the fleet's when the
+weighted truth was 65%. `GET /api/oauth/usage` returns every bucket of the
+plan on every call, whatever the account has been running and wherever it
+ran, so the daemon polls it for accounts in its own credential custody and
+the usage-logger polls it for each interactive user's, due-gated on the
+stalest meter so a busy session cannot keep a missing bucket "fresh".
 
 Codex was the expensive case to have missed. With no meter source at all, every
 Codex account was permanently uncalibrated, which the broker correctly reads as
@@ -127,9 +141,9 @@ not the account plan and are not read.
 
 Readings are spaced by a sampling interval, only percentages are recorded (the
 dollar "included usage" figure Cursor reports gates nothing — see
-[docs/provider-meter-notes.md](docs/provider-meter-notes.md)), and neither
-sampler ever refreshes OAuth: an expired access token is recorded as a gap
-rather than a token-family revocation. Everything downstream — calibration,
+[docs/provider-meter-notes.md](docs/provider-meter-notes.md)), and no sampler
+ever refreshes OAuth: an expired access token is recorded as a gap rather than
+a token-family revocation. Everything downstream — calibration,
 broker admission, Pi Remote's plan cards — then reads the same ledger facts it
 reads for header-instrumented providers.
 

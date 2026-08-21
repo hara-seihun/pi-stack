@@ -13,6 +13,7 @@ import type { AccountDomain } from "./ledger/ledger.js";
 import { brokerConfig, defaultConfigPath, loadConfig } from "./config.js";
 import { CURSOR_PROVIDER, CursorMeterSampler } from "./meters/cursor.js";
 import { CODEX_PROVIDER, CodexMeterSampler } from "./meters/codex.js";
+import { AnthropicMeterSampler } from "./meters/anthropic.js";
 import { VoiceBroker } from "./voice/broker.js";
 import { createVoiceServer } from "./voice/server.js";
 import type { LaunchSpec } from "./host/types.js";
@@ -228,6 +229,13 @@ async function daemon(ledger: Ledger, args: string[]): Promise<void> {
           meters: codexMeters,
         })
       : undefined;
+  // Anthropic does publish meter headers, but only for the models a session
+  // actually runs and only for traffic on this machine, so an Opus account's
+  // Fable meter and any off-machine drain are invisible to the usage-logger.
+  // The account usage endpoint reports every bucket on every call; this poll
+  // covers the accounts in this user's custody, and each interactive user's
+  // own pi sessions poll theirs.
+  const anthropicSampler = new AnthropicMeterSampler(ledger, { agentDir: agentDirPath() });
   console.log(`controller started (config: ${defaultConfigPath()})`);
   for (;;) {
     try {
@@ -243,6 +251,16 @@ async function daemon(ledger: Ledger, args: string[]): Promise<void> {
         if (sample.outcome === "recorded") {
           console.log(`meter ${meter}: ${sample.usedPercent}% used`);
         } else if (sample.outcome !== "not-due") {
+          console.error(`meter ${meter}: ${sample.outcome}${sample.detail ? ` (${sample.detail})` : ""}`);
+        }
+      }
+      for (const sample of await anthropicSampler.sample()) {
+        const meter = `${sample.accountId}/${sample.meterId ?? "?"}`;
+        if (sample.outcome === "recorded") {
+          console.log(`meter ${meter}: ${sample.usedPercent}% used`);
+        } else if (sample.outcome !== "not-due" && sample.outcome !== "no-credential") {
+          // `no-credential` is the ordinary state of an account held in
+          // another custody domain, not a fault worth logging every tick.
           console.error(`meter ${meter}: ${sample.outcome}${sample.detail ? ` (${sample.detail})` : ""}`);
         }
       }

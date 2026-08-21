@@ -1,6 +1,21 @@
 import { mkdirSync } from "node:fs";
+import { createRequire } from "node:module";
 import { dirname } from "node:path";
-import { DatabaseSync } from "node:sqlite";
+import type { DatabaseSync } from "node:sqlite";
+
+/**
+ * The ledger must open inside any host that embeds a pi session — the
+ * orchestrator's own Node processes, but also bun runtimes (the Converge
+ * meeting agent embeds pi via the SDK, and its extensions open this ledger).
+ * Node ships sqlite as `node:sqlite`, bun as `bun:sqlite`; the subset used
+ * here (exec, prepare().get/.all/.run with positional binds) is identical,
+ * so resolve whichever module the current runtime provides.
+ */
+const require = createRequire(import.meta.url);
+const SqliteDatabase: new (path: string) => DatabaseSync =
+  typeof (globalThis as { Bun?: unknown }).Bun === "undefined"
+    ? (require("node:sqlite") as { DatabaseSync: new (path: string) => DatabaseSync }).DatabaseSync
+    : (require("bun:sqlite") as { Database: new (path: string) => DatabaseSync }).Database;
 import { AccountCalibrator } from "../calibrator/calibrator.js";
 import { gateRefs, parseGate } from "../tasks/gate.js";
 import { TIERS, type DemandState, type TaskSpec, type Tier, type TierShare } from "../tasks/types.js";
@@ -294,7 +309,7 @@ export class Ledger {
 
   static open(path: string): Ledger {
     if (path !== ":memory:") mkdirSync(dirname(path), { recursive: true });
-    const db = new DatabaseSync(path);
+    const db = new SqliteDatabase(path);
     // busy_timeout first: setting the journal mode takes a brief exclusive
     // lock, so two processes opening the ledger at once (boot, or a runner
     // worker starting beside its supervisor) would otherwise race and one

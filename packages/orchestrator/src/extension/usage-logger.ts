@@ -2,6 +2,7 @@ import { homedir } from "node:os";
 import { join } from "node:path";
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 import { Ledger } from "../ledger/ledger.js";
+import { AnthropicMeterSampler } from "../meters/anthropic.js";
 import type { MeterReading } from "../calibrator/types.js";
 
 /**
@@ -33,10 +34,21 @@ export function baseProvider(providerAlias: string): string {
   return providerAlias.replace(/-\d+$/, "");
 }
 
+/** pi agent directory of the user this session runs as: its auth.json is the
+ * credential custody for this session's accounts. */
+function agentDirPath(): string {
+  return process.env.PI_AGENT_DIR ?? process.env.PI_CODING_AGENT_DIR ?? join(homedir(), ".pi", "agent");
+}
+
 /**
- * Anthropic reports all unified meters on every response (names verified
- * against recorded production traffic): 5h, 7d, and the model-specific
- * 7d_oi weekly. Utilization is a fraction with 1% granularity.
+ * Anthropic stamps its unified meters on every response (names verified
+ * against recorded production traffic): 5h, 7d, and the model-scoped 7d_oi
+ * weekly. Utilization is a fraction with 1% granularity.
+ *
+ * This is a complete record of *this response*, not of the account: the
+ * 7d_oi header appears only on traffic scoped to that model, and no header
+ * can report a drain that happened on another machine. The meter sampler
+ * beside this extension polls the account usage endpoint to close both gaps.
  */
 export function anthropicMeterReadings(
   headers: Record<string, string>,
@@ -64,9 +76,34 @@ export default function usageLogger(pi: ExtensionAPI): void {
   let lastErrorLog = 0;
   let activeLease: string | undefined;
   let leaseHeartbeat: ReturnType<typeof setInterval> | undefined;
+  let anthropicSampler: AnthropicMeterSampler | undefined;
+  let anthropicPoll: Promise<unknown> | undefined;
   const knownAccounts = new Set<string>();
 
   const open = (): Ledger => (ledger ??= Ledger.open(defaultLedgerPath()));
+
+  /**
+   * Fills the meters this session's response headers cannot report, for the
+   * accounts credentialed in this user's agent dir. Due-gated inside the
+   * sampler, so a busy session polls at most once per interval, and never
+   * awaited: plan meters are worth a background request, never a pause
+   * between the provider's response and the agent's next step.
+   */
+  const pollAnthropicMeters = (l: Ledger): void => {
+    if (anthropicPoll !== undefined) return;
+    anthropicSampler ??= new AnthropicMeterSampler(l, { agentDir: agentDirPath() });
+    anthropicPoll = anthropicSampler
+      .sample()
+      .catch((thrown) => {
+        if (Date.now() - lastErrorLog > 60_000) {
+          lastErrorLog = Date.now();
+          console.error(`pi-orchestrator usage-logger: anthropic meter poll: ${String(thrown)}`);
+        }
+      })
+      .finally(() => {
+        anthropicPoll = undefined;
+      });
+  };
 
   const guard = (fn: () => void): void => {
     try {
@@ -144,12 +181,17 @@ export default function usageLogger(pi: ExtensionAPI): void {
           // Concurrent sessions race on readings; a lost redundant reading is fine.
         }
       }
+      pollAnthropicMeters(l);
     });
   });
 
   pi.on("session_shutdown", async () => {
     endLease();
+    // The poll writes through this ledger handle, so it must finish before
+    // the handle closes; it is bounded by the sampler's request timeout.
+    await anthropicPoll;
     ledger?.close();
     ledger = undefined;
+    anthropicSampler = undefined;
   });
 }

@@ -14,7 +14,8 @@ const CONFIG: OrchestratorConfig = {
     anthropic: {
       meters: [
         { id: "anthropic-5h", drainedBy: ["default:cost", "opus:cost", "fable:cost"], windowHours: 5 },
-        { id: "anthropic-7d_oi", drainedBy: ["opus:cost", "fable:cost"], windowHours: 168 },
+        // The scoped weekly meter is Fable's alone; Opus never touches it.
+        { id: "anthropic-7d_oi", drainedBy: ["fable:cost"], windowHours: 168 },
       ],
       costWeights: { input: 1, output: 5, cacheRead: 0.1, cacheWrite: 1.25 },
       modelClasses: { "claude-fable-5": "fable", "claude-opus-5": "opus" },

@@ -44,6 +44,32 @@ tests).
   `GetAggregatedUsageEvents` RPC reports the real split. Cost weights for
   Cursor must be corrected from that RPC, not taken from stream usage.
 
+## Anthropic
+
+- Anthropic stamps `anthropic-ratelimit-unified-<window>-*` headers on every
+  response, but a response reports only the windows *its own request* was
+  metered against. The scoped weekly window (`7d_oi`) rides only on traffic
+  scoped to that model, so an account running Opus emits `5h` and `7d` and
+  nothing else and its scoped meter never exists. Headers are also
+  machine-local: an account shared with an off-machine client reads as idle
+  while its plan drains. Both gaps overstate headroom, so headers alone are
+  not a meter source for this provider either — poll
+  `GET https://api.anthropic.com/api/oauth/usage`, which returns every bucket
+  of the plan on every call.
+- That response's `limits` array is the authority. The older top-level fields
+  carry no scoped weekly bucket at all (`seven_day_opus` is null on these
+  plans, and is *not* this bucket), so reading them reintroduces the hole.
+- The scoped weekly meter is **Fable's alone; Opus never touches it**.
+  Verified from production traffic: readings on `7d_oi` begin exactly when an
+  account starts running Fable and never appear for Opus-only accounts, and
+  the usage endpoint labels the same bucket `weekly_scoped` on model "Fable".
+  Opus drains the session and all-models weekly meters, which is why no card
+  or meter may be labelled "Opus".
+- Poll due-ness must be judged on the **stalest** of an account's meters. A
+  running session refreshes `5h` and `7d` from headers continuously; judging
+  on the freshest reading would leave the very bucket the poll exists to
+  supply permanently "not due".
+
 ## OpenAI
 
 - Codex publishes no meter state pi can observe: the default transport is a
