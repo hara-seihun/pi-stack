@@ -226,7 +226,7 @@ export class PiHost implements HostManager {
           transcript.append("tool_start", {
             toolCallId: String(event.toolCallId ?? ""),
             name: String(event.toolName ?? "tool"),
-            args: bounded(event.args),
+            args: boundedArgs(event.args),
           });
           return;
         case "tool_execution_end":
@@ -267,6 +267,22 @@ const MAX_PAYLOAD = 8_000;
 function bounded(value: unknown): string {
   const text = typeof value === "string" ? value : JSON.stringify(value ?? "") ?? "";
   return text.length > MAX_PAYLOAD ? `${text.slice(0, MAX_PAYLOAD)}… [truncated]` : text;
+}
+
+/** Tool arguments stay structured. A reader renders a tool card from named
+ * fields — a bash `command` and its `timeout`, a `path`, an edit count — so
+ * flattening them to a JSON blob would leave every card in the observer's
+ * transcript blank. Oversized arguments degrade to a labelled preview rather
+ * than to a second serialization of the same object. */
+function boundedArgs(value: unknown): unknown {
+  let encoded: string;
+  try {
+    encoded = JSON.stringify(value ?? {}) ?? "{}";
+  } catch {
+    return { unavailable: true };
+  }
+  if (encoded.length <= MAX_PAYLOAD) return value ?? {};
+  return { truncated: true, preview: `${encoded.slice(0, MAX_PAYLOAD)}… [truncated]` };
 }
 
 function messageText(message: any): string {
