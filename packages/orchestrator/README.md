@@ -340,10 +340,13 @@ Three consumption modes, all exported as `pi-orchestrator/voice`:
 
 ## Operator CLI (`src/cli.ts`)
 
-Standing math lane launches are paused, and the lane contract these tasks carry
-is the first item in
-[`../math-research/docs/agent-research-capability.md`](../math-research/docs/agent-research-capability.md):
-run transcripts show agents ending a session at the first publishable fact.
+Standing math lanes are enabled. Their research-session contract and the
+transcript evidence that shaped it live in
+[`../math-research/docs/agent-research-capability.md`](../math-research/docs/agent-research-capability.md).
+The deployed task ledger is the source of truth for definitions. In addition
+to research, survey, formalization, and review, `math-curation` keeps one
+light-tier work unit improving high-notability ledger titles and summaries via
+T0 amendment proposals; `math-review` independently applies or rejects them.
 
 `pi-orchestrator status | task set/list/delete | account list/add/domain/share/login |
 pause | resume | boost | abort | say | runner | drain-runners | voice-broker` —
