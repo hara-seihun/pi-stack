@@ -1,7 +1,7 @@
 import type { Broker } from "../broker/broker.js";
 import type { Ledger, RunRow } from "../ledger/ledger.js";
 import type { Scheduler } from "../tasks/scheduler.js";
-import { allocate } from "../tasks/allocate.js";
+import { allocate, desiredByTier } from "../tasks/allocate.js";
 import type { EvaluateResult, Tier } from "../tasks/types.js";
 
 /**
@@ -22,10 +22,11 @@ export interface ControllerConfig {
    * skipped, so a crashing task cannot hot-loop through plan capacity. */
   readonly errorWindowMs: number;
   readonly errorThreshold: number;
-  /** How far back the allocator looks when measuring what share of launches a
-   * task has already had. Long enough to smooth single-slot cycles, short
-   * enough that a demand change is honoured within a shift. */
-  readonly fairnessWindowMs: number;
+  /** How far back a finished session still counts as part of the fleet the
+   * allocator is composing. Long enough that lanes with short sessions and
+   * lanes with hours-long ones are compared on the same footing, short enough
+   * that a share or demand change is honoured within a shift. */
+  readonly compositionWindowMs: number;
 }
 
 export const CONTROLLER_DEFAULTS: ControllerConfig = {
@@ -33,7 +34,7 @@ export const CONTROLLER_DEFAULTS: ControllerConfig = {
   claimTimeoutMs: 2 * 60_000,
   errorWindowMs: 30 * 60_000,
   errorThreshold: 3,
-  fairnessWindowMs: 6 * 60 * 60_000,
+  compositionWindowMs: 60 * 60_000,
 };
 
 export interface TickReport {
@@ -105,26 +106,18 @@ export class Controller {
           t.units === undefined
             ? undefined
             : Math.max(0, t.units - (activeByTask.get(t.taskId) ?? 0)),
-        recentLaunches: this.ledger.recentLaunchCount(t.taskId, now - this.cfg.fairnessWindowMs),
-        recentLaunchesByTier: this.ledger.recentLaunchCountByTier(
+        heldByTier: this.ledger.fleetPresenceByTier(
           t.taskId,
-          now - this.cfg.fairnessWindowMs,
+          now - this.cfg.compositionWindowMs,
         ),
       }));
 
-    // Demand is split by the task's tier weights, not repeated whole into
-    // every tier it allows. The broker advertises scarce tiers first, so a
-    // lane that wants one standard session per twenty light ones must ask
-    // for one — asking for twenty-one would let it reserve, and waste, every
-    // scarce slot on the machine.
-    const demandByTier: Partial<Record<Tier, number>> = {};
-    for (const t of launchable) {
-      const totalWeight = t.tiers.reduce((sum, share) => sum + share.weight, 0);
-      for (const share of t.tiers) {
-        const units = ((t.units ?? 0) * share.weight) / totalWeight;
-        demandByTier[share.tier] = (demandByTier[share.tier] ?? 0) + Math.ceil(units);
-      }
-    }
+    // What the tiers are worth to the broker is what the claims would put in
+    // them: a lane wanting twenty light sessions per standard one must not
+    // have scarce standard accounts held for a standard session it is not
+    // going to ask for, and must have light slots advertised in the quantity
+    // it will actually take.
+    const demandByTier = desiredByTier(launchable, this.broker.maxSlotsPerCycle);
     const created: RunRow[] = [];
     const { assignments } = allocate(launchable, this.broker.slotsByTier(now, demandByTier));
     for (const a of assignments) {

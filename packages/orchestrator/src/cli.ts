@@ -631,15 +631,23 @@ const formatTiers = (tiers: readonly TierShare[]): string =>
  * as a bare weight an operator would have to normalize by hand. A lane that
  * is not claiming anything — held, gated, out of work — gets no percentage:
  * normalizing a bystander against the eligible lanes printed "share=14
- * (700%)" for a lane launching nothing at all. */
-function sharePercent(
-  task: { share?: number; eligible: boolean },
-  tasks: readonly { share?: number; eligible: boolean }[],
+ * (700%)" for a lane launching nothing at all.
+ *
+ * The fraction is of claims, not of bare shares: share scales a lane's whole
+ * tier bundle, so a share-14 lane wanting twenty light sessions per standard
+ * one claims twenty-one times what a share-14 single-tier lane would. Naming
+ * the fleet fraction as 14/(14+2) told the operator to expect 88% of the
+ * machine for a lane that in fact claims 99% of it. */
+export function sharePercent(
+  task: { share?: number; eligible: boolean; tiers: readonly TierShare[] },
+  tasks: readonly { share?: number; eligible: boolean; tiers: readonly TierShare[] }[],
 ): string {
   const weight = task.share ?? 1;
   if (!task.eligible) return `${weight}`;
-  const total = tasks.filter((t) => t.eligible).reduce((sum, t) => sum + (t.share ?? 1), 0);
-  return total > 0 ? `${weight} (${Math.round((100 * weight) / total)}%)` : `${weight}`;
+  const claim = (t: { share?: number; tiers: readonly TierShare[] }): number =>
+    (t.share ?? 1) * t.tiers.reduce((sum, s) => sum + s.weight, 0);
+  const total = tasks.filter((t) => t.eligible).reduce((sum, t) => sum + claim(t), 0);
+  return total > 0 ? `${weight} (${Math.round((100 * claim(task)) / total)}%)` : `${weight}`;
 }
 
 /**

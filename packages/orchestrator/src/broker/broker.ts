@@ -104,6 +104,13 @@ export class Broker {
     this.cfg = { ...BROKER_DEFAULTS, ...cfg };
   }
 
+  /** The most slots one cycle can advertise across every tier. What a caller
+   * asking "how should the next batch of launches be shaped" should size its
+   * answer to; smaller and the shape is clipped before the broker sees it. */
+  get maxSlotsPerCycle(): number {
+    return this.cfg.maxSlotsPerTier * TIERS.length;
+  }
+
   /**
    * Admits one session for a tier: walks the tier's candidates in preference
    * order and picks the usable account with the most free capacity. Returns

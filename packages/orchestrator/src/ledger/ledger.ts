@@ -1174,28 +1174,32 @@ export class Ledger {
     return ms / 3_600_000;
   }
 
-  /** Error runs for a task since the cutoff; the controller's circuit breaker. */
-  /** Launches a task has had since a cutoff, whatever became of them. The
-   *  allocator's memory: proportional shares are only proportional if what a
-   *  task already received counts against what it is owed next. */
-  recentLaunchCount(taskId: string, since: number): number {
-    const row = this.db
-      .prepare("SELECT COUNT(*) AS n FROM run WHERE task_id = ? AND started_at >= ?")
-      .get(taskId, since) as { n: number };
-    return row.n;
-  }
-
-  /** The same launch history split by tier, which is what lets a weighted
-   * tier mix hold across cycles that each hand out a single slot. */
-  recentLaunchCountByTier(taskId: string, since: number): Partial<Record<Tier, number>> {
+  /**
+   * What a lane holds in the fleet, split by tier: its pending and running
+   * sessions, plus those that ended since the cutoff.
+   *
+   * The allocator targets the fleet's composition, and composition read from
+   * live sessions alone undersamples a lane whose sessions are short. A queue
+   * lane that empties and exits every few minutes would show as holding
+   * nothing on almost every cycle and be handed slot after slot, while a
+   * research lane holding warm context for hours would look permanently
+   * over-served. Counting the sessions a lane occupied anywhere in the window
+   * makes the two comparable: a long session counts once while it runs, a
+   * short one counts once for the window after it ends.
+   */
+  fleetPresenceByTier(taskId: string, since: number): Partial<Record<Tier, number>> {
     const rows = this.db
       .prepare(
-        "SELECT tier, COUNT(*) AS n FROM run WHERE task_id = ? AND started_at >= ? GROUP BY tier",
+        `SELECT tier, COUNT(*) AS n FROM run
+          WHERE task_id = ?
+            AND (state IN ('pending', 'running') OR ended_at >= ?)
+          GROUP BY tier`,
       )
       .all(taskId, since) as { tier: Tier; n: number }[];
     return Object.fromEntries(rows.map((r) => [r.tier, r.n]));
   }
 
+  /** Error runs for a task since the cutoff; the controller's circuit breaker. */
   recentErrorCount(taskId: string, since: number): number {
     const row = this.db
       .prepare(

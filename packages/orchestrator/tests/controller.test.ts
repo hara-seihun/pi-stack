@@ -251,6 +251,54 @@ describe("run custody", () => {
     expect(launched.every((l) => l.model !== undefined)).toBe(true);
   });
 
+  it("the standing fleet holds the shape of share × tier weight", async () => {
+    // The production failure: the fleet came up almost entirely review
+    // agents. The research lane was share 14 asking for twenty light sessions
+    // per standard one; the review lane was share 2, standard only. Sessions
+    // are long, so what matters is the fleet standing after a run of cycles,
+    // not the launch order.
+    const { ledger, cycle } = build();
+    for (let i = 2; i <= 12; i++) {
+      ledger.upsertAccount({ id: `codex-${i}`, provider: "openai-codex", domain: "orchestrator" });
+    }
+    ledger.upsertTask({
+      id: "frontier",
+      demandConstant: 90,
+      tiers: mix("light:20", "standard:1"),
+      share: 14,
+      prompt: "Attack.",
+    });
+    ledger.upsertTask({
+      id: "review",
+      demandConstant: 41,
+      tiers: mix("standard"),
+      share: 2,
+      prompt: "Review.",
+    });
+
+    let now = 0;
+    for (let i = 0; i < 10; i++) {
+      await cycle(now); // Nothing finishes: these sessions hold their slots.
+      now += 60_000;
+    }
+
+    const fleet = ledger.runs().filter((r) => r.state === "pending" || r.state === "running");
+    const held = (taskId: string, model: string): number =>
+      fleet.filter((r) => r.taskId === taskId && r.model === model).length;
+    const frontierLight = held("frontier", "gpt-5.6-luna");
+    const reviewStandard = fleet.filter((r) => r.taskId === "review").length;
+    // The research lane holds the machine, in the mix it asked for: its
+    // standard session is the one its bundle buys, not a share of whatever
+    // standard capacity happened to be free.
+    expect(frontierLight).toBeGreaterThan(0.8 * fleet.length);
+    expect(held("frontier", "gpt-5.6-sol") + held("frontier", "claude-opus")).toBe(1);
+    // The review lane's claim is 2 of 296, so on a thirteen-session machine
+    // it holds at most one — nothing like the thirteen it took when the mix
+    // was a per-lane ceiling and the leftover standard slots went to whoever
+    // could use them.
+    expect(reviewStandard).toBeLessThanOrEqual(1);
+  });
+
   it("a finished run wakes tasks gated on it", async () => {
     let queue = 1;
     const { ledger, runner, cycle } = build({ "probe queue": () => queue });

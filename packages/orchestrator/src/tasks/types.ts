@@ -2,11 +2,12 @@ export type Tier = "light" | "standard" | "expert";
 export const TIERS: readonly Tier[] = ["light", "standard", "expert"];
 
 /**
- * How one task wants its launches divided across tiers. Weights are relative
- * and hold over the fairness window, not inside a cycle: `light:20,standard:1`
- * asks for twenty light sessions per standard one, which is a ratio no single
- * one-slot cycle can express. A tier with no capacity simply loses its turn
- * to the others, so the same list is still the substitution set. With one
+ * The shape of one lane's bundle: how many sessions of each tier it wants
+ * running at once. `light:20,standard:1` asks for twenty light sessions per
+ * standard one, and the lane's share scales that whole bundle, so weight and
+ * share multiply into the lane's claim on each tier. A tier with no capacity
+ * costs the lane only that tier's sessions — it is not substituted into
+ * another tier, and it does not hold the rest of the bundle up. With one
  * tier the weight says nothing and is conventionally 1.
  */
 export interface TierShare {
@@ -29,7 +30,9 @@ export interface TaskSpec {
   readonly demandConstant?: number;
   readonly gate?: string;
   readonly tiers: readonly TierShare[];
-  /** This lane's relative claim on the fleet's launches, default 1. Demand
+  /** Scales this lane's whole tier bundle, default 1: `share × tier weight`
+   * is the lane's claim on each tier, so two lanes asking for standard
+   * sessions at share 10 and 5 hold them 2:1. Demand
    * says whether a lane can absorb another agent and caps how many; share
    * says how the scarce slots are divided between the lanes that can. They
    * are different questions, and letting demand answer both made the split a
@@ -72,14 +75,11 @@ export interface TaskSnapshot {
    * is launching. Omitted by callers that do not track it. */
   readonly paused?: boolean;
   readonly error: string | undefined;
-  /** Launches this task has already had inside the fairness window. What
-   * makes allocation proportional across cycles instead of only within one;
-   * omitted by callers that do not track it. */
-  readonly recentLaunches?: number;
-  /** The same history split by tier, which is what makes a weighted mix
-   * hold: a 20:1 ratio is invisible inside a cycle that hands out one slot.
-   * Omitted by callers that do not track it. */
-  readonly recentLaunchesByTier?: Readonly<Partial<Record<Tier, number>>>;
+  /** Sessions this lane already holds, pending or running, split by tier.
+   * The allocator targets the fleet's composition, so what a lane is already
+   * running is what it is measured against; omitted by callers that do not
+   * track it, which then allocate from empty. */
+  readonly heldByTier?: Readonly<Partial<Record<Tier, number>>>;
 }
 
 export interface EvaluateResult {

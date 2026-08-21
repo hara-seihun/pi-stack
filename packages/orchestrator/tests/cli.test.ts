@@ -1,5 +1,6 @@
 import { describe, expect, it } from "vitest";
-import { launchControl, taskSet } from "../src/cli.js";
+import { launchControl, sharePercent, taskSet } from "../src/cli.js";
+import { mix } from "./harness.js";
 import { Ledger } from "../src/ledger/ledger.js";
 
 const open = (): Ledger => Ledger.open(":memory:");
@@ -70,6 +71,23 @@ describe("task set", () => {
     const ledger = open();
     expect(() => taskSet(ledger, ["fresh", "--demand-constant", "1"])).toThrow(/--tiers required/);
     ledger.close();
+  });
+});
+
+describe("status display", () => {
+  it("names the fleet fraction a lane actually claims, bundle and all", () => {
+    // share × tier weight is the claim, so the light-heavy lane claims
+    // twenty-one bundles' worth against the review lane's one. Reporting the
+    // bare 14-against-2 split told the operator to expect 88% of the machine
+    // for a lane that claims essentially all of it.
+    const frontier = { share: 14, eligible: true, tiers: mix("light:20", "standard:1") };
+    const review = { share: 2, eligible: true, tiers: mix("standard") };
+    expect(sharePercent(frontier, [frontier, review])).toBe("14 (99%)");
+    expect(sharePercent(review, [frontier, review])).toBe("2 (1%)");
+    // A lane that is not claiming anything is not normalized against those
+    // that are.
+    const held = { share: 5, eligible: false, tiers: mix("standard") };
+    expect(sharePercent(held, [frontier, review, held])).toBe("5");
   });
 });
 

@@ -2,179 +2,162 @@ import type { AllocationResult, Assignment, TaskSnapshot, Tier } from "./types.j
 import { TIERS } from "./types.js";
 
 /**
- * Which tier a task's next slot should come from, given what it has already
- * been launched on inside the fairness window.
+ * A lane's claim on one tier: its share times that tier's weight in its mix.
  *
- * Weighted fair queueing: the winner is the tier whose next launch falls
- * earliest in virtual time, `(served + 1) / weight`. A 20:1 mix therefore
- * comes out as twenty light launches and then a standard one, out of a long
- * run of cycles that each hand out a single slot and could never express a
- * ratio individually. Sharing out each cycle's slots by proportion instead
- * would round the minority tier to zero every time and it would never launch
- * at all.
- *
- * The mix is a ceiling, not merely a preference: a tier is passed over once
- * it holds its rounded-up share of the launches so far. That is what stops a
- * light-heavy lane from quietly becoming a standard lane whenever light
- * capacity is short — the free standard slot goes to a lane that actually
- * wants standard sessions instead. Within the ceiling the list is still a
- * substitution set: a tier with no free capacity loses its turn rather than
- * holding the lane up. Ties break by weight then declaration order, so the
- * choice is deterministic.
+ * This product is the whole allocation model. A lane's share scales a bundle
+ * whose shape is its tier mix, so `share 10, light:20 standard:1` claims 200
+ * light and 10 standard, and `share 5, standard:1` claims 5 standard. Sharing
+ * the fleet out in proportion to those claims puts 43 sessions at 40 light and
+ * 2 standard for the first lane and 1 standard for the second: the shares
+ * divide each tier (10:5 of the standard sessions) and the mix holds inside
+ * the lane (20 light per standard).
  */
-function tierForNextSlot(
-  task: TaskSnapshot,
-  assigned: ReadonlyMap<Tier, number>,
-  capacity: Readonly<Record<Tier, number>>,
-): Tier | undefined {
-  const totalWeight = task.tiers.reduce((sum, share) => sum + share.weight, 0);
-  const servedOf = (tier: Tier): number =>
-    (task.recentLaunchesByTier?.[tier] ?? 0) + (assigned.get(tier) ?? 0);
-  const totalServed = task.tiers.reduce((sum, share) => sum + servedOf(share.tier), 0);
-  let best: { tier: Tier; virtualTime: number; weight: number } | undefined;
-  for (const share of task.tiers) {
-    if ((capacity[share.tier] ?? 0) <= 0 || share.weight <= 0) continue;
-    const served = servedOf(share.tier);
-    const ceiling = Math.ceil(((totalServed + 1) * share.weight) / totalWeight);
-    if (served + 1 > ceiling) continue;
-    const virtualTime = (served + 1) / share.weight;
-    if (
-      best === undefined ||
-      virtualTime < best.virtualTime - 1e-9 ||
-      (virtualTime < best.virtualTime + 1e-9 && share.weight > best.weight)
-    ) {
-      best = { tier: share.tier, virtualTime, weight: share.weight };
+interface Claim {
+  readonly taskId: string;
+  readonly tier: Tier;
+  readonly claim: number;
+  /** Sessions this lane holds in this tier: running now, or run recently
+   * enough to still count in the fleet it is composing. */
+  readonly held: number;
+  assigned: number;
+}
+
+const tierRank = (tier: Tier): number => TIERS.indexOf(tier);
+
+function claims(tasks: readonly TaskSnapshot[]): Claim[] {
+  const out: Claim[] = [];
+  for (const t of tasks) {
+    const share = t.share ?? 1;
+    for (const tier of t.tiers) {
+      const claim = share * tier.weight;
+      if (claim <= 0) continue;
+      out.push({
+        taskId: t.taskId,
+        tier: tier.tier,
+        claim,
+        held: t.heldByTier?.[tier.tier] ?? 0,
+        assigned: 0,
+      });
     }
   }
-  return best?.tier;
+  return out;
 }
 
 /**
- * Distributes launch slots across eligible tasks in proportion to their
- * declared shares, honouring each task's weighted tier set. Largest remainder
- * keeps proportionality exact; a task never receives more agents than it has
- * work units; leftover capacity — from tier mismatches, or from lanes with
- * less demand than share — is redistributed greedily to the task furthest
- * behind. Deterministic: ties break by demand then task id.
+ * Distributes launch slots so that the fleet's *composition* converges on the
+ * declared claims: each (lane, tier) pair should hold sessions in proportion
+ * to `share × tier weight`, counting the sessions it already has.
  *
- * Share, not demand, is the basis. Demand answers whether a lane can absorb
- * another agent and caps how many; it is a work-unit count in whatever unit
- * each probe chose, so using it to divide the fleet made a lane that counts
- * problems in sixes outrank a lane that counts review items singly — a split
- * no operator ever chose. An operator who wants the frontier lane to hold
- * most of the fleet now says so, and the lanes that cannot use their share
- * still give it back rather than idling capacity.
+ * Composition, not launch history, is the target. The operator's question is
+ * "what should be running right now", and a lane whose sessions are short
+ * (a queue lane that exits when drained) launches many times more often than
+ * a research lane holding warm context for hours. Allocating the flow of
+ * launches let that turnover decide the fleet; allocating the standing
+ * population makes the declared claims mean what they say.
  *
- * Proportionality has to be measured across cycles, not inside one. Slots
- * free one session at a time, and with a single slot every task's integer
- * quota floors to zero, so the whole decision is the remainder order — which,
- * on one cycle's arithmetic alone, is the largest lane every time. A 60% lane
- * took 100% of the common cycle and a 15% lane launched only when three slots
- * happened to free together. So each task's recent launch history comes in
- * with it, and the ordering key is its shortfall: target share minus served
- * share. With no history supplied the shortfall is zero everywhere and the
- * order falls back to demand, which is what the pure-function tests pin.
+ * Slots go one at a time to the pair with the lowest virtual time,
+ * `(held + 1) / claim` — weighted fair queueing over pairs rather than over
+ * lanes. Choosing per pair is what fixed the failure that prompted it: a
+ * light-heavy lane at share 14 was losing every standard slot to a share-2
+ * review lane, because the mix was applied as a per-lane ceiling after the
+ * lane's total was decided, so 20-of-21 light left it asking for a single
+ * standard session however large its share. A tier is now contested by
+ * `share × weight` directly, so that lane holds 14/16 of the standard
+ * sessions and the review lane 2/16 — and it cannot flood a tier it did not
+ * ask for either, because its claim there is exactly what it declared.
+ *
+ * A claim is also a ceiling, which is the half that stops the flooding: no
+ * pair may hold more than its proportional slice of the fleet it would
+ * create, so free capacity that no claim wants is left unused rather than
+ * poured into whichever lane happens to be able to take it. That is how a
+ * share-2 review lane ends up holding one session next to a share-14
+ * research lane instead of thirteen, and how a lane whose cheap tier is
+ * short does not quietly become an expensive-tier lane.
+ *
+ * The exception is a lane with no work left: its claim leaves the
+ * denominator entirely, so share stays a claim on contested capacity rather
+ * than a reservation, and the lanes with a backlog divide what an idle lane
+ * is not using. Work units also cap a lane directly — never more agents than
+ * units. Ties break by claim, then task id, then tier order, so the choice
+ * is deterministic.
  */
 export function allocate(
   tasks: readonly TaskSnapshot[],
   slots: Readonly<Record<Tier, number>>,
+  /** Cap on slots handed out across every tier; the tier capacities alone by
+   * default. `desiredByTier` uses it to ask what a fleet of a given size
+   * should look like. */
+  totalCap = Number.POSITIVE_INFINITY,
 ): AllocationResult {
-  const eligible = tasks
-    .filter((t) => t.eligible && t.units !== undefined && t.units > 0)
-    .sort((a, b) => (b.units ?? 0) - (a.units ?? 0) || a.taskId.localeCompare(b.taskId));
+  const eligible = tasks.filter((t) => t.eligible && t.units !== undefined && t.units > 0);
   const capacity: Record<Tier, number> = { ...slots };
-  const totalSlots = TIERS.reduce((s, tier) => s + (capacity[tier] ?? 0), 0);
-  const totalUnits = eligible.reduce((s, t) => s + (t.units ?? 0), 0);
-  const shareOf = (t: TaskSnapshot): number => t.share ?? 1;
-  const totalShare = eligible.reduce((s, t) => s + shareOf(t), 0);
-  const assigned = new Map<string, Map<Tier, number>>();
-  if (totalSlots === 0 || totalUnits === 0) {
-    return { assignments: [], unusedSlots: capacity };
-  }
-
-  // Proportional quotas by largest remainder, capped at each task's units.
-  const totalServed = eligible.reduce((s, t) => s + (t.recentLaunches ?? 0), 0);
-  const shortfallOf = (t: TaskSnapshot): number =>
-    totalServed === 0 ? 0 : shareOf(t) / totalShare - (t.recentLaunches ?? 0) / totalServed;
-
-  const quota = new Map<string, number>();
-  const remainders: { taskId: string; units: number; frac: number; shortfall: number }[] = [];
-  let used = 0;
-  for (const t of eligible) {
-    const units = t.units ?? 0;
-    const ideal = (totalSlots * shareOf(t)) / totalShare;
-    const base = Math.min(Math.floor(ideal), Math.ceil(units));
-    quota.set(t.taskId, base);
-    used += base;
-    remainders.push({
-      taskId: t.taskId,
-      units,
-      frac: ideal - Math.floor(ideal),
-      shortfall: shortfallOf(t),
-    });
-  }
-  remainders.sort(
-    (a, b) =>
-      b.shortfall - a.shortfall ||
-      b.frac - a.frac ||
-      b.units - a.units ||
-      a.taskId.localeCompare(b.taskId),
+  const pairs = claims(eligible);
+  const headroom = new Map<string, number>(
+    eligible.map((t) => [t.taskId, Math.ceil(t.units ?? 0)]),
   );
-  for (const r of remainders) {
-    if (used >= totalSlots) break;
-    if ((quota.get(r.taskId) ?? 0) < Math.ceil(r.units)) {
-      quota.set(r.taskId, (quota.get(r.taskId) ?? 0) + 1);
-      used++;
-    }
-  }
-
-  const give = (taskId: string, tier: Tier, n: number): void => {
-    const byTier = assigned.get(taskId) ?? new Map<Tier, number>();
-    byTier.set(tier, (byTier.get(tier) ?? 0) + n);
-    assigned.set(taskId, byTier);
-    capacity[tier] -= n;
-  };
-  const assignedCount = (taskId: string): number =>
-    [...(assigned.get(taskId)?.values() ?? [])].reduce((a, b) => a + b, 0);
-
-  // First pass: satisfy quotas one slot at a time, each going to the tier
-  // furthest behind the task's declared mix.
-  for (const t of eligible) {
-    let want = quota.get(t.taskId) ?? 0;
-    while (want > 0) {
-      const tier = tierForNextSlot(t, assigned.get(t.taskId) ?? new Map(), capacity);
-      if (tier === undefined) break;
-      give(t.taskId, tier, 1);
-      want--;
-    }
-  }
-
-  // Second pass: leftover capacity goes one slot at a time to the task
-  // furthest behind its share that allows the tier and still has work headroom.
-  const byShortfall = [...eligible].sort(
-    (a, b) =>
-      shortfallOf(b) - shortfallOf(a) ||
-      (b.units ?? 0) - (a.units ?? 0) ||
-      a.taskId.localeCompare(b.taskId),
+  const total = Math.min(
+    totalCap,
+    TIERS.reduce((sum, tier) => sum + Math.max(0, capacity[tier] ?? 0), 0),
   );
-  let progressed = true;
-  while (progressed) {
-    progressed = false;
-    for (const t of byShortfall) {
-      if (assignedCount(t.taskId) >= Math.ceil(t.units ?? 0)) continue;
-      const tier = tierForNextSlot(t, assigned.get(t.taskId) ?? new Map(), capacity);
-      if (tier === undefined) continue;
-      give(t.taskId, tier, 1);
-      progressed = true;
+
+  for (let given = 0; given < total; given++) {
+    // Recomputed each slot: lanes that run out of work leave the composition,
+    // and their claim stops counting against the lanes that still have a
+    // backlog.
+    const contending = pairs.filter((p) => (headroom.get(p.taskId) ?? 0) > 0);
+    const totalClaim = contending.reduce((sum, p) => sum + p.claim, 0);
+    const fleet = contending.reduce((sum, p) => sum + p.held + p.assigned, 0);
+    if (totalClaim <= 0) break;
+    let best: Claim | undefined;
+    let bestTime = Number.POSITIVE_INFINITY;
+    for (const pair of contending) {
+      if ((capacity[pair.tier] ?? 0) <= 0) continue;
+      const held = pair.held + pair.assigned;
+      if (held + 1 > Math.ceil(((fleet + 1) * pair.claim) / totalClaim)) continue;
+      const virtualTime = (held + 1) / pair.claim;
+      if (
+        best === undefined ||
+        virtualTime < bestTime - 1e-9 ||
+        (virtualTime < bestTime + 1e-9 &&
+          (pair.claim > best.claim ||
+            (pair.claim === best.claim &&
+              (pair.taskId < best.taskId ||
+                (pair.taskId === best.taskId && tierRank(pair.tier) < tierRank(best.tier))))))
+      ) {
+        best = pair;
+        bestTime = virtualTime;
+      }
     }
+    if (best === undefined) break;
+    best.assigned++;
+    capacity[best.tier]--;
+    headroom.set(best.taskId, (headroom.get(best.taskId) ?? 0) - 1);
   }
 
-  const assignments: Assignment[] = [];
-  for (const t of eligible) {
-    for (const share of t.tiers) {
-      const count = assigned.get(t.taskId)?.get(share.tier) ?? 0;
-      if (count > 0) assignments.push({ taskId: t.taskId, tier: share.tier, count });
-    }
-  }
+  const assignments: Assignment[] = pairs
+    .filter((p) => p.assigned > 0)
+    .map((p) => ({ taskId: p.taskId, tier: p.tier, count: p.assigned }));
   return { assignments, unusedSlots: capacity };
+}
+
+/**
+ * How many sessions of each tier the claims want on top of what is running,
+ * for a hypothetical `budget` of free slots. The broker advertises slots per
+ * tier, and needs both a cap (never hoard a scarce account for a tier nothing
+ * claims) and a weight (which tier gets the next turn). Deriving both from
+ * the same claim arithmetic the allocator uses keeps the advertisement and
+ * the allocation from disagreeing — the earlier split, where the broker
+ * weighted tiers by demand units spread over the mix, offered slots in a
+ * shape no lane had asked for.
+ */
+export function desiredByTier(
+  tasks: readonly TaskSnapshot[],
+  budget: number,
+): Partial<Record<Tier, number>> {
+  const open: Record<Tier, number> = { light: budget, standard: budget, expert: budget };
+  const out: Partial<Record<Tier, number>> = {};
+  for (const a of allocate(tasks, open, budget).assignments) {
+    out[a.tier] = (out[a.tier] ?? 0) + a.count;
+  }
+  return out;
 }

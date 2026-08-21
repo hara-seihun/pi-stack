@@ -4,10 +4,10 @@ import { join } from "node:path";
 import { DatabaseSync } from "node:sqlite";
 import { afterAll, describe, expect, it } from "vitest";
 import { Ledger } from "../src/ledger/ledger.js";
-import { allocate } from "../src/tasks/allocate.js";
+import { allocate, desiredByTier } from "../src/tasks/allocate.js";
 import { evalGate, gateRefs, parseGate } from "../src/tasks/gate.js";
 import { Scheduler } from "../src/tasks/scheduler.js";
-import type { TaskSnapshot, Tier } from "../src/tasks/types.js";
+import type { Assignment, TaskSnapshot, Tier } from "../src/tasks/types.js";
 import { mix } from "./harness.js";
 
 const dir = mkdtempSync(join(tmpdir(), "pi-orch-tasks-"));
@@ -277,35 +277,39 @@ describe("allocation", () => {
     error: undefined,
   });
 
-  it("A1 distributes proportionally to demand across a task's tiers, with spill", () => {
+  const count = (result: { assignments: readonly Assignment[] }, id: string, tier: Tier): number =>
+    result.assignments.find((a) => a.taskId === id && a.tier === tier)?.count ?? 0;
+
+  it("A1 composes the fleet from share × tier weight", () => {
+    // The operator's statement of the model: a lane at share 10 wanting one
+    // standard session per twenty light ones, against a lane at share 5
+    // wanting standard sessions only. The shares divide the standard tier
+    // 10:5, and the mix holds inside the first lane, so 43 slots come out as
+    // 40 light and 3 standard rather than as 43 split by lane first.
     const result = allocate(
-      [
-        task("heavy", 60, ["standard", "expert"]),
-        task("mid", 30, ["light"]),
-        task("small", 10, ["light"]),
-      ],
-      { light: 2, standard: 2, expert: 1 },
+      [task("a", 200, ["standard:1", "light:20"], true, 10), task("b", 200, ["standard"], true, 5)],
+      { light: 40, standard: 3, expert: 0 },
     );
-    expect(result.assignments).toEqual([
-      { taskId: "heavy", tier: "standard", count: 2 },
-      { taskId: "heavy", tier: "expert", count: 1 },
-      { taskId: "mid", tier: "light", count: 2 },
-    ]);
-    // small's quota rounded to zero; every slot used.
+    expect(count(result, "a", "light")).toBe(40);
+    expect(count(result, "a", "standard")).toBe(2);
+    expect(count(result, "b", "standard")).toBe(1);
     expect(result.unusedSlots).toEqual({ light: 0, standard: 0, expert: 0 });
   });
 
-  it("A2 a tier-restricted task waits rather than being downgraded; capacity redistributes", () => {
+  it("A2 a tier-restricted task waits, and nobody else takes its slice", () => {
     const result = allocate(
       [task("expert-only", 100, ["expert"]), task("flexible", 50, ["light", "standard"])],
       { light: 2, standard: 2, expert: 0 },
     );
-    // expert-only gets nothing (its only tier has no capacity) and its share
-    // flows to the task that can use the machine.
+    // expert-only gets nothing — its only tier has no capacity — but it still
+    // has work, so it keeps its third of the composition and the machine runs
+    // smaller. Handing the idle slots to whoever can take them is exactly the
+    // flooding this model exists to stop.
     expect(result.assignments).toEqual([
-      { taskId: "flexible", tier: "light", count: 2 },
-      { taskId: "flexible", tier: "standard", count: 2 },
+      { taskId: "flexible", tier: "light", count: 1 },
+      { taskId: "flexible", tier: "standard", count: 1 },
     ]);
+    expect(result.unusedSlots).toEqual({ light: 1, standard: 1, expert: 0 });
   });
 
   it("A3 never assigns more agents than work units", () => {
@@ -323,7 +327,7 @@ describe("allocation", () => {
     expect(result.unusedSlots.light).toBe(3);
   });
 
-  it("A11 share, not demand size, divides the fleet", () => {
+  it("A11 share, not demand size, divides a tier", () => {
     // Ten slots, and a lane whose probe counts problems in sixes against
     // lanes that count items one by one. On demand alone the counting unit
     // decided the split; the operator's declared share decides it now.
@@ -353,82 +357,72 @@ describe("allocation", () => {
       ],
       { light: 0, standard: 10, expert: 0 },
     );
-    const count = (id: string) =>
-      result.assignments.find((a) => a.taskId === id)?.count ?? 0;
-    expect(count("frontier")).toBe(1);
-    expect(count("review") + count("survey")).toBe(9);
-    expect(count("review")).toBeGreaterThan(count("survey"));
+    expect(count(result, "frontier", "standard")).toBe(1);
+    expect(count(result, "review", "standard")).toBe(6);
+    expect(count(result, "survey", "standard")).toBe(3);
     expect(result.unusedSlots.standard).toBe(0);
   });
 
-  it("A6 one free slot goes to the task furthest behind its share, not the biggest", () => {
-    // The production regime: sessions end one at a time, so almost every cycle
-    // offers a single slot. Inside one cycle the 60% lane wins every time and
-    // the 15% lane never launches; with history it takes its turn.
-    const history = (taskId: string, share: number, recentLaunches: number): TaskSnapshot => ({
-      ...task(taskId, 120, ["standard"], true, share),
-      recentLaunches,
-    });
+  it("A6 single free slots converge on the declared composition", () => {
+    // The production regime: sessions end one at a time, so almost every
+    // cycle offers a single slot. The target is what should be *running*, so
+    // each cycle's slot goes to the lane furthest below its claim, measured
+    // against the fleet it already holds.
     const slots = { light: 0, standard: 1, expert: 0 };
-    // Served exactly in proportion so far (60/25/15 of 100 launches): the next
-    // slot still goes to the largest, because nobody is behind.
+    const held = (taskId: string, share: number, standard: number): TaskSnapshot => ({
+      ...task(taskId, 120, ["standard"], true, share),
+      heldByTier: { standard },
+    });
+    // Held exactly in proportion (60/25/15 of 100): the next slot goes to the
+    // largest claim, because nobody is behind.
     expect(
-      allocate([history("big", 60, 60), history("mid", 25, 25), history("small", 15, 15)], slots)
+      allocate([held("big", 60, 60), held("mid", 25, 25), held("small", 15, 15)], slots)
         .assignments,
     ).toEqual([{ taskId: "big", tier: "standard", count: 1 }]);
-    // Now the big task has taken everything. The slot goes to whoever is
-    // furthest below its own share, which is mid (owed 25%, served 2%) rather
-    // than the smallest task (owed 15%, served 0%).
+    // Once the big lane holds everything, the slot goes to whoever is
+    // furthest below its claim in proportion — the starved lane, not the one
+    // with the larger absolute shortfall.
     expect(
-      allocate([history("big", 60, 98), history("mid", 25, 2), history("small", 15, 0)], slots)
-        .assignments,
-    ).toEqual([{ taskId: "mid", tier: "standard", count: 1 }]);
-    // Starved outright, the smallest still gets its turn.
-    expect(
-      allocate([history("big", 60, 80), history("mid", 25, 20), history("small", 15, 0)], slots)
-        .assignments,
+      allocate([held("big", 60, 98), held("mid", 25, 2), held("small", 15, 0)], slots).assignments,
     ).toEqual([{ taskId: "small", tier: "standard", count: 1 }]);
-    // Repeated single-slot cycles converge on the declared split rather than
-    // handing every slot to the same task.
-    const served = new Map<string, number>([["big", 0], ["mid", 0], ["small", 0]]);
+    // Repeated single-slot cycles reach the declared split rather than
+    // handing every slot to the same lane.
+    const running = new Map<string, number>([["big", 0], ["mid", 0], ["small", 0]]);
     for (let i = 0; i < 100; i++) {
       const [a] = allocate(
         [
-          history("big", 60, served.get("big")!),
-          history("mid", 25, served.get("mid")!),
-          history("small", 15, served.get("small")!),
+          held("big", 60, running.get("big")!),
+          held("mid", 25, running.get("mid")!),
+          held("small", 15, running.get("small")!),
         ],
         slots,
       ).assignments;
-      served.set(a!.taskId, served.get(a!.taskId)! + 1);
+      running.set(a!.taskId, running.get(a!.taskId)! + 1);
     }
-    expect(served.get("big")).toBe(60);
-    expect(served.get("mid")).toBe(25);
-    expect(served.get("small")).toBe(15);
+    expect(Object.fromEntries(running)).toEqual({ big: 60, mid: 25, small: 15 });
   });
 
   it("A7 holds a weighted tier mix across single-slot cycles", () => {
-    // The point of weights: "one standard session per twenty light ones" is a
-    // ratio no single cycle can express, and the production regime hands out
-    // one slot at a time (demand is netted against running sessions, so a
-    // busy lane asks for one more agent, not twenty). Without per-tier
-    // history every one of those cycles picks the same tier and the mix never
-    // materialises.
-    const served: Partial<Record<Tier, number>> = {};
+    // "One standard session per twenty light ones" is a ratio no single cycle
+    // can express, and the production regime hands out one slot at a time
+    // (demand is netted against running sessions, so a busy lane asks for one
+    // more agent, not twenty). The lane's own running sessions are what make
+    // it materialise.
+    const running: Partial<Record<Tier, number>> = {};
     const slots = { light: 1, standard: 1, expert: 0 };
     for (let i = 0; i < 63; i++) {
       const [a] = allocate(
-        [{ ...task("frontier", 1, ["light:20", "standard:1"]), recentLaunchesByTier: served }],
+        [{ ...task("frontier", 1, ["light:20", "standard:1"]), heldByTier: running }],
         slots,
       ).assignments;
-      served[a!.tier] = (served[a!.tier] ?? 0) + 1;
+      running[a!.tier] = (running[a!.tier] ?? 0) + 1;
     }
-    expect(served).toEqual({ light: 60, standard: 3 });
+    expect(running).toEqual({ light: 60, standard: 3 });
   });
 
-  it("A8 a mixed lane spends its whole quota on the tiers that have capacity", () => {
-    // Weights say what to prefer, not what to wait for: with no standard
-    // slots the ratio yields and the light tier takes the lot.
+  it("A8 a mixed lane spends what it can on the tiers that have capacity", () => {
+    // A tier with no slots costs the lane those sessions only; the rest of
+    // the bundle launches instead of waiting.
     const result = allocate([task("frontier", 40, ["light:20", "standard:1"])], {
       light: 4,
       standard: 0,
@@ -437,59 +431,87 @@ describe("allocation", () => {
     expect(result.assignments).toEqual([{ taskId: "frontier", tier: "light", count: 4 }]);
   });
 
-  it("A10 a light-heavy lane does not become a standard lane when light is short", () => {
-    // The failure this rules out: light capacity dries up, the lane
-    // substitutes into every free standard slot, and "one standard per twenty
-    // light" silently becomes all-standard. It may take its one standard
-    // share and no more; the rest of the scarce tier is left for lanes that
-    // asked for it.
-    const result = allocate(
+  it("A10 a big light-heavy lane keeps its proportional standard sessions", () => {
+    // The failure that prompted the model: the fleet came up almost entirely
+    // review agents. A share-14 lane wanting twenty light per standard was
+    // treated as asking for one standard session in twenty-one *launches*, so
+    // a share-2 standard-only lane took the whole scarce tier. The standard
+    // tier is contested by share × weight, so it splits 14:2.
+    const scarce = allocate(
       [
-        task("frontier", 40, ["light:20", "standard:1"]),
-        task("review", 10, ["standard"]),
+        task("frontier", 40, ["light:20", "standard:1"], true, 14),
+        task("review", 40, ["standard"], true, 2),
       ],
-      { light: 0, standard: 6, expert: 0 },
+      { light: 0, standard: 8, expert: 0 },
     );
-    expect(result.assignments).toEqual([
-      { taskId: "frontier", tier: "standard", count: 1 },
-      { taskId: "review", tier: "standard", count: 5 },
-    ]);
+    // Neither lane floods: the light-heavy lane takes the one standard
+    // session its bundle asks for, the review lane the one its share buys,
+    // and six expensive slots go unused rather than becoming a fleet nobody
+    // asked for.
+    expect(count(scarce, "frontier", "standard")).toBe(1);
+    expect(count(scarce, "review", "standard")).toBe(1);
+    expect(scarce.unusedSlots.standard).toBe(6);
 
-    // And a lane already at its standard share this window declines outright.
-    const saturated = allocate(
+    // With light capacity present the same claims put the fleet where the
+    // operator pointed it: the light-heavy lane's bundle dominates, and the
+    // review lane holds its small standard slice rather than the machine.
+    const whole = allocate(
       [
-        {
-          ...task("frontier", 40, ["light:20", "standard:1"]),
-          recentLaunchesByTier: { light: 3, standard: 1 },
-        },
+        task("frontier", 400, ["light:20", "standard:1"], true, 14),
+        task("review", 40, ["standard"], true, 2),
       ],
-      { light: 0, standard: 6, expert: 0 },
+      { light: 40, standard: 8, expert: 0 },
     );
-    expect(saturated.assignments).toEqual([]);
-    expect(saturated.unusedSlots.standard).toBe(6);
+    expect(count(whole, "frontier", "light")).toBe(40);
+    expect(count(whole, "frontier", "standard")).toBe(3);
+    expect(count(whole, "review", "standard")).toBe(1);
   });
 
-  it("A9 splits one cycle's quota by weight when the slots are there", () => {
+  it("A9 splits one cycle's slots by weight when the capacity is there", () => {
     const result = allocate([task("frontier", 40, ["light:3", "standard:1"])], {
       light: 40,
       standard: 40,
       expert: 0,
     });
-    expect(result.assignments).toEqual([
-      { taskId: "frontier", tier: "light", count: 30 },
-      { taskId: "frontier", tier: "standard", count: 10 },
-    ]);
+    expect(count(result, "frontier", "light")).toBe(30);
+    expect(count(result, "frontier", "standard")).toBe(10);
   });
 
-  it("A5 is deterministic under equal demand (ties break by id)", () => {
+  it("A5 is deterministic under equal claims (ties break by id)", () => {
     const a = allocate([task("b", 10, ["light"]), task("a", 10, ["light"])], {
       light: 3,
       standard: 0,
       expert: 0,
     });
-    expect(a.assignments).toEqual([
-      { taskId: "a", tier: "light", count: 2 },
-      { taskId: "b", tier: "light", count: 1 },
-    ]);
+    expect(count(a, "a", "light")).toBe(2);
+    expect(count(a, "b", "light")).toBe(1);
+  });
+
+  it("A13 advertises the tier shape the claims will actually take", () => {
+    // What the broker is told to offer: the same claim arithmetic, so a lane
+    // wanting one standard per twenty light does not have scarce standard
+    // accounts held for a session it will not ask for.
+    expect(
+      desiredByTier(
+        [
+          task("frontier", 400, ["light:20", "standard:1"], true, 14),
+          task("review", 40, ["standard"], true, 2),
+        ],
+        24,
+      ),
+    ).toEqual({ light: 23, standard: 1 });
+    // And a lane already holding forty light sessions is owed the standard
+    // ones its mix has been short of, so they get advertised first.
+    expect(
+      desiredByTier(
+        [
+          {
+            ...task("frontier", 400, ["light:20", "standard:1"], true, 14),
+            heldByTier: { light: 40 },
+          },
+        ],
+        4,
+      ),
+    ).toEqual({ light: 2, standard: 2 });
   });
 });

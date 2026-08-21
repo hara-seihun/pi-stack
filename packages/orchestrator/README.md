@@ -170,10 +170,11 @@ describe scheduling:
   gate that references it). Demand answers *whether* a lane can absorb
   another agent, and caps how many it may hold at once.
 - `share`: this lane's relative claim on the fleet, default 1 — *how* the
-  scarce slots are divided among the lanes that want them.
-  `--share 14` against four lanes at 1 and 2 makes the frontier lane 70% of
-  every launch. It is a claim, not a reservation: a lane with less work than
-  share gives the remainder back the same cycle. Share and demand were one
+  scarce slots are divided among the lanes that want them. It scales the
+  lane's whole tier bundle: `share × tier weight` is the lane's claim on each
+  tier, so two lanes at share 10 and 5 hold standard sessions 2:1. It is a
+  claim, not a reservation: a lane with less work than share gives the
+  remainder back the same cycle. Share and demand were one
   number until it became clear they answer different questions — a lane whose
   probe counted problems in sixes outranked a lane counting review items one
   by one, and the fleet's split was an artefact of each probe's unit rather
@@ -190,32 +191,46 @@ describe scheduling:
   ones", which is how a research lane is run mostly on a cheap model with a
   deliberate trickle of an expensive one to compare against; an unweighted
   tier is weight 1, so `--tiers standard` is the ordinary single-tier lane.
-  Allocation across eligible tasks is proportional to share by largest
-  remainder, never assigns more agents than work units, and redistributes
-  capacity a tier-restricted task cannot use. Tier labels live only in
-  launch-side tables; prompt assembly and agent-visible surfaces have no read
-  path to them.
-- The mix is a **ceiling, not a preference**. A tier is passed over once it
-  holds its rounded-up share of the lane's recent launches, so a light-heavy
-  lane cannot quietly become a standard lane the moment light capacity runs
-  short — the free standard slot goes to a lane that actually asked for
-  standard sessions. Within that ceiling the list is still a substitution
-  set: a tier with no free capacity loses its turn rather than holding the
-  lane up.
-- Like task shares, a tier mix is **held across cycles**: 20:1 is invisible
-  inside a cycle that hands out one slot, so each lane's launches inside the
-  fairness window are counted per tier and the next slot goes to the tier
-  whose turn is earliest in virtual time (`(served + 1) / weight`). Splitting
-  each cycle's slots proportionally instead would round the minority tier to
-  zero every time and it would never launch at all.
-- Proportional **across cycles**, not inside one. Sessions end one at a time,
-  so the common cycle offers a single slot, every integer quota floors to
-  zero, and one cycle's arithmetic alone would hand that slot to the largest
-  claim every time — a 60% lane took 100% of ordinary cycles and a 15% lane
-  launched only when three slots happened to free together. Each task
-  therefore carries its launch count over a fairness window (6h) into the
-  decision, and slots go to the task furthest below its own share. Repeated
-  single-slot cycles converge on the declared split.
+  Tier labels live only in launch-side tables; prompt assembly and
+  agent-visible surfaces have no read path to them.
+
+**Allocation composes a fleet, not a launch order.** `share × tier weight` is
+one number per (lane, tier) pair, and the sessions standing at any moment
+should divide in proportion to those numbers. A lane at share 10 wanting
+`light:20,standard:1`, beside a lane at share 5 wanting `standard`, claims
+200 light and 10 standard against 5 standard — so a 43-session machine holds
+40 light and 2 standard for the first lane and 1 standard for the second. The
+shares divide each tier, and the mix holds inside the lane.
+
+- The claim is a **ceiling as well as a target**: no pair holds more than its
+  proportional slice of the fleet, so capacity that no claim wants stays
+  unused instead of being poured into whichever lane can take it. That is the
+  bug this model replaced. Share and mix used to be applied in sequence —
+  share divided the launches, then the mix split each lane's launches — so a
+  share-14 research lane wanting 20 light per standard was asking for one
+  standard session in twenty-one *launches*, and a share-2 review lane took
+  every remaining standard slot on the machine. The fleet came up almost
+  entirely review agents against an operator instruction that said the
+  opposite.
+- A lane with **no work left** drops out of the denominator entirely, so its
+  claim is redistributed among lanes that still have a backlog. Share stays a
+  claim on contested capacity rather than a reservation. A tier with no
+  capacity is different: the lane simply does not hold those sessions, and
+  nobody else inherits them.
+- **Composition is measured over a window** (1h), counting sessions a lane
+  held at any point in it, not launches. A queue lane that exits when drained
+  turns over many times an hour while a research lane holds warm context for
+  hours; counting launches let turnover decide the fleet, and counting only
+  live sessions would make the short-lived lane look permanently empty and
+  feed it slot after slot.
+- Slots go one at a time to the pair whose next session falls earliest in
+  virtual time, `(held + 1) / claim`. Splitting a cycle's slots by proportion
+  instead would round every minority claim to zero — the common cycle offers
+  a single slot — and 20:1 is a ratio no one cycle can express.
+
+The broker is told the same arithmetic: the tier shape it advertises is what
+the claims would actually take, so scarce accounts are not held for a tier no
+lane is about to ask for.
 
 The two levers compose, which is the point: `share` decides who gets the
 fleet, `boost <family> 5` decides how large the fleet is (it multiplies the
