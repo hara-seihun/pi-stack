@@ -23,6 +23,9 @@ export interface BrokerConfig {
   readonly tiers: Readonly<Record<Tier, readonly ModelCandidate[]>>;
   /** Meter topology per provider, keyed by the provider of its accounts. */
   readonly meters: Readonly<Record<string, readonly MeterSpec[]>>;
+  /** model id -> usage class, per provider family; a model absent here is
+   * `default`. Names which meters a launch of that model can drain. */
+  readonly modelClasses?: Readonly<Record<string, Readonly<Record<string, string>>>>;
   /** Assumed per-session percent/hour before enough measured session-hours
    * exist. Deliberately pessimistic: bootstrap admits little, measurement
    * then earns concurrency. */
@@ -76,7 +79,9 @@ interface AccountView {
   readonly sustainable: number | undefined;
   /** Measured (or bootstrap) percent/hour one session burns. */
   readonly sessionBurn: number;
-  /** Concurrent sessions this account supports right now. */
+  /** True once session burn is measured rather than assumed. */
+  readonly measured: boolean;
+  /** Concurrent sessions this account supports across every meter it has. */
   readonly capacity: number;
   active: number;
 }
@@ -86,6 +91,11 @@ const SLOT_ORDER: readonly Tier[] = [...TIERS].reverse();
 
 export class Broker {
   private readonly cfg: BrokerConfig;
+  /** Rates for one decision instant. Calibration is a replay of the whole
+   * ledger segment history, and one allocation cycle asks for the same
+   * account-and-model rate once per advertised slot. */
+  private readonly rates = new Map<string, number | undefined>();
+  private ratesAt: number | undefined;
 
   constructor(
     private readonly ledger: Ledger,
@@ -100,7 +110,7 @@ export class Broker {
    * undefined when no account can take another session.
    */
   admit(tier: Tier, now: number, exclude?: ReadonlySet<string>): Admission | undefined {
-    return this.pick(this.views(now), tier, exclude);
+    return this.pick(this.views(now), tier, now, exclude);
   }
 
   /**
@@ -143,7 +153,7 @@ export class Broker {
         }
       }
       if (next === undefined) return slots;
-      const admission = this.pick(views, next);
+      const admission = this.pick(views, next, now);
       if (admission === undefined) {
         exhausted.add(next);
         continue;
@@ -204,15 +214,40 @@ export class Broker {
    * hazard-paced plan rate, scaled by the family's operator boost. Undefined
    * until calibration exists — an uncalibrated account stays in bootstrap
    * whatever the boost, because there is nothing measured to spend faster. */
-  sustainableRate(accountId: string, provider: string, now: number): number | undefined {
-    const paced = this.pacedRate(accountId, provider, now);
+  sustainableRate(accountId: string, provider: string, now: number, model?: string): number | undefined {
+    const paced = this.pacedRate(accountId, provider, now, model);
     return paced === undefined ? undefined : paced * this.ledger.boost(provider);
   }
 
-  private pacedRate(accountId: string, provider: string, now: number): number | undefined {
+  /**
+   * The meters a launch of `model` can actually drain, from the topology's
+   * `drainedBy` classes.
+   *
+   * A model-scoped meter must not pace work that cannot touch it. Anthropic's
+   * scoped weekly bucket is Fable's alone, so an account whose Fable week is
+   * spent still has whatever its session and all-models meters say for an
+   * Opus launch — and pacing that launch against the exhausted bucket would
+   * strand a working plan at zero capacity. Naming no model asks the
+   * account-wide question and keeps every meter, which is the conservative
+   * answer for a caller that has not said what it will run.
+   */
+  private metersFor(provider: string, model: string | undefined): readonly MeterSpec[] {
+    const specs = this.cfg.meters[provider] ?? [];
+    if (model === undefined) return specs;
+    const prefix = `${this.cfg.modelClasses?.[provider]?.[model] ?? "default"}:`;
+    const drained = specs.filter((spec) => spec.drainedBy.some((classId) => classId.startsWith(prefix)));
+    // A topology that names no class for this model says nothing about which
+    // meters it spares; pace against all of them rather than none.
+    return drained.length > 0 ? drained : specs;
+  }
+
+  private pacedRate(accountId: string, provider: string, now: number, model?: string): number | undefined {
     const specs = this.cfg.meters[provider];
     if (specs === undefined || specs.length === 0) return undefined;
     const transform = this.cfg.transform;
+    // Replay always carries the family's whole topology — every stored
+    // reading has to land on a meter it knows — and the model narrows only
+    // which of the calibrated meters get a say in the rate.
     const cal = this.ledger.replayCalibrator(
       accountId,
       specs,
@@ -220,7 +255,7 @@ export class Broker {
       transform === undefined ? undefined : (c, t) => transform(provider, c, t),
     );
     let min: number | undefined;
-    for (const spec of specs) {
+    for (const spec of this.metersFor(provider, model)) {
       if (this.ledger.latestReading(accountId, spec.id) === undefined) continue;
       const plan = cal.plan(spec.id, now);
       if (!plan.ok) return undefined;
@@ -258,27 +293,16 @@ export class Broker {
           (a.cooldownUntil === undefined || a.cooldownUntil <= now),
       )
       .map((a) => {
-        const sustainable = this.sustainableRate(a.id, a.provider, now);
+        const sustainable = this.cachedRate(a.id, a.provider, now);
         const measured = this.measuredSessionBurn(a.id, now);
         const sessionBurn = measured ?? this.cfg.bootstrapSessionPercentPerHour;
-        // Concurrency is a measurement, not a constant: what the plan
-        // sustains, divided by what one session actually costs. Both halves
-        // have to be observed for the quotient to mean anything, so an
-        // account missing either one runs a single session until it has
-        // earned the evidence. That bootstrap is a floor for the unmeasured,
-        // never a cap on the measured — and never a floor under a measured
-        // account that plainly cannot afford another session, which is why a
-        // fully measured quotient of zero is honoured.
-        const capacity =
-          sustainable === undefined || measured === undefined
-            ? 1
-            : Math.floor(sustainable / sessionBurn);
         return {
           id: a.id,
           provider: a.provider,
           sustainable,
           sessionBurn,
-          capacity,
+          measured: measured !== undefined,
+          capacity: this.capacity(sustainable, sessionBurn, measured !== undefined),
           active:
             this.ledger.activeRunCount(a.id) +
             this.ledger.activeSessionLeaseCount(a.id, now, this.cfg.sessionLeaseTimeoutMs),
@@ -286,9 +310,34 @@ export class Broker {
       });
   }
 
+  /**
+   * Concurrency is a measurement, not a constant: what the plan sustains,
+   * divided by what one session actually costs. Both halves have to be
+   * observed for the quotient to mean anything, so an account missing either
+   * one runs a single session until it has earned the evidence. That
+   * bootstrap is a floor for the unmeasured, never a cap on the measured —
+   * and never a floor under a measured account that plainly cannot afford
+   * another session, which is why a fully measured quotient of zero is
+   * honoured.
+   */
+  private capacity(sustainable: number | undefined, sessionBurn: number, measured: boolean): number {
+    return sustainable === undefined || !measured ? 1 : Math.floor(sustainable / sessionBurn);
+  }
+
+  private cachedRate(accountId: string, provider: string, now: number, model?: string): number | undefined {
+    if (this.ratesAt !== now) {
+      this.rates.clear();
+      this.ratesAt = now;
+    }
+    const key = `${accountId}\u0000${provider}\u0000${model ?? ""}`;
+    if (!this.rates.has(key)) this.rates.set(key, this.sustainableRate(accountId, provider, now, model));
+    return this.rates.get(key);
+  }
+
   private pick(
     views: readonly AccountView[],
     tier: Tier,
+    now: number,
     exclude?: ReadonlySet<string>,
   ): Admission | undefined {
     // Quota is not the only finite resource: sessions are hosted in the
@@ -299,11 +348,23 @@ export class Broker {
     if (active >= this.cfg.maxConcurrentSessions) return undefined;
     for (const candidate of this.cfg.tiers[tier] ?? []) {
       let best: AccountView | undefined;
+      let bestFree = 0;
       for (const v of views) {
         if (v.provider !== candidate.provider) continue;
         if (exclude?.has(v.id)) continue;
-        if (v.capacity - v.active <= 0) continue;
-        if (best === undefined || v.capacity - v.active > best.capacity - best.active) best = v;
+        // Capacity for *this candidate*: a meter the model cannot drain has
+        // no say in whether the model may launch.
+        const capacity = this.capacity(
+          this.cachedRate(v.id, candidate.provider, now, candidate.model),
+          v.sessionBurn,
+          v.measured,
+        );
+        const free = capacity - v.active;
+        if (free <= 0) continue;
+        if (best === undefined || free > bestFree) {
+          best = v;
+          bestFree = free;
+        }
       }
       if (best !== undefined) {
         return {

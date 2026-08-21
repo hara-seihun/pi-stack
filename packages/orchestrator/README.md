@@ -252,6 +252,17 @@ meter drain over both fleet run-hours and interactive lease-hours. Active
 interactive leases consume the same shared-account slots as fleet runs.
 There are no hand-configured burn constants anywhere.
 
+"Most binding meter" means the meters the launch can actually drain, from
+the topology's `drainedBy` classes. Anthropic's scoped weekly bucket is
+Fable's alone, so an account whose Fable week is spent still has whatever
+its session and all-models meters say for an Opus launch; pacing that launch
+against the exhausted bucket would strand a working plan at zero capacity.
+A caller that names no model — `externalCapacity`, and the `capacity`
+command built on it — gets the conservative account-wide minimum over every
+meter, because it has not said what it will run. Calibration replay always
+carries the family's whole topology; the model narrows only which calibrated
+meters get a say in the rate.
+
 An **operator boost** (`boost <family> on`, a `boost:<family>` control row) is
 the one deliberate lever over that arithmetic: it multiplies the paced
 sustainable rate for one provider family, so a boosted family spends its real

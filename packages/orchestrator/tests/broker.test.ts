@@ -419,3 +419,61 @@ describe("operator boost", () => {
     expect(() => ledger.setBoost("anthropic", 0)).toThrow();
   });
 });
+
+/**
+ * The defect this covers: a model-scoped meter paced every launch on the
+ * account. Anthropic's scoped weekly bucket is Fable's alone, so an account
+ * whose Fable week is spent still has whatever its all-models meter says for
+ * an Opus launch — but the broker took the minimum over every meter with a
+ * reading and read the account as having zero capacity for anything. It was
+ * invisible only because that bucket had no reading at all on Opus accounts;
+ * once the usage sampler supplied one, a working plan would have been
+ * stranded.
+ */
+describe("broker meter scope", () => {
+  const SCOPED_METERS: MeterSpec[] = [
+    { id: "weekly", drainedBy: ["opus:cost", "fable:cost"], nominalWindowMs: 7 * 24 * HOUR },
+    { id: "weekly-fable", drainedBy: ["fable:cost"], nominalWindowMs: 7 * 24 * HOUR },
+  ];
+  const SCOPED_CONFIG: Partial<BrokerConfig> & Pick<BrokerConfig, "tiers" | "meters"> = {
+    ...CONFIG,
+    meters: { ...CONFIG.meters, anthropic: SCOPED_METERS },
+    modelClasses: { anthropic: { "claude-opus": "opus", "claude-fable": "fable" } },
+  };
+
+  /** Feeds the same clean history as `feedHistory`, then exhausts the
+   * scoped meter: spent, with a reset still a day away. */
+  function exhaustedFable(ledger: Ledger): number {
+    const now = feedHistory(ledger, "anth-1", { percentPerHour: 0.2, hours: 48 });
+    feedRuns(ledger, "anth-1", { count: 6, hoursEach: 8, endAt: now });
+    ledger.recordReading("anth-1", "weekly-fable", { at: now, usedPercent: 100, resetAt: now + 24 * HOUR });
+    return now;
+  }
+
+  it("an exhausted Fable week does not strand the account's Opus capacity", () => {
+    const ledger = openLedger();
+    const now = exhaustedFable(ledger);
+    const broker = new Broker(ledger, SCOPED_CONFIG);
+
+    // The account-wide question still answers with the binding meter, which
+    // is what a caller naming no model must be told.
+    expect(broker.sustainableRate("anth-1", "anthropic", now)).toBe(0);
+    expect(broker.sustainableRate("anth-1", "anthropic", now, "claude-fable")).toBe(0);
+    expect(broker.sustainableRate("anth-1", "anthropic", now, "claude-opus")).toBeGreaterThan(0);
+    // Standard tier prefers Opus on this account: it is admitted.
+    expect(broker.admit("standard", now)).toMatchObject({ accountId: "anth-1", model: "claude-opus" });
+    // Expert tier is Fable only, and Fable has nothing left to spend.
+    expect(broker.admit("expert", now)).toBeUndefined();
+  });
+
+  it("paces against every meter when the topology names no class for the model", () => {
+    const ledger = openLedger();
+    const now = exhaustedFable(ledger);
+    // No modelClasses entry: nothing says this model spares the scoped
+    // meter, so it is paced against all of them rather than none.
+    const broker = new Broker(ledger, { ...SCOPED_CONFIG, modelClasses: {} });
+
+    expect(broker.sustainableRate("anth-1", "anthropic", now, "claude-opus")).toBe(0);
+    expect(broker.admit("standard", now)?.accountId).toBe("codex-1");
+  });
+});

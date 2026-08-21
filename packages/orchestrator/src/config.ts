@@ -89,17 +89,20 @@ export function meterSpecs(cfg: OrchestratorConfig, family: string): MeterSpec[]
  * family at replay time; meters are per family. */
 export function brokerConfig(
   cfg: OrchestratorConfig,
-): Pick<BrokerConfig, "tiers" | "meters" | "transform"> &
+): Pick<BrokerConfig, "tiers" | "meters" | "modelClasses" | "transform"> &
   Partial<Pick<BrokerConfig, "maxConcurrentSessions" | "maxSlotsPerTier">> {
   const meters: Record<string, MeterSpec[]> = {};
+  const modelClasses: Record<string, Record<string, string>> = {};
   const transforms = new Map<string, (c: string, t: number) => { classId: string; tokens: number }>();
   for (const family of Object.keys(cfg.providers)) {
     meters[family] = meterSpecs(cfg, family);
+    modelClasses[family] = { ...(cfg.providers[family]?.modelClasses ?? {}) };
     transforms.set(family, costTransform(cfg, family));
   }
   return {
     tiers: cfg.tiers,
     meters,
+    modelClasses,
     ...(cfg.maxConcurrentSessions === undefined
       ? {}
       : { maxConcurrentSessions: cfg.maxConcurrentSessions }),
