@@ -268,6 +268,12 @@ byte cursor rather than re-reading the file. The in-flight turn is published to
 a file touch, and nobody watching costs nothing. Transcript failure never fails
 a run, and transcripts older than a week are pruned when a runner starts.
 
+A `tool_start` payload carries the tool's own arguments as an object, because a
+reader renders a card from named fields — a bash `command` and its `timeout`, a
+`path`, an edit count. Only genuinely oversized arguments and tool output are
+flattened to bounded text, and an oversized argument becomes a labelled
+`{truncated, preview}` rather than a quoted blob.
+
 ## Routing extension — the multi-pass successor (`src/extension/routing.ts`)
 
 Multi-account routing for interactive pi sessions, driven entirely by the
