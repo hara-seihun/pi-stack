@@ -117,6 +117,37 @@ describe("broker admission", () => {
     expect(capacity).toBeGreaterThan(0);
   });
 
+  it("keeps bootstrap capacity until every observed meter is calibrated", () => {
+    const ledger = Ledger.open(":memory:");
+    ledger.upsertAccount({ id: "anth-1", provider: "anthropic", domain: "orchestrator" });
+    const fast = { id: "fast", drainedBy: ["cost"], nominalWindowMs: 5 * HOUR };
+    const weekly = { id: "weekly", drainedBy: ["cost"], nominalWindowMs: 7 * 24 * HOUR };
+    const now = 6 * HOUR;
+    ledger.recordReading("anth-1", "fast", { at: 0, usedPercent: 0, resetAt: 10 * HOUR });
+    ledger.recordReading("anth-1", "weekly", { at: 0, usedPercent: 80, resetAt: 48 * HOUR });
+    for (let hour = 1; hour <= 6; hour++) {
+      ledger.recordUsage("anth-1", { at: hour * HOUR - HOUR / 2, classId: "cost", tokens: 1e6, source: "machine" });
+      ledger.recordReading("anth-1", "fast", { at: hour * HOUR, usedPercent: hour, resetAt: 10 * HOUR });
+    }
+    ledger.recordReading("anth-1", "weekly", { at: now, usedPercent: 81, resetAt: 48 * HOUR });
+    const broker = new Broker(ledger, {
+      ...CONFIG,
+      meters: { ...CONFIG.meters, anthropic: [fast, weekly] },
+    });
+
+    expect(broker.sustainableRate("anth-1", "anthropic", now)).toBeUndefined();
+    const first = broker.admit("standard", now)!;
+    ledger.createRun({ taskId: "t", tier: "standard", at: now, ...first });
+    expect(broker.admit("expert", now)).toBeUndefined();
+  });
+
+  it("refuses calibration from a reading whose reset already passed", () => {
+    const ledger = openLedger();
+    feedHistory(ledger, "anth-1", { percentPerHour: 0.2, hours: 48 });
+    const broker = new Broker(ledger, CONFIG);
+    expect(broker.sustainableRate("anth-1", "anthropic", 8 * 24 * HOUR)).toBeUndefined();
+  });
+
   it("over-drained account: burn above the sustainable rate admits nothing", () => {
     const ledger = openLedger();
     // 1%/h continuous drain for 48h leaves the hazard-paced plan rate well

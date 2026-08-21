@@ -396,6 +396,7 @@ export class AccountCalibrator {
     const r = st.lastReading;
     if (!r) return err({ reason: "no-reading" });
     if (r.resetAt === undefined) return err({ reason: "no-reset-schedule" });
+    if (r.resetAt <= now) return err({ reason: "stale-reading" });
     const stats = this.stats(meterId);
     const usable = stats.classes.filter(
       (c) => c.confidence !== "none" && c.tokensPerPercent !== undefined,

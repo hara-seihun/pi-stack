@@ -178,7 +178,11 @@ is nothing measured to spend faster.
 
 An uncalibrated account is in **bootstrap**: exactly one concurrent session,
 so the calibrator gets data without risking a stampede; measurement then
-earns concurrency. `slotsByTier` advertises capacity for one allocation
+earns concurrency. Calibration is complete only when every meter already
+observed on that account has a current reset schedule and enough signal. A
+fresh short-window reset must never let the broker ignore an unread weekly
+meter and infer dozens of slots from the short window alone (the 2026-08-20
+21-Opus launch incident). `slotsByTier` advertises capacity for one allocation
 cycle by virtually admitting scarcest-tier-first (so shared accounts are
 never double-counted), capped by what eligible tasks actually demand (so a
 scarce tier never hoards an account nothing wants). `failover` cools the

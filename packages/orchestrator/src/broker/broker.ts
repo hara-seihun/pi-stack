@@ -159,8 +159,9 @@ export class Broker {
     );
     let min: number | undefined;
     for (const spec of specs) {
+      if (this.ledger.latestReading(accountId, spec.id) === undefined) continue;
       const plan = cal.plan(spec.id, now);
-      if (!plan.ok) continue;
+      if (!plan.ok) return undefined;
       if (min === undefined || plan.value.percentPerHour < min) min = plan.value.percentPerHour;
     }
     return min;

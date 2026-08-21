@@ -104,6 +104,7 @@ export type PlanError = {
     | "unknown-meter"
     | "no-reading"
     | "no-reset-schedule"
+    | "stale-reading"
     | "insufficient-calibration";
 };
 
