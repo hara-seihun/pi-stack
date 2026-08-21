@@ -25,6 +25,7 @@ import type {
   MeterReading,
   MeterSpec,
   UsageEvent,
+  UsageSource,
 } from "../calibrator/types.js";
 
 /**
@@ -228,6 +229,33 @@ ALTER TABLE task ADD COLUMN exit_when_drained INTEGER NOT NULL DEFAULT 0
   CHECK (exit_when_drained IN (0, 1));
 `;
 
+/** Token burn becomes attributable. `usage_event.source` existed from the
+ * first schema but the logger wrote the literal 'machine' for every session,
+ * so the fleet's burn and the operator's own were one undifferentiated
+ * number and "what is using our quota" could only be answered by correlating
+ * run windows against session ids by hand. The link is recorded directly:
+ * the runner writes its session id onto the run, and the logger labels the
+ * source from the environment the broker already sets.
+ *
+ * History predating the link is relabelled by that same correlation, once:
+ * a session whose first event falls inside a run window on the same account
+ * was that run's. Concurrent runs share accounts, so this recovers the
+ * source split but not the run identity, which stays null for old rows. */
+const RUN_SESSION_SCHEMA = `
+ALTER TABLE run ADD COLUMN session_id TEXT;
+CREATE INDEX run_session ON run (session_id);
+
+WITH first_event AS (
+  SELECT session_id, account_id, MIN(at) AS at FROM usage_event
+  WHERE session_id IS NOT NULL GROUP BY session_id, account_id
+)
+UPDATE usage_event SET source = 'orchestrator' WHERE session_id IN (
+  SELECT f.session_id FROM first_event f JOIN run r ON r.account_id = f.account_id
+  WHERE f.at >= COALESCE(r.claimed_at, r.started_at) - 60000
+    AND f.at <= COALESCE(r.ended_at, r.heartbeat_at, r.started_at + 3600000) + 300000
+);
+`;
+
 const MIGRATIONS: readonly string[] = [
   SCHEMA,
   TASK_SCHEMA,
@@ -240,6 +268,7 @@ const MIGRATIONS: readonly string[] = [
   TIER_WEIGHT_SCHEMA,
   TASK_SHARE_SCHEMA,
   EXIT_WHEN_DRAINED_SCHEMA,
+  RUN_SESSION_SCHEMA,
 ];
 
 export type AccountDomain = "interactive" | "orchestrator";
@@ -273,6 +302,7 @@ export interface RunRow {
   readonly startedAt: number;
   readonly claimedAt: number | undefined;
   readonly runnerId: string | undefined;
+  readonly sessionId: string | undefined;
   readonly endedAt: number | undefined;
   readonly heartbeatAt: number | undefined;
   readonly abortRequested: boolean;
@@ -290,6 +320,24 @@ export interface RunResult {
 
 export interface LoggedUsageEvent extends UsageEvent {
   readonly sessionId?: string;
+}
+
+export interface UsageSlice {
+  readonly key: string;
+  readonly tokens: number;
+  readonly sessions: number;
+}
+
+export interface UsageBreakdown {
+  readonly since: number;
+  readonly total: number;
+  readonly bySource: Record<UsageSource, number>;
+  /** Fleet burn per lane; a run predating the session link falls into one
+   * unattributed bucket rather than silently joining a lane it did not run. */
+  readonly byLane: readonly UsageSlice[];
+  readonly byAccount: readonly UsageSlice[];
+  readonly byModel: readonly UsageSlice[];
+  readonly topSessions: readonly UsageSlice[];
 }
 
 function boostKey(provider: string): string {
@@ -523,6 +571,60 @@ export class Ledger {
          VALUES (?, ?, ?, ?, ?, ?)`,
       )
       .run(accountId, e.classId, e.at, e.tokens, e.source, e.sessionId ?? null);
+  }
+
+  /**
+   * Who spent the quota. The fleet's share resolves to the lane that spent it
+   * through `run.session_id`; everything else is one of this machine's own
+   * interactive sessions, named by session id because that is the only handle
+   * the ledger holds for them.
+   */
+  usageBreakdown(since: number): UsageBreakdown {
+    const slices = (select: string, params: (string | number)[] = []): UsageSlice[] =>
+      (
+        this.db.prepare(select).all(since, ...params) as {
+          key: string;
+          tokens: number;
+          sessions: number;
+        }[]
+      ).map((r) => ({ key: r.key, tokens: r.tokens, sessions: r.sessions }));
+
+    const bySource = { orchestrator: 0, machine: 0 };
+    for (const s of slices(
+      `SELECT source AS key, SUM(tokens) AS tokens, COUNT(DISTINCT session_id) AS sessions
+       FROM usage_event WHERE at >= ? GROUP BY source`,
+    )) {
+      bySource[s.key as UsageSource] = s.tokens;
+    }
+    return {
+      since,
+      total: bySource.orchestrator + bySource.machine,
+      bySource,
+      byLane: slices(
+        `SELECT COALESCE(r.task_id, '(unattributed fleet session)') AS key,
+                SUM(u.tokens) AS tokens, COUNT(DISTINCT u.session_id) AS sessions
+         FROM usage_event u LEFT JOIN run r ON r.session_id = u.session_id
+         WHERE u.at >= ? AND u.source = 'orchestrator'
+         GROUP BY key ORDER BY tokens DESC`,
+      ),
+      byAccount: slices(
+        `SELECT account_id AS key, SUM(tokens) AS tokens, COUNT(DISTINCT session_id) AS sessions
+         FROM usage_event WHERE at >= ? GROUP BY key ORDER BY tokens DESC`,
+      ),
+      byModel: slices(
+        `SELECT substr(class_id, 1, instr(class_id, ':') - 1) AS key,
+                SUM(tokens) AS tokens, COUNT(DISTINCT session_id) AS sessions
+         FROM usage_event WHERE at >= ? GROUP BY key ORDER BY tokens DESC`,
+      ),
+      topSessions: slices(
+        `SELECT u.session_id || '  ' || COALESCE(r.task_id, u.account_id) AS key,
+                SUM(u.tokens) AS tokens, 1 AS sessions
+         FROM usage_event u LEFT JOIN run r ON r.session_id = u.session_id
+         WHERE u.at >= ? AND u.session_id IS NOT NULL
+         GROUP BY u.session_id ORDER BY tokens DESC LIMIT ?`,
+        [10],
+      ),
+    };
   }
 
   recordUsageBatch(accountId: string, events: readonly LoggedUsageEvent[]): void {
@@ -889,7 +991,8 @@ export class Ledger {
     const rows = this.db
       .prepare(
         `SELECT id, task_id, tier, account_id, model, provider, thinking, state, started_at,
-                claimed_at, runner_id, ended_at, heartbeat_at, abort_requested, productive, complete, detail
+                claimed_at, runner_id, session_id, ended_at, heartbeat_at, abort_requested,
+                productive, complete, detail
          FROM run ${clause}`,
       )
       .all(...params) as {
@@ -904,6 +1007,7 @@ export class Ledger {
       started_at: number;
       claimed_at: number | null;
       runner_id: string | null;
+      session_id: string | null;
       ended_at: number | null;
       heartbeat_at: number | null;
       abort_requested: number;
@@ -923,6 +1027,7 @@ export class Ledger {
       startedAt: r.started_at,
       claimedAt: r.claimed_at ?? undefined,
       runnerId: r.runner_id ?? undefined,
+      sessionId: r.session_id ?? undefined,
       endedAt: r.ended_at ?? undefined,
       heartbeatAt: r.heartbeat_at ?? undefined,
       abortRequested: r.abort_requested !== 0,
@@ -950,6 +1055,12 @@ export class Ledger {
 
   heartbeatRun(id: string, at: number): void {
     this.db.prepare("UPDATE run SET heartbeat_at = ? WHERE id = ?").run(at, id);
+  }
+
+  /** Bind a run to the pi session hosting it, so its usage events resolve to
+   * a task without correlating timestamps. */
+  linkRunSession(id: string, sessionId: string): void {
+    this.db.prepare("UPDATE run SET session_id = ? WHERE id = ?").run(sessionId, id);
   }
 
   requestAbort(id: string): void {

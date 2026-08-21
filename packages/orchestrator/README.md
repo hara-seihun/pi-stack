@@ -483,7 +483,7 @@ T0 amendment proposals and filling the reviewed reach/advance/closure impact
 rubric in coherent batches; `math-review` independently applies or rejects
 both proposal kinds.
 
-`pi-orchestrator status | capacity | task set/list/delete | account list/add/domain/share/login |
+`pi-orchestrator status | capacity | usage | task set/list/delete | account list/add/domain/share/login |
 pause | resume | boost | abort | say | runner | drain-runners | voice-broker` —
 thin reads and
 writes against the ledger (path from `PI_ORCHESTRATOR_LEDGER`, default
@@ -497,6 +497,17 @@ for external launchers — processes that start their own pi sessions on this
 machine's pooled accounts (the Converge supervisor's workers) — so their
 launch sizing reads the same ledger facts the broker admits from instead of
 keeping a parallel quota model.
+`usage [--hours N]` answers "what is spending our quota", which is otherwise
+only answerable by forensics. Every pi session on this machine logs into this
+ledger, so the split is exhaustive: fleet burn against the operator's own
+interactive burn, then by lane, account, model, and largest session. The
+label is not inferred — `usage_event.source` is written from
+`PI_ORCHESTRATOR_ASSIGNED`, the same flag the broker sets to claim a
+session's account custody, and the runner records its session id on the run
+so fleet burn resolves to the lane that asked for it. Usage recorded before
+that link existed was relabelled by correlating run windows, so its lane is
+one `(unattributed fleet session)` bucket rather than a guess.
+
 `say <runId> <text>` is the counterpart of `abort`: it queues an operator
 message in `run_message`, the runner that owns the session steers it in as a
 user turn (and mirrors it into the transcript), and the CLI waits for the

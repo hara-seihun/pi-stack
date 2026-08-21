@@ -270,4 +270,45 @@ describe("account metadata custody", () => {
     expect(() => ledger.removeAccount("codex-7")).toThrow(/in-flight/);
     expect(ledger.accounts().map((a) => a.id)).toEqual(["codex-7"]);
   });
+
+  it("attributes fleet burn to its lane and leaves interactive burn on the machine", () => {
+    const ledger = Ledger.open(":memory:");
+    ledger.upsertAccount({ id: "codex-7", provider: "openai-codex" });
+    ledger.upsertTask({ id: "frontier", tiers: mix("standard"), demandConstant: 1, prompt: "go" });
+    const at = Date.now();
+    const run = ledger.createRun({
+      taskId: "frontier",
+      tier: "standard",
+      accountId: "codex-7",
+      model: "gpt",
+      provider: "openai-codex",
+      at,
+    });
+    ledger.linkRunSession(run, "fleet-session");
+    ledger.recordUsage("codex-7", {
+      at,
+      classId: "gpt:input",
+      tokens: 300,
+      source: "orchestrator",
+      sessionId: "fleet-session",
+    });
+    // The same shared account, spent by an operator's own session.
+    ledger.recordUsage("codex-7", {
+      at,
+      classId: "gpt:input",
+      tokens: 100,
+      source: "machine",
+      sessionId: "operator-session",
+    });
+
+    const b = ledger.usageBreakdown(at - HOUR);
+    expect(b.total).toBe(400);
+    expect(b.bySource).toEqual({ orchestrator: 300, machine: 100 });
+    expect(b.byLane).toEqual([{ key: "frontier", tokens: 300, sessions: 1 }]);
+    expect(b.byAccount).toEqual([{ key: "codex-7", tokens: 400, sessions: 2 }]);
+    expect(b.topSessions.map((s) => s.key)).toEqual([
+      "fleet-session  frontier",
+      "operator-session  codex-7",
+    ]);
+  });
 });

@@ -162,6 +162,7 @@ export class PiHost implements HostManager {
       customTools: [taskComplete],
     });
     this.sessions.set(spec.runId, session);
+    this.events.sessionStarted(spec.runId, session.sessionManager.getSessionId());
     if (preresolved === undefined) {
       const model = session.modelRuntime.getModel(spec.provider, spec.model);
       if (model === undefined) {

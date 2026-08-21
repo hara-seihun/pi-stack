@@ -3,7 +3,7 @@ import { join } from "node:path";
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 import { Ledger } from "../ledger/ledger.js";
 import { AnthropicMeterSampler } from "../meters/anthropic.js";
-import type { MeterReading } from "../calibrator/types.js";
+import type { MeterReading, UsageSource } from "../calibrator/types.js";
 
 /**
  * Records every pi session's usage into the orchestrator ledger, making all
@@ -21,6 +21,12 @@ import type { MeterReading } from "../calibrator/types.js";
 
 const COMPONENTS = ["input", "output", "cacheRead", "cacheWrite"] as const;
 const LEASE_HEARTBEAT_MS = 30_000;
+
+/** The same flag the broker sets to claim a session's account custody names
+ * who is spending: a broker-assigned session is the fleet, anything else is
+ * this machine's own operator work. Recording both as one source made the
+ * fleet's burn and the operator's indistinguishable in the ledger. */
+const SOURCE: UsageSource = process.env.PI_ORCHESTRATOR_ASSIGNED === "1" ? "orchestrator" : "machine";
 
 export function defaultLedgerPath(): string {
   return (
@@ -161,7 +167,7 @@ export default function usageLogger(pi: ExtensionAPI): void {
       const events = COMPONENTS.flatMap((component) => {
         const tokens = usage[component];
         return tokens > 0
-          ? [{ at, classId: `${model}:${component}`, tokens, source: "machine" as const, sessionId }]
+          ? [{ at, classId: `${model}:${component}`, tokens, source: SOURCE, sessionId }]
           : [];
       });
       if (events.length > 0) l.recordUsageBatch(provider, events);

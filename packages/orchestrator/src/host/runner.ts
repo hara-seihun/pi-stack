@@ -104,6 +104,10 @@ export class Runner implements HostEvents {
     );
   }
 
+  sessionStarted(runId: string, sessionId: string): void {
+    this.ledger.linkRunSession(runId, sessionId);
+  }
+
   runFinished(runId: string, result: HostRunResult, at = Date.now()): void {
     const run = this.ledger.run(runId);
     if (run === undefined) return;

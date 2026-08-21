@@ -40,6 +40,10 @@ export interface HostManager {
 export interface HostEvents {
   runFinished(runId: string, result: HostRunResult, at: number): void;
   heartbeat(runId: string, at: number): void;
+  /** The pi session now hosting this run. Reported once, as soon as the
+   * session exists, so the usage the session is about to record is
+   * attributable to the lane that asked for it. */
+  sessionStarted(runId: string, sessionId: string): void;
   /** True when this lane has run out of work and its shift should end rather
    * than be re-prompted. The policy (which lanes end this way, and what
    * counts as drained) lives in the runner; the host only asks. */

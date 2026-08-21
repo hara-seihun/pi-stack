@@ -105,6 +105,37 @@ async function status(ledger: Ledger): Promise<void> {
 }
 
 /**
+ * Where the machine's token quota went. Every pi session on this machine
+ * logs into the ledger, so this is the whole answer: fleet burn resolved to
+ * the lane that spent it, operator burn to the session that spent it, and
+ * nothing left over. A number that does not appear here was not spent by a
+ * session on this machine.
+ */
+function usage(ledger: Ledger, args: string[]): void {
+  const { named } = flags(args);
+  const hours = Number(named.get("hours") ?? 24);
+  if (!Number.isFinite(hours) || hours <= 0) fail("usage: usage [--hours N]");
+  const b = ledger.usageBreakdown(Date.now() - hours * 3_600_000);
+  const M = (n: number): string => `${(n / 1e6).toFixed(1)}M`;
+  const share = (n: number): string =>
+    b.total > 0 ? `${((100 * n) / b.total).toFixed(0).padStart(3)}%` : "   -";
+  const table = (title: string, rows: readonly { key: string; tokens: number; sessions: number }[]): void => {
+    if (rows.length === 0) return;
+    console.log(`\n${title}`);
+    for (const r of rows) {
+      console.log(`  ${share(r.tokens)} ${M(r.tokens).padStart(8)}  ${String(r.sessions).padStart(4)} sess  ${r.key}`);
+    }
+  };
+  console.log(`last ${hours}h: ${M(b.total)} tokens`);
+  console.log(`  ${share(b.bySource.orchestrator)} ${M(b.bySource.orchestrator).padStart(8)}  fleet (orchestrator-launched)`);
+  console.log(`  ${share(b.bySource.machine)} ${M(b.bySource.machine).padStart(8)}  this machine (interactive)`);
+  table("by lane", b.byLane);
+  table("by account", b.byAccount);
+  table("by model", b.byModel);
+  table("largest sessions", b.topSessions);
+}
+
+/**
  * Machine-readable admission and quota facts for external launchers —
  * processes (like the Converge supervisor) that start their own sessions on
  * this machine's pooled accounts and need to size that launch decision from
@@ -337,6 +368,7 @@ async function runner(ledger: Ledger, args: string[]): Promise<void> {
     // The runner is constructed below; PiHost only needs the event surface.
     { runFinished: (id, result, at) => live.runFinished(id, result, at),
       heartbeat: (id, at) => live.heartbeat(id, at),
+      sessionStarted: (id, sessionId) => live.sessionStarted(id, sessionId),
       laneDrained: (taskId) => live.laneDrained(taskId) },
     {
       resolveModel,
@@ -710,6 +742,9 @@ async function main(): Promise<void> {
       case "capacity":
         capacity(ledger, args);
         break;
+      case "usage":
+        usage(ledger, args);
+        break;
       case "pause":
       case "resume":
         launchControl(ledger, command, args);
@@ -774,6 +809,8 @@ async function main(): Promise<void> {
             "  status                       tasks, gates, eligibility, running sessions",
             "  capacity [--provider F]      admission and quota facts as JSON, for external",
             "                               launchers sizing sessions on the pooled accounts",
+            "  usage [--hours N]            where the token quota went: fleet vs interactive,",
+            "                               by lane, account, model, and largest session",
             "  task set <id> --tiers light:20,standard [--share N] [--demand-command CMD | --demand-constant N]",
             "               [--gate EXPR] [--prompt TEXT] [--cwd DIR] [--exit-when-drained true|false]",
             "  task list | task delete <id>",

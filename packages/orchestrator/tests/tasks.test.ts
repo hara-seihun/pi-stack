@@ -102,7 +102,11 @@ describe("task custody", () => {
   it("migrates a v1 ledger in place and defaults launches to enabled", () => {
     const path = join(dir, "migrate.sqlite3");
     const old = new DatabaseSync(path);
+    // The whole v1 schema: later migrations read the facts it holds, so a
+    // fixture missing them would test a database that never existed.
     old.exec("CREATE TABLE account (id TEXT PRIMARY KEY, provider TEXT NOT NULL, label TEXT, access_until INTEGER, created_at INTEGER NOT NULL) STRICT");
+    old.exec("CREATE TABLE meter_reading (account_id TEXT NOT NULL REFERENCES account(id), meter_id TEXT NOT NULL, at INTEGER NOT NULL, used_percent INTEGER NOT NULL, reset_at INTEGER, PRIMARY KEY (account_id, meter_id, at)) STRICT");
+    old.exec("CREATE TABLE usage_event (id INTEGER PRIMARY KEY, account_id TEXT NOT NULL REFERENCES account(id), class_id TEXT NOT NULL, at INTEGER NOT NULL, tokens REAL NOT NULL, source TEXT NOT NULL CHECK (source IN ('orchestrator', 'machine')), session_id TEXT) STRICT");
     old.exec("PRAGMA user_version = 1");
     old.close();
     const ledger = Ledger.open(path);

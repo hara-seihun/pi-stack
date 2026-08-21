@@ -31,6 +31,7 @@ function harness(
   let taskComplete: { execute: (id: string, params: unknown) => Promise<unknown> } | undefined;
   const session = {
     messages,
+    sessionManager: { getSessionId: () => "session-1" },
     subscribe: () => () => {},
     dispose: () => {},
     abort: async () => {},
@@ -53,10 +54,12 @@ function harness(
     },
   };
   const results: HostRunResult[] = [];
+  const links: { runId: string; sessionId: string }[] = [];
   const host = new PiHost(
     {
       runFinished: (_id, result) => results.push(result),
       heartbeat: () => {},
+      sessionStarted: (runId, sessionId) => links.push({ runId, sessionId }),
       laneDrained: options.laneDrained ?? (() => false),
     },
     {
@@ -86,10 +89,18 @@ function harness(
       }
     }, 1);
   });
-  return { host, spec, prompts, finished, now: () => clock };
+  return { host, spec, prompts, finished, links, now: () => clock };
 }
 
 describe("host shift loop", () => {
+  it("reports the session hosting a run, so its usage is attributable to the lane", async () => {
+    const { host, spec, finished, links } = harness([{ reports: 1 }, {}, {}]);
+    host.launch(spec);
+    await finished;
+
+    expect(links).toEqual([{ runId: "run-1", sessionId: "session-1" }]);
+  });
+
   it("keeps prompting the same session after a turn ends, and reports the newest record", async () => {
     const { host, spec, prompts, finished } = harness([
       { reports: 1 },
