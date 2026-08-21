@@ -167,8 +167,7 @@ record survives: the controller harvests it automatically at startup, and
 `orchestrator pro-recover [--from-audits DAYS]` does the same on demand
 (audit-era orphans with placeholder ids are matched to real conversations by
 prompt SHA-256 against the account's recent history). Verified recovered
-responses become ordinary provider audits plus advisory artifacts under
-`~/data/projects-research/pro/recovered/`.
+responses become ordinary provider audits under `~/data/chatgpt-pro/`.
 
 ## Live progress streaming
 
