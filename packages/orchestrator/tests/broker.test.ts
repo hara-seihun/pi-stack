@@ -324,6 +324,32 @@ describe("broker slots", () => {
   });
 });
 
+describe("broker external capacity", () => {
+  it("reports eligible accounts with active counts and the machine ceiling", () => {
+    const ledger = openLedger();
+    ledger.upsertAccount({ id: "codex-cooling", provider: "openai-codex", domain: "orchestrator" });
+    ledger.setAccountCooldown("codex-cooling", 5000);
+    const broker = new Broker(ledger, CONFIG);
+    const external = broker.externalCapacity(1000);
+    // The cooling account is not an eligible view; the two healthy bootstrap
+    // accounts each advertise one session.
+    expect(external.accounts.map((a) => a.id).sort()).toEqual(["anth-1", "codex-1"]);
+    for (const account of external.accounts) {
+      expect(account.capacity).toBe(1);
+      expect(account.active).toBe(0);
+    }
+    expect(external.machineCeiling).toBeGreaterThan(0);
+    expect(external.totalActive).toBe(0);
+
+    // An interactive lease appears as active capacity, exactly as admission
+    // would count it.
+    ledger.beginSessionLease("codex-1", 1000);
+    const withLease = broker.externalCapacity(1000);
+    expect(withLease.accounts.find((a) => a.id === "codex-1")?.active).toBe(1);
+    expect(withLease.totalActive).toBe(1);
+  });
+});
+
 describe("broker failover", () => {
   it("moves a failing run to another account and cools the old one down", () => {
     const ledger = openLedger();

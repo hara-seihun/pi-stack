@@ -154,6 +154,38 @@ export class Broker {
   }
 
   /**
+   * Admission facts for an external launcher (a process that starts its own
+   * sessions on this machine's accounts instead of enqueuing orchestrator
+   * runs). Eligible accounts only — cooling, expired-access, and
+   * non-shareable accounts are already filtered — with each account's
+   * measured concurrent-session capacity and current active count (fleet
+   * runs plus interactive session leases). The machine ceiling bounds any
+   * slot sum a reader derives, exactly as it bounds `admit`.
+   */
+  externalCapacity(now: number): {
+    readonly accounts: readonly {
+      readonly id: string;
+      readonly provider: string;
+      readonly capacity: number;
+      readonly active: number;
+    }[];
+    readonly machineCeiling: number;
+    readonly totalActive: number;
+  } {
+    const views = this.views(now);
+    return {
+      accounts: views.map((v) => ({
+        id: v.id,
+        provider: v.provider,
+        capacity: v.capacity,
+        active: v.active,
+      })),
+      machineCeiling: this.cfg.maxConcurrentSessions,
+      totalActive: views.reduce((sum, v) => sum + v.active, 0),
+    };
+  }
+
+  /**
    * Moves a failing run to another account: the old account cools down (its
    * failure is likely exhaustion or an outage that a retry would just re-hit)
    * and the run is re-admitted excluding it. Returns the new assignment, or

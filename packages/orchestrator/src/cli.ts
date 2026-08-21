@@ -103,6 +103,98 @@ async function status(ledger: Ledger): Promise<void> {
   }
 }
 
+/**
+ * Machine-readable admission and quota facts for external launchers —
+ * processes (like the Converge supervisor) that start their own sessions on
+ * this machine's pooled accounts and need to size that launch decision from
+ * the same ledger facts the broker admits from. Pure read: broker views,
+ * latest meter readings, nothing mutated.
+ */
+function capacity(ledger: Ledger, args: string[]): void {
+  const { named } = flags(args);
+  const providerFilter = named.get("provider");
+  const cfg = loadConfig();
+  const broker = new Broker(ledger, brokerConfig(cfg));
+  const now = Date.now();
+  const external = broker.externalCapacity(now);
+  const viewById = new Map(external.accounts.map((v) => [v.id, v]));
+  const machineFree = Math.max(0, external.machineCeiling - external.totalActive);
+  const providers: Record<string, unknown> = {};
+  for (const [provider, providerCfg] of Object.entries(cfg.providers)) {
+    if (providerFilter !== undefined && provider !== providerFilter) continue;
+    const accounts = ledger
+      .accounts()
+      .filter((a) => a.provider === provider)
+      .map((a) => {
+        const view = viewById.get(a.id);
+        const meters = providerCfg.meters.map((meter) => {
+          const reading = ledger.latestReading(a.id, meter.id);
+          return reading === undefined
+            ? { id: meter.id }
+            : {
+                id: meter.id,
+                usedPercent: reading.usedPercent,
+                readAt: new Date(reading.at).toISOString(),
+                ...(reading.resetAt === undefined
+                  ? {}
+                  : { resetAt: new Date(reading.resetAt).toISOString() }),
+              };
+        });
+        return {
+          id: a.id,
+          label: a.label,
+          eligible: view !== undefined,
+          cooling: a.cooldownUntil !== undefined && a.cooldownUntil > now,
+          active: view?.active ?? 0,
+          sessionCapacity: view?.capacity ?? 0,
+          meters,
+        };
+      });
+    const eligible = accounts.filter((a) => a.eligible);
+    const remaining = eligible
+      .map((a) => {
+        const percents = a.meters
+          .map((m) => ("usedPercent" in m ? m.usedPercent : undefined))
+          .filter((v): v is number => typeof v === "number");
+        return percents.length === 0 ? undefined : 100 - Math.max(...percents);
+      })
+      .filter((v): v is number => v !== undefined);
+    const futureResets = eligible
+      .flatMap((a) => a.meters.map((m) => ("resetAt" in m ? m.resetAt : undefined)))
+      .filter((v): v is string => typeof v === "string")
+      .map((v) => Date.parse(v))
+      .filter((v) => Number.isFinite(v) && v > now);
+    const accountSlots = eligible.reduce(
+      (sum, a) => sum + Math.max(0, a.sessionCapacity - a.active),
+      0,
+    );
+    providers[provider] = {
+      accounts,
+      eligibleAccounts: eligible.length,
+      freeSessionSlots: Math.min(accountSlots, machineFree),
+      meanRemainingPercent:
+        remaining.length === 0
+          ? null
+          : remaining.reduce((sum, v) => sum + v, 0) / remaining.length,
+      minimumRemainingPercent: remaining.length === 0 ? null : Math.min(...remaining),
+      nextResetAt:
+        futureResets.length === 0 ? null : new Date(Math.min(...futureResets)).toISOString(),
+    };
+  }
+  console.log(
+    JSON.stringify(
+      {
+        generatedAt: new Date(now).toISOString(),
+        machineCeiling: external.machineCeiling,
+        totalActiveSessions: external.totalActive,
+        providers,
+      },
+      null,
+      2,
+    ),
+  );
+}
+
 /** Controller daemon: the launch loop. Tier→model maps and meter topology
  * come from operator config; everything else is measured. */
 async function daemon(ledger: Ledger, args: string[]): Promise<void> {
@@ -597,6 +689,9 @@ async function main(): Promise<void> {
       case "status":
         await status(ledger);
         break;
+      case "capacity":
+        capacity(ledger, args);
+        break;
       case "pause":
       case "resume":
         launchControl(ledger, command, args);
@@ -659,6 +754,8 @@ async function main(): Promise<void> {
           [
             "usage: pi-orchestrator <command>",
             "  status                       tasks, gates, eligibility, running sessions",
+            "  capacity [--provider F]      admission and quota facts as JSON, for external",
+            "                               launchers sizing sessions on the pooled accounts",
             "  task set <id> --tiers light:20,standard [--share N] [--demand-command CMD | --demand-constant N]",
             "               [--gate EXPR] [--prompt TEXT] [--cwd DIR] [--exit-when-drained true|false]",
             "  task list | task delete <id>",

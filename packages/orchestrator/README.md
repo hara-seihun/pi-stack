@@ -446,11 +446,20 @@ T0 amendment proposals and filling the reviewed reach/advance/closure impact
 rubric in coherent batches; `math-review` independently applies or rejects
 both proposal kinds.
 
-`pi-orchestrator status | task set/list/delete | account list/add/domain/share/login |
+`pi-orchestrator status | capacity | task set/list/delete | account list/add/domain/share/login |
 pause | resume | boost | abort | say | runner | drain-runners | voice-broker` —
 thin reads and
 writes against the ledger (path from `PI_ORCHESTRATOR_LEDGER`, default
 `~/.local/share/pi-orchestrator/`).
+`capacity [--provider F]` prints admission and quota facts as JSON — per
+account the broker's eligible view (measured session capacity, active runs
+plus interactive leases, cooldown state) and the latest reading of every
+configured meter, with per-provider aggregates (free session slots bounded by
+the machine ceiling, mean/minimum remaining percent, next reset). It exists
+for external launchers — processes that start their own pi sessions on this
+machine's pooled accounts (the Converge supervisor's workers) — so their
+launch sizing reads the same ledger facts the broker admits from instead of
+keeping a parallel quota model.
 `say <runId> <text>` is the counterpart of `abort`: it queues an operator
 message in `run_message`, the runner that owns the session steers it in as a
 user turn (and mirrors it into the transcript), and the CLI waits for the
