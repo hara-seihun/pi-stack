@@ -14,6 +14,11 @@ npm test
 claude_extension="$PWD/extensions/pi-claude-code-use/extensions/index.ts"
 settings="$HOME/.pi/agent/settings.json"
 claude_extension_configured=$(jq -r '.packages | any(. == "../../tools/pi-runtime/extensions/pi-claude-code-use" or . == "/home/kenan/tools/pi-runtime/extensions/pi-claude-code-use")' "$settings")
+for shared_extension in context-guard bash-timeout-guard; do
+  jq -e --arg e "$shared_extension" \
+    '.packages | any(endswith("/tools/pi-runtime/extensions/" + $e))' "$settings" >/dev/null ||
+    { echo "$shared_extension extension package is not configured" >&2; exit 1; }
+done
 orchestrator_configured=$(jq -r '.packages | any(. == "/srv/pi/pi-orchestrator")' "$settings")
 [[ "$orchestrator_configured" == true ]] || { echo "pi-orchestrator extension package is not configured" >&2; exit 1; }
 cursor_provider="$HOME/tools/pi-cursor"
@@ -55,8 +60,30 @@ version=$("$HOME/.local/bin/pi" --version)
 shared=/srv/pi
 install -d -m 755 "$shared/extensions" "$shared/pi-cursor/node_modules"
 rsync -a --delete --chmod=D755,F644 \
-  "$PWD/extensions/pi-claude-code-use" "$PWD/extensions/context-guard" "$shared/extensions/"
+  "$PWD/extensions/pi-claude-code-use" "$PWD/extensions/context-guard" \
+  "$PWD/extensions/bash-timeout-guard" "$shared/extensions/"
 rsync -a --delete --chmod=D755,F644 "$cursor_provider/dist" "$cursor_provider/package.json" "$shared/pi-cursor/"
 rsync -a --delete --chmod=D755,F644 "$cursor_provider/node_modules/@bufbuild" "$shared/pi-cursor/node_modules/"
 
+# This deploy owns which shared packages the fleet user loads, so an extension
+# can never reach interactive sessions while silently missing from the fleet.
+# Everything else in that file (model defaults) stays orchestrator-owned.
+# Sessions build their settings at launch, so this needs no runner drain.
+fleet_settings=/home/orchestrator/.pi/agent/settings.json
+fleet_packages=$(jq -n '[
+  "/srv/pi/pi-orchestrator",
+  "/srv/pi/extensions/pi-claude-code-use",
+  "/srv/pi/extensions/context-guard",
+  "/srv/pi/extensions/bash-timeout-guard",
+  "/srv/pi/pi-cursor"
+]')
+sudo -n install -d -m 700 -o orchestrator -g users /home/orchestrator/.pi /home/orchestrator/.pi/agent
+fleet_current=$(sudo -n cat "$fleet_settings" 2>/dev/null || echo '{}')
+printf '%s' "$fleet_current" | jq --argjson p "$fleet_packages" '.packages = $p' |
+  sudo -n -u orchestrator tee "$fleet_settings" >/dev/null
+sudo -n chmod 600 "$fleet_settings"
+sudo -n cat "$fleet_settings" | jq -e --argjson p "$fleet_packages" '.packages == $p' >/dev/null ||
+  { echo "fleet pi settings did not take the shared package list" >&2; exit 1; }
+
 echo "Pi $version, prompt evaluator, extensions, and /srv/pi shared packages deployed"
+echo "fleet packages reconciled in $fleet_settings"

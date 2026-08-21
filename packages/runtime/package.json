@@ -3,7 +3,7 @@
   "private": true,
   "version": "1.0.0",
   "scripts": {
-    "test": "node --test prompt-eval/prompt-eval.test.mjs extensions/chatgpt-pro/browser.test.mjs extensions/chatgpt-pro/launcher.test.mjs extensions/pi-claude-code-use/index.test.mjs extensions/context-guard/plan.test.mjs extensions/context-guard/guard.test.mjs"
+    "test": "node --test prompt-eval/prompt-eval.test.mjs extensions/chatgpt-pro/browser.test.mjs extensions/chatgpt-pro/launcher.test.mjs extensions/pi-claude-code-use/index.test.mjs extensions/context-guard/plan.test.mjs extensions/context-guard/guard.test.mjs extensions/bash-timeout-guard/guard.test.mjs"
   },
   "dependencies": {
     "@earendil-works/pi-coding-agent": "0.84.1",
