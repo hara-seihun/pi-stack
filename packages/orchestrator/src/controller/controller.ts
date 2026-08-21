@@ -56,7 +56,7 @@ export class Controller {
     const reaped: string[] = [];
     for (const run of this.ledger.runs({ state: "running" })) {
       if ((run.heartbeatAt ?? run.startedAt) < now - this.cfg.heartbeatTimeoutMs) {
-        this.ledger.finishRun(run.id, { state: "error", detail: "heartbeat timeout" }, now);
+        this.ledger.finishRun(run.id, { state: "aborted", detail: "runner heartbeat timeout" }, now);
         this.ledger.taskFinished(run.taskId);
         reaped.push(run.id);
       }

@@ -146,8 +146,8 @@ describe("run custody", () => {
     const later = 11 * 60_000;
     const report = await cycle(later);
     expect(report.tick.reaped).toEqual([runId]);
-    expect(ledger.run(runId)?.state).toBe("error");
-    expect(ledger.run(runId)?.detail).toBe("heartbeat timeout");
+    expect(ledger.run(runId)?.state).toBe("aborted");
+    expect(ledger.run(runId)?.detail).toBe("runner heartbeat timeout");
     // The account is free again; the invalidated demand re-launches.
     expect(report.claimed).toHaveLength(1);
   });

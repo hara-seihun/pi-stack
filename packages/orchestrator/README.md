@@ -231,7 +231,9 @@ account cools down so the next run goes to a sibling. An account that cannot
 authenticate at all — missing, shadowed, or rejected credential — is recorded
 `aborted` (like an unclaimed run) and cooled down, never `error`: it is a
 property of the account, and counting it against the task would let one dead
-credential trip every task's circuit breaker and stop the fleet.
+credential trip every task's circuit breaker and stop the fleet. A run lost
+with its runner is likewise `aborted` on heartbeat timeout: process loss is
+infrastructure failure, not evidence that the task itself crashes.
 
 Run custody lives in the ledger's `run` table (launch-side only: `tier` is
 recorded there for capacity accounting and never reaches a host). A task
