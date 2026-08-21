@@ -18,7 +18,7 @@ function clearAlerts() {
   for (const file of alertFiles()) rmSync(join(ALERTS, file));
 }
 
-function makeHarness({ completeText = "SUMMARY BODY", modelAvailable = true } = {}) {
+function makeHarness({ completeText = "SUMMARY BODY", modelAvailable = true, provider = "test" } = {}) {
   const handlers = new Map();
   const pi = { on: (name, fn) => handlers.set(name, fn) };
   guard(pi);
@@ -30,7 +30,7 @@ function makeHarness({ completeText = "SUMMARY BODY", modelAvailable = true } = 
       getSessionFile: () => "/tmp/session.jsonl",
       getSessionId: () => "sess-test",
     },
-    model: modelAvailable ? { id: "test-model", provider: "test" } : null,
+    model: modelAvailable ? { id: "test-model", provider } : null,
     modelRegistry: {
       complete: async (_model, context, options) => {
         completeCalls++;
@@ -233,6 +233,12 @@ test("a measured healthy cut landing does not alert", async () => {
   messages.push(response(129_000, "aborted"));
   await h.fire(messages);
   assert.deepEqual(alertFiles(), []);
+});
+
+test("Cursor is excluded because server-side continuation does not honor transformed history", async () => {
+  const h = makeHarness({ provider: "cursor" });
+  assert.equal(await h.fire(session(30)), undefined);
+  assert.equal(h.getCompleteCalls(), 0);
 });
 
 test("PI_CONTEXT_GUARD=off disables everything", () => {

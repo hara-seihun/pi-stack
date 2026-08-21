@@ -83,6 +83,7 @@ export default function (pi) {
   pi.on("model_select", resetCalibration);
 
   pi.on("context", async (event, ctx) => {
+    if (ctx.model?.provider === "cursor") return;
     const messages = event.messages;
     if (!Array.isArray(messages) || messages.length < 2) return;
 

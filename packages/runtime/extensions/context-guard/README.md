@@ -14,9 +14,15 @@ telemetry ledger they read; their conclusions are recorded in that memory file.)
 
 ## Behavior
 
-One uniform rule set for all providers and models (models whose window is
-smaller than the trigger are pi's stock domain — the trigger simply never
-fires for them):
+One rule set covers providers whose request history is client-authored (the
+builtin Anthropic and OpenAI families). Cursor is excluded: its Connect
+transport continues a server-side conversation, and the 2026-08-20 incident
+showed a transformed 65k client view still billing 281k on the next
+continuation. Pretending the cap applied there produced a catastrophic false
+floor diagnosis; Cursor has no corresponding 272k price tier, so its provider
+must own any future server-side compaction. Models whose window is smaller
+than the trigger remain pi's stock domain — the trigger simply never fires for
+them.
 
 - **Trigger:** projected prompt ≥ **250k** tokens → cut before sending.
   Guarantees Sol/Luna never bill the 272k tier (22k margin covers estimator
