@@ -432,11 +432,12 @@ minutes, heartbeat healthy, `abort` requests unobservable to a turn that
 never returns, holding a lane seat until the operator noticed. `PiHost`
 therefore reports session activity separately (throttled to a 15-second
 ledger write) and the run row keeps `progress_at`. A runner asks a run with
-no progress for 15 minutes to abort, and 5 minutes later kills the session
+no progress for 20 minutes to abort, and 10 minutes later kills the session
 outright — `HostManager.kill` disposes it and reports the run finished
 without waiting for the provider to unwind, because a parked provider call
-never unwinds. The threshold is above any legitimate quiet stretch: the
-longest one is a single tool call, and commands are capped at five minutes.
+never unwinds. The threshold sits well above any legitimate quiet stretch: the longest are a
+single tool call (fleet sessions cap bash at five minutes) and one silent
+stretch of reasoning.
 
 A session may not outlive its run row either. Every tick the runner kills
 sessions the host still holds whose row is no longer `running`, so a

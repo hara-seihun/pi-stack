@@ -26,9 +26,10 @@ export interface RunnerConfig {
   /** Concurrent embedded sessions this process will host. */
   readonly maxSessions: number;
   /**
-   * A session that records nothing for this long is stuck, not thinking: the
-   * longest legitimate quiet stretch is one tool call, and commands are capped
-   * at five minutes. The run is asked to abort at this point.
+   * A session that records nothing for this long is stuck, not thinking. The
+   * longest legitimate quiet stretch is one tool call (fleet sessions cap bash
+   * at five minutes) or one silent stretch of reasoning, both far short of
+   * this. The run is asked to abort at this point.
    */
   readonly progressTimeoutMs?: number;
   /** How long the polite abort gets before the session is torn down. A stall
@@ -36,8 +37,8 @@ export interface RunnerConfig {
   readonly stallKillGraceMs?: number;
 }
 
-const PROGRESS_TIMEOUT_MS = 15 * 60_000;
-const STALL_KILL_GRACE_MS = 5 * 60_000;
+const PROGRESS_TIMEOUT_MS = 20 * 60_000;
+const STALL_KILL_GRACE_MS = 10 * 60_000;
 
 /** A demand reading older than this says nothing about the queue now. The
  * controller re-probes on a 60s TTL, so anything this old means nobody is
