@@ -94,15 +94,18 @@ test("findTailBoundary never lands on a toolResult", () => {
   assert.ok(tailTokens >= 3_000);
 });
 
-test("compaction notice restores headroom expectations with or without a transcript", () => {
+test("compaction notice warmly restores headroom expectations with or without a transcript", () => {
   const withTranscript = noticeMessage("/tmp/s.jsonl", 9).content[0].text;
-  assert.match(withTranscript, /cut restored substantial context headroom/);
-  assert.match(withTranscript, /do not stop or avoid starting more work/);
-  assert.match(withTranscript, /pre-compaction transcript length/);
+  assert.match(withTranscript, /Good news/);
+  assert.match(withTranscript, /has just been compacted/);
+  assert.match(withTranscript, /substantial context headroom again/);
+  assert.match(withTranscript, /pre-compaction length doesn't need to limit/);
+  assert.match(withTranscript, /good position to keep going/);
+  assert.doesNotMatch(withTranscript, /do not|must not/);
   assert.match(withTranscript, /\/tmp\/s\.jsonl/);
 
   const withoutTranscript = noticeMessage("", 9).content[0].text;
-  assert.match(withoutTranscript, /cut restored substantial context headroom/);
+  assert.match(withoutTranscript, /substantial context headroom again/);
   assert.doesNotMatch(withoutTranscript, /greppable at:/);
 });
 
@@ -117,7 +120,7 @@ test("buildView returns null when untouched and is deterministic when cut", () =
   const notices = a.filter((m) => m.role === "user" && m.content[0]?.text?.includes("context-guard notice"));
   assert.equal(notices.length, 1);
   assert.match(notices[0].content[0].text, /\/tmp\/s\.jsonl/);
-  assert.match(notices[0].content[0].text, /substantial context headroom/);
+  assert.match(notices[0].content[0].text, /substantial context headroom again/);
   // Tail is byte-identical: same object references as the source array.
   assert.equal(a[a.length - 1], msgs[msgs.length - 1]);
   // Old thinking is gone from the view.
@@ -146,7 +149,7 @@ test("summary replaces span but preserves user-ish messages verbatim", () => {
   assert.match(view[1].content[0].text, /SUMMARY/);
   assert.match(view[1].content[0].text, /greppable at: \/tmp\/s\.jsonl/);
   assert.ok(view.some(
-    (m) => m.role === "user" && m.content[0]?.text?.includes("cut restored substantial context headroom"),
+    (m) => m.role === "user" && m.content[0]?.text?.includes("substantial context headroom again"),
   ));
   assert.ok(view.some((m) => m.role === "user" && m.content[0]?.text === "steering follow-up"));
   // Summarized assistants/toolResults are gone entirely: only tail ones remain.

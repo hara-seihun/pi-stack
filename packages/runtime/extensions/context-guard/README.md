@@ -29,9 +29,10 @@ them.
   error and single-step bursts).
 - **Rung 1 — evict tool results** older than the tail: body replaced by a
   short placeholder naming the tool. A single notice near the head tells the
-  model that compaction restored substantial headroom and that pre-compaction
-  transcript length is not a reason to stop or avoid more work. It also carries
-  the greppable transcript path once for the whole view — repeating the path in
+  model that it has just been compacted, has substantial headroom again, and
+  is in a good position to keep working regardless of the earlier transcript
+  length. It also carries the greppable transcript path once for the whole
+  view — repeating the path in
   hundreds of placeholders measurably raised the post-cut floor. Tool-call
   arguments are kept verbatim (they are the artifact trail).
 - **Rung 2 — strip old reasoning**: thinking blocks removed from old

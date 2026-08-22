@@ -118,10 +118,11 @@ export function noticeMessage(note, timestamp) {
     content: [{
       type: "text",
       text:
-        "[context-guard notice: Context compaction has run for this active view. The cut restored " +
-        "substantial context headroom. Continue the task normally; do not stop or avoid starting more " +
-        "work based on the pre-compaction transcript length. Older tool results and reasoning were " +
-        `evicted from this view to enforce the context cap.${transcript}]`,
+        "[context-guard notice: Good news — this active view has just been compacted, so you have " +
+        "substantial context headroom again. Your recent context is still here, and older tool results " +
+        "and reasoning were evicted to enforce the context cap. The session's pre-compaction length " +
+        `doesn't need to limit what you take on next; if there's more work, you're in a good position ` +
+        `to keep going.${transcript}]`,
     }],
     timestamp,
   };
