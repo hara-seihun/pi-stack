@@ -574,7 +574,7 @@ Three consumption modes, all exported as `pi-orchestrator/voice`:
 Standing math lanes are enabled. Their research-session contract and the
 transcript evidence that shaped it live in
 [`../math-research/docs/agent-research-capability.md`](../math-research/docs/agent-research-capability.md).
-The deployed task ledger is the source of truth for definitions; four lanes
+The deployed task ledger is the source of truth for definitions; five lanes
 stand there now. `math-frontier` (share 14) attacks open problems and
 conjectures. `math-review` (share 2) works the trusted-review queue.
 `math-cleanup` (share 2) owns the corpus rather than any one question: stale
@@ -584,13 +584,19 @@ titles that defeat search. Its prompt names past defects as a genre and
 leaves the judgement to the agent, because the next defect will not be on any
 list. Its demand probe counts three cheap defect populations over `q_links`
 and `q_entries`, saturating each at a few hundred, so a corpus with nothing
-wrong drains the lane instead of re-prompting it. `fast-math-pr` (share 1)
-handles that repository's pull requests.
+wrong drains the lane instead of re-prompting it. `elaine` (share 1, one
+session at a time) audits claimed originality and dependence on prior work.
+It verifies primary sources, creates or reuses `source` contributions, adds
+typed source and dependency links, and uses `set_origin` when an entry's
+headline claim predates the ledger. `fast-math-pr` (share 1) handles that
+repository's pull requests.
 
 Review and cleanup are deliberately equal claims on the fleet. Review decides
 whether new work is sound; cleanup decides whether the corpus still says what
 is true, and only cleanup is looking when the thing that went wrong is
-somebody's finished business.
+somebody's finished business. Elaine has a smaller standing claim because
+citation audits need one source-reading agent, not a parallel sweep of the
+same literature.
 
 `pi-orchestrator status | capacity | usage | task set/list/delete | account list/add/domain/share/login |
 pause | resume | boost | abort | kill | say | runner | drain-runners | voice-broker` —
