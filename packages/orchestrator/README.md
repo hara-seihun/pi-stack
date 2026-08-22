@@ -454,11 +454,14 @@ never returns, holding a lane seat until the operator noticed. `PiHost`
 therefore reports session activity separately (throttled to a 15-second
 ledger write) and the run row keeps `progress_at`. A runner asks a run with
 no progress for 20 minutes to abort, and 10 minutes later kills the session
-outright — `HostManager.kill` disposes it and reports the run finished
-without waiting for the provider to unwind, because a parked provider call
-never unwinds. The threshold sits well above any legitimate quiet stretch: the longest are a
-single tool call (fleet sessions cap bash at five minutes) and one silent
-stretch of reasoning.
+outright. `HostManager.kill` cancels the shift, clears its heartbeat and
+subscriptions, disposes the session, and reports the run finished without
+waiting for the provider to unwind, because a parked provider call may never
+return. Cleanup happens synchronously before a drained worker closes its
+ledger. Without that ownership, a heartbeat from a killed session fired after
+ledger closure and crashed the worker on 2026-08-22. The threshold sits well
+above any legitimate quiet stretch: the longest are a single tool call (fleet
+sessions cap bash at five minutes) and one silent stretch of reasoning.
 
 A session may not outlive its run row either. Every tick the runner kills
 sessions the host still holds whose row is no longer `running`, so a

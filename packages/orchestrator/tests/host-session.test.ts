@@ -1,4 +1,4 @@
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 import { PiHost } from "../src/host/pi-host.js";
 import type { HostRunResult, LaunchSpec } from "../src/host/types.js";
 
@@ -28,6 +28,7 @@ function harness(
   options: { sessionBudgetMs?: number; laneDrained?: () => boolean; taskId?: string } = {},
 ) {
   const prompts: string[] = [];
+  const heartbeats: number[] = [];
   const progress: number[] = [];
   const observers: ((event: unknown) => void)[] = [];
   let clock = 0;
@@ -70,7 +71,7 @@ function harness(
   const host = new PiHost(
     {
       runFinished: (_id, result) => results.push(result),
-      heartbeat: () => {},
+      heartbeat: (_id, at) => heartbeats.push(at),
       progress: (_id, at) => progress.push(at),
       sessionStarted: (runId, sessionId) => links.push({ runId, sessionId }),
       laneDrained: options.laneDrained ?? (() => false),
@@ -103,7 +104,7 @@ function harness(
     }, 1);
   });
   const emit = () => observers.forEach((observe) => observe({}));
-  return { host, spec, prompts, finished, links, bindings, progress, emit, now: () => clock };
+  return { host, spec, prompts, finished, links, bindings, heartbeats, progress, emit, now: () => clock };
 }
 
 describe("host shift loop", () => {
@@ -229,6 +230,25 @@ describe("host shift loop", () => {
     const clean = harness([{ stopReason: "aborted" }]);
     clean.host.launch(clean.spec);
     expect(await clean.finished).toEqual({ state: "aborted", detail: "session aborted" });
+  });
+
+  it("stops lifecycle timers immediately when a parked session is killed", async () => {
+    vi.useFakeTimers();
+    try {
+      const { host, spec, heartbeats } = harness([{ parks: true }]);
+      host.launch(spec);
+      for (let turn = 0; turn < 20 && !host.has(spec.runId); turn++) await Promise.resolve();
+      expect(host.has(spec.runId)).toBe(true);
+
+      host.kill(spec.runId, "operator kill");
+      await Promise.resolve();
+      vi.advanceTimersByTime(60_000);
+
+      expect(heartbeats).toEqual([]);
+      expect(host.has(spec.runId)).toBe(false);
+    } finally {
+      vi.useRealTimers();
+    }
   });
 });
 

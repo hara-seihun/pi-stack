@@ -69,10 +69,17 @@ interface CompletionReport {
 }
 
 export class PiHost implements HostManager {
-  private readonly sessions = new Map<string, AgentSession>();
+  private readonly runtimes = new Map<
+    string,
+    {
+      readonly session: AgentSession;
+      readonly cancel: () => void;
+      readonly cleanup: () => void;
+    }
+  >();
   private readonly transcripts = new Map<string, RunTranscript>();
   /** Runs already reported terminal by `kill`, so the shift loop's own late
-   * (or never-arriving) result cannot report a second outcome. */
+   * result cannot report a second outcome. */
   private readonly killed = new Set<string>();
 
   constructor(
@@ -116,20 +123,19 @@ export class PiHost implements HostManager {
   }
 
   abort(runId: string): void {
-    void this.sessions.get(runId)?.abort();
+    void this.runtimes.get(runId)?.session.abort();
   }
 
   kill(runId: string, detail: string): void {
-    const session = this.sessions.get(runId);
-    if (session === undefined) return;
+    const runtime = this.runtimes.get(runId);
+    if (runtime === undefined) return;
     this.killed.add(runId);
-    this.sessions.delete(runId);
     const transcript = this.transcripts.get(runId);
-    this.transcripts.delete(runId);
     transcript?.append("notice", { text: `Run killed: ${detail}` });
     transcript?.live({ activity: "IDLE" }, { force: true });
-    void session.abort();
-    session.dispose();
+    void runtime.session.abort();
+    runtime.cancel();
+    runtime.cleanup();
     this.events.runFinished(runId, { state: "aborted", detail }, Date.now());
   }
 
@@ -142,7 +148,7 @@ export class PiHost implements HostManager {
    * agent has left — which is exactly the behaviour worth correcting.
    */
   message(runId: string, text: string): boolean {
-    const session = this.sessions.get(runId);
+    const session = this.runtimes.get(runId)?.session;
     if (session === undefined) return false;
     this.transcripts.get(runId)?.append("user", { text });
     void session.sendUserMessage(text, { deliverAs: "steer" }).catch(() => {
@@ -154,11 +160,11 @@ export class PiHost implements HostManager {
 
   /** Whether a session for this run is still live in this process. */
   has(runId: string): boolean {
-    return this.sessions.has(runId);
+    return this.runtimes.has(runId);
   }
 
   liveRuns(): readonly string[] {
-    return [...this.sessions.keys()];
+    return [...this.runtimes.keys()];
   }
 
   private async run(spec: LaunchSpec, transcript: RunTranscript | undefined): Promise<HostRunResult> {
@@ -200,59 +206,81 @@ export class PiHost implements HostManager {
       thinkingLevel: spec.thinking as never,
       customTools: [taskComplete],
     });
-    this.sessions.set(spec.runId, session);
-    // Extensions only come alive when a mode binds them: `bindExtensions` is
-    // what emits `session_start`, and everything an extension sets up in
-    // response — MCP server connections above all — simply never happens in a
-    // session that skips it. Hosted sessions had the `mcp` tool on their
-    // surface (it registers at load time) answering "MCP not initialized" to
-    // every call, so fleet agents told to use the math ledger's MCP server
-    // spent their turns writing curl JSON-RPC helpers instead. A headless
-    // host binds print mode: no UI, no command actions, and extension errors
-    // go to the run's own log.
-    await session.bindExtensions({
-      mode: "print",
-      onError: (err: { extensionPath: string; error: unknown }) => {
-        transcript?.append("notice", {
-          text: `Extension error (${err.extensionPath}): ${String(err.error)}`,
-        });
-      },
-    } as never);
-    this.events.sessionStarted(spec.runId, session.sessionManager.getSessionId());
-    if (preresolved === undefined) {
-      const model = session.modelRuntime.getModel(spec.provider, spec.model);
-      if (model === undefined) {
-        session.dispose();
-        this.sessions.delete(spec.runId);
-        return { state: "error", detail: `unknown model ${spec.provider}/${spec.model}` };
-      }
-      // Extension providers own their transport; re-homing the model onto an
-      // alias id would strip it and leak the request to the family's public
-      // API. Such an account is a configuration error, not a runtime fallback.
-      if (spec.accountId !== spec.provider) {
-        session.dispose();
-        this.sessions.delete(spec.runId);
-        return {
-          state: "error",
-          detail: `account ${spec.accountId} cannot alias extension provider ${spec.provider}`,
-        };
-      }
-      await session.setModel(model);
-      if (spec.thinking !== undefined) session.setThinkingLevel(spec.thinking as never);
-    }
-    // Registered only past the model-resolution returns above: a session
-    // that never runs must not be addressable by an operator message.
-    if (transcript !== undefined) this.transcripts.set(spec.runId, transcript);
-    const unsubscribe = transcript === undefined ? undefined : this.publish(transcript, session);
-    const stopProgress = this.trackProgress(spec.runId, session);
-    transcript?.append("user", { text: spec.prompt });
-    const heartbeat = setInterval(
-      () => this.events.heartbeat(spec.runId, Date.now()),
-      HEARTBEAT_MS,
-    );
-    const deadline = Date.now() + (this.options.sessionBudgetMs ?? SESSION_BUDGET_MS);
-    const continuation = continuationFor(spec.taskId);
+    let cancelRun!: () => void;
+    const cancelled = new Promise<true>((resolve) => {
+      cancelRun = () => resolve(true);
+    });
+    const interrupted = (operation: Promise<unknown>): Promise<boolean> =>
+      Promise.race([operation.then(() => false), cancelled]);
+    const disposers: (() => void)[] = [() => session.dispose()];
+    let cleaned = false;
+    const cleanup = () => {
+      if (cleaned) return;
+      cleaned = true;
+      this.runtimes.delete(spec.runId);
+      this.transcripts.delete(spec.runId);
+      for (const dispose of disposers.reverse()) dispose();
+    };
+    this.runtimes.set(spec.runId, { session, cancel: cancelRun, cleanup });
     try {
+      // Extensions only come alive when a mode binds them: `bindExtensions` is
+      // what emits `session_start`, and everything an extension sets up in
+      // response — MCP server connections above all — simply never happens in a
+      // session that skips it. Hosted sessions had the `mcp` tool on their
+      // surface (it registers at load time) answering "MCP not initialized" to
+      // every call, so fleet agents told to use the math ledger's MCP server
+      // spent their turns writing curl JSON-RPC helpers instead. A headless
+      // host binds print mode: no UI, no command actions, and extension errors
+      // go to the run's own log.
+      if (
+        await interrupted(
+          session.bindExtensions({
+            mode: "print",
+            onError: (err: { extensionPath: string; error: unknown }) => {
+              transcript?.append("notice", {
+                text: `Extension error (${err.extensionPath}): ${String(err.error)}`,
+              });
+            },
+          } as never),
+        )
+      ) {
+        return { state: "aborted", detail: "session killed" };
+      }
+      this.events.sessionStarted(spec.runId, session.sessionManager.getSessionId());
+      if (preresolved === undefined) {
+        const model = session.modelRuntime.getModel(spec.provider, spec.model);
+        if (model === undefined) {
+          return { state: "error", detail: `unknown model ${spec.provider}/${spec.model}` };
+        }
+        // Extension providers own their transport; re-homing the model onto an
+        // alias id would strip it and leak the request to the family's public
+        // API. Such an account is a configuration error, not a runtime fallback.
+        if (spec.accountId !== spec.provider) {
+          return {
+            state: "error",
+            detail: `account ${spec.accountId} cannot alias extension provider ${spec.provider}`,
+          };
+        }
+        if (await interrupted(session.setModel(model))) {
+          return { state: "aborted", detail: "session killed" };
+        }
+        if (spec.thinking !== undefined) session.setThinkingLevel(spec.thinking as never);
+      }
+      // Live transcript publication starts only after model resolution, so a
+      // rejected model setup is never presented as an active run.
+      if (transcript !== undefined) this.transcripts.set(spec.runId, transcript);
+      const unsubscribe = transcript === undefined ? undefined : this.publish(transcript, session);
+      if (unsubscribe !== undefined) disposers.push(unsubscribe);
+      const stopProgress = this.trackProgress(spec.runId, session);
+      disposers.push(stopProgress);
+      transcript?.append("user", { text: spec.prompt });
+      const heartbeat = setInterval(
+        () => this.events.heartbeat(spec.runId, Date.now()),
+        HEARTBEAT_MS,
+      );
+      disposers.push(() => clearInterval(heartbeat));
+      const deadline = Date.now() + (this.options.sessionBudgetMs ?? SESSION_BUDGET_MS);
+      const continuation = continuationFor(spec.taskId);
       // A launch is a shift, not a single turn. The host keeps prompting the
       // same session — same context, same working directory, same trail —
       // until the session's budget runs out, the turn fails, an operator
@@ -263,7 +291,9 @@ export class PiHost implements HostManager {
       for (let turn = 0; ; turn++) {
         const before = reports;
         if (turn > 0) transcript?.append("user", { text: continuation });
-        await session.prompt(turn === 0 ? spec.prompt : continuation);
+        if (await interrupted(session.prompt(turn === 0 ? spec.prompt : continuation))) {
+          return { state: "aborted", detail: "session killed" };
+        }
         // prompt() resolves even when the turn failed provider-side; the
         // truth is on the final assistant message. An errored turn must be an
         // error run (circuit breaker, account cooldown), never quiet
@@ -304,12 +334,7 @@ export class PiHost implements HostManager {
         detail: report.summary,
       };
     } finally {
-      clearInterval(heartbeat);
-      this.sessions.delete(spec.runId);
-      this.transcripts.delete(spec.runId);
-      unsubscribe?.();
-      stopProgress();
-      session.dispose();
+      cleanup();
     }
   }
 
