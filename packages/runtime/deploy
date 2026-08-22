@@ -86,6 +86,20 @@ sudo -n chmod 600 "$fleet_settings"
 sudo -n cat "$fleet_settings" | jq -e --argjson p "$fleet_packages" '.packages == $p' >/dev/null ||
   { echo "fleet pi settings did not take the shared package list" >&2; exit 1; }
 
+# Models pi's own catalog does not carry yet — stealth previews above all,
+# which appear on a provider weeks before a pinned release knows their name.
+# Both users run the same catalog: a model the fleet is configured to launch
+# but the interactive user cannot select (or the reverse) is a split brain
+# that only shows up as an unknown-model run failure.
+for user_home in "$HOME" /home/orchestrator; do
+  user=$([[ "$user_home" == "$HOME" ]] && echo "$USER" || echo orchestrator)
+  sudo -n -u "$user" tee "$user_home/.pi/agent/models.json" >/dev/null < "$PWD/models.json"
+  sudo -n -u "$user" chmod 600 "$user_home/.pi/agent/models.json"
+  sudo -n cat "$user_home/.pi/agent/models.json" | cmp -s - "$PWD/models.json" ||
+    { echo "$user did not take the shared model catalog" >&2; exit 1; }
+done
+"$HOME/.local/bin/pi" --list-models openrouter | grep -q 'stealth/ox-alpha'
+
 # The MCP adapter is an npm package, and the fleet user has no pi CLI to
 # install one for itself, so this deploy installs it at the version the
 # interactive user runs. Without it the fleet has no MCP client at all, which
