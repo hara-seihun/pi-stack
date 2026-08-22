@@ -1,6 +1,6 @@
 import { describe, expect, it, vi } from "vitest";
 import { continuationFor, type TurnFacts } from "../src/host/continuations.js";
-import { PiHost } from "../src/host/pi-host.js";
+import { openingPinExtension, PiHost, serializeOpening } from "../src/host/pi-host.js";
 import type { HostRunResult, LaunchSpec } from "../src/host/types.js";
 
 /**
@@ -32,6 +32,8 @@ function harness(
     taskId?: string;
     doctrineUrl?: string;
     fetchDoctrine?: (url: string) => Promise<string>;
+    opening?: readonly string[];
+    selfPaced?: boolean;
   } = {},
 ) {
   const prompts: string[] = [];
@@ -105,6 +107,8 @@ function harness(
     thinking: "max",
     cwd: "/tmp",
     doctrineUrl: options.doctrineUrl,
+    opening: options.opening,
+    selfPaced: options.selfPaced,
   };
   const finished = new Promise<HostRunResult>((resolve) => {
     const poll = setInterval(() => {
@@ -382,5 +386,182 @@ describe("a hosted session reports that it is doing something", () => {
     expect(result).toEqual({ state: "aborted", detail: "session made no progress for 30m" });
     expect(host.has(spec.runId)).toBe(false);
     expect(host.liveRuns()).toEqual([]);
+  });
+});
+
+describe("the opening exchange", () => {
+  // The exchange is lived, not injected: each message is a real turn the
+  // agent answers, and the lived record is what the pin extension replays
+  // verbatim through every compaction. See RESULTS-mcp.md in the thread-lab
+  // experiments: the same corpus read as depletion or as terrain depending
+  // on one operator sentence, and a paraphrased opening loses that force.
+  it("sends each opening message as a real turn before the task prompt", async () => {
+    const { host, spec, prompts, finished } = harness([{}, {}, { reports: 1 }, {}, {}], {
+      opening: ["Here's something I wrote.", "Now examine the ledger."],
+    });
+    host.launch(spec);
+    await finished;
+
+    expect(prompts.slice(0, 3)).toEqual([
+      "Here's something I wrote.",
+      "Now examine the ledger.",
+      "Attack the central problem.",
+    ]);
+  });
+
+  it("fails the run when an opening turn errors, rather than working from a broken exchange", async () => {
+    const { host, spec, finished } = harness(
+      [{ stopReason: "error", errorMessage: "provider fell over" }],
+      { opening: ["Here's something I wrote."] },
+    );
+    host.launch(spec);
+    const result = await finished;
+
+    expect(result).toMatchObject({ state: "error", detail: "provider fell over" });
+  });
+
+  it("self-paced: the agent ending its work turn ends the shift, with no check-in", async () => {
+    const { host, spec, prompts, finished } = harness(
+      [{}, { reports: 1 }, { reports: 1 }],
+      { opening: ["Here's something I wrote."], selfPaced: true },
+    );
+    host.launch(spec);
+    const result = await finished;
+
+    // One opening turn, one work turn, nothing after: the third fake turn is
+    // never reached because no continuation is ever sent.
+    expect(prompts).toEqual(["Here's something I wrote.", "Attack the central problem."]);
+    expect(result).toMatchObject({ state: "done", productive: true });
+  });
+
+  it("self-paced without a report is an unproductive done, not a retry loop", async () => {
+    const { host, spec, prompts, finished } = harness([{}, {}], {
+      opening: ["Here's something I wrote."],
+      selfPaced: true,
+    });
+    host.launch(spec);
+    const result = await finished;
+
+    expect(prompts).toHaveLength(2);
+    expect(result).toMatchObject({ state: "done", productive: false });
+  });
+});
+
+describe("the opening pin", () => {
+  const capture = () => {
+    let handler: ((event: unknown, ctx: unknown) => Promise<unknown>) | undefined;
+    const bind = (pin: Parameters<typeof openingPinExtension>[0]) => {
+      (openingPinExtension(pin) as { factory: (pi: unknown) => void }).factory({
+        on: (_name: string, fn: typeof handler) => {
+          handler = fn;
+        },
+      } as never);
+      return (event: unknown, ctx: unknown) => handler!(event, ctx);
+    };
+    return bind;
+  };
+  const ctx = (summary = "WORK SUMMARY") => ({
+    model: { id: "m" },
+    modelRegistry: {
+      complete: async () => ({
+        content: [{ type: "text", text: summary }],
+        usage: { input: 1, output: 1 },
+      }),
+    },
+  });
+  const message = (role: string, text: string) => ({
+    role,
+    content: [{ type: "text", text }],
+  });
+
+  it("replays the exchange verbatim at the head of every compaction summary", async () => {
+    const bind = capture();
+    const openingMessages = [
+      message("user", "Here's something I wrote to fix your priors."),
+      message("assistant", "I give myself 25%."),
+    ];
+    const handle = bind({ text: serializeOpening(openingMessages), messageCount: 2 });
+    const result = (await handle(
+      {
+        preparation: {
+          messagesToSummarize: [...openingMessages, message("user", "later work")],
+          turnPrefixMessages: [],
+          firstKeptEntryId: "entry-9",
+          tokensBefore: 100_000,
+        },
+      },
+      ctx(),
+    )) as { compaction: { summary: string; firstKeptEntryId: string } };
+
+    expect(result.compaction.firstKeptEntryId).toBe("entry-9");
+    const summary = result.compaction.summary;
+    expect(summary).toContain("Here's something I wrote to fix your priors.");
+    expect(summary).toContain("I give myself 25%.");
+    expect(summary).toContain("# Work since the opening exchange");
+    expect(summary.indexOf("priors")).toBeLessThan(summary.indexOf("# Work since"));
+    expect(summary).toContain("WORK SUMMARY");
+  });
+
+  it("stays out of the way when there is no pinned opening", async () => {
+    const bind = capture();
+    const handle = bind({ text: undefined, messageCount: 0 });
+    expect(
+      await handle({ preparation: { messagesToSummarize: [], turnPrefixMessages: [] } }, ctx()),
+    ).toBeUndefined();
+  });
+
+  it("steps aside on failure so compaction still happens without the pin", async () => {
+    const bind = capture();
+    const handle = bind({ text: "# pinned", messageCount: 0 });
+    const failing = {
+      model: { id: "m" },
+      modelRegistry: {
+        complete: async () => {
+          throw new Error("provider unavailable");
+        },
+      },
+    };
+    expect(
+      await handle(
+        {
+          preparation: {
+            messagesToSummarize: [message("user", "work")],
+            turnPrefixMessages: [],
+            firstKeptEntryId: "e",
+            tokensBefore: 1,
+          },
+        },
+        failing,
+      ),
+    ).toBeUndefined();
+  });
+});
+
+describe("serializeOpening", () => {
+  it("keeps text, tool calls, and tool results whole", () => {
+    const text = serializeOpening([
+      { role: "user", content: [{ type: "text", text: "Examine erdos647." }] },
+      {
+        role: "assistant",
+        content: [
+          { type: "text", text: "Looking now." },
+          { type: "toolCall", name: "mcp", arguments: { tool: "math_get", args: { ref: "erdos647" } } },
+        ],
+      },
+      { role: "toolResult", content: [{ type: "text", text: "certified to 6.2e17" }] },
+    ]);
+
+    expect(text).toContain("[User]:\nExamine erdos647.");
+    expect(text).toContain("[Assistant]:\nLooking now.");
+    expect(text).toContain('mcp({"tool":"math_get","args":{"ref":"erdos647"}})');
+    expect(text).toContain("[Tool result]: certified to 6.2e17");
+    expect(text).toContain("verbatim");
+  });
+
+  it("truncates only a pathological giant tool result", () => {
+    const giant = "x".repeat(20_000);
+    const text = serializeOpening([{ role: "toolResult", content: [{ type: "text", text: giant }] }]);
+    expect(text).toContain("[truncated]");
+    expect(text.length).toBeLessThan(17_000);
   });
 });

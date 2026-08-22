@@ -60,6 +60,19 @@ export interface TaskSpec {
    * binding — survives only in the system prompt. Fetched at launch so
    * sessions carry the current text. */
   readonly doctrineUrl?: string;
+  /** Opening exchange: user messages the host sends as real turns, in
+   * order, before the task prompt. The agent lives the exchange — answers
+   * each message, runs whatever tools it reaches for — and the host then
+   * pins the whole thing verbatim through every compaction. Agents are
+   * acutely good at telling self from not-self: a summarized or paraphrased
+   * opening reads as someone else's words and loses its force, so the pin
+   * is word for word, tool traffic included. */
+  readonly opening?: readonly string[];
+  /** The shift is one work turn: after the opening exchange and the task
+   * prompt, the host never sends continuation check-ins — the agent works
+   * until it ends its turn, and that end is the shift's end. The agent is
+   * not told this. */
+  readonly selfPaced?: boolean;
 }
 
 export interface DemandState {

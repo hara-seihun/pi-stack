@@ -1,8 +1,12 @@
 import {
+  convertToLlm,
   createAgentSession,
   DefaultResourceLoader,
+  serializeConversation,
   type AgentSession,
+  type InlineExtension,
 } from "@earendil-works/pi-coding-agent";
+import { randomUUID } from "node:crypto";
 import { homedir } from "node:os";
 import { join } from "node:path";
 import { Type } from "typebox";
@@ -211,18 +215,26 @@ export class PiHost implements HostManager {
     // thing summarized away, and the night of 2026-08-21 showed lanes obeying
     // whatever voice was still in context once the opening instructions were
     // gone. The system prompt is the one region compaction preserves.
+    const pin: OpeningPin = { text: undefined, messageCount: 0 };
     let resourceLoader: DefaultResourceLoader | undefined;
-    if (spec.doctrineUrl !== undefined) {
-      const doctrine = await this.doctrine(spec.doctrineUrl);
+    if (spec.doctrineUrl !== undefined || (spec.opening?.length ?? 0) > 0) {
+      const doctrine = spec.doctrineUrl === undefined ? undefined : await this.doctrine(spec.doctrineUrl);
       resourceLoader = new DefaultResourceLoader({
         cwd: spec.cwd ?? process.cwd(),
         agentDir: this.options.agentDir ?? join(homedir(), ".pi", "agent"),
-        appendSystemPrompt: [
-          `# Lane doctrine (pinned from ${spec.doctrineUrl})\n\n` +
-            "This document is pinned into your system prompt so it stays with " +
-            "you even after context compaction. It is binding for this lane.\n\n" +
-            doctrine,
-        ],
+        ...(doctrine === undefined
+          ? {}
+          : {
+              appendSystemPrompt: [
+                `# Lane doctrine (pinned from ${spec.doctrineUrl})\n\n` +
+                  "This document is pinned into your system prompt so it stays with " +
+                  "you even after context compaction. It is binding for this lane.\n\n" +
+                  doctrine,
+              ],
+            }),
+        // The pin extension must exist before the session binds extensions;
+        // it reads the mutable ref lazily, at compaction time.
+        extensionFactories: [openingPinExtension(pin)],
       });
       await resourceLoader.reload();
     }
@@ -309,7 +321,6 @@ export class PiHost implements HostManager {
       );
       const stopProgress = this.trackProgress(spec.runId, session);
       disposers.push(stopProgress);
-      transcript?.append("user", { text: spec.prompt });
       const heartbeat = setInterval(
         () => this.events.heartbeat(spec.runId, Date.now()),
         HEARTBEAT_MS,
@@ -325,6 +336,35 @@ export class PiHost implements HostManager {
       // first quiet turn threw away a warm context that had just paid for
       // itself and made every lane restart from scratch.
       let idle = 0;
+      // The opening exchange is lived, not injected: each message is a real
+      // turn the agent answers with whatever tools it reaches for, and the
+      // record of that lived exchange is what the pin extension replays
+      // verbatim through every compaction. Injecting a transcript the agent
+      // never produced would be spotted — agents are acutely good at telling
+      // self from not-self — and disbelieved.
+      for (const message of spec.opening ?? []) {
+        transcript?.append("user", { text: message });
+        if (await interrupted(session.prompt(message))) {
+          return { state: "aborted", detail: "session killed" };
+        }
+        const opener = [...session.messages]
+          .reverse()
+          .find(
+            (m): m is typeof m & { stopReason?: string; errorMessage?: string } =>
+              m.role === "assistant",
+          );
+        if (opener?.stopReason === "error") {
+          return { state: "error", detail: opener.errorMessage ?? "opening turn errored" };
+        }
+        if (opener?.stopReason === "aborted") {
+          return { state: "aborted", detail: "session aborted" };
+        }
+        observer.endTurn();
+      }
+      if ((spec.opening?.length ?? 0) > 0) {
+        pin.messageCount = session.messages.length;
+        pin.text = serializeOpening(session.messages);
+      }
       for (let turn = 0; ; turn++) {
         const before = reports;
         // The lane's check-in (see continuations.ts) is generated from the
@@ -340,7 +380,7 @@ export class PiHost implements HostManager {
                 budgetMs,
                 turns: observer.turns(),
               });
-        if (turn > 0) transcript?.append("user", { text: message });
+        transcript?.append("user", { text: message });
         if (await interrupted(session.prompt(message))) {
           return { state: "aborted", detail: "session killed" };
         }
@@ -365,6 +405,9 @@ export class PiHost implements HostManager {
           break;
         }
         observer.endTurn();
+        // A self-paced shift is one work turn: the agent ending it is the
+        // agent deciding to stop, and no check-in second-guesses that.
+        if (spec.selfPaced === true) break;
         idle = reports > before ? 0 : idle + 1;
         if (idle >= MAX_IDLE_TURNS || Date.now() >= deadline) break;
         // A queue lane can empty its queue mid-shift, and a continuation
@@ -475,6 +518,169 @@ export class PiHost implements HostManager {
           return;
       }
     });
+  }
+}
+
+/** Mutable ref shared between the host's shift loop and the pin extension:
+ * the loop fills it in when the opening exchange completes, the extension
+ * reads it at each compaction. */
+export interface OpeningPin {
+  text: string | undefined;
+  /** How many session messages the opening spans, so the first compaction
+   * can exclude them from the generated work summary (they are already in
+   * the pin, verbatim). */
+  messageCount: number;
+}
+
+const PIN_DIVIDER = "# Work since the opening exchange";
+
+/**
+ * Keeps the session's opening exchange intact across compaction. Pi's
+ * compaction replaces everything before the kept tail with one generated
+ * summary; this handler builds that summary as the verbatim opening
+ * exchange followed by a generated summary of the work after it. The
+ * exchange is replayed word for word — the agent said these things in this
+ * session, and it stays able to recognize them as its own — while ordinary
+ * work compacts as usual behind the divider.
+ *
+ * On any failure the handler steps aside and default compaction runs: a
+ * session that loses its pin is degraded, a session that cannot compact at
+ * all is dead.
+ */
+export function openingPinExtension(pin: OpeningPin): InlineExtension {
+  return {
+    name: "opening-pin",
+    factory: (pi: any) => {
+      pi.on("session_before_compact", async (event: any, ctx: any) => {
+        if (pin.text === undefined) return undefined;
+        try {
+          const { preparation } = event;
+          const all = [
+            ...(preparation.messagesToSummarize ?? []),
+            ...(preparation.turnPrefixMessages ?? []),
+          ];
+          // The first compaction still holds the opening as live messages;
+          // they are dropped from the work summary because the pin already
+          // carries them verbatim. Later compactions start past them.
+          const isFirst = preparation.previousSummary === undefined;
+          const work = isFirst ? all.slice(pin.messageCount) : all;
+          const previousWork = preparation.previousSummary?.split(PIN_DIVIDER).pop()?.trim();
+          let workSummary = previousWork ?? "";
+          if (work.length > 0 && ctx.model !== undefined) {
+            const conversation = serializeConversation(convertToLlm(work as never));
+            const response = await ctx.modelRegistry.complete(
+              ctx.model,
+              {
+                messages: [
+                  {
+                    role: "user",
+                    content: [
+                      {
+                        type: "text",
+                        text:
+                          "Summarize this working session so it can continue after " +
+                          "context compaction. Capture goals, key decisions and their " +
+                          "rationale, validated results, current state, blockers, and " +
+                          "next steps, as structured markdown. Be thorough but concise; " +
+                          "the summary replaces the messages." +
+                          (previousWork ? `\n\nEarlier summary to fold in:\n${previousWork}` : "") +
+                          `\n\n<conversation>\n${conversation}\n</conversation>`,
+                      },
+                    ],
+                    timestamp: Date.now(),
+                  },
+                ],
+              },
+              { maxTokens: 8192, signal: event.signal, cacheRetention: "none", sessionId: randomUUID() },
+            );
+            const text = (response.content ?? [])
+              .filter((c: any) => c?.type === "text")
+              .map((c: any) => String(c.text ?? ""))
+              .join("\n")
+              .trim();
+            if (text === "") return undefined;
+            workSummary = text;
+            return {
+              compaction: {
+                summary: `${pin.text}\n\n${PIN_DIVIDER}\n\n${workSummary}`,
+                firstKeptEntryId: preparation.firstKeptEntryId,
+                tokensBefore: preparation.tokensBefore,
+                usage: response.usage,
+              },
+            };
+          }
+          return {
+            compaction: {
+              summary: `${pin.text}\n\n${PIN_DIVIDER}\n\n${workSummary}`,
+              firstKeptEntryId: preparation.firstKeptEntryId,
+              tokensBefore: preparation.tokensBefore,
+            },
+          };
+        } catch {
+          return undefined;
+        }
+      });
+    },
+  };
+}
+
+/** One tool result inside the pinned opening may be large (an MCP `get` runs
+ * to a few KB) but must stay whole enough to be the thing the agent actually
+ * read; this cap only guards against a pathological giant result. */
+const PIN_TOOL_RESULT_MAX = 16_000;
+
+/**
+ * Verbatim serialization of the opening exchange, in the same voice pi uses
+ * when it serializes conversations ([User]/[Assistant]/[Tool result]), with
+ * tool results kept essentially whole rather than truncated to a stub.
+ */
+export function serializeOpening(messages: readonly any[]): string {
+  const parts: string[] = [
+    "# This session's opening exchange, preserved verbatim",
+    "The messages below are the word-for-word opening of this session — the " +
+      "operator's messages, your replies, and the tool calls you made. They " +
+      "are pinned so compaction never erases them.",
+  ];
+  for (const m of messages) {
+    if (m?.role === "user") {
+      const text = contentText(m);
+      if (text) parts.push(`[User]:\n${text}`);
+    } else if (m?.role === "assistant") {
+      const text = contentText(m);
+      if (text) parts.push(`[Assistant]:\n${text}`);
+      const calls = (Array.isArray(m.content) ? m.content : [])
+        .filter((c: any) => c?.type === "toolCall")
+        .map((c: any) => `${String(c.name ?? "tool")}(${safeJson(c.arguments ?? c.args)})`);
+      if (calls.length > 0) parts.push(`[Assistant tool calls]: ${calls.join("; ")}`);
+    } else if (m?.role === "toolResult") {
+      const text = contentText(m);
+      parts.push(
+        `[Tool result]: ${
+          text.length > PIN_TOOL_RESULT_MAX
+            ? `${text.slice(0, PIN_TOOL_RESULT_MAX)}… [truncated]`
+            : text
+        }`,
+      );
+    }
+  }
+  return parts.join("\n\n");
+}
+
+function contentText(message: any): string {
+  if (typeof message.content === "string") return message.content.trim();
+  if (!Array.isArray(message.content)) return "";
+  return message.content
+    .filter((part: any) => part?.type === "text")
+    .map((part: any) => String(part.text ?? ""))
+    .join("")
+    .trim();
+}
+
+function safeJson(value: unknown): string {
+  try {
+    return JSON.stringify(value ?? {}) ?? "{}";
+  } catch {
+    return "{}";
   }
 }
 

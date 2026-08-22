@@ -16,6 +16,12 @@ export interface LaunchSpec {
    * survives compaction; the task prompt, as the first user message, does
    * not. */
   readonly doctrineUrl?: string;
+  /** User messages sent as real turns before the task prompt; the lived
+   * exchange is then pinned verbatim through every compaction. */
+  readonly opening?: readonly string[];
+  /** One work turn, no continuation check-ins: the agent ending its turn
+   * ends the shift. */
+  readonly selfPaced?: boolean;
 }
 
 /** Result a host reports when a session ends. */

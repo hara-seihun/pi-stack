@@ -293,6 +293,18 @@ ALTER TABLE run ADD COLUMN progress_at INTEGER;
 UPDATE run SET progress_at = COALESCE(heartbeat_at, claimed_at, started_at);
 `;
 
+/** The opening exchange (see tasks/types.ts): user messages the host sends
+ * as real turns before the task prompt, stored as a JSON array of message
+ * texts; and self-pacing, which makes the shift a single work turn with no
+ * continuation check-ins. Message bodies live in the row (not URLs): the
+ * exchange is operator-authored text whose exact wording is the point, and
+ * a launch must not change voice because a fetch failed. */
+const OPENING_SCHEMA = `
+ALTER TABLE task ADD COLUMN opening TEXT;
+ALTER TABLE task ADD COLUMN self_paced INTEGER NOT NULL DEFAULT 0
+  CHECK (self_paced IN (0, 1));
+`;
+
 const MIGRATIONS: readonly string[] = [
   SCHEMA,
   TASK_SCHEMA,
@@ -309,6 +321,7 @@ const MIGRATIONS: readonly string[] = [
   RUN_PROGRESS_SCHEMA,
   DOCTRINE_URL_SCHEMA,
   FLEET_CREDENTIAL_SCHEMA,
+  OPENING_SCHEMA,
 ];
 
 export interface AccountRow {
@@ -765,8 +778,8 @@ export class Ledger {
     this.db
       .prepare(
         `INSERT INTO task (id, demand_command, demand_constant, gate, tiers, share, prompt, cwd,
-                           exit_when_drained, doctrine_url, created_at)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                           exit_when_drained, doctrine_url, opening, self_paced, created_at)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
          ON CONFLICT (id) DO UPDATE SET
            demand_command = excluded.demand_command,
            demand_constant = excluded.demand_constant,
@@ -776,7 +789,9 @@ export class Ledger {
            prompt = excluded.prompt,
            cwd = excluded.cwd,
            exit_when_drained = excluded.exit_when_drained,
-           doctrine_url = excluded.doctrine_url`,
+           doctrine_url = excluded.doctrine_url,
+           opening = excluded.opening,
+           self_paced = excluded.self_paced`,
       )
       .run(
         t.id,
@@ -789,6 +804,8 @@ export class Ledger {
         t.cwd ?? null,
         t.exitWhenDrained ? 1 : 0,
         t.doctrineUrl ?? null,
+        t.opening === undefined ? null : JSON.stringify(t.opening),
+        t.selfPaced ? 1 : 0,
         Date.now(),
       );
   }
@@ -802,7 +819,7 @@ export class Ledger {
     const rows = this.db
       .prepare(
         `SELECT id, demand_command, demand_constant, gate, tiers, share, prompt, cwd,
-                exit_when_drained, doctrine_url
+                exit_when_drained, doctrine_url, opening, self_paced
          FROM task ORDER BY id`,
       )
       .all() as {
@@ -816,6 +833,8 @@ export class Ledger {
       cwd: string | null;
       exit_when_drained: number;
       doctrine_url: string | null;
+      opening: string | null;
+      self_paced: number;
     }[];
     return rows.map((r) => ({
       id: r.id,
@@ -828,6 +847,8 @@ export class Ledger {
       cwd: r.cwd ?? undefined,
       exitWhenDrained: r.exit_when_drained !== 0,
       doctrineUrl: r.doctrine_url ?? undefined,
+      opening: r.opening === null ? undefined : (JSON.parse(r.opening) as string[]),
+      selfPaced: r.self_paced !== 0,
     }));
   }
 

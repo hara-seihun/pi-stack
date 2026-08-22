@@ -177,6 +177,24 @@ describe scheduling:
   bind for a whole shift — the math ledger's attack guide, whose anti-ladder
   rules override even the session's opening instructions — survives only in
   the system prompt, which compaction preserves.
+- `opening` (`task set … --opening file1,file2`) and `selfPaced` (`…
+  --self-paced true`): the opening exchange. The host sends each file's text
+  as a real user turn, in order, before the task prompt; the agent lives the
+  exchange — answers each message, runs whatever tools it reaches for — and
+  the host then pins the lived record verbatim through every compaction (an
+  inline extension rebuilds each compaction summary as the word-for-word
+  exchange followed by a generated summary of the work after it). Message
+  bodies are captured into the ledger row at set time, so a launch never
+  changes voice because a fetch failed; re-run `task set` to pick up file
+  edits. Verbatim matters: agents are acutely good at telling self from
+  not-self, and a paraphrased opening reads as someone else's words. With
+  `selfPaced` the shift is one work turn — no continuation check-ins; the
+  agent ending its turn is the agent deciding the shift is over, and it is
+  deliberately not told this. Measured on the math-frontier lane
+  (2026-08-22): the exchange moved self-assessed odds on an open target from
+  ~0.1% to 25–40% and flipped ledger contact from "crowded field, retreat"
+  to "inherited terrain, attack"; the experiment record lives in
+  `~/data/thread-lab/_experiments/2026-08-22-erdos647-priors/`.
 - `demand`: a constant or a cheap read-only probe command whose last stdout
   line is a work-unit count. `0` means no work; agents are never launched to
   discover idleness. Results are cached with a TTL and invalidated by task

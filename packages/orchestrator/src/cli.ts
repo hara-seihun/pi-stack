@@ -740,6 +740,31 @@ export function taskSet(ledger: Ledger, args: string[]): void {
       ? undefined
       : current?.demandConstant;
 
+  // Opening-exchange messages are authored in files and captured into the
+  // ledger at set time: the row is the source of truth for what launches
+  // say, and editing the file later changes nothing until the next
+  // `task set`. `--opening ""` clears the exchange.
+  let opening = current?.opening;
+  if (named.has("opening")) {
+    const value = named.get("opening") ?? "";
+    opening =
+      value === ""
+        ? undefined
+        : value.split(",").map((file) => {
+            try {
+              return readFileSync(file.trim(), "utf8");
+            } catch (thrown) {
+              return fail(`--opening ${file}: ${String(thrown)}`);
+            }
+          });
+  }
+
+  const paced = named.get("self-paced");
+  if (paced !== undefined && paced !== "true" && paced !== "false") {
+    fail("--self-paced must be true or false");
+  }
+  const selfPaced = paced === undefined ? current?.selfPaced : paced === "true";
+
   const drained = named.get("exit-when-drained");
   if (drained !== undefined && drained !== "true" && drained !== "false") {
     fail("--exit-when-drained must be true or false");
@@ -757,6 +782,8 @@ export function taskSet(ledger: Ledger, args: string[]): void {
     cwd: pick("cwd", current?.cwd),
     ...(exitWhenDrained === undefined ? {} : { exitWhenDrained }),
     doctrineUrl: pick("doctrine-url", current?.doctrineUrl),
+    ...(opening === undefined ? {} : { opening }),
+    ...(selfPaced === undefined ? {} : { selfPaced }),
   });
   console.log(`task ${id} ${current ? "updated" : "created"}`);
 }
@@ -795,6 +822,8 @@ async function main(): Promise<void> {
               `${t.id}: tiers=${formatTiers(t.tiers)} share=${t.share ?? 1} demand=[${demand}]` +
                 (t.gate !== undefined ? ` gate=[${t.gate}]` : "") +
                 (t.exitWhenDrained ? " exit-when-drained" : "") +
+                (t.opening !== undefined ? ` opening(${t.opening.length})` : "") +
+                (t.selfPaced ? " self-paced" : "") +
                 (ledger.taskPaused(t.id) ? " HELD" : "") +
                 (t.prompt === undefined ? " (signal only)" : ""),
             );
