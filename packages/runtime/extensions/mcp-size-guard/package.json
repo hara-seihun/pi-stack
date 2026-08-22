@@ -1,0 +1,22 @@
+{
+  "name": "@works-kenan/mcp-size-guard",
+  "private": true,
+  "version": "1.0.0",
+  "type": "module",
+  "description": "Files a machine alert when an MCP tool returns a response over the size threshold.",
+  "keywords": [
+    "pi-package",
+    "pi-extension"
+  ],
+  "pi": {
+    "extensions": [
+      "./index.mjs"
+    ]
+  },
+  "peerDependencies": {
+    "@earendil-works/pi-coding-agent": "*"
+  },
+  "scripts": {
+    "test": "node --test guard.test.mjs"
+  }
+}

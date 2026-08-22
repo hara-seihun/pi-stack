@@ -14,7 +14,7 @@ npm test
 claude_extension="$PWD/extensions/pi-claude-code-use/extensions/index.ts"
 settings="$HOME/.pi/agent/settings.json"
 claude_extension_configured=$(jq -r '.packages | any(. == "../../tools/pi-runtime/extensions/pi-claude-code-use" or . == "/home/kenan/tools/pi-runtime/extensions/pi-claude-code-use")' "$settings")
-for shared_extension in context-guard bash-timeout-guard; do
+for shared_extension in context-guard bash-timeout-guard mcp-size-guard; do
   jq -e --arg e "$shared_extension" \
     '.packages | any(endswith("/tools/pi-runtime/extensions/" + $e))' "$settings" >/dev/null ||
     { echo "$shared_extension extension package is not configured" >&2; exit 1; }
@@ -61,7 +61,7 @@ shared=/srv/pi
 install -d -m 755 "$shared/extensions" "$shared/pi-cursor/node_modules"
 rsync -a --delete --chmod=D755,F644 \
   "$PWD/extensions/pi-claude-code-use" "$PWD/extensions/context-guard" \
-  "$PWD/extensions/bash-timeout-guard" "$shared/extensions/"
+  "$PWD/extensions/bash-timeout-guard" "$PWD/extensions/mcp-size-guard" "$shared/extensions/"
 rsync -a --delete --chmod=D755,F644 "$cursor_provider/dist" "$cursor_provider/package.json" "$shared/pi-cursor/"
 
 # Skills are the fleet's only written account of how this host reaches things:
@@ -86,6 +86,7 @@ fleet_packages=$(jq -n '[
   "/srv/pi/extensions/pi-claude-code-use",
   "/srv/pi/extensions/context-guard",
   "/srv/pi/extensions/bash-timeout-guard",
+  "/srv/pi/extensions/mcp-size-guard",
   "/srv/pi/pi-cursor",
   "npm:pi-mcp-adapter"
 ]')
