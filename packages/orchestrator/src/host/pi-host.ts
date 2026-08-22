@@ -186,11 +186,13 @@ export class PiHost implements HostManager {
     // `{{placeholders}}` would rightly disbelieve the whole exchange, so a
     // probe failure fails the launch instead.
     let opening = spec.opening ?? [];
-    if (spec.openingProbe !== undefined && opening.length > 0) {
+    let prompt = spec.prompt;
+    if (spec.openingProbe !== undefined) {
       try {
         const probe = this.options.runOpeningProbe ?? execOpeningProbe;
         const values = parseProbeValues(await probe(spec.openingProbe, spec.cwd ?? process.cwd()));
-        opening = opening.map((message) => renderOpening(message, values));
+        opening = opening.map((message) => renderTemplate(message, values));
+        if (prompt !== undefined) prompt = renderTemplate(prompt, values);
       } catch (thrown) {
         return { state: "error", detail: `opening probe failed: ${String(thrown)}` };
       }
@@ -391,7 +393,7 @@ export class PiHost implements HostManager {
         // rather than firing a fixed sequence on a timer.
         const message =
           turn === 0
-            ? spec.prompt
+            ? prompt
             : continuationFor({
                 taskId: spec.taskId,
                 turn,
@@ -830,9 +832,10 @@ export function parseProbeValues(stdout: string): Record<string, string> {
  * the probe did not answer means the template and the probe have drifted
  * apart, and the message must not be sent — an operator voice with literal
  * template holes reads as exactly the fabrication agents are good at
- * spotting.
+ * spotting. The opening exchange and the task prompt are both per-launch text
+ * from the same probe, so both are rendered the same way.
  */
-export function renderOpening(message: string, values: Record<string, string>): string {
+export function renderTemplate(message: string, values: Record<string, string>): string {
   const rendered = message.replace(/\{\{([a-zA-Z0-9_.-]+)\}\}/g, (whole, key: string) =>
     key in values ? values[key] : whole,
   );

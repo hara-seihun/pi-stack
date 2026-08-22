@@ -35,6 +35,7 @@ function harness(
     opening?: readonly string[];
     openingProbe?: string;
     runOpeningProbe?: (command: string, cwd: string) => Promise<string>;
+    prompt?: string;
     selfPaced?: boolean;
   } = {},
 ) {
@@ -103,7 +104,7 @@ function harness(
   const spec: LaunchSpec = {
     runId: "run-1",
     taskId: options.taskId ?? "math-frontier",
-    prompt: "Attack the central problem.",
+    prompt: options.prompt ?? "Attack the central problem.",
     accountId: "codex-1",
     provider: "openai-codex",
     model: "gpt-5.6-luna",
@@ -474,6 +475,39 @@ describe("the opening probe", () => {
       "What odds on Frankl's conjecture?",
       "Now examine `abc123`.",
     ]);
+  });
+
+  // The task prompt is per-launch text from the same probe, which is how a lane
+  // varies the work itself rather than only its opening — the math lane draws
+  // half its launches into the research-ambition working method this way.
+  it("fills placeholders in the task prompt, not only the opening", async () => {
+    const { host, spec, prompts, finished } = harness([{}, { reports: 1 }, {}], {
+      opening: ["Now examine `{{problem_id}}`."],
+      prompt: "Attack it.{{ambition}}",
+      openingProbe: "sample-problem",
+      runOpeningProbe: async () =>
+        JSON.stringify({ problem_id: "abc123", ambition: " Work in rounds." }),
+    });
+    host.launch(spec);
+    await finished;
+
+    expect(prompts[0]).toBe("Now examine `abc123`.");
+    expect(prompts[1]).toBe("Attack it. Work in rounds.");
+  });
+
+  it("fails the launch when the task prompt has an unanswered placeholder", async () => {
+    const { host, spec, prompts, finished } = harness([{}], {
+      opening: ["Now examine `{{problem_id}}`."],
+      prompt: "Attack it.{{ambition}}",
+      openingProbe: "sample-problem",
+      runOpeningProbe: async () => JSON.stringify({ problem_id: "abc123" }),
+    });
+    host.launch(spec);
+    const result = await finished;
+
+    expect(prompts).toHaveLength(0);
+    expect(result.state).toBe("error");
+    expect(result.detail).toContain("ambition");
   });
 
   it("fails the launch when the probe fails, rather than sending the template", async () => {
