@@ -448,17 +448,25 @@ describe("the opening exchange", () => {
 });
 
 describe("the opening pin", () => {
-  const capture = () => {
-    let handler: ((event: unknown, ctx: unknown) => Promise<unknown>) | undefined;
+  type Handler = (event: unknown, ctx: unknown) => Promise<unknown>;
+  const captureAll = () => {
+    const handlers = new Map<string, Handler>();
     const bind = (pin: Parameters<typeof openingPinExtension>[0]) => {
       (openingPinExtension(pin) as { factory: (pi: unknown) => void }).factory({
-        on: (_name: string, fn: typeof handler) => {
-          handler = fn;
+        on: (name: string, fn: Handler) => {
+          handlers.set(name, fn);
         },
       } as never);
-      return (event: unknown, ctx: unknown) => handler!(event, ctx);
+      return handlers;
     };
     return bind;
+  };
+  const capture = () => {
+    const bindAll = captureAll();
+    return (pin: Parameters<typeof openingPinExtension>[0]) => {
+      const handlers = bindAll(pin);
+      return (event: unknown, ctx: unknown) => handlers.get("session_before_compact")!(event, ctx);
+    };
   };
   const ctx = (summary = "WORK SUMMARY") => ({
     model: { id: "m" },
@@ -500,6 +508,29 @@ describe("the opening pin", () => {
     expect(summary).toContain("# Work since the opening exchange");
     expect(summary.indexOf("priors")).toBeLessThan(summary.indexOf("# Work since"));
     expect(summary).toContain("WORK SUMMARY");
+  });
+
+  it("registers the opening span with context-guard and withdraws it on shutdown", async () => {
+    // Context-guard, not native compaction, is what actually cuts context on
+    // large-window models; it protects the head span registered under the
+    // session id in this global map.
+    const bindAll = captureAll();
+    const pin = { text: undefined, messageCount: 0 };
+    const handlers = bindAll(pin);
+    const guardCtx = { sessionManager: { getSessionId: () => "sess-1" } };
+    const registry = (globalThis as never as { __piContextGuardProtect: Map<string, number> })
+      .__piContextGuardProtect;
+
+    // Before the opening turns complete there is nothing to protect.
+    await handlers.get("context")!({ type: "context" }, guardCtx);
+    expect(registry?.get("sess-1")).toBeUndefined();
+
+    pin.messageCount = 7;
+    await handlers.get("context")!({ type: "context" }, guardCtx);
+    expect(registry.get("sess-1")).toBe(7);
+
+    await handlers.get("session_shutdown")!({ type: "session_shutdown" }, guardCtx);
+    expect(registry.get("sess-1")).toBeUndefined();
   });
 
   it("stays out of the way when there is no pinned opening", async () => {

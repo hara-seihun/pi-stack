@@ -535,22 +535,54 @@ export interface OpeningPin {
 const PIN_DIVIDER = "# Work since the opening exchange";
 
 /**
- * Keeps the session's opening exchange intact across compaction. Pi's
- * compaction replaces everything before the kept tail with one generated
- * summary; this handler builds that summary as the verbatim opening
- * exchange followed by a generated summary of the work after it. The
- * exchange is replayed word for word — the agent said these things in this
- * session, and it stays able to recognize them as its own — while ordinary
- * work compacts as usual behind the divider.
+ * Keeps the session's opening exchange intact across both context
+ * mechanisms.
  *
- * On any failure the handler steps aside and default compaction runs: a
- * session that loses its pin is degraded, a session that cannot compact at
- * all is dead.
+ * Context-guard (the global 250k-cap extension, loaded into hosted sessions
+ * from the machine's settings packages) is the mechanism that actually
+ * governs large-window models: it cuts the per-request view before pi's
+ * native compaction ever triggers, and its cut evicts old tool-result
+ * bodies — the opening's MCP traffic first of all. The pin registers the
+ * opening's message count under the session id in
+ * `globalThis.__piContextGuardProtect`; the guard treats that span as a
+ * protected head that crosses every cut byte-identical.
+ *
+ * Pi's native compaction still governs where the guard does not reach —
+ * models whose window sits below the guard's trigger, and cursor sessions,
+ * which the guard excludes. There the `session_before_compact` handler
+ * rebuilds the summary as the verbatim opening exchange followed by a
+ * generated summary of the work after it. Either way the exchange is
+ * replayed word for word — the agent said these things in this session,
+ * and it stays able to recognize them as its own.
+ *
+ * On any failure the compaction handler steps aside and default compaction
+ * runs: a session that loses its pin is degraded, a session that cannot
+ * compact at all is dead.
  */
 export function openingPinExtension(pin: OpeningPin): InlineExtension {
   return {
     name: "opening-pin",
     factory: (pi: any) => {
+      const registry: Map<string, number> = ((globalThis as any).__piContextGuardProtect ??=
+        new Map());
+      let sessionId: string | undefined;
+      const register = (ctx: any) => {
+        const id = ctx?.sessionManager?.getSessionId?.();
+        if (id === undefined) return;
+        sessionId = id;
+        // messageCount is 0 until the host's opening turns complete; register
+        // on every event so the count lands as soon as it exists. Cuts happen
+        // hundreds of events later.
+        if (pin.messageCount > 0) registry.set(id, pin.messageCount);
+      };
+      pi.on("session_start", (_event: any, ctx: any) => register(ctx));
+      pi.on("context", (_event: any, ctx: any) => {
+        register(ctx);
+        return undefined;
+      });
+      pi.on("session_shutdown", () => {
+        if (sessionId !== undefined) registry.delete(sessionId);
+      });
       pi.on("session_before_compact", async (event: any, ctx: any) => {
         if (pin.text === undefined) return undefined;
         try {

@@ -181,9 +181,14 @@ describe scheduling:
   --self-paced true`): the opening exchange. The host sends each file's text
   as a real user turn, in order, before the task prompt; the agent lives the
   exchange — answers each message, runs whatever tools it reaches for — and
-  the host then pins the lived record verbatim through every compaction (an
-  inline extension rebuilds each compaction summary as the word-for-word
-  exchange followed by a generated summary of the work after it). Message
+  the host then pins the lived record verbatim through both context
+  mechanisms: it registers the span as context-guard's protected head (the
+  global 250k-cap extension is what actually cuts context on large-window
+  models, and its cut would otherwise evict the opening's tool results
+  first), and an inline extension rebuilds each native compaction summary as
+  the word-for-word exchange followed by a generated summary of the work
+  after it (native compaction still governs small-window models and cursor
+  sessions, which the guard excludes). Message
   bodies are captured into the ledger row at set time, so a launch never
   changes voice because a fetch failed; re-run `task set` to pick up file
   edits. Verbatim matters: agents are acutely good at telling self from
