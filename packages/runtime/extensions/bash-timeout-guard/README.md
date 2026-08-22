@@ -31,6 +31,13 @@ were gone. Operator directive, same day: fleet sessions run in the foreground.
   `batch`, or a background `&`. `findDetachment` scans with quotes removed, so
   `sed 's/x/&/'` and `2>&1` are not operators, and it recurses into a quoted
   `sh -c '…'` payload, which is where the `&` otherwise hides.
+- Heredoc bodies are dropped before the scan and `$(( … ))` is replaced, and an
+  `&` counts as an operator only when the next character ends the command
+  (whitespace, `;`, `)`, `|`, `&`, or end of input). On 2026-08-22 a fleet agent
+  was blocked for writing `if (e & 1)` inside a `<<EOF` C source: bitwise AND in
+  a language that is not the shell, in text that is data rather than a command.
+  A false block costs a session the tool it needs, so text the shell will never
+  execute is not scanned.
 - A command that also contains `wait` keeps its `&`: `for i in …; do ./shard
   $i & done; wait` is parallelism inside the call, which is the answer to a
   job that does not fit rather than a way around the cap. The call still
