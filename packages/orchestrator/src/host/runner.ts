@@ -25,7 +25,19 @@ export interface RunnerConfig {
   readonly runnerId: string;
   /** Concurrent embedded sessions this process will host. */
   readonly maxSessions: number;
+  /**
+   * A session that records nothing for this long is stuck, not thinking: the
+   * longest legitimate quiet stretch is one tool call, and commands are capped
+   * at five minutes. The run is asked to abort at this point.
+   */
+  readonly progressTimeoutMs?: number;
+  /** How long the polite abort gets before the session is torn down. A stall
+   * inside a provider call never returns, so asking is not enough. */
+  readonly stallKillGraceMs?: number;
 }
+
+const PROGRESS_TIMEOUT_MS = 15 * 60_000;
+const STALL_KILL_GRACE_MS = 5 * 60_000;
 
 /** A demand reading older than this says nothing about the queue now. The
  * controller re-probes on a 60s TTL, so anything this old means nobody is
@@ -36,6 +48,8 @@ export interface RunnerTickReport {
   readonly claimed: readonly LaunchSpec[];
   readonly active: number;
   readonly draining: boolean;
+  /** Runs torn down this tick for making no progress. */
+  readonly stalled: readonly string[];
 }
 
 export class Runner implements HostEvents {
@@ -55,8 +69,22 @@ export class Runner implements HostEvents {
       this.draining = true;
     }
     const owned = this.ledger.runs({ state: "running", runnerId: this.cfg.runnerId });
+    const progressTimeoutMs = this.cfg.progressTimeoutMs ?? PROGRESS_TIMEOUT_MS;
+    const killGraceMs = this.cfg.stallKillGraceMs ?? STALL_KILL_GRACE_MS;
+    const stalled: string[] = [];
     for (const run of owned) {
-      if (run.abortRequested) this.engine.abort(run.id);
+      const stalledForMs = now - (run.progressAt ?? run.claimedAt ?? run.startedAt);
+      if (stalledForMs > progressTimeoutMs + killGraceMs) {
+        this.engine.kill(
+          run.id,
+          `session made no progress for ${Math.round(stalledForMs / 60_000)}m`,
+        );
+        stalled.push(run.id);
+        continue;
+      }
+      const overdue = stalledForMs > progressTimeoutMs;
+      if (overdue && !run.abortRequested) this.ledger.requestAbort(run.id);
+      if (overdue || run.abortRequested) this.engine.abort(run.id);
       // Operator messages are delivered exactly once: a message the host no
       // longer holds a session for stays queued rather than being lost, and
       // is retired with the run below.
@@ -64,6 +92,18 @@ export class Runner implements HostEvents {
         if (!this.engine.message(run.id, message.text)) break;
         this.ledger.markRunMessageDelivered(message.id, now);
       }
+    }
+
+    // A run can also end outside this loop — an operator `kill`, a controller reap
+    // — and the ledger row is the authority on whether a session should exist. A
+    // session outliving its row would hold a slot and keep spending an account.
+    const ownedIds = new Set(owned.map((run) => run.id));
+    for (const runId of this.engine.liveRuns()) {
+      if (ownedIds.has(runId)) continue;
+      const run = this.ledger.run(runId);
+      if (run === undefined || run.state === "running") continue;
+      this.engine.kill(runId, run.detail ?? `run ${run.state}`);
+      stalled.push(runId);
     }
 
     const claimed: LaunchSpec[] = [];
@@ -92,8 +132,8 @@ export class Runner implements HostEvents {
         claimed.push(spec);
       }
     }
-    const active = owned.length + claimed.length;
-    return { claimed, active, draining: this.draining };
+    const active = owned.length - stalled.length + claimed.length;
+    return { claimed, active, draining: this.draining, stalled };
   }
 
   /** True when a draining runner has nothing left and should exit. */
@@ -132,6 +172,10 @@ export class Runner implements HostEvents {
 
   heartbeat(runId: string, at = Date.now()): void {
     this.ledger.heartbeatRun(runId, at);
+  }
+
+  progress(runId: string, at = Date.now()): void {
+    this.ledger.progressRun(runId, at);
   }
 
   /**

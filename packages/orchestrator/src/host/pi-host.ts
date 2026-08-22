@@ -15,6 +15,8 @@ import { RunTranscript } from "./transcript.js";
  */
 
 const HEARTBEAT_MS = 30_000;
+/** Ledger writes per session while it streams: liveness needs a coarse clock. */
+const PROGRESS_WRITE_INTERVAL_MS = 15_000;
 
 /**
  * How long a session may keep working before the host stops re-prompting it,
@@ -54,6 +56,9 @@ interface CompletionReport {
 export class PiHost implements HostManager {
   private readonly sessions = new Map<string, AgentSession>();
   private readonly transcripts = new Map<string, RunTranscript>();
+  /** Runs already reported terminal by `kill`, so the shift loop's own late
+   * (or never-arriving) result cannot report a second outcome. */
+  private readonly killed = new Set<string>();
 
   constructor(
     private readonly events: HostEvents,
@@ -84,6 +89,7 @@ export class PiHost implements HostManager {
     void this.run(spec, transcript)
       .catch((thrown: unknown): HostRunResult => ({ state: "error", detail: String(thrown) }))
       .then((result) => {
+        if (this.killed.delete(spec.runId)) return;
         // The closing notice is the transcript's own terminal fact; the run
         // row remains the authority on outcome.
         transcript?.append("notice", {
@@ -96,6 +102,20 @@ export class PiHost implements HostManager {
 
   abort(runId: string): void {
     void this.sessions.get(runId)?.abort();
+  }
+
+  kill(runId: string, detail: string): void {
+    const session = this.sessions.get(runId);
+    if (session === undefined) return;
+    this.killed.add(runId);
+    this.sessions.delete(runId);
+    const transcript = this.transcripts.get(runId);
+    this.transcripts.delete(runId);
+    transcript?.append("notice", { text: `Run killed: ${detail}` });
+    transcript?.live({ activity: "IDLE" }, { force: true });
+    void session.abort();
+    session.dispose();
+    this.events.runFinished(runId, { state: "aborted", detail }, Date.now());
   }
 
   /**
@@ -120,6 +140,10 @@ export class PiHost implements HostManager {
   /** Whether a session for this run is still live in this process. */
   has(runId: string): boolean {
     return this.sessions.has(runId);
+  }
+
+  liveRuns(): readonly string[] {
+    return [...this.sessions.keys()];
   }
 
   private async run(spec: LaunchSpec, transcript: RunTranscript | undefined): Promise<HostRunResult> {
@@ -205,6 +229,7 @@ export class PiHost implements HostManager {
     // that never runs must not be addressable by an operator message.
     if (transcript !== undefined) this.transcripts.set(spec.runId, transcript);
     const unsubscribe = transcript === undefined ? undefined : this.publish(transcript, session);
+    const stopProgress = this.trackProgress(spec.runId, session);
     transcript?.append("user", { text: spec.prompt });
     const heartbeat = setInterval(
       () => this.events.heartbeat(spec.runId, Date.now()),
@@ -267,8 +292,27 @@ export class PiHost implements HostManager {
       this.sessions.delete(spec.runId);
       this.transcripts.delete(spec.runId);
       unsubscribe?.();
+      stopProgress();
       session.dispose();
     }
+  }
+
+  /**
+   * Records that the session is doing something. Every event counts, including
+   * token deltas, because the question this answers is whether the provider is
+   * still feeding the run at all — not whether the agent is being useful. Writes
+   * are throttled: a streaming turn produces thousands of events and the ledger
+   * only needs to know the session was alive within the stall window.
+   */
+  private trackProgress(runId: string, session: AgentSession): () => void {
+    let lastWrite = Date.now();
+    this.events.progress(runId, lastWrite);
+    return session.subscribe(() => {
+      const now = Date.now();
+      if (now - lastWrite < PROGRESS_WRITE_INTERVAL_MS) return;
+      lastWrite = now;
+      this.events.progress(runId, now);
+    });
   }
 
   /**

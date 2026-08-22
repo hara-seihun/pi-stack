@@ -256,6 +256,18 @@ UPDATE usage_event SET source = 'orchestrator' WHERE session_id IN (
 );
 `;
 
+/**
+ * A heartbeat only proves the runner's timer still fires. A session parked on a
+ * provider that never answers heartbeats just as happily, which is how a Grok
+ * research run sat frozen for 90 minutes in 2026-08 while every liveness signal
+ * looked healthy. `progress_at` is the last time the session actually did
+ * something the transcript recorded; existing runs backfill from their heartbeat.
+ */
+const RUN_PROGRESS_SCHEMA = `
+ALTER TABLE run ADD COLUMN progress_at INTEGER;
+UPDATE run SET progress_at = COALESCE(heartbeat_at, claimed_at, started_at);
+`;
+
 const MIGRATIONS: readonly string[] = [
   SCHEMA,
   TASK_SCHEMA,
@@ -269,6 +281,7 @@ const MIGRATIONS: readonly string[] = [
   TASK_SHARE_SCHEMA,
   EXIT_WHEN_DRAINED_SCHEMA,
   RUN_SESSION_SCHEMA,
+  RUN_PROGRESS_SCHEMA,
 ];
 
 export type AccountDomain = "interactive" | "orchestrator";
@@ -305,6 +318,8 @@ export interface RunRow {
   readonly sessionId: string | undefined;
   readonly endedAt: number | undefined;
   readonly heartbeatAt: number | undefined;
+  /** Last recorded session activity, as opposed to runner liveness. */
+  readonly progressAt: number | undefined;
   readonly abortRequested: boolean;
   readonly productive: boolean | undefined;
   readonly complete: boolean | undefined;
@@ -939,12 +954,13 @@ export class Ledger {
     if (limit <= 0) return [];
     const ids = this.db
       .prepare(
-        `UPDATE run SET state = 'running', runner_id = ?, claimed_at = ?, heartbeat_at = ?
+        `UPDATE run SET state = 'running', runner_id = ?, claimed_at = ?, heartbeat_at = ?,
+                progress_at = ?
          WHERE state = 'pending' AND id IN
            (SELECT id FROM run WHERE state = 'pending' ORDER BY started_at LIMIT ?)
          RETURNING id`,
       )
-      .all(runnerId, at, at, limit) as { id: string }[];
+      .all(runnerId, at, at, at, limit) as { id: string }[];
     return ids.map((r) => this.run(r.id)!);
   }
 
@@ -991,8 +1007,8 @@ export class Ledger {
     const rows = this.db
       .prepare(
         `SELECT id, task_id, tier, account_id, model, provider, thinking, state, started_at,
-                claimed_at, runner_id, session_id, ended_at, heartbeat_at, abort_requested,
-                productive, complete, detail
+                claimed_at, runner_id, session_id, ended_at, heartbeat_at, progress_at,
+                abort_requested, productive, complete, detail
          FROM run ${clause}`,
       )
       .all(...params) as {
@@ -1010,6 +1026,7 @@ export class Ledger {
       session_id: string | null;
       ended_at: number | null;
       heartbeat_at: number | null;
+      progress_at: number | null;
       abort_requested: number;
       productive: number | null;
       complete: number | null;
@@ -1030,6 +1047,7 @@ export class Ledger {
       sessionId: r.session_id ?? undefined,
       endedAt: r.ended_at ?? undefined,
       heartbeatAt: r.heartbeat_at ?? undefined,
+      progressAt: r.progress_at ?? undefined,
       abortRequested: r.abort_requested !== 0,
       productive: r.productive === null ? undefined : r.productive !== 0,
       complete: r.complete === null ? undefined : r.complete !== 0,
@@ -1055,6 +1073,11 @@ export class Ledger {
 
   heartbeatRun(id: string, at: number): void {
     this.db.prepare("UPDATE run SET heartbeat_at = ? WHERE id = ?").run(at, id);
+  }
+
+  /** The session did something: a turn, a tool call, a notice. */
+  progressRun(id: string, at: number): void {
+    this.db.prepare("UPDATE run SET progress_at = ? WHERE id = ?").run(at, id);
   }
 
   /** Bind a run to the pi session hosting it, so its usage events resolve to

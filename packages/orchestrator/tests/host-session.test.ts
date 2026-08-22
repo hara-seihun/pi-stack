@@ -63,6 +63,7 @@ function harness(
     {
       runFinished: (_id, result) => results.push(result),
       heartbeat: () => {},
+      progress: () => {},
       sessionStarted: (runId, sessionId) => links.push({ runId, sessionId }),
       laneDrained: options.laneDrained ?? (() => false),
     },

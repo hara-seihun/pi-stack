@@ -11,6 +11,10 @@ class FakeEngine implements HostManager {
     this.launched.push(spec);
   }
   abort(): void {}
+  kill(): void {}
+  liveRuns(): readonly string[] {
+    return [];
+  }
   message(): boolean {
     return true;
   }

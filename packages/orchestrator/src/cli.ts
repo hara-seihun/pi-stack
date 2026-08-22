@@ -368,6 +368,7 @@ async function runner(ledger: Ledger, args: string[]): Promise<void> {
     // The runner is constructed below; PiHost only needs the event surface.
     { runFinished: (id, result, at) => live.runFinished(id, result, at),
       heartbeat: (id, at) => live.heartbeat(id, at),
+      progress: (id, at) => live.progress(id, at),
       sessionStarted: (id, sessionId) => live.sessionStarted(id, sessionId),
       laneDrained: (taskId) => live.laneDrained(taskId) },
     {
@@ -792,6 +793,21 @@ async function main(): Promise<void> {
         console.log(`abort requested for ${run.id} (${run.taskId} on ${run.accountId})`);
         break;
       }
+      // A session parked inside a provider call never returns, so `abort` — which
+      // asks the agent loop to stop — can be ignored forever. This ends the run in
+      // the ledger; the owning runner then tears the session down on its next tick.
+      case "kill": {
+        const runId = args[0] ?? fail("kill <runId> [reason]");
+        const run = ledger.run(runId) ?? fail(`unknown run ${runId}`);
+        if (run.state !== "running" && run.state !== "pending") {
+          fail(`run ${run.id} is already ${run.state}`);
+        }
+        const reason = args.slice(1).join(" ") || "killed by operator";
+        ledger.finishRun(run.id, { state: "aborted", detail: reason }, Date.now());
+        ledger.taskFinished(run.taskId);
+        console.log(`killed ${run.id} (${run.taskId} on ${run.accountId}): ${reason}`);
+        break;
+      }
       case "say":
         await say(ledger, args);
         break;
@@ -834,6 +850,7 @@ async function main(): Promise<void> {
             "                               capacity goes to the named ones",
             `  boost <family> [on|off|N]    scale a family's spend pace (on = ${DEFAULT_BOOST}x)`,
             "  abort <runId>                request a running session stop",
+            "  kill <runId> [reason]        end a run its session will not stop for",
             "  say <runId> <text...>        deliver an operator message into a live",
             "                               session as a user turn",
             "  daemon [--interval MS]       controller loop (config: ~/.config/pi-orchestrator)",

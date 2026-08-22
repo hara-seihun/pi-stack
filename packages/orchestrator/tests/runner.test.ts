@@ -9,9 +9,19 @@ class FakeEngine implements HostManager {
   aborted: string[] = [];
   launch(spec: LaunchSpec): void {
     this.launched.push(spec);
+    this.live.add(spec.runId);
   }
   abort(runId: string): void {
     this.aborted.push(runId);
+  }
+  killed: { runId: string; detail: string }[] = [];
+  kill(runId: string, detail: string): void {
+    this.killed.push({ runId, detail });
+    this.live.delete(runId);
+  }
+  live = new Set<string>();
+  liveRuns(): readonly string[] {
+    return [...this.live];
   }
   messages: { runId: string; text: string }[] = [];
   /** Live sessions only: a run this engine never launched cannot be told anything. */
@@ -237,6 +247,63 @@ describe("a drained queue lane ends its shift", () => {
     // A research lane keeps its warm context however quiet its probe goes.
     ledger.recordDemand("frontier", { units: 0 }, 30_000);
     expect(runner.laneDrained("frontier", 30_000)).toBe(false);
+    ledger.close();
+  });
+});
+
+describe("a session that stops making progress is torn down", () => {
+  it("asks first, then kills, and a live session keeps its slot", () => {
+    const ledger = Ledger.open(":memory:");
+    const [stuck, healthy] = seed(ledger, 2);
+    const engine = new FakeEngine();
+    const runner = new Runner(ledger, engine, {
+      runnerId: "r1",
+      maxSessions: 5,
+      progressTimeoutMs: 1_000,
+      stallKillGraceMs: 500,
+    });
+    runner.tick(1_000);
+
+    // Both sessions are streaming.
+    ledger.progressRun(stuck!, 1_000);
+    ledger.progressRun(healthy!, 1_000);
+    expect(runner.tick(1_500).stalled).toEqual([]);
+    expect(engine.aborted).toEqual([]);
+
+    // One goes quiet. Cursor-style parks keep heartbeating, so only recorded
+    // session activity may hold a run open.
+    ledger.progressRun(healthy!, 2_100);
+    ledger.heartbeatRun(stuck!, 2_100);
+    expect(runner.tick(2_100).stalled).toEqual([]);
+    expect(engine.aborted).toEqual([stuck]);
+    expect(ledger.run(stuck!)?.state).toBe("running");
+
+    // The abort had its grace period and the session never came back.
+    ledger.progressRun(healthy!, 2_700);
+    const report = runner.tick(2_700);
+    expect(report.stalled).toEqual([stuck]);
+    expect(engine.killed.map((k) => k.runId)).toEqual([stuck]);
+    expect(report.active).toBe(1);
+    expect(ledger.run(healthy!)?.state).toBe("running");
+    ledger.close();
+  });
+});
+
+describe("a session may not outlive its run row", () => {
+  it("tears down a session whose run was killed out from under it", () => {
+    const ledger = Ledger.open(":memory:");
+    const [runId] = seed(ledger, 1);
+    const engine = new FakeEngine();
+    const runner = new Runner(ledger, engine, { runnerId: "r1", maxSessions: 5 });
+    runner.tick(1_000);
+    expect(engine.liveRuns()).toEqual([runId]);
+
+    ledger.finishRun(runId!, { state: "aborted", detail: "killed by operator" }, 2_000);
+    const report = runner.tick(2_000);
+
+    expect(report.stalled).toEqual([runId]);
+    expect(engine.killed).toEqual([{ runId, detail: "killed by operator" }]);
+    expect(engine.liveRuns()).toEqual([]);
     ledger.close();
   });
 });

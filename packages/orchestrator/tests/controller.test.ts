@@ -16,9 +16,19 @@ class FakeEngine implements HostManager {
   aborted: string[] = [];
   launch(spec: LaunchSpec): void {
     this.launched.push(spec);
+    this.live.add(spec.runId);
   }
   abort(runId: string): void {
     this.aborted.push(runId);
+  }
+  killed: { runId: string; detail: string }[] = [];
+  kill(runId: string, detail: string): void {
+    this.killed.push({ runId, detail });
+    this.live.delete(runId);
+  }
+  live = new Set<string>();
+  liveRuns(): readonly string[] {
+    return [...this.live];
   }
   message(): boolean {
     return true;

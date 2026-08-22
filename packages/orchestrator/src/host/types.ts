@@ -32,6 +32,15 @@ export interface HostRunResult {
 export interface HostManager {
   launch(spec: LaunchSpec): void;
   abort(runId: string): void;
+  /**
+   * Tear the session down without waiting for the provider to unwind, and
+   * report the run finished. `abort` asks the agent loop to stop and depends
+   * on the in-flight turn returning; a session parked inside a provider call
+   * never returns, so a stalled run needs an exit that does not consult it.
+   */
+  kill(runId: string, detail: string): void;
+  /** Runs this host still holds a live session for. */
+  liveRuns(): readonly string[];
   message(runId: string, text: string): boolean;
 }
 
@@ -40,6 +49,9 @@ export interface HostManager {
 export interface HostEvents {
   runFinished(runId: string, result: HostRunResult, at: number): void;
   heartbeat(runId: string, at: number): void;
+  /** The session did something the transcript recorded. Distinct from
+   * `heartbeat`, which only says the hosting process is alive. */
+  progress(runId: string, at: number): void;
   /** The pi session now hosting this run. Reported once, as soon as the
    * session exists, so the usage the session is about to record is
    * attributable to the lane that asked for it. */
