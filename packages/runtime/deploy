@@ -63,6 +63,17 @@ rsync -a --delete --chmod=D755,F644 \
   "$PWD/extensions/pi-claude-code-use" "$PWD/extensions/context-guard" \
   "$PWD/extensions/bash-timeout-guard" "$shared/extensions/"
 rsync -a --delete --chmod=D755,F644 "$cursor_provider/dist" "$cursor_provider/package.json" "$shared/pi-cursor/"
+
+# Skills are the fleet's only written account of how this host reaches things:
+# where the ledger key lives, how evidence uploads, what prose is expected. They
+# lived solely in the interactive user's 0700 home until 2026-08-22, so fleet
+# agents kept rediscovering the machine by grep, and an upload that needed one
+# documented curl became a dead end. Skill sources are symlinks into
+# ~/projects/skills, hence rsync -L.
+install -d -m 755 "$shared/skills"
+rsync -aL --delete --chmod=D755,F644 \
+  "$HOME/.pi/agent/skills/math-research" "$HOME/.pi/agent/skills/software-engineering" \
+  "$HOME/.pi/agent/skills/unslop" "$shared/skills/"
 rsync -a --delete --chmod=D755,F644 "$cursor_provider/node_modules/@bufbuild" "$shared/pi-cursor/node_modules/"
 
 # This deploy owns which shared packages the fleet user loads, so an extension
@@ -78,13 +89,22 @@ fleet_packages=$(jq -n '[
   "/srv/pi/pi-cursor",
   "npm:pi-mcp-adapter"
 ]')
+fleet_skills=$(jq -n '["/srv/pi/skills"]')
 sudo -n install -d -m 700 -o orchestrator -g users /home/orchestrator/.pi /home/orchestrator/.pi/agent
 fleet_current=$(sudo -n cat "$fleet_settings" 2>/dev/null || echo '{}')
-printf '%s' "$fleet_current" | jq --argjson p "$fleet_packages" '.packages = $p' |
+printf '%s' "$fleet_current" |
+  jq --argjson p "$fleet_packages" --argjson s "$fleet_skills" '.packages = $p | .skills = $s' |
   sudo -n -u orchestrator tee "$fleet_settings" >/dev/null
 sudo -n chmod 600 "$fleet_settings"
-sudo -n cat "$fleet_settings" | jq -e --argjson p "$fleet_packages" '.packages == $p' >/dev/null ||
-  { echo "fleet pi settings did not take the shared package list" >&2; exit 1; }
+sudo -n cat "$fleet_settings" |
+  jq -e --argjson p "$fleet_packages" --argjson s "$fleet_skills" '.packages == $p and .skills == $s' >/dev/null ||
+  { echo "fleet pi settings did not take the shared package and skill lists" >&2; exit 1; }
+for skill in math-research software-engineering unslop; do
+  [[ -f "$shared/skills/$skill/SKILL.md" ]] ||
+    { echo "shared skill $skill is missing from $shared/skills" >&2; exit 1; }
+  sudo -n -u orchestrator test -r "$shared/skills/$skill/SKILL.md" ||
+    { echo "the fleet user cannot read shared skill $skill" >&2; exit 1; }
+done
 
 # Models pi's own catalog does not carry yet — stealth previews above all,
 # which appear on a provider weeks before a pinned release knows their name.
@@ -171,5 +191,5 @@ for user in "$USER" orchestrator; do
 done
 
 echo "Pi $version, prompt evaluator, extensions, and /srv/pi shared packages deployed"
-echo "fleet packages reconciled in $fleet_settings"
+echo "fleet packages and shared skills reconciled in $fleet_settings"
 echo "MCP adapter $adapter_version and the math server registration verified for both users"
