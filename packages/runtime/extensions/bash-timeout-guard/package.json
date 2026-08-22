@@ -3,7 +3,7 @@
   "private": true,
   "version": "1.0.0",
   "type": "module",
-  "description": "Blocks bash tool calls that omit a timeout or ask for more than 30 minutes, and states the rule in the system prompt.",
+  "description": "Caps orchestrator bash calls at 5 minutes and other bash calls at 30 minutes, and states the applicable rule in the system prompt.",
   "keywords": [
     "pi-package",
     "pi-extension"
