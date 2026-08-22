@@ -425,6 +425,24 @@ running rows (reaped on heartbeat timeout) never count against the
 replacement's capacity. Only a supervisor update needs a full drain first,
 which is why it holds no policy.
 
+A heartbeat is not progress. The runner's heartbeat is a timer inside the
+hosting process, and it keeps ticking over a session that has stopped
+running: on 2026-08-21 a Grok run parked inside a Cursor provider call for 90
+minutes, heartbeat healthy, `abort` requests unobservable to a turn that
+never returns, holding a lane seat until the operator noticed. `PiHost`
+therefore reports session activity separately (throttled to a 15-second
+ledger write) and the run row keeps `progress_at`. A runner asks a run with
+no progress for 15 minutes to abort, and 5 minutes later kills the session
+outright — `HostManager.kill` disposes it and reports the run finished
+without waiting for the provider to unwind, because a parked provider call
+never unwinds. The threshold is above any legitimate quiet stretch: the
+longest one is a single tool call, and commands are capped at five minutes.
+
+A session may not outlive its run row either. Every tick the runner kills
+sessions the host still holds whose row is no longer `running`, so a
+controller reap or an operator `kill <runId>` frees the slot and stops the
+spend instead of leaving an orphan streaming against an account.
+
 Run outcomes are classified by whose failure they are. A rate-limited
 account cools down so the next run goes to a sibling. An account that cannot
 authenticate at all — missing, shadowed, or rejected credential — is recorded
@@ -539,7 +557,7 @@ rubric in coherent batches; `math-review` independently applies or rejects
 both proposal kinds.
 
 `pi-orchestrator status | capacity | usage | task set/list/delete | account list/add/domain/share/login |
-pause | resume | boost | abort | say | runner | drain-runners | voice-broker` —
+pause | resume | boost | abort | kill | say | runner | drain-runners | voice-broker` —
 thin reads and
 writes against the ledger (path from `PI_ORCHESTRATOR_LEDGER`, default
 `~/.local/share/pi-orchestrator/`).
@@ -562,6 +580,11 @@ session's account custody, and the runner records its session id on the run
 so fleet burn resolves to the lane that asked for it. Usage recorded before
 that link existed was relabelled by correlating run windows, so its lane is
 one `(unattributed fleet session)` bucket rather than a guess.
+
+`kill <runId> [reason]` is the blunt end of `abort`: it ends the run row, and
+the owning runner then tears the session down on its next tick. `abort` asks
+the agent loop to stop and depends on the in-flight turn returning, which a
+session parked inside a provider call never does.
 
 `say <runId> <text>` is the counterpart of `abort`: it queues an operator
 message in `run_message`, the runner that owns the session steers it in as a
