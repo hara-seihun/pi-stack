@@ -11,12 +11,16 @@ function account(partial: Partial<AccountRow> & { id: string }): AccountRow {
     accessUntil: undefined,
     cooldownUntil: undefined,
     lastBoundAt: undefined,
-    domain: "interactive",
+    fleetCredentialed: false,
     shared: false,
     createdAt: 0,
     ...partial,
   };
 }
+
+/** This runtime's auth store holds a credential for every account, unless a
+ * test says otherwise. */
+const heldAll = () => true;
 
 describe("interactive account selection", () => {
   it("least-used account wins", () => {
@@ -30,6 +34,7 @@ describe("interactive account selection", () => {
       "anthropic",
       0,
       (id) => usage.get(id),
+      heldAll,
     );
     expect(picked?.id).toBe("anthropic-2");
   });
@@ -40,6 +45,7 @@ describe("interactive account selection", () => {
       "anthropic",
       0,
       (id) => (id === "anthropic" ? 5 : undefined),
+      heldAll,
     );
     expect(picked?.id).toBe("anthropic-new");
   });
@@ -51,7 +57,7 @@ describe("interactive account selection", () => {
       account({ id: "anthropic-3", lastBoundAt: 200 }),
     ];
     // All report the same integer percent: rotation, not pile-on.
-    expect(pickAccount(accounts, "anthropic", 0, () => 30)?.id).toBe("anthropic-2");
+    expect(pickAccount(accounts, "anthropic", 0, () => 30, heldAll)?.id).toBe("anthropic-2");
   });
 
   it("cooling, expired, foreign-family, and excluded accounts are skipped", () => {
@@ -62,38 +68,43 @@ describe("interactive account selection", () => {
       account({ id: "anthropic-3" }),
       account({ id: "anthropic-4" }),
     ];
-    const picked = pickAccount(accounts, "anthropic", 1000, () => 0, new Set(["anthropic-3"]));
+    const picked = pickAccount(accounts, "anthropic", 1000, () => 0, heldAll, new Set(["anthropic-3"]));
     expect(picked?.id).toBe("anthropic-4");
     // A passed cooldown deadline makes the account eligible again.
-    expect(pickAccount(accounts, "anthropic", 6000, () => 0, new Set(["anthropic-3", "anthropic-4"]))?.id).toBe(
-      "anthropic",
-    );
+    expect(
+      pickAccount(accounts, "anthropic", 6000, () => 0, heldAll, new Set(["anthropic-3", "anthropic-4"]))?.id,
+    ).toBe("anthropic");
   });
 
   it("no eligible account yields undefined rather than a bad binding", () => {
-    expect(pickAccount([account({ id: "anthropic", cooldownUntil: 99 })], "anthropic", 0, () => 0)).toBeUndefined();
+    expect(
+      pickAccount([account({ id: "anthropic", cooldownUntil: 99 })], "anthropic", 0, () => 0, heldAll),
+    ).toBeUndefined();
   });
 
-  it("shared accounts are visible to interactive binding regardless of exclusive domain", () => {
+  it("shared accounts are visible to binding even without a local credential", () => {
     const picked = pickAccount(
-      [account({ id: "anthropic", domain: "orchestrator", shared: true })],
+      [account({ id: "anthropic", shared: true })],
       "anthropic",
       0,
       () => 0,
+      () => false,
     );
     expect(picked?.id).toBe("anthropic");
   });
 
-  it("orchestrator-custody accounts are invisible to interactive binding", () => {
+  it("accounts this runtime holds no credential for are invisible to binding", () => {
+    const held = (id: string) => id === "anthropic-2";
     const picked = pickAccount(
-      [account({ id: "anthropic", domain: "orchestrator" }), account({ id: "anthropic-2" })],
+      [account({ id: "anthropic" }), account({ id: "anthropic-2" })],
       "anthropic",
       0,
       () => 50,
+      held,
     );
     expect(picked?.id).toBe("anthropic-2");
     expect(
-      pickAccount([account({ id: "anthropic", domain: "orchestrator" })], "anthropic", 0, () => 0),
+      pickAccount([account({ id: "anthropic" })], "anthropic", 0, () => 0, () => false),
     ).toBeUndefined();
   });
 });

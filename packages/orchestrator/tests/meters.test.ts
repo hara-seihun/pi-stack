@@ -13,6 +13,14 @@ import {
 import { MeterLog } from "../src/meters/log.js";
 import { anthropicMeterReadings } from "../src/extension/usage-logger.js";
 
+/** Upsert an account and record it as fleet-credentialed, the way the
+ * controller's per-tick credential observation would. */
+function fleetAccount(ledger: Ledger, spec: Parameters<Ledger["upsertAccount"]>[0]): void {
+  ledger.upsertAccount(spec);
+  ledger.syncFleetCredentials(new Set(ledger.accounts().map((a) => a.id)));
+}
+
+
 const dirs: string[] = [];
 afterAll(() => {
   for (const dir of dirs) rmSync(dir, { recursive: true, force: true });
@@ -23,7 +31,7 @@ function workspace(auth: Record<string, unknown>): { ledger: Ledger; agentDir: s
   dirs.push(dir);
   writeFileSync(join(dir, "auth.json"), JSON.stringify(auth));
   const ledger = Ledger.open(join(dir, "ledger.sqlite3"));
-  ledger.upsertAccount({ id: "cursor", provider: "cursor", domain: "orchestrator" });
+  fleetAccount(ledger, { id: "cursor", provider: "cursor" });
   return { ledger, agentDir: dir };
 }
 
@@ -103,7 +111,7 @@ describe("cursor meter sampler", () => {
     expect(ledger.latestReading("cursor", "cursor-month")).toBeUndefined();
   });
 
-  it("skips accounts whose credential lives in another custody domain", async () => {
+  it("skips accounts whose credential lives in another auth store", async () => {
     const { ledger, agentDir } = workspace({ "openai-codex-8": { type: "oauth", access: "other" } });
     const sampler = new CursorMeterSampler(ledger, {
       agentDir,
@@ -172,7 +180,7 @@ function codexWorkspace(auth: Record<string, unknown>): { ledger: Ledger; authPa
   const authPath = join(dir, "auth.json");
   writeFileSync(authPath, JSON.stringify(auth));
   const ledger = Ledger.open(join(dir, "ledger.sqlite3"));
-  ledger.upsertAccount({ id: "openai-codex-8", provider: "openai-codex", domain: "orchestrator" });
+  fleetAccount(ledger, { id: "openai-codex-8", provider: "openai-codex" });
   return { ledger, authPath };
 }
 
@@ -373,7 +381,7 @@ function anthropicWorkspace(auth: Record<string, unknown>): { ledger: Ledger; ag
   dirs.push(dir);
   writeFileSync(join(dir, "auth.json"), JSON.stringify(auth));
   const ledger = Ledger.open(join(dir, "ledger.sqlite3"));
-  ledger.upsertAccount({ id: "anthropic-2", provider: "anthropic", domain: "orchestrator" });
+  fleetAccount(ledger, { id: "anthropic-2", provider: "anthropic" });
   return { ledger, agentDir: dir };
 }
 
@@ -508,7 +516,7 @@ describe("anthropic meter sampler", () => {
     expect(ledger.latestReading("anthropic-2", "anthropic-7d_oi")).toBeUndefined();
   });
 
-  it("skips accounts whose credential lives in another custody domain", async () => {
+  it("skips accounts whose credential lives in another auth store", async () => {
     const { ledger, agentDir } = anthropicWorkspace({ anthropic: ANTHROPIC_CREDENTIAL });
     const sampler = new AnthropicMeterSampler(ledger, {
       agentDir,

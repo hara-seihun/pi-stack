@@ -162,9 +162,10 @@ ALTER TABLE run ADD COLUMN thinking TEXT;
 `;
 
 /**
- * Exclusive credential custody domain. Shared custody is added separately:
- * exclusive accounts use one user's auth.json, while shared Codex accounts
- * use the central locked store and are eligible in both runtimes.
+ * Historical: the exclusive credential-custody flag, superseded by
+ * `fleet_credentialed` (see FLEET_CREDENTIAL_SCHEMA), which observes custody
+ * instead of declaring it. The migration must stay: ledgers created before
+ * it replay this step.
  */
 const DOMAIN_SCHEMA = `
 ALTER TABLE account ADD COLUMN domain TEXT NOT NULL DEFAULT 'interactive'
@@ -239,6 +240,20 @@ const DOCTRINE_URL_SCHEMA = `
 ALTER TABLE task ADD COLUMN doctrine_url TEXT;
 `;
 
+/** Which runtime may spend an account is a fact about credential custody —
+ * which auth store actually holds the token — not an operator-declared
+ * classification. The `domain` flag was a manually maintained copy of that
+ * fact and could drift from it; it is replaced by `fleet_credentialed`, an
+ * observation the controller refreshes every tick from the fleet's own
+ * credential stores. Backfilled from the old flag so admission is continuous
+ * until the first tick re-observes. */
+const FLEET_CREDENTIAL_SCHEMA = `
+ALTER TABLE account ADD COLUMN fleet_credentialed INTEGER NOT NULL DEFAULT 0
+  CHECK (fleet_credentialed IN (0, 1));
+UPDATE account SET fleet_credentialed = CASE WHEN shared = 1 OR domain = 'orchestrator' THEN 1 ELSE 0 END;
+ALTER TABLE account DROP COLUMN domain;
+`;
+
 /** Token burn becomes attributable. `usage_event.source` existed from the
  * first schema but the logger wrote the literal 'machine' for every session,
  * so the fleet's burn and the operator's own were one undifferentiated
@@ -293,9 +308,8 @@ const MIGRATIONS: readonly string[] = [
   RUN_SESSION_SCHEMA,
   RUN_PROGRESS_SCHEMA,
   DOCTRINE_URL_SCHEMA,
+  FLEET_CREDENTIAL_SCHEMA,
 ];
-
-export type AccountDomain = "interactive" | "orchestrator";
 
 export interface AccountRow {
   readonly id: string;
@@ -304,7 +318,11 @@ export interface AccountRow {
   readonly accessUntil: number | undefined;
   readonly cooldownUntil: number | undefined;
   readonly lastBoundAt: number | undefined;
-  readonly domain: AccountDomain;
+  /** The fleet can resolve a credential for this account — observed from the
+   * credential stores by the controller each tick, never operator-declared.
+   * Which runtime may spend an account is decided by which auth store
+   * actually holds its token, not by a flag that can drift from that fact. */
+  readonly fleetCredentialed: boolean;
   readonly shared: boolean;
   readonly createdAt: number;
 }
@@ -411,18 +429,16 @@ export class Ledger {
     provider: string;
     label?: string;
     accessUntil?: number;
-    domain?: AccountDomain;
     shared?: boolean;
   }): void {
     this.db
       .prepare(
-        `INSERT INTO account (id, provider, label, access_until, domain, shared, created_at)
-         VALUES (?, ?, ?, ?, COALESCE(?, 'interactive'), COALESCE(?, 0), ?)
+        `INSERT INTO account (id, provider, label, access_until, shared, created_at)
+         VALUES (?, ?, ?, ?, COALESCE(?, 0), ?)
          ON CONFLICT (id) DO UPDATE SET
            provider = excluded.provider,
            label = COALESCE(excluded.label, account.label),
            access_until = COALESCE(excluded.access_until, account.access_until),
-           domain = COALESCE(?, account.domain),
            shared = COALESCE(?, account.shared)`,
       )
       .run(
@@ -430,10 +446,8 @@ export class Ledger {
         a.provider,
         a.label ?? null,
         a.accessUntil ?? null,
-        a.domain ?? null,
         a.shared === undefined ? null : a.shared ? 1 : 0,
         Date.now(),
-        a.domain ?? null,
         a.shared === undefined ? null : a.shared ? 1 : 0,
       );
   }
@@ -467,11 +481,16 @@ export class Ledger {
     return { usageEvents: Number(usageEvents), meterReadings: Number(meterReadings) };
   }
 
-  setAccountDomain(id: string, domain: AccountDomain): void {
-    const changed = this.db
-      .prepare("UPDATE account SET domain = ?, shared = 0 WHERE id = ?")
-      .run(domain, id);
-    if (changed.changes === 0) throw new Error(`unknown account ${id}`);
+  /** The controller's per-tick observation of which accounts the fleet can
+   * actually authenticate: the ids found across the fleet's credential
+   * stores. Rows drift back to the truth within one tick of any credential
+   * moving. */
+  syncFleetCredentials(heldIds: ReadonlySet<string>): void {
+    const update = this.db.prepare("UPDATE account SET fleet_credentialed = ? WHERE id = ?");
+    for (const account of this.accounts()) {
+      const held = heldIds.has(account.id) || account.shared;
+      if (held !== account.fleetCredentialed) update.run(held ? 1 : 0, account.id);
+    }
   }
 
   setAccountShared(id: string, shared: boolean): void {
@@ -484,7 +503,7 @@ export class Ledger {
   accounts(): AccountRow[] {
     const rows = this.db
       .prepare(
-        "SELECT id, provider, label, access_until, cooldown_until, last_bound_at, domain, shared, created_at FROM account ORDER BY id",
+        "SELECT id, provider, label, access_until, cooldown_until, last_bound_at, fleet_credentialed, shared, created_at FROM account ORDER BY id",
       )
       .all() as {
       id: string;
@@ -493,7 +512,7 @@ export class Ledger {
       access_until: number | null;
       cooldown_until: number | null;
       last_bound_at: number | null;
-      domain: AccountDomain;
+      fleet_credentialed: number;
       shared: number;
       created_at: number;
     }[];
@@ -504,7 +523,7 @@ export class Ledger {
       accessUntil: r.access_until ?? undefined,
       cooldownUntil: r.cooldown_until ?? undefined,
       lastBoundAt: r.last_bound_at ?? undefined,
-      domain: r.domain,
+      fleetCredentialed: r.fleet_credentialed !== 0,
       shared: r.shared !== 0,
       createdAt: r.created_at,
     }));
@@ -847,24 +866,27 @@ export class Ledger {
    */
   boost(provider: string): number {
     const raw = Number(this.getControl(boostKey(provider)));
-    return Number.isFinite(raw) && raw >= 1 ? raw : 1;
+    return Number.isFinite(raw) && raw >= 0 ? raw : 1;
   }
 
+  /** `0` halts the family: the broker refuses every new launch while running
+   * sessions finish naturally. */
   setBoost(provider: string, multiplier: number): void {
-    if (!Number.isFinite(multiplier) || multiplier < 1) {
-      throw new Error(`boost multiplier must be >= 1, got ${multiplier}`);
+    if (!Number.isFinite(multiplier) || multiplier < 0) {
+      throw new Error(`boost multiplier must be >= 0, got ${multiplier}`);
     }
     this.setControl(boostKey(provider), String(multiplier));
   }
 
-  /** Every family currently boosted above 1, for status and client display. */
+  /** Every family away from the normal 1x — boosted or halted — for status
+   * and client display. */
   boosts(): { provider: string; multiplier: number }[] {
     const rows = this.db
       .prepare("SELECT key, value FROM control WHERE key LIKE 'boost:%' ORDER BY key")
       .all() as { key: string; value: string }[];
     return rows
       .map((r) => ({ provider: r.key.slice("boost:".length), multiplier: Number(r.value) }))
-      .filter((b) => Number.isFinite(b.multiplier) && b.multiplier > 1);
+      .filter((b) => Number.isFinite(b.multiplier) && b.multiplier !== 1);
   }
 
   demandState(taskId: string): DemandState | undefined {

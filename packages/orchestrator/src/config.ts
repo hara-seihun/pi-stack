@@ -21,10 +21,22 @@ import { TIERS, type Tier } from "./tasks/types.js";
 
 export interface ProviderConfig {
   readonly meters: readonly { id: string; drainedBy: readonly string[]; windowHours: number }[];
-  /** Relative price per token component (input/output/cacheRead/cacheWrite). */
-  readonly costWeights: Readonly<Record<string, number>>;
+  /** Relative price per token component (input/output/cacheRead/cacheWrite).
+   * A family with no meters prices nothing, so it may omit them. */
+  readonly costWeights?: Readonly<Record<string, number>>;
   /** model id -> model class; models absent here class as "default". */
   readonly modelClasses?: Readonly<Record<string, string>>;
+  /** Concurrent sessions each account of this family may hold, declared by
+   * the operator instead of measured.
+   *
+   * Measurement answers "how many sessions does this plan sustain" by
+   * dividing a paced allowance by observed drain, which needs a plan window
+   * to drain. A pay-as-you-go API key has none: nothing resets, nothing is
+   * allocated, and the only real limit is how much concurrency the operator
+   * wants to buy or how much the endpoint will take. Such a family declares
+   * that number here and skips calibration entirely — it is the answer, not
+   * a bootstrap floor or a ceiling on a measurement. */
+  readonly sessionCapacity?: number;
 }
 
 export interface OrchestratorConfig {
@@ -56,7 +68,18 @@ export function loadConfig(path = defaultConfigPath()): OrchestratorConfig {
     }
   }
   for (const [name, provider] of Object.entries(cfg.providers)) {
-    if (provider.meters.length === 0) throw new Error(`config: provider ${name} has no meters`);
+    if (provider.sessionCapacity !== undefined) {
+      if (!Number.isInteger(provider.sessionCapacity) || provider.sessionCapacity < 1) {
+        throw new Error(`config: provider ${name} sessionCapacity must be a positive integer`);
+      }
+      continue;
+    }
+    if (provider.meters.length === 0) {
+      throw new Error(
+        `config: provider ${name} has no meters and declares no sessionCapacity, so nothing ` +
+        `can say how many sessions it may run`,
+      );
+    }
   }
   return cfg;
 }
@@ -72,7 +95,7 @@ export function costTransform(
     const model = split >= 0 ? classId.slice(0, split) : classId;
     const component = split >= 0 ? classId.slice(split + 1) : "";
     const modelClass = provider?.modelClasses?.[model] ?? "default";
-    const weight = provider?.costWeights[component] ?? 1;
+    const weight = provider?.costWeights?.[component] ?? 1;
     return { classId: `${modelClass}:cost`, tokens: tokens * weight };
   };
 }
@@ -89,20 +112,24 @@ export function meterSpecs(cfg: OrchestratorConfig, family: string): MeterSpec[]
  * family at replay time; meters are per family. */
 export function brokerConfig(
   cfg: OrchestratorConfig,
-): Pick<BrokerConfig, "tiers" | "meters" | "modelClasses" | "transform"> &
+): Pick<BrokerConfig, "tiers" | "meters" | "modelClasses" | "declaredCapacity" | "transform"> &
   Partial<Pick<BrokerConfig, "maxConcurrentSessions" | "maxSlotsPerTier">> {
   const meters: Record<string, MeterSpec[]> = {};
   const modelClasses: Record<string, Record<string, string>> = {};
+  const declaredCapacity: Record<string, number> = {};
   const transforms = new Map<string, (c: string, t: number) => { classId: string; tokens: number }>();
   for (const family of Object.keys(cfg.providers)) {
     meters[family] = meterSpecs(cfg, family);
     modelClasses[family] = { ...(cfg.providers[family]?.modelClasses ?? {}) };
+    const declared = cfg.providers[family]?.sessionCapacity;
+    if (declared !== undefined) declaredCapacity[family] = declared;
     transforms.set(family, costTransform(cfg, family));
   }
   return {
     tiers: cfg.tiers,
     meters,
     modelClasses,
+    declaredCapacity,
     ...(cfg.maxConcurrentSessions === undefined
       ? {}
       : { maxConcurrentSessions: cfg.maxConcurrentSessions }),

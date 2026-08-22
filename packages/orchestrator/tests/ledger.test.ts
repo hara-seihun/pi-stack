@@ -148,17 +148,29 @@ describe("ledger", () => {
     second.close();
   });
 
-  it("usage-attribution upserts never reset the custody domain", () => {
+  it("usage-attribution upserts never reset custody facts", () => {
     const ledger = Ledger.open(":memory:");
-    ledger.upsertAccount({ id: "codex-2", provider: "openai-codex", domain: "orchestrator", shared: true });
-    // The usage-logger extension upserts without a domain on every session.
+    ledger.upsertAccount({ id: "codex-2", provider: "openai-codex", shared: true });
+    ledger.syncFleetCredentials(new Set(["codex-2"]));
+    // The usage-logger extension upserts without custody fields on every session.
     ledger.upsertAccount({ id: "codex-2", provider: "openai-codex" });
-    expect(ledger.accounts()[0]?.domain).toBe("orchestrator");
     expect(ledger.accounts()[0]?.shared).toBe(true);
-    ledger.setAccountDomain("codex-2", "interactive");
-    expect(ledger.accounts()[0]?.domain).toBe("interactive");
-    expect(ledger.accounts()[0]?.shared).toBe(false);
-    expect(() => ledger.setAccountDomain("missing", "orchestrator")).toThrow();
+    expect(ledger.accounts()[0]?.fleetCredentialed).toBe(true);
+  });
+
+  it("fleet credential custody follows the observed stores, both directions", () => {
+    const ledger = Ledger.open(":memory:");
+    ledger.upsertAccount({ id: "anthropic-2", provider: "anthropic" });
+    ledger.upsertAccount({ id: "anthropic-9", provider: "anthropic" });
+    ledger.upsertAccount({ id: "codex-2", provider: "openai-codex", shared: true });
+    ledger.syncFleetCredentials(new Set(["anthropic-2"]));
+    const custody = () =>
+      Object.fromEntries(ledger.accounts().map((a) => [a.id, a.fleetCredentialed]));
+    // Shared accounts are central-store credentialed whatever the id set says.
+    expect(custody()).toEqual({ "anthropic-2": true, "anthropic-9": false, "codex-2": true });
+    // The credential moved away: the next observation withdraws the account.
+    ledger.syncFleetCredentials(new Set());
+    expect(custody()).toEqual({ "anthropic-2": false, "anthropic-9": false, "codex-2": true });
   });
 
   it("interactive leases contribute live capacity and bounded historical session-hours", () => {
@@ -319,7 +331,7 @@ describe("fleet presence", () => {
   it("counts live sessions whole and lets ended ones fade across the window", () => {
     const dir = mkdtempSync(join(tmpdir(), "presence-"));
     const ledger = Ledger.open(join(dir, "l.sqlite3"));
-    ledger.upsertAccount({ id: "a1", provider: "anthropic", domain: "orchestrator" });
+    ledger.upsertAccount({ id: "a1", provider: "anthropic" });
     const now = 10 * HOUR_MS;
     const since = now - HOUR_MS;
 

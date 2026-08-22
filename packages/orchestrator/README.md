@@ -24,9 +24,14 @@ Usage that does not flow through the orchestrator still drains the same plans
 machine usage; the calibrator consumes both streams. Accounts are assigned to
 exactly one machine — there is no cross-machine coordination by design.
 
-Accounts carry a **credential-custody mode**. Exclusive `interactive` and
-`orchestrator` domains remain available for providers whose credential lives
-in one user's `auth.json`. A shared Codex account instead keeps its only OAuth
+Which runtime may spend an account follows from **where its credential
+actually lives**, never from a declared flag. An exclusive account's
+credential sits in one user's `auth.json`, and that runtime alone can spend
+it: the controller observes the fleet's stores every tick into the ledger's
+`fleet_credentialed` column (broker admission reads it), and the routing
+extension reads its own runtime's store directly when binding interactive
+sessions. Moving a credential moves the capability, within one tick, with
+nothing to update. A shared Codex account instead keeps its only OAuth
 credential in the central store beside the ledger (`auth.json`, or
 `PI_ORCHESTRATOR_AUTH`): both runtimes resolve and refresh it under one
 cross-process lock, so rotating refresh tokens are never duplicated.
@@ -330,17 +335,19 @@ meter, because it has not said what it will run. Calibration replay always
 carries the family's whole topology; the model narrows only which calibrated
 meters get a say in the rate.
 
-An **operator boost** (`boost <family> on`, a `boost:<family>` control row) is
-the one deliberate lever over that arithmetic: it multiplies the paced
-sustainable rate for one provider family, so a boosted family spends its real
-measured headroom faster rather than acquiring invented capacity. `on` means
-`BOOSTED_MULTIPLIER` (`src/boost.ts`, currently 10×), exported as the
-package's `./boost` entry point because Pi Remote's drawer offers the same
-switch and must mean the same thing by it; any multiplier ≥ 1 can be named
-directly instead. Everything
-underneath keeps working — measurement, hazard pacing, cooldowns — and an
-uncalibrated account stays in bootstrap however high the boost, because there
-is nothing measured to spend faster.
+An **operator boost** (`boost <family> on|off|halt|N`, a `boost:<family>`
+control row) is the one deliberate lever over that arithmetic: it multiplies
+the paced sustainable rate for one provider family, so a boosted family
+spends its real measured headroom faster rather than acquiring invented
+capacity. `on` means `BOOSTED_MULTIPLIER` (`src/boost.ts`, currently 10×);
+`halt` writes `0`, the red stop: the broker refuses every new launch for the
+family while running sessions finish naturally. Any multiplier ≥ 0 can be
+named directly. The Pi Remote drawer's per-family buttons cycle
+`BOOST_CYCLE` (off → 3× green → 10× blue → halted red), all exported from
+the package's `./boost` entry point because both surfaces must mean the same
+thing by the same state. Everything underneath keeps working — measurement,
+hazard pacing, cooldowns — and an uncalibrated account stays in bootstrap
+however high the boost, because there is nothing measured to spend faster.
 
 Concurrency per account is a quotient of two measurements: what the plan
 sustains (percent/hour) over what one session actually costs (percent/hour of
@@ -354,6 +361,16 @@ indefinitely, because Codex publishes no per-request meter headers to pi's
 transport and so never calibrates a usage class at all — seven subscriptions
 with a week of headroom each, running seven agents. The plan is now always
 issued; an unpriced class simply appears in no budget.
+
+A family with no plan is not a family with no evidence yet. A pay-as-you-go
+key (OpenRouter) has no window that resets, so there is no allowance to pace
+and no drain that would price a session; bootstrap would hold it at one
+session forever, waiting for evidence that can never arrive. Such a family
+declares `sessionCapacity` in the operator config and the broker counts
+sessions against that number — no calibration, no duty cycle, no bootstrap.
+That number is the operator saying how much concurrency to buy, which is the
+only quantity that exists here, and it is deliberately not expressible for a
+metered family, where the answer is measured rather than chosen.
 
 A quotient below one means a duty cycle, not a shutdown. An account whose
 single session burns faster than its plan sustains can still afford to run
@@ -630,7 +647,7 @@ somebody's finished business. The provenance lane has a smaller standing
 claim because citation audits need one source-reading agent, not a parallel
 sweep of the same literature.
 
-`pi-orchestrator status | capacity | usage | task set/list/delete | account list/add/domain/share/login |
+`pi-orchestrator status | capacity | usage | task set/list/delete | account list/add/share/login |
 pause | resume | boost | abort | kill | say | runner | drain-runners | voice-broker` —
 thin reads and
 writes against the ledger (path from `PI_ORCHESTRATOR_LEDGER`, default

@@ -6,6 +6,14 @@ import { Runner } from "../src/host/runner.js";
 import { Scheduler } from "../src/tasks/scheduler.js";
 import type { HostManager, LaunchSpec } from "../src/host/types.js";
 import { mix } from "./harness.js";
+
+/** Upsert an account and record it as fleet-credentialed, the way the
+ * controller's per-tick credential observation would. */
+function fleetAccount(ledger: Ledger, spec: Parameters<Ledger["upsertAccount"]>[0]): void {
+  ledger.upsertAccount(spec);
+  ledger.syncFleetCredentials(new Set(ledger.accounts().map((a) => a.id)));
+}
+
 import type { MeterSpec } from "../src/calibrator/types.js";
 
 const HOUR = 3_600_000;
@@ -40,8 +48,8 @@ function build(
   opts: { maxConcurrentSessions?: number } = {},
 ) {
   const ledger = Ledger.open(":memory:");
-  ledger.upsertAccount({ id: "anth-1", provider: "anthropic", domain: "orchestrator" });
-  ledger.upsertAccount({ id: "codex-1", provider: "openai-codex", domain: "orchestrator" });
+  fleetAccount(ledger, { id: "anth-1", provider: "anthropic" });
+  fleetAccount(ledger, { id: "codex-1", provider: "openai-codex" });
   const scheduler = new Scheduler(ledger, { demandTtlMs: 60_000, gateDebounceMs: 0 }, async (cmd) => {
     const probe = probes[cmd];
     if (probe === undefined) throw new Error(`unexpected probe ${cmd}`);
@@ -275,7 +283,7 @@ describe("run custody", () => {
     // not the launch order.
     const { ledger, cycle } = build();
     for (let i = 2; i <= 12; i++) {
-      ledger.upsertAccount({ id: `codex-${i}`, provider: "openai-codex", domain: "orchestrator" });
+      fleetAccount(ledger, { id: `codex-${i}`, provider: "openai-codex" });
     }
     ledger.upsertTask({
       id: "frontier",
@@ -323,7 +331,7 @@ describe("run custody", () => {
     // waited on attrition with the quota for the standard sessions idle.
     const { ledger, cycle, broker } = build({}, { maxConcurrentSessions: 12 });
     for (let i = 2; i <= 12; i++) {
-      ledger.upsertAccount({ id: `codex-${i}`, provider: "openai-codex", domain: "orchestrator" });
+      fleetAccount(ledger, { id: `codex-${i}`, provider: "openai-codex" });
     }
     const lane = {
       id: "frontier",
@@ -360,7 +368,7 @@ describe("run custody", () => {
     // still with the fleet mis-composed.
     const { ledger, cycle } = build({}, { maxConcurrentSessions: 12 });
     for (let i = 2; i <= 12; i++) {
-      ledger.upsertAccount({ id: `codex-${i}`, provider: "openai-codex", domain: "orchestrator" });
+      fleetAccount(ledger, { id: `codex-${i}`, provider: "openai-codex" });
     }
     ledger.upsertTask({
       id: "ghost",

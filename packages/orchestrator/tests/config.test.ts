@@ -64,4 +64,19 @@ describe("operator config", () => {
     writeFileSync(path, JSON.stringify(CONFIG));
     expect(loadConfig(path).tiers.standard[0].thinking).toBe("xhigh");
   });
+
+  it("a meterless provider is only legal when it declares its own concurrency", () => {
+    const dir = mkdtempSync(join(tmpdir(), "po-config-"));
+    const path = join(dir, "config.json");
+    const unmetered = (extra: Record<string, unknown>) => ({
+      tiers: { light: [], standard: [{ provider: "openrouter", model: "stealth/ox-alpha" }], expert: [] },
+      providers: { openrouter: { meters: [], ...extra } },
+    });
+    writeFileSync(path, JSON.stringify(unmetered({})));
+    expect(() => loadConfig(path)).toThrow(/sessionCapacity/);
+    writeFileSync(path, JSON.stringify(unmetered({ sessionCapacity: 0 })));
+    expect(() => loadConfig(path)).toThrow(/positive integer/);
+    writeFileSync(path, JSON.stringify(unmetered({ sessionCapacity: 2 })));
+    expect(brokerConfig(loadConfig(path)).declaredCapacity).toEqual({ openrouter: 2 });
+  });
 });

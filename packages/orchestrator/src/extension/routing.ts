@@ -9,6 +9,9 @@ import {
 } from "../auth/shared-codex.js";
 import { pickAccount } from "./select-account.js";
 import { baseProvider, defaultLedgerPath } from "./usage-logger.js";
+import { credentialedAccountIds } from "../auth/credentials.js";
+import { homedir } from "node:os";
+import { join } from "node:path";
 
 /**
  * The multi-pass successor: multi-account routing for interactive pi
@@ -78,10 +81,19 @@ export default function routing(pi: ExtensionAPI): void {
         toAuth: (credential) => codex.toAuth(credential),
       });
 
-  const domain = process.env.PI_ORCHESTRATOR_ASSIGNED === "1" ? "orchestrator" : "interactive";
+  // Which accounts this runtime may spend is exactly which credentials its
+  // own auth store holds — re-read per use, so a login mid-session is seen.
+  const authStorePath = join(
+    process.env.PI_AGENT_DIR ??
+      process.env.PI_CODING_AGENT_DIR ??
+      join(homedir(), ".pi", "agent"),
+    "auth.json",
+  );
+  const held = (accountId: string): boolean =>
+    credentialedAccountIds([authStorePath]).has(accountId);
   for (const account of ledger.accounts()) {
     if (!account.shared && account.id === account.provider) continue;
-    if (!account.shared && account.domain !== domain) continue;
+    if (!account.shared && !held(account.id)) continue;
     const family = families.get(account.provider);
     if (family === undefined) continue;
     if (account.shared) {
@@ -122,7 +134,7 @@ export default function routing(pi: ExtensionAPI): void {
     if (current === undefined) return undefined;
     const now = Date.now();
     const family = familyOf(current.provider);
-    const choice = pickAccount(ledger.accounts(), family, now, (id) => ledger.latestUsedPercent(id), exclude);
+    const choice = pickAccount(ledger.accounts(), family, now, (id) => ledger.latestUsedPercent(id), held, exclude);
     if (choice === undefined) return undefined;
     ledger.setAccountLastBound(choice.id, now);
     if (choice.id === current.provider) return undefined;

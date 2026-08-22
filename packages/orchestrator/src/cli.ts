@@ -10,7 +10,7 @@ import { Ledger } from "./ledger/ledger.js";
 import { Runner, bumpRunnerGeneration } from "./host/runner.js";
 import { Scheduler } from "./tasks/scheduler.js";
 import { TIERS, type Tier, type TierShare } from "./tasks/types.js";
-import type { AccountDomain } from "./ledger/ledger.js";
+import { credentialedAccountIds } from "./auth/credentials.js";
 import { brokerConfig, defaultConfigPath, loadConfig } from "./config.js";
 import { CURSOR_PROVIDER, CursorMeterSampler } from "./meters/cursor.js";
 import { CODEX_PROVIDER, CodexMeterSampler } from "./meters/codex.js";
@@ -238,6 +238,16 @@ async function daemon(ledger: Ledger, args: string[]): Promise<void> {
     ledger,
     new Scheduler(ledger),
     new Broker(ledger, brokerConfig(cfg)),
+    {
+      // The daemon runs as the fleet's credential-custody user, so it can
+      // observe exactly which accounts the fleet can authenticate: the
+      // central shared-Codex store plus its own agent dir's auth.json.
+      fleetCredentials: () =>
+        credentialedAccountIds([
+          defaultSharedCodexAuthPath(LEDGER_PATH),
+          join(agentDirPath(), "auth.json"),
+        ]),
+    },
   );
   const intervalMs = Number(named.get("interval") ?? 30_000);
   // Cursor publishes no meter headers, so its monthly meter is polled here
@@ -459,8 +469,6 @@ async function say(ledger: Ledger, args: string[]): Promise<void> {
   );
 }
 
-const DOMAINS: readonly AccountDomain[] = ["interactive", "orchestrator"];
-
 /** Taking an account into shared custody moves its credential there; a
  * per-user copy left behind is a duplicate of the same secret. */
 function reportLocalCopy(id: string): void {
@@ -511,7 +519,10 @@ async function accountCommand(ledger: Ledger, args: string[]): Promise<void> {
   const [sub, ...rest] = args;
   if (sub === "list") {
     for (const a of ledger.accounts()) {
-      const parts = [`provider=${a.provider}`, `custody=${a.shared ? "shared" : a.domain}`];
+      const parts = [
+        `provider=${a.provider}`,
+        `custody=${a.shared ? "shared" : a.fleetCredentialed ? "fleet" : "local"}`,
+      ];
       const credential = credentialState(a.id);
       if (credential !== undefined) parts.push(credential);
       if (a.label !== undefined) parts.push(`label=${a.label}`);
@@ -524,8 +535,6 @@ async function accountCommand(ledger: Ledger, args: string[]): Promise<void> {
     const { positional, named } = flags(rest);
     const id = positional[0] ?? fail("account add <id> --provider FAMILY required");
     const provider = named.get("provider") ?? fail("--provider required");
-    const domain = named.get("domain") as AccountDomain | undefined;
-    if (domain !== undefined && !DOMAINS.includes(domain)) fail(`unknown domain ${domain}`);
     const shared = named.get("shared");
     if (shared !== undefined && shared !== "true" && shared !== "false") fail("--shared must be true or false");
     if (shared === "true" && provider !== "openai-codex") fail("shared credentials currently support openai-codex only");
@@ -533,10 +542,11 @@ async function accountCommand(ledger: Ledger, args: string[]): Promise<void> {
       id,
       provider,
       label: named.get("label"),
-      domain,
       shared: shared === undefined ? undefined : shared === "true",
     });
-    console.log(`account ${id} saved`);
+    console.log(
+      `account ${id} saved; which runtime can spend it follows from where its credential lives`,
+    );
   } else if (sub === "remove") {
     const id = rest[0] ?? fail("usage: account remove <id>");
     const removed = ledger.removeAccount(id);
@@ -554,7 +564,7 @@ async function accountCommand(ledger: Ledger, args: string[]): Promise<void> {
       fail(`${id} has no credential in ${defaultSharedCodexAuthPath(LEDGER_PATH)}; run account login ${id}`);
     }
     ledger.setAccountShared(id, value === "on");
-    console.log(`account ${id} custody is now ${value === "on" ? "shared" : account.domain}`);
+    console.log(`account ${id} custody is now ${value === "on" ? "shared" : "its credential store's"}`);
     if (value === "on") reportLocalCopy(id);
   } else if (sub === "login") {
     const id = rest[0] ?? fail("usage: account login <id>");
@@ -584,16 +594,10 @@ async function accountCommand(ledger: Ledger, args: string[]): Promise<void> {
     ledger.setAccountShared(id, true);
     console.log(`account ${id} authenticated into shared custody`);
     reportLocalCopy(id);
-  } else if (sub === "domain") {
-    const [id, domain] = rest;
-    if (id === undefined || !DOMAINS.includes(domain as AccountDomain))
-      fail("usage: account domain <id> interactive|orchestrator");
-    ledger.setAccountDomain(id, domain as AccountDomain);
-    console.log(`account ${id} custody is now ${domain}; shared custody is disabled`);
   } else
     fail(
-      "usage: account list | account add <id> --provider F [--label L] [--domain D] [--shared true] | " +
-        "account remove <id> | account domain <id> <domain> | account share <id> [on|off] | account login <id>",
+      "usage: account list | account add <id> --provider F [--label L] [--shared true] | " +
+        "account remove <id> | account share <id> [on|off] | account login <id>",
     );
 }
 
@@ -611,10 +615,14 @@ function boostCommand(ledger: Ledger, args: string[]): void {
     return;
   }
   const multiplier =
-    value === "on" ? BOOSTED_MULTIPLIER : value === "off" ? 1 : Number(value);
-  if (!Number.isFinite(multiplier) || multiplier < 1) fail("usage: boost <family> [on|off|N>=1]");
+    value === "on" ? BOOSTED_MULTIPLIER : value === "off" ? 1 : value === "halt" ? 0 : Number(value);
+  if (!Number.isFinite(multiplier) || multiplier < 0) fail("usage: boost <family> [on|off|halt|N>=0]");
   ledger.setBoost(family, multiplier);
-  console.log(`${family}: ${multiplier}x allowance`);
+  console.log(
+    multiplier === 0
+      ? `${family}: halted — no new launches; running sessions finish naturally`
+      : `${family}: ${multiplier}x allowance`,
+  );
 }
 
 /**
@@ -852,17 +860,17 @@ async function main(): Promise<void> {
             "               [--gate EXPR] [--prompt TEXT] [--cwd DIR] [--exit-when-drained true|false]",
             "               [--doctrine-url URL]   pin a fetched document into the lane's system prompts",
             "  task list | task delete <id>",
-            "  account list | account add <id> --provider F [--label L] [--domain D] [--shared true]",
+            "  account list | account add <id> --provider F [--label L] [--shared true]",
             "  account remove <id>          drop an account that left this machine",
-            "  account domain <id> interactive|orchestrator",
-            "                               exclusive credential custody",
+
             "  account share <id> [on|off]  share a Codex account across both runtimes",
             "  account login <id>           device-login a Codex account into shared custody",
             "  pause | resume [task...]     durable launch control (ledger rows): the",
             "                               machine, or the named lanes",
             "  pause --except <task,...>    hold every other lane, so the fleet's whole",
             "                               capacity goes to the named ones",
-            `  boost <family> [on|off|N]    scale a family's spend pace (on = ${BOOSTED_MULTIPLIER}x)`,
+            `  boost <family> [on|off|halt|N]  scale a family's spend pace (on = ${BOOSTED_MULTIPLIER}x,`,
+            "                               halt = 0: no new launches for the family)",
             "  abort <runId>                request a running session stop",
             "  kill <runId> [reason]        end a run its session will not stop for",
             "  say <runId> <text...>        deliver an operator message into a live",

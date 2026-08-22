@@ -13,6 +13,12 @@ import type { EvaluateResult, TaskSnapshot, Tier } from "../tasks/types.js";
  */
 
 export interface ControllerConfig {
+  /** Enumerates the account ids the fleet can currently authenticate, from
+   * its credential stores. Observed each tick into the ledger's
+   * `fleet_credentialed` column, so admission follows credential custody
+   * instead of an operator-maintained flag. Omitted (tests, read-only
+   * consumers) means the recorded observations stand. */
+  readonly fleetCredentials?: () => ReadonlySet<string>;
   /** A running run whose heartbeat is older than this is presumed dead. */
   readonly heartbeatTimeoutMs: number;
   /** A pending run no runner claimed within this window is aborted;
@@ -61,6 +67,9 @@ export class Controller {
   }
 
   async tick(now = Date.now()): Promise<TickReport> {
+    if (this.cfg.fleetCredentials !== undefined) {
+      this.ledger.syncFleetCredentials(this.cfg.fleetCredentials());
+    }
     const reaped: string[] = [];
     for (const run of this.ledger.runs({ state: "running" })) {
       if ((run.heartbeatAt ?? run.startedAt) < now - this.cfg.heartbeatTimeoutMs) {

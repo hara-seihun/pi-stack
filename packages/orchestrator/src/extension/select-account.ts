@@ -9,8 +9,9 @@ import type { AccountRow } from "../ledger/ledger.js";
  * common) break by least-recently-bound, which is what makes this a round
  * robin rather than a pile-on; the final tie-break is the id, for
  * determinism. Cooling and expired accounts are skipped entirely, as are
- * orchestrator-only accounts. Shared accounts remain eligible because their
- * OAuth credential lives in the central cross-process store.
+ * accounts this runtime holds no credential for (`held` — the caller's own
+ * auth store answers). Shared accounts remain eligible because their OAuth
+ * credential lives in the central cross-process store.
  *
  * Selection happens once per session: sessions stay sticky to their account
  * because provider-side prompt caches are per-account, and a mid-session
@@ -22,12 +23,13 @@ export function pickAccount(
   family: string,
   now: number,
   usedPercent: (accountId: string) => number | undefined,
+  held: (accountId: string) => boolean,
   exclude?: ReadonlySet<string>,
 ): AccountRow | undefined {
   const candidates = accounts
     .filter(
       (a) =>
-        (a.shared || a.domain === "interactive") &&
+        (a.shared || held(a.id)) &&
         a.provider === family &&
         !exclude?.has(a.id) &&
         (a.accessUntil === undefined || a.accessUntil > now) &&

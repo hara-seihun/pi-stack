@@ -4,6 +4,14 @@ import { Ledger } from "../src/ledger/ledger.js";
 import type { MeterSpec } from "../src/calibrator/types.js";
 
 const HOUR = 3_600_000;
+
+/** Upsert an account and record it as fleet-credentialed, the way the
+ * controller's per-tick credential observation would. */
+function fleetAccount(ledger: Ledger, spec: Parameters<Ledger["upsertAccount"]>[0]): void {
+  ledger.upsertAccount(spec);
+  ledger.syncFleetCredentials(new Set(ledger.accounts().map((a) => a.id)));
+}
+
 const METERS: MeterSpec[] = [{ id: "weekly", drainedBy: ["cost"], nominalWindowMs: 7 * 24 * HOUR }];
 
 const CONFIG: Partial<BrokerConfig> & Pick<BrokerConfig, "tiers" | "meters"> = {
@@ -73,8 +81,8 @@ function feedRuns(
 
 function openLedger(): Ledger {
   const ledger = Ledger.open(":memory:");
-  ledger.upsertAccount({ id: "anth-1", provider: "anthropic", domain: "orchestrator" });
-  ledger.upsertAccount({ id: "codex-1", provider: "openai-codex", domain: "orchestrator" });
+  fleetAccount(ledger, { id: "anth-1", provider: "anthropic" });
+  fleetAccount(ledger, { id: "codex-1", provider: "openai-codex" });
   return ledger;
 }
 
@@ -119,7 +127,7 @@ describe("broker admission", () => {
 
   it("paces on the most binding meter, and runs one session until burn is measured", () => {
     const ledger = Ledger.open(":memory:");
-    ledger.upsertAccount({ id: "anth-1", provider: "anthropic", domain: "orchestrator" });
+    fleetAccount(ledger, { id: "anth-1", provider: "anthropic" });
     const fast = { id: "fast", drainedBy: ["cost"], nominalWindowMs: 5 * HOUR };
     const weekly = { id: "weekly", drainedBy: ["cost"], nominalWindowMs: 7 * 24 * HOUR };
     const now = 6 * HOUR;
@@ -155,7 +163,7 @@ describe("broker admission", () => {
     // on a subscription with a week of headroom. Percent readings alone are
     // enough to pace, and with burn measured the account carries a fleet.
     const ledger = Ledger.open(":memory:");
-    ledger.upsertAccount({ id: "codex-1", provider: "openai-codex", domain: "orchestrator" });
+    fleetAccount(ledger, { id: "codex-1", provider: "openai-codex" });
     const now = 48 * HOUR;
     // A week's plan, 10% spent, no usage events at all to attribute it to.
     ledger.recordReading("codex-1", "weekly", {
@@ -219,6 +227,30 @@ describe("broker admission", () => {
     expect(slots.light + slots.standard + slots.expert).toBe(3);
   });
 
+  it("a family with no plan runs exactly the concurrency the operator declared", () => {
+    // OpenRouter's case: an API key against credits, no window that resets,
+    // so no allowance to pace and no drain to price a session by. Bootstrap
+    // would hold it at one session forever, because the evidence it waits
+    // for can never arrive. The operator's number is the answer instead.
+    const ledger = Ledger.open(":memory:");
+    fleetAccount(ledger, { id: "openrouter", provider: "openrouter" });
+    const broker = new Broker(ledger, {
+      ...CONFIG,
+      tiers: { ...CONFIG.tiers, standard: [{ provider: "openrouter", model: "stealth/ox-alpha" }] },
+      meters: { ...CONFIG.meters, openrouter: [] },
+      declaredCapacity: { openrouter: 2 },
+    });
+    let admitted = 0;
+    for (;;) {
+      const a = broker.admit("standard", 0);
+      if (a === undefined) break;
+      ledger.createRun({ taskId: "t", tier: "standard", at: 0, ...a });
+      admitted++;
+    }
+    expect(admitted).toBe(2);
+    expect(broker.externalCapacity(0).accounts[0]).toMatchObject({ capacity: 2, active: 2 });
+  });
+
   it("refuses calibration from a reading whose reset already passed", () => {
     const ledger = openLedger();
     feedHistory(ledger, "anth-1", { percentPerHour: 0.2, hours: 48 });
@@ -256,13 +288,13 @@ describe("broker admission", () => {
 
   it("expired accounts are never admitted", () => {
     const ledger = Ledger.open(":memory:");
-    ledger.upsertAccount({ id: "anth-1", provider: "anthropic", accessUntil: 100, domain: "orchestrator" });
+    fleetAccount(ledger, { id: "anth-1", provider: "anthropic", accessUntil: 100 });
     const broker = new Broker(ledger, CONFIG);
     expect(broker.admit("expert", 200)).toBeUndefined();
     expect(broker.admit("expert", 50)?.accountId).toBe("anth-1");
   });
 
-  it("interactive-custody accounts are never admitted unless shared", () => {
+  it("accounts the fleet holds no credential for are never admitted unless shared", () => {
     const ledger = Ledger.open(":memory:");
     ledger.upsertAccount({ id: "anth-1", provider: "anthropic" });
     const broker = new Broker(ledger, CONFIG);
@@ -283,7 +315,7 @@ describe("broker admission", () => {
 
   it("tier restriction: a light launch never lands on a provider outside its tier", () => {
     const ledger = Ledger.open(":memory:");
-    ledger.upsertAccount({ id: "anth-1", provider: "anthropic", domain: "orchestrator" });
+    fleetAccount(ledger, { id: "anth-1", provider: "anthropic" });
     const broker = new Broker(ledger, CONFIG);
     // Only an anthropic account exists but light maps only to openai-codex.
     expect(broker.admit("light", 0)).toBeUndefined();
@@ -327,7 +359,7 @@ describe("broker slots", () => {
     const now = 48 * HOUR;
     for (let i = 0; i < 4; i++) {
       const id = `anth-${i}`;
-      ledger.upsertAccount({ id, provider: "anthropic", domain: "orchestrator" });
+      fleetAccount(ledger, { id, provider: "anthropic" });
       feedHistory(ledger, id, { percentPerHour: 0.2, hours: 48 });
       feedRuns(ledger, id, { count: 6, hoursEach: 8, endAt: now });
     }
@@ -341,7 +373,7 @@ describe("broker slots", () => {
 describe("broker external capacity", () => {
   it("reports eligible accounts with active counts and the machine ceiling", () => {
     const ledger = openLedger();
-    ledger.upsertAccount({ id: "codex-cooling", provider: "openai-codex", domain: "orchestrator" });
+    fleetAccount(ledger, { id: "codex-cooling", provider: "openai-codex" });
     ledger.setAccountCooldown("codex-cooling", 5000);
     const broker = new Broker(ledger, CONFIG);
     const external = broker.externalCapacity(1000);
@@ -381,7 +413,7 @@ describe("broker failover", () => {
 
   it("failover with no alternative reports undefined and keeps the run assignment", () => {
     const ledger = Ledger.open(":memory:");
-    ledger.upsertAccount({ id: "anth-1", provider: "anthropic", domain: "orchestrator" });
+    fleetAccount(ledger, { id: "anth-1", provider: "anthropic" });
     const broker = new Broker(ledger, CONFIG);
     const a = broker.admit("expert", 0)!;
     const runId = ledger.createRun({ taskId: "t", tier: "expert", at: 0, ...a });
@@ -428,9 +460,24 @@ describe("operator boost", () => {
     expect(broker.admit("standard", 0)?.accountId).toBe("codex-1");
   });
 
-  it("refuses a multiplier below one", () => {
+  it("refuses a negative multiplier and accepts zero as the halt state", () => {
     const ledger = openLedger();
-    expect(() => ledger.setBoost("anthropic", 0)).toThrow();
+    expect(() => ledger.setBoost("anthropic", -1)).toThrow();
+    ledger.setBoost("anthropic", 0);
+    expect(ledger.boost("anthropic")).toBe(0);
+    expect(ledger.boosts()).toEqual([{ provider: "anthropic", multiplier: 0 }]);
+  });
+
+  it("a halted family admits nothing until the halt lifts, and other families are untouched", () => {
+    const ledger = Ledger.open(":memory:");
+    fleetAccount(ledger, { id: "anth-1", provider: "anthropic" });
+    fleetAccount(ledger, { id: "codex-1", provider: "openai-codex" });
+    const broker = new Broker(ledger, CONFIG);
+    ledger.setBoost("anthropic", 0);
+    expect(broker.admit("expert", 0)).toBeUndefined();
+    expect(broker.admit("light", 0)?.accountId).toBe("codex-1");
+    ledger.setBoost("anthropic", 1);
+    expect(broker.admit("expert", 0)?.accountId).toBe("anth-1");
   });
 });
 
@@ -660,7 +707,7 @@ describe("per-model burn", () => {
 describe("duty cycle for an account that cannot afford a continuous session", () => {
   function burstLedger(usedPercentPerHour: number): { ledger: Ledger; now: number } {
     const ledger = Ledger.open(":memory:");
-    ledger.upsertAccount({ id: "anth-1", provider: "anthropic", domain: "orchestrator" });
+    fleetAccount(ledger, { id: "anth-1", provider: "anthropic" });
     // 48h into a 7-day window, with few session-hours behind the drain: one
     // session costs far more per hour than the plan sustains per hour.
     const now = feedHistory(ledger, "anth-1", { percentPerHour: usedPercentPerHour, hours: 48 });

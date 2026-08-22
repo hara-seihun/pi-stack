@@ -27,6 +27,13 @@ export interface BrokerConfig {
   /** model id -> usage class, per provider family; a model absent here is
    * `default`. Names which meters a launch of that model can drain. */
   readonly modelClasses?: Readonly<Record<string, Readonly<Record<string, string>>>>;
+  /** Concurrent sessions per account for families whose concurrency is
+   * declared rather than measured, keyed by provider. A pay-as-you-go key
+   * has no plan window: nothing resets, so there is no allowance to pace
+   * against and no drain to price a session by. The operator states how many
+   * sessions of it the fleet may hold, and that number is the whole answer
+   * for those accounts — no bootstrap, no calibration, no duty cycle. */
+  readonly declaredCapacity?: Readonly<Record<string, number>>;
   /** Assumed per-session percent/hour before enough measured session-hours
    * exist. Deliberately pessimistic: bootstrap admits little, measurement
    * then earns concurrency. */
@@ -78,6 +85,9 @@ interface AccountView {
   readonly provider: string;
   /** Sustainable percent/hour; undefined = no calibration yet (bootstrap). */
   readonly sustainable: number | undefined;
+  /** Operator-declared concurrency; set means this account is never paced
+   * from measurement, because it has no plan to measure. */
+  readonly declared: number | undefined;
   /** Measured (or bootstrap) percent/hour one session burns, blended over
    * whatever models have been running here. */
   readonly sessionBurn: number;
@@ -456,25 +466,33 @@ export class Broker {
       .accounts()
       .filter(
         (a) =>
-          // Shared accounts are authenticated from the central credential
-          // store and can fund both interactive and orchestrated sessions.
-          (a.shared || a.domain === "orchestrator") &&
+          // Fundable means the fleet holds a credential — shared custody is
+          // verified when it is granted, and exclusive custody is observed
+          // from the credential stores each controller tick — and the family
+          // is not halted by its boost state (0 = the drawer's red button).
+          (a.shared || a.fleetCredentialed) &&
+          this.ledger.boost(a.provider) > 0 &&
           (a.accessUntil === undefined || a.accessUntil > now) &&
           (a.cooldownUntil === undefined || a.cooldownUntil <= now),
       )
       .map((a) => {
+        const declared = this.cfg.declaredCapacity?.[a.provider];
         const sustainable = this.cachedRate(a.id, a.provider, now);
         const measured = this.measuredSessionBurn(a.id, now);
         const sessionBurn = measured ?? this.cfg.bootstrapSessionPercentPerHour;
         const behindPace = this.behindPace(a.id, a.provider, now);
         return {
           behindPace,
+          declared,
           id: a.id,
           provider: a.provider,
           sustainable,
           sessionBurn,
           measured: measured !== undefined,
-          capacity: this.capacity(sustainable, sessionBurn, measured !== undefined, behindPace),
+          capacity:
+            declared === undefined
+              ? this.capacity(sustainable, sessionBurn, measured !== undefined, behindPace)
+              : Math.min(declared, this.cfg.maxConcurrentSessions),
           committed: this.committedBurn(a.id, a.provider, sessionBurn, now),
           active:
             this.ledger.activeRunCount(a.id) +
@@ -554,6 +572,42 @@ export class Broker {
     return this.rates.get(key);
   }
 
+  /**
+   * How many more sessions of `candidate` this account can take right now.
+   *
+   * What a metered account can take is a rate budget, not a session count:
+   * every live session commits what its own model burns, and a candidate is
+   * admitted if the account's meter can sustain the sum. Counting sessions
+   * instead let a cheap model starve an expensive one — forty-six light
+   * sessions on an account filled its session count, so the standard tier,
+   * costing a fraction of the account's sustainable rate and asked for by an
+   * operator running a 1:5 mix, was refused every account on the machine and
+   * the fleet ran with a single standard session.
+   */
+  private freeSessions(v: AccountView, candidate: ModelCandidate, now: number): number {
+    // A declared family has no plan window, so there is no rate to budget:
+    // the operator's number is the count, and no calibration question is
+    // asked of an account that can never answer one.
+    if (v.declared !== undefined) {
+      return Math.min(v.declared, this.cfg.maxConcurrentSessions) - v.active;
+    }
+    const rate = this.cachedRate(v.id, candidate.provider, now, candidate.model);
+    // Bootstrap: nothing is measured, so one session at a time until the
+    // meters have priced this account.
+    if (rate === undefined || !v.measured) return v.active >= 1 ? 0 : 1;
+    // A model measured as free against every meter it drains costs the
+    // account nothing; the machine ceiling is what bounds it.
+    const burn = this.sessionBurn(v.id, now, candidate.provider, candidate.model);
+    const free =
+      burn <= 0 ? this.cfg.maxConcurrentSessions - v.active : (rate - v.committed) / burn;
+    // A session costing more per hour than the plan sustains is a duty cycle,
+    // not a refusal: while the window is under-spent the account runs exactly
+    // one, and it stops being under-spent as that session burns. Without this
+    // an account is retired the moment measurement proves it expensive, and
+    // its remaining window expires unused.
+    return free < 1 && v.behindPace && v.active === 0 ? 1 : free;
+  }
+
   private pick(
     views: readonly AccountView[],
     tier: Tier,
@@ -572,33 +626,7 @@ export class Broker {
       for (const v of views) {
         if (v.provider !== candidate.provider) continue;
         if (exclude?.has(v.id)) continue;
-        // What an account can take is a rate budget, not a session count.
-        // Every live session commits what its own model burns, and a
-        // candidate is admitted if the account's meter can sustain the sum.
-        // Counting sessions instead let a cheap model starve an expensive
-        // one: forty-six light sessions on an account filled its session
-        // count, so the standard tier — costing a fraction of the account's
-        // sustainable rate, and asked for by an operator running a 1:5 mix —
-        // was refused every account on the machine and the fleet ran with a
-        // single standard session.
-        const rate = this.cachedRate(v.id, candidate.provider, now, candidate.model);
-        const burn = this.sessionBurn(v.id, now, candidate.provider, candidate.model);
-        let free: number;
-        if (rate === undefined || !v.measured) {
-          // Bootstrap: nothing is measured, so one session at a time until
-          // the meters have priced this account.
-          free = v.active >= 1 ? 0 : 1;
-        } else {
-          // A model measured as free against every meter it drains costs the
-          // account nothing; the machine ceiling above is what bounds it.
-          free = burn <= 0 ? this.cfg.maxConcurrentSessions - v.active : (rate - v.committed) / burn;
-          // A session costing more per hour than the plan sustains is a duty
-          // cycle, not a refusal: while the window is under-spent the account
-          // runs exactly one, and it stops being under-spent as that session
-          // burns. Without this an account is retired the moment measurement
-          // proves it expensive, and its remaining window expires unused.
-          if (free < 1 && v.behindPace && v.active === 0) free = 1;
-        }
+        const free = this.freeSessions(v, candidate, now);
         if (free < 1) continue;
         if (best === undefined || free > bestFree) {
           best = v;
