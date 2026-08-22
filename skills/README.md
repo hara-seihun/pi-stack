@@ -13,6 +13,10 @@ their agent's skill directory.
   meetings and calls: register, hedging, agreement, humour, and pacing.
 - [`unslop`](unslop/SKILL.md) — cut AI tells from any prose a person will
   read, and put a voice back in. Applies to every register.
+- [`math-research`](math-research/SKILL.md) — how to reach the public math
+  ledger at `lemma.ing`: identity and key files, the evidence-upload pipe,
+  attribution, and catching up. Host-specific paths inside are for the
+  `kenan` machine; a new machine adjusts the Identity section.
 
 ## Deployment on a machine
 
