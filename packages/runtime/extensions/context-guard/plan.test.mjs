@@ -7,6 +7,7 @@ import {
   estimateView,
   fallbackMessage,
   findTailBoundary,
+  noticeMessage,
   planCut,
   summaryMessage,
   transformOldMessage,
@@ -93,6 +94,18 @@ test("findTailBoundary never lands on a toolResult", () => {
   assert.ok(tailTokens >= 3_000);
 });
 
+test("compaction notice restores headroom expectations with or without a transcript", () => {
+  const withTranscript = noticeMessage("/tmp/s.jsonl", 9).content[0].text;
+  assert.match(withTranscript, /cut restored substantial context headroom/);
+  assert.match(withTranscript, /do not stop or avoid starting more work/);
+  assert.match(withTranscript, /pre-compaction transcript length/);
+  assert.match(withTranscript, /\/tmp\/s\.jsonl/);
+
+  const withoutTranscript = noticeMessage("", 9).content[0].text;
+  assert.match(withoutTranscript, /cut restored substantial context headroom/);
+  assert.doesNotMatch(withoutTranscript, /greppable at:/);
+});
+
 test("buildView returns null when untouched and is deterministic when cut", () => {
   const msgs = sampleSession(10);
   assert.equal(buildView(msgs, { watermark: 1, summary: null }, est, ""), null);
@@ -104,6 +117,7 @@ test("buildView returns null when untouched and is deterministic when cut", () =
   const notices = a.filter((m) => m.role === "user" && m.content[0]?.text?.includes("context-guard notice"));
   assert.equal(notices.length, 1);
   assert.match(notices[0].content[0].text, /\/tmp\/s\.jsonl/);
+  assert.match(notices[0].content[0].text, /substantial context headroom/);
   // Tail is byte-identical: same object references as the source array.
   assert.equal(a[a.length - 1], msgs[msgs.length - 1]);
   // Old thinking is gone from the view.
@@ -131,6 +145,9 @@ test("summary replaces span but preserves user-ish messages verbatim", () => {
   const view = buildView(msgs, state, est, "");
   assert.match(view[1].content[0].text, /SUMMARY/);
   assert.match(view[1].content[0].text, /greppable at: \/tmp\/s\.jsonl/);
+  assert.ok(view.some(
+    (m) => m.role === "user" && m.content[0]?.text?.includes("cut restored substantial context headroom"),
+  ));
   assert.ok(view.some((m) => m.role === "user" && m.content[0]?.text === "steering follow-up"));
   // Summarized assistants/toolResults are gone entirely: only tail ones remain.
   const tailToolResults = msgs.slice(12).filter((m) => m.role === "toolResult").length;

@@ -110,13 +110,18 @@ export function findTailBoundary(messages, minIndex, estimate, tailTokens) {
  * hundreds of) eviction placeholders don't each repeat it.
  */
 export function noticeMessage(note, timestamp) {
+  const transcript = note
+    ? ` The full session transcript remains greppable at: ${note}`
+    : "";
   return {
     role: "user",
     content: [{
       type: "text",
       text:
-        "[context-guard notice: older tool results and reasoning were evicted from this view to cap context. " +
-        `The full session transcript remains greppable at: ${note}]`,
+        "[context-guard notice: Context compaction has run for this active view. The cut restored " +
+        "substantial context headroom. Continue the task normally; do not stop or avoid starting more " +
+        "work based on the pre-compaction transcript length. Older tool results and reasoning were " +
+        `evicted from this view to enforce the context cap.${transcript}]`,
     }],
     timestamp,
   };
@@ -134,7 +139,9 @@ export function buildView(messages, state, estimate, note) {
   const out = [messages[0]];
   if (summary) out.push(summary.message);
   const summaryEnd = summary ? summary.coversUpTo : 1;
-  if (note && watermark > summaryEnd) out.push(noticeMessage(note, messages[0]?.timestamp));
+  if (watermark > 1) {
+    out.push(noticeMessage(summary ? "" : note, messages[0]?.timestamp));
+  }
   for (let i = 1; i < Math.min(watermark, messages.length); i++) {
     const m = messages[i];
     if (i < summaryEnd) {
