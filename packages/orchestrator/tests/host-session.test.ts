@@ -19,6 +19,8 @@ interface FakeTurn {
   readonly errorMessage?: string;
   /** Wall-clock the turn consumes, for budget tests. */
   readonly tookMs?: number;
+  /** The turn never returns: a provider parked mid-stream. */
+  readonly parks?: boolean;
 }
 
 function harness(
@@ -26,6 +28,8 @@ function harness(
   options: { sessionBudgetMs?: number; laneDrained?: () => boolean } = {},
 ) {
   const prompts: string[] = [];
+  const progress: number[] = [];
+  const observers: ((event: unknown) => void)[] = [];
   let clock = 0;
   const messages: { role: string; stopReason?: string; errorMessage?: string }[] = [];
   let taskComplete: { execute: (id: string, params: unknown) => Promise<unknown> } | undefined;
@@ -36,13 +40,17 @@ function harness(
     bindExtensions: async (b: unknown) => {
       bindings.push(b);
     },
-    subscribe: () => () => {},
+    subscribe: (handler: (event: unknown) => void) => {
+      observers.push(handler);
+      return () => {};
+    },
     dispose: () => {},
     abort: async () => {},
     sendUserMessage: async () => {},
     prompt: async (text: string) => {
       const turn = turns[prompts.length] ?? {};
       prompts.push(text);
+      if (turn.parks) await new Promise(() => {});
       for (let i = 0; i < (turn.reports ?? 0); i++) {
         await taskComplete?.execute("call", {
           complete: true,
@@ -63,7 +71,7 @@ function harness(
     {
       runFinished: (_id, result) => results.push(result),
       heartbeat: () => {},
-      progress: () => {},
+      progress: (_id, at) => progress.push(at),
       sessionStarted: (runId, sessionId) => links.push({ runId, sessionId }),
       laneDrained: options.laneDrained ?? (() => false),
     },
@@ -94,7 +102,8 @@ function harness(
       }
     }, 1);
   });
-  return { host, spec, prompts, finished, links, bindings, now: () => clock };
+  const emit = () => observers.forEach((observe) => observe({}));
+  return { host, spec, prompts, finished, links, bindings, progress, emit, now: () => clock };
 }
 
 describe("host shift loop", () => {
@@ -209,5 +218,27 @@ describe("host shift loop", () => {
     const clean = harness([{ stopReason: "aborted" }]);
     clean.host.launch(clean.spec);
     expect(await clean.finished).toEqual({ state: "aborted", detail: "session aborted" });
+  });
+});
+
+describe("a hosted session reports that it is doing something", () => {
+  it("records activity at launch and kills on demand without waiting for the turn", async () => {
+    // Liveness is what the heartbeat already claimed; this is the run itself
+    // moving. A provider that parks mid-turn stops producing events, which is
+    // the only signal that distinguishes it from a healthy long turn.
+    const { host, spec, progress, emit, finished } = harness([{ parks: true }]);
+    host.launch(spec);
+    // The session opens asynchronously; nothing can be reported before it exists.
+    while (!host.has(spec.runId)) await new Promise((resolve) => setTimeout(resolve, 1));
+    expect(progress).toHaveLength(1);
+    emit();
+    // Throttled: a streaming turn must not write to the ledger per token.
+    expect(progress).toHaveLength(1);
+
+    host.kill(spec.runId, "session made no progress for 30m");
+    const result = await finished;
+    expect(result).toEqual({ state: "aborted", detail: "session made no progress for 30m" });
+    expect(host.has(spec.runId)).toBe(false);
+    expect(host.liveRuns()).toEqual([]);
   });
 });

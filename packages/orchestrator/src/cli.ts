@@ -3,6 +3,7 @@ import { homedir, hostname } from "node:os";
 import { join } from "node:path";
 import { realpathSync } from "node:fs";
 import { pathToFileURL } from "node:url";
+import { BOOSTED_MULTIPLIER } from "./boost.js";
 import { Broker } from "./broker/broker.js";
 import { Controller } from "./controller/controller.js";
 import { Ledger } from "./ledger/ledger.js";
@@ -583,9 +584,6 @@ async function accountCommand(ledger: Ledger, args: string[]): Promise<void> {
     );
 }
 
-/** The 5× the Pi Remote drawer controls: one deliberate, durable multiplier
- * on a family's paced spend, honoured by every broker decision. */
-const DEFAULT_BOOST = 5;
 
 function boostCommand(ledger: Ledger, args: string[]): void {
   const [family, value] = args;
@@ -600,7 +598,7 @@ function boostCommand(ledger: Ledger, args: string[]): void {
     return;
   }
   const multiplier =
-    value === "on" ? DEFAULT_BOOST : value === "off" ? 1 : Number(value);
+    value === "on" ? BOOSTED_MULTIPLIER : value === "off" ? 1 : Number(value);
   if (!Number.isFinite(multiplier) || multiplier < 1) fail("usage: boost <family> [on|off|N>=1]");
   ledger.setBoost(family, multiplier);
   console.log(`${family}: ${multiplier}x allowance`);
@@ -849,7 +847,7 @@ async function main(): Promise<void> {
             "                               machine, or the named lanes",
             "  pause --except <task,...>    hold every other lane, so the fleet's whole",
             "                               capacity goes to the named ones",
-            `  boost <family> [on|off|N]    scale a family's spend pace (on = ${DEFAULT_BOOST}x)`,
+            `  boost <family> [on|off|N]    scale a family's spend pace (on = ${BOOSTED_MULTIPLIER}x)`,
             "  abort <runId>                request a running session stop",
             "  kill <runId> [reason]        end a run its session will not stop for",
             "  say <runId> <text...>        deliver an operator message into a live",

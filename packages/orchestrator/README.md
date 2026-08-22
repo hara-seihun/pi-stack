@@ -246,7 +246,7 @@ the claims would actually take, so scarce accounts are not held for a tier no
 lane is about to ask for.
 
 The two levers compose, which is the point: `share` decides who gets the
-fleet, `boost <family> 5` decides how large the fleet is (it multiplies the
+fleet, `boost <family> on` decides how large the fleet is (it multiplies the
 paced sustainable rate, so a family spends its real measured headroom faster
 rather than acquiring invented capacity), and the lane's tier mix decides
 which models those launches use. Turning one lane up to 70% and boosting the
@@ -323,7 +323,11 @@ meters get a say in the rate.
 An **operator boost** (`boost <family> on`, a `boost:<family>` control row) is
 the one deliberate lever over that arithmetic: it multiplies the paced
 sustainable rate for one provider family, so a boosted family spends its real
-measured headroom faster rather than acquiring invented capacity. Everything
+measured headroom faster rather than acquiring invented capacity. `on` means
+`BOOSTED_MULTIPLIER` (`src/boost.ts`, currently 10×), exported as the
+package's `./boost` entry point because Pi Remote's drawer offers the same
+switch and must mean the same thing by it; any multiplier ≥ 1 can be named
+directly instead. Everything
 underneath keeps working — measurement, hazard pacing, cooldowns — and an
 uncalibrated account stays in bootstrap however high the boost, because there
 is nothing measured to spend faster.
@@ -550,12 +554,23 @@ Three consumption modes, all exported as `pi-orchestrator/voice`:
 Standing math lanes are enabled. Their research-session contract and the
 transcript evidence that shaped it live in
 [`../math-research/docs/agent-research-capability.md`](../math-research/docs/agent-research-capability.md).
-The deployed task ledger is the source of truth for definitions. In addition
-to research, survey, formalization, and review, `math-curation` keeps one
-light-tier work unit improving high-notability ledger titles and summaries via
-T0 amendment proposals and filling the reviewed reach/advance/closure impact
-rubric in coherent batches; `math-review` independently applies or rejects
-both proposal kinds.
+The deployed task ledger is the source of truth for definitions; four lanes
+stand there now. `math-frontier` (share 14) attacks open problems and
+conjectures. `math-review` (share 2) works the trusted-review queue.
+`math-cleanup` (share 2) owns the corpus rather than any one question: stale
+or unchecked provenance, contentless T0 records, settlement edges that
+overclaim, links into retracted entries, duplicate results under two titles,
+titles that defeat search. Its prompt names past defects as a genre and
+leaves the judgement to the agent, because the next defect will not be on any
+list. Its demand probe counts three cheap defect populations over `q_links`
+and `q_entries`, saturating each at a few hundred, so a corpus with nothing
+wrong drains the lane instead of re-prompting it. `fast-math-pr` (share 1)
+handles that repository's pull requests.
+
+Review and cleanup are deliberately equal claims on the fleet. Review decides
+whether new work is sound; cleanup decides whether the corpus still says what
+is true, and only cleanup is looking when the thing that went wrong is
+somebody's finished business.
 
 `pi-orchestrator status | capacity | usage | task set/list/delete | account list/add/domain/share/login |
 pause | resume | boost | abort | kill | say | runner | drain-runners | voice-broker` —

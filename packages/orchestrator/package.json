@@ -9,6 +9,11 @@
     "pi-orchestrator": "dist/cli.js"
   },
   "exports": {
+    "./boost": {
+      "types": "./src/boost.ts",
+      "bun": "./src/boost.ts",
+      "default": "./dist/boost.js"
+    },
     "./voice": {
       "types": "./src/voice/index.ts",
       "bun": "./src/voice/index.ts",
