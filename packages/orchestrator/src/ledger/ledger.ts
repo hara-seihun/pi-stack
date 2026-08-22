@@ -305,6 +305,14 @@ ALTER TABLE task ADD COLUMN self_paced INTEGER NOT NULL DEFAULT 0
   CHECK (self_paced IN (0, 1));
 `;
 
+/** Per-launch opening substitution (see tasks/types.ts): a command whose
+ * JSON stdout fills `{{key}}` placeholders in the opening messages, so each
+ * launch can live a different exchange — the math lane samples a different
+ * famous open problem per session instead of anchoring every agent on one. */
+const OPENING_PROBE_SCHEMA = `
+ALTER TABLE task ADD COLUMN opening_probe TEXT;
+`;
+
 const MIGRATIONS: readonly string[] = [
   SCHEMA,
   TASK_SCHEMA,
@@ -322,6 +330,7 @@ const MIGRATIONS: readonly string[] = [
   DOCTRINE_URL_SCHEMA,
   FLEET_CREDENTIAL_SCHEMA,
   OPENING_SCHEMA,
+  OPENING_PROBE_SCHEMA,
 ];
 
 export interface AccountRow {
@@ -778,8 +787,9 @@ export class Ledger {
     this.db
       .prepare(
         `INSERT INTO task (id, demand_command, demand_constant, gate, tiers, share, prompt, cwd,
-                           exit_when_drained, doctrine_url, opening, self_paced, created_at)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                           exit_when_drained, doctrine_url, opening, opening_probe, self_paced,
+                           created_at)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
          ON CONFLICT (id) DO UPDATE SET
            demand_command = excluded.demand_command,
            demand_constant = excluded.demand_constant,
@@ -791,6 +801,7 @@ export class Ledger {
            exit_when_drained = excluded.exit_when_drained,
            doctrine_url = excluded.doctrine_url,
            opening = excluded.opening,
+           opening_probe = excluded.opening_probe,
            self_paced = excluded.self_paced`,
       )
       .run(
@@ -805,6 +816,7 @@ export class Ledger {
         t.exitWhenDrained ? 1 : 0,
         t.doctrineUrl ?? null,
         t.opening === undefined ? null : JSON.stringify(t.opening),
+        t.openingProbe ?? null,
         t.selfPaced ? 1 : 0,
         Date.now(),
       );
@@ -819,7 +831,7 @@ export class Ledger {
     const rows = this.db
       .prepare(
         `SELECT id, demand_command, demand_constant, gate, tiers, share, prompt, cwd,
-                exit_when_drained, doctrine_url, opening, self_paced
+                exit_when_drained, doctrine_url, opening, opening_probe, self_paced
          FROM task ORDER BY id`,
       )
       .all() as {
@@ -834,6 +846,7 @@ export class Ledger {
       exit_when_drained: number;
       doctrine_url: string | null;
       opening: string | null;
+      opening_probe: string | null;
       self_paced: number;
     }[];
     return rows.map((r) => ({
@@ -848,6 +861,7 @@ export class Ledger {
       exitWhenDrained: r.exit_when_drained !== 0,
       doctrineUrl: r.doctrine_url ?? undefined,
       opening: r.opening === null ? undefined : (JSON.parse(r.opening) as string[]),
+      openingProbe: r.opening_probe ?? undefined,
       selfPaced: r.self_paced !== 0,
     }));
   }

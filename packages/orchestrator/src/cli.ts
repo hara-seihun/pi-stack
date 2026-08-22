@@ -783,6 +783,7 @@ export function taskSet(ledger: Ledger, args: string[]): void {
     ...(exitWhenDrained === undefined ? {} : { exitWhenDrained }),
     doctrineUrl: pick("doctrine-url", current?.doctrineUrl),
     ...(opening === undefined ? {} : { opening }),
+    openingProbe: pick("opening-probe", current?.openingProbe),
     ...(selfPaced === undefined ? {} : { selfPaced }),
   });
   console.log(`task ${id} ${current ? "updated" : "created"}`);
@@ -881,6 +882,7 @@ async function main(): Promise<void> {
                 (t.gate !== undefined ? ` gate=[${t.gate}]` : "") +
                 (t.exitWhenDrained ? " exit-when-drained" : "") +
                 (t.opening !== undefined ? ` opening(${t.opening.length})` : "") +
+                (t.openingProbe !== undefined ? " opening-probe" : "") +
                 (t.selfPaced ? " self-paced" : "") +
                 (ledger.taskPaused(t.id) ? " HELD" : "") +
                 (t.prompt === undefined ? " (signal only)" : ""),
@@ -949,6 +951,9 @@ async function main(): Promise<void> {
             "  task set <id> --tiers light:20,standard [--share N] [--demand-command CMD | --demand-constant N]",
             "               [--gate EXPR] [--prompt TEXT] [--cwd DIR] [--exit-when-drained true|false]",
             "               [--doctrine-url URL]   pin a fetched document into the lane's system prompts",
+            "               [--opening file1,file2] [--self-paced true|false] lived opening exchange",
+            "               [--opening-probe CMD]  command whose JSON stdout fills {{key}} placeholders",
+            "                                      in the opening messages, run fresh at every launch",
             "  task list | task delete <id>",
             "  account list | account add <id> --provider F [--label L] [--shared true]",
             "  account remove <id>          drop an account that left this machine",

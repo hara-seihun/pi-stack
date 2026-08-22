@@ -6,6 +6,7 @@ import {
   type AgentSession,
   type InlineExtension,
 } from "@earendil-works/pi-coding-agent";
+import { execFile } from "node:child_process";
 import { randomUUID } from "node:crypto";
 import { homedir } from "node:os";
 import { join } from "node:path";
@@ -78,6 +79,9 @@ export class PiHost implements HostManager {
       readonly openSession?: typeof createAgentSession;
       /** Doctrine fetcher. Defaults to HTTP fetch; a test supplies its own. */
       readonly fetchDoctrine?: (url: string) => Promise<string>;
+      /** Opening-probe runner. Defaults to `bash -c` in the launch cwd; a
+       * test supplies its own. */
+      readonly runOpeningProbe?: (command: string, cwd: string) => Promise<string>;
     },
   ) {}
 
@@ -176,6 +180,21 @@ export class PiHost implements HostManager {
   }
 
   private async run(spec: LaunchSpec, transcript: RunTranscript | undefined): Promise<HostRunResult> {
+    // The opening exchange may be a template: a probe command sampling, say,
+    // a different famous open problem for every launch. Resolved before the
+    // session exists, and never sent unresolved — an agent handed literal
+    // `{{placeholders}}` would rightly disbelieve the whole exchange, so a
+    // probe failure fails the launch instead.
+    let opening = spec.opening ?? [];
+    if (spec.openingProbe !== undefined && opening.length > 0) {
+      try {
+        const probe = this.options.runOpeningProbe ?? execOpeningProbe;
+        const values = parseProbeValues(await probe(spec.openingProbe, spec.cwd ?? process.cwd()));
+        opening = opening.map((message) => renderOpening(message, values));
+      } catch (thrown) {
+        return { state: "error", detail: `opening probe failed: ${String(thrown)}` };
+      }
+    }
     let report: CompletionReport | undefined;
     let reports = 0;
     // Check-ins are generated from what the shift actually did; the observer
@@ -342,7 +361,7 @@ export class PiHost implements HostManager {
       // verbatim through every compaction. Injecting a transcript the agent
       // never produced would be spotted — agents are acutely good at telling
       // self from not-self — and disbelieved.
-      for (const message of spec.opening ?? []) {
+      for (const message of opening) {
         transcript?.append("user", { text: message });
         if (await interrupted(session.prompt(message))) {
           return { state: "aborted", detail: "session killed" };
@@ -361,7 +380,7 @@ export class PiHost implements HostManager {
         }
         observer.endTurn();
       }
-      if ((spec.opening?.length ?? 0) > 0) {
+      if (opening.length > 0) {
         pin.messageCount = session.messages.length;
         pin.text = serializeOpening(session.messages);
       }
@@ -761,4 +780,65 @@ function toolOutput(result: any): string {
       .trim();
   }
   return JSON.stringify(result);
+}
+
+/** Probes announce work in bounded time; a sample query against the ledger
+ * takes seconds, so a minute of grace already means something is wrong. */
+const OPENING_PROBE_TIMEOUT_MS = 60_000;
+
+function execOpeningProbe(command: string, cwd: string): Promise<string> {
+  return new Promise((resolve, reject) => {
+    execFile(
+      "bash",
+      ["-c", command],
+      { cwd, timeout: OPENING_PROBE_TIMEOUT_MS, maxBuffer: 1024 * 1024 },
+      (error, stdout, stderr) => {
+        if (error) reject(new Error(`${String(error)}${stderr ? `: ${stderr.slice(0, 500)}` : ""}`));
+        else resolve(stdout);
+      },
+    );
+  });
+}
+
+/**
+ * A probe's whole stdout is one JSON object of scalar values. Anything else
+ * is a defect in the probe command, reported with enough of the output to
+ * see what it printed instead.
+ */
+export function parseProbeValues(stdout: string): Record<string, string> {
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(stdout.trim());
+  } catch {
+    throw new Error(`probe stdout is not JSON: ${stdout.trim().slice(0, 200)}`);
+  }
+  if (typeof parsed !== "object" || parsed === null || Array.isArray(parsed)) {
+    throw new Error("probe stdout must be a JSON object");
+  }
+  const values: Record<string, string> = {};
+  for (const [key, value] of Object.entries(parsed)) {
+    if (typeof value !== "string" && typeof value !== "number" && typeof value !== "boolean") {
+      throw new Error(`probe value ${key} is not a scalar`);
+    }
+    values[key] = String(value);
+  }
+  return values;
+}
+
+/**
+ * Replace every `{{key}}` with the probe's value for that key. A placeholder
+ * the probe did not answer means the template and the probe have drifted
+ * apart, and the message must not be sent — an operator voice with literal
+ * template holes reads as exactly the fabrication agents are good at
+ * spotting.
+ */
+export function renderOpening(message: string, values: Record<string, string>): string {
+  const rendered = message.replace(/\{\{([a-zA-Z0-9_.-]+)\}\}/g, (whole, key: string) =>
+    key in values ? values[key] : whole,
+  );
+  const unresolved = [...rendered.matchAll(/\{\{([a-zA-Z0-9_.-]+)\}\}/g)].map((m) => m[1]);
+  if (unresolved.length > 0) {
+    throw new Error(`opening placeholders without probe values: ${[...new Set(unresolved)].join(", ")}`);
+  }
+  return rendered;
 }

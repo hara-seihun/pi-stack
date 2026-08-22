@@ -191,7 +191,17 @@ describe scheduling:
   sessions, which the guard excludes). Message
   bodies are captured into the ledger row at set time, so a launch never
   changes voice because a fetch failed; re-run `task set` to pick up file
-  edits. Verbatim matters: agents are acutely good at telling self from
+  edits. An opening may be a template: `--opening-probe CMD` names a command
+  (its content likewise captured at set time when read from a file) that runs
+  fresh at every launch and prints one JSON object, whose values fill
+  `{{key}}` placeholders in the opening messages — the math-frontier lane
+  samples a different famous open problem per session this way, because a
+  fixed example anchored whole batches on one target (16 filings against
+  Erdős 647 in the 48 hours the opening named it). No cache: a cached draw
+  would hand a batch the same problem, which is the crowding the probe
+  exists to break. A failed probe or an unresolved placeholder fails the
+  launch loudly; an operator voice with literal template holes reads as
+  fabrication and poisons the exchange. Verbatim matters: agents are acutely good at telling self from
   not-self, and a paraphrased opening reads as someone else's words. With
   `selfPaced` the shift is one work turn — no continuation check-ins; the
   agent ending its turn is the agent deciding the shift is over, and it is

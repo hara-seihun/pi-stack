@@ -19,6 +19,9 @@ export interface LaunchSpec {
   /** User messages sent as real turns before the task prompt; the lived
    * exchange is then pinned verbatim through every compaction. */
   readonly opening?: readonly string[];
+  /** Command whose JSON stdout fills `{{key}}` placeholders in the opening
+   * messages, run fresh at every launch (see tasks/types.ts). */
+  readonly openingProbe?: string;
   /** One work turn, no continuation check-ins: the agent ending its turn
    * ends the shift. */
   readonly selfPaced?: boolean;

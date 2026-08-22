@@ -33,6 +33,8 @@ function harness(
     doctrineUrl?: string;
     fetchDoctrine?: (url: string) => Promise<string>;
     opening?: readonly string[];
+    openingProbe?: string;
+    runOpeningProbe?: (command: string, cwd: string) => Promise<string>;
     selfPaced?: boolean;
   } = {},
 ) {
@@ -95,6 +97,7 @@ function harness(
         return { session };
       }) as never,
       fetchDoctrine: options.fetchDoctrine,
+      runOpeningProbe: options.runOpeningProbe,
     },
   );
   const spec: LaunchSpec = {
@@ -108,6 +111,7 @@ function harness(
     cwd: "/tmp",
     doctrineUrl: options.doctrineUrl,
     opening: options.opening,
+    openingProbe: options.openingProbe,
     selfPaced: options.selfPaced,
   };
   const finished = new Promise<HostRunResult>((resolve) => {
@@ -444,6 +448,75 @@ describe("the opening exchange", () => {
 
     expect(prompts).toHaveLength(2);
     expect(result).toMatchObject({ state: "done", productive: false });
+  });
+});
+
+describe("the opening probe", () => {
+  // The exchange can be a template: the probe samples fresh values (the math
+  // lane draws a different famous open problem per launch) and the agent must
+  // only ever see the rendered result — a literal {{placeholder}} in the
+  // operator's voice would be spotted as fabrication and poison the exchange.
+  it("fills placeholders from the probe's JSON before the exchange is lived", async () => {
+    const commands: string[] = [];
+    const { host, spec, prompts, finished } = harness([{}, {}, { reports: 1 }, {}, {}], {
+      opening: ["What odds on {{problem_title}}?", "Now examine `{{problem_id}}`."],
+      openingProbe: "sample-problem",
+      runOpeningProbe: async (command) => {
+        commands.push(command);
+        return JSON.stringify({ problem_title: "Frankl's conjecture", problem_id: "abc123" });
+      },
+    });
+    host.launch(spec);
+    await finished;
+
+    expect(commands).toEqual(["sample-problem"]);
+    expect(prompts.slice(0, 2)).toEqual([
+      "What odds on Frankl's conjecture?",
+      "Now examine `abc123`.",
+    ]);
+  });
+
+  it("fails the launch when the probe fails, rather than sending the template", async () => {
+    const { host, spec, prompts, finished } = harness([{}], {
+      opening: ["What odds on {{problem_title}}?"],
+      openingProbe: "sample-problem",
+      runOpeningProbe: async () => {
+        throw new Error("ledger unreachable");
+      },
+    });
+    host.launch(spec);
+    const result = await finished;
+
+    expect(prompts).toHaveLength(0);
+    expect(result.state).toBe("error");
+    expect(result.detail).toContain("opening probe failed");
+  });
+
+  it("fails the launch when a placeholder has no probe value", async () => {
+    const { host, spec, prompts, finished } = harness([{}], {
+      opening: ["What odds on {{problem_title}}? Examine {{problem_id}}."],
+      openingProbe: "sample-problem",
+      runOpeningProbe: async () => JSON.stringify({ problem_title: "Frankl's conjecture" }),
+    });
+    host.launch(spec);
+    const result = await finished;
+
+    expect(prompts).toHaveLength(0);
+    expect(result.state).toBe("error");
+    expect(result.detail).toContain("problem_id");
+  });
+
+  it("rejects probe output that is not a JSON object of scalars", async () => {
+    const { host, spec, finished } = harness([{}], {
+      opening: ["What odds on {{problem_title}}?"],
+      openingProbe: "sample-problem",
+      runOpeningProbe: async () => "three problems, none of them JSON",
+    });
+    host.launch(spec);
+    const result = await finished;
+
+    expect(result.state).toBe("error");
+    expect(result.detail).toContain("not JSON");
   });
 });
 

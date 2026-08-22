@@ -126,6 +126,7 @@ export class Runner implements HostEvents {
           cwd: task.cwd,
           doctrineUrl: task.doctrineUrl,
           opening: task.opening,
+          openingProbe: task.openingProbe,
           selfPaced: task.selfPaced,
           provider: run.provider,
           model: run.model,

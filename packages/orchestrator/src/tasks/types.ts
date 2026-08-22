@@ -68,6 +68,15 @@ export interface TaskSpec {
    * opening reads as someone else's words and loses its force, so the pin
    * is word for word, tool traffic included. */
   readonly opening?: readonly string[];
+  /** Command run at each launch whose stdout is a JSON object; every
+   * `{{key}}` placeholder in the opening messages is replaced by the
+   * object's value for that key. This is what lets an opening exchange vary
+   * per session — the math lane samples a different famous open problem for
+   * each launch so a batch of agents does not crowd one anchor. The probe
+   * runs fresh every launch (a cache would hand a whole batch the same
+   * draw), and a probe failure or an unresolved placeholder fails the
+   * launch loudly rather than sending a template. */
+  readonly openingProbe?: string;
   /** The shift is one work turn: after the opening exchange and the task
    * prompt, the host never sends continuation check-ins — the agent works
    * until it ends its turn, and that end is the shift's end. The agent is

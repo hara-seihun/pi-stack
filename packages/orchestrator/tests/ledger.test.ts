@@ -266,6 +266,26 @@ describe("account metadata custody", () => {
     expect(() => ledger.run("")).toThrow(/ambiguous/);
   });
 
+  it("round-trips the opening exchange and its per-launch probe", () => {
+    const ledger = Ledger.open(":memory:");
+    ledger.upsertTask({
+      id: "lane",
+      tiers: mix("standard"),
+      demandConstant: 1,
+      prompt: "go",
+      opening: ["What odds on {{problem_title}}?"],
+      openingProbe: "sample-problem --famous",
+    });
+
+    const task = ledger.tasks()[0];
+    expect(task?.opening).toEqual(["What odds on {{problem_title}}?"]);
+    expect(task?.openingProbe).toBe("sample-problem --famous");
+
+    // Merging semantics live in the CLI; the ledger clears what is absent.
+    ledger.upsertTask({ id: "lane", tiers: mix("standard"), demandConstant: 1, prompt: "go" });
+    expect(ledger.tasks()[0]?.openingProbe).toBeUndefined();
+  });
+
   it("refuses to remove an account with work still on it", () => {
     const ledger = Ledger.open(":memory:");
     ledger.upsertAccount({ id: "codex-7", provider: "openai-codex" });
