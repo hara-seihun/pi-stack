@@ -788,6 +788,64 @@ export function taskSet(ledger: Ledger, args: string[]): void {
   console.log(`task ${id} ${current ? "updated" : "created"}`);
 }
 
+/**
+ * Create one pending run for a lane right now, outside the controller's
+ * allocation cycle. The normal path answers "is a launch worth an account's
+ * quota" — demand, share, pacing — and an operator asking for a session has
+ * already answered it. The broker still picks the account when it can; when
+ * pacing refuses (`no-admission` is exactly the state this command exists
+ * for), the tier's configured account list is walked directly and one
+ * session is spent on operator authority. The run lands `pending`, so the
+ * live runner claims it within a tick like any other.
+ */
+export function spawn(ledger: Ledger, args: string[], cfg = loadConfig()): void {
+  const { positional, named } = flags(args);
+  const taskId = positional[0] ?? fail("spawn <task-id> [--tier TIER] [--account ID]");
+  const task = ledger.tasks().find((t) => t.id === taskId) ?? fail(`unknown task ${taskId}`);
+  if (task.prompt === undefined) fail(`task ${taskId} is a pure demand signal; nothing to launch`);
+  const tier = (named.get("tier") ?? task.tiers[0]?.tier ?? fail(`task ${taskId} has no tiers`)) as Tier;
+  if (!TIERS.includes(tier)) fail(`unknown tier ${tier}`);
+  const now = Date.now();
+  let admission = new Broker(ledger, brokerConfig(cfg)).admit(tier, now);
+  let forced = false;
+  if (admission === undefined) {
+    forced = true;
+    const wanted = named.get("account");
+    const accounts = ledger
+      .accounts()
+      .filter((a) => a.fleetCredentialed && (a.cooldownUntil === undefined || a.cooldownUntil <= now));
+    for (const candidate of cfg.tiers[tier] ?? []) {
+      const account = accounts.find(
+        (a) => a.provider === candidate.provider && (wanted === undefined || a.id === wanted),
+      );
+      if (account !== undefined) {
+        admission = {
+          accountId: account.id,
+          provider: candidate.provider,
+          model: candidate.model,
+          ...(candidate.thinking === undefined ? {} : { thinking: candidate.thinking }),
+        };
+        break;
+      }
+    }
+  }
+  if (admission === undefined) {
+    fail(
+      wantedDetail(named.get("account")) +
+        `no ${tier} account is even forceable: every candidate is uncredentialed or cooling down`,
+    );
+  }
+  const runId = ledger.createRun({ taskId, tier, ...admission, at: now });
+  console.log(
+    `spawned ${runId}: ${taskId} (${tier}) on ${admission.accountId} → ${admission.provider}/${admission.model}` +
+      (forced ? " [forced past pacing]" : ""),
+  );
+}
+
+function wantedDetail(account: string | undefined): string {
+  return account === undefined ? "" : `account ${account} unavailable; \u2014 `;
+}
+
 async function main(): Promise<void> {
   const [command, ...args] = process.argv.slice(2);
   const ledger = Ledger.open(LEDGER_PATH);
@@ -835,6 +893,9 @@ async function main(): Promise<void> {
         } else fail("usage: task set|list|delete");
         break;
       }
+      case "spawn":
+        spawn(ledger, args);
+        break;
       case "abort": {
         const runId = args[0] ?? fail("abort <runId>");
         const run = ledger.run(runId) ?? fail(`unknown run ${runId}`);
@@ -900,6 +961,8 @@ async function main(): Promise<void> {
             "                               capacity goes to the named ones",
             `  boost <family> [on|off|halt|N]  scale a family's spend pace (on = ${BOOSTED_MULTIPLIER}x,`,
             "                               halt = 0: no new launches for the family)",
+            "  spawn <task-id> [--tier T] [--account ID]  create one pending run now,",
+            "                               past demand and pacing when they refuse",
             "  abort <runId>                request a running session stop",
             "  kill <runId> [reason]        end a run its session will not stop for",
             "  say <runId> <text...>        deliver an operator message into a live",

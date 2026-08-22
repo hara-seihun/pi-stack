@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { launchControl, sharePercent, taskSet } from "../src/cli.js";
+import { launchControl, sharePercent, spawn, taskSet } from "../src/cli.js";
 import { mix } from "./harness.js";
 import { Ledger } from "../src/ledger/ledger.js";
 
@@ -114,6 +114,50 @@ describe("launch control", () => {
     ledger.deleteTask("survey");
     taskSet(ledger, ["survey", "--tiers", "light", "--demand-constant", "5"]);
     expect(ledger.taskPaused("survey")).toBe(false);
+    ledger.close();
+  });
+});
+
+describe("spawn", () => {
+  const cfg = {
+    tiers: {
+      light: [],
+      standard: [{ provider: "openai-codex", model: "gpt-5.6-sol", thinking: "xhigh" }],
+      expert: [],
+    },
+    providers: { "openai-codex": {} },
+  } as never;
+
+  it("creates a pending run past pacing, on the tier's configured account", () => {
+    // The broker refuses here — no calibration, no bootstrap window — which
+    // is exactly the state the command exists for: an operator asking for a
+    // session now has already decided it is worth an account's quota.
+    const ledger = open();
+    taskSet(ledger, ["frontier", "--tiers", "standard", "--demand-constant", "1", "--prompt", "go"]);
+    ledger.upsertAccount({ id: "codex-1", provider: "openai-codex" });
+    ledger.syncFleetCredentials(new Set(["codex-1"]));
+
+    spawn(ledger, ["frontier"], cfg);
+
+    const runs = ledger.runs({});
+    expect(runs).toHaveLength(1);
+    expect(runs[0]).toMatchObject({
+      taskId: "frontier",
+      state: "pending",
+      accountId: "codex-1",
+      provider: "openai-codex",
+      model: "gpt-5.6-sol",
+      thinking: "xhigh",
+    });
+    ledger.close();
+  });
+
+  it("refuses a signal-only lane and a lane with nothing to force onto", () => {
+    const ledger = open();
+    taskSet(ledger, ["signal", "--tiers", "standard", "--demand-constant", "1"]);
+    expect(() => spawn(ledger, ["signal"], cfg)).toThrow(/pure demand signal/);
+    taskSet(ledger, ["real", "--tiers", "standard", "--demand-constant", "1", "--prompt", "go"]);
+    expect(() => spawn(ledger, ["real"], cfg)).toThrow(/uncredentialed or cooling down/);
     ledger.close();
   });
 });
