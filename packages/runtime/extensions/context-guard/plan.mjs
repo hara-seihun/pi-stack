@@ -7,6 +7,13 @@
  * metadata removed). Messages at or after the watermark — the verbatim tail —
  * cross every cut byte-identical, thinking blocks and signatures included.
  *
+ * The head is a protected span, not just message 0: `state.protect` (default
+ * 1) marks how many leading messages cross every cut byte-identical, tool
+ * results and thinking included. A host that opens a session with a lived
+ * exchange the agent must keep recognizing as its own (the orchestrator's
+ * opening pin) registers that span; eviction, summarization, and the tail
+ * boundary all begin after it.
+ *
  * All functions are pure: state in, state out. The estimator is injected.
  */
 
@@ -38,6 +45,10 @@ export const CFG = {
 
 /** Strip the provider item-id suffix from a tool call id ("call_x|fc_y" -> "call_x"). */
 export const baseCallId = (id) => (typeof id === "string" ? id.split("|")[0] : id);
+
+/** First index eligible for transformation: the protected head span ends here. */
+export const headEnd = (messages, state) =>
+  Math.min(Math.max(1, state.protect ?? 1), messages.length);
 
 const isVerbatimRole = (m) => m.role !== "assistant" && m.role !== "toolResult";
 
@@ -130,20 +141,21 @@ export function noticeMessage(note, timestamp) {
 
 /**
  * Build the transformed view for the current state.
- * Layout: [ head(msg 0) | summary? | notice? | verbatim user-ish from summarized
+ * Layout: [ protected head | summary? | notice? | verbatim user-ish from summarized
  *           span | rung-1/2-transformed old messages | verbatim tail ].
  * Returns null when the state implies no modification.
  */
 export function buildView(messages, state, estimate, note) {
   const { watermark, summary } = state;
-  if (watermark <= 1 && !summary) return null;
-  const out = [messages[0]];
+  const head = headEnd(messages, state);
+  if (watermark <= head && !summary) return null;
+  const out = messages.slice(0, head);
   if (summary) out.push(summary.message);
-  const summaryEnd = summary ? summary.coversUpTo : 1;
-  if (watermark > 1) {
+  const summaryEnd = summary ? Math.max(summary.coversUpTo, head) : head;
+  if (watermark > head) {
     out.push(noticeMessage(summary ? "" : note, messages[0]?.timestamp));
   }
-  for (let i = 1; i < Math.min(watermark, messages.length); i++) {
+  for (let i = head; i < Math.min(watermark, messages.length); i++) {
     const m = messages[i];
     if (i < summaryEnd) {
       if (isVerbatimRole(m)) out.push(m);
@@ -151,7 +163,7 @@ export function buildView(messages, state, estimate, note) {
       out.push(transformOldMessage(m, note, estimate));
     }
   }
-  for (let i = Math.max(watermark, 1); i < messages.length; i++) out.push(messages[i]);
+  for (let i = Math.max(watermark, head); i < messages.length; i++) out.push(messages[i]);
   return out;
 }
 
@@ -168,10 +180,11 @@ export function estimateView(messages, state, estimate, note) {
  * a rungs-1-2 cut (in estimator units; caller applies its calibration ratio).
  */
 export function planCut(messages, state, estimate, cfg, note) {
+  const head = headEnd(messages, state);
   const boundary = Math.max(
-    findTailBoundary(messages, 1, estimate, cfg.tailTokens),
+    findTailBoundary(messages, head, estimate, cfg.tailTokens),
     state.watermark,
-    1,
+    head,
   );
   const landEstimate = estimateView(
     messages,

@@ -94,6 +94,16 @@ export default function (pi) {
     state.headStamp = messages[0]?.timestamp ?? null;
     state.step++;
 
+    // A host that opened this session with a lived exchange registers its
+    // span here (see README § Protected head); those messages cross every
+    // cut byte-identical. Read fresh each event: the host registers the
+    // count only once the opening turns have completed.
+    const sessionId = ctx.sessionManager?.getSessionId?.();
+    state.protect = Math.max(
+      1,
+      (sessionId !== undefined && globalThis.__piContextGuardProtect?.get?.(sessionId)) || 1,
+    );
+
     const transcript = ctx.sessionManager?.getSessionFile?.() ?? undefined;
     const note = transcript ?? "";
     const assistants = assistantMessages(messages);

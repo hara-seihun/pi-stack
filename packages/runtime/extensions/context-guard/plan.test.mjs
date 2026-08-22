@@ -179,3 +179,32 @@ test("repeated cuts deplete: residue grows monotonically across cuts", () => {
   // unevictable residue only accumulates.
   assert.ok(c2.landEstimate >= c1.landEstimate - 5);
 });
+
+test("protected head crosses a cut byte-identical, tool results and thinking included", () => {
+  const msgs = sampleSession(20);
+  // Protect an opening exchange: user, two full turns (assistant+toolResult each).
+  const state = { watermark: 1, summary: null, protect: 5 };
+  const { boundary } = planCut(msgs, state, est, { ...CFG, tailTokens: 3_000 }, "");
+  assert.ok(boundary >= 5, `boundary ${boundary} regressed into the protected span`);
+  const view = buildView(msgs, { ...state, watermark: boundary }, est, "/tmp/s.jsonl");
+  // Same object references: nothing in the protected span was transformed.
+  for (let i = 0; i < 5; i++) assert.equal(view[i], msgs[i]);
+  // The notice lands after the protected span, not inside it.
+  const noticeAt = view.findIndex(
+    (m) => m.role === "user" && m.content[0]?.text?.includes("context-guard notice"),
+  );
+  assert.equal(noticeAt, 5);
+});
+
+test("summary escalation never covers the protected head", () => {
+  const msgs = sampleSession(20);
+  const summary = { message: summaryMessage("handoff", "/tmp/s.jsonl", 9), coversUpTo: 3 };
+  // A summary claiming to cover part of the protected span is clamped: the
+  // protected messages still cross verbatim, ahead of the summary message.
+  const view = buildView(msgs, { watermark: 15, summary, protect: 5 }, est, "");
+  for (let i = 0; i < 5; i++) assert.equal(view[i], msgs[i]);
+  assert.match(view[5].content[0].text, /handoff summary/);
+  // No protected message appears twice (the summarized-span walk starts at
+  // the head boundary, not at the summary's claimed start).
+  assert.equal(view.filter((m) => m === msgs[2]).length, 1);
+});

@@ -55,6 +55,17 @@ them.
   provider-independent hard-compaction message replaces the same span. The
   original user messages, 50k verbatim tail, and transcript pointer remain;
   cap enforcement never depends on a second successful provider call.
+- **Protected head:** a host can register a leading span of messages that
+  crosses every cut byte-identical — tool results, thinking, and signatures
+  included — by setting `globalThis.__piContextGuardProtect` (a
+  `Map<sessionId, messageCount>`) before the first cut. Eviction,
+  summarization, and the tail boundary all begin after the span; the guard
+  reads the map fresh at each context event and defaults to protecting only
+  message 0. The registrant is the pi-orchestrator's opening-pin extension:
+  frontier lanes open with a lived exchange the agent must keep recognizing
+  as its own words, and an evicted tool result inside it reads as someone
+  else's context injection. The floor alert already covers the pathological
+  case of a protected head too large for the trigger.
 - **Verbatim tail:** the most recent **50k billed** tokens cross every cut
   byte-identical — thinking blocks, signatures, and item IDs included. The
   planner accumulates estimator units, so the guard divides the tail budget by

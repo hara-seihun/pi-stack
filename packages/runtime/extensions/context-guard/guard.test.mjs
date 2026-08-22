@@ -251,3 +251,24 @@ test("PI_CONTEXT_GUARD=off disables everything", () => {
     delete process.env.PI_CONTEXT_GUARD;
   }
 });
+
+test("a registered protected head crosses the cut byte-identical", async () => {
+  // The orchestrator's opening-pin extension registers the lived opening
+  // exchange's span under the session id; the guard must carry those
+  // messages — tool results and thinking included — through every cut.
+  (globalThis.__piContextGuardProtect ??= new Map()).set("sess-test", 5);
+  try {
+    const h = makeHarness();
+    const messages = session(12);
+    const result = await h.fire(messages);
+    assert.ok(result?.messages, "expected a cut");
+    for (let i = 0; i < 5; i++) {
+      assert.deepEqual(result.messages[i], messages[i], `protected message ${i} was transformed`);
+    }
+    // The opening's tool result survives with its body, not a placeholder.
+    const protectedToolResult = result.messages.find((m) => m.role === "toolResult");
+    assert.equal(protectedToolResult.content[0].text, big);
+  } finally {
+    globalThis.__piContextGuardProtect.delete("sess-test");
+  }
+});
