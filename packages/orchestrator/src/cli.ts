@@ -388,6 +388,7 @@ async function runner(ledger: Ledger, args: string[]): Promise<void> {
   for (;;) {
     const report = live.tick();
     for (const spec of report.claimed) console.log(`claimed ${spec.runId}: ${spec.taskId}`);
+    for (const runId of report.stalled) console.log(`tore down ${runId}: session stopped`);
     if (live.drained()) {
       console.log(`runner ${runnerId} drained, exiting`);
       return;
