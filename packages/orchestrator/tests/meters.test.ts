@@ -10,6 +10,7 @@ import {
   AnthropicMeterSampler,
   parseAnthropicUsage,
 } from "../src/meters/anthropic.js";
+import { MeterLog } from "../src/meters/log.js";
 import { anthropicMeterReadings } from "../src/extension/usage-logger.js";
 
 const dirs: string[] = [];
@@ -539,5 +540,58 @@ describe("anthropic meter sampler", () => {
     });
 
     expect(await sampler.sample()).toEqual([]);
+  });
+});
+
+describe("meter logging", () => {
+  function sinkLog(quiet: string[] = []) {
+    const lines: string[] = [];
+    return {
+      lines,
+      log: new MeterLog(
+        { info: (line) => lines.push(`out ${line}`), error: (line) => lines.push(`err ${line}`) },
+        quiet,
+      ),
+    };
+  }
+
+  it("announces a gap once and again when it closes", () => {
+    const { lines, log } = sinkLog();
+    for (let poll = 0; poll < 5; poll += 1) {
+      log.report({ accountId: "anthropic-2", outcome: "expired-credential" });
+    }
+    log.report({ accountId: "anthropic-2", meterId: "anthropic-5h", outcome: "recorded", usedPercent: 12 });
+    log.report({ accountId: "anthropic-2", outcome: "expired-credential" });
+
+    expect(lines).toEqual([
+      "err meter anthropic-2/?: expired-credential",
+      "out meter anthropic-2/anthropic-5h: readable again (was expired-credential)",
+      "out meter anthropic-2/anthropic-5h: 12% used",
+      "err meter anthropic-2/?: expired-credential",
+    ]);
+  });
+
+  it("reports a gap that changes, and the recovery of the meter that had it", () => {
+    const { lines, log } = sinkLog();
+    const cursor = { accountId: "cursor", meterId: "monthly" } as const;
+    log.report({ ...cursor, outcome: "request-failed", detail: "HTTP 500" });
+    log.report({ ...cursor, outcome: "request-failed", detail: "HTTP 502" });
+    log.report({ ...cursor, outcome: "unreadable-response" });
+    log.report({ ...cursor, outcome: "recorded", usedPercent: 40 });
+
+    expect(lines).toEqual([
+      "err meter cursor/monthly: request-failed (HTTP 500)",
+      "err meter cursor/monthly: unreadable-response",
+      "out meter cursor/monthly: readable again (was unreadable-response)",
+      "out meter cursor/monthly: 40% used",
+    ]);
+  });
+
+  it("keeps resting states silent", () => {
+    const { lines, log } = sinkLog(["no-credential"]);
+    log.report({ accountId: "anthropic-3", outcome: "not-due" });
+    log.report({ accountId: "anthropic-3", outcome: "no-credential" });
+
+    expect(lines).toEqual([]);
   });
 });

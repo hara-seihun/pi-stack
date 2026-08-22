@@ -1,7 +1,7 @@
 #!/usr/bin/env node
 import { homedir, hostname } from "node:os";
 import { join } from "node:path";
-import { realpathSync } from "node:fs";
+import { readFileSync, realpathSync } from "node:fs";
 import { pathToFileURL } from "node:url";
 import { BOOSTED_MULTIPLIER } from "./boost.js";
 import { Broker } from "./broker/broker.js";
@@ -15,6 +15,7 @@ import { brokerConfig, defaultConfigPath, loadConfig } from "./config.js";
 import { CURSOR_PROVIDER, CursorMeterSampler } from "./meters/cursor.js";
 import { CODEX_PROVIDER, CodexMeterSampler } from "./meters/codex.js";
 import { AnthropicMeterSampler } from "./meters/anthropic.js";
+import { MeterLog } from "./meters/log.js";
 import { VoiceBroker } from "./voice/broker.js";
 import { createVoiceServer } from "./voice/server.js";
 import type { LaunchSpec } from "./host/types.js";
@@ -268,34 +269,18 @@ async function daemon(ledger: Ledger, args: string[]): Promise<void> {
   // covers the accounts in this user's custody, and each interactive user's
   // own pi sessions poll theirs.
   const anthropicSampler = new AnthropicMeterSampler(ledger, { agentDir: agentDirPath() });
+  const meterLog = new MeterLog();
+  // `no-credential` is the ordinary state of an account held in another
+  // custody domain, not a gap this controller can close.
+  const anthropicLog = new MeterLog(undefined, ["no-credential"]);
   console.log(`controller started (config: ${defaultConfigPath()})`);
   for (;;) {
     try {
       for (const sample of (await cursorSampler?.sample()) ?? []) {
-        if (sample.outcome === "recorded") {
-          console.log(`meter ${sample.accountId}/${cursorMeter?.id}: ${sample.usedPercent}% used`);
-        } else if (sample.outcome !== "not-due") {
-          console.error(`meter ${sample.accountId}/${cursorMeter?.id}: ${sample.outcome}${sample.detail ? ` (${sample.detail})` : ""}`);
-        }
+        meterLog.report({ ...sample, meterId: cursorMeter?.id });
       }
-      for (const sample of (await codexSampler?.sample()) ?? []) {
-        const meter = `${sample.accountId}/${sample.meterId ?? "?"}`;
-        if (sample.outcome === "recorded") {
-          console.log(`meter ${meter}: ${sample.usedPercent}% used`);
-        } else if (sample.outcome !== "not-due") {
-          console.error(`meter ${meter}: ${sample.outcome}${sample.detail ? ` (${sample.detail})` : ""}`);
-        }
-      }
-      for (const sample of await anthropicSampler.sample()) {
-        const meter = `${sample.accountId}/${sample.meterId ?? "?"}`;
-        if (sample.outcome === "recorded") {
-          console.log(`meter ${meter}: ${sample.usedPercent}% used`);
-        } else if (sample.outcome !== "not-due" && sample.outcome !== "no-credential") {
-          // `no-credential` is the ordinary state of an account held in
-          // another custody domain, not a fault worth logging every tick.
-          console.error(`meter ${meter}: ${sample.outcome}${sample.detail ? ` (${sample.detail})` : ""}`);
-        }
-      }
+      for (const sample of (await codexSampler?.sample()) ?? []) meterLog.report(sample);
+      for (const sample of await anthropicSampler.sample()) anthropicLog.report(sample);
       const report = await controller.tick();
       for (const run of report.created) {
         console.log(`created ${run.id.slice(0, 8)}: ${run.taskId} -> ${run.accountId} (${run.model})`);
@@ -496,11 +481,39 @@ function sharedCodexAuth(): SharedCodexAuth {
   });
 }
 
+/**
+ * How the stored credential for an account looks from this process, for
+ * `account list`. An account whose access token has expired still works —
+ * the next pi session that runs it refreshes on use — but nothing else can
+ * read its meters until then, so an idle or cooling account can sit blind
+ * for a day. That is worth being able to see without reading the journal.
+ */
+function credentialState(accountId: string, now = Date.now()): string | undefined {
+  for (const path of [defaultSharedCodexAuthPath(LEDGER_PATH), join(agentDirPath(), "auth.json")]) {
+    let stored: unknown;
+    try {
+      stored = (JSON.parse(readFileSync(path, "utf8")) as Record<string, unknown>)[accountId];
+    } catch {
+      continue;
+    }
+    if (stored === null || typeof stored !== "object") continue;
+    const credential = stored as { type?: unknown; expires?: unknown };
+    if (credential.type !== "oauth") return "credential=api-key";
+    if (typeof credential.expires !== "number") return "credential=oauth";
+    return credential.expires <= now
+      ? `credential=expired-at=${new Date(credential.expires).toISOString()}`
+      : `credential_expires=${new Date(credential.expires).toISOString()}`;
+  }
+  return undefined;
+}
+
 async function accountCommand(ledger: Ledger, args: string[]): Promise<void> {
   const [sub, ...rest] = args;
   if (sub === "list") {
     for (const a of ledger.accounts()) {
       const parts = [`provider=${a.provider}`, `custody=${a.shared ? "shared" : a.domain}`];
+      const credential = credentialState(a.id);
+      if (credential !== undefined) parts.push(credential);
       if (a.label !== undefined) parts.push(`label=${a.label}`);
       if (a.accessUntil !== undefined) parts.push(`access_until=${new Date(a.accessUntil).toISOString()}`);
       if (a.cooldownUntil !== undefined && a.cooldownUntil > Date.now())

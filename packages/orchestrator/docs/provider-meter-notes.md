@@ -20,6 +20,16 @@ readings should be collected and interpreted here.
   an independent refresh revokes the token family out from under pi. Read
   `auth.json` access tokens without refreshing and record an expired token as
   a gap.
+- Because of that rule, only a pi session keeps a credential alive, so an
+  account nothing is running goes blind: an Anthropic access token lasts about
+  nine hours, and an account in a day-long cooldown outlives its token with
+  nothing able to renew it. Expect `expired-credential` on idle accounts, and
+  expect it to clear by itself when the account next runs. `account list`
+  prints each credential's expiry so this is visible without the journal, and
+  a gap is announced once when it opens rather than on every poll.
+- Repairing one by hand is a deliberate act, not a sampler behaviour: refresh
+  through `AuthStorage.modify` from pi's own package, which takes the same
+  lock a session takes, and only when no session is running that account.
 
 ## Normalization
 
