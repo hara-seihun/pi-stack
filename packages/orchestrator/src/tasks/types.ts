@@ -53,6 +53,13 @@ export interface TaskSpec {
    * never ends a shift, because "I cannot see the queue" is not "the queue
    * is empty". */
   readonly exitWhenDrained?: boolean;
+  /** URL of a doctrine document the host pins into every session's system
+   * prompt for this lane. The task prompt is the first user message and is
+   * the first thing compaction summarizes away; doctrine that must hold for
+   * a whole shift — the ledger's attack guide, whose anti-ladder rules are
+   * binding — survives only in the system prompt. Fetched at launch so
+   * sessions carry the current text. */
+  readonly doctrineUrl?: string;
 }
 
 export interface DemandState {

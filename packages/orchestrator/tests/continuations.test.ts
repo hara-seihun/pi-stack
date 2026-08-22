@@ -29,7 +29,11 @@ import { SESSION_BUDGET_MS } from "../src/host/pi-host.js";
  *  - cleanup-sol-batch: budget exhaustion during legitimate mass corpus
  *    repair (run bf44aeda);
  *  - pr-sol-empty-queue: lane drained, agent reporting productive=false to an
- *    empty queue (run 7a54c9d3).
+ *    empty queue (run 7a54c9d3);
+ *  - frontier-census-walk: operator abort for ladder climbing (run 1d00fe29,
+ *    "aborted by operator (ladder climbing)") — the slow walker that files
+ *    only 3 per turn but marches a parameter through its titles, which volume
+ *    thresholds alone missed.
  */
 
 const FIXTURES = join(dirname(fileURLToPath(import.meta.url)), "fixtures", "shifts");
@@ -134,6 +138,17 @@ describe("check-ins replayed over the night of 2026-08-21", () => {
     expect(checkins.every((checkin) => checkin.cls !== "consolidate")).toBe(true);
   });
 
+  it("catches the slow census walker by its titles, where volume thresholds miss it", () => {
+    // 3 filings per turn stays under every count threshold, but "…through
+    // order seventeen" → "…at order eighteen" is the same rung count in a
+    // different font. The operator aborted the real run by hand; the
+    // generator should be the one to say it now.
+    const checkins = replay("frontier-census-walk.jsonl", "math-frontier");
+    expect(checkins.length).toBeGreaterThanOrEqual(1);
+    expect(checkins.some((checkin) => checkin.cls === "consolidate")).toBe(true);
+    expect(checkins.every((checkin) => checkin.latest.submissions.length < 5)).toBe(true);
+  });
+
   it("gives the empty-queue shift honest permission to rest instead of re-goading it", () => {
     const checkins = replay("pr-sol-empty-queue.jsonl", "fast-math-pr");
     // The real agent re-polled an empty queue and reported productive=false.
@@ -152,6 +167,7 @@ describe("check-ins replayed over the night of 2026-08-21", () => {
       ["review-opus.jsonl", "math-review"],
       ["cleanup-sol-batch.jsonl", "math-cleanup"],
       ["pr-sol-empty-queue.jsonl", "fast-math-pr"],
+      ["frontier-census-walk.jsonl", "math-frontier"],
     ];
     for (const [fixture, taskId] of shifts) {
       for (const checkin of replay(fixture, taskId)) {

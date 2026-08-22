@@ -163,6 +163,15 @@ A task is an action plus two observable predicates: **demand** (is there
 work right now?) and, eventually, completion. Three launch-side fields
 describe scheduling:
 
+- `doctrineUrl` (`task set … --doctrine-url URL`): a document the host
+  fetches at launch and pins into every session's *system prompt* for the
+  lane (`appendSystemPrompt`), with a 15-minute cache that tolerates
+  transient fetch failures once a copy exists and fails the launch when no
+  copy has ever been fetchable. The task prompt is the first user message,
+  which is the first thing compaction summarizes away; doctrine that must
+  bind for a whole shift — the math ledger's attack guide, whose anti-ladder
+  rules override even the session's opening instructions — survives only in
+  the system prompt, which compaction preserves.
 - `demand`: a constant or a cheap read-only probe command whose last stdout
   line is a work-unit count. `0` means no work; agents are never launched to
   discover idleness. Results are cached with a TTL and invalidated by task
@@ -426,7 +435,11 @@ two consecutive turns report nothing, or the lane declares itself drained
 Each re-prompt is a check-in
 (`src/host/continuations.ts`) generated from what the shift actually did,
 observed from the session's own tool stream: a frontier turn that filed a
-pile of near-adjacent ledger entries gets a warm, specific ask to
+pile of near-adjacent ledger entries — caught by volume, by repair-chain
+titles, or by the title signatures of a parameter walk (several titles
+sharing a number-bearing bigram once numerals are normalized, or titles
+that are mostly the same words), all thresholds calibrated against that
+night's real shifts — gets a warm, specific ask to
 consolidate them into the theorem they are shadows of (the night of
 2026-08-21 showed what unconditional praise trains — one shift answered its
 check-ins with 1, 4, 5, 4, 7, 2, 2, 8, 12, 21 filings); a turn of deep quiet

@@ -229,6 +229,16 @@ ALTER TABLE task ADD COLUMN exit_when_drained INTEGER NOT NULL DEFAULT 0
   CHECK (exit_when_drained IN (0, 1));
 `;
 
+/** A lane can pin a doctrine document into its sessions' system prompts.
+ * The task prompt is the first user message, which is exactly what
+ * compaction summarizes away first; doctrine a session must hold for a
+ * whole long shift (the ledger's attack guide above all) has to live in the
+ * system prompt, which compaction preserves. The column holds a URL: the
+ * host fetches it at launch so sessions always carry the current text. */
+const DOCTRINE_URL_SCHEMA = `
+ALTER TABLE task ADD COLUMN doctrine_url TEXT;
+`;
+
 /** Token burn becomes attributable. `usage_event.source` existed from the
  * first schema but the logger wrote the literal 'machine' for every session,
  * so the fleet's burn and the operator's own were one undifferentiated
@@ -282,6 +292,7 @@ const MIGRATIONS: readonly string[] = [
   EXIT_WHEN_DRAINED_SCHEMA,
   RUN_SESSION_SCHEMA,
   RUN_PROGRESS_SCHEMA,
+  DOCTRINE_URL_SCHEMA,
 ];
 
 export type AccountDomain = "interactive" | "orchestrator";
@@ -735,8 +746,8 @@ export class Ledger {
     this.db
       .prepare(
         `INSERT INTO task (id, demand_command, demand_constant, gate, tiers, share, prompt, cwd,
-                           exit_when_drained, created_at)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                           exit_when_drained, doctrine_url, created_at)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
          ON CONFLICT (id) DO UPDATE SET
            demand_command = excluded.demand_command,
            demand_constant = excluded.demand_constant,
@@ -745,7 +756,8 @@ export class Ledger {
            share = excluded.share,
            prompt = excluded.prompt,
            cwd = excluded.cwd,
-           exit_when_drained = excluded.exit_when_drained`,
+           exit_when_drained = excluded.exit_when_drained,
+           doctrine_url = excluded.doctrine_url`,
       )
       .run(
         t.id,
@@ -757,6 +769,7 @@ export class Ledger {
         t.prompt ?? null,
         t.cwd ?? null,
         t.exitWhenDrained ? 1 : 0,
+        t.doctrineUrl ?? null,
         Date.now(),
       );
   }
@@ -770,7 +783,7 @@ export class Ledger {
     const rows = this.db
       .prepare(
         `SELECT id, demand_command, demand_constant, gate, tiers, share, prompt, cwd,
-                exit_when_drained
+                exit_when_drained, doctrine_url
          FROM task ORDER BY id`,
       )
       .all() as {
@@ -783,6 +796,7 @@ export class Ledger {
       prompt: string | null;
       cwd: string | null;
       exit_when_drained: number;
+      doctrine_url: string | null;
     }[];
     return rows.map((r) => ({
       id: r.id,
@@ -794,6 +808,7 @@ export class Ledger {
       prompt: r.prompt ?? undefined,
       cwd: r.cwd ?? undefined,
       exitWhenDrained: r.exit_when_drained !== 0,
+      doctrineUrl: r.doctrine_url ?? undefined,
     }));
   }
 

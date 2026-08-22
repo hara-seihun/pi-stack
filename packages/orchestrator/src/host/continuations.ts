@@ -155,12 +155,85 @@ function submissionsIn(name: string, args: unknown): Submission[] {
  * peaked at 4 filings in a turn and 4 in the whole shift, while the ladder
  * shifts ran 5–21 per turn. A repair-of-a-repair title is proof debugging
  * landing in the corpus at any volume.
+ *
+ * Volume alone misses the slow walker: the operator-aborted census shift
+ * filed only 3 per turn, but its titles walked a parameter — "…through
+ * order seventeen", "…at order eighteen" — and every aborted ladder shift
+ * shows one of two title signatures the deep-work shift never does. A
+ * number walk: several titles sharing the same number-bearing bigram once
+ * numerals and spelled numbers are normalized (ladder shifts 5–6 titles,
+ * deep work 1). Near-duplicates: titles that are mostly the same words
+ * (ladder shifts 4–13 titles with a ≥0.7-Jaccard partner, deep work 0).
  */
 const BURST_TURN = 5;
 const GRIND_TURN = 3;
 const GRIND_SHIFT = 15;
+const WALK_TITLES = 3;
+const NEAR_DUP_TITLES = 5;
+const NEAR_DUP_JACCARD = 0.7;
 const REPAIRISH = /^\s*(?:(?:scope|second|third|final)\s+)?repair\b/i;
 const LATE_FRACTION = 0.85;
+
+const NUMBER_WORDS = new Set(
+  (
+    "zero one two three four five six seven eight nine ten eleven twelve " +
+    "thirteen fourteen fifteen sixteen seventeen eighteen nineteen twenty " +
+    "thirty forty fifty sixty seventy eighty ninety hundred thousand"
+  ).split(" "),
+);
+
+/** Title tokens with every number — digit runs, digit-bearing words like
+ * "C4-free", spelled numbers — collapsed to '#', so a parameter walk reads
+ * as repetition. */
+function titleTokens(title: string): string[] {
+  const tokens: string[] = [];
+  for (const raw of title.toLowerCase().split(/[^a-z0-9]+/)) {
+    if (raw === "") continue;
+    tokens.push(/[0-9]/.test(raw) || NUMBER_WORDS.has(raw) ? "#" : raw);
+  }
+  return tokens;
+}
+
+/** Widest family of titles sharing one number-bearing bigram ("order #",
+ * "distance #"): the census-walk signature. */
+function numberWalkWidth(titles: readonly string[]): number {
+  const width = new Map<string, number>();
+  let widest = 0;
+  for (const title of titles) {
+    const tokens = titleTokens(title);
+    const grams = new Set<string>();
+    for (let i = 0; i + 1 < tokens.length; i++) {
+      if (tokens[i] === "#" || tokens[i + 1] === "#") grams.add(`${tokens[i]} ${tokens[i + 1]}`);
+    }
+    for (const gram of grams) {
+      const seen = (width.get(gram) ?? 0) + 1;
+      width.set(gram, seen);
+      if (seen > widest) widest = seen;
+    }
+  }
+  return widest;
+}
+
+/** How many titles have a near-duplicate partner: same statement with one
+ * case, qualifier, or parameter swapped. */
+function nearDupCount(titles: readonly string[]): number {
+  const sets = titles.map((title) => new Set(titleTokens(title).filter((t) => t.length > 2)));
+  const laddery = new Set<number>();
+  for (let i = 0; i < sets.length; i++) {
+    for (let j = i + 1; j < sets.length; j++) {
+      const a = sets[i] as Set<string>;
+      const b = sets[j] as Set<string>;
+      let both = 0;
+      for (const token of a) if (b.has(token)) both++;
+      const union = a.size + b.size - both;
+      if (union > 0 && both / union >= NEAR_DUP_JACCARD) {
+        laddery.add(i);
+        laddery.add(j);
+      }
+    }
+  }
+  return laddery.size;
+}
 
 /** Lanes whose filings are research output, where a filing burst means the
  * working diary is landing in the corpus. Queue lanes (review, cleanup,
@@ -191,6 +264,17 @@ function factsClass(taskId: string, turns: readonly TurnFacts[]): Exclude<ShiftC
       (filed >= 2 && repairChain(turns))
     ) {
       return "consolidate";
+    }
+    if (filed >= 2) {
+      const titles: string[] = [];
+      for (const turn of turns) {
+        for (const submission of turn.submissions) {
+          if (submission.title !== undefined) titles.push(submission.title);
+        }
+      }
+      if (numberWalkWidth(titles) >= WALK_TITLES || nearDupCount(titles) >= NEAR_DUP_TITLES) {
+        return "consolidate";
+      }
     }
   }
   if (latest.reportedUnproductive) return "quiet";

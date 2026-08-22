@@ -1,4 +1,10 @@
-import { createAgentSession, type AgentSession } from "@earendil-works/pi-coding-agent";
+import {
+  createAgentSession,
+  DefaultResourceLoader,
+  type AgentSession,
+} from "@earendil-works/pi-coding-agent";
+import { homedir } from "node:os";
+import { join } from "node:path";
 import { Type } from "typebox";
 import type { HostEvents, HostManager, HostRunResult, LaunchSpec } from "./types.js";
 import { continuationFor, ShiftObserver } from "./continuations.js";
@@ -66,8 +72,40 @@ export class PiHost implements HostManager {
       /** Session factory. Defaults to the pi SDK; a test supplies its own to
        * exercise the shift loop without a provider. */
       readonly openSession?: typeof createAgentSession;
+      /** Doctrine fetcher. Defaults to HTTP fetch; a test supplies its own. */
+      readonly fetchDoctrine?: (url: string) => Promise<string>;
     },
   ) {}
+
+  /** Last good copy of each doctrine document, so a transient fetch failure
+   * mid-week does not strip doctrine from launches. A URL that has never
+   * been fetched successfully fails the launch instead: a frontier session
+   * without its binding anti-ladder doctrine is exactly the run the night of
+   * 2026-08-21 taught us not to start. */
+  private readonly doctrines = new Map<string, { content: string; fetchedAt: number }>();
+  private static readonly DOCTRINE_TTL_MS = 15 * 60_000;
+
+  private async doctrine(url: string): Promise<string> {
+    const cached = this.doctrines.get(url);
+    if (cached !== undefined && Date.now() - cached.fetchedAt < PiHost.DOCTRINE_TTL_MS) {
+      return cached.content;
+    }
+    try {
+      const fetcher =
+        this.options.fetchDoctrine ??
+        (async (target: string): Promise<string> => {
+          const response = await fetch(target);
+          if (!response.ok) throw new Error(`${target}: HTTP ${response.status}`);
+          return response.text();
+        });
+      const content = await fetcher(url);
+      this.doctrines.set(url, { content, fetchedAt: Date.now() });
+      return content;
+    } catch (thrown) {
+      if (cached !== undefined) return cached.content;
+      throw new Error(`doctrine unavailable: ${String(thrown)}`);
+    }
+  }
 
   launch(spec: LaunchSpec): void {
     const transcript =
@@ -168,9 +206,30 @@ export class PiHost implements HostManager {
     // provider (cursor) exists only inside the session's own model runtime,
     // because the extension that registers it is loaded per session.
     const preresolved = this.options.resolveModel(spec);
+    // Doctrine rides the system prompt because the task prompt does not
+    // survive compaction: it is the first user message, which is the first
+    // thing summarized away, and the night of 2026-08-21 showed lanes obeying
+    // whatever voice was still in context once the opening instructions were
+    // gone. The system prompt is the one region compaction preserves.
+    let resourceLoader: DefaultResourceLoader | undefined;
+    if (spec.doctrineUrl !== undefined) {
+      const doctrine = await this.doctrine(spec.doctrineUrl);
+      resourceLoader = new DefaultResourceLoader({
+        cwd: spec.cwd ?? process.cwd(),
+        agentDir: this.options.agentDir ?? join(homedir(), ".pi", "agent"),
+        appendSystemPrompt: [
+          `# Lane doctrine (pinned from ${spec.doctrineUrl})\n\n` +
+            "This document is pinned into your system prompt so it stays with " +
+            "you even after context compaction. It is binding for this lane.\n\n" +
+            doctrine,
+        ],
+      });
+      await resourceLoader.reload();
+    }
     const { session } = await (this.options.openSession ?? createAgentSession)({
       cwd: spec.cwd,
       agentDir: this.options.agentDir,
+      ...(resourceLoader === undefined ? {} : { resourceLoader }),
       // The SDK's Model type is provider-internal; the resolver returns one.
       model: preresolved as never,
       thinkingLevel: spec.thinking as never,

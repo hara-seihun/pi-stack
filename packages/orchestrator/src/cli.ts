@@ -735,6 +735,7 @@ export function taskSet(ledger: Ledger, args: string[]): void {
     prompt: pick("prompt", current?.prompt),
     cwd: pick("cwd", current?.cwd),
     ...(exitWhenDrained === undefined ? {} : { exitWhenDrained }),
+    doctrineUrl: pick("doctrine-url", current?.doctrineUrl),
   });
   console.log(`task ${id} ${current ? "updated" : "created"}`);
 }
@@ -836,6 +837,7 @@ async function main(): Promise<void> {
             "                               by lane, account, model, and largest session",
             "  task set <id> --tiers light:20,standard [--share N] [--demand-command CMD | --demand-constant N]",
             "               [--gate EXPR] [--prompt TEXT] [--cwd DIR] [--exit-when-drained true|false]",
+            "               [--doctrine-url URL]   pin a fetched document into the lane's system prompts",
             "  task list | task delete <id>",
             "  account list | account add <id> --provider F [--label L] [--domain D] [--shared true]",
             "  account remove <id>          drop an account that left this machine",

@@ -12,6 +12,10 @@ export interface LaunchSpec {
   readonly model: string;
   readonly thinking: string | undefined;
   readonly accountId: string;
+  /** URL of doctrine to pin into the session's system prompt, where it
+   * survives compaction; the task prompt, as the first user message, does
+   * not. */
+  readonly doctrineUrl?: string;
 }
 
 /** Result a host reports when a session ends. */
