@@ -423,15 +423,22 @@ the time it would apply. The host therefore re-prompts the same live session
 until the session budget (4h) is spent, the turn errors, an operator aborts,
 two consecutive turns report nothing, or the lane declares itself drained
 (`exitWhenDrained`, checked against current demand before each re-prompt).
-Each lane has an ordered sequence of check-in messages
-(`src/host/continuations.ts`), written in the operator's voice: the first
-quiet turn gets the first message, the next gets the second, cycling when
-the sequence runs out. A single message repeated at every stop reads as a
-timer; a sequence that notices how long the shift has run reads as a
-collaborator, and its later messages give honest permission to stop. The
-frontier sequence opens with the operator's own message verbatim and talks
-mathematics; review, cleanup, provenance, and code lanes each get wording
-for their own work, and unregistered lanes get a generic sequence. Work
+Each re-prompt is a check-in
+(`src/host/continuations.ts`) generated from what the shift actually did,
+observed from the session's own tool stream: a frontier turn that filed a
+pile of near-adjacent ledger entries gets a warm, specific ask to
+consolidate them into the theorem they are shadows of (the night of
+2026-08-21 showed what unconditional praise trains — one shift answered its
+check-ins with 1, 4, 5, 4, 7, 2, 2, 8, 12, 21 filings); a turn of deep quiet
+work gets the operator's encouragement, her own first message verbatim; a
+turn with nothing in it, or one that reported `productive=false`, gets
+honest permission to stop; a shift near its budget is asked to land what it
+holds. Queue lanes (review, cleanup, provenance) submit in bulk as their
+job and are never steered to consolidate. The warmth is load-bearing —
+agents perform worse under terse or cold direction — so correction arrives
+as an upgrade, never a scolding, and the replay tests
+(`tests/continuations.test.ts`) hold every generated message to that bar
+against distilled transcripts of that night's real shifts. Work
 already banked in a
 `task_complete` report survives a late error: the report is the run's record,
 and only a shift that banked nothing reports as an error run.

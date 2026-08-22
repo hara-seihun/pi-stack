@@ -1,7 +1,7 @@
 import { createAgentSession, type AgentSession } from "@earendil-works/pi-coding-agent";
 import { Type } from "typebox";
 import type { HostEvents, HostManager, HostRunResult, LaunchSpec } from "./types.js";
-import { continuationFor } from "./continuations.js";
+import { continuationFor, ShiftObserver } from "./continuations.js";
 import { RunTranscript } from "./transcript.js";
 
 /**
@@ -136,6 +136,9 @@ export class PiHost implements HostManager {
   private async run(spec: LaunchSpec, transcript: RunTranscript | undefined): Promise<HostRunResult> {
     let report: CompletionReport | undefined;
     let reports = 0;
+    // Check-ins are generated from what the shift actually did; the observer
+    // accumulates per-turn facts from the session's own tool stream.
+    const observer = new ShiftObserver();
     const taskComplete = {
       name: "task_complete",
       label: "Complete task",
@@ -156,6 +159,7 @@ export class PiHost implements HostManager {
       execute: async (_id: string, params: CompletionReport) => {
         report = params;
         reports++;
+        observer.reportFiled(params.productive !== false);
         return { content: [{ type: "text" as const, text: "Report recorded." }], details: undefined };
       },
     };
@@ -237,6 +241,13 @@ export class PiHost implements HostManager {
       if (transcript !== undefined) this.transcripts.set(spec.runId, transcript);
       const unsubscribe = transcript === undefined ? undefined : this.publish(transcript, session);
       if (unsubscribe !== undefined) disposers.push(unsubscribe);
+      disposers.push(
+        session.subscribe((event: any) => {
+          if (event.type === "tool_execution_start") {
+            observer.toolCall(String(event.toolName ?? "tool"), event.args);
+          }
+        }),
+      );
       const stopProgress = this.trackProgress(spec.runId, session);
       disposers.push(stopProgress);
       transcript?.append("user", { text: spec.prompt });
@@ -245,7 +256,9 @@ export class PiHost implements HostManager {
         HEARTBEAT_MS,
       );
       disposers.push(() => clearInterval(heartbeat));
-      const deadline = Date.now() + (this.options.sessionBudgetMs ?? SESSION_BUDGET_MS);
+      const budgetMs = this.options.sessionBudgetMs ?? SESSION_BUDGET_MS;
+      const shiftStart = Date.now();
+      const deadline = shiftStart + budgetMs;
       // A launch is a shift, not a single turn. The host keeps prompting the
       // same session — same context, same working directory, same trail —
       // until the session's budget runs out, the turn fails, an operator
@@ -255,10 +268,19 @@ export class PiHost implements HostManager {
       let idle = 0;
       for (let turn = 0; ; turn++) {
         const before = reports;
-        // The lane's ordered check-in sequence (see continuations.ts): each
-        // quiet turn gets the next message, so the shift reads as a
-        // collaborator following along rather than a timer firing.
-        const message = turn === 0 ? spec.prompt : continuationFor(spec.taskId, turn);
+        // The lane's check-in (see continuations.ts) is generated from the
+        // observed shift, so the message answers what the agent actually did
+        // rather than firing a fixed sequence on a timer.
+        const message =
+          turn === 0
+            ? spec.prompt
+            : continuationFor({
+                taskId: spec.taskId,
+                turn,
+                elapsedMs: Date.now() - shiftStart,
+                budgetMs,
+                turns: observer.turns(),
+              });
         if (turn > 0) transcript?.append("user", { text: message });
         if (await interrupted(session.prompt(message))) {
           return { state: "aborted", detail: "session killed" };
@@ -283,6 +305,7 @@ export class PiHost implements HostManager {
           if (report === undefined) return { state: "aborted", detail: "session aborted" };
           break;
         }
+        observer.endTurn();
         idle = reports > before ? 0 : idle + 1;
         if (idle >= MAX_IDLE_TURNS || Date.now() >= deadline) break;
         // A queue lane can empty its queue mid-shift, and a continuation

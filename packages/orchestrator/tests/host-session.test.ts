@@ -1,5 +1,5 @@
 import { describe, expect, it, vi } from "vitest";
-import { continuationFor } from "../src/host/continuations.js";
+import { continuationFor, type TurnFacts } from "../src/host/continuations.js";
 import { PiHost } from "../src/host/pi-host.js";
 import type { HostRunResult, LaunchSpec } from "../src/host/types.js";
 
@@ -143,13 +143,13 @@ describe("host shift loop", () => {
 
     expect(prompts).toHaveLength(4);
     expect(prompts[0]).toBe("Attack the central problem.");
-    // The operator's own first message, verbatim, then her follow-ups in
-    // order: repeated identical nudges are what the sequence replaces.
+    // The operator's own first message, verbatim, then her follow-ups while
+    // the work flows — and honest permission to stop once a turn is quiet.
     expect(prompts[1]).toContain("take a step back");
     expect(prompts[1]).toContain("attack guide on the MCP");
     expect(prompts[2]).toContain("me again");
     expect(prompts[2]).not.toBe(prompts[1]);
-    expect(prompts[3]).toContain("translate before you fight");
+    expect(prompts[3]).toContain("honest check-in");
     expect(result).toMatchObject({ state: "done", productive: true, detail: "report 2.0" });
   });
 
@@ -162,18 +162,31 @@ describe("host shift loop", () => {
 
     expect(prompts[1]).toContain("the next page of the queue");
     expect(prompts[1]).not.toContain("attack guide on the MCP");
+    expect(prompts[2]).toContain("queue");
     expect(prompts[2]).not.toBe(prompts[1]);
   });
 
-  it("cycles each lane's check-in sequence instead of running out of messages", () => {
+  it("cycles each lane's flow bank instead of running out of messages", () => {
+    const working = (): TurnFacts => ({
+      toolCalls: 3,
+      submissions: [],
+      reported: true,
+      reportedUnproductive: false,
+    });
     for (const taskId of ["math-frontier", "math-review", "unregistered-lane"]) {
-      const first = continuationFor(taskId, 1);
-      let period = 1;
-      while (continuationFor(taskId, period + 1) !== first) period++;
-      expect(period).toBeGreaterThanOrEqual(5);
-      for (let turn = 1; turn <= period; turn++) {
-        expect(continuationFor(taskId, turn + period)).toBe(continuationFor(taskId, turn));
+      const messages = Array.from({ length: 12 }, (_, i) =>
+        continuationFor({
+          taskId,
+          turn: i + 1,
+          elapsedMs: 60_000,
+          budgetMs: 4 * 3_600_000,
+          turns: Array.from({ length: i + 1 }, working),
+        }),
+      );
+      for (let i = 1; i < messages.length; i++) {
+        expect(messages[i]).not.toBe(messages[i - 1]);
       }
+      expect(new Set(messages).size).toBeGreaterThanOrEqual(4);
     }
   });
 
