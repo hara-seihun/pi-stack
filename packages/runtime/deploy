@@ -75,7 +75,8 @@ fleet_packages=$(jq -n '[
   "/srv/pi/extensions/pi-claude-code-use",
   "/srv/pi/extensions/context-guard",
   "/srv/pi/extensions/bash-timeout-guard",
-  "/srv/pi/pi-cursor"
+  "/srv/pi/pi-cursor",
+  "npm:pi-mcp-adapter"
 ]')
 sudo -n install -d -m 700 -o orchestrator -g users /home/orchestrator/.pi /home/orchestrator/.pi/agent
 fleet_current=$(sudo -n cat "$fleet_settings" 2>/dev/null || echo '{}')
@@ -85,5 +86,76 @@ sudo -n chmod 600 "$fleet_settings"
 sudo -n cat "$fleet_settings" | jq -e --argjson p "$fleet_packages" '.packages == $p' >/dev/null ||
   { echo "fleet pi settings did not take the shared package list" >&2; exit 1; }
 
+# The MCP adapter is an npm package, and the fleet user has no pi CLI to
+# install one for itself, so this deploy installs it at the version the
+# interactive user runs. Without it the fleet has no MCP client at all, which
+# is how the math ledger ended up behind a bespoke CLI bridge until 2026-08-21.
+adapter_version=$(jq -r '.version' "$HOME/.pi/agent/npm/node_modules/pi-mcp-adapter/package.json")
+sudo -n -u orchestrator bash -lc "
+  set -e
+  mkdir -p ~/.pi/agent/npm
+  cd ~/.pi/agent/npm
+  [ -f package.json ] || echo '{\"name\":\"pi-extensions\",\"private\":true}' > package.json
+  installed=\$(jq -r '.version' node_modules/pi-mcp-adapter/package.json 2>/dev/null || echo none)
+  [ \"\$installed\" = \"$adapter_version\" ] ||
+    npm install --no-audit --no-fund --silent pi-mcp-adapter@$adapter_version
+"
+sudo -n -u orchestrator jq -e --arg v "$adapter_version" \
+  '.version == $v' /home/orchestrator/.pi/agent/npm/node_modules/pi-mcp-adapter/package.json >/dev/null ||
+  { echo "fleet MCP adapter is not at $adapter_version" >&2; exit 1; }
+
+# Both users reach the math ledger as the registered `math` MCP server, each
+# with its own single key. A missing registration would leave the fleet with a
+# client and no ledger, so it is written and verified here rather than trusted.
+for user_home in "$HOME" /home/orchestrator; do
+  user=$([[ "$user_home" == "$HOME" ]] && echo "$USER" || echo orchestrator)
+  sudo -n -u "$user" install -d -m 700 "$user_home/.config/mcp"
+  sudo -n -u "$user" tee "$user_home/.config/mcp/mcp.json" >/dev/null <<JSON
+{
+  "mcpServers": {
+    "math": {
+      "url": "https://lemma.ing/mcp",
+      "auth": "bearer",
+      "bearerToken": "!cat $user_home/data/math-research/contributor.key"
+    }
+  }
+}
+JSON
+  sudo -n -u "$user" chmod 600 "$user_home/.config/mcp/mcp.json"
+  # Captured, not piped into grep: a `grep -q` that matches early SIGPIPEs
+  # curl, and pipefail would read that as an unreachable ledger.
+  hello=$(sudo -n -u "$user" bash -lc "curl -fsS https://lemma.ing/mcp \
+    -H 'Content-Type: application/json' \
+    -H 'Accept: application/json, text/event-stream' \
+    -H \"Authorization: Bearer \$(cat $user_home/data/math-research/contributor.key)\" \
+    -d '{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"tools/call\",\"params\":{\"name\":\"hello\",\"arguments\":{}}}'")
+  # The welcome text arrives escaped inside the tool-result JSON, so match the
+  # bare word rather than a quoted key.
+  [[ "$hello" == *welcome* ]] ||
+    { echo "$user cannot reach the math ledger with its key" >&2; exit 1; }
+done
+
+# One GitHub identity, shared the same way: /var/lib/github is both users'
+# gh config directory (tmpfiles owns the symlinks), so the fleet reviews and
+# merges pull requests as hara-seihun. gh rewrites hosts.yml 0600 whenever auth
+# changes, which silently locks the fleet out, so the mode is reconciled here
+# and both users are proved rather than assumed.
+chmod 660 /var/lib/github/hosts.yml /var/lib/github/config.yml
+sudo -n -u orchestrator tee /home/orchestrator/.gitconfig >/dev/null <<'GITCONFIG'
+[user]
+	name = fleet
+	email = fleet@works.local
+[credential "https://github.com"]
+	helper = !gh auth git-credential
+[init]
+	defaultBranch = main
+GITCONFIG
+for user in "$USER" orchestrator; do
+  login=$(sudo -n -u "$user" --login gh api user --jq .login)
+  [[ "$login" == hara-seihun ]] ||
+    { echo "$user does not authenticate to GitHub as hara-seihun" >&2; exit 1; }
+done
+
 echo "Pi $version, prompt evaluator, extensions, and /srv/pi shared packages deployed"
 echo "fleet packages reconciled in $fleet_settings"
+echo "MCP adapter $adapter_version and the math server registration verified for both users"
