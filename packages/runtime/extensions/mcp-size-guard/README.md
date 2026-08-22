@@ -35,11 +35,44 @@ So the condition announces itself now, in
 ## Why 1 MiB
 
 The inbox is for conditions that must be fixed, explicitly not a log stream, so
-the threshold has to sit above everything legitimate. pi already truncates
-model-facing MCP text at 50 KB, so "large" is routine and self-correcting; an
-entry with its full text or a wide search page lands there and is fine. A
-megabyte is not a big answer, it is a broken one. Set `PI_MCP_SIZE_ALERT_KB`
-lower while hunting something specific.
+the threshold has to sit above everything legitimate. Measured against the math
+ledger, the only MCP server registered on this host — every one of these is a
+healthy call:
+
+| response | call |
+|---|---|
+| 20.6 KB | `hello` |
+| 55.3 KB | `review_queue` default page |
+| 85.5 KB | `review_queue {limit: 50}` |
+| 86.5 KB | `get` on the largest entry in the corpus |
+| 95.9 KB | `news {}` |
+| 644 KB | `query`, 500 rows of id+title+summary (500 is the documented row cap) |
+| 1.6 MB | `query`, 20 whole artifact bodies |
+| 5.0 MB | `query`, 100 whole artifact bodies |
+
+Against 13.5 MB for the incident. A 100 KB threshold was considered and rejected
+on this evidence: `news` alone would cross it, and an inbox that fills up gets
+emptied without being read, which costs the channel the one alert that mattered.
+A megabyte leaves healthy traffic room to grow and still catches the condition by
+an order of magnitude. Set `PI_MCP_SIZE_ALERT_KB` lower while hunting something
+specific.
+
+The last two rows are the honest limit of a pure size rule: `query` returns
+whatever SELECT the caller wrote, so its size is authored by the caller, like an
+mcpScript that emits everything it fetched. Bulk-reading a hundred documents
+trips this and nothing is broken. There is no per-tool exemption list, because
+an empty-by-default list naming one tool on one server is config that rots; the
+alert instead tells the reader to check the arguments first, and a caller-sized
+response is resolved by deleting the file. Only a small request that came back
+enormous is a defect.
+
+## Waste is a different question
+
+This guard answers "is a tool broken?", not "is this call wasteful?". Responses
+between 50 KB and the threshold are truncated in front of the agent who asked,
+which is feedback delivered to the only party who can act on it. If per-call MCP
+size ever needs watching as a trend, that belongs in the usage ledger beside the
+other telemetry, not in an inbox reserved for things that must be fixed.
 
 ## What it does not see
 

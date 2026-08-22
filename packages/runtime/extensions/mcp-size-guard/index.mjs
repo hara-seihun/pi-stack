@@ -3,11 +3,14 @@ import { readdirSync, readFileSync } from "node:fs";
 import { join } from "node:path";
 
 /**
- * A well-formed MCP tool response is never a megabyte. Below this, big-but-fine
- * answers (a corpus entry with its full text, a wide search page) are ordinary
- * and pi's output guard already caps what reaches the model at 50 KB. The
- * threshold is the line between "large" and "this tool has an unbounded field",
- * and only the second belongs in an inbox reserved for things that must be fixed.
+ * The line between "large" and "this tool has an unbounded field". Only the
+ * second belongs in an inbox reserved for things that must be fixed, and the
+ * measured ceiling of healthy traffic on this host is what sets it: the math
+ * ledger's `news` answers with 96 KB, a full reviewer worklist with 86 KB, the
+ * largest entry in the corpus with 86 KB, and a 500-row SQL read — the
+ * documented row cap — with 644 KB. The incident that prompted this extension
+ * was 13.5 MB. A megabyte leaves healthy traffic room to grow and still catches
+ * the condition by an order of magnitude. README.md carries the measurements.
  */
 export const DEFAULT_THRESHOLD_KB = 1024;
 
@@ -94,18 +97,22 @@ export function alertBody(measured, { input, cwd, limit } = {}) {
       : "- the whole response was not saved to disk",
     `- seen by: a pi session in ${cwd ?? "an unknown directory"}`,
     "",
-    "One response this size is a defect in the tool that produced it rather than in the caller:",
-    "something it returns is unbounded. Nothing was corrupted — pi's output guard cut it before the",
-    "model read it — so the damage is bandwidth, latency, and a read surface that cannot be used the",
-    "way it is meant to be. The last one of these was a reviewer worklist where twenty rows each",
-    "carried a full compiler log, and it answered a one-row question with 13 MB.",
+    "Read the arguments above first. A response whose size the caller asked for — a bulk SQL read, a",
+    "deliberate dump of whole documents — is the caller's own doing, nothing needs fixing, and this",
+    "file can go. The case worth your time is the other one: a small request that came back enormous.",
+    "",
+    "That means the tool has an unbounded field in what it returns. Nothing was corrupted — pi's",
+    "output guard cut the response before the model read it — so the damage is bandwidth, latency,",
+    "and a read surface that cannot be used the way it is meant to be. The last one was a reviewer",
+    "worklist where twenty rows each carried a full compiler log, and it answered a one-row question",
+    "with 13 MB.",
     "",
     "Fixed means the tool's own read surface bounds the field, so the answer is small at the source",
     "rather than truncated on the way past. The saved response above is the whole of the evidence:",
     "the offending field is usually obvious from the byte counts of its top-level keys.",
     "",
-    "If the size turns out to be legitimate for this tool, the honest fix is to say so here and raise",
-    "PI_MCP_SIZE_ALERT_KB rather than to keep deleting the alert.",
+    "If a size like this is simply normal for this tool, say so here and raise PI_MCP_SIZE_ALERT_KB",
+    "rather than deleting the same alert every week.",
     "",
     "While this file sits in the inbox, further oversized responses from this same tool file nothing.",
     "Deleting it re-arms the alert, which is what makes deletion mean \"looked at\".",
