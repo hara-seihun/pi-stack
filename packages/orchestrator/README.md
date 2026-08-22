@@ -506,6 +506,13 @@ reader renders a card from named fields — a bash `command` and its `timeout`, 
 flattened to bounded text, and an oversized argument becomes a labelled
 `{truncated, preview}` rather than a quoted blob.
 
+That bound is 8,000 characters, and it is the transcript's, not the session's.
+An auditor reading `events.jsonl` to work out what an agent was told sees every
+large tool result cut off mid-sentence and will conclude the model never got
+the rest. It did: the model's own view is the pi session log under the agent
+user's `~/.pi/agent/sessions/`, which carries the full result. Read the
+transcript for what happened and the session log for what was said.
+
 ## Routing extension — the multi-pass successor (`src/extension/routing.ts`)
 
 Multi-account routing for interactive pi sessions, driven entirely by the
