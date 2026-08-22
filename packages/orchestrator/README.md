@@ -419,11 +419,15 @@ down at the first checkpoint — 27 to 57 minutes in — and relaunched from an
 empty context, paying re-orientation cost over and over. No prompt wording can
 fix that, because the instruction addresses an agent that no longer exists by
 the time it would apply. The host therefore re-prompts the same live session
-(`CONTINUE` in `src/host/pi-host.ts`, a pointer back to the blocker rather
-than a pep talk) until the session budget (4h) is spent, the turn errors, an
-operator aborts, two consecutive turns report nothing, or the lane declares
-itself drained (`exitWhenDrained`, checked against current demand before each
-re-prompt). Work already banked in a
+until the session budget (4h) is spent, the turn errors, an operator aborts,
+two consecutive turns report nothing, or the lane declares itself drained
+(`exitWhenDrained`, checked against current demand before each re-prompt).
+Most lanes receive `CONTINUE` in `src/host/pi-host.ts`, which points back to
+the blocker. `math-frontier` instead receives a dedicated continuation that
+asks the agent to step back, rethink the shape of the solution, consult the
+ledger or its attack guide when useful, and keep pushing for a breakthrough.
+The math-specific wording never reaches review, cleanup, provenance, or code
+lanes. Work already banked in a
 `task_complete` report survives a late error: the report is the run's record,
 and only a shift that banked nothing reports as an error run.
 

@@ -25,7 +25,7 @@ interface FakeTurn {
 
 function harness(
   turns: FakeTurn[],
-  options: { sessionBudgetMs?: number; laneDrained?: () => boolean } = {},
+  options: { sessionBudgetMs?: number; laneDrained?: () => boolean; taskId?: string } = {},
 ) {
   const prompts: string[] = [];
   const progress: number[] = [];
@@ -86,7 +86,7 @@ function harness(
   );
   const spec: LaunchSpec = {
     runId: "run-1",
-    taskId: "frontier",
+    taskId: options.taskId ?? "math-frontier",
     prompt: "Attack the central problem.",
     accountId: "codex-1",
     provider: "openai-codex",
@@ -141,10 +141,21 @@ describe("host shift loop", () => {
 
     expect(prompts).toHaveLength(4);
     expect(prompts[0]).toBe("Attack the central problem.");
-    // The continuation is a pointer back to the work, not a new task.
-    expect(prompts[1]).toContain("still live");
+    expect(prompts[1]).toContain("take a step back");
+    expect(prompts[1]).toContain("attack guide on the MCP");
     expect(prompts[1]).toBe(prompts[2]);
     expect(result).toMatchObject({ state: "done", productive: true, detail: "report 2.0" });
+  });
+
+  it("does not send the frontier continuation to other lanes", async () => {
+    const { host, spec, prompts, finished } = harness([{ reports: 1 }, {}, {}], {
+      taskId: "math-review",
+    });
+    host.launch(spec);
+    await finished;
+
+    expect(prompts[1]).toContain("still live");
+    expect(prompts[1]).not.toContain("attack guide on the MCP");
   });
 
   it("a turn that reports keeps the shift alive however long it has been quiet before", async () => {

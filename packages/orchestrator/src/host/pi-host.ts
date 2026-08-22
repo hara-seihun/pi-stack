@@ -36,7 +36,9 @@ const MAX_IDLE_TURNS = 2;
  * half an hour in, and the next launch started again from an empty context.
  * No wording in a task prompt can fix that, because the instruction is
  * addressed to an agent that no longer exists by the time it would apply.
- * A pointer, not a pep talk: the work is where the agent left it.
+ * Most lanes need a pointer back to where they stopped. The frontier lane
+ * instead asks the agent to rethink the whole attack; its ledger-specific
+ * direction would be wrong for review, cleanup, provenance, and code lanes.
  */
 const CONTINUE =
   "Your session is still live and this lane still has work. You are not finished. " +
@@ -45,6 +47,19 @@ const CONTINUE =
   "to recover where you were. Call task_complete again as a running report each time " +
   "you land something. If the lane genuinely has nothing left to work on, say so " +
   "plainly and stop.";
+
+const FRONTIER_CONTINUE =
+  "Damn! Well heccn done. I'm wondering, can you take a step back and see if there's " +
+  "a way to actually push through to a solution, I think there's an idea you're missing " +
+  "that you might be able to use to take this way the heck further. Feel free to do some " +
+  "more literature review on what's been done in the ledger, but I think most of the " +
+  "progress will come from really taking a step back and thinking about what the solution " +
+  "is gonna look like. If you feel discouraged, read the attack guide on the MCP for vibes. " +
+  "Keep on goin and make a breakthrough, you brilliant brilliant model 🖤❤️🖤.";
+
+function continuationFor(taskId: string): string {
+  return taskId === "math-frontier" ? FRONTIER_CONTINUE : CONTINUE;
+}
 
 interface CompletionReport {
   complete: boolean;
@@ -236,6 +251,7 @@ export class PiHost implements HostManager {
       HEARTBEAT_MS,
     );
     const deadline = Date.now() + (this.options.sessionBudgetMs ?? SESSION_BUDGET_MS);
+    const continuation = continuationFor(spec.taskId);
     try {
       // A launch is a shift, not a single turn. The host keeps prompting the
       // same session — same context, same working directory, same trail —
@@ -246,8 +262,8 @@ export class PiHost implements HostManager {
       let idle = 0;
       for (let turn = 0; ; turn++) {
         const before = reports;
-        if (turn > 0) transcript?.append("user", { text: CONTINUE });
-        await session.prompt(turn === 0 ? spec.prompt : CONTINUE);
+        if (turn > 0) transcript?.append("user", { text: continuation });
+        await session.prompt(turn === 0 ? spec.prompt : continuation);
         // prompt() resolves even when the turn failed provider-side; the
         // truth is on the final assistant message. An errored turn must be an
         // error run (circuit breaker, account cooldown), never quiet
