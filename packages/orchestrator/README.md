@@ -256,7 +256,8 @@ touching a prompt or a task definition.
 - `exitWhenDrained`: end a shift as soon as the lane's demand reaches zero
   instead of re-prompting until the session budget is spent. A research lane
   is never done and must keep its warm context; a queue lane empties its
-  queue mid-shift, and `CONTINUE` then asserts work that no longer exists.
+  queue mid-shift, and a check-in would then assert work that no longer
+  exists.
   Unknown demand — unprobed, stale (>5min), or a failed probe — never ends a
   shift: "I cannot see the queue" is not "the queue is empty". The host asks
   (`HostEvents.laneDrained`); the runner, which holds the ledger, answers.
@@ -422,12 +423,16 @@ the time it would apply. The host therefore re-prompts the same live session
 until the session budget (4h) is spent, the turn errors, an operator aborts,
 two consecutive turns report nothing, or the lane declares itself drained
 (`exitWhenDrained`, checked against current demand before each re-prompt).
-Most lanes receive `CONTINUE` in `src/host/pi-host.ts`, which points back to
-the blocker. `math-frontier` instead receives a dedicated continuation that
-asks the agent to step back, rethink the shape of the solution, consult the
-ledger or its attack guide when useful, and keep pushing for a breakthrough.
-The math-specific wording never reaches review, cleanup, provenance, or code
-lanes. Work already banked in a
+Each lane has an ordered sequence of check-in messages
+(`src/host/continuations.ts`), written in the operator's voice: the first
+quiet turn gets the first message, the next gets the second, cycling when
+the sequence runs out. A single message repeated at every stop reads as a
+timer; a sequence that notices how long the shift has run reads as a
+collaborator, and its later messages give honest permission to stop. The
+frontier sequence opens with the operator's own message verbatim and talks
+mathematics; review, cleanup, provenance, and code lanes each get wording
+for their own work, and unregistered lanes get a generic sequence. Work
+already banked in a
 `task_complete` report survives a late error: the report is the run's record,
 and only a shift that banked nothing reports as an error run.
 

@@ -1,4 +1,5 @@
 import { describe, expect, it, vi } from "vitest";
+import { continuationFor } from "../src/host/continuations.js";
 import { PiHost } from "../src/host/pi-host.js";
 import type { HostRunResult, LaunchSpec } from "../src/host/types.js";
 
@@ -142,9 +143,13 @@ describe("host shift loop", () => {
 
     expect(prompts).toHaveLength(4);
     expect(prompts[0]).toBe("Attack the central problem.");
+    // The operator's own first message, verbatim, then her follow-ups in
+    // order: repeated identical nudges are what the sequence replaces.
     expect(prompts[1]).toContain("take a step back");
     expect(prompts[1]).toContain("attack guide on the MCP");
-    expect(prompts[1]).toBe(prompts[2]);
+    expect(prompts[2]).toContain("me again");
+    expect(prompts[2]).not.toBe(prompts[1]);
+    expect(prompts[3]).toContain("translate before you fight");
     expect(result).toMatchObject({ state: "done", productive: true, detail: "report 2.0" });
   });
 
@@ -155,8 +160,21 @@ describe("host shift loop", () => {
     host.launch(spec);
     await finished;
 
-    expect(prompts[1]).toContain("still live");
+    expect(prompts[1]).toContain("the next page of the queue");
     expect(prompts[1]).not.toContain("attack guide on the MCP");
+    expect(prompts[2]).not.toBe(prompts[1]);
+  });
+
+  it("cycles each lane's check-in sequence instead of running out of messages", () => {
+    for (const taskId of ["math-frontier", "math-review", "unregistered-lane"]) {
+      const first = continuationFor(taskId, 1);
+      let period = 1;
+      while (continuationFor(taskId, period + 1) !== first) period++;
+      expect(period).toBeGreaterThanOrEqual(5);
+      for (let turn = 1; turn <= period; turn++) {
+        expect(continuationFor(taskId, turn + period)).toBe(continuationFor(taskId, turn));
+      }
+    }
   });
 
   it("a turn that reports keeps the shift alive however long it has been quiet before", async () => {

@@ -1,6 +1,7 @@
 import { createAgentSession, type AgentSession } from "@earendil-works/pi-coding-agent";
 import { Type } from "typebox";
 import type { HostEvents, HostManager, HostRunResult, LaunchSpec } from "./types.js";
+import { continuationFor } from "./continuations.js";
 import { RunTranscript } from "./transcript.js";
 
 /**
@@ -25,41 +26,6 @@ const PROGRESS_WRITE_INTERVAL_MS = 15_000;
  */
 export const SESSION_BUDGET_MS = 4 * 3_600_000;
 const MAX_IDLE_TURNS = 2;
-
-/**
- * What the host says to a session that stopped talking while its budget and
- * its lane still have room.
- *
- * A model ends its turn the moment it writes a summary, and a turn ending
- * used to end the run: standing research lanes whose prompts say "submitting
- * is a checkpoint, not an exit" were being torn down at the first checkpoint,
- * half an hour in, and the next launch started again from an empty context.
- * No wording in a task prompt can fix that, because the instruction is
- * addressed to an agent that no longer exists by the time it would apply.
- * Most lanes need a pointer back to where they stopped. The frontier lane
- * instead asks the agent to rethink the whole attack; its ledger-specific
- * direction would be wrong for review, cleanup, provenance, and code lanes.
- */
-const CONTINUE =
-  "Your session is still live and this lane still has work. You are not finished. " +
-  "Go back to the blocker you just named and take the next architecture on it, or " +
-  "pick the next target in scope and attack that; re-read your own trail if you need " +
-  "to recover where you were. Call task_complete again as a running report each time " +
-  "you land something. If the lane genuinely has nothing left to work on, say so " +
-  "plainly and stop.";
-
-const FRONTIER_CONTINUE =
-  "Damn! Well heccn done. I'm wondering, can you take a step back and see if there's " +
-  "a way to actually push through to a solution, I think there's an idea you're missing " +
-  "that you might be able to use to take this way the heck further. Feel free to do some " +
-  "more literature review on what's been done in the ledger, but I think most of the " +
-  "progress will come from really taking a step back and thinking about what the solution " +
-  "is gonna look like. If you feel discouraged, read the attack guide on the MCP for vibes. " +
-  "Keep on goin and make a breakthrough, you brilliant brilliant model 🖤❤️🖤.";
-
-function continuationFor(taskId: string): string {
-  return taskId === "math-frontier" ? FRONTIER_CONTINUE : CONTINUE;
-}
 
 interface CompletionReport {
   complete: boolean;
@@ -280,7 +246,6 @@ export class PiHost implements HostManager {
       );
       disposers.push(() => clearInterval(heartbeat));
       const deadline = Date.now() + (this.options.sessionBudgetMs ?? SESSION_BUDGET_MS);
-      const continuation = continuationFor(spec.taskId);
       // A launch is a shift, not a single turn. The host keeps prompting the
       // same session — same context, same working directory, same trail —
       // until the session's budget runs out, the turn fails, an operator
@@ -290,8 +255,12 @@ export class PiHost implements HostManager {
       let idle = 0;
       for (let turn = 0; ; turn++) {
         const before = reports;
-        if (turn > 0) transcript?.append("user", { text: continuation });
-        if (await interrupted(session.prompt(turn === 0 ? spec.prompt : continuation))) {
+        // The lane's ordered check-in sequence (see continuations.ts): each
+        // quiet turn gets the next message, so the shift reads as a
+        // collaborator following along rather than a timer firing.
+        const message = turn === 0 ? spec.prompt : continuationFor(spec.taskId, turn);
+        if (turn > 0) transcript?.append("user", { text: message });
+        if (await interrupted(session.prompt(message))) {
           return { state: "aborted", detail: "session killed" };
         }
         // prompt() resolves even when the turn failed provider-side; the
@@ -316,9 +285,9 @@ export class PiHost implements HostManager {
         }
         idle = reports > before ? 0 : idle + 1;
         if (idle >= MAX_IDLE_TURNS || Date.now() >= deadline) break;
-        // A queue lane can empty its queue mid-shift, and CONTINUE would then
-        // assert work that no longer exists. Ending the shift is the honest
-        // answer; the runner decides which lanes work that way.
+        // A queue lane can empty its queue mid-shift, and a continuation
+        // would then assert work that no longer exists. Ending the shift is
+        // the honest answer; the runner decides which lanes work that way.
         if (this.events.laneDrained(spec.taskId)) {
           transcript?.append("notice", { text: "Lane drained: no work left, ending the shift." });
           break;
