@@ -131,7 +131,10 @@ export function findDetachment(command) {
   for (const { found, pattern } of DETACHERS) {
     if (pattern.test(text)) return found;
   }
-  const background = backgroundOperator(text);
+  // `./part $i & … wait` is parallelism inside the call, not an escape from
+  // it: the call still blocks, the cap still applies, and running 32 shards
+  // at once is the answer to a job that does not fit, not a way around it.
+  const background = /\bwait\b/.test(text) ? null : backgroundOperator(text);
   if (background !== null) return background;
   for (const match of command.matchAll(NESTED_SHELL)) {
     const nested = findDetachment(match[1] ?? match[2] ?? "");

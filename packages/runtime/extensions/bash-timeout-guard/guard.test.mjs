@@ -72,6 +72,7 @@ test("every way of outliving the session is recognised", () => {
     "cd /tmp/work && ./census --batch masks.txt &",
     "python3 solve.py > log 2>&1 & echo started",
     "bash -lc './census --batch masks.txt > out 2>err &'",
+    "nohup ./shards & wait",
     'bash -c "nohup ./census > out 2>&1"',
   ];
   for (const command of detached) {
@@ -89,6 +90,8 @@ test("ordinary shell punctuation is not mistaken for detachment", () => {
     "echo 'run it with nohup later' > note.txt",
     "python3 -c 'print(1 & 2)'",
     "ls /tmp/at",
+    "for i in $(seq 8); do ./shard $i & done; wait",
+    "./left & ./right & wait; cat left.out right.out",
     "cat report.md",
     "git commit -m 'batch the census'",
   ];

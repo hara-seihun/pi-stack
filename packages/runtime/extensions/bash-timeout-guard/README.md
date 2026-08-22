@@ -31,6 +31,10 @@ were gone. Operator directive, same day: fleet sessions run in the foreground.
   `batch`, or a background `&`. `findDetachment` scans with quotes removed, so
   `sed 's/x/&/'` and `2>&1` are not operators, and it recurses into a quoted
   `sh -c '…'` payload, which is where the `&` otherwise hides.
+- A command that also contains `wait` keeps its `&`: `for i in …; do ./shard
+  $i & done; wait` is parallelism inside the call, which is the answer to a
+  job that does not fit rather than a way around the cap. The call still
+  blocks and the sweep still collects anything left behind.
 - That block is the one message in this extension written to be read rather
   than obeyed: it says why the machine cannot carry the job, offers shrinking
   the instance, taking a smaller bite, and checkpointing, and names reporting
