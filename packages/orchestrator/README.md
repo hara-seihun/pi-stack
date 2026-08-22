@@ -217,16 +217,29 @@ shares divide each tier, and the mix holds inside the lane.
   claim on contested capacity rather than a reservation. A tier with no
   capacity is different: the lane simply does not hold those sessions, and
   nobody else inherits them.
-- **Composition is measured over a window** (1h), counting sessions a lane
-  held at any point in it, not launches. A queue lane that exits when drained
-  turns over many times an hour while a research lane holds warm context for
-  hours; counting launches let turnover decide the fleet, and counting only
-  live sessions would make the short-lived lane look permanently empty and
-  feed it slot after slot.
+- **Composition is measured over a window** (1h): live sessions count as one,
+  and ended ones fade linearly to nothing across the window. A queue lane
+  that exits when drained turns over many times an hour while a research lane
+  holds warm context for hours, so counting only live sessions would read the
+  short-lived lane as idle and feed it slot after slot — and would erase the
+  memory a weighted mix needs, since 20:1 is a ratio no single-slot cycle can
+  express. Counting every session in the window at full weight fails the
+  other way: a lane cancelled an hour ago held a phantom share of the machine
+  and blocked the real over-served lane from giving anything back.
 - Slots go one at a time to the pair whose next session falls earliest in
   virtual time, `(held + 1) / claim`. Splitting a cycle's slots by proportion
   instead would round every minority claim to zero — the common cycle offers
   a single slot — and 20:1 is a ratio no one cycle can express.
+- **A full machine sheds** to converge. Allocation can only place slots that
+  exist, so on a machine at its session ceiling a mix change would wait on
+  attrition: after a lane moved from 20:1 to 5:1 its fleet sat at 46 light
+  and 1 standard, with the quota for eight standard sessions idle and each
+  light session good for hours. When some pair is a whole session below its
+  claim and the broker could fund it, the controller asks the worst
+  over-served pair to give one session back — the youngest, which has the
+  least work behind it — at most one per tick. Never while slots were
+  launched that tick (the machine was not full), and never for a tier whose
+  quota is spent anyway.
 
 The broker is told the same arithmetic: the tier shape it advertises is what
 the claims would actually take, so scarce accounts are not held for a tier no
@@ -259,13 +272,30 @@ other lanes' gates read — and running agents are never touched.
 ## Broker (`src/broker/`)
 
 The broker owns account custody: which account and model a launch runs on,
-how many concurrent sessions each account sustains, and where a failing
+how much of each account's quota a session commits, and where a failing
 session moves. Everything it knows is derived from ledger facts at decision
 time — sustainable percent/hour from the replayed calibrator's hazard-paced
 plan (most binding meter wins), per-session burn measured from observed
 meter drain over both fleet run-hours and interactive lease-hours. Active
-interactive leases consume the same shared-account slots as fleet runs.
+interactive leases consume the same shared-account quota as fleet runs.
 There are no hand-configured burn constants anywhere.
+
+**Burn is measured per model, and an account's budget is a rate.** Sessions
+of different models against the same quota differ by more than an order of
+magnitude: a light session on this fleet moves the Codex weekly meter so
+little it prices at zero, while a standard one costs about 1%/h. So the
+calibrator classes usage per model (`modelClasses` splits `luna:cost` from
+`sol:cost`), the ledger reports what an hour of each model's sessions
+actually recorded, and the product of the two is what a session of that
+model burns here. Admission then compares rates, not counts: every live
+session commits its own model's burn against the account, and a candidate
+launches if the meter can sustain the sum. Counting sessions instead let the
+cheap model starve the expensive one — forty-six light sessions filled the
+accounts' session counts, and the standard tier, costing a fraction of the
+sustainable rate and asked for by an operator running a 1:5 mix, was refused
+every account on the machine while the fleet ran one standard session. A
+model measured as free has no quota bound at all; what bounds it is the
+machine ceiling.
 
 Burn is a quotient, so both halves are taken over the **same interval**: the
 span the account's meters actually reported across, never the nominal
@@ -354,6 +384,16 @@ Runner updates use generation draining: `drain-runners` bumps a control
 row; live runners stop claiming and exit when their last session ends,
 while freshly started runners claim under the new generation. Nothing is
 ever killed mid-run.
+
+A hosted session **binds extensions** before its first prompt. Extensions
+come alive only when a mode binds them — `bindExtensions` is what emits
+`session_start` — and everything an extension sets up in response simply
+never happens in a session that skips it. Hosted sessions carried the `mcp`
+tool on their surface (it registers at load time) answering "MCP not
+initialized" to every call, so fleet agents told to work through the math
+ledger's MCP server spent their turns writing curl JSON-RPC helpers instead.
+The host binds print mode: no UI, no command actions, extension errors into
+the run's own transcript.
 
 A launch is a **shift**, not a turn. A model ends its turn as soon as it
 writes a summary, and the host used to end the run with it: standing research

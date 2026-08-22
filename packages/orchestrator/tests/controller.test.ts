@@ -25,7 +25,10 @@ class FakeEngine implements HostManager {
   }
 }
 
-function build(probes: Record<string, number | (() => number)> = {}) {
+function build(
+  probes: Record<string, number | (() => number)> = {},
+  opts: { maxConcurrentSessions?: number } = {},
+) {
   const ledger = Ledger.open(":memory:");
   ledger.upsertAccount({ id: "anth-1", provider: "anthropic", domain: "orchestrator" });
   ledger.upsertAccount({ id: "codex-1", provider: "openai-codex", domain: "orchestrator" });
@@ -44,6 +47,9 @@ function build(probes: Record<string, number | (() => number)> = {}) {
       expert: [{ provider: "anthropic", model: "claude-fable" }],
     },
     meters: { anthropic: METERS, "openai-codex": METERS },
+    ...(opts.maxConcurrentSessions === undefined
+      ? {}
+      : { maxConcurrentSessions: opts.maxConcurrentSessions }),
   });
   const engine = new FakeEngine();
   const controller = new Controller(ledger, scheduler, broker);
@@ -55,7 +61,7 @@ function build(probes: Record<string, number | (() => number)> = {}) {
     const claimed = runner.tick(now).claimed;
     return { tick, claimed };
   };
-  return { ledger, controller, runner, engine, cycle };
+  return { ledger, controller, runner, engine, broker, cycle };
 }
 
 describe("dispatch cycle", () => {
@@ -297,6 +303,104 @@ describe("run custody", () => {
     // was a per-lane ceiling and the leftover standard slots went to whoever
     // could use them.
     expect(reviewStandard).toBeLessThanOrEqual(1);
+  });
+
+  it("gives a session back when the machine is full and holding the wrong shape", async () => {
+    // The incident: a lane built its fleet at twenty light sessions per
+    // standard one, the operator changed it to five, and the machine was
+    // already full. Allocation can only place slots that exist, and these
+    // sessions run for hours, so without shedding the new mix would have
+    // waited on attrition with the quota for the standard sessions idle.
+    const { ledger, cycle, broker } = build({}, { maxConcurrentSessions: 12 });
+    for (let i = 2; i <= 12; i++) {
+      ledger.upsertAccount({ id: `codex-${i}`, provider: "openai-codex", domain: "orchestrator" });
+    }
+    const lane = {
+      id: "frontier",
+      demandConstant: 90,
+      share: 14,
+      prompt: "Attack.",
+    };
+    ledger.upsertTask({ ...lane, tiers: mix("light:20", "standard:1") });
+    let now = 0;
+    for (let i = 0; i < 6; i++) {
+      await cycle(now);
+      now += 60_000;
+    }
+    const live = () => ledger.runs().filter((r) => r.state === "running" || r.state === "pending");
+    const held = (tier: string) => live().filter((r) => r.tier === tier).length;
+    expect(live()).toHaveLength(12); // full
+    expect(held("light")).toBeGreaterThan(10);
+
+    // The operator changes the mix. Nothing has ended, so the fleet is still
+    // the old shape and every slot is taken.
+    ledger.upsertTask({ ...lane, tiers: mix("light:5", "standard:1") });
+    const report = (await cycle(now)).tick;
+    expect(report.created).toHaveLength(0);
+    expect(report.shed).toBeDefined();
+    expect(ledger.run(report.shed!)!.tier).toBe("light");
+    expect(broker.hasQuotaFor("standard", now)).toBe(true);
+  });
+
+  it("skips a surplus with nothing live to give", async () => {
+    // Composition counts the window, not the instant: a lane whose sessions
+    // were all cancelled an hour ago still shows the largest surplus, and
+    // shedding it would abort nothing while the real over-served lane kept
+    // the machine. The first attempt at this shed exactly once and then sat
+    // still with the fleet mis-composed.
+    const { ledger, cycle } = build({}, { maxConcurrentSessions: 12 });
+    for (let i = 2; i <= 12; i++) {
+      ledger.upsertAccount({ id: `codex-${i}`, provider: "openai-codex", domain: "orchestrator" });
+    }
+    ledger.upsertTask({
+      id: "ghost",
+      demandConstant: 90,
+      tiers: mix("standard"),
+      share: 2,
+      prompt: "Review.",
+    });
+    let now = 0;
+    for (let i = 0; i < 3; i++) {
+      await cycle(now);
+      now += 60_000;
+    }
+    // The ghost lane's sessions all end; the frontier lane then fills the
+    // machine at the old mix.
+    for (const run of ledger.runs({ state: "running" })) {
+      ledger.finishRun(run.id, { state: "aborted", detail: "operator" }, now);
+      ledger.taskFinished(run.taskId);
+    }
+    ledger.upsertTask({ id: "ghost", demandConstant: 0, tiers: mix("standard"), share: 2, prompt: "Review." });
+    const lane = { id: "frontier", demandConstant: 90, share: 14, prompt: "Attack." };
+    ledger.upsertTask({ ...lane, tiers: mix("light:20", "standard:1") });
+    for (let i = 0; i < 6; i++) {
+      await cycle(now);
+      now += 60_000;
+    }
+    ledger.upsertTask({ ...lane, tiers: mix("light:5", "standard:1") });
+
+    const report = (await cycle(now)).tick;
+    expect(report.shed).toBeDefined();
+    const shed = ledger.run(report.shed!)!;
+    expect(shed.taskId).toBe("frontier");
+    expect(shed.tier).toBe("light");
+  });
+
+  it("sheds nothing when the composition already matches the claims", async () => {
+    const { ledger, cycle } = build({}, { maxConcurrentSessions: 2 });
+    ledger.upsertTask({
+      id: "solo",
+      demandConstant: 90,
+      tiers: mix("standard"),
+      share: 1,
+      prompt: "Work.",
+    });
+    let now = 0;
+    for (let i = 0; i < 4; i++) {
+      await cycle(now);
+      now += 60_000;
+    }
+    expect((await cycle(now)).tick.shed).toBeUndefined();
   });
 
   it("a finished run wakes tasks gated on it", async () => {

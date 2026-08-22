@@ -277,6 +277,7 @@ export class AccountCalibrator {
       meterId,
       classes: st.spec.drainedBy.map((classId) => ({
         classId,
+        percentPerToken: undefined,
         tokensPerPercent: undefined,
         planTokens: undefined,
         confidence: "none",
@@ -332,6 +333,10 @@ export class AccountCalibrator {
       if (b === undefined || b <= 1e-15 || tokens <= 0) {
         return {
           classId,
+          // A class the window carried tokens for was measured, and the fit
+          // put its drain at zero: the honest reading is "free", not
+          // "unknown". Only a class with no tokens has nothing to report.
+          percentPerToken: tokens > 0 ? 0 : undefined,
           tokensPerPercent: undefined,
           planTokens: undefined,
           confidence: "none" as Confidence,
@@ -343,6 +348,7 @@ export class AccountCalibrator {
       const tpp = 1 / b;
       return {
         classId,
+        percentPerToken: b,
         tokensPerPercent: confidence === "none" ? undefined : tpp,
         planTokens: confidence === "none" ? undefined : 100 * tpp,
         confidence,

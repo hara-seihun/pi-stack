@@ -162,6 +162,23 @@ export class PiHost implements HostManager {
       customTools: [taskComplete],
     });
     this.sessions.set(spec.runId, session);
+    // Extensions only come alive when a mode binds them: `bindExtensions` is
+    // what emits `session_start`, and everything an extension sets up in
+    // response — MCP server connections above all — simply never happens in a
+    // session that skips it. Hosted sessions had the `mcp` tool on their
+    // surface (it registers at load time) answering "MCP not initialized" to
+    // every call, so fleet agents told to use the math ledger's MCP server
+    // spent their turns writing curl JSON-RPC helpers instead. A headless
+    // host binds print mode: no UI, no command actions, and extension errors
+    // go to the run's own log.
+    await session.bindExtensions({
+      mode: "print",
+      onError: (err: { extensionPath: string; error: unknown }) => {
+        transcript?.append("notice", {
+          text: `Extension error (${err.extensionPath}): ${String(err.error)}`,
+        });
+      },
+    } as never);
     this.events.sessionStarted(spec.runId, session.sessionManager.getSessionId());
     if (preresolved === undefined) {
       const model = session.modelRuntime.getModel(spec.provider, spec.model);

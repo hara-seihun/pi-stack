@@ -31,6 +31,16 @@ export type Confidence = "none" | "low" | "high";
 
 export interface ClassStats {
   readonly classId: UsageClassId;
+  /**
+   * The fitted coefficient itself: percent of the meter one token of this
+   * class drains. `tokensPerPercent` is its reciprocal and goes undefined
+   * once the class is too cheap to price confidently — which is exactly the
+   * case a launcher most needs an answer for, because a model that barely
+   * touches the meter is one it can run many of. Zero is a real answer here
+   * ("this class was observed and drained nothing"); undefined means the
+   * class had no tokens in the window, so nothing was observed at all.
+   */
+  readonly percentPerToken: number | undefined;
   readonly tokensPerPercent: number | undefined;
   readonly planTokens: number | undefined;
   readonly confidence: Confidence;

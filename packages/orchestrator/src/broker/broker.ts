@@ -1,4 +1,5 @@
 import type { Ledger } from "../ledger/ledger.js";
+import type { AccountCalibrator } from "../calibrator/calibrator.js";
 import type { CalibratorConfig, MeterSpec } from "../calibrator/types.js";
 import { TIERS, type Tier } from "../tasks/types.js";
 
@@ -77,12 +78,18 @@ interface AccountView {
   readonly provider: string;
   /** Sustainable percent/hour; undefined = no calibration yet (bootstrap). */
   readonly sustainable: number | undefined;
-  /** Measured (or bootstrap) percent/hour one session burns. */
+  /** Measured (or bootstrap) percent/hour one session burns, blended over
+   * whatever models have been running here. */
   readonly sessionBurn: number;
   /** True once session burn is measured rather than assumed. */
   readonly measured: boolean;
-  /** Concurrent sessions this account supports across every meter it has. */
+  /** Concurrent sessions this account supports at its blended burn; what an
+   * external launcher is told, and the bootstrap bound before burn is
+   * measured. */
   readonly capacity: number;
+  /** Percent/hour the account's live sessions have already committed, each
+   * priced at what its own model burns. */
+  committed: number;
   active: number;
 }
 
@@ -91,10 +98,13 @@ const SLOT_ORDER: readonly Tier[] = [...TIERS].reverse();
 
 export class Broker {
   private readonly cfg: BrokerConfig;
-  /** Rates for one decision instant. Calibration is a replay of the whole
-   * ledger segment history, and one allocation cycle asks for the same
-   * account-and-model rate once per advertised slot. */
+  /** Everything derived from a full calibration replay, memoised for one
+   * decision instant. A replay reads the account's whole reading and usage
+   * history, and one allocation cycle asks the same questions once per
+   * advertised slot, per account, per candidate model. */
   private readonly rates = new Map<string, number | undefined>();
+  private readonly burns = new Map<string, number>();
+  private readonly cals = new Map<string, AccountCalibrator>();
   private ratesAt: number | undefined;
 
   constructor(
@@ -118,6 +128,19 @@ export class Broker {
    */
   admit(tier: Tier, now: number, exclude?: ReadonlySet<string>): Admission | undefined {
     return this.pick(this.views(now), tier, now, exclude);
+  }
+
+  /**
+   * Whether some account could fund a session of this tier if the machine
+   * had room — quota only, with the session ceiling left out.
+   *
+   * The question a full machine has to answer before giving a session up:
+   * freeing a slot for a tier whose quota is already spent costs real work
+   * and buys nothing.
+   */
+  hasQuotaFor(tier: Tier, now: number): boolean {
+    const views = this.views(now).map((v) => ({ ...v, active: 0 }));
+    return this.pick(views, tier, now) !== undefined;
   }
 
   /**
@@ -165,7 +188,14 @@ export class Broker {
         exhausted.add(next);
         continue;
       }
-      for (const v of views) if (v.id === admission.accountId) v.active++;
+      // The provisional slot commits its model's burn, so the next tier is
+      // priced against what this one just took.
+      const burn = this.sessionBurn(admission.accountId, now, admission.provider, admission.model);
+      for (const v of views) {
+        if (v.id !== admission.accountId) continue;
+        v.active++;
+        v.committed += burn;
+      }
       slots[next]++;
     }
   }
@@ -248,19 +278,38 @@ export class Broker {
     return drained.length > 0 ? drained : specs;
   }
 
-  private pacedRate(accountId: string, provider: string, now: number, model?: string): number | undefined {
+  /** One replay of an account's whole history, shared by everything that
+   * asks a calibration question at the same instant. */
+  private calibration(accountId: string, provider: string, now: number): AccountCalibrator | undefined {
     const specs = this.cfg.meters[provider];
     if (specs === undefined || specs.length === 0) return undefined;
+    if (this.ratesAt !== now) {
+      this.rates.clear();
+      this.burns.clear();
+      this.cals.clear();
+      this.ratesAt = now;
+    }
+    const cached = this.cals.get(accountId);
+    if (cached !== undefined) return cached;
     const transform = this.cfg.transform;
-    // Replay always carries the family's whole topology — every stored
-    // reading has to land on a meter it knows — and the model narrows only
-    // which of the calibrated meters get a say in the rate.
     const cal = this.ledger.replayCalibrator(
       accountId,
       specs,
       this.cfg.calibrator,
       transform === undefined ? undefined : (c, t) => transform(provider, c, t),
     );
+    this.cals.set(accountId, cal);
+    return cal;
+  }
+
+  private pacedRate(accountId: string, provider: string, now: number, model?: string): number | undefined {
+    const specs = this.cfg.meters[provider];
+    if (specs === undefined || specs.length === 0) return undefined;
+    // Replay always carries the family's whole topology — every stored
+    // reading has to land on a meter it knows — and the model narrows only
+    // which of the calibrated meters get a say in the rate.
+    const cal = this.calibration(accountId, provider, now);
+    if (cal === undefined) return undefined;
     let min: number | undefined;
     for (const spec of this.metersFor(provider, model)) {
       if (this.ledger.latestReading(accountId, spec.id) === undefined) continue;
@@ -273,9 +322,87 @@ export class Broker {
 
   /** Measured percent/hour one session burns on this account, from observed
    * meter drain over recorded session-hours; bootstrap value until enough
-   * hours exist. */
-  sessionBurn(accountId: string, now: number): number {
-    return this.measuredSessionBurn(accountId, now) ?? this.cfg.bootstrapSessionPercentPerHour;
+   * hours exist. Naming a model asks the sharper question — what a session
+   * *of that model* costs — and falls back to the account's blended burn
+   * when that model has not run long enough here to have been measured. */
+  sessionBurn(accountId: string, now: number, provider?: string, model?: string): number {
+    if (this.ratesAt !== now) {
+      this.rates.clear();
+      this.burns.clear();
+      this.cals.clear();
+      this.ratesAt = now;
+    }
+    const key = `${accountId}\u0000${provider ?? ""}\u0000${model ?? ""}`;
+    const cached = this.burns.get(key);
+    if (cached !== undefined) return cached;
+    const burn =
+      (provider !== undefined && model !== undefined
+        ? this.measuredModelBurn(accountId, provider, model, now)
+        : undefined) ??
+      this.measuredSessionBurn(accountId, now) ??
+      this.cfg.bootstrapSessionPercentPerHour;
+    this.burns.set(key, burn);
+    return burn;
+  }
+
+  /**
+   * Percent/hour a session of one model burns: what an hour of it costs in
+   * usage, priced at what the meter charges that usage class.
+   *
+   * Both halves are measured. The calibrator already fits a coefficient per
+   * usage class — percent of the meter per token — so classing the models
+   * apart is what makes the difference between them visible; the ledger
+   * supplies the cost an hour of each model's sessions actually recorded.
+   * A class the fit prices at zero is a real answer: the fleet ran thousands
+   * of session-hours of a cheap model against a meter that did not move, and
+   * pacing those sessions as if they cost what the expensive model costs held
+   * the machine at a fraction of the concurrency the plan sustains.
+   */
+  private measuredModelBurn(
+    accountId: string,
+    provider: string,
+    model: string,
+    now: number,
+  ): number | undefined {
+    const since = now - this.cfg.measurementWindowMs;
+    const usage = this.ledger
+      .modelUsage(accountId, since, now)
+      .find((row) => row.model === model);
+    if (usage === undefined || usage.hours < this.cfg.minMeasuredSessionHours) return undefined;
+    const transform = this.cfg.transform;
+    let cost = 0;
+    let costClass: string | undefined;
+    for (const [classId, tokens] of Object.entries(usage.tokensByClass)) {
+      const priced = transform?.(provider, classId, tokens) ?? { classId, tokens };
+      cost += priced.tokens;
+      costClass ??= priced.classId;
+    }
+    if (cost <= 0 || costClass === undefined) return undefined;
+    const percentPerToken = this.classCoefficient(accountId, provider, model, costClass, now);
+    if (percentPerToken === undefined) return undefined;
+    return (percentPerToken * cost) / usage.hours;
+  }
+
+  /** The fitted percent-per-cost-unit for a model's usage class, from the
+   * meter that paces it most tightly. Undefined until that meter has
+   * observed the class at all; zero once it has and found no drain. */
+  private classCoefficient(
+    accountId: string,
+    provider: string,
+    model: string,
+    costClass: string,
+    now: number,
+  ): number | undefined {
+    const cal = this.calibration(accountId, provider, now);
+    if (cal === undefined) return undefined;
+    let binding: number | undefined;
+    for (const spec of this.metersFor(provider, model)) {
+      const stats = cal.stats(spec.id);
+      const cls = stats.classes.find((c) => c.classId === costClass);
+      if (cls?.percentPerToken === undefined) continue;
+      if (binding === undefined || cls.percentPerToken > binding) binding = cls.percentPerToken;
+    }
+    return binding;
   }
 
   /** The measurement itself, or undefined while the account has too few
@@ -300,6 +427,27 @@ export class Broker {
     return burn > 0 ? burn : undefined;
   }
 
+  /**
+   * Percent/hour an account's live sessions already commit: each run priced
+   * at what a session of *its* model burns here, plus interactive leases at
+   * the account's blended rate, since a lease carries no model.
+   */
+  private committedBurn(
+    accountId: string,
+    provider: string,
+    blended: number,
+    now: number,
+  ): number {
+    let committed = 0;
+    for (const { model, count } of this.ledger.activeRunModels(accountId)) {
+      committed += count * this.sessionBurn(accountId, now, provider, model);
+    }
+    return (
+      committed +
+      this.ledger.activeSessionLeaseCount(accountId, now, this.cfg.sessionLeaseTimeoutMs) * blended
+    );
+  }
+
   private views(now: number): AccountView[] {
     return this.ledger
       .accounts()
@@ -322,6 +470,7 @@ export class Broker {
           sessionBurn,
           measured: measured !== undefined,
           capacity: this.capacity(sustainable, sessionBurn, measured !== undefined),
+          committed: this.committedBurn(a.id, a.provider, sessionBurn, now),
           active:
             this.ledger.activeRunCount(a.id) +
             this.ledger.activeSessionLeaseCount(a.id, now, this.cfg.sessionLeaseTimeoutMs),
@@ -340,12 +489,20 @@ export class Broker {
    * honoured.
    */
   private capacity(sustainable: number | undefined, sessionBurn: number, measured: boolean): number {
-    return sustainable === undefined || !measured ? 1 : Math.floor(sustainable / sessionBurn);
+    if (sustainable === undefined || !measured) return 1;
+    // A model measured as free against the meter has no quota bound at all,
+    // and the quotient says so. What still bounds it is the machine: sessions
+    // are hosted in the runner's process, so the ceiling is the answer rather
+    // than an infinity that would flow into every free-capacity comparison.
+    if (sessionBurn <= 0) return this.cfg.maxConcurrentSessions;
+    return Math.min(this.cfg.maxConcurrentSessions, Math.floor(sustainable / sessionBurn));
   }
 
   private cachedRate(accountId: string, provider: string, now: number, model?: string): number | undefined {
     if (this.ratesAt !== now) {
       this.rates.clear();
+      this.burns.clear();
+      this.cals.clear();
       this.ratesAt = now;
     }
     const key = `${accountId}\u0000${provider}\u0000${model ?? ""}`;
@@ -371,15 +528,28 @@ export class Broker {
       for (const v of views) {
         if (v.provider !== candidate.provider) continue;
         if (exclude?.has(v.id)) continue;
-        // Capacity for *this candidate*: a meter the model cannot drain has
-        // no say in whether the model may launch.
-        const capacity = this.capacity(
-          this.cachedRate(v.id, candidate.provider, now, candidate.model),
-          v.sessionBurn,
-          v.measured,
-        );
-        const free = capacity - v.active;
-        if (free <= 0) continue;
+        // What an account can take is a rate budget, not a session count.
+        // Every live session commits what its own model burns, and a
+        // candidate is admitted if the account's meter can sustain the sum.
+        // Counting sessions instead let a cheap model starve an expensive
+        // one: forty-six light sessions on an account filled its session
+        // count, so the standard tier — costing a fraction of the account's
+        // sustainable rate, and asked for by an operator running a 1:5 mix —
+        // was refused every account on the machine and the fleet ran with a
+        // single standard session.
+        const rate = this.cachedRate(v.id, candidate.provider, now, candidate.model);
+        const burn = this.sessionBurn(v.id, now, candidate.provider, candidate.model);
+        let free: number;
+        if (rate === undefined || !v.measured) {
+          // Bootstrap: nothing is measured, so one session at a time until
+          // the meters have priced this account.
+          free = v.active >= 1 ? 0 : 1;
+        } else {
+          // A model measured as free against every meter it drains costs the
+          // account nothing; the machine ceiling above is what bounds it.
+          free = burn <= 0 ? this.cfg.maxConcurrentSessions - v.active : (rate - v.committed) / burn;
+        }
+        if (free < 1) continue;
         if (best === undefined || free > bestFree) {
           best = v;
           bestFree = free;

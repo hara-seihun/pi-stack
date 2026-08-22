@@ -491,3 +491,160 @@ describe("broker meter scope", () => {
     expect(broker.admit("standard", now)?.accountId).toBe("codex-1");
   });
 });
+
+describe("per-model burn", () => {
+  const MIXED: MeterSpec[] = [
+    { id: "weekly", drainedBy: ["cheap:cost", "dear:cost"], nominalWindowMs: 7 * 24 * HOUR },
+  ];
+  const MIXED_CONFIG: Partial<BrokerConfig> & Pick<BrokerConfig, "tiers" | "meters"> = {
+    tiers: {
+      light: [{ provider: "openai-codex", model: "gpt-5.6-luna" }],
+      standard: [{ provider: "openai-codex", model: "gpt-5.6-sol" }],
+      expert: [],
+    },
+    meters: { "openai-codex": MIXED },
+    maxConcurrentSessions: 60,
+    modelClasses: { "openai-codex": { "gpt-5.6-luna": "cheap", "gpt-5.6-sol": "dear" } },
+    transform: (_provider, classId, tokens) => {
+      const model = classId.slice(0, classId.lastIndexOf(":"));
+      const cls = model === "gpt-5.6-luna" ? "cheap" : "dear";
+      return { classId: `${cls}:cost`, tokens };
+    },
+  };
+
+  /** A fleet running both models continuously on one account, with the mix
+   * shifting between blocks: cheap-heavy for a while, then expensive-heavy.
+   * Only the expensive model moves the meter. A mix held at one ratio would
+   * be collinear and unidentifiable however long it ran, which is why the
+   * measurement needs a fleet whose composition changes — as a real one does
+   * whenever lanes come and go. */
+  function feedMixedHistory(ledger: Ledger, hours: number): number {
+    let used = 5;
+    let drained = 0;
+    ledger.recordReading("codex-1", "weekly", { at: 0, usedPercent: used, resetAt: 7 * 24 * HOUR });
+    for (let h = 1; h <= hours; h++) {
+      const at = h * HOUR;
+      const cheapHeavy = Math.floor((h - 1) / 8) % 2 === 0;
+      const cheapTokens = cheapHeavy ? 8e6 : 1e6;
+      const dearTokens = cheapHeavy ? 0.25e6 : 1e6;
+      ledger.recordUsage("codex-1", {
+        at: at - HOUR / 2,
+        classId: "gpt-5.6-luna:input",
+        tokens: cheapTokens,
+        source: "orchestrator",
+      });
+      ledger.recordUsage("codex-1", {
+        at: at - HOUR / 2,
+        classId: "gpt-5.6-sol:input",
+        tokens: dearTokens,
+        source: "orchestrator",
+      });
+      for (const [model, tier] of [
+        ["gpt-5.6-luna", "light"],
+        ["gpt-5.6-sol", "standard"],
+      ] as const) {
+        const run = ledger.createRun({
+          taskId: "t",
+          tier,
+          accountId: "codex-1",
+          model,
+          provider: "openai-codex",
+          at: at - HOUR,
+        });
+        ledger.finishRun(run, { state: "done" }, at);
+      }
+      // 1% of the meter per 2M tokens of the expensive model; the cheap one
+      // is free.
+      drained += dearTokens / 2e6;
+      used = 5 + drained;
+      ledger.recordReading("codex-1", "weekly", {
+        at,
+        usedPercent: Math.floor(used),
+        resetAt: 7 * 24 * HOUR,
+      });
+    }
+    return hours * HOUR;
+  }
+
+  it("prices each model's sessions separately, so a cheap model earns real concurrency", () => {
+    // The production failure: light sessions cost a fraction of what standard
+    // ones do against the same quota, but burn was measured per account and
+    // blended. Every luna session was paced as if it were a sol session, and
+    // the fleet sat at a quarter of the concurrency the plan sustained.
+    const ledger = openLedger();
+    const now = feedMixedHistory(ledger, 60);
+    const broker = new Broker(ledger, MIXED_CONFIG);
+
+    const blended = broker.sessionBurn("codex-1", now);
+    const cheap = broker.sessionBurn("codex-1", now, "openai-codex", "gpt-5.6-luna");
+    const dear = broker.sessionBurn("codex-1", now, "openai-codex", "gpt-5.6-sol");
+    expect(cheap).toBeLessThan(0.01); // measured against a meter it never moved
+    expect(dear).toBeGreaterThan(blended);
+    expect(dear).toBeGreaterThan(0.2); // ~0.3 %/h against a cheap model at ~0
+
+    // Concurrency follows: the cheap tier is bounded by the machine, the
+    // expensive one by what the plan sustains.
+    let light = 0;
+    for (;;) {
+      const a = broker.admit("light", now);
+      if (a === undefined) break;
+      ledger.createRun({ taskId: "t", tier: "light", at: now, ...a });
+      light++;
+    }
+    expect(light).toBeGreaterThan(20);
+  });
+
+  it("a cheap model filling an account never starves an expensive one", () => {
+    // The operator asked for one standard session per five light ones and got
+    // one standard session against forty-six light. Admission compared a
+    // per-model capacity against the account's whole session count, so the
+    // cheap tier's sessions consumed the expensive tier's headroom: an
+    // account's budget is a rate, and a light session commits a fraction of
+    // what a standard one does.
+    const ledger = openLedger();
+    const now = feedMixedHistory(ledger, 60);
+    const broker = new Broker(ledger, MIXED_CONFIG);
+
+    // Fill the account with cheap sessions, as a light-heavy mix does within
+    // a cycle or two, while leaving machine headroom so this test speaks
+    // only about the account's quota budget.
+    for (let i = 0; i < 40; i++) {
+      const a = broker.admit("light", now);
+      expect(a).toBeDefined();
+      ledger.createRun({ taskId: "t", tier: "light", at: now, ...a! });
+    }
+    // The expensive tier is still admitted: what bounds it is the account's
+    // sustainable rate against what a standard session actually burns.
+    const dear = broker.admit("standard", now);
+    expect(dear).toEqual({
+      accountId: "codex-1",
+      provider: "openai-codex",
+      model: "gpt-5.6-sol",
+    });
+
+    // And it is bounded: expensive sessions are admitted until the account's
+    // rate budget is spent, not indefinitely.
+    let admitted = 0;
+    for (;;) {
+      const a = broker.admit("standard", now);
+      if (a === undefined) break;
+      ledger.createRun({ taskId: "t", tier: "standard", at: now, ...a });
+      admitted++;
+      if (admitted > 50) break;
+    }
+    const rate = broker.sustainableRate("codex-1", "openai-codex", now, "gpt-5.6-sol")!;
+    const burn = broker.sessionBurn("codex-1", now, "openai-codex", "gpt-5.6-sol");
+    expect(admitted).toBeLessThanOrEqual(Math.ceil(rate / burn));
+    expect(admitted).toBeGreaterThan(0);
+  });
+
+  it("falls back to the account's blended burn until a model has been measured here", () => {
+    const ledger = openLedger();
+    const now = feedMixedHistory(ledger, 60);
+    const broker = new Broker(ledger, MIXED_CONFIG);
+    // A model this account has never run has no hours to divide by.
+    expect(broker.sessionBurn("codex-1", now, "openai-codex", "gpt-5.6-nova")).toBe(
+      broker.sessionBurn("codex-1", now),
+    );
+  });
+});

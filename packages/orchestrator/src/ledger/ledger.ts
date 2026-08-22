@@ -1104,6 +1104,18 @@ export class Ledger {
   }
 
   /** Pending runs reserve the account just like running ones. */
+  /** The live sessions on an account, by model. What each of them costs the
+   * account differs by model, so a count alone cannot say how much of the
+   * account's quota is already committed. */
+  activeRunModels(accountId: string): { readonly model: string; readonly count: number }[] {
+    return this.db
+      .prepare(
+        `SELECT model, COUNT(*) AS count FROM run
+          WHERE account_id = ? AND state IN ('pending', 'running') GROUP BY model`,
+      )
+      .all(accountId) as { model: string; count: number }[];
+  }
+
   activeRunCount(accountId: string): number {
     const row = this.db
       .prepare(
@@ -1175,28 +1187,94 @@ export class Ledger {
   }
 
   /**
-   * What a lane holds in the fleet, split by tier: its pending and running
-   * sessions, plus those that ended since the cutoff.
+   * What one hour of a session costs, per model, on this account: the usage
+   * the fleet's own sessions recorded for each model against the hours those
+   * sessions ran.
    *
-   * The allocator targets the fleet's composition, and composition read from
-   * live sessions alone undersamples a lane whose sessions are short. A queue
-   * lane that empties and exits every few minutes would show as holding
-   * nothing on almost every cycle and be handed slot after slot, while a
-   * research lane holding warm context for hours would look permanently
-   * over-served. Counting the sessions a lane occupied anywhere in the window
-   * makes the two comparable: a long session counts once while it runs, a
-   * short one counts once for the window after it ends.
+   * Burn measured per account blends every model that ran on it, and the
+   * models differ by more than an order of magnitude against a provider's
+   * quota meter — a cheap model's sessions were being paced as if they cost
+   * what the expensive model's do, which capped the fleet at a fraction of
+   * what the plan sustains. Interactive usage (`source = 'machine'`) is left
+   * out on both sides: its hours are leases with no model attached, so
+   * counting its tokens would price them against fleet hours.
    */
-  fleetPresenceByTier(taskId: string, since: number): Partial<Record<Tier, number>> {
+  modelUsage(
+    accountId: string,
+    since: number,
+    now: number,
+  ): { readonly model: string; readonly tokensByClass: Readonly<Record<string, number>>; readonly hours: number }[] {
+    const usage = this.db
+      .prepare(
+        `SELECT class_id, SUM(tokens) AS tokens FROM usage_event
+          WHERE account_id = ? AND at >= ? AND at <= ? AND source = 'orchestrator'
+          GROUP BY class_id`,
+      )
+      .all(accountId, since, now) as { class_id: string; tokens: number }[];
+    const runs = this.db
+      .prepare(
+        `SELECT model, COALESCE(claimed_at, started_at) AS s, ended_at AS e FROM run
+          WHERE account_id = ? AND state != 'pending'
+            AND (ended_at IS NULL OR ended_at > ?) AND COALESCE(claimed_at, started_at) < ?`,
+      )
+      .all(accountId, since, now) as { model: string; s: number; e: number | null }[];
+    const byModel = new Map<string, { tokensByClass: Record<string, number>; hours: number }>();
+    const entry = (model: string) => {
+      let row = byModel.get(model);
+      if (row === undefined) {
+        row = { tokensByClass: {}, hours: 0 };
+        byModel.set(model, row);
+      }
+      return row;
+    };
+    for (const u of usage) {
+      // Usage classes are `model:component`; the model is the launch-side
+      // fact the run rows also carry.
+      const split = u.class_id.lastIndexOf(":");
+      if (split < 0) continue;
+      const row = entry(u.class_id.slice(0, split));
+      row.tokensByClass[u.class_id] = (row.tokensByClass[u.class_id] ?? 0) + u.tokens;
+    }
+    for (const r of runs) {
+      entry(r.model).hours +=
+        Math.max(0, Math.min(r.e ?? now, now) - Math.max(r.s, since)) / 3_600_000;
+    }
+    return [...byModel].map(([model, row]) => ({ model, ...row }));
+  }
+
+  /**
+   * What a lane holds in the fleet, split by tier: its live sessions, plus
+   * recently ended ones at a weight that fades to nothing across the window.
+   *
+   * The allocator targets the fleet's composition, and the measure has to
+   * survive two opposite failures. Counting only live sessions undersamples a
+   * lane whose sessions are short — a queue lane that drains and exits every
+   * few minutes shows as holding nothing on most ticks and is fed slot after
+   * slot, while a research lane keeping warm context for hours looks
+   * permanently over-served — and it also erases the memory a weighted tier
+   * mix needs, since twenty light per standard is a ratio no single-slot
+   * cycle can express. Counting every session that touched the window at full
+   * weight fails the other way: a lane cancelled an hour ago kept a phantom
+   * hold on the machine, which was enough to stop a genuinely over-served
+   * lane from ever being asked to give a session back. A live session counts
+   * as one; an ended one counts for what is left of the window behind it.
+   */
+  fleetPresenceByTier(taskId: string, since: number, now = Date.now()): Partial<Record<Tier, number>> {
+    const span = Math.max(1, now - since);
     const rows = this.db
       .prepare(
-        `SELECT tier, COUNT(*) AS n FROM run
+        `SELECT tier,
+                SUM(CASE WHEN state IN ('pending', 'running') THEN 1.0
+                         ELSE MAX(0.0, 1.0 - (? - ended_at) / CAST(? AS REAL)) END) AS held
+           FROM run
           WHERE task_id = ?
             AND (state IN ('pending', 'running') OR ended_at >= ?)
           GROUP BY tier`,
       )
-      .all(taskId, since) as { tier: Tier; n: number }[];
-    return Object.fromEntries(rows.map((r) => [r.tier, r.n]));
+      .all(now, span, taskId, since) as { tier: Tier; held: number | null }[];
+    return Object.fromEntries(
+      rows.filter((r) => (r.held ?? 0) > 0).map((r) => [r.tier, r.held ?? 0]),
+    );
   }
 
   /** Error runs for a task since the cutoff; the controller's circuit breaker. */

@@ -141,6 +141,54 @@ export function allocate(
 }
 
 /**
+ * The (lane, tier) pairs holding more than their claim while some other pair
+ * is starved, worst surplus first: what to give up when the fleet is full and
+ * mis-composed.
+ *
+ * A ranked list rather than one answer, because the biggest surplus may have
+ * nothing live to give. Composition counts sessions a lane held anywhere in
+ * the window, so a lane whose sessions all ended an hour ago still shows a
+ * surplus — and shedding it is a no-op. The caller walks the list to the
+ * first pair with a session actually running.
+ *
+ * A full machine cannot converge by allocation alone. Slots only appear as
+ * sessions end, so a lane's declared mix takes effect at the speed of
+ * turnover — and a research fleet whose sessions run for hours will hold a
+ * composition the operator has already changed. Naming the surplus lets the
+ * controller give one session back per cycle, which is what makes a mix
+ * change mean anything before tomorrow.
+ *
+ * `admissible` filters the tiers that could actually take the freed slot:
+ * shedding a session for a tier whose quota is spent buys nothing and costs
+ * an hour of somebody's work.
+ */
+export function surpluses(
+  tasks: readonly TaskSnapshot[],
+  admissible: (tier: Tier) => boolean,
+): { readonly taskId: string; readonly tier: Tier }[] {
+  const pairs = claims(tasks.filter((t) => t.eligible));
+  const totalClaim = pairs.reduce((sum, p) => sum + p.claim, 0);
+  const fleet = pairs.reduce((sum, p) => sum + p.held, 0);
+  if (totalClaim <= 0 || fleet <= 0) return [];
+  const share = (p: Claim): number => (fleet * p.claim) / totalClaim;
+  // Starved: a pair a whole session below its share, whose tier could take
+  // the slot and whose lane still has work for it.
+  const starved = pairs.some(
+    (p) =>
+      p.held + 1 <= share(p) &&
+      admissible(p.tier) &&
+      (tasks.find((t) => t.taskId === p.taskId)?.units ?? 0) > p.held,
+  );
+  if (!starved) return [];
+  return pairs
+    // Only a pair holding a whole session more than its share is asked to
+    // give one up, so rounding alone never costs a session.
+    .filter((p) => p.held - share(p) >= 1)
+    .sort((a, b) => b.held - share(b) - (a.held - share(a)))
+    .map((p) => ({ taskId: p.taskId, tier: p.tier }));
+}
+
+/**
  * How many sessions of each tier the claims want on top of what is running,
  * for a hypothetical `budget` of free slots. The broker advertises slots per
  * tier, and needs both a cap (never hoard a scarce account for a tier nothing

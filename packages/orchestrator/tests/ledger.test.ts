@@ -312,3 +312,35 @@ describe("account metadata custody", () => {
     ]);
   });
 });
+
+describe("fleet presence", () => {
+  const HOUR_MS = 60 * 60_000;
+
+  it("counts live sessions whole and lets ended ones fade across the window", () => {
+    const dir = mkdtempSync(join(tmpdir(), "presence-"));
+    const ledger = Ledger.open(join(dir, "l.sqlite3"));
+    ledger.upsertAccount({ id: "a1", provider: "anthropic", domain: "orchestrator" });
+    const now = 10 * HOUR_MS;
+    const since = now - HOUR_MS;
+
+    // A live session, whatever its age.
+    ledger.createRun({ taskId: "lane", tier: "light", accountId: "a1", model: "m", provider: "anthropic", at: now - 5 * HOUR_MS });
+    // A session that ended a moment ago still counts as one: a lane whose
+    // sessions are short must not read as idle, or a weighted mix could never
+    // hold across single-slot cycles.
+    const justEnded = ledger.createRun({ taskId: "lane", tier: "light", accountId: "a1", model: "m", provider: "anthropic", at: now - HOUR_MS });
+    ledger.finishRun(justEnded, { state: "done" }, now - 36_000);
+    // Half a window ago: half weight.
+    const half = ledger.createRun({ taskId: "lane", tier: "standard", accountId: "a1", model: "m", provider: "anthropic", at: now - HOUR_MS });
+    ledger.finishRun(half, { state: "done" }, now - HOUR_MS / 2);
+    // Older than the window: gone, not a phantom hold on the machine.
+    const old = ledger.createRun({ taskId: "lane", tier: "standard", accountId: "a1", model: "m", provider: "anthropic", at: now - 4 * HOUR_MS });
+    ledger.finishRun(old, { state: "done" }, now - 2 * HOUR_MS);
+
+    const held = ledger.fleetPresenceByTier("lane", since, now);
+    expect(held.light).toBeCloseTo(1.99, 2);
+    expect(held.standard).toBeCloseTo(0.5, 2);
+    ledger.close();
+    rmSync(dir, { recursive: true, force: true });
+  });
+});

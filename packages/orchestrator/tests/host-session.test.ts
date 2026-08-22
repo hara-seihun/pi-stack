@@ -29,9 +29,13 @@ function harness(
   let clock = 0;
   const messages: { role: string; stopReason?: string; errorMessage?: string }[] = [];
   let taskComplete: { execute: (id: string, params: unknown) => Promise<unknown> } | undefined;
+  const bindings: unknown[] = [];
   const session = {
     messages,
     sessionManager: { getSessionId: () => "session-1" },
+    bindExtensions: async (b: unknown) => {
+      bindings.push(b);
+    },
     subscribe: () => () => {},
     dispose: () => {},
     abort: async () => {},
@@ -89,10 +93,23 @@ function harness(
       }
     }, 1);
   });
-  return { host, spec, prompts, finished, links, now: () => clock };
+  return { host, spec, prompts, finished, links, bindings, now: () => clock };
 }
 
 describe("host shift loop", () => {
+  it("binds extensions, or the session's MCP servers never connect", async () => {
+    // `bindExtensions` is what emits session_start, and an extension that
+    // never sees session_start never sets anything up. Hosted sessions used
+    // to skip it, so the MCP gateway answered "MCP not initialized" for the
+    // whole run and agents fell back to hand-rolled curl JSON-RPC.
+    const { host, spec, finished, bindings } = harness([{ reports: 1 }, {}, {}]);
+    host.launch(spec);
+    await finished;
+
+    expect(bindings).toHaveLength(1);
+    expect((bindings[0] as { mode: string }).mode).toBe("print");
+  });
+
   it("reports the session hosting a run, so its usage is attributable to the lane", async () => {
     const { host, spec, finished, links } = harness([{ reports: 1 }, {}, {}]);
     host.launch(spec);
