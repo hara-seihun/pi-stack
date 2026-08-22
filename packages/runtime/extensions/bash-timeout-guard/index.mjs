@@ -62,6 +62,35 @@ export function checkBashTimeout(timeout, policy = timeoutPolicy()) {
   return null;
 }
 
+/**
+ * Heredoc bodies are data, not shell text: a C loop written through `<<EOF` can contain `&`,
+ * `nohup`, or anything else without any of it being a command in this session.
+ */
+function stripHeredocs(command) {
+  const lines = command.split("\n");
+  const out = [];
+  for (let index = 0; index < lines.length; index += 1) {
+    const line = lines[index];
+    out.push(line);
+    const opener = /<<-?\s*(?:'([^']+)'|"([^"]+)"|\\?(\w+))/.exec(line);
+    if (opener === null) continue;
+    const delimiter = opener[1] ?? opener[2] ?? opener[3];
+    const dashed = line.slice(opener.index).startsWith("<<-");
+    index += 1;
+    while (index < lines.length) {
+      const body = dashed ? lines[index].replace(/^\t+/, "") : lines[index];
+      if (body.trimEnd() === delimiter) break;
+      index += 1;
+    }
+  }
+  return out.join("\n");
+}
+
+/** `$(( … ))` is arithmetic, where `&` is bitwise AND rather than a background operator. */
+function stripArithmetic(command) {
+  return command.replace(/\$\(\([\s\S]*?\)\)/g, "0");
+}
+
 /** Quoted spans are removed so a `&` inside `sed 's/x/&/'` is not read as an operator. */
 function unquoted(command) {
   let out = "";
@@ -112,11 +141,15 @@ function backgroundOperator(text) {
       index += 1;
       continue;
     }
-    if (text[index - 1] === ">" || text[index - 1] === "|") continue;
+    if (text[index - 1] === ">" || text[index - 1] === "|" || text[index - 1] === "&") continue;
     if (text[index + 1] === ">") {
       index += 1;
       continue;
     }
+    // A real background operator terminates a command, so it is followed by end of input,
+    // whitespace, or another operator. `e&1` and `x&y` are somebody else's language.
+    const next = text[index + 1];
+    if (next !== undefined && !/[\s;()|&]/.test(next)) continue;
     return "a trailing `&`";
   }
   return null;
@@ -127,7 +160,7 @@ const NESTED_SHELL = /\b(?:ba|z|k|da)?sh\b[^'"\n]*?-[A-Za-z]*c\s+(?:'([^']*)'|"(
 
 export function findDetachment(command) {
   if (typeof command !== "string" || command.length === 0) return null;
-  const text = unquoted(command);
+  const text = unquoted(stripArithmetic(stripHeredocs(command)));
   for (const { found, pattern } of DETACHERS) {
     if (pattern.test(text)) return found;
   }

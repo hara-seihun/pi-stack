@@ -74,6 +74,8 @@ test("every way of outliving the session is recognised", () => {
     "bash -lc './census --batch masks.txt > out 2>err &'",
     "nohup ./shards & wait",
     'bash -c "nohup ./census > out 2>&1"',
+    "cat <<EOF > note\nplain text\nEOF\n./census &",
+    "./census &\n",
   ];
   for (const command of detached) {
     assert.notEqual(findDetachment(command), null, `expected detachment in: ${command}`);
@@ -94,6 +96,13 @@ test("ordinary shell punctuation is not mistaken for detachment", () => {
     "./left & ./right & wait; cat left.out right.out",
     "cat report.md",
     "git commit -m 'batch the census'",
+    // Heredoc bodies are data: source written through them is not shell in this session.
+    "cat > sub.c <<EOF\nfor (int e = P - 2; e; e >>= 1) { if (e & 1) r = r * b % P; }\nEOF\ngcc sub.c",
+    "cat <<'PY' > s.py\nos.system('nohup ./census &')\nPY",
+    "cat <<-EOF > f\n\ta & b\n\tEOF",
+    // `&` as bitwise AND, in arithmetic or in another language's syntax.
+    "x=$((mask & 1)); echo $x",
+    "awk '{ print $1 }' f | python3 -c 'import sys; print(sum(int(v)&3 for v in sys.stdin))'",
   ];
   for (const command of foreground) {
     assert.equal(findDetachment(command), null, `expected no detachment in: ${command}`);
