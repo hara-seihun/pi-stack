@@ -648,3 +648,49 @@ describe("per-model burn", () => {
     );
   });
 });
+
+/**
+ * A plan the fleet cannot afford to run continuously is still a plan it can
+ * afford to run *sometimes*. Cursor's monthly subscription measured one Grok
+ * session at 0.85%/h against a paced 0.13%/h, so the integer quotient was
+ * zero and the account was retired for the rest of the month with 89% of a
+ * paid window left to expire unspent. Capacity below one session means duty
+ * cycle, not shutdown.
+ */
+describe("duty cycle for an account that cannot afford a continuous session", () => {
+  function burstLedger(usedPercentPerHour: number): { ledger: Ledger; now: number } {
+    const ledger = Ledger.open(":memory:");
+    ledger.upsertAccount({ id: "anth-1", provider: "anthropic", domain: "orchestrator" });
+    // 48h into a 7-day window, with few session-hours behind the drain: one
+    // session costs far more per hour than the plan sustains per hour.
+    const now = feedHistory(ledger, "anth-1", { percentPerHour: usedPercentPerHour, hours: 48 });
+    feedRuns(ledger, "anth-1", { count: 2, hoursEach: 4, endAt: now });
+    return { ledger, now };
+  }
+
+  it("runs one session while the window is under-spent", () => {
+    // 5% + 48 × 0.3 ≈ 19% used at 29% of the way through the window.
+    const { ledger, now } = burstLedger(0.3);
+    const broker = new Broker(ledger, CONFIG);
+    const sustainable = broker.sustainableRate("anth-1", "anthropic", now)!;
+    expect(broker.sessionBurn("anth-1", now)).toBeGreaterThan(sustainable);
+
+    const admission = broker.admit("standard", now);
+    expect(admission?.accountId).toBe("anth-1");
+    // Exactly one: a burst is a single session, not a scramble for the meter.
+    ledger.createRun({ taskId: "t", tier: "standard", at: now, ...admission! });
+    expect(broker.admit("standard", now)?.accountId).not.toBe("anth-1");
+  });
+
+  it("rests once the burst has run the window ahead of its pace", () => {
+    // 5% + 48 × 0.6 ≈ 34% used at the same 29% mark: spent ahead, so wait.
+    const { ledger, now } = burstLedger(0.6);
+    const broker = new Broker(ledger, CONFIG);
+    expect(broker.externalCapacity(now).accounts).toContainEqual({
+      id: "anth-1",
+      provider: "anthropic",
+      capacity: 0,
+      active: 0,
+    });
+  });
+});

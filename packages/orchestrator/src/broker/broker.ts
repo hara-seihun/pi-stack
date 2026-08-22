@@ -87,6 +87,9 @@ interface AccountView {
    * external launcher is told, and the bootstrap bound before burn is
    * measured. */
   readonly capacity: number;
+  /** The window is spending slower than it grants, so an account too
+   * expensive to run continuously may still run one session now. */
+  readonly behindPace: boolean;
   /** Percent/hour the account's live sessions have already committed, each
    * priced at what its own model burns. */
   committed: number;
@@ -463,13 +466,15 @@ export class Broker {
         const sustainable = this.cachedRate(a.id, a.provider, now);
         const measured = this.measuredSessionBurn(a.id, now);
         const sessionBurn = measured ?? this.cfg.bootstrapSessionPercentPerHour;
+        const behindPace = this.behindPace(a.id, a.provider, now);
         return {
+          behindPace,
           id: a.id,
           provider: a.provider,
           sustainable,
           sessionBurn,
           measured: measured !== undefined,
-          capacity: this.capacity(sustainable, sessionBurn, measured !== undefined),
+          capacity: this.capacity(sustainable, sessionBurn, measured !== undefined, behindPace),
           committed: this.committedBurn(a.id, a.provider, sessionBurn, now),
           active:
             this.ledger.activeRunCount(a.id) +
@@ -483,19 +488,58 @@ export class Broker {
    * divided by what one session actually costs. Both halves have to be
    * observed for the quotient to mean anything, so an account missing either
    * one runs a single session until it has earned the evidence. That
-   * bootstrap is a floor for the unmeasured, never a cap on the measured —
-   * and never a floor under a measured account that plainly cannot afford
-   * another session, which is why a fully measured quotient of zero is
-   * honoured.
+   * bootstrap is a floor for the unmeasured, never a cap on the measured.
+   *
+   * A quotient below one is a duty cycle, not a shutdown. An account whose
+   * single session burns faster than its plan sustains can still afford to
+   * run *some* of the time, and flooring that to zero permanently retires a
+   * subscription the moment it is measured: Cursor's monthly plan sat at 11%
+   * used with 89% left to expire unspent, because one Grok session measures
+   * 0.85%/h against a paced 0.13%/h. Such an account runs one session
+   * whenever its usage is behind the plan's pace line, and rests while it is
+   * ahead — bursts that spend the plan over the window instead of never.
    */
-  private capacity(sustainable: number | undefined, sessionBurn: number, measured: boolean): number {
+  private capacity(
+    sustainable: number | undefined,
+    sessionBurn: number,
+    measured: boolean,
+    behindPace: boolean,
+  ): number {
     if (sustainable === undefined || !measured) return 1;
     // A model measured as free against the meter has no quota bound at all,
     // and the quotient says so. What still bounds it is the machine: sessions
     // are hosted in the runner's process, so the ceiling is the answer rather
     // than an infinity that would flow into every free-capacity comparison.
     if (sessionBurn <= 0) return this.cfg.maxConcurrentSessions;
-    return Math.min(this.cfg.maxConcurrentSessions, Math.floor(sustainable / sessionBurn));
+    const sessions = Math.min(this.cfg.maxConcurrentSessions, Math.floor(sustainable / sessionBurn));
+    return sessions === 0 && behindPace ? 1 : sessions;
+  }
+
+  /**
+   * Is every meter this account drains consuming slower than its window
+   * grants? The pace line is elapsed fraction of the nominal window, in
+   * percent, scaled by the family's operator boost: at 20% into a monthly
+   * window a 1x plan may be 20% spent, a 5x boosted one 100%.
+   *
+   * Deliberately a cumulative test rather than a rate: a burst that runs
+   * ahead of the line stops admitting until the line catches up, which is
+   * what makes the duty cycle self-correcting without any timer.
+   */
+  private behindPace(accountId: string, provider: string, now: number): boolean {
+    const specs = this.metersFor(provider, undefined);
+    let judged = false;
+    for (const spec of specs) {
+      const reading = this.ledger.latestReading(accountId, spec.id);
+      if (reading?.resetAt === undefined || spec.nominalWindowMs <= 0) continue;
+      const elapsedMs = spec.nominalWindowMs - (reading.resetAt - now);
+      // Before the window's own start (a reset further out than the window is
+      // long) there is nothing granted yet to be behind on.
+      if (elapsedMs <= 0) return false;
+      const granted = (100 * Math.min(elapsedMs, spec.nominalWindowMs)) / spec.nominalWindowMs;
+      if (reading.usedPercent >= granted * this.ledger.boost(provider)) return false;
+      judged = true;
+    }
+    return judged;
   }
 
   private cachedRate(accountId: string, provider: string, now: number, model?: string): number | undefined {
@@ -548,6 +592,12 @@ export class Broker {
           // A model measured as free against every meter it drains costs the
           // account nothing; the machine ceiling above is what bounds it.
           free = burn <= 0 ? this.cfg.maxConcurrentSessions - v.active : (rate - v.committed) / burn;
+          // A session costing more per hour than the plan sustains is a duty
+          // cycle, not a refusal: while the window is under-spent the account
+          // runs exactly one, and it stops being under-spent as that session
+          // burns. Without this an account is retired the moment measurement
+          // proves it expensive, and its remaining window expires unused.
+          if (free < 1 && v.behindPace && v.active === 0) free = 1;
         }
         if (free < 1) continue;
         if (best === undefined || free > bestFree) {

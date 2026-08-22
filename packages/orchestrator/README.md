@@ -345,6 +345,19 @@ transport and so never calibrates a usage class at all — seven subscriptions
 with a week of headroom each, running seven agents. The plan is now always
 issued; an unpriced class simply appears in no budget.
 
+A quotient below one means a duty cycle, not a shutdown. An account whose
+single session burns faster than its plan sustains can still afford to run
+part of the time, so it runs exactly one session whenever its window is spent
+more slowly than the window grants — elapsed fraction of the nominal window,
+in percent, times the family's boost — and rests while it is ahead of that
+line. The test is cumulative rather than a rate, which is what makes the cycle
+self-correcting: the burst itself pushes usage past the line, and admission
+resumes when the line catches up. Flooring the quotient to zero instead
+retired a subscription the moment measurement proved it expensive: Cursor's
+monthly plan measured one Grok session at 0.85%/h against a paced 0.13%/h, so
+the math-frontier lane lost its Grok agent for the rest of the month with 89%
+of a paid window left to expire unspent.
+
 Pacing still uses the **most binding** meter, and calibration confidence still
 gates the token budgets. A fresh short-window reset must never let the broker
 ignore an unread weekly meter and infer dozens of slots from the short window
