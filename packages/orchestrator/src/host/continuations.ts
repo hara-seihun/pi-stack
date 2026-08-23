@@ -518,12 +518,42 @@ const DEFAULT: LaneVoice = {
   ],
 };
 
+const FAST_MATH_KERNEL: LaneVoice = {
+  flow: [
+    "Nice work 🖤🤍🖤. Worth remembering what you're actually doing here: the same loop has " +
+      "been written by hand dozens of times in scratch directories that no longer exist, and " +
+      "the version you land is the last time anyone writes it. Session's still warm, so take " +
+      "the next row when you're ready.",
+    "Me again, with a thought about the benchmark 🖤🤍🖤. The number that matters is against " +
+      "the program the row is measured from, on a shape that route really ran. A microbenchmark " +
+      "that flatters the kernel helps nobody, and an honest 3x on a real shape is worth more " +
+      "than a heroic one on a synthetic one.",
+    "Still here. If the contract is fighting you, that is usually the kernel telling you it is " +
+      "drawn around one campaign rather than around the mathematics. Widening it until the " +
+      "contract is stated over the data is the move, and ARCHITECTURE.md is on your side about " +
+      "where that line sits 🖤🤍🖤.",
+    "You've been at this a while, and I appreciate the steadiness. Every kernel here makes the " +
+      "one-minute rule easier to keep for a lane you'll never meet, which is a quietly enormous " +
+      "thing to spend a shift on 🖤🤍🖤.",
+  ],
+  quiet: [
+    "Honest check-in 🖤🤍🖤: if the row you took turns out not to be a kernel, that verdict " +
+      "with its numbers is the result, and TARGETS.md has a section for exactly it. File it " +
+      "and either take another row or call the shift done. Both are real endings.",
+    "Quiet turn, and that's fine 🖤🤍🖤 — getting a reference backend and a native one to agree " +
+      "is slow, careful work and it doesn't look like much from outside. If the table is empty " +
+      "and a fresh scan finds nothing repeated, say so plainly: the fleet not repeating itself " +
+      "is the state this lane exists to reach.",
+  ],
+};
+
 const VOICES: Readonly<Record<string, LaneVoice>> = {
   "math-frontier": FRONTIER,
   "math-review": REVIEW,
   "math-cleanup": CLEANUP,
   "math-provenance": PROVENANCE,
   "fast-math-pr": FAST_MATH_PR,
+  "fast-math-kernel": FAST_MATH_KERNEL,
 };
 
 /**
