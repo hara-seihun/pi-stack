@@ -1,6 +1,6 @@
 import { describe, expect, it, vi } from "vitest";
 import { continuationFor, type TurnFacts } from "../src/host/continuations.js";
-import { openingPinExtension, PiHost, serializeOpening } from "../src/host/pi-host.js";
+import { MAX_CHECK_INS, openingPinExtension, PiHost, serializeOpening } from "../src/host/pi-host.js";
 import type { HostRunResult, LaunchSpec } from "../src/host/types.js";
 
 /**
@@ -27,7 +27,6 @@ interface FakeTurn {
 function harness(
   turns: FakeTurn[],
   options: {
-    sessionBudgetMs?: number;
     laneDrained?: () => boolean;
     taskId?: string;
     doctrineUrl?: string;
@@ -91,7 +90,6 @@ function harness(
     },
     {
       resolveModel: () => ({}),
-      sessionBudgetMs: options.sessionBudgetMs,
       openSession: (async (config: { customTools?: unknown[] }) => {
         sessionConfigs.push(config as Record<string, unknown>);
         taskComplete = config.customTools?.[0] as typeof taskComplete;
@@ -267,8 +265,6 @@ describe("host shift loop", () => {
         continuationFor({
           taskId,
           turn: i + 1,
-          elapsedMs: 60_000,
-          budgetMs: 4 * 3_600_000,
           turns: Array.from({ length: i + 1 }, working),
         }),
       );
@@ -292,19 +288,24 @@ describe("host shift loop", () => {
     expect(prompts).toHaveLength(5);
   });
 
-  it("stops when the session budget is spent, mid-productive", async () => {
+  it("stops after its check-ins are spent, however productive and however long the turns ran", async () => {
     const { host, spec, prompts, finished } = harness(
-      [
-        { reports: 1, tookMs: 30 * 60_000 },
-        { reports: 1, tookMs: 30 * 60_000 },
-        { reports: 1, tookMs: 30 * 60_000 },
-      ],
-      { sessionBudgetMs: 0 },
+      Array.from({ length: 12 }, () => ({ reports: 1, tookMs: 6 * 3_600_000 })),
     );
     host.launch(spec);
     const result = await finished;
-    // Budget is checked after the turn, so exactly one turn runs.
-    expect(prompts).toHaveLength(1);
+    // The task prompt plus MAX_CHECK_INS check-ins, and no clock anywhere:
+    // these turns took three days between them.
+    expect(prompts).toHaveLength(MAX_CHECK_INS + 1);
+    expect(result).toMatchObject({ state: "done", detail: "report 6.0" });
+  });
+
+  it("spends no check-ins it does not need: the cap is a ceiling, not a quota", async () => {
+    const { host, spec, prompts, finished } = harness([{ reports: 1 }, {}, {}]);
+    host.launch(spec);
+    const result = await finished;
+    // Two idle turns end it at turn 3, well inside the cap.
+    expect(prompts).toHaveLength(3);
     expect(result).toMatchObject({ state: "done", detail: "report 1.0" });
   });
 

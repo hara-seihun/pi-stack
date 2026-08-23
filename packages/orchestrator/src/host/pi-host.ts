@@ -31,11 +31,24 @@ const HEARTBEAT_MS = 30_000;
 const PROGRESS_WRITE_INTERVAL_MS = 15_000;
 
 /**
- * How long a session may keep working before the host stops re-prompting it,
- * and how many consecutive turns may pass with nothing reported before the
- * host accepts that the lane is spent.
+ * How many check-ins the host may send before it stops re-prompting, and how
+ * many consecutive turns may pass with nothing reported before the host
+ * accepts that the lane is spent.
+ *
+ * A shift is bounded by asks, not by a clock. The host used to stop at a
+ * four-hour budget, which put a deadline into a system whose whole argument
+ * is that a hard problem deserves however long it takes; agents also invent
+ * deadlines readily on their own (transcript audit 2026-08-23), and a real
+ * one behind them made the invention true. Six work turns — the task prompt
+ * plus five check-ins — is the host's whole claim on a session now. The
+ * agent may work each of them for as long as the mathematics needs.
+ *
+ * It is a constant and not a knob. The override that used to exist could
+ * only make a shift longer, and a non-numeric one silently removed the cap
+ * altogether (`turn >= NaN` is false forever), which is the shape of the
+ * failure it exists to prevent.
  */
-export const SESSION_BUDGET_MS = 4 * 3_600_000;
+export const MAX_CHECK_INS = 5;
 const MAX_IDLE_TURNS = 2;
 
 interface CompletionReport {
@@ -72,8 +85,6 @@ export class PiHost implements HostManager {
       readonly resolveModel: (spec: LaunchSpec) => unknown;
       /** Directory root for per-run transcripts; omit to disable them. */
       readonly runsRoot?: string;
-      /** How long one session may keep working. Default 4h. */
-      readonly sessionBudgetMs?: number;
       /** Session factory. Defaults to the pi SDK; a test supplies its own to
        * exercise the shift loop without a provider. */
       readonly openSession?: typeof createAgentSession;
@@ -347,15 +358,13 @@ export class PiHost implements HostManager {
         HEARTBEAT_MS,
       );
       disposers.push(() => clearInterval(heartbeat));
-      const budgetMs = this.options.sessionBudgetMs ?? SESSION_BUDGET_MS;
-      const shiftStart = Date.now();
-      const deadline = shiftStart + budgetMs;
       // A launch is a shift, not a single turn. The host keeps prompting the
       // same session — same context, same working directory, same trail —
-      // until the session's budget runs out, the turn fails, an operator
-      // aborts, or the agent has twice had nothing to report. Ending at the
-      // first quiet turn threw away a warm context that had just paid for
-      // itself and made every lane restart from scratch.
+      // until it has spent its check-ins, the turn fails, an operator aborts,
+      // or the agent has twice had nothing to report. Ending at the first
+      // quiet turn threw away a warm context that had just paid for itself
+      // and made every lane restart from scratch. Nothing here is timed: a
+      // turn may run as long as the agent keeps working.
       let idle = 0;
       // The opening exchange is lived, not injected: each message is a real
       // turn the agent answers with whatever tools it reaches for, and the
@@ -397,8 +406,6 @@ export class PiHost implements HostManager {
             : continuationFor({
                 taskId: spec.taskId,
                 turn,
-                elapsedMs: Date.now() - shiftStart,
-                budgetMs,
                 turns: observer.turns(),
               });
         transcript?.append("user", { text: message });
@@ -430,7 +437,7 @@ export class PiHost implements HostManager {
         // agent deciding to stop, and no check-in second-guesses that.
         if (spec.selfPaced === true) break;
         idle = reports > before ? 0 : idle + 1;
-        if (idle >= MAX_IDLE_TURNS || Date.now() >= deadline) break;
+        if (idle >= MAX_IDLE_TURNS || turn >= MAX_CHECK_INS) break;
         // A queue lane can empty its queue mid-shift, and a continuation
         // would then assert work that no longer exists. Ending the shift is
         // the honest answer; the runner decides which lanes work that way.

@@ -370,9 +370,6 @@ async function runner(ledger: Ledger, args: string[]): Promise<void> {
     {
       resolveModel,
       runsRoot,
-      ...(named.has("session-budget-hours")
-        ? { sessionBudgetMs: Number(named.get("session-budget-hours")) * 3_600_000 }
-        : {}),
     },
   );
   const live = new Runner(ledger, engine, {

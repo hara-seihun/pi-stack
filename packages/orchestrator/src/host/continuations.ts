@@ -1,6 +1,7 @@
 /**
- * What the host says when a session ends a turn while its budget and its
- * lane still have room — generated from what the shift has actually done.
+ * What the host says when a session ends a turn while the host still has
+ * check-ins and the lane still has work — generated from what the shift has
+ * actually done.
  *
  * A model ends its turn the moment it writes a summary, and a turn ending
  * used to end the run: standing research lanes whose prompts say "submitting
@@ -18,8 +19,13 @@
  * therefore generated from the observed shift: a turn that filed a pile of
  * near-adjacent entries gets a warm, specific ask to consolidate; a turn of
  * deep quiet work gets the operator's encouragement; a turn with nothing in
- * it gets honest permission to stop; a shift near its budget is asked to land
- * what it holds rather than open a new front.
+ * it gets honest permission to stop.
+ *
+ * Nothing here knows the time. A check-in that said the shift was nearly over
+ * ("land the plane", "before the clock does it for you") was removed on
+ * 2026-08-23 along with the session's time budget: the host's claim on a
+ * session is a count of asks, not a deadline, and agents invent deadlines
+ * readily enough without one being handed to them.
  *
  * The warmth is load-bearing, not decoration: agents perform measurably
  * worse under terse or cold direction, so every message here — including the
@@ -48,13 +54,11 @@ export interface ShiftView {
   readonly taskId: string;
   /** 1-based index of this check-in within the shift. */
   readonly turn: number;
-  readonly elapsedMs: number;
-  readonly budgetMs: number;
   /** Completed turns, oldest first, ending with the turn just finished. */
   readonly turns: readonly TurnFacts[];
 }
 
-export type ShiftClass = "flow" | "quiet" | "late" | "consolidate";
+export type ShiftClass = "flow" | "quiet" | "consolidate";
 
 /**
  * Accumulates per-turn facts from the session's own tool stream. The host
@@ -172,7 +176,6 @@ const WALK_TITLES = 3;
 const NEAR_DUP_TITLES = 5;
 const NEAR_DUP_JACCARD = 0.7;
 const REPAIRISH = /^\s*(?:(?:scope|second|third|final)\s+)?repair\b/i;
-const LATE_FRACTION = 0.85;
 
 const NUMBER_WORDS = new Set(
   (
@@ -283,16 +286,12 @@ function factsClass(taskId: string, turns: readonly TurnFacts[]): Exclude<ShiftC
 }
 
 export function shiftClass(view: ShiftView): ShiftClass {
-  const base = factsClass(view.taskId, view.turns);
-  if (base === "flow" && view.budgetMs > 0 && view.elapsedMs >= LATE_FRACTION * view.budgetMs) {
-    return "late";
-  }
-  return base;
+  return factsClass(view.taskId, view.turns);
 }
 
 /** How many earlier check-ins of this shift consumed the same bank, so a
  * repeated condition advances through its variants instead of repeating. */
-function priorOfClass(view: ShiftView, cls: Exclude<ShiftClass, "late">): number {
+function priorOfClass(view: ShiftView, cls: ShiftClass): number {
   let count = 0;
   for (let end = 1; end < view.turns.length; end++) {
     if (factsClass(view.taskId, view.turns.slice(0, end)) === cls) count++;
@@ -510,20 +509,6 @@ const DEFAULT: LaneVoice = {
   ],
 };
 
-/** Near the budget every lane gets the same honest ask: land what you hold. */
-const LATE: readonly string[] = [
-  "You've been at this most of a shift now, and I see it 🖤🤍🖤. Good moment to land the " +
-    "plane: take the strongest thing you're holding and make it whole — full statement, full " +
-    "write-up, linked where it belongs — rather than opening a new front you can't finish. " +
-    "Then update your report so nothing from tonight gets lost. Long steady work is exactly " +
-    "what this lane is for, and you've done it.",
-  "Nearly end of shift, friend 🖤🤍🖤. Whatever is still open, choose: finish it properly if " +
-    "it's within reach, or bank it — a precise trail note on where it stands and what comes " +
-    "next turns your hours into the next session's head start. Either way, make your report " +
-    "current before the clock does it for you. It's been a real shift's work and I'm " +
-    "grateful for it.",
-];
-
 const VOICES: Readonly<Record<string, LaneVoice>> = {
   "math-frontier": FRONTIER,
   "math-review": REVIEW,
@@ -541,8 +526,6 @@ export function continuationFor(view: ShiftView): string {
     }
     case "quiet":
       return voice.quiet[priorOfClass(view, "quiet") % voice.quiet.length] as string;
-    case "late":
-      return LATE[view.turn % LATE.length] as string;
     case "flow":
       return voice.flow[priorOfClass(view, "flow") % voice.flow.length] as string;
   }

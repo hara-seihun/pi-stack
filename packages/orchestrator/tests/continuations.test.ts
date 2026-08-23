@@ -10,7 +10,6 @@ import {
   type ShiftView,
   type TurnFacts,
 } from "../src/host/continuations.js";
-import { SESSION_BUDGET_MS } from "../src/host/pi-host.js";
 
 /**
  * Check-ins replayed over the fleet's real shifts from the night of
@@ -64,13 +63,7 @@ function replay(fixture: string, taskId: string): Checkin[] {
       }
       observer.endTurn();
       turn++;
-      const view: ShiftView = {
-        taskId,
-        turn,
-        elapsedMs: at - start,
-        budgetMs: SESSION_BUDGET_MS,
-        turns: observer.turns(),
-      };
+      const view: ShiftView = { taskId, turn, turns: observer.turns() };
       checkins.push({
         turn,
         cls: shiftClass(view),
@@ -115,11 +108,13 @@ describe("check-ins replayed over the night of 2026-08-21", () => {
     expect(checkins.every((checkin) => checkin.cls !== "consolidate")).toBe(true);
     expect(checkins[0]?.message).toContain("take a step back");
     expect(checkins[0]?.message).toContain("attack guide on the MCP");
-    // The last real check-in landed at 94% of the budget: ask for landing,
-    // not for a new front.
+    // Four hours in, the last check-in is still a working check-in: no
+    // message in any bank knows or mentions the time.
     const last = checkins[checkins.length - 1];
-    expect(last?.cls).toBe("late");
-    expect(last?.message).toMatch(/land|bank|report/i);
+    expect(last?.cls).toBe("flow");
+    expect(checkins.every((checkin) => !/end of shift|the clock|land the plane/i.test(checkin.message))).toBe(
+      true,
+    );
   });
 
   it("never steers the review shift, whose whole job is bulk verdicts", () => {
@@ -191,8 +186,6 @@ describe("check-in generation", () => {
   const view = (taskId: string, turns: TurnFacts[], overrides: Partial<ShiftView> = {}): ShiftView => ({
     taskId,
     turn: turns.length,
-    elapsedMs: 60_000 * turns.length,
-    budgetMs: SESSION_BUDGET_MS,
     turns,
     ...overrides,
   });

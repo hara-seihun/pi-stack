@@ -301,7 +301,7 @@ family it runs on fills the machine with that lane's cheap tier without
 touching a prompt or a task definition.
 
 - `exitWhenDrained`: end a shift as soon as the lane's demand reaches zero
-  instead of re-prompting until the session budget is spent. A research lane
+  instead of re-prompting until the check-ins are spent. A research lane
   is never done and must keep its warm context; a queue lane empties its
   queue mid-shift, and a check-in would then assert work that no longer
   exists.
@@ -502,9 +502,22 @@ down at the first checkpoint — 27 to 57 minutes in — and relaunched from an
 empty context, paying re-orientation cost over and over. No prompt wording can
 fix that, because the instruction addresses an agent that no longer exists by
 the time it would apply. The host therefore re-prompts the same live session
-until the session budget (4h) is spent, the turn errors, an operator aborts,
-two consecutive turns report nothing, or the lane declares itself drained
-(`exitWhenDrained`, checked against current demand before each re-prompt).
+until it has spent its check-ins (`MAX_CHECK_INS`, 5), the turn errors, an
+operator aborts, two consecutive turns report nothing, or the lane declares
+itself drained (`exitWhenDrained`, checked against current demand before each
+re-prompt).
+
+**A shift is bounded by asks, not by a clock (2026-08-23).** The host used to
+stop at a four-hour session budget, and the last check-in inside it said so
+("land the plane", "before the clock does it for you"). Both are gone. A lane
+that exists to say a hard problem deserves however long it takes cannot also
+run a deadline behind the agent's back, and the deadline was doing work in the
+wrong direction: transcript audit found agents inventing time pressure
+unprompted — one wrote "Given time budget, let me prioritize" 31 minutes into
+its work turn, then "session has been long already. Priority is durable filings
+NOW" — counting turns in its own transcript as if they were a clock. Nothing in
+the host or in `continuations.ts` now knows the time. Six work turns is the
+whole claim on a session; each may run as long as the agent keeps working.
 Each re-prompt is a check-in
 (`src/host/continuations.ts`) generated from what the shift actually did,
 observed from the session's own tool stream: a frontier turn that filed a
@@ -518,8 +531,7 @@ consolidate them into the theorem they are shadows of (the night of
 check-ins with 1, 4, 5, 4, 7, 2, 2, 8, 12, 21 filings); a turn of deep quiet
 work gets the operator's encouragement, her own first message verbatim; a
 turn with nothing in it, or one that reported `productive=false`, gets
-honest permission to stop; a shift near its budget is asked to land what it
-holds. Queue lanes (review, cleanup, provenance) submit in bulk as their
+honest permission to stop. Queue lanes (review, cleanup, provenance) submit in bulk as their
 job and are never steered to consolidate. The warmth is load-bearing —
 agents perform worse under terse or cold direction — so correction arrives
 as an upgrade, never a scolding, and the replay tests
