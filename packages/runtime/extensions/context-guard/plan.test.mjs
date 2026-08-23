@@ -263,3 +263,21 @@ test("summary escalation never covers the protected head", () => {
   // the head boundary, not at the summary's claimed start).
   assert.equal(view.filter((m) => m === msgs[1]).length, 1);
 });
+
+test("a cut still reaches the head when the watermark cannot pass it", () => {
+  // The pathological shape: the pinned head is the bulk, so the tail boundary
+  // lands on the head itself and the old span is empty. This used to return
+  // null and send the raw view, enforcing nothing at all.
+  const msgs = [user("task packet"), assistant([{ type: "text", text: "reading" }]), toolResult("call_0", bigText)];
+  msgs.push(assistant([{ type: "text", text: "done" }]));
+  const state = { watermark: 3, summary: null, protect: 3, cut: true };
+  const view = buildView(msgs, state, est, "/tmp/s.jsonl");
+  assert.ok(view, "a cut in effect must produce a view");
+  assert.match(view[2].content[0].text, /context-guard evicted this/);
+  assert.ok(
+    estimateView(msgs, state, est, "") < msgs.reduce((s, m) => s + est(m), 0) / 2,
+    "the head's payload survived a cut that had nowhere else to go",
+  );
+  // Before any cut the head is still sent whole.
+  assert.equal(buildView(msgs, { ...state, cut: false, watermark: 1 }, est, ""), null);
+});

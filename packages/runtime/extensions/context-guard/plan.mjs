@@ -184,7 +184,11 @@ export function noticeMessage(note, timestamp) {
 export function buildView(messages, state, estimate, note, cfg = CFG) {
   const { watermark, summary } = state;
   const head = headEnd(messages, state, estimate, cfg);
-  if (watermark <= head && !summary) return null;
+  // `state.cut` keeps rung 1 reaching the head once a cut has happened. A
+  // watermark that has not passed the head means the old span is empty, which
+  // used to read as "nothing to do" — but when the head is the bulk, that
+  // silently sent the raw view and enforced nothing.
+  if (!state.cut && watermark <= head && !summary) return null;
   const out = [];
   for (let i = 0; i < head; i++) out.push(transformHeadMessage(messages[i], note, estimate));
   if (summary) out.push(summary.message);

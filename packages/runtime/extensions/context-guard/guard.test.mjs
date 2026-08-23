@@ -281,3 +281,54 @@ test("a registered protected head keeps its voice, not its tool payloads", async
     globalThis.__piContextGuardProtect.delete("sess-test");
   }
 });
+
+test("PI_CONTEXT_GUARD_TRIGGER only ever lowers the cap", async () => {
+  // The override exists so a deployed cap can be proven in one cheap session
+  // instead of a 250k-token one; it must not be able to raise the cap above
+  // the price tier the guard defends.
+  process.env.PI_CONTEXT_GUARD_TRIGGER = "900000";
+  try {
+    const h = makeHarness();
+    assert.equal(await h.fire(session(2)), undefined, "a small view was cut under a raised trigger");
+  } finally {
+    delete process.env.PI_CONTEXT_GUARD_TRIGGER;
+  }
+
+  process.env.PI_CONTEXT_GUARD_TRIGGER = "not-a-number";
+  try {
+    const h = makeHarness();
+    assert.equal(await h.fire(session(2)), undefined, "an unreadable override changed behavior");
+  } finally {
+    delete process.env.PI_CONTEXT_GUARD_TRIGGER;
+  }
+
+  process.env.PI_CONTEXT_GUARD_TRIGGER = "1000";
+  try {
+    const h = makeHarness();
+    const result = await h.fire(session(6));
+    assert.ok(result?.messages, "a lowered trigger did not cut a view it should have");
+  } finally {
+    delete process.env.PI_CONTEXT_GUARD_TRIGGER;
+  }
+});
+
+test("the floor threshold scales with a lowered trigger instead of going negative", async () => {
+  // A fixed trigger - 100k headroom is negative under any small trigger, which
+  // made every cut in a validation session file a floor alert.
+  process.env.PI_CONTEXT_GUARD_TRIGGER = "35000";
+  clearAlerts();
+  try {
+    const h = makeHarness();
+    const messages = session(5);
+    await h.fire(messages);
+    // A cut that landed at 3,420 against a 35,000 trigger is as healthy as a
+    // landing of 24,000 against the default one. Under a fixed 100k headroom
+    // the threshold is negative, so this filed a floor alert.
+    messages.push(response(3_420, "aborted"));
+    await h.fire(messages);
+    assert.deepEqual(alertFiles(), [], "a healthy small-trigger cut was reported as a floor breach");
+  } finally {
+    delete process.env.PI_CONTEXT_GUARD_TRIGGER;
+    clearAlerts();
+  }
+});

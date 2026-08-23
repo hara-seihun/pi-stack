@@ -41,12 +41,48 @@ function clampRatio(ratio) {
   return Math.min(CFG.ratioMax, Math.max(CFG.ratioMin, ratio));
 }
 
+/**
+ * A deployed cap is only proven by a request that actually got cut, and
+ * reaching the real trigger costs a 250k-token session and hours of waiting.
+ * This override exists so any agent can prove the loaded code end to end in
+ * one cheap session; it only ever lowers the trigger, so a typo cannot raise
+ * the cap above the price tier it defends.
+ */
+function configuredTrigger() {
+  const raw = process.env.PI_CONTEXT_GUARD_TRIGGER;
+  if (raw === undefined) return CFG.trigger;
+  const value = Number(raw);
+  if (!Number.isFinite(value) || value <= 0) {
+    console.error(`context-guard: ignoring unreadable PI_CONTEXT_GUARD_TRIGGER=${raw}.`);
+    return CFG.trigger;
+  }
+  const trigger = Math.min(value, CFG.trigger);
+  console.error(`context-guard: trigger lowered to ${trigger.toLocaleString()} for this session.`);
+  return trigger;
+}
+
 export default function (pi) {
   if (process.env.PI_CONTEXT_GUARD === "off") return;
+  // Every budget below the trigger is a share of it, not a fixed subtraction.
+  // At the default trigger these are exactly the documented constants; under a
+  // lowered one they stay in proportion instead of degenerating — an unscaled
+  // 50k tail under a 35k trigger cannot fit, so the guard would cut every step
+  // and file thrash alerts caused purely by the override.
+  const trigger = configuredTrigger();
+  const scale = trigger / CFG.trigger;
+  const cfg = {
+    ...CFG,
+    trigger,
+    tailTokens: CFG.tailTokens * scale,
+    residueMax: CFG.residueMax * scale,
+    headMax: CFG.headMax * scale,
+  };
+  const floorThreshold = trigger - CFG.floorHeadroom * scale;
 
   const state = {
     watermark: 1,
     summary: null,
+    cut: false,
     step: 0,
     lastCutStep: -Infinity,
     ratio: CFG.initialRatio,
@@ -61,6 +97,7 @@ export default function (pi) {
   const reset = () => {
     state.watermark = 1;
     state.summary = null;
+    state.cut = false;
     state.step = 0;
     state.lastCutStep = -Infinity;
     state.ratio = CFG.initialRatio;
@@ -123,23 +160,23 @@ export default function (pi) {
 
         if (
           state.pendingRequest.cutStep !== null &&
-          promptTokens > CFG.trigger - CFG.floorHeadroom &&
+          promptTokens > floorThreshold &&
           !state.alerted.floor
         ) {
           state.alerted.floor = true;
-          const at = describeView(messages, state, estimateTokens, note);
+          const at = describeView(messages, state, estimateTokens, note, cfg);
           const share = (tokens) =>
             `${Math.round(tokens * state.ratio).toLocaleString()} billed (${Math.round((100 * tokens) / Math.max(at.total, 1))}%)`;
           const msg =
             `context-guard cut, and the cut request actually billed ~${promptTokens.toLocaleString()} prompt tokens ` +
-            `(> trigger - ${CFG.floorHeadroom.toLocaleString()}) in session ${ctx.sessionManager?.getSessionId?.() ?? "unknown"} (${transcript ?? "no file"}).\n\n` +
+            `(> the ${Math.round(floorThreshold).toLocaleString()} floor of a ${cfg.trigger.toLocaleString()} trigger) in session ${ctx.sessionManager?.getSessionId?.() ?? "unknown"} (${transcript ?? "no file"}).\n\n` +
             `Where the cut view's tokens are:\n` +
             `- protected head (${at.head} messages${at.headClamped ? `, clamped from the ${at.headRequested} the host registered` : ""}): ${share(at.headTokens)}\n` +
             `- transformed span: ${share(at.oldTokens)}\n` +
             `- handoff summary: ${share(at.summaryTokens)}\n` +
             `- verbatim tail (${at.tailCount} messages): ${share(at.tailTokens)}\n\n` +
             `The largest component is what to fix. A head this size means the host pinned an opening whose own ` +
-            `words are outweighed by what it read; the tail means one step produced more than ${CFG.tailTokens.toLocaleString()} billed tokens.`;
+            `words are outweighed by what it read; the tail means one step produced more than ${Math.round(cfg.tailTokens).toLocaleString()} billed tokens.`;
           console.error(msg);
           writeAlert("context-guard floor too high", msg);
         }
@@ -156,16 +193,16 @@ export default function (pi) {
       state.ratio = CFG.ratioMax;
     }
 
-    const viewEst = estimateView(messages, state, estimateTokens, note);
+    const viewEst = estimateView(messages, state, estimateTokens, note, cfg);
     const projected = viewEst * state.ratio;
 
     const rememberRequest = (viewEstimate, cutStep = null) => {
       state.pendingRequest = { assistantCount, viewEstimate, cutStep };
     };
 
-    if (projected < CFG.trigger) {
-      const view = buildView(messages, state, estimateTokens, note);
-      rememberRequest(view ? estimateView(messages, state, estimateTokens, note) : viewEst);
+    if (projected < cfg.trigger) {
+      const view = buildView(messages, state, estimateTokens, note, cfg);
+      rememberRequest(view ? estimateView(messages, state, estimateTokens, note, cfg) : viewEst);
       return view ? { messages: view } : undefined;
     }
 
@@ -176,17 +213,17 @@ export default function (pi) {
       writeAlert("context-guard thrashing", msg);
     }
 
-    const cutCfg = { ...CFG, tailTokens: CFG.tailTokens / state.ratio };
+    const cutCfg = { ...cfg, tailTokens: cfg.tailTokens / state.ratio };
     const { boundary, landEstimate } = planCut(messages, state, estimateTokens, cutCfg, note);
     const landTokens = landEstimate * state.ratio;
 
-    if (landTokens > CFG.residueMax && !state.summarizing) {
+    if (landTokens > cfg.residueMax && !state.summarizing) {
       state.summarizing = true;
       let summarized = false;
       try {
         const candidateState = { ...state, watermark: boundary };
-        const candidateView = buildView(messages, candidateState, estimateTokens, note) ?? messages;
-        if (landTokens >= CFG.trigger) {
+        const candidateView = buildView(messages, candidateState, estimateTokens, note, cfg) ?? messages;
+        if (landTokens >= cfg.trigger) {
           console.error(
             `context-guard: transformed handoff input still projects ~${Math.round(landTokens).toLocaleString()} tokens; using deterministic hard compaction without another oversized provider call.`,
           );
@@ -246,13 +283,14 @@ export default function (pi) {
     }
 
     state.watermark = boundary;
+    state.cut = true;
     state.lastCutStep = state.step;
 
-    const view = buildView(messages, state, estimateTokens, note);
-    const landedEstimate = view ? estimateView(messages, state, estimateTokens, note) : viewEst;
+    const view = buildView(messages, state, estimateTokens, note, cfg);
+    const landedEstimate = view ? estimateView(messages, state, estimateTokens, note, cfg) : viewEst;
     const landed = landedEstimate * state.ratio;
     rememberRequest(landedEstimate, state.step);
-    const at = describeView(messages, state, estimateTokens, note);
+    const at = describeView(messages, state, estimateTokens, note, cfg);
     const billedShare = (tokens) => Math.round(tokens * state.ratio).toLocaleString();
     console.error(
       `context-guard cut at step ${state.step}: projected ~${Math.round(projected).toLocaleString()} -> estimated ~${Math.round(landed).toLocaleString()} tokens (ratio ${state.ratio.toFixed(2)}); ` +
@@ -263,7 +301,7 @@ export default function (pi) {
       const msg =
         `context-guard honored only ${at.head} of the ${at.headRequested} leading messages the host registered as a protected head in session ` +
         `${ctx.sessionManager?.getSessionId?.() ?? "unknown"} (${transcript ?? "no file"}): even with its tool results evicted the span exceeds the ` +
-        `${CFG.headMax.toLocaleString()}-token head budget. The cap is enforced and the session is healthy, but the host is pinning more than it can afford ` +
+        `${Math.round(cfg.headMax).toLocaleString()}-token head budget. The cap is enforced and the session is healthy, but the host is pinning more than it can afford ` +
         `and the agent will not see the tail of its own opening.`;
       console.error(msg);
       writeAlert("context-guard protected head clamped", msg);

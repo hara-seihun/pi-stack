@@ -143,6 +143,26 @@ until its first matched response. Model switches invalidate calibration.
 
 `PI_CONTEXT_GUARD=off` in the environment disables all behavior.
 
+## Proving a deployed cut without a 250k session
+
+`PI_CONTEXT_GUARD_TRIGGER=<tokens>` lowers the trigger for one session. It only
+ever lowers it, so a typo cannot raise the cap above the price tier the guard
+defends, and the floor threshold scales with it rather than going negative. This
+is how to prove that the code a host actually loaded cuts, evicts, and logs what
+it should — the alternative is a real 250k-token session, and on a self-paced
+fleet lane that is hours away:
+
+```bash
+mkdir -p /tmp/cgprobe && cd /tmp/cgprobe
+python3 -c "open('big1.txt','w').write(('the quick brown fox '*40+chr(10))*220)"
+PI_CONTEXT_GUARD_TRIGGER=60000 pi -p "Read big1.txt with the read tool, then tell me its first word."
+```
+
+The cut and its component breakdown go to stderr. To exercise the protected-head
+path too, load a throwaway extension that registers a span in
+`globalThis.__piContextGuardProtect` the way the orchestrator's opening pin does,
+with `pi -e ./pin-probe.mjs`.
+
 ## Known limitations
 
 - State is in-memory per session process. After a host restart/adoption the
@@ -184,9 +204,18 @@ node --test
 ## Rollout
 
 Sessions load this extension at start and cache it for their lifetime. After
-changing this package, new interactive sessions pick it up immediately, and
-orchestrator-hosted sessions pick it up after `pi-orchestrator drain-runners`
-cycles the runner onto fresh code. An edited file on disk does **not** reach
-lanes running in an existing session host — the 2026-08-19 floor alerts kept
-firing for 15 minutes after the fix was committed because the host predated
-the commit.
+changing this package, run `tools/pi-runtime/deploy` (which syncs `/srv/pi`, the
+path the fleet's settings actually point at) — editing the source tree alone
+reaches nobody. New interactive sessions then pick it up immediately, and
+orchestrator-hosted sessions after `pi-orchestrator drain-runners` cycles the
+runner onto fresh code.
+
+**Drain is graceful, and on self-paced lanes it is slow.** `drain-runners` bumps
+the generation and starts a successor at once, but existing workers exit only
+when their sessions end; a `math-frontier` shift can hold a runner for hours.
+Measured 2026-08-23: 22 of 26 runs were still on the previous generation an hour
+after the bump, draining at roughly one run per 25 minutes. Plan for a fix to
+reach the whole fleet overnight, not in minutes, and verify with
+`PI_CONTEXT_GUARD_TRIGGER` rather than waiting for a lane to prove it. Aborting
+in-flight runs to force the issue costs real research for a token saving on
+shifts already mostly paid for.
