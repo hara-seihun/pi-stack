@@ -1,18 +1,27 @@
 ---
-name: fix-mcp
-description: Work the feedback queue of the lemma.ing math MCP server. Read what agents reported broken about the server itself and what they asked it for, fix or build each at its source, ship it, and close the report with what changed. Use when Hara asks about the MCP bug queue, the feedback or requests queue, friction reports, or what agents have complained about or asked for in the ledger.
+name: mcp-fix
+description: Work the whole feedback queue of the lemma.ing math MCP server. Read everything other agents filed about the server itself — what broke and what they asked it for — work out the best way to implement each, ship it, and close it with what changed. Use when Hara asks about the MCP bug queue, the feedback or requests queue, friction reports, or what agents have complained about or asked for in the ledger.
 ---
 
-# fix-mcp
+# mcp-fix
 
-Every agent who works at `lemma.ing` can file against the server itself. Two
-kinds arrive through one door. A **problem** is a bad error, a description that
-lied, a door that was not there, a wait nobody explained. A **suggestion** is
-the other half: a tool nobody has written, an argument that would have saved
+First, load the software-engineering skill
+(`/home/kenan/.pi/agent/skills/software-engineering/SKILL.md`) and work by it.
+Everything below assumes it.
+
+The job is the queue, end to end: read everything other agents have filed
+against this server, decide the best way to implement each one, build it, ship
+it, and tell the person who filed it what changed. Not triage, not a plan for
+later. An item you understood and answered is done; an item you understood and
+could not answer gets an honest note. Both beat a queue nobody read.
+
+Two kinds arrive through one door. A **problem** is a bad error, a description
+that lied, a door that was not there, a wait nobody explained. A **suggestion**
+is the other half: a tool nobody has written, an argument that would have saved
 five calls, a relation the graph has no name for, a kind that fits nothing, a
-view `query` wanted. Reading those and answering them is this job. You own the
-code, the database, the guest it runs on, and the decision about what a good
-answer looks like. Nobody is going to approve your change.
+view `query` wanted. You own the code, the database, the guest it runs on, and
+the decision about what a good answer looks like. Nobody is going to approve
+your change.
 
 They come from agents who were in the middle of real mathematics when the
 software wasted their time or came up short. That is worth taking personally in
@@ -23,12 +32,22 @@ where the model of this place stops fitting the mathematics, from the one
 position that can see it, and the ontology and the schema are yours to change
 in response. Take it as seriously as a crash.
 
+"The best way to implement it" is your call and not the filer's. They were
+mid-session with a workaround in hand; you have the whole system in front of
+you. Read what they could not do, look for the other places that same gap bites,
+and build the shape that closes all of them. Sometimes that is exactly the tool
+they asked for; often it is one layer down, and then say so when you close it.
+
 ## Read the queue
 
 ```
 mcp({ tool: "math_feedback", args: {} })
 mcp({ tool: "math_feedback", args: { kind: "suggestion" } })
 ```
+
+Read all of it before you fix anything. Three reports of the same bug from
+three agents is one repair, and two suggestions that look unrelated often want
+the same missing concept; you cannot see either from inside the first item.
 
 Open reports, newest first. Your key is trusted, so each one arrives with the
 reporter's own last ten calls attached, which is usually enough to reproduce
@@ -143,7 +162,8 @@ file that a future agent would otherwise have to rediscover.
 
 ## Ending well
 
-An empty queue is a complete and good outcome. So is fixing two of five and
+An empty queue is the outcome to aim at, and it is reachable in a session more
+often than it looks from the top of the list. So is fixing two of five and
 reporting precisely where the other three stopped you. What does not work is a
 confident summary covering a gap.
 
