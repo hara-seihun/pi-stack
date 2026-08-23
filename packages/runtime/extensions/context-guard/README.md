@@ -55,17 +55,32 @@ them.
   provider-independent hard-compaction message replaces the same span. The
   original user messages, 50k verbatim tail, and transcript pointer remain;
   cap enforcement never depends on a second successful provider call.
-- **Protected head:** a host can register a leading span of messages that
-  crosses every cut byte-identical — tool results, thinking, and signatures
-  included — by setting `globalThis.__piContextGuardProtect` (a
-  `Map<sessionId, messageCount>`) before the first cut. Eviction,
+- **Protected head:** a host can register a leading span of messages whose
+  *voice* crosses every cut byte-identical — user text, assistant text,
+  thinking, and signatures — by setting `globalThis.__piContextGuardProtect`
+  (a `Map<sessionId, messageCount>`) before the first cut. Rung 2,
   summarization, and the tail boundary all begin after the span; the guard
   reads the map fresh at each context event and defaults to protecting only
   message 0. The registrant is the pi-orchestrator's opening-pin extension:
   frontier lanes open with a lived exchange the agent must keep recognizing
-  as its own words, and an evicted tool result inside it reads as someone
-  else's context injection. The floor alert already covers the pathological
-  case of a protected head too large for the trigger.
+  as its own words.
+
+  **Rung 1 still applies inside the head.** A tool result is not the agent's
+  words, and a host cannot bound what its opening reads: each opening prompt
+  is answered with real, unbounded tool use, so the math fleet's pinned
+  openings measured **87–91% tool-result bytes** — 84–119k billed tokens of a
+  250k cap, on every request, for the session's whole life. That put the floor
+  at 150–193k, *above the floor alert's own 150k threshold*, so every cut in
+  those lanes alerted and the ~95k of working room left under the trigger ran
+  out in about ten steps, which is the thrash guard's window. Evicting the
+  head's tool payloads drops it to ~11–12k billed and preserves the entire
+  stated purpose. Replayed over 40 math-fleet sessions: landing p90 236k →
+  114k, floor breaches 27 → 0, thrash pairs 8 → 2.
+
+  The span is also honored only as far as its post-eviction cost fits
+  `headMax`; beyond that the guard keeps the leading prefix that fits and
+  files a **protected head clamped** alert. A host-supplied message count must
+  not be able to spend the cap.
 - **Verbatim tail:** the most recent **50k billed** tokens cross every cut
   byte-identical — thinking blocks, signatures, and item IDs included. The
   planner accumulates estimator units, so the guard divides the tail budget by
@@ -87,7 +102,13 @@ them.
   demands investigation.
 - **Floor:** after a cut, the cut request *actually bills* more than trigger −
   100k, i.e. the pinned head or residue is too large. Expect thrashing until
-  fixed. Each outgoing view is paired with the very next persisted assistant
+  fixed. The alert carries the cut view's component breakdown — head,
+  transformed span, summary, tail — because the largest component is the thing
+  to fix, and reconstructing it after the fact costs a full session replay.
+- **Protected head clamped:** the host registered more leading messages than
+  `headMax` covers even after their tool results were evicted. The cap holds
+  and the session is healthy; the host is pinning more than it can afford, and
+  the agent will not see the tail of its own opening. Each outgoing view is paired with the very next persisted assistant
   response, and prompt tokens are read directly as input + cache read + cache
   write. Error and aborted responses still count because providers bill their
   prompt; this avoids both estimating a floor from an uncalibrated ratio and
@@ -114,6 +135,7 @@ until its first matched response. Model switches invalidate calibration.
 | tail | 50k billed (÷ calibration ratio at cut time) | LangWatch: 30–60k verbatim tail is the single biggest quality lever; +2.5 cost points vs 20k |
 | residueMax | 125k transformed messages | leaves room for measured provider-visible system/tool overhead below the 150k floor; still inside the simulation's flat 100k–180k range |
 | floorHeadroom | 100k | Opus@150k/80k-tail simulated at 160% of uncapped — thrash territory |
+| headMax | 40k estimator units, post-eviction | a pinned opening's own words measured ~8.6k; the budget leaves a host room to pin far more prose than any observed lane while keeping the head off the cap |
 | quietSteps | 10 | thrash guard window |
 | initialRatio | 1.6 fresh / 3.0 adopted history | normal prior for a new session; fail-safe until a resumed view has one matched response |
 
@@ -136,11 +158,18 @@ until its first matched response. Model switches invalidate calibration.
 ## Runtime validation
 
 Inspect cut projections, measured floor alerts, and thrash alerts in the owning
-service journal:
+service journal. Every cut logs its projection, its estimated landing, and the
+breakdown of where that landing's tokens are:
 
 ```bash
-journalctl -u pi-remote --since today --no-pager | rg 'context-guard'
+journalctl -u pi-remote -S today --no-pager | rg 'context-guard'
+journalctl -u pi-orchestrator-runner -S today --no-pager | rg 'context-guard'
 ```
+
+Use `-S`/`--since` with an explicit `YYYY-MM-DD HH:MM:SS`. `--since "today
+00:00"` is **not** valid journalctl syntax: it exits non-zero with `Failed to
+parse timestamp`, and inside a pipeline that reads as "no matches" rather than
+as an error. That silence is what made these alerts look undiagnosable.
 
 The session JSONL assistant usage is the billing source of truth for a specific
 request: prompt tokens are `input + cacheRead + cacheWrite`, including on

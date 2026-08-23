@@ -252,10 +252,13 @@ test("PI_CONTEXT_GUARD=off disables everything", () => {
   }
 });
 
-test("a registered protected head crosses the cut byte-identical", async () => {
+test("a registered protected head keeps its voice, not its tool payloads", async () => {
   // The orchestrator's opening-pin extension registers the lived opening
-  // exchange's span under the session id; the guard must carry those
-  // messages — tool results and thinking included — through every cut.
+  // exchange's span under the session id. The agent has to keep recognizing
+  // those words as its own, so they cross byte-identical — thinking and
+  // signatures included. The tool results it read while producing them are
+  // not its words, and pinning them verbatim is what put the math fleet's
+  // floor above the floor alert's own threshold.
   (globalThis.__piContextGuardProtect ??= new Map()).set("sess-test", 5);
   try {
     const h = makeHarness();
@@ -263,11 +266,17 @@ test("a registered protected head crosses the cut byte-identical", async () => {
     const result = await h.fire(messages);
     assert.ok(result?.messages, "expected a cut");
     for (let i = 0; i < 5; i++) {
-      assert.deepEqual(result.messages[i], messages[i], `protected message ${i} was transformed`);
+      if (messages[i].role === "toolResult") continue;
+      assert.deepEqual(result.messages[i], messages[i], `protected message ${i} lost its voice`);
     }
-    // The opening's tool result survives with its body, not a placeholder.
-    const protectedToolResult = result.messages.find((m) => m.role === "toolResult");
-    assert.equal(protectedToolResult.content[0].text, big);
+    const headToolResults = result.messages
+      .slice(0, 5)
+      .filter((m) => m.role === "toolResult");
+    assert.ok(headToolResults.length > 0, "fixture needs a tool result inside the head");
+    for (const m of headToolResults) {
+      assert.match(m.content[0].text, /context-guard evicted this/);
+      assert.notEqual(m.content[0].text, big);
+    }
   } finally {
     globalThis.__piContextGuardProtect.delete("sess-test");
   }

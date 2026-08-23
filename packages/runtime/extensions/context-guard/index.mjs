@@ -5,6 +5,7 @@ import { estimateTokens } from "@earendil-works/pi-coding-agent";
 import {
   CFG,
   buildView,
+  describeView,
   estimateView,
   fallbackMessage,
   handoffInstruction,
@@ -51,7 +52,7 @@ export default function (pi) {
     ratio: CFG.initialRatio,
     calibrated: false,
     pendingRequest: null,
-    alerted: { thrash: false, floor: false },
+    alerted: { thrash: false, floor: false, head: false },
     lastLen: 0,
     headStamp: null,
     summarizing: false,
@@ -65,7 +66,7 @@ export default function (pi) {
     state.ratio = CFG.initialRatio;
     state.calibrated = false;
     state.pendingRequest = null;
-    state.alerted = { thrash: false, floor: false };
+    state.alerted = { thrash: false, floor: false, head: false };
     state.lastLen = 0;
     state.headStamp = null;
     state.summarizing = false;
@@ -126,7 +127,19 @@ export default function (pi) {
           !state.alerted.floor
         ) {
           state.alerted.floor = true;
-          const msg = `context-guard cut, and the cut request actually billed ~${promptTokens.toLocaleString()} prompt tokens (> trigger - ${CFG.floorHeadroom.toLocaleString()}) in session ${ctx.sessionManager?.getSessionId?.() ?? "unknown"} (${transcript ?? "no file"}). The pinned head or unevictable residue is too large relative to the ${CFG.trigger.toLocaleString()} trigger; expect thrashing until this is fixed.`;
+          const at = describeView(messages, state, estimateTokens, note);
+          const share = (tokens) =>
+            `${Math.round(tokens * state.ratio).toLocaleString()} billed (${Math.round((100 * tokens) / Math.max(at.total, 1))}%)`;
+          const msg =
+            `context-guard cut, and the cut request actually billed ~${promptTokens.toLocaleString()} prompt tokens ` +
+            `(> trigger - ${CFG.floorHeadroom.toLocaleString()}) in session ${ctx.sessionManager?.getSessionId?.() ?? "unknown"} (${transcript ?? "no file"}).\n\n` +
+            `Where the cut view's tokens are:\n` +
+            `- protected head (${at.head} messages${at.headClamped ? `, clamped from the ${at.headRequested} the host registered` : ""}): ${share(at.headTokens)}\n` +
+            `- transformed span: ${share(at.oldTokens)}\n` +
+            `- handoff summary: ${share(at.summaryTokens)}\n` +
+            `- verbatim tail (${at.tailCount} messages): ${share(at.tailTokens)}\n\n` +
+            `The largest component is what to fix. A head this size means the host pinned an opening whose own ` +
+            `words are outweighed by what it read; the tail means one step produced more than ${CFG.tailTokens.toLocaleString()} billed tokens.`;
           console.error(msg);
           writeAlert("context-guard floor too high", msg);
         }
@@ -239,7 +252,22 @@ export default function (pi) {
     const landedEstimate = view ? estimateView(messages, state, estimateTokens, note) : viewEst;
     const landed = landedEstimate * state.ratio;
     rememberRequest(landedEstimate, state.step);
-    console.error(`context-guard cut at step ${state.step}: projected ~${Math.round(projected).toLocaleString()} -> estimated ~${Math.round(landed).toLocaleString()} tokens (ratio ${state.ratio.toFixed(2)}).`);
+    const at = describeView(messages, state, estimateTokens, note);
+    const billedShare = (tokens) => Math.round(tokens * state.ratio).toLocaleString();
+    console.error(
+      `context-guard cut at step ${state.step}: projected ~${Math.round(projected).toLocaleString()} -> estimated ~${Math.round(landed).toLocaleString()} tokens (ratio ${state.ratio.toFixed(2)}); ` +
+        `head ${billedShare(at.headTokens)} over ${at.head} msgs, span ${billedShare(at.oldTokens)}, summary ${billedShare(at.summaryTokens)}, tail ${billedShare(at.tailTokens)} over ${at.tailCount} msgs.`,
+    );
+    if (at.headClamped && !state.alerted.head) {
+      state.alerted.head = true;
+      const msg =
+        `context-guard honored only ${at.head} of the ${at.headRequested} leading messages the host registered as a protected head in session ` +
+        `${ctx.sessionManager?.getSessionId?.() ?? "unknown"} (${transcript ?? "no file"}): even with its tool results evicted the span exceeds the ` +
+        `${CFG.headMax.toLocaleString()}-token head budget. The cap is enforced and the session is healthy, but the host is pinning more than it can afford ` +
+        `and the agent will not see the tail of its own opening.`;
+      console.error(msg);
+      writeAlert("context-guard protected head clamped", msg);
+    }
 
     return view ? { messages: view } : undefined;
   });
