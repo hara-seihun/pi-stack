@@ -3,7 +3,6 @@ import {
   createAgentSession,
   DefaultResourceLoader,
   serializeConversation,
-  SettingsManager,
   type AgentSession,
   type InlineExtension,
 } from "@earendil-works/pi-coding-agent";
@@ -255,15 +254,12 @@ export class PiHost implements HostManager {
     // whatever voice was still in context once the opening instructions were
     // gone. The system prompt is the one region compaction preserves.
     const pin: OpeningPin = { text: undefined, messageCount: 0 };
-    const settingsManager = SettingsManager.create(spec.cwd ?? process.cwd(), this.options.agentDir);
-    settingsManager.applyOverrides({ retry: { ...SESSION_RETRY } });
     let resourceLoader: DefaultResourceLoader | undefined;
     if (spec.doctrineUrl !== undefined || (spec.opening?.length ?? 0) > 0) {
       const doctrine = spec.doctrineUrl === undefined ? undefined : await this.doctrine(spec.doctrineUrl);
       resourceLoader = new DefaultResourceLoader({
         cwd: spec.cwd ?? process.cwd(),
         agentDir: this.options.agentDir ?? join(homedir(), ".pi", "agent"),
-        settingsManager,
         ...(doctrine === undefined
           ? {}
           : {
@@ -283,13 +279,17 @@ export class PiHost implements HostManager {
     const { session } = await (this.options.openSession ?? createAgentSession)({
       cwd: spec.cwd,
       agentDir: this.options.agentDir,
-      settingsManager,
       ...(resourceLoader === undefined ? {} : { resourceLoader }),
       // The SDK's Model type is provider-internal; the resolver returns one.
       model: preresolved as never,
       thinkingLevel: spec.thinking as never,
       customTools: [taskComplete],
     });
+    // After creation, not before: a settings manager handed to the SDK is
+    // reloaded from disk during startup, and a reload rebuilds settings from
+    // the files and drops every override applied to it. An override passed in
+    // reads as applied and is not (measured against the SDK, 2026-08-23).
+    session.settingsManager.applyOverrides({ retry: { ...SESSION_RETRY } });
     let cancelRun!: () => void;
     const cancelled = new Promise<true>((resolve) => {
       cancelRun = () => resolve(true);

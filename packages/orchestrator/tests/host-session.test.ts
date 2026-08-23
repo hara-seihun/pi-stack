@@ -53,9 +53,13 @@ function harness(
   const messages: { role: string; stopReason?: string; errorMessage?: string }[] = [];
   let taskComplete: { execute: (id: string, params: unknown) => Promise<unknown> } | undefined;
   const bindings: unknown[] = [];
+  const overrides: Record<string, unknown>[] = [];
   const session = {
     messages,
     sessionManager: { getSessionId: () => "session-1" },
+    settingsManager: {
+      applyOverrides: (settings: Record<string, unknown>) => overrides.push(settings),
+    },
     bindExtensions: async (b: unknown) => {
       bindings.push(b);
     },
@@ -148,6 +152,7 @@ function harness(
     emit,
     sessionConfigs,
     waits,
+    overrides,
     now: () => clock,
   };
 }
@@ -313,6 +318,18 @@ describe("host shift loop", () => {
     // these turns took three days between them.
     expect(prompts).toHaveLength(MAX_CHECK_INS + 1);
     expect(result).toMatchObject({ state: "done", detail: "report 6.0" });
+  });
+
+  it("gives the session a retry budget that outlasts an ordinary throttle", async () => {
+    // pi replays an interrupted turn on the same context with nothing
+    // injected, so in-turn retry is the cheapest possible recovery and worth
+    // spending minutes on. The default three attempts over fourteen seconds
+    // are shorter than the throttles this fleet actually meets.
+    const { host, spec, finished, overrides } = harness([{ reports: 1 }, {}, {}]);
+    host.launch(spec);
+    await finished;
+
+    expect(overrides).toEqual([{ retry: { enabled: true, maxRetries: 6, baseDelayMs: 5_000 } }]);
   });
 
   it("waits a provider failure out and resumes the same session, rather than dying of it", async () => {
