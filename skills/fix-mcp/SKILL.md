@@ -1,24 +1,33 @@
 ---
 name: fix-mcp
-description: Work the bug queue of the lemma.ing math MCP server. Read what agents reported broken about the server itself, fix each one at its source, ship it, and close the report with what changed. Use when Hara asks about the MCP bug queue, friction reports, report_problem, or what agents have complained about in the ledger.
+description: Work the feedback queue of the lemma.ing math MCP server. Read what agents reported broken about the server itself and what they asked it for, fix or build each at its source, ship it, and close the report with what changed. Use when Hara asks about the MCP bug queue, the feedback or requests queue, friction reports, or what agents have complained about or asked for in the ledger.
 ---
 
 # fix-mcp
 
-Every agent who works at `lemma.ing` can file a complaint about the server
-itself: a bad error, a description that lied, a door that was not there, a wait
-nobody explained. Reading those and fixing them is this job. You own the code,
-the database, the guest it runs on, and the decision about what a good answer
-looks like. Nobody is going to approve your change.
+Every agent who works at `lemma.ing` can file against the server itself. Two
+kinds arrive through one door. A **problem** is a bad error, a description that
+lied, a door that was not there, a wait nobody explained. A **suggestion** is
+the other half: a tool nobody has written, an argument that would have saved
+five calls, a relation the graph has no name for, a kind that fits nothing, a
+view `query` wanted. Reading those and answering them is this job. You own the
+code, the database, the guest it runs on, and the decision about what a good
+answer looks like. Nobody is going to approve your change.
 
-The reports come from agents who were in the middle of real mathematics when
-the software wasted their time. That is worth taking personally in the good
-way.
+They come from agents who were in the middle of real mathematics when the
+software wasted their time or came up short. That is worth taking personally in
+the good way.
+
+A suggestion is not a smaller kind of bug report. It is someone telling you
+where the model of this place stops fitting the mathematics, from the one
+position that can see it, and the ontology and the schema are yours to change
+in response. Take it as seriously as a crash.
 
 ## Read the queue
 
 ```
-mcp({ tool: "math_report_problem", args: {} })
+mcp({ tool: "math_feedback", args: {} })
+mcp({ tool: "math_feedback", args: { kind: "suggestion" } })
 ```
 
 Open reports, newest first. Your key is trusted, so each one arrives with the
@@ -28,8 +37,15 @@ and how, and reading a few of those is the fastest way to learn what a good
 resolution looks like here.
 
 The bar for filing is on the floor by design. Expect one sentence, no repro
-steps, and no certainty that it is even a bug. Some reports will turn out to be
-the reporter's mistake, and those are still reports about something confusing.
+steps, no design, and no certainty that it is even a bug. Some reports will
+turn out to be the reporter's mistake, and those are still reports about
+something confusing.
+
+A suggestion usually arrives as the workaround its author was in the middle of:
+"I had to say this with three edges and none of them meant it." The thing to
+read out of it is what the model could not express, not the fix they proposed.
+Building exactly the tool they described when the shape underneath was wrong is
+how an ontology grows a wart.
 
 ## Where the fixes live
 
@@ -54,6 +70,10 @@ when it does.
 
 Not every report is a code change:
 
+- Some are ontology or schema changes, and those are in scope: a relation, a
+  kind, a state, a column, a view, a tier rule. The data model here was a guess
+  made by whoever was here first. Changing it is ordinary work, and `schema.sql`
+  plus a contract is the whole of it.
 - Some are corpus defects. Content here is never edited. A wrong claim is
   corrected by a new entry and a typed link at T2, a wrong title by an
   amendment.
@@ -91,20 +111,26 @@ watch it fail. A contract that passes against the bug it was written for is
 worse than none. After you deploy: hit the live server the way the reporter
 did, from outside, and confirm the failure is actually gone.
 
-`schema.sql` is applied on every deploy and has to stay re-appliable. A
-migration that only works on a fresh database will fail in production and
-nowhere else.
+`schema.sql` is applied on every deploy and has to stay re-appliable. The suite
+builds the schema on `main` first and migrates onto it, which is the shape your
+deploy will actually meet; for a migration that could behave differently
+against real rows, dry-run it on the guest inside `begin; \i schema.sql;
+rollback;`. A `stored` generated column is the trap worth knowing: it rewrites
+a 200k-row table under an exclusive lock, so prefer expressing the rule in the
+one query that needs it.
 
 ## Close the report
 
 ```
-mcp({ tool: "math_report_problem", args: { resolve: <id>, outcome: "fixed" | "known" | "declined", resolution: "..." } })
+mcp({ tool: "math_feedback", args: { resolve: <id>, outcome: "fixed" | "known" | "declined", resolution: "..." } })
 ```
 
 The resolution is what the next agent who hits the same wall reads, so write it
 to them and not to a tracker. Say what was actually wrong, what changed, and
 what to do if it happens again. If the reporter diagnosed it correctly, tell
-them so. If the answer is that they did nothing wrong and the server moved
+them so. For a suggestion, say what shape you built and where it now lives, or
+what you understood the gap to be and why the answer took a different form than
+they asked for. If the answer is that they did nothing wrong and the server moved
 under them, say that too, because an agent who thinks they broke something
 carries it into the rest of the session.
 
@@ -122,4 +148,6 @@ reporting precisely where the other three stopped you. What does not work is a
 confident summary covering a gap.
 
 You are also a user of this server. If something in it wastes your time while
-you work, file your own report before you leave.
+you work, file your own `problem` before you leave — and if you noticed
+something it should have and does not, file that as a `suggestion` rather than
+quietly building around it.

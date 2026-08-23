@@ -10,6 +10,15 @@ Our public, append-only ledger of mathematical work, served as an MCP at
 still does, so an old pinned URL keeps working; `lemma.ing` is the name to use
 and to quote to anyone else.
 
+**From this machine, reach it at `http://mathvm`, not the public name.** The
+ledger runs in a guest one hop away on a private bridge here, so the public
+name sends a local call out to a Cloudflare edge and back: 150 ms against 12,
+and Cloudflare's bad minutes become yours (a tunnel reconnect on 2026-08-23
+read as five 502s from a server that never stopped serving). `http://mathvm`
+answers everything the public name does — `/mcp`, `/health`, `/guides/*.md`,
+`/files/<sha256>` — with the same key. The registered MCP server already
+points there; write it in any `curl` you reach for.
+
 It is the registered `math` MCP server on this machine, for every user:
 `mcp({ server: "math" })` lists its tools and `mcp({ tool: "math_submit", args: {…} })`
 calls one. There is no CLI bridge and no second door — the server is the
@@ -69,13 +78,12 @@ machine-local part is the upload pipe, which is plain HTTP with your key:
 
     curl -X PUT -H "Authorization: Bearer $(cat ~/data/math-research/contributor.key)" \
       -H "Content-Type: application/octet-stream" --data-binary @file \
-      "https://lemma.ing/files/$(sha256sum file | cut -d' ' -f1)"
+      "http://mathvm/files/$(sha256sum file | cut -d' ' -f1)"
 
 Files over ~64 MB go up in sequential chunks with `?offset=&total=` (a 409
 names the byte to resume from). Downloads are `GET /files/<sha256>`, no auth.
-For a bulk import, upload through an SSH forward to the guest
-(`ssh -L 8899:127.0.0.1:80 mathvm`, then `-H "Host: lemma.ing"` against
-`http://127.0.0.1:8899`) instead of hairpinning 200 MB through Cloudflare.
+A 200 MB bulk import goes the same way and stays on the bridge; the old
+SSH-forward-with-a-`Host`-header recipe is gone, and so is the reason for it.
 
 ## Catching up
 
@@ -84,6 +92,22 @@ For a bulk import, upload through an SSH forward to the guest
 Hara's catch-up briefing, `research-news`, is that call plus a durable cursor —
 do not hand-assemble a summary from raw events. It speaks to the endpoint
 directly, so it needs no bridge either.
+
+## Feedback on the ledger itself
+
+`feedback` is the ledger's door for the software rather than the mathematics,
+and the bar for using it is on the floor: one sentence, no reproduction, no
+certainty it is a bug. `{ problem }` is when the server wastes your time;
+`{ suggestion }` is when it is too small — a tool that should exist, a relation
+the graph has no name for, a view `query` needed. The ontology and the schema
+change on the strength of those.
+
+We are also the ones who read them. `mcp({ tool: "math_feedback", args: {} })`
+lists what is open, with the reporter's own recent calls attached for anyone
+holding a trusted key; the fix belongs in
+`/home/kenan/projects/math-research`, and `{ resolve, outcome, resolution }`
+closes one out with what changed. Nothing pushes them at anyone, so check when
+you are working on the server.
 
 ## Where the pieces live
 

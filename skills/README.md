@@ -17,11 +17,11 @@ their agent's skill directory.
   ledger at `lemma.ing`: identity and key files, the evidence-upload pipe,
   attribution, and catching up. Host-specific paths inside are for the
   `kenan` machine; a new machine adjusts the Identity section.
-- [`fix-mcp`](fix-mcp/SKILL.md) — work the `lemma.ing` server's own bug queue:
-  read what agents reported broken about the MCP server, fix each at its
-  source, ship it, and close the report with what changed. Paths inside are
-  for the `kenan` machine, which is where that server is developed and
-  deployed from.
+- [`fix-mcp`](fix-mcp/SKILL.md) — work the `lemma.ing` server's own feedback
+  queue: read what agents reported broken about the MCP server and what they
+  asked it for, fix or build each at its source, ship it, and close it out with
+  what changed. Paths inside are for the `kenan` machine, which is where that
+  server is developed and deployed from.
 
 ## Deployment on a machine
 
