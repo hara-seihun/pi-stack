@@ -1,8 +1,8 @@
 import type { Broker } from "../broker/broker.js";
 import type { Ledger, RunRow } from "../ledger/ledger.js";
 import type { Scheduler } from "../tasks/scheduler.js";
-import { allocate, desiredByTier, surpluses } from "../tasks/allocate.js";
-import type { EvaluateResult, TaskSnapshot, Tier } from "../tasks/types.js";
+import { allocate, desiredByTier } from "../tasks/allocate.js";
+import type { EvaluateResult } from "../tasks/types.js";
 
 /**
  * The controller is the launch loop: each tick it reaps dead runs, evaluates
@@ -10,6 +10,18 @@ import type { EvaluateResult, TaskSnapshot, Tier } from "../tasks/types.js";
  * processes claim. It never touches a session itself — the ledger is the
  * only channel to runners — and holds no state of its own, so a controller
  * restart (or update) affects no running agent.
+ *
+ * It also never ends one. A live session belongs to the agent working in it
+ * until that agent has spent its asks, and composition is converged by what
+ * the controller launches into slots as they free, never by taking a slot
+ * back. The controller used to shed one surplus session per tick so a mix
+ * change would land before attrition; on the night of 2026-08-22 that loop
+ * killed fourteen consecutive frontier sessions, thirty seconds apart, each
+ * one mid-thought in its first work turn, because the freed slot was never
+ * placeable and the surplus therefore never cleared. Hours of warm context
+ * bought a rebalance that never happened. A mis-composed fleet costs a lane
+ * some share for an hour; shedding costs an agent everything it was holding,
+ * and the fleet is not owed that.
  */
 
 export interface ControllerConfig {
@@ -50,8 +62,6 @@ export interface TickReport {
   readonly reaped: readonly string[];
   readonly expired: readonly string[];
   readonly skipped: readonly { taskId: string; reason: "error-backoff" | "no-admission" }[];
-  /** A session asked to stop this tick so the fleet can re-compose. */
-  readonly shed?: string;
 }
 
 export class Controller {
@@ -148,39 +158,6 @@ export class Controller {
         created.push(this.ledger.run(runId)!);
       }
     }
-    const shed = this.shed(launchable, created.length, now);
-    return { evaluation, created, reaped, expired, skipped, ...(shed ? { shed } : {}) };
-  }
-
-  /**
-   * Gives one session back when the machine is full and holding the wrong
-   * shape, so a lane's declared mix takes effect before its sessions happen
-   * to end.
-   *
-   * Sessions here run for hours, and allocation can only place slots that
-   * exist: after an operator changed a lane from twenty light per standard to
-   * five, the fleet sat at forty-six light and one standard with the quota
-   * for eight standard sessions unused, and nothing but attrition would have
-   * moved it. One session per tick is deliberate — enough to converge over a
-   * few minutes, little enough that a mistake costs one agent's context
-   * rather than the fleet's.
-   *
-   * The youngest session of the over-served pair goes: it is the one with the
-   * least work behind it. Nothing is shed while slots were launched this
-   * tick (the machine was not full), nor for a tier the broker could not fund
-   * anyway.
-   */
-  private shed(tasks: readonly TaskSnapshot[], created: number, now: number): string | undefined {
-    if (created > 0) return undefined;
-    const running = this.ledger.runs({ state: "running" });
-    for (const over of surpluses(tasks, (tier) => this.broker.hasQuotaFor(tier, now))) {
-      const youngest = running
-        .filter((r) => r.taskId === over.taskId && r.tier === over.tier)
-        .sort((a, b) => b.startedAt - a.startedAt)[0];
-      if (youngest === undefined) continue; // a surplus with nothing live to give
-      this.ledger.requestAbort(youngest.id);
-      return youngest.id;
-    }
-    return undefined;
+    return { evaluation, created, reaped, expired, skipped };
   }
 }

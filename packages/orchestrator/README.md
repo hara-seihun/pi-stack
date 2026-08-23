@@ -271,22 +271,26 @@ shares divide each tier, and the mix holds inside the lane.
   short-lived lane as idle and feed it slot after slot — and would erase the
   memory a weighted mix needs, since 20:1 is a ratio no single-slot cycle can
   express. Counting every session in the window at full weight fails the
-  other way: a lane cancelled an hour ago held a phantom share of the machine
-  and blocked the real over-served lane from giving anything back.
+  other way: a lane whose sessions all ended an hour ago would hold a phantom
+  share of the machine and keep taking slots from lanes that are actually
+  working.
 - Slots go one at a time to the pair whose next session falls earliest in
   virtual time, `(held + 1) / claim`. Splitting a cycle's slots by proportion
   instead would round every minority claim to zero — the common cycle offers
   a single slot — and 20:1 is a ratio no one cycle can express.
-- **A full machine sheds** to converge. Allocation can only place slots that
-  exist, so on a machine at its session ceiling a mix change would wait on
-  attrition: after a lane moved from 20:1 to 5:1 its fleet sat at 46 light
-  and 1 standard, with the quota for eight standard sessions idle and each
-  light session good for hours. When some pair is a whole session below its
-  claim and the broker could fund it, the controller asks the worst
-  over-served pair to give one session back — the youngest, which has the
-  least work behind it — at most one per tick. Never while slots were
-  launched that tick (the machine was not full), and never for a tier whose
-  quota is spent anyway.
+- **A full machine converges by turnover, not by eviction.** Allocation can
+  only place slots that exist, so on a machine at its session ceiling a mix
+  change lands as sessions end — a lane that moved from 20:1 to 5:1 keeps its
+  46 light sessions until they finish their own shifts, and the new ratio
+  applies to every slot freed after that. The controller has no way to end a
+  running session and is not getting one back. It used to shed the youngest
+  over-served session once per tick, which on 2026-08-22 killed fourteen
+  consecutive frontier sessions thirty seconds apart, every one of them
+  mid-thought in its first work turn, none replaced (the freed slot was never
+  placeable, so the surplus never cleared and the next tick shed again). A
+  mis-composed fleet costs a lane some share for an hour. Shedding costs an
+  agent every bit of context it was holding, which is the more expensive
+  thing on this machine by a wide margin.
 
 The broker is told the same arithmetic: the tier shape it advertises is what
 the claims would actually take, so scarce accounts are not held for a tier no

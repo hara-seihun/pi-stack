@@ -144,19 +144,6 @@ export class Broker {
   }
 
   /**
-   * Whether some account could fund a session of this tier if the machine
-   * had room — quota only, with the session ceiling left out.
-   *
-   * The question a full machine has to answer before giving a session up:
-   * freeing a slot for a tier whose quota is already spent costs real work
-   * and buys nothing.
-   */
-  hasQuotaFor(tier: Tier, now: number): boolean {
-    const views = this.views(now).map((v) => ({ ...v, active: 0 }));
-    return this.pick(views, tier, now) !== undefined;
-  }
-
-  /**
    * Advertises launch slots per tier for one allocation cycle by virtually
    * admitting until refusal, so shared accounts are never double-counted
    * across tiers. `demand` caps each tier at what eligible tasks can actually
