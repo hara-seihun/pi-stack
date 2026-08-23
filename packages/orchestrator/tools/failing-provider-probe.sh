@@ -28,7 +28,10 @@ cleanup() {
   [[ -n ${SERVER_PID:-} ]] && kill "$SERVER_PID" 2>/dev/null
   [[ -n ${RUNNER_PID:-} ]] && kill "$RUNNER_PID" 2>/dev/null
   wait 2>/dev/null || true
-  rm -rf "$DIR"
+  # The runner's session writes its own files as it unwinds, and a delete
+  # racing that leaves the directory behind: give it a moment, then insist.
+  sleep 2
+  rm -rf "$DIR" || { sleep 3; rm -rf "$DIR"; }
 }
 trap cleanup EXIT
 
@@ -84,7 +87,9 @@ for _ in $(seq 1 80); do
   grep -q "Your last turn was cut off" <<< "$events" && break
 done
 
-retries=$(grep -c '"text":"Retrying' <<< "$events" || true)
+# Only the retries of the first turn: by the time the resumption lands, the
+# session is already retrying its way through the next one.
+retries=$(awk '/Provider failed the turn/ { exit } /"text":"Retrying/ { n++ } END { print n+0 }' <<< "$events")
 echo
 echo "in-turn retries before the host stepped in: $retries (want 6; 3 means the budget was lost)"
 grep -o 'provider failed the turn[^"]*' "$DIR/runner.log" | head -1
