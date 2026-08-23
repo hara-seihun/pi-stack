@@ -566,8 +566,17 @@ every run created in the meantime expires unclaimed — the fleet stops
 launching agents while looking healthy (observed 2026-08-20, 80 minutes of
 silently dropped work). Workers get distinct ids, so a crashed worker's
 running rows (reaped on heartbeat timeout) never count against the
-replacement's capacity. Only a supervisor update needs a full drain first,
-which is why it holds no policy.
+replacement's capacity. Distinct across supervisor lifetimes, not just within
+one: the sequence counter alone restarts with the process, and on 2026-08-23 a
+restarted supervisor spawned a second `gmktec-g45.1` that inherited twelve run
+rows whose sessions systemd had already killed with the old control group.
+Each supervisor process therefore mixes a random instance token into the ids it
+hands out, and reaps on startup: `KillMode=control-group` means a supervisor
+that is starting knows no worker of its host survives, so every row still
+marked running under one of them is failed `runner restarted` immediately
+rather than ten minutes later when the controller's heartbeat timeout notices.
+Only a supervisor update needs a full drain first, which is why it holds no
+policy.
 
 A heartbeat is not progress. The runner's heartbeat is a timer inside the
 hosting process, and it keeps ticking over a session that has stopped

@@ -1,3 +1,5 @@
+import { randomUUID } from "node:crypto";
+
 import type { Ledger } from "../ledger/ledger.js";
 
 /**
@@ -28,6 +30,12 @@ export interface SupervisorConfig {
   /** Wait before respawning a worker that died under the live generation,
    * so a worker that crashes on startup cannot hot-loop. */
   readonly respawnBackoffMs?: number;
+  /** Distinguishes this supervisor process from its predecessors. A worker id
+   * is written into run rows, so a counter that restarts with the process
+   * hands the successor its predecessor's rows: on 2026-08-23 a restarted
+   * supervisor spawned a second `gmktec-g45.1` that owned seven runs whose
+   * sessions systemd had already killed. Defaults to random. */
+  readonly instance?: string;
 }
 
 export interface WorkerSpec {
@@ -48,6 +56,7 @@ const DEFAULT_RESPAWN_BACKOFF_MS = 5_000;
 
 export class RunnerSupervisor {
   private current?: WorkerSpec;
+  private readonly instance: string;
   private sequence = 0;
   private respawnAt = 0;
 
@@ -55,7 +64,30 @@ export class RunnerSupervisor {
     private readonly ledger: Ledger,
     private readonly spawn: (spec: WorkerSpec) => void,
     private readonly cfg: SupervisorConfig,
-  ) {}
+  ) {
+    this.instance = cfg.instance ?? randomUUID().slice(0, 8);
+  }
+
+  /**
+   * Systemd kills the whole control group with the unit, so a supervisor that
+   * is starting knows every worker of its host is gone and every run row still
+   * marked running under one of them is a session that no longer exists.
+   * Failing them here costs nothing and buys honesty: otherwise the broker
+   * counts phantom sessions against account capacity, and `status` shows work
+   * that is not happening, until the controller's heartbeat timeout catches up
+   * ten minutes later.
+   */
+  reapOrphans(now = Date.now()): string[] {
+    const mine = `${this.cfg.runnerId}-`;
+    const orphans = this.ledger
+      .runs({ state: "running" })
+      .filter((run) => run.runnerId?.startsWith(mine) === true);
+    for (const run of orphans) {
+      this.ledger.finishRun(run.id, { state: "aborted", detail: "runner restarted" }, now);
+      this.ledger.taskFinished(run.taskId);
+    }
+    return orphans.map((run) => run.id);
+  }
 
   tick(now = Date.now()): SupervisorTickReport {
     const generation = this.ledger.getControl("runner_generation") ?? "1";
@@ -65,7 +97,7 @@ export class RunnerSupervisor {
     // A worker of the live generation died; back off before replacing it.
     if (this.current === undefined && now < this.respawnAt) return { generation };
     const spec: WorkerSpec = {
-      workerId: `${this.cfg.runnerId}-g${generation}.${++this.sequence}`,
+      workerId: `${this.cfg.runnerId}-g${generation}.${this.instance}.${++this.sequence}`,
       generation,
       maxSessions: this.cfg.maxSessions,
     };

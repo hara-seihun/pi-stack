@@ -113,4 +113,22 @@ describe("runner supervisor", () => {
     }
     expect(new Set(spawned.map((s) => s.workerId)).size).toBe(spawned.length);
   });
+
+  it("a restarted supervisor takes a new identity and fails the runs it killed", () => {
+    const ledger = Ledger.open(":memory:");
+    seed(ledger, 2);
+    const before: WorkerSpec[] = [];
+    const worker = supervisor(ledger, before).tick(1_000).spawned!;
+    const engine = new FakeEngine();
+    new Runner(ledger, engine, { runnerId: worker.workerId, maxSessions: 700 }).tick(1_100);
+    expect(ledger.runs({ state: "running" })).toHaveLength(2);
+
+    // The unit restarts: systemd kills the control group, so the sessions
+    // behind those two rows are already gone when the successor starts.
+    const after: WorkerSpec[] = [];
+    const restarted = supervisor(ledger, after);
+    expect(restarted.reapOrphans(2_000)).toHaveLength(2);
+    expect(ledger.runs({ state: "running" })).toHaveLength(0);
+    expect(restarted.tick(2_100).spawned?.workerId).not.toBe(worker.workerId);
+  });
 });

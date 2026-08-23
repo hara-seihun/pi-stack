@@ -433,6 +433,10 @@ async function supervisor(ledger: Ledger, args: string[]): Promise<void> {
       maxSessions: Number(named.get("max-sessions") ?? 100),
     },
   );
+  const orphans = live.reapOrphans();
+  if (orphans.length > 0) {
+    console.log(`reaped ${orphans.length} run(s) whose worker died with the last supervisor`);
+  }
   console.log(`runner supervisor started (interval ${intervalMs}ms)`);
   for (;;) {
     live.tick();
