@@ -562,6 +562,38 @@ already banked in a
 `task_complete` report survives a late error: the report is the run's record,
 and only a shift that banked nothing reports as an error run.
 
+**A shift survives its provider (2026-08-23).** A turn that failed
+provider-side used to end the run, and pi's own retry — three attempts over
+fourteen seconds — was the whole defence. It is shorter than the failures this
+fleet actually meets: an upstream pool throttled `ox-alpha` in bursts for two
+hours and took four sessions with it, three of them an hour deep in work that
+nobody got back, for a condition that cleared in seconds each time. Recovery
+now has two layers.
+
+In-turn retry is the first and much the better one, because pi replays the
+interrupted turn on the same context with nothing injected and no message
+duplicated — the agent never learns anything happened. Hosted sessions raise
+that budget to six attempts on a five-second base, about five minutes, applied
+to the session's own settings manager **after** `createAgentSession` returns:
+the SDK reloads settings from disk during startup and a reload rebuilds them
+from the files, so an override handed to the factory reads as applied and is
+not.
+
+When that is spent, the host asks the runner how long to wait
+(`HostEvents.turnFailed`), sleeps it in slices that keep reporting progress so
+the stall reaper can still tell waiting from parked, and prompts the same
+session with an honest note about what broke and what was done about it
+(`interruptedTurnPrompt`, shared with interactive failover). The runner prices
+the wait from the family's own cooldown class — that number already answers
+"how long is this condition out for", per family — doubling per consecutive
+failure, capped at ten minutes and six attempts, and the count resets whenever
+a turn lands. The account cools while its session waits, so the throttle stops
+new launches without killing the agent already holding context. Three things
+still end the run at once, because waiting for them is waiting for nothing: a
+broken credential, a request that will fail identically next time (`unknown
+model`, a 400), and a limit the provider names in hours — a weekly or monthly
+window is not weather, and the task belongs on a sibling account.
+
 Draining needs two runner processes alive at once, which is what the
 **supervisor** (`src/host/supervisor.ts`) is for. It is the process a
 service unit runs: it hosts nothing, and keeps exactly one worker of the

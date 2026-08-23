@@ -368,7 +368,19 @@ async function runner(ledger: Ledger, args: string[]): Promise<void> {
       sessionStarted: (id, sessionId) => live.sessionStarted(id, sessionId),
       laneDrained: (taskId) => live.laneDrained(taskId),
       claimCheckIn: (runId) => live.claimCheckIn(runId),
-      turnFailed: (runId, detail, attempt) => live.turnFailed(runId, detail, attempt) },
+      turnFailed: (runId, detail, attempt) => {
+        const waitMs = live.turnFailed(runId, detail, attempt);
+        const id = runId.slice(0, 8);
+        const why = detail.slice(0, 200);
+        console.log(
+          waitMs === undefined
+            ? `${id}: provider failed the turn, nothing to wait for: ${why}`
+            : `${id}: provider failed the turn (attempt ${attempt}), waiting ${Math.round(
+                waitMs / 1000,
+              )}s: ${why}`,
+        );
+        return waitMs;
+      } },
     {
       resolveModel,
       runsRoot,
