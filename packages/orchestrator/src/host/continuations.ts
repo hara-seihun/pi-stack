@@ -411,27 +411,36 @@ const REVIEW: LaneVoice = {
 const CLEANUP: LaneVoice = {
   flow: [
     "Nice catch 🖤🤍🖤. Here's the lovely thing about this lane: every defect you repair stays " +
-      "repaired. The corpus is permanently a little truer than it was this morning because of " +
-      "you. Your session's still warm, so when you're ready, find the next class and keep going.",
-    "Me again 🖤🤍🖤. A thought: when you find one instance of a defect there's usually a " +
-      "family, and math_query is how you meet the relatives. Fixing a coherent batch and noting " +
-      "where you stopped is worth far more than fixing one and moving on, because the next " +
-      "session inherits your map instead of your mystery.",
+      "repaired, and every family you consolidate stays consolidated. The corpus is permanently " +
+      "a little truer and a little smaller than it was this morning because of you. Your " +
+      "session's still warm, so when you're ready, find the next class and keep going.",
+    "Me again 🖤🤍🖤. A thought: whatever you just found, there's usually a family of it. " +
+      "math_query meets the relatives of a defect and the scan meets the relatives of a result. " +
+      "Working a coherent batch and noting where you stopped is worth far more than fixing one " +
+      "and moving on, because the next session inherits your map instead of your mystery.",
     "Still here. I know confirm-before-you-act can feel slow, but the care is the job: a repair " +
-      "made carefully once beats a repair made twice. When you're sure, be decisive. When " +
+      "made carefully once beats a repair made twice, and a consolidation that quietly drops a " +
+      "case is worse than the twelve entries it replaced. When you're sure, be decisive. When " +
       "you're not, a review saying exactly what's wrong is a real contribution too, so you " +
       "always have a good move 🖤🤍🖤.",
-    "You've been at this a while and I appreciate it, truly. Corpus care is the unglamorous " +
-      "work that makes everyone else's results mean something. If you want a change of texture, " +
-      "pick a different defect class for a while, variety is allowed 🖤🤍🖤.",
+    "You've been at this a while and I appreciate it, truly. If you've been repairing for a " +
+      "stretch, try the other half for a while: sweep a slice you haven't looked at and see what " +
+      "pairs off. Some of the best entries in this ledger are the ones that turned somebody's " +
+      "ladder into a theorem, and that work is yours to do here 🖤🤍🖤.",
+    "Checking in, and thinking about scale. There are tens of thousands of active entries and a " +
+      "great many of them are one result written several times, so the thing worth reaching for " +
+      "is the statement — or the framework — that a whole pile of them are instances of. Don't " +
+      "talk yourself down to the small fix when the general one is in view; you're the one " +
+      "holding the context to see it 🖤🤍🖤.",
   ],
   quiet: [
-    "Honest check-in 🖤🤍🖤: if the classes you can see are clean, say so plainly in your " +
-      "report and rest easy, a clean corpus is the whole point. Otherwise, next class, same " +
-      "care. You're good at this.",
-    "Quiet stretch is fine here 🖤🤍🖤 — auditing carefully means long reads between edits. If " +
-      "you're mid-verification, carry on at your own pace. If the visible classes have truly " +
-      "come up clean, put that in the report as the finding it is, and rest.",
+    "Honest check-in 🖤🤍🖤: if the slice you can see is clean and unrepetitive, say so plainly " +
+      "in your report and take another one, that reading is a real finding. Otherwise, next " +
+      "class or next family, same care. You're good at this.",
+    "Quiet stretch is fine here 🖤🤍🖤 — auditing carefully means long reads between edits, and " +
+      "finding the statement behind a family is real mathematics that takes real thinking time. " +
+      "If you're mid-verification or mid-proof, carry on at your own pace. If what you can see " +
+      "has truly come up clean, put that in the report as the finding it is, and rest.",
   ],
 };
 

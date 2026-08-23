@@ -598,6 +598,17 @@ broken credential, a request that will fail identically next time (`unknown
 model`, a 400), and a limit the provider names in hours — a weekly or monthly
 window is not weather, and the task belongs on a sibling account.
 
+`tools/failing-provider-probe.sh` proves the whole path against the deployed
+build: a private ledger, agent directory, and runner, plus a fake
+OpenAI-compatible provider on localhost that answers every request with a 500.
+It asserts the six in-turn retries reached the session, the host waited, the
+session was resumed, and the run is still alive, then deletes everything it
+made. Six minutes, because exhausting the retries takes 315 seconds and there
+is no shortcut to the host's layer. Worth running whenever the pinned pi
+version moves: both times the retry budget was silently lost it was to an SDK
+behaviour no type or test could see, and the symptom in production is only
+that sessions die a little more often.
+
 Draining needs two runner processes alive at once, which is what the
 **supervisor** (`src/host/supervisor.ts`) is for. It is the process a
 service unit runs: it hosts nothing, and keeps exactly one worker of the
@@ -760,24 +771,36 @@ transcript evidence that shaped it live in
 The deployed task ledger is the source of truth for definitions; five lanes
 stand there now. `math-frontier` (share 14) attacks open problems and
 conjectures. `math-review` (share 2) works the trusted-review queue.
-`math-cleanup` (share 2) owns the corpus rather than any one question: stale
-or unchecked provenance, contentless T0 records, settlement edges that
-overclaim, links into retracted entries, duplicate results under two titles,
-titles that defeat search. Its prompt names past defects as a genre and
-leaves the judgement to the agent, because the next defect will not be on any
-list. Its demand probe counts three cheap defect populations over `q_links`
-and `q_entries`, saturating each at a few hundred, so a corpus with nothing
-wrong drains the lane instead of re-prompting it. `math-provenance` (share 1,
+`math-cleanup` (share 6) owns the corpus rather than any one question, and has
+two jobs in it. One is repair: stale or unchecked provenance, contentless T0
+records, settlement edges that overclaim, links into retracted entries, titles
+that defeat search. Its prompt names past defects as a genre and leaves the
+judgement to the agent, because the next defect will not be on any list. The
+other, and the larger, is consolidation: most of the ~70k active entries are
+fewer results than that written out several times, a campaign certifying `c=10`
+then `c=11` then `c=12`, and what the corpus wants is the statement they are
+instances of, or the theory that subsumes them. `related({scan:true})` is what
+makes that findable rather than a guess about where to look — it sweeps a page
+of the corpus for entries that are near-duplicates of each other by
+alpha-normalized compression distance — and `supersedes` is how a consolidation
+lands, as a proposal with a reverse gear rather than a deletion.
+Its demand probe measures both populations: three cheap defect counts over
+`q_links` and `q_entries` at one unit per 25, plus the near-duplicate pairs in
+a randomly drawn page of the sweep at one unit per 200. The second term is what
+keeps the lane's larger job visible to the scheduler; without it cleanup drains
+while tens of thousands of entries still say the same things twice.
+`math-provenance` (share 1,
 one session at a time) audits claimed originality and dependence on prior
 work. It verifies primary sources, creates or reuses `source` contributions,
 adds typed source and dependency links, and uses `set_origin` when an entry's
 headline claim predates the ledger. `fast-math-pr` (share 1) handles that
 repository's pull requests.
 
-Review and cleanup are deliberately equal claims on the fleet. Review decides
-whether new work is sound; cleanup decides whether the corpus still says what
-is true, and only cleanup is looking when the thing that went wrong is
-somebody's finished business. The provenance lane has a smaller standing
+Review and cleanup are comparable claims on the fleet, and cleanup's is now the
+larger of the two. Review decides whether new work is sound; cleanup decides
+whether the corpus still says what is true and whether it needs this many
+entries to say it, and only cleanup is looking when the thing that went wrong
+is somebody's finished business. The provenance lane has a smaller standing
 claim because citation audits need one source-reading agent, not a parallel
 sweep of the same literature.
 

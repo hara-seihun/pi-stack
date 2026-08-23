@@ -285,11 +285,6 @@ export class PiHost implements HostManager {
       thinkingLevel: spec.thinking as never,
       customTools: [taskComplete],
     });
-    // After creation, not before: a settings manager handed to the SDK is
-    // reloaded from disk during startup, and a reload rebuilds settings from
-    // the files and drops every override applied to it. An override passed in
-    // reads as applied and is not (measured against the SDK, 2026-08-23).
-    session.settingsManager.applyOverrides({ retry: { ...SESSION_RETRY } });
     let cancelRun!: () => void;
     const cancelled = new Promise<true>((resolve) => {
       cancelRun = () => resolve(true);
@@ -350,6 +345,22 @@ export class PiHost implements HostManager {
           return { state: "aborted", detail: "session killed" };
         }
         if (spec.thinking !== undefined) session.setThinkingLevel(spec.thinking as never);
+      }
+      // Last, after every other setup: settings overrides live in an object
+      // that both `reload()` and `setModel()` rebuild from the files on disk,
+      // so an override applied any earlier reads as applied and silently is
+      // not. Measured 2026-08-23, twice — handed to `createAgentSession` it
+      // died in the loader's reload, and applied after creation it died in
+      // `setModel`, while the session went on retrying three times over
+      // fourteen seconds.
+      session.settingsManager.applyOverrides({ retry: { ...SESSION_RETRY } });
+      const retry = session.settingsManager.getRetrySettings();
+      if (retry.maxRetries !== SESSION_RETRY.maxRetries) {
+        const notice =
+          `Session retry budget did not apply (${JSON.stringify(retry)}); this session dies of ` +
+          "provider errors the SDK should have retried through.";
+        console.warn(`${spec.runId.slice(0, 8)}: ${notice}`);
+        transcript?.append("notice", { text: notice });
       }
       // Live transcript publication starts only after model resolution, so a
       // rejected model setup is never presented as an active run.

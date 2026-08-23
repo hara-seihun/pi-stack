@@ -42,6 +42,11 @@ function harness(
     /** What the runner answers when a turn fails: milliseconds to wait, or
      * undefined for "nothing to wait for, end the run". */
     turnFailed?: (detail: string, attempt: number) => number | undefined;
+    /** Undefined resolves the model inside the session, as an extension
+     * provider (cursor) does. */
+    resolveModel?: () => unknown;
+    accountId?: string;
+    provider?: string;
   } = {},
 ) {
   let spent = options.checkInsSpent ?? 0;
@@ -54,11 +59,24 @@ function harness(
   let taskComplete: { execute: (id: string, params: unknown) => Promise<unknown> } | undefined;
   const bindings: unknown[] = [];
   const overrides: Record<string, unknown>[] = [];
+  // Both `reload()` and `setModel()` rebuild settings from disk in the real
+  // SDK, which is how the retry budget was silently lost twice; the fake
+  // does the same so the ordering stays pinned.
+  let retry: Record<string, unknown> = { enabled: true, maxRetries: 3, baseDelayMs: 2_000 };
   const session = {
     messages,
     sessionManager: { getSessionId: () => "session-1" },
+    modelRuntime: { getModel: () => ({ id: "model" }) },
+    setModel: async () => {
+      retry = { enabled: true, maxRetries: 3, baseDelayMs: 2_000 };
+    },
+    setThinkingLevel: () => {},
     settingsManager: {
-      applyOverrides: (settings: Record<string, unknown>) => overrides.push(settings),
+      applyOverrides: (settings: { retry?: Record<string, unknown> }) => {
+        overrides.push(settings);
+        if (settings.retry !== undefined) retry = settings.retry;
+      },
+      getRetrySettings: () => retry,
     },
     bindExtensions: async (b: unknown) => {
       bindings.push(b);
@@ -107,7 +125,7 @@ function harness(
       },
     },
     {
-      resolveModel: () => ({}),
+      resolveModel: options.resolveModel ?? (() => ({})),
       openSession: (async (config: { customTools?: unknown[] }) => {
         sessionConfigs.push(config as Record<string, unknown>);
         taskComplete = config.customTools?.[0] as typeof taskComplete;
@@ -121,8 +139,8 @@ function harness(
     runId: "run-1",
     taskId: options.taskId ?? "math-frontier",
     prompt: options.prompt ?? "Attack the central problem.",
-    accountId: "codex-1",
-    provider: "openai-codex",
+    accountId: options.accountId ?? "codex-1",
+    provider: options.provider ?? "openai-codex",
     model: "gpt-5.6-luna",
     thinking: "max",
     cwd: "/tmp",
@@ -153,6 +171,7 @@ function harness(
     sessionConfigs,
     waits,
     overrides,
+    retrySettings: () => retry,
     now: () => clock,
   };
 }
@@ -325,11 +344,27 @@ describe("host shift loop", () => {
     // injected, so in-turn retry is the cheapest possible recovery and worth
     // spending minutes on. The default three attempts over fourteen seconds
     // are shorter than the throttles this fleet actually meets.
-    const { host, spec, finished, overrides } = harness([{ reports: 1 }, {}, {}]);
+    const { host, spec, finished, overrides, retrySettings } = harness([{ reports: 1 }, {}, {}]);
     host.launch(spec);
     await finished;
 
     expect(overrides).toEqual([{ retry: { enabled: true, maxRetries: 6, baseDelayMs: 5_000 } }]);
+    expect(retrySettings()).toMatchObject({ maxRetries: 6 });
+  });
+
+  it("applies the budget after model setup, which is what rebuilds settings from disk", async () => {
+    // An extension-provider account resolves its model inside the session,
+    // and `setModel` reloads settings: the override used to be applied before
+    // it and was gone by the first prompt, with nothing anywhere saying so.
+    const { host, spec, finished, retrySettings } = harness([{ reports: 1 }, {}, {}], {
+      resolveModel: () => undefined,
+      accountId: "cursor",
+      provider: "cursor",
+    });
+    host.launch(spec);
+    await finished;
+
+    expect(retrySettings()).toMatchObject({ maxRetries: 6 });
   });
 
   it("waits a provider failure out and resumes the same session, rather than dying of it", async () => {
