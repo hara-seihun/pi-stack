@@ -6,7 +6,13 @@ import {
   isRateLimitError,
   uniformCooldown,
 } from "../rate-limit.js";
-import type { HostEvents, HostManager, HostRunResult, LaunchSpec } from "./types.js";
+import {
+  MAX_CHECK_INS,
+  type HostEvents,
+  type HostManager,
+  type HostRunResult,
+  type LaunchSpec,
+} from "./types.js";
 
 /**
  * A runner is a separate process from the controller, so orchestrator
@@ -197,6 +203,15 @@ export class Runner implements HostEvents {
    * warm session down on a failed probe would cost the lane its context for
    * nothing.
    */
+  /**
+   * The shift's budget of asks, spent in the ledger so it is a property of
+   * the run rather than of the process hosting it. A worker on a superseded
+   * build cannot re-open a budget the run has already spent.
+   */
+  claimCheckIn(runId: string): boolean {
+    return this.ledger.claimCheckIn(runId, MAX_CHECK_INS);
+  }
+
   laneDrained(taskId: string, now = Date.now()): boolean {
     const task = this.ledger.tasks().find((t) => t.id === taskId);
     if (task?.exitWhenDrained !== true) return false;

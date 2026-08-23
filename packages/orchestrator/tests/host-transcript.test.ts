@@ -17,7 +17,8 @@ function harness(runId: string) {
   const transcript = new RunTranscript(runId, dir);
   const host = new PiHost(
     { runFinished: () => {}, heartbeat: () => {},
-      progress: () => {}, sessionStarted: () => {}, laneDrained: () => false },
+      progress: () => {}, sessionStarted: () => {}, laneDrained: () => false,
+      claimCheckIn: () => true },
     { resolveModel: () => undefined },
   );
   let emit: (event: unknown) => void = () => {};

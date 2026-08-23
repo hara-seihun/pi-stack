@@ -503,9 +503,8 @@ empty context, paying re-orientation cost over and over. No prompt wording can
 fix that, because the instruction addresses an agent that no longer exists by
 the time it would apply. The host therefore re-prompts the same live session
 until it has spent its check-ins (`MAX_CHECK_INS`, 5), the turn errors, an
-operator aborts, two consecutive turns report nothing, or the lane declares
-itself drained (`exitWhenDrained`, checked against current demand before each
-re-prompt).
+operator aborts, or the lane declares itself drained (`exitWhenDrained`,
+checked against current demand before each re-prompt).
 
 **A shift is bounded by asks, not by a clock (2026-08-23).** The host used to
 stop at a four-hour session budget, and the last check-in inside it said so
@@ -518,6 +517,20 @@ its work turn, then "session has been long already. Priority is durable filings
 NOW" — counting turns in its own transcript as if they were a clock. Nothing in
 the host or in `continuations.ts` now knows the time. Six work turns is the
 whole claim on a session; each may run as long as the agent keeps working.
+
+The five are **messages sent, counted on the run row**, and both halves of
+that matter. The rule they replaced ended a shift after two turns that filed
+no report, which is not the same measurement: an agent that files a running
+report every turn is never idle by it, so nothing but the clock bounded the
+kick-backs, and one math-cleanup session took 52 of them — pinned against the
+context cap for two and a half hours, saying so in its own reasoning. And a
+budget held in a worker's memory is a budget a superseded worker re-opens:
+the cap shipped while three older workers kept kicking their sessions back on
+the rule they had loaded at startup. `Ledger.claimCheckIn` spends one from
+the run's own `check_ins` before the message is composed, so every process
+that ever hosts the run reads the same budget and a live shift that is
+already over its five is asked for nothing further.
+
 Each re-prompt is a check-in
 (`src/host/continuations.ts`) generated from what the shift actually did,
 observed from the session's own tool stream: a frontier turn that filed a

@@ -366,7 +366,8 @@ async function runner(ledger: Ledger, args: string[]): Promise<void> {
       heartbeat: (id, at) => live.heartbeat(id, at),
       progress: (id, at) => live.progress(id, at),
       sessionStarted: (id, sessionId) => live.sessionStarted(id, sessionId),
-      laneDrained: (taskId) => live.laneDrained(taskId) },
+      laneDrained: (taskId) => live.laneDrained(taskId),
+      claimCheckIn: (runId) => live.claimCheckIn(runId) },
     {
       resolveModel,
       runsRoot,

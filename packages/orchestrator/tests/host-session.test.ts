@@ -1,7 +1,7 @@
 import { describe, expect, it, vi } from "vitest";
 import { continuationFor, type TurnFacts } from "../src/host/continuations.js";
-import { MAX_CHECK_INS, openingPinExtension, PiHost, serializeOpening } from "../src/host/pi-host.js";
-import type { HostRunResult, LaunchSpec } from "../src/host/types.js";
+import { openingPinExtension, PiHost, serializeOpening } from "../src/host/pi-host.js";
+import { MAX_CHECK_INS, type HostRunResult, type LaunchSpec } from "../src/host/types.js";
 
 /**
  * A launch is a shift, not a single turn.
@@ -27,6 +27,9 @@ interface FakeTurn {
 function harness(
   turns: FakeTurn[],
   options: {
+    /** Check-ins the run has already spent, as the ledger would report them
+     * for a shift some earlier process already kicked back. */
+    checkInsSpent?: number;
     laneDrained?: () => boolean;
     taskId?: string;
     doctrineUrl?: string;
@@ -38,6 +41,7 @@ function harness(
     selfPaced?: boolean;
   } = {},
 ) {
+  let spent = options.checkInsSpent ?? 0;
   const prompts: string[] = [];
   const heartbeats: number[] = [];
   const progress: number[] = [];
@@ -87,6 +91,7 @@ function harness(
       progress: (_id, at) => progress.push(at),
       sessionStarted: (runId, sessionId) => links.push({ runId, sessionId }),
       laneDrained: options.laneDrained ?? (() => false),
+      claimCheckIn: () => (spent++ < MAX_CHECK_INS ? true : false),
     },
     {
       resolveModel: () => ({}),
@@ -163,14 +168,14 @@ describe("host shift loop", () => {
     const { host, spec, prompts, finished } = harness([
       { reports: 1 },
       { reports: 1 },
-      {}, // nothing to report
-      {}, // still nothing: the lane is spent
-      { reports: 1 }, // never reached
+      {}, // nothing to report, which is not the same as nothing to do
+      {},
+      { reports: 1 },
     ]);
     host.launch(spec);
     const result = await finished;
 
-    expect(prompts).toHaveLength(4);
+    expect(prompts).toHaveLength(MAX_CHECK_INS + 1);
     expect(prompts[0]).toBe("Attack the central problem.");
     // The operator's own first message, verbatim, then her follow-ups while
     // the work flows — and honest permission to stop once a turn is quiet.
@@ -179,7 +184,7 @@ describe("host shift loop", () => {
     expect(prompts[2]).toContain("me again");
     expect(prompts[2]).not.toBe(prompts[1]);
     expect(prompts[3]).toContain("honest check-in");
-    expect(result).toMatchObject({ state: "done", productive: true, detail: "report 2.0" });
+    expect(result).toMatchObject({ state: "done", productive: true, detail: "report 5.0" });
   });
 
   it("does not send the frontier continuation to other lanes", async () => {
@@ -275,17 +280,17 @@ describe("host shift loop", () => {
     }
   });
 
-  it("a turn that reports keeps the shift alive however long it has been quiet before", async () => {
-    const { host, spec, prompts, finished } = harness([
-      { reports: 1 },
-      {},
-      { reports: 1 }, // breaks the idle streak
-      {},
-      {},
-    ]);
+  it("asks nothing of a shift whose check-ins some earlier process already spent", async () => {
+    // The budget belongs to the run, not to the worker hosting it: a session
+    // adopted mid-flight cannot start the five over.
+    const { host, spec, prompts, finished } = harness(
+      Array.from({ length: 12 }, () => ({ reports: 1 })),
+      { checkInsSpent: MAX_CHECK_INS },
+    );
     host.launch(spec);
-    await finished;
-    expect(prompts).toHaveLength(5);
+    const result = await finished;
+    expect(prompts).toHaveLength(1);
+    expect(result).toMatchObject({ state: "done", detail: "report 1.0" });
   });
 
   it("stops after its check-ins are spent, however productive and however long the turns ran", async () => {
@@ -298,15 +303,6 @@ describe("host shift loop", () => {
     // these turns took three days between them.
     expect(prompts).toHaveLength(MAX_CHECK_INS + 1);
     expect(result).toMatchObject({ state: "done", detail: "report 6.0" });
-  });
-
-  it("spends no check-ins it does not need: the cap is a ceiling, not a quota", async () => {
-    const { host, spec, prompts, finished } = harness([{ reports: 1 }, {}, {}]);
-    host.launch(spec);
-    const result = await finished;
-    // Two idle turns end it at turn 3, well inside the cap.
-    expect(prompts).toHaveLength(3);
-    expect(result).toMatchObject({ state: "done", detail: "report 1.0" });
   });
 
   it("an errored turn ends the shift: error when nothing was banked, the report when something was", async () => {

@@ -313,6 +313,17 @@ const OPENING_PROBE_SCHEMA = `
 ALTER TABLE task ADD COLUMN opening_probe TEXT;
 `;
 
+/** Check-ins the host has sent this run. A shift's whole claim on a session
+ * is five of them, and the count belongs to the run rather than to the
+ * process hosting it: a rule that lives only in one worker's memory is a
+ * rule a stale worker keeps breaking, which is how a single math-cleanup
+ * session took 52 kick-backs while a build that capped them was already
+ * deployed. Existing rows start at zero; a live run over the cap is asked
+ * for nothing further. */
+const CHECK_IN_SCHEMA = `
+ALTER TABLE run ADD COLUMN check_ins INTEGER NOT NULL DEFAULT 0;
+`;
+
 const MIGRATIONS: readonly string[] = [
   SCHEMA,
   TASK_SCHEMA,
@@ -331,6 +342,7 @@ const MIGRATIONS: readonly string[] = [
   FLEET_CREDENTIAL_SCHEMA,
   OPENING_SCHEMA,
   OPENING_PROBE_SCHEMA,
+  CHECK_IN_SCHEMA,
 ];
 
 export interface AccountRow {
@@ -1150,6 +1162,23 @@ export class Ledger {
   /** The session did something: a turn, a tool call, a notice. */
   progressRun(id: string, at: number): void {
     this.db.prepare("UPDATE run SET progress_at = ? WHERE id = ?").run(at, id);
+  }
+
+  /**
+   * Take one of the run's check-ins if any are left, reporting whether the
+   * host may kick this shift back again. The count is spent in the ledger
+   * before the message is sent, so a host that crashes mid-check-in loses
+   * the ask rather than repeating it, and every process that ever hosts the
+   * run reads the same budget.
+   */
+  claimCheckIn(id: string, max: number): boolean {
+    const row = this.db
+      .prepare(
+        "UPDATE run SET check_ins = check_ins + 1 WHERE id = ? AND check_ins < ? " +
+          "RETURNING check_ins",
+      )
+      .get(id, max) as { check_ins: number } | undefined;
+    return row !== undefined;
   }
 
   /** Bind a run to the pi session hosting it, so its usage events resolve to

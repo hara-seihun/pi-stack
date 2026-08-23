@@ -266,6 +266,26 @@ describe("account metadata custody", () => {
     expect(() => ledger.run("")).toThrow(/ambiguous/);
   });
 
+  it("a run's check-ins are spent once, by whichever process asks", () => {
+    const ledger = Ledger.open(":memory:");
+    ledger.upsertAccount({ id: "codex-7", provider: "openai-codex" });
+    ledger.upsertTask({ id: "lane", tiers: mix("standard"), demandConstant: 1, prompt: "go" });
+    const run = ledger.createRun({
+      taskId: "lane",
+      tier: "standard",
+      accountId: "codex-7",
+      model: "gpt",
+      provider: "openai-codex",
+      at: 1,
+    });
+
+    const granted = Array.from({ length: 8 }, () => ledger.claimCheckIn(run, 5));
+    expect(granted).toEqual([true, true, true, true, true, false, false, false]);
+    // A worker on a superseded build asking the same run is refused too: the
+    // budget is the row's, not the process's.
+    expect(ledger.claimCheckIn(run, 5)).toBe(false);
+  });
+
   it("round-trips the opening exchange and its per-launch probe", () => {
     const ledger = Ledger.open(":memory:");
     ledger.upsertTask({

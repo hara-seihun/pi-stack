@@ -30,26 +30,6 @@ const HEARTBEAT_MS = 30_000;
 /** Ledger writes per session while it streams: liveness needs a coarse clock. */
 const PROGRESS_WRITE_INTERVAL_MS = 15_000;
 
-/**
- * How many check-ins the host may send before it stops re-prompting, and how
- * many consecutive turns may pass with nothing reported before the host
- * accepts that the lane is spent.
- *
- * A shift is bounded by asks, not by a clock. The host used to stop at a
- * four-hour budget, which put a deadline into a system whose whole argument
- * is that a hard problem deserves however long it takes; agents also invent
- * deadlines readily on their own (transcript audit 2026-08-23), and a real
- * one behind them made the invention true. Six work turns — the task prompt
- * plus five check-ins — is the host's whole claim on a session now. The
- * agent may work each of them for as long as the mathematics needs.
- *
- * It is a constant and not a knob. The override that used to exist could
- * only make a shift longer, and a non-numeric one silently removed the cap
- * altogether (`turn >= NaN` is false forever), which is the shape of the
- * failure it exists to prevent.
- */
-export const MAX_CHECK_INS = 5;
-const MAX_IDLE_TURNS = 2;
 
 interface CompletionReport {
   complete: boolean;
@@ -365,7 +345,6 @@ export class PiHost implements HostManager {
       // quiet turn threw away a warm context that had just paid for itself
       // and made every lane restart from scratch. Nothing here is timed: a
       // turn may run as long as the agent keeps working.
-      let idle = 0;
       // The opening exchange is lived, not injected: each message is a real
       // turn the agent answers with whatever tools it reaches for, and the
       // record of that lived exchange is what the pin extension replays
@@ -396,7 +375,6 @@ export class PiHost implements HostManager {
         pin.text = serializeOpening(session.messages);
       }
       for (let turn = 0; ; turn++) {
-        const before = reports;
         // The lane's check-in (see continuations.ts) is generated from the
         // observed shift, so the message answers what the agent actually did
         // rather than firing a fixed sequence on a timer.
@@ -436,8 +414,6 @@ export class PiHost implements HostManager {
         // A self-paced shift is one work turn: the agent ending it is the
         // agent deciding to stop, and no check-in second-guesses that.
         if (spec.selfPaced === true) break;
-        idle = reports > before ? 0 : idle + 1;
-        if (idle >= MAX_IDLE_TURNS || turn >= MAX_CHECK_INS) break;
         // A queue lane can empty its queue mid-shift, and a continuation
         // would then assert work that no longer exists. Ending the shift is
         // the honest answer; the runner decides which lanes work that way.
@@ -445,6 +421,11 @@ export class PiHost implements HostManager {
           transcript?.append("notice", { text: "Lane drained: no work left, ending the shift." });
           break;
         }
+        // Spent in the ledger before it is spoken, so the budget survives
+        // this process. Nothing about the turn's quality is consulted: the
+        // host may ask five times, and how the agent spends the answers is
+        // the agent's business.
+        if (!this.events.claimCheckIn(spec.runId)) break;
       }
       if (report === undefined) {
         return { state: "done", productive: false, detail: "no task_complete report" };
