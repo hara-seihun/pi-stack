@@ -3,6 +3,7 @@ import {
   createAgentSession,
   DefaultResourceLoader,
   serializeConversation,
+  SettingsManager,
   type AgentSession,
   type InlineExtension,
 } from "@earendil-works/pi-coding-agent";
@@ -12,7 +13,12 @@ import { homedir } from "node:os";
 import { join } from "node:path";
 import { Type } from "typebox";
 import type { HostEvents, HostManager, HostRunResult, LaunchSpec } from "./types.js";
-import { continuationFor, ShiftObserver } from "./continuations.js";
+import {
+  continuationFor,
+  describeWait,
+  interruptedTurnPrompt,
+  ShiftObserver,
+} from "./continuations.js";
 import { RunTranscript } from "./transcript.js";
 
 /**
@@ -29,6 +35,22 @@ import { RunTranscript } from "./transcript.js";
 const HEARTBEAT_MS = 30_000;
 /** Ledger writes per session while it streams: liveness needs a coarse clock. */
 const PROGRESS_WRITE_INTERVAL_MS = 15_000;
+
+/**
+ * In-turn retry, which is the first and best line: pi replays the interrupted
+ * turn on the same context with nothing injected and no message duplicated, so
+ * an outage the provider clears inside five minutes costs the agent nothing at
+ * all and it never learns one happened. The default budget is three attempts
+ * over fourteen seconds, which is shorter than most throttles last. Waiting
+ * this long only ever delays the report of an error that was going to be
+ * reported anyway.
+ */
+const SESSION_RETRY = { enabled: true, maxRetries: 6, baseDelayMs: 5_000 } as const;
+
+/** Waits are slept in slices so the run keeps reporting progress: a session
+ * waiting out a provider is not the stalled session the runner reaps, and
+ * only a signal on the same clock can tell those apart. */
+const WAIT_SLICE_MS = 20_000;
 
 
 interface CompletionReport {
@@ -51,6 +73,10 @@ export class PiHost implements HostManager {
   /** Runs already reported terminal by `kill`, so the shift loop's own late
    * result cannot report a second outcome. */
   private readonly killed = new Set<string>();
+  /** Runs an operator or the runner has asked to stop. A session waiting out
+   * a provider outage is not inside `prompt()`, so `session.abort()` has
+   * nothing to interrupt; the wait watches this instead. */
+  private readonly aborting = new Set<string>();
 
   constructor(
     private readonly events: HostEvents,
@@ -126,6 +152,7 @@ export class PiHost implements HostManager {
   }
 
   abort(runId: string): void {
+    this.aborting.add(runId);
     void this.runtimes.get(runId)?.session.abort();
   }
 
@@ -228,12 +255,15 @@ export class PiHost implements HostManager {
     // whatever voice was still in context once the opening instructions were
     // gone. The system prompt is the one region compaction preserves.
     const pin: OpeningPin = { text: undefined, messageCount: 0 };
+    const settingsManager = SettingsManager.create(spec.cwd ?? process.cwd(), this.options.agentDir);
+    settingsManager.applyOverrides({ retry: { ...SESSION_RETRY } });
     let resourceLoader: DefaultResourceLoader | undefined;
     if (spec.doctrineUrl !== undefined || (spec.opening?.length ?? 0) > 0) {
       const doctrine = spec.doctrineUrl === undefined ? undefined : await this.doctrine(spec.doctrineUrl);
       resourceLoader = new DefaultResourceLoader({
         cwd: spec.cwd ?? process.cwd(),
         agentDir: this.options.agentDir ?? join(homedir(), ".pi", "agent"),
+        settingsManager,
         ...(doctrine === undefined
           ? {}
           : {
@@ -253,6 +283,7 @@ export class PiHost implements HostManager {
     const { session } = await (this.options.openSession ?? createAgentSession)({
       cwd: spec.cwd,
       agentDir: this.options.agentDir,
+      settingsManager,
       ...(resourceLoader === undefined ? {} : { resourceLoader }),
       // The SDK's Model type is provider-internal; the resolver returns one.
       model: preresolved as never,
@@ -272,6 +303,7 @@ export class PiHost implements HostManager {
       cleaned = true;
       this.runtimes.delete(spec.runId);
       this.transcripts.delete(spec.runId);
+      this.aborting.delete(spec.runId);
       for (const dispose of disposers.reverse()) dispose();
     };
     this.runtimes.set(spec.runId, { session, cancel: cancelRun, cleanup });
@@ -351,65 +383,95 @@ export class PiHost implements HostManager {
       // verbatim through every compaction. Injecting a transcript the agent
       // never produced would be spotted — agents are acutely good at telling
       // self from not-self — and disbelieved.
+      // A shift survives its provider. Everything below treats a failed turn
+      // as weather to wait out rather than as the end of the session: the
+      // runner prices the wait (see HostEvents.turnFailed), the host sleeps it
+      // while still reporting progress, and the same context picks up where it
+      // stopped. Only when the runner says there is nothing left to wait for
+      // does the run end.
+      let stalls = 0;
       for (const message of opening) {
-        transcript?.append("user", { text: message });
-        if (await interrupted(session.prompt(message))) {
-          return { state: "aborted", detail: "session killed" };
+        for (;;) {
+          transcript?.append("user", { text: message });
+          if (await interrupted(session.prompt(message))) {
+            return { state: "aborted", detail: "session killed" };
+          }
+          const opener = lastAssistant(session);
+          if (opener?.stopReason === "error") {
+            const detail = opener.errorMessage ?? "opening turn errored";
+            const waited = await this.recover(spec, transcript, detail, stalls + 1, interrupted);
+            if (waited === "killed") return { state: "aborted", detail: "session killed" };
+            // The opening is a lived exchange, so the message is asked again
+            // rather than resumed: an opening turn nobody answered is not an
+            // opening the pin can replay.
+            if (typeof waited === "number") {
+              stalls++;
+              continue;
+            }
+            return { state: "error", detail };
+          }
+          if (opener?.stopReason === "aborted") {
+            return { state: "aborted", detail: "session aborted" };
+          }
+          stalls = 0;
+          observer.endTurn();
+          break;
         }
-        const opener = [...session.messages]
-          .reverse()
-          .find(
-            (m): m is typeof m & { stopReason?: string; errorMessage?: string } =>
-              m.role === "assistant",
-          );
-        if (opener?.stopReason === "error") {
-          return { state: "error", detail: opener.errorMessage ?? "opening turn errored" };
-        }
-        if (opener?.stopReason === "aborted") {
-          return { state: "aborted", detail: "session aborted" };
-        }
-        observer.endTurn();
       }
       if (opening.length > 0) {
         pin.messageCount = session.messages.length;
         pin.text = serializeOpening(session.messages);
       }
-      for (let turn = 0; ; turn++) {
+      let turn = 0;
+      let resume: string | undefined;
+      for (;;) {
         // The lane's check-in (see continuations.ts) is generated from the
         // observed shift, so the message answers what the agent actually did
-        // rather than firing a fixed sequence on a timer.
+        // rather than firing a fixed sequence on a timer. A resumption note
+        // pre-empts it: a turn the provider cut off was not a turn the agent
+        // finished, and asking it "what did you land?" would be a lie about
+        // what just happened.
         const message =
-          turn === 0
+          resume ??
+          (turn === 0
             ? prompt
             : continuationFor({
                 taskId: spec.taskId,
                 turn,
                 turns: observer.turns(),
-              });
+              }));
         transcript?.append("user", { text: message });
         if (await interrupted(session.prompt(message))) {
           return { state: "aborted", detail: "session killed" };
         }
         // prompt() resolves even when the turn failed provider-side; the
-        // truth is on the final assistant message. An errored turn must be an
-        // error run (circuit breaker, account cooldown), never quiet
-        // unproductive-done — that combination relaunches every tick.
-        const last = [...session.messages]
-          .reverse()
-          .find(
-            (m): m is typeof m & { stopReason?: string; errorMessage?: string } =>
-              m.role === "assistant",
-          );
+        // truth is on the final assistant message. An errored turn that is
+        // out of waits must be an error run (circuit breaker, account
+        // cooldown), never quiet unproductive-done — that combination
+        // relaunches every tick.
+        const last = lastAssistant(session);
         if (last?.stopReason === "error") {
-          if (report === undefined) {
-            return { state: "error", detail: last.errorMessage ?? "assistant turn errored" };
+          const detail = last.errorMessage ?? "assistant turn errored";
+          const waited = await this.recover(spec, transcript, detail, stalls + 1, interrupted);
+          if (waited === "killed") return { state: "aborted", detail: "session killed" };
+          if (typeof waited === "number") {
+            stalls++;
+            resume = interruptedTurnPrompt(
+              detail,
+              `I waited ${describeWait(waited)} for the provider to come back, and it is ` +
+                "answering again.",
+            );
+            continue;
           }
+          if (report === undefined) return { state: "error", detail };
           break; // Work already banked: report it rather than lose it.
         }
         if (last?.stopReason === "aborted") {
           if (report === undefined) return { state: "aborted", detail: "session aborted" };
           break;
         }
+        stalls = 0;
+        resume = undefined;
         observer.endTurn();
         // A self-paced shift is one work turn: the agent ending it is the
         // agent deciding to stop, and no check-in second-guesses that.
@@ -426,6 +488,7 @@ export class PiHost implements HostManager {
         // host may ask five times, and how the agent spends the answers is
         // the agent's business.
         if (!this.events.claimCheckIn(spec.runId)) break;
+        turn++;
       }
       if (report === undefined) {
         return { state: "done", productive: false, detail: "no task_complete report" };
@@ -439,6 +502,33 @@ export class PiHost implements HostManager {
     } finally {
       cleanup();
     }
+  }
+
+  /**
+   * Waits out a failed turn, or reports that there is nothing to wait for.
+   * Returns the milliseconds slept, `"give-up"` when the run should end, or
+   * `"killed"` when the wait was interrupted.
+   */
+  private async recover(
+    spec: LaunchSpec,
+    transcript: RunTranscript | undefined,
+    detail: string,
+    attempt: number,
+    interrupted: (operation: Promise<unknown>) => Promise<boolean>,
+  ): Promise<number | "give-up" | "killed"> {
+    const waitMs = this.events.turnFailed(spec.runId, detail, attempt);
+    if (waitMs === undefined) return "give-up";
+    transcript?.append("notice", {
+      text: `Provider failed the turn (attempt ${attempt}); waiting ${describeWait(waitMs)} and ` +
+        `continuing this session rather than ending it: ${detail}`,
+    });
+    const until = Date.now() + waitMs;
+    for (let left = waitMs; left > 0; left = until - Date.now()) {
+      if (await interrupted(sleep(Math.min(left, WAIT_SLICE_MS)))) return "killed";
+      if (this.aborting.has(spec.runId)) return "killed";
+      this.events.progress(spec.runId, Date.now());
+    }
+    return waitMs;
   }
 
   /**
@@ -528,6 +618,20 @@ export class PiHost implements HostManager {
       }
     });
   }
+}
+
+function sleep(ms: number): Promise<void> {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+function lastAssistant(
+  session: AgentSession,
+): { stopReason?: string; errorMessage?: string } | undefined {
+  return [...session.messages]
+    .reverse()
+    .find(
+      (m): m is typeof m & { stopReason?: string; errorMessage?: string } => m.role === "assistant",
+    );
 }
 
 /** Mutable ref shared between the host's shift loop and the pin extension:

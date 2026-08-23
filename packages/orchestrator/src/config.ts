@@ -3,7 +3,7 @@ import { homedir } from "node:os";
 import { join } from "node:path";
 import type { BrokerConfig, ModelCandidate } from "./broker/broker.js";
 import type { MeterSpec } from "./calibrator/types.js";
-import { type CooldownPolicy, rateLimitCooldownMs } from "./rate-limit.js";
+import { type CooldownPolicy, rateLimitCooldownMs } from "./provider-errors.js";
 import { TIERS, type Tier } from "./tasks/types.js";
 
 /**

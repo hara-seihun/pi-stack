@@ -2,7 +2,7 @@ import { describe, expect, it } from "vitest";
 import { Ledger, type AccountRow } from "../src/ledger/ledger.js";
 import { pickAccount } from "../src/extension/select-account.js";
 import { isRateLimitError } from "../src/extension/routing.js";
-import { rateLimitCooldownMs } from "../src/rate-limit.js";
+import { rateLimitCooldownMs } from "../src/provider-errors.js";
 
 function account(partial: Partial<AccountRow> & { id: string }): AccountRow {
   return {

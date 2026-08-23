@@ -117,7 +117,7 @@ describe("interactive failover notices", () => {
     await emit("agent_end", { messages: [errored] });
     await emit("agent_settled");
     expect(sent).toHaveLength(1);
-    expect(sent[0]).toContain("Provider failover");
+    expect(sent[0]).toContain("Your last turn was cut off");
     expect(sent[0]).toContain("anthropic-3");
     // One notice per lost turn, never a second on a later settle.
     await emit("agent_settled");

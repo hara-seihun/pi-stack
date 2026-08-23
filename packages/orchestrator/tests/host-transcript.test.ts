@@ -18,7 +18,7 @@ function harness(runId: string) {
   const host = new PiHost(
     { runFinished: () => {}, heartbeat: () => {},
       progress: () => {}, sessionStarted: () => {}, laneDrained: () => false,
-      claimCheckIn: () => true },
+      claimCheckIn: () => true, turnFailed: () => undefined },
     { resolveModel: () => undefined },
   );
   let emit: (event: unknown) => void = () => {};

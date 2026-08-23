@@ -174,6 +174,49 @@ describe("runner result classification", () => {
   });
 });
 
+describe("a failed turn is weather, not the end of the session", () => {
+  function throttled() {
+    const ledger = Ledger.open(":memory:");
+    const [runId] = seed(ledger, 1);
+    const runner = new Runner(ledger, new FakeEngine(), {
+      runnerId: "r1",
+      maxSessions: 5,
+      cooldown: (family, detail) =>
+        /weekly/i.test(detail) ? 6 * 60 * 60_000 : family === "anthropic" ? 60_000 : 10 * 60_000,
+    });
+    runner.tick(100);
+    return { ledger, runId, runner };
+  }
+
+  it("backs off exponentially from the family's own cooldown class", () => {
+    const { runId, runner } = throttled();
+    expect(runner.turnFailed(runId, "429 rate-limited upstream", 1, 1000)).toBe(60_000);
+    expect(runner.turnFailed(runId, "429 rate-limited upstream", 2, 1000)).toBe(120_000);
+    expect(runner.turnFailed(runId, "429 rate-limited upstream", 3, 1000)).toBe(240_000);
+    // Six attempts is the whole budget; after that the broker gets the task.
+    expect(runner.turnFailed(runId, "429 rate-limited upstream", 7, 1000)).toBeUndefined();
+  });
+
+  it("cools the account while the session waits, so nothing new launches into the throttle", () => {
+    const { ledger, runId, runner } = throttled();
+    runner.turnFailed(runId, "429 rate-limited upstream", 1, 1000);
+    expect(ledger.accounts().find((a) => a.id === "anth-1")?.cooldownUntil).toBe(61_000);
+    expect(ledger.run(runId)?.state).toBe("running"); // the agent is still alive
+  });
+
+  it("rides out a dropped stream on half a minute, whatever the family's rate-limit class", () => {
+    const { runId, runner } = throttled();
+    expect(runner.turnFailed(runId, "JSON error injected into SSE stream", 1, 1000)).toBe(30_000);
+  });
+
+  it("refuses to wait for a condition measured in hours, or for one that will never clear", () => {
+    const { runId, runner } = throttled();
+    expect(runner.turnFailed(runId, "weekly limit reached", 1, 1000)).toBeUndefined();
+    expect(runner.turnFailed(runId, "No API key found for openai-codex-9.", 1, 1000)).toBeUndefined();
+    expect(runner.turnFailed(runId, "unknown model gpt-5.6-luna", 1, 1000)).toBeUndefined();
+  });
+});
+
 describe("credential failures are the account's, not the task's", () => {
   it("an unauthenticated account aborts the run and cools down, sparing the breaker", () => {
     const ledger = Ledger.open(":memory:");

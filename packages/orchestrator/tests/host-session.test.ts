@@ -39,6 +39,9 @@ function harness(
     runOpeningProbe?: (command: string, cwd: string) => Promise<string>;
     prompt?: string;
     selfPaced?: boolean;
+    /** What the runner answers when a turn fails: milliseconds to wait, or
+     * undefined for "nothing to wait for, end the run". */
+    turnFailed?: (detail: string, attempt: number) => number | undefined;
   } = {},
 ) {
   let spent = options.checkInsSpent ?? 0;
@@ -82,6 +85,7 @@ function harness(
     },
   };
   const results: HostRunResult[] = [];
+  const waits: number[] = [];
   const links: { runId: string; sessionId: string }[] = [];
   const sessionConfigs: Record<string, unknown>[] = [];
   const host = new PiHost(
@@ -92,6 +96,11 @@ function harness(
       sessionStarted: (runId, sessionId) => links.push({ runId, sessionId }),
       laneDrained: options.laneDrained ?? (() => false),
       claimCheckIn: () => (spent++ < MAX_CHECK_INS ? true : false),
+      turnFailed: (_id, detail, attempt) => {
+        const waitMs = options.turnFailed?.(detail, attempt);
+        if (waitMs !== undefined) waits.push(waitMs);
+        return waitMs;
+      },
     },
     {
       resolveModel: () => ({}),
@@ -138,6 +147,7 @@ function harness(
     progress,
     emit,
     sessionConfigs,
+    waits,
     now: () => clock,
   };
 }
@@ -305,6 +315,46 @@ describe("host shift loop", () => {
     expect(result).toMatchObject({ state: "done", detail: "report 6.0" });
   });
 
+  it("waits a provider failure out and resumes the same session, rather than dying of it", async () => {
+    // The 2026-08-23 ox-alpha throttle killed four sessions that were an hour
+    // into work; the condition itself lasted seconds. A failed turn now costs
+    // a wait and a resumption note, and the context survives.
+    const { host, spec, prompts, finished, waits } = harness(
+      [
+        { reports: 1 },
+        { stopReason: "error", errorMessage: "429 rate-limited upstream" },
+        { reports: 1 },
+        {},
+        {},
+        {},
+        {},
+      ],
+      { turnFailed: (_detail, attempt) => attempt * 2 },
+    );
+    host.launch(spec);
+    const result = await finished;
+
+    expect(waits).toEqual([2]);
+    expect(prompts[2]).toContain("Your last turn was cut off");
+    expect(prompts[2]).toContain("429 rate-limited upstream");
+    // The resumption replaces the check-in rather than spending one: the
+    // agent is being asked to continue a turn, not to report on it.
+    expect(prompts[3]).toContain("me again");
+    expect(result).toMatchObject({ state: "done", detail: "report 3.0" });
+  });
+
+  it("keeps reporting progress while it waits, so the stall reaper leaves it alone", async () => {
+    const { host, spec, finished, progress } = harness(
+      [{ stopReason: "error", errorMessage: "provider fell over" }, { reports: 1 }, {}, {}, {}, {}],
+      { turnFailed: () => 5 },
+    );
+    const before = progress.length;
+    host.launch(spec);
+    await finished;
+
+    expect(progress.length).toBeGreaterThan(before);
+  });
+
   it("an errored turn ends the shift: error when nothing was banked, the report when something was", async () => {
     const failed = harness([{ stopReason: "error", errorMessage: "usage limit reached" }]);
     failed.host.launch(failed.spec);
@@ -411,7 +461,7 @@ describe("the opening exchange", () => {
     ]);
   });
 
-  it("fails the run when an opening turn errors, rather than working from a broken exchange", async () => {
+  it("fails the run when an opening turn errors with nothing left to wait for", async () => {
     const { host, spec, finished } = harness(
       [{ stopReason: "error", errorMessage: "provider fell over" }],
       { opening: ["Here's something I wrote."] },
@@ -420,6 +470,30 @@ describe("the opening exchange", () => {
     const result = await finished;
 
     expect(result).toMatchObject({ state: "error", detail: "provider fell over" });
+  });
+
+  it("asks an opening message again after a wait, because an unanswered opening cannot be pinned", async () => {
+    const { host, spec, prompts, finished } = harness(
+      [
+        { stopReason: "error", errorMessage: "provider fell over" },
+        {},
+        { reports: 1 },
+        {},
+        {},
+        {},
+        {},
+      ],
+      { opening: ["Here's something I wrote."], turnFailed: () => 2 },
+    );
+    host.launch(spec);
+    const result = await finished;
+
+    expect(prompts.slice(0, 3)).toEqual([
+      "Here's something I wrote.",
+      "Here's something I wrote.",
+      "Attack the central problem.",
+    ]);
+    expect(result).toMatchObject({ state: "done" });
   });
 
   it("self-paced: the agent ending its work turn ends the shift, with no check-in", async () => {

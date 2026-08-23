@@ -3,9 +3,10 @@ import {
   type CooldownPolicy,
   CREDENTIAL_COOLDOWN_MS,
   isCredentialError,
+  isPermanentError,
   isRateLimitError,
   uniformCooldown,
-} from "../rate-limit.js";
+} from "../provider-errors.js";
 import {
   MAX_CHECK_INS,
   type HostEvents,
@@ -49,6 +50,25 @@ export interface RunnerConfig {
 
 const PROGRESS_TIMEOUT_MS = 20 * 60_000;
 const STALL_KILL_GRACE_MS = 10 * 60_000;
+
+/**
+ * How a session rides out a provider failure instead of dying of it.
+ *
+ * The first wait is the family's own cooldown class where the error is a
+ * rate limit — that number already answers "how long is this condition out
+ * for", measured per family — and half a minute for anything else, which is
+ * the shape of a dropped stream or a 500. It doubles per consecutive failure
+ * and stops climbing at ten minutes; six attempts spend a little over half an
+ * hour, after which the run ends and the broker places the task somewhere
+ * with a working provider.
+ *
+ * A condition the provider names in hours (a weekly or monthly window) is not
+ * weather and gets no waiting: the run ends at once so the account cools and
+ * the task moves to a sibling.
+ */
+const RECOVERY_BASE_MS = 30_000;
+const RECOVERY_MAX_MS = 10 * 60_000;
+const RECOVERY_ATTEMPTS = 6;
 
 /** A demand reading older than this says nothing about the queue now. The
  * controller re-probes on a 60s TTL, so anything this old means nobody is
@@ -210,6 +230,24 @@ export class Runner implements HostEvents {
    */
   claimCheckIn(runId: string): boolean {
     return this.ledger.claimCheckIn(runId, MAX_CHECK_INS);
+  }
+
+  turnFailed(runId: string, detail: string, attempt: number, now = Date.now()): number | undefined {
+    if (isCredentialError(detail) || isPermanentError(detail)) return undefined;
+    if (attempt > RECOVERY_ATTEMPTS) return undefined;
+    const run = this.ledger.run(runId);
+    if (run === undefined) return undefined;
+    const rateLimited = isRateLimitError(detail);
+    const family = this.ledger.accounts().find((a) => a.id === run.accountId)?.provider;
+    const cooldown = (this.cfg.cooldown ?? uniformCooldown)(family, detail);
+    const base = rateLimited ? cooldown : RECOVERY_BASE_MS;
+    if (base > RECOVERY_MAX_MS) return undefined;
+    // The session waits, and meanwhile nothing new is launched onto the
+    // account: an agent already holding context is the one worth keeping in
+    // the queue, and a fresh launch into a throttled provider is the one
+    // worth not making.
+    if (rateLimited) this.ledger.setAccountCooldown(run.accountId, now + cooldown);
+    return Math.min(base * 2 ** (attempt - 1), RECOVERY_MAX_MS);
   }
 
   laneDrained(taskId: string, now = Date.now()): boolean {

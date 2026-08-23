@@ -1,9 +1,10 @@
 /**
- * One vocabulary for "this account is out of capacity right now" across
- * every surface that sees provider errors: interactive routing failover,
- * and runner-side classification of orchestrator runs. A match cools the
- * account down in the ledger, which both interactive binding and broker
- * admission honour.
+ * One vocabulary for provider failure across every surface that sees one:
+ * interactive routing failover, runner-side classification of orchestrator
+ * runs, and the host deciding whether a session waits out a bad turn or
+ * dies of it. Three questions are asked of an error message here — is the
+ * account out of capacity, is its credential broken, and is this condition
+ * ever going to clear — and each answer has exactly one implementation.
  */
 
 const RATE_LIMIT_PATTERNS = [
@@ -65,6 +66,28 @@ const CREDENTIAL_PATTERNS = [
   /credential store modify failed/i,
   /\b401\b|unauthorized|invalid[_ ]?(api[_ ]?key|token|grant)/i,
 ];
+
+/**
+ * The failure will be identical on the next attempt, so waiting for it is
+ * waiting for nothing. These are defects in the launch or the request — a
+ * model that does not exist, an account that cannot serve it, a request the
+ * provider rejects on its merits — and the run should end so the ledger
+ * records why. Everything else is treated as weather: a session rides it
+ * out on backoff rather than dying of it, because the alternative throws
+ * away however many hours of context the agent had built.
+ */
+const PERMANENT_PATTERNS = [
+  /unknown model/i,
+  /cannot alias/i,
+  /\b400\b|\b404\b/,
+  /invalid[_ ]?request|malformed|unsupported|not supported/i,
+  /does not exist|no such model/i,
+  /opening probe failed/i,
+];
+
+export function isPermanentError(message: string): boolean {
+  return PERMANENT_PATTERNS.some((p) => p.test(message));
+}
 
 /**
  * The account cannot authenticate at all: a missing, shadowed, or rejected

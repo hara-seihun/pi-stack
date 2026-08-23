@@ -102,4 +102,22 @@ export interface HostEvents {
    * own spent check-ins, so the budget is a fact about the run and not a
    * counter inside whichever process happens to be hosting it. */
   claimCheckIn(runId: string): boolean;
+  /**
+   * A turn ended in a provider error. Answers how long this session should
+   * wait before picking the shift back up, or `undefined` when there is
+   * nothing to wait for and the run should end.
+   *
+   * A provider error used to be terminal: pi's own retry covers seconds, and
+   * once it was spent the host returned `error` and the session was disposed
+   * mid-thought. On 2026-08-23 an upstream pool throttled `ox-alpha` for two
+   * hours and killed four sessions that way, three of them an hour deep into
+   * work nobody got back. The condition lasted seconds at a time; the sessions
+   * did not have to.
+   *
+   * `attempt` counts consecutive failures in this shift and resets whenever a
+   * turn lands, so the backoff climbs through a bad patch and starts over
+   * after a good one. The policy lives in the runner, which knows the account,
+   * its family, and how long that family's failures usually last.
+   */
+  turnFailed(runId: string, detail: string, attempt: number): number | undefined;
 }

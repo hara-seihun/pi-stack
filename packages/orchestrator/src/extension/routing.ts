@@ -39,9 +39,10 @@ import { join } from "node:path";
  * must resolve.
  */
 
-export { isRateLimitError } from "../rate-limit.js";
-import { isRateLimitError } from "../rate-limit.js";
+export { isRateLimitError } from "../provider-errors.js";
+import { isRateLimitError } from "../provider-errors.js";
 import { cooldownPolicy, loadConfig } from "../config.js";
+import { interruptedTurnPrompt } from "../host/continuations.js";
 
 /** An alias provider: the family's models, transport, and OAuth under the
  * account's own id, so credentials resolve from auth.json[aliasId]. */
@@ -61,11 +62,9 @@ export function aliasProvider(family: Provider, aliasId: string, label?: string)
 }
 
 export function failoverPrompt(failure: string, account: string): string {
-  return (
-    `## Provider failover\n\nYour previous turn did not complete: ${failure.slice(0, 500)}\n\n` +
-    `This session moved to another account (${account}). Nothing was lost: your reasoning, ` +
-    `tool calls, and tool results above are all still here. Continue exactly where you ` +
-    `stopped rather than restarting, and verify any tool call whose result you never saw.`
+  return interruptedTurnPrompt(
+    failure,
+    `This session moved to another account (${account}) and is ready to keep going.`,
   );
 }
 
