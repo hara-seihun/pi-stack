@@ -150,6 +150,19 @@ describe("runner result classification", () => {
     expect(ledger.run(runId)?.state).toBe("error");
   });
 
+  it("a burst-throttled family's 429 benches the account for seconds, not minutes", () => {
+    const ledger = Ledger.open(":memory:");
+    const [runId] = seed(ledger, 1);
+    const runner = new Runner(ledger, new FakeEngine(), {
+      runnerId: "r1",
+      maxSessions: 5,
+      cooldown: (family) => (family === "anthropic" ? 30_000 : 10 * 60_000),
+    });
+    runner.tick(100);
+    runner.runFinished(runId, { state: "error", detail: '{"status":429,"title":"Too Many Requests"}' }, 200);
+    expect(ledger.accounts().find((a) => a.id === "anth-1")?.cooldownUntil).toBe(30_200);
+  });
+
   it("an ordinary error run does not cool the account", () => {
     const ledger = Ledger.open(":memory:");
     const [runId] = seed(ledger, 1);

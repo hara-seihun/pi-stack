@@ -2,7 +2,13 @@ import { mkdtempSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { describe, expect, it } from "vitest";
-import { brokerConfig, costTransform, loadConfig, type OrchestratorConfig } from "../src/config.js";
+import {
+  brokerConfig,
+  cooldownPolicy,
+  costTransform,
+  loadConfig,
+  type OrchestratorConfig,
+} from "../src/config.js";
 
 const CONFIG: OrchestratorConfig = {
   tiers: {
@@ -78,5 +84,18 @@ describe("operator config", () => {
     expect(() => loadConfig(path)).toThrow(/positive integer/);
     writeFileSync(path, JSON.stringify(unmetered({ sessionCapacity: 2 })));
     expect(brokerConfig(loadConfig(path)).declaredCapacity).toEqual({ openrouter: 2 });
+  });
+
+  it("a burst-throttled family sits out seconds where a metered one sits out minutes", () => {
+    const cooldown = cooldownPolicy({
+      ...CONFIG,
+      providers: { ...CONFIG.providers, nvidia: { meters: [], sessionCapacity: 2, throttleCooldownMs: 30_000 } },
+    });
+    expect(cooldown("nvidia", '{"status":429,"title":"Too Many Requests"}')).toBe(30_000);
+    expect(cooldown("anthropic", "429 too many requests")).toBe(10 * 60_000);
+    expect(cooldown(undefined, "429 too many requests")).toBe(10 * 60_000);
+    // A named window is the provider reporting an empty plan, whatever its
+    // ordinary 429s mean, so it outranks the declared throttle class.
+    expect(cooldown("nvidia", "monthly spend limit reached")).toBe(24 * 60 * 60_000);
   });
 });

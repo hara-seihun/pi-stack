@@ -11,7 +11,7 @@ import { Runner, bumpRunnerGeneration } from "./host/runner.js";
 import { Scheduler } from "./tasks/scheduler.js";
 import { TIERS, type Tier, type TierShare } from "./tasks/types.js";
 import { credentialedAccountIds } from "./auth/credentials.js";
-import { brokerConfig, defaultConfigPath, loadConfig } from "./config.js";
+import { brokerConfig, cooldownPolicy, defaultConfigPath, loadConfig } from "./config.js";
 import { CURSOR_PROVIDER, CursorMeterSampler } from "./meters/cursor.js";
 import { CODEX_PROVIDER, CodexMeterSampler } from "./meters/codex.js";
 import { AnthropicMeterSampler } from "./meters/anthropic.js";
@@ -378,6 +378,7 @@ async function runner(ledger: Ledger, args: string[]): Promise<void> {
   const live = new Runner(ledger, engine, {
     runnerId,
     maxSessions: Number(named.get("max-sessions") ?? 100),
+    cooldown: cooldownPolicy(loadConfig()),
   });
   const intervalMs = Number(named.get("interval") ?? 5000);
   console.log(`runner ${runnerId} started`);

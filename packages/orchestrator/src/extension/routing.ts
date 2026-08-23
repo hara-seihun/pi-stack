@@ -40,7 +40,8 @@ import { join } from "node:path";
  */
 
 export { isRateLimitError } from "../rate-limit.js";
-import { isRateLimitError, rateLimitCooldownMs } from "../rate-limit.js";
+import { isRateLimitError } from "../rate-limit.js";
+import { cooldownPolicy, loadConfig } from "../config.js";
 
 /** An alias provider: the family's models, transport, and OAuth under the
  * account's own id, so credentials resolve from auth.json[aliasId]. */
@@ -114,6 +115,11 @@ export default function routing(pi: ExtensionAPI): void {
     return;
   }
 
+  // Only interactive failover cools accounts down here, so only interactive
+  // sessions need the operator's limit topology; a broken config is a broken
+  // deployment and says so rather than quietly routing on default classes.
+  const cooldown = cooldownPolicy(loadConfig());
+
   /** The family model re-homed onto an account's alias provider. */
   const resolve = (accountId: string, family: string, modelId: string): Model<never> | undefined => {
     const model = families.get(family)?.getModels().find((m) => m.id === modelId);
@@ -166,7 +172,7 @@ export default function routing(pi: ExtensionAPI): void {
     const failing = ctx.model?.provider;
     if (failing === undefined) return;
     if (ledger.accounts().some((a) => a.id === failing)) {
-      ledger.setAccountCooldown(failing, Date.now() + rateLimitCooldownMs(errorMessage));
+      ledger.setAccountCooldown(failing, Date.now() + cooldown(familyOf(failing), errorMessage));
     }
     // Move now, before pi's auto-retry fires: the retry inherits the new
     // account, which is what usually saves the turn without the agent ever

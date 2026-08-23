@@ -1,4 +1,4 @@
-import { mkdtempSync, rmSync } from "node:fs";
+import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
@@ -58,6 +58,14 @@ describe("interactive failover notices", () => {
   beforeEach(() => {
     dir = mkdtempSync(join(tmpdir(), "pi-orchestrator-routing-"));
     process.env.PI_ORCHESTRATOR_LEDGER = join(dir, "ledger.sqlite3");
+    process.env.PI_ORCHESTRATOR_CONFIG = join(dir, "config.json");
+    writeFileSync(
+      process.env.PI_ORCHESTRATOR_CONFIG,
+      JSON.stringify({
+        tiers: { light: [], standard: [{ provider: "anthropic", model: "claude-opus-5" }], expert: [] },
+        providers: { anthropic: { meters: [{ id: "a-5h", drainedBy: ["default:cost"], windowHours: 5 }] } },
+      }),
+    );
     delete process.env.PI_ORCHESTRATOR_ASSIGNED;
     const ledger = Ledger.open(process.env.PI_ORCHESTRATOR_LEDGER);
     ledger.upsertAccount({ id: "anthropic", provider: "anthropic" });
@@ -67,6 +75,7 @@ describe("interactive failover notices", () => {
 
   afterEach(() => {
     delete process.env.PI_ORCHESTRATOR_LEDGER;
+    delete process.env.PI_ORCHESTRATOR_CONFIG;
     rmSync(dir, { recursive: true, force: true });
   });
 

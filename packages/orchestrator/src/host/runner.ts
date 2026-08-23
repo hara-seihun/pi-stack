@@ -1,9 +1,10 @@
 import type { Ledger } from "../ledger/ledger.js";
 import {
+  type CooldownPolicy,
   CREDENTIAL_COOLDOWN_MS,
   isCredentialError,
   isRateLimitError,
-  rateLimitCooldownMs,
+  uniformCooldown,
 } from "../rate-limit.js";
 import type { HostEvents, HostManager, HostRunResult, LaunchSpec } from "./types.js";
 
@@ -35,6 +36,9 @@ export interface RunnerConfig {
   /** How long the polite abort gets before the session is torn down. A stall
    * inside a provider call never returns, so asking is not enough. */
   readonly stallKillGraceMs?: number;
+  /** How long a rate-limited account sits out, per provider family. Absent,
+   * every family is treated as plan-metered. */
+  readonly cooldown?: CooldownPolicy;
 }
 
 const PROGRESS_TIMEOUT_MS = 20 * 60_000;
@@ -171,7 +175,9 @@ export class Runner implements HostEvents {
     // broker moves the task's next run to a sibling account instead of
     // burning the breaker window on the same dead meter.
     if (result.state === "error" && isRateLimitError(detail)) {
-      this.ledger.setAccountCooldown(run.accountId, at + rateLimitCooldownMs(detail));
+      const family = this.ledger.accounts().find((a) => a.id === run.accountId)?.provider;
+      const cooldown = this.cfg.cooldown ?? uniformCooldown;
+      this.ledger.setAccountCooldown(run.accountId, at + cooldown(family, detail));
     }
   }
 

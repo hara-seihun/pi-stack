@@ -3,6 +3,7 @@ import { homedir } from "node:os";
 import { join } from "node:path";
 import type { BrokerConfig, ModelCandidate } from "./broker/broker.js";
 import type { MeterSpec } from "./calibrator/types.js";
+import { type CooldownPolicy, rateLimitCooldownMs } from "./rate-limit.js";
 import { TIERS, type Tier } from "./tasks/types.js";
 
 /**
@@ -37,6 +38,16 @@ export interface ProviderConfig {
    * that number here and skips calibration entirely — it is the answer, not
    * a bootstrap floor or a ceiling on a measurement. */
   readonly sessionCapacity?: number;
+  /** How long an account of this family sits out a rate-limit error that
+   * named no window.
+   *
+   * Plan-metered families want the long default: their unnamed 429 means an
+   * empty window. A family that throttles bursts instead is out for seconds
+   * (NVIDIA NIM's free tier answered again 2.6s and 5.1s after a 429, and its
+   * worst observed stretch cleared inside 15s), so the default would bench a
+   * healthy account for two orders of magnitude longer than the condition
+   * lasts. Such a family declares its own class here. */
+  readonly throttleCooldownMs?: number;
 }
 
 export interface OrchestratorConfig {
@@ -68,6 +79,12 @@ export function loadConfig(path = defaultConfigPath()): OrchestratorConfig {
     }
   }
   for (const [name, provider] of Object.entries(cfg.providers)) {
+    if (
+      provider.throttleCooldownMs !== undefined &&
+      (!Number.isFinite(provider.throttleCooldownMs) || provider.throttleCooldownMs < 0)
+    ) {
+      throw new Error(`config: provider ${name} throttleCooldownMs must be a non-negative number`);
+    }
     if (provider.sessionCapacity !== undefined) {
       if (!Number.isInteger(provider.sessionCapacity) || provider.sessionCapacity < 1) {
         throw new Error(`config: provider ${name} sessionCapacity must be a positive integer`);
@@ -82,6 +99,17 @@ export function loadConfig(path = defaultConfigPath()): OrchestratorConfig {
     }
   }
   return cfg;
+}
+
+/** Every surface that cools an account down asks this: the ledger says which
+ * family the account belongs to, config says what that family's rate limits
+ * are made of. */
+export function cooldownPolicy(cfg: OrchestratorConfig): CooldownPolicy {
+  return (family, message) =>
+    rateLimitCooldownMs(
+      message,
+      family === undefined ? undefined : cfg.providers[family]?.throttleCooldownMs,
+    );
 }
 
 /** Maps a logged `model:component` usage class onto its cost class. */

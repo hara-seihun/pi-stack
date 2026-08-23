@@ -405,6 +405,29 @@ That number is the operator saying how much concurrency to buy, which is the
 only quantity that exists here, and it is deliberately not expressible for a
 metered family, where the answer is measured rather than chosen.
 
+A family can also be limited by **rate** rather than by any allowance, and
+then a 429 means something different. The default cooldown for a rate-limit
+error that named no window is ten minutes, which fits a plan-metered family:
+its unnamed 429 usually means some window is empty and the next minute will
+not refill it. A burst-throttled endpoint is out for seconds — NVIDIA NIM's
+free tier answered again 2.6s and 5.1s after a 429, with the worst observed
+stretch clearing inside 15s — so ten minutes would bench a healthy account for
+two orders of magnitude longer than the condition lasted, and a single busy
+moment would cost the fleet the account for the rest of the wave. Such a
+family declares `throttleCooldownMs`, and every surface that cools an account
+down (runner classification, interactive failover) resolves the error against
+the family the ledger says the account belongs to. A **named** window still
+wins: a provider saying "weekly" is reporting an empty plan whatever its
+ordinary 429s mean.
+
+Rate-limited families want their concurrency measured the same way, by
+watching the 429 rate climb with session count rather than by trusting a
+published number. NVIDIA NIM on Kimi K3 took two concurrent sessions with no
+429 at all, three at a 30% 429 rate, and five at 47%; pi's own retry (three
+attempts, 2s/4s/8s) absorbs the throttles it does hit, so `sessionCapacity`
+is set where the endpoint stops answering cleanly rather than where it stops
+answering at all.
+
 A quotient below one means a duty cycle, not a shutdown. An account whose
 single session burns faster than its plan sustains can still afford to run
 part of the time, so it runs exactly one session whenever its window is spent
