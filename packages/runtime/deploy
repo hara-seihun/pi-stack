@@ -120,6 +120,7 @@ for user_home in "$HOME" /home/orchestrator; do
     { echo "$user did not take the shared model catalog" >&2; exit 1; }
 done
 "$HOME/.local/bin/pi" --list-models openrouter | grep -q 'stealth/ox-alpha'
+"$HOME/.local/bin/pi" --list-models nvidia | grep -q 'moonshotai/kimi-k3'
 
 # The MCP adapter is an npm package, and the fleet user has no pi CLI to
 # install one for itself, so this deploy installs it at the version the
