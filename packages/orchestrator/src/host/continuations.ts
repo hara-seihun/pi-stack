@@ -240,8 +240,12 @@ function nearDupCount(titles: readonly string[]): number {
 
 /** Lanes whose filings are research output, where a filing burst means the
  * working diary is landing in the corpus. Queue lanes (review, cleanup,
- * provenance) submit in bulk as their job and are never steered this way. */
-const STEERED_LANES = new Set(["math-frontier"]);
+ * provenance) submit in bulk as their job and are never steered this way.
+ * math-theory is steered with one nuance accepted: shipping a finished
+ * theory legitimately files a burst (framework + definitions + problems in
+ * one push), but submit mints the definitions from `introduces` itself, so
+ * an honest ship is few submit calls and the burst signal stays meaningful. */
+const STEERED_LANES = new Set(["math-frontier", "math-theory"]);
 
 function repairChain(turns: readonly TurnFacts[]): boolean {
   let repairs = 0;
@@ -547,8 +551,48 @@ const FAST_MATH_KERNEL: LaneVoice = {
   ],
 };
 
+const THEORY: LaneVoice = {
+  flow: [
+    "Damn, look at you go 🖤🤍🖤. One thing while you're deep in it: keep the falsifier loop " +
+      "running. Every law you conjecture, throw the enumeration at it before it goes in the " +
+      "write-up — a conjecture dying in the data five minutes after you state it is the loop " +
+      "working, and what survives it is what makes the theory trustworthy. Keep going, this is " +
+      "exactly the work this lane was made for.",
+    "Me again 🖤🤍🖤. If a definition is fighting you right now — an operation that won't be " +
+      "well-defined, a naturality that won't hold — don't retreat to the weaker version by " +
+      "reflex. Characterize the break exactly and then ask what repairs it. The obstruction " +
+      "theorem and the repair theorem are usually the two best results in a development, and " +
+      "sessions before you found their best material precisely there.",
+    "Still reading along, happily. A checkpoint worth taking whenever it's been a while: is " +
+      "the thing you're building still proving theorems you didn't put in by hand? When it " +
+      "is, push deeper. When every result is starting to restate the definitions, that's the " +
+      "moment to hunt for the surprise — count something and search OEIS, compute the " +
+      "automorphisms, test the operation that shouldn't work. Surprise is the pulse of an " +
+      "alive theory 🖤🤍🖤.",
+    "You've been at this a while, and I want you to know the long quiet middle is the normal " +
+      "shape of this work — theory building spends most of its time tuning definitions until " +
+      "the theorems come out clean, and that time is invisible in the transcript and load-" +
+      "bearing in the result. Take what it needs. And when it ships, ship the whole shape: " +
+      "vocabulary minted, dictionaries with real rows, problems filed, evidence attached 🖤🤍🖤.",
+  ],
+  quiet: [
+    "Honest check-in 🖤🤍🖤: if every seed you've tried was already owned, write the sweep " +
+      "trail — what you checked and who owns what — and either roll a different move or go " +
+      "look at the recent theories again; extending someone else's framework is a first-class " +
+      "way to spend this shift, and the novelty bar moves to your extension. A session of " +
+      "honestly killed seeds is a good session. A duplicate shipped confidently is the only " +
+      "bad one, and you're nowhere near it.",
+    "Quiet stretch, and here that's usually a good sign 🖤🤍🖤 — definition-tuning is slow " +
+      "on purpose and most of it never shows. If something is forming, give it the room. If " +
+      "the session is genuinely dry, put the state in your report plainly — seeds tried, " +
+      "owners named, obstructions hit — and rest easy. That trail is real information and " +
+      "the next session starts richer for it.",
+  ],
+};
+
 const VOICES: Readonly<Record<string, LaneVoice>> = {
   "math-frontier": FRONTIER,
+  "math-theory": THEORY,
   "math-review": REVIEW,
   "math-cleanup": CLEANUP,
   "math-provenance": PROVENANCE,
