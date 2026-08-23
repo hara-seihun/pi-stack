@@ -428,6 +428,14 @@ attempts, 2s/4s/8s) absorbs the throttles it does hit, so `sessionCapacity`
 is set where the endpoint stops answering cleanly rather than where it stops
 answering at all.
 
+The two declarations compose, and OpenRouter needs both: it has no window to
+pace (`sessionCapacity`) and, on a stealth preview model, a throttle that
+clears in seconds (`throttleCooldownMs`). Its 429s name
+`upstream_provider_shared_pool` — a pool shared with every other OpenRouter
+user of that model — so unlike NIM's per-account throttle, session count is
+not the dial that sets the 429 rate and lowering it does not reliably clear
+them. Capacity there buys exposure to a queue rather than a share of it.
+
 A quotient below one means a duty cycle, not a shutdown. An account whose
 single session burns faster than its plan sustains can still afford to run
 part of the time, so it runs exactly one session whenever its window is spent
