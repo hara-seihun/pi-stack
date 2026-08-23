@@ -197,11 +197,17 @@ describe("a failed turn is weather, not the end of the session", () => {
     expect(runner.turnFailed(runId, "429 rate-limited upstream", 7, 1000)).toBeUndefined();
   });
 
-  it("cools the account while the session waits, so nothing new launches into the throttle", () => {
+  it("cools the account while the session waits, so nothing new launches into the failure", () => {
     const { ledger, runId, runner } = throttled();
     runner.turnFailed(runId, "429 rate-limited upstream", 1, 1000);
     expect(ledger.accounts().find((a) => a.id === "anth-1")?.cooldownUntil).toBe(61_000);
     expect(ledger.run(runId)?.state).toBe("running"); // the agent is still alive
+  });
+
+  it("cools it for an ordinary failure too, so a dead provider stops drawing sessions", () => {
+    const { ledger, runId, runner } = throttled();
+    runner.turnFailed(runId, "500: provider is down", 2, 1000);
+    expect(ledger.accounts().find((a) => a.id === "anth-1")?.cooldownUntil).toBe(61_000);
   });
 
   it("rides out a dropped stream on half a minute, whatever the family's rate-limit class", () => {

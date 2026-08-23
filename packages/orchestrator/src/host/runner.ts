@@ -242,12 +242,15 @@ export class Runner implements HostEvents {
     const cooldown = (this.cfg.cooldown ?? uniformCooldown)(family, detail);
     const base = rateLimited ? cooldown : RECOVERY_BASE_MS;
     if (base > RECOVERY_MAX_MS) return undefined;
+    const waitMs = Math.min(base * 2 ** (attempt - 1), RECOVERY_MAX_MS);
     // The session waits, and meanwhile nothing new is launched onto the
     // account: an agent already holding context is the one worth keeping in
-    // the queue, and a fresh launch into a throttled provider is the one
-    // worth not making.
-    if (rateLimited) this.ledger.setAccountCooldown(run.accountId, now + cooldown);
-    return Math.min(base * 2 ** (attempt - 1), RECOVERY_MAX_MS);
+    // the queue, and a fresh launch into a provider that just failed is the
+    // one worth not making. This holds for any failure, not only a throttle —
+    // otherwise a hard-down provider keeps drawing fresh sessions, each of
+    // which spends half an hour discovering the same outage.
+    this.ledger.setAccountCooldown(run.accountId, now + waitMs);
+    return waitMs;
   }
 
   laneDrained(taskId: string, now = Date.now()): boolean {

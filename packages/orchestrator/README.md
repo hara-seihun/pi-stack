@@ -591,8 +591,10 @@ session with an honest note about what broke and what was done about it
 the wait from the family's own cooldown class — that number already answers
 "how long is this condition out for", per family — doubling per consecutive
 failure, capped at ten minutes and six attempts, and the count resets whenever
-a turn lands. The account cools while its session waits, so the throttle stops
-new launches without killing the agent already holding context. Three things
+a turn lands. The account cools for the length of every wait — not only a
+throttle's — so the failure stops new launches without killing the agent
+already holding context, and a provider that is simply down does not draw a
+fresh session every tick to spend half an hour rediscovering it. Three things
 still end the run at once, because waiting for them is waiting for nothing: a
 broken credential, a request that will fail identically next time (`unknown
 model`, a 400), and a limit the provider names in hours — a weekly or monthly
