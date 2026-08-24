@@ -343,6 +343,9 @@ async function runner(ledger: Ledger, args: string[]): Promise<void> {
   // Hosted sessions must never be re-routed by the interactive routing
   // extension: the broker assigned their account.
   process.env.PI_ORCHESTRATOR_ASSIGNED = "1";
+  process.env.PI_BASH_TIMEOUT_MAX_SECONDS = "300";
+  process.env.PI_BASH_FOREGROUND_ONLY = "1";
+  process.env.PI_BASH_TIMEOUT_CONTEXT = "This shared runner has a five-minute ceiling.";
   const { PiHost } = await import("./host/pi-host.js");
   const { DEFAULT_RUNS_ROOT, pruneTranscripts } = await import("./host/transcript.js");
   const { builtinProviders } = await import("@earendil-works/pi-ai/providers/all");
