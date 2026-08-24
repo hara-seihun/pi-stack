@@ -1,0 +1,9 @@
+.DS_Store
+AGENTS.md
+docs/screenshots/
+android/.gradle/
+android/build/
+android/app/build/
+android/local.properties
+server/node_modules/
+*.log

@@ -1,0 +1,80 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+peer_name=${PI_REMOTE_ANDROID_TAILSCALE_NAME:-pixel-7-1}
+state_dir=${XDG_CACHE_HOME:-$HOME/.cache}/pi-remote
+endpoint_file=$state_dir/android-adb-endpoint
+mkdir -p "$state_dir"
+chmod 700 "$state_dir"
+
+connected_endpoint() {
+  adb devices -l | awk '$2 == "device" && $0 ~ /model:Pixel_7/ { print $1; exit }'
+}
+
+verify_endpoint() {
+  local endpoint=$1
+  timeout 5 adb connect "$endpoint" >/dev/null 2>&1 || true
+  [[ $(timeout 5 adb -s "$endpoint" get-state 2>/dev/null || true) == device ]]
+}
+
+endpoint=$(connected_endpoint)
+if [[ -n $endpoint ]] && verify_endpoint "$endpoint"; then
+  printf '%s\n' "$endpoint" > "$endpoint_file"
+  chmod 600 "$endpoint_file"
+  printf '%s\n' "$endpoint"
+  exit 0
+fi
+
+phone_ip=$(tailscale status --json | jq -r --arg peer "$peer_name" '
+  [.Peer[] | select(.Online == true)
+    | select((.DNSName | split(".")[0]) == $peer or .HostName == $peer)
+    | .TailscaleIPs[0]][0] // empty')
+[[ -n $phone_ip ]] || { echo "online Tailscale peer $peer_name not found" >&2; exit 1; }
+
+if [[ -s $endpoint_file ]]; then
+  endpoint=$(<"$endpoint_file")
+  if [[ $endpoint == "$phone_ip:"* ]] && verify_endpoint "$endpoint"; then
+    printf '%s\n' "$endpoint"
+    exit 0
+  fi
+fi
+
+mapfile -t open_ports < <(python3 - "$phone_ip" <<'PY'
+import asyncio
+import sys
+
+host = sys.argv[1]
+
+async def probe(port: int, semaphore: asyncio.Semaphore):
+    async with semaphore:
+        try:
+            _reader, writer = await asyncio.wait_for(asyncio.open_connection(host, port), 0.5)
+            writer.close()
+            await writer.wait_closed()
+            return port
+        except (TimeoutError, OSError, asyncio.TimeoutError):
+            return None
+
+async def main():
+    semaphore = asyncio.Semaphore(128)
+    results = await asyncio.gather(*(probe(port, semaphore) for port in range(30000, 65001)))
+    for port in results:
+        if port is not None:
+            print(port)
+
+asyncio.run(main())
+PY
+)
+
+for port in "${open_ports[@]}"; do
+  endpoint="$phone_ip:$port"
+  if verify_endpoint "$endpoint"; then
+    printf '%s\n' "$endpoint" > "$endpoint_file"
+    chmod 600 "$endpoint_file"
+    printf '%s\n' "$endpoint"
+    exit 0
+  fi
+done
+
+echo "Pixel 7 is online at $phone_ip, but no authorized wireless ADB endpoint was found" >&2
+exit 1

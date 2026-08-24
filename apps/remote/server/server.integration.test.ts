@@ -1,0 +1,1355 @@
+import { afterAll, beforeAll, describe, expect, setDefaultTimeout, test } from "bun:test";
+import { Database } from "bun:sqlite";
+import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, statSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+const BOOSTED_MULTIPLIER = 10;
+
+const root = mkdtempSync(join(tmpdir(), "pi-remote-state-test-"));
+const fakePi = join(root, "fake-pi.py");
+const fakeAudio = join(root, "fake-audio.py");
+const fakeAudioState = join(root, "fake-audio-state.json");
+const fakeLaunch = join(root, "fake-launch.json");
+const fakeRpcLog = join(root, "fake-rpc.jsonl");
+const fakeChildPid = join(root, "fake-child.pid");
+const fakeCrashMarker = join(root, "fake-crash.marker");
+const fakeRestartMarker = join(root, "fake-restart.marker");
+const fakeOrchestratorDb = join(root, "orchestrator.sqlite3");
+const fakeWorkOrchestratorDb = join(root, "work-orchestrator.sqlite3");
+const fakeAgentRuns = join(root, "agent-runs");
+const fakeWorkAgentRuns = join(root, "work-agent-runs");
+const port = 20_000 + Math.floor(Math.random() * 10_000);
+const base = `http://127.0.0.1:${port}`;
+let server: ReturnType<typeof Bun.spawn>;
+setDefaultTimeout(30_000);
+
+async function api(method: string, path: string, body?: unknown) {
+  const response = await fetch(base + path, {
+    method,
+    headers: body === undefined ? undefined : { "content-type": "application/json" },
+    body: body === undefined ? undefined : JSON.stringify(body),
+  });
+  const value = await response.json() as any;
+  return { status: response.status, value };
+}
+
+async function waitFor<T>(read: () => Promise<T>, accept: (value: T) => boolean, timeoutMs = 8_000): Promise<T> {
+  const deadline = Date.now() + timeoutMs;
+  let value!: T;
+  while (Date.now() < deadline) {
+    value = await read();
+    if (accept(value)) return value;
+    await Bun.sleep(50);
+  }
+  throw new Error(`Timed out waiting for state; last value: ${JSON.stringify(value)}`);
+}
+
+async function startServer() {
+  server = Bun.spawn([process.execPath, join(import.meta.dir, "server.ts")], {
+    cwd: import.meta.dir,
+    stdout: "ignore",
+    stderr: "pipe",
+    env: {
+      ...process.env,
+      PI_BIN: fakePi,
+      PI_REMOTE_AUDIO_BIN: fakeAudio,
+      PI_FAKE_AUDIO_STATE: fakeAudioState,
+      PI_REMOTE_DATA: join(root, "data"),
+      PI_REMOTE_PORT: String(port),
+      PI_AGENT_DIR: join(root, "agent"),
+      PI_REMOTE_PROMPT_ACK_TIMEOUT_MS: "150",
+      PI_REMOTE_STATE_RECONCILE_MS: "50",
+      PI_REMOTE_INGESTION: join(root, "ingestion"),
+      PI_FAKE_LAUNCH: fakeLaunch,
+      PI_FAKE_RPC_LOG: fakeRpcLog,
+      PI_FAKE_CHILD_PID: fakeChildPid,
+      PI_FAKE_CRASH_MARKER: fakeCrashMarker,
+      PI_FAKE_RESTART_MARKER: fakeRestartMarker,
+      PI_REMOTE_ORCHESTRATOR_DB: fakeOrchestratorDb,
+      PI_REMOTE_ORCHESTRATOR_MODULE: join(import.meta.dir, "test-integration"),
+      PI_ORCHESTRATOR_AUTH: join(root, "agent", "auth.json"),
+      PI_REMOTE_WORK_ORCHESTRATOR_DB: fakeWorkOrchestratorDb,
+      PI_REMOTE_WORK_ORCHESTRATOR_RUNS: fakeWorkAgentRuns,
+      PI_REMOTE_ORCHESTRATOR_RUNS: fakeAgentRuns,
+      PI_REMOTE_LOCAL_AGENT_MAX_AGE_MS: "0",
+      PI_REMOTE_WORK_AGENT_MAX_AGE_MS: "1000",
+      PI_REMOTE_PRIVATE_ID: "private",
+      PI_REMOTE_PRIVATE_NAME: "Private",
+      PI_REMOTE_PRIVATE_DIR: join(root, "private"),
+      PI_REMOTE_DESTINATIONS: "work,personal,home",
+      PI_REMOTE_TARGETS: JSON.stringify([
+        { id: "converge", name: "Cloud", ssh: "cloud-host", home: root, cwd: join(root, "cloud") },
+      ]),
+      PI_REMOTE_WORKSPACES: JSON.stringify([
+        { id: "home", name: "Home", path: join(root, "home") },
+        { id: "private", name: "Private", path: join(root, "private") },
+        { id: "pi-remote", name: "Pi Remote", path: join(import.meta.dir, "..") },
+      ]),
+      PI_REMOTE_THREAD_DESTINATIONS: JSON.stringify([
+        { id: "work", label: "WORK", icon: "converge", accent: "#3574ad", workspaceId: "home", executionTarget: "converge", thinkingLevel: "high", models: [], defaultModel: "sol" },
+        { id: "personal", label: "PERSONAL", icon: "personal", accent: "#a371f7", workspaceId: "private", executionTarget: "local", thinkingLevel: "low", models: ["sol", "opus", "fable"], defaultModel: "fable" },
+        { id: "home", label: "HOME", icon: "house", accent: "#3fb950", workspaceId: "home", executionTarget: "local", thinkingLevel: "high", models: ["sol", "fable", "opus"], defaultModel: "opus" },
+      ]),
+      PI_REMOTE_WORK_AGENT_NAME: "Cloud",
+    },
+  });
+  await waitFor(() => fetch(base + "/v1/health").then((response) => response.ok).catch(() => false), Boolean);
+}
+
+beforeAll(async () => {
+  await Bun.write(fakePi, `#!/usr/bin/env python3
+import json, os, subprocess, sys, time
+provider = sys.argv[sys.argv.index('--provider') + 1] if '--provider' in sys.argv else 'anthropic'
+model_id = sys.argv[sys.argv.index('--model') + 1] if '--model' in sys.argv else 'claude-fable-5'
+thinking_level = sys.argv[sys.argv.index('--thinking') + 1] if '--thinking' in sys.argv else 'off'
+with open(os.environ['PI_FAKE_LAUNCH'], 'w') as launch:
+ json.dump({'argv': sys.argv, 'pid': os.getpid(), 'sessionId': os.environ.get('PI_REMOTE_SESSION_ID'), 'serverUrl': os.environ.get('PI_REMOTE_SERVER_URL'), 'renameScript': os.environ.get('PI_REMOTE_RENAME_SCRIPT'), 'serviceTierFile': os.environ.get('PI_REMOTE_SERVICE_TIER_FILE'), 'executionTarget': os.environ.get('PI_REMOTE_EXECUTION_TARGET'), 'workSsh': os.environ.get('PI_REMOTE_WORK_SSH'), 'workCwd': os.environ.get('PI_REMOTE_WORK_CWD'), 'agentDir': os.environ.get('PI_CODING_AGENT_DIR'), 'offline': os.environ.get('PI_OFFLINE')}, launch)
+streaming = False
+compacting = False
+last = ''
+session_name = None
+steering = []
+follow_up = []
+first_state = True
+child = None
+def out(value):
+ print(json.dumps(value), flush=True)
+for line in sys.stdin:
+ try: request = json.loads(line)
+ except Exception: continue
+ with open(os.environ['PI_FAKE_RPC_LOG'], 'a') as rpc_log:
+  rpc_log.write(json.dumps({'sessionId': os.environ.get('PI_REMOTE_SESSION_ID'), **request}) + '\\n')
+ kind = request.get('type')
+ rid = request.get('id')
+ if kind == 'get_state':
+  if first_state:
+   first_state = False
+   time.sleep(0.12)
+  out({'type':'response','id':rid,'command':'get_state','success':True,'data':{'isStreaming':streaming,'isCompacting':compacting,'pendingMessageCount':len(steering)+len(follow_up),'messageCount':0,'thinkingLevel':thinking_level,'sessionFile':None,'sessionName':session_name,'model':{'provider':provider,'id':model_id,'name':model_id}}})
+ elif kind == 'get_available_models':
+  out({'type':'response','id':rid,'command':kind,'success':True,'data':{'models':[
+   {'provider':'openai-codex-2','id':'gpt-5.6-sol','name':'GPT-5.6 Sol duplicate'},
+   {'provider':'openai-codex','id':'gpt-5.6-sol','name':'GPT-5.6 Sol'},
+   {'provider':'openai-codex','id':'gpt-5.6-luna','name':'GPT-5.6 Luna'},
+   {'provider':'openai-codex','id':'gpt-5.5','name':'GPT-5.5'},
+   {'provider':'anthropic','id':'claude-fable-5','name':'Claude Fable 5'},
+   {'provider':'anthropic-2','id':'claude-fable-5','name':'Claude Fable 5 (#2)'},
+   {'provider':'anthropic-3','id':'claude-fable-5','name':'Claude Fable 5 (#3)'},
+   {'provider':'anthropic','id':'claude-opus-5','name':'Claude Opus 5'},
+   {'provider':'anthropic-2','id':'claude-opus-5','name':'Claude Opus 5 (#2)'},
+   {'provider':'anthropic-3','id':'claude-opus-5','name':'Claude Opus 5 (#3)'},
+   {'provider':'anthropic','id':'claude-sonnet-4','name':'Claude Sonnet 4'},
+   {'provider':'anthropic-2','id':'claude-sonnet-4','name':'Claude Sonnet 4 (#2)'},
+   {'provider':'anthropic-3','id':'claude-sonnet-4','name':'Claude Sonnet 4 (#3)'}
+  ]}})
+ elif kind == 'get_available_thinking_levels':
+  out({'type':'response','id':rid,'command':kind,'success':True,'data':{'levels':['off','low','high']}})
+ elif kind == 'set_model':
+  provider = request.get('provider', provider); model_id = request.get('modelId', model_id)
+  out({'type':'response','id':rid,'command':kind,'success':True,'data':{'provider':provider,'id':model_id,'name':model_id}})
+ elif kind == 'set_thinking_level':
+  thinking_level = request.get('level', thinking_level)
+  out({'type':'response','id':rid,'command':kind,'success':True})
+ elif kind == 'set_session_name':
+  session_name = request.get('name')
+  out({'type':'response','id':rid,'command':'set_session_name','success':True})
+ elif kind == 'prompt':
+  last = request.get('message','')
+  if last == 'retry-prompt':
+   out({'type':'response','id':rid,'command':'prompt','success':False,'error':'simulated rejection'})
+   continue
+  streaming = True
+  if last == 'slow-ack': time.sleep(0.35)
+  if last != 'ack-timeout': out({'type':'response','id':rid,'command':'prompt','success':True})
+  if last == 'slow-ack':
+   out({'type':'agent_start'})
+   out({'type':'message_end','message':{'role':'assistant','content':[{'type':'text','text':'slow ack done'}]}})
+   streaming = False
+   out({'type':'agent_settled'})
+  elif last == 'delayed-start':
+   time.sleep(0.35)
+   out({'type':'agent_start'})
+   out({'type':'message_end','message':{'role':'assistant','content':[{'type':'text','text':'started after reconcile'}]}})
+   streaming = False
+   out({'type':'agent_settled'})
+  elif last == 'stale-settled':
+   out({'type':'agent_settled'})
+   time.sleep(0.2)
+   out({'type':'agent_start'})
+   time.sleep(0.2)
+   out({'type':'message_end','message':{'role':'assistant','content':[{'type':'text','text':'done once'}]}})
+   streaming = False
+   out({'type':'agent_settled'})
+  else:
+   out({'type':'agent_start'})
+   if last == 'release-later':
+    time.sleep(0.35)
+    out({'type':'message_end','message':{'role':'assistant','content':[{'type':'text','text':'current finished'}]}})
+    streaming = False
+    out({'type':'agent_settled'})
+   elif last == 'later-run' or '<new_user_message>\\nlater-run\\n</new_user_message>' in last:
+    out({'type':'message_end','message':{'role':'assistant','content':[{'type':'text','text':'later ran'}]}})
+    streaming = False
+    out({'type':'agent_settled'})
+   elif last == 'compact':
+    compacting = True
+    out({'type':'compaction_start','reason':'threshold'})
+    time.sleep(0.5)
+    compacting = False
+    out({'type':'compaction_end','reason':'threshold','result':{'summary':'done'},'aborted':False,'willRetry':False})
+    out({'type':'message_end','message':{'role':'assistant','content':[{'type':'text','text':'done'}]}})
+    streaming = False
+    out({'type':'agent_settled'})
+   elif last == 'model-refusal':
+    out({'type':'message_end','message':{'role':'assistant','content':[{'type':'thinking','thinking':''}],'stopReason':'error','rawStopReason':'refusal','errorMessage':'Blocked by the provider policy'}})
+    streaming = False
+    out({'type':'agent_settled'})
+   elif last == 'account-failover':
+    out({'type':'message_end','message':{'role':'assistant','content':[],'stopReason':'error','errorMessage':'Codex error: The usage limit has been reached'}})
+    out({'type':'message_end','message':{'role':'assistant','content':[{'type':'text','text':'continued on next account'}],'stopReason':'stop'}})
+    streaming = False
+    out({'type':'agent_settled'})
+   elif 'restart-once' in last:
+    if not os.path.exists(os.environ['PI_FAKE_RESTART_MARKER']):
+     with open(os.environ['PI_FAKE_RESTART_MARKER'], 'w') as marker: marker.write('started')
+     time.sleep(60)
+    out({'type':'message_end','message':{'role':'assistant','content':[{'type':'text','text':'recovered after supervisor restart'}]}})
+    streaming = False
+    out({'type':'agent_settled'})
+   elif 'crash-once' in last:
+    if not os.path.exists(os.environ['PI_FAKE_CRASH_MARKER']):
+     with open(os.environ['PI_FAKE_CRASH_MARKER'], 'w') as marker: marker.write('crashed')
+     os._exit(17)
+    out({'type':'message_end','message':{'role':'assistant','content':[{'type':'text','text':'recovered after disconnect'}]}})
+    streaming = False
+    out({'type':'agent_settled'})
+   elif last == 'lease-exit':
+    time.sleep(0.3)
+    os._exit(143)
+   elif last == 'group-child':
+    child = subprocess.Popen(['sleep', '60'])
+    with open(os.environ['PI_FAKE_CHILD_PID'], 'w') as child_pid:
+     child_pid.write(str(child.pid))
+    out({'type':'tool_execution_start','toolCallId':'bash-1','toolName':'bash','args':{'command':'sleep 60'}})
+   elif last == 'ack-timeout':
+    time.sleep(0.4)
+    out({'type':'message_end','message':{'role':'assistant','content':[{'type':'text','text':'ack was lost'}]}})
+    streaming = False
+    out({'type':'agent_settled'})
+ elif kind == 'steer':
+  steering.append(request.get('message',''))
+  out({'type':'queue_update','steering':steering,'followUp':follow_up})
+  out({'type':'response','id':rid,'command':'steer','success':True})
+ elif kind == 'follow_up':
+  follow_up.append(request.get('message',''))
+  out({'type':'queue_update','steering':steering,'followUp':follow_up})
+  out({'type':'response','id':rid,'command':'follow_up','success':True})
+ elif kind == 'abort':
+  if last == 'abort-refuse':
+   out({'type':'response','id':rid,'command':'abort','success':False,'error':'simulated refusal'})
+  else:
+   streaming = False
+   compacting = False
+   if child is not None:
+    child.terminate()
+    try: child.wait(timeout=2)
+    except subprocess.TimeoutExpired: child.kill()
+    child = None
+   if steering or follow_up:
+    time.sleep(0.3)
+    out({'type':'message_end','message':{'role':'assistant','content':[{'type':'text','text':'cancelled queue executed'}]}})
+   out({'type':'response','id':rid,'command':'abort','success':True})
+   steering.clear()
+   follow_up.clear()
+   out({'type':'queue_update','steering':steering,'followUp':follow_up})
+ else:
+  out({'type':'response','id':rid,'command':kind,'success':True,'data':{}})
+`);
+  chmodSync(fakePi, 0o700);
+  await Bun.write(fakeAudio, `#!/usr/bin/env python3
+import json, os, sys
+state_path = os.environ['PI_FAKE_AUDIO_STATE']
+action = sys.argv[1]
+def write(value):
+ with open(state_path, 'w') as state: json.dump(value, state)
+ print(json.dumps(value))
+if action == 'status':
+ if os.path.exists(state_path):
+  with open(state_path) as state: print(state.read())
+ else: print(json.dumps({'status':'stopped'}))
+elif action == 'thunder': write({'kind':'thunder','status':'playing'})
+elif action == 'stop': write({'status':'stopped'})
+else: sys.exit(2)
+`);
+  chmodSync(fakeAudio, 0o700);
+  // Both ledgers are pi-orchestrator's: every agent host runs the same
+  // orchestrator, and the work host below is read exactly like this one.
+  const orchestrator = new Database(fakeOrchestratorDb, { create: true, strict: true });
+  orchestrator.exec(`
+    CREATE TABLE run(id TEXT PRIMARY KEY,task_id TEXT NOT NULL,tier TEXT,account_id TEXT,state TEXT NOT NULL,
+      started_at INTEGER NOT NULL DEFAULT 0,ended_at INTEGER,detail TEXT,productive INTEGER,complete INTEGER,
+      provider TEXT,model TEXT,thinking TEXT);
+    CREATE TABLE control(key TEXT PRIMARY KEY,value TEXT NOT NULL);
+    CREATE TABLE account(id TEXT PRIMARY KEY,provider TEXT NOT NULL,label TEXT,access_until INTEGER,
+      created_at INTEGER NOT NULL DEFAULT 0,cooldown_until INTEGER,last_bound_at INTEGER,
+      fleet_credentialed INTEGER NOT NULL DEFAULT 0);
+    INSERT INTO account(id,provider) VALUES('openai-codex','openai-codex'),('anthropic','anthropic');
+  `);
+  const insertRun = orchestrator.query("INSERT INTO run(id,task_id,state,model) VALUES(?,?,?,?)");
+  for (let index = 0; index < 122; index++) insertRun.run(`sol-${index}`, "sol-task", "running", "openai-codex/gpt-5.6-sol");
+  insertRun.run("opus-mixed", "sol-task", "running", "anthropic/claude-opus-5");
+  for (let index = 0; index < 45; index++) insertRun.run(`luna-${index}`, "luna-task", "running", "openai-codex/gpt-5.6-luna");
+  for (let index = 0; index < 4; index++) insertRun.run(`pro-${index}`, "pro-task", "running", "chatgpt-pro/gpt-5-6-pro-literal");
+  insertRun.run("grok", "grok-task", "running", "cursor/grok-4.6");
+  insertRun.run("finished", "luna-task", "done", "openai-codex/gpt-5.6-luna");
+  orchestrator.query(`UPDATE run SET started_at=1000,provider='openai-codex-3',thinking='xhigh'
+    WHERE id='sol-0'`).run();
+  orchestrator.query(`UPDATE run SET started_at=500,ended_at=900,provider='openai-codex-2',thinking='max',
+    detail='processed one work unit',productive=1,complete=1 WHERE id='finished'`).run();
+  orchestrator.close();
+  mkdirSync(join(fakeAgentRuns, "sol-0"), { recursive: true });
+  writeFileSync(join(fakeAgentRuns, "sol-0", "events.jsonl"), [
+    { seq: 1, time: "2026-08-18T00:00:00.000Z", type: "user", payload: { text: "claim one unit" } },
+    { seq: 2, time: "2026-08-18T00:00:02.000Z", type: "tool_start", payload: { toolCallId: "t1", name: "bash", args: { command: "ls" } } },
+    { seq: 3, time: "2026-08-18T00:00:03.000Z", type: "tool_end", payload: { toolCallId: "t1", name: "bash", output: "ledger.sqlite3", error: false } },
+  ].map((event) => JSON.stringify(event)).join("\n") + "\n");
+  writeFileSync(join(fakeAgentRuns, "sol-0", "live.json"), JSON.stringify({ activity: "THINKING", liveText: "", liveThinking: "weighing options" }));
+  const workOrchestrator = new Database(fakeWorkOrchestratorDb, { create: true, strict: true });
+  workOrchestrator.exec(`
+    CREATE TABLE run(id TEXT PRIMARY KEY,task_id TEXT NOT NULL,state TEXT NOT NULL,
+      started_at INTEGER NOT NULL DEFAULT 0,ended_at INTEGER,detail TEXT,productive INTEGER,
+      provider TEXT,model TEXT,thinking TEXT);
+  `);
+  const insertWorkRun = workOrchestrator.query("INSERT INTO run(id,task_id,state,started_at,provider,model,thinking) VALUES(?,?,?,?,?,?,?)");
+  for (let index = 0; index < 6; index++) {
+    insertWorkRun.run(`work-sol-${index}`, "repair-lane", "running", 1000, "openai-codex-4", "openai-codex/gpt-5.6-sol", "high");
+  }
+  workOrchestrator.close();
+  mkdirSync(join(fakeWorkAgentRuns, "work-sol-0"), { recursive: true });
+  writeFileSync(join(fakeWorkAgentRuns, "work-sol-0", "events.jsonl"),
+    `${JSON.stringify({ seq: 1, time: "2026-08-21T00:00:00.000Z", type: "user", payload: { text: "repair the lane" } })}\n`);
+  writeFileSync(join(fakeWorkAgentRuns, "work-sol-0", "live.json"),
+    JSON.stringify({ activity: "TOOL", liveText: "", liveThinking: "" }));
+  for (const directory of [join(root, "home"), join(root, "private"), join(root, "cloud")]) {
+    mkdirSync(directory, { recursive: true });
+  }
+  // Shared Codex custody fixture: the ledger above registers openai-codex,
+  // and this central auth file makes exactly one voice account eligible.
+  mkdirSync(join(root, "agent"), { recursive: true });
+  writeFileSync(join(root, "agent", "auth.json"), JSON.stringify({
+    "openai-codex": { type: "oauth", access: "a", refresh: "r", expires: Date.now() + 3_600_000, accountId: "acct" },
+  }));
+  await startServer();
+});
+
+afterAll(async () => {
+  server?.kill();
+  await server?.exited.catch(() => {});
+  rmSync(root, { recursive: true, force: true });
+});
+
+async function createThread(destination = "home", model?: string) {
+  const created = await api("POST", "/v1/sessions", { requestId: crypto.randomUUID(), destination, model });
+  expect(created.status).toBe(201);
+  const id = created.value.session.id as string;
+  await waitFor(
+    () => api("GET", "/v1/sessions").then((result) => result.value.sessions.find((session: any) => session.id === id)),
+    (session) => session?.state === "IDLE",
+  );
+  return id;
+}
+
+describe("web and supervisor integration", () => {
+  test("toggles the machine thunder ambience", async () => {
+    const initial = await api("GET", "/v1/audio/thunder");
+    expect(initial).toMatchObject({ status: 200, value: { thunder: { active: false, status: "stopped" } } });
+
+    const started = await api("POST", "/v1/audio/thunder/toggle", {});
+    expect(started).toMatchObject({ status: 200, value: { thunder: { active: true, status: "playing" } } });
+    expect((await api("GET", "/v1/audio/thunder")).value.thunder.active).toBe(true);
+
+    const stopped = await api("POST", "/v1/audio/thunder/toggle", {});
+    expect(stopped).toMatchObject({ status: 200, value: { thunder: { active: false, status: "stopped" } } });
+  });
+
+  test("cycles a provider's allowance through off, green, blue, and a red halt", async () => {
+    const initial = await api("GET", "/v1/governor-controls");
+    expect(initial.status).toBe(200);
+    expect(initial.value.governors).toMatchObject({
+      openai: { state: "off", boosted: false, multiplier: 1 },
+      anthropic: { state: "off", boosted: false, multiplier: 1 },
+    });
+
+    // The cycle itself comes from the orchestrator package (BOOST_CYCLE), so
+    // this asserts the drawer walks those states rather than a second copy.
+    const green = await api("POST", "/v1/governor-controls/openai/toggle", {});
+    expect(green.status).toBe(200);
+    expect(green.value.governors.openai).toMatchObject({ state: "green", boosted: true, multiplier: 3 });
+    // Anthropic is a separate family and is unaffected.
+    expect(green.value.governors.anthropic).toMatchObject({ state: "off", boosted: false, multiplier: 1 });
+
+    const blue = await api("POST", "/v1/governor-controls/openai/toggle", {});
+    expect(blue.value.governors.openai).toMatchObject({ state: "blue", boosted: true, multiplier: BOOSTED_MULTIPLIER });
+
+    // Red is the halt: multiplier 0, which the orchestrator's broker reads as
+    // "launch nothing new for this family".
+    const red = await api("POST", "/v1/governor-controls/openai/toggle", {});
+    expect(red.value.governors.openai).toMatchObject({ state: "red", boosted: false, multiplier: 0 });
+
+    // The orchestrator's own ledger row is the only state: the halt is
+    // durable and visible to the controller, not supervisor memory.
+    const ledger = new Database(fakeOrchestratorDb, { readonly: true, strict: true });
+    expect(ledger.query("SELECT value FROM control WHERE key='boost:openai-codex'").get()).toMatchObject({ value: "0" });
+    ledger.close();
+
+    expect((await api("GET", "/v1/sessions")).value.governors.openai).toMatchObject({ state: "red", multiplier: 0 });
+    const restored = await api("POST", "/v1/governor-controls/openai/toggle", {});
+    expect(restored.value.governors.openai).toMatchObject({ state: "off", boosted: false, multiplier: 1 });
+  });
+
+  test("voice pool is the orchestrator ledger intersected with auth custody", async () => {
+    const status = await api("GET", "/v1/voice");
+    expect(status.status).toBe(200);
+    expect(status.value).toEqual({ enabled: true, accountCount: 1, model: "gpt-live-1-codex", voice: "cove" });
+  });
+
+  test("separates work and this-machine active model counts", async () => {
+    const listed = await api("GET", "/v1/sessions");
+    expect(listed.value.agents).toMatchObject({
+      total: 179,
+      sources: { piRemote: 0, orchestrator: 179, localOrchestrator: 173, workOrchestrator: 6 },
+      groups: [
+        { key: "pi-remote", label: "REMOTE", count: 0 },
+        { key: "orchestrator", label: "ORCH", count: 179 },
+        { key: "sol", label: "SOL", count: 128 },
+        { key: "luna", label: "LUNA", count: 45 },
+        { key: "pro", label: "PRO", count: 4 },
+        { key: "opus", label: "OPUS", count: 1 },
+        { key: "grok", label: "GROK", count: 1 },
+      ],
+      models: [
+        { key: "sol", label: "SOL", count: 128 },
+        { key: "luna", label: "LUNA", count: 45 },
+        { key: "pro", label: "PRO", count: 4 },
+        { key: "opus", label: "OPUS", count: 1 },
+        { key: "grok", label: "GROK", count: 1 },
+      ],
+      locations: [
+        { key: "work", label: "WORK", name: "Cloud", total: 6, models: [{ key: "sol", label: "SOL", count: 6 }], error: null },
+        { key: "local", label: "THIS MACHINE", name: "This machine", total: 173, models: [
+          { key: "sol", label: "SOL", count: 122 },
+          { key: "luna", label: "LUNA", count: 45 },
+          { key: "pro", label: "PRO", count: 4 },
+          { key: "opus", label: "OPUS", count: 1 },
+          { key: "grok", label: "GROK", count: 1 },
+        ], error: null },
+      ],
+    });
+  });
+
+  test("lists every host's working agents for observation, each naming its host", async () => {
+    const listed = await api("GET", "/v1/agents/runs");
+    expect(listed.status).toBe(200);
+    expect(listed.value.running).toBe(179);
+    expect(listed.value.hosts).toEqual([
+      { key: "local", label: "THIS MACHINE", name: "This machine", running: 173, updatedAt: expect.any(String), error: null },
+      { key: "work", label: "WORK", name: "Cloud", running: 6, updatedAt: expect.any(String), error: null },
+    ]);
+    const observable = listed.value.runs.find((run: any) => run.id === "local:sol-0");
+    expect(observable).toMatchObject({
+      host: "local", hostName: "This machine", runId: "sol-0",
+      taskId: "sol-task", status: "running", label: "SOL", provider: "openai-codex-3",
+      thinking: "xhigh", observable: true, activity: "THINKING",
+    });
+    // The work machine's own orchestrator agents are in the same list, told
+    // apart by their host rather than kept on a separate screen.
+    expect(listed.value.runs.find((run: any) => run.id === "work:work-sol-0")).toMatchObject({
+      host: "work", hostLabel: "WORK", hostName: "Cloud", runId: "work-sol-0",
+      taskId: "repair-lane", status: "running", provider: "openai-codex-4", observable: true, activity: "TOOL",
+    });
+    expect(listed.value.runs.filter((run: any) => run.host === "work").length).toBe(6);
+    // Settled runs never appear in the list, but stay observable by id so a run
+    // that finishes while it is open does not vanish from the client.
+    expect(listed.value.runs.every((run: any) => run.status === "running")).toBe(true);
+    expect(listed.value.runs.find((run: any) => run.runId === "finished")).toBeUndefined();
+    const settled = await api("GET", "/v1/agents/runs/local:finished/events");
+    expect(settled.status).toBe(200);
+    expect(settled.value.run).toMatchObject({ id: "local:finished", status: "done", summary: "processed one work unit" });
+  });
+
+  test("streams one agent's transcript incrementally without any control surface", async () => {
+    const first = await api("GET", "/v1/agents/runs/local:sol-0/events");
+    expect(first.status).toBe(200);
+    expect(first.value.events.map((event: any) => event.type)).toEqual(["user", "tool_start", "tool_end"]);
+    expect(first.value.events[0].text).toBe("claim one unit");
+    expect(first.value.events[2]).toMatchObject({ toolCallId: "t1", name: "bash", output: "ledger.sqlite3", error: false });
+    expect(first.value.liveThinking).toBe("weighing options");
+    expect(first.value.run).toMatchObject({ id: "local:sol-0", taskId: "sol-task", activity: "THINKING" });
+
+    // Watching a live agent asks its host to publish partial output.
+    expect(Date.now() - statSync(join(fakeAgentRuns, "sol-0", "watch")).mtimeMs).toBeLessThan(10_000);
+
+    expect((await api("GET", "/v1/agents/runs/local:sol-0/events?after=3")).value.events).toEqual([]);
+    expect((await api("GET", "/v1/agents/runs/local:missing-run/events")).status).toBe(404);
+    expect((await api("GET", "/v1/agents/runs/local:%2E%2E%2Fescape/events")).status).toBe(400);
+    expect((await api("GET", "/v1/agents/runs/nowhere:sol-0/events")).status).toBe(400);
+    expect((await api("GET", "/v1/agents/runs/sol-0/events")).status).toBe(400);
+    expect((await api("POST", "/v1/agents/runs/local:sol-0/events", {})).status).toBe(404);
+  });
+
+  test("a work agent's transcript is observed through the same read-only stream", async () => {
+    const observed = await api("GET", "/v1/agents/runs/work:work-sol-0/events");
+    expect(observed.status).toBe(200);
+    expect(observed.value.run).toMatchObject({ id: "work:work-sol-0", host: "work", taskId: "repair-lane" });
+    expect(observed.value.events.map((event: any) => event.text)).toEqual(["repair the lane"]);
+    expect(Date.now() - statSync(join(fakeWorkAgentRuns, "work-sol-0", "watch")).mtimeMs).toBeLessThan(10_000);
+  });
+
+  test("merges working Pi Remote runtimes with hosted agents", async () => {
+    const id = await createThread("home", "sol");
+    await api("POST", `/v1/sessions/${id}/prompt`, {
+      requestId: crypto.randomUUID(), text: "hold-queue", delivery: "followUp",
+    });
+    const agents = await waitFor(
+      () => api("GET", "/v1/sessions").then((result) => result.value.agents),
+      (value) => value?.sources?.piRemote === 1,
+    );
+    expect(agents).toMatchObject({
+      total: 180,
+      sources: { piRemote: 1, orchestrator: 179 },
+      groups: [
+        { key: "pi-remote", label: "REMOTE", count: 1 },
+        { key: "orchestrator", label: "ORCH", count: 179 },
+        { key: "sol", label: "SOL", count: 129 },
+        { key: "luna", label: "LUNA", count: 45 },
+        { key: "pro", label: "PRO", count: 4 },
+        { key: "opus", label: "OPUS", count: 1 },
+        { key: "grok", label: "GROK", count: 1 },
+      ],
+    });
+    await api("POST", `/v1/sessions/${id}/abort`, {});
+    await api("DELETE", `/v1/sessions/${id}`);
+  });
+
+  test("archives and unarchives a thread without deleting its history", async () => {
+    const id = await createThread();
+    await api("POST", `/v1/sessions/${id}/prompt`, {
+      requestId: crypto.randomUUID(), text: "slow-ack", delivery: "followUp",
+    });
+    await waitFor(
+      () => api("GET", `/v1/sessions/${id}/events?after=0`).then((result) => result.value),
+      (result) => result.events.some((event: any) => event.type === "assistant" && event.text === "slow ack done"),
+    );
+
+    const archived = await api("DELETE", `/v1/sessions/${id}`);
+    expect(archived).toMatchObject({ status: 200, value: { ok: true, archived: true, session: { id } } });
+    const afterArchive = await api("GET", "/v1/sessions");
+    expect(afterArchive.value.sessions.some((session: any) => session.id === id)).toBe(false);
+    expect(afterArchive.value.archivedSessions.some((session: any) => session.id === id)).toBe(true);
+    const preserved = await api("GET", `/v1/sessions/${id}/events?after=0`);
+    expect(preserved.value.events.some((event: any) => event.type === "assistant" && event.text === "slow ack done")).toBe(true);
+    const blocked = await api("POST", `/v1/sessions/${id}/prompt`, {
+      requestId: crypto.randomUUID(), text: "must-not-run",
+    });
+    expect(blocked).toMatchObject({ status: 409, value: { error: expect.stringContaining("archived") } });
+
+    const restored = await api("POST", `/v1/sessions/${id}/unarchive`, {});
+    expect(restored).toMatchObject({ status: 200, value: { ok: true, session: { id, archivedAt: null } } });
+    const afterRestore = await api("GET", "/v1/sessions");
+    expect(afterRestore.value.sessions.some((session: any) => session.id === id)).toBe(true);
+    expect(afterRestore.value.archivedSessions.some((session: any) => session.id === id)).toBe(false);
+    await api("DELETE", `/v1/sessions/${id}`);
+  });
+
+  test("lists only the newest archived page and pages older archived threads on request", async () => {
+    const ledger = new Database(join(root, "data", "supervisor.sqlite3"));
+    ledger.exec("PRAGMA busy_timeout=5000");
+    const seeded = Array.from({ length: 25 }, (_, index) => ({
+      id: crypto.randomUUID(),
+      name: `Archived ${String(index).padStart(2, "0")}`,
+      archivedAt: `2099-01-${String(index + 1).padStart(2, "0")}T00:00:00.000Z`,
+    }));
+    const baseline = (await api("GET", "/v1/sessions")).value.archivedTotal as number;
+    try {
+      for (const row of seeded) {
+        ledger.query(`
+          INSERT INTO sessions(id,name,workspace_id,session_path,state,created_at,updated_at,archived_at,
+            initial_provider,current_provider,initial_model,initial_thinking,execution_target)
+          VALUES(?,?,'openai',NULL,'STOPPED',?,?,?,'openai','openai','gpt-5.1-codex-max','high','local')
+        `).run(row.id, row.name, row.archivedAt, row.archivedAt, row.archivedAt);
+      }
+      const listed = await api("GET", "/v1/sessions");
+      expect(listed.value.archivedSessions).toHaveLength(20);
+      expect(listed.value.archivedTotal).toBe(baseline + 25);
+      expect(listed.value.archivedSessions[0].name).toBe("Archived 24");
+      expect(listed.value.archivedSessions.at(-1).name).toBe("Archived 05");
+
+      const older = await api("GET", "/v1/sessions/archived?offset=20&limit=20");
+      expect(older.status).toBe(200);
+      expect(older.value).toMatchObject({ total: baseline + 25, offset: 20, limit: 20, hasMore: baseline + 25 > 40 });
+      expect(older.value.sessions).toHaveLength(Math.min(20, baseline + 5));
+      expect(older.value.sessions.slice(0, 5).map((session: any) => session.name))
+        .toEqual(["Archived 04", "Archived 03", "Archived 02", "Archived 01", "Archived 00"]);
+
+      const firstPage = await api("GET", "/v1/sessions/archived?offset=0&limit=5");
+      expect(firstPage.value).toMatchObject({ total: baseline + 25, offset: 0, limit: 5, hasMore: true });
+      expect(firstPage.value.sessions.map((session: any) => session.name))
+        .toEqual(["Archived 24", "Archived 23", "Archived 22", "Archived 21", "Archived 20"]);
+
+      const clamped = await api("GET", "/v1/sessions/archived?offset=-5&limit=999");
+      expect(clamped.value).toMatchObject({ offset: 0, limit: 100, hasMore: baseline + 25 > 100 });
+      expect(clamped.value.sessions).toHaveLength(Math.min(100, baseline + 25));
+    } finally {
+      for (const row of seeded) ledger.query("DELETE FROM sessions WHERE id=?").run(row.id);
+      ledger.close();
+    }
+  });
+
+  test("serves the browser interface and local assets", async () => {
+    const page = await fetch(base + "/");
+    expect(page.headers.get("content-type")).toContain("text/html");
+    const markup = await page.text();
+    expect(markup).toContain("id=\"conversation\"");
+    expect(markup).toContain("id=\"agent-summary\"");
+    expect(markup).toContain("id=\"work-agent-summary\"");
+    expect(markup).toContain("id=\"local-agent-summary\"");
+    expect(markup).toContain("id=\"plan-summary\"");
+    expect(markup).not.toContain("id=\"openai-plan\"");
+    expect(markup).not.toContain("id=\"anthropic-plan\"");
+    expect(markup).not.toContain("id=\"cursor-plan\"");
+    expect(markup).toContain("id=\"usage-summary\"");
+    expect(markup).toContain("id=\"thunder-control\"");
+    expect(markup).toContain("id=\"openai-governor-control\"");
+    expect(markup).toContain("id=\"anthropic-governor-control\"");
+    expect(markup).toContain("CPU — · GPU — · RAM — · DISK —");
+    // The thread starters are built from /v1/thread-starts, so the page carries the row and
+    // no destination or model of its own.
+    expect(markup).toContain("id=\"new-thread-buttons\"");
+    expect(markup).not.toContain("new-openai-thread");
+    expect(markup).not.toContain("new-converge-thread");
+    expect(markup).toContain("id=\"connection\" class=\"connection muted\" hidden");
+    expect(markup).toContain("id=\"attachments\"");
+    expect(markup).toContain("id=\"file-picker\"");
+    expect(markup).toContain("id=\"message-queue\"");
+    expect(markup).toContain("id=\"queue-status\"");
+    expect(markup).toContain("id=\"speed-select\"");
+    expect(markup).toContain("src=\"/vendor/pi-markdown-compat.js\"");
+    expect(markup).not.toContain("id=\"toast-region\"");
+    expect(markup).not.toContain("id=\"steer\"");
+    expect(markup).not.toContain("id=\"follow-up\"");
+    expect(markup).not.toContain("id=\"abort\"");
+    expect(markup).not.toContain("id=\"process-page\"");
+    expect(markup).not.toContain("id=\"machine-usage\"");
+    expect(markup).toContain("id=\"paste-text\"");
+    expect(markup).toContain("id=\"paste-text-dialog\"");
+    expect(markup).toContain("Paste text document");
+    for (const icon of ["openai", "opus", "sol", "fable", "house", "anthropic", "cursor", "personal", "work", "converge", "thunder"]) {
+      const response = await fetch(`${base}/${icon}.svg`);
+      expect(response.status).toBe(200);
+      expect(response.headers.get("content-type")).toContain("image/svg+xml");
+      expect(await response.text()).toContain("<svg");
+    }
+    const styles = await fetch(base + "/styles.css");
+    const css = await styles.text();
+    expect(css).toContain("gap: 0; padding: 0; background: var(--surface)");
+    expect(css).toContain("margin: 0 8px 0 12px");
+    expect(css).toContain("margin: 0 12px 0 8px");
+    expect(css).toContain(".topbar > .icon-button { flex: 0 0 48px; height: 56px; margin: 0; }");
+    expect(css).toContain(".thread-provider { flex: 0 0 14px;");
+    expect(css).toContain(".machine-controls { height: 44px; display: grid; grid-template-columns: repeat(3, 1fr);");
+    expect(css).toContain(".machine-control.active { background: var(--tool-ok); }");
+    expect(css).toContain(".archive-thread { position: absolute; z-index: 1; top: 4px; right: 5px;");
+    expect(css).toContain(".composer { flex: 0 0 auto; display: grid; gap: 2px;");
+    expect(css).not.toContain("grid-template-rows: auto auto 40px");
+    expect(css).not.toContain(".toast");
+    const script = await fetch(base + "/app.js");
+    expect(script.headers.get("content-type")).toContain("text/javascript");
+    const source = await script.text();
+    expect(source).not.toContain("renderProcesses");
+    expect(source).toContain("renderMarkdown");
+    expect(source).not.toContain("function toast");
+    expect(source).toContain("pi-remote-image");
+    expect(source).toContain("uploadFiles");
+    expect(source).toContain("openPasteTextDialog");
+    expect(source).toContain("Archived threads");
+    expect(source).toContain('node("button", "archive-thread", "×")');
+    expect(source).toContain('open.addEventListener("click", () => { selectThread(session); closeDrawer(); });');
+    expect(source).not.toContain("installArchiveSlide");
+    expect(source).not.toContain('addEventListener("pointermove"');
+    expect(source).not.toContain("archiveGestureActive");
+    expect(source).toContain("unarchiveThread");
+    expect(source).not.toContain("deleteThread");
+    expect(source).not.toContain("confirm(`Archive thread");
+    expect(source).toContain("pastedTextFileName");
+    expect(source).toContain('type: "text/plain;charset=utf-8"');
+    expect(source).toContain("The following files were attached to this message:");
+    expect(source).toContain("renderAgents");
+    expect(source).toContain("updateUsageSummary");
+    expect(source).toContain("Array.isArray(plans?.cards)");
+    expect(source).toContain("card.description");
+    expect(source).toContain("encodeURIComponent(card.icon)");
+    expect(source).not.toContain("fablePaceDelta");
+    expect(source).not.toContain("opusPaceDelta");
+    expect(source).toContain("renderGovernorControls(all.governors)");
+    expect(source).toContain('api("POST", `/v1/governor-controls/${provider}/toggle`, {})');
+    expect(source).toContain('api("POST", "/v1/audio/thunder/toggle", {})');
+    expect(source).toContain("GPU ${gpu}");
+    expect(source).toContain("localStorage.setItem");
+    expect(source).toContain("loadDraft(session.id)");
+    expect(source).toContain("nearConversationBottom");
+    expect(source).toContain("if (!state.followTail) return");
+    expect(source).not.toContain('plan.percentLeft <= 15 ? "var(--danger)"');
+    expect(source).toContain('providerIcon.src = `/${provider}.svg`');
+    expect(source).toContain('const starts = await api("GET", "/v1/thread-starts");');
+    expect(source).toContain('["dollars", "brackets", "beg_end"]');
+    expect(source).toContain("window.normalizeLatexDelimiters");
+    const markdownCompat = await fetch(base + "/vendor/pi-markdown-compat.js");
+    expect(markdownCompat.headers.get("content-type")).toContain("text/javascript");
+    expect(await markdownCompat.text()).toContain("normalizeLatexDelimiters");
+    expect(source).toContain('event.key === "Enter" && !event.shiftKey && !event.isComposing');
+    expect(source).toContain('updateSettings({ speedMode: ui.speed.value })');
+    expect(source).toContain("state.attachments.some((file) => file.path)");
+    expect(source).not.toContain('sendPrompt("steer")');
+    expect(source).toContain('sendPrompt("followUp")');
+    expect(source).toContain("steerQueuedMessage");
+    expect(source).toContain("cancelQueuedMessage");
+    expect(source).toContain("restoreQueuedDraft(result.text ?? message.text)");
+    expect(source).toContain('"STEER"');
+    expect(source).toContain('"EDIT"');
+    expect(source).toContain('"CANCEL"');
+    expect(source).toContain("selectedRevision");
+    expect(source).toContain("selectionEpoch");
+    expect(source).toContain("pollAgain");
+    expect(source).toContain("pendingActions");
+    const katex = await fetch(base + "/vendor/katex.min.js");
+    expect(katex.headers.get("content-type")).toContain("text/javascript");
+    expect((await katex.text()).length).toBeGreaterThan(100_000);
+    const font = await fetch(base + "/vendor/katex/fonts/KaTeX_Main-Regular.woff2");
+    expect(font.headers.get("content-type")).toBe("font/woff2");
+    expect((await font.arrayBuffer()).byteLength).toBeGreaterThan(10_000);
+  });
+
+  test("stores attached files in ingestion and removes discarded uploads", async () => {
+    const upload = await fetch(`${base}/v1/uploads?name=${encodeURIComponent("notes.txt")}`, {
+      method: "POST", headers: { "content-type": "text/plain" }, body: "attached content",
+    });
+    expect(upload.status).toBe(201);
+    const first = (await upload.json() as any).file;
+    expect(first).toMatchObject({ name: "notes.txt", size: 16, path: join(root, "ingestion", "notes.txt") });
+    expect(readFileSync(first.path, "utf8")).toBe("attached content");
+
+    const duplicate = await fetch(`${base}/v1/uploads?name=${encodeURIComponent("notes.txt")}`, {
+      method: "POST", body: "second",
+    });
+    const second = (await duplicate.json() as any).file;
+    expect(second.name).toBe("notes-2.txt");
+    const removed = await fetch(`${base}/v1/uploads?name=${encodeURIComponent(first.name)}`, { method: "DELETE" });
+    expect(removed.status).toBe(200);
+    expect(existsSync(first.path)).toBe(false);
+  });
+
+  test("lets an active agent rename its initial numeric thread with the bundled script", async () => {
+    const id = await createThread("home", "sol");
+    const before = await api("GET", `/v1/sessions/${id}`);
+    expect(before.value.session.provider).toBe("openai");
+    const initialNumber = Number(before.value.session.name);
+    const launch = JSON.parse(readFileSync(fakeLaunch, "utf8"));
+    expect(launch.sessionId).toBe(id);
+    expect(launch.serverUrl).toBe(base);
+    expect(launch.renameScript).toBe(join(import.meta.dir, "rename-thread.sh"));
+    expect(launch.argv).toContain("--append-system-prompt");
+    expect(launch.argv).toEqual(expect.arrayContaining([
+      "--extension", join(import.meta.dir, "service-tier.ts"),
+    ]));
+    expect(readFileSync(launch.serviceTierFile, "utf8").trim()).toBe("default");
+    expect(launch.argv.join(" ")).toContain("two or three words");
+    expect(launch.argv.join(" ")).toContain("use the bash tool");
+    expect(launch.argv).toEqual(expect.arrayContaining([
+      "--provider", "openai-codex", "--model", "gpt-5.6-sol", "--thinking", "high",
+    ]));
+    expect(initialNumber).toBeGreaterThan(0);
+
+    const rename = Bun.spawn(["bash", join(import.meta.dir, "rename-thread.sh"), "Markdown Rendering"], {
+      stdout: "pipe",
+      stderr: "pipe",
+      env: { ...process.env, PI_REMOTE_SESSION_ID: id, PI_REMOTE_SERVER_URL: base },
+    });
+    const [output, renameError, renameCode] = await Promise.all([
+      new Response(rename.stdout).text(),
+      new Response(rename.stderr).text(),
+      rename.exited,
+    ]);
+    expect({ renameCode, renameError }).toEqual({ renameCode: 0, renameError: "" });
+    expect(JSON.parse(output)).toEqual({ ok: true, name: "Markdown Rendering" });
+
+    const renamed = await api("GET", `/v1/sessions/${id}`);
+    expect(renamed.value.session.name).toBe("Markdown Rendering");
+    const same = await fetch(`${base}/v1/sessions/${id}/name`, { method: "PUT", body: "Markdown Rendering" });
+    expect(same.status).toBe(200);
+    const secondRename = await fetch(`${base}/v1/sessions/${id}/name`, { method: "PUT", body: "Different Title" });
+    expect(secondRename.status).toBe(409);
+
+    const nextId = await createThread();
+    const next = await api("GET", `/v1/sessions/${nextId}`);
+    expect(Number(next.value.session.name)).toBeGreaterThan(initialNumber);
+    const invalid = await fetch(`${base}/v1/sessions/${nextId}/name`, { method: "PUT", body: "One" });
+    expect(invalid.status).toBe(400);
+  });
+
+  test("creates Opus threads with Claude Opus 5 and high thinking", async () => {
+    const id = await createThread("home", "opus");
+    const listed = await api("GET", "/v1/sessions");
+    expect(listed.value.sessions.find((session: any) => session.id === id)?.provider).toBe("anthropic");
+    const launch = JSON.parse(readFileSync(fakeLaunch, "utf8"));
+    expect(launch.sessionId).toBe(id);
+    expect(launch.argv).toEqual(expect.arrayContaining([
+      "--provider", "anthropic", "--model", "claude-opus-5", "--thinking", "high",
+    ]));
+  });
+
+  test("creates Anthropic threads with Claude Fable 5 and high thinking", async () => {
+    const id = await createThread("home", "fable");
+    const listed = await api("GET", "/v1/sessions");
+    expect(listed.value.sessions.find((session: any) => session.id === id)?.provider).toBe("anthropic");
+    const launch = JSON.parse(readFileSync(fakeLaunch, "utf8"));
+    expect(launch.sessionId).toBe(id);
+    expect(launch.argv).toEqual(expect.arrayContaining([
+      "--provider", "anthropic", "--model", "claude-fable-5", "--thinking", "high",
+    ]));
+    const invalid = await api("POST", "/v1/sessions", { requestId: crypto.randomUUID(), destination: "unknown" });
+    expect(invalid).toMatchObject({ status: 400, value: { error: "Unknown thread destination" } });
+  });
+
+  test("creates Personal sessions in Private with Claude Fable 5 and low thinking", async () => {
+    const id = await createThread("personal", "fable");
+    const listed = await api("GET", "/v1/sessions");
+    const session = listed.value.sessions.find((candidate: any) => candidate.id === id);
+    expect(session).toMatchObject({
+      environment: "local",
+      workspaceName: "Private",
+      cwd: join(root, "private"),
+      provider: "anthropic",
+    });
+    const launch = JSON.parse(readFileSync(fakeLaunch, "utf8"));
+    expect(launch.argv).toEqual(expect.arrayContaining([
+      "--provider", "anthropic", "--model", "claude-fable-5", "--thinking", "low",
+    ]));
+  });
+
+  test("serves images requested by Pi Remote image tags", async () => {
+    const imagePath = join(import.meta.dir, "fixtures/test.png");
+    const image = await fetch(`${base}/v1/images?path=${encodeURIComponent(imagePath)}`);
+    expect(image.status).toBe(200);
+    expect(image.headers.get("content-type")).toBe("image/png");
+    expect((await image.arrayBuffer()).byteLength).toBeGreaterThan(0);
+    const outside = await fetch(`${base}/v1/images?path=${encodeURIComponent("/etc/passwd")}`);
+    expect(outside.status).toBe(403);
+  });
+
+  test("offers each destination only the models it can actually run", async () => {
+    const starts = await api("GET", "/v1/thread-starts");
+    const destinations = starts.value.destinations;
+    // Rarest first: the menu grows toward the button, so the everyday choice lands under
+    // the finger. Home then Opus is two taps in one place.
+    expect(destinations.map((entry: any) => entry.id)).toEqual(["work", "personal", "home"]);
+    expect(destinations[2].models.map((model: any) => model.id)).toEqual(["sol", "fable", "opus"]);
+    expect(destinations[1].models.map((model: any) => model.id)).toEqual(["sol", "opus", "fable"]);
+    // The work machine has no Anthropic access, so it offers no model step at all.
+    expect(destinations[0].models).toEqual([]);
+    const refused = await api("POST", "/v1/sessions", { requestId: crypto.randomUUID(), destination: "work", model: "opus" });
+    expect(refused.status).toBe(400);
+    expect(refused.value.error).toBe("Model not available at this destination");
+  });
+
+  // Both clients resolve a glyph by the name the manifest gives it, and both fail quietly:
+  // the web serves nothing and Android falls back to a generic mark. A named glyph that no
+  // client can draw is therefore invisible until someone opens the menu.
+  test("every choice names a glyph both clients can draw", async () => {
+    const source = join(import.meta.dir, "..");
+    const starts = await api("GET", "/v1/thread-starts");
+    const icons = starts.value.destinations.flatMap((entry: any) => [entry.icon, ...entry.models.map((model: any) => model.icon)]);
+    expect(icons.length).toBeGreaterThan(0);
+    for (const icon of icons) {
+      expect(existsSync(join(source, "web", `${icon}.svg`))).toBe(true);
+      expect(existsSync(join(source, "android/app/src/main/res/drawable", `ic_${icon}.xml`))).toBe(true);
+    }
+  });
+
+  test("creates persistent Cloud sessions on the cloud machine with Sol high", async () => {
+    const id = await createThread("work");
+    const listed = await api("GET", "/v1/sessions");
+    const session = listed.value.sessions.find((candidate: any) => candidate.id === id);
+    expect(session).toMatchObject({
+      environment: "converge",
+      workspaceName: "Cloud",
+      cwd: join(root, "cloud"),
+      provider: "openai",
+    });
+    const launch = JSON.parse(readFileSync(fakeLaunch, "utf8"));
+    expect(launch).toMatchObject({
+      executionTarget: "converge",
+      workSsh: "cloud-host",
+      workCwd: join(root, "cloud"),
+    });
+    expect(launch.argv).toEqual(expect.arrayContaining([
+      "--provider", "openai-codex", "--model", "gpt-5.6-sol", "--thinking", "high",
+      "--no-context-files", "--extension", join(import.meta.dir, "work-remote.ts"),
+    ]));
+    expect(launch.argv.join(" ")).toContain("rename_thread tool");
+  });
+
+  test("rolls account aliases into common and uncommon model groups", async () => {
+    const id = await createThread("home", "sol");
+    const result = await api("GET", `/v1/sessions/${id}/settings`);
+    expect(result.status).toBe(200);
+    expect(result.value.settings).toMatchObject({ speedMode: "normal", speedModes: ["normal", "priority"] });
+    const priority = await api("PUT", `/v1/sessions/${id}/settings`, { speedMode: "priority" });
+    expect(priority.status).toBe(200);
+    expect(priority.value.settings.speedMode).toBe("priority");
+    const speedLaunch = JSON.parse(readFileSync(fakeLaunch, "utf8"));
+    expect(readFileSync(speedLaunch.serviceTierFile, "utf8").trim()).toBe("priority");
+    const models = result.value.settings.models;
+    expect(models.filter((model: any) => model.provider === "openai-codex" && model.id === "gpt-5.6-sol")).toHaveLength(1);
+    expect(models.some((model: any) => /^(?:openai-codex|anthropic)-\d+$/.test(model.provider))).toBe(false);
+    expect(models.filter((model: any) => model.provider === "anthropic" && model.id === "claude-fable-5")).toHaveLength(1);
+    expect(models.filter((model: any) => model.provider === "anthropic" && model.id === "claude-opus-5")).toHaveLength(1);
+    expect(models.filter((model: any) => model.common).map((model: any) => model.id)).toEqual([
+      "claude-fable-5", "claude-opus-5", "gpt-5.6-luna", "gpt-5.6-sol",
+    ]);
+    expect(models.filter((model: any) => !model.common).map((model: any) => model.id)).toEqual([
+      "claude-sonnet-4", "gpt-5.5",
+    ]);
+    const changed = await api("PUT", `/v1/sessions/${id}/settings`, {
+      modelProvider: "anthropic", modelId: "claude-fable-5",
+    });
+    expect(changed.status).toBe(200);
+    expect(changed.value.settings.speedModes).toEqual([]);
+    const unavailable = await api("PUT", `/v1/sessions/${id}/settings`, { speedMode: "priority" });
+    expect(unavailable).toMatchObject({ status: 409, value: { error: "Priority speed is available only for OpenAI threads" } });
+    const listed = await api("GET", "/v1/sessions");
+    expect(listed.value.sessions.find((session: any) => session.id === id)?.provider).toBe("anthropic");
+  });
+
+  test("holds later messages durably and promotes them to steering", async () => {
+    const id = await createThread();
+    const first = await api("POST", `/v1/sessions/${id}/prompt`, {
+      requestId: crypto.randomUUID(), text: "hold-queue", delivery: "followUp",
+    });
+    expect(first.value).toMatchObject({ accepted: true, queued: false, delivery: "prompt" });
+    await waitFor(
+      () => api("GET", `/v1/sessions/${id}`).then((result) => result.value.session),
+      (session) => session?.state === "RUNNING",
+    );
+    const steering = await api("POST", `/v1/sessions/${id}/prompt`, {
+      requestId: crypto.randomUUID(), text: "change direction", delivery: "steer",
+    });
+    const followUp = await api("POST", `/v1/sessions/${id}/prompt`, {
+      requestId: crypto.randomUUID(), text: "do this later", delivery: "followUp",
+    });
+    expect(steering.value).toMatchObject({ queued: true, delivery: "steer" });
+    expect(followUp.value).toMatchObject({ queued: true, delivery: "followUp" });
+    const beforePromotion = await waitFor(
+      () => api("GET", `/v1/sessions/${id}`).then((result) => result.value.session),
+      (session) => session.queuedMessages?.some((message: any) => message.text === "do this later"),
+    );
+    expect(beforePromotion).toMatchObject({ steeringQueued: 1, followUpQueued: 1 });
+    const rpcBeforePromotion = existsSync(fakeRpcLog)
+      ? readFileSync(fakeRpcLog, "utf8").trim().split("\n").filter(Boolean).map((line) => JSON.parse(line))
+        .filter((entry: any) => entry.sessionId === id)
+      : [];
+    expect(rpcBeforePromotion.some((entry: any) => entry.type === "follow_up")).toBe(false);
+    const queued = beforePromotion.queuedMessages.find((message: any) => message.text === "do this later");
+    const promoted = await api("POST", `/v1/sessions/${id}/queue/${queued.id}/steer`, {});
+    expect(promoted.value).toMatchObject({ ok: true, delivery: "steer" });
+    await waitFor(
+      async () => existsSync(fakeRpcLog) ? readFileSync(fakeRpcLog, "utf8").trim().split("\n").filter(Boolean).map((line) => JSON.parse(line))
+        .filter((entry: any) => entry.sessionId === id) : [],
+      (entries) => entries.some((entry: any) => entry.type === "steer" && entry.message === "change direction")
+        && entries.some((entry: any) => entry.type === "steer" && entry.message === "do this later"),
+    );
+    const listed = await api("GET", `/v1/sessions/${id}`);
+    expect(listed.value.session).toMatchObject({ steeringQueued: 2, followUpQueued: 0, queuedMessages: [] });
+    const events = await api("GET", `/v1/sessions/${id}/events?after=0`);
+    expect(events.value.events.filter((event: any) => event.type === "user").map((event: any) => [event.text, event.delivery]))
+      .toEqual(expect.arrayContaining([
+        ["hold-queue", "prompt"], ["change direction", "steer"], ["do this later", "steer"],
+      ]));
+    expect(events.value.events.some((event: any) => event.type === "user_delivery")).toBe(false);
+    const invalid = await api("POST", `/v1/sessions/${id}/prompt`, {
+      requestId: crypto.randomUUID(), text: "bad delivery", delivery: "eventually",
+    });
+    expect(invalid).toMatchObject({ status: 400, value: { error: "delivery must be steer or followUp" } });
+    await api("DELETE", `/v1/sessions/${id}`);
+  }, 20_000);
+
+  test("cancels supervisor-owned messages and returns their text for editing", async () => {
+    const id = await createThread();
+    await api("POST", `/v1/sessions/${id}/prompt`, {
+      requestId: crypto.randomUUID(), text: "hold-queue", delivery: "followUp",
+    });
+    await waitFor(
+      () => api("GET", `/v1/sessions/${id}`).then((result) => result.value.session),
+      (session) => session?.state === "RUNNING",
+    );
+    await api("POST", `/v1/sessions/${id}/prompt`, {
+      requestId: crypto.randomUUID(), text: "cancel this message", delivery: "followUp",
+    });
+    await api("POST", `/v1/sessions/${id}/prompt`, {
+      requestId: crypto.randomUUID(), text: "edit this message", delivery: "followUp",
+    });
+    const queued = await waitFor(
+      () => api("GET", `/v1/sessions/${id}`).then((result) => result.value.session),
+      (session) => session.queuedMessages?.filter((message: any) => message.canCancel).length === 2,
+    );
+    const cancelMessage = queued.queuedMessages.find((message: any) => message.text === "cancel this message");
+    const editMessage = queued.queuedMessages.find((message: any) => message.text === "edit this message");
+    expect(cancelMessage).toMatchObject({ state: "queued", canCancel: true });
+    expect(editMessage).toMatchObject({ state: "queued", canCancel: true });
+
+    const cancelled = await api("DELETE", `/v1/sessions/${id}/queue/${cancelMessage.id}`);
+    expect(cancelled.value).toMatchObject({ ok: true, text: "cancel this message" });
+    expect(cancelled.value.session.queuedMessages.map((message: any) => message.text)).not.toContain("cancel this message");
+    const edited = await api("DELETE", `/v1/sessions/${id}/queue/${editMessage.id}`);
+    expect(edited.value).toMatchObject({ ok: true, text: "edit this message" });
+    expect(edited.value.session).toMatchObject({ followUpQueued: 0, queuedMessages: [] });
+    const alreadyCancelled = await api("DELETE", `/v1/sessions/${id}/queue/${editMessage.id}`);
+    expect(alreadyCancelled).toMatchObject({ status: 409, value: { error: "Message has already started" } });
+
+    const commands = existsSync(fakeRpcLog)
+      ? readFileSync(fakeRpcLog, "utf8").trim().split("\n").filter(Boolean).map((line) => JSON.parse(line))
+        .filter((entry: any) => entry.sessionId === id)
+      : [];
+    expect(commands.some((entry: any) => ["cancel this message", "edit this message"].includes(entry.message))).toBe(false);
+    await api("DELETE", `/v1/sessions/${id}`);
+  }, 15_000);
+
+  test("keeps unconfirmed sends above the composer and out of the transcript", async () => {
+    const id = await createThread();
+    const accepted = await api("POST", `/v1/sessions/${id}/prompt`, { requestId: crypto.randomUUID(), text: "slow-ack" });
+    const pending = await waitFor(
+      () => api("GET", `/v1/sessions/${id}`).then((result) => result.value.session),
+      (session) => session.queuedMessages?.some((message: any) => message.text === "slow-ack"),
+    );
+    expect(pending.queuedMessages.find((message: any) => message.text === "slow-ack")).toMatchObject({
+      canSteer: false,
+      delivery: "prompt",
+    });
+    const beforeAck = await api("GET", `/v1/sessions/${id}/events?after=0`);
+    expect(beforeAck.value.events.some((event: any) => event.type === "user" && event.text === "slow-ack")).toBe(false);
+    const inserted = await waitFor(
+      () => api("GET", `/v1/sessions/${id}/events?after=0`).then((result) => result.value),
+      (value) => value.events.some((event: any) => event.type === "assistant" && event.text === "slow ack done"),
+    );
+    const userEvents = inserted.events.filter((event: any) => event.type === "user" && event.text === "slow-ack");
+    expect(userEvents).toHaveLength(1);
+    expect(userEvents[0].workId).toBe(accepted.value.workId);
+    expect(inserted.session.queuedMessages).toEqual([]);
+  }, 15_000);
+
+  test("runs a durable later message only after the current run settles", async () => {
+    const id = await createThread();
+    await api("POST", `/v1/sessions/${id}/prompt`, { requestId: crypto.randomUUID(), text: "release-later" });
+    const later = await api("POST", `/v1/sessions/${id}/prompt`, {
+      requestId: crypto.randomUUID(), text: "later-run", delivery: "followUp",
+    });
+    expect(later.value).toMatchObject({ queued: true, delivery: "followUp" });
+    const queued = await api("GET", `/v1/sessions/${id}`);
+    expect(queued.value.session.queuedMessages.map((message: any) => message.text)).toContain("later-run");
+    const events = await waitFor(
+      () => api("GET", `/v1/sessions/${id}/events?after=0`).then((result) => result.value),
+      (value) => value.session.state === "IDLE" &&
+        value.events.some((event: any) => event.type === "assistant" && event.text === "later ran"),
+    );
+    expect(events.events.filter((event: any) => event.type === "assistant").map((event: any) => event.text))
+      .toEqual(["current finished", "later ran"]);
+    expect(events.session).toMatchObject({ state: "IDLE", queuedMessages: [] });
+    const commands = readFileSync(fakeRpcLog, "utf8").trim().split("\n").filter(Boolean).map((line) => JSON.parse(line))
+      .filter((entry: any) => entry.sessionId === id && entry.message === "later-run");
+    expect(commands.map((entry: any) => entry.type)).toEqual(["prompt"]);
+  }, 20_000);
+
+  test("runs /compact through RPC instead of recording a user prompt", async () => {
+    const id = await createThread();
+    const listed = await api("GET", `/v1/sessions/${id}/commands`);
+    expect(listed.value.commands).toEqual(expect.arrayContaining([
+      expect.objectContaining({ name: "compact", source: "builtin" }),
+    ]));
+    const requestId = crypto.randomUUID();
+    const result = await api("POST", `/v1/sessions/${id}/command`, { requestId, name: "compact" });
+    expect(result).toMatchObject({ status: 202, value: { accepted: true, command: "compact" } });
+    const rpcCommands = readFileSync(fakeRpcLog, "utf8").trim().split("\n").filter(Boolean).map((line) => JSON.parse(line))
+      .filter((entry: any) => entry.sessionId === id);
+    expect(rpcCommands.some((entry: any) => entry.type === "compact")).toBe(true);
+    const events = await api("GET", `/v1/sessions/${id}/events?after=0`);
+    expect(events.value.events.some((event: any) => event.type === "user")).toBe(false);
+    await api("DELETE", `/v1/sessions/${id}`);
+  });
+
+  test("reports compaction start and completion", async () => {
+    const id = await createThread();
+    await api("POST", `/v1/sessions/${id}/prompt`, { requestId: crypto.randomUUID(), text: "compact" });
+    const compacting = await waitFor(
+      () => api("GET", "/v1/sessions").then((result) => result.value.sessions.find((session: any) => session.id === id)),
+      (session) => session?.activity === "COMPACTING",
+    );
+    expect(compacting.activity).toBe("COMPACTING");
+    const events = await waitFor(
+      () => api("GET", `/v1/sessions/${id}/events?after=0`).then((result) => result.value.events),
+      (rows) => rows.some((event: any) => event.type === "notice" && event.text === "Context compacted"),
+    );
+    expect(events.filter((event: any) => event.type === "notice").map((event: any) => event.text))
+      .toEqual(expect.arrayContaining(["Compacting context…", "Context compacted"]));
+  }, 15_000);
+
+  test("surfaces a terminal model refusal instead of silently settling", async () => {
+    const id = await createThread("home", "fable");
+    await api("POST", `/v1/sessions/${id}/prompt`, { requestId: crypto.randomUUID(), text: "model-refusal" });
+    const result = await waitFor(
+      () => api("GET", `/v1/sessions/${id}/events?after=0`).then((response) => response.value),
+      (value) => value.events.some((event: any) => event.type === "notice" && event.text.includes("Blocked by the provider policy")),
+    );
+    expect(result.events.some((event: any) => event.type === "notice" && event.text === "Model refused the message: Blocked by the provider policy")).toBe(true);
+    expect(result.events.some((event: any) => event.type === "assistant")).toBe(false);
+    await waitFor(() => api("GET", `/v1/sessions/${id}`).then((response) => response.value.session), (session) => session?.state === "IDLE");
+  }, 15_000);
+
+  test("hides an account-limit failure when failover succeeds", async () => {
+    const id = await createThread();
+    await api("POST", `/v1/sessions/${id}/prompt`, { requestId: crypto.randomUUID(), text: "account-failover" });
+    const result = await waitFor(
+      () => api("GET", `/v1/sessions/${id}/events?after=0`).then((response) => response.value),
+      (value) => value.session.state === "IDLE" && value.events.some(
+        (event: any) => event.type === "assistant" && event.text === "continued on next account",
+      ),
+    );
+    expect(result.events.some((event: any) => event.type === "notice" && event.text.includes("usage limit"))).toBe(false);
+  }, 15_000);
+
+  test("does not let a stale settled event complete a newly dispatched message", async () => {
+    const id = await createThread();
+    await api("POST", `/v1/sessions/${id}/prompt`, { requestId: crypto.randomUUID(), text: "stale-settled" });
+    const events = await waitFor(
+      () => api("GET", `/v1/sessions/${id}/events?after=0`).then((result) => result.value.events),
+      (rows) => rows.some((event: any) => event.type === "assistant" && event.text === "done once"),
+    );
+    expect(events.some((event: any) => event.type === "notice" && event.text.includes("stale settled"))).toBe(true);
+    const session = await waitFor(
+      () => api("GET", `/v1/sessions/${id}`).then((result) => result.value.session),
+      (value) => value?.state === "IDLE",
+    );
+    expect(session.activity).toBe("IDLE");
+  }, 15_000);
+
+  test("does not let inactive reconciliation settle the prompt-to-agent_start gap", async () => {
+    const id = await createThread();
+    const accepted = await api("POST", `/v1/sessions/${id}/prompt`, {
+      requestId: crypto.randomUUID(), text: "delayed-start",
+    });
+    expect(accepted.value.session).toMatchObject({ steeringQueued: 0, followUpQueued: 0 });
+    expect(accepted.value.session.revision).toBeGreaterThan(0);
+    await Bun.sleep(200);
+    const duringGap = await api("GET", `/v1/sessions/${id}`);
+    expect(duringGap.value.session).toMatchObject({ state: "RUNNING", activity: "QUEUED" });
+    const ledger = new Database(join(root, "data", "supervisor.sqlite3"), { readonly: true });
+    const workDuringGap = ledger.query("SELECT state FROM work_items WHERE session_id=? ORDER BY event_seq DESC LIMIT 1").get(id) as any;
+    ledger.close();
+    expect(workDuringGap.state).toBe("dispatched");
+    const events = await waitFor(
+      () => api("GET", `/v1/sessions/${id}/events?after=0`).then((result) => result.value),
+      (value) => value.events.some((event: any) => event.type === "assistant" && event.text === "started after reconcile"),
+    );
+    expect(events.session.state).toBe("IDLE");
+    expect(events.session.revision).toBeGreaterThanOrEqual(accepted.value.session.revision);
+  }, 15_000);
+
+  test("aborting during activation cannot resurrect queued work", async () => {
+    const created = await api("POST", "/v1/sessions", { requestId: crypto.randomUUID(), destination: "home" });
+    const id = created.value.session.id;
+    await api("POST", `/v1/sessions/${id}/prompt`, { requestId: crypto.randomUUID(), text: "must not launch" });
+    const aborted = await api("POST", `/v1/sessions/${id}/abort`, {});
+    expect(aborted.value).toMatchObject({ ok: true, retainedQueued: 0 });
+    const stopped = await waitFor(
+      () => api("GET", `/v1/sessions/${id}`).then((result) => result.value.session),
+      (session) => session.state === "IDLE",
+    );
+    expect(stopped.activity).toBe("IDLE");
+    await Bun.sleep(300);
+    const ledger = new Database(join(root, "data", "supervisor.sqlite3"), { readonly: true });
+    const work = ledger.query("SELECT state FROM work_items WHERE session_id=? ORDER BY event_seq DESC LIMIT 1").get(id) as any;
+    ledger.close();
+    expect(work.state).toBe("cancelled");
+    const commands = existsSync(fakeRpcLog) ? readFileSync(fakeRpcLog, "utf8").trim().split("\n").filter(Boolean).map((line) => JSON.parse(line)) : [];
+    expect(commands.some((entry: any) => entry.sessionId === id && entry.type === "prompt")).toBe(false);
+  }, 15_000);
+
+  test("abort cancels a queued prompt that is waiting to retry", async () => {
+    const id = await createThread();
+    const runtimePid = JSON.parse(readFileSync(fakeLaunch, "utf8")).pid;
+    await api("POST", `/v1/sessions/${id}/prompt`, { requestId: crypto.randomUUID(), text: "retry-prompt" });
+    const retrying = await waitFor(
+      () => api("GET", `/v1/sessions/${id}`).then((result) => result.value.session),
+      (session) => session.activity === "RETRYING",
+    );
+    expect(retrying.state).toBe("RUNNING");
+
+    const aborted = await api("POST", `/v1/sessions/${id}/abort`, {});
+    expect(aborted).toMatchObject({ status: 200, value: { ok: true, retainedQueued: 0 } });
+    expect(aborted.value.session).toMatchObject({ state: "IDLE", activity: "IDLE" });
+    expect(JSON.parse(readFileSync(fakeLaunch, "utf8")).pid).toBe(runtimePid);
+
+    const ledger = new Database(join(root, "data", "supervisor.sqlite3"), { readonly: true });
+    const work = ledger.query("SELECT state,last_error FROM work_items WHERE session_id=? ORDER BY created_at DESC LIMIT 1").get(id) as any;
+    ledger.close();
+    expect(work).toEqual({ state: "cancelled", last_error: "Current turn stopped by user" });
+  }, 15_000);
+
+  test("monitors a lost prompt acknowledgement without resending", async () => {
+    const id = await createThread();
+    await api("POST", `/v1/sessions/${id}/prompt`, { requestId: crypto.randomUUID(), text: "ack-timeout" });
+    const events = await waitFor(
+      () => api("GET", `/v1/sessions/${id}/events?after=0`).then((result) => result.value.events),
+      (rows) => rows.some((event: any) => event.type === "assistant" && event.text === "ack was lost"),
+    );
+    expect(events.filter((event: any) => event.type === "user" && event.text === "ack-timeout")).toHaveLength(1);
+    expect(events.some((event: any) => event.type === "notice" && event.text.includes("without resending"))).toBe(true);
+    await waitFor(() => api("GET", `/v1/sessions/${id}`).then((result) => result.value.session), (value) => value?.state === "IDLE");
+    const ledger = new Database(join(root, "data", "supervisor.sqlite3"), { readonly: true });
+    const work = ledger.query("SELECT state,attempts FROM work_items WHERE session_id=?").get(id) as any;
+    ledger.close();
+    expect(work).toMatchObject({ state: "complete", attempts: 0 });
+  }, 15_000);
+
+  test("repairs a missing settled event after abort", async () => {
+    const id = await createThread();
+    await api("POST", `/v1/sessions/${id}/prompt`, { requestId: crypto.randomUUID(), text: "abort-no-settle" });
+    await waitFor(() => api("GET", `/v1/sessions/${id}`).then((result) => result.value.session), (session) => session?.state === "RUNNING");
+    const aborted = await api("POST", `/v1/sessions/${id}/abort`, {});
+    expect(aborted).toMatchObject({ status: 200, value: { ok: true } });
+    const session = await api("GET", `/v1/sessions/${id}`);
+    expect(session.value.session).toMatchObject({ state: "IDLE", activity: "IDLE" });
+  }, 15_000);
+
+  test("abort stops the active tool without terminating the agent process", async () => {
+    const id = await createThread();
+    const runtimePid = JSON.parse(readFileSync(fakeLaunch, "utf8")).pid;
+    rmSync(fakeChildPid, { force: true });
+    await api("POST", `/v1/sessions/${id}/prompt`, { requestId: crypto.randomUUID(), text: "group-child" });
+    const childPid = await waitFor(
+      async () => existsSync(fakeChildPid) ? Number(readFileSync(fakeChildPid, "utf8")) : 0,
+      (pid) => pid > 1,
+    );
+    await api("POST", `/v1/sessions/${id}/prompt`, {
+      requestId: crypto.randomUUID(), text: "later-run", delivery: "followUp",
+    });
+    const stopped = await api("POST", `/v1/sessions/${id}/abort`, {});
+    expect(stopped).toMatchObject({ status: 200, value: { ok: true, retainedQueued: 1 } });
+    await waitFor(
+      async () => {
+        try { process.kill(childPid, 0); return false; } catch { return true; }
+      },
+      Boolean,
+    );
+    const completed = await waitFor(
+      () => api("GET", `/v1/sessions/${id}/events?after=0`).then((result) => result.value),
+      (value) => value.events.some((event: any) => event.type === "assistant" && event.text === "later ran"),
+    );
+    expect(completed.session).toMatchObject({ state: "IDLE", followUpQueued: 0 });
+    expect(JSON.parse(readFileSync(fakeLaunch, "utf8")).pid).toBe(runtimePid);
+    const ledger = new Database(join(root, "data", "supervisor.sqlite3"), { readonly: true });
+    const work = ledger.query("SELECT text,state FROM work_items WHERE session_id=? ORDER BY created_at,rowid").all(id) as any[];
+    ledger.close();
+    expect(work).toEqual([
+      { text: "group-child", state: "cancelled" },
+      { text: "later-run", state: "complete" },
+    ]);
+  }, 20_000);
+
+  test("leaves the agent process running when Pi refuses an abort", async () => {
+    const id = await createThread();
+    const runtimePid = JSON.parse(readFileSync(fakeLaunch, "utf8")).pid;
+    await api("POST", `/v1/sessions/${id}/prompt`, { requestId: crypto.randomUUID(), text: "abort-refuse" });
+    await waitFor(() => api("GET", `/v1/sessions/${id}`).then((result) => result.value.session), (session) => session?.state === "RUNNING");
+    const aborted = await api("POST", `/v1/sessions/${id}/abort`, {});
+    expect(aborted).toMatchObject({ status: 409, value: { error: expect.stringContaining("still running") } });
+    const session = await api("GET", `/v1/sessions/${id}`);
+    expect(session.value.session.state).toBe("RUNNING");
+    expect(JSON.parse(readFileSync(fakeLaunch, "utf8")).pid).toBe(runtimePid);
+    await api("DELETE", `/v1/sessions/${id}`);
+  }, 20_000);
+
+  test("an unexpected active child exit resumes without exposing FAILED", async () => {
+    const id = await createThread();
+    await api("POST", `/v1/sessions/${id}/prompt`, { requestId: crypto.randomUUID(), text: "crash-once" });
+    let sawFailed = false;
+    const events = await waitFor(
+      async () => {
+        const session = await api("GET", `/v1/sessions/${id}`);
+        if (session.value.session.state === "FAILED") sawFailed = true;
+        return api("GET", `/v1/sessions/${id}/events?after=0`).then((result) => result.value);
+      },
+      (value) => value.events.some((event: any) => event.type === "assistant" && event.text === "recovered after disconnect"),
+      15_000,
+    );
+    expect(sawFailed).toBe(false);
+    expect(events.session.state).toBe("IDLE");
+    expect(events.events.some((event: any) => event.type === "notice" && event.text.includes("Agent disconnected (exit 17)"))).toBe(true);
+    expect(events.events.some((event: any) => event.type === "notice" && event.text === "Agent process failed")).toBe(false);
+    expect(events.events.filter((event: any) => event.type === "user" && event.text === "crash-once")).toHaveLength(1);
+    const recoveryCommands = readFileSync(fakeRpcLog, "utf8").trim().split("\n").filter(Boolean).map((line) => JSON.parse(line))
+      .filter((entry: any) => entry.sessionId === id && entry.type === "prompt");
+    expect(recoveryCommands).toHaveLength(2);
+    expect(recoveryCommands[1].message).toContain("Continue the unfinished work");
+    expect(recoveryCommands[1].message).toContain("USER: crash-once");
+  }, 20_000);
+
+  test("a replaced supervisor cannot publish late child-exit state", async () => {
+    const id = await createThread();
+    await api("POST", `/v1/sessions/${id}/prompt`, { requestId: crypto.randomUUID(), text: "lease-exit" });
+    const ledger = new Database(join(root, "data", "supervisor.sqlite3"));
+    ledger.exec("PRAGMA busy_timeout=5000");
+    const epoch = String((ledger.query("SELECT value FROM metadata WHERE key='supervisor_epoch'").get() as any).value);
+    try {
+      ledger.query("UPDATE metadata SET value='replacement-test' WHERE key='supervisor_epoch'").run();
+      await Bun.sleep(500);
+      const row = ledger.query("SELECT state,last_error FROM sessions WHERE id=?").get(id) as any;
+      expect(row.state).toBe("RUNNING");
+      expect(row.last_error).toBe(null);
+      const failureNotices = Number((ledger.query(
+        "SELECT COUNT(*) count FROM events WHERE session_id=? AND type='notice' AND payload LIKE '%Agent process failed%'",
+      ).get(id) as any).count);
+      expect(failureNotices).toBe(0);
+    } finally {
+      ledger.query("UPDATE metadata SET value=? WHERE key='supervisor_epoch'").run(epoch);
+      ledger.close();
+    }
+    const removed = await api("DELETE", `/v1/sessions/${id}`);
+    expect(removed.status).toBe(200);
+  }, 20_000);
+
+  test("a replacement supervisor resumes active work exactly once", async () => {
+    const id = await createThread();
+    await api("POST", `/v1/sessions/${id}/prompt`, { requestId: crypto.randomUUID(), text: "restart-once" });
+    await waitFor(
+      () => api("GET", `/v1/sessions/${id}`).then((result) => result.value.session),
+      (session) => session?.state === "RUNNING" && existsSync(fakeRestartMarker),
+    );
+    server.kill("SIGTERM");
+    await server.exited;
+    await startServer();
+    const events = await waitFor(
+      () => api("GET", `/v1/sessions/${id}/events?after=0`).then((result) => result.value),
+      (value) => value.events.some((event: any) => event.type === "assistant" && event.text === "recovered after supervisor restart"),
+      15_000,
+    );
+    expect(events.session.state).toBe("IDLE");
+    expect(events.events.filter((event: any) => event.type === "user" && event.text === "restart-once")).toHaveLength(1);
+    const ledger = new Database(join(root, "data", "supervisor.sqlite3"), { readonly: true });
+    const work = ledger.query("SELECT state,resume,attempts FROM work_items WHERE session_id=? AND text='restart-once'").all(id) as any[];
+    ledger.close();
+    expect(work).toEqual([{ state: "complete", resume: 1, attempts: 0 }]);
+    const prompts = readFileSync(fakeRpcLog, "utf8").trim().split("\n").filter(Boolean).map((line) => JSON.parse(line))
+      .filter((entry: any) => entry.sessionId === id && entry.type === "prompt");
+    expect(prompts).toHaveLength(2);
+    expect(prompts[1].message).toContain("Continue the unfinished work");
+  }, 20_000);
+});

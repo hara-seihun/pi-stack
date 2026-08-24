@@ -1,0 +1,82 @@
+#!/usr/bin/env bash
+# Activates supervisor source changes without aborting agent work.
+#
+# There is one supervisor per person and this restarts the caller's own, which
+# is the only one whose key this process could possibly have: a restart drops
+# the mount, and only the owner's client can bring it back.
+#
+# Every agent that changes this server is itself a child of the service it
+# must activate, and `systemctl restart pi-remote@$USER` aborts every active thread
+# — including the agent issuing it, mid-turn. So activation is handed to a
+# transient root unit outside the service cgroup, which waits for the
+# supervisor to report no RUNNING session (the caller's own turn is one) and
+# then restarts cleanly. Idle threads are durable: they resume from the
+# supervisor ledger.
+#
+# A single long-running agent must not postpone activation forever, so the
+# wait is bounded. After the grace window the unit reloads instead: SIGHUP
+# requeues running work with resume context and systemd starts a replacement
+# supervisor that resumes every unfinished thread, so activation always lands
+# within a bounded time and still aborts nothing.
+#
+#   ./restart-when-idle            # wait for idle, then restart; reload after the grace window
+#   ./restart-when-idle --now      # activate immediately by reloading; running turns requeue
+#
+# Progress and outcome: journalctl -u pi-remote-restart -f
+set -euo pipefail
+
+API=${PI_REMOTE_API:-http://127.0.0.1:8788}
+UNIT=pi-remote-restart
+TEMPLATE_SERVICE="pi-remote@${USER:-$(id -un)}.service"
+if systemctl is-active --quiet "$TEMPLATE_SERVICE"; then
+  SERVICE="$TEMPLATE_SERVICE"
+elif systemctl is-active --quiet pi-remote.service; then
+  SERVICE=pi-remote.service
+else
+  SERVICE="$TEMPLATE_SERVICE"
+fi
+
+# Both services run the source tree in place, so a NixOS switch has no way to
+# notice a code change and leaves them running whatever they started with. The
+# router is stateless, so it just restarts here; the supervisor is what the rest
+# of this script waits for.
+sudo -n systemctl restart pi-remote-router.service 2>/dev/null || true
+POLL_SECONDS=${PI_REMOTE_RESTART_POLL_SECONDS:-15}
+GRACE_SECONDS=${PI_REMOTE_RESTART_GRACE_SECONDS:-1200}
+
+if [[ ${1:-} == "--now" ]]; then
+  exec sudo -n systemd-run --collect --unit="$UNIT" systemctl reload "$SERVICE"
+fi
+
+if [[ ${1:-} == "--wait-loop" ]]; then
+  deadline=$((SECONDS + GRACE_SECONDS))
+  while ((SECONDS < deadline)); do
+    if sessions=$(curl -sf --max-time 10 "$API/v1/sessions"); then
+      # Parsed, not grepped: a thread's own live text can quote any state.
+      count=$(printf '%s' "$sessions" | python3 -c \
+        'import json,sys; print(sum(s["state"] == "RUNNING" for s in json.load(sys.stdin)["sessions"]))')
+      if ((count == 0)); then
+        echo "no working thread; restarting $SERVICE"
+        exec systemctl restart "$SERVICE"
+      fi
+      echo "$count thread(s) working; waiting"
+    else
+      echo "supervisor unreachable; waiting"
+    fi
+    sleep "$POLL_SECONDS"
+  done
+  echo "still busy after ${GRACE_SECONDS}s; reloading instead (running work requeues with resume context)"
+  exec systemctl reload "$SERVICE"
+fi
+
+# A transient unit starts with systemd's minimal PATH, which holds neither
+# this script's interpreter nor curl; hand it this shell's PATH instead of
+# hard-coding store paths.
+sudo -n systemd-run --collect --unit="$UNIT" \
+  --setenv=PATH="$PATH" \
+  --setenv=PI_REMOTE_API="$API" \
+  --setenv=PI_REMOTE_RESTART_POLL_SECONDS="$POLL_SECONDS" \
+  --setenv=PI_REMOTE_RESTART_GRACE_SECONDS="$GRACE_SECONDS" \
+  "$(realpath "$0")" --wait-loop
+echo "queued: $UNIT restarts pi-remote once no thread is working," \
+  "and reloads it after ${GRACE_SECONDS}s if one keeps working (journalctl -u $UNIT -f)"
