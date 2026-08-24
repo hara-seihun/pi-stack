@@ -1,0 +1,11 @@
+{
+  "name": "@hara-seihun/context-guard",
+  "version": "1.0.0",
+  "description": "Bound long-running Pi conversation context while retaining a verbatim tail",
+  "license": "MIT",
+  "type": "module",
+  "keywords": ["pi-package", "pi-extension"],
+  "pi": { "extensions": ["./index.mjs"] },
+  "peerDependencies": { "@earendil-works/pi-coding-agent": ">=0.84.0 <0.85.0" },
+  "scripts": { "test": "node --test plan.test.mjs guard.test.mjs" }
+}
