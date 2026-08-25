@@ -4,7 +4,7 @@ Reusable extensions and prompt-evaluation tools for [Pi](https://pi.dev).
 
 ## Packages
 
-- `context-guard` bounds long-running conversation context while preserving a protected opening and recent verbatim tail.
+- `state-compactor` maintains a source-linked working-state record and a recent verbatim tail in long interactive and hosted sessions.
 - `bash-timeout-guard` requires bounded bash calls and can forbid detached work.
 - `mcp-size-guard` reports MCP responses that cross a configurable size threshold.
 - `pi-claude-code-use` adapts Pi tools and prompts for Anthropic subscription requests.
