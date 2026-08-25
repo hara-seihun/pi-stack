@@ -5,11 +5,6 @@ import org.junit.Test;
 import static org.junit.Assert.assertEquals;
 
 public class MarkdownCompatTest {
-    @Test public void convertsRemoteImageTagsToClientImagesWithBlankLines() {
-        String value = MarkdownCompat.normalizeLatexDelimiters("Before\n<pi-remote-image src=\"/home/alex/picture.png\" />\nAfter");
-        org.junit.Assert.assertTrue(value.contains("\n\n![Presented image](" + BuildConfig.SERVER_URL + "/v1/images?path=%2Fhome%2Falex%2Fpicture.png)\n\n"));
-    }
-
     @Test public void convertsRemoteFileTagsToSessionDownloadLinks() {
         String value = MarkdownCompat.normalizeLatexDelimiters(
             "Result\n<pi-remote-file src=\"/home/alex/report [final].pdf\" />",

@@ -493,16 +493,6 @@ for (const icon of [
 ]) {
   if (/^[a-z0-9_-]+$/.test(icon)) webAssets.set(`/${icon}.svg`, [`${icon}.svg`, "image/svg+xml"]);
 }
-const imageContentTypes: Record<string, string> = {
-  ".avif": "image/avif",
-  ".bmp": "image/bmp",
-  ".gif": "image/gif",
-  ".jpeg": "image/jpeg",
-  ".jpg": "image/jpeg",
-  ".png": "image/png",
-  ".svg": "image/svg+xml",
-  ".webp": "image/webp",
-};
 const vendorContentTypes: Record<string, string> = {
   ".css": "text/css; charset=utf-8",
   ".js": "text/javascript; charset=utf-8",
@@ -510,22 +500,6 @@ const vendorContentTypes: Record<string, string> = {
   ".woff": "font/woff",
   ".woff2": "font/woff2",
 };
-
-function localImageResponse(url: URL, method: string): Response | null {
-  if ((method !== "GET" && method !== "HEAD") || url.pathname !== "/v1/images") return null;
-  const rawPath = url.searchParams.get("path") ?? "";
-  if (!rawPath.startsWith("/")) return new Response("Valid absolute image path required", { status: 400 });
-  try {
-    const path = realpathSync(rawPath);
-    if (path !== HOME && !path.startsWith(`${HOME}/`)) return new Response(`Image path must be under ${HOME}`, { status: 403 });
-    if (!statSync(path).isFile()) return new Response("Image file not found", { status: 404 });
-    const contentType = imageContentTypes[extname(path).toLowerCase()];
-    if (!contentType) return new Response("Unsupported image type", { status: 415 });
-    return new Response(method === "HEAD" ? null : Bun.file(path), {
-      headers: { "content-type": contentType, "cache-control": "private, no-store", "x-content-type-options": "nosniff" },
-    });
-  } catch { return new Response("Image file not found", { status: 404 }); }
-}
 
 function downloadHeaders(path: string, size: number, contentType: string): Headers {
   const name = basename(path) || "download";
@@ -1765,8 +1739,6 @@ const server = Bun.serve({
   async fetch(req) {
     const url = new URL(req.url);
     if (!ownsSupervisorLease()) return error("Supervisor instance was replaced", 503);
-    const image = localImageResponse(url, req.method);
-    if (image) return image;
     const deliveredFile = await sessionFileResponse(url, req.method);
     if (deliveredFile) return deliveredFile;
     const web = webResponse(url.pathname, req.method);

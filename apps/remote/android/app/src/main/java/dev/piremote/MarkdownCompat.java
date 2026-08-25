@@ -6,7 +6,6 @@ import java.util.regex.Matcher;
 import java.util.regex.Pattern;
 
 final class MarkdownCompat {
-    private static final Pattern REMOTE_IMAGE = Pattern.compile("<pi-remote-image\\s+src=[\"']([^\"']+)[\"']\\s*/\\s*>", Pattern.CASE_INSENSITIVE);
     private static final Pattern REMOTE_FILE = Pattern.compile("<pi-remote-file\\s+src=[\"']([^\"']+)[\"']\\s*/\\s*>", Pattern.CASE_INSENSITIVE);
 
     private MarkdownCompat() {}
@@ -99,17 +98,9 @@ final class MarkdownCompat {
     }
 
     private static String normalizePresentation(String value, String sessionId) {
+        if (sessionId == null || sessionId.isEmpty()) return value;
         String base = BuildConfig.SERVER_URL.endsWith("/") ? BuildConfig.SERVER_URL.substring(0, BuildConfig.SERVER_URL.length() - 1) : BuildConfig.SERVER_URL;
-        Matcher imageMatcher = REMOTE_IMAGE.matcher(value);
-        StringBuffer images = new StringBuffer();
-        while (imageMatcher.find()) {
-            String path = URLEncoder.encode(imageMatcher.group(1), StandardCharsets.UTF_8);
-            imageMatcher.appendReplacement(images, Matcher.quoteReplacement("\n\n![Presented image](" + base + "/v1/images?path=" + path + ")\n\n"));
-        }
-        imageMatcher.appendTail(images);
-        if (sessionId == null || sessionId.isEmpty()) return images.toString();
-
-        Matcher fileMatcher = REMOTE_FILE.matcher(images.toString());
+        Matcher fileMatcher = REMOTE_FILE.matcher(value);
         StringBuffer files = new StringBuffer();
         while (fileMatcher.find()) {
             String filePath = fileMatcher.group(1);

@@ -89,7 +89,6 @@ export default function threadContext(pi: ExtensionAPI) {
     const instructions = threadStateInstructions({
       name,
       prompt: event.prompt,
-      imageTag: process.env.PI_REMOTE_IMAGE_TAG ?? "pi-remote-image",
       fileTag: process.env.PI_REMOTE_FILE_TAG ?? "pi-remote-file",
       home: remoteHome || process.env.HOME || homedir(),
     });

@@ -38,7 +38,7 @@ public class PromptComposerTest {
     }
 
     @Test public void listsOnlySkillsAndNothingNamedForMcp() {
-        assertTrue(PromptComposer.commandListed("skill:research-news-summary", "skill"));
+        assertTrue(PromptComposer.commandListed("skill:exa-search", "skill"));
         assertFalse(PromptComposer.commandListed("skill:mcp-scripting", "skill"));
         assertFalse(PromptComposer.commandListed("mcp__math__attack", "extension"));
         assertFalse(PromptComposer.commandListed("mcp-auth", "extension"));
@@ -47,16 +47,16 @@ public class PromptComposerTest {
     }
 
     @Test public void matchesSkillCommandsBySkillName() {
-        assertTrue(PromptComposer.commandMatches("skill:research-news-summary", "re"));
-        assertTrue(PromptComposer.commandMatches("skill:research-news-summary", "skill"));
-        assertFalse(PromptComposer.commandMatches("skill:research-news-summary", "news"));
+        assertTrue(PromptComposer.commandMatches("skill:exa-search", "ex"));
+        assertTrue(PromptComposer.commandMatches("skill:exa-search", "skill"));
+        assertFalse(PromptComposer.commandMatches("skill:exa-search", "search"));
     }
 
     @Test public void skillLabelsOmitDescriptions() {
         assertEquals(
-            "/skill:research-news-summary",
+            "/skill:exa-search",
             PromptComposer.commandLabel(
-                "skill:research-news-summary",
+                "skill:exa-search",
                 "A long skill description",
                 "skill"
             )

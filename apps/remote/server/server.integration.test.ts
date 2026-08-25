@@ -682,7 +682,6 @@ describe("web and supervisor integration", () => {
     expect(source).toContain('api("GET", `/v1/sessions/${requested}/context`)');
     expect(source).not.toContain('api("GET", `/v1/sessions/${requested}/events?after=${after}`)');
     expect(source).not.toContain("function toast");
-    expect(source).toContain("pi-remote-image");
     expect(source).toContain("pi-remote-file");
     expect(source).toContain("/files?path=");
     expect(source).toContain("uploadFiles");
@@ -873,19 +872,9 @@ describe("web and supervisor integration", () => {
     ]));
   });
 
-  test("serves images requested by Pi Remote image tags", async () => {
-    const imagePath = join(import.meta.dir, "fixtures/test.png");
-    const image = await fetch(`${base}/v1/images?path=${encodeURIComponent(imagePath)}`);
-    expect(image.status).toBe(200);
-    expect(image.headers.get("content-type")).toBe("image/png");
-    expect((await image.arrayBuffer()).byteLength).toBeGreaterThan(0);
-    const outside = await fetch(`${base}/v1/images?path=${encodeURIComponent("/etc/passwd")}`);
-    expect(outside.status).toBe(403);
-  });
-
   test("downloads files from the selected session execution target", async () => {
     const localId = await createThread("home", "sol");
-    const localPath = join(import.meta.dir, "fixtures/download report.txt");
+    const localPath = join(root, "download report.txt");
     writeFileSync(localPath, "local report");
     try {
       const local = await fetch(`${base}/v1/sessions/${localId}/files?path=${encodeURIComponent(localPath)}`);

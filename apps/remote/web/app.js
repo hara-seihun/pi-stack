@@ -75,8 +75,7 @@ markdown.renderer.rules.link_open = (tokens, index, options, env, renderer) => {
 };
 
 function presentationMarkdown(source) {
-  let value = String(source || "").replace(/<pi-remote-image\s+src=["']([^"']+)["']\s*\/\s*>/gi, (_match, path) =>
-    `\n\n![Presented image](/v1/images?path=${encodeURIComponent(path)})\n\n`);
+  let value = String(source || "");
   if (!state.selectedId) return value;
   value = value.replace(/<pi-remote-file\s+src=["']([^"']+)["']\s*\/\s*>/gi, (_match, path) => {
     const name = String(path).split("/").filter(Boolean).at(-1) || "Download file";
