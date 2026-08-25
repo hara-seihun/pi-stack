@@ -6,8 +6,6 @@ Reusable extensions and prompt-evaluation tools for [Pi](https://pi.dev).
 
 - `state-compactor` triggers Pi's native compaction before a provider request once context reaches 250,000 tokens.
 - `bash-timeout-guard` requires bounded bash calls and can forbid detached work.
-- `mcp-size-guard` reports MCP responses that cross a configurable size threshold.
-- `session-condenser` reads agent session transcripts through two-pass, content-addressed summarization while keeping user turns and the recent tool tail verbatim.
 - `pi-claude-code-use` adapts Pi tools and prompts for Anthropic subscription requests.
 - `chatgpt-pro` exposes ChatGPT Pro through short-lived, authenticated Kernel browsers and verifies the persisted model evidence before returning an answer.
 - `prompt-eval` runs reproducible Pi prompt comparisons in isolated workspaces.
