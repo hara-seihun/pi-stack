@@ -123,7 +123,10 @@ public class MainActivity extends Activity {
     private JSONArray availableModels = new JSONArray(), availableThinkingLevels = new JSONArray();
     private String currentThinkingLevel = "off", currentSpeedMode = "normal";
     private JSONArray availableSpeedModes = new JSONArray();
-    private long lastSeq = 0;
+    private long lastSeq = 0, contextCapturedAt = 0;
+    private final List<String> contextEntrySignatures = new ArrayList<>();
+    private final List<View> contextEntryViews = new ArrayList<>();
+    private final List<ContextEntry> contextEntries = new ArrayList<>();
     private boolean drawerOpen = false, settingsOpen = false, archiveSupported = false;
     private String drawerTab = DRAWER_TAB_INTERACTIVE;
     // The thread poll carries only the newest archived page; older pages load on request.
@@ -1292,10 +1295,10 @@ public class MainActivity extends Activity {
         pollNetwork.execute(() -> {
             try {
                 JSONObject all = api("GET", "/v1/sessions", null);
-                JSONObject selectedEvents = null;
+                JSONObject selectedContext = null;
                 boolean selectedMissing = false;
                 if (requestedSession != null && requestedAgent == null) {
-                    try { selectedEvents = api("GET", "/v1/sessions/" + requestedSession + "/events?after=" + requestedAfter, null); }
+                    try { selectedContext = api("GET", "/v1/sessions/" + requestedSession + "/context", null); }
                     catch (Exception failure) {
                         // The thread itself is the authority on whether it still exists. The
                         // drawer list is not: it shows only interactive threads, and treating
@@ -1319,7 +1322,7 @@ public class MainActivity extends Activity {
                     try { agentRunEvents = api("GET", "/v1/agents/runs/" + addressed + "/events?after=" + requestedAfter, null); }
                     catch (Exception ignored) { /* A transient read leaves the observed transcript unchanged. */ }
                 }
-                JSONObject events = selectedEvents;
+                JSONObject context = selectedContext;
                 JSONObject observedList = agentRunList;
                 JSONObject observedEvents = agentRunEvents;
                 String observedListError = agentListError;
@@ -1366,11 +1369,11 @@ public class MainActivity extends Activity {
                             selectionGeneration, requestedSession, selectedId, agentRunId != null)) {
                         clearSelection();
                     }
-                    if (events != null && SelectionGate.transcriptApplies(requestedSelectionGeneration,
+                    if (context != null && SelectionGate.transcriptApplies(requestedSelectionGeneration,
                             selectionGeneration, requestedSession, selectedId, agentRunId != null)) {
                         if (SelectionGate.snapshotApplies(requestedActionGeneration, actionGeneration,
-                            selectedActionInFlight())) applySelectedSnapshot(events.optJSONObject("session"), false);
-                        renderEvents(events);
+                            selectedActionInFlight())) applySelectedSnapshot(context.optJSONObject("session"), false);
+                        renderContext(context);
                     }
                     updateComposer(); updateTopBar();
                     connection.setVisibility(View.GONE);
@@ -1546,8 +1549,9 @@ public class MainActivity extends Activity {
 
     private void resetTranscript() {
         transcriptOpenedMs = SystemClock.uptimeMillis();
-        lastSeq = 0; transcriptScroll.resetToEnd();
+        lastSeq = 0; contextCapturedAt = 0; transcriptScroll.resetToEnd();
         transcript.removeAllViews(); toolCards.clear(); userMessageLabels.clear();
+        contextEntrySignatures.clear(); contextEntryViews.clear(); contextEntries.clear();
         liveAnswer = null; liveThought = null;
     }
 
@@ -2608,7 +2612,7 @@ public class MainActivity extends Activity {
         // Backfilling a thread is not an arrival, so only what lands after it is settled rises in.
         if (transcript.getChildCount() > 1 && SystemClock.uptimeMillis() - transcriptOpenedMs > 700)
             Springs.enter(view, dp(14));
-        while (transcript.getChildCount() > 50) {
+        while (agentRunId != null && transcript.getChildCount() > 50) {
             View removed = transcript.getChildAt(0);
             transcript.removeViewAt(0);
             Iterator<Map.Entry<String, ToolCard>> iterator = toolCards.entrySet().iterator();
@@ -2843,6 +2847,215 @@ public class MainActivity extends Activity {
         thought.setPadding(dp(12), dp(10), dp(12), dp(10)); thought.setBackground(shape(TOOL_PENDING));
         addTranscriptView(thought, transcript.getChildCount() == 0 ? 0 : 18);
         return thought;
+    }
+
+    private static final class ContextEntry {
+        String key;
+        String signature;
+        String kind;
+        String label;
+        String source;
+        int color;
+        TextView labelView;
+        MarkdownStream body;
+        JSONObject toolCall;
+        JSONObject toolResult;
+        long time;
+
+        ContextEntry(String signature, String kind, String label, String source, int color) {
+            this(signature, signature, kind, label, source, color);
+        }
+
+        ContextEntry(String key, String signature, String kind, String label, String source, int color) {
+            this.key = key;
+            this.signature = signature;
+            this.kind = kind;
+            this.label = label;
+            this.source = source;
+            this.color = color;
+        }
+    }
+
+    private String fencedContext(String value) {
+        String text = value == null ? "" : value;
+        int longest = 0, run = 0;
+        for (int index = 0; index < text.length(); index++) {
+            if (text.charAt(index) == '`') { run++; longest = Math.max(longest, run); }
+            else run = 0;
+        }
+        char[] fenceChars = new char[Math.max(3, longest + 1)];
+        Arrays.fill(fenceChars, '`');
+        String fence = new String(fenceChars);
+        return fence + "json\n" + text + "\n" + fence;
+    }
+
+    private String contextContentMarkdown(Object content) {
+        if (content instanceof String) return (String) content;
+        if (!(content instanceof JSONArray)) return fencedContext(formatJson(content));
+        JSONArray blocks = (JSONArray) content;
+        StringBuilder rendered = new StringBuilder();
+        for (int index = 0; index < blocks.length(); index++) {
+            JSONObject block = blocks.optJSONObject(index);
+            if (block == null) continue;
+            String part;
+            switch (block.optString("type")) {
+                case "text":
+                    part = block.optString("text");
+                    break;
+                case "thinking":
+                    part = "*Thinking*\n\n" + block.optString("thinking");
+                    break;
+                case "image":
+                    String mime = block.optString("mimeType", "application/octet-stream");
+                    String data = block.optString("data");
+                    part = data.isEmpty() ? "*Image · " + mime + "*" : "![Context image](data:" + mime + ";base64," + data + ")";
+                    break;
+                case "toolCall":
+                    String namespace = block.optString("namespace");
+                    String tool = (namespace.isEmpty() ? "" : namespace + ".") + block.optString("name", "tool");
+                    part = "**Tool call · " + tool + "**\n\n" + fencedContext(formatJson(block.opt("arguments")));
+                    break;
+                default:
+                    part = fencedContext(formatJson(block));
+                    break;
+            }
+            if (part.isEmpty()) continue;
+            if (rendered.length() > 0) rendered.append("\n\n");
+            rendered.append(part);
+        }
+        return rendered.toString();
+    }
+
+    private List<ContextEntry> modelContextEntries(JSONObject context) {
+        List<ContextEntry> entries = new ArrayList<>();
+        if (context == null) {
+            entries.add(new ContextEntry("waiting", "notice", "Context", "Context will appear when Pi makes its next model request.", MUTED));
+            return entries;
+        }
+        String systemPrompt = context.optString("systemPrompt");
+        entries.add(new ContextEntry("system:" + systemPrompt, "system", "System", systemPrompt, MUTED));
+        JSONArray tools = context.optJSONArray("tools");
+        if (tools != null) for (int index = 0; index < tools.length(); index++) {
+            JSONObject tool = tools.optJSONObject(index);
+            if (tool == null) continue;
+            String source = (tool.optString("description") + "\n\n" + fencedContext(formatJson(tool.opt("parameters")))).trim();
+            entries.add(new ContextEntry("tool:" + tool, "tool", "Tool · " + tool.optString("name", "tool"), source, ACCENT));
+        }
+        JSONArray messages = context.optJSONArray("messages");
+        Map<String, JSONObject> results = new HashMap<>();
+        if (messages != null) for (int index = 0; index < messages.length(); index++) {
+            JSONObject message = messages.optJSONObject(index);
+            if (message != null && "toolResult".equals(message.optString("role")))
+                results.put(message.optString("toolCallId"), message);
+        }
+        Set<JSONObject> pairedResults = Collections.newSetFromMap(new IdentityHashMap<>());
+        if (messages != null) for (int index = 0; index < messages.length(); index++) {
+            JSONObject message = messages.optJSONObject(index);
+            if (message == null) continue;
+            String role = message.optString("role", "message");
+            if ("assistant".equals(role) && message.optJSONArray("content") != null) {
+                JSONArray content = message.optJSONArray("content");
+                for (int blockIndex = 0; blockIndex < content.length(); blockIndex++) {
+                    JSONObject block = content.optJSONObject(blockIndex);
+                    if (block == null) continue;
+                    if ("toolCall".equals(block.optString("type"))) {
+                        JSONObject toolResult = results.get(block.optString("id"));
+                        if (toolResult != null) pairedResults.add(toolResult);
+                        ContextEntry entry = new ContextEntry("toolCall:" + block.optString("id"), "toolCall:" + block + ":" + toolResult, "toolCall", "", "", ACCENT);
+                        entry.toolCall = block;
+                        entry.toolResult = toolResult;
+                        entry.time = message.optLong("timestamp");
+                        entries.add(entry);
+                    } else if ("thinking".equals(block.optString("type"))) {
+                        entries.add(new ContextEntry("assistant:" + message.optLong("timestamp", index) + ":" + blockIndex + ":thinking",
+                            "thinking:" + block, "thinking", "Thinking", block.optString("thinking"), MUTED));
+                    } else {
+                        entries.add(new ContextEntry("assistant:" + message.optLong("timestamp", index) + ":" + blockIndex + ":" + block.optString("type", "content"),
+                            "assistant:" + block, "assistant", "Assistant", contextContentMarkdown(new JSONArray().put(block)), SUCCESS));
+                    }
+                }
+                if (content.length() == 0 && !message.optString("errorMessage").isEmpty()) {
+                    entries.add(new ContextEntry("assistant:" + message.optLong("timestamp", index) + ":error",
+                        "assistant-error:" + message.optString("errorMessage"), "notice", "Assistant error", message.optString("errorMessage"), DANGER));
+                }
+                continue;
+            }
+            if ("toolResult".equals(role) && pairedResults.contains(message)) continue;
+            String label;
+            String kind;
+            int color;
+            if ("user".equals(role)) { label = "User"; kind = "user"; color = ACCENT; }
+            else if ("assistant".equals(role)) { label = "Assistant"; kind = "assistant"; color = SUCCESS; }
+            else if ("toolResult".equals(role)) {
+                label = "Tool result · " + message.optString("toolName", "tool");
+                kind = "tool";
+                color = message.optBoolean("isError") ? DANGER : MUTED;
+            } else { label = role; kind = "message"; color = MUTED; }
+            entries.add(new ContextEntry("message:" + message, kind, label, contextContentMarkdown(message.opt("content")), color));
+        }
+        return entries;
+    }
+
+    private View appendContextEntry(ContextEntry entry) {
+        if (!"toolCall".equals(entry.kind)) {
+            Message message = message(entry.label, entry.color);
+            message.body.setSource(entry.source);
+            entry.labelView = message.label;
+            entry.body = message.body;
+            return message.root;
+        }
+        JSONObject call = entry.toolCall;
+        String id = call.optString("id");
+        startTool(id, call.optString("name"), call.optJSONObject("arguments") == null ? new JSONObject() : call.optJSONObject("arguments"),
+            java.time.Instant.ofEpochMilli(entry.time > 0 ? entry.time : System.currentTimeMillis()).toString());
+        if (entry.toolResult != null) {
+            JSONObject toolResult = entry.toolResult;
+            long endedAt = toolResult.optLong("timestamp", entry.time);
+            finishTool(id, call.optString("name"), contextContentMarkdown(toolResult.opt("content")), toolResult.optBoolean("isError"),
+                java.time.Instant.ofEpochMilli(endedAt > 0 ? endedAt : System.currentTimeMillis()).toString());
+        }
+        ToolCard card = toolCards.get(id);
+        return card == null ? new View(this) : card.root;
+    }
+
+    private void renderContext(JSONObject result) {
+        long capturedAt = result.optLong("capturedAt");
+        if (capturedAt == contextCapturedAt && !contextEntrySignatures.isEmpty()) return;
+        List<ContextEntry> entries = modelContextEntries(result.optJSONObject("context"));
+        int shared = 0;
+        while (shared < entries.size() && shared < contextEntrySignatures.size()
+            && entries.get(shared).signature.equals(contextEntrySignatures.get(shared))) shared++;
+        while (shared < entries.size() && shared < contextEntries.size()
+            && entries.get(shared).key.equals(contextEntries.get(shared).key) && !"toolCall".equals(entries.get(shared).kind)) {
+            ContextEntry old = contextEntries.get(shared);
+            ContextEntry next = entries.get(shared);
+            if (old.labelView != null) {
+                old.labelView.setText(next.label.toUpperCase(Locale.ROOT));
+                old.labelView.setTextColor(next.color);
+                next.labelView = old.labelView;
+            }
+            if (old.body != null) {
+                old.body.setSource(next.source);
+                next.body = old.body;
+            }
+            contextEntrySignatures.set(shared, next.signature);
+            contextEntries.set(shared, next);
+            shared++;
+        }
+        for (int index = contextEntryViews.size() - 1; index >= shared; index--) {
+            ContextEntry removed = contextEntries.get(index);
+            if ("toolCall".equals(removed.kind) && removed.toolCall != null) toolCards.remove(removed.toolCall.optString("id"));
+            transcript.removeView(contextEntryViews.remove(index));
+            contextEntrySignatures.remove(index);
+            contextEntries.remove(index);
+        }
+        for (int index = shared; index < entries.size(); index++) {
+            ContextEntry entry = entries.get(index);
+            contextEntryViews.add(appendContextEntry(entry));
+            contextEntrySignatures.add(entry.signature);
+            contextEntries.add(entry);
+        }
+        contextCapturedAt = capturedAt;
     }
 
     private void renderEvents(JSONObject result) {

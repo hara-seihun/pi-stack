@@ -347,6 +347,9 @@ else: sys.exit(2)
   writeFileSync(join(root, "agent", "auth.json"), JSON.stringify({
     "openai-codex": { type: "oauth", access: "a", refresh: "r", expires: Date.now() + 3_600_000, accountId: "acct" },
   }));
+  writeFileSync(join(root, "agent", "settings.json"), JSON.stringify({
+    packages: [join(import.meta.dir, "..")],
+  }));
   await startServer();
 });
 
@@ -675,6 +678,9 @@ describe("web and supervisor integration", () => {
     const source = await script.text();
     expect(source).not.toContain("renderProcesses");
     expect(source).toContain("renderMarkdown");
+    expect(source).toContain("modelContextEntries");
+    expect(source).toContain('api("GET", `/v1/sessions/${requested}/context`)');
+    expect(source).not.toContain('api("GET", `/v1/sessions/${requested}/events?after=${after}`)');
     expect(source).not.toContain("function toast");
     expect(source).toContain("pi-remote-image");
     expect(source).toContain("pi-remote-file");
@@ -771,6 +777,7 @@ describe("web and supervisor integration", () => {
       "--extension", join(import.meta.dir, "service-tier.ts"),
       "--extension", join(import.meta.dir, "thread-context.ts"),
     ]));
+    expect(launch.argv).not.toContain(join(import.meta.dir, "context-mirror.ts"));
     expect(readFileSync(launch.serviceTierFile, "utf8").trim()).toBe("default");
     expect(launch.argv).toEqual(expect.arrayContaining([
       "--provider", "openai-codex", "--model", "gpt-5.6-sol", "--thinking", "high",
@@ -793,6 +800,37 @@ describe("web and supervisor integration", () => {
     expect(Number(next.value.session.name)).toBeGreaterThan(initialNumber);
     const invalid = await fetch(`${base}/v1/sessions/${nextId}/name`, { method: "PUT", body: "One" });
     expect(invalid.status).toBe(400);
+  });
+
+  test("serves Pi's provider-neutral context as the entire interactive transcript", async () => {
+    const id = await createThread("home", "sol");
+    const empty = await api("GET", `/v1/sessions/${id}/context`);
+    expect(empty).toMatchObject({ status: 200, value: { capturedAt: 0, context: null } });
+
+    const context = {
+      systemPrompt: "# System\n\nLoaded AGENTS.md",
+      tools: [{ name: "read", description: "Read a file", parameters: { type: "object", properties: { path: { type: "string" } } } }],
+      messages: [
+        { role: "user", content: [{ type: "text", text: "Inspect $x^2$." }], timestamp: 1 },
+        { role: "assistant", content: [{ type: "toolCall", id: "call-1", name: "read", arguments: { path: "/tmp/a.md" } }], timestamp: 2 },
+        { role: "toolResult", toolCallId: "call-1", toolName: "read", content: [{ type: "text", text: "# Result" }], isError: false, timestamp: 3 },
+      ],
+    };
+    const stored = await api("PUT", `/v1/sessions/${id}/context`, { capturedAt: 200, context });
+    expect(stored).toEqual({ status: 200, value: { ok: true, capturedAt: 200 } });
+    const mirrored = await api("GET", `/v1/sessions/${id}/context`);
+    expect(mirrored.value.context).toEqual(context);
+
+    await api("PUT", `/v1/sessions/${id}/context`, {
+      capturedAt: 199,
+      context: { systemPrompt: "stale", tools: [], messages: [] },
+    });
+    await api("PUT", `/v1/sessions/${id}/context`, {
+      capturedAt: 200,
+      context: { systemPrompt: "same-time stale", tools: [], messages: [] },
+    });
+    expect((await api("GET", `/v1/sessions/${id}/context`)).value).toMatchObject({ capturedAt: 200, context });
+    expect((await api("PUT", `/v1/sessions/${id}/context`, { capturedAt: 201, context: { tools: [], messages: [] } })).status).toBe(400);
   });
 
   test("creates Opus threads with Claude Opus 5 and high thinking", async () => {
@@ -931,6 +969,7 @@ describe("web and supervisor integration", () => {
       "--extension", join(import.meta.dir, "thread-context.ts"),
       "--no-context-files", "--extension", join(import.meta.dir, "work-remote.ts"),
     ]));
+    expect(launch.argv).not.toContain(join(import.meta.dir, "context-mirror.ts"));
   });
 
   test("rolls account aliases into common and uncommon model groups", async () => {

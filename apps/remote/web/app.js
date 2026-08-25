@@ -30,7 +30,7 @@ const state = {
   selectedId: null, selectedName: "Agent", selectedCwd: "/", selectedState: "STOPPED", selectedActivity: "IDLE", selectedTool: "",
   steeringQueued: 0, followUpQueued: 0, queuedMessages: [], selectedRevision: 0,
   selectionEpoch: 0, actionEpoch: 0, pendingActions: new Map(),
-  lastSeq: 0, pollBusy: false, pollAgain: false, settingsOpen: false,
+  lastSeq: 0, contextCapturedAt: 0, contextEntries: [], pollBusy: false, pollAgain: false, settingsOpen: false,
   toolCards: new Map(), userMessageLabels: new Map(), followTail: true, attachments: [], attachmentGeneration: 0,
   slashCommands: [], slashCommandsLoading: false,
   planCards: [],
@@ -713,6 +713,8 @@ async function toggleVoice() {
 
 function clearConversation() {
   state.lastSeq = 0;
+  state.contextCapturedAt = 0;
+  state.contextEntries = [];
   state.followTail = true;
   state.toolCards.clear();
   state.userMessageLabels.clear();
@@ -1092,9 +1094,9 @@ async function poll() {
   const selectionEpoch = state.selectionEpoch;
   const actionEpoch = state.actionEpoch;
   try {
-    const [all, events, agentEvents, agentList] = await Promise.all([
+    const [all, context, agentEvents, agentList] = await Promise.all([
       api("GET", "/v1/sessions"),
-      requested && !requestedAgent ? api("GET", `/v1/sessions/${requested}/events?after=${after}`).catch((error) => ({ pollError: error })) : Promise.resolve(null),
+      requested && !requestedAgent ? api("GET", `/v1/sessions/${requested}/context`).catch((error) => ({ pollError: error })) : Promise.resolve(null),
       requestedAgent ? api("GET", `/v1/agents/runs/${encodeURIComponent(requestedAgent)}/events?after=${after}`).catch((error) => ({ pollError: error })) : Promise.resolve(null),
       state.drawerTab === "agents" || requestedAgent ? api("GET", "/v1/agents/runs").catch((error) => ({ pollError: error })) : Promise.resolve(null),
     ]);
@@ -1127,12 +1129,12 @@ async function poll() {
       if (selected) applySelectedSession(selected);
       else if (requested) clearSelection();
     }
-    if (events && !events.pollError && sameSelection) {
-      if (events.session) {
-        mergeSession(events.session);
-        if (mutationStable) applySelectedSession(events.session);
+    if (context && !context.pollError && sameSelection) {
+      if (context.session) {
+        mergeSession(context.session);
+        if (mutationStable) applySelectedSession(context.session);
       }
-      renderEvents(events);
+      renderContext(context);
     }
     if (!state.selectedId && !state.agentRunId && state.sessions.length && selectionEpoch === state.selectionEpoch) selectThread(state.sessions[0]);
     renderThreads(); renderAgents(all.agents); renderTabs(); renderPlan(all.plans); renderGovernorControls(all.governors); renderMachine(all.machine); updateChrome();
@@ -1162,6 +1164,7 @@ function appendMessage(kind, label, text, eventSeq = 0) {
 }
 function appendThinking(text) { appendMessage("thinking", "Thinking", text); }
 function trimTranscript() {
+  if (!state.agentRunId) return;
   while (ui.transcript.children.length > 50) {
     const first = ui.transcript.firstElementChild;
     for (const [id, card] of state.toolCards) if (card.root === first) state.toolCards.delete(id);
@@ -1263,6 +1266,138 @@ function finishTool(event) {
   if (output) { card.body.textContent = `${card.body.textContent ? `${card.body.textContent}\n\n` : ""}${output}`; card.body.hidden = false; }
   const expandable = card.header.textContent.length > 100 || card.body.textContent.length > 320 || card.body.textContent.split("\n").length > 5;
   card.toggle.hidden = !expandable; updateToolTiming(card);
+}
+
+function fencedContext(value, language = "json") {
+  const text = String(value ?? "");
+  const longest = Math.max(2, ...[...text.matchAll(/`+/g)].map((match) => match[0].length));
+  const fence = "`".repeat(longest + 1);
+  return `${fence}${language}\n${text}\n${fence}`;
+}
+function contextContentMarkdown(content) {
+  if (typeof content === "string") return content;
+  if (!Array.isArray(content)) return fencedContext(formatJson(content));
+  return content.map((block) => {
+    if (!block || typeof block !== "object") return fencedContext(formatJson(block));
+    if (block.type === "text") return String(block.text || "");
+    if (block.type === "thinking") return `*Thinking*\n\n${String(block.thinking || "")}`;
+    if (block.type === "image") {
+      const mime = String(block.mimeType || "application/octet-stream");
+      const data = String(block.data || "");
+      return data ? `![Context image](data:${mime};base64,${data})` : `*Image · ${mime}*`;
+    }
+    if (block.type === "toolCall") {
+      const namespace = block.namespace ? `${block.namespace}.` : "";
+      return `**Tool call · ${namespace}${String(block.name || "tool")}**\n\n${fencedContext(formatJson(block.arguments))}`;
+    }
+    return fencedContext(formatJson(block));
+  }).filter(Boolean).join("\n\n");
+}
+function modelContextEntries(context) {
+  if (!context) return [{ key: "waiting", signature: "waiting", kind: "notice", label: "Context", text: "Context will appear when Pi makes its next model request." }];
+  const entries = [{
+    key: "system",
+    signature: `system:${context.systemPrompt || ""}`,
+    kind: "system",
+    label: "System",
+    text: String(context.systemPrompt || ""),
+  }];
+  for (const [index, tool] of (context.tools || []).entries()) {
+    entries.push({
+      key: `tool:${index}:${tool.name || "tool"}`,
+      signature: `tool:${JSON.stringify(tool)}`,
+      kind: "tool",
+      label: `Tool · ${tool.name || "tool"}`,
+      text: `${String(tool.description || "")}\n\n${fencedContext(formatJson(tool.parameters))}`.trim(),
+    });
+  }
+  const results = new Map((context.messages || [])
+    .filter((message) => message?.role === "toolResult")
+    .map((message) => [String(message.toolCallId || ""), message]));
+  const pairedResults = new Set();
+  for (const [messageIndex, message] of (context.messages || []).entries()) {
+    const role = String(message?.role || "message");
+    if (role === "assistant" && Array.isArray(message.content)) {
+      for (const [blockIndex, block] of message.content.entries()) {
+        if (block?.type === "toolCall") {
+          const result = results.get(String(block.id || ""));
+          if (result) pairedResults.add(result);
+          entries.push({
+            key: `toolCall:${block.id || `${message.timestamp || messageIndex}:${blockIndex}`}`,
+            signature: `toolCall:${JSON.stringify(block)}:${JSON.stringify(result || null)}`,
+            kind: "toolCall",
+            toolCall: block,
+            toolResult: result,
+            time: message.timestamp,
+          });
+        } else if (block?.type === "thinking") {
+          entries.push({ key: `assistant:${message.timestamp || messageIndex}:${blockIndex}:thinking`, signature: `thinking:${JSON.stringify(block)}`, kind: "thinking", label: "Thinking", text: String(block.thinking || "") });
+        } else {
+          entries.push({ key: `assistant:${message.timestamp || messageIndex}:${blockIndex}:${block?.type || "content"}`, signature: `assistant:${JSON.stringify(block)}`, kind: "assistant", label: "Assistant", text: contextContentMarkdown([block]) });
+        }
+      }
+      if (message.content.length === 0 && message.errorMessage) entries.push({
+        key: `assistant:${message.timestamp || messageIndex}:error`,
+        signature: `assistant-error:${message.errorMessage}`,
+        kind: "notice",
+        label: "Assistant error",
+        text: String(message.errorMessage),
+      });
+      continue;
+    }
+    if (role === "toolResult" && pairedResults.has(message)) continue;
+    entries.push({
+      key: `message:${role}:${message?.timestamp || messageIndex}:${message?.toolCallId || ""}`,
+      signature: `message:${JSON.stringify(message)}`,
+      kind: role === "user" ? "user" : role === "assistant" ? "assistant" : role === "toolResult" && message?.isError ? "notice" : "tool",
+      label: role === "user" ? "User" : role === "assistant" ? "Assistant" : role === "toolResult" ? `Tool result · ${message.toolName || "tool"}` : role,
+      text: contextContentMarkdown(message?.content),
+    });
+  }
+  return entries;
+}
+function appendContextEntry(entry) {
+  if (entry.kind !== "toolCall") return appendMessage(entry.kind, entry.label, entry.text);
+  const call = entry.toolCall;
+  const event = { toolCallId: call.id, name: call.name, args: call.arguments || {}, time: new Date(Number(entry.time || Date.now())).toISOString() };
+  const card = startTool(event);
+  if (entry.toolResult) finishTool({
+    ...event,
+    output: contextContentMarkdown(entry.toolResult.content),
+    error: Boolean(entry.toolResult.isError),
+    time: new Date(Number(entry.toolResult.timestamp || entry.time || Date.now())).toISOString(),
+  });
+  return card.root;
+}
+function renderContext(result) {
+  const capturedAt = Number(result.capturedAt || 0);
+  if (capturedAt === state.contextCapturedAt && state.contextEntries.length) return;
+  const entries = modelContextEntries(result.context);
+  let shared = 0;
+  while (shared < entries.length && shared < state.contextEntries.length
+    && entries[shared].signature === state.contextEntries[shared].signature) shared++;
+  while (shared < entries.length && shared < state.contextEntries.length
+    && entries[shared].key === state.contextEntries[shared].key && entries[shared].kind !== "toolCall") {
+    const root = ui.transcript.children[shared];
+    if (root) {
+      root.className = `message ${entries[shared].kind}`;
+      const label = root.querySelector(".message-label");
+      if (label) label.textContent = entries[shared].label.toUpperCase();
+      const body = root.querySelector(".markdown-body");
+      if (body) renderMarkdown(body, entries[shared].text);
+    }
+    shared++;
+  }
+  while (state.contextEntries.length > shared) {
+    const removed = state.contextEntries.pop();
+    if (removed.kind === "toolCall") state.toolCards.delete(String(removed.toolCall.id || ""));
+    ui.transcript.lastElementChild?.remove();
+  }
+  for (let index = shared; index < entries.length; index++) appendContextEntry(entries[index]);
+  state.contextCapturedAt = capturedAt;
+  state.contextEntries = entries;
+  setLive("", "");
+  if (shared < entries.length) scrollBottom();
 }
 
 function renderEvents(result) {

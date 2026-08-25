@@ -32,7 +32,7 @@ any live phase -> STOPPING -> STOPPED|FAILED
 FAILED|STOPPED -> STARTING         later activation/retry
 ```
 
-Only `RUNNING -> IDLE` can ordinarily settle dispatched work. `agent_settled` in `DISPATCHING` is stale and ignored. During `ABORTING`, the abort handler owns the phase transition, while real transcript output remains visible because Pi may finish steering it already accepted before `abort()` returns. `STOPPING` suppresses output. An assistant message with `stopReason=error|aborted` is held until settlement: a later successful assistant message in the same run clears it, so automatic retry or account failover does not expose a false terminal failure. If the run settles without recovery, the provider error is committed as a visible transcript notice; an empty refusal must never look like an unanswered message followed by ordinary idle.
+Only `RUNNING -> IDLE` can ordinarily settle dispatched work. `agent_settled` in `DISPATCHING` is stale and ignored. During `ABORTING`, the abort handler owns the phase transition, while Pi may finish steering it already accepted before `abort()` returns. `STOPPING` suppresses output. An assistant message with `stopReason=error|aborted` is held until settlement: a later successful assistant message in the same run clears it, so automatic retry or account failover does not expose a false terminal failure. If the run settles without recovery, the provider error remains in the supervisor event ledger for voice and diagnosis. The interactive view comes from Pi's model context rather than this event projection.
 
 ## Durable work
 
@@ -45,12 +45,12 @@ queued -> running -> dispatched -> complete
    +---------+------------+-> queued (retry/process recovery)
 ```
 
-- SQLite contains the message before the API acknowledges it, but the transcript does not. Until Pi confirms insertion, clients show the work item above the composer with its canonical `queued`, `running`, or `dispatched` status.
+- SQLite contains the message before the API acknowledges it, but Pi's model context does not. Until Pi confirms insertion, clients show the work item above the composer with its canonical `queued`, `running`, or `dispatched` status.
 - `running` means the worker has claimed it but has not handed it to Pi.
-- `dispatched` means exactly one RPC command was written; acknowledgement loss never causes a duplicate send. The user event enters the transcript only when the RPC acknowledgement or subsequent Pi activity proves insertion, and the pending composer card disappears in the same durable update.
+- `dispatched` means exactly one RPC command was written; acknowledgement loss never causes a duplicate send. Pi's next context snapshot contains the user message after RPC acknowledgement or subsequent Pi activity proves insertion, and the pending composer card disappears in the same durable update.
 - A `followUp` created during `RUNNING` remains `queued` under supervisor ownership. It is not handed to Pi until the current run settles, so it can be atomically promoted to `steer` or cancelled. While busy, the worker skips held follow-ups and dispatches only promoted steering items; while idle, it starts the oldest queued item as the next prompt.
 - Cancellation succeeds only while the supervisor still owns an item in `queued`; it atomically marks the item `cancelled` before any Pi insertion. Client-side Edit uses this same cancellation endpoint and copies the returned canonical text into the composer without creating a second server-side message.
-- Promotion normally updates a still-pending durable work item before it has any transcript event. Compatibility code relabels and emits `user_delivery` only for an older already-inserted queued item.
+- Promotion normally updates a still-pending durable work item before it has any event entry. An already-inserted item keeps its delivery event accurate for voice consumers.
 - All dispatched items in one Pi run complete only on an accepted `agent_settled` or inactive reconciliation from the `RUNNING` phase.
 - Cancellation is terminal for the active item. Stop requeues every later queued/running/dispatched item with `resume=0`; a dispatch error checks each durable state before retrying, so the cancelled active turn cannot resurrect while retained messages remain sendable.
 - Supervisor restart requeues `running`/`dispatched` work only after killing orphan RPC children. An interrupted inserted turn resumes through the supported RPC `prompt` command with an explicit continuation instruction; startup never invents protocol commands that Pi does not support.
@@ -75,7 +75,7 @@ Both clients:
 4. coalesce a poll requested during another poll and run it immediately afterward rather than dropping it; and
 5. use a local `SENDING`/`ABORTING` overlay only while the HTTP action is unresolved.
 
-This keeps thread identity, lifecycle, transcript cursor, and local actions separate. A response for thread A cannot mutate thread B, and a pre-action poll cannot overwrite the action response.
+This keeps thread identity, lifecycle, context capture time, and local actions separate. A response for thread A cannot mutate thread B, and a pre-action poll cannot overwrite the action response.
 
 ## Observed orchestrator agents
 
@@ -97,5 +97,5 @@ The observation surface is therefore a pure projection with three rules:
 6. `ABORTING` preserves real transcript output while owning settlement; only `STOPPING` suppresses output.
 7. A stale reconciliation response cannot change phase.
 8. The cancelled active item is never retried; Pi-owned accepted steering and supervisor-owned pending work each continue from their canonical owner without duplication.
-9. Client transcript events are applied only to the selection generation that requested them.
-10. Client authoritative snapshots never move backward in revision.
+9. Client context snapshots are applied only to the selection generation that requested them; their capture times never move backward.
+10. Client authoritative lifecycle snapshots never move backward in revision.

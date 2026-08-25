@@ -4,7 +4,9 @@ A self-hosted web and Android controller for persistent [Pi](https://pi.dev) cod
 
 Pi Remote keeps session state in SQLite, talks to Pi through RPC mode, survives browser or app disconnects, queues prompts durably, streams tool and model activity, and can combine agent activity from local and SSH-backed hosts. An optional identity router starts per-user supervisors whose private directories are mounted only while unlocked.
 
-Each runtime loads `server/thread-context.ts`. The extension offers initialization only while the durable session title is numeric, removes that control from named threads, and treats process or model changes as continuation rather than a new thread. It also tells the agent how to present images and downloadable files. A `<pi-remote-file src="/absolute/path" />` tag becomes a normal link in both clients, and the session-scoped endpoint streams the file from the thread's local or SSH execution target.
+The interactive view is Pi's provider-neutral model context, not a transcript reconstructed by Pi Remote. Pi Remote is installed as the final Pi package so `server/context-mirror.ts` runs after every other `context` handler. It stores the effective system prompt, active tool schemas, and `convertToLlm()` messages; streaming and finalized model messages update that same document. Both clients render the complete document, so compaction removes exactly what Pi removed and loaded AGENTS.md content appears inside the system prompt Pi received.
+
+Each runtime also loads `server/thread-context.ts`. The extension offers initialization only while the durable session title is numeric, removes that control from named threads, and treats process or model changes as continuation rather than a new thread. It tells the agent how to present images and downloadable files. A `<pi-remote-file src="/absolute/path" />` tag becomes a normal link in both clients, and the session-scoped endpoint streams the file from the thread's local or SSH execution target.
 
 On hosts that load `pi-runtime`'s state-compactor, the extension keeps previously read mandatory skill contents in the compacted provider view. It validates those contents against the current files and asks the agent to finish a paged read or refresh a changed file instead of silently retaining stale instructions.
 
@@ -13,12 +15,13 @@ Both clients advertise that capability in the composer and render `delegate`
 as a distinct **Nested agent** tool card: the full delegated task and working
 directory remain expandable while the child's single final answer lands in the
 same card. Nested execution is owned by pi-orchestrator; Pi Remote only renders
-the ordinary tool events.
+the tool calls and results already present in Pi's model context.
 
 ## Requirements
 
 - [Bun](https://bun.sh/)
 - Pi on the supervisor's `PATH`
+- this checkout installed as Pi's final configured package: `pi install /absolute/path/to/pi-remote`
 - a deployed `pi-orchestrator` integration when voice and allowance controls are enabled
 - Android SDK 36 and Java 17 to build the Android client
 
@@ -58,9 +61,14 @@ piRemoteAppLabel=Pi Remote
 
 ## Run
 
+Install Pi Remote after every other Pi package. This is what makes the read-only context mirror the final `context` handler; the supervisor refuses to start if the ordering invariant is missing.
+
 ```sh
+pi install /absolute/path/to/pi-remote
 bun server/main.ts
 ```
+
+If Pi Remote was already configured and another package was installed later, move it back to the end with `pi remove /absolute/path/to/pi-remote` followed by the install command above.
 
 For the router, supply `PI_REMOTE_USERS` as a JSON array and run:
 

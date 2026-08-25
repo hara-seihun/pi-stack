@@ -229,12 +229,22 @@ public final class CompletionNotificationService extends Service {
 
     private String fetchLastAssistantText(String id) {
         try {
-            JSONArray events = getJson("/v1/sessions/" + id + "/events?after=0").optJSONArray("events");
-            if (events == null) return null;
-            for (int i = events.length() - 1; i >= 0; i--) {
-                JSONObject event = events.optJSONObject(i);
-                if (event == null || !"assistant".equals(event.optString("type"))) continue;
-                String text = event.optString("text").trim();
+            JSONObject context = getJson("/v1/sessions/" + id + "/context").optJSONObject("context");
+            JSONArray messages = context == null ? null : context.optJSONArray("messages");
+            if (messages == null) return null;
+            for (int index = messages.length() - 1; index >= 0; index--) {
+                JSONObject message = messages.optJSONObject(index);
+                if (message == null || !"assistant".equals(message.optString("role"))) continue;
+                JSONArray content = message.optJSONArray("content");
+                if (content == null) continue;
+                StringBuilder value = new StringBuilder();
+                for (int blockIndex = 0; blockIndex < content.length(); blockIndex++) {
+                    JSONObject block = content.optJSONObject(blockIndex);
+                    if (block == null || !"text".equals(block.optString("type"))) continue;
+                    if (value.length() > 0) value.append("\n\n");
+                    value.append(block.optString("text"));
+                }
+                String text = value.toString().trim();
                 if (text.isEmpty()) continue;
                 return text.length() <= 4_000 ? text : text.substring(0, 3_999) + "…";
             }

@@ -1,7 +1,7 @@
 import { Database } from "bun:sqlite";
 import { existsSync, mkdirSync, readFileSync, realpathSync, renameSync, statSync, unlinkSync, writeFileSync } from "node:fs";
 import { homedir } from "node:os";
-import { basename, dirname, extname, isAbsolute, join } from "node:path";
+import { basename, dirname, extname, isAbsolute, join, resolve } from "node:path";
 import { parseRunKey } from "./agent-runs";
 import { AgentHost, LocalLedger, RemoteLedger, sshRunner } from "./agent-hosts";
 import { loadPlanUsage, type PlanUsageSnapshot } from "./plan-usage";
@@ -16,7 +16,7 @@ const boostIntegration = await import(`${integrationRoot}/boost.js`);
 const { DEFAULT_LIVE_MODEL, DEFAULT_LIVE_VOICE, VoiceBroker } = voiceIntegration;
 const { BOOSTED_MULTIPLIER, nextBoost } = boostIntegration;
 
-const VERSION = "0.40.0";
+const VERSION = "0.41.0";
 const PROVIDER_MANIFEST = loadProviderManifest();
 const SUPERVISOR_EPOCH = crypto.randomUUID();
 const HOME = homedir();
@@ -51,6 +51,37 @@ const HOST = process.env.PI_REMOTE_HOST ?? "127.0.0.1";
 const PORT = Number(process.env.PI_REMOTE_PORT ?? "8788");
 const AGENT_DIR = process.env.PI_AGENT_DIR ?? join(HOME, ".pi/agent");
 const WEB_DIR = join(import.meta.dir, "../web");
+const PACKAGE_ROOT = realpathSync(join(import.meta.dir, ".."));
+
+function configuredPackageSource(entry: unknown): string | null {
+  if (typeof entry === "string") return entry;
+  if (!entry || typeof entry !== "object" || !("source" in entry)) return null;
+  return typeof entry.source === "string" ? entry.source : null;
+}
+
+function assertContextMirrorLoadsLast() {
+  const settingsPath = join(AGENT_DIR, "settings.json");
+  let settings: { packages?: unknown[] };
+  try {
+    settings = JSON.parse(readFileSync(settingsPath, "utf8"));
+  } catch (error) {
+    throw new Error(`Pi Remote requires its context capture package to be installed last. Could not read ${settingsPath}: ${error instanceof Error ? error.message : error}`);
+  }
+  const source = configuredPackageSource(settings.packages?.at(-1));
+  let configuredRoot: string | null = null;
+  if (source && !source.startsWith("npm:") && !source.startsWith("git:") && !source.includes("://")) {
+    try {
+      configuredRoot = realpathSync(isAbsolute(source) ? source : resolve(AGENT_DIR, source));
+    } catch {
+      configuredRoot = null;
+    }
+  }
+  if (configuredRoot !== PACKAGE_ROOT) {
+    throw new Error(`Pi Remote's package must be the final entry in ${settingsPath} so context-mirror.ts observes every context transformation. Run: pi remove ${PACKAGE_ROOT}; pi install ${PACKAGE_ROOT}`);
+  }
+}
+
+assertContextMirrorLoadsLast();
 
 // Starting a thread is two independent choices: where it runs, and which model runs there.
 // Both clients read this manifest rather than carrying their own copy of the combinations.
@@ -167,6 +198,11 @@ CREATE TABLE IF NOT EXISTS events (
   payload TEXT NOT NULL
 );
 CREATE INDEX IF NOT EXISTS events_session_seq ON events(session_id, seq);
+CREATE TABLE IF NOT EXISTS session_contexts (
+  session_id TEXT PRIMARY KEY REFERENCES sessions(id) ON DELETE CASCADE,
+  captured_at INTEGER NOT NULL,
+  context TEXT NOT NULL
+);
 CREATE TABLE IF NOT EXISTS requests (
   request_id TEXT PRIMARY KEY,
   session_id TEXT NOT NULL,
@@ -1983,7 +2019,7 @@ const server = Bun.serve({
       kickSession(sessionId);
       return json({ ok: true, workId, delivery: "steer", session: publicSession(sessionRow.get(sessionId)) });
     }
-    const match = url.pathname.match(/^\/v1\/sessions\/([0-9a-f-]+)(?:\/(prompt|abort|events|settings|name|commands|command|unarchive))?$/i);
+    const match = url.pathname.match(/^\/v1\/sessions\/([0-9a-f-]+)(?:\/(prompt|abort|events|context|settings|name|commands|command|unarchive))?$/i);
     if (!match) return error("Not found", 404);
     const id = match[1];
     const action = match[2];
@@ -2021,7 +2057,32 @@ const server = Bun.serve({
       if (!ownsSupervisorLease()) return error("Supervisor instance was replaced", 503);
       return json({ ok: true, archived: true, session: publicSession(sessionRow.get(id)) });
     }
-    if (row.archived_at && action !== "events") return error("Thread is archived; unarchive it before continuing", 409);
+    if (row.archived_at && action !== "events" && !(action === "context" && req.method === "GET"))
+      return error("Thread is archived; unarchive it before continuing", 409);
+    if (action === "context" && req.method === "GET") {
+      const stored = db.query("SELECT captured_at,context FROM session_contexts WHERE session_id=?").get(id) as any;
+      return json({
+        capturedAt: stored ? Number(stored.captured_at) : 0,
+        context: stored ? JSON.parse(String(stored.context)) : null,
+        session: publicSession(sessionRow.get(id)),
+      });
+    }
+    if (action === "context" && req.method === "PUT") {
+      try {
+        const body = await readBody(req);
+        const capturedAt = Number(body.capturedAt);
+        const context = body.context;
+        if (!Number.isSafeInteger(capturedAt) || capturedAt <= 0) return error("Valid context capture time required");
+        if (!context || typeof context !== "object" || typeof context.systemPrompt !== "string"
+          || !Array.isArray(context.tools) || !Array.isArray(context.messages)) return error("Valid model context required");
+        db.query(`
+          INSERT INTO session_contexts(session_id,captured_at,context) VALUES(?,?,?)
+          ON CONFLICT(session_id) DO UPDATE SET captured_at=excluded.captured_at,context=excluded.context
+          WHERE excluded.captured_at > session_contexts.captured_at
+        `).run(id, capturedAt, JSON.stringify(context));
+        return json({ ok: true, capturedAt });
+      } catch (cause: any) { return error(cause?.message ?? "Could not store model context", 400); }
+    }
     if (action === "events" && req.method === "GET") {
       const after = Math.max(0, Number(url.searchParams.get("after") ?? 0) || 0);
       let floor = after;
