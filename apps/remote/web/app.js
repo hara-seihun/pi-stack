@@ -74,15 +74,22 @@ markdown.renderer.rules.link_open = (tokens, index, options, env, renderer) => {
   return defaultLinkOpen(tokens, index, options, env, renderer);
 };
 
-function imageMarkdown(source) {
-  return String(source || "").replace(/<pi-remote-image\s+src=["']([^"']+)["']\s*\/\s*>/gi, (_match, path) =>
+function presentationMarkdown(source) {
+  let value = String(source || "").replace(/<pi-remote-image\s+src=["']([^"']+)["']\s*\/\s*>/gi, (_match, path) =>
     `\n\n![Presented image](/v1/images?path=${encodeURIComponent(path)})\n\n`);
+  if (!state.selectedId) return value;
+  value = value.replace(/<pi-remote-file\s+src=["']([^"']+)["']\s*\/\s*>/gi, (_match, path) => {
+    const name = String(path).split("/").filter(Boolean).at(-1) || "Download file";
+    const label = name.replaceAll("&", "&amp;").replaceAll("[", "&#91;").replaceAll("]", "&#93;").replace(/[\r\n]+/g, " ");
+    return `\n\n[${label}](/v1/sessions/${encodeURIComponent(state.selectedId)}/files?path=${encodeURIComponent(path)})\n\n`;
+  });
+  return value;
 }
 function renderMarkdown(destination, source) {
   const value = source || "";
   if (destination.dataset.markdownSource === value) return;
   destination.dataset.markdownSource = value;
-  try { destination.innerHTML = markdown.render(window.normalizeLatexDelimiters(imageMarkdown(value))); }
+  try { destination.innerHTML = markdown.render(window.normalizeLatexDelimiters(presentationMarkdown(value))); }
   catch { destination.textContent = value; }
 }
 

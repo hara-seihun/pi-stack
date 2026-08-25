@@ -39,14 +39,16 @@ function branchWithSkill(body = "# Engineering\n\nKeep state durable.") {
 
 describe("thread lifecycle context", () => {
   test("offers initialization only to a numeric thread", () => {
-    const fresh = threadStateInstructions({ name: "83", prompt: "Fix it", imageTag: "pi-image", home: "/home/a" });
+    const fresh = threadStateInstructions({ name: "83", prompt: "Fix it", imageTag: "pi-image", fileTag: "pi-file", home: "/home/a" });
     expect(fresh).toContain("new, uninitialized thread");
     expect(fresh).toContain("call initialize_thread once");
 
-    const existing = threadStateInstructions({ name: "Fix Runtime", prompt: "Fix it", imageTag: "pi-image", home: "/home/a" });
+    const existing = threadStateInstructions({ name: "Fix Runtime", prompt: "Fix it", imageTag: "pi-image", fileTag: "pi-file", home: "/home/a" });
     expect(existing).toContain("continuing \"Fix Runtime\"");
     expect(existing).toContain("Do not call initialize_thread");
     expect(existing).not.toContain("new, uninitialized thread");
+    expect(existing).toContain('<pi-file src="/home/a/path/to/file" />');
+    expect(existing).toContain("download link");
   });
 
   test("marks an interrupted prompt as the same unfinished task", () => {
@@ -54,6 +56,7 @@ describe("thread lifecycle context", () => {
       name: "Fix Runtime",
       prompt: "The previous agent operation was interrupted. Continue its unfinished work.",
       imageTag: "pi-image",
+      fileTag: "pi-file",
       home: "/home/a",
     });
     expect(instructions).toContain("resumes an interrupted operation in the same task");

@@ -10,6 +10,23 @@ public class MarkdownCompatTest {
         org.junit.Assert.assertTrue(value.contains("\n\n![Presented image](" + BuildConfig.SERVER_URL + "/v1/images?path=%2Fhome%2Falex%2Fpicture.png)\n\n"));
     }
 
+    @Test public void convertsRemoteFileTagsToSessionDownloadLinks() {
+        String value = MarkdownCompat.normalizeLatexDelimiters(
+            "Result\n<pi-remote-file src=\"/home/alex/report [final].pdf\" />",
+            "12345678-abcd-4abc-8abc-1234567890ab"
+        );
+        assertEquals(
+            "Result\n\n\n[report &#91;final&#93;.pdf](" + BuildConfig.SERVER_URL
+                + "/v1/sessions/12345678-abcd-4abc-8abc-1234567890ab/files?path=%2Fhome%2Falex%2Freport+%5Bfinal%5D.pdf)\n\n",
+            value
+        );
+    }
+
+    @Test public void leavesRemoteFileTagsAloneWithoutAnInteractiveSession() {
+        String value = "<pi-remote-file src=\"/home/alex/report.pdf\" />";
+        assertEquals(value, MarkdownCompat.normalizeLatexDelimiters(value));
+    }
+
     @Test public void convertsWebBracketLatexDelimiters() {
         assertEquals(
             "Inline $$a+b$$ and display $$\\int_0^1 x dx$$.",

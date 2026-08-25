@@ -8,6 +8,7 @@ const BOOSTED_MULTIPLIER = 10;
 const root = mkdtempSync(join(tmpdir(), "pi-remote-state-test-"));
 const fakePi = join(root, "fake-pi.py");
 const fakeAudio = join(root, "fake-audio.py");
+const fakeSsh = join(root, "ssh");
 const fakeAudioState = join(root, "fake-audio-state.json");
 const fakeLaunch = join(root, "fake-launch.json");
 const fakeRpcLog = join(root, "fake-rpc.jsonl");
@@ -51,6 +52,7 @@ async function startServer() {
     stderr: "pipe",
     env: {
       ...process.env,
+      PATH: `${root}:${process.env.PATH ?? ""}`,
       PI_BIN: fakePi,
       PI_REMOTE_AUDIO_BIN: fakeAudio,
       PI_FAKE_AUDIO_STATE: fakeAudioState,
@@ -97,6 +99,12 @@ async function startServer() {
 }
 
 beforeAll(async () => {
+  await Bun.write(fakeSsh, `#!/usr/bin/env bash
+host="$1"
+shift
+exec bash -c "$1"
+`);
+  chmodSync(fakeSsh, 0o755);
   await Bun.write(fakePi, `#!/usr/bin/env python3
 import json, os, subprocess, sys, time
 provider = sys.argv[sys.argv.index('--provider') + 1] if '--provider' in sys.argv else 'anthropic'
@@ -669,6 +677,8 @@ describe("web and supervisor integration", () => {
     expect(source).toContain("renderMarkdown");
     expect(source).not.toContain("function toast");
     expect(source).toContain("pi-remote-image");
+    expect(source).toContain("pi-remote-file");
+    expect(source).toContain("/files?path=");
     expect(source).toContain("uploadFiles");
     expect(source).toContain("openPasteTextDialog");
     expect(source).toContain("Archived threads");
@@ -833,6 +843,42 @@ describe("web and supervisor integration", () => {
     expect((await image.arrayBuffer()).byteLength).toBeGreaterThan(0);
     const outside = await fetch(`${base}/v1/images?path=${encodeURIComponent("/etc/passwd")}`);
     expect(outside.status).toBe(403);
+  });
+
+  test("downloads files from the selected session execution target", async () => {
+    const localId = await createThread("home", "sol");
+    const localPath = join(import.meta.dir, "fixtures/download report.txt");
+    writeFileSync(localPath, "local report");
+    try {
+      const local = await fetch(`${base}/v1/sessions/${localId}/files?path=${encodeURIComponent(localPath)}`);
+      expect(local.status).toBe(200);
+      expect(local.headers.get("content-type")).toContain("text/plain");
+      expect(local.headers.get("content-disposition")).toContain('filename="download report.txt"');
+      expect(local.headers.get("content-disposition")).toContain("filename*=UTF-8''download%20report.txt");
+      expect(await local.text()).toBe("local report");
+
+      const head = await fetch(`${base}/v1/sessions/${localId}/files?path=${encodeURIComponent(localPath)}`, { method: "HEAD" });
+      expect(head.status).toBe(200);
+      expect(head.headers.get("content-length")).toBe(String("local report".length));
+      expect(await head.text()).toBe("");
+
+      const workId = await createThread("work");
+      const remotePath = join(root, "cloud", "remote result.json");
+      mkdirSync(join(root, "cloud"), { recursive: true });
+      writeFileSync(remotePath, '{"source":"ssh"}');
+      const remote = await fetch(`${base}/v1/sessions/${workId}/files?path=${encodeURIComponent(remotePath)}`);
+      expect(remote.status).toBe(200);
+      expect(remote.headers.get("content-type")).toContain("application/json");
+      expect(remote.headers.get("content-disposition")).toContain('filename="remote result.json"');
+      expect(await remote.text()).toBe('{"source":"ssh"}');
+
+      const relative = await fetch(`${base}/v1/sessions/${localId}/files?path=report.txt`);
+      expect(relative.status).toBe(400);
+      const missing = await fetch(`${base}/v1/sessions/${workId}/files?path=${encodeURIComponent(join(root, "missing.txt"))}`);
+      expect(missing.status).toBe(404);
+      const unknown = await fetch(`${base}/v1/sessions/00000000-0000-0000-0000-000000000000/files?path=${encodeURIComponent(localPath)}`);
+      expect(unknown.status).toBe(404);
+    } finally { rmSync(localPath, { force: true }); }
   });
 
   test("offers each destination only the models it can actually run", async () => {

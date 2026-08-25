@@ -7,11 +7,16 @@ import java.util.regex.Pattern;
 
 final class MarkdownCompat {
     private static final Pattern REMOTE_IMAGE = Pattern.compile("<pi-remote-image\\s+src=[\"']([^\"']+)[\"']\\s*/\\s*>", Pattern.CASE_INSENSITIVE);
+    private static final Pattern REMOTE_FILE = Pattern.compile("<pi-remote-file\\s+src=[\"']([^\"']+)[\"']\\s*/\\s*>", Pattern.CASE_INSENSITIVE);
 
     private MarkdownCompat() {}
 
     static String normalizeLatexDelimiters(String value) {
-        value = normalizeImages(value == null ? "" : value);
+        return normalizeLatexDelimiters(value, null);
+    }
+
+    static String normalizeLatexDelimiters(String value, String sessionId) {
+        value = normalizePresentation(value == null ? "" : value, sessionId);
         // The web renderer accepts both dollar and bracket LaTeX delimiters.
         // Markwon/JLatexMath accepts dollars, so translate bracket delimiters
         // outside fenced and inline code to keep Android rendering equivalent.
@@ -93,16 +98,31 @@ final class MarkdownCompat {
         return output.toString();
     }
 
-    private static String normalizeImages(String value) {
-        Matcher matcher = REMOTE_IMAGE.matcher(value);
-        StringBuffer output = new StringBuffer();
+    private static String normalizePresentation(String value, String sessionId) {
         String base = BuildConfig.SERVER_URL.endsWith("/") ? BuildConfig.SERVER_URL.substring(0, BuildConfig.SERVER_URL.length() - 1) : BuildConfig.SERVER_URL;
-        while (matcher.find()) {
-            String path = URLEncoder.encode(matcher.group(1), StandardCharsets.UTF_8);
-            matcher.appendReplacement(output, Matcher.quoteReplacement("\n\n![Presented image](" + base + "/v1/images?path=" + path + ")\n\n"));
+        Matcher imageMatcher = REMOTE_IMAGE.matcher(value);
+        StringBuffer images = new StringBuffer();
+        while (imageMatcher.find()) {
+            String path = URLEncoder.encode(imageMatcher.group(1), StandardCharsets.UTF_8);
+            imageMatcher.appendReplacement(images, Matcher.quoteReplacement("\n\n![Presented image](" + base + "/v1/images?path=" + path + ")\n\n"));
         }
-        matcher.appendTail(output);
-        return output.toString();
+        imageMatcher.appendTail(images);
+        if (sessionId == null || sessionId.isEmpty()) return images.toString();
+
+        Matcher fileMatcher = REMOTE_FILE.matcher(images.toString());
+        StringBuffer files = new StringBuffer();
+        while (fileMatcher.find()) {
+            String filePath = fileMatcher.group(1);
+            int slash = filePath.lastIndexOf('/');
+            String name = slash >= 0 ? filePath.substring(slash + 1) : filePath;
+            if (name.isBlank()) name = "Download file";
+            name = name.replace("&", "&amp;").replace("[", "&#91;").replace("]", "&#93;").replaceAll("[\\r\\n]+", " ");
+            String path = URLEncoder.encode(filePath, StandardCharsets.UTF_8);
+            String session = URLEncoder.encode(sessionId, StandardCharsets.UTF_8);
+            fileMatcher.appendReplacement(files, Matcher.quoteReplacement("\n\n[" + name + "](" + base + "/v1/sessions/" + session + "/files?path=" + path + ")\n\n"));
+        }
+        fileMatcher.appendTail(files);
+        return files.toString();
     }
 
     private static boolean isEscaped(String value, int index) {

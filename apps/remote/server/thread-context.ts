@@ -83,11 +83,15 @@ export default function threadContext(pi: ExtensionAPI) {
     const needsInitialize = Boolean(name && INITIAL_TITLE.test(name));
     if (needsInitialize && !hasInitialize) pi.setActiveTools([...active, "initialize_thread"]);
     if (!needsInitialize && hasInitialize) pi.setActiveTools(active.filter((tool) => tool !== "initialize_thread"));
+    const remoteHome = process.env.PI_REMOTE_EXECUTION_TARGET === "local"
+      ? undefined
+      : process.env.PI_REMOTE_WORK_HOME;
     const instructions = threadStateInstructions({
       name,
       prompt: event.prompt,
       imageTag: process.env.PI_REMOTE_IMAGE_TAG ?? "pi-remote-image",
-      home: process.env.HOME ?? homedir(),
+      fileTag: process.env.PI_REMOTE_FILE_TAG ?? "pi-remote-file",
+      home: remoteHome || process.env.HOME || homedir(),
     });
     return { systemPrompt: `${event.systemPrompt}\n\n${instructions}` };
   });

@@ -1,7 +1,7 @@
 import { Database } from "bun:sqlite";
 import { existsSync, mkdirSync, readFileSync, realpathSync, renameSync, statSync, unlinkSync, writeFileSync } from "node:fs";
 import { homedir } from "node:os";
-import { basename, dirname, extname, join } from "node:path";
+import { basename, dirname, extname, isAbsolute, join } from "node:path";
 import { parseRunKey } from "./agent-runs";
 import { AgentHost, LocalLedger, RemoteLedger, sshRunner } from "./agent-hosts";
 import { loadPlanUsage, type PlanUsageSnapshot } from "./plan-usage";
@@ -16,7 +16,7 @@ const boostIntegration = await import(`${integrationRoot}/boost.js`);
 const { DEFAULT_LIVE_MODEL, DEFAULT_LIVE_VOICE, VoiceBroker } = voiceIntegration;
 const { BOOSTED_MULTIPLIER, nextBoost } = boostIntegration;
 
-const VERSION = "0.39.0";
+const VERSION = "0.40.0";
 const PROVIDER_MANIFEST = loadProviderManifest();
 const SUPERVISOR_EPOCH = crypto.randomUUID();
 const HOME = homedir();
@@ -489,6 +489,98 @@ function localImageResponse(url: URL, method: string): Response | null {
       headers: { "content-type": contentType, "cache-control": "private, no-store", "x-content-type-options": "nosniff" },
     });
   } catch { return new Response("Image file not found", { status: 404 }); }
+}
+
+function downloadHeaders(path: string, size: number, contentType: string): Headers {
+  const name = basename(path) || "download";
+  const fallback = name.replace(/[^\x20-\x7e]|["\\]/g, "_") || "download";
+  const encoded = encodeURIComponent(name).replace(/[!'()*]/g, (character) => `%${character.charCodeAt(0).toString(16).toUpperCase()}`);
+  return new Headers({
+    "content-type": contentType || "application/octet-stream",
+    "content-length": String(size),
+    "content-disposition": `attachment; filename="${fallback}"; filename*=UTF-8''${encoded}`,
+    "cache-control": "private, no-store",
+    "x-content-type-options": "nosniff",
+  });
+}
+
+const REMOTE_FILE_METADATA = String.raw`
+import json, mimetypes, os, pathlib, sys
+requested = pathlib.Path(sys.argv[1])
+if not requested.is_absolute():
+    print(json.dumps({"status": 400, "error": "Valid absolute file path required"}))
+    raise SystemExit
+try:
+    path = requested.resolve(strict=True)
+    if not path.is_file() or not os.access(path, os.R_OK):
+        raise FileNotFoundError
+    stat = path.stat()
+    print(json.dumps({
+        "path": str(path),
+        "size": stat.st_size,
+        "contentType": mimetypes.guess_type(path.name)[0] or "application/octet-stream",
+    }))
+except (FileNotFoundError, PermissionError, OSError):
+    print(json.dumps({"status": 404, "error": "File not found"}))
+`;
+
+async function remoteFileMetadata(path: string, target: RemoteTarget): Promise<any> {
+  const command = `python3 -c ${shellQuote(REMOTE_FILE_METADATA)} ${shellQuote(path)}`;
+  const proc = Bun.spawn(["ssh", target.ssh, command], { stdout: "pipe", stderr: "pipe" });
+  const [stdout, stderr, code] = await Promise.all([
+    new Response(proc.stdout).text(), new Response(proc.stderr).text(), proc.exited,
+  ]);
+  if (code !== 0) throw new Error(stderr.trim() || `Could not inspect remote file (${code})`);
+  try { return JSON.parse(stdout.trim()); }
+  catch { throw new Error("Remote file inspection returned invalid metadata"); }
+}
+
+function childResponseBody(proc: any): ReadableStream<Uint8Array> {
+  const reader = proc.stdout.getReader();
+  return new ReadableStream({
+    async pull(controller) {
+      try {
+        const { value, done } = await reader.read();
+        if (done) controller.close();
+        else controller.enqueue(value);
+      } catch (cause) { controller.error(cause); }
+    },
+    async cancel(reason) {
+      try { await reader.cancel(reason); } catch {}
+      try { proc.kill(); } catch {}
+    },
+  });
+}
+
+async function sessionFileResponse(url: URL, method: string): Promise<Response | null> {
+  const match = url.pathname.match(/^\/v1\/sessions\/([0-9a-f-]+)\/files$/i);
+  if (!match || (method !== "GET" && method !== "HEAD")) return null;
+  const row = sessionRow.get(match[1]) as any;
+  if (!row) return new Response("Session not found", { status: 404 });
+  const requested = url.searchParams.get("path") ?? "";
+  if (!isAbsolute(requested)) return new Response("Valid absolute file path required", { status: 400 });
+  const target = REMOTE_TARGETS.get(String(row.execution_target)) ?? null;
+  if (target) {
+    let metadata;
+    try { metadata = await remoteFileMetadata(requested, target); }
+    catch (cause: any) { return new Response(cause?.message ?? "Could not inspect remote file", { status: 502 }); }
+    if (metadata.status) return new Response(String(metadata.error ?? "File not found"), { status: Number(metadata.status) });
+    const headers = downloadHeaders(String(metadata.path), Number(metadata.size), String(metadata.contentType));
+    if (method === "HEAD") return new Response(null, { headers });
+    const proc = Bun.spawn(["ssh", target.ssh, `cat -- ${shellQuote(String(metadata.path))}`], { stdout: "pipe", stderr: "pipe" });
+    void new Response(proc.stderr).text().then(async (stderr) => {
+      const code = await proc.exited;
+      if (code !== 0) console.error(`Remote file download failed (${code}): ${stderr.trim()}`);
+    }).catch((cause) => console.error("Remote file download failed", cause));
+    return new Response(childResponseBody(proc), { headers });
+  }
+  try {
+    const path = realpathSync(requested);
+    const stat = statSync(path);
+    if (!stat.isFile()) return new Response("File not found", { status: 404 });
+    const file = Bun.file(path);
+    return new Response(method === "HEAD" ? null : file, { headers: downloadHeaders(path, stat.size, file.type) });
+  } catch { return new Response("File not found", { status: 404 }); }
 }
 
 function webResponse(pathname: string, method: string): Response | null {
@@ -1639,6 +1731,8 @@ const server = Bun.serve({
     if (!ownsSupervisorLease()) return error("Supervisor instance was replaced", 503);
     const image = localImageResponse(url, req.method);
     if (image) return image;
+    const deliveredFile = await sessionFileResponse(url, req.method);
+    if (deliveredFile) return deliveredFile;
     const web = webResponse(url.pathname, req.method);
     if (web) return web;
     if (url.pathname === "/v1/health") return json({ ok: true, version: VERSION });

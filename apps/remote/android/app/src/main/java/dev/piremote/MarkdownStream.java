@@ -48,13 +48,15 @@ final class MarkdownStream extends TextView {
 
     private final Markwon markwon;
     private final MarkdownRasters rasters;
+    private final String sessionId;
     private String source = "";
     private String held;
 
-    MarkdownStream(Context context, Markwon markwon, MarkdownRasters rasters) {
+    MarkdownStream(Context context, Markwon markwon, MarkdownRasters rasters, String sessionId) {
         super(context);
         this.markwon = markwon;
         this.rasters = rasters;
+        this.sessionId = sessionId;
         setSpannableFactory(MUTABLE);
         setTextIsSelectable(true);
         setLongClickable(true);
@@ -63,7 +65,7 @@ final class MarkdownStream extends TextView {
     void setSource(String value) {
         String next = value == null ? "" : value;
         if (next.equals(source)) return;
-        Spanned rendered = markwon.toMarkdown(MarkdownCompat.normalizeLatexDelimiters(next));
+        Spanned rendered = markwon.toMarkdown(MarkdownCompat.normalizeLatexDelimiters(next, sessionId));
         CharSequence shown = getText();
         if (!(shown instanceof Editable) || shown.length() == 0) {
             source = next;

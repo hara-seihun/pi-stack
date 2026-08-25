@@ -20,7 +20,10 @@ import android.view.inputmethod.InputMethodManager;
 import android.widget.*;
 import androidx.dynamicanimation.animation.DynamicAnimation;
 import androidx.dynamicanimation.animation.SpringAnimation;
+import io.noties.markwon.AbstractMarkwonPlugin;
+import io.noties.markwon.LinkResolverDef;
 import io.noties.markwon.Markwon;
+import io.noties.markwon.MarkwonConfiguration;
 import io.noties.markwon.ext.latex.JLatexMathPlugin;
 import io.noties.markwon.ext.strikethrough.StrikethroughPlugin;
 import io.noties.markwon.ext.tables.TablePlugin;
@@ -174,6 +177,16 @@ public class MainActivity extends Activity {
             .usePlugin(StrikethroughPlugin.create())
             .usePlugin(TablePlugin.create(this))
             .usePlugin(TaskListPlugin.create(this))
+            .usePlugin(new AbstractMarkwonPlugin() {
+                @Override public void configureConfiguration(MarkwonConfiguration.Builder builder) {
+                    LinkResolverDef external = new LinkResolverDef();
+                    builder.linkResolver((view, link) -> {
+                        Uri uri = Uri.parse(link);
+                        if (isPiRemoteFile(uri)) downloadFile(uri);
+                        else external.resolve(view, link);
+                    });
+                }
+            })
             .build();
         drawerTab = getSharedPreferences(DRAWER_PREFS, MODE_PRIVATE)
             .getString(DRAWER_TAB_KEY, DRAWER_TAB_INTERACTIVE);
@@ -340,6 +353,32 @@ public class MainActivity extends Activity {
         } else if (data.getData() != null) queueAttachment(data.getData());
     }
 
+    private boolean isPiRemoteFile(Uri uri) {
+        Uri server = Uri.parse(BuildConfig.SERVER_URL);
+        String path = uri.getPath();
+        return Objects.equals(server.getScheme(), uri.getScheme())
+            && Objects.equals(server.getAuthority(), uri.getAuthority())
+            && path != null
+            && path.matches("/v1/sessions/[0-9a-fA-F-]+/files");
+    }
+
+    private void downloadFile(Uri uri) {
+        String path = uri.getQueryParameter("path");
+        String name = path == null ? "Download" : new File(path).getName();
+        if (name.isBlank()) name = "Download";
+        try {
+            DownloadManager.Request request = new DownloadManager.Request(uri)
+                .setTitle(name)
+                .setDescription("Pi Remote file")
+                .setNotificationVisibility(DownloadManager.Request.VISIBILITY_VISIBLE_NOTIFY_COMPLETED);
+            DownloadManager manager = (DownloadManager) getSystemService(DOWNLOAD_SERVICE);
+            manager.enqueue(request);
+            Toast.makeText(this, "Downloading " + name, Toast.LENGTH_SHORT).show();
+        } catch (RuntimeException failure) {
+            Toast.makeText(this, "Could not download " + name, Toast.LENGTH_LONG).show();
+        }
+    }
+
     private void configureWindow() {
         getWindow().setStatusBarColor(BG);
         getWindow().setNavigationBarColor(BG);
@@ -389,7 +428,7 @@ public class MainActivity extends Activity {
     }
 
     private MarkdownStream markdown(int size, int color) {
-        MarkdownStream view = new MarkdownStream(this, markwon, rasters);
+        MarkdownStream view = new MarkdownStream(this, markwon, rasters, selectedId);
         view.setTextSize(size); view.setTextColor(color); view.setGravity(Gravity.TOP);
         return view;
     }
