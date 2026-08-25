@@ -1,13 +1,9 @@
 import {
-  convertToLlm,
   createAgentSession,
   DefaultResourceLoader,
-  serializeConversation,
   type AgentSession,
-  type InlineExtension,
 } from "@earendil-works/pi-coding-agent";
 import { execFile } from "node:child_process";
-import { randomUUID } from "node:crypto";
 import { homedir } from "node:os";
 import { join } from "node:path";
 import { Type } from "typebox";
@@ -248,31 +244,26 @@ export class PiHost implements HostManager {
     // provider (cursor) exists only inside the session's own model runtime,
     // because the extension that registers it is loaded per session.
     const preresolved = this.options.resolveModel(spec);
-    // Doctrine rides the system prompt because the task prompt does not
-    // survive compaction: it is the first user message, which is the first
-    // thing summarized away, and the night of 2026-08-21 showed lanes obeying
-    // whatever voice was still in context once the opening instructions were
-    // gone. The system prompt is the one region compaction preserves.
-    const pin: OpeningPin = { text: undefined, messageCount: 0 };
+    // Doctrine stays in the system prompt. The task itself is also exposed to
+    // the state compactor as host-owned data, so a completed opening exchange
+    // cannot be mistaken for the work assigned after it. Interactive sessions
+    // simply have no host frame and derive their activity from user messages.
+    const frame: WorkingStateFrame = {
+      activeTask: prompt ?? "",
+      openingMessageCount: 0,
+    };
+    const doctrine = spec.doctrineUrl === undefined ? undefined : await this.doctrine(spec.doctrineUrl);
     let resourceLoader: DefaultResourceLoader | undefined;
-    if (spec.doctrineUrl !== undefined || (spec.opening?.length ?? 0) > 0) {
-      const doctrine = spec.doctrineUrl === undefined ? undefined : await this.doctrine(spec.doctrineUrl);
+    if (doctrine !== undefined) {
       resourceLoader = new DefaultResourceLoader({
         cwd: spec.cwd ?? process.cwd(),
         agentDir: this.options.agentDir ?? join(homedir(), ".pi", "agent"),
-        ...(doctrine === undefined
-          ? {}
-          : {
-              appendSystemPrompt: [
-                `# Lane doctrine (pinned from ${spec.doctrineUrl})\n\n` +
-                  "This document is pinned into your system prompt so it stays with " +
-                  "you even after context compaction. It is binding for this lane.\n\n" +
-                  doctrine,
-              ],
-            }),
-        // The pin extension must exist before the session binds extensions;
-        // it reads the mutable ref lazily, at compaction time.
-        extensionFactories: [openingPinExtension(pin)],
+        appendSystemPrompt: [
+          `# Lane doctrine (pinned from ${spec.doctrineUrl})\n\n` +
+            "This document is pinned into your system prompt so it stays with " +
+            "you after context compaction. It is binding for this lane.\n\n" +
+            doctrine,
+        ],
       });
       await resourceLoader.reload();
     }
@@ -291,7 +282,11 @@ export class PiHost implements HostManager {
     });
     const interrupted = (operation: Promise<unknown>): Promise<boolean> =>
       Promise.race([operation.then(() => false), cancelled]);
-    const disposers: (() => void)[] = [() => session.dispose()];
+    const unregisterWorkingState = registerWorkingStateFrame(
+      session.sessionManager.getSessionId(),
+      frame,
+    );
+    const disposers: (() => void)[] = [() => session.dispose(), unregisterWorkingState];
     let cleaned = false;
     const cleanup = () => {
       if (cleaned) return;
@@ -429,10 +424,7 @@ export class PiHost implements HostManager {
           break;
         }
       }
-      if (opening.length > 0) {
-        pin.messageCount = session.messages.length;
-        pin.text = serializeOpening(session.messages);
-      }
+      if (opening.length > 0) frame.openingMessageCount = session.messages.length;
       let turn = 0;
       let resume: string | undefined;
       for (;;) {
@@ -645,199 +637,24 @@ function lastAssistant(
     );
 }
 
-/** Mutable ref shared between the host's shift loop and the pin extension:
- * the loop fills it in when the opening exchange completes, the extension
- * reads it at each compaction. */
-export interface OpeningPin {
-  text: string | undefined;
-  /** How many session messages the opening spans, so the first compaction
-   * can exclude them from the generated work summary (they are already in
-   * the pin, verbatim). */
-  messageCount: number;
+export interface WorkingStateFrame {
+  activeTask: string;
+  openingMessageCount: number;
 }
-
-const PIN_DIVIDER = "# Work since the opening exchange";
 
 /**
- * Keeps the session's opening exchange intact across both context
- * mechanisms.
- *
- * Context-guard (the global 250k-cap extension, loaded into hosted sessions
- * from the machine's settings packages) is the mechanism that actually
- * governs large-window models: it cuts the per-request view before pi's
- * native compaction ever triggers, and its cut evicts old tool-result
- * bodies — the opening's MCP traffic first of all. The pin registers the
- * opening's message count under the session id in
- * `globalThis.__piContextGuardProtect`; the guard treats that span as a
- * protected head that crosses every cut byte-identical.
- *
- * Pi's native compaction still governs where the guard does not reach —
- * models whose window sits below the guard's trigger, and cursor sessions,
- * which the guard excludes. There the `session_before_compact` handler
- * rebuilds the summary as the verbatim opening exchange followed by a
- * generated summary of the work after it. Either way the exchange is
- * replayed word for word — the agent said these things in this session,
- * and it stays able to recognize them as its own.
- *
- * On any failure the compaction handler steps aside and default compaction
- * runs: a session that loses its pin is degraded, a session that cannot
- * compact at all is dead.
+ * Publishes facts only the host can know. The global state compactor reads
+ * this mutable frame while building a checkpoint. There is no frame in an
+ * interactive session, so the compactor falls back to unresolved user turns.
  */
-export function openingPinExtension(pin: OpeningPin): InlineExtension {
-  return {
-    name: "opening-pin",
-    factory: (pi: any) => {
-      const registry: Map<string, number> = ((globalThis as any).__piContextGuardProtect ??=
-        new Map());
-      let sessionId: string | undefined;
-      const register = (ctx: any) => {
-        const id = ctx?.sessionManager?.getSessionId?.();
-        if (id === undefined) return;
-        sessionId = id;
-        // messageCount is 0 until the host's opening turns complete; register
-        // on every event so the count lands as soon as it exists. Cuts happen
-        // hundreds of events later.
-        if (pin.messageCount > 0) registry.set(id, pin.messageCount);
-      };
-      pi.on("session_start", (_event: any, ctx: any) => register(ctx));
-      pi.on("context", (_event: any, ctx: any) => {
-        register(ctx);
-        return undefined;
-      });
-      pi.on("session_shutdown", () => {
-        if (sessionId !== undefined) registry.delete(sessionId);
-      });
-      pi.on("session_before_compact", async (event: any, ctx: any) => {
-        if (pin.text === undefined) return undefined;
-        try {
-          const { preparation } = event;
-          const all = [
-            ...(preparation.messagesToSummarize ?? []),
-            ...(preparation.turnPrefixMessages ?? []),
-          ];
-          // The first compaction still holds the opening as live messages;
-          // they are dropped from the work summary because the pin already
-          // carries them verbatim. Later compactions start past them.
-          const isFirst = preparation.previousSummary === undefined;
-          const work = isFirst ? all.slice(pin.messageCount) : all;
-          const previousWork = preparation.previousSummary?.split(PIN_DIVIDER).pop()?.trim();
-          let workSummary = previousWork ?? "";
-          if (work.length > 0 && ctx.model !== undefined) {
-            const conversation = serializeConversation(convertToLlm(work as never));
-            const response = await ctx.modelRegistry.complete(
-              ctx.model,
-              {
-                messages: [
-                  {
-                    role: "user",
-                    content: [
-                      {
-                        type: "text",
-                        text:
-                          "Summarize this working session so it can continue after " +
-                          "context compaction. Capture goals, key decisions and their " +
-                          "rationale, validated results, current state, blockers, and " +
-                          "next steps, as structured markdown. Be thorough but concise; " +
-                          "the summary replaces the messages." +
-                          (previousWork ? `\n\nEarlier summary to fold in:\n${previousWork}` : "") +
-                          `\n\n<conversation>\n${conversation}\n</conversation>`,
-                      },
-                    ],
-                    timestamp: Date.now(),
-                  },
-                ],
-              },
-              { maxTokens: 8192, signal: event.signal, cacheRetention: "none", sessionId: randomUUID() },
-            );
-            const text = (response.content ?? [])
-              .filter((c: any) => c?.type === "text")
-              .map((c: any) => String(c.text ?? ""))
-              .join("\n")
-              .trim();
-            if (text === "") return undefined;
-            workSummary = text;
-            return {
-              compaction: {
-                summary: `${pin.text}\n\n${PIN_DIVIDER}\n\n${workSummary}`,
-                firstKeptEntryId: preparation.firstKeptEntryId,
-                tokensBefore: preparation.tokensBefore,
-                usage: response.usage,
-              },
-            };
-          }
-          return {
-            compaction: {
-              summary: `${pin.text}\n\n${PIN_DIVIDER}\n\n${workSummary}`,
-              firstKeptEntryId: preparation.firstKeptEntryId,
-              tokensBefore: preparation.tokensBefore,
-            },
-          };
-        } catch {
-          return undefined;
-        }
-      });
-    },
-  };
-}
-
-/** One tool result inside the pinned opening may be large (an MCP `get` runs
- * to a few KB) but must stay whole enough to be the thing the agent actually
- * read; this cap only guards against a pathological giant result. */
-const PIN_TOOL_RESULT_MAX = 16_000;
-
-/**
- * Verbatim serialization of the opening exchange, in the same voice pi uses
- * when it serializes conversations ([User]/[Assistant]/[Tool result]), with
- * tool results kept essentially whole rather than truncated to a stub.
- */
-export function serializeOpening(messages: readonly any[]): string {
-  const parts: string[] = [
-    "# This session's opening exchange, preserved verbatim",
-    "The messages below are the word-for-word opening of this session — the " +
-      "operator's messages, your replies, and the tool calls you made. They " +
-      "are pinned so compaction never erases them.",
-  ];
-  for (const m of messages) {
-    if (m?.role === "user") {
-      const text = contentText(m);
-      if (text) parts.push(`[User]:\n${text}`);
-    } else if (m?.role === "assistant") {
-      const text = contentText(m);
-      if (text) parts.push(`[Assistant]:\n${text}`);
-      const calls = (Array.isArray(m.content) ? m.content : [])
-        .filter((c: any) => c?.type === "toolCall")
-        .map((c: any) => `${String(c.name ?? "tool")}(${safeJson(c.arguments ?? c.args)})`);
-      if (calls.length > 0) parts.push(`[Assistant tool calls]: ${calls.join("; ")}`);
-    } else if (m?.role === "toolResult") {
-      const text = contentText(m);
-      parts.push(
-        `[Tool result]: ${
-          text.length > PIN_TOOL_RESULT_MAX
-            ? `${text.slice(0, PIN_TOOL_RESULT_MAX)}… [truncated]`
-            : text
-        }`,
-      );
-    }
-  }
-  return parts.join("\n\n");
-}
-
-function contentText(message: any): string {
-  if (typeof message.content === "string") return message.content.trim();
-  if (!Array.isArray(message.content)) return "";
-  return message.content
-    .filter((part: any) => part?.type === "text")
-    .map((part: any) => String(part.text ?? ""))
-    .join("")
-    .trim();
-}
-
-function safeJson(value: unknown): string {
-  try {
-    return JSON.stringify(value ?? {}) ?? "{}";
-  } catch {
-    return "{}";
-  }
+export function registerWorkingStateFrame(
+  sessionId: string,
+  frame: WorkingStateFrame,
+): () => void {
+  const registry: Map<string, WorkingStateFrame> =
+    ((globalThis as any).__piWorkingStateHosts ??= new Map());
+  registry.set(sessionId, frame);
+  return () => registry.delete(sessionId);
 }
 
 /** Transcript payloads are for a human reader, not a second data authority:

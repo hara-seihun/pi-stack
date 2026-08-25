@@ -1,6 +1,6 @@
 import { describe, expect, it, vi } from "vitest";
 import { continuationFor, type TurnFacts } from "../src/host/continuations.js";
-import { openingPinExtension, PiHost, serializeOpening } from "../src/host/pi-host.js";
+import { PiHost, registerWorkingStateFrame } from "../src/host/pi-host.js";
 import { MAX_CHECK_INS, type HostRunResult, type LaunchSpec } from "../src/host/types.js";
 
 /**
@@ -677,152 +677,19 @@ describe("the opening probe", () => {
   });
 });
 
-describe("the opening pin", () => {
-  type Handler = (event: unknown, ctx: unknown) => Promise<unknown>;
-  const captureAll = () => {
-    const handlers = new Map<string, Handler>();
-    const bind = (pin: Parameters<typeof openingPinExtension>[0]) => {
-      (openingPinExtension(pin) as { factory: (pi: unknown) => void }).factory({
-        on: (name: string, fn: Handler) => {
-          handlers.set(name, fn);
-        },
-      } as never);
-      return handlers;
-    };
-    return bind;
-  };
-  const capture = () => {
-    const bindAll = captureAll();
-    return (pin: Parameters<typeof openingPinExtension>[0]) => {
-      const handlers = bindAll(pin);
-      return (event: unknown, ctx: unknown) => handlers.get("session_before_compact")!(event, ctx);
-    };
-  };
-  const ctx = (summary = "WORK SUMMARY") => ({
-    model: { id: "m" },
-    modelRegistry: {
-      complete: async () => ({
-        content: [{ type: "text", text: summary }],
-        usage: { input: 1, output: 1 },
-      }),
-    },
-  });
-  const message = (role: string, text: string) => ({
-    role,
-    content: [{ type: "text", text }],
-  });
+describe("the working-state host frame", () => {
+  it("publishes the exact task and completed-opening boundary, then withdraws them", () => {
+    const frame = { activeTask: "Classify the current ledger obligation", openingMessageCount: 0 };
+    const unregister = registerWorkingStateFrame("sess-1", frame);
+    const registry = (globalThis as never as {
+      __piWorkingStateHosts: Map<string, typeof frame>;
+    }).__piWorkingStateHosts;
 
-  it("replays the exchange verbatim at the head of every compaction summary", async () => {
-    const bind = capture();
-    const openingMessages = [
-      message("user", "Here's something I wrote to fix your priors."),
-      message("assistant", "I give myself 25%."),
-    ];
-    const handle = bind({ text: serializeOpening(openingMessages), messageCount: 2 });
-    const result = (await handle(
-      {
-        preparation: {
-          messagesToSummarize: [...openingMessages, message("user", "later work")],
-          turnPrefixMessages: [],
-          firstKeptEntryId: "entry-9",
-          tokensBefore: 100_000,
-        },
-      },
-      ctx(),
-    )) as { compaction: { summary: string; firstKeptEntryId: string } };
+    expect(registry.get("sess-1")).toBe(frame);
+    frame.openingMessageCount = 7;
+    expect(registry.get("sess-1")?.openingMessageCount).toBe(7);
 
-    expect(result.compaction.firstKeptEntryId).toBe("entry-9");
-    const summary = result.compaction.summary;
-    expect(summary).toContain("Here's something I wrote to fix your priors.");
-    expect(summary).toContain("I give myself 25%.");
-    expect(summary).toContain("# Work since the opening exchange");
-    expect(summary.indexOf("priors")).toBeLessThan(summary.indexOf("# Work since"));
-    expect(summary).toContain("WORK SUMMARY");
-  });
-
-  it("registers the opening span with context-guard and withdraws it on shutdown", async () => {
-    // Context-guard, not native compaction, is what actually cuts context on
-    // large-window models; it protects the head span registered under the
-    // session id in this global map.
-    const bindAll = captureAll();
-    const pin = { text: undefined, messageCount: 0 };
-    const handlers = bindAll(pin);
-    const guardCtx = { sessionManager: { getSessionId: () => "sess-1" } };
-    const registry = (globalThis as never as { __piContextGuardProtect: Map<string, number> })
-      .__piContextGuardProtect;
-
-    // Before the opening turns complete there is nothing to protect.
-    await handlers.get("context")!({ type: "context" }, guardCtx);
-    expect(registry?.get("sess-1")).toBeUndefined();
-
-    pin.messageCount = 7;
-    await handlers.get("context")!({ type: "context" }, guardCtx);
-    expect(registry.get("sess-1")).toBe(7);
-
-    await handlers.get("session_shutdown")!({ type: "session_shutdown" }, guardCtx);
-    expect(registry.get("sess-1")).toBeUndefined();
-  });
-
-  it("stays out of the way when there is no pinned opening", async () => {
-    const bind = capture();
-    const handle = bind({ text: undefined, messageCount: 0 });
-    expect(
-      await handle({ preparation: { messagesToSummarize: [], turnPrefixMessages: [] } }, ctx()),
-    ).toBeUndefined();
-  });
-
-  it("steps aside on failure so compaction still happens without the pin", async () => {
-    const bind = capture();
-    const handle = bind({ text: "# pinned", messageCount: 0 });
-    const failing = {
-      model: { id: "m" },
-      modelRegistry: {
-        complete: async () => {
-          throw new Error("provider unavailable");
-        },
-      },
-    };
-    expect(
-      await handle(
-        {
-          preparation: {
-            messagesToSummarize: [message("user", "work")],
-            turnPrefixMessages: [],
-            firstKeptEntryId: "e",
-            tokensBefore: 1,
-          },
-        },
-        failing,
-      ),
-    ).toBeUndefined();
-  });
-});
-
-describe("serializeOpening", () => {
-  it("keeps text, tool calls, and tool results whole", () => {
-    const text = serializeOpening([
-      { role: "user", content: [{ type: "text", text: "Examine erdos647." }] },
-      {
-        role: "assistant",
-        content: [
-          { type: "text", text: "Looking now." },
-          { type: "toolCall", name: "mcp", arguments: { tool: "math_get", args: { ref: "erdos647" } } },
-        ],
-      },
-      { role: "toolResult", content: [{ type: "text", text: "certified to 6.2e17" }] },
-    ]);
-
-    expect(text).toContain("[User]:\nExamine erdos647.");
-    expect(text).toContain("[Assistant]:\nLooking now.");
-    expect(text).toContain('mcp({"tool":"math_get","args":{"ref":"erdos647"}})');
-    expect(text).toContain("[Tool result]: certified to 6.2e17");
-    expect(text).toContain("verbatim");
-  });
-
-  it("truncates only a pathological giant tool result", () => {
-    const giant = "x".repeat(20_000);
-    const text = serializeOpening([{ role: "toolResult", content: [{ type: "text", text: giant }] }]);
-    expect(text).toContain("[truncated]");
-    expect(text.length).toBeLessThan(17_000);
+    unregister();
+    expect(registry.has("sess-1")).toBe(false);
   });
 });

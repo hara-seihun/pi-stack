@@ -179,36 +179,23 @@ describe scheduling:
   the system prompt, which compaction preserves.
 - `opening` (`task set … --opening file1,file2`) and `selfPaced` (`…
   --self-paced true`): the opening exchange. The host sends each file's text
-  as a real user turn, in order, before the task prompt; the agent lives the
-  exchange — answers each message, runs whatever tools it reaches for — and
-  the host then pins the lived record verbatim through both context
-  mechanisms: it registers the span as context-guard's protected head (the
-  global 250k-cap extension is what actually cuts context on large-window
-  models, and its cut would otherwise evict the opening's tool results
-  first), and an inline extension rebuilds each native compaction summary as
-  the word-for-word exchange followed by a generated summary of the work
-  after it (native compaction still governs small-window models and cursor
-  sessions, which the guard excludes). Message
-  bodies are captured into the ledger row at set time, so a launch never
-  changes voice because a fetch failed; re-run `task set` to pick up file
-  edits. An opening may be a template: `--opening-probe CMD` names a command
-  (its content likewise captured at set time when read from a file) that runs
-  fresh at every launch and prints one JSON object, whose values fill
-  `{{key}}` placeholders in the opening messages — the math-frontier lane
-  samples a different famous open problem per session this way, because a
-  fixed example anchored whole batches on one target (16 filings against
-  Erdős 647 in the 48 hours the opening named it). No cache: a cached draw
-  would hand a batch the same problem, which is the crowding the probe
-  exists to break. A failed probe or an unresolved placeholder fails the
-  launch loudly; an operator voice with literal template holes reads as
-  fabrication and poisons the exchange. Verbatim matters: agents are acutely good at telling self from
-  not-self, and a paraphrased opening reads as someone else's words. With
-  `selfPaced` the shift is one work turn — no continuation check-ins; the
-  agent ending its turn is the agent deciding the shift is over, and it is
-  deliberately not told this. Measured on the math-frontier lane
-  (2026-08-22): the exchange moved self-assessed odds on an open target from
-  ~0.1% to 25–40% and flipped ledger contact from "crowded field, retreat"
-  to "inherited terrain, attack"; the experiment record lives in
+  as a real user turn, in order, before the task prompt; the agent answers
+  each message and may use tools. The host then publishes two facts to the
+  global state compactor: the opening's completed message boundary and the
+  exact task prompt that follows. Compaction can retain constraints and
+  findings from the opening, but cannot mistake one of its requests for the
+  active task. Raw messages remain in Pi's session and `state_recall` can
+  recover a cited source. Message bodies are captured into the ledger row at
+  set time, so a launch never changes voice because a fetch failed; re-run
+  `task set` to pick up file edits. An opening may be a template:
+  `--opening-probe CMD` names a command that runs fresh at every launch and
+  prints one JSON object whose values fill `{{key}}` placeholders. The
+  math-frontier lane samples a different famous open problem per session this
+  way because a fixed example anchored whole batches on one target. A failed
+  probe or unresolved placeholder fails the launch. With `selfPaced` the
+  shift is one work turn with no continuation check-ins. Measured on the
+  math-frontier lane on 2026-08-22, the exchange moved self-assessed odds on
+  an open target from about 0.1% to 25–40%; the experiment record lives in
   `~/data/thread-lab/_experiments/2026-08-22-erdos647-priors/`.
 - `demand`: a constant or a cheap read-only probe command whose last stdout
   line is a work-unit count. `0` means no work; agents are never launched to
