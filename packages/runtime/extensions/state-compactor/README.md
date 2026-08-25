@@ -20,6 +20,20 @@ Pi's JSONL session stays the source of truth. Checkpoints are branch-local custo
 
 The active threshold also stays 32,000 tokens below the selected model's context window. The retained tail is 40,000 tokens on large models and scales down on smaller ones.
 
+## Context pins
+
+An extension loaded before state-compactor may keep derived context across checkpoint boundaries by adding a transient user message with this field:
+
+```js
+stateCompactor: {
+  pin: true,
+  id: "stable-owner-scoped-id",
+  replacesToolCallIds: ["call-id-already-carrying-the-same-content"]
+}
+```
+
+State-compactor deduplicates pins by `id`, omits a pin while every listed tool result remains in the assembled view, and restores it when a checkpoint removes any replacement. Pins count toward the checkpoint budget and are placed before the current user request. Use an empty replacement list for a notice that must remain visible. Pin messages are transient provider context; the owning extension remains responsible for regenerating them from durable session state.
+
 ## Design sources
 
 - [TRACE](https://arxiv.org/abs/2608.06503): typed current and completed state, plus continuation-based damage measurement.
