@@ -6,15 +6,15 @@
       },
       "models": [
         {
-          "id": "moonshotai/kimi-k3",
-          "name": "Kimi K3 (NVIDIA NIM)",
+          "id": "nvidia/nemotron-3-ultra-550b-a55b",
+          "name": "Nemotron 3 Ultra 550B (NVIDIA NIM)",
           "api": "openai-completions",
           "reasoning": true,
           "input": [
             "text"
           ],
           "contextWindow": 1048576,
-          "maxTokens": 131072,
+          "maxTokens": 65536,
           "cost": {
             "input": 0,
             "output": 0,
@@ -22,18 +22,20 @@
             "cacheWrite": 0
           },
           "thinkingLevelMap": {
-            "off": "none",
-            "minimal": "low",
-            "low": "low",
-            "medium": "high",
-            "high": "high",
-            "xhigh": "max",
+            "xhigh": "xhigh",
             "max": "max"
           },
           "compat": {
             "supportsStore": false,
             "supportsDeveloperRole": false,
+            "supportsReasoningEffort": false,
             "maxTokensField": "max_tokens",
+            "thinkingFormat": "chat-template",
+            "chatTemplateKwargs": {
+              "enable_thinking": {
+                "$var": "thinking.enabled"
+              }
+            },
             "supportsStrictMode": false,
             "supportsLongCacheRetention": false
           }
