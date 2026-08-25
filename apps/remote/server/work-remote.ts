@@ -19,7 +19,6 @@ import {
   type ReadOperations,
   type WriteOperations,
 } from "@earendil-works/pi-coding-agent";
-import { Type } from "typebox";
 import { processGroupCleanupCommand } from "./remote-process";
 
 const SSH = process.env.PI_REMOTE_WORK_SSH || "";
@@ -342,22 +341,6 @@ export default function workRemote(pi: ExtensionAPI) {
       const text = output.text.trimEnd();
       const truncation = truncateHead(text);
       return { content: [{ type: "text", text: truncation.content || "Directory is empty" }], details: truncation.truncated ? { truncation } : undefined };
-    },
-  });
-
-  pi.registerTool({
-    name: "rename_thread",
-    label: "Rename thread",
-    description: "Rename this Pi Remote thread from its initial numeric title",
-    parameters: Type.Object({ title: Type.String({ description: "Concise two- or three-word title" }) }),
-    async execute(_id, { title }) {
-      const sessionId = process.env.PI_REMOTE_SESSION_ID;
-      const server = process.env.PI_REMOTE_SERVER_URL;
-      if (!sessionId || !server) throw new Error("Pi Remote rename control plane is unavailable");
-      const response = await fetch(`${server}/v1/sessions/${sessionId}/name`, { method: "PUT", body: title });
-      const text = await response.text();
-      if (!response.ok) throw new Error(text || `Rename failed (${response.status})`);
-      return { content: [{ type: "text", text: `Thread renamed to ${title}` }], details: JSON.parse(text) };
     },
   });
 

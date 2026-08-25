@@ -4,6 +4,8 @@ A self-hosted web and Android controller for persistent [Pi](https://pi.dev) cod
 
 Pi Remote keeps session state in SQLite, talks to Pi through RPC mode, survives browser or app disconnects, queues prompts durably, streams tool and model activity, and can combine agent activity from local and SSH-backed hosts. An optional identity router starts per-user supervisors whose private directories are mounted only while unlocked.
 
+Each runtime loads `server/thread-context.ts`. The extension offers initialization only while the durable session title is numeric, removes that control from named threads, and treats process or model changes as continuation rather than a new thread. On hosts that load `pi-runtime`'s state-compactor, it also keeps previously read mandatory skill contents in the compacted provider view. It validates those contents against the current files and asks the agent to finish a paged read or refresh a changed file instead of silently retaining stale instructions.
+
 Pi sessions may delegate a self-contained task to one isolated nested agent.
 Both clients advertise that capability in the composer and render `delegate`
 as a distinct **Nested agent** tool card: the full delegated task and working

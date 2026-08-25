@@ -34,6 +34,7 @@ const PRIVATE_DIR = process.env.PI_REMOTE_PRIVATE_DIR ?? join(HOME, PRIVATE_ID);
 const WORK_SHADOW = process.env.PI_REMOTE_WORK_SHADOW ?? join(DATA, "work-shadow");
 const WORK_EXTENSION = join(import.meta.dir, "work-remote.ts");
 const SERVICE_TIER_EXTENSION = join(import.meta.dir, "service-tier.ts");
+const THREAD_CONTEXT_EXTENSION = join(import.meta.dir, "thread-context.ts");
 const SERVICE_TIER_DIR = join(DATA, "service-tiers");
 const ORCHESTRATOR_DB_PATH = process.env.PI_REMOTE_ORCHESTRATOR_DB ?? join(HOME, ".local/share/pi-orchestrator/ledger.sqlite3");
 const ORCHESTRATOR_AUTH_PATH = process.env.PI_ORCHESTRATOR_AUTH ?? join(dirname(realpathSync(ORCHESTRATOR_DB_PATH)), "auth.json");
@@ -50,16 +51,7 @@ const HOST = process.env.PI_REMOTE_HOST ?? "127.0.0.1";
 const PORT = Number(process.env.PI_REMOTE_PORT ?? "8788");
 const AGENT_DIR = process.env.PI_AGENT_DIR ?? join(HOME, ".pi/agent");
 const WEB_DIR = join(import.meta.dir, "../web");
-const RENAME_SCRIPT = join(import.meta.dir, "rename-thread.sh");
-const IMAGE_TAG = process.env.PI_REMOTE_IMAGE_TAG ?? "pi-remote-image";
-const IMAGE_PRESENTATION_PROMPT = `Pi Remote image presentation: To show a local image, include <${IMAGE_TAG} src="${HOME}/path/to/image.png" /> on its own line. Use an absolute path to an existing image.`;
-const alertsInbox = process.env.PI_REMOTE_ALERTS_INBOX;
-const operatorName = process.env.PI_REMOTE_OPERATOR_NAME ?? "the operator";
-const ALERTS_INBOX_PROMPT = alertsInbox
-  ? `Machine alerts inbox: immediately after the rename, list ${alertsInbox} in the same tool call. If it contains files, read and delete each one, then surface every alert prominently to ${operatorName}. Deleting the file marks it consumed.`
-  : "";
-const THREAD_NAMING_PROMPT = `Pi Remote thread naming: New threads begin with a numeric title. After receiving the first user message in a still-numbered thread, choose a concise descriptive title of two or three words based on that message. As your first action, use the bash tool to run bash "$PI_REMOTE_RENAME_SCRIPT" "Your Chosen Title". Do not ask permission and do not narrate the rename; continue with the user's task immediately afterward. The script only renames an initial numeric title and is idempotent for the same title, so do not call it again after it succeeds.\n\n${ALERTS_INBOX_PROMPT}\n\n${IMAGE_PRESENTATION_PROMPT}`;
-const WORK_THREAD_NAMING_PROMPT = `Pi Remote thread naming: New threads begin with a numeric title. After receiving the first user message in a still-numbered thread, choose a concise descriptive title of two or three words based on that message. As your first action, call the rename_thread tool with that title. Do not ask permission and do not narrate the rename; continue with the user's task immediately afterward. The tool only renames an initial numeric title and is idempotent for the same title, so do not call it again after it succeeds.\n\n${IMAGE_PRESENTATION_PROMPT}`;
+
 // Starting a thread is two independent choices: where it runs, and which model runs there.
 // Both clients read this manifest rather than carrying their own copy of the combinations.
 // Luna is still an orchestrator agent; it is only the hand-started thread that does not offer
@@ -1173,9 +1165,9 @@ async function startRuntime(row: any): Promise<Runtime> {
   writeServiceTier(row.id, row.service_tier === "priority" ? "priority" : "default");
   const args = [
     NICE, "-n", "10", PI, "--mode", "rpc", "--session-dir", join(DATA, "sessions"),
-    "--append-system-prompt", isWork ? WORK_THREAD_NAMING_PROMPT : THREAD_NAMING_PROMPT,
+    "--extension", SERVICE_TIER_EXTENSION,
+    "--extension", THREAD_CONTEXT_EXTENSION,
   ];
-  args.push("--extension", SERVICE_TIER_EXTENSION);
   if (isWork) args.push("--no-context-files", "--extension", WORK_EXTENSION);
   if (resumePath) args.push("--session", resumePath);
   else {
@@ -1199,7 +1191,6 @@ async function startRuntime(row: any): Promise<Runtime> {
       PI_REMOTE_SESSION_ID: row.id,
       PI_REMOTE_SERVICE_TIER_FILE: serviceTierPath(row.id),
       PI_REMOTE_SERVER_URL: `http://${HOST}:${PORT}`,
-      PI_REMOTE_RENAME_SCRIPT: RENAME_SCRIPT,
       PI_REMOTE_EXECUTION_TARGET: remoteTarget?.id ?? "local",
       PI_REMOTE_WORK_SSH: remoteTarget?.ssh ?? "",
       PI_REMOTE_WORK_HOME: remoteTarget?.home ?? "",

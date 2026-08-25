@@ -103,7 +103,7 @@ provider = sys.argv[sys.argv.index('--provider') + 1] if '--provider' in sys.arg
 model_id = sys.argv[sys.argv.index('--model') + 1] if '--model' in sys.argv else 'claude-fable-5'
 thinking_level = sys.argv[sys.argv.index('--thinking') + 1] if '--thinking' in sys.argv else 'off'
 with open(os.environ['PI_FAKE_LAUNCH'], 'w') as launch:
- json.dump({'argv': sys.argv, 'pid': os.getpid(), 'sessionId': os.environ.get('PI_REMOTE_SESSION_ID'), 'serverUrl': os.environ.get('PI_REMOTE_SERVER_URL'), 'renameScript': os.environ.get('PI_REMOTE_RENAME_SCRIPT'), 'serviceTierFile': os.environ.get('PI_REMOTE_SERVICE_TIER_FILE'), 'executionTarget': os.environ.get('PI_REMOTE_EXECUTION_TARGET'), 'workSsh': os.environ.get('PI_REMOTE_WORK_SSH'), 'workCwd': os.environ.get('PI_REMOTE_WORK_CWD'), 'agentDir': os.environ.get('PI_CODING_AGENT_DIR'), 'offline': os.environ.get('PI_OFFLINE')}, launch)
+ json.dump({'argv': sys.argv, 'pid': os.getpid(), 'sessionId': os.environ.get('PI_REMOTE_SESSION_ID'), 'serverUrl': os.environ.get('PI_REMOTE_SERVER_URL'), 'serviceTierFile': os.environ.get('PI_REMOTE_SERVICE_TIER_FILE'), 'executionTarget': os.environ.get('PI_REMOTE_EXECUTION_TARGET'), 'workSsh': os.environ.get('PI_REMOTE_WORK_SSH'), 'workCwd': os.environ.get('PI_REMOTE_WORK_CWD'), 'agentDir': os.environ.get('PI_CODING_AGENT_DIR'), 'offline': os.environ.get('PI_OFFLINE')}, launch)
 streaming = False
 compacting = False
 last = ''
@@ -748,7 +748,7 @@ describe("web and supervisor integration", () => {
     expect(existsSync(first.path)).toBe(false);
   });
 
-  test("lets an active agent rename its initial numeric thread with the bundled script", async () => {
+  test("initializes a numeric thread once through the lifecycle extension", async () => {
     const id = await createThread("home", "sol");
     const before = await api("GET", `/v1/sessions/${id}`);
     expect(before.value.session.provider).toBe("openai");
@@ -756,31 +756,20 @@ describe("web and supervisor integration", () => {
     const launch = JSON.parse(readFileSync(fakeLaunch, "utf8"));
     expect(launch.sessionId).toBe(id);
     expect(launch.serverUrl).toBe(base);
-    expect(launch.renameScript).toBe(join(import.meta.dir, "rename-thread.sh"));
-    expect(launch.argv).toContain("--append-system-prompt");
+    expect(launch.argv).not.toContain("--append-system-prompt");
     expect(launch.argv).toEqual(expect.arrayContaining([
       "--extension", join(import.meta.dir, "service-tier.ts"),
+      "--extension", join(import.meta.dir, "thread-context.ts"),
     ]));
     expect(readFileSync(launch.serviceTierFile, "utf8").trim()).toBe("default");
-    expect(launch.argv.join(" ")).toContain("two or three words");
-    expect(launch.argv.join(" ")).toContain("use the bash tool");
     expect(launch.argv).toEqual(expect.arrayContaining([
       "--provider", "openai-codex", "--model", "gpt-5.6-sol", "--thinking", "high",
     ]));
     expect(initialNumber).toBeGreaterThan(0);
 
-    const rename = Bun.spawn(["bash", join(import.meta.dir, "rename-thread.sh"), "Markdown Rendering"], {
-      stdout: "pipe",
-      stderr: "pipe",
-      env: { ...process.env, PI_REMOTE_SESSION_ID: id, PI_REMOTE_SERVER_URL: base },
-    });
-    const [output, renameError, renameCode] = await Promise.all([
-      new Response(rename.stdout).text(),
-      new Response(rename.stderr).text(),
-      rename.exited,
-    ]);
-    expect({ renameCode, renameError }).toEqual({ renameCode: 0, renameError: "" });
-    expect(JSON.parse(output)).toEqual({ ok: true, name: "Markdown Rendering" });
+    const initialized = await fetch(`${base}/v1/sessions/${id}/name`, { method: "PUT", body: "Markdown Rendering" });
+    expect(initialized.status).toBe(200);
+    expect(await initialized.json()).toEqual({ ok: true, name: "Markdown Rendering" });
 
     const renamed = await api("GET", `/v1/sessions/${id}`);
     expect(renamed.value.session.name).toBe("Markdown Rendering");
@@ -893,9 +882,9 @@ describe("web and supervisor integration", () => {
     });
     expect(launch.argv).toEqual(expect.arrayContaining([
       "--provider", "openai-codex", "--model", "gpt-5.6-sol", "--thinking", "high",
+      "--extension", join(import.meta.dir, "thread-context.ts"),
       "--no-context-files", "--extension", join(import.meta.dir, "work-remote.ts"),
     ]));
-    expect(launch.argv.join(" ")).toContain("rename_thread tool");
   });
 
   test("rolls account aliases into common and uncommon model groups", async () => {
