@@ -9,7 +9,7 @@ The engine has four pieces:
 3. Every fact cites a raw session entry. `state_recall` pages the exact source when the compact record is insufficient.
 4. A recent tool-safe tail remains verbatim. Large tool results may leave the active view, but their source entries remain recallable.
 
-A checkpoint begins with a fixed warning that it is a historical record rather than a user instruction. Completed opening exchanges cannot become active work. The orchestrator may provide an authoritative task, but the engine does not require one. Without a host task it derives current activity from unresolved user messages and permits `active: null` for an ordinary conversation.
+A checkpoint begins with a fixed warning that it is a historical record rather than a user instruction. Completed opening exchanges cannot become active work. The orchestrator may provide an authoritative task, but the engine does not require one. Without a host task it derives current activity from unresolved user messages and permits `active: null` for an ordinary conversation. If compaction lands during tool use, the current user request stays open until a visible assistant reply ends the turn, even when the tools have already finished the work.
 
 Pi's JSONL session stays the source of truth. Checkpoints are branch-local custom entries. `<session>.state-views.ndjson` records the checkpoint, branch leaf, boundary, token estimate, and hashes needed to reproduce each assembled provider view.
 
