@@ -1,12 +1,16 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import stateCompactor, { COMPACT_THRESHOLD_TOKENS } from "./index.mjs";
+import stateCompactor, { COMPACT_THRESHOLD_TOKENS, CONTINUATION_MESSAGE } from "./index.mjs";
 
 test("guards provider requests with one native compaction at 250,000 tokens", () => {
   const handlers = new Map();
+  const messages = [];
   stateCompactor({
     on(event, handler) {
       handlers.set(event, handler);
+    },
+    sendMessage(message, options) {
+      messages.push({ message, options });
     },
   });
 
@@ -31,10 +35,21 @@ test("guards provider requests with one native compaction at 250,000 tokens", ()
   assert.equal(compactions.length, 1);
 
   compactions[0].onError(new Error("failed"));
+  assert.equal(messages.length, 0);
   guard({}, ctx);
   assert.equal(compactions.length, 2);
 
   compactions[1].onComplete({});
+  assert.deepEqual(messages, [
+    {
+      message: {
+        customType: "state-compactor",
+        content: CONTINUATION_MESSAGE,
+        display: false,
+      },
+      options: { triggerTurn: true },
+    },
+  ]);
   guard({}, ctx);
   assert.equal(compactions.length, 3);
 });
