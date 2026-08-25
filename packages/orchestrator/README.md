@@ -188,13 +188,10 @@ describe scheduling:
 - `opening` (`task set … --opening file1,file2`) and `selfPaced` (`…
   --self-paced true`): the opening exchange. The host sends each file's text
   as a real user turn, in order, before the task prompt; the agent answers
-  each message and may use tools. The host then publishes two facts to the
-  global state compactor: the opening's completed message boundary and the
-  exact task prompt that follows. Compaction can retain constraints and
-  findings from the opening, but cannot mistake one of its requests for the
-  active task. Raw messages remain in Pi's session and `state_recall` can
-  recover a cited source. Message bodies are captured into the ledger row at
-  set time, so a launch never changes voice because a fetch failed; re-run
+  each message and may use tools. Pi stores the exchange as ordinary session
+  messages and native compaction summarizes it with the rest of the
+  conversation. Message bodies are captured into the ledger row at set time,
+  so a launch never changes voice because a fetch failed; re-run
   `task set` to pick up file edits. An opening may be a template:
   `--opening-probe CMD` names a command that runs fresh at every launch and
   prints one JSON object whose values fill `{{key}}` placeholders. The

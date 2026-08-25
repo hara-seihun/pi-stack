@@ -1,6 +1,6 @@
 import { describe, expect, it, vi } from "vitest";
 import { continuationFor, type TurnFacts } from "../src/host/continuations.js";
-import { PiHost, registerWorkingStateFrame } from "../src/host/pi-host.js";
+import { PiHost } from "../src/host/pi-host.js";
 import { MAX_CHECK_INS, type HostRunResult, type LaunchSpec } from "../src/host/types.js";
 
 /**
@@ -674,22 +674,5 @@ describe("the opening probe", () => {
 
     expect(result.state).toBe("error");
     expect(result.detail).toContain("not JSON");
-  });
-});
-
-describe("the working-state host frame", () => {
-  it("publishes the exact task and completed-opening boundary, then withdraws them", () => {
-    const frame = { activeTask: "Classify the current ledger obligation", openingMessageCount: 0 };
-    const unregister = registerWorkingStateFrame("sess-1", frame);
-    const registry = (globalThis as never as {
-      __piWorkingStateHosts: Map<string, typeof frame>;
-    }).__piWorkingStateHosts;
-
-    expect(registry.get("sess-1")).toBe(frame);
-    frame.openingMessageCount = 7;
-    expect(registry.get("sess-1")?.openingMessageCount).toBe(7);
-
-    unregister();
-    expect(registry.has("sess-1")).toBe(false);
   });
 });

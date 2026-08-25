@@ -234,14 +234,6 @@ export class PiHost implements HostManager {
     // provider (cursor) exists only inside the session's own model runtime,
     // because the extension that registers it is loaded per session.
     const preresolved = this.options.resolveModel(spec);
-    // Doctrine stays in the system prompt. The task itself is also exposed to
-    // the state compactor as host-owned data, so a completed opening exchange
-    // cannot be mistaken for the work assigned after it. Interactive sessions
-    // simply have no host frame and derive their activity from user messages.
-    const frame: WorkingStateFrame = {
-      activeTask: prompt ?? "",
-      openingMessageCount: 0,
-    };
     const doctrine = spec.doctrineUrl === undefined ? undefined : await this.doctrine(spec.doctrineUrl);
     let resourceLoader: DefaultResourceLoader | undefined;
     if (doctrine !== undefined) {
@@ -282,11 +274,7 @@ export class PiHost implements HostManager {
     });
     const interrupted = (operation: Promise<unknown>): Promise<boolean> =>
       Promise.race([operation.then(() => false), cancelled]);
-    const unregisterWorkingState = registerWorkingStateFrame(
-      session.sessionManager.getSessionId(),
-      frame,
-    );
-    const disposers: (() => void)[] = [hosted.dispose, unregisterWorkingState];
+    const disposers: (() => void)[] = [hosted.dispose];
     let cleaned = false;
     const cleanup = () => {
       if (cleaned) return;
@@ -334,11 +322,8 @@ export class PiHost implements HostManager {
       // and made every lane restart from scratch. Nothing here is timed: a
       // turn may run as long as the agent keeps working.
       // The opening exchange is lived, not injected: each message is a real
-      // turn the agent answers with whatever tools it reaches for, and the
-      // record of that lived exchange is what the pin extension replays
-      // verbatim through every compaction. Injecting a transcript the agent
-      // never produced would be spotted — agents are acutely good at telling
-      // self from not-self — and disbelieved.
+      // turn the agent answers with whatever tools it reaches for. Injecting a
+      // transcript the agent never produced would be spotted and disbelieved.
       // A shift survives its provider. Everything below treats a failed turn
       // as weather to wait out rather than as the end of the session: the
       // runner prices the wait (see HostEvents.turnFailed), the host sleeps it
@@ -374,7 +359,6 @@ export class PiHost implements HostManager {
           break;
         }
       }
-      if (opening.length > 0) frame.openingMessageCount = session.messages.length;
       let turn = 0;
       let resume: string | undefined;
       for (;;) {
@@ -585,26 +569,6 @@ function lastAssistant(
     .find(
       (m): m is typeof m & { stopReason?: string; errorMessage?: string } => m.role === "assistant",
     );
-}
-
-export interface WorkingStateFrame {
-  activeTask: string;
-  openingMessageCount: number;
-}
-
-/**
- * Publishes facts only the host can know. The global state compactor reads
- * this mutable frame while building a checkpoint. There is no frame in an
- * interactive session, so the compactor falls back to unresolved user turns.
- */
-export function registerWorkingStateFrame(
-  sessionId: string,
-  frame: WorkingStateFrame,
-): () => void {
-  const registry: Map<string, WorkingStateFrame> =
-    ((globalThis as any).__piWorkingStateHosts ??= new Map());
-  registry.set(sessionId, frame);
-  return () => registry.delete(sessionId);
 }
 
 /** Transcript payloads are for a human reader, not a second data authority:
