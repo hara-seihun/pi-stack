@@ -69,6 +69,8 @@ const STALL_KILL_GRACE_MS = 10 * 60_000;
 const RECOVERY_BASE_MS = 30_000;
 const RECOVERY_MAX_MS = 10 * 60_000;
 const RECOVERY_ATTEMPTS = 6;
+const TERMINAL_THROTTLE_BASE_MS = 30 * 60_000;
+const TERMINAL_THROTTLE_MAX_MS = 24 * 60 * 60_000;
 
 /** A demand reading older than this says nothing about the queue now. The
  * controller re-probes on a 60s TTL, so anything this old means nobody is
@@ -187,24 +189,43 @@ export class Runner implements HostEvents {
     const run = this.ledger.run(runId);
     if (run === undefined) return;
     const detail = result.detail ?? "";
-    // An account that cannot authenticate is not a failing task: recorded as
-    // aborted (like an unclaimed run) so it never trips a task's circuit
-    // breaker, and cooled down so waves stop being spent on it.
     const credential = result.state === "error" && isCredentialError(detail);
-    this.ledger.finishRun(runId, credential ? { ...result, state: "aborted" } : result, at);
+    const rateLimited = result.state === "error" && isRateLimitError(detail);
+    // Authentication and provider capacity belong to the account, not the
+    // task, so neither can trip the task's circuit breaker.
+    this.ledger.finishRun(
+      runId,
+      credential || rateLimited ? { ...result, state: "aborted" } : result,
+      at,
+    );
     this.ledger.taskFinished(run.taskId);
     if (credential) {
       this.ledger.setAccountCooldown(run.accountId, at + CREDENTIAL_COOLDOWN_MS);
       return;
     }
-    // An exhausted account fails every launch it gets; cool it down so the
-    // broker moves the task's next run to a sibling account instead of
-    // burning the breaker window on the same dead meter.
-    if (result.state === "error" && isRateLimitError(detail)) {
+    if (rateLimited) {
       const family = this.ledger.accounts().find((a) => a.id === run.accountId)?.provider;
       const cooldown = this.cfg.cooldown ?? uniformCooldown;
-      this.ledger.setAccountCooldown(run.accountId, at + cooldown(family, detail));
+      const failures = this.consecutiveTerminalThrottles(run.accountId);
+      const terminalBackoff = Math.min(
+        TERMINAL_THROTTLE_BASE_MS * 2 ** Math.max(0, failures - 1),
+        TERMINAL_THROTTLE_MAX_MS,
+      );
+      this.ledger.setAccountCooldown(
+        run.accountId,
+        at + Math.max(cooldown(family, detail), terminalBackoff),
+      );
     }
+  }
+
+  private consecutiveTerminalThrottles(accountId: string): number {
+    let failures = 0;
+    for (const prior of this.ledger.runs({ accountId }).reverse()) {
+      if (prior.state === "done") break;
+      if (prior.state === "error" && !isRateLimitError(prior.detail ?? "")) break;
+      if (isRateLimitError(prior.detail ?? "")) failures++;
+    }
+    return failures;
   }
 
   heartbeat(runId: string, at = Date.now()): void {

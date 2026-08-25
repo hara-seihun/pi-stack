@@ -1081,7 +1081,7 @@ export class Ledger {
     return matches[0];
   }
 
-  runs(filter?: { state?: RunState; runnerId?: string }): RunRow[] {
+  runs(filter?: { state?: RunState; runnerId?: string; accountId?: string }): RunRow[] {
     const clauses: string[] = [];
     const params: (string | number)[] = [];
     if (filter?.state !== undefined) {
@@ -1091,6 +1091,10 @@ export class Ledger {
     if (filter?.runnerId !== undefined) {
       clauses.push("runner_id = ?");
       params.push(filter.runnerId);
+    }
+    if (filter?.accountId !== undefined) {
+      clauses.push("account_id = ?");
+      params.push(filter.accountId);
     }
     const where = clauses.length > 0 ? `WHERE ${clauses.join(" AND ")} ` : "";
     return this.runRows(`${where}ORDER BY started_at`, params);

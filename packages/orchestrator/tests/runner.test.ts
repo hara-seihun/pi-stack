@@ -139,28 +139,36 @@ describe("runner generations", () => {
 });
 
 describe("runner result classification", () => {
-  it("a rate-limited error run cools the account down for broker admission", () => {
+  it("a terminal rate limit belongs to the account rather than the task", () => {
     const ledger = Ledger.open(":memory:");
     const [runId] = seed(ledger, 1);
     const runner = new Runner(ledger, new FakeEngine(), { runnerId: "r1", maxSessions: 5 });
     runner.tick(100);
     runner.runFinished(runId, { state: "error", detail: "Codex error: The usage limit has been reached" }, 200);
     const account = ledger.accounts().find((a) => a.id === "anth-1");
-    expect(account?.cooldownUntil).toBeGreaterThan(200);
-    expect(ledger.run(runId)?.state).toBe("error");
+    expect(account?.cooldownUntil).toBe(30 * 60_000 + 200);
+    expect(ledger.run(runId)?.state).toBe("aborted");
+    expect(ledger.recentErrorCount("t", 0)).toBe(0);
   });
 
-  it("a burst-throttled family's 429 benches the account for seconds, not minutes", () => {
+  it("backs off across runs after a burst throttle survives the shift's retry budget", () => {
     const ledger = Ledger.open(":memory:");
-    const [runId] = seed(ledger, 1);
+    const [first, second] = seed(ledger, 2);
     const runner = new Runner(ledger, new FakeEngine(), {
       runnerId: "r1",
-      maxSessions: 5,
+      maxSessions: 2,
       cooldown: (family) => (family === "anthropic" ? 30_000 : 10 * 60_000),
     });
     runner.tick(100);
-    runner.runFinished(runId, { state: "error", detail: '{"status":429,"title":"Too Many Requests"}' }, 200);
-    expect(ledger.accounts().find((a) => a.id === "anth-1")?.cooldownUntil).toBe(30_200);
+    const detail = '{"status":429,"title":"Too Many Requests"}';
+    runner.runFinished(first, { state: "error", detail }, 200);
+    expect(ledger.accounts().find((a) => a.id === "anth-1")?.cooldownUntil).toBe(
+      30 * 60_000 + 200,
+    );
+    runner.runFinished(second, { state: "error", detail }, 300);
+    expect(ledger.accounts().find((a) => a.id === "anth-1")?.cooldownUntil).toBe(
+      60 * 60_000 + 300,
+    );
   });
 
   it("an ordinary error run does not cool the account", () => {

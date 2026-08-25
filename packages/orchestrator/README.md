@@ -400,10 +400,10 @@ A family can also be limited by **rate** rather than by any allowance, and
 then a 429 means something different. The default cooldown for a rate-limit
 error that named no window is ten minutes, which fits a plan-metered family:
 its unnamed 429 usually means some window is empty and the next minute will
-not refill it. A burst-throttled endpoint is out for seconds — NVIDIA NIM's
-free tier answered again 2.6s and 5.1s after a 429, with the worst observed
-stretch clearing inside 15s — so ten minutes would bench a healthy account for
-two orders of magnitude longer than the condition lasted, and a single busy
+not refill it. A burst-throttled endpoint is out for seconds. NVIDIA NIM's
+free tier answered again 2.6s and 5.1s after an ordinary 429, with the worst
+observed stretch clearing inside 15s. Ten minutes would bench a healthy account
+for two orders of magnitude longer than the condition lasted, and a single busy
 moment would cost the fleet the account for the rest of the wave. Such a
 family declares `throttleCooldownMs`, and every surface that cools an account
 down (runner classification, interactive failover) resolves the error against
@@ -414,10 +414,12 @@ ordinary 429s mean.
 Rate-limited families want their concurrency measured the same way, by
 watching the 429 rate climb with session count rather than by trusting a
 published number. NVIDIA NIM on Kimi K3 took two concurrent sessions with no
-429 at all, three at a 30% 429 rate, and five at 47%; pi's own retry (three
-attempts, 2s/4s/8s) absorbs the throttles it does hit, so `sessionCapacity`
-is set where the endpoint stops answering cleanly rather than where it stops
-answering at all.
+429 at all, three at a 30% 429 rate, and five at 47%. NVIDIA later withdrew
+that endpoint, which changed its response to a permanent bare 429 while other
+models on the account still answered. The fleet now uses Nemotron 3 Ultra at
+one session until its own rate is measured. Pi's retry absorbs brief throttles,
+so `sessionCapacity` is set where the endpoint stops answering cleanly rather
+than where it stops answering at all.
 
 The two declarations compose, and OpenRouter needs both: it has no window to
 pace (`sessionCapacity`) and, on a stealth preview model, a throttle that
@@ -584,8 +586,15 @@ already holding context, and a provider that is simply down does not draw a
 fresh session every tick to spend half an hour rediscovering it. Three things
 still end the run at once, because waiting for them is waiting for nothing: a
 broken credential, a request that will fail identically next time (`unknown
-model`, a 400), and a limit the provider names in hours — a weekly or monthly
+model`, a 400), and a limit the provider names in hours. A weekly or monthly
 window is not weather, and the task belongs on a sibling account.
+
+If all six host recoveries still end in a rate limit, the account has outlived
+its burst class. The run is recorded as aborted because provider capacity is
+not a task failure. The account then cools for 30 minutes, doubling across
+consecutive terminal throttles to a one-day ceiling. A successful run resets
+the sequence. This stops a withdrawn endpoint that returns a bare 429 from
+spending one failed task wave every thirty seconds.
 
 `tools/failing-provider-probe.sh` proves the whole path against the deployed
 build: a private ledger, agent directory, and runner, plus a fake
