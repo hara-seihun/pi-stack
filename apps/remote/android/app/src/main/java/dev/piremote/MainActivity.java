@@ -49,6 +49,8 @@ public class MainActivity extends Activity {
     private static final int TOOL_PENDING = Color.rgb(40, 40, 50);
     private static final int TOOL_SUCCESS = Color.rgb(40, 50, 40);
     private static final int TOOL_ERROR = Color.rgb(55, 34, 36);
+    private static final int DELEGATE = Color.rgb(203, 166, 247);
+    private static final int DELEGATE_PENDING = Color.rgb(48, 38, 58);
     private static final int OPENAI = Color.rgb(16, 163, 127);
     private static final int OPUS = Color.rgb(124, 92, 191);
     private static final int ANTHROPIC = Color.rgb(217, 119, 87);
@@ -618,7 +620,7 @@ public class MainActivity extends Activity {
         slashCommandList.setVisibility(View.GONE);
         composer.addView(slashCommandList, new LinearLayout.LayoutParams(-1, -2));
         prompt = new EditText(this);
-        prompt.setHint("Message agent"); prompt.setHintTextColor(MUTED);
+        prompt.setHint("Message agent · it can delegate tasks"); prompt.setHintTextColor(MUTED);
         prompt.setTextColor(TEXT); prompt.setTextSize(16); prompt.setBackgroundColor(Color.TRANSPARENT);
         prompt.setPadding(dp(10), dp(7), dp(10), dp(7));
         // setSingleLine(false) resets TextView's line limit, so it must precede setMaxLines.
@@ -2439,7 +2441,7 @@ public class MainActivity extends Activity {
         attachButton.setEnabled(selectedId != null && !uploading);
         pasteTextButton.setEnabled(selectedId != null && !uploading);
         voiceButton.setEnabled(selectedId != null);
-        prompt.setHint("Message " + selectedName);
+        prompt.setHint("Message " + selectedName + " · it can delegate tasks");
         renderSlashCommands();
         updateQueueStatus();
     }
@@ -2553,6 +2555,7 @@ public class MainActivity extends Activity {
         boolean expandable;
         boolean expanded;
         boolean finished;
+        boolean delegated;
         long startedAtMs;
         long endedAtMs;
         long timeoutMs = -1;
@@ -2627,6 +2630,10 @@ public class MainActivity extends Activity {
             return "edit " + shortPath(path) + (changes > 1 ? " · " + changes + " changes" : "");
         }
         if ("write".equals(tool)) return "write " + shortPath(path);
+        if ("delegate".equals(tool)) {
+            String task = args.optString("task").replaceAll("\\s+", " ").trim();
+            return "Nested agent · " + (task.isEmpty() ? "delegated task" : task);
+        }
         if ("grep".equals(tool)) return "grep /" + args.optString("pattern") + "/ in " + shortPath(path.isEmpty() ? "." : path);
         if ("find".equals(tool)) return "find " + args.optString("pattern") + " in " + shortPath(path.isEmpty() ? "." : path);
         if ("ls".equals(tool)) return "ls " + shortPath(path.isEmpty() ? "." : path);
@@ -2647,6 +2654,10 @@ public class MainActivity extends Activity {
             }
             if (edits.length() > 3) preview.append("\n… ").append(edits.length() - 3).append(" more changes");
             return preview.toString();
+        }
+        if ("delegate".equals(tool)) {
+            String cwd = args.has("cwd") ? args.optString("cwd") : "Inherited from parent";
+            return "Task\n" + args.optString("task") + "\n\nWorking directory\n" + cwd;
         }
         if (Arrays.asList("bash", "read", "grep", "find", "ls").contains(tool)) return "";
         return formatJson(args);
@@ -2725,12 +2736,15 @@ public class MainActivity extends Activity {
 
     private void startTool(String id, String name, JSONObject args, String startedAt) {
         ToolCard card = new ToolCard();
+        card.delegated = "delegate".equalsIgnoreCase(name);
         card.startedAtMs = toolEventTime(startedAt);
         if (args.has("timeoutMs")) card.timeoutMs = Math.max(0, args.optLong("timeoutMs"));
         else if (args.has("timeout")) card.timeoutMs = Math.max(0, Math.round(args.optDouble("timeout") * 1000));
         card.root = new LinearLayout(this); card.root.setOrientation(LinearLayout.VERTICAL);
-        card.root.setPadding(dp(12), dp(10), dp(12), dp(10)); card.root.setBackground(shape(TOOL_PENDING));
-        card.header = toolText("…  " + toolCallSummary(name, args), ACCENT, true);
+        card.root.setPadding(dp(12), dp(10), dp(12), dp(10));
+        card.root.setBackground(shape(card.delegated ? DELEGATE_PENDING : TOOL_PENDING));
+        if (card.delegated) card.root.setContentDescription("Nested agent delegation");
+        card.header = toolText("…  " + toolCallSummary(name, args), card.delegated ? DELEGATE : ACCENT, true);
         card.root.addView(card.header);
         card.timing = text("", 12, false); card.timing.setTextColor(MUTED); makeSelectable(card.timing);
         card.timing.setPadding(0, dp(5), 0, 0); card.root.addView(card.timing, new LinearLayout.LayoutParams(-1, dp(28)));

@@ -4,6 +4,13 @@ A self-hosted web and Android controller for persistent [Pi](https://pi.dev) cod
 
 Pi Remote keeps session state in SQLite, talks to Pi through RPC mode, survives browser or app disconnects, queues prompts durably, streams tool and model activity, and can combine agent activity from local and SSH-backed hosts. An optional identity router starts per-user supervisors whose private directories are mounted only while unlocked.
 
+Pi sessions may delegate a self-contained task to one isolated nested agent.
+Both clients advertise that capability in the composer and render `delegate`
+as a distinct **Nested agent** tool card: the full delegated task and working
+directory remain expandable while the child's single final answer lands in the
+same card. Nested execution is owned by pi-orchestrator; Pi Remote only renders
+the ordinary tool events.
+
 ## Requirements
 
 - [Bun](https://bun.sh/)
