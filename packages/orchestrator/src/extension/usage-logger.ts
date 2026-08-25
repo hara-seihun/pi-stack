@@ -4,6 +4,7 @@ import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 import { Ledger } from "../ledger/ledger.js";
 import { AnthropicMeterSampler } from "../meters/anthropic.js";
 import type { MeterReading, UsageSource } from "../calibrator/types.js";
+import { nestedSession } from "../host/session-context.js";
 
 /**
  * Records every pi session's usage into the orchestrator ledger, making all
@@ -140,6 +141,10 @@ export default function usageLogger(pi: ExtensionAPI): void {
 
   if (process.env.PI_ORCHESTRATOR_ASSIGNED !== "1") {
     pi.on("agent_start", async (_event, ctx) => {
+      // The parent remains inside the tool call while its child works, so its
+      // lease already covers the account. A second child lease would turn one
+      // serialized session tree into two apparent capacity slots.
+      if (nestedSession(ctx.sessionManager.getSessionId()) !== undefined) return;
       endLease();
       const providerAlias = ctx.model?.provider;
       if (providerAlias === undefined) return;

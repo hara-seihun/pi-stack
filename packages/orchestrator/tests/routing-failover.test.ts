@@ -11,9 +11,15 @@ import { Ledger } from "../src/ledger/ledger.js";
 function harness() {
   const handlers = new Map<string, (event: unknown, ctx: ExtensionContext) => Promise<void>>();
   const sent: string[] = [];
-  const ctx = { model: undefined as Model<never> | undefined } as unknown as ExtensionContext;
+  const ctx = {
+    model: undefined as Model<never> | undefined,
+    cwd: "/tmp",
+    thinkingLevel: "high",
+    sessionManager: { getSessionId: () => "interactive-session" },
+  } as unknown as ExtensionContext;
   const pi = {
     registerProvider: () => {},
+    registerTool: () => {},
     on: (event: string, handler: (event: unknown, ctx: ExtensionContext) => Promise<void>) => {
       handlers.set(event, handler);
     },

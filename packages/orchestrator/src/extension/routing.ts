@@ -1,5 +1,6 @@
 import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
 import type { Model, Provider } from "@earendil-works/pi-ai";
+import { Type } from "typebox";
 import { builtinProviders } from "@earendil-works/pi-ai/providers/all";
 import { Ledger } from "../ledger/ledger.js";
 import {
@@ -43,6 +44,8 @@ export { isRateLimitError } from "../provider-errors.js";
 import { isRateLimitError } from "../provider-errors.js";
 import { cooldownPolicy, loadConfig } from "../config.js";
 import { interruptedTurnPrompt } from "../host/continuations.js";
+import { Delegator } from "../host/delegation.js";
+import { nestedSession } from "../host/session-context.js";
 
 /** An alias provider: the family's models, transport, and OAuth under the
  * account's own id, so credentials resolve from auth.json[aliasId]. */
@@ -71,6 +74,50 @@ export function failoverPrompt(failure: string, account: string): string {
 export default function routing(pi: ExtensionAPI): void {
   const ledgerPath = defaultLedgerPath();
   const ledger = Ledger.open(ledgerPath);
+  const delegator = new Delegator(ledger, {
+    agentDir:
+      process.env.PI_AGENT_DIR ??
+      process.env.PI_CODING_AGENT_DIR ??
+      join(homedir(), ".pi", "agent"),
+  });
+  pi.registerTool({
+    name: "delegate",
+    label: "Delegate",
+    description:
+      "Run one well-scoped task in an isolated nested Pi session and return only its final answer. " +
+      "The nested agent inherits this session's model, reasoning level, tools, project guidance, and " +
+      "working directory unless cwd is supplied. It cannot see this conversation, so include all context " +
+      "it needs in task. Calls from this session run one at a time and cancellation follows the parent turn.",
+    promptSnippet: "Delegate one isolated task to a nested agent and receive its final answer",
+    promptGuidelines: [
+      "Use delegate for a self-contained investigation or implementation that benefits from an isolated context; write a complete task because the nested agent cannot see this conversation.",
+    ],
+    parameters: Type.Object({
+      task: Type.String({ minLength: 1, description: "Complete, self-contained task for the nested agent." }),
+      cwd: Type.Optional(
+        Type.String({ description: "Working directory for the nested agent. Relative paths resolve from the current cwd." }),
+      ),
+    }),
+    execute: async (_toolCallId, params, signal, _onUpdate, ctx) => {
+      if (ctx.model === undefined) throw new Error("delegate requires an active model");
+      const answer = await delegator.run(
+        params,
+        {
+          cwd: ctx.cwd,
+          model: ctx.model as Model<any>,
+          thinkingLevel: ctx.thinkingLevel,
+          tools: pi.getActiveTools(),
+          sessionId: ctx.sessionManager.getSessionId(),
+        },
+        signal,
+      );
+      return {
+        content: [{ type: "text" as const, text: answer.text }],
+        details: { sessionId: answer.sessionId },
+        ...(answer.usage === undefined ? {} : { usage: answer.usage }),
+      };
+    },
+  });
   const families = new Map(builtinProviders().map((p) => [p.id, p]));
   const codex = families.get("openai-codex")?.auth.oauth;
   const sharedAuth = codex === undefined
@@ -149,6 +196,10 @@ export default function routing(pi: ExtensionAPI): void {
   };
 
   pi.on("session_start", async (event, ctx) => {
+    // A delegated child inherits the parent's exact model/account choice.
+    // Re-running interactive selection here would create a second reservation
+    // and throw away the parent's provider cache while it waits on this tool.
+    if (nestedSession(ctx.sessionManager.getSessionId()) !== undefined) return;
     // Only fresh sessions bind; resume/fork/reload stay sticky to their
     // account so provider caches survive.
     if (event.reason !== "startup" && event.reason !== "new") return;
@@ -163,6 +214,7 @@ export default function routing(pi: ExtensionAPI): void {
 
   pi.on("agent_end", async (event, ctx) => {
     unresolved = undefined;
+    if (nestedSession(ctx.sessionManager.getSessionId()) !== undefined) return;
     const last = event.messages[event.messages.length - 1];
     if (last?.role !== "assistant") return;
     const { stopReason, errorMessage } = last as { stopReason?: string; errorMessage?: string };

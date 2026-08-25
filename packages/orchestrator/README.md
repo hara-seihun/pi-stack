@@ -162,6 +162,14 @@ apply retroactively to recorded history. Idle high-frequency readings are
 deduplicated to hourly anchors; old facts are prunable because calibration
 only weights recent windows.
 
+Runs and Pi sessions are many-to-one. `run_session` records the root session
+and every nested delegated session, including parentage. Usage joins through
+that relation, so a child's tokens belong to the lane whose root run asked for
+them rather than an unattributed or separately scheduled agent. The
+`run.session_id` root projection remains deliberately: a worker on the prior
+schema generation must still be able to finish while a successor starts during
+a rolling deploy. Current code never uses it for attribution.
+
 ## Tasks: demand, gates, tiers (`src/tasks/`)
 
 A task is an action plus two observable predicates: **demand** (is there
@@ -489,7 +497,10 @@ row; live runners stop claiming and exit when their last session ends,
 while freshly started runners claim under the new generation. Nothing is
 ever killed mid-run.
 
-A hosted session **binds extensions** before its first prompt. Extensions
+A hosted session **binds extensions** before its first prompt. Standing shifts
+and nested one-turn sessions both use `openHostedSession` in
+`src/host/session-lifecycle.ts`, so extension binding, extension-provider model
+resolution, retry settings, and cleanup have one implementation. Extensions
 come alive only when a mode binds them — `bindExtensions` is what emits
 `session_start` — and everything an extension sets up in response simply
 never happens in a session that skips it. Hosted sessions carried the `mcp`
@@ -712,8 +723,16 @@ transcript for what happened and the session log for what was said.
 
 Multi-account routing for interactive pi sessions, driven entirely by the
 ledger — the account table is the registry (there is no `multi-pass.json`),
-and the extension replaces the old 6,000-line multi-pass with three rules:
+and the extension replaces the old 6,000-line multi-pass with four rules:
 
+- Every session has `delegate({ task, cwd? })`: one isolated, in-memory nested
+  Pi session that inherits the parent's model, thinking level, tools,
+  extensions, project guidance, and cwd (unless overridden), sees none of the
+  parent conversation, and returns one final answer as the tool result. Calls
+  serialize per parent, recurse normally, and abort with the parent turn. A
+  delegated child inherits the parent's account choice; it does not bind a
+  second account or hold a second interactive lease. Fleet children join the
+  root run through `run_session`, so their usage is charged to that lane.
 - Exclusive accounts whose id differs from their family (`anthropic-2`, ...)
   are ordinary alias providers over the local `auth.json`. Shared Codex
   accounts, including the unsuffixed family id, are providers over the central

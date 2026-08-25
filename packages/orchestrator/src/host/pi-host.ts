@@ -15,6 +15,7 @@ import {
   ShiftObserver,
 } from "./continuations.js";
 import { RunTranscript } from "./transcript.js";
+import { openHostedSession, SESSION_RETRY } from "./session-lifecycle.js";
 
 /**
  * In-process host: each launch is one embedded pi AgentSession. This file is
@@ -30,17 +31,6 @@ import { RunTranscript } from "./transcript.js";
 const HEARTBEAT_MS = 30_000;
 /** Ledger writes per session while it streams: liveness needs a coarse clock. */
 const PROGRESS_WRITE_INTERVAL_MS = 15_000;
-
-/**
- * In-turn retry, which is the first and best line: pi replays the interrupted
- * turn on the same context with nothing injected and no message duplicated, so
- * an outage the provider clears inside five minutes costs the agent nothing at
- * all and it never learns one happened. The default budget is three attempts
- * over fourteen seconds, which is shorter than most throttles last. Waiting
- * this long only ever delays the report of an error that was going to be
- * reported anyway.
- */
-const SESSION_RETRY = { enabled: true, maxRetries: 6, baseDelayMs: 5_000 } as const;
 
 /** Waits are slept in slices so the run keeps reporting progress: a session
  * waiting out a provider is not the stalled session the runner reaps, and
@@ -267,15 +257,25 @@ export class PiHost implements HostManager {
       });
       await resourceLoader.reload();
     }
-    const { session } = await (this.options.openSession ?? createAgentSession)({
+    const hosted = await openHostedSession({
       cwd: spec.cwd,
       agentDir: this.options.agentDir,
-      ...(resourceLoader === undefined ? {} : { resourceLoader }),
+      resourceLoader,
       // The SDK's Model type is provider-internal; the resolver returns one.
-      model: preresolved as never,
-      thinkingLevel: spec.thinking as never,
+      model: preresolved,
+      thinkingLevel: spec.thinking,
+      provider: spec.provider,
+      modelId: spec.model,
+      accountId: spec.accountId,
       customTools: [taskComplete],
+      openSession: this.options.openSession,
+      onExtensionError: (extensionPath, error) => {
+        transcript?.append("notice", {
+          text: `Extension error (${extensionPath}): ${String(error)}`,
+        });
+      },
     });
+    const session = hosted.session;
     let cancelRun!: () => void;
     const cancelled = new Promise<true>((resolve) => {
       cancelRun = () => resolve(true);
@@ -286,7 +286,7 @@ export class PiHost implements HostManager {
       session.sessionManager.getSessionId(),
       frame,
     );
-    const disposers: (() => void)[] = [() => session.dispose(), unregisterWorkingState];
+    const disposers: (() => void)[] = [hosted.dispose, unregisterWorkingState];
     let cleaned = false;
     const cleanup = () => {
       if (cleaned) return;
@@ -298,57 +298,7 @@ export class PiHost implements HostManager {
     };
     this.runtimes.set(spec.runId, { session, cancel: cancelRun, cleanup });
     try {
-      // Extensions only come alive when a mode binds them: `bindExtensions` is
-      // what emits `session_start`, and everything an extension sets up in
-      // response — MCP server connections above all — simply never happens in a
-      // session that skips it. Hosted sessions had the `mcp` tool on their
-      // surface (it registers at load time) answering "MCP not initialized" to
-      // every call, so fleet agents told to use the math ledger's MCP server
-      // spent their turns writing curl JSON-RPC helpers instead. A headless
-      // host binds print mode: no UI, no command actions, and extension errors
-      // go to the run's own log.
-      if (
-        await interrupted(
-          session.bindExtensions({
-            mode: "print",
-            onError: (err: { extensionPath: string; error: unknown }) => {
-              transcript?.append("notice", {
-                text: `Extension error (${err.extensionPath}): ${String(err.error)}`,
-              });
-            },
-          } as never),
-        )
-      ) {
-        return { state: "aborted", detail: "session killed" };
-      }
-      this.events.sessionStarted(spec.runId, session.sessionManager.getSessionId());
-      if (preresolved === undefined) {
-        const model = session.modelRuntime.getModel(spec.provider, spec.model);
-        if (model === undefined) {
-          return { state: "error", detail: `unknown model ${spec.provider}/${spec.model}` };
-        }
-        // Extension providers own their transport; re-homing the model onto an
-        // alias id would strip it and leak the request to the family's public
-        // API. Such an account is a configuration error, not a runtime fallback.
-        if (spec.accountId !== spec.provider) {
-          return {
-            state: "error",
-            detail: `account ${spec.accountId} cannot alias extension provider ${spec.provider}`,
-          };
-        }
-        if (await interrupted(session.setModel(model))) {
-          return { state: "aborted", detail: "session killed" };
-        }
-        if (spec.thinking !== undefined) session.setThinkingLevel(spec.thinking as never);
-      }
-      // Last, after every other setup: settings overrides live in an object
-      // that both `reload()` and `setModel()` rebuild from the files on disk,
-      // so an override applied any earlier reads as applied and silently is
-      // not. Measured 2026-08-23, twice — handed to `createAgentSession` it
-      // died in the loader's reload, and applied after creation it died in
-      // `setModel`, while the session went on retrying three times over
-      // fourteen seconds.
-      session.settingsManager.applyOverrides({ retry: { ...SESSION_RETRY } });
+      this.events.sessionStarted(spec.runId, hosted.sessionId);
       const retry = session.settingsManager.getRetrySettings();
       if (retry.maxRetries !== SESSION_RETRY.maxRetries) {
         const notice =

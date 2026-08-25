@@ -324,6 +324,26 @@ const CHECK_IN_SCHEMA = `
 ALTER TABLE run ADD COLUMN check_ins INTEGER NOT NULL DEFAULT 0;
 `;
 
+/** A run may host a tree of isolated Pi sessions. The relation is the
+ * attribution source for every root and child. run.session_id remains the root
+ * projection so a worker from the previous generation can finish during a
+ * rolling schema migration; new code never joins usage through it. */
+const RUN_SESSION_RELATION_SCHEMA = `
+DROP INDEX run_session;
+CREATE TABLE run_session (
+  run_id TEXT NOT NULL REFERENCES run(id) ON DELETE CASCADE,
+  session_id TEXT NOT NULL UNIQUE,
+  parent_session_id TEXT,
+  created_at INTEGER NOT NULL,
+  PRIMARY KEY (run_id, session_id)
+) STRICT;
+INSERT INTO run_session (run_id, session_id, parent_session_id, created_at)
+  SELECT id, session_id, NULL, COALESCE(claimed_at, started_at)
+  FROM run WHERE session_id IS NOT NULL;
+CREATE INDEX run_session_run ON run_session (run_id, created_at);
+CREATE INDEX run_session_parent ON run_session (parent_session_id);
+`;
+
 const MIGRATIONS: readonly string[] = [
   SCHEMA,
   TASK_SCHEMA,
@@ -343,6 +363,7 @@ const MIGRATIONS: readonly string[] = [
   OPENING_SCHEMA,
   OPENING_PROBE_SCHEMA,
   CHECK_IN_SCHEMA,
+  RUN_SESSION_RELATION_SCHEMA,
 ];
 
 export interface AccountRow {
@@ -378,7 +399,6 @@ export interface RunRow {
   readonly startedAt: number;
   readonly claimedAt: number | undefined;
   readonly runnerId: string | undefined;
-  readonly sessionId: string | undefined;
   readonly endedAt: number | undefined;
   readonly heartbeatAt: number | undefined;
   /** Last recorded session activity, as opposed to runner liveness. */
@@ -662,8 +682,8 @@ export class Ledger {
   }
 
   /**
-   * Who spent the quota. The fleet's share resolves to the lane that spent it
-   * through `run.session_id`; everything else is one of this machine's own
+   * Who spent the quota. Every root or delegated fleet session resolves to its
+   * lane through `run_session`; everything else is one of this machine's own
    * interactive sessions, named by session id because that is the only handle
    * the ledger holds for them.
    */
@@ -691,7 +711,9 @@ export class Ledger {
       byLane: slices(
         `SELECT COALESCE(r.task_id, '(unattributed fleet session)') AS key,
                 SUM(u.tokens) AS tokens, COUNT(DISTINCT u.session_id) AS sessions
-         FROM usage_event u LEFT JOIN run r ON r.session_id = u.session_id
+         FROM usage_event u
+         LEFT JOIN run_session rs ON rs.session_id = u.session_id
+         LEFT JOIN run r ON r.id = rs.run_id
          WHERE u.at >= ? AND u.source = 'orchestrator'
          GROUP BY key ORDER BY tokens DESC`,
       ),
@@ -707,7 +729,9 @@ export class Ledger {
       topSessions: slices(
         `SELECT u.session_id || '  ' || COALESCE(r.task_id, u.account_id) AS key,
                 SUM(u.tokens) AS tokens, 1 AS sessions
-         FROM usage_event u LEFT JOIN run r ON r.session_id = u.session_id
+         FROM usage_event u
+         LEFT JOIN run_session rs ON rs.session_id = u.session_id
+         LEFT JOIN run r ON r.id = rs.run_id
          WHERE u.at >= ? AND u.session_id IS NOT NULL
          GROUP BY u.session_id ORDER BY tokens DESC LIMIT ?`,
         [10],
@@ -1104,7 +1128,7 @@ export class Ledger {
     const rows = this.db
       .prepare(
         `SELECT id, task_id, tier, account_id, model, provider, thinking, state, started_at,
-                claimed_at, runner_id, session_id, ended_at, heartbeat_at, progress_at,
+                claimed_at, runner_id, ended_at, heartbeat_at, progress_at,
                 abort_requested, productive, complete, detail
          FROM run ${clause}`,
       )
@@ -1120,7 +1144,6 @@ export class Ledger {
       started_at: number;
       claimed_at: number | null;
       runner_id: string | null;
-      session_id: string | null;
       ended_at: number | null;
       heartbeat_at: number | null;
       progress_at: number | null;
@@ -1141,7 +1164,6 @@ export class Ledger {
       startedAt: r.started_at,
       claimedAt: r.claimed_at ?? undefined,
       runnerId: r.runner_id ?? undefined,
-      sessionId: r.session_id ?? undefined,
       endedAt: r.ended_at ?? undefined,
       heartbeatAt: r.heartbeat_at ?? undefined,
       progressAt: r.progress_at ?? undefined,
@@ -1194,10 +1216,55 @@ export class Ledger {
     return row !== undefined;
   }
 
-  /** Bind a run to the pi session hosting it, so its usage events resolve to
-   * a task without correlating timestamps. */
-  linkRunSession(id: string, sessionId: string): void {
-    this.db.prepare("UPDATE run SET session_id = ? WHERE id = ?").run(sessionId, id);
+  /** Bind the root Pi session to its run. Repeating the report is idempotent.
+   * session_id is also filled for a still-draining pre-relation worker; all
+   * current attribution reads run_session. */
+  linkRunSession(id: string, sessionId: string, at = Date.now()): void {
+    this.db.exec("BEGIN IMMEDIATE");
+    try {
+      this.db.prepare("UPDATE run SET session_id = ? WHERE id = ?").run(sessionId, id);
+      this.db
+        .prepare(
+          `INSERT INTO run_session (run_id, session_id, parent_session_id, created_at)
+           VALUES (?, ?, NULL, ?) ON CONFLICT (session_id) DO NOTHING`,
+        )
+        .run(id, sessionId, at);
+      this.db.exec("COMMIT");
+    } catch (thrown) {
+      this.db.exec("ROLLBACK");
+      throw thrown;
+    }
+  }
+
+  /** Bind a delegated session to the same run as its parent. Interactive
+   * sessions have no run relation, in which case there is intentionally
+   * nothing to write. Returns the owning run id when one exists. */
+  linkNestedSession(parentSessionId: string, sessionId: string, at = Date.now()): string | undefined {
+    const parent = this.db
+      .prepare("SELECT run_id FROM run_session WHERE session_id = ?")
+      .get(parentSessionId) as { run_id: string } | undefined;
+    if (parent === undefined) return undefined;
+    this.db
+      .prepare(
+        `INSERT INTO run_session (run_id, session_id, parent_session_id, created_at)
+         VALUES (?, ?, ?, ?) ON CONFLICT (session_id) DO NOTHING`,
+      )
+      .run(parent.run_id, sessionId, parentSessionId, at);
+    return parent.run_id;
+  }
+
+  sessionsForRun(id: string): { sessionId: string; parentSessionId?: string; createdAt: number }[] {
+    return (this.db
+      .prepare(
+        `SELECT session_id, parent_session_id, created_at FROM run_session
+         WHERE run_id = ? ORDER BY created_at, session_id`,
+      )
+      .all(id) as { session_id: string; parent_session_id: string | null; created_at: number }[])
+      .map((row) => ({
+        sessionId: row.session_id,
+        parentSessionId: row.parent_session_id ?? undefined,
+        createdAt: row.created_at,
+      }));
   }
 
   requestAbort(id: string): void {
