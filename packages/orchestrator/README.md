@@ -416,10 +416,13 @@ watching the 429 rate climb with session count rather than by trusting a
 published number. NVIDIA NIM on Kimi K3 took two concurrent sessions with no
 429 at all, three at a 30% 429 rate, and five at 47%. NVIDIA later withdrew
 that endpoint, which changed its response to a permanent bare 429 while other
-models on the account still answered. The fleet now uses Nemotron 3 Ultra at
-one session until its own rate is measured. Pi's retry absorbs brief throttles,
-so `sessionCapacity` is set where the endpoint stops answering cleanly rather
-than where it stops answering at all.
+models on the account still answered. Nemotron 3 Ultra then passed a complete
+hosted-agent probe, but Hara disabled NVIDIA NIM for the fleet on 2026-08-25.
+The operator config has no NVIDIA candidate or provider entry, so neither the
+scheduler nor an explicit account spawn can launch it. Pi's retry absorbs brief
+throttles, so an unmetered family that returns later should set
+`sessionCapacity` where the endpoint stops answering cleanly rather than where
+it stops answering at all.
 
 The two declarations compose, and OpenRouter needs both: it has no window to
 pace (`sessionCapacity`) and, on a stealth preview model, a throttle that
