@@ -826,11 +826,11 @@ export function spawn(ledger: Ledger, args: string[], cfg = loadConfig()): void 
   const tier = (named.get("tier") ?? task.tiers[0]?.tier ?? fail(`task ${taskId} has no tiers`)) as Tier;
   if (!TIERS.includes(tier)) fail(`unknown tier ${tier}`);
   const now = Date.now();
-  let admission = new Broker(ledger, brokerConfig(cfg)).admit(tier, now);
+  const wanted = named.get("account");
+  let admission = wanted === undefined ? new Broker(ledger, brokerConfig(cfg)).admit(tier, now) : undefined;
   let forced = false;
   if (admission === undefined) {
     forced = true;
-    const wanted = named.get("account");
     const accounts = ledger
       .accounts()
       .filter((a) => a.fleetCredentialed && (a.cooldownUntil === undefined || a.cooldownUntil <= now));

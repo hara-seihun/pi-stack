@@ -152,6 +152,20 @@ describe("spawn", () => {
     ledger.close();
   });
 
+  it("pins an explicitly named account even when the broker can admit another", () => {
+    const ledger = open();
+    taskSet(ledger, ["frontier", "--tiers", "standard", "--demand-constant", "1", "--prompt", "go"]);
+    ledger.upsertAccount({ id: "codex-1", provider: "openai-codex" });
+    ledger.upsertAccount({ id: "codex-2", provider: "openai-codex" });
+    ledger.syncFleetCredentials(new Set(["codex-1", "codex-2"]));
+
+    spawn(ledger, ["frontier", "--account", "codex-2"], cfg);
+
+    expect(ledger.runs({})).toHaveLength(1);
+    expect(ledger.runs({})[0]?.accountId).toBe("codex-2");
+    ledger.close();
+  });
+
   it("refuses a signal-only lane and a lane with nothing to force onto", () => {
     const ledger = open();
     taskSet(ledger, ["signal", "--tiers", "standard", "--demand-constant", "1"]);
