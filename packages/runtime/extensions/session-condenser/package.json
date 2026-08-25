@@ -1,0 +1,11 @@
+{
+  "name": "@hara-seihun/session-condenser",
+  "version": "1.0.0",
+  "description": "Read pi sessions with long thinking blocks and tool outputs replaced by cached model-written summaries",
+  "license": "MIT",
+  "type": "module",
+  "keywords": ["pi-package", "pi-extension"],
+  "pi": { "extensions": ["./index.mjs"] },
+  "peerDependencies": { "@earendil-works/pi-coding-agent": ">=0.84.0 <0.85.0" },
+  "scripts": { "test": "node --test condense.test.mjs" }
+}
