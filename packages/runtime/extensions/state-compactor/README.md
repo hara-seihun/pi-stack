@@ -1,48 +1,13 @@
 # State compactor
 
-State compactor replaces old dialogue with a source-linked working-state record and keeps a recent tail verbatim. It runs in interactive Pi threads and orchestrator sessions.
+State compactor keeps Pi's native compaction and triggers it earlier, at 250,000 context tokens.
 
-The engine has four pieces:
+It registers one `before_provider_request` handler. When `ctx.getContextUsage()` reaches the threshold, the handler calls `ctx.compact()` once and waits for Pi's completion or error callback before it can trigger again. Missing usage data and smaller contexts pass through unchanged.
 
-1. An anchored state update absorbs only messages added since the previous checkpoint.
-2. The checkpoint separates current activity, unanswered requests, completed requests, work, constraints, decisions, artifacts, blockers, uncertainty, and next actions.
-3. Every fact cites a raw session entry. `state_recall` pages the exact source when the compact record is insufficient.
-4. A recent tool-safe tail remains verbatim. Large tool results may leave the active view, but their source entries remain recallable.
-
-A checkpoint begins with a fixed warning that it is a historical record rather than a user instruction. Completed opening exchanges cannot become active work. The orchestrator may provide an authoritative task, but the engine does not require one. Without a host task it derives current activity from unresolved user messages and permits `active: null` for an ordinary conversation. If compaction lands during tool use, the current user request stays open until a visible assistant reply ends the turn, even when the tools have already finished the work.
-
-Pi's JSONL session stays the source of truth. Checkpoints are branch-local custom entries. `<session>.state-views.ndjson` records the checkpoint, branch leaf, boundary, token estimate, and hashes needed to reproduce each assembled provider view.
-
-## Configuration
-
-- `PI_STATE_COMPACTOR_TRIGGER` lowers the default 220,000-token checkpoint threshold. It cannot raise it.
-- `PI_STATE_COMPACTOR_ALERTS` names the directory for a checkpoint-model failure alert. The engine then uses deterministic extraction so the provider request still fits; this path is loud and occurs once per session.
-
-The active threshold also stays 32,000 tokens below the selected model's context window. The retained tail is 40,000 tokens on large models and scales down on smaller ones.
-
-## Context pins
-
-An extension loaded before state-compactor may keep derived context across checkpoint boundaries by adding a transient user message with this field:
-
-```js
-stateCompactor: {
-  pin: true,
-  id: "stable-owner-scoped-id",
-  replacesToolCallIds: ["call-id-already-carrying-the-same-content"]
-}
-```
-
-State-compactor deduplicates pins by `id`, omits a pin while every listed tool result remains in the assembled view, and restores it when a checkpoint removes any replacement. Pins count toward the checkpoint budget and are placed before the current user request. Use an empty replacement list for a notice that must remain visible. Pin messages are transient provider context; the owning extension remains responsible for regenerating them from durable session state.
-
-## Design sources
-
-- [TRACE](https://arxiv.org/abs/2608.06503): typed current and completed state, plus continuation-based damage measurement.
-- [Factory's compression evaluation](https://factory.ai/news/evaluating-compression): anchored iterative updates beat whole-summary regeneration across 36,000 production messages.
-- [Anthropic's context-engineering cookbook](https://platform.claude.com/cookbook/tool-use-context-engineering-context-engineering-tools): clear old tool payloads and preserve recoverability.
-- [TierMem](https://arxiv.org/abs/2602.17913): compact records retain provenance into immutable raw evidence.
+The extension does not transform context, replace Pi's summary, or add continuation messages. Pi aborts the pending agent operation when compaction starts, and the request does not resume automatically.
 
 ## Test
 
 ```sh
-node --test state.test.mjs extension.test.mjs
+node --test extension.test.mjs
 ```

@@ -1,7 +1,7 @@
 {
   "name": "@hara-seihun/state-compactor",
   "version": "1.0.0",
-  "description": "Source-linked working-state compaction for Pi",
+  "description": "Pre-request native compaction guard for Pi",
   "license": "MIT",
   "type": "module",
   "keywords": ["pi-package", "pi-extension", "context-compaction"],

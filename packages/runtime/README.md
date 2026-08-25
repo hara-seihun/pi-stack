@@ -4,7 +4,7 @@ Reusable extensions and prompt-evaluation tools for [Pi](https://pi.dev).
 
 ## Packages
 
-- `state-compactor` maintains a source-linked working-state record and a recent verbatim tail in long interactive and hosted sessions.
+- `state-compactor` triggers Pi's native compaction before a provider request once context reaches 250,000 tokens.
 - `bash-timeout-guard` requires bounded bash calls and can forbid detached work.
 - `mcp-size-guard` reports MCP responses that cross a configurable size threshold.
 - `session-condenser` reads agent session transcripts through two-pass, content-addressed summarization while keeping user turns and the recent tool tail verbatim.

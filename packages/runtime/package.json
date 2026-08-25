@@ -20,7 +20,7 @@
     ]
   },
   "scripts": {
-    "test": "node --test prompt-eval/prompt-eval.test.mjs extensions/chatgpt-pro/browser.test.mjs extensions/chatgpt-pro/launcher.test.mjs extensions/pi-claude-code-use/index.test.mjs extensions/state-compactor/state.test.mjs extensions/state-compactor/extension.test.mjs extensions/bash-timeout-guard/guard.test.mjs extensions/mcp-size-guard/guard.test.mjs extensions/session-condenser/condense.test.mjs"
+    "test": "node --test prompt-eval/prompt-eval.test.mjs extensions/chatgpt-pro/browser.test.mjs extensions/chatgpt-pro/launcher.test.mjs extensions/pi-claude-code-use/index.test.mjs extensions/state-compactor/extension.test.mjs extensions/bash-timeout-guard/guard.test.mjs extensions/mcp-size-guard/guard.test.mjs extensions/session-condenser/condense.test.mjs"
   },
   "dependencies": {
     "playwright-core": "1.59.1"

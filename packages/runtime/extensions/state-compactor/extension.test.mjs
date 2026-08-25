@@ -1,307 +1,40 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import stateCompactor from "./index.mjs";
+import stateCompactor, { COMPACT_THRESHOLD_TOKENS } from "./index.mjs";
 
-const originalAlertsDirectory = process.env.PI_STATE_COMPACTOR_ALERTS;
-delete process.env.PI_STATE_COMPACTOR_ALERTS;
-test.after(() => {
-  if (originalAlertsDirectory === undefined) delete process.env.PI_STATE_COMPACTOR_ALERTS;
-  else process.env.PI_STATE_COMPACTOR_ALERTS = originalAlertsDirectory;
-});
-
-const makeMessage = (role, text, timestamp, extra = {}) => ({
-  role,
-  content: [{ type: "text", text }],
-  timestamp,
-  ...extra,
-});
-
-function setup(messages, responseText) {
+test("guards provider requests with one native compaction at 250,000 tokens", () => {
   const handlers = new Map();
-  const tools = new Map();
-  const branch = messages.map((message, index) => ({
-    type: "message",
-    id: `e${index + 1}`,
-    parentId: index ? `e${index}` : null,
-    timestamp: message.timestamp,
-    message,
-  }));
-  let calls = 0;
-  const pi = {
-    on(name, handler) {
-      handlers.set(name, handler);
+  stateCompactor({
+    on(event, handler) {
+      handlers.set(event, handler);
     },
-    registerTool(tool) {
-      tools.set(tool.name, tool);
-    },
-    appendEntry(customType, data) {
-      branch.push({ type: "custom", id: `c${branch.length}`, customType, data });
-    },
-  };
-  stateCompactor(pi);
+  });
+
+  assert.deepEqual([...handlers.keys()], ["before_provider_request"]);
+
+  let tokens = null;
+  const compactions = [];
   const ctx = {
-    model: { id: "model", contextWindow: 100_000 },
-    modelRegistry: {
-      complete: async () => {
-        calls++;
-        return {
-          content: Array.isArray(responseText) ? responseText : [{ type: "text", text: responseText }],
-          usage: { input: 100, output: 20 },
-        };
-      },
-    },
-    sessionManager: {
-      getBranch: () => branch,
-      getEntries: () => branch,
-      getSessionId: () => "session-test",
-      getSessionFile: () => undefined,
-      getLeafId: () => branch.at(-1)?.id,
-    },
+    getContextUsage: () => ({ tokens }),
+    compact: (options) => compactions.push(options),
   };
-  return { handlers, tools, branch, ctx, calls: () => calls };
-}
+  const guard = handlers.get("before_provider_request");
 
-function validState(activeSource = "e1") {
-  return JSON.stringify({
-    active: { text: "Continue the current request", sources: [activeSource] },
-    openRequests: [{ text: "Current request remains open", sources: [activeSource] }],
-    completedRequests: [],
-    inProgress: [],
-    completedActions: [],
-    constraints: [],
-    decisions: [],
-    artifacts: [],
-    blockers: [],
-    uncertainties: [],
-    nextActions: [{ text: "Continue", sources: [activeSource] }],
-  });
-}
+  guard({}, ctx);
+  tokens = COMPACT_THRESHOLD_TOKENS - 1;
+  guard({}, ctx);
+  assert.equal(compactions.length, 0);
 
-test("a checkpoint removes old dialogue, keeps a verbatim tail, and is reused", async () => {
-  process.env.PI_STATE_COMPACTOR_TRIGGER = "10000";
-  try {
-    const messages = Array.from({ length: 12 }, (_, index) =>
-      makeMessage(index % 2 ? "assistant" : "user", `${index}: ${"x".repeat(3_000)}`, index + 1),
-    );
-    const harness = setup(messages, validState("e1"));
-    const context = harness.handlers.get("context");
-    const first = await context({ messages }, harness.ctx);
+  tokens = COMPACT_THRESHOLD_TOKENS;
+  guard({}, ctx);
+  guard({}, ctx);
+  assert.equal(compactions.length, 1);
 
-    assert.equal(harness.calls(), 1);
-    assert.ok(first.messages.length < messages.length);
-    assert.match(first.messages[0].content[0].text, /^# Working state/);
-    assert.doesNotMatch(first.messages[0].content[0].text, /0: xxx/);
-    assert.equal(first.messages.at(-1), messages.at(-1));
-    assert.equal(harness.branch.at(-1).customType, "state-compactor.checkpoint");
+  compactions[0].onError(new Error("failed"));
+  guard({}, ctx);
+  assert.equal(compactions.length, 2);
 
-    const second = await context({ messages }, harness.ctx);
-    assert.equal(harness.calls(), 1);
-    assert.deepEqual(second.messages, first.messages);
-  } finally {
-    delete process.env.PI_STATE_COMPACTOR_TRIGGER;
-  }
-});
-
-test("a context pin replaces an active tool result without duplicating it", async () => {
-  const user = makeMessage("user", "Do the work", 1);
-  const call = {
-    role: "assistant",
-    content: [{ type: "toolCall", id: "skill-read", name: "read", arguments: {} }],
-    timestamp: 2,
-  };
-  const result = makeMessage("toolResult", "loaded skill", 3, { toolCallId: "skill-read", toolName: "read", isError: false });
-  const pin = makeMessage("user", "retained skill", 3, {
-    stateCompactor: { pin: true, id: "mandatory-skill", replacesToolCallIds: ["skill-read"] },
-  });
-  const current = makeMessage("user", "Continue", 4);
-  const messages = [user, call, result, pin, current];
-  const harness = setup([user, call, result, current], validState("e1"));
-  const compacted = await harness.handlers.get("context")({ messages }, harness.ctx);
-
-  assert.equal(compacted.messages.includes(pin), false);
-  assert.equal(compacted.messages.includes(result), true);
-});
-
-test("a context pin survives the checkpoint that removes its tool result", async () => {
-  process.env.PI_STATE_COMPACTOR_TRIGGER = "10000";
-  try {
-    const user = makeMessage("user", "Do the work", 1);
-    const call = {
-      role: "assistant",
-      content: [{ type: "toolCall", id: "skill-read", name: "read", arguments: {} }],
-      timestamp: 2,
-    };
-    const result = makeMessage("toolResult", `loaded skill ${"s".repeat(3_000)}`, 3, {
-      toolCallId: "skill-read", toolName: "read", isError: false,
-    });
-    const dialogue = Array.from({ length: 10 }, (_, index) =>
-      makeMessage(index % 2 ? "assistant" : "user", `${index}: ${"x".repeat(3_000)}`, index + 4),
-    );
-    const current = makeMessage("user", "Continue", 20);
-    const persisted = [user, call, result, ...dialogue, current];
-    const pin = makeMessage("user", `retained skill ${"p".repeat(3_000)}`, 3, {
-      stateCompactor: { pin: true, id: "mandatory-skill", replacesToolCallIds: ["skill-read"] },
-    });
-    const messages = [...persisted.slice(0, -1), pin, current];
-    const harness = setup(persisted, validState("e1"));
-    const compacted = await harness.handlers.get("context")({ messages }, harness.ctx);
-
-    assert.equal(harness.calls(), 1);
-    assert.equal(compacted.messages.filter((message) => message.stateCompactor?.id === "mandatory-skill").length, 1);
-    assert.equal(compacted.messages.some((message) => message.toolCallId === "skill-read"), false);
-    assert.ok(compacted.messages.indexOf(pin) < compacted.messages.indexOf(current));
-  } finally {
-    delete process.env.PI_STATE_COMPACTOR_TRIGGER;
-  }
-});
-
-test("an in-flight checkpoint is discarded when the session is replaced", async () => {
-  process.env.PI_STATE_COMPACTOR_TRIGGER = "10000";
-  try {
-    const messages = Array.from({ length: 12 }, (_, index) =>
-      makeMessage(index % 2 ? "assistant" : "user", `${index}: ${"s".repeat(3_000)}`, index + 1),
-    );
-    const harness = setup(messages, validState("e1"));
-    let resolveCompletion;
-    harness.ctx.modelRegistry.complete = () => new Promise((resolve) => {
-      resolveCompletion = resolve;
-    });
-
-    const pending = harness.handlers.get("context")({ messages }, harness.ctx);
-    await Promise.resolve();
-    harness.handlers.get("session_start")();
-    harness.ctx.sessionManager.getSessionFile = () => {
-      throw new Error("stale context accessed");
-    };
-    resolveCompletion({ content: [{ type: "text", text: validState("e1") }] });
-
-    assert.equal(await pending, undefined);
-    assert.equal(harness.branch.some((entry) => entry.type === "custom"), false);
-  } finally {
-    delete process.env.PI_STATE_COMPACTOR_TRIGGER;
-  }
-});
-
-test("a reasoning-only checkpoint response is accepted", async () => {
-  process.env.PI_STATE_COMPACTOR_TRIGGER = "10000";
-  try {
-    const messages = Array.from({ length: 12 }, (_, index) =>
-      makeMessage(index % 2 ? "assistant" : "user", `${index}: ${"r".repeat(3_000)}`, index + 1),
-    );
-    const harness = setup(messages, [{ type: "thinking", thinking: validState("e1") }]);
-    await harness.handlers.get("context")({ messages }, harness.ctx);
-    assert.equal(harness.branch.at(-1).data.state.active.text, "Continue the current request");
-    assert.equal(harness.branch.at(-1).data.state.completedActions.length, 0);
-  } finally {
-    delete process.env.PI_STATE_COMPACTOR_TRIGGER;
-  }
-});
-
-test("an orchestrator task overrides requests in the completed opening", async () => {
-  process.env.PI_STATE_COMPACTOR_TRIGGER = "10000";
-  globalThis.__piWorkingStateHosts = new Map([
-    ["session-test", { activeTask: "Classify the current ledger obligation", openingMessageCount: 4 }],
-  ]);
-  try {
-    const messages = Array.from({ length: 12 }, (_, index) =>
-      makeMessage(index % 2 ? "assistant" : "user", `${index}: ${"y".repeat(3_000)}`, index + 1),
-    );
-    const harness = setup(messages, validState("e1"));
-    const result = await harness.handlers.get("context")({ messages }, harness.ctx);
-    assert.match(result.messages[0].content[0].text, /Classify the current ledger obligation \[host:task\]/);
-  } finally {
-    delete process.env.PI_STATE_COMPACTOR_TRIGGER;
-    delete globalThis.__piWorkingStateHosts;
-  }
-});
-
-test("invalid model output takes the deterministic interactive path", async () => {
-  process.env.PI_STATE_COMPACTOR_TRIGGER = "10000";
-  try {
-    const messages = Array.from({ length: 12 }, (_, index) =>
-      makeMessage(index % 2 ? "assistant" : "user", `${index}: ${"z".repeat(3_000)}`, index + 1),
-    );
-    const harness = setup(messages, "not json");
-    const result = await harness.handlers.get("context")({ messages }, harness.ctx);
-    assert.match(result.messages[0].content[0].text, /## Current activity/);
-    assert.match(result.messages[0].content[0].text, /\[e[0-9]+\]/);
-    assert.equal(harness.branch.at(-1).data.state.active.sources.length, 1);
-  } finally {
-    delete process.env.PI_STATE_COMPACTOR_TRIGGER;
-  }
-});
-
-test("a mid-turn checkpoint keeps the user request open after successful tool work", async () => {
-  process.env.PI_STATE_COMPACTOR_TRIGGER = "10000";
-  try {
-    const user = makeMessage("user", "Deploy the Auth0 alert", 1);
-    const call = {
-      role: "assistant",
-      content: [{ type: "toolCall", id: "call-1", name: "deploy", arguments: {} }],
-      stopReason: "toolUse",
-      timestamp: 2,
-    };
-    const result = {
-      role: "toolResult",
-      toolCallId: "call-1",
-      toolName: "deploy",
-      content: [{ type: "text", text: `deployed ${"x".repeat(30_000)}` }],
-      isError: false,
-      timestamp: 3,
-    };
-    const completedTooEarly = JSON.stringify({
-      active: null,
-      openRequests: [],
-      completedRequests: [{ text: "Deployed the Auth0 alert", sources: ["e1"] }],
-      inProgress: [],
-      completedActions: [{ text: "Deployment succeeded", sources: ["e3"] }],
-      constraints: [], decisions: [], artifacts: [], blockers: [], uncertainties: [], nextActions: [],
-    });
-    const harness = setup([user, call, result], completedTooEarly);
-    const compacted = await harness.handlers.get("context")({ messages: [user, call, result] }, harness.ctx);
-    const summary = compacted.messages[0].content[0].text;
-
-    assert.match(summary, /## Current activity\nDeploy the Auth0 alert \[e1\]/);
-    assert.match(summary, /## Open user requests\n- Deploy the Auth0 alert \[e1\]/);
-    assert.doesNotMatch(summary, /## Completed user requests\n- Deployed the Auth0 alert/);
-    assert.match(summary, /Continue the current turn from the recorded state, then reply to the user/);
-  } finally {
-    delete process.env.PI_STATE_COMPACTOR_TRIGGER;
-  }
-});
-
-test("state_recall pages exact branch sources", async () => {
-  const source = makeMessage("user", "abcdefghij", 1);
-  const harness = setup([source], validState());
-  const result = await harness.tools.get("state_recall").execute(
-    "call",
-    { source_id: "e1", offset: 5, max_chars: 7 },
-    undefined,
-    undefined,
-    harness.ctx,
-  );
-  assert.equal(result.details.found, true);
-  assert.equal(result.details.offset, 5);
-  assert.ok(result.details.totalChars > result.content[0].text.length);
-});
-
-test("native compaction uses the same working-state format", async () => {
-  const messages = [makeMessage("user", "Do the work", 1), makeMessage("assistant", "Working", 2)];
-  const harness = setup(messages, validState("e1"));
-  const result = await harness.handlers.get("session_before_compact")(
-    {
-      branchEntries: harness.branch,
-      signal: undefined,
-      preparation: {
-        messagesToSummarize: [messages[0]],
-        turnPrefixMessages: [],
-        firstKeptEntryId: "e2",
-        tokensBefore: 80_000,
-      },
-    },
-    harness.ctx,
-  );
-  assert.match(result.compaction.summary, /^# Working state/);
-  assert.equal(result.compaction.details.type, "state-compactor.checkpoint");
-  assert.equal(result.compaction.firstKeptEntryId, "e2");
+  compactions[1].onComplete({});
+  guard({}, ctx);
+  assert.equal(compactions.length, 3);
 });
