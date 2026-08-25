@@ -45,7 +45,11 @@ POLL_SECONDS=${PI_REMOTE_RESTART_POLL_SECONDS:-15}
 GRACE_SECONDS=${PI_REMOTE_RESTART_GRACE_SECONDS:-1200}
 
 if [[ ${1:-} == "--now" ]]; then
-  exec sudo -n systemd-run --collect --unit="$UNIT" systemctl reload "$SERVICE"
+  # Replace a queued wait instead of colliding with its transient unit. A unique
+  # activation unit also avoids systemd's short garbage-collection window after
+  # the waiter stops.
+  sudo -n systemctl stop "$UNIT.service" 2>/dev/null || true
+  exec sudo -n systemd-run --collect --unit="$UNIT-now-$(date +%s%N)" systemctl reload "$SERVICE"
 fi
 
 if [[ ${1:-} == "--wait-loop" ]]; then
@@ -67,6 +71,13 @@ if [[ ${1:-} == "--wait-loop" ]]; then
   done
   echo "still busy after ${GRACE_SECONDS}s; reloading instead (running work requeues with resume context)"
   exec systemctl reload "$SERVICE"
+fi
+
+# A second deploy while a waiter is already active needs no second polling
+# process. --now above deliberately replaces it.
+if systemctl is-active --quiet "$UNIT.service"; then
+  echo "already queued: $UNIT is waiting to activate Pi Remote"
+  exit 0
 fi
 
 # A transient unit starts with systemd's minimal PATH, which holds neither
