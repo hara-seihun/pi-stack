@@ -720,16 +720,8 @@ transcript for what happened and the session log for what was said.
 
 Multi-account routing for interactive pi sessions, driven entirely by the
 ledger — the account table is the registry (there is no `multi-pass.json`),
-and the extension replaces the old 6,000-line multi-pass with four rules:
+and the extension replaces the old 6,000-line multi-pass with three rules:
 
-- Every session has `delegate({ task, cwd? })`: one isolated, in-memory nested
-  Pi session that inherits the parent's model, thinking level, tools,
-  extensions, project guidance, and cwd (unless overridden), sees none of the
-  parent conversation, and returns one final answer as the tool result. Calls
-  serialize per parent, recurse normally, and abort with the parent turn. A
-  delegated child inherits the parent's account choice; it does not bind a
-  second account or hold a second interactive lease. Fleet children join the
-  root run through `run_session`, so their usage is charged to that lane.
 - Exclusive accounts whose id differs from their family (`anthropic-2`, ...)
   are ordinary alias providers over the local `auth.json`. Shared Codex
   accounts, including the unsuffixed family id, are providers over the central
@@ -750,9 +742,11 @@ and the extension replaces the old 6,000-line multi-pass with four rules:
   retry already delivered the reply is a lie it then has to reason around.
 
 Orchestrator-launched sessions set `PI_ORCHESTRATOR_ASSIGNED=1` and the
-extension stays out entirely — the broker owns their custody, so exactly
-one brain routes any given session. Load it by adding this repository to
-`packages` in pi settings (the package also carries the usage logger).
+extension stays out entirely. The broker owns their custody, so exactly
+one brain routes any given session. The standalone `delegate` command sets
+`PI_DELEGATE_CHILD=1` for the same reason while preserving the parent's chosen
+account. Load this repository by adding it to `packages` in Pi settings. The
+package also carries the usage logger.
 
 ## GPT-Live voice (`src/voice/`)
 

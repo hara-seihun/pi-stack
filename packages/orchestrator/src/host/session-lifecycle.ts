@@ -1,9 +1,7 @@
 import {
   createAgentSession,
-  SessionManager,
   type AgentSession,
 } from "@earendil-works/pi-coding-agent";
-import { registerNestedSession } from "./session-context.js";
 
 /** A retry window long enough to cover ordinary provider throttles while Pi
  * can replay the interrupted turn without changing the conversation. */
@@ -21,7 +19,6 @@ export interface HostedSessionOptions {
   readonly customTools?: unknown[];
   readonly resourceLoader?: unknown;
   readonly sessionManager?: unknown;
-  readonly parentSessionId?: string;
   readonly openSession?: typeof createAgentSession;
   readonly onExtensionError?: (extensionPath: string, error: unknown) => void;
 }
@@ -52,14 +49,10 @@ export async function openHostedSession(options: HostedSessionOptions): Promise<
     ...(options.sessionManager === undefined ? {} : { sessionManager: options.sessionManager as never }),
   });
   const sessionId = session.sessionManager.getSessionId();
-  const unregisterNested = options.parentSessionId === undefined
-    ? undefined
-    : registerNestedSession(sessionId, options.parentSessionId);
   let disposed = false;
   const dispose = (): void => {
     if (disposed) return;
     disposed = true;
-    unregisterNested?.();
     session.dispose();
   };
 
@@ -94,9 +87,4 @@ export async function openHostedSession(options: HostedSessionOptions): Promise<
     dispose();
     throw thrown;
   }
-}
-
-/** Delegates are deliberately ephemeral and isolated from parent history. */
-export function delegatedSessionManager(cwd: string): unknown {
-  return SessionManager.inMemory(cwd);
 }
