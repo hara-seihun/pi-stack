@@ -95,6 +95,33 @@ test("a checkpoint removes old dialogue, keeps a verbatim tail, and is reused", 
   }
 });
 
+test("an in-flight checkpoint is discarded when the session is replaced", async () => {
+  process.env.PI_STATE_COMPACTOR_TRIGGER = "10000";
+  try {
+    const messages = Array.from({ length: 12 }, (_, index) =>
+      makeMessage(index % 2 ? "assistant" : "user", `${index}: ${"s".repeat(3_000)}`, index + 1),
+    );
+    const harness = setup(messages, validState("e1"));
+    let resolveCompletion;
+    harness.ctx.modelRegistry.complete = () => new Promise((resolve) => {
+      resolveCompletion = resolve;
+    });
+
+    const pending = harness.handlers.get("context")({ messages }, harness.ctx);
+    await Promise.resolve();
+    harness.handlers.get("session_start")();
+    harness.ctx.sessionManager.getSessionFile = () => {
+      throw new Error("stale context accessed");
+    };
+    resolveCompletion({ content: [{ type: "text", text: validState("e1") }] });
+
+    assert.equal(await pending, undefined);
+    assert.equal(harness.branch.some((entry) => entry.type === "custom"), false);
+  } finally {
+    delete process.env.PI_STATE_COMPACTOR_TRIGGER;
+  }
+});
+
 test("a reasoning-only checkpoint response is accepted", async () => {
   process.env.PI_STATE_COMPACTOR_TRIGGER = "10000";
   try {

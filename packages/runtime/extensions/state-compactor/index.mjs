@@ -215,8 +215,10 @@ export default function stateCompactor(pi) {
   let previousEstimate = null;
   let checkpointing = null;
   let alerted = false;
+  let sessionGeneration = 0;
 
   const reset = () => {
+    sessionGeneration++;
     active = null;
     ratio = 1.6;
     previousEstimate = null;
@@ -287,6 +289,7 @@ export default function stateCompactor(pi) {
 
     if (projected >= budgets.trigger) {
       if (!checkpointing) {
+        const checkpointGeneration = sessionGeneration;
         checkpointing = (async () => {
           const checkpointStart = findCheckpointStart(rawMessages, active);
           const start = checkpointStart < 0 ? 0 : checkpointStart;
@@ -306,6 +309,7 @@ export default function stateCompactor(pi) {
             openingCount,
             pendingUser: pending && pending.index < boundary ? pending : null,
           });
+          if (checkpointGeneration !== sessionGeneration) return null;
           const summary = renderState(generated.state, ctx.sessionManager.getSessionFile?.());
           const firstKept = rawMessages[boundary];
           const coveredMessage = rawMessages[boundary - 1];
@@ -364,6 +368,7 @@ export default function stateCompactor(pi) {
     const branchMessages = branch.map(branchEntryMessage).filter(Boolean);
     const pending = frame?.activeTask?.trim() ? null : pendingUserRequest(branchMessages, branch);
     const summarizedIds = new Set(delta.map((message) => sourceIdForMessage(message, branch)).filter(Boolean));
+    const compactionGeneration = sessionGeneration;
     const generated = await generateState({
       ctx,
       signal: event.signal,
@@ -374,6 +379,7 @@ export default function stateCompactor(pi) {
       openingCount,
       pendingUser: pending && summarizedIds.has(pending.id) ? pending : null,
     });
+    if (compactionGeneration !== sessionGeneration) return;
     const state = generated.state;
     const summary = renderState(state, ctx.sessionManager.getSessionFile?.());
     const firstKept = branchMessageById(branch, event.preparation.firstKeptEntryId) ?? all.at(-1);
