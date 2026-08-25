@@ -59,6 +59,8 @@ describe("interactive failover notices", () => {
     dir = mkdtempSync(join(tmpdir(), "pi-orchestrator-routing-"));
     process.env.PI_ORCHESTRATOR_LEDGER = join(dir, "ledger.sqlite3");
     process.env.PI_ORCHESTRATOR_CONFIG = join(dir, "config.json");
+    process.env.PI_AGENT_DIR = dir;
+    writeFileSync(join(dir, "auth.json"), JSON.stringify({ anthropic: {}, "anthropic-3": {} }));
     writeFileSync(
       process.env.PI_ORCHESTRATOR_CONFIG,
       JSON.stringify({
@@ -76,6 +78,7 @@ describe("interactive failover notices", () => {
   afterEach(() => {
     delete process.env.PI_ORCHESTRATOR_LEDGER;
     delete process.env.PI_ORCHESTRATOR_CONFIG;
+    delete process.env.PI_AGENT_DIR;
     rmSync(dir, { recursive: true, force: true });
   });
 
