@@ -14,6 +14,8 @@ import {
   fingerprintMessage,
   latestCheckpoint,
   parseStateResponse,
+  pendingUserRequest,
+  preservePendingRequest,
   recordsForMessages,
   renderSourceEntry,
   renderState,
@@ -161,9 +163,10 @@ function knownSources(branch, records, frame) {
   return result;
 }
 
-async function generateState({ ctx, signal, previousState, messages, branch, frame, openingCount }) {
+async function generateState({ ctx, signal, previousState, messages, branch, frame, openingCount, pendingUser }) {
   const records = recordsForMessages(messages, branch, openingCount).filter((record) => !record.id.startsWith("view:"));
-  const fallback = () => deterministicState(previousState, records, { hostTask: frame?.activeTask?.trim() || "" });
+  const finalize = (state) => preservePendingRequest(state, pendingUser);
+  const fallback = () => finalize(deterministicState(previousState, records, { hostTask: frame?.activeTask?.trim() || "" }));
   if (!ctx.model || records.length === 0) return { state: fallback(), usage: undefined, degraded: records.length > 0 };
 
   const prompt = buildUpdatePrompt(previousState, records, frame);
@@ -185,7 +188,7 @@ async function generateState({ ctx, signal, previousState, messages, branch, fra
       openingSources: new Set(records.filter((record) => record.opening).map((record) => record.id)),
       hostTask: frame?.activeTask?.trim() || "",
     });
-    if (parsed.ok) return { state: parsed.state, usage: response.usage, degraded: false };
+    if (parsed.ok) return { state: finalize(parsed.state), usage: response.usage, degraded: false };
     const blocks = (response.content ?? []).map((part) => {
       const length = typeof part?.text === "string"
         ? part.text.length
@@ -292,6 +295,7 @@ export default function stateCompactor(pi) {
           if (boundary <= start) return null;
           const frame = hostFrame(ctx);
           const openingCount = Math.max(0, Number(frame?.openingMessageCount ?? 0) - start);
+          const pending = frame?.activeTask?.trim() ? null : pendingUserRequest(rawMessages, branch);
           const generated = await generateState({
             ctx,
             signal: ctx.signal,
@@ -300,6 +304,7 @@ export default function stateCompactor(pi) {
             branch,
             frame,
             openingCount,
+            pendingUser: pending && pending.index < boundary ? pending : null,
           });
           const summary = renderState(generated.state, ctx.sessionManager.getSessionFile?.());
           const firstKept = rawMessages[boundary];
@@ -356,6 +361,9 @@ export default function stateCompactor(pi) {
     const delta = all.slice(start);
     const frame = hostFrame(ctx);
     const openingCount = Math.max(0, Number(frame?.openingMessageCount ?? 0) - start);
+    const branchMessages = branch.map(branchEntryMessage).filter(Boolean);
+    const pending = frame?.activeTask?.trim() ? null : pendingUserRequest(branchMessages, branch);
+    const summarizedIds = new Set(delta.map((message) => sourceIdForMessage(message, branch)).filter(Boolean));
     const generated = await generateState({
       ctx,
       signal: event.signal,
@@ -364,6 +372,7 @@ export default function stateCompactor(pi) {
       branch,
       frame,
       openingCount,
+      pendingUser: pending && summarizedIds.has(pending.id) ? pending : null,
     });
     const state = generated.state;
     const summary = renderState(state, ctx.sessionManager.getSessionFile?.());

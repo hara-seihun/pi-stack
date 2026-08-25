@@ -144,6 +144,45 @@ test("invalid model output takes the deterministic interactive path", async () =
   }
 });
 
+test("a mid-turn checkpoint keeps the user request open after successful tool work", async () => {
+  process.env.PI_STATE_COMPACTOR_TRIGGER = "10000";
+  try {
+    const user = makeMessage("user", "Deploy the Auth0 alert", 1);
+    const call = {
+      role: "assistant",
+      content: [{ type: "toolCall", id: "call-1", name: "deploy", arguments: {} }],
+      stopReason: "toolUse",
+      timestamp: 2,
+    };
+    const result = {
+      role: "toolResult",
+      toolCallId: "call-1",
+      toolName: "deploy",
+      content: [{ type: "text", text: `deployed ${"x".repeat(30_000)}` }],
+      isError: false,
+      timestamp: 3,
+    };
+    const completedTooEarly = JSON.stringify({
+      active: null,
+      openRequests: [],
+      completedRequests: [{ text: "Deployed the Auth0 alert", sources: ["e1"] }],
+      inProgress: [],
+      completedActions: [{ text: "Deployment succeeded", sources: ["e3"] }],
+      constraints: [], decisions: [], artifacts: [], blockers: [], uncertainties: [], nextActions: [],
+    });
+    const harness = setup([user, call, result], completedTooEarly);
+    const compacted = await harness.handlers.get("context")({ messages: [user, call, result] }, harness.ctx);
+    const summary = compacted.messages[0].content[0].text;
+
+    assert.match(summary, /## Current activity\nDeploy the Auth0 alert \[e1\]/);
+    assert.match(summary, /## Open user requests\n- Deploy the Auth0 alert \[e1\]/);
+    assert.doesNotMatch(summary, /## Completed user requests\n- Deployed the Auth0 alert/);
+    assert.match(summary, /Continue the current turn from the recorded state, then reply to the user/);
+  } finally {
+    delete process.env.PI_STATE_COMPACTOR_TRIGGER;
+  }
+});
+
 test("state_recall pages exact branch sources", async () => {
   const source = makeMessage("user", "abcdefghij", 1);
   const harness = setup([source], validState());

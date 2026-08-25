@@ -7,6 +7,8 @@ import {
   emptyState,
   findTailBoundary,
   parseStateResponse,
+  pendingUserRequest,
+  preservePendingRequest,
   recordsForMessages,
   renderState,
 } from "./state.mjs";
@@ -98,6 +100,42 @@ test("deterministic state works for interactive conversations without a host tas
   const state = deterministicState(null, records);
   assert.equal(state.active.text, "What should we make for dinner?");
   assert.deepEqual(state.active.sources, ["u2"]);
+});
+
+test("a user request remains pending through tool use until the assistant replies", () => {
+  const user = message("user", "Deploy the alert", 1);
+  const toolCall = {
+    role: "assistant",
+    content: [{ type: "toolCall", id: "call-1", name: "deploy", arguments: {} }],
+    stopReason: "toolUse",
+    timestamp: 2,
+  };
+  const toolResult = {
+    role: "toolResult",
+    toolCallId: "call-1",
+    content: [{ type: "text", text: "deployed" }],
+    timestamp: 3,
+  };
+  const branch = [entry("user-source", user), entry("call-source", toolCall), entry("result-source", toolResult)];
+  const pending = pendingUserRequest([user, toolCall, toolResult], branch);
+  assert.deepEqual(pending, { id: "user-source", index: 0, text: "Deploy the alert" });
+
+  const mistaken = emptyState();
+  mistaken.completedRequests = [fact("Deployed the alert", "user-source")];
+  mistaken.completedActions = [fact("Deployment succeeded", "result-source")];
+  const corrected = preservePendingRequest(mistaken, pending);
+  assert.deepEqual(corrected.active, fact("Deploy the alert", "user-source"));
+  assert.deepEqual(corrected.openRequests, [fact("Deploy the alert", "user-source")]);
+  assert.deepEqual(corrected.completedRequests, []);
+  assert.deepEqual(corrected.completedActions, mistaken.completedActions);
+  assert.match(corrected.nextActions[0].text, /then reply to the user/);
+});
+
+test("a visible final assistant reply resolves the pending user request", () => {
+  const user = message("user", "Deploy the alert", 1);
+  const reply = { ...message("assistant", "Deployed.", 2), stopReason: "stop" };
+  const branch = [entry("user-source", user), entry("reply-source", reply)];
+  assert.equal(pendingUserRequest([user, reply], branch), null);
 });
 
 test("deterministic extraction records successful tool calls so they are not repeated", () => {

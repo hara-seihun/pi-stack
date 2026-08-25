@@ -104,6 +104,52 @@ export function assembleView(messages, checkpoint) {
   return [stateMessage(checkpoint.summary, messages[start]?.timestamp ?? Date.now()), ...messages.slice(start)];
 }
 
+export function pendingUserRequest(messages, branchEntries) {
+  let userIndex = -1;
+  for (let index = messages.length - 1; index >= 0; index--) {
+    if (messages[index]?.role === "user" && textOfContent(messages[index]?.content).trim()) {
+      userIndex = index;
+      break;
+    }
+  }
+  if (userIndex < 0) return null;
+
+  const replied = messages.slice(userIndex + 1).some(
+    (message) => message?.role === "assistant" &&
+      message.stopReason === "stop" &&
+      textOfContent(message.content).trim(),
+  );
+  if (replied) return null;
+
+  const id = sourceIdForMessage(messages[userIndex], branchEntries);
+  if (!id) return null;
+  return {
+    id,
+    index: userIndex,
+    text: bounded(textOfContent(messages[userIndex].content), 6_000),
+  };
+}
+
+export function preservePendingRequest(state, pending) {
+  if (!pending || !isState(state)) return state;
+  const result = structuredClone(state);
+  const request = { text: pending.text, sources: [pending.id] };
+  result.active = request;
+  result.completedRequests = result.completedRequests.filter((fact) => !fact.sources.includes(pending.id));
+  result.openRequests = dedupeFacts(
+    [request, ...result.openRequests.filter((fact) => !fact.sources.includes(pending.id))],
+    FIELD_LIMITS.openRequests,
+  );
+  result.nextActions = dedupeFacts([
+    {
+      text: "Continue the current turn from the recorded state, then reply to the user. Do not repeat completed work.",
+      sources: [pending.id],
+    },
+    ...result.nextActions.filter((fact) => !fact.sources.includes(pending.id)),
+  ], FIELD_LIMITS.nextActions);
+  return result;
+}
+
 export function latestCheckpoint(branchEntries) {
   for (let index = branchEntries.length - 1; index >= 0; index--) {
     const entry = branchEntries[index];
@@ -380,6 +426,7 @@ export function buildUpdatePrompt(previousState, records, hostFrame) {
     "- Entries marked COMPLETED OPENING EXCHANGE are orientation or priming that already happened. They can support constraints or decisions, but can never become active or open requests.",
     "- The host task, when present, is the authoritative current activity. Copy it exactly into active with source host:task.",
     "- Without a host task, infer active from the latest unresolved user request. This may be an interactive conversation with no formal task, in which case active may be null.",
+    "- Tool calls and successful results can complete the work, but the user request stays open until a visible assistant reply ends the turn.",
     "- Every fact needs one or more exact source ids from brackets below or from the previous state.",
     "- Put claims such as tests passed, deployed, published, released, or fixed in completedActions only when a cited source is a SUCCESSFUL TOOL RESULT.",
     "- Keep exact paths, identifiers, values, error text, constraints, and decision rationale. Prefer short facts.",
