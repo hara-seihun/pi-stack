@@ -149,9 +149,6 @@ export default function routing(pi: ExtensionAPI): void {
   };
 
   pi.on("session_start", async (event, ctx) => {
-    // The standalone delegate command explicitly inherits its parent's model
-    // and account. Do not replace that choice when its SDK session starts.
-    if (process.env.PI_DELEGATE_CHILD === "1") return;
     // Only fresh sessions bind; resume/fork/reload stay sticky to their
     // account so provider caches survive.
     if (event.reason !== "startup" && event.reason !== "new") return;
@@ -166,7 +163,6 @@ export default function routing(pi: ExtensionAPI): void {
 
   pi.on("agent_end", async (event, ctx) => {
     unresolved = undefined;
-    if (process.env.PI_DELEGATE_CHILD === "1") return;
     const last = event.messages[event.messages.length - 1];
     if (last?.role !== "assistant") return;
     const { stopReason, errorMessage } = last as { stopReason?: string; errorMessage?: string };

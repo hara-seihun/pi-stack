@@ -32,9 +32,8 @@ export interface HostedSession {
 /**
  * Open and fully initialize one embedded Pi session.
  *
- * Standing shifts and one-turn delegates share this path so extension binding,
- * extension-provider model resolution, retry settings, and teardown cannot
- * drift into two almost-identical runtimes.
+ * Standing shifts use this path so extension binding, extension-provider model
+ * resolution, retry settings, and teardown stay together.
  */
 export async function openHostedSession(options: HostedSessionOptions): Promise<HostedSession> {
   const factory = options.openSession ?? createAgentSession;

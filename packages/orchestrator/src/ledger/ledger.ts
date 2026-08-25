@@ -324,10 +324,10 @@ const CHECK_IN_SCHEMA = `
 ALTER TABLE run ADD COLUMN check_ins INTEGER NOT NULL DEFAULT 0;
 `;
 
-/** A run may host a tree of isolated Pi sessions. The relation is the
- * attribution source for every root and child. run.session_id remains the root
- * projection so a worker from the previous generation can finish during a
- * rolling schema migration; new code never joins usage through it. */
+/** The relation is the attribution source for each run's Pi session.
+ * run.session_id remains the root projection so a worker from the previous
+ * generation can finish during a rolling schema migration; new code never
+ * joins usage through it. */
 const RUN_SESSION_RELATION_SCHEMA = `
 DROP INDEX run_session;
 CREATE TABLE run_session (
@@ -342,6 +342,13 @@ INSERT INTO run_session (run_id, session_id, parent_session_id, created_at)
   FROM run WHERE session_id IS NOT NULL;
 CREATE INDEX run_session_run ON run_session (run_id, created_at);
 CREATE INDEX run_session_parent ON run_session (parent_session_id);
+`;
+
+/** Nested sessions were removed. Drop their ancestry while retaining every
+ * recorded session so historical usage attribution remains intact. */
+const SINGLE_RUN_SESSION_SCHEMA = `
+DROP INDEX run_session_parent;
+ALTER TABLE run_session DROP COLUMN parent_session_id;
 `;
 
 const MIGRATIONS: readonly string[] = [
@@ -364,6 +371,7 @@ const MIGRATIONS: readonly string[] = [
   OPENING_PROBE_SCHEMA,
   CHECK_IN_SCHEMA,
   RUN_SESSION_RELATION_SCHEMA,
+  SINGLE_RUN_SESSION_SCHEMA,
 ];
 
 export interface AccountRow {
@@ -682,10 +690,10 @@ export class Ledger {
   }
 
   /**
-   * Who spent the quota. Every root or delegated fleet session resolves to its
-   * lane through `run_session`; everything else is one of this machine's own
-   * interactive sessions, named by session id because that is the only handle
-   * the ledger holds for them.
+   * Who spent the quota. Every fleet session resolves to its lane through
+   * `run_session`; everything else is one of this machine's own interactive
+   * sessions, named by session id because that is the only handle the ledger
+   * holds for them.
    */
   usageBreakdown(since: number): UsageBreakdown {
     const slices = (select: string, params: (string | number)[] = []): UsageSlice[] =>
@@ -1225,8 +1233,8 @@ export class Ledger {
       this.db.prepare("UPDATE run SET session_id = ? WHERE id = ?").run(sessionId, id);
       this.db
         .prepare(
-          `INSERT INTO run_session (run_id, session_id, parent_session_id, created_at)
-           VALUES (?, ?, NULL, ?) ON CONFLICT (session_id) DO NOTHING`,
+          `INSERT INTO run_session (run_id, session_id, created_at)
+           VALUES (?, ?, ?) ON CONFLICT (session_id) DO NOTHING`,
         )
         .run(id, sessionId, at);
       this.db.exec("COMMIT");
@@ -1234,37 +1242,6 @@ export class Ledger {
       this.db.exec("ROLLBACK");
       throw thrown;
     }
-  }
-
-  /** Bind a delegated session to the same run as its parent. Interactive
-   * sessions have no run relation, in which case there is intentionally
-   * nothing to write. Returns the owning run id when one exists. */
-  linkNestedSession(parentSessionId: string, sessionId: string, at = Date.now()): string | undefined {
-    const parent = this.db
-      .prepare("SELECT run_id FROM run_session WHERE session_id = ?")
-      .get(parentSessionId) as { run_id: string } | undefined;
-    if (parent === undefined) return undefined;
-    this.db
-      .prepare(
-        `INSERT INTO run_session (run_id, session_id, parent_session_id, created_at)
-         VALUES (?, ?, ?, ?) ON CONFLICT (session_id) DO NOTHING`,
-      )
-      .run(parent.run_id, sessionId, parentSessionId, at);
-    return parent.run_id;
-  }
-
-  sessionsForRun(id: string): { sessionId: string; parentSessionId?: string; createdAt: number }[] {
-    return (this.db
-      .prepare(
-        `SELECT session_id, parent_session_id, created_at FROM run_session
-         WHERE run_id = ? ORDER BY created_at, session_id`,
-      )
-      .all(id) as { session_id: string; parent_session_id: string | null; created_at: number }[])
-      .map((row) => ({
-        sessionId: row.session_id,
-        parentSessionId: row.parent_session_id ?? undefined,
-        createdAt: row.created_at,
-      }));
   }
 
   requestAbort(id: string): void {

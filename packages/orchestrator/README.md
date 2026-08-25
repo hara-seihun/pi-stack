@@ -162,10 +162,8 @@ apply retroactively to recorded history. Idle high-frequency readings are
 deduplicated to hourly anchors; old facts are prunable because calibration
 only weights recent windows.
 
-Runs and Pi sessions are many-to-one. `run_session` records the root session
-and every nested delegated session, including parentage. Usage joins through
-that relation, so a child's tokens belong to the lane whose root run asked for
-them rather than an unattributed or separately scheduled agent. The
+`run_session` records each run's Pi session. Usage joins through that relation
+so token consumption belongs to the lane that launched the session. The
 `run.session_id` root projection remains deliberately: a worker on the prior
 schema generation must still be able to finish while a successor starts during
 a rolling deploy. Current code never uses it for attribution.
@@ -743,10 +741,8 @@ and the extension replaces the old 6,000-line multi-pass with three rules:
 
 Orchestrator-launched sessions set `PI_ORCHESTRATOR_ASSIGNED=1` and the
 extension stays out entirely. The broker owns their custody, so exactly
-one brain routes any given session. The standalone `delegate` command sets
-`PI_DELEGATE_CHILD=1` for the same reason while preserving the parent's chosen
-account. Load this repository by adding it to `packages` in Pi settings. The
-package also carries the usage logger.
+one brain routes any given session. Load this repository by adding it to
+`packages` in Pi settings. The package also carries the usage logger.
 
 ## GPT-Live voice (`src/voice/`)
 

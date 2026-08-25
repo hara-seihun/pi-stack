@@ -131,8 +131,12 @@ describe("ledger", () => {
     migrated.close();
     expect(await exited, stderr).toBe(0);
     const verified = new DatabaseSync(path);
-    expect((verified.prepare("PRAGMA user_version").get() as { user_version: number }).user_version).toBe(19);
+    expect((verified.prepare("PRAGMA user_version").get() as { user_version: number }).user_version).toBe(20);
     expect(verified.prepare("SELECT check_ins, session_id FROM run LIMIT 1").all()).toEqual([]);
+    expect(
+      (verified.prepare("PRAGMA table_info(run_session)").all() as { name: string }[])
+        .some((column) => column.name === "parent_session_id"),
+    ).toBe(false);
     // The root projection lets a previous-generation worker continue selecting
     // run rows while it drains across this migration.
     expect(
@@ -386,20 +390,12 @@ describe("account metadata custody", () => {
       at,
     });
     ledger.linkRunSession(run, "fleet-session", at);
-    expect(ledger.linkNestedSession("fleet-session", "delegated-session", at + 1)).toBe(run);
     ledger.recordUsage("codex-7", {
       at,
       classId: "gpt:input",
       tokens: 300,
       source: "orchestrator",
       sessionId: "fleet-session",
-    });
-    ledger.recordUsage("codex-7", {
-      at: at + 1,
-      classId: "gpt:output",
-      tokens: 50,
-      source: "orchestrator",
-      sessionId: "delegated-session",
     });
     // The same shared account, spent by an operator's own session.
     ledger.recordUsage("codex-7", {
@@ -411,18 +407,13 @@ describe("account metadata custody", () => {
     });
 
     const b = ledger.usageBreakdown(at - HOUR);
-    expect(b.total).toBe(450);
-    expect(b.bySource).toEqual({ orchestrator: 350, machine: 100 });
-    expect(b.byLane).toEqual([{ key: "frontier", tokens: 350, sessions: 2 }]);
-    expect(b.byAccount).toEqual([{ key: "codex-7", tokens: 450, sessions: 3 }]);
+    expect(b.total).toBe(400);
+    expect(b.bySource).toEqual({ orchestrator: 300, machine: 100 });
+    expect(b.byLane).toEqual([{ key: "frontier", tokens: 300, sessions: 1 }]);
+    expect(b.byAccount).toEqual([{ key: "codex-7", tokens: 400, sessions: 2 }]);
     expect(b.topSessions.map((s) => s.key)).toEqual([
       "fleet-session  frontier",
       "operator-session  codex-7",
-      "delegated-session  frontier",
-    ]);
-    expect(ledger.sessionsForRun(run)).toEqual([
-      { sessionId: "fleet-session", createdAt: at },
-      { sessionId: "delegated-session", parentSessionId: "fleet-session", createdAt: at + 1 },
     ]);
   });
 });

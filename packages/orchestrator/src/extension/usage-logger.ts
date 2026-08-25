@@ -140,10 +140,6 @@ export default function usageLogger(pi: ExtensionAPI): void {
 
   if (process.env.PI_ORCHESTRATOR_ASSIGNED !== "1") {
     pi.on("agent_start", async (_event, ctx) => {
-      // The parent remains inside its bash call while the standalone delegate
-      // works, so its lease already covers the account. The child still logs
-      // token usage below, but it must not claim a second capacity slot.
-      if (process.env.PI_DELEGATE_CHILD === "1") return;
       endLease();
       const providerAlias = ctx.model?.provider;
       if (providerAlias === undefined) return;
