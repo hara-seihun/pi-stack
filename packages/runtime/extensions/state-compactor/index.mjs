@@ -23,6 +23,41 @@ import {
   stateMessage,
 } from "./state.mjs";
 
+function pinData(message) {
+  const value = message?.stateCompactor;
+  if (!value || value.pin !== true || typeof value.id !== "string") return null;
+  return {
+    id: value.id,
+    replacesToolCallIds: Array.isArray(value.replacesToolCallIds)
+      ? value.replacesToolCallIds.filter((id) => typeof id === "string")
+      : [],
+  };
+}
+
+function withPinnedContext(rawMessages, assembledMessages) {
+  const pins = new Map();
+  for (const message of rawMessages) {
+    const data = pinData(message);
+    if (data) pins.set(data.id, { message, data });
+  }
+  if (pins.size === 0) return assembledMessages;
+
+  const visibleToolResults = new Set(
+    assembledMessages
+      .filter((message) => message?.role === "toolResult" && typeof message.toolCallId === "string")
+      .map((message) => message.toolCallId),
+  );
+  const result = assembledMessages.filter((message) => !pinData(message));
+  const retained = [...pins.values()]
+    .filter(({ data }) => data.replacesToolCallIds.length === 0 || !data.replacesToolCallIds.every((id) => visibleToolResults.has(id)))
+    .map(({ message }) => message);
+  if (retained.length === 0) return result;
+  let insertion = result.findLastIndex((message) => message?.role === "user");
+  if (insertion < 0) insertion = result.length;
+  result.splice(insertion, 0, ...retained);
+  return result;
+}
+
 function estimateMessageTokens(message) {
   const wire = {
     role: message?.role,
@@ -274,7 +309,7 @@ export default function stateCompactor(pi) {
     const branch = ctx.sessionManager.getBranch();
     active = latestCheckpoint(branch) ?? active;
 
-    let currentView = assembleView(rawMessages, active);
+    let currentView = withPinnedContext(rawMessages, assembleView(rawMessages, active));
     const lastAssistant = [...currentView].reverse().find((message) => message?.role === "assistant");
     const billed = promptTokens(lastAssistant);
     if (billed !== null && previousEstimate && previousEstimate > 0) {
@@ -316,7 +351,8 @@ export default function stateCompactor(pi) {
           const firstKeptEntryId = firstKept ? sourceIdForMessage(firstKept, branch) : null;
           const covered = sourceIdForMessage(coveredMessage, branch);
           const provisional = [stateMessage(summary, firstKept?.timestamp ?? Date.now()), ...rawMessages.slice(boundary)];
-          const after = provisional.reduce((sum, message) => sum + estimate(message), 0) * ratio;
+          const pinnedProvisional = withPinnedContext(rawMessages, provisional);
+          const after = pinnedProvisional.reduce((sum, message) => sum + estimate(message), 0) * ratio;
           const checkpoint = checkpointData({
             state: generated.state,
             summary,
@@ -345,7 +381,7 @@ export default function stateCompactor(pi) {
       }
       const created = await checkpointing;
       if (created) active = created;
-      currentView = assembleView(rawMessages, active);
+      currentView = withPinnedContext(rawMessages, assembleView(rawMessages, active));
       estimated = currentView.reduce((sum, message) => sum + estimate(message), 0);
     }
 

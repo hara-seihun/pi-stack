@@ -2,6 +2,13 @@ import test from "node:test";
 import assert from "node:assert/strict";
 import stateCompactor from "./index.mjs";
 
+const originalAlertsDirectory = process.env.PI_STATE_COMPACTOR_ALERTS;
+delete process.env.PI_STATE_COMPACTOR_ALERTS;
+test.after(() => {
+  if (originalAlertsDirectory === undefined) delete process.env.PI_STATE_COMPACTOR_ALERTS;
+  else process.env.PI_STATE_COMPACTOR_ALERTS = originalAlertsDirectory;
+});
+
 const makeMessage = (role, text, timestamp, extra = {}) => ({
   role,
   content: [{ type: "text", text }],
@@ -90,6 +97,59 @@ test("a checkpoint removes old dialogue, keeps a verbatim tail, and is reused", 
     const second = await context({ messages }, harness.ctx);
     assert.equal(harness.calls(), 1);
     assert.deepEqual(second.messages, first.messages);
+  } finally {
+    delete process.env.PI_STATE_COMPACTOR_TRIGGER;
+  }
+});
+
+test("a context pin replaces an active tool result without duplicating it", async () => {
+  const user = makeMessage("user", "Do the work", 1);
+  const call = {
+    role: "assistant",
+    content: [{ type: "toolCall", id: "skill-read", name: "read", arguments: {} }],
+    timestamp: 2,
+  };
+  const result = makeMessage("toolResult", "loaded skill", 3, { toolCallId: "skill-read", toolName: "read", isError: false });
+  const pin = makeMessage("user", "retained skill", 3, {
+    stateCompactor: { pin: true, id: "mandatory-skill", replacesToolCallIds: ["skill-read"] },
+  });
+  const current = makeMessage("user", "Continue", 4);
+  const messages = [user, call, result, pin, current];
+  const harness = setup([user, call, result, current], validState("e1"));
+  const compacted = await harness.handlers.get("context")({ messages }, harness.ctx);
+
+  assert.equal(compacted.messages.includes(pin), false);
+  assert.equal(compacted.messages.includes(result), true);
+});
+
+test("a context pin survives the checkpoint that removes its tool result", async () => {
+  process.env.PI_STATE_COMPACTOR_TRIGGER = "10000";
+  try {
+    const user = makeMessage("user", "Do the work", 1);
+    const call = {
+      role: "assistant",
+      content: [{ type: "toolCall", id: "skill-read", name: "read", arguments: {} }],
+      timestamp: 2,
+    };
+    const result = makeMessage("toolResult", `loaded skill ${"s".repeat(3_000)}`, 3, {
+      toolCallId: "skill-read", toolName: "read", isError: false,
+    });
+    const dialogue = Array.from({ length: 10 }, (_, index) =>
+      makeMessage(index % 2 ? "assistant" : "user", `${index}: ${"x".repeat(3_000)}`, index + 4),
+    );
+    const current = makeMessage("user", "Continue", 20);
+    const persisted = [user, call, result, ...dialogue, current];
+    const pin = makeMessage("user", `retained skill ${"p".repeat(3_000)}`, 3, {
+      stateCompactor: { pin: true, id: "mandatory-skill", replacesToolCallIds: ["skill-read"] },
+    });
+    const messages = [...persisted.slice(0, -1), pin, current];
+    const harness = setup(persisted, validState("e1"));
+    const compacted = await harness.handlers.get("context")({ messages }, harness.ctx);
+
+    assert.equal(harness.calls(), 1);
+    assert.equal(compacted.messages.filter((message) => message.stateCompactor?.id === "mandatory-skill").length, 1);
+    assert.equal(compacted.messages.some((message) => message.toolCallId === "skill-read"), false);
+    assert.ok(compacted.messages.indexOf(pin) < compacted.messages.indexOf(current));
   } finally {
     delete process.env.PI_STATE_COMPACTOR_TRIGGER;
   }
