@@ -1,6 +1,9 @@
-import { mkdtempSync, rmSync } from "node:fs";
+import { existsSync, mkdtempSync, rmSync } from "node:fs";
+import { spawn } from "node:child_process";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { setTimeout as delay } from "node:timers/promises";
+import { DatabaseSync } from "node:sqlite";
 import { afterAll, describe, expect, it } from "vitest";
 import { AccountCalibrator } from "../src/calibrator/calibrator.js";
 import type { MeterSpec } from "../src/calibrator/types.js";
@@ -92,6 +95,43 @@ function feedLedger(ledger: Ledger, accountId: string, history: HistoryEntry[]):
 describe("ledger", () => {
   const dir = mkdtempSync(join(tmpdir(), "pi-orch-ledger-"));
   afterAll(() => rmSync(dir, { recursive: true, force: true }));
+
+  it("serializes concurrent migrations before reading the schema version", async () => {
+    const path = join(dir, "migration-race.sqlite3");
+    Ledger.open(path).close();
+    const db = new DatabaseSync(path);
+    db.exec("ALTER TABLE run DROP COLUMN check_ins; PRAGMA user_version = 17");
+    db.close();
+
+    const marker = join(dir, "migration-writer-ready");
+    const code = `
+      import { writeFileSync } from "node:fs";
+      import { DatabaseSync } from "node:sqlite";
+      const db = new DatabaseSync(${JSON.stringify(path)});
+      db.exec("PRAGMA busy_timeout = 5000; BEGIN IMMEDIATE; ALTER TABLE run ADD COLUMN check_ins INTEGER NOT NULL DEFAULT 0; PRAGMA user_version = 18");
+      writeFileSync(${JSON.stringify(marker)}, "ready");
+      Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 250);
+      db.exec("COMMIT");
+      db.close();
+    `;
+    const writer = spawn(process.execPath, ["--input-type=module", "--eval", code], {
+      stdio: ["ignore", "ignore", "pipe"],
+    });
+    let stderr = "";
+    writer.stderr.setEncoding("utf8");
+    writer.stderr.on("data", (chunk: string) => (stderr += chunk));
+    const exited = new Promise<number | null>((resolve) => writer.once("exit", resolve));
+    for (let i = 0; i < 100 && !existsSync(marker); i++) await delay(10);
+    expect(existsSync(marker)).toBe(true);
+
+    const migrated = Ledger.open(path);
+    migrated.close();
+    expect(await exited, stderr).toBe(0);
+    const verified = new DatabaseSync(path);
+    expect((verified.prepare("PRAGMA user_version").get() as { user_version: number }).user_version).toBe(18);
+    expect(verified.prepare("SELECT check_ins FROM run LIMIT 1").all()).toEqual([]);
+    verified.close();
+  });
 
   it("replayed calibrator is identical to one that lived through the events", () => {
     const history = generateHistory(12, 7);

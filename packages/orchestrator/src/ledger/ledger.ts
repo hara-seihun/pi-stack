@@ -444,12 +444,21 @@ export class Ledger {
     db.exec("PRAGMA journal_mode = WAL");
     db.exec("PRAGMA synchronous = NORMAL");
     db.exec("PRAGMA foreign_keys = ON");
-    const row = db.prepare("PRAGMA user_version").get() as { user_version: number };
-    for (let v = row.user_version; v < MIGRATIONS.length; v++) {
-      db.exec("BEGIN");
-      db.exec(MIGRATIONS[v]);
-      db.exec(`PRAGMA user_version = ${v + 1}`);
+    // Acquire the writer lock before reading user_version. If two services
+    // start on the same old ledger, the loser must read the version after the
+    // winner commits rather than replaying the same ALTER TABLE statements.
+    db.exec("BEGIN IMMEDIATE");
+    try {
+      const row = db.prepare("PRAGMA user_version").get() as { user_version: number };
+      for (let v = row.user_version; v < MIGRATIONS.length; v++) {
+        db.exec(MIGRATIONS[v]);
+        db.exec(`PRAGMA user_version = ${v + 1}`);
+      }
       db.exec("COMMIT");
+    } catch (error) {
+      db.exec("ROLLBACK");
+      db.close();
+      throw error;
     }
     return new Ledger(db);
   }
