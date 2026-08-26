@@ -17,7 +17,10 @@ const HOST = process.env.PI_REMOTE_ROUTER_HOST ?? "127.0.0.1";
 const KEY_DIR = process.env.PI_REMOTE_KEY_DIR ?? "/run/pi-remote-keys";
 const WEB_DIR = join(import.meta.dir, "../web");
 const UNLOCK_TIMEOUT_MS = Number(process.env.PI_REMOTE_UNLOCK_TIMEOUT_MS ?? "20000");
-const VERSION = "1.0.0";
+const VERSION = "1.1.0";
+const ENVIRONMENT_ID = process.env.PI_REMOTE_ENVIRONMENT_ID ?? "local";
+const ENVIRONMENT_NAME = process.env.PI_REMOTE_ENVIRONMENT_NAME ?? "Local";
+if (!/^[a-z][a-z0-9-]{0,31}$/.test(ENVIRONMENT_ID)) throw new Error("PI_REMOTE_ENVIRONMENT_ID must be a stable lowercase identifier");
 
 const PEOPLE: Person[] = JSON.parse(process.env.PI_REMOTE_USERS ?? "[]");
 if (PEOPLE.length === 0) throw new Error("PI_REMOTE_USERS must list at least one person");
@@ -162,12 +165,22 @@ Bun.serve({
     const url = new URL(req.url);
     if (url.pathname === "/v1/router-health") {
       const people = await Promise.all(PEOPLE.map(async (person) => ({ user: person.user, unlocked: await unitActive(person.user) })));
-      return Response.json({ ok: true, version: VERSION, people });
+      return Response.json({ ok: true, version: VERSION, environmentId: ENVIRONMENT_ID, people });
     }
 
     const person = identify(req);
     if (!person) {
       return Response.json({ error: "This machine does not know you. Ask to be added to Pi Remote." }, { status: 403 });
+    }
+
+    if (url.pathname === "/v1/environment" && req.method === "GET" && !(await unitActive(person.user))) {
+      return Response.json({ environment: {
+        id: ENVIRONMENT_ID,
+        name: ENVIRONMENT_NAME,
+        requiresUnlock: true,
+        profiles: [],
+        capabilities: { voice: true, downloads: true, notifications: true },
+      } });
     }
 
     if (url.pathname === "/v1/unlock" && req.method === "POST") {

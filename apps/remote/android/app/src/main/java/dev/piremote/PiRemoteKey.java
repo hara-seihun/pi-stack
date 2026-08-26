@@ -14,12 +14,10 @@ import java.util.concurrent.TimeUnit;
  * The key to this person's folder, held on the device and sent to the machine
  * when her supervisor is not running.
  *
- * <p>The machine keeps no copy: her folder and her whole transcript ledger are
- * encrypted there, and the supervisor that can read them exists only for as
- * long as it holds this key in memory. So a locked server is the ordinary state
- * after a reboot rather than a fault, and the app's job is to answer it without
- * involving her. She is asked once, on the first launch after this arrives, and
- * again only if the key stops working.
+ * <p>The machine keeps the key only in root-owned tmpfs while the folder is
+ * unlocked. That lets systemd restart the supervisor without asking again. A
+ * reboot forgets it and locks the folder. The app asks once, then reuses the
+ * device copy until the key stops working.
  */
 final class PiRemoteKey {
     /** Asks the person for her key. Returns null if she dismisses the request. */
@@ -48,14 +46,14 @@ final class PiRemoteKey {
         return context == null ? null : context.getSharedPreferences(PREFERENCES, Context.MODE_PRIVATE);
     }
 
-    private static String stored() {
+    private static String stored(PiRemoteEnvironment.Endpoint environment) {
         SharedPreferences preferences = preferences();
-        return preferences == null ? null : preferences.getString(KEY, null);
+        return preferences == null ? null : preferences.getString(KEY + "." + environment.id, null);
     }
 
-    private static void remember(String key) {
+    private static void remember(PiRemoteEnvironment.Endpoint environment, String key) {
         SharedPreferences preferences = preferences();
-        if (preferences != null) preferences.edit().putString(KEY, key).apply();
+        if (preferences != null) preferences.edit().putString(KEY + "." + environment.id, key).apply();
     }
 
     /**
@@ -64,16 +62,17 @@ final class PiRemoteKey {
      * is always a background thread; the main thread would deadlock against the
      * dialog it is waiting for, so it fails there instead.
      */
-    static void ensureUnlocked() throws Exception {
+    static void ensureUnlocked(PiRemoteEnvironment.Endpoint environment) throws Exception {
+        if (!environment.requiresUnlock) throw new IllegalStateException(environment.name + " does not support folder unlock");
         if (Looper.myLooper() == Looper.getMainLooper()) throw new IllegalStateException("Locked");
         synchronized (LOCK) {
-            String key = stored();
+            String key = stored(environment);
             String failure = null;
             for (int attempt = 0; attempt < 20; attempt++) {
                 if (key != null && !key.isEmpty()) {
                     try {
-                        unlock(key);
-                        remember(key);
+                        unlock(environment, key);
+                        remember(environment, key);
                         return;
                     } catch (Exception refused) {
                         failure = refused.getMessage() == null ? "Could not unlock" : refused.getMessage();
@@ -91,9 +90,9 @@ final class PiRemoteKey {
         }
     }
 
-    private static void unlock(String key) throws Exception {
+    private static void unlock(PiRemoteEnvironment.Endpoint environment, String key) throws Exception {
         JSONObject body = new JSONObject();
         body.put("key", key);
-        PiRemoteApi.unlockRequest(body);
+        PiRemoteApi.unlockRequest(environment, body);
     }
 }

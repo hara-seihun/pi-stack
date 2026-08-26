@@ -1,0 +1,116 @@
+import type { Database } from "bun:sqlite";
+import { existsSync, readFileSync } from "node:fs";
+
+export function ensureSupervisorSchema(db: Database): void {
+  db.exec("PRAGMA journal_mode=WAL; PRAGMA foreign_keys=ON; PRAGMA secure_delete=ON; PRAGMA busy_timeout=5000;");
+  db.exec(`
+CREATE TABLE IF NOT EXISTS sessions (
+  id TEXT PRIMARY KEY,
+  name TEXT NOT NULL,
+  workspace_id TEXT NOT NULL,
+  session_path TEXT,
+  state TEXT NOT NULL,
+  created_at TEXT NOT NULL,
+  updated_at TEXT NOT NULL,
+  last_error TEXT,
+  initial_provider TEXT,
+  current_provider TEXT,
+  initial_model TEXT,
+  initial_thinking TEXT,
+  execution_target TEXT NOT NULL DEFAULT 'local',
+  remote_cwd TEXT,
+  revision INTEGER NOT NULL DEFAULT 0,
+  service_tier TEXT NOT NULL DEFAULT 'default',
+  archived_at TEXT
+);
+CREATE TABLE IF NOT EXISTS events (
+  seq INTEGER PRIMARY KEY AUTOINCREMENT,
+  session_id TEXT NOT NULL REFERENCES sessions(id) ON DELETE CASCADE,
+  time TEXT NOT NULL,
+  type TEXT NOT NULL,
+  payload TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS events_session_seq ON events(session_id, seq);
+CREATE TABLE IF NOT EXISTS session_contexts (
+  session_id TEXT PRIMARY KEY REFERENCES sessions(id) ON DELETE CASCADE,
+  captured_at INTEGER NOT NULL,
+  context TEXT NOT NULL
+);
+CREATE TABLE IF NOT EXISTS requests (
+  request_id TEXT PRIMARY KEY,
+  session_id TEXT NOT NULL,
+  kind TEXT NOT NULL,
+  status INTEGER NOT NULL,
+  response TEXT NOT NULL,
+  created_at TEXT NOT NULL
+);
+CREATE TABLE IF NOT EXISTS work_items (
+  id TEXT PRIMARY KEY,
+  session_id TEXT NOT NULL REFERENCES sessions(id) ON DELETE CASCADE,
+  request_id TEXT NOT NULL UNIQUE,
+  event_seq INTEGER NOT NULL,
+  text TEXT NOT NULL,
+  delivery TEXT NOT NULL DEFAULT 'followUp',
+  resume INTEGER NOT NULL DEFAULT 0,
+  state TEXT NOT NULL,
+  attempts INTEGER NOT NULL DEFAULT 0,
+  available_at INTEGER NOT NULL,
+  created_at TEXT NOT NULL,
+  updated_at TEXT NOT NULL,
+  last_error TEXT,
+  inserted_at TEXT
+);
+CREATE INDEX IF NOT EXISTS work_items_session_state ON work_items(session_id, state, available_at);
+CREATE TABLE IF NOT EXISTS uploads (
+  path TEXT PRIMARY KEY,
+  session_id TEXT NOT NULL REFERENCES sessions(id) ON DELETE CASCADE,
+  environment TEXT NOT NULL,
+  created_at TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS uploads_session ON uploads(session_id);
+CREATE TABLE IF NOT EXISTS metadata (
+  key TEXT PRIMARY KEY,
+  value TEXT NOT NULL
+);
+`);
+  const sessionColumns = new Set((db.query("PRAGMA table_info(sessions)").all() as any[]).map((column) => String(column.name)));
+  for (const [name, type] of [["initial_provider", "TEXT"], ["current_provider", "TEXT"], ["initial_model", "TEXT"], ["initial_thinking", "TEXT"], ["execution_target", "TEXT NOT NULL DEFAULT 'local'"], ["remote_cwd", "TEXT"], ["revision", "INTEGER NOT NULL DEFAULT 0"], ["service_tier", "TEXT NOT NULL DEFAULT 'default'"], ["archived_at", "TEXT"]]) {
+    if (!sessionColumns.has(name)) db.exec(`ALTER TABLE sessions ADD COLUMN ${name} ${type}`);
+  }
+  const workColumns = new Set((db.query("PRAGMA table_info(work_items)").all() as any[]).map((column) => String(column.name)));
+  if (!workColumns.has("delivery")) db.exec("ALTER TABLE work_items ADD COLUMN delivery TEXT NOT NULL DEFAULT 'followUp'");
+  if (!workColumns.has("resume")) db.exec("ALTER TABLE work_items ADD COLUMN resume INTEGER NOT NULL DEFAULT 0");
+  if (!workColumns.has("inserted_at")) {
+    db.exec("ALTER TABLE work_items ADD COLUMN inserted_at TEXT");
+    db.exec("UPDATE work_items SET inserted_at=created_at WHERE event_seq>0");
+  }
+}
+
+export function beginSupervisorGeneration(db: Database, epoch: string): void {
+  db.query("INSERT OR REPLACE INTO metadata(key,value) VALUES('supervisor_epoch',?)").run(epoch);
+  db.query("UPDATE sessions SET initial_provider='openai-codex' WHERE initial_provider IS NULL OR initial_provider=''").run();
+  for (const row of db.query("SELECT id,session_path,initial_provider FROM sessions WHERE current_provider IS NULL OR current_provider='' ").all() as any[]) {
+    let provider = String(row.initial_provider || "openai-codex");
+    if (row.session_path && existsSync(row.session_path)) {
+      try {
+        const lines = readFileSync(row.session_path, "utf8").trimEnd().split("\n");
+        for (let index = lines.length - 1; index >= 0; index--) {
+          const recorded = JSON.parse(lines[index])?.message?.provider;
+          if (recorded) { provider = String(recorded); break; }
+        }
+      } catch {}
+    }
+    db.query("UPDATE sessions SET current_provider=? WHERE id=?").run(provider, row.id);
+  }
+  updateLastThreadNumber(db);
+  const time = new Date().toISOString();
+  db.query("UPDATE sessions SET state='STOPPED', updated_at=?, last_error=NULL, revision=revision+1 WHERE state NOT IN ('STOPPED','FAILED') OR (state='FAILED' AND last_error='Agent exited 143')").run(time);
+  db.query("UPDATE work_items SET state='queued', resume=CASE WHEN state='dispatched' THEN 1 ELSE resume END, available_at=?, updated_at=? WHERE state IN ('running','dispatched')").run(Date.now(), time);
+}
+
+export function updateLastThreadNumber(db: Database): void {
+  const highest = Math.max(0, ...(db.query("SELECT name FROM sessions").all() as any[])
+    .map((session) => /^\d+$/.test(session.name) ? Number(session.name) : 0));
+  const stored = Number((db.query("SELECT value FROM metadata WHERE key='last_thread_number'").get() as any)?.value ?? 0);
+  db.query("INSERT OR REPLACE INTO metadata(key,value) VALUES('last_thread_number',?)").run(String(Math.max(highest, stored)));
+}

@@ -1,0 +1,59 @@
+#!/usr/bin/env node
+import { readFileSync } from "node:fs";
+import { runScript } from "./lib.mjs";
+
+const HELP = `usage: mcp-script [--file FILE] [--timeout MS] [--config FILE]
+
+Run trusted JavaScript with one shared standalone MCP client. Without --file,
+code is read from stdin.
+
+Available values inside the script:
+  await tools.search({query, server?, limit?, offset?})
+  await tools.describe({path})
+  await tools.call(path, args)
+  await tools.status({connect?})
+  await tools.list({server?})
+  await tools.instructions({server})
+  await tools.connect({server})
+  await tools.math_search(args)     direct flat tool calls also work
+  emit(value)                       include a value in final output
+
+call and direct tool methods return {ok:true,data} or {ok:false,error}. The
+command prints one JSON object containing emitted values and the script return.`;
+
+function option(args, name) {
+  const index = args.indexOf(name);
+  if (index < 0) return undefined;
+  if (index + 1 >= args.length) throw new Error(`${name} requires a value`);
+  const value = args[index + 1];
+  args.splice(index, 2);
+  return value;
+}
+
+async function stdin() {
+  const chunks = [];
+  for await (const chunk of process.stdin) chunks.push(chunk);
+  return Buffer.concat(chunks).toString("utf8");
+}
+
+async function main() {
+  const args = process.argv.slice(2);
+  if (args.includes("--help") || args.includes("-h")) {
+    console.log(HELP);
+    return;
+  }
+  const file = option(args, "--file");
+  const timeoutMs = Number(option(args, "--timeout") ?? 30_000);
+  const config = option(args, "--config");
+  if (args.length > 0) throw new Error(`unexpected arguments: ${args.join(" ")}`);
+  if (!file && process.stdin.isTTY) throw new Error("pass --file or pipe JavaScript on stdin");
+  const code = file ? readFileSync(file, "utf8") : await stdin();
+  if (!code.trim()) throw new Error("script is empty");
+  const result = await runScript(code, { timeoutMs, config });
+  process.stdout.write(`${JSON.stringify(result, null, 2)}\n`);
+}
+
+main().catch((error) => {
+  process.stdout.write(`${JSON.stringify({ error: { message: error?.message ?? String(error) } }, null, 2)}\n`);
+  process.exitCode = 1;
+});

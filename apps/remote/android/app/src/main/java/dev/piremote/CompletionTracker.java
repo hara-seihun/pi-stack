@@ -8,16 +8,22 @@ import java.util.Map;
 
 final class CompletionTracker {
     static final class Snapshot {
+        final String environmentId;
         final String id;
         final String name;
         final String state;
         final String lastAssistantText;
 
         Snapshot(String id, String name, String state) {
-            this(id, name, state, null);
+            this("local", id, name, state, null);
         }
 
         Snapshot(String id, String name, String state, String lastAssistantText) {
+            this("local", id, name, state, lastAssistantText);
+        }
+
+        Snapshot(String environmentId, String id, String name, String state, String lastAssistantText) {
+            this.environmentId = environmentId;
             this.id = id;
             this.name = name;
             this.state = state;
@@ -26,12 +32,14 @@ final class CompletionTracker {
     }
 
     static final class Completion {
+        final String environmentId;
         final String id;
         final String name;
         final String state;
         final String lastAssistantText;
 
-        Completion(String id, String name, String state, String lastAssistantText) {
+        Completion(String environmentId, String id, String name, String state, String lastAssistantText) {
+            this.environmentId = environmentId;
             this.id = id;
             this.name = name;
             this.state = state;
@@ -39,15 +47,35 @@ final class CompletionTracker {
         }
     }
 
-    private final LinkedHashMap<String, String> watched = new LinkedHashMap<>();
+    private static final class Watch {
+        final String environmentId;
+        final String id;
+        String name;
+
+        Watch(String environmentId, String id, String name) {
+            this.environmentId = environmentId;
+            this.id = id;
+            this.name = name;
+        }
+    }
+
+    private final LinkedHashMap<String, Watch> watched = new LinkedHashMap<>();
 
     void watch(String id, String name) {
-        if (id == null || id.isEmpty()) return;
-        watched.put(id, name == null || name.isEmpty() ? "Thread" : name);
+        watch("local", id, name);
+    }
+
+    void watch(String environmentId, String id, String name) {
+        if (environmentId == null || environmentId.isEmpty() || id == null || id.isEmpty()) return;
+        watched.put(key(environmentId, id), new Watch(environmentId, id, displayName(name)));
     }
 
     void remove(String id) {
-        watched.remove(id);
+        remove("local", id);
+    }
+
+    void remove(String environmentId, String id) {
+        watched.remove(key(environmentId, id));
     }
 
     boolean isEmpty() {
@@ -60,27 +88,27 @@ final class CompletionTracker {
 
     List<Snapshot> watched() {
         List<Snapshot> result = new ArrayList<>();
-        for (Map.Entry<String, String> item : watched.entrySet())
-            result.add(new Snapshot(item.getKey(), item.getValue(), ""));
+        for (Watch item : watched.values())
+            result.add(new Snapshot(item.environmentId, item.id, item.name, "", null));
         return result;
     }
 
     List<Completion> update(Collection<Snapshot> sessions) {
         Map<String, Snapshot> current = new LinkedHashMap<>();
-        for (Snapshot session : sessions) current.put(session.id, session);
+        for (Snapshot session : sessions) current.put(key(session.environmentId, session.id), session);
 
         List<Completion> completed = new ArrayList<>();
-        for (Map.Entry<String, String> item : new ArrayList<>(watched.entrySet())) {
-            Snapshot session = current.get(item.getKey());
+        for (Map.Entry<String, Watch> entry : new ArrayList<>(watched.entrySet())) {
+            Watch item = entry.getValue();
+            Snapshot session = current.get(entry.getKey());
             if (session == null) {
-                watched.remove(item.getKey());
+                watched.remove(entry.getKey());
                 continue;
             }
-            String name = session.name == null || session.name.isEmpty() ? item.getValue() : session.name;
-            watched.put(item.getKey(), name);
+            item.name = session.name == null || session.name.isEmpty() ? item.name : session.name;
             if (!isActive(session.state)) {
-                watched.remove(item.getKey());
-                completed.add(new Completion(item.getKey(), name, session.state, session.lastAssistantText));
+                watched.remove(entry.getKey());
+                completed.add(new Completion(item.environmentId, item.id, item.name, session.state, session.lastAssistantText));
             }
         }
         return completed;
@@ -88,5 +116,13 @@ final class CompletionTracker {
 
     static boolean isActive(String state) {
         return "RUNNING".equals(state) || "STARTING".equals(state) || "ABORTING".equals(state);
+    }
+
+    private static String key(String environmentId, String id) {
+        return environmentId + "\u0000" + id;
+    }
+
+    private static String displayName(String value) {
+        return value == null || value.isEmpty() ? "Thread" : value;
     }
 }

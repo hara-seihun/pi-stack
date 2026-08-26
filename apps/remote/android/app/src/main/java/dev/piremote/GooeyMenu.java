@@ -203,11 +203,18 @@ final class GooeyMenu extends FrameLayout {
     void open() {
         if (expanded) return;
         if (destinations.isEmpty()) { haptics.play(Haptics.Feel.REJECT); return; }
+        Choice only = destinations.size() == 1 ? destinations.get(0) : null;
+        if (only != null && only.children.isEmpty()) {
+            haptics.play(Haptics.Feel.SELECT);
+            if (onStart != null) onStart.start(only.id, null);
+            return;
+        }
         expanded = true;
-        chosen = null;
+        chosen = only;
         absorbTrigger(true);
         if (onExpansion != null) onExpansion.expansion(true);
-        destinationRow.show(destinations, 0f);
+        if (only == null) destinationRow.show(destinations, 0f);
+        else modelRow.show(only.children, 0f);
     }
 
     void collapse() {

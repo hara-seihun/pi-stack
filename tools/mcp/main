@@ -1,0 +1,103 @@
+#!/usr/bin/env node
+import { readFileSync } from "node:fs";
+import { McpRuntime, formatError, parseJson } from "./lib.mjs";
+
+const HELP = `usage: mcp [--config FILE] COMMAND [ARGS]
+
+Standalone MCP client. Configuration is merged from ~/.config/mcp/mcp.json,
+~/.agents/mcp*.json, the Pi agent config, .mcp.json, and .pi/mcp.json.
+
+commands:
+  status [--connect]             list configured servers, optionally test them
+  list [SERVER]                 list tools
+  search QUERY [--server NAME]  search tool names and descriptions
+  describe TOOL                 print a tool schema and TypeScript input type
+  instructions SERVER           print server instructions
+  call TOOL [JSON]              call a tool; omit JSON to read it from stdin
+  connect SERVER                connect and report discovered tool count
+
+Tool paths are SERVER_TOOL, for example math_search. Output is JSON except for
+instructions. Use mcp-script when several calls need shared JavaScript logic.`;
+
+function takeOption(args, name) {
+  const index = args.indexOf(name);
+  if (index < 0) return undefined;
+  if (index + 1 >= args.length) throw new Error(`${name} requires a value`);
+  const value = args[index + 1];
+  args.splice(index, 2);
+  return value;
+}
+
+function hasFlag(args, name) {
+  const index = args.indexOf(name);
+  if (index < 0) return false;
+  args.splice(index, 1);
+  return true;
+}
+
+async function stdin() {
+  if (process.stdin.isTTY) return "";
+  const chunks = [];
+  for await (const chunk of process.stdin) chunks.push(chunk);
+  return Buffer.concat(chunks).toString("utf8").trim();
+}
+
+function output(value) {
+  process.stdout.write(`${JSON.stringify(value, null, 2)}\n`);
+}
+
+async function main() {
+  const args = process.argv.slice(2);
+  if (hasFlag(args, "--help") || hasFlag(args, "-h")) {
+    console.log(HELP);
+    return;
+  }
+  const config = takeOption(args, "--config");
+  const command = args.shift() ?? "status";
+  const runtime = new McpRuntime({ config });
+  try {
+    if (command === "status") {
+      output(await runtime.status({ connect: hasFlag(args, "--connect") }));
+    } else if (command === "list") {
+      output(await runtime.list(args.shift()));
+    } else if (command === "search") {
+      const server = takeOption(args, "--server");
+      const limit = Number(takeOption(args, "--limit") ?? 12);
+      const offset = Number(takeOption(args, "--offset") ?? 0);
+      const query = args.join(" ").trim();
+      args.length = 0;
+      if (!query) throw new Error("search requires a query");
+      output(await runtime.search({ query, server, limit, offset }));
+    } else if (command === "describe") {
+      const path = args.shift();
+      if (!path) throw new Error("describe requires a tool path");
+      output(await runtime.describe(path));
+    } else if (command === "instructions") {
+      const server = args.shift();
+      if (!server) throw new Error("instructions requires a server name");
+      process.stdout.write(`${await runtime.instructions(server)}\n`);
+    } else if (command === "connect") {
+      const server = args.shift();
+      if (!server) throw new Error("connect requires a server name");
+      const connection = await runtime.connect(server);
+      output({ server, connected: true, tools: connection.tools.length, instructions: Boolean(connection.instructions) });
+    } else if (command === "call") {
+      const path = args.shift();
+      if (!path) throw new Error("call requires a tool path");
+      const file = takeOption(args, "--args-file");
+      const text = file ? readFileSync(file, "utf8") : args.length ? args.join(" ") : await stdin();
+      args.length = 0;
+      output(await runtime.call(path, text ? parseJson(text, "tool arguments") : {}));
+    } else {
+      throw new Error(`unknown command ${command}`);
+    }
+    if (args.length > 0) throw new Error(`unexpected arguments: ${args.join(" ")}`);
+  } finally {
+    await runtime.close();
+  }
+}
+
+main().catch((error) => {
+  output(formatError(error));
+  process.exitCode = 1;
+});

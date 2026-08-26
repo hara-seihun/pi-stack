@@ -1,0 +1,35 @@
+{
+  "version": 1,
+  "packages": {
+    "orchestrator": "packages/orchestrator",
+    "claude-code-use": "packages/runtime/extensions/pi-claude-code-use",
+    "state-compactor": "packages/runtime/extensions/state-compactor",
+    "bash-timeout-guard": "packages/runtime/extensions/bash-timeout-guard",
+    "pi-cursor": null,
+    "remote": "apps/remote"
+  },
+  "roles": {
+    "gmktec-user": [
+      "orchestrator",
+      "claude-code-use",
+      "state-compactor",
+      "bash-timeout-guard",
+      "pi-cursor",
+      "remote"
+    ],
+    "gmktec-fleet": [
+      "orchestrator",
+      "claude-code-use",
+      "state-compactor",
+      "bash-timeout-guard",
+      "pi-cursor"
+    ],
+    "converge-user": [
+      "orchestrator",
+      "state-compactor",
+      "bash-timeout-guard",
+      "remote"
+    ]
+  },
+  "contextObserver": "remote"
+}

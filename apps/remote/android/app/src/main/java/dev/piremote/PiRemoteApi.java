@@ -8,40 +8,68 @@ import java.io.OutputStream;
 import java.net.HttpURLConnection;
 import java.net.URL;
 import java.nio.charset.StandardCharsets;
+import java.util.Set;
+import java.util.concurrent.ConcurrentHashMap;
 
-/** The Android app's single HTTP boundary to the canonical Pi Remote supervisor. */
+/** The Android app's single HTTP boundary to every configured Pi Remote environment. */
 final class PiRemoteApi {
+    private static final Set<String> VERIFIED = ConcurrentHashMap.newKeySet();
+
     private PiRemoteApi() {}
 
     static JSONObject get(String path) throws Exception {
         return request("GET", path, null);
     }
 
-    /**
-     * Every call the app makes passes through here, so answering a locked machine
-     * belongs here too: unlock with the key this device holds, then repeat the
-     * request. From the screen's point of view nothing happened.
-     */
+    static JSONObject getFor(String environmentId, String path) throws Exception {
+        return requestFor(PiRemoteEnvironment.find(environmentId), "GET", path, null);
+    }
+
     static JSONObject request(String method, String path, JSONObject body) throws Exception {
+        PiRemoteEnvironment.Endpoint environment = PiRemoteEnvironment.current();
+        JSONObject result = requestFor(environment, method, path, body);
+        if (!environment.id.equals(PiRemoteEnvironment.current().id)) throw new StaleEnvironment(environment.id);
+        return result;
+    }
+
+    static JSONObject requestFor(PiRemoteEnvironment.Endpoint environment, String method, String path, JSONObject body) throws Exception {
+        verify(environment);
         try {
-            return send(method, path, body);
+            return send(environment, method, path, body);
         } catch (Locked locked) {
-            PiRemoteKey.ensureUnlocked();
-            return send(method, path, body);
+            if (!environment.requiresUnlock) throw locked;
+            PiRemoteKey.ensureUnlocked(environment);
+            return send(environment, method, path, body);
         }
     }
 
-    static JSONObject unlockRequest(JSONObject body) throws Exception {
-        return send("POST", "/v1/unlock", body);
+    static JSONObject unlockRequest(PiRemoteEnvironment.Endpoint environment, JSONObject body) throws Exception {
+        return send(environment, "POST", "/v1/unlock", body);
     }
 
-    /** The machine has no supervisor running for this person yet. */
+    private static void verify(PiRemoteEnvironment.Endpoint environment) throws Exception {
+        if (VERIFIED.contains(environment.id)) return;
+        JSONObject metadata = send(environment, "GET", "/v1/environment", null).optJSONObject("environment");
+        String actual = metadata == null ? "" : metadata.optString("id");
+        if (!environment.id.equals(actual))
+            throw new IOException("Expected " + environment.id + " but endpoint reported " + (actual.isEmpty() ? "no environment identity" : actual));
+        VERIFIED.add(environment.id);
+    }
+
+    static String absolute(String path) {
+        return PiRemoteEnvironment.current().baseUrl + path;
+    }
+
     static final class Locked extends IOException {
         Locked(String message) { super(message); }
     }
 
-    private static JSONObject send(String method, String path, JSONObject body) throws Exception {
-        HttpURLConnection connection = (HttpURLConnection) new URL(BuildConfig.SERVER_URL + path).openConnection();
+    static final class StaleEnvironment extends IOException {
+        StaleEnvironment(String id) { super("Environment changed while requesting " + id); }
+    }
+
+    private static JSONObject send(PiRemoteEnvironment.Endpoint environment, String method, String path, JSONObject body) throws Exception {
+        HttpURLConnection connection = (HttpURLConnection) new URL(environment.baseUrl + path).openConnection();
         connection.setRequestMethod(method);
         connection.setConnectTimeout(7_000);
         connection.setReadTimeout(20_000);

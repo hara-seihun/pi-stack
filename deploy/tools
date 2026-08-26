@@ -1,0 +1,77 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+root=$(cd "$(dirname "$0")/.." && pwd)
+if [[ ${PI_STACK_ALLOW_DIRTY:-0} != 1 && -n $(git -C "$root" status --porcelain) ]]; then
+  echo "refusing to deploy an uncommitted Pi stack; set PI_STACK_ALLOW_DIRTY=1 only for a temporary test" >&2
+  exit 65
+fi
+role=${1:-}
+[[ $role == local || $role == converge ]] || { echo "usage: deploy/tools {local|converge}" >&2; exit 64; }
+dest=${PI_STACK_TOOLS_DEST:-/srv/pi/tools}
+user_home=${PI_STACK_USER_HOME:-/home/kenan}
+fleet_home=${PI_STACK_FLEET_HOME:-/home/orchestrator}
+skip_links=${PI_STACK_SKIP_TOOL_LINKS:-0}
+stage=$(mktemp -d "${TMPDIR:-/tmp}/pi-tools.XXXXXXXX")
+trap 'rm -rf "$stage"' EXIT
+
+cd "$root"
+npm ci --ignore-scripts
+npm test --workspace=@hara-seihun/mcp-cli
+npm test --workspace=@hara-seihun/mcp-script
+npm test --workspace=@hara-seihun/read-condensed-session
+node scripts/check-tools.mjs
+
+mkdir -p "$stage/release"
+mapfile -t selected < <(jq -r --arg role "$role" '.tools[] | select(.hosts | index($role)) | .id' config/tools.json)
+for tool in "${selected[@]}"; do
+  rsync -a --chmod=D755,F644 --exclude=deploy "tools/$tool/" "$stage/release/$tool/"
+  while IFS=$'\t' read -r name entry; do
+    chmod 755 "$stage/release/$tool/$entry"
+  done < <(jq -r --arg tool "$tool" '.tools[] | select(.id == $tool) | .commands[] | [.name,.entry] | @tsv' config/tools.json)
+done
+
+npm pack --workspace=@hara-seihun/mcp-cli --pack-destination "$stage" >/dev/null
+archive=$(find "$stage" -maxdepth 1 -name '*.tgz' -print -quit)
+npm install --prefix "$stage/dependencies" --omit=dev --ignore-scripts "$archive" >/dev/null
+mkdir -p "$stage/release/node_modules"
+rsync -a --delete --chmod=D755,F644 "$stage/dependencies/node_modules/" "$stage/release/node_modules/"
+rm -rf "$stage/release/node_modules/@hara-seihun/mcp-cli"
+rmdir "$stage/release/node_modules/@hara-seihun" 2>/dev/null || true
+for tool in "${selected[@]}"; do
+  while IFS=$'\t' read -r name entry; do
+    "$stage/release/$tool/$entry" --help >/dev/null
+  done < <(jq -r --arg tool "$tool" '.tools[] | select(.id == $tool) | .commands[] | [.name,.entry] | @tsv' config/tools.json)
+done
+
+as_root() {
+  if [[ $EUID == 0 || ${PI_STACK_DEPLOY_NO_SUDO:-0} == 1 ]]; then "$@"; else sudo -n "$@"; fi
+}
+
+as_root install -d -m 755 "$dest"
+as_root rsync -a --delete --chmod=D755,F644 "$stage/release/" "$dest/"
+for tool in "${selected[@]}"; do
+  while IFS=$'\t' read -r name entry; do
+    as_root chmod 755 "$dest/$tool/$entry"
+  done < <(jq -r --arg tool "$tool" '.tools[] | select(.id == $tool) | .commands[] | [.name,.entry] | @tsv' config/tools.json)
+done
+
+if [[ $skip_links != 1 ]]; then
+  as_root install -d -m 755 -o "$(stat -c %U "$user_home")" -g "$(stat -c %G "$user_home")" "$user_home/.local/bin"
+  for tool in "${selected[@]}"; do
+    while IFS=$'\t' read -r name entry; do
+      as_root ln -sfn "$dest/$tool/$entry" "$user_home/.local/bin/$name"
+      as_root chown -h "$(stat -c %U "$user_home"):$(stat -c %G "$user_home")" "$user_home/.local/bin/$name"
+    done < <(jq -r --arg tool "$tool" '.tools[] | select(.id == $tool) | .commands[] | [.name,.entry] | @tsv' config/tools.json)
+  done
+
+  if [[ -d $fleet_home ]]; then
+    as_root install -d -m 755 -o "$(stat -c %U "$fleet_home")" -g "$(stat -c %G "$fleet_home")" "$fleet_home/.local/bin"
+    while IFS=$'\t' read -r tool name entry; do
+      as_root ln -sfn "$dest/$tool/$entry" "$fleet_home/.local/bin/$name"
+      as_root chown -h "$(stat -c %U "$fleet_home"):$(stat -c %G "$fleet_home")" "$fleet_home/.local/bin/$name"
+    done < <(jq -r --arg role "$role" '.tools[] | select(.fleet and (.hosts | index($role))) | .id as $tool | .commands[] | [$tool,.name,.entry] | @tsv' config/tools.json)
+  fi
+fi
+
+printf 'deployed %s Pi tools from %s to %s\n' "$role" "$(git rev-parse HEAD)" "$dest"

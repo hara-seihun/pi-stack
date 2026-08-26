@@ -1,0 +1,32 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+root=$(cd "$(dirname "$0")/.." && pwd)
+if [[ ${PI_STACK_ALLOW_DIRTY:-0} != 1 && -n $(git -C "$root" status --porcelain) ]]; then
+  echo "refusing to deploy an uncommitted Pi stack; set PI_STACK_ALLOW_DIRTY=1 only for a temporary test" >&2
+  exit 65
+fi
+dest=${PI_STACK_REMOTE_DEST:-/srv/pi/pi-remote}
+orchestrator=${PI_STACK_ORCHESTRATOR_DEST:-/srv/pi/pi-orchestrator}
+stage=$(mktemp -d "${TMPDIR:-/tmp}/pi-remote.XXXXXXXX")
+trap 'rm -rf "$stage"' EXIT
+
+cd "$root"
+npm ci --ignore-scripts
+npm test --workspace=pi-remote
+[[ -f $orchestrator/src/boost.ts && -f $orchestrator/src/voice/index.ts ]] || {
+  echo "deploy Pi Orchestrator to $orchestrator before Pi Remote" >&2
+  exit 66
+}
+
+mkdir -p "$stage/release/node_modules"
+rsync -a --chmod=D755,F644 apps/remote/package.json apps/remote/server apps/remote/web "$stage/release/"
+ln -s "$orchestrator" "$stage/release/node_modules/pi-orchestrator"
+printf '%s\n' "$(git rev-parse HEAD)" > "$stage/release/.pi-stack-commit"
+
+as_root() {
+  if [[ $EUID == 0 || ${PI_STACK_DEPLOY_NO_SUDO:-0} == 1 ]]; then "$@"; else sudo -n "$@"; fi
+}
+as_root install -d -m 755 "$dest"
+as_root rsync -a --delete --chmod=D755,F644 "$stage/release/" "$dest/"
+printf 'deployed Pi Remote from %s to %s\n' "$(git rev-parse HEAD)" "$dest"

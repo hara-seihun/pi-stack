@@ -1,9 +1,8 @@
 # skills
 
-Shared agent skills, synced across machines. Each top-level directory is one
-skill in standard Pi skill layout (`<name>/SKILL.md` plus any referenced
-files); machines clone this repository and link the skills they want into
-their agent's skill directory.
+Shared agent skills from the Pi stack. Each top-level directory is one skill
+in standard Pi skill layout. Host deployment links the skills it wants into
+the agent's skill directory.
 
 ## Skills
 
@@ -26,8 +25,8 @@ Clone, then symlink each desired skill into the agent's global skill
 directory, e.g.:
 
 ```bash
-ln -sn ~/projects/skills/software-engineering ~/.pi/agent/skills/software-engineering
+ln -sn ~/projects/pi-stack/skills/software-engineering ~/.pi/agent/skills/software-engineering
 ```
 
-The repository checkout is the source of truth; edit here, commit, push, and
-pull on other machines.
+The Pi stack checkout is the source of truth. Both deployed hosts consume the
+same reviewed commit.

@@ -15,6 +15,7 @@ import android.webkit.WebViewClient;
 public final class VoiceActivity extends Activity {
     static final String EXTRA_SESSION_ID = "sessionId";
     static final String EXTRA_SESSION_NAME = "sessionName";
+    static final String EXTRA_ENVIRONMENT_ID = "environmentId";
     private static final int MICROPHONE_PERMISSION = 71;
     private WebView webView;
 
@@ -36,7 +37,9 @@ public final class VoiceActivity extends Activity {
     private void openVoice() {
         String sessionId = getIntent().getStringExtra(EXTRA_SESSION_ID);
         if (sessionId == null || sessionId.isBlank()) { finish(); return; }
-        Uri server = Uri.parse(BuildConfig.SERVER_URL);
+        PiRemoteEnvironment.attach(getApplicationContext());
+        PiRemoteEnvironment.Endpoint environment = PiRemoteEnvironment.find(getIntent().getStringExtra(EXTRA_ENVIRONMENT_ID));
+        Uri server = Uri.parse(environment.baseUrl);
         String trustedOrigin = server.getScheme() + "://" + server.getAuthority();
         webView = new WebView(this);
         webView.setBackgroundColor(0xff0b0d10);
@@ -67,7 +70,7 @@ public final class VoiceActivity extends Activity {
         });
         setContentView(webView);
         String name = getIntent().getStringExtra(EXTRA_SESSION_NAME);
-        Uri url = Uri.parse(BuildConfig.SERVER_URL + "/voice.html").buildUpon()
+        Uri url = Uri.parse(environment.baseUrl + "/voice.html").buildUpon()
             .appendQueryParameter("sessionId", sessionId)
             .appendQueryParameter("name", name == null ? "Agent" : name)
             .build();

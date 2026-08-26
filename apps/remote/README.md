@@ -14,8 +14,8 @@ On hosts that load `pi-runtime`'s state-compactor, the extension keeps previousl
 
 - [Bun](https://bun.sh/)
 - Pi on the supervisor's `PATH`
-- this checkout installed as Pi's final configured package: `pi install /absolute/path/to/pi-remote`
-- a deployed `pi-orchestrator` integration when voice and allowance controls are enabled
+- `apps/remote` installed as Pi's final configured package
+- the root npm workspaces installed and Pi Orchestrator built
 - Android SDK 36 and Java 17 to build the Android client
 
 ## Configuration
@@ -26,10 +26,12 @@ Pi Remote loads `$XDG_CONFIG_HOME/pi-remote/config.json`, falling back to `~/.co
 {
   "version": 1,
   "environment": {
+    "PI_REMOTE_ENVIRONMENT_ID": "local",
+    "PI_REMOTE_ENVIRONMENT_NAME": "Local",
+    "PI_REMOTE_REQUIRES_UNLOCK": true,
     "PI_REMOTE_DATA": "/var/lib/pi-remote",
     "PI_REMOTE_HOST": "127.0.0.1",
     "PI_REMOTE_PORT": 8788,
-    "PI_REMOTE_ORCHESTRATOR_MODULE": "/opt/pi-orchestrator/dist",
     "PI_REMOTE_ORCHESTRATOR_DB": "/var/lib/pi-orchestrator/ledger.sqlite3",
     "PI_REMOTE_ORCHESTRATOR_RUNS": "/var/lib/pi-orchestrator/runs",
     "PI_REMOTE_WORKSPACES": [
@@ -47,7 +49,8 @@ Host identities, Tailscale names, private directory paths, alert integration, re
 The Android client reads these ignored `android/local.properties` keys:
 
 ```properties
-piRemoteUrl=https://pi-remote.example.ts.net
+piRemoteLocalUrl=https://local-pi-remote.example.ts.net
+piRemoteConvergeUrl=https://converge-pi-remote.example.ts.net
 piRemoteApplicationId=dev.example.piremote
 piRemoteAppLabel=Pi Remote
 ```
@@ -57,11 +60,14 @@ piRemoteAppLabel=Pi Remote
 Install Pi Remote after every other Pi package. This is what makes the read-only context mirror the final `context` handler; the supervisor refuses to start if the ordering invariant is missing.
 
 ```sh
-pi install /absolute/path/to/pi-remote
-bun server/main.ts
+cd /absolute/path/to/pi-stack
+npm ci --ignore-scripts
+npm run build
+pi install /absolute/path/to/pi-stack/apps/remote
+npm start --workspace=pi-remote
 ```
 
-If Pi Remote was already configured and another package was installed later, move it back to the end with `pi remove /absolute/path/to/pi-remote` followed by the install command above.
+If another package was installed later, remove and reinstall the `apps/remote` path so it returns to the end.
 
 For the router, supply `PI_REMOTE_USERS` as a JSON array and run:
 

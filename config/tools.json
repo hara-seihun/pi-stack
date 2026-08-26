@@ -1,0 +1,37 @@
+{
+  "tools": [
+    {
+      "id": "fleet-errors",
+      "hosts": ["local", "converge"],
+      "commands": [{ "name": "fleet-errors", "entry": "main" }]
+    },
+    {
+      "id": "hara-messages",
+      "hosts": ["local"],
+      "commands": [{ "name": "hara-messages", "entry": "main" }]
+    },
+    {
+      "id": "mcp",
+      "hosts": ["local", "converge"],
+      "fleet": true,
+      "commands": [{ "name": "mcp", "entry": "main" }]
+    },
+    {
+      "id": "mcp-script",
+      "hosts": ["local", "converge"],
+      "fleet": true,
+      "commands": [{ "name": "mcp-script", "entry": "main" }]
+    },
+    {
+      "id": "read-condensed-session",
+      "hosts": ["local", "converge"],
+      "fleet": true,
+      "commands": [{ "name": "read-condensed-session", "entry": "main" }]
+    },
+    {
+      "id": "thread-lab",
+      "hosts": ["local", "converge"],
+      "commands": [{ "name": "tlab", "entry": "main" }]
+    }
+  ]
+}

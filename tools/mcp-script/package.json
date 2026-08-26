@@ -1,0 +1,8 @@
+{
+  "name": "@hara-seihun/mcp-script",
+  "version": "1.0.0",
+  "private": true,
+  "type": "module",
+  "bin": { "mcp-script": "./main" },
+  "scripts": { "test": "node --test test.mjs" }
+}

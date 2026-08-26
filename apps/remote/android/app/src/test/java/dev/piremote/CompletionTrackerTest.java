@@ -46,6 +46,20 @@ public class CompletionTrackerTest {
         assertEquals("STOPPED", completed.get(1).state);
     }
 
+    @Test public void identicalSessionIdsRemainIndependentAcrossEnvironments() {
+        CompletionTracker tracker = new CompletionTracker();
+        tracker.watch("local", "same", "Local thread");
+        tracker.watch("converge", "same", "Converge thread");
+
+        List<CompletionTracker.Completion> completed = tracker.update(Arrays.asList(
+            new CompletionTracker.Snapshot("local", "same", "Local thread", "RUNNING", null),
+            new CompletionTracker.Snapshot("converge", "same", "Converge thread", "IDLE", "Done")));
+
+        assertEquals(1, completed.size());
+        assertEquals("converge", completed.get(0).environmentId);
+        assertEquals(1, tracker.size());
+    }
+
     @Test public void deletedThreadIsForgottenWithoutCompletion() {
         CompletionTracker tracker = new CompletionTracker();
         tracker.watch("gone", "Gone");

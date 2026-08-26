@@ -5,7 +5,8 @@ plugins {
 Properties local = new Properties()
 File localFile = rootProject.file("local.properties")
 if (localFile.exists()) localFile.withInputStream { local.load(it) }
-def remoteUrl = local.getProperty("piRemoteUrl", "http://127.0.0.1:8788")
+def localUrl = local.getProperty("piRemoteLocalUrl", local.getProperty("piRemoteUrl", "http://127.0.0.1:8788"))
+def convergeUrl = local.getProperty("piRemoteConvergeUrl", "http://127.0.0.1:8789")
 def remoteApplicationId = local.getProperty("piRemoteApplicationId", "dev.piremote")
 def remoteAppLabel = local.getProperty("piRemoteAppLabel", "Pi Remote")
 
@@ -19,9 +20,10 @@ android {
         manifestPlaceholders = [piRemoteAppLabel: remoteAppLabel]
         minSdk 26
         targetSdk 36
-        versionCode 81
-        versionName "0.52.0"
-        buildConfigField "String", "SERVER_URL", "\"${remoteUrl}\""
+        versionCode 82
+        versionName "0.53.0"
+        buildConfigField "String", "LOCAL_SERVER_URL", "\"${localUrl}\""
+        buildConfigField "String", "CONVERGE_SERVER_URL", "\"${convergeUrl}\""
     }
 
     buildFeatures { buildConfig true }

@@ -12,10 +12,10 @@ Reusable extensions and prompt-evaluation tools for [Pi](https://pi.dev).
 
 ## Install
 
-Install the repository as a Pi package:
+Install the runtime workspace from a Pi stack checkout:
 
 ```sh
-pi install git:github.com/hara-seihun/pi-runtime@v1.0.0
+pi install /absolute/path/to/pi-stack/packages/runtime
 ```
 
 The root package enables every extension. Use Pi's package filters when only some extensions are wanted. Each extension also has its own package manifest and can be installed from a checkout path.
@@ -29,8 +29,9 @@ The ChatGPT Pro bridge requires a local configuration file. Other guards work wi
 ## Development
 
 ```sh
+cd /absolute/path/to/pi-stack
 npm ci --ignore-scripts
-npm test
+npm test --workspace=@hara-seihun/pi-runtime
 ```
 
 The supported Pi peer is `@earendil-works/pi-coding-agent` 0.84.x. Tests run without account credentials or browser sessions.

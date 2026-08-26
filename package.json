@@ -1,0 +1,24 @@
+{
+  "name": "@hara-seihun/pi-stack",
+  "version": "1.0.0",
+  "private": true,
+  "description": "The custom Pi runtime, orchestrator, remote clients, skills, and agent tools",
+  "license": "MIT",
+  "type": "module",
+  "workspaces": [
+    "apps/remote",
+    "packages/*",
+    "tools/*"
+  ],
+  "scripts": {
+    "build": "npm run build --workspace=pi-orchestrator",
+    "typecheck": "npm run typecheck --workspace=pi-orchestrator",
+    "test": "node scripts/test.mjs",
+    "check": "npm run typecheck && npm run build && npm test"
+  },
+  "overrides": {
+    "@earendil-works/pi-ai": "0.84.2",
+    "@earendil-works/pi-coding-agent": "0.84.2",
+    "typebox": "1.3.16"
+  }
+}

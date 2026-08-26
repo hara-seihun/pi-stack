@@ -68,13 +68,15 @@ async function startServer() {
       PI_FAKE_CRASH_MARKER: fakeCrashMarker,
       PI_FAKE_RESTART_MARKER: fakeRestartMarker,
       PI_REMOTE_ORCHESTRATOR_DB: fakeOrchestratorDb,
-      PI_REMOTE_ORCHESTRATOR_MODULE: join(import.meta.dir, "test-integration"),
       PI_ORCHESTRATOR_AUTH: join(root, "agent", "auth.json"),
       PI_REMOTE_WORK_ORCHESTRATOR_DB: fakeWorkOrchestratorDb,
       PI_REMOTE_WORK_ORCHESTRATOR_RUNS: fakeWorkAgentRuns,
       PI_REMOTE_ORCHESTRATOR_RUNS: fakeAgentRuns,
       PI_REMOTE_LOCAL_AGENT_MAX_AGE_MS: "0",
       PI_REMOTE_WORK_AGENT_MAX_AGE_MS: "1000",
+      PI_REMOTE_ENVIRONMENT_ID: "local",
+      PI_REMOTE_ENVIRONMENT_NAME: "Local",
+      PI_REMOTE_REQUIRES_UNLOCK: "true",
       PI_REMOTE_PRIVATE_ID: "private",
       PI_REMOTE_PRIVATE_NAME: "Private",
       PI_REMOTE_PRIVATE_DIR: join(root, "private"),
@@ -906,6 +908,23 @@ describe("web and supervisor integration", () => {
       const unknown = await fetch(`${base}/v1/sessions/00000000-0000-0000-0000-000000000000/files?path=${encodeURIComponent(localPath)}`);
       expect(unknown.status).toBe(404);
     } finally { rmSync(localPath, { force: true }); }
+  });
+
+  test("describes the server identity and its profiles", async () => {
+    const metadata = await api("GET", "/v1/environment");
+    expect(metadata.status).toBe(200);
+    expect(metadata.value.environment).toEqual({
+      id: "local",
+      name: "Local",
+      requiresUnlock: true,
+      capabilities: { voice: true, downloads: true, notifications: true },
+      profiles: expect.arrayContaining([
+        expect.objectContaining({ id: "personal" }),
+        expect.objectContaining({ id: "home" }),
+      ]),
+    });
+    const health = await api("GET", "/v1/health");
+    expect(health.value.environmentId).toBe("local");
   });
 
   test("offers each destination only the models it can actually run", async () => {

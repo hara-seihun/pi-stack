@@ -1,0 +1,8 @@
+{
+  "name": "@hara-seihun/read-condensed-session",
+  "version": "1.0.0",
+  "private": true,
+  "type": "module",
+  "bin": { "read-condensed-session": "./main" },
+  "scripts": { "test": "node --test \"*.test.mjs\"" }
+}

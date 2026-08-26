@@ -1,0 +1,8 @@
+node_modules/
+**/node_modules/
+**/dist/
+apps/remote/android/.gradle/
+apps/remote/android/build/
+apps/remote/android/app/build/
+apps/remote/android/local.properties
+*.log

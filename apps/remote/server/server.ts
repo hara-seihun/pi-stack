@@ -7,16 +7,16 @@ import { AgentHost, LocalLedger, RemoteLedger, sshRunner } from "./agent-hosts";
 import { loadPlanUsage, type PlanUsageSnapshot } from "./plan-usage";
 import { loadProviderManifest, manifestAgentType, manifestPlanCards } from "./provider-manifest";
 import { readMachineUsage } from "./machine-usage";
+import { beginSupervisorGeneration, ensureSupervisorSchema } from "./database";
+import { BOOSTED_MULTIPLIER, nextBoost } from "pi-orchestrator/boost";
+import { DEFAULT_LIVE_MODEL, DEFAULT_LIVE_VOICE, VoiceBroker } from "pi-orchestrator/voice";
 type VoiceAccount = { id: string; provider: string; accessUntil?: number; cooldownUntil?: number };
 
-const integrationRoot = process.env.PI_REMOTE_ORCHESTRATOR_MODULE;
-if (!integrationRoot) throw new Error("PI_REMOTE_ORCHESTRATOR_MODULE must point to a deployed pi-orchestrator dist directory");
-const voiceIntegration = await import(`${integrationRoot}/voice/index.js`);
-const boostIntegration = await import(`${integrationRoot}/boost.js`);
-const { DEFAULT_LIVE_MODEL, DEFAULT_LIVE_VOICE, VoiceBroker } = voiceIntegration;
-const { BOOSTED_MULTIPLIER, nextBoost } = boostIntegration;
-
-const VERSION = "0.41.0";
+const VERSION = "0.42.0";
+const ENVIRONMENT_ID = process.env.PI_REMOTE_ENVIRONMENT_ID ?? "local";
+const ENVIRONMENT_NAME = process.env.PI_REMOTE_ENVIRONMENT_NAME ?? "Local";
+const ENVIRONMENT_REQUIRES_UNLOCK = process.env.PI_REMOTE_REQUIRES_UNLOCK === "true";
+if (!/^[a-z][a-z0-9-]{0,31}$/.test(ENVIRONMENT_ID)) throw new Error("PI_REMOTE_ENVIRONMENT_ID must be a stable lowercase identifier");
 const PROVIDER_MANIFEST = loadProviderManifest();
 const SUPERVISOR_EPOCH = crypto.randomUUID();
 const HOME = homedir();
@@ -113,6 +113,32 @@ const destinationDefinitions = JSON.parse(process.env.PI_REMOTE_THREAD_DESTINATI
 const THREAD_DESTINATIONS = new Map(destinationDefinitions
   .filter((destination) => OFFERED_DESTINATIONS.includes(destination.id))
   .map((destination) => [destination.id, destination]));
+
+function threadStartProfiles() {
+  return [...THREAD_DESTINATIONS.values()].map((destination) => ({
+    id: destination.id,
+    label: destination.label,
+    icon: destination.icon,
+    accent: destination.accent,
+    defaultModel: destination.defaultModel,
+    models: destination.models.map((id) => {
+      const model = THREAD_MODELS.get(id);
+      if (!model) throw new Error(`Unknown thread model ${id} in profile ${destination.id}`);
+      return { id: model.id, label: model.label, icon: model.icon, accent: model.accent };
+    }),
+  }));
+}
+
+function environmentMetadata() {
+  return {
+    id: ENVIRONMENT_ID,
+    name: ENVIRONMENT_NAME,
+    requiresUnlock: ENVIRONMENT_REQUIRES_UNLOCK,
+    profiles: threadStartProfiles(),
+    capabilities: { voice: true, downloads: true, notifications: true },
+  };
+}
+
 const PLAN_USAGE_REFRESH_MS = Math.max(15_000, Number(process.env.PI_REMOTE_PLAN_USAGE_REFRESH_MS ?? "60000"));
 const PROMPT_ACK_TIMEOUT_MS = Math.max(100, Number(process.env.PI_REMOTE_PROMPT_ACK_TIMEOUT_MS ?? "30000"));
 const STATE_RECONCILE_MS = Math.max(50, Number(process.env.PI_REMOTE_STATE_RECONCILE_MS ?? "15000"));
@@ -169,114 +195,8 @@ if (WORK_ORCHESTRATOR_DB_PATH) {
   ));
 }
 const agentHostsByKey = new Map(agentHosts.map((host) => [host.key, host]));
-db.exec("PRAGMA journal_mode=WAL; PRAGMA foreign_keys=ON; PRAGMA secure_delete=ON; PRAGMA busy_timeout=5000;");
-db.exec(`
-CREATE TABLE IF NOT EXISTS sessions (
-  id TEXT PRIMARY KEY,
-  name TEXT NOT NULL,
-  workspace_id TEXT NOT NULL,
-  session_path TEXT,
-  state TEXT NOT NULL,
-  created_at TEXT NOT NULL,
-  updated_at TEXT NOT NULL,
-  last_error TEXT,
-  initial_provider TEXT,
-  current_provider TEXT,
-  initial_model TEXT,
-  initial_thinking TEXT,
-  execution_target TEXT NOT NULL DEFAULT 'local',
-  remote_cwd TEXT,
-  revision INTEGER NOT NULL DEFAULT 0,
-  service_tier TEXT NOT NULL DEFAULT 'default',
-  archived_at TEXT
-);
-CREATE TABLE IF NOT EXISTS events (
-  seq INTEGER PRIMARY KEY AUTOINCREMENT,
-  session_id TEXT NOT NULL REFERENCES sessions(id) ON DELETE CASCADE,
-  time TEXT NOT NULL,
-  type TEXT NOT NULL,
-  payload TEXT NOT NULL
-);
-CREATE INDEX IF NOT EXISTS events_session_seq ON events(session_id, seq);
-CREATE TABLE IF NOT EXISTS session_contexts (
-  session_id TEXT PRIMARY KEY REFERENCES sessions(id) ON DELETE CASCADE,
-  captured_at INTEGER NOT NULL,
-  context TEXT NOT NULL
-);
-CREATE TABLE IF NOT EXISTS requests (
-  request_id TEXT PRIMARY KEY,
-  session_id TEXT NOT NULL,
-  kind TEXT NOT NULL,
-  status INTEGER NOT NULL,
-  response TEXT NOT NULL,
-  created_at TEXT NOT NULL
-);
-CREATE TABLE IF NOT EXISTS work_items (
-  id TEXT PRIMARY KEY,
-  session_id TEXT NOT NULL REFERENCES sessions(id) ON DELETE CASCADE,
-  request_id TEXT NOT NULL UNIQUE,
-  event_seq INTEGER NOT NULL,
-  text TEXT NOT NULL,
-  delivery TEXT NOT NULL DEFAULT 'followUp',
-  resume INTEGER NOT NULL DEFAULT 0,
-  state TEXT NOT NULL,
-  attempts INTEGER NOT NULL DEFAULT 0,
-  available_at INTEGER NOT NULL,
-  created_at TEXT NOT NULL,
-  updated_at TEXT NOT NULL,
-  last_error TEXT,
-  inserted_at TEXT
-);
-CREATE INDEX IF NOT EXISTS work_items_session_state ON work_items(session_id, state, available_at);
-CREATE TABLE IF NOT EXISTS uploads (
-  path TEXT PRIMARY KEY,
-  session_id TEXT NOT NULL REFERENCES sessions(id) ON DELETE CASCADE,
-  environment TEXT NOT NULL,
-  created_at TEXT NOT NULL
-);
-CREATE INDEX IF NOT EXISTS uploads_session ON uploads(session_id);
-CREATE TABLE IF NOT EXISTS metadata (
-  key TEXT PRIMARY KEY,
-  value TEXT NOT NULL
-);
-`);
-db.query("INSERT OR REPLACE INTO metadata(key,value) VALUES('supervisor_epoch',?)").run(SUPERVISOR_EPOCH);
-const sessionColumns = new Set((db.query("PRAGMA table_info(sessions)").all() as any[]).map((column) => String(column.name)));
-for (const [name, type] of [["initial_provider", "TEXT"], ["current_provider", "TEXT"], ["initial_model", "TEXT"], ["initial_thinking", "TEXT"], ["execution_target", "TEXT NOT NULL DEFAULT 'local'"], ["remote_cwd", "TEXT"], ["revision", "INTEGER NOT NULL DEFAULT 0"], ["service_tier", "TEXT NOT NULL DEFAULT 'default'"], ["archived_at", "TEXT"]]) {
-  if (!sessionColumns.has(name)) db.exec(`ALTER TABLE sessions ADD COLUMN ${name} ${type}`);
-}
-const workColumns = new Set((db.query("PRAGMA table_info(work_items)").all() as any[]).map((column) => String(column.name)));
-if (!workColumns.has("delivery")) db.exec("ALTER TABLE work_items ADD COLUMN delivery TEXT NOT NULL DEFAULT 'followUp'");
-if (!workColumns.has("resume")) db.exec("ALTER TABLE work_items ADD COLUMN resume INTEGER NOT NULL DEFAULT 0");
-if (!workColumns.has("inserted_at")) {
-  db.exec("ALTER TABLE work_items ADD COLUMN inserted_at TEXT");
-  // Existing work items already had their user event inserted before dispatch.
-  db.exec("UPDATE work_items SET inserted_at=created_at WHERE event_seq>0");
-}
-// Threads created before provider presets existed used Pi Remote's OpenAI default.
-db.query("UPDATE sessions SET initial_provider='openai-codex' WHERE initial_provider IS NULL OR initial_provider=''").run();
-for (const row of db.query("SELECT id,session_path,initial_provider FROM sessions WHERE current_provider IS NULL OR current_provider='' ").all() as any[]) {
-  let provider = String(row.initial_provider || "openai-codex");
-  if (row.session_path && existsSync(row.session_path)) {
-    try {
-      const lines = readFileSync(row.session_path, "utf8").trimEnd().split("\n");
-      for (let index = lines.length - 1; index >= 0; index--) {
-        const recorded = JSON.parse(lines[index])?.message?.provider;
-        if (recorded) { provider = String(recorded); break; }
-      }
-    } catch {}
-  }
-  db.query("UPDATE sessions SET current_provider=? WHERE id=?").run(provider, row.id);
-}
-const highestExistingThreadNumber = Math.max(0, ...(db.query("SELECT name FROM sessions").all() as any[])
-  .map((session) => /^\d+$/.test(session.name) ? Number(session.name) : 0));
-const storedThreadNumber = Number((db.query("SELECT value FROM metadata WHERE key='last_thread_number'").get() as any)?.value ?? 0);
-db.query("INSERT OR REPLACE INTO metadata(key,value) VALUES('last_thread_number',?)")
-  .run(String(Math.max(highestExistingThreadNumber, storedThreadNumber)));
-db.query("UPDATE sessions SET state='STOPPED', updated_at=?, last_error=NULL, revision=revision+1 WHERE state NOT IN ('STOPPED','FAILED') OR (state='FAILED' AND last_error='Agent exited 143')")
-  .run(new Date().toISOString());
-db.query("UPDATE work_items SET state='queued', resume=CASE WHEN state='dispatched' THEN 1 ELSE resume END, available_at=?, updated_at=? WHERE state IN ('running','dispatched')")
-  .run(Date.now(), new Date().toISOString());
+ensureSupervisorSchema(db);
+beginSupervisorGeneration(db, SUPERVISOR_EPOCH);
 
 type RuntimePhase = "STARTING" | "IDLE" | "DISPATCHING" | "RUNNING" | "ABORTING" | "STOPPING";
 
@@ -1743,7 +1663,8 @@ const server = Bun.serve({
     if (deliveredFile) return deliveredFile;
     const web = webResponse(url.pathname, req.method);
     if (web) return web;
-    if (url.pathname === "/v1/health") return json({ ok: true, version: VERSION });
+    if (url.pathname === "/v1/health") return json({ ok: true, version: VERSION, environmentId: ENVIRONMENT_ID });
+    if (url.pathname === "/v1/environment" && req.method === "GET") return json({ environment: environmentMetadata() });
     if (url.pathname === "/v1/voice" && req.method === "GET") {
       return json({ ...voiceAccounts.status(), model: DEFAULT_LIVE_MODEL, voice: DEFAULT_LIVE_VOICE });
     }
@@ -1765,18 +1686,9 @@ const server = Bun.serve({
     }
     if (url.pathname === "/v1/thread-starts" && req.method === "GET") {
       return json({
+        environment: { id: ENVIRONMENT_ID, name: ENVIRONMENT_NAME },
         home: HOME,
-        destinations: [...THREAD_DESTINATIONS.values()].map((destination) => ({
-          id: destination.id,
-          label: destination.label,
-          icon: destination.icon,
-          accent: destination.accent,
-          defaultModel: destination.defaultModel,
-          models: destination.models.map((id) => {
-            const model = THREAD_MODELS.get(id)!;
-            return { id: model.id, label: model.label, icon: model.icon, accent: model.accent };
-          }),
-        })),
+        destinations: threadStartProfiles(),
       });
     }
     if (url.pathname === "/v1/governor-controls" && req.method === "GET") {

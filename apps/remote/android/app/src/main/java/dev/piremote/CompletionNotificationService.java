@@ -16,13 +16,16 @@ import org.json.JSONObject;
 import java.util.ArrayList;
 import java.util.Collection;
 import java.util.HashSet;
+import java.util.LinkedHashMap;
 import java.util.List;
+import java.util.Map;
 import java.util.Set;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
 
 public final class CompletionNotificationService extends Service {
     static final String EXTRA_SESSION_ID = "dev.piremote.SESSION_ID";
+    static final String EXTRA_ENVIRONMENT_ID = "dev.piremote.ENVIRONMENT_ID";
     private static final String ACTION_WATCH = "dev.piremote.WATCH_COMPLETION";
     private static final String ACTION_UNWATCH = "dev.piremote.UNWATCH_COMPLETION";
     private static final String EXTRA_IDS = "session_ids";
@@ -31,6 +34,7 @@ public final class CompletionNotificationService extends Service {
     private static final String PREF_WATCHED = "watched";
     private static final String PREF_APP_VISIBLE = "app_visible";
     private static final String PREF_OPEN_SESSION = "open_session";
+    private static final String PREF_OPEN_ENVIRONMENT = "open_environment";
     private static final String PREF_VISIBILITY_HEARTBEAT = "visibility_heartbeat";
     private static final String MONITOR_CHANNEL = "thread_monitor";
     private static final String COMPLETION_CHANNEL = "thread_completions";
@@ -70,6 +74,7 @@ public final class CompletionNotificationService extends Service {
         Intent intent = new Intent(context, CompletionNotificationService.class).setAction(ACTION_WATCH);
         intent.putStringArrayListExtra(EXTRA_IDS, new ArrayList<>(ids));
         intent.putStringArrayListExtra(EXTRA_NAMES, new ArrayList<>(names));
+        intent.putExtra(EXTRA_ENVIRONMENT_ID, PiRemoteEnvironment.current().id);
         return start(context, intent, true);
     }
 
@@ -82,11 +87,16 @@ public final class CompletionNotificationService extends Service {
     static void unwatchSession(Context context, String id) {
         Intent intent = new Intent(context, CompletionNotificationService.class).setAction(ACTION_UNWATCH);
         intent.putExtra(EXTRA_SESSION_ID, id);
+        intent.putExtra(EXTRA_ENVIRONMENT_ID, PiRemoteEnvironment.current().id);
         start(context, intent, false);
     }
 
     static void clearCompletionNotification(Context context, String id) {
-        context.getSystemService(NotificationManager.class).cancel(completionNotificationId(id));
+        clearCompletionNotification(context, PiRemoteEnvironment.current().id, id);
+    }
+
+    private static void clearCompletionNotification(Context context, String environmentId, String id) {
+        context.getSystemService(NotificationManager.class).cancel(completionNotificationId(environmentId, id));
     }
 
     static void setOpenThread(Context context, String id, boolean visible) {
@@ -94,13 +104,15 @@ public final class CompletionNotificationService extends Service {
         context.getSharedPreferences(PREFS, MODE_PRIVATE).edit()
             .putBoolean(PREF_APP_VISIBLE, visible)
             .putString(PREF_OPEN_SESSION, openThreadId)
+            .putString(PREF_OPEN_ENVIRONMENT, PiRemoteEnvironment.current().id)
             .putLong(PREF_VISIBILITY_HEARTBEAT, System.currentTimeMillis())
             .apply();
         if (visible && !openThreadId.isEmpty()) clearCompletionNotification(context, openThreadId);
     }
 
-    private boolean isThreadOpen(String id) {
+    private boolean isThreadOpen(String environmentId, String id) {
         SharedPreferences preferences = getSharedPreferences(PREFS, MODE_PRIVATE);
+        if (!environmentId.equals(preferences.getString(PREF_OPEN_ENVIRONMENT, ""))) return false;
         return OpenThreadVisibility.matches(
             id,
             preferences.getBoolean(PREF_APP_VISIBLE, false),
@@ -124,18 +136,21 @@ public final class CompletionNotificationService extends Service {
 
     @Override public void onCreate() {
         super.onCreate();
+        PiRemoteEnvironment.attach(getApplicationContext());
+        PiRemoteKey.attach(getApplicationContext());
         createChannels(this);
         restoreWatched();
     }
 
     @Override public int onStartCommand(Intent intent, int flags, int startId) {
         if (intent != null && ACTION_UNWATCH.equals(intent.getAction())) {
-            tracker.remove(intent.getStringExtra(EXTRA_SESSION_ID));
+            tracker.remove(intent.getStringExtra(EXTRA_ENVIRONMENT_ID), intent.getStringExtra(EXTRA_SESSION_ID));
         } else if (intent != null && ACTION_WATCH.equals(intent.getAction())) {
             ArrayList<String> ids = intent.getStringArrayListExtra(EXTRA_IDS);
             ArrayList<String> names = intent.getStringArrayListExtra(EXTRA_NAMES);
+            String environmentId = intent.getStringExtra(EXTRA_ENVIRONMENT_ID);
             if (ids != null) for (int i = 0; i < ids.size(); i++)
-                tracker.watch(ids.get(i), names != null && i < names.size() ? names.get(i) : "Thread");
+                tracker.watch(environmentId, ids.get(i), names != null && i < names.size() ? names.get(i) : "Thread");
         }
         persistWatched();
         if (tracker.isEmpty()) {
@@ -210,26 +225,30 @@ public final class CompletionNotificationService extends Service {
     }
 
     private List<CompletionTracker.Snapshot> fetchSessions(Collection<CompletionTracker.Snapshot> watched) throws Exception {
-        Set<String> watchedIds = new HashSet<>();
-        for (CompletionTracker.Snapshot item : watched) watchedIds.add(item.id);
-        JSONArray values = getJson("/v1/sessions").optJSONArray("sessions");
+        Map<String, Set<String>> watchedByEnvironment = new LinkedHashMap<>();
+        for (CompletionTracker.Snapshot item : watched)
+            watchedByEnvironment.computeIfAbsent(item.environmentId, ignored -> new HashSet<>()).add(item.id);
         List<CompletionTracker.Snapshot> sessions = new ArrayList<>();
-        if (values != null) for (int i = 0; i < values.length(); i++) {
-            JSONObject value = values.optJSONObject(i); if (value == null) continue;
-            String id = value.optString("id");
-            String state = value.optString("state");
-            String lastAssistantText = null;
-            if (watchedIds.contains(id) && !CompletionTracker.isActive(state))
-                lastAssistantText = fetchLastAssistantText(id);
-            sessions.add(new CompletionTracker.Snapshot(
-                id, value.optString("name", "Thread"), state, lastAssistantText));
+        for (Map.Entry<String, Set<String>> environment : watchedByEnvironment.entrySet()) {
+            JSONArray values = getJson(environment.getKey(), "/v1/sessions").optJSONArray("sessions");
+            if (values == null) continue;
+            for (int i = 0; i < values.length(); i++) {
+                JSONObject value = values.optJSONObject(i); if (value == null) continue;
+                String id = value.optString("id");
+                String state = value.optString("state");
+                String lastAssistantText = null;
+                if (environment.getValue().contains(id) && !CompletionTracker.isActive(state))
+                    lastAssistantText = fetchLastAssistantText(environment.getKey(), id);
+                sessions.add(new CompletionTracker.Snapshot(environment.getKey(), id,
+                    value.optString("name", "Thread"), state, lastAssistantText));
+            }
         }
         return sessions;
     }
 
-    private String fetchLastAssistantText(String id) {
+    private String fetchLastAssistantText(String environmentId, String id) {
         try {
-            JSONObject context = getJson("/v1/sessions/" + id + "/context").optJSONObject("context");
+            JSONObject context = getJson(environmentId, "/v1/sessions/" + id + "/context").optJSONObject("context");
             JSONArray messages = context == null ? null : context.optJSONArray("messages");
             if (messages == null) return null;
             for (int index = messages.length() - 1; index >= 0; index--) {
@@ -252,13 +271,13 @@ public final class CompletionNotificationService extends Service {
         return null;
     }
 
-    private JSONObject getJson(String path) throws Exception {
-        return PiRemoteApi.get(path);
+    private JSONObject getJson(String environmentId, String path) throws Exception {
+        return PiRemoteApi.getFor(environmentId, path);
     }
 
     private void notifyCompletion(CompletionTracker.Completion completion) {
-        if (isThreadOpen(completion.id)) {
-            clearCompletionNotification(this, completion.id);
+        if (isThreadOpen(completion.environmentId, completion.id)) {
+            clearCompletionNotification(this, completion.environmentId, completion.id);
             return;
         }
         boolean failed = "FAILED".equals(completion.state);
@@ -271,11 +290,11 @@ public final class CompletionNotificationService extends Service {
             .setSubText(failed ? "Thread failed" : "Thread complete")
             .setContentText(text)
             .setStyle(new Notification.BigTextStyle().bigText(text))
-            .setContentIntent(openAppIntent(completion.id))
+            .setContentIntent(openAppIntent(completion.environmentId, completion.id))
             .setAutoCancel(true)
             .setCategory(Notification.CATEGORY_MESSAGE)
             .build();
-        getSystemService(NotificationManager.class).notify(completionNotificationId(completion.id), notification);
+        getSystemService(NotificationManager.class).notify(completionNotificationId(completion.environmentId, completion.id), notification);
     }
 
     private Notification.Builder builder(String channel) {
@@ -286,16 +305,22 @@ public final class CompletionNotificationService extends Service {
     }
 
     private PendingIntent openAppIntent(String sessionId) {
+        return openAppIntent(PiRemoteEnvironment.current().id, sessionId);
+    }
+
+    private PendingIntent openAppIntent(String environmentId, String sessionId) {
         Intent intent = new Intent(this, MainActivity.class)
             .setFlags(Intent.FLAG_ACTIVITY_CLEAR_TOP | Intent.FLAG_ACTIVITY_SINGLE_TOP);
+        intent.putExtra(EXTRA_ENVIRONMENT_ID, environmentId);
         if (sessionId != null) intent.putExtra(EXTRA_SESSION_ID, sessionId);
-        int requestCode = sessionId == null ? 0 : completionNotificationId(sessionId);
+        int requestCode = sessionId == null ? 0 : completionNotificationId(environmentId, sessionId);
         return PendingIntent.getActivity(this, requestCode, intent,
             PendingIntent.FLAG_UPDATE_CURRENT | PendingIntent.FLAG_IMMUTABLE);
     }
 
-    private static int completionNotificationId(String id) {
-        return 10_000 + (id == null ? 0 : id.hashCode() & 0x3fffffff);
+    private static int completionNotificationId(String environmentId, String id) {
+        String key = environmentId + "\u0000" + (id == null ? "" : id);
+        return 10_000 + (key.hashCode() & 0x3fffffff);
     }
 
     private void schedulePoll(long delay) {
@@ -319,7 +344,7 @@ public final class CompletionNotificationService extends Service {
             JSONArray values = new JSONArray(encoded);
             for (int i = 0; i < values.length(); i++) {
                 JSONObject value = values.optJSONObject(i); if (value == null) continue;
-                tracker.watch(value.optString("id"), value.optString("name", "Thread"));
+                tracker.watch(value.optString("environmentId", "local"), value.optString("id"), value.optString("name", "Thread"));
             }
         } catch (Exception ignored) {}
     }
@@ -328,7 +353,8 @@ public final class CompletionNotificationService extends Service {
         JSONArray values = new JSONArray();
         try {
             for (CompletionTracker.Snapshot item : tracker.watched())
-                values.put(new JSONObject().put("id", item.id).put("name", item.name));
+                values.put(new JSONObject().put("environmentId", item.environmentId)
+                    .put("id", item.id).put("name", item.name));
         } catch (Exception ignored) {}
         SharedPreferences preferences = getSharedPreferences(PREFS, MODE_PRIVATE);
         preferences.edit().putString(PREF_WATCHED, values.toString()).apply();

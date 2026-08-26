@@ -1,0 +1,31 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+root=$(cd "$(dirname "$0")/.." && pwd)
+if [[ ${PI_STACK_ALLOW_DIRTY:-0} != 1 && -n $(git -C "$root" status --porcelain) ]]; then
+  echo "refusing to deploy an uncommitted Pi stack; set PI_STACK_ALLOW_DIRTY=1 only for a temporary test" >&2
+  exit 65
+fi
+dest=${PI_STACK_ORCHESTRATOR_DEST:-/srv/pi/pi-orchestrator}
+stage=$(mktemp -d "${TMPDIR:-/tmp}/pi-orchestrator.XXXXXXXX")
+trap 'rm -rf "$stage"' EXIT
+
+cd "$root"
+npm ci --ignore-scripts
+npm run typecheck --workspace=pi-orchestrator
+npm run build --workspace=pi-orchestrator
+npm test --workspace=pi-orchestrator
+npm pack --workspace=pi-orchestrator --pack-destination "$stage" >/dev/null
+archive=$(find "$stage" -maxdepth 1 -name '*.tgz' -print -quit)
+npm install --prefix "$stage/install" --omit=dev --ignore-scripts "$archive" >/dev/null
+
+package="$stage/install/node_modules/pi-orchestrator"
+[[ -x "$package/dist/cli.js" ]] || chmod 755 "$package/dist/cli.js"
+install -d -m 755 "$dest" "$dest/node_modules"
+rsync -a --delete --chmod=D755,F644 "$package/dist" "$package/src" "$package/package.json" "$dest/"
+rsync -a --delete --chmod=D755,F644 --exclude=pi-orchestrator "$stage/install/node_modules/" "$dest/node_modules/"
+chmod 755 "$dest/dist/cli.js"
+printf '%s\n' "$(git rev-parse HEAD)" > "$dest/.pi-stack-commit"
+
+"$dest/dist/cli.js" help | grep -q '^usage: pi-orchestrator'
+printf 'deployed Pi Orchestrator from %s to %s\n' "$(git rev-parse HEAD)" "$dest"

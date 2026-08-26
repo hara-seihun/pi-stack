@@ -65,6 +65,7 @@ public class MainActivity extends Activity {
     private static final String DRAFT_PREFS = "thread_drafts";
     private static final String DRAWER_PREFS = "drawer";
     private static final String DRAWER_TAB_KEY = "selected_tab";
+    private static final String SELECTED_THREAD_PREFS = "selected_threads";
     private static final String DRAWER_TAB_INTERACTIVE = "interactive";
     private static final String DRAWER_TAB_ORCHESTRATOR = "orchestrator";
     private static final String DRAWER_TAB_ARCHIVED = "archived";
@@ -90,6 +91,7 @@ public class MainActivity extends Activity {
     private TextView agentBanner;
     private DrawerTab interactiveTab, orchestratorTab, archivedTab;
     private LinearLayout drawerTabs;
+    private final Map<String, TextView> environmentButtons = new LinkedHashMap<>();
     private Markwon markwon;
     private final MarkdownRasters rasters = new MarkdownRasters();
     /** The entry Pi is still writing, and the thought it is still having. Null when neither. */
@@ -162,6 +164,7 @@ public class MainActivity extends Activity {
     @Override public void onCreate(Bundle state) {
         super.onCreate(state);
         haptics = new Haptics(this);
+        PiRemoteEnvironment.attach(getApplicationContext());
         PiRemoteKey.attach(getApplicationContext());
         PiRemoteKey.setPrompter(this::askForKey);
         configureWindow();
@@ -190,7 +193,7 @@ public class MainActivity extends Activity {
             })
             .build();
         drawerTab = getSharedPreferences(DRAWER_PREFS, MODE_PRIVATE)
-            .getString(DRAWER_TAB_KEY, DRAWER_TAB_INTERACTIVE);
+            .getString(PiRemoteEnvironment.scoped(DRAWER_TAB_KEY), DRAWER_TAB_INTERACTIVE);
         if (!DRAWER_TAB_INTERACTIVE.equals(drawerTab)
             && !DRAWER_TAB_ORCHESTRATOR.equals(drawerTab)
             && !DRAWER_TAB_ARCHIVED.equals(drawerTab)) drawerTab = DRAWER_TAB_INTERACTIVE;
@@ -200,6 +203,7 @@ public class MainActivity extends Activity {
         CompletionNotificationService.createChannels(this);
         String named = notificationTarget(getIntent());
         if (named == null && state != null) named = state.getString(STATE_SESSION);
+        if (named == null) named = rememberedThread();
         openNamedThread(named);
         android.content.SharedPreferences notificationPreferences =
             getSharedPreferences("completion_notifications", MODE_PRIVATE);
@@ -333,6 +337,11 @@ public class MainActivity extends Activity {
      */
     private String notificationTarget(Intent intent) {
         if (intent == null) return null;
+        String environmentId = intent.getStringExtra(CompletionNotificationService.EXTRA_ENVIRONMENT_ID);
+        if (environmentId != null) {
+            intent.removeExtra(CompletionNotificationService.EXTRA_ENVIRONMENT_ID);
+            switchEnvironment(environmentId);
+        }
         String id = intent.getStringExtra(CompletionNotificationService.EXTRA_SESSION_ID);
         if (id != null) intent.removeExtra(CompletionNotificationService.EXTRA_SESSION_ID);
         return id;
@@ -355,7 +364,7 @@ public class MainActivity extends Activity {
     }
 
     private boolean isPiRemoteFile(Uri uri) {
-        Uri server = Uri.parse(BuildConfig.SERVER_URL);
+        Uri server = Uri.parse(PiRemoteEnvironment.current().baseUrl);
         String path = uri.getPath();
         return Objects.equals(server.getScheme(), uri.getScheme())
             && Objects.equals(server.getAuthority(), uri.getAuthority())
@@ -407,6 +416,12 @@ public class MainActivity extends Activity {
         d.setColor(color);
         d.setCornerRadius(0);
         return d;
+    }
+
+    private GradientDrawable roundRect(int color, int radius) {
+        GradientDrawable drawable = shape(color);
+        drawable.setCornerRadius(radius);
+        return drawable;
     }
 
     private GradientDrawable outlined(int color, int strokeColor) {
@@ -499,7 +514,8 @@ public class MainActivity extends Activity {
         if (!tab.equals(drawerTab)) haptics.play(Haptics.Feel.TAB);
         if (!DRAWER_TAB_ARCHIVED.equals(tab)) archivedOlder = new JSONArray();
         drawerTab = tab;
-        getSharedPreferences(DRAWER_PREFS, MODE_PRIVATE).edit().putString(DRAWER_TAB_KEY, tab).apply();
+        getSharedPreferences(DRAWER_PREFS, MODE_PRIVATE).edit()
+            .putString(PiRemoteEnvironment.scoped(DRAWER_TAB_KEY), tab).apply();
         renderDrawerTabs();
         redrawSessions();
         renderAgentSection();
@@ -739,9 +755,71 @@ public class MainActivity extends Activity {
         wasAtEdge[0] = atEnd;
     }
 
+    private void renderEnvironmentSelector() {
+        String current = PiRemoteEnvironment.current().id;
+        for (Map.Entry<String, TextView> entry : environmentButtons.entrySet()) {
+            boolean selected = current.equals(entry.getKey());
+            entry.getValue().setTextColor(selected ? BG : MUTED);
+            entry.getValue().setBackground(roundRect(selected ? ACCENT : SURFACE_2, dp(12)));
+            entry.getValue().setSelected(selected);
+        }
+    }
+
+    private void switchEnvironment(String environmentId) {
+        if (PiRemoteEnvironment.current().id.equals(environmentId)) return;
+        saveDraft();
+        if (!PiRemoteEnvironment.select(environmentId)) return;
+        haptics.play(Haptics.Feel.TAB);
+        if (threadStarter != null) {
+            threadStarter.collapse();
+            threadStarter.setDestinations(Collections.emptyList());
+        }
+        openingThreadId = null;
+        refreshAgain = false;
+        requestedCompletionWatches.clear();
+        actionTokens.clear();
+        actionTypes.clear();
+        clearSelection();
+        lastSessions = new JSONArray();
+        lastArchivedPage = new JSONArray();
+        archivedOlder = new JSONArray();
+        archivedTotal = 0;
+        agentRuns = new JSONArray();
+        agentHosts = new JSONArray();
+        agentRunningCount = 0;
+        agentHostFailing = false;
+        agentError = "";
+        drawerList.removeAllViews();
+        agentList.removeAllViews();
+        archivedList.removeAllViews();
+        drawerTab = getSharedPreferences(DRAWER_PREFS, MODE_PRIVATE)
+            .getString(PiRemoteEnvironment.scoped(DRAWER_TAB_KEY), DRAWER_TAB_INTERACTIVE);
+        renderEnvironmentSelector();
+        renderDrawerTabs();
+        refreshThreadStarts();
+        openNamedThread(rememberedThread());
+        refresh();
+    }
+
     private LinearLayout buildDrawer() {
         LinearLayout panel = new LinearLayout(this);
         panel.setOrientation(LinearLayout.VERTICAL); panel.setBackgroundColor(SURFACE);
+
+        LinearLayout environments = new LinearLayout(this);
+        environments.setOrientation(LinearLayout.HORIZONTAL);
+        environments.setPadding(dp(10), dp(10), dp(10), dp(2));
+        for (PiRemoteEnvironment.Endpoint endpoint : PiRemoteEnvironment.all()) {
+            TextView button = text(endpoint.name, 14, true);
+            button.setGravity(Gravity.CENTER);
+            button.setContentDescription("Switch to " + endpoint.name + " environment");
+            button.setOnClickListener(view -> switchEnvironment(endpoint.id));
+            LinearLayout.LayoutParams params = new LinearLayout.LayoutParams(0, dp(40), 1);
+            params.setMarginStart(dp(3)); params.setMarginEnd(dp(3));
+            environments.addView(button, params);
+            environmentButtons.put(endpoint.id, button);
+        }
+        panel.addView(environments, new LinearLayout.LayoutParams(-1, dp(52)));
+        renderEnvironmentSelector();
 
         // One button holds every way to start a thread; it splits into them when asked.
         // The tabs and the new-thread button share one row, because they are the same row: the
@@ -1290,6 +1368,7 @@ public class MainActivity extends Activity {
         long requestedAfter = lastSeq;
         long requestedSelectionGeneration = selectionGeneration;
         long requestedActionGeneration = actionGeneration;
+        long requestedEnvironmentGeneration = PiRemoteEnvironment.generation();
         pollNetwork.execute(() -> {
             try {
                 JSONObject all = api("GET", "/v1/sessions", null);
@@ -1325,6 +1404,10 @@ public class MainActivity extends Activity {
                 JSONObject observedEvents = agentRunEvents;
                 String observedListError = agentListError;
                 main.post(() -> {
+                    if (requestedEnvironmentGeneration != PiRemoteEnvironment.generation()) {
+                        finishRefresh();
+                        return;
+                    }
                     if (requestedAgentList) {
                         if (observedList != null) {
                             JSONArray runs = observedList.optJSONArray("runs");
@@ -1379,6 +1462,10 @@ public class MainActivity extends Activity {
                 });
             } catch (Exception e) {
                 main.post(() -> {
+                    if (requestedEnvironmentGeneration != PiRemoteEnvironment.generation()) {
+                        finishRefresh();
+                        return;
+                    }
                     connection.setText("●  Offline · " + shortError(e)); connection.setTextColor(DANGER);
                     connection.setVisibility(View.VISIBLE);
                     topState.setText("OFFLINE"); topState.setTextColor(DANGER);
@@ -2178,7 +2265,7 @@ public class MainActivity extends Activity {
             // The upload body is already spent, so this reopens the file rather
             // than retrying the request. Uploads are the one call that cannot be
             // replayed from inside PiRemoteApi.
-            PiRemoteKey.ensureUnlocked();
+            PiRemoteKey.ensureUnlocked(PiRemoteEnvironment.current());
             return uploadAttachment(openAttachment(uri), name, sessionId, contentType);
         }
     }
@@ -2190,7 +2277,7 @@ public class MainActivity extends Activity {
     }
 
     private JSONObject uploadAttachment(InputStream input, String name, String sessionId, String type) throws Exception {
-        URL url = new URL(BuildConfig.SERVER_URL + "/v1/uploads?name=" + URLEncoder.encode(name, "UTF-8")
+        URL url = new URL(PiRemoteApi.absolute("/v1/uploads?name=") + URLEncoder.encode(name, "UTF-8")
             + "&sessionId=" + URLEncoder.encode(sessionId, "UTF-8"));
         HttpURLConnection connection = (HttpURLConnection) url.openConnection();
         try {
@@ -2537,6 +2624,7 @@ public class MainActivity extends Activity {
         if (changed) {
             selectionGeneration++;
             selectedId = id; selectedRevision = revision;
+            rememberThread(id);
             refreshCommands();
         }
         try {
@@ -2568,12 +2656,24 @@ public class MainActivity extends Activity {
         if (prompt == null || selectedId == null) return;
         String value = prompt.getText().toString();
         android.content.SharedPreferences.Editor editor = getSharedPreferences(DRAFT_PREFS, MODE_PRIVATE).edit();
-        if (value.isEmpty()) editor.remove(selectedId); else editor.putString(selectedId, value);
+        String key = PiRemoteEnvironment.scoped(selectedId);
+        if (value.isEmpty()) editor.remove(key); else editor.putString(key, value);
         editor.apply();
     }
 
     private String loadDraft(String sessionId) {
-        return getSharedPreferences(DRAFT_PREFS, MODE_PRIVATE).getString(sessionId, "");
+        return getSharedPreferences(DRAFT_PREFS, MODE_PRIVATE)
+            .getString(PiRemoteEnvironment.scoped(sessionId), "");
+    }
+
+    private void rememberThread(String sessionId) {
+        getSharedPreferences(SELECTED_THREAD_PREFS, MODE_PRIVATE).edit()
+            .putString(PiRemoteEnvironment.current().id, sessionId).apply();
+    }
+
+    private String rememberedThread() {
+        return getSharedPreferences(SELECTED_THREAD_PREFS, MODE_PRIVATE)
+            .getString(PiRemoteEnvironment.current().id, null);
     }
 
     private static class Attachment {
@@ -3206,7 +3306,8 @@ public class MainActivity extends Activity {
         haptics.play(Haptics.Feel.VOICE_START);
         Intent intent = new Intent(this, VoiceActivity.class)
             .putExtra(VoiceActivity.EXTRA_SESSION_ID, selectedId)
-            .putExtra(VoiceActivity.EXTRA_SESSION_NAME, selectedName);
+            .putExtra(VoiceActivity.EXTRA_SESSION_NAME, selectedName)
+            .putExtra(VoiceActivity.EXTRA_ENVIRONMENT_ID, PiRemoteEnvironment.current().id);
         startActivity(intent);
     }
 
@@ -3354,7 +3455,7 @@ public class MainActivity extends Activity {
     }
 
     private String shortError(Exception e) {
-        String s = e.getMessage(); return s == null ? "Request failed" : s.replace(BuildConfig.SERVER_URL, "server");
+        String s = e.getMessage(); return s == null ? "Request failed" : s.replace(PiRemoteEnvironment.current().baseUrl, "server");
     }
 
     /**

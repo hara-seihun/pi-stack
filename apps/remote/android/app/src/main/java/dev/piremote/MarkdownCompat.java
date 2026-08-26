@@ -99,7 +99,7 @@ final class MarkdownCompat {
 
     private static String normalizePresentation(String value, String sessionId) {
         if (sessionId == null || sessionId.isEmpty()) return value;
-        String base = BuildConfig.SERVER_URL.endsWith("/") ? BuildConfig.SERVER_URL.substring(0, BuildConfig.SERVER_URL.length() - 1) : BuildConfig.SERVER_URL;
+        String base = PiRemoteEnvironment.current().baseUrl;
         Matcher fileMatcher = REMOTE_FILE.matcher(value);
         StringBuffer files = new StringBuffer();
         while (fileMatcher.find()) {

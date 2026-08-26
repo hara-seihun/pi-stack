@@ -1,0 +1,28 @@
+#!/usr/bin/env bash
+# Install fleet-errors on PATH and prove it can read the fleet's transcripts.
+set -euo pipefail
+ROOT=$(cd "$(dirname "$0")" && pwd)
+
+install -d -m 700 "$HOME/.local/bin"
+ln -sfn "$ROOT/main" "$HOME/.local/bin/fleet-errors"
+
+# Reading the shared run transcripts is the whole tool, and it depends on
+# `pi-orch` group membership rather than anything this script installs. So the
+# smoke test is a real run over a real window: a permission problem, an empty
+# runs directory, or a transcript format change all fail here rather than in
+# front of the next agent.
+OUT=$("$HOME/.local/bin/fleet-errors" --since 6h)
+grep -q "tool calls in the last" <<<"$OUT" || {
+  echo "fleet-errors ran but produced no census:" >&2
+  echo "$OUT" >&2
+  exit 1
+}
+
+# Every window shape and both output modes, since a --since parser or a
+# category filter that broke would otherwise surface as a confusing empty run.
+"$HOME/.local/bin/fleet-errors" --since 1d --tool bash >/dev/null
+"$HOME/.local/bin/fleet-errors" --since 1w --json >/dev/null
+"$HOME/.local/bin/fleet-errors" --since 6h --show module >/dev/null
+
+echo "fleet-errors installed at $HOME/.local/bin/fleet-errors"
+sed -n '1p' <<<"$OUT"

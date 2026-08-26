@@ -11,7 +11,7 @@ public class MarkdownCompatTest {
             "12345678-abcd-4abc-8abc-1234567890ab"
         );
         assertEquals(
-            "Result\n\n\n[report &#91;final&#93;.pdf](" + BuildConfig.SERVER_URL
+            "Result\n\n\n[report &#91;final&#93;.pdf](" + BuildConfig.LOCAL_SERVER_URL
                 + "/v1/sessions/12345678-abcd-4abc-8abc-1234567890ab/files?path=%2Fhome%2Falex%2Freport+%5Bfinal%5D.pdf)\n\n",
             value
         );
