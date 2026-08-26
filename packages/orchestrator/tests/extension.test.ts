@@ -73,15 +73,17 @@ describe("usage-logger meter poll", () => {
     process.env.PI_AGENT_DIR = dir;
     const handlers = new Map<string, (event: any, ctx: any) => Promise<void>>();
     let polls = 0;
-    vi.stubGlobal("fetch", async () => {
+    vi.stubGlobal("fetch", async (input: string) => {
       polls++;
-      return new Response(JSON.stringify({
-        limits: [
-          { kind: "session", percent: 14 },
-          { kind: "weekly_all", percent: 90 },
-          { kind: "weekly_scoped", percent: 100, scope: { model: { display_name: "Fable" } } },
-        ],
-      }));
+      return new Response(JSON.stringify(input.endsWith("/profile")
+        ? { organization: { rate_limit_tier: "default_claude_max_20x" } }
+        : {
+            limits: [
+              { kind: "session", percent: 14 },
+              { kind: "weekly_all", percent: 90 },
+              { kind: "weekly_scoped", percent: 100, scope: { model: { display_name: "Fable" } } },
+            ],
+          }));
     });
 
     try {
@@ -102,8 +104,9 @@ describe("usage-logger meter poll", () => {
       // One poll answers for every bucket, so the meters the headers do
       // carry are refreshed by the same reading rather than left behind.
       expect(ledger.latestReading("anthropic", "anthropic-7d")?.usedPercent).toBe(90);
+      expect(ledger.accounts()[0]?.capacityWeight).toBe(2);
       ledger.close();
-      expect(polls).toBe(1);
+      expect(polls).toBe(2);
     } finally {
       vi.unstubAllGlobals();
       delete process.env.PI_ORCHESTRATOR_LEDGER;

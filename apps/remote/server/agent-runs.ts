@@ -1,4 +1,6 @@
-import { manifestAgentType, type ProviderManifest } from "./provider-manifest";
+import { catalogAgentType, tailRange, type ObservedRun } from "pi-orchestrator/api";
+
+export { tailRange };
 
 // Read-only observation of autonomous pi-orchestrator agents. The orchestrator
 // on each agent host owns both authorities used here: the SQLite run ledger and
@@ -40,23 +42,7 @@ export interface AgentLiveState {
   liveThinking?: string;
 }
 
-// One ledger row plus the two filesystem facts that belong to the same run.
-// A remote host reports all three in a single round trip, so summarizing never
-// depends on the transcript being reachable from this machine.
-export interface AgentRunRow {
-  id: string;
-  task_id: string;
-  model?: unknown;
-  thinking?: unknown;
-  provider?: unknown;
-  state: string;
-  started_at: unknown;
-  ended_at?: unknown;
-  productive?: unknown;
-  detail?: unknown;
-  observable?: boolean;
-  live?: AgentLiveState | null;
-}
+export type AgentRunRow = ObservedRun;
 
 export interface AgentRunSummary {
   id: string;
@@ -100,17 +86,16 @@ function iso(value: unknown): string {
 
 export function summarizeAgentRun(
   row: AgentRunRow,
-  manifest: ProviderManifest,
   host: AgentHostRef,
   at = Date.now(),
 ): AgentRunSummary {
   const model = String(row.model ?? "unknown");
-  const type = manifestAgentType(manifest, model);
+  const type = catalogAgentType(model);
   const status = String(row.state);
   const running = status === "running";
   const live = running ? row.live ?? null : null;
-  const endedAt = row.ended_at ? iso(row.ended_at) : null;
-  const detail = row.detail === null || row.detail === undefined ? null : String(row.detail);
+  const endedAt = row.endedAt ? iso(row.endedAt) : null;
+  const detail = row.detail === undefined ? null : String(row.detail);
   const runId = String(row.id);
   return {
     id: runKey(host.key, runId),
@@ -118,7 +103,7 @@ export function summarizeAgentRun(
     hostLabel: host.label,
     hostName: host.name,
     runId,
-    taskId: String(row.task_id),
+    taskId: row.taskId,
     model,
     thinking: String(row.thinking ?? ""),
     provider: String(row.provider ?? ""),
@@ -126,12 +111,12 @@ export function summarizeAgentRun(
     key: type.key,
     status,
     activity: running ? String(live?.activity ?? RUNNING_ACTIVITY) : "IDLE",
-    startedAt: iso(row.started_at),
+    startedAt: iso(row.startedAt),
     finishedAt: endedAt,
-    elapsedMs: Math.max(0, (row.ended_at ? Number(row.ended_at) : at) - Number(row.started_at)),
+    elapsedMs: Math.max(0, (row.endedAt ?? at) - row.startedAt),
     observable: row.observable === true,
     dispatched: false,
-    productive: row.productive === null || row.productive === undefined ? null : Number(row.productive) === 1,
+    productive: row.productive ?? null,
     summary: status === "error" ? null : detail,
     error: status === "error" ? detail : null,
   };
@@ -188,17 +173,4 @@ export class TranscriptBuffer {
     const visible = this.events.filter((entry) => entry.seq > after);
     return after === 0 ? visible.slice(-MAX_DELIVERED_EVENTS) : visible.slice(0, MAX_DELIVERED_EVENTS);
   }
-}
-
-// The byte range a reader asks for next. A fresh reader starts at the tail of a
-// long transcript instead of paying for its whole history, and a transcript
-// that shrank was rotated, so the cursor restarts. Both the local reader and
-// the remote host script implement this same rule; it lives here so the shared
-// intent is stated and tested once.
-export function tailRange(size: number, offset: number, maxBytes: number): { start: number; end: number; fresh: boolean } {
-  const fresh = offset < 0 || offset > size;
-  const start = offset < 0 ? Math.max(0, size - maxBytes)
-    : offset > size ? Math.max(0, size - maxBytes)
-    : offset;
-  return { start, end: Math.min(size, start + maxBytes), fresh };
 }

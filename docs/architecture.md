@@ -4,7 +4,7 @@
 
 The repository contains several packages because they run in different processes and have different release artifacts. One Git commit still identifies the whole deployed stack.
 
-Pi Remote imports Pi Orchestrator's voice and quota controls through the `pi-orchestrator` workspace. It does not discover a built module through an environment variable. Host deployment publishes the compiled orchestrator before starting Pi Remote.
+Pi Remote imports Pi Orchestrator's public API through the `pi-orchestrator` workspace. One catalog owns model identities, labels, default thinking levels, and plan-meter definitions. `OrchestratorClient` owns account, quota, governor, run, and transcript reads, so Pi Remote does not know the ledger schema. Host deployment publishes the compiled orchestrator before starting Pi Remote.
 
 The runtime package owns the exact Pi development dependency. Root npm overrides keep every workspace on the same Pi and TypeBox versions. `package-lock.json` is the only JavaScript lockfile.
 
@@ -48,6 +48,4 @@ The thread-start menu uses the server's profile list. With two Local profiles it
 
 ## Session ownership
 
-Each Pi Remote deployment owns local Pi RPC processes, local uploads, and the local orchestrator ledger view. The GMKtec deployment currently has an SSH work bridge only to carry existing work sessions through migration. Cutover removes that bridge after those sessions move to Converge.
-
-A work-thread move includes its supervisor rows, events, context snapshots, work items, uploads, service-tier files, and Pi JSONL. The destination keeps the existing session ID. Import completes before Converge creates any new work thread, which avoids ID and notification ambiguity.
+Each Pi Remote deployment owns its Pi RPC processes, uploads, and local orchestrator view. Local owns Personal and Home; Converge owns work. Android combines the two environments at the client boundary. There is no server-to-server agent bridge or remote ledger reader.

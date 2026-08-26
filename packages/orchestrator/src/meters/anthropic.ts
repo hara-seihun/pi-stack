@@ -37,6 +37,7 @@ import type { Ledger } from "../ledger/ledger.js";
 
 export const ANTHROPIC_PROVIDER = "anthropic";
 const USAGE_URL = "https://api.anthropic.com/api/oauth/usage";
+const PROFILE_URL = "https://api.anthropic.com/api/oauth/profile";
 const USER_AGENT = "pi-orchestrator";
 
 /**
@@ -160,23 +161,51 @@ export function parseAnthropicUsage(value: unknown): AnthropicUsageReading {
   return { buckets, unmappedScopes };
 }
 
+function requestHeaders(accessToken: string): Record<string, string> {
+  return {
+    Authorization: `Bearer ${accessToken}`,
+    Accept: "application/json",
+    "anthropic-version": "2023-06-01",
+    "anthropic-beta": "oauth-2025-04-20",
+    "User-Agent": USER_AGENT,
+  };
+}
+
 export async function fetchAnthropicUsage(
   accessToken: string,
   fetchFn: FetchLike,
   requestTimeoutMs: number,
 ): Promise<AnthropicUsageReading> {
   const response = await fetchFn(USAGE_URL, {
-    headers: {
-      Authorization: `Bearer ${accessToken}`,
-      Accept: "application/json",
-      "anthropic-version": "2023-06-01",
-      "anthropic-beta": "oauth-2025-04-20",
-      "User-Agent": USER_AGENT,
-    },
+    headers: requestHeaders(accessToken),
     signal: AbortSignal.timeout(requestTimeoutMs),
   });
   if (!response.ok) throw new Error(`anthropic usage HTTP ${response.status}`);
   return parseAnthropicUsage(await response.json());
+}
+
+/** Relative weekly allowance of Anthropic's plan tiers. These ratios are what
+ * turn account percentages into a fleet percentage; an unrecognized tier
+ * keeps the account's last observation (or its default weight of one). */
+export function parseAnthropicCapacityWeight(value: unknown): number | undefined {
+  const organization = record(record(value)?.organization);
+  const tier = String(organization?.rate_limit_tier ?? "").trim().toLowerCase();
+  if (tier === "default_claude_max_20x") return 2;
+  if (tier === "default_claude_max_5x") return 1;
+  return undefined;
+}
+
+async function fetchAnthropicCapacityWeight(
+  accessToken: string,
+  fetchFn: FetchLike,
+  requestTimeoutMs: number,
+): Promise<number | undefined> {
+  const response = await fetchFn(PROFILE_URL, {
+    headers: requestHeaders(accessToken),
+    signal: AbortSignal.timeout(requestTimeoutMs),
+  });
+  if (!response.ok) throw new Error(`anthropic profile HTTP ${response.status}`);
+  return parseAnthropicCapacityWeight(await response.json());
 }
 
 export interface AnthropicMeterSamplerOptions {
@@ -257,12 +286,17 @@ export class AnthropicMeterSampler {
         reports.push({ accountId: account.id, outcome: credential.gap });
         continue;
       }
-      let usage: AnthropicUsageReading;
-      try {
-        usage = await fetchAnthropicUsage(credential.token, this.fetchFn, this.requestTimeoutMs);
-      } catch (thrown) {
-        reports.push({ accountId: account.id, outcome: "request-failed", detail: String(thrown) });
+      const [usageResult, capacityResult] = await Promise.allSettled([
+        fetchAnthropicUsage(credential.token, this.fetchFn, this.requestTimeoutMs),
+        fetchAnthropicCapacityWeight(credential.token, this.fetchFn, this.requestTimeoutMs),
+      ]);
+      if (usageResult.status === "rejected") {
+        reports.push({ accountId: account.id, outcome: "request-failed", detail: String(usageResult.reason) });
         continue;
+      }
+      const usage = usageResult.value;
+      if (capacityResult.status === "fulfilled" && capacityResult.value !== undefined) {
+        this.ledger.setAccountCapacityWeight(account.id, capacityResult.value);
       }
       for (const scope of usage.unmappedScopes) {
         reports.push({

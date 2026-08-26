@@ -3,14 +3,15 @@ import { homedir } from "node:os";
 import { join } from "node:path";
 import type { BrokerConfig, ModelCandidate } from "./broker/broker.js";
 import type { MeterSpec } from "./calibrator/types.js";
+import { catalogMeter, catalogModel } from "./catalog.js";
 import { type CooldownPolicy, rateLimitCooldownMs } from "./provider-errors.js";
 import { TIERS, type Tier } from "./tasks/types.js";
 
 /**
- * Operator deployment configuration: which models serve which tier, and each
- * provider family's meter topology and cost weighting. This file is the only
- * place model names appear; everything downstream works in tiers and
- * measured facts.
+ * Operator deployment configuration: which catalog models serve each tier,
+ * plus private deployment providers, meter topology, and cost weighting.
+ * Catalog ids resolve to provider API names here; everything downstream works
+ * in tiers and measured facts.
  *
  * Cost weighting turns raw token components (usage-logger class ids are
  * `model:component`) into price-comparable cost units at calibrator replay
@@ -69,8 +70,48 @@ export function defaultConfigPath(): string {
   );
 }
 
+type CandidateDocument = ModelCandidate | string | { readonly id: string; readonly thinking?: string };
+type ProviderDocument = Omit<ProviderConfig, "meters"> & {
+  readonly meters: readonly {
+    readonly id: string;
+    readonly drainedBy: readonly string[];
+    readonly windowHours?: number;
+  }[];
+};
+type ConfigDocument = Omit<OrchestratorConfig, "tiers" | "providers"> & {
+  readonly tiers: Readonly<Record<Tier, readonly CandidateDocument[]>>;
+  readonly providers: Readonly<Record<string, ProviderDocument>>;
+};
+
+function resolveCandidate(candidate: CandidateDocument, tier: Tier): ModelCandidate {
+  if (typeof candidate !== "string" && !("id" in candidate)) return candidate;
+  const id = typeof candidate === "string" ? candidate : candidate.id;
+  const model = catalogModel(id);
+  if (model === undefined) throw new Error(`config: tier ${tier} references unknown catalog model ${id}`);
+  const thinking = typeof candidate === "string" ? model.thinking : candidate.thinking ?? model.thinking;
+  return { provider: model.provider, model: model.model, ...(thinking === undefined ? {} : { thinking }) };
+}
+
 export function loadConfig(path = defaultConfigPath()): OrchestratorConfig {
-  const cfg = JSON.parse(readFileSync(path, "utf8")) as OrchestratorConfig;
+  const document = JSON.parse(readFileSync(path, "utf8")) as ConfigDocument;
+  const tiers = {} as Record<Tier, readonly ModelCandidate[]>;
+  for (const tier of TIERS) {
+    tiers[tier] = (document.tiers[tier] ?? []).map((candidate) => resolveCandidate(candidate, tier));
+  }
+  const providers = Object.fromEntries(Object.entries(document.providers).map(([name, provider]) => [
+    name,
+    {
+      ...provider,
+      meters: provider.meters.map((meter) => {
+        const windowHours = meter.windowHours ?? catalogMeter(meter.id)?.windowHours;
+        if (windowHours === undefined) {
+          throw new Error(`config: provider ${name} meter ${meter.id} needs windowHours or a catalog definition`);
+        }
+        return { ...meter, windowHours };
+      }),
+    },
+  ]));
+  const cfg: OrchestratorConfig = { ...document, providers, tiers };
   for (const tier of TIERS) {
     for (const candidate of cfg.tiers[tier] ?? []) {
       if (cfg.providers[candidate.provider] === undefined) {

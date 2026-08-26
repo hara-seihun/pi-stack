@@ -351,6 +351,14 @@ DROP INDEX run_session_parent;
 ALTER TABLE run_session DROP COLUMN parent_session_id;
 `;
 
+/** Relative allowance represented by one account when plan percentages are
+ * combined for operator read models. Provider samplers own this observation;
+ * the default keeps unknown plans usable without inventing zero capacity. */
+const PLAN_CAPACITY_SCHEMA = `
+ALTER TABLE account ADD COLUMN capacity_weight REAL NOT NULL DEFAULT 1
+  CHECK (capacity_weight > 0);
+`;
+
 const MIGRATIONS: readonly string[] = [
   SCHEMA,
   TASK_SCHEMA,
@@ -372,6 +380,7 @@ const MIGRATIONS: readonly string[] = [
   CHECK_IN_SCHEMA,
   RUN_SESSION_RELATION_SCHEMA,
   SINGLE_RUN_SESSION_SCHEMA,
+  PLAN_CAPACITY_SCHEMA,
 ];
 
 export interface AccountRow {
@@ -387,6 +396,7 @@ export interface AccountRow {
    * actually holds its token, not by a flag that can drift from that fact. */
   readonly fleetCredentialed: boolean;
   readonly shared: boolean;
+  readonly capacityWeight: number;
   readonly createdAt: number;
 }
 
@@ -501,16 +511,21 @@ export class Ledger {
     label?: string;
     accessUntil?: number;
     shared?: boolean;
+    capacityWeight?: number;
   }): void {
+    if (a.capacityWeight !== undefined && (!Number.isFinite(a.capacityWeight) || a.capacityWeight <= 0)) {
+      throw new Error(`account ${a.id}: capacityWeight must be positive`);
+    }
     this.db
       .prepare(
-        `INSERT INTO account (id, provider, label, access_until, shared, created_at)
-         VALUES (?, ?, ?, ?, COALESCE(?, 0), ?)
+        `INSERT INTO account (id, provider, label, access_until, shared, capacity_weight, created_at)
+         VALUES (?, ?, ?, ?, COALESCE(?, 0), COALESCE(?, 1), ?)
          ON CONFLICT (id) DO UPDATE SET
            provider = excluded.provider,
            label = COALESCE(excluded.label, account.label),
            access_until = COALESCE(excluded.access_until, account.access_until),
-           shared = COALESCE(?, account.shared)`,
+           shared = COALESCE(?, account.shared),
+           capacity_weight = COALESCE(?, account.capacity_weight)`,
       )
       .run(
         a.id,
@@ -518,8 +533,10 @@ export class Ledger {
         a.label ?? null,
         a.accessUntil ?? null,
         a.shared === undefined ? null : a.shared ? 1 : 0,
+        a.capacityWeight ?? null,
         Date.now(),
         a.shared === undefined ? null : a.shared ? 1 : 0,
+        a.capacityWeight ?? null,
       );
   }
 
@@ -574,7 +591,7 @@ export class Ledger {
   accounts(): AccountRow[] {
     const rows = this.db
       .prepare(
-        "SELECT id, provider, label, access_until, cooldown_until, last_bound_at, fleet_credentialed, shared, created_at FROM account ORDER BY id",
+        "SELECT id, provider, label, access_until, cooldown_until, last_bound_at, fleet_credentialed, shared, capacity_weight, created_at FROM account ORDER BY id",
       )
       .all() as {
       id: string;
@@ -585,6 +602,7 @@ export class Ledger {
       last_bound_at: number | null;
       fleet_credentialed: number;
       shared: number;
+      capacity_weight: number;
       created_at: number;
     }[];
     return rows.map((r) => ({
@@ -596,8 +614,15 @@ export class Ledger {
       lastBoundAt: r.last_bound_at ?? undefined,
       fleetCredentialed: r.fleet_credentialed !== 0,
       shared: r.shared !== 0,
+      capacityWeight: r.capacity_weight,
       createdAt: r.created_at,
     }));
+  }
+
+  setAccountCapacityWeight(id: string, weight: number): void {
+    if (!Number.isFinite(weight) || weight <= 0) throw new Error("capacity weight must be positive");
+    const changed = this.db.prepare("UPDATE account SET capacity_weight = ? WHERE id = ?").run(weight, id);
+    if (changed.changes === 0) throw new Error(`unknown account ${id}`);
   }
 
   /** A cooling account is skipped by admission until the deadline passes. */

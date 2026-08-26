@@ -3,23 +3,21 @@ import { closeSync, existsSync, mkdirSync, openSync, readFileSync, readdirSync, 
 import { homedir } from "node:os";
 import { basename, dirname, extname, isAbsolute, join, resolve } from "node:path";
 import { parseRunKey } from "./agent-runs";
-import { AgentHost, LocalLedger, RemoteLedger, sshRunner } from "./agent-hosts";
-import { loadPlanUsage, type PlanUsageSnapshot } from "./plan-usage";
-import { loadProviderManifest, manifestAgentType, manifestPlanCards } from "./provider-manifest";
+import { AgentHost } from "./agent-hosts";
+import { ORCHESTRATOR_CATALOG, OrchestratorClient, catalogAgentType, type PlanUsageSnapshot } from "pi-orchestrator/api";
+import { planCards } from "./catalog-presentation";
 import { readMachineUsage } from "./machine-usage";
 import { displayContextDocument } from "./context-display";
 import { applyContextSplice, contextSplice, sha256, type ContextSplice } from "./sync";
 import { beginSupervisorGeneration, ensureSupervisorSchema } from "./database";
 import { BOOSTED_MULTIPLIER, nextBoost } from "pi-orchestrator/boost";
 import { DEFAULT_LIVE_MODEL, DEFAULT_LIVE_VOICE, VoiceBroker } from "pi-orchestrator/voice";
-type VoiceAccount = { id: string; provider: string; accessUntil?: number; cooldownUntil?: number };
 
-const VERSION = "0.45.0";
+const VERSION = "0.46.0";
 const ENVIRONMENT_ID = process.env.PI_REMOTE_ENVIRONMENT_ID ?? "local";
 const ENVIRONMENT_NAME = process.env.PI_REMOTE_ENVIRONMENT_NAME ?? "Local";
 const ENVIRONMENT_REQUIRES_UNLOCK = process.env.PI_REMOTE_REQUIRES_UNLOCK === "true";
 if (!/^[a-z][a-z0-9-]{0,31}$/.test(ENVIRONMENT_ID)) throw new Error("PI_REMOTE_ENVIRONMENT_ID must be a stable lowercase identifier");
-const PROVIDER_MANIFEST = loadProviderManifest();
 const SUPERVISOR_EPOCH = crypto.randomUUID();
 const HOME = homedir();
 const DATA = process.env.PI_REMOTE_DATA ?? join(process.env.XDG_STATE_HOME ?? join(HOME, ".local/state"), "pi-remote");
@@ -27,27 +25,16 @@ const INGESTION = process.env.PI_REMOTE_INGESTION ?? join(DATA, "ingestion");
 const PI = process.env.PI_BIN ?? "pi";
 const AUDIO = process.env.PI_REMOTE_AUDIO_BIN ?? "audio";
 const NICE = process.env.PI_REMOTE_NICE ?? "nice";
-type RemoteTarget = { id: string; name: string; ssh: string; home: string; cwd: string };
-const remoteTargets = JSON.parse(process.env.PI_REMOTE_TARGETS ?? "[]") as RemoteTarget[];
-const REMOTE_TARGETS = new Map<string, RemoteTarget>(remoteTargets.map((target) => [target.id, target]));
 const PRIVATE_ID = process.env.PI_REMOTE_PRIVATE_ID ?? "private";
 const PRIVATE_NAME = process.env.PI_REMOTE_PRIVATE_NAME ?? "Private";
 const PRIVATE_DIR = process.env.PI_REMOTE_PRIVATE_DIR ?? join(HOME, PRIVATE_ID);
-const WORK_SHADOW = process.env.PI_REMOTE_WORK_SHADOW ?? join(DATA, "work-shadow");
-const WORK_EXTENSION = join(import.meta.dir, "work-remote.ts");
 const SERVICE_TIER_EXTENSION = join(import.meta.dir, "service-tier.ts");
 const THREAD_CONTEXT_EXTENSION = join(import.meta.dir, "thread-context.ts");
 const SERVICE_TIER_DIR = join(DATA, "service-tiers");
 const ORCHESTRATOR_DB_PATH = process.env.PI_REMOTE_ORCHESTRATOR_DB ?? join(HOME, ".local/share/pi-orchestrator/ledger.sqlite3");
 const ORCHESTRATOR_AUTH_PATH = process.env.PI_ORCHESTRATOR_AUTH ?? join(dirname(realpathSync(ORCHESTRATOR_DB_PATH)), "auth.json");
 const ORCHESTRATOR_RUNS_ROOT = process.env.PI_REMOTE_ORCHESTRATOR_RUNS ?? join(HOME, ".local/share/pi-orchestrator/runs");
-const WORK_ORCHESTRATOR_DB_PATH = process.env.PI_REMOTE_WORK_ORCHESTRATOR_DB;
-const WORK_ORCHESTRATOR_RUNS_ROOT = process.env.PI_REMOTE_WORK_ORCHESTRATOR_RUNS;
-const WORK_ORCHESTRATOR_REMOTE_DB_PATH = process.env.PI_REMOTE_WORK_ORCHESTRATOR_REMOTE_DB;
-const WORK_ORCHESTRATOR_REMOTE_RUNS_ROOT = process.env.PI_REMOTE_WORK_ORCHESTRATOR_REMOTE_RUNS;
-const WORK_AGENT_SSH = process.env.PI_REMOTE_WORK_AGENT_SSH;
-const WORK_AGENT_REFRESH_MS = Math.max(5_000, Number(process.env.PI_REMOTE_WORK_AGENT_REFRESH_MS ?? "15000"));
-const WORK_AGENT_MAX_AGE_MS = Math.max(1_000, Number(process.env.PI_REMOTE_WORK_AGENT_MAX_AGE_MS ?? "4000"));
+const AGENT_REFRESH_MS = Math.max(5_000, Number(process.env.PI_REMOTE_AGENT_REFRESH_MS ?? "15000"));
 const LOCAL_AGENT_MAX_AGE_MS = Math.max(0, Number(process.env.PI_REMOTE_LOCAL_AGENT_MAX_AGE_MS ?? "500"));
 const HOST = process.env.PI_REMOTE_HOST ?? "127.0.0.1";
 const PORT = Number(process.env.PI_REMOTE_PORT ?? "8788");
@@ -86,7 +73,7 @@ function assertContextMirrorLoadsLast() {
 assertContextMirrorLoadsLast();
 
 // Starting a thread is two independent choices: where it runs, and which model runs there.
-// Both clients read this manifest rather than carrying their own copy of the combinations.
+// Both clients read these server profiles, whose models come from the orchestrator catalog.
 // Luna is still an orchestrator agent; it is only the hand-started thread that does not offer
 // it, because two GPT choices in a wordless menu are one choice too many to tell apart.
 //
@@ -101,17 +88,20 @@ assertContextMirrorLoadsLast();
 // cool place colours and a pictogram; models wear their provider's colour and their own
 // initial, so the two Claude models read as a pair without either being mistaken for the
 // other. Green is the default place and the loudest, blue the cloud and the quietest.
-const THREAD_MODELS = new Map([
-  ["sol", { id: "sol", label: "SOL", icon: "sol", accent: "#5a6673", provider: "openai-codex", modelId: "gpt-5.6-sol" }],
-  ["opus", { id: "opus", label: "OPUS", icon: "opus", accent: "#d9663d", provider: "anthropic", modelId: "claude-opus-5" }],
-  ["fable", { id: "fable", label: "FABLE", icon: "fable", accent: "#e6a23c", provider: "anthropic", modelId: "claude-fable-5" }],
-]);
+const THREAD_MODELS = new Map(ORCHESTRATOR_CATALOG.models.map((model) => [model.id, {
+  id: model.id,
+  label: model.label,
+  icon: model.icon,
+  accent: model.accent,
+  provider: model.provider,
+  modelId: model.model,
+}]));
 // A destination that offers no model choice is started straight from its default, which is
 // why the work machine has no second step: Anthropic models do not run there.
 const OFFERED_DESTINATIONS = (process.env.PI_REMOTE_DESTINATIONS ?? "home").split(",").map((id) => id.trim()).filter(Boolean);
 const destinationDefinitions = JSON.parse(process.env.PI_REMOTE_THREAD_DESTINATIONS ?? JSON.stringify([
-  { id: "home", label: "HOME", icon: "house", accent: "#3fb950", workspaceId: "home", executionTarget: "local", thinkingLevel: "high", models: ["sol", "fable", "opus"], defaultModel: "opus" },
-])) as Array<{ id: string; label: string; icon: string; accent: string; workspaceId: string; executionTarget: string; thinkingLevel: string; models: string[]; defaultModel: string }>;
+  { id: "home", label: "HOME", icon: "house", accent: "#3fb950", workspaceId: "home", thinkingLevel: "high", models: ["sol", "fable", "opus"], defaultModel: "opus" },
+])) as Array<{ id: string; label: string; icon: string; accent: string; workspaceId: string; thinkingLevel: string; models: string[]; defaultModel: string }>;
 const THREAD_DESTINATIONS = new Map(destinationDefinitions
   .filter((destination) => OFFERED_DESTINATIONS.includes(destination.id))
   .map((destination) => [destination.id, destination]));
@@ -157,46 +147,22 @@ mkdirSync(DATA, { recursive: true, mode: 0o700 });
 mkdirSync(join(DATA, "sessions"), { recursive: true, mode: 0o700 });
 mkdirSync(SERVICE_TIER_DIR, { recursive: true, mode: 0o700 });
 mkdirSync(INGESTION, { recursive: true, mode: 0o700 });
-mkdirSync(WORK_SHADOW, { recursive: true, mode: 0o700 });
 const db = new Database(join(DATA, "supervisor.sqlite3"), { create: true, strict: true });
-const orchestratorDb = new Database(ORCHESTRATOR_DB_PATH, { readonly: true, strict: true });
-orchestratorDb.exec("PRAGMA busy_timeout=5000;");
-// The GPT-Live pool is the orchestrator's account ledger and shared Codex
-// credential store, the same custody used by interactive and fleet sessions.
+const orchestrator = new OrchestratorClient({
+  ledgerPath: ORCHESTRATOR_DB_PATH,
+  runsRoot: ORCHESTRATOR_RUNS_ROOT,
+});
+// Voice, plan cards, governor controls, and autonomous-run observation all
+// consume the orchestrator's public model instead of its private tables.
 const voiceAccounts = new VoiceBroker({
   authPath: ORCHESTRATOR_AUTH_PATH,
   agentDir: AGENT_DIR,
-  accounts: (): VoiceAccount[] => (orchestratorDb
-    .query("SELECT id, provider, access_until accessUntil, cooldown_until cooldownUntil FROM account WHERE provider='openai-codex'")
-    .all() as any[])
-    .map((row) => ({
-      id: row.id,
-      provider: row.provider,
-      accessUntil: row.accessUntil ?? undefined,
-      cooldownUntil: row.cooldownUntil ?? undefined,
-    })),
+  accounts: () => orchestrator.accounts("openai-codex"),
 });
-// Autonomous agents run on more than one machine. Each host owns an identical
-// pi-orchestrator ledger and runs directory, so the drawer's agent list is the
-// union of the hosts rather than a view of this machine alone.
-const agentHosts = [
-  new AgentHost(new LocalLedger(orchestratorDb, ORCHESTRATOR_RUNS_ROOT), {
-    key: "local", label: "THIS MACHINE", name: "This machine",
-    manifest: PROVIDER_MANIFEST, maxAgeMs: LOCAL_AGENT_MAX_AGE_MS,
-  }),
-];
-if (WORK_ORCHESTRATOR_DB_PATH) {
-  agentHosts.push(new AgentHost(
-    new LocalLedger(WORK_ORCHESTRATOR_DB_PATH, WORK_ORCHESTRATOR_RUNS_ROOT ?? join(dirname(WORK_ORCHESTRATOR_DB_PATH), "runs")),
-    { key: "work", label: process.env.PI_REMOTE_WORK_AGENT_LABEL ?? "WORK", name: process.env.PI_REMOTE_WORK_AGENT_NAME ?? "Work host", manifest: PROVIDER_MANIFEST, maxAgeMs: WORK_AGENT_MAX_AGE_MS },
-  ));
-} else if (WORK_AGENT_SSH && WORK_ORCHESTRATOR_REMOTE_DB_PATH && WORK_ORCHESTRATOR_REMOTE_RUNS_ROOT) {
-  agentHosts.push(new AgentHost(
-    new RemoteLedger(WORK_ORCHESTRATOR_REMOTE_DB_PATH, WORK_ORCHESTRATOR_REMOTE_RUNS_ROOT, sshRunner(WORK_AGENT_SSH)),
-    { key: "work", label: process.env.PI_REMOTE_WORK_AGENT_LABEL ?? "WORK", name: process.env.PI_REMOTE_WORK_AGENT_NAME ?? "Work host", manifest: PROVIDER_MANIFEST, maxAgeMs: WORK_AGENT_MAX_AGE_MS },
-  ));
-}
-const agentHostsByKey = new Map(agentHosts.map((host) => [host.key, host]));
+const agentHost = new AgentHost(orchestrator, {
+  key: "local", label: "THIS MACHINE", name: "This machine",
+  maxAgeMs: LOCAL_AGENT_MAX_AGE_MS,
+});
 ensureSupervisorSchema(db);
 beginSupervisorGeneration(db, SUPERVISOR_EPOCH);
 
@@ -234,54 +200,21 @@ const serviceTierPath = (sessionId: string) => join(SERVICE_TIER_DIR, sessionId)
 function writeServiceTier(sessionId: string, tier: "default" | "priority") {
   writeFileSync(serviceTierPath(sessionId), tier + "\n", { mode: 0o600 });
 }
-type ProviderPlanUsageState = PlanUsageSnapshot["openai"] & { state: PlanUsageSnapshot["openai"]["state"] | "loading" };
-type AnthropicPlanUsageState = PlanUsageSnapshot["anthropic"] & { state: PlanUsageSnapshot["anthropic"]["state"] | "loading" };
-type CursorPlanUsageState = PlanUsageSnapshot["cursor"] & { state: PlanUsageSnapshot["cursor"]["state"] | "loading" };
-type PlanUsageState = {
-  openai: ProviderPlanUsageState;
-  anthropic: AnthropicPlanUsageState;
-  cursor: CursorPlanUsageState;
-  updatedAt: string;
-};
-const loadingProviderPlanUsage = (): ProviderPlanUsageState => ({
-  state: "loading", percentLeft: null, expectedPercentLeft: null, paceDelta: null, planCount: 0, checkedCount: 0,
-});
-const loadingAnthropicPlanUsage = (): AnthropicPlanUsageState => ({
-  ...loadingProviderPlanUsage(),
-  fablePercentLeft: null, fableExpectedPercentLeft: null, fablePaceDelta: null,
-  weeklyPercentLeft: null, weeklyExpectedPercentLeft: null, weeklyPaceDelta: null,
-});
-const loadingCursorPlanUsage = (): CursorPlanUsageState => ({
-  ...loadingProviderPlanUsage(), percentUsed: null,
-});
-let planUsage: PlanUsageState = {
-  openai: loadingProviderPlanUsage(),
-  anthropic: loadingAnthropicPlanUsage(),
-  cursor: loadingCursorPlanUsage(),
-  updatedAt: now(),
-};
+let planUsage: PlanUsageSnapshot | null = null;
 let planUsageRefresh: Promise<void> | null = null;
 let nextPlanUsageRefresh = 0;
 
 function refreshPlanUsageIfDue() {
   if (planUsageRefresh || Date.now() < nextPlanUsageRefresh) return;
   nextPlanUsageRefresh = Date.now() + PLAN_USAGE_REFRESH_MS;
-  planUsageRefresh = loadPlanUsage({
-    agentDir: AGENT_DIR,
-    openaiAuthPath: ORCHESTRATOR_AUTH_PATH,
-    ledgerPath: ORCHESTRATOR_DB_PATH,
-  })
-    .then((snapshot) => { planUsage = snapshot; })
-    .catch((cause) => {
-      console.error("Plan usage refresh failed", cause);
-      planUsage = {
-        openai: planUsage.openai.percentLeft === null ? { ...planUsage.openai, state: "unavailable" } : planUsage.openai,
-        anthropic: planUsage.anthropic.percentLeft === null ? { ...planUsage.anthropic, state: "unavailable" } : planUsage.anthropic,
-        cursor: planUsage.cursor.percentUsed === null ? { ...planUsage.cursor, state: "unavailable" } : planUsage.cursor,
-        updatedAt: now(),
-      };
-    })
-    .finally(() => { planUsageRefresh = null; });
+  planUsageRefresh = (async () => {
+    try {
+      await orchestrator.refreshPlanFacts(AGENT_DIR);
+    } catch (cause) {
+      console.error("Plan meter refresh failed", cause);
+    }
+    planUsage = orchestrator.plans();
+  })().finally(() => { planUsageRefresh = null; });
 }
 
 const json = (data: unknown, status = 200) => new Response(JSON.stringify(data), {
@@ -440,12 +373,8 @@ const GOVERNOR_FAMILIES: Record<GovernorProvider, string> = {
   openai: "openai-codex",
   anthropic: "anthropic",
 };
-let orchestratorWriteDb: Database | null = null;
-
 function boostMultiplier(family: string): number {
-  const row = orchestratorDb.query("SELECT value FROM control WHERE key=?").get(`boost:${family}`) as { value: string } | null;
-  const multiplier = Number(row?.value);
-  return Number.isFinite(multiplier) && multiplier >= 0 ? multiplier : 1;
+  return orchestrator.boost(family);
 }
 
 function governorState(multiplier: number): GovernorState {
@@ -476,11 +405,7 @@ function governorControls(): GovernorControls | null {
 
 function toggleGovernor(provider: GovernorProvider): GovernorControls {
   const family = GOVERNOR_FAMILIES[provider];
-  if (!orchestratorWriteDb) orchestratorWriteDb = new Database(ORCHESTRATOR_DB_PATH, { strict: true });
-  orchestratorWriteDb.exec("PRAGMA busy_timeout=5000;");
-  orchestratorWriteDb
-    .query("INSERT INTO control(key,value) VALUES(?,?) ON CONFLICT(key) DO UPDATE SET value=excluded.value")
-    .run(`boost:${family}`, String(nextBoost(boostMultiplier(family))));
+  orchestrator.setBoost(family, nextBoost(boostMultiplier(family)));
   const controls = governorControls();
   if (!controls) throw new Error("Governor controls are unavailable");
   return controls;
@@ -537,7 +462,7 @@ const webAssets = new Map<string, readonly [string, string]>([
   ["/thunder.svg", ["thunder.svg", "image/svg+xml"]],
 ]);
 for (const icon of [
-  ...PROVIDER_MANIFEST.plans.map((plan) => plan.icon),
+  ...ORCHESTRATOR_CATALOG.plans.map((plan) => plan.icon),
   ...[...THREAD_MODELS.values()].map((model) => model.icon),
   ...[...THREAD_DESTINATIONS.values()].map((destination) => destination.icon),
 ]) {
@@ -563,55 +488,6 @@ function downloadHeaders(path: string, size: number, contentType: string, etagVa
     "accept-ranges": "bytes",
     etag: `\"${sha256(`${path}:${etagValue}`)}\"`,
     "x-content-type-options": "nosniff",
-  });
-}
-
-const REMOTE_FILE_METADATA = String.raw`
-import json, mimetypes, os, pathlib, sys
-requested = pathlib.Path(sys.argv[1])
-if not requested.is_absolute():
-    print(json.dumps({"status": 400, "error": "Valid absolute file path required"}))
-    raise SystemExit
-try:
-    path = requested.resolve(strict=True)
-    if not path.is_file() or not os.access(path, os.R_OK):
-        raise FileNotFoundError
-    stat = path.stat()
-    print(json.dumps({
-        "path": str(path),
-        "size": stat.st_size,
-        "contentType": mimetypes.guess_type(path.name)[0] or "application/octet-stream",
-        "mtimeNs": stat.st_mtime_ns,
-    }))
-except (FileNotFoundError, PermissionError, OSError):
-    print(json.dumps({"status": 404, "error": "File not found"}))
-`;
-
-async function remoteFileMetadata(path: string, target: RemoteTarget): Promise<any> {
-  const command = `python3 -c ${shellQuote(REMOTE_FILE_METADATA)} ${shellQuote(path)}`;
-  const proc = Bun.spawn(["ssh", target.ssh, command], { stdout: "pipe", stderr: "pipe" });
-  const [stdout, stderr, code] = await Promise.all([
-    new Response(proc.stdout).text(), new Response(proc.stderr).text(), proc.exited,
-  ]);
-  if (code !== 0) throw new Error(stderr.trim() || `Could not inspect remote file (${code})`);
-  try { return JSON.parse(stdout.trim()); }
-  catch { throw new Error("Remote file inspection returned invalid metadata"); }
-}
-
-function childResponseBody(proc: any): ReadableStream<Uint8Array> {
-  const reader = proc.stdout.getReader();
-  return new ReadableStream({
-    async pull(controller) {
-      try {
-        const { value, done } = await reader.read();
-        if (done) controller.close();
-        else controller.enqueue(value);
-      } catch (cause) { controller.error(cause); }
-    },
-    async cancel(reason) {
-      try { await reader.cancel(reason); } catch {}
-      try { proc.kill(); } catch {}
-    },
   });
 }
 
@@ -657,40 +533,6 @@ async function sessionFileResponse(url: URL, method: string, req: Request): Prom
   if (!row) return new Response("Session not found", { status: 404 });
   const requested = url.searchParams.get("path") ?? "";
   if (!isAbsolute(requested)) return new Response("Valid absolute file path required", { status: 400 });
-  const target = REMOTE_TARGETS.get(String(row.execution_target)) ?? null;
-  if (target) {
-    let metadata;
-    try { metadata = await remoteFileMetadata(requested, target); }
-    catch (cause: any) { return new Response(cause?.message ?? "Could not inspect remote file", { status: 502 }); }
-    if (metadata.status) return new Response(String(metadata.error ?? "File not found"), { status: Number(metadata.status) });
-    const size = Number(metadata.size);
-    const headers = downloadHeaders(String(metadata.path), size, String(metadata.contentType), `${size}:${metadata.mtimeNs}`);
-    const range = method === "GET" ? byteRange(req.headers.get("range"), size) : null;
-    if (req.headers.has("range") && method === "GET" && !range)
-      return new Response(null, { status: 416, headers: { "content-range": `bytes */${size}` } });
-    if (method === "HEAD") return new Response(null, { headers });
-    const start = range?.start ?? 0;
-    const length = range ? range.end - range.start + 1 : size;
-    if (range) {
-      headers.set("content-range", `bytes ${range.start}-${range.end}/${size}`);
-      headers.set("content-length", String(length));
-    }
-    const remoteRange = String.raw`import pathlib,sys
-p=pathlib.Path(sys.argv[1]); start=int(sys.argv[2]); left=int(sys.argv[3])
-with p.open('rb') as f:
- f.seek(start)
- while left:
-  chunk=f.read(min(left,65536))
-  if not chunk: break
-  sys.stdout.buffer.write(chunk); left-=len(chunk)`;
-    const command = `python3 -c ${shellQuote(remoteRange)} ${shellQuote(String(metadata.path))} ${start} ${length}`;
-    const proc = Bun.spawn(["ssh", target.ssh, command], { stdout: "pipe", stderr: "pipe" });
-    void new Response(proc.stderr).text().then(async (stderr) => {
-      const code = await proc.exited;
-      if (code !== 0) console.error(`Remote file download failed (${code}): ${stderr.trim()}`);
-    }).catch((cause) => console.error("Remote file download failed", cause));
-    return new Response(childResponseBody(proc), { status: range ? 206 : 200, headers });
-  }
   return localFileResponse(requested, method, req);
 }
 
@@ -770,71 +612,6 @@ async function storeUpload(req: Request, requestedName: string, root = INGESTION
     if (existsSync(path)) unlinkSync(path);
     throw cause;
   }
-}
-
-function shellQuote(value: string): string {
-  return `'${value.replaceAll("'", `'"'"'`)}'`;
-}
-
-const REMOTE_UPLOAD_SCRIPT = `
-import json, os, pathlib, sys
-name = pathlib.Path(sys.argv[1]).name
-root = pathlib.Path.home() / "ingestion"
-root.mkdir(mode=0o700, parents=True, exist_ok=True)
-os.chmod(root, 0o700)
-stem, suffix = pathlib.Path(name).stem, pathlib.Path(name).suffix
-path = root / name
-index = 2
-while path.exists():
-    path = root / f"{stem}-{index}{suffix}"
-    index += 1
-try:
-    size = 0
-    with path.open("xb") as out:
-        while True:
-            chunk = sys.stdin.buffer.read(65536)
-            if not chunk: break
-            out.write(chunk)
-            size += len(chunk)
-    os.chmod(path, 0o600)
-    print(json.dumps({"name": path.name, "path": str(path), "size": size}))
-except BaseException:
-    try: path.unlink()
-    except OSError: pass
-    raise
-`;
-
-async function storeWorkUpload(req: Request, requestedName: string, target: RemoteTarget) {
-  const name = uploadName(requestedName);
-  const command = `python3 -c ${shellQuote(REMOTE_UPLOAD_SCRIPT)} ${shellQuote(name)}`;
-  const proc = Bun.spawn(["ssh", target.ssh, command], { stdin: "pipe", stdout: "pipe", stderr: "pipe" });
-  try {
-    const reader = req.body?.getReader();
-    if (reader) {
-      while (true) {
-        const { value, done } = await reader.read();
-        if (done) break;
-        proc.stdin.write(value);
-      }
-    }
-    await proc.stdin.end();
-    const [stdout, stderr, code] = await Promise.all([
-      new Response(proc.stdout).text(), new Response(proc.stderr).text(), proc.exited,
-    ]);
-    if (code !== 0) throw new Error(stderr.trim() || `Work upload failed (${code})`);
-    return JSON.parse(stdout.trim());
-  } catch (cause) {
-    try { proc.kill(); } catch {}
-    throw cause;
-  }
-}
-
-async function deleteWorkUpload(requestedName: string, target: RemoteTarget) {
-  const name = uploadName(requestedName);
-  const path = `${target.home}/ingestion/${name}`;
-  const proc = Bun.spawn(["ssh", target.ssh, `rm -f -- ${shellQuote(path)}`], { stdout: "ignore", stderr: "pipe" });
-  const [stderr, code] = await Promise.all([new Response(proc.stderr).text(), proc.exited]);
-  if (code !== 0) throw new Error(stderr.trim() || `Could not remove work upload (${code})`);
 }
 
 const sessionRow = db.query("SELECT * FROM sessions WHERE id=?");
@@ -931,14 +708,10 @@ function nextThreadName(): string {
 }
 
 type AgentModelCount = { key: string; label: string; count: number };
-const agentModelOrder = new Map(PROVIDER_MANIFEST.agentOrder.map((key, index) => [key, index]));
-// The drawer presents work above this machine; the agent list presents this
-// machine first. Both are views of the same hosts.
-const AGENT_LOCATION_ORDER = ["work", "local"];
-
+const agentModelOrder = new Map(ORCHESTRATOR_CATALOG.agentOrder.map((key, index) => [key, index]));
 function addAgentModel(models: Map<string, AgentModelCount>, raw: string, count = 1) {
   if (count <= 0) return;
-  const type = manifestAgentType(PROVIDER_MANIFEST, raw);
+  const type = catalogAgentType(raw);
   const current = models.get(type.key);
   if (current) current.count += count;
   else models.set(type.key, { ...type, count });
@@ -947,60 +720,34 @@ function sortedAgentModels(models: Map<string, AgentModelCount>): AgentModelCoun
   return [...models.values()].sort((left, right) =>
     (agentModelOrder.get(left.key) ?? 999) - (agentModelOrder.get(right.key) ?? 999) || left.label.localeCompare(right.label));
 }
-// A Pi Remote thread runs where its execution target points, so a work thread
-// belongs to the work machine's count even though its supervisor is here.
-function runtimeHostKey(id: string): string {
-  const row = sessionRow.get(id) as any;
-  return row && row.execution_target !== "local" ? "work" : "local";
-}
 async function activeAgents() {
-  const snapshots = new Map(await Promise.all(agentHosts.map(async (host) =>
-    [host.key, await host.runs()] as const)));
-  const runtimeModels = new Map(agentHosts.map((host) => [host.key, new Map<string, AgentModelCount>()]));
-  const runtimeCounts = new Map(agentHosts.map((host) => [host.key, 0]));
-  for (const [id, rt] of runtimes) if (runtimeWorking(rt)) {
-    const key = runtimeHostKey(id);
-    if (!runtimeCounts.has(key)) continue;
-    runtimeCounts.set(key, runtimeCounts.get(key)! + 1);
-    addAgentModel(runtimeModels.get(key)!, rt.modelId || "unknown");
+  const snapshot = await agentHost.runs();
+  const models = new Map<string, AgentModelCount>();
+  for (const row of snapshot.models) addAgentModel(models, row.model, row.count);
+  let piRemote = 0;
+  for (const rt of runtimes.values()) if (runtimeWorking(rt)) {
+    piRemote++;
+    addAgentModel(models, rt.modelId || "unknown");
   }
-  const locations = agentHosts
-    .map((host) => {
-      const snapshot = snapshots.get(host.key)!;
-      const models = new Map<string, AgentModelCount>();
-      for (const row of snapshot.models) addAgentModel(models, row.model, row.count);
-      for (const model of runtimeModels.get(host.key)!.values()) addAgentModel(models, model.key, model.count);
-      return {
-        key: host.key,
-        label: host.ref.label,
-        name: host.ref.name,
-        total: snapshot.running + runtimeCounts.get(host.key)!,
-        models: sortedAgentModels(models),
-        updatedAt: snapshot.updatedAt,
-        error: snapshot.error,
-      };
-    })
-    .sort((left, right) => AGENT_LOCATION_ORDER.indexOf(left.key) - AGENT_LOCATION_ORDER.indexOf(right.key));
-  const allModels = new Map<string, AgentModelCount>();
-  for (const location of locations) for (const model of location.models) addAgentModel(allModels, model.key, model.count);
-  const modelGroups = sortedAgentModels(allModels);
-  const piRemote = [...runtimeCounts.values()].reduce((total, count) => total + count, 0);
-  const orchestrator = [...snapshots.values()].reduce((total, snapshot) => total + snapshot.running, 0);
+  const modelGroups = sortedAgentModels(models);
   return {
-    total: piRemote + orchestrator,
+    total: piRemote + snapshot.running,
     groups: [
       { key: "pi-remote", label: "REMOTE", count: piRemote },
-      { key: "orchestrator", label: "ORCH", count: orchestrator },
+      { key: "orchestrator", label: "ORCH", count: snapshot.running },
       ...modelGroups,
     ],
     models: modelGroups,
-    locations,
-    sources: {
-      piRemote,
-      orchestrator,
-      localOrchestrator: snapshots.get("local")?.running ?? 0,
-      workOrchestrator: snapshots.get("work")?.running ?? 0,
-    },
+    locations: [{
+      key: agentHost.key,
+      label: agentHost.ref.label,
+      name: agentHost.ref.name,
+      total: piRemote + snapshot.running,
+      models: modelGroups,
+      updatedAt: snapshot.updatedAt,
+      error: snapshot.error,
+    }],
+    sources: { piRemote, orchestrator: snapshot.running },
     updatedAt: now(),
   };
 }
@@ -1030,10 +777,7 @@ function publicSessions(rows: any[]): any[] {
 function publicSession(row: any, prepared?: PreparedQueue) {
   const rt = runtimes.get(row.id);
   const preset = workspaces.get(row.workspace_id);
-  const remoteTarget = REMOTE_TARGETS.get(row.execution_target) ?? null;
-  const executionTarget = remoteTarget ? remoteTarget.id : "local";
-  const profile = row.workspace_id === "hara" ? "personal" : executionTarget;
-  const cwd = remoteTarget ? (row.remote_cwd || remoteTarget.cwd) : (preset?.path ?? row.workspace_id);
+  const cwd = preset?.path ?? row.workspace_id;
   const toolNames = rt ? [...rt.activeTools.values()] : [];
   const durableQueue = prepared ? [...prepared.counts].map(([delivery, count]) => ({ delivery, count })) : db.query(`
     SELECT delivery,count(*) count FROM work_items
@@ -1075,8 +819,8 @@ function publicSession(row: any, prepared?: PreparedQueue) {
     id: row.id,
     name: row.name,
     cwd,
-    workspaceName: remoteTarget ? remoteTarget.name : (preset?.name ?? cwd),
-    environment: profile,
+    workspaceName: preset?.name ?? cwd,
+    environment: row.profile_id,
     state: row.state,
     activity,
     activeTool: toolNames.at(-1) ?? null,
@@ -1379,10 +1123,8 @@ async function reconcileRuntimeState(sessionId: string, rt: Runtime): Promise<an
 }
 
 async function startRuntime(row: any): Promise<Runtime> {
-  const remoteTarget = REMOTE_TARGETS.get(row.execution_target) ?? null;
-  const isWork = remoteTarget !== null;
   const preset = workspaces.get(row.workspace_id);
-  const cwd = isWork ? realpathSync(WORK_SHADOW) : realpathSync(preset?.path ?? row.workspace_id);
+  const cwd = realpathSync(preset?.path ?? row.workspace_id);
   const resumePath = row.session_path && existsSync(row.session_path) ? row.session_path : null;
   if (row.session_path && !resumePath) {
     db.query("UPDATE sessions SET session_path=NULL WHERE id=?").run(row.id);
@@ -1394,7 +1136,6 @@ async function startRuntime(row: any): Promise<Runtime> {
     "--extension", SERVICE_TIER_EXTENSION,
     "--extension", THREAD_CONTEXT_EXTENSION,
   ];
-  if (isWork) args.push("--no-context-files", "--extension", WORK_EXTENSION);
   if (resumePath) args.push("--session", resumePath);
   else {
     args.push("--name", row.name);
@@ -1417,11 +1158,6 @@ async function startRuntime(row: any): Promise<Runtime> {
       PI_REMOTE_SESSION_ID: row.id,
       PI_REMOTE_SERVICE_TIER_FILE: serviceTierPath(row.id),
       PI_REMOTE_SERVER_URL: `http://${HOST}:${PORT}`,
-      PI_REMOTE_EXECUTION_TARGET: remoteTarget?.id ?? "local",
-      PI_REMOTE_WORK_SSH: remoteTarget?.ssh ?? "",
-      PI_REMOTE_WORK_HOME: remoteTarget?.home ?? "",
-      PI_REMOTE_WORK_CWD: row.remote_cwd || remoteTarget?.cwd || "",
-      PI_REMOTE_WORK_NAME: remoteTarget?.name ?? "Remote host",
       PI_CODING_AGENT_DIR: AGENT_DIR,
     },
   });
@@ -1996,24 +1732,16 @@ const server = Bun.serve({
         if (String(body.sha256 ?? "").toLowerCase() !== fileHash) return error("Completed upload hash does not match", 422);
         const uploadSession = sessionRow.get(String(transfer.session_id)) as any;
         if (!uploadSession) return error("Session not found", 404);
-        const uploadTarget = REMOTE_TARGETS.get(String(uploadSession.execution_target)) ?? null;
-        let file: any;
-        if (uploadTarget) {
-          const transferRequest = new Request("http://localhost/upload", { method: "POST", body: Bun.file(String(transfer.temp_path)).stream(), duplex: "half" } as RequestInit);
-          file = await storeWorkUpload(transferRequest, String(transfer.name), uploadTarget);
-          unlinkSync(String(transfer.temp_path));
-        } else {
-          mkdirSync(INGESTION, { recursive: true, mode: 0o700 });
-          const destination = availableUploadPath(INGESTION, String(transfer.name));
-          renameSync(String(transfer.temp_path), destination);
-          file = { name: basename(destination), path: destination, size: Number(transfer.expected_size) };
-        }
+        mkdirSync(INGESTION, { recursive: true, mode: 0o700 });
+        const destination = availableUploadPath(INGESTION, String(transfer.name));
+        renameSync(String(transfer.temp_path), destination);
+        const file = { name: basename(destination), path: destination, size: Number(transfer.expected_size) };
         db.transaction(() => {
-          db.query("INSERT OR REPLACE INTO uploads(path,session_id,environment,created_at) VALUES(?,?,?,?)")
-            .run(file.path, transfer.session_id, uploadTarget?.id ?? "local", now());
+          db.query("INSERT OR REPLACE INTO uploads(path,session_id,created_at) VALUES(?,?,?)")
+            .run(file.path, transfer.session_id, now());
           db.query("DELETE FROM upload_transfers WHERE id=?").run(transfer.id);
         })();
-        return json({ file: { ...file, sha256: fileHash, environment: uploadTarget?.id ?? "local" } }, 201);
+        return json({ file: { ...file, sha256: fileHash, environment: "local" } }, 201);
       } catch (cause: any) { return error(cause?.message ?? "Could not complete upload", 400); }
     }
     if (url.pathname === "/v1/uploads" && req.method === "POST") {
@@ -2022,11 +1750,10 @@ const server = Bun.serve({
         const uploadSessionId = url.searchParams.get("sessionId") ?? "";
         const uploadSession = uploadSessionId ? sessionRow.get(uploadSessionId) as any : null;
         if (uploadSessionId && !uploadSession) return error("Session not found", 404);
-        const uploadTarget = uploadSession ? REMOTE_TARGETS.get(String(uploadSession.execution_target)) ?? null : null;
-        const file = uploadTarget ? await storeWorkUpload(req, name, uploadTarget) : await storeUpload(req, name, INGESTION);
-        if (uploadSession) db.query("INSERT OR REPLACE INTO uploads(path,session_id,environment,created_at) VALUES(?,?,?,?)")
-          .run(file.path, uploadSessionId, uploadTarget?.id ?? "local", now());
-        return json({ file: { ...file, environment: uploadTarget?.id ?? "local" } }, 201);
+        const file = await storeUpload(req, name, INGESTION);
+        if (uploadSession) db.query("INSERT OR REPLACE INTO uploads(path,session_id,created_at) VALUES(?,?,?)")
+          .run(file.path, uploadSessionId, now());
+        return json({ file: { ...file, environment: "local" } }, 201);
       } catch (cause: any) { return error(cause?.message ?? "Upload failed", 400); }
     }
     if (url.pathname === "/v1/uploads" && req.method === "DELETE") {
@@ -2035,38 +1762,31 @@ const server = Bun.serve({
         const name = uploadName(requested);
         if (name !== requested) return error("Invalid uploaded file name");
         const uploadSessionId = url.searchParams.get("sessionId") ?? "";
-        const uploadSession = uploadSessionId ? sessionRow.get(uploadSessionId) as any : null;
-        const deleteTarget = uploadSession
-          ? REMOTE_TARGETS.get(String(uploadSession.execution_target)) ?? null
-          : REMOTE_TARGETS.get(url.searchParams.get("environment") ?? "") ?? null;
         const tracked = uploadSessionId
           ? db.query("SELECT path FROM uploads WHERE session_id=? AND path LIKE ?").get(uploadSessionId, `%/${name}`) as any
           : null;
-        if (deleteTarget) await deleteWorkUpload(name, deleteTarget);
-        else {
-          const path = tracked?.path ?? join(INGESTION, name);
-          if (existsSync(path)) unlinkSync(path);
-        }
+        const path = tracked?.path ?? join(INGESTION, name);
+        if (existsSync(path)) unlinkSync(path);
         if (tracked?.path) db.query("DELETE FROM uploads WHERE path=? AND session_id=?").run(tracked.path, uploadSessionId);
         return json({ ok: true });
       } catch (cause: any) { return error(cause?.message ?? "Could not remove upload", 400); }
     }
-    // Read-only observation of every host's autonomous agents. There is no
+    // Read-only observation of this host's autonomous agents. There is no
     // prompt, steer, or abort surface here: the orchestrator owns their work.
     if (url.pathname === "/v1/agents/runs" && req.method === "GET") {
       try {
-        const snapshots = await Promise.all(agentHosts.map((host) => host.runs()));
+        const snapshot = await agentHost.runs();
         return json({
-          runs: snapshots.flatMap((snapshot) => snapshot.runs),
-          running: snapshots.reduce((total, snapshot) => total + snapshot.running, 0),
-          hosts: agentHosts.map((host, index) => ({
-            key: host.ref.key,
-            label: host.ref.label,
-            name: host.ref.name,
-            running: snapshots[index]!.running,
-            updatedAt: snapshots[index]!.updatedAt,
-            error: snapshots[index]!.error,
-          })),
+          runs: snapshot.runs,
+          running: snapshot.running,
+          hosts: [{
+            key: agentHost.ref.key,
+            label: agentHost.ref.label,
+            name: agentHost.ref.name,
+            running: snapshot.running,
+            updatedAt: snapshot.updatedAt,
+            error: snapshot.error,
+          }],
         });
       }
       catch (cause: any) { return error(cause?.message ?? "Could not read agent runs", 503); }
@@ -2074,11 +1794,10 @@ const server = Bun.serve({
     const agentEvents = url.pathname.match(/^\/v1\/agents\/runs\/([^/]+)\/events$/);
     if (agentEvents && req.method === "GET") {
       const addressed = parseRunKey(decodeURIComponent(agentEvents[1]));
-      const host = addressed ? agentHostsByKey.get(addressed.host) : undefined;
-      if (!addressed || !host) return error("Invalid agent run", 400);
+      if (!addressed || addressed.host !== agentHost.key) return error("Invalid agent run", 400);
       try {
         const after = Math.max(0, Number(url.searchParams.get("after") ?? 0) || 0);
-        const stream = await host.events(addressed.runId, after);
+        const stream = await agentHost.events(addressed.runId, after);
         if (!stream.run) return error("Agent run not found", 404);
         return json({
           run: stream.run,
@@ -2146,26 +1865,25 @@ const server = Bun.serve({
         }
         let runList: any = null;
         if (body.includeAgentList === true) {
-          const snapshots = await Promise.all(agentHosts.map((host) => host.runs()));
+          const snapshot = await agentHost.runs();
           runList = {
-            runs: snapshots.flatMap((snapshot) => snapshot.runs),
-            running: snapshots.reduce((total, snapshot) => total + snapshot.running, 0),
-            hosts: agentHosts.map((host, index) => ({
-              key: host.key,
-              label: host.ref.label,
-              name: host.ref.name,
-              running: snapshots[index]!.running,
-              updatedAt: snapshots[index]!.updatedAt,
-              error: snapshots[index]!.error,
-            })),
+            runs: snapshot.runs,
+            running: snapshot.running,
+            hosts: [{
+              key: agentHost.key,
+              label: agentHost.ref.label,
+              name: agentHost.ref.name,
+              running: snapshot.running,
+              updatedAt: snapshot.updatedAt,
+              error: snapshot.error,
+            }],
           };
         }
         let runEvents: any = null;
         if (typeof body.agentRunId === "string" && body.agentRunId) {
           const addressed = parseRunKey(body.agentRunId);
-          const host = addressed ? agentHostsByKey.get(addressed.host) : undefined;
-          if (addressed && host) {
-            const stream = await host.events(addressed.runId, Math.max(0, Number(body.agentAfter ?? 0) || 0));
+          if (addressed?.host === agentHost.key) {
+            const stream = await agentHost.events(addressed.runId, Math.max(0, Number(body.agentAfter ?? 0) || 0));
             if (stream.run) runEvents = {
               run: stream.run,
               events: stream.events,
@@ -2200,7 +1918,7 @@ const server = Bun.serve({
           agentRuns: runList,
           agentEvents: runEvents,
           agents: body.includeDashboard === false ? null : await activeAgents(),
-          plans: body.includeDashboard === false ? null : { cards: manifestPlanCards(PROVIDER_MANIFEST, planUsage), updatedAt: planUsage.updatedAt },
+          plans: body.includeDashboard === false ? null : { cards: planCards(planUsage), updatedAt: planUsage?.updatedAt ?? null },
           governors: body.includeDashboard === false ? null : governorControls(),
           machine: body.includeDashboard === false ? null : readMachineUsage(),
         });
@@ -2215,7 +1933,7 @@ const server = Bun.serve({
         archivedSessions: publicSessions(archivedRows),
         archivedTotal: archivedCount(),
         agents: await activeAgents(),
-        plans: { cards: manifestPlanCards(PROVIDER_MANIFEST, planUsage), updatedAt: planUsage.updatedAt },
+        plans: { cards: planCards(planUsage), updatedAt: planUsage?.updatedAt ?? null },
         governors: governorControls(),
         machine: readMachineUsage(),
       });
@@ -2248,7 +1966,6 @@ const server = Bun.serve({
           provider: model.provider,
           modelId: model.modelId,
           thinkingLevel: destination.thinkingLevel,
-          executionTarget: destination.executionTarget,
         };
         const workspaceId = destination.workspaceId;
         const name = nextThreadName();
@@ -2257,10 +1974,10 @@ const server = Bun.serve({
         db.query(`
           INSERT INTO sessions(
             id,name,workspace_id,session_path,state,created_at,updated_at,last_error,
-            initial_provider,current_provider,initial_model,initial_thinking,execution_target,remote_cwd
-          ) VALUES(?,?,?,?,?,?,?,NULL,?,?,?,?,?,?)
-        `).run(id, name, workspaceId, null, "STOPPED", time, time, preset.provider, preset.provider, preset.modelId, preset.thinkingLevel,
-          preset.executionTarget, REMOTE_TARGETS.get(preset.executionTarget)?.cwd ?? null);
+            initial_provider,current_provider,initial_model,initial_thinking,profile_id
+          ) VALUES(?,?,?,?,?,?,?,NULL,?,?,?,?,?)
+        `).run(id, name, workspaceId, null, "STOPPED", time, time,
+          preset.provider, preset.provider, preset.modelId, preset.thinkingLevel, destination.id);
         const response = { session: publicSession(sessionRow.get(id)) };
         saveRequest(requestId, id, "create", 201, response);
         activate(sessionRow.get(id)).catch((e) => {
@@ -2661,7 +2378,7 @@ try {
 }
 
 refreshPlanUsageIfDue();
-for (const host of agentHosts) void host.refresh();
+void agentHost.refresh();
 for (const row of db.query("SELECT DISTINCT session_id FROM work_items WHERE state='queued'").all() as any[]) kickSession(row.session_id);
 
 // Sessions are on-demand rather than a permanent process fleet. Preserve the
@@ -2677,9 +2394,7 @@ const stateReconciler = setInterval(() => {
 
 // Agent counts stay warm even when nobody has the drawer open, so a host that
 // went unreachable is already reported the moment somebody looks.
-const workAgentRefresher = setInterval(() => {
-  for (const host of agentHosts) void host.refresh();
-}, WORK_AGENT_REFRESH_MS);
+const agentRefresher = setInterval(() => void agentHost.refresh(), AGENT_REFRESH_MS);
 
 // The nightly backup runs as root, outside this supervisor's mount namespace,
 // so it cannot reach the ledger to take a consistent copy the way it used to.
@@ -2730,7 +2445,7 @@ async function shutdown() {
   shuttingDown = true;
   clearInterval(reaper);
   clearInterval(stateReconciler);
-  clearInterval(workAgentRefresher);
+  clearInterval(agentRefresher);
   clearInterval(ledgerSnapshotter);
   for (const timer of retryTimers.values()) clearTimeout(timer);
   retryTimers.clear();
@@ -2749,8 +2464,7 @@ async function shutdown() {
   }
   await Promise.race([Promise.all(exits), Bun.sleep(3_000)]);
   server.stop();
-  for (const host of agentHosts) host.close();
-  orchestratorDb.close();
+  agentHost.close();
   db.close();
   process.exit(0);
 }

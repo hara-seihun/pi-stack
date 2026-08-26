@@ -7,7 +7,7 @@ const ui = {
   threadsTab: $("tab-threads"), agentsTab: $("tab-agents"), archivedTab: $("tab-archived"),
   threadsTabCount: $("tab-threads-count"), agentsTabCount: $("tab-agents-count"), archivedTabCount: $("tab-archived-count"),
   agentList: $("agent-list"), agentBanner: $("agent-banner"), composer: $("composer"),
-  connection: $("connection"), agentSummary: $("agent-summary"), workAgentSummary: $("work-agent-summary"), localAgentSummary: $("local-agent-summary"), planSummary: $("plan-summary"),
+  connection: $("connection"), agentSummary: $("agent-summary"), localAgentSummary: $("local-agent-summary"), planSummary: $("plan-summary"),
   usageSummary: $("usage-summary"), newThreadButtons: $("new-thread-buttons"),
   thunderControl: $("thunder-control"), openaiGovernorControl: $("openai-governor-control"), anthropicGovernorControl: $("anthropic-governor-control"),
   topTitle: $("top-title"), topState: $("top-state"), settingsButton: $("open-settings"),
@@ -1025,7 +1025,6 @@ function renderAgentLocation(destination, location, label) {
 }
 function renderAgents(agents) {
   const locations = new Map((agents?.locations || []).map((location) => [location.key, location]));
-  renderAgentLocation(ui.workAgentSummary, locations.get("work"), "WORK");
   renderAgentLocation(ui.localAgentSummary, locations.get("local"), "THIS MACHINE");
   // Every thread poll carries the same fleet-wide running count the agent list
   // returns, so the tab stays honest without fetching a list nobody is reading.

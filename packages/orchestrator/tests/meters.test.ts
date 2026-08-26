@@ -448,9 +448,11 @@ describe("anthropic meter sampler", () => {
     let headers: Headers | undefined;
     const sampler = new AnthropicMeterSampler(ledger, {
       agentDir,
-      fetch: async (_input, init) => {
+      fetch: async (input, init) => {
         headers = new Headers(init?.headers);
-        return usageResponse(ANTHROPIC_USAGE);
+        return String(input).endsWith("/profile")
+          ? usageResponse({ organization: { rate_limit_tier: "default_claude_max_20x" } })
+          : usageResponse(ANTHROPIC_USAGE);
       },
     });
 
@@ -464,6 +466,7 @@ describe("anthropic meter sampler", () => {
     const scoped = ledger.latestReading("anthropic-2", "anthropic-7d_oi");
     expect(scoped?.usedPercent).toBe(100);
     expect(scoped?.resetAt).toBe(Date.parse(WEEK_RESET));
+    expect(ledger.accounts().find((account) => account.id === "anthropic-2")?.capacityWeight).toBe(2);
   });
 
   it("polls an account whose scoped meter is missing though its headers are current", async () => {
@@ -498,7 +501,7 @@ describe("anthropic meter sampler", () => {
 
     expect((await sampler.sample())[0]?.outcome).toBe("recorded");
     expect(await sampler.sample()).toEqual([{ accountId: "anthropic-2", outcome: "not-due" }]);
-    expect(calls).toBe(1);
+    expect(calls).toBe(2);
   });
 
   it("never refreshes an expired credential; the window is recorded as a gap", async () => {

@@ -53,9 +53,7 @@ export default function threadContext(pi: ExtensionAPI) {
       if (!response.ok) throw new Error(text || `Thread initialization failed (${response.status})`);
       const details = JSON.parse(text) as object;
       pi.setActiveTools(pi.getActiveTools().filter((tool) => tool !== "initialize_thread"));
-      const alerts = process.env.PI_REMOTE_EXECUTION_TARGET === "local"
-        ? readAlerts(process.env.PI_REMOTE_ALERTS_INBOX)
-        : [];
+      const alerts = readAlerts(process.env.PI_REMOTE_ALERTS_INBOX);
       for (const alert of alerts) {
         if (alert.path && !alert.error) pendingAlerts.set(alert.path, {
           expected: alert.text.trimEnd() || "[empty alert]",
@@ -83,14 +81,11 @@ export default function threadContext(pi: ExtensionAPI) {
     const needsInitialize = Boolean(name && INITIAL_TITLE.test(name));
     if (needsInitialize && !hasInitialize) pi.setActiveTools([...active, "initialize_thread"]);
     if (!needsInitialize && hasInitialize) pi.setActiveTools(active.filter((tool) => tool !== "initialize_thread"));
-    const remoteHome = process.env.PI_REMOTE_EXECUTION_TARGET === "local"
-      ? undefined
-      : process.env.PI_REMOTE_WORK_HOME;
     const instructions = threadStateInstructions({
       name,
       prompt: event.prompt,
       fileTag: process.env.PI_REMOTE_FILE_TAG ?? "pi-remote-file",
-      home: remoteHome || process.env.HOME || homedir(),
+      home: process.env.HOME || homedir(),
     });
     return { systemPrompt: `${event.systemPrompt}\n\n${instructions}` };
   });

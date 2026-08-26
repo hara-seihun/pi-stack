@@ -559,6 +559,7 @@ async function accountCommand(ledger: Ledger, args: string[]): Promise<void> {
       const credential = credentialState(a.id);
       if (credential !== undefined) parts.push(credential);
       if (a.label !== undefined) parts.push(`label=${a.label}`);
+      if (a.capacityWeight !== 1) parts.push(`capacity_weight=${a.capacityWeight}`);
       if (a.accessUntil !== undefined) parts.push(`access_until=${new Date(a.accessUntil).toISOString()}`);
       if (a.cooldownUntil !== undefined && a.cooldownUntil > Date.now())
         parts.push(`cooling_until=${new Date(a.cooldownUntil).toISOString()}`);

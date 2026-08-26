@@ -148,9 +148,7 @@ Readings are spaced by a sampling interval, only percentages are recorded (the
 dollar "included usage" figure Cursor reports gates nothing — see
 [docs/provider-meter-notes.md](docs/provider-meter-notes.md)), and no sampler
 ever refreshes OAuth: an expired access token is recorded as a gap rather than
-a token-family revocation. Everything downstream — calibration,
-broker admission, Pi Remote's plan cards — then reads the same ledger facts it
-reads for header-instrumented providers.
+a token-family revocation. Everything downstream — calibration, broker admission, and Pi Remote's plan cards — reads those same ledger facts. The Anthropic profile poll also records each account's relative plan capacity, so combining percentages does not let a smaller plan count the same as a larger one.
 
 ## Ledger (`src/ledger/`)
 
@@ -162,11 +160,13 @@ apply retroactively to recorded history. Idle high-frequency readings are
 deduplicated to hourly anchors; old facts are prunable because calibration
 only weights recent windows.
 
-`run_session` records each run's Pi session. Usage joins through that relation
-so token consumption belongs to the lane that launched the session. The
-`run.session_id` root projection remains deliberately: a worker on the prior
-schema generation must still be able to finish while a successor starts during
-a rolling deploy. Current code never uses it for attribution.
+`run_session` records each run's Pi session. Usage joins through that relation so token consumption belongs to the lane that launched the session. The `run.session_id` root projection remains deliberately: a worker on the prior schema generation must still be able to finish while a successor starts during a rolling deploy. Current code never uses it for attribution.
+
+## Public API and catalog (`src/api.ts`)
+
+`pi-orchestrator/api` is the boundary for other stack processes. `OrchestratorClient` exposes account eligibility, governor controls, plan projections, active runs, and incremental transcript tails without exposing SQLite tables or transcript-file mechanics. It opens the same ledger on Node and Bun, so Pi Remote uses this API in-process.
+
+`ORCHESTRATOR_CATALOG` owns public model identities and plan-meter definitions. Tier configuration may name a catalog model directly (`"sol"`) or override only its thinking level (`{"id":"opus","thinking":"high"}`); private deployment models may still use a full provider/model candidate. Pi Remote derives thread choices and agent labels from the same catalog, and its plan cards render `OrchestratorClient.plans()` rather than querying providers or the ledger themselves.
 
 ## Tasks: demand, gates, tiers (`src/tasks/`)
 
@@ -758,8 +758,7 @@ Three consumption modes, all exported as `pi-orchestrator/voice`:
 
 - **Library** — `VoiceBroker.negotiate(sdp, instructions)` turns a WebRTC
   SDP offer into an answer on a pooled account. The ledger rows are an
-  injected `accounts` source, so any SQLite driver (node:sqlite, bun:sqlite)
-  works. pi-remote consumes it this way, in-process.
+  injected `accounts` source. Pi Remote supplies `OrchestratorClient.accounts()` and consumes the broker in-process.
 - **Daemon** — `pi-orchestrator voice-broker [--listen 127.0.0.1:2457]`
   serves `GET /v1/voice` and `POST /v1/voice/offer` (`{ sdp, instructions,
   voice?, model? }` → `{ sdp, account }`) on loopback. Processes without

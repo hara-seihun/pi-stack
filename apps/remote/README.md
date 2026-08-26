@@ -2,7 +2,7 @@
 
 A self-hosted web and Android controller for persistent [Pi](https://pi.dev) coding-agent sessions.
 
-Pi Remote keeps session state in SQLite, talks to Pi through RPC mode, survives browser or app disconnects, queues prompts durably, streams tool and model activity, and can combine agent activity from local and SSH-backed hosts. An optional identity router starts per-user supervisors whose private directories are mounted only while unlocked.
+Pi Remote keeps session state in SQLite, talks to Pi through RPC mode, survives browser or app disconnects, queues prompts durably, and streams tool and model activity. It observes autonomous agents through Pi Orchestrator's public read model rather than reading that service's SQLite tables. An optional identity router starts per-user supervisors whose private directories are mounted only while unlocked.
 
 The interactive view is Pi's provider-neutral model context, not a transcript reconstructed by Pi Remote. Pi Remote is installed as the final Pi package so `server/context-mirror.ts` runs after every other `context` handler. It stores the effective system prompt, active tool schemas, and `convertToLlm()` messages; streaming and finalized model messages update that same document. Both clients consume that document, so compaction removes exactly what Pi removed and loaded AGENTS.md content appears inside the system prompt Pi received. The web client renders it whole. Android keeps the complete display projection but builds a keyed tail window: instructions and tool definitions remain collapsed rows, recent conversation appears first, and older rows are created only when requested.
 
@@ -10,9 +10,11 @@ Android synchronizes through a resumable long poll rather than a timer. It reque
 
 The Files drawer tab browses the selected environment from `/`. It includes dotfiles and reads one directory per request. Android uses a recycled list for large directories. Folder taps navigate, file taps download without opening a preview, and a long press copies the absolute path.
 
-Each runtime also loads `server/thread-context.ts`. The extension offers initialization only while the durable session title is numeric, removes that control from named threads, and treats process or model changes as continuation rather than a new thread. It tells the agent how to offer downloadable files. A `<pi-remote-file src="/absolute/path" />` tag becomes a normal link in both clients, and the session-scoped endpoint streams the file from the thread's local or SSH execution target.
+Each runtime also loads `server/thread-context.ts`. The extension offers initialization only while the durable session title is numeric, removes that control from named threads, and treats process or model changes as continuation rather than a new thread. It tells the agent how to offer downloadable files. A `<pi-remote-file src="/absolute/path" />` tag becomes a normal link in both clients, and the session-scoped endpoint streams the file from the thread's host.
 
 On hosts that load `pi-runtime`'s state-compactor, the extension keeps previously read mandatory skill contents in the compacted provider view. It validates those contents against the current files and asks the agent to finish a paged read or refresh a changed file instead of silently retaining stale instructions.
+
+Model menus, autonomous-agent labels, and plan cards use the catalog exported by `pi-orchestrator/api`. Plan cards project the orchestrator's account and meter facts; Pi Remote carries no provider usage parser or duplicate provider manifest.
 
 ## Requirements
 

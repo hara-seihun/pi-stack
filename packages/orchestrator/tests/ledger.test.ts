@@ -102,7 +102,8 @@ describe("ledger", () => {
     const db = new DatabaseSync(path);
     db.exec(
       "DROP TABLE run_session; CREATE INDEX run_session ON run (session_id); " +
-        "ALTER TABLE run DROP COLUMN check_ins; PRAGMA user_version = 17",
+        "ALTER TABLE run DROP COLUMN check_ins; ALTER TABLE account DROP COLUMN capacity_weight; " +
+        "PRAGMA user_version = 17",
     );
     db.close();
 
@@ -131,7 +132,7 @@ describe("ledger", () => {
     migrated.close();
     expect(await exited, stderr).toBe(0);
     const verified = new DatabaseSync(path);
-    expect((verified.prepare("PRAGMA user_version").get() as { user_version: number }).user_version).toBe(20);
+    expect((verified.prepare("PRAGMA user_version").get() as { user_version: number }).user_version).toBe(21);
     expect(verified.prepare("SELECT check_ins, session_id FROM run LIMIT 1").all()).toEqual([]);
     expect(
       (verified.prepare("PRAGMA table_info(run_session)").all() as { name: string }[])

@@ -13,6 +13,7 @@ function account(partial: Partial<AccountRow> & { id: string }): AccountRow {
     lastBoundAt: undefined,
     fleetCredentialed: false,
     shared: false,
+    capacityWeight: 1,
     createdAt: 0,
     ...partial,
   };

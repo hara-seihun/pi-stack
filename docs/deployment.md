@@ -76,35 +76,9 @@ Converge Pi Remote reports environment ID `converge`. It has one profile rooted 
 
 Pi Remote listens on loopback. Android opens a pinned SSH connection and forwards its app-local port to that listener. A dedicated SSH account accepts the app key with forwarding restricted to `127.0.0.1:8788`; it cannot open a shell. No GCP firewall rule exposes the application port.
 
-## Work-thread cutover
+## Environment ownership
 
-Do not start Converge Pi Remote for ordinary use until the existing GMKtec work sessions have moved.
-
-1. Disable new Work starts on GMKtec.
-2. Settle active Work runs and take a verified supervisor database backup.
-3. Stop the Local supervisor and export the Converge execution target:
-
-   ```bash
-   bun /srv/pi/pi-remote/server/session-migration.ts export \
-     --db /home/kenan/data/pi-remote/supervisor.sqlite3 \
-     --data /home/kenan/data/pi-remote \
-     --target converge \
-     --bundle /home/kenan/data/pi-remote/converge-cutover
-   ```
-
-4. Copy the bundle to Converge over the existing SSH path.
-5. Keep Converge Pi Remote stopped and import before it creates a thread:
-
-   ```bash
-   bun /srv/pi/pi-remote/server/session-migration.ts import \
-     --db /home/kenan/.local/share/pi-remote/supervisor.sqlite3 \
-     --data /home/kenan/.local/share/pi-remote \
-     --bundle /home/kenan/converge-cutover
-   ```
-
-6. Start Converge Pi Remote. Verify list, transcript, continuation, archive, download, and completion behavior.
-7. Restore the backup into a temporary path and compare its session count and hashes. Then remove the source rows with `session-migration.ts remove-source` and delete their copied files.
-8. Remove the SSH work bridge and remote orchestrator reader from Local configuration and source.
+Work threads and autonomous work agents belong to Converge. Personal and Home threads belong to Local. Each Pi Remote reads only its host's orchestrator through `OrchestratorClient`; environment aggregation happens in Android, not through an SSH work bridge or a copied ledger.
 
 ## Release verification
 

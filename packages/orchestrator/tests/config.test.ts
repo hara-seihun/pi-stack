@@ -56,6 +56,33 @@ describe("operator config", () => {
     expect(brokerConfig({ ...CONFIG, maxConcurrentSessions: 24 }).maxConcurrentSessions).toBe(24);
   });
 
+  it("resolves shared catalog ids while preserving private model definitions", () => {
+    const dir = mkdtempSync(join(tmpdir(), "po-config-"));
+    const path = join(dir, "config.json");
+    writeFileSync(path, JSON.stringify({
+      ...CONFIG,
+      providers: {
+        ...CONFIG.providers,
+        anthropic: {
+          ...CONFIG.providers.anthropic,
+          meters: [{ id: "anthropic-5h", drainedBy: ["default:cost", "opus:cost", "fable:cost"] }],
+        },
+      },
+      tiers: {
+        light: ["luna"],
+        standard: [{ id: "opus", thinking: "high" }],
+        expert: [{ provider: "openai-codex", model: "private-preview" }],
+      },
+    }));
+    const loaded = loadConfig(path);
+    expect(loaded.providers.anthropic.meters[0]?.windowHours).toBe(5);
+    expect(loaded.tiers).toEqual({
+      light: [{ provider: "openai-codex", model: "gpt-5.6-luna", thinking: "max" }],
+      standard: [{ provider: "anthropic", model: "claude-opus-5", thinking: "high" }],
+      expert: [{ provider: "openai-codex", model: "private-preview" }],
+    });
+  });
+
   it("rejects a tier referencing an unconfigured provider", () => {
     const dir = mkdtempSync(join(tmpdir(), "po-config-"));
     const path = join(dir, "config.json");

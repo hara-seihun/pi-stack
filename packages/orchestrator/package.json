@@ -1,6 +1,6 @@
 {
   "name": "pi-orchestrator",
-  "version": "0.0.1",
+  "version": "0.1.0",
   "description": "Fleet orchestration for pi agents: multi-account calibration, quota governance, task scheduling",
   "type": "module",
   "license": "MIT",
@@ -13,6 +13,11 @@
     "src"
   ],
   "exports": {
+    "./api": {
+      "types": "./src/api.ts",
+      "bun": "./src/api.ts",
+      "default": "./dist/api.js"
+    },
     "./boost": {
       "types": "./src/boost.ts",
       "bun": "./src/boost.ts",

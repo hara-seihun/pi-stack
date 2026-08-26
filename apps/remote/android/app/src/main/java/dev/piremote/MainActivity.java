@@ -84,7 +84,7 @@ public class MainActivity extends Activity {
     private FrameLayout root;
     private LinearLayout drawer, settingsDrawer, planSummary;
     private View drawerScrim, settingsScrim, detail, emptyBox;
-    private TextView connection, workAgentSummary, localAgentSummary, usageSummary, empty, topTitle, topState;
+    private TextView connection, localAgentSummary, usageSummary, empty, topTitle, topState;
     private TextView settingsThread, settingsActivity, settingsCwd, queueStatus;
     private String machineUsageText = "CPU — · GPU — · RAM — · DISK —", machineUsageDescription = machineUsageText;
     private int machineUsageColor = MUTED;
@@ -960,14 +960,6 @@ public class MainActivity extends Activity {
             machineControls.addView(control, params);
         }
         footer.addView(machineControls, new LinearLayout.LayoutParams(-1, dp(44)));
-        LinearLayout workAgentRow = new LinearLayout(this); workAgentRow.setGravity(Gravity.CENTER_VERTICAL);
-        ImageView workAgentIcon = new ImageView(this); workAgentIcon.setImageResource(R.drawable.ic_work); workAgentIcon.setAlpha(0.72f);
-        workAgentRow.addView(workAgentIcon, new LinearLayout.LayoutParams(dp(14), dp(14)));
-        workAgentSummary = text("—", 11, true); workAgentSummary.setTextColor(MUTED);
-        workAgentSummary.setSingleLine(true); workAgentSummary.setEllipsize(TextUtils.TruncateAt.END);
-        LinearLayout.LayoutParams workAgentTextParams = new LinearLayout.LayoutParams(0, dp(28), 1);
-        workAgentTextParams.leftMargin = dp(7); workAgentRow.addView(workAgentSummary, workAgentTextParams);
-        footer.addView(workAgentRow, new LinearLayout.LayoutParams(-1, dp(28)));
         LinearLayout localAgentRow = new LinearLayout(this); localAgentRow.setGravity(Gravity.CENTER_VERTICAL);
         ImageView localAgentIcon = new ImageView(this); localAgentIcon.setImageResource(R.drawable.ic_personal); localAgentIcon.setAlpha(0.72f);
         localAgentRow.addView(localAgentIcon, new LinearLayout.LayoutParams(dp(14), dp(14)));
@@ -1638,7 +1630,6 @@ public class MainActivity extends Activity {
     }
 
     private void renderAgents(JSONObject agents) {
-        renderAgentLocation(workAgentSummary, agentLocation(agents, "work"), "WORK");
         renderAgentLocation(localAgentSummary, agentLocation(agents, "local"), "THIS MACHINE");
         if (agents != null) {
             JSONObject sources = agents.optJSONObject("sources");

@@ -1,5 +1,6 @@
 import { afterAll, beforeAll, describe, expect, setDefaultTimeout, test } from "bun:test";
 import { Database } from "bun:sqlite";
+import { OrchestratorClient } from "pi-orchestrator/api";
 import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
@@ -9,7 +10,6 @@ const BOOSTED_MULTIPLIER = 10;
 const root = mkdtempSync(join(tmpdir(), "pi-remote-state-test-"));
 const fakePi = join(root, "fake-pi.py");
 const fakeAudio = join(root, "fake-audio.py");
-const fakeSsh = join(root, "ssh");
 const fakeAudioState = join(root, "fake-audio-state.json");
 const fakeLaunch = join(root, "fake-launch.json");
 const fakeRpcLog = join(root, "fake-rpc.jsonl");
@@ -17,9 +17,7 @@ const fakeChildPid = join(root, "fake-child.pid");
 const fakeCrashMarker = join(root, "fake-crash.marker");
 const fakeRestartMarker = join(root, "fake-restart.marker");
 const fakeOrchestratorDb = join(root, "orchestrator.sqlite3");
-const fakeWorkOrchestratorDb = join(root, "work-orchestrator.sqlite3");
 const fakeAgentRuns = join(root, "agent-runs");
-const fakeWorkAgentRuns = join(root, "work-agent-runs");
 const port = 20_000 + Math.floor(Math.random() * 10_000);
 const base = `http://127.0.0.1:${port}`;
 let server: ReturnType<typeof Bun.spawn>;
@@ -78,51 +76,37 @@ async function startServer() {
       PI_FAKE_RESTART_MARKER: fakeRestartMarker,
       PI_REMOTE_ORCHESTRATOR_DB: fakeOrchestratorDb,
       PI_ORCHESTRATOR_AUTH: join(root, "agent", "auth.json"),
-      PI_REMOTE_WORK_ORCHESTRATOR_DB: fakeWorkOrchestratorDb,
-      PI_REMOTE_WORK_ORCHESTRATOR_RUNS: fakeWorkAgentRuns,
       PI_REMOTE_ORCHESTRATOR_RUNS: fakeAgentRuns,
       PI_REMOTE_LOCAL_AGENT_MAX_AGE_MS: "0",
-      PI_REMOTE_WORK_AGENT_MAX_AGE_MS: "1000",
       PI_REMOTE_ENVIRONMENT_ID: "local",
       PI_REMOTE_ENVIRONMENT_NAME: "Local",
       PI_REMOTE_REQUIRES_UNLOCK: "true",
       PI_REMOTE_PRIVATE_ID: "private",
       PI_REMOTE_PRIVATE_NAME: "Private",
       PI_REMOTE_PRIVATE_DIR: join(root, "private"),
-      PI_REMOTE_DESTINATIONS: "work,personal,home",
-      PI_REMOTE_TARGETS: JSON.stringify([
-        { id: "converge", name: "Cloud", ssh: "cloud-host", home: root, cwd: join(root, "cloud") },
-      ]),
+      PI_REMOTE_DESTINATIONS: "personal,home",
       PI_REMOTE_WORKSPACES: JSON.stringify([
         { id: "home", name: "Home", path: join(root, "home") },
         { id: "private", name: "Private", path: join(root, "private") },
         { id: "pi-remote", name: "Pi Remote", path: join(import.meta.dir, "..") },
       ]),
       PI_REMOTE_THREAD_DESTINATIONS: JSON.stringify([
-        { id: "work", label: "WORK", icon: "converge", accent: "#3574ad", workspaceId: "home", executionTarget: "converge", thinkingLevel: "high", models: [], defaultModel: "sol" },
-        { id: "personal", label: "PERSONAL", icon: "personal", accent: "#a371f7", workspaceId: "private", executionTarget: "local", thinkingLevel: "low", models: ["sol", "opus", "fable"], defaultModel: "fable" },
-        { id: "home", label: "HOME", icon: "house", accent: "#3fb950", workspaceId: "home", executionTarget: "local", thinkingLevel: "high", models: ["sol", "fable", "opus"], defaultModel: "opus" },
+        { id: "personal", label: "PERSONAL", icon: "personal", accent: "#a371f7", workspaceId: "private", thinkingLevel: "low", models: ["sol", "opus", "fable"], defaultModel: "fable" },
+        { id: "home", label: "HOME", icon: "house", accent: "#3fb950", workspaceId: "home", thinkingLevel: "high", models: ["sol", "fable", "opus"], defaultModel: "opus" },
       ]),
-      PI_REMOTE_WORK_AGENT_NAME: "Cloud",
     },
   });
   await waitFor(() => fetch(base + "/v1/health").then((response) => response.ok).catch(() => false), Boolean);
 }
 
 beforeAll(async () => {
-  await Bun.write(fakeSsh, `#!/usr/bin/env bash
-host="$1"
-shift
-exec bash -c "$1"
-`);
-  chmodSync(fakeSsh, 0o755);
   await Bun.write(fakePi, `#!/usr/bin/env python3
 import json, os, subprocess, sys, time
 provider = sys.argv[sys.argv.index('--provider') + 1] if '--provider' in sys.argv else 'anthropic'
 model_id = sys.argv[sys.argv.index('--model') + 1] if '--model' in sys.argv else 'claude-fable-5'
 thinking_level = sys.argv[sys.argv.index('--thinking') + 1] if '--thinking' in sys.argv else 'off'
 with open(os.environ['PI_FAKE_LAUNCH'], 'w') as launch:
- json.dump({'argv': sys.argv, 'pid': os.getpid(), 'sessionId': os.environ.get('PI_REMOTE_SESSION_ID'), 'serverUrl': os.environ.get('PI_REMOTE_SERVER_URL'), 'serviceTierFile': os.environ.get('PI_REMOTE_SERVICE_TIER_FILE'), 'executionTarget': os.environ.get('PI_REMOTE_EXECUTION_TARGET'), 'workSsh': os.environ.get('PI_REMOTE_WORK_SSH'), 'workCwd': os.environ.get('PI_REMOTE_WORK_CWD'), 'agentDir': os.environ.get('PI_CODING_AGENT_DIR'), 'offline': os.environ.get('PI_OFFLINE')}, launch)
+ json.dump({'argv': sys.argv, 'pid': os.getpid(), 'sessionId': os.environ.get('PI_REMOTE_SESSION_ID'), 'serverUrl': os.environ.get('PI_REMOTE_SERVER_URL'), 'serviceTierFile': os.environ.get('PI_REMOTE_SERVICE_TIER_FILE'), 'agentDir': os.environ.get('PI_CODING_AGENT_DIR'), 'offline': os.environ.get('PI_OFFLINE')}, launch)
 streaming = False
 compacting = False
 last = ''
@@ -303,18 +287,15 @@ else: sys.exit(2)
   chmodSync(fakeAudio, 0o700);
   // Both ledgers are pi-orchestrator's: every agent host runs the same
   // orchestrator, and the work host below is read exactly like this one.
-  const orchestrator = new Database(fakeOrchestratorDb, { create: true, strict: true });
+  new OrchestratorClient({ ledgerPath: fakeOrchestratorDb, runsRoot: fakeAgentRuns }).close();
+  const orchestrator = new Database(fakeOrchestratorDb, { strict: true });
   orchestrator.exec(`
-    CREATE TABLE run(id TEXT PRIMARY KEY,task_id TEXT NOT NULL,tier TEXT,account_id TEXT,state TEXT NOT NULL,
-      started_at INTEGER NOT NULL DEFAULT 0,ended_at INTEGER,detail TEXT,productive INTEGER,complete INTEGER,
-      provider TEXT,model TEXT,thinking TEXT);
-    CREATE TABLE control(key TEXT PRIMARY KEY,value TEXT NOT NULL);
-    CREATE TABLE account(id TEXT PRIMARY KEY,provider TEXT NOT NULL,label TEXT,access_until INTEGER,
-      created_at INTEGER NOT NULL DEFAULT 0,cooldown_until INTEGER,last_bound_at INTEGER,
-      fleet_credentialed INTEGER NOT NULL DEFAULT 0);
-    INSERT INTO account(id,provider) VALUES('openai-codex','openai-codex'),('anthropic','anthropic');
+    INSERT INTO account(id,provider,created_at) VALUES
+      ('openai-codex','openai-codex',0),('anthropic','anthropic',0);
   `);
-  const insertRun = orchestrator.query("INSERT INTO run(id,task_id,state,model) VALUES(?,?,?,?)");
+  const insertRun = orchestrator.query(`INSERT INTO run
+    (id,task_id,tier,account_id,state,started_at,provider,model)
+    VALUES(?,?,\"standard\",\"openai-codex\",?,0,\"openai-codex\",?)`);
   for (let index = 0; index < 122; index++) insertRun.run(`sol-${index}`, "sol-task", "running", "openai-codex/gpt-5.6-sol");
   insertRun.run("opus-mixed", "sol-task", "running", "anthropic/claude-opus-5");
   for (let index = 0; index < 45; index++) insertRun.run(`luna-${index}`, "luna-task", "running", "openai-codex/gpt-5.6-luna");
@@ -333,23 +314,7 @@ else: sys.exit(2)
     { seq: 3, time: "2026-08-18T00:00:03.000Z", type: "tool_end", payload: { toolCallId: "t1", name: "bash", output: "ledger.sqlite3", error: false } },
   ].map((event) => JSON.stringify(event)).join("\n") + "\n");
   writeFileSync(join(fakeAgentRuns, "sol-0", "live.json"), JSON.stringify({ activity: "THINKING", liveText: "", liveThinking: "weighing options" }));
-  const workOrchestrator = new Database(fakeWorkOrchestratorDb, { create: true, strict: true });
-  workOrchestrator.exec(`
-    CREATE TABLE run(id TEXT PRIMARY KEY,task_id TEXT NOT NULL,state TEXT NOT NULL,
-      started_at INTEGER NOT NULL DEFAULT 0,ended_at INTEGER,detail TEXT,productive INTEGER,
-      provider TEXT,model TEXT,thinking TEXT);
-  `);
-  const insertWorkRun = workOrchestrator.query("INSERT INTO run(id,task_id,state,started_at,provider,model,thinking) VALUES(?,?,?,?,?,?,?)");
-  for (let index = 0; index < 6; index++) {
-    insertWorkRun.run(`work-sol-${index}`, "repair-lane", "running", 1000, "openai-codex-4", "openai-codex/gpt-5.6-sol", "high");
-  }
-  workOrchestrator.close();
-  mkdirSync(join(fakeWorkAgentRuns, "work-sol-0"), { recursive: true });
-  writeFileSync(join(fakeWorkAgentRuns, "work-sol-0", "events.jsonl"),
-    `${JSON.stringify({ seq: 1, time: "2026-08-21T00:00:00.000Z", type: "user", payload: { text: "repair the lane" } })}\n`);
-  writeFileSync(join(fakeWorkAgentRuns, "work-sol-0", "live.json"),
-    JSON.stringify({ activity: "TOOL", liveText: "", liveThinking: "" }));
-  for (const directory of [join(root, "home"), join(root, "private"), join(root, "cloud")]) {
+  for (const directory of [join(root, "home"), join(root, "private")]) {
     mkdirSync(directory, { recursive: true });
   }
   // Shared Codex custody fixture: the ledger above registers openai-codex,
@@ -447,47 +412,43 @@ describe("web and supervisor integration", () => {
     expect(status.value).toEqual({ enabled: true, accountCount: 1, model: "gpt-live-1-codex", voice: "cove" });
   });
 
-  test("separates work and this-machine active model counts", async () => {
+  test("reports this machine's active model counts", async () => {
     const listed = await api("GET", "/v1/sessions");
     expect(listed.value.agents).toMatchObject({
-      total: 179,
-      sources: { piRemote: 0, orchestrator: 179, localOrchestrator: 173, workOrchestrator: 6 },
+      total: 173,
+      sources: { piRemote: 0, orchestrator: 173 },
       groups: [
         { key: "pi-remote", label: "REMOTE", count: 0 },
-        { key: "orchestrator", label: "ORCH", count: 179 },
-        { key: "sol", label: "SOL", count: 128 },
+        { key: "orchestrator", label: "ORCH", count: 173 },
+        { key: "sol", label: "SOL", count: 122 },
         { key: "luna", label: "LUNA", count: 45 },
         { key: "pro", label: "PRO", count: 4 },
         { key: "opus", label: "OPUS", count: 1 },
         { key: "grok", label: "GROK", count: 1 },
       ],
       models: [
-        { key: "sol", label: "SOL", count: 128 },
+        { key: "sol", label: "SOL", count: 122 },
         { key: "luna", label: "LUNA", count: 45 },
         { key: "pro", label: "PRO", count: 4 },
         { key: "opus", label: "OPUS", count: 1 },
         { key: "grok", label: "GROK", count: 1 },
       ],
-      locations: [
-        { key: "work", label: "WORK", name: "Cloud", total: 6, models: [{ key: "sol", label: "SOL", count: 6 }], error: null },
-        { key: "local", label: "THIS MACHINE", name: "This machine", total: 173, models: [
-          { key: "sol", label: "SOL", count: 122 },
-          { key: "luna", label: "LUNA", count: 45 },
-          { key: "pro", label: "PRO", count: 4 },
-          { key: "opus", label: "OPUS", count: 1 },
-          { key: "grok", label: "GROK", count: 1 },
-        ], error: null },
-      ],
+      locations: [{ key: "local", label: "THIS MACHINE", name: "This machine", total: 173, models: [
+        { key: "sol", label: "SOL", count: 122 },
+        { key: "luna", label: "LUNA", count: 45 },
+        { key: "pro", label: "PRO", count: 4 },
+        { key: "opus", label: "OPUS", count: 1 },
+        { key: "grok", label: "GROK", count: 1 },
+      ], error: null }],
     });
   });
 
-  test("lists every host's working agents for observation, each naming its host", async () => {
+  test("lists this host's working agents for observation", async () => {
     const listed = await api("GET", "/v1/agents/runs");
     expect(listed.status).toBe(200);
-    expect(listed.value.running).toBe(179);
+    expect(listed.value.running).toBe(173);
     expect(listed.value.hosts).toEqual([
       { key: "local", label: "THIS MACHINE", name: "This machine", running: 173, updatedAt: expect.any(String), error: null },
-      { key: "work", label: "WORK", name: "Cloud", running: 6, updatedAt: expect.any(String), error: null },
     ]);
     const observable = listed.value.runs.find((run: any) => run.id === "local:sol-0");
     expect(observable).toMatchObject({
@@ -495,13 +456,6 @@ describe("web and supervisor integration", () => {
       taskId: "sol-task", status: "running", label: "SOL", provider: "openai-codex-3",
       thinking: "xhigh", observable: true, activity: "THINKING",
     });
-    // The work machine's own orchestrator agents are in the same list, told
-    // apart by their host rather than kept on a separate screen.
-    expect(listed.value.runs.find((run: any) => run.id === "work:work-sol-0")).toMatchObject({
-      host: "work", hostLabel: "WORK", hostName: "Cloud", runId: "work-sol-0",
-      taskId: "repair-lane", status: "running", provider: "openai-codex-4", observable: true, activity: "TOOL",
-    });
-    expect(listed.value.runs.filter((run: any) => run.host === "work").length).toBe(6);
     // Settled runs never appear in the list, but stay observable by id so a run
     // that finishes while it is open does not vanish from the client.
     expect(listed.value.runs.every((run: any) => run.status === "running")).toBe(true);
@@ -531,14 +485,6 @@ describe("web and supervisor integration", () => {
     expect((await api("POST", "/v1/agents/runs/local:sol-0/events", {})).status).toBe(404);
   });
 
-  test("a work agent's transcript is observed through the same read-only stream", async () => {
-    const observed = await api("GET", "/v1/agents/runs/work:work-sol-0/events");
-    expect(observed.status).toBe(200);
-    expect(observed.value.run).toMatchObject({ id: "work:work-sol-0", host: "work", taskId: "repair-lane" });
-    expect(observed.value.events.map((event: any) => event.text)).toEqual(["repair the lane"]);
-    expect(Date.now() - statSync(join(fakeWorkAgentRuns, "work-sol-0", "watch")).mtimeMs).toBeLessThan(10_000);
-  });
-
   test("merges working Pi Remote runtimes with hosted agents", async () => {
     const id = await createThread("home", "sol");
     await api("POST", `/v1/sessions/${id}/prompt`, {
@@ -549,12 +495,12 @@ describe("web and supervisor integration", () => {
       (value) => value?.sources?.piRemote === 1,
     );
     expect(agents).toMatchObject({
-      total: 180,
-      sources: { piRemote: 1, orchestrator: 179 },
+      total: 174,
+      sources: { piRemote: 1, orchestrator: 173 },
       groups: [
         { key: "pi-remote", label: "REMOTE", count: 1 },
-        { key: "orchestrator", label: "ORCH", count: 179 },
-        { key: "sol", label: "SOL", count: 129 },
+        { key: "orchestrator", label: "ORCH", count: 173 },
+        { key: "sol", label: "SOL", count: 123 },
         { key: "luna", label: "LUNA", count: 45 },
         { key: "pro", label: "PRO", count: 4 },
         { key: "opus", label: "OPUS", count: 1 },
@@ -608,8 +554,8 @@ describe("web and supervisor integration", () => {
       for (const row of seeded) {
         ledger.query(`
           INSERT INTO sessions(id,name,workspace_id,session_path,state,created_at,updated_at,archived_at,
-            initial_provider,current_provider,initial_model,initial_thinking,execution_target)
-          VALUES(?,?,'openai',NULL,'STOPPED',?,?,?,'openai','openai','gpt-5.1-codex-max','high','local')
+            initial_provider,current_provider,initial_model,initial_thinking,profile_id)
+          VALUES(?,?,'openai',NULL,'STOPPED',?,?,?,'openai','openai','gpt-5.1-codex-max','high','home')
         `).run(row.id, row.name, row.archivedAt, row.archivedAt, row.archivedAt);
       }
       const listed = await api("GET", "/v1/sessions");
@@ -645,7 +591,6 @@ describe("web and supervisor integration", () => {
     const markup = await page.text();
     expect(markup).toContain("id=\"conversation\"");
     expect(markup).toContain("id=\"agent-summary\"");
-    expect(markup).toContain("id=\"work-agent-summary\"");
     expect(markup).toContain("id=\"local-agent-summary\"");
     expect(markup).toContain("id=\"plan-summary\"");
     expect(markup).not.toContain("id=\"openai-plan\"");
@@ -984,7 +929,7 @@ describe("web and supervisor integration", () => {
     const listed = await api("GET", "/v1/sessions");
     const session = listed.value.sessions.find((candidate: any) => candidate.id === id);
     expect(session).toMatchObject({
-      environment: "local",
+      environment: "personal",
       workspaceName: "Private",
       cwd: join(root, "private"),
       provider: "anthropic",
@@ -1042,7 +987,7 @@ describe("web and supervisor integration", () => {
     expect((await fetch(`${base}/v1/files/download?path=relative`)).status).toBe(400);
   });
 
-  test("downloads files from the selected session execution target", async () => {
+  test("downloads files from a thread's local workspace", async () => {
     const localId = await createThread("home", "sol");
     const localPath = join(root, "download report.txt");
     writeFileSync(localPath, "local report");
@@ -1059,19 +1004,9 @@ describe("web and supervisor integration", () => {
       expect(head.headers.get("content-length")).toBe(String("local report".length));
       expect(await head.text()).toBe("");
 
-      const workId = await createThread("work");
-      const remotePath = join(root, "cloud", "remote result.json");
-      mkdirSync(join(root, "cloud"), { recursive: true });
-      writeFileSync(remotePath, '{"source":"ssh"}');
-      const remote = await fetch(`${base}/v1/sessions/${workId}/files?path=${encodeURIComponent(remotePath)}`);
-      expect(remote.status).toBe(200);
-      expect(remote.headers.get("content-type")).toContain("application/json");
-      expect(remote.headers.get("content-disposition")).toContain('filename="remote result.json"');
-      expect(await remote.text()).toBe('{"source":"ssh"}');
-
       const relative = await fetch(`${base}/v1/sessions/${localId}/files?path=report.txt`);
       expect(relative.status).toBe(400);
-      const missing = await fetch(`${base}/v1/sessions/${workId}/files?path=${encodeURIComponent(join(root, "missing.txt"))}`);
+      const missing = await fetch(`${base}/v1/sessions/${localId}/files?path=${encodeURIComponent(join(root, "missing.txt"))}`);
       expect(missing.status).toBe(404);
       const unknown = await fetch(`${base}/v1/sessions/00000000-0000-0000-0000-000000000000/files?path=${encodeURIComponent(localPath)}`);
       expect(unknown.status).toBe(404);
@@ -1100,17 +1035,12 @@ describe("web and supervisor integration", () => {
     const destinations = starts.value.destinations;
     // Rarest first: the menu grows toward the button, so the everyday choice lands under
     // the finger. Home then Opus is two taps in one place.
-    expect(destinations.map((entry: any) => entry.id)).toEqual(["work", "personal", "home"]);
-    expect(destinations[2].models.map((model: any) => model.id)).toEqual(["sol", "fable", "opus"]);
-    expect(destinations[1].models.map((model: any) => model.id)).toEqual(["sol", "opus", "fable"]);
-    // The work machine has no Anthropic access, so it offers no model step at all.
-    expect(destinations[0].models).toEqual([]);
-    const refused = await api("POST", "/v1/sessions", { requestId: crypto.randomUUID(), destination: "work", model: "opus" });
-    expect(refused.status).toBe(400);
-    expect(refused.value.error).toBe("Model not available at this destination");
+    expect(destinations.map((entry: any) => entry.id)).toEqual(["personal", "home"]);
+    expect(destinations[1].models.map((model: any) => model.id)).toEqual(["sol", "fable", "opus"]);
+    expect(destinations[0].models.map((model: any) => model.id)).toEqual(["sol", "opus", "fable"]);
   });
 
-  // Both clients resolve a glyph by the name the manifest gives it, and both fail quietly:
+  // Both clients resolve a glyph by the name the catalog gives it, and both fail quietly:
   // the web serves nothing and Android falls back to a generic mark. A named glyph that no
   // client can draw is therefore invisible until someone opens the menu.
   test("every choice names a glyph both clients can draw", async () => {
@@ -1122,30 +1052,6 @@ describe("web and supervisor integration", () => {
       expect(existsSync(join(source, "web", `${icon}.svg`))).toBe(true);
       expect(existsSync(join(source, "android/app/src/main/res/drawable", `ic_${icon}.xml`))).toBe(true);
     }
-  });
-
-  test("creates persistent Cloud sessions on the cloud machine with Sol high", async () => {
-    const id = await createThread("work");
-    const listed = await api("GET", "/v1/sessions");
-    const session = listed.value.sessions.find((candidate: any) => candidate.id === id);
-    expect(session).toMatchObject({
-      environment: "converge",
-      workspaceName: "Cloud",
-      cwd: join(root, "cloud"),
-      provider: "openai",
-    });
-    const launch = JSON.parse(readFileSync(fakeLaunch, "utf8"));
-    expect(launch).toMatchObject({
-      executionTarget: "converge",
-      workSsh: "cloud-host",
-      workCwd: join(root, "cloud"),
-    });
-    expect(launch.argv).toEqual(expect.arrayContaining([
-      "--provider", "openai-codex", "--model", "gpt-5.6-sol", "--thinking", "high",
-      "--extension", join(import.meta.dir, "thread-context.ts"),
-      "--no-context-files", "--extension", join(import.meta.dir, "work-remote.ts"),
-    ]));
-    expect(launch.argv).not.toContain(join(import.meta.dir, "context-mirror.ts"));
   });
 
   test("rolls account aliases into common and uncommon model groups", async () => {

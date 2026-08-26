@@ -1,18 +1,36 @@
 import { expect, test } from "bun:test";
+import type { ObservedRun } from "pi-orchestrator/api";
 import { parseRunKey, runKey, summarizeAgentRun, tailRange, TranscriptBuffer } from "./agent-runs";
-import { loadProviderManifest } from "./provider-manifest";
 
-const MANIFEST = loadProviderManifest();
+const observed = (values: Partial<ObservedRun> & Pick<ObservedRun, "id" | "taskId" | "state" | "startedAt">): ObservedRun => ({
+  tier: "standard",
+  accountId: "account",
+  model: "gpt-5.6-sol",
+  provider: "openai-codex",
+  thinking: undefined,
+  claimedAt: undefined,
+  runnerId: undefined,
+  endedAt: undefined,
+  heartbeatAt: undefined,
+  progressAt: undefined,
+  abortRequested: false,
+  productive: undefined,
+  complete: undefined,
+  detail: undefined,
+  observable: false,
+  live: null,
+  ...values,
+});
 const LOCAL = { key: "local", label: "THIS MACHINE", name: "This machine" };
 const WORK = { key: "work", label: "WORK", name: "Cloud" };
 
 test("a run carries the host that owns it, and is addressed by both together", () => {
-  const row = {
-    id: "sol-0", task_id: "research-frontier", state: "running", started_at: 1000,
+  const row = observed({
+    id: "sol-0", taskId: "research-frontier", state: "running", startedAt: 1000,
     provider: "openai-codex", model: "gpt-5.6-sol", thinking: "xhigh",
     observable: true, live: { activity: "THINKING" },
-  };
-  const local = summarizeAgentRun(row, MANIFEST, LOCAL, 5000);
+  });
+  const local = summarizeAgentRun(row, LOCAL, 5000);
   expect(local).toMatchObject({
     id: "local:sol-0", host: "local", hostName: "This machine", runId: "sol-0",
     taskId: "research-frontier", status: "running", activity: "THINKING", observable: true, elapsedMs: 4000,
@@ -20,7 +38,7 @@ test("a run carries the host that owns it, and is addressed by both together", (
   expect(local.label.length).toBeGreaterThan(0);
 
   // The same run id on another host is a different agent, and says so.
-  const work = summarizeAgentRun(row, MANIFEST, WORK, 5000);
+  const work = summarizeAgentRun(row, WORK, 5000);
   expect(work.id).toBe("work:sol-0");
   expect(work.hostName).toBe("Cloud");
   expect(parseRunKey(work.id)).toEqual({ host: "work", runId: "sol-0" });
@@ -38,13 +56,13 @@ test("a run key that names no host, or escapes its runs directory, is refused", 
 
 test("a settled run reports its outcome rather than an activity", () => {
   const done = summarizeAgentRun(
-    { id: "done", task_id: "t", state: "done", started_at: 700, ended_at: 750, model: "gpt-5.6-luna", detail: "task complete", productive: 1 },
-    MANIFEST, LOCAL, 5000,
+    observed({ id: "done", taskId: "t", state: "done", startedAt: 700, endedAt: 750, model: "gpt-5.6-luna", detail: "task complete", productive: true }),
+    LOCAL, 5000,
   );
   expect(done).toMatchObject({ id: "local:done", status: "done", activity: "IDLE", summary: "task complete", productive: true, elapsedMs: 50 });
   const failed = summarizeAgentRun(
-    { id: "bad", task_id: "t", state: "error", started_at: 700, ended_at: 750, model: "gpt-5.6-luna", detail: "provider refused" },
-    MANIFEST, LOCAL, 5000,
+    observed({ id: "bad", taskId: "t", state: "error", startedAt: 700, endedAt: 750, model: "gpt-5.6-luna", detail: "provider refused" }),
+    LOCAL, 5000,
   );
   expect(failed).toMatchObject({ status: "error", error: "provider refused", summary: null });
 });

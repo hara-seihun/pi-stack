@@ -17,8 +17,7 @@ CREATE TABLE IF NOT EXISTS sessions (
   current_provider TEXT,
   initial_model TEXT,
   initial_thinking TEXT,
-  execution_target TEXT NOT NULL DEFAULT 'local',
-  remote_cwd TEXT,
+  profile_id TEXT NOT NULL,
   revision INTEGER NOT NULL DEFAULT 0,
   service_tier TEXT NOT NULL DEFAULT 'default',
   archived_at TEXT
@@ -75,7 +74,6 @@ CREATE INDEX IF NOT EXISTS work_items_session_state ON work_items(session_id, st
 CREATE TABLE IF NOT EXISTS uploads (
   path TEXT PRIMARY KEY,
   session_id TEXT NOT NULL REFERENCES sessions(id) ON DELETE CASCADE,
-  environment TEXT NOT NULL,
   created_at TEXT NOT NULL
 );
 CREATE INDEX IF NOT EXISTS uploads_session ON uploads(session_id);
@@ -96,9 +94,25 @@ CREATE TABLE IF NOT EXISTS metadata (
 );
 `);
   const sessionColumns = new Set((db.query("PRAGMA table_info(sessions)").all() as any[]).map((column) => String(column.name)));
-  for (const [name, type] of [["initial_provider", "TEXT"], ["current_provider", "TEXT"], ["initial_model", "TEXT"], ["initial_thinking", "TEXT"], ["execution_target", "TEXT NOT NULL DEFAULT 'local'"], ["remote_cwd", "TEXT"], ["revision", "INTEGER NOT NULL DEFAULT 0"], ["service_tier", "TEXT NOT NULL DEFAULT 'default'"], ["archived_at", "TEXT"]]) {
+  for (const [name, type] of [["initial_provider", "TEXT"], ["current_provider", "TEXT"], ["initial_model", "TEXT"], ["initial_thinking", "TEXT"], ["revision", "INTEGER NOT NULL DEFAULT 0"], ["service_tier", "TEXT NOT NULL DEFAULT 'default'"], ["archived_at", "TEXT"]]) {
     if (!sessionColumns.has(name)) db.exec(`ALTER TABLE sessions ADD COLUMN ${name} ${type}`);
   }
+  if (!sessionColumns.has("profile_id")) {
+    db.exec("ALTER TABLE sessions ADD COLUMN profile_id TEXT");
+    if (sessionColumns.has("execution_target")) {
+      db.exec(`UPDATE sessions SET profile_id = CASE
+        WHEN execution_target <> 'local' THEN execution_target
+        WHEN workspace_id = 'home' THEN 'home'
+        WHEN workspace_id IN ('hara', 'sibyl', 'private') THEN 'personal'
+        ELSE workspace_id END`);
+    } else {
+      db.exec("UPDATE sessions SET profile_id = workspace_id");
+    }
+  }
+  if (sessionColumns.has("remote_cwd")) db.exec("ALTER TABLE sessions DROP COLUMN remote_cwd");
+  if (sessionColumns.has("execution_target")) db.exec("ALTER TABLE sessions DROP COLUMN execution_target");
+  const uploadColumns = new Set((db.query("PRAGMA table_info(uploads)").all() as any[]).map((column) => String(column.name)));
+  if (uploadColumns.has("environment")) db.exec("ALTER TABLE uploads DROP COLUMN environment");
   const workColumns = new Set((db.query("PRAGMA table_info(work_items)").all() as any[]).map((column) => String(column.name)));
   if (!workColumns.has("delivery")) db.exec("ALTER TABLE work_items ADD COLUMN delivery TEXT NOT NULL DEFAULT 'followUp'");
   if (!workColumns.has("resume")) db.exec("ALTER TABLE work_items ADD COLUMN resume INTEGER NOT NULL DEFAULT 0");
