@@ -1109,11 +1109,12 @@ describe("web and supervisor integration", () => {
       () => api("GET", `/v1/sessions/${id}`).then((result) => result.value.session),
       (session) => session.queuedMessages?.some((message: any) => message.text === "do this later"),
     );
-    expect(beforePromotion).toMatchObject({ steeringQueued: 1, followUpQueued: 1 });
+    expect(beforePromotion.followUpQueued).toBe(1);
+    const queued = beforePromotion.queuedMessages.find((message: any) => message.text === "do this later");
+    expect(queued).toMatchObject({ delivery: "followUp", state: "queued", canSteer: true });
     const rpcBeforePromotion = readJsonLines(fakeRpcLog)
       .filter((entry: any) => entry.sessionId === id);
     expect(rpcBeforePromotion.some((entry: any) => entry.type === "follow_up")).toBe(false);
-    const queued = beforePromotion.queuedMessages.find((message: any) => message.text === "do this later");
     const promoted = await api("POST", `/v1/sessions/${id}/queue/${queued.id}/steer`, {});
     expect(promoted.value).toMatchObject({ ok: true, delivery: "steer" });
     await waitFor(
