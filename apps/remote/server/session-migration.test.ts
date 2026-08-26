@@ -48,10 +48,16 @@ describe("session migration", () => {
 
     const bundle = exportSessions({ dbPath: sourceDbPath, dataRoot: sourceData, target: "converge", bundleRoot });
     expect(bundle.tables.sessions).toHaveLength(1);
-    importSessions({ dbPath: join(destinationData, "supervisor.sqlite3"), dataRoot: destinationData, bundleRoot });
+    importSessions({
+      dbPath: join(destinationData, "supervisor.sqlite3"),
+      dataRoot: destinationData,
+      bundleRoot,
+      workspace: "work",
+    });
 
     const destination = new Database(join(destinationData, "supervisor.sqlite3"), { readonly: true, strict: true });
     const session = destination.query("SELECT * FROM sessions WHERE id='thread'").get() as any;
+    expect(session.workspace_id).toBe("work");
     expect(session.execution_target).toBe("local");
     expect(session.remote_cwd).toBeNull();
     expect(session.session_path).toBe(join(destinationData, "sessions", "thread.jsonl"));
@@ -91,7 +97,12 @@ describe("session migration", () => {
     const bundleRoot = join(root, "bundle");
     const bundle = exportSessions({ dbPath: sourceDbPath, dataRoot: sourceData, target: "converge", bundleRoot });
     expect(bundle.sessionFiles).toHaveLength(0);
-    importSessions({ dbPath: join(destinationData, "supervisor.sqlite3"), dataRoot: destinationData, bundleRoot });
+    importSessions({
+      dbPath: join(destinationData, "supervisor.sqlite3"),
+      dataRoot: destinationData,
+      bundleRoot,
+      workspace: "work",
+    });
 
     const destination = new Database(join(destinationData, "supervisor.sqlite3"), { readonly: true, strict: true });
     expect((destination.query("SELECT session_path FROM sessions WHERE id='empty'").get() as any).session_path).toBeNull();
