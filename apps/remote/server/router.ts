@@ -9,6 +9,7 @@
 import { existsSync } from "node:fs";
 import { unlink, writeFile, mkdir, chmod } from "node:fs/promises";
 import { join } from "node:path";
+import { proxyFetch } from "./proxy-fetch";
 
 type Person = { user: string; login: string; port: number };
 
@@ -148,7 +149,7 @@ async function proxy(person: Person, req: Request, url: URL): Promise<Response> 
   const target = `http://127.0.0.1:${person.port}${url.pathname}${url.search}`;
   const body = req.method === "GET" || req.method === "HEAD" ? undefined : req.body;
   try {
-    const response = await fetch(target, { method: req.method, headers, body, redirect: "manual", ...(body ? { duplex: "half" } : {}) } as RequestInit);
+    const response = await proxyFetch(target, { method: req.method, headers, body, redirect: "manual", ...(body ? { duplex: "half" } : {}) } as RequestInit);
     const out = new Headers(response.headers);
     for (const name of HOP_BY_HOP) out.delete(name);
     return new Response(response.body, { status: response.status, statusText: response.statusText, headers: out });
