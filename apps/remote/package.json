@@ -1,0 +1,29 @@
+{
+  "name": "pi-remote",
+  "version": "0.41.0",
+  "description": "Self-hosted web and Android controller for persistent Pi sessions",
+  "keywords": [
+    "pi-package"
+  ],
+  "license": "MIT",
+  "private": false,
+  "type": "module",
+  "pi": {
+    "extensions": [
+      "./server/context-mirror.ts"
+    ]
+  },
+  "scripts": {
+    "start": "bun server/main.ts",
+    "test": "bun test server/*.test.ts web/*.test.ts"
+  },
+  "engines": {
+    "bun": ">=1.3.0"
+  },
+  "peerDependencies": {
+    "@earendil-works/pi-coding-agent": "*"
+  },
+  "devDependencies": {
+    "@earendil-works/pi-coding-agent": "0.84.1"
+  }
+}

@@ -1,0 +1,163 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
+  <meta name="theme-color" content="#0b0d10">
+  <title>Pi Remote</title>
+  <link rel="icon" href="/icon.svg" type="image/svg+xml">
+  <link rel="manifest" href="/manifest.webmanifest">
+  <link rel="stylesheet" href="/vendor/katex.min.css">
+  <link rel="stylesheet" href="/vendor/texmath.css">
+  <link rel="stylesheet" href="/styles.css">
+  <script src="/vendor/markdown-it.min.js" defer></script>
+  <script src="/vendor/katex.min.js" defer></script>
+  <script src="/vendor/texmath.js" defer></script>
+  <script src="/vendor/pi-markdown-compat.js" defer></script>
+  <script src="/voice.js" defer></script>
+  <script src="/app.js" defer></script>
+</head>
+<body>
+  <div id="app">
+    <div id="drawer-scrim" class="scrim" hidden></div>
+    <svg class="motion-definitions" aria-hidden="true">
+      <defs>
+        <filter id="thread-goo" x="-40%" y="-240%" width="180%" height="580%" color-interpolation-filters="sRGB">
+          <feGaussianBlur in="SourceGraphic" stdDeviation="8" result="blurred"/>
+          <feColorMatrix in="blurred" type="matrix" values="1 0 0 0 0  0 1 0 0 0  0 0 1 0 0  0 0 0 26 -10"/>
+        </filter>
+      </defs>
+    </svg>
+    <aside id="drawer" aria-label="Threads">
+      <header id="thread-start-heading" class="drawer-heading thread-start-heading">
+        <nav id="drawer-tabs" class="drawer-tabs" role="tablist" aria-label="Drawer sections">
+          <button id="tab-threads" class="drawer-tab" type="button" role="tab" aria-controls="thread-list" aria-selected="true">
+            <span class="drawer-tab-name">Interactive</span><span id="tab-threads-count" class="drawer-tab-count">0</span>
+          </button>
+          <button id="tab-agents" class="drawer-tab" type="button" role="tab" aria-controls="agent-list" aria-selected="false">
+            <span class="drawer-tab-name">Orchestrator</span><span id="tab-agents-count" class="drawer-tab-count">0</span>
+          </button>
+          <button id="tab-archived" class="drawer-tab" type="button" role="tab" aria-controls="archived-list" aria-selected="false">
+            <span class="drawer-tab-name">Archived</span><span id="tab-archived-count" class="drawer-tab-count">0</span>
+          </button>
+        </nav>
+        <div id="new-thread-buttons" class="new-thread-buttons" aria-label="Create thread"></div>
+      </header>
+      <div id="thread-list" class="thread-list" role="tabpanel" aria-labelledby="tab-threads"></div>
+      <div id="agent-list" class="agent-list" role="tabpanel" aria-labelledby="tab-agents" hidden></div>
+      <div id="archived-list" class="thread-list" role="tabpanel" aria-labelledby="tab-archived" hidden></div>
+      <footer class="drawer-footer">
+        <div class="machine-controls" aria-label="This machine controls">
+          <button id="thunder-control" class="machine-control" type="button" aria-label="Thunder status loading" title="Thunder status loading" disabled>
+            <img src="/thunder.svg" alt="">
+          </button>
+          <button id="openai-governor-control" class="machine-control" type="button" aria-label="OpenAI governor status loading" title="OpenAI governor status loading" disabled>
+            <img src="/openai.svg" alt="">
+          </button>
+          <button id="anthropic-governor-control" class="machine-control" type="button" aria-label="Anthropic governor status loading" title="Anthropic governor status loading" disabled>
+            <img src="/anthropic.svg" alt="">
+          </button>
+        </div>
+        <div id="agent-summary" class="agent-summary muted">
+          <div class="agent-location"><img src="/work.svg" alt="Work"><span id="work-agent-summary">—</span></div>
+          <div class="agent-location"><img src="/personal.svg" alt="This machine"><span id="local-agent-summary">—</span></div>
+        </div>
+        <div id="plan-summary" class="plan-summary muted" aria-label="Plan capacity loading"></div>
+        <div id="usage-summary" class="usage-summary muted">CPU — · GPU — · RAM — · DISK —</div>
+        <div id="connection" class="connection muted" hidden></div>
+      </footer>
+    </aside>
+
+    <main id="main">
+      <header class="topbar">
+        <button id="open-drawer" class="icon-button" aria-label="Open threads">☰</button>
+        <div id="top-title" class="top-title">Pi Remote</div>
+        <div id="top-state" class="top-state muted">IDLE</div>
+        <button id="open-settings" class="icon-button" aria-label="Open thread settings" disabled>⚙</button>
+      </header>
+
+      <section id="empty-state" class="empty-state">
+        <strong>No threads</strong>
+        <span>Open the drawer to create one.</span>
+      </section>
+
+      <section id="conversation" class="conversation" hidden>
+        <div id="scrollback" class="scrollback">
+          <div id="transcript" class="transcript"></div>
+          <div id="live-thinking" class="live-thinking markdown-body" hidden></div>
+          <div id="live-answer" class="live-answer markdown-body" hidden></div>
+        </div>
+        <div id="queue-status" class="queue-status" hidden></div>
+        <div id="message-queue" class="message-queue" hidden></div>
+        <div id="attachments" class="attachments" hidden></div>
+        <div id="agent-banner" class="agent-banner" hidden></div>
+        <form id="composer" class="composer">
+          <div id="slash-commands" class="slash-commands" role="listbox" aria-label="Available slash commands" hidden></div>
+          <textarea id="prompt" rows="1" maxlength="200000" placeholder="Message agent" autocomplete="off"></textarea>
+          <div class="composer-actions">
+            <button id="attach" class="composer-icon" type="button" aria-label="Attach files" title="Attach files">
+              <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M16.5 6.5 8.7 14.3a2.5 2.5 0 0 0 3.5 3.5l8.1-8.1a4.5 4.5 0 0 0-6.4-6.4L5.5 11.7a6.5 6.5 0 0 0 9.2 9.2l6.1-6.1"/></svg>
+            </button>
+            <button id="paste-text" class="composer-icon" type="button" aria-label="Paste text document" title="Paste text document">
+              <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M9 5.5V4h6v1.5M9 5.5h6M9 5.5H7v15h10v-15h-2M9 10h6m-6 4h6m-6 4h4"/></svg>
+            </button>
+            <span class="composer-spacer"></span>
+            <button id="voice" class="composer-icon voice" type="button" aria-label="Start voice" title="Start voice">
+              <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 3a3 3 0 0 0-3 3v6a3 3 0 0 0 6 0V6a3 3 0 0 0-3-3Z"/><path d="M5.5 11.5a6.5 6.5 0 0 0 13 0M12 18v3m-3 0h6"/></svg>
+            </button>
+            <button id="action" class="composer-icon send" type="submit" aria-label="Send message" title="Send">
+              <svg class="send-icon" viewBox="0 0 24 24" aria-hidden="true"><path d="m3 3 18 9-18 9 4-9-4-9Zm4 9h14"/></svg>
+              <span class="stop-icon" aria-hidden="true">■</span>
+            </button>
+          </div>
+          <input id="file-picker" type="file" multiple hidden>
+        </form>
+      </section>
+    </main>
+
+    <dialog id="unlock-dialog" class="unlock-dialog" aria-labelledby="unlock-title">
+      <form id="unlock-form" class="unlock-form">
+        <h2 id="unlock-title">Unlock your folder</h2>
+        <p id="unlock-explanation">Your threads and your private folder are encrypted on the machine. This key stays on this device and opens them for as long as your agents are running.</p>
+        <label for="unlock-key">Key</label>
+        <input id="unlock-key" type="password" autocomplete="current-password" spellcheck="false" required>
+        <p id="unlock-error" class="unlock-error" hidden></p>
+        <div class="unlock-actions">
+          <button id="submit-unlock" class="accent" type="submit">Unlock</button>
+        </div>
+      </form>
+    </dialog>
+
+    <dialog id="paste-text-dialog" class="paste-text-dialog" aria-labelledby="paste-text-title">
+      <form id="paste-text-form" class="paste-text-form">
+        <h2 id="paste-text-title">Paste text document</h2>
+        <label for="paste-text-name">Document name</label>
+        <input id="paste-text-name" type="text" maxlength="180" value="pasted-text.txt" autocomplete="off">
+        <label for="paste-text-content">Text</label>
+        <textarea id="paste-text-content" rows="12" maxlength="200000" placeholder="Paste text here" required></textarea>
+        <div class="paste-text-actions">
+          <button id="cancel-paste-text" type="button">Cancel</button>
+          <button id="upload-pasted-text" class="accent" type="submit" disabled>Add document</button>
+        </div>
+      </form>
+    </dialog>
+
+    <div id="settings-scrim" class="scrim settings-scrim" hidden></div>
+    <aside id="settings" class="settings" aria-label="Thread settings" hidden>
+      <header class="drawer-heading">
+        <h1>Thread settings</h1>
+        <button id="close-settings" class="icon-button" aria-label="Close settings">×</button>
+      </header>
+      <div class="settings-body">
+        <label>Thread</label><strong id="settings-thread">—</strong>
+        <label>Activity</label><strong id="settings-activity" class="muted">IDLE</strong>
+        <label for="model-select">Model</label><select id="model-select" disabled><option>Loading…</option></select>
+        <label for="thinking-select">Thinking level</label><select id="thinking-select" disabled><option>Loading…</option></select>
+        <label for="speed-select">Speed mode</label><select id="speed-select" disabled><option>Loading…</option></select>
+        <label>Working directory</label><code id="settings-cwd">/</code>
+      </div>
+    </aside>
+
+  </div>
+</body>
+</html>

@@ -1,0 +1,51 @@
+plugins {
+    id "com.android.application"
+}
+
+Properties local = new Properties()
+File localFile = rootProject.file("local.properties")
+if (localFile.exists()) localFile.withInputStream { local.load(it) }
+def remoteUrl = local.getProperty("piRemoteUrl", "http://127.0.0.1:8788")
+def remoteApplicationId = local.getProperty("piRemoteApplicationId", "dev.piremote")
+def remoteAppLabel = local.getProperty("piRemoteAppLabel", "Pi Remote")
+
+android {
+    namespace "dev.piremote"
+    compileSdk 36
+    buildToolsVersion "36.0.0"
+
+    defaultConfig {
+        applicationId remoteApplicationId
+        manifestPlaceholders = [piRemoteAppLabel: remoteAppLabel]
+        minSdk 26
+        targetSdk 36
+        versionCode 81
+        versionName "0.52.0"
+        buildConfigField "String", "SERVER_URL", "\"${remoteUrl}\""
+    }
+
+    buildFeatures { buildConfig true }
+    compileOptions {
+        sourceCompatibility JavaVersion.VERSION_17
+        targetCompatibility JavaVersion.VERSION_17
+    }
+    buildTypes {
+        release {
+            minifyEnabled true
+            proguardFiles getDefaultProguardFile("proguard-android-optimize.txt"), "proguard-rules.pro"
+        }
+    }
+}
+
+dependencies {
+    implementation "io.noties.markwon:core:4.6.2"
+    implementation "io.noties.markwon:linkify:4.6.2"
+    implementation "io.noties.markwon:ext-latex:4.6.2"
+    implementation "io.noties.markwon:ext-strikethrough:4.6.2"
+    implementation "io.noties.markwon:ext-tables:4.6.2"
+    implementation "io.noties.markwon:ext-tasklist:4.6.2"
+    implementation "io.noties.markwon:image-glide:4.6.2"
+    implementation "io.noties.markwon:inline-parser:4.6.2"
+    implementation "androidx.dynamicanimation:dynamicanimation:1.1.0"
+    testImplementation "junit:junit:4.13.2"
+}

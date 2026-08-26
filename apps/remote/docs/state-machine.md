@@ -1,0 +1,101 @@
+# Pi Remote state machine
+
+Pi Remote treats SQLite and one per-thread runtime projection as the authority. Clients are projections only: they may show a short-lived local action overlay, but they never invent an authoritative lifecycle transition.
+
+Each supervisor process first writes a random `supervisor_epoch` lease to SQLite. Every API request, runtime event, reconciliation, activation continuation, work worker, and child-exit callback verifies that lease before durable mutation. This fences an old supervisor incarnation that is still unwinding while its replacement has already reset and adopted the database; its late `SIGTERM` child exit cannot overwrite the replacement's `STOPPED` state with `FAILED`.
+
+## Server lifecycle
+
+Each live RPC child has exactly one phase:
+
+| Phase | Meaning | Public state |
+|---|---|---|
+| `STARTING` | Child exists; initial `get_state` has not completed | `STARTING` |
+| `IDLE` | Child is ready and Pi has no active or pending run | `IDLE` |
+| `DISPATCHING` | An idle `prompt` was durably dispatched, but `agent_start` has not proved the run yet | `RUNNING` / `QUEUED` |
+| `RUNNING` | Pi has proved an active run; steering/follow-up messages stay in this phase | `RUNNING` |
+| `ABORTING` | Pi is stopping the active operation in the existing child; accepted steering may still complete | `ABORTING` |
+| `STOPPING` | The idle reaper, archiving, or supervisor shutdown is removing the child | `ABORTING` until process exit, then `STOPPED` |
+
+`phaseVersion` changes on phase transitions, dispatches, queue changes, and Pi activity. A `get_state` reconciliation captures this version before its RPC request and discards the response if the version changed while it was in flight. This prevents an old inactive snapshot from settling newer work.
+
+### Valid transitions
+
+```text
+(no runtime) -> STARTING -> IDLE
+IDLE -> DISPATCHING -> RUNNING -> IDLE
+RUNNING -> RUNNING                 queued steer/follow-up
+STARTING -> STARTING                   cancel claimed work before dispatch
+DISPATCHING|RUNNING -> ABORTING -> IDLE
+IDLE -> STOPPING                       fifteen-minute inactivity reaper
+any live phase -> STOPPING -> STOPPED|FAILED
+FAILED|STOPPED -> STARTING         later activation/retry
+```
+
+Only `RUNNING -> IDLE` can ordinarily settle dispatched work. `agent_settled` in `DISPATCHING` is stale and ignored. During `ABORTING`, the abort handler owns the phase transition, while Pi may finish steering it already accepted before `abort()` returns. `STOPPING` suppresses output. An assistant message with `stopReason=error|aborted` is held until settlement: a later successful assistant message in the same run clears it, so automatic retry or account failover does not expose a false terminal failure. If the run settles without recovery, the provider error remains in the supervisor event ledger for voice and diagnosis. The interactive view comes from Pi's model context rather than this event projection.
+
+## Durable work
+
+Work items move through:
+
+```text
+queued -> running -> dispatched -> complete
+   |         |            |
+   +---------+------------+-> cancelled
+   +---------+------------+-> queued (retry/process recovery)
+```
+
+- SQLite contains the message before the API acknowledges it, but Pi's model context does not. Until Pi confirms insertion, clients show the work item above the composer with its canonical `queued`, `running`, or `dispatched` status.
+- `running` means the worker has claimed it but has not handed it to Pi.
+- `dispatched` means exactly one RPC command was written; acknowledgement loss never causes a duplicate send. Pi's next context snapshot contains the user message after RPC acknowledgement or subsequent Pi activity proves insertion, and the pending composer card disappears in the same durable update.
+- A `followUp` created during `RUNNING` remains `queued` under supervisor ownership. It is not handed to Pi until the current run settles, so it can be atomically promoted to `steer` or cancelled. While busy, the worker skips held follow-ups and dispatches only promoted steering items; while idle, it starts the oldest queued item as the next prompt.
+- Cancellation succeeds only while the supervisor still owns an item in `queued`; it atomically marks the item `cancelled` before any Pi insertion. Client-side Edit uses this same cancellation endpoint and copies the returned canonical text into the composer without creating a second server-side message.
+- Promotion normally updates a still-pending durable work item before it has any event entry. An already-inserted item keeps its delivery event accurate for voice consumers.
+- All dispatched items in one Pi run complete only on an accepted `agent_settled` or inactive reconciliation from the `RUNNING` phase.
+- Cancellation is terminal for the active item. Stop requeues every later queued/running/dispatched item with `resume=0`; a dispatch error checks each durable state before retrying, so the cancelled active turn cannot resurrect while retained messages remain sendable.
+- Supervisor restart requeues `running`/`dispatched` work only after killing orphan RPC children. An interrupted inserted turn resumes through the supported RPC `prompt` command with an explicit continuation instruction; startup never invents protocol commands that Pi does not support.
+
+## Abort ownership
+
+Abort stops only the current operation through Pi's RPC `abort`; it never terminates the Pi RPC child. This propagates cancellation into the active local or remote tool while preserving the thread process, model state, and session. A claimed message can be cancelled during `STARTING` before dispatch without cancelling activation. A prompt waiting in retry backoff has no active Pi operation, so abort cancels that durable item directly, clears its retry timer, and returns the existing child to `IDLE` instead of briefly displaying `ABORTING` and resuming the retry loop.
+
+Pi owns steering it has already acknowledged, while the supervisor continues to own uninserted follow-ups. Because `session.abort()` waits for Pi to become idle, accepted steering may complete before the abort response and its real transcript output remains visible. The active work item becomes `cancelled`, accepted steering completed by Pi becomes `complete`, and supervisor-held work then dispatches normally through the same child. If Pi refuses or cannot confirm abort, the endpoint reports failure and leaves the child and active work running; it never substitutes process termination for operation cancellation.
+
+The normal runtime termination path is the idle reaper: after fifteen minutes in `IDLE`, it preserves the Pi JSONL session and stops the child. Explicit thread retirement, supervisor shutdown, activation failure, and unexpected child failure remain lifecycle-distinct termination paths. Archiving an ordinary thread sets `sessions.archived_at`, cancels unfinished durable work, and stops the child while preserving events, settings, and Pi JSONL resume state. Archived threads cannot activate or accept new work until unarchived.
+
+## Revision ordering
+
+Every externally meaningful lifecycle mutation increments `sessions.revision`. Session snapshots in list, event, prompt, and abort responses carry this revision.
+
+Both clients:
+
+1. apply a selected-thread snapshot only when its revision is at least the last applied revision;
+2. capture a selection generation for every poll and discard selected-thread/event results after a switch;
+3. capture an action generation and reject poll projections that overlap a send or abort;
+4. coalesce a poll requested during another poll and run it immediately afterward rather than dropping it; and
+5. use a local `SENDING`/`ABORTING` overlay only while the HTTP action is unresolved.
+
+This keeps thread identity, lifecycle, context capture time, and local actions separate. A response for thread A cannot mutate thread B, and a pre-action poll cannot overwrite the action response.
+
+## Observed orchestrator agents
+
+Autonomous orchestrator agents are outside this state machine. They have no supervisor epoch, no RPC child, no runtime phase, and no durable work queue here, because Pi Remote does not own them: the orchestrator's SQLite ledger owns their lifecycle and its agent hosts own their sessions.
+
+The observation surface is therefore a pure projection with three rules:
+
+1. Pi Remote never writes agent lifecycle state. Its only write is touching a run's `watch` marker, which asks the owning agent host to publish partial output; losing that write degrades to message-granular updates, never to wrong state.
+2. An observed agent's transcript is applied only to the selection generation that requested it, exactly as for threads, and a per-run byte cursor makes replay incremental. Opening an agent leaves thread selection untouched, and opening a thread ends observation.
+3. The list projects only the `running` rows of the ledger. Settlement is not a client state transition: a settled run simply leaves the list, and one already open stays open because observation fetches it by id and renders whatever terminal result the ledger holds.
+
+## Core invariants
+
+1. Exactly one supervisor epoch may publish durable state; callbacks from replaced incarnations are read-only and terminate locally.
+2. One server runtime at most per thread ID. Each RPC wrapper and all descendants run in a dedicated process group; stop waits for the whole group and escalates from `SIGTERM` to `SIGKILL`.
+3. One serialized durable worker at most per thread ID.
+4. A runtime event is bound to the thread ID captured when that child was spawned.
+5. Only `RUNNING` may settle and complete dispatched work.
+6. `ABORTING` preserves real transcript output while owning settlement; only `STOPPING` suppresses output.
+7. A stale reconciliation response cannot change phase.
+8. The cancelled active item is never retried; Pi-owned accepted steering and supervisor-owned pending work each continue from their canonical owner without duplication.
+9. Client context snapshots are applied only to the selection generation that requested them; their capture times never move backward.
+10. Client authoritative lifecycle snapshots never move backward in revision.
