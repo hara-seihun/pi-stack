@@ -44,16 +44,33 @@ Pi Remote loads `$XDG_CONFIG_HOME/pi-remote/config.json`, falling back to `~/.co
 
 Values in `environment` become process environment variables before the supervisor loads. Existing process variables win, which makes service-level overrides straightforward. Arrays and objects are JSON-encoded automatically.
 
-Host identities, Tailscale names, private directory paths, alert integration, remote targets, workspace menus, app branding, and provider custody belong in this untracked configuration or in the host's service manager—not in the repository.
+Host identities, Tailscale names, private directory paths, alert integration, remote targets, workspace menus, app branding, and provider custody belong in this untracked configuration or in the host's service manager, not in the repository.
 
-The Android client reads these ignored `android/local.properties` keys:
+The Android client reads ignored `android/local.properties` values. Direct endpoints use a URL:
 
 ```properties
 piRemoteLocalUrl=https://local-pi-remote.example.ts.net
+piRemoteConvergeAuth=direct
 piRemoteConvergeUrl=https://converge-pi-remote.example.ts.net
 piRemoteApplicationId=dev.example.piremote
 piRemoteAppLabel=Pi Remote
 ```
+
+An SSH-backed Converge endpoint replaces its direct URL with a restricted local-forward:
+
+```properties
+piRemoteConvergeAuth=ssh
+piRemoteConvergeSshHost=converge.example.net
+piRemoteConvergeSshPort=22
+piRemoteConvergeSshUser=pi-remote-android
+piRemoteConvergeSshPrivateKeyFile=/owner-only/path/to/android-converge-key
+piRemoteConvergeSshHostKey=ecdsa-sha2-nistp256 <base64-encoded host key>
+piRemoteConvergeSshLocalPort=8789
+piRemoteConvergeSshRemoteHost=127.0.0.1
+piRemoteConvergeSshRemotePort=8788
+```
+
+The app pins the SSH host key and opens only the declared forward. Keep the private key out of Git.
 
 ## Run
 
@@ -86,7 +103,7 @@ cd android && ./gradlew test
 
 ## Security boundary
 
-Bind the service to loopback or a private network. The application assumes network access control is handled by the deployment layer. Secrets and unlock keys must stay in local credential stores; they are never part of the JSON application configuration.
+Bind the service to loopback or a private network. Direct endpoints rely on deployment-layer network access. SSH endpoints pin the server host key and carry their private identity in the local Android build. Unlock keys stay in Android's private preferences and never enter the JSON server configuration.
 
 ## License
 

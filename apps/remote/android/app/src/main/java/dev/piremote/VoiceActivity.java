@@ -11,6 +11,9 @@ import android.webkit.WebChromeClient;
 import android.webkit.WebResourceRequest;
 import android.webkit.WebView;
 import android.webkit.WebViewClient;
+import android.widget.Toast;
+
+import java.io.IOException;
 
 public final class VoiceActivity extends Activity {
     static final String EXTRA_SESSION_ID = "sessionId";
@@ -33,12 +36,29 @@ public final class VoiceActivity extends Activity {
         else finish();
     }
 
-    @SuppressLint("SetJavaScriptEnabled")
     private void openVoice() {
         String sessionId = getIntent().getStringExtra(EXTRA_SESSION_ID);
         if (sessionId == null || sessionId.isBlank()) { finish(); return; }
         PiRemoteEnvironment.attach(getApplicationContext());
         PiRemoteEnvironment.Endpoint environment = PiRemoteEnvironment.find(getIntent().getStringExtra(EXTRA_ENVIRONMENT_ID));
+        Thread connection = new Thread(() -> {
+            try {
+                PiRemoteTransport.ensure(environment);
+                runOnUiThread(() -> {
+                    if (!isFinishing() && !isDestroyed()) openVoicePage(environment, sessionId);
+                });
+            } catch (IOException failure) {
+                runOnUiThread(() -> {
+                    Toast.makeText(this, "Could not connect to " + environment.name, Toast.LENGTH_LONG).show();
+                    finish();
+                });
+            }
+        }, "pi-remote-voice-connection");
+        connection.start();
+    }
+
+    @SuppressLint("SetJavaScriptEnabled")
+    private void openVoicePage(PiRemoteEnvironment.Endpoint environment, String sessionId) {
         Uri server = Uri.parse(environment.baseUrl);
         String trustedOrigin = server.getScheme() + "://" + server.getAuthority();
         webView = new WebView(this);

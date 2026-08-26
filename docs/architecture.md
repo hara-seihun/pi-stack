@@ -25,9 +25,9 @@ The two current environments are:
 | `local` | Local | GMKtec | Personal, Home | encrypted folder key |
 | `converge` | Converge | `converge-kenan` | one work profile | none |
 
-Android knows the two endpoint URLs because it cannot discover a server before choosing one. It verifies the reported ID before sending ordinary requests. A URL aimed at the wrong server fails instead of mixing state.
+Android knows how to reach both endpoints because it cannot discover a server before choosing one. It verifies the reported ID before sending ordinary requests. A connection aimed at the wrong server fails instead of mixing state.
 
-Converge uses Tailscale Serve and binds Pi Remote to loopback. Tailscale authenticates the caller and keeps the service off the public Internet.
+An endpoint can use direct network access or an SSH local-forward. Local uses its existing Tailscale Serve URL. Converge binds Pi Remote to loopback and accepts only the app's restricted SSH identity, which may forward to that listener but cannot open a shell or reach another port. Ignored local properties supply the Converge SSH host, pinned host key, user, and owner-only private-key path. The build embeds that key in the app artifact.
 
 ## Android state
 

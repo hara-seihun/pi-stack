@@ -11,7 +11,7 @@ Host repositories own:
 - systemd units and service users;
 - endpoint URLs and ports;
 - Pi Remote profiles and workspaces;
-- Tailscale enrollment;
+- endpoint network access and SSH forwarding identities;
 - account configuration and credentials;
 - mutable ledgers, sessions, uploads, and encrypted folders.
 
@@ -27,14 +27,22 @@ cd apps/remote/android
 ./gradlew test
 ```
 
-The Android build reads these uncommitted properties:
+The Android build reads endpoint access from uncommitted properties. A direct endpoint needs only its URL. An SSH endpoint uses a loopback URL created by the app and requires its forwarding identity:
 
 ```properties
 piRemoteLocalUrl=https://gmktec.example-tailnet.ts.net
-piRemoteConvergeUrl=https://converge-kenan.example-tailnet.ts.net
+piRemoteConvergeAuth=ssh
+piRemoteConvergeSshHost=converge.example.net
+piRemoteConvergeSshPort=22
+piRemoteConvergeSshUser=pi-remote-android
+piRemoteConvergeSshPrivateKeyFile=/owner-only/path/to/android-converge-key
+piRemoteConvergeSshHostKey=ecdsa-sha2-nistp256 <base64-encoded host key>
+piRemoteConvergeSshLocalPort=8789
+piRemoteConvergeSshRemoteHost=127.0.0.1
+piRemoteConvergeSshRemotePort=8788
 ```
 
-The real tailnet suffix belongs in machine-local configuration, not documentation or source.
+Hostnames and credentials belong in machine-local configuration, not documentation or source. The SSH account must allow local forwarding only to the configured Pi Remote port.
 
 ## GMKtec
 
@@ -66,7 +74,7 @@ The last two commands derive the deployed skill and package lists from the check
 
 Converge Pi Remote reports environment ID `converge`. It has one profile rooted at `/home/kenan/converge` and executes Pi directly on that machine.
 
-Pi Remote listens on loopback. Tailscale Serve publishes it to the tailnet. No GCP firewall rule exposes the application port.
+Pi Remote listens on loopback. Android opens a pinned SSH connection and forwards its app-local port to that listener. A dedicated SSH account accepts the app key with forwarding restricted to `127.0.0.1:8788`; it cannot open a shell. No GCP firewall rule exposes the application port.
 
 ## Work-thread cutover
 
@@ -107,7 +115,7 @@ A release is complete when:
 - each service reports the intended environment ID;
 - Pi settings match the role in `config/package-sets.json`;
 - Pi Remote is last for roles that load it;
-- Tailscale reaches both endpoints and GCP exposes no Pi Remote port;
+- Tailscale reaches Local, the restricted SSH key reaches Converge, and GCP exposes no Pi Remote port;
 - Android can switch repeatedly without crossing threads, keys, voice, downloads, or notifications;
 - a migrated Work thread resumes on Converge;
 - both machine handbooks point here.

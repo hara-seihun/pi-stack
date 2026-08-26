@@ -374,8 +374,21 @@ public class MainActivity extends Activity {
 
     private void downloadFile(Uri uri) {
         String path = uri.getQueryParameter("path");
-        String name = path == null ? "Download" : new File(path).getName();
-        if (name.isBlank()) name = "Download";
+        String candidate = path == null ? "Download" : new File(path).getName();
+        String name = candidate.isBlank() ? "Download" : candidate;
+        PiRemoteEnvironment.Endpoint environment = PiRemoteEnvironment.current();
+        network.execute(() -> {
+            try {
+                PiRemoteTransport.ensure(environment);
+                main.post(() -> enqueueDownload(uri, name));
+            } catch (IOException failure) {
+                main.post(() -> Toast.makeText(this, "Could not connect to " + environment.name,
+                    Toast.LENGTH_LONG).show());
+            }
+        });
+    }
+
+    private void enqueueDownload(Uri uri, String name) {
         try {
             DownloadManager.Request request = new DownloadManager.Request(uri)
                 .setTitle(name)
@@ -2277,23 +2290,9 @@ public class MainActivity extends Activity {
     }
 
     private JSONObject uploadAttachment(InputStream input, String name, String sessionId, String type) throws Exception {
-        URL url = new URL(PiRemoteApi.absolute("/v1/uploads?name=") + URLEncoder.encode(name, "UTF-8")
-            + "&sessionId=" + URLEncoder.encode(sessionId, "UTF-8"));
-        HttpURLConnection connection = (HttpURLConnection) url.openConnection();
-        try {
-            connection.setRequestMethod("POST"); connection.setDoOutput(true); connection.setConnectTimeout(20_000);
-            connection.setReadTimeout(120_000); connection.setChunkedStreamingMode(64 * 1024);
-            connection.setRequestProperty("Content-Type", type);
-            try (input; OutputStream output = connection.getOutputStream()) {
-                byte[] buffer = new byte[64 * 1024];
-                for (int count; (count = input.read(buffer)) >= 0;) if (count > 0) output.write(buffer, 0, count);
-            }
-            int code = connection.getResponseCode();
-            String response = read(code >= 400 ? connection.getErrorStream() : connection.getInputStream());
-            if (code == 423) throw new PiRemoteApi.Locked("Locked");
-            if (code < 200 || code >= 300) throw new IOException(new JSONObject(response).optString("error", "Upload failed"));
-            return new JSONObject(response).getJSONObject("file");
-        } finally { connection.disconnect(); }
+        String path = "/v1/uploads?name=" + URLEncoder.encode(name, "UTF-8")
+            + "&sessionId=" + URLEncoder.encode(sessionId, "UTF-8");
+        return PiRemoteApi.upload(path, input, type).getJSONObject("file");
     }
 
     private void deleteUploaded(String name, String sessionId, String environment) {
