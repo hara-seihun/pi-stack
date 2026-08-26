@@ -1081,7 +1081,8 @@ public class MainActivity extends Activity {
             try {
                 JSONObject thunder = api("GET", "/v1/audio/thunder", null).optJSONObject("thunder");
                 JSONObject governors = api("GET", "/v1/governor-controls", null).optJSONObject("governors");
-                main.post(() -> { renderThunderStatus(thunder); renderGovernorControls(governors); });
+                JSONObject machine = api("GET", "/v1/machine", null).optJSONObject("machine");
+                main.post(() -> { renderThunderStatus(thunder); renderGovernorControls(governors); renderMachineUsage(machine); });
             } catch (Exception error) {
                 main.post(() -> {
                     for (ImageButton control : new ImageButton[] { thunderButton, openAiGovernorButton, anthropicGovernorButton }) {

@@ -1839,6 +1839,13 @@ const server = Bun.serve({
       try { return json({ governors: governorControls() }); }
       catch (cause: any) { return error(cause?.message ?? "Could not read governor controls", 503); }
     }
+    // The drawer footer shows this host's load beside its controls. The long
+    // poll carries it only while the drawer is open, so a direct read lets the
+    // footer fill in the moment the drawer opens rather than after a poll.
+    if (url.pathname === "/v1/machine" && req.method === "GET") {
+      try { return json({ machine: readMachineUsage() }); }
+      catch (cause: any) { return error(cause?.message ?? "Could not read machine usage", 503); }
+    }
     const governorToggle = url.pathname.match(/^\/v1\/governor-controls\/(openai|anthropic)\/toggle$/);
     if (governorToggle && req.method === "POST") {
       try { return json({ governors: toggleGovernor(governorToggle[1] as GovernorProvider) }); }

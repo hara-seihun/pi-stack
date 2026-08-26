@@ -386,6 +386,18 @@ describe("web and supervisor integration", () => {
     expect(stopped).toMatchObject({ status: 200, value: { thunder: { active: false, status: "stopped" } } });
   });
 
+  test("reports this host's load for the drawer footer", async () => {
+    const usage = await api("GET", "/v1/machine");
+    expect(usage.status).toBe(200);
+    const machine = usage.value.machine;
+    // A single read cannot yet know CPU or GPU load, so those may be null until
+    // a later sample; memory and disk are always present.
+    expect(machine.cpuPercent === null || typeof machine.cpuPercent === "number").toBe(true);
+    expect(machine.gpuPercent === null || typeof machine.gpuPercent === "number").toBe(true);
+    expect(machine.memory).toMatchObject({ usedBytes: expect.any(Number), totalBytes: expect.any(Number), percentUsed: expect.any(Number) });
+    expect(machine.disk).toMatchObject({ usedBytes: expect.any(Number), totalBytes: expect.any(Number), percentUsed: expect.any(Number) });
+  });
+
   test("cycles a provider's allowance through off, green, blue, and a red halt", async () => {
     const initial = await api("GET", "/v1/governor-controls");
     expect(initial.status).toBe(200);
