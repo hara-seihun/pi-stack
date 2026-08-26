@@ -71,8 +71,8 @@ how an ontology grows a wart.
 - Source: `/home/kenan/projects/math-research`. Its `README.md` is the design
   document and says why things are the way they are; `schema.sql` is the data
   model and carries most of the reasoning about state.
-- The `math-research` skill covers identity, keys, and how this machine reaches
-  the ledger. Load it if you have not.
+- `/home/kenan/machine/pi.md` documents identity, key custody, and how this
+  machine reaches the ledger.
 - Tests: `test/contracts.sh`. Ephemeral Postgres, a real server, `MCP_VALIDATE=1`,
   and a hard one minute deadline on the whole pipeline.
 - Deploy: `tools/deploy.sh`. It pushes, applies `schema.sql`, rolls the eight
