@@ -27,8 +27,20 @@ final class PiRemoteApi {
     }
 
     static JSONObject request(String method, String path, JSONObject body) throws Exception {
+        return request(method, path, body, null);
+    }
+
+    static JSONObject request(String method, String path, JSONObject body, Cancellation cancellation) throws Exception {
         PiRemoteEnvironment.Endpoint environment = PiRemoteEnvironment.current();
-        JSONObject result = requestFor(environment, method, path, body);
+        verify(environment, cancellation);
+        JSONObject result;
+        try {
+            result = send(environment, method, path, body, cancellation);
+        } catch (Locked locked) {
+            if (!environment.requiresUnlock) throw locked;
+            PiRemoteKey.ensureUnlocked(environment);
+            result = send(environment, method, path, body, cancellation);
+        }
         if (!environment.id.equals(PiRemoteEnvironment.current().id)) throw new StaleEnvironment(environment.id);
         return result;
     }
@@ -113,12 +125,43 @@ final class PiRemoteApi {
     }
 
     private static void verify(PiRemoteEnvironment.Endpoint environment) throws Exception {
+        verify(environment, null);
+    }
+
+    private static void verify(PiRemoteEnvironment.Endpoint environment, Cancellation cancellation) throws Exception {
         if (VERIFIED.contains(environment.id)) return;
-        JSONObject metadata = send(environment, "GET", "/v1/environment", null).optJSONObject("environment");
+        JSONObject metadata = send(environment, "GET", "/v1/environment", null, cancellation).optJSONObject("environment");
         String actual = metadata == null ? "" : metadata.optString("id");
         if (!environment.id.equals(actual))
             throw new IOException("Expected " + environment.id + " but endpoint reported " + (actual.isEmpty() ? "no environment identity" : actual));
         VERIFIED.add(environment.id);
+    }
+
+    static final class Cancellation {
+        private HttpURLConnection active;
+        private boolean cancelled;
+
+        synchronized boolean attach(HttpURLConnection connection) {
+            if (cancelled) return false;
+            active = connection;
+            return true;
+        }
+
+        synchronized void detach(HttpURLConnection connection) {
+            if (active == connection) active = null;
+        }
+
+        synchronized void cancel() {
+            cancelled = true;
+            if (active != null) active.disconnect();
+            active = null;
+        }
+
+        synchronized boolean isCancelled() { return cancelled; }
+    }
+
+    static final class Cancelled extends IOException {
+        Cancelled() { super("Request cancelled"); }
     }
 
     static final class Locked extends IOException {
@@ -136,9 +179,19 @@ final class PiRemoteApi {
     }
 
     private static JSONObject send(PiRemoteEnvironment.Endpoint environment, String method, String path, JSONObject body) throws Exception {
+        return send(environment, method, path, body, null);
+    }
+
+    private static JSONObject send(PiRemoteEnvironment.Endpoint environment, String method, String path, JSONObject body,
+                                   Cancellation cancellation) throws Exception {
+        HttpURLConnection connection = null;
         try {
             PiRemoteTransport.ensure(environment);
-            HttpURLConnection connection = (HttpURLConnection) new URL(environment.baseUrl + path).openConnection();
+            connection = (HttpURLConnection) new URL(environment.baseUrl + path).openConnection();
+            if (cancellation != null && !cancellation.attach(connection)) {
+                connection.disconnect();
+                throw new Cancelled();
+            }
             try {
                 connection.setRequestMethod(method);
                 connection.setConnectTimeout(7_000);
@@ -159,11 +212,13 @@ final class PiRemoteApi {
                     throw new HttpFailure(status, result.optString("error", "HTTP " + status));
                 return result;
             } finally {
+                if (cancellation != null) cancellation.detach(connection);
                 connection.disconnect();
             }
-        } catch (Locked | HttpFailure failure) {
+        } catch (Locked | HttpFailure | Cancelled failure) {
             throw failure;
         } catch (IOException failure) {
+            if (cancellation != null && cancellation.isCancelled()) throw new Cancelled();
             if (!(failure instanceof SocketTimeoutException)) PiRemoteTransport.invalidate(environment);
             throw failure;
         }

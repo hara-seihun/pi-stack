@@ -66,6 +66,7 @@ public class MainActivity extends Activity {
     private static final String DRAWER_PREFS = "drawer";
     private static final String DRAWER_TAB_KEY = "selected_tab";
     private static final String SELECTED_THREAD_PREFS = "selected_threads";
+    private static final String SELECTED_SESSION_PREFS = "selected_session_snapshots";
     private static final String DRAWER_TAB_INTERACTIVE = "interactive";
     private static final String DRAWER_TAB_ORCHESTRATOR = "orchestrator";
     private static final String DRAWER_TAB_ARCHIVED = "archived";
@@ -73,7 +74,8 @@ public class MainActivity extends Activity {
     private Haptics haptics;
     private final ExecutorService network = Executors.newSingleThreadExecutor();
     private final ExecutorService abortNetwork = Executors.newSingleThreadExecutor();
-    private final ExecutorService pollNetwork = Executors.newSingleThreadExecutor();
+    // One replacement poll may start while a cancelled HTTP or SSH call unwinds.
+    private final ExecutorService pollNetwork = Executors.newFixedThreadPool(2);
     private final Handler main = new Handler(Looper.getMainLooper());
     private FrameLayout root;
     private LinearLayout drawer, settingsDrawer, planSummary;
@@ -156,6 +158,9 @@ public class MainActivity extends Activity {
     // Felt state: what the last haptic signalled, so only genuine changes are played.
     private boolean feltComposerArmed = false;
     private volatile boolean polling = false;
+    private long syncPollGeneration = 0;
+    private boolean immediateSync = true;
+    private PiRemoteApi.Cancellation activeSync;
     private final Runnable poller = this::refresh;
     private final Runnable openThreadHeartbeat = new Runnable() {
         public void run() {
@@ -208,7 +213,7 @@ public class MainActivity extends Activity {
         String named = notificationTarget(getIntent());
         if (named == null && state != null) named = state.getString(STATE_SESSION);
         if (named == null) named = rememberedThread();
-        openNamedThread(named);
+        restoreAndOpenNamedThread(named);
         android.content.SharedPreferences notificationPreferences =
             getSharedPreferences("completion_notifications", MODE_PRIVATE);
         if (Build.VERSION.SDK_INT >= 33
@@ -244,8 +249,7 @@ public class MainActivity extends Activity {
         haptics.refreshSystemSetting();
         haptics.setWatching(true);
         activityVisible = true;
-        main.removeCallbacks(poller);
-        main.post(poller);
+        restartSyncImmediately();
         flushOutbox();
         publishOpenThread();
         main.removeCallbacks(openThreadHeartbeat);
@@ -255,7 +259,7 @@ public class MainActivity extends Activity {
     @Override protected void onStop() {
         haptics.setWatching(false);
         activityVisible = false;
-        main.removeCallbacks(poller);
+        cancelSyncPoll();
         main.removeCallbacks(openThreadHeartbeat);
         publishOpenThread();
         super.onStop();
@@ -268,7 +272,7 @@ public class MainActivity extends Activity {
     }
 
     @Override public void onDestroy() {
-        main.removeCallbacks(poller);
+        cancelSyncPoll();
         main.removeCallbacks(openThreadHeartbeat);
         network.shutdownNow(); abortNetwork.shutdownNow(); pollNetwork.shutdownNow();
         super.onDestroy();
@@ -281,7 +285,7 @@ public class MainActivity extends Activity {
     @Override protected void onNewIntent(Intent intent) {
         super.onNewIntent(intent);
         setIntent(intent);
-        openNamedThread(notificationTarget(intent));
+        restoreAndOpenNamedThread(notificationTarget(intent));
         refresh();
     }
 
@@ -295,11 +299,14 @@ public class MainActivity extends Activity {
      * Asking for the thread by id keeps the promise in every one of those cases, and until it
      * is kept nothing else is allowed to take the screen.
      */
-    private void openNamedThread(String id) { openNamedThread(id, 3); }
+    private void restoreAndOpenNamedThread(String id) {
+        boolean restored = id != null && !id.equals(selectedId) && restoreSelectedSession(id);
+        openNamedThread(id, 3, restored);
+    }
 
-    private void openNamedThread(String id, int attemptsLeft) {
+    private void openNamedThread(String id, int attemptsLeft, boolean refreshSelected) {
         if (id == null) return;
-        if (id.equals(selectedId)) {
+        if (id.equals(selectedId) && !refreshSelected) {
             CompletionNotificationService.clearCompletionNotification(this, id);
             return;
         }
@@ -328,9 +335,20 @@ public class MainActivity extends Activity {
                 boolean gone = isMissing(failure);
                 main.post(() -> {
                     if (!id.equals(openingThreadId)) return;
-                    // A thread that is merely unreachable is worth waiting for; a deleted one is not.
-                    if (gone || attemptsLeft <= 0) { openingThreadId = null; return; }
-                    main.postDelayed(() -> openNamedThread(id, attemptsLeft - 1), 1500);
+                    // A thread that is merely unreachable keeps its cached view. A deleted one does not.
+                    if (gone) {
+                        openingThreadId = null;
+                        if (refreshSelected && requestedSelectionGeneration == selectionGeneration
+                            && Objects.equals(id, selectedId)) {
+                            getSharedPreferences(SELECTED_SESSION_PREFS, MODE_PRIVATE).edit()
+                                .remove(PiRemoteEnvironment.scoped(id)).apply();
+                            PiRemoteCache.remove(this, PiRemoteEnvironment.current().id, id);
+                            clearSelection();
+                        }
+                        return;
+                    }
+                    if (attemptsLeft <= 0) { openingThreadId = null; return; }
+                    main.postDelayed(() -> openNamedThread(id, attemptsLeft - 1, refreshSelected), 1500);
                 });
             }
         });
@@ -795,7 +813,8 @@ public class MainActivity extends Activity {
             threadStarter.setDestinations(Collections.emptyList());
         }
         openingThreadId = null;
-        refreshAgain = false;
+        cancelSyncPoll();
+        immediateSync = true;
         syncSequence = 0;
         syncErrorDelayMs = 1_000;
         syncEpoch = "";
@@ -821,7 +840,7 @@ public class MainActivity extends Activity {
         renderEnvironmentSelector();
         renderDrawerTabs();
         refreshThreadStarts();
-        openNamedThread(rememberedThread());
+        restoreAndOpenNamedThread(rememberedThread());
         refresh();
     }
 
@@ -1388,6 +1407,11 @@ public class MainActivity extends Activity {
         publishOpenThread();
         if (polling) { refreshAgain = true; return; }
         polling = true;
+        long requestedPollGeneration = ++syncPollGeneration;
+        PiRemoteApi.Cancellation requestedCancellation = new PiRemoteApi.Cancellation();
+        activeSync = requestedCancellation;
+        boolean requestedImmediate = immediateSync;
+        immediateSync = false;
         String requestedSession = selectedId;
         String requestedAgent = agentRunId;
         boolean requestedAgentList = DRAWER_TAB_ORCHESTRATOR.equals(drawerTab) || requestedAgent != null;
@@ -1400,7 +1424,7 @@ public class MainActivity extends Activity {
         ContextSync.Document requestedAgentThinkingDocument = agentLiveThinkingDocument;
         JSONObject body = new JSONObject();
         try {
-            body.put("after", syncSequence).put("waitMs", 25_000)
+            body.put("after", syncSequence).put("waitMs", requestedImmediate ? 0 : 25_000)
                 .put("includeArchived", DRAWER_TAB_ARCHIVED.equals(drawerTab))
                 .put("includeAgentList", requestedAgentList)
                 .put("includeDashboard", drawerOpen);
@@ -1416,7 +1440,7 @@ public class MainActivity extends Activity {
         } catch (Exception impossible) { throw new IllegalStateException(impossible); }
         pollNetwork.execute(() -> {
             try {
-                JSONObject all = api("POST", "/v1/sync", body);
+                JSONObject all = PiRemoteApi.request("POST", "/v1/sync", body, requestedCancellation);
                 JSONObject context = null;
                 ContextSync.Document nextDocument = requestedContextDocument;
                 JSONObject update = all.optJSONObject("contextUpdate");
@@ -1445,7 +1469,8 @@ public class MainActivity extends Activity {
                 ContextSync.Document appliedAgentThinking = nextAgentThinking;
                 JSONObject renderedContext = context;
                 main.post(() -> {
-                    if (requestedEnvironmentGeneration != PiRemoteEnvironment.generation()) { finishRefresh(0); return; }
+                    if (requestedPollGeneration != syncPollGeneration) return;
+                    if (requestedEnvironmentGeneration != PiRemoteEnvironment.generation()) { finishRefresh(requestedPollGeneration, 0); return; }
                     String epoch = all.optString("epoch");
                     if (!syncEpoch.isEmpty() && !syncEpoch.equals(epoch)) {
                         contextDocument = null;
@@ -1497,10 +1522,11 @@ public class MainActivity extends Activity {
                     updateComposer(); updateTopBar();
                     connection.setVisibility(View.GONE);
                     syncErrorDelayMs = 1_000;
-                    finishRefresh(0);
+                    finishRefresh(requestedPollGeneration, 0);
                 });
             } catch (Exception failure) {
                 main.post(() -> {
+                    if (requestedPollGeneration != syncPollGeneration) return;
                     if (requestedEnvironmentGeneration == PiRemoteEnvironment.generation()) {
                         connection.setText("●  Offline · " + shortError(failure)); connection.setTextColor(DANGER);
                         connection.setVisibility(View.VISIBLE);
@@ -1509,7 +1535,7 @@ public class MainActivity extends Activity {
                     flushOutbox();
                     long retryDelay = syncErrorDelayMs;
                     syncErrorDelayMs = Math.min(30_000, syncErrorDelayMs * 2);
-                    finishRefresh(retryDelay);
+                    finishRefresh(requestedPollGeneration, retryDelay);
                 });
             }
         });
@@ -1517,7 +1543,25 @@ public class MainActivity extends Activity {
 
     private void refresh() { refreshSync(); }
 
-    private void finishRefresh(long delayMs) {
+    private void restartSyncImmediately() {
+        cancelSyncPoll();
+        immediateSync = true;
+        main.post(poller);
+    }
+
+    private void cancelSyncPoll() {
+        syncPollGeneration++;
+        PiRemoteApi.Cancellation cancellation = activeSync;
+        activeSync = null;
+        if (cancellation != null) cancellation.cancel();
+        polling = false;
+        refreshAgain = false;
+        main.removeCallbacks(poller);
+    }
+
+    private void finishRefresh(long generation, long delayMs) {
+        if (generation != syncPollGeneration) return;
+        activeSync = null;
         polling = false;
         if (!activityVisible) return;
         if (refreshAgain) { refreshAgain = false; delayMs = 0; }
@@ -2724,6 +2768,7 @@ public class MainActivity extends Activity {
             loadCachedContext(id, selectionGeneration);
         }
         detail.setVisibility(View.VISIBLE); emptyBox.setVisibility(View.GONE); updateComposer(); updateTopBar();
+        cacheSelectedSession();
         publishOpenThread();
         refresh();
     }
@@ -2752,6 +2797,39 @@ public class MainActivity extends Activity {
         resetTranscript();
         detail.setVisibility(View.GONE); prompt.setText(""); clearAttachments(true); updateTopBar();
         publishOpenThread();
+    }
+
+    private void cacheSelectedSession() {
+        if (selectedId == null) return;
+        try {
+            JSONObject snapshot = new JSONObject()
+                .put("id", selectedId).put("name", selectedName).put("cwd", selectedCwd)
+                .put("state", selectedState).put("activity", selectedActivity).put("activeTool", selectedTool)
+                .put("revision", selectedRevision).put("steeringQueued", selectedSteeringQueued)
+                .put("followUpQueued", selectedFollowUpQueued).put("queuedMessages", selectedQueuedMessages);
+            getSharedPreferences(SELECTED_SESSION_PREFS, MODE_PRIVATE).edit()
+                .putString(PiRemoteEnvironment.scoped(selectedId), snapshot.toString()).apply();
+        } catch (JSONException ignored) {}
+    }
+
+    private boolean restoreSelectedSession(String id) {
+        String value = getSharedPreferences(SELECTED_SESSION_PREFS, MODE_PRIVATE)
+            .getString(PiRemoteEnvironment.scoped(id), null);
+        if (value == null) return false;
+        try {
+            JSONObject thread = new JSONObject(value);
+            if (!id.equals(thread.optString("id"))) throw new JSONException("Cached session id changed");
+            String state = thread.optString("state", "STOPPED");
+            select(id, thread.optString("name", "Agent"), thread.optString("cwd", "/"), state,
+                thread.optString("activity", activityFromState(state)), thread.optString("activeTool", ""),
+                thread.optLong("revision"), thread.optInt("steeringQueued"), thread.optInt("followUpQueued"),
+                thread.optJSONArray("queuedMessages"));
+            return true;
+        } catch (JSONException failure) {
+            getSharedPreferences(SELECTED_SESSION_PREFS, MODE_PRIVATE).edit()
+                .remove(PiRemoteEnvironment.scoped(id)).apply();
+            return false;
+        }
     }
 
     private void saveDraft() {
