@@ -1246,6 +1246,12 @@ describe("web and supervisor integration", () => {
       (session) => session?.activity === "COMPACTING",
     );
     expect(compacting.activity).toBe("COMPACTING");
+    const sync = await api("POST", "/v1/sync", {
+      after: 0, waitMs: 0, includeSessions: false, includeDashboard: false, watchedIds: [id],
+    });
+    expect(sync.value.watched).toEqual([
+      expect.objectContaining({ id, state: "RUNNING", activity: "COMPACTING" }),
+    ]);
     const events = await waitFor(
       () => api("GET", `/v1/sessions/${id}/events?after=0`).then((result) => result.value.events),
       (rows) => rows.some((event: any) => event.type === "notice" && event.text === "Context compacted"),

@@ -51,6 +51,7 @@ public final class CompletionNotificationService extends Service {
     private boolean foreground;
     private String lastMonitorText = "";
     private final Runnable poller = this::poll;
+    private final Runnable completionFinisher = this::finishPendingCompletions;
 
     static void createChannels(Context context) {
         NotificationManager manager = context.getSystemService(NotificationManager.class);
@@ -176,6 +177,7 @@ public final class CompletionNotificationService extends Service {
 
     @Override public void onDestroy() {
         main.removeCallbacks(poller);
+        main.removeCallbacks(completionFinisher);
         network.shutdownNow();
         super.onDestroy();
     }
@@ -238,6 +240,7 @@ public final class CompletionNotificationService extends Service {
                     notifyCompletion(completion);
             }
             persistWatched();
+            scheduleCompletionFinisher();
             if (tracker.isEmpty()) stopMonitoring();
             else {
                 ensureForeground();
@@ -257,7 +260,8 @@ public final class CompletionNotificationService extends Service {
         if (values != null) for (int index = 0; index < values.length(); index++) {
             JSONObject value = values.optJSONObject(index); if (value == null) continue;
             sessions.add(new CompletionTracker.Snapshot(environmentId, value.optString("id"),
-                value.optString("name", "Thread"), value.optString("state"), value.optString("lastAssistantText", null)));
+                value.optString("name", "Thread"), value.optString("state"), value.optString("activity"),
+                value.optString("lastAssistantText", null)));
         }
         return new EnvironmentResult(environmentId, sessions);
     }
@@ -315,8 +319,25 @@ public final class CompletionNotificationService extends Service {
         main.postDelayed(poller, delay);
     }
 
+    private void scheduleCompletionFinisher() {
+        main.removeCallbacks(completionFinisher);
+        long next = tracker.nextCompletionAt();
+        if (next != Long.MAX_VALUE)
+            main.postDelayed(completionFinisher, Math.max(0, next - System.currentTimeMillis()));
+    }
+
+    private void finishPendingCompletions() {
+        for (CompletionTracker.Completion completion : tracker.completeDue(System.currentTimeMillis()))
+            notifyCompletion(completion);
+        persistWatched();
+        scheduleCompletionFinisher();
+        if (tracker.isEmpty()) stopMonitoring();
+        else ensureForeground();
+    }
+
     private void stopMonitoring() {
         main.removeCallbacks(poller);
+        main.removeCallbacks(completionFinisher);
         if (foreground) {
             stopForeground(STOP_FOREGROUND_REMOVE);
             foreground = false;

@@ -3348,6 +3348,36 @@ public class MainActivity extends Activity {
         return card.root;
     }
 
+    private void applyContextToolCard(ToolCard card, ContextEntry entry) {
+        JSONObject call = entry.toolCall;
+        JSONObject args = call.optJSONObject("arguments") == null ? new JSONObject() : call.optJSONObject("arguments");
+        card.startedAtMs = entry.time > 0 ? entry.time : card.startedAtMs;
+        if (args.has("timeoutMs")) card.timeoutMs = Math.max(0, args.optLong("timeoutMs"));
+        else if (args.has("timeout")) card.timeoutMs = Math.max(0, Math.round(args.optDouble("timeout") * 1000));
+
+        JSONObject result = entry.toolResult;
+        boolean finished = result != null;
+        boolean error = finished && result.optBoolean("isError");
+        card.finished = finished;
+        if (finished) {
+            long endedAt = result.optLong("timestamp", entry.time);
+            card.endedAtMs = endedAt > 0 ? endedAt : System.currentTimeMillis();
+            if (card.ticker != null) main.removeCallbacks(card.ticker);
+        }
+        String symbol = finished ? (error ? "×" : "✓") : "…";
+        card.header.setText(symbol + "  " + toolCallSummary(call.optString("name"), args));
+        card.header.setTextColor(finished ? (error ? DANGER : SUCCESS) : ACCENT);
+        card.root.setBackground(shape(finished ? (error ? TOOL_ERROR : TOOL_SUCCESS) : TOOL_PENDING));
+
+        String input = toolInputBody(call.optString("name"), args).trim();
+        String output = finished ? contextContentMarkdown(result.opt("content")).trim() : "";
+        String body = input.isEmpty() ? output : output.isEmpty() ? input : input + "\n\n" + output;
+        card.body.setText(body);
+        card.body.setTextColor(error ? DANGER : TEXT);
+        updateToolTiming(card);
+        refreshToolExpansionControl(card);
+    }
+
     private View appendContextEntry(ContextEntry entry) {
         if ("history".equals(entry.kind)) {
             TextView button = text(entry.source, 13, true);
@@ -3375,13 +3405,8 @@ public class MainActivity extends Activity {
         String id = call.optString("id");
         startTool(id, call.optString("name"), call.optJSONObject("arguments") == null ? new JSONObject() : call.optJSONObject("arguments"),
             java.time.Instant.ofEpochMilli(entry.time > 0 ? entry.time : System.currentTimeMillis()).toString());
-        if (entry.toolResult != null) {
-            JSONObject toolResult = entry.toolResult;
-            long endedAt = toolResult.optLong("timestamp", entry.time);
-            finishTool(id, call.optString("name"), contextContentMarkdown(toolResult.opt("content")), toolResult.optBoolean("isError"),
-                java.time.Instant.ofEpochMilli(endedAt > 0 ? endedAt : System.currentTimeMillis()).toString());
-        }
         ToolCard card = toolCards.get(id);
+        if (card != null) applyContextToolCard(card, entry);
         return card == null ? new View(this) : card.root;
     }
 
@@ -3489,7 +3514,15 @@ public class MainActivity extends Activity {
     private boolean updateContextEntry(int index, ContextEntry next) {
         ContextEntry old = contextEntries.get(index);
         boolean changed = !old.signature.equals(next.signature);
-        if (!old.kind.equals(next.kind) || (changed && "toolCall".equals(next.kind))) return false;
+        if (!old.kind.equals(next.kind)) return false;
+        if ("toolCall".equals(next.kind)) {
+            String id = old.toolCall == null ? "" : old.toolCall.optString("id");
+            ToolCard card = toolCards.get(id);
+            if (card == null || card.root != contextEntryViews.get(index)) return false;
+            if (changed) applyContextToolCard(card, next);
+            contextEntries.set(index, next);
+            return true;
+        }
         if (old.alwaysCard != null) {
             next.alwaysCard = old.alwaysCard;
             if (changed) {
