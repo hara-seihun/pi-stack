@@ -13,6 +13,14 @@ set -euo pipefail
 : "${PI_REMOTE_PRIVATE_DIR:?mountpoint required}"
 : "${CREDENTIALS_DIRECTORY:?systemd credentials required}"
 
+# This is a system service with User=, so systemd's %U is the system manager's
+# UID (root), not this process's UID. Derive the user runtime directory here;
+# audio and Proton Pass both need the real session bus and must never inherit
+# /run/user/0.
+runtime_dir="/run/user/$(id -u)"
+export XDG_RUNTIME_DIR="$runtime_dir"
+export DBUS_SESSION_BUS_ADDRESS="unix:path=$runtime_dir/bus"
+
 key="$CREDENTIALS_DIRECTORY/key"
 [[ -r $key ]] || { echo "no key credential" >&2; exit 78; }
 
