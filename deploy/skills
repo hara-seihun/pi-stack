@@ -37,7 +37,10 @@ as_root rsync -a --delete --chmod=D755,F644 "$stage/release/" "$dest/"
 while IFS= read -r skill; do
   target="$agent_dir/skills/$skill"
   if jq -e --arg role "$role" --arg skill "$skill" '.roles[$role] | index($skill) != null' "$manifest" >/dev/null; then
-    as_root ln -sfn "$dest/$skill" "$target"
+    if [[ ! -L $target || $(readlink "$target") != "$dest/$skill" ]]; then
+      as_root rm -rf -- "$target"
+      as_root ln -s "$dest/$skill" "$target"
+    fi
   elif [[ -L $target && $(readlink "$target") == "$dest/$skill" ]]; then
     as_root rm "$target"
   fi
