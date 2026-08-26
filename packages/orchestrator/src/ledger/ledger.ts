@@ -28,6 +28,26 @@ import type {
   UsageSource,
 } from "../calibrator/types.js";
 
+function validateTask(t: TaskSpec): void {
+  if ((t.demandCommand === undefined) === (t.demandConstant === undefined)) {
+    throw new Error(`task ${t.id}: exactly one of demandCommand/demandConstant required`);
+  }
+  const tiers = t.tiers.map((share) => share.tier);
+  if (tiers.length === 0 || new Set(tiers).size !== tiers.length) {
+    throw new Error(`task ${t.id}: tiers must be a non-empty list without duplicates`);
+  }
+  for (const share of t.tiers) {
+    if (!TIERS.includes(share.tier)) throw new Error(`task ${t.id}: unknown tier ${share.tier}`);
+    if (!Number.isFinite(share.weight) || share.weight <= 0) {
+      throw new Error(`task ${t.id}: tier ${share.tier} needs a positive weight`);
+    }
+  }
+  if (t.share !== undefined && (!Number.isFinite(t.share) || t.share <= 0)) {
+    throw new Error(`task ${t.id}: share must be positive`);
+  }
+  if (t.gate !== undefined) parseGate(t.gate);
+}
+
 /**
  * The ledger stores facts, not conclusions: provider meter readings and token
  * usage events. Calibration is always rebuilt by replaying those facts, so
@@ -845,23 +865,7 @@ export class Ledger {
   }
 
   upsertTask(t: TaskSpec): void {
-    if ((t.demandCommand === undefined) === (t.demandConstant === undefined)) {
-      throw new Error(`task ${t.id}: exactly one of demandCommand/demandConstant required`);
-    }
-    const tiers = t.tiers.map((share) => share.tier);
-    if (tiers.length === 0 || new Set(tiers).size !== tiers.length) {
-      throw new Error(`task ${t.id}: tiers must be a non-empty list without duplicates`);
-    }
-    for (const share of t.tiers) {
-      if (!TIERS.includes(share.tier)) throw new Error(`task ${t.id}: unknown tier ${share.tier}`);
-      if (!Number.isFinite(share.weight) || share.weight <= 0) {
-        throw new Error(`task ${t.id}: tier ${share.tier} needs a positive weight`);
-      }
-    }
-    if (t.share !== undefined && (!Number.isFinite(t.share) || t.share <= 0)) {
-      throw new Error(`task ${t.id}: share must be positive`);
-    }
-    if (t.gate !== undefined) parseGate(t.gate); // Validate syntax at write time.
+    validateTask(t);
     this.db
       .prepare(
         `INSERT INTO task (id, demand_command, demand_constant, gate, tiers, share, prompt, cwd,
@@ -903,6 +907,25 @@ export class Ledger {
   deleteTask(id: string): void {
     this.db.prepare("DELETE FROM task WHERE id = ?").run(id);
     this.db.prepare("DELETE FROM control WHERE key = ?").run(taskPauseKey(id));
+  }
+
+  /** Replace task definitions atomically while preserving lane pause controls. */
+  reconcileTasks(tasks: readonly TaskSpec[]): { upserted: number; deleted: string[] } {
+    const ids = tasks.map((task) => task.id);
+    if (new Set(ids).size !== ids.length) throw new Error("task manifest contains duplicate ids");
+    for (const task of tasks) validateTask(task);
+    const wanted = new Set(ids);
+    const deleted = this.tasks().map((task) => task.id).filter((id) => !wanted.has(id));
+    this.db.exec("BEGIN IMMEDIATE");
+    try {
+      for (const task of tasks) this.upsertTask(task);
+      for (const id of deleted) this.deleteTask(id);
+      this.db.exec("COMMIT");
+    } catch (thrown) {
+      this.db.exec("ROLLBACK");
+      throw thrown;
+    }
+    return { upserted: tasks.length, deleted };
   }
 
   tasks(): TaskSpec[] {

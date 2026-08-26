@@ -13,7 +13,10 @@ Host repositories own:
 - Pi Remote profiles and workspaces;
 - endpoint network access and SSH forwarding identities;
 - account configuration and credentials;
+- authoritative task manifests and their prompt/probe files;
 - mutable ledgers, sessions, uploads, and encrypted folders.
+
+A host points Orchestrator's operator config at its version-1 task manifest. Controller startup reconciles the complete set atomically, so replacing a host does not depend on remembered `task set` commands and a removed lane cannot linger in SQLite. Pause controls remain mutable ledger state and survive reconciliation.
 
 This repository owns build commands, package and skill roles, API contracts, and component tests. `deploy/runtime`, `deploy/orchestrator`, `deploy/remote`, and `deploy/tools` publish immutable artifacts and record the source commit beside them. `deploy/settings ROLE` reconciles Pi's ordered package list, and `deploy/skills ROLE` publishes and links the role's first-party skills.
 

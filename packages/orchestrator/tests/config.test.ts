@@ -61,6 +61,7 @@ describe("operator config", () => {
     const path = join(dir, "config.json");
     writeFileSync(path, JSON.stringify({
       ...CONFIG,
+      taskManifest: "tasks.json",
       providers: {
         ...CONFIG.providers,
         anthropic: {
@@ -75,6 +76,7 @@ describe("operator config", () => {
       },
     }));
     const loaded = loadConfig(path);
+    expect(loaded.taskManifest).toBe(join(dir, "tasks.json"));
     expect(loaded.providers.anthropic.meters[0]).toEqual({
       id: "anthropic-5h",
       drainedBy: ["default:cost", "opus:cost", "fable:cost"],

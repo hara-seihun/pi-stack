@@ -1,6 +1,6 @@
 import { readFileSync } from "node:fs";
 import { homedir } from "node:os";
-import { join } from "node:path";
+import { dirname, isAbsolute, join, resolve } from "node:path";
 import type { BrokerConfig, ModelCandidate } from "./broker/broker.js";
 import type { MeterSpec } from "./calibrator/types.js";
 import { catalogMeter, catalogModel, ORCHESTRATOR_CATALOG } from "./catalog.js";
@@ -61,6 +61,8 @@ export interface OrchestratorConfig {
   /** Launches advertised per tier per cycle: a ramp limiter, not a
    * concurrency limit. */
   readonly maxSlotsPerTier?: number;
+  /** Authoritative lane definitions reconciled at controller startup. */
+  readonly taskManifest?: string;
 }
 
 export function defaultConfigPath(): string {
@@ -124,7 +126,12 @@ export function loadConfig(path = defaultConfigPath()): OrchestratorConfig {
       },
     },
   ]));
-  const cfg: OrchestratorConfig = { ...document, providers, tiers };
+  const taskManifest = document.taskManifest === undefined
+    ? undefined
+    : isAbsolute(document.taskManifest)
+      ? document.taskManifest
+      : resolve(dirname(path), document.taskManifest);
+  const cfg: OrchestratorConfig = { ...document, providers, tiers, taskManifest };
   for (const tier of TIERS) {
     for (const candidate of cfg.tiers[tier] ?? []) {
       if (cfg.providers[candidate.provider] === undefined) {

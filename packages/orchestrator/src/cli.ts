@@ -10,6 +10,7 @@ import { Ledger } from "./ledger/ledger.js";
 import { Runner, bumpRunnerGeneration } from "./host/runner.js";
 import { Scheduler } from "./tasks/scheduler.js";
 import { TIERS, type Tier, type TierShare } from "./tasks/types.js";
+import { reconcileTaskManifest } from "./task-manifest.js";
 import { credentialedAccountIds } from "./auth/credentials.js";
 import { brokerConfig, cooldownPolicy, defaultConfigPath, loadConfig } from "./config.js";
 import { CURSOR_PROVIDER, CursorMeterSampler } from "./meters/cursor.js";
@@ -29,9 +30,8 @@ import {
 /**
  * Operator CLI. Thin by design: every command is a small read or write
  * against the ledger plus a scheduler evaluation; all policy lives in the
- * library modules. The daemon command additionally needs broker + host
- * configuration, which is deliberately not wired here yet — see README
- * (deployment configuration is the next roadmap step).
+ * library modules. The daemon additionally reconciles the deployment's task
+ * manifest before it starts scheduling.
  */
 
 const LEDGER_PATH =
@@ -248,6 +248,13 @@ function capacity(ledger: Ledger, args: string[]): void {
 async function daemon(ledger: Ledger, args: string[]): Promise<void> {
   const named = namedFlags("daemon", args, ["interval"]);
   const cfg = loadConfig();
+  if (cfg.taskManifest !== undefined) {
+    const result = reconcileTaskManifest(ledger, cfg.taskManifest);
+    console.log(
+      `reconciled ${result.upserted} task(s) from ${cfg.taskManifest}` +
+      (result.deleted.length === 0 ? "" : `; deleted ${result.deleted.join(", ")}`),
+    );
+  }
   const controller = new Controller(
     ledger,
     new Scheduler(ledger),
@@ -926,7 +933,15 @@ async function main(): Promise<void> {
           const id = rest[0] ?? fail("task delete <id>");
           ledger.deleteTask(id);
           console.log(`task ${id} deleted`);
-        } else fail("usage: task set|list|delete");
+        } else if (sub === "reconcile") {
+          const path = rest[0] ?? fail("task reconcile <manifest.json>");
+          if (rest.length !== 1) fail("task reconcile <manifest.json>");
+          const result = reconcileTaskManifest(ledger, path);
+          console.log(
+            `reconciled ${result.upserted} task(s)` +
+            (result.deleted.length === 0 ? "" : `; deleted ${result.deleted.join(", ")}`),
+          );
+        } else fail("usage: task set|list|delete|reconcile");
         break;
       }
       case "spawn":
@@ -988,7 +1003,7 @@ async function main(): Promise<void> {
             "               [--opening file1,file2] [--self-paced true|false] lived opening exchange",
             "               [--opening-probe CMD]  command whose JSON stdout fills {{key}} placeholders",
             "                                      in the opening messages, run fresh at every launch",
-            "  task list | task delete <id>",
+            "  task list | task delete <id> | task reconcile <manifest.json>",
             "  account list | account add <id> --provider F [--label L] [--shared true]",
             "  account remove <id>          drop an account that left this machine",
 

@@ -173,8 +173,16 @@ only weights recent windows.
 ## Tasks: demand, gates, tiers (`src/tasks/`)
 
 A task is an action plus two observable predicates: **demand** (is there
-work right now?) and, eventually, completion. Three launch-side fields
-describe scheduling:
+work right now?) and, eventually, completion. A deployment may set
+`taskManifest` in operator config to an authoritative version-1 JSON manifest.
+The controller resolves prompt, demand-command, opening, and opening-probe file
+references relative to that manifest, upserts the complete set atomically, and
+deletes definitions absent from it while preserving lane pause controls. Run
+`task reconcile <manifest.json>` to apply a file without restarting the
+controller. `task set` remains useful for experiments, but the next manifest
+reconciliation restores the declared state.
+
+Three launch-side fields describe scheduling:
 
 - `doctrineUrl` (`task set … --doctrine-url URL`): a document the host
   fetches at launch and pins into every session's *system prompt* for the
@@ -190,9 +198,9 @@ describe scheduling:
   as a real user turn, in order, before the task prompt; the agent answers
   each message and may use tools. Pi stores the exchange as ordinary session
   messages and native compaction summarizes it with the rest of the
-  conversation. Message bodies are captured into the ledger row at set time,
-  so a launch never changes voice because a fetch failed; re-run
-  `task set` to pick up file edits. An opening may be a template:
+  conversation. Message bodies are captured into the ledger row at reconciliation
+  time, so a launch never changes voice because a fetch failed; reconcile the
+  task manifest to pick up file edits. An opening may be a template:
   `--opening-probe CMD` names a command that runs fresh at every launch and
   prints one JSON object whose values fill `{{key}}` placeholders. The
   math-frontier lane samples a different famous open problem per session this
