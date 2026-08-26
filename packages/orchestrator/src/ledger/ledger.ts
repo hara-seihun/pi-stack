@@ -569,7 +569,7 @@ export class Ledger {
    * would lose its subject mid-run. */
   removeAccount(id: string): { usageEvents: number; meterReadings: number } {
     const known = this.db.prepare("SELECT 1 FROM account WHERE id = ?").get(id);
-    if (known === undefined) throw new Error(`unknown account ${id}`);
+    if (known === undefined || known === null) throw new Error(`unknown account ${id}`);
     const inFlight = this.db
       .prepare("SELECT COUNT(*) AS n FROM run WHERE account_id = ? AND state IN ('pending', 'running')")
       .get(id) as { n: number };
@@ -688,8 +688,8 @@ export class Ledger {
         `SELECT at, used_percent, reset_at FROM meter_reading
          WHERE account_id = ? AND meter_id = ? ORDER BY at DESC LIMIT 1`,
       )
-      .get(accountId, meterId) as { at: number; used_percent: number; reset_at: number | null } | undefined;
-    return row === undefined
+      .get(accountId, meterId) as { at: number; used_percent: number; reset_at: number | null } | null | undefined;
+    return row === undefined || row === null
       ? undefined
       : { at: row.at, usedPercent: row.used_percent, ...(row.reset_at === null ? {} : { resetAt: row.reset_at }) };
   }
@@ -1268,8 +1268,8 @@ export class Ledger {
         "UPDATE run SET check_ins = check_ins + 1 WHERE id = ? AND check_ins < ? " +
           "RETURNING check_ins",
       )
-      .get(id, max) as { check_ins: number } | undefined;
-    return row !== undefined;
+      .get(id, max) as { check_ins: number } | null | undefined;
+    return row !== undefined && row !== null;
   }
 
   /** Bind the root Pi session to its run. Repeating the report is idempotent.

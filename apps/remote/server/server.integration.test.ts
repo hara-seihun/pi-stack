@@ -1028,6 +1028,7 @@ describe("web and supervisor integration", () => {
     });
     const health = await api("GET", "/v1/health");
     expect(health.value.environmentId).toBe("local");
+    expect(health.value.version).toBe(JSON.parse(readFileSync(join(import.meta.dir, "../package.json"), "utf8")).version);
   });
 
   test("offers each destination only the models it can actually run", async () => {
