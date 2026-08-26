@@ -34,19 +34,22 @@ PI_STACK_LOCKFILE_MODULE="$lockfile_module" \
 PI_STACK_RUNTIME_CURRENT="$runtime_root/current" \
 PI_STACK_ORCHESTRATOR_PACKAGE="$orchestrator" \
 PI_STACK_REMOTE_PACKAGE="$remote" \
+PI_STACK_CLAUDE_CODE_USE_PACKAGE="${PI_STACK_CLAUDE_CODE_USE_PACKAGE:-}" \
+PI_STACK_STATE_COMPACTOR_PACKAGE="${PI_STACK_STATE_COMPACTOR_PACKAGE:-}" \
+PI_STACK_BASH_TIMEOUT_GUARD_PACKAGE="${PI_STACK_BASH_TIMEOUT_GUARD_PACKAGE:-}" \
 PI_STACK_PI_CURSOR_PACKAGE="${PI_STACK_PI_CURSOR_PACKAGE:-}" \
 node --input-type=module <<'NODE'
 import { randomUUID } from "node:crypto";
-import { existsSync, readFileSync, renameSync, rmSync, writeFileSync } from "node:fs";
+import { chownSync, existsSync, readFileSync, renameSync, rmSync, statSync, writeFileSync } from "node:fs";
 
 const manifest = JSON.parse(readFileSync(process.env.PI_STACK_MANIFEST, "utf8"));
 const names = manifest.roles[process.env.PI_STACK_ROLE];
 const runtime = process.env.PI_STACK_RUNTIME_CURRENT;
 const paths = {
   orchestrator: process.env.PI_STACK_ORCHESTRATOR_PACKAGE,
-  "claude-code-use": `${runtime}/extensions/pi-claude-code-use`,
-  "state-compactor": `${runtime}/extensions/state-compactor`,
-  "bash-timeout-guard": `${runtime}/extensions/bash-timeout-guard`,
+  "claude-code-use": process.env.PI_STACK_CLAUDE_CODE_USE_PACKAGE || `${runtime}/extensions/pi-claude-code-use`,
+  "state-compactor": process.env.PI_STACK_STATE_COMPACTOR_PACKAGE || `${runtime}/extensions/state-compactor`,
+  "bash-timeout-guard": process.env.PI_STACK_BASH_TIMEOUT_GUARD_PACKAGE || `${runtime}/extensions/bash-timeout-guard`,
   "pi-cursor": process.env.PI_STACK_PI_CURSOR_PACKAGE,
   remote: process.env.PI_STACK_REMOTE_PACKAGE,
 };
@@ -60,6 +63,7 @@ const observer = names.indexOf(manifest.contextObserver);
 if (observer !== -1 && observer !== names.length - 1) throw new Error(`${manifest.contextObserver} must load last`);
 const { default: lockfile } = await import(process.env.PI_STACK_LOCKFILE_MODULE);
 const path = process.env.PI_STACK_SETTINGS;
+const ownership = statSync(path);
 const release = await lockfile.lock(path, {
   realpath: false,
   retries: { retries: 50, factor: 1, minTimeout: 20, maxTimeout: 20 },
@@ -74,6 +78,7 @@ try {
   const temporary = `${path}.${process.pid}.${randomUUID()}.tmp`;
   try {
     writeFileSync(temporary, `${JSON.stringify(next, null, 2)}\n`, { mode: 0o600 });
+    chownSync(temporary, ownership.uid, ownership.gid);
     renameSync(temporary, path);
   } finally {
     rmSync(temporary, { force: true });
