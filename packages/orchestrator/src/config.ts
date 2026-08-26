@@ -3,7 +3,7 @@ import { homedir } from "node:os";
 import { join } from "node:path";
 import type { BrokerConfig, ModelCandidate } from "./broker/broker.js";
 import type { MeterSpec } from "./calibrator/types.js";
-import { catalogMeter, catalogModel } from "./catalog.js";
+import { catalogMeter, catalogModel, ORCHESTRATOR_CATALOG } from "./catalog.js";
 import { type CooldownPolicy, rateLimitCooldownMs } from "./provider-errors.js";
 import { TIERS, type Tier } from "./tasks/types.js";
 
@@ -71,12 +71,13 @@ export function defaultConfigPath(): string {
 }
 
 type CandidateDocument = ModelCandidate | string | { readonly id: string; readonly thinking?: string };
+type MeterDocument = string | {
+  readonly id: string;
+  readonly drainedBy?: readonly string[];
+  readonly windowHours?: number;
+};
 type ProviderDocument = Omit<ProviderConfig, "meters"> & {
-  readonly meters: readonly {
-    readonly id: string;
-    readonly drainedBy: readonly string[];
-    readonly windowHours?: number;
-  }[];
+  readonly meters: readonly MeterDocument[];
 };
 type ConfigDocument = Omit<OrchestratorConfig, "tiers" | "providers"> & {
   readonly tiers: Readonly<Record<Tier, readonly CandidateDocument[]>>;
@@ -102,13 +103,25 @@ export function loadConfig(path = defaultConfigPath()): OrchestratorConfig {
     name,
     {
       ...provider,
-      meters: provider.meters.map((meter) => {
-        const windowHours = meter.windowHours ?? catalogMeter(meter.id)?.windowHours;
-        if (windowHours === undefined) {
-          throw new Error(`config: provider ${name} meter ${meter.id} needs windowHours or a catalog definition`);
+      meters: provider.meters.map((raw) => {
+        const id = typeof raw === "string" ? raw : raw.id;
+        const known = catalogMeter(id);
+        if (known !== undefined && known.provider !== name) {
+          throw new Error(`config: meter ${id} belongs to provider ${known.provider}, not ${name}`);
         }
-        return { ...meter, windowHours };
+        const drainedBy = (typeof raw === "string" ? undefined : raw.drainedBy) ?? known?.drainedBy;
+        const windowHours = (typeof raw === "string" ? undefined : raw.windowHours) ?? known?.windowHours;
+        if (drainedBy === undefined || windowHours === undefined) {
+          throw new Error(`config: provider ${name} meter ${id} needs drainedBy and windowHours or a catalog definition`);
+        }
+        return { id, drainedBy, windowHours };
       }),
+      modelClasses: {
+        ...Object.fromEntries(ORCHESTRATOR_CATALOG.models
+          .filter((model) => model.provider === name && model.meterClass !== undefined)
+          .map((model) => [model.model, model.meterClass!])),
+        ...(provider.modelClasses ?? {}),
+      },
     },
   ]));
   const cfg: OrchestratorConfig = { ...document, providers, tiers };

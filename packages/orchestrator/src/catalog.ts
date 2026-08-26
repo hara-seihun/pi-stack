@@ -11,10 +11,14 @@ export interface CatalogModel extends ModelCandidate {
   readonly aliases: readonly string[];
   readonly icon: string;
   readonly accent: string;
+  /** Usage class when this model drains a provider meter separately. */
+  readonly meterClass?: string;
 }
 
 export interface CatalogMeter {
   readonly id: string;
+  readonly provider: string;
+  readonly drainedBy: readonly string[];
   readonly windowHours: number;
 }
 
@@ -47,22 +51,22 @@ const DAY = 24 * HOUR;
 
 export const ORCHESTRATOR_CATALOG: OrchestratorCatalog = {
   models: [
-    { id: "sol", provider: "openai-codex", model: "gpt-5.6-sol", thinking: "xhigh", label: "SOL", aliases: ["sol"], icon: "sol", accent: "#5a6673" },
-    { id: "luna", provider: "openai-codex", model: "gpt-5.6-luna", thinking: "max", label: "LUNA", aliases: ["luna"], icon: "luna", accent: "#5a6673" },
-    { id: "terra", provider: "openai-codex", model: "gpt-5.6-terra", thinking: "max", label: "TERRA", aliases: ["terra"], icon: "terra", accent: "#5a6673" },
-    { id: "opus", provider: "anthropic", model: "claude-opus-5", thinking: "xhigh", label: "OPUS", aliases: ["opus"], icon: "opus", accent: "#d9663d" },
-    { id: "fable", provider: "anthropic", model: "claude-fable-5", thinking: "high", label: "FABLE", aliases: ["fable"], icon: "fable", accent: "#e6a23c" },
+    { id: "sol", provider: "openai-codex", model: "gpt-5.6-sol", thinking: "xhigh", label: "SOL", aliases: ["sol"], icon: "sol", accent: "#5a6673", meterClass: "sol" },
+    { id: "luna", provider: "openai-codex", model: "gpt-5.6-luna", thinking: "max", label: "LUNA", aliases: ["luna"], icon: "luna", accent: "#5a6673", meterClass: "luna" },
+    { id: "terra", provider: "openai-codex", model: "gpt-5.6-terra", thinking: "max", label: "TERRA", aliases: ["terra"], icon: "terra", accent: "#5a6673", meterClass: "terra" },
+    { id: "opus", provider: "anthropic", model: "claude-opus-5", thinking: "xhigh", label: "OPUS", aliases: ["opus"], icon: "opus", accent: "#d9663d", meterClass: "opus" },
+    { id: "fable", provider: "anthropic", model: "claude-fable-5", thinking: "high", label: "FABLE", aliases: ["fable"], icon: "fable", accent: "#e6a23c", meterClass: "fable" },
     { id: "sonnet", provider: "anthropic", model: "claude-sonnet", thinking: "high", label: "SONNET", aliases: ["sonnet"], icon: "sonnet", accent: "#d9663d" },
     { id: "grok", provider: "cursor", model: "grok-4.6", thinking: "xhigh", label: "GROK", aliases: ["grok"], icon: "grok", accent: "#111111" },
     { id: "pro", provider: "chatgpt-pro", model: "gpt-5-6-pro-literal", thinking: "max", label: "PRO", aliases: ["pro", "gpt-5-6-pro", "gpt-5.6-pro"], icon: "pro", accent: "#5a6673" },
   ],
   meters: [
-    { id: "codex-5h", windowHours: 5 },
-    { id: "codex-7d", windowHours: 168 },
-    { id: "anthropic-5h", windowHours: 5 },
-    { id: "anthropic-7d", windowHours: 168 },
-    { id: "anthropic-7d_oi", windowHours: 168 },
-    { id: "cursor-month", windowHours: 720 },
+    { id: "codex-5h", provider: "openai-codex", drainedBy: ["luna:cost", "sol:cost", "terra:cost"], windowHours: 5 },
+    { id: "codex-7d", provider: "openai-codex", drainedBy: ["luna:cost", "sol:cost", "terra:cost"], windowHours: 168 },
+    { id: "anthropic-5h", provider: "anthropic", drainedBy: ["default:cost", "opus:cost", "fable:cost"], windowHours: 5 },
+    { id: "anthropic-7d", provider: "anthropic", drainedBy: ["default:cost", "opus:cost", "fable:cost"], windowHours: 168 },
+    { id: "anthropic-7d_oi", provider: "anthropic", drainedBy: ["fable:cost"], windowHours: 168 },
+    { id: "cursor-month", provider: "cursor", drainedBy: ["default:cost"], windowHours: 720 },
   ],
   agentOrder: ["sol", "luna", "terra", "pro", "fable", "opus", "grok", "sonnet"],
   plans: [

@@ -64,8 +64,8 @@ describe("operator config", () => {
       providers: {
         ...CONFIG.providers,
         anthropic: {
-          ...CONFIG.providers.anthropic,
-          meters: [{ id: "anthropic-5h", drainedBy: ["default:cost", "opus:cost", "fable:cost"] }],
+          meters: ["anthropic-5h"],
+          costWeights: CONFIG.providers.anthropic.costWeights,
         },
       },
       tiers: {
@@ -75,7 +75,15 @@ describe("operator config", () => {
       },
     }));
     const loaded = loadConfig(path);
-    expect(loaded.providers.anthropic.meters[0]?.windowHours).toBe(5);
+    expect(loaded.providers.anthropic.meters[0]).toEqual({
+      id: "anthropic-5h",
+      drainedBy: ["default:cost", "opus:cost", "fable:cost"],
+      windowHours: 5,
+    });
+    expect(loaded.providers.anthropic.modelClasses).toMatchObject({
+      "claude-fable-5": "fable",
+      "claude-opus-5": "opus",
+    });
     expect(loaded.tiers).toEqual({
       light: [{ provider: "openai-codex", model: "gpt-5.6-luna", thinking: "max" }],
       standard: [{ provider: "anthropic", model: "claude-opus-5", thinking: "high" }],

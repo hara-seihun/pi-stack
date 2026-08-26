@@ -138,11 +138,13 @@ Codex account was permanently uncalibrated, which the broker correctly reads as
 bootstrap and holds to one concurrent session per account — seven Pro accounts
 at 8–23% of their weekly plans were the whole fleet's ceiling until the sampler
 existed. Codex reports its windows with a length, so **window length names the
-meter**: the operator config declares meters by window hours, a reported window
-is matched to the meter of that length, and an undeclared window is reported
-rather than guessed at, because a mis-named meter would calibrate one plan's
-drain against another's allowance. Model-scoped `additional_rate_limits` are
-not the account plan and are not read.
+meter**: the shared catalog owns each known meter's provider, drain classes,
+and window hours; operator config names those meters by id. A private meter
+must declare the same fields in full. A reported window is matched to the
+meter of that length, and an undeclared window is reported rather than guessed
+at, because a mis-named meter would calibrate one plan's drain against another's
+allowance. Model-scoped `additional_rate_limits` are not the account plan and
+are not read.
 
 Readings are spaced by a sampling interval, only percentages are recorded (the
 dollar "included usage" figure Cursor reports gates nothing — see
