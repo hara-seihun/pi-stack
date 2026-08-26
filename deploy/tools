@@ -43,6 +43,7 @@ for tool in "${selected[@]}"; do
     "$stage/release/$tool/$entry" --help >/dev/null
   done < <(jq -r --arg tool "$tool" '.tools[] | select(.id == $tool) | .commands[] | [.name,.entry] | @tsv' config/tools.json)
 done
+printf '%s\n' "$(git rev-parse HEAD)" > "$stage/release/.pi-stack-commit"
 
 as_root() {
   if [[ $EUID == 0 || ${PI_STACK_DEPLOY_NO_SUDO:-0} == 1 ]]; then "$@"; else sudo -n "$@"; fi
