@@ -46,6 +46,14 @@ async function waitFor<T>(read: () => Promise<T>, accept: (value: T) => boolean,
   throw new Error(`Timed out waiting for state; last value: ${JSON.stringify(value)}`);
 }
 
+function readJsonLines(path: string): any[] {
+  if (!existsSync(path)) return [];
+  const content = readFileSync(path, "utf8");
+  const completeEnd = content.lastIndexOf("\n");
+  if (completeEnd < 0) return [];
+  return content.slice(0, completeEnd).split("\n").filter(Boolean).map((line) => JSON.parse(line));
+}
+
 async function startServer() {
   server = Bun.spawn([process.execPath, join(import.meta.dir, "server.ts")], {
     cwd: import.meta.dir,
@@ -1195,17 +1203,14 @@ describe("web and supervisor integration", () => {
       (session) => session.queuedMessages?.some((message: any) => message.text === "do this later"),
     );
     expect(beforePromotion).toMatchObject({ steeringQueued: 1, followUpQueued: 1 });
-    const rpcBeforePromotion = existsSync(fakeRpcLog)
-      ? readFileSync(fakeRpcLog, "utf8").trim().split("\n").filter(Boolean).map((line) => JSON.parse(line))
-        .filter((entry: any) => entry.sessionId === id)
-      : [];
+    const rpcBeforePromotion = readJsonLines(fakeRpcLog)
+      .filter((entry: any) => entry.sessionId === id);
     expect(rpcBeforePromotion.some((entry: any) => entry.type === "follow_up")).toBe(false);
     const queued = beforePromotion.queuedMessages.find((message: any) => message.text === "do this later");
     const promoted = await api("POST", `/v1/sessions/${id}/queue/${queued.id}/steer`, {});
     expect(promoted.value).toMatchObject({ ok: true, delivery: "steer" });
     await waitFor(
-      async () => existsSync(fakeRpcLog) ? readFileSync(fakeRpcLog, "utf8").trim().split("\n").filter(Boolean).map((line) => JSON.parse(line))
-        .filter((entry: any) => entry.sessionId === id) : [],
+      async () => readJsonLines(fakeRpcLog).filter((entry: any) => entry.sessionId === id),
       (entries) => entries.some((entry: any) => entry.type === "steer" && entry.message === "change direction")
         && entries.some((entry: any) => entry.type === "steer" && entry.message === "do this later"),
     );
@@ -1257,10 +1262,8 @@ describe("web and supervisor integration", () => {
     const alreadyCancelled = await api("DELETE", `/v1/sessions/${id}/queue/${editMessage.id}`);
     expect(alreadyCancelled).toMatchObject({ status: 409, value: { error: "Message has already started" } });
 
-    const commands = existsSync(fakeRpcLog)
-      ? readFileSync(fakeRpcLog, "utf8").trim().split("\n").filter(Boolean).map((line) => JSON.parse(line))
-        .filter((entry: any) => entry.sessionId === id)
-      : [];
+    const commands = readJsonLines(fakeRpcLog)
+      .filter((entry: any) => entry.sessionId === id);
     expect(commands.some((entry: any) => ["cancel this message", "edit this message"].includes(entry.message))).toBe(false);
     await api("DELETE", `/v1/sessions/${id}`);
   }, 15_000);
@@ -1305,7 +1308,7 @@ describe("web and supervisor integration", () => {
     expect(events.events.filter((event: any) => event.type === "assistant").map((event: any) => event.text))
       .toEqual(["current finished", "later ran"]);
     expect(events.session).toMatchObject({ state: "IDLE", queuedMessages: [] });
-    const commands = readFileSync(fakeRpcLog, "utf8").trim().split("\n").filter(Boolean).map((line) => JSON.parse(line))
+    const commands = readJsonLines(fakeRpcLog)
       .filter((entry: any) => entry.sessionId === id && entry.message === "later-run");
     expect(commands.map((entry: any) => entry.type)).toEqual(["prompt"]);
   }, 20_000);
@@ -1319,8 +1322,10 @@ describe("web and supervisor integration", () => {
     const requestId = crypto.randomUUID();
     const result = await api("POST", `/v1/sessions/${id}/command`, { requestId, name: "compact" });
     expect(result).toMatchObject({ status: 202, value: { accepted: true, command: "compact" } });
-    const rpcCommands = readFileSync(fakeRpcLog, "utf8").trim().split("\n").filter(Boolean).map((line) => JSON.parse(line))
-      .filter((entry: any) => entry.sessionId === id);
+    const rpcCommands = await waitFor(
+      async () => readJsonLines(fakeRpcLog).filter((entry: any) => entry.sessionId === id),
+      (entries) => entries.some((entry: any) => entry.type === "compact"),
+    );
     expect(rpcCommands.some((entry: any) => entry.type === "compact")).toBe(true);
     const events = await api("GET", `/v1/sessions/${id}/events?after=0`);
     expect(events.value.events.some((event: any) => event.type === "user")).toBe(false);
@@ -1420,7 +1425,7 @@ describe("web and supervisor integration", () => {
     const work = ledger.query("SELECT state FROM work_items WHERE session_id=? ORDER BY event_seq DESC LIMIT 1").get(id) as any;
     ledger.close();
     expect(work.state).toBe("cancelled");
-    const commands = existsSync(fakeRpcLog) ? readFileSync(fakeRpcLog, "utf8").trim().split("\n").filter(Boolean).map((line) => JSON.parse(line)) : [];
+    const commands = readJsonLines(fakeRpcLog);
     expect(commands.some((entry: any) => entry.sessionId === id && entry.type === "prompt")).toBe(false);
   }, 15_000);
 
@@ -1537,7 +1542,7 @@ describe("web and supervisor integration", () => {
     expect(events.events.some((event: any) => event.type === "notice" && event.text.includes("Agent disconnected (exit 17)"))).toBe(true);
     expect(events.events.some((event: any) => event.type === "notice" && event.text === "Agent process failed")).toBe(false);
     expect(events.events.filter((event: any) => event.type === "user" && event.text === "crash-once")).toHaveLength(1);
-    const recoveryCommands = readFileSync(fakeRpcLog, "utf8").trim().split("\n").filter(Boolean).map((line) => JSON.parse(line))
+    const recoveryCommands = readJsonLines(fakeRpcLog)
       .filter((entry: any) => entry.sessionId === id && entry.type === "prompt");
     expect(recoveryCommands).toHaveLength(2);
     expect(recoveryCommands[1].message).toContain("Continue the unfinished work");
@@ -1589,7 +1594,7 @@ describe("web and supervisor integration", () => {
     const work = ledger.query("SELECT state,resume,attempts FROM work_items WHERE session_id=? AND text='restart-once'").all(id) as any[];
     ledger.close();
     expect(work).toEqual([{ state: "complete", resume: 1, attempts: 0 }]);
-    const prompts = readFileSync(fakeRpcLog, "utf8").trim().split("\n").filter(Boolean).map((line) => JSON.parse(line))
+    const prompts = readJsonLines(fakeRpcLog)
       .filter((entry: any) => entry.sessionId === id && entry.type === "prompt");
     expect(prompts).toHaveLength(2);
     expect(prompts[1].message).toContain("Continue the unfinished work");
