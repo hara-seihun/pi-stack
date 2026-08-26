@@ -20,7 +20,11 @@ npm test --workspace=pi-remote
 }
 
 mkdir -p "$stage/release/node_modules"
-rsync -a --chmod=D755,F644 apps/remote/package.json apps/remote/server apps/remote/web "$stage/release/"
+rsync -a --chmod=D755,Fu=rwX,Fgo=rX apps/remote/package.json apps/remote/server apps/remote/web "$stage/release/"
+test -x "$stage/release/server/pi-remote-launch" || {
+  printf 'staged Pi Remote launch wrapper is not executable\n' >&2
+  exit 1
+}
 ln -s "$orchestrator" "$stage/release/node_modules/pi-orchestrator"
 printf '%s\n' "$(git rev-parse HEAD)" > "$stage/release/.pi-stack-commit"
 
@@ -28,5 +32,5 @@ as_root() {
   if [[ $EUID == 0 || ${PI_STACK_DEPLOY_NO_SUDO:-0} == 1 ]]; then "$@"; else sudo -n "$@"; fi
 }
 as_root install -d -m 755 "$dest"
-as_root rsync -a --delete --chmod=D755,F644 "$stage/release/" "$dest/"
+as_root rsync -a --delete --chmod=D755,Fu=rwX,Fgo=rX "$stage/release/" "$dest/"
 printf 'deployed Pi Remote from %s to %s\n' "$(git rev-parse HEAD)" "$dest"
