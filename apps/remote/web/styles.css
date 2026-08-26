@@ -214,12 +214,8 @@ button:focus-visible, input:focus-visible, textarea:focus-visible, select:focus-
 .paste-text-actions .accent { color: var(--bg); background: var(--accent); }
 
 .tool-card { margin-top: 18px; padding: 11px 13px; background: var(--pending); user-select: text; }
-.tool-card.delegate { border-left: 3px solid #cba6f7; background: #30263a; }
-.tool-card.delegate::before { content: "NESTED AGENT"; display: block; margin-bottom: 5px; color: #cba6f7; font-size: 10px; font-weight: 850; letter-spacing: .08em; }
 .tool-card.success { background: var(--tool-ok); }
 .tool-card.error { background: var(--tool-error); }
-.tool-card.delegate.success { background: color-mix(in srgb, var(--tool-ok) 78%, #30263a); }
-.tool-card.delegate.error { background: color-mix(in srgb, var(--tool-error) 78%, #30263a); }
 .tool-header, .tool-body { margin: 0; font: 14px/1.4 ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; white-space: pre-wrap; overflow-wrap: anywhere; }
 .tool-header { color: var(--accent); font-weight: 800; }
 .tool-card.success .tool-header { color: var(--success); }

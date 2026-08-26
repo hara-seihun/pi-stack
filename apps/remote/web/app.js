@@ -474,7 +474,7 @@ function updateComposer() {
   ui.attach.disabled = !state.selectedId || uploading;
   ui.pasteText.disabled = !state.selectedId || uploading;
   ui.voice.disabled = !state.selectedId;
-  ui.prompt.placeholder = `Message ${state.selectedName} · it can delegate tasks`;
+  ui.prompt.placeholder = `Message ${state.selectedName}`;
   ui.prompt.style.height = "auto";
   ui.prompt.style.height = `${Math.min(180, Math.max(48, ui.prompt.scrollHeight))}px`;
   updateQueueStatus();
@@ -1204,20 +1204,12 @@ function toolSummary(name, args) {
   }
   if (tool === "edit") return `edit ${shortPath(path)}${Array.isArray(args.edits) && args.edits.length > 1 ? ` · ${args.edits.length} changes` : ""}`;
   if (tool === "write") return `write ${shortPath(path)}`;
-  if (tool === "delegate") {
-    const task = String(args.task || "").replace(/\s+/g, " ").trim();
-    return `Nested agent · ${task || "delegated task"}`;
-  }
   return tool;
 }
 function toolInput(name, args) {
   const tool = (name || "").toLowerCase();
   if (tool === "write") return args.content || "";
   if (tool === "edit" && Array.isArray(args.edits)) return args.edits.slice(0, 3).map((edit) => `− ${edit.oldText || ""}\n+ ${edit.newText || ""}`).join("\n");
-  if (tool === "delegate") {
-    const cwd = args.cwd ? `\n\nWorking directory\n${args.cwd}` : "\n\nWorking directory\nInherited from parent";
-    return `Task\n${args.task || ""}${cwd}`;
-  }
   return ["bash", "read", "grep", "find", "ls"].includes(tool) ? "" : formatJson(args);
 }
 function eventMillis(value) { const parsed = Date.parse(value); return Number.isFinite(parsed) ? parsed : Date.now(); }
@@ -1237,9 +1229,7 @@ function startTool(event) {
   const id = event.toolCallId || crypto.randomUUID();
   if (state.toolCards.has(id)) return state.toolCards.get(id);
   const args = event.args || {};
-  const delegated = String(event.name || "").toLowerCase() === "delegate";
-  const root = node("div", `tool-card collapsed${delegated ? " delegate" : ""}`);
-  if (delegated) root.setAttribute("aria-label", "Nested agent delegation");
+  const root = node("div", "tool-card collapsed");
   const header = node("pre", "tool-header", `…  ${toolSummary(event.name, args)}`);
   const timing = node("div", "tool-timing");
   const body = node("pre", "tool-body", toolInput(event.name, args));

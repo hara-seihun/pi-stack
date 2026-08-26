@@ -10,13 +10,6 @@ Each runtime also loads `server/thread-context.ts`. The extension offers initial
 
 On hosts that load `pi-runtime`'s state-compactor, the extension keeps previously read mandatory skill contents in the compacted provider view. It validates those contents against the current files and asks the agent to finish a paged read or refresh a changed file instead of silently retaining stale instructions.
 
-Pi sessions may delegate a self-contained task to one isolated nested agent.
-Both clients advertise that capability in the composer and render `delegate`
-as a distinct **Nested agent** tool card: the full delegated task and working
-directory remain expandable while the child's single final answer lands in the
-same card. Nested execution is owned by pi-orchestrator; Pi Remote only renders
-the tool calls and results already present in Pi's model context.
-
 ## Requirements
 
 - [Bun](https://bun.sh/)
