@@ -21,12 +21,10 @@ the agent's skill directory.
 
 ## Deployment on a machine
 
-Clone, then symlink each desired skill into the agent's global skill
-directory, e.g.:
+[`config/skill-sets.json`](../config/skill-sets.json) declares each host role. Publish all skill files under `/srv/pi/skills` and link the selected role into an agent directory with:
 
 ```bash
-ln -sn ~/projects/pi-stack/skills/software-engineering ~/.pi/agent/skills/software-engineering
+deploy/skills converge-user
 ```
 
-The Pi stack checkout is the source of truth. Both deployed hosts consume the
-same reviewed commit.
+Set `PI_AGENT_DIR` when deploying another user, such as the GMKtec fleet account. The deployed directory records the Pi stack commit.

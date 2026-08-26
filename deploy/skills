@@ -1,0 +1,45 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+root=$(cd "$(dirname "$0")/.." && pwd)
+if [[ ${PI_STACK_ALLOW_DIRTY:-0} != 1 && -n $(git -C "$root" status --porcelain) ]]; then
+  echo "refusing to deploy an uncommitted Pi stack; set PI_STACK_ALLOW_DIRTY=1 only for a temporary test" >&2
+  exit 65
+fi
+role=${1:-}
+manifest="$root/config/skill-sets.json"
+jq -e --arg role "$role" '.roles[$role] | type == "array"' "$manifest" >/dev/null || {
+  echo "usage: deploy/skills {gmktec-user|gmktec-fleet|converge-user}" >&2
+  exit 64
+}
+dest=${PI_STACK_SKILLS_DEST:-/srv/pi/skills}
+agent_dir=${PI_AGENT_DIR:-${PI_CODING_AGENT_DIR:-$HOME/.pi/agent}}
+stage=$(mktemp -d "${TMPDIR:-/tmp}/pi-skills.XXXXXXXX")
+trap 'rm -rf "$stage"' EXIT
+
+cd "$root"
+node scripts/check-skill-sets.mjs
+mkdir -p "$stage/release"
+while IFS= read -r skill; do
+  rsync -a --chmod=D755,F644 "skills/$skill/" "$stage/release/$skill/"
+done < <(jq -r '.skills[]' "$manifest")
+printf '%s\n' "$(git rev-parse HEAD)" > "$stage/release/.pi-stack-commit"
+
+as_root() {
+  if [[ $EUID == 0 || ${PI_STACK_DEPLOY_NO_SUDO:-0} == 1 ]]; then "$@"; else sudo -n "$@"; fi
+}
+agent_home=$(dirname "$(dirname "$agent_dir")")
+agent_owner=$(stat -c %U "$agent_home")
+agent_group=$(stat -c %G "$agent_home")
+as_root install -d -m 755 "$dest"
+as_root install -d -m 755 -o "$agent_owner" -g "$agent_group" "$agent_dir" "$agent_dir/skills"
+as_root rsync -a --delete --chmod=D755,F644 "$stage/release/" "$dest/"
+while IFS= read -r skill; do
+  target="$agent_dir/skills/$skill"
+  if jq -e --arg role "$role" --arg skill "$skill" '.roles[$role] | index($skill) != null' "$manifest" >/dev/null; then
+    as_root ln -sfn "$dest/$skill" "$target"
+  elif [[ -L $target && $(readlink "$target") == "$dest/$skill" ]]; then
+    as_root rm "$target"
+  fi
+done < <(jq -r '.skills[]' "$manifest")
+printf 'deployed %s Pi skills from %s to %s\n' "$role" "$(git rev-parse HEAD)" "$dest"

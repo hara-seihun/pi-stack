@@ -15,7 +15,7 @@ Host repositories own:
 - account configuration and credentials;
 - mutable ledgers, sessions, uploads, and encrypted folders.
 
-This repository owns build commands, package order, API contracts, and component tests. `deploy/runtime`, `deploy/orchestrator`, `deploy/remote`, and `deploy/tools` publish immutable artifacts and record the source commit beside them.
+This repository owns build commands, package and skill roles, API contracts, and component tests. `deploy/runtime`, `deploy/orchestrator`, `deploy/remote`, and `deploy/tools` publish immutable artifacts and record the source commit beside them. `deploy/settings ROLE` reconciles Pi's ordered package list, and `deploy/skills ROLE` publishes and links the role's first-party skills.
 
 ## Build checks
 
@@ -51,7 +51,18 @@ Never restart the orchestrator runner to update it. Drain it so existing agent p
 
 ## Converge
 
-Converge OpenTofu owns one `pi_stack_commit`. Its startup configuration clones that commit, installs the root lockfile, builds Orchestrator, reconciles Pi settings from `config/package-sets.json`, and starts Pi Remote.
+Converge OpenTofu owns one `pi_stack_commit`. Its startup configuration clones that commit and invokes the repository deployment commands in this order:
+
+```bash
+deploy/runtime
+deploy/orchestrator
+deploy/remote
+deploy/tools converge
+deploy/skills converge-user
+deploy/settings converge-user
+```
+
+The last two commands derive the deployed skill and package lists from the checked manifests. Pi Remote remains last without an OpenTofu copy of that order.
 
 Converge Pi Remote reports environment ID `converge`. It has one profile rooted at `/home/kenan/converge` and executes Pi directly on that machine.
 

@@ -1,0 +1,88 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+root=$(cd "$(dirname "$0")/.." && pwd)
+if [[ ${PI_STACK_ALLOW_DIRTY:-0} != 1 && -n $(git -C "$root" status --porcelain) ]]; then
+  echo "refusing to deploy an uncommitted Pi stack; set PI_STACK_ALLOW_DIRTY=1 only for a temporary test" >&2
+  exit 65
+fi
+role=${1:-}
+manifest="$root/config/package-sets.json"
+jq -e --arg role "$role" '.roles[$role] | type == "array"' "$manifest" >/dev/null || {
+  echo "usage: deploy/settings {gmktec-user|gmktec-fleet|converge-user}" >&2
+  exit 64
+}
+
+runtime_root=${PI_STACK_RUNTIME_ROOT:-$HOME/.local/share/pi-runtime}
+orchestrator=${PI_STACK_ORCHESTRATOR_DEST:-/srv/pi/pi-orchestrator}
+remote=${PI_STACK_REMOTE_DEST:-/srv/pi/pi-remote}
+agent_dir=${PI_AGENT_DIR:-${PI_CODING_AGENT_DIR:-$HOME/.pi/agent}}
+settings=${PI_STACK_SETTINGS_PATH:-$agent_dir/settings.json}
+lockfile_module="$runtime_root/current/node_modules/@earendil-works/pi-coding-agent/node_modules/proper-lockfile/index.js"
+[[ -f $lockfile_module ]] || { echo "deploy Pi Runtime before settings" >&2; exit 66; }
+install -d -m 700 "$agent_dir"
+if [[ ! -e $settings ]]; then
+  printf '{}\n' > "$settings"
+  chmod 600 "$settings"
+fi
+
+PI_STACK_ROOT="$root" \
+PI_STACK_ROLE="$role" \
+PI_STACK_MANIFEST="$manifest" \
+PI_STACK_SETTINGS="$settings" \
+PI_STACK_LOCKFILE_MODULE="$lockfile_module" \
+PI_STACK_RUNTIME_CURRENT="$runtime_root/current" \
+PI_STACK_ORCHESTRATOR_PACKAGE="$orchestrator" \
+PI_STACK_REMOTE_PACKAGE="$remote" \
+PI_STACK_PI_CURSOR_PACKAGE="${PI_STACK_PI_CURSOR_PACKAGE:-}" \
+node --input-type=module <<'NODE'
+import { randomUUID } from "node:crypto";
+import { existsSync, readFileSync, renameSync, rmSync, writeFileSync } from "node:fs";
+
+const manifest = JSON.parse(readFileSync(process.env.PI_STACK_MANIFEST, "utf8"));
+const names = manifest.roles[process.env.PI_STACK_ROLE];
+const runtime = process.env.PI_STACK_RUNTIME_CURRENT;
+const paths = {
+  orchestrator: process.env.PI_STACK_ORCHESTRATOR_PACKAGE,
+  "claude-code-use": `${runtime}/extensions/pi-claude-code-use`,
+  "state-compactor": `${runtime}/extensions/state-compactor`,
+  "bash-timeout-guard": `${runtime}/extensions/bash-timeout-guard`,
+  "pi-cursor": process.env.PI_STACK_PI_CURSOR_PACKAGE,
+  remote: process.env.PI_STACK_REMOTE_PACKAGE,
+};
+const packages = names.map((name) => {
+  const path = paths[name];
+  if (!path) throw new Error(`${name} needs a deployment path`);
+  if (!existsSync(path)) throw new Error(`${name} deployment does not exist at ${path}`);
+  return path;
+});
+const observer = names.indexOf(manifest.contextObserver);
+if (observer !== -1 && observer !== names.length - 1) throw new Error(`${manifest.contextObserver} must load last`);
+const { default: lockfile } = await import(process.env.PI_STACK_LOCKFILE_MODULE);
+const path = process.env.PI_STACK_SETTINGS;
+const release = await lockfile.lock(path, {
+  realpath: false,
+  retries: { retries: 50, factor: 1, minTimeout: 20, maxTimeout: 20 },
+});
+try {
+  const current = JSON.parse(readFileSync(path, "utf8"));
+  const next = {
+    ...current,
+    packages,
+    retry: { enabled: true, maxRetries: 6, baseDelayMs: 5000 },
+  };
+  const temporary = `${path}.${process.pid}.${randomUUID()}.tmp`;
+  try {
+    writeFileSync(temporary, `${JSON.stringify(next, null, 2)}\n`, { mode: 0o600 });
+    renameSync(temporary, path);
+  } finally {
+    rmSync(temporary, { force: true });
+  }
+} finally {
+  await release();
+}
+NODE
+
+jq -e --argjson expected "$(jq -c --arg role "$role" '.roles[$role] | length' "$manifest")" \
+  '.packages | length == $expected' "$settings" >/dev/null
+printf 'deployed %s Pi settings from %s to %s\n' "$role" "$(git -C "$root" rev-parse HEAD)" "$settings"

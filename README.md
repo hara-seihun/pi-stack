@@ -26,11 +26,11 @@ cd apps/remote/android && ./gradlew test
 
 `npm test` runs independent suites in parallel and normally finishes in under twenty seconds. The Android project keeps its Gradle build because it has no useful dependency boundary with the JavaScript workspaces.
 
-[`config/package-sets.json`](config/package-sets.json) is the source of truth for package order by host role. Its check fails if Pi Remote's context observer is not last.
+[`config/package-sets.json`](config/package-sets.json) owns package order by host role. [`config/skill-sets.json`](config/skill-sets.json) owns the first-party skills each role loads. Their checks reject unknown or misplaced entries, including a Pi Remote context observer that is not last.
 
 ## Deployments
 
-GMKtec and Converge deploy one reviewed repository commit. Host configuration chooses which components to publish and supplies local values. The scripts under [`deploy`](deploy) refuse an uncommitted checkout. See [`docs/deployment.md`](docs/deployment.md).
+GMKtec and Converge deploy one reviewed repository commit. Host configuration chooses which components to publish and supplies local values. The scripts under [`deploy`](deploy) refuse an uncommitted checkout. `deploy/settings` and `deploy/skills` derive each role directly from the manifests rather than repeating package or skill lists in host configuration. See [`docs/deployment.md`](docs/deployment.md).
 
 Pi Remote environments are independent servers:
 

@@ -21,11 +21,15 @@ npm install --prefix "$stage/install" --omit=dev --ignore-scripts "$archive" >/d
 
 package="$stage/install/node_modules/pi-orchestrator"
 [[ -x "$package/dist/cli.js" ]] || chmod 755 "$package/dist/cli.js"
-install -d -m 755 "$dest" "$dest/node_modules"
-rsync -a --delete --chmod=D755,F644 "$package/dist" "$package/src" "$package/package.json" "$dest/"
-rsync -a --delete --chmod=D755,F644 --exclude=pi-orchestrator "$stage/install/node_modules/" "$dest/node_modules/"
-chmod 755 "$dest/dist/cli.js"
-printf '%s\n' "$(git rev-parse HEAD)" > "$dest/.pi-stack-commit"
+as_root() {
+  if [[ $EUID == 0 || ${PI_STACK_DEPLOY_NO_SUDO:-0} == 1 ]]; then "$@"; else sudo -n "$@"; fi
+}
+as_root install -d -m 755 "$dest" "$dest/node_modules"
+as_root rsync -a --delete --chmod=D755,F644 "$package/dist" "$package/src" "$package/package.json" "$dest/"
+as_root rsync -a --delete --chmod=D755,F644 --exclude=pi-orchestrator "$stage/install/node_modules/" "$dest/node_modules/"
+as_root chmod 755 "$dest/dist/cli.js"
+printf '%s\n' "$(git rev-parse HEAD)" > "$stage/pi-stack-commit"
+as_root install -m 644 "$stage/pi-stack-commit" "$dest/.pi-stack-commit"
 
 "$dest/dist/cli.js" help | grep -q '^usage: pi-orchestrator'
 printf 'deployed Pi Orchestrator from %s to %s\n' "$(git rev-parse HEAD)" "$dest"

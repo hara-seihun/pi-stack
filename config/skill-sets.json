@@ -1,0 +1,25 @@
+{
+  "version": 1,
+  "skills": [
+    "charisma",
+    "mcp-fix",
+    "software-engineering",
+    "unslop"
+  ],
+  "roles": {
+    "gmktec-user": [
+      "software-engineering",
+      "unslop",
+      "mcp-fix"
+    ],
+    "gmktec-fleet": [
+      "software-engineering",
+      "unslop"
+    ],
+    "converge-user": [
+      "software-engineering",
+      "unslop",
+      "charisma"
+    ]
+  }
+}
