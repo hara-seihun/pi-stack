@@ -128,7 +128,8 @@ function insertRows(db: Database, table: Table, rows: Row[]): void {
   }
 }
 
-export function importSessions(options: { dbPath: string; dataRoot: string; bundleRoot: string }): Bundle {
+export function importSessions(options: { dbPath: string; dataRoot: string; bundleRoot: string; workspace: string }): Bundle {
+  if (!options.workspace) throw new Error("Destination workspace is required");
   const bundle = loadBundle(options.bundleRoot);
   mkdirSync(options.dataRoot, { recursive: true, mode: 0o700 });
   const db = new Database(options.dbPath, { create: true, strict: true });
@@ -145,6 +146,7 @@ export function importSessions(options: { dbPath: string; dataRoot: string; bund
     return {
       ...row,
       session_path: file ? join(options.dataRoot, file.relative) : null,
+      workspace_id: options.workspace,
       execution_target: "local",
       remote_cwd: null,
     };
@@ -230,13 +232,18 @@ if (import.meta.main) {
     const bundle = exportSessions({ dbPath: values.db, dataRoot: values.data, target: values.target, bundleRoot: values.bundle });
     console.log(`exported ${bundle.tables.sessions.length} ${bundle.sourceTarget} sessions to ${values.bundle}`);
   } else if (command === "import") {
-    const bundle = importSessions({ dbPath: values.db, dataRoot: values.data, bundleRoot: values.bundle });
+    const bundle = importSessions({
+      dbPath: values.db,
+      dataRoot: values.data,
+      bundleRoot: values.bundle,
+      workspace: values.workspace,
+    });
     console.log(`imported ${bundle.tables.sessions.length} sessions into ${values.data}`);
   } else if (command === "remove-source") {
     console.log(`removed ${removeExportedSessions({ dbPath: values.db, bundleRoot: values.bundle })} exported sessions`);
   } else {
     console.error("usage: bun server/session-migration.ts export --db DB --data DATA --target TARGET --bundle DIR");
-    console.error("       bun server/session-migration.ts import --db DB --data DATA --bundle DIR");
+    console.error("       bun server/session-migration.ts import --db DB --data DATA --bundle DIR --workspace ID");
     console.error("       bun server/session-migration.ts remove-source --db DB --bundle DIR");
     process.exit(2);
   }
