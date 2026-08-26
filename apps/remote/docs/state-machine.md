@@ -95,6 +95,12 @@ Every context entry has a stable key and a content signature. Reconciliation mov
 
 Attachments upload in hash-checked chunks. Initialization by request ID returns the committed byte offset, so reconnecting resumes rather than creates another file. Completion checks the whole-file hash before the file enters ingestion. Downloads carry validators and byte-range support.
 
+## Android file browsing
+
+The Files drawer tab belongs to the selected environment, not to a thread. It starts at `/`, includes hidden entries, and requests only the open directory. The server sorts folders before regular and special files. Android renders the result through a recycled list, so directories with thousands of entries do not create thousands of views.
+
+A folder tap replaces the list and adds its path to the breadcrumb row. Back moves to the parent before it closes the drawer. A regular file tap sends it to Android's download manager without reading it into the app. A long press copies the absolute path. Special files remain visible but cannot be downloaded.
+
 ## Observed orchestrator agents
 
 Autonomous orchestrator agents are outside this state machine. They have no supervisor epoch, no RPC child, no runtime phase, and no durable work queue here, because Pi Remote does not own them: the orchestrator's SQLite ledger owns their lifecycle and its agent hosts own their sessions.

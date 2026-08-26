@@ -41,12 +41,12 @@ import java.util.concurrent.*;
 
 @SuppressLint("SetTextI18n")
 public class MainActivity extends Activity {
-    private static final int BG = Color.rgb(11, 13, 16);
-    private static final int SURFACE = Color.rgb(22, 25, 30);
-    private static final int SURFACE_2 = Color.rgb(31, 35, 42);
-    private static final int TEXT = Color.rgb(241, 244, 248);
-    private static final int MUTED = Color.rgb(139, 148, 158);
-    private static final int ACCENT = Color.rgb(137, 180, 250);
+    private static final int BG = PiRemoteColors.BG;
+    private static final int SURFACE = PiRemoteColors.SURFACE;
+    private static final int SURFACE_2 = PiRemoteColors.SURFACE_2;
+    private static final int TEXT = PiRemoteColors.TEXT;
+    private static final int MUTED = PiRemoteColors.MUTED;
+    private static final int ACCENT = PiRemoteColors.ACCENT;
     private static final int SUCCESS = Color.rgb(126, 231, 135);
     private static final int DANGER = Color.rgb(255, 123, 114);
     private static final int TOOL_PENDING = Color.rgb(40, 40, 50);
@@ -73,6 +73,7 @@ public class MainActivity extends Activity {
     private static final String DRAWER_TAB_INTERACTIVE = "interactive";
     private static final String DRAWER_TAB_ORCHESTRATOR = "orchestrator";
     private static final String DRAWER_TAB_ARCHIVED = "archived";
+    private static final String DRAWER_TAB_FILES = "files";
 
     private Haptics haptics;
     private final ExecutorService network = Executors.newSingleThreadExecutor();
@@ -93,8 +94,9 @@ public class MainActivity extends Activity {
     private long transcriptOpenedMs;
     private boolean composerWasSending = true;
     private ScrollView drawerThreadScroll, drawerAgentScroll, drawerArchivedScroll;
+    private FileExplorerView fileExplorer;
     private TextView agentBanner;
-    private DrawerTab interactiveTab, orchestratorTab, archivedTab;
+    private DrawerTab interactiveTab, orchestratorTab, archivedTab, filesTab;
     private LinearLayout drawerTabs;
     private final Map<String, TextView> environmentButtons = new LinkedHashMap<>();
     private Markwon markwon;
@@ -209,9 +211,7 @@ public class MainActivity extends Activity {
             .build();
         drawerTab = getSharedPreferences(DRAWER_PREFS, MODE_PRIVATE)
             .getString(PiRemoteEnvironment.scoped(DRAWER_TAB_KEY), DRAWER_TAB_INTERACTIVE);
-        if (!DRAWER_TAB_INTERACTIVE.equals(drawerTab)
-            && !DRAWER_TAB_ORCHESTRATOR.equals(drawerTab)
-            && !DRAWER_TAB_ARCHIVED.equals(drawerTab)) drawerTab = DRAWER_TAB_INTERACTIVE;
+        if (!validDrawerTab(drawerTab)) drawerTab = DRAWER_TAB_INTERACTIVE;
         setContentView(buildUi());
         haptics.setAnchor(root);
         applyInsets();
@@ -232,6 +232,7 @@ public class MainActivity extends Activity {
             getOnBackInvokedDispatcher().registerOnBackInvokedCallback(
                 android.window.OnBackInvokedDispatcher.PRIORITY_DEFAULT,
                 () -> {
+                    if (drawerOpen && DRAWER_TAB_FILES.equals(drawerTab) && fileExplorer.navigateBack()) return;
                     if (drawerOpen) closeDrawer();
                     else if (settingsOpen) closeSettings();
                     else finishAfterTransition();
@@ -280,6 +281,7 @@ public class MainActivity extends Activity {
     @Override public void onDestroy() {
         cancelSyncPoll();
         main.removeCallbacks(openThreadHeartbeat);
+        if (fileExplorer != null) fileExplorer.destroy();
         network.shutdownNow(); abortNetwork.shutdownNow(); pollNetwork.shutdownNow();
         super.onDestroy();
     }
@@ -380,6 +382,7 @@ public class MainActivity extends Activity {
 
     @SuppressLint("GestureBackNavigation")
     @Override public void onBackPressed() {
+        if (drawerOpen && DRAWER_TAB_FILES.equals(drawerTab) && fileExplorer.navigateBack()) return;
         if (drawerOpen) closeDrawer();
         else if (settingsOpen) closeSettings();
         else super.onBackPressed();
@@ -400,7 +403,14 @@ public class MainActivity extends Activity {
         return Objects.equals(server.getScheme(), uri.getScheme())
             && Objects.equals(server.getAuthority(), uri.getAuthority())
             && path != null
-            && path.matches("/v1/sessions/[0-9a-fA-F-]+/files");
+            && (path.matches("/v1/sessions/[0-9a-fA-F-]+/files")
+                || path.equals("/v1/files/download"));
+    }
+
+    private void downloadHostFile(String path) {
+        Uri uri = Uri.parse(PiRemoteEnvironment.current().baseUrl + "/v1/files/download")
+            .buildUpon().appendQueryParameter("path", path).build();
+        downloadFile(uri);
     }
 
     private void downloadFile(Uri uri) {
@@ -551,10 +561,15 @@ public class MainActivity extends Activity {
         return new DrawerTab(root, glyph, count);
     }
 
+    private static boolean validDrawerTab(String tab) {
+        return DRAWER_TAB_INTERACTIVE.equals(tab)
+            || DRAWER_TAB_ORCHESTRATOR.equals(tab)
+            || DRAWER_TAB_ARCHIVED.equals(tab)
+            || DRAWER_TAB_FILES.equals(tab);
+    }
+
     private void selectDrawerTab(String tab) {
-        if (!DRAWER_TAB_INTERACTIVE.equals(tab)
-            && !DRAWER_TAB_ORCHESTRATOR.equals(tab)
-            && !DRAWER_TAB_ARCHIVED.equals(tab)) return;
+        if (!validDrawerTab(tab)) return;
         if (!tab.equals(drawerTab)) haptics.play(Haptics.Feel.TAB);
         if (!DRAWER_TAB_ARCHIVED.equals(tab)) archivedOlder = new JSONArray();
         drawerTab = tab;
@@ -564,6 +579,7 @@ public class MainActivity extends Activity {
         redrawSessions();
         renderAgentSection();
         if (DRAWER_TAB_ORCHESTRATOR.equals(tab)) refresh();
+        if (DRAWER_TAB_FILES.equals(tab)) fileExplorer.open();
     }
 
     private void renderDrawerTab(DrawerTab tab, String label, int count, boolean selected, boolean attention) {
@@ -592,9 +608,11 @@ public class MainActivity extends Activity {
             DRAWER_TAB_ORCHESTRATOR.equals(drawerTab), failing);
         renderDrawerTab(archivedTab, "Archived", archivedCount,
             DRAWER_TAB_ARCHIVED.equals(drawerTab), false);
+        renderDrawerTab(filesTab, "Files", 0, DRAWER_TAB_FILES.equals(drawerTab), false);
         drawerThreadScroll.setVisibility(DRAWER_TAB_INTERACTIVE.equals(drawerTab) ? View.VISIBLE : View.GONE);
         drawerAgentScroll.setVisibility(DRAWER_TAB_ORCHESTRATOR.equals(drawerTab) ? View.VISIBLE : View.GONE);
         drawerArchivedScroll.setVisibility(DRAWER_TAB_ARCHIVED.equals(drawerTab) ? View.VISIBLE : View.GONE);
+        fileExplorer.setVisibility(DRAWER_TAB_FILES.equals(drawerTab) ? View.VISIBLE : View.GONE);
     }
 
     private View buildUi() {
@@ -843,8 +861,11 @@ public class MainActivity extends Activity {
         archivedList.removeAllViews();
         drawerTab = getSharedPreferences(DRAWER_PREFS, MODE_PRIVATE)
             .getString(PiRemoteEnvironment.scoped(DRAWER_TAB_KEY), DRAWER_TAB_INTERACTIVE);
+        if (!validDrawerTab(drawerTab)) drawerTab = DRAWER_TAB_INTERACTIVE;
+        fileExplorer.environmentChanged();
         renderEnvironmentSelector();
         renderDrawerTabs();
+        if (drawerOpen && DRAWER_TAB_FILES.equals(drawerTab)) fileExplorer.open();
         refreshThreadStarts();
         restoreAndOpenNamedThread(rememberedThread());
         refresh();
@@ -881,7 +902,8 @@ public class MainActivity extends Activity {
         interactiveTab = drawerTabButton(R.drawable.ic_tab_interactive, "Interactive", DRAWER_TAB_INTERACTIVE);
         orchestratorTab = drawerTabButton(R.drawable.ic_tab_orchestrator, "Orchestrator", DRAWER_TAB_ORCHESTRATOR);
         archivedTab = drawerTabButton(R.drawable.ic_tab_archived, "Archived", DRAWER_TAB_ARCHIVED);
-        for (DrawerTab tab : new DrawerTab[]{ interactiveTab, orchestratorTab, archivedTab }) {
+        filesTab = drawerTabButton(R.drawable.ic_folder, "Files", DRAWER_TAB_FILES);
+        for (DrawerTab tab : new DrawerTab[]{ interactiveTab, orchestratorTab, archivedTab, filesTab }) {
             LinearLayout.LayoutParams params = new LinearLayout.LayoutParams(dp(50), dp(44));
             params.rightMargin = dp(6);
             drawerTabs.addView(tab.root, params);
@@ -893,7 +915,7 @@ public class MainActivity extends Activity {
         threadStarter.setOnExpansion(expanded -> {
             Springs.to(drawerTabs, DynamicAnimation.ALPHA, expanded ? 0f : 1f, Springs.POP_STIFFNESS, 1f);
             Springs.scale(drawerTabs, expanded ? 0.8f : 1f, Springs.POP_STIFFNESS, expanded ? 1f : 0.55f);
-            for (DrawerTab tab : new DrawerTab[]{ interactiveTab, orchestratorTab, archivedTab })
+            for (DrawerTab tab : new DrawerTab[]{ interactiveTab, orchestratorTab, archivedTab, filesTab })
                 tab.root.setClickable(!expanded);
         });
         heading.addView(threadStarter, new FrameLayout.LayoutParams(-1, -1));
@@ -911,10 +933,12 @@ public class MainActivity extends Activity {
         drawerArchivedScroll = new ScrollView(this); drawerArchivedScroll.setFillViewport(true); drawerArchivedScroll.addView(archivedList);
         for (ScrollView page : new ScrollView[]{ drawerThreadScroll, drawerAgentScroll, drawerArchivedScroll })
             installScrollTexture(page);
+        fileExplorer = new FileExplorerView(this, haptics, this::downloadHostFile);
         FrameLayout pages = new FrameLayout(this);
         pages.addView(drawerThreadScroll, new FrameLayout.LayoutParams(-1, -1));
         pages.addView(drawerAgentScroll, new FrameLayout.LayoutParams(-1, -1));
         pages.addView(drawerArchivedScroll, new FrameLayout.LayoutParams(-1, -1));
+        pages.addView(fileExplorer, new FrameLayout.LayoutParams(-1, -1));
         panel.addView(pages, new LinearLayout.LayoutParams(-1, 0, 1));
         renderDrawerTabs();
 
@@ -1164,12 +1188,13 @@ public class MainActivity extends Activity {
         haptics.play(Haptics.Feel.PANEL_OPEN);
         refreshMachineControls();
         refreshThreadStarts();
+        if (DRAWER_TAB_FILES.equals(drawerTab)) fileExplorer.open();
         drawerScrim.setVisibility(View.VISIBLE);
         drawer.setVisibility(View.VISIBLE);
         if (drawer.getTranslationX() == 0f) drawer.setTranslationX(-drawer.getLayoutParams().width);
         Springs.to(drawer, DynamicAnimation.TRANSLATION_X, 0f, Springs.SLIDE_STIFFNESS, Springs.SLIDE_DAMPING);
         Springs.to(drawerScrim, DynamicAnimation.ALPHA, 1f, Springs.SLIDE_STIFFNESS, 1f);
-        dealIn(drawerList);
+        if (DRAWER_TAB_INTERACTIVE.equals(drawerTab)) dealIn(drawerList);
         hamburger.setVisibility(View.GONE);
     }
 

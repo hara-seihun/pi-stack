@@ -2,7 +2,7 @@ import { afterAll, beforeAll, describe, expect, setDefaultTimeout, test } from "
 import { Database } from "bun:sqlite";
 import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { join, resolve } from "node:path";
 import { applyContextSplice, contextSplice, sha256 } from "./sync";
 const BOOSTED_MULTIPLIER = 10;
 
@@ -987,6 +987,53 @@ describe("web and supervisor integration", () => {
     ]));
   });
 
+  test("lists the host filesystem from root and downloads files without a preview endpoint", async () => {
+    const browser = join(root, "file-browser");
+    mkdirSync(join(browser, ".hidden"), { recursive: true });
+    mkdirSync(join(browser, "folder"));
+    writeFileSync(join(browser, "file10.txt"), "ten");
+    writeFileSync(join(browser, "file2.txt"), "two");
+
+    const listed = await api("GET", `/v1/files?path=${encodeURIComponent(browser)}`);
+    expect(listed).toMatchObject({
+      status: 200,
+      value: {
+        directory: {
+          path: browser,
+          parent: root,
+          entries: [
+            { name: ".hidden", path: join(browser, ".hidden"), kind: "directory" },
+            { name: "folder", path: join(browser, "folder"), kind: "directory" },
+            { name: "file2.txt", path: join(browser, "file2.txt"), kind: "file" },
+            { name: "file10.txt", path: join(browser, "file10.txt"), kind: "file" },
+          ],
+        },
+      },
+    });
+
+    const rootListing = await api("GET", "/v1/files?path=%2F");
+    expect(rootListing.status).toBe(200);
+    expect(rootListing.value.directory.path).toBe("/");
+    expect(rootListing.value.directory.parent).toBeNull();
+    expect(rootListing.value.directory.entries.some((entry: any) => entry.path === resolve(tmpdir()))).toBe(true);
+
+    const download = await fetch(`${base}/v1/files/download?path=${encodeURIComponent(join(browser, "file2.txt"))}`);
+    expect(download.status).toBe(200);
+    expect(download.headers.get("content-disposition")).toContain('filename="file2.txt"');
+    expect(await download.text()).toBe("two");
+
+    const range = await fetch(`${base}/v1/files/download?path=${encodeURIComponent(join(browser, "file10.txt"))}`, {
+      headers: { range: "bytes=1-2" },
+    });
+    expect(range.status).toBe(206);
+    expect(range.headers.get("content-range")).toBe("bytes 1-2/3");
+    expect(await range.text()).toBe("en");
+
+    expect((await api("GET", "/v1/files?path=relative")).status).toBe(400);
+    expect((await api("GET", `/v1/files?path=${encodeURIComponent(join(browser, "missing"))}`)).status).toBe(404);
+    expect((await fetch(`${base}/v1/files/download?path=relative`)).status).toBe(400);
+  });
+
   test("downloads files from the selected session execution target", async () => {
     const localId = await createThread("home", "sol");
     const localPath = join(root, "download report.txt");
@@ -1030,7 +1077,7 @@ describe("web and supervisor integration", () => {
       id: "local",
       name: "Local",
       requiresUnlock: true,
-      capabilities: { voice: true, downloads: true, notifications: true },
+      capabilities: { voice: true, downloads: true, notifications: true, files: true },
       profiles: expect.arrayContaining([
         expect.objectContaining({ id: "personal" }),
         expect.objectContaining({ id: "home" }),

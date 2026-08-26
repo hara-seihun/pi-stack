@@ -180,7 +180,7 @@ Bun.serve({
         name: ENVIRONMENT_NAME,
         requiresUnlock: true,
         profiles: [],
-        capabilities: { voice: true, downloads: true, notifications: true },
+        capabilities: { voice: true, downloads: true, notifications: true, files: true },
       } });
     }
 

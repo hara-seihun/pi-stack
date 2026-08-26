@@ -1,5 +1,5 @@
 import { Database } from "bun:sqlite";
-import { closeSync, existsSync, mkdirSync, openSync, readFileSync, realpathSync, renameSync, statSync, unlinkSync, writeFileSync, writeSync } from "node:fs";
+import { closeSync, existsSync, mkdirSync, openSync, readFileSync, readdirSync, realpathSync, renameSync, statSync, unlinkSync, writeFileSync, writeSync } from "node:fs";
 import { homedir } from "node:os";
 import { basename, dirname, extname, isAbsolute, join, resolve } from "node:path";
 import { parseRunKey } from "./agent-runs";
@@ -14,7 +14,7 @@ import { BOOSTED_MULTIPLIER, nextBoost } from "pi-orchestrator/boost";
 import { DEFAULT_LIVE_MODEL, DEFAULT_LIVE_VOICE, VoiceBroker } from "pi-orchestrator/voice";
 type VoiceAccount = { id: string; provider: string; accessUntil?: number; cooldownUntil?: number };
 
-const VERSION = "0.44.0";
+const VERSION = "0.45.0";
 const ENVIRONMENT_ID = process.env.PI_REMOTE_ENVIRONMENT_ID ?? "local";
 const ENVIRONMENT_NAME = process.env.PI_REMOTE_ENVIRONMENT_NAME ?? "Local";
 const ENVIRONMENT_REQUIRES_UNLOCK = process.env.PI_REMOTE_REQUIRES_UNLOCK === "true";
@@ -137,7 +137,7 @@ function environmentMetadata() {
     name: ENVIRONMENT_NAME,
     requiresUnlock: ENVIRONMENT_REQUIRES_UNLOCK,
     profiles: threadStartProfiles(),
-    capabilities: { voice: true, downloads: true, notifications: true },
+    capabilities: { voice: true, downloads: true, notifications: true, files: true },
   };
 }
 
@@ -386,6 +386,38 @@ function storedContext(sessionId: string): { capturedAt: number; document: strin
 
 const error = (message: string, status = 400) => json({ error: message }, status);
 
+type FileBrowserEntry = {
+  name: string;
+  path: string;
+  kind: "directory" | "file" | "other";
+};
+
+function fileBrowserError(cause: any): { message: string; status: number } {
+  if (cause?.code === "EACCES" || cause?.code === "EPERM") return { message: "Permission denied", status: 403 };
+  if (cause?.code === "ENOENT" || cause?.code === "ENOTDIR") return { message: "Folder not found", status: 404 };
+  return { message: cause?.message ?? "Could not read folder", status: 500 };
+}
+
+function listDirectory(requested: string) {
+  if (!isAbsolute(requested)) throw Object.assign(new Error("Valid absolute folder path required"), { code: "EINVAL" });
+  const path = resolve(requested);
+  const entries: FileBrowserEntry[] = readdirSync(path, { withFileTypes: true }).map((entry) => {
+    const child = join(path, entry.name);
+    let kind: FileBrowserEntry["kind"] = entry.isDirectory() ? "directory" : entry.isFile() ? "file" : "other";
+    if (entry.isSymbolicLink()) {
+      try {
+        const target = statSync(child);
+        kind = target.isDirectory() ? "directory" : target.isFile() ? "file" : "other";
+      } catch {}
+    }
+    return { name: entry.name, path: child, kind };
+  });
+  const rank = { directory: 0, file: 1, other: 2 } as const;
+  entries.sort((left, right) => rank[left.kind] - rank[right.kind]
+    || left.name.localeCompare(right.name, undefined, { numeric: true, sensitivity: "base" }));
+  return { path, parent: path === "/" ? null : dirname(path), entries };
+}
+
 type ThunderStatus = { active: boolean; status: string };
 type GovernorProvider = "openai" | "anthropic";
 /** The drawer button's four states, in cycle order: normal pace, 3× (green),
@@ -594,6 +626,30 @@ function byteRange(value: string | null, size: number): { start: number; end: nu
     : null;
 }
 
+function localFileResponse(requested: string, method: string, req: Request): Response {
+  try {
+    const path = realpathSync(requested);
+    const stat = statSync(path);
+    if (!stat.isFile()) return new Response("File not found", { status: 404 });
+    const file = Bun.file(path);
+    const headers = downloadHeaders(path, stat.size, file.type, `${stat.size}:${stat.mtimeMs}`);
+    const range = method === "GET" ? byteRange(req.headers.get("range"), stat.size) : null;
+    if (req.headers.has("range") && method === "GET" && !range)
+      return new Response(null, { status: 416, headers: { "content-range": `bytes */${stat.size}` } });
+    if (!range) return new Response(method === "HEAD" ? null : file, { headers });
+    headers.set("content-range", `bytes ${range.start}-${range.end}/${stat.size}`);
+    headers.set("content-length", String(range.end - range.start + 1));
+    return new Response(file.slice(range.start, range.end + 1), { status: 206, headers });
+  } catch { return new Response("File not found", { status: 404 }); }
+}
+
+function hostFileResponse(url: URL, method: string, req: Request): Response | null {
+  if (url.pathname !== "/v1/files/download" || (method !== "GET" && method !== "HEAD")) return null;
+  const requested = url.searchParams.get("path") ?? "";
+  if (!isAbsolute(requested)) return new Response("Valid absolute file path required", { status: 400 });
+  return localFileResponse(requested, method, req);
+}
+
 async function sessionFileResponse(url: URL, method: string, req: Request): Promise<Response | null> {
   const match = url.pathname.match(/^\/v1\/sessions\/([0-9a-f-]+)\/files$/i);
   if (!match || (method !== "GET" && method !== "HEAD")) return null;
@@ -635,20 +691,7 @@ with p.open('rb') as f:
     }).catch((cause) => console.error("Remote file download failed", cause));
     return new Response(childResponseBody(proc), { status: range ? 206 : 200, headers });
   }
-  try {
-    const path = realpathSync(requested);
-    const stat = statSync(path);
-    if (!stat.isFile()) return new Response("File not found", { status: 404 });
-    const file = Bun.file(path);
-    const headers = downloadHeaders(path, stat.size, file.type, `${stat.size}:${stat.mtimeMs}`);
-    const range = method === "GET" ? byteRange(req.headers.get("range"), stat.size) : null;
-    if (req.headers.has("range") && method === "GET" && !range)
-      return new Response(null, { status: 416, headers: { "content-range": `bytes */${stat.size}` } });
-    if (!range) return new Response(method === "HEAD" ? null : file, { headers });
-    headers.set("content-range", `bytes ${range.start}-${range.end}/${stat.size}`);
-    headers.set("content-length", String(range.end - range.start + 1));
-    return new Response(file.slice(range.start, range.end + 1), { status: 206, headers });
-  } catch { return new Response("File not found", { status: 404 }); }
+  return localFileResponse(requested, method, req);
 }
 
 function webResponse(pathname: string, method: string): Response | null {
@@ -1822,10 +1865,21 @@ const server = Bun.serve({
     if (!ownsSupervisorLease()) return error("Supervisor instance was replaced", 503);
     const deliveredFile = await sessionFileResponse(url, req.method, req);
     if (deliveredFile) return deliveredFile;
+    const hostFile = hostFileResponse(url, req.method, req);
+    if (hostFile) return hostFile;
     const web = webResponse(url.pathname, req.method);
     if (web) return web;
     if (url.pathname === "/v1/health") return json({ ok: true, version: VERSION, environmentId: ENVIRONMENT_ID });
     if (url.pathname === "/v1/environment" && req.method === "GET") return json({ environment: environmentMetadata() });
+    if (url.pathname === "/v1/files" && req.method === "GET") {
+      const requested = url.searchParams.get("path") ?? "";
+      if (!isAbsolute(requested)) return error("Valid absolute folder path required");
+      try { return json({ directory: listDirectory(requested) }); }
+      catch (cause: any) {
+        const failure = fileBrowserError(cause);
+        return error(failure.message, failure.status);
+      }
+    }
     if (url.pathname === "/v1/voice" && req.method === "GET") {
       return json({ ...voiceAccounts.status(), model: DEFAULT_LIVE_MODEL, voice: DEFAULT_LIVE_VOICE });
     }
