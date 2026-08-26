@@ -44,6 +44,14 @@ function assertSettled(tables: Bundle["tables"]): void {
   if (pending.length > 0) throw new Error(`${pending.length} work items are not settled`);
 }
 
+function hasSessionContent(tables: Bundle["tables"], sessionId: string): boolean {
+  for (const table of [tables.events, tables.session_contexts, tables.work_items, tables.uploads]) {
+    if (table.some((row) => String(row.session_id) === sessionId)) return true;
+  }
+  return tables.requests.some((row) =>
+    String(row.session_id) === sessionId && String(row.kind) !== "create");
+}
+
 export function exportSessions(options: { dbPath: string; dataRoot: string; target: string; bundleRoot: string }): Bundle {
   if (existsSync(options.bundleRoot)) throw new Error(`Bundle path already exists at ${options.bundleRoot}`);
   mkdirSync(dirname(options.bundleRoot), { recursive: true, mode: 0o700 });
@@ -72,8 +80,11 @@ export function exportSessions(options: { dbPath: string; dataRoot: string; targ
       const id = String(row.id);
       const path = row.session_path == null ? "" : String(row.session_path);
       if (path) {
-        if (!existsSync(path)) throw new Error(`Session ${id} is missing ${path}`);
-        sessionFiles.push(copyRecord(id, path, join("sessions", basename(path)), stagingRoot));
+        if (!existsSync(path)) {
+          if (hasSessionContent(tables, id)) throw new Error(`Session ${id} is missing ${path}`);
+        } else {
+          sessionFiles.push(copyRecord(id, path, join("sessions", basename(path)), stagingRoot));
+        }
       }
       const tier = join(options.dataRoot, "service-tiers", id);
       if (existsSync(tier)) serviceTiers.push(copyRecord(id, tier, join("service-tiers", id), stagingRoot));
