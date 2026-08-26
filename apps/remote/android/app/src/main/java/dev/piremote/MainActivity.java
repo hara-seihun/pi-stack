@@ -2602,6 +2602,15 @@ public class MainActivity extends Activity {
         Runnable ticker;
     }
 
+    private static final class AlwaysCard {
+        LinearLayout root;
+        TextView header;
+        MarkdownStream body;
+        String label;
+        String source;
+        boolean expanded;
+    }
+
     private void addTranscriptView(View view, int topMargin) {
         LinearLayout.LayoutParams params = new LinearLayout.LayoutParams(-1, -2);
         params.topMargin = dp(topMargin);
@@ -2847,6 +2856,7 @@ public class MainActivity extends Activity {
         MarkdownStream body;
         JSONObject toolCall;
         JSONObject toolResult;
+        AlwaysCard alwaysCard;
         long time;
 
         ContextEntry(String signature, String kind, String label, String source, int color) {
@@ -2920,13 +2930,18 @@ public class MainActivity extends Activity {
             return entries;
         }
         String systemPrompt = context.optString("systemPrompt");
-        entries.add(new ContextEntry("system:" + systemPrompt, "system", "System", systemPrompt, MUTED));
+        for (SystemPromptSections.Section section : SystemPromptSections.split(systemPrompt)) {
+            entries.add(new ContextEntry("always:" + section.key, "system:" + section.key + ":" + section.text,
+                "always", section.label, section.text, MUTED));
+        }
         JSONArray tools = context.optJSONArray("tools");
         if (tools != null) for (int index = 0; index < tools.length(); index++) {
             JSONObject tool = tools.optJSONObject(index);
             if (tool == null) continue;
+            String name = tool.optString("name", "tool");
             String source = (tool.optString("description") + "\n\n" + fencedContext(formatJson(tool.opt("parameters")))).trim();
-            entries.add(new ContextEntry("tool:" + tool, "tool", "Tool · " + tool.optString("name", "tool"), source, ACCENT));
+            entries.add(new ContextEntry("always:tool:" + index + ":" + name, "tool:" + tool,
+                "always", "Tool · " + name, source, ACCENT));
         }
         JSONArray messages = context.optJSONArray("messages");
         Map<String, JSONObject> results = new HashMap<>();
@@ -2983,7 +2998,44 @@ public class MainActivity extends Activity {
         return entries;
     }
 
+    private void setAlwaysExpanded(AlwaysCard card, boolean expanded) {
+        card.expanded = expanded;
+        card.header.setText((expanded ? "▾  " : "▸  ") + card.label);
+        card.header.setContentDescription((expanded ? "Collapse " : "Expand ") + card.label);
+        if (expanded) card.body.setSource(card.source);
+        card.body.setVisibility(expanded ? View.VISIBLE : View.GONE);
+        card.root.requestLayout();
+    }
+
+    private View appendAlwaysSection(ContextEntry entry) {
+        AlwaysCard card = new AlwaysCard();
+        card.label = entry.label;
+        card.source = entry.source;
+        card.root = new LinearLayout(this);
+        card.root.setOrientation(LinearLayout.VERTICAL);
+        card.root.setPadding(dp(12), 0, dp(12), 0);
+        card.root.setBackground(shape(SURFACE));
+        card.header = text("", 14, true);
+        card.header.setTextColor(entry.color);
+        card.header.setGravity(Gravity.START | Gravity.CENTER_VERTICAL);
+        card.header.setMinHeight(dp(44));
+        card.header.setOnClickListener(view -> {
+            haptics.play(Haptics.Feel.SELECT, view);
+            setAlwaysExpanded(card, !card.expanded);
+        });
+        card.root.addView(card.header, new LinearLayout.LayoutParams(-1, -2));
+        card.body = markdown(15, TEXT);
+        card.body.setPadding(0, 0, 0, dp(12));
+        card.body.setLineSpacing(0, 1.06f);
+        card.root.addView(card.body, new LinearLayout.LayoutParams(-1, -2));
+        setAlwaysExpanded(card, false);
+        entry.alwaysCard = card;
+        addTranscriptView(card.root, transcript.getChildCount() == 0 ? 0 : 2);
+        return card.root;
+    }
+
     private View appendContextEntry(ContextEntry entry) {
+        if ("always".equals(entry.kind)) return appendAlwaysSection(entry);
         if (!"toolCall".equals(entry.kind)) {
             Message message = message(entry.label, entry.color);
             message.body.setSource(entry.source);
@@ -3016,6 +3068,13 @@ public class MainActivity extends Activity {
             && entries.get(shared).key.equals(contextEntries.get(shared).key) && !"toolCall".equals(entries.get(shared).kind)) {
             ContextEntry old = contextEntries.get(shared);
             ContextEntry next = entries.get(shared);
+            if (old.alwaysCard != null) {
+                old.alwaysCard.label = next.label;
+                old.alwaysCard.source = next.source;
+                old.alwaysCard.header.setTextColor(next.color);
+                setAlwaysExpanded(old.alwaysCard, old.alwaysCard.expanded);
+                next.alwaysCard = old.alwaysCard;
+            }
             if (old.labelView != null) {
                 old.labelView.setText(next.label.toUpperCase(Locale.ROOT));
                 old.labelView.setTextColor(next.color);
