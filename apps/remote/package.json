@@ -1,6 +1,6 @@
 {
   "name": "pi-remote",
-  "version": "0.41.0",
+  "version": "0.44.0",
   "description": "Self-hosted web and Android controller for persistent Pi sessions",
   "keywords": [
     "pi-package"

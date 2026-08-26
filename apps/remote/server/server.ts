@@ -7,13 +7,14 @@ import { AgentHost, LocalLedger, RemoteLedger, sshRunner } from "./agent-hosts";
 import { loadPlanUsage, type PlanUsageSnapshot } from "./plan-usage";
 import { loadProviderManifest, manifestAgentType, manifestPlanCards } from "./provider-manifest";
 import { readMachineUsage } from "./machine-usage";
+import { displayContextDocument } from "./context-display";
 import { applyContextSplice, contextSplice, sha256, type ContextSplice } from "./sync";
 import { beginSupervisorGeneration, ensureSupervisorSchema } from "./database";
 import { BOOSTED_MULTIPLIER, nextBoost } from "pi-orchestrator/boost";
 import { DEFAULT_LIVE_MODEL, DEFAULT_LIVE_VOICE, VoiceBroker } from "pi-orchestrator/voice";
 type VoiceAccount = { id: string; provider: string; accessUntil?: number; cooldownUntil?: number };
 
-const VERSION = "0.43.0";
+const VERSION = "0.44.0";
 const ENVIRONMENT_ID = process.env.PI_REMOTE_ENVIRONMENT_ID ?? "local";
 const ENVIRONMENT_NAME = process.env.PI_REMOTE_ENVIRONMENT_NAME ?? "Local";
 const ENVIRONMENT_REQUIRES_UNLOCK = process.env.PI_REMOTE_REQUIRES_UNLOCK === "true";
@@ -326,6 +327,7 @@ async function awaitSync(after: number, waitMs: number) {
 }
 
 const contextVersions = new Map<string, Map<string, string>>();
+const displayContexts = new Map<string, { sourceHash: string; document: string; hash: string }>();
 function rememberContext(sessionId: string, document: string): string {
   const hash = sha256(document);
   let versions = contextVersions.get(sessionId);
@@ -337,6 +339,21 @@ function rememberContext(sessionId: string, document: string): string {
   versions.set(hash, document);
   while (versions.size > 12) versions.delete(versions.keys().next().value!);
   return hash;
+}
+
+function displayContext(sessionId: string, sourceHash: string, sourceDocument: string) {
+  const cached = displayContexts.get(sessionId);
+  if (cached?.sourceHash === sourceHash) {
+    displayContexts.delete(sessionId);
+    displayContexts.set(sessionId, cached);
+    return cached;
+  }
+  const document = displayContextDocument(sourceDocument);
+  const projected = { sourceHash, document, hash: rememberContext(sessionId, document) };
+  displayContexts.delete(sessionId);
+  displayContexts.set(sessionId, projected);
+  while (displayContexts.size > 4) displayContexts.delete(displayContexts.keys().next().value!);
+  return projected;
 }
 
 function textUpdate(key: string, baseHash: unknown, target: string): any {
@@ -2037,12 +2054,21 @@ const server = Bun.serve({
             selectedSession = publicSession(selected);
             const stored = storedContext(selectedId);
             if (stored) {
+              const projected = body.contextProjection === "display";
+              const display = projected ? displayContext(selectedId, stored.hash, stored.document) : null;
+              const document = display?.document ?? stored.document;
+              const hash = display?.hash ?? stored.hash;
               const baseHash = typeof body.contextHash === "string" ? body.contextHash : "";
-              if (baseHash !== stored.hash) {
-                const base = contextVersions.get(selectedId)?.get(baseHash);
+              if (baseHash !== hash) {
+                const candidate = contextVersions.get(selectedId)?.get(baseHash);
+                // A cache written before display projection contains provider
+                // signatures throughout the document. Send one compact full
+                // projection instead of representing those scattered removals
+                // as a nearly full-size splice.
+                const base = projected && candidate?.includes('"thinkingSignature"') ? undefined : candidate;
                 contextUpdate = base === undefined
-                  ? { kind: "full", capturedAt: stored.capturedAt, hash: stored.hash, document: stored.document }
-                  : { kind: "splice", capturedAt: stored.capturedAt, hash: stored.hash, splice: contextSplice(base, stored.document) };
+                  ? { kind: "full", capturedAt: stored.capturedAt, hash, document }
+                  : { kind: "splice", capturedAt: stored.capturedAt, hash, splice: contextSplice(base, document) };
               }
             } else if (body.contextHash) contextUpdate = { kind: "clear", capturedAt: 0, hash: "" };
           }

@@ -1425,6 +1425,7 @@ public class MainActivity extends Activity {
         JSONObject body = new JSONObject();
         try {
             body.put("after", syncSequence).put("waitMs", requestedImmediate ? 0 : 25_000)
+                .put("contextProjection", "display")
                 .put("includeArchived", DRAWER_TAB_ARCHIVED.equals(drawerTab))
                 .put("includeAgentList", requestedAgentList)
                 .put("includeDashboard", drawerOpen);

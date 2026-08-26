@@ -849,7 +849,21 @@ describe("web and supervisor integration", () => {
 
   test("synchronizes a selected context with compressed verified splices", async () => {
     const id = await createThread("home", "sol");
-    const firstContext = { systemPrompt: "System ".repeat(400), tools: [], messages: [{ role: "assistant", content: [{ type: "text", text: "first" }] }] };
+    const firstContext = {
+      systemPrompt: "System ".repeat(400),
+      tools: [],
+      messages: [{
+        role: "assistant",
+        provider: "openai",
+        model: "model",
+        responseId: "response",
+        usage: { cost: { total: 1 } },
+        content: [
+          { type: "thinking", thinking: "consider", thinkingSignature: "opaque" },
+          { type: "text", text: "first", textSignature: "opaque" },
+        ],
+      }],
+    };
     await api("PUT", `/v1/sessions/${id}/context`, { capturedAt: 300, context: firstContext });
     const firstResponse = await fetch(`${base}/v1/sync`, {
       method: "POST",
@@ -861,6 +875,28 @@ describe("web and supervisor integration", () => {
     expect(first.contextUpdate.kind).toBe("full");
     expect(JSON.parse(first.contextUpdate.document)).toEqual(firstContext);
     expect(first.archivedSessions).toBeNull();
+
+    const display = await api("POST", "/v1/sync", {
+      after: 0,
+      waitMs: 0,
+      selectedId: id,
+      contextHash: "",
+      contextProjection: "display",
+      includeDashboard: false,
+    });
+    const displayDocument = JSON.parse(display.value.contextUpdate.document);
+    expect(displayDocument).toEqual({
+      systemPrompt: firstContext.systemPrompt,
+      tools: [],
+      messages: [{
+        role: "assistant",
+        content: [
+          { type: "thinking", thinking: "consider" },
+          { type: "text", text: "first" },
+        ],
+      }],
+    });
+    expect(display.value.contextUpdate.hash).not.toBe(first.contextUpdate.hash);
 
     const secondContext = { ...firstContext, messages: [{ role: "assistant", content: [{ type: "text", text: "first and second" }] }] };
     const baseDocument = JSON.stringify(firstContext);
