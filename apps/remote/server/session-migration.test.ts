@@ -68,6 +68,58 @@ describe("session migration", () => {
     cleaned.close();
   });
 
+  test("preserves an empty thread whose Pi process never created its session file", () => {
+    const root = mkdtempSync(join(tmpdir(), "pi-remote-migration-"));
+    roots.push(root);
+    const sourceData = join(root, "source");
+    const destinationData = join(root, "destination");
+    mkdirSync(sourceData, { recursive: true });
+    const sourceDbPath = join(sourceData, "supervisor.sqlite3");
+    const source = new Database(sourceDbPath, { create: true, strict: true });
+    ensureSupervisorSchema(source);
+    const missing = join(sourceData, "sessions", "never-created.jsonl");
+    source.query(`INSERT INTO sessions(
+      id,name,workspace_id,session_path,state,created_at,updated_at,execution_target,archived_at
+    ) VALUES(?,?,?,?,?,?,?,?,?)`).run(
+      "empty", "104", "home", missing, "STOPPED", "2026-08-16T00:00:00Z",
+      "2026-08-16T00:01:00Z", "converge", "2026-08-16T00:01:00Z",
+    );
+    source.query("INSERT INTO requests(request_id,session_id,kind,status,response,created_at) VALUES(?,?,?,?,?,?)")
+      .run("create", "empty", "create", 201, "{}", "2026-08-16T00:00:00Z");
+    source.close();
+
+    const bundleRoot = join(root, "bundle");
+    const bundle = exportSessions({ dbPath: sourceDbPath, dataRoot: sourceData, target: "converge", bundleRoot });
+    expect(bundle.sessionFiles).toHaveLength(0);
+    importSessions({ dbPath: join(destinationData, "supervisor.sqlite3"), dataRoot: destinationData, bundleRoot });
+
+    const destination = new Database(join(destinationData, "supervisor.sqlite3"), { readonly: true, strict: true });
+    expect((destination.query("SELECT session_path FROM sessions WHERE id='empty'").get() as any).session_path).toBeNull();
+    expect((destination.query("SELECT COUNT(*) count FROM requests WHERE session_id='empty'").get() as any).count).toBe(1);
+    destination.close();
+  });
+
+  test("refuses a missing session file when other thread content exists", () => {
+    const root = mkdtempSync(join(tmpdir(), "pi-remote-migration-"));
+    roots.push(root);
+    const dbPath = join(root, "supervisor.sqlite3");
+    const db = new Database(dbPath, { create: true, strict: true });
+    ensureSupervisorSchema(db);
+    const missing = join(root, "sessions", "missing.jsonl");
+    db.query(`INSERT INTO sessions(
+      id,name,workspace_id,session_path,state,created_at,updated_at,execution_target,archived_at
+    ) VALUES(?,?,?,?,?,?,?,?,?)`).run(
+      "contentful", "Thread", "home", missing, "STOPPED", "now", "now", "converge", "now",
+    );
+    db.query("INSERT INTO events(seq,session_id,time,type,payload) VALUES(?,?,?,?,?)")
+      .run(1, "contentful", "now", "user", '{"text":"must not be lost"}');
+    db.close();
+
+    expect(() => exportSessions({
+      dbPath, dataRoot: root, target: "converge", bundleRoot: join(root, "bundle"),
+    })).toThrow("is missing");
+  });
+
   test("refuses to export unfinished work", () => {
     const root = mkdtempSync(join(tmpdir(), "pi-remote-migration-"));
     roots.push(root);
