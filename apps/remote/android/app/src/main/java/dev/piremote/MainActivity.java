@@ -118,12 +118,17 @@ public class MainActivity extends Activity {
     private final Map<String, Long> actionTokens = new HashMap<>();
     private final Map<String, String> actionTypes = new HashMap<>();
     private final Set<String> requestedCompletionWatches = new HashSet<>();
+    private volatile boolean outboxFlushing = false;
     private String openingThreadId;
     private JSONObject currentModel;
     private JSONArray availableModels = new JSONArray(), availableThinkingLevels = new JSONArray();
     private String currentThinkingLevel = "off", currentSpeedMode = "normal";
     private JSONArray availableSpeedModes = new JSONArray();
     private long lastSeq = 0, contextCapturedAt = 0;
+    private long syncSequence = 0;
+    private long syncErrorDelayMs = 1_000;
+    private String syncEpoch = "";
+    private ContextSync.Document contextDocument;
     private final List<String> contextEntrySignatures = new ArrayList<>();
     private final List<View> contextEntryViews = new ArrayList<>();
     private final List<ContextEntry> contextEntries = new ArrayList<>();
@@ -144,15 +149,14 @@ public class MainActivity extends Activity {
     private String agentError = "";
     private String agentRunId, agentRunLabel = "Agent", agentRunTask = "", agentRunStatus = "running";
     private String agentRunActivity = "WORKING", agentRunProvider = "";
+    private ContextSync.Document agentLiveTextDocument, agentLiveThinkingDocument;
     private long agentRunElapsedMs = 0;
     private boolean activityVisible = false;
 
     // Felt state: what the last haptic signalled, so only genuine changes are played.
     private boolean feltComposerArmed = false;
     private volatile boolean polling = false;
-    private final Runnable poller = new Runnable() {
-        public void run() { refresh(); main.postDelayed(this, 1200); }
-    };
+    private final Runnable poller = this::refresh;
     private final Runnable openThreadHeartbeat = new Runnable() {
         public void run() {
             if (!activityVisible) return;
@@ -222,7 +226,6 @@ public class MainActivity extends Activity {
                     else finishAfterTransition();
                 });
         }
-        main.post(poller);
     }
 
     /**
@@ -241,6 +244,9 @@ public class MainActivity extends Activity {
         haptics.refreshSystemSetting();
         haptics.setWatching(true);
         activityVisible = true;
+        main.removeCallbacks(poller);
+        main.post(poller);
+        flushOutbox();
         publishOpenThread();
         main.removeCallbacks(openThreadHeartbeat);
         main.postDelayed(openThreadHeartbeat, OpenThreadVisibility.HEARTBEAT_INTERVAL_MS);
@@ -249,6 +255,7 @@ public class MainActivity extends Activity {
     @Override protected void onStop() {
         haptics.setWatching(false);
         activityVisible = false;
+        main.removeCallbacks(poller);
         main.removeCallbacks(openThreadHeartbeat);
         publishOpenThread();
         super.onStop();
@@ -789,6 +796,10 @@ public class MainActivity extends Activity {
         }
         openingThreadId = null;
         refreshAgain = false;
+        syncSequence = 0;
+        syncErrorDelayMs = 1_000;
+        syncEpoch = "";
+        contextDocument = null;
         requestedCompletionWatches.clear();
         actionTokens.clear();
         actionTypes.clear();
@@ -1371,126 +1382,146 @@ public class MainActivity extends Activity {
             .hideSoftInputFromWindow(focused.getWindowToken(), 0);
     }
 
-    private void refresh() {
-        if (activityVisible) publishOpenThread();
+    private void refreshSync() {
+        if (!activityVisible) return;
+        publishOpenThread();
         if (polling) { refreshAgain = true; return; }
         polling = true;
         String requestedSession = selectedId;
         String requestedAgent = agentRunId;
-        boolean requestedAgentList = DRAWER_TAB_ORCHESTRATOR.equals(drawerTab) || agentRunId != null;
+        boolean requestedAgentList = DRAWER_TAB_ORCHESTRATOR.equals(drawerTab) || requestedAgent != null;
         long requestedAfter = lastSeq;
         long requestedSelectionGeneration = selectionGeneration;
         long requestedActionGeneration = actionGeneration;
         long requestedEnvironmentGeneration = PiRemoteEnvironment.generation();
+        ContextSync.Document requestedContextDocument = contextDocument;
+        ContextSync.Document requestedAgentTextDocument = agentLiveTextDocument;
+        ContextSync.Document requestedAgentThinkingDocument = agentLiveThinkingDocument;
+        JSONObject body = new JSONObject();
+        try {
+            body.put("after", syncSequence).put("waitMs", 25_000)
+                .put("includeArchived", DRAWER_TAB_ARCHIVED.equals(drawerTab))
+                .put("includeAgentList", requestedAgentList)
+                .put("includeDashboard", drawerOpen);
+            if (requestedSession != null && requestedAgent == null) {
+                body.put("selectedId", requestedSession);
+                if (requestedContextDocument != null) body.put("contextHash", requestedContextDocument.hash);
+            }
+            if (requestedAgent != null) {
+                body.put("agentRunId", requestedAgent).put("agentAfter", requestedAfter);
+                if (requestedAgentTextDocument != null) body.put("agentLiveTextHash", requestedAgentTextDocument.hash);
+                if (requestedAgentThinkingDocument != null) body.put("agentLiveThinkingHash", requestedAgentThinkingDocument.hash);
+            }
+        } catch (Exception impossible) { throw new IllegalStateException(impossible); }
         pollNetwork.execute(() -> {
             try {
-                JSONObject all = api("GET", "/v1/sessions", null);
-                JSONObject selectedContext = null;
-                boolean selectedMissing = false;
-                if (requestedSession != null && requestedAgent == null) {
-                    try { selectedContext = api("GET", "/v1/sessions/" + requestedSession + "/context", null); }
-                    catch (Exception failure) {
-                        // The thread itself is the authority on whether it still exists. The
-                        // drawer list is not: it shows only interactive threads, and treating
-                        // absence from it as deletion threw the user out of any archived thread
-                        // they had deliberately opened, one poll after opening it.
-                        selectedMissing = isMissing(failure);
-                    }
+                JSONObject all = api("POST", "/v1/sync", body);
+                JSONObject context = null;
+                ContextSync.Document nextDocument = requestedContextDocument;
+                JSONObject update = all.optJSONObject("contextUpdate");
+                if (requestedSession != null && requestedAgent == null && update != null) {
+                    nextDocument = ContextSync.update(nextDocument, update);
+                    if (nextDocument != null) context = new JSONObject()
+                        .put("capturedAt", nextDocument.capturedAt)
+                        .put("context", new JSONObject(nextDocument.json))
+                        .put("session", all.optJSONObject("selectedSession"));
                 }
-                boolean selectedThreadGone = selectedMissing;
-                JSONObject agentRunList = null;
-                String agentListError = "";
-                if (requestedAgentList) {
-                    try { agentRunList = api("GET", "/v1/agents/runs", null); }
-                    catch (Exception failure) { agentListError = "Agents unavailable · " + shortError(failure); }
+                ContextSync.Document nextAgentText = requestedAgentTextDocument;
+                ContextSync.Document nextAgentThinking = requestedAgentThinkingDocument;
+                JSONObject observedEvents = all.optJSONObject("agentEvents");
+                if (observedEvents != null) {
+                    nextAgentText = ContextSync.update(nextAgentText, observedEvents.optJSONObject("liveTextUpdate"));
+                    nextAgentThinking = ContextSync.update(nextAgentThinking, observedEvents.optJSONObject("liveThinkingUpdate"));
+                    observedEvents.put("liveText", nextAgentText == null ? "" : nextAgentText.json);
+                    observedEvents.put("liveThinking", nextAgentThinking == null ? "" : nextAgentThinking.json);
                 }
-                JSONObject agentRunEvents = null;
-                if (requestedAgent != null) {
-                    // A run is addressed by host and run id together, so the
-                    // separator between them is escaped rather than routed on.
-                    String addressed = requestedAgent.replace(":", "%3A");
-                    try { agentRunEvents = api("GET", "/v1/agents/runs/" + addressed + "/events?after=" + requestedAfter, null); }
-                    catch (Exception ignored) { /* A transient read leaves the observed transcript unchanged. */ }
+                ContextSync.Document appliedDocument = nextDocument;
+                if (update != null && appliedDocument != null && requestedSession != null) {
+                    try { PiRemoteCache.save(this, PiRemoteEnvironment.current().id, requestedSession, appliedDocument); }
+                    catch (Exception cacheFailure) { Log.w("PiRemote", "Could not cache context", cacheFailure); }
                 }
-                JSONObject context = selectedContext;
-                JSONObject observedList = agentRunList;
-                JSONObject observedEvents = agentRunEvents;
-                String observedListError = agentListError;
+                ContextSync.Document appliedAgentText = nextAgentText;
+                ContextSync.Document appliedAgentThinking = nextAgentThinking;
+                JSONObject renderedContext = context;
                 main.post(() -> {
-                    if (requestedEnvironmentGeneration != PiRemoteEnvironment.generation()) {
-                        finishRefresh();
-                        return;
+                    if (requestedEnvironmentGeneration != PiRemoteEnvironment.generation()) { finishRefresh(0); return; }
+                    String epoch = all.optString("epoch");
+                    if (!syncEpoch.isEmpty() && !syncEpoch.equals(epoch)) {
+                        contextDocument = null;
+                        syncSequence = 0;
+                    } else {
+                        syncEpoch = epoch;
+                        syncSequence = all.optLong("seq", syncSequence);
+                        if (Objects.equals(requestedSession, selectedId)) contextDocument = appliedDocument;
                     }
-                    if (requestedAgentList) {
-                        if (observedList != null) {
-                            JSONArray runs = observedList.optJSONArray("runs");
-                            JSONArray hosts = observedList.optJSONArray("hosts");
-                            agentRuns = runs == null ? new JSONArray() : runs;
-                            agentHosts = hosts == null ? new JSONArray() : hosts;
-                            agentRunningCount = observedList.optInt("running");
-                            agentHostFailing = false;
-                            for (int index = 0; index < agentHosts.length(); index++) {
-                                JSONObject host = agentHosts.optJSONObject(index);
-                                if (!optionalJsonString(host, "error").isEmpty()) agentHostFailing = true;
-                            }
-                            agentError = "";
-                        } else {
-                            agentError = observedListError;
+                    JSONObject listedRuns = all.optJSONObject("agentRuns");
+                    if (requestedAgentList && listedRuns != null) {
+                        agentRuns = listedRuns.optJSONArray("runs") == null ? new JSONArray() : listedRuns.optJSONArray("runs");
+                        agentHosts = listedRuns.optJSONArray("hosts") == null ? new JSONArray() : listedRuns.optJSONArray("hosts");
+                        agentRunningCount = listedRuns.optInt("running");
+                        agentHostFailing = false;
+                        for (int index = 0; index < agentHosts.length(); index++) {
+                            JSONObject host = agentHosts.optJSONObject(index);
+                            if (!optionalJsonString(host, "error").isEmpty()) agentHostFailing = true;
                         }
+                        agentError = "";
                         renderAgentSection();
                     }
                     if (observedEvents != null && Objects.equals(agentRunId, requestedAgent)
                         && requestedSelectionGeneration == selectionGeneration) {
+                        agentLiveTextDocument = appliedAgentText;
+                        agentLiveThinkingDocument = appliedAgentThinking;
                         applyObservedRun(observedEvents.optJSONObject("run"));
                         renderEvents(observedEvents);
-                        updateComposer(); updateTopBar();
                     }
-                    archiveSupported = all.has("archivedSessions") && all.optJSONArray("archivedSessions") != null;
                     JSONArray archivedPage = all.optJSONArray("archivedSessions");
-                    archivedTotal = all.optInt("archivedTotal", archivedPage == null ? 0 : archivedPage.length());
+                    archiveSupported = true;
+                    archivedTotal = all.optInt("archivedTotal", archivedPage == null ? archivedTotal : archivedPage.length());
                     lastSessions = all.optJSONArray("sessions") == null ? new JSONArray() : all.optJSONArray("sessions");
-                    lastArchivedPage = archivedPage == null ? new JSONArray() : archivedPage;
-                    renderSessions(lastSessions, lastArchivedPage,
-                        requestedSelectionGeneration, requestedActionGeneration);
-                    renderAgents(all.optJSONObject("agents"));
-                    renderPlanUsage(all.optJSONObject("plans"));
-                    renderGovernorControls(all.optJSONObject("governors"));
-                    renderMachineUsage(all.optJSONObject("machine"));
-                    // Asked after the drawer render, not before it: a notification opens its
-                    // thread from inside that render, and this answer belongs to whichever
-                    // thread was open when the poll left.
-                    if (selectedThreadGone && SelectionGate.transcriptApplies(requestedSelectionGeneration,
-                            selectionGeneration, requestedSession, selectedId, agentRunId != null)) {
-                        clearSelection();
-                    }
-                    if (context != null && SelectionGate.transcriptApplies(requestedSelectionGeneration,
+                    if (archivedPage != null) lastArchivedPage = archivedPage;
+                    renderSessions(lastSessions, lastArchivedPage, requestedSelectionGeneration, requestedActionGeneration);
+                    if (all.optJSONObject("agents") != null) renderAgents(all.optJSONObject("agents"));
+                    if (all.optJSONObject("plans") != null) renderPlanUsage(all.optJSONObject("plans"));
+                    if (all.optJSONObject("governors") != null) renderGovernorControls(all.optJSONObject("governors"));
+                    if (all.optJSONObject("machine") != null) renderMachineUsage(all.optJSONObject("machine"));
+                    if (renderedContext != null && SelectionGate.transcriptApplies(requestedSelectionGeneration,
                             selectionGeneration, requestedSession, selectedId, agentRunId != null)) {
                         if (SelectionGate.snapshotApplies(requestedActionGeneration, actionGeneration,
-                            selectedActionInFlight())) applySelectedSnapshot(context.optJSONObject("session"), false);
-                        renderContext(context);
+                            selectedActionInFlight())) applySelectedSnapshot(renderedContext.optJSONObject("session"), false);
+                        renderContext(renderedContext);
+                    } else if (all.optJSONObject("selectedSession") != null && Objects.equals(requestedSession, selectedId)
+                        && SelectionGate.snapshotApplies(requestedActionGeneration, actionGeneration, selectedActionInFlight())) {
+                        applySelectedSnapshot(all.optJSONObject("selectedSession"), false);
                     }
                     updateComposer(); updateTopBar();
                     connection.setVisibility(View.GONE);
-                    finishRefresh();
+                    syncErrorDelayMs = 1_000;
+                    finishRefresh(0);
                 });
-            } catch (Exception e) {
+            } catch (Exception failure) {
                 main.post(() -> {
-                    if (requestedEnvironmentGeneration != PiRemoteEnvironment.generation()) {
-                        finishRefresh();
-                        return;
+                    if (requestedEnvironmentGeneration == PiRemoteEnvironment.generation()) {
+                        connection.setText("●  Offline · " + shortError(failure)); connection.setTextColor(DANGER);
+                        connection.setVisibility(View.VISIBLE);
+                        topState.setText("OFFLINE"); topState.setTextColor(DANGER);
                     }
-                    connection.setText("●  Offline · " + shortError(e)); connection.setTextColor(DANGER);
-                    connection.setVisibility(View.VISIBLE);
-                    topState.setText("OFFLINE"); topState.setTextColor(DANGER);
-                    finishRefresh();
+                    flushOutbox();
+                    long retryDelay = syncErrorDelayMs;
+                    syncErrorDelayMs = Math.min(30_000, syncErrorDelayMs * 2);
+                    finishRefresh(retryDelay);
                 });
             }
         });
     }
 
-    private void finishRefresh() {
+    private void refresh() { refreshSync(); }
+
+    private void finishRefresh(long delayMs) {
         polling = false;
-        if (refreshAgain) { refreshAgain = false; main.post(this::refresh); }
+        if (!activityVisible) return;
+        if (refreshAgain) { refreshAgain = false; delayMs = 0; }
+        main.removeCallbacks(poller);
+        main.postDelayed(poller, Math.max(0, delayMs));
     }
 
     private String optionalJsonString(JSONObject object, String key) {
@@ -1647,10 +1678,11 @@ public class MainActivity extends Activity {
 
     private void resetTranscript() {
         transcriptOpenedMs = SystemClock.uptimeMillis();
-        lastSeq = 0; contextCapturedAt = 0; transcriptScroll.resetToEnd();
+        lastSeq = 0; contextCapturedAt = 0; contextDocument = null; transcriptScroll.resetToEnd();
         transcript.removeAllViews(); toolCards.clear(); userMessageLabels.clear();
         contextEntrySignatures.clear(); contextEntryViews.clear(); contextEntries.clear();
         liveAnswer = null; liveThought = null;
+        agentLiveTextDocument = null; agentLiveThinkingDocument = null;
     }
 
     private void updateUsageSummary() {
@@ -2265,22 +2297,42 @@ public class MainActivity extends Activity {
     private void queueTextAttachment(String name, String text) {
         Attachment file = beginAttachment(TextDocument.fileName(name));
         byte[] content = TextDocument.utf8(text);
-        queueAttachmentUpload(file, () -> uploadAttachment(
-            new ByteArrayInputStream(content), file.name, file.sessionId, "text/plain; charset=utf-8"));
+        queueAttachmentUpload(file, () -> uploadAttachment(content, file.name, file.sessionId, "text/plain; charset=utf-8"));
+    }
+
+    private long attachmentSize(Uri uri) {
+        try (Cursor cursor = getContentResolver().query(uri, new String[]{OpenableColumns.SIZE}, null, null, null)) {
+            if (cursor != null && cursor.moveToFirst() && !cursor.isNull(0)) return cursor.getLong(0);
+        } catch (Exception ignored) {}
+        return -1;
     }
 
     private JSONObject uploadAttachment(Uri uri, String name, String sessionId) throws Exception {
         String type = getContentResolver().getType(uri);
         String contentType = type == null ? "application/octet-stream" : type;
-        try {
-            return uploadAttachment(openAttachment(uri), name, sessionId, contentType);
-        } catch (PiRemoteApi.Locked locked) {
-            // The upload body is already spent, so this reopens the file rather
-            // than retrying the request. Uploads are the one call that cannot be
-            // replayed from inside PiRemoteApi.
-            PiRemoteKey.ensureUnlocked(PiRemoteEnvironment.current());
-            return uploadAttachment(openAttachment(uri), name, sessionId, contentType);
+        long size = attachmentSize(uri);
+        if (size < 0) {
+            try (InputStream input = openAttachment(uri); ByteArrayOutputStream output = new ByteArrayOutputStream()) {
+                byte[] buffer = new byte[256 * 1024];
+                for (int count; (count = input.read(buffer)) >= 0;) if (count > 0) output.write(buffer, 0, count);
+                return uploadAttachment(output.toByteArray(), name, sessionId, contentType);
+            }
         }
+        String requestId = UUID.randomUUID().toString();
+        Exception last = null;
+        for (int attempt = 0; attempt < 5; attempt++) {
+            try (InputStream input = openAttachment(uri)) {
+                return uploadAttachment(input, size, name, sessionId, contentType, requestId);
+            } catch (PiRemoteApi.Locked locked) {
+                PiRemoteKey.ensureUnlocked(PiRemoteEnvironment.current());
+                last = locked;
+            } catch (Exception failure) {
+                last = failure;
+                if (failure instanceof PiRemoteApi.HttpFailure && !((PiRemoteApi.HttpFailure) failure).retryable()) throw failure;
+                Thread.sleep(Math.min(8_000, 500L << attempt));
+            }
+        }
+        throw last == null ? new IOException("Upload did not complete") : last;
     }
 
     private InputStream openAttachment(Uri uri) throws IOException {
@@ -2289,10 +2341,43 @@ public class MainActivity extends Activity {
         return input;
     }
 
-    private JSONObject uploadAttachment(InputStream input, String name, String sessionId, String type) throws Exception {
-        String path = "/v1/uploads?name=" + URLEncoder.encode(name, "UTF-8")
-            + "&sessionId=" + URLEncoder.encode(sessionId, "UTF-8");
-        return PiRemoteApi.upload(path, input, type).getJSONObject("file");
+    private JSONObject uploadAttachment(byte[] content, String name, String sessionId, String type) throws Exception {
+        String requestId = UUID.randomUUID().toString();
+        Exception last = null;
+        for (int attempt = 0; attempt < 5; attempt++) {
+            try { return uploadAttachment(new ByteArrayInputStream(content), content.length, name, sessionId, type, requestId); }
+            catch (Exception failure) {
+                last = failure;
+                if (failure instanceof PiRemoteApi.HttpFailure && !((PiRemoteApi.HttpFailure) failure).retryable()) throw failure;
+                Thread.sleep(Math.min(8_000, 500L << attempt));
+            }
+        }
+        throw last == null ? new IOException("Upload did not complete") : last;
+    }
+
+    private JSONObject uploadAttachment(InputStream input, long size, String name, String sessionId, String type, String requestId) throws Exception {
+        JSONObject initialized = api("POST", "/v1/uploads/init", new JSONObject().put("requestId", requestId)
+            .put("sessionId", sessionId).put("name", name).put("contentType", type).put("size", size)).getJSONObject("upload");
+        String uploadId = initialized.getString("id");
+        long offset = initialized.getLong("offset");
+        java.security.MessageDigest digest = java.security.MessageDigest.getInstance("SHA-256");
+        byte[] buffer = new byte[256 * 1024];
+        long position = 0;
+        for (int count; (count = input.read(buffer)) >= 0;) {
+            if (count == 0) continue;
+            digest.update(buffer, 0, count);
+            int start = position < offset ? (int) Math.min(count, offset - position) : 0;
+            if (start < count) {
+                byte[] chunk = Arrays.copyOfRange(buffer, start, count);
+                JSONObject progress = PiRemoteApi.putBytes("/v1/uploads/" + uploadId + "?offset=" + (position + start), chunk, ContextSync.hash(chunk));
+                offset = progress.getJSONObject("upload").getLong("offset");
+            }
+            position += count;
+        }
+        if (position != size || offset != size) throw new IOException("Attachment changed while uploading");
+        StringBuilder hash = new StringBuilder(64);
+        for (byte value : digest.digest()) hash.append(String.format("%02x", value & 0xff));
+        return api("POST", "/v1/uploads/" + uploadId + "/complete", new JSONObject().put("sha256", hash.toString())).getJSONObject("file");
     }
 
     private void deleteUploaded(String name, String sessionId, String environment) {
@@ -2635,10 +2720,27 @@ public class MainActivity extends Activity {
         if (changed) {
             resetTranscript(); prompt.setText(loadDraft(id)); clearAttachments(true);
             renderAgentSection();
+            loadCachedContext(id, selectionGeneration);
         }
         detail.setVisibility(View.VISIBLE); emptyBox.setVisibility(View.GONE); updateComposer(); updateTopBar();
         publishOpenThread();
         refresh();
+    }
+
+    private void loadCachedContext(String id, long generation) {
+        String environmentId = PiRemoteEnvironment.current().id;
+        network.execute(() -> {
+            ContextSync.Document cached = PiRemoteCache.load(this, environmentId, id);
+            if (cached == null) return;
+            main.post(() -> {
+                if (generation != selectionGeneration || !Objects.equals(id, selectedId) || contextDocument != null) return;
+                try {
+                    contextDocument = cached;
+                    renderContext(new JSONObject().put("capturedAt", cached.capturedAt).put("context", new JSONObject(cached.json)));
+                    connection.setText("●  Cached · connecting"); connection.setTextColor(MUTED); connection.setVisibility(View.VISIBLE);
+                } catch (Exception failure) { PiRemoteCache.remove(this, environmentId, id); }
+            });
+        });
     }
 
     private void clearSelection() {
@@ -3322,13 +3424,16 @@ public class MainActivity extends Activity {
         for (Attachment file : sentFiles) attachmentPaths.add(file.path);
         String sentText = PromptComposer.compose(value, attachmentPaths);
         String id = selectedId;
+        PiRemoteOutbox.Entry outbox;
+        try { outbox = PiRemoteOutbox.enqueue(this, PiRemoteEnvironment.current().id, id, sentText, delivery); }
+        catch (Exception failure) { haptics.play(Haptics.Feel.ERROR); note(shortError(failure)); return; }
         prompt.setText(""); clearAttachments(false);
         // Sending is a statement that you want to see the answer.
         transcriptScroll.follow();
         haptics.play(Haptics.Feel.SEND);
         long actionToken = beginAction(id, "send");
         try {
-            JSONObject body = new JSONObject().put("requestId", UUID.randomUUID().toString()).put("text", sentText).put("delivery", delivery);
+            JSONObject body = outbox.json();
             network.execute(() -> {
                 Exception failure = null;
                 JSONObject accepted = null;
@@ -3343,13 +3448,20 @@ public class MainActivity extends Activity {
                 JSONObject result = accepted;
                 main.post(() -> {
                     finishAction(id, actionToken);
-                    if (error != null && Objects.equals(selectedId, id)) {
-                        if (prompt.getText().toString().trim().isEmpty()) prompt.setText(value);
-                        for (Attachment file : sentFiles) { file.removed = false; file.generation = attachmentGeneration; }
-                        attachments.addAll(0, sentFiles); renderAttachments();
-                        haptics.play(Haptics.Feel.ERROR);
-                        note(shortError(error));
+                    if (error != null) {
+                        boolean terminal = error instanceof PiRemoteApi.HttpFailure && !((PiRemoteApi.HttpFailure) error).retryable();
+                        if (terminal) {
+                            PiRemoteOutbox.remove(this, outbox.requestId);
+                            if (Objects.equals(selectedId, id) && prompt.getText().toString().trim().isEmpty()) prompt.setText(value);
+                            for (Attachment file : sentFiles) { file.removed = false; file.generation = attachmentGeneration; }
+                            attachments.addAll(0, sentFiles); renderAttachments();
+                            haptics.play(Haptics.Feel.ERROR); note(shortError(error));
+                        } else {
+                            note("Message queued until the connection returns");
+                            flushOutbox();
+                        }
                     } else if (result != null) {
+                        PiRemoteOutbox.remove(this, outbox.requestId);
                         JSONObject resultSession = result.optJSONObject("session");
                         String resultName = resultSession == null ? "Thread" : resultSession.optString("name", "Thread");
                         if (CompletionNotificationService.watchSession(this, id, resultName))
@@ -3364,6 +3476,34 @@ public class MainActivity extends Activity {
                 });
             });
         } catch (Exception e) { haptics.play(Haptics.Feel.ERROR); note(shortError(e)); }
+    }
+
+    private void flushOutbox() {
+        if (outboxFlushing) return;
+        String environmentId = PiRemoteEnvironment.current().id;
+        List<PiRemoteOutbox.Entry> entries = PiRemoteOutbox.pending(this, environmentId);
+        if (entries.isEmpty()) return;
+        outboxFlushing = true;
+        network.execute(() -> {
+            try {
+                for (PiRemoteOutbox.Entry entry : entries) {
+                    try {
+                        JSONObject result = PiRemoteApi.requestFor(PiRemoteEnvironment.find(entry.environmentId), "POST",
+                            "/v1/sessions/" + entry.sessionId + "/prompt", entry.json());
+                        PiRemoteOutbox.remove(this, entry.requestId);
+                        JSONObject session = result.optJSONObject("session");
+                        CompletionNotificationService.watchSessionFor(this, entry.environmentId, entry.sessionId,
+                            session == null ? "Thread" : session.optString("name", "Thread"));
+                    } catch (PiRemoteApi.HttpFailure failure) {
+                        if (!failure.retryable()) PiRemoteOutbox.remove(this, entry.requestId);
+                        else break;
+                    } catch (Exception transientFailure) { break; }
+                }
+            } finally {
+                outboxFlushing = false;
+                main.post(this::refresh);
+            }
+        });
     }
 
     private void abortSelected() {

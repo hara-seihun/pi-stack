@@ -2,7 +2,36 @@
 
 (() => {
   const MAX_CONTEXT_BYTES = 500;
-  const POLL_MS = 500;
+  const POLL_MS = 1_000;
+
+  async function sha256(value) {
+    const digest = await crypto.subtle.digest("SHA-256", new TextEncoder().encode(value));
+    return [...new Uint8Array(digest)].map((byte) => byte.toString(16).padStart(2, "0")).join("");
+  }
+
+  async function applyTextUpdate(current, update) {
+    if (!update) return current;
+    if (update.kind === "clear") return null;
+    if (update.kind === "full") {
+      if (await sha256(update.document) !== update.hash) throw new Error("Live transcript hash verification failed");
+      return { value: update.document, hash: update.hash };
+    }
+    if (update.kind !== "splice" || !current || current.hash !== update.splice?.baseHash)
+      throw new Error("Live transcript resynchronization required");
+    const source = new TextEncoder().encode(current.value);
+    const prefix = Number(update.splice.prefixBytes);
+    const deleted = Number(update.splice.deleteBytes);
+    const inserted = Uint8Array.from(atob(update.splice.insertBase64), (character) => character.charCodeAt(0));
+    if (!Number.isSafeInteger(prefix) || !Number.isSafeInteger(deleted) || prefix < 0 || deleted < 0 || prefix + deleted > source.length)
+      throw new Error("Live transcript splice is invalid");
+    const result = new Uint8Array(source.length - deleted + inserted.length);
+    result.set(source.subarray(0, prefix));
+    result.set(inserted, prefix);
+    result.set(source.subarray(prefix + deleted), prefix + inserted.length);
+    const value = new TextDecoder("utf-8", { fatal: true }).decode(result);
+    if (await sha256(value) !== update.hash) throw new Error("Live transcript splice hash verification failed");
+    return { value, hash: update.hash };
+  }
 
   function asRecord(value) {
     return value && typeof value === "object" && !Array.isArray(value) ? value : null;
@@ -76,6 +105,9 @@
       this.speaker = null;
       this.generation = 0;
       this.cursor = 0;
+      this.syncSequence = 0;
+      this.liveTextDocument = null;
+      this.liveThinkingDocument = null;
       this.pollTimer = null;
       this.polling = false;
       this.delegations = [];
@@ -299,10 +331,27 @@
     async poll() {
       if (this.polling || this.state !== "live") return;
       this.polling = true;
+      let failed = false;
       try {
-        const response = await piFetch(`/v1/sessions/${encodeURIComponent(this.sessionId)}/events?after=${this.cursor}`, { cache: "no-store" });
+        const response = await piFetch("/v1/sync", {
+          method: "POST",
+          headers: { "content-type": "application/json" },
+          body: JSON.stringify({
+            after: this.syncSequence,
+            waitMs: 25_000,
+            includeDashboard: false,
+            eventSessionId: this.sessionId,
+            eventAfter: this.cursor,
+            eventLiveTextHash: this.liveTextDocument?.hash || "",
+            eventLiveThinkingHash: this.liveThinkingDocument?.hash || "",
+          }),
+        });
         if (!response.ok) throw new Error(await responseError(response, "Voice lost the thread"));
-        const snapshot = await response.json();
+        const synchronized = await response.json();
+        this.syncSequence = Number(synchronized.seq || this.syncSequence);
+        const snapshot = synchronized.sessionEvents || { events: [] };
+        this.liveTextDocument = await applyTextUpdate(this.liveTextDocument, snapshot.liveTextUpdate);
+        this.liveThinkingDocument = await applyTextUpdate(this.liveThinkingDocument, snapshot.liveThinkingUpdate);
         for (const event of snapshot.events || []) {
           this.cursor = Math.max(this.cursor, Number(event.seq) || 0);
           if (event.type === "user") {
@@ -331,12 +380,13 @@
             this.setState("live", this.delegations.length ? "Agent queued…" : "Listening");
           }
         }
-        this.observeLiveText(String(snapshot.liveText || ""));
+        this.observeLiveText(this.liveTextDocument?.value || "");
       } catch (cause) {
+        failed = true;
         this.onNotice(String(cause?.message || cause));
       } finally {
         this.polling = false;
-        this.schedulePoll();
+        this.schedulePoll(failed ? POLL_MS : 0);
       }
     }
 

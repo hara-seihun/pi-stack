@@ -36,6 +36,17 @@ CREATE TABLE IF NOT EXISTS session_contexts (
   captured_at INTEGER NOT NULL,
   context TEXT NOT NULL
 );
+CREATE TABLE IF NOT EXISTS session_context_patches (
+  seq INTEGER PRIMARY KEY AUTOINCREMENT,
+  session_id TEXT NOT NULL REFERENCES sessions(id) ON DELETE CASCADE,
+  captured_at INTEGER NOT NULL,
+  base_hash TEXT NOT NULL,
+  target_hash TEXT NOT NULL,
+  prefix_bytes INTEGER NOT NULL,
+  delete_bytes INTEGER NOT NULL,
+  insert_base64 TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS session_context_patches_session_seq ON session_context_patches(session_id, seq);
 CREATE TABLE IF NOT EXISTS requests (
   request_id TEXT PRIMARY KEY,
   session_id TEXT NOT NULL,
@@ -68,6 +79,17 @@ CREATE TABLE IF NOT EXISTS uploads (
   created_at TEXT NOT NULL
 );
 CREATE INDEX IF NOT EXISTS uploads_session ON uploads(session_id);
+CREATE TABLE IF NOT EXISTS upload_transfers (
+  id TEXT PRIMARY KEY,
+  request_id TEXT NOT NULL UNIQUE,
+  session_id TEXT NOT NULL REFERENCES sessions(id) ON DELETE CASCADE,
+  name TEXT NOT NULL,
+  content_type TEXT NOT NULL,
+  expected_size INTEGER NOT NULL,
+  received_size INTEGER NOT NULL DEFAULT 0,
+  temp_path TEXT NOT NULL,
+  created_at TEXT NOT NULL
+);
 CREATE TABLE IF NOT EXISTS metadata (
   key TEXT PRIMARY KEY,
   value TEXT NOT NULL

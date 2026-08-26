@@ -1,5 +1,5 @@
 import { Database } from "bun:sqlite";
-import { existsSync, mkdirSync, readFileSync, realpathSync, renameSync, statSync, unlinkSync, writeFileSync } from "node:fs";
+import { closeSync, existsSync, mkdirSync, openSync, readFileSync, realpathSync, renameSync, statSync, unlinkSync, writeFileSync, writeSync } from "node:fs";
 import { homedir } from "node:os";
 import { basename, dirname, extname, isAbsolute, join, resolve } from "node:path";
 import { parseRunKey } from "./agent-runs";
@@ -7,12 +7,13 @@ import { AgentHost, LocalLedger, RemoteLedger, sshRunner } from "./agent-hosts";
 import { loadPlanUsage, type PlanUsageSnapshot } from "./plan-usage";
 import { loadProviderManifest, manifestAgentType, manifestPlanCards } from "./provider-manifest";
 import { readMachineUsage } from "./machine-usage";
+import { applyContextSplice, contextSplice, sha256, type ContextSplice } from "./sync";
 import { beginSupervisorGeneration, ensureSupervisorSchema } from "./database";
 import { BOOSTED_MULTIPLIER, nextBoost } from "pi-orchestrator/boost";
 import { DEFAULT_LIVE_MODEL, DEFAULT_LIVE_VOICE, VoiceBroker } from "pi-orchestrator/voice";
 type VoiceAccount = { id: string; provider: string; accessUntil?: number; cooldownUntil?: number };
 
-const VERSION = "0.42.0";
+const VERSION = "0.43.0";
 const ENVIRONMENT_ID = process.env.PI_REMOTE_ENVIRONMENT_ID ?? "local";
 const ENVIRONMENT_NAME = process.env.PI_REMOTE_ENVIRONMENT_NAME ?? "Local";
 const ENVIRONMENT_REQUIRES_UNLOCK = process.env.PI_REMOTE_REQUIRES_UNLOCK === "true";
@@ -286,6 +287,86 @@ const json = (data: unknown, status = 200) => new Response(JSON.stringify(data),
   status,
   headers: { "content-type": "application/json", "cache-control": "no-store" },
 });
+
+function compressedJson(req: Request, data: unknown, status = 200): Response {
+  const encoded = JSON.stringify(data);
+  const headers: Record<string, string> = {
+    "content-type": "application/json",
+    "cache-control": "no-store",
+    vary: "accept-encoding",
+  };
+  if (encoded.length >= 1_024 && /(?:^|,)\s*gzip(?:\s*;|\s*,|$)/i.test(req.headers.get("accept-encoding") ?? "")) {
+    headers["content-encoding"] = "gzip";
+    return new Response(Bun.gzipSync(Buffer.from(encoded)), { status, headers });
+  }
+  return new Response(encoded, { status, headers });
+}
+
+let syncSequence = 1;
+const syncWaiters = new Set<() => void>();
+function signalSync() {
+  syncSequence++;
+  for (const wake of syncWaiters) wake();
+  syncWaiters.clear();
+}
+async function awaitSync(after: number, waitMs: number) {
+  if (after !== syncSequence) return;
+  await new Promise<void>((resolve) => {
+    let settled = false;
+    const finish = () => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(timer);
+      syncWaiters.delete(finish);
+      resolve();
+    };
+    const timer = setTimeout(finish, Math.min(30_000, Math.max(0, waitMs)));
+    syncWaiters.add(finish);
+  });
+}
+
+const contextVersions = new Map<string, Map<string, string>>();
+function rememberContext(sessionId: string, document: string): string {
+  const hash = sha256(document);
+  let versions = contextVersions.get(sessionId);
+  if (!versions) {
+    versions = new Map();
+    contextVersions.set(sessionId, versions);
+  }
+  versions.delete(hash);
+  versions.set(hash, document);
+  while (versions.size > 12) versions.delete(versions.keys().next().value!);
+  return hash;
+}
+
+function textUpdate(key: string, baseHash: unknown, target: string): any {
+  const targetHash = rememberContext(key, target);
+  if (baseHash === targetHash) return null;
+  const base = typeof baseHash === "string" ? contextVersions.get(key)?.get(baseHash) : undefined;
+  return base === undefined
+    ? { kind: "full", capturedAt: Date.now(), hash: targetHash, document: target }
+    : { kind: "splice", capturedAt: Date.now(), hash: targetHash, splice: contextSplice(base, target) };
+}
+
+function storedContext(sessionId: string): { capturedAt: number; document: string; hash: string } | null {
+  const base = db.query("SELECT captured_at,context FROM session_contexts WHERE session_id=?").get(sessionId) as any;
+  if (!base) return null;
+  let document = String(base.context);
+  let capturedAt = Number(base.captured_at);
+  for (const row of db.query("SELECT * FROM session_context_patches WHERE session_id=? ORDER BY seq").all(sessionId) as any[]) {
+    document = applyContextSplice(document, {
+      baseHash: String(row.base_hash),
+      targetHash: String(row.target_hash),
+      prefixBytes: Number(row.prefix_bytes),
+      deleteBytes: Number(row.delete_bytes),
+      insertBase64: String(row.insert_base64),
+    });
+    capturedAt = Number(row.captured_at);
+    rememberContext(sessionId, document);
+  }
+  return { capturedAt, document, hash: rememberContext(sessionId, document) };
+}
+
 const error = (message: string, status = 400) => json({ error: message }, status);
 
 type ThunderStatus = { active: boolean; status: string };
@@ -421,7 +502,7 @@ const vendorContentTypes: Record<string, string> = {
   ".woff2": "font/woff2",
 };
 
-function downloadHeaders(path: string, size: number, contentType: string): Headers {
+function downloadHeaders(path: string, size: number, contentType: string, etagValue = `${size}`): Headers {
   const name = basename(path) || "download";
   const fallback = name.replace(/[^\x20-\x7e]|["\\]/g, "_") || "download";
   const encoded = encodeURIComponent(name).replace(/[!'()*]/g, (character) => `%${character.charCodeAt(0).toString(16).toUpperCase()}`);
@@ -429,7 +510,9 @@ function downloadHeaders(path: string, size: number, contentType: string): Heade
     "content-type": contentType || "application/octet-stream",
     "content-length": String(size),
     "content-disposition": `attachment; filename="${fallback}"; filename*=UTF-8''${encoded}`,
-    "cache-control": "private, no-store",
+    "cache-control": "private, no-cache",
+    "accept-ranges": "bytes",
+    etag: `\"${sha256(`${path}:${etagValue}`)}\"`,
     "x-content-type-options": "nosniff",
   });
 }
@@ -449,6 +532,7 @@ try:
         "path": str(path),
         "size": stat.st_size,
         "contentType": mimetypes.guess_type(path.name)[0] or "application/octet-stream",
+        "mtimeNs": stat.st_mtime_ns,
     }))
 except (FileNotFoundError, PermissionError, OSError):
     print(json.dumps({"status": 404, "error": "File not found"}))
@@ -482,7 +566,18 @@ function childResponseBody(proc: any): ReadableStream<Uint8Array> {
   });
 }
 
-async function sessionFileResponse(url: URL, method: string): Promise<Response | null> {
+function byteRange(value: string | null, size: number): { start: number; end: number } | null {
+  if (!value) return null;
+  const match = value.match(/^bytes=(\d+)-(\d*)$/);
+  if (!match) return null;
+  const start = Number(match[1]);
+  const end = match[2] ? Math.min(size - 1, Number(match[2])) : size - 1;
+  return Number.isSafeInteger(start) && Number.isSafeInteger(end) && start >= 0 && start <= end && start < size
+    ? { start, end }
+    : null;
+}
+
+async function sessionFileResponse(url: URL, method: string, req: Request): Promise<Response | null> {
   const match = url.pathname.match(/^\/v1\/sessions\/([0-9a-f-]+)\/files$/i);
   if (!match || (method !== "GET" && method !== "HEAD")) return null;
   const row = sessionRow.get(match[1]) as any;
@@ -495,21 +590,47 @@ async function sessionFileResponse(url: URL, method: string): Promise<Response |
     try { metadata = await remoteFileMetadata(requested, target); }
     catch (cause: any) { return new Response(cause?.message ?? "Could not inspect remote file", { status: 502 }); }
     if (metadata.status) return new Response(String(metadata.error ?? "File not found"), { status: Number(metadata.status) });
-    const headers = downloadHeaders(String(metadata.path), Number(metadata.size), String(metadata.contentType));
+    const size = Number(metadata.size);
+    const headers = downloadHeaders(String(metadata.path), size, String(metadata.contentType), `${size}:${metadata.mtimeNs}`);
+    const range = method === "GET" ? byteRange(req.headers.get("range"), size) : null;
+    if (req.headers.has("range") && method === "GET" && !range)
+      return new Response(null, { status: 416, headers: { "content-range": `bytes */${size}` } });
     if (method === "HEAD") return new Response(null, { headers });
-    const proc = Bun.spawn(["ssh", target.ssh, `cat -- ${shellQuote(String(metadata.path))}`], { stdout: "pipe", stderr: "pipe" });
+    const start = range?.start ?? 0;
+    const length = range ? range.end - range.start + 1 : size;
+    if (range) {
+      headers.set("content-range", `bytes ${range.start}-${range.end}/${size}`);
+      headers.set("content-length", String(length));
+    }
+    const remoteRange = String.raw`import pathlib,sys
+p=pathlib.Path(sys.argv[1]); start=int(sys.argv[2]); left=int(sys.argv[3])
+with p.open('rb') as f:
+ f.seek(start)
+ while left:
+  chunk=f.read(min(left,65536))
+  if not chunk: break
+  sys.stdout.buffer.write(chunk); left-=len(chunk)`;
+    const command = `python3 -c ${shellQuote(remoteRange)} ${shellQuote(String(metadata.path))} ${start} ${length}`;
+    const proc = Bun.spawn(["ssh", target.ssh, command], { stdout: "pipe", stderr: "pipe" });
     void new Response(proc.stderr).text().then(async (stderr) => {
       const code = await proc.exited;
       if (code !== 0) console.error(`Remote file download failed (${code}): ${stderr.trim()}`);
     }).catch((cause) => console.error("Remote file download failed", cause));
-    return new Response(childResponseBody(proc), { headers });
+    return new Response(childResponseBody(proc), { status: range ? 206 : 200, headers });
   }
   try {
     const path = realpathSync(requested);
     const stat = statSync(path);
     if (!stat.isFile()) return new Response("File not found", { status: 404 });
     const file = Bun.file(path);
-    return new Response(method === "HEAD" ? null : file, { headers: downloadHeaders(path, stat.size, file.type) });
+    const headers = downloadHeaders(path, stat.size, file.type, `${stat.size}:${stat.mtimeMs}`);
+    const range = method === "GET" ? byteRange(req.headers.get("range"), stat.size) : null;
+    if (req.headers.has("range") && method === "GET" && !range)
+      return new Response(null, { status: 416, headers: { "content-range": `bytes */${stat.size}` } });
+    if (!range) return new Response(method === "HEAD" ? null : file, { headers });
+    headers.set("content-range", `bytes ${range.start}-${range.end}/${stat.size}`);
+    headers.set("content-length", String(range.end - range.start + 1));
+    return new Response(file.slice(range.start, range.end + 1), { status: 206, headers });
   } catch { return new Response("File not found", { status: 404 }); }
 }
 
@@ -679,11 +800,13 @@ function emit(sessionId: string, type: string, payload: unknown = {}): number {
   const encoded = JSON.stringify(payload);
   const result = db.query("INSERT INTO events(session_id,time,type,payload) VALUES(?,?,?,?)")
     .run(sessionId, time, type, encoded);
+  signalSync();
   return Number(result.lastInsertRowid);
 }
 function touchSession(id: string) {
   if (!ownsSupervisorLease()) return;
   db.query("UPDATE sessions SET revision=revision+1,updated_at=? WHERE id=?").run(now(), id);
+  signalSync();
 }
 function confirmWorkInserted(sessionId: string, workId: string): number {
   if (!ownsSupervisorLease()) return 0;
@@ -822,7 +945,29 @@ async function activeAgents() {
   };
 }
 
-function publicSession(row: any) {
+type PreparedQueue = { counts: Map<string, number>; messages: any[] };
+function preparedQueues(rows: any[]): Map<string, PreparedQueue> {
+  const wanted = new Set(rows.map((row) => String(row.id)));
+  const prepared = new Map<string, PreparedQueue>();
+  for (const id of wanted) prepared.set(id, { counts: new Map(), messages: [] });
+  for (const item of db.query(`
+    SELECT rowid queue_order,id,session_id,text,delivery,state,created_at,last_error,inserted_at
+    FROM work_items WHERE state IN ('queued','running','dispatched') ORDER BY created_at,rowid
+  `).all() as any[]) {
+    const queue = prepared.get(String(item.session_id));
+    if (!queue) continue;
+    queue.counts.set(String(item.delivery), (queue.counts.get(String(item.delivery)) ?? 0) + (item.state === "dispatched" ? 0 : 1));
+    if (!item.inserted_at && queue.messages.length < 50) queue.messages.push(item);
+  }
+  return prepared;
+}
+
+function publicSessions(rows: any[]): any[] {
+  const queues = preparedQueues(rows);
+  return rows.map((row) => publicSession(row, queues.get(String(row.id))));
+}
+
+function publicSession(row: any, prepared?: PreparedQueue) {
   const rt = runtimes.get(row.id);
   const preset = workspaces.get(row.workspace_id);
   const remoteTarget = REMOTE_TARGETS.get(row.execution_target) ?? null;
@@ -830,17 +975,18 @@ function publicSession(row: any) {
   const profile = row.workspace_id === "hara" ? "personal" : executionTarget;
   const cwd = remoteTarget ? (row.remote_cwd || remoteTarget.cwd) : (preset?.path ?? row.workspace_id);
   const toolNames = rt ? [...rt.activeTools.values()] : [];
-  const durableQueue = db.query(`
+  const durableQueue = prepared ? [...prepared.counts].map(([delivery, count]) => ({ delivery, count })) : db.query(`
     SELECT delivery,count(*) count FROM work_items
     WHERE session_id=? AND state IN ('queued','running') GROUP BY delivery
   `).all(row.id) as any[];
   const durableSteering = Number(durableQueue.find((item) => item.delivery === "steer")?.count ?? 0);
   const durableFollowUps = Number(durableQueue.find((item) => item.delivery === "followUp")?.count ?? 0);
-  const queuedMessages = (db.query(`
+  const queuedSource = prepared?.messages ?? db.query(`
     SELECT id,text,delivery,state,created_at,last_error FROM work_items
     WHERE session_id=? AND state IN ('queued','running','dispatched') AND inserted_at IS NULL
     ORDER BY created_at,rowid LIMIT 50
-  `).all(row.id) as any[]).map((item) => ({
+  `).all(row.id) as any[];
+  const queuedMessages = queuedSource.map((item) => ({
     id: item.id,
     text: String(item.text),
     delivery: String(item.delivery),
@@ -879,8 +1025,6 @@ function publicSession(row: any) {
     updatedAt: row.updated_at,
     revision: Number(row.revision ?? 0),
     lastError: row.last_error,
-    liveText: rt?.liveText ?? "",
-    liveThinking: rt?.liveThinking ?? "",
     steeringQueued: durableSteering + (rt?.steeringQueued ?? 0),
     followUpQueued: durableFollowUps + (rt?.followUpQueued ?? 0),
     queuedMessages,
@@ -1659,7 +1803,7 @@ const server = Bun.serve({
   async fetch(req) {
     const url = new URL(req.url);
     if (!ownsSupervisorLease()) return error("Supervisor instance was replaced", 503);
-    const deliveredFile = await sessionFileResponse(url, req.method);
+    const deliveredFile = await sessionFileResponse(url, req.method, req);
     if (deliveredFile) return deliveredFile;
     const web = webResponse(url.pathname, req.method);
     if (web) return web;
@@ -1709,6 +1853,90 @@ const server = Bun.serve({
       try {
         return json({ thunder: await toggleThunder() });
       } catch (cause: any) { return error(cause?.message ?? "Could not toggle thunder", 503); }
+    }
+    if (url.pathname === "/v1/uploads/init" && req.method === "POST") {
+      try {
+        const body = await readBody(req);
+        const requestId = String(body.requestId ?? "");
+        const uploadSessionId = String(body.sessionId ?? "");
+        const name = uploadName(String(body.name ?? ""));
+        const size = Number(body.size);
+        if (!/^[0-9a-f-]{36}$/i.test(requestId)) return error("Valid requestId required");
+        if (!sessionRow.get(uploadSessionId)) return error("Session not found", 404);
+        if (!Number.isSafeInteger(size) || size < 0) return error("Valid upload size required");
+        const old = db.query("SELECT * FROM upload_transfers WHERE request_id=?").get(requestId) as any;
+        if (old) return json({ upload: { id: old.id, offset: Number(old.received_size), size: Number(old.expected_size) } });
+        const id = crypto.randomUUID();
+        const root = join(DATA, "upload-parts");
+        mkdirSync(root, { recursive: true, mode: 0o700 });
+        const path = join(root, id);
+        writeFileSync(path, "", { mode: 0o600 });
+        db.query(`INSERT INTO upload_transfers(id,request_id,session_id,name,content_type,expected_size,received_size,temp_path,created_at)
+          VALUES(?,?,?,?,?,?,0,?,?)`).run(id, requestId, uploadSessionId, name,
+            String(body.contentType ?? "application/octet-stream"), size, path, now());
+        return json({ upload: { id, offset: 0, size } }, 201);
+      } catch (cause: any) { return error(cause?.message ?? "Could not initialize upload", 400); }
+    }
+    const uploadChunk = url.pathname.match(/^\/v1\/uploads\/([0-9a-f-]+)$/i);
+    if (uploadChunk && req.method === "PUT") {
+      try {
+        const transfer = db.query("SELECT * FROM upload_transfers WHERE id=?").get(uploadChunk[1]) as any;
+        if (!transfer) return error("Upload not found", 404);
+        const offset = Number(url.searchParams.get("offset"));
+        if (!Number.isSafeInteger(offset) || offset !== Number(transfer.received_size))
+          return json({ error: "Upload offset does not match", offset: Number(transfer.received_size) }, 409);
+        const chunks: Uint8Array[] = [];
+        let length = 0;
+        const reader = req.body?.getReader();
+        if (reader) while (true) {
+          const { value, done } = await reader.read();
+          if (done) break;
+          chunks.push(value); length += value.byteLength;
+          if (length > 1024 * 1024) return error("Upload chunk exceeds 1 MiB", 413);
+        }
+        if (offset + length > Number(transfer.expected_size)) return error("Upload exceeds declared size", 413);
+        const data = Buffer.concat(chunks.map((chunk) => Buffer.from(chunk)), length);
+        const expectedHash = req.headers.get("x-chunk-sha256") ?? "";
+        if (!/^[0-9a-f]{64}$/i.test(expectedHash) || sha256(data) !== expectedHash.toLowerCase()) return error("Upload chunk hash does not match", 422);
+        const handle = openSync(String(transfer.temp_path), "r+");
+        try { writeSync(handle, data, 0, data.length, offset); } finally { closeSync(handle); }
+        const next = offset + length;
+        db.query("UPDATE upload_transfers SET received_size=? WHERE id=? AND received_size=?").run(next, transfer.id, offset);
+        return json({ upload: { id: transfer.id, offset: next, size: Number(transfer.expected_size) } });
+      } catch (cause: any) { return error(cause?.message ?? "Could not store upload chunk", 400); }
+    }
+    const uploadComplete = url.pathname.match(/^\/v1\/uploads\/([0-9a-f-]+)\/complete$/i);
+    if (uploadComplete && req.method === "POST") {
+      try {
+        const transfer = db.query("SELECT * FROM upload_transfers WHERE id=?").get(uploadComplete[1]) as any;
+        if (!transfer) return error("Upload not found", 404);
+        if (Number(transfer.received_size) !== Number(transfer.expected_size))
+          return json({ error: "Upload is incomplete", offset: Number(transfer.received_size) }, 409);
+        const body = await readBody(req);
+        const data = await Bun.file(String(transfer.temp_path)).arrayBuffer();
+        const fileHash = sha256(new Uint8Array(data));
+        if (String(body.sha256 ?? "").toLowerCase() !== fileHash) return error("Completed upload hash does not match", 422);
+        const uploadSession = sessionRow.get(String(transfer.session_id)) as any;
+        if (!uploadSession) return error("Session not found", 404);
+        const uploadTarget = REMOTE_TARGETS.get(String(uploadSession.execution_target)) ?? null;
+        let file: any;
+        if (uploadTarget) {
+          const transferRequest = new Request("http://localhost/upload", { method: "POST", body: Bun.file(String(transfer.temp_path)).stream(), duplex: "half" } as RequestInit);
+          file = await storeWorkUpload(transferRequest, String(transfer.name), uploadTarget);
+          unlinkSync(String(transfer.temp_path));
+        } else {
+          mkdirSync(INGESTION, { recursive: true, mode: 0o700 });
+          const destination = availableUploadPath(INGESTION, String(transfer.name));
+          renameSync(String(transfer.temp_path), destination);
+          file = { name: basename(destination), path: destination, size: Number(transfer.expected_size) };
+        }
+        db.transaction(() => {
+          db.query("INSERT OR REPLACE INTO uploads(path,session_id,environment,created_at) VALUES(?,?,?,?)")
+            .run(file.path, transfer.session_id, uploadTarget?.id ?? "local", now());
+          db.query("DELETE FROM upload_transfers WHERE id=?").run(transfer.id);
+        })();
+        return json({ file: { ...file, sha256: fileHash, environment: uploadTarget?.id ?? "local" } }, 201);
+      } catch (cause: any) { return error(cause?.message ?? "Could not complete upload", 400); }
     }
     if (url.pathname === "/v1/uploads" && req.method === "POST") {
       try {
@@ -1785,13 +2013,119 @@ const server = Bun.serve({
     if (url.pathname === "/v1/workspaces" && req.method === "GET") {
       return json({ workspaces: [...workspaces.values()].map(({ id, name, path }) => ({ id, name, path })) });
     }
+    if (url.pathname === "/v1/sync" && req.method === "POST") {
+      try {
+        const body = await readBody(req);
+        const after = Math.max(0, Number(body.after ?? 0) || 0);
+        await awaitSync(after, Number(body.waitMs ?? 25_000));
+        const sequence = syncSequence;
+        const rows = db.query("SELECT * FROM sessions WHERE archived_at IS NULL ORDER BY created_at DESC").all() as any[];
+        const includeArchived = body.includeArchived === true;
+        const selectedId = typeof body.selectedId === "string" ? body.selectedId : "";
+        let contextUpdate: any = null;
+        let selectedSession: any = null;
+        if (selectedId) {
+          const selected = sessionRow.get(selectedId) as any;
+          if (selected) {
+            selectedSession = publicSession(selected);
+            const stored = storedContext(selectedId);
+            if (stored) {
+              const baseHash = typeof body.contextHash === "string" ? body.contextHash : "";
+              if (baseHash !== stored.hash) {
+                const base = contextVersions.get(selectedId)?.get(baseHash);
+                contextUpdate = base === undefined
+                  ? { kind: "full", capturedAt: stored.capturedAt, hash: stored.hash, document: stored.document }
+                  : { kind: "splice", capturedAt: stored.capturedAt, hash: stored.hash, splice: contextSplice(base, stored.document) };
+              }
+            } else if (body.contextHash) contextUpdate = { kind: "clear", capturedAt: 0, hash: "" };
+          }
+        }
+        let sessionEvents: any = null;
+        if (typeof body.eventSessionId === "string" && body.eventSessionId) {
+          const eventSessionId = String(body.eventSessionId);
+          const eventRow = sessionRow.get(eventSessionId) as any;
+          if (eventRow) {
+            const eventAfter = Math.max(0, Number(body.eventAfter ?? 0) || 0);
+            const events = db.query("SELECT seq,time,type,payload FROM events WHERE session_id=? AND seq>? ORDER BY seq LIMIT 150")
+              .all(eventSessionId, eventAfter).map((entry: any) => ({ seq: entry.seq, time: entry.time, type: entry.type, ...JSON.parse(entry.payload) }));
+            const runtime = runtimes.get(eventSessionId);
+            sessionEvents = {
+              events,
+              liveTextUpdate: textUpdate(`session:${eventSessionId}:text`, body.eventLiveTextHash, runtime?.liveText ?? ""),
+              liveThinkingUpdate: textUpdate(`session:${eventSessionId}:thinking`, body.eventLiveThinkingHash, runtime?.liveThinking ?? ""),
+              session: publicSession(eventRow),
+            };
+          }
+        }
+        let runList: any = null;
+        if (body.includeAgentList === true) {
+          const snapshots = await Promise.all(agentHosts.map((host) => host.runs()));
+          runList = {
+            runs: snapshots.flatMap((snapshot) => snapshot.runs),
+            running: snapshots.reduce((total, snapshot) => total + snapshot.running, 0),
+            hosts: agentHosts.map((host, index) => ({
+              key: host.key,
+              label: host.ref.label,
+              name: host.ref.name,
+              running: snapshots[index]!.running,
+              updatedAt: snapshots[index]!.updatedAt,
+              error: snapshots[index]!.error,
+            })),
+          };
+        }
+        let runEvents: any = null;
+        if (typeof body.agentRunId === "string" && body.agentRunId) {
+          const addressed = parseRunKey(body.agentRunId);
+          const host = addressed ? agentHostsByKey.get(addressed.host) : undefined;
+          if (addressed && host) {
+            const stream = await host.events(addressed.runId, Math.max(0, Number(body.agentAfter ?? 0) || 0));
+            if (stream.run) runEvents = {
+              run: stream.run,
+              events: stream.events,
+              liveTextUpdate: textUpdate(`agent:${body.agentRunId}:text`, body.agentLiveTextHash, stream.liveText),
+              liveThinkingUpdate: textUpdate(`agent:${body.agentRunId}:thinking`, body.agentLiveThinkingHash, stream.liveThinking),
+            };
+          }
+        }
+        const watched = Array.isArray(body.watchedIds)
+          ? body.watchedIds.slice(0, 100).map((id: unknown) => sessionRow.get(String(id)) as any).filter(Boolean).map((watchedRow: any) => {
+              const session = publicSession(watchedRow) as any;
+              if (!["RUNNING", "STARTING", "ABORTING"].includes(String(watchedRow.state))) {
+                const event = db.query("SELECT payload FROM events WHERE session_id=? AND type='assistant' ORDER BY seq DESC LIMIT 1").get(watchedRow.id) as any;
+                if (event?.payload) {
+                  try { session.lastAssistantText = String(JSON.parse(event.payload).text ?? "").slice(0, 4_000); } catch {}
+                }
+              }
+              return session;
+            })
+          : [];
+        refreshPlanUsageIfDue();
+        return compressedJson(req, {
+          epoch: SUPERVISOR_EPOCH,
+          seq: sequence,
+          sessions: body.includeSessions === false ? null : publicSessions(rows),
+          archivedSessions: includeArchived ? publicSessions(archivedPage(0, ARCHIVED_PAGE_SIZE)) : null,
+          archivedTotal: archivedCount(),
+          selectedSession,
+          contextUpdate,
+          watched,
+          sessionEvents,
+          agentRuns: runList,
+          agentEvents: runEvents,
+          agents: body.includeDashboard === false ? null : await activeAgents(),
+          plans: body.includeDashboard === false ? null : { cards: manifestPlanCards(PROVIDER_MANIFEST, planUsage), updatedAt: planUsage.updatedAt },
+          governors: body.includeDashboard === false ? null : governorControls(),
+          machine: body.includeDashboard === false ? null : readMachineUsage(),
+        });
+      } catch (cause: any) { return error(cause?.message ?? "Could not synchronize", 400); }
+    }
     if (url.pathname === "/v1/sessions" && req.method === "GET") {
       refreshPlanUsageIfDue();
       const rows = db.query("SELECT * FROM sessions WHERE archived_at IS NULL ORDER BY created_at DESC").all();
       const archivedRows = archivedPage(0, ARCHIVED_PAGE_SIZE);
       return json({
-        sessions: rows.map(publicSession),
-        archivedSessions: archivedRows.map(publicSession),
+        sessions: publicSessions(rows),
+        archivedSessions: publicSessions(archivedRows),
         archivedTotal: archivedCount(),
         agents: await activeAgents(),
         plans: { cards: manifestPlanCards(PROVIDER_MANIFEST, planUsage), updatedAt: planUsage.updatedAt },
@@ -1804,7 +2138,7 @@ const server = Bun.serve({
       const requested = Math.floor(Number(url.searchParams.get("limit") ?? ARCHIVED_PAGE_SIZE) || ARCHIVED_PAGE_SIZE);
       const limit = Math.min(ARCHIVED_MAX_PAGE_SIZE, Math.max(1, requested));
       const total = archivedCount();
-      const sessions = archivedPage(offset, limit).map(publicSession);
+      const sessions = publicSessions(archivedPage(offset, limit));
       return json({ sessions, total, offset, limit, hasMore: offset + sessions.length < total });
     }
     if (url.pathname === "/v1/sessions" && req.method === "POST") {
@@ -1944,12 +2278,37 @@ const server = Bun.serve({
     if (row.archived_at && action !== "events" && !(action === "context" && req.method === "GET"))
       return error("Thread is archived; unarchive it before continuing", 409);
     if (action === "context" && req.method === "GET") {
-      const stored = db.query("SELECT captured_at,context FROM session_contexts WHERE session_id=?").get(id) as any;
-      return json({
-        capturedAt: stored ? Number(stored.captured_at) : 0,
-        context: stored ? JSON.parse(String(stored.context)) : null,
+      const stored = storedContext(id);
+      const hash = stored?.hash ?? "empty";
+      const etag = `\"${hash}\"`;
+      if (req.headers.get("if-none-match") === etag) return new Response(null, { status: 304, headers: { etag, "cache-control": "no-cache" } });
+      const response = compressedJson(req, {
+        capturedAt: stored?.capturedAt ?? 0,
+        context: stored ? JSON.parse(stored.document) : null,
+        hash: stored?.hash ?? "",
         session: publicSession(sessionRow.get(id)),
       });
+      response.headers.set("etag", etag);
+      return response;
+    }
+    if (action === "context" && req.method === "PATCH") {
+      try {
+        const body = await readBody(req);
+        const capturedAt = Number(body.capturedAt);
+        const splice = body.splice as ContextSplice;
+        if (!Number.isSafeInteger(capturedAt) || capturedAt <= 0 || !splice) return error("Valid context patch required");
+        const current = storedContext(id);
+        if (!current) return error("Context base is missing", 409);
+        if (capturedAt <= current.capturedAt) return json({ ok: true, capturedAt: current.capturedAt, hash: current.hash });
+        const document = applyContextSplice(current.document, splice);
+        db.query(`
+          INSERT INTO session_context_patches(session_id,captured_at,base_hash,target_hash,prefix_bytes,delete_bytes,insert_base64)
+          VALUES(?,?,?,?,?,?,?)
+        `).run(id, capturedAt, splice.baseHash, splice.targetHash, splice.prefixBytes, splice.deleteBytes, splice.insertBase64);
+        rememberContext(id, document);
+        signalSync();
+        return json({ ok: true, capturedAt, hash: splice.targetHash });
+      } catch (cause: any) { return error(cause?.message ?? "Could not patch model context", 409); }
     }
     if (action === "context" && req.method === "PUT") {
       try {
@@ -1959,12 +2318,24 @@ const server = Bun.serve({
         if (!Number.isSafeInteger(capturedAt) || capturedAt <= 0) return error("Valid context capture time required");
         if (!context || typeof context !== "object" || typeof context.systemPrompt !== "string"
           || !Array.isArray(context.tools) || !Array.isArray(context.messages)) return error("Valid model context required");
-        db.query(`
-          INSERT INTO session_contexts(session_id,captured_at,context) VALUES(?,?,?)
-          ON CONFLICT(session_id) DO UPDATE SET captured_at=excluded.captured_at,context=excluded.context
-          WHERE excluded.captured_at > session_contexts.captured_at
-        `).run(id, capturedAt, JSON.stringify(context));
-        return json({ ok: true, capturedAt });
+        const document = JSON.stringify(context);
+        let changed = false;
+        let acknowledgedHash = sha256(document);
+        db.transaction(() => {
+          const current = storedContext(id);
+          if (current && capturedAt <= current.capturedAt) { acknowledgedHash = current.hash; return; }
+          db.query(`
+            INSERT INTO session_contexts(session_id,captured_at,context) VALUES(?,?,?)
+            ON CONFLICT(session_id) DO UPDATE SET captured_at=excluded.captured_at,context=excluded.context
+          `).run(id, capturedAt, document);
+          db.query("DELETE FROM session_context_patches WHERE session_id=?").run(id);
+          changed = true;
+        })();
+        if (changed) {
+          rememberContext(id, document);
+          signalSync();
+        }
+        return json({ ok: true, capturedAt, hash: acknowledgedHash });
       } catch (cause: any) { return error(cause?.message ?? "Could not store model context", 400); }
     }
     if (action === "events" && req.method === "GET") {
@@ -2244,8 +2615,18 @@ function writeLedgerSnapshot() {
 writeLedgerSnapshot();
 const ledgerSnapshotter = setInterval(writeLedgerSnapshot, 6 * 60 * 60_000);
 
+function pruneUploadTransfers() {
+  const cutoff = new Date(Date.now() - 24 * 60 * 60_000).toISOString();
+  for (const transfer of db.query("SELECT id,temp_path FROM upload_transfers WHERE created_at<?").all(cutoff) as any[]) {
+    try { if (existsSync(String(transfer.temp_path))) unlinkSync(String(transfer.temp_path)); } catch {}
+    db.query("DELETE FROM upload_transfers WHERE id=?").run(transfer.id);
+  }
+}
+pruneUploadTransfers();
+
 const reaper = setInterval(() => {
   const cutoff = Date.now() - 15 * 60_000;
+  pruneUploadTransfers();
   for (const [id, rt] of runtimes) {
     if (rt.phase === "IDLE" && rt.lastActivity < cutoff) {
       rt.expectedExit = true;

@@ -77,6 +77,18 @@ Both clients:
 
 This keeps thread identity, lifecycle, context capture time, and local actions separate. A response for thread A cannot mutate thread B, and a pre-action poll cannot overwrite the action response.
 
+## Network synchronization
+
+Android uses one resumable long poll for the visible environment. Completion monitoring uses one independent long poll per environment with watched work. The server identifies each incarnation with `epoch` and orders wakeups with `seq`. A client reconnects with its last sequence. An epoch change clears cursors and requests authoritative state again.
+
+Interactive context remains the exact JSON document captured by Pi. Both sides hash its UTF-8 bytes with SHA-256. A context update is either a complete document or one byte splice naming its base and target hashes. The client checks the base, applies the splice, verifies the target, and only then parses or renders it. A missing base is an explicit complete resynchronization. The server keeps recent versions for this purpose and records streaming patches separately from the stable context, so one new token does not rewrite or transfer the preceding transcript. A finalized message or compaction commits a new stable document and clears its patch chain.
+
+Live text for observed orchestrator agents and GPT-Live delegation follows the same verified splice rule. Event rows still use their durable sequence cursor.
+
+Android caches each verified context in app-private storage. Cached text is labelled while the endpoint reconnects and does not advance lifecycle state. Outgoing prompts enter an app-private outbox before the composer clears. Retries retain the same request ID, and the supervisor's request ledger makes delivery idempotent across lost acknowledgements and process death.
+
+Attachments upload in hash-checked chunks. Initialization by request ID returns the committed byte offset, so reconnecting resumes rather than creates another file. Completion checks the whole-file hash before the file enters ingestion. Downloads carry validators and byte-range support.
+
 ## Observed orchestrator agents
 
 Autonomous orchestrator agents are outside this state machine. They have no supervisor epoch, no RPC child, no runtime phase, and no durable work queue here, because Pi Remote does not own them: the orchestrator's SQLite ledger owns their lifecycle and its agent hosts own their sessions.

@@ -3,6 +3,7 @@ import { Database } from "bun:sqlite";
 import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { applyContextSplice, contextSplice, sha256 } from "./sync";
 const BOOSTED_MULTIPLIER = 10;
 
 const root = mkdtempSync(join(tmpdir(), "pi-remote-state-test-"));
@@ -818,7 +819,7 @@ describe("web and supervisor integration", () => {
       ],
     };
     const stored = await api("PUT", `/v1/sessions/${id}/context`, { capturedAt: 200, context });
-    expect(stored).toEqual({ status: 200, value: { ok: true, capturedAt: 200 } });
+    expect(stored).toMatchObject({ status: 200, value: { ok: true, capturedAt: 200, hash: expect.any(String) } });
     const mirrored = await api("GET", `/v1/sessions/${id}/context`);
     expect(mirrored.value.context).toEqual(context);
 
@@ -832,6 +833,70 @@ describe("web and supervisor integration", () => {
     });
     expect((await api("GET", `/v1/sessions/${id}/context`)).value).toMatchObject({ capturedAt: 200, context });
     expect((await api("PUT", `/v1/sessions/${id}/context`, { capturedAt: 201, context: { tools: [], messages: [] } })).status).toBe(400);
+  });
+
+  test("synchronizes a selected context with compressed verified splices", async () => {
+    const id = await createThread("home", "sol");
+    const firstContext = { systemPrompt: "System ".repeat(400), tools: [], messages: [{ role: "assistant", content: [{ type: "text", text: "first" }] }] };
+    await api("PUT", `/v1/sessions/${id}/context`, { capturedAt: 300, context: firstContext });
+    const firstResponse = await fetch(`${base}/v1/sync`, {
+      method: "POST",
+      headers: { "content-type": "application/json", "accept-encoding": "gzip" },
+      body: JSON.stringify({ after: 0, waitMs: 0, selectedId: id, contextHash: "", includeDashboard: false }),
+    });
+    expect(firstResponse.headers.get("content-encoding")).toBe("gzip");
+    const first = await firstResponse.json() as any;
+    expect(first.contextUpdate.kind).toBe("full");
+    expect(JSON.parse(first.contextUpdate.document)).toEqual(firstContext);
+    expect(first.archivedSessions).toBeNull();
+
+    const secondContext = { ...firstContext, messages: [{ role: "assistant", content: [{ type: "text", text: "first and second" }] }] };
+    const baseDocument = JSON.stringify(firstContext);
+    const targetDocument = JSON.stringify(secondContext);
+    await api("PATCH", `/v1/sessions/${id}/context`, {
+      capturedAt: 301,
+      splice: contextSplice(baseDocument, targetDocument),
+    });
+    const second = await api("POST", "/v1/sync", {
+      after: first.seq,
+      waitMs: 0,
+      selectedId: id,
+      contextHash: first.contextUpdate.hash,
+      includeDashboard: false,
+    });
+    expect(second.value.contextUpdate.kind).toBe("splice");
+    expect(applyContextSplice(baseDocument, second.value.contextUpdate.splice)).toBe(targetDocument);
+  });
+
+  test("resumes uploads by committed offset and serves byte ranges", async () => {
+    const id = await createThread("home", "sol");
+    const content = Buffer.from("resumable attachment content");
+    const requestId = crypto.randomUUID();
+    const initialized = await api("POST", "/v1/uploads/init", {
+      requestId, sessionId: id, name: "resumable.txt", contentType: "text/plain", size: content.length,
+    });
+    const uploadId = initialized.value.upload.id;
+    const first = content.subarray(0, 10);
+    const firstResponse = await fetch(`${base}/v1/uploads/${uploadId}?offset=0`, {
+      method: "PUT", headers: { "x-chunk-sha256": sha256(first) }, body: first,
+    });
+    expect(firstResponse.status).toBe(200);
+    const resumed = await api("POST", "/v1/uploads/init", {
+      requestId, sessionId: id, name: "resumable.txt", contentType: "text/plain", size: content.length,
+    });
+    expect(resumed.value.upload.offset).toBe(10);
+    const rest = content.subarray(10);
+    expect((await fetch(`${base}/v1/uploads/${uploadId}?offset=10`, {
+      method: "PUT", headers: { "x-chunk-sha256": sha256(rest) }, body: rest,
+    })).status).toBe(200);
+    const completed = await api("POST", `/v1/uploads/${uploadId}/complete`, { sha256: sha256(content) });
+    expect(readFileSync(completed.value.file.path)).toEqual(content);
+    const ranged = await fetch(`${base}/v1/sessions/${id}/files?path=${encodeURIComponent(completed.value.file.path)}`, {
+      headers: { range: "bytes=10-19" },
+    });
+    expect(ranged.status).toBe(206);
+    expect(ranged.headers.get("content-range")).toBe(`bytes 10-19/${content.length}`);
+    expect(Buffer.from(await ranged.arrayBuffer())).toEqual(content.subarray(10, 20));
   });
 
   test("creates Opus threads with Claude Opus 5 and high thinking", async () => {

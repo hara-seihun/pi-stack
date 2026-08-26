@@ -6,6 +6,7 @@ import java.io.IOException;
 import java.io.InputStream;
 import java.io.OutputStream;
 import java.net.HttpURLConnection;
+import java.net.SocketTimeoutException;
 import java.net.URL;
 import java.nio.charset.StandardCharsets;
 import java.util.Set;
@@ -47,6 +48,32 @@ final class PiRemoteApi {
         return send(environment, "POST", "/v1/unlock", body);
     }
 
+    static JSONObject putBytes(String path, byte[] data, String sha256) throws Exception {
+        PiRemoteEnvironment.Endpoint environment = PiRemoteEnvironment.current();
+        verify(environment);
+        PiRemoteTransport.ensure(environment);
+        HttpURLConnection connection = (HttpURLConnection) new URL(environment.baseUrl + path).openConnection();
+        try {
+            connection.setRequestMethod("PUT");
+            connection.setDoOutput(true);
+            connection.setConnectTimeout(20_000);
+            connection.setReadTimeout(120_000);
+            connection.setRequestProperty("Content-Type", "application/octet-stream");
+            connection.setRequestProperty("X-Chunk-Sha256", sha256);
+            connection.setFixedLengthStreamingMode(data.length);
+            try (OutputStream output = connection.getOutputStream()) { output.write(data); }
+            int status = connection.getResponseCode();
+            String value = read(status >= 400 ? connection.getErrorStream() : connection.getInputStream());
+            JSONObject result = value.isEmpty() ? new JSONObject() : new JSONObject(value);
+            if (status == 423) throw new Locked(result.optString("error", "Locked"));
+            if (status < 200 || status >= 300) throw new HttpFailure(status, result.optString("error", "HTTP " + status));
+            return result;
+        } catch (IOException failure) {
+            if (!(failure instanceof SocketTimeoutException)) PiRemoteTransport.invalidate(environment);
+            throw failure;
+        } finally { connection.disconnect(); }
+    }
+
     static JSONObject upload(String path, InputStream input, String contentType) throws Exception {
         PiRemoteEnvironment.Endpoint environment = PiRemoteEnvironment.current();
         verify(environment);
@@ -70,7 +97,7 @@ final class PiRemoteApi {
                 JSONObject result = value.isEmpty() ? new JSONObject() : new JSONObject(value);
                 if (status == 423) throw new Locked(result.optString("error", "Locked"));
                 if (status < 200 || status >= 300)
-                    throw new HttpFailure(result.optString("error", "HTTP " + status));
+                    throw new HttpFailure(status, result.optString("error", "HTTP " + status));
                 if (!environment.id.equals(PiRemoteEnvironment.current().id))
                     throw new StaleEnvironment(environment.id);
                 return result;
@@ -80,7 +107,7 @@ final class PiRemoteApi {
         } catch (Locked | StaleEnvironment | HttpFailure failure) {
             throw failure;
         } catch (IOException failure) {
-            PiRemoteTransport.invalidate(environment);
+            if (!(failure instanceof SocketTimeoutException)) PiRemoteTransport.invalidate(environment);
             throw failure;
         }
     }
@@ -102,8 +129,10 @@ final class PiRemoteApi {
         StaleEnvironment(String id) { super("Environment changed while requesting " + id); }
     }
 
-    private static final class HttpFailure extends IOException {
-        HttpFailure(String message) { super(message); }
+    static final class HttpFailure extends IOException {
+        final int status;
+        HttpFailure(int status, String message) { super(message); this.status = status; }
+        boolean retryable() { return status == 408 || status == 425 || status == 429 || status >= 500; }
     }
 
     private static JSONObject send(PiRemoteEnvironment.Endpoint environment, String method, String path, JSONObject body) throws Exception {
@@ -113,7 +142,7 @@ final class PiRemoteApi {
             try {
                 connection.setRequestMethod(method);
                 connection.setConnectTimeout(7_000);
-                connection.setReadTimeout(20_000);
+                connection.setReadTimeout(path.equals("/v1/sync") ? 40_000 : 20_000);
                 connection.setRequestProperty("Accept", "application/json");
                 if (body != null) {
                     byte[] data = body.toString().getBytes(StandardCharsets.UTF_8);
@@ -127,7 +156,7 @@ final class PiRemoteApi {
                 JSONObject result = value.isEmpty() ? new JSONObject() : new JSONObject(value);
                 if (status == 423) throw new Locked(result.optString("error", "Locked"));
                 if (status < 200 || status >= 300)
-                    throw new HttpFailure(result.optString("error", "HTTP " + status));
+                    throw new HttpFailure(status, result.optString("error", "HTTP " + status));
                 return result;
             } finally {
                 connection.disconnect();
@@ -135,7 +164,7 @@ final class PiRemoteApi {
         } catch (Locked | HttpFailure failure) {
             throw failure;
         } catch (IOException failure) {
-            PiRemoteTransport.invalidate(environment);
+            if (!(failure instanceof SocketTimeoutException)) PiRemoteTransport.invalidate(environment);
             throw failure;
         }
     }

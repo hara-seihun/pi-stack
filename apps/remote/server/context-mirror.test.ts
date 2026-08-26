@@ -1,15 +1,20 @@
 import { afterAll, beforeAll, describe, expect, test } from "bun:test";
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 import contextMirror from "./context-mirror";
+import { applyContextSplice, sha256 } from "./sync";
 
 type Handler = (event: Record<string, unknown>, context: Record<string, unknown>) => unknown | Promise<unknown>;
 
 const captures: Array<{ capturedAt: number; context: Record<string, unknown> }> = [];
+let document = "";
 const server = Bun.serve({
   port: 0,
   async fetch(request) {
-    captures.push(await request.json() as { capturedAt: number; context: Record<string, unknown> });
-    return Response.json({ ok: true });
+    const body = await request.json() as any;
+    if (request.method === "PATCH") document = applyContextSplice(document, body.splice);
+    else document = JSON.stringify(body.context);
+    captures.push({ capturedAt: body.capturedAt, context: JSON.parse(document) });
+    return Response.json({ ok: true, hash: sha256(document) });
   },
 });
 const previousSessionId = process.env.PI_REMOTE_SESSION_ID;
@@ -44,6 +49,7 @@ function assistant(text: string, stopReason = "pending") {
 describe("context mirror", () => {
   test("publishes Pi's final generic context and updates the streaming assistant in place", async () => {
     captures.length = 0;
+    document = "";
     const handlers = new Map<string, Handler>();
     const pi = {
       on(type: string, handler: Handler) { handlers.set(type, handler); },

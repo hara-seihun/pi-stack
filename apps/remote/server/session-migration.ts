@@ -4,7 +4,7 @@ import { basename, dirname, join, resolve } from "node:path";
 import { createHash, randomUUID } from "node:crypto";
 import { ensureSupervisorSchema, updateLastThreadNumber } from "./database";
 
-const TABLES = ["sessions", "events", "session_contexts", "requests", "work_items", "uploads"] as const;
+const TABLES = ["sessions", "events", "session_contexts", "session_context_patches", "requests", "work_items", "uploads"] as const;
 type Table = typeof TABLES[number];
 type Row = Record<string, unknown>;
 type FileRecord = { sessionId: string; source: string; relative: string; sha256: string };
@@ -45,7 +45,7 @@ function assertSettled(tables: Bundle["tables"]): void {
 }
 
 function hasSessionContent(tables: Bundle["tables"], sessionId: string): boolean {
-  for (const table of [tables.events, tables.session_contexts, tables.work_items, tables.uploads]) {
+  for (const table of [tables.events, tables.session_contexts, tables.session_context_patches, tables.work_items, tables.uploads]) {
     if (table.some((row) => String(row.session_id) === sessionId)) return true;
   }
   return tables.requests.some((row) =>
@@ -67,6 +67,7 @@ export function exportSessions(options: { dbPath: string; dataRoot: string; targ
       sessions,
       events: relatedRows(db, "events", ids),
       session_contexts: relatedRows(db, "session_contexts", ids),
+      session_context_patches: relatedRows(db, "session_context_patches", ids),
       requests: relatedRows(db, "requests", ids),
       work_items: relatedRows(db, "work_items", ids),
       uploads: relatedRows(db, "uploads", ids),
@@ -109,6 +110,7 @@ export function exportSessions(options: { dbPath: string; dataRoot: string; targ
 function loadBundle(bundleRoot: string): Bundle {
   const bundle = JSON.parse(readFileSync(join(bundleRoot, "manifest.json"), "utf8")) as Bundle;
   if (bundle.version !== 1) throw new Error("Unknown session bundle version");
+  bundle.tables.session_context_patches ??= [];
   assertSettled(bundle.tables);
   for (const group of [bundle.sessionFiles, bundle.serviceTiers, bundle.uploads]) {
     for (const file of group) {
@@ -170,6 +172,7 @@ export function importSessions(options: { dbPath: string; dataRoot: string; bund
       insertRows(db, "sessions", sessions);
       insertRows(db, "events", bundle.tables.events);
       insertRows(db, "session_contexts", bundle.tables.session_contexts);
+      insertRows(db, "session_context_patches", bundle.tables.session_context_patches ?? []);
       insertRows(db, "requests", bundle.tables.requests);
       insertRows(db, "work_items", bundle.tables.work_items);
       insertRows(db, "uploads", uploads);
@@ -205,7 +208,7 @@ export function removeExportedSessions(options: { dbPath: string; bundleRoot: st
       throw new Error(`Source session file ${session.id} changed after export`);
   }
   const transaction = db.transaction(() => {
-    for (const table of ["uploads", "work_items", "requests", "session_contexts", "events"])
+    for (const table of ["uploads", "work_items", "requests", "session_context_patches", "session_contexts", "events"])
       db.query(`DELETE FROM ${table} WHERE session_id IN (${placeholders})`).run(...ids);
     db.query(`DELETE FROM sessions WHERE id IN (${placeholders})`).run(...ids);
   });

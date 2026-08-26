@@ -1,4 +1,5 @@
 import { convertToLlm, type ExtensionAPI } from "@earendil-works/pi-coding-agent";
+import { contextSplice, sha256 } from "./sync";
 
 type ModelMessage = ReturnType<typeof convertToLlm>[number];
 type ModelTool = { name: string; description: string; parameters: unknown };
@@ -14,7 +15,8 @@ export default function contextMirror(pi: ExtensionAPI) {
   let context: ModelContext | null = null;
   let baseMessages: ModelMessage[] = [];
   let capturedAt = 0;
-  let pending: { capturedAt: number; context: ModelContext } | null = null;
+  let pending: { capturedAt: number; context: ModelContext; compact: boolean } | null = null;
+  let publishedDocument: string | null = null;
   let draining: Promise<void> | null = null;
   let updateTimer: ReturnType<typeof setTimeout> | null = null;
 
@@ -29,25 +31,45 @@ export default function contextMirror(pi: ExtensionAPI) {
       while (pending) {
         const snapshot = pending;
         pending = null;
-        const response = await fetch(`${server}/v1/sessions/${sessionId}/context`, {
-          method: "PUT",
-          headers: { "content-type": "application/json" },
-          body: JSON.stringify(snapshot),
-        });
+        const document = JSON.stringify(snapshot.context);
+        let response: Response;
+        if (publishedDocument !== null && !snapshot.compact) {
+          response = await fetch(`${server}/v1/sessions/${sessionId}/context`, {
+            method: "PATCH",
+            headers: { "content-type": "application/json" },
+            body: JSON.stringify({ capturedAt: snapshot.capturedAt, splice: contextSplice(publishedDocument, document) }),
+          });
+          if (response.status === 409) {
+            response = await fetch(`${server}/v1/sessions/${sessionId}/context`, {
+              method: "PUT",
+              headers: { "content-type": "application/json" },
+              body: JSON.stringify({ capturedAt: snapshot.capturedAt, context: snapshot.context }),
+            });
+          }
+        } else {
+          response = await fetch(`${server}/v1/sessions/${sessionId}/context`, {
+            method: "PUT",
+            headers: { "content-type": "application/json" },
+            body: JSON.stringify({ capturedAt: snapshot.capturedAt, context: snapshot.context }),
+          });
+        }
         if (!response.ok) throw new Error(await response.text() || `Context mirror failed (${response.status})`);
+        const result = await response.json() as { hash?: string };
+        if (result.hash && result.hash !== sha256(document)) throw new Error("Context mirror acknowledgement hash does not match");
+        publishedDocument = document;
       }
     })().finally(() => { draining = null; });
     return draining;
   };
 
-  const publish = (next: ModelContext) => {
-    pending = { capturedAt: nextCaptureTime(), context: next };
+  const publish = (next: ModelContext, compact = false) => {
+    pending = { capturedAt: nextCaptureTime(), context: next, compact };
     return drain();
   };
 
-  const publishCurrent = async () => {
+  const publishCurrent = async (compact = false) => {
     if (!context) return;
-    await publish(context);
+    await publish(context, compact);
   };
 
   const scheduleCurrent = () => {
@@ -72,7 +94,7 @@ export default function contextMirror(pi: ExtensionAPI) {
       clearTimeout(updateTimer);
       updateTimer = null;
     }
-    await publishCurrent();
+    await publishCurrent(true);
   });
 
   pi.on("message_update", (event) => {
@@ -89,7 +111,7 @@ export default function contextMirror(pi: ExtensionAPI) {
       clearTimeout(updateTimer);
       updateTimer = null;
     }
-    await publishCurrent();
+    await publishCurrent(true);
   });
 
   pi.on("session_shutdown", async () => {
@@ -97,7 +119,7 @@ export default function contextMirror(pi: ExtensionAPI) {
       clearTimeout(updateTimer);
       updateTimer = null;
     }
-    if (context) await publishCurrent();
+    if (context) await publishCurrent(true);
     if (draining) await draining;
   });
 }

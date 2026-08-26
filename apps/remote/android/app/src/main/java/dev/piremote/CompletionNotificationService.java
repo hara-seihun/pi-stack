@@ -20,6 +20,8 @@ import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.Set;
+import java.util.concurrent.CompletableFuture;
+import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
 
@@ -39,11 +41,11 @@ public final class CompletionNotificationService extends Service {
     private static final String MONITOR_CHANNEL = "thread_monitor";
     private static final String COMPLETION_CHANNEL = "thread_completions";
     private static final int MONITOR_NOTIFICATION_ID = 1001;
-    private static final long POLL_INTERVAL_MS = 2_500;
     private static final long ERROR_INTERVAL_MS = 10_000;
 
     private final CompletionTracker tracker = new CompletionTracker();
-    private final ExecutorService network = Executors.newSingleThreadExecutor();
+    private final ExecutorService network = Executors.newFixedThreadPool(3);
+    private final Map<String, Long> syncSequences = new ConcurrentHashMap<>();
     private final Handler main = new Handler(Looper.getMainLooper());
     private boolean polling;
     private boolean foreground;
@@ -79,9 +81,15 @@ public final class CompletionNotificationService extends Service {
     }
 
     static boolean watchSession(Context context, String id, String name) {
-        ArrayList<String> ids = new ArrayList<>(); ids.add(id);
-        ArrayList<String> names = new ArrayList<>(); names.add(name);
-        return watchSessions(context, ids, names);
+        return watchSessionFor(context, PiRemoteEnvironment.current().id, id, name);
+    }
+
+    static boolean watchSessionFor(Context context, String environmentId, String id, String name) {
+        Intent intent = new Intent(context, CompletionNotificationService.class).setAction(ACTION_WATCH);
+        intent.putStringArrayListExtra(EXTRA_IDS, new ArrayList<>(java.util.Collections.singletonList(id)));
+        intent.putStringArrayListExtra(EXTRA_NAMES, new ArrayList<>(java.util.Collections.singletonList(name)));
+        intent.putExtra(EXTRA_ENVIRONMENT_ID, environmentId);
+        return start(context, intent, true);
     }
 
     static void unwatchSession(Context context, String id) {
@@ -198,81 +206,60 @@ public final class CompletionNotificationService extends Service {
             .build();
     }
 
+    private static final class EnvironmentResult {
+        final String environmentId;
+        final List<CompletionTracker.Snapshot> sessions;
+        EnvironmentResult(String environmentId, List<CompletionTracker.Snapshot> sessions) {
+            this.environmentId = environmentId;
+            this.sessions = sessions;
+        }
+    }
+
     private void poll() {
         if (polling || tracker.isEmpty()) return;
         polling = true;
-        List<CompletionTracker.Snapshot> watched = tracker.watched();
-        network.execute(() -> {
-            List<CompletionTracker.Snapshot> sessions = null;
-            try { sessions = fetchSessions(watched); }
-            catch (Exception ignored) {}
-            List<CompletionTracker.Snapshot> result = sessions;
-            main.post(() -> {
-                polling = false;
-                if (result == null) {
-                    schedulePoll(ERROR_INTERVAL_MS);
-                    return;
-                }
-                for (CompletionTracker.Completion completion : tracker.update(result)) notifyCompletion(completion);
-                persistWatched();
-                if (tracker.isEmpty()) stopMonitoring();
-                else {
-                    ensureForeground();
-                    schedulePoll(POLL_INTERVAL_MS);
-                }
-            });
-        });
-    }
-
-    private List<CompletionTracker.Snapshot> fetchSessions(Collection<CompletionTracker.Snapshot> watched) throws Exception {
         Map<String, Set<String>> watchedByEnvironment = new LinkedHashMap<>();
-        for (CompletionTracker.Snapshot item : watched)
+        for (CompletionTracker.Snapshot item : tracker.watched())
             watchedByEnvironment.computeIfAbsent(item.environmentId, ignored -> new HashSet<>()).add(item.id);
-        List<CompletionTracker.Snapshot> sessions = new ArrayList<>();
-        for (Map.Entry<String, Set<String>> environment : watchedByEnvironment.entrySet()) {
-            JSONArray values = getJson(environment.getKey(), "/v1/sessions").optJSONArray("sessions");
-            if (values == null) continue;
-            for (int i = 0; i < values.length(); i++) {
-                JSONObject value = values.optJSONObject(i); if (value == null) continue;
-                String id = value.optString("id");
-                String state = value.optString("state");
-                String lastAssistantText = null;
-                if (environment.getValue().contains(id) && !CompletionTracker.isActive(state))
-                    lastAssistantText = fetchLastAssistantText(environment.getKey(), id);
-                sessions.add(new CompletionTracker.Snapshot(environment.getKey(), id,
-                    value.optString("name", "Thread"), state, lastAssistantText));
-            }
+        List<CompletableFuture<EnvironmentResult>> requests = new ArrayList<>();
+        for (Map.Entry<String, Set<String>> entry : watchedByEnvironment.entrySet()) {
+            requests.add(CompletableFuture.supplyAsync(() -> {
+                try { return fetchEnvironment(entry.getKey(), entry.getValue()); }
+                catch (Exception ignored) { return null; }
+            }, network));
         }
-        return sessions;
-    }
-
-    private String fetchLastAssistantText(String environmentId, String id) {
-        try {
-            JSONObject context = getJson(environmentId, "/v1/sessions/" + id + "/context").optJSONObject("context");
-            JSONArray messages = context == null ? null : context.optJSONArray("messages");
-            if (messages == null) return null;
-            for (int index = messages.length() - 1; index >= 0; index--) {
-                JSONObject message = messages.optJSONObject(index);
-                if (message == null || !"assistant".equals(message.optString("role"))) continue;
-                JSONArray content = message.optJSONArray("content");
-                if (content == null) continue;
-                StringBuilder value = new StringBuilder();
-                for (int blockIndex = 0; blockIndex < content.length(); blockIndex++) {
-                    JSONObject block = content.optJSONObject(blockIndex);
-                    if (block == null || !"text".equals(block.optString("type"))) continue;
-                    if (value.length() > 0) value.append("\n\n");
-                    value.append(block.optString("text"));
-                }
-                String text = value.toString().trim();
-                if (text.isEmpty()) continue;
-                return text.length() <= 4_000 ? text : text.substring(0, 3_999) + "…";
+        CompletableFuture.allOf(requests.toArray(new CompletableFuture[0])).whenComplete((ignored, failure) -> main.post(() -> {
+            polling = false;
+            boolean anyFailed = false;
+            for (CompletableFuture<EnvironmentResult> request : requests) {
+                EnvironmentResult result = request.getNow(null);
+                if (result == null) { anyFailed = true; continue; }
+                for (CompletionTracker.Completion completion : tracker.updateEnvironment(result.environmentId, result.sessions))
+                    notifyCompletion(completion);
             }
-        } catch (Exception ignored) {}
-        return null;
+            persistWatched();
+            if (tracker.isEmpty()) stopMonitoring();
+            else {
+                ensureForeground();
+                schedulePoll(anyFailed ? ERROR_INTERVAL_MS : 0);
+            }
+        }));
     }
 
-    private JSONObject getJson(String environmentId, String path) throws Exception {
-        return PiRemoteApi.getFor(environmentId, path);
+    private EnvironmentResult fetchEnvironment(String environmentId, Set<String> ids) throws Exception {
+        JSONObject body = new JSONObject().put("after", syncSequences.getOrDefault(environmentId, 0L))
+            .put("waitMs", 25_000).put("includeSessions", false).put("includeDashboard", false)
+            .put("watchedIds", new JSONArray(ids));
+        JSONObject result = PiRemoteApi.requestFor(PiRemoteEnvironment.find(environmentId), "POST", "/v1/sync", body);
+        syncSequences.put(environmentId, result.optLong("seq"));
+        JSONArray values = result.optJSONArray("watched");
+        List<CompletionTracker.Snapshot> sessions = new ArrayList<>();
+        if (values != null) for (int index = 0; index < values.length(); index++) {
+            JSONObject value = values.optJSONObject(index); if (value == null) continue;
+            sessions.add(new CompletionTracker.Snapshot(environmentId, value.optString("id"),
+                value.optString("name", "Thread"), value.optString("state"), value.optString("lastAssistantText", null)));
+        }
+        return new EnvironmentResult(environmentId, sessions);
     }
 
     private void notifyCompletion(CompletionTracker.Completion completion) {

@@ -94,12 +94,17 @@ final class CompletionTracker {
     }
 
     List<Completion> update(Collection<Snapshot> sessions) {
+        return updateEnvironment(null, sessions);
+    }
+
+    List<Completion> updateEnvironment(String environmentId, Collection<Snapshot> sessions) {
         Map<String, Snapshot> current = new LinkedHashMap<>();
         for (Snapshot session : sessions) current.put(key(session.environmentId, session.id), session);
 
         List<Completion> completed = new ArrayList<>();
         for (Map.Entry<String, Watch> entry : new ArrayList<>(watched.entrySet())) {
             Watch item = entry.getValue();
+            if (environmentId != null && !environmentId.equals(item.environmentId)) continue;
             Snapshot session = current.get(entry.getKey());
             if (session == null) {
                 watched.remove(entry.getKey());
