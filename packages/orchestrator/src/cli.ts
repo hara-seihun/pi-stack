@@ -70,6 +70,20 @@ function flags(args: string[]): { positional: string[]; named: Map<string, strin
   return { positional, named };
 }
 
+export function namedFlags(
+  command: string,
+  args: string[],
+  allowed: readonly string[],
+): Map<string, string> {
+  const { positional, named } = flags(args);
+  if (positional.length > 0) fail(`${command}: unexpected argument ${positional[0]}`);
+  const accepted = new Set(allowed);
+  for (const name of named.keys()) {
+    if (!accepted.has(name)) fail(`${command}: unknown flag --${name}`);
+  }
+  return named;
+}
+
 async function status(ledger: Ledger): Promise<void> {
   console.log(`ledger: ${LEDGER_PATH}`);
   console.log(`launches: ${ledger.getControl("launches") ?? "enabled"}`);
@@ -114,7 +128,7 @@ async function status(ledger: Ledger): Promise<void> {
  * session on this machine.
  */
 function usage(ledger: Ledger, args: string[]): void {
-  const { named } = flags(args);
+  const named = namedFlags("usage", args, ["hours"]);
   const hours = Number(named.get("hours") ?? 24);
   if (!Number.isFinite(hours) || hours <= 0) fail("usage: usage [--hours N]");
   const b = ledger.usageBreakdown(Date.now() - hours * 3_600_000);
@@ -145,7 +159,7 @@ function usage(ledger: Ledger, args: string[]): void {
  * latest meter readings, nothing mutated.
  */
 function capacity(ledger: Ledger, args: string[]): void {
-  const { named } = flags(args);
+  const named = namedFlags("capacity", args, ["provider"]);
   const providerFilter = named.get("provider");
   const cfg = loadConfig();
   const broker = new Broker(ledger, brokerConfig(cfg));
@@ -232,7 +246,7 @@ function capacity(ledger: Ledger, args: string[]): void {
 /** Controller daemon: the launch loop. Tier→model maps and meter topology
  * come from operator config; everything else is measured. */
 async function daemon(ledger: Ledger, args: string[]): Promise<void> {
-  const { named } = flags(args);
+  const named = namedFlags("daemon", args, ["interval"]);
   const cfg = loadConfig();
   const controller = new Controller(
     ledger,
@@ -311,7 +325,7 @@ async function daemon(ledger: Ledger, args: string[]): Promise<void> {
  * runtime, any local script) never see OAuth tokens.
  */
 async function voiceBroker(ledger: Ledger, args: string[]): Promise<void> {
-  const { named } = flags(args);
+  const named = namedFlags("voice-broker", args, ["listen"]);
   const listen = named.get("listen") ?? "127.0.0.1:2457";
   const separator = listen.lastIndexOf(":");
   const host = separator > 0 ? listen.slice(0, separator) : "127.0.0.1";
@@ -339,7 +353,7 @@ async function voiceBroker(ledger: Ledger, args: string[]): Promise<void> {
  * runner generation is bumped, then exits.
  */
 async function runner(ledger: Ledger, args: string[]): Promise<void> {
-  const { named } = flags(args);
+  const named = namedFlags("runner", args, ["id", "max-sessions", "interval"]);
   // Hosted sessions must never be re-routed by the interactive routing
   // extension: the broker assigned their account.
   process.env.PI_ORCHESTRATOR_ASSIGNED = "1";
@@ -417,7 +431,7 @@ async function runner(ledger: Ledger, args: string[]): Promise<void> {
  * the deployed artifact, so each new worker starts on the newest build.
  */
 async function supervisor(ledger: Ledger, args: string[]): Promise<void> {
-  const { named } = flags(args);
+  const named = namedFlags("supervisor", args, ["id", "max-sessions", "interval"]);
   const { RunnerSupervisor } = await import("./host/supervisor.js");
   const { spawn } = await import("node:child_process");
   const entry = process.argv[1] ?? fail("supervisor cannot resolve its own CLI path");

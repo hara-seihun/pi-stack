@@ -1,11 +1,22 @@
 import { describe, expect, it } from "vitest";
-import { launchControl, sharePercent, spawn, taskSet } from "../src/cli.js";
+import { launchControl, namedFlags, sharePercent, spawn, taskSet } from "../src/cli.js";
 import { mix } from "./harness.js";
 import { Ledger } from "../src/ledger/ledger.js";
 
 const open = (): Ledger => Ledger.open(":memory:");
 
 const task = (ledger: Ledger, id: string) => ledger.tasks().find((t) => t.id === id);
+
+describe("service command flags", () => {
+  it("refuses typos instead of starting another long-lived process", () => {
+    expect(() => namedFlags("supervisor", ["status"], ["id", "max-sessions", "interval"]))
+      .toThrow(/unexpected argument status/);
+    expect(() => namedFlags("supervisor", ["--status", "true"], ["id", "max-sessions", "interval"]))
+      .toThrow(/unknown flag --status/);
+    expect(namedFlags("supervisor", ["--id", "converge"], ["id", "max-sessions", "interval"])
+      .get("id")).toBe("converge");
+  });
+});
 
 describe("task set", () => {
   it("keeps the fields an edit does not name", () => {
