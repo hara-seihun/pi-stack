@@ -61,6 +61,9 @@ public class MainActivity extends Activity {
     private static final int TOOL_PREVIEW_LINES = 5;
     private static final String THINKING = "**THINKING**\n\n";
     private static final int TOOL_HEADER_PREVIEW_LINES = 1;
+    private static final int INITIAL_CONTEXT_MESSAGES = 32;
+    private static final int MAXIMUM_AUTOMATIC_CONTEXT_MESSAGES = 64;
+    private static final int CONTEXT_HISTORY_PAGE = 32;
     private static final String STATE_SESSION = "session";
     private static final String DRAFT_PREFS = "thread_drafts";
     private static final String DRAWER_PREFS = "drawer";
@@ -131,9 +134,12 @@ public class MainActivity extends Activity {
     private long syncErrorDelayMs = 1_000;
     private String syncEpoch = "";
     private ContextSync.Document contextDocument;
-    private final List<String> contextEntrySignatures = new ArrayList<>();
     private final List<View> contextEntryViews = new ArrayList<>();
     private final List<ContextEntry> contextEntries = new ArrayList<>();
+    private final ContextRenderWindow contextWindow = new ContextRenderWindow(
+        INITIAL_CONTEXT_MESSAGES, CONTEXT_HISTORY_PAGE, MAXIMUM_AUTOMATIC_CONTEXT_MESSAGES);
+    private List<ContextEntry> completeContextEntries = Collections.emptyList();
+    private long contextRenderGeneration = 0;
     private boolean drawerOpen = false, settingsOpen = false, archiveSupported = false;
     private String drawerTab = DRAWER_TAB_INTERACTIVE;
     // The thread poll carries only the newest archived page; older pages load on request.
@@ -1469,6 +1475,8 @@ public class MainActivity extends Activity {
                 ContextSync.Document appliedAgentText = nextAgentText;
                 ContextSync.Document appliedAgentThinking = nextAgentThinking;
                 JSONObject renderedContext = context;
+                List<ContextEntry> renderedEntries = renderedContext == null
+                    ? null : modelContextEntries(renderedContext.optJSONObject("context"));
                 main.post(() -> {
                     if (requestedPollGeneration != syncPollGeneration) return;
                     if (requestedEnvironmentGeneration != PiRemoteEnvironment.generation()) { finishRefresh(requestedPollGeneration, 0); return; }
@@ -1515,7 +1523,7 @@ public class MainActivity extends Activity {
                             selectionGeneration, requestedSession, selectedId, agentRunId != null)) {
                         if (SelectionGate.snapshotApplies(requestedActionGeneration, actionGeneration,
                             selectedActionInFlight())) applySelectedSnapshot(renderedContext.optJSONObject("session"), false);
-                        renderContext(renderedContext);
+                        renderContext(renderedContext, renderedEntries);
                     } else if (all.optJSONObject("selectedSession") != null && Objects.equals(requestedSession, selectedId)
                         && SelectionGate.snapshotApplies(requestedActionGeneration, actionGeneration, selectedActionInFlight())) {
                         applySelectedSnapshot(all.optJSONObject("selectedSession"), false);
@@ -1726,7 +1734,10 @@ public class MainActivity extends Activity {
         transcriptOpenedMs = SystemClock.uptimeMillis();
         lastSeq = 0; contextCapturedAt = 0; contextDocument = null; transcriptScroll.resetToEnd();
         transcript.removeAllViews(); toolCards.clear(); userMessageLabels.clear();
-        contextEntrySignatures.clear(); contextEntryViews.clear(); contextEntries.clear();
+        contextRenderGeneration++;
+        contextWindow.reset();
+        completeContextEntries = Collections.emptyList();
+        contextEntryViews.clear(); contextEntries.clear();
         liveAnswer = null; liveThought = null;
         agentLiveTextDocument = null; agentLiveThinkingDocument = null;
     }
@@ -2779,14 +2790,17 @@ public class MainActivity extends Activity {
         network.execute(() -> {
             ContextSync.Document cached = PiRemoteCache.load(this, environmentId, id);
             if (cached == null) return;
-            main.post(() -> {
-                if (generation != selectionGeneration || !Objects.equals(id, selectedId) || contextDocument != null) return;
-                try {
+            try {
+                JSONObject rendered = new JSONObject().put("capturedAt", cached.capturedAt)
+                    .put("context", new JSONObject(cached.json));
+                List<ContextEntry> entries = modelContextEntries(rendered.optJSONObject("context"));
+                main.post(() -> {
+                    if (generation != selectionGeneration || !Objects.equals(id, selectedId) || contextDocument != null) return;
                     contextDocument = cached;
-                    renderContext(new JSONObject().put("capturedAt", cached.capturedAt).put("context", new JSONObject(cached.json)));
+                    renderContext(rendered, entries);
                     connection.setText("●  Cached · connecting"); connection.setTextColor(MUTED); connection.setVisibility(View.VISIBLE);
-                } catch (Exception failure) { PiRemoteCache.remove(this, environmentId, id); }
-            });
+                });
+            } catch (Exception failure) { PiRemoteCache.remove(this, environmentId, id); }
         });
     }
 
@@ -3134,6 +3148,7 @@ public class MainActivity extends Activity {
         String source;
         int color;
         TextView labelView;
+        TextView historyButton;
         MarkdownStream body;
         JSONObject toolCall;
         JSONObject toolResult;
@@ -3274,7 +3289,9 @@ public class MainActivity extends Activity {
                 kind = "tool";
                 color = message.optBoolean("isError") ? DANGER : MUTED;
             } else { label = role; kind = "message"; color = MUTED; }
-            entries.add(new ContextEntry("message:" + message, kind, label, contextContentMarkdown(message.opt("content")), color));
+            String key = "message:" + role + ":" + message.optLong("timestamp", index) + ":" + index;
+            entries.add(new ContextEntry(key, key + ":" + message, kind, label,
+                contextContentMarkdown(message.opt("content")), color));
         }
         return entries;
     }
@@ -3316,6 +3333,20 @@ public class MainActivity extends Activity {
     }
 
     private View appendContextEntry(ContextEntry entry) {
+        if ("history".equals(entry.kind)) {
+            TextView button = text(entry.source, 13, true);
+            button.setTextColor(ACCENT);
+            button.setGravity(Gravity.CENTER);
+            button.setMinHeight(dp(44));
+            button.setContentDescription(entry.source);
+            button.setOnClickListener(view -> {
+                haptics.play(Haptics.Feel.SELECT, view);
+                expandContextHistory();
+            });
+            entry.historyButton = button;
+            addTranscriptView(button, transcript.getChildCount() == 0 ? 0 : 8);
+            return button;
+        }
         if ("always".equals(entry.kind)) return appendAlwaysSection(entry);
         if (!"toolCall".equals(entry.kind)) {
             Message message = message(entry.label, entry.color);
@@ -3338,51 +3369,202 @@ public class MainActivity extends Activity {
         return card == null ? new View(this) : card.root;
     }
 
-    private void renderContext(JSONObject result) {
-        long capturedAt = result.optLong("capturedAt");
-        if (capturedAt == contextCapturedAt && !contextEntrySignatures.isEmpty()) return;
-        List<ContextEntry> entries = modelContextEntries(result.optJSONObject("context"));
-        int shared = 0;
-        while (shared < entries.size() && shared < contextEntrySignatures.size()
-            && entries.get(shared).signature.equals(contextEntrySignatures.get(shared))) shared++;
-        while (shared < entries.size() && shared < contextEntries.size()
-            && entries.get(shared).key.equals(contextEntries.get(shared).key) && !"toolCall".equals(entries.get(shared).kind)) {
-            ContextEntry old = contextEntries.get(shared);
-            ContextEntry next = entries.get(shared);
-            if (old.alwaysCard != null) {
+    private void renderContext(JSONObject result, List<ContextEntry> entries) {
+        contextCapturedAt = result.optLong("capturedAt");
+        completeContextEntries = entries == null ? Collections.emptyList() : entries;
+        applyContextWindow();
+    }
+
+    private int pinnedContextEntryCount() {
+        int pinned = 0;
+        while (pinned < completeContextEntries.size() && "always".equals(completeContextEntries.get(pinned).kind)) pinned++;
+        return pinned;
+    }
+
+    private List<String> completeContextKeys() {
+        List<String> keys = new ArrayList<>(completeContextEntries.size());
+        for (ContextEntry entry : completeContextEntries) keys.add(entry.key);
+        return keys;
+    }
+
+    private void applyContextWindow() {
+        int pinned = pinnedContextEntryCount();
+        ContextRenderWindow.Selection window = contextWindow.select(completeContextKeys(), pinned);
+        List<ContextEntry> visible = new ArrayList<>(pinned + 1 + completeContextEntries.size() - window.start);
+        visible.addAll(completeContextEntries.subList(0, pinned));
+        if (window.hidden > 0) {
+            String label = "Show earlier context · " + window.hidden + " hidden";
+            visible.add(new ContextEntry("context-history", "context-history:" + window.hidden,
+                "history", "Earlier context", label, ACCENT));
+        }
+        visible.addAll(completeContextEntries.subList(window.start, completeContextEntries.size()));
+        reconcileContextEntries(visible);
+    }
+
+    private void expandContextHistory() {
+        int pinned = pinnedContextEntryCount();
+        contextWindow.expand(completeContextKeys(), pinned);
+        applyContextWindow();
+    }
+
+    /**
+     * Reuses the view belonging to each stable context key. New views are admitted one per
+     * frame, which keeps Markdown and tool-card construction from monopolizing the UI thread.
+     */
+    private void reconcileContextEntries(List<ContextEntry> desired) {
+        long generation = ++contextRenderGeneration;
+        Set<String> desiredKeys = new HashSet<>();
+        for (ContextEntry entry : desired) desiredKeys.add(entry.key);
+        for (int index = contextEntries.size() - 1; index >= 0; index--)
+            if (!desiredKeys.contains(contextEntries.get(index).key)) removeContextEntryAt(index);
+        if (contextEntries.isEmpty() && !desired.isEmpty()) {
+            appendInitialContextEntry(desired, desired.size() - 1, generation);
+            return;
+        }
+        reconcileContextEntry(desired, 0, generation);
+    }
+
+    /** Shows the newest entry in the first frame, then fills history above it. */
+    private void appendInitialContextEntry(List<ContextEntry> desired, int index, long generation) {
+        if (generation != contextRenderGeneration || index < 0) return;
+        ContextEntry entry = desired.get(index);
+        View view = buildContextEntry(entry);
+        insertAppendedContextEntry(0, entry, view);
+        int previousIndex = index - 1;
+        transcript.postOnAnimation(() -> appendInitialContextEntry(desired, previousIndex, generation));
+    }
+
+    private void reconcileContextEntry(List<ContextEntry> desired, int requestedIndex, long generation) {
+        if (generation != contextRenderGeneration) return;
+        int index = requestedIndex;
+        while (index < desired.size()) {
+            ContextEntry next = desired.get(index);
+            int existing = findContextEntry(next.key, index);
+            if (existing >= 0) {
+                boolean moved = existing != index;
+                if (moved) moveContextEntry(existing, index);
+                boolean changed = !contextEntries.get(index).signature.equals(next.signature);
+                if (updateContextEntry(index, next)) {
+                    index++;
+                    if (moved || changed) {
+                        int followingIndex = index;
+                        transcript.postOnAnimation(() -> reconcileContextEntry(desired, followingIndex, generation));
+                        return;
+                    }
+                    continue;
+                }
+                removeContextEntryAt(index);
+            }
+            View view = buildContextEntry(next);
+            insertAppendedContextEntry(index, next, view);
+            int followingIndex = index + 1;
+            transcript.postOnAnimation(() -> reconcileContextEntry(desired, followingIndex, generation));
+            return;
+        }
+        while (contextEntries.size() > desired.size()) removeContextEntryAt(contextEntries.size() - 1);
+    }
+
+    private int findContextEntry(String key, int start) {
+        for (int index = start; index < contextEntries.size(); index++)
+            if (key.equals(contextEntries.get(index).key)) return index;
+        return -1;
+    }
+
+    private boolean updateContextEntry(int index, ContextEntry next) {
+        ContextEntry old = contextEntries.get(index);
+        boolean changed = !old.signature.equals(next.signature);
+        if (!old.kind.equals(next.kind) || (changed && "toolCall".equals(next.kind))) return false;
+        if (old.alwaysCard != null) {
+            next.alwaysCard = old.alwaysCard;
+            if (changed) {
                 old.alwaysCard.label = next.label;
                 old.alwaysCard.source = next.source;
                 old.alwaysCard.header.setTextColor(next.color);
                 setAlwaysExpanded(old.alwaysCard, old.alwaysCard.expanded);
-                next.alwaysCard = old.alwaysCard;
             }
-            if (old.labelView != null) {
+        }
+        if (old.historyButton != null) {
+            next.historyButton = old.historyButton;
+            if (changed) {
+                old.historyButton.setText(next.source);
+                old.historyButton.setContentDescription(next.source);
+            }
+        }
+        if (old.labelView != null) {
+            next.labelView = old.labelView;
+            if (changed) {
                 old.labelView.setText(next.label.toUpperCase(Locale.ROOT));
                 old.labelView.setTextColor(next.color);
-                next.labelView = old.labelView;
             }
-            if (old.body != null) {
-                old.body.setSource(next.source);
-                next.body = old.body;
+        }
+        if (old.body != null) {
+            next.body = old.body;
+            if (changed) old.body.setSource(next.source);
+        }
+        contextEntries.set(index, next);
+        return true;
+    }
+
+    private View buildContextEntry(ContextEntry entry) {
+        long startedAt = SystemClock.uptimeMillis();
+        View view = appendContextEntry(entry);
+        long elapsed = SystemClock.uptimeMillis() - startedAt;
+        if (elapsed >= 32) Log.i("PiRemoteRender", "Built " + entry.kind + " view in " + elapsed
+            + "ms (" + entry.source.length() + " source chars)");
+        return view;
+    }
+
+    private void insertAppendedContextEntry(int index, ContextEntry entry, View view) {
+        View anchor = index < contextEntryViews.size() ? contextEntryViews.get(index) : null;
+        if (anchor != null) {
+            ViewGroup.LayoutParams params = view.getLayoutParams();
+            transcript.removeView(view);
+            transcript.addView(view, transcript.indexOfChild(anchor), params);
+        }
+        contextEntryViews.add(index, view);
+        contextEntries.add(index, entry);
+        refreshContextMargins(index);
+    }
+
+    private void refreshContextMargins(int index) {
+        for (int current = Math.max(0, index); current < Math.min(contextEntryViews.size(), index + 2); current++) {
+            View view = contextEntryViews.get(current);
+            LinearLayout.LayoutParams params = (LinearLayout.LayoutParams) view.getLayoutParams();
+            ContextEntry entry = contextEntries.get(current);
+            int preferred = "always".equals(entry.kind) ? 2
+                : "history".equals(entry.kind) ? 8
+                : "toolCall".equals(entry.kind) || "thinking".equals(entry.kind) ? 18 : 22;
+            int margin = current == 0 ? 0 : dp(preferred);
+            if (params.topMargin != margin) { params.topMargin = margin; view.setLayoutParams(params); }
+        }
+    }
+
+    private void moveContextEntry(int from, int to) {
+        View view = contextEntryViews.remove(from);
+        ContextEntry entry = contextEntries.remove(from);
+        View anchor = to < contextEntryViews.size() ? contextEntryViews.get(to) : null;
+        if (anchor != null) {
+            ViewGroup.LayoutParams params = view.getLayoutParams();
+            transcript.removeView(view);
+            transcript.addView(view, transcript.indexOfChild(anchor), params);
+        }
+        contextEntryViews.add(to, view);
+        contextEntries.add(to, entry);
+        refreshContextMargins(to);
+    }
+
+    private void removeContextEntryAt(int index) {
+        ContextEntry removed = contextEntries.remove(index);
+        if (removed.toolCall != null) {
+            String id = removed.toolCall.optString("id");
+            ToolCard card = toolCards.get(id);
+            if (card != null && card.root == contextEntryViews.get(index)) {
+                if (card.ticker != null) main.removeCallbacks(card.ticker);
+                toolCards.remove(id);
             }
-            contextEntrySignatures.set(shared, next.signature);
-            contextEntries.set(shared, next);
-            shared++;
         }
-        for (int index = contextEntryViews.size() - 1; index >= shared; index--) {
-            ContextEntry removed = contextEntries.get(index);
-            if ("toolCall".equals(removed.kind) && removed.toolCall != null) toolCards.remove(removed.toolCall.optString("id"));
-            transcript.removeView(contextEntryViews.remove(index));
-            contextEntrySignatures.remove(index);
-            contextEntries.remove(index);
-        }
-        for (int index = shared; index < entries.size(); index++) {
-            ContextEntry entry = entries.get(index);
-            contextEntryViews.add(appendContextEntry(entry));
-            contextEntrySignatures.add(entry.signature);
-            contextEntries.add(entry);
-        }
-        contextCapturedAt = capturedAt;
+        transcript.removeView(contextEntryViews.remove(index));
+        if (index < contextEntryViews.size()) refreshContextMargins(index);
     }
 
     private void renderEvents(JSONObject result) {

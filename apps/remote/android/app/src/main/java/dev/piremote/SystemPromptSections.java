@@ -1,6 +1,7 @@
 package dev.piremote;
 
 import java.nio.file.Path;
+import java.nio.file.Paths;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.regex.Matcher;
@@ -93,7 +94,7 @@ final class SystemPromptSections {
 
     private static String instructionLabel(String value) {
         try {
-            Path path = Path.of(value);
+            Path path = Paths.get(value);
             Path file = path.getFileName();
             Path parent = path.getParent();
             if (file != null && parent != null) return file + " · " + parent;

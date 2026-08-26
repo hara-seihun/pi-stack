@@ -1,5 +1,7 @@
 package dev.piremote;
 
+import android.annotation.SuppressLint;
+import android.annotation.TargetApi;
 import android.content.Context;
 import android.os.Build;
 import android.os.Handler;
@@ -87,7 +89,7 @@ final class Haptics {
         this.context = context;
         this.vibrator = loadVibrator(context);
         this.rich = Build.VERSION.SDK_INT >= 31 && vibrator != null && vibrator.hasVibrator();
-        this.touch = Build.VERSION.SDK_INT >= 30
+        this.touch = Build.VERSION.SDK_INT >= 33
             ? new VibrationAttributes.Builder().setUsage(VibrationAttributes.USAGE_TOUCH).build()
             : null;
         defineVocabulary();
@@ -153,11 +155,7 @@ final class Haptics {
             return;
         }
         lastStatementMs = SystemClock.uptimeMillis();
-        VibrationEffect.Composition composition = VibrationEffect.startComposition();
-        for (int i = 0; i < count; i++)
-            composition.addPrimitive(recipe.primitives.get(0),
-                HapticPolicy.clamp(scale, 0f, 1f), i == 0 ? 0 : Math.max(0, gapMs));
-        vibrate(composition.compose());
+        if (Build.VERSION.SDK_INT >= 30) composeBurst(recipe, count, scale, gapMs);
     }
 
     /** Distance travelled under the finger, rendered as a surface texture. */
@@ -207,17 +205,20 @@ final class Haptics {
         else render(recipe, on, intensity);
     }
 
+    @TargetApi(30)
+    private void composeBurst(Recipe recipe, int count, float scale, int gapMs) {
+        VibrationEffect.Composition composition = VibrationEffect.startComposition();
+        for (int i = 0; i < count; i++)
+            composition.addPrimitive(recipe.primitives.get(0),
+                HapticPolicy.clamp(scale, 0f, 1f), i == 0 ? 0 : Math.max(0, gapMs));
+        vibrate(composition.compose());
+    }
+
     private void render(Recipe recipe, View on, float intensity) {
         switch (recipe.mode) {
             case RICH:
-                if (!enabled()) return;
-                VibrationEffect.Composition composition = VibrationEffect.startComposition();
-                for (int i = 0; i < recipe.primitives.size(); i++)
-                    composition.addPrimitive(
-                        recipe.primitives.get(i),
-                        HapticPolicy.clamp(recipe.scales.get(i) * intensity, 0f, 1f),
-                        recipe.delays.get(i));
-                vibrate(composition.compose());
+                if (!enabled() || Build.VERSION.SDK_INT < 30) return;
+                renderRich(recipe, intensity);
                 return;
             case CONSTANT:
                 View target = on == null ? anchor : on;
@@ -228,9 +229,20 @@ final class Haptics {
         }
     }
 
+    @TargetApi(30)
+    private void renderRich(Recipe recipe, float intensity) {
+        VibrationEffect.Composition composition = VibrationEffect.startComposition();
+        for (int i = 0; i < recipe.primitives.size(); i++)
+            composition.addPrimitive(
+                recipe.primitives.get(i),
+                HapticPolicy.clamp(recipe.scales.get(i) * intensity, 0f, 1f),
+                recipe.delays.get(i));
+        vibrate(composition.compose());
+    }
+
     private void vibrate(VibrationEffect effect) {
         if (!watching) return;
-        if (touch != null) vibrator.vibrate(effect, touch);
+        if (Build.VERSION.SDK_INT >= 33 && touch != null) vibrator.vibrate(effect, touch);
         else vibrator.vibrate(effect);
     }
 
@@ -292,6 +304,8 @@ final class Haptics {
         }
     }
 
+    @TargetApi(30)
+    @SuppressLint("WrongConstant")
     private boolean supported(Recipe recipe) {
         int[] wanted = new int[recipe.primitives.size()];
         for (int i = 0; i < wanted.length; i++) wanted[i] = recipe.primitives.get(i);
@@ -299,6 +313,7 @@ final class Haptics {
         return true;
     }
 
+    @SuppressLint("InlinedApi")
     private void defineVocabulary() {
         int click = VibrationEffect.Composition.PRIMITIVE_CLICK;
         int tick = VibrationEffect.Composition.PRIMITIVE_TICK;

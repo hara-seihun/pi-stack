@@ -1,7 +1,7 @@
 package dev.piremote;
 
+import java.io.UnsupportedEncodingException;
 import java.net.URLEncoder;
-import java.nio.charset.StandardCharsets;
 import java.util.regex.Matcher;
 import java.util.regex.Pattern;
 
@@ -108,12 +108,17 @@ final class MarkdownCompat {
             String name = slash >= 0 ? filePath.substring(slash + 1) : filePath;
             if (name.isBlank()) name = "Download file";
             name = name.replace("&", "&amp;").replace("[", "&#91;").replace("]", "&#93;").replaceAll("[\\r\\n]+", " ");
-            String path = URLEncoder.encode(filePath, StandardCharsets.UTF_8);
-            String session = URLEncoder.encode(sessionId, StandardCharsets.UTF_8);
+            String path = urlEncode(filePath);
+            String session = urlEncode(sessionId);
             fileMatcher.appendReplacement(files, Matcher.quoteReplacement("\n\n[" + name + "](" + base + "/v1/sessions/" + session + "/files?path=" + path + ")\n\n"));
         }
         fileMatcher.appendTail(files);
         return files.toString();
+    }
+
+    private static String urlEncode(String value) {
+        try { return URLEncoder.encode(value, "UTF-8"); }
+        catch (UnsupportedEncodingException impossible) { throw new AssertionError(impossible); }
     }
 
     private static boolean isEscaped(String value, int index) {
