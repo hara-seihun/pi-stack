@@ -1,0 +1,1531 @@
+import { mkdirSync } from "node:fs";
+import { createRequire } from "node:module";
+import { dirname } from "node:path";
+import type { DatabaseSync } from "node:sqlite";
+
+/**
+ * The ledger must open inside any host that embeds a pi session — the
+ * orchestrator's own Node processes, but also bun runtimes (the Converge
+ * meeting agent embeds pi via the SDK, and its extensions open this ledger).
+ * Node ships sqlite as `node:sqlite`, bun as `bun:sqlite`; the subset used
+ * here (exec, prepare().get/.all/.run with positional binds) is identical,
+ * so resolve whichever module the current runtime provides.
+ */
+const require = createRequire(import.meta.url);
+const SqliteDatabase: new (path: string) => DatabaseSync =
+  typeof (globalThis as { Bun?: unknown }).Bun === "undefined"
+    ? (require("node:sqlite") as { DatabaseSync: new (path: string) => DatabaseSync }).DatabaseSync
+    : (require("bun:sqlite") as { Database: new (path: string) => DatabaseSync }).Database;
+import { AccountCalibrator } from "../calibrator/calibrator.js";
+import { gateRefs, parseGate } from "../tasks/gate.js";
+import { TIERS, type DemandState, type TaskSpec, type Tier, type TierShare } from "../tasks/types.js";
+import type {
+  CalibratorConfig,
+  MeterId,
+  MeterReading,
+  MeterSpec,
+  UsageEvent,
+  UsageSource,
+} from "../calibrator/types.js";
+
+/**
+ * The ledger stores facts, not conclusions: provider meter readings and token
+ * usage events. Calibration is always rebuilt by replaying those facts, so
+ * there is exactly one source of truth and calibrator improvements apply
+ * retroactively to all recorded history.
+ */
+
+const SCHEMA = `
+CREATE TABLE account (
+  id TEXT PRIMARY KEY,
+  provider TEXT NOT NULL,
+  label TEXT,
+  access_until INTEGER,
+  created_at INTEGER NOT NULL
+) STRICT;
+
+CREATE TABLE meter_reading (
+  account_id TEXT NOT NULL REFERENCES account(id),
+  meter_id TEXT NOT NULL,
+  at INTEGER NOT NULL,
+  used_percent INTEGER NOT NULL,
+  reset_at INTEGER,
+  PRIMARY KEY (account_id, meter_id, at)
+) STRICT;
+
+CREATE TABLE usage_event (
+  id INTEGER PRIMARY KEY,
+  account_id TEXT NOT NULL REFERENCES account(id),
+  class_id TEXT NOT NULL,
+  at INTEGER NOT NULL,
+  tokens REAL NOT NULL,
+  source TEXT NOT NULL CHECK (source IN ('orchestrator', 'machine')),
+  session_id TEXT
+) STRICT;
+
+CREATE INDEX usage_event_account_at ON usage_event (account_id, at);
+`;
+
+const TASK_SCHEMA = `
+CREATE TABLE control (
+  key TEXT PRIMARY KEY,
+  value TEXT NOT NULL
+) STRICT;
+INSERT INTO control (key, value) VALUES ('launches', 'enabled');
+
+CREATE TABLE task (
+  id TEXT PRIMARY KEY,
+  demand_command TEXT,
+  demand_constant REAL,
+  gate TEXT,
+  tiers TEXT NOT NULL,
+  created_at INTEGER NOT NULL,
+  CHECK ((demand_command IS NULL) <> (demand_constant IS NULL))
+) STRICT;
+
+CREATE TABLE task_demand (
+  task_id TEXT PRIMARY KEY REFERENCES task(id) ON DELETE CASCADE,
+  units REAL,
+  probed_at INTEGER,
+  invalidated INTEGER NOT NULL DEFAULT 0,
+  error TEXT,
+  gate_open_since INTEGER
+) STRICT;
+`;
+
+const RUN_SCHEMA = `
+ALTER TABLE task ADD COLUMN prompt TEXT;
+ALTER TABLE task ADD COLUMN cwd TEXT;
+ALTER TABLE account ADD COLUMN cooldown_until INTEGER;
+
+CREATE TABLE run (
+  id TEXT PRIMARY KEY,
+  task_id TEXT NOT NULL,
+  tier TEXT NOT NULL,
+  account_id TEXT NOT NULL,
+  model TEXT NOT NULL,
+  provider TEXT NOT NULL,
+  state TEXT NOT NULL CHECK (state IN ('running', 'done', 'error', 'aborted')),
+  started_at INTEGER NOT NULL,
+  ended_at INTEGER,
+  heartbeat_at INTEGER,
+  abort_requested INTEGER NOT NULL DEFAULT 0,
+  productive INTEGER,
+  complete INTEGER,
+  detail TEXT
+) STRICT;
+
+CREATE INDEX run_state ON run (state);
+CREATE INDEX run_task_started ON run (task_id, started_at);
+`;
+
+/**
+ * Runs become ledger-mediated: the controller creates them 'pending', runner
+ * processes claim them atomically. The table is rebuilt because the state
+ * CHECK cannot be altered in place; claimed_at backfills from started_at.
+ */
+const RUNNER_SCHEMA = `
+ALTER TABLE account ADD COLUMN last_bound_at INTEGER;
+
+CREATE TABLE run_next (
+  id TEXT PRIMARY KEY,
+  task_id TEXT NOT NULL,
+  tier TEXT NOT NULL,
+  account_id TEXT NOT NULL,
+  model TEXT NOT NULL,
+  provider TEXT NOT NULL,
+  state TEXT NOT NULL CHECK (state IN ('pending', 'running', 'done', 'error', 'aborted')),
+  started_at INTEGER NOT NULL,
+  claimed_at INTEGER,
+  runner_id TEXT,
+  ended_at INTEGER,
+  heartbeat_at INTEGER,
+  abort_requested INTEGER NOT NULL DEFAULT 0,
+  productive INTEGER,
+  complete INTEGER,
+  detail TEXT
+) STRICT;
+INSERT INTO run_next (id, task_id, tier, account_id, model, provider, state, started_at,
+                      claimed_at, ended_at, heartbeat_at, abort_requested, productive, complete, detail)
+  SELECT id, task_id, tier, account_id, model, provider, state, started_at,
+         started_at, ended_at, heartbeat_at, abort_requested, productive, complete, detail FROM run;
+DROP TABLE run;
+ALTER TABLE run_next RENAME TO run;
+CREATE INDEX run_state ON run (state);
+CREATE INDEX run_task_started ON run (task_id, started_at);
+
+INSERT INTO control (key, value) VALUES ('runner_generation', '1');
+`;
+
+const THINKING_SCHEMA = `
+ALTER TABLE run ADD COLUMN thinking TEXT;
+`;
+
+/**
+ * Historical: the exclusive credential-custody flag, superseded by
+ * `fleet_credentialed` (see FLEET_CREDENTIAL_SCHEMA), which observes custody
+ * instead of declaring it. The migration must stay: ledgers created before
+ * it replay this step.
+ */
+const DOMAIN_SCHEMA = `
+ALTER TABLE account ADD COLUMN domain TEXT NOT NULL DEFAULT 'interactive'
+  CHECK (domain IN ('interactive', 'orchestrator'));
+`;
+
+/** Shared credentials let interactive and orchestrated sessions draw from the
+ * same account. Interactive turns publish leases here so broker admission and
+ * per-session burn include work outside the fleet runner. */
+const SHARED_ACCOUNT_SCHEMA = `
+ALTER TABLE account ADD COLUMN shared INTEGER NOT NULL DEFAULT 0 CHECK (shared IN (0, 1));
+
+CREATE TABLE session_lease (
+  id TEXT PRIMARY KEY,
+  account_id TEXT NOT NULL REFERENCES account(id),
+  started_at INTEGER NOT NULL,
+  heartbeat_at INTEGER NOT NULL,
+  ended_at INTEGER
+) STRICT;
+CREATE INDEX session_lease_account_started ON session_lease (account_id, started_at);
+CREATE INDEX session_lease_active ON session_lease (account_id, ended_at, heartbeat_at);
+`;
+
+/** An operator watching a live agent could only kill it. A queued message is
+ * the other half of that control: the runner delivers it into the session as
+ * a user turn, so a drifting agent can be corrected instead of discarded. */
+const RUN_MESSAGE_SCHEMA = `
+CREATE TABLE run_message (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  run_id TEXT NOT NULL,
+  text TEXT NOT NULL,
+  created_at INTEGER NOT NULL,
+  delivered_at INTEGER
+) STRICT;
+CREATE INDEX run_message_undelivered ON run_message (run_id, delivered_at);
+`;
+
+/** A task's tier list gains relative weights, so one lane can be worked by a
+ * deliberate mix of tiers ("one standard session per twenty light ones")
+ * rather than only by substitution. Existing single-tier lists carry over at
+ * weight 1, where the weight means nothing and the behaviour is unchanged. */
+const TIER_WEIGHT_SCHEMA = `
+UPDATE task SET tiers = (
+  SELECT json_group_array(json_object('tier', value, 'weight', 1))
+  FROM json_each(task.tiers)
+);
+`;
+
+/** A lane gains an explicit claim on the fleet's launches. Existing lanes
+ * carry over at 1, an even split capped by demand, because the alternative —
+ * inferring intent from whatever numbers each demand probe happens to emit —
+ * is what made the split accidental in the first place. */
+const TASK_SHARE_SCHEMA = `
+ALTER TABLE task ADD COLUMN share REAL NOT NULL DEFAULT 1;
+`;
+
+/** A queue lane can empty its queue mid-shift. Research lanes are never done
+ * and must keep their warm context to the end of the budget, so the choice is
+ * a property of the lane rather than of the host. */
+const EXIT_WHEN_DRAINED_SCHEMA = `
+ALTER TABLE task ADD COLUMN exit_when_drained INTEGER NOT NULL DEFAULT 0
+  CHECK (exit_when_drained IN (0, 1));
+`;
+
+/** A lane can pin a doctrine document into its sessions' system prompts.
+ * The task prompt is the first user message, which is exactly what
+ * compaction summarizes away first; doctrine a session must hold for a
+ * whole long shift (the ledger's attack guide above all) has to live in the
+ * system prompt, which compaction preserves. The column holds a URL: the
+ * host fetches it at launch so sessions always carry the current text. */
+const DOCTRINE_URL_SCHEMA = `
+ALTER TABLE task ADD COLUMN doctrine_url TEXT;
+`;
+
+/** Which runtime may spend an account is a fact about credential custody —
+ * which auth store actually holds the token — not an operator-declared
+ * classification. The `domain` flag was a manually maintained copy of that
+ * fact and could drift from it; it is replaced by `fleet_credentialed`, an
+ * observation the controller refreshes every tick from the fleet's own
+ * credential stores. Backfilled from the old flag so admission is continuous
+ * until the first tick re-observes. */
+const FLEET_CREDENTIAL_SCHEMA = `
+ALTER TABLE account ADD COLUMN fleet_credentialed INTEGER NOT NULL DEFAULT 0
+  CHECK (fleet_credentialed IN (0, 1));
+UPDATE account SET fleet_credentialed = CASE WHEN shared = 1 OR domain = 'orchestrator' THEN 1 ELSE 0 END;
+ALTER TABLE account DROP COLUMN domain;
+`;
+
+/** Token burn becomes attributable. `usage_event.source` existed from the
+ * first schema but the logger wrote the literal 'machine' for every session,
+ * so the fleet's burn and the operator's own were one undifferentiated
+ * number and "what is using our quota" could only be answered by correlating
+ * run windows against session ids by hand. The link is recorded directly:
+ * the runner writes its session id onto the run, and the logger labels the
+ * source from the environment the broker already sets.
+ *
+ * History predating the link is relabelled by that same correlation, once:
+ * a session whose first event falls inside a run window on the same account
+ * was that run's. Concurrent runs share accounts, so this recovers the
+ * source split but not the run identity, which stays null for old rows. */
+const RUN_SESSION_SCHEMA = `
+ALTER TABLE run ADD COLUMN session_id TEXT;
+CREATE INDEX run_session ON run (session_id);
+
+WITH first_event AS (
+  SELECT session_id, account_id, MIN(at) AS at FROM usage_event
+  WHERE session_id IS NOT NULL GROUP BY session_id, account_id
+)
+UPDATE usage_event SET source = 'orchestrator' WHERE session_id IN (
+  SELECT f.session_id FROM first_event f JOIN run r ON r.account_id = f.account_id
+  WHERE f.at >= COALESCE(r.claimed_at, r.started_at) - 60000
+    AND f.at <= COALESCE(r.ended_at, r.heartbeat_at, r.started_at + 3600000) + 300000
+);
+`;
+
+/**
+ * A heartbeat only proves the runner's timer still fires. A session parked on a
+ * provider that never answers heartbeats just as happily, which is how a Grok
+ * research run sat frozen for 90 minutes in 2026-08 while every liveness signal
+ * looked healthy. `progress_at` is the last time the session actually did
+ * something the transcript recorded; existing runs backfill from their heartbeat.
+ */
+const RUN_PROGRESS_SCHEMA = `
+ALTER TABLE run ADD COLUMN progress_at INTEGER;
+UPDATE run SET progress_at = COALESCE(heartbeat_at, claimed_at, started_at);
+`;
+
+/** The opening exchange (see tasks/types.ts): user messages the host sends
+ * as real turns before the task prompt, stored as a JSON array of message
+ * texts; and self-pacing, which makes the shift a single work turn with no
+ * continuation check-ins. Message bodies live in the row (not URLs): the
+ * exchange is operator-authored text whose exact wording is the point, and
+ * a launch must not change voice because a fetch failed. */
+const OPENING_SCHEMA = `
+ALTER TABLE task ADD COLUMN opening TEXT;
+ALTER TABLE task ADD COLUMN self_paced INTEGER NOT NULL DEFAULT 0
+  CHECK (self_paced IN (0, 1));
+`;
+
+/** Per-launch opening substitution (see tasks/types.ts): a command whose
+ * JSON stdout fills `{{key}}` placeholders in the opening messages, so each
+ * launch can live a different exchange — the math lane samples a different
+ * famous open problem per session instead of anchoring every agent on one. */
+const OPENING_PROBE_SCHEMA = `
+ALTER TABLE task ADD COLUMN opening_probe TEXT;
+`;
+
+/** Check-ins the host has sent this run. A shift's whole claim on a session
+ * is five of them, and the count belongs to the run rather than to the
+ * process hosting it: a rule that lives only in one worker's memory is a
+ * rule a stale worker keeps breaking, which is how a single math-cleanup
+ * session took 52 kick-backs while a build that capped them was already
+ * deployed. Existing rows start at zero; a live run over the cap is asked
+ * for nothing further. */
+const CHECK_IN_SCHEMA = `
+ALTER TABLE run ADD COLUMN check_ins INTEGER NOT NULL DEFAULT 0;
+`;
+
+/** The relation is the attribution source for each run's Pi session.
+ * run.session_id remains the root projection so a worker from the previous
+ * generation can finish during a rolling schema migration; new code never
+ * joins usage through it. */
+const RUN_SESSION_RELATION_SCHEMA = `
+DROP INDEX run_session;
+CREATE TABLE run_session (
+  run_id TEXT NOT NULL REFERENCES run(id) ON DELETE CASCADE,
+  session_id TEXT NOT NULL UNIQUE,
+  parent_session_id TEXT,
+  created_at INTEGER NOT NULL,
+  PRIMARY KEY (run_id, session_id)
+) STRICT;
+INSERT INTO run_session (run_id, session_id, parent_session_id, created_at)
+  SELECT id, session_id, NULL, COALESCE(claimed_at, started_at)
+  FROM run WHERE session_id IS NOT NULL;
+CREATE INDEX run_session_run ON run_session (run_id, created_at);
+CREATE INDEX run_session_parent ON run_session (parent_session_id);
+`;
+
+/** Nested sessions were removed. Drop their ancestry while retaining every
+ * recorded session so historical usage attribution remains intact. */
+const SINGLE_RUN_SESSION_SCHEMA = `
+DROP INDEX run_session_parent;
+ALTER TABLE run_session DROP COLUMN parent_session_id;
+`;
+
+const MIGRATIONS: readonly string[] = [
+  SCHEMA,
+  TASK_SCHEMA,
+  RUN_SCHEMA,
+  RUNNER_SCHEMA,
+  THINKING_SCHEMA,
+  DOMAIN_SCHEMA,
+  SHARED_ACCOUNT_SCHEMA,
+  RUN_MESSAGE_SCHEMA,
+  TIER_WEIGHT_SCHEMA,
+  TASK_SHARE_SCHEMA,
+  EXIT_WHEN_DRAINED_SCHEMA,
+  RUN_SESSION_SCHEMA,
+  RUN_PROGRESS_SCHEMA,
+  DOCTRINE_URL_SCHEMA,
+  FLEET_CREDENTIAL_SCHEMA,
+  OPENING_SCHEMA,
+  OPENING_PROBE_SCHEMA,
+  CHECK_IN_SCHEMA,
+  RUN_SESSION_RELATION_SCHEMA,
+  SINGLE_RUN_SESSION_SCHEMA,
+];
+
+export interface AccountRow {
+  readonly id: string;
+  readonly provider: string;
+  readonly label: string | undefined;
+  readonly accessUntil: number | undefined;
+  readonly cooldownUntil: number | undefined;
+  readonly lastBoundAt: number | undefined;
+  /** The fleet can resolve a credential for this account — observed from the
+   * credential stores by the controller each tick, never operator-declared.
+   * Which runtime may spend an account is decided by which auth store
+   * actually holds its token, not by a flag that can drift from that fact. */
+  readonly fleetCredentialed: boolean;
+  readonly shared: boolean;
+  readonly createdAt: number;
+}
+
+export type RunState = "pending" | "running" | "done" | "error" | "aborted";
+
+/** Launch-side custody of one agent session. `tier` lives here for capacity
+ * accounting and statistics only; it must never reach agent-visible surfaces.
+ * Deliberately no FK to task: run history outlives deleted tasks. */
+export interface RunRow {
+  readonly id: string;
+  readonly taskId: string;
+  readonly tier: Tier;
+  readonly accountId: string;
+  readonly model: string;
+  readonly provider: string;
+  readonly thinking: string | undefined;
+  readonly state: RunState;
+  readonly startedAt: number;
+  readonly claimedAt: number | undefined;
+  readonly runnerId: string | undefined;
+  readonly endedAt: number | undefined;
+  readonly heartbeatAt: number | undefined;
+  /** Last recorded session activity, as opposed to runner liveness. */
+  readonly progressAt: number | undefined;
+  readonly abortRequested: boolean;
+  readonly productive: boolean | undefined;
+  readonly complete: boolean | undefined;
+  readonly detail: string | undefined;
+}
+
+export interface RunResult {
+  readonly state: "done" | "error" | "aborted";
+  readonly productive?: boolean;
+  readonly complete?: boolean;
+  readonly detail?: string;
+}
+
+export interface LoggedUsageEvent extends UsageEvent {
+  readonly sessionId?: string;
+}
+
+export interface UsageSlice {
+  readonly key: string;
+  readonly tokens: number;
+  readonly sessions: number;
+}
+
+export interface UsageBreakdown {
+  readonly since: number;
+  readonly total: number;
+  readonly bySource: Record<UsageSource, number>;
+  /** Fleet burn per lane; a run predating the session link falls into one
+   * unattributed bucket rather than silently joining a lane it did not run. */
+  readonly byLane: readonly UsageSlice[];
+  readonly byAccount: readonly UsageSlice[];
+  readonly byModel: readonly UsageSlice[];
+  readonly topSessions: readonly UsageSlice[];
+}
+
+function boostKey(provider: string): string {
+  return `boost:${provider}`;
+}
+
+/** Launch control, scoped to one lane. The machine-wide pause is a control
+ * row; holding a single lane is the same lever named for one task, so
+ * "run only the review lane" is a durable operator decision rather than a
+ * set of deleted task definitions. */
+function taskPauseKey(taskId: string): string {
+  return `launches:${taskId}`;
+}
+
+export class Ledger {
+  private constructor(private readonly db: DatabaseSync) {}
+
+  static open(path: string): Ledger {
+    if (path !== ":memory:") mkdirSync(dirname(path), { recursive: true });
+    const db = new SqliteDatabase(path);
+    // busy_timeout first: setting the journal mode takes a brief exclusive
+    // lock, so two processes opening the ledger at once (boot, or a runner
+    // worker starting beside its supervisor) would otherwise race and one
+    // would die with SQLITE_BUSY before any timeout applied.
+    db.exec("PRAGMA busy_timeout = 5000");
+    db.exec("PRAGMA journal_mode = WAL");
+    db.exec("PRAGMA synchronous = NORMAL");
+    db.exec("PRAGMA foreign_keys = ON");
+    // Acquire the writer lock before reading user_version. If two services
+    // start on the same old ledger, the loser must read the version after the
+    // winner commits rather than replaying the same ALTER TABLE statements.
+    db.exec("BEGIN IMMEDIATE");
+    try {
+      const row = db.prepare("PRAGMA user_version").get() as { user_version: number };
+      for (let v = row.user_version; v < MIGRATIONS.length; v++) {
+        db.exec(MIGRATIONS[v]);
+        db.exec(`PRAGMA user_version = ${v + 1}`);
+      }
+      db.exec("COMMIT");
+    } catch (error) {
+      db.exec("ROLLBACK");
+      db.close();
+      throw error;
+    }
+    return new Ledger(db);
+  }
+
+  close(): void {
+    this.db.close();
+  }
+
+  upsertAccount(a: {
+    id: string;
+    provider: string;
+    label?: string;
+    accessUntil?: number;
+    shared?: boolean;
+  }): void {
+    this.db
+      .prepare(
+        `INSERT INTO account (id, provider, label, access_until, shared, created_at)
+         VALUES (?, ?, ?, ?, COALESCE(?, 0), ?)
+         ON CONFLICT (id) DO UPDATE SET
+           provider = excluded.provider,
+           label = COALESCE(excluded.label, account.label),
+           access_until = COALESCE(excluded.access_until, account.access_until),
+           shared = COALESCE(?, account.shared)`,
+      )
+      .run(
+        a.id,
+        a.provider,
+        a.label ?? null,
+        a.accessUntil ?? null,
+        a.shared === undefined ? null : a.shared ? 1 : 0,
+        Date.now(),
+        a.shared === undefined ? null : a.shared ? 1 : 0,
+      );
+  }
+
+  /** An account belongs to exactly one machine, so when its credential moves
+   * away this ledger must stop knowing it: a row left behind would keep being
+   * bound by the routing extension and admitted by the broker with no auth.json
+   * entry to run on. Its recorded facts go with it — they calibrate that
+   * account's plan, which is now another machine's business — so the removal
+   * is a delete, not a tombstone. In-flight runs block it: capacity accounting
+   * would lose its subject mid-run. */
+  removeAccount(id: string): { usageEvents: number; meterReadings: number } {
+    const known = this.db.prepare("SELECT 1 FROM account WHERE id = ?").get(id);
+    if (known === undefined) throw new Error(`unknown account ${id}`);
+    const inFlight = this.db
+      .prepare("SELECT COUNT(*) AS n FROM run WHERE account_id = ? AND state IN ('pending', 'running')")
+      .get(id) as { n: number };
+    if (inFlight.n > 0)
+      throw new Error(`account ${id} has ${inFlight.n} in-flight run(s); abort or let them finish first`);
+    const interactive = this.db
+      .prepare(
+        "SELECT COUNT(*) AS n FROM session_lease WHERE account_id = ? AND ended_at IS NULL AND heartbeat_at >= ?",
+      )
+      .get(id, Date.now() - 2 * 60_000) as { n: number };
+    if (interactive.n > 0)
+      throw new Error(`account ${id} has ${interactive.n} active interactive session(s); let them finish first`);
+    const usageEvents = this.db.prepare("DELETE FROM usage_event WHERE account_id = ?").run(id).changes;
+    const meterReadings = this.db.prepare("DELETE FROM meter_reading WHERE account_id = ?").run(id).changes;
+    this.db.prepare("DELETE FROM session_lease WHERE account_id = ?").run(id);
+    this.db.prepare("DELETE FROM account WHERE id = ?").run(id);
+    return { usageEvents: Number(usageEvents), meterReadings: Number(meterReadings) };
+  }
+
+  /** The controller's per-tick observation of which accounts the fleet can
+   * actually authenticate: the ids found across the fleet's credential
+   * stores. Rows drift back to the truth within one tick of any credential
+   * moving. */
+  syncFleetCredentials(heldIds: ReadonlySet<string>): void {
+    const update = this.db.prepare("UPDATE account SET fleet_credentialed = ? WHERE id = ?");
+    for (const account of this.accounts()) {
+      const held = heldIds.has(account.id) || account.shared;
+      if (held !== account.fleetCredentialed) update.run(held ? 1 : 0, account.id);
+    }
+  }
+
+  setAccountShared(id: string, shared: boolean): void {
+    const changed = this.db
+      .prepare("UPDATE account SET shared = ? WHERE id = ?")
+      .run(shared ? 1 : 0, id);
+    if (changed.changes === 0) throw new Error(`unknown account ${id}`);
+  }
+
+  accounts(): AccountRow[] {
+    const rows = this.db
+      .prepare(
+        "SELECT id, provider, label, access_until, cooldown_until, last_bound_at, fleet_credentialed, shared, created_at FROM account ORDER BY id",
+      )
+      .all() as {
+      id: string;
+      provider: string;
+      label: string | null;
+      access_until: number | null;
+      cooldown_until: number | null;
+      last_bound_at: number | null;
+      fleet_credentialed: number;
+      shared: number;
+      created_at: number;
+    }[];
+    return rows.map((r) => ({
+      id: r.id,
+      provider: r.provider,
+      label: r.label ?? undefined,
+      accessUntil: r.access_until ?? undefined,
+      cooldownUntil: r.cooldown_until ?? undefined,
+      lastBoundAt: r.last_bound_at ?? undefined,
+      fleetCredentialed: r.fleet_credentialed !== 0,
+      shared: r.shared !== 0,
+      createdAt: r.created_at,
+    }));
+  }
+
+  /** A cooling account is skipped by admission until the deadline passes. */
+  /** Explicit lifecycle transition: upsertAccount coalesces missing fields
+   * (usage attribution must never erase registration metadata), so clearing
+   * a cancelled subscription's deadline on reactivation needs this setter. */
+  setAccountAccessUntil(id: string, until: number | undefined): void {
+    this.db
+      .prepare("UPDATE account SET access_until = ? WHERE id = ?")
+      .run(until ?? null, id);
+  }
+
+  setAccountCooldown(id: string, until: number | undefined): void {
+    this.db
+      .prepare("UPDATE account SET cooldown_until = ? WHERE id = ?")
+      .run(until ?? null, id);
+  }
+
+  /** Session-binding fact for least-used round-robin tie-breaking. */
+  setAccountLastBound(id: string, at: number): void {
+    this.db.prepare("UPDATE account SET last_bound_at = ? WHERE id = ?").run(at, id);
+  }
+
+  /** Freshest provider-reported utilization: max over meters of the latest
+   * used_percent reading. Undefined when the account has no readings. */
+  latestUsedPercent(accountId: string): number | undefined {
+    const row = this.db
+      .prepare(
+        `SELECT MAX(used_percent) AS p FROM meter_reading r
+         WHERE account_id = ?
+           AND at = (SELECT MAX(at) FROM meter_reading
+                     WHERE account_id = r.account_id AND meter_id = r.meter_id)`,
+      )
+      .get(accountId) as { p: number | null };
+    return row.p ?? undefined;
+  }
+
+  /** Most recent reading for one account meter, or undefined when the meter
+   * has never been read. Pollers use it to space their sampling. */
+  latestReading(accountId: string, meterId: MeterId): MeterReading | undefined {
+    const row = this.db
+      .prepare(
+        `SELECT at, used_percent, reset_at FROM meter_reading
+         WHERE account_id = ? AND meter_id = ? ORDER BY at DESC LIMIT 1`,
+      )
+      .get(accountId, meterId) as { at: number; used_percent: number; reset_at: number | null } | undefined;
+    return row === undefined
+      ? undefined
+      : { at: row.at, usedPercent: row.used_percent, ...(row.reset_at === null ? {} : { resetAt: row.reset_at }) };
+  }
+
+  /**
+   * Stores a reading verbatim. Every reading is a fact and segment semantics
+   * depend on exact boundaries, so nothing is deduplicated; `prune` bounds
+   * growth instead. Out-of-order readings (concurrent writers racing) are
+   * rejected loudly; callers may drop the redundant loser.
+   *
+   * Two writers can land on the same instant, and readings of one meter at
+   * one instant are one fact, so the later write corrects the earlier value
+   * rather than being refused as a duplicate. That case is not hypothetical:
+   * the usage-logger records a response's headers and then polls the account
+   * usage endpoint, and the endpoint answers for buckets the headers cannot
+   * describe at all. Refusing the equal timestamp kept the header's partial
+   * view and discarded the account-wide truth that was fetched to replace
+   * it.
+   */
+  recordReading(accountId: string, meterId: MeterId, r: MeterReading): void {
+    const last = this.latestReading(accountId, meterId);
+    if (last && r.at < last.at) {
+      throw new Error(`out-of-order reading for ${accountId}/${meterId}: ${r.at} < ${last.at}`);
+    }
+    this.db
+      .prepare(
+        `INSERT INTO meter_reading (account_id, meter_id, at, used_percent, reset_at)
+         VALUES (?, ?, ?, ?, ?)
+         ON CONFLICT (account_id, meter_id, at) DO UPDATE SET
+           used_percent = excluded.used_percent,
+           reset_at = excluded.reset_at`,
+      )
+      .run(accountId, meterId, r.at, r.usedPercent, r.resetAt ?? null);
+  }
+
+  recordUsage(accountId: string, e: LoggedUsageEvent): void {
+    this.db
+      .prepare(
+        `INSERT INTO usage_event (account_id, class_id, at, tokens, source, session_id)
+         VALUES (?, ?, ?, ?, ?, ?)`,
+      )
+      .run(accountId, e.classId, e.at, e.tokens, e.source, e.sessionId ?? null);
+  }
+
+  /**
+   * Who spent the quota. Every fleet session resolves to its lane through
+   * `run_session`; everything else is one of this machine's own interactive
+   * sessions, named by session id because that is the only handle the ledger
+   * holds for them.
+   */
+  usageBreakdown(since: number): UsageBreakdown {
+    const slices = (select: string, params: (string | number)[] = []): UsageSlice[] =>
+      (
+        this.db.prepare(select).all(since, ...params) as {
+          key: string;
+          tokens: number;
+          sessions: number;
+        }[]
+      ).map((r) => ({ key: r.key, tokens: r.tokens, sessions: r.sessions }));
+
+    const bySource = { orchestrator: 0, machine: 0 };
+    for (const s of slices(
+      `SELECT source AS key, SUM(tokens) AS tokens, COUNT(DISTINCT session_id) AS sessions
+       FROM usage_event WHERE at >= ? GROUP BY source`,
+    )) {
+      bySource[s.key as UsageSource] = s.tokens;
+    }
+    return {
+      since,
+      total: bySource.orchestrator + bySource.machine,
+      bySource,
+      byLane: slices(
+        `SELECT COALESCE(r.task_id, '(unattributed fleet session)') AS key,
+                SUM(u.tokens) AS tokens, COUNT(DISTINCT u.session_id) AS sessions
+         FROM usage_event u
+         LEFT JOIN run_session rs ON rs.session_id = u.session_id
+         LEFT JOIN run r ON r.id = rs.run_id
+         WHERE u.at >= ? AND u.source = 'orchestrator'
+         GROUP BY key ORDER BY tokens DESC`,
+      ),
+      byAccount: slices(
+        `SELECT account_id AS key, SUM(tokens) AS tokens, COUNT(DISTINCT session_id) AS sessions
+         FROM usage_event WHERE at >= ? GROUP BY key ORDER BY tokens DESC`,
+      ),
+      byModel: slices(
+        `SELECT substr(class_id, 1, instr(class_id, ':') - 1) AS key,
+                SUM(tokens) AS tokens, COUNT(DISTINCT session_id) AS sessions
+         FROM usage_event WHERE at >= ? GROUP BY key ORDER BY tokens DESC`,
+      ),
+      topSessions: slices(
+        `SELECT u.session_id || '  ' || COALESCE(r.task_id, u.account_id) AS key,
+                SUM(u.tokens) AS tokens, 1 AS sessions
+         FROM usage_event u
+         LEFT JOIN run_session rs ON rs.session_id = u.session_id
+         LEFT JOIN run r ON r.id = rs.run_id
+         WHERE u.at >= ? AND u.session_id IS NOT NULL
+         GROUP BY u.session_id ORDER BY tokens DESC LIMIT ?`,
+        [10],
+      ),
+    };
+  }
+
+  recordUsageBatch(accountId: string, events: readonly LoggedUsageEvent[]): void {
+    this.db.exec("BEGIN");
+    try {
+      for (const e of events) this.recordUsage(accountId, e);
+      this.db.exec("COMMIT");
+    } catch (thrown) {
+      this.db.exec("ROLLBACK");
+      throw thrown;
+    }
+  }
+
+  /**
+   * Rebuilds an account's calibrator by folding stored facts in time order.
+   * `transform` maps stored usage facts onto calibration classes (e.g. raw
+   * token components onto price-weighted cost units); because it runs at
+   * replay time, corrected weights apply retroactively to all history.
+   */
+  replayCalibrator(
+    accountId: string,
+    specs: readonly MeterSpec[],
+    cfg?: Partial<CalibratorConfig>,
+    transform?: (classId: string, tokens: number) => { classId: string; tokens: number },
+  ): AccountCalibrator {
+    const cal = new AccountCalibrator(specs, cfg);
+    const readings = this.db
+      .prepare(
+        `SELECT meter_id, at, used_percent, reset_at FROM meter_reading
+         WHERE account_id = ? ORDER BY at`,
+      )
+      .all(accountId) as {
+      meter_id: string;
+      at: number;
+      used_percent: number;
+      reset_at: number | null;
+    }[];
+    const usage = this.db
+      .prepare(
+        `SELECT class_id, at, tokens, source FROM usage_event
+         WHERE account_id = ? ORDER BY at`,
+      )
+      .all(accountId) as {
+      class_id: string;
+      at: number;
+      tokens: number;
+      source: "orchestrator" | "machine";
+    }[];
+    const fold = (e: { class_id: string; at: number; tokens: number; source: "orchestrator" | "machine" }) => {
+      const t = transform ? transform(e.class_id, e.tokens) : { classId: e.class_id, tokens: e.tokens };
+      cal.recordUsage({ at: e.at, classId: t.classId, tokens: t.tokens, source: e.source });
+    };
+    let u = 0;
+    for (const r of readings) {
+      while (u < usage.length && usage[u].at <= r.at) fold(usage[u++]);
+      cal.recordReading(r.meter_id, {
+        at: r.at,
+        usedPercent: r.used_percent,
+        resetAt: r.reset_at ?? undefined,
+      });
+    }
+    while (u < usage.length) fold(usage[u++]);
+    return cal;
+  }
+
+  counts(accountId: string): { readings: number; usageEvents: number } {
+    const one = (sql: string) =>
+      (this.db.prepare(sql).get(accountId) as { n: number }).n;
+    return {
+      readings: one("SELECT COUNT(*) AS n FROM meter_reading WHERE account_id = ?"),
+      usageEvents: one("SELECT COUNT(*) AS n FROM usage_event WHERE account_id = ?"),
+    };
+  }
+
+  upsertTask(t: TaskSpec): void {
+    if ((t.demandCommand === undefined) === (t.demandConstant === undefined)) {
+      throw new Error(`task ${t.id}: exactly one of demandCommand/demandConstant required`);
+    }
+    const tiers = t.tiers.map((share) => share.tier);
+    if (tiers.length === 0 || new Set(tiers).size !== tiers.length) {
+      throw new Error(`task ${t.id}: tiers must be a non-empty list without duplicates`);
+    }
+    for (const share of t.tiers) {
+      if (!TIERS.includes(share.tier)) throw new Error(`task ${t.id}: unknown tier ${share.tier}`);
+      if (!Number.isFinite(share.weight) || share.weight <= 0) {
+        throw new Error(`task ${t.id}: tier ${share.tier} needs a positive weight`);
+      }
+    }
+    if (t.share !== undefined && (!Number.isFinite(t.share) || t.share <= 0)) {
+      throw new Error(`task ${t.id}: share must be positive`);
+    }
+    if (t.gate !== undefined) parseGate(t.gate); // Validate syntax at write time.
+    this.db
+      .prepare(
+        `INSERT INTO task (id, demand_command, demand_constant, gate, tiers, share, prompt, cwd,
+                           exit_when_drained, doctrine_url, opening, opening_probe, self_paced,
+                           created_at)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+         ON CONFLICT (id) DO UPDATE SET
+           demand_command = excluded.demand_command,
+           demand_constant = excluded.demand_constant,
+           gate = excluded.gate,
+           tiers = excluded.tiers,
+           share = excluded.share,
+           prompt = excluded.prompt,
+           cwd = excluded.cwd,
+           exit_when_drained = excluded.exit_when_drained,
+           doctrine_url = excluded.doctrine_url,
+           opening = excluded.opening,
+           opening_probe = excluded.opening_probe,
+           self_paced = excluded.self_paced`,
+      )
+      .run(
+        t.id,
+        t.demandCommand ?? null,
+        t.demandConstant ?? null,
+        t.gate ?? null,
+        JSON.stringify(t.tiers),
+        t.share ?? 1,
+        t.prompt ?? null,
+        t.cwd ?? null,
+        t.exitWhenDrained ? 1 : 0,
+        t.doctrineUrl ?? null,
+        t.opening === undefined ? null : JSON.stringify(t.opening),
+        t.openingProbe ?? null,
+        t.selfPaced ? 1 : 0,
+        Date.now(),
+      );
+  }
+
+  deleteTask(id: string): void {
+    this.db.prepare("DELETE FROM task WHERE id = ?").run(id);
+    this.db.prepare("DELETE FROM control WHERE key = ?").run(taskPauseKey(id));
+  }
+
+  tasks(): TaskSpec[] {
+    const rows = this.db
+      .prepare(
+        `SELECT id, demand_command, demand_constant, gate, tiers, share, prompt, cwd,
+                exit_when_drained, doctrine_url, opening, opening_probe, self_paced
+         FROM task ORDER BY id`,
+      )
+      .all() as {
+      id: string;
+      demand_command: string | null;
+      demand_constant: number | null;
+      gate: string | null;
+      tiers: string;
+      share: number;
+      prompt: string | null;
+      cwd: string | null;
+      exit_when_drained: number;
+      doctrine_url: string | null;
+      opening: string | null;
+      opening_probe: string | null;
+      self_paced: number;
+    }[];
+    return rows.map((r) => ({
+      id: r.id,
+      demandCommand: r.demand_command ?? undefined,
+      demandConstant: r.demand_constant ?? undefined,
+      gate: r.gate ?? undefined,
+      tiers: JSON.parse(r.tiers) as TierShare[],
+      share: r.share,
+      prompt: r.prompt ?? undefined,
+      cwd: r.cwd ?? undefined,
+      exitWhenDrained: r.exit_when_drained !== 0,
+      doctrineUrl: r.doctrine_url ?? undefined,
+      opening: r.opening === null ? undefined : (JSON.parse(r.opening) as string[]),
+      openingProbe: r.opening_probe ?? undefined,
+      selfPaced: r.self_paced !== 0,
+    }));
+  }
+
+  /** True when this one lane is held, whatever the machine-wide control says. */
+  taskPaused(taskId: string): boolean {
+    return this.getControl(taskPauseKey(taskId)) === "paused";
+  }
+
+  setTaskPaused(taskId: string, paused: boolean): void {
+    if (paused) this.setControl(taskPauseKey(taskId), "paused");
+    else this.db.prepare("DELETE FROM control WHERE key = ?").run(taskPauseKey(taskId));
+  }
+
+  getControl(key: string): string | undefined {
+    const row = this.db.prepare("SELECT value FROM control WHERE key = ?").get(key) as
+      | { value: string }
+      | undefined;
+    return row?.value;
+  }
+
+  setControl(key: string, value: string): void {
+    this.db
+      .prepare(
+        `INSERT INTO control (key, value) VALUES (?, ?)
+         ON CONFLICT (key) DO UPDATE SET value = excluded.value`,
+      )
+      .run(key, value);
+  }
+
+  /**
+   * Operator boost: a deliberate multiplier on how hard one provider family's
+   * plans may be drawn down. It scales the measured sustainable rate the
+   * broker paces against, so it spends real headroom faster rather than
+   * inventing capacity — measurement, hazard pacing, and cooldowns all keep
+   * working underneath. `1` is the normal, unboosted state.
+   */
+  boost(provider: string): number {
+    const raw = Number(this.getControl(boostKey(provider)));
+    return Number.isFinite(raw) && raw >= 0 ? raw : 1;
+  }
+
+  /** `0` halts the family: the broker refuses every new launch while running
+   * sessions finish naturally. */
+  setBoost(provider: string, multiplier: number): void {
+    if (!Number.isFinite(multiplier) || multiplier < 0) {
+      throw new Error(`boost multiplier must be >= 0, got ${multiplier}`);
+    }
+    this.setControl(boostKey(provider), String(multiplier));
+  }
+
+  /** Every family away from the normal 1x — boosted or halted — for status
+   * and client display. */
+  boosts(): { provider: string; multiplier: number }[] {
+    const rows = this.db
+      .prepare("SELECT key, value FROM control WHERE key LIKE 'boost:%' ORDER BY key")
+      .all() as { key: string; value: string }[];
+    return rows
+      .map((r) => ({ provider: r.key.slice("boost:".length), multiplier: Number(r.value) }))
+      .filter((b) => Number.isFinite(b.multiplier) && b.multiplier !== 1);
+  }
+
+  demandState(taskId: string): DemandState | undefined {
+    const row = this.db
+      .prepare(
+        `SELECT units, probed_at, invalidated, error, gate_open_since
+         FROM task_demand WHERE task_id = ?`,
+      )
+      .get(taskId) as
+      | {
+          units: number | null;
+          probed_at: number | null;
+          invalidated: number;
+          error: string | null;
+          gate_open_since: number | null;
+        }
+      | undefined;
+    if (!row) return undefined;
+    return {
+      units: row.units ?? undefined,
+      probedAt: row.probed_at ?? undefined,
+      invalidated: row.invalidated !== 0,
+      error: row.error ?? undefined,
+      gateOpenSince: row.gate_open_since ?? undefined,
+    };
+  }
+
+  /** A successful probe stores units and clears invalidation; a failed one
+   * stores the error and clears units (fail closed). */
+  recordDemand(taskId: string, result: { units?: number; error?: string }, at: number): void {
+    this.db
+      .prepare(
+        `INSERT INTO task_demand (task_id, units, probed_at, invalidated, error)
+         VALUES (?, ?, ?, 0, ?)
+         ON CONFLICT (task_id) DO UPDATE SET
+           units = excluded.units,
+           probed_at = excluded.probed_at,
+           invalidated = 0,
+           error = excluded.error`,
+      )
+      .run(taskId, result.units ?? null, at, result.error ?? null);
+  }
+
+  setGateOpenSince(taskId: string, value: number | undefined): void {
+    this.db
+      .prepare(
+        `INSERT INTO task_demand (task_id, gate_open_since) VALUES (?, ?)
+         ON CONFLICT (task_id) DO UPDATE SET gate_open_since = excluded.gate_open_since`,
+      )
+      .run(taskId, value ?? null);
+  }
+
+  invalidateDemand(taskId: string): void {
+    // No-op for deleted tasks: a run can finish after its task is removed.
+    this.db
+      .prepare(
+        `INSERT INTO task_demand (task_id, invalidated)
+         SELECT id, 1 FROM task WHERE id = ?
+         ON CONFLICT (task_id) DO UPDATE SET invalidated = 1`,
+      )
+      .run(taskId);
+  }
+
+  /**
+   * A finished run of `taskId` may have changed its own demand and the gates
+   * that reference it; invalidate both so the next evaluation re-probes.
+   */
+  taskFinished(taskId: string): void {
+    this.invalidateDemand(taskId);
+    for (const t of this.tasks()) {
+      if (t.gate !== undefined && gateRefs(parseGate(t.gate)).includes(taskId)) {
+        this.invalidateDemand(t.id);
+      }
+    }
+  }
+
+  createRun(r: {
+    taskId: string;
+    tier: Tier;
+    accountId: string;
+    model: string;
+    provider: string;
+    thinking?: string;
+    at: number;
+  }): string {
+    const id = crypto.randomUUID();
+    this.db
+      .prepare(
+        `INSERT INTO run (id, task_id, tier, account_id, model, provider, thinking, state, started_at)
+         VALUES (?, ?, ?, ?, ?, ?, ?, 'pending', ?)`,
+      )
+      .run(id, r.taskId, r.tier, r.accountId, r.model, r.provider, r.thinking ?? null, r.at);
+    return id;
+  }
+
+  /**
+   * Atomically claims up to `limit` pending runs for a runner (oldest first).
+   * A single UPDATE statement, so concurrent runners never claim the same
+   * run. Returns the claimed rows.
+   */
+  claimRuns(runnerId: string, limit: number, at: number): RunRow[] {
+    if (limit <= 0) return [];
+    const ids = this.db
+      .prepare(
+        `UPDATE run SET state = 'running', runner_id = ?, claimed_at = ?, heartbeat_at = ?,
+                progress_at = ?
+         WHERE state = 'pending' AND id IN
+           (SELECT id FROM run WHERE state = 'pending' ORDER BY started_at LIMIT ?)
+         RETURNING id`,
+      )
+      .all(runnerId, at, at, at, limit) as { id: string }[];
+    return ids.map((r) => this.run(r.id)!);
+  }
+
+  /** Pending runs no runner claimed in time: aborted, not error, so a runner
+   * outage never trips task circuit breakers. */
+  expireUnclaimed(before: number, at: number): RunRow[] {
+    const ids = this.db
+      .prepare(
+        `UPDATE run SET state = 'aborted', ended_at = ?, detail = 'unclaimed'
+         WHERE state = 'pending' AND started_at < ? RETURNING id`,
+      )
+      .all(at, before) as { id: string }[];
+    return ids.map((r) => this.run(r.id)!);
+  }
+
+  /** Operators read truncated ids from `status` output, so a unique prefix
+   * resolves like the full id. Ambiguity is an error, never a guess. */
+  run(idOrPrefix: string): RunRow | undefined {
+    const exact = this.runRows("WHERE id = ?", [idOrPrefix])[0];
+    if (exact !== undefined) return exact;
+    const matches = this.runRows("WHERE id LIKE ? || '%' LIMIT 3", [idOrPrefix]);
+    if (matches.length > 1) {
+      throw new Error(`run id prefix ${idOrPrefix} is ambiguous`);
+    }
+    return matches[0];
+  }
+
+  runs(filter?: { state?: RunState; runnerId?: string; accountId?: string }): RunRow[] {
+    const clauses: string[] = [];
+    const params: (string | number)[] = [];
+    if (filter?.state !== undefined) {
+      clauses.push("state = ?");
+      params.push(filter.state);
+    }
+    if (filter?.runnerId !== undefined) {
+      clauses.push("runner_id = ?");
+      params.push(filter.runnerId);
+    }
+    if (filter?.accountId !== undefined) {
+      clauses.push("account_id = ?");
+      params.push(filter.accountId);
+    }
+    const where = clauses.length > 0 ? `WHERE ${clauses.join(" AND ")} ` : "";
+    return this.runRows(`${where}ORDER BY started_at`, params);
+  }
+
+  private runRows(clause: string, params: (string | number)[]): RunRow[] {
+    const rows = this.db
+      .prepare(
+        `SELECT id, task_id, tier, account_id, model, provider, thinking, state, started_at,
+                claimed_at, runner_id, ended_at, heartbeat_at, progress_at,
+                abort_requested, productive, complete, detail
+         FROM run ${clause}`,
+      )
+      .all(...params) as {
+      id: string;
+      task_id: string;
+      tier: Tier;
+      account_id: string;
+      model: string;
+      provider: string;
+      thinking: string | null;
+      state: RunState;
+      started_at: number;
+      claimed_at: number | null;
+      runner_id: string | null;
+      ended_at: number | null;
+      heartbeat_at: number | null;
+      progress_at: number | null;
+      abort_requested: number;
+      productive: number | null;
+      complete: number | null;
+      detail: string | null;
+    }[];
+    return rows.map((r) => ({
+      id: r.id,
+      taskId: r.task_id,
+      tier: r.tier,
+      accountId: r.account_id,
+      model: r.model,
+      provider: r.provider,
+      thinking: r.thinking ?? undefined,
+      state: r.state,
+      startedAt: r.started_at,
+      claimedAt: r.claimed_at ?? undefined,
+      runnerId: r.runner_id ?? undefined,
+      endedAt: r.ended_at ?? undefined,
+      heartbeatAt: r.heartbeat_at ?? undefined,
+      progressAt: r.progress_at ?? undefined,
+      abortRequested: r.abort_requested !== 0,
+      productive: r.productive === null ? undefined : r.productive !== 0,
+      complete: r.complete === null ? undefined : r.complete !== 0,
+      detail: r.detail ?? undefined,
+    }));
+  }
+
+  finishRun(id: string, result: RunResult, at: number): void {
+    this.db
+      .prepare(
+        `UPDATE run SET state = ?, ended_at = ?, productive = ?, complete = ?, detail = ?
+         WHERE id = ? AND state IN ('pending', 'running')`,
+      )
+      .run(
+        result.state,
+        at,
+        result.productive === undefined ? null : result.productive ? 1 : 0,
+        result.complete === undefined ? null : result.complete ? 1 : 0,
+        result.detail ?? null,
+        id,
+      );
+  }
+
+  heartbeatRun(id: string, at: number): void {
+    this.db.prepare("UPDATE run SET heartbeat_at = ? WHERE id = ?").run(at, id);
+  }
+
+  /** The session did something: a turn, a tool call, a notice. */
+  progressRun(id: string, at: number): void {
+    this.db.prepare("UPDATE run SET progress_at = ? WHERE id = ?").run(at, id);
+  }
+
+  /**
+   * Take one of the run's check-ins if any are left, reporting whether the
+   * host may kick this shift back again. The count is spent in the ledger
+   * before the message is sent, so a host that crashes mid-check-in loses
+   * the ask rather than repeating it, and every process that ever hosts the
+   * run reads the same budget.
+   */
+  claimCheckIn(id: string, max: number): boolean {
+    const row = this.db
+      .prepare(
+        "UPDATE run SET check_ins = check_ins + 1 WHERE id = ? AND check_ins < ? " +
+          "RETURNING check_ins",
+      )
+      .get(id, max) as { check_ins: number } | undefined;
+    return row !== undefined;
+  }
+
+  /** Bind the root Pi session to its run. Repeating the report is idempotent.
+   * session_id is also filled for a still-draining pre-relation worker; all
+   * current attribution reads run_session. */
+  linkRunSession(id: string, sessionId: string, at = Date.now()): void {
+    this.db.exec("BEGIN IMMEDIATE");
+    try {
+      this.db.prepare("UPDATE run SET session_id = ? WHERE id = ?").run(sessionId, id);
+      this.db
+        .prepare(
+          `INSERT INTO run_session (run_id, session_id, created_at)
+           VALUES (?, ?, ?) ON CONFLICT (session_id) DO NOTHING`,
+        )
+        .run(id, sessionId, at);
+      this.db.exec("COMMIT");
+    } catch (thrown) {
+      this.db.exec("ROLLBACK");
+      throw thrown;
+    }
+  }
+
+  requestAbort(id: string): void {
+    this.db.prepare("UPDATE run SET abort_requested = 1 WHERE id = ?").run(id);
+  }
+
+  /** Queue an operator message for a live run. Delivery is the runner's job;
+   * the row is the request, `delivered_at` the receipt. */
+  queueRunMessage(runId: string, text: string, at = Date.now()): number {
+    const trimmed = text.trim();
+    if (trimmed === "") throw new Error("a run message cannot be empty");
+    const row = this.db
+      .prepare(
+        "INSERT INTO run_message (run_id, text, created_at) VALUES (?, ?, ?) RETURNING id",
+      )
+      .get(runId, trimmed, at) as { id: number };
+    return row.id;
+  }
+
+  /** Undelivered messages for a run, oldest first. */
+  pendingRunMessages(runId: string): { id: number; text: string; createdAt: number }[] {
+    return (
+      this.db
+        .prepare(
+          "SELECT id, text, created_at FROM run_message WHERE run_id = ? AND delivered_at IS NULL ORDER BY id",
+        )
+        .all(runId) as { id: number; text: string; created_at: number }[]
+    ).map((r) => ({ id: r.id, text: r.text, createdAt: r.created_at }));
+  }
+
+  markRunMessageDelivered(id: number, at = Date.now()): void {
+    this.db.prepare("UPDATE run_message SET delivered_at = ? WHERE id = ?").run(at, id);
+  }
+
+  /** Failover moves a running session's assignment; history keeps only the
+   * final assignment because per-hop provenance lives in `detail`. */
+  reassignRun(id: string, a: { accountId: string; model: string; provider: string }): void {
+    this.db
+      .prepare("UPDATE run SET account_id = ?, model = ?, provider = ? WHERE id = ?")
+      .run(a.accountId, a.model, a.provider, id);
+  }
+
+  /** Pending runs reserve the account just like running ones. */
+  /** The live sessions on an account, by model. What each of them costs the
+   * account differs by model, so a count alone cannot say how much of the
+   * account's quota is already committed. */
+  activeRunModels(accountId: string): { readonly model: string; readonly count: number }[] {
+    return this.db
+      .prepare(
+        `SELECT model, COUNT(*) AS count FROM run
+          WHERE account_id = ? AND state IN ('pending', 'running') GROUP BY model`,
+      )
+      .all(accountId) as { model: string; count: number }[];
+  }
+
+  activeRunCount(accountId: string): number {
+    const row = this.db
+      .prepare(
+        "SELECT COUNT(*) AS n FROM run WHERE account_id = ? AND state IN ('pending', 'running')",
+      )
+      .get(accountId) as { n: number };
+    return row.n;
+  }
+
+  beginSessionLease(accountId: string, at: number): string {
+    const id = crypto.randomUUID();
+    this.db
+      .prepare(
+        "INSERT INTO session_lease (id, account_id, started_at, heartbeat_at) VALUES (?, ?, ?, ?)",
+      )
+      .run(id, accountId, at, at);
+    return id;
+  }
+
+  heartbeatSessionLease(id: string, at: number): void {
+    this.db
+      .prepare("UPDATE session_lease SET heartbeat_at = ? WHERE id = ? AND ended_at IS NULL")
+      .run(at, id);
+  }
+
+  endSessionLease(id: string, at: number): void {
+    this.db
+      .prepare("UPDATE session_lease SET heartbeat_at = ?, ended_at = ? WHERE id = ? AND ended_at IS NULL")
+      .run(at, at, id);
+  }
+
+  activeSessionLeaseCount(accountId: string, now: number, timeoutMs: number): number {
+    const row = this.db
+      .prepare(
+        `SELECT COUNT(*) AS n FROM session_lease
+         WHERE account_id = ? AND ended_at IS NULL AND heartbeat_at >= ?`,
+      )
+      .get(accountId, now - timeoutMs) as { n: number };
+    return row.n;
+  }
+
+  /** Concurrent session-hours this account served inside [since, now], from
+   * both fleet runs and instrumented interactive turns. A crashed interactive
+   * process accrues only through its final heartbeat plus the lease timeout. */
+  sessionHours(accountId: string, since: number, now: number, leaseTimeoutMs: number): number {
+    const runs = this.db
+      .prepare(
+        `SELECT COALESCE(claimed_at, started_at) AS s, ended_at AS e FROM run
+         WHERE account_id = ? AND state != 'pending'
+           AND (ended_at IS NULL OR ended_at > ?) AND COALESCE(claimed_at, started_at) < ?`,
+      )
+      .all(accountId, since, now) as { s: number; e: number | null }[];
+    const leases = this.db
+      .prepare(
+        `SELECT started_at AS s, heartbeat_at, ended_at AS e FROM session_lease
+         WHERE account_id = ? AND started_at < ?
+           AND (ended_at IS NULL OR ended_at > ?)`,
+      )
+      .all(accountId, now, since) as { s: number; heartbeat_at: number; e: number | null }[];
+    let ms = 0;
+    for (const row of runs) {
+      ms += Math.max(0, Math.min(row.e ?? now, now) - Math.max(row.s, since));
+    }
+    for (const row of leases) {
+      const ended = row.e ?? Math.min(now, row.heartbeat_at + leaseTimeoutMs);
+      ms += Math.max(0, Math.min(ended, now) - Math.max(row.s, since));
+    }
+    return ms / 3_600_000;
+  }
+
+  /**
+   * What one hour of a session costs, per model, on this account: the usage
+   * the fleet's own sessions recorded for each model against the hours those
+   * sessions ran.
+   *
+   * Burn measured per account blends every model that ran on it, and the
+   * models differ by more than an order of magnitude against a provider's
+   * quota meter — a cheap model's sessions were being paced as if they cost
+   * what the expensive model's do, which capped the fleet at a fraction of
+   * what the plan sustains. Interactive usage (`source = 'machine'`) is left
+   * out on both sides: its hours are leases with no model attached, so
+   * counting its tokens would price them against fleet hours.
+   */
+  modelUsage(
+    accountId: string,
+    since: number,
+    now: number,
+  ): { readonly model: string; readonly tokensByClass: Readonly<Record<string, number>>; readonly hours: number }[] {
+    const usage = this.db
+      .prepare(
+        `SELECT class_id, SUM(tokens) AS tokens FROM usage_event
+          WHERE account_id = ? AND at >= ? AND at <= ? AND source = 'orchestrator'
+          GROUP BY class_id`,
+      )
+      .all(accountId, since, now) as { class_id: string; tokens: number }[];
+    const runs = this.db
+      .prepare(
+        `SELECT model, COALESCE(claimed_at, started_at) AS s, ended_at AS e FROM run
+          WHERE account_id = ? AND state != 'pending'
+            AND (ended_at IS NULL OR ended_at > ?) AND COALESCE(claimed_at, started_at) < ?`,
+      )
+      .all(accountId, since, now) as { model: string; s: number; e: number | null }[];
+    const byModel = new Map<string, { tokensByClass: Record<string, number>; hours: number }>();
+    const entry = (model: string) => {
+      let row = byModel.get(model);
+      if (row === undefined) {
+        row = { tokensByClass: {}, hours: 0 };
+        byModel.set(model, row);
+      }
+      return row;
+    };
+    for (const u of usage) {
+      // Usage classes are `model:component`; the model is the launch-side
+      // fact the run rows also carry.
+      const split = u.class_id.lastIndexOf(":");
+      if (split < 0) continue;
+      const row = entry(u.class_id.slice(0, split));
+      row.tokensByClass[u.class_id] = (row.tokensByClass[u.class_id] ?? 0) + u.tokens;
+    }
+    for (const r of runs) {
+      entry(r.model).hours +=
+        Math.max(0, Math.min(r.e ?? now, now) - Math.max(r.s, since)) / 3_600_000;
+    }
+    return [...byModel].map(([model, row]) => ({ model, ...row }));
+  }
+
+  /**
+   * What a lane holds in the fleet, split by tier: its live sessions, plus
+   * recently ended ones at a weight that fades to nothing across the window.
+   *
+   * The allocator targets the fleet's composition, and the measure has to
+   * survive two opposite failures. Counting only live sessions undersamples a
+   * lane whose sessions are short — a queue lane that drains and exits every
+   * few minutes shows as holding nothing on most ticks and is fed slot after
+   * slot, while a research lane keeping warm context for hours looks
+   * permanently over-served — and it also erases the memory a weighted tier
+   * mix needs, since twenty light per standard is a ratio no single-slot
+   * cycle can express. Counting every session that touched the window at full
+   * weight fails the other way: a lane cancelled an hour ago kept a phantom
+   * hold on the machine, which was enough to stop a genuinely over-served
+   * lane from ever being asked to give a session back. A live session counts
+   * as one; an ended one counts for what is left of the window behind it.
+   */
+  fleetPresenceByTier(taskId: string, since: number, now = Date.now()): Partial<Record<Tier, number>> {
+    const span = Math.max(1, now - since);
+    const rows = this.db
+      .prepare(
+        `SELECT tier,
+                SUM(CASE WHEN state IN ('pending', 'running') THEN 1.0
+                         ELSE MAX(0.0, 1.0 - (? - ended_at) / CAST(? AS REAL)) END) AS held
+           FROM run
+          WHERE task_id = ?
+            AND (state IN ('pending', 'running') OR ended_at >= ?)
+          GROUP BY tier`,
+      )
+      .all(now, span, taskId, since) as { tier: Tier; held: number | null }[];
+    return Object.fromEntries(
+      rows.filter((r) => (r.held ?? 0) > 0).map((r) => [r.tier, r.held ?? 0]),
+    );
+  }
+
+  /** Error runs for a task since the cutoff; the controller's circuit breaker. */
+  recentErrorCount(taskId: string, since: number): number {
+    const row = this.db
+      .prepare(
+        "SELECT COUNT(*) AS n FROM run WHERE task_id = ? AND state = 'error' AND ended_at >= ?",
+      )
+      .get(taskId, since) as { n: number };
+    return row.n;
+  }
+
+  /**
+   * Observed drain inside `[since, now]` **and the span of meter evidence
+   * that observed it**: per meter, the sum of positive used-percent deltas
+   * (resets appear as negative deltas and are skipped), taking the most
+   * binding meter and reporting the first and last reading that priced it.
+   * This is a fact-level aggregate for burn measurement, deliberately
+   * simpler than calibration.
+   *
+   * The span is the point. Burn is a quotient, and a quotient only measures
+   * anything when both halves describe the same interval. Readings covering
+   * four hours of a forty-eight-hour window say nothing about the
+   * session-hours before the first one, so dividing their drain by the whole
+   * window's session-hours understates burn by exactly the coverage ratio —
+   * which the broker then inverts into that many times too much concurrency.
+   * A fresh sampler, a sampling outage, a pruned ledger, and a newly added
+   * account all produce that gap. Undefined when no meter has two readings
+   * in the window, because a single reading prices no interval at all.
+   */
+  drainWindow(
+    accountId: string,
+    since: number,
+    now: number,
+  ): { percent: number; from: number; to: number } | undefined {
+    const rows = this.db
+      .prepare(
+        `SELECT meter_id, at, used_percent FROM meter_reading
+         WHERE account_id = ? AND at >= ? AND at <= ? ORDER BY meter_id, at`,
+      )
+      .all(accountId, since, now) as { meter_id: string; at: number; used_percent: number }[];
+    const drain = new Map<string, { from: number; to: number; last: number; sum: number }>();
+    for (const r of rows) {
+      const d = drain.get(r.meter_id);
+      if (d === undefined) {
+        drain.set(r.meter_id, { from: r.at, to: r.at, last: r.used_percent, sum: 0 });
+      } else {
+        if (r.used_percent > d.last) d.sum += r.used_percent - d.last;
+        d.last = r.used_percent;
+        d.to = r.at;
+      }
+    }
+    let binding: { percent: number; from: number; to: number } | undefined;
+    for (const d of drain.values()) {
+      if (d.to === d.from) continue;
+      if (binding === undefined || d.sum > binding.percent) {
+        binding = { percent: d.sum, from: d.from, to: d.to };
+      }
+    }
+    return binding;
+  }
+
+  /** Deletes facts older than the cutoff; calibration only needs recent windows. */
+  prune(beforeMs: number): { readings: number; usageEvents: number } {
+    const readings = this.db
+      .prepare("DELETE FROM meter_reading WHERE at < ?")
+      .run(beforeMs).changes;
+    const usageEvents = this.db
+      .prepare("DELETE FROM usage_event WHERE at < ?")
+      .run(beforeMs).changes;
+    return { readings: Number(readings), usageEvents: Number(usageEvents) };
+  }
+}
