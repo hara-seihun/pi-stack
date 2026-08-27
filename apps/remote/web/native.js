@@ -5,9 +5,18 @@
 // the interface untouched.
 (() => {
   const capacitor = window.Capacitor;
-  if (!capacitor?.isNativePlatform?.() || typeof capacitor.registerPlugin !== "function") return;
+  if (!capacitor?.isNativePlatform?.()) return;
 
-  const remote = capacitor.registerPlugin("KenanRemote");
+  // A source-bundled Capacitor client exposes registerPlugin; the Android
+  // bridge injected ahead of an unbundled page exposes nativePromise instead.
+  // Pi Remote deliberately ships plain browser assets, so support both forms.
+  const remote = typeof capacitor.registerPlugin === "function"
+    ? capacitor.registerPlugin("KenanRemote")
+    : {
+        getState: (options = {}) => capacitor.nativePromise("KenanRemote", "getState", options),
+        prepare: (options = {}) => capacitor.nativePromise("KenanRemote", "prepare", options),
+        select: (options = {}) => capacitor.nativePromise("KenanRemote", "select", options),
+      };
   const browserFetch = window.fetch.bind(window);
   let statePromise = remote.getState();
   let current = null;
