@@ -1,4 +1,4 @@
-import { mkdtempSync, utimesSync, writeFileSync } from "node:fs";
+import { mkdirSync, mkdtempSync, utimesSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { describe, expect, it } from "vitest";
@@ -44,17 +44,21 @@ describe("team workspace awareness", () => {
     expect(blocked.block).toBe(true);
     expect(blocked.reason).toContain("theorem.md");
 
-    await live.call("tool_execution_end", {
+    await live.call("tool_result", {
       toolName: "read",
-      args: { path: changed },
+      input: { path: changed },
       isError: false,
     });
     expect(await live.call("tool_call", { toolName: "write", input: { path: "notes.md" } }))
       .toBeUndefined();
     writeFileSync(join(root, "notes.md"), "notes\n");
+    await live.call("tool_result", {
+      toolName: "write",
+      input: { path: "notes.md" },
+      isError: false,
+    });
     await live.call("tool_execution_end", {
       toolName: "write",
-      args: { path: "notes.md" },
       isError: false,
     });
   });
@@ -74,9 +78,13 @@ describe("team workspace awareness", () => {
     expect(blocked.reason).toContain("writing this shared file right now");
 
     writeFileSync(path, "first worker\n");
+    await first.call("tool_result", {
+      toolName: "edit",
+      input: { path },
+      isError: false,
+    });
     await first.call("tool_execution_end", {
       toolName: "edit",
-      args: { path },
       isError: false,
     });
   });
@@ -93,15 +101,30 @@ describe("team workspace awareness", () => {
       .toBeUndefined();
     changedFile(root, "friend-during-edit.md");
     writeFileSync(own, "new notes\n");
+    await live.call("tool_result", {
+      toolName: "edit",
+      input: { path: own },
+      isError: false,
+    });
     await live.call("tool_execution_end", {
       toolName: "edit",
-      args: { path: own },
       isError: false,
     });
 
     const update = await live.call("context", { messages: [] });
     expect(update.messages[0].content[0].text).toContain("friend-during-edit.md");
     expect(update.messages[0].content[0].text).not.toContain("notes.md");
+  });
+
+  it("ignores generated caches that cannot carry teammate mathematics", async () => {
+    const root = mkdtempSync(join(tmpdir(), "pi-team-"));
+    const live = extension(root);
+    mkdirSync(join(root, "__pycache__"));
+    changedFile(root, "__pycache__/verifier.cpython-313.pyc");
+
+    expect(await live.call("tool_call", { toolName: "write", input: { path: "notes.md" } }))
+      .toBeUndefined();
+    await live.call("tool_execution_end", { toolName: "write", isError: true });
   });
 
   it("places live workspace changes immediately after retained skills", async () => {

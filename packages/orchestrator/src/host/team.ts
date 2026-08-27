@@ -2,7 +2,7 @@ import { execFile } from "node:child_process";
 import { createHash } from "node:crypto";
 import { mkdir, open, stat, unlink } from "node:fs/promises";
 import { tmpdir } from "node:os";
-import { isAbsolute, join, relative, resolve } from "node:path";
+import { basename, isAbsolute, join, relative, resolve, sep } from "node:path";
 
 import type { TeamLaunch } from "./types.js";
 
@@ -17,6 +17,8 @@ const CONDENSE_TIMEOUT_MS = 60_000;
 const WRITE_LOCK_MAX_AGE_MS = 60_000;
 const MTIME_ROUNDING_MS = 0.001;
 const WRITE_LOCK_ROOT = join(tmpdir(), "pi-orchestrator-team-writes");
+const EPHEMERAL_DIRECTORIES = new Set(["__pycache__", ".pytest_cache", ".mypy_cache", ".ruff_cache"]);
+const EPHEMERAL_SUFFIXES = [".pyc", ".pyo", ".swp", ".swo", "~"];
 
 function inside(root: string, path: string): boolean {
   const rel = relative(root, path);
@@ -62,6 +64,12 @@ async function acquireWriteLock(workspace: string, path: string): Promise<string
   return undefined;
 }
 
+function ephemeralChange(root: string, path: string): boolean {
+  const parts = relative(root, path).split(sep);
+  return parts.some((part) => EPHEMERAL_DIRECTORIES.has(part))
+    || EPHEMERAL_SUFFIXES.some((suffix) => basename(path).endsWith(suffix));
+}
+
 async function changedSince(root: string, since: number): Promise<ChangedFile[]> {
   const output = await runFile(
     "find",
@@ -76,7 +84,7 @@ async function changedSince(root: string, since: number): Promise<ChangedFile[]>
       if (tab < 0) return [];
       const modifiedAt = Number(record.slice(0, tab)) * 1000;
       const path = record.slice(tab + 1);
-      return Number.isFinite(modifiedAt) ? [{ path, modifiedAt }] : [];
+      return Number.isFinite(modifiedAt) && !ephemeralChange(root, path) ? [{ path, modifiedAt }] : [];
     })
     .sort((left, right) => left.modifiedAt - right.modifiedAt || left.path.localeCompare(right.path));
 }
@@ -105,16 +113,12 @@ export function teamWorkspaceExtension(root: string, role: TeamLaunch["role"]): 
   };
 
   return (pi: any): void => {
-    pi.on("tool_execution_end", async (event: any) => {
-      if (writeLock !== undefined) {
-        await removeWriteLock(writeLock);
-        writeLock = undefined;
-      }
+    pi.on("tool_result", async (event: any) => {
       if (event.isError) {
         if (event.toolName === "edit" || event.toolName === "write") editStartedAt = undefined;
         return;
       }
-      const rawPath = event.args?.path;
+      const rawPath = event.input?.path;
       if (typeof rawPath !== "string") return;
       const path = resolve(workspace, rawPath);
       if (!inside(workspace, path)) return;
@@ -137,6 +141,14 @@ export function teamWorkspaceExtension(root: string, role: TeamLaunch["role"]): 
         } catch {
           return;
         }
+      }
+    });
+
+    pi.on("tool_execution_end", async (event: any) => {
+      if (event.toolName !== "edit" && event.toolName !== "write") return;
+      if (writeLock !== undefined) {
+        await removeWriteLock(writeLock);
+        writeLock = undefined;
       }
     });
 
