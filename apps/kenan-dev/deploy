@@ -13,6 +13,6 @@ installed=$(adb -s "$endpoint" shell dumpsys package "$application_id" \
   | awk -F= '/versionName=/ { gsub(/\r/, "", $2); print $2; exit }')
 current=$(adb -s "$endpoint" shell dumpsys package works.kenan.piremote.kenan \
   | awk -F= '/versionName=/ { gsub(/\r/, "", $2); print $2; exit }')
-[[ $installed == 0.1.2 ]] || { echo "installed kenan-dev version $installed; expected 0.1.2" >&2; exit 1; }
+[[ $installed == 0.1.3 ]] || { echo "installed kenan-dev version $installed; expected 0.1.3" >&2; exit 1; }
 [[ -n $current ]] || { echo "the current Kenan app is no longer installed" >&2; exit 1; }
 printf 'kenan-dev %s deployed beside Kenan %s on %s\n' "$installed" "$current" "$endpoint"

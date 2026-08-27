@@ -5,20 +5,45 @@
 // the interface untouched.
 (() => {
   const capacitor = window.Capacitor;
-  if (!capacitor?.isNativePlatform?.()) return;
+  const nativePlatform = capacitor?.isNativePlatform?.() === true;
+  const browserPlatform = /^\/dev(?:\/|$)/.test(window.location.pathname);
+  if (!nativePlatform && !browserPlatform) return;
+
+  const browserFetch = window.fetch.bind(window);
+  const browserEnvironments = [
+    { id: "local", name: "Local", baseUrl: "", requiresUnlock: false },
+    { id: "converge", name: "Converge", baseUrl: "/dev-converge", requiresUnlock: false },
+  ];
+  const browserSnapshot = (id) => {
+    const selected = browserEnvironments.find((environment) => environment.id === id);
+    if (!selected) throw new Error(`Unknown Pi Remote environment: ${id}`);
+    return { ...selected, environments: browserEnvironments.map(({ id, name }) => ({ id, name })) };
+  };
+  const browserRemote = {
+    getState: async () => browserSnapshot(localStorage.getItem("kenan-dev-environment") || "local"),
+    prepare: async () => {},
+    select: async ({ id }) => {
+      const selected = browserSnapshot(id);
+      const response = await browserFetch(`${selected.baseUrl}/v1/health`, { cache: "no-store" });
+      if (!response.ok) throw new Error(`${selected.name} returned HTTP ${response.status}`);
+      localStorage.setItem("kenan-dev-environment", id);
+      return selected;
+    },
+  };
 
   // A source-bundled Capacitor client exposes registerPlugin; the Android
   // bridge injected ahead of an unbundled page exposes nativePromise instead.
   // Pi Remote deliberately ships plain browser assets, so support both forms.
-  const remote = typeof capacitor.registerPlugin === "function"
-    ? capacitor.registerPlugin("KenanRemote")
-    : {
-        getState: (options = {}) => capacitor.nativePromise("KenanRemote", "getState", options),
-        prepare: (options = {}) => capacitor.nativePromise("KenanRemote", "prepare", options),
-        select: (options = {}) => capacitor.nativePromise("KenanRemote", "select", options),
-        haptic: (options = {}) => capacitor.nativePromise("KenanRemote", "haptic", options),
-      };
-  const browserFetch = window.fetch.bind(window);
+  const remote = !nativePlatform
+    ? browserRemote
+    : typeof capacitor.registerPlugin === "function"
+      ? capacitor.registerPlugin("KenanRemote")
+      : {
+          getState: (options = {}) => capacitor.nativePromise("KenanRemote", "getState", options),
+          prepare: (options = {}) => capacitor.nativePromise("KenanRemote", "prepare", options),
+          select: (options = {}) => capacitor.nativePromise("KenanRemote", "select", options),
+          haptic: (options = {}) => capacitor.nativePromise("KenanRemote", "haptic", options),
+        };
   let statePromise = remote.getState();
   let current = null;
   let preparePromise = null;
@@ -73,29 +98,31 @@
     },
   };
 
-  const tactileSelector = "button:not(:disabled), select:not(:disabled), input:not(:disabled), [role=button]";
-  const tactileTarget = (event) => event.target?.closest?.(tactileSelector);
-  const hapticKind = (target) => {
-    if (target?.id === "action") return target.classList.contains("abort") ? "reject" : "confirm";
-    if (target?.id === "voice") return "confirm";
-    return "select";
-  };
-  const haptic = (kind) => { remote.haptic({ kind }).catch(() => {}); };
+  if (nativePlatform) {
+    const tactileSelector = "button:not(:disabled), select:not(:disabled), input:not(:disabled), [role=button]";
+    const tactileTarget = (event) => event.target?.closest?.(tactileSelector);
+    const hapticKind = (target) => {
+      if (target?.id === "action") return target.classList.contains("abort") ? "reject" : "confirm";
+      if (target?.id === "voice") return "confirm";
+      return "select";
+    };
+    const haptic = (kind) => { remote.haptic({ kind }).catch(() => {}); };
 
-  document.addEventListener("pointerdown", (event) => {
-    const target = tactileTarget(event);
-    if (target) haptic(hapticKind(target) === "select" ? "press" : hapticKind(target));
-  }, { capture: true, passive: true });
-  document.addEventListener("pointerup", (event) => {
-    if (tactileTarget(event)) haptic("release");
-  }, { capture: true, passive: true });
-  document.addEventListener("change", (event) => {
-    if (tactileTarget(event)) haptic("select");
-  }, true);
-  document.addEventListener("click", (event) => {
-    const target = tactileTarget(event);
-    if (target && event.detail === 0) haptic(hapticKind(target));
-  }, true);
+    document.addEventListener("pointerdown", (event) => {
+      const target = tactileTarget(event);
+      if (target) haptic(hapticKind(target) === "select" ? "press" : hapticKind(target));
+    }, { capture: true, passive: true });
+    document.addEventListener("pointerup", (event) => {
+      if (tactileTarget(event)) haptic("release");
+    }, { capture: true, passive: true });
+    document.addEventListener("change", (event) => {
+      if (tactileTarget(event)) haptic("select");
+    }, true);
+    document.addEventListener("click", (event) => {
+      const target = tactileTarget(event);
+      if (target && event.detail === 0) haptic(hapticKind(target));
+    }, true);
+  }
 
   async function mountEnvironmentControl() {
     const row = document.getElementById("native-environment");

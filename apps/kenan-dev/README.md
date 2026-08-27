@@ -4,7 +4,7 @@
 
 The browser and this app have one interface source of truth: [`../remote/web`](../remote/web). `build.mjs` copies that client into Capacitor's generated asset directory. Do not edit files under `dist` or `android/app/src/main/assets/public`; both are generated.
 
-The native layer is deliberately narrow. It keeps the WebView below Android's system bars, translates shared-client touches into system haptics, remembers the selected environment, opens the pinned Converge SSH forward, and tells the shared client which endpoint owns its API calls. Everything above those platform boundaries, including synchronization, context rendering, the drawer, composer, uploads, voice, and settings, runs from the same JavaScript and CSS as the browser.
+The native layer is deliberately narrow. It keeps the WebView below Android's system bars, translates shared-client touches into system haptics, remembers the selected environment, opens the pinned Converge SSH forward, and tells the shared client which endpoint owns its API calls. Everything above those platform boundaries, including synchronization, context rendering, the drawer, composer, uploads, voice, and settings, runs from the same JavaScript and CSS as the browser. On GMKtec, `/dev/` enables the same environment control in an ordinary browser; a host-managed SSH forward owns its Converge transport.
 
 This channel does not yet replace the current app. Android-only background completion notifications and the native filesystem drawer still live only in the current client. Keeping both package ids installed makes those gaps safe while the shared client is exercised on the phone.
 
