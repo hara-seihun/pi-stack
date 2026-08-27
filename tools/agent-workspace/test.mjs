@@ -119,6 +119,26 @@ test("creates and releases a clean review checkout", () => {
   }
 });
 
+test("defaults to the repository's current HEAD", () => {
+  const f = fixture();
+  try {
+    git(f.source, "checkout", "--detach");
+    writeFileSync(path.join(f.source, "file.txt"), "detached source\n");
+    git(f.source, "add", "file.txt");
+    git(f.source, "commit", "-m", "detached source");
+    const detachedHead = git(f.source, "rev-parse", "HEAD");
+
+    const created = JSON.parse(run([
+      "create", "--root", f.workspaces, "--name", "detached-source", "--repo", f.source,
+      "--strategy", "worktree", "--mode", "writer", "--min-free-gib", "0", "--json",
+    ], f.env));
+    assert.equal(created.sourceCommit, detachedHead);
+    assert.equal(git(created.path, "rev-parse", "HEAD"), detachedHead);
+  } finally {
+    f.close();
+  }
+});
+
 test("releases and can recreate a linked worktree name", () => {
   const f = fixture();
   try {

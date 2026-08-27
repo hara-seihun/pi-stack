@@ -1040,7 +1040,7 @@ function createCommand(database, args, statePath) {
   const destination = path.join(root, name);
   if (existsSync(destination)) fail(`workspace already exists: ${destination}`);
   const repository = required(args, "repo");
-  const ref = one(args, "ref", "refs/heads/main");
+  const ref = one(args, "ref", "HEAD");
   const mode = one(args, "mode", "writer");
   if (!["writer", "review"].includes(mode)) fail("--mode must be writer or review");
   const strategy = one(args, "strategy", "clone");
