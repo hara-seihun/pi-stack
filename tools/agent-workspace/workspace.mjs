@@ -1009,6 +1009,29 @@ function mirrorFor(statePath, repository) {
   return path.join(path.dirname(statePath), "mirrors", `${digest}.git`);
 }
 
+function prepareMirror(mirror, repository) {
+  mkdirSync(path.dirname(mirror), { recursive: true, mode: 0o700 });
+  if (!existsSync(mirror)) {
+    run("git", ["init", "--bare", mirror]);
+    run("git", ["--git-dir", mirror, "remote", "add", "origin", repository]);
+  } else {
+    run("git", ["--git-dir", mirror, "remote", "set-url", "origin", repository]);
+  }
+  run("git", ["--git-dir", mirror, "config", "remote.origin.mirror", "false"]);
+  run("git", [
+    "--git-dir", mirror, "config", "--replace-all", "remote.origin.fetch",
+    "+refs/heads/*:refs/remotes/origin/*",
+  ]);
+  run("git", ["--git-dir", mirror, "fetch", "--prune", "--no-tags", "origin"], { timeout: 120_000 });
+}
+
+function fetchSource(mirror, repository, ref) {
+  const digest = createHash("sha256").update(`${repository}\0${ref}`).digest("hex");
+  const sourceRef = `refs/pi-workspace/sources/${digest}`;
+  run("git", ["--git-dir", mirror, "fetch", "--no-tags", "origin", `+${ref}:${sourceRef}`], { timeout: 120_000 });
+  return run("git", ["--git-dir", mirror, "rev-parse", sourceRef]);
+}
+
 function createCommand(database, args, statePath) {
   assertOnly(args, ["root", "name", "repo", "ref", "branch", "kind", "mode", "owner", "group", "strategy", "lease-seconds", "cache", "max-count", "min-free-gib", "min-free-inodes-percent", "json"]);
   const root = path.resolve(required(args, "root"));
@@ -1023,13 +1046,8 @@ function createCommand(database, args, statePath) {
   const strategy = one(args, "strategy", "clone");
   if (!["clone", "worktree"].includes(strategy)) fail("--strategy must be clone or worktree");
   const mirror = mirrorFor(statePath, repository);
-  mkdirSync(path.dirname(mirror), { recursive: true, mode: 0o700 });
-  if (!existsSync(mirror)) run("git", ["clone", "--mirror", repository, mirror], { timeout: 120_000 });
-  else {
-    run("git", ["--git-dir", mirror, "remote", "set-url", "origin", repository]);
-    run("git", ["--git-dir", mirror, "fetch", "--prune", "origin"], { timeout: 120_000 });
-  }
-  const sourceCommit = run("git", ["--git-dir", mirror, "rev-parse", ref]);
+  prepareMirror(mirror, repository);
+  const sourceCommit = fetchSource(mirror, repository, ref);
   const branch = one(args, "branch", `agent/${name}`);
   try {
     if (strategy === "worktree") {

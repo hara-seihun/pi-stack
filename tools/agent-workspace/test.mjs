@@ -143,17 +143,25 @@ test("a linked worktree ignores branches owned by its peers", () => {
       "create", "--root", f.workspaces, "--name", "first", "--repo", f.remote,
       "--strategy", "worktree", "--mode", "writer", "--min-free-gib", "0", "--json",
     ], f.env));
+    git(first.path, "config", "user.name", "Test");
+    git(first.path, "config", "user.email", "test@example.invalid");
+    writeFileSync(path.join(first.path, "file.txt"), "first\n");
+    git(first.path, "add", "file.txt");
+    git(first.path, "commit", "-m", "first");
+    const firstHead = git(first.path, "rev-parse", "HEAD");
+
     const second = JSON.parse(run([
       "create", "--root", f.workspaces, "--name", "second", "--repo", f.remote,
       "--strategy", "worktree", "--mode", "writer", "--min-free-gib", "0", "--json",
     ], f.env));
-    for (const workspace of [first, second]) {
-      git(workspace.path, "config", "user.name", "Test");
-      git(workspace.path, "config", "user.email", "test@example.invalid");
-      writeFileSync(path.join(workspace.path, "file.txt"), `${path.basename(workspace.path)}\n`);
-      git(workspace.path, "add", "file.txt");
-      git(workspace.path, "commit", "-m", path.basename(workspace.path));
-    }
+    assert.equal(git(first.path, "rev-parse", "HEAD"), firstHead);
+    assert.equal(git(first.path, "rev-list", "--count", `${first.sourceCommit}..HEAD`), "1");
+
+    git(second.path, "config", "user.name", "Test");
+    git(second.path, "config", "user.email", "test@example.invalid");
+    writeFileSync(path.join(second.path, "file.txt"), "second\n");
+    git(second.path, "add", "file.txt");
+    git(second.path, "commit", "-m", "second");
     git(first.path, "remote", "add", "publish", f.remote);
     git(first.path, "push", "-u", "publish", "HEAD");
 
