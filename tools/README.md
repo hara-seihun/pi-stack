@@ -4,6 +4,7 @@ These commands depend on Pi sessions, Pi models, or the orchestrator ledger.
 
 | Directory | Command | Purpose |
 |---|---|---|
+| [`agent-workspace`](agent-workspace/README.md) | `agent-workspace` | Lease, recover, and release agent Git checkouts. |
 | [`fleet-errors`](fleet-errors/README.md) | `fleet-errors` | Classify failed fleet tool calls. |
 | [`hara-messages`](hara-messages/README.md) | `hara-messages` | Extract Hara's messages from local Pi sessions. |
 | [`mcp`](mcp/README.md) | `mcp` | Discover and call configured MCP servers. |

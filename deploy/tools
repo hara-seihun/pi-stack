@@ -19,6 +19,7 @@ trap 'rm -rf "$stage"' EXIT
 
 cd "$root"
 npm ci --ignore-scripts
+npm test --workspace=@hara-seihun/agent-workspace
 npm test --workspace=@hara-seihun/mcp-cli
 npm test --workspace=@hara-seihun/mcp-script
 npm test --workspace=@hara-seihun/read-condensed-session

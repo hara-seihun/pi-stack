@@ -1,6 +1,12 @@
 {
   "tools": [
     {
+      "id": "agent-workspace",
+      "hosts": ["local", "converge"],
+      "fleet": true,
+      "commands": [{ "name": "agent-workspace", "entry": "main" }]
+    },
+    {
       "id": "fleet-errors",
       "hosts": ["local", "converge"],
       "commands": [{ "name": "fleet-errors", "entry": "main" }]
