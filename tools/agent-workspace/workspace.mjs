@@ -537,9 +537,11 @@ function gitDisposition(record) {
   if (ignored.length > 0) return { safe: false, reason: `checkout has unclassified ignored output: ${ignored.slice(0, 8).join(" | ")}` };
   const head = git(record.path, ["rev-parse", "HEAD"]);
   if (record.sourceCommit !== null && head === record.sourceCommit) return { safe: true, reason: "checkout remains at its durable source commit", head };
-  const refs = git(record.path, ["for-each-ref", "--format=%(refname)", "refs/heads"])
-    .split("\n")
-    .filter(Boolean);
+  const refs = record.checkoutType === "clone"
+    ? git(record.path, ["for-each-ref", "--format=%(refname)", "refs/heads"])
+      .split("\n")
+      .filter(Boolean)
+    : [];
   const candidates = [...refs, "HEAD"];
   const local = [];
   for (const ref of candidates) {

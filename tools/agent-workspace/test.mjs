@@ -136,6 +136,42 @@ test("releases and can recreate a linked worktree name", () => {
   }
 });
 
+test("a linked worktree ignores branches owned by its peers", () => {
+  const f = fixture();
+  try {
+    const first = JSON.parse(run([
+      "create", "--root", f.workspaces, "--name", "first", "--repo", f.remote,
+      "--strategy", "worktree", "--mode", "writer", "--min-free-gib", "0", "--json",
+    ], f.env));
+    const second = JSON.parse(run([
+      "create", "--root", f.workspaces, "--name", "second", "--repo", f.remote,
+      "--strategy", "worktree", "--mode", "writer", "--min-free-gib", "0", "--json",
+    ], f.env));
+    for (const workspace of [first, second]) {
+      git(workspace.path, "config", "user.name", "Test");
+      git(workspace.path, "config", "user.email", "test@example.invalid");
+      writeFileSync(path.join(workspace.path, "file.txt"), `${path.basename(workspace.path)}\n`);
+      git(workspace.path, "add", "file.txt");
+      git(workspace.path, "commit", "-m", path.basename(workspace.path));
+    }
+    git(first.path, "remote", "add", "publish", f.remote);
+    git(first.path, "push", "-u", "publish", "HEAD");
+
+    const released = JSON.parse(run(["release", "--id", first.id, "--json"], f.env));
+    assert.equal(released.action, "released");
+    assert.equal(existsSync(first.path), false);
+    assert.equal(existsSync(second.path), true);
+
+    const retained = JSON.parse(run(["release", "--id", second.id, "--json"], f.env));
+    assert.equal(retained.inspection.classification, "repair-required");
+    git(second.path, "push", "-u", "publish", "HEAD");
+    const secondRelease = JSON.parse(run(["release", "--id", second.id, "--json"], f.env));
+    assert.equal(secondRelease.action, "released");
+  } finally {
+    f.close();
+  }
+});
+
 test("keeps local commits but strips declared caches", () => {
   const f = fixture();
   try {
