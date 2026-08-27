@@ -475,6 +475,7 @@ const webAssets = new Map<string, readonly [string, string]>([
   ["/app.js", ["app.js", "text/javascript; charset=utf-8"]],
   ["/native.js", ["native.js", "text/javascript; charset=utf-8"]],
   ["/voice.js", ["voice.js", "text/javascript; charset=utf-8"]],
+  ["/sync.js", ["sync.js", "text/javascript; charset=utf-8"]],
   ["/voice-page.js", ["voice-page.js", "text/javascript; charset=utf-8"]],
   ["/voice.html", ["voice.html", "text/html; charset=utf-8"]],
   ["/styles.css", ["styles.css", "text/css; charset=utf-8"]],

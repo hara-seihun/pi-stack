@@ -643,6 +643,11 @@ describe("web and supervisor integration", () => {
     expect(markup).toContain("id=\"paste-text\"");
     expect(markup).toContain("id=\"paste-text-dialog\"");
     expect(markup).toContain("Paste text document");
+    const referencedAssets = [...markup.matchAll(/(?:src|href)="(\/[^"]+)"/g)].map((match) => match[1]);
+    for (const asset of new Set(referencedAssets)) {
+      const response = await fetch(`${base}${asset}`);
+      expect(response.status, `missing browser asset ${asset}`).toBe(200);
+    }
     for (const icon of ["openai", "opus", "sol", "fable", "house", "anthropic", "cursor", "personal", "work", "converge", "thunder"]) {
       const response = await fetch(`${base}/${icon}.svg`);
       expect(response.status).toBe(200);
