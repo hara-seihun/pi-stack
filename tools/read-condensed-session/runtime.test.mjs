@@ -10,18 +10,20 @@ const models = [
 
 function fakeRuntime(complete) {
   return {
-    getModels: () => models,
+    getModels: (provider) => provider ? models.filter((model) => model.provider === provider) : models,
     getModel: (provider, id) => models.find((model) => model.provider === provider && model.id === id),
-    hasConfiguredAuth: (provider) => provider !== "other",
+    getAvailable: async (provider) => models.filter(
+      (model) => model.provider !== "other" && (provider === undefined || model.provider === provider),
+    ),
     complete,
   };
 }
 
-test("candidate selection honors preferred and explicitly pinned providers", () => {
+test("candidate selection awaits availability and honors preferred and pinned providers", async () => {
   const runtime = fakeRuntime();
-  assert.deepEqual(candidateModels(runtime, { model: "gpt-5.6-sol", preferredProvider: "account-b" }).map((model) => model.provider), ["account-b", "account-a"]);
-  assert.deepEqual(candidateModels(runtime, { model: "account-a/gpt-5.6-sol" }).map((model) => model.provider), ["account-a"]);
-  assert.throws(() => candidateModels(runtime, { model: "missing/gpt-5.6-sol" }), /has no model/);
+  assert.deepEqual((await candidateModels(runtime, { model: "gpt-5.6-sol", preferredProvider: "account-b" })).map((model) => model.provider), ["account-b", "account-a"]);
+  assert.deepEqual((await candidateModels(runtime, { model: "account-a/gpt-5.6-sol" })).map((model) => model.provider), ["account-a"]);
+  await assert.rejects(candidateModels(runtime, { model: "missing/gpt-5.6-sol" }), /has no model/);
 });
 
 test("direct summarization sends exactly one user message and no agent context", async () => {

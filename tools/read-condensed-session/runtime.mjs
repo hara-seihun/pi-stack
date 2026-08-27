@@ -67,6 +67,9 @@ async function modelRuntime() {
           throw new Error(`Pi extension ${extensionPath} failed while loading model providers: ${error?.message ?? error}`);
         },
       });
+      // Native providers start their availability refresh without awaiting it.
+      // Finish one pass so shared-custody aliases are visible on the first job.
+      await session.modelRuntime.refresh({ allowNetwork: false });
       bootstrapSession = session;
       // The bootstrap session loads extension-registered provider aliases and
       // their credentials. Summaries bypass session.prompt and call this
@@ -86,20 +89,19 @@ function parseModel(value) {
   return slash < 0 ? { modelId: value } : { provider: value.slice(0, slash), modelId: value.slice(slash + 1) };
 }
 
-export function candidateModels(runtime, options = {}) {
+export async function candidateModels(runtime, options = {}) {
   const requested = parseModel(options.model ?? process.env.SESSION_CONDENSER_MODEL ?? DEFAULT_MODEL);
   const provider = requested.provider ?? options.provider ?? process.env.SESSION_CONDENSER_PROVIDER;
   const idMatches = (model) => model.id === requested.modelId || model.id.endsWith(`/${requested.modelId}`);
   if (provider) {
-    const model = runtime.getModel(provider, requested.modelId) ?? [...runtime.getModels(provider)].find((candidate) => candidate.provider === provider && idMatches(candidate));
-    if (!model) throw new Error(`provider ${provider} has no model ${requested.modelId}`);
-    if (!runtime.hasConfiguredAuth(provider)) throw new Error(`provider ${provider} is not authenticated`);
+    const known = runtime.getModel(provider, requested.modelId) ?? [...runtime.getModels(provider)].find((candidate) => candidate.provider === provider && idMatches(candidate));
+    if (!known) throw new Error(`provider ${provider} has no model ${requested.modelId}`);
+    const model = [...await runtime.getAvailable(provider)].find((candidate) => candidate.provider === provider && idMatches(candidate));
+    if (!model) throw new Error(`provider ${provider} is not authenticated`);
     return [model];
   }
 
-  const candidates = [...runtime.getModels()].filter(
-    (model) => idMatches(model) && runtime.hasConfiguredAuth(model.provider),
-  );
+  const candidates = [...await runtime.getAvailable()].filter(idMatches);
   const preferred = options.preferredProvider ?? process.env.PI_PROVIDER ?? "";
   candidates.sort((left, right) =>
     Number(right.provider === preferred) - Number(left.provider === preferred) || left.provider.localeCompare(right.provider),
@@ -119,7 +121,7 @@ function responseText(response) {
 
 /** Make one bare model request, walking same-model provider aliases on failure. */
 export async function summarizeWithRuntime(runtime, prompt, options = {}) {
-  const candidates = candidateModels(runtime, options);
+  const candidates = await candidateModels(runtime, options);
   const errors = [];
   for (const model of candidates) {
     const timeout = AbortSignal.timeout(options.timeoutMs ?? CALL_TIMEOUT_MS);
