@@ -16,6 +16,7 @@
         getState: (options = {}) => capacitor.nativePromise("KenanRemote", "getState", options),
         prepare: (options = {}) => capacitor.nativePromise("KenanRemote", "prepare", options),
         select: (options = {}) => capacitor.nativePromise("KenanRemote", "select", options),
+        haptic: (options = {}) => capacitor.nativePromise("KenanRemote", "haptic", options),
       };
   const browserFetch = window.fetch.bind(window);
   let statePromise = remote.getState();
@@ -71,6 +72,30 @@
       return current ? `${current.baseUrl}${path}` : path;
     },
   };
+
+  const tactileSelector = "button:not(:disabled), select:not(:disabled), input:not(:disabled), [role=button]";
+  const tactileTarget = (event) => event.target?.closest?.(tactileSelector);
+  const hapticKind = (target) => {
+    if (target?.id === "action") return target.classList.contains("abort") ? "reject" : "confirm";
+    if (target?.id === "voice") return "confirm";
+    return "select";
+  };
+  const haptic = (kind) => { remote.haptic({ kind }).catch(() => {}); };
+
+  document.addEventListener("pointerdown", (event) => {
+    const target = tactileTarget(event);
+    if (target) haptic(hapticKind(target) === "select" ? "press" : hapticKind(target));
+  }, { capture: true, passive: true });
+  document.addEventListener("pointerup", (event) => {
+    if (tactileTarget(event)) haptic("release");
+  }, { capture: true, passive: true });
+  document.addEventListener("change", (event) => {
+    if (tactileTarget(event)) haptic("select");
+  }, true);
+  document.addEventListener("click", (event) => {
+    const target = tactileTarget(event);
+    if (target && event.detail === 0) haptic(hapticKind(target));
+  }, true);
 
   async function mountEnvironmentControl() {
     const row = document.getElementById("native-environment");

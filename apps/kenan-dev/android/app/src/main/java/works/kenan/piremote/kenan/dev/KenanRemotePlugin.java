@@ -43,6 +43,15 @@ public final class KenanRemotePlugin extends Plugin {
     }
 
     @PluginMethod
+    public void haptic(PluginCall call) {
+        String kind = call.getString("kind", "select");
+        getActivity().runOnUiThread(() -> {
+            boolean played = NativeHaptics.play(getActivity().getWindow().getDecorView(), kind);
+            call.resolve(new JSObject().put("played", played));
+        });
+    }
+
+    @PluginMethod
     public void select(PluginCall call) {
         String id = call.getString("id", "");
         transportExecutor.execute(() -> {
