@@ -4,7 +4,7 @@ One reviewed commit goes to GMKtec and Converge. A host may build only what it r
 
 ## Source and state
 
-Both hosts check out this private repository at `/home/kenan/projects/pi-stack` through an authenticated HTTPS remote. A host that cannot run `git fetch --dry-run origin` cannot deploy. Build output goes under `/srv/pi`; services never execute a mutable checkout they cannot read.
+Both hosts check out this public repository at `/home/kenan/projects/pi-stack` through an authenticated HTTPS remote. A host that cannot run `git fetch --dry-run origin` cannot deploy. Build output goes under `/srv/pi`; services never execute a mutable checkout they cannot read.
 
 Host repositories own:
 
@@ -18,7 +18,7 @@ Host repositories own:
 
 A host points Orchestrator's operator config at its version-1 task manifest. Controller startup reconciles the complete set atomically, so replacing a host does not depend on remembered `task set` commands and a removed lane cannot linger in SQLite. Pause controls remain mutable ledger state and survive reconciliation.
 
-This repository owns build commands, package and skill roles, API contracts, and component tests. `deploy/runtime`, `deploy/orchestrator`, `deploy/remote`, and `deploy/tools` publish immutable artifacts and record the source commit beside them. `deploy/settings ROLE` reconciles Pi's ordered package list, and `deploy/skills ROLE` publishes and links the role's first-party skills. Every deployment command locks its checkout before reading source or running `npm ci`. Host deployment commands hold that lock until every artifact carries the same commit.
+This repository owns build commands, package and skill roles, API contracts, and component tests. `deploy/runtime`, `deploy/orchestrator`, `deploy/remote`, and `deploy/tools` publish immutable artifacts and record the source commit beside them. `deploy/settings ROLE` reconciles Pi's ordered package list, and `deploy/skills ROLE` publishes and links the role's first-party skills. Every deployment command locks its checkout before reading source. A component deployment prepares dependencies itself. A host deployment runs `npm ci` once and passes the verified dependency tree to its component children. The host keeps the lock until every artifact carries the same commit.
 
 ## Build checks
 

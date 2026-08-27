@@ -9,3 +9,13 @@ pi_stack_acquire_deploy_lock() {
   flock "$PI_STACK_DEPLOY_LOCK_FD"
   export PI_STACK_DEPLOY_LOCK_FD PI_STACK_DEPLOY_LOCK_HELD=1
 }
+
+pi_stack_prepare_dependencies() {
+  local root=$1 key
+  key=$(sha256sum "$root/package.json" "$root/package-lock.json" | sha256sum | cut -d' ' -f1)
+  if [[ ${PI_STACK_DEPENDENCIES_READY:-} == "$key" && -f $root/node_modules/.package-lock.json ]]; then
+    return
+  fi
+  (cd "$root" && npm ci --ignore-scripts)
+  export PI_STACK_DEPENDENCIES_READY=$key
+}

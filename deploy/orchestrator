@@ -13,7 +13,7 @@ stage=$(mktemp -d "${TMPDIR:-/tmp}/pi-orchestrator.XXXXXXXX")
 trap 'rm -rf "$stage"' EXIT
 
 cd "$root"
-npm ci --ignore-scripts
+pi_stack_prepare_dependencies "$root"
 npm run typecheck --workspace=pi-orchestrator
 npm run build --workspace=pi-orchestrator
 npm test --workspace=pi-orchestrator

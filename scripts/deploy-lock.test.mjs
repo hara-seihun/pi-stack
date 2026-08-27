@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { spawn, spawnSync } from "node:child_process";
-import { existsSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join, resolve } from "node:path";
 import test from "node:test";
@@ -34,6 +34,32 @@ function waitForExit(child) {
     });
   });
 }
+
+test("one host deployment installs its shared dependency tree once", () => {
+  const directory = mkdtempSync(join(tmpdir(), "pi-stack-dependencies-"));
+  try {
+    writeFileSync(join(directory, "package.json"), "{}\n");
+    writeFileSync(join(directory, "package-lock.json"), "{}\n");
+    const calls = join(directory, "npm-calls");
+    const result = spawnSync("bash", ["-c", `
+      set -euo pipefail
+      source "$1"
+      root=$2
+      calls=$3
+      npm() {
+        printf 'called\\n' >> "$calls"
+        mkdir -p "$root/node_modules"
+        : > "$root/node_modules/.package-lock.json"
+      }
+      pi_stack_prepare_dependencies "$root"
+      pi_stack_prepare_dependencies "$root"
+    `, "deploy-dependencies-test", helper, directory, calls], { encoding: "utf8" });
+    assert.equal(result.status, 0, result.stderr);
+    assert.equal(readFileSync(calls, "utf8"), "called\n");
+  } finally {
+    rmSync(directory, { recursive: true, force: true });
+  }
+});
 
 test("deploys from one checkout serialize before reading or changing source", async () => {
   const directory = mkdtempSync(join(tmpdir(), "pi-stack-deploy-lock-"));

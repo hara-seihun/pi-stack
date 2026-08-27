@@ -49,13 +49,15 @@ function fixture() {
   };
 }
 
-test("resolves its installed command symlink", () => {
+test("offers help through the installed command and each subcommand", () => {
   const root = mkdtempSync(path.join(tmpdir(), "agent-workspace-link-"));
   try {
     const linked = path.join(root, "agent-workspace");
     symlinkSync(entry, linked);
-    const output = execFileSync(linked, ["--help"], { encoding: "utf8" });
-    assert.match(output, /agent-workspace create/);
+    for (const args of [["--help"], ["create", "--help"]]) {
+      const output = execFileSync(linked, args, { encoding: "utf8" });
+      assert.match(output, /agent-workspace create/);
+    }
   } finally {
     rmSync(root, { recursive: true, force: true });
   }

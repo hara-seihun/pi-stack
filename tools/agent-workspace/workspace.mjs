@@ -1143,7 +1143,12 @@ export const workspaceTesting = { dockerSnapshot, parseSystemdUnits, systemdRefe
 
 export function main(argv = process.argv.slice(2), statePath = DEFAULT_STATE) {
   const [commandName, ...rest] = argv;
-  if (commandName === undefined || commandName === "--help" || commandName === "help") {
+  if (
+    commandName === undefined ||
+    commandName === "--help" ||
+    commandName === "help" ||
+    (rest.length === 1 && rest[0] === "--help")
+  ) {
     help();
     return;
   }

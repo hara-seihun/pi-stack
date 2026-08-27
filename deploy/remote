@@ -14,7 +14,7 @@ stage=$(mktemp -d "${TMPDIR:-/tmp}/pi-remote.XXXXXXXX")
 trap 'rm -rf "$stage"' EXIT
 
 cd "$root"
-npm ci --ignore-scripts
+pi_stack_prepare_dependencies "$root"
 npm test --workspace=pi-remote
 [[ -f $orchestrator/src/boost.ts && -f $orchestrator/src/voice/index.ts ]] || {
   echo "deploy Pi Orchestrator to $orchestrator before Pi Remote" >&2

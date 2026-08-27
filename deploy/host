@@ -8,6 +8,7 @@ pi_stack_acquire_deploy_lock "$root"
 role=${1:-}
 [[ $role == converge ]] || { echo "usage: deploy/host converge" >&2; exit 64; }
 
+pi_stack_prepare_dependencies "$root"
 "$root/deploy/runtime"
 "$root/deploy/orchestrator"
 "$root/deploy/remote"

@@ -21,7 +21,7 @@ exec 9>"$runtime_root/deploy.lock"
 flock 9
 
 cd "$root"
-npm ci --ignore-scripts
+pi_stack_prepare_dependencies "$root"
 npm run check --workspace=@rahularya01/pi-cursor
 npm run build --workspace=@rahularya01/pi-cursor
 npm test --workspace=@hara-seihun/pi-runtime

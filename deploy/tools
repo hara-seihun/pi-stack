@@ -18,7 +18,7 @@ stage=$(mktemp -d "${TMPDIR:-/tmp}/pi-tools.XXXXXXXX")
 trap 'rm -rf "$stage"' EXIT
 
 cd "$root"
-npm ci --ignore-scripts
+pi_stack_prepare_dependencies "$root"
 npm test --workspace=@hara-seihun/agent-workspace
 npm test --workspace=@hara-seihun/mcp-cli
 npm test --workspace=@hara-seihun/mcp-script
