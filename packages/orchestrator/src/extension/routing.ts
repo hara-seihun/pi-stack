@@ -134,23 +134,58 @@ export default function routing(pi: ExtensionAPI): void {
   const bind = async (
     ctx: ExtensionContext,
     exclude?: ReadonlySet<string>,
+    requested?: { family: string; modelId: string },
   ): Promise<string | undefined> => {
     const current = ctx.model;
-    if (current === undefined) return undefined;
+    let family: string;
+    let modelId: string;
+    if (requested !== undefined) {
+      family = requested.family;
+      modelId = requested.modelId;
+    } else {
+      if (current === undefined) return undefined;
+      family = familyOf(current.provider);
+      modelId = current.id;
+    }
     const now = Date.now();
-    const family = familyOf(current.provider);
     const choice = pickAccount(ledger.accounts(), family, now, (id) => ledger.latestUsedPercent(id), held, exclude);
     if (choice === undefined) return undefined;
     ledger.setAccountLastBound(choice.id, now);
-    if (choice.id === current.provider) return undefined;
-    const next = resolve(choice.id, family, current.id);
+    if (choice.id === current?.provider && modelId === current.id) return undefined;
+    const next = resolve(choice.id, family, modelId);
     if (next === undefined) return undefined;
+    await ctx.modelRegistry.refresh({ providers: [choice.id], allowNetwork: false });
     return (await pi.setModel(next)) ? choice.id : undefined;
   };
 
   pi.on("session_start", async (event, ctx) => {
-    // Only fresh sessions bind; resume/fork/reload stay sticky to their
-    // account so provider caches survive.
+    const branch = ctx.sessionManager.getBranch();
+    const hasAssistantHistory = branch.some(
+      (entry) => entry.type === "message" && entry.message.role === "assistant",
+    );
+    if (hasAssistantHistory) {
+      // Pi chooses its startup model before extension providers are registered.
+      // The transcript's explicit selections remain the user's intent; unlike
+      // assistant metadata, they are not changed by Pi's startup fallback.
+      let selected: { provider: string; modelId: string } | undefined;
+      for (const entry of branch) {
+        if (entry.type === "model_change") {
+          selected = { provider: entry.provider, modelId: entry.modelId };
+        }
+      }
+      if (selected === undefined) return;
+      if (ctx.model?.provider === selected.provider && ctx.model.id === selected.modelId) return;
+
+      const family = familyOf(selected.provider);
+      const saved = resolve(selected.provider, family, selected.modelId);
+      await ctx.modelRegistry.refresh({ providers: [selected.provider], allowNetwork: false });
+      if (saved !== undefined && await pi.setModel(saved)) return;
+      await bind(ctx, undefined, { family, modelId: selected.modelId });
+      return;
+    }
+
+    // Only fresh sessions bind; resumed sessions restore above, while reloads
+    // with no assistant history leave the current selection untouched.
     if (event.reason !== "startup" && event.reason !== "new") return;
     await bind(ctx);
   });

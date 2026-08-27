@@ -738,7 +738,12 @@ and the extension replaces the old 6,000-line multi-pass with three rules:
   (max latest used-percent across meters; unread accounts sort first;
   integer-percent ties round-robin by least-recently-bound) and then stays
   **sticky**: provider prompt caches are per-account, and a mid-session
-  switch throws the cache away. Resume, fork, and reload never rebind.
+  switch throws the cache away. When a process reopens a session, the
+  extension refreshes its alias provider and restores the transcript's last
+  explicit model selection before any turn can run. Assistant metadata does
+  not override that selection, so Pi's pre-extension startup fallback cannot
+  become the thread's model. Resume, fork, and reload never rebind a healthy
+  selection.
 - Stickiness yields only to failure: on a rate-limit error the account
   cools down in the ledger (broker admission honours the same fact) and the
   session moves to the next account. The move happens on `agent_end`, before

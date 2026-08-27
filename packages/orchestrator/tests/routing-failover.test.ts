@@ -6,16 +6,35 @@ import type { ExtensionContext } from "@earendil-works/pi-coding-agent";
 import type { Model } from "@earendil-works/pi-ai";
 import { Ledger } from "../src/ledger/ledger.js";
 
+/** Only the fields routing reads; pi's own message type is not exported. */
+interface AssistantMessage {
+  role: "assistant";
+  content: unknown[];
+  stopReason?: string;
+  errorMessage?: string;
+  provider?: string;
+  model?: string;
+}
+
+type BranchEntry =
+  | { type: "model_change"; provider: string; modelId: string }
+  | { type: "message"; message: AssistantMessage };
+
 /** A pi harness thin enough to drive the real extension: it records the
  * calls routing makes and replays the event order pi itself uses. */
-function harness() {
+function harness(branch: BranchEntry[] = []) {
   const handlers = new Map<string, (event: unknown, ctx: ExtensionContext) => Promise<void>>();
   const sent: string[] = [];
+  const selected: Model<never>[] = [];
   const ctx = {
     model: undefined as Model<never> | undefined,
     cwd: "/tmp",
     thinkingLevel: "high",
-    sessionManager: { getSessionId: () => "interactive-session" },
+    modelRegistry: { refresh: async () => ({ aborted: false, errors: new Map() }) },
+    sessionManager: {
+      getSessionId: () => "interactive-session",
+      getBranch: () => branch,
+    },
   } as unknown as ExtensionContext;
   const pi = {
     registerProvider: () => {},
@@ -24,6 +43,7 @@ function harness() {
       handlers.set(event, handler);
     },
     setModel: async (model: Model<never>) => {
+      selected.push(model);
       (ctx as { model?: Model<never> }).model = model;
       return true;
     },
@@ -34,15 +54,7 @@ function harness() {
   const emit = async (event: string, payload: Record<string, unknown> = {}): Promise<void> => {
     await handlers.get(event)?.({ type: event, ...payload }, ctx);
   };
-  return { pi, ctx, sent, emit };
-}
-
-/** Only the fields routing reads; pi's own message type is not exported. */
-interface AssistantMessage {
-  role: "assistant";
-  content: unknown[];
-  stopReason?: string;
-  errorMessage?: string;
+  return { pi, ctx, sent, selected, emit };
 }
 
 const assistant = (partial: Partial<AssistantMessage>): AssistantMessage => ({
@@ -78,6 +90,7 @@ describe("interactive failover notices", () => {
     const ledger = Ledger.open(process.env.PI_ORCHESTRATOR_LEDGER);
     ledger.upsertAccount({ id: "anthropic", provider: "anthropic" });
     ledger.upsertAccount({ id: "anthropic-3", provider: "anthropic" });
+    ledger.upsertAccount({ id: "openai-codex-10", provider: "openai-codex", shared: true });
     ledger.close();
   });
 
@@ -86,6 +99,65 @@ describe("interactive failover notices", () => {
     delete process.env.PI_ORCHESTRATOR_CONFIG;
     delete process.env.PI_AGENT_DIR;
     rmSync(dir, { recursive: true, force: true });
+  });
+
+  it("restores the last explicit model after Pi falls back during process startup", async () => {
+    const { pi, ctx, emit } = harness([
+      { type: "model_change", provider: "openai-codex", modelId: "gpt-5.6-sol" },
+      { type: "model_change", provider: "openai-codex-10", modelId: "gpt-5.6-sol" },
+      {
+        type: "message",
+        message: assistant({ provider: "openai-codex-10", model: "gpt-5.6-sol" }),
+      },
+      {
+        type: "message",
+        message: assistant({ provider: "anthropic", model: "claude-opus-4-8" }),
+      },
+    ]);
+    const routing = (await import("../src/extension/routing.js")).default;
+    routing(pi as never);
+    (ctx as { model?: Model<never> }).model = {
+      id: "claude-opus-4-8",
+      provider: "anthropic",
+    } as Model<never>;
+
+    await emit("session_start", { reason: "startup" });
+
+    expect(ctx.model?.provider).toBe("openai-codex-10");
+    expect(ctx.model?.id).toBe("gpt-5.6-sol");
+  });
+
+  it("leaves an already restored session on its bound account", async () => {
+    const { pi, ctx, selected, emit } = harness([
+      { type: "model_change", provider: "anthropic-3", modelId: "claude-opus-5" },
+      { type: "message", message: assistant({ provider: "anthropic-3", model: "claude-opus-5" }) },
+    ]);
+    const routing = (await import("../src/extension/routing.js")).default;
+    routing(pi as never);
+    (ctx as { model?: Model<never> }).model = {
+      id: "claude-opus-5",
+      provider: "anthropic-3",
+    } as Model<never>;
+
+    await emit("session_start", { reason: "startup" });
+
+    expect(selected).toEqual([]);
+    expect(ctx.model?.provider).toBe("anthropic-3");
+  });
+
+  it("still binds a fresh startup to the least-used account", async () => {
+    const { pi, ctx, selected, emit } = harness();
+    const routing = (await import("../src/extension/routing.js")).default;
+    routing(pi as never);
+    (ctx as { model?: Model<never> }).model = {
+      id: "claude-opus-5",
+      provider: "anthropic-3",
+    } as Model<never>;
+
+    await emit("session_start", { reason: "startup" });
+
+    expect(selected).toHaveLength(1);
+    expect(ctx.model?.provider).toBe("anthropic");
   });
 
   /** routing() with the session already bound to `anthropic`. */
