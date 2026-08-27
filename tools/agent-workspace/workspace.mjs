@@ -143,11 +143,17 @@ function openRegistry(statePath = DEFAULT_STATE) {
       updated_at INTEGER NOT NULL,
       lease_expires_at INTEGER NOT NULL,
       state TEXT NOT NULL,
-      detail TEXT NOT NULL
+      detail TEXT NOT NULL,
+      group_id TEXT
     );
     CREATE INDEX IF NOT EXISTS workspace_root ON workspace(root);
     CREATE INDEX IF NOT EXISTS workspace_lease ON workspace(lease_expires_at);
   `);
+  const columns = database.prepare("PRAGMA table_info(workspace)").all();
+  if (!columns.some((column) => column.name === "group_id")) {
+    database.exec("ALTER TABLE workspace ADD COLUMN group_id TEXT");
+  }
+  database.exec("CREATE INDEX IF NOT EXISTS workspace_group ON workspace(group_id)");
   return database;
 }
 
@@ -168,6 +174,7 @@ function rowToRecord(row) {
     leaseExpiresAt: row.lease_expires_at,
     state: row.state,
     detail: row.detail,
+    groupId: row.group_id ?? null,
   };
 }
 
@@ -233,18 +240,19 @@ function register(database, input) {
     leaseExpiresAt: now + input.leaseSeconds * 1000,
     state: "active",
     detail: "lease registered",
+    groupId: input.groupId ?? null,
   };
   database.prepare(`
     INSERT INTO workspace (
       id, path, root, kind, mode, owner, repository, source_commit,
       checkout_type, cache_paths, created_at, updated_at,
-      lease_expires_at, state, detail
-    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+      lease_expires_at, state, detail, group_id
+    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
   `).run(
     record.id, record.path, record.root, record.kind, record.mode, record.owner,
     record.repository, record.sourceCommit, record.checkoutType,
     JSON.stringify(record.cachePaths), record.createdAt, record.updatedAt,
-    record.leaseExpiresAt, record.state, record.detail,
+    record.leaseExpiresAt, record.state, record.detail, record.groupId,
   );
   return record;
 }
@@ -374,8 +382,74 @@ function dockerReferences(workspacePath, snapshot = dockerSnapshot()) {
   return { references, available: snapshot.available };
 }
 
+function parseSystemdUnits(output, manager) {
+  return output.split(/\n\s*\n/u).flatMap((block) => {
+    const properties = new Map(block.split("\n").flatMap((line) => {
+      const separator = line.indexOf("=");
+      return separator === -1 ? [] : [[line.slice(0, separator), line.slice(separator + 1)]];
+    }));
+    const id = properties.get("Id");
+    const activeState = properties.get("ActiveState");
+    if (id === undefined || activeState === undefined || !["active", "activating", "reloading", "deactivating"].includes(activeState)) return [];
+    const rawWorkingDirectory = properties.get("WorkingDirectory") ?? "";
+    return [{
+      id,
+      manager,
+      activeState,
+      workingDirectory: rawWorkingDirectory.replace(/^[!+~-]+/u, "") || null,
+      execStart: properties.get("ExecStart") ?? "",
+    }];
+  });
+}
+
+function systemdManagerSnapshot(manager) {
+  const managerArgs = manager === "user" ? ["--user"] : [];
+  const result = command("systemctl", [
+    ...managerArgs,
+    "show",
+    "--all",
+    "--type=service",
+    "--type=scope",
+    "--property=Id",
+    "--property=ActiveState",
+    "--property=WorkingDirectory",
+    "--property=ExecStart",
+  ], { timeout: 20_000 });
+  if (result.error?.code === "ENOENT" || /not been booted with systemd|failed to connect to bus/iu.test(result.stderr)) {
+    return { units: [], available: false };
+  }
+  if (result.status !== 0) return { units: [], available: true, error: result.stderr || result.stdout || "systemctl show failed" };
+  return { units: parseSystemdUnits(result.stdout, manager), available: true };
+}
+
+function systemdSnapshot() {
+  const user = systemdManagerSnapshot("user");
+  const system = systemdManagerSnapshot("system");
+  const errors = [user.error, system.error].filter(Boolean);
+  return {
+    units: [...user.units, ...system.units],
+    available: user.available || system.available,
+    ...(errors.length > 0 ? { error: errors.join("; ") } : {}),
+  };
+}
+
+function serializedPathReference(serialized, workspacePath) {
+  return serialized === workspacePath || serialized.includes(`${workspacePath}/`) ||
+    serialized.includes(`=${workspacePath}`) || serialized.includes(` ${workspacePath} `);
+}
+
+function systemdReferences(workspacePath, snapshot = systemdSnapshot()) {
+  if (snapshot.error !== undefined) return { references: [], available: snapshot.available, error: snapshot.error };
+  return {
+    available: snapshot.available,
+    references: snapshot.units.filter((unit) =>
+      (unit.workingDirectory !== null && within(workspacePath, unit.workingDirectory)) ||
+      serializedPathReference(unit.execStart, workspacePath)),
+  };
+}
+
 function safetySnapshot() {
-  return { processes: processSnapshot(), docker: dockerSnapshot() };
+  return { processes: processSnapshot(), docker: dockerSnapshot(), systemd: systemdSnapshot() };
 }
 
 function gitDisposition(record) {
@@ -472,6 +546,17 @@ function removeDockerReferences(references) {
   run("docker", ["rm", "--force", ...references.map((reference) => reference.id)], { timeout: 30_000 });
 }
 
+function stopSystemdReferences(references) {
+  const systemUnits = references.filter((reference) => reference.manager === "system");
+  if (systemUnits.length > 0) {
+    fail(`system units require their owning service lifecycle: ${systemUnits.map((unit) => unit.id).join(", ")}`);
+  }
+  const userUnits = references.filter((reference) => reference.manager === "user");
+  if (userUnits.length > 0) {
+    run("systemctl", ["--user", "stop", ...userUnits.map((unit) => unit.id)], { timeout: 30_000 });
+  }
+}
+
 function removeWorkspace(record, statePath) {
   if (record.checkoutType === "worktree") {
     const rawCommon = git(record.path, ["rev-parse", "--git-common-dir"]);
@@ -487,15 +572,23 @@ function removeWorkspace(record, statePath) {
 
 function inspectRecord(record, options = {}) {
   const now = options.now ?? Date.now();
-  if (!existsSync(record.path)) return { classification: "missing", reason: "checkout path is absent", processes: [], containers: [] };
+  if (!existsSync(record.path)) return { classification: "missing", reason: "checkout path is absent", processes: [], containers: [], systemdUnits: [] };
   if (record.leaseExpiresAt > now && !options.ignoreLease) {
-    return { classification: "active", reason: `lease valid until ${new Date(record.leaseExpiresAt).toISOString()}`, processes: [], containers: [] };
+    return { classification: "active", reason: `lease valid until ${new Date(record.leaseExpiresAt).toISOString()}`, processes: [], containers: [], systemdUnits: [] };
   }
   const processes = processReferences(record.path, options.safety?.processes);
   const docker = dockerReferences(record.path, options.safety?.docker);
-  if (docker.error !== undefined) return { classification: "blocked", reason: `cannot prove container safety: ${docker.error}`, processes, containers: [] };
-  if (processes.length > 0 || docker.references.length > 0) {
-    return { classification: "referenced", reason: `${processes.length} process and ${docker.references.length} container references remain`, processes, containers: docker.references };
+  const systemd = systemdReferences(record.path, options.safety?.systemd);
+  if (docker.error !== undefined) return { classification: "blocked", reason: `cannot prove container safety: ${docker.error}`, processes, containers: [], systemdUnits: [] };
+  if (systemd.error !== undefined) return { classification: "blocked", reason: `cannot prove systemd safety: ${systemd.error}`, processes, containers: docker.references, systemdUnits: [] };
+  if (processes.length > 0 || docker.references.length > 0 || systemd.references.length > 0) {
+    return {
+      classification: "referenced",
+      reason: `${processes.length} process, ${docker.references.length} container, and ${systemd.references.length} systemd references remain`,
+      processes,
+      containers: docker.references,
+      systemdUnits: systemd.references,
+    };
   }
   const disposition = gitDisposition(record);
   return {
@@ -503,6 +596,7 @@ function inspectRecord(record, options = {}) {
     reason: disposition.reason,
     processes,
     containers: docker.references,
+    systemdUnits: systemd.references,
     head: disposition.head,
   };
 }
@@ -518,6 +612,7 @@ function reconcileRecord(database, record, options) {
     const current = recordBy(database, { id: record.id });
     if (current.leaseExpiresAt > Date.now()) return { record: current, inspection: inspectRecord(current), action: "lease-renewed" };
     updateState(database, current, "reclaiming", "expired lease is fencing live references");
+    stopSystemdReferences(inspection.systemdUnits);
     removeDockerReferences(inspection.containers);
     killProcessReferences(inspection.processes);
     inspection = inspectRecord({ ...current, state: "reclaiming" }, { ignoreLease: true });
@@ -529,7 +624,7 @@ function reconcileRecord(database, record, options) {
   let removedCaches = [];
   if (options.execute) {
     removedCaches = stripCaches(record, options.statePath);
-    inspection = inspectRecord(record, { ignoreLease: true, safety: options.safety });
+    inspection = inspectRecord(record, { ignoreLease: true });
   }
   if (inspection.classification === "repair-required") {
     if (options.execute) updateState(database, record, "repair-required", inspection.reason);
@@ -545,6 +640,104 @@ function reconcileRecord(database, record, options) {
   return { record: current, inspection, action: "released" };
 }
 
+function recordsInGroup(database, record) {
+  if (record.groupId === null) return [record];
+  return database.prepare("SELECT * FROM workspace WHERE group_id = ? ORDER BY root, path")
+    .all(record.groupId)
+    .map(rowToRecord)
+    .filter((candidate) => candidate.state !== "released" || existsSync(candidate.path));
+}
+
+function groupReconciliation(database, records, options) {
+  const now = Date.now();
+  const groupId = records[0]?.groupId;
+  if (!options.ignoreLease && records.some((record) => record.leaseExpiresAt > now)) {
+    const expires = Math.max(...records.map((record) => record.leaseExpiresAt));
+    return records.map((record) => ({
+      record,
+      inspection: { classification: "active", reason: `group lease valid until ${new Date(expires).toISOString()}`, processes: [], containers: [], systemdUnits: [] },
+      action: "none",
+    }));
+  }
+
+  let inspections = records.map((record) => inspectRecord(record, { ignoreLease: true, safety: options.safety }));
+  if (options.execute && options.reapExpired && inspections.some((inspection) => inspection.classification === "referenced")) {
+    const current = records.map((record) => recordBy(database, { id: record.id }));
+    if (!options.ignoreLease && current.some((record) => record.leaseExpiresAt > Date.now())) {
+      return groupReconciliation(database, current, { ...options, execute: false });
+    }
+    const systemUnits = inspections.flatMap((inspection) => inspection.systemdUnits);
+    stopSystemdReferences(systemUnits);
+    removeDockerReferences(inspections.flatMap((inspection) => inspection.containers));
+    killProcessReferences(inspections.flatMap((inspection) => inspection.processes));
+    inspections = records.map((record) => inspectRecord(record, { ignoreLease: true }));
+  }
+
+  const removedCaches = new Map();
+  if (options.execute) {
+    records.forEach((record, index) => {
+      if (inspections[index].classification !== "missing") removedCaches.set(record.id, stripCaches(record, options.statePath));
+    });
+    inspections = records.map((record) => inspectRecord(record, { ignoreLease: true }));
+  }
+
+  const releasable = inspections.every((inspection) => ["missing", "reclaimable"].includes(inspection.classification));
+  if (!releasable) {
+    if (options.execute) {
+      records.forEach((record, index) => {
+        const inspection = inspections[index];
+        const state = inspection.classification === "reclaimable" ? "blocked" : inspection.classification;
+        updateState(database, record, state, `workspace group ${groupId} retained: ${inspection.reason}`);
+      });
+    }
+    return records.map((record, index) => ({
+      record,
+      inspection: inspections[index],
+      action: (removedCaches.get(record.id) ?? []).length > 0
+        ? `removed-caches:${removedCaches.get(record.id).join(",")}`
+        : "none",
+    }));
+  }
+  if (!options.execute) {
+    return records.map((record, index) => ({ record, inspection: inspections[index], action: "would-release-group" }));
+  }
+
+  database.exec("BEGIN IMMEDIATE");
+  try {
+    const current = records.map((record) => recordBy(database, { id: record.id }));
+    if (!options.ignoreLease && current.some((record) => record.leaseExpiresAt > Date.now())) {
+      database.exec("ROLLBACK");
+      return groupReconciliation(database, current, { ...options, execute: false });
+    }
+    const statement = database.prepare("UPDATE workspace SET state = 'reclaiming', detail = ?, updated_at = ? WHERE id = ?");
+    const updatedAt = Date.now();
+    for (const record of current) statement.run(`workspace group ${groupId} is reclaiming`, updatedAt, record.id);
+    database.exec("COMMIT");
+  } catch (error) {
+    try { database.exec("ROLLBACK"); } catch {}
+    throw error;
+  }
+
+  records.forEach((record, index) => {
+    if (inspections[index].classification === "reclaimable") removeWorkspace(record, options.statePath);
+    updateState(database, record, "released", `workspace group ${groupId} released: ${inspections[index].reason}`);
+  });
+  return records.map((record, index) => ({ record, inspection: inspections[index], action: "released-group" }));
+}
+
+function reconcileRecords(database, selected, options) {
+  const results = [];
+  const visited = new Set();
+  for (const selectedRecord of selected) {
+    if (visited.has(selectedRecord.id)) continue;
+    const records = recordsInGroup(database, selectedRecord);
+    records.forEach((record) => visited.add(record.id));
+    if (records.length > 1) results.push(...groupReconciliation(database, records, options));
+    else if (records.length === 1) results.push(reconcileRecord(database, records[0], options));
+  }
+  return results;
+}
+
 function print(value, json) {
   if (json) process.stdout.write(`${JSON.stringify(value, null, 2)}\n`);
   else if (Array.isArray(value)) {
@@ -553,7 +746,7 @@ function print(value, json) {
 }
 
 function registerCommand(database, args) {
-  assertOnly(args, ["path", "root", "kind", "mode", "owner", "source-commit", "lease-seconds", "cache", "json"]);
+  assertOnly(args, ["path", "root", "kind", "mode", "owner", "group", "source-commit", "lease-seconds", "cache", "json"]);
   const mode = one(args, "mode", "writer");
   if (!["writer", "review"].includes(mode)) fail("--mode must be writer or review");
   const selectedPath = path.resolve(required(args, "path"));
@@ -563,6 +756,7 @@ function registerCommand(database, args) {
     kind: one(args, "kind", "agent"),
     mode,
     owner: one(args, "owner", "unowned"),
+    groupId: one(args, "group"),
     sourceCommit: one(args, "source-commit"),
     leaseSeconds: numberFlag(args, "lease-seconds", DEFAULT_LEASE_SECONDS),
     cachePaths: normalizeCachePaths(many(args, "cache")),
@@ -571,7 +765,7 @@ function registerCommand(database, args) {
 }
 
 function adoptCommand(database, args, statePath) {
-  assertOnly(args, ["root", "kind", "mode", "owner", "lease-seconds", "cache", "execute", "reap-expired", "json"]);
+  assertOnly(args, ["root", "kind", "mode", "owner", "group", "lease-seconds", "cache", "execute", "reap-expired", "json"]);
   const root = path.resolve(required(args, "root"));
   const mode = one(args, "mode", "writer");
   if (!["writer", "review"].includes(mode)) fail("--mode must be writer or review");
@@ -588,6 +782,7 @@ function adoptCommand(database, args, statePath) {
       kind: one(args, "kind", "agent"),
       mode,
       owner: one(args, "owner", "unowned"),
+      groupId: one(args, "group"),
       sourceCommit: null,
       leaseSeconds: numberFlag(args, "lease-seconds", 0),
       cachePaths: normalizeCachePaths(many(args, "cache")),
@@ -596,7 +791,7 @@ function adoptCommand(database, args, statePath) {
   const execute = bool(args, "execute");
   const safety = execute ? safetySnapshot() : undefined;
   const results = execute
-    ? records.map((record) => reconcileRecord(database, record, { execute, reapExpired: bool(args, "reap-expired"), ignoreLease: false, statePath, safety }))
+    ? reconcileRecords(database, records, { execute, reapExpired: bool(args, "reap-expired"), ignoreLease: false, statePath, safety })
     : records;
   print(results, bool(args, "json"));
 }
@@ -627,7 +822,7 @@ function mirrorFor(statePath, repository) {
 }
 
 function createCommand(database, args, statePath) {
-  assertOnly(args, ["root", "name", "repo", "ref", "branch", "kind", "mode", "owner", "strategy", "lease-seconds", "cache", "max-count", "min-free-gib", "min-free-inodes-percent", "json"]);
+  assertOnly(args, ["root", "name", "repo", "ref", "branch", "kind", "mode", "owner", "group", "strategy", "lease-seconds", "cache", "max-count", "min-free-gib", "min-free-inodes-percent", "json"]);
   const root = path.resolve(required(args, "root"));
   assertCapacity(root, args);
   const name = safeName(required(args, "name"));
@@ -665,6 +860,7 @@ function createCommand(database, args, statePath) {
       kind: one(args, "kind", "agent"),
       mode,
       owner: one(args, "owner", name),
+      groupId: one(args, "group"),
       sourceCommit,
       leaseSeconds: numberFlag(args, "lease-seconds", DEFAULT_LEASE_SECONDS),
       cachePaths: normalizeCachePaths(many(args, "cache")),
@@ -683,24 +879,29 @@ function heartbeatCommand(database, args) {
   if (!existsSync(record.path)) fail(`workspace path is absent: ${record.path}`);
   const now = Date.now();
   const expires = now + numberFlag(args, "lease-seconds", DEFAULT_LEASE_SECONDS) * 1000;
-  database.prepare("UPDATE workspace SET lease_expires_at = ?, updated_at = ?, state = 'active', detail = 'lease renewed' WHERE id = ?")
-    .run(expires, now, record.id);
-  print(recordBy(database, { id: record.id }), bool(args, "json"));
+  const records = recordsInGroup(database, record);
+  const statement = database.prepare("UPDATE workspace SET lease_expires_at = ?, updated_at = ?, state = 'active', detail = 'lease renewed' WHERE id = ?");
+  for (const candidate of records) statement.run(expires, now, candidate.id);
+  const renewed = records.map((candidate) => recordBy(database, { id: candidate.id }));
+  print(renewed.length === 1 ? renewed[0] : renewed, bool(args, "json"));
 }
 
 function releaseCommand(database, args, statePath) {
   assertOnly(args, ["id", "path", "reap-expired", "json"]);
   const record = recordBy(database, selectorFrom(args));
-  database.prepare("UPDATE workspace SET lease_expires_at = 0, updated_at = ?, detail = 'owner released lease' WHERE id = ?")
-    .run(Date.now(), record.id);
-  const current = recordBy(database, { id: record.id });
-  const result = reconcileRecord(database, current, {
+  const records = recordsInGroup(database, record);
+  const statement = database.prepare("UPDATE workspace SET lease_expires_at = 0, updated_at = ?, detail = 'owner released lease' WHERE id = ?");
+  const updatedAt = Date.now();
+  for (const candidate of records) statement.run(updatedAt, candidate.id);
+  const current = records.map((candidate) => recordBy(database, { id: candidate.id }));
+  const result = reconcileRecords(database, current, {
     execute: true,
     reapExpired: bool(args, "reap-expired"),
     ignoreLease: true,
     statePath,
+    safety: safetySnapshot(),
   });
-  print(result, bool(args, "json"));
+  print(result.length === 1 ? result[0] : result, bool(args, "json"));
 }
 
 function reconcileCommand(database, args, statePath) {
@@ -715,9 +916,11 @@ function reconcileCommand(database, args, statePath) {
     statePath,
     safety: safetySnapshot(),
   };
-  const results = records
-    .filter((record) => record.state !== "released" || existsSync(record.path))
-    .map((record) => reconcileRecord(database, record, options));
+  const results = reconcileRecords(
+    database,
+    records.filter((record) => record.state !== "released" || existsSync(record.path)),
+    options,
+  );
   print(results, bool(args, "json"));
 }
 
@@ -736,8 +939,8 @@ function statusCommand(database, args) {
 
 function help() {
   process.stdout.write(`Usage:
-  agent-workspace create --root PATH --name NAME --repo URL [--ref REF] [--mode writer|review]
-  agent-workspace register --path PATH [--owner ID] [--source-commit SHA]
+  agent-workspace create --root PATH --name NAME --repo URL [--ref REF] [--mode writer|review] [--group ID]
+  agent-workspace register --path PATH [--owner ID] [--source-commit SHA] [--group ID]
   agent-workspace adopt --root PATH [--mode writer|review] [--execute]
   agent-workspace heartbeat (--id ID|--path PATH) [--lease-seconds N]
   agent-workspace release (--id ID|--path PATH) [--reap-expired]
@@ -746,8 +949,11 @@ function help() {
 
 The registry defaults to ${DEFAULT_STATE}. Set PI_WORKSPACE_STATE to move it.
 A lease expiry permits reconciliation; it never makes dirty or unpushed work disposable.
+Records with the same --group lease, heartbeat, and release as one multi-repository workspace.
 `);
 }
+
+export const workspaceTesting = { parseSystemdUnits, systemdReferences };
 
 export function main(argv = process.argv.slice(2), statePath = DEFAULT_STATE) {
   const [commandName, ...rest] = argv;

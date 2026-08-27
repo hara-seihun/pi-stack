@@ -3,7 +3,9 @@ import { execFileSync, spawn } from "node:child_process";
 import { existsSync, mkdtempSync, mkdirSync, readFileSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import path from "node:path";
+import { DatabaseSync } from "node:sqlite";
 import test from "node:test";
+import { workspaceTesting } from "./workspace.mjs";
 
 const entry = new URL("./main", import.meta.url).pathname;
 
@@ -57,6 +59,36 @@ test("resolves its installed command symlink", () => {
   } finally {
     rmSync(root, { recursive: true, force: true });
   }
+});
+
+test("migrates a registry created before workspace groups", () => {
+  const root = mkdtempSync(path.join(tmpdir(), "agent-workspace-migration-"));
+  const state = path.join(root, "registry.sqlite3");
+  try {
+    const database = new DatabaseSync(state);
+    database.exec(`CREATE TABLE workspace (
+      id TEXT PRIMARY KEY, path TEXT NOT NULL UNIQUE, root TEXT NOT NULL,
+      kind TEXT NOT NULL, mode TEXT NOT NULL, owner TEXT NOT NULL,
+      repository TEXT, source_commit TEXT, checkout_type TEXT NOT NULL,
+      cache_paths TEXT NOT NULL, created_at INTEGER NOT NULL,
+      updated_at INTEGER NOT NULL, lease_expires_at INTEGER NOT NULL,
+      state TEXT NOT NULL, detail TEXT NOT NULL
+    )`);
+    database.close();
+    const status = run(["status", "--json"], { PI_WORKSPACE_STATE: state });
+    assert.deepEqual(JSON.parse(status), []);
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("classifies active systemd workspace references", () => {
+  const workspace = "/srv/workspaces/agent-one";
+  const units = workspaceTesting.parseSystemdUnits(`Id=worker.service\nActiveState=active\nExecStart={ path=/usr/bin/node ; argv[]=/usr/bin/node ${workspace}/server.js ; }\nWorkingDirectory=${workspace}\n\nId=finished.service\nActiveState=inactive\nExecStart={ path=/bin/true ; argv[]=/bin/true ; }\nWorkingDirectory=${workspace}\n`, "user");
+  const result = workspaceTesting.systemdReferences(workspace, { units, available: true });
+  assert.deepEqual(result.references.map(({ id, manager }) => ({ id, manager })), [
+    { id: "worker.service", manager: "user" },
+  ]);
 });
 
 test("creates and releases a clean review checkout", () => {
@@ -134,6 +166,40 @@ test("releases a writer after its branch is pushed", () => {
     const result = JSON.parse(run(["release", "--id", created.id, "--json"], f.env));
     assert.equal(result.action, "released");
     assert.equal(existsSync(created.path), false);
+  } finally {
+    f.close();
+  }
+});
+
+test("keeps every repository in a group until all are recoverable", () => {
+  const f = fixture();
+  try {
+    const secondRoot = path.join(f.root, "second-workspaces");
+    const first = JSON.parse(run([
+      "create", "--root", f.workspaces, "--name", "backend", "--repo", f.remote,
+      "--mode", "writer", "--group", "link-change-1", "--min-free-gib", "0", "--json",
+    ], f.env));
+    const second = JSON.parse(run([
+      "create", "--root", secondRoot, "--name", "frontend", "--repo", f.remote,
+      "--mode", "review", "--group", "link-change-1", "--min-free-gib", "0", "--json",
+    ], f.env));
+    git(first.path, "config", "user.name", "Test");
+    git(first.path, "config", "user.email", "test@example.invalid");
+    writeFileSync(path.join(first.path, "file.txt"), "grouped work\n");
+    git(first.path, "add", "file.txt");
+    git(first.path, "commit", "-m", "grouped work");
+
+    const held = JSON.parse(run(["release", "--id", second.id, "--json"], f.env));
+    assert.equal(Array.isArray(held), true);
+    assert.equal(held.some((result) => result.inspection.classification === "repair-required"), true);
+    assert.equal(existsSync(first.path), true);
+    assert.equal(existsSync(second.path), true);
+
+    git(first.path, "push", "-u", "origin", "HEAD");
+    const released = JSON.parse(run(["release", "--id", first.id, "--json"], f.env));
+    assert.equal(released.every((result) => result.action === "released-group"), true);
+    assert.equal(existsSync(first.path), false);
+    assert.equal(existsSync(second.path), false);
   } finally {
     f.close();
   }
