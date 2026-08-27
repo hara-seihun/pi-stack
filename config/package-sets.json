@@ -5,7 +5,7 @@
     "claude-code-use": "packages/runtime/extensions/pi-claude-code-use",
     "state-compactor": "packages/runtime/extensions/state-compactor",
     "bash-timeout-guard": "packages/runtime/extensions/bash-timeout-guard",
-    "pi-cursor": null,
+    "pi-cursor": "packages/runtime/extensions/pi-cursor",
     "remote": "apps/remote"
   },
   "roles": {

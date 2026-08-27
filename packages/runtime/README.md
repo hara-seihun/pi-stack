@@ -8,6 +8,7 @@ Reusable extensions and prompt-evaluation tools for [Pi](https://pi.dev).
 - `bash-timeout-guard` requires bounded bash calls and can forbid detached work.
 - `pi-claude-code-use` adapts Pi tools and prompts for Anthropic subscription requests.
 - `chatgpt-pro` exposes ChatGPT Pro through short-lived, authenticated Kernel browsers and verifies the persisted model evidence before returning an answer.
+- `pi-cursor` adds Cursor subscription OAuth, live model discovery, usage reporting, and native Connect/protobuf streaming. Its imported upstream source is pinned at version 1.4.27.
 - `prompt-eval` runs reproducible Pi prompt comparisons in isolated workspaces.
 
 ## Install
@@ -31,7 +32,7 @@ The ChatGPT Pro bridge requires a local configuration file. Other guards work wi
 ```sh
 cd /absolute/path/to/pi-stack
 npm ci --ignore-scripts
-npm test --workspace=@hara-seihun/pi-runtime
+npm run check
 ```
 
 The supported Pi peer is `@earendil-works/pi-coding-agent` 0.84.x. Tests run without account credentials or browser sessions.

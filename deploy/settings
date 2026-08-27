@@ -50,7 +50,7 @@ const paths = {
   "claude-code-use": process.env.PI_STACK_CLAUDE_CODE_USE_PACKAGE || `${runtime}/extensions/pi-claude-code-use`,
   "state-compactor": process.env.PI_STACK_STATE_COMPACTOR_PACKAGE || `${runtime}/extensions/state-compactor`,
   "bash-timeout-guard": process.env.PI_STACK_BASH_TIMEOUT_GUARD_PACKAGE || `${runtime}/extensions/bash-timeout-guard`,
-  "pi-cursor": process.env.PI_STACK_PI_CURSOR_PACKAGE,
+  "pi-cursor": process.env.PI_STACK_PI_CURSOR_PACKAGE || `${runtime}/extensions/pi-cursor`,
   remote: process.env.PI_STACK_REMOTE_PACKAGE,
 };
 const packages = names.map((name) => {

@@ -8,6 +8,7 @@
   "workspaces": [
     "apps/remote",
     "packages/*",
+    "packages/runtime/extensions/pi-cursor",
     "tools/*"
   ],
   "scripts": {

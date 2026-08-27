@@ -20,6 +20,8 @@ flock 9
 
 cd "$root"
 npm ci --ignore-scripts
+npm run check --workspace=@rahularya01/pi-cursor
+npm run build --workspace=@rahularya01/pi-cursor
 npm test --workspace=@hara-seihun/pi-runtime
 dependency_hash=$({
   sha256sum package.json package-lock.json
@@ -32,7 +34,7 @@ if [[ ! -x $dependency_release/node_modules/.bin/pi ]]; then
   while IFS= read -r manifest; do
     install -d "$stage/$(dirname "$manifest")"
     install -m 644 "$manifest" "$stage/$manifest"
-  done < <(find apps packages tools -mindepth 2 -maxdepth 2 -name package.json -print)
+  done < <(find apps packages tools -name node_modules -prune -o -name package.json -print)
   (cd "$stage" && npm ci --omit=dev --ignore-scripts)
   settings_manager="$stage/node_modules/@earendil-works/pi-coding-agent/dist/core/settings-manager.js"
   SETTINGS_MANAGER="$settings_manager" node --input-type=module <<'NODE'
@@ -63,7 +65,7 @@ settings_manager="$dependency_release/node_modules/@earendil-works/pi-coding-age
 grep -q 'renameSync(temporary, path)' "$settings_manager"
 node --check "$settings_manager"
 
-extensions=(pi-claude-code-use state-compactor bash-timeout-guard chatgpt-pro)
+extensions=(pi-claude-code-use state-compactor bash-timeout-guard chatgpt-pro pi-cursor)
 release_hash=$(cd "$runtime_source" && {
   printf '%s\n' "$dependency_hash"
   for extension in "${extensions[@]}"; do

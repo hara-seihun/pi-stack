@@ -5,6 +5,7 @@ const jobs = [
   ["skill deployment", "node", ["--test", "scripts/deploy-skills.test.mjs"]],
   ["tools", "node", ["scripts/check-tools.mjs"]],
   ["runtime", "npm", ["test", "--workspace=@hara-seihun/pi-runtime"]],
+  ["cursor provider", "npm", ["run", "check", "--workspace=@rahularya01/pi-cursor"]],
   ["orchestrator", "npm", ["test", "--workspace=pi-orchestrator"]],
   ["remote", "npm", ["test", "--workspace=pi-remote"]],
   ["mcp", "npm", ["test", "--workspace=@hara-seihun/mcp-cli"]],
