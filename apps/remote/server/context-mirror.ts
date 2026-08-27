@@ -1,4 +1,4 @@
-import { convertToLlm, type ExtensionAPI } from "@earendil-works/pi-coding-agent";
+import { buildSessionContext, convertToLlm, type ExtensionAPI, type ExtensionContext } from "@earendil-works/pi-coding-agent";
 import { contextSplice, sha256 } from "./sync";
 
 type ModelMessage = ReturnType<typeof convertToLlm>[number];
@@ -15,7 +15,7 @@ export default function contextMirror(pi: ExtensionAPI) {
   let context: ModelContext | null = null;
   let baseMessages: ModelMessage[] = [];
   let capturedAt = 0;
-  let pending: { capturedAt: number; context: ModelContext; compact: boolean } | null = null;
+  let pending: { capturedAt: number; context: ModelContext; compact: boolean; replacement?: "compaction" } | null = null;
   let publishedDocument: string | null = null;
   let draining: Promise<void> | null = null;
   let updateTimer: ReturnType<typeof setTimeout> | null = null;
@@ -43,14 +43,22 @@ export default function contextMirror(pi: ExtensionAPI) {
             response = await fetch(`${server}/v1/sessions/${sessionId}/context`, {
               method: "PUT",
               headers: { "content-type": "application/json" },
-              body: JSON.stringify({ capturedAt: snapshot.capturedAt, context: snapshot.context }),
+              body: JSON.stringify({
+                capturedAt: snapshot.capturedAt,
+                context: snapshot.context,
+                replacement: snapshot.replacement,
+              }),
             });
           }
         } else {
           response = await fetch(`${server}/v1/sessions/${sessionId}/context`, {
             method: "PUT",
             headers: { "content-type": "application/json" },
-            body: JSON.stringify({ capturedAt: snapshot.capturedAt, context: snapshot.context }),
+            body: JSON.stringify({
+              capturedAt: snapshot.capturedAt,
+              context: snapshot.context,
+              replacement: snapshot.replacement,
+            }),
           });
         }
         if (!response.ok) throw new Error(await response.text() || `Context mirror failed (${response.status})`);
@@ -62,27 +70,28 @@ export default function contextMirror(pi: ExtensionAPI) {
     return draining;
   };
 
-  const publish = (next: ModelContext, compact = false) => {
-    pending = { capturedAt: nextCaptureTime(), context: next, compact };
+  const publish = (next: ModelContext, compact = false, replacement?: "compaction") => {
+    pending = {
+      capturedAt: nextCaptureTime(),
+      context: next,
+      compact: compact || pending?.compact === true,
+      replacement: replacement ?? pending?.replacement,
+    };
     return drain();
   };
 
-  const publishCurrent = async (compact = false) => {
+  const publishCurrent = async (compact = false, replacement?: "compaction") => {
     if (!context) return;
-    await publish(context, compact);
+    await publish(context, compact, replacement);
   };
 
-  const scheduleCurrent = () => {
-    if (updateTimer || !context) return;
-    updateTimer = setTimeout(() => {
-      updateTimer = null;
-      void publishCurrent().catch((error) => console.error(`Pi Remote context mirror failed: ${error instanceof Error ? error.message : error}`));
-    }, UPDATE_INTERVAL_MS);
-  };
-
-  pi.on("context", async (event, ctx) => {
+  const replaceContext = async (
+    messages: Parameters<typeof convertToLlm>[0],
+    ctx: ExtensionContext,
+    replacement?: "compaction",
+  ) => {
     const active = new Set(pi.getActiveTools());
-    baseMessages = convertToLlm(event.messages);
+    baseMessages = convertToLlm(messages);
     context = {
       systemPrompt: ctx.getSystemPrompt(),
       tools: pi.getAllTools()
@@ -94,7 +103,36 @@ export default function contextMirror(pi: ExtensionAPI) {
       clearTimeout(updateTimer);
       updateTimer = null;
     }
-    await publishCurrent(true);
+    await publishCurrent(true, replacement);
+  };
+
+  const replaceContextFromSession = async (ctx: ExtensionContext, replacement?: "compaction") => {
+    const session = buildSessionContext(ctx.sessionManager.getBranch());
+    await replaceContext(session.messages, ctx, replacement);
+  };
+
+  const scheduleCurrent = () => {
+    if (updateTimer || !context) return;
+    updateTimer = setTimeout(() => {
+      updateTimer = null;
+      void publishCurrent().catch((error) => console.error(`Pi Remote context mirror failed: ${error instanceof Error ? error.message : error}`));
+    }, UPDATE_INTERVAL_MS);
+  };
+
+  pi.on("context", async (event, ctx) => {
+    await replaceContext(event.messages, ctx);
+  });
+
+  pi.on("session_start", async (_event, ctx) => {
+    await replaceContextFromSession(ctx);
+  });
+
+  pi.on("session_compact", async (_event, ctx) => {
+    await replaceContextFromSession(ctx, "compaction");
+  });
+
+  pi.on("session_tree", async (_event, ctx) => {
+    await replaceContextFromSession(ctx);
   });
 
   pi.on("message_update", (event) => {
@@ -114,12 +152,12 @@ export default function contextMirror(pi: ExtensionAPI) {
     await publishCurrent(true);
   });
 
-  pi.on("session_shutdown", async () => {
+  pi.on("session_shutdown", async (_event, ctx) => {
     if (updateTimer) {
       clearTimeout(updateTimer);
       updateTimer = null;
     }
-    if (context) await publishCurrent(true);
+    await replaceContextFromSession(ctx);
     if (draining) await draining;
   });
 }

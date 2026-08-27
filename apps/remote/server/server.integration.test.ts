@@ -1240,8 +1240,16 @@ describe("web and supervisor integration", () => {
     await api("DELETE", `/v1/sessions/${id}`);
   });
 
-  test("reports compaction start and completion", async () => {
+  test("reports compaction start and completion without retaining an unconfirmed old context", async () => {
     const id = await createThread();
+    await api("PUT", `/v1/sessions/${id}/context`, {
+      capturedAt: Date.now(),
+      context: {
+        systemPrompt: "old prompt",
+        tools: [],
+        messages: [{ role: "user", content: [{ type: "text", text: "removed by compaction" }] }],
+      },
+    });
     await api("POST", `/v1/sessions/${id}/prompt`, { requestId: crypto.randomUUID(), text: "compact" });
     const compacting = await waitFor(
       () => api("GET", "/v1/sessions").then((result) => result.value.sessions.find((session: any) => session.id === id)),
@@ -1260,6 +1268,32 @@ describe("web and supervisor integration", () => {
     );
     expect(events.filter((event: any) => event.type === "notice").map((event: any) => event.text))
       .toEqual(expect.arrayContaining(["Compacting context…", "Context compacted"]));
+    const context = await api("GET", `/v1/sessions/${id}/context`);
+    expect(context.value.context).toBeNull();
+  }, 15_000);
+
+  test("keeps the context replacement acknowledged during compaction", async () => {
+    const id = await createThread();
+    await api("POST", `/v1/sessions/${id}/prompt`, { requestId: crypto.randomUUID(), text: "compact" });
+    await waitFor(
+      () => api("GET", "/v1/sessions").then((result) => result.value.sessions.find((session: any) => session.id === id)),
+      (session) => session?.activity === "COMPACTING",
+    );
+    await api("PUT", `/v1/sessions/${id}/context`, {
+      capturedAt: Date.now(),
+      replacement: "compaction",
+      context: {
+        systemPrompt: "current prompt",
+        tools: [],
+        messages: [{ role: "user", content: [{ type: "text", text: "compacted summary" }] }],
+      },
+    });
+    await waitFor(
+      () => api("GET", `/v1/sessions/${id}/events?after=0`).then((result) => result.value.events),
+      (events) => events.some((event: any) => event.type === "notice" && event.text === "Context compacted"),
+    );
+    const context = await api("GET", `/v1/sessions/${id}/context`);
+    expect(context.value.context.messages[0].content[0].text).toBe("compacted summary");
   }, 15_000);
 
   test("surfaces a terminal model refusal instead of silently settling", async () => {

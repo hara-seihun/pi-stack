@@ -5,7 +5,7 @@ import { applyContextSplice, sha256 } from "./sync";
 
 type Handler = (event: Record<string, unknown>, context: Record<string, unknown>) => unknown | Promise<unknown>;
 
-const captures: Array<{ capturedAt: number; context: Record<string, unknown> }> = [];
+const captures: Array<{ capturedAt: number; context: Record<string, unknown>; replacement?: string }> = [];
 let document = "";
 const server = Bun.serve({
   port: 0,
@@ -13,7 +13,7 @@ const server = Bun.serve({
     const body = await request.json() as any;
     if (request.method === "PATCH") document = applyContextSplice(document, body.splice);
     else document = JSON.stringify(body.context);
-    captures.push({ capturedAt: body.capturedAt, context: JSON.parse(document) });
+    captures.push({ capturedAt: body.capturedAt, context: JSON.parse(document), replacement: body.replacement });
     return Response.json({ ok: true, hash: sha256(document) });
   },
 });
@@ -88,5 +88,52 @@ describe("context mirror", () => {
     const messages = captures.at(-1)?.context.messages as Array<{ role: string; content: Array<{ text: string }> }>;
     expect(messages.map((message) => message.role)).toEqual(["user", "assistant"]);
     expect(messages.at(-1)?.content[0].text).toBe("Finished");
+  });
+
+  test("replaces the visible document as soon as Pi commits a compaction", async () => {
+    captures.length = 0;
+    document = "";
+    const handlers = new Map<string, Handler>();
+    const pi = {
+      on(type: string, handler: Handler) { handlers.set(type, handler); },
+      getActiveTools() { return []; },
+      getAllTools() { return []; },
+    } as unknown as ExtensionAPI;
+    contextMirror(pi);
+
+    const extensionContext = {
+      getSystemPrompt: () => "Current system prompt",
+      sessionManager: {
+        getBranch: () => [
+          {
+            type: "message", id: "old", parentId: null, timestamp: "2026-08-27T00:00:00.000Z",
+            message: { role: "user", content: [{ type: "text", text: "deleted secret" }], timestamp: 1 },
+          },
+          {
+            type: "compaction", id: "compact", parentId: "old", timestamp: "2026-08-27T00:01:00.000Z",
+            summary: "Only this summary remains", firstKeptEntryId: "none", tokensBefore: 1_000,
+          },
+        ],
+      },
+    };
+    await handlers.get("context")?.({
+      type: "context",
+      messages: [{ role: "user", content: [{ type: "text", text: "deleted secret" }], timestamp: 1 }],
+    }, extensionContext);
+    expect(JSON.stringify(captures.at(-1)?.context)).toContain("deleted secret");
+
+    await handlers.get("session_compact")?.({ type: "session_compact" }, extensionContext);
+    const replacement = captures.at(-1);
+    expect(replacement?.replacement).toBe("compaction");
+    expect(JSON.stringify(replacement?.context)).toContain("Only this summary remains");
+    expect(JSON.stringify(replacement?.context)).not.toContain("deleted secret");
+
+    await handlers.get("context")?.({
+      type: "context",
+      messages: [{ role: "user", content: [{ type: "text", text: "deleted secret" }], timestamp: 1 }],
+    }, extensionContext);
+    await handlers.get("session_shutdown")?.({ type: "session_shutdown" }, extensionContext);
+    expect(JSON.stringify(captures.at(-1)?.context)).toContain("Only this summary remains");
+    expect(JSON.stringify(captures.at(-1)?.context)).not.toContain("deleted secret");
   });
 });

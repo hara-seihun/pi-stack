@@ -174,6 +174,7 @@ interface Runtime {
   phase: RuntimePhase;
   phaseVersion: number;
   compacting: boolean;
+  compactionContextHash: string | null;
   retrying: boolean;
   reconciling: boolean;
   suppressOutput: boolean;
@@ -315,6 +316,22 @@ function storedContext(sessionId: string): { capturedAt: number; document: strin
     rememberContext(sessionId, document);
   }
   return { capturedAt, document, hash: rememberContext(sessionId, document) };
+}
+
+function clearStoredContext(sessionId: string) {
+  db.transaction(() => {
+    db.query("DELETE FROM session_context_patches WHERE session_id=?").run(sessionId);
+    db.query("DELETE FROM session_contexts WHERE session_id=?").run(sessionId);
+  })();
+  contextVersions.delete(sessionId);
+  displayContexts.delete(sessionId);
+  signalSync();
+}
+
+function requireCompactionContext(sessionId: string, rt: Runtime) {
+  const stored = storedContext(sessionId);
+  if (!rt.compactionContextHash || stored?.hash !== rt.compactionContextHash) clearStoredContext(sessionId);
+  rt.compactionContextHash = null;
 }
 
 const error = (message: string, status = 400) => json({ error: message }, status);
@@ -1028,10 +1045,13 @@ function handleRpcEvent(sessionId: string, rt: Runtime, event: any) {
     if (!event.success && event.finalError) emit(sessionId, "notice", { text: `Retry failed: ${String(event.finalError)}` });
   } else if (event.type === "compaction_start") {
     rt.compacting = true;
+    rt.compactionContextHash = null;
     touchSession(sessionId);
     emit(sessionId, "notice", { text: "Compacting context…" });
   } else if (event.type === "compaction_end") {
     rt.compacting = false;
+    if (event.result) requireCompactionContext(sessionId, rt);
+    else rt.compactionContextHash = null;
     touchSession(sessionId);
     const text = event.aborted
       ? "Context compaction cancelled"
@@ -1103,7 +1123,9 @@ async function reconcileRuntimeState(sessionId: string, rt: Runtime): Promise<an
       }
     }
     const active = Boolean(state.isStreaming || state.isCompacting || Number(state.pendingMessageCount ?? 0) > 0);
+    const wasCompacting = rt.compacting;
     rt.compacting = Boolean(state.isCompacting);
+    if (wasCompacting && !rt.compacting) requireCompactionContext(sessionId, rt);
     if (active) {
       if (["IDLE", "DISPATCHING"].includes(rt.phase)) setRuntimePhase(sessionId, rt, "RUNNING", "RUNNING");
     } else if (rt.phase === "RUNNING") {
@@ -1167,6 +1189,7 @@ async function startRuntime(row: any): Promise<Runtime> {
     phase: "STARTING",
     phaseVersion: 0,
     compacting: false,
+    compactionContextHash: null,
     retrying: false,
     reconciling: false,
     suppressOutput: false,
@@ -2137,6 +2160,10 @@ const server = Bun.serve({
         })();
         if (changed) {
           rememberContext(id, document);
+          if (body.replacement === "compaction") {
+            const runtime = runtimes.get(id);
+            if (runtime?.compacting) runtime.compactionContextHash = acknowledgedHash;
+          }
           signalSync();
         }
         return json({ ok: true, capturedAt, hash: acknowledgedHash });
