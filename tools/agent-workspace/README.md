@@ -26,13 +26,15 @@ Give related repositories the same `--group` value when one agent task spans the
 
 ## Reconciliation
 
-Adopt existing direct children of a pool, then inspect before changing anything:
+Adopt existing children of a pool, then inspect before changing anything:
 
 ```bash
 agent-workspace adopt --root ~/worktrees --kind project-agent --mode writer --json
 agent-workspace reconcile --root ~/worktrees --json
 agent-workspace reconcile --root ~/worktrees --execute --json
 ```
+
+Use `--nested-groups` when each direct child is a task directory containing sibling repositories. The manager discovers Git roots one level below the pool, assigns siblings to one durable group, and removes the task directory only when it is empty after the whole group is released.
 
 An expired lease with a live process, active systemd unit, or Docker container remains referenced. `--reap-expired` fences that owner, stops user units, removes containers, terminates processes, and continues reconciliation. System units remain blocked for their owning service lifecycle. Use reaping only for roots whose workers honor workspace leases.
 

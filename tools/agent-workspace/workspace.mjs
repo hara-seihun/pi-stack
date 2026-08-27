@@ -8,6 +8,7 @@ import {
   readdirSync,
   readlinkSync,
   renameSync,
+  rmdirSync,
   rmSync,
   statfsSync,
 } from "node:fs";
@@ -656,6 +657,14 @@ function removeWorkspace(record, statePath) {
   moveToGc(record.path, destination);
 }
 
+function removeEmptyWorkspaceContainer(record) {
+  const container = path.dirname(record.path);
+  if (path.dirname(container) !== record.root) return;
+  try { rmdirSync(container); } catch (error) {
+    if (!["ENOENT", "ENOTEMPTY"].includes(error?.code)) throw error;
+  }
+}
+
 function inspectRecord(record, options = {}) {
   const now = options.now ?? Date.now();
   if (!existsSync(record.path)) return { classification: "missing", reason: "checkout path is absent", processes: [], containers: [], systemdUnits: [] };
@@ -692,7 +701,10 @@ function reconcileRecord(database, record, options) {
   let inspection = inspectRecord(record, { ignoreLease: options.ignoreLease, safety });
   if (inspection.classification === "active") return { record, inspection, action: "none" };
   if (inspection.classification === "missing") {
-    if (options.execute) updateState(database, record, "released", inspection.reason);
+    if (options.execute) {
+      updateState(database, record, "released", inspection.reason);
+      removeEmptyWorkspaceContainer(record);
+    }
     return { record, inspection, action: options.execute ? "forgot-missing" : "would-forget-missing" };
   }
   if (inspection.classification === "referenced" && options.execute && options.reapExpired) {
@@ -724,6 +736,7 @@ function reconcileRecord(database, record, options) {
   if (!options.ignoreLease && current.leaseExpiresAt > Date.now()) return { record: current, inspection: inspectRecord(current), action: "lease-renewed" };
   updateState(database, current, "reclaiming", inspection.reason);
   removeWorkspace(current, options.statePath);
+  removeEmptyWorkspaceContainer(current);
   updateState(database, current, "released", inspection.reason);
   return { record: current, inspection, action: "released" };
 }
@@ -812,6 +825,7 @@ function groupReconciliation(database, records, options) {
     if (inspections[index].classification === "reclaimable") removeWorkspace(record, options.statePath);
     updateState(database, record, "released", `workspace group ${groupId} released: ${inspections[index].reason}`);
   });
+  for (const record of records) removeEmptyWorkspaceContainer(record);
   return records.map((record, index) => ({ record, inspection: inspections[index], action: "released-group" }));
 }
 
@@ -870,25 +884,47 @@ function registerCommand(database, args) {
   print(record, bool(args, "json"));
 }
 
+function gitRoot(candidate) {
+  const probe = command("git", ["-C", candidate, "rev-parse", "--show-toplevel"]);
+  return probe.status === 0 && path.resolve(probe.stdout) === candidate;
+}
+
+function adoptionCandidates(root, nestedGroups) {
+  const candidates = [];
+  for (const entry of readdirSync(root, { withFileTypes: true })) {
+    if (!entry.isDirectory()) continue;
+    const candidate = path.join(root, entry.name);
+    if (gitRoot(candidate)) {
+      candidates.push({ path: candidate, groupId: null });
+      continue;
+    }
+    if (!nestedGroups) continue;
+    const groupId = `adopted-${createHash("sha256").update(candidate).digest("hex").slice(0, 20)}`;
+    for (const child of readdirSync(candidate, { withFileTypes: true })) {
+      if (!child.isDirectory()) continue;
+      const nested = path.join(candidate, child.name);
+      if (gitRoot(nested)) candidates.push({ path: nested, groupId });
+    }
+  }
+  return candidates;
+}
+
 function adoptCommand(database, args, statePath) {
-  assertOnly(args, ["root", "kind", "mode", "owner", "group", "lease-seconds", "cache", "execute", "reap-expired", "json"]);
+  assertOnly(args, ["root", "kind", "mode", "owner", "group", "nested-groups", "lease-seconds", "cache", "execute", "reap-expired", "json"]);
   const root = path.resolve(required(args, "root"));
   const mode = one(args, "mode", "writer");
   if (!["writer", "review"].includes(mode)) fail("--mode must be writer or review");
   if (!existsSync(root)) fail(`root does not exist: ${root}`);
   const records = [];
-  for (const entry of readdirSync(root, { withFileTypes: true })) {
-    if (!entry.isDirectory()) continue;
-    const candidate = path.join(root, entry.name);
-    const probe = command("git", ["-C", candidate, "rev-parse", "--show-toplevel"]);
-    if (probe.status !== 0 || path.resolve(probe.stdout) !== candidate) continue;
+  const requestedGroup = one(args, "group");
+  for (const candidate of adoptionCandidates(root, bool(args, "nested-groups"))) {
     records.push(register(database, {
-      path: candidate,
+      path: candidate.path,
       root,
       kind: one(args, "kind", "agent"),
       mode,
       owner: one(args, "owner", "unowned"),
-      groupId: one(args, "group"),
+      groupId: requestedGroup ?? candidate.groupId,
       sourceCommit: null,
       leaseSeconds: numberFlag(args, "lease-seconds", 0),
       cachePaths: normalizeCachePaths(many(args, "cache")),
@@ -1047,7 +1083,7 @@ function help() {
   process.stdout.write(`Usage:
   agent-workspace create --root PATH --name NAME --repo URL [--ref REF] [--mode writer|review] [--group ID]
   agent-workspace register --path PATH [--owner ID] [--source-commit SHA] [--group ID]
-  agent-workspace adopt --root PATH [--mode writer|review] [--execute]
+  agent-workspace adopt --root PATH [--mode writer|review] [--nested-groups] [--execute]
   agent-workspace heartbeat (--id ID|--path PATH) [--lease-seconds N]
   agent-workspace release (--id ID|--path PATH) [--reap-expired]
   agent-workspace reconcile [--root PATH] [--execute] [--reap-expired]

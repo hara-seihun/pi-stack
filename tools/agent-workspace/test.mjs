@@ -217,6 +217,37 @@ test("keeps every repository in a group until all are recoverable", () => {
   }
 });
 
+test("adopts nested repositories as one workspace group", () => {
+  const f = fixture();
+  try {
+    const container = path.join(f.workspaces, "link-change");
+    mkdirSync(container, { recursive: true });
+    const backend = path.join(container, "backend");
+    const frontend = path.join(container, "frontend");
+    execFileSync("git", ["clone", f.remote, backend]);
+    execFileSync("git", ["clone", f.remote, frontend]);
+    writeFileSync(path.join(backend, "file.txt"), "uncommitted work\n");
+
+    const held = JSON.parse(run([
+      "adopt", "--root", f.workspaces, "--nested-groups", "--execute", "--json",
+    ], f.env));
+    assert.equal(held.length, 2);
+    assert.equal(new Set(held.map((result) => result.record.groupId)).size, 1);
+    assert.equal(held.some((result) => result.inspection.classification === "repair-required"), true);
+    assert.equal(existsSync(backend), true);
+    assert.equal(existsSync(frontend), true);
+
+    git(backend, "checkout", "--", "file.txt");
+    const released = JSON.parse(run([
+      "reconcile", "--root", f.workspaces, "--execute", "--json",
+    ], f.env));
+    assert.equal(released.every((result) => result.action === "released-group"), true);
+    assert.equal(existsSync(container), false);
+  } finally {
+    f.close();
+  }
+});
+
 test("empty ignored directories do not masquerade as unique work", () => {
   const f = fixture();
   try {
