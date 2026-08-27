@@ -10,7 +10,9 @@ def convergeSshHost = remote.getProperty('piRemoteConvergeSshHost', '')
 def convergeSshPort = remote.getProperty('piRemoteConvergeSshPort', '22')
 def convergeSshUser = remote.getProperty('piRemoteConvergeSshUser', '')
 def convergeSshHostKey = remote.getProperty('piRemoteConvergeSshHostKey', '')
-def convergeSshLocalPort = remote.getProperty('piRemoteConvergeSshLocalPort', '8789')
+// The development package can run beside the current native client, so its
+// loopback listener must not compete for that client's SSH forwarding port.
+def convergeSshLocalPort = remote.getProperty('piRemoteKenanDevConvergeSshLocalPort', '18789')
 def convergeSshRemoteHost = remote.getProperty('piRemoteConvergeSshRemoteHost', '127.0.0.1')
 def convergeSshRemotePort = remote.getProperty('piRemoteConvergeSshRemotePort', '8788')
 def convergeSshPrivateKey = ''
@@ -32,8 +34,8 @@ android {
         applicationId "works.kenan.piremote.kenan.dev"
         minSdkVersion rootProject.ext.minSdkVersion
         targetSdkVersion rootProject.ext.targetSdkVersion
-        versionCode 1
-        versionName "0.1.0"
+        versionCode 2
+        versionName "0.1.1"
         testInstrumentationRunner "androidx.test.runner.AndroidJUnitRunner"
         buildConfigField "String", "LOCAL_SERVER_URL", javaString(localUrl)
         buildConfigField "String", "CONVERGE_SERVER_URL", javaString(convergeUrl)

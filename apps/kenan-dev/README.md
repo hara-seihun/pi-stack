@@ -10,7 +10,7 @@ This channel does not yet replace the current app. Android-only background compl
 
 ## Build
 
-The ignored [`../remote/android/local.properties`](../remote/android/local.properties) supplies endpoint URLs and Converge SSH credentials to both Android clients. The build requires Android SDK 36 and Java 21.
+The ignored [`../remote/android/local.properties`](../remote/android/local.properties) supplies endpoint URLs and Converge SSH credentials to both Android clients. `kenan-dev` uses loopback port 18789 for its SSH forward by default, keeping it independent of the current app's port; `piRemoteKenanDevConvergeSshLocalPort` can override that default. The build requires Android SDK 36 and Java 21.
 
 ```sh
 npm run android:test --workspace=kenan-dev
