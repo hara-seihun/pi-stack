@@ -24,6 +24,9 @@ interface FakeTurn {
   readonly tookMs?: number;
   /** The turn never returns: a provider parked mid-stream. */
   readonly parks?: boolean;
+  /** A before_provider_request extension aborts this run to compact, then
+   * starts an internal continuation turn from its completion callback. */
+  readonly compacts?: boolean;
 }
 
 function harness(
@@ -70,6 +73,13 @@ function harness(
   let releasePark: (() => void) | undefined;
   let interrupted = false;
   let prompting = false;
+  let compacting = false;
+  const idleWaiters: (() => void)[] = [];
+  const resolveIdle = () => {
+    if (prompting) return;
+    for (const resolve of idleWaiters.splice(0)) resolve();
+  };
+  const notify = (event: unknown) => observers.forEach((observe) => observe(event));
   // Both `reload()` and `setModel()` rebuild settings from disk in the real
   // SDK, which is how the retry budget was silently lost twice; the fake
   // does the same so the ordering stays pinned.
@@ -96,7 +106,21 @@ function harness(
       observers.push(handler);
       return () => {};
     },
+    get isCompacting() {
+      return compacting;
+    },
+    get isStreaming() {
+      return prompting;
+    },
+    waitForIdle: async () => {
+      if (!prompting) return;
+      await new Promise<void>((resolve) => idleWaiters.push(resolve));
+    },
     dispose: () => {},
+    abortCompaction: () => {
+      compacting = false;
+      notify({ type: "compaction_end", aborted: true });
+    },
     abort: async () => {
       if (prompting) interrupted = true;
       releasePark?.();
@@ -120,6 +144,25 @@ function harness(
         });
       }
       clock += turn.tookMs ?? 0;
+      if (turn.compacts) {
+        messages.push({ role: "assistant", stopReason: "aborted" });
+        prompting = false;
+        compacting = true;
+        notify({ type: "compaction_start", reason: "manual" });
+        setTimeout(() => {
+          compacting = false;
+          notify({ type: "compaction_end", reason: "manual", aborted: false });
+          queueMicrotask(() => {
+            prompting = true;
+            setTimeout(() => {
+              messages.push({ role: "assistant" });
+              prompting = false;
+              resolveIdle();
+            }, 0);
+          });
+        }, 0);
+        return;
+      }
       messages.push({
         role: "assistant",
         stopReason: interrupted ? "aborted" : turn.stopReason,
@@ -127,6 +170,7 @@ function harness(
       });
       interrupted = false;
       prompting = false;
+      resolveIdle();
       releasePark = undefined;
     },
   };
@@ -519,6 +563,20 @@ describe("host shift loop", () => {
     const clean = harness([{ stopReason: "aborted" }]);
     clean.host.launch(clean.spec);
     expect(await clean.finished).toEqual({ state: "aborted", detail: "session aborted" });
+  });
+
+  it("keeps a worker warm when an extension compacts and continues the turn asynchronously", async () => {
+    const worker = harness([{ compacts: true }], {
+      team: { role: "worker", slot: 1, workers: 4, watchFor: [] },
+    });
+    worker.host.launch(worker.spec);
+    while (worker.teamStops() < 1) await new Promise((resolve) => setTimeout(resolve, 1));
+
+    expect(worker.prompts).toEqual(["Attack the central problem."]);
+    expect(worker.host.has(worker.spec.runId)).toBe(true);
+
+    worker.host.kill(worker.spec.runId, "test complete");
+    expect(await worker.finished).toMatchObject({ state: "aborted" });
   });
 
   it("parks every worker turn until the supervisor answers in the same session", async () => {

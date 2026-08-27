@@ -163,7 +163,9 @@ export class PiHost implements HostManager {
   abort(runId: string): void {
     this.aborting.add(runId);
     this.teamWakeups.get(runId)?.();
-    void this.runtimes.get(runId)?.session.abort();
+    const session = this.runtimes.get(runId)?.session;
+    session?.abortCompaction();
+    void session?.abort();
   }
 
   kill(runId: string, detail: string): void {
@@ -173,6 +175,7 @@ export class PiHost implements HostManager {
     const transcript = this.transcripts.get(runId);
     transcript?.append("notice", { text: `Run killed: ${detail}` });
     transcript?.live({ activity: "IDLE" }, { force: true });
+    runtime.session.abortCompaction();
     void runtime.session.abort();
     runtime.cancel();
     runtime.cleanup();
@@ -205,6 +208,7 @@ export class PiHost implements HostManager {
     pending.push(text);
     this.interventions.set(runId, pending);
     this.teamWakeups.get(runId)?.();
+    session.abortCompaction();
     void session.abort().catch((thrown: unknown) => {
       this.transcripts.get(runId)?.append("notice", {
         text: `Could not abort the turn immediately: ${String(thrown)}`,
@@ -553,7 +557,7 @@ export class PiHost implements HostManager {
       for (const message of opening) {
         for (;;) {
           transcript?.append("user", { text: message });
-          if (await interrupted(session.prompt(message))) {
+          if (await interrupted(promptAndSettle(session, message))) {
             return { state: "aborted", detail: "session killed" };
           }
           const opener = lastAssistant(session);
@@ -601,7 +605,7 @@ export class PiHost implements HostManager {
                 })
               : teamContinuation(spec.team.role));
         transcript?.append("user", { text: message });
-        if (await interrupted(session.prompt(message))) {
+        if (await interrupted(promptAndSettle(session, message))) {
           return { state: "aborted", detail: "session killed" };
         }
         // prompt() resolves even when the turn failed provider-side; the
@@ -830,6 +834,46 @@ export class PiHost implements HostManager {
       }
     });
   }
+}
+
+async function promptAndSettle(session: AgentSession, message: string): Promise<void> {
+  await session.prompt(message);
+
+  // An extension can call ctx.compact() from before_provider_request. Pi
+  // aborts the current agent run, so prompt() resolves while manual
+  // compaction is still running; the extension's onComplete callback then
+  // starts the continuation turn. Disposing the session in that gap loses
+  // both the compaction and the warm session. Let callback microtasks run,
+  // wait for compaction, then wait for the turn they started.
+  await sleep(0);
+  for (;;) {
+    if (session.isCompacting) await waitForCompaction(session);
+    await sleep(0);
+    if (session.isStreaming) {
+      await session.waitForIdle();
+      await sleep(0);
+      continue;
+    }
+    if (!session.isCompacting) return;
+  }
+}
+
+function waitForCompaction(session: AgentSession): Promise<void> {
+  if (!session.isCompacting) return Promise.resolve();
+  return new Promise((resolve) => {
+    let unsubscribe = (): void => {};
+    let finished = false;
+    const finish = (): void => {
+      if (finished) return;
+      finished = true;
+      unsubscribe();
+      resolve();
+    };
+    unsubscribe = session.subscribe((event: any) => {
+      if (event.type === "compaction_end") finish();
+    });
+    if (!session.isCompacting) finish();
+  });
 }
 
 function sleep(ms: number): Promise<void> {
