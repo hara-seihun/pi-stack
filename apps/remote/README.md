@@ -4,15 +4,15 @@ A self-hosted web and Android controller for persistent [Pi](https://pi.dev) cod
 
 Pi Remote keeps session state in SQLite, talks to Pi through RPC mode, survives browser or app disconnects, queues prompts durably, and streams tool and model activity. It observes autonomous agents through Pi Orchestrator's public read model rather than reading that service's SQLite tables. An optional identity router starts per-user supervisors whose private directories are mounted only while unlocked.
 
-The interactive view is Pi's provider-neutral model context, not a transcript reconstructed by Pi Remote. Pi Remote is installed as the final Pi package so `server/context-mirror.ts` runs after every other `context` handler. It stores the effective system prompt, active tool schemas, and `convertToLlm()` messages; streaming and finalized model messages update that same document. Session startup, compaction, and tree navigation replace it from Pi's current session branch immediately. A successful compaction must acknowledge that replacement before the server will keep any context visible. If capture fails, the server clears the old document rather than show messages Pi removed. Loaded AGENTS.md content appears inside the system prompt Pi received. The web client renders the context whole. Android keeps the complete display projection but builds a keyed tail window: instructions and tool definitions remain collapsed rows, recent conversation appears first, and older rows are created only when requested. It fills that window within a per-frame work budget rather than delaying every row by a frame.
+The interactive view is Pi's provider-neutral model context, not a transcript reconstructed by Pi Remote. Pi Remote is installed as the final Pi package so `server/context-mirror.ts` runs after every other `context` handler. It stores the effective system prompt, active tool schemas, and `convertToLlm()` messages; streaming and finalized model messages update that same document. Session startup, compaction, and tree navigation replace it from Pi's current session branch immediately. A successful compaction must acknowledge that replacement before the server will keep any context visible. If capture fails, the server clears the old document rather than show messages Pi removed. Loaded AGENTS.md content appears inside the system prompt Pi received. The shared client renders the context whole.
 
-The browser and both Android clients synchronize through a resumable long poll rather than a timer. They request a display projection that omits provider continuation metadata while canonical API context stays untouched. Context and live output travel as SHA-256-verified byte splices against each client's last projected document, with gzip for complete snapshots. The current native Android app also keeps verified context in private storage for offline reading and records prompts in an idempotent outbox before clearing the composer. Completion watches receive only the named thread states. Attachment uploads resume from hash-checked committed chunks, and downloads support validators and byte ranges.
+The browser and Android client synchronize through a resumable long poll rather than a timer. They request a display projection that omits provider continuation metadata while canonical API context stays untouched. Context and live output travel as SHA-256-verified byte splices against each client's last projected document, with gzip for complete snapshots.
 
 The drawer reports only measured plan and hardware rows. CPU sampling runs independently of client polling, and Android warms SSH-backed environments in the background so switching does not pay connection setup in the foreground.
 
-[`apps/kenan-dev`](../kenan-dev/README.md) packages this web client with Capacitor under a separate Android package id. It is the development channel for the shared client: browser and Android render the files in `web`, while a small native plugin owns endpoint selection and the pinned Converge SSH tunnel. The current native Android client remains installed until the shared channel has its remaining Android-only background and filesystem features.
+[`apps/kenan`](../kenan/README.md) packages this web client with Capacitor as the Kenan Android app. Browser and Android render the files in `web`, while a small native plugin owns endpoint selection, haptics, system-bar layout, and the pinned Converge SSH tunnel.
 
-The Files drawer tab browses the selected environment from `/`. It includes dotfiles and reads one directory per request. Android uses a recycled list for large directories. Folder taps navigate, file taps download without opening a preview, and a long press copies the absolute path.
+The Files drawer tab browses the selected environment from `/`. It includes dotfiles and reads one directory per request. Folder taps navigate and file taps download without opening a preview.
 
 Each runtime also loads `server/thread-context.ts`. The extension offers initialization only while the durable session title is numeric, removes that control from named threads, and treats process or model changes as continuation rather than a new thread. It tells the agent how to offer downloadable files. A `<pi-remote-file src="/absolute/path" />` tag becomes a normal link in both clients, and the session-scoped endpoint streams the file from the thread's host.
 
@@ -26,7 +26,7 @@ Model menus, autonomous-agent labels, and plan cards use the catalog exported by
 - Pi on the supervisor's `PATH`
 - `apps/remote` installed as Pi's final configured package
 - the root npm workspaces installed and Pi Orchestrator built
-- Android SDK 36 and Java 21 to build both Android clients
+- Android SDK 36 and Java 21 to build Kenan
 
 ## Configuration
 
@@ -56,7 +56,7 @@ Values in `environment` become process environment variables before the supervis
 
 Host identities, Tailscale names, private directory paths, alert integration, remote targets, workspace menus, app branding, and provider custody belong in this untracked configuration or in the host's service manager, not in the repository.
 
-The Android client reads ignored `android/local.properties` values. Direct endpoints use a URL:
+Kenan reads ignored [`../kenan/android/local.properties`](../kenan/android/local.properties) values. Direct endpoints use a URL:
 
 ```properties
 piRemoteLocalUrl=https://local-pi-remote.example.ts.net
@@ -108,8 +108,7 @@ The router expects systemd template units named `pi-remote@<user>.service`. `ser
 
 ```sh
 bun test server/*.test.ts web/*.test.ts
-cd android && ./gradlew test
-npm run android:test --workspace=kenan-dev
+npm run android:test --workspace=kenan
 ```
 
 ## Security boundary

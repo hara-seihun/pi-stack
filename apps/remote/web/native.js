@@ -20,13 +20,13 @@
     return { ...selected, environments: browserEnvironments.map(({ id, name }) => ({ id, name })) };
   };
   const browserRemote = {
-    getState: async () => browserSnapshot(localStorage.getItem("kenan-dev-environment") || "local"),
+    getState: async () => browserSnapshot(localStorage.getItem("kenan-environment") || "local"),
     prepare: async () => {},
     select: async ({ id }) => {
       const selected = browserSnapshot(id);
       const response = await browserFetch(`${selected.baseUrl}/v1/health`, { cache: "no-store" });
       if (!response.ok) throw new Error(`${selected.name} returned HTTP ${response.status}`);
-      localStorage.setItem("kenan-dev-environment", id);
+      localStorage.setItem("kenan-environment", id);
       return selected;
     },
   };
@@ -90,7 +90,7 @@
     }
   };
 
-  window.KenanDev = {
+  window.KenanRemote = {
     enabled: true,
     getState,
     resolveApiUrl(path) {
@@ -130,7 +130,7 @@
     if (!row || !select) return;
     try {
       const environment = await getState();
-      document.title = "kenan-dev";
+      document.title = "Kenan";
       select.replaceChildren(...environment.environments.map((candidate) => {
         const option = document.createElement("option");
         option.value = candidate.id;

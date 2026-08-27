@@ -25,27 +25,16 @@ The two current environments are:
 | `local` | Local | GMKtec | Personal, Home | encrypted folder key |
 | `converge` | Converge | `converge-kenan` | one work profile | none |
 
-Android knows how to reach both endpoints because it cannot discover a server before choosing one. It verifies the reported ID before sending ordinary requests. A connection aimed at the wrong server fails instead of mixing state.
+Kenan knows how to reach both endpoints because it cannot discover a server before choosing one. It verifies the reported ID before sending ordinary requests. A connection aimed at the wrong server fails instead of mixing state.
 
 An endpoint can use direct network access or an SSH local-forward. Local uses its existing Tailscale Serve URL. Converge binds Pi Remote to loopback and accepts only the app's restricted SSH identity, which may forward to that listener but cannot open a shell or reach another port. Ignored local properties supply the Converge SSH host, pinned host key, user, and owner-only private-key path. The build embeds that key in the app artifact.
 
-## Android state
+## Kenan state
 
-`PiRemoteEnvironment` owns the selected endpoint. `PiRemoteApi` captures an endpoint for each request and rejects foreground responses after an environment switch.
+The native `RemoteEnvironment` owns the selected endpoint in Android preferences. It prepares the direct connection or pinned SSH tunnel and verifies `/v1/health` before the shared client sends ordinary requests. Switching environments reloads the page, which cancels requests owned by the previous endpoint.
 
-Android keys these values by environment ID:
-
-- folder unlock keys;
-- selected thread;
-- composer drafts;
-- completion watches;
-- open-thread visibility and notification routes;
-- drawer tab.
-
-Completion monitoring can poll both servers while the activity shows one. Notifications include the environment ID, switch the drawer to that environment, and then open the named thread. Identical session IDs on the two servers remain distinct.
-
-The thread-start menu uses the server's profile list. With two Local profiles it shows profile selection before model selection. With Converge's one profile it opens model selection immediately.
+The shared client keeps the selected drawer tab, composer drafts, and Local unlock key in WebView storage. Session lists and context come from the selected server after every reload. The thread-start menu uses that server's profile list.
 
 ## Session ownership
 
-Each Pi Remote deployment owns its Pi RPC processes, uploads, and local orchestrator view. Local owns Personal and Home; Converge owns work. Android combines the two environments at the client boundary. There is no server-to-server agent bridge or remote ledger reader.
+Each Pi Remote deployment owns its Pi RPC processes, uploads, and local orchestrator view. Local owns Personal and Home; Converge owns work. Kenan combines the two environments at the client boundary. There is no server-to-server agent bridge or remote ledger reader.

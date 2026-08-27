@@ -26,11 +26,10 @@ This repository owns build commands, package and skill roles, API contracts, and
 cd /home/kenan/projects/pi-stack
 npm ci --ignore-scripts
 npm run check
-cd apps/remote/android
-./gradlew test
+npm run android:test --workspace=kenan
 ```
 
-The Android build reads endpoint access from uncommitted properties. A direct endpoint needs only its URL. An SSH endpoint uses a loopback URL created by the app and requires its forwarding identity:
+Kenan reads endpoint access from `apps/kenan/android/local.properties`. A direct endpoint needs only its URL. An SSH endpoint uses a loopback URL created by the app and requires its forwarding identity:
 
 ```properties
 piRemoteLocalUrl=https://gmktec.example-tailnet.ts.net
@@ -74,7 +73,7 @@ The command publishes runtime, Orchestrator, Pi Remote, tools, skills, and setti
 
 Converge Pi Remote reports environment ID `converge`. It has one profile rooted at `/home/kenan/converge` and executes Pi directly on that machine.
 
-Pi Remote listens on loopback. Android opens a pinned SSH connection and forwards its app-local port to that listener. A dedicated SSH account accepts the app key with forwarding restricted to `127.0.0.1:8788`; it cannot open a shell. No GCP firewall rule exposes the application port.
+Pi Remote listens on loopback. Kenan opens a pinned SSH connection and forwards its app-local port to that listener. A dedicated SSH account accepts the app key with forwarding restricted to `127.0.0.1:8788`; it cannot open a shell. No GCP firewall rule exposes the application port.
 
 ## Environment ownership
 
@@ -90,6 +89,6 @@ A release is complete when:
 - Pi settings match the role in `config/package-sets.json`;
 - Pi Remote is last for roles that load it;
 - Tailscale reaches Local, the restricted SSH key reaches Converge, and GCP exposes no Pi Remote port;
-- Android can switch repeatedly without crossing threads, keys, voice, downloads, or notifications;
+- Kenan can switch repeatedly without crossing threads, keys, voice, or downloads;
 - a migrated Work thread resumes on Converge;
 - both machine handbooks point here.

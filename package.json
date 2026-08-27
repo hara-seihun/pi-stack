@@ -7,7 +7,7 @@
   "type": "module",
   "workspaces": [
     "apps/remote",
-    "apps/kenan-dev",
+    "apps/kenan",
     "packages/*",
     "packages/runtime/extensions/pi-cursor",
     "tools/*"
@@ -16,8 +16,8 @@
     "build": "npm run build --workspace=pi-orchestrator",
     "typecheck": "npm run typecheck --workspace=pi-orchestrator",
     "test": "node scripts/test.mjs",
-    "build:kenan-dev": "npm run build --workspace=kenan-dev",
-    "check": "npm run typecheck && npm run build && npm run build:kenan-dev && npm test && node scripts/check-skill-sets.mjs"
+    "build:kenan": "npm run build --workspace=kenan",
+    "check": "npm run typecheck && npm run build && npm run build:kenan && npm test && node scripts/check-skill-sets.mjs"
   },
   "overrides": {
     "@earendil-works/pi-ai": "0.84.2",

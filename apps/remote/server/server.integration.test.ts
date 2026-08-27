@@ -1087,18 +1087,12 @@ describe("web and supervisor integration", () => {
     expect(destinations[0].models.map((model: any) => model.id)).toEqual(["sol", "opus", "fable"]);
   });
 
-  // Both clients resolve a glyph by the name the catalog gives it, and both fail quietly:
-  // the web serves nothing and Android falls back to a generic mark. A named glyph that no
-  // client can draw is therefore invisible until someone opens the menu.
-  test("every choice names a glyph both clients can draw", async () => {
+  test("every choice names a glyph the shared client can draw", async () => {
     const source = join(import.meta.dir, "..");
     const starts = await api("GET", "/v1/thread-starts");
     const icons = starts.value.destinations.flatMap((entry: any) => [entry.icon, ...entry.models.map((model: any) => model.icon)]);
     expect(icons.length).toBeGreaterThan(0);
-    for (const icon of icons) {
-      expect(existsSync(join(source, "web", `${icon}.svg`))).toBe(true);
-      expect(existsSync(join(source, "android/app/src/main/res/drawable", `ic_${icon}.xml`))).toBe(true);
-    }
+    for (const icon of icons) expect(existsSync(join(source, "web", `${icon}.svg`))).toBe(true);
   });
 
   test("rolls account aliases into common and uncommon model groups", async () => {

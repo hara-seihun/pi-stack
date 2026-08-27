@@ -6,7 +6,8 @@ This repository owns Hara's custom Pi runtime, agent orchestrator, remote client
 
 - [`packages/runtime`](packages/runtime/README.md) pins Pi and owns the runtime extensions, model catalog, and prompt evaluator.
 - [`packages/orchestrator`](packages/orchestrator/README.md) schedules and hosts persistent agent work.
-- [`apps/remote`](apps/remote/README.md) contains the Pi Remote supervisor, web client, Android app, and context mirror extension.
+- [`apps/remote`](apps/remote/README.md) contains the Pi Remote supervisor, shared client, and context mirror extension.
+- [`apps/kenan`](apps/kenan/README.md) packages the shared client for Android.
 - [`skills`](skills/README.md) contains the shared first-party skills loaded by interactive and fleet agents.
 - [`tools`](tools/README.md) contains commands whose contracts depend on Pi or its session format.
 
@@ -21,7 +22,7 @@ Install every JavaScript workspace from the root:
 ```bash
 npm ci --ignore-scripts
 npm run check
-cd apps/remote/android && ./gradlew test
+npm run android:test --workspace=kenan
 ```
 
 `npm test` runs independent suites in parallel and normally finishes in under twenty seconds. The Android project keeps its Gradle build because it has no useful dependency boundary with the JavaScript workspaces.
@@ -37,7 +38,7 @@ Pi Remote environments are independent servers:
 - `local` runs Personal and Home threads on GMKtec.
 - `converge` runs one work profile directly on Converge.
 
-The Android drawer switches between them. Endpoint URLs enter the build through `apps/remote/android/local.properties`; they are not committed.
+The Kenan drawer switches between them. Endpoint URLs enter the build through `apps/kenan/android/local.properties`; they are not committed.
 
 ## Architecture
 
