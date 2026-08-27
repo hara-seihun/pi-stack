@@ -602,7 +602,8 @@ function inspectRecord(record, options = {}) {
 }
 
 function reconcileRecord(database, record, options) {
-  let inspection = inspectRecord(record, { ignoreLease: options.ignoreLease, safety: options.safety });
+  let safety = options.safety;
+  let inspection = inspectRecord(record, { ignoreLease: options.ignoreLease, safety });
   if (inspection.classification === "active") return { record, inspection, action: "none" };
   if (inspection.classification === "missing") {
     if (options.execute) updateState(database, record, "released", inspection.reason);
@@ -615,7 +616,8 @@ function reconcileRecord(database, record, options) {
     stopSystemdReferences(inspection.systemdUnits);
     removeDockerReferences(inspection.containers);
     killProcessReferences(inspection.processes);
-    inspection = inspectRecord({ ...current, state: "reclaiming" }, { ignoreLease: true });
+    safety = safetySnapshot();
+    inspection = inspectRecord({ ...current, state: "reclaiming" }, { ignoreLease: true, safety });
   }
   if (inspection.classification === "referenced" || inspection.classification === "blocked") {
     if (options.execute) updateState(database, record, inspection.classification, inspection.reason);
@@ -624,7 +626,7 @@ function reconcileRecord(database, record, options) {
   let removedCaches = [];
   if (options.execute) {
     removedCaches = stripCaches(record, options.statePath);
-    inspection = inspectRecord(record, { ignoreLease: true });
+    inspection = inspectRecord(record, { ignoreLease: true, safety });
   }
   if (inspection.classification === "repair-required") {
     if (options.execute) updateState(database, record, "repair-required", inspection.reason);
@@ -650,6 +652,7 @@ function recordsInGroup(database, record) {
 
 function groupReconciliation(database, records, options) {
   const now = Date.now();
+  let safety = options.safety;
   const groupId = records[0]?.groupId;
   if (!options.ignoreLease && records.some((record) => record.leaseExpiresAt > now)) {
     const expires = Math.max(...records.map((record) => record.leaseExpiresAt));
@@ -660,7 +663,7 @@ function groupReconciliation(database, records, options) {
     }));
   }
 
-  let inspections = records.map((record) => inspectRecord(record, { ignoreLease: true, safety: options.safety }));
+  let inspections = records.map((record) => inspectRecord(record, { ignoreLease: true, safety }));
   if (options.execute && options.reapExpired && inspections.some((inspection) => inspection.classification === "referenced")) {
     const current = records.map((record) => recordBy(database, { id: record.id }));
     if (!options.ignoreLease && current.some((record) => record.leaseExpiresAt > Date.now())) {
@@ -670,7 +673,8 @@ function groupReconciliation(database, records, options) {
     stopSystemdReferences(systemUnits);
     removeDockerReferences(inspections.flatMap((inspection) => inspection.containers));
     killProcessReferences(inspections.flatMap((inspection) => inspection.processes));
-    inspections = records.map((record) => inspectRecord(record, { ignoreLease: true }));
+    safety = safetySnapshot();
+    inspections = records.map((record) => inspectRecord(record, { ignoreLease: true, safety }));
   }
 
   const removedCaches = new Map();
@@ -678,7 +682,7 @@ function groupReconciliation(database, records, options) {
     records.forEach((record, index) => {
       if (inspections[index].classification !== "missing") removedCaches.set(record.id, stripCaches(record, options.statePath));
     });
-    inspections = records.map((record) => inspectRecord(record, { ignoreLease: true }));
+    inspections = records.map((record) => inspectRecord(record, { ignoreLease: true, safety }));
   }
 
   const releasable = inspections.every((inspection) => ["missing", "reclaimable"].includes(inspection.classification));
