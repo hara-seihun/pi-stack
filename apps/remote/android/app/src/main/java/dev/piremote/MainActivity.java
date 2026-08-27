@@ -141,6 +141,7 @@ public class MainActivity extends Activity {
     private long syncErrorDelayMs = 1_000;
     private String syncEpoch = "";
     private ContextSync.Document contextDocument;
+    private boolean contextAuthorityKnown;
     private final List<View> contextEntryViews = new ArrayList<>();
     private final List<ContextEntry> contextEntries = new ArrayList<>();
     private final ContextRenderWindow contextWindow = new ContextRenderWindow(
@@ -1489,9 +1490,9 @@ public class MainActivity extends Activity {
                 JSONObject update = all.optJSONObject("contextUpdate");
                 if (requestedSession != null && requestedAgent == null && update != null) {
                     nextDocument = ContextSync.update(nextDocument, update);
-                    if (nextDocument != null) context = new JSONObject()
-                        .put("capturedAt", nextDocument.capturedAt)
-                        .put("context", new JSONObject(nextDocument.json))
+                    context = new JSONObject()
+                        .put("capturedAt", nextDocument == null ? 0 : nextDocument.capturedAt)
+                        .put("context", nextDocument == null ? JSONObject.NULL : new JSONObject(nextDocument.json))
                         .put("session", all.optJSONObject("selectedSession"));
                 }
                 ContextSync.Document nextAgentText = requestedAgentTextDocument;
@@ -1515,11 +1516,15 @@ public class MainActivity extends Activity {
                     String epoch = all.optString("epoch");
                     if (!syncEpoch.isEmpty() && !syncEpoch.equals(epoch)) {
                         contextDocument = null;
+                        contextAuthorityKnown = update != null;
                         syncSequence = 0;
                     } else {
                         syncEpoch = epoch;
                         syncSequence = all.optLong("seq", syncSequence);
-                        if (Objects.equals(requestedSession, selectedId)) contextDocument = appliedDocument;
+                        if (Objects.equals(requestedSession, selectedId)) {
+                            contextDocument = appliedDocument;
+                            if (update != null) contextAuthorityKnown = true;
+                        }
                     }
                     JSONObject listedRuns = all.optJSONObject("agentRuns");
                     if (requestedAgentList && listedRuns != null) {
@@ -1565,9 +1570,11 @@ public class MainActivity extends Activity {
                     syncErrorDelayMs = 1_000;
                     finishRefresh(requestedPollGeneration, 0);
                 });
-                if (update != null && appliedDocument != null && requestedSession != null) {
-                    try { PiRemoteCache.save(this, requestedEnvironmentId, requestedSession, appliedDocument); }
-                    catch (Exception cacheFailure) { Log.w("PiRemote", "Could not cache context", cacheFailure); }
+                if (update != null && requestedSession != null) {
+                    try {
+                        if (appliedDocument == null) PiRemoteCache.remove(this, requestedEnvironmentId, requestedSession);
+                        else PiRemoteCache.save(this, requestedEnvironmentId, requestedSession, appliedDocument);
+                    } catch (Exception cacheFailure) { Log.w("PiRemote", "Could not update context cache", cacheFailure); }
                 }
             } catch (Exception failure) {
                 main.post(() -> {
@@ -1767,7 +1774,7 @@ public class MainActivity extends Activity {
 
     private void resetTranscript() {
         transcriptOpenedMs = SystemClock.uptimeMillis();
-        lastSeq = 0; contextCapturedAt = 0; contextDocument = null; transcriptScroll.resetToEnd();
+        lastSeq = 0; contextCapturedAt = 0; contextDocument = null; contextAuthorityKnown = false; transcriptScroll.resetToEnd();
         transcript.removeAllViews(); toolCards.clear(); userMessageLabels.clear();
         contextRenderGeneration++;
         contextWindow.reset();
@@ -2843,7 +2850,8 @@ public class MainActivity extends Activity {
                     .put("context", new JSONObject(cached.json));
                 List<ContextEntry> entries = modelContextEntries(rendered.optJSONObject("context"));
                 main.post(() -> {
-                    if (generation != selectionGeneration || !Objects.equals(id, selectedId) || contextDocument != null) return;
+                    if (generation != selectionGeneration || !Objects.equals(id, selectedId)
+                        || contextAuthorityKnown || contextDocument != null) return;
                     contextDocument = cached;
                     renderContext(rendered, entries);
                     connection.setText("●  Cached · connecting"); connection.setTextColor(MUTED); connection.setVisibility(View.VISIBLE);

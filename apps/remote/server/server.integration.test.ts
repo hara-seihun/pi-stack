@@ -869,6 +869,17 @@ describe("web and supervisor integration", () => {
     expect(applyContextSplice(baseDocument, second.value.contextUpdate.splice)).toBe(targetDocument);
   });
 
+  test("confirms an empty selected context even when the client has not loaded its cache yet", async () => {
+    const id = await createThread("home", "sol");
+    const result = await api("POST", "/v1/sync", {
+      after: 0,
+      waitMs: 0,
+      selectedId: id,
+      includeDashboard: false,
+    });
+    expect(result.value.contextUpdate).toEqual({ kind: "clear", capturedAt: 0, hash: "" });
+  });
+
   test("resumes uploads by committed offset and serves byte ranges", async () => {
     const id = await createThread("home", "sol");
     const content = Buffer.from("resumable attachment content");

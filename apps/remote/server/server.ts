@@ -1866,7 +1866,7 @@ const server = Bun.serve({
                   ? { kind: "full", capturedAt: stored.capturedAt, hash, document }
                   : { kind: "splice", capturedAt: stored.capturedAt, hash, splice: contextSplice(base, document) };
               }
-            } else if (body.contextHash) contextUpdate = { kind: "clear", capturedAt: 0, hash: "" };
+            } else contextUpdate = { kind: "clear", capturedAt: 0, hash: "" };
           }
         }
         let sessionEvents: any = null;

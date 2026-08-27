@@ -3,6 +3,7 @@ package dev.piremote;
 import static org.junit.Assert.*;
 import java.nio.charset.StandardCharsets;
 import java.util.Base64;
+import org.json.JSONObject;
 import org.junit.Test;
 
 public class ContextSyncTest {
@@ -27,5 +28,11 @@ public class ContextSyncTest {
         assertThrows(IllegalStateException.class, () -> ContextSync.splice(
             new ContextSync.Document(base, ContextSync.hash(base), 1), 2, ContextSync.hash(base), ContextSync.hash("two"),
             0, 3, Base64.getEncoder().encodeToString("bad".getBytes(StandardCharsets.UTF_8))));
+    }
+
+    @Test public void clearRemovesThePreviousDocument() throws Exception {
+        String base = "{\"messages\":[\"removed by compaction\"]}";
+        ContextSync.Document current = new ContextSync.Document(base, ContextSync.hash(base), 1);
+        assertNull(ContextSync.update(current, new JSONObject().put("kind", "clear")));
     }
 }

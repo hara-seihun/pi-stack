@@ -40,8 +40,8 @@ android {
         manifestPlaceholders = [piRemoteAppLabel: remoteAppLabel]
         minSdk 26
         targetSdk 36
-        versionCode 95
-        versionName "0.55.11"
+        versionCode 96
+        versionName "0.55.12"
         buildConfigField "String", "LOCAL_SERVER_URL", javaString(localUrl)
         buildConfigField "String", "CONVERGE_SERVER_URL", javaString(convergeUrl)
         buildConfigField "String", "CONVERGE_AUTH", javaString(convergeAuth)
@@ -80,4 +80,5 @@ dependencies {
     implementation "androidx.dynamicanimation:dynamicanimation:1.1.0"
     implementation "com.github.mwiede:jsch:2.28.7"
     testImplementation "junit:junit:4.13.2"
+    testImplementation "org.json:json:20240303"
 }
