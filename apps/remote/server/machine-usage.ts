@@ -93,6 +93,8 @@ export class CpuUsageWindow {
 }
 
 const cpuUsage = new CpuUsageWindow();
+const cpuSampler = setInterval(() => cpuUsage.read(), CPU_SAMPLE_INTERVAL_MS);
+cpuSampler.unref();
 
 export function parseGpuPercent(raw: string): number | null {
   const text = raw.trim();

@@ -78,6 +78,8 @@ public class MainActivity extends Activity {
 
     private Haptics haptics;
     private final ExecutorService network = Executors.newSingleThreadExecutor();
+    private final ExecutorService cacheNetwork = Executors.newSingleThreadExecutor();
+    private final ExecutorService transportNetwork = Executors.newSingleThreadExecutor();
     private final ExecutorService abortNetwork = Executors.newSingleThreadExecutor();
     // One replacement poll may start while a cancelled HTTP or SSH call unwinds.
     private final ExecutorService pollNetwork = Executors.newFixedThreadPool(2);
@@ -121,6 +123,8 @@ public class MainActivity extends Activity {
     private int selectedSteeringQueued = 0, selectedFollowUpQueued = 0;
     private JSONArray selectedQueuedMessages = new JSONArray();
     private JSONArray availableCommands = new JSONArray();
+    private String commandsSessionId;
+    private boolean commandsLoading;
     private long selectedRevision = 0, selectionGeneration = 0, actionGeneration = 0;
     private boolean refreshAgain = false;
     private final Map<String, Long> actionTokens = new HashMap<>();
@@ -259,6 +263,7 @@ public class MainActivity extends Activity {
         haptics.setWatching(true);
         activityVisible = true;
         restartSyncImmediately();
+        warmRemoteTransports();
         flushOutbox();
         publishOpenThread();
         main.removeCallbacks(openThreadHeartbeat);
@@ -284,8 +289,19 @@ public class MainActivity extends Activity {
         cancelSyncPoll();
         main.removeCallbacks(openThreadHeartbeat);
         if (fileExplorer != null) fileExplorer.destroy();
-        network.shutdownNow(); abortNetwork.shutdownNow(); pollNetwork.shutdownNow();
+        network.shutdownNow(); cacheNetwork.shutdownNow(); transportNetwork.shutdownNow();
+        abortNetwork.shutdownNow(); pollNetwork.shutdownNow();
         super.onDestroy();
+    }
+
+    private void warmRemoteTransports() {
+        for (PiRemoteEnvironment.Endpoint endpoint : PiRemoteEnvironment.all()) {
+            if (endpoint.authentication != PiRemoteEnvironment.Authentication.SSH) continue;
+            transportNetwork.execute(() -> {
+                try { PiRemoteTransport.ensure(endpoint); }
+                catch (IOException failure) { Log.w("PiRemote", "Could not warm " + endpoint.name + " transport", failure); }
+            });
+        }
     }
 
     private void publishOpenThread() {
@@ -1808,13 +1824,13 @@ public class MainActivity extends Activity {
         }
         JSONObject memory = machine.optJSONObject("memory");
         JSONObject disk = machine.optJSONObject("disk");
-        String cpu = machine.has("cpuPercent") && !machine.isNull("cpuPercent")
-            ? machine.optInt("cpuPercent") + "%" : "—";
-        String gpu = machine.has("gpuPercent") && !machine.isNull("gpuPercent")
-            ? machine.optInt("gpuPercent") + "%" : "—";
-        String ram = memory == null ? "—" : memory.optInt("percentUsed") + "%";
-        String storage = disk == null ? "—" : disk.optInt("percentUsed") + "%";
-        machineUsageText = "CPU " + cpu + " · GPU " + gpu + " · RAM " + ram + " · DISK " + storage;
+        Integer cpu = machine.has("cpuPercent") && !machine.isNull("cpuPercent")
+            ? machine.optInt("cpuPercent") : null;
+        Integer gpu = machine.has("gpuPercent") && !machine.isNull("gpuPercent")
+            ? machine.optInt("gpuPercent") : null;
+        Integer ram = memory == null ? null : memory.optInt("percentUsed");
+        Integer storage = disk == null ? null : disk.optInt("percentUsed");
+        machineUsageText = MachineUsageText.summary(cpu, gpu, ram, storage);
         machineUsageDescription = machineUsageText;
         if (memory != null) machineUsageDescription += ". RAM " + gib(memory.optLong("usedBytes")) + " of " + gib(memory.optLong("totalBytes"));
         if (disk != null) machineUsageDescription += ". Disk " + gib(disk.optLong("usedBytes")) + " of " + gib(disk.optLong("totalBytes"));
@@ -2603,6 +2619,10 @@ public class MainActivity extends Activity {
         slashCommandList.removeAllViews();
         String token = slashToken();
         if (token == null) { slashCommandList.setVisibility(View.GONE); return; }
+        if (selectedId != null && !Objects.equals(commandsSessionId, selectedId) && !commandsLoading) {
+            refreshCommands();
+            return;
+        }
         int shown = 0;
         for (int i = 0; i < availableCommands.length(); i++) {
             JSONObject command = availableCommands.optJSONObject(i);
@@ -2629,8 +2649,11 @@ public class MainActivity extends Activity {
 
     private void refreshCommands() {
         String id = selectedId;
-        availableCommands = new JSONArray(); renderSlashCommands();
-        if (id == null) return;
+        availableCommands = new JSONArray();
+        commandsSessionId = null;
+        if (id == null) { commandsLoading = false; renderSlashCommands(); return; }
+        commandsLoading = true;
+        renderSlashCommands();
         network.execute(() -> {
             try {
                 JSONObject result = api("GET", "/v1/sessions/" + id + "/commands", null);
@@ -2638,10 +2661,16 @@ public class MainActivity extends Activity {
                 main.post(() -> {
                     if (!Objects.equals(selectedId, id)) return;
                     availableCommands = commands == null ? new JSONArray() : commands;
+                    commandsSessionId = id;
+                    commandsLoading = false;
                     renderSlashCommands(); updateComposer();
                 });
             } catch (Exception error) {
-                main.post(() -> { if (Objects.equals(selectedId, id)) note("Could not load slash commands: " + shortError(error)); });
+                main.post(() -> {
+                    if (!Objects.equals(selectedId, id)) return;
+                    commandsLoading = false;
+                    note("Could not load slash commands: " + shortError(error));
+                });
             }
         });
     }
@@ -2781,7 +2810,10 @@ public class MainActivity extends Activity {
             selectionGeneration++;
             selectedId = id; selectedRevision = revision;
             rememberThread(id);
-            refreshCommands();
+            availableCommands = new JSONArray();
+            commandsSessionId = null;
+            commandsLoading = false;
+            renderSlashCommands();
         }
         try {
             applySelectedSnapshot(new JSONObject().put("id", id).put("name", name).put("cwd", cwd)
@@ -2803,7 +2835,7 @@ public class MainActivity extends Activity {
 
     private void loadCachedContext(String id, long generation) {
         String environmentId = PiRemoteEnvironment.current().id;
-        network.execute(() -> {
+        cacheNetwork.execute(() -> {
             ContextSync.Document cached = PiRemoteCache.load(this, environmentId, id);
             if (cached == null) return;
             try {
@@ -2824,7 +2856,7 @@ public class MainActivity extends Activity {
         selectionGeneration++;
         selectedId = null; selectedState = "STOPPED"; selectedActivity = "IDLE"; selectedTool = ""; selectedRevision = 0;
         selectedSteeringQueued = 0; selectedFollowUpQueued = 0; selectedQueuedMessages = new JSONArray(); renderMessageQueue(); lastSeq = 0;
-        availableCommands = new JSONArray(); renderSlashCommands();
+        availableCommands = new JSONArray(); commandsSessionId = null; commandsLoading = false; renderSlashCommands();
         resetTranscript();
         detail.setVisibility(View.GONE); prompt.setText(""); clearAttachments(true); updateTopBar();
         publishOpenThread();
