@@ -26,11 +26,12 @@
 set -euo pipefail
 
 API=${PI_REMOTE_API:-http://127.0.0.1:8788}
+OWNER=${PI_REMOTE_USER:-${USER:-$(id -un)}}
 UNIT=pi-remote-restart
 if [[ -n ${PI_REMOTE_SERVICE:-} ]]; then
   SERVICE=$PI_REMOTE_SERVICE
 else
-  TEMPLATE_SERVICE="pi-remote@${USER:-$(id -un)}.service"
+  TEMPLATE_SERVICE="pi-remote@$OWNER.service"
   if systemctl is-active --quiet "$TEMPLATE_SERVICE"; then
     SERVICE="$TEMPLATE_SERVICE"
   elif systemctl is-active --quiet pi-remote.service; then
@@ -59,7 +60,7 @@ fi
 if [[ ${1:-} == "--wait-loop" ]]; then
   deadline=$((SECONDS + GRACE_SECONDS))
   while ((SECONDS < deadline)); do
-    if sessions=$(curl -sf --max-time 10 "$API/v1/sessions"); then
+    if sessions=$(curl -sf --max-time 10 -H "x-pi-remote-user: $OWNER" "$API/v1/sessions"); then
       # Parsed, not grepped: a thread's own live text can quote any state.
       count=$(printf '%s' "$sessions" | python3 -c \
         'import json,sys; print(sum(s["state"] == "RUNNING" for s in json.load(sys.stdin)["sessions"]))')
@@ -91,6 +92,7 @@ sudo -n systemd-run --collect --unit="$UNIT" \
   --setenv=PATH="$PATH" \
   --setenv=PI_REMOTE_API="$API" \
   --setenv=PI_REMOTE_SERVICE="$SERVICE" \
+  --setenv=PI_REMOTE_USER="$OWNER" \
   --setenv=PI_REMOTE_RESTART_POLL_SECONDS="$POLL_SECONDS" \
   --setenv=PI_REMOTE_RESTART_GRACE_SECONDS="$GRACE_SECONDS" \
   "$(realpath "$0")" --wait-loop

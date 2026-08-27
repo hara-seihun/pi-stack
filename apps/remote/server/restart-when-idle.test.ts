@@ -26,7 +26,7 @@ describe("idle-safe Pi Remote activation", () => {
     `);
     executable(join(directory, "sudo"), `[ "$1" = -n ] && shift\nexec "$@"`);
     executable(join(directory, "systemd-run"), `printf 'systemd-run %s\\n' "$*" >> "$TRACE"`);
-    executable(join(directory, "curl"), `printf '{"sessions":[]}'`);
+    executable(join(directory, "curl"), `printf 'curl %s\\n' "$*" >> "$TRACE"\nprintf '{"sessions":[]}'`);
 
     const script = join(import.meta.dir, "..", "restart-when-idle");
     const environment = {
@@ -40,12 +40,20 @@ describe("idle-safe Pi Remote activation", () => {
     expect(readFileSync(trace, "utf8")).toContain(
       "--setenv=PI_REMOTE_SERVICE=pi-remote@kenan.service",
     );
+    expect(readFileSync(trace, "utf8")).toContain("--setenv=PI_REMOTE_USER=kenan");
 
     writeFileSync(trace, "");
     const waited = Bun.spawnSync([script, "--wait-loop"], {
-      env: { ...environment, USER: "root", PI_REMOTE_SERVICE: "pi-remote@kenan.service" },
+      env: {
+        ...environment,
+        USER: "root",
+        PI_REMOTE_SERVICE: "pi-remote@kenan.service",
+        PI_REMOTE_USER: "kenan",
+      },
     });
     expect(waited.exitCode).toBe(0);
-    expect(readFileSync(trace, "utf8")).toContain("systemctl restart pi-remote@kenan.service");
+    const waitTrace = readFileSync(trace, "utf8");
+    expect(waitTrace).toContain("x-pi-remote-user: kenan");
+    expect(waitTrace).toContain("systemctl restart pi-remote@kenan.service");
   });
 });

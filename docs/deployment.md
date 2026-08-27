@@ -47,6 +47,8 @@ piRemoteConvergeSshRemotePort=8788
 
 Hostnames and credentials belong in machine-local configuration, not documentation or source. The SSH account must allow local forwarding only to the configured Pi Remote port.
 
+`deploy/remote` publishes the tested artifact without ending active work. Activate it with `apps/remote/restart-when-idle`. The root waiter keeps the caller's service and router identity, restarts as soon as no thread is working, and sends SIGHUP after twenty minutes if work never goes idle. SIGHUP returns unfinished work to the durable queue before systemd starts the new release. Use `--now` when activation cannot wait, and inspect `journalctl -u pi-remote-restart` for the result.
+
 ## GMKtec
 
 The NixOS repository owns the deployment command and service definitions. It publishes:
