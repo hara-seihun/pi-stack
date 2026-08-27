@@ -25,6 +25,29 @@
 # Progress and outcome: journalctl -u pi-remote-restart -f
 set -euo pipefail
 
+usage() {
+  cat <<'USAGE'
+usage: restart-when-idle [--now]
+
+Wait until Pi Remote has no working thread, then restart it. After the bounded
+grace period, reload it so running work returns to the durable queue first.
+
+  --now   reload immediately
+  --help  show this help
+USAGE
+}
+
+case ${1:-} in
+  --help|-h) usage; exit 0 ;;
+  ""|--now|--wait-loop) ;;
+  *) echo "restart-when-idle: unknown argument: $1" >&2; usage >&2; exit 64 ;;
+esac
+if (($# > 1)); then
+  echo "restart-when-idle: expected at most one argument" >&2
+  usage >&2
+  exit 64
+fi
+
 API=${PI_REMOTE_API:-http://127.0.0.1:8788}
 OWNER=${PI_REMOTE_USER:-${USER:-$(id -un)}}
 UNIT=pi-remote-restart

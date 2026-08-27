@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, it } from "bun:test";
-import { chmodSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { chmodSync, existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
@@ -35,6 +35,11 @@ describe("idle-safe Pi Remote activation", () => {
       TRACE: trace,
       USER: "kenan",
     };
+    const help = Bun.spawnSync([script, "--help"], { env: environment });
+    expect(help.exitCode).toBe(0);
+    expect(help.stdout.toString()).toContain("usage: restart-when-idle");
+    expect(existsSync(trace)).toBe(false);
+
     const queued = Bun.spawnSync([script], { env: environment });
     expect(queued.exitCode).toBe(0);
     expect(readFileSync(trace, "utf8")).toContain(
