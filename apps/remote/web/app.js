@@ -30,7 +30,9 @@ const state = {
   selectedId: null, selectedName: "Agent", selectedCwd: "/", selectedState: "STOPPED", selectedActivity: "IDLE", selectedTool: "",
   steeringQueued: 0, followUpQueued: 0, queuedMessages: [], selectedRevision: 0,
   selectionEpoch: 0, actionEpoch: 0, pendingActions: new Map(),
-  lastSeq: 0, contextCapturedAt: 0, contextEntries: [], pollBusy: false, pollAgain: false, settingsOpen: false,
+  lastSeq: 0, contextCapturedAt: 0, contextEntries: [], pollBusy: false, pollAgain: false, pollController: null, settingsOpen: false,
+  syncSeq: 0, syncEpoch: "", contextDocument: null, contextSessionId: null,
+  agentLiveTextDocument: null, agentLiveThinkingDocument: null, agentDocumentRunId: null,
   toolCards: new Map(), userMessageLabels: new Map(), followTail: true, attachments: [], attachmentGeneration: 0,
   slashCommands: [], slashCommandsLoading: false,
   planCards: [],
@@ -286,6 +288,38 @@ async function api(method, path, body, timeout = 20000, retryOnLock = true) {
     if (error?.name === "AbortError") throw new Error("Request timed out");
     throw error;
   } finally { clearTimeout(timer); }
+}
+
+async function syncRequest(body, signal, retryOnLock = true) {
+  if (signal.aborted) throw new DOMException("Synchronization cancelled", "AbortError");
+  const controller = new AbortController();
+  let timedOut = false;
+  const cancel = () => controller.abort();
+  signal.addEventListener("abort", cancel, { once: true });
+  const timer = setTimeout(() => { timedOut = true; controller.abort(); }, 35_000);
+  try {
+    const response = await fetch("/v1/sync", {
+      method: "POST",
+      headers: { accept: "application/json", "content-type": "application/json" },
+      body: JSON.stringify(body),
+      signal: controller.signal,
+      cache: "no-store",
+    });
+    const text = await response.text();
+    const result = text ? JSON.parse(text) : {};
+    if (response.status === 423 && retryOnLock) {
+      await ensureUnlocked();
+      return syncRequest(body, signal, false);
+    }
+    if (!response.ok) throw new Error(result.error || `HTTP ${response.status}`);
+    return result;
+  } catch (error) {
+    if (error?.name === "AbortError" && timedOut) throw new Error("Synchronization timed out");
+    throw error;
+  } finally {
+    clearTimeout(timer);
+    signal.removeEventListener("abort", cancel);
+  }
 }
 
 function activityLabel(activity, tool = "") {
@@ -714,6 +748,11 @@ function clearConversation() {
   state.lastSeq = 0;
   state.contextCapturedAt = 0;
   state.contextEntries = [];
+  state.contextDocument = null;
+  state.contextSessionId = null;
+  state.agentLiveTextDocument = null;
+  state.agentLiveThinkingDocument = null;
+  state.agentDocumentRunId = null;
   state.followTail = true;
   state.toolCards.clear();
   state.userMessageLabels.clear();
@@ -1083,37 +1122,82 @@ function renderMachine(machine) {
   updateUsageSummary();
 }
 
-async function poll() {
-  if (state.pollBusy) { state.pollAgain = true; return; }
+async function poll(immediate = false) {
+  if (state.pollBusy) {
+    state.pollAgain = true;
+    state.pollController?.abort();
+    return;
+  }
   state.pollBusy = true;
+  const controller = new AbortController();
+  state.pollController = controller;
   const requested = state.selectedId;
   const requestedAgent = state.agentRunId;
   const after = state.lastSeq;
   const selectionEpoch = state.selectionEpoch;
   const actionEpoch = state.actionEpoch;
+  const requestedContext = requested && state.contextSessionId === requested ? state.contextDocument : null;
+  const requestedAgentText = requestedAgent && state.agentDocumentRunId === requestedAgent ? state.agentLiveTextDocument : null;
+  const requestedAgentThinking = requestedAgent && state.agentDocumentRunId === requestedAgent ? state.agentLiveThinkingDocument : null;
+  let retryDelay = 0;
   try {
-    const [all, context, agentEvents, agentList] = await Promise.all([
-      api("GET", "/v1/sessions"),
-      requested && !requestedAgent ? api("GET", `/v1/sessions/${requested}/context`).catch((error) => ({ pollError: error })) : Promise.resolve(null),
-      requestedAgent ? api("GET", `/v1/agents/runs/${encodeURIComponent(requestedAgent)}/events?after=${after}`).catch((error) => ({ pollError: error })) : Promise.resolve(null),
-      state.drawerTab === "agents" || requestedAgent ? api("GET", "/v1/agents/runs").catch((error) => ({ pollError: error })) : Promise.resolve(null),
-    ]);
-    if (agentList && !agentList.pollError) {
-      applyAgentList(agentList);
-    } else if (agentList) {
-      state.agentError = `Agents unavailable · ${agentList.pollError.message}`;
+    const body = {
+      after: state.syncSeq,
+      waitMs: immediate ? 0 : 25_000,
+      contextProjection: "display",
+      includeArchived: true,
+      includeAgentList: state.drawerTab === "agents" || Boolean(requestedAgent),
+      includeDashboard: true,
+    };
+    if (requested && !requestedAgent) {
+      body.selectedId = requested;
+      if (requestedContext) body.contextHash = requestedContext.hash;
     }
-    if (agentEvents && !agentEvents.pollError && requestedAgent === state.agentRunId && selectionEpoch === state.selectionEpoch) {
-      if (agentEvents.run) state.agentRun = agentEvents.run;
-      renderEvents(agentEvents);
+    if (requestedAgent) {
+      body.agentRunId = requestedAgent;
+      body.agentAfter = after;
+      if (requestedAgentText) body.agentLiveTextHash = requestedAgentText.hash;
+      if (requestedAgentThinking) body.agentLiveThinkingHash = requestedAgentThinking.hash;
+    }
+    const all = await syncRequest(body, controller.signal);
+    if (controller.signal.aborted) throw new DOMException("Synchronization cancelled", "AbortError");
+
+    if (state.syncEpoch && state.syncEpoch !== all.epoch) {
+      state.contextDocument = null;
+      state.contextSessionId = null;
+      state.agentLiveTextDocument = null;
+      state.agentLiveThinkingDocument = null;
+      state.agentDocumentRunId = null;
+      state.syncSeq = 0;
+    }
+    state.syncEpoch = String(all.epoch || "");
+
+    if (all.agentRuns) applyAgentList(all.agentRuns);
+    const sameAgent = requestedAgent && requestedAgent === state.agentRunId && selectionEpoch === state.selectionEpoch;
+    if (all.agentEvents && sameAgent) {
+      const baseText = state.agentDocumentRunId === requestedAgent ? state.agentLiveTextDocument : null;
+      const baseThinking = state.agentDocumentRunId === requestedAgent ? state.agentLiveThinkingDocument : null;
+      const nextText = await window.PiRemoteSync.update(baseText, all.agentEvents.liveTextUpdate);
+      const nextThinking = await window.PiRemoteSync.update(baseThinking, all.agentEvents.liveThinkingUpdate);
+      if (controller.signal.aborted) throw new DOMException("Synchronization cancelled", "AbortError");
+      state.agentLiveTextDocument = nextText;
+      state.agentLiveThinkingDocument = nextThinking;
+      state.agentDocumentRunId = requestedAgent;
+      if (all.agentEvents.run) state.agentRun = all.agentEvents.run;
+      renderEvents({
+        ...all.agentEvents,
+        liveText: nextText?.document || "",
+        liveThinking: nextThinking?.document || "",
+      });
     }
     renderAgentList();
+
     const previous = new Map([...state.sessions, ...state.archivedSessions].map((session) => [session.id, session]));
     const mergeListed = (sessions) => (sessions || []).map((session) => {
       const old = previous.get(session.id);
       return old && Number(old.revision || 0) > Number(session.revision || 0) ? old : session;
     });
-    state.archiveSupported = Array.isArray(all.archivedSessions);
+    state.archiveSupported = true;
     state.sessions = mergeListed(all.sessions);
     state.archivedSessions = mergeListed(all.archivedSessions);
     const listedArchived = new Set(state.archivedSessions.map((session) => session.id));
@@ -1123,27 +1207,48 @@ async function poll() {
     const sameSelection = selectionEpoch === state.selectionEpoch && requested === state.selectedId && !state.agentRunId;
     const mutationStable = actionEpoch === state.actionEpoch && !selectedPendingAction();
     if (sameSelection && mutationStable) {
-      const selected = state.sessions.find((session) => session.id === requested);
+      const selected = all.selectedSession || state.sessions.find((session) => session.id === requested);
       if (selected) applySelectedSession(selected);
       else if (requested) clearSelection();
     }
-    if (context && !context.pollError && sameSelection) {
-      if (context.session) {
-        mergeSession(context.session);
-        if (mutationStable) applySelectedSession(context.session);
-      }
-      renderContext(context);
+    if (sameSelection && all.contextUpdate) {
+      const base = state.contextSessionId === requested ? state.contextDocument : null;
+      const next = await window.PiRemoteSync.update(base, all.contextUpdate);
+      if (controller.signal.aborted) throw new DOMException("Synchronization cancelled", "AbortError");
+      state.contextDocument = next;
+      state.contextSessionId = requested;
+      if (all.selectedSession) mergeSession(all.selectedSession);
+      if (mutationStable && all.selectedSession) applySelectedSession(all.selectedSession);
+      renderContext({
+        capturedAt: next?.capturedAt || 0,
+        context: next ? JSON.parse(next.document) : null,
+        session: all.selectedSession,
+      });
     }
+    state.syncSeq = Number(all.seq || state.syncSeq);
     if (!state.selectedId && !state.agentRunId && state.sessions.length && selectionEpoch === state.selectionEpoch) selectThread(state.sessions[0]);
-    renderThreads(); renderAgents(all.agents); renderTabs(); renderPlan(all.plans); renderGovernorControls(all.governors); renderMachine(all.machine); updateChrome();
+    renderThreads();
+    if (all.agents) renderAgents(all.agents);
+    renderTabs();
+    if (all.plans) renderPlan(all.plans);
+    if (all.governors) renderGovernorControls(all.governors);
+    if (all.machine) renderMachine(all.machine);
+    updateChrome();
     ui.connection.hidden = true;
   } catch (error) {
-    ui.connection.hidden = false;
-    ui.connection.textContent = `●  Offline · ${error.message}`; ui.connection.style.color = "var(--danger)";
-    ui.topState.textContent = "OFFLINE"; ui.topState.style.color = "var(--danger)";
+    if (error?.name !== "AbortError") {
+      state.syncSeq = 0;
+      retryDelay = 1_200;
+      ui.connection.hidden = false;
+      ui.connection.textContent = `●  Offline · ${error.message}`; ui.connection.style.color = "var(--danger)";
+      ui.topState.textContent = "OFFLINE"; ui.topState.style.color = "var(--danger)";
+    }
   } finally {
+    if (state.pollController === controller) state.pollController = null;
     state.pollBusy = false;
-    if (state.pollAgain) { state.pollAgain = false; queueMicrotask(poll); }
+    const again = state.pollAgain;
+    state.pollAgain = false;
+    setTimeout(() => poll(again), again ? 0 : retryDelay);
   }
 }
 
@@ -1852,4 +1957,4 @@ window.addEventListener("resize", () => {
 window.addEventListener("pagehide", stopVoice);
 if (innerWidth >= 1000) ui.drawer.classList.add("open");
 restoreDrawerTab();
-renderVoiceState("idle"); updateChrome(); renderTabs(); renderAgentList(); refreshMachineControls(); loadThreadStarts(); poll(); setInterval(poll, 1200);
+renderVoiceState("idle"); updateChrome(); renderTabs(); renderAgentList(); refreshMachineControls(); loadThreadStarts(); poll();

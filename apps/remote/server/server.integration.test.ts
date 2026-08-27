@@ -671,8 +671,12 @@ describe("web and supervisor integration", () => {
     expect(source).not.toContain("renderProcesses");
     expect(source).toContain("renderMarkdown");
     expect(source).toContain("modelContextEntries");
-    expect(source).toContain('api("GET", `/v1/sessions/${requested}/context`)');
+    expect(source).toContain('fetch("/v1/sync"');
+    expect(source).toContain('contextProjection: "display"');
+    expect(source).toContain("window.PiRemoteSync.update");
+    expect(source).not.toContain('api("GET", `/v1/sessions/${requested}/context`)');
     expect(source).not.toContain('api("GET", `/v1/sessions/${requested}/events?after=${after}`)');
+    expect(source).not.toContain("setInterval(poll");
     expect(source).not.toContain("function toast");
     expect(source).toContain("pi-remote-file");
     expect(source).toContain("/files?path=");
