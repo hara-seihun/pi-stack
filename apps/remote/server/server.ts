@@ -24,7 +24,6 @@ const DATA = process.env.PI_REMOTE_DATA ?? join(process.env.XDG_STATE_HOME ?? jo
 const INGESTION = process.env.PI_REMOTE_INGESTION ?? join(DATA, "ingestion");
 const PI = process.env.PI_BIN ?? "pi";
 const AUDIO = process.env.PI_REMOTE_AUDIO_BIN ?? "audio";
-const NICE = process.env.PI_REMOTE_NICE ?? "nice";
 const PRIVATE_ID = process.env.PI_REMOTE_PRIVATE_ID ?? "private";
 const PRIVATE_NAME = process.env.PI_REMOTE_PRIVATE_NAME ?? "Private";
 const PRIVATE_DIR = process.env.PI_REMOTE_PRIVATE_DIR ?? join(HOME, PRIVATE_ID);
@@ -1165,7 +1164,7 @@ async function startRuntime(row: any): Promise<Runtime> {
   }
   writeServiceTier(row.id, row.service_tier === "priority" ? "priority" : "default");
   const args = [
-    NICE, "-n", "10", PI, "--mode", "rpc", "--session-dir", join(DATA, "sessions"),
+    PI, "--mode", "rpc", "--session-dir", join(DATA, "sessions"),
     "--extension", SERVICE_TIER_EXTENSION,
     "--extension", THREAD_CONTEXT_EXTENSION,
   ];
