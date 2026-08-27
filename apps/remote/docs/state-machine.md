@@ -93,6 +93,8 @@ Document state and view state are separate. JSON parsing and entry modeling run 
 
 Every context entry has a stable key and a content signature. Reconciliation moves the existing view for a surviving key, updates it only when its signature changed, and creates as many missing views as fit an eight-millisecond frame budget. Backfilled rows never play arrival animations. Tool arguments, results, timing, and status update inside the existing card, so a growing result does not replay the card's entrance animation or lose its expanded state. A new context capture therefore does not recreate unchanged Markdown, tool cards, selections, or image state. Selection changes and context compaction invalidate only state whose keys no longer survive.
 
+The drawer's plan summary renders only cards with a measured percentage. Environments without an Anthropic or Cursor account do not get empty provider rows.
+
 Attachments upload in hash-checked chunks. Initialization by request ID returns the committed byte offset, so reconnecting resumes rather than creates another file. Completion checks the whole-file hash before the file enters ingestion. Downloads carry validators and byte-range support.
 
 ## Android file browsing

@@ -1779,7 +1779,7 @@ public class MainActivity extends Activity {
         List<String> descriptions = new ArrayList<>();
         if (cards != null) for (int index = 0; index < cards.length(); index++) {
             JSONObject card = cards.optJSONObject(index);
-            if (card == null) continue;
+            if (card == null || !PlanUsageRows.hasValue(card.optString("text"))) continue;
             String label = card.optString("label", "Provider");
             LinearLayout row = new LinearLayout(this); row.setGravity(Gravity.CENTER_VERTICAL);
             ImageView icon = new ImageView(this); icon.setImageResource(providerIcon(card.optString("icon", "provider")));
@@ -1793,11 +1793,7 @@ public class MainActivity extends Activity {
             row.setContentDescription(description); descriptions.add(description);
             planSummary.addView(row, new LinearLayout.LayoutParams(-1, dp(28)));
         }
-        if (planSummary.getChildCount() == 0) {
-            TextView unavailable = text("—", 11, true); unavailable.setTextColor(MUTED);
-            planSummary.addView(unavailable, new LinearLayout.LayoutParams(-1, dp(28)));
-            descriptions.add("Plan capacity unavailable");
-        }
+        if (planSummary.getChildCount() == 0) descriptions.add("Plan capacity unavailable");
         planSummary.setContentDescription(String.join(". ", descriptions));
     }
 
