@@ -41,6 +41,9 @@ class FakeEngine implements HostManager {
   message(): boolean {
     return true;
   }
+  intervene(): boolean {
+    return true;
+  }
 }
 
 function build(
@@ -115,6 +118,39 @@ describe("dispatch cycle", () => {
     const third = await cycle(3000);
     expect(third.claimed).toHaveLength(0);
     expect(ledger.runs({ state: "running" })).toHaveLength(1);
+  });
+
+  it("reconciles one team as four equal workers and one supervisor", async () => {
+    const { ledger, runner, cycle } = build();
+    for (let i = 2; i <= 4; i++) {
+      fleetAccount(ledger, { id: `codex-${i}`, provider: "openai-codex" });
+    }
+    ledger.upsertTask({
+      id: "cayley",
+      demandConstant: 1,
+      tiers: mix("standard"),
+      prompt: "Work on the whole Cayley CI programme.",
+      cwd: "/work/cayley-ci",
+      team: {
+        workers: 4,
+        supervisorPrompt: "Keep the whole programme in view.",
+        watchFor: ["constant ladders"],
+      },
+    });
+
+    const first = await cycle(0);
+    expect(first.claimed).toHaveLength(5);
+    const workers = first.claimed.filter((run) => run.team?.role === "worker");
+    const supervisor = first.claimed.find((run) => run.team?.role === "supervisor");
+    expect(workers.map((run) => run.team?.slot)).toEqual([1, 2, 3, 4]);
+    expect(new Set(workers.map((run) => run.prompt))).toEqual(new Set(["Work on the whole Cayley CI programme."]));
+    expect(supervisor?.prompt).toBe("Keep the whole programme in view.");
+
+    const secondWorker = workers.find((run) => run.team?.slot === 2)!;
+    runner.runFinished(secondWorker.runId, { state: "done" }, 500);
+    const replacement = await cycle(1_000);
+    expect(replacement.claimed).toHaveLength(1);
+    expect(replacement.claimed[0]?.team).toMatchObject({ role: "worker", slot: 2 });
   });
 
   it("a task without a prompt is a pure demand signal and never launches", async () => {

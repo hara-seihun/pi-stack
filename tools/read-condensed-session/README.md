@@ -49,10 +49,10 @@ The cache key is the SHA-256 of the exact model prompt. Source changes, episode-
 ## Operations
 
 ```bash
-npm test
-./deploy
+npm test --workspace=@hara-seihun/read-condensed-session
+../../deploy/tools local
 ```
 
-`deploy` tests the implementation, links the interactive command at `~/.local/bin/read-condensed-session`, publishes a self-contained fleet copy under `/srv/pi/tools/read-condensed-session`, and verifies both users can run `--help`. The deployed Pi coding-agent runtime remains the provider and credential source; this tool does not register a Pi extension.
+`deploy/tools local` tests every shared command, links `read-condensed-session` into both users' `~/.local/bin`, publishes a self-contained fleet copy at `/srv/pi/tools/read-condensed-session/main`, and verifies the command can run. The deployed Pi coding-agent runtime remains the provider and credential source; this tool does not register a Pi extension.
 
 The 2026-08-25 full-session trial condensed the `User Message Extraction` session from 3,840,059 on-disk characters to 174,849 characters, down from 404,334 with the former per-block design. It generated 17 large-block pre-summaries and 16 episode summaries with no failures. Manual inspection recovered decisions, exact paths and commits, failed approaches, benchmark values, current state, and the recent tail; all user messages and answered assistant replies remained exact.

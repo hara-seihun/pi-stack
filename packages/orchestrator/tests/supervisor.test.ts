@@ -18,6 +18,9 @@ class FakeEngine implements HostManager {
   message(): boolean {
     return true;
   }
+  intervene(): boolean {
+    return true;
+  }
 }
 
 function seed(ledger: Ledger, count: number): void {

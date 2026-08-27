@@ -8,6 +8,9 @@ the agent's skill directory.
 
 - [`software-engineering`](software-engineering/SKILL.md) — mandatory
   software-engineering principles and defaults for agents.
+- [`math-research`](math-research/SKILL.md) — mandatory doctrine for doing and
+  supervising mathematics: attack the target, build theory rather than constant
+  ladders, and keep computational evidence fast and replayable.
 - [`charisma`](charisma/SKILL.md) — how a voice agent should behave in live
   meetings and calls: register, hedging, agreement, humour, and pacing.
 - [`unslop`](unslop/SKILL.md) — cut AI tells from any prose a person will

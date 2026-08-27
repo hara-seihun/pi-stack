@@ -210,6 +210,31 @@ Three launch-side fields describe scheduling:
   math-frontier lane on 2026-08-22, the exchange moved self-assessed odds on
   an open target from about 0.1% to 25–40%; the experiment record lives in
   `~/data/thread-lab/_experiments/2026-08-22-erdos647-priors/`.
+- `team`: one durable room with a fixed number of equal workers and one
+  supervisor. A team task uses ordinary positive demand as a boolean request
+  for its complete roster. The controller reconciles worker slots plus the
+  supervisor slot independently, so one session ending replaces only that
+  member. Every worker receives the task's same complete prompt. The
+  supervisor receives `team.supervisorPrompt`; `team.watchFor` is added to its
+  pinned system instructions as a list of signs worth inspecting, never as an
+  automatic intervention policy.
+
+  Team sessions share the task's `cwd`. A session-local extension reports files
+  changed since that member's last successful edit. Workers cannot call
+  `edit` or `write` until they read every current changed file, which prevents
+  an unseen teammate version from being silently overwritten. Parallel
+  derivations remain welcome, and the filesystem is the coordination record.
+
+  The supervisor has `team_members`, `team_context`, and `team_intervene`.
+  `team_context` runs `/srv/pi/tools/read-condensed-session/main` against the
+  exact Pi session file recorded for a worker, so the supervisor reads the
+  worker's real condensed reasoning and recent activity rather than a status
+  report. `team_intervene` queues a ledger message for that worker's runner.
+  The host aborts the in-flight turn and sends the correction as the next
+  ordinary user message in the same session, preserving all prior context.
+  The supervisor system prompt forbids task allocation. It cycles through the
+  room, observes more than it interrupts, and speaks as a trusted colleague
+  when a programme-level correction is worth breaking the current thought.
 - `demand`: a constant or a cheap read-only probe command whose last stdout
   line is a work-unit count. `0` means no work; agents are never launched to
   discover idleness. Results are cached with a TTL and invalidated by task

@@ -7,7 +7,7 @@ import { execFile } from "node:child_process";
 import { homedir } from "node:os";
 import { join } from "node:path";
 import { Type } from "typebox";
-import type { HostEvents, HostManager, HostRunResult, LaunchSpec } from "./types.js";
+import type { HostEvents, HostManager, HostRunResult, LaunchSpec, TeamMember } from "./types.js";
 import {
   continuationFor,
   describeWait,
@@ -16,6 +16,12 @@ import {
 } from "./continuations.js";
 import { RunTranscript } from "./transcript.js";
 import { openHostedSession, SESSION_RETRY } from "./session-lifecycle.js";
+import {
+  readCondensedSession,
+  teamContinuation,
+  teamSystemPrompt,
+  teamWorkspaceExtension,
+} from "./team.js";
 
 /**
  * In-process host: each launch is one embedded pi AgentSession. This file is
@@ -36,6 +42,15 @@ const PROGRESS_WRITE_INTERVAL_MS = 15_000;
  * waiting out a provider is not the stalled session the runner reaps, and
  * only a signal on the same clock can tell those apart. */
 const WAIT_SLICE_MS = 20_000;
+
+function resolveTeamMember(members: readonly TeamMember[], ref: string): TeamMember {
+  const exact = members.find((member) => member.runId === ref);
+  if (exact !== undefined) return exact;
+  const matches = members.filter((member) => member.runId.startsWith(ref));
+  if (matches.length === 0) throw new Error(`${ref} is not on this team`);
+  if (matches.length > 1) throw new Error(`${ref} matches more than one team member; use a longer run id`);
+  return matches[0] as TeamMember;
+}
 
 
 interface CompletionReport {
@@ -62,6 +77,9 @@ export class PiHost implements HostManager {
    * a provider outage is not inside `prompt()`, so `session.abort()` has
    * nothing to interrupt; the wait watches this instead. */
   private readonly aborting = new Set<string>();
+  /** Supervisor corrections waiting to become the next ordinary user turn.
+   * The current turn is aborted when the item enters this queue. */
+  private readonly interventions = new Map<string, string[]>();
 
   constructor(
     private readonly events: HostEvents,
@@ -84,6 +102,8 @@ export class PiHost implements HostManager {
       /** Opening-probe runner. Defaults to `bash -c` in the launch cwd; a
        * test supplies its own. */
       readonly runOpeningProbe?: (command: string, cwd: string) => Promise<string>;
+      /** Condensed worker-context reader. */
+      readonly readCondensed?: (sessionFile: string) => Promise<string>;
     },
   ) {}
 
@@ -173,6 +193,20 @@ export class PiHost implements HostManager {
     return true;
   }
 
+  intervene(runId: string, text: string): boolean {
+    const session = this.runtimes.get(runId)?.session;
+    if (session === undefined) return false;
+    const pending = this.interventions.get(runId) ?? [];
+    pending.push(text);
+    this.interventions.set(runId, pending);
+    void session.abort().catch((thrown: unknown) => {
+      this.transcripts.get(runId)?.append("notice", {
+        text: `Could not abort the turn immediately: ${String(thrown)}`,
+      });
+    });
+    return true;
+  }
+
   /** Whether a session for this run is still live in this process. */
   has(runId: string): boolean {
     return this.runtimes.has(runId);
@@ -229,6 +263,66 @@ export class PiHost implements HostManager {
         return { content: [{ type: "text" as const, text: "Report recorded." }], details: undefined };
       },
     };
+    const customTools: any[] = [taskComplete];
+    if (spec.team?.role === "supervisor") {
+      customTools.push(
+        {
+          name: "team_members",
+          label: "Team members",
+          description: "List this team's worker and supervisor runs, progress times, and condensed-context availability.",
+          parameters: Type.Object({}),
+          execute: async () => ({
+            content: [{
+              type: "text" as const,
+              text: JSON.stringify(this.events.teamMembers(spec.taskId), null, 2),
+            }],
+            details: undefined,
+          }),
+        },
+        {
+          name: "team_context",
+          label: "Worker context",
+          description: "Read one worker's Pi Stack compacted-context view. Cycle through every live worker with this tool.",
+          parameters: Type.Object({ runId: Type.String({ minLength: 1 }) }),
+          execute: async (_id: string, params: { runId: string }) => {
+            const member = resolveTeamMember(this.events.teamMembers(spec.taskId), params.runId);
+            if (member.role !== "worker") {
+              throw new Error(`${params.runId} is not a worker on this team`);
+            }
+            if (member.sessionFile === undefined) {
+              throw new Error(`${member.runId} has no readable Pi session file yet`);
+            }
+            const condensed = this.options.readCondensed ?? readCondensedSession;
+            const text = await condensed(member.sessionFile);
+            return { content: [{ type: "text" as const, text }], details: { runId: member.runId } };
+          },
+        },
+        {
+          name: "team_intervene",
+          label: "Intervene with worker",
+          description:
+            "Interrupt one live worker and deliver a warm programme-level correction as its next user message. Use sparingly, after observing a concrete warning sign.",
+          parameters: Type.Object({
+            runId: Type.String({ minLength: 1 }),
+            message: Type.String({ minLength: 1 }),
+          }),
+          execute: async (_id: string, params: { runId: string; message: string }) => {
+            const member = resolveTeamMember(this.events.teamMembers(spec.taskId), params.runId);
+            if (member.role !== "worker") {
+              throw new Error(`${params.runId} is not a worker on this team`);
+            }
+            this.events.teamIntervene(spec.runId, member.runId, params.message);
+            return {
+              content: [{
+                type: "text" as const,
+                text: `Queued for ${member.runId}. Its runner will abort the in-flight turn before delivering the message.`,
+              }],
+              details: undefined,
+            };
+          },
+        },
+      );
+    }
 
     // A builtin family resolves before the session exists; an extension
     // provider (cursor) exists only inside the session's own model runtime,
@@ -236,16 +330,26 @@ export class PiHost implements HostManager {
     const preresolved = this.options.resolveModel(spec);
     const doctrine = spec.doctrineUrl === undefined ? undefined : await this.doctrine(spec.doctrineUrl);
     let resourceLoader: DefaultResourceLoader | undefined;
-    if (doctrine !== undefined) {
-      resourceLoader = new DefaultResourceLoader({
-        cwd: spec.cwd ?? process.cwd(),
-        agentDir: this.options.agentDir ?? join(homedir(), ".pi", "agent"),
-        appendSystemPrompt: [
+    if (doctrine !== undefined || spec.team !== undefined) {
+      const appendSystemPrompt: string[] = [];
+      if (doctrine !== undefined) {
+        appendSystemPrompt.push(
           `# Lane doctrine (pinned from ${spec.doctrineUrl})\n\n` +
             "This document is pinned into your system prompt so it stays with " +
             "you after context compaction. It is binding for this lane.\n\n" +
             doctrine,
-        ],
+        );
+      }
+      if (spec.team !== undefined) {
+        appendSystemPrompt.push(teamSystemPrompt(spec.team, spec.cwd ?? process.cwd()));
+      }
+      resourceLoader = new DefaultResourceLoader({
+        cwd: spec.cwd ?? process.cwd(),
+        agentDir: this.options.agentDir ?? join(homedir(), ".pi", "agent"),
+        appendSystemPrompt,
+        ...(spec.team === undefined
+          ? {}
+          : { extensionFactories: [teamWorkspaceExtension(spec.cwd ?? process.cwd(), spec.team.role)] }),
       });
       await resourceLoader.reload();
     }
@@ -259,7 +363,7 @@ export class PiHost implements HostManager {
       provider: spec.provider,
       modelId: spec.model,
       accountId: spec.accountId,
-      customTools: [taskComplete],
+      customTools,
       openSession: this.options.openSession,
       onExtensionError: (extensionPath, error) => {
         transcript?.append("notice", {
@@ -282,11 +386,16 @@ export class PiHost implements HostManager {
       this.runtimes.delete(spec.runId);
       this.transcripts.delete(spec.runId);
       this.aborting.delete(spec.runId);
+      this.interventions.delete(spec.runId);
       for (const dispose of disposers.reverse()) dispose();
     };
     this.runtimes.set(spec.runId, { session, cancel: cancelRun, cleanup });
     try {
-      this.events.sessionStarted(spec.runId, hosted.sessionId);
+      this.events.sessionStarted(
+        spec.runId,
+        hosted.sessionId,
+        session.sessionManager.getSessionFile() ?? undefined,
+      );
       const retry = session.settingsManager.getRetrySettings();
       if (retry.maxRetries !== SESSION_RETRY.maxRetries) {
         const notice =
@@ -368,15 +477,19 @@ export class PiHost implements HostManager {
         // pre-empts it: a turn the provider cut off was not a turn the agent
         // finished, and asking it "what did you land?" would be a lie about
         // what just happened.
+        const intervention = this.interventions.get(spec.runId)?.shift();
         const message =
+          intervention ??
           resume ??
           (turn === 0
             ? prompt
-            : continuationFor({
-                taskId: spec.taskId,
-                turn,
-                turns: observer.turns(),
-              }));
+            : spec.team === undefined
+              ? continuationFor({
+                  taskId: spec.taskId,
+                  turn,
+                  turns: observer.turns(),
+                })
+              : teamContinuation(spec.team.role));
         transcript?.append("user", { text: message });
         if (await interrupted(session.prompt(message))) {
           return { state: "aborted", detail: "session killed" };
@@ -404,12 +517,24 @@ export class PiHost implements HostManager {
           break; // Work already banked: report it rather than lose it.
         }
         if (last?.stopReason === "aborted") {
+          // A supervisor correction deliberately aborts the in-flight turn.
+          // Its queued text becomes the next ordinary user turn in this same
+          // loop, preserving the session rather than turning intervention
+          // into termination.
+          if ((this.interventions.get(spec.runId)?.length ?? 0) > 0) {
+            resume = undefined;
+            continue;
+          }
           if (report === undefined) return { state: "aborted", detail: "session aborted" };
           break;
         }
         stalls = 0;
         resume = undefined;
         observer.endTurn();
+        // The abort can race with a turn that was already finishing. A queued
+        // supervisor correction still gets the next user turn rather than
+        // disappearing at a self-paced or check-in boundary.
+        if ((this.interventions.get(spec.runId)?.length ?? 0) > 0) continue;
         // A self-paced shift is one work turn: the agent ending it is the
         // agent deciding to stop, and no check-in second-guesses that.
         if (spec.selfPaced === true) break;

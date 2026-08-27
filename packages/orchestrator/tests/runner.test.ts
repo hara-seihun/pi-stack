@@ -30,6 +30,12 @@ class FakeEngine implements HostManager {
     this.messages.push({ runId, text });
     return true;
   }
+  interventions: { runId: string; text: string }[] = [];
+  intervene(runId: string, text: string): boolean {
+    if (!this.launched.some((spec) => spec.runId === runId)) return false;
+    this.interventions.push({ runId, text });
+    return true;
+  }
 }
 
 function seed(ledger: Ledger, count: number): string[] {
@@ -283,6 +289,50 @@ describe("operator messages reach a live session", () => {
     ledger.queueRunMessage(runId, "Stop that.", 150);
     bystander.tick(200);
     expect(ledger.pendingRunMessages(runId).map((m) => m.text)).toEqual(["Stop that."]);
+  });
+
+  it("supervisor intervention uses abort-then-message delivery for its own worker", () => {
+    const ledger = Ledger.open(":memory:");
+    ledger.upsertAccount({ id: "anth-1", provider: "anthropic" });
+    ledger.upsertTask({
+      id: "team",
+      demandConstant: 1,
+      tiers: mix("standard"),
+      prompt: "Whole programme.",
+      cwd: "/work",
+      team: { workers: 1, supervisorPrompt: "Observe.", watchFor: [] },
+    });
+    const create = (teamRole: "worker" | "supervisor", teamSlot: number) =>
+      ledger.createRun({
+        taskId: "team",
+        tier: "standard",
+        accountId: "anth-1",
+        model: "claude-opus",
+        provider: "anthropic",
+        teamRole,
+        teamSlot,
+        at: teamSlot,
+      });
+    const supervisorId = create("supervisor", 0);
+    const workerId = create("worker", 1);
+    const engine = new FakeEngine();
+    const runner = new Runner(ledger, engine, { runnerId: "r1", maxSessions: 5 });
+    runner.tick(100);
+    runner.sessionStarted(workerId, "session-worker", "/sessions/worker.jsonl");
+
+    expect(runner.teamMembers("team").find((member) => member.runId === workerId)?.sessionFile)
+      .toBe("/sessions/worker.jsonl");
+    runner.teamIntervene(supervisorId, workerId, "Step back from the constant ladder and look for the general mechanism.");
+    runner.tick(200);
+    expect(engine.interventions).toEqual([{
+      runId: workerId,
+      text: "Step back from the constant ladder and look for the general mechanism.",
+    }]);
+    expect(engine.messages).toEqual([]);
+    expect(ledger.pendingRunMessages(workerId)).toEqual([]);
+
+    runner.runFinished(workerId, { state: "done" }, 300);
+    expect(runner.teamMembers("team").some((member) => member.runId === workerId)).toBe(false);
   });
 
   it("an empty message is a mistake, not a turn", () => {

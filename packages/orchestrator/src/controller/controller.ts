@@ -102,13 +102,37 @@ export class Controller {
 
     const tasks = new Map(this.ledger.tasks().map((t) => [t.id, t]));
     const activeByTask = new Map<string, number>();
+    const activeRuns: RunRow[] = [];
     for (const run of this.ledger.runs()) {
       if (run.state !== "pending" && run.state !== "running") continue;
+      activeRuns.push(run);
       activeByTask.set(run.taskId, (activeByTask.get(run.taskId) ?? 0) + 1);
     }
-    // A pending or running session is presumed to hold one work unit, so
-    // demand is netted against it: a backlog of 3 with 2 agents on it wants
-    // exactly one more agent, not three.
+    const missingTeamRoles = new Map<
+      string,
+      Array<{ role: "worker" | "supervisor"; slot: number }>
+    >();
+    for (const task of tasks.values()) {
+      if (task.team === undefined) continue;
+      const held = new Set(
+        activeRuns
+          .filter((run) => run.taskId === task.id && run.teamRole !== undefined)
+          .map((run) => `${run.teamRole}:${run.teamSlot ?? 0}`),
+      );
+      const desired: Array<{ role: "worker" | "supervisor"; slot: number }> = Array.from(
+        { length: task.team.workers },
+        (_, index) => ({ role: "worker" as const, slot: index + 1 }),
+      );
+      desired.push({ role: "supervisor" as const, slot: 0 });
+      missingTeamRoles.set(
+        task.id,
+        desired.filter(({ role, slot }) => !held.has(`${role}:${slot}`)),
+      );
+    }
+    // A pending or running ordinary session holds one work unit. A team
+    // lane's demand is boolean instead: any positive reading asks for its
+    // complete roster, and the controller fills only the roles currently
+    // missing from that roster.
     const launchable = evaluation.tasks
       .filter((t) => {
         if (!t.eligible || tasks.get(t.taskId)?.prompt === undefined) return false;
@@ -126,7 +150,11 @@ export class Controller {
         units:
           t.units === undefined
             ? undefined
-            : Math.max(0, t.units - (activeByTask.get(t.taskId) ?? 0)),
+            : tasks.get(t.taskId)?.team !== undefined
+              ? t.units > 0
+                ? missingTeamRoles.get(t.taskId)?.length ?? 0
+                : 0
+              : Math.max(0, t.units - (activeByTask.get(t.taskId) ?? 0)),
         heldByTier: this.ledger.fleetPresenceByTier(
           t.taskId,
           now - this.cfg.compositionWindowMs,
@@ -149,10 +177,14 @@ export class Controller {
           skipped.push({ taskId: a.taskId, reason: "no-admission" });
           break;
         }
+        const teamRole = missingTeamRoles.get(a.taskId)?.shift();
         const runId = this.ledger.createRun({
           taskId: a.taskId,
           tier: a.tier,
           ...admission,
+          ...(teamRole === undefined
+            ? {}
+            : { teamRole: teamRole.role, teamSlot: teamRole.slot }),
           at: now,
         });
         created.push(this.ledger.run(runId)!);

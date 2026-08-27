@@ -101,11 +101,13 @@ async function status(ledger: Ledger): Promise<void> {
     console.log(`task ${t.taskId}: ${parts.join(" ")}`);
   }
   for (const r of ledger.runs({ state: "pending" })) {
-    console.log(`pending ${r.id.slice(0, 8)}: ${r.taskId} awaiting runner`);
+    const role = r.teamRole === undefined ? "" : ` ${r.teamRole}-${r.teamSlot}`;
+    console.log(`pending ${r.id.slice(0, 8)}: ${r.taskId}${role} awaiting runner`);
   }
   for (const r of ledger.runs({ state: "running" })) {
+    const role = r.teamRole === undefined ? "" : ` ${r.teamRole}-${r.teamSlot}`;
     console.log(
-      `run ${r.id.slice(0, 8)}: ${r.taskId} on ${r.accountId} (${r.model}) runner=${r.runnerId}`,
+      `run ${r.id.slice(0, 8)}: ${r.taskId}${role} on ${r.accountId} (${r.model}) runner=${r.runnerId}`,
     );
   }
   // Pausing skips evaluation entirely, so an empty list here means "not
@@ -389,7 +391,10 @@ async function runner(ledger: Ledger, args: string[]): Promise<void> {
     { runFinished: (id, result, at) => live.runFinished(id, result, at),
       heartbeat: (id, at) => live.heartbeat(id, at),
       progress: (id, at) => live.progress(id, at),
-      sessionStarted: (id, sessionId) => live.sessionStarted(id, sessionId),
+      sessionStarted: (id, sessionId, sessionFile) => live.sessionStarted(id, sessionId, sessionFile),
+      teamMembers: (taskId) => live.teamMembers(taskId),
+      teamIntervene: (supervisorRunId, workerRunId, text) =>
+        live.teamIntervene(supervisorRunId, workerRunId, text),
       laneDrained: (taskId) => live.laneDrained(taskId),
       claimCheckIn: (runId) => live.claimCheckIn(runId),
       turnFailed: (runId, detail, attempt) => {
@@ -826,6 +831,7 @@ export function taskSet(ledger: Ledger, args: string[]): void {
     ...(opening === undefined ? {} : { opening }),
     openingProbe: pick("opening-probe", current?.openingProbe),
     ...(selfPaced === undefined ? {} : { selfPaced }),
+    ...(current?.team === undefined ? {} : { team: current.team }),
   });
   console.log(`task ${id} ${current ? "updated" : "created"}`);
 }
@@ -925,6 +931,7 @@ async function main(): Promise<void> {
                 (t.opening !== undefined ? ` opening(${t.opening.length})` : "") +
                 (t.openingProbe !== undefined ? " opening-probe" : "") +
                 (t.selfPaced ? " self-paced" : "") +
+                (t.team === undefined ? "" : ` team=${t.team.workers}+supervisor`) +
                 (ledger.taskPaused(t.id) ? " HELD" : "") +
                 (t.prompt === undefined ? " (signal only)" : ""),
             );

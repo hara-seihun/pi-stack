@@ -1,10 +1,12 @@
 # State compactor
 
-State compactor keeps Pi's native compaction and triggers it earlier, at 250,000 context tokens.
+State compactor triggers Pi's native compaction at 250,000 context tokens and keeps skills intact across the boundary.
 
-It registers one `before_provider_request` handler. When `ctx.getContextUsage()` reaches the threshold, the handler calls `ctx.compact()` once and waits for Pi's completion or error callback before it can trigger again. Missing usage data and smaller contexts pass through unchanged.
+Pi's session branch retains the tool traffic removed from the provider view. After a compaction, this extension finds every skill file read before that boundary, validates paged reads against the current file, and inserts the exact loaded skills at the start of the message list. They therefore sit after Pi's system and tool context but before the compaction summary and retained conversation. A skill loaded after the latest compaction stays in its ordinary tool result until the next compaction.
 
-The extension does not transform context or replace Pi's summary. Pi aborts the pending agent operation when compaction starts, so a successful compaction adds a hidden custom message and triggers a fresh turn. The agent continues the interrupted work from Pi's compacted state.
+A partial paged read produces a durable request for the missing page. A changed or unavailable file produces a reread request. The extension never keeps stale instructions silently.
+
+When `ctx.getContextUsage()` reaches the threshold, the extension calls `ctx.compact()` once and waits for Pi's completion or error callback before it can trigger again. Pi aborts the pending operation when compaction starts, so a successful compaction adds a hidden continuation message and starts a fresh turn.
 
 ## Test
 

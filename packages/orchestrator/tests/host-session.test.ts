@@ -39,6 +39,7 @@ function harness(
     runOpeningProbe?: (command: string, cwd: string) => Promise<string>;
     prompt?: string;
     selfPaced?: boolean;
+    team?: LaunchSpec["team"];
     /** What the runner answers when a turn fails: milliseconds to wait, or
      * undefined for "nothing to wait for, end the run". */
     turnFailed?: (detail: string, attempt: number) => number | undefined;
@@ -59,13 +60,15 @@ function harness(
   let taskComplete: { execute: (id: string, params: unknown) => Promise<unknown> } | undefined;
   const bindings: unknown[] = [];
   const overrides: Record<string, unknown>[] = [];
+  let releasePark: (() => void) | undefined;
+  let interrupted = false;
   // Both `reload()` and `setModel()` rebuild settings from disk in the real
   // SDK, which is how the retry budget was silently lost twice; the fake
   // does the same so the ordering stays pinned.
   let retry: Record<string, unknown> = { enabled: true, maxRetries: 3, baseDelayMs: 2_000 };
   const session = {
     messages,
-    sessionManager: { getSessionId: () => "session-1" },
+    sessionManager: { getSessionId: () => "session-1", getSessionFile: () => "/tmp/session-1.jsonl" },
     modelRuntime: { getModel: () => ({ id: "model" }) },
     setModel: async () => {
       retry = { enabled: true, maxRetries: 3, baseDelayMs: 2_000 };
@@ -86,12 +89,15 @@ function harness(
       return () => {};
     },
     dispose: () => {},
-    abort: async () => {},
+    abort: async () => {
+      interrupted = true;
+      releasePark?.();
+    },
     sendUserMessage: async () => {},
     prompt: async (text: string) => {
       const turn = turns[prompts.length] ?? {};
       prompts.push(text);
-      if (turn.parks) await new Promise(() => {});
+      if (turn.parks) await new Promise<void>((resolve) => { releasePark = resolve; });
       for (let i = 0; i < (turn.reports ?? 0); i++) {
         await taskComplete?.execute("call", {
           complete: true,
@@ -101,9 +107,11 @@ function harness(
       clock += turn.tookMs ?? 0;
       messages.push({
         role: "assistant",
-        stopReason: turn.stopReason,
+        stopReason: interrupted ? "aborted" : turn.stopReason,
         errorMessage: turn.errorMessage,
       });
+      interrupted = false;
+      releasePark = undefined;
     },
   };
   const results: HostRunResult[] = [];
@@ -116,6 +124,8 @@ function harness(
       heartbeat: (_id, at) => heartbeats.push(at),
       progress: (_id, at) => progress.push(at),
       sessionStarted: (runId, sessionId) => links.push({ runId, sessionId }),
+      teamMembers: () => [],
+      teamIntervene: () => {},
       laneDrained: options.laneDrained ?? (() => false),
       claimCheckIn: () => (spent++ < MAX_CHECK_INS ? true : false),
       turnFailed: (_id, detail, attempt) => {
@@ -148,6 +158,7 @@ function harness(
     opening: options.opening,
     openingProbe: options.openingProbe,
     selfPaced: options.selfPaced,
+    team: options.team,
   };
   const finished = new Promise<HostRunResult>((resolve) => {
     const poll = setInterval(() => {
@@ -449,6 +460,44 @@ describe("host shift loop", () => {
     const clean = harness([{ stopReason: "aborted" }]);
     clean.host.launch(clean.spec);
     expect(await clean.finished).toEqual({ state: "aborted", detail: "session aborted" });
+  });
+
+  it("keeps team check-ins on whole-programme work rather than generic task picking", async () => {
+    const worker = harness([{ reports: 1 }, {}], {
+      team: { role: "worker", slot: 1, workers: 4, watchFor: [] },
+    });
+    worker.host.launch(worker.spec);
+    await worker.finished;
+    expect(worker.prompts[1]).toContain("whole theorem");
+    expect(worker.prompts[1]).toContain("bounded case is working material");
+
+    const supervisor = harness([{ reports: 1 }, {}], {
+      team: { role: "supervisor", slot: 0, workers: 4, watchFor: [] },
+    });
+    supervisor.host.launch(supervisor.spec);
+    await supervisor.finished;
+    expect(supervisor.prompts[1]).toContain("Cycle through every live worker");
+    expect(supervisor.prompts[1]).toContain("don't turn the programme into assignments");
+  });
+
+  it("a supervisor correction aborts the current turn and becomes the next user turn", async () => {
+    const { host, spec, prompts, finished } = harness(
+      [{ parks: true }, { reports: 1 }],
+      {
+        selfPaced: true,
+        team: { role: "worker", slot: 1, workers: 4, watchFor: ["constant ladders"] },
+      },
+    );
+    host.launch(spec);
+    while (prompts.length === 0) await new Promise((resolve) => setTimeout(resolve, 1));
+
+    expect(host.intervene(spec.runId, "Step back and look for the theory that closes the whole family.")).toBe(true);
+    const result = await finished;
+    expect(prompts).toEqual([
+      "Attack the central problem.",
+      "Step back and look for the theory that closes the whole family.",
+    ]);
+    expect(result).toMatchObject({ state: "done", productive: true });
   });
 
   it("stops lifecycle timers immediately when a parked session is killed", async () => {

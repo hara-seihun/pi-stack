@@ -5,12 +5,9 @@ import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 import { Type } from "typebox";
 import {
   INITIAL_TITLE,
-  retainedSkillContext,
   surfacedInAssistantReply,
   threadStateInstructions,
   type AgentMessage,
-  type SessionEntry,
-  type SkillMetadata,
 } from "./thread-context-state";
 
 function readAlerts(directory: string | undefined): Array<{ file: string; path?: string; text: string; error?: string }> {
@@ -35,8 +32,6 @@ function readAlerts(directory: string | undefined): Array<{ file: string; path?:
 }
 
 export default function threadContext(pi: ExtensionAPI) {
-  let availableSkills: SkillMetadata[] = [];
-  let supportsContextPins = false;
   const pendingAlerts = new Map<string, { expected: string; text: string }>();
 
   pi.registerTool({
@@ -73,8 +68,6 @@ export default function threadContext(pi: ExtensionAPI) {
   });
 
   pi.on("before_agent_start", async (event) => {
-    availableSkills = (event.systemPromptOptions.skills ?? []) as SkillMetadata[];
-    supportsContextPins = pi.getAllTools().some((tool) => tool.name === "state_recall");
     const name = pi.getSessionName();
     const active = pi.getActiveTools();
     const hasInitialize = active.includes("initialize_thread");
@@ -100,20 +93,5 @@ export default function threadContext(pi: ExtensionAPI) {
       }
     }
     pendingAlerts.clear();
-  });
-
-  pi.on("context", async (event, ctx) => {
-    if (!supportsContextPins) return;
-    const retained = retainedSkillContext({
-      branch: ctx.sessionManager.getBranch() as SessionEntry[],
-      skills: availableSkills,
-      cwd: ctx.cwd,
-      readCurrent: (path) => readFileSync(path, "utf8"),
-    });
-    if (!retained) return;
-    const messages = [...event.messages] as AgentMessage[];
-    const latestUser = messages.findLastIndex((message) => message.role === "user");
-    messages.splice(latestUser < 0 ? messages.length : latestUser, 0, retained);
-    return { messages: messages as any };
   });
 }

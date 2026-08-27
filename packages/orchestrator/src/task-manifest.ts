@@ -1,12 +1,12 @@
 import { readFileSync } from "node:fs";
 import { dirname, isAbsolute, resolve } from "node:path";
 import type { Ledger } from "./ledger/ledger.js";
-import { TIERS, type TaskSpec, type Tier, type TierShare } from "./tasks/types.js";
+import { TIERS, type TaskSpec, type TeamSpec, type Tier, type TierShare } from "./tasks/types.js";
 
 const TASK_KEYS = new Set([
   "id", "demandCommand", "demandCommandFile", "demandConstant", "gate", "tiers", "share",
   "prompt", "promptFile", "cwd", "exitWhenDrained", "doctrineUrl", "opening", "openingFiles",
-  "openingProbe", "openingProbeFile", "selfPaced",
+  "openingProbe", "openingProbeFile", "selfPaced", "team",
 ]);
 
 function object(value: unknown, where: string): Record<string, unknown> {
@@ -94,6 +94,31 @@ function tiers(value: unknown, where: string): TierShare[] {
   });
 }
 
+function team(value: unknown, where: string, base: string): TeamSpec | undefined {
+  if (value === undefined) return undefined;
+  const row = object(value, `${where}.team`);
+  const allowed = new Set(["workers", "supervisorPrompt", "supervisorPromptFile", "watchFor"]);
+  for (const key of Object.keys(row)) {
+    if (!allowed.has(key)) throw new Error(`${where}.team has unknown field ${key}`);
+  }
+  const workers = row.workers;
+  if (!Number.isInteger(workers) || (workers as number) < 1) {
+    throw new Error(`${where}.team.workers must be a positive integer`);
+  }
+  const supervisorPrompt = text(
+    row,
+    "supervisorPrompt",
+    "supervisorPromptFile",
+    `${where}.team`,
+    base,
+  );
+  if (supervisorPrompt === undefined || supervisorPrompt.trim() === "") {
+    throw new Error(`${where}.team needs supervisorPrompt or supervisorPromptFile`);
+  }
+  const watchFor = stringArray(row.watchFor, `${where}.team.watchFor`) ?? [];
+  return { workers: workers as number, supervisorPrompt, watchFor };
+}
+
 function task(raw: unknown, index: number, base: string): TaskSpec {
   const where = `task manifest tasks[${index}]`;
   const row = object(raw, where);
@@ -136,6 +161,7 @@ function task(raw: unknown, index: number, base: string): TaskSpec {
     opening: resolvedOpening,
     openingProbe,
     selfPaced,
+    team: team(row.team, where, base),
   };
 }
 

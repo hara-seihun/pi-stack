@@ -13,6 +13,7 @@ import {
   type HostManager,
   type HostRunResult,
   type LaunchSpec,
+  type TeamMember,
 } from "./types.js";
 
 /**
@@ -122,7 +123,10 @@ export class Runner implements HostEvents {
       // longer holds a session for stays queued rather than being lost, and
       // is retired with the run below.
       for (const message of this.ledger.pendingRunMessages(run.id)) {
-        if (!this.engine.message(run.id, message.text)) break;
+        const accepted = message.interrupt
+          ? this.engine.intervene(run.id, message.text)
+          : this.engine.message(run.id, message.text);
+        if (!accepted) break;
         this.ledger.markRunMessageDelivered(message.id, now);
       }
     }
@@ -154,12 +158,25 @@ export class Runner implements HostEvents {
         const spec: LaunchSpec = {
           runId: run.id,
           taskId: run.taskId,
-          prompt: task.prompt,
+          prompt:
+            task.team !== undefined && run.teamRole === "supervisor"
+              ? task.team.supervisorPrompt
+              : task.prompt,
           cwd: task.cwd,
           doctrineUrl: task.doctrineUrl,
           opening: task.opening,
           openingProbe: task.openingProbe,
           selfPaced: task.selfPaced,
+          ...(task.team === undefined || run.teamRole === undefined
+            ? {}
+            : {
+                team: {
+                  role: run.teamRole,
+                  slot: run.teamSlot ?? 0,
+                  workers: task.team.workers,
+                  watchFor: task.team.watchFor,
+                },
+              }),
           provider: run.provider,
           model: run.model,
           thinking: run.thinking,
@@ -181,8 +198,43 @@ export class Runner implements HostEvents {
     );
   }
 
-  sessionStarted(runId: string, sessionId: string): void {
-    this.ledger.linkRunSession(runId, sessionId);
+  sessionStarted(runId: string, sessionId: string, sessionFile?: string): void {
+    this.ledger.linkRunSession(runId, sessionId, Date.now(), sessionFile);
+  }
+
+  teamMembers(taskId: string): readonly TeamMember[] {
+    return this.ledger
+      .runs()
+      .filter(
+        (run) =>
+          run.taskId === taskId &&
+          run.teamRole !== undefined &&
+          (run.state === "pending" || run.state === "running"),
+      )
+      .map((run) => ({
+        runId: run.id,
+        role: run.teamRole!,
+        slot: run.teamSlot ?? 0,
+        state: run.state,
+        progressAt: run.progressAt,
+        sessionFile: this.ledger.runSession(run.id)?.sessionFile,
+      }));
+  }
+
+  teamIntervene(supervisorRunId: string, workerRunId: string, text: string): void {
+    const supervisor = this.ledger.run(supervisorRunId);
+    const worker = this.ledger.run(workerRunId);
+    if (supervisor?.state !== "running" || supervisor.teamRole !== "supervisor") {
+      throw new Error("only a live team supervisor can intervene");
+    }
+    if (
+      worker?.state !== "running" ||
+      worker.teamRole !== "worker" ||
+      worker.taskId !== supervisor.taskId
+    ) {
+      throw new Error("the intervention target must be a live worker on this team");
+    }
+    this.ledger.queueRunMessage(worker.id, text, Date.now(), true);
   }
 
   runFinished(runId: string, result: HostRunResult, at = Date.now()): void {

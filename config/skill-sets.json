@@ -3,21 +3,25 @@
   "skills": [
     "charisma",
     "mcp-fix",
+    "math-research",
     "software-engineering",
     "unslop"
   ],
   "roles": {
     "gmktec-user": [
       "software-engineering",
+      "math-research",
       "unslop",
       "mcp-fix"
     ],
     "gmktec-fleet": [
       "software-engineering",
+      "math-research",
       "unslop"
     ],
     "converge-user": [
       "software-engineering",
+      "math-research",
       "unslop",
       "charisma"
     ]

@@ -24,6 +24,17 @@ export interface TierShare {
  * labels are launch-side data only and must never reach agent-visible
  * surfaces.
  */
+export interface TeamSpec {
+  /** Standard colleagues working concurrently in the lane's shared cwd. */
+  readonly workers: number;
+  /** The supervisor's task prompt. Workers receive TaskSpec.prompt. */
+  readonly supervisorPrompt: string;
+  /** Concrete signs the supervisor should look for while cycling through the
+   * workers' condensed contexts. These are observations, not reasons to
+   * interrupt by themselves. */
+  readonly watchFor: readonly string[];
+}
+
 export interface TaskSpec {
   readonly id: string;
   readonly demandCommand?: string;
@@ -82,6 +93,10 @@ export interface TaskSpec {
    * until it ends its turn, and that end is the shift's end. The agent is
    * not told this. */
   readonly selfPaced?: boolean;
+  /** Run this lane as one durable team: N workers plus one supervisor. Demand
+   * is boolean for a team lane. Any positive reading asks for the complete
+   * roster, and missing roles are replaced without disturbing their peers. */
+  readonly team?: TeamSpec;
 }
 
 export interface DemandState {

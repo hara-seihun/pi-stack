@@ -28,6 +28,22 @@ export const MAX_CHECK_INS = 5;
  * carries no tier: tier labels are launch-side data and must never reach a
  * host, a session, or any agent-visible surface.
  */
+export interface TeamLaunch {
+  readonly role: "worker" | "supervisor";
+  readonly slot: number;
+  readonly workers: number;
+  readonly watchFor: readonly string[];
+}
+
+export interface TeamMember {
+  readonly runId: string;
+  readonly role: "worker" | "supervisor";
+  readonly slot: number;
+  readonly state: "pending" | "running" | "done" | "error" | "aborted";
+  readonly progressAt?: number;
+  readonly sessionFile?: string;
+}
+
 export interface LaunchSpec {
   readonly runId: string;
   readonly taskId: string;
@@ -50,6 +66,7 @@ export interface LaunchSpec {
   /** One work turn, no continuation check-ins: the agent ending its turn
    * ends the shift. */
   readonly selfPaced?: boolean;
+  readonly team?: TeamLaunch;
 }
 
 /** Result a host reports when a session ends. */
@@ -80,6 +97,9 @@ export interface HostManager {
   /** Runs this host still holds a live session for. */
   liveRuns(): readonly string[];
   message(runId: string, text: string): boolean;
+  /** Abort the current turn, then deliver text as the next ordinary user
+   * message while preserving the session and its context. */
+  intervene(runId: string, text: string): boolean;
 }
 
 /** How the host reports back, and the one question it asks: implemented by
@@ -93,7 +113,11 @@ export interface HostEvents {
   /** The pi session now hosting this run. Reported once, as soon as the
    * session exists, so the usage the session is about to record is
    * attributable to the lane that asked for it. */
-  sessionStarted(runId: string, sessionId: string): void;
+  sessionStarted(runId: string, sessionId: string, sessionFile?: string): void;
+  teamMembers(taskId: string): readonly TeamMember[];
+  /** Queue a supervisor correction. The target runner performs the abort and
+   * subsequent user-message delivery, so this also works across generations. */
+  teamIntervene(supervisorRunId: string, workerRunId: string, text: string): void;
   /** True when this lane has run out of work and its shift should end rather
    * than be re-prompted. The policy (which lanes end this way, and what
    * counts as drained) lives in the runner; the host only asks. */

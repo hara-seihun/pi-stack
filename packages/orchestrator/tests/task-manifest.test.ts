@@ -52,9 +52,36 @@ describe("task manifests", () => {
       opening: ["Take a look first.\n"],
       openingProbe: undefined,
       selfPaced: false,
+      team: undefined,
     }]);
     expect(ledger.taskPaused("queue")).toBe(true);
     ledger.close();
+  });
+
+  it("loads one whole-programme team with a shared worker prompt", () => {
+    const { dir, manifest } = fixture();
+    writeFileSync(join(dir, "workers.md"), "Work on the whole theorem.\n");
+    writeFileSync(join(dir, "supervisor.md"), "Keep the whole theorem in view.\n");
+    writeFileSync(manifest, JSON.stringify({
+      version: 1,
+      tasks: [{
+        id: "cayley-ci-team",
+        demandConstant: 1,
+        tiers: ["standard"],
+        cwd: "/work/cayley-ci",
+        promptFile: "workers.md",
+        team: {
+          workers: 4,
+          supervisorPromptFile: "supervisor.md",
+          watchFor: ["constant ladders", "large censuses replacing theory"],
+        },
+      }],
+    }));
+    expect(loadTaskManifest(manifest)[0]?.team).toEqual({
+      workers: 4,
+      supervisorPrompt: "Keep the whole theorem in view.\n",
+      watchFor: ["constant ladders", "large censuses replacing theory"],
+    });
   });
 
   it("rejects misspelled fields and leaves the ledger unchanged on invalid tasks", () => {

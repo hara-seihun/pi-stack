@@ -46,6 +46,21 @@ function validateTask(t: TaskSpec): void {
     throw new Error(`task ${t.id}: share must be positive`);
   }
   if (t.gate !== undefined) parseGate(t.gate);
+  if (t.team !== undefined) {
+    if (!Number.isInteger(t.team.workers) || t.team.workers < 1) {
+      throw new Error(`task ${t.id}: team.workers must be a positive integer`);
+    }
+    if (t.prompt === undefined || t.prompt.trim() === "") {
+      throw new Error(`task ${t.id}: a team needs a worker prompt`);
+    }
+    if (t.team.supervisorPrompt.trim() === "") {
+      throw new Error(`task ${t.id}: a team needs a supervisor prompt`);
+    }
+    if (t.cwd === undefined) throw new Error(`task ${t.id}: a team needs a shared cwd`);
+    if (t.team.watchFor.some((warning) => warning.trim() === "")) {
+      throw new Error(`task ${t.id}: team.watchFor entries cannot be empty`);
+    }
+  }
 }
 
 /**
@@ -379,6 +394,22 @@ ALTER TABLE account ADD COLUMN capacity_weight REAL NOT NULL DEFAULT 1
   CHECK (capacity_weight > 0);
 `;
 
+/** Team lanes keep role and communication facts in the same ledger that owns
+ * every other launch fact. A task's JSON team definition is desired state;
+ * active run roles are the observed roster the controller reconciles toward.
+ * Session files let a supervisor ask the condensed-context reader for the
+ * exact worker it is cycling through. An interrupting message differs from an
+ * ordinary operator steer: the host aborts the in-flight worker turn first,
+ * then delivers the correction as the next user turn. */
+const TEAM_SCHEMA = `
+ALTER TABLE task ADD COLUMN team TEXT;
+ALTER TABLE run ADD COLUMN team_role TEXT CHECK (team_role IN ('worker', 'supervisor'));
+ALTER TABLE run ADD COLUMN team_slot INTEGER;
+ALTER TABLE run_session ADD COLUMN session_file TEXT;
+ALTER TABLE run_message ADD COLUMN interrupt INTEGER NOT NULL DEFAULT 0 CHECK (interrupt IN (0, 1));
+CREATE INDEX run_team_roster ON run (task_id, team_role, team_slot, state);
+`;
+
 const MIGRATIONS: readonly string[] = [
   SCHEMA,
   TASK_SCHEMA,
@@ -401,6 +432,7 @@ const MIGRATIONS: readonly string[] = [
   RUN_SESSION_RELATION_SCHEMA,
   SINGLE_RUN_SESSION_SCHEMA,
   PLAN_CAPACITY_SCHEMA,
+  TEAM_SCHEMA,
 ];
 
 export interface AccountRow {
@@ -445,6 +477,9 @@ export interface RunRow {
   readonly productive: boolean | undefined;
   readonly complete: boolean | undefined;
   readonly detail: string | undefined;
+  readonly teamRole: "worker" | "supervisor" | undefined;
+  /** Worker slots are one-indexed; the supervisor uses slot zero. */
+  readonly teamSlot: number | undefined;
 }
 
 export interface RunResult {
@@ -870,8 +905,8 @@ export class Ledger {
       .prepare(
         `INSERT INTO task (id, demand_command, demand_constant, gate, tiers, share, prompt, cwd,
                            exit_when_drained, doctrine_url, opening, opening_probe, self_paced,
-                           created_at)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                           team, created_at)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
          ON CONFLICT (id) DO UPDATE SET
            demand_command = excluded.demand_command,
            demand_constant = excluded.demand_constant,
@@ -884,7 +919,8 @@ export class Ledger {
            doctrine_url = excluded.doctrine_url,
            opening = excluded.opening,
            opening_probe = excluded.opening_probe,
-           self_paced = excluded.self_paced`,
+           self_paced = excluded.self_paced,
+           team = excluded.team`,
       )
       .run(
         t.id,
@@ -900,6 +936,7 @@ export class Ledger {
         t.opening === undefined ? null : JSON.stringify(t.opening),
         t.openingProbe ?? null,
         t.selfPaced ? 1 : 0,
+        t.team === undefined ? null : JSON.stringify(t.team),
         Date.now(),
       );
   }
@@ -932,7 +969,7 @@ export class Ledger {
     const rows = this.db
       .prepare(
         `SELECT id, demand_command, demand_constant, gate, tiers, share, prompt, cwd,
-                exit_when_drained, doctrine_url, opening, opening_probe, self_paced
+                exit_when_drained, doctrine_url, opening, opening_probe, self_paced, team
          FROM task ORDER BY id`,
       )
       .all() as {
@@ -949,6 +986,7 @@ export class Ledger {
       opening: string | null;
       opening_probe: string | null;
       self_paced: number;
+      team: string | null;
     }[];
     return rows.map((r) => ({
       id: r.id,
@@ -964,6 +1002,7 @@ export class Ledger {
       opening: r.opening === null ? undefined : (JSON.parse(r.opening) as string[]),
       openingProbe: r.opening_probe ?? undefined,
       selfPaced: r.self_paced !== 0,
+      team: r.team === null ? undefined : JSON.parse(r.team),
     }));
   }
 
@@ -1106,15 +1145,29 @@ export class Ledger {
     model: string;
     provider: string;
     thinking?: string;
+    teamRole?: "worker" | "supervisor";
+    teamSlot?: number;
     at: number;
   }): string {
     const id = crypto.randomUUID();
     this.db
       .prepare(
-        `INSERT INTO run (id, task_id, tier, account_id, model, provider, thinking, state, started_at)
-         VALUES (?, ?, ?, ?, ?, ?, ?, 'pending', ?)`,
+        `INSERT INTO run (id, task_id, tier, account_id, model, provider, thinking,
+                          team_role, team_slot, state, started_at)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 'pending', ?)`,
       )
-      .run(id, r.taskId, r.tier, r.accountId, r.model, r.provider, r.thinking ?? null, r.at);
+      .run(
+        id,
+        r.taskId,
+        r.tier,
+        r.accountId,
+        r.model,
+        r.provider,
+        r.thinking ?? null,
+        r.teamRole ?? null,
+        r.teamSlot ?? null,
+        r.at,
+      );
     return id;
   }
 
@@ -1185,7 +1238,7 @@ export class Ledger {
       .prepare(
         `SELECT id, task_id, tier, account_id, model, provider, thinking, state, started_at,
                 claimed_at, runner_id, ended_at, heartbeat_at, progress_at,
-                abort_requested, productive, complete, detail
+                abort_requested, productive, complete, detail, team_role, team_slot
          FROM run ${clause}`,
       )
       .all(...params) as {
@@ -1207,6 +1260,8 @@ export class Ledger {
       productive: number | null;
       complete: number | null;
       detail: string | null;
+      team_role: "worker" | "supervisor" | null;
+      team_slot: number | null;
     }[];
     return rows.map((r) => ({
       id: r.id,
@@ -1227,6 +1282,8 @@ export class Ledger {
       productive: r.productive === null ? undefined : r.productive !== 0,
       complete: r.complete === null ? undefined : r.complete !== 0,
       detail: r.detail ?? undefined,
+      teamRole: r.team_role ?? undefined,
+      teamSlot: r.team_slot ?? undefined,
     }));
   }
 
@@ -1275,16 +1332,17 @@ export class Ledger {
   /** Bind the root Pi session to its run. Repeating the report is idempotent.
    * session_id is also filled for a still-draining pre-relation worker; all
    * current attribution reads run_session. */
-  linkRunSession(id: string, sessionId: string, at = Date.now()): void {
+  linkRunSession(id: string, sessionId: string, at = Date.now(), sessionFile?: string): void {
     this.db.exec("BEGIN IMMEDIATE");
     try {
       this.db.prepare("UPDATE run SET session_id = ? WHERE id = ?").run(sessionId, id);
       this.db
         .prepare(
-          `INSERT INTO run_session (run_id, session_id, created_at)
-           VALUES (?, ?, ?) ON CONFLICT (session_id) DO NOTHING`,
+          `INSERT INTO run_session (run_id, session_id, session_file, created_at)
+           VALUES (?, ?, ?, ?) ON CONFLICT (session_id) DO UPDATE SET
+             session_file = COALESCE(excluded.session_file, run_session.session_file)`,
         )
-        .run(id, sessionId, at);
+        .run(id, sessionId, sessionFile ?? null, at);
       this.db.exec("COMMIT");
     } catch (thrown) {
       this.db.exec("ROLLBACK");
@@ -1292,32 +1350,51 @@ export class Ledger {
     }
   }
 
+  runSession(runId: string): { sessionId: string; sessionFile?: string } | undefined {
+    const row = this.db
+      .prepare(
+        `SELECT session_id, session_file FROM run_session
+         WHERE run_id = ? ORDER BY created_at DESC LIMIT 1`,
+      )
+      .get(runId) as { session_id: string; session_file: string | null } | undefined;
+    return row === undefined
+      ? undefined
+      : { sessionId: row.session_id, sessionFile: row.session_file ?? undefined };
+  }
+
   requestAbort(id: string): void {
     this.db.prepare("UPDATE run SET abort_requested = 1 WHERE id = ?").run(id);
   }
 
-  /** Queue an operator message for a live run. Delivery is the runner's job;
-   * the row is the request, `delivered_at` the receipt. */
-  queueRunMessage(runId: string, text: string, at = Date.now()): number {
+  /** Queue an operator or supervisor message for a live run. Delivery is the
+   * runner's job; the row is the request, `delivered_at` the receipt. */
+  queueRunMessage(runId: string, text: string, at = Date.now(), interrupt = false): number {
     const trimmed = text.trim();
     if (trimmed === "") throw new Error("a run message cannot be empty");
     const row = this.db
       .prepare(
-        "INSERT INTO run_message (run_id, text, created_at) VALUES (?, ?, ?) RETURNING id",
+        `INSERT INTO run_message (run_id, text, created_at, interrupt)
+         VALUES (?, ?, ?, ?) RETURNING id`,
       )
-      .get(runId, trimmed, at) as { id: number };
+      .get(runId, trimmed, at, interrupt ? 1 : 0) as { id: number };
     return row.id;
   }
 
   /** Undelivered messages for a run, oldest first. */
-  pendingRunMessages(runId: string): { id: number; text: string; createdAt: number }[] {
+  pendingRunMessages(runId: string): { id: number; text: string; createdAt: number; interrupt: boolean }[] {
     return (
       this.db
         .prepare(
-          "SELECT id, text, created_at FROM run_message WHERE run_id = ? AND delivered_at IS NULL ORDER BY id",
+          `SELECT id, text, created_at, interrupt FROM run_message
+           WHERE run_id = ? AND delivered_at IS NULL ORDER BY id`,
         )
-        .all(runId) as { id: number; text: string; created_at: number }[]
-    ).map((r) => ({ id: r.id, text: r.text, createdAt: r.created_at }));
+        .all(runId) as { id: number; text: string; created_at: number; interrupt: number }[]
+    ).map((r) => ({
+      id: r.id,
+      text: r.text,
+      createdAt: r.created_at,
+      interrupt: r.interrupt !== 0,
+    }));
   }
 
   markRunMessageDelivered(id: number, at = Date.now()): void {
