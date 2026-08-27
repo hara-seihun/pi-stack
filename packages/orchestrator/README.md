@@ -213,8 +213,8 @@ Three launch-side fields describe scheduling:
 - `team`: one durable room with a fixed number of equal workers and one
   supervisor. A team task uses ordinary positive demand as a boolean request
   for its complete roster. The controller reconciles worker slots plus the
-  supervisor slot independently, so one session ending replaces only that
-  member. Every worker receives the task's same complete prompt. The
+  supervisor slot independently, so an infrastructure failure replaces only
+  that member. Every worker receives the task's same complete prompt. The
   supervisor receives `team.supervisorPrompt`; `team.watchFor` is added to its
   pinned system instructions as a list of signs worth inspecting, never as an
   automatic intervention policy.
@@ -225,17 +225,25 @@ Three launch-side fields describe scheduling:
   an unseen teammate version from being silently overwritten. Parallel
   derivations remain welcome, and the filesystem is the coordination record.
 
+  Team turns form one durable conversation. Whenever a worker finishes a turn,
+  the ledger records its stop, wakes the supervisor, and parks the worker's
+  session with its full context. The worker cannot continue until the
+  supervisor answers it through `team_intervene`. Once every waiting worker has
+  an answer, the supervisor parks too; the next worker stop wakes it. This
+  event-driven handoff has no check-in budget, so a team does not dissolve and
+  relaunch merely because its members finished ordinary turns.
+
   The supervisor has `team_members`, `team_context`, `team_intervene`, and
-  `team_completion`. `team_context` runs
-  `/srv/pi/tools/read-condensed-session/main` against the exact Pi session file
-  recorded for a worker, so the supervisor reads the worker's real condensed
-  reasoning and recent activity rather than a status report. `team_intervene`
-  queues a ledger message for that worker's runner. The host aborts the
-  in-flight turn and sends the correction as the next ordinary user message in
-  the same session, preserving all prior context. The supervisor system prompt
-  forbids task allocation. It cycles through the room, observes more than it
-  interrupts, and speaks as a trusted colleague when a programme-level
-  correction is worth breaking the current thought.
+  `team_completion`. `team_members` shows which workers are waiting and their
+  stop sequence. `team_context` runs `/srv/pi/tools/read-condensed-session/main`
+  against the exact Pi session file recorded for a worker, so the supervisor
+  reads the worker's real condensed reasoning and recent activity rather than
+  a status report. `team_intervene` atomically acknowledges a waiting stop and
+  queues the supervisor's response for that worker's runner. For a proactive
+  correction, the host aborts the in-flight turn and sends the correction as
+  the next ordinary user message in the same session. The supervisor system
+  prompt forbids task allocation. It steers toward the whole programme as a
+  trusted colleague rather than splitting the room into assigned leaves.
 
   Programme completion is deliberately not a `task_complete` flag from any
   one session. The supervisor opens a durable audit with `team_completion`;

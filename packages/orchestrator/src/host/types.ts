@@ -24,7 +24,9 @@ import type {
  * It is a constant and not a knob. The override that used to exist could
  * only make a shift longer, and a non-numeric one removed the cap outright
  * (`turn >= NaN` is false forever), which is the shape of the failure it
- * exists to prevent.
+ * exists to prevent. Team sessions do not use this budget. Their turns are
+ * paced by durable worker-stop and supervisor-response events until the
+ * unanimous programme marker closes the room.
  */
 export const MAX_CHECK_INS = 5;
 
@@ -47,6 +49,23 @@ export interface TeamMember {
   readonly state: "pending" | "running" | "done" | "error" | "aborted";
   readonly progressAt?: number;
   readonly sessionFile?: string;
+  /** Workers stop after every turn until the supervisor sends their next
+   * message. Supervisors never use these fields. */
+  readonly waiting: boolean;
+  readonly stop: number;
+  readonly stoppedAt?: number;
+}
+
+export interface TeamStop {
+  readonly taskId: string;
+  readonly workerRunId: string;
+  readonly stop: number;
+  readonly stoppedAt: number;
+}
+
+export interface TeamMessageResult {
+  readonly respondedToStop: boolean;
+  readonly stop?: number;
 }
 
 export interface LaunchSpec {
@@ -69,7 +88,7 @@ export interface LaunchSpec {
    * messages, run fresh at every launch (see tasks/types.ts). */
   readonly openingProbe?: string;
   /** One work turn, no continuation check-ins: the agent ending its turn
-   * ends the shift. */
+   * ends an ordinary shift. Team sessions instead wait for one another. */
   readonly selfPaced?: boolean;
   readonly team?: TeamLaunch;
 }
@@ -136,9 +155,18 @@ export interface HostEvents {
     verdict: TeamAuditVerdict,
     summary: string,
   ): TeamCompletionStatus;
-  /** Queue a supervisor correction. The target runner performs the abort and
-   * subsequent user-message delivery, so this also works across generations. */
-  teamIntervene(supervisorRunId: string, workerRunId: string, text: string): void;
+  /** Record that a worker finished a turn and wake the current supervisor. */
+  teamStopped(workerRunId: string): TeamStop;
+  /** Whether this worker still needs the supervisor's next message. */
+  teamWaiting(workerRunId: string): boolean;
+  /** Queue a supervisor message. If the worker is waiting, this atomically
+   * acknowledges its latest stop before delivery; otherwise it is a proactive
+   * correction. The target runner performs the abort and user-message delivery. */
+  teamIntervene(
+    supervisorRunId: string,
+    workerRunId: string,
+    text: string,
+  ): TeamMessageResult;
   /** True when this lane has run out of work and its shift should end rather
    * than be re-prompted. The policy (which lanes end this way, and what
    * counts as drained) lives in the runner; the host only asks. */

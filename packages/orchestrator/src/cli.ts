@@ -114,8 +114,9 @@ async function status(ledger: Ledger): Promise<void> {
   }
   for (const r of ledger.runs({ state: "running" })) {
     const role = r.teamRole === undefined ? "" : ` ${r.teamRole}-${r.teamSlot}`;
+    const waiting = r.teamWaiting ? ` waiting-for-supervisor stop=${r.teamStop}` : "";
     console.log(
-      `run ${r.id.slice(0, 8)}: ${r.taskId}${role} on ${r.accountId} (${r.model}) runner=${r.runnerId}`,
+      `run ${r.id.slice(0, 8)}: ${r.taskId}${role}${waiting} on ${r.accountId} (${r.model}) runner=${r.runnerId}`,
     );
   }
   // Pausing skips evaluation entirely, so an empty list here means "not
@@ -415,6 +416,8 @@ async function runner(ledger: Ledger, args: string[]): Promise<void> {
         live.teamCompletionAction(supervisorRunId, action, summary),
       teamAudit: (workerRunId, audit, verdict, summary) =>
         live.teamAudit(workerRunId, audit, verdict, summary),
+      teamStopped: (workerRunId) => live.teamStopped(workerRunId),
+      teamWaiting: (workerRunId) => live.teamWaiting(workerRunId),
       teamIntervene: (supervisorRunId, workerRunId, text) =>
         live.teamIntervene(supervisorRunId, workerRunId, text),
       laneDrained: (taskId) => live.laneDrained(taskId),

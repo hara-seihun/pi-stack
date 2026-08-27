@@ -101,7 +101,9 @@ describe("ledger", () => {
     Ledger.open(path).close();
     const db = new DatabaseSync(path);
     db.exec(
-      "DROP TABLE team_audit; DROP TABLE team_completion; DROP INDEX run_team_roster; " +
+      "DROP INDEX run_team_waiting; ALTER TABLE run DROP COLUMN team_stopped_at; " +
+        "ALTER TABLE run DROP COLUMN team_stop; ALTER TABLE run DROP COLUMN team_waiting; " +
+        "DROP TABLE team_audit; DROP TABLE team_completion; DROP INDEX run_team_roster; " +
         "ALTER TABLE run DROP COLUMN team_role; ALTER TABLE run DROP COLUMN team_slot; " +
         "ALTER TABLE task DROP COLUMN team; ALTER TABLE run_message DROP COLUMN interrupt; " +
         "DROP TABLE run_session; CREATE INDEX run_session ON run (session_id); " +
@@ -135,7 +137,7 @@ describe("ledger", () => {
     migrated.close();
     expect(await exited, stderr).toBe(0);
     const verified = new DatabaseSync(path);
-    expect((verified.prepare("PRAGMA user_version").get() as { user_version: number }).user_version).toBe(23);
+    expect((verified.prepare("PRAGMA user_version").get() as { user_version: number }).user_version).toBe(24);
     expect(verified.prepare("SELECT check_ins, session_id FROM run LIMIT 1").all()).toEqual([]);
     expect(verified.prepare("SELECT phase, audit FROM team_completion LIMIT 1").all()).toEqual([]);
     expect(
@@ -149,6 +151,49 @@ describe("ledger", () => {
         .some((column) => column.name === "session_id"),
     ).toBe(true);
     verified.close();
+  });
+
+  it("makes every worker stop wait for one durable supervisor response", () => {
+    const ledger = Ledger.open(":memory:");
+    ledger.upsertTask({
+      id: "team-turns",
+      demandConstant: 1,
+      tiers: mix("standard"),
+      prompt: "Classify every Cayley graph.",
+      cwd: "/work",
+      team: { workers: 1, supervisorPrompt: "Keep the whole programme moving.", watchFor: [] },
+    });
+    const create = (role: "worker" | "supervisor", slot: number, at: number) =>
+      ledger.createRun({
+        taskId: "team-turns",
+        tier: "standard",
+        accountId: `${role}-account`,
+        provider: "provider",
+        model: "model",
+        teamRole: role,
+        teamSlot: slot,
+        at,
+      });
+    const supervisor = create("supervisor", 0, 1);
+    const worker = create("worker", 1, 2);
+    ledger.claimRuns("runner", 2, 3);
+
+    expect(ledger.teamWorkerStopped(worker, 4)).toMatchObject({ stop: 1, stoppedAt: 4 });
+    expect(ledger.run(worker)).toMatchObject({ teamWaiting: true, teamStop: 1 });
+    expect(ledger.pendingRunMessages(supervisor)[0]?.text).toContain("cannot continue until you respond");
+
+    expect(
+      ledger.respondToTeamWorker(
+        supervisor,
+        worker,
+        "Look for one criterion that decides the whole family.",
+        5,
+      ),
+    ).toEqual({ respondedToStop: true, stop: 1 });
+    expect(ledger.run(worker)?.teamWaiting).toBe(false);
+    expect(ledger.pendingRunMessages(worker)[0]?.text).toContain("criterion that decides");
+    expect(ledger.teamWorkerStopped(worker, 6).stop).toBe(2);
+    ledger.close();
   });
 
   it("carries audit state across runs and requires the current worker in each slot", () => {

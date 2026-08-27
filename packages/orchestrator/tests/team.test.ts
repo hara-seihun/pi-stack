@@ -146,7 +146,9 @@ describe("team workspace awareness", () => {
     );
     expect(prompt).toContain("room of geniuses, not a task queue");
     expect(prompt).toContain("Never allocate tasks");
-    expect(prompt).toContain("Observe far more often than you intervene");
+    expect(prompt).toContain("Observe far more often than you interrupt a worker mid-thought");
+    expect(prompt).toContain("You must answer every waiting worker");
+    expect(prompt).toContain("the next worker stop wakes you");
     expect(prompt).toContain("a ladder of bounded cases");
     expect(teamContinuation("supervisor")).toContain("don't turn the programme into assignments");
   });

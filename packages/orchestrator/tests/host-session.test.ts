@@ -16,6 +16,8 @@ import { MAX_CHECK_INS, type HostRunResult, type LaunchSpec } from "../src/host/
 interface FakeTurn {
   /** Reports the agent files during this turn. */
   readonly reports?: number;
+  /** A supervisor turn answers this waiting worker through the real tool. */
+  readonly respondsTo?: { readonly runId: string; readonly message: string };
   readonly stopReason?: "error" | "aborted";
   readonly errorMessage?: string;
   /** Wall-clock the turn consumes, for budget tests. */
@@ -58,10 +60,16 @@ function harness(
   let clock = 0;
   const messages: { role: string; stopReason?: string; errorMessage?: string }[] = [];
   let taskComplete: { execute: (id: string, params: unknown) => Promise<unknown> } | undefined;
+  let teamIntervene: { execute: (id: string, params: unknown) => Promise<unknown> } | undefined;
+  let teamWaiting = false;
+  let teamStop = 0;
+  let teamStoppedAt: number | undefined;
+  const teamResponses: string[] = [];
   const bindings: unknown[] = [];
   const overrides: Record<string, unknown>[] = [];
   let releasePark: (() => void) | undefined;
   let interrupted = false;
+  let prompting = false;
   // Both `reload()` and `setModel()` rebuild settings from disk in the real
   // SDK, which is how the retry budget was silently lost twice; the fake
   // does the same so the ordering stays pinned.
@@ -90,11 +98,12 @@ function harness(
     },
     dispose: () => {},
     abort: async () => {
-      interrupted = true;
+      if (prompting) interrupted = true;
       releasePark?.();
     },
     sendUserMessage: async () => {},
     prompt: async (text: string) => {
+      prompting = true;
       const turn = turns[prompts.length] ?? {};
       prompts.push(text);
       if (turn.parks) await new Promise<void>((resolve) => { releasePark = resolve; });
@@ -104,6 +113,12 @@ function harness(
           summary: `report ${prompts.length}.${i}`,
         });
       }
+      if (turn.respondsTo !== undefined) {
+        await teamIntervene?.execute("respond", {
+          runId: turn.respondsTo.runId,
+          message: turn.respondsTo.message,
+        });
+      }
       clock += turn.tookMs ?? 0;
       messages.push({
         role: "assistant",
@@ -111,6 +126,7 @@ function harness(
         errorMessage: turn.errorMessage,
       });
       interrupted = false;
+      prompting = false;
       releasePark = undefined;
     },
   };
@@ -124,11 +140,31 @@ function harness(
       heartbeat: (_id, at) => heartbeats.push(at),
       progress: (_id, at) => progress.push(at),
       sessionStarted: (runId, sessionId) => links.push({ runId, sessionId }),
-      teamMembers: () => [],
+      teamMembers: () => options.team === undefined ? [] : [{
+        runId: options.team.role === "supervisor" ? "worker-1" : "run-1",
+        role: "worker" as const,
+        slot: 1,
+        state: "running" as const,
+        waiting: teamWaiting,
+        stop: teamStop,
+        stoppedAt: teamStoppedAt,
+      }],
       teamCompletion: (taskId) => ({ taskId, phase: "working", audit: 0, reports: [] }),
       teamCompletionAction: () => ({ taskId: "team", phase: "audit", audit: 1, reports: [] }),
       teamAudit: () => ({ taskId: "team", phase: "audit", audit: 1, reports: [] }),
-      teamIntervene: () => {},
+      teamStopped: (workerRunId) => {
+        teamWaiting = true;
+        teamStop++;
+        teamStoppedAt = Date.now();
+        return { taskId: "team", workerRunId, stop: teamStop, stoppedAt: teamStoppedAt };
+      },
+      teamWaiting: () => teamWaiting,
+      teamIntervene: (_supervisorRunId, _workerRunId, text) => {
+        const respondedToStop = teamWaiting;
+        teamWaiting = false;
+        teamResponses.push(text);
+        return { respondedToStop, ...(respondedToStop ? { stop: teamStop } : {}) };
+      },
       laneDrained: options.laneDrained ?? (() => false),
       claimCheckIn: () => (spent++ < MAX_CHECK_INS ? true : false),
       turnFailed: (_id, detail, attempt) => {
@@ -141,7 +177,9 @@ function harness(
       resolveModel: options.resolveModel ?? (() => ({})),
       openSession: (async (config: { customTools?: unknown[] }) => {
         sessionConfigs.push(config as Record<string, unknown>);
-        taskComplete = config.customTools?.[0] as typeof taskComplete;
+        const tools = config.customTools as { name: string; execute: (id: string, params: unknown) => Promise<unknown> }[];
+        taskComplete = tools.find((tool) => tool.name === "task_complete");
+        teamIntervene = tools.find((tool) => tool.name === "team_intervene");
         return { session };
       }) as never,
       fetchDoctrine: options.fetchDoctrine,
@@ -172,11 +210,29 @@ function harness(
     }, 1);
   });
   const emit = () => observers.forEach((observe) => observe({}));
+  const respondWorker = (message: string) => {
+    teamWaiting = false;
+    teamResponses.push(message);
+    host.intervene(spec.runId, message);
+  };
+  const stopWorker = () => {
+    teamWaiting = true;
+    teamStop++;
+    teamStoppedAt = Date.now();
+    host.intervene(
+      spec.runId,
+      `Worker worker-1 has stopped after finishing turn ${teamStop} and is waiting for you.`,
+    );
+  };
   return {
     host,
     spec,
     prompts,
     finished,
+    teamStops: () => teamStop,
+    teamResponses,
+    respondWorker,
+    stopWorker,
     links,
     bindings,
     heartbeats,
@@ -465,28 +521,62 @@ describe("host shift loop", () => {
     expect(await clean.finished).toEqual({ state: "aborted", detail: "session aborted" });
   });
 
-  it("keeps team check-ins on whole-programme work rather than generic task picking", async () => {
-    const worker = harness([{ reports: 1 }, {}], {
+  it("parks every worker turn until the supervisor answers in the same session", async () => {
+    const worker = harness([{ reports: 1 }, { reports: 1 }], {
       team: { role: "worker", slot: 1, workers: 4, watchFor: [] },
     });
     worker.host.launch(worker.spec);
-    await worker.finished;
-    expect(worker.prompts[1]).toContain("whole theorem");
-    expect(worker.prompts[1]).toContain("bounded case is working material");
+    while (worker.teamStops() < 1) await new Promise((resolve) => setTimeout(resolve, 1));
 
-    const supervisor = harness([{ reports: 1 }, {}], {
-      team: { role: "supervisor", slot: 0, workers: 4, watchFor: [] },
-    });
+    expect(worker.prompts).toEqual(["Attack the central problem."]);
+    expect(worker.host.has(worker.spec.runId)).toBe(true);
+
+    worker.respondWorker("Look across the new examples for the invariant that decides the whole family.");
+    while (worker.teamStops() < 2) await new Promise((resolve) => setTimeout(resolve, 1));
+    expect(worker.prompts[1]).toContain("invariant that decides the whole family");
+    expect(worker.host.has(worker.spec.runId)).toBe(true);
+
+    worker.host.kill(worker.spec.runId, "test complete");
+    expect(await worker.finished).toMatchObject({ state: "aborted" });
+  });
+
+  it("parks the supervisor until a worker stop wakes it, then requires a response", async () => {
+    const supervisor = harness(
+      [
+        { reports: 1 },
+        {},
+        {
+          respondsTo: {
+            runId: "worker-1",
+            message: "Try to turn that obstruction into a criterion for every Cayley graph.",
+          },
+        },
+      ],
+      { team: { role: "supervisor", slot: 0, workers: 4, watchFor: [] } },
+    );
     supervisor.host.launch(supervisor.spec);
-    await supervisor.finished;
-    expect(supervisor.prompts[1]).toContain("Cycle through every live worker");
-    expect(supervisor.prompts[1]).toContain("don't turn the programme into assignments");
+    while (supervisor.prompts.length < 1) await new Promise((resolve) => setTimeout(resolve, 1));
+    await new Promise((resolve) => setTimeout(resolve, 1));
+    expect(supervisor.prompts).toHaveLength(1);
+
+    supervisor.stopWorker();
+    while (supervisor.teamResponses.length < 1) {
+      await new Promise((resolve) => setTimeout(resolve, 1));
+    }
+    expect(supervisor.prompts[1]).toContain("has stopped after finishing turn 1");
+    expect(supervisor.prompts[2]).toContain("cannot continue until you respond");
+    expect(supervisor.teamResponses[0]).toContain("criterion for every Cayley graph");
+    expect(supervisor.host.has(supervisor.spec.runId)).toBe(true);
+
+    supervisor.host.kill(supervisor.spec.runId, "test complete");
+    expect(await supervisor.finished).toMatchObject({ state: "aborted" });
   });
 
   it("gives workers audit verdicts and only supervisors the durable completion marker", async () => {
     const worker = harness([{ reports: 1 }], {
       selfPaced: true,
       team: { role: "worker", slot: 1, workers: 4, watchFor: [] },
+      laneDrained: () => true,
     });
     worker.host.launch(worker.spec);
     await worker.finished;
@@ -499,6 +589,7 @@ describe("host shift loop", () => {
     const supervisor = harness([{ reports: 1 }], {
       selfPaced: true,
       team: { role: "supervisor", slot: 0, workers: 4, watchFor: [] },
+      laneDrained: () => true,
     });
     supervisor.host.launch(supervisor.spec);
     await supervisor.finished;
@@ -513,6 +604,7 @@ describe("host shift loop", () => {
       {
         selfPaced: true,
         team: { role: "worker", slot: 1, workers: 4, watchFor: ["constant ladders"] },
+        laneDrained: () => true,
       },
     );
     host.launch(spec);

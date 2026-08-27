@@ -78,9 +78,12 @@ export class PiHost implements HostManager {
    * a provider outage is not inside `prompt()`, so `session.abort()` has
    * nothing to interrupt; the wait watches this instead. */
   private readonly aborting = new Set<string>();
-  /** Supervisor corrections waiting to become the next ordinary user turn.
-   * The current turn is aborted when the item enters this queue. */
+  /** Supervisor corrections and worker-stop alerts waiting to become the next
+   * ordinary user turn. The current turn is aborted when an item arrives. */
   private readonly interventions = new Map<string, string[]>();
+  /** A team session with no turn in flight sleeps here until another member
+   * creates the next conversation event. */
+  private readonly teamWakeups = new Map<string, () => void>();
 
   constructor(
     private readonly events: HostEvents,
@@ -159,6 +162,7 @@ export class PiHost implements HostManager {
 
   abort(runId: string): void {
     this.aborting.add(runId);
+    this.teamWakeups.get(runId)?.();
     void this.runtimes.get(runId)?.session.abort();
   }
 
@@ -200,6 +204,7 @@ export class PiHost implements HostManager {
     const pending = this.interventions.get(runId) ?? [];
     pending.push(text);
     this.interventions.set(runId, pending);
+    this.teamWakeups.get(runId)?.();
     void session.abort().catch((thrown: unknown) => {
       this.transcripts.get(runId)?.append("notice", {
         text: `Could not abort the turn immediately: ${String(thrown)}`,
@@ -365,7 +370,7 @@ export class PiHost implements HostManager {
           name: "team_intervene",
           label: "Intervene with worker",
           description:
-            "Interrupt one live worker and deliver a warm programme-level correction as its next user message. Use sparingly, after observing a concrete warning sign.",
+            "Send one worker its next warm programme-level message. A worker that has stopped cannot continue until you answer with this tool. A worker still mid-turn is interrupted, so proactive corrections remain rare and should follow a concrete warning sign.",
           parameters: Type.Object({
             runId: Type.String({ minLength: 1 }),
             message: Type.String({ minLength: 1 }),
@@ -375,13 +380,15 @@ export class PiHost implements HostManager {
             if (member.role !== "worker") {
               throw new Error(`${params.runId} is not a worker on this team`);
             }
-            this.events.teamIntervene(spec.runId, member.runId, params.message);
+            const result = this.events.teamIntervene(spec.runId, member.runId, params.message);
             return {
               content: [{
                 type: "text" as const,
-                text: `Queued for ${member.runId}. Its runner will abort the in-flight turn before delivering the message.`,
+                text: result.respondedToStop
+                  ? `Response to ${member.runId} stop ${result.stop} queued. The worker can continue when its runner delivers your message.`
+                  : `Queued for ${member.runId}. Its runner will abort the in-flight turn before delivering the message.`,
               }],
-              details: undefined,
+              details: result,
             };
           },
         },
@@ -442,6 +449,44 @@ export class PiHost implements HostManager {
     });
     const interrupted = (operation: Promise<unknown>): Promise<boolean> =>
       Promise.race([operation.then(() => false), cancelled]);
+    const waitForTeam = async (ready: () => boolean): Promise<boolean> => {
+      while (!ready()) {
+        let wake!: () => void;
+        const signaled = new Promise<void>((resolve) => {
+          wake = resolve;
+        });
+        this.teamWakeups.set(spec.runId, wake);
+        if (ready()) wake();
+        const killed = await interrupted(Promise.race([signaled, sleep(WAIT_SLICE_MS)]));
+        if (this.teamWakeups.get(spec.runId) === wake) {
+          this.teamWakeups.delete(spec.runId);
+        }
+        if (killed || this.aborting.has(spec.runId)) return false;
+        this.events.progress(spec.runId, Date.now());
+      }
+      return true;
+    };
+    const queueStopReminder = (): boolean => {
+      if (spec.team?.role !== "supervisor") return false;
+      if ((this.interventions.get(spec.runId)?.length ?? 0) > 0) return true;
+      const waiting = this.events
+        .teamMembers(spec.taskId)
+        .filter((member) => member.role === "worker" && member.waiting);
+      if (waiting.length === 0) return false;
+      const pending = waiting.map(
+        (worker) =>
+          `- ${worker.runId}, stop ${worker.stop}` +
+          (worker.stoppedAt === undefined
+            ? ""
+            : ` at ${new Date(worker.stoppedAt).toISOString()}`),
+      );
+      this.interventions.set(spec.runId, [[
+        "These workers have stopped and cannot continue until you respond:",
+        ...pending,
+        "Read each worker's current context, then call team_intervene with the next warm programme-level message for every waiting worker.",
+      ].join("\n")]);
+      return true;
+    };
     const disposers: (() => void)[] = [hosted.dispose];
     let cleaned = false;
     const cleanup = () => {
@@ -451,6 +496,7 @@ export class PiHost implements HostManager {
       this.transcripts.delete(spec.runId);
       this.aborting.delete(spec.runId);
       this.interventions.delete(spec.runId);
+      this.teamWakeups.delete(spec.runId);
       for (const dispose of disposers.reverse()) dispose();
     };
     this.runtimes.set(spec.runId, { session, cancel: cancelRun, cleanup });
@@ -595,8 +641,48 @@ export class PiHost implements HostManager {
         stalls = 0;
         resume = undefined;
         observer.endTurn();
+        if (spec.team !== undefined) {
+          if (this.events.laneDrained(spec.taskId)) {
+            transcript?.append("notice", {
+              text: "The team's unanimous completion marker is set; ending this session.",
+            });
+            break;
+          }
+          if (spec.team.role === "worker") {
+            const stopped = this.events.teamStopped(spec.runId);
+            transcript?.append("notice", {
+              text: `Turn ${stopped.stop} finished. Waiting for the supervisor's next message.`,
+            });
+            const resumed = await waitForTeam(
+              () =>
+                this.events.laneDrained(spec.taskId) ||
+                (!this.events.teamWaiting(spec.runId) &&
+                  (this.interventions.get(spec.runId)?.length ?? 0) > 0),
+            );
+            if (!resumed) return { state: "aborted", detail: "session aborted" };
+          } else {
+            if (!queueStopReminder()) {
+              transcript?.append("notice", {
+                text: "All workers are moving. Waiting for the next worker to stop.",
+              });
+              const awakened = await waitForTeam(
+                () =>
+                  this.events.laneDrained(spec.taskId) ||
+                  (this.interventions.get(spec.runId)?.length ?? 0) > 0 ||
+                  this.events
+                    .teamMembers(spec.taskId)
+                    .some((member) => member.role === "worker" && member.waiting),
+              );
+              if (!awakened) return { state: "aborted", detail: "session aborted" };
+              queueStopReminder();
+            }
+          }
+          if (this.events.laneDrained(spec.taskId)) break;
+          turn++;
+          continue;
+        }
         // The abort can race with a turn that was already finishing. A queued
-        // supervisor correction still gets the next user turn rather than
+        // operator correction still gets the next user turn rather than
         // disappearing at a self-paced or check-in boundary.
         if ((this.interventions.get(spec.runId)?.length ?? 0) > 0) continue;
         // A self-paced shift is one work turn: the agent ending it is the

@@ -444,6 +444,18 @@ CREATE TABLE team_audit (
 CREATE INDEX team_audit_task_generation ON team_audit (task_id, audit);
 `;
 
+/** Team turns are a durable conversation. A worker that finishes a turn waits
+ * for the supervisor's next message; the supervisor sleeps when nobody is
+ * waiting and wakes on the next worker stop. The sequence number distinguishes
+ * successive stops by the same long-lived worker session. */
+const TEAM_TURN_SCHEMA = `
+ALTER TABLE run ADD COLUMN team_waiting INTEGER NOT NULL DEFAULT 0
+  CHECK (team_waiting IN (0, 1));
+ALTER TABLE run ADD COLUMN team_stop INTEGER NOT NULL DEFAULT 0;
+ALTER TABLE run ADD COLUMN team_stopped_at INTEGER;
+CREATE INDEX run_team_waiting ON run (task_id, team_waiting, state);
+`;
+
 const MIGRATIONS: readonly string[] = [
   SCHEMA,
   TASK_SCHEMA,
@@ -468,6 +480,7 @@ const MIGRATIONS: readonly string[] = [
   PLAN_CAPACITY_SCHEMA,
   TEAM_SCHEMA,
   TEAM_COMPLETION_SCHEMA,
+  TEAM_TURN_SCHEMA,
 ];
 
 export interface AccountRow {
@@ -515,6 +528,11 @@ export interface RunRow {
   readonly teamRole: "worker" | "supervisor" | undefined;
   /** Worker slots are one-indexed; the supervisor uses slot zero. */
   readonly teamSlot: number | undefined;
+  /** A worker that ended its last turn and has not received the supervisor's
+   * next message. Only team workers use these fields. */
+  readonly teamWaiting: boolean;
+  readonly teamStop: number;
+  readonly teamStoppedAt: number | undefined;
 }
 
 export interface RunResult {
@@ -1207,6 +1225,125 @@ export class Ledger {
     return this.teamCompletion(taskId);
   }
 
+  teamWorkerStopped(
+    workerRunId: string,
+    at = Date.now(),
+  ): { taskId: string; workerRunId: string; stop: number; stoppedAt: number } {
+    let stopped!: { taskId: string; workerRunId: string; stop: number; stoppedAt: number };
+    this.immediate(() => {
+      const worker = this.run(workerRunId);
+      if (worker?.state !== "running" || worker.teamRole !== "worker") {
+        throw new Error("only a live team worker can stop for supervisor guidance");
+      }
+      if (worker.teamWaiting) {
+        stopped = {
+          taskId: worker.taskId,
+          workerRunId: worker.id,
+          stop: worker.teamStop,
+          stoppedAt: worker.teamStoppedAt ?? at,
+        };
+        return;
+      }
+      const row = this.db
+        .prepare(
+          `UPDATE run
+           SET team_waiting = 1, team_stop = team_stop + 1, team_stopped_at = ?
+           WHERE id = ? AND state = 'running' AND team_role = 'worker'
+           RETURNING task_id, team_stop`,
+        )
+        .get(at, worker.id) as { task_id: string; team_stop: number } | undefined;
+      if (row === undefined) throw new Error(`${worker.id} stopped outside a live team run`);
+      stopped = {
+        taskId: row.task_id,
+        workerRunId: worker.id,
+        stop: row.team_stop,
+        stoppedAt: at,
+      };
+      const supervisor = this.db
+        .prepare(
+          `SELECT id FROM run
+           WHERE task_id = ? AND team_role = 'supervisor' AND state IN ('pending', 'running')
+           ORDER BY CASE state WHEN 'running' THEN 0 ELSE 1 END, started_at DESC
+           LIMIT 1`,
+        )
+        .get(worker.taskId) as { id: string } | undefined;
+      if (supervisor !== undefined) {
+        this.db
+          .prepare(
+            `INSERT INTO run_message (run_id, text, created_at, interrupt)
+             VALUES (?, ?, ?, 1)`,
+          )
+          .run(
+            supervisor.id,
+            this.teamStopAlert(stopped),
+            at,
+          );
+      }
+    });
+    return stopped;
+  }
+
+  waitingTeamWorkers(taskId: string): RunRow[] {
+    return this.runRows(
+      "WHERE task_id = ? AND team_role = 'worker' AND team_waiting = 1 AND state = 'running' ORDER BY team_slot",
+      [taskId],
+    );
+  }
+
+  respondToTeamWorker(
+    supervisorRunId: string,
+    workerRunId: string,
+    text: string,
+    at = Date.now(),
+  ): { stop: number | undefined; respondedToStop: boolean } {
+    const trimmed = text.trim();
+    if (trimmed === "") throw new Error("team message must not be empty");
+    let result!: { stop: number | undefined; respondedToStop: boolean };
+    this.immediate(() => {
+      const supervisor = this.run(supervisorRunId);
+      const worker = this.run(workerRunId);
+      if (supervisor?.state !== "running" || supervisor.teamRole !== "supervisor") {
+        throw new Error("only a live team supervisor can message a worker");
+      }
+      if (
+        worker?.state !== "running" ||
+        worker.teamRole !== "worker" ||
+        worker.taskId !== supervisor.taskId
+      ) {
+        throw new Error("the message target must be a live worker on this team");
+      }
+      const respondedToStop = worker.teamWaiting;
+      if (respondedToStop) {
+        this.db
+          .prepare("UPDATE run SET team_waiting = 0 WHERE id = ? AND team_waiting = 1")
+          .run(worker.id);
+      }
+      this.db
+        .prepare(
+          `INSERT INTO run_message (run_id, text, created_at, interrupt)
+           VALUES (?, ?, ?, 1)`,
+        )
+        .run(worker.id, trimmed, at);
+      result = {
+        stop: respondedToStop ? worker.teamStop : undefined,
+        respondedToStop,
+      };
+    });
+    return result;
+  }
+
+  teamStopAlert(stop: {
+    workerRunId: string;
+    stop: number;
+    stoppedAt: number;
+  }): string {
+    return [
+      `Worker ${stop.workerRunId} has stopped after finishing turn ${stop.stop} and is waiting for you.`,
+      `The stop was recorded at ${new Date(stop.stoppedAt).toISOString()}.`,
+      "Read its current work with team_context, then call team_intervene with your next warm programme-level message. The worker cannot continue until you respond.",
+    ].join("\n\n");
+  }
+
   /** True when this one lane is held, whatever the machine-wide control says. */
   taskPaused(taskId: string): boolean {
     return this.getControl(taskPauseKey(taskId)) === "paused";
@@ -1439,7 +1576,8 @@ export class Ledger {
       .prepare(
         `SELECT id, task_id, tier, account_id, model, provider, thinking, state, started_at,
                 claimed_at, runner_id, ended_at, heartbeat_at, progress_at,
-                abort_requested, productive, complete, detail, team_role, team_slot
+                abort_requested, productive, complete, detail, team_role, team_slot,
+                team_waiting, team_stop, team_stopped_at
          FROM run ${clause}`,
       )
       .all(...params) as {
@@ -1463,6 +1601,9 @@ export class Ledger {
       detail: string | null;
       team_role: "worker" | "supervisor" | null;
       team_slot: number | null;
+      team_waiting: number;
+      team_stop: number;
+      team_stopped_at: number | null;
     }[];
     return rows.map((r) => ({
       id: r.id,
@@ -1485,23 +1626,34 @@ export class Ledger {
       detail: r.detail ?? undefined,
       teamRole: r.team_role ?? undefined,
       teamSlot: r.team_slot ?? undefined,
+      teamWaiting: r.team_waiting !== 0,
+      teamStop: r.team_stop,
+      teamStoppedAt: r.team_stopped_at ?? undefined,
     }));
   }
 
   finishRun(id: string, result: RunResult, at: number): void {
-    this.db
-      .prepare(
-        `UPDATE run SET state = ?, ended_at = ?, productive = ?, complete = ?, detail = ?
-         WHERE id = ? AND state IN ('pending', 'running')`,
-      )
-      .run(
-        result.state,
-        at,
-        result.productive === undefined ? null : result.productive ? 1 : 0,
-        result.complete === undefined ? null : result.complete ? 1 : 0,
-        result.detail ?? null,
-        id,
-      );
+    this.immediate(() => {
+      this.db
+        .prepare(
+          `UPDATE run SET state = ?, ended_at = ?, productive = ?, complete = ?, detail = ?
+           WHERE id = ? AND state IN ('pending', 'running')`,
+        )
+        .run(
+          result.state,
+          at,
+          result.productive === undefined ? null : result.productive ? 1 : 0,
+          result.complete === undefined ? null : result.complete ? 1 : 0,
+          result.detail ?? null,
+          id,
+        );
+      this.db
+        .prepare(
+          `UPDATE run_message SET delivered_at = ?
+           WHERE run_id = ? AND delivered_at IS NULL`,
+        )
+        .run(at, id);
+    });
   }
 
   heartbeatRun(id: string, at: number): void {

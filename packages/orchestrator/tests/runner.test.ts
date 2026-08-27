@@ -310,7 +310,7 @@ describe("operator messages reach a live session", () => {
     expect(ledger.pendingRunMessages(runId).map((m) => m.text)).toEqual(["Stop that."]);
   });
 
-  it("supervisor intervention uses abort-then-message delivery for its own worker", () => {
+  it("wakes the supervisor on every worker stop and resumes only after its response", () => {
     const ledger = Ledger.open(":memory:");
     ledger.upsertAccount({ id: "anth-1", provider: "anthropic" });
     ledger.upsertTask({
@@ -341,14 +341,38 @@ describe("operator messages reach a live session", () => {
 
     expect(runner.teamMembers("team").find((member) => member.runId === workerId)?.sessionFile)
       .toBe("/sessions/worker.jsonl");
-    runner.teamIntervene(supervisorId, workerId, "Step back from the constant ladder and look for the general mechanism.");
+    expect(runner.teamStopped(workerId).stop).toBe(1);
+    expect(runner.teamMembers("team").find((member) => member.runId === workerId)?.waiting)
+      .toBe(true);
+    runner.tick(150);
+    expect(engine.interventions[0]).toMatchObject({ runId: supervisorId });
+    expect(engine.interventions[0]?.text).toContain("cannot continue until you respond");
+
+    expect(
+      runner.teamIntervene(
+        supervisorId,
+        workerId,
+        "Step back from the constant ladder and look for the general mechanism.",
+      ),
+    ).toEqual({ respondedToStop: true, stop: 1 });
+    expect(runner.teamMembers("team").find((member) => member.runId === workerId)?.waiting)
+      .toBe(false);
     runner.tick(200);
-    expect(engine.interventions).toEqual([{
+    expect(engine.interventions[1]).toEqual({
       runId: workerId,
       text: "Step back from the constant ladder and look for the general mechanism.",
-    }]);
+    });
     expect(engine.messages).toEqual([]);
     expect(ledger.pendingRunMessages(workerId)).toEqual([]);
+
+    expect(runner.teamStopped(workerId).stop).toBe(2);
+    runner.runFinished(supervisorId, { state: "done" }, 210);
+    expect(ledger.pendingRunMessages(supervisorId)).toEqual([]);
+    const replacementSupervisor = create("supervisor", 0);
+    runner.tick(220);
+    runner.tick(230);
+    expect(engine.interventions.at(-1)).toMatchObject({ runId: replacementSupervisor });
+    expect(engine.interventions.at(-1)?.text).toContain("turn 2");
 
     runner.runFinished(workerId, { state: "done" }, 300);
     expect(runner.teamMembers("team").some((member) => member.runId === workerId)).toBe(false);

@@ -217,6 +217,19 @@ export class Runner implements HostEvents {
           if (completion.phase === "audit") {
             this.ledger.queueRunMessage(run.id, auditRequest(completion), now, true);
           }
+        } else if (spec.team?.role === "supervisor") {
+          for (const worker of this.ledger.waitingTeamWorkers(spec.taskId)) {
+            this.ledger.queueRunMessage(
+              run.id,
+              this.ledger.teamStopAlert({
+                workerRunId: worker.id,
+                stop: worker.teamStop,
+                stoppedAt: worker.teamStoppedAt ?? now,
+              }),
+              now,
+              true,
+            );
+          }
         }
         claimed.push(spec);
       }
@@ -253,6 +266,9 @@ export class Runner implements HostEvents {
         state: run.state,
         progressAt: run.progressAt,
         sessionFile: this.ledger.runSession(run.id)?.sessionFile,
+        waiting: run.teamWaiting,
+        stop: run.teamStop,
+        stoppedAt: run.teamStoppedAt,
       }));
   }
 
@@ -322,20 +338,20 @@ export class Runner implements HostEvents {
     );
   }
 
-  teamIntervene(supervisorRunId: string, workerRunId: string, text: string): void {
-    const supervisor = this.ledger.run(supervisorRunId);
+  teamStopped(workerRunId: string) {
+    return this.ledger.teamWorkerStopped(workerRunId);
+  }
+
+  teamWaiting(workerRunId: string): boolean {
     const worker = this.ledger.run(workerRunId);
-    if (supervisor?.state !== "running" || supervisor.teamRole !== "supervisor") {
-      throw new Error("only a live team supervisor can intervene");
-    }
-    if (
-      worker?.state !== "running" ||
-      worker.teamRole !== "worker" ||
-      worker.taskId !== supervisor.taskId
-    ) {
-      throw new Error("the intervention target must be a live worker on this team");
-    }
-    this.ledger.queueRunMessage(worker.id, text, Date.now(), true);
+    return (
+      worker?.teamWaiting === true &&
+      this.ledger.teamCompletion(worker.taskId).phase !== "complete"
+    );
+  }
+
+  teamIntervene(supervisorRunId: string, workerRunId: string, text: string) {
+    return this.ledger.respondToTeamWorker(supervisorRunId, workerRunId, text);
   }
 
   runFinished(runId: string, result: HostRunResult, at = Date.now()): void {

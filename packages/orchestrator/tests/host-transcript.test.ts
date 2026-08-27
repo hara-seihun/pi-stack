@@ -21,7 +21,9 @@ function harness(runId: string) {
       teamCompletion: (taskId) => ({ taskId, phase: "working", audit: 0, reports: [] }),
       teamCompletionAction: () => ({ taskId: "team", phase: "audit", audit: 1, reports: [] }),
       teamAudit: () => ({ taskId: "team", phase: "audit", audit: 1, reports: [] }),
-      teamIntervene: () => {}, laneDrained: () => false,
+      teamStopped: () => ({ taskId: "team", workerRunId: "worker", stop: 1, stoppedAt: 1 }),
+      teamWaiting: () => false,
+      teamIntervene: () => ({ respondedToStop: false }), laneDrained: () => false,
       claimCheckIn: () => true, turnFailed: () => undefined },
     { resolveModel: () => undefined },
   );
