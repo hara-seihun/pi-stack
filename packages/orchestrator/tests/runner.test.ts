@@ -177,6 +177,25 @@ describe("runner result classification", () => {
     );
   });
 
+  it("a retired provider model aborts against launch custody instead of breaking the task", () => {
+    const ledger = Ledger.open(":memory:");
+    const [runId] = seed(ledger, 1);
+    const runner = new Runner(ledger, new FakeEngine(), { runnerId: "r1", maxSessions: 5 });
+    runner.tick(100);
+    runner.runFinished(
+      runId,
+      {
+        state: "error",
+        detail: "404: Thank you for the testing period. This model is now unavailable.",
+      },
+      200,
+    );
+    expect(ledger.run(runId)?.state).toBe("aborted");
+    expect(ledger.recentErrorCount("t", 0)).toBe(0);
+    expect(ledger.accounts().find((account) => account.id === "anth-1")?.cooldownUntil)
+      .toBe(30 * 60_000 + 200);
+  });
+
   it("an ordinary error run does not cool the account", () => {
     const ledger = Ledger.open(":memory:");
     const [runId] = seed(ledger, 1);

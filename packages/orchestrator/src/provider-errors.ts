@@ -89,6 +89,20 @@ export function isPermanentError(message: string): boolean {
   return PERMANENT_PATTERNS.some((p) => p.test(message));
 }
 
+/** A provider retired, renamed, or cannot serve the configured model. This is
+ * launch configuration, not evidence that the lane's task is broken. Keep it
+ * distinct from generic permanent request failures so a stale model cannot
+ * trip every task's circuit breaker. */
+const MODEL_CONFIGURATION_PATTERNS = [
+  /unknown model|no such model|cannot alias/i,
+  /model.{0,200}(does not exist|retired|unavailable|testing period)/is,
+  /\b404\b.{0,500}\bmodel\b|\bmodel\b.{0,500}\b404\b/is,
+];
+
+export function isModelConfigurationError(message: string): boolean {
+  return MODEL_CONFIGURATION_PATTERNS.some((pattern) => pattern.test(message));
+}
+
 /**
  * The account cannot authenticate at all: a missing, shadowed, or rejected
  * credential. It is a property of the account, never of the task the run

@@ -7,6 +7,7 @@ import {
   type CooldownPolicy,
   CREDENTIAL_COOLDOWN_MS,
   isCredentialError,
+  isModelConfigurationError,
   isPermanentError,
   isRateLimitError,
   uniformCooldown,
@@ -343,15 +344,20 @@ export class Runner implements HostEvents {
     const detail = result.detail ?? "";
     const credential = result.state === "error" && isCredentialError(detail);
     const rateLimited = result.state === "error" && isRateLimitError(detail);
-    // Authentication and provider capacity belong to the account, not the
-    // task, so neither can trip the task's circuit breaker.
+    const modelConfiguration =
+      result.state === "error" && isModelConfigurationError(detail);
+    // Authentication, provider capacity, and a retired provider model belong
+    // to launch custody, not the task. None may trip the task's circuit
+    // breaker: the lane did not make the account unable to run its model.
     this.ledger.finishRun(
       runId,
-      credential || rateLimited ? { ...result, state: "aborted" } : result,
+      credential || rateLimited || modelConfiguration
+        ? { ...result, state: "aborted" }
+        : result,
       at,
     );
     this.ledger.taskFinished(run.taskId);
-    if (credential) {
+    if (credential || modelConfiguration) {
       this.ledger.setAccountCooldown(run.accountId, at + CREDENTIAL_COOLDOWN_MS);
       return;
     }
