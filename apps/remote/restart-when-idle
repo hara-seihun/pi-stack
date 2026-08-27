@@ -41,10 +41,8 @@ else
   fi
 fi
 
-# Both services run the source tree in place, so a NixOS switch has no way to
-# notice a code change and leaves them running whatever they started with. The
-# router is stateless, so it just restarts here; the supervisor is what the rest
-# of this script waits for.
+# Deploying a new immutable artifact does not restart either service. The router
+# is stateless, so it restarts here. The supervisor waits until active work ends.
 sudo -n systemctl restart pi-remote-router.service 2>/dev/null || true
 POLL_SECONDS=${PI_REMOTE_RESTART_POLL_SECONDS:-15}
 GRACE_SECONDS=${PI_REMOTE_RESTART_GRACE_SECONDS:-1200}
