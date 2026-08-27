@@ -117,21 +117,25 @@ describe("runner supervisor", () => {
     expect(new Set(spawned.map((s) => s.workerId)).size).toBe(spawned.length);
   });
 
-  it("a restarted supervisor takes a new identity and fails the runs it killed", () => {
+  it("a restarted supervisor takes a new identity and recovers persisted sessions", () => {
     const ledger = Ledger.open(":memory:");
     seed(ledger, 2);
     const before: WorkerSpec[] = [];
     const worker = supervisor(ledger, before).tick(1_000).spawned!;
     const engine = new FakeEngine();
     new Runner(ledger, engine, { runnerId: worker.workerId, maxSessions: 700 }).tick(1_100);
-    expect(ledger.runs({ state: "running" })).toHaveLength(2);
+    const running = ledger.runs({ state: "running" });
+    expect(running).toHaveLength(2);
+    ledger.linkRunSession(running[0]!.id, "session-1", 1_200, "/tmp/session-1.jsonl");
 
-    // The unit restarts: systemd kills the control group, so the sessions
-    // behind those two rows are already gone when the successor starts.
+    // The unit restarts: systemd kills the control group. The persisted
+    // conversation can move; the run that never opened a session cannot.
     const after: WorkerSpec[] = [];
     const restarted = supervisor(ledger, after);
     expect(restarted.reapOrphans(2_000)).toHaveLength(2);
     expect(ledger.runs({ state: "running" })).toHaveLength(0);
+    expect(ledger.run(running[0]!.id)?.state).toBe("pending");
+    expect(ledger.run(running[1]!.id)?.state).toBe("aborted");
     expect(restarted.tick(2_100).spawned?.workerId).not.toBe(worker.workerId);
   });
 });

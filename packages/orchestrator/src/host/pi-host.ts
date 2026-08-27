@@ -5,8 +5,10 @@ import {
   type AgentSession,
 } from "@earendil-works/pi-coding-agent";
 import { execFile } from "node:child_process";
+import { createHash } from "node:crypto";
+import { mkdir, readFile, rename, stat, writeFile } from "node:fs/promises";
 import { homedir } from "node:os";
-import { join } from "node:path";
+import { dirname, join } from "node:path";
 import { Type } from "typebox";
 import type { TeamAuditVerdict } from "../tasks/types.js";
 import type { HostEvents, HostManager, HostRunResult, LaunchSpec, TeamMember } from "./types.js";
@@ -118,12 +120,39 @@ export class PiHost implements HostManager {
    * without its binding anti-ladder doctrine is exactly the run the night of
    * 2026-08-21 taught us not to start. */
   private readonly doctrines = new Map<string, { content: string; fetchedAt: number }>();
+  private readonly doctrineFetches = new Map<string, Promise<string>>();
   private static readonly DOCTRINE_TTL_MS = 15 * 60_000;
 
-  private async doctrine(url: string): Promise<string> {
-    const cached = this.doctrines.get(url);
-    if (cached !== undefined && Date.now() - cached.fetchedAt < PiHost.DOCTRINE_TTL_MS) {
-      return cached.content;
+  private doctrine(url: string): Promise<string> {
+    const active = this.doctrineFetches.get(url);
+    if (active !== undefined) return active;
+    const loading = this.loadDoctrine(url).finally(() => {
+      if (this.doctrineFetches.get(url) === loading) this.doctrineFetches.delete(url);
+    });
+    this.doctrineFetches.set(url, loading);
+    return loading;
+  }
+
+  private async loadDoctrine(url: string): Promise<string> {
+    const memory = this.doctrines.get(url);
+    if (memory !== undefined && Date.now() - memory.fetchedAt < PiHost.DOCTRINE_TTL_MS) {
+      return memory.content;
+    }
+    const cachePath = join(
+      this.options.agentDir ?? join(homedir(), ".pi", "agent"),
+      "doctrines",
+      `${createHash("sha256").update(url).digest("hex")}.md`,
+    );
+    let disk: { content: string; fetchedAt: number } | undefined;
+    try {
+      const [content, metadata] = await Promise.all([readFile(cachePath, "utf8"), stat(cachePath)]);
+      disk = { content, fetchedAt: metadata.mtimeMs };
+      if (memory === undefined && Date.now() - disk.fetchedAt < PiHost.DOCTRINE_TTL_MS) {
+        this.doctrines.set(url, disk);
+        return disk.content;
+      }
+    } catch {
+      disk = undefined;
     }
     try {
       const fetcher =
@@ -134,10 +163,19 @@ export class PiHost implements HostManager {
           return response.text();
         });
       const content = await fetcher(url);
-      this.doctrines.set(url, { content, fetchedAt: Date.now() });
+      const fetchedAt = Date.now();
+      this.doctrines.set(url, { content, fetchedAt });
+      const temporary = `${cachePath}.${process.pid}.${fetchedAt}`;
+      await mkdir(dirname(cachePath), { recursive: true });
+      await writeFile(temporary, content, { mode: 0o600 });
+      await rename(temporary, cachePath);
       return content;
     } catch (thrown) {
-      if (cached !== undefined) return cached.content;
+      if (memory !== undefined) return memory.content;
+      if (disk !== undefined) {
+        this.doctrines.set(url, disk);
+        return disk.content;
+      }
       throw new Error(`doctrine unavailable: ${String(thrown)}`);
     }
   }

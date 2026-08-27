@@ -58,6 +58,7 @@ function harness(
     accountId?: string;
     provider?: string;
     resumeSessionFile?: string;
+    agentDir?: string;
   } = {},
 ) {
   let spent = options.checkInsSpent ?? 0;
@@ -224,6 +225,7 @@ function harness(
     },
     {
       resolveModel: options.resolveModel ?? (() => ({})),
+      agentDir: options.agentDir ?? mkdtempSync(join(tmpdir(), "pi-host-agent-")),
       openSession: (async (config: { customTools?: unknown[] }) => {
         sessionConfigs.push(config as Record<string, unknown>);
         const tools = config.customTools as { name: string; execute: (id: string, params: unknown) => Promise<unknown> }[];
@@ -373,6 +375,33 @@ describe("host shift loop", () => {
     expect(appended).toContain("LLMs are really good at math now");
     expect(appended).toContain("pinned from https://lemma.ing/guides/attack.md");
     expect(appended).toContain("compaction");
+  });
+
+  it("keeps the last fetched doctrine across runner processes", async () => {
+    const agentDir = mkdtempSync(join(tmpdir(), "pi-host-doctrine-"));
+    const first = harness([{ reports: 1 }], {
+      doctrineUrl: "https://lemma.ing/guides/attack.md",
+      fetchDoctrine: async () => "# Durable attack doctrine",
+      selfPaced: true,
+      agentDir,
+    });
+    first.host.launch(first.spec);
+    await first.finished;
+
+    const recovered = harness([{ reports: 1 }], {
+      doctrineUrl: "https://lemma.ing/guides/attack.md",
+      fetchDoctrine: async () => {
+        throw new Error("temporary network failure");
+      },
+      selfPaced: true,
+      agentDir,
+    });
+    recovered.host.launch(recovered.spec);
+    expect(await recovered.finished).toMatchObject({ state: "done" });
+    const loader = recovered.sessionConfigs[0]?.["resourceLoader"] as
+      | { getAppendSystemPrompt(): string[] }
+      | undefined;
+    expect(loader?.getAppendSystemPrompt().join("\n")).toContain("Durable attack doctrine");
   });
 
   it("fails the launch when doctrine has never been fetchable, rather than running without it", async () => {

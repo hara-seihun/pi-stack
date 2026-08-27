@@ -71,11 +71,11 @@ export class RunnerSupervisor {
   /**
    * Systemd kills the whole control group with the unit, so a supervisor that
    * is starting knows every worker of its host is gone and every run row still
-   * marked running under one of them is a session that no longer exists.
-   * Failing them here costs nothing and buys honesty: otherwise the broker
-   * counts phantom sessions against account capacity, and `status` shows work
-   * that is not happening, until the controller's heartbeat timeout catches up
-   * ten minutes later.
+   * marked running under one of them has lost its process. A run with a
+   * persisted Pi session returns to the claim queue so the successor can
+   * reopen its context. A run that never reached session creation is failed
+   * here; otherwise the broker counts a phantom against account capacity until
+   * the controller's heartbeat timeout catches up ten minutes later.
    */
   reapOrphans(now = Date.now()): string[] {
     const mine = `${this.cfg.runnerId}-`;
@@ -83,8 +83,12 @@ export class RunnerSupervisor {
       .runs({ state: "running" })
       .filter((run) => run.runnerId?.startsWith(mine) === true);
     for (const run of orphans) {
-      this.ledger.finishRun(run.id, { state: "aborted", detail: "runner restarted" }, now);
-      this.ledger.taskFinished(run.taskId);
+      if (this.ledger.runSession(run.id)?.sessionFile !== undefined) {
+        this.ledger.requeueRun(run.id, now);
+      } else {
+        this.ledger.finishRun(run.id, { state: "aborted", detail: "runner restarted" }, now);
+        this.ledger.taskFinished(run.taskId);
+      }
     }
     return orphans.map((run) => run.id);
   }

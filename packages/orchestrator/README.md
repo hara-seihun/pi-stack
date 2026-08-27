@@ -188,7 +188,10 @@ Three launch-side fields describe scheduling:
   fetches at launch and pins into every session's *system prompt* for the
   lane (`appendSystemPrompt`), with a 15-minute cache that tolerates
   transient fetch failures once a copy exists and fails the launch when no
-  copy has ever been fetchable. The task prompt is the first user message,
+  copy has ever been fetchable. The cache is persisted under the session
+  account's Pi agent directory, so a replacement runner inherits the last
+  verified copy instead of depending on the doctrine host during recovery.
+  Concurrent launches share one fetch. The task prompt is the first user message,
   which is the first thing compaction summarizes away; doctrine that must
   bind for a whole shift — the math ledger's attack guide, whose anti-ladder
   rules override even the session's opening instructions — survives only in
@@ -231,7 +234,12 @@ Three launch-side fields describe scheduling:
   supervisor answers it through `team_intervene`. Once every waiting worker has
   an answer, the supervisor parks too; the next worker stop wakes it. This
   event-driven handoff has no check-in budget, so a team does not dissolve and
-  relaunch merely because its members finished ordinary turns.
+  relaunch merely because its members finished ordinary turns. The host also
+  waits through extension-triggered compaction and its automatic continuation
+  before classifying a turn. Pi's manual compaction API first aborts the active
+  agent run, so treating the first `prompt()` resolution as terminal would
+  discard the compaction callback and relaunch every member around 250,000
+  context tokens.
 
   The supervisor has `team_members`, `team_context`, `team_intervene`, and
   `team_completion`. `team_members` shows which workers are waiting and their
@@ -687,12 +695,15 @@ one: the sequence counter alone restarts with the process, and on 2026-08-23 a
 restarted supervisor spawned a second `gmktec-g45.1` that inherited twelve run
 rows whose sessions systemd had already killed with the old control group.
 Each supervisor process therefore mixes a random instance token into the ids it
-hands out, and reaps on startup: `KillMode=control-group` means a supervisor
-that is starting knows no worker of its host survives, so every row still
-marked running under one of them is failed `runner restarted` immediately
-rather than ten minutes later when the controller's heartbeat timeout notices.
-Only a supervisor update needs a full drain first, which is why it holds no
-policy.
+hands out, and reconciles its old rows on startup: `KillMode=control-group`
+means a supervisor that is starting knows no worker of its host survives. A
+row with a persisted Pi session returns to the claim queue and the successor
+opens that same session file; a row that died before session creation is
+aborted immediately. The controller applies the same rule on heartbeat
+timeout. Recovery keeps the run id, team stop state, conversation, and file
+history, then sends one honest resumption turn rather than replaying the task
+opening. Only a supervisor update needs a full drain first, which is why it
+holds no policy.
 
 A heartbeat is not progress. The runner's heartbeat is a timer inside the
 hosting process, and it keeps ticking over a session that has stopped
@@ -721,9 +732,9 @@ account cools down so the next run goes to a sibling. An account that cannot
 authenticate at all — missing, shadowed, or rejected credential — is recorded
 `aborted` (like an unclaimed run) and cooled down, never `error`: it is a
 property of the account, and counting it against the task would let one dead
-credential trip every task's circuit breaker and stop the fleet. A run lost
-with its runner is likewise `aborted` on heartbeat timeout: process loss is
-infrastructure failure, not evidence that the task itself crashes.
+credential trip every task's circuit breaker and stop the fleet. A run lost with its runner reopens its persisted Pi session. If no session
+file exists, the row is `aborted`: process loss is infrastructure failure, not
+evidence that the task itself crashes.
 
 Run custody lives in the ledger's `run` table (launch-side only: `tier` is
 recorded there for capacity accounting and never reaches a host). A task
