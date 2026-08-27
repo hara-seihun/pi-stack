@@ -64,6 +64,7 @@ public class MainActivity extends Activity {
     private static final int INITIAL_CONTEXT_MESSAGES = 32;
     private static final int MAXIMUM_AUTOMATIC_CONTEXT_MESSAGES = 64;
     private static final int CONTEXT_HISTORY_PAGE = 32;
+    private static final long CONTEXT_RENDER_FRAME_BUDGET_MS = 8;
     private static final String STATE_SESSION = "session";
     private static final String DRAFT_PREFS = "thread_drafts";
     private static final String DRAWER_PREFS = "drawer";
@@ -142,6 +143,7 @@ public class MainActivity extends Activity {
         INITIAL_CONTEXT_MESSAGES, CONTEXT_HISTORY_PAGE, MAXIMUM_AUTOMATIC_CONTEXT_MESSAGES);
     private List<ContextEntry> completeContextEntries = Collections.emptyList();
     private long contextRenderGeneration = 0;
+    private int contextBackfillDepth = 0;
     private boolean drawerOpen = false, settingsOpen = false, archiveSupported = false;
     private String drawerTab = DRAWER_TAB_INTERACTIVE;
     // The thread poll carries only the newest archived page; older pages load on request.
@@ -1442,6 +1444,7 @@ public class MainActivity extends Activity {
         long requestedSelectionGeneration = selectionGeneration;
         long requestedActionGeneration = actionGeneration;
         long requestedEnvironmentGeneration = PiRemoteEnvironment.generation();
+        String requestedEnvironmentId = PiRemoteEnvironment.current().id;
         ContextSync.Document requestedContextDocument = contextDocument;
         ContextSync.Document requestedAgentTextDocument = agentLiveTextDocument;
         ContextSync.Document requestedAgentThinkingDocument = agentLiveThinkingDocument;
@@ -1485,10 +1488,6 @@ public class MainActivity extends Activity {
                     observedEvents.put("liveThinking", nextAgentThinking == null ? "" : nextAgentThinking.json);
                 }
                 ContextSync.Document appliedDocument = nextDocument;
-                if (update != null && appliedDocument != null && requestedSession != null) {
-                    try { PiRemoteCache.save(this, PiRemoteEnvironment.current().id, requestedSession, appliedDocument); }
-                    catch (Exception cacheFailure) { Log.w("PiRemote", "Could not cache context", cacheFailure); }
-                }
                 ContextSync.Document appliedAgentText = nextAgentText;
                 ContextSync.Document appliedAgentThinking = nextAgentThinking;
                 JSONObject renderedContext = context;
@@ -1550,6 +1549,10 @@ public class MainActivity extends Activity {
                     syncErrorDelayMs = 1_000;
                     finishRefresh(requestedPollGeneration, 0);
                 });
+                if (update != null && appliedDocument != null && requestedSession != null) {
+                    try { PiRemoteCache.save(this, requestedEnvironmentId, requestedSession, appliedDocument); }
+                    catch (Exception cacheFailure) { Log.w("PiRemote", "Could not cache context", cacheFailure); }
+                }
             } catch (Exception failure) {
                 main.post(() -> {
                     if (requestedPollGeneration != syncPollGeneration) return;
@@ -1743,7 +1746,7 @@ public class MainActivity extends Activity {
         detail.setVisibility(View.VISIBLE); emptyBox.setVisibility(View.GONE);
         hideKeyboard();
         updateComposer(); updateTopBar(); renderAgentSection();
-        refresh();
+        restartSyncImmediately();
     }
 
     private void resetTranscript() {
@@ -2798,7 +2801,8 @@ public class MainActivity extends Activity {
         detail.setVisibility(View.VISIBLE); emptyBox.setVisibility(View.GONE); updateComposer(); updateTopBar();
         cacheSelectedSession();
         publishOpenThread();
-        refresh();
+        if (changed) restartSyncImmediately();
+        else refresh();
     }
 
     private void loadCachedContext(String id, long generation) {
@@ -2927,8 +2931,8 @@ public class MainActivity extends Activity {
         params.topMargin = dp(topMargin);
         transcript.addView(view, params);
         // Backfilling a thread is not an arrival, so only what lands after it is settled rises in.
-        if (transcript.getChildCount() > 1 && SystemClock.uptimeMillis() - transcriptOpenedMs > 700)
-            Springs.enter(view, dp(14));
+        if (contextBackfillDepth == 0 && transcript.getChildCount() > 1
+            && SystemClock.uptimeMillis() - transcriptOpenedMs > 700) Springs.enter(view, dp(14));
         while (agentRunId != null && transcript.getChildCount() > 50) {
             View removed = transcript.getChildAt(0);
             transcript.removeViewAt(0);
@@ -3449,8 +3453,8 @@ public class MainActivity extends Activity {
     }
 
     /**
-     * Reuses the view belonging to each stable context key. New views are admitted one per
-     * frame, which keeps Markdown and tool-card construction from monopolizing the UI thread.
+     * Reuses the view belonging to each stable context key. Each frame admits as many cheap
+     * views as fit its budget instead of imposing a full-frame delay on every row.
      */
     private void reconcileContextEntries(List<ContextEntry> desired) {
         long generation = ++contextRenderGeneration;
@@ -3465,40 +3469,46 @@ public class MainActivity extends Activity {
         reconcileContextEntry(desired, 0, generation);
     }
 
-    /** Shows the newest entry in the first frame, then fills history above it. */
-    private void appendInitialContextEntry(List<ContextEntry> desired, int index, long generation) {
-        if (generation != contextRenderGeneration || index < 0) return;
-        ContextEntry entry = desired.get(index);
-        View view = buildContextEntry(entry);
-        insertAppendedContextEntry(0, entry, view);
-        int previousIndex = index - 1;
-        transcript.postOnAnimation(() -> appendInitialContextEntry(desired, previousIndex, generation));
+    /** Shows the newest entry first, then fills history above it within bounded frame work. */
+    private void appendInitialContextEntry(List<ContextEntry> desired, int requestedIndex, long generation) {
+        if (generation != contextRenderGeneration || requestedIndex < 0) return;
+        long deadline = SystemClock.uptimeMillis() + CONTEXT_RENDER_FRAME_BUDGET_MS;
+        int index = requestedIndex;
+        do {
+            ContextEntry entry = desired.get(index);
+            View view = buildContextEntry(entry);
+            insertAppendedContextEntry(0, entry, view);
+            index--;
+        } while (index >= 0 && SystemClock.uptimeMillis() < deadline);
+        if (index >= 0) {
+            int previousIndex = index;
+            transcript.postOnAnimation(() -> appendInitialContextEntry(desired, previousIndex, generation));
+        }
     }
 
     private void reconcileContextEntry(List<ContextEntry> desired, int requestedIndex, long generation) {
         if (generation != contextRenderGeneration) return;
+        long deadline = SystemClock.uptimeMillis() + CONTEXT_RENDER_FRAME_BUDGET_MS;
         int index = requestedIndex;
         while (index < desired.size()) {
             ContextEntry next = desired.get(index);
             int existing = findContextEntry(next.key, index);
             if (existing >= 0) {
-                boolean moved = existing != index;
-                if (moved) moveContextEntry(existing, index);
-                boolean changed = !contextEntries.get(index).signature.equals(next.signature);
+                if (existing != index) moveContextEntry(existing, index);
                 if (updateContextEntry(index, next)) {
                     index++;
-                    if (moved || changed) {
-                        int followingIndex = index;
-                        transcript.postOnAnimation(() -> reconcileContextEntry(desired, followingIndex, generation));
-                        return;
-                    }
-                    continue;
+                    if (SystemClock.uptimeMillis() < deadline) continue;
+                    int followingIndex = index;
+                    transcript.postOnAnimation(() -> reconcileContextEntry(desired, followingIndex, generation));
+                    return;
                 }
                 removeContextEntryAt(index);
             }
             View view = buildContextEntry(next);
             insertAppendedContextEntry(index, next, view);
-            int followingIndex = index + 1;
+            index++;
+            if (SystemClock.uptimeMillis() < deadline) continue;
+            int followingIndex = index;
             transcript.postOnAnimation(() -> reconcileContextEntry(desired, followingIndex, generation));
             return;
         }
@@ -3556,7 +3566,10 @@ public class MainActivity extends Activity {
 
     private View buildContextEntry(ContextEntry entry) {
         long startedAt = SystemClock.uptimeMillis();
-        View view = appendContextEntry(entry);
+        View view;
+        contextBackfillDepth++;
+        try { view = appendContextEntry(entry); }
+        finally { contextBackfillDepth--; }
         long elapsed = SystemClock.uptimeMillis() - startedAt;
         if (elapsed >= 32) Log.i("PiRemoteRender", "Built " + entry.kind + " view in " + elapsed
             + "ms (" + entry.source.length() + " source chars)");

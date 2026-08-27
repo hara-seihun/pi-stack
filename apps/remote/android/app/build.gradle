@@ -40,8 +40,8 @@ android {
         manifestPlaceholders = [piRemoteAppLabel: remoteAppLabel]
         minSdk 26
         targetSdk 36
-        versionCode 92
-        versionName "0.55.8"
+        versionCode 93
+        versionName "0.55.9"
         buildConfigField "String", "LOCAL_SERVER_URL", javaString(localUrl)
         buildConfigField "String", "CONVERGE_SERVER_URL", javaString(convergeUrl)
         buildConfigField "String", "CONVERGE_AUTH", javaString(convergeAuth)
