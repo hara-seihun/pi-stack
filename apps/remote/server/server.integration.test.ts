@@ -680,6 +680,7 @@ describe("web and supervisor integration", () => {
     expect(source).toContain('fetch("/v1/sync"');
     expect(source).toContain('contextProjection: "display"');
     expect(source).toContain("window.PiRemoteSync.update");
+    expect(source).toContain('if (metric.text === "—") continue;');
     expect(source).not.toContain('api("GET", `/v1/sessions/${requested}/context`)');
     expect(source).not.toContain('api("GET", `/v1/sessions/${requested}/events?after=${after}`)');
     expect(source).not.toContain("setInterval(poll");

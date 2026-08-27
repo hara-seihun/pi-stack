@@ -1072,6 +1072,7 @@ function renderCapacityRows() {
   ui.planSummary.replaceChildren();
   const descriptions = [];
   for (const card of state.planCards) for (const metric of card.metrics || []) {
+    if (metric.text === "—") continue;
     const count = state.agentModelCounts.get(metric.model) || 0;
     const row = document.createElement("div");
     row.className = "capacity-row";
