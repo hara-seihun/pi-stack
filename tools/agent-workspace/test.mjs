@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { execFileSync, spawn } from "node:child_process";
-import { existsSync, mkdtempSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, mkdtempSync, mkdirSync, readFileSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import test from "node:test";
@@ -46,6 +46,18 @@ function fixture() {
     close() { rmSync(root, { recursive: true, force: true }); },
   };
 }
+
+test("resolves its installed command symlink", () => {
+  const root = mkdtempSync(path.join(tmpdir(), "agent-workspace-link-"));
+  try {
+    const linked = path.join(root, "agent-workspace");
+    symlinkSync(entry, linked);
+    const output = execFileSync(linked, ["--help"], { encoding: "utf8" });
+    assert.match(output, /agent-workspace create/);
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
 
 test("creates and releases a clean review checkout", () => {
   const f = fixture();
