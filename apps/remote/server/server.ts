@@ -2014,10 +2014,11 @@ const server = Bun.serve({
         db.query(`
           INSERT INTO sessions(
             id,name,workspace_id,session_path,state,created_at,updated_at,last_error,
-            initial_provider,current_provider,initial_model,initial_thinking,profile_id
-          ) VALUES(?,?,?,?,?,?,?,NULL,?,?,?,?,?)
+            initial_provider,current_provider,initial_model,initial_thinking,profile_id,service_tier
+          ) VALUES(?,?,?,?,?,?,?,NULL,?,?,?,?,?,?)
         `).run(id, name, workspaceId, null, "STOPPED", time, time,
-          preset.provider, preset.provider, preset.modelId, preset.thinkingLevel, destination.id);
+          preset.provider, preset.provider, preset.modelId, preset.thinkingLevel, destination.id,
+          model.id === "sol" ? "priority" : "default");
         const response = { session: publicSession(sessionRow.get(id)) };
         saveRequest(requestId, id, "create", 201, response);
         activate(sessionRow.get(id)).catch((e) => {

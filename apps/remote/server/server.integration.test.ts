@@ -769,7 +769,7 @@ describe("web and supervisor integration", () => {
       "--extension", join(import.meta.dir, "thread-context.ts"),
     ]));
     expect(launch.argv).not.toContain(join(import.meta.dir, "context-mirror.ts"));
-    expect(readFileSync(launch.serviceTierFile, "utf8").trim()).toBe("default");
+    expect(readFileSync(launch.serviceTierFile, "utf8").trim()).toBe("priority");
     expect(launch.argv).toEqual(expect.arrayContaining([
       "--provider", "openai-codex", "--model", "gpt-5.6-sol", "--thinking", "high",
     ]));
@@ -789,6 +789,8 @@ describe("web and supervisor integration", () => {
     const nextId = await createThread();
     const next = await api("GET", `/v1/sessions/${nextId}`);
     expect(Number(next.value.session.name)).toBeGreaterThan(initialNumber);
+    const nextLaunch = JSON.parse(readFileSync(fakeLaunch, "utf8"));
+    expect(readFileSync(nextLaunch.serviceTierFile, "utf8").trim()).toBe("default");
     const invalid = await fetch(`${base}/v1/sessions/${nextId}/name`, { method: "PUT", body: "One" });
     expect(invalid.status).toBe(400);
   });
@@ -1094,7 +1096,10 @@ describe("web and supervisor integration", () => {
     const id = await createThread("home", "sol");
     const result = await api("GET", `/v1/sessions/${id}/settings`);
     expect(result.status).toBe(200);
-    expect(result.value.settings).toMatchObject({ speedMode: "normal", speedModes: ["normal", "priority"] });
+    expect(result.value.settings).toMatchObject({ speedMode: "priority", speedModes: ["normal", "priority"] });
+    const normal = await api("PUT", `/v1/sessions/${id}/settings`, { speedMode: "normal" });
+    expect(normal.status).toBe(200);
+    expect(normal.value.settings.speedMode).toBe("normal");
     const priority = await api("PUT", `/v1/sessions/${id}/settings`, { speedMode: "priority" });
     expect(priority.status).toBe(200);
     expect(priority.value.settings.speedMode).toBe("priority");

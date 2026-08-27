@@ -18,7 +18,7 @@ Each runtime also loads `server/thread-context.ts`. The extension offers initial
 
 On hosts that load `pi-runtime`'s state-compactor, the extension keeps previously read mandatory skill contents in the compacted provider view. It validates those contents against the current files and asks the agent to finish a paged read or refresh a changed file instead of silently retaining stale instructions.
 
-Model menus, autonomous-agent labels, and plan cards use the catalog exported by `pi-orchestrator/api`. Plan cards project the orchestrator's account and meter facts; Pi Remote carries no provider usage parser or duplicate provider manifest.
+Model menus, autonomous-agent labels, and plan cards use the catalog exported by `pi-orchestrator/api`. Plan cards project the orchestrator's account and meter facts; Pi Remote carries no provider usage parser or duplicate provider manifest. New Sol threads start in OpenAI's priority service tier. Existing threads keep their saved mode, and other models start in normal mode.
 
 ## Requirements
 
