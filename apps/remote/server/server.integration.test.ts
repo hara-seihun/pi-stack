@@ -585,6 +585,25 @@ describe("web and supervisor integration", () => {
     }
   });
 
+  test("permits the shared native shell to call the API", async () => {
+    const preflight = await fetch(base + "/v1/sync", {
+      method: "OPTIONS",
+      headers: {
+        origin: "http://localhost",
+        "access-control-request-method": "POST",
+        "access-control-request-headers": "content-type",
+      },
+    });
+    expect(preflight.status).toBe(204);
+    expect(preflight.headers.get("access-control-allow-origin")).toBe("http://localhost");
+    expect(preflight.headers.get("access-control-allow-methods")).toContain("POST");
+    expect(preflight.headers.get("access-control-allow-headers")).toContain("content-type");
+
+    const health = await fetch(base + "/v1/health", { headers: { origin: "http://localhost" } });
+    expect(health.status).toBe(200);
+    expect(health.headers.get("access-control-allow-origin")).toBe("http://localhost");
+  });
+
   test("serves the browser interface and local assets", async () => {
     const page = await fetch(base + "/");
     expect(page.headers.get("content-type")).toContain("text/html");
@@ -613,6 +632,8 @@ describe("web and supervisor integration", () => {
     expect(markup).toContain("id=\"queue-status\"");
     expect(markup).toContain("id=\"speed-select\"");
     expect(markup).toContain("src=\"/vendor/pi-markdown-compat.js\"");
+    expect(markup).toContain("src=\"/native.js\"");
+    expect(markup).toContain("id=\"native-environment\"");
     expect(markup).not.toContain("id=\"toast-region\"");
     expect(markup).not.toContain("id=\"steer\"");
     expect(markup).not.toContain("id=\"follow-up\"");
@@ -641,6 +662,9 @@ describe("web and supervisor integration", () => {
     expect(css).toContain(".composer { flex: 0 0 auto; display: grid; gap: 2px;");
     expect(css).not.toContain("grid-template-rows: auto auto 40px");
     expect(css).not.toContain(".toast");
+    const nativeScript = await fetch(base + "/native.js");
+    expect(nativeScript.headers.get("content-type")).toContain("text/javascript");
+    expect(await nativeScript.text()).toContain('capacitor.registerPlugin("KenanRemote")');
     const script = await fetch(base + "/app.js");
     expect(script.headers.get("content-type")).toContain("text/javascript");
     const source = await script.text();

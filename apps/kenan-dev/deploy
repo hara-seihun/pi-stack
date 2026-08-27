@@ -1,0 +1,18 @@
+#!/usr/bin/env bash
+set -euo pipefail
+cd "$(dirname "$0")"
+
+trap 'adb kill-server >/dev/null 2>&1 || true' EXIT
+
+npm run android:test
+endpoint=$(../remote/android/connect-adb)
+apk=android/app/build/outputs/apk/debug/app-debug.apk
+application_id=works.kenan.piremote.kenan.dev
+adb -s "$endpoint" install -r "$apk"
+installed=$(adb -s "$endpoint" shell dumpsys package "$application_id" \
+  | awk -F= '/versionName=/ { gsub(/\r/, "", $2); print $2; exit }')
+current=$(adb -s "$endpoint" shell dumpsys package works.kenan.piremote.kenan \
+  | awk -F= '/versionName=/ { gsub(/\r/, "", $2); print $2; exit }')
+[[ $installed == 0.1.0 ]] || { echo "installed kenan-dev version $installed; expected 0.1.0" >&2; exit 1; }
+[[ -n $current ]] || { echo "the current Kenan app is no longer installed" >&2; exit 1; }
+printf 'kenan-dev %s deployed beside Kenan %s on %s\n' "$installed" "$current" "$endpoint"

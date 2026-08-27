@@ -14,6 +14,7 @@
   <script src="/vendor/katex.min.js" defer></script>
   <script src="/vendor/texmath.js" defer></script>
   <script src="/vendor/pi-markdown-compat.js" defer></script>
+  <script src="/native.js" defer></script>
   <script src="/voice.js" defer></script>
   <script src="/app.js" defer></script>
 </head>
@@ -57,6 +58,11 @@
           <button id="anthropic-governor-control" class="machine-control" type="button" aria-label="Anthropic governor status loading" title="Anthropic governor status loading" disabled>
             <img src="/anthropic.svg" alt="">
           </button>
+        </div>
+        <div id="native-environment" class="native-environment" hidden>
+          <span class="native-environment-badge">DEV</span>
+          <label for="native-environment-select">Environment</label>
+          <select id="native-environment-select" aria-label="Environment"></select>
         </div>
         <div id="agent-summary" class="agent-summary muted">
           <div class="agent-location"><img src="/personal.svg" alt="This machine"><span id="local-agent-summary">—</span></div>

@@ -1,0 +1,8 @@
+{
+  "appId": "works.kenan.piremote.kenan.dev",
+  "appName": "kenan-dev",
+  "webDir": "dist",
+  "server": {
+    "androidScheme": "http"
+  }
+}

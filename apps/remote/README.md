@@ -10,6 +10,8 @@ Android synchronizes through a resumable long poll rather than a timer. It reque
 
 The drawer reports only measured plan and hardware rows. CPU sampling runs independently of client polling, and Android warms SSH-backed environments in the background so switching does not pay connection setup in the foreground.
 
+[`apps/kenan-dev`](../kenan-dev/README.md) packages this web client with Capacitor under a separate Android package id. It is the development channel for the shared client: browser and Android render the files in `web`, while a small native plugin owns endpoint selection and the pinned Converge SSH tunnel. The current native Android client remains installed until the shared channel has its remaining Android-only background and filesystem features.
+
 The Files drawer tab browses the selected environment from `/`. It includes dotfiles and reads one directory per request. Android uses a recycled list for large directories. Folder taps navigate, file taps download without opening a preview, and a long press copies the absolute path.
 
 Each runtime also loads `server/thread-context.ts`. The extension offers initialization only while the durable session title is numeric, removes that control from named threads, and treats process or model changes as continuation rather than a new thread. It tells the agent how to offer downloadable files. A `<pi-remote-file src="/absolute/path" />` tag becomes a normal link in both clients, and the session-scoped endpoint streams the file from the thread's host.
@@ -24,7 +26,7 @@ Model menus, autonomous-agent labels, and plan cards use the catalog exported by
 - Pi on the supervisor's `PATH`
 - `apps/remote` installed as Pi's final configured package
 - the root npm workspaces installed and Pi Orchestrator built
-- Android SDK 36 and Java 17 to build the Android client
+- Android SDK 36 and Java 21 to build both Android clients
 
 ## Configuration
 
@@ -107,6 +109,7 @@ The router expects systemd template units named `pi-remote@<user>.service`. `ser
 ```sh
 bun test server/*.test.ts web/*.test.ts
 cd android && ./gradlew test
+npm run android:test --workspace=kenan-dev
 ```
 
 ## Security boundary

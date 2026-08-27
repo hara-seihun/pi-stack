@@ -218,14 +218,22 @@ function refreshPlanUsageIfDue() {
   })().finally(() => { planUsageRefresh = null; });
 }
 
+const API_CORS_HEADERS = {
+  "access-control-allow-origin": "http://localhost",
+  "access-control-allow-methods": "GET, HEAD, POST, PUT, PATCH, DELETE, OPTIONS",
+  "access-control-allow-headers": "accept, content-type, if-none-match, range, x-chunk-sha256",
+  "access-control-expose-headers": "accept-ranges, content-disposition, content-length, content-range, etag, x-pi-voice-account",
+} as const;
+
 const json = (data: unknown, status = 200) => new Response(JSON.stringify(data), {
   status,
-  headers: { "content-type": "application/json", "cache-control": "no-store" },
+  headers: { ...API_CORS_HEADERS, "content-type": "application/json", "cache-control": "no-store" },
 });
 
 function compressedJson(req: Request, data: unknown, status = 200): Response {
   const encoded = JSON.stringify(data);
   const headers: Record<string, string> = {
+    ...API_CORS_HEADERS,
     "content-type": "application/json",
     "cache-control": "no-store",
     vary: "accept-encoding",
@@ -465,6 +473,7 @@ const webAssets = new Map<string, readonly [string, string]>([
   ["/", ["index.html", "text/html; charset=utf-8"]],
   ["/index.html", ["index.html", "text/html; charset=utf-8"]],
   ["/app.js", ["app.js", "text/javascript; charset=utf-8"]],
+  ["/native.js", ["native.js", "text/javascript; charset=utf-8"]],
   ["/voice.js", ["voice.js", "text/javascript; charset=utf-8"]],
   ["/voice-page.js", ["voice-page.js", "text/javascript; charset=utf-8"]],
   ["/voice.html", ["voice.html", "text/html; charset=utf-8"]],
@@ -505,6 +514,7 @@ function downloadHeaders(path: string, size: number, contentType: string, etagVa
     "accept-ranges": "bytes",
     etag: `\"${sha256(`${path}:${etagValue}`)}\"`,
     "x-content-type-options": "nosniff",
+    ...API_CORS_HEADERS,
   });
 }
 
@@ -523,23 +533,23 @@ function localFileResponse(requested: string, method: string, req: Request): Res
   try {
     const path = realpathSync(requested);
     const stat = statSync(path);
-    if (!stat.isFile()) return new Response("File not found", { status: 404 });
+    if (!stat.isFile()) return new Response("File not found", { status: 404, headers: API_CORS_HEADERS });
     const file = Bun.file(path);
     const headers = downloadHeaders(path, stat.size, file.type, `${stat.size}:${stat.mtimeMs}`);
     const range = method === "GET" ? byteRange(req.headers.get("range"), stat.size) : null;
     if (req.headers.has("range") && method === "GET" && !range)
-      return new Response(null, { status: 416, headers: { "content-range": `bytes */${stat.size}` } });
+      return new Response(null, { status: 416, headers: { ...API_CORS_HEADERS, "content-range": `bytes */${stat.size}` } });
     if (!range) return new Response(method === "HEAD" ? null : file, { headers });
     headers.set("content-range", `bytes ${range.start}-${range.end}/${stat.size}`);
     headers.set("content-length", String(range.end - range.start + 1));
     return new Response(file.slice(range.start, range.end + 1), { status: 206, headers });
-  } catch { return new Response("File not found", { status: 404 }); }
+  } catch { return new Response("File not found", { status: 404, headers: API_CORS_HEADERS }); }
 }
 
 function hostFileResponse(url: URL, method: string, req: Request): Response | null {
   if (url.pathname !== "/v1/files/download" || (method !== "GET" && method !== "HEAD")) return null;
   const requested = url.searchParams.get("path") ?? "";
-  if (!isAbsolute(requested)) return new Response("Valid absolute file path required", { status: 400 });
+  if (!isAbsolute(requested)) return new Response("Valid absolute file path required", { status: 400, headers: API_CORS_HEADERS });
   return localFileResponse(requested, method, req);
 }
 
@@ -547,9 +557,9 @@ async function sessionFileResponse(url: URL, method: string, req: Request): Prom
   const match = url.pathname.match(/^\/v1\/sessions\/([0-9a-f-]+)\/files$/i);
   if (!match || (method !== "GET" && method !== "HEAD")) return null;
   const row = sessionRow.get(match[1]) as any;
-  if (!row) return new Response("Session not found", { status: 404 });
+  if (!row) return new Response("Session not found", { status: 404, headers: API_CORS_HEADERS });
   const requested = url.searchParams.get("path") ?? "";
-  if (!isAbsolute(requested)) return new Response("Valid absolute file path required", { status: 400 });
+  if (!isAbsolute(requested)) return new Response("Valid absolute file path required", { status: 400, headers: API_CORS_HEADERS });
   return localFileResponse(requested, method, req);
 }
 
@@ -1621,6 +1631,12 @@ const server = Bun.serve({
   idleTimeout: 30,
   async fetch(req) {
     const url = new URL(req.url);
+    if (req.method === "OPTIONS" && url.pathname.startsWith("/v1/")) {
+      return new Response(null, {
+        status: 204,
+        headers: { ...API_CORS_HEADERS, "access-control-max-age": "86400" },
+      });
+    }
     if (!ownsSupervisorLease()) return error("Supervisor instance was replaced", 503);
     const deliveredFile = await sessionFileResponse(url, req.method, req);
     if (deliveredFile) return deliveredFile;
@@ -1655,6 +1671,7 @@ const server = Bun.serve({
           "content-type": "application/sdp",
           "cache-control": "no-store",
           "x-pi-voice-account": result.account,
+          ...API_CORS_HEADERS,
         },
       });
     }
@@ -2108,7 +2125,7 @@ const server = Bun.serve({
       const stored = storedContext(id);
       const hash = stored?.hash ?? "empty";
       const etag = `\"${hash}\"`;
-      if (req.headers.get("if-none-match") === etag) return new Response(null, { status: 304, headers: { etag, "cache-control": "no-cache" } });
+      if (req.headers.get("if-none-match") === etag) return new Response(null, { status: 304, headers: { ...API_CORS_HEADERS, etag, "cache-control": "no-cache" } });
       const response = compressedJson(req, {
         capturedAt: stored?.capturedAt ?? 0,
         context: stored ? JSON.parse(stored.document) : null,
