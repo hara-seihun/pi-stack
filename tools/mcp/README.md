@@ -22,4 +22,4 @@ Later definitions win. HTTP and stdio servers are supported. A `bearerToken` or 
 
 `mcp` opens connections only for one invocation and closes them before exit. Use [`mcp-script`](../mcp-script/README.md) when several calls need one process and JavaScript control flow.
 
-Run `./deploy` after changes. It installs dependencies, runs tests, links `mcp` into the interactive user's `PATH`, publishes a world-readable copy under `/srv/pi/tools/mcp`, and links that copy into the fleet user's `PATH`. Configuration and credentials remain per-user.
+After CI accepts the commit, run `../../deploy/tools local`. It publishes the reviewed source under `/srv/pi/tools/mcp`, reuses Pi Runtime's production dependencies, and links `mcp` into both users' `PATH`. Configuration and credentials remain per-user.

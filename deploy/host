@@ -3,12 +3,19 @@ set -euo pipefail
 
 root=$(cd "$(dirname "$0")/.." && pwd)
 source "$root/deploy/lib"
+pi_stack_enforce_deploy_deadline "$0" "$@"
 pi_stack_acquire_deploy_lock "$root"
 
 role=${1:-}
 [[ $role == converge ]] || { echo "usage: deploy/host converge" >&2; exit 64; }
 
 pi_stack_prepare_dependencies "$root"
+expected=$(git -C "$root" rev-parse HEAD)
+orchestrator_dest=${PI_STACK_ORCHESTRATOR_DEST:-/srv/pi/pi-orchestrator}
+previous_orchestrator=""
+if [[ -f $orchestrator_dest/.pi-stack-commit ]]; then
+  previous_orchestrator=$(<"$orchestrator_dest/.pi-stack-commit")
+fi
 "$root/deploy/runtime"
 "$root/deploy/orchestrator"
 "$root/deploy/remote"
@@ -16,11 +23,20 @@ pi_stack_prepare_dependencies "$root"
 "$root/deploy/skills" converge-user
 "$root/deploy/settings" converge-user
 
-expected=$(git -C "$root" rev-parse HEAD)
-for artifact in "$HOME/.local/share/pi-runtime" /srv/pi/pi-orchestrator /srv/pi/pi-remote /srv/pi/skills /srv/pi/tools; do
+for artifact in \
+  "${PI_STACK_RUNTIME_ROOT:-$HOME/.local/share/pi-runtime}" \
+  "${PI_STACK_ORCHESTRATOR_DEST:-/srv/pi/pi-orchestrator}" \
+  "${PI_STACK_REMOTE_DEST:-/srv/pi/pi-remote}" \
+  "${PI_STACK_SKILLS_DEST:-/srv/pi/skills}" \
+  "${PI_STACK_TOOLS_DEST:-/srv/pi/tools}"; do
   [[ -f $artifact/.pi-stack-commit && $(<"$artifact/.pi-stack-commit") == "$expected" ]] || {
     echo "$artifact does not carry Pi stack $expected" >&2
     exit 1
   }
 done
+
+ledger=${PI_ORCHESTRATOR_LEDGER:-$HOME/.local/share/pi-orchestrator/ledger.sqlite3}
+if [[ -n $previous_orchestrator && $previous_orchestrator != "$expected" && -f $ledger ]]; then
+  PI_ORCHESTRATOR_LEDGER="$ledger" node "$orchestrator_dest/dist/cli.js" drain-runners
+fi
 printf 'deployed Pi stack %s for Converge\n' "$expected"

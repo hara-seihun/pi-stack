@@ -719,8 +719,8 @@ waiting for the provider to unwind, because a parked provider call may never
 return. Cleanup happens synchronously before a drained worker closes its
 ledger. Without that ownership, a heartbeat from a killed session fired after
 ledger closure and crashed the worker on 2026-08-22. The threshold sits well
-above any legitimate quiet stretch: the longest are a single tool call (fleet
-sessions cap bash at five minutes) and one silent stretch of reasoning.
+above any legitimate quiet stretch. Fleet sessions cap each bash call at 55
+seconds, while provider reasoning reports activity through its own channel.
 
 A session may not outlive its run row either. Every tick the runner kills
 sessions the host still holds whose row is no longer `running`, so a

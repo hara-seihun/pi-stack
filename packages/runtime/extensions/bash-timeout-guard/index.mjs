@@ -1,17 +1,13 @@
-export const MAX_TIMEOUT_SECONDS = 1800;
+export const MAX_TIMEOUT_SECONDS = 55;
 
 function positiveSeconds(value, fallback) {
   const parsed = Number(value);
   return Number.isFinite(parsed) && parsed > 0 ? parsed : fallback;
 }
 
-function policyRule(maxTimeoutSeconds, foregroundOnly, context) {
-  const limit = `${maxTimeoutSeconds} seconds`;
-  const foreground = foregroundOnly
-    ? " Commands that detach work from the session are blocked; keep the work in the foreground."
-    : "";
+function policyRule(maxTimeoutSeconds, context) {
   const reason = context ? ` ${context.trim()}` : "";
-  return `Every bash tool call must pass an explicit timeout of at most ${limit}.${foreground}${reason}`;
+  return `Every bash tool call must pass an explicit timeout of at most ${maxTimeoutSeconds} seconds. Commands that detach work from the session are blocked; keep the work in the foreground.${reason}`;
 }
 
 const detachmentRefusal = (found, policy) =>
@@ -20,16 +16,16 @@ const detachmentRefusal = (found, policy) =>
   policy.rule;
 
 export function timeoutPolicy(environment = process.env) {
-  const maxTimeoutSeconds = positiveSeconds(environment.PI_BASH_TIMEOUT_MAX_SECONDS, MAX_TIMEOUT_SECONDS);
-  const foregroundOnly = environment.PI_BASH_FOREGROUND_ONLY === "1";
+  const requested = positiveSeconds(environment.PI_BASH_TIMEOUT_MAX_SECONDS, MAX_TIMEOUT_SECONDS);
+  const maxTimeoutSeconds = Math.min(requested, MAX_TIMEOUT_SECONDS);
   return {
     maxTimeoutSeconds,
-    foregroundOnly,
-    rule: policyRule(maxTimeoutSeconds, foregroundOnly, environment.PI_BASH_TIMEOUT_CONTEXT),
+    foregroundOnly: true,
+    rule: policyRule(maxTimeoutSeconds, environment.PI_BASH_TIMEOUT_CONTEXT),
   };
 }
 
-export const RULE = policyRule(MAX_TIMEOUT_SECONDS, false);
+export const RULE = policyRule(MAX_TIMEOUT_SECONDS);
 
 export function checkBashTimeout(timeout, policy = timeoutPolicy()) {
   if (timeout === undefined || timeout === null) {

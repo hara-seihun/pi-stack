@@ -194,6 +194,8 @@ const activations = new Map<string, Promise<Runtime>>();
 const sessionWorkers = new Map<string, Promise<void>>();
 const retryTimers = new Map<string, Timer>();
 let shuttingDown = false;
+let releaseActivationRequested = false;
+let releaseActivationCheckQueued = false;
 
 const now = () => new Date().toISOString();
 const serviceTierPath = (sessionId: string) => join(SERVICE_TIER_DIR, sessionId);
@@ -715,6 +717,7 @@ function setRuntimePhase(id: string, rt: Runtime, phase: RuntimePhase, state?: s
     touchSession(id);
   }
   if (state) setState(id, state, lastError);
+  scheduleReleaseActivationCheck();
 }
 function runtimeWorking(rt: Runtime | undefined): boolean {
   return !!rt && ["STARTING", "DISPATCHING", "RUNNING", "ABORTING"].includes(rt.phase);
@@ -1230,6 +1233,7 @@ async function startRuntime(row: any): Promise<Runtime> {
     if (runtimes.get(row.id) !== rt) return;
     setRuntimePhase(row.id, rt, "STOPPING");
     runtimes.delete(row.id);
+    scheduleReleaseActivationCheck();
     if (shuttingDown || !ownsSupervisorLease()) return;
     const retryAt = Date.now() + 2_000;
     db.query("UPDATE work_items SET state='queued',resume=1,available_at=?,updated_at=?,last_error='Agent stopped before settling' WHERE session_id=? AND state='dispatched'")
@@ -1289,7 +1293,10 @@ async function activate(row: any): Promise<Runtime> {
   if (inProgress) return inProgress;
   const existing = runtimes.get(row.id);
   if (existing) return existing;
-  const activation = startRuntime(row).finally(() => { activations.delete(row.id); });
+  const activation = startRuntime(row).finally(() => {
+    activations.delete(row.id);
+    scheduleReleaseActivationCheck();
+  });
   activations.set(row.id, activation);
   return activation;
 }
@@ -1570,6 +1577,7 @@ function kickSession(sessionId: string) {
     .catch((cause) => console.error(`Session worker ${sessionId} failed`, cause))
     .finally(() => {
       sessionWorkers.delete(sessionId);
+      scheduleReleaseActivationCheck();
       const rt = runtimes.get(sessionId);
       const busy = rt && ["DISPATCHING", "RUNNING"].includes(rt.phase);
       const next = db.query(`
@@ -2485,6 +2493,26 @@ const reaper = setInterval(() => {
   }
 }, 60_000);
 
+function releaseActivationReady() {
+  return activations.size === 0 && sessionWorkers.size === 0 &&
+    ![...runtimes.values()].some(runtimeWorking);
+}
+
+function scheduleReleaseActivationCheck() {
+  if (!releaseActivationRequested || releaseActivationCheckQueued || shuttingDown) return;
+  releaseActivationCheckQueued = true;
+  queueMicrotask(() => {
+    releaseActivationCheckQueued = false;
+    if (releaseActivationRequested && releaseActivationReady() && !shuttingDown) void shutdown();
+  });
+}
+
+function requestReleaseActivation() {
+  releaseActivationRequested = true;
+  console.log("Pi Remote release activation requested; active turns will finish on this generation");
+  scheduleReleaseActivationCheck();
+}
+
 async function shutdown() {
   if (shuttingDown) return;
   shuttingDown = true;
@@ -2515,4 +2543,4 @@ async function shutdown() {
 }
 process.on("SIGTERM", shutdown);
 process.on("SIGINT", shutdown);
-process.on("SIGHUP", shutdown);
+process.on("SIGHUP", requestReleaseActivation);

@@ -13,20 +13,19 @@ fleet-errors --json --since 1h        # one classified failure per line
 The fleet makes tens of thousands of tool calls a day and a few percent of
 them fail. Most of those failures are the mathematics being hard, and nothing
 on this machine can help with that. A minority are the machine refusing a call
-it could have served — a missing Python library, a cap that rejects instead of
-clamping, a service that was restarting. Those are worth an afternoon each,
-and separating them from the noise by hand costs an afternoon on its own.
+it could have served, such as a missing Python library, a cap that rejects
+instead of clamps, or a service restart. Those are worth an afternoon each.
+Separating them from the noise by hand costs an afternoon on its own.
 
-So the output is grouped by whose fault a failure is:
+The output groups failures by owner:
 
-- **machine** — broken here: a missing module, a dead service, a permission
-  denial, an OOM. Fix these.
-- **interface** — a tool refused a call it could have served, or produced an
-  error that taught the caller nothing. Usually the cheapest wins.
-- **workload** — the work did not fit the bounds it was given, mostly bash
-  calls hitting the fleet's five-minute cap. A signal about task sizing, not a
-  defect.
-- **agent** — the agent's own code and mathematics. Expected, and the largest
+- **Machine.** A missing module, dead service, permission denial, or OOM. Fix
+  these.
+- **Interface.** A tool refused work it could have served or returned an error
+  that taught the caller nothing. These are often cheap to fix.
+- **Workload.** The work hit its bound, usually the 55-second bash cap. Improve
+  or divide the work.
+- **Agent.** The agent's code or mathematics failed. This should be the largest
   group in a healthy day.
 
 ## Where it reads

@@ -1,4 +1,6 @@
 import assert from "node:assert/strict";
+import { spawnSync } from "node:child_process";
+import { fileURLToPath } from "node:url";
 import test from "node:test";
 import {
   MAX_TIMEOUT_SECONDS,
@@ -17,18 +19,19 @@ function load(environment = {}) {
 }
 
 const bashCall = (input) => ({ toolName: "bash", input });
+const sweep = fileURLToPath(new URL("./sweep", import.meta.url));
 const fleet = {
-  PI_BASH_TIMEOUT_MAX_SECONDS: "300",
-  PI_BASH_FOREGROUND_ONLY: "1",
-  PI_BASH_TIMEOUT_CONTEXT: "This shared runner has a five-minute ceiling.",
+  PI_BASH_TIMEOUT_MAX_SECONDS: "55",
+  PI_BASH_TIMEOUT_CONTEXT: "This shared runner has the same ceiling.",
 };
 
 test("the environment selects the timeout and foreground policy", () => {
   assert.equal(timeoutPolicy({}).maxTimeoutSeconds, MAX_TIMEOUT_SECONDS);
   assert.equal(timeoutPolicy({ PI_BASH_TIMEOUT_MAX_SECONDS: "bad" }).maxTimeoutSeconds, MAX_TIMEOUT_SECONDS);
-  assert.equal(timeoutPolicy(fleet).maxTimeoutSeconds, 300);
+  assert.equal(timeoutPolicy(fleet).maxTimeoutSeconds, 55);
+  assert.equal(timeoutPolicy({ PI_BASH_TIMEOUT_MAX_SECONDS: "300" }).maxTimeoutSeconds, 55);
   assert.equal(timeoutPolicy(fleet).foregroundOnly, true);
-  assert.equal(timeoutPolicy({}).foregroundOnly, false);
+  assert.equal(timeoutPolicy({}).foregroundOnly, true);
 });
 
 test("only bounded positive timeouts are accepted", () => {
@@ -40,21 +43,21 @@ test("only bounded positive timeouts are accepted", () => {
   }
 });
 
-test("orchestrator calls are capped at five minutes", () => {
+test("every session has a hard ceiling below one minute", () => {
   const onToolCall = load(fleet).get("tool_call");
   assert.equal(
-    onToolCall(bashCall({ command: "ls", timeout: 300 })),
+    onToolCall(bashCall({ command: "ls", timeout: 55 })),
     undefined,
   );
-  const blocked = onToolCall(bashCall({ command: "ls", timeout: 301 }));
+  const blocked = onToolCall(bashCall({ command: "ls", timeout: 56 }));
   assert.equal(blocked.block, true);
-  assert.match(blocked.reason, /300s cap/);
-  assert.match(blocked.reason, /five-minute ceiling/);
+  assert.match(blocked.reason, /55s cap/);
+  assert.match(blocked.reason, /same ceiling/);
 });
 
 test("bash calls without an acceptable timeout are blocked, others run", () => {
   const onToolCall = load().get("tool_call");
-  assert.deepEqual(onToolCall(bashCall({ command: "ls", timeout: 60 })), undefined);
+  assert.deepEqual(onToolCall(bashCall({ command: "ls", timeout: 55 })), undefined);
   assert.equal(onToolCall(bashCall({ command: "ls" })).block, true);
   assert.equal(onToolCall(bashCall({ command: "ls", timeout: 3600 })).block, true);
   assert.equal(onToolCall({ toolName: "read", input: { path: "x" } }), undefined);
@@ -112,9 +115,9 @@ test("ordinary shell punctuation is not mistaken for detachment", () => {
   }
 });
 
-test("detachment is refused only in fleet sessions, and refused kindly", () => {
+test("detachment is refused in every session, and refused kindly", () => {
   const interactivePolicy = timeoutPolicy({});
-  assert.equal(checkBashCommand("nohup ./census &", interactivePolicy), null);
+  assert.match(checkBashCommand("nohup ./census &", interactivePolicy), /`nohup`/);
 
   const reason = checkBashCommand("nohup ./census &", timeoutPolicy(fleet));
   assert.match(reason, /`nohup`/);
@@ -123,9 +126,15 @@ test("detachment is refused only in fleet sessions, and refused kindly", () => {
   assert.doesNotMatch(reason, /forbidden|violation|punish/i);
 
   const onToolCall = load(fleet).get("tool_call");
-  const blocked = onToolCall(bashCall({ command: "./census &", timeout: 60 }));
+  const blocked = onToolCall(bashCall({ command: "./census &", timeout: 55 }));
   assert.equal(blocked.block, true);
   assert.match(blocked.reason, /foreground/);
+});
+
+test("the process sweep requires an explicit account", () => {
+  const result = spawnSync(sweep, [], { encoding: "utf8" });
+  assert.equal(result.status, 64);
+  assert.match(result.stderr, /usage: sweep USER/);
 });
 
 test("the matching rule is stated once in the system prompt", () => {
@@ -136,9 +145,9 @@ test("the matching rule is stated once in the system prompt", () => {
 
   const orchestratorHandler = load(fleet).get("before_agent_start");
   const orchestratorPrompt = orchestratorHandler({ systemPrompt: "base" }).systemPrompt;
-  assert.match(orchestratorPrompt, /300 seconds/);
-  assert.match(orchestratorPrompt, /five-minute ceiling/);
+  assert.match(orchestratorPrompt, /55 seconds/);
+  assert.match(orchestratorPrompt, /same ceiling/);
   assert.match(orchestratorPrompt, /foreground/);
-  assert.doesNotMatch(interactivePrompt, /ceiling/);
+  assert.match(interactivePrompt, /55 seconds/);
   assert.equal(orchestratorHandler({ systemPrompt: orchestratorPrompt }), undefined);
 });

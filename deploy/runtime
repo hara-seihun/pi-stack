@@ -3,6 +3,7 @@ set -euo pipefail
 
 root=$(cd "$(dirname "$0")/.." && pwd)
 source "$root/deploy/lib"
+pi_stack_enforce_deploy_deadline "$0" "$@"
 pi_stack_acquire_deploy_lock "$root"
 if [[ ${PI_STACK_ALLOW_DIRTY:-0} != 1 && -n $(git -C "$root" status --porcelain) ]]; then
   echo "refusing to deploy an uncommitted Pi stack; set PI_STACK_ALLOW_DIRTY=1 only for a temporary test" >&2
@@ -11,33 +12,43 @@ fi
 runtime_source="$root/packages/runtime"
 runtime_root=${PI_STACK_RUNTIME_ROOT:-$HOME/.local/share/pi-runtime}
 bin_dir=${PI_STACK_USER_BIN:-$HOME/.local/bin}
-dependencies_root="$runtime_root/dependencies"
+dependencies_root=${PI_STACK_DEPENDENCIES_ROOT:-/srv/pi/dependencies}
 releases_root="$runtime_root/releases"
 stage=""
 cleanup() { [[ -z $stage ]] || rm -rf "$stage"; }
 trap cleanup EXIT
-install -d -m 700 "$runtime_root" "$dependencies_root" "$releases_root"
+install -d -m 700 "$runtime_root" "$releases_root"
+pi_stack_as_root install -d -m 755 "$dependencies_root"
 exec 9>"$runtime_root/deploy.lock"
 flock 9
+commit=$(git -C "$root" rev-parse HEAD)
+current="$runtime_root/current"
+if [[ -f $runtime_root/.pi-stack-commit && $(<"$runtime_root/.pi-stack-commit") == "$commit" && \
+      -f $current/.pi-stack-commit && $(<"$current/.pi-stack-commit") == "$commit" && \
+      -x $current/node_modules/.bin/pi ]]; then
+  version=$("$current/node_modules/.bin/pi" --version)
+  [[ $version == 0.84.2 ]] || { echo "unexpected Pi version: $version" >&2; exit 1; }
+  printf 'Pi %s from %s is already deployed\n' "$version" "$commit"
+  exit 0
+fi
 
 cd "$root"
 pi_stack_prepare_dependencies "$root"
-npm run check --workspace=@rahularya01/pi-cursor
+rm -rf packages/runtime/extensions/pi-cursor/dist
 npm run build --workspace=@rahularya01/pi-cursor
-npm test --workspace=@hara-seihun/pi-runtime
 dependency_hash=$({
   sha256sum package.json package-lock.json
   printf '%s\n' workspace-production-closure-v1-atomic-settings-writes-v1
 } | sha256sum | cut -d' ' -f1)
 dependency_release="$dependencies_root/$dependency_hash"
 if [[ ! -x $dependency_release/node_modules/.bin/pi ]]; then
-  stage=$(mktemp -d "$dependencies_root/.stage.XXXXXXXX")
+  stage=$(mktemp -d "${TMPDIR:-/tmp}/pi-runtime-dependencies.XXXXXXXX")
   install -m 644 package.json package-lock.json "$stage/"
   while IFS= read -r manifest; do
     install -d "$stage/$(dirname "$manifest")"
     install -m 644 "$manifest" "$stage/$manifest"
   done < <(find apps packages tools -name node_modules -prune -o -name package.json -print)
-  (cd "$stage" && npm ci --omit=dev --ignore-scripts)
+  (cd "$stage" && npm ci --omit=dev --ignore-scripts --prefer-offline --no-audit --no-fund)
   settings_manager="$stage/node_modules/@earendil-works/pi-coding-agent/dist/core/settings-manager.js"
   SETTINGS_MANAGER="$settings_manager" node --input-type=module <<'NODE'
 import { readFileSync, writeFileSync } from "node:fs";
@@ -60,7 +71,17 @@ NODE
   node --check "$settings_manager"
   rm -f "$stage/node_modules/pi-orchestrator" "$stage/node_modules/pi-remote"
   rm -rf "$stage/node_modules/@hara-seihun"
-  mv "$stage" "$dependency_release"
+  dependency_stage="$dependencies_root/.stage.$$.${RANDOM}"
+  pi_stack_as_root install -d -m 755 "$dependency_stage"
+  if ! pi_stack_as_root rsync -a --delete --chmod=D755,Fu=rwX,Fgo=rX "$stage/" "$dependency_stage/"; then
+    pi_stack_as_root rm -rf "$dependency_stage"
+    exit 1
+  fi
+  if ! pi_stack_as_root mv -T "$dependency_stage" "$dependency_release"; then
+    pi_stack_as_root rm -rf "$dependency_stage"
+    exit 1
+  fi
+  rm -rf "$stage"
   stage=""
 fi
 settings_manager="$dependency_release/node_modules/@earendil-works/pi-coding-agent/dist/core/settings-manager.js"
@@ -68,15 +89,10 @@ grep -q 'renameSync(temporary, path)' "$settings_manager"
 node --check "$settings_manager"
 
 extensions=(pi-claude-code-use state-compactor bash-timeout-guard publication-custody chatgpt-pro pi-cursor)
-release_hash=$(cd "$runtime_source" && {
-  printf '%s\n' "$dependency_hash"
-  for extension in "${extensions[@]}"; do
-    find "extensions/$extension" -type f -print0 | sort -z | xargs -0 sha256sum
-  done
-  find prompt-eval -type f -print0 | sort -z | xargs -0 sha256sum
-  sha256sum models.json
-} | sha256sum | cut -d' ' -f1)
-runtime_release="$releases_root/$release_hash"
+# A release belongs to the reviewed source commit, even when two commits happen
+# to produce identical runtime files. This keeps the selected artifact's receipt
+# commit-consistent and makes the next deployment hit the unchanged fast path.
+runtime_release=$(pi_stack_release_for_commit "$root" "$releases_root")
 if [[ ! -d $runtime_release ]]; then
   stage=$(mktemp -d "$releases_root/.stage.XXXXXXXX")
   install -d -m 700 "$stage/extensions"
@@ -89,7 +105,6 @@ if [[ ! -d $runtime_release ]]; then
   stage=""
 fi
 
-current="$runtime_root/current"
 link_stage="$current.stage.$$"
 ln -s "$runtime_release" "$link_stage"
 mv -Tf "$link_stage" "$current"

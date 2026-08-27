@@ -31,7 +31,7 @@ npm run android:test --workspace=kenan
 
 ## Deployments
 
-GMKtec and Converge deploy one reviewed repository commit. Host configuration chooses which components to publish and supplies local values. The scripts under [`deploy`](deploy) refuse an uncommitted checkout and serialize work from the same source tree. Host deployment commands keep that lock until every artifact carries one commit. `deploy/settings` and `deploy/skills` derive each role directly from the manifests rather than repeating package or skill lists in host configuration. See [`docs/deployment.md`](docs/deployment.md).
+GMKtec and Converge deploy one reviewed repository commit. Host configuration supplies local values. The scripts under [`deploy`](deploy) refuse an uncommitted checkout, serialize work from the same source tree, and enforce a 50-second deadline. Commit-addressed releases share one production dependency tree and switch atomically. Host deployment keeps the source lock until every artifact carries one commit. `deploy/settings` and `deploy/skills` derive each role from the manifests. See [`docs/deployment.md`](docs/deployment.md).
 
 Pi Remote environments are independent servers:
 

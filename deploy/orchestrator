@@ -3,35 +3,41 @@ set -euo pipefail
 
 root=$(cd "$(dirname "$0")/.." && pwd)
 source "$root/deploy/lib"
+pi_stack_enforce_deploy_deadline "$0" "$@"
 pi_stack_acquire_deploy_lock "$root"
 if [[ ${PI_STACK_ALLOW_DIRTY:-0} != 1 && -n $(git -C "$root" status --porcelain) ]]; then
   echo "refusing to deploy an uncommitted Pi stack; set PI_STACK_ALLOW_DIRTY=1 only for a temporary test" >&2
   exit 65
 fi
 dest=${PI_STACK_ORCHESTRATOR_DEST:-/srv/pi/pi-orchestrator}
+runtime_root=${PI_STACK_RUNTIME_ROOT:-$HOME/.local/share/pi-runtime}
+commit=$(git -C "$root" rev-parse HEAD)
+if [[ -f $dest/.pi-stack-commit && $(<"$dest/.pi-stack-commit") == "$commit" && -x $dest/dist/cli.js ]]; then
+  "$dest/dist/cli.js" help | grep -q '^usage: pi-orchestrator'
+  printf 'Pi Orchestrator from %s is already deployed\n' "$commit"
+  exit 0
+fi
 stage=$(mktemp -d "${TMPDIR:-/tmp}/pi-orchestrator.XXXXXXXX")
 trap 'rm -rf "$stage"' EXIT
 
 cd "$root"
 pi_stack_prepare_dependencies "$root"
-npm run typecheck --workspace=pi-orchestrator
-npm run build --workspace=pi-orchestrator
-npm test --workspace=pi-orchestrator
-npm pack --workspace=pi-orchestrator --pack-destination "$stage" >/dev/null
-archive=$(find "$stage" -maxdepth 1 -name '*.tgz' -print -quit)
-npm install --prefix "$stage/install" --omit=dev --ignore-scripts "$archive" >/dev/null
-
-package="$stage/install/node_modules/pi-orchestrator"
-[[ -x "$package/dist/cli.js" ]] || chmod 755 "$package/dist/cli.js"
-as_root() {
-  if [[ $EUID == 0 || ${PI_STACK_DEPLOY_NO_SUDO:-0} == 1 ]]; then "$@"; else sudo -n "$@"; fi
+[[ -f $runtime_root/.pi-stack-commit && $(<"$runtime_root/.pi-stack-commit") == "$commit" ]] || {
+  echo "deploy Pi Runtime $commit before Pi Orchestrator" >&2
+  exit 66
 }
-as_root install -d -m 755 "$dest" "$dest/node_modules"
-as_root rsync -a --delete --chmod=D755,Fu=rwX,Fgo=rX "$package/dist" "$package/src" "$package/package.json" "$dest/"
-as_root rsync -a --delete --chmod=D755,F644 --exclude=pi-orchestrator "$stage/install/node_modules/" "$dest/node_modules/"
-as_root chmod 755 "$dest/dist/cli.js"
-printf '%s\n' "$(git rev-parse HEAD)" > "$stage/pi-stack-commit"
-as_root install -m 644 "$stage/pi-stack-commit" "$dest/.pi-stack-commit"
+dependencies=$(readlink -f "$runtime_root/current/node_modules")
+[[ -d $dependencies ]] || { echo "Pi Runtime dependencies are missing at $dependencies" >&2; exit 66; }
+rm -rf packages/orchestrator/dist
+npm run build --workspace=pi-orchestrator
+
+mkdir -p "$stage/release"
+rsync -a --chmod=D755,Fu=rwX,Fgo=rX packages/orchestrator/dist packages/orchestrator/src \
+  packages/orchestrator/package.json "$stage/release/"
+chmod 755 "$stage/release/dist/cli.js"
+ln -s "$dependencies" "$stage/release/node_modules"
+printf '%s\n' "$commit" > "$stage/release/.pi-stack-commit"
+pi_stack_publish_release "$root" "$stage/release" "$dest" orchestrator
 
 "$dest/dist/cli.js" help | grep -q '^usage: pi-orchestrator'
-printf 'deployed Pi Orchestrator from %s to %s\n' "$(git rev-parse HEAD)" "$dest"
+printf 'deployed Pi Orchestrator from %s to %s\n' "$commit" "$dest"

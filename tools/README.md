@@ -11,6 +11,6 @@ These commands depend on Pi sessions, Pi models, or the orchestrator ledger.
 | [`mcp-script`](mcp-script/README.md) | `mcp-script` | Run JavaScript over one MCP client. |
 | [`read-condensed-session`](read-condensed-session/README.md) | `read-condensed-session` | Render a complete Pi session as a condensed transcript. |
 
-[`../config/tools.json`](../config/tools.json) defines host availability, command names, and fleet installation. `../deploy/tools` tests the selected role, publishes an immutable copy under `/srv/pi/tools`, and links commands into the interactive and fleet users' bin directories.
+[`../config/tools.json`](../config/tools.json) defines host availability, command names, and fleet installation. CI tests every command. `../deploy/tools` links the reviewed runtime dependency tree into a commit-addressed release, switches `/srv/pi/tools` atomically, and reconciles the interactive and fleet users' command links.
 
 Session files, summary caches, prompt-experiment records, credentials, and generated corpora remain host state. This repository contains no extracted messages or private transcripts.

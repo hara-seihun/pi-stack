@@ -1,0 +1,25 @@
+#!/usr/bin/env bash
+set -uo pipefail
+
+user=${1:-}
+[[ -n $user ]] || { echo "usage: sweep USER" >&2; exit 64; }
+target_uid=$(id -u "$user")
+
+kill_tree() {
+  local pid=$1 child
+  for child in $(ps -o pid= --ppid "$pid" 2>/dev/null); do
+    kill_tree "$child"
+  done
+  kill -KILL "$pid" 2>/dev/null
+}
+
+while read -r pid age uid command; do
+  ((age > 50)) || continue
+  [[ $uid == "$target_uid" ]] || continue
+  case "$command" in
+    *"dist/cli.js daemon"*|*"dist/cli.js runner"*|*"dist/cli.js supervisor"*) continue ;;
+  esac
+  grep -qz '^PI_SESSION_ID=' "/proc/$pid/environ" 2>/dev/null || continue
+  printf 'killing %s after %ss: %s\n' "$pid" "$age" "$command"
+  kill_tree "$pid"
+done < <(ps -eo pid=,etimes=,euid=,args= 2>/dev/null)

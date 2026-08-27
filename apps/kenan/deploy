@@ -1,6 +1,15 @@
 #!/usr/bin/env bash
 set -euo pipefail
-cd "$(dirname "$0")"
+root=$(cd "$(dirname "$0")/../.." && pwd)
+source "$root/deploy/lib"
+pi_stack_enforce_deploy_deadline "$0" "$@"
+pi_stack_acquire_deploy_lock "$root"
+if [[ -n $(git -C "$root" status --porcelain) ]]; then
+  echo "refusing to deploy an uncommitted Pi stack" >&2
+  exit 65
+fi
+pi_stack_prepare_dependencies "$root"
+cd "$root/apps/kenan"
 
 trap 'adb kill-server >/dev/null 2>&1 || true' EXIT
 

@@ -1,4 +1,20 @@
 # shellcheck shell=bash
+PI_STACK_MAX_DEPLOY_SECONDS=50
+
+pi_stack_enforce_deploy_deadline() {
+  local script=$1 seconds=${PI_STACK_DEPLOY_TIMEOUT_SECONDS:-$PI_STACK_MAX_DEPLOY_SECONDS}
+  shift
+  if [[ ${PI_STACK_DEPLOY_DEADLINE_ACTIVE:-0} == 1 ]]; then
+    return
+  fi
+  if [[ ! $seconds =~ ^[1-9][0-9]*$ ]] || ((seconds > PI_STACK_MAX_DEPLOY_SECONDS)); then
+    echo "PI_STACK_DEPLOY_TIMEOUT_SECONDS must be an integer from 1 through $PI_STACK_MAX_DEPLOY_SECONDS" >&2
+    exit 64
+  fi
+  export PI_STACK_DEPLOY_DEADLINE_ACTIVE=1
+  exec timeout --signal=TERM --kill-after=2s "${seconds}s" "$(realpath "$script")" "$@"
+}
+
 pi_stack_acquire_deploy_lock() {
   local root=$1 lock
   if [[ ${PI_STACK_DEPLOY_LOCK_HELD:-0} == 1 ]]; then
@@ -10,12 +26,90 @@ pi_stack_acquire_deploy_lock() {
   export PI_STACK_DEPLOY_LOCK_FD PI_STACK_DEPLOY_LOCK_HELD=1
 }
 
+pi_stack_dependency_key() {
+  local root=$1
+  sha256sum "$root/package.json" "$root/package-lock.json" | sha256sum | cut -d' ' -f1
+}
+
 pi_stack_prepare_dependencies() {
-  local root=$1 key
-  key=$(sha256sum "$root/package.json" "$root/package-lock.json" | sha256sum | cut -d' ' -f1)
-  if [[ ${PI_STACK_DEPENDENCIES_READY:-} == "$key" && -f $root/node_modules/.package-lock.json ]]; then
+  local root=$1 key stamp hidden_lock hidden_hash expected
+  key=$(pi_stack_dependency_key "$root")
+  stamp="$root/node_modules/.pi-stack-dependency-key"
+  hidden_lock="$root/node_modules/.package-lock.json"
+  if [[ -f $stamp && -f $hidden_lock ]]; then
+    hidden_hash=$(sha256sum "$hidden_lock" | cut -d' ' -f1)
+    expected=$(printf '%s %s\n' "$key" "$hidden_hash")
+    if [[ $(<"$stamp") == "$expected" ]]; then
+      export PI_STACK_DEPENDENCIES_READY=$key
+      return
+    fi
+  fi
+  (cd "$root" && npm ci --ignore-scripts --prefer-offline --no-audit --no-fund)
+  hidden_hash=$(sha256sum "$hidden_lock" | cut -d' ' -f1)
+  printf '%s %s\n' "$key" "$hidden_hash" > "$stamp"
+  export PI_STACK_DEPENDENCIES_READY=$key
+}
+
+pi_stack_as_root() {
+  if [[ $EUID == 0 || ${PI_STACK_DEPLOY_NO_SUDO:-0} == 1 ]]; then
+    "$@"
+  else
+    sudo -n "$@"
+  fi
+}
+
+pi_stack_release_for_commit() {
+  local root=$1 releases=$2
+  printf '%s/%s\n' "$releases" "$(git -C "$root" rev-parse HEAD)"
+}
+
+pi_stack_publish_release() {
+  local root=$1 stage=$2 dest=$3 name=$4 commit releases release root_stage candidate
+  commit=$(git -C "$root" rev-parse HEAD)
+  releases=${PI_STACK_RELEASES_ROOT:-$(dirname "$dest")/.pi-stack-releases}/$name
+  release=$(pi_stack_release_for_commit "$root" "$releases")
+  pi_stack_as_root install -d -m 755 "$releases"
+  if ! pi_stack_as_root test -d "$release"; then
+    root_stage="$releases/.stage.$$.${RANDOM}"
+    pi_stack_as_root install -d -m 755 "$root_stage"
+    if ! pi_stack_as_root rsync -a --delete --chmod=D755,Fu=rwX,Fgo=rX "$stage/" "$root_stage/"; then
+      pi_stack_as_root rm -rf "$root_stage"
+      return 1
+    fi
+    pi_stack_as_root mv -T "$root_stage" "$release"
+  fi
+  [[ $(pi_stack_as_root cat "$release/.pi-stack-commit") == "$commit" ]] || {
+    echo "$release does not carry Pi stack $commit" >&2
+    return 1
+  }
+  if [[ -L $dest && $(readlink -f "$dest") == "$release" ]]; then
     return
   fi
-  (cd "$root" && npm ci --ignore-scripts)
-  export PI_STACK_DEPENDENCIES_READY=$key
+  candidate="$releases/.activate.$$.${RANDOM}"
+  pi_stack_as_root ln -s "$release" "$candidate"
+  if pi_stack_as_root test -L "$dest"; then
+    # POSIX rename semantics make this an atomic symlink replacement. Unlike
+    # `mv --exchange`, `mv -T` is available on both fleet hosts.
+    pi_stack_as_root mv -Tf "$candidate" "$dest"
+  elif pi_stack_as_root test -e "$dest"; then
+    # The first release migration may replace a populated directory. Linux can
+    # exchange it atomically, but older coreutils does not expose renameat2.
+    pi_stack_as_root python3 - "$candidate" "$dest" <<'PY'
+import ctypes
+import os
+import sys
+
+source, destination = (os.fsencode(path) for path in sys.argv[1:])
+libc = ctypes.CDLL(None, use_errno=True)
+renameat2 = libc.renameat2
+renameat2.argtypes = [ctypes.c_int, ctypes.c_char_p, ctypes.c_int, ctypes.c_char_p, ctypes.c_uint]
+renameat2.restype = ctypes.c_int
+if renameat2(-100, source, -100, destination, 2) != 0:  # AT_FDCWD, RENAME_EXCHANGE
+    error = ctypes.get_errno()
+    raise OSError(error, os.strerror(error))
+PY
+    pi_stack_as_root rm -rf "$candidate"
+  else
+    pi_stack_as_root mv -T "$candidate" "$dest"
+  fi
 }

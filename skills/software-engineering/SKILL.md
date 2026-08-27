@@ -35,7 +35,7 @@ If all software accomplished its goal in an optimal manner, you would expect tha
 
 ### Pipelines
 
-There is no reason that a deploy or testing pipeline should take any longer than maybe a minute, with the sole exception of irreducible third-party latency. A few examples of common mistakes are setting timeouts in tests rather than awaiting state, not properly parallelizing and not properly identifying which parts of tests are not dependent or can be made non-dependent. There are also things like memoization. If we know that there exists some flow from steps 1 through 7, where each step relies on the state of the step before it, we can take advantage of seeing whether the state machine after some step has changed. If not, then we can take the output of that step as a memoized value. There are many things like this. This is not an exhaustive list, and all of these things can be used to speed up a pipeline by orders of magnitude.
+Every attended command and pipeline must finish within 55 seconds. There are no exceptions. Third-party latency belongs to a durable worker, not a waiting model session. Common mistakes include sleeping instead of awaiting state, serializing independent work, and rebuilding an unchanged stage. Memoize a stage when its inputs have not changed. These fixes often cut pipeline time by orders of magnitude.
 
 ### Publication is a custody transfer
 
@@ -47,9 +47,9 @@ Do not use `gh pr checks --watch`, `gh run watch`, sleep loops around status com
 
 ### Always run commands with timeouts
 
-Either your command tool has a timeout argument, or if it doesn't, install timeout, or gtimeout, or whatever is available for your system. Timeouts should rarely, if ever, be longer than one minute. If you're running a command and you expect it to take longer than a minute, you want to spend time optimizing and then run the command. Let's say you're running a test suite and you know the test suite takes longer than one minute to run. Instead of accepting this and running the test suite and waiting, optimize the test suite until you can run the command quicker. Exceptions are bounded to work that must remain in the current process, such as one large download or an indivisible third-party request. Waiting for another agent, CI, merge, or deployment is not an exception. Transfer that wait to durable process state and end the model run.
+Pass an explicit timeout of at most 55 seconds to every command. Install `timeout` if your command tool does not provide one. If work does not fit, make it faster, divide it into independent bounded calls, or transfer it to a durable worker that owns the result. Do not keep a model alive for a download, third-party request, CI, merge, deployment, or another agent.
 
-You might be tempted to run something like a 20-minute census for mathematical discovery in group theory. In general, using 20 times the time is not worth the 20 times more operations. Optimize it and run a one-minute experiment instead.
+A computation that takes twenty minutes is the wrong computation for an attended session. Improve it and run a sub-minute experiment instead.
 
 ### Rules of thumb (for low level performance optimization)
 - Struct of arrays is faster than array of structs

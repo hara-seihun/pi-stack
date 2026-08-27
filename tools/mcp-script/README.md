@@ -17,4 +17,4 @@ Inside the script, `tools.search`, `tools.describe`, `tools.call`, `tools.status
 
 The default deadline is 30 seconds. Set another bounded deadline with `--timeout MS`. Code is read from stdin by default or from `--file FILE`. The worker has no injected `process`, filesystem, or module loader, but this is an accident guard rather than a security boundary. Scripts are trusted.
 
-Run [`../mcp/deploy`](../mcp/deploy) first, then `./deploy`. The deployment links the local command and publishes the fleet copy under `/srv/pi/tools/mcp-script` beside `/srv/pi/tools/mcp`.
+After CI accepts the commit, run `../../deploy/tools local`. One atomic tools release publishes `mcp-script` beside `mcp` and reconciles both users' command links.

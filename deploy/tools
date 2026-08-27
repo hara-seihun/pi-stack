@@ -3,6 +3,7 @@ set -euo pipefail
 
 root=$(cd "$(dirname "$0")/.." && pwd)
 source "$root/deploy/lib"
+pi_stack_enforce_deploy_deadline "$0" "$@"
 pi_stack_acquire_deploy_lock "$root"
 if [[ ${PI_STACK_ALLOW_DIRTY:-0} != 1 && -n $(git -C "$root" status --porcelain) ]]; then
   echo "refusing to deploy an uncommitted Pi stack; set PI_STACK_ALLOW_DIRTY=1 only for a temporary test" >&2
@@ -11,6 +12,7 @@ fi
 role=${1:-}
 [[ $role == local || $role == converge ]] || { echo "usage: deploy/tools {local|converge}" >&2; exit 64; }
 dest=${PI_STACK_TOOLS_DEST:-/srv/pi/tools}
+runtime_root=${PI_STACK_RUNTIME_ROOT:-$HOME/.local/share/pi-runtime}
 user_home=${PI_STACK_USER_HOME:-/home/kenan}
 fleet_home=${PI_STACK_FLEET_HOME:-/home/orchestrator}
 skip_links=${PI_STACK_SKIP_TOOL_LINKS:-0}
@@ -18,12 +20,13 @@ stage=$(mktemp -d "${TMPDIR:-/tmp}/pi-tools.XXXXXXXX")
 trap 'rm -rf "$stage"' EXIT
 
 cd "$root"
-pi_stack_prepare_dependencies "$root"
-npm test --workspace=@hara-seihun/agent-workspace
-npm test --workspace=@hara-seihun/mcp-cli
-npm test --workspace=@hara-seihun/mcp-script
-npm test --workspace=@hara-seihun/read-condensed-session
-node scripts/check-tools.mjs
+commit=$(git rev-parse HEAD)
+[[ -f $runtime_root/.pi-stack-commit && $(<"$runtime_root/.pi-stack-commit") == "$commit" ]] || {
+  echo "deploy Pi Runtime $commit before Pi tools" >&2
+  exit 66
+}
+dependencies=$(readlink -f "$runtime_root/current/node_modules")
+[[ -d $dependencies ]] || { echo "Pi Runtime dependencies are missing at $dependencies" >&2; exit 66; }
 
 mkdir -p "$stage/release"
 mapfile -t selected < <(jq -r --arg role "$role" '.tools[] | select(.hosts | index($role)) | .id' config/tools.json)
@@ -34,31 +37,9 @@ for tool in "${selected[@]}"; do
   done < <(jq -r --arg tool "$tool" '.tools[] | select(.id == $tool) | .commands[] | [.name,.entry] | @tsv' config/tools.json)
 done
 
-npm pack --workspace=@hara-seihun/mcp-cli --pack-destination "$stage" >/dev/null
-archive=$(find "$stage" -maxdepth 1 -name '*.tgz' -print -quit)
-npm install --prefix "$stage/dependencies" --omit=dev --ignore-scripts "$archive" >/dev/null
-mkdir -p "$stage/release/node_modules"
-rsync -a --delete --chmod=D755,F644 "$stage/dependencies/node_modules/" "$stage/release/node_modules/"
-rm -rf "$stage/release/node_modules/@hara-seihun/mcp-cli"
-rmdir "$stage/release/node_modules/@hara-seihun" 2>/dev/null || true
-for tool in "${selected[@]}"; do
-  while IFS=$'\t' read -r name entry; do
-    "$stage/release/$tool/$entry" --help >/dev/null
-  done < <(jq -r --arg tool "$tool" '.tools[] | select(.id == $tool) | .commands[] | [.name,.entry] | @tsv' config/tools.json)
-done
-printf '%s\n' "$(git rev-parse HEAD)" > "$stage/release/.pi-stack-commit"
-
-as_root() {
-  if [[ $EUID == 0 || ${PI_STACK_DEPLOY_NO_SUDO:-0} == 1 ]]; then "$@"; else sudo -n "$@"; fi
-}
-
-as_root install -d -m 755 "$dest"
-as_root rsync -a --delete --chmod=D755,F644 "$stage/release/" "$dest/"
-for tool in "${selected[@]}"; do
-  while IFS=$'\t' read -r name entry; do
-    as_root chmod 755 "$dest/$tool/$entry"
-  done < <(jq -r --arg tool "$tool" '.tools[] | select(.id == $tool) | .commands[] | [.name,.entry] | @tsv' config/tools.json)
-done
+ln -s "$dependencies" "$stage/release/node_modules"
+printf '%s\n' "$commit" > "$stage/release/.pi-stack-commit"
+pi_stack_publish_release "$root" "$stage/release" "$dest" "tools-$role"
 
 if [[ $skip_links != 1 ]]; then
   reconcile_links() {
@@ -73,26 +54,26 @@ if [[ $skip_links != 1 ]]; then
       config/tools.json)
 
     while IFS= read -r -d '' link; do
-      target=$(as_root readlink "$link")
+      target=$(pi_stack_as_root readlink "$link")
       name=$(basename "$link")
       if [[ $target == "$dest/"* && ${expected[$name]:-} != "$target" ]]; then
-        as_root rm -- "$link"
+        pi_stack_as_root rm -- "$link"
       fi
-    done < <(as_root find "$bin" -maxdepth 1 -type l -print0)
+    done < <(pi_stack_as_root find "$bin" -maxdepth 1 -type l -print0)
 
     for name in "${!expected[@]}"; do
-      as_root ln -sfn "${expected[$name]}" "$bin/$name"
-      as_root chown -h "$(stat -c %U "$home"):$(stat -c %G "$home")" "$bin/$name"
+      pi_stack_as_root ln -sfn "${expected[$name]}" "$bin/$name"
+      pi_stack_as_root chown -h "$(stat -c %U "$home"):$(stat -c %G "$home")" "$bin/$name"
     done
   }
 
-  as_root install -d -m 755 -o "$(stat -c %U "$user_home")" -g "$(stat -c %G "$user_home")" "$user_home/.local/bin"
+  pi_stack_as_root install -d -m 755 -o "$(stat -c %U "$user_home")" -g "$(stat -c %G "$user_home")" "$user_home/.local/bin"
   reconcile_links "$user_home" false
 
   if [[ -d $fleet_home ]]; then
-    as_root install -d -m 755 -o "$(stat -c %U "$fleet_home")" -g "$(stat -c %G "$fleet_home")" "$fleet_home/.local/bin"
+    pi_stack_as_root install -d -m 755 -o "$(stat -c %U "$fleet_home")" -g "$(stat -c %G "$fleet_home")" "$fleet_home/.local/bin"
     reconcile_links "$fleet_home" true
   fi
 fi
 
-printf 'deployed %s Pi tools from %s to %s\n' "$role" "$(git rev-parse HEAD)" "$dest"
+printf 'deployed %s Pi tools from %s to %s\n' "$role" "$commit" "$dest"

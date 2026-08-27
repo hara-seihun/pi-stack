@@ -18,7 +18,11 @@ Host repositories own:
 
 A host points Orchestrator's operator config at its version-1 task manifest. Controller startup reconciles the complete set atomically, so replacing a host does not depend on remembered `task set` commands and a removed lane cannot linger in SQLite. Pause controls remain mutable ledger state and survive reconciliation.
 
-This repository owns build commands, package and skill roles, API contracts, and component tests. `deploy/runtime`, `deploy/orchestrator`, `deploy/remote`, and `deploy/tools` publish immutable artifacts and record the source commit beside them. `deploy/settings ROLE` reconciles Pi's ordered package list, and `deploy/skills ROLE` publishes and links the role's first-party skills. Every deployment command locks its checkout before reading source. A component deployment prepares dependencies itself. A host deployment runs `npm ci` once and passes the verified dependency tree to its component children. The host keeps the lock until every artifact carries the same commit.
+This repository owns build commands, package and skill roles, API contracts, and component tests. CI runs the complete check before publication. Deployment builds the two compiled packages and does not repeat tests that already passed on the immutable commit.
+
+`deploy/runtime`, `deploy/orchestrator`, `deploy/remote`, `deploy/tools`, and `deploy/skills` publish commit-addressed releases. Runtime owns one lockfile-addressed production dependency tree under `/srv/pi/dependencies`. Runtime, Orchestrator, and tools link that tree instead of copying hundreds of megabytes. Component destinations switch to complete releases with an atomic filesystem exchange. `/srv/pi/.pi-stack-releases` retains prior component generations for processes that loaded them before the exchange.
+
+Every deployment command locks its checkout before reading source. A dependency receipt avoids reinstalling an unchanged development tree and invalidates itself if npm changes the installed lock. `deploy/settings ROLE` reconciles Pi's ordered package list. The host keeps the source lock until every artifact carries the same commit. The outer deployment process has a 50-second deadline, including lock wait and all child deployments. An isolated first publication measured 6.33 seconds with a prepared development tree. A clean npm install measured 3.12 seconds. An unchanged host redeploy measured 1.06 seconds.
 
 ## Build checks
 
@@ -46,7 +50,7 @@ piRemoteConvergeSshRemotePort=8788
 
 Hostnames and credentials belong in machine-local configuration, not documentation or source. The SSH account must allow local forwarding only to the configured Pi Remote port.
 
-`deploy/remote` publishes the tested artifact without ending active work. Activate it with `apps/remote/restart-when-idle`. The root waiter keeps the caller's service and router identity, restarts as soon as no thread is working, and sends SIGHUP after twenty minutes if work never goes idle. SIGHUP returns unfinished work to the durable queue before systemd starts the new release. Use `--now` when activation cannot wait, and inspect `journalctl -u pi-remote-restart` for the result.
+`deploy/remote` publishes without ending active work. Run `apps/remote/activate` to request activation; it returns immediately and starts no detached worker. Pi Remote keeps every active turn on its current generation. Once all turns settle, it exits at that idle boundary and systemd starts the selected release. Phase transitions drive the handoff, so neither the caller nor a timer polls. Ordinary updates never abort or replay a thread.
 
 ## GMKtec
 
@@ -59,7 +63,7 @@ The NixOS repository owns the deployment command and service definitions. It pub
 
 Local Pi Remote reports environment ID `local`, requires unlock, and offers only Personal and Home after the Converge cutover.
 
-Never restart the orchestrator runner to update it. Drain it so existing agent processes finish on their current generation.
+Never restart the orchestrator runner to update it. When the selected Orchestrator commit changes, the host deployment bumps the runner generation. The supervisor immediately starts a worker from the new release while existing workers finish on their current generation.
 
 ## Converge
 
@@ -69,7 +73,7 @@ Converge OpenTofu owns one `pi_stack_commit`. Its startup configuration clones t
 deploy/host converge
 ```
 
-The command publishes runtime, Orchestrator, Pi Remote, tools, skills, and settings while holding one source lock. It derives the deployed skill and package lists from the checked manifests. Pi Remote remains last without an OpenTofu copy of that order.
+The command publishes runtime, Orchestrator, Pi Remote, tools, skills, and settings while holding one source lock. It derives the deployed skill and package lists from the checked manifests. If a live Orchestrator ledger exists and its release changed, the command bumps the runner generation instead of restarting workers. The whole command must finish within 50 seconds. A timeout is a deployment failure, never permission to raise the limit.
 
 Converge Pi Remote reports environment ID `converge`. It has one profile rooted at `/home/kenan/converge` and executes Pi directly on that machine.
 
