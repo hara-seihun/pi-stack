@@ -475,8 +475,39 @@ function systemdReferences(workspacePath, snapshot = systemdSnapshot()) {
   };
 }
 
-function safetySnapshot() {
-  return { processes: processSnapshot(), docker: dockerSnapshot(), systemd: systemdSnapshot() };
+function gitAlternateSnapshot(database) {
+  const references = [];
+  for (const record of listRecords(database)) {
+    if (!existsSync(record.path)) continue;
+    let objectDirectory;
+    if (record.checkoutType === "clone") objectDirectory = path.join(record.path, ".git", "objects");
+    else {
+      const common = command("git", ["-C", record.path, "rev-parse", "--git-common-dir"]);
+      if (common.status !== 0) continue;
+      objectDirectory = path.join(path.resolve(record.path, common.stdout), "objects");
+    }
+    const alternatesPath = path.join(objectDirectory, "info", "alternates");
+    if (!existsSync(alternatesPath)) continue;
+    let contents;
+    try { contents = readFileSync(alternatesPath, "utf8"); } catch { continue; }
+    for (const alternate of contents.split("\n").filter(Boolean)) {
+      references.push({
+        recordId: record.id,
+        workspacePath: record.path,
+        objectDirectory: path.resolve(objectDirectory, alternate),
+      });
+    }
+  }
+  return references;
+}
+
+function safetySnapshot(database) {
+  return {
+    processes: processSnapshot(),
+    docker: dockerSnapshot(),
+    systemd: systemdSnapshot(),
+    gitAlternates: gitAlternateSnapshot(database),
+  };
 }
 
 function directoryHasEntries(directory) {
@@ -509,7 +540,7 @@ function gitDisposition(record) {
   const refs = git(record.path, ["for-each-ref", "--format=%(refname)", "refs/heads"])
     .split("\n")
     .filter(Boolean);
-  const candidates = refs.length === 0 ? ["HEAD"] : refs;
+  const candidates = [...refs, "HEAD"];
   const local = [];
   for (const ref of candidates) {
     const count = Number(git(record.path, ["rev-list", "--count", ref, "--not", "--remotes"]));
@@ -674,6 +705,19 @@ function inspectRecord(record, options = {}) {
   const processes = processReferences(record.path, options.safety?.processes);
   const docker = dockerReferences(record.path, options.safety?.docker);
   const systemd = systemdReferences(record.path, options.safety?.systemd);
+  const objectDirectory = record.checkoutType === "clone" ? path.join(record.path, ".git", "objects") : null;
+  const gitDependents = objectDirectory === null ? [] : (options.safety?.gitAlternates ?? [])
+    .filter((reference) => reference.recordId !== record.id && reference.objectDirectory === objectDirectory);
+  if (gitDependents.length > 0) {
+    return {
+      classification: "referenced",
+      reason: `${gitDependents.length} registered Git checkout(s) still borrow this checkout's objects: ${gitDependents.map((reference) => reference.workspacePath).join(", ")}`,
+      processes,
+      containers: docker.references,
+      systemdUnits: systemd.references,
+      gitDependents,
+    };
+  }
   if (docker.error !== undefined) return { classification: "blocked", reason: `cannot prove container safety: ${docker.error}`, processes, containers: [], systemdUnits: [] };
   if (systemd.error !== undefined) return { classification: "blocked", reason: `cannot prove systemd safety: ${systemd.error}`, processes, containers: docker.references, systemdUnits: [] };
   if (processes.length > 0 || docker.references.length > 0 || systemd.references.length > 0) {
@@ -714,7 +758,7 @@ function reconcileRecord(database, record, options) {
     stopSystemdReferences(inspection.systemdUnits);
     removeDockerReferences(inspection.containers);
     killProcessReferences(inspection.processes);
-    safety = safetySnapshot();
+    safety = safetySnapshot(database);
     inspection = inspectRecord({ ...current, state: "reclaiming" }, { ignoreLease: true, safety });
   }
   if (inspection.classification === "referenced" || inspection.classification === "blocked") {
@@ -772,7 +816,7 @@ function groupReconciliation(database, records, options) {
     stopSystemdReferences(systemUnits);
     removeDockerReferences(inspections.flatMap((inspection) => inspection.containers));
     killProcessReferences(inspections.flatMap((inspection) => inspection.processes));
-    safety = safetySnapshot();
+    safety = safetySnapshot(database);
     inspections = records.map((record) => inspectRecord(record, { ignoreLease: true, safety }));
   }
 
@@ -931,7 +975,7 @@ function adoptCommand(database, args, statePath) {
     }));
   }
   const execute = bool(args, "execute");
-  const safety = execute ? safetySnapshot() : undefined;
+  const safety = execute ? safetySnapshot(database) : undefined;
   const results = execute
     ? reconcileRecords(database, records, { execute, reapExpired: bool(args, "reap-expired"), ignoreLease: false, statePath, safety })
     : records;
@@ -1041,7 +1085,7 @@ function releaseCommand(database, args, statePath) {
     reapExpired: bool(args, "reap-expired"),
     ignoreLease: true,
     statePath,
-    safety: safetySnapshot(),
+    safety: safetySnapshot(database),
   });
   print(result.length === 1 ? result[0] : result, bool(args, "json"));
 }
@@ -1056,7 +1100,7 @@ function reconcileCommand(database, args, statePath) {
     reapExpired: bool(args, "reap-expired"),
     ignoreLease: bool(args, "ignore-lease"),
     statePath,
-    safety: safetySnapshot(),
+    safety: safetySnapshot(database),
   };
   const results = reconcileRecords(
     database,

@@ -183,6 +183,28 @@ test("releases a writer after its branch is pushed", () => {
   }
 });
 
+test("keeps a unique detached HEAD even when local branches are remote", () => {
+  const f = fixture();
+  try {
+    const created = JSON.parse(run([
+      "create", "--root", f.workspaces, "--name", "detached-work", "--repo", f.remote,
+      "--mode", "review", "--min-free-gib", "0", "--json",
+    ], f.env));
+    git(created.path, "config", "user.name", "Test");
+    git(created.path, "config", "user.email", "test@example.invalid");
+    writeFileSync(path.join(created.path, "file.txt"), "detached work\n");
+    git(created.path, "add", "file.txt");
+    git(created.path, "commit", "-m", "detached work");
+
+    const held = JSON.parse(run(["release", "--id", created.id, "--json"], f.env));
+    assert.equal(held.inspection.classification, "repair-required");
+    assert.match(held.inspection.reason, /HEAD:1/);
+    assert.equal(existsSync(created.path), true);
+  } finally {
+    f.close();
+  }
+});
+
 test("keeps every repository in a group until all are recoverable", () => {
   const f = fixture();
   try {
@@ -212,6 +234,34 @@ test("keeps every repository in a group until all are recoverable", () => {
     assert.equal(released.every((result) => result.action === "released-group"), true);
     assert.equal(existsSync(first.path), false);
     assert.equal(existsSync(second.path), false);
+  } finally {
+    f.close();
+  }
+});
+
+test("keeps an object source until registered alternate borrowers are released", () => {
+  const f = fixture();
+  try {
+    mkdirSync(f.workspaces, { recursive: true });
+    const source = path.join(f.workspaces, "object-source");
+    const borrower = path.join(f.workspaces, "borrower");
+    execFileSync("git", ["clone", f.remote, source]);
+    execFileSync("git", ["clone", "--reference", source, f.remote, borrower]);
+    const records = JSON.parse(run([
+      "adopt", "--root", f.workspaces, "--lease-seconds", "0", "--json",
+    ], f.env));
+    const sourceRecord = records.find((record) => record.path === source);
+    const borrowerRecord = records.find((record) => record.path === borrower);
+
+    const held = JSON.parse(run(["release", "--id", sourceRecord.id, "--json"], f.env));
+    assert.equal(held.inspection.classification, "referenced");
+    assert.match(held.inspection.reason, /borrow this checkout's objects/);
+    assert.equal(existsSync(source), true);
+
+    const borrowerRelease = JSON.parse(run(["release", "--id", borrowerRecord.id, "--json"], f.env));
+    assert.equal(borrowerRelease.action, "released");
+    const sourceRelease = JSON.parse(run(["release", "--id", sourceRecord.id, "--json"], f.env));
+    assert.equal(sourceRelease.action, "released");
   } finally {
     f.close();
   }

@@ -20,7 +20,7 @@ agent-workspace release --path ~/worktrees/claim-123
 
 `create` uses a shared bare mirror but gives the agent an independent checkout. `--strategy worktree` uses a linked Git worktree instead. New allocations default to a 32-checkout limit, 30 GiB of free disk, and 10 percent free inodes. Callers may set stricter limits.
 
-A released or expired checkout is reclaimable only when it is clean and every local branch commit is already on a remote ref, or when it remains at the source commit recorded during creation. Dirty files, unclassified ignored output, and unpushed commits move it to `repair-required`. Declared generated trees such as root or package-level `node_modules`, `.nx`, and `.converge-cache` are removed once no runtime uses the checkout, even when unique source work still needs repair.
+A released or expired checkout is reclaimable only when it is clean and every local branch and detached `HEAD` commit is already on a remote ref, or when it remains at the source commit recorded during creation. Dirty files, unclassified ignored output, and unpushed commits move it to `repair-required`. A checkout also remains referenced while another registered checkout borrows its Git objects through an alternates file. Declared generated trees such as root or package-level `node_modules`, `.nx`, and `.converge-cache` are removed once no runtime uses the checkout, even when unique source work still needs repair.
 
 Give related repositories the same `--group` value when one agent task spans them. A heartbeat on any member renews the whole group. Release removes the group only when every member is recoverable, so a clean frontend checkout cannot disappear while its backend peer still contains unique work.
 
