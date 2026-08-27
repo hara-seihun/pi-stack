@@ -141,6 +141,8 @@ test("defaults to the repository's current HEAD", () => {
     ], f.env));
     assert.equal(created.sourceCommit, detachedHead);
     assert.equal(git(created.path, "rev-parse", "HEAD"), detachedHead);
+    assert.equal(git(created.path, "remote", "get-url", "origin"), f.remote);
+    assert.equal(git(created.path, "remote", "get-url", "--push", "origin"), f.remote);
   } finally {
     f.close();
   }

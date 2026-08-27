@@ -1021,14 +1021,24 @@ function mirrorFor(statePath, repository) {
   return path.join(path.dirname(statePath), "mirrors", `${digest}.git`);
 }
 
-function prepareMirror(mirror, repository) {
+function repositoryRemotes(repository) {
+  if (!existsSync(repository)) return { fetch: repository, push: repository };
+  const valid = command("git", ["-C", repository, "rev-parse", "--git-dir"]);
+  if (valid.status !== 0) return { fetch: repository, push: repository };
+  const fetch = command("git", ["-C", repository, "remote", "get-url", "origin"]);
+  if (fetch.status !== 0 || fetch.stdout.length === 0) return { fetch: repository, push: repository };
+  const push = command("git", ["-C", repository, "remote", "get-url", "--push", "origin"]);
+  return { fetch: fetch.stdout, push: push.status === 0 && push.stdout.length > 0 ? push.stdout : fetch.stdout };
+}
+
+function prepareMirror(mirror, repository, upstream) {
   mkdirSync(path.dirname(mirror), { recursive: true, mode: 0o700 });
-  if (!existsSync(mirror)) {
-    run("git", ["init", "--bare", mirror]);
-    run("git", ["--git-dir", mirror, "remote", "add", "origin", repository]);
-  } else {
-    run("git", ["--git-dir", mirror, "remote", "set-url", "origin", repository]);
+  if (!existsSync(mirror)) run("git", ["init", "--bare", mirror]);
+  for (const [name, url] of [["origin", upstream.fetch], ["workspace-source", repository]]) {
+    const exists = command("git", ["--git-dir", mirror, "remote", "get-url", name]).status === 0;
+    run("git", ["--git-dir", mirror, "remote", exists ? "set-url" : "add", name, url]);
   }
+  run("git", ["--git-dir", mirror, "remote", "set-url", "--push", "origin", upstream.push]);
   run("git", ["--git-dir", mirror, "config", "remote.origin.mirror", "false"]);
   run("git", [
     "--git-dir", mirror, "config", "--replace-all", "remote.origin.fetch",
@@ -1040,7 +1050,7 @@ function prepareMirror(mirror, repository) {
 function fetchSource(mirror, repository, ref) {
   const digest = createHash("sha256").update(`${repository}\0${ref}`).digest("hex");
   const sourceRef = `refs/pi-workspace/sources/${digest}`;
-  run("git", ["--git-dir", mirror, "fetch", "--no-tags", "origin", `+${ref}:${sourceRef}`], { timeout: 120_000 });
+  run("git", ["--git-dir", mirror, "fetch", "--no-tags", "workspace-source", `+${ref}:${sourceRef}`], { timeout: 120_000 });
   return run("git", ["--git-dir", mirror, "rev-parse", sourceRef]);
 }
 
@@ -1058,7 +1068,8 @@ function createCommand(database, args, statePath) {
   const strategy = one(args, "strategy", "clone");
   if (!["clone", "worktree"].includes(strategy)) fail("--strategy must be clone or worktree");
   const mirror = mirrorFor(statePath, repository);
-  prepareMirror(mirror, repository);
+  const upstream = repositoryRemotes(repository);
+  prepareMirror(mirror, repository, upstream);
   const sourceCommit = fetchSource(mirror, repository, ref);
   const branch = one(args, "branch", `agent/${name}`);
   try {
@@ -1069,6 +1080,8 @@ function createCommand(database, args, statePath) {
       run("git", worktreeArgs);
     } else {
       run("git", ["clone", "--reference-if-able", mirror, "--no-checkout", repository, destination], { timeout: 120_000 });
+      git(destination, ["remote", "set-url", "origin", upstream.fetch]);
+      git(destination, ["remote", "set-url", "--push", "origin", upstream.push]);
       if (mode === "review") git(destination, ["checkout", "--detach", sourceCommit]);
       else git(destination, ["checkout", "-b", branch, sourceCommit]);
     }
