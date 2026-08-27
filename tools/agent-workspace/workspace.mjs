@@ -504,8 +504,10 @@ function spawnRemoval(target) {
   const script = [
     "const fs = require('node:fs');",
     "const os = require('node:os');",
+    "const cp = require('node:child_process');",
     "try { os.setPriority(0, 19); } catch {}",
-    "fs.rmSync(process.argv[1], { recursive: true, force: true });",
+    "try { fs.rmSync(process.argv[1], { recursive: true, force: true }); }",
+    "catch { cp.spawnSync('sudo', ['-n', 'rm', '-rf', '--', process.argv[1]], { stdio: 'ignore' }); }",
   ].join("");
   const child = spawn(process.execPath, ["-e", script, target], {
     detached: true,
@@ -522,11 +524,24 @@ function drainGc(statePath) {
   }
 }
 
+function repairCacheOwnership(target) {
+  const uid = process.getuid?.();
+  const gid = process.getgid?.();
+  if (uid === undefined || gid === undefined) fail(`cannot repair cache ownership without a numeric user and group: ${target}`);
+  run("sudo", ["-n", "chown", "-R", `${uid}:${gid}`, "--", target], { timeout: 120_000 });
+}
+
 function moveToGc(target, destination) {
   try {
     renameSync(target, destination);
     spawnRemoval(destination);
   } catch (error) {
+    if (error?.code === "EACCES" || error?.code === "EPERM") {
+      repairCacheOwnership(target);
+      renameSync(target, destination);
+      spawnRemoval(destination);
+      return;
+    }
     if (error?.code !== "EXDEV") throw error;
     rmSync(target, { recursive: true, force: true });
   }
@@ -776,6 +791,18 @@ function groupReconciliation(database, records, options) {
   return records.map((record, index) => ({ record, inspection: inspections[index], action: "released-group" }));
 }
 
+function blockedReconciliation(database, records, error, execute) {
+  const detail = error instanceof Error ? error.message : String(error);
+  return records.map((record) => {
+    if (execute) updateState(database, record, "blocked", detail);
+    return {
+      record,
+      inspection: { classification: "blocked", reason: detail, processes: [], containers: [], systemdUnits: [] },
+      action: "none",
+    };
+  });
+}
+
 function reconcileRecords(database, selected, options) {
   const results = [];
   const visited = new Set();
@@ -783,8 +810,12 @@ function reconcileRecords(database, selected, options) {
     if (visited.has(selectedRecord.id)) continue;
     const records = recordsInGroup(database, selectedRecord);
     records.forEach((record) => visited.add(record.id));
-    if (records.length > 1) results.push(...groupReconciliation(database, records, options));
-    else if (records.length === 1) results.push(reconcileRecord(database, records[0], options));
+    try {
+      if (records.length > 1) results.push(...groupReconciliation(database, records, options));
+      else if (records.length === 1) results.push(reconcileRecord(database, records[0], options));
+    } catch (error) {
+      results.push(...blockedReconciliation(database, records, error, options.execute));
+    }
   }
   return results;
 }
