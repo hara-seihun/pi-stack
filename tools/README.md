@@ -9,7 +9,6 @@ These commands depend on Pi sessions, Pi models, or the orchestrator ledger.
 | [`mcp`](mcp/README.md) | `mcp` | Discover and call configured MCP servers. |
 | [`mcp-script`](mcp-script/README.md) | `mcp-script` | Run JavaScript over one MCP client. |
 | [`read-condensed-session`](read-condensed-session/README.md) | `read-condensed-session` | Render a complete Pi session as a condensed transcript. |
-| [`thread-lab`](thread-lab/README.md) | `tlab` | Run controlled, persistent prompt experiments. |
 
 [`../config/tools.json`](../config/tools.json) defines host availability, command names, and fleet installation. `../deploy/tools` tests the selected role, publishes an immutable copy under `/srv/pi/tools`, and links commands into the interactive and fleet users' bin directories.
 

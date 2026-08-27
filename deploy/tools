@@ -58,20 +58,37 @@ for tool in "${selected[@]}"; do
 done
 
 if [[ $skip_links != 1 ]]; then
+  reconcile_links() {
+    local home=$1
+    local fleet=$2
+    local bin="$home/.local/bin"
+    declare -A expected=()
+    while IFS=$'\t' read -r tool name entry; do
+      expected["$name"]="$dest/$tool/$entry"
+    done < <(jq -r --arg role "$role" --argjson fleet "$fleet" \
+      '.tools[] | select(.hosts | index($role)) | select(($fleet | not) or .fleet) | .id as $tool | .commands[] | [$tool,.name,.entry] | @tsv' \
+      config/tools.json)
+
+    while IFS= read -r -d '' link; do
+      target=$(readlink "$link")
+      name=$(basename "$link")
+      if [[ $target == "$dest/"* && ${expected[$name]:-} != "$target" ]]; then
+        as_root rm -- "$link"
+      fi
+    done < <(find "$bin" -maxdepth 1 -type l -print0)
+
+    for name in "${!expected[@]}"; do
+      as_root ln -sfn "${expected[$name]}" "$bin/$name"
+      as_root chown -h "$(stat -c %U "$home"):$(stat -c %G "$home")" "$bin/$name"
+    done
+  }
+
   as_root install -d -m 755 -o "$(stat -c %U "$user_home")" -g "$(stat -c %G "$user_home")" "$user_home/.local/bin"
-  for tool in "${selected[@]}"; do
-    while IFS=$'\t' read -r name entry; do
-      as_root ln -sfn "$dest/$tool/$entry" "$user_home/.local/bin/$name"
-      as_root chown -h "$(stat -c %U "$user_home"):$(stat -c %G "$user_home")" "$user_home/.local/bin/$name"
-    done < <(jq -r --arg tool "$tool" '.tools[] | select(.id == $tool) | .commands[] | [.name,.entry] | @tsv' config/tools.json)
-  done
+  reconcile_links "$user_home" false
 
   if [[ -d $fleet_home ]]; then
     as_root install -d -m 755 -o "$(stat -c %U "$fleet_home")" -g "$(stat -c %G "$fleet_home")" "$fleet_home/.local/bin"
-    while IFS=$'\t' read -r tool name entry; do
-      as_root ln -sfn "$dest/$tool/$entry" "$fleet_home/.local/bin/$name"
-      as_root chown -h "$(stat -c %U "$fleet_home"):$(stat -c %G "$fleet_home")" "$fleet_home/.local/bin/$name"
-    done < <(jq -r --arg role "$role" '.tools[] | select(.fleet and (.hosts | index($role))) | .id as $tool | .commands[] | [$tool,.name,.entry] | @tsv' config/tools.json)
+    reconcile_links "$fleet_home" true
   fi
 fi
 

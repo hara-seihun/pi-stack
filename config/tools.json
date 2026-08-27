@@ -27,11 +27,6 @@
       "hosts": ["local", "converge"],
       "fleet": true,
       "commands": [{ "name": "read-condensed-session", "entry": "main" }]
-    },
-    {
-      "id": "thread-lab",
-      "hosts": ["local", "converge"],
-      "commands": [{ "name": "tlab", "entry": "main" }]
     }
   ]
 }
