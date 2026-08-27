@@ -7,6 +7,7 @@ import { execFile } from "node:child_process";
 import { homedir } from "node:os";
 import { join } from "node:path";
 import { Type } from "typebox";
+import type { TeamAuditVerdict } from "../tasks/types.js";
 import type { HostEvents, HostManager, HostRunResult, LaunchSpec, TeamMember } from "./types.js";
 import {
   continuationFor,
@@ -247,7 +248,10 @@ export class PiHost implements HostManager {
         "cumulative summary every time you land something, then keep working; each " +
         "call replaces the earlier report and the newest is the record. Set " +
         "complete=true only when the task's completion condition is satisfied. Set " +
-        "productive=false only when this launch processed no work unit at all.",
+        "productive=false only when this launch processed no work unit at all." +
+        (spec.team === undefined
+          ? ""
+          : " In a team this is only a session report; it cannot place the programme completion marker."),
       parameters: Type.Object({
         complete: Type.Boolean(),
         productive: Type.Optional(
@@ -264,6 +268,33 @@ export class PiHost implements HostManager {
       },
     };
     const customTools: any[] = [taskComplete];
+    if (spec.team?.role === "worker") {
+      customTools.push({
+        name: "team_audit",
+        label: "Report completion audit",
+        description:
+          "Record your independent whole-programme verdict in the audit opened by the supervisor. Use pass only after trying to falsify the root theorem and replaying its load-bearing evidence; use objection for any unresolved contradiction, hidden conjecture, or certificate failure.",
+        parameters: Type.Object({
+          audit: Type.Integer({ minimum: 1 }),
+          verdict: Type.Union([Type.Literal("pass"), Type.Literal("objection")]),
+          summary: Type.String({ minLength: 1 }),
+        }),
+        execute: async (
+          _id: string,
+          params: { audit: number; verdict: TeamAuditVerdict; summary: string },
+        ) => ({
+          content: [{
+            type: "text" as const,
+            text: JSON.stringify(
+              this.events.teamAudit(spec.runId, params.audit, params.verdict, params.summary),
+              null,
+              2,
+            ),
+          }],
+          details: undefined,
+        }),
+      });
+    }
     if (spec.team?.role === "supervisor") {
       customTools.push(
         {
@@ -295,6 +326,39 @@ export class PiHost implements HostManager {
             const condensed = this.options.readCondensed ?? readCondensedSession;
             const text = await condensed(member.sessionFile);
             return { content: [{ type: "text" as const, text }], details: { runId: member.runId } };
+          },
+        },
+        {
+          name: "team_completion",
+          label: "Team completion",
+          description:
+            "Read or change the durable whole-programme completion marker. begin_audit sends the same independent falsification request to every worker. Never use it to assign leaves. complete is accepted only after every worker slot has passed the current audit; withdraw returns the room to ordinary work when an objection lands.",
+          parameters: Type.Object({
+            action: Type.Union([
+              Type.Literal("status"),
+              Type.Literal("begin_audit"),
+              Type.Literal("withdraw"),
+              Type.Literal("complete"),
+            ]),
+            summary: Type.Optional(Type.String({ minLength: 1 })),
+          }),
+          execute: async (
+            _id: string,
+            params: {
+              action: "status" | "begin_audit" | "withdraw" | "complete";
+              summary?: string;
+            },
+          ) => {
+            if (params.action !== "status" && params.summary === undefined) {
+              throw new Error(`${params.action} needs a summary`);
+            }
+            const status = params.action === "status"
+              ? this.events.teamCompletion(spec.taskId)
+              : this.events.teamCompletionAction(spec.runId, params.action, params.summary!);
+            return {
+              content: [{ type: "text" as const, text: JSON.stringify(status, null, 2) }],
+              details: undefined,
+            };
           },
         },
         {

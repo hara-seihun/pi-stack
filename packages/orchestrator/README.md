@@ -225,16 +225,27 @@ Three launch-side fields describe scheduling:
   an unseen teammate version from being silently overwritten. Parallel
   derivations remain welcome, and the filesystem is the coordination record.
 
-  The supervisor has `team_members`, `team_context`, and `team_intervene`.
-  `team_context` runs `/srv/pi/tools/read-condensed-session/main` against the
-  exact Pi session file recorded for a worker, so the supervisor reads the
-  worker's real condensed reasoning and recent activity rather than a status
-  report. `team_intervene` queues a ledger message for that worker's runner.
-  The host aborts the in-flight turn and sends the correction as the next
-  ordinary user message in the same session, preserving all prior context.
-  The supervisor system prompt forbids task allocation. It cycles through the
-  room, observes more than it interrupts, and speaks as a trusted colleague
-  when a programme-level correction is worth breaking the current thought.
+  The supervisor has `team_members`, `team_context`, `team_intervene`, and
+  `team_completion`. `team_context` runs
+  `/srv/pi/tools/read-condensed-session/main` against the exact Pi session file
+  recorded for a worker, so the supervisor reads the worker's real condensed
+  reasoning and recent activity rather than a status report. `team_intervene`
+  queues a ledger message for that worker's runner. The host aborts the
+  in-flight turn and sends the correction as the next ordinary user message in
+  the same session, preserving all prior context. The supervisor system prompt
+  forbids task allocation. It cycles through the room, observes more than it
+  interrupts, and speaks as a trusted colleague when a programme-level
+  correction is worth breaking the current thought.
+
+  Programme completion is deliberately not a `task_complete` flag from any
+  one session. The supervisor opens a durable audit with `team_completion`;
+  every worker receives the same whole-programme falsification request and
+  reports `pass` or `objection` through `team_audit`. An audit generation can
+  close only after every worker slot has an independent current pass. The
+  supervisor withdraws it when an objection survives, or places the durable
+  completion marker after unanimity. That marker stops replacement launches
+  and lets every live member settle its current turn. `task list` and `status`
+  expose the team's `working`, `audit`, or `complete` phase.
 - `demand`: a constant or a cheap read-only probe command whose last stdout
   line is a work-unit count. `0` means no work; agents are never launched to
   discover idleness. Results are cached with a TTL and invalidated by task

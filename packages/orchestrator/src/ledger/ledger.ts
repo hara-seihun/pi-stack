@@ -18,7 +18,15 @@ const SqliteDatabase: new (path: string) => DatabaseSync =
     : (require("bun:sqlite") as { Database: new (path: string) => DatabaseSync }).Database;
 import { AccountCalibrator } from "../calibrator/calibrator.js";
 import { gateRefs, parseGate } from "../tasks/gate.js";
-import { TIERS, type DemandState, type TaskSpec, type Tier, type TierShare } from "../tasks/types.js";
+import {
+  TIERS,
+  type DemandState,
+  type TaskSpec,
+  type TeamAuditVerdict,
+  type TeamCompletionStatus,
+  type Tier,
+  type TierShare,
+} from "../tasks/types.js";
 import type {
   CalibratorConfig,
   MeterId,
@@ -410,6 +418,32 @@ ALTER TABLE run_message ADD COLUMN interrupt INTEGER NOT NULL DEFAULT 0 CHECK (i
 CREATE INDEX run_team_roster ON run (task_id, team_role, team_slot, state);
 `;
 
+/** Whole-programme completion is a durable team fact, not one session's
+ * `task_complete` report. The supervisor opens an audit; each worker slot
+ * records an independent verdict for that audit generation; only unanimous
+ * current passes permit the supervisor to place the final marker. */
+const TEAM_COMPLETION_SCHEMA = `
+CREATE TABLE team_completion (
+  task_id TEXT PRIMARY KEY REFERENCES task(id) ON DELETE CASCADE,
+  phase TEXT NOT NULL CHECK (phase IN ('working', 'audit', 'complete')),
+  audit INTEGER NOT NULL DEFAULT 0,
+  summary TEXT,
+  updated_at INTEGER NOT NULL,
+  supervisor_run_id TEXT
+) STRICT;
+CREATE TABLE team_audit (
+  task_id TEXT NOT NULL REFERENCES task(id) ON DELETE CASCADE,
+  audit INTEGER NOT NULL,
+  worker_slot INTEGER NOT NULL,
+  worker_run_id TEXT NOT NULL,
+  verdict TEXT NOT NULL CHECK (verdict IN ('pass', 'objection')),
+  summary TEXT NOT NULL,
+  at INTEGER NOT NULL,
+  PRIMARY KEY (task_id, audit, worker_slot)
+) STRICT;
+CREATE INDEX team_audit_task_generation ON team_audit (task_id, audit);
+`;
+
 const MIGRATIONS: readonly string[] = [
   SCHEMA,
   TASK_SCHEMA,
@@ -433,6 +467,7 @@ const MIGRATIONS: readonly string[] = [
   SINGLE_RUN_SESSION_SCHEMA,
   PLAN_CAPACITY_SCHEMA,
   TEAM_SCHEMA,
+  TEAM_COMPLETION_SCHEMA,
 ];
 
 export interface AccountRow {
@@ -558,6 +593,18 @@ export class Ledger {
 
   close(): void {
     this.db.close();
+  }
+
+  private immediate<T>(action: () => T): T {
+    this.db.exec("BEGIN IMMEDIATE");
+    try {
+      const result = action();
+      this.db.exec("COMMIT");
+      return result;
+    } catch (thrown) {
+      this.db.exec("ROLLBACK");
+      throw thrown;
+    }
   }
 
   upsertAccount(a: {
@@ -1004,6 +1051,160 @@ export class Ledger {
       selfPaced: r.self_paced !== 0,
       team: r.team === null ? undefined : JSON.parse(r.team),
     }));
+  }
+
+  teamCompletion(taskId: string): TeamCompletionStatus {
+    const row = this.db
+      .prepare(
+        `SELECT phase, audit, summary, updated_at, supervisor_run_id
+         FROM team_completion WHERE task_id = ?`,
+      )
+      .get(taskId) as
+      | {
+          phase: "working" | "audit" | "complete";
+          audit: number;
+          summary: string | null;
+          updated_at: number;
+          supervisor_run_id: string | null;
+        }
+      | undefined;
+    if (row === undefined) return { taskId, phase: "working", audit: 0, reports: [] };
+    const reports = this.db
+      .prepare(
+        `SELECT worker_slot, worker_run_id, verdict, summary, at
+         FROM team_audit WHERE task_id = ? AND audit = ? ORDER BY worker_slot`,
+      )
+      .all(taskId, row.audit) as {
+      worker_slot: number;
+      worker_run_id: string;
+      verdict: TeamAuditVerdict;
+      summary: string;
+      at: number;
+    }[];
+    return {
+      taskId,
+      phase: row.phase,
+      audit: row.audit,
+      summary: row.summary ?? undefined,
+      updatedAt: row.updated_at,
+      supervisorRunId: row.supervisor_run_id ?? undefined,
+      reports: reports.map((report) => ({
+        workerSlot: report.worker_slot,
+        workerRunId: report.worker_run_id,
+        verdict: report.verdict,
+        summary: report.summary,
+        at: report.at,
+      })),
+    };
+  }
+
+  beginTeamAudit(taskId: string, supervisorRunId: string, summary: string, at = Date.now()): TeamCompletionStatus {
+    this.immediate(() => {
+      const current = this.teamCompletion(taskId);
+      if (current.phase === "complete") throw new Error(`team ${taskId} is already complete`);
+      if (current.phase === "audit") throw new Error(`team ${taskId} already has audit ${current.audit} open`);
+      const audit = current.audit + 1;
+      this.db
+        .prepare(
+          `INSERT INTO team_completion (task_id, phase, audit, summary, updated_at, supervisor_run_id)
+           VALUES (?, 'audit', ?, ?, ?, ?)
+           ON CONFLICT (task_id) DO UPDATE SET
+             phase = 'audit', audit = excluded.audit, summary = excluded.summary,
+             updated_at = excluded.updated_at, supervisor_run_id = excluded.supervisor_run_id`,
+        )
+        .run(taskId, audit, summary, at, supervisorRunId);
+    });
+    return this.teamCompletion(taskId);
+  }
+
+  reportTeamAudit(
+    taskId: string,
+    audit: number,
+    workerSlot: number,
+    workerRunId: string,
+    verdict: TeamAuditVerdict,
+    summary: string,
+    at = Date.now(),
+  ): TeamCompletionStatus {
+    this.immediate(() => {
+      const current = this.teamCompletion(taskId);
+      if (current.phase !== "audit" || current.audit !== audit) {
+        throw new Error(`team ${taskId} has no open audit ${audit}`);
+      }
+      this.db
+        .prepare(
+          `INSERT INTO team_audit
+             (task_id, audit, worker_slot, worker_run_id, verdict, summary, at)
+           VALUES (?, ?, ?, ?, ?, ?, ?)
+           ON CONFLICT (task_id, audit, worker_slot) DO UPDATE SET
+             worker_run_id = excluded.worker_run_id, verdict = excluded.verdict,
+             summary = excluded.summary, at = excluded.at`,
+        )
+        .run(taskId, audit, workerSlot, workerRunId, verdict, summary, at);
+    });
+    return this.teamCompletion(taskId);
+  }
+
+  withdrawTeamAudit(taskId: string, supervisorRunId: string, summary: string, at = Date.now()): TeamCompletionStatus {
+    this.immediate(() => {
+      const current = this.teamCompletion(taskId);
+      if (current.phase !== "audit") throw new Error(`team ${taskId} has no open audit`);
+      this.db
+        .prepare(
+          `UPDATE team_completion
+           SET phase = 'working', summary = ?, updated_at = ?, supervisor_run_id = ?
+           WHERE task_id = ?`,
+        )
+        .run(summary, at, supervisorRunId, taskId);
+    });
+    return this.teamCompletion(taskId);
+  }
+
+  markTeamComplete(
+    taskId: string,
+    supervisorRunId: string,
+    workers: number,
+    summary: string,
+    at = Date.now(),
+  ): TeamCompletionStatus {
+    this.immediate(() => {
+      const current = this.teamCompletion(taskId);
+      if (current.phase !== "audit") throw new Error(`team ${taskId} has no open audit`);
+      const active = new Map(
+        (
+          this.db
+            .prepare(
+              `SELECT team_slot, id FROM run
+               WHERE task_id = ? AND team_role = 'worker' AND state IN ('pending', 'running')`,
+            )
+            .all(taskId) as { team_slot: number; id: string }[]
+        ).map((run) => [run.team_slot, run.id]),
+      );
+      const passing = new Set(
+        current.reports
+          .filter(
+            (report) =>
+              report.verdict === "pass" && active.get(report.workerSlot) === report.workerRunId,
+          )
+          .map((report) => report.workerSlot),
+      );
+      const missing = Array.from({ length: workers }, (_, index) => index + 1).filter(
+        (slot) => !passing.has(slot),
+      );
+      if (missing.length > 0) {
+        throw new Error(
+          `audit ${current.audit} still needs passing verdicts from worker slot(s) ${missing.join(", ")}`,
+        );
+      }
+      this.db
+        .prepare(
+          `UPDATE team_completion
+           SET phase = 'complete', summary = ?, updated_at = ?, supervisor_run_id = ?
+           WHERE task_id = ? AND phase = 'audit' AND audit = ?`,
+        )
+        .run(summary, at, supervisorRunId, taskId, current.audit);
+    });
+    return this.teamCompletion(taskId);
   }
 
   /** True when this one lane is held, whatever the machine-wide control says. */

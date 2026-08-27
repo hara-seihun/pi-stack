@@ -1,3 +1,8 @@
+import type {
+  TeamAuditVerdict,
+  TeamCompletionStatus,
+} from "../tasks/types.js";
+
 /**
  * How many check-ins the host may send before it stops re-prompting a shift.
  *
@@ -115,6 +120,22 @@ export interface HostEvents {
    * attributable to the lane that asked for it. */
   sessionStarted(runId: string, sessionId: string, sessionFile?: string): void;
   teamMembers(taskId: string): readonly TeamMember[];
+  teamCompletion(taskId: string): TeamCompletionStatus;
+  /** Open, withdraw, or close the team's whole-programme audit. These are
+   * supervisor-only transitions; completion requires one passing verdict
+   * from every worker slot in the current audit generation. */
+  teamCompletionAction(
+    supervisorRunId: string,
+    action: "begin_audit" | "withdraw" | "complete",
+    summary: string,
+  ): TeamCompletionStatus;
+  /** Record this worker slot's independent verdict in the open audit. */
+  teamAudit(
+    workerRunId: string,
+    audit: number,
+    verdict: TeamAuditVerdict,
+    summary: string,
+  ): TeamCompletionStatus;
   /** Queue a supervisor correction. The target runner performs the abort and
    * subsequent user-message delivery, so this also works across generations. */
   teamIntervene(supervisorRunId: string, workerRunId: string, text: string): void;

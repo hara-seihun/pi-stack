@@ -18,6 +18,9 @@ function harness(runId: string) {
   const host = new PiHost(
     { runFinished: () => {}, heartbeat: () => {},
       progress: () => {}, sessionStarted: () => {}, teamMembers: () => [],
+      teamCompletion: (taskId) => ({ taskId, phase: "working", audit: 0, reports: [] }),
+      teamCompletionAction: () => ({ taskId: "team", phase: "audit", audit: 1, reports: [] }),
+      teamAudit: () => ({ taskId: "team", phase: "audit", audit: 1, reports: [] }),
       teamIntervene: () => {}, laneDrained: () => false,
       claimCheckIn: () => true, turnFailed: () => undefined },
     { resolveModel: () => undefined },

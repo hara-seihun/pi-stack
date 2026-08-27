@@ -221,6 +221,7 @@ export function teamSystemPrompt(team: TeamLaunch, workspace: string): string {
       "Work directly on the programme and leave proofs, counterexamples, certificates, code, and honest obstructions in the shared area. Parallel derivations are welcome. Nobody owns a route merely by trying it first.",
       "The host reports files your teammates changed after your last edit and refuses edit/write until you have read those current versions. Treat that as collaboration context, not an instruction to abandon your own line.",
       "A supervisor reads compacted views of all workers. It may occasionally interrupt your current turn with a user message when a clear programme-level correction is worth the interruption.",
+      "If the supervisor opens a whole-programme completion audit, independently try to falsify the root result and call team_audit with pass or objection. This is a shared audit, never an assigned leaf. A task_complete report describes only your session and cannot close the programme.",
     ].join("\n\n");
   }
   return [
@@ -239,7 +240,8 @@ export function teamSystemPrompt(team: TeamLaunch, workspace: string): string {
           ].join("\n"),
         ]),
     "team_intervene aborts the worker's in-flight turn first, then delivers your text as the next ordinary user message in that same session. Write with warmth and intellectual respect. Name what you saw, why it matters, and the larger opportunity you think the worker may be missing.",
-    "Keep the programme map current in the shared workspace. Collapse obligations when stronger theory lands, preserve useful failures, request independent falsification for load-bearing claims, and do not declare completion without replayable certificates and a final contradiction audit.",
+    "Keep the programme map current in the shared workspace. Collapse obligations when stronger theory lands, preserve useful failures, and request independent falsification for load-bearing claims.",
+    "You alone control the durable programme marker through team_completion. When closure is genuinely plausible, begin one whole-programme audit: every worker receives the same independent falsification request, not an assigned part. Read every verdict and its evidence. Withdraw on any real objection. The host accepts complete only after every worker slot passes the current audit, and then stops replacement launches. task_complete is only a running report for this supervisor session; it never closes the programme.",
   ].join("\n\n");
 }
 

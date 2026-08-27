@@ -98,6 +98,14 @@ async function status(ledger: Ledger): Promise<void> {
       `share=${sharePercent(t, evaluation.tasks)}`,
     ];
     if (t.error !== undefined) parts.push(`error=${t.error}`);
+    const defined = ledger.tasks().find((task) => task.id === t.taskId);
+    if (defined?.team !== undefined) {
+      const completion = ledger.teamCompletion(t.taskId);
+      parts.push(
+        `completion=${completion.phase}${completion.audit > 0 ? `:${completion.audit}` : ""}` +
+          (completion.phase === "audit" ? `(${completion.reports.length}/${defined.team.workers})` : ""),
+      );
+    }
     console.log(`task ${t.taskId}: ${parts.join(" ")}`);
   }
   for (const r of ledger.runs({ state: "pending" })) {
@@ -119,6 +127,15 @@ async function status(ledger: Ledger): Promise<void> {
         ? "no tasks"
         : `${defined} task(s) defined, not evaluated while launches are paused (pi-orchestrator task list)`,
     );
+    for (const task of ledger.tasks()) {
+      if (task.team === undefined) continue;
+      const completion = ledger.teamCompletion(task.id);
+      console.log(
+        `team ${task.id}: completion=${completion.phase}` +
+          (completion.audit > 0 ? ` audit=${completion.audit}` : "") +
+          (completion.phase === "audit" ? ` verdicts=${completion.reports.length}/${task.team.workers}` : ""),
+      );
+    }
   }
 }
 
@@ -393,6 +410,11 @@ async function runner(ledger: Ledger, args: string[]): Promise<void> {
       progress: (id, at) => live.progress(id, at),
       sessionStarted: (id, sessionId, sessionFile) => live.sessionStarted(id, sessionId, sessionFile),
       teamMembers: (taskId) => live.teamMembers(taskId),
+      teamCompletion: (taskId) => live.teamCompletion(taskId),
+      teamCompletionAction: (supervisorRunId, action, summary) =>
+        live.teamCompletionAction(supervisorRunId, action, summary),
+      teamAudit: (workerRunId, audit, verdict, summary) =>
+        live.teamAudit(workerRunId, audit, verdict, summary),
       teamIntervene: (supervisorRunId, workerRunId, text) =>
         live.teamIntervene(supervisorRunId, workerRunId, text),
       laneDrained: (taskId) => live.laneDrained(taskId),
@@ -931,7 +953,9 @@ async function main(): Promise<void> {
                 (t.opening !== undefined ? ` opening(${t.opening.length})` : "") +
                 (t.openingProbe !== undefined ? " opening-probe" : "") +
                 (t.selfPaced ? " self-paced" : "") +
-                (t.team === undefined ? "" : ` team=${t.team.workers}+supervisor`) +
+                (t.team === undefined
+                  ? ""
+                  : ` team=${t.team.workers}+supervisor completion=${ledger.teamCompletion(t.id).phase}`) +
                 (ledger.taskPaused(t.id) ? " HELD" : "") +
                 (t.prompt === undefined ? " (signal only)" : ""),
             );

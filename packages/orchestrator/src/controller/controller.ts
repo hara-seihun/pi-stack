@@ -114,6 +114,10 @@ export class Controller {
     >();
     for (const task of tasks.values()) {
       if (task.team === undefined) continue;
+      if (this.ledger.teamCompletion(task.id).phase === "complete") {
+        missingTeamRoles.set(task.id, []);
+        continue;
+      }
       const held = new Set(
         activeRuns
           .filter((run) => run.taskId === task.id && run.teamRole !== undefined)

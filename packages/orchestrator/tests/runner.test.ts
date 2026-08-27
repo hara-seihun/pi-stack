@@ -335,6 +335,69 @@ describe("operator messages reach a live session", () => {
     expect(runner.teamMembers("team").some((member) => member.runId === workerId)).toBe(false);
   });
 
+  it("lets only the supervisor close a unanimous whole-programme audit", () => {
+    const ledger = Ledger.open(":memory:");
+    ledger.upsertAccount({ id: "anth-1", provider: "anthropic" });
+    ledger.upsertTask({
+      id: "team",
+      demandConstant: 1,
+      tiers: mix("standard"),
+      prompt: "Whole programme.",
+      cwd: "/work",
+      team: { workers: 2, supervisorPrompt: "Observe.", watchFor: [] },
+    });
+    const create = (teamRole: "worker" | "supervisor", teamSlot: number) =>
+      ledger.createRun({
+        taskId: "team",
+        tier: "standard",
+        accountId: "anth-1",
+        model: "claude-opus",
+        provider: "anthropic",
+        teamRole,
+        teamSlot,
+        at: teamSlot,
+      });
+    const supervisorId = create("supervisor", 0);
+    const worker1 = create("worker", 1);
+    const worker2 = create("worker", 2);
+    const engine = new FakeEngine();
+    const runner = new Runner(ledger, engine, { runnerId: "r1", maxSessions: 5 });
+    runner.tick(100);
+
+    const opened = runner.teamCompletionAction(
+      supervisorId,
+      "begin_audit",
+      "The root theorem and replay certificates now appear closed.",
+    );
+    expect(opened).toMatchObject({ phase: "audit", audit: 1 });
+    expect(() =>
+      runner.teamCompletionAction(supervisorId, "complete", "Close the programme."),
+    ).toThrow(/worker slot\(s\) 1, 2/);
+    runner.tick(200);
+    expect(engine.interventions).toHaveLength(2);
+    expect(new Set(engine.interventions.map((item) => item.text)).size).toBe(1);
+    expect(engine.interventions[0]?.text).toContain("same whole-programme request");
+
+    runner.teamAudit(worker1, 1, "pass", "Replayed the root certificate and found no contradiction.");
+    runner.teamAudit(worker2, 1, "objection", "One implication still assumes the conclusion.");
+    expect(() =>
+      runner.teamCompletionAction(supervisorId, "complete", "Close the programme."),
+    ).toThrow(/worker slot\(s\) 2/);
+    runner.teamAudit(worker2, 1, "pass", "The implication was repaired and now checks independently.");
+    const complete = runner.teamCompletionAction(
+      supervisorId,
+      "complete",
+      "All two independent audits pass against the root theorem.",
+    );
+    expect(complete.phase).toBe("complete");
+    expect(complete.reports.map((report) => report.verdict)).toEqual(["pass", "pass"]);
+    expect(runner.laneDrained("team")).toBe(true);
+    runner.tick(300);
+    expect(engine.interventions).toHaveLength(4);
+    expect(engine.interventions.slice(2).every((item) => item.text.includes("durable completion marker")))
+      .toBe(true);
+  });
+
   it("an empty message is a mistake, not a turn", () => {
     const ledger = Ledger.open(":memory:");
     const [runId] = seed(ledger, 1);

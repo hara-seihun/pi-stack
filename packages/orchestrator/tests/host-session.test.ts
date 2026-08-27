@@ -125,6 +125,9 @@ function harness(
       progress: (_id, at) => progress.push(at),
       sessionStarted: (runId, sessionId) => links.push({ runId, sessionId }),
       teamMembers: () => [],
+      teamCompletion: (taskId) => ({ taskId, phase: "working", audit: 0, reports: [] }),
+      teamCompletionAction: () => ({ taskId: "team", phase: "audit", audit: 1, reports: [] }),
+      teamAudit: () => ({ taskId: "team", phase: "audit", audit: 1, reports: [] }),
       teamIntervene: () => {},
       laneDrained: options.laneDrained ?? (() => false),
       claimCheckIn: () => (spent++ < MAX_CHECK_INS ? true : false),
@@ -478,6 +481,30 @@ describe("host shift loop", () => {
     await supervisor.finished;
     expect(supervisor.prompts[1]).toContain("Cycle through every live worker");
     expect(supervisor.prompts[1]).toContain("don't turn the programme into assignments");
+  });
+
+  it("gives workers audit verdicts and only supervisors the durable completion marker", async () => {
+    const worker = harness([{ reports: 1 }], {
+      selfPaced: true,
+      team: { role: "worker", slot: 1, workers: 4, watchFor: [] },
+    });
+    worker.host.launch(worker.spec);
+    await worker.finished;
+    const workerTools = worker.sessionConfigs[0]!.customTools as { name: string; description: string }[];
+    expect(workerTools.map((tool) => tool.name)).toContain("team_audit");
+    expect(workerTools.map((tool) => tool.name)).not.toContain("team_completion");
+    expect(workerTools.find((tool) => tool.name === "task_complete")?.description)
+      .toContain("cannot place the programme completion marker");
+
+    const supervisor = harness([{ reports: 1 }], {
+      selfPaced: true,
+      team: { role: "supervisor", slot: 0, workers: 4, watchFor: [] },
+    });
+    supervisor.host.launch(supervisor.spec);
+    await supervisor.finished;
+    const supervisorTools = supervisor.sessionConfigs[0]!.customTools as { name: string }[];
+    expect(supervisorTools.map((tool) => tool.name)).toContain("team_completion");
+    expect(supervisorTools.map((tool) => tool.name)).not.toContain("team_audit");
   });
 
   it("a supervisor correction aborts the current turn and becomes the next user turn", async () => {
