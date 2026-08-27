@@ -63,6 +63,8 @@ describe("team workspace awareness", () => {
     const root = mkdtempSync(join(tmpdir(), "pi-team-"));
     const path = join(root, "shared.md");
     writeFileSync(path, "current\n");
+    const beforeSession = new Date(Date.now() - 5_000);
+    utimesSync(path, beforeSession, beforeSession);
     const first = extension(root);
     const second = extension(root);
 
@@ -83,6 +85,8 @@ describe("team workspace awareness", () => {
     const root = mkdtempSync(join(tmpdir(), "pi-team-"));
     const own = join(root, "notes.md");
     writeFileSync(own, "old notes\n");
+    const beforeSession = new Date(Date.now() - 5_000);
+    utimesSync(own, beforeSession, beforeSession);
     const live = extension(root);
 
     expect(await live.call("tool_call", { toolName: "edit", input: { path: own } }))

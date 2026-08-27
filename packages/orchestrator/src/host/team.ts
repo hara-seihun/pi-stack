@@ -15,6 +15,7 @@ const MAX_VISIBLE_CHANGES = 120;
 const FIND_TIMEOUT_MS = 5_000;
 const CONDENSE_TIMEOUT_MS = 60_000;
 const WRITE_LOCK_MAX_AGE_MS = 60_000;
+const MTIME_ROUNDING_MS = 0.001;
 const WRITE_LOCK_ROOT = join(tmpdir(), "pi-orchestrator-team-writes");
 
 function inside(root: string, path: string): boolean {
@@ -98,7 +99,9 @@ export function teamWorkspaceExtension(root: string, role: TeamLaunch["role"]): 
 
   const pending = async (): Promise<ChangedFile[]> => {
     const changed = await changedSince(workspace, lastEditAt);
-    return changed.filter((file) => (readAt.get(file.path) ?? 0) < file.modifiedAt);
+    return changed.filter(
+      (file) => (readAt.get(file.path) ?? 0) + MTIME_ROUNDING_MS < file.modifiedAt,
+    );
   };
 
   return (pi: any): void => {
