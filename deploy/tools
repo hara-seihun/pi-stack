@@ -70,12 +70,12 @@ if [[ $skip_links != 1 ]]; then
       config/tools.json)
 
     while IFS= read -r -d '' link; do
-      target=$(readlink "$link")
+      target=$(as_root readlink "$link")
       name=$(basename "$link")
       if [[ $target == "$dest/"* && ${expected[$name]:-} != "$target" ]]; then
         as_root rm -- "$link"
       fi
-    done < <(find "$bin" -maxdepth 1 -type l -print0)
+    done < <(as_root find "$bin" -maxdepth 1 -type l -print0)
 
     for name in "${!expected[@]}"; do
       as_root ln -sfn "${expected[$name]}" "$bin/$name"
