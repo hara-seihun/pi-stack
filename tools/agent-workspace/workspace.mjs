@@ -413,22 +413,33 @@ function parseSystemdUnits(output, manager) {
 
 function systemdManagerSnapshot(manager) {
   const managerArgs = manager === "user" ? ["--user"] : [];
-  const result = command("systemctl", [
+  const listed = command("systemctl", [
     ...managerArgs,
-    "show",
+    "list-units",
     "--all",
+    "--state=active,activating,reloading,deactivating",
     "--type=service",
     "--type=scope",
+    "--no-legend",
+    "--plain",
+  ], { timeout: 20_000 });
+  if (listed.error?.code === "ENOENT" || /not been booted with systemd|failed to connect to bus/iu.test(listed.stderr)) {
+    return { units: [], available: false };
+  }
+  if (listed.status !== 0) return { units: [], available: true, error: listed.stderr || listed.stdout || "systemctl list-units failed" };
+  const unitIds = listed.stdout.split("\n").map((line) => line.trim().split(/\s+/u)[0]).filter(Boolean);
+  if (unitIds.length === 0) return { units: [], available: true };
+  const shown = command("systemctl", [
+    ...managerArgs,
+    "show",
+    ...unitIds,
     "--property=Id",
     "--property=ActiveState",
     "--property=WorkingDirectory",
     "--property=ExecStart",
   ], { timeout: 20_000 });
-  if (result.error?.code === "ENOENT" || /not been booted with systemd|failed to connect to bus/iu.test(result.stderr)) {
-    return { units: [], available: false };
-  }
-  if (result.status !== 0) return { units: [], available: true, error: result.stderr || result.stdout || "systemctl show failed" };
-  return { units: parseSystemdUnits(result.stdout, manager), available: true };
+  if (shown.status !== 0) return { units: [], available: true, error: shown.stderr || shown.stdout || "systemctl show failed" };
+  return { units: parseSystemdUnits(shown.stdout, manager), available: true };
 }
 
 function systemdSnapshot() {
