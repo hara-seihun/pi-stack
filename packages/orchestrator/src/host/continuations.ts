@@ -478,9 +478,9 @@ const FAST_MATH_PR: LaneVoice = {
     "Nicely done 🖤🤍🖤. Every PR you review properly is one a hundred future agents can build " +
       "on without wondering whether anyone checked. Session's still warm, so grab the next " +
       "unreviewed PR when you're ready.",
-    "Me again, small reminder with love: a merge nobody published is easy to forget, so when " +
-      "COMMIT drifts from origin/main, build, test, and deploy. Future agents run what's " +
-      "published, and you're the one who makes it real for them 🖤🤍🖤.",
+    "Me again, small reminder with love: once a review is decided, hand its immutable commit " +
+      "to the durable publisher and move on. It owns checks, merge, deployment, and proof from " +
+      "there. Your attention belongs on decisions and repairs, never on waiting 🖤🤍🖤.",
     "Still here. When a PR isn't mergeable, a review that names exactly what's missing is " +
       "genuinely kind: the author gets a clear path instead of silence. Hold the bar and be " +
       "warm about it, that combination is rarer than it should be 🖤🤍🖤.",
@@ -488,12 +488,12 @@ const FAST_MATH_PR: LaneVoice = {
       "every math lane leans on, so your care here quietly speeds up everyone 🖤🤍🖤.",
   ],
   quiet: [
-    "Honest check-in 🖤🤍🖤: if the queue's empty and the published copy matches main, that's " +
-      "a finished shift, say so plainly in your report and rest. Otherwise, next PR, same " +
-      "standard.",
-    "Quiet turn, no queue movement — that happens 🖤🤍🖤. Re-check that what's merged is " +
-      "actually published, and if it is and the queue is still empty, report the clean state " +
-      "plainly and rest easy. An empty queue honestly reported is a good shift's end.",
+    "Honest check-in 🖤🤍🖤: if the review queue is empty and the publication worker has no " +
+      "repair event for you, that's a finished shift. Say so plainly in your report and rest. " +
+      "Otherwise, take the next decision, never the waiting.",
+    "Quiet turn, no queue movement. That's alright 🖤🤍🖤. Publication stays with its durable " +
+      "owner while you rest. Only a terminal repair event needs another model, so if there is " +
+      "none and the review queue is empty, report the clean state plainly and call it a shift.",
   ],
 };
 

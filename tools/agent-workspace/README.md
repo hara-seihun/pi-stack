@@ -18,6 +18,8 @@ agent-workspace heartbeat --path ~/worktrees/claim-123
 agent-workspace release --path ~/worktrees/claim-123
 ```
 
+For source delivery, call `release` as soon as the repository's durable publisher acknowledges custody of the immutable commit. A live process keeps the checkout referenced until the session exits. The publication worker continues checks, merge, deployment, and verification without the originating model or workspace.
+
 `create` uses a shared bare mirror but gives the agent an independent checkout. It defaults to the repository's current `HEAD`, including a detached `HEAD`; pass `--ref` to select another commit. `--strategy worktree` uses a linked Git worktree instead. Mirror refreshes keep fetched source refs outside the local branch namespace, so creating one worktree cannot rewrite another worktree's branch. Release checks only the linked checkout's `HEAD`; branches checked out by its peers belong to those peers. New allocations default to a 32-checkout limit, 30 GiB of free disk, and 10 percent free inodes. Callers may set stricter limits.
 
 A released or expired checkout is reclaimable only when it is clean and every local branch and detached `HEAD` commit is already on a remote ref, or when it remains at the source commit recorded during creation. Dirty files, unclassified ignored output, and unpushed commits move it to `repair-required`. A checkout also remains referenced while another registered checkout borrows its Git objects through an alternates file. Declared generated trees such as root or package-level `node_modules`, `.nx`, and `.converge-cache` are removed once no runtime uses the checkout, even when unique source work still needs repair.

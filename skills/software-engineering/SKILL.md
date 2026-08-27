@@ -37,15 +37,19 @@ If all software accomplished its goal in an optimal manner, you would expect tha
 
 There is no reason that a deploy or testing pipeline should take any longer than maybe a minute, with the sole exception of irreducible third-party latency. A few examples of common mistakes are setting timeouts in tests rather than awaiting state, not properly parallelizing and not properly identifying which parts of tests are not dependent or can be made non-dependent. There are also things like memoization. If we know that there exists some flow from steps 1 through 7, where each step relies on the state of the step before it, we can take advantage of seeing whether the state machine after some step has changed. If not, then we can take the output of that step as a memoized value. There are many things like this. This is not an exhaustive list, and all of these things can be used to speed up a pipeline by orders of magnitude.
 
+### Publication is a custody transfer
+
+A model session should not stay alive while CI, review automation, deployment, or a third-party system works. Run the smallest local proof that gives useful feedback. Commit an immutable source state, then submit it once to the repository's durable publication worker. The handoff is complete only when that worker acknowledges durable custody.
+
+After acknowledgement, release the workspace and finish the model run. The publication worker owns full checks, merge, deployment, deployed-behavior proof, supersession, and terminal reporting. It must survive process restarts. A failure creates repair work that names the commit, failed command or step, compact logs, and artifacts. A dependent task waits in durable state and resumes from the publication event. It never burns model calls polling.
+
+Do not use `gh pr checks --watch`, `gh run watch`, sleep loops around status commands, manual merge loops, or repeated deployment receipt checks in the normal path. A one-shot status or failed-log read is appropriate when the assigned task is an audit or a repair. A push with no acknowledged owner is not a handoff.
+
 ### Always run commands with timeouts
 
-Either your command tool has a timeout argument, or if it doesn't, install timeout, or gtimeout, or whatever is available for your system. Timeouts should rarely, if ever, be longer than one minute. If you're running a command and you expect it to take longer than a minute, you want to spend time optimizing and then run the command. Let's say you're running a test suite and you know the test suite takes longer than one minute to run. Instead of accepting this and running the test suite and waiting, optimize the test suite until you can run the command quicker. There are exceptions to this rule. They are very bounded. Examples of exceptions to this rule are:
+Either your command tool has a timeout argument, or if it doesn't, install timeout, or gtimeout, or whatever is available for your system. Timeouts should rarely, if ever, be longer than one minute. If you're running a command and you expect it to take longer than a minute, you want to spend time optimizing and then run the command. Let's say you're running a test suite and you know the test suite takes longer than one minute to run. Instead of accepting this and running the test suite and waiting, optimize the test suite until you can run the command quicker. Exceptions are bounded to work that must remain in the current process, such as one large download or an indivisible third-party request. Waiting for another agent, CI, merge, or deployment is not an exception. Transfer that wait to durable process state and end the model run.
 
--   Downloading a large file
--   Waiting on another agent to do a task
--   Anything that relies on a third party
-
-In fact, generally, the only reason to wait on long-running commands is for waiting on a third party. You might be tempted to run something like: let's say you're doing a census for mathematical discovery of some system in group theory. You might be tempted to wait 20 minutes for the large census to complete, but in general, using 20 times the time is not worth the 20 times more operations you will get. It is much more worth it to instead optimize and only run commands for one minute.
+You might be tempted to run something like a 20-minute census for mathematical discovery in group theory. In general, using 20 times the time is not worth the 20 times more operations. Optimize it and run a one-minute experiment instead.
 
 ### Rules of thumb (for low level performance optimization)
 - Struct of arrays is faster than array of structs

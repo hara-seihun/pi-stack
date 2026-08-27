@@ -209,4 +209,21 @@ describe("check-in generation", () => {
     const polled = turn({ toolCalls: 5, reported: true, reportedUnproductive: true });
     expect(shiftClass(view("fast-math-pr", [polled]))).toBe("quiet");
   });
+
+  it("leaves publication waiting with the durable publisher", () => {
+    const working = () => turn({ toolCalls: 8, reported: true });
+    const quiet = () => turn({ toolCalls: 2, reported: true, reportedUnproductive: true });
+    const prompts = [
+      ...Array.from({ length: 4 }, (_, index) =>
+        continuationFor(view("fast-math-pr", Array.from({ length: index + 1 }, working))),
+      ),
+      ...Array.from({ length: 2 }, (_, index) =>
+        continuationFor(view("fast-math-pr", [quiet(), ...Array.from({ length: index }, quiet)])),
+      ),
+    ];
+    expect(prompts.some((prompt) => /durable publisher|publication worker/i.test(prompt))).toBe(true);
+    for (const prompt of prompts) {
+      expect(prompt).not.toMatch(/\b(?:poll|re-check|watch|deploy)\b/i);
+    }
+  });
 });

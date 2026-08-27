@@ -1,0 +1,11 @@
+{
+  "name": "@hara-seihun/publication-custody",
+  "version": "1.0.0",
+  "description": "End model custody after durable source publication handoff",
+  "license": "MIT",
+  "type": "module",
+  "keywords": ["pi-package", "pi-extension", "ci"],
+  "pi": { "extensions": ["./index.mjs"] },
+  "peerDependencies": { "@earendil-works/pi-coding-agent": ">=0.84.0 <0.85.0" },
+  "scripts": { "test": "node --test custody.test.mjs" }
+}

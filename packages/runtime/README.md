@@ -6,6 +6,7 @@ Reusable extensions and prompt-evaluation tools for [Pi](https://pi.dev).
 
 - `state-compactor` triggers Pi's native compaction before a provider request once context reaches 250,000 tokens.
 - `bash-timeout-guard` requires bounded bash calls and can forbid detached work.
+- `publication-custody` ends model-side CI polling after a durable publication handoff.
 - `pi-claude-code-use` adapts Pi tools and prompts for Anthropic subscription requests.
 - `chatgpt-pro` exposes ChatGPT Pro through short-lived, authenticated Kernel browsers and verifies the persisted model evidence before returning an answer.
 - `pi-cursor` adds Cursor subscription OAuth, live model discovery, usage reporting, and native Connect/protobuf streaming. Its imported upstream source is pinned at version 1.4.27.
