@@ -2,10 +2,12 @@ import assert from "node:assert/strict";
 import { spawn, spawnSync } from "node:child_process";
 import { existsSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { join, resolve } from "node:path";
+import { dirname, join, resolve } from "node:path";
 import test from "node:test";
+import { fileURLToPath } from "node:url";
 
-const helper = resolve("deploy/lib");
+const root = resolve(dirname(fileURLToPath(import.meta.url)), "..");
+const helper = join(root, "deploy", "lib");
 
 function start(script, args) {
   return spawn("bash", ["-c", script, "deploy-lock-test", ...args], {
@@ -53,6 +55,7 @@ test("deploys from one checkout serialize before reading or changing source", as
       while [[ ! -e $4 ]]; do sleep 0.01; done
     `, [helper, repository, firstReady, releaseFirst]);
     await waitForFile(firstReady);
+    assert.equal(existsSync(join(repository, ".git", "pi-stack-deploy.lock")), true);
 
     const second = start(`
       set -euo pipefail
