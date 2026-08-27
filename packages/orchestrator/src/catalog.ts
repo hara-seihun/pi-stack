@@ -24,6 +24,7 @@ export interface CatalogMeter {
 
 export interface PlanMetric {
   readonly id: string;
+  readonly model: string;
   readonly label?: string;
   readonly name?: string;
   /** The most depleted fresh meter is the binding meter for this metric. */
@@ -72,18 +73,18 @@ export const ORCHESTRATOR_CATALOG: OrchestratorCatalog = {
   plans: [
     {
       id: "openai", label: "OpenAI", icon: "openai", provider: "openai-codex", maxReadingAgeMs: HOUR,
-      metrics: [{ id: "remaining", meters: ["codex-5h", "codex-7d"] }],
+      metrics: [{ id: "remaining", model: "sol", meters: ["codex-5h", "codex-7d"] }],
     },
     {
       id: "anthropic", label: "Anthropic", icon: "anthropic", provider: "anthropic", maxReadingAgeMs: 14 * DAY,
       metrics: [
-        { id: "fable", label: "F", name: "Fable weekly", meters: ["anthropic-7d_oi"] },
-        { id: "weekly", label: "W", name: "Weekly, all models including Opus", meters: ["anthropic-7d"] },
+        { id: "fable", model: "fable", label: "F", name: "Fable weekly", meters: ["anthropic-7d_oi"] },
+        { id: "weekly", model: "opus", label: "W", name: "Weekly, all models including Opus", meters: ["anthropic-7d"] },
       ],
     },
     {
       id: "cursor", label: "Cursor", icon: "cursor", provider: "cursor", maxReadingAgeMs: HOUR,
-      metrics: [{ id: "remaining", meters: ["cursor-month"] }],
+      metrics: [{ id: "remaining", model: "grok", meters: ["cursor-month"] }],
     },
   ],
 };

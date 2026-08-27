@@ -103,14 +103,13 @@ button:focus-visible, input:focus-visible, textarea:focus-visible, select:focus-
 .native-environment-badge { flex: 0 0 auto; padding: 2px 5px; color: var(--bg); background: var(--accent); font-size: 9px; font-weight: 900; letter-spacing: .08em; }
 .native-environment label { color: var(--muted); font-size: 10px; font-weight: 800; letter-spacing: .04em; text-transform: uppercase; }
 .native-environment select { min-width: 0; flex: 1; height: 30px; padding: 0 8px; border: 1px solid var(--border); border-radius: 0; color: var(--text); background: var(--surface-2); font: 750 11px/1 sans-serif; }
-.agent-summary, .plan-summary, .usage-summary { min-width: 0; font-size: 11px; font-weight: 750; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
-.agent-summary { display: grid; gap: 3px; }
-.agent-location { min-width: 0; display: flex; align-items: center; gap: 7px; }
-.agent-location img { flex: 0 0 14px; width: 14px; height: 14px; object-fit: contain; opacity: .72; }
-.agent-location span { min-width: 0; overflow: hidden; text-overflow: ellipsis; }
-.plan-summary { display: flex; flex-wrap: wrap; align-items: center; gap: 3px 7px; }
-.provider-plan { display: inline-flex; align-items: center; gap: 5px; }
-.provider-plan img { width: 14px; height: 14px; object-fit: contain; }
+.plan-summary, .usage-summary { min-width: 0; font-size: 11px; font-weight: 750; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.plan-summary { display: grid; gap: 3px; }
+.capacity-row { min-width: 0; display: grid; grid-template-columns: 14px minmax(46px, 1fr) minmax(18px, auto) auto; align-items: center; gap: 7px; font-variant-numeric: tabular-nums; }
+.capacity-row img { width: 14px; height: 14px; object-fit: contain; }
+.capacity-model { min-width: 0; overflow: hidden; text-overflow: ellipsis; color: var(--text); letter-spacing: .03em; }
+.capacity-count { color: var(--text); text-align: right; }
+.capacity-value { color: var(--muted); text-align: right; }
 .connection { font-size: 12px; font-weight: 750; align-self: center; }
 .connection[hidden] { display: none; }
 

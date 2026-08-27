@@ -7,7 +7,7 @@ const ui = {
   threadsTab: $("tab-threads"), agentsTab: $("tab-agents"), archivedTab: $("tab-archived"),
   threadsTabCount: $("tab-threads-count"), agentsTabCount: $("tab-agents-count"), archivedTabCount: $("tab-archived-count"),
   agentList: $("agent-list"), agentBanner: $("agent-banner"), composer: $("composer"),
-  connection: $("connection"), agentSummary: $("agent-summary"), localAgentSummary: $("local-agent-summary"), planSummary: $("plan-summary"),
+  connection: $("connection"), planSummary: $("plan-summary"),
   usageSummary: $("usage-summary"), newThreadButtons: $("new-thread-buttons"),
   thunderControl: $("thunder-control"), openaiGovernorControl: $("openai-governor-control"), anthropicGovernorControl: $("anthropic-governor-control"),
   topTitle: $("top-title"), topState: $("top-state"), settingsButton: $("open-settings"),
@@ -35,7 +35,7 @@ const state = {
   agentLiveTextDocument: null, agentLiveThinkingDocument: null, agentDocumentRunId: null,
   toolCards: new Map(), userMessageLabels: new Map(), followTail: true, attachments: [], attachmentGeneration: 0,
   slashCommands: [], slashCommandsLoading: false,
-  planCards: [],
+  planCards: [], agentModelCounts: new Map(),
   agents: [], agentHosts: [], agentRunning: 0, agentRunId: null, agentRun: null, agentError: "", agentHostFailing: false,
   machineUsageText: "CPU — · GPU — · RAM — · DISK —", machineUsageColor: "var(--muted)", machineUsageDescription: "CPU — · GPU — · RAM — · DISK —",
   machineControlPending: new Set(), governors: { openai: {}, anthropic: {} },
@@ -1052,23 +1052,15 @@ function renderThreads() {
   ui.archivedList.append(more);
 }
 
-function renderAgentLocation(destination, location, label) {
-  if (!location) {
-    destination.textContent = "—";
-    destination.title = `${label} agent counts unavailable`;
-    return;
-  }
-  const counts = (location.models || []).map((model) => `${model.label} ${model.count}`);
-  destination.textContent = counts.length ? counts.join(" · ") : "NO AGENTS";
-  destination.title = location.error || (counts.length ? `${label}: ${counts.join(", ")} agents running` : `${label}: no agents running`);
-}
 function renderAgents(agents) {
   const locations = new Map((agents?.locations || []).map((location) => [location.key, location]));
-  renderAgentLocation(ui.localAgentSummary, locations.get("local"), "THIS MACHINE");
+  const location = locations.values().next().value;
+  state.agentModelCounts = new Map((location?.models || []).map((model) => [model.key, Number(model.count || 0)]));
+  renderCapacityRows();
   // Every thread poll carries the same fleet-wide running count the agent list
   // returns, so the tab stays honest without fetching a list nobody is reading.
   if (Number.isFinite(agents?.sources?.orchestrator)) state.agentRunning = Number(agents.sources.orchestrator);
-  state.agentHostFailing = [...locations.values()].some((location) => Boolean(location.error));
+  state.agentHostFailing = [...locations.values()].some((candidate) => Boolean(candidate.error));
 }
 
 function updateUsageSummary() {
@@ -1076,30 +1068,39 @@ function updateUsageSummary() {
   ui.usageSummary.style.color = state.machineUsageColor;
   ui.usageSummary.title = state.machineUsageDescription;
 }
-function renderPlan(plans) {
-  const cards = Array.isArray(plans?.cards) ? plans.cards : [];
-  state.planCards = cards;
+function renderCapacityRows() {
   ui.planSummary.replaceChildren();
-  cards.forEach((card, index) => {
-    if (index > 0) {
-      const separator = document.createElement("span");
-      separator.ariaHidden = "true";
-      separator.textContent = "·";
-      ui.planSummary.append(separator);
-    }
-    const provider = document.createElement("span");
-    provider.className = "provider-plan";
+  const descriptions = [];
+  for (const card of state.planCards) for (const metric of card.metrics || []) {
+    const count = state.agentModelCounts.get(metric.model) || 0;
+    const row = document.createElement("div");
+    row.className = "capacity-row";
     const icon = document.createElement("img");
     icon.src = `/${encodeURIComponent(card.icon)}.svg`;
     icon.alt = card.label;
+    const model = document.createElement("span");
+    model.className = "capacity-model";
+    model.textContent = metric.modelLabel;
+    const inUse = document.createElement("span");
+    inUse.className = "capacity-count";
+    inUse.textContent = String(count);
     const value = document.createElement("span");
-    value.textContent = card.text;
-    provider.append(icon, value);
-    ui.planSummary.append(provider);
-  });
-  const description = cards.map((card) => card.description).join(". ") || "Plan capacity unavailable";
+    value.className = "capacity-value";
+    value.textContent = metric.text;
+    const description = `${card.label} ${metric.modelLabel}, ${count} in use, ${metric.description}`;
+    row.title = description;
+    row.ariaLabel = description;
+    descriptions.push(description);
+    row.append(icon, model, inUse, value);
+    ui.planSummary.append(row);
+  }
+  const description = descriptions.join(". ") || "Plan capacity unavailable";
   ui.planSummary.title = description;
   ui.planSummary.ariaLabel = description;
+}
+function renderPlan(plans) {
+  state.planCards = Array.isArray(plans?.cards) ? plans.cards : [];
+  renderCapacityRows();
 }
 function renderMachine(machine) {
   if (!machine) {

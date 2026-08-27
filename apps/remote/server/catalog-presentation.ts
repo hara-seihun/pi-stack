@@ -1,7 +1,16 @@
 import {
   ORCHESTRATOR_CATALOG,
+  catalogModel,
   type PlanUsageSnapshot,
 } from "pi-orchestrator/api";
+
+export interface PlanMetricRow {
+  id: string;
+  model: string;
+  modelLabel: string;
+  text: string;
+  description: string;
+}
 
 export interface PlanCard {
   id: string;
@@ -10,6 +19,7 @@ export interface PlanCard {
   state: string;
   text: string;
   description: string;
+  metrics: PlanMetricRow[];
 }
 
 function percent(value: number): string {
@@ -30,8 +40,13 @@ export function planCards(snapshot: PlanUsageSnapshot | null): PlanCard[] {
     const rendered = plan.metrics.map((metric) => {
       const value = usage?.metrics[metric.id]?.percentLeft ?? null;
       const paceText = pace(usage?.metrics[metric.id]?.paceDelta);
+      const model = catalogModel(metric.model);
+      if (!model) throw new Error(`Plan ${plan.id} names unknown model ${metric.model}`);
       return {
-        text: `${metric.label ? `${metric.label} ` : ""}${value === null ? "—" : `${percent(value)}%${paceText}`}`,
+        id: metric.id,
+        model: model.id,
+        modelLabel: model.label,
+        text: value === null ? "—" : `${percent(value)}%${paceText}`,
         description: `${metric.name ?? metric.label ?? plan.label} ${value === null ? "usage unavailable" : `${percent(value)}% remaining${paceText ? `, pace ${paceText.trim()}` : ""}`}`,
       };
     });
@@ -45,12 +60,13 @@ export function planCards(snapshot: PlanUsageSnapshot | null): PlanCard[] {
       label: plan.label,
       icon: plan.icon,
       state,
-      text: `${rendered.map((metric) => metric.text).join(" · ")}${coverage ? "*" : ""}`,
+      text: `${rendered.map((metric, index) => `${plan.metrics[index]?.label ? `${plan.metrics[index].label} ` : ""}${metric.text}`).join(" · ")}${coverage ? "*" : ""}`,
       description: state === "loading"
         ? `${plan.label} plan usage loading`
         : rendered.every((metric) => metric.text.includes("—"))
           ? planCount > 0 ? `${plan.label} plan usage unavailable` : `No ${plan.label} plan configured`
           : `${plan.label}${coverage}: ${rendered.map((metric) => metric.description).join("; ")}`,
+      metrics: rendered,
     };
   });
 }

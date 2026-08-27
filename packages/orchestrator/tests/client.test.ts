@@ -26,8 +26,8 @@ const PLAN: PlanDefinition = {
   provider: "provider",
   maxReadingAgeMs: 60 * 60_000,
   metrics: [
-    { id: "binding", meters: ["codex-5h", "codex-7d"] },
-    { id: "weekly", meters: ["codex-7d"] },
+    { id: "binding", model: "sol", meters: ["codex-5h", "codex-7d"] },
+    { id: "weekly", model: "sol", meters: ["codex-7d"] },
   ],
 };
 

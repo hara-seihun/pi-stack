@@ -609,8 +609,8 @@ describe("web and supervisor integration", () => {
     expect(page.headers.get("content-type")).toContain("text/html");
     const markup = await page.text();
     expect(markup).toContain("id=\"conversation\"");
-    expect(markup).toContain("id=\"agent-summary\"");
-    expect(markup).toContain("id=\"local-agent-summary\"");
+    expect(markup).not.toContain("id=\"agent-summary\"");
+    expect(markup).not.toContain("id=\"local-agent-summary\"");
     expect(markup).toContain("id=\"plan-summary\"");
     expect(markup).not.toContain("id=\"openai-plan\"");
     expect(markup).not.toContain("id=\"anthropic-plan\"");
@@ -663,6 +663,7 @@ describe("web and supervisor integration", () => {
     expect(css).toContain(".thread-provider { flex: 0 0 14px;");
     expect(css).toContain(".machine-controls { height: 44px; display: grid; grid-template-columns: repeat(3, 1fr);");
     expect(css).toContain(".machine-control.active { background: var(--tool-ok); }");
+    expect(css).toContain(".capacity-row { min-width: 0; display: grid;");
     expect(css).toContain(".archive-thread { position: absolute; z-index: 1; top: 4px; right: 5px;");
     expect(css).toContain(".composer { flex: 0 0 auto; display: grid; gap: 2px;");
     expect(css).not.toContain("grid-template-rows: auto auto 40px");
@@ -702,7 +703,8 @@ describe("web and supervisor integration", () => {
     expect(source).toContain("renderAgents");
     expect(source).toContain("updateUsageSummary");
     expect(source).toContain("Array.isArray(plans?.cards)");
-    expect(source).toContain("card.description");
+    expect(source).toContain("metric.description");
+    expect(source).toContain("state.agentModelCounts.get(metric.model)");
     expect(source).toContain("encodeURIComponent(card.icon)");
     expect(source).not.toContain("fablePaceDelta");
     expect(source).not.toContain("opusPaceDelta");

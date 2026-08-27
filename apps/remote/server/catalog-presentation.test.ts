@@ -26,6 +26,12 @@ describe("orchestrator catalog presentation", () => {
     expect(cards.find((card) => card.id === "openai")?.text).toBe("64% (+3%)");
     expect(cards.find((card) => card.id === "anthropic")?.text).toBe("F 70% (-2%) · W 55% (+4%)");
     expect(cards.find((card) => card.id === "cursor")?.text).toBe("99% (+0%)");
+    expect(cards.flatMap((card) => card.metrics).map((metric) => [metric.model, metric.modelLabel, metric.text])).toEqual([
+      ["sol", "SOL", "64% (+3%)"],
+      ["fable", "FABLE", "70% (-2%)"],
+      ["opus", "OPUS", "55% (+4%)"],
+      ["grok", "GROK", "99% (+0%)"],
+    ]);
   });
 
   test("marks a figure that covers only some of the plans", () => {
