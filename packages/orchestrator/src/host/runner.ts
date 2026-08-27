@@ -210,6 +210,7 @@ export class Runner implements HostEvents {
           model: run.model,
           thinking: run.thinking,
           accountId: run.accountId,
+          resumeSessionFile: this.ledger.runSession(run.id)?.sessionFile,
         };
         this.engine.launch(spec);
         if (spec.team?.role === "worker") {

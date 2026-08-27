@@ -77,6 +77,10 @@ export interface LaunchSpec {
   readonly model: string;
   readonly thinking: string | undefined;
   readonly accountId: string;
+  /** Existing Pi session file recovered after its hosting runner vanished.
+   * The replacement host appends to this same conversation instead of
+   * starting the task again. */
+  readonly resumeSessionFile?: string;
   /** URL of doctrine to pin into the session's system prompt, where it
    * survives compaction; the task prompt, as the first user message, does
    * not. */

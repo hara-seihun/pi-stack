@@ -1,6 +1,7 @@
 import {
   createAgentSession,
   DefaultResourceLoader,
+  SessionManager,
   type AgentSession,
 } from "@earendil-works/pi-coding-agent";
 import { execFile } from "node:child_process";
@@ -430,6 +431,10 @@ export class PiHost implements HostManager {
     }
     const hosted = await openHostedSession({
       cwd: spec.cwd,
+      sessionManager:
+        spec.resumeSessionFile === undefined
+          ? undefined
+          : SessionManager.open(spec.resumeSessionFile, undefined, spec.cwd),
       agentDir: this.options.agentDir,
       resourceLoader,
       // The SDK's Model type is provider-internal; the resolver returns one.
@@ -554,7 +559,7 @@ export class PiHost implements HostManager {
       // stopped. Only when the runner says there is nothing left to wait for
       // does the run end.
       let stalls = 0;
-      for (const message of opening) {
+      for (const message of spec.resumeSessionFile === undefined ? opening : []) {
         for (;;) {
           transcript?.append("user", { text: message });
           if (await interrupted(promptAndSettle(session, message))) {
@@ -583,7 +588,13 @@ export class PiHost implements HostManager {
         }
       }
       let turn = 0;
-      let resume: string | undefined;
+      let resume =
+        spec.resumeSessionFile === undefined
+          ? undefined
+          : interruptedTurnPrompt(
+              "the process hosting this session stopped",
+              "I reopened your durable Pi session with its full conversation and working context.",
+            );
       for (;;) {
         // The lane's check-in (see continuations.ts) is generated from the
         // observed shift, so the message answers what the agent actually did

@@ -231,6 +231,25 @@ describe("run custody", () => {
     expect(report.claimed).toHaveLength(1);
   });
 
+  it("requeues a stale run with a durable Pi session and reopens that context", async () => {
+    const { ledger, controller } = build();
+    ledger.upsertTask({ id: "t", demandConstant: 1, tiers: mix("expert"), prompt: "Work." });
+    await controller.tick(0);
+    const firstRunner = new Runner(ledger, new FakeEngine(), { runnerId: "r1", maxSessions: 1 });
+    const runId = firstRunner.tick(0).claimed[0]!.runId;
+    ledger.linkRunSession(runId, "session-1", 1, "/tmp/session-1.jsonl");
+
+    const later = 11 * 60_000;
+    const report = await controller.tick(later);
+    expect(report.reaped).toEqual([runId]);
+    expect(ledger.run(runId)?.state).toBe("pending");
+
+    const replacement = new Runner(ledger, new FakeEngine(), { runnerId: "r2", maxSessions: 1 });
+    const resumed = replacement.tick(later + 1).claimed[0]!;
+    expect(resumed.runId).toBe(runId);
+    expect(resumed.resumeSessionFile).toBe("/tmp/session-1.jsonl");
+  });
+
   it("heartbeats keep a long run alive", async () => {
     const { ledger, runner, cycle } = build();
     ledger.upsertTask({ id: "t", demandConstant: 1, tiers: mix("expert"), prompt: "Work." });

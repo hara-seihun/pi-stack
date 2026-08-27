@@ -1,3 +1,7 @@
+import { SessionManager } from "@earendil-works/pi-coding-agent";
+import { mkdtempSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import { describe, expect, it, vi } from "vitest";
 import { continuationFor, type TurnFacts } from "../src/host/continuations.js";
 import { PiHost } from "../src/host/pi-host.js";
@@ -53,6 +57,7 @@ function harness(
     resolveModel?: () => unknown;
     accountId?: string;
     provider?: string;
+    resumeSessionFile?: string;
   } = {},
 ) {
   let spent = options.checkInsSpent ?? 0;
@@ -238,6 +243,7 @@ function harness(
     provider: options.provider ?? "openai-codex",
     model: "gpt-5.6-luna",
     thinking: "max",
+    resumeSessionFile: options.resumeSessionFile,
     cwd: "/tmp",
     doctrineUrl: options.doctrineUrl,
     opening: options.opening,
@@ -563,6 +569,27 @@ describe("host shift loop", () => {
     const clean = harness([{ stopReason: "aborted" }]);
     clean.host.launch(clean.spec);
     expect(await clean.finished).toEqual({ state: "aborted", detail: "session aborted" });
+  });
+
+  it("reopens a runner-crashed session and resumes it instead of replaying the task opening", async () => {
+    const directory = mkdtempSync(join(tmpdir(), "pi-host-resume-"));
+    const prior = SessionManager.create("/tmp", directory);
+    const sessionFile = prior.getSessionFile();
+    expect(sessionFile).toBeDefined();
+    prior.appendMessage({ role: "user", content: "Prior work", timestamp: 1 });
+
+    const recovered = harness([{ reports: 1 }], {
+      opening: ["A lived opening that must not replay."],
+      selfPaced: true,
+      resumeSessionFile: sessionFile,
+    });
+    recovered.host.launch(recovered.spec);
+    await recovered.finished;
+
+    expect(recovered.prompts).toHaveLength(1);
+    expect(recovered.prompts[0]).toContain("reopened your durable Pi session");
+    expect(recovered.prompts[0]).not.toContain("Attack the central problem");
+    expect(recovered.prompts[0]).not.toContain("lived opening");
   });
 
   it("keeps a worker warm when an extension compacts and continues the turn asynchronously", async () => {

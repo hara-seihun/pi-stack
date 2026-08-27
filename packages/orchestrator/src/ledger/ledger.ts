@@ -1528,13 +1528,29 @@ export class Ledger {
     return ids.map((r) => this.run(r.id)!);
   }
 
+  /** Return a run whose host vanished to the claim queue. Its Pi session file
+   * remains linked to the row, so the next runner reopens the same context.
+   * `claimed_at` doubles as the new pending-since time without rewriting the
+   * run's original age. */
+  requeueRun(id: string, at: number): boolean {
+    const result = this.db
+      .prepare(
+        `UPDATE run SET state = 'pending', claimed_at = ?, runner_id = NULL,
+                        heartbeat_at = NULL, abort_requested = 0
+         WHERE id = ? AND state = 'running'`,
+      )
+      .run(at, id);
+    return result.changes === 1;
+  }
+
   /** Pending runs no runner claimed in time: aborted, not error, so a runner
-   * outage never trips task circuit breakers. */
+   * outage never trips task circuit breakers. A recovered run is aged from
+   * the instant it returned to the queue, not its original launch. */
   expireUnclaimed(before: number, at: number): RunRow[] {
     const ids = this.db
       .prepare(
         `UPDATE run SET state = 'aborted', ended_at = ?, detail = 'unclaimed'
-         WHERE state = 'pending' AND started_at < ? RETURNING id`,
+         WHERE state = 'pending' AND COALESCE(claimed_at, started_at) < ? RETURNING id`,
       )
       .all(at, before) as { id: string }[];
     return ids.map((r) => this.run(r.id)!);
