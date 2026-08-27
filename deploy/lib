@@ -1,0 +1,11 @@
+# shellcheck shell=bash
+pi_stack_acquire_deploy_lock() {
+  local root=$1 lock
+  if [[ ${PI_STACK_DEPLOY_LOCK_HELD:-0} == 1 ]]; then
+    return
+  fi
+  lock=$(git -C "$root" rev-parse --git-path pi-stack-deploy.lock)
+  exec {PI_STACK_DEPLOY_LOCK_FD}>"$lock"
+  flock "$PI_STACK_DEPLOY_LOCK_FD"
+  export PI_STACK_DEPLOY_LOCK_FD PI_STACK_DEPLOY_LOCK_HELD=1
+}

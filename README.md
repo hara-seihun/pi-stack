@@ -30,7 +30,7 @@ cd apps/remote/android && ./gradlew test
 
 ## Deployments
 
-GMKtec and Converge deploy one reviewed repository commit. Host configuration chooses which components to publish and supplies local values. The scripts under [`deploy`](deploy) refuse an uncommitted checkout. `deploy/settings` and `deploy/skills` derive each role directly from the manifests rather than repeating package or skill lists in host configuration. See [`docs/deployment.md`](docs/deployment.md).
+GMKtec and Converge deploy one reviewed repository commit. Host configuration chooses which components to publish and supplies local values. The scripts under [`deploy`](deploy) refuse an uncommitted checkout and serialize work from the same source tree. Host deployment commands keep that lock until every artifact carries one commit. `deploy/settings` and `deploy/skills` derive each role directly from the manifests rather than repeating package or skill lists in host configuration. See [`docs/deployment.md`](docs/deployment.md).
 
 Pi Remote environments are independent servers:
 

@@ -1,0 +1,25 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+root=$(cd "$(dirname "$0")/.." && pwd)
+source "$root/deploy/lib"
+pi_stack_acquire_deploy_lock "$root"
+
+role=${1:-}
+[[ $role == converge ]] || { echo "usage: deploy/host converge" >&2; exit 64; }
+
+"$root/deploy/runtime"
+"$root/deploy/orchestrator"
+"$root/deploy/remote"
+"$root/deploy/tools" converge
+"$root/deploy/skills" converge-user
+"$root/deploy/settings" converge-user
+
+expected=$(git -C "$root" rev-parse HEAD)
+for artifact in "$HOME/.local/share/pi-runtime" /srv/pi/pi-orchestrator /srv/pi/pi-remote /srv/pi/skills /srv/pi/tools; do
+  [[ -f $artifact/.pi-stack-commit && $(<"$artifact/.pi-stack-commit") == "$expected" ]] || {
+    echo "$artifact does not carry Pi stack $expected" >&2
+    exit 1
+  }
+done
+printf 'deployed Pi stack %s for Converge\n' "$expected"

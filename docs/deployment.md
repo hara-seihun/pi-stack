@@ -18,7 +18,7 @@ Host repositories own:
 
 A host points Orchestrator's operator config at its version-1 task manifest. Controller startup reconciles the complete set atomically, so replacing a host does not depend on remembered `task set` commands and a removed lane cannot linger in SQLite. Pause controls remain mutable ledger state and survive reconciliation.
 
-This repository owns build commands, package and skill roles, API contracts, and component tests. `deploy/runtime`, `deploy/orchestrator`, `deploy/remote`, and `deploy/tools` publish immutable artifacts and record the source commit beside them. `deploy/settings ROLE` reconciles Pi's ordered package list, and `deploy/skills ROLE` publishes and links the role's first-party skills.
+This repository owns build commands, package and skill roles, API contracts, and component tests. `deploy/runtime`, `deploy/orchestrator`, `deploy/remote`, and `deploy/tools` publish immutable artifacts and record the source commit beside them. `deploy/settings ROLE` reconciles Pi's ordered package list, and `deploy/skills ROLE` publishes and links the role's first-party skills. Every deployment command locks its checkout before reading source or running `npm ci`. Host deployment commands hold that lock until every artifact carries the same commit.
 
 ## Build checks
 
@@ -64,18 +64,13 @@ Never restart the orchestrator runner to update it. Drain it so existing agent p
 
 ## Converge
 
-Converge OpenTofu owns one `pi_stack_commit`. Its startup configuration clones that commit and invokes the repository deployment commands in this order:
+Converge OpenTofu owns one `pi_stack_commit`. Its startup configuration clones that commit and runs the atomic host deployment:
 
 ```bash
-deploy/runtime
-deploy/orchestrator
-deploy/remote
-deploy/tools converge
-deploy/skills converge-user
-deploy/settings converge-user
+deploy/host converge
 ```
 
-The last two commands derive the deployed skill and package lists from the checked manifests. Pi Remote remains last without an OpenTofu copy of that order.
+The command publishes runtime, Orchestrator, Pi Remote, tools, skills, and settings while holding one source lock. It derives the deployed skill and package lists from the checked manifests. Pi Remote remains last without an OpenTofu copy of that order.
 
 Converge Pi Remote reports environment ID `converge`. It has one profile rooted at `/home/kenan/converge` and executes Pi directly on that machine.
 

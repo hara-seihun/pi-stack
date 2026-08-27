@@ -3,6 +3,7 @@ import { spawn } from "node:child_process";
 const jobs = [
   ["package sets", "node", ["scripts/check-package-sets.mjs"]],
   ["skill deployment", "node", ["--test", "scripts/deploy-skills.test.mjs"]],
+  ["deploy lock", "node", ["--test", "scripts/deploy-lock.test.mjs"]],
   ["tools", "node", ["scripts/check-tools.mjs"]],
   ["runtime", "npm", ["test", "--workspace=@hara-seihun/pi-runtime"]],
   ["cursor provider", "npm", ["run", "check", "--workspace=@rahularya01/pi-cursor"]],
