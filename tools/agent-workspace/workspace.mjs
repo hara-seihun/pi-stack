@@ -472,12 +472,30 @@ function safetySnapshot() {
   return { processes: processSnapshot(), docker: dockerSnapshot(), systemd: systemdSnapshot() };
 }
 
+function directoryHasEntries(directory) {
+  const pending = [directory];
+  while (pending.length > 0) {
+    const current = pending.pop();
+    let entries;
+    try { entries = readdirSync(current, { withFileTypes: true }); } catch { return true; }
+    for (const entry of entries) {
+      if (entry.isDirectory() && !entry.isSymbolicLink()) pending.push(path.join(current, entry.name));
+      else return true;
+    }
+  }
+  return false;
+}
+
 function gitDisposition(record) {
   const status = git(record.path, ["status", "--porcelain=v1", "--untracked-files=normal"]);
   if (status.length > 0) return { safe: false, reason: `working tree has changes: ${status.split("\n").slice(0, 8).join(" | ")}` };
   const ignored = git(record.path, ["status", "--porcelain=v1", "--ignored=matching", "--untracked-files=normal"])
     .split("\n")
-    .filter((line) => line.startsWith("!! "));
+    .filter((line) => line.startsWith("!! "))
+    .filter((line) => {
+      const candidate = path.resolve(record.path, line.slice(3).replace(/\/$/u, ""));
+      try { return existsSync(candidate) && directoryHasEntries(candidate); } catch { return true; }
+    });
   if (ignored.length > 0) return { safe: false, reason: `checkout has unclassified ignored output: ${ignored.slice(0, 8).join(" | ")}` };
   const head = git(record.path, ["rev-parse", "HEAD"]);
   if (record.sourceCommit !== null && head === record.sourceCommit) return { safe: true, reason: "checkout remains at its durable source commit", head };

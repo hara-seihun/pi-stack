@@ -208,6 +208,22 @@ test("keeps every repository in a group until all are recoverable", () => {
   }
 });
 
+test("empty ignored directories do not masquerade as unique work", () => {
+  const f = fixture();
+  try {
+    const created = JSON.parse(run([
+      "create", "--root", f.workspaces, "--name", "empty-ignored", "--repo", f.remote,
+      "--mode", "review", "--min-free-gib", "0", "--json",
+    ], f.env));
+    mkdirSync(path.join(created.path, "ignored-output"));
+    const result = JSON.parse(run(["release", "--id", created.id, "--json"], f.env));
+    assert.equal(result.action, "released");
+    assert.equal(existsSync(created.path), false);
+  } finally {
+    f.close();
+  }
+});
+
 test("unknown ignored output requires repair", () => {
   const f = fixture();
   try {
