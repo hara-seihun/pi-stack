@@ -20,7 +20,7 @@ const DEFAULT_STATE = process.env.PI_WORKSPACE_STATE ?? path.join(
   "pi-workspaces",
   "registry.sqlite3",
 );
-const DEFAULT_CACHE_PATHS = ["node_modules", ".nx", ".converge-cache"];
+const DEFAULT_CACHE_PATHS = ["node_modules", "**/node_modules", ".nx", ".converge-cache"];
 const DEFAULT_LEASE_SECONDS = 6 * 60 * 60;
 const DEFAULT_MAX_COUNT = 32;
 const DEFAULT_MIN_FREE_GIB = 30;
@@ -214,7 +214,11 @@ function normalizeCachePaths(values) {
   const selected = values.length === 0 ? DEFAULT_CACHE_PATHS : values.flatMap((value) => value.split(","));
   return [...new Set(selected.map((value) => value.trim()).filter(Boolean).map((value) => {
     if (path.isAbsolute(value) || value.split(path.sep).includes("..")) fail(`cache path must be relative: ${value}`);
-    return value.replace(/^\.\//, "").replace(/\/$/, "");
+    const normalized = value.replace(/^\.\//, "").replace(/\/$/, "");
+    if (/[?\[\]]/u.test(normalized) || (normalized.includes("*") && !/^\*\*\/[^*]+$/u.test(normalized))) {
+      fail(`cache path supports only an exact path or **/directory: ${value}`);
+    }
+    return normalized;
   }))];
 }
 
@@ -222,7 +226,12 @@ function register(database, input) {
   const info = gitInfo(input.path);
   const now = Date.now();
   const existing = database.prepare("SELECT * FROM workspace WHERE path = ?").get(path.resolve(input.path));
-  if (existing !== undefined && existing.state !== "released") return rowToRecord(existing);
+  if (existing !== undefined && existing.state !== "released") {
+    const cachePaths = [...new Set([...JSON.parse(existing.cache_paths), ...input.cachePaths])];
+    database.prepare("UPDATE workspace SET cache_paths = ?, updated_at = ? WHERE id = ?")
+      .run(JSON.stringify(cachePaths), now, existing.id);
+    return recordBy(database, { id: existing.id });
+  }
   if (existing !== undefined) database.prepare("DELETE FROM workspace WHERE id = ?").run(existing.id);
   const record = {
     id: randomUUID(),
@@ -512,14 +521,41 @@ function moveToGc(target, destination) {
   }
 }
 
+function matchingCacheTargets(workspacePath, relative) {
+  if (!relative.startsWith("**/")) return [path.resolve(workspacePath, relative)];
+  const directoryName = relative.slice("**/".length);
+  const matches = [];
+  const pending = [workspacePath];
+  while (pending.length > 0) {
+    const current = pending.pop();
+    let entries;
+    try {
+      entries = readdirSync(current, { withFileTypes: true });
+    } catch {
+      continue;
+    }
+    for (const entry of entries) {
+      if (!entry.isDirectory() || entry.isSymbolicLink() || entry.name === ".git") continue;
+      const candidate = path.join(current, entry.name);
+      if (entry.name === directoryName) matches.push(candidate);
+      else pending.push(candidate);
+    }
+  }
+  return matches;
+}
+
 function stripCaches(record, statePath) {
   const removed = [];
+  const seen = new Set();
   for (const relative of record.cachePaths) {
-    const target = path.resolve(record.path, relative);
-    if (!within(record.path, target) || target === record.path || !existsSync(target)) continue;
-    const destination = gcDestination(statePath, record, path.basename(relative));
-    moveToGc(target, destination);
-    removed.push(relative);
+    for (const target of matchingCacheTargets(record.path, relative)) {
+      if (seen.has(target) || !within(record.path, target) || target === record.path || !existsSync(target)) continue;
+      seen.add(target);
+      const cacheKey = createHash("sha256").update(path.relative(record.path, target)).digest("hex").slice(0, 12);
+      const destination = gcDestination(statePath, record, `${path.basename(target)}-${cacheKey}`);
+      moveToGc(target, destination);
+      removed.push(path.relative(record.path, target));
+    }
   }
   return removed;
 }

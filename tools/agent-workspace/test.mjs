@@ -139,11 +139,14 @@ test("keeps local commits but strips declared caches", () => {
     git(created.path, "commit", "-m", "local work");
     mkdirSync(path.join(created.path, "node_modules", "package"), { recursive: true });
     writeFileSync(path.join(created.path, "node_modules", "package", "index.js"), "generated\n");
+    mkdirSync(path.join(created.path, "packages", "api", "node_modules", "package"), { recursive: true });
+    writeFileSync(path.join(created.path, "packages", "api", "node_modules", "package", "index.js"), "generated\n");
     const result = JSON.parse(run(["release", "--id", created.id, "--json"], f.env));
     assert.equal(result.inspection.classification, "repair-required");
     assert.match(result.inspection.reason, /commits absent from remote refs/);
     assert.equal(existsSync(created.path), true);
     assert.equal(existsSync(path.join(created.path, "node_modules")), false);
+    assert.equal(existsSync(path.join(created.path, "packages", "api", "node_modules")), false);
     assert.equal(readFileSync(path.join(created.path, "file.txt"), "utf8"), "changed\n");
   } finally {
     f.close();
