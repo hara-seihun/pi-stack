@@ -114,6 +114,13 @@ test("creates and releases a clean review checkout", () => {
     const released = JSON.parse(run(["release", "--id", created.id, "--json"], f.env));
     assert.equal(released.action, "released");
     assert.equal(existsSync(created.path), false);
+
+    const plain = JSON.parse(run([
+      "create", "--root", f.workspaces, "--name", "review-plain", "--repo", f.remote,
+      "--mode", "review", "--min-free-gib", "0", "--json",
+    ], f.env));
+    const output = run(["release", "--id", plain.id], f.env);
+    assert.equal(output, `${plain.id}\treclaimable\t${plain.path}\treleased\tcheckout remains at its durable source commit`);
   } finally {
     f.close();
   }

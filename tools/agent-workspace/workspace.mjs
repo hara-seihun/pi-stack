@@ -905,10 +905,22 @@ function reconcileRecords(database, selected, options) {
 }
 
 function print(value, json) {
-  if (json) process.stdout.write(`${JSON.stringify(value, null, 2)}\n`);
-  else if (Array.isArray(value)) {
+  if (json) {
+    process.stdout.write(`${JSON.stringify(value, null, 2)}\n`);
+    return;
+  }
+  const items = Array.isArray(value) ? value : [value];
+  if (items.every((item) => item?.record !== undefined && item?.inspection !== undefined)) {
+    for (const item of items) {
+      process.stdout.write(`${item.record.id}\t${item.inspection.classification}\t${item.record.path}\t${item.action}\t${item.inspection.reason}\n`);
+    }
+    return;
+  }
+  if (Array.isArray(value)) {
     for (const item of value) process.stdout.write(`${item.id}\t${item.state}\t${item.path}\t${item.detail}\n`);
-  } else process.stdout.write(`${value.path ?? value.id}\n`);
+    return;
+  }
+  process.stdout.write(`${value.path ?? value.id}\n`);
 }
 
 function registerCommand(database, args) {
