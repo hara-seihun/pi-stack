@@ -82,6 +82,15 @@ test("migrates a registry created before workspace groups", () => {
   }
 });
 
+test("ignores containers removed during the Docker ownership snapshot", () => {
+  const snapshot = workspaceTesting.dockerSnapshot((_executable, args) => {
+    if (args[0] === "ps") return { status: 0, stdout: "vanished\nlive", stderr: "" };
+    if (args[1] === "vanished") return { status: 1, stdout: "", stderr: "Error: No such object: vanished" };
+    return { status: 0, stdout: JSON.stringify([{ Id: "live" }]), stderr: "" };
+  });
+  assert.deepEqual(snapshot, { containers: [{ Id: "live" }], available: true });
+});
+
 test("classifies active systemd workspace references", () => {
   const workspace = "/srv/workspaces/agent-one";
   const units = workspaceTesting.parseSystemdUnits(`Id=worker.service\nActiveState=active\nExecStart={ path=/usr/bin/node ; argv[]=/usr/bin/node ${workspace}/server.js ; }\nWorkingDirectory=${workspace}\n\nId=finished.service\nActiveState=inactive\nExecStart={ path=/bin/true ; argv[]=/bin/true ; }\nWorkingDirectory=${workspace}\n`, "user");

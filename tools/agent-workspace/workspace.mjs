@@ -351,19 +351,25 @@ function processReferences(workspacePath, snapshot = processSnapshot()) {
   });
 }
 
-function dockerSnapshot() {
-  const listed = command("docker", ["ps", "--all", "--quiet", "--no-trunc"], { timeout: 10_000 });
+function dockerSnapshot(execute = command) {
+  const listed = execute("docker", ["ps", "--all", "--quiet", "--no-trunc"], { timeout: 10_000 });
   if (listed.error?.code === "ENOENT") return { containers: [], available: false };
   if (listed.status !== 0) return { containers: [], available: true, error: listed.stderr || listed.stdout || "docker ps failed" };
-  const ids = listed.stdout.split(/\s+/u).filter(Boolean);
-  if (ids.length === 0) return { containers: [], available: true };
-  const inspected = command("docker", ["inspect", ...ids], { timeout: 20_000 });
-  if (inspected.status !== 0) return { containers: [], available: true, error: inspected.stderr || inspected.stdout || "docker inspect failed" };
-  try {
-    return { containers: JSON.parse(inspected.stdout), available: true };
-  } catch {
-    return { containers: [], available: true, error: "docker inspect returned invalid JSON" };
+  const containers = [];
+  for (const id of listed.stdout.split(/\s+/u).filter(Boolean)) {
+    const inspected = execute("docker", ["inspect", id], { timeout: 20_000 });
+    const detail = inspected.stderr || inspected.stdout || "docker inspect failed";
+    if (inspected.status !== 0 && /no such object/iu.test(detail)) continue;
+    if (inspected.status !== 0) return { containers: [], available: true, error: detail };
+    try {
+      const parsed = JSON.parse(inspected.stdout);
+      if (!Array.isArray(parsed)) return { containers: [], available: true, error: "docker inspect returned invalid JSON" };
+      containers.push(...parsed);
+    } catch {
+      return { containers: [], available: true, error: "docker inspect returned invalid JSON" };
+    }
   }
+  return { containers, available: true };
 }
 
 function dockerReferences(workspacePath, snapshot = dockerSnapshot()) {
@@ -1053,7 +1059,7 @@ Records with the same --group lease, heartbeat, and release as one multi-reposit
 `);
 }
 
-export const workspaceTesting = { parseSystemdUnits, systemdReferences };
+export const workspaceTesting = { dockerSnapshot, parseSystemdUnits, systemdReferences };
 
 export function main(argv = process.argv.slice(2), statePath = DEFAULT_STATE) {
   const [commandName, ...rest] = argv;
