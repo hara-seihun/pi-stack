@@ -12,6 +12,7 @@ agent-workspace create \
   --ref refs/heads/main \
   --owner claim-123 \
   --mode writer \
+  --cache deploy/generated \
   --json
 
 agent-workspace heartbeat --path ~/worktrees/claim-123
@@ -20,7 +21,9 @@ agent-workspace release --path ~/worktrees/claim-123
 
 For source delivery, call `release` as soon as the repository's durable publisher acknowledges custody of the immutable commit. A live process keeps the checkout referenced until the session exits. The publication worker continues checks, merge, deployment, and verification without the originating model or workspace.
 
-`create` uses a shared bare mirror but gives the agent an independent checkout. It defaults to the repository's current `HEAD`, including a detached `HEAD`; pass `--ref` to select another commit. `--strategy worktree` uses a linked Git worktree instead. When `--repo` names a local checkout, the new workspace inherits that checkout's canonical `origin` fetch and push URLs. The mirror uses a separate `workspace-source` remote to read a local detached or unpushed commit. Mirror refreshes keep fetched source refs outside the local branch namespace, so creating one worktree cannot rewrite another worktree's branch. Release checks only the linked checkout's `HEAD`; branches checked out by its peers belong to those peers. New allocations default to a 32-checkout limit, 30 GiB of free disk, and 10 percent free inodes. Callers may set stricter limits.
+`create` uses a shared bare mirror but gives the agent an independent checkout. It defaults to the repository's current `HEAD`, including a detached `HEAD`; pass `--ref` to select another commit. Use a ref the source repository can fetch, such as `refs/heads/main`, a branch name, or a commit. `origin/main` names a local remote-tracking ref and is not a remote branch name. `--strategy worktree` uses a linked Git worktree instead. When `--repo` names a local checkout, the new workspace inherits that checkout's canonical `origin` fetch and push URLs. The mirror uses a separate `workspace-source` remote to read a local detached or unpushed commit. Mirror refreshes keep fetched source refs outside the local branch namespace, so creating one worktree cannot rewrite another worktree's branch. Release checks only the linked checkout's `HEAD`; branches checked out by its peers belong to those peers. New allocations default to a 32-checkout limit, 30 GiB of free disk, and 10 percent free inodes. Callers may set stricter limits.
+
+Use repeatable `--cache PATH` flags on `create`, `register`, or `adopt` for repository-generated ignored output. A comma-separated list also works. Declarations extend the built-in `node_modules`, `**/node_modules`, `.nx`, and `.converge-cache` set. Cache paths must be relative exact paths or `**/directory` patterns. The manager removes only declared ignored output, so record every test, build, and infrastructure cache that a normal agent pass can create before doing the work.
 
 A released or expired checkout is reclaimable only when it is clean and every local branch and detached `HEAD` commit is already on a remote ref, or when it remains at the source commit recorded during creation. Dirty files, unclassified ignored output, and unpushed commits move it to `repair-required`. A checkout also remains referenced while another registered checkout borrows its Git objects through an alternates file. Declared generated trees such as root or package-level `node_modules`, `.nx`, and `.converge-cache` are removed once no runtime uses the checkout, even when unique source work still needs repair.
 

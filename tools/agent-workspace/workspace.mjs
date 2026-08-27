@@ -212,7 +212,10 @@ function gitInfo(workspacePath) {
 }
 
 function normalizeCachePaths(values) {
-  const selected = values.length === 0 ? DEFAULT_CACHE_PATHS : values.flatMap((value) => value.split(","));
+  const selected = [
+    ...DEFAULT_CACHE_PATHS,
+    ...values.flatMap((value) => value.split(",")),
+  ];
   return [...new Set(selected.map((value) => value.trim()).filter(Boolean).map((value) => {
     if (path.isAbsolute(value) || value.split(path.sep).includes("..")) fail(`cache path must be relative: ${value}`);
     const normalized = value.replace(/^\.\//, "").replace(/\/$/, "");
@@ -1170,15 +1173,17 @@ function statusCommand(database, args) {
 
 function help() {
   process.stdout.write(`Usage:
-  agent-workspace create --root PATH --name NAME --repo URL [--ref REF] [--mode writer|review] [--group ID]
-  agent-workspace register --path PATH [--owner ID] [--source-commit SHA] [--group ID]
-  agent-workspace adopt --root PATH [--mode writer|review] [--nested-groups] [--execute]
+  agent-workspace create --root PATH --name NAME --repo URL [--ref GIT_REF] [--mode writer|review] [--group ID] [--cache PATH,...]
+  agent-workspace register --path PATH [--owner ID] [--source-commit SHA] [--group ID] [--cache PATH,...]
+  agent-workspace adopt --root PATH [--mode writer|review] [--nested-groups] [--cache PATH,...] [--execute]
   agent-workspace heartbeat (--id ID|--path PATH) [--lease-seconds N]
   agent-workspace release (--id ID|--path PATH) [--reap-expired]
   agent-workspace reconcile [--root PATH] [--execute] [--reap-expired]
   agent-workspace status [--root PATH] [--json]
 
 The registry defaults to ${DEFAULT_STATE}. Set PI_WORKSPACE_STATE to move it.
+Repeat --cache to declare ignored generated paths that release may remove; these extend the default cache set.
+Use a Git ref the source repository can fetch, such as refs/heads/main or a branch name, not origin/main.
 A lease expiry permits reconciliation; it never makes dirty or unpushed work disposable.
 Records with the same --group lease, heartbeat, and release as one multi-repository workspace.
 `);

@@ -57,6 +57,8 @@ test("offers help through the installed command and each subcommand", () => {
     for (const args of [["--help"], ["create", "--help"]]) {
       const output = execFileSync(linked, args, { encoding: "utf8" });
       assert.match(output, /agent-workspace create/);
+      assert.match(output, /--cache PATH/);
+      assert.match(output, /not origin\/main/);
     }
   } finally {
     rmSync(root, { recursive: true, force: true });
@@ -107,10 +109,19 @@ test("creates and releases a clean review checkout", () => {
   try {
     const created = JSON.parse(run([
       "create", "--root", f.workspaces, "--name", "review-one", "--repo", f.remote,
-      "--mode", "review", "--min-free-gib", "0", "--json",
+      "--mode", "review", "--cache", "ignored-output", "--min-free-gib", "0", "--json",
     ], f.env));
     assert.equal(created.mode, "review");
+    assert.deepEqual(created.cachePaths, [
+      "node_modules",
+      "**/node_modules",
+      ".nx",
+      ".converge-cache",
+      "ignored-output",
+    ]);
     assert.equal(existsSync(created.path), true);
+    mkdirSync(path.join(created.path, "ignored-output"));
+    writeFileSync(path.join(created.path, "ignored-output", "generated.txt"), "generated\n");
     const released = JSON.parse(run(["release", "--id", created.id, "--json"], f.env));
     assert.equal(released.action, "released");
     assert.equal(existsSync(created.path), false);
