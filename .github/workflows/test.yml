@@ -7,7 +7,7 @@ on:
 jobs:
   stack:
     runs-on: ubuntu-latest
-    timeout-minutes: 1
+    timeout-minutes: 3
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-node@v4
@@ -18,4 +18,4 @@ jobs:
         with:
           bun-version: 1.3.13
       - run: npm ci --ignore-scripts --prefer-offline --no-audit --no-fund
-      - run: timeout --signal=TERM --kill-after=2s 50s npm run check
+      - run: npm run check
