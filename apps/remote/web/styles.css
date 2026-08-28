@@ -82,6 +82,20 @@ button:focus-visible, input:focus-visible, textarea:focus-visible, select:focus-
 .agent-row-label { flex: 0 0 auto; font-size: 12px; font-weight: 850; letter-spacing: .05em; color: var(--accent); }
 .agent-row-task { min-width: 0; font-size: 14px; font-weight: 700; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 .agent-row-meta { display: block; margin-top: 4px; color: var(--muted); font-size: 11px; font-weight: 750; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.agent-group { border-left: 3px solid transparent; }
+.agent-group.selected { border-left-color: var(--accent); }
+.agent-group-summary { min-height: 56px; display: block; padding: 9px 14px 8px; list-style: none; background: var(--surface); color: var(--text); cursor: pointer; }
+.agent-group-summary::-webkit-details-marker { display: none; }
+.agent-group-summary:hover, .agent-group[open] > .agent-group-summary { background: var(--surface-2); }
+.agent-group-title { display: flex; align-items: center; gap: 7px; min-width: 0; }
+.agent-group-title::before { content: "›"; flex: 0 0 auto; color: var(--muted); font-size: 18px; line-height: 12px; transform: rotate(0); transition: transform .16s ease; }
+.agent-group[open] .agent-group-title::before { transform: rotate(90deg); }
+.agent-group-name { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: 14px; font-weight: 800; }
+.agent-group-count { flex: 0 0 auto; min-width: 20px; padding: 1px 5px; background: var(--pending); color: var(--muted); font-size: 10px; font-weight: 850; text-align: center; }
+.agent-group-meta { display: block; margin: 5px 0 0 18px; color: var(--muted); font-size: 11px; font-weight: 750; }
+.agent-group-members { border-top: 1px solid var(--border); border-bottom: 1px solid var(--border); }
+.agent-row.grouped { padding-left: 27px; background: var(--bg); }
+.agent-row.grouped:hover, .agent-row.grouped.selected { background: var(--surface-2); }
 .agent-empty { padding: 12px 17px; color: var(--muted); font-size: 12px; font-weight: 700; }
 .agent-banner { padding: 10px clamp(16px, 3vw, 42px); border-top: 1px solid var(--border); background: var(--surface); color: var(--muted); font-size: 12px; font-weight: 750; }
 .drawer-footer { flex: 0 0 auto; min-height: 195px; padding: 8px 18px; border-top: 1px solid var(--border); display: grid; gap: 3px; }

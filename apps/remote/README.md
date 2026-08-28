@@ -2,7 +2,7 @@
 
 A self-hosted web and Android controller for persistent [Pi](https://pi.dev) coding-agent sessions.
 
-Pi Remote keeps session state in SQLite, talks to Pi through RPC mode, survives browser or app disconnects, queues prompts durably, and streams tool and model activity. It observes autonomous agents through Pi Orchestrator's public read model rather than reading that service's SQLite tables. An optional identity router starts per-user supervisors whose private directories are mounted only while unlocked.
+Pi Remote keeps session state in SQLite, talks to Pi through RPC mode, survives browser or app disconnects, queues prompts durably, and streams tool and model activity. It observes autonomous agents through Pi Orchestrator's public read model rather than reading that service's SQLite tables. The Orchestrator tab folds each team into one collapsed group; opening it lists the supervisor first, then workers by slot. An optional identity router starts per-user supervisors whose private directories are mounted only while unlocked.
 
 Interactive Pi children run at normal scheduler priority. Background services and CI must yield through their own scheduler settings. Lowering the interactive child priority makes every compiler, test, and file scan it starts lose CPU at the exact moment an operator is waiting for it.
 

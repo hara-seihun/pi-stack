@@ -17,6 +17,11 @@ const observed = (values: Partial<ObservedRun> & Pick<ObservedRun, "id" | "taskI
   productive: undefined,
   complete: undefined,
   detail: undefined,
+  teamRole: undefined,
+  teamSlot: undefined,
+  teamWaiting: false,
+  teamStop: 0,
+  teamStoppedAt: undefined,
   observable: false,
   live: null,
   ...values,
@@ -52,6 +57,25 @@ test("a run key that names no host, or escapes its runs directory, is refused", 
   expect(parseRunKey("local:")).toBeNull();
   expect(parseRunKey(":sol-0")).toBeNull();
   expect(parseRunKey("Local:sol-0")).toBeNull();
+});
+
+test("team roles survive the public run summary", () => {
+  const supervisor = summarizeAgentRun(
+    observed({
+      id: "supervisor", taskId: "cayley", state: "running", startedAt: 700,
+      teamRole: "supervisor", teamSlot: 0,
+    }),
+    LOCAL, 5000,
+  );
+  const worker = summarizeAgentRun(
+    observed({
+      id: "worker-3", taskId: "cayley", state: "running", startedAt: 800,
+      teamRole: "worker", teamSlot: 3,
+    }),
+    LOCAL, 5000,
+  );
+  expect(supervisor).toMatchObject({ teamRole: "supervisor", teamSlot: 0 });
+  expect(worker).toMatchObject({ teamRole: "worker", teamSlot: 3 });
 });
 
 test("a settled run reports its outcome rather than an activity", () => {

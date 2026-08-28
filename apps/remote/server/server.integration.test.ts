@@ -302,8 +302,9 @@ else: sys.exit(2)
   for (let index = 0; index < 4; index++) insertRun.run(`pro-${index}`, "pro-task", "running", "chatgpt-pro/gpt-5-6-pro-literal");
   insertRun.run("grok", "grok-task", "running", "cursor/grok-4.6");
   insertRun.run("finished", "luna-task", "done", "openai-codex/gpt-5.6-luna");
-  orchestrator.query(`UPDATE run SET started_at=1000,provider='openai-codex-3',thinking='xhigh'
+  orchestrator.query(`UPDATE run SET started_at=1000,provider='openai-codex-3',thinking='xhigh',team_role='supervisor',team_slot=0
     WHERE id='sol-0'`).run();
+  orchestrator.query(`UPDATE run SET team_role='worker',team_slot=1 WHERE id='sol-1'`).run();
   orchestrator.query(`UPDATE run SET started_at=500,ended_at=900,provider='openai-codex-2',thinking='max',
     detail='processed one work unit',productive=1,complete=1 WHERE id='finished'`).run();
   orchestrator.close();
@@ -454,7 +455,8 @@ describe("web and supervisor integration", () => {
     expect(observable).toMatchObject({
       host: "local", hostName: "This machine", runId: "sol-0",
       taskId: "sol-task", status: "running", label: "SOL", provider: "openai-codex-3",
-      thinking: "xhigh", observable: true, activity: "THINKING",
+      thinking: "xhigh", teamRole: "supervisor", teamSlot: 0,
+      observable: true, activity: "THINKING",
     });
     // Settled runs never appear in the list, but stay observable by id so a run
     // that finishes while it is open does not vanish from the client.

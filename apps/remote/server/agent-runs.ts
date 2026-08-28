@@ -64,6 +64,8 @@ export interface AgentRunSummary {
   observable: boolean;
   dispatched: boolean;
   productive: boolean | null;
+  teamRole: "worker" | "supervisor" | null;
+  teamSlot: number | null;
   summary: string | null;
   error: string | null;
 }
@@ -117,6 +119,8 @@ export function summarizeAgentRun(
     observable: row.observable === true,
     dispatched: false,
     productive: row.productive ?? null,
+    teamRole: row.teamRole ?? null,
+    teamSlot: row.teamSlot ?? null,
     summary: status === "error" ? null : detail,
     error: status === "error" ? detail : null,
   };

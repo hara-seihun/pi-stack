@@ -37,6 +37,7 @@ const state = {
   slashCommands: [], slashCommandsLoading: false,
   planCards: [], agentModelCounts: new Map(),
   agents: [], agentHosts: [], agentRunning: 0, agentRunId: null, agentRun: null, agentError: "", agentHostFailing: false,
+  agentExpandedGroups: new Set(),
   machineUsageText: "CPU — · GPU — · RAM — · DISK —", machineUsageColor: "var(--muted)", machineUsageDescription: "CPU — · GPU — · RAM — · DISK —",
   machineControlPending: new Set(), governors: { openai: {}, anthropic: {} },
   threadStarts: [],
@@ -818,11 +819,17 @@ function clearAgentSelection() {
   clearConversation();
   renderAgentList();
 }
-function agentRow(run) {
-  const row = node("button", `agent-row${run.id === state.agentRunId ? " selected" : ""}`);
+function agentRow(run, grouped = false) {
+  const row = node("button", `agent-row${grouped ? " grouped" : ""}${run.id === state.agentRunId ? " selected" : ""}`);
   row.type = "button";
   const title = node("span", "agent-row-title");
-  title.append(node("span", "agent-row-label", run.label), node("span", "agent-row-task", run.taskId));
+  const role = run.teamRole === "supervisor"
+    ? "SUPERVISOR"
+    : run.teamRole === "worker" ? `WORKER ${run.teamSlot ?? ""}`.trim() : run.label;
+  title.append(
+    node("span", "agent-row-label", grouped ? role : run.label),
+    node("span", "agent-row-task", grouped ? run.label : run.taskId),
+  );
   const status = agentActivityLabel(run);
   const meta = node("span", "agent-row-meta", `${status} · ${agentDuration(run.elapsedMs)}${run.observable ? "" : " · no transcript"}`);
   meta.style.color = run.status === "running" ? activityColor(run.activity || "WORKING") : "var(--muted)";
@@ -831,6 +838,62 @@ function agentRow(run) {
   row.addEventListener("click", () => { selectAgent(run); closeDrawer(); });
   return row;
 }
+
+function groupAgentRuns(runs) {
+  const groups = new Map();
+  const items = [];
+  for (const run of runs) {
+    if (!["supervisor", "worker"].includes(run.teamRole)) {
+      items.push({ run });
+      continue;
+    }
+    let group = groups.get(run.taskId);
+    if (!group) {
+      group = { taskId: run.taskId, runs: [] };
+      groups.set(run.taskId, group);
+      items.push({ group });
+    }
+    group.runs.push(run);
+  }
+  return items;
+}
+
+function teamRunOrder(left, right) {
+  const role = (run) => run.teamRole === "supervisor" ? 0 : 1;
+  return role(left) - role(right)
+    || Number(left.teamSlot ?? 0) - Number(right.teamSlot ?? 0)
+    || String(left.startedAt ?? "").localeCompare(String(right.startedAt ?? ""));
+}
+
+function agentGroup(group, host) {
+  const key = `${host.key}:${group.taskId}`;
+  const runs = [...group.runs].sort(teamRunOrder);
+  const selected = runs.some((run) => run.id === state.agentRunId);
+  const details = node("details", `agent-group${selected ? " selected" : ""}`);
+  details.open = state.agentExpandedGroups.has(key);
+  const summary = node("summary", "agent-group-summary");
+  const title = node("span", "agent-group-title");
+  title.append(
+    node("span", "agent-group-name", group.taskId),
+    node("span", "agent-group-count", String(runs.length)),
+  );
+  const supervisors = runs.filter((run) => run.teamRole === "supervisor").length;
+  const workers = runs.filter((run) => run.teamRole === "worker").length;
+  const roles = [
+    supervisors ? `${supervisors} supervisor${supervisors === 1 ? "" : "s"}` : "",
+    workers ? `${workers} worker${workers === 1 ? "" : "s"}` : "",
+  ].filter(Boolean).join(" · ");
+  summary.append(title, node("span", "agent-group-meta", roles));
+  details.append(summary, node("div", "agent-group-members"));
+  const members = details.lastElementChild;
+  for (const run of runs) members.append(agentRow(run, true));
+  details.addEventListener("toggle", () => {
+    if (details.open) state.agentExpandedGroups.add(key);
+    else state.agentExpandedGroups.delete(key);
+  });
+  return details;
+}
+
 // Agents run on more than one machine, so the list is grouped by the host that
 // owns them: an empty or unreachable host is stated rather than silently
 // leaving its agents out of a list that claims to hold every working agent.
@@ -853,7 +916,9 @@ function renderAgentList() {
     ui.agentList.append(heading);
     if (host.error) ui.agentList.append(node("div", "agent-empty", host.error));
     else if (!runs.length) ui.agentList.append(node("div", "agent-empty", "No agents working"));
-    else for (const run of runs) ui.agentList.append(agentRow(run));
+    else for (const item of groupAgentRuns(runs)) {
+      ui.agentList.append(item.group ? agentGroup(item.group, host) : agentRow(item.run));
+    }
   }
 }
 function applyAgentList(result) {
