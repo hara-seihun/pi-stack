@@ -6,8 +6,10 @@ import { join } from "node:path";
 import {
   activePath,
   buildEpisodes,
+  contextThrough,
   episodeJobs,
   flattenPath,
+  itemsSince,
   hashBlock,
   hashJob,
   lookupSummaries,
@@ -77,6 +79,16 @@ test("active path skips abandoned branches", () => {
   const path = activePath(lines.filter((line) => line.id));
   assert.equal(path.some((candidate) => candidate.id === "dead"), false);
   assert.equal(path.at(-1).id, "end");
+});
+
+test("since windows exclude old activity and report their exact upper bound", () => {
+  const items = flattenPath(activePath(parseSession(fixture({ grindCalls: 2, tailCalls: 2 }))));
+  const since = 1787630000001;
+  const window = itemsSince(items, since);
+  assert.ok(window.length > 0);
+  assert.ok(window.every((item) => Number(item.time) >= since));
+  assert.equal(contextThrough(window, since), Math.max(...window.map((item) => Number(item.time))));
+  assert.equal(itemsSince(items, Date.UTC(2030, 0, 1)).length, 0);
 });
 
 test("durable anchors and the ten-call recent tail are retained", () => {

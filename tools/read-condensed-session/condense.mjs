@@ -101,6 +101,29 @@ export function flattenPath(path) {
   return items;
 }
 
+export function timestampMs(value) {
+  const parsed = typeof value === "number" ? value : Date.parse(value ?? "");
+  return Number.isFinite(parsed) ? parsed : undefined;
+}
+
+/** Keep only session activity in the requested incremental window. */
+export function itemsSince(items, since) {
+  if (since === undefined) return items;
+  return items.filter((item) => {
+    const time = timestampMs(item.time);
+    return time !== undefined && time >= since;
+  });
+}
+
+export function contextThrough(items, since) {
+  let through = since;
+  for (const item of items) {
+    const time = timestampMs(item.time);
+    if (time !== undefined && (through === undefined || time > through)) through = time;
+  }
+  return through;
+}
+
 /**
  * Durable anchors are user messages, the assistant prose each user was
  * replying to, compaction markers, and images. Recent activity from the
@@ -281,9 +304,13 @@ function renderItem(item, out) {
 }
 
 /** Render anchors, episode summaries, and a bounded recent activity tail. */
-export function renderCondensed(segments, threshold, summaries, source, header) {
+export function renderCondensed(segments, threshold, summaries, source, header, window) {
+  const bounds = window?.since === undefined
+    ? undefined
+    : `window: ${new Date(window.since).toISOString()} through ${new Date(window.through ?? window.since).toISOString()}`;
   const out = [
     `=== condensed session ${source ?? header?.id ?? ""} ===`,
+    ...(bounds === undefined ? [] : [bounds]),
     `cwd: ${header?.cwd ?? "unknown"} · anchor-to-anchor episodes ≥${count(threshold)} source chars summarized · blocks ≥${count(threshold)} chars pre-summarized inside episodes · last ${VERBATIM_TAIL_CALLS} tool calls retained (large thinking/results capped at ${count(TAIL_BODY_CAP_CHARS)} chars)`,
   ];
   for (const segment of segments) {

@@ -24,39 +24,11 @@ export interface TierShare {
  * labels are launch-side data only and must never reach agent-visible
  * surfaces.
  */
-export type TeamCompletionPhase = "working" | "audit" | "complete";
-export type TeamAuditVerdict = "pass" | "objection";
-
-export interface TeamAuditReport {
-  readonly workerSlot: number;
-  readonly workerRunId: string;
-  readonly verdict: TeamAuditVerdict;
-  readonly summary: string;
-  readonly at: number;
-}
-
-/** Durable whole-programme closure state. It belongs to the team rather than
- * any one run, so replacements inherit an open audit and a completed lane
- * cannot silently relaunch. */
-export interface TeamCompletionStatus {
-  readonly taskId: string;
-  readonly phase: TeamCompletionPhase;
-  readonly audit: number;
-  readonly summary?: string;
-  readonly updatedAt?: number;
-  readonly supervisorRunId?: string;
-  readonly reports: readonly TeamAuditReport[];
-}
-
 export interface TeamSpec {
-  /** Standard colleagues working concurrently in the lane's shared cwd. */
+  /** Colleagues working concurrently in the lane's shared cwd. */
   readonly workers: number;
   /** The supervisor's task prompt. Workers receive TaskSpec.prompt. */
   readonly supervisorPrompt: string;
-  /** Concrete signs the supervisor should look for while cycling through the
-   * workers' condensed contexts. These are observations, not reasons to
-   * interrupt by themselves. */
-  readonly watchFor: readonly string[];
 }
 
 export interface TaskSpec {

@@ -97,7 +97,7 @@ function tiers(value: unknown, where: string): TierShare[] {
 function team(value: unknown, where: string, base: string): TeamSpec | undefined {
   if (value === undefined) return undefined;
   const row = object(value, `${where}.team`);
-  const allowed = new Set(["workers", "supervisorPrompt", "supervisorPromptFile", "watchFor"]);
+  const allowed = new Set(["workers", "supervisorPrompt", "supervisorPromptFile"]);
   for (const key of Object.keys(row)) {
     if (!allowed.has(key)) throw new Error(`${where}.team has unknown field ${key}`);
   }
@@ -115,8 +115,7 @@ function team(value: unknown, where: string, base: string): TeamSpec | undefined
   if (supervisorPrompt === undefined || supervisorPrompt.trim() === "") {
     throw new Error(`${where}.team needs supervisorPrompt or supervisorPromptFile`);
   }
-  const watchFor = stringArray(row.watchFor, `${where}.team.watchFor`) ?? [];
-  return { workers: workers as number, supervisorPrompt, watchFor };
+  return { workers: workers as number, supervisorPrompt };
 }
 
 function task(raw: unknown, index: number, base: string): TaskSpec {

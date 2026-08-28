@@ -71,16 +71,14 @@ describe("task manifests", () => {
         cwd: "/work/cayley-ci",
         promptFile: "workers.md",
         team: {
-          workers: 4,
+          workers: 10,
           supervisorPromptFile: "supervisor.md",
-          watchFor: ["constant ladders", "large censuses replacing theory"],
         },
       }],
     }));
     expect(loadTaskManifest(manifest)[0]?.team).toEqual({
-      workers: 4,
+      workers: 10,
       supervisorPrompt: "Keep the whole theorem in view.\n",
-      watchFor: ["constant ladders", "large censuses replacing theory"],
     });
   });
 

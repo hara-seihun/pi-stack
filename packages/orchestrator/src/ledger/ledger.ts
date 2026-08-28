@@ -22,8 +22,6 @@ import {
   TIERS,
   type DemandState,
   type TaskSpec,
-  type TeamAuditVerdict,
-  type TeamCompletionStatus,
   type Tier,
   type TierShare,
 } from "../tasks/types.js";
@@ -65,9 +63,6 @@ function validateTask(t: TaskSpec): void {
       throw new Error(`task ${t.id}: a team needs a supervisor prompt`);
     }
     if (t.cwd === undefined) throw new Error(`task ${t.id}: a team needs a shared cwd`);
-    if (t.team.watchFor.some((warning) => warning.trim() === "")) {
-      throw new Error(`task ${t.id}: team.watchFor entries cannot be empty`);
-    }
   }
 }
 
@@ -418,10 +413,16 @@ ALTER TABLE run_message ADD COLUMN interrupt INTEGER NOT NULL DEFAULT 0 CHECK (i
 CREATE INDEX run_team_roster ON run (task_id, team_role, team_slot, state);
 `;
 
-/** Whole-programme completion is a durable team fact, not one session's
- * `task_complete` report. The supervisor opens an audit; each worker slot
- * records an independent verdict for that audit generation; only unanimous
- * current passes permit the supervisor to place the final marker. */
+/** The first team implementation carried its own completion protocol and
+ * required supervisors to drive workers through custom tools. Preserve those
+ * migrations so existing ledgers can be upgraded, then replace their state
+ * with Pi turns: a worker records when it becomes idle, the supervisor gets a
+ * normal user message, and the supervisor's assistant response becomes the
+ * worker's next normal user message. The superseded columns remain during the
+ * rolling release because the sessions already hosted by the previous runner
+ * generation must finish without being aborted. Current code mirrors idle
+ * transitions into those columns during the drain, but exposes no part of the
+ * former protocol to new sessions. */
 const TEAM_COMPLETION_SCHEMA = `
 CREATE TABLE team_completion (
   task_id TEXT PRIMARY KEY REFERENCES task(id) ON DELETE CASCADE,
@@ -444,16 +445,37 @@ CREATE TABLE team_audit (
 CREATE INDEX team_audit_task_generation ON team_audit (task_id, audit);
 `;
 
-/** Team turns are a durable conversation. A worker that finishes a turn waits
- * for the supervisor's next message; the supervisor sleeps when nobody is
- * waiting and wakes on the next worker stop. The sequence number distinguishes
- * successive stops by the same long-lived worker session. */
 const TEAM_TURN_SCHEMA = `
 ALTER TABLE run ADD COLUMN team_waiting INTEGER NOT NULL DEFAULT 0
   CHECK (team_waiting IN (0, 1));
 ALTER TABLE run ADD COLUMN team_stop INTEGER NOT NULL DEFAULT 0;
 ALTER TABLE run ADD COLUMN team_stopped_at INTEGER;
 CREATE INDEX run_team_waiting ON run (task_id, team_waiting, state);
+`;
+
+const NATIVE_TEAM_TURN_SCHEMA = `
+ALTER TABLE run ADD COLUMN idle_at INTEGER;
+ALTER TABLE run ADD COLUMN context_since INTEGER;
+UPDATE run
+SET idle_at = CASE WHEN team_waiting = 1 THEN team_stopped_at ELSE NULL END,
+    context_since = started_at
+WHERE team_role = 'worker';
+ALTER TABLE run_message ADD COLUMN sender_run_id TEXT;
+ALTER TABLE run_message ADD COLUMN reply_run_id TEXT;
+ALTER TABLE run_message ADD COLUMN reply_idle_at INTEGER;
+CREATE INDEX run_team_idle ON run (task_id, idle_at, state);
+CREATE TRIGGER previous_team_waiting_to_idle
+AFTER UPDATE OF team_waiting ON run
+WHEN NEW.team_role = 'worker' AND NEW.idle_at IS OLD.idle_at
+BEGIN
+  UPDATE run
+  SET idle_at = CASE WHEN NEW.team_waiting = 1 THEN NEW.team_stopped_at ELSE NULL END,
+      context_since = CASE
+        WHEN NEW.team_waiting = 1 THEN COALESCE(context_since, started_at)
+        ELSE CAST(unixepoch('subsec') * 1000 AS INTEGER)
+      END
+  WHERE id = NEW.id;
+END;
 `;
 
 const MIGRATIONS: readonly string[] = [
@@ -481,6 +503,7 @@ const MIGRATIONS: readonly string[] = [
   TEAM_SCHEMA,
   TEAM_COMPLETION_SCHEMA,
   TEAM_TURN_SCHEMA,
+  NATIVE_TEAM_TURN_SCHEMA,
 ];
 
 export interface AccountRow {
@@ -528,11 +551,11 @@ export interface RunRow {
   readonly teamRole: "worker" | "supervisor" | undefined;
   /** Worker slots are one-indexed; the supervisor uses slot zero. */
   readonly teamSlot: number | undefined;
-  /** A worker that ended its last turn and has not received the supervisor's
-   * next message. Only team workers use these fields. */
-  readonly teamWaiting: boolean;
-  readonly teamStop: number;
-  readonly teamStoppedAt: number | undefined;
+  /** The worker has no turn in flight and awaits the supervisor's next Pi
+   * message. `contextSince` is the lower bound for its next incremental
+   * compressed-context read. */
+  readonly idleAt: number | undefined;
+  readonly contextSince: number | undefined;
 }
 
 export interface RunResult {
@@ -1071,276 +1094,168 @@ export class Ledger {
     }));
   }
 
-  teamCompletion(taskId: string): TeamCompletionStatus {
-    const row = this.db
-      .prepare(
-        `SELECT phase, audit, summary, updated_at, supervisor_run_id
-         FROM team_completion WHERE task_id = ?`,
-      )
-      .get(taskId) as
-      | {
-          phase: "working" | "audit" | "complete";
-          audit: number;
-          summary: string | null;
-          updated_at: number;
-          supervisor_run_id: string | null;
-        }
-      | undefined;
-    if (row === undefined) return { taskId, phase: "working", audit: 0, reports: [] };
-    const reports = this.db
-      .prepare(
-        `SELECT worker_slot, worker_run_id, verdict, summary, at
-         FROM team_audit WHERE task_id = ? AND audit = ? ORDER BY worker_slot`,
-      )
-      .all(taskId, row.audit) as {
-      worker_slot: number;
-      worker_run_id: string;
-      verdict: TeamAuditVerdict;
-      summary: string;
-      at: number;
-    }[];
-    return {
-      taskId,
-      phase: row.phase,
-      audit: row.audit,
-      summary: row.summary ?? undefined,
-      updatedAt: row.updated_at,
-      supervisorRunId: row.supervisor_run_id ?? undefined,
-      reports: reports.map((report) => ({
-        workerSlot: report.worker_slot,
-        workerRunId: report.worker_run_id,
-        verdict: report.verdict,
-        summary: report.summary,
-        at: report.at,
-      })),
-    };
-  }
-
-  beginTeamAudit(taskId: string, supervisorRunId: string, summary: string, at = Date.now()): TeamCompletionStatus {
-    this.immediate(() => {
-      const current = this.teamCompletion(taskId);
-      if (current.phase === "complete") throw new Error(`team ${taskId} is already complete`);
-      if (current.phase === "audit") throw new Error(`team ${taskId} already has audit ${current.audit} open`);
-      const audit = current.audit + 1;
-      this.db
-        .prepare(
-          `INSERT INTO team_completion (task_id, phase, audit, summary, updated_at, supervisor_run_id)
-           VALUES (?, 'audit', ?, ?, ?, ?)
-           ON CONFLICT (task_id) DO UPDATE SET
-             phase = 'audit', audit = excluded.audit, summary = excluded.summary,
-             updated_at = excluded.updated_at, supervisor_run_id = excluded.supervisor_run_id`,
-        )
-        .run(taskId, audit, summary, at, supervisorRunId);
-    });
-    return this.teamCompletion(taskId);
-  }
-
-  reportTeamAudit(
-    taskId: string,
-    audit: number,
-    workerSlot: number,
-    workerRunId: string,
-    verdict: TeamAuditVerdict,
-    summary: string,
-    at = Date.now(),
-  ): TeamCompletionStatus {
-    this.immediate(() => {
-      const current = this.teamCompletion(taskId);
-      if (current.phase !== "audit" || current.audit !== audit) {
-        throw new Error(`team ${taskId} has no open audit ${audit}`);
-      }
-      this.db
-        .prepare(
-          `INSERT INTO team_audit
-             (task_id, audit, worker_slot, worker_run_id, verdict, summary, at)
-           VALUES (?, ?, ?, ?, ?, ?, ?)
-           ON CONFLICT (task_id, audit, worker_slot) DO UPDATE SET
-             worker_run_id = excluded.worker_run_id, verdict = excluded.verdict,
-             summary = excluded.summary, at = excluded.at`,
-        )
-        .run(taskId, audit, workerSlot, workerRunId, verdict, summary, at);
-    });
-    return this.teamCompletion(taskId);
-  }
-
-  withdrawTeamAudit(taskId: string, supervisorRunId: string, summary: string, at = Date.now()): TeamCompletionStatus {
-    this.immediate(() => {
-      const current = this.teamCompletion(taskId);
-      if (current.phase !== "audit") throw new Error(`team ${taskId} has no open audit`);
-      this.db
-        .prepare(
-          `UPDATE team_completion
-           SET phase = 'working', summary = ?, updated_at = ?, supervisor_run_id = ?
-           WHERE task_id = ?`,
-        )
-        .run(summary, at, supervisorRunId, taskId);
-    });
-    return this.teamCompletion(taskId);
-  }
-
-  markTeamComplete(
-    taskId: string,
-    supervisorRunId: string,
-    workers: number,
-    summary: string,
-    at = Date.now(),
-  ): TeamCompletionStatus {
-    this.immediate(() => {
-      const current = this.teamCompletion(taskId);
-      if (current.phase !== "audit") throw new Error(`team ${taskId} has no open audit`);
-      const active = new Map(
-        (
-          this.db
-            .prepare(
-              `SELECT team_slot, id FROM run
-               WHERE task_id = ? AND team_role = 'worker' AND state IN ('pending', 'running')`,
-            )
-            .all(taskId) as { team_slot: number; id: string }[]
-        ).map((run) => [run.team_slot, run.id]),
-      );
-      const passing = new Set(
-        current.reports
-          .filter(
-            (report) =>
-              report.verdict === "pass" && active.get(report.workerSlot) === report.workerRunId,
-          )
-          .map((report) => report.workerSlot),
-      );
-      const missing = Array.from({ length: workers }, (_, index) => index + 1).filter(
-        (slot) => !passing.has(slot),
-      );
-      if (missing.length > 0) {
-        throw new Error(
-          `audit ${current.audit} still needs passing verdicts from worker slot(s) ${missing.join(", ")}`,
-        );
-      }
-      this.db
-        .prepare(
-          `UPDATE team_completion
-           SET phase = 'complete', summary = ?, updated_at = ?, supervisor_run_id = ?
-           WHERE task_id = ? AND phase = 'audit' AND audit = ?`,
-        )
-        .run(summary, at, supervisorRunId, taskId, current.audit);
-    });
-    return this.teamCompletion(taskId);
-  }
-
-  teamWorkerStopped(
+  teamWorkerIdle(
     workerRunId: string,
     at = Date.now(),
-  ): { taskId: string; workerRunId: string; stop: number; stoppedAt: number } {
-    let stopped!: { taskId: string; workerRunId: string; stop: number; stoppedAt: number };
+  ): { taskId: string; workerRunId: string; idleAt: number; contextSince: number } {
+    let idle!: { taskId: string; workerRunId: string; idleAt: number; contextSince: number };
     this.immediate(() => {
       const worker = this.run(workerRunId);
       if (worker?.state !== "running" || worker.teamRole !== "worker") {
-        throw new Error("only a live team worker can stop for supervisor guidance");
+        throw new Error("only a live team worker can become idle");
       }
-      if (worker.teamWaiting) {
-        stopped = {
+      if (worker.idleAt !== undefined) {
+        idle = {
           taskId: worker.taskId,
           workerRunId: worker.id,
-          stop: worker.teamStop,
-          stoppedAt: worker.teamStoppedAt ?? at,
+          idleAt: worker.idleAt,
+          contextSince: worker.contextSince ?? worker.startedAt,
         };
         return;
       }
       const row = this.db
         .prepare(
           `UPDATE run
-           SET team_waiting = 1, team_stop = team_stop + 1, team_stopped_at = ?
+           SET idle_at = ?, context_since = COALESCE(context_since, started_at),
+               team_waiting = 1, team_stop = team_stop + 1, team_stopped_at = ?
            WHERE id = ? AND state = 'running' AND team_role = 'worker'
-           RETURNING task_id, team_stop`,
+           RETURNING task_id, context_since`,
         )
-        .get(at, worker.id) as { task_id: string; team_stop: number } | undefined;
-      if (row === undefined) throw new Error(`${worker.id} stopped outside a live team run`);
-      stopped = {
+        .get(at, at, worker.id) as { task_id: string; context_since: number } | undefined;
+      if (row === undefined) throw new Error(`${worker.id} became idle outside a live team run`);
+      idle = {
         taskId: row.task_id,
         workerRunId: worker.id,
-        stop: row.team_stop,
-        stoppedAt: at,
+        idleAt: at,
+        contextSince: row.context_since,
       };
-      const supervisor = this.db
-        .prepare(
-          `SELECT id FROM run
-           WHERE task_id = ? AND team_role = 'supervisor' AND state IN ('pending', 'running')
-           ORDER BY CASE state WHEN 'running' THEN 0 ELSE 1 END, started_at DESC
-           LIMIT 1`,
-        )
-        .get(worker.taskId) as { id: string } | undefined;
-      if (supervisor !== undefined) {
-        this.db
-          .prepare(
-            `INSERT INTO run_message (run_id, text, created_at, interrupt)
-             VALUES (?, ?, ?, 1)`,
-          )
-          .run(
-            supervisor.id,
-            this.teamStopAlert(stopped),
-            at,
-          );
-      }
+      const supervisor = this.currentTeamSupervisor(worker.taskId);
+      if (supervisor !== undefined) this.queueIdleNotification(supervisor, idle, at);
     });
-    return stopped;
+    return idle;
   }
 
-  waitingTeamWorkers(taskId: string): RunRow[] {
+  idleTeamWorkers(taskId: string): RunRow[] {
     return this.runRows(
-      "WHERE task_id = ? AND team_role = 'worker' AND team_waiting = 1 AND state = 'running' ORDER BY team_slot",
+      "WHERE task_id = ? AND team_role = 'worker' AND idle_at IS NOT NULL AND state = 'running' ORDER BY team_slot",
       [taskId],
     );
   }
 
-  respondToTeamWorker(
+  notifyIdleTeamWorkers(supervisorRunId: string, at = Date.now()): void {
+    this.immediate(() => {
+      const supervisor = this.run(supervisorRunId);
+      if (supervisor?.state !== "running" || supervisor.teamRole !== "supervisor") {
+        throw new Error("only a live team supervisor can receive idle notifications");
+      }
+      for (const worker of this.idleTeamWorkers(supervisor.taskId)) {
+        const pending = this.db
+          .prepare(
+            `SELECT 1 FROM run_message
+             WHERE run_id = ? AND reply_run_id = ? AND reply_idle_at = ? LIMIT 1`,
+          )
+          .get(supervisor.id, worker.id, worker.idleAt!);
+        if (pending !== undefined) continue;
+        this.queueIdleNotification(
+          supervisor.id,
+          {
+            workerRunId: worker.id,
+            idleAt: worker.idleAt!,
+            contextSince: worker.contextSince ?? worker.startedAt,
+          },
+          at,
+        );
+      }
+    });
+  }
+
+  resumeTeamWorker(
     supervisorRunId: string,
     workerRunId: string,
+    expectedIdleAt: number,
     text: string,
     at = Date.now(),
-  ): { stop: number | undefined; respondedToStop: boolean } {
+  ): boolean {
     const trimmed = text.trim();
-    if (trimmed === "") throw new Error("team message must not be empty");
-    let result!: { stop: number | undefined; respondedToStop: boolean };
+    if (trimmed === "") throw new Error("the supervisor response must not be empty");
+    let delivered = false;
     this.immediate(() => {
       const supervisor = this.run(supervisorRunId);
       const worker = this.run(workerRunId);
       if (supervisor?.state !== "running" || supervisor.teamRole !== "supervisor") {
-        throw new Error("only a live team supervisor can message a worker");
+        throw new Error("only a live team supervisor can resume a worker");
       }
       if (
         worker?.state !== "running" ||
         worker.teamRole !== "worker" ||
         worker.taskId !== supervisor.taskId
       ) {
-        throw new Error("the message target must be a live worker on this team");
+        throw new Error("the response target must be a live worker on this team");
       }
-      const respondedToStop = worker.teamWaiting;
-      if (respondedToStop) {
-        this.db
-          .prepare("UPDATE run SET team_waiting = 0 WHERE id = ? AND team_waiting = 1")
-          .run(worker.id);
-      }
+      if (worker.idleAt !== expectedIdleAt) return;
+      const resumed = this.db
+        .prepare(
+          `UPDATE run
+           SET idle_at = NULL, context_since = ?, team_waiting = 0
+           WHERE id = ? AND idle_at = ?`,
+        )
+        .run(at, worker.id, expectedIdleAt);
+      if (resumed.changes !== 1) return;
       this.db
         .prepare(
-          `INSERT INTO run_message (run_id, text, created_at, interrupt)
-           VALUES (?, ?, ?, 1)`,
+          `INSERT INTO run_message
+             (run_id, text, created_at, interrupt, sender_run_id, reply_run_id, reply_idle_at)
+           VALUES (?, ?, ?, 1, ?, NULL, NULL)`,
         )
-        .run(worker.id, trimmed, at);
-      result = {
-        stop: respondedToStop ? worker.teamStop : undefined,
-        respondedToStop,
-      };
+        .run(worker.id, trimmed, at, supervisor.id);
+      delivered = true;
     });
-    return result;
+    return delivered;
   }
 
-  teamStopAlert(stop: {
+  private currentTeamSupervisor(taskId: string): string | undefined {
+    const row = this.db
+      .prepare(
+        `SELECT id FROM run
+         WHERE task_id = ? AND team_role = 'supervisor' AND state IN ('pending', 'running')
+         ORDER BY CASE state WHEN 'running' THEN 0 ELSE 1 END, started_at DESC
+         LIMIT 1`,
+      )
+      .get(taskId) as { id: string } | undefined;
+    return row?.id;
+  }
+
+  private queueIdleNotification(
+    supervisorRunId: string,
+    idle: { workerRunId: string; idleAt: number; contextSince: number },
+    at: number,
+  ): void {
+    this.db
+      .prepare(
+        `INSERT INTO run_message
+           (run_id, text, created_at, interrupt, sender_run_id, reply_run_id, reply_idle_at)
+         VALUES (?, ?, ?, 1, ?, ?, ?)`,
+      )
+      .run(
+        supervisorRunId,
+        this.teamIdleAlert(idle),
+        at,
+        idle.workerRunId,
+        idle.workerRunId,
+        idle.idleAt,
+      );
+  }
+
+  teamIdleAlert(idle: {
     workerRunId: string;
-    stop: number;
-    stoppedAt: number;
+    idleAt: number;
+    contextSince: number;
   }): string {
+    const since = new Date(idle.contextSince).toISOString();
     return [
-      `Worker ${stop.workerRunId} has stopped after finishing turn ${stop.stop} and is waiting for you.`,
-      `The stop was recorded at ${new Date(stop.stoppedAt).toISOString()}.`,
-      "Read its current work with team_context, then call team_intervene with your next warm programme-level message. The worker cannot continue until you respond.",
+      `Worker ${idle.workerRunId} is idle as of ${new Date(idle.idleAt).toISOString()}.`,
+      `If you need its new work, call read_compressed_context with runId ${idle.workerRunId} and since ${since}.`,
+      "Reply with its next message. Your response will be delivered verbatim as the worker's next Pi user message.",
     ].join("\n\n");
   }
 
@@ -1593,7 +1508,7 @@ export class Ledger {
         `SELECT id, task_id, tier, account_id, model, provider, thinking, state, started_at,
                 claimed_at, runner_id, ended_at, heartbeat_at, progress_at,
                 abort_requested, productive, complete, detail, team_role, team_slot,
-                team_waiting, team_stop, team_stopped_at
+                idle_at, context_since
          FROM run ${clause}`,
       )
       .all(...params) as {
@@ -1617,9 +1532,8 @@ export class Ledger {
       detail: string | null;
       team_role: "worker" | "supervisor" | null;
       team_slot: number | null;
-      team_waiting: number;
-      team_stop: number;
-      team_stopped_at: number | null;
+      idle_at: number | null;
+      context_since: number | null;
     }[];
     return rows.map((r) => ({
       id: r.id,
@@ -1642,9 +1556,8 @@ export class Ledger {
       detail: r.detail ?? undefined,
       teamRole: r.team_role ?? undefined,
       teamSlot: r.team_slot ?? undefined,
-      teamWaiting: r.team_waiting !== 0,
-      teamStop: r.team_stop,
-      teamStoppedAt: r.team_stopped_at ?? undefined,
+      idleAt: r.idle_at ?? undefined,
+      contextSince: r.context_since ?? undefined,
     }));
   }
 
@@ -1735,34 +1648,70 @@ export class Ledger {
     this.db.prepare("UPDATE run SET abort_requested = 1 WHERE id = ?").run(id);
   }
 
-  /** Queue an operator or supervisor message for a live run. Delivery is the
-   * runner's job; the row is the request, `delivered_at` the receipt. */
-  queueRunMessage(runId: string, text: string, at = Date.now(), interrupt = false): number {
+  /** Queue an operator message for a live run. Team messages use the same
+   * durable queue but also name the Pi session that sent them and, for idle
+   * notifications, the worker that receives the assistant response. */
+  queueRunMessage(runId: string, text: string, at = Date.now()): number {
     const trimmed = text.trim();
     if (trimmed === "") throw new Error("a run message cannot be empty");
-    const row = this.db
-      .prepare(
-        `INSERT INTO run_message (run_id, text, created_at, interrupt)
-         VALUES (?, ?, ?, ?) RETURNING id`,
-      )
-      .get(runId, trimmed, at, interrupt ? 1 : 0) as { id: number };
-    return row.id;
+    let id!: number;
+    this.immediate(() => {
+      const target = this.run(runId);
+      if (target?.teamRole === "worker" && target.idleAt !== undefined) {
+        this.db
+          .prepare(
+            "UPDATE run SET idle_at = NULL, context_since = ?, team_waiting = 0 WHERE id = ?",
+          )
+          .run(at, runId);
+        this.db
+          .prepare(
+            `DELETE FROM run_message
+             WHERE reply_run_id = ? AND delivered_at IS NULL`,
+          )
+          .run(runId);
+      }
+      const row = this.db
+        .prepare(
+          `INSERT INTO run_message
+             (run_id, text, created_at, interrupt, sender_run_id, reply_run_id, reply_idle_at)
+           VALUES (?, ?, ?, ?, NULL, NULL, NULL) RETURNING id`,
+        )
+        .get(runId, trimmed, at, target?.teamRole === undefined ? 0 : 1) as { id: number };
+      id = row.id;
+    });
+    return id;
   }
 
   /** Undelivered messages for a run, oldest first. */
-  pendingRunMessages(runId: string): { id: number; text: string; createdAt: number; interrupt: boolean }[] {
+  pendingRunMessages(runId: string): {
+    id: number;
+    text: string;
+    createdAt: number;
+    senderRunId?: string;
+    replyRunId?: string;
+    replyIdleAt?: number;
+  }[] {
     return (
       this.db
         .prepare(
-          `SELECT id, text, created_at, interrupt FROM run_message
+          `SELECT id, text, created_at, sender_run_id, reply_run_id, reply_idle_at FROM run_message
            WHERE run_id = ? AND delivered_at IS NULL ORDER BY id`,
         )
-        .all(runId) as { id: number; text: string; created_at: number; interrupt: number }[]
+        .all(runId) as {
+          id: number;
+          text: string;
+          created_at: number;
+          sender_run_id: string | null;
+          reply_run_id: string | null;
+          reply_idle_at: number | null;
+        }[]
     ).map((r) => ({
       id: r.id,
       text: r.text,
       createdAt: r.created_at,
-      interrupt: r.interrupt !== 0,
+      senderRunId: r.sender_run_id ?? undefined,
+      replyRunId: r.reply_run_id ?? undefined,
+      replyIdleAt: r.reply_idle_at ?? undefined,
     }));
   }
 

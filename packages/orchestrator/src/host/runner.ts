@@ -1,8 +1,4 @@
 import type { Ledger } from "../ledger/ledger.js";
-import type {
-  TeamAuditVerdict,
-  TeamCompletionStatus,
-} from "../tasks/types.js";
 import {
   type CooldownPolicy,
   CREDENTIAL_COOLDOWN_MS,
@@ -18,7 +14,6 @@ import {
   type HostManager,
   type HostRunResult,
   type LaunchSpec,
-  type TeamMember,
 } from "./types.js";
 
 /**
@@ -83,28 +78,8 @@ const TERMINAL_THROTTLE_MAX_MS = 24 * 60 * 60_000;
  * measuring the lane — and an unmeasured lane never ends a live shift. */
 const DEMAND_FRESH_MS = 5 * 60_000;
 
-function auditRequest(status: TeamCompletionStatus): string {
-  return [
-    `The team supervisor has opened whole-programme completion audit ${status.audit}.`,
-    status.summary ?? "",
-    "Independently try to falsify the claimed closure against the root theorem, the shared evidence, and every load-bearing hypothesis. This is the same whole-programme request to every colleague, not an assigned leaf. Check replayable certificates and look for contradictions or hidden conjectures. When your audit is honest and current, call team_audit with this audit number and either pass or objection; explain the decisive evidence.",
-  ].filter(Boolean).join("\n\n");
-}
-
-function auditWithdrawn(status: TeamCompletionStatus): string {
-  return [
-    `Whole-programme completion audit ${status.audit} has been withdrawn.`,
-    status.summary ?? "The programme remains open.",
-    "Keep working from the whole theorem and the shared mathematics; nobody has been assigned a narrower obligation.",
-  ].join("\n\n");
-}
-
-function completionNotice(status: TeamCompletionStatus): string {
-  return [
-    `Whole-programme completion audit ${status.audit} passed and the supervisor has placed the durable completion marker.`,
-    status.summary ?? "",
-    "Preserve any final evidence already in flight, make your current report honest, and close this turn. The lane will not replace the room after it settles.",
-  ].filter(Boolean).join("\n\n");
+function previousTeamAlert(text: string): boolean {
+  return text.startsWith("Worker ") && text.includes("has stopped after finishing turn");
 }
 
 export interface RunnerTickReport {
@@ -148,13 +123,30 @@ export class Runner implements HostEvents {
       const overdue = stalledForMs > progressTimeoutMs;
       if (overdue && !run.abortRequested) this.ledger.requestAbort(run.id);
       if (overdue || run.abortRequested) this.engine.abort(run.id);
-      // Operator messages are delivered exactly once: a message the host no
-      // longer holds a session for stays queued rather than being lost, and
-      // is retired with the run below.
+      // A supervisor hosted by this release also watches idle state created
+      // by a still-draining runner from the previous release. That runner's
+      // old alert is discarded here after a native notification has replaced
+      // it; the previous runner still consumes its own alerts unchanged.
+      if (run.teamRole === "supervisor") {
+        this.ledger.notifyIdleTeamWorkers(run.id, now);
+      }
+      // Pi messages are delivered exactly once. A message whose session is no
+      // longer hosted remains queued rather than disappearing between runners.
       for (const message of this.ledger.pendingRunMessages(run.id)) {
-        const accepted = message.interrupt
-          ? this.engine.intervene(run.id, message.text)
-          : this.engine.message(run.id, message.text);
+        if (
+          run.teamRole === "supervisor" &&
+          message.senderRunId === undefined &&
+          previousTeamAlert(message.text)
+        ) {
+          this.ledger.markRunMessageDelivered(message.id, now);
+          continue;
+        }
+        const accepted = this.engine.message(run.id, {
+          text: message.text,
+          senderRunId: message.senderRunId,
+          replyRunId: message.replyRunId,
+          replyIdleAt: message.replyIdleAt,
+        });
         if (!accepted) break;
         this.ledger.markRunMessageDelivered(message.id, now);
       }
@@ -203,7 +195,7 @@ export class Runner implements HostEvents {
                   role: run.teamRole,
                   slot: run.teamSlot ?? 0,
                   workers: task.team.workers,
-                  watchFor: task.team.watchFor,
+                  idleAt: run.idleAt,
                 },
               }),
           provider: run.provider,
@@ -213,24 +205,8 @@ export class Runner implements HostEvents {
           resumeSessionFile: this.ledger.runSession(run.id)?.sessionFile,
         };
         this.engine.launch(spec);
-        if (spec.team?.role === "worker") {
-          const completion = this.ledger.teamCompletion(spec.taskId);
-          if (completion.phase === "audit") {
-            this.ledger.queueRunMessage(run.id, auditRequest(completion), now, true);
-          }
-        } else if (spec.team?.role === "supervisor") {
-          for (const worker of this.ledger.waitingTeamWorkers(spec.taskId)) {
-            this.ledger.queueRunMessage(
-              run.id,
-              this.ledger.teamStopAlert({
-                workerRunId: worker.id,
-                stop: worker.teamStop,
-                stoppedAt: worker.teamStoppedAt ?? now,
-              }),
-              now,
-              true,
-            );
-          }
+        if (spec.team?.role === "supervisor") {
+          this.ledger.notifyIdleTeamWorkers(run.id, now);
         }
         claimed.push(spec);
       }
@@ -251,108 +227,44 @@ export class Runner implements HostEvents {
     this.ledger.linkRunSession(runId, sessionId, Date.now(), sessionFile);
   }
 
-  teamMembers(taskId: string): readonly TeamMember[] {
-    return this.ledger
-      .runs()
-      .filter(
-        (run) =>
-          run.taskId === taskId &&
-          run.teamRole !== undefined &&
-          (run.state === "pending" || run.state === "running"),
-      )
-      .map((run) => ({
-        runId: run.id,
-        role: run.teamRole!,
-        slot: run.teamSlot ?? 0,
-        state: run.state,
-        progressAt: run.progressAt,
-        sessionFile: this.ledger.runSession(run.id)?.sessionFile,
-        waiting: run.teamWaiting,
-        stop: run.teamStop,
-        stoppedAt: run.teamStoppedAt,
-      }));
+  teamWorkerIdle(workerRunId: string) {
+    return this.ledger.teamWorkerIdle(workerRunId);
   }
 
-  teamCompletion(taskId: string): TeamCompletionStatus {
-    return this.ledger.teamCompletion(taskId);
-  }
-
-  teamCompletionAction(
+  teamSupervisorResponded(
     supervisorRunId: string,
-    action: "begin_audit" | "withdraw" | "complete",
-    summary: string,
-  ): TeamCompletionStatus {
-    const supervisor = this.ledger.run(supervisorRunId);
-    if (supervisor?.state !== "running" || supervisor.teamRole !== "supervisor") {
-      throw new Error("only a live team supervisor can control completion");
-    }
-    const task = this.ledger.tasks().find((candidate) => candidate.id === supervisor.taskId);
-    if (task?.team === undefined) throw new Error(`${supervisor.taskId} is not a team lane`);
-    let status: TeamCompletionStatus;
-    if (action === "begin_audit") {
-      status = this.ledger.beginTeamAudit(supervisor.taskId, supervisorRunId, summary);
-    } else if (action === "withdraw") {
-      status = this.ledger.withdrawTeamAudit(supervisor.taskId, supervisorRunId, summary);
-    } else {
-      status = this.ledger.markTeamComplete(
-        supervisor.taskId,
-        supervisorRunId,
-        task.team.workers,
-        summary,
-      );
-    }
-    const message =
-      action === "begin_audit"
-        ? auditRequest(status)
-        : action === "withdraw"
-          ? auditWithdrawn(status)
-          : completionNotice(status);
-    for (const member of this.teamMembers(supervisor.taskId)) {
-      if (member.role === "worker") {
-        this.ledger.queueRunMessage(member.runId, message, Date.now(), true);
-      }
-    }
-    return status;
+    workerRunId: string,
+    idleAt: number,
+    text: string,
+  ): boolean {
+    return this.ledger.resumeTeamWorker(
+      supervisorRunId,
+      workerRunId,
+      idleAt,
+      text,
+    );
   }
 
-  teamAudit(
+  teamWorkerSession(
+    supervisorRunId: string,
     workerRunId: string,
-    audit: number,
-    verdict: TeamAuditVerdict,
-    summary: string,
-  ): TeamCompletionStatus {
+  ): { runId: string; sessionFile?: string } {
+    const supervisor = this.ledger.run(supervisorRunId);
     const worker = this.ledger.run(workerRunId);
+    if (supervisor?.state !== "running" || supervisor.teamRole !== "supervisor") {
+      throw new Error("only a live team supervisor can read worker context");
+    }
     if (
       worker?.state !== "running" ||
       worker.teamRole !== "worker" ||
-      worker.teamSlot === undefined
+      worker.taskId !== supervisor.taskId
     ) {
-      throw new Error("only a live team worker can report an audit verdict");
+      throw new Error(`${workerRunId} is not a live worker on this team`);
     }
-    return this.ledger.reportTeamAudit(
-      worker.taskId,
-      audit,
-      worker.teamSlot,
-      worker.id,
-      verdict,
-      summary,
-    );
-  }
-
-  teamStopped(workerRunId: string) {
-    return this.ledger.teamWorkerStopped(workerRunId);
-  }
-
-  teamWaiting(workerRunId: string): boolean {
-    const worker = this.ledger.run(workerRunId);
-    return (
-      worker?.teamWaiting === true &&
-      this.ledger.teamCompletion(worker.taskId).phase !== "complete"
-    );
-  }
-
-  teamIntervene(supervisorRunId: string, workerRunId: string, text: string) {
-    return this.ledger.respondToTeamWorker(supervisorRunId, workerRunId, text);
+    return {
+      runId: worker.id,
+      sessionFile: this.ledger.runSession(worker.id)?.sessionFile,
+    };
   }
 
   runFinished(runId: string, result: HostRunResult, at = Date.now()): void {
@@ -451,9 +363,6 @@ export class Runner implements HostEvents {
 
   laneDrained(taskId: string, now = Date.now()): boolean {
     const task = this.ledger.tasks().find((t) => t.id === taskId);
-    if (task?.team !== undefined && this.ledger.teamCompletion(taskId).phase === "complete") {
-      return true;
-    }
     if (task?.exitWhenDrained !== true) return false;
     if (task.demandConstant !== undefined) return task.demandConstant <= 0;
     const demand = this.ledger.demandState(taskId);

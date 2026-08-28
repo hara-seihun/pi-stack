@@ -6,8 +6,10 @@ import {
   DEFAULT_THRESHOLD,
   activePath,
   buildEpisodes,
+  contextThrough,
   episodeJobs,
   flattenPath,
+  itemsSince,
   lookupSummaries,
   markVerbatim,
   openSummaryDb,
@@ -27,6 +29,7 @@ Render the active path of a Pi session as an episode-condensed transcript.
 
 options:
   --threshold CHARS    pre-summarize blocks and condense episodes at this source size (default: 16000)
+  --since TIMESTAMP    include only activity at or after this ISO timestamp
   --output FILE        write the transcript and print only statistics
   --model MODEL        summarizer model id or provider/model (default: ${DEFAULT_MODEL})
   --thinking LEVEL     summarizer reasoning level (default: low)
@@ -84,6 +87,11 @@ async function main() {
     return;
   }
   const threshold = positiveInteger(option(args, "--threshold") ?? DEFAULT_THRESHOLD, "threshold", 500);
+  const sinceOption = option(args, "--since");
+  const since = sinceOption === undefined ? undefined : Date.parse(sinceOption);
+  if (sinceOption !== undefined && !Number.isFinite(since)) {
+    throw new Error("--since must be an ISO timestamp");
+  }
   const output = option(args, "--output");
   const model = option(args, "--model") ?? process.env.SESSION_CONDENSER_MODEL ?? DEFAULT_MODEL;
   const thinking = option(args, "--thinking") ?? "low";
@@ -97,7 +105,9 @@ async function main() {
   const sessionPath = resolve(args[0]);
   const raw = readFileSync(sessionPath, "utf8");
   const entries = parseSession(raw);
-  const items = markVerbatim(flattenPath(activePath(entries)));
+  const windowItems = itemsSince(flattenPath(activePath(entries)), since);
+  const through = contextThrough(windowItems, since);
+  const items = markVerbatim(windowItems);
   const db = openSummaryDb(resolve(dbFile));
   try {
     const summaries = new Map();
@@ -113,6 +123,7 @@ async function main() {
       summaries,
       sessionPath,
       entries.find((entry) => entry.type === "session"),
+      { since, through },
     );
     const failed = [...summaries.values()].filter((record) => record.error).length;
     const episodes = segments.filter((segment) => segment.type === "episode");

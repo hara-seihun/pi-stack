@@ -134,7 +134,6 @@ describe("dispatch cycle", () => {
       team: {
         workers: 4,
         supervisorPrompt: "Keep the whole programme in view.",
-        watchFor: ["constant ladders"],
       },
     });
 
@@ -152,23 +151,6 @@ describe("dispatch cycle", () => {
     expect(replacement.claimed).toHaveLength(1);
     expect(replacement.claimed[0]?.team).toMatchObject({ role: "worker", slot: 2 });
 
-    const audit = ledger.beginTeamAudit("cayley", supervisor!.runId, "The root theorem appears closed.", 1_100);
-    const currentWorkers = ledger.runs({ state: "running" }).filter((run) => run.teamRole === "worker");
-    for (const worker of currentWorkers) {
-      ledger.reportTeamAudit(
-        "cayley",
-        audit.audit,
-        worker.teamSlot!,
-        worker.id,
-        "pass",
-        `worker ${worker.teamSlot} independently passed the audit`,
-        1_200,
-      );
-    }
-    ledger.markTeamComplete("cayley", supervisor!.runId, 4, "Unanimous audit passed.", 1_300);
-    runner.runFinished(currentWorkers[0]!.id, { state: "done" }, 1_400);
-    const afterCompletion = await cycle(2_000);
-    expect(afterCompletion.claimed).toHaveLength(0);
   });
 
   it("starts the supervisor before workers when only part of a team roster fits", async () => {
@@ -185,7 +167,6 @@ describe("dispatch cycle", () => {
       team: {
         workers: 4,
         supervisorPrompt: "Keep the whole programme in view.",
-        watchFor: [],
       },
     });
 

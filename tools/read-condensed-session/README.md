@@ -5,10 +5,17 @@
 ```bash
 read-condensed-session /path/to/session.jsonl
 read-condensed-session --output /tmp/condensed.md /path/to/large-session.jsonl
+read-condensed-session --since 2026-08-28T15:20:00.000Z /path/to/session.jsonl
 read-condensed-session --threshold 32000 --concurrency 8 /path/to/session.jsonl
 ```
 
 For a large session, use `--output FILE` and inspect the result in slices.
+
+`--since TIMESTAMP` filters the active path before condensation. The output
+prints both the requested lower bound and the latest included timestamp. A
+caller can use that upper bound as the next read's lower bound. Team
+supervision always supplies `--since`, so each read contains only the worker's
+new activity.
 
 ## Transcript shape
 

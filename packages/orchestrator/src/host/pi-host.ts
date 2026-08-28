@@ -10,8 +10,7 @@ import { mkdir, readFile, rename, stat, writeFile } from "node:fs/promises";
 import { homedir } from "node:os";
 import { dirname, join } from "node:path";
 import { Type } from "typebox";
-import type { TeamAuditVerdict } from "../tasks/types.js";
-import type { HostEvents, HostManager, HostRunResult, LaunchSpec, TeamMember } from "./types.js";
+import type { HostEvents, HostManager, HostMessage, HostRunResult, LaunchSpec } from "./types.js";
 import {
   continuationFor,
   describeWait,
@@ -20,12 +19,7 @@ import {
 } from "./continuations.js";
 import { RunTranscript } from "./transcript.js";
 import { openHostedSession, SESSION_RETRY } from "./session-lifecycle.js";
-import {
-  readCondensedSession,
-  teamContinuation,
-  teamSystemPrompt,
-  teamWorkspaceExtension,
-} from "./team.js";
+import { readCondensedSession, teamSystemPrompt } from "./team.js";
 
 /**
  * In-process host: each launch is one embedded pi AgentSession. This file is
@@ -47,16 +41,6 @@ const PROGRESS_WRITE_INTERVAL_MS = 15_000;
  * only a signal on the same clock can tell those apart. */
 const WAIT_SLICE_MS = 20_000;
 
-function resolveTeamMember(members: readonly TeamMember[], ref: string): TeamMember {
-  const exact = members.find((member) => member.runId === ref);
-  if (exact !== undefined) return exact;
-  const matches = members.filter((member) => member.runId.startsWith(ref));
-  if (matches.length === 0) throw new Error(`${ref} is not on this team`);
-  if (matches.length > 1) throw new Error(`${ref} matches more than one team member; use a longer run id`);
-  return matches[0] as TeamMember;
-}
-
-
 interface CompletionReport {
   complete: boolean;
   productive?: boolean;
@@ -69,6 +53,7 @@ export class PiHost implements HostManager {
     string,
     {
       readonly session: AgentSession;
+      readonly team: boolean;
       readonly cancel: () => void;
       readonly cleanup: () => void;
     }
@@ -81,11 +66,10 @@ export class PiHost implements HostManager {
    * a provider outage is not inside `prompt()`, so `session.abort()` has
    * nothing to interrupt; the wait watches this instead. */
   private readonly aborting = new Set<string>();
-  /** Supervisor corrections and worker-stop alerts waiting to become the next
-   * ordinary user turn. The current turn is aborted when an item arrives. */
-  private readonly interventions = new Map<string, string[]>();
-  /** A team session with no turn in flight sleeps here until another member
-   * creates the next conversation event. */
+  /** Team-to-team Pi messages waiting to become ordinary user turns. */
+  private readonly teamMessages = new Map<string, HostMessage[]>();
+  /** A team session with no turn in flight sleeps here until a Pi message
+   * arrives from another member. */
   private readonly teamWakeups = new Map<string, () => void>();
 
   constructor(
@@ -109,8 +93,8 @@ export class PiHost implements HostManager {
       /** Opening-probe runner. Defaults to `bash -c` in the launch cwd; a
        * test supplies its own. */
       readonly runOpeningProbe?: (command: string, cwd: string) => Promise<string>;
-      /** Condensed worker-context reader. */
-      readonly readCondensed?: (sessionFile: string) => Promise<string>;
+      /** Incremental condensed worker-context reader. */
+      readonly readCondensed?: (sessionFile: string, since: string) => Promise<string>;
     },
   ) {}
 
@@ -221,38 +205,23 @@ export class PiHost implements HostManager {
     this.events.runFinished(runId, { state: "aborted", detail }, Date.now());
   }
 
-  /**
-   * Deliver an operator message into a live session as a user turn, and
-   * mirror it into the transcript so the run's record shows why the agent
-   * changed course. Steered, not queued as a follow-up: an operator
-   * correcting a running agent means "from the next turn on", and a
-   * follow-up would sit unread behind however many hours of tool calls the
-   * agent has left — which is exactly the behaviour worth correcting.
-   */
-  message(runId: string, text: string): boolean {
-    const session = this.runtimes.get(runId)?.session;
-    if (session === undefined) return false;
-    this.transcripts.get(runId)?.append("user", { text });
-    void session.sendUserMessage(text, { deliverAs: "steer" }).catch(() => {
-      // A session that ended between the tick and delivery is not an error
-      // worth killing a runner over; the run row already tells that story.
-    });
-    return true;
-  }
-
-  intervene(runId: string, text: string): boolean {
-    const session = this.runtimes.get(runId)?.session;
-    if (session === undefined) return false;
-    const pending = this.interventions.get(runId) ?? [];
-    pending.push(text);
-    this.interventions.set(runId, pending);
-    this.teamWakeups.get(runId)?.();
-    session.abortCompaction();
-    void session.abort().catch((thrown: unknown) => {
-      this.transcripts.get(runId)?.append("notice", {
-        text: `Could not abort the turn immediately: ${String(thrown)}`,
+  /** Deliver a normal Pi message. Operator messages use Pi's native steering
+   * while team messages wait for the recipient's current turn to settle. */
+  message(runId: string, message: HostMessage): boolean {
+    const runtime = this.runtimes.get(runId);
+    if (runtime === undefined) return false;
+    if (!runtime.team || (message.senderRunId === undefined && runtime.session.isStreaming)) {
+      this.transcripts.get(runId)?.append("user", { text: message.text });
+      void runtime.session.sendUserMessage(message.text, { deliverAs: "steer" }).catch(() => {
+        // The ledger row remains authoritative if the session ended between
+        // the runner tick and delivery.
       });
-    });
+      return true;
+    }
+    const pending = this.teamMessages.get(runId) ?? [];
+    pending.push(message);
+    this.teamMessages.set(runId, pending);
+    this.teamWakeups.get(runId)?.();
     return true;
   }
 
@@ -284,7 +253,6 @@ export class PiHost implements HostManager {
       }
     }
     let report: CompletionReport | undefined;
-    let reports = 0;
     // Check-ins are generated from what the shift actually did; the observer
     // accumulates per-turn facts from the session's own tool stream.
     const observer = new ShiftObserver();
@@ -296,10 +264,7 @@ export class PiHost implements HostManager {
         "cumulative summary every time you land something, then keep working; each " +
         "call replaces the earlier report and the newest is the record. Set " +
         "complete=true only when the task's completion condition is satisfied. Set " +
-        "productive=false only when this launch processed no work unit at all." +
-        (spec.team === undefined
-          ? ""
-          : " In a team this is only a session report; it cannot place the programme completion marker."),
+        "productive=false only when this launch processed no work unit at all.",
       parameters: Type.Object({
         complete: Type.Boolean(),
         productive: Type.Optional(
@@ -310,132 +275,36 @@ export class PiHost implements HostManager {
       }),
       execute: async (_id: string, params: CompletionReport) => {
         report = params;
-        reports++;
         observer.reportFiled(params.productive !== false);
         return { content: [{ type: "text" as const, text: "Report recorded." }], details: undefined };
       },
     };
-    const customTools: any[] = [taskComplete];
-    if (spec.team?.role === "worker") {
-      customTools.push({
-        name: "team_audit",
-        label: "Report completion audit",
-        description:
-          "Record your independent whole-programme verdict in the audit opened by the supervisor. Use pass only after trying to falsify the root theorem and replaying its load-bearing evidence; use objection for any unresolved contradiction, hidden conjecture, or certificate failure.",
-        parameters: Type.Object({
-          audit: Type.Integer({ minimum: 1 }),
-          verdict: Type.Union([Type.Literal("pass"), Type.Literal("objection")]),
-          summary: Type.String({ minLength: 1 }),
-        }),
-        execute: async (
-          _id: string,
-          params: { audit: number; verdict: TeamAuditVerdict; summary: string },
-        ) => ({
-          content: [{
-            type: "text" as const,
-            text: JSON.stringify(
-              this.events.teamAudit(spec.runId, params.audit, params.verdict, params.summary),
-              null,
-              2,
-            ),
-          }],
-          details: undefined,
-        }),
-      });
-    }
+    const customTools: any[] = spec.team === undefined ? [taskComplete] : [];
     if (spec.team?.role === "supervisor") {
-      customTools.push(
-        {
-          name: "team_members",
-          label: "Team members",
-          description: "List this team's worker and supervisor runs, progress times, and condensed-context availability.",
-          parameters: Type.Object({}),
-          execute: async () => ({
-            content: [{
-              type: "text" as const,
-              text: JSON.stringify(this.events.teamMembers(spec.taskId), null, 2),
-            }],
-            details: undefined,
-          }),
+      customTools.push({
+        name: "read_compressed_context",
+        label: "Read compressed context",
+        description:
+          "Read one worker's incremental Pi session context beginning at the supplied timestamp from its idle notification.",
+        parameters: Type.Object({
+          runId: Type.String({ minLength: 1 }),
+          since: Type.String({ minLength: 1 }),
+        }),
+        execute: async (_id: string, params: { runId: string; since: string }) => {
+          const parsed = Date.parse(params.since);
+          if (!Number.isFinite(parsed)) throw new Error("since must be an ISO timestamp");
+          const worker = this.events.teamWorkerSession(spec.runId, params.runId);
+          if (worker.sessionFile === undefined) {
+            throw new Error(`${worker.runId} has no readable Pi session file yet`);
+          }
+          const condensed = this.options.readCondensed ?? readCondensedSession;
+          const text = await condensed(worker.sessionFile, new Date(parsed).toISOString());
+          return {
+            content: [{ type: "text" as const, text }],
+            details: { runId: worker.runId, since: new Date(parsed).toISOString() },
+          };
         },
-        {
-          name: "team_context",
-          label: "Worker context",
-          description: "Read one worker's Pi Stack compacted-context view. Cycle through every live worker with this tool.",
-          parameters: Type.Object({ runId: Type.String({ minLength: 1 }) }),
-          execute: async (_id: string, params: { runId: string }) => {
-            const member = resolveTeamMember(this.events.teamMembers(spec.taskId), params.runId);
-            if (member.role !== "worker") {
-              throw new Error(`${params.runId} is not a worker on this team`);
-            }
-            if (member.sessionFile === undefined) {
-              throw new Error(`${member.runId} has no readable Pi session file yet`);
-            }
-            const condensed = this.options.readCondensed ?? readCondensedSession;
-            const text = await condensed(member.sessionFile);
-            return { content: [{ type: "text" as const, text }], details: { runId: member.runId } };
-          },
-        },
-        {
-          name: "team_completion",
-          label: "Team completion",
-          description:
-            "Read or change the durable whole-programme completion marker. begin_audit sends the same independent falsification request to every worker. Never use it to assign leaves. complete is accepted only after every worker slot has passed the current audit; withdraw returns the room to ordinary work when an objection lands.",
-          parameters: Type.Object({
-            action: Type.Union([
-              Type.Literal("status"),
-              Type.Literal("begin_audit"),
-              Type.Literal("withdraw"),
-              Type.Literal("complete"),
-            ]),
-            summary: Type.Optional(Type.String({ minLength: 1 })),
-          }),
-          execute: async (
-            _id: string,
-            params: {
-              action: "status" | "begin_audit" | "withdraw" | "complete";
-              summary?: string;
-            },
-          ) => {
-            if (params.action !== "status" && params.summary === undefined) {
-              throw new Error(`${params.action} needs a summary`);
-            }
-            const status = params.action === "status"
-              ? this.events.teamCompletion(spec.taskId)
-              : this.events.teamCompletionAction(spec.runId, params.action, params.summary!);
-            return {
-              content: [{ type: "text" as const, text: JSON.stringify(status, null, 2) }],
-              details: undefined,
-            };
-          },
-        },
-        {
-          name: "team_intervene",
-          label: "Intervene with worker",
-          description:
-            "Send one worker its next warm programme-level message. A worker that has stopped cannot continue until you answer with this tool. A worker still mid-turn is interrupted, so proactive corrections remain rare and should follow a concrete warning sign.",
-          parameters: Type.Object({
-            runId: Type.String({ minLength: 1 }),
-            message: Type.String({ minLength: 1 }),
-          }),
-          execute: async (_id: string, params: { runId: string; message: string }) => {
-            const member = resolveTeamMember(this.events.teamMembers(spec.taskId), params.runId);
-            if (member.role !== "worker") {
-              throw new Error(`${params.runId} is not a worker on this team`);
-            }
-            const result = this.events.teamIntervene(spec.runId, member.runId, params.message);
-            return {
-              content: [{
-                type: "text" as const,
-                text: result.respondedToStop
-                  ? `Response to ${member.runId} stop ${result.stop} queued. The worker can continue when its runner delivers your message.`
-                  : `Queued for ${member.runId}. Its runner will abort the in-flight turn before delivering the message.`,
-              }],
-              details: result,
-            };
-          },
-        },
-      );
+      });
     }
 
     // A builtin family resolves before the session exists; an extension
@@ -461,9 +330,6 @@ export class PiHost implements HostManager {
         cwd: spec.cwd ?? process.cwd(),
         agentDir: this.options.agentDir ?? join(homedir(), ".pi", "agent"),
         appendSystemPrompt,
-        ...(spec.team === undefined
-          ? {}
-          : { extensionFactories: [teamWorkspaceExtension(spec.cwd ?? process.cwd(), spec.team.role)] }),
       });
       await resourceLoader.reload();
     }
@@ -513,27 +379,6 @@ export class PiHost implements HostManager {
       }
       return true;
     };
-    const queueStopReminder = (): boolean => {
-      if (spec.team?.role !== "supervisor") return false;
-      if ((this.interventions.get(spec.runId)?.length ?? 0) > 0) return true;
-      const waiting = this.events
-        .teamMembers(spec.taskId)
-        .filter((member) => member.role === "worker" && member.waiting);
-      if (waiting.length === 0) return false;
-      const pending = waiting.map(
-        (worker) =>
-          `- ${worker.runId}, stop ${worker.stop}` +
-          (worker.stoppedAt === undefined
-            ? ""
-            : ` at ${new Date(worker.stoppedAt).toISOString()}`),
-      );
-      this.interventions.set(spec.runId, [[
-        "These workers have stopped and cannot continue until you respond:",
-        ...pending,
-        "Read each worker's current context, then call team_intervene with the next warm programme-level message for every waiting worker.",
-      ].join("\n")]);
-      return true;
-    };
     const disposers: (() => void)[] = [hosted.dispose];
     let cleaned = false;
     const cleanup = () => {
@@ -542,11 +387,16 @@ export class PiHost implements HostManager {
       this.runtimes.delete(spec.runId);
       this.transcripts.delete(spec.runId);
       this.aborting.delete(spec.runId);
-      this.interventions.delete(spec.runId);
+      this.teamMessages.delete(spec.runId);
       this.teamWakeups.delete(spec.runId);
       for (const dispose of disposers.reverse()) dispose();
     };
-    this.runtimes.set(spec.runId, { session, cancel: cancelRun, cleanup });
+    this.runtimes.set(spec.runId, {
+      session,
+      team: spec.team !== undefined,
+      cancel: cancelRun,
+      cleanup,
+    });
     try {
       this.events.sessionStarted(
         spec.runId,
@@ -626,42 +476,45 @@ export class PiHost implements HostManager {
         }
       }
       let turn = 0;
+      let envelope: HostMessage | undefined;
       let resume =
-        spec.resumeSessionFile === undefined
+        spec.resumeSessionFile === undefined ||
+        spec.team?.role === "supervisor" ||
+        spec.team?.idleAt !== undefined
           ? undefined
           : interruptedTurnPrompt(
               "the process hosting this session stopped",
               "I reopened your durable Pi session with its full conversation and working context.",
             );
       for (;;) {
-        // The lane's check-in (see continuations.ts) is generated from the
-        // observed shift, so the message answers what the agent actually did
-        // rather than firing a fixed sequence on a timer. A resumption note
-        // pre-empts it: a turn the provider cut off was not a turn the agent
-        // finished, and asking it "what did you land?" would be a lie about
-        // what just happened.
-        const intervention = this.interventions.get(spec.runId)?.shift();
+        const firstTeamTurn =
+          spec.team !== undefined && spec.resumeSessionFile === undefined && turn === 0;
+        if (spec.team !== undefined && !firstTeamTurn && resume === undefined && envelope === undefined) {
+          transcript?.append("notice", { text: "Idle. Waiting for the next Pi message." });
+          const awakened = await waitForTeam(
+            () => (this.teamMessages.get(spec.runId)?.length ?? 0) > 0,
+          );
+          if (!awakened) return { state: "aborted", detail: "session aborted" };
+          envelope = this.teamMessages.get(spec.runId)?.shift();
+          if (envelope === undefined) continue;
+        }
         const message =
-          intervention ??
           resume ??
-          (turn === 0
-            ? prompt
-            : spec.team === undefined
-              ? continuationFor({
+          (spec.team !== undefined
+            ? firstTeamTurn
+              ? prompt
+              : envelope!.text
+            : turn === 0
+              ? prompt
+              : continuationFor({
                   taskId: spec.taskId,
                   turn,
                   turns: observer.turns(),
-                })
-              : teamContinuation(spec.team.role));
+                }));
         transcript?.append("user", { text: message });
         if (await interrupted(promptAndSettle(session, message))) {
           return { state: "aborted", detail: "session killed" };
         }
-        // prompt() resolves even when the turn failed provider-side; the
-        // truth is on the final assistant message. An errored turn that is
-        // out of waits must be an error run (circuit breaker, account
-        // cooldown), never quiet unproductive-done — that combination
-        // relaunches every tick.
         const last = lastAssistant(session);
         if (last?.stopReason === "error") {
           const detail = last.errorMessage ?? "assistant turn errored";
@@ -676,82 +529,57 @@ export class PiHost implements HostManager {
             );
             continue;
           }
-          if (report === undefined) return { state: "error", detail };
-          break; // Work already banked: report it rather than lose it.
+          if (report === undefined || spec.team !== undefined) return { state: "error", detail };
+          break;
         }
         if (last?.stopReason === "aborted") {
-          // A supervisor correction deliberately aborts the in-flight turn.
-          // Its queued text becomes the next ordinary user turn in this same
-          // loop, preserving the session rather than turning intervention
-          // into termination.
-          if ((this.interventions.get(spec.runId)?.length ?? 0) > 0) {
-            resume = undefined;
-            continue;
+          if (report === undefined || spec.team !== undefined) {
+            return { state: "aborted", detail: "session aborted" };
           }
-          if (report === undefined) return { state: "aborted", detail: "session aborted" };
           break;
         }
         stalls = 0;
         resume = undefined;
         observer.endTurn();
         if (spec.team !== undefined) {
-          if (this.events.laneDrained(spec.taskId)) {
-            transcript?.append("notice", {
-              text: "The team's unanimous completion marker is set; ending this session.",
-            });
-            break;
-          }
           if (spec.team.role === "worker") {
-            const stopped = this.events.teamStopped(spec.runId);
+            const idle = this.events.teamWorkerIdle(spec.runId);
             transcript?.append("notice", {
-              text: `Turn ${stopped.stop} finished. Waiting for the supervisor's next message.`,
+              text: `Worker idle as of ${new Date(idle.idleAt).toISOString()}.`,
             });
-            const resumed = await waitForTeam(
-              () =>
-                this.events.laneDrained(spec.taskId) ||
-                (!this.events.teamWaiting(spec.runId) &&
-                  (this.interventions.get(spec.runId)?.length ?? 0) > 0),
-            );
-            if (!resumed) return { state: "aborted", detail: "session aborted" };
-          } else {
-            if (!queueStopReminder()) {
-              transcript?.append("notice", {
-                text: "All workers are moving. Waiting for the next worker to stop.",
-              });
-              const awakened = await waitForTeam(
-                () =>
-                  this.events.laneDrained(spec.taskId) ||
-                  (this.interventions.get(spec.runId)?.length ?? 0) > 0 ||
-                  this.events
-                    .teamMembers(spec.taskId)
-                    .some((member) => member.role === "worker" && member.waiting),
+          } else if (
+            envelope?.replyRunId !== undefined &&
+            envelope.replyIdleAt !== undefined
+          ) {
+            const response = lastAssistantText(session);
+            if (response === "") {
+              this.teamMessages.set(spec.runId, [
+                envelope,
+                ...(this.teamMessages.get(spec.runId) ?? []),
+              ]);
+            } else {
+              const delivered = this.events.teamSupervisorResponded(
+                spec.runId,
+                envelope.replyRunId,
+                envelope.replyIdleAt,
+                response,
               );
-              if (!awakened) return { state: "aborted", detail: "session aborted" };
-              queueStopReminder();
+              if (!delivered) {
+                transcript?.append("notice", {
+                  text: `Worker ${envelope.replyRunId} already moved past this idle notification; response not delivered.`,
+                });
+              }
             }
           }
-          if (this.events.laneDrained(spec.taskId)) break;
+          envelope = undefined;
           turn++;
           continue;
         }
-        // The abort can race with a turn that was already finishing. A queued
-        // operator correction still gets the next user turn rather than
-        // disappearing at a self-paced or check-in boundary.
-        if ((this.interventions.get(spec.runId)?.length ?? 0) > 0) continue;
-        // A self-paced shift is one work turn: the agent ending it is the
-        // agent deciding to stop, and no check-in second-guesses that.
         if (spec.selfPaced === true) break;
-        // A queue lane can empty its queue mid-shift, and a continuation
-        // would then assert work that no longer exists. Ending the shift is
-        // the honest answer; the runner decides which lanes work that way.
         if (this.events.laneDrained(spec.taskId)) {
           transcript?.append("notice", { text: "Lane drained: no work left, ending the shift." });
           break;
         }
-        // Spent in the ledger before it is spoken, so the budget survives
-        // this process. Nothing about the turn's quality is consulted: the
-        // host may ask five times, and how the agent spends the answers is
-        // the agent's business.
         if (!this.events.claimCheckIn(spec.runId)) break;
         turn++;
       }
@@ -937,6 +765,11 @@ function lastAssistant(
     .find(
       (m): m is typeof m & { stopReason?: string; errorMessage?: string } => m.role === "assistant",
     );
+}
+
+function lastAssistantText(session: AgentSession): string {
+  const message = [...session.messages].reverse().find((entry) => entry.role === "assistant");
+  return messageText(message);
 }
 
 /** Transcript payloads are for a human reader, not a second data authority:

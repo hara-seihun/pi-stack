@@ -213,58 +213,40 @@ Three launch-side fields describe scheduling:
   math-frontier lane on 2026-08-22, the exchange moved self-assessed odds on
   an open target from about 0.1% to 25–40%; the experiment record lives in
   `~/data/thread-lab/_experiments/2026-08-22-erdos647-priors/`.
-- `team`: one durable room with a fixed number of equal workers and one
-  supervisor. A team task uses ordinary positive demand as a boolean request
-  for its complete roster. The controller reconciles worker slots plus the
-  supervisor slot independently, so an infrastructure failure replaces only
-  that member. Every worker receives the task's same complete prompt. The
-  supervisor receives `team.supervisorPrompt`; `team.watchFor` is added to its
-  pinned system instructions as a list of signs worth inspecting, never as an
-  automatic intervention policy.
+- `team`: one durable room with a fixed number of workers and one supervisor.
+  Positive demand asks for the complete roster. The controller reconciles each
+  slot independently, so an infrastructure failure replaces one session rather
+  than restarting the room. Every worker receives the task prompt, and the
+  supervisor receives `team.supervisorPrompt`.
 
-  Team sessions share the task's `cwd`. If current account capacity can hold
-  only part of a roster, the controller starts the supervisor before worker
-  slots. Starting workers first deadlocks a room when those workers finish
-  their opening turns and park while still consuming every available account.
-  A session-local extension reports files changed since that member's last successful edit. Workers cannot call
-  `edit` or `write` until they read every current changed file, which prevents
-  an unseen teammate version from being silently overwritten. Parallel
-  derivations remain welcome, and the filesystem is the coordination record.
+  Team sessions share the task's `cwd`. If account capacity can hold only part
+  of the roster, the controller starts the supervisor first. The filesystem and
+  Git remain the coordination record. Pi's normal read, edit, and write tools
+  work without a second locking or task-allocation protocol.
 
-  Team turns form one durable conversation. Whenever a worker finishes a turn,
-  the ledger records its stop, wakes the supervisor, and parks the worker's
-  session with its full context. The worker cannot continue until the
-  supervisor answers it through `team_intervene`. Once every waiting worker has
-  an answer, the supervisor parks too; the next worker stop wakes it. This
-  event-driven handoff has no check-in budget, so a team does not dissolve and
-  relaunch merely because its members finished ordinary turns. The host also
-  waits through extension-triggered compaction and its automatic continuation
-  before classifying a turn. Pi's manual compaction API first aborts the active
-  agent run, so treating the first `prompt()` resolution as terminal would
-  discard the compaction callback and relaunch every member around 250,000
-  context tokens.
+  A worker becomes idle when its Pi turn settles. The ledger records the idle
+  timestamp and sends the supervisor an ordinary Pi user message containing the
+  worker run id and the start of its new context window. The supervisor's
+  assistant response is delivered verbatim as that worker's next ordinary user
+  message. There are no stop commands, waiting commands, intervention tools, or
+  team completion state. A team remains desired while its task demand is
+  positive. Change that desired state when the room should end.
 
-  The supervisor has `team_members`, `team_context`, `team_intervene`, and
-  `team_completion`. `team_members` shows which workers are waiting and their
-  stop sequence. `team_context` runs `/srv/pi/tools/read-condensed-session/main`
-  against the exact Pi session file recorded for a worker, so the supervisor
-  reads the worker's real condensed reasoning and recent activity rather than
-  a status report. `team_intervene` atomically acknowledges a waiting stop and
-  queues the supervisor's response for that worker's runner. For a proactive
-  correction, the host aborts the in-flight turn and sends the correction as
-  the next ordinary user message in the same session. The supervisor system
-  prompt forbids task allocation. It steers toward the whole programme as a
-  trusted colleague rather than splitting the room into assigned leaves.
+  The supervisor's only team-specific tool is `read_compressed_context`. It
+  requires the worker run id and the `since` timestamp from the idle
+  notification. The condenser reads the exact Pi session file, filters before
+  summarizing, and prints the window's upper timestamp. This keeps repeated
+  supervision reads proportional to new work instead of replaying the whole
+  session. The supervisor can skip the read when the notification and shared
+  files already provide enough context.
 
-  Programme completion is deliberately not a `task_complete` flag from any
-  one session. The supervisor opens a durable audit with `team_completion`;
-  every worker receives the same whole-programme falsification request and
-  reports `pass` or `objection` through `team_audit`. An audit generation can
-  close only after every worker slot has an independent current pass. The
-  supervisor withdraws it when an objection survives, or places the durable
-  completion marker after unanimity. That marker stops replacement launches
-  and lets every live member settle its current turn. `task list` and `status`
-  expose the team's `working`, `audit`, or `complete` phase.
+  Team messages survive runner restarts in `run_message`. An idle worker's
+  timestamp also survives. A replacement supervisor receives fresh
+  notifications for every idle worker, and an idle worker recovered on another
+  runner waits rather than inventing a recovery turn. Replies carry the idle
+  timestamp they answer, so a delayed response cannot resume a worker that has
+  already moved to a later turn. Operator `say` messages use Pi's normal message
+  delivery instead of a separate team channel.
 - `demand`: a constant or a cheap read-only probe command whose last stdout
   line is a work-unit count. `0` means no work; agents are never launched to
   discover idleness. Results are cached with a TTL and invalidated by task

@@ -1,8 +1,3 @@
-import type {
-  TeamAuditVerdict,
-  TeamCompletionStatus,
-} from "../tasks/types.js";
-
 /**
  * How many check-ins the host may send before it stops re-prompting a shift.
  *
@@ -24,9 +19,8 @@ import type {
  * It is a constant and not a knob. The override that used to exist could
  * only make a shift longer, and a non-numeric one removed the cap outright
  * (`turn >= NaN` is false forever), which is the shape of the failure it
- * exists to prevent. Team sessions do not use this budget. Their turns are
- * paced by durable worker-stop and supervisor-response events until the
- * unanimous programme marker closes the room.
+ * exists to prevent. Team sessions do not use this budget. Pi messages pace
+ * their turns until the operator changes the lane's desired state.
  */
 export const MAX_CHECK_INS = 5;
 
@@ -39,33 +33,27 @@ export interface TeamLaunch {
   readonly role: "worker" | "supervisor";
   readonly slot: number;
   readonly workers: number;
-  readonly watchFor: readonly string[];
+  /** A recovered idle worker waits for its next supervisor message instead
+   * of inventing a process-recovery turn. */
+  readonly idleAt?: number;
 }
 
-export interface TeamMember {
-  readonly runId: string;
-  readonly role: "worker" | "supervisor";
-  readonly slot: number;
-  readonly state: "pending" | "running" | "done" | "error" | "aborted";
-  readonly progressAt?: number;
-  readonly sessionFile?: string;
-  /** Workers stop after every turn until the supervisor sends their next
-   * message. Supervisors never use these fields. */
-  readonly waiting: boolean;
-  readonly stop: number;
-  readonly stoppedAt?: number;
+export interface HostMessage {
+  readonly text: string;
+  /** Present for a Pi message sent by another team session. Operator messages
+   * omit it and use Pi's native steering behavior. */
+  readonly senderRunId?: string;
+  /** A supervisor's assistant response to this turn is delivered here. */
+  readonly replyRunId?: string;
+  /** Idle generation the response belongs to. */
+  readonly replyIdleAt?: number;
 }
 
-export interface TeamStop {
+export interface TeamIdle {
   readonly taskId: string;
   readonly workerRunId: string;
-  readonly stop: number;
-  readonly stoppedAt: number;
-}
-
-export interface TeamMessageResult {
-  readonly respondedToStop: boolean;
-  readonly stop?: number;
+  readonly idleAt: number;
+  readonly contextSince: number;
 }
 
 export interface LaunchSpec {
@@ -108,9 +96,9 @@ export interface HostRunResult {
 /**
  * A host runs agent sessions. `launch` must not throw and must eventually
  * cause exactly one `runFinished` report for the run; `abort` is best-effort.
- * `message` delivers an operator turn into a live session and reports whether
- * this host still holds it — killing an agent must not be the only way to
- * change what it is doing.
+ * `message` delivers a Pi turn into a live session and reports whether this
+ * host still holds it. Killing an agent must not be the only way to change
+ * what it is doing.
  */
 export interface HostManager {
   launch(spec: LaunchSpec): void;
@@ -124,10 +112,7 @@ export interface HostManager {
   kill(runId: string, detail: string): void;
   /** Runs this host still holds a live session for. */
   liveRuns(): readonly string[];
-  message(runId: string, text: string): boolean;
-  /** Abort the current turn, then deliver text as the next ordinary user
-   * message while preserving the session and its context. */
-  intervene(runId: string, text: string): boolean;
+  message(runId: string, message: HostMessage): boolean;
 }
 
 /** How the host reports back, and the one question it asks: implemented by
@@ -142,35 +127,20 @@ export interface HostEvents {
    * session exists, so the usage the session is about to record is
    * attributable to the lane that asked for it. */
   sessionStarted(runId: string, sessionId: string, sessionFile?: string): void;
-  teamMembers(taskId: string): readonly TeamMember[];
-  teamCompletion(taskId: string): TeamCompletionStatus;
-  /** Open, withdraw, or close the team's whole-programme audit. These are
-   * supervisor-only transitions; completion requires one passing verdict
-   * from every worker slot in the current audit generation. */
-  teamCompletionAction(
-    supervisorRunId: string,
-    action: "begin_audit" | "withdraw" | "complete",
-    summary: string,
-  ): TeamCompletionStatus;
-  /** Record this worker slot's independent verdict in the open audit. */
-  teamAudit(
-    workerRunId: string,
-    audit: number,
-    verdict: TeamAuditVerdict,
-    summary: string,
-  ): TeamCompletionStatus;
-  /** Record that a worker finished a turn and wake the current supervisor. */
-  teamStopped(workerRunId: string): TeamStop;
-  /** Whether this worker still needs the supervisor's next message. */
-  teamWaiting(workerRunId: string): boolean;
-  /** Queue a supervisor message. If the worker is waiting, this atomically
-   * acknowledges its latest stop before delivery; otherwise it is a proactive
-   * correction. The target runner performs the abort and user-message delivery. */
-  teamIntervene(
+  /** Record that a worker's Pi turn settled and notify the supervisor. */
+  teamWorkerIdle(workerRunId: string): TeamIdle;
+  /** Route the supervisor's Pi response to the idle worker it was answering. */
+  teamSupervisorResponded(
     supervisorRunId: string,
     workerRunId: string,
+    idleAt: number,
     text: string,
-  ): TeamMessageResult;
+  ): boolean;
+  /** Resolve the readable Pi session for one worker on this supervisor's team. */
+  teamWorkerSession(
+    supervisorRunId: string,
+    workerRunId: string,
+  ): { runId: string; sessionFile?: string };
   /** True when this lane has run out of work and its shift should end rather
    * than be re-prompted. The policy (which lanes end this way, and what
    * counts as drained) lives in the runner; the host only asks. */

@@ -101,7 +101,12 @@ describe("ledger", () => {
     Ledger.open(path).close();
     const db = new DatabaseSync(path);
     db.exec(
-      "DROP INDEX run_team_waiting; ALTER TABLE run DROP COLUMN team_stopped_at; " +
+      "DROP TRIGGER previous_team_waiting_to_idle; DROP INDEX run_team_idle; " +
+        "ALTER TABLE run DROP COLUMN idle_at; ALTER TABLE run DROP COLUMN context_since; " +
+        "ALTER TABLE run_message DROP COLUMN sender_run_id; " +
+        "ALTER TABLE run_message DROP COLUMN reply_run_id; " +
+        "ALTER TABLE run_message DROP COLUMN reply_idle_at; " +
+        "DROP INDEX run_team_waiting; ALTER TABLE run DROP COLUMN team_stopped_at; " +
         "ALTER TABLE run DROP COLUMN team_stop; ALTER TABLE run DROP COLUMN team_waiting; " +
         "DROP TABLE team_audit; DROP TABLE team_completion; DROP INDEX run_team_roster; " +
         "ALTER TABLE run DROP COLUMN team_role; ALTER TABLE run DROP COLUMN team_slot; " +
@@ -137,9 +142,8 @@ describe("ledger", () => {
     migrated.close();
     expect(await exited, stderr).toBe(0);
     const verified = new DatabaseSync(path);
-    expect((verified.prepare("PRAGMA user_version").get() as { user_version: number }).user_version).toBe(24);
-    expect(verified.prepare("SELECT check_ins, session_id FROM run LIMIT 1").all()).toEqual([]);
-    expect(verified.prepare("SELECT phase, audit FROM team_completion LIMIT 1").all()).toEqual([]);
+    expect((verified.prepare("PRAGMA user_version").get() as { user_version: number }).user_version).toBe(25);
+    expect(verified.prepare("SELECT check_ins, session_id, idle_at, context_since FROM run LIMIT 1").all()).toEqual([]);
     expect(
       (verified.prepare("PRAGMA table_info(run_session)").all() as { name: string }[])
         .some((column) => column.name === "parent_session_id"),
@@ -153,7 +157,7 @@ describe("ledger", () => {
     verified.close();
   });
 
-  it("makes every worker stop wait for one durable supervisor response", () => {
+  it("turns worker idleness and a supervisor response into durable Pi messages", () => {
     const ledger = Ledger.open(":memory:");
     ledger.upsertTask({
       id: "team-turns",
@@ -161,7 +165,7 @@ describe("ledger", () => {
       tiers: mix("standard"),
       prompt: "Classify every Cayley graph.",
       cwd: "/work",
-      team: { workers: 1, supervisorPrompt: "Keep the whole programme moving.", watchFor: [] },
+      team: { workers: 1, supervisorPrompt: "Keep the whole programme moving." },
     });
     const create = (role: "worker" | "supervisor", slot: number, at: number) =>
       ledger.createRun({
@@ -178,25 +182,70 @@ describe("ledger", () => {
     const worker = create("worker", 1, 2);
     ledger.claimRuns("runner", 2, 3);
 
-    expect(ledger.teamWorkerStopped(worker, 4)).toMatchObject({ stop: 1, stoppedAt: 4 });
-    expect(ledger.run(worker)).toMatchObject({ teamWaiting: true, teamStop: 1 });
-    expect(ledger.pendingRunMessages(supervisor)[0]?.text).toContain("cannot continue until you respond");
+    expect(ledger.teamWorkerIdle(worker, 4)).toMatchObject({
+      workerRunId: worker,
+      idleAt: 4,
+      contextSince: 2,
+    });
+    expect(ledger.run(worker)).toMatchObject({ idleAt: 4, contextSince: 2 });
+    expect(ledger.pendingRunMessages(supervisor)[0]).toMatchObject({
+      senderRunId: worker,
+      replyRunId: worker,
+      replyIdleAt: 4,
+    });
 
     expect(
-      ledger.respondToTeamWorker(
+      ledger.resumeTeamWorker(
         supervisor,
         worker,
+        4,
         "Look for one criterion that decides the whole family.",
         5,
       ),
-    ).toEqual({ respondedToStop: true, stop: 1 });
-    expect(ledger.run(worker)?.teamWaiting).toBe(false);
-    expect(ledger.pendingRunMessages(worker)[0]?.text).toContain("criterion that decides");
-    expect(ledger.teamWorkerStopped(worker, 6).stop).toBe(2);
+    ).toBe(true);
+    expect(ledger.run(worker)).toMatchObject({ idleAt: undefined, contextSince: 5 });
+    expect(ledger.pendingRunMessages(worker)[0]).toMatchObject({
+      senderRunId: supervisor,
+      text: "Look for one criterion that decides the whole family.",
+    });
+    expect(ledger.resumeTeamWorker(supervisor, worker, 4, "stale", 6)).toBe(false);
     ledger.close();
   });
 
-  it("carries audit state across runs and requires the current worker in each slot", () => {
+  it("mirrors idle state from a draining pre-native runner", () => {
+    const path = join(dir, "team-rolling.sqlite3");
+    const ledger = Ledger.open(path);
+    ledger.upsertTask({
+      id: "team-rolling",
+      demandConstant: 1,
+      tiers: mix("standard"),
+      prompt: "Whole programme.",
+      cwd: "/work",
+      team: { workers: 1, supervisorPrompt: "Observe." },
+    });
+    const worker = ledger.createRun({
+      taskId: "team-rolling",
+      tier: "standard",
+      accountId: "account",
+      provider: "provider",
+      model: "model",
+      teamRole: "worker",
+      teamSlot: 1,
+      at: 10,
+    });
+    ledger.claimRuns("previous-runner", 1, 11);
+    const previous = new DatabaseSync(path);
+    previous.prepare(
+      "UPDATE run SET team_waiting = 1, team_stop = 1, team_stopped_at = ? WHERE id = ?",
+    ).run(12, worker);
+    expect(ledger.run(worker)).toMatchObject({ idleAt: 12, contextSince: 10 });
+    previous.prepare("UPDATE run SET team_waiting = 0 WHERE id = ?").run(worker);
+    expect(ledger.run(worker)?.idleAt).toBeUndefined();
+    previous.close();
+    ledger.close();
+  });
+
+  it("re-notifies a replacement supervisor about every idle worker", () => {
     const ledger = Ledger.open(":memory:");
     ledger.upsertTask({
       id: "team",
@@ -204,7 +253,7 @@ describe("ledger", () => {
       tiers: mix("standard"),
       prompt: "Whole programme.",
       cwd: "/work",
-      team: { workers: 1, supervisorPrompt: "Observe.", watchFor: [] },
+      team: { workers: 1, supervisorPrompt: "Observe." },
     });
     const create = (role: "worker" | "supervisor", slot: number, at: number) =>
       ledger.createRun({
@@ -218,15 +267,18 @@ describe("ledger", () => {
         at,
       });
     const supervisor = create("supervisor", 0, 1);
-    const firstWorker = create("worker", 1, 2);
-    const audit = ledger.beginTeamAudit("team", supervisor, "Closure appears plausible.", 3);
-    ledger.reportTeamAudit("team", audit.audit, 1, firstWorker, "pass", "First worker passed.", 4);
-    ledger.finishRun(firstWorker, { state: "done" }, 5);
-    const replacement = create("worker", 1, 6);
-    expect(() => ledger.markTeamComplete("team", supervisor, 1, "Close.", 7))
-      .toThrow(/worker slot\(s\) 1/);
-    ledger.reportTeamAudit("team", audit.audit, 1, replacement, "pass", "Replacement passed.", 8);
-    expect(ledger.markTeamComplete("team", supervisor, 1, "Close.", 9).phase).toBe("complete");
+    const worker = create("worker", 1, 2);
+    ledger.claimRuns("runner", 2, 3);
+    ledger.teamWorkerIdle(worker, 4);
+    ledger.finishRun(supervisor, { state: "done" }, 5);
+    const replacement = create("supervisor", 0, 6);
+    ledger.claimRuns("runner", 1, 7);
+    ledger.notifyIdleTeamWorkers(replacement, 8);
+    expect(ledger.pendingRunMessages(replacement)[0]).toMatchObject({
+      replyRunId: worker,
+      replyIdleAt: 4,
+    });
+    ledger.close();
   });
 
   it("replayed calibrator is identical to one that lived through the events", () => {

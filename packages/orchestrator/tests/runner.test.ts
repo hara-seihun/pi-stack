@@ -1,7 +1,7 @@
 import { describe, expect, it } from "vitest";
 import { Ledger } from "../src/ledger/ledger.js";
 import { Runner, bumpRunnerGeneration } from "../src/host/runner.js";
-import type { HostManager, LaunchSpec } from "../src/host/types.js";
+import type { HostManager, HostMessage, LaunchSpec } from "../src/host/types.js";
 import { mix } from "./harness.js";
 
 class FakeEngine implements HostManager {
@@ -23,17 +23,11 @@ class FakeEngine implements HostManager {
   liveRuns(): readonly string[] {
     return [...this.live];
   }
-  messages: { runId: string; text: string }[] = [];
+  messages: { runId: string; message: HostMessage }[] = [];
   /** Live sessions only: a run this engine never launched cannot be told anything. */
-  message(runId: string, text: string): boolean {
+  message(runId: string, message: HostMessage): boolean {
     if (!this.launched.some((spec) => spec.runId === runId)) return false;
-    this.messages.push({ runId, text });
-    return true;
-  }
-  interventions: { runId: string; text: string }[] = [];
-  intervene(runId: string, text: string): boolean {
-    if (!this.launched.some((spec) => spec.runId === runId)) return false;
-    this.interventions.push({ runId, text });
+    this.messages.push({ runId, message });
     return true;
   }
 }
@@ -285,7 +279,7 @@ describe("operator messages reach a live session", () => {
     ledger.queueRunMessage(runId, "Keep every command under a minute.", 150);
     ledger.queueRunMessage(runId, "Timeout everything.", 160);
     runner.tick(200);
-    expect(engine.messages.map((m) => m.text)).toEqual([
+    expect(engine.messages.map((m) => m.message.text)).toEqual([
       "Keep every command under a minute.",
       "Timeout everything.",
     ]);
@@ -310,7 +304,7 @@ describe("operator messages reach a live session", () => {
     expect(ledger.pendingRunMessages(runId).map((m) => m.text)).toEqual(["Stop that."]);
   });
 
-  it("wakes the supervisor on every worker stop and resumes only after its response", () => {
+  it("routes idle notifications and supervisor replies as durable Pi messages", () => {
     const ledger = Ledger.open(":memory:");
     ledger.upsertAccount({ id: "anth-1", provider: "anthropic" });
     ledger.upsertTask({
@@ -319,9 +313,9 @@ describe("operator messages reach a live session", () => {
       tiers: mix("standard"),
       prompt: "Whole programme.",
       cwd: "/work",
-      team: { workers: 1, supervisorPrompt: "Observe.", watchFor: [] },
+      team: { workers: 1, supervisorPrompt: "Observe." },
     });
-    const create = (teamRole: "worker" | "supervisor", teamSlot: number) =>
+    const create = (teamRole: "worker" | "supervisor", teamSlot: number, at: number) =>
       ledger.createRun({
         taskId: "team",
         tier: "standard",
@@ -330,115 +324,48 @@ describe("operator messages reach a live session", () => {
         provider: "anthropic",
         teamRole,
         teamSlot,
-        at: teamSlot,
+        at,
       });
-    const supervisorId = create("supervisor", 0);
-    const workerId = create("worker", 1);
+    const supervisorId = create("supervisor", 0, 1);
+    const workerId = create("worker", 1, 2);
     const engine = new FakeEngine();
     const runner = new Runner(ledger, engine, { runnerId: "r1", maxSessions: 5 });
     runner.tick(100);
     runner.sessionStarted(workerId, "session-worker", "/sessions/worker.jsonl");
-
-    expect(runner.teamMembers("team").find((member) => member.runId === workerId)?.sessionFile)
+    expect(runner.teamWorkerSession(supervisorId, workerId).sessionFile)
       .toBe("/sessions/worker.jsonl");
-    expect(runner.teamStopped(workerId).stop).toBe(1);
-    expect(runner.teamMembers("team").find((member) => member.runId === workerId)?.waiting)
-      .toBe(true);
+
+    const idle = runner.teamWorkerIdle(workerId);
     runner.tick(150);
-    expect(engine.interventions[0]).toMatchObject({ runId: supervisorId });
-    expect(engine.interventions[0]?.text).toContain("cannot continue until you respond");
+    expect(engine.messages[0]).toMatchObject({
+      runId: supervisorId,
+      message: {
+        senderRunId: workerId,
+        replyRunId: workerId,
+        replyIdleAt: idle.idleAt,
+      },
+    });
+    expect(engine.messages[0]?.message.text).toContain("read_compressed_context");
 
     expect(
-      runner.teamIntervene(
+      runner.teamSupervisorResponded(
         supervisorId,
         workerId,
+        idle.idleAt,
         "Step back from the constant ladder and look for the general mechanism.",
       ),
-    ).toEqual({ respondedToStop: true, stop: 1 });
-    expect(runner.teamMembers("team").find((member) => member.runId === workerId)?.waiting)
-      .toBe(false);
+    ).toBe(true);
     runner.tick(200);
-    expect(engine.interventions[1]).toEqual({
+    expect(engine.messages[1]).toEqual({
       runId: workerId,
-      text: "Step back from the constant ladder and look for the general mechanism.",
+      message: {
+        text: "Step back from the constant ladder and look for the general mechanism.",
+        senderRunId: supervisorId,
+        replyRunId: undefined,
+        replyIdleAt: undefined,
+      },
     });
-    expect(engine.messages).toEqual([]);
     expect(ledger.pendingRunMessages(workerId)).toEqual([]);
-
-    expect(runner.teamStopped(workerId).stop).toBe(2);
-    runner.runFinished(supervisorId, { state: "done" }, 210);
-    expect(ledger.pendingRunMessages(supervisorId)).toEqual([]);
-    const replacementSupervisor = create("supervisor", 0);
-    runner.tick(220);
-    runner.tick(230);
-    expect(engine.interventions.at(-1)).toMatchObject({ runId: replacementSupervisor });
-    expect(engine.interventions.at(-1)?.text).toContain("turn 2");
-
-    runner.runFinished(workerId, { state: "done" }, 300);
-    expect(runner.teamMembers("team").some((member) => member.runId === workerId)).toBe(false);
-  });
-
-  it("lets only the supervisor close a unanimous whole-programme audit", () => {
-    const ledger = Ledger.open(":memory:");
-    ledger.upsertAccount({ id: "anth-1", provider: "anthropic" });
-    ledger.upsertTask({
-      id: "team",
-      demandConstant: 1,
-      tiers: mix("standard"),
-      prompt: "Whole programme.",
-      cwd: "/work",
-      team: { workers: 2, supervisorPrompt: "Observe.", watchFor: [] },
-    });
-    const create = (teamRole: "worker" | "supervisor", teamSlot: number) =>
-      ledger.createRun({
-        taskId: "team",
-        tier: "standard",
-        accountId: "anth-1",
-        model: "claude-opus",
-        provider: "anthropic",
-        teamRole,
-        teamSlot,
-        at: teamSlot,
-      });
-    const supervisorId = create("supervisor", 0);
-    const worker1 = create("worker", 1);
-    const worker2 = create("worker", 2);
-    const engine = new FakeEngine();
-    const runner = new Runner(ledger, engine, { runnerId: "r1", maxSessions: 5 });
-    runner.tick(100);
-
-    const opened = runner.teamCompletionAction(
-      supervisorId,
-      "begin_audit",
-      "The root theorem and replay certificates now appear closed.",
-    );
-    expect(opened).toMatchObject({ phase: "audit", audit: 1 });
-    expect(() =>
-      runner.teamCompletionAction(supervisorId, "complete", "Close the programme."),
-    ).toThrow(/worker slot\(s\) 1, 2/);
-    runner.tick(200);
-    expect(engine.interventions).toHaveLength(2);
-    expect(new Set(engine.interventions.map((item) => item.text)).size).toBe(1);
-    expect(engine.interventions[0]?.text).toContain("same whole-programme request");
-
-    runner.teamAudit(worker1, 1, "pass", "Replayed the root certificate and found no contradiction.");
-    runner.teamAudit(worker2, 1, "objection", "One implication still assumes the conclusion.");
-    expect(() =>
-      runner.teamCompletionAction(supervisorId, "complete", "Close the programme."),
-    ).toThrow(/worker slot\(s\) 2/);
-    runner.teamAudit(worker2, 1, "pass", "The implication was repaired and now checks independently.");
-    const complete = runner.teamCompletionAction(
-      supervisorId,
-      "complete",
-      "All two independent audits pass against the root theorem.",
-    );
-    expect(complete.phase).toBe("complete");
-    expect(complete.reports.map((report) => report.verdict)).toEqual(["pass", "pass"]);
-    expect(runner.laneDrained("team")).toBe(true);
-    runner.tick(300);
-    expect(engine.interventions).toHaveLength(4);
-    expect(engine.interventions.slice(2).every((item) => item.text.includes("durable completion marker")))
-      .toBe(true);
   });
 
   it("an empty message is a mistake, not a turn", () => {

@@ -98,14 +98,6 @@ async function status(ledger: Ledger): Promise<void> {
       `share=${sharePercent(t, evaluation.tasks)}`,
     ];
     if (t.error !== undefined) parts.push(`error=${t.error}`);
-    const defined = ledger.tasks().find((task) => task.id === t.taskId);
-    if (defined?.team !== undefined) {
-      const completion = ledger.teamCompletion(t.taskId);
-      parts.push(
-        `completion=${completion.phase}${completion.audit > 0 ? `:${completion.audit}` : ""}` +
-          (completion.phase === "audit" ? `(${completion.reports.length}/${defined.team.workers})` : ""),
-      );
-    }
     console.log(`task ${t.taskId}: ${parts.join(" ")}`);
   }
   for (const r of ledger.runs({ state: "pending" })) {
@@ -114,9 +106,9 @@ async function status(ledger: Ledger): Promise<void> {
   }
   for (const r of ledger.runs({ state: "running" })) {
     const role = r.teamRole === undefined ? "" : ` ${r.teamRole}-${r.teamSlot}`;
-    const waiting = r.teamWaiting ? ` waiting-for-supervisor stop=${r.teamStop}` : "";
+    const idle = r.idleAt === undefined ? "" : ` idle-since=${new Date(r.idleAt).toISOString()}`;
     console.log(
-      `run ${r.id.slice(0, 8)}: ${r.taskId}${role}${waiting} on ${r.accountId} (${r.model}) runner=${r.runnerId}`,
+      `run ${r.id.slice(0, 8)}: ${r.taskId}${role}${idle} on ${r.accountId} (${r.model}) runner=${r.runnerId}`,
     );
   }
   // Pausing skips evaluation entirely, so an empty list here means "not
@@ -128,15 +120,6 @@ async function status(ledger: Ledger): Promise<void> {
         ? "no tasks"
         : `${defined} task(s) defined, not evaluated while launches are paused (pi-orchestrator task list)`,
     );
-    for (const task of ledger.tasks()) {
-      if (task.team === undefined) continue;
-      const completion = ledger.teamCompletion(task.id);
-      console.log(
-        `team ${task.id}: completion=${completion.phase}` +
-          (completion.audit > 0 ? ` audit=${completion.audit}` : "") +
-          (completion.phase === "audit" ? ` verdicts=${completion.reports.length}/${task.team.workers}` : ""),
-      );
-    }
   }
 }
 
@@ -409,16 +392,11 @@ async function runner(ledger: Ledger, args: string[]): Promise<void> {
       heartbeat: (id, at) => live.heartbeat(id, at),
       progress: (id, at) => live.progress(id, at),
       sessionStarted: (id, sessionId, sessionFile) => live.sessionStarted(id, sessionId, sessionFile),
-      teamMembers: (taskId) => live.teamMembers(taskId),
-      teamCompletion: (taskId) => live.teamCompletion(taskId),
-      teamCompletionAction: (supervisorRunId, action, summary) =>
-        live.teamCompletionAction(supervisorRunId, action, summary),
-      teamAudit: (workerRunId, audit, verdict, summary) =>
-        live.teamAudit(workerRunId, audit, verdict, summary),
-      teamStopped: (workerRunId) => live.teamStopped(workerRunId),
-      teamWaiting: (workerRunId) => live.teamWaiting(workerRunId),
-      teamIntervene: (supervisorRunId, workerRunId, text) =>
-        live.teamIntervene(supervisorRunId, workerRunId, text),
+      teamWorkerIdle: (workerRunId) => live.teamWorkerIdle(workerRunId),
+      teamSupervisorResponded: (supervisorRunId, workerRunId, idleAt, text) =>
+        live.teamSupervisorResponded(supervisorRunId, workerRunId, idleAt, text),
+      teamWorkerSession: (supervisorRunId, workerRunId) =>
+        live.teamWorkerSession(supervisorRunId, workerRunId),
       laneDrained: (taskId) => live.laneDrained(taskId),
       claimCheckIn: (runId) => live.claimCheckIn(runId),
       turnFailed: (runId, detail, attempt) => {
@@ -957,7 +935,7 @@ async function main(): Promise<void> {
                 (t.selfPaced ? " self-paced" : "") +
                 (t.team === undefined
                   ? ""
-                  : ` team=${t.team.workers}+supervisor completion=${ledger.teamCompletion(t.id).phase}`) +
+                  : ` team=${t.team.workers}+supervisor`) +
                 (ledger.taskPaused(t.id) ? " HELD" : "") +
                 (t.prompt === undefined ? " (signal only)" : ""),
             );
