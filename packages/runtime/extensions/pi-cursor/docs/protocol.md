@@ -58,7 +58,7 @@ To prevent Cursor models from being derailed by side-channel injections:
 Because Node.js HTTP/2 client sessions require persistent stream handling, `pi-cursor` spawns a lightweight child process (`h2-bridge.mjs`) to manage the HTTP/2 connection.
 
 - **Request:** Serialized `AgentClientMessage` binary frame.
-- **Headers:** `x-cursor-client-version` (default: `cli-2026.05.01-eea359f`), `authorization: Bearer <token>`, `connect-protocol-version: 1`.
+- **Headers:** `x-cursor-client-version` (default: `cli-2026.08.25-3e8eec8`), `authorization: Bearer <token>`, `connect-protocol-version: 1`.
 - **Response:** Streaming binary Connect frames parsed via `@bufbuild/protobuf` `fromBinary()`.
 - **Idle safety net:** Connect timeout defaults to 30s (handshake only). **Activity idle is disabled by default** so long agent turns are not killed. Parent heartbeats every 5s reset the activity timer when it is enabled via `PI_CURSOR_H2_IDLE_TIMEOUT_MS`.
 

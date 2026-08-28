@@ -30,7 +30,7 @@ import http2 from "node:http2";
 import crypto from "node:crypto";
 import { once } from "node:events";
 
-const CURSOR_CLIENT_VERSION = process.env.PI_CURSOR_CLIENT_VERSION || "cli-2026.05.01-eea359f";
+const CURSOR_CLIENT_VERSION = process.env.PI_CURSOR_CLIENT_VERSION || "cli-2026.08.25-3e8eec8";
 const MAX_BRIDGE_MESSAGE_BYTES = 64 * 1024 * 1024;
 const MAX_ERROR_BODY_BYTES = 1024 * 1024;
 

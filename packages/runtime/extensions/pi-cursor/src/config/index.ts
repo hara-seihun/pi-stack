@@ -7,7 +7,7 @@ import { join as pathJoin } from "node:path";
 import { assertSafeCursorBaseUrl } from "../utils/security.js";
 
 export const DEFAULT_CURSOR_AGENT_URL = "https://agentn.us.api5.cursor.sh";
-export const DEFAULT_CURSOR_CLIENT_VERSION = "cli-2026.05.01-eea359f";
+export const DEFAULT_CURSOR_CLIENT_VERSION = "cli-2026.08.25-3e8eec8";
 
 let cachedCursorAgentUrl: string | undefined;
 

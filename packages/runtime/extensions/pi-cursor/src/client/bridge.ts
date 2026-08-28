@@ -157,7 +157,7 @@ export function spawnBridge(
     rpcPath: options.rpcPath,
     url: options.url ?? CURSOR_API_URL,
     unary: options.unary ?? false,
-    cursorClientVersion: process.env.PI_CURSOR_CLIENT_VERSION || "cli-2026.05.01-eea359f",
+    cursorClientVersion: process.env.PI_CURSOR_CLIENT_VERSION || "cli-2026.08.25-3e8eec8",
   });
   const proc = spawn(process.execPath, [BRIDGE_PATH], {
     // Capture stderr so bridge deaths (HTTP/2 errors, panics) are diagnosable.
