@@ -126,11 +126,13 @@ export class Controller {
           .filter((run) => run.taskId === task.id && run.teamRole !== undefined)
           .map((run) => `${run.teamRole}:${run.teamSlot ?? 0}`),
       );
-      const desired: Array<{ role: "worker" | "supervisor"; slot: number }> = Array.from(
-        { length: task.team.workers },
-        (_, index) => ({ role: "worker" as const, slot: index + 1 }),
-      );
-      desired.push({ role: "supervisor" as const, slot: 0 });
+      const desired: Array<{ role: "worker" | "supervisor"; slot: number }> = [
+        { role: "supervisor", slot: 0 },
+        ...Array.from(
+          { length: task.team.workers },
+          (_, index) => ({ role: "worker" as const, slot: index + 1 }),
+        ),
+      ];
       missingTeamRoles.set(
         task.id,
         desired.filter(({ role, slot }) => !held.has(`${role}:${slot}`)),

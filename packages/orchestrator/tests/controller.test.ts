@@ -171,6 +171,34 @@ describe("dispatch cycle", () => {
     expect(afterCompletion.claimed).toHaveLength(0);
   });
 
+  it("starts the supervisor before workers when only part of a team roster fits", async () => {
+    const { ledger, cycle } = build({}, { maxConcurrentSessions: 4 });
+    for (let i = 2; i <= 4; i++) {
+      fleetAccount(ledger, { id: `codex-${i}`, provider: "openai-codex" });
+    }
+    ledger.upsertTask({
+      id: "cayley",
+      demandConstant: 1,
+      tiers: mix("standard"),
+      prompt: "Work on the whole Cayley CI programme.",
+      cwd: "/work/cayley-ci",
+      team: {
+        workers: 4,
+        supervisorPrompt: "Keep the whole programme in view.",
+        watchFor: [],
+      },
+    });
+
+    const first = await cycle(0);
+    expect(first.claimed).toHaveLength(4);
+    expect(first.claimed.map((run) => run.team)).toEqual([
+      expect.objectContaining({ role: "supervisor", slot: 0 }),
+      expect.objectContaining({ role: "worker", slot: 1 }),
+      expect.objectContaining({ role: "worker", slot: 2 }),
+      expect.objectContaining({ role: "worker", slot: 3 }),
+    ]);
+  });
+
   it("a task without a prompt is a pure demand signal and never launches", async () => {
     const { ledger, cycle } = build({ "probe signal": 5 });
     ledger.upsertTask({ id: "signal", demandCommand: "probe signal", tiers: mix("standard") });

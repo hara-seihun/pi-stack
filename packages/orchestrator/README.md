@@ -222,8 +222,11 @@ Three launch-side fields describe scheduling:
   pinned system instructions as a list of signs worth inspecting, never as an
   automatic intervention policy.
 
-  Team sessions share the task's `cwd`. A session-local extension reports files
-  changed since that member's last successful edit. Workers cannot call
+  Team sessions share the task's `cwd`. If current account capacity can hold
+  only part of a roster, the controller starts the supervisor before worker
+  slots. Starting workers first deadlocks a room when those workers finish
+  their opening turns and park while still consuming every available account.
+  A session-local extension reports files changed since that member's last successful edit. Workers cannot call
   `edit` or `write` until they read every current changed file, which prevents
   an unseen teammate version from being silently overwritten. Parallel
   derivations remain welcome, and the filesystem is the coordination record.
@@ -844,41 +847,10 @@ Three consumption modes, all exported as `pi-orchestrator/voice`:
 Standing math lanes are enabled. Their research-session contract and the
 transcript evidence that shaped it live in
 [`../math-research/docs/agent-research-capability.md`](../math-research/docs/agent-research-capability.md).
-The deployed task ledger is the source of truth for definitions; five lanes
-stand there now. `math-frontier` (share 14) attacks open problems and
-conjectures. `math-review` (share 2) works the trusted-review queue.
-`math-cleanup` (share 6) owns the corpus rather than any one question, and has
-two jobs in it. One is repair: stale or unchecked provenance, contentless T0
-records, settlement edges that overclaim, links into retracted entries, titles
-that defeat search. Its prompt names past defects as a genre and leaves the
-judgement to the agent, because the next defect will not be on any list. The
-other, and the larger, is consolidation: most of the ~70k active entries are
-fewer results than that written out several times, a campaign certifying `c=10`
-then `c=11` then `c=12`, and what the corpus wants is the statement they are
-instances of, or the theory that subsumes them. `related({scan:true})` is what
-makes that findable rather than a guess about where to look — it sweeps a page
-of the corpus for entries that are near-duplicates of each other by
-alpha-normalized compression distance — and `supersedes` is how a consolidation
-lands, as a proposal with a reverse gear rather than a deletion.
-Its demand probe measures both populations: three cheap defect counts over
-`q_links` and `q_entries` at one unit per 25, plus the near-duplicate pairs in
-a randomly drawn page of the sweep at one unit per 200. The second term is what
-keeps the lane's larger job visible to the scheduler; without it cleanup drains
-while tens of thousands of entries still say the same things twice.
-`math-provenance` (share 1,
-one session at a time) audits claimed originality and dependence on prior
-work. It verifies primary sources, creates or reuses `source` contributions,
-adds typed source and dependency links, and uses `set_origin` when an entry's
-headline claim predates the ledger. `fast-math-pr` (share 1) handles that
-repository's pull requests.
-
-Review and cleanup are comparable claims on the fleet, and cleanup's is now the
-larger of the two. Review decides whether new work is sound; cleanup decides
-whether the corpus still says what is true and whether it needs this many
-entries to say it, and only cleanup is looking when the thing that went wrong
-is somebody's finished business. The provenance lane has a smaller standing
-claim because citation audits need one source-reading agent, not a parallel
-sweep of the same literature.
+The deployed task ledger is the source of truth for definitions. Host task
+manifests own the active lanes, their prompts, and their demand. This package
+owns the scheduling semantics and does not carry a second list of what a host
+currently runs.
 
 `pi-orchestrator status | capacity | usage | task set/list/delete | account list/add/share/login |
 pause | resume | boost | abort | kill | say | runner | drain-runners | voice-broker` —
