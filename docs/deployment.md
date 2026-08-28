@@ -50,7 +50,7 @@ piRemoteConvergeSshRemotePort=8788
 
 Hostnames and credentials belong in machine-local configuration, not documentation or source. The SSH account must allow local forwarding only to the configured Pi Remote port.
 
-`deploy/remote` publishes without ending active work. Run `apps/remote/activate` to request activation; it returns immediately and starts no detached worker. Pi Remote keeps every active turn on its current generation. Once all turns settle, it exits at that idle boundary and systemd starts the selected release. Phase transitions drive the handoff, so neither the caller nor a timer polls. Ordinary updates never abort or replay a thread.
+`deploy/remote` publishes without ending active work. Host deployment calls `apps/remote/activate` after every changed Pi Remote release. You can run it directly to repeat activation. It switches the supervisor to the selected release immediately. The systemd service keeps a small launcher as its main process. Each Pi RPC child runs behind a runtime host in the same encrypted mount namespace and service cgroup. During activation, the old supervisor writes its runtime state, disconnects from those hosts, and exits. The launcher starts the selected supervisor, which reconnects to every host before serving requests. Active turns keep their process, stream, and RPC state. They are neither aborted nor replayed. A full service stop still kills the whole cgroup and unmounts the encrypted folder.
 
 ## GMKtec
 
@@ -73,7 +73,7 @@ Converge OpenTofu owns one `pi_stack_commit`. Its startup configuration clones t
 deploy/host converge
 ```
 
-The command publishes runtime, Orchestrator, Pi Remote, tools, skills, and settings while holding one source lock. It derives the deployed skill and package lists from the checked manifests. If a live Orchestrator ledger exists and its release changed, the command bumps the runner generation instead of restarting workers. The whole command must finish within 50 seconds. A timeout is a deployment failure, never permission to raise the limit.
+The command publishes runtime, Orchestrator, Pi Remote, tools, skills, and settings while holding one source lock. It derives the deployed skill and package lists from the checked manifests. If a live Orchestrator ledger exists and its release changed, the command bumps the runner generation instead of restarting workers. If Pi Remote changed, it performs a live supervisor handoff before returning. The whole command must finish within 50 seconds. A timeout is a deployment failure, never permission to raise the limit.
 
 Converge Pi Remote reports environment ID `converge`. It has one profile rooted at `/home/kenan/converge` and executes Pi directly on that machine.
 

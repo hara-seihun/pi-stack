@@ -34,4 +34,4 @@ if ! mountpoint -q -- "$PI_REMOTE_PRIVATE_DIR"; then
   gocryptfs -q -passfile "$key" -- "$PI_REMOTE_CIPHER_DIR" "$PI_REMOTE_PRIVATE_DIR"
 fi
 
-exec "$@"
+exec "$(dirname "$0")/pi-remote-supervise" "$@"

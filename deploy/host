@@ -16,6 +16,11 @@ previous_orchestrator=""
 if [[ -f $orchestrator_dest/.pi-stack-commit ]]; then
   previous_orchestrator=$(<"$orchestrator_dest/.pi-stack-commit")
 fi
+remote_dest=${PI_STACK_REMOTE_DEST:-/srv/pi/pi-remote}
+previous_remote=""
+if [[ -f $remote_dest/.pi-stack-commit ]]; then
+  previous_remote=$(<"$remote_dest/.pi-stack-commit")
+fi
 "$root/deploy/runtime"
 "$root/deploy/orchestrator"
 "$root/deploy/remote"
@@ -39,4 +44,8 @@ ledger=${PI_ORCHESTRATOR_LEDGER:-$HOME/.local/share/pi-orchestrator/ledger.sqlit
 if [[ -n $previous_orchestrator && $previous_orchestrator != "$expected" && -f $ledger ]]; then
   PI_ORCHESTRATOR_LEDGER="$ledger" node "$orchestrator_dest/dist/cli.js" drain-runners
 fi
-printf 'deployed Pi stack %s for Converge\n' "$expected"
+remote_service=${PI_REMOTE_SERVICE:-pi-remote.service}
+if [[ $previous_remote != "$expected" ]] && systemctl is-active --quiet "$remote_service"; then
+  PI_REMOTE_SERVICE=$remote_service "$root/apps/remote/activate"
+fi
+printf 'deployed and activated Pi stack %s for Converge\n' "$expected"

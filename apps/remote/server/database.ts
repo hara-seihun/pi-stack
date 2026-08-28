@@ -122,7 +122,7 @@ CREATE TABLE IF NOT EXISTS metadata (
   }
 }
 
-export function beginSupervisorGeneration(db: Database, epoch: string): void {
+export function beginSupervisorGeneration(db: Database, epoch: string, retainedSessions: ReadonlySet<string> = new Set()): void {
   db.query("INSERT OR REPLACE INTO metadata(key,value) VALUES('supervisor_epoch',?)").run(epoch);
   db.query("UPDATE sessions SET initial_provider='openai-codex' WHERE initial_provider IS NULL OR initial_provider=''").run();
   for (const row of db.query("SELECT id,session_path,initial_provider FROM sessions WHERE current_provider IS NULL OR current_provider='' ").all() as any[]) {
@@ -140,8 +140,19 @@ export function beginSupervisorGeneration(db: Database, epoch: string): void {
   }
   updateLastThreadNumber(db);
   const time = new Date().toISOString();
-  db.query("UPDATE sessions SET state='STOPPED', updated_at=?, last_error=NULL, revision=revision+1 WHERE state NOT IN ('STOPPED','FAILED') OR (state='FAILED' AND last_error='Agent exited 143')").run(time);
-  db.query("UPDATE work_items SET state='queued', resume=CASE WHEN state='dispatched' THEN 1 ELSE resume END, available_at=?, updated_at=? WHERE state IN ('running','dispatched')").run(Date.now(), time);
+  const retained = [...retainedSessions];
+  const placeholders = retained.map(() => "?").join(",");
+  const sessionFilter = retained.length ? ` AND id NOT IN (${placeholders})` : "";
+  const workFilter = retained.length ? ` AND session_id NOT IN (${placeholders})` : "";
+  db.query(`UPDATE sessions SET state='STOPPED', updated_at=?, last_error=NULL, revision=revision+1 WHERE (state NOT IN ('STOPPED','FAILED') OR (state='FAILED' AND last_error='Agent exited 143'))${sessionFilter}`)
+    .run(time, ...retained);
+  db.query(`UPDATE work_items SET state='queued', resume=CASE WHEN state='dispatched' THEN 1 ELSE resume END, available_at=?, updated_at=? WHERE state IN ('running','dispatched')${workFilter}`)
+    .run(Date.now(), time, ...retained);
+  if (retained.length) {
+    db.query(`UPDATE work_items SET state='queued',available_at=?,updated_at=? WHERE state='running' AND session_id IN (${placeholders})`)
+      .run(Date.now(), time, ...retained);
+  }
+
 }
 
 export function updateLastThreadNumber(db: Database): void {

@@ -12,6 +12,7 @@ import { applyContextSplice, contextSplice, sha256, type ContextSplice } from ".
 import { beginSupervisorGeneration, ensureSupervisorSchema } from "./database";
 import { BOOSTED_MULTIPLIER, nextBoost } from "pi-orchestrator/boost";
 import { DEFAULT_LIVE_MODEL, DEFAULT_LIVE_VOICE, VoiceBroker } from "pi-orchestrator/voice";
+import { attachRuntimeHost, startRuntimeHost, type RuntimeTransport } from "./runtime-transport";
 
 const VERSION = (JSON.parse(readFileSync(join(import.meta.dir, "../package.json"), "utf8")) as { version: string }).version;
 const ENVIRONMENT_ID = process.env.PI_REMOTE_ENVIRONMENT_ID ?? "local";
@@ -163,12 +164,43 @@ const agentHost = new AgentHost(orchestrator, {
   maxAgeMs: LOCAL_AGENT_MAX_AGE_MS,
 });
 ensureSupervisorSchema(db);
-beginSupervisorGeneration(db, SUPERVISOR_EPOCH);
-
+const HANDOFF_PATH = join(DATA, "supervisor-handoff.json");
 type RuntimePhase = "STARTING" | "IDLE" | "DISPATCHING" | "RUNNING" | "ABORTING" | "STOPPING";
+type RuntimeHandoff = {
+  sessionId: string;
+  socketPath: string;
+  phase: RuntimePhase;
+  compacting: boolean;
+  compactionContextHash: string | null;
+  retrying: boolean;
+  liveText: string;
+  liveThinking: string;
+  pendingModelFailure: string | null;
+  lastActivity: number;
+  activeTools: Array<[string, string]>;
+  dispatchedWorkIds: string[];
+  steeringQueued: number;
+  followUpQueued: number;
+  historyNeedsRestore: boolean;
+  modelId: string;
+};
+function loadHandoff(): RuntimeHandoff[] {
+  if (!existsSync(HANDOFF_PATH)) return [];
+  try {
+    const document = JSON.parse(readFileSync(HANDOFF_PATH, "utf8"));
+    if (document?.version !== 1 || !Array.isArray(document.runtimes)) throw new Error("invalid handoff document");
+    return document.runtimes.filter((item: any) => typeof item?.sessionId === "string"
+      && typeof item?.socketPath === "string" && existsSync(item.socketPath));
+  } catch (cause) {
+    console.error("Could not read supervisor handoff", cause);
+    return [];
+  }
+}
+const pendingHandoff = loadHandoff();
+beginSupervisorGeneration(db, SUPERVISOR_EPOCH, new Set(pendingHandoff.map((item) => item.sessionId)));
 
 interface Runtime {
-  proc: ReturnType<typeof Bun.spawn>;
+  transport: RuntimeTransport;
   pending: Map<string, { resolve: (value: any) => void; reject: (error: Error) => void; timer: Timer }>;
   phase: RuntimePhase;
   phaseVersion: number;
@@ -194,8 +226,7 @@ const activations = new Map<string, Promise<Runtime>>();
 const sessionWorkers = new Map<string, Promise<void>>();
 const retryTimers = new Map<string, Timer>();
 let shuttingDown = false;
-let releaseActivationRequested = false;
-let releaseActivationCheckQueued = false;
+let releaseHandoffRequested = false;
 
 const now = () => new Date().toISOString();
 const serviceTierPath = (sessionId: string) => join(SERVICE_TIER_DIR, sessionId);
@@ -717,7 +748,9 @@ function setRuntimePhase(id: string, rt: Runtime, phase: RuntimePhase, state?: s
     touchSession(id);
   }
   if (state) setState(id, state, lastError);
-  scheduleReleaseActivationCheck();
+  if (releaseHandoffRequested && ![...runtimes.values()].some((runtime) => runtime.phase === "ABORTING")) {
+    queueMicrotask(() => void handoffRelease());
+  }
 }
 function runtimeWorking(rt: Runtime | undefined): boolean {
   return !!rt && ["STARTING", "DISPATCHING", "RUNNING", "ABORTING"].includes(rt.phase);
@@ -905,24 +938,11 @@ function toolResultText(result: any): string {
 }
 
 function sendLine(rt: Runtime, value: unknown) {
-  rt.proc.stdin.write(JSON.stringify(value) + "\n");
-  rt.proc.stdin.flush();
+  rt.transport.send(value);
 }
 
-function signalRuntimeProcessGroup(rt: Runtime, signal: NodeJS.Signals) {
-  try { process.kill(-rt.proc.pid, signal); }
-  catch { try { rt.proc.kill(signal); } catch {} }
-}
-
-async function terminateRuntimeProcess(rt: Runtime, graceMs = 2_000) {
-  const groupAlive = () => {
-    try { process.kill(-rt.proc.pid, 0); return true; } catch { return false; }
-  };
-  signalRuntimeProcessGroup(rt, "SIGTERM");
-  const deadline = Date.now() + graceMs;
-  while (groupAlive() && Date.now() < deadline) await Bun.sleep(50);
-  if (groupAlive()) signalRuntimeProcessGroup(rt, "SIGKILL");
-  await Promise.race([rt.proc.exited.catch(() => {}), Bun.sleep(500)]);
+async function terminateRuntimeProcess(rt: Runtime) {
+  await rt.transport.terminate();
 }
 class RpcTimeoutError extends Error {
   constructor(readonly command: string) { super(`${command} timed out`); this.name = "RpcTimeoutError"; }
@@ -944,27 +964,6 @@ function rpc(rt: Runtime, type: string, body: Record<string, unknown> = {}, time
   // Awaiting callers still receive the rejection normally.
   promise.catch(() => {});
   return promise;
-}
-
-async function consumeLines(stream: ReadableStream<Uint8Array>, onLine: (line: string) => void) {
-  const reader = stream.getReader();
-  const decoder = new TextDecoder();
-  let buffer = "";
-  while (true) {
-    const { value, done } = await reader.read();
-    if (done) break;
-    buffer += decoder.decode(value, { stream: true });
-    while (true) {
-      const i = buffer.indexOf("\n");
-      if (i < 0) break;
-      let line = buffer.slice(0, i);
-      buffer = buffer.slice(i + 1);
-      if (line.endsWith("\r")) line = line.slice(0, -1);
-      if (line) onLine(line);
-    }
-  }
-  buffer += decoder.decode();
-  if (buffer) onLine(buffer.endsWith("\r") ? buffer.slice(0, -1) : buffer);
 }
 
 function handleRpcEvent(sessionId: string, rt: Runtime, event: any) {
@@ -1157,6 +1156,77 @@ async function reconcileRuntimeState(sessionId: string, rt: Runtime): Promise<an
   }
 }
 
+function runtimeFromHandoff(row: any, handoff?: RuntimeHandoff): Runtime {
+  return {
+    transport: null as unknown as RuntimeTransport,
+    pending: new Map(),
+    phase: handoff?.phase ?? "STARTING",
+    phaseVersion: 0,
+    compacting: handoff?.compacting ?? false,
+    compactionContextHash: handoff?.compactionContextHash ?? null,
+    retrying: handoff?.retrying ?? false,
+    reconciling: false,
+    suppressOutput: false,
+    liveText: handoff?.liveText ?? "",
+    liveThinking: handoff?.liveThinking ?? "",
+    pendingModelFailure: handoff?.pendingModelFailure ?? null,
+    expectedExit: false,
+    lastActivity: handoff?.lastActivity ?? Date.now(),
+    activeTools: new Map(handoff?.activeTools ?? []),
+    dispatchedWorkIds: new Set(handoff?.dispatchedWorkIds ?? []),
+    steeringQueued: handoff?.steeringQueued ?? 0,
+    followUpQueued: handoff?.followUpQueued ?? 0,
+    historyNeedsRestore: handoff?.historyNeedsRestore ?? false,
+    modelId: handoff?.modelId ?? String(row.initial_model ?? "unknown"),
+  };
+}
+
+function handleRuntimeOutput(sessionId: string, rt: Runtime, line: string) {
+  try { handleRpcEvent(sessionId, rt, JSON.parse(line)); }
+  catch { emit(sessionId, "notice", { text: "Malformed agent event ignored" }); }
+}
+
+function monitorRuntime(row: any, rt: Runtime) {
+  rt.transport.onExit((code) => {
+    for (const pending of rt.pending.values()) { clearTimeout(pending.timer); pending.reject(new Error("Agent stopped")); }
+    rt.pending.clear();
+    if (runtimes.get(row.id) !== rt) return;
+    setRuntimePhase(row.id, rt, "STOPPING");
+    runtimes.delete(row.id);
+    if (shuttingDown || !ownsSupervisorLease()) return;
+    const retryAt = Date.now() + 2_000;
+    db.query("UPDATE work_items SET state='queued',resume=1,available_at=?,updated_at=?,last_error='Agent stopped before settling' WHERE session_id=? AND state='dispatched'")
+      .run(retryAt, now(), row.id);
+    rt.dispatchedWorkIds.clear();
+    if (!sessionRow.get(row.id)) return;
+    const pendingWork = Number((db.query(
+      "SELECT COUNT(*) count FROM work_items WHERE session_id=? AND state IN ('queued','running')",
+    ).get(row.id) as any)?.count ?? 0);
+    if (rt.expectedExit) {
+      setState(row.id, "STOPPED");
+    } else if (pendingWork > 0) {
+      setState(row.id, "RUNNING", `Agent exited ${code}; resuming queued work`);
+      emit(row.id, "notice", { text: `Agent disconnected (exit ${code}); resuming queued work` });
+      scheduleSession(row.id, 2_000);
+    } else {
+      setState(row.id, "STOPPED", code === 0 ? null : `Agent exited ${code}`);
+      emit(row.id, "notice", { text: `Agent disconnected while idle (exit ${code}); thread remains resumable` });
+    }
+  });
+}
+
+function runtimeEnvironment(row: any) {
+  return {
+    ...process.env,
+    HOME,
+    PATH: `${join(HOME, ".local/bin")}:${join(HOME, ".bun/bin")}:${process.env.PATH ?? ""}`,
+    PI_REMOTE_SESSION_ID: row.id,
+    PI_REMOTE_SERVICE_TIER_FILE: serviceTierPath(row.id),
+    PI_REMOTE_SERVER_URL: `http://${HOST}:${PORT}`,
+    PI_CODING_AGENT_DIR: AGENT_DIR,
+  };
+}
+
 async function startRuntime(row: any): Promise<Runtime> {
   const preset = workspaces.get(row.workspace_id);
   const cwd = realpathSync(preset?.path ?? row.workspace_id);
@@ -1174,88 +1244,22 @@ async function startRuntime(row: any): Promise<Runtime> {
   if (resumePath) args.push("--session", resumePath);
   else {
     args.push("--name", row.name);
-    if (row.initial_provider && row.initial_model) {
-      args.push("--provider", row.initial_provider, "--model", row.initial_model);
-    }
+    if (row.initial_provider && row.initial_model) args.push("--provider", row.initial_provider, "--model", row.initial_model);
     if (row.initial_thinking) args.push("--thinking", row.initial_thinking);
   }
   setState(row.id, "STARTING");
-  const proc = Bun.spawn(args, {
-    cwd,
-    detached: true,
-    stdin: "pipe",
-    stdout: "pipe",
-    stderr: "pipe",
-    env: {
-      ...process.env,
-      HOME,
-      PATH: `${join(HOME, ".local/bin")}:${join(HOME, ".bun/bin")}:${process.env.PATH ?? ""}`,
-      PI_REMOTE_SESSION_ID: row.id,
-      PI_REMOTE_SERVICE_TIER_FILE: serviceTierPath(row.id),
-      PI_REMOTE_SERVER_URL: `http://${HOST}:${PORT}`,
-      PI_CODING_AGENT_DIR: AGENT_DIR,
-    },
-  });
-  const rt: Runtime = {
-    proc,
-    pending: new Map(),
-    phase: "STARTING",
-    phaseVersion: 0,
-    compacting: false,
-    compactionContextHash: null,
-    retrying: false,
-    reconciling: false,
-    suppressOutput: false,
-    liveText: "",
-    liveThinking: "",
-    pendingModelFailure: null,
-    expectedExit: false,
-    lastActivity: Date.now(),
-    activeTools: new Map(),
-    dispatchedWorkIds: new Set(),
-    steeringQueued: 0,
-    followUpQueued: 0,
-    historyNeedsRestore: false,
-    modelId: String(row.initial_model ?? "unknown"),
-  };
+  const rt = runtimeFromHandoff(row);
   runtimes.set(row.id, rt);
-  consumeLines(proc.stdout, (line) => {
-    try { handleRpcEvent(row.id, rt, JSON.parse(line)); }
-    catch { emit(row.id, "notice", { text: "Malformed agent event ignored" }); }
-  });
-  consumeLines(proc.stderr, (line) => {
-    const clean = line.replaceAll(HOME, "~").slice(0, 500);
-    if (clean) console.error(`[pi ${row.id}] ${clean}`);
-  });
-  proc.exited.then((code) => {
-    for (const pending of rt.pending.values()) { clearTimeout(pending.timer); pending.reject(new Error("Agent stopped")); }
-    rt.pending.clear();
-    if (runtimes.get(row.id) !== rt) return;
-    setRuntimePhase(row.id, rt, "STOPPING");
-    runtimes.delete(row.id);
-    scheduleReleaseActivationCheck();
-    if (shuttingDown || !ownsSupervisorLease()) return;
-    const retryAt = Date.now() + 2_000;
-    db.query("UPDATE work_items SET state='queued',resume=1,available_at=?,updated_at=?,last_error='Agent stopped before settling' WHERE session_id=? AND state='dispatched'")
-      .run(retryAt, now(), row.id);
-    rt.dispatchedWorkIds.clear();
-    // A database migration or operator recovery may remove the row before process exit arrives.
-    if (!sessionRow.get(row.id)) return;
-    const pendingWork = Number((db.query(
-      "SELECT COUNT(*) count FROM work_items WHERE session_id=? AND state IN ('queued','running')",
-    ).get(row.id) as any)?.count ?? 0);
-    if (rt.expectedExit) {
-      setState(row.id, "STOPPED");
-    } else if (pendingWork > 0) {
-      setState(row.id, "RUNNING", `Agent exited ${code}; resuming queued work`);
-      emit(row.id, "notice", { text: `Agent disconnected (exit ${code}); resuming queued work` });
-      scheduleSession(row.id, 2_000);
-    } else {
-      setState(row.id, "STOPPED", code === 0 ? null : `Agent exited ${code}`);
-      emit(row.id, "notice", { text: `Agent disconnected while idle (exit ${code}); thread remains resumable` });
-    }
-  });
   try {
+    rt.transport = await startRuntimeHost({
+      data: DATA,
+      sessionId: row.id,
+      cwd,
+      args,
+      env: runtimeEnvironment(row),
+      onOutput: (line) => handleRuntimeOutput(row.id, rt, line),
+    });
+    monitorRuntime(row, rt);
     const state = await rpc(rt, "get_state", {}, 120_000);
     if (!ownsSupervisorLease() || rt.phase !== "STARTING") throw new Error("Activation cancelled");
     if (state.model?.id) rt.modelId = String(state.model.id);
@@ -1274,7 +1278,7 @@ async function startRuntime(row: any): Promise<Runtime> {
     const cancelled = rt.expectedExit;
     rt.expectedExit = true;
     setRuntimePhase(row.id, rt, "STOPPING");
-    await terminateRuntimeProcess(rt);
+    if (rt.transport) await terminateRuntimeProcess(rt);
     if (cancelled || !ownsSupervisorLease()) throw cause;
     if (resumePath) {
       db.query("UPDATE sessions SET session_path=NULL WHERE id=?").run(row.id);
@@ -1282,6 +1286,55 @@ async function startRuntime(row: any): Promise<Runtime> {
       return startRuntime({ ...row, session_path: null });
     }
     throw cause;
+  }
+}
+
+function recoverFailedHandoff(sessionId: string) {
+  const time = now();
+  db.query("UPDATE sessions SET state='STOPPED',updated_at=?,last_error=NULL,revision=revision+1 WHERE id=?").run(time, sessionId);
+  db.query("UPDATE work_items SET state='queued',resume=CASE WHEN state='dispatched' THEN 1 ELSE resume END,available_at=?,updated_at=? WHERE session_id=? AND state IN ('running','dispatched')")
+    .run(Date.now(), time, sessionId);
+}
+
+async function adoptHandoffRuntimes() {
+  for (const handoff of pendingHandoff) {
+    const row = sessionRow.get(handoff.sessionId) as any;
+    if (!row) continue;
+    const rt = runtimeFromHandoff(row, handoff);
+    runtimes.set(row.id, rt);
+    try {
+      rt.transport = await attachRuntimeHost(handoff.socketPath, (line) => handleRuntimeOutput(row.id, rt, line));
+      monitorRuntime(row, rt);
+      const state = await rpc(rt, "get_state", {}, 5_000);
+      if (state.model?.id) rt.modelId = String(state.model.id);
+      if (state.sessionFile) db.query("UPDATE sessions SET session_path=? WHERE id=?").run(state.sessionFile, row.id);
+      const active = Boolean(state.isStreaming || state.isCompacting || Number(state.pendingMessageCount ?? 0) > 0);
+      if (active && !["RUNNING", "ABORTING"].includes(rt.phase)) setRuntimePhase(row.id, rt, "RUNNING", "RUNNING");
+      else if (!active && rt.phase === "RUNNING") settleRuntime(row.id, rt, true);
+      else if (!active && rt.phase === "STARTING") setRuntimePhase(row.id, rt, "IDLE", "IDLE");
+    } catch (cause) {
+      console.error(`Could not adopt runtime ${row.id}`, cause);
+      runtimes.delete(row.id);
+      recoverFailedHandoff(row.id);
+    }
+  }
+  try { unlinkSync(HANDOFF_PATH); } catch {}
+}
+
+async function reapUnclaimedRuntimeHosts() {
+  const directory = join(DATA, "runtime-hosts");
+  if (!existsSync(directory)) return;
+  const claimed = new Set([...runtimes.values()].map((rt) => rt.transport.socketPath));
+  for (const name of readdirSync(directory)) {
+    if (!name.endsWith(".sock")) continue;
+    const socketPath = join(directory, name);
+    if (claimed.has(socketPath)) continue;
+    try {
+      const transport = await attachRuntimeHost(socketPath, () => {});
+      await transport.terminate();
+    } catch {
+      try { unlinkSync(socketPath); } catch {}
+    }
   }
 }
 
@@ -1295,7 +1348,6 @@ async function activate(row: any): Promise<Runtime> {
   if (existing) return existing;
   const activation = startRuntime(row).finally(() => {
     activations.delete(row.id);
-    scheduleReleaseActivationCheck();
   });
   activations.set(row.id, activation);
   return activation;
@@ -1577,7 +1629,6 @@ function kickSession(sessionId: string) {
     .catch((cause) => console.error(`Session worker ${sessionId} failed`, cause))
     .finally(() => {
       sessionWorkers.delete(sessionId);
-      scheduleReleaseActivationCheck();
       const rt = runtimes.get(sessionId);
       const busy = rt && ["DISPATCHING", "RUNNING"].includes(rt.phase);
       const next = db.query(`
@@ -1632,6 +1683,9 @@ function recoverUnansweredPrompts() {
 }
 
 recoverUnansweredPrompts();
+
+await adoptHandoffRuntimes();
+await reapUnclaimedRuntimeHosts();
 
 const server = Bun.serve({
   hostname: HOST,
@@ -2386,49 +2440,15 @@ const server = Bun.serve({
 });
 console.log(`Pi Remote listening on http://${server.hostname}:${server.port}`);
 
-// A rejected promise anywhere (e.g. an un-awaited rpc get_state timing out
-// under machine load) must never kill the supervisor: systemd restarts it,
-// which respawns runtimes while the previous RPC children survive as orphans
-// still executing their turn — producing two agents bound to one thread and
-// duplicated work (observed 2026-08-10: 59 crash-loop restarts, thread 6).
+// A rejected promise anywhere, such as an un-awaited get_state timeout under
+// load, is isolated to its request. Crashing the supervisor hands recovery to
+// systemd instead of turning one request failure into duplicated agent work.
 process.on("unhandledRejection", (cause) => {
   console.error("Unhandled rejection (contained)", cause);
 });
 process.on("uncaughtException", (cause) => {
   console.error("Uncaught exception (contained)", cause);
 });
-
-// Reap orphan RPC children from a previous supervisor incarnation before any
-// dispatch: at this point this process has spawned no children yet, so every
-// live pi RPC process pointing at our session directory is a stale orphan
-// double-executing or holding a session file we are about to reuse.
-try {
-  const sessionRoots = [join(DATA, "sessions")];
-  const orphans = [...new Set(sessionRoots.flatMap((root) => {
-    const pattern = root.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
-    const survey = Bun.spawnSync(["pgrep", "-f", pattern]);
-    return new TextDecoder().decode(survey.stdout).split("\n")
-      .map((value) => Number(value.trim())).filter((pid) => Number.isFinite(pid) && pid > 1 && pid !== process.pid);
-  }))];
-  for (const pid of orphans) {
-    try { process.kill(pid, "SIGTERM"); } catch {}
-  }
-  const alive = (pid: number) => {
-    try { process.kill(pid, 0); return true; } catch { return false; }
-  };
-  const deadline = Date.now() + 2_000;
-  while (orphans.some(alive) && Date.now() < deadline) Bun.sleepSync(50);
-  const stubborn = orphans.filter(alive);
-  for (const pid of stubborn) {
-    try { process.kill(pid, "SIGKILL"); } catch {}
-  }
-  if (stubborn.length) Bun.sleepSync(100);
-  if (orphans.length) console.error(
-    `Reaped ${orphans.length} orphan RPC child(ren) from previous incarnation${stubborn.length ? ` (${stubborn.length} required SIGKILL)` : ""}`,
-  );
-} catch (cause) {
-  console.error("Orphan reap failed", cause);
-}
 
 refreshPlanUsageIfDue();
 void agentHost.refresh();
@@ -2493,35 +2513,64 @@ const reaper = setInterval(() => {
   }
 }, 60_000);
 
-function releaseActivationReady() {
-  return activations.size === 0 && sessionWorkers.size === 0 &&
-    ![...runtimes.values()].some(runtimeWorking);
-}
-
-function scheduleReleaseActivationCheck() {
-  if (!releaseActivationRequested || releaseActivationCheckQueued || shuttingDown) return;
-  releaseActivationCheckQueued = true;
-  queueMicrotask(() => {
-    releaseActivationCheckQueued = false;
-    if (releaseActivationRequested && releaseActivationReady() && !shuttingDown) void shutdown();
+function handoffDocument() {
+  const runtimeSnapshots: RuntimeHandoff[] = [...runtimes].flatMap(([sessionId, rt]) => {
+    if (!rt.transport?.pid || rt.phase === "STOPPING") return [];
+    return [{
+      sessionId,
+      socketPath: rt.transport.socketPath,
+      phase: rt.phase,
+      compacting: rt.compacting,
+      compactionContextHash: rt.compactionContextHash,
+      retrying: rt.retrying,
+      liveText: rt.liveText,
+      liveThinking: rt.liveThinking,
+      pendingModelFailure: rt.pendingModelFailure,
+      lastActivity: rt.lastActivity,
+      activeTools: [...rt.activeTools],
+      dispatchedWorkIds: [...rt.dispatchedWorkIds],
+      steeringQueued: rt.steeringQueued,
+      followUpQueued: rt.followUpQueued,
+      historyNeedsRestore: rt.historyNeedsRestore,
+      modelId: rt.modelId,
+    }];
   });
+  return { version: 1, createdAt: now(), runtimes: runtimeSnapshots };
 }
 
-function requestReleaseActivation() {
-  releaseActivationRequested = true;
-  console.log("Pi Remote release activation requested; active turns will finish on this generation");
-  scheduleReleaseActivationCheck();
-}
-
-async function shutdown() {
-  if (shuttingDown) return;
-  shuttingDown = true;
+function stopSupervisorTimers() {
   clearInterval(reaper);
   clearInterval(stateReconciler);
   clearInterval(agentRefresher);
   clearInterval(ledgerSnapshotter);
   for (const timer of retryTimers.values()) clearTimeout(timer);
   retryTimers.clear();
+}
+
+async function handoffRelease() {
+  if (shuttingDown) return;
+  releaseHandoffRequested = true;
+  if ([...runtimes.values()].some((runtime) => runtime.phase === "ABORTING")) {
+    console.log("Pi Remote release handoff waiting for an in-flight abort to resolve");
+    return;
+  }
+  shuttingDown = true;
+  stopSupervisorTimers();
+  const staging = `${HANDOFF_PATH}.writing`;
+  writeFileSync(staging, `${JSON.stringify(handoffDocument())}\n`, { mode: 0o600 });
+  renameSync(staging, HANDOFF_PATH);
+  for (const rt of runtimes.values()) rt.transport.detach();
+  server.stop(true);
+  agentHost.close();
+  db.close();
+  console.log("Pi Remote supervisor handed active runtimes to the selected release");
+  process.exit(75);
+}
+
+async function shutdown() {
+  if (shuttingDown) return;
+  shuttingDown = true;
+  stopSupervisorTimers();
   if (ownsSupervisorLease()) {
     db.query("UPDATE work_items SET state='queued',resume=CASE WHEN state='dispatched' THEN 1 ELSE resume END,available_at=?,updated_at=?,last_error='Supervisor restarted before settling' WHERE state IN ('running','dispatched')")
       .run(Date.now(), now());
@@ -2543,4 +2592,5 @@ async function shutdown() {
 }
 process.on("SIGTERM", shutdown);
 process.on("SIGINT", shutdown);
-process.on("SIGHUP", requestReleaseActivation);
+process.on("SIGUSR2", handoffRelease);
+process.on("SIGHUP", handoffRelease);

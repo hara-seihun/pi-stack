@@ -1596,7 +1596,7 @@ describe("web and supervisor integration", () => {
     expect(prompts[1].message).toContain("Continue the unfinished work");
   }, 20_000);
 
-  test("release activation lets an active turn settle before the supervisor exits", async () => {
+  test("release activation hands an active turn to the replacement supervisor", async () => {
     const id = await createThread();
     await api("POST", `/v1/sessions/${id}/prompt`, { requestId: crypto.randomUUID(), text: "release-later" });
     await waitFor(
@@ -1605,20 +1605,20 @@ describe("web and supervisor integration", () => {
     );
     const runtimePid = Number(JSON.parse(readFileSync(fakeLaunch, "utf8")).pid);
     server.kill("SIGHUP");
-    const exitedEarly = await Promise.race([
-      server.exited.then(() => true),
-      Bun.sleep(150).then(() => false),
-    ]);
-    expect(exitedEarly).toBe(false);
+    expect(await server.exited).toBe(75);
     expect(() => process.kill(runtimePid, 0)).not.toThrow();
-    await server.exited;
 
+    await startServer();
+    const events = await waitFor(
+      () => api("GET", `/v1/sessions/${id}/events?after=0`).then((result) => result.value),
+      (value) => value.events.some((event: any) => event.type === "assistant" && event.text === "current finished"),
+    );
+    expect(events.session.state).toBe("IDLE");
     const ledger = new Database(join(root, "data", "supervisor.sqlite3"), { readonly: true });
-    const assistant = ledger.query("SELECT payload FROM events WHERE session_id=? AND type='assistant' ORDER BY seq DESC LIMIT 1").get(id) as any;
     const work = ledger.query("SELECT state,resume FROM work_items WHERE session_id=? AND text='release-later'").get(id) as any;
     ledger.close();
-    expect(JSON.parse(assistant.payload).text).toBe("current finished");
     expect(work).toEqual({ state: "complete", resume: 0 });
     expect(readJsonLines(fakeRpcLog).filter((entry: any) => entry.sessionId === id && entry.type === "abort")).toHaveLength(0);
+    expect(readJsonLines(fakeRpcLog).filter((entry: any) => entry.sessionId === id && entry.type === "prompt")).toHaveLength(1);
   }, 20_000);
 });

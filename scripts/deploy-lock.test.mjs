@@ -175,13 +175,15 @@ test("component publication atomically replaces directories and symlinks", () =>
   }
 });
 
-test("a changed host release rolls orchestrator workers without restarting them", () => {
+test("a changed host release rolls orchestrator workers and activates Pi Remote", () => {
   const directory = mkdtempSync(join(tmpdir(), "pi-stack-host-roll-"));
   try {
     const repository = join(directory, "repo");
     const deploy = join(repository, "deploy");
+    const remoteApp = join(repository, "apps", "remote");
     const bin = join(directory, "bin");
     mkdirSync(deploy, { recursive: true });
+    mkdirSync(remoteApp, { recursive: true });
     mkdirSync(bin);
     copyFileSync(join(root, "deploy", "host"), join(deploy, "host"));
     chmodSync(join(deploy, "host"), 0o755);
@@ -208,8 +210,10 @@ git -C "$(cd "$(dirname "$0")/.." && pwd)" rev-parse HEAD > "$destination/.pi-st
       writeFileSync(join(deploy, name), component);
       chmodSync(join(deploy, name), 0o755);
     }
+    writeFileSync(join(remoteApp, "activate"), "#!/bin/sh\nprintf '%s\\n' \"${PI_REMOTE_SERVICE:-}\" >> \"$ACTIVATE_TRACE\"\n");
+    chmodSync(join(remoteApp, "activate"), 0o755);
     assert.equal(spawnSync("git", ["init", "-q", repository]).status, 0);
-    assert.equal(spawnSync("git", ["-C", repository, "add", "deploy"]).status, 0);
+    assert.equal(spawnSync("git", ["-C", repository, "add", "deploy", "apps"]).status, 0);
     assert.equal(spawnSync("git", ["-C", repository, "-c", "user.name=test", "-c", "user.email=test@example.test", "commit", "-qm", "fixture"]).status, 0);
 
     const destinations = Object.fromEntries(["RUNTIME", "ORCHESTRATOR", "REMOTE", "TOOLS", "SKILLS"].map((name) =>
@@ -221,23 +225,29 @@ git -C "$(cd "$(dirname "$0")/.." && pwd)" rev-parse HEAD > "$destination/.pi-st
     const ledger = join(directory, "ledger.sqlite3");
     writeFileSync(ledger, "ledger");
     const trace = join(directory, "node.trace");
+    const activationTrace = join(directory, "activation.trace");
     writeFileSync(join(bin, "node"), `#!/bin/sh\nprintf '%s\\n' "$*" >> "$TRACE"\n`);
     chmodSync(join(bin, "node"), 0o755);
+    writeFileSync(join(bin, "systemctl"), "#!/bin/sh\n[ \"$1\" = is-active ]\n");
+    chmodSync(join(bin, "systemctl"), 0o755);
     const env = {
       ...process.env,
       ...destinations,
       PI_ORCHESTRATOR_LEDGER: ledger,
       PATH: `${bin}:${process.env.PATH}`,
       TRACE: trace,
+      ACTIVATE_TRACE: activationTrace,
     };
     const first = spawnSync(join(deploy, "host"), ["converge"], { encoding: "utf8", env });
     assert.equal(first.status, 0, first.stderr);
     assert.match(readFileSync(trace, "utf8"), /orchestrator\/dist\/cli\.js drain-runners/);
+    assert.equal(readFileSync(activationTrace, "utf8"), "pi-remote.service\n");
 
     rmSync(trace, { force: true });
     const unchanged = spawnSync(join(deploy, "host"), ["converge"], { encoding: "utf8", env });
     assert.equal(unchanged.status, 0, unchanged.stderr);
     assert.equal(existsSync(trace), false);
+    assert.equal(readFileSync(activationTrace, "utf8"), "pi-remote.service\n");
   } finally {
     rmSync(directory, { recursive: true, force: true });
   }

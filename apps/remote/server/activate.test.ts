@@ -14,7 +14,7 @@ function executable(path: string, body: string): void {
 }
 
 describe("Pi Remote activation", () => {
-  it("requests an idle-boundary reload without detached work", () => {
+  it("requests a live supervisor reload without detached work", () => {
     const directory = mkdtempSync(join(tmpdir(), "pi-remote-activate-"));
     temporaryDirectories.push(directory);
     const trace = join(directory, "trace");
@@ -44,5 +44,40 @@ describe("Pi Remote activation", () => {
     expect(activation).toContain("systemctl reload --no-block pi-remote@kenan.service");
     expect(activation).not.toContain("systemd-run");
     expect(activation).not.toContain("curl");
+    expect(queued.stdout.toString()).toContain("requested live activation");
+  });
+
+  it("keeps the service launcher alive while replacing its supervisor", async () => {
+    const directory = mkdtempSync(join(tmpdir(), "pi-remote-supervise-"));
+    temporaryDirectories.push(directory);
+    const starts = join(directory, "starts");
+    const child = join(directory, "child");
+    executable(child, `
+      printf 'start %s\\n' "$$" >> "$STARTS"
+      trap 'exit 75' USR2
+      trap 'exit 0' TERM INT
+      while :; do sleep 0.05; done
+    `);
+    const launcher = Bun.spawn([join(import.meta.dir, "pi-remote-supervise"), child], {
+      env: { ...process.env, STARTS: starts },
+      stdout: "pipe",
+      stderr: "pipe",
+    });
+    const waitForStarts = async (count: number) => {
+      const deadline = Date.now() + 2_000;
+      while (Date.now() < deadline) {
+        const lines = existsSync(starts) ? readFileSync(starts, "utf8").trim().split("\n").filter(Boolean) : [];
+        if (lines.length >= count) return lines;
+        await Bun.sleep(20);
+      }
+      throw new Error(`launcher did not reach ${count} supervisor starts`);
+    };
+    await waitForStarts(1);
+    launcher.kill("SIGHUP");
+    const generations = await waitForStarts(2);
+    expect(new Set(generations).size).toBe(2);
+    expect(() => process.kill(launcher.pid, 0)).not.toThrow();
+    launcher.kill("SIGTERM");
+    expect(await launcher.exited).toBe(0);
   });
 });

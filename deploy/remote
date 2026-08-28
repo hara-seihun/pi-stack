@@ -32,10 +32,12 @@ orchestrator_release=$(readlink -f "$orchestrator")
 
 mkdir -p "$stage/release/node_modules"
 rsync -a --chmod=D755,Fu=rwX,Fgo=rX apps/remote/package.json apps/remote/server apps/remote/web "$stage/release/"
-test -x "$stage/release/server/pi-remote-launch" || {
-  printf 'staged Pi Remote launch wrapper is not executable\n' >&2
-  exit 1
-}
+for executable in pi-remote-launch pi-remote-supervise; do
+  test -x "$stage/release/server/$executable" || {
+    printf 'staged Pi Remote executable is not executable: %s\n' "$executable" >&2
+    exit 1
+  }
+done
 ln -s "$orchestrator_release" "$stage/release/node_modules/pi-orchestrator"
 printf '%s\n' "$commit" > "$stage/release/.pi-stack-commit"
 pi_stack_publish_release "$root" "$stage/release" "$dest" remote
