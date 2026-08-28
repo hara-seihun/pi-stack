@@ -65,6 +65,39 @@ test("offers help through the installed command and each subcommand", () => {
   }
 });
 
+test("a reader that closes the output pipe does not crash the command", async () => {
+  const f = fixture();
+  try {
+    run(["status", "--json"], f.env);
+    const database = new DatabaseSync(f.env.PI_WORKSPACE_STATE);
+    const insert = database.prepare(`INSERT INTO workspace
+      (id,path,root,kind,mode,owner,repository,source_commit,checkout_type,
+       cache_paths,created_at,updated_at,lease_expires_at,state,detail,group_id)
+      VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,NULL)`);
+    for (let index = 0; index < 2_000; index += 1) {
+      insert.run(
+        `workspace-${index}`, path.join(f.workspaces, `workspace-${index}`), f.workspaces,
+        "agent", "writer", `owner-${index}`, f.remote, "a".repeat(40), "clone",
+        JSON.stringify(["node_modules"]), index, index, 0, "released", "durable remote branch",
+      );
+    }
+    database.close();
+
+    const child = spawn(entry, ["status", "--json"], {
+      env: { ...process.env, ...f.env },
+      stdio: ["ignore", "pipe", "pipe"],
+    });
+    let stderr = "";
+    child.stderr.setEncoding("utf8");
+    child.stderr.on("data", (chunk) => { stderr += chunk; });
+    child.stdout.once("data", () => child.stdout.destroy());
+    const code = await new Promise((resolve) => child.once("close", resolve));
+    assert.equal(code, 0, stderr);
+  } finally {
+    f.close();
+  }
+});
+
 test("migrates a registry created before workspace groups", () => {
   const root = mkdtempSync(path.join(tmpdir(), "agent-workspace-migration-"));
   const state = path.join(root, "registry.sqlite3");

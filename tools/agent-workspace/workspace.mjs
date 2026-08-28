@@ -1221,6 +1221,12 @@ export function main(argv = process.argv.slice(2), statePath = DEFAULT_STATE) {
 }
 
 if (import.meta.url === `file://${process.argv[1]}`) {
+  for (const stream of [process.stdout, process.stderr]) {
+    stream.on("error", (error) => {
+      if (error.code === "EPIPE") process.exit(0);
+      throw error;
+    });
+  }
   try {
     main();
   } catch (error) {
