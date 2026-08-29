@@ -86,9 +86,33 @@ describe("runner supervisor", () => {
     });
     expect(successor.tick(2_200).claimed).toHaveLength(1);
 
-    // The drained worker's later exit is expected and spawns nothing.
+    // Once the old worker's sessions finish, its exit is expected and spawns nothing.
+    for (const run of ledger.runs({ state: "running", runnerId: old.workerId })) {
+      ledger.finishRun(run.id, { state: "done" }, 8_000);
+    }
+    expect(worker.drained()).toBe(true);
     live.workerExited(old.workerId, 9_000);
     expect(live.tick(9_100).spawned).toBeUndefined();
+    expect(spawned).toHaveLength(2);
+  });
+
+  it("recovers a superseded worker that exits before its sessions drain", () => {
+    const ledger = Ledger.open(":memory:");
+    seed(ledger, 2);
+    const spawned: WorkerSpec[] = [];
+    const live = supervisor(ledger, spawned);
+    const old = live.tick(1_000).spawned!;
+    new Runner(ledger, new FakeEngine(), { runnerId: old.workerId, maxSessions: 700 }).tick(1_100);
+    const runs = ledger.runs({ state: "running", runnerId: old.workerId });
+    ledger.linkRunSession(runs[0]!.id, "session-1", 1_200, "/tmp/session-1.jsonl");
+
+    bumpRunnerGeneration(ledger);
+    const successor = live.tick(2_000).spawned!;
+    live.workerExited(old.workerId, 2_100);
+
+    expect(ledger.run(runs[0]!.id)?.state).toBe("pending");
+    expect(ledger.run(runs[1]!.id)?.state).toBe("aborted");
+    expect(live.tick(2_200).claiming).toBe(successor.workerId);
     expect(spawned).toHaveLength(2);
   });
 

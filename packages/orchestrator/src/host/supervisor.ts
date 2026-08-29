@@ -68,6 +68,21 @@ export class RunnerSupervisor {
     this.instance = cfg.instance ?? randomUUID().slice(0, 8);
   }
 
+  private recoverWorkerRuns(matches: (runnerId: string | undefined) => boolean, detail: string, now: number): string[] {
+    const orphans = this.ledger
+      .runs({ state: "running" })
+      .filter((run) => matches(run.runnerId));
+    for (const run of orphans) {
+      if (this.ledger.runSession(run.id)?.sessionFile !== undefined) {
+        this.ledger.requeueRun(run.id, now);
+      } else {
+        this.ledger.finishRun(run.id, { state: "aborted", detail }, now);
+        this.ledger.taskFinished(run.taskId);
+      }
+    }
+    return orphans.map((run) => run.id);
+  }
+
   /**
    * Systemd kills the whole control group with the unit, so a supervisor that
    * is starting knows every worker of its host is gone and every run row still
@@ -79,18 +94,11 @@ export class RunnerSupervisor {
    */
   reapOrphans(now = Date.now()): string[] {
     const mine = `${this.cfg.runnerId}-`;
-    const orphans = this.ledger
-      .runs({ state: "running" })
-      .filter((run) => run.runnerId?.startsWith(mine) === true);
-    for (const run of orphans) {
-      if (this.ledger.runSession(run.id)?.sessionFile !== undefined) {
-        this.ledger.requeueRun(run.id, now);
-      } else {
-        this.ledger.finishRun(run.id, { state: "aborted", detail: "runner restarted" }, now);
-        this.ledger.taskFinished(run.taskId);
-      }
-    }
-    return orphans.map((run) => run.id);
+    return this.recoverWorkerRuns(
+      (runnerId) => runnerId?.startsWith(mine) === true,
+      "runner restarted",
+      now,
+    );
   }
 
   tick(now = Date.now()): SupervisorTickReport {
@@ -116,6 +124,7 @@ export class RunnerSupervisor {
    * that should be claiming asks for a replacement.
    */
   workerExited(workerId: string, now = Date.now()): void {
+    this.recoverWorkerRuns((runnerId) => runnerId === workerId, "runner exited", now);
     const worker = this.current;
     if (worker?.workerId !== workerId) return;
     this.current = undefined;
