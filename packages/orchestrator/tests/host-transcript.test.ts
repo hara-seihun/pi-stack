@@ -23,8 +23,7 @@ function harness(runId: string) {
       }),
       teamSupervisorResponded: () => true,
       teamWorkerSession: (_supervisorRunId, workerRunId) => ({ runId: workerRunId }),
-      laneDrained: () => false,
-      claimCheckIn: () => true, turnFailed: () => undefined },
+      turnFailed: () => undefined },
     { resolveModel: () => undefined },
   );
   let emit: (event: unknown) => void = () => {};

@@ -52,14 +52,6 @@ export interface TaskSpec {
   readonly prompt?: string;
   /** Working directory for launched sessions. */
   readonly cwd?: string;
-  /** End the shift as soon as this lane's demand reaches zero, instead of
-   * re-prompting the session until its budget is spent. A research lane is
-   * never done and keeps its warm context; a queue lane (review) can empty
-   * its queue mid-shift, and re-prompting it then asserts work that no
-   * longer exists. Unknown demand — an unprobed, stale, or failed probe —
-   * never ends a shift, because "I cannot see the queue" is not "the queue
-   * is empty". */
-  readonly exitWhenDrained?: boolean;
   /** URL of a doctrine document the host pins into every session's system
    * prompt for this lane. The task prompt is the first user message and is
    * the first thing compaction summarizes away; doctrine that must hold for
@@ -84,11 +76,6 @@ export interface TaskSpec {
    * draw), and a probe failure or an unresolved placeholder fails the
    * launch loudly rather than sending a template. */
   readonly openingProbe?: string;
-  /** The shift is one work turn: after the opening exchange and the task
-   * prompt, the host never sends continuation check-ins — the agent works
-   * until it ends its turn, and that end is the shift's end. The agent is
-   * not told this. */
-  readonly selfPaced?: boolean;
   /** Run this lane as one durable team: N workers plus one supervisor. Demand
    * is boolean for a team lane. Any positive reading asks for the complete
    * roster, and missing roles are replaced without disturbing their peers. */

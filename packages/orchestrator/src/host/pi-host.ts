@@ -11,12 +11,7 @@ import { homedir } from "node:os";
 import { dirname, join } from "node:path";
 import { Type } from "typebox";
 import type { HostEvents, HostManager, HostMessage, HostRunResult, LaunchSpec } from "./types.js";
-import {
-  continuationFor,
-  describeWait,
-  interruptedTurnPrompt,
-  ShiftObserver,
-} from "./continuations.js";
+import { describeWait, interruptedTurnPrompt } from "./continuations.js";
 import { RunTranscript } from "./transcript.js";
 import { openHostedSession, SESSION_RETRY } from "./session-lifecycle.js";
 import { readCondensedSession, teamSystemPrompt } from "./team.js";
@@ -245,9 +240,6 @@ export class PiHost implements HostManager {
         return { state: "error", detail: `opening probe failed: ${String(thrown)}` };
       }
     }
-    // Check-ins are generated from what the shift actually did; the observer
-    // accumulates per-turn facts from the session's own tool stream.
-    const observer = new ShiftObserver();
     const customTools: any[] = [];
     if (spec.team?.role === "supervisor") {
       customTools.push({
@@ -385,13 +377,6 @@ export class PiHost implements HostManager {
       if (transcript !== undefined) this.transcripts.set(spec.runId, transcript);
       const unsubscribe = transcript === undefined ? undefined : this.publish(transcript, session);
       if (unsubscribe !== undefined) disposers.push(unsubscribe);
-      disposers.push(
-        session.subscribe((event: any) => {
-          if (event.type === "tool_execution_start") {
-            observer.toolCall(String(event.toolName ?? "tool"), event.args);
-          }
-        }),
-      );
       const stopProgress = this.trackProgress(spec.runId, session);
       disposers.push(stopProgress);
       const heartbeat = setInterval(
@@ -399,13 +384,13 @@ export class PiHost implements HostManager {
         HEARTBEAT_MS,
       );
       disposers.push(() => clearInterval(heartbeat));
-      // A launch is a shift, not a single turn. The host keeps prompting the
-      // same session — same context, same working directory, same trail —
-      // until it has spent its check-ins, the turn fails, an operator aborts,
-      // or the lane drains. Ending at the first quiet turn threw away a warm
-      // context that had just paid for itself
-      // and made every lane restart from scratch. Nothing here is timed: a
-      // turn may run as long as the agent keeps working.
+      // An ordinary shift is the opening exchange plus one work turn, and the
+      // agent ending that turn ends it. The host never re-prompts a session
+      // that chose to stop: the continuation check-ins that used to do so
+      // trained volume in flowing shifts and trapped agents in drained lanes.
+      // Team sessions instead wait for Pi messages from one another.
+      // Nothing here is timed: a turn may run as long as the agent keeps
+      // working.
       // The opening exchange is lived, not injected: each message is a real
       // turn the agent answers with whatever tools it reaches for. Injecting a
       // transcript the agent never produced would be spotted and disbelieved.
@@ -440,7 +425,6 @@ export class PiHost implements HostManager {
             return { state: "aborted", detail: "session aborted" };
           }
           stalls = 0;
-          observer.endTurn();
           break;
         }
       }
@@ -473,13 +457,7 @@ export class PiHost implements HostManager {
             ? firstTeamTurn
               ? prompt
               : envelope!.text
-            : turn === 0
-              ? prompt
-              : continuationFor({
-                  taskId: spec.taskId,
-                  turn,
-                  turns: observer.turns(),
-                }));
+            : prompt);
         transcript?.append("user", { text: message });
         if (await interrupted(promptAndSettle(session, message))) {
           return { state: "aborted", detail: "session killed" };
@@ -505,7 +483,6 @@ export class PiHost implements HostManager {
         }
         stalls = 0;
         resume = undefined;
-        observer.endTurn();
         if (spec.team !== undefined) {
           if (spec.team.role === "worker") {
             const idle = this.events.teamWorkerIdle(spec.runId);
@@ -540,13 +517,7 @@ export class PiHost implements HostManager {
           turn++;
           continue;
         }
-        if (spec.selfPaced === true) break;
-        if (this.events.laneDrained(spec.taskId)) {
-          transcript?.append("notice", { text: "Lane drained: no work left, ending the shift." });
-          break;
-        }
-        if (!this.events.claimCheckIn(spec.runId)) break;
-        turn++;
+        break;
       }
       return { state: "done" };
     } finally {

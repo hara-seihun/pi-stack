@@ -9,7 +9,6 @@ import {
   uniformCooldown,
 } from "../provider-errors.js";
 import {
-  MAX_CHECK_INS,
   type HostEvents,
   type HostManager,
   type HostRunResult,
@@ -72,11 +71,6 @@ const RECOVERY_MAX_MS = 10 * 60_000;
 const RECOVERY_ATTEMPTS = 6;
 const TERMINAL_THROTTLE_BASE_MS = 30 * 60_000;
 const TERMINAL_THROTTLE_MAX_MS = 24 * 60 * 60_000;
-
-/** A demand reading older than this says nothing about the queue now. The
- * controller re-probes on a 60s TTL, so anything this old means nobody is
- * measuring the lane — and an unmeasured lane never ends a live shift. */
-const DEMAND_FRESH_MS = 5 * 60_000;
 
 function previousTeamAlert(text: string): boolean {
   return text.startsWith("Worker ") && text.includes("has stopped after finishing turn");
@@ -187,7 +181,6 @@ export class Runner implements HostEvents {
           doctrineUrl: task.doctrineUrl,
           opening: task.opening,
           openingProbe: task.openingProbe,
-          selfPaced: task.selfPaced,
           ...(task.team === undefined || run.teamRole === undefined
             ? {}
             : {
@@ -323,23 +316,6 @@ export class Runner implements HostEvents {
     this.ledger.progressRun(runId, at);
   }
 
-  /**
-   * Whether a shift on this lane should end instead of being re-prompted.
-   * Only lanes that asked for it (`exitWhenDrained`) can end this way, and
-   * only against a demand reading that is both current and successful:
-   * unknown demand means the queue is unobserved, not empty, and tearing a
-   * warm session down on a failed probe would cost the lane its context for
-   * nothing.
-   */
-  /**
-   * The shift's budget of asks, spent in the ledger so it is a property of
-   * the run rather than of the process hosting it. A worker on a superseded
-   * build cannot re-open a budget the run has already spent.
-   */
-  claimCheckIn(runId: string): boolean {
-    return this.ledger.claimCheckIn(runId, MAX_CHECK_INS);
-  }
-
   turnFailed(runId: string, detail: string, attempt: number, now = Date.now()): number | undefined {
     if (isCredentialError(detail) || isPermanentError(detail)) return undefined;
     if (attempt > RECOVERY_ATTEMPTS) return undefined;
@@ -361,15 +337,6 @@ export class Runner implements HostEvents {
     return waitMs;
   }
 
-  laneDrained(taskId: string, now = Date.now()): boolean {
-    const task = this.ledger.tasks().find((t) => t.id === taskId);
-    if (task?.exitWhenDrained !== true) return false;
-    if (task.demandConstant !== undefined) return task.demandConstant <= 0;
-    const demand = this.ledger.demandState(taskId);
-    if (demand?.units === undefined || demand.error !== undefined) return false;
-    if (demand.probedAt === undefined || now - demand.probedAt > DEMAND_FRESH_MS) return false;
-    return demand.units <= 0;
-  }
 }
 
 /** Ordered but non-destructive: bump the generation and every live runner

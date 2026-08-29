@@ -500,6 +500,19 @@ ALTER TABLE run DROP COLUMN productive;
 ALTER TABLE run DROP COLUMN complete;
 `;
 
+/** Continuation check-ins are gone: an ordinary shift is one work turn, and
+ * the agent ending it ends the shift. The night they were removed, check-ins
+ * had pinned a fleet of drained-queue agents against work none of them could
+ * claim — unable to work, unable to stop. The lane flags that configured the
+ * loop and the run's spent-ask counter go with the machinery. Deployment
+ * restarts the runner generation whenever this module changes, so no live
+ * worker reads these columns after they drop. */
+const SINGLE_TURN_SCHEMA = `
+ALTER TABLE task DROP COLUMN exit_when_drained;
+ALTER TABLE task DROP COLUMN self_paced;
+ALTER TABLE run DROP COLUMN check_ins;
+`;
+
 const MIGRATIONS: readonly string[] = [
   SCHEMA,
   TASK_SCHEMA,
@@ -529,6 +542,7 @@ const MIGRATIONS: readonly string[] = [
   RUN_LIFECYCLE_SCHEMA,
   RUN_ROLLING_DEPLOY_SCHEMA,
   RUN_RESULT_COLUMNS_REMOVAL_SCHEMA,
+  SINGLE_TURN_SCHEMA,
 ];
 
 export interface AccountRow {
@@ -1013,9 +1027,8 @@ export class Ledger {
     this.db
       .prepare(
         `INSERT INTO task (id, demand_command, demand_constant, gate, tiers, share, prompt, cwd,
-                           exit_when_drained, doctrine_url, opening, opening_probe, self_paced,
-                           team, created_at)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                           doctrine_url, opening, opening_probe, team, created_at)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
          ON CONFLICT (id) DO UPDATE SET
            demand_command = excluded.demand_command,
            demand_constant = excluded.demand_constant,
@@ -1024,11 +1037,9 @@ export class Ledger {
            share = excluded.share,
            prompt = excluded.prompt,
            cwd = excluded.cwd,
-           exit_when_drained = excluded.exit_when_drained,
            doctrine_url = excluded.doctrine_url,
            opening = excluded.opening,
            opening_probe = excluded.opening_probe,
-           self_paced = excluded.self_paced,
            team = excluded.team`,
       )
       .run(
@@ -1040,11 +1051,9 @@ export class Ledger {
         t.share ?? 1,
         t.prompt ?? null,
         t.cwd ?? null,
-        t.exitWhenDrained ? 1 : 0,
         t.doctrineUrl ?? null,
         t.opening === undefined ? null : JSON.stringify(t.opening),
         t.openingProbe ?? null,
-        t.selfPaced ? 1 : 0,
         t.team === undefined ? null : JSON.stringify(t.team),
         Date.now(),
       );
@@ -1078,7 +1087,7 @@ export class Ledger {
     const rows = this.db
       .prepare(
         `SELECT id, demand_command, demand_constant, gate, tiers, share, prompt, cwd,
-                exit_when_drained, doctrine_url, opening, opening_probe, self_paced, team
+                doctrine_url, opening, opening_probe, team
          FROM task ORDER BY id`,
       )
       .all() as {
@@ -1090,11 +1099,9 @@ export class Ledger {
       share: number;
       prompt: string | null;
       cwd: string | null;
-      exit_when_drained: number;
       doctrine_url: string | null;
       opening: string | null;
       opening_probe: string | null;
-      self_paced: number;
       team: string | null;
     }[];
     return rows.map((r) => ({
@@ -1106,11 +1113,9 @@ export class Ledger {
       share: r.share,
       prompt: r.prompt ?? undefined,
       cwd: r.cwd ?? undefined,
-      exitWhenDrained: r.exit_when_drained !== 0,
       doctrineUrl: r.doctrine_url ?? undefined,
       opening: r.opening === null ? undefined : (JSON.parse(r.opening) as string[]),
       openingProbe: r.opening_probe ?? undefined,
-      selfPaced: r.self_paced !== 0,
       team: r.team === null ? undefined : JSON.parse(r.team),
     }));
   }
@@ -1601,23 +1606,6 @@ export class Ledger {
   /** The session did something: a turn, a tool call, a notice. */
   progressRun(id: string, at: number): void {
     this.db.prepare("UPDATE run SET progress_at = ? WHERE id = ?").run(at, id);
-  }
-
-  /**
-   * Take one of the run's check-ins if any are left, reporting whether the
-   * host may kick this shift back again. The count is spent in the ledger
-   * before the message is sent, so a host that crashes mid-check-in loses
-   * the ask rather than repeating it, and every process that ever hosts the
-   * run reads the same budget.
-   */
-  claimCheckIn(id: string, max: number): boolean {
-    const row = this.db
-      .prepare(
-        "UPDATE run SET check_ins = check_ins + 1 WHERE id = ? AND check_ins < ? " +
-          "RETURNING check_ins",
-      )
-      .get(id, max) as { check_ins: number } | null | undefined;
-    return row !== undefined && row !== null;
   }
 
   /** Bind the root Pi session to its run. Repeating the report is idempotent.

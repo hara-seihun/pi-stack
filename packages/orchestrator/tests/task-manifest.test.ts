@@ -29,8 +29,6 @@ describe("task manifests", () => {
         share: 4,
         promptFile: "prompt.md",
         openingFiles: ["opening.md"],
-        exitWhenDrained: true,
-        selfPaced: false,
       }],
     }));
     ledger.upsertTask({ id: "queue", demandConstant: 1, tiers: [{ tier: "standard", weight: 1 }] });
@@ -47,11 +45,9 @@ describe("task manifests", () => {
       share: 4,
       prompt: "Work the queue.\n",
       cwd: undefined,
-      exitWhenDrained: true,
       doctrineUrl: undefined,
       opening: ["Take a look first.\n"],
       openingProbe: undefined,
-      selfPaced: false,
       team: undefined,
     }]);
     expect(ledger.taskPaused("queue")).toBe(true);

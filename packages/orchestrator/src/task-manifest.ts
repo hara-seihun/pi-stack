@@ -5,8 +5,8 @@ import { TIERS, type TaskSpec, type TeamSpec, type Tier, type TierShare } from "
 
 const TASK_KEYS = new Set([
   "id", "demandCommand", "demandCommandFile", "demandConstant", "gate", "tiers", "share",
-  "prompt", "promptFile", "cwd", "exitWhenDrained", "doctrineUrl", "opening", "openingFiles",
-  "openingProbe", "openingProbeFile", "selfPaced", "team",
+  "prompt", "promptFile", "cwd", "doctrineUrl", "opening", "openingFiles",
+  "openingProbe", "openingProbeFile", "team",
 ]);
 
 function object(value: unknown, where: string): Record<string, unknown> {
@@ -143,8 +143,6 @@ function task(raw: unknown, index: number, base: string): TaskSpec {
   const openingProbe = text(row, "openingProbe", "openingProbeFile", where, base);
   const demandConstant = optionalNumber(row, "demandConstant", where);
   const share = optionalNumber(row, "share", where);
-  const exitWhenDrained = optionalBoolean(row, "exitWhenDrained", where);
-  const selfPaced = optionalBoolean(row, "selfPaced", where);
 
   return {
     id,
@@ -155,11 +153,9 @@ function task(raw: unknown, index: number, base: string): TaskSpec {
     share,
     prompt,
     cwd: optionalString(row, "cwd", where),
-    exitWhenDrained,
     doctrineUrl: optionalString(row, "doctrineUrl", where),
     opening: resolvedOpening,
     openingProbe,
-    selfPaced,
     team: team(row.team, where, base),
   };
 }

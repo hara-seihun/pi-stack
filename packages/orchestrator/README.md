@@ -197,8 +197,8 @@ Three launch-side fields describe scheduling:
   bind for a whole shift — the math ledger's attack guide, whose anti-ladder
   rules override even the session's opening instructions — survives only in
   the system prompt, which compaction preserves.
-- `opening` (`task set … --opening file1,file2`) and `selfPaced` (`…
-  --self-paced true`): the opening exchange. The host sends each file's text
+- `opening` (`task set … --opening file1,file2`): the opening exchange. The
+  host sends each file's text
   as a real user turn, in order, before the task prompt; the agent answers
   each message and may use tools. Pi stores the exchange as ordinary session
   messages and native compaction summarizes it with the rest of the
@@ -209,8 +209,7 @@ Three launch-side fields describe scheduling:
   prints one JSON object whose values fill `{{key}}` placeholders. The
   math-frontier lane samples a different famous open problem per session this
   way because a fixed example anchored whole batches on one target. A failed
-  probe or unresolved placeholder fails the launch. With `selfPaced` the
-  shift is one work turn with no continuation check-ins. Measured on the
+  probe or unresolved placeholder fails the launch. Measured on the
   math-frontier lane on 2026-08-22, the exchange moved self-assessed odds on
   an open target from about 0.1% to 25–40%; the experiment record lives in
   `~/data/thread-lab/_experiments/2026-08-22-erdos647-priors/`.
@@ -306,8 +305,8 @@ shares divide each tier, and the mix holds inside the lane.
   nobody else inherits them.
 - **Composition is measured over a window** (1h): live sessions count as one,
   and ended ones fade linearly to nothing across the window. A queue lane
-  that exits when drained turns over many times an hour while a research lane
-  holds warm context for hours, so counting only live sessions would read the
+  turns over its short single-turn shifts many times an hour while a research
+  lane's one turn holds warm context for hours, so counting only live sessions would read the
   short-lived lane as idle and feed it slot after slot — and would erase the
   memory a weighted mix needs, since 20:1 is a ratio no single-slot cycle can
   express. Counting every session in the window at full weight fails the
@@ -343,15 +342,6 @@ rather than acquiring invented capacity), and the lane's tier mix decides
 which models those launches use. Turning one lane up to 70% and boosting the
 family it runs on fills the machine with that lane's cheap tier without
 touching a prompt or a task definition.
-
-- `exitWhenDrained`: end a shift as soon as the lane's demand reaches zero
-  instead of re-prompting until the check-ins are spent. A research lane
-  is never done and must keep its warm context; a queue lane empties its
-  queue mid-shift, and a check-in would then assert work that no longer
-  exists.
-  Unknown demand — unprobed, stale (>5min), or a failed probe — never ends a
-  shift: "I cannot see the queue" is not "the queue is empty". The host asks
-  (`HostEvents.laneDrained`); the runner, which holds the ledger, answers.
 
 Launch control is one lever at two scopes, both `control` rows in the ledger
 and honoured by every evaluation regardless of who restarts which process:
@@ -555,62 +545,29 @@ ledger's MCP server spent their turns writing curl JSON-RPC helpers instead.
 The host binds print mode: no UI, no command actions, extension errors into
 the run's own transcript.
 
-A launch is a **shift**, not a turn. A model ends its turn as soon as it
-writes a summary, and the host used to end the run with it: standing research
-lanes whose prompts say "submitting is a checkpoint, not an exit" were torn
-down at the first checkpoint — 27 to 57 minutes in — and relaunched from an
-empty context, paying re-orientation cost over and over. No prompt wording can
-fix that, because the instruction addresses an agent that no longer exists by
-the time it would apply. The host therefore re-prompts the same live session
-until it has spent its check-ins (`MAX_CHECK_INS`, 5), the turn errors, an
-operator aborts, or the lane declares itself drained (`exitWhenDrained`,
-checked against current demand before each re-prompt).
+A launch is a **shift**: the lane's opening exchange, then one work turn.
+The agent ending that turn ends the shift — the host never re-prompts a
+session that chose to stop. The turn may run as long as the agent keeps
+working; nothing in the host knows the time. The four-hour session budget
+died on 2026-08-23 after transcript audit found agents inventing time
+pressure unprompted ("Given time budget, let me prioritize", 31 minutes into
+a turn) — a lane that exists to say a hard problem deserves however long it
+takes cannot also run a deadline behind the agent's back.
 
-**A shift is bounded by asks, not by a clock (2026-08-23).** The host used to
-stop at a four-hour session budget, and the last check-in inside it said so
-("land the plane", "before the clock does it for you"). Both are gone. A lane
-that exists to say a hard problem deserves however long it takes cannot also
-run a deadline behind the agent's back, and the deadline was doing work in the
-wrong direction: transcript audit found agents inventing time pressure
-unprompted — one wrote "Given time budget, let me prioritize" 31 minutes into
-its work turn, then "session has been long already. Priority is durable filings
-NOW" — counting turns in its own transcript as if they were a clock. Nothing in
-the host or in `continuations.ts` now knows the time. Six work turns is the
-whole claim on a session; each may run as long as the agent keeps working.
-
-The five are **messages sent, counted on the run row**, and both halves of
-that matter. The rule they replaced ended a shift after two turns that filed
-no report, which is not the same measurement: an agent that files a running
-report every turn is never idle by it, so nothing but the clock bounded the
-kick-backs, and one math-cleanup session took 52 of them — pinned against the
-context cap for two and a half hours, saying so in its own reasoning. And a
-budget held in a worker's memory is a budget a superseded worker re-opens:
-the cap shipped while three older workers kept kicking their sessions back on
-the rule they had loaded at startup. `Ledger.claimCheckIn` spends one from
-the run's own `check_ins` before the message is composed, so every process
-that ever hosts the run reads the same budget and a live shift that is
-already over its five is asked for nothing further.
-
-Each re-prompt is a check-in
-(`src/host/continuations.ts`) generated from what the shift actually did,
-observed from the session's own tool stream: a frontier turn that filed a
-pile of near-adjacent ledger entries — caught by volume, by repair-chain
-titles, or by the title signatures of a parameter walk (several titles
-sharing a number-bearing bigram once numerals are normalized, or titles
-that are mostly the same words), all thresholds calibrated against that
-night's real shifts — gets a warm, specific ask to
-consolidate them into the theorem they are shadows of (the night of
-2026-08-21 showed what unconditional praise trains — one shift answered its
-check-ins with 1, 4, 5, 4, 7, 2, 2, 8, 12, 21 filings); a turn of deep quiet
-work gets the operator's encouragement, her own first message verbatim; a
-turn with nothing in it gets honest permission to stop. Queue lanes (review,
-cleanup, provenance) submit in bulk as their
-job and are never steered to consolidate. The warmth is load-bearing —
-agents perform worse under terse or cold direction — so correction arrives
-as an upgrade, never a scolding, and the replay tests
-(`tests/continuations.test.ts`) hold every generated message to that bar
-against distilled transcripts of that night's real shifts. Run state follows
-the session lifecycle. If provider recovery is exhausted, the host reports the
+**Continuation check-ins are gone (2026-08-29).** The host used to answer a
+finished turn with up to five generated follow-ups, on the theory that a
+model ends its turn too eagerly and a standing lane should keep its warm
+context. What they actually did at the boundary showed the night they were
+removed: an ingest lane near drain read positive demand while every
+remaining unit was claimed or blocked, and the check-ins kept pushing
+sessions that had nothing claimable — unable to work, unable to stop, some
+re-prompted for hours against one folder none of them could take. A
+generated message can only ever insist; it cannot see what the agent sees.
+So the agent's own judgment ends the shift, and a lane that wants more work
+done gets it as fresh launches against real demand, not as pressure on a
+finished session. Team lanes still converse mid-shift — their messages come
+from the supervisor and the operator, not from a generator. Run state
+follows the session lifecycle. If provider recovery is exhausted, the host reports the
 failure even when an earlier turn produced work; the runner then classifies it
 as an account or task failure. Durable results stay in the task's own store and
 the Pi transcript rather than an agent-authored run flag.

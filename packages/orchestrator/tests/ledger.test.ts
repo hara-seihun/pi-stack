@@ -101,7 +101,10 @@ describe("ledger", () => {
     Ledger.open(path).close();
     const db = new DatabaseSync(path);
     db.exec(
-      "DROP TRIGGER previous_team_waiting_to_idle; DROP INDEX run_team_idle; " +
+      "ALTER TABLE task ADD COLUMN exit_when_drained INTEGER NOT NULL DEFAULT 0; " +
+        "ALTER TABLE task ADD COLUMN self_paced INTEGER NOT NULL DEFAULT 0; " +
+        "ALTER TABLE run ADD COLUMN check_ins INTEGER NOT NULL DEFAULT 0; " +
+        "DROP TRIGGER previous_team_waiting_to_idle; DROP INDEX run_team_idle; " +
         "ALTER TABLE run DROP COLUMN idle_at; ALTER TABLE run DROP COLUMN context_since; " +
         "ALTER TABLE run_message DROP COLUMN sender_run_id; " +
         "ALTER TABLE run_message DROP COLUMN reply_run_id; " +
@@ -143,12 +146,13 @@ describe("ledger", () => {
     migrated.close();
     expect(await exited, stderr).toBe(0);
     const verified = new DatabaseSync(path);
-    expect((verified.prepare("PRAGMA user_version").get() as { user_version: number }).user_version).toBe(28);
-    expect(verified.prepare("SELECT check_ins, session_id, idle_at, context_since FROM run LIMIT 1").all()).toEqual([]);
+    expect((verified.prepare("PRAGMA user_version").get() as { user_version: number }).user_version).toBe(29);
+    expect(verified.prepare("SELECT session_id, idle_at, context_since FROM run LIMIT 1").all()).toEqual([]);
     const runColumns = (verified.prepare("PRAGMA table_info(run)").all() as { name: string }[])
       .map((column) => column.name);
     expect(runColumns).not.toContain("productive");
     expect(runColumns).not.toContain("complete");
+    expect(runColumns).not.toContain("check_ins");
     expect(
       (verified.prepare("PRAGMA table_info(run_session)").all() as { name: string }[])
         .some((column) => column.name === "parent_session_id"),
@@ -457,26 +461,6 @@ describe("account metadata custody", () => {
     expect(ledger.run(target.slice(0, 8))?.id).toBe(target);
     expect(ledger.run("no-such-run")).toBeUndefined();
     expect(() => ledger.run("")).toThrow(/ambiguous/);
-  });
-
-  it("a run's check-ins are spent once, by whichever process asks", () => {
-    const ledger = Ledger.open(":memory:");
-    ledger.upsertAccount({ id: "codex-7", provider: "openai-codex" });
-    ledger.upsertTask({ id: "lane", tiers: mix("standard"), demandConstant: 1, prompt: "go" });
-    const run = ledger.createRun({
-      taskId: "lane",
-      tier: "standard",
-      accountId: "codex-7",
-      model: "gpt",
-      provider: "openai-codex",
-      at: 1,
-    });
-
-    const granted = Array.from({ length: 8 }, () => ledger.claimCheckIn(run, 5));
-    expect(granted).toEqual([true, true, true, true, true, false, false, false]);
-    // A worker on a superseded build asking the same run is refused too: the
-    // budget is the row's, not the process's.
-    expect(ledger.claimCheckIn(run, 5)).toBe(false);
   });
 
   it("round-trips the opening exchange and its per-launch probe", () => {

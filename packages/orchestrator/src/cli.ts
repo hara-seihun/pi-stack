@@ -402,8 +402,6 @@ async function runner(ledger: Ledger, args: string[]): Promise<void> {
         live.teamSupervisorResponded(supervisorRunId, workerRunId, idleAt, text),
       teamWorkerSession: (supervisorRunId, workerRunId) =>
         live.teamWorkerSession(supervisorRunId, workerRunId),
-      laneDrained: (taskId) => live.laneDrained(taskId),
-      claimCheckIn: (runId) => live.claimCheckIn(runId),
       turnFailed: (runId, detail, attempt) => {
         const waitMs = live.turnFailed(runId, detail, attempt);
         const id = runId.slice(0, 8);
@@ -845,18 +843,6 @@ export function taskSet(ledger: Ledger, args: string[]): void {
           });
   }
 
-  const paced = named.get("self-paced");
-  if (paced !== undefined && paced !== "true" && paced !== "false") {
-    fail("--self-paced must be true or false");
-  }
-  const selfPaced = paced === undefined ? current?.selfPaced : paced === "true";
-
-  const drained = named.get("exit-when-drained");
-  if (drained !== undefined && drained !== "true" && drained !== "false") {
-    fail("--exit-when-drained must be true or false");
-  }
-  const exitWhenDrained = drained === undefined ? current?.exitWhenDrained : drained === "true";
-
   ledger.upsertTask({
     id,
     tiers,
@@ -866,11 +852,9 @@ export function taskSet(ledger: Ledger, args: string[]): void {
     gate: pick("gate", current?.gate),
     prompt: pick("prompt", current?.prompt),
     cwd: pick("cwd", current?.cwd),
-    ...(exitWhenDrained === undefined ? {} : { exitWhenDrained }),
     doctrineUrl: pick("doctrine-url", current?.doctrineUrl),
     ...(opening === undefined ? {} : { opening }),
     openingProbe: pick("opening-probe", current?.openingProbe),
-    ...(selfPaced === undefined ? {} : { selfPaced }),
     ...(current?.team === undefined ? {} : { team: current.team }),
   });
   console.log(`task ${id} ${current ? "updated" : "created"}`);
@@ -977,10 +961,8 @@ async function main(): Promise<void> {
             console.log(
               `${t.id}: tiers=${formatTiers(t.tiers)} share=${t.share ?? 1} demand=[${demand}]` +
                 (t.gate !== undefined ? ` gate=[${t.gate}]` : "") +
-                (t.exitWhenDrained ? " exit-when-drained" : "") +
                 (t.opening !== undefined ? ` opening(${t.opening.length})` : "") +
                 (t.openingProbe !== undefined ? " opening-probe" : "") +
-                (t.selfPaced ? " self-paced" : "") +
                 (t.team === undefined
                   ? ""
                   : ` team=${t.team.workers}+supervisor`) +
@@ -1057,9 +1039,9 @@ async function main(): Promise<void> {
             "  usage [--hours N]            where the token quota went: fleet vs interactive,",
             "                               by lane, account, model, and largest session",
             "  task set <id> --tiers light:20,standard [--share N] [--demand-command CMD | --demand-constant N]",
-            "               [--gate EXPR] [--prompt TEXT] [--cwd DIR] [--exit-when-drained true|false]",
+            "               [--gate EXPR] [--prompt TEXT] [--cwd DIR]",
             "               [--doctrine-url URL]   pin a fetched document into the lane's system prompts",
-            "               [--opening file1,file2] [--self-paced true|false] lived opening exchange",
+            "               [--opening file1,file2] lived opening exchange",
             "               [--opening-probe CMD]  command whose JSON stdout fills {{key}} placeholders",
             "                                      in the opening messages, run fresh at every launch",
             "  task list | task delete <id> | task reconcile <manifest.json>",
