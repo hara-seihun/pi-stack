@@ -1333,12 +1333,21 @@ describe("web and supervisor integration", () => {
 
   test("keeps the context replacement acknowledged during compaction", async () => {
     const id = await createThread();
+    const futureCapture = Date.now() + 60_000;
+    await api("PUT", `/v1/sessions/${id}/context`, {
+      capturedAt: futureCapture,
+      context: {
+        systemPrompt: "old prompt",
+        tools: [],
+        messages: [{ role: "user", content: [{ type: "text", text: "removed by compaction" }] }],
+      },
+    });
     await api("POST", `/v1/sessions/${id}/prompt`, { requestId: crypto.randomUUID(), text: "compact" });
     await waitFor(
       () => api("GET", "/v1/sessions").then((result) => result.value.sessions.find((session: any) => session.id === id)),
       (session) => session?.activity === "COMPACTING",
     );
-    await api("PUT", `/v1/sessions/${id}/context`, {
+    const replacement = await api("PUT", `/v1/sessions/${id}/context`, {
       capturedAt: Date.now(),
       replacement: "compaction",
       context: {
@@ -1347,6 +1356,7 @@ describe("web and supervisor integration", () => {
         messages: [{ role: "user", content: [{ type: "text", text: "compacted summary" }] }],
       },
     });
+    expect(replacement.value.capturedAt).toBeGreaterThan(futureCapture);
     await waitFor(
       () => api("GET", `/v1/sessions/${id}/events?after=0`).then((result) => result.value.events),
       (events) => events.some((event: any) => event.type === "notice" && event.text === "Context compacted"),

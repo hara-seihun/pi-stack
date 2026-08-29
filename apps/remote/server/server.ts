@@ -2241,27 +2241,34 @@ const server = Bun.serve({
         if (!context || typeof context !== "object" || typeof context.systemPrompt !== "string"
           || !Array.isArray(context.tools) || !Array.isArray(context.messages)) return error("Valid model context required");
         const document = JSON.stringify(context);
+        const runtime = runtimes.get(id);
+        const compactionReplacement = body.replacement === "compaction" && runtime?.compacting === true;
         let changed = false;
         let acknowledgedHash = sha256(document);
+        let acknowledgedCapturedAt = capturedAt;
         db.transaction(() => {
           const current = storedContext(id);
-          if (current && capturedAt <= current.capturedAt) { acknowledgedHash = current.hash; return; }
+          if (current && capturedAt <= current.capturedAt) {
+            if (!compactionReplacement) {
+              acknowledgedHash = current.hash;
+              acknowledgedCapturedAt = current.capturedAt;
+              return;
+            }
+            acknowledgedCapturedAt = current.capturedAt + 1;
+          }
           db.query(`
             INSERT INTO session_contexts(session_id,captured_at,context) VALUES(?,?,?)
             ON CONFLICT(session_id) DO UPDATE SET captured_at=excluded.captured_at,context=excluded.context
-          `).run(id, capturedAt, document);
+          `).run(id, acknowledgedCapturedAt, document);
           db.query("DELETE FROM session_context_patches WHERE session_id=?").run(id);
           changed = true;
         })();
         if (changed) {
           rememberContext(id, document);
-          if (body.replacement === "compaction") {
-            const runtime = runtimes.get(id);
-            if (runtime?.compacting) runtime.compactionContextHash = acknowledgedHash;
-          }
+          if (compactionReplacement && runtime) runtime.compactionContextHash = acknowledgedHash;
           signalSync();
         }
-        return json({ ok: true, capturedAt, hash: acknowledgedHash });
+        return json({ ok: true, capturedAt: acknowledgedCapturedAt, hash: acknowledgedHash });
       } catch (cause: any) { return error(cause?.message ?? "Could not store model context", 400); }
     }
     if (action === "events" && req.method === "GET") {
