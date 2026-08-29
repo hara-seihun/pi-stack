@@ -253,9 +253,12 @@ git -C "$(cd "$(dirname "$0")/.." && pwd)" rev-parse HEAD > "$destination/.pi-st
       ACTIVATE_TRACE: activationTrace,
       SYSTEMCTL_TRACE: systemctlTrace,
     };
+    // The previous artifact carries no contract sources, so the change is
+    // unknowable and must be treated as a contract change: restart, not drain.
     const first = spawnSync(join(deploy, "host"), ["converge"], { encoding: "utf8", env });
     assert.equal(first.status, 0, first.stderr);
-    assert.match(readFileSync(trace, "utf8"), /orchestrator\/dist\/cli\.js drain-runners/);
+    assert.equal(existsSync(trace), false);
+    assert.match(readFileSync(systemctlTrace, "utf8"), /--user stop pi-orchestrator\.service\nstop pi-orchestrator-runner\.service\nstart pi-orchestrator-runner\.service\n--user start pi-orchestrator\.service/);
     assert.match(readFileSync(systemctlTrace, "utf8"), /restart pi-orchestrator-voice\.service/);
     assert.equal(readFileSync(activationTrace, "utf8"), "pi-remote.service\n");
 

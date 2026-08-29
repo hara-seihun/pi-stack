@@ -49,8 +49,12 @@ restore_services() {
     controller_systemctl start "$controller_service"
   fi
 }
+# An artifact without a readable contract hash (predating content comparison,
+# or after a layout change) must be treated as a contract change: on 2026-08-29
+# the empty-hash case took the drain path across a ledger migration and left
+# old workers writing to dropped columns.
 if [[ -n $previous_orchestrator && $previous_orchestrator != "$expected" &&
-      -n $previous_runner_contract_hash && $previous_runner_contract_hash != "$source_runner_contract_hash" ]]; then
+      $previous_runner_contract_hash != "$source_runner_contract_hash" ]]; then
   runner_contract_changed=1
   services_stopped=1
   trap restore_services EXIT
