@@ -3,7 +3,17 @@ import assert from "node:assert/strict";
 import { mkdtempSync, mkdirSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
+import { takeFlag, takeOption } from "../shared/arguments.mjs";
 import { loadConfig, parseJson, schemaToTypeScript } from "./lib.mjs";
+
+test("shared argument parsing consumes options and flags", () => {
+  const args = ["call", "--config", "mcp.json", "--connect"];
+  assert.equal(takeOption(args, "--config"), "mcp.json");
+  assert.equal(takeFlag(args, "--connect"), true);
+  assert.equal(takeFlag(args, "--missing"), false);
+  assert.deepEqual(args, ["call"]);
+  assert.throws(() => takeOption(["--config"], "--config"), /requires a value/);
+});
 
 test("config precedence follows global then project order", () => {
   const root = mkdtempSync(join(tmpdir(), "mcp-cli-"));

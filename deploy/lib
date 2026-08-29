@@ -26,6 +26,17 @@ pi_stack_acquire_deploy_lock() {
   export PI_STACK_DEPLOY_LOCK_FD PI_STACK_DEPLOY_LOCK_HELD=1
 }
 
+pi_stack_enter_deployment() {
+  local script=$1 root=$2
+  shift 2
+  pi_stack_enforce_deploy_deadline "$script" "$@"
+  pi_stack_acquire_deploy_lock "$root"
+  if [[ ${PI_STACK_ALLOW_DIRTY:-0} != 1 && -n $(git -C "$root" status --porcelain) ]]; then
+    echo "refusing to deploy an uncommitted Pi stack; set PI_STACK_ALLOW_DIRTY=1 only for a temporary test" >&2
+    exit 65
+  fi
+}
+
 pi_stack_dependency_key() {
   local root=$1
   sha256sum "$root/package.json" "$root/package-lock.json" | sha256sum | cut -d' ' -f1

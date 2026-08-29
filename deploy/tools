@@ -3,12 +3,7 @@ set -euo pipefail
 
 root=$(cd "$(dirname "$0")/.." && pwd)
 source "$root/deploy/lib"
-pi_stack_enforce_deploy_deadline "$0" "$@"
-pi_stack_acquire_deploy_lock "$root"
-if [[ ${PI_STACK_ALLOW_DIRTY:-0} != 1 && -n $(git -C "$root" status --porcelain) ]]; then
-  echo "refusing to deploy an uncommitted Pi stack; set PI_STACK_ALLOW_DIRTY=1 only for a temporary test" >&2
-  exit 65
-fi
+pi_stack_enter_deployment "$0" "$root" "$@"
 role=${1:-}
 [[ $role == local || $role == converge ]] || { echo "usage: deploy/tools {local|converge}" >&2; exit 64; }
 dest=${PI_STACK_TOOLS_DEST:-/srv/pi/tools}
@@ -29,6 +24,7 @@ dependencies=$(readlink -f "$runtime_root/current/node_modules")
 [[ -d $dependencies ]] || { echo "Pi Runtime dependencies are missing at $dependencies" >&2; exit 66; }
 
 mkdir -p "$stage/release"
+rsync -a --chmod=D755,F644 tools/shared/ "$stage/release/shared/"
 mapfile -t selected < <(jq -r --arg role "$role" '.tools[] | select(.hosts | index($role)) | .id' config/tools.json)
 for tool in "${selected[@]}"; do
   rsync -a --chmod=D755,F644 --exclude=deploy "tools/$tool/" "$stage/release/$tool/"

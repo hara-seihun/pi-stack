@@ -31,23 +31,13 @@ import {
   type InteractionQuery,
   type InteractionResponse,
 } from "../proto/agent_pb.js";
+import { encodeVarint } from "../proto/wire.js";
 import { frameConnectMessage } from "../client/bridge.js";
 
 const CURSOR_WEB_FETCH_INTERACTION_FIELD = 9;
 
 const PI_REJECT_REASON =
   "Not available through the Pi Cursor provider. Use Pi tools (web_search, fetch, bash, etc.) instead.";
-
-function encodeVarint(value: number): number[] {
-  const bytes: number[] = [];
-  let remaining = value >>> 0;
-  while (remaining >= 0x80) {
-    bytes.push((remaining & 0x7f) | 0x80);
-    remaining >>>= 7;
-  }
-  bytes.push(remaining);
-  return bytes;
-}
 
 function encodeLengthDelimitedField(fieldNo: number, data: Uint8Array): number[] {
   return [(fieldNo << 3) | 2, ...encodeVarint(data.length), ...data];

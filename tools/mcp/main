@@ -1,5 +1,6 @@
 #!/usr/bin/env node
 import { readFileSync } from "node:fs";
+import { takeFlag, takeOption } from "../shared/arguments.mjs";
 import { McpRuntime, formatError, parseJson } from "./lib.mjs";
 
 const HELP = `usage: mcp [--config FILE] COMMAND [ARGS]
@@ -19,22 +20,6 @@ commands:
 Tool paths are SERVER_TOOL, for example math_search. Output is JSON except for
 instructions. Use mcp-script when several calls need shared JavaScript logic.`;
 
-function takeOption(args, name) {
-  const index = args.indexOf(name);
-  if (index < 0) return undefined;
-  if (index + 1 >= args.length) throw new Error(`${name} requires a value`);
-  const value = args[index + 1];
-  args.splice(index, 2);
-  return value;
-}
-
-function hasFlag(args, name) {
-  const index = args.indexOf(name);
-  if (index < 0) return false;
-  args.splice(index, 1);
-  return true;
-}
-
 async function stdin() {
   if (process.stdin.isTTY) return "";
   const chunks = [];
@@ -48,7 +33,7 @@ function output(value) {
 
 async function main() {
   const args = process.argv.slice(2);
-  if (hasFlag(args, "--help") || hasFlag(args, "-h")) {
+  if (takeFlag(args, "--help") || takeFlag(args, "-h")) {
     console.log(HELP);
     return;
   }
@@ -57,7 +42,7 @@ async function main() {
   const runtime = new McpRuntime({ config });
   try {
     if (command === "status") {
-      output(await runtime.status({ connect: hasFlag(args, "--connect") }));
+      output(await runtime.status({ connect: takeFlag(args, "--connect") }));
     } else if (command === "list") {
       output(await runtime.list(args.shift()));
     } else if (command === "search") {

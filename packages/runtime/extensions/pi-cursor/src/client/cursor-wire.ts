@@ -1,3 +1,5 @@
+import { encodeVarint } from "../proto/wire.js";
+
 export interface CursorModelParameter {
   id: string;
   value: string;
@@ -23,17 +25,6 @@ export interface CursorParameterizedModel {
   contextTokenLimit?: number;
   contextTokenLimitForMaxMode?: number;
   variants: CursorParameterizedVariant[];
-}
-
-function encodeVarint(value: number): number[] {
-  const out: number[] = [];
-  let v = value >>> 0;
-  while (v >= 0x80) {
-    out.push((v & 0x7f) | 0x80);
-    v >>>= 7;
-  }
-  out.push(v);
-  return out;
 }
 
 function encodeBoolField(fieldNo: number, value: boolean): number[] {

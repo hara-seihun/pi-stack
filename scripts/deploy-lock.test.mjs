@@ -188,8 +188,7 @@ test("a changed host release rolls orchestrator workers and activates Pi Remote"
     copyFileSync(join(root, "deploy", "host"), join(deploy, "host"));
     chmodSync(join(deploy, "host"), 0o755);
     writeFileSync(join(deploy, "lib"), `
-pi_stack_enforce_deploy_deadline() { :; }
-pi_stack_acquire_deploy_lock() { :; }
+pi_stack_enter_deployment() { :; }
 pi_stack_prepare_dependencies() { :; }
 pi_stack_as_root() { "$@"; }
 `);

@@ -3,12 +3,7 @@ set -euo pipefail
 
 root=$(cd "$(dirname "$0")/.." && pwd)
 source "$root/deploy/lib"
-pi_stack_enforce_deploy_deadline "$0" "$@"
-pi_stack_acquire_deploy_lock "$root"
-if [[ ${PI_STACK_ALLOW_DIRTY:-0} != 1 && -n $(git -C "$root" status --porcelain) ]]; then
-  echo "refusing to deploy an uncommitted Pi stack; set PI_STACK_ALLOW_DIRTY=1 only for a temporary test" >&2
-  exit 65
-fi
+pi_stack_enter_deployment "$0" "$root" "$@"
 role=${1:-}
 manifest="$root/config/package-sets.json"
 jq -e --arg role "$role" '.roles[$role] | type == "array"' "$manifest" >/dev/null || {
