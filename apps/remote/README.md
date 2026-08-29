@@ -104,7 +104,7 @@ For the router, supply `PI_REMOTE_USERS` as a JSON array and run:
 bun server/router.ts
 ```
 
-The router expects systemd template units named `pi-remote@<user>.service`. `server/pi-remote-launch` mounts the person's gocryptfs folder and remains as the service's generation launcher. A reload replaces the supervisor process immediately. Per-thread runtime hosts remain in the same service cgroup and mount namespace, so active Pi processes keep running and the replacement supervisor adopts their RPC streams. Stopping the unit still kills every process and destroys the private mount.
+The router expects systemd template units named `pi-remote@<user>.service`. `server/pi-remote-launch` mounts the person's gocryptfs folder and remains as the service's generation launcher. A reload replaces the supervisor process immediately. Per-thread runtime hosts remain in the same service cgroup and mount namespace, so active Pi processes finish their turns and the replacement supervisor adopts their RPC streams. Once an adopted runtime settles, the supervisor replaces it before its next use so provider and extension changes take effect. Stopping the unit still kills every process and destroys the private mount.
 
 ## Test
 

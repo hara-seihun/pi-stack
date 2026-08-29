@@ -1596,7 +1596,7 @@ describe("web and supervisor integration", () => {
     expect(prompts[1].message).toContain("Continue the unfinished work");
   }, 20_000);
 
-  test("release activation hands an active turn to the replacement supervisor", async () => {
+  test("release activation finishes an active turn before replacing its runtime", async () => {
     const id = await createThread();
     await api("POST", `/v1/sessions/${id}/prompt`, { requestId: crypto.randomUUID(), text: "release-later" });
     await waitFor(
@@ -1613,7 +1613,16 @@ describe("web and supervisor integration", () => {
       () => api("GET", `/v1/sessions/${id}/events?after=0`).then((result) => result.value),
       (value) => value.events.some((event: any) => event.type === "assistant" && event.text === "current finished"),
     );
-    expect(events.session.state).toBe("IDLE");
+    await waitFor(
+      async () => {
+        try { process.kill(runtimePid, 0); return false; }
+        catch { return true; }
+      },
+      (stopped) => stopped,
+    );
+    const settings = await api("GET", `/v1/sessions/${id}/settings`);
+    expect(settings.status).toBe(200);
+    expect(Number(JSON.parse(readFileSync(fakeLaunch, "utf8")).pid)).not.toBe(runtimePid);
     const ledger = new Database(join(root, "data", "supervisor.sqlite3"), { readonly: true });
     const work = ledger.query("SELECT state,resume FROM work_items WHERE session_id=? AND text='release-later'").get(id) as any;
     ledger.close();

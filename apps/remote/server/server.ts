@@ -220,6 +220,7 @@ interface Runtime {
   followUpQueued: number;
   historyNeedsRestore: boolean;
   modelId: string;
+  replaceAfterSettle: boolean;
 }
 const runtimes = new Map<string, Runtime>();
 const activations = new Map<string, Promise<Runtime>>();
@@ -1115,7 +1116,14 @@ function settleRuntime(sessionId: string, rt: Runtime, emitEvent: boolean): bool
   ).get(sessionId) as any)?.count ?? 0);
   setState(sessionId, pendingWork > 0 ? "RUNNING" : "IDLE");
   if (emitEvent) emit(sessionId, "settled");
-  kickSession(sessionId);
+  if (rt.replaceAfterSettle && pendingWork === 0) {
+    rt.expectedExit = true;
+    rt.suppressOutput = true;
+    setRuntimePhase(sessionId, rt, "STOPPING");
+    void terminateRuntimeProcess(rt);
+  } else {
+    kickSession(sessionId);
+  }
   return true;
 }
 
@@ -1178,6 +1186,7 @@ function runtimeFromHandoff(row: any, handoff?: RuntimeHandoff): Runtime {
     followUpQueued: handoff?.followUpQueued ?? 0,
     historyNeedsRestore: handoff?.historyNeedsRestore ?? false,
     modelId: handoff?.modelId ?? String(row.initial_model ?? "unknown"),
+    replaceAfterSettle: handoff !== undefined,
   };
 }
 
@@ -1311,7 +1320,13 @@ async function adoptHandoffRuntimes() {
       const active = Boolean(state.isStreaming || state.isCompacting || Number(state.pendingMessageCount ?? 0) > 0);
       if (active && !["RUNNING", "ABORTING"].includes(rt.phase)) setRuntimePhase(row.id, rt, "RUNNING", "RUNNING");
       else if (!active && rt.phase === "RUNNING") settleRuntime(row.id, rt, true);
-      else if (!active && rt.phase === "STARTING") setRuntimePhase(row.id, rt, "IDLE", "IDLE");
+      else if (!active) {
+        if (rt.phase === "STARTING") setRuntimePhase(row.id, rt, "IDLE", "IDLE");
+        rt.expectedExit = true;
+        rt.suppressOutput = true;
+        setRuntimePhase(row.id, rt, "STOPPING");
+        void terminateRuntimeProcess(rt);
+      }
     } catch (cause) {
       console.error(`Could not adopt runtime ${row.id}`, cause);
       runtimes.delete(row.id);
