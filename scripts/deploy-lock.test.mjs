@@ -265,6 +265,16 @@ git -C "$(cd "$(dirname "$0")/.." && pwd)" rev-parse HEAD > "$destination/.pi-st
     assert.equal(existsSync(trace), false);
     assert.equal(readFileSync(activationTrace, "utf8"), "pi-remote.service\n");
 
+    writeFileSync(join(repository, "release"), "ordinary update\n");
+    assert.equal(spawnSync("git", ["-C", repository, "add", "release"]).status, 0);
+    assert.equal(spawnSync("git", ["-C", repository, "-c", "user.name=test", "-c", "user.email=test@example.test", "commit", "-qm", "ordinary update"]).status, 0);
+    rmSync(systemctlTrace, { force: true });
+    const ordinary = spawnSync(join(deploy, "host"), ["converge"], { encoding: "utf8", env });
+    assert.equal(ordinary.status, 0, ordinary.stderr);
+    assert.match(readFileSync(trace, "utf8"), /orchestrator\/dist\/cli\.js drain-runners/);
+    assert.doesNotMatch(readFileSync(systemctlTrace, "utf8"), /stop pi-orchestrator-runner\.service/);
+
+    rmSync(trace, { force: true });
     writeFileSync(supervisorSource, "changed\n");
     assert.equal(spawnSync("git", ["-C", repository, "add", supervisorSource]).status, 0);
     assert.equal(spawnSync("git", ["-C", repository, "-c", "user.name=test", "-c", "user.email=test@example.test", "commit", "-qm", "supervisor update"]).status, 0);

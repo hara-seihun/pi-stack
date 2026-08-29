@@ -12,6 +12,10 @@ controller_systemctl() {
   XDG_RUNTIME_DIR=${XDG_RUNTIME_DIR:-/run/user/$(id -u)} systemctl --user "$@"
 }
 
+runner_contract_hash() {
+  sha256sum "$1" "$2" | cut -d' ' -f1 | sha256sum | cut -d' ' -f1
+}
+
 pi_stack_prepare_dependencies "$root"
 expected=$(git -C "$root" rev-parse HEAD)
 orchestrator_dest=${PI_STACK_ORCHESTRATOR_DEST:-/srv/pi/pi-orchestrator}
@@ -21,10 +25,8 @@ if [[ -f $orchestrator_dest/.pi-stack-commit ]]; then
   previous_orchestrator=$(<"$orchestrator_dest/.pi-stack-commit")
 fi
 if [[ -f $orchestrator_dest/src/host/supervisor.ts && -f $orchestrator_dest/src/ledger/ledger.ts ]]; then
-  previous_runner_contract_hash=$(
-    sha256sum "$orchestrator_dest/src/host/supervisor.ts" "$orchestrator_dest/src/ledger/ledger.ts" |
-      sha256sum | cut -d' ' -f1
-  )
+  previous_runner_contract_hash=$(runner_contract_hash \
+    "$orchestrator_dest/src/host/supervisor.ts" "$orchestrator_dest/src/ledger/ledger.ts")
 fi
 remote_dest=${PI_STACK_REMOTE_DEST:-/srv/pi/pi-remote}
 previous_remote=""
@@ -35,10 +37,9 @@ ledger=${PI_ORCHESTRATOR_LEDGER:-$HOME/.local/share/pi-orchestrator/ledger.sqlit
 runner_service=${PI_ORCHESTRATOR_RUNNER_SERVICE:-pi-orchestrator-runner.service}
 controller_service=${PI_ORCHESTRATOR_CONTROLLER_SERVICE:-pi-orchestrator.service}
 voice_service=${PI_ORCHESTRATOR_VOICE_SERVICE:-pi-orchestrator-voice.service}
-source_runner_contract_hash=$(
-  sha256sum "$root/packages/orchestrator/src/host/supervisor.ts" \
-    "$root/packages/orchestrator/src/ledger/ledger.ts" | sha256sum | cut -d' ' -f1
-)
+source_runner_contract_hash=$(runner_contract_hash \
+  "$root/packages/orchestrator/src/host/supervisor.ts" \
+  "$root/packages/orchestrator/src/ledger/ledger.ts")
 runner_contract_changed=0
 services_stopped=0
 restore_services() {
