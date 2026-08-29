@@ -256,6 +256,7 @@ git -C "$(cd "$(dirname "$0")/.." && pwd)" rev-parse HEAD > "$destination/.pi-st
     const first = spawnSync(join(deploy, "host"), ["converge"], { encoding: "utf8", env });
     assert.equal(first.status, 0, first.stderr);
     assert.match(readFileSync(trace, "utf8"), /orchestrator\/dist\/cli\.js drain-runners/);
+    assert.match(readFileSync(systemctlTrace, "utf8"), /restart pi-orchestrator-voice\.service/);
     assert.equal(readFileSync(activationTrace, "utf8"), "pi-remote.service\n");
 
     rmSync(trace, { force: true });

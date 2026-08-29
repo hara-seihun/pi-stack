@@ -34,6 +34,7 @@ fi
 ledger=${PI_ORCHESTRATOR_LEDGER:-$HOME/.local/share/pi-orchestrator/ledger.sqlite3}
 runner_service=${PI_ORCHESTRATOR_RUNNER_SERVICE:-pi-orchestrator-runner.service}
 controller_service=${PI_ORCHESTRATOR_CONTROLLER_SERVICE:-pi-orchestrator.service}
+voice_service=${PI_ORCHESTRATOR_VOICE_SERVICE:-pi-orchestrator-voice.service}
 source_runner_contract_hash=$(
   sha256sum "$root/packages/orchestrator/src/host/supervisor.ts" \
     "$root/packages/orchestrator/src/ledger/ledger.ts" | sha256sum | cut -d' ' -f1
@@ -83,6 +84,10 @@ if (( runner_contract_changed )); then
     "$runner_service" "$controller_service"
 elif [[ -n $previous_orchestrator && $previous_orchestrator != "$expected" && -f $ledger ]]; then
   PI_ORCHESTRATOR_LEDGER="$ledger" node "$orchestrator_dest/dist/cli.js" drain-runners
+fi
+if [[ -n $previous_orchestrator && $previous_orchestrator != "$expected" ]] &&
+   pi_stack_as_root systemctl is-active --quiet "$voice_service"; then
+  pi_stack_as_root systemctl restart "$voice_service"
 fi
 remote_service=${PI_REMOTE_SERVICE:-pi-remote.service}
 if [[ $previous_remote != "$expected" ]] && systemctl is-active --quiet "$remote_service"; then
