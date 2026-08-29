@@ -181,9 +181,16 @@ test("a changed host release rolls orchestrator workers and activates Pi Remote"
     const repository = join(directory, "repo");
     const deploy = join(repository, "deploy");
     const remoteApp = join(repository, "apps", "remote");
+    const orchestratorSource = join(repository, "packages", "orchestrator", "src");
+    const supervisorSource = join(orchestratorSource, "host", "supervisor.ts");
+    const ledgerSource = join(orchestratorSource, "ledger", "ledger.ts");
     const bin = join(directory, "bin");
     mkdirSync(deploy, { recursive: true });
     mkdirSync(remoteApp, { recursive: true });
+    mkdirSync(dirname(supervisorSource), { recursive: true });
+    mkdirSync(dirname(ledgerSource), { recursive: true });
+    writeFileSync(supervisorSource, "same\n");
+    writeFileSync(ledgerSource, "same\n");
     mkdirSync(bin);
     copyFileSync(join(root, "deploy", "host"), join(deploy, "host"));
     chmodSync(join(deploy, "host"), 0o755);
@@ -205,9 +212,10 @@ case "$name" in
 esac
 mkdir -p "$destination/dist"
 if [[ $name == orchestrator ]]; then
+  source_root=$(cd "$(dirname "$0")/../packages/orchestrator/src" && pwd)
   mkdir -p "$destination/src/host" "$destination/src/ledger"
-  printf '%s\n' "\${SUPERVISOR_CONTENT:-same}" > "$destination/src/host/supervisor.ts"
-  printf '%s\n' "\${LEDGER_CONTENT:-same}" > "$destination/src/ledger/ledger.ts"
+  cp "$source_root/host/supervisor.ts" "$destination/src/host/supervisor.ts"
+  cp "$source_root/ledger/ledger.ts" "$destination/src/ledger/ledger.ts"
 fi
 git -C "$(cd "$(dirname "$0")/.." && pwd)" rev-parse HEAD > "$destination/.pi-stack-commit"
 `;
@@ -218,7 +226,7 @@ git -C "$(cd "$(dirname "$0")/.." && pwd)" rev-parse HEAD > "$destination/.pi-st
     writeFileSync(join(remoteApp, "activate"), "#!/bin/sh\nprintf '%s\\n' \"${PI_REMOTE_SERVICE:-}\" >> \"$ACTIVATE_TRACE\"\n");
     chmodSync(join(remoteApp, "activate"), 0o755);
     assert.equal(spawnSync("git", ["init", "-q", repository]).status, 0);
-    assert.equal(spawnSync("git", ["-C", repository, "add", "deploy", "apps"]).status, 0);
+    assert.equal(spawnSync("git", ["-C", repository, "add", "deploy", "apps", "packages"]).status, 0);
     assert.equal(spawnSync("git", ["-C", repository, "-c", "user.name=test", "-c", "user.email=test@example.test", "commit", "-qm", "fixture"]).status, 0);
 
     const destinations = Object.fromEntries(["RUNTIME", "ORCHESTRATOR", "REMOTE", "TOOLS", "SKILLS"].map((name) =>
@@ -256,29 +264,29 @@ git -C "$(cd "$(dirname "$0")/.." && pwd)" rev-parse HEAD > "$destination/.pi-st
     assert.equal(existsSync(trace), false);
     assert.equal(readFileSync(activationTrace, "utf8"), "pi-remote.service\n");
 
-    writeFileSync(join(repository, "release"), "supervisor update\n");
-    assert.equal(spawnSync("git", ["-C", repository, "add", "release"]).status, 0);
+    writeFileSync(supervisorSource, "changed\n");
+    assert.equal(spawnSync("git", ["-C", repository, "add", supervisorSource]).status, 0);
     assert.equal(spawnSync("git", ["-C", repository, "-c", "user.name=test", "-c", "user.email=test@example.test", "commit", "-qm", "supervisor update"]).status, 0);
     rmSync(systemctlTrace, { force: true });
     const supervisorChanged = spawnSync(join(deploy, "host"), ["converge"], {
       encoding: "utf8",
-      env: { ...env, SUPERVISOR_CONTENT: "changed" },
+      env,
     });
     assert.equal(supervisorChanged.status, 0, supervisorChanged.stderr);
     assert.equal(existsSync(trace), false);
-    assert.match(readFileSync(systemctlTrace, "utf8"), /--user stop pi-orchestrator\.service\nrestart pi-orchestrator-runner\.service\n--user start pi-orchestrator\.service/);
+    assert.match(readFileSync(systemctlTrace, "utf8"), /--user stop pi-orchestrator\.service\nstop pi-orchestrator-runner\.service\nstart pi-orchestrator-runner\.service\n--user start pi-orchestrator\.service/);
 
-    writeFileSync(join(repository, "release"), "ledger update\n");
-    assert.equal(spawnSync("git", ["-C", repository, "add", "release"]).status, 0);
+    writeFileSync(ledgerSource, "changed\n");
+    assert.equal(spawnSync("git", ["-C", repository, "add", ledgerSource]).status, 0);
     assert.equal(spawnSync("git", ["-C", repository, "-c", "user.name=test", "-c", "user.email=test@example.test", "commit", "-qm", "ledger update"]).status, 0);
     rmSync(systemctlTrace, { force: true });
     const ledgerChanged = spawnSync(join(deploy, "host"), ["converge"], {
       encoding: "utf8",
-      env: { ...env, SUPERVISOR_CONTENT: "changed", LEDGER_CONTENT: "changed" },
+      env,
     });
     assert.equal(ledgerChanged.status, 0, ledgerChanged.stderr);
     assert.equal(existsSync(trace), false);
-    assert.match(readFileSync(systemctlTrace, "utf8"), /--user stop pi-orchestrator\.service\nrestart pi-orchestrator-runner\.service\n--user start pi-orchestrator\.service/);
+    assert.match(readFileSync(systemctlTrace, "utf8"), /--user stop pi-orchestrator\.service\nstop pi-orchestrator-runner\.service\nstart pi-orchestrator-runner\.service\n--user start pi-orchestrator\.service/);
   } finally {
     rmSync(directory, { recursive: true, force: true });
   }

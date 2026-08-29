@@ -486,6 +486,15 @@ ALTER TABLE run DROP COLUMN productive;
 ALTER TABLE run DROP COLUMN complete;
 `;
 
+/** Keep the rolling deployment readable by workers from the previous release.
+ * Migration 26 reached one host before its old workers had stopped; restoring
+ * these unused columns lets every host move to code that no longer reads them
+ * before a later migration removes them for good. */
+const RUN_ROLLING_DEPLOY_SCHEMA = `
+ALTER TABLE run ADD COLUMN productive INTEGER;
+ALTER TABLE run ADD COLUMN complete INTEGER;
+`;
+
 const MIGRATIONS: readonly string[] = [
   SCHEMA,
   TASK_SCHEMA,
@@ -513,6 +522,7 @@ const MIGRATIONS: readonly string[] = [
   TEAM_TURN_SCHEMA,
   NATIVE_TEAM_TURN_SCHEMA,
   RUN_LIFECYCLE_SCHEMA,
+  RUN_ROLLING_DEPLOY_SCHEMA,
 ];
 
 export interface AccountRow {
