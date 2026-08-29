@@ -234,6 +234,7 @@ Stream modules are split under `src/stream/`:
 | `model-routing.ts`     | Effort suffix / requested model resolution                            |
 | `model-discovery.ts`   | `GetUsableModels` unary RPCs + per-token model cache                  |
 | `model-cache.ts`       | Cross-process catalog cache read synchronously at startup             |
+| `message-content.ts`   | Shared OpenAI-shaped message content extraction                       |
 | `context-normalize.ts` | Context-mode side-channel folding                                     |
 | `message-parsing.ts`   | Pi/OpenAI message list → Cursor turn structures                       |
 | `pi-adapter.ts`        | Pi context/model types ↔ OpenAI-shaped request, usage accounting      |

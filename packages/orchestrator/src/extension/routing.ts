@@ -1,5 +1,5 @@
 import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
-import type { Model, Provider } from "@earendil-works/pi-ai";
+import type { Model } from "@earendil-works/pi-ai";
 import { builtinProviders } from "@earendil-works/pi-ai/providers/all";
 import { Ledger } from "../ledger/ledger.js";
 import {
@@ -10,6 +10,8 @@ import {
 import { pickAccount } from "./select-account.js";
 import { baseProvider, defaultLedgerPath } from "./usage-logger.js";
 import { credentialedAccountIds } from "../auth/credentials.js";
+import { aliasProvider } from "../auth/provider-alias.js";
+export { aliasProvider } from "../auth/provider-alias.js";
 import { homedir } from "node:os";
 import { join } from "node:path";
 
@@ -43,23 +45,6 @@ export { isRateLimitError } from "../provider-errors.js";
 import { isRateLimitError } from "../provider-errors.js";
 import { cooldownPolicy, loadConfig } from "../config.js";
 import { interruptedTurnPrompt } from "../host/continuations.js";
-
-/** An alias provider: the family's models, transport, and OAuth under the
- * account's own id, so credentials resolve from auth.json[aliasId]. */
-export function aliasProvider(family: Provider, aliasId: string, label?: string): Provider {
-  return {
-    id: aliasId,
-    name: label !== undefined ? `${family.name} [${label}]` : `${family.name} [${aliasId}]`,
-    baseUrl: family.baseUrl,
-    headers: family.headers,
-    auth: family.auth,
-    getModels: () =>
-      family.getModels().map((m) => ({ ...m, provider: aliasId, name: `${m.name} (${aliasId})` })),
-    filterModels: family.filterModels?.bind(family),
-    stream: (model, context, options) => family.stream(model as never, context, options),
-    streamSimple: (model, context, options) => family.streamSimple(model, context, options),
-  };
-}
 
 export function failoverPrompt(failure: string, account: string): string {
   return interruptedTurnPrompt(

@@ -55,34 +55,38 @@
     return endings[1]?.index === undefined ? -1 : endings[1].index + endings[1][0].length;
   }
 
-  async function waitForIce(peer) {
-    if (peer.iceGatheringState === "complete") return;
+  async function waitForReady(target, options) {
+    if (options.ready()) return;
     await new Promise((resolve, reject) => {
-      const timeout = setTimeout(() => finish(new Error("Voice ICE gathering timed out")), 15_000);
-      const changed = () => { if (peer.iceGatheringState === "complete") finish(); };
       const finish = (error) => {
         clearTimeout(timeout);
-        peer.removeEventListener("icegatheringstatechange", changed);
+        target.removeEventListener(options.readyEvent, ready);
+        if (options.failureEvent) target.removeEventListener(options.failureEvent, failed);
         error ? reject(error) : resolve();
       };
-      peer.addEventListener("icegatheringstatechange", changed);
+      const ready = () => { if (options.ready()) finish(); };
+      const failed = () => finish(new Error(options.failureMessage));
+      const timeout = setTimeout(() => finish(new Error(options.timeoutMessage)), 15_000);
+      target.addEventListener(options.readyEvent, ready);
+      if (options.failureEvent) target.addEventListener(options.failureEvent, failed);
     });
   }
 
-  async function waitForChannel(channel) {
-    if (channel.readyState === "open") return;
-    await new Promise((resolve, reject) => {
-      const timeout = setTimeout(() => finish(new Error("GPT-Live data channel timed out")), 15_000);
-      const opened = () => finish();
-      const closed = () => finish(new Error("GPT-Live closed during startup"));
-      const finish = (error) => {
-        clearTimeout(timeout);
-        channel.removeEventListener("open", opened);
-        channel.removeEventListener("close", closed);
-        error ? reject(error) : resolve();
-      };
-      channel.addEventListener("open", opened);
-      channel.addEventListener("close", closed);
+  function waitForIce(peer) {
+    return waitForReady(peer, {
+      ready: () => peer.iceGatheringState === "complete",
+      readyEvent: "icegatheringstatechange",
+      timeoutMessage: "Voice ICE gathering timed out",
+    });
+  }
+
+  function waitForChannel(channel) {
+    return waitForReady(channel, {
+      ready: () => channel.readyState === "open",
+      readyEvent: "open",
+      failureEvent: "close",
+      failureMessage: "GPT-Live closed during startup",
+      timeoutMessage: "GPT-Live data channel timed out",
     });
   }
 

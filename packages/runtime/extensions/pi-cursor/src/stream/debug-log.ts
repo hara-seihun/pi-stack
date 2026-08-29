@@ -12,9 +12,8 @@
  */
 import { createHash } from "node:crypto";
 import { appendFile } from "node:fs";
-import { join as pathJoin } from "node:path";
 
-import { getCacheDir } from "../utils/cache-dir.js";
+import { generatedLogPath } from "../utils/log-path.js";
 import { redactSecrets } from "../utils/security.js";
 import { normalizeImageMimeType } from "./images.js";
 import type { CursorRequestDebugSummary } from "./types.js";
@@ -177,11 +176,7 @@ export function getDebugLogFilePath(): string {
   const configured = process.env.PI_CURSOR_PROVIDER_DEBUG_FILE?.trim();
   if (configured) return configured;
   if (debugLogFilePath) return debugLogFilePath;
-  const stamp = new Date().toISOString().replace(/[:.]/g, "-");
-  debugLogFilePath = pathJoin(
-    getCacheDir() ?? process.cwd(),
-    `pi-cursor-provider-debug-${stamp}-${process.pid}.log`,
-  );
+  debugLogFilePath = generatedLogPath("pi-cursor-provider-debug", { timestamp: true });
   return debugLogFilePath;
 }
 
@@ -212,10 +207,7 @@ export function getLifecycleLogPath(): string {
   const configured = process.env.PI_CURSOR_LIFECYCLE_LOG?.trim();
   if (configured) return configured;
   if (lifecycleLogPath) return lifecycleLogPath;
-  lifecycleLogPath = pathJoin(
-    getCacheDir() ?? process.cwd(),
-    `pi-cursor-lifecycle-${process.pid}.jsonl`,
-  );
+  lifecycleLogPath = generatedLogPath("pi-cursor-lifecycle", { extension: "jsonl" });
   return lifecycleLogPath;
 }
 

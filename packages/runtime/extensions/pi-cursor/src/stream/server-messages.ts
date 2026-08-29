@@ -55,6 +55,7 @@ import {
   WriteResultSchema,
   WriteShellStdinErrorSchema,
   WriteShellStdinResultSchema,
+  type AgentClientMessage,
   type AgentServerMessage,
   type ConversationStateStructure,
   type ExecServerMessage,
@@ -249,6 +250,14 @@ export function processServerMessage(
   return "none";
 }
 
+function sendClientMessage(
+  message: AgentClientMessage["message"],
+  sendFrame: (data: Uint8Array) => void,
+): void {
+  const clientMessage = create(AgentClientMessageSchema, { message });
+  sendFrame(frameConnectMessage(toBinary(AgentClientMessageSchema, clientMessage)));
+}
+
 function sendKvResponse(
   kvMsg: KvServerMessage,
   messageCase: string,
@@ -259,10 +268,7 @@ function sendKvResponse(
     id: (kvMsg as any).id,
     message: { case: messageCase as any, value: value as any },
   });
-  const clientMsg = create(AgentClientMessageSchema, {
-    message: { case: "kvClientMessage", value: response },
-  });
-  sendFrame(frameConnectMessage(toBinary(AgentClientMessageSchema, clientMsg)));
+  sendClientMessage({ case: "kvClientMessage", value: response }, sendFrame);
 }
 
 /** Returns true when a recognized KV branch fired (real round-trip with cursor). */
@@ -726,10 +732,7 @@ function sendExecThrow(
       value: create(ExecClientThrowSchema, { id: (execMsg as any).id, error }),
     },
   });
-  const clientMessage = create(AgentClientMessageSchema, {
-    message: { case: "execClientControlMessage", value: control },
-  });
-  sendFrame(frameConnectMessage(toBinary(AgentClientMessageSchema, clientMessage)));
+  sendClientMessage({ case: "execClientControlMessage", value: control }, sendFrame);
 }
 
 function sendExecResult(
@@ -743,10 +746,7 @@ function sendExecResult(
     execId: (execMsg as any).execId,
     message: { case: messageCase as any, value: value as any },
   });
-  const clientMessage = create(AgentClientMessageSchema, {
-    message: { case: "execClientMessage", value: execClientMessage },
-  });
-  sendFrame(frameConnectMessage(toBinary(AgentClientMessageSchema, clientMessage)));
+  sendClientMessage({ case: "execClientMessage", value: execClientMessage }, sendFrame);
 }
 
 export const __testInternals = {

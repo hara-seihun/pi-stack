@@ -12,8 +12,7 @@ import type {
   StoredConversation,
   ToolResultInfo,
 } from "./types.js";
-
-export const DEFAULT_MIDPAUSE_REBUILD_MAX_AGE_MS = 15 * 60 * 1000;
+import { resolveMidPauseRebuildMaxAgeMs } from "./tuning.js";
 
 export type {
   ParsedImageContent,
@@ -86,14 +85,6 @@ export interface PlanRecoveryInput {
     requestId: string,
     convKey: string,
   ) => void;
-}
-
-export function resolveMidPauseRebuildMaxAgeMs(envValue?: string): number {
-  const normalized = envValue?.trim();
-  if (normalized === undefined || normalized === "") return DEFAULT_MIDPAUSE_REBUILD_MAX_AGE_MS;
-  const parsed = Number(normalized);
-  if (!Number.isFinite(parsed) || parsed < 0) return DEFAULT_MIDPAUSE_REBUILD_MAX_AGE_MS;
-  return Math.max(1_000, Math.floor(parsed));
 }
 
 export function lostToolContinuationMessage(): string {

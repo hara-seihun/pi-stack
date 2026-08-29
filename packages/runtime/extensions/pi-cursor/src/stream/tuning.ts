@@ -65,6 +65,25 @@ export const DEFAULT_H2_CONNECT_TIMEOUT_MS = 30_000;
  */
 export const DEFAULT_H2_IDLE_TIMEOUT_MS = 0;
 
+type NumericSetting = {
+  fallback: number;
+  minimum: number;
+  maximum?: number;
+  zeroDisables?: boolean;
+};
+
+function resolveNumericSetting(envValue: string | undefined, setting: NumericSetting): number {
+  const normalized = envValue?.trim();
+  if (!normalized) return setting.fallback;
+  const parsed = Number(normalized);
+  if (!Number.isFinite(parsed) || parsed < 0) return setting.fallback;
+  if (parsed === 0 && setting.zeroDisables) return 0;
+  return Math.min(
+    setting.maximum ?? Number.POSITIVE_INFINITY,
+    Math.max(setting.minimum, Math.floor(parsed)),
+  );
+}
+
 export function resolveActiveBridgeTtlMs(envValue?: string): number {
   if (envValue === undefined || envValue === "") return DEFAULT_ACTIVE_BRIDGE_TTL_MS;
   const parsed = Number(envValue);
@@ -73,48 +92,44 @@ export function resolveActiveBridgeTtlMs(envValue?: string): number {
 }
 
 export function resolveStreamIdleTimeoutMs(envValue?: string): number {
-  const normalized = envValue?.trim();
-  if (normalized === undefined || normalized === "") return DEFAULT_STREAM_IDLE_TIMEOUT_MS;
-  const parsed = Number(normalized);
-  if (!Number.isFinite(parsed) || parsed < 0) return DEFAULT_STREAM_IDLE_TIMEOUT_MS;
-  if (parsed === 0) return 0;
-  return Math.max(1_000, Math.floor(parsed));
+  return resolveNumericSetting(envValue, {
+    fallback: DEFAULT_STREAM_IDLE_TIMEOUT_MS,
+    minimum: 1_000,
+    zeroDisables: true,
+  });
 }
 
 export function resolveStreamIdleMaxRetries(envValue?: string): number {
-  const normalized = envValue?.trim();
-  if (normalized === undefined || normalized === "") return DEFAULT_STREAM_IDLE_MAX_RETRIES;
-  const parsed = Number(normalized);
-  if (!Number.isFinite(parsed) || parsed < 0) return DEFAULT_STREAM_IDLE_MAX_RETRIES;
-  if (parsed === 0) return 0;
-  return Math.min(10, Math.max(1, Math.floor(parsed)));
+  return resolveNumericSetting(envValue, {
+    fallback: DEFAULT_STREAM_IDLE_MAX_RETRIES,
+    minimum: 1,
+    maximum: 10,
+    zeroDisables: true,
+  });
 }
 
 export function resolveResumeIdleTimeoutMs(envValue?: string): number {
-  const normalized = envValue?.trim();
-  if (normalized === undefined || normalized === "") return DEFAULT_RESUME_IDLE_TIMEOUT_MS;
-  const parsed = Number(normalized);
-  if (!Number.isFinite(parsed) || parsed < 0) return DEFAULT_RESUME_IDLE_TIMEOUT_MS;
-  if (parsed === 0) return 0;
-  return Math.max(1_000, Math.floor(parsed));
+  return resolveNumericSetting(envValue, {
+    fallback: DEFAULT_RESUME_IDLE_TIMEOUT_MS,
+    minimum: 1_000,
+    zeroDisables: true,
+  });
 }
 
 export function resolveH2ConnectTimeoutMs(envValue?: string): number {
-  const normalized = envValue?.trim();
-  if (normalized === undefined || normalized === "") return DEFAULT_H2_CONNECT_TIMEOUT_MS;
-  const parsed = Number(normalized);
-  if (!Number.isFinite(parsed) || parsed < 0) return DEFAULT_H2_CONNECT_TIMEOUT_MS;
-  if (parsed === 0) return 0;
-  return Math.max(1_000, Math.floor(parsed));
+  return resolveNumericSetting(envValue, {
+    fallback: DEFAULT_H2_CONNECT_TIMEOUT_MS,
+    minimum: 1_000,
+    zeroDisables: true,
+  });
 }
 
 export function resolveH2IdleTimeoutMs(envValue?: string): number {
-  const normalized = envValue?.trim();
-  if (normalized === undefined || normalized === "") return DEFAULT_H2_IDLE_TIMEOUT_MS;
-  const parsed = Number(normalized);
-  if (!Number.isFinite(parsed) || parsed < 0) return DEFAULT_H2_IDLE_TIMEOUT_MS;
-  if (parsed === 0) return 0;
-  return Math.max(5_000, Math.floor(parsed));
+  return resolveNumericSetting(envValue, {
+    fallback: DEFAULT_H2_IDLE_TIMEOUT_MS,
+    minimum: 5_000,
+    zeroDisables: true,
+  });
 }
 
 /**
@@ -178,12 +193,10 @@ export function canRecoverAfterTransportLoss(input: {
 }
 
 export function resolveMidPauseRebuildMaxAgeMs(envValue?: string): number {
-  const normalized = envValue?.trim();
-  if (normalized === undefined || normalized === "") return DEFAULT_MIDPAUSE_REBUILD_MAX_AGE_MS;
-  const parsed = Number(normalized);
-  if (!Number.isFinite(parsed) || parsed < 0) return DEFAULT_MIDPAUSE_REBUILD_MAX_AGE_MS;
-  // Zero should keep the replay trust window bounded; negative values are treated as invalid.
-  return Math.max(1_000, Math.floor(parsed));
+  return resolveNumericSetting(envValue, {
+    fallback: DEFAULT_MIDPAUSE_REBUILD_MAX_AGE_MS,
+    minimum: 1_000,
+  });
 }
 
 export function createStreamIdleWatchdog(options: { timeoutMs: number; onTimeout: () => void }): {

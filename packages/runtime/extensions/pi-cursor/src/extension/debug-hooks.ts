@@ -4,9 +4,8 @@
 
 import { appendFile } from "node:fs";
 import { createHash } from "node:crypto";
-import { join as pathJoin } from "node:path";
 import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
-import { getCacheDir } from "../utils/cache-dir.js";
+import { generatedLogPath } from "../utils/log-path.js";
 import { cleanupSessionState } from "../stream/session-state.js";
 
 let extensionDebugLogFilePath: string | undefined;
@@ -23,11 +22,9 @@ export function getExtensionDebugLogFilePath(): string {
     extensionDebugLogFilePath = configured;
     return extensionDebugLogFilePath;
   }
-  const stamp = new Date().toISOString().replace(/[:.]/g, "-");
-  extensionDebugLogFilePath = pathJoin(
-    getCacheDir() ?? process.cwd(),
-    `pi-cursor-provider-extension-debug-${stamp}-${process.pid}.log`,
-  );
+  extensionDebugLogFilePath = generatedLogPath("pi-cursor-provider-extension-debug", {
+    timestamp: true,
+  });
   return extensionDebugLogFilePath;
 }
 

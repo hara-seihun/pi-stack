@@ -80,147 +80,79 @@ function hasUnknownInteractionField(query: InteractionQuery, fieldNo: number): b
   );
 }
 
-function sendInteractionResponse(
-  response: InteractionResponse,
-  sendFrame: (data: Uint8Array) => void,
-): void {
-  const clientMsg = create(AgentClientMessageSchema, {
-    message: { case: "interactionResponse", value: response },
-  });
-  sendFrame(frameConnectMessage(toBinary(AgentClientMessageSchema, clientMsg)));
-}
+type InteractionDecision =
+  | { kind: "webSearch" | "exaSearch" | "exaFetch"; approved: boolean }
+  | { kind: "switchMode" | "askQuestion" | "createPlan" | "setupVm" };
 
-function approveWebSearch(id: number, sendFrame: (data: Uint8Array) => void): void {
-  sendInteractionResponse(
-    create(InteractionResponseSchema, {
-      id,
-      result: {
+type InteractionResult = InteractionResponse["result"];
+
+function buildInteractionResult(decision: InteractionDecision): InteractionResult {
+  switch (decision.kind) {
+    case "webSearch":
+      return {
         case: "webSearchRequestResponse",
         value: create(WebSearchRequestResponseSchema, {
-          result: {
-            case: "approved",
-            value: create(WebSearchRequestResponse_ApprovedSchema, {}),
-          },
+          result: decision.approved
+            ? {
+                case: "approved",
+                value: create(WebSearchRequestResponse_ApprovedSchema, {}),
+              }
+            : {
+                case: "rejected",
+                value: create(WebSearchRequestResponse_RejectedSchema, {
+                  reason: PI_REJECT_REASON,
+                }),
+              },
         }),
-      },
-    }),
-    sendFrame,
-  );
-}
-
-function rejectWebSearch(id: number, sendFrame: (data: Uint8Array) => void): void {
-  sendInteractionResponse(
-    create(InteractionResponseSchema, {
-      id,
-      result: {
-        case: "webSearchRequestResponse",
-        value: create(WebSearchRequestResponseSchema, {
-          result: {
-            case: "rejected",
-            value: create(WebSearchRequestResponse_RejectedSchema, { reason: PI_REJECT_REASON }),
-          },
-        }),
-      },
-    }),
-    sendFrame,
-  );
-}
-
-function approveExaSearch(id: number, sendFrame: (data: Uint8Array) => void): void {
-  sendInteractionResponse(
-    create(InteractionResponseSchema, {
-      id,
-      result: {
+      };
+    case "exaSearch":
+      return {
         case: "exaSearchRequestResponse",
         value: create(ExaSearchRequestResponseSchema, {
-          result: {
-            case: "approved",
-            value: create(ExaSearchRequestResponse_ApprovedSchema, {}),
-          },
+          result: decision.approved
+            ? {
+                case: "approved",
+                value: create(ExaSearchRequestResponse_ApprovedSchema, {}),
+              }
+            : {
+                case: "rejected",
+                value: create(ExaSearchRequestResponse_RejectedSchema, {
+                  reason: PI_REJECT_REASON,
+                }),
+              },
         }),
-      },
-    }),
-    sendFrame,
-  );
-}
-
-function rejectExaSearch(id: number, sendFrame: (data: Uint8Array) => void): void {
-  sendInteractionResponse(
-    create(InteractionResponseSchema, {
-      id,
-      result: {
-        case: "exaSearchRequestResponse",
-        value: create(ExaSearchRequestResponseSchema, {
-          result: {
-            case: "rejected",
-            value: create(ExaSearchRequestResponse_RejectedSchema, { reason: PI_REJECT_REASON }),
-          },
-        }),
-      },
-    }),
-    sendFrame,
-  );
-}
-
-function approveExaFetch(id: number, sendFrame: (data: Uint8Array) => void): void {
-  sendInteractionResponse(
-    create(InteractionResponseSchema, {
-      id,
-      result: {
+      };
+    case "exaFetch":
+      return {
         case: "exaFetchRequestResponse",
         value: create(ExaFetchRequestResponseSchema, {
-          result: {
-            case: "approved",
-            value: create(ExaFetchRequestResponse_ApprovedSchema, {}),
-          },
+          result: decision.approved
+            ? {
+                case: "approved",
+                value: create(ExaFetchRequestResponse_ApprovedSchema, {}),
+              }
+            : {
+                case: "rejected",
+                value: create(ExaFetchRequestResponse_RejectedSchema, {
+                  reason: PI_REJECT_REASON,
+                }),
+              },
         }),
-      },
-    }),
-    sendFrame,
-  );
-}
-
-function rejectExaFetch(id: number, sendFrame: (data: Uint8Array) => void): void {
-  sendInteractionResponse(
-    create(InteractionResponseSchema, {
-      id,
-      result: {
-        case: "exaFetchRequestResponse",
-        value: create(ExaFetchRequestResponseSchema, {
-          result: {
-            case: "rejected",
-            value: create(ExaFetchRequestResponse_RejectedSchema, { reason: PI_REJECT_REASON }),
-          },
-        }),
-      },
-    }),
-    sendFrame,
-  );
-}
-
-function rejectSwitchMode(id: number, sendFrame: (data: Uint8Array) => void): void {
-  sendInteractionResponse(
-    create(InteractionResponseSchema, {
-      id,
-      result: {
+      };
+    case "switchMode":
+      return {
         case: "switchModeRequestResponse",
         value: create(SwitchModeRequestResponseSchema, {
           result: {
             case: "rejected",
-            value: create(SwitchModeRequestResponse_RejectedSchema, { reason: PI_REJECT_REASON }),
+            value: create(SwitchModeRequestResponse_RejectedSchema, {
+              reason: PI_REJECT_REASON,
+            }),
           },
         }),
-      },
-    }),
-    sendFrame,
-  );
-}
-
-function skipAskQuestion(id: number, sendFrame: (data: Uint8Array) => void): void {
-  sendInteractionResponse(
-    create(InteractionResponseSchema, {
-      id,
-      result: {
+      };
+    case "askQuestion":
+      return {
         case: "askQuestionInteractionResponse",
         value: create(AskQuestionInteractionResponseSchema, {
           result: create(AskQuestionResultSchema, {
@@ -233,17 +165,9 @@ function skipAskQuestion(id: number, sendFrame: (data: Uint8Array) => void): voi
             },
           }),
         }),
-      },
-    }),
-    sendFrame,
-  );
-}
-
-function skipCreatePlan(id: number, sendFrame: (data: Uint8Array) => void): void {
-  sendInteractionResponse(
-    create(InteractionResponseSchema, {
-      id,
-      result: {
+      };
+    case "createPlan":
+      return {
         case: "createPlanRequestResponse",
         value: create(CreatePlanRequestResponseSchema, {
           result: create(CreatePlanResultSchema, {
@@ -256,17 +180,9 @@ function skipCreatePlan(id: number, sendFrame: (data: Uint8Array) => void): void
             },
           }),
         }),
-      },
-    }),
-    sendFrame,
-  );
-}
-
-function skipSetupVm(id: number, sendFrame: (data: Uint8Array) => void): void {
-  sendInteractionResponse(
-    create(InteractionResponseSchema, {
-      id,
-      result: {
+      };
+    case "setupVm":
+      return {
         case: "setupVmEnvironmentResult",
         value: create(SetupVmEnvironmentResultSchema, {
           result: {
@@ -274,10 +190,23 @@ function skipSetupVm(id: number, sendFrame: (data: Uint8Array) => void): void {
             value: create(SetupVmEnvironmentSuccessSchema, {}),
           },
         }),
-      },
-    }),
-    sendFrame,
-  );
+      };
+  }
+}
+
+function sendInteractionDecision(
+  id: number,
+  decision: InteractionDecision,
+  sendFrame: (data: Uint8Array) => void,
+): void {
+  const response = create(InteractionResponseSchema, {
+    id,
+    result: buildInteractionResult(decision),
+  });
+  const clientMsg = create(AgentClientMessageSchema, {
+    message: { case: "interactionResponse", value: response },
+  });
+  sendFrame(frameConnectMessage(toBinary(AgentClientMessageSchema, clientMsg)));
 }
 
 export type InteractionQueryHandleResult = {
@@ -314,40 +243,37 @@ export function handleInteractionQuery(
 
   switch (queryCase) {
     case "webSearchRequestQuery":
-      if (approveWeb) approveWebSearch(query.id, sendFrame);
-      else rejectWebSearch(query.id, sendFrame);
+      sendInteractionDecision(query.id, { kind: "webSearch", approved: approveWeb }, sendFrame);
       return {
         handled: true,
         action: approveWeb ? "web_search_approved" : "web_search_rejected",
         queryCase,
       };
     case "exaSearchRequestQuery":
-      if (approveWeb) approveExaSearch(query.id, sendFrame);
-      else rejectExaSearch(query.id, sendFrame);
+      sendInteractionDecision(query.id, { kind: "exaSearch", approved: approveWeb }, sendFrame);
       return {
         handled: true,
         action: approveWeb ? "exa_search_approved" : "exa_search_rejected",
         queryCase,
       };
     case "exaFetchRequestQuery":
-      if (approveWeb) approveExaFetch(query.id, sendFrame);
-      else rejectExaFetch(query.id, sendFrame);
+      sendInteractionDecision(query.id, { kind: "exaFetch", approved: approveWeb }, sendFrame);
       return {
         handled: true,
         action: approveWeb ? "exa_fetch_approved" : "exa_fetch_rejected",
         queryCase,
       };
     case "switchModeRequestQuery":
-      rejectSwitchMode(query.id, sendFrame);
+      sendInteractionDecision(query.id, { kind: "switchMode" }, sendFrame);
       return { handled: true, action: "switch_mode_rejected", queryCase };
     case "askQuestionInteractionQuery":
-      skipAskQuestion(query.id, sendFrame);
+      sendInteractionDecision(query.id, { kind: "askQuestion" }, sendFrame);
       return { handled: true, action: "ask_question_skipped", queryCase };
     case "createPlanRequestQuery":
-      skipCreatePlan(query.id, sendFrame);
+      sendInteractionDecision(query.id, { kind: "createPlan" }, sendFrame);
       return { handled: true, action: "create_plan_skipped", queryCase };
     case "setupVmEnvironmentArgs":
-      skipSetupVm(query.id, sendFrame);
+      sendInteractionDecision(query.id, { kind: "setupVm" }, sendFrame);
       return { handled: true, action: "setup_vm_acked", queryCase };
     default: {
       // Protocol drift must fail closed. An empty result for an unknown field is

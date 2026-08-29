@@ -204,6 +204,10 @@ function storedKey() {
 function rememberKey(key) {
   try { localStorage.setItem(KEY_STORAGE, key); } catch {}
 }
+async function responseJson(response) {
+  const text = await response.text();
+  return text ? JSON.parse(text) : {};
+}
 
 async function sendUnlock(key) {
   const response = await fetch("/v1/unlock", {
@@ -212,8 +216,7 @@ async function sendUnlock(key) {
     body: JSON.stringify({ key }),
     cache: "no-store",
   });
-  const text = await response.text();
-  const result = text ? JSON.parse(text) : {};
+  const result = await responseJson(response);
   if (!response.ok) throw new Error(result.error || `HTTP ${response.status}`);
   return result;
 }
@@ -276,8 +279,7 @@ async function api(method, path, body, timeout = 20000, retryOnLock = true) {
       signal: controller.signal,
       cache: "no-store",
     });
-    const text = await response.text();
-    const result = text ? JSON.parse(text) : {};
+    const result = await responseJson(response);
     if (response.status === 423 && retryOnLock) {
       clearTimeout(timer);
       await ensureUnlocked();
@@ -306,8 +308,7 @@ async function syncRequest(body, signal, retryOnLock = true) {
       signal: controller.signal,
       cache: "no-store",
     });
-    const text = await response.text();
-    const result = text ? JSON.parse(text) : {};
+    const result = await responseJson(response);
     if (response.status === 423 && retryOnLock) {
       await ensureUnlocked();
       return syncRequest(body, signal, false);
@@ -1806,36 +1807,29 @@ function restoreQueuedDraft(text) {
   saveDraft(state.selectedId, ui.prompt.value);
   updateComposer();
 }
-async function steerQueuedMessage(message, actions) {
+async function mutateQueuedMessage(message, actions, method, suffix, onSuccess) {
   const id = state.selectedId;
   if (!id || !message?.id) return;
   setQueuedActionsEnabled(actions, false);
   try {
-    const result = await api("POST", `/v1/sessions/${id}/queue/${message.id}/steer`, {});
+    const result = await api(method, `/v1/sessions/${id}/queue/${message.id}${suffix}`, method === "POST" ? {} : undefined);
     if (result.session) {
       mergeSession(result.session);
       if (state.selectedId === id) applySelectedSession(result.session);
     }
+    onSuccess?.(result, id);
   } catch (error) {
     setQueuedActionsEnabled(actions, true);
     console.error(error);
   } finally { poll(); }
 }
-async function cancelQueuedMessage(message, edit, actions) {
-  const id = state.selectedId;
-  if (!id || !message?.id) return;
-  setQueuedActionsEnabled(actions, false);
-  try {
-    const result = await api("DELETE", `/v1/sessions/${id}/queue/${message.id}`);
-    if (result.session) {
-      mergeSession(result.session);
-      if (state.selectedId === id) applySelectedSession(result.session);
-    }
+function steerQueuedMessage(message, actions) {
+  return mutateQueuedMessage(message, actions, "POST", "/steer");
+}
+function cancelQueuedMessage(message, edit, actions) {
+  return mutateQueuedMessage(message, actions, "DELETE", "", (result, id) => {
     if (edit && state.selectedId === id) restoreQueuedDraft(result.text ?? message.text);
-  } catch (error) {
-    setQueuedActionsEnabled(actions, true);
-    console.error(error);
-  } finally { poll(); }
+  });
 }
 
 async function runCommand(command) {

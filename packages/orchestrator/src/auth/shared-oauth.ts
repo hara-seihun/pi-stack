@@ -5,15 +5,12 @@ import {
   readFileSync,
   realpathSync,
   renameSync,
-  rmSync,
-  statSync,
-  utimesSync,
   writeFileSync,
 } from "node:fs";
 import { dirname, join } from "node:path";
 import type { ModelAuth, OAuthAuth, OAuthCredential, Provider } from "@earendil-works/pi-ai";
-
-const LOCK_STALE_MS = 30_000;
+import { acquireDirectoryLock } from "./directory-lock.js";
+import { aliasProvider } from "./provider-alias.js";
 const TOKEN_MIN_LIFETIME_MS = 5 * 60_000;
 
 type RefreshCredential = (credential: OAuthCredential, signal: AbortSignal) => Promise<OAuthCredential>;
@@ -75,10 +72,6 @@ function writeAuth(path: string, auth: Record<string, unknown>): void {
   renameSync(temporary, path);
 }
 
-function sleep(ms: number): Promise<void> {
-  return new Promise((resolve) => setTimeout(resolve, ms));
-}
-
 function ensureAuth(path: string): void {
   mkdirSync(dirname(path), { recursive: true, mode: 0o770 });
   if (existsSync(path)) return;
@@ -90,38 +83,9 @@ function ensureAuth(path: string): void {
   }
 }
 
-async function acquireLock(path: string, signal: AbortSignal): Promise<() => void> {
+function acquireLock(path: string, signal: AbortSignal): Promise<() => void> {
   ensureAuth(path);
-  const lockPath = `${path}.lock`;
-  const deadline = Date.now() + LOCK_STALE_MS;
-  while (true) {
-    signal.throwIfAborted();
-    try {
-      mkdirSync(lockPath, { mode: 0o770 });
-      const heartbeat = setInterval(() => {
-        try {
-          const time = new Date();
-          utimesSync(lockPath, time, time);
-        } catch {}
-      }, 10_000);
-      return () => {
-        clearInterval(heartbeat);
-        try {
-          rmSync(lockPath, { recursive: true, force: true });
-        } catch {}
-      };
-    } catch (cause: any) {
-      if (cause?.code !== "EEXIST") throw cause;
-      try {
-        if (Date.now() - statSync(lockPath).mtimeMs > LOCK_STALE_MS) {
-          rmSync(lockPath, { recursive: true, force: true });
-          continue;
-        }
-      } catch {}
-      if (Date.now() >= deadline) throw new Error("Timed out waiting for the shared OAuth auth lock");
-      await sleep(25 + Math.floor(Math.random() * 75));
-    }
-  }
+  return acquireDirectoryLock(path, signal, "Timed out waiting for the shared OAuth auth lock");
 }
 
 export class SharedOAuthAuth {
@@ -240,40 +204,26 @@ export function sharedOAuthProvider(
   auth: SharedOAuthAuth,
 ): Provider {
   const authName = `Shared ${family.name} OAuth`;
-  return {
-    id: alias,
-    name: label === undefined ? `${family.name} [${alias}]` : `${family.name} [${label}]`,
-    baseUrl: family.baseUrl,
-    headers: family.headers,
-    auth: {
-      apiKey: {
-        name: authName,
-        async check() {
-          return auth.has(alias) ? { type: "oauth", source: "shared OAuth" } : undefined;
-        },
-        async resolve({ signal }) {
-          return { auth: await auth.resolve(alias, signal), source: "shared OAuth" };
-        },
+  return aliasProvider(family, alias, label, {
+    apiKey: {
+      name: authName,
+      async check() {
+        return auth.has(alias) ? { type: "oauth", source: "shared OAuth" } : undefined;
       },
-      oauth: {
-        name: authName,
-        isSubscription: family.auth.oauth?.isSubscription,
-        async login(): Promise<never> {
-          throw new Error(
-            `${alias} is in shared custody: log in with \`pi-orchestrator account login ${alias}\``,
-          );
-        },
-        refresh: (_credential, signal) => auth.credential(alias, signal),
-        toAuth: () => auth.resolve(alias, new AbortController().signal),
+      async resolve({ signal }) {
+        return { auth: await auth.resolve(alias, signal), source: "shared OAuth" };
       },
     },
-    getModels: () => family.getModels().map((model) => ({
-      ...model,
-      provider: alias,
-      name: `${model.name} (${alias})`,
-    })),
-    filterModels: family.filterModels?.bind(family),
-    stream: (model, context, options) => family.stream(model as never, context, options),
-    streamSimple: (model, context, options) => family.streamSimple(model, context, options),
-  };
+    oauth: {
+      name: authName,
+      isSubscription: family.auth.oauth?.isSubscription,
+      async login(): Promise<never> {
+        throw new Error(
+          `${alias} is in shared custody: log in with \`pi-orchestrator account login ${alias}\``,
+        );
+      },
+      refresh: (_credential, signal) => auth.credential(alias, signal),
+      toAuth: () => auth.resolve(alias, new AbortController().signal),
+    },
+  });
 }

@@ -107,68 +107,81 @@ function decodeString(bytes: Uint8Array): string {
   return new TextDecoder().decode(bytes);
 }
 
-function decodeModelParameter(bytes: Uint8Array): CursorModelParameter {
+function decodeWireMessage<T>(
+  bytes: Uint8Array,
+  value: T,
+  decodeField: (value: T, fieldNo: number, wireType: number, reader: WireReader) => boolean,
+): T {
   const reader: WireReader = { bytes, offset: 0 };
-  const parameter: CursorModelParameter = { id: "", value: "" };
   while (reader.offset < bytes.length) {
     const tag = readVarint(reader);
-    const fieldNo = tag >>> 3;
     const wireType = tag & 0x7;
-    if (fieldNo === 1 && wireType === 2) parameter.id = decodeString(readLengthDelimited(reader));
-    else if (fieldNo === 2 && wireType === 2)
-      parameter.value = decodeString(readLengthDelimited(reader));
-    else skipWireField(reader, wireType);
+    if (!decodeField(value, tag >>> 3, wireType, reader)) skipWireField(reader, wireType);
   }
-  return parameter;
+  return value;
+}
+
+function decodeModelParameter(bytes: Uint8Array): CursorModelParameter {
+  return decodeWireMessage<CursorModelParameter>(
+    bytes,
+    { id: "", value: "" },
+    (parameter, fieldNo, wireType, reader) => {
+      if (fieldNo === 1 && wireType === 2) parameter.id = decodeString(readLengthDelimited(reader));
+      else if (fieldNo === 2 && wireType === 2)
+        parameter.value = decodeString(readLengthDelimited(reader));
+      else return false;
+      return true;
+    },
+  );
 }
 
 function decodeParameterizedVariant(bytes: Uint8Array): CursorParameterizedVariant {
-  const reader: WireReader = { bytes, offset: 0 };
-  const variant: CursorParameterizedVariant = { parameters: [], isMaxMode: false };
-  while (reader.offset < bytes.length) {
-    const tag = readVarint(reader);
-    const fieldNo = tag >>> 3;
-    const wireType = tag & 0x7;
-    if (fieldNo === 1 && wireType === 2)
-      variant.parameters.push(decodeModelParameter(readLengthDelimited(reader)));
-    else if (fieldNo === 2 && wireType === 2)
-      variant.displayName = decodeString(readLengthDelimited(reader));
-    else if (fieldNo === 8 && wireType === 2)
-      variant.displayNameOutsidePicker = decodeString(readLengthDelimited(reader));
-    else if (fieldNo === 3 && wireType === 0) variant.isMaxMode = readVarint(reader) !== 0;
-    else if (fieldNo === 4 && wireType === 0) variant.isDefaultMaxConfig = readVarint(reader) !== 0;
-    else if (fieldNo === 5 && wireType === 0)
-      variant.isDefaultNonMaxConfig = readVarint(reader) !== 0;
-    else if (fieldNo === 9 && wireType === 2)
-      variant.variantStringRepresentation = decodeString(readLengthDelimited(reader));
-    else skipWireField(reader, wireType);
-  }
-  return variant;
+  return decodeWireMessage<CursorParameterizedVariant>(
+    bytes,
+    { parameters: [], isMaxMode: false },
+    (variant, fieldNo, wireType, reader) => {
+      if (fieldNo === 1 && wireType === 2)
+        variant.parameters.push(decodeModelParameter(readLengthDelimited(reader)));
+      else if (fieldNo === 2 && wireType === 2)
+        variant.displayName = decodeString(readLengthDelimited(reader));
+      else if (fieldNo === 8 && wireType === 2)
+        variant.displayNameOutsidePicker = decodeString(readLengthDelimited(reader));
+      else if (fieldNo === 3 && wireType === 0) variant.isMaxMode = readVarint(reader) !== 0;
+      else if (fieldNo === 4 && wireType === 0)
+        variant.isDefaultMaxConfig = readVarint(reader) !== 0;
+      else if (fieldNo === 5 && wireType === 0)
+        variant.isDefaultNonMaxConfig = readVarint(reader) !== 0;
+      else if (fieldNo === 9 && wireType === 2)
+        variant.variantStringRepresentation = decodeString(readLengthDelimited(reader));
+      else return false;
+      return true;
+    },
+  );
 }
 
 function decodeParameterizedModel(bytes: Uint8Array): CursorParameterizedModel {
-  const reader: WireReader = { bytes, offset: 0 };
-  const model: CursorParameterizedModel = { name: "", variants: [] };
-  while (reader.offset < bytes.length) {
-    const tag = readVarint(reader);
-    const fieldNo = tag >>> 3;
-    const wireType = tag & 0x7;
-    if (fieldNo === 1 && wireType === 2) model.name = decodeString(readLengthDelimited(reader));
-    else if (fieldNo === 10 && wireType === 0) model.supportsImages = readVarint(reader) !== 0;
-    else if (fieldNo === 14 && wireType === 0) model.supportsMaxMode = readVarint(reader) !== 0;
-    else if (fieldNo === 19 && wireType === 0) model.supportsNonMaxMode = readVarint(reader) !== 0;
-    else if (fieldNo === 15 && wireType === 0) model.contextTokenLimit = readVarint(reader);
-    else if (fieldNo === 16 && wireType === 0)
-      model.contextTokenLimitForMaxMode = readVarint(reader);
-    else if (fieldNo === 17 && wireType === 2)
-      model.clientDisplayName = decodeString(readLengthDelimited(reader));
-    else if (fieldNo === 18 && wireType === 2)
-      model.serverModelName = decodeString(readLengthDelimited(reader));
-    else if (fieldNo === 30 && wireType === 2)
-      model.variants.push(decodeParameterizedVariant(readLengthDelimited(reader)));
-    else skipWireField(reader, wireType);
-  }
-  return model;
+  return decodeWireMessage<CursorParameterizedModel>(
+    bytes,
+    { name: "", variants: [] },
+    (model, fieldNo, wireType, reader) => {
+      if (fieldNo === 1 && wireType === 2) model.name = decodeString(readLengthDelimited(reader));
+      else if (fieldNo === 10 && wireType === 0) model.supportsImages = readVarint(reader) !== 0;
+      else if (fieldNo === 14 && wireType === 0) model.supportsMaxMode = readVarint(reader) !== 0;
+      else if (fieldNo === 19 && wireType === 0)
+        model.supportsNonMaxMode = readVarint(reader) !== 0;
+      else if (fieldNo === 15 && wireType === 0) model.contextTokenLimit = readVarint(reader);
+      else if (fieldNo === 16 && wireType === 0)
+        model.contextTokenLimitForMaxMode = readVarint(reader);
+      else if (fieldNo === 17 && wireType === 2)
+        model.clientDisplayName = decodeString(readLengthDelimited(reader));
+      else if (fieldNo === 18 && wireType === 2)
+        model.serverModelName = decodeString(readLengthDelimited(reader));
+      else if (fieldNo === 30 && wireType === 2)
+        model.variants.push(decodeParameterizedVariant(readLengthDelimited(reader)));
+      else return false;
+      return true;
+    },
+  );
 }
 
 export function decodeAvailableModelsResponse(bytes: Uint8Array): CursorParameterizedModel[] {

@@ -11,9 +11,9 @@ import {
   isContextModeSideChannelText as isContextModeSideChannelTextImpl,
   normalizeMessagesForCursor as normalizeMessagesForCursorImpl,
   systemPromptHasSessionMemory as systemPromptHasSessionMemoryImpl,
-  type OpenAIMessage as NormalizedOpenAIMessage,
 } from "./context-normalize.js";
 import { debugLog } from "./debug-log.js";
+import { textContent } from "./message-content.js";
 import {
   decodeBase64Image,
   mergeImages,
@@ -33,16 +33,9 @@ import type {
   ToolResultInfo,
 } from "./types.js";
 
-export function textContent(content: OpenAIMessage["content"]): string {
-  if (content == null) return "";
-  if (typeof content === "string") return content;
-  return content
-    .filter((p) => p.type === "text" && p.text)
-    .map((p) => p.text!)
-    .join("\n");
-}
+export { textContent } from "./message-content.js";
 
-export function contentHasImageParts(content: OpenAIMessage["content"]): boolean {
+export function contentHasDecodableImageParts(content: OpenAIMessage["content"]): boolean {
   return (
     Array.isArray(content) &&
     content.some(
@@ -98,7 +91,7 @@ export function isSyntheticToolResultImageMessage(msg: OpenAIMessage): boolean {
   return (
     msg.role === "user" &&
     textContent(msg.content).trim() === "Attached image(s) from tool result:" &&
-    contentHasImageParts(msg.content)
+    contentHasDecodableImageParts(msg.content)
   );
 }
 
@@ -234,7 +227,7 @@ export function systemPromptHasSessionMemory(systemPrompt: string): boolean {
 }
 
 export function normalizeMessagesForCursor(messages: OpenAIMessage[]): OpenAIMessage[] {
-  return normalizeMessagesForCursorImpl(messages as NormalizedOpenAIMessage[]) as OpenAIMessage[];
+  return normalizeMessagesForCursorImpl(messages);
 }
 
 export function parseMessages(

@@ -1,14 +1,6 @@
-import {
-  chmodSync,
-  mkdirSync,
-  readFileSync,
-  renameSync,
-  rmSync,
-  statSync,
-  utimesSync,
-  writeFileSync,
-} from "node:fs";
+import { chmodSync, readFileSync, renameSync, statSync, writeFileSync } from "node:fs";
 import { dirname, join } from "node:path";
+import { acquireDirectoryLock } from "../auth/directory-lock.js";
 
 /**
  * GPT-Live call brokering on top of this machine's account custody: the
@@ -28,7 +20,6 @@ const DEFAULT_CALL_BASE_URL = "https://chatgpt.com/backend-api/codex";
 const DEFAULT_USAGE_BASE_URL = "https://chatgpt.com/backend-api";
 const TOKEN_URL = "https://auth.openai.com/oauth/token";
 const CLIENT_ID = "app_EMoamEEZ73f0CkXaXp7hrann";
-const LOCK_STALE_MS = 30_000;
 const QUOTA_CACHE_MS = 60_000;
 const TOKEN_MIN_LIFETIME_MS = 60_000;
 const MAX_SDP_BYTES = 128 * 1024;
@@ -127,46 +118,12 @@ function decodeJwtAccountId(access: string): string | null {
   }
 }
 
-function sleep(ms: number): Promise<void> {
-  return new Promise((resolve) => setTimeout(resolve, ms));
-}
-
-/**
- * pi stores credentials with proper-lockfile, whose lock is a `<path>.lock`
- * directory with mtime-based staleness. This lock speaks the same
- * convention so broker refreshes and pi's own refreshes exclude each other.
- */
-async function acquireAuthLock(authPath: string, signal: AbortSignal): Promise<() => void> {
-  const lockPath = `${authPath}.lock`;
-  const deadline = Date.now() + LOCK_STALE_MS;
-  while (true) {
-    signal.throwIfAborted();
-    try {
-      mkdirSync(lockPath, { mode: 0o770 });
-      const heartbeat = setInterval(() => {
-        try {
-          const time = new Date();
-          utimesSync(lockPath, time, time);
-        } catch {}
-      }, 10_000);
-      return () => {
-        clearInterval(heartbeat);
-        try {
-          rmSync(lockPath, { recursive: true, force: true });
-        } catch {}
-      };
-    } catch (cause: any) {
-      if (cause?.code !== "EEXIST") throw cause;
-      try {
-        if (Date.now() - statSync(lockPath).mtimeMs > LOCK_STALE_MS) {
-          rmSync(lockPath, { recursive: true, force: true });
-          continue;
-        }
-      } catch {}
-      if (Date.now() >= deadline) throw new Error("Timed out waiting for the pi OAuth credential lock");
-      await sleep(25 + Math.floor(Math.random() * 75));
-    }
-  }
+function acquireAuthLock(authPath: string, signal: AbortSignal): Promise<() => void> {
+  return acquireDirectoryLock(
+    authPath,
+    signal,
+    "Timed out waiting for the pi OAuth credential lock",
+  );
 }
 
 async function refreshCredential(

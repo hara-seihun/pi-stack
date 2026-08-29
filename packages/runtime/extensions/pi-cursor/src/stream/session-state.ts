@@ -437,36 +437,39 @@ export function derivePiSessionId(
   return trimmed ? trimmed : undefined;
 }
 
+type SessionKeyScope = "bridge" | "conv";
+
+function scopedSessionKey(scope: SessionKeyScope, value: string): string {
+  return createHash("sha256").update(`${scope}:${value}`).digest("hex").slice(0, 16);
+}
+
+function deriveScopedMessageKey(
+  scope: SessionKeyScope,
+  messages: OpenAIMessage[],
+  sessionId?: string,
+): string {
+  if (sessionId) return scopedSessionKey(scope, sessionId);
+  const firstSystemMsg = messages.find((message) => message.role === "system");
+  const firstUserMsg = messages.find((message) => message.role === "user");
+  const firstSystemText = firstSystemMsg ? textContent(firstSystemMsg.content) : "";
+  const firstUserText = firstUserMsg ? textContent(firstUserMsg.content) : "";
+  return scopedSessionKey(scope, `${firstSystemText}\0${firstUserText}`);
+}
+
 export function deriveBridgeKeyFromSessionId(sessionId: string): string {
-  return createHash("sha256").update(`bridge:${sessionId}`).digest("hex").slice(0, 16);
+  return scopedSessionKey("bridge", sessionId);
 }
 
 export function deriveConversationKeyFromSessionId(sessionId: string): string {
-  return createHash("sha256").update(`conv:${sessionId}`).digest("hex").slice(0, 16);
+  return scopedSessionKey("conv", sessionId);
 }
 
 export function deriveBridgeKey(messages: OpenAIMessage[], sessionId?: string): string {
-  if (sessionId) return deriveBridgeKeyFromSessionId(sessionId);
-  const firstSystemMsg = messages.find((m) => m.role === "system");
-  const firstUserMsg = messages.find((m) => m.role === "user");
-  const firstSystemText = firstSystemMsg ? textContent(firstSystemMsg.content) : "";
-  const firstUserText = firstUserMsg ? textContent(firstUserMsg.content) : "";
-  return createHash("sha256")
-    .update(`bridge:${firstSystemText}\0${firstUserText}`)
-    .digest("hex")
-    .slice(0, 16);
+  return deriveScopedMessageKey("bridge", messages, sessionId);
 }
 
 export function deriveConversationKey(messages: OpenAIMessage[], sessionId?: string): string {
-  if (sessionId) return deriveConversationKeyFromSessionId(sessionId);
-  const firstSystemMsg = messages.find((m) => m.role === "system");
-  const firstUserMsg = messages.find((m) => m.role === "user");
-  const firstSystemText = firstSystemMsg ? textContent(firstSystemMsg.content) : "";
-  const firstUserText = firstUserMsg ? textContent(firstUserMsg.content) : "";
-  return createHash("sha256")
-    .update(`conv:${firstSystemText}\0${firstUserText}`)
-    .digest("hex")
-    .slice(0, 16);
+  return deriveScopedMessageKey("conv", messages, sessionId);
 }
 
 export function cleanupSessionState(sessionId?: string): void {

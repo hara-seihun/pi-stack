@@ -8,27 +8,11 @@
  * split so only the infrastructure blocks move to the system prompt.
  */
 
-export type OpenAIRole = "system" | "user" | "assistant" | "tool";
+import { textContent } from "./message-content.js";
+import type { OpenAIMessage } from "./types.js";
 
-export interface OpenAIContentPart {
-  type: string;
-  text?: string;
-  data?: string;
-  mimeType?: string;
-  image_url?: { url?: string };
-}
-
-export interface OpenAIMessage {
-  role: OpenAIRole;
-  content?: string | OpenAIContentPart[] | null;
-  tool_call_id?: string;
-  name?: string;
-  tool_calls?: unknown[];
-  /** Carried through untouched; see OpenAIMessage in ./types.ts. */
-  interrupted_notice?: string;
-  /** Replayed thinking from a prior assistant turn. */
-  thinking?: string;
-}
+export { textContent } from "./message-content.js";
+export type { OpenAIMessage } from "./types.js";
 
 const CONTEXT_MODE_SIDE_CHANNEL_PRIORITY =
   "Provider infrastructure context only. The latest user message is the only task. " +
@@ -44,16 +28,7 @@ const RESUME_CONTEXT_PRIORITY =
 const SIDE_CHANNEL_BLOCK_START =
   /(?:^|\n)[ \t]*(?:context-mode active\b|\[context\]|\[pi-lens automated\b|<session_state\b|<session_resume\b|<active_memory\b|<compaction\b|<session_mode\b|Hierarchy:\s*ctx_batch_execute)/i;
 
-export function textContent(content: OpenAIMessage["content"]): string {
-  if (content == null) return "";
-  if (typeof content === "string") return content;
-  return content
-    .filter((p) => p.type === "text" && p.text)
-    .map((p) => p.text as string)
-    .join("\n");
-}
-
-export function contentHasImageParts(content: OpenAIMessage["content"]): boolean {
+export function contentIncludesImagePart(content: OpenAIMessage["content"]): boolean {
   if (!Array.isArray(content)) return false;
   return content.some(
     (part) =>
@@ -274,7 +249,7 @@ export function normalizeMessagesForCursor(messages: OpenAIMessage[]): OpenAIMes
 
       if (!userText.trim()) {
         // Pure side-channel (optionally keep images on a stub user turn).
-        if (contentHasImageParts(msg.content)) {
+        if (contentIncludesImagePart(msg.content)) {
           rest.push({
             ...msg,
             content: rebuildUserContent(msg.content, ""),

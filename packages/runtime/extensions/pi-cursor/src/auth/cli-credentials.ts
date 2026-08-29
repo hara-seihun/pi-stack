@@ -73,6 +73,16 @@ async function tryRefresh(refreshToken: string | undefined): Promise<string | un
   }
 }
 
+async function resolveStoredTokens(
+  tokens: StoredTokens,
+  source: CredentialSource,
+  refreshSource: CredentialSource,
+): Promise<CursorTokenResult | undefined> {
+  if (isUsable(tokens.accessToken)) return { accessToken: tokens.accessToken, source };
+  const refreshed = await tryRefresh(tokens.refreshToken);
+  return refreshed ? { accessToken: refreshed, source: refreshSource } : undefined;
+}
+
 /** Reads the raw Cursor CLI token pair from the macOS Keychain. */
 async function readKeychainTokens(): Promise<StoredTokens> {
   if (platform() !== "darwin") return {};
@@ -108,12 +118,11 @@ async function readKeychainTokens(): Promise<StoredTokens> {
  * Uses async execFile so Keychain reads don't block the event loop.
  */
 export async function getCursorKeychainToken(): Promise<CursorTokenResult | undefined> {
-  const { accessToken, refreshToken } = await readKeychainTokens();
-  if (isUsable(accessToken)) return { accessToken, source: CredentialSource.CliKeychain };
-  const refreshed = await tryRefresh(refreshToken);
-  return refreshed
-    ? { accessToken: refreshed, source: CredentialSource.CliKeychainRefresh }
-    : undefined;
+  return resolveStoredTokens(
+    await readKeychainTokens(),
+    CredentialSource.CliKeychain,
+    CredentialSource.CliKeychainRefresh,
+  );
 }
 
 // Cache the DatabaseSync constructor at module level so repeated vscdb lookups
@@ -210,12 +219,11 @@ async function readVscdbTokens(): Promise<StoredTokens> {
  * Reads token from Cursor IDE state.vscdb.
  */
 export async function getCursorVscdbToken(): Promise<CursorTokenResult | undefined> {
-  const { accessToken, refreshToken } = await readVscdbTokens();
-  if (isUsable(accessToken)) return { accessToken, source: CredentialSource.IdeVscdb };
-  const refreshed = await tryRefresh(refreshToken);
-  return refreshed
-    ? { accessToken: refreshed, source: CredentialSource.IdeVscdbRefresh }
-    : undefined;
+  return resolveStoredTokens(
+    await readVscdbTokens(),
+    CredentialSource.IdeVscdb,
+    CredentialSource.IdeVscdbRefresh,
+  );
 }
 
 /**

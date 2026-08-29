@@ -240,18 +240,22 @@ function entryEqual(left, right) {
   return JSON.stringify(left) === JSON.stringify(right);
 }
 
+function inventoryDifference(before, after) {
+  const beforeOnly = Object.keys(before).filter((name) => !(name in after)).sort();
+  const afterOnly = Object.keys(after).filter((name) => !(name in before)).sort();
+  const modified = Object.keys(after)
+    .filter((name) => name in before && !entryEqual(before[name], after[name]))
+    .sort();
+  return { beforeOnly, afterOnly, modified };
+}
+
 function changesFrom(before, after) {
-  const created = [];
-  const modified = [];
-  const deleted = [];
-  for (const name of Object.keys(after).sort()) {
-    if (!(name in before)) created.push(name);
-    else if (!entryEqual(before[name], after[name])) modified.push(name);
-  }
-  for (const name of Object.keys(before).sort()) {
-    if (!(name in after)) deleted.push(name);
-  }
-  return { created, modified, deleted };
+  const difference = inventoryDifference(before, after);
+  return {
+    created: difference.afterOnly,
+    modified: difference.modified,
+    deleted: difference.beforeOnly,
+  };
 }
 
 function assistantText(message) {
@@ -461,15 +465,12 @@ async function materializeComparisonTree(source, target, fileInventory) {
 }
 
 function artifactDifference(left, right) {
-  const onlyLeft = [];
-  const onlyRight = [];
-  const different = [];
-  for (const name of Object.keys(left).sort()) {
-    if (!(name in right)) onlyLeft.push(name);
-    else if (!entryEqual(left[name], right[name])) different.push(name);
-  }
-  for (const name of Object.keys(right).sort()) if (!(name in left)) onlyRight.push(name);
-  return { onlyLeft, onlyRight, different };
+  const difference = inventoryDifference(left, right);
+  return {
+    onlyLeft: difference.beforeOnly,
+    onlyRight: difference.afterOnly,
+    different: difference.modified,
+  };
 }
 
 function listOrNone(values) {

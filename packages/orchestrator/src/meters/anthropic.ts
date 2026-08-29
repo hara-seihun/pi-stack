@@ -171,17 +171,29 @@ function requestHeaders(accessToken: string): Record<string, string> {
   };
 }
 
+async function fetchAnthropicJson(
+  url: string,
+  label: string,
+  accessToken: string,
+  fetchFn: FetchLike,
+  requestTimeoutMs: number,
+): Promise<unknown> {
+  const response = await fetchFn(url, {
+    headers: requestHeaders(accessToken),
+    signal: AbortSignal.timeout(requestTimeoutMs),
+  });
+  if (!response.ok) throw new Error(`anthropic ${label} HTTP ${response.status}`);
+  return response.json();
+}
+
 export async function fetchAnthropicUsage(
   accessToken: string,
   fetchFn: FetchLike,
   requestTimeoutMs: number,
 ): Promise<AnthropicUsageReading> {
-  const response = await fetchFn(USAGE_URL, {
-    headers: requestHeaders(accessToken),
-    signal: AbortSignal.timeout(requestTimeoutMs),
-  });
-  if (!response.ok) throw new Error(`anthropic usage HTTP ${response.status}`);
-  return parseAnthropicUsage(await response.json());
+  return parseAnthropicUsage(
+    await fetchAnthropicJson(USAGE_URL, "usage", accessToken, fetchFn, requestTimeoutMs),
+  );
 }
 
 /** Relative weekly allowance of Anthropic's plan tiers. These ratios are what
@@ -200,12 +212,9 @@ async function fetchAnthropicCapacityWeight(
   fetchFn: FetchLike,
   requestTimeoutMs: number,
 ): Promise<number | undefined> {
-  const response = await fetchFn(PROFILE_URL, {
-    headers: requestHeaders(accessToken),
-    signal: AbortSignal.timeout(requestTimeoutMs),
-  });
-  if (!response.ok) throw new Error(`anthropic profile HTTP ${response.status}`);
-  return parseAnthropicCapacityWeight(await response.json());
+  return parseAnthropicCapacityWeight(
+    await fetchAnthropicJson(PROFILE_URL, "profile", accessToken, fetchFn, requestTimeoutMs),
+  );
 }
 
 export interface AnthropicMeterSamplerOptions {
