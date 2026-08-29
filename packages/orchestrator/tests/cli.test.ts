@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { launchControl, namedFlags, sharePercent, spawn, taskSet } from "../src/cli.js";
+import { accountCommand, launchControl, namedFlags, sharePercent, spawn, taskSet } from "../src/cli.js";
 import { mix } from "./harness.js";
 import { Ledger } from "../src/ledger/ledger.js";
 
@@ -204,6 +204,18 @@ describe("spawn", () => {
       thinking: "max",
     });
     expect(() => spawn(ledger, ["frontier", "--model", "nonesuch"], pinnable)).toThrow(/no candidate matching/);
+    ledger.close();
+  });
+
+  it("cools an account down and back", async () => {
+    const ledger = open();
+    ledger.upsertAccount({ id: "anthropic-1", provider: "anthropic" });
+
+    await accountCommand(ledger, ["cooldown", "anthropic-1", "2100-01-01T00:00:00Z"]);
+    expect(ledger.accounts()[0]?.cooldownUntil).toBe(Date.parse("2100-01-01T00:00:00Z"));
+
+    await accountCommand(ledger, ["cooldown", "anthropic-1", "off"]);
+    expect(ledger.accounts()[0]?.cooldownUntil).toBeUndefined();
     ledger.close();
   });
 

@@ -574,7 +574,7 @@ function credentialState(accountId: string, now = Date.now()): string | undefine
   return undefined;
 }
 
-async function accountCommand(ledger: Ledger, args: string[]): Promise<void> {
+export async function accountCommand(ledger: Ledger, args: string[]): Promise<void> {
   const [sub, ...rest] = args;
   if (sub === "list") {
     for (const a of ledger.accounts()) {
@@ -638,6 +638,19 @@ async function accountCommand(ledger: Ledger, args: string[]): Promise<void> {
     ledger.setAccountShared(id, value === "on");
     console.log(`account ${id} custody is now ${value === "on" ? "shared" : "its credential store's"}`);
     if (value === "on") reportLocalCopy(id);
+  } else if (sub === "cooldown") {
+    const [id, value] = rest;
+    if (id === undefined) fail("usage: account cooldown <id> <until|off>");
+    const account = ledger.accounts().find((row) => row.id === id) ?? fail(`unknown account ${id}`);
+    if (value === "off") {
+      ledger.setAccountCooldown(account.id, undefined);
+      console.log(`account ${id} cooldown cleared`);
+    } else {
+      const until = Date.parse(value ?? "");
+      if (Number.isNaN(until)) fail("usage: account cooldown <id> <until|off> (until is an ISO timestamp)");
+      ledger.setAccountCooldown(account.id, until);
+      console.log(`account ${id} cooling until ${new Date(until).toISOString()}`);
+    }
   } else if (sub === "login") {
     const id = rest[0] ?? fail("usage: account login <id>");
     const account = ledger.accounts().find((row) => row.id === id) ?? fail(`unknown account ${id}`);
@@ -669,7 +682,8 @@ async function accountCommand(ledger: Ledger, args: string[]): Promise<void> {
   } else
     fail(
       "usage: account list | account add <id> --provider F [--label L] [--shared true] | " +
-        "account remove <id> | account share <id> [on|off] | account login <id>",
+        "account remove <id> | account share <id> [on|off] | account login <id> | " +
+        "account cooldown <id> <until|off>",
     );
 }
 
@@ -1054,6 +1068,8 @@ async function main(): Promise<void> {
 
             "  account share <id> [on|off]  share a Codex account across both runtimes",
             "  account login <id>           device-login a Codex account into shared custody",
+            "  account cooldown <id> <until|off>  keep the broker off an exhausted",
+            "                               account until the ISO timestamp passes",
             "  pause | resume [task...]     durable launch control (ledger rows): the",
             "                               machine, or the named lanes",
             "  pause --except <task,...>    hold every other lane, so the fleet's whole",
