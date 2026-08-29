@@ -1176,8 +1176,13 @@ describe("web and supervisor integration", () => {
       (entries) => entries.some((entry: any) => entry.type === "steer" && entry.message === "change direction")
         && entries.some((entry: any) => entry.type === "steer" && entry.message === "do this later"),
     );
-    const listed = await api("GET", `/v1/sessions/${id}`);
-    expect(listed.value.session).toMatchObject({ steeringQueued: 2, followUpQueued: 0, queuedMessages: [] });
+    const listed = await waitFor(
+      () => api("GET", `/v1/sessions/${id}`).then((result) => result.value),
+      (value) => value.session.steeringQueued === 2
+        && value.session.followUpQueued === 0
+        && value.session.queuedMessages.length === 0,
+    );
+    expect(listed.session).toMatchObject({ steeringQueued: 2, followUpQueued: 0, queuedMessages: [] });
     const events = await api("GET", `/v1/sessions/${id}/events?after=0`);
     expect(events.value.events.filter((event: any) => event.type === "user").map((event: any) => [event.text, event.delivery]))
       .toEqual(expect.arrayContaining([
