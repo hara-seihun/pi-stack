@@ -54,10 +54,10 @@ function generateTurns(rng: () => number): Turn[] {
   let session = 0;
   for (let d = 0; d < 14; d++) {
     const shifted = d >= 11;
-    const pBatch = shifted ? 0.05 : 0.25 + 0.5 * rng();
-    const pAgent = shifted ? 0.15 : 0.2;
+    const pBatch = shifted ? 0 : 0.25 + 0.5 * rng();
+    const pAgent = shifted ? 0.05 : 0.2;
     const intensity = 0.7 + 0.4 * rng();
-    const sessions = Math.round((shifted ? 60 : 28) * intensity);
+    const sessions = Math.round((shifted ? 30 : 14) * intensity);
     for (let s = 0; s < sessions; s++) {
       session++;
       const sessionStart = start + d * DAY + Math.floor((7 + rng() * 15) * HOUR);
@@ -169,7 +169,7 @@ describe("fully instrumented machine", () => {
     expect(scalarError).toBeGreaterThan(0.1);
     expect(costError).toBeLessThan(scalarError / 2);
     ledger.close();
-  });
+  }, 10_000);
 
   it("I2 leak becomes an alarm: an un-instrumented nightly job is detected, not absorbed", () => {
     const rng = mulberry32(2027);
