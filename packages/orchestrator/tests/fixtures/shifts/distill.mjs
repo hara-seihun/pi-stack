@@ -70,7 +70,6 @@ for await (const line of lines) {
       break;
     case "tool_start": {
       const name = String(event.payload?.name ?? "tool");
-      if (name === "task_complete") break;
       console.log(
         JSON.stringify({
           type: "tool_start",
