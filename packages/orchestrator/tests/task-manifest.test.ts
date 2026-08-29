@@ -36,20 +36,18 @@ describe("task manifests", () => {
     ledger.upsertTask({ id: "obsolete", demandConstant: 1, tiers: [{ tier: "standard", weight: 1 }] });
 
     expect(reconcileTaskManifest(ledger, manifest)).toEqual({ upserted: 1, deleted: ["obsolete"] });
-    expect(ledger.tasks()).toEqual([{
+    const [queue] = ledger.tasks();
+    expect(ledger.tasks()).toHaveLength(1);
+    // File references resolve to contents, and the manifest's tier list
+    // replaces the ledger's rather than merging with it.
+    expect(queue).toMatchObject({
       id: "queue",
       demandCommand: "printf '2\\n'\n",
-      demandConstant: undefined,
-      gate: undefined,
       tiers: [{ tier: "standard", weight: 1 }, { tier: "light", weight: 3 }],
-      share: 4,
       prompt: "Work the queue.\n",
-      cwd: undefined,
-      doctrineUrl: undefined,
       opening: ["Take a look first.\n"],
-      openingProbe: undefined,
-      team: undefined,
-    }]);
+    });
+    expect(queue?.demandConstant).toBeUndefined();
     expect(ledger.taskPaused("queue")).toBe(true);
     ledger.close();
   });

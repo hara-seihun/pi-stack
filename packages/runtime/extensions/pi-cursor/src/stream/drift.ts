@@ -116,7 +116,3 @@ export function formatDriftSummary(limit = 4): string {
   const rest = all.length > limit ? ` (+${all.length - limit} more)` : "";
   return `${shown}${rest}`;
 }
-
-export function resetDriftSignalsForTests(): void {
-  signals.clear();
-}

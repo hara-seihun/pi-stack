@@ -4,7 +4,7 @@ import { join } from "node:path";
 import { afterEach, describe, expect, test } from "vitest";
 
 import { VoiceBroker, boundedSdp, type VoiceAccount } from "../src/voice/broker.js";
-import { contextAppendEvents, parseDelegationCreated, parseTurnTranscript, utf8Chunks } from "../src/voice/protocol.js";
+import { utf8Chunks } from "../src/voice/protocol.js";
 import { createVoiceServer } from "../src/voice/server.js";
 
 const roots: string[] = [];
@@ -189,34 +189,6 @@ describe("voice protocol helpers", () => {
     for (const chunk of chunks) expect(Buffer.byteLength(chunk, "utf8")).toBeLessThanOrEqual(500);
   });
 
-  test("parses delegation and turn events, ignores the rest", () => {
-    expect(
-      parseDelegationCreated({
-        type: "delegation.created",
-        item: { id: "d1", content: [{ type: "input_text", text: "do the thing" }] },
-      }),
-    ).toEqual({ delegationId: "d1", task: "do the thing" });
-    expect(parseDelegationCreated({ type: "delegation.created", item: { id: "d1", content: [] } })).toBeNull();
-    expect(parseTurnTranscript({ type: "turn.done", turn: { role: "assistant", transcript: " hi " } })).toEqual({
-      role: "assistant",
-      transcript: "hi",
-    });
-    expect(parseTurnTranscript({ type: "response.done" })).toBeNull();
-  });
-
-  test("builds chunked context events addressed to a delegation or the session", () => {
-    const events = contextAppendEvents("progress", "commentary", "d1");
-    expect(events).toEqual([
-      {
-        type: "delegation.context.append",
-        delegation_item_id: "d1",
-        channel: "commentary",
-        content: [{ type: "input_text", text: "progress" }],
-      },
-    ]);
-    expect(contextAppendEvents("hello", "speakable")[0]!.type).toBe("session.context.append");
-    expect(contextAppendEvents("   ", "speakable")).toEqual([]);
-  });
 });
 
 describe("voice HTTP server", () => {

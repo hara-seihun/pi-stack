@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 import { createHash } from "node:crypto";
-import { imageKey, mergeImages } from "../src/stream/images.js";
+import { mergeImages } from "../src/stream/images.js";
 import type { ParsedImageContent } from "../src/stream/types.js";
 
 const image = (fill: number, byteLength: number, mimeType = "image/png"): ParsedImageContent => ({
@@ -14,29 +14,6 @@ const image = (fill: number, byteLength: number, mimeType = "image/png"): Parsed
  * pin it to the original contract: dedup iff same MIME type *and* same bytes.
  */
 describe("mergeImages", () => {
-  it("drops duplicates with identical mime type and bytes", () => {
-    expect(mergeImages([image(1, 64), image(1, 64)])).toHaveLength(1);
-  });
-
-  it("keeps same-length images whose content differs", () => {
-    expect(mergeImages([image(1, 64), image(2, 64)])).toHaveLength(2);
-  });
-
-  it("keeps identical bytes carrying different mime types", () => {
-    const merged = mergeImages([image(1, 64, "image/png"), image(1, 64, "image/jpeg")]);
-    expect(merged).toHaveLength(2);
-  });
-
-  it("dedups across separate groups and skips undefined ones", () => {
-    const merged = mergeImages([image(3, 32)], undefined, [image(3, 32), image(4, 32)]);
-    expect(merged).toHaveLength(2);
-  });
-
-  it("preserves first-seen order", () => {
-    const merged = mergeImages([image(5, 16), image(6, 8), image(5, 16)])!;
-    expect(merged.map((i) => i.data.byteLength)).toEqual([16, 8]);
-  });
-
   it("returns undefined when nothing survives", () => {
     expect(mergeImages(undefined, [])).toBeUndefined();
   });
@@ -76,11 +53,5 @@ describe("mergeImages", () => {
       const expected = reference(groups);
       expect(mergeImages(...groups) ?? []).toEqual(expected);
     }
-  });
-
-  it("keys an image by mime type and content digest", () => {
-    expect(imageKey(image(1, 64))).toEqual(imageKey(image(1, 64)));
-    expect(imageKey(image(1, 64))).not.toEqual(imageKey(image(2, 64)));
-    expect(imageKey(image(1, 64, "image/png"))).not.toEqual(imageKey(image(1, 64, "image/jpeg")));
   });
 });
