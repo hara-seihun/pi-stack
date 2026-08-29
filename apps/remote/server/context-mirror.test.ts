@@ -7,6 +7,9 @@ type Handler = (event: Record<string, unknown>, context: Record<string, unknown>
 
 const captures: Array<{ capturedAt: number; context: Record<string, unknown>; replacement?: string }> = [];
 let document = "";
+let failNextCapture = false;
+let captureStarted: (() => void) | undefined;
+let blockedCapture: Promise<void> | undefined;
 const server = Bun.serve({
   port: 0,
   async fetch(request) {
@@ -14,6 +17,12 @@ const server = Bun.serve({
     if (request.method === "PATCH") document = applyContextSplice(document, body.splice);
     else document = JSON.stringify(body.context);
     captures.push({ capturedAt: body.capturedAt, context: JSON.parse(document), replacement: body.replacement });
+    if (failNextCapture) {
+      failNextCapture = false;
+      captureStarted?.();
+      await blockedCapture;
+      return Response.json({ ok: true, hash: "wrong acknowledgement" });
+    }
     return Response.json({ ok: true, hash: sha256(document) });
   },
 });
@@ -88,6 +97,47 @@ describe("context mirror", () => {
     const messages = captures.at(-1)?.context.messages as Array<{ role: string; content: Array<{ text: string }> }>;
     expect(messages.map((message) => message.role)).toEqual(["user", "assistant"]);
     expect(messages.at(-1)?.content[0].text).toBe("Finished");
+  });
+
+  test("publishes a newer snapshot queued while the current capture fails", async () => {
+    captures.length = 0;
+    document = "";
+    failNextCapture = true;
+    let started!: () => void;
+    let releaseCapture!: () => void;
+    const firstCaptureStarted = new Promise<void>((resolve) => { started = resolve; });
+    blockedCapture = new Promise<void>((resolve) => { releaseCapture = resolve; });
+    captureStarted = started;
+    const handlers = new Map<string, Handler>();
+    const pi = {
+      on(type: string, handler: Handler) { handlers.set(type, handler); },
+      getActiveTools() { return []; },
+      getAllTools() { return []; },
+    } as unknown as ExtensionAPI;
+    contextMirror(pi);
+
+    const extensionContext = { getSystemPrompt: () => "System" };
+    const first = handlers.get("context")?.({
+      type: "context",
+      messages: [{ role: "user", content: [{ type: "text", text: "first" }], timestamp: 1 }],
+    }, extensionContext) as Promise<void>;
+    await firstCaptureStarted;
+    const second = handlers.get("context")?.({
+      type: "context",
+      messages: [{ role: "user", content: [{ type: "text", text: "second" }], timestamp: 2 }],
+    }, extensionContext) as Promise<void>;
+    const firstFailure = first.catch((error) => error as Error);
+    void second.catch(() => {});
+    releaseCapture();
+    expect((await firstFailure).message).toContain("acknowledgement hash");
+    for (let attempt = 0; attempt < 100 && !JSON.stringify(captures.at(-1)?.context).includes("second"); attempt++) {
+      await Bun.sleep(1);
+    }
+
+    expect(captures.length).toBeGreaterThanOrEqual(2);
+    expect(JSON.stringify(captures.at(-1)?.context)).toContain("second");
+    captureStarted = undefined;
+    blockedCapture = undefined;
   });
 
   test("replaces the visible document as soon as Pi commits a compaction", async () => {

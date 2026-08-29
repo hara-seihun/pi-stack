@@ -66,7 +66,14 @@ export default function contextMirror(pi: ExtensionAPI) {
         if (result.hash && result.hash !== sha256(document)) throw new Error("Context mirror acknowledgement hash does not match");
         publishedDocument = document;
       }
-    })().finally(() => { draining = null; });
+    })().finally(() => {
+      draining = null;
+      if (pending) {
+        void drain().catch((error) => console.error(
+          `Pi Remote context mirror failed: ${error instanceof Error ? error.message : error}`,
+        ));
+      }
+    });
     return draining;
   };
 
