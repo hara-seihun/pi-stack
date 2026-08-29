@@ -61,6 +61,22 @@ pi_stack_prepare_dependencies() {
   export PI_STACK_DEPENDENCIES_READY=$key
 }
 
+pi_stack_validate_task_manifest() {
+  local module=$1 manifest=${2:-}
+  [[ -n $manifest ]] || return
+  [[ -f $manifest ]] || {
+    echo "orchestrator task manifest does not exist: $manifest" >&2
+    return 1
+  }
+  node --input-type=module - "$module" "$manifest" <<'JS'
+import { pathToFileURL } from "node:url";
+
+const [modulePath, manifestPath] = process.argv.slice(2);
+const { loadTaskManifest } = await import(pathToFileURL(modulePath).href);
+loadTaskManifest(manifestPath);
+JS
+}
+
 pi_stack_as_root() {
   if [[ $EUID == 0 || ${PI_STACK_DEPLOY_NO_SUDO:-0} == 1 ]]; then
     "$@"

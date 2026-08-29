@@ -37,6 +37,23 @@ ledger=${PI_ORCHESTRATOR_LEDGER:-$HOME/.local/share/pi-orchestrator/ledger.sqlit
 runner_service=${PI_ORCHESTRATOR_RUNNER_SERVICE:-pi-orchestrator-runner.service}
 controller_service=${PI_ORCHESTRATOR_CONTROLLER_SERVICE:-pi-orchestrator.service}
 voice_service=${PI_ORCHESTRATOR_VOICE_SERVICE:-pi-orchestrator-voice.service}
+if [[ ! -v PI_ORCHESTRATOR_TASK_MANIFEST ]]; then
+  controller_config=${PI_ORCHESTRATOR_CONFIG:-$HOME/.config/pi-orchestrator/config.json}
+  if [[ -f $controller_config ]]; then
+    PI_ORCHESTRATOR_TASK_MANIFEST=$(node - "$controller_config" <<'JS'
+const { readFileSync } = require("node:fs");
+const { dirname, isAbsolute, resolve } = require("node:path");
+
+const configPath = process.argv[2];
+const manifest = JSON.parse(readFileSync(configPath, "utf8")).taskManifest;
+if (typeof manifest === "string" && manifest.length > 0) {
+  process.stdout.write(isAbsolute(manifest) ? manifest : resolve(dirname(configPath), manifest));
+}
+JS
+)
+    export PI_ORCHESTRATOR_TASK_MANIFEST
+  fi
+fi
 source_runner_contract_hash=$(runner_contract_hash \
   "$root/packages/orchestrator/src/host/supervisor.ts" \
   "$root/packages/orchestrator/src/ledger/ledger.ts")

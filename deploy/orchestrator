@@ -8,6 +8,9 @@ dest=${PI_STACK_ORCHESTRATOR_DEST:-/srv/pi/pi-orchestrator}
 runtime_root=${PI_STACK_RUNTIME_ROOT:-$HOME/.local/share/pi-runtime}
 commit=$(git -C "$root" rev-parse HEAD)
 if [[ -f $dest/.pi-stack-commit && $(<"$dest/.pi-stack-commit") == "$commit" && -x $dest/dist/cli.js ]]; then
+  pi_stack_validate_task_manifest \
+    "$dest/dist/task-manifest.js" \
+    "${PI_ORCHESTRATOR_TASK_MANIFEST:-}"
   "$dest/dist/cli.js" help | grep -q '^usage: pi-orchestrator'
   printf 'Pi Orchestrator from %s is already deployed\n' "$commit"
   exit 0
@@ -32,6 +35,9 @@ rsync -a --chmod=D755,Fu=rwX,Fgo=rX packages/orchestrator/dist packages/orchestr
 chmod 755 "$stage/release/dist/cli.js"
 ln -s "$dependencies" "$stage/release/node_modules"
 printf '%s\n' "$commit" > "$stage/release/.pi-stack-commit"
+pi_stack_validate_task_manifest \
+  "$stage/release/dist/task-manifest.js" \
+  "${PI_ORCHESTRATOR_TASK_MANIFEST:-}"
 pi_stack_publish_release "$root" "$stage/release" "$dest" orchestrator
 
 "$dest/dist/cli.js" help | grep -q '^usage: pi-orchestrator'

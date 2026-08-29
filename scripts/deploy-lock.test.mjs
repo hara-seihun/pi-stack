@@ -88,6 +88,31 @@ test("a changed installed lock invalidates the dependency receipt", () => {
   }
 });
 
+test("a candidate orchestrator validates the installed task manifest before publication", () => {
+  const directory = mkdtempSync(join(tmpdir(), "pi-stack-manifest-preflight-"));
+  try {
+    const loader = join(directory, "task-manifest.mjs");
+    const manifest = join(directory, "tasks.json");
+    writeFileSync(loader, `
+import { readFileSync } from "node:fs";
+export function loadTaskManifest(path) {
+  const document = JSON.parse(readFileSync(path, "utf8"));
+  if (document.retiredField) throw new Error("unknown task manifest field retiredField");
+}
+`);
+    writeFileSync(manifest, '{"retiredField":true}\n');
+    const invalid = spawnSync("bash", ["-c", 'source "$1"; pi_stack_validate_task_manifest "$2" "$3"', "manifest-preflight-test", helper, loader, manifest], { encoding: "utf8" });
+    assert.notEqual(invalid.status, 0);
+    assert.match(invalid.stderr, /unknown task manifest field retiredField/);
+
+    writeFileSync(manifest, '{}\n');
+    const valid = spawnSync("bash", ["-c", 'source "$1"; pi_stack_validate_task_manifest "$2" "$3"', "manifest-preflight-test", helper, loader, manifest], { encoding: "utf8" });
+    assert.equal(valid.status, 0, valid.stderr);
+  } finally {
+    rmSync(directory, { recursive: true, force: true });
+  }
+});
+
 test("every deployment process ends before the machine-wide ceiling", () => {
   const directory = mkdtempSync(join(tmpdir(), "pi-stack-deadline-"));
   try {
@@ -248,6 +273,7 @@ git -C "$(cd "$(dirname "$0")/.." && pwd)" rev-parse HEAD > "$destination/.pi-st
       ...process.env,
       ...destinations,
       PI_ORCHESTRATOR_LEDGER: ledger,
+      PI_ORCHESTRATOR_TASK_MANIFEST: "",
       PATH: `${bin}:${process.env.PATH}`,
       TRACE: trace,
       ACTIVATE_TRACE: activationTrace,
