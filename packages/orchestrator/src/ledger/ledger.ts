@@ -495,6 +495,11 @@ ALTER TABLE run ADD COLUMN productive INTEGER;
 ALTER TABLE run ADD COLUMN complete INTEGER;
 `;
 
+const RUN_RESULT_COLUMNS_REMOVAL_SCHEMA = `
+ALTER TABLE run DROP COLUMN productive;
+ALTER TABLE run DROP COLUMN complete;
+`;
+
 const MIGRATIONS: readonly string[] = [
   SCHEMA,
   TASK_SCHEMA,
@@ -523,6 +528,7 @@ const MIGRATIONS: readonly string[] = [
   NATIVE_TEAM_TURN_SCHEMA,
   RUN_LIFECYCLE_SCHEMA,
   RUN_ROLLING_DEPLOY_SCHEMA,
+  RUN_RESULT_COLUMNS_REMOVAL_SCHEMA,
 ];
 
 export interface AccountRow {
