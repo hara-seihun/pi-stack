@@ -13,6 +13,7 @@ import { TIERS, type Tier, type TierShare } from "./tasks/types.js";
 import { reconcileTaskManifest } from "./task-manifest.js";
 import { credentialedAccountIds } from "./auth/credentials.js";
 import { brokerConfig, cooldownPolicy, defaultConfigPath, loadConfig } from "./config.js";
+import { catalogModel } from "./catalog.js";
 import { CURSOR_PROVIDER, CursorMeterSampler } from "./meters/cursor.js";
 import { CODEX_PROVIDER, CodexMeterSampler } from "./meters/codex.js";
 import { AnthropicMeterSampler } from "./meters/anthropic.js";
@@ -873,21 +874,31 @@ export function taskSet(ledger: Ledger, args: string[]): void {
  */
 export function spawn(ledger: Ledger, args: string[], cfg = loadConfig()): void {
   const { positional, named } = flags(args);
-  const taskId = positional[0] ?? fail("spawn <task-id> [--tier TIER] [--account ID]");
+  const taskId = positional[0] ?? fail("spawn <task-id> [--tier TIER] [--account ID] [--model ID]");
   const task = ledger.tasks().find((t) => t.id === taskId) ?? fail(`unknown task ${taskId}`);
   if (task.prompt === undefined) fail(`task ${taskId} is a pure demand signal; nothing to launch`);
   const tier = (named.get("tier") ?? task.tiers[0]?.tier ?? fail(`task ${taskId} has no tiers`)) as Tier;
   if (!TIERS.includes(tier)) fail(`unknown tier ${tier}`);
   const now = Date.now();
   const wanted = named.get("account");
-  let admission = wanted === undefined ? new Broker(ledger, brokerConfig(cfg)).admit(tier, now) : undefined;
+  const wantedModel = named.get("model");
+  const resolvedModel = wantedModel === undefined ? undefined : catalogModel(wantedModel)?.model ?? wantedModel;
+  const candidates = (cfg.tiers[tier] ?? []).filter(
+    (candidate) => resolvedModel === undefined || candidate.model === resolvedModel,
+  );
+  if (wantedModel !== undefined && candidates.length === 0) {
+    fail(`tier ${tier} has no candidate matching model ${wantedModel}`);
+  }
+  let admission = wanted === undefined && wantedModel === undefined
+    ? new Broker(ledger, brokerConfig(cfg)).admit(tier, now)
+    : undefined;
   let forced = false;
   if (admission === undefined) {
     forced = true;
     const accounts = ledger
       .accounts()
       .filter((a) => a.fleetCredentialed && (a.cooldownUntil === undefined || a.cooldownUntil <= now));
-    for (const candidate of cfg.tiers[tier] ?? []) {
+    for (const candidate of candidates) {
       const account = accounts.find(
         (a) => a.provider === candidate.provider && (wanted === undefined || a.id === wanted),
       );
@@ -1049,8 +1060,9 @@ async function main(): Promise<void> {
             "                               capacity goes to the named ones",
             `  boost <family> [on|off|halt|N]  scale a family's spend pace (on = ${BOOSTED_MULTIPLIER}x,`,
             "                               halt = 0: no new launches for the family)",
-            "  spawn <task-id> [--tier T] [--account ID]  create one pending run now,",
-            "                               past demand and pacing when they refuse",
+            "  spawn <task-id> [--tier T] [--account ID] [--model ID]  create one pending run",
+            "                               now, past demand and pacing when they refuse;",
+            "                               --model pins one tier candidate by catalog id",
             "  abort <runId>                request a running session stop",
             "  kill <runId> [reason]        end a run its session will not stop for",
             "  say <runId> <text...>        deliver an operator message into a live",

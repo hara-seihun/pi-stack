@@ -177,6 +177,36 @@ describe("spawn", () => {
     ledger.close();
   });
 
+  it("pins one tier candidate by model", () => {
+    const pinnable = {
+      tiers: {
+        light: [],
+        standard: [
+          { provider: "anthropic", model: "claude-opus-5", thinking: "xhigh" },
+          { provider: "openai-codex", model: "gpt-5.6-sol", thinking: "max" },
+        ],
+        expert: [],
+      },
+      providers: { anthropic: {}, "openai-codex": {} },
+    } as never;
+    const ledger = open();
+    taskSet(ledger, ["frontier", "--tiers", "standard", "--demand-constant", "1", "--prompt", "go"]);
+    ledger.upsertAccount({ id: "anthropic-1", provider: "anthropic" });
+    ledger.upsertAccount({ id: "codex-1", provider: "openai-codex" });
+    ledger.syncFleetCredentials(new Set(["anthropic-1", "codex-1"]));
+
+    spawn(ledger, ["frontier", "--model", "sol"], pinnable);
+
+    expect(ledger.runs({})[0]).toMatchObject({
+      accountId: "codex-1",
+      provider: "openai-codex",
+      model: "gpt-5.6-sol",
+      thinking: "max",
+    });
+    expect(() => spawn(ledger, ["frontier", "--model", "nonesuch"], pinnable)).toThrow(/no candidate matching/);
+    ledger.close();
+  });
+
   it("refuses a signal-only lane and a lane with nothing to force onto", () => {
     const ledger = open();
     taskSet(ledger, ["signal", "--tiers", "standard", "--demand-constant", "1"]);
