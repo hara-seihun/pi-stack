@@ -16,6 +16,16 @@ const RATE_LIMIT_PATTERNS = [
   /capacity/i,
   /\b429\b/,
   /quota/i,
+  // Anthropic bills third-party API traffic against a purchased extra-usage
+  // balance rather than the plan windows its meters report, and refuses with
+  // a 400 once that balance is empty ("You're out of extra usage", "Third-party
+  // apps now draw from your extra usage"). Nothing is wrong with the request or
+  // the credential — the account is out of capacity while its plan meters still
+  // read low — so it has to cool the account and let the wave rotate onto a
+  // sibling. Read as an ordinary 400 it did the opposite: on 2026-08-29 the
+  // broker relaunched the Cayley lane onto the same empty account six times in
+  // eighteen minutes and charged each failure to the task's circuit breaker.
+  /extra usage/i,
 ];
 
 export function isRateLimitError(message: string): boolean {

@@ -190,6 +190,47 @@ describe("runner result classification", () => {
       .toBe(30 * 60_000 + 200);
   });
 
+  it("an empty extra-usage balance cools the account instead of blaming the task", () => {
+    const ledger = Ledger.open(":memory:");
+    const [runId] = seed(ledger, 1);
+    const runner = new Runner(ledger, new FakeEngine(), { runnerId: "r1", maxSessions: 5 });
+    runner.tick(100);
+    runner.runFinished(
+      runId,
+      {
+        state: "error",
+        detail:
+          '400 {"type":"error","error":{"type":"invalid_request_error","message":"You\'re out of extra usage. Add more at claude.ai/settings/usage and keep going."}}',
+      },
+      200,
+    );
+    expect(ledger.run(runId)?.state).toBe("aborted");
+    expect(ledger.recentErrorCount("t", 0)).toBe(0);
+    expect(ledger.accounts().find((a) => a.id === "anth-1")?.cooldownUntil).toBe(
+      30 * 60_000 + 200,
+    );
+  });
+
+  it("the third-party extra-usage refusal is the same account exhaustion", () => {
+    const ledger = Ledger.open(":memory:");
+    const [runId] = seed(ledger, 1);
+    const runner = new Runner(ledger, new FakeEngine(), { runnerId: "r1", maxSessions: 5 });
+    runner.tick(100);
+    runner.runFinished(
+      runId,
+      {
+        state: "error",
+        detail:
+          '400 {"type":"invalid_request_error","message":"Third-party apps now draw from your extra usage, not your plan limits."}',
+      },
+      200,
+    );
+    expect(ledger.run(runId)?.state).toBe("aborted");
+    expect(ledger.accounts().find((a) => a.id === "anth-1")?.cooldownUntil).toBe(
+      30 * 60_000 + 200,
+    );
+  });
+
   it("an ordinary error run does not cool the account", () => {
     const ledger = Ledger.open(":memory:");
     const [runId] = seed(ledger, 1);
