@@ -186,7 +186,13 @@ for line in sys.stdin:
   else:
    out({'type':'agent_start'})
    if last == 'release-later':
-    time.sleep(0.35)
+    # Both tests that send this prompt have to act while the turn is still
+    # running: one queues a follow-up message, the other SIGHUPs the server
+    # mid-turn. They observe RUNNING over HTTP first, so the window has to
+    # outlast a poll interval plus a couple of round trips on a machine with
+    # nothing to spare. At 0.35s CI lost that race and the turn finished with
+    # no supervisor attached, which reads as a dropped assistant message.
+    time.sleep(3)
     out({'type':'message_end','message':{'role':'assistant','content':[{'type':'text','text':'current finished'}]}})
     streaming = False
     out({'type':'agent_settled'})
