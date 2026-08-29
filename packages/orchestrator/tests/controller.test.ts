@@ -153,6 +153,47 @@ describe("dispatch cycle", () => {
 
   });
 
+  it("replaces a missing team role without treating the finished member as present", async () => {
+    const { ledger, runner, cycle } = build();
+    ledger.upsertTask({
+      id: "cayley",
+      demandConstant: 1,
+      tiers: mix("expert", "standard"),
+      prompt: "Work on the whole Cayley CI programme.",
+      cwd: "/work/cayley-ci",
+      team: {
+        workers: 1,
+        supervisorPrompt: "Keep the whole programme in view.",
+      },
+    });
+
+    const first = await cycle(0);
+    expect(first.claimed).toHaveLength(2);
+    expect(first.claimed.map((run) => [run.team?.role, run.model])).toEqual([
+      ["supervisor", "claude-fable"],
+      ["worker", "gpt-5.6-sol"],
+    ]);
+
+    const worker = first.claimed.find((run) => run.team?.role === "worker")!;
+    runner.runFinished(worker.runId, { state: "done" }, 500);
+    for (let i = 0; i < 30; i++) {
+      const old = ledger.createRun({
+        taskId: "cayley",
+        tier: "standard",
+        accountId: "codex-1",
+        model: "gpt-5.6-sol",
+        provider: "openai-codex",
+        at: 600,
+      });
+      ledger.finishRun(old, { state: "aborted" }, 700);
+    }
+
+    const replacement = await cycle(1_000);
+    expect(replacement.claimed).toHaveLength(1);
+    expect(replacement.claimed[0]?.team).toMatchObject({ role: "worker", slot: 1 });
+    expect(replacement.claimed[0]?.model).toBe("gpt-5.6-sol");
+  });
+
   it("starts the supervisor before workers when only part of a team roster fits", async () => {
     const { ledger, cycle } = build({}, { maxConcurrentSessions: 4 });
     for (let i = 2; i <= 4; i++) {

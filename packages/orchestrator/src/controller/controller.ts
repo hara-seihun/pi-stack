@@ -2,7 +2,7 @@ import type { Broker } from "../broker/broker.js";
 import type { Ledger, RunRow } from "../ledger/ledger.js";
 import type { Scheduler } from "../tasks/scheduler.js";
 import { allocate, desiredByTier } from "../tasks/allocate.js";
-import type { EvaluateResult } from "../tasks/types.js";
+import type { EvaluateResult, Tier } from "../tasks/types.js";
 
 /**
  * The controller is the launch loop: each tick it reaps dead runs, evaluates
@@ -134,10 +134,20 @@ export class Controller {
         desired.filter(({ role, slot }) => !held.has(`${role}:${slot}`)),
       );
     }
+    const activeTeamPresenceByTier = (taskId: string): Partial<Record<Tier, number>> => {
+      const held: Partial<Record<Tier, number>> = {};
+      for (const run of activeRuns) {
+        if (run.taskId !== taskId) continue;
+        held[run.tier] = (held[run.tier] ?? 0) + 1;
+      }
+      return held;
+    };
+
     // A pending or running ordinary session holds one work unit. A team
     // lane's demand is boolean instead: any positive reading asks for its
     // complete roster, and the controller fills only the roles currently
-    // missing from that roster.
+    // missing from that roster. Recent ended runs still smooth ordinary lane
+    // composition, but cannot occupy a fixed team role after that role ends.
     const launchable = evaluation.tasks
       .filter((t) => {
         if (!t.eligible || tasks.get(t.taskId)?.prompt === undefined) return false;
@@ -150,22 +160,28 @@ export class Controller {
         }
         return true;
       })
-      .map((t) => ({
-        ...t,
-        units:
-          t.units === undefined
-            ? undefined
-            : tasks.get(t.taskId)?.team !== undefined
-              ? t.units > 0
-                ? missingTeamRoles.get(t.taskId)?.length ?? 0
-                : 0
-              : Math.max(0, t.units - (activeByTask.get(t.taskId) ?? 0)),
-        heldByTier: this.ledger.fleetPresenceByTier(
-          t.taskId,
-          now - this.cfg.compositionWindowMs,
-          now,
-        ),
-      }));
+      .map((t) => {
+        const team = tasks.get(t.taskId)?.team;
+        return {
+          ...t,
+          units:
+            t.units === undefined
+              ? undefined
+              : team !== undefined
+                ? t.units > 0
+                  ? missingTeamRoles.get(t.taskId)?.length ?? 0
+                  : 0
+                : Math.max(0, t.units - (activeByTask.get(t.taskId) ?? 0)),
+          heldByTier:
+            team === undefined
+              ? this.ledger.fleetPresenceByTier(
+                  t.taskId,
+                  now - this.cfg.compositionWindowMs,
+                  now,
+                )
+              : activeTeamPresenceByTier(t.taskId),
+        };
+      });
 
     // What the tiers are worth to the broker is what the claims would put in
     // them: a lane wanting twenty light sessions per standard one must not

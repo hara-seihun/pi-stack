@@ -216,8 +216,10 @@ Three launch-side fields describe scheduling:
 - `team`: one durable room with a fixed number of workers and one supervisor.
   Positive demand asks for the complete roster. The controller reconciles each
   slot independently, so an infrastructure failure replaces one session rather
-  than restarting the room. Every worker receives the task prompt, and the
-  supervisor receives `team.supervisorPrompt`.
+  than restarting the room. A finished member stops counting toward the team's
+  tier composition at once. Ordinary lanes still average recently ended runs,
+  but that history cannot occupy a fixed team slot. Every worker receives the
+  task prompt, and the supervisor receives `team.supervisorPrompt`.
 
   Team sessions share the task's `cwd`. If account capacity can hold only part
   of the roster, the controller starts the supervisor first. The filesystem and
