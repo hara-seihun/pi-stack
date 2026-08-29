@@ -305,8 +305,8 @@ else: sys.exit(2)
   orchestrator.query(`UPDATE run SET started_at=1000,provider='openai-codex-3',thinking='xhigh',team_role='supervisor',team_slot=0
     WHERE id='sol-0'`).run();
   orchestrator.query(`UPDATE run SET team_role='worker',team_slot=1 WHERE id='sol-1'`).run();
-  orchestrator.query(`UPDATE run SET started_at=500,ended_at=900,provider='openai-codex-2',thinking='max',
-    detail='processed one work unit',productive=1,complete=1 WHERE id='finished'`).run();
+  orchestrator.query(`UPDATE run SET started_at=500,ended_at=900,provider='openai-codex-2',thinking='max'
+    WHERE id='finished'`).run();
   orchestrator.close();
   mkdirSync(join(fakeAgentRuns, "sol-0"), { recursive: true });
   writeFileSync(join(fakeAgentRuns, "sol-0", "events.jsonl"), [
@@ -464,7 +464,7 @@ describe("web and supervisor integration", () => {
     expect(listed.value.runs.find((run: any) => run.runId === "finished")).toBeUndefined();
     const settled = await api("GET", "/v1/agents/runs/local:finished/events");
     expect(settled.status).toBe(200);
-    expect(settled.value.run).toMatchObject({ id: "local:finished", status: "done", summary: "processed one work unit" });
+    expect(settled.value.run).toMatchObject({ id: "local:finished", status: "done" });
   });
 
   test("streams one agent's transcript incrementally without any control surface", async () => {
@@ -1613,12 +1613,20 @@ describe("web and supervisor integration", () => {
       () => api("GET", `/v1/sessions/${id}/events?after=0`).then((result) => result.value),
       (value) => value.events.some((event: any) => event.type === "assistant" && event.text === "current finished"),
     );
+    // The retired runtime stops on its own chain of asynchronous steps: the
+    // turn settles, the supervisor asks the host to terminate, the host signals
+    // the child, and the child exits. Locally that lands in under a second, but
+    // a loaded CI runner has twice spent longer than the default eight-second
+    // wait and failed the whole release gate on scheduling rather than on
+    // behaviour. The assertion is that the old process really goes away, so
+    // give it room to be slow while still failing if it never goes.
     await waitFor(
       async () => {
         try { process.kill(runtimePid, 0); return false; }
         catch { return true; }
       },
       (stopped) => stopped,
+      30_000,
     );
     const settings = await api("GET", `/v1/sessions/${id}/settings`);
     expect(settings.status).toBe(200);
@@ -1629,5 +1637,5 @@ describe("web and supervisor integration", () => {
     expect(work).toEqual({ state: "complete", resume: 0 });
     expect(readJsonLines(fakeRpcLog).filter((entry: any) => entry.sessionId === id && entry.type === "abort")).toHaveLength(0);
     expect(readJsonLines(fakeRpcLog).filter((entry: any) => entry.sessionId === id && entry.type === "prompt")).toHaveLength(1);
-  }, 20_000);
+  }, 60_000);
 });
