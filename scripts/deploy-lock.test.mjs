@@ -191,6 +191,7 @@ test("a changed host release rolls orchestrator workers and activates Pi Remote"
 pi_stack_enforce_deploy_deadline() { :; }
 pi_stack_acquire_deploy_lock() { :; }
 pi_stack_prepare_dependencies() { :; }
+pi_stack_as_root() { "$@"; }
 `);
     const component = `#!/usr/bin/env bash
 set -euo pipefail
@@ -204,6 +205,10 @@ case "$name" in
   settings) exit 0 ;;
 esac
 mkdir -p "$destination/dist"
+if [[ $name == orchestrator ]]; then
+  mkdir -p "$destination/src/host"
+  printf '%s\n' "\${SUPERVISOR_CONTENT:-same}" > "$destination/src/host/supervisor.ts"
+fi
 git -C "$(cd "$(dirname "$0")/.." && pwd)" rev-parse HEAD > "$destination/.pi-stack-commit"
 `;
     for (const name of ["runtime", "orchestrator", "remote", "tools", "skills", "settings"]) {
@@ -226,9 +231,10 @@ git -C "$(cd "$(dirname "$0")/.." && pwd)" rev-parse HEAD > "$destination/.pi-st
     writeFileSync(ledger, "ledger");
     const trace = join(directory, "node.trace");
     const activationTrace = join(directory, "activation.trace");
+    const systemctlTrace = join(directory, "systemctl.trace");
     writeFileSync(join(bin, "node"), `#!/bin/sh\nprintf '%s\\n' "$*" >> "$TRACE"\n`);
     chmodSync(join(bin, "node"), 0o755);
-    writeFileSync(join(bin, "systemctl"), "#!/bin/sh\n[ \"$1\" = is-active ]\n");
+    writeFileSync(join(bin, "systemctl"), "#!/bin/sh\nprintf '%s\\n' \"$*\" >> \"$SYSTEMCTL_TRACE\"\ncase $1 in is-active|try-restart) exit 0;; *) exit 1;; esac\n");
     chmodSync(join(bin, "systemctl"), 0o755);
     const env = {
       ...process.env,
@@ -237,6 +243,7 @@ git -C "$(cd "$(dirname "$0")/.." && pwd)" rev-parse HEAD > "$destination/.pi-st
       PATH: `${bin}:${process.env.PATH}`,
       TRACE: trace,
       ACTIVATE_TRACE: activationTrace,
+      SYSTEMCTL_TRACE: systemctlTrace,
     };
     const first = spawnSync(join(deploy, "host"), ["converge"], { encoding: "utf8", env });
     assert.equal(first.status, 0, first.stderr);
@@ -248,6 +255,18 @@ git -C "$(cd "$(dirname "$0")/.." && pwd)" rev-parse HEAD > "$destination/.pi-st
     assert.equal(unchanged.status, 0, unchanged.stderr);
     assert.equal(existsSync(trace), false);
     assert.equal(readFileSync(activationTrace, "utf8"), "pi-remote.service\n");
+
+    writeFileSync(join(repository, "release"), "supervisor update\n");
+    assert.equal(spawnSync("git", ["-C", repository, "add", "release"]).status, 0);
+    assert.equal(spawnSync("git", ["-C", repository, "-c", "user.name=test", "-c", "user.email=test@example.test", "commit", "-qm", "supervisor update"]).status, 0);
+    rmSync(systemctlTrace, { force: true });
+    const supervisorChanged = spawnSync(join(deploy, "host"), ["converge"], {
+      encoding: "utf8",
+      env: { ...env, SUPERVISOR_CONTENT: "changed" },
+    });
+    assert.equal(supervisorChanged.status, 0, supervisorChanged.stderr);
+    assert.equal(existsSync(trace), false);
+    assert.match(readFileSync(systemctlTrace, "utf8"), /try-restart pi-orchestrator-runner\.service/);
   } finally {
     rmSync(directory, { recursive: true, force: true });
   }

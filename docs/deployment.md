@@ -50,7 +50,7 @@ piRemoteConvergeSshRemotePort=8788
 
 Hostnames and credentials belong in machine-local configuration, not documentation or source. The SSH account must allow local forwarding only to the configured Pi Remote port.
 
-`deploy/remote` publishes without ending active work. Host deployment calls `apps/remote/activate` after every changed Pi Remote release. You can run it directly to repeat activation. It switches the supervisor to the selected release immediately. The systemd service keeps a small launcher as its main process. Each Pi RPC child runs behind a runtime host in the same encrypted mount namespace and service cgroup. During activation, the old supervisor writes its runtime state, disconnects from those hosts, and exits. The launcher starts the selected supervisor, which reconnects to every host before serving requests. Active turns keep their process, stream, and RPC state. They are neither aborted nor replayed. A full service stop still kills the whole cgroup and unmounts the encrypted folder.
+`deploy/remote` publishes without ending active work. Host deployment calls `apps/remote/activate` after every changed Pi Remote release. You can run it directly to repeat activation. It switches the supervisor to the selected release immediately. The systemd service keeps a small launcher as its main process. Each Pi RPC child runs behind a runtime host in the same encrypted mount namespace and service cgroup. During activation, the old supervisor writes its runtime state, disconnects from those hosts, and exits. The launcher starts the selected supervisor, which reconnects to every host before serving requests. Active turns keep their process, stream, and RPC state. They are neither aborted nor replayed. After an adopted runtime settles, the supervisor replaces it before its next use so provider and extension changes take effect. A full service stop still kills the whole cgroup and unmounts the encrypted folder.
 
 ## GMKtec
 
@@ -63,7 +63,7 @@ The NixOS repository owns the deployment command and service definitions. It pub
 
 Local Pi Remote reports environment ID `local`, requires unlock, and offers only Personal and Home after the Converge cutover.
 
-Never restart the orchestrator runner to update it. When the selected Orchestrator commit changes, the host deployment bumps the runner generation. The supervisor immediately starts a worker from the new release while existing workers finish on their current generation.
+An ordinary Orchestrator update does not restart the runner service. The host deployment bumps the runner generation, and the supervisor starts a worker from the new release while existing workers finish on their current generation. If `host/supervisor.ts` itself changed, the deployment restarts the service because the long-lived supervisor cannot reload its own module. Startup requeues every persisted session from the stopped workers, and the new worker reopens them.
 
 ## Converge
 
