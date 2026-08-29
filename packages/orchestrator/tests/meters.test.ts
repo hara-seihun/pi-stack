@@ -529,6 +529,17 @@ describe("anthropic meter sampler", () => {
     expect(await sampler.sample()).toEqual([{ accountId: "anthropic-2", outcome: "no-credential" }]);
   });
 
+  it("polls a credential from the central shared store", async () => {
+    const { ledger, agentDir } = anthropicWorkspace({ "anthropic-2": ANTHROPIC_CREDENTIAL });
+    const sampler = new AnthropicMeterSampler(ledger, {
+      agentDir: join(agentDir, "empty-local-store"),
+      sharedAuthPath: join(agentDir, "auth.json"),
+      fetch: async () => usageResponse(ANTHROPIC_USAGE),
+    });
+
+    expect((await sampler.sample()).filter((report) => report.outcome === "recorded")).toHaveLength(3);
+  });
+
   it("reports a provider failure without throwing or writing a reading", async () => {
     const { ledger, agentDir } = anthropicWorkspace({ "anthropic-2": ANTHROPIC_CREDENTIAL });
     const sampler = new AnthropicMeterSampler(ledger, {

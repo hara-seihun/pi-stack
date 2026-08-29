@@ -16,11 +16,10 @@ import type { ModelAuth, OAuthAuth, OAuthCredential, Provider } from "@earendil-
 const LOCK_STALE_MS = 30_000;
 const TOKEN_MIN_LIFETIME_MS = 5 * 60_000;
 
-export type CodexCredential = OAuthCredential & { readonly accountId: string };
+type RefreshCredential = (credential: OAuthCredential, signal: AbortSignal) => Promise<OAuthCredential>;
+type CredentialIdentity = (credential: OAuthCredential) => string | undefined;
 
-type RefreshCredential = (credential: CodexCredential, signal: AbortSignal) => Promise<OAuthCredential>;
-
-export function defaultSharedCodexAuthPath(ledgerPath: string): string {
+export function defaultSharedAuthPath(ledgerPath: string): string {
   if (process.env.PI_ORCHESTRATOR_AUTH !== undefined) return process.env.PI_ORCHESTRATOR_AUTH;
   try {
     return join(dirname(realpathSync(ledgerPath)), "auth.json");
@@ -29,10 +28,12 @@ export function defaultSharedCodexAuthPath(ledgerPath: string): string {
   }
 }
 
-export interface SharedCodexAuthOptions {
+export interface SharedOAuthAuthOptions {
   readonly path: string;
+  readonly providerId: string;
   readonly refresh: RefreshCredential;
   readonly toAuth: OAuthAuth["toAuth"];
+  readonly identity?: CredentialIdentity;
   readonly now?: () => number;
 }
 
@@ -42,16 +43,15 @@ function record(value: unknown): Record<string, unknown> | undefined {
     : undefined;
 }
 
-export function codexCredential(value: unknown): CodexCredential | undefined {
+export function oauthCredential(value: unknown): OAuthCredential | undefined {
   const raw = record(value);
   if (
     raw?.type !== "oauth" ||
     typeof raw.access !== "string" || raw.access.length === 0 ||
     typeof raw.refresh !== "string" || raw.refresh.length === 0 ||
-    typeof raw.expires !== "number" || !Number.isFinite(raw.expires) ||
-    typeof raw.accountId !== "string" || raw.accountId.length === 0
+    typeof raw.expires !== "number" || !Number.isFinite(raw.expires)
   ) return undefined;
-  return raw as CodexCredential;
+  return raw as OAuthCredential;
 }
 
 function readAuth(path: string): Record<string, unknown> {
@@ -63,7 +63,7 @@ function readAuth(path: string): Record<string, unknown> {
     throw cause;
   }
   const auth = record(parsed);
-  if (auth === undefined) throw new Error(`Shared Codex auth at ${path} is not a JSON object`);
+  if (auth === undefined) throw new Error(`Shared OAuth auth at ${path} is not a JSON object`);
   return auth;
 }
 
@@ -118,22 +118,26 @@ async function acquireLock(path: string, signal: AbortSignal): Promise<() => voi
           continue;
         }
       } catch {}
-      if (Date.now() >= deadline) throw new Error("Timed out waiting for the shared Codex auth lock");
+      if (Date.now() >= deadline) throw new Error("Timed out waiting for the shared OAuth auth lock");
       await sleep(25 + Math.floor(Math.random() * 75));
     }
   }
 }
 
-export class SharedCodexAuth {
+export class SharedOAuthAuth {
   readonly #path: string;
+  readonly #providerId: string;
   readonly #refresh: RefreshCredential;
   readonly #toAuth: OAuthAuth["toAuth"];
+  readonly #identity?: CredentialIdentity;
   readonly #now: () => number;
 
-  constructor(options: SharedCodexAuthOptions) {
+  constructor(options: SharedOAuthAuthOptions) {
     this.#path = options.path;
+    this.#providerId = options.providerId;
     this.#refresh = options.refresh;
     this.#toAuth = options.toAuth;
+    this.#identity = options.identity;
     this.#now = options.now ?? Date.now;
   }
 
@@ -143,30 +147,32 @@ export class SharedCodexAuth {
 
   aliases(): string[] {
     return Object.entries(readAuth(this.#path))
-      .filter(([, value]) => codexCredential(value) !== undefined)
+      .filter(([, value]) => oauthCredential(value) !== undefined)
       .map(([alias]) => alias)
       .sort();
   }
 
   has(alias: string): boolean {
-    return codexCredential(readAuth(this.#path)[alias]) !== undefined;
+    return oauthCredential(readAuth(this.#path)[alias]) !== undefined;
   }
 
   async credential(
     alias: string,
     signal: AbortSignal,
     minLifetimeMs = TOKEN_MIN_LIFETIME_MS,
-  ): Promise<CodexCredential> {
+  ): Promise<OAuthCredential> {
     const release = await acquireLock(this.#path, signal);
     try {
       const auth = readAuth(this.#path);
-      const current = codexCredential(auth[alias]);
-      if (current === undefined) throw new Error(`${alias} has no shared Codex OAuth credential`);
+      const current = oauthCredential(auth[alias]);
+      if (current === undefined) throw new Error(`${alias} has no shared ${this.#providerId} OAuth credential`);
       if (current.expires > this.#now() + minLifetimeMs) return current;
-      const refreshed = codexCredential(await this.#refresh(current, signal));
-      if (refreshed === undefined) throw new Error(`Codex OAuth refresh for ${alias} returned an invalid credential`);
-      if (refreshed.accountId !== current.accountId) {
-        throw new Error(`Codex OAuth refresh for ${alias} changed account identity`);
+      const refreshed = oauthCredential(await this.#refresh(current, signal));
+      if (refreshed === undefined) throw new Error(`${this.#providerId} OAuth refresh for ${alias} returned an invalid credential`);
+      const oldIdentity = this.#identity?.(current);
+      const newIdentity = this.#identity?.(refreshed);
+      if (oldIdentity !== undefined && newIdentity !== oldIdentity) {
+        throw new Error(`${this.#providerId} OAuth refresh for ${alias} changed account identity`);
       }
       auth[alias] = refreshed;
       writeAuth(this.#path, auth);
@@ -181,14 +187,18 @@ export class SharedCodexAuth {
   }
 
   async set(alias: string, value: OAuthCredential, signal = new AbortController().signal): Promise<void> {
-    const credential = codexCredential(value);
-    if (credential === undefined) throw new Error(`Invalid Codex OAuth credential for ${alias}`);
+    const credential = oauthCredential(value);
+    if (credential === undefined) throw new Error(`Invalid ${this.#providerId} OAuth credential for ${alias}`);
     const release = await acquireLock(this.#path, signal);
     try {
       const auth = readAuth(this.#path);
-      for (const [otherAlias, otherValue] of Object.entries(auth)) {
-        if (otherAlias !== alias && codexCredential(otherValue)?.accountId === credential.accountId) {
-          throw new Error(`Codex account identity is already stored as ${otherAlias}`);
+      const identity = this.#identity?.(credential);
+      if (identity !== undefined) {
+        for (const [otherAlias, otherValue] of Object.entries(auth)) {
+          const other = oauthCredential(otherValue);
+          if (otherAlias !== alias && other !== undefined && this.#identity?.(other) === identity) {
+            throw new Error(`${this.#providerId} account identity is already stored as ${otherAlias}`);
+          }
         }
       }
       auth[alias] = credential;
@@ -210,11 +220,6 @@ export class SharedCodexAuth {
   }
 }
 
-/**
- * Custody is a move, not a copy: once an alias is served from the shared
- * store, the per-user copy is a second source of truth for the same secret
- * and is deleted. Returns whether one was there.
- */
 export function dropLocalCredential(agentAuthPath: string, alias: string): boolean {
   let auth: Record<string, unknown>;
   try {
@@ -228,12 +233,13 @@ export function dropLocalCredential(agentAuthPath: string, alias: string): boole
   return true;
 }
 
-export function sharedCodexProvider(
+export function sharedOAuthProvider(
   family: Provider,
   alias: string,
   label: string | undefined,
-  auth: SharedCodexAuth,
+  auth: SharedOAuthAuth,
 ): Provider {
+  const authName = `Shared ${family.name} OAuth`;
   return {
     id: alias,
     name: label === undefined ? `${family.name} [${alias}]` : `${family.name} [${label}]`,
@@ -241,7 +247,7 @@ export function sharedCodexProvider(
     headers: family.headers,
     auth: {
       apiKey: {
-        name: "Shared OpenAI Codex OAuth",
+        name: authName,
         async check() {
           return auth.has(alias) ? { type: "oauth", source: "shared OAuth" } : undefined;
         },
@@ -249,14 +255,8 @@ export function sharedCodexProvider(
           return { auth: await auth.resolve(alias, signal), source: "shared OAuth" };
         },
       },
-      // A credential stored under this alias in a per-user auth.json owns the
-      // provider as far as the SDK's resolver is concerned: with no oauth
-      // branch here it would resolve to nothing at all ("No API key found"),
-      // and with the family's branch it would rotate the shared refresh token
-      // from a stale copy. Both are answered by making shared custody the
-      // only source of tokens, whatever a leftover per-user copy holds.
       oauth: {
-        name: "Shared OpenAI Codex OAuth",
+        name: authName,
         isSubscription: family.auth.oauth?.isSubscription,
         async login(): Promise<never> {
           throw new Error(

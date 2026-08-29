@@ -3,16 +3,16 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
 import {
-  SharedCodexAuth,
-  codexCredential,
+  SharedOAuthAuth,
+  oauthCredential,
   dropLocalCredential,
-  sharedCodexProvider,
-} from "../src/auth/shared-codex.js";
+  sharedOAuthProvider,
+} from "../src/auth/shared-oauth.js";
 
 const dirs: string[] = [];
 
 function fixture(expires: number) {
-  const dir = mkdtempSync(join(tmpdir(), "shared-codex-"));
+  const dir = mkdtempSync(join(tmpdir(), "shared-oauth-"));
   dirs.push(dir);
   const path = join(dir, "auth.json");
   writeFileSync(path, JSON.stringify({
@@ -31,12 +31,13 @@ afterEach(() => {
   for (const dir of dirs.splice(0)) rmSync(dir, { recursive: true, force: true });
 });
 
-describe("shared Codex auth", () => {
+describe("shared OAuth auth", () => {
   it("serves a valid credential without refreshing it", async () => {
     const path = fixture(1_000_000);
     let refreshes = 0;
-    const auth = new SharedCodexAuth({
+    const auth = new SharedOAuthAuth({
       path,
+      providerId: "openai-codex",
       now: () => 1000,
       refresh: async (credential) => { refreshes++; return credential; },
       toAuth: async (credential) => ({ apiKey: credential.access }),
@@ -47,8 +48,9 @@ describe("shared Codex auth", () => {
 
   it("refreshes under the central lock and preserves group-readable mode", async () => {
     const path = fixture(1000);
-    const auth = new SharedCodexAuth({
+    const auth = new SharedOAuthAuth({
       path,
+      providerId: "openai-codex",
       now: () => 10_000,
       refresh: async () => ({
         type: "oauth",
@@ -61,14 +63,16 @@ describe("shared Codex auth", () => {
     });
     expect((await auth.credential("openai-codex", new AbortController().signal)).access).toBe("access-2");
     const persisted = JSON.parse(readFileSync(path, "utf8"));
-    expect(codexCredential(persisted["openai-codex"])?.refresh).toBe("refresh-2");
+    expect(oauthCredential(persisted["openai-codex"])?.refresh).toBe("refresh-2");
     expect(statSync(path).mode & 0o777).toBe(0o660);
   });
 
   it("refuses to store the same account identity under two aliases", async () => {
     const path = fixture(1_000_000);
-    const auth = new SharedCodexAuth({
+    const auth = new SharedOAuthAuth({
       path,
+      providerId: "openai-codex",
+      identity: (credential) => (credential as { accountId?: string }).accountId,
       refresh: async (credential) => credential,
       toAuth: async (credential) => ({ apiKey: credential.access }),
     });
@@ -90,15 +94,16 @@ describe("shared custody is the only source of tokens", () => {
     getModels: () => [{ id: "gpt", name: "GPT", provider: "openai-codex" }],
     stream: () => undefined,
     streamSimple: () => undefined,
-  } as unknown as Parameters<typeof sharedCodexProvider>[0];
+  } as unknown as Parameters<typeof sharedOAuthProvider>[0];
 
   function provider(path: string) {
-    return sharedCodexProvider(
+    return sharedOAuthProvider(
       family,
       "openai-codex",
       "label",
-      new SharedCodexAuth({
+      new SharedOAuthAuth({
         path,
+        providerId: "openai-codex",
         refresh: async (credential) => credential,
         toAuth: async (credential) => ({ apiKey: credential.access }),
       }),
@@ -131,6 +136,29 @@ describe("shared custody is the only source of tokens", () => {
   it("sends interactive login for a shared alias to the operator CLI", async () => {
     const oauth = provider(fixture(1_000_000)).auth.oauth!;
     await expect(oauth.login({} as never)).rejects.toThrow(/pi-orchestrator account login/);
+  });
+
+  it("serves Anthropic OAuth without requiring a Codex account identity", async () => {
+    const path = fixture(1_000_000);
+    const anthropic = {
+      ...family,
+      id: "anthropic",
+      name: "Anthropic",
+      auth: { oauth: { isSubscription: true } },
+      getModels: () => [{ id: "claude", name: "Claude", provider: "anthropic" }],
+    } as unknown as Parameters<typeof sharedOAuthProvider>[0];
+    const auth = new SharedOAuthAuth({
+      path,
+      providerId: "anthropic",
+      refresh: async (credential) => credential,
+      toAuth: async (credential) => ({ apiKey: credential.access }),
+    });
+    const stored = JSON.parse(readFileSync(path, "utf8"));
+    await auth.set("anthropic", oauthCredential(stored["openai-codex"])!);
+    const shared = sharedOAuthProvider(anthropic, "anthropic", undefined, auth);
+    expect(await shared.auth.apiKey?.resolve({ signal: new AbortController().signal } as never))
+      .toEqual({ auth: { apiKey: "access-1" }, source: "shared OAuth" });
+    expect(shared.getModels()[0]?.provider).toBe("anthropic");
   });
 
   it("dropLocalCredential removes only the named per-user copy", () => {

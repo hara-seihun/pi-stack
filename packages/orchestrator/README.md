@@ -31,13 +31,14 @@ it: the controller observes the fleet's stores every tick into the ledger's
 `fleet_credentialed` column (broker admission reads it), and the routing
 extension reads its own runtime's store directly when binding interactive
 sessions. Moving a credential moves the capability, within one tick, with
-nothing to update. A shared Codex account instead keeps its only OAuth
-credential in the central store beside the ledger (`auth.json`, or
-`PI_ORCHESTRATOR_AUTH`): both runtimes resolve and refresh it under one
+nothing to update. A shared OAuth account instead keeps its only credential
+in the central store beside the ledger (`auth.json`, or
+`PI_ORCHESTRATOR_AUTH`). Both runtimes resolve and refresh it under one
 cross-process lock, so rotating refresh tokens are never duplicated.
-`account share <id>` enables this mode and `account login <id>` performs a
-headless device login directly into the shared store; both delete the
-invoking user's copy of that credential, because custody is a move.
+`account share <id>` moves an existing local credential into this mode.
+`account login <id>` can also perform a headless Codex device login directly
+into the shared store. Both commands delete the invoking user's local copy,
+because custody is a move.
 
 Shared custody must be exclusive, and the provider enforces it rather than
 trusting it. Pi's resolver lets a credential stored under a provider id own
@@ -773,9 +774,9 @@ ledger — the account table is the registry (there is no `multi-pass.json`),
 and the extension replaces the old 6,000-line multi-pass with three rules:
 
 - Exclusive accounts whose id differs from their family (`anthropic-2`, ...)
-  are ordinary alias providers over the local `auth.json`. Shared Codex
-  accounts, including the unsuffixed family id, are providers over the central
-  credential store; both runtimes use the same locked refresh-token lineage.
+  are ordinary alias providers over the local `auth.json`. Shared OAuth
+  accounts, including unsuffixed family ids, are providers over the central
+  credential store. Both runtimes use the same locked refresh-token lineage.
 - A fresh session binds to the **least-used** account of its model's family
   (max latest used-percent across meters; unread accounts sort first;
   integer-percent ties round-robin by least-recently-bound) and then stays

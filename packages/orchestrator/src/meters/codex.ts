@@ -1,7 +1,7 @@
 import { readFileSync } from "node:fs";
 import { request as httpsRequest } from "node:https";
 import type { Ledger } from "../ledger/ledger.js";
-import { codexCredential } from "../auth/shared-codex.js";
+import { oauthCredential } from "../auth/shared-oauth.js";
 
 /**
  * Codex meter sampling.
@@ -174,7 +174,7 @@ export async function fetchCodexUsage(
 
 export interface CodexMeterSamplerOptions {
   /**
-   * Credential stores to look in, in order: the shared Codex store beside
+   * Credential stores to look in, in order: the shared OAuth store beside
    * the ledger first, then the daemon user's own `auth.json` for accounts
    * whose custody was never moved.
    */
@@ -232,13 +232,14 @@ export class CodexMeterSampler {
       } catch {
         continue;
       }
-      const credential = codexCredential(auth[accountId]);
-      if (credential === undefined) continue;
+      const credential = oauthCredential(auth[accountId]);
+      const chatgptAccountId = (credential as { accountId?: unknown } | undefined)?.accountId;
+      if (credential === undefined || typeof chatgptAccountId !== "string" || chatgptAccountId.length === 0) continue;
       if (credential.expires <= now) {
         expired = true;
         continue;
       }
-      return { token: credential.access, chatgptAccountId: credential.accountId };
+      return { token: credential.access, chatgptAccountId };
     }
     return { gap: expired ? "expired-credential" : "no-credential" };
   }

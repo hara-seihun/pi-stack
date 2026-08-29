@@ -3,7 +3,7 @@ import { readFileSync } from "node:fs";
 /**
  * The account ids a runtime can actually authenticate: the keys of its
  * credential stores. Which runtime may spend an account is exactly this
- * fact — the fleet's stores are the central shared-Codex file beside the
+ * fact. The fleet's stores are the central shared OAuth file beside the
  * ledger plus the orchestrator user's own auth.json, and an interactive pi
  * session's store is its own agent dir's auth.json.
  *

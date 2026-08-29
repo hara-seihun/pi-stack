@@ -3,6 +3,7 @@ import { join } from "node:path";
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 import { Ledger } from "../ledger/ledger.js";
 import { AnthropicMeterSampler } from "../meters/anthropic.js";
+import { defaultSharedAuthPath } from "../auth/shared-oauth.js";
 import type { MeterReading, UsageSource } from "../calibrator/types.js";
 
 /**
@@ -97,7 +98,10 @@ export default function usageLogger(pi: ExtensionAPI): void {
    */
   const pollAnthropicMeters = (l: Ledger): void => {
     if (anthropicPoll !== undefined) return;
-    anthropicSampler ??= new AnthropicMeterSampler(l, { agentDir: agentDirPath() });
+    anthropicSampler ??= new AnthropicMeterSampler(l, {
+      agentDir: agentDirPath(),
+      sharedAuthPath: defaultSharedAuthPath(defaultLedgerPath()),
+    });
     anthropicPoll = anthropicSampler
       .sample()
       .catch((thrown) => {

@@ -209,8 +209,10 @@ async function fetchAnthropicCapacityWeight(
 }
 
 export interface AnthropicMeterSamplerOptions {
-  /** pi agent directory whose auth.json holds this domain's credentials. */
+  /** pi agent directory whose auth.json holds this domain's exclusive credentials. */
   readonly agentDir: string;
+  /** Central auth.json for accounts shared across runtime users. */
+  readonly sharedAuthPath?: string;
   /** Minimum age of the stalest meter before an account is polled again. */
   readonly intervalMs?: number;
   readonly requestTimeoutMs?: number;
@@ -221,7 +223,7 @@ const DEFAULT_INTERVAL_MS = 10 * 60_000;
 const DEFAULT_REQUEST_TIMEOUT_MS = 10_000;
 
 export class AnthropicMeterSampler {
-  private readonly agentDir: string;
+  private readonly authPaths: readonly string[];
   private readonly intervalMs: number;
   private readonly requestTimeoutMs: number;
   private readonly fetchFn: FetchLike;
@@ -230,7 +232,7 @@ export class AnthropicMeterSampler {
     private readonly ledger: Ledger,
     options: AnthropicMeterSamplerOptions,
   ) {
-    this.agentDir = options.agentDir;
+    this.authPaths = [options.sharedAuthPath, join(options.agentDir, "auth.json")].filter((path): path is string => path !== undefined);
     this.intervalMs = options.intervalMs ?? DEFAULT_INTERVAL_MS;
     this.requestTimeoutMs = options.requestTimeoutMs ?? DEFAULT_REQUEST_TIMEOUT_MS;
     this.fetchFn = options.fetch ?? fetch;
@@ -238,17 +240,23 @@ export class AnthropicMeterSampler {
 
   /** Access token for `accountId`, read without ever refreshing it. */
   private accessToken(accountId: string, now: number): { token: string } | { gap: AnthropicSampleOutcome } {
-    let auth: Record<string, unknown>;
-    try {
-      auth = JSON.parse(readFileSync(join(this.agentDir, "auth.json"), "utf8")) as Record<string, unknown>;
-    } catch {
-      return { gap: "no-credential" };
+    let expired = false;
+    for (const path of this.authPaths) {
+      let auth: Record<string, unknown>;
+      try {
+        auth = JSON.parse(readFileSync(path, "utf8")) as Record<string, unknown>;
+      } catch {
+        continue;
+      }
+      const credential = record(auth[accountId]) as { access?: unknown; expires?: unknown } | undefined;
+      if (credential === undefined || typeof credential.access !== "string" || credential.access.length === 0) continue;
+      if (typeof credential.expires === "number" && credential.expires <= now) {
+        expired = true;
+        continue;
+      }
+      return { token: credential.access };
     }
-    const credential = record(auth[accountId]) as { access?: unknown; expires?: unknown } | undefined;
-    if (credential === undefined) return { gap: "no-credential" };
-    if (typeof credential.access !== "string" || credential.access.length === 0) return { gap: "no-credential" };
-    if (typeof credential.expires === "number" && credential.expires <= now) return { gap: "expired-credential" };
-    return { token: credential.access };
+    return { gap: expired ? "expired-credential" : "no-credential" };
   }
 
   /**
@@ -267,9 +275,9 @@ export class AnthropicMeterSampler {
   }
 
   /**
-   * Samples every Anthropic account whose credential lives in this agent dir
-   * and whose meters are due. Accounts credentialed in another custody
-   * domain are skipped, not failed: their own owner polls them. Never
+   * Samples every Anthropic account whose credential lives in either supplied
+   * auth store and whose meters are due. Accounts credentialed in another
+   * custody domain are skipped, not failed: their own owner polls them. Never
    * throws — a provider outage is a gap in evidence, not a controller fault.
    */
   async sample(now = Date.now()): Promise<AnthropicSampleReport[]> {

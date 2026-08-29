@@ -22,10 +22,11 @@ import { createVoiceServer } from "./voice/server.js";
 import type { LaunchSpec } from "./host/types.js";
 import { builtinProviders } from "@earendil-works/pi-ai/providers/all";
 import {
-  defaultSharedCodexAuthPath,
+  defaultSharedAuthPath,
   dropLocalCredential,
-  SharedCodexAuth,
-} from "./auth/shared-codex.js";
+  oauthCredential,
+  SharedOAuthAuth,
+} from "./auth/shared-oauth.js";
 
 /**
  * Operator CLI. Thin by design: every command is a small read or write
@@ -265,10 +266,10 @@ async function daemon(ledger: Ledger, args: string[]): Promise<void> {
     {
       // The daemon runs as the fleet's credential-custody user, so it can
       // observe exactly which accounts the fleet can authenticate: the
-      // central shared-Codex store plus its own agent dir's auth.json.
+      // central shared OAuth store plus its own agent dir's auth.json.
       fleetCredentials: () =>
         credentialedAccountIds([
-          defaultSharedCodexAuthPath(LEDGER_PATH),
+          defaultSharedAuthPath(LEDGER_PATH),
           join(agentDirPath(), "auth.json"),
         ]),
     },
@@ -290,7 +291,7 @@ async function daemon(ledger: Ledger, args: string[]): Promise<void> {
     codexMeters.length > 0
       ? new CodexMeterSampler(ledger, {
           authPaths: [
-            defaultSharedCodexAuthPath(LEDGER_PATH),
+            defaultSharedAuthPath(LEDGER_PATH),
             join(agentDirPath(), "auth.json"),
           ],
           meters: codexMeters,
@@ -302,7 +303,10 @@ async function daemon(ledger: Ledger, args: string[]): Promise<void> {
   // The account usage endpoint reports every bucket on every call; this poll
   // covers the accounts in this user's custody, and each interactive user's
   // own pi sessions poll theirs.
-  const anthropicSampler = new AnthropicMeterSampler(ledger, { agentDir: agentDirPath() });
+  const anthropicSampler = new AnthropicMeterSampler(ledger, {
+    agentDir: agentDirPath(),
+    sharedAuthPath: defaultSharedAuthPath(LEDGER_PATH),
+  });
   const meterLog = new MeterLog();
   // `no-credential` is the ordinary state of an account held in another
   // custody domain, not a gap this controller can close.
@@ -341,7 +345,7 @@ async function voiceBroker(ledger: Ledger, args: string[]): Promise<void> {
   const host = separator > 0 ? listen.slice(0, separator) : "127.0.0.1";
   const port = Number(listen.slice(separator + 1));
   if (!Number.isInteger(port) || port < 1 || port > 65535) fail(`voice-broker: invalid --listen ${listen}`);
-  const authPath = defaultSharedCodexAuthPath(LEDGER_PATH);
+  const authPath = defaultSharedAuthPath(LEDGER_PATH);
   const broker = new VoiceBroker({ authPath, accounts: () => ledger.accounts() });
   const server = createVoiceServer(broker);
   await new Promise<void>((resolve, reject) => {
@@ -526,13 +530,20 @@ function reportLocalCopy(id: string): void {
   );
 }
 
-function sharedCodexAuth(): SharedCodexAuth {
-  const oauth = builtinProviders().find((provider) => provider.id === "openai-codex")?.auth.oauth;
-  if (oauth === undefined) throw new Error("OpenAI Codex OAuth is unavailable");
-  return new SharedCodexAuth({
-    path: defaultSharedCodexAuthPath(LEDGER_PATH),
+function sharedOAuthAuth(providerId: string): SharedOAuthAuth {
+  const oauth = builtinProviders().find((provider) => provider.id === providerId)?.auth.oauth;
+  if (oauth === undefined) throw new Error(`${providerId} OAuth is unavailable`);
+  return new SharedOAuthAuth({
+    path: defaultSharedAuthPath(LEDGER_PATH),
+    providerId,
     refresh: (credential, signal) => oauth.refresh(credential, signal),
     toAuth: (credential) => oauth.toAuth(credential),
+    identity: providerId === "openai-codex"
+      ? (credential) => {
+          const accountId = (credential as { accountId?: unknown }).accountId;
+          return typeof accountId === "string" && accountId.length > 0 ? accountId : undefined;
+        }
+      : undefined,
   });
 }
 
@@ -544,7 +555,7 @@ function sharedCodexAuth(): SharedCodexAuth {
  * for a day. That is worth being able to see without reading the journal.
  */
 function credentialState(accountId: string, now = Date.now()): string | undefined {
-  for (const path of [defaultSharedCodexAuthPath(LEDGER_PATH), join(agentDirPath(), "auth.json")]) {
+  for (const path of [defaultSharedAuthPath(LEDGER_PATH), join(agentDirPath(), "auth.json")]) {
     let stored: unknown;
     try {
       stored = (JSON.parse(readFileSync(path, "utf8")) as Record<string, unknown>)[accountId];
@@ -585,7 +596,9 @@ async function accountCommand(ledger: Ledger, args: string[]): Promise<void> {
     const provider = named.get("provider") ?? fail("--provider required");
     const shared = named.get("shared");
     if (shared !== undefined && shared !== "true" && shared !== "false") fail("--shared must be true or false");
-    if (shared === "true" && provider !== "openai-codex") fail("shared credentials currently support openai-codex only");
+    if (shared === "true" && builtinProviders().find((candidate) => candidate.id === provider)?.auth.oauth === undefined) {
+      fail(`${provider} does not support shared OAuth custody`);
+    }
     ledger.upsertAccount({
       id,
       provider,
@@ -607,9 +620,19 @@ async function accountCommand(ledger: Ledger, args: string[]): Promise<void> {
     const [id, value = "on"] = rest;
     if (id === undefined || (value !== "on" && value !== "off")) fail("usage: account share <id> [on|off]");
     const account = ledger.accounts().find((row) => row.id === id) ?? fail(`unknown account ${id}`);
-    if (account.provider !== "openai-codex") fail("shared credentials currently support openai-codex only");
-    if (value === "on" && !sharedCodexAuth().has(id)) {
-      fail(`${id} has no credential in ${defaultSharedCodexAuthPath(LEDGER_PATH)}; run account login ${id}`);
+    const shared = sharedOAuthAuth(account.provider);
+    if (value === "on" && !shared.has(id)) {
+      const localPath = join(agentDirPath(), "auth.json");
+      let local: Record<string, unknown> = {};
+      try {
+        local = JSON.parse(readFileSync(localPath, "utf8")) as Record<string, unknown>;
+      } catch {}
+      const credential = oauthCredential(local[id]);
+      if (credential === undefined) {
+        fail(`${id} has no OAuth credential in ${localPath} or ${defaultSharedAuthPath(LEDGER_PATH)}`);
+      }
+      await shared.set(id, credential);
+      console.log(`moved ${id} into ${defaultSharedAuthPath(LEDGER_PATH)}`);
     }
     ledger.setAccountShared(id, value === "on");
     console.log(`account ${id} custody is now ${value === "on" ? "shared" : "its credential store's"}`);
@@ -638,7 +661,7 @@ async function accountCommand(ledger: Ledger, args: string[]): Promise<void> {
         }
       },
     });
-    await sharedCodexAuth().set(id, credential);
+    await sharedOAuthAuth(account.provider).set(id, credential);
     ledger.setAccountShared(id, true);
     console.log(`account ${id} authenticated into shared custody`);
     reportLocalCopy(id);

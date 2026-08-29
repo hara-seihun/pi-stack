@@ -3,10 +3,10 @@ import type { Model, Provider } from "@earendil-works/pi-ai";
 import { builtinProviders } from "@earendil-works/pi-ai/providers/all";
 import { Ledger } from "../ledger/ledger.js";
 import {
-  defaultSharedCodexAuthPath,
-  SharedCodexAuth,
-  sharedCodexProvider,
-} from "../auth/shared-codex.js";
+  defaultSharedAuthPath,
+  SharedOAuthAuth,
+  sharedOAuthProvider,
+} from "../auth/shared-oauth.js";
 import { pickAccount } from "./select-account.js";
 import { baseProvider, defaultLedgerPath } from "./usage-logger.js";
 import { credentialedAccountIds } from "../auth/credentials.js";
@@ -18,9 +18,9 @@ import { join } from "node:path";
  * sessions, driven entirely by the orchestrator ledger.
  *
  * - Exclusive aliases delegate models, transport, and OAuth to their builtin
- *   family and use the owning user's auth.json. Shared Codex accounts use the
- *   central credential store beside the ledger, including the unsuffixed
- *   family id. The account table is the only registry.
+ *   family and use the owning user's auth.json. Shared OAuth accounts use the
+ *   central credential store beside the ledger, including unsuffixed family
+ *   ids. The account table is the only registry.
  * - At session start the session binds to the least-used account of its
  *   model's family (round-robin among ties) and then stays sticky: provider
  *   prompt caches are per-account, so rebinding mid-session wastes them.
@@ -72,14 +72,23 @@ export default function routing(pi: ExtensionAPI): void {
   const ledgerPath = defaultLedgerPath();
   const ledger = Ledger.open(ledgerPath);
   const families = new Map(builtinProviders().map((p) => [p.id, p]));
-  const codex = families.get("openai-codex")?.auth.oauth;
-  const sharedAuth = codex === undefined
-    ? undefined
-    : new SharedCodexAuth({
-        path: defaultSharedCodexAuthPath(ledgerPath),
-        refresh: (credential, signal) => codex.refresh(credential, signal),
-        toAuth: (credential) => codex.toAuth(credential),
-      });
+  const sharedAuth = new Map<string, SharedOAuthAuth>();
+  for (const family of families.values()) {
+    const oauth = family.auth.oauth;
+    if (oauth === undefined) continue;
+    sharedAuth.set(family.id, new SharedOAuthAuth({
+      path: defaultSharedAuthPath(ledgerPath),
+      providerId: family.id,
+      refresh: (credential, signal) => oauth.refresh(credential, signal),
+      toAuth: (credential) => oauth.toAuth(credential),
+      identity: family.id === "openai-codex"
+        ? (credential) => {
+            const accountId = (credential as { accountId?: unknown }).accountId;
+            return typeof accountId === "string" && accountId.length > 0 ? accountId : undefined;
+          }
+        : undefined,
+    }));
+  }
 
   // Which accounts this runtime may spend is exactly which credentials its
   // own auth store holds — re-read per use, so a login mid-session is seen.
@@ -97,11 +106,12 @@ export default function routing(pi: ExtensionAPI): void {
     const family = families.get(account.provider);
     if (family === undefined) continue;
     if (account.shared) {
-      if (account.provider !== "openai-codex" || sharedAuth === undefined) {
+      const auth = sharedAuth.get(account.provider);
+      if (auth === undefined) {
         console.error(`pi-orchestrator: shared auth is unavailable for ${account.id}`);
         continue;
       }
-      pi.registerProvider(sharedCodexProvider(family, account.id, account.label, sharedAuth));
+      pi.registerProvider(sharedOAuthProvider(family, account.id, account.label, auth));
     } else {
       pi.registerProvider(aliasProvider(family, account.id, account.label));
     }
