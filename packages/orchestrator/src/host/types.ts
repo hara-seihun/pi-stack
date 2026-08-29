@@ -88,8 +88,6 @@ export interface LaunchSpec {
 /** Result a host reports when a session ends. */
 export interface HostRunResult {
   readonly state: "done" | "error" | "aborted";
-  readonly productive?: boolean;
-  readonly complete?: boolean;
   readonly detail?: string;
 }
 

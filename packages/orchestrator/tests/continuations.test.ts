@@ -22,13 +22,13 @@ import {
  * The halting conditions covered, each from a real run:
  *  - frontier-sol-ladder: budget exhaustion after a 66-filing ladder shift
  *    (run f37c033f, ended "did not close it");
- *  - frontier-opus-deep: a complete result inside the budget (run 9da60640,
- *    Snevily's conjecture, complete=true);
- *  - review-opus: provider 429 with the report already banked (run e59d499e);
+ *  - frontier-opus-deep: sustained work on Snevily's conjecture inside the
+ *    budget (run 9da60640);
+ *  - review-opus: a long bulk-review shift ending on provider 429 (run e59d499e);
  *  - cleanup-sol-batch: budget exhaustion during legitimate mass corpus
  *    repair (run bf44aeda);
- *  - pr-sol-empty-queue: lane drained, agent reporting productive=false to an
- *    empty queue (run 7a54c9d3);
+ *  - pr-sol-empty-queue: lane drained after the agent confirmed an empty
+ *    queue (run 7a54c9d3);
  *  - frontier-census-walk: operator abort for ladder climbing (run 1d00fe29,
  *    "aborted by operator (ladder climbing)") — the slow walker that files
  *    only 3 per turn but marches a parameter through its titles, which volume
@@ -144,17 +144,6 @@ describe("check-ins replayed over the night of 2026-08-21", () => {
     expect(checkins.every((checkin) => checkin.latest.submissions.length < 5)).toBe(true);
   });
 
-  it("gives the empty-queue shift honest permission to rest instead of re-goading it", () => {
-    const checkins = replay("pr-sol-empty-queue.jsonl", "fast-math-pr");
-    // The real agent re-polled an empty queue and reported productive=false.
-    const afterEmpty = checkins.filter((checkin) => checkin.latest.reportedUnproductive);
-    expect(afterEmpty.length).toBeGreaterThanOrEqual(1);
-    for (const checkin of afterEmpty) {
-      expect(checkin.cls).toBe("quiet");
-      expect(checkin.message).toMatch(/plainly|rest/);
-    }
-  });
-
   it("stays warm in every message, whatever it has to say", () => {
     const shifts: [string, string][] = [
       ["frontier-sol-ladder.jsonl", "math-frontier"],
@@ -179,8 +168,6 @@ describe("check-in generation", () => {
   const turn = (facts: Partial<TurnFacts>): TurnFacts => ({
     toolCalls: 0,
     submissions: [],
-    reported: false,
-    reportedUnproductive: false,
     ...facts,
   });
   const view = (taskId: string, turns: TurnFacts[], overrides: Partial<ShiftView> = {}): ShiftView => ({
@@ -198,21 +185,16 @@ describe("check-in generation", () => {
     const second = continuationFor(view("math-frontier", [burst(), burst()]));
     expect(first).not.toBe(second);
 
-    const working = () => turn({ toolCalls: 20, reported: true });
+    const working = () => turn({ toolCalls: 20 });
     const flows = [1, 2, 3].map((count) =>
       continuationFor(view("math-frontier", Array.from({ length: count }, working))),
     );
     expect(new Set(flows).size).toBe(3);
   });
 
-  it("treats an unproductive report as a quiet turn even when tools ran", () => {
-    const polled = turn({ toolCalls: 5, reported: true, reportedUnproductive: true });
-    expect(shiftClass(view("fast-math-pr", [polled]))).toBe("quiet");
-  });
-
   it("leaves publication waiting with the durable publisher", () => {
-    const working = () => turn({ toolCalls: 8, reported: true });
-    const quiet = () => turn({ toolCalls: 2, reported: true, reportedUnproductive: true });
+    const working = () => turn({ toolCalls: 8 });
+    const quiet = () => turn({ toolCalls: 0 });
     const prompts = [
       ...Array.from({ length: 4 }, (_, index) =>
         continuationFor(view("fast-math-pr", Array.from({ length: index + 1 }, working))),

@@ -41,13 +41,6 @@ const PROGRESS_WRITE_INTERVAL_MS = 15_000;
  * only a signal on the same clock can tell those apart. */
 const WAIT_SLICE_MS = 20_000;
 
-interface CompletionReport {
-  complete: boolean;
-  productive?: boolean;
-  summary: string;
-  artifacts?: string[];
-}
-
 export class PiHost implements HostManager {
   private readonly runtimes = new Map<
     string,
@@ -252,34 +245,10 @@ export class PiHost implements HostManager {
         return { state: "error", detail: `opening probe failed: ${String(thrown)}` };
       }
     }
-    let report: CompletionReport | undefined;
     // Check-ins are generated from what the shift actually did; the observer
     // accumulates per-turn facts from the session's own tool stream.
     const observer = new ShiftObserver();
-    const taskComplete = {
-      name: "task_complete",
-      label: "Complete task",
-      description:
-        "Running report of this launch's validated results. Call it with an updated " +
-        "cumulative summary every time you land something, then keep working; each " +
-        "call replaces the earlier report and the newest is the record. Set " +
-        "complete=true only when the task's completion condition is satisfied. Set " +
-        "productive=false only when this launch processed no work unit at all.",
-      parameters: Type.Object({
-        complete: Type.Boolean(),
-        productive: Type.Optional(
-          Type.Boolean({ description: "Whether this launch processed a real work unit. Defaults to true." }),
-        ),
-        summary: Type.String({ minLength: 1 }),
-        artifacts: Type.Optional(Type.Array(Type.String())),
-      }),
-      execute: async (_id: string, params: CompletionReport) => {
-        report = params;
-        observer.reportFiled(params.productive !== false);
-        return { content: [{ type: "text" as const, text: "Report recorded." }], details: undefined };
-      },
-    };
-    const customTools: any[] = spec.team === undefined ? [taskComplete] : [];
+    const customTools: any[] = [];
     if (spec.team?.role === "supervisor") {
       customTools.push({
         name: "read_compressed_context",
@@ -433,8 +402,8 @@ export class PiHost implements HostManager {
       // A launch is a shift, not a single turn. The host keeps prompting the
       // same session — same context, same working directory, same trail —
       // until it has spent its check-ins, the turn fails, an operator aborts,
-      // or the agent has twice had nothing to report. Ending at the first
-      // quiet turn threw away a warm context that had just paid for itself
+      // or the lane drains. Ending at the first quiet turn threw away a warm
+      // context that had just paid for itself
       // and made every lane restart from scratch. Nothing here is timed: a
       // turn may run as long as the agent keeps working.
       // The opening exchange is lived, not injected: each message is a real
@@ -529,14 +498,10 @@ export class PiHost implements HostManager {
             );
             continue;
           }
-          if (report === undefined || spec.team !== undefined) return { state: "error", detail };
-          break;
+          return { state: "error", detail };
         }
         if (last?.stopReason === "aborted") {
-          if (report === undefined || spec.team !== undefined) {
-            return { state: "aborted", detail: "session aborted" };
-          }
-          break;
+          return { state: "aborted", detail: "session aborted" };
         }
         stalls = 0;
         resume = undefined;
@@ -583,15 +548,7 @@ export class PiHost implements HostManager {
         if (!this.events.claimCheckIn(spec.runId)) break;
         turn++;
       }
-      if (report === undefined) {
-        return { state: "done", productive: false, detail: "no task_complete report" };
-      }
-      return {
-        state: "done",
-        productive: report.productive ?? true,
-        complete: report.complete,
-        detail: report.summary,
-      };
+      return { state: "done" };
     } finally {
       cleanup();
     }

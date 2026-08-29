@@ -26,7 +26,7 @@ function fixture(): { ledgerPath: string; runsRoot: string } {
   insert.run("live", "repair-lane", "standard", "openai-codex", "running", 1000, "openai-codex", "gpt-5.6-sol", "high");
   insert.run("quiet", "slack-lane", "light", "openai-codex", "running", 900, "openai-codex", "gpt-5.6-luna", null);
   insert.run("settled", "slack-lane", "light", "openai-codex", "done", 700, "openai-codex", "gpt-5.6-luna", null);
-  database.query("UPDATE run SET ended_at=800,detail='task complete',productive=1 WHERE id='settled'").run();
+  database.query("UPDATE run SET ended_at=800 WHERE id='settled'").run();
   database.close();
   return { ledgerPath, runsRoot };
 }
@@ -108,7 +108,7 @@ test("a settled run stays addressable and stops publishing a live tail", async (
   const reader = host(local(ledgerPath, runsRoot));
 
   const settled = await reader.events("settled", 0);
-  expect(settled.run).toMatchObject({ id: "local:settled", status: "done", activity: "IDLE", summary: "task complete" });
+  expect(settled.run).toMatchObject({ id: "local:settled", status: "done", activity: "IDLE" });
   expect(settled.liveText).toBe("");
   expect(existsSync(join(runsRoot, "settled", "watch"))).toBe(false);
   expect((await reader.events("missing", 0)).run).toBeNull();

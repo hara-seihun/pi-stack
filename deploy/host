@@ -8,16 +8,23 @@ pi_stack_enter_deployment "$0" "$root" "$@"
 role=${1:-}
 [[ $role == converge ]] || { echo "usage: deploy/host converge" >&2; exit 64; }
 
+controller_systemctl() {
+  XDG_RUNTIME_DIR=${XDG_RUNTIME_DIR:-/run/user/$(id -u)} systemctl --user "$@"
+}
+
 pi_stack_prepare_dependencies "$root"
 expected=$(git -C "$root" rev-parse HEAD)
 orchestrator_dest=${PI_STACK_ORCHESTRATOR_DEST:-/srv/pi/pi-orchestrator}
 previous_orchestrator=""
-previous_supervisor_hash=""
+previous_runner_contract_hash=""
 if [[ -f $orchestrator_dest/.pi-stack-commit ]]; then
   previous_orchestrator=$(<"$orchestrator_dest/.pi-stack-commit")
 fi
-if [[ -f $orchestrator_dest/src/host/supervisor.ts ]]; then
-  previous_supervisor_hash=$(sha256sum "$orchestrator_dest/src/host/supervisor.ts" | cut -d' ' -f1)
+if [[ -f $orchestrator_dest/src/host/supervisor.ts && -f $orchestrator_dest/src/ledger/ledger.ts ]]; then
+  previous_runner_contract_hash=$(
+    sha256sum "$orchestrator_dest/src/host/supervisor.ts" "$orchestrator_dest/src/ledger/ledger.ts" |
+      sha256sum | cut -d' ' -f1
+  )
 fi
 remote_dest=${PI_STACK_REMOTE_DEST:-/srv/pi/pi-remote}
 previous_remote=""
@@ -45,11 +52,18 @@ done
 
 ledger=${PI_ORCHESTRATOR_LEDGER:-$HOME/.local/share/pi-orchestrator/ledger.sqlite3}
 runner_service=${PI_ORCHESTRATOR_RUNNER_SERVICE:-pi-orchestrator-runner.service}
-current_supervisor_hash=$(sha256sum "$orchestrator_dest/src/host/supervisor.ts" | cut -d' ' -f1)
+controller_service=${PI_ORCHESTRATOR_CONTROLLER_SERVICE:-pi-orchestrator.service}
+current_runner_contract_hash=$(
+  sha256sum "$orchestrator_dest/src/host/supervisor.ts" "$orchestrator_dest/src/ledger/ledger.ts" |
+    sha256sum | cut -d' ' -f1
+)
 if [[ -n $previous_orchestrator && $previous_orchestrator != "$expected" ]]; then
-  if [[ -n $previous_supervisor_hash && $previous_supervisor_hash != "$current_supervisor_hash" ]]; then
-    pi_stack_as_root systemctl try-restart "$runner_service"
-    printf 'restarted %s to activate changed supervisor code\n' "$runner_service"
+  if [[ -n $previous_runner_contract_hash && $previous_runner_contract_hash != "$current_runner_contract_hash" ]]; then
+    controller_systemctl stop "$controller_service"
+    pi_stack_as_root systemctl restart "$runner_service"
+    controller_systemctl start "$controller_service"
+    printf 'restarted %s and %s to activate changed runner storage or supervisor code\n' \
+      "$runner_service" "$controller_service"
   elif [[ -f $ledger ]]; then
     PI_ORCHESTRATOR_LEDGER="$ledger" node "$orchestrator_dest/dist/cli.js" drain-runners
   fi

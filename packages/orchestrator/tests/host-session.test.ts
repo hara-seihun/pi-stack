@@ -18,8 +18,8 @@ import { MAX_CHECK_INS, type HostRunResult, type LaunchSpec } from "../src/host/
  */
 
 interface FakeTurn {
-  /** Reports the agent files during this turn. */
-  readonly reports?: number;
+  /** Ordinary tool calls the agent makes during this turn. */
+  readonly toolCalls?: number;
   /** Assistant text returned by this turn. */
   readonly responseText?: string;
   readonly stopReason?: "error" | "aborted";
@@ -73,7 +73,6 @@ function harness(
     errorMessage?: string;
     content?: { type: string; text: string }[];
   }[] = [];
-  let taskComplete: { execute: (id: string, params: unknown) => Promise<unknown> } | undefined;
   let teamStop = 0;
   const teamResponses: string[] = [];
   const bindings: unknown[] = [];
@@ -139,11 +138,8 @@ function harness(
       const turn = turns[prompts.length] ?? {};
       prompts.push(text);
       if (turn.parks) await new Promise<void>((resolve) => { releasePark = resolve; });
-      for (let i = 0; i < (turn.reports ?? 0); i++) {
-        await taskComplete?.execute("call", {
-          complete: true,
-          summary: `report ${prompts.length}.${i}`,
-        });
+      for (let i = 0; i < (turn.toolCalls ?? 0); i++) {
+        notify({ type: "tool_execution_start", toolName: "bash", args: {} });
       }
       clock += turn.tookMs ?? 0;
       if (turn.compacts) {
@@ -219,8 +215,6 @@ function harness(
       agentDir: options.agentDir ?? mkdtempSync(join(tmpdir(), "pi-host-agent-")),
       openSession: (async (config: { customTools?: unknown[] }) => {
         sessionConfigs.push(config as Record<string, unknown>);
-        const tools = config.customTools as { name: string; execute: (id: string, params: unknown) => Promise<unknown> }[];
-        taskComplete = tools.find((tool) => tool.name === "task_complete");
         return { session };
       }) as never,
       fetchDoctrine: options.fetchDoctrine,
@@ -295,7 +289,7 @@ describe("host shift loop", () => {
     // never sees session_start never sets anything up. Hosted sessions used
     // to skip it, so the MCP gateway answered "MCP not initialized" for the
     // whole run and agents fell back to hand-rolled curl JSON-RPC.
-    const { host, spec, finished, bindings } = harness([{ reports: 1 }, {}, {}]);
+    const { host, spec, finished, bindings } = harness([{ toolCalls: 1 }, {}, {}]);
     host.launch(spec);
     await finished;
 
@@ -303,21 +297,30 @@ describe("host shift loop", () => {
     expect((bindings[0] as { mode: string }).mode).toBe("print");
   });
 
+  it("does not inject a task completion tool", async () => {
+    const { host, spec, finished, sessionConfigs } = harness([{ toolCalls: 1 }]);
+    host.launch(spec);
+    await finished;
+
+    const tools = sessionConfigs[0]?.["customTools"] as { name: string }[];
+    expect(tools.map((tool) => tool.name)).not.toContain("task_complete");
+  });
+
   it("reports the session hosting a run, so its usage is attributable to the lane", async () => {
-    const { host, spec, finished, links } = harness([{ reports: 1 }, {}, {}]);
+    const { host, spec, finished, links } = harness([{ toolCalls: 1 }, {}, {}]);
     host.launch(spec);
     await finished;
 
     expect(links).toEqual([{ runId: "run-1", sessionId: "session-1" }]);
   });
 
-  it("keeps prompting the same session after a turn ends, and reports the newest record", async () => {
+  it("keeps prompting the same session after a turn ends", async () => {
     const { host, spec, prompts, finished } = harness([
-      { reports: 1 },
-      { reports: 1 },
-      {}, // nothing to report, which is not the same as nothing to do
+      { toolCalls: 1 },
+      { toolCalls: 1 },
+      {}, // a quiet turn does not discard the session's warm context
       {},
-      { reports: 1 },
+      { toolCalls: 1 },
     ]);
     host.launch(spec);
     const result = await finished;
@@ -331,11 +334,11 @@ describe("host shift loop", () => {
     expect(prompts[2]).toContain("me again");
     expect(prompts[2]).not.toBe(prompts[1]);
     expect(prompts[3]).toContain("honest check-in");
-    expect(result).toMatchObject({ state: "done", productive: true, detail: "report 5.0" });
+    expect(result).toEqual({ state: "done" });
   });
 
   it("does not send the frontier continuation to other lanes", async () => {
-    const { host, spec, prompts, finished } = harness([{ reports: 1 }, {}, {}], {
+    const { host, spec, prompts, finished } = harness([{ toolCalls: 1 }, {}, {}], {
       taskId: "math-review",
     });
     host.launch(spec);
@@ -351,7 +354,7 @@ describe("host shift loop", () => {
     // The task prompt is the first user message — the first thing compaction
     // summarizes away. Doctrine that must hold for a whole shift (the attack
     // guide's binding anti-ladder rules) survives only in the system prompt.
-    const { host, spec, finished, sessionConfigs } = harness([{ reports: 1 }, {}, {}], {
+    const { host, spec, finished, sessionConfigs } = harness([{ toolCalls: 1 }, {}, {}], {
       doctrineUrl: "https://lemma.ing/guides/attack.md",
       fetchDoctrine: async (url) => `# LLMs are really good at math now (${url})`,
     });
@@ -370,7 +373,7 @@ describe("host shift loop", () => {
 
   it("keeps the last fetched doctrine across runner processes", async () => {
     const agentDir = mkdtempSync(join(tmpdir(), "pi-host-doctrine-"));
-    const first = harness([{ reports: 1 }], {
+    const first = harness([{ toolCalls: 1 }], {
       doctrineUrl: "https://lemma.ing/guides/attack.md",
       fetchDoctrine: async () => "# Durable attack doctrine",
       selfPaced: true,
@@ -379,7 +382,7 @@ describe("host shift loop", () => {
     first.host.launch(first.spec);
     await first.finished;
 
-    const recovered = harness([{ reports: 1 }], {
+    const recovered = harness([{ toolCalls: 1 }], {
       doctrineUrl: "https://lemma.ing/guides/attack.md",
       fetchDoctrine: async () => {
         throw new Error("temporary network failure");
@@ -396,7 +399,7 @@ describe("host shift loop", () => {
   });
 
   it("fails the launch when doctrine has never been fetchable, rather than running without it", async () => {
-    const { host, spec, finished } = harness([{ reports: 1 }, {}, {}], {
+    const { host, spec, finished } = harness([{ toolCalls: 1 }, {}, {}], {
       doctrineUrl: "https://lemma.ing/guides/attack.md",
       fetchDoctrine: async () => {
         throw new Error("connect ECONNREFUSED");
@@ -436,8 +439,6 @@ describe("host shift loop", () => {
     const working = (): TurnFacts => ({
       toolCalls: 3,
       submissions: [],
-      reported: true,
-      reportedUnproductive: false,
     });
     for (const taskId of ["math-frontier", "math-review", "unregistered-lane"]) {
       const messages = Array.from({ length: 12 }, (_, i) =>
@@ -458,25 +459,25 @@ describe("host shift loop", () => {
     // The budget belongs to the run, not to the worker hosting it: a session
     // adopted mid-flight cannot start the five over.
     const { host, spec, prompts, finished } = harness(
-      Array.from({ length: 12 }, () => ({ reports: 1 })),
+      Array.from({ length: 12 }, () => ({ toolCalls: 1 })),
       { checkInsSpent: MAX_CHECK_INS },
     );
     host.launch(spec);
     const result = await finished;
     expect(prompts).toHaveLength(1);
-    expect(result).toMatchObject({ state: "done", detail: "report 1.0" });
+    expect(result).toEqual({ state: "done" });
   });
 
-  it("stops after its check-ins are spent, however productive and however long the turns ran", async () => {
+  it("stops after its check-ins are spent, however active and however long the turns ran", async () => {
     const { host, spec, prompts, finished } = harness(
-      Array.from({ length: 12 }, () => ({ reports: 1, tookMs: 6 * 3_600_000 })),
+      Array.from({ length: 12 }, () => ({ toolCalls: 1, tookMs: 6 * 3_600_000 })),
     );
     host.launch(spec);
     const result = await finished;
     // The task prompt plus MAX_CHECK_INS check-ins, and no clock anywhere:
     // these turns took three days between them.
     expect(prompts).toHaveLength(MAX_CHECK_INS + 1);
-    expect(result).toMatchObject({ state: "done", detail: "report 6.0" });
+    expect(result).toEqual({ state: "done" });
   });
 
   it("gives the session a retry budget that outlasts an ordinary throttle", async () => {
@@ -484,7 +485,7 @@ describe("host shift loop", () => {
     // injected, so in-turn retry is the cheapest possible recovery and worth
     // spending minutes on. The default three attempts over fourteen seconds
     // are shorter than the throttles this fleet actually meets.
-    const { host, spec, finished, overrides, retrySettings } = harness([{ reports: 1 }, {}, {}]);
+    const { host, spec, finished, overrides, retrySettings } = harness([{ toolCalls: 1 }, {}, {}]);
     host.launch(spec);
     await finished;
 
@@ -496,7 +497,7 @@ describe("host shift loop", () => {
     // An extension-provider account resolves its model inside the session,
     // and `setModel` reloads settings: the override used to be applied before
     // it and was gone by the first prompt, with nothing anywhere saying so.
-    const { host, spec, finished, retrySettings } = harness([{ reports: 1 }, {}, {}], {
+    const { host, spec, finished, retrySettings } = harness([{ toolCalls: 1 }, {}, {}], {
       resolveModel: () => undefined,
       accountId: "cursor",
       provider: "cursor",
@@ -513,9 +514,9 @@ describe("host shift loop", () => {
     // a wait and a resumption note, and the context survives.
     const { host, spec, prompts, finished, waits } = harness(
       [
-        { reports: 1 },
+        { toolCalls: 1 },
         { stopReason: "error", errorMessage: "429 rate-limited upstream" },
-        { reports: 1 },
+        { toolCalls: 1 },
         {},
         {},
         {},
@@ -530,14 +531,14 @@ describe("host shift loop", () => {
     expect(prompts[2]).toContain("Your last turn was cut off");
     expect(prompts[2]).toContain("429 rate-limited upstream");
     // The resumption replaces the check-in rather than spending one: the
-    // agent is being asked to continue a turn, not to report on it.
+    // agent is being asked to continue the interrupted turn.
     expect(prompts[3]).toContain("me again");
-    expect(result).toMatchObject({ state: "done", detail: "report 3.0" });
+    expect(result).toEqual({ state: "done" });
   });
 
   it("keeps reporting progress while it waits, so the stall reaper leaves it alone", async () => {
     const { host, spec, finished, progress } = harness(
-      [{ stopReason: "error", errorMessage: "provider fell over" }, { reports: 1 }, {}, {}, {}, {}],
+      [{ stopReason: "error", errorMessage: "provider fell over" }, { toolCalls: 1 }, {}, {}, {}, {}],
       { turnFailed: () => 5 },
     );
     const before = progress.length;
@@ -547,40 +548,40 @@ describe("host shift loop", () => {
     expect(progress.length).toBeGreaterThan(before);
   });
 
-  it("an errored turn ends the shift: error when nothing was banked, the report when something was", async () => {
+  it("an errored turn ends the shift even after earlier work", async () => {
     const failed = harness([{ stopReason: "error", errorMessage: "usage limit reached" }]);
     failed.host.launch(failed.spec);
     expect(await failed.finished).toEqual({ state: "error", detail: "usage limit reached" });
 
     const banked = harness([
-      { reports: 1 },
+      { toolCalls: 1 },
       { stopReason: "error", errorMessage: "usage limit reached" },
-      { reports: 1 },
+      { toolCalls: 1 },
     ]);
     banked.host.launch(banked.spec);
     const result = await banked.finished;
     expect(banked.prompts).toHaveLength(2);
-    expect(result).toMatchObject({ state: "done", detail: "report 1.0" });
+    expect(result).toEqual({ state: "error", detail: "usage limit reached" });
   });
 
   it("a lane that drains mid-shift ends instead of being re-prompted about work it no longer has", async () => {
     let queue = 2;
     const { host, spec, prompts, finished } = harness(
-      [{ reports: 1 }, { reports: 1 }, { reports: 1 }],
+      [{ toolCalls: 1 }, { toolCalls: 1 }, { toolCalls: 1 }],
       { laneDrained: () => --queue <= 0 },
     );
     host.launch(spec);
     const result = await finished;
-    // Two turns, then the queue is empty: banked work is still the record.
+    // Two turns, then the queue is empty.
     expect(prompts).toHaveLength(2);
-    expect(result).toMatchObject({ state: "done", productive: true, detail: "report 2.0" });
+    expect(result).toEqual({ state: "done" });
   });
 
   it("an operator abort ends the shift immediately", async () => {
     const { host, spec, prompts, finished } = harness([
-      { reports: 1 },
+      { toolCalls: 1 },
       { stopReason: "aborted" },
-      { reports: 1 },
+      { toolCalls: 1 },
     ]);
     host.launch(spec);
     await finished;
@@ -598,7 +599,7 @@ describe("host shift loop", () => {
     expect(sessionFile).toBeDefined();
     prior.appendMessage({ role: "user", content: "Prior work", timestamp: 1 });
 
-    const recovered = harness([{ reports: 1 }], {
+    const recovered = harness([{ toolCalls: 1 }], {
       opening: ["A lived opening that must not replay."],
       selfPaced: true,
       resumeSessionFile: sessionFile,
@@ -627,7 +628,7 @@ describe("host shift loop", () => {
   });
 
   it("parks every worker turn until the supervisor answers in the same session", async () => {
-    const worker = harness([{ reports: 1 }, { reports: 1 }], {
+    const worker = harness([{ toolCalls: 1 }, { toolCalls: 1 }], {
       team: { role: "worker", slot: 1, workers: 4 },
     });
     worker.host.launch(worker.spec);
@@ -757,7 +758,7 @@ describe("the opening exchange", () => {
   // experiments: the same corpus read as depletion or as terrain depending
   // on one operator sentence, and a paraphrased opening loses that force.
   it("sends each opening message as a real turn before the task prompt", async () => {
-    const { host, spec, prompts, finished } = harness([{}, {}, { reports: 1 }, {}, {}], {
+    const { host, spec, prompts, finished } = harness([{}, {}, { toolCalls: 1 }, {}, {}], {
       opening: ["Here's something I wrote.", "Now examine the ledger."],
     });
     host.launch(spec);
@@ -786,7 +787,7 @@ describe("the opening exchange", () => {
       [
         { stopReason: "error", errorMessage: "provider fell over" },
         {},
-        { reports: 1 },
+        { toolCalls: 1 },
         {},
         {},
         {},
@@ -807,7 +808,7 @@ describe("the opening exchange", () => {
 
   it("self-paced: the agent ending its work turn ends the shift, with no check-in", async () => {
     const { host, spec, prompts, finished } = harness(
-      [{}, { reports: 1 }, { reports: 1 }],
+      [{}, { toolCalls: 1 }, { toolCalls: 1 }],
       { opening: ["Here's something I wrote."], selfPaced: true },
     );
     host.launch(spec);
@@ -816,10 +817,10 @@ describe("the opening exchange", () => {
     // One opening turn, one work turn, nothing after: the third fake turn is
     // never reached because no continuation is ever sent.
     expect(prompts).toEqual(["Here's something I wrote.", "Attack the central problem."]);
-    expect(result).toMatchObject({ state: "done", productive: true });
+    expect(result).toEqual({ state: "done" });
   });
 
-  it("self-paced without a report is an unproductive done, not a retry loop", async () => {
+  it("self-paced work ends after one turn without a retry loop", async () => {
     const { host, spec, prompts, finished } = harness([{}, {}], {
       opening: ["Here's something I wrote."],
       selfPaced: true,
@@ -828,7 +829,7 @@ describe("the opening exchange", () => {
     const result = await finished;
 
     expect(prompts).toHaveLength(2);
-    expect(result).toMatchObject({ state: "done", productive: false });
+    expect(result).toEqual({ state: "done" });
   });
 });
 
@@ -839,7 +840,7 @@ describe("the opening probe", () => {
   // operator's voice would be spotted as fabrication and poison the exchange.
   it("fills placeholders from the probe's JSON before the exchange is lived", async () => {
     const commands: string[] = [];
-    const { host, spec, prompts, finished } = harness([{}, {}, { reports: 1 }, {}, {}], {
+    const { host, spec, prompts, finished } = harness([{}, {}, { toolCalls: 1 }, {}, {}], {
       opening: ["What odds on {{problem_title}}?", "Now examine `{{problem_id}}`."],
       openingProbe: "sample-problem",
       runOpeningProbe: async (command) => {
@@ -861,7 +862,7 @@ describe("the opening probe", () => {
   // varies the work itself rather than only its opening — the math lane draws
   // half its launches into the research-ambition working method this way.
   it("fills placeholders in the task prompt, not only the opening", async () => {
-    const { host, spec, prompts, finished } = harness([{}, { reports: 1 }, {}], {
+    const { host, spec, prompts, finished } = harness([{}, { toolCalls: 1 }, {}], {
       opening: ["Now examine `{{problem_id}}`."],
       prompt: "Attack it.{{ambition}}",
       openingProbe: "sample-problem",

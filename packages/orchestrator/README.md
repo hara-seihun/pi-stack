@@ -603,16 +603,17 @@ consolidate them into the theorem they are shadows of (the night of
 2026-08-21 showed what unconditional praise trains — one shift answered its
 check-ins with 1, 4, 5, 4, 7, 2, 2, 8, 12, 21 filings); a turn of deep quiet
 work gets the operator's encouragement, her own first message verbatim; a
-turn with nothing in it, or one that reported `productive=false`, gets
-honest permission to stop. Queue lanes (review, cleanup, provenance) submit in bulk as their
+turn with nothing in it gets honest permission to stop. Queue lanes (review,
+cleanup, provenance) submit in bulk as their
 job and are never steered to consolidate. The warmth is load-bearing —
 agents perform worse under terse or cold direction — so correction arrives
 as an upgrade, never a scolding, and the replay tests
 (`tests/continuations.test.ts`) hold every generated message to that bar
-against distilled transcripts of that night's real shifts. Work
-already banked in a
-`task_complete` report survives a late error: the report is the run's record,
-and only a shift that banked nothing reports as an error run.
+against distilled transcripts of that night's real shifts. Run state follows
+the session lifecycle. If provider recovery is exhausted, the host reports the
+failure even when an earlier turn produced work; the runner then classifies it
+as an account or task failure. Durable results stay in the task's own store and
+the Pi transcript rather than an agent-authored run flag.
 
 **A shift survives its provider (2026-08-23).** A turn that failed
 provider-side used to end the run, and pi's own retry — three attempts over
@@ -730,8 +731,9 @@ without a `prompt` is a pure demand signal for gates and is never launched.
 
 `PiHost` is the thin pi-SDK adapter behind the `HostManager`/`HostEvents`
 interfaces: one launch = one embedded `AgentSession`, the task prompt as
-first user message, a `task_complete` custom tool for the result report, a
-30-second heartbeat, `dispose` on the way out. All policy lives upstream.
+first user message, a 30-second heartbeat, and `dispose` on the way out. A
+team supervisor also gets the worker-context reader it needs. All policy lives
+upstream.
 
 Models resolve in two places for one reason. Builtin-family models resolve
 before the session exists, because an alias account re-homes the family model

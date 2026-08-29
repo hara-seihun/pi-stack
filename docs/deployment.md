@@ -63,7 +63,7 @@ The NixOS repository owns the deployment command and service definitions. It pub
 
 Local Pi Remote reports environment ID `local`, requires unlock, and offers only Personal and Home after the Converge cutover.
 
-An ordinary Orchestrator update does not restart the runner service. The host deployment bumps the runner generation, and the supervisor starts a worker from the new release while existing workers finish on their current generation. If `host/supervisor.ts` itself changed, the deployment restarts the service because the long-lived supervisor cannot reload its own module. Startup requeues every persisted session from the stopped workers, and the new worker reopens them.
+An ordinary Orchestrator update does not restart the runner service. The host deployment bumps the runner generation, and the supervisor starts a worker from the new release while existing workers finish on their current generation. Changes to `host/supervisor.ts` or `ledger/ledger.ts` stop the controller, restart the runner service, then start the controller on the new build. The supervisor cannot reload its own module, and storage migrations cannot race workers or a controller using the previous schema. Runner startup requeues every persisted session from the stopped workers, and the new worker reopens them.
 
 ## Converge
 
@@ -73,7 +73,7 @@ Converge OpenTofu owns one `pi_stack_commit`. Its startup configuration clones t
 deploy/host converge
 ```
 
-The command publishes runtime, Orchestrator, Pi Remote, tools, skills, and settings while holding one source lock. It derives the deployed skill and package lists from the checked manifests. If a live Orchestrator ledger exists and its release changed, the command bumps the runner generation instead of restarting workers. If Pi Remote changed, it performs a live supervisor handoff before returning. The whole command must finish within 50 seconds. A timeout is a deployment failure, never permission to raise the limit.
+The command publishes runtime, Orchestrator, Pi Remote, tools, skills, and settings while holding one source lock. It derives the deployed skill and package lists from the checked manifests. If a live Orchestrator ledger exists and an ordinary release changed, the command bumps the runner generation instead of restarting workers. Supervisor and runner-storage changes stop the controller while the runner restarts, reopen persisted sessions on the new build, then start the new controller. If Pi Remote changed, it performs a live supervisor handoff before returning. The whole command must finish within 50 seconds. A timeout is a deployment failure, never permission to raise the limit.
 
 Converge Pi Remote reports environment ID `converge`. It has one profile rooted at `/home/kenan/converge` and executes Pi directly on that machine.
 

@@ -14,8 +14,6 @@ const observed = (values: Partial<ObservedRun> & Pick<ObservedRun, "id" | "taskI
   heartbeatAt: undefined,
   progressAt: undefined,
   abortRequested: false,
-  productive: undefined,
-  complete: undefined,
   detail: undefined,
   teamRole: undefined,
   teamSlot: undefined,
@@ -80,15 +78,15 @@ test("team roles survive the public run summary", () => {
 
 test("a settled run reports its outcome rather than an activity", () => {
   const done = summarizeAgentRun(
-    observed({ id: "done", taskId: "t", state: "done", startedAt: 700, endedAt: 750, model: "gpt-5.6-luna", detail: "task complete", productive: true }),
+    observed({ id: "done", taskId: "t", state: "done", startedAt: 700, endedAt: 750, model: "gpt-5.6-luna" }),
     LOCAL, 5000,
   );
-  expect(done).toMatchObject({ id: "local:done", status: "done", activity: "IDLE", summary: "task complete", productive: true, elapsedMs: 50 });
+  expect(done).toMatchObject({ id: "local:done", status: "done", activity: "IDLE", elapsedMs: 50 });
   const failed = summarizeAgentRun(
     observed({ id: "bad", taskId: "t", state: "error", startedAt: 700, endedAt: 750, model: "gpt-5.6-luna", detail: "provider refused" }),
     LOCAL, 5000,
   );
-  expect(failed).toMatchObject({ status: "error", error: "provider refused", summary: null });
+  expect(failed).toMatchObject({ status: "error", error: "provider refused" });
 });
 
 test("a transcript is parsed incrementally and delivered by sequence", () => {

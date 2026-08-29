@@ -478,6 +478,14 @@ BEGIN
 END;
 `;
 
+/** A run records session lifecycle. Results belong to the task's own durable
+ * store and the Pi transcript, so agent-authored completion flags on a run
+ * duplicated authority and were never consumed by scheduling. */
+const RUN_LIFECYCLE_SCHEMA = `
+ALTER TABLE run DROP COLUMN productive;
+ALTER TABLE run DROP COLUMN complete;
+`;
+
 const MIGRATIONS: readonly string[] = [
   SCHEMA,
   TASK_SCHEMA,
@@ -504,6 +512,7 @@ const MIGRATIONS: readonly string[] = [
   TEAM_COMPLETION_SCHEMA,
   TEAM_TURN_SCHEMA,
   NATIVE_TEAM_TURN_SCHEMA,
+  RUN_LIFECYCLE_SCHEMA,
 ];
 
 export interface AccountRow {
@@ -545,8 +554,6 @@ export interface RunRow {
   /** Last recorded session activity, as opposed to runner liveness. */
   readonly progressAt: number | undefined;
   readonly abortRequested: boolean;
-  readonly productive: boolean | undefined;
-  readonly complete: boolean | undefined;
   readonly detail: string | undefined;
   readonly teamRole: "worker" | "supervisor" | undefined;
   /** Worker slots are one-indexed; the supervisor uses slot zero. */
@@ -560,8 +567,6 @@ export interface RunRow {
 
 export interface RunResult {
   readonly state: "done" | "error" | "aborted";
-  readonly productive?: boolean;
-  readonly complete?: boolean;
   readonly detail?: string;
 }
 
@@ -1507,8 +1512,7 @@ export class Ledger {
       .prepare(
         `SELECT id, task_id, tier, account_id, model, provider, thinking, state, started_at,
                 claimed_at, runner_id, ended_at, heartbeat_at, progress_at,
-                abort_requested, productive, complete, detail, team_role, team_slot,
-                idle_at, context_since
+                abort_requested, detail, team_role, team_slot, idle_at, context_since
          FROM run ${clause}`,
       )
       .all(...params) as {
@@ -1527,8 +1531,6 @@ export class Ledger {
       heartbeat_at: number | null;
       progress_at: number | null;
       abort_requested: number;
-      productive: number | null;
-      complete: number | null;
       detail: string | null;
       team_role: "worker" | "supervisor" | null;
       team_slot: number | null;
@@ -1551,8 +1553,6 @@ export class Ledger {
       heartbeatAt: r.heartbeat_at ?? undefined,
       progressAt: r.progress_at ?? undefined,
       abortRequested: r.abort_requested !== 0,
-      productive: r.productive === null ? undefined : r.productive !== 0,
-      complete: r.complete === null ? undefined : r.complete !== 0,
       detail: r.detail ?? undefined,
       teamRole: r.team_role ?? undefined,
       teamSlot: r.team_slot ?? undefined,
@@ -1565,17 +1565,10 @@ export class Ledger {
     this.immediate(() => {
       this.db
         .prepare(
-          `UPDATE run SET state = ?, ended_at = ?, productive = ?, complete = ?, detail = ?
+          `UPDATE run SET state = ?, ended_at = ?, detail = ?
            WHERE id = ? AND state IN ('pending', 'running')`,
         )
-        .run(
-          result.state,
-          at,
-          result.productive === undefined ? null : result.productive ? 1 : 0,
-          result.complete === undefined ? null : result.complete ? 1 : 0,
-          result.detail ?? null,
-          id,
-        );
+        .run(result.state, at, result.detail ?? null, id);
       this.db
         .prepare(
           `UPDATE run_message SET delivered_at = ?

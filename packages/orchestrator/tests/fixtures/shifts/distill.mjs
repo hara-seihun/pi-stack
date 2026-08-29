@@ -36,9 +36,6 @@ function reduceCode(code) {
 
 function reduceArgs(name, args) {
   if (args === null || typeof args !== "object") return {};
-  if (name === "task_complete") {
-    return { complete: args.complete, productive: args.productive };
-  }
   if (name === "mcp") {
     if (args.tool !== "math_submit") return { tool: args.tool };
     let inner = args.args;
@@ -73,6 +70,7 @@ for await (const line of lines) {
       break;
     case "tool_start": {
       const name = String(event.payload?.name ?? "tool");
+      if (name === "task_complete") break;
       console.log(
         JSON.stringify({
           type: "tool_start",

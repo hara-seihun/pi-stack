@@ -205,8 +205,9 @@ case "$name" in
 esac
 mkdir -p "$destination/dist"
 if [[ $name == orchestrator ]]; then
-  mkdir -p "$destination/src/host"
+  mkdir -p "$destination/src/host" "$destination/src/ledger"
   printf '%s\n' "\${SUPERVISOR_CONTENT:-same}" > "$destination/src/host/supervisor.ts"
+  printf '%s\n' "\${LEDGER_CONTENT:-same}" > "$destination/src/ledger/ledger.ts"
 fi
 git -C "$(cd "$(dirname "$0")/.." && pwd)" rev-parse HEAD > "$destination/.pi-stack-commit"
 `;
@@ -233,7 +234,7 @@ git -C "$(cd "$(dirname "$0")/.." && pwd)" rev-parse HEAD > "$destination/.pi-st
     const systemctlTrace = join(directory, "systemctl.trace");
     writeFileSync(join(bin, "node"), `#!/bin/sh\nprintf '%s\\n' "$*" >> "$TRACE"\n`);
     chmodSync(join(bin, "node"), 0o755);
-    writeFileSync(join(bin, "systemctl"), "#!/bin/sh\nprintf '%s\\n' \"$*\" >> \"$SYSTEMCTL_TRACE\"\ncase $1 in is-active|try-restart) exit 0;; *) exit 1;; esac\n");
+    writeFileSync(join(bin, "systemctl"), "#!/bin/sh\nprintf '%s\\n' \"$*\" >> \"$SYSTEMCTL_TRACE\"\ncase $1 in --user|is-active|stop|restart|start) exit 0;; *) exit 1;; esac\n");
     chmodSync(join(bin, "systemctl"), 0o755);
     const env = {
       ...process.env,
@@ -265,7 +266,19 @@ git -C "$(cd "$(dirname "$0")/.." && pwd)" rev-parse HEAD > "$destination/.pi-st
     });
     assert.equal(supervisorChanged.status, 0, supervisorChanged.stderr);
     assert.equal(existsSync(trace), false);
-    assert.match(readFileSync(systemctlTrace, "utf8"), /try-restart pi-orchestrator-runner\.service/);
+    assert.match(readFileSync(systemctlTrace, "utf8"), /--user stop pi-orchestrator\.service\nrestart pi-orchestrator-runner\.service\n--user start pi-orchestrator\.service/);
+
+    writeFileSync(join(repository, "release"), "ledger update\n");
+    assert.equal(spawnSync("git", ["-C", repository, "add", "release"]).status, 0);
+    assert.equal(spawnSync("git", ["-C", repository, "-c", "user.name=test", "-c", "user.email=test@example.test", "commit", "-qm", "ledger update"]).status, 0);
+    rmSync(systemctlTrace, { force: true });
+    const ledgerChanged = spawnSync(join(deploy, "host"), ["converge"], {
+      encoding: "utf8",
+      env: { ...env, SUPERVISOR_CONTENT: "changed", LEDGER_CONTENT: "changed" },
+    });
+    assert.equal(ledgerChanged.status, 0, ledgerChanged.stderr);
+    assert.equal(existsSync(trace), false);
+    assert.match(readFileSync(systemctlTrace, "utf8"), /--user stop pi-orchestrator\.service\nrestart pi-orchestrator-runner\.service\n--user start pi-orchestrator\.service/);
   } finally {
     rmSync(directory, { recursive: true, force: true });
   }

@@ -110,6 +110,7 @@ describe("ledger", () => {
         "ALTER TABLE run DROP COLUMN team_stop; ALTER TABLE run DROP COLUMN team_waiting; " +
         "DROP TABLE team_audit; DROP TABLE team_completion; DROP INDEX run_team_roster; " +
         "ALTER TABLE run DROP COLUMN team_role; ALTER TABLE run DROP COLUMN team_slot; " +
+        "ALTER TABLE run ADD COLUMN productive INTEGER; ALTER TABLE run ADD COLUMN complete INTEGER; " +
         "ALTER TABLE task DROP COLUMN team; ALTER TABLE run_message DROP COLUMN interrupt; " +
         "DROP TABLE run_session; CREATE INDEX run_session ON run (session_id); " +
         "ALTER TABLE run DROP COLUMN check_ins; ALTER TABLE account DROP COLUMN capacity_weight; " +
@@ -142,8 +143,12 @@ describe("ledger", () => {
     migrated.close();
     expect(await exited, stderr).toBe(0);
     const verified = new DatabaseSync(path);
-    expect((verified.prepare("PRAGMA user_version").get() as { user_version: number }).user_version).toBe(25);
+    expect((verified.prepare("PRAGMA user_version").get() as { user_version: number }).user_version).toBe(26);
     expect(verified.prepare("SELECT check_ins, session_id, idle_at, context_since FROM run LIMIT 1").all()).toEqual([]);
+    const runColumns = (verified.prepare("PRAGMA table_info(run)").all() as { name: string }[])
+      .map((column) => column.name);
+    expect(runColumns).not.toContain("productive");
+    expect(runColumns).not.toContain("complete");
     expect(
       (verified.prepare("PRAGMA table_info(run_session)").all() as { name: string }[])
         .some((column) => column.name === "parent_session_id"),

@@ -113,7 +113,7 @@ describe("dispatch cycle", () => {
     // One session finishes; demand is re-probed (backlog 1) and netted
     // against the still-running session: no further launch.
     backlog = 1;
-    runner.runFinished(spec.runId, { state: "done", productive: true, complete: false }, 2000);
+    runner.runFinished(spec.runId, { state: "done" }, 2000);
     expect(ledger.run(spec.runId)?.state).toBe("done");
     const third = await cycle(3000);
     expect(third.claimed).toHaveLength(0);

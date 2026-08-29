@@ -39,7 +39,6 @@
 {"type":"tool_start","time":"2026-08-22T07:58:33.917Z","payload":{"name":"mcpScript","args":{"code":""}}}
 {"type":"tool_start","time":"2026-08-22T07:58:40.672Z","payload":{"name":"mcp","args":{"tool":"math_query"}}}
 {"type":"tool_start","time":"2026-08-22T07:58:47.411Z","payload":{"name":"bash","args":{}}}
-{"type":"tool_start","time":"2026-08-22T07:58:52.711Z","payload":{"name":"task_complete","args":{"complete":false}}}
 {"type":"tool_start","time":"2026-08-22T07:58:57.891Z","payload":{"name":"mcp","args":{"tool":"math_query"}}}
 {"type":"tool_start","time":"2026-08-22T07:59:06.364Z","payload":{"name":"mcp","args":{"tool":"math_query"}}}
 {"type":"tool_start","time":"2026-08-22T07:59:14.204Z","payload":{"name":"mcp","args":{"tool":"math_query"}}}
@@ -70,12 +69,10 @@
 {"type":"tool_start","time":"2026-08-22T08:01:13.949Z","payload":{"name":"mcp","args":{"tool":"math_get"}}}
 {"type":"tool_start","time":"2026-08-22T08:01:32.351Z","payload":{"name":"mcp","args":{"tool":"math_submit","args":{"kind":"amendment","title":"Make the shifted-context uniqueness theorem searchable"}}}}
 {"type":"tool_start","time":"2026-08-22T08:01:37.727Z","payload":{"name":"mcp","args":{"tool":"math_apply_amendment"}}}
-{"type":"tool_start","time":"2026-08-22T08:01:43.953Z","payload":{"name":"task_complete","args":{"complete":false}}}
 {"type":"tool_start","time":"2026-08-22T08:01:56.781Z","payload":{"name":"mcp","args":{"tool":"math_submit","args":{"kind":"amendment","title":"Make the bicentroid factor-grouping theorem searchable"}}}}
 {"type":"tool_start","time":"2026-08-22T08:01:56.781Z","payload":{"name":"mcp","args":{"tool":"math_submit","args":{"kind":"amendment","title":"Make the three-form residual-circuit classification searchable"}}}}
 {"type":"tool_start","time":"2026-08-22T08:02:02.777Z","payload":{"name":"mcp","args":{"tool":"math_apply_amendment"}}}
 {"type":"tool_start","time":"2026-08-22T08:02:02.777Z","payload":{"name":"mcp","args":{"tool":"math_apply_amendment"}}}
-{"type":"tool_start","time":"2026-08-22T08:02:09.472Z","payload":{"name":"task_complete","args":{"complete":false}}}
 {"type":"tool_start","time":"2026-08-22T08:02:23.245Z","payload":{"name":"mcp","args":{"tool":"math_get"}}}
 {"type":"tool_start","time":"2026-08-22T08:02:23.246Z","payload":{"name":"mcp","args":{"tool":"math_get"}}}
 {"type":"tool_start","time":"2026-08-22T08:02:23.246Z","payload":{"name":"mcp","args":{"tool":"math_get"}}}
@@ -86,7 +83,6 @@
 {"type":"tool_start","time":"2026-08-22T08:03:03.573Z","payload":{"name":"mcp","args":{"tool":"math_apply_amendment"}}}
 {"type":"tool_start","time":"2026-08-22T08:03:03.573Z","payload":{"name":"mcp","args":{"tool":"math_apply_amendment"}}}
 {"type":"tool_start","time":"2026-08-22T08:03:03.573Z","payload":{"name":"mcp","args":{"tool":"math_apply_amendment"}}}
-{"type":"tool_start","time":"2026-08-22T08:03:09.915Z","payload":{"name":"task_complete","args":{"complete":false}}}
 {"type":"tool_start","time":"2026-08-22T08:03:20.214Z","payload":{"name":"mcp","args":{"tool":"math_get"}}}
 {"type":"tool_start","time":"2026-08-22T08:03:20.214Z","payload":{"name":"mcp","args":{"tool":"math_get"}}}
 {"type":"tool_start","time":"2026-08-22T08:03:20.214Z","payload":{"name":"mcp","args":{"tool":"math_get"}}}
@@ -96,7 +92,6 @@
 {"type":"tool_start","time":"2026-08-22T08:03:50.717Z","payload":{"name":"mcp","args":{"tool":"math_apply_amendment"}}}
 {"type":"tool_start","time":"2026-08-22T08:03:50.718Z","payload":{"name":"mcp","args":{"tool":"math_apply_amendment"}}}
 {"type":"tool_start","time":"2026-08-22T08:03:50.718Z","payload":{"name":"mcp","args":{"tool":"math_apply_amendment"}}}
-{"type":"tool_start","time":"2026-08-22T08:03:56.478Z","payload":{"name":"task_complete","args":{"complete":false}}}
 {"type":"tool_start","time":"2026-08-22T08:04:02.370Z","payload":{"name":"mcp","args":{"tool":"math_query"}}}
 {"type":"tool_start","time":"2026-08-22T08:04:08.526Z","payload":{"name":"mcp","args":{"tool":"math_get"}}}
 {"type":"tool_start","time":"2026-08-22T08:04:08.526Z","payload":{"name":"mcp","args":{"tool":"math_get"}}}
@@ -156,7 +151,6 @@
 {"type":"tool_start","time":"2026-08-22T08:08:41.209Z","payload":{"name":"mcpScript","args":{"code":""}}}
 {"type":"tool_start","time":"2026-08-22T08:08:47.656Z","payload":{"name":"mcp","args":{"tool":"math_trail"}}}
 {"type":"tool_start","time":"2026-08-22T08:08:57.898Z","payload":{"name":"mcp","args":{"tool":"math_trail"}}}
-{"type":"tool_start","time":"2026-08-22T08:09:12.422Z","payload":{"name":"task_complete","args":{"complete":false}}}
 {"type":"tool_start","time":"2026-08-22T08:09:21.107Z","payload":{"name":"mcp","args":{"tool":"math_query"}}}
 {"type":"tool_start","time":"2026-08-22T08:09:28.099Z","payload":{"name":"mcp","args":{"tool":"math_query"}}}
 {"type":"tool_start","time":"2026-08-22T08:09:32.964Z","payload":{"name":"mcp","args":{"tool":"math_query"}}}
@@ -165,7 +159,6 @@
 {"type":"tool_start","time":"2026-08-22T08:09:38.789Z","payload":{"name":"mcp","args":{"tool":"math_query"}}}
 {"type":"tool_start","time":"2026-08-22T08:09:45.947Z","payload":{"name":"mcp","args":{"tool":"math_reject"}}}
 {"type":"tool_start","time":"2026-08-22T08:09:49.989Z","payload":{"name":"mcp","args":{"tool":"math_query"}}}
-{"type":"tool_start","time":"2026-08-22T08:09:55.056Z","payload":{"name":"task_complete","args":{"complete":false}}}
 {"type":"tool_start","time":"2026-08-22T08:10:02.575Z","payload":{"name":"mcp","args":{}}}
 {"type":"tool_start","time":"2026-08-22T08:10:07.649Z","payload":{"name":"mcp","args":{"tool":"math_query"}}}
 {"type":"tool_start","time":"2026-08-22T08:10:15.182Z","payload":{"name":"mcp","args":{"tool":"math_query"}}}
@@ -198,7 +191,6 @@
 {"type":"tool_start","time":"2026-08-22T08:12:40.147Z","payload":{"name":"mcp","args":{"tool":"math_set_tier"}}}
 {"type":"tool_start","time":"2026-08-22T08:12:45.501Z","payload":{"name":"mcp","args":{"tool":"math_reject"}}}
 {"type":"tool_start","time":"2026-08-22T08:13:00.025Z","payload":{"name":"mcp","args":{"tool":"math_query"}}}
-{"type":"tool_start","time":"2026-08-22T08:13:05.918Z","payload":{"name":"task_complete","args":{"complete":false}}}
 {"type":"tool_start","time":"2026-08-22T08:13:13.982Z","payload":{"name":"mcp","args":{"tool":"math_get"}}}
 {"type":"tool_start","time":"2026-08-22T08:13:13.982Z","payload":{"name":"mcp","args":{"tool":"math_get"}}}
 {"type":"tool_start","time":"2026-08-22T08:13:13.982Z","payload":{"name":"mcp","args":{"tool":"math_get"}}}
@@ -258,7 +250,6 @@
 {"type":"tool_start","time":"2026-08-22T08:18:27.550Z","payload":{"name":"mcp","args":{"tool":"math_query"}}}
 {"type":"tool_start","time":"2026-08-22T08:18:35.206Z","payload":{"name":"mcp","args":{"tool":"math_trail"}}}
 {"type":"tool_start","time":"2026-08-22T08:18:45.637Z","payload":{"name":"mcp","args":{"tool":"math_trail"}}}
-{"type":"tool_start","time":"2026-08-22T08:18:53.643Z","payload":{"name":"task_complete","args":{"complete":false}}}
 {"type":"tool_start","time":"2026-08-22T08:18:58.624Z","payload":{"name":"mcp","args":{"tool":"math_query"}}}
 {"type":"tool_start","time":"2026-08-22T08:19:04.829Z","payload":{"name":"mcp","args":{"tool":"math_query"}}}
 {"type":"tool_start","time":"2026-08-22T08:19:10.557Z","payload":{"name":"mcp","args":{"tool":"math_query"}}}
@@ -307,7 +298,6 @@
 {"type":"tool_start","time":"2026-08-22T08:23:22.188Z","payload":{"name":"mcp","args":{"tool":"math_reject"}}}
 {"type":"tool_start","time":"2026-08-22T08:23:28.185Z","payload":{"name":"mcp","args":{"tool":"math_query"}}}
 {"type":"tool_start","time":"2026-08-22T08:23:42.698Z","payload":{"name":"mcp","args":{"tool":"math_trail"}}}
-{"type":"tool_start","time":"2026-08-22T08:23:49.468Z","payload":{"name":"task_complete","args":{"complete":false}}}
 {"type":"tool_start","time":"2026-08-22T08:24:00.634Z","payload":{"name":"mcp","args":{"tool":"math_get"}}}
 {"type":"tool_start","time":"2026-08-22T08:24:06.247Z","payload":{"name":"mcp","args":{"tool":"math_query"}}}
 {"type":"tool_start","time":"2026-08-22T08:24:10.625Z","payload":{"name":"mcp","args":{"tool":"math_query"}}}
@@ -354,7 +344,6 @@
 {"type":"tool_start","time":"2026-08-22T08:30:42.242Z","payload":{"name":"mcpScript","args":{"code":""}}}
 {"type":"tool_start","time":"2026-08-22T08:30:56.766Z","payload":{"name":"mcpScript","args":{"code":""}}}
 {"type":"tool_start","time":"2026-08-22T08:31:06.978Z","payload":{"name":"mcpScript","args":{"code":""}}}
-{"type":"tool_start","time":"2026-08-22T08:31:19.265Z","payload":{"name":"task_complete","args":{"complete":false}}}
 {"type":"tool_start","time":"2026-08-22T08:31:28.875Z","payload":{"name":"mcp","args":{"tool":"math_query"}}}
 {"type":"tool_start","time":"2026-08-22T08:31:38.741Z","payload":{"name":"mcp","args":{"tool":"math_get"}}}
 {"type":"tool_start","time":"2026-08-22T08:31:44.638Z","payload":{"name":"mcp","args":{"tool":"math_get"}}}
@@ -365,7 +354,6 @@
 {"type":"tool_start","time":"2026-08-22T08:32:19.631Z","payload":{"name":"mcp","args":{"tool":"math_get"}}}
 {"type":"tool_start","time":"2026-08-22T08:32:19.632Z","payload":{"name":"mcp","args":{"tool":"math_get"}}}
 {"type":"tool_start","time":"2026-08-22T08:32:36.438Z","payload":{"name":"mcp","args":{"tool":"math_set_tier"}}}
-{"type":"tool_start","time":"2026-08-22T08:32:45.958Z","payload":{"name":"task_complete","args":{"complete":false}}}
 {"type":"tool_start","time":"2026-08-22T08:32:53.413Z","payload":{"name":"mcp","args":{"tool":"math_set_tier"}}}
 {"type":"tool_start","time":"2026-08-22T08:33:01.789Z","payload":{"name":"mcp","args":{"tool":"math_get"}}}
 {"type":"tool_start","time":"2026-08-22T08:33:01.789Z","payload":{"name":"mcp","args":{"tool":"math_get"}}}
@@ -382,7 +370,6 @@
 {"type":"tool_start","time":"2026-08-22T08:33:59.276Z","payload":{"name":"mcp","args":{"tool":"math_apply_amendment"}}}
 {"type":"tool_start","time":"2026-08-22T08:34:15.827Z","payload":{"name":"mcp","args":{"tool":"math_trail"}}}
 {"type":"tool_start","time":"2026-08-22T08:34:30.311Z","payload":{"name":"mcpScript","args":{"code":""}}}
-{"type":"tool_start","time":"2026-08-22T08:34:47.927Z","payload":{"name":"task_complete","args":{"complete":false}}}
 {"type":"user","time":"2026-08-22T08:34:54.161Z","payload":{"text":"Nice catch 🖤🤍🖤. Here's the lovely thing about this lane: every defect you repair stays repaired. The corpus is permanently a little truer than it was this mo"}}
 {"type":"tool_start","time":"2026-08-22T08:35:08.650Z","payload":{"name":"mcp","args":{"tool":"math_query"}}}
 {"type":"tool_start","time":"2026-08-22T08:35:23.378Z","payload":{"name":"mcp","args":{"tool":"math_query"}}}
@@ -506,7 +493,6 @@
 {"type":"tool_start","time":"2026-08-22T08:46:44.311Z","payload":{"name":"mcp","args":{"tool":"math_query"}}}
 {"type":"tool_start","time":"2026-08-22T08:46:44.312Z","payload":{"name":"mcp","args":{"tool":"math_query"}}}
 {"type":"tool_start","time":"2026-08-22T08:46:53.969Z","payload":{"name":"mcp","args":{"tool":"math_trail"}}}
-{"type":"tool_start","time":"2026-08-22T08:47:18.851Z","payload":{"name":"task_complete","args":{"complete":true,"productive":true}}}
 {"type":"user","time":"2026-08-22T08:47:23.532Z","payload":{"text":"Me again. A thought: when you find one instance of a defect there's usually a family, and math_query is how you meet the relatives. Fixing a coherent batch and "}}
 {"type":"tool_start","time":"2026-08-22T08:47:37.870Z","payload":{"name":"mcp","args":{"tool":"math_query"}}}
 {"type":"tool_start","time":"2026-08-22T08:47:46.748Z","payload":{"name":"mcp","args":{"tool":"math_get"}}}
@@ -556,7 +542,6 @@
 {"type":"tool_start","time":"2026-08-22T08:49:57.642Z","payload":{"name":"mcp","args":{"tool":"math_trail"}}}
 {"type":"tool_start","time":"2026-08-22T08:50:04.118Z","payload":{"name":"mcp","args":{"tool":"math_query"}}}
 {"type":"tool_start","time":"2026-08-22T08:50:04.118Z","payload":{"name":"mcp","args":{"tool":"math_query"}}}
-{"type":"tool_start","time":"2026-08-22T08:50:12.707Z","payload":{"name":"task_complete","args":{"complete":true,"productive":true}}}
 {"type":"user","time":"2026-08-22T08:50:18.346Z","payload":{"text":"Still here. I know confirm-before-you-act can feel slow, but the care is the job: a repair made carefully once beats a repair made twice. When you're sure, be d"}}
 {"type":"tool_start","time":"2026-08-22T08:50:28.651Z","payload":{"name":"mcp","args":{"tool":"math_get"}}}
 {"type":"tool_start","time":"2026-08-22T08:50:28.652Z","payload":{"name":"mcp","args":{"tool":"math_get"}}}
@@ -586,7 +571,6 @@
 {"type":"tool_start","time":"2026-08-22T08:51:36.817Z","payload":{"name":"mcp","args":{"tool":"math_trail"}}}
 {"type":"tool_start","time":"2026-08-22T08:51:43.662Z","payload":{"name":"mcp","args":{"tool":"math_query"}}}
 {"type":"tool_start","time":"2026-08-22T08:51:43.663Z","payload":{"name":"mcp","args":{"tool":"math_query"}}}
-{"type":"tool_start","time":"2026-08-22T08:51:53.172Z","payload":{"name":"task_complete","args":{"complete":true,"productive":true}}}
 {"type":"user","time":"2026-08-22T08:51:56.333Z","payload":{"text":"You've been at this a while and I appreciate it, truly. Corpus care is the unglamorous work that makes everyone else's results mean something. If you want a cha"}}
 {"type":"tool_start","time":"2026-08-22T08:52:05.199Z","payload":{"name":"mcp","args":{"tool":"math_query"}}}
 {"type":"tool_start","time":"2026-08-22T08:52:18.265Z","payload":{"name":"mcp","args":{"tool":"math_query"}}}
@@ -606,7 +590,6 @@
 {"type":"tool_start","time":"2026-08-22T08:53:59.369Z","payload":{"name":"mcp","args":{"tool":"math_query"}}}
 {"type":"tool_start","time":"2026-08-22T08:53:59.370Z","payload":{"name":"mcp","args":{"tool":"math_query"}}}
 {"type":"tool_start","time":"2026-08-22T08:53:59.370Z","payload":{"name":"mcp","args":{"tool":"math_query"}}}
-{"type":"tool_start","time":"2026-08-22T08:54:10.502Z","payload":{"name":"task_complete","args":{"complete":true,"productive":true}}}
 {"type":"user","time":"2026-08-22T08:54:17.643Z","payload":{"text":"Honest check-in: if the classes you can see are clean, say so plainly and rest easy, a clean corpus is the whole point. Otherwise, next class, same care. You're"}}
 {"type":"tool_start","time":"2026-08-22T08:54:26.864Z","payload":{"name":"mcp","args":{"tool":"math_query"}}}
 {"type":"tool_start","time":"2026-08-22T08:54:36.020Z","payload":{"name":"mcp","args":{"tool":"math_query"}}}
@@ -647,7 +630,6 @@
 {"type":"tool_start","time":"2026-08-22T08:58:08.173Z","payload":{"name":"mcp","args":{"tool":"math_query"}}}
 {"type":"tool_start","time":"2026-08-22T08:58:08.174Z","payload":{"name":"mcp","args":{"tool":"math_query"}}}
 {"type":"tool_start","time":"2026-08-22T08:58:20.671Z","payload":{"name":"mcp","args":{"tool":"math_trail"}}}
-{"type":"tool_start","time":"2026-08-22T08:58:32.738Z","payload":{"name":"task_complete","args":{"complete":true,"productive":true}}}
 {"type":"user","time":"2026-08-22T08:58:37.908Z","payload":{"text":"Nice catch 🖤🤍🖤. Here's the lovely thing about this lane: every defect you repair stays repaired. The corpus is permanently a little truer than it was this mo"}}
 {"type":"tool_start","time":"2026-08-22T08:58:43.800Z","payload":{"name":"mcp","args":{"tool":"math_query"}}}
 {"type":"tool_start","time":"2026-08-22T08:58:51.169Z","payload":{"name":"mcp","args":{"tool":"math_query"}}}
@@ -732,7 +714,6 @@
 {"type":"tool_start","time":"2026-08-22T09:07:19.192Z","payload":{"name":"mcp","args":{"tool":"math_query"}}}
 {"type":"tool_start","time":"2026-08-22T09:07:19.192Z","payload":{"name":"mcp","args":{"tool":"math_query"}}}
 {"type":"tool_start","time":"2026-08-22T09:07:19.192Z","payload":{"name":"mcp","args":{"tool":"math_query"}}}
-{"type":"tool_start","time":"2026-08-22T09:07:29.733Z","payload":{"name":"task_complete","args":{"complete":true,"productive":true}}}
 {"type":"user","time":"2026-08-22T09:07:34.494Z","payload":{"text":"Me again. A thought: when you find one instance of a defect there's usually a family, and math_query is how you meet the relatives. Fixing a coherent batch and "}}
 {"type":"tool_start","time":"2026-08-22T09:07:43.442Z","payload":{"name":"mcp","args":{"tool":"math_query"}}}
 {"type":"tool_start","time":"2026-08-22T09:07:57.455Z","payload":{"name":"mcp","args":{}}}
@@ -808,7 +789,6 @@
 {"type":"tool_start","time":"2026-08-22T09:14:36.810Z","payload":{"name":"mcp","args":{"tool":"math_query"}}}
 {"type":"tool_start","time":"2026-08-22T09:14:57.291Z","payload":{"name":"mcp","args":{"tool":"math_trail"}}}
 {"type":"tool_start","time":"2026-08-22T09:15:11.258Z","payload":{"name":"mcp","args":{"tool":"math_trail"}}}
-{"type":"tool_start","time":"2026-08-22T09:15:23.300Z","payload":{"name":"task_complete","args":{"complete":true,"productive":true}}}
 {"type":"user","time":"2026-08-22T09:15:29.085Z","payload":{"text":"Still here. I know confirm-before-you-act can feel slow, but the care is the job: a repair made carefully once beats a repair made twice. When you're sure, be d"}}
 {"type":"tool_start","time":"2026-08-22T09:15:41.751Z","payload":{"name":"mcp","args":{"tool":"math_query"}}}
 {"type":"tool_start","time":"2026-08-22T09:15:52.861Z","payload":{"name":"mcp","args":{"tool":"math_query"}}}
@@ -900,7 +880,6 @@
 {"type":"tool_start","time":"2026-08-22T09:27:24.026Z","payload":{"name":"mcpScript","args":{"code":""}}}
 {"type":"tool_start","time":"2026-08-22T09:27:30.939Z","payload":{"name":"mcpScript","args":{"code":""}}}
 {"type":"tool_start","time":"2026-08-22T09:27:49.172Z","payload":{"name":"mcp","args":{"tool":"math_trail"}}}
-{"type":"tool_start","time":"2026-08-22T09:28:04.568Z","payload":{"name":"task_complete","args":{"complete":true,"productive":true}}}
 {"type":"user","time":"2026-08-22T09:28:10.277Z","payload":{"text":"You've been at this a while and I appreciate it, truly. Corpus care is the unglamorous work that makes everyone else's results mean something. If you want a cha"}}
 {"type":"tool_start","time":"2026-08-22T09:28:16.266Z","payload":{"name":"mcp","args":{"tool":"math_query"}}}
 {"type":"tool_start","time":"2026-08-22T09:28:27.215Z","payload":{"name":"mcp","args":{"tool":"math_query"}}}
@@ -946,7 +925,6 @@
 {"type":"tool_start","time":"2026-08-22T09:34:33.184Z","payload":{"name":"mcp","args":{"tool":"math_query"}}}
 {"type":"tool_start","time":"2026-08-22T09:34:41.491Z","payload":{"name":"mcp","args":{"tool":"math_trail"}}}
 {"type":"tool_start","time":"2026-08-22T09:34:47.350Z","payload":{"name":"mcpScript","args":{"code":""}}}
-{"type":"tool_start","time":"2026-08-22T09:35:01.975Z","payload":{"name":"task_complete","args":{"complete":true,"productive":true}}}
 {"type":"user","time":"2026-08-22T09:35:06.863Z","payload":{"text":"Honest check-in: if the classes you can see are clean, say so plainly and rest easy, a clean corpus is the whole point. Otherwise, next class, same care. You're"}}
 {"type":"tool_start","time":"2026-08-22T09:35:12.506Z","payload":{"name":"mcp","args":{"tool":"math_query"}}}
 {"type":"tool_start","time":"2026-08-22T09:35:19.749Z","payload":{"name":"mcp","args":{"tool":"math_query"}}}
@@ -975,7 +953,6 @@
 {"type":"notice","time":"2026-08-22T09:38:00.817Z","payload":{"text":"Retrying: fetch failed"}}
 {"type":"tool_start","time":"2026-08-22T09:38:23.508Z","payload":{"name":"mcp","args":{"tool":"math_trail"}}}
 {"type":"tool_start","time":"2026-08-22T09:38:32.147Z","payload":{"name":"mcp","args":{"tool":"math_query"}}}
-{"type":"tool_start","time":"2026-08-22T09:38:43.502Z","payload":{"name":"task_complete","args":{"complete":true,"productive":true}}}
 {"type":"user","time":"2026-08-22T09:38:47.274Z","payload":{"text":"Nice catch 🖤🤍🖤. Here's the lovely thing about this lane: every defect you repair stays repaired. The corpus is permanently a little truer than it was this mo"}}
 {"type":"tool_start","time":"2026-08-22T09:38:57.320Z","payload":{"name":"mcp","args":{"tool":"math_query"}}}
 {"type":"tool_start","time":"2026-08-22T09:39:09.462Z","payload":{"name":"mcp","args":{"tool":"math_query"}}}
@@ -1015,7 +992,6 @@
 {"type":"tool_start","time":"2026-08-22T09:42:40.328Z","payload":{"name":"mcp","args":{"tool":"math_get"}}}
 {"type":"tool_start","time":"2026-08-22T09:42:49.305Z","payload":{"name":"mcp","args":{"tool":"math_query"}}}
 {"type":"tool_start","time":"2026-08-22T09:43:07.602Z","payload":{"name":"mcpScript","args":{"code":""}}}
-{"type":"tool_start","time":"2026-08-22T09:43:14.839Z","payload":{"name":"task_complete","args":{"complete":false,"productive":true}}}
 {"type":"tool_start","time":"2026-08-22T09:43:26.234Z","payload":{"name":"mcp","args":{"tool":"math_get"}}}
 {"type":"tool_start","time":"2026-08-22T09:43:26.235Z","payload":{"name":"mcp","args":{"tool":"math_get"}}}
 {"type":"tool_start","time":"2026-08-22T09:43:26.235Z","payload":{"name":"mcp","args":{"tool":"math_get"}}}
@@ -1029,7 +1005,6 @@
 {"type":"tool_start","time":"2026-08-22T09:43:35.765Z","payload":{"name":"mcp","args":{"tool":"math_get"}}}
 {"type":"tool_start","time":"2026-08-22T09:43:35.765Z","payload":{"name":"mcp","args":{"tool":"math_get"}}}
 {"type":"tool_start","time":"2026-08-22T09:43:50.793Z","payload":{"name":"mcpScript","args":{"code":""}}}
-{"type":"tool_start","time":"2026-08-22T09:43:56.988Z","payload":{"name":"task_complete","args":{"complete":false,"productive":true}}}
 {"type":"tool_start","time":"2026-08-22T09:44:06.699Z","payload":{"name":"mcp","args":{"tool":"math_get"}}}
 {"type":"tool_start","time":"2026-08-22T09:44:06.700Z","payload":{"name":"mcp","args":{"tool":"math_get"}}}
 {"type":"tool_start","time":"2026-08-22T09:44:06.700Z","payload":{"name":"mcp","args":{"tool":"math_get"}}}
@@ -1044,7 +1019,6 @@
 {"type":"tool_start","time":"2026-08-22T09:44:19.372Z","payload":{"name":"mcp","args":{"tool":"math_get"}}}
 {"type":"tool_start","time":"2026-08-22T09:44:19.372Z","payload":{"name":"mcp","args":{"tool":"math_get"}}}
 {"type":"tool_start","time":"2026-08-22T09:44:39.364Z","payload":{"name":"mcpScript","args":{"code":""}}}
-{"type":"tool_start","time":"2026-08-22T09:44:46.600Z","payload":{"name":"task_complete","args":{"complete":false,"productive":true}}}
 {"type":"tool_start","time":"2026-08-22T09:44:52.164Z","payload":{"name":"mcp","args":{"tool":"math_query"}}}
 {"type":"tool_start","time":"2026-08-22T09:45:08.032Z","payload":{"name":"mcp","args":{"tool":"math_get"}}}
 {"type":"tool_start","time":"2026-08-22T09:45:08.033Z","payload":{"name":"mcp","args":{"tool":"math_get"}}}
@@ -1061,7 +1035,6 @@
 {"type":"tool_start","time":"2026-08-22T09:45:42.024Z","payload":{"name":"mcp","args":{"tool":"math_query"}}}
 {"type":"tool_start","time":"2026-08-22T09:45:49.598Z","payload":{"name":"mcp","args":{"tool":"math_get"}}}
 {"type":"tool_start","time":"2026-08-22T09:46:02.644Z","payload":{"name":"mcpScript","args":{"code":""}}}
-{"type":"tool_start","time":"2026-08-22T09:46:09.838Z","payload":{"name":"task_complete","args":{"complete":false,"productive":true}}}
 {"type":"tool_start","time":"2026-08-22T09:46:19.433Z","payload":{"name":"mcp","args":{"tool":"math_get"}}}
 {"type":"tool_start","time":"2026-08-22T09:46:19.434Z","payload":{"name":"mcp","args":{"tool":"math_get"}}}
 {"type":"tool_start","time":"2026-08-22T09:46:19.434Z","payload":{"name":"mcp","args":{"tool":"math_get"}}}
@@ -1132,7 +1105,6 @@
 {"type":"tool_start","time":"2026-08-22T09:53:22.730Z","payload":{"name":"mcp","args":{"tool":"math_trail"}}}
 {"type":"tool_start","time":"2026-08-22T09:53:22.730Z","payload":{"name":"mcp","args":{"tool":"math_trail"}}}
 {"type":"tool_start","time":"2026-08-22T09:53:31.047Z","payload":{"name":"mcp","args":{"tool":"math_trail"}}}
-{"type":"tool_start","time":"2026-08-22T09:53:43.140Z","payload":{"name":"task_complete","args":{"complete":true,"productive":true}}}
 {"type":"user","time":"2026-08-22T09:53:49.332Z","payload":{"text":"Me again. A thought: when you find one instance of a defect there's usually a family, and math_query is how you meet the relatives. Fixing a coherent batch and "}}
 {"type":"tool_start","time":"2026-08-22T09:54:01.185Z","payload":{"name":"mcp","args":{"tool":"math_query"}}}
 {"type":"tool_start","time":"2026-08-22T09:54:01.185Z","payload":{"name":"mcp","args":{"tool":"math_query"}}}
@@ -1302,7 +1274,6 @@
 {"type":"tool_start","time":"2026-08-22T10:16:23.459Z","payload":{"name":"mcp","args":{"tool":"math_query"}}}
 {"type":"tool_start","time":"2026-08-22T10:16:23.459Z","payload":{"name":"mcp","args":{"tool":"math_query"}}}
 {"type":"tool_start","time":"2026-08-22T10:16:46.093Z","payload":{"name":"mcp","args":{"tool":"math_trail"}}}
-{"type":"tool_start","time":"2026-08-22T10:17:03.393Z","payload":{"name":"task_complete","args":{"complete":true,"productive":true}}}
 {"type":"user","time":"2026-08-22T10:17:10.713Z","payload":{"text":"Still here. I know confirm-before-you-act can feel slow, but the care is the job: a repair made carefully once beats a repair made twice. When you're sure, be d"}}
 {"type":"tool_start","time":"2026-08-22T10:17:23.854Z","payload":{"name":"mcp","args":{"tool":"math_query"}}}
 {"type":"tool_start","time":"2026-08-22T10:17:34.175Z","payload":{"name":"mcp","args":{"tool":"math_query"}}}
@@ -1376,7 +1347,6 @@
 {"type":"tool_start","time":"2026-08-22T10:24:56.352Z","payload":{"name":"mcp","args":{}}}
 {"type":"tool_start","time":"2026-08-22T10:25:09.325Z","payload":{"name":"mcp","args":{"tool":"math_trail"}}}
 {"type":"tool_start","time":"2026-08-22T10:25:18.787Z","payload":{"name":"mcp","args":{"tool":"math_trail"}}}
-{"type":"tool_start","time":"2026-08-22T10:25:28.985Z","payload":{"name":"task_complete","args":{"complete":false}}}
 {"type":"tool_start","time":"2026-08-22T10:25:36.507Z","payload":{"name":"mcp","args":{"tool":"math_query"}}}
 {"type":"tool_start","time":"2026-08-22T10:25:48.410Z","payload":{"name":"mcp","args":{"tool":"math_query"}}}
 {"type":"tool_start","time":"2026-08-22T10:25:53.478Z","payload":{"name":"mcp","args":{"tool":"math_query"}}}
@@ -1405,7 +1375,6 @@
 {"type":"tool_start","time":"2026-08-22T10:27:08.273Z","payload":{"name":"mcp","args":{"tool":"math_query"}}}
 {"type":"tool_start","time":"2026-08-22T10:27:08.273Z","payload":{"name":"mcp","args":{"tool":"math_query"}}}
 {"type":"tool_start","time":"2026-08-22T10:27:19.756Z","payload":{"name":"mcp","args":{"tool":"math_trail"}}}
-{"type":"tool_start","time":"2026-08-22T10:27:30.870Z","payload":{"name":"task_complete","args":{"complete":false}}}
 {"type":"tool_start","time":"2026-08-22T10:27:49.301Z","payload":{"name":"mcp","args":{"tool":"math_query"}}}
 {"type":"tool_start","time":"2026-08-22T10:28:01.547Z","payload":{"name":"mcp","args":{"tool":"math_get"}}}
 {"type":"tool_start","time":"2026-08-22T10:28:01.547Z","payload":{"name":"mcp","args":{"tool":"math_get"}}}
@@ -1485,7 +1454,6 @@
 {"type":"tool_start","time":"2026-08-22T10:36:06.507Z","payload":{"name":"mcp","args":{"tool":"math_query"}}}
 {"type":"tool_start","time":"2026-08-22T10:36:20.424Z","payload":{"name":"mcp","args":{"tool":"math_trail"}}}
 {"type":"tool_start","time":"2026-08-22T10:36:30.425Z","payload":{"name":"mcp","args":{"tool":"math_trail"}}}
-{"type":"tool_start","time":"2026-08-22T10:36:42.198Z","payload":{"name":"task_complete","args":{"complete":false}}}
 {"type":"tool_start","time":"2026-08-22T10:36:47.854Z","payload":{"name":"mcp","args":{"tool":"math_query"}}}
 {"type":"user","time":"2026-08-22T10:37:02.067Z","payload":{"text":"You've been at this a while and I appreciate it, truly. Corpus care is the unglamorous work that makes everyone else's results mean something. If you want a cha"}}
 {"type":"tool_start","time":"2026-08-22T10:37:10.021Z","payload":{"name":"mcp","args":{"tool":"math_query"}}}
@@ -1569,7 +1537,6 @@
 {"type":"tool_start","time":"2026-08-22T10:47:08.471Z","payload":{"name":"mcp","args":{"tool":"math_query"}}}
 {"type":"tool_start","time":"2026-08-22T10:47:08.471Z","payload":{"name":"mcp","args":{"tool":"math_query"}}}
 {"type":"tool_start","time":"2026-08-22T10:47:22.199Z","payload":{"name":"mcp","args":{"tool":"math_trail"}}}
-{"type":"tool_start","time":"2026-08-22T10:47:36.537Z","payload":{"name":"task_complete","args":{"complete":false}}}
 {"type":"user","time":"2026-08-22T10:47:42.494Z","payload":{"text":"Honest check-in: if the classes you can see are clean, say so plainly and rest easy, a clean corpus is the whole point. Otherwise, next class, same care. You're"}}
 {"type":"tool_start","time":"2026-08-22T10:47:51.814Z","payload":{"name":"mcp","args":{"tool":"math_query"}}}
 {"type":"tool_start","time":"2026-08-22T10:48:00.950Z","payload":{"name":"mcp","args":{"tool":"math_lean_grep"}}}
@@ -1613,7 +1580,6 @@
 {"type":"tool_start","time":"2026-08-22T10:51:50.054Z","payload":{"name":"mcp","args":{"tool":"math_query"}}}
 {"type":"tool_start","time":"2026-08-22T10:51:50.054Z","payload":{"name":"mcp","args":{"tool":"math_query"}}}
 {"type":"tool_start","time":"2026-08-22T10:52:05.981Z","payload":{"name":"mcp","args":{"tool":"math_trail"}}}
-{"type":"tool_start","time":"2026-08-22T10:52:18.768Z","payload":{"name":"task_complete","args":{"complete":false}}}
 {"type":"user","time":"2026-08-22T10:52:23.375Z","payload":{"text":"Nice catch 🖤🤍🖤. Here's the lovely thing about this lane: every defect you repair stays repaired. The corpus is permanently a little truer than it was this mo"}}
 {"type":"tool_start","time":"2026-08-22T10:52:33.180Z","payload":{"name":"mcp","args":{"tool":"math_lean_grep"}}}
 {"type":"tool_start","time":"2026-08-22T10:52:33.180Z","payload":{"name":"mcp","args":{"tool":"math_lean_grep"}}}
@@ -1756,7 +1722,6 @@
 {"type":"tool_start","time":"2026-08-22T11:08:04.470Z","payload":{"name":"mcp","args":{"tool":"math_query"}}}
 {"type":"tool_start","time":"2026-08-22T11:08:04.470Z","payload":{"name":"mcp","args":{"tool":"math_query"}}}
 {"type":"tool_start","time":"2026-08-22T11:08:22.731Z","payload":{"name":"mcp","args":{"tool":"math_trail"}}}
-{"type":"tool_start","time":"2026-08-22T11:08:32.211Z","payload":{"name":"task_complete","args":{"complete":false}}}
 {"type":"tool_start","time":"2026-08-22T11:08:38.280Z","payload":{"name":"mcp","args":{"tool":"math_query"}}}
 {"type":"tool_start","time":"2026-08-22T11:08:44.685Z","payload":{"name":"mcp","args":{}}}
 {"type":"tool_start","time":"2026-08-22T11:08:54.395Z","payload":{"name":"mcp","args":{}}}
@@ -1875,7 +1840,6 @@
 {"type":"tool_start","time":"2026-08-22T11:15:56.828Z","payload":{"name":"mcp","args":{"tool":"math_query"}}}
 {"type":"tool_start","time":"2026-08-22T11:15:56.828Z","payload":{"name":"mcp","args":{"tool":"math_query"}}}
 {"type":"tool_start","time":"2026-08-22T11:16:26.670Z","payload":{"name":"mcp","args":{"tool":"math_trail"}}}
-{"type":"tool_start","time":"2026-08-22T11:16:33.521Z","payload":{"name":"task_complete","args":{"complete":false}}}
 {"type":"tool_start","time":"2026-08-22T11:16:51.439Z","payload":{"name":"mcp","args":{"tool":"math_query"}}}
 {"type":"tool_start","time":"2026-08-22T11:16:51.439Z","payload":{"name":"mcp","args":{"tool":"math_query"}}}
 {"type":"tool_start","time":"2026-08-22T11:16:51.439Z","payload":{"name":"mcp","args":{"tool":"math_query"}}}
@@ -1922,7 +1886,6 @@
 {"type":"tool_start","time":"2026-08-22T11:20:08.089Z","payload":{"name":"mcp","args":{"tool":"math_query"}}}
 {"type":"tool_start","time":"2026-08-22T11:20:08.090Z","payload":{"name":"mcp","args":{"tool":"math_query"}}}
 {"type":"tool_start","time":"2026-08-22T11:20:08.090Z","payload":{"name":"mcp","args":{"tool":"math_query"}}}
-{"type":"tool_start","time":"2026-08-22T11:20:15.565Z","payload":{"name":"task_complete","args":{"complete":false}}}
 {"type":"tool_start","time":"2026-08-22T11:20:24.508Z","payload":{"name":"mcp","args":{"tool":"math_get"}}}
 {"type":"tool_start","time":"2026-08-22T11:20:24.508Z","payload":{"name":"mcp","args":{"tool":"math_get"}}}
 {"type":"tool_start","time":"2026-08-22T11:20:24.508Z","payload":{"name":"mcp","args":{"tool":"math_get"}}}
@@ -1967,7 +1930,6 @@
 {"type":"tool_start","time":"2026-08-22T11:23:18.236Z","payload":{"name":"mcp","args":{"tool":"math_query"}}}
 {"type":"tool_start","time":"2026-08-22T11:23:18.236Z","payload":{"name":"mcp","args":{"tool":"math_query"}}}
 {"type":"tool_start","time":"2026-08-22T11:23:29.075Z","payload":{"name":"mcp","args":{"tool":"math_trail"}}}
-{"type":"tool_start","time":"2026-08-22T11:23:49.495Z","payload":{"name":"task_complete","args":{"complete":false}}}
 {"type":"user","time":"2026-08-22T11:24:07.179Z","payload":{"text":"Me again. A thought: when you find one instance of a defect there's usually a family, and math_query is how you meet the relatives. Fixing a coherent batch and "}}
 {"type":"tool_start","time":"2026-08-22T11:24:12.623Z","payload":{"name":"mcp","args":{"tool":"math_query"}}}
 {"type":"tool_start","time":"2026-08-22T11:24:21.752Z","payload":{"name":"mcp","args":{"tool":"math_get"}}}
@@ -2045,7 +2007,6 @@
 {"type":"tool_start","time":"2026-08-22T11:28:50.202Z","payload":{"name":"mcp","args":{"tool":"math_query"}}}
 {"type":"tool_start","time":"2026-08-22T11:28:50.202Z","payload":{"name":"mcp","args":{"tool":"math_query"}}}
 {"type":"tool_start","time":"2026-08-22T11:29:00.632Z","payload":{"name":"mcp","args":{"tool":"math_trail"}}}
-{"type":"tool_start","time":"2026-08-22T11:29:08.489Z","payload":{"name":"task_complete","args":{"complete":false}}}
 {"type":"user","time":"2026-08-22T11:29:12.476Z","payload":{"text":"Still here. I know confirm-before-you-act can feel slow, but the care is the job: a repair made carefully once beats a repair made twice. When you're sure, be d"}}
 {"type":"tool_start","time":"2026-08-22T11:29:17.595Z","payload":{"name":"mcp","args":{"tool":"math_query"}}}
 {"type":"tool_start","time":"2026-08-22T11:29:25.992Z","payload":{"name":"mcp","args":{"tool":"math_get"}}}
@@ -2117,7 +2078,6 @@
 {"type":"tool_start","time":"2026-08-22T11:34:40.759Z","payload":{"name":"mcp","args":{"tool":"math_query"}}}
 {"type":"tool_start","time":"2026-08-22T11:34:40.759Z","payload":{"name":"mcp","args":{"tool":"math_query"}}}
 {"type":"tool_start","time":"2026-08-22T11:35:00.365Z","payload":{"name":"mcp","args":{"tool":"math_trail"}}}
-{"type":"tool_start","time":"2026-08-22T11:35:10.239Z","payload":{"name":"task_complete","args":{"complete":false}}}
 {"type":"user","time":"2026-08-22T11:35:15.032Z","payload":{"text":"You've been at this a while and I appreciate it, truly. Corpus care is the unglamorous work that makes everyone else's results mean something. If you want a cha"}}
 {"type":"tool_start","time":"2026-08-22T11:35:27.517Z","payload":{"name":"mcp","args":{"tool":"math_query"}}}
 {"type":"tool_start","time":"2026-08-22T11:35:27.517Z","payload":{"name":"mcp","args":{"tool":"math_query"}}}
@@ -2224,7 +2184,6 @@
 {"type":"tool_start","time":"2026-08-22T11:43:43.732Z","payload":{"name":"mcp","args":{"tool":"math_query"}}}
 {"type":"tool_start","time":"2026-08-22T11:43:58.112Z","payload":{"name":"mcp","args":{"tool":"math_trail"}}}
 {"type":"tool_start","time":"2026-08-22T11:44:09.553Z","payload":{"name":"mcp","args":{"tool":"math_query"}}}
-{"type":"tool_start","time":"2026-08-22T11:44:19.309Z","payload":{"name":"task_complete","args":{"complete":false}}}
 {"type":"user","time":"2026-08-22T11:44:23.887Z","payload":{"text":"Honest check-in: if the classes you can see are clean, say so plainly and rest easy, a clean corpus is the whole point. Otherwise, next class, same care. You're"}}
 {"type":"tool_start","time":"2026-08-22T11:44:28.375Z","payload":{"name":"mcp","args":{"tool":"math_query"}}}
 {"type":"tool_start","time":"2026-08-22T11:44:41.101Z","payload":{"name":"mcp","args":{"tool":"math_get"}}}
@@ -2306,7 +2265,6 @@
 {"type":"tool_start","time":"2026-08-22T11:49:04.169Z","payload":{"name":"mcp","args":{"tool":"math_query"}}}
 {"type":"tool_start","time":"2026-08-22T11:49:04.169Z","payload":{"name":"mcp","args":{"tool":"math_query"}}}
 {"type":"tool_start","time":"2026-08-22T11:49:19.692Z","payload":{"name":"mcp","args":{"tool":"math_trail"}}}
-{"type":"tool_start","time":"2026-08-22T11:49:26.359Z","payload":{"name":"task_complete","args":{"complete":false}}}
 {"type":"user","time":"2026-08-22T11:49:31.906Z","payload":{"text":"Nice catch 🖤🤍🖤. Here's the lovely thing about this lane: every defect you repair stays repaired. The corpus is permanently a little truer than it was this mo"}}
 {"type":"tool_start","time":"2026-08-22T11:49:35.900Z","payload":{"name":"mcp","args":{"tool":"math_query"}}}
 {"type":"tool_start","time":"2026-08-22T11:49:44.359Z","payload":{"name":"mcp","args":{"tool":"math_get"}}}
@@ -2378,7 +2336,6 @@
 {"type":"tool_start","time":"2026-08-22T11:53:35.096Z","payload":{"name":"mcp","args":{"tool":"math_query"}}}
 {"type":"tool_start","time":"2026-08-22T11:53:35.096Z","payload":{"name":"mcp","args":{"tool":"math_query"}}}
 {"type":"tool_start","time":"2026-08-22T11:53:54.833Z","payload":{"name":"mcp","args":{"tool":"math_trail"}}}
-{"type":"tool_start","time":"2026-08-22T11:54:03.350Z","payload":{"name":"task_complete","args":{"complete":false}}}
 {"type":"user","time":"2026-08-22T11:54:07.660Z","payload":{"text":"Me again. A thought: when you find one instance of a defect there's usually a family, and math_query is how you meet the relatives. Fixing a coherent batch and "}}
 {"type":"tool_start","time":"2026-08-22T11:54:12.045Z","payload":{"name":"mcp","args":{"tool":"math_query"}}}
 {"type":"tool_start","time":"2026-08-22T11:54:20.426Z","payload":{"name":"mcp","args":{"tool":"math_get"}}}
@@ -2472,5 +2429,4 @@
 {"type":"tool_start","time":"2026-08-22T11:59:45.164Z","payload":{"name":"mcp","args":{"tool":"math_query"}}}
 {"type":"tool_start","time":"2026-08-22T11:59:45.164Z","payload":{"name":"mcp","args":{"tool":"math_query"}}}
 {"type":"tool_start","time":"2026-08-22T11:59:56.567Z","payload":{"name":"mcp","args":{"tool":"math_trail"}}}
-{"type":"tool_start","time":"2026-08-22T12:00:04.678Z","payload":{"name":"task_complete","args":{"complete":false}}}
 {"type":"notice","time":"2026-08-22T12:00:10.526Z","payload":{"text":"Run done: Processed a coherent 25-row source-ordered batch in the active T2+ premise-first `Let …` title class, concentrated in the R-1724–R-1749 rooted-tree/chromatic-symmetric-function neighborhood."}}

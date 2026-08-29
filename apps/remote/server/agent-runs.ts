@@ -63,10 +63,8 @@ export interface AgentRunSummary {
   elapsedMs: number;
   observable: boolean;
   dispatched: boolean;
-  productive: boolean | null;
   teamRole: "worker" | "supervisor" | null;
   teamSlot: number | null;
-  summary: string | null;
   error: string | null;
 }
 
@@ -118,10 +116,8 @@ export function summarizeAgentRun(
     elapsedMs: Math.max(0, (row.endedAt ?? at) - row.startedAt),
     observable: row.observable === true,
     dispatched: false,
-    productive: row.productive ?? null,
     teamRole: row.teamRole ?? null,
     teamSlot: row.teamSlot ?? null,
-    summary: status === "error" ? null : detail,
     error: status === "error" ? detail : null,
   };
 }

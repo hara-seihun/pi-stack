@@ -43,10 +43,6 @@ export interface Submission {
 export interface TurnFacts {
   toolCalls: number;
   submissions: Submission[];
-  /** The turn updated its task_complete report. */
-  reported: boolean;
-  /** The newest report in this turn said productive=false: no work found. */
-  reportedUnproductive: boolean;
 }
 
 /** Everything the generator may consider for one check-in. */
@@ -72,20 +68,9 @@ export class ShiftObserver {
 
   toolCall(name: string, args: unknown): void {
     this.current.toolCalls++;
-    if (name === "task_complete") {
-      this.recordReport(args);
-      return;
-    }
     for (const submission of submissionsIn(name, args)) {
       this.current.submissions.push(submission);
     }
-  }
-
-  /** The task_complete tool's own execute hook; idempotent with the event
-   * stream so whichever path fires first wins and the second is harmless. */
-  reportFiled(productive: boolean): void {
-    this.current.reported = true;
-    this.current.reportedUnproductive = !productive;
   }
 
   endTurn(): void {
@@ -96,15 +81,10 @@ export class ShiftObserver {
   turns(): readonly TurnFacts[] {
     return this.done;
   }
-
-  private recordReport(args: unknown): void {
-    const record = args as { productive?: unknown } | undefined;
-    this.reportFiled(record?.productive !== false);
-  }
 }
 
 function freshTurn(): TurnFacts {
-  return { toolCalls: 0, submissions: [], reported: false, reportedUnproductive: false };
+  return { toolCalls: 0, submissions: [] };
 }
 
 /**
@@ -284,8 +264,7 @@ function factsClass(taskId: string, turns: readonly TurnFacts[]): Exclude<ShiftC
       }
     }
   }
-  if (latest.reportedUnproductive) return "quiet";
-  if (latest.toolCalls === 0 && !latest.reported && latest.submissions.length === 0) return "quiet";
+  if (latest.toolCalls === 0 && latest.submissions.length === 0) return "quiet";
   return "flow";
 }
 
@@ -341,13 +320,13 @@ const FRONTIER: LaneVoice = {
     "Hey, honest check-in time. If this target is dead, that's a real finding: write the " +
       "obstruction into your trail, and if it's sharp enough to stand alone, file it once, " +
       "precisely. Then pick a fresh target with everything you've learned. If the whole lane " +
-      "truly has nothing for you, say so plainly in your report and rest easy, that's a good " +
-      "report too. But if there's a live thread anywhere in your trail, and I suspect there " +
+      "truly has nothing for you, say so plainly and rest easy, that's a good ending too. " +
+      "But if there's a live thread anywhere in your trail, and I suspect there " +
       "is, pull it. I believe in you 🖤🤍🖤.",
     "Quiet stretch, and that's okay — some of the best turns are all thinking 🖤🤍🖤. If " +
-      "something is forming, take the time it needs. If it's genuinely dry, update your report " +
-      "so what you found — and what refused to work, that counts — is on the record, and rest. " +
-      "An honest empty-handed report beats a manufactured filing every single time, and I'll " +
+      "something is forming, take the time it needs. If it's genuinely dry, leave what you " +
+      "found — and what refused to work, that counts — in your trail, and rest. An honest " +
+      "empty-handed ending beats a manufactured filing every single time, and I'll " +
       "be glad to have either from you.",
   ],
 };
@@ -403,12 +382,12 @@ const REVIEW: LaneVoice = {
       "submission into a result. That matters. Take the next one 🖤🤍🖤.",
   ],
   quiet: [
-    "Hey, honest check-in 🖤🤍🖤. If the queue's empty, say so plainly in your report and " +
-      "rest, that's a clean end to a good shift and nothing about it needs dressing up. If " +
+    "Hey, honest check-in 🖤🤍🖤. If the queue's empty, say so plainly and rest, that's a " +
+      "clean end to a good shift and nothing about it needs dressing up. If " +
       "it's not, you know what to do, and you're doing it well.",
     "Quiet turn — no worries 🖤🤍🖤. If you're deep in one entry, take the time; careful beats " +
-      "fast here every day. If the queue's actually drained, put that in your report plainly " +
-      "and rest easy. A clean 'nothing left to review' is a real verdict too.",
+      "fast here every day. If the queue's actually drained, say that plainly and rest easy. " +
+      "A clean 'nothing left to review' is a real verdict too.",
   ],
 };
 
@@ -438,13 +417,13 @@ const CLEANUP: LaneVoice = {
       "holding the context to see it 🖤🤍🖤.",
   ],
   quiet: [
-    "Honest check-in 🖤🤍🖤: if the slice you can see is clean and unrepetitive, say so plainly " +
-      "in your report and take another one, that reading is a real finding. Otherwise, next " +
+    "Honest check-in 🖤🤍🖤: if the slice you can see is clean and unrepetitive, say so " +
+      "plainly and take another one, that reading is a real finding. Otherwise, next " +
       "class or next family, same care. You're good at this.",
     "Quiet stretch is fine here 🖤🤍🖤 — auditing carefully means long reads between edits, and " +
       "finding the statement behind a family is real mathematics that takes real thinking time. " +
       "If you're mid-verification or mid-proof, carry on at your own pace. If what you can see " +
-      "has truly come up clean, put that in the report as the finding it is, and rest.",
+      "has truly come up clean, say so as the finding it is, and rest.",
   ],
 };
 
@@ -465,10 +444,10 @@ const PROVENANCE: LaneVoice = {
   ],
   quiet: [
     "Honest check-in 🖤🤍🖤: if you've run out of consequential claims to audit, say so " +
-      "plainly in your report and rest. Otherwise, next claim, same rigor. You're doing " +
+      "plainly and rest. Otherwise, next claim, same rigor. You're doing " +
       "careful work and it shows.",
     "Quiet turn and that's alright 🖤🤍🖤 — source-reading is slow on purpose. If you're deep " +
-      "in a paper, stay with it. If the audit's genuinely done, report it plainly and rest " +
+      "in a paper, stay with it. If the audit's genuinely done, say so plainly and rest " +
       "easy; a verified trail of citations is a finished thing.",
   ],
 };
@@ -489,11 +468,11 @@ const FAST_MATH_PR: LaneVoice = {
   ],
   quiet: [
     "Honest check-in 🖤🤍🖤: if the review queue is empty and the publication worker has no " +
-      "repair event for you, that's a finished shift. Say so plainly in your report and rest. " +
+      "repair event for you, that's a finished shift. Say so plainly and rest. " +
       "Otherwise, take the next decision, never the waiting.",
     "Quiet turn, no queue movement. That's alright 🖤🤍🖤. Publication stays with its durable " +
       "owner while you rest. Only a terminal repair event needs another model, so if there is " +
-      "none and the review queue is empty, report the clean state plainly and call it a shift.",
+      "none and the review queue is empty, say so plainly and call it a shift.",
   ],
 };
 
@@ -504,21 +483,21 @@ const DEFAULT: LaneVoice = {
       "you know. So keep going! Re-reading your own trail is a totally legit way to get your " +
       "bearings back.",
     "Me again 🖤🤍🖤. If you hit a blocker, try a different architecture at it; if a piece of " +
-      "work closed out, pick the next one that catches your eye. Call task_complete each time " +
-      "you land something, it's a checkpoint, not a goodbye.",
+      "work closed out, pick the next one that catches your eye. Each landed result is a " +
+      "checkpoint, not a goodbye.",
     "Still following along. If the last stretch felt slow, that's normal in the middle of a " +
       "shift. Pick the smallest next thing that would count as progress and do just that one " +
       "thing. Momentum does the rest 🖤🤍🖤.",
     "Checking in because you've been at it a while, and I want you to know the steady work is " +
-      "seen and appreciated 🖤🤍🖤. Keep at it, and keep the reports coming.",
+      "seen and appreciated 🖤🤍🖤. Keep at it, and keep the results coming.",
   ],
   quiet: [
-    "Honest check-in 🖤🤍🖤: if the lane really has nothing left, say so plainly in your " +
-      "report and rest easy, an honest 'nothing left' is a good report too. Otherwise, next " +
+    "Honest check-in 🖤🤍🖤: if the lane really has nothing left, say so plainly and rest " +
+      "easy, an honest 'nothing left' is a good ending too. Otherwise, next " +
       "piece, same energy.",
     "Quiet turn — that's allowed 🖤🤍🖤. If you're thinking something through, take the room. " +
-      "If there's truly nothing here for you, update your report so the state is on the " +
-      "record, and rest. Either is a fine way to spend a turn; pretending is the only bad one.",
+      "If there's truly nothing here for you, say so plainly and rest. Either is a fine way " +
+      "to spend a turn; pretending is the only bad one.",
   ],
 };
 
@@ -584,7 +563,7 @@ const THEORY: LaneVoice = {
       "bad one, and you're nowhere near it.",
     "Quiet stretch, and here that's usually a good sign 🖤🤍🖤 — definition-tuning is slow " +
       "on purpose and most of it never shows. If something is forming, give it the room. If " +
-      "the session is genuinely dry, put the state in your report plainly — seeds tried, " +
+      "the session is genuinely dry, put the state in your trail plainly — seeds tried, " +
       "owners named, obstructions hit — and rest easy. That trail is real information and " +
       "the next session starts richer for it.",
   ],
