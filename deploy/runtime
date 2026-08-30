@@ -83,7 +83,7 @@ settings_manager="$dependency_release/node_modules/@earendil-works/pi-coding-age
 grep -q 'renameSync(temporary, path)' "$settings_manager"
 node --check "$settings_manager"
 
-extensions=(pi-claude-code-use state-compactor bash-timeout-guard publication-custody chatgpt-pro pi-cursor)
+extensions=(pi-claude-code-use state-compactor bash-timeout-guard publication-custody scratch-updates chatgpt-pro pi-cursor)
 # A release belongs to the reviewed source commit, even when two commits happen
 # to produce identical runtime files. This keeps the selected artifact's receipt
 # commit-consistent and makes the next deployment hit the unchanged fast path.

@@ -5,6 +5,7 @@
     "claude-code-use": "packages/runtime/extensions/pi-claude-code-use",
     "state-compactor": "packages/runtime/extensions/state-compactor",
     "bash-timeout-guard": "packages/runtime/extensions/bash-timeout-guard",
+    "scratch-updates": "packages/runtime/extensions/scratch-updates",
     "pi-cursor": "packages/runtime/extensions/pi-cursor",
     "remote": "apps/remote"
   },
@@ -14,6 +15,7 @@
       "claude-code-use",
       "state-compactor",
       "bash-timeout-guard",
+      "scratch-updates",
       "pi-cursor",
       "remote"
     ],

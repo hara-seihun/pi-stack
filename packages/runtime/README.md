@@ -7,6 +7,7 @@ Reusable extensions and prompt-evaluation tools for [Pi](https://pi.dev).
 - `state-compactor` triggers Pi's native compaction before a provider request once context reaches 250,000 tokens.
 - `bash-timeout-guard` caps every bash call at 55 seconds and forbids detached work.
 - `publication-custody` ends model-side CI polling after a durable publication handoff.
+- `scratch-updates` reads published math scratch activity since its preceding machine-wide invocation.
 - `pi-claude-code-use` adapts Pi tools and prompts for Anthropic subscription requests.
 - `chatgpt-pro` exposes ChatGPT Pro through short-lived, authenticated Kernel browsers and verifies the persisted model evidence before returning an answer.
 - `pi-cursor` adds Cursor subscription OAuth, live model discovery, usage reporting, and native Connect/protobuf streaming. Its imported upstream source is pinned at version 1.4.27.
@@ -26,7 +27,7 @@ The root package enables every extension. Use Pi's package filters when only som
 
 The packages contain no host identities, credential values, deployment paths, or service policy. Configuration stays on the machine running Pi. Each component README lists its environment variables and local files.
 
-The ChatGPT Pro bridge requires a local configuration file. Other guards work with defaults and accept environment overrides. A host may connect their reporting hooks to an alert command or inbox without making that mechanism part of this repository.
+The ChatGPT Pro bridge requires a local configuration file. Scratch Updates requires the standalone `mcp` command and an authenticated `math_scratch` registration. Other guards work with defaults and accept environment overrides. A host may connect their reporting hooks to an alert command or inbox without making that mechanism part of this repository.
 
 ## Development
 
