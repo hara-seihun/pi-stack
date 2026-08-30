@@ -16,6 +16,7 @@ const fakeRpcLog = join(root, "fake-rpc.jsonl");
 const fakeChildPid = join(root, "fake-child.pid");
 const fakeCrashMarker = join(root, "fake-crash.marker");
 const fakeRestartMarker = join(root, "fake-restart.marker");
+const fakeGateRoot = join(root, "gates");
 const fakeOrchestratorDb = join(root, "orchestrator.sqlite3");
 const fakeAgentRuns = join(root, "agent-runs");
 const port = 20_000 + Math.floor(Math.random() * 10_000);
@@ -39,7 +40,7 @@ async function waitFor<T>(read: () => Promise<T>, accept: (value: T) => boolean,
   while (Date.now() < deadline) {
     value = await read();
     if (accept(value)) return value;
-    await Bun.sleep(50);
+    await Bun.sleep(5);
   }
   throw new Error(`Timed out waiting for state; last value: ${JSON.stringify(value)}`);
 }
@@ -50,6 +51,23 @@ function readJsonLines(path: string): any[] {
   const completeEnd = content.lastIndexOf("\n");
   if (completeEnd < 0) return [];
   return content.slice(0, completeEnd).split("\n").filter(Boolean).map((line) => JSON.parse(line));
+}
+
+function gatePath(name: string, state: "ready" | "release") {
+  return join(fakeGateRoot, `${name}.${state}`);
+}
+
+function resetGate(name: string) {
+  rmSync(gatePath(name, "ready"), { force: true });
+  rmSync(gatePath(name, "release"), { force: true });
+}
+
+async function waitForGate(name: string) {
+  await waitFor(async () => existsSync(gatePath(name, "ready")), Boolean);
+}
+
+function releaseGate(name: string) {
+  writeFileSync(gatePath(name, "release"), "release");
 }
 
 async function startServer() {
@@ -66,14 +84,21 @@ async function startServer() {
       PI_REMOTE_DATA: join(root, "data"),
       PI_REMOTE_PORT: String(port),
       PI_AGENT_DIR: join(root, "agent"),
-      PI_REMOTE_PROMPT_ACK_TIMEOUT_MS: "150",
-      PI_REMOTE_STATE_RECONCILE_MS: "50",
+      PI_REMOTE_PROMPT_ACK_TIMEOUT_MS: "10",
+      PI_REMOTE_STATE_RECONCILE_MS: "5",
+      PI_REMOTE_RUNTIME_CONNECT_TIMEOUT_MS: "200",
+      PI_REMOTE_RUNTIME_START_TIMEOUT_MS: "500",
+      PI_REMOTE_RUNTIME_TERMINATE_TIMEOUT_MS: "200",
+      PI_REMOTE_RUNTIME_START_POLL_MS: "2",
+      PI_REMOTE_RUNTIME_RESTART_DELAY_MS: "20",
       PI_REMOTE_INGESTION: join(root, "ingestion"),
       PI_FAKE_LAUNCH: fakeLaunch,
       PI_FAKE_RPC_LOG: fakeRpcLog,
       PI_FAKE_CHILD_PID: fakeChildPid,
       PI_FAKE_CRASH_MARKER: fakeCrashMarker,
       PI_FAKE_RESTART_MARKER: fakeRestartMarker,
+      PI_FAKE_GATE_ROOT: fakeGateRoot,
+      PI_FAKE_TIME_SCALE: "0.05",
       PI_REMOTE_ORCHESTRATOR_DB: fakeOrchestratorDb,
       PI_ORCHESTRATOR_AUTH: join(root, "agent", "auth.json"),
       PI_REMOTE_ORCHESTRATOR_RUNS: fakeAgentRuns,
@@ -101,7 +126,21 @@ async function startServer() {
 
 beforeAll(async () => {
   await Bun.write(fakePi, `#!/usr/bin/env python3
-import json, os, subprocess, sys, time
+import json, os, subprocess, sys, threading, time
+scale = float(os.environ.get('PI_FAKE_TIME_SCALE', '1'))
+def pause(seconds): time.sleep(seconds * scale)
+def gate(name):
+ root = os.environ['PI_FAKE_GATE_ROOT']
+ os.makedirs(root, exist_ok=True)
+ ready = os.path.join(root, name + '.ready')
+ release = os.path.join(root, name + '.release')
+ for path in (ready, release):
+  try: os.unlink(path)
+  except FileNotFoundError: pass
+ with open(ready, 'w') as marker: marker.write('ready')
+ while not os.path.exists(release): time.sleep(0.001)
+ os.unlink(ready)
+ os.unlink(release)
 provider = sys.argv[sys.argv.index('--provider') + 1] if '--provider' in sys.argv else 'anthropic'
 model_id = sys.argv[sys.argv.index('--model') + 1] if '--model' in sys.argv else 'claude-fable-5'
 thinking_level = sys.argv[sys.argv.index('--thinking') + 1] if '--thinking' in sys.argv else 'off'
@@ -117,6 +156,12 @@ first_state = True
 child = None
 def out(value):
  print(json.dumps(value), flush=True)
+def finish_release_later():
+ global streaming
+ gate('release-later')
+ out({'type':'message_end','message':{'role':'assistant','content':[{'type':'text','text':'current finished'}]}})
+ streaming = False
+ out({'type':'agent_settled'})
 for line in sys.stdin:
  try: request = json.loads(line)
  except Exception: continue
@@ -127,7 +172,7 @@ for line in sys.stdin:
  if kind == 'get_state':
   if first_state:
    first_state = False
-   time.sleep(0.12)
+   pause(0.12)
   out({'type':'response','id':rid,'command':'get_state','success':True,'data':{'isStreaming':streaming,'isCompacting':compacting,'pendingMessageCount':len(steering)+len(follow_up),'messageCount':0,'thinkingLevel':thinking_level,'sessionFile':None,'sessionName':session_name,'model':{'provider':provider,'id':model_id,'name':model_id}}})
  elif kind == 'get_available_models':
   out({'type':'response','id':rid,'command':kind,'success':True,'data':{'models':[
@@ -162,7 +207,7 @@ for line in sys.stdin:
    out({'type':'response','id':rid,'command':'prompt','success':False,'error':'simulated rejection'})
    continue
   streaming = True
-  if last == 'slow-ack': time.sleep(0.35)
+  if last == 'slow-ack': pause(0.35)
   if last != 'ack-timeout': out({'type':'response','id':rid,'command':'prompt','success':True})
   if last == 'slow-ack':
    out({'type':'agent_start'})
@@ -170,32 +215,23 @@ for line in sys.stdin:
    streaming = False
    out({'type':'agent_settled'})
   elif last == 'delayed-start':
-   time.sleep(0.35)
+   gate('delayed-start')
    out({'type':'agent_start'})
    out({'type':'message_end','message':{'role':'assistant','content':[{'type':'text','text':'started after reconcile'}]}})
    streaming = False
    out({'type':'agent_settled'})
   elif last == 'stale-settled':
    out({'type':'agent_settled'})
-   time.sleep(0.2)
+   pause(0.2)
    out({'type':'agent_start'})
-   time.sleep(0.2)
+   pause(0.2)
    out({'type':'message_end','message':{'role':'assistant','content':[{'type':'text','text':'done once'}]}})
    streaming = False
    out({'type':'agent_settled'})
   else:
    out({'type':'agent_start'})
    if last == 'release-later':
-    # Both tests that send this prompt have to act while the turn is still
-    # running: one queues a follow-up message, the other SIGHUPs the server
-    # mid-turn. They observe RUNNING over HTTP first, so the window has to
-    # outlast a poll interval plus a couple of round trips on a machine with
-    # nothing to spare. At 0.35s CI lost that race and the turn finished with
-    # no supervisor attached, which reads as a dropped assistant message.
-    time.sleep(3)
-    out({'type':'message_end','message':{'role':'assistant','content':[{'type':'text','text':'current finished'}]}})
-    streaming = False
-    out({'type':'agent_settled'})
+    threading.Thread(target=finish_release_later, daemon=True).start()
    elif last == 'later-run' or '<new_user_message>\\nlater-run\\n</new_user_message>' in last:
     out({'type':'message_end','message':{'role':'assistant','content':[{'type':'text','text':'later ran'}]}})
     streaming = False
@@ -203,7 +239,7 @@ for line in sys.stdin:
    elif last == 'compact':
     compacting = True
     out({'type':'compaction_start','reason':'threshold'})
-    time.sleep(0.5)
+    pause(0.5)
     compacting = False
     out({'type':'compaction_end','reason':'threshold','result':{'summary':'done'},'aborted':False,'willRetry':False})
     out({'type':'message_end','message':{'role':'assistant','content':[{'type':'text','text':'done'}]}})
@@ -221,7 +257,7 @@ for line in sys.stdin:
    elif 'restart-once' in last:
     if not os.path.exists(os.environ['PI_FAKE_RESTART_MARKER']):
      with open(os.environ['PI_FAKE_RESTART_MARKER'], 'w') as marker: marker.write('started')
-     time.sleep(60)
+     pause(60)
     out({'type':'message_end','message':{'role':'assistant','content':[{'type':'text','text':'recovered after supervisor restart'}]}})
     streaming = False
     out({'type':'agent_settled'})
@@ -233,7 +269,7 @@ for line in sys.stdin:
     streaming = False
     out({'type':'agent_settled'})
    elif last == 'lease-exit':
-    time.sleep(0.3)
+    pause(0.3)
     os._exit(143)
    elif last == 'group-child':
     child = subprocess.Popen(['sleep', '60'])
@@ -241,7 +277,7 @@ for line in sys.stdin:
      child_pid.write(str(child.pid))
     out({'type':'tool_execution_start','toolCallId':'bash-1','toolName':'bash','args':{'command':'sleep 60'}})
    elif last == 'ack-timeout':
-    time.sleep(0.4)
+    pause(0.4)
     out({'type':'message_end','message':{'role':'assistant','content':[{'type':'text','text':'ack was lost'}]}})
     streaming = False
     out({'type':'agent_settled'})
@@ -265,7 +301,7 @@ for line in sys.stdin:
     except subprocess.TimeoutExpired: child.kill()
     child = None
    if steering or follow_up:
-    time.sleep(0.3)
+    pause(0.3)
     out({'type':'message_end','message':{'role':'assistant','content':[{'type':'text','text':'cancelled queue executed'}]}})
    out({'type':'response','id':rid,'command':'abort','success':True})
    steering.clear()
@@ -1260,13 +1296,16 @@ describe("web and supervisor integration", () => {
 
   test("runs a durable later message only after the current run settles", async () => {
     const id = await createThread();
+    resetGate("release-later");
     await api("POST", `/v1/sessions/${id}/prompt`, { requestId: crypto.randomUUID(), text: "release-later" });
+    await waitForGate("release-later");
     const later = await api("POST", `/v1/sessions/${id}/prompt`, {
       requestId: crypto.randomUUID(), text: "later-run", delivery: "followUp",
     });
     expect(later.value).toMatchObject({ queued: true, delivery: "followUp" });
     const queued = await api("GET", `/v1/sessions/${id}`);
     expect(queued.value.session.queuedMessages.map((message: any) => message.text)).toContain("later-run");
+    releaseGate("release-later");
     const events = await waitFor(
       () => api("GET", `/v1/sessions/${id}/events?after=0`).then((result) => result.value),
       (value) => value.session.state === "IDLE" &&
@@ -1406,18 +1445,20 @@ describe("web and supervisor integration", () => {
 
   test("does not let inactive reconciliation settle the prompt-to-agent_start gap", async () => {
     const id = await createThread();
+    resetGate("delayed-start");
     const accepted = await api("POST", `/v1/sessions/${id}/prompt`, {
       requestId: crypto.randomUUID(), text: "delayed-start",
     });
     expect(accepted.value.session).toMatchObject({ steeringQueued: 0, followUpQueued: 0 });
     expect(accepted.value.session.revision).toBeGreaterThan(0);
-    await Bun.sleep(200);
+    await waitForGate("delayed-start");
     const duringGap = await api("GET", `/v1/sessions/${id}`);
     expect(duringGap.value.session).toMatchObject({ state: "RUNNING", activity: "QUEUED" });
     const ledger = new Database(join(root, "data", "supervisor.sqlite3"), { readonly: true });
     const workDuringGap = ledger.query("SELECT state FROM work_items WHERE session_id=? ORDER BY event_seq DESC LIMIT 1").get(id) as any;
     ledger.close();
     expect(workDuringGap.state).toBe("dispatched");
+    releaseGate("delayed-start");
     const events = await waitFor(
       () => api("GET", `/v1/sessions/${id}/events?after=0`).then((result) => result.value),
       (value) => value.events.some((event: any) => event.type === "assistant" && event.text === "started after reconcile"),
@@ -1437,7 +1478,7 @@ describe("web and supervisor integration", () => {
       (session) => session.state === "IDLE",
     );
     expect(stopped.activity).toBe("IDLE");
-    await Bun.sleep(300);
+    await Bun.sleep(30);
     const ledger = new Database(join(root, "data", "supervisor.sqlite3"), { readonly: true });
     const work = ledger.query("SELECT state FROM work_items WHERE session_id=? ORDER BY event_seq DESC LIMIT 1").get(id) as any;
     ledger.close();
@@ -1574,7 +1615,7 @@ describe("web and supervisor integration", () => {
     const epoch = String((ledger.query("SELECT value FROM metadata WHERE key='supervisor_epoch'").get() as any).value);
     try {
       ledger.query("UPDATE metadata SET value='replacement-test' WHERE key='supervisor_epoch'").run();
-      await Bun.sleep(500);
+      await Bun.sleep(50);
       const row = ledger.query("SELECT state,last_error FROM sessions WHERE id=?").get(id) as any;
       expect(row.state).toBe("RUNNING");
       expect(row.last_error).toBe(null);
@@ -1619,17 +1660,16 @@ describe("web and supervisor integration", () => {
 
   test("release activation finishes an active turn before replacing its runtime", async () => {
     const id = await createThread();
+    resetGate("release-later");
     await api("POST", `/v1/sessions/${id}/prompt`, { requestId: crypto.randomUUID(), text: "release-later" });
-    await waitFor(
-      () => api("GET", `/v1/sessions/${id}`).then((result) => result.value.session),
-      (session) => session?.state === "RUNNING",
-    );
+    await waitForGate("release-later");
     const runtimePid = Number(JSON.parse(readFileSync(fakeLaunch, "utf8")).pid);
     server.kill("SIGHUP");
     expect(await server.exited).toBe(75);
     expect(() => process.kill(runtimePid, 0)).not.toThrow();
 
     await startServer();
+    releaseGate("release-later");
     const events = await waitFor(
       () => api("GET", `/v1/sessions/${id}/events?after=0`).then((result) => result.value),
       (value) => value.events.some((event: any) => event.type === "assistant" && event.text === "current finished"),

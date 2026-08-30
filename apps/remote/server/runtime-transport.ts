@@ -17,11 +17,21 @@ export interface RuntimeTransport {
 
 type ConnectionResult = { transport: RuntimeTransport } | { error: Error };
 
+function duration(name: string, fallback: number): number {
+  const value = Number(process.env[name] ?? fallback);
+  return Number.isFinite(value) && value > 0 ? value : fallback;
+}
+
+const CONNECT_TIMEOUT_MS = duration("PI_REMOTE_RUNTIME_CONNECT_TIMEOUT_MS", 2_000);
+const START_TIMEOUT_MS = duration("PI_REMOTE_RUNTIME_START_TIMEOUT_MS", 2_000);
+const TERMINATE_TIMEOUT_MS = duration("PI_REMOTE_RUNTIME_TERMINATE_TIMEOUT_MS", 2_500);
+const START_POLL_MS = duration("PI_REMOTE_RUNTIME_START_POLL_MS", 25);
+
 function errorValue(cause: unknown): Error {
   return cause instanceof Error ? cause : new Error(String(cause));
 }
 
-async function connectHost(socketPath: string, onOutput: RuntimeOutput, timeoutMs = 2_000): Promise<ConnectionResult> {
+async function connectHost(socketPath: string, onOutput: RuntimeOutput, timeoutMs = CONNECT_TIMEOUT_MS): Promise<ConnectionResult> {
   return new Promise((resolve) => {
     const socket = createConnection(socketPath);
     let input = "";
@@ -50,7 +60,7 @@ async function connectHost(socketPath: string, onOutput: RuntimeOutput, timeoutM
       },
       async terminate() {
         if (socket.writable && !detached) socket.write('{"type":"terminate"}\n');
-        await Promise.race([exited, Bun.sleep(2_500)]);
+        await Promise.race([exited, Bun.sleep(TERMINATE_TIMEOUT_MS)]);
       },
       detach() {
         detached = true;
@@ -140,7 +150,7 @@ export async function startRuntimeHost(options: {
   mkdirSync(directory, { recursive: true, mode: 0o700 });
   const socketPath = runtimeSocketPath(options.data, options.sessionId);
   if (existsSync(socketPath)) {
-    const existing = await connectHost(socketPath, options.onOutput, 250);
+    const existing = await connectHost(socketPath, options.onOutput, Math.min(250, CONNECT_TIMEOUT_MS));
     if (!("error" in existing)) return existing.transport;
     try { unlinkSync(socketPath); } catch {}
   }
@@ -153,15 +163,15 @@ export async function startRuntimeHost(options: {
     stderr: "inherit",
     env: options.env,
   });
-  const deadline = Date.now() + 2_000;
+  const deadline = Date.now() + START_TIMEOUT_MS;
   let lastError = new Error("Runtime host did not start");
   while (Date.now() < deadline) {
     if (existsSync(socketPath)) {
-      const connected = await connectHost(socketPath, options.onOutput, 250);
+      const connected = await connectHost(socketPath, options.onOutput, Math.min(250, CONNECT_TIMEOUT_MS));
       if (!("error" in connected)) return connected.transport;
       lastError = connected.error;
     }
-    await Bun.sleep(25);
+    await Bun.sleep(START_POLL_MS);
   }
   throw lastError;
 }

@@ -4,18 +4,20 @@ on:
   push:
   pull_request:
 
+concurrency:
+  group: test-${{ github.ref }}
+  cancel-in-progress: true
+
 jobs:
   stack:
-    runs-on: ubuntu-latest
-    timeout-minutes: 3
+    runs-on: [self-hosted, pi-stack]
+    timeout-minutes: 1
     steps:
       - uses: actions/checkout@v4
-      - uses: actions/setup-node@v4
         with:
-          node-version: 24
-          cache: npm
-      - uses: oven-sh/setup-bun@v2
-        with:
-          bun-version: 1.3.13
-      - run: npm ci --ignore-scripts --prefer-offline --no-audit --no-fund
+          clean: false
+      - name: dependencies
+        run: |
+          source deploy/lib
+          pi_stack_prepare_dependencies "$PWD"
       - run: npm run check

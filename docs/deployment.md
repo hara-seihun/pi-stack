@@ -18,7 +18,7 @@ Host repositories own:
 
 A host points Orchestrator's operator config at its version-1 task manifest. Controller startup reconciles the complete set atomically, so replacing a host does not depend on remembered `task set` commands and a removed lane cannot linger in SQLite. Pause controls remain mutable ledger state and survive reconciliation.
 
-This repository owns build commands, package and skill roles, API contracts, and component tests. CI runs the complete check before publication. Deployment builds the two compiled packages and does not repeat tests that already passed on the immutable commit.
+This repository owns build commands, package and skill roles, API contracts, and component tests. CI runs the complete check before publication. Its dedicated self-hosted runner retains the checkout between jobs, and `pi_stack_prepare_dependencies` proves the installed lock before reuse. A runner restart loses that cache and performs a clean install. Deployment builds the two compiled packages and does not repeat tests that already passed on the immutable commit.
 
 `deploy/runtime`, `deploy/orchestrator`, `deploy/remote`, `deploy/tools`, and `deploy/skills` publish commit-addressed releases. Runtime owns one lockfile-addressed production dependency tree under `/srv/pi/dependencies`. Runtime, Orchestrator, and tools link that tree instead of copying hundreds of megabytes. Component destinations switch to complete releases with an atomic filesystem exchange. `/srv/pi/.pi-stack-releases` retains prior component generations for processes that loaded them before the exchange.
 

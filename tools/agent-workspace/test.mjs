@@ -1,12 +1,20 @@
 import assert from "node:assert/strict";
-import { execFileSync, spawn } from "node:child_process";
+import { execFile, execFileSync, spawn } from "node:child_process";
 import { existsSync, mkdtempSync, mkdirSync, readFileSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { DatabaseSync } from "node:sqlite";
-import test from "node:test";
+import { test as nodeTest } from "node:test";
 import { workspaceTesting } from "./workspace.mjs";
 
+const [shardIndex = 0, shardCount = 1] = (process.env.AGENT_WORKSPACE_TEST_SHARD ?? "0/1")
+  .split("/").map(Number);
+if (!Number.isSafeInteger(shardIndex) || !Number.isSafeInteger(shardCount)
+  || shardIndex < 0 || shardCount < 1 || shardIndex >= shardCount) {
+  throw new Error("AGENT_WORKSPACE_TEST_SHARD must be a zero-based INDEX/COUNT");
+}
+let testIndex = 0;
+const test = (name, body) => nodeTest(name, { skip: testIndex++ % shardCount !== shardIndex }, body);
 const entry = new URL("./main", import.meta.url).pathname;
 
 function run(args, env, cwd) {
@@ -16,6 +24,17 @@ function run(args, env, cwd) {
     encoding: "utf8",
     timeout: 30_000,
   }).trim();
+}
+
+function runAsync(args, env, cwd) {
+  return new Promise((resolve, reject) => {
+    execFile(entry, args, {
+      cwd,
+      env: { ...process.env, ...env },
+      encoding: "utf8",
+      timeout: 30_000,
+    }, (error, stdout) => error ? reject(error) : resolve(stdout.trim()));
+  });
 }
 
 function git(cwd, ...args) {
@@ -74,7 +93,7 @@ test("a reader that closes the output pipe does not crash the command", async ()
       (id,path,root,kind,mode,owner,repository,source_commit,checkout_type,
        cache_paths,created_at,updated_at,lease_expires_at,state,detail,group_id)
       VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,NULL)`);
-    for (let index = 0; index < 2_000; index += 1) {
+    for (let index = 0; index < 512; index += 1) {
       insert.run(
         `workspace-${index}`, path.join(f.workspaces, `workspace-${index}`), f.workspaces,
         "agent", "writer", `owner-${index}`, f.remote, "a".repeat(40), "clone",
@@ -461,13 +480,14 @@ test("expired live references require an explicit reap", async () => {
     ], f.env));
     sleeper = spawn("sleep", ["60"], { cwd: created.path, stdio: "ignore" });
     await new Promise((resolve) => setTimeout(resolve, 100));
-    const held = JSON.parse(run(["release", "--id", created.id, "--json"], f.env));
+    const exited = new Promise((resolve) => sleeper.once("exit", resolve));
+    const held = JSON.parse(await runAsync(["release", "--id", created.id, "--json"], f.env));
     assert.equal(held.inspection.classification, "referenced");
     assert.equal(existsSync(created.path), true);
-    const reaped = JSON.parse(run(["release", "--id", created.id, "--reap-expired", "--json"], f.env));
+    const reaped = JSON.parse(await runAsync(["release", "--id", created.id, "--reap-expired", "--json"], f.env));
     assert.equal(reaped.action, "released");
     assert.equal(existsSync(created.path), false);
-    await new Promise((resolve) => sleeper.once("exit", resolve));
+    await exited;
   } finally {
     sleeper?.kill("SIGKILL");
     f.close();

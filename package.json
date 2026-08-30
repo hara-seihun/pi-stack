@@ -17,7 +17,7 @@
     "typecheck": "npm run typecheck --workspace=pi-orchestrator",
     "test": "node scripts/test.mjs",
     "build:kenan": "npm run build --workspace=kenan",
-    "check": "npm run typecheck && npm run build && npm run build:kenan && npm test && node scripts/check-skill-sets.mjs"
+    "check": "node scripts/test.mjs"
   },
   "overrides": {
     "@earendil-works/pi-ai": "0.84.2",

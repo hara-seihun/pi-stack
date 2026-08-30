@@ -28,10 +28,12 @@ const server = Bun.serve({
 });
 const previousSessionId = process.env.PI_REMOTE_SESSION_ID;
 const previousServer = process.env.PI_REMOTE_SERVER_URL;
+const previousUpdateInterval = process.env.PI_REMOTE_CONTEXT_UPDATE_MS;
 
 beforeAll(() => {
   process.env.PI_REMOTE_SESSION_ID = "00000000-0000-0000-0000-000000000001";
   process.env.PI_REMOTE_SERVER_URL = server.url.origin;
+  process.env.PI_REMOTE_CONTEXT_UPDATE_MS = "5";
 });
 
 afterAll(() => {
@@ -39,6 +41,8 @@ afterAll(() => {
   else process.env.PI_REMOTE_SESSION_ID = previousSessionId;
   if (previousServer === undefined) delete process.env.PI_REMOTE_SERVER_URL;
   else process.env.PI_REMOTE_SERVER_URL = previousServer;
+  if (previousUpdateInterval === undefined) delete process.env.PI_REMOTE_CONTEXT_UPDATE_MS;
+  else process.env.PI_REMOTE_CONTEXT_UPDATE_MS = previousUpdateInterval;
   server.stop(true);
 });
 
@@ -90,7 +94,11 @@ describe("context mirror", () => {
     });
 
     await updateHandler?.({ type: "message_update", message: assistant("Working") }, {});
-    await Bun.sleep(1_050);
+    for (let attempt = 0; attempt < 100; attempt++) {
+      const messages = captures.at(-1)?.context.messages as Array<{ content: Array<{ text: string }> }>;
+      if (messages.at(-1)?.content[0].text === "Working") break;
+      await Bun.sleep(1);
+    }
     expect((captures.at(-1)?.context.messages as Array<{ content: Array<{ text: string }> }>).at(-1)?.content[0].text).toBe("Working");
 
     await endHandler?.({ type: "message_end", message: assistant("Finished", "stop") }, {});

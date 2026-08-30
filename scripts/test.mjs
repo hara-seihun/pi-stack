@@ -1,7 +1,11 @@
-import { spawn } from "node:child_process";
+import { runJobs } from "./run-jobs.mjs";
 
 const jobs = [
+  ["orchestrator types", "npm", ["run", "typecheck", "--workspace=pi-orchestrator"]],
+  ["orchestrator build", "npm", ["run", "build", "--workspace=pi-orchestrator"]],
+  ["Kenan build", "npm", ["run", "build", "--workspace=kenan"]],
   ["package sets", "node", ["scripts/check-package-sets.mjs"]],
+  ["skill sets", "node", ["scripts/check-skill-sets.mjs"]],
   ["skill deployment", "node", ["--test", "scripts/deploy-skills.test.mjs"]],
   ["deploy lock", "node", ["--test", "scripts/deploy-lock.test.mjs"]],
   ["tools", "node", ["scripts/check-tools.mjs"]],
@@ -15,20 +19,4 @@ const jobs = [
   ["session reader", "npm", ["test", "--workspace=@hara-seihun/read-condensed-session"]],
 ];
 
-const results = await Promise.all(jobs.map(([name, command, args]) => new Promise((resolve) => {
-  const child = spawn(command, args, { stdio: ["ignore", "pipe", "pipe"] });
-  let output = "";
-  child.stdout.on("data", (chunk) => { output += chunk; });
-  child.stderr.on("data", (chunk) => { output += chunk; });
-  child.on("exit", (code, signal) => resolve({ name, code, signal, output }));
-})));
-
-let failed = false;
-for (const result of results) {
-  process.stdout.write(`\n===== ${result.name} =====\n${result.output}`);
-  if (result.code !== 0) {
-    failed = true;
-    process.stderr.write(`${result.name} failed${result.signal ? ` with ${result.signal}` : ` with exit ${result.code}`}\n`);
-  }
-}
-if (failed) process.exit(1);
+await runJobs(jobs);

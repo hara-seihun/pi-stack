@@ -132,8 +132,9 @@ function environmentMetadata() {
 }
 
 const PLAN_USAGE_REFRESH_MS = Math.max(15_000, Number(process.env.PI_REMOTE_PLAN_USAGE_REFRESH_MS ?? "60000"));
-const PROMPT_ACK_TIMEOUT_MS = Math.max(100, Number(process.env.PI_REMOTE_PROMPT_ACK_TIMEOUT_MS ?? "30000"));
-const STATE_RECONCILE_MS = Math.max(50, Number(process.env.PI_REMOTE_STATE_RECONCILE_MS ?? "15000"));
+const PROMPT_ACK_TIMEOUT_MS = Math.max(5, Number(process.env.PI_REMOTE_PROMPT_ACK_TIMEOUT_MS ?? "30000"));
+const STATE_RECONCILE_MS = Math.max(5, Number(process.env.PI_REMOTE_STATE_RECONCILE_MS ?? "15000"));
+const RUNTIME_RESTART_DELAY_MS = Math.max(5, Number(process.env.PI_REMOTE_RUNTIME_RESTART_DELAY_MS ?? "2000"));
 const workspaceDefinitions = JSON.parse(process.env.PI_REMOTE_WORKSPACES ?? JSON.stringify([
   { id: "home", name: "Home", path: HOME },
   { id: PRIVATE_ID, name: PRIVATE_NAME, path: PRIVATE_DIR },
@@ -1203,7 +1204,7 @@ function monitorRuntime(row: any, rt: Runtime) {
     setRuntimePhase(row.id, rt, "STOPPING");
     runtimes.delete(row.id);
     if (shuttingDown || !ownsSupervisorLease()) return;
-    const retryAt = Date.now() + 2_000;
+    const retryAt = Date.now() + RUNTIME_RESTART_DELAY_MS;
     db.query("UPDATE work_items SET state='queued',resume=1,available_at=?,updated_at=?,last_error='Agent stopped before settling' WHERE session_id=? AND state='dispatched'")
       .run(retryAt, now(), row.id);
     rt.dispatchedWorkIds.clear();
@@ -1216,7 +1217,7 @@ function monitorRuntime(row: any, rt: Runtime) {
     } else if (pendingWork > 0) {
       setState(row.id, "RUNNING", `Agent exited ${code}; resuming queued work`);
       emit(row.id, "notice", { text: `Agent disconnected (exit ${code}); resuming queued work` });
-      scheduleSession(row.id, 2_000);
+      scheduleSession(row.id, RUNTIME_RESTART_DELAY_MS);
     } else {
       setState(row.id, "STOPPED", code === 0 ? null : `Agent exited ${code}`);
       emit(row.id, "notice", { text: `Agent disconnected while idle (exit ${code}); thread remains resumable` });

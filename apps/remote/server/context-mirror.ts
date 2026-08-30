@@ -5,11 +5,10 @@ type ModelMessage = ReturnType<typeof convertToLlm>[number];
 type ModelTool = { name: string; description: string; parameters: unknown };
 type ModelContext = { systemPrompt: string; tools: ModelTool[]; messages: ModelMessage[] };
 
-const UPDATE_INTERVAL_MS = 1_000;
-
 export default function contextMirror(pi: ExtensionAPI) {
   const sessionId = process.env.PI_REMOTE_SESSION_ID;
   const server = process.env.PI_REMOTE_SERVER_URL;
+  const updateIntervalMs = Math.max(1, Number(process.env.PI_REMOTE_CONTEXT_UPDATE_MS ?? "1000"));
   if (!sessionId || !server) return;
 
   let context: ModelContext | null = null;
@@ -123,7 +122,7 @@ export default function contextMirror(pi: ExtensionAPI) {
     updateTimer = setTimeout(() => {
       updateTimer = null;
       void publishCurrent().catch((error) => console.error(`Pi Remote context mirror failed: ${error instanceof Error ? error.message : error}`));
-    }, UPDATE_INTERVAL_MS);
+    }, updateIntervalMs);
   };
 
   pi.on("context", async (event, ctx) => {

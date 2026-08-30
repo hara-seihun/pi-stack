@@ -55,7 +55,7 @@
     "smoke:models": "node --import tsx scripts/smoke-models.mjs",
     "smoke:stream": "node --import tsx scripts/smoke-stream.mjs",
     "smoke:wire": "node --import tsx scripts/smoke-wire.mjs",
-    "check": "npm run typecheck && npm run lint && npm run format:check && npm run security-check && npm run proto:check && npm test && npm run test:legacy"
+    "check": "node scripts/check.mjs"
   },
   "pi": {
     "extensions": [
