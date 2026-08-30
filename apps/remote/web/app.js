@@ -1987,7 +1987,16 @@ ui.thunderControl.addEventListener("click", toggleThunder);
 ui.openaiGovernorControl.addEventListener("click", () => toggleGovernor("openai"));
 ui.anthropicGovernorControl.addEventListener("click", () => toggleGovernor("anthropic"));
 ui.prompt.addEventListener("input", () => { saveDraft(state.selectedId, ui.prompt.value); updateComposer(); });
+// On a soft keyboard Enter is the newline key and the send button is the only way to send,
+// so the composer must not steal it. A hardware keyboard keeps Enter as send.
+const softKeyboard = matchMedia("(hover: none) and (pointer: coarse)");
+function applyEnterKeyHint() {
+  ui.prompt.enterKeyHint = softKeyboard.matches ? "enter" : "send";
+}
+applyEnterKeyHint();
+softKeyboard.addEventListener("change", applyEnterKeyHint);
 ui.prompt.addEventListener("keydown", (event) => {
+  if (softKeyboard.matches) return;
   if (event.key === "Enter" && !event.shiftKey && !event.isComposing) {
     event.preventDefault();
     if (ui.prompt.value.trim() || state.attachments.some((file) => file.path)) sendPrompt("followUp");

@@ -14,6 +14,8 @@ The drawer reports only measured plan and hardware rows. CPU sampling runs indep
 
 [`apps/kenan`](../kenan/README.md) packages this web client with Capacitor as the Kenan Android app. Browser and Android render the files in `web`, while a small native plugin owns endpoint selection, haptics, system-bar layout, and the pinned Converge SSH tunnel.
 
+Enter sends the composer only where a hardware keyboard is typing. On touch devices the media query `(hover: none) and (pointer: coarse)` matches, Enter inserts a newline, the key is labelled as a return key, and the send button submits. Phone keyboards have no comfortable way to type a newline otherwise, so sending on Enter cost multi-paragraph prompts.
+
 The Files drawer tab browses the selected environment from `/`. It includes dotfiles and reads one directory per request. Folder taps navigate and file taps download without opening a preview.
 
 Each runtime also loads `server/thread-context.ts`. The extension offers initialization only while the durable session title is numeric, removes that control from named threads, and treats process or model changes as continuation rather than a new thread. It tells the agent how to offer downloadable files. A `<pi-remote-file src="/absolute/path" />` tag becomes a normal link in both clients, and the session-scoped endpoint streams the file from the thread's host.
