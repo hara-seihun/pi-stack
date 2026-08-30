@@ -72,7 +72,13 @@ async function main() {
       const file = takeOption(args, "--args-file");
       const text = file ? readFileSync(file, "utf8") : args.length ? args.join(" ") : await stdin();
       args.length = 0;
-      output(await runtime.call(path, text ? parseJson(text, "tool arguments") : {}));
+      const result = await runtime.call(path, text ? parseJson(text, "tool arguments") : {});
+      output(result);
+      // A tool that refuses the call answers with isError inside a successful
+      // JSON-RPC response. Exiting 0 there taught a scripted caller that 1600
+      // rejected deletions had all succeeded, so the failure has to reach the
+      // shell the same way any other failed command does.
+      if (result?.isError) process.exitCode = 1;
     } else {
       throw new Error(`unknown command ${command}`);
     }

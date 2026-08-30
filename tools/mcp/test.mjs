@@ -3,6 +3,7 @@ import assert from "node:assert/strict";
 import { mkdtempSync, mkdirSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
+import { spawn } from "node:child_process";
 import { takeFlag, takeOption } from "../shared/arguments.mjs";
 import { loadConfig, parseJson, schemaToTypeScript } from "./lib.mjs";
 
@@ -44,4 +45,29 @@ test("schema renderer preserves required and optional fields", () => {
 test("tool arguments must be an object", () => {
   assert.deepEqual(parseJson('{"x":1}'), { x: 1 });
   assert.throws(() => parseJson("[]"), /expected an object/);
+});
+
+test("a refused tool call exits non-zero while printing the result", async () => {
+  const root = mkdtempSync(join(tmpdir(), "mcp-cli-exit-"));
+  const config = join(root, "mcp.json");
+  writeFileSync(config, JSON.stringify({
+    mcpServers: { stub: { command: process.execPath, args: [join(import.meta.dirname, "stub-server.mjs")] } },
+  }));
+  const run = (tool) => new Promise((done) => {
+    const child = spawn(process.execPath, [join(import.meta.dirname, "main"), "--config", config, "call", tool, "{}"], {
+      stdio: ["ignore", "pipe", "pipe"],
+    });
+    let out = "";
+    child.stdout.on("data", (chunk) => { out += chunk; });
+    child.on("close", (code) => done({ code, out }));
+  });
+
+  const refused = await run("stub_refuse");
+  assert.equal(refused.code, 1);
+  assert.equal(JSON.parse(refused.out).isError, true);
+  assert.match(refused.out, /refused on purpose/);
+
+  const accepted = await run("stub_accept");
+  assert.equal(accepted.code, 0);
+  assert.equal(JSON.parse(accepted.out).isError, undefined);
 });
