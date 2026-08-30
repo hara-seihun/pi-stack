@@ -237,11 +237,15 @@ for line in sys.stdin:
     streaming = False
     out({'type':'agent_settled'})
    elif last == 'compact':
+    streaming = False
     compacting = True
+    out({'type':'agent_settled'})
     out({'type':'compaction_start','reason':'threshold'})
     gate('compaction')
     compacting = False
     out({'type':'compaction_end','reason':'threshold','result':{'summary':'done'},'aborted':False,'willRetry':False})
+    streaming = True
+    out({'type':'agent_start'})
     out({'type':'message_end','message':{'role':'assistant','content':[{'type':'text','text':'done'}]}})
     streaming = False
     out({'type':'agent_settled'})
@@ -1363,6 +1367,8 @@ describe("web and supervisor integration", () => {
       expect(sync.value.watched).toEqual([
         expect.objectContaining({ id, state: "RUNNING", activity: "COMPACTING" }),
       ]);
+      const inProgressEvents = await api("GET", `/v1/sessions/${id}/events?after=0`);
+      expect(inProgressEvents.value.events.some((event: any) => event.type === "settled")).toBe(false);
     } finally {
       releaseGate("compaction");
     }
@@ -1566,11 +1572,15 @@ describe("web and supervisor integration", () => {
       },
       Boolean,
     );
-    const completed = await waitFor(
+    await waitFor(
       () => api("GET", `/v1/sessions/${id}/events?after=0`).then((result) => result.value),
       (value) => value.events.some((event: any) => event.type === "assistant" && event.text === "later ran"),
     );
-    expect(completed.session).toMatchObject({ state: "IDLE", followUpQueued: 0 });
+    const completed = await waitFor(
+      () => api("GET", `/v1/sessions/${id}`).then((result) => result.value.session),
+      (session) => session?.state === "IDLE",
+    );
+    expect(completed).toMatchObject({ state: "IDLE", followUpQueued: 0 });
     expect(JSON.parse(readFileSync(fakeLaunch, "utf8")).pid).toBe(runtimePid);
     const ledger = new Database(join(root, "data", "supervisor.sqlite3"), { readonly: true });
     const work = ledger.query("SELECT text,state FROM work_items WHERE session_id=? ORDER BY created_at,rowid").all(id) as any[];
@@ -1608,7 +1618,10 @@ describe("web and supervisor integration", () => {
       15_000,
     );
     expect(sawFailed).toBe(false);
-    expect(events.session.state).toBe("IDLE");
+    await waitFor(
+      () => api("GET", `/v1/sessions/${id}`).then((result) => result.value.session),
+      (session) => session?.state === "IDLE",
+    );
     expect(events.events.some((event: any) => event.type === "notice" && event.text.includes("Agent disconnected (exit 17)"))).toBe(true);
     expect(events.events.some((event: any) => event.type === "notice" && event.text === "Agent process failed")).toBe(false);
     expect(events.events.filter((event: any) => event.type === "user" && event.text === "crash-once")).toHaveLength(1);
@@ -1658,7 +1671,10 @@ describe("web and supervisor integration", () => {
       (value) => value.events.some((event: any) => event.type === "assistant" && event.text === "recovered after supervisor restart"),
       15_000,
     );
-    expect(events.session.state).toBe("IDLE");
+    await waitFor(
+      () => api("GET", `/v1/sessions/${id}`).then((result) => result.value.session),
+      (session) => session?.state === "IDLE",
+    );
     expect(events.events.filter((event: any) => event.type === "user" && event.text === "restart-once")).toHaveLength(1);
     const ledger = new Database(join(root, "data", "supervisor.sqlite3"), { readonly: true });
     const work = ledger.query("SELECT state,resume,attempts FROM work_items WHERE session_id=? AND text='restart-once'").all(id) as any[];

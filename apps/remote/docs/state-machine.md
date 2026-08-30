@@ -32,7 +32,7 @@ any live phase -> STOPPING -> STOPPED|FAILED
 FAILED|STOPPED -> STARTING         later activation/retry
 ```
 
-Only `RUNNING -> IDLE` can ordinarily settle dispatched work. `agent_settled` in `DISPATCHING` is stale and ignored. During `ABORTING`, the abort handler owns the phase transition, while Pi may finish steering it already accepted before `abort()` returns. `STOPPING` suppresses output. An assistant message with `stopReason=error|aborted` is held until settlement: a later successful assistant message in the same run clears it, so automatic retry or account failover does not expose a false terminal failure. If the run settles without recovery, the provider error remains in the supervisor event ledger for voice and diagnosis. The interactive view comes from Pi's model context rather than this event projection.
+Only `RUNNING -> IDLE` can ordinarily settle dispatched work. `agent_settled` in `DISPATCHING` is stale and ignored. In `RUNNING`, it starts a next-tick `get_state` check rather than settling by itself. The state-compactor aborts the low-level run before Pi reports compaction, then starts a continuation from the compaction callback. Its intermediate `agent_settled` therefore arrives before `compaction_start`; Pi's state already reports the compaction, so the check keeps the work and runtime alive. During `ABORTING`, the abort handler owns the phase transition, while Pi may finish steering it already accepted before `abort()` returns. `STOPPING` suppresses output. An assistant message with `stopReason=error|aborted` is held until confirmed settlement: a later successful assistant message in the same run clears it, so automatic retry, account failover, or compaction does not expose a false terminal failure. If the run settles without recovery, the provider error remains in the supervisor event ledger for voice and diagnosis. The interactive view comes from Pi's model context rather than this event projection.
 
 ## Durable work
 
@@ -51,7 +51,7 @@ queued -> running -> dispatched -> complete
 - A `followUp` created during `RUNNING` remains `queued` under supervisor ownership. It is not handed to Pi until the current run settles, so it can be atomically promoted to `steer` or cancelled. While busy, the worker skips held follow-ups and dispatches only promoted steering items; while idle, it starts the oldest queued item as the next prompt.
 - Cancellation succeeds only while the supervisor still owns an item in `queued`; it atomically marks the item `cancelled` before any Pi insertion. Client-side Edit uses this same cancellation endpoint and copies the returned canonical text into the composer without creating a second server-side message.
 - Promotion normally updates a still-pending durable work item before it has any event entry. An already-inserted item keeps its delivery event accurate for voice consumers.
-- All dispatched items in one Pi run complete only on an accepted `agent_settled` or inactive reconciliation from the `RUNNING` phase.
+- All dispatched items in one Pi run complete only when reconciliation confirms Pi inactive from the `RUNNING` phase. An `agent_settled` event requests that reconciliation but cannot complete work on its own.
 - Cancellation is terminal for the active item. Stop requeues every later queued/running/dispatched item with `resume=0`; a dispatch error checks each durable state before retrying, so the cancelled active turn cannot resurrect while retained messages remain sendable.
 - A live release handoff keeps `dispatched` work attached to its existing runtime host and releases a supervisor-only `running` claim back to `queued`. A crash or full service restart terminates unclaimed runtime hosts, requeues `running`/`dispatched` work, and resumes an interrupted inserted turn through the supported RPC `prompt` command with an explicit continuation instruction. Startup never invents protocol commands that Pi does not support.
 
@@ -121,7 +121,7 @@ The observation surface is therefore a pure projection with three rules:
 2. One server runtime at most per thread ID. Each RPC wrapper and all descendants run in a dedicated process group; stop waits for the whole group and escalates from `SIGTERM` to `SIGKILL`.
 3. One serialized durable worker at most per thread ID.
 4. A runtime event is bound to the thread ID captured when that child was spawned.
-5. Only `RUNNING` may settle and complete dispatched work.
+5. Only an inactive Pi state confirmed from `RUNNING` may settle and complete dispatched work.
 6. `ABORTING` preserves real transcript output while owning settlement; only `STOPPING` suppresses output.
 7. A stale reconciliation response cannot change phase.
 8. The cancelled active item is never retried; Pi-owned accepted steering and supervisor-owned pending work each continue from their canonical owner without duplication.

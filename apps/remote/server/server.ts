@@ -1086,9 +1086,17 @@ function handleRpcEvent(sessionId: string, rt: Runtime, event: any) {
     if (rt.phase === "DISPATCHING" && rt.dispatchedWorkIds.size > 0) {
       emit(sessionId, "notice", { text: "Ignored a stale settled event while the new message was starting" });
     } else if (rt.phase === "RUNNING") {
-      settleRuntime(sessionId, rt, true);
+      void verifyRuntimeSettlement(sessionId, rt).catch((cause) => {
+        console.error(`Settlement verification failed for ${sessionId}`, cause);
+      });
     }
   }
+}
+
+async function verifyRuntimeSettlement(sessionId: string, rt: Runtime) {
+  await new Promise((resolve) => setTimeout(resolve, 0));
+  if (!ownsSupervisorLease() || runtimes.get(sessionId) !== rt || rt.phase !== "RUNNING") return;
+  await reconcileRuntimeState(sessionId, rt);
 }
 
 function settleRuntime(sessionId: string, rt: Runtime, emitEvent: boolean): boolean {
