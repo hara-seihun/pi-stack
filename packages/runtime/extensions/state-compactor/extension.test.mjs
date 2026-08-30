@@ -2,9 +2,10 @@ import test from "node:test";
 import assert from "node:assert/strict";
 import stateCompactor, {
   COMPACT_THRESHOLD_TOKENS,
-  COMPACTION_MODEL,
-  COMPACTION_PROVIDER,
   CONTINUATION_MESSAGE,
+  FALLBACK_COMPACTION_MODEL,
+  FALLBACK_COMPACTION_PROVIDER,
+  FALLBACK_COMPACTION_REASONING,
   RETAINED_SKILLS_TYPE,
   compactionPrompt,
   retainedSkillContext,
@@ -94,43 +95,45 @@ test("guards provider requests with one native compaction at 250,000 tokens", ()
   ]);
 });
 
-test("routes Anthropic compaction through the independent OpenAI summarizer", async () => {
-  const handlers = new Map();
-  let request;
-  const model = { provider: COMPACTION_PROVIDER, id: COMPACTION_MODEL };
-  const usage = { totalTokens: 100 };
-  stateCompactor({
-    on: (event, handler) => handlers.set(event, handler),
-    sendMessage() {},
-  });
-  const preparation = {
-    messagesToSummarize: [{ role: "user", content: [{ type: "text", text: "Fix the broken thread" }] }],
-    turnPrefixMessages: [],
-    previousSummary: "Earlier work",
-    firstKeptEntryId: "kept",
-    tokensBefore: 251_000,
+const preparation = {
+  messagesToSummarize: [{ role: "user", content: [{ type: "text", text: "Fix the broken thread" }] }],
+  turnPrefixMessages: [],
+  previousSummary: "Earlier work",
+  firstKeptEntryId: "kept",
+  tokensBefore: 251_000,
+};
+
+function compactionEvent() {
+  return {
+    preparation,
+    customInstructions: "Keep the worktree state",
+    signal: new AbortController().signal,
   };
-  const result = await handlers.get("session_before_compact")(
-    { preparation, signal: new AbortController().signal },
-    {
-      model: { provider: "anthropic-3" },
-      modelRegistry: {
-        find: (provider, modelId) => {
-          assert.equal(provider, COMPACTION_PROVIDER);
-          assert.equal(modelId, COMPACTION_MODEL);
-          return model;
-        },
-        complete: async (...args) => {
-          request = args;
-          return { content: [{ type: "text", text: "  compacted work  " }], usage };
-        },
+}
+
+test("tries the selected model before looking up the Terra fallback", async () => {
+  const handlers = new Map();
+  const requests = [];
+  const nativeModel = { provider: "anthropic-3", id: "claude-fable-5" };
+  const usage = { totalTokens: 100 };
+  stateCompactor({ on: (event, handler) => handlers.set(event, handler), sendMessage() {} });
+  const result = await handlers.get("session_before_compact")(compactionEvent(), {
+    model: nativeModel,
+    thinkingLevel: "high",
+    modelRegistry: {
+      find: () => assert.fail("fallback lookup ran after a successful native summary"),
+      complete: async (...args) => {
+        requests.push(args);
+        return { content: [{ type: "text", text: "  compacted work  " }], usage };
       },
     },
-  );
-  assert.equal(request[0], model);
-  assert.match(request[1].messages[0].content[0].text, /Fix the broken thread/);
-  assert.match(request[1].messages[0].content[0].text, /Earlier work/);
-  assert.equal(request[2].cacheRetention, "none");
+  });
+  assert.equal(requests[0][0], nativeModel);
+  assert.equal(requests[0][2].reasoning, "high");
+  assert.equal(requests[0][2].cacheRetention, "none");
+  assert.match(requests[0][1].messages[0].content[0].text, /Fix the broken thread/);
+  assert.match(requests[0][1].messages[0].content[0].text, /Earlier work/);
+  assert.match(requests[0][1].messages[0].content[0].text, /Keep the worktree state/);
   assert.deepEqual(result, {
     compaction: {
       summary: "compacted work",
@@ -141,14 +144,41 @@ test("routes Anthropic compaction through the independent OpenAI summarizer", as
   });
 });
 
-test("leaves non-Anthropic compaction on its current provider", async () => {
+test("falls back to Terra at medium when the selected model refuses the summary", async () => {
   const handlers = new Map();
+  const requests = [];
+  const notices = [];
+  const nativeModel = { provider: "anthropic-3", id: "claude-fable-5" };
+  const fallbackModel = { provider: FALLBACK_COMPACTION_PROVIDER, id: FALLBACK_COMPACTION_MODEL };
+  const fallbackUsage = { totalTokens: 200 };
   stateCompactor({ on: (event, handler) => handlers.set(event, handler), sendMessage() {} });
-  const result = await handlers.get("session_before_compact")(
-    { preparation: {}, signal: new AbortController().signal },
-    { model: { provider: "openai-codex" } },
-  );
-  assert.equal(result, undefined);
+  const result = await handlers.get("session_before_compact")(compactionEvent(), {
+    model: nativeModel,
+    thinkingLevel: "high",
+    ui: { notify: (...args) => notices.push(args) },
+    modelRegistry: {
+      find: (provider, modelId) => {
+        assert.equal(provider, FALLBACK_COMPACTION_PROVIDER);
+        assert.equal(modelId, FALLBACK_COMPACTION_MODEL);
+        return fallbackModel;
+      },
+      complete: async (...args) => {
+        requests.push(args);
+        if (args[0] === nativeModel) {
+          return { stopReason: "error", errorMessage: "policy refusal", content: [], usage: { totalTokens: 0 } };
+        }
+        return { stopReason: "stop", content: [{ type: "text", text: "Terra summary" }], usage: fallbackUsage };
+      },
+    },
+  });
+  assert.deepEqual(requests.map((request) => request[0]), [nativeModel, fallbackModel]);
+  assert.equal(requests[1][2].reasoning, FALLBACK_COMPACTION_REASONING);
+  assert.deepEqual(notices, [[
+    `Native summary failed; retrying with ${FALLBACK_COMPACTION_MODEL} at ${FALLBACK_COMPACTION_REASONING}`,
+    "warning",
+  ]]);
+  assert.equal(result.compaction.summary, "Terra summary");
+  assert.equal(result.compaction.usage, fallbackUsage);
 });
 
 test("compaction prompt preserves split-turn and previous-summary context", () => {

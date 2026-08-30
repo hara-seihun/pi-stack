@@ -8,7 +8,7 @@ A partial paged read produces a durable request for the missing page. A changed 
 
 When `ctx.getContextUsage()` reaches the threshold, the extension calls `ctx.compact()` once and waits for Pi's completion or error callback before it can trigger again. Pi aborts the pending operation when compaction starts, so a successful compaction adds a hidden continuation message and starts a fresh turn.
 
-Anthropic refuses some native summary requests when a long transcript contains extensive model-written material. That refusal used to abort every later turn because each request retried the same blocked compaction. Anthropic sessions now summarize through `openai-codex/gpt-5.4-mini` while keeping their selected conversation model. Other providers retain Pi's native summarizer.
+The selected conversation model gets the first summary attempt at its current reasoning level. If that request fails or returns no summary, the extension retries with `openai-codex/gpt-5.6-terra` at `medium`. This handles Anthropic policy refusals without changing the thread's selected model. Before the fallback existed, one refused summary aborted every later turn because each request retried the same blocked compaction.
 
 ## Test
 

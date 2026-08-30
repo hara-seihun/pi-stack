@@ -5,8 +5,9 @@ import { uuidv7 } from "@earendil-works/pi-ai";
 import { convertToLlm, serializeConversation } from "@earendil-works/pi-coding-agent";
 
 export const COMPACT_THRESHOLD_TOKENS = 250_000;
-export const COMPACTION_PROVIDER = "openai-codex";
-export const COMPACTION_MODEL = "gpt-5.4-mini";
+export const FALLBACK_COMPACTION_PROVIDER = "openai-codex";
+export const FALLBACK_COMPACTION_MODEL = "gpt-5.6-terra";
+export const FALLBACK_COMPACTION_REASONING = "medium";
 export const CONTINUATION_MESSAGE = "Your context was compacted, you now have tons of room to continue what you were doing ^-^";
 export const RETAINED_SKILLS_TYPE = "state-compactor-skills";
 
@@ -28,12 +29,24 @@ Use this format:
 <modified-files>
 </modified-files>`;
 
-export function compactionPrompt(preparation) {
+export function compactionPrompt(preparation, customInstructions) {
   const messages = [...preparation.messagesToSummarize, ...preparation.turnPrefixMessages];
   const previous = preparation.previousSummary
     ? `\n\n<previous-summary>\n${preparation.previousSummary}\n</previous-summary>`
     : "";
-  return `<work-log>\n${serializeConversation(convertToLlm(messages))}\n</work-log>${previous}\n\n${SUMMARY_PROMPT}`;
+  const focus = customInstructions ? `\n\nAdditional focus: ${customInstructions}` : "";
+  return `<work-log>\n${serializeConversation(convertToLlm(messages))}\n</work-log>${previous}\n\n${SUMMARY_PROMPT}${focus}`;
+}
+
+function summaryText(response) {
+  if (response.stopReason === "error") throw new Error(response.errorMessage || "Summary request failed");
+  const summary = response.content
+    .filter((part) => part.type === "text")
+    .map((part) => part.text)
+    .join("\n")
+    .trim();
+  if (!summary) throw new Error("Summary request returned an empty continuation record");
+  return summary;
 }
 
 function contentText(content) {
@@ -210,16 +223,14 @@ export default function stateCompactor(pi) {
   });
 
   pi.on("session_before_compact", async (event, ctx) => {
-    if (!ctx.model?.provider?.startsWith("anthropic")) return;
-    const model = ctx.modelRegistry.find(COMPACTION_PROVIDER, COMPACTION_MODEL);
-    if (!model) throw new Error(`Compaction model ${COMPACTION_PROVIDER}/${COMPACTION_MODEL} is unavailable`);
-    const response = await ctx.modelRegistry.complete(
+    const prompt = compactionPrompt(event.preparation, event.customInstructions);
+    const complete = (model, reasoning) => ctx.modelRegistry.complete(
       model,
       {
         systemPrompt: "Write a faithful continuation record from the supplied work log.",
         messages: [{
           role: "user",
-          content: [{ type: "text", text: compactionPrompt(event.preparation) }],
+          content: [{ type: "text", text: prompt }],
           timestamp: Date.now(),
         }],
       },
@@ -228,14 +239,31 @@ export default function stateCompactor(pi) {
         signal: event.signal,
         cacheRetention: "none",
         sessionId: uuidv7(),
+        reasoning,
       },
     );
-    const summary = response.content
-      .filter((part) => part.type === "text")
-      .map((part) => part.text)
-      .join("\n")
-      .trim();
-    if (!summary) throw new Error("Compaction model returned an empty continuation record");
+
+    let response;
+    let summary;
+    try {
+      response = await complete(ctx.model, ctx.thinkingLevel);
+      summary = summaryText(response);
+    } catch (nativeError) {
+      const fallback = ctx.modelRegistry.find(FALLBACK_COMPACTION_PROVIDER, FALLBACK_COMPACTION_MODEL);
+      if (!fallback) {
+        throw new AggregateError(
+          [nativeError],
+          `Fallback compaction model ${FALLBACK_COMPACTION_PROVIDER}/${FALLBACK_COMPACTION_MODEL} is unavailable`,
+        );
+      }
+      ctx.ui.notify(
+        `Native summary failed; retrying with ${FALLBACK_COMPACTION_MODEL} at ${FALLBACK_COMPACTION_REASONING}`,
+        "warning",
+      );
+      response = await complete(fallback, FALLBACK_COMPACTION_REASONING);
+      summary = summaryText(response);
+    }
+
     return {
       compaction: {
         summary,
