@@ -239,7 +239,7 @@ for line in sys.stdin:
    elif last == 'compact':
     compacting = True
     out({'type':'compaction_start','reason':'threshold'})
-    pause(0.5)
+    gate('compaction')
     compacting = False
     out({'type':'compaction_end','reason':'threshold','result':{'summary':'done'},'aborted':False,'willRetry':False})
     out({'type':'message_end','message':{'role':'assistant','content':[{'type':'text','text':'done'}]}})
@@ -1348,18 +1348,24 @@ describe("web and supervisor integration", () => {
         messages: [{ role: "user", content: [{ type: "text", text: "removed by compaction" }] }],
       },
     });
+    resetGate("compaction");
     await api("POST", `/v1/sessions/${id}/prompt`, { requestId: crypto.randomUUID(), text: "compact" });
-    const compacting = await waitFor(
-      () => api("GET", "/v1/sessions").then((result) => result.value.sessions.find((session: any) => session.id === id)),
-      (session) => session?.activity === "COMPACTING",
-    );
-    expect(compacting.activity).toBe("COMPACTING");
-    const sync = await api("POST", "/v1/sync", {
-      after: 0, waitMs: 0, includeSessions: false, includeDashboard: false, watchedIds: [id],
-    });
-    expect(sync.value.watched).toEqual([
-      expect.objectContaining({ id, state: "RUNNING", activity: "COMPACTING" }),
-    ]);
+    await waitForGate("compaction");
+    try {
+      const compacting = await waitFor(
+        () => api("GET", "/v1/sessions").then((result) => result.value.sessions.find((session: any) => session.id === id)),
+        (session) => session?.activity === "COMPACTING",
+      );
+      expect(compacting.activity).toBe("COMPACTING");
+      const sync = await api("POST", "/v1/sync", {
+        after: 0, waitMs: 0, includeSessions: false, includeDashboard: false, watchedIds: [id],
+      });
+      expect(sync.value.watched).toEqual([
+        expect.objectContaining({ id, state: "RUNNING", activity: "COMPACTING" }),
+      ]);
+    } finally {
+      releaseGate("compaction");
+    }
     const events = await waitFor(
       () => api("GET", `/v1/sessions/${id}/events?after=0`).then((result) => result.value.events),
       (rows) => rows.some((event: any) => event.type === "notice" && event.text === "Context compacted"),
@@ -1381,21 +1387,27 @@ describe("web and supervisor integration", () => {
         messages: [{ role: "user", content: [{ type: "text", text: "removed by compaction" }] }],
       },
     });
+    resetGate("compaction");
     await api("POST", `/v1/sessions/${id}/prompt`, { requestId: crypto.randomUUID(), text: "compact" });
-    await waitFor(
-      () => api("GET", "/v1/sessions").then((result) => result.value.sessions.find((session: any) => session.id === id)),
-      (session) => session?.activity === "COMPACTING",
-    );
-    const replacement = await api("PUT", `/v1/sessions/${id}/context`, {
-      capturedAt: Date.now(),
-      replacement: "compaction",
-      context: {
-        systemPrompt: "current prompt",
-        tools: [],
-        messages: [{ role: "user", content: [{ type: "text", text: "compacted summary" }] }],
-      },
-    });
-    expect(replacement.value.capturedAt).toBeGreaterThan(futureCapture);
+    await waitForGate("compaction");
+    try {
+      await waitFor(
+        () => api("GET", "/v1/sessions").then((result) => result.value.sessions.find((session: any) => session.id === id)),
+        (session) => session?.activity === "COMPACTING",
+      );
+      const replacement = await api("PUT", `/v1/sessions/${id}/context`, {
+        capturedAt: Date.now(),
+        replacement: "compaction",
+        context: {
+          systemPrompt: "current prompt",
+          tools: [],
+          messages: [{ role: "user", content: [{ type: "text", text: "compacted summary" }] }],
+        },
+      });
+      expect(replacement.value.capturedAt).toBeGreaterThan(futureCapture);
+    } finally {
+      releaseGate("compaction");
+    }
     await waitFor(
       () => api("GET", `/v1/sessions/${id}/events?after=0`).then((result) => result.value.events),
       (events) => events.some((event: any) => event.type === "notice" && event.text === "Context compacted"),
