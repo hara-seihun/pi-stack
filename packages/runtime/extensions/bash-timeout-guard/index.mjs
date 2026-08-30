@@ -1,13 +1,18 @@
 export const MAX_TIMEOUT_SECONDS = 55;
+export const INTERACTIVE_MAX_TIMEOUT_SECONDS = 1800;
 
 function positiveSeconds(value, fallback) {
   const parsed = Number(value);
   return Number.isFinite(parsed) && parsed > 0 ? parsed : fallback;
 }
 
+function describeSeconds(seconds) {
+  return seconds % 60 === 0 && seconds > 60 ? `${seconds} seconds (${seconds / 60} minutes)` : `${seconds} seconds`;
+}
+
 function policyRule(maxTimeoutSeconds, context) {
   const reason = context ? ` ${context.trim()}` : "";
-  return `Every bash tool call must pass an explicit timeout of at most ${maxTimeoutSeconds} seconds. Commands that detach work from the session are blocked; keep the work in the foreground.${reason}`;
+  return `Every bash tool call must pass an explicit timeout of at most ${describeSeconds(maxTimeoutSeconds)}. Commands that detach work from the session are blocked; keep the work in the foreground.${reason}`;
 }
 
 const detachmentRefusal = (found, policy) =>
@@ -15,9 +20,16 @@ const detachmentRefusal = (found, policy) =>
   `Keep the operation inside the bounded tool call, split it into checkpoints, or report that it does not fit. ` +
   policy.rule;
 
-export function timeoutPolicy(environment = process.env) {
-  const requested = positiveSeconds(environment.PI_BASH_TIMEOUT_MAX_SECONDS, MAX_TIMEOUT_SECONDS);
-  const maxTimeoutSeconds = Math.min(requested, MAX_TIMEOUT_SECONDS);
+/**
+ * A session with a UI attached (TUI or Pi Remote over RPC) has an operator
+ * watching it and may run a bounded command for up to thirty minutes.
+ * Autonomous sessions (embedded fleet runs, print, json) keep the 55-second
+ * ceiling that the process sweep and pacing assume.
+ */
+export function timeoutPolicy(environment = process.env, interactive = false) {
+  const ceiling = interactive ? INTERACTIVE_MAX_TIMEOUT_SECONDS : MAX_TIMEOUT_SECONDS;
+  const requested = positiveSeconds(environment.PI_BASH_TIMEOUT_MAX_SECONDS, ceiling);
+  const maxTimeoutSeconds = Math.min(requested, ceiling);
   return {
     maxTimeoutSeconds,
     foregroundOnly: true,
@@ -161,16 +173,18 @@ export function checkBashCommand(command, policy = timeoutPolicy()) {
 }
 
 export function registerGuard(pi, environment = process.env) {
-  const policy = timeoutPolicy(environment);
+  const policyFor = (ctx) => timeoutPolicy(environment, ctx?.hasUI === true);
 
-  pi.on("tool_call", (event) => {
+  pi.on("tool_call", (event, ctx) => {
     if (event.toolName !== "bash") return undefined;
+    const policy = policyFor(ctx);
     const reason =
       checkBashTimeout(event.input?.timeout, policy) ?? checkBashCommand(event.input?.command, policy);
     return reason === null || reason === undefined ? undefined : { block: true, reason };
   });
 
-  pi.on("before_agent_start", (event) => {
+  pi.on("before_agent_start", (event, ctx) => {
+    const policy = policyFor(ctx);
     if (event.systemPrompt.includes(policy.rule)) return undefined;
     return { systemPrompt: `${event.systemPrompt}\n\n${policy.rule}` };
   });

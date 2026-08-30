@@ -3,6 +3,7 @@ import { spawnSync } from "node:child_process";
 import { fileURLToPath } from "node:url";
 import test from "node:test";
 import {
+  INTERACTIVE_MAX_TIMEOUT_SECONDS,
   MAX_TIMEOUT_SECONDS,
   RULE,
   checkBashCommand,
@@ -19,6 +20,7 @@ function load(environment = {}) {
 }
 
 const bashCall = (input) => ({ toolName: "bash", input });
+const ui = { hasUI: true };
 const sweep = fileURLToPath(new URL("./sweep", import.meta.url));
 const fleet = {
   PI_BASH_TIMEOUT_MAX_SECONDS: "55",
@@ -32,6 +34,23 @@ test("the environment selects the timeout and foreground policy", () => {
   assert.equal(timeoutPolicy({ PI_BASH_TIMEOUT_MAX_SECONDS: "300" }).maxTimeoutSeconds, 55);
   assert.equal(timeoutPolicy(fleet).foregroundOnly, true);
   assert.equal(timeoutPolicy({}).foregroundOnly, true);
+});
+
+test("interactive sessions get a thirty-minute ceiling, autonomous ones keep 55 seconds", () => {
+  assert.equal(timeoutPolicy({}, true).maxTimeoutSeconds, INTERACTIVE_MAX_TIMEOUT_SECONDS);
+  assert.equal(timeoutPolicy({ PI_BASH_TIMEOUT_MAX_SECONDS: "7200" }, true).maxTimeoutSeconds, 1800);
+  assert.equal(timeoutPolicy(fleet, true).maxTimeoutSeconds, 55);
+
+  const onToolCall = load().get("tool_call");
+  assert.equal(onToolCall(bashCall({ command: "ls", timeout: 1800 }), ui), undefined);
+  const blocked = onToolCall(bashCall({ command: "ls", timeout: 1801 }), ui);
+  assert.equal(blocked.block, true);
+  assert.match(blocked.reason, /1800s cap/);
+  assert.equal(onToolCall(bashCall({ command: "ls", timeout: 1800 }), { hasUI: false }).block, true);
+  assert.equal(onToolCall(bashCall({ command: "./census &", timeout: 1800 }), ui).block, true);
+
+  const prompt = load().get("before_agent_start")({ systemPrompt: "base" }, ui).systemPrompt;
+  assert.match(prompt, /1800 seconds \(30 minutes\)/);
 });
 
 test("only bounded positive timeouts are accepted", () => {

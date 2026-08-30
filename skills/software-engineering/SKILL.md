@@ -35,7 +35,7 @@ If all software accomplished its goal in an optimal manner, you would expect tha
 
 ### Pipelines
 
-Every attended command and pipeline must finish within 55 seconds. There are no exceptions. Third-party latency belongs to a durable worker, not a waiting model session. Common mistakes include sleeping instead of awaiting state, serializing independent work, and rebuilding an unchanged stage. Memoize a stage when its inputs have not changed. These fixes often cut pipeline time by orders of magnitude.
+Every attended command and pipeline must finish within your session's bash timeout ceiling — 55 seconds for autonomous sessions, 30 minutes when an operator is attached. Treat 55 seconds as the design target regardless; a longer allowance is for genuinely long bounded work, not slack for slow pipelines. Third-party latency belongs to a durable worker, not a waiting model session. Common mistakes include sleeping instead of awaiting state, serializing independent work, and rebuilding an unchanged stage. Memoize a stage when its inputs have not changed. These fixes often cut pipeline time by orders of magnitude.
 
 ### Publication is a custody transfer
 
@@ -47,7 +47,7 @@ Do not use `gh pr checks --watch`, `gh run watch`, sleep loops around status com
 
 ### Always run commands with timeouts
 
-Pass an explicit timeout of at most 55 seconds to every command. Install `timeout` if your command tool does not provide one. If work does not fit, make it faster, divide it into independent bounded calls, or transfer it to a durable worker that owns the result. Do not keep a model alive for a download, third-party request, CI, merge, deployment, or another agent.
+Pass an explicit timeout within your session's stated ceiling to every command. Install `timeout` if your command tool does not provide one. If work does not fit, make it faster, divide it into independent bounded calls, or transfer it to a durable worker that owns the result. Do not keep a model alive for a download, third-party request, CI, merge, deployment, or another agent.
 
 A computation that takes twenty minutes is the wrong computation for an attended session. Improve it and run a sub-minute experiment instead.
 
