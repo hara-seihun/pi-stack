@@ -29,14 +29,59 @@ function activity(at, overrides = {}) {
   };
 }
 
-function successfulExec(items) {
+function workspaceActivity(overrides = {}) {
+  return {
+    workspace_id: "workspace-id",
+    workspace_title: "A live attack",
+    problem_id: "problem-id",
+    problem_title: "A problem",
+    formulation_id: "formulation-id",
+    formulation_title: "The exact statement",
+    latest_at: "2026-08-30T01:45:00.000Z",
+    created_at: "2026-08-30T01:05:00.000Z",
+    created_in_window: true,
+    creator_name: "Researcher",
+    guide_updated_at: null,
+    guide_updated_by_name: null,
+    note_count: 2,
+    latest_note_at: "2026-08-30T01:45:00.000Z",
+    latest_note_author_name: "Researcher",
+    latest_note_excerpt: "The obstruction is now isolated.",
+    changed_file_count: 3,
+    latest_file_at: "2026-08-30T01:44:00.000Z",
+    latest_file_uploader_name: "Researcher",
+    latest_file_paths: ["proof.md", "check.py"],
+    ...overrides,
+  };
+}
+
+function successfulExec(publishedItems, workspaceItems = [], workspaceTruncated = false) {
   return async (command, args, options) => {
     assert.equal(command, "mcp");
-    assert.deepEqual(args, ["call", "math_scratch_recent_activity", JSON.stringify({ limit: ACTIVITY_LIMIT })]);
     assert.equal(options.timeout, 10_000);
+    if (args[1] === "math_scratch_recent_activity") {
+      assert.deepEqual(args, ["call", "math_scratch_recent_activity", JSON.stringify({ limit: ACTIVITY_LIMIT })]);
+      return {
+        code: 0,
+        stdout: JSON.stringify({ structuredContent: { items: publishedItems, generated_at: new Date(NOW).toISOString() } }),
+        stderr: "",
+      };
+    }
+    assert.equal(args[1], "math_scratch_recent_workspace_activity");
+    const input = JSON.parse(args[2]);
+    assert.equal(input.limit, ACTIVITY_LIMIT);
     return {
       code: 0,
-      stdout: JSON.stringify({ structuredContent: { items, generated_at: new Date(NOW).toISOString() } }),
+      stdout: JSON.stringify({
+        structuredContent: {
+          items: workspaceItems,
+          total: workspaceItems.length + (workspaceTruncated ? 1 : 0),
+          truncated: workspaceTruncated,
+          after: input.after,
+          before: input.before,
+          generated_at: new Date(NOW).toISOString(),
+        },
+      }),
       stderr: "",
     };
   };
@@ -62,7 +107,7 @@ test("the first invocation looks back one hour and advances to invocation start"
   });
 
   assert.equal(result.details.since, new Date(NOW - FIRST_LOOKBACK_MS).toISOString());
-  assert.deepEqual(result.details.items, [included]);
+  assert.deepEqual(result.details.published, [included]);
   assert.match(result.text, /Scratch activity after 2026-08-30T01:00:00\.000Z/);
   assert.match(result.text, /formulation settled: The exact statement/);
   const state = JSON.parse(await readFile(statePath, "utf8"));
@@ -82,8 +127,21 @@ test("later invocations use the shared persisted checkpoint", () => fixture(asyn
   });
 
   assert.equal(result.details.since, "2026-08-30T02:00:00.000Z");
-  assert.equal(result.details.count, 1);
+  assert.equal(result.details.publishedCount, 1);
   assert.equal(JSON.parse(await readFile(statePath, "utf8")).lastInvokedAt, "2026-08-30T02:30:00.000Z");
+}));
+
+test("workspace work appears beside published advancement", () => fixture(async (statePath) => {
+  const workspace = workspaceActivity();
+  const result = await runScratchUpdates({
+    exec: successfulExec([], [workspace]),
+    statePath,
+    now: () => NOW,
+  });
+
+  assert.deepEqual(result.details.workspaces, [workspace]);
+  assert.match(result.text, /1 workspace, 2 notes, 3 changed file paths/);
+  assert.match(result.text, /Latest note by Researcher: The obstruction is now isolated/);
 }));
 
 test("a saturated feed that does not reach the checkpoint stays explicitly partial", () => fixture(async (statePath) => {
@@ -103,7 +161,7 @@ test("an MCP failure does not advance the checkpoint", () => fixture(async (stat
       statePath,
       now: () => NOW,
     }),
-    /Could not read the math scratch activity feed: connection refused/,
+    /Could not call math_scratch_recent_activity: connection refused/,
   );
   await assert.rejects(readFile(statePath, "utf8"), { code: "ENOENT" });
 }));

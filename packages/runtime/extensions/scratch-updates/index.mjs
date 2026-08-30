@@ -15,7 +15,8 @@ export const FIRST_LOOKBACK_MS = 60 * 60 * 1000;
 export const TOOL_NAME = "scratch_updates";
 
 const STATE_VERSION = 1;
-const MCP_TOOL = "math_scratch_recent_activity";
+const PUBLISHED_ACTIVITY_TOOL = "math_scratch_recent_activity";
+const WORKSPACE_ACTIVITY_TOOL = "math_scratch_recent_workspace_activity";
 const KIND_LABELS = {
   problem_published: "problem published",
   formulation_published: "formulation published",
@@ -163,6 +164,28 @@ function parseActivity(stdout) {
   return items;
 }
 
+function parseWorkspaceActivity(stdout) {
+  let envelope;
+  try {
+    envelope = JSON.parse(stdout);
+  } catch (error) {
+    throw new Error(`math_scratch_recent_workspace_activity returned invalid JSON: ${error.message}`);
+  }
+  const feed = envelope?.structuredContent;
+  if (!feed || !Array.isArray(feed.items) || !Number.isInteger(feed.total) || typeof feed.truncated !== "boolean") {
+    throw new Error("math_scratch_recent_workspace_activity returned no structured workspace feed");
+  }
+  const items = feed.items.map((item, index) => {
+    if (!item || typeof item !== "object") throw new Error(`Workspace activity item ${index} is not an object`);
+    return {
+      ...item,
+      latest_at: parseTimestamp(item.latest_at, `Workspace activity item ${index} timestamp`),
+    };
+  });
+  items.sort((left, right) => right.latest_at.localeCompare(left.latest_at) || String(right.workspace_id).localeCompare(String(left.workspace_id)));
+  return { items, total: feed.total, truncated: feed.truncated };
+}
+
 function oneLine(value) {
   return String(value ?? "").replace(/\s+/gu, " ").trim();
 }
@@ -192,24 +215,50 @@ function formatEntry(item) {
   );
 }
 
-function formatActivity(items, since, invokedAt, incomplete) {
-  const counts = Object.entries(
-    items.reduce((accumulator, item) => {
+function formatWorkspaceEntry(item) {
+  const at = item.latest_at.slice(0, 16).replace("T", " ") + "Z";
+  const title = truncateUtf8(item.workspace_title, 110);
+  const target = truncateUtf8(item.formulation_title || item.problem_title, 110);
+  const changes = [
+    item.created_in_window ? "created" : "",
+    item.guide_updated_at ? "guide updated" : "",
+    item.note_count ? `${item.note_count} note${item.note_count === 1 ? "" : "s"}` : "",
+    item.changed_file_count ? `${item.changed_file_count} changed path${item.changed_file_count === 1 ? "" : "s"}` : "",
+  ].filter(Boolean).join(", ");
+  const note = item.latest_note_excerpt
+    ? ` Latest note by ${truncateUtf8(item.latest_note_author_name, 45)}: ${truncateUtf8(item.latest_note_excerpt, 145)}`
+    : "";
+  const paths = item.latest_file_paths?.length
+    ? ` Paths: ${truncateUtf8(item.latest_file_paths.join(", "), 100)}`
+    : "";
+  return truncateUtf8(`- ${at} workspace ${title} on ${target}: ${changes}.${note}${paths} (${item.workspace_id})`, 430);
+}
+
+function formatActivity(published, workspaces, since, invokedAt, incomplete) {
+  const publishedCounts = Object.entries(
+    published.reduce((accumulator, item) => {
       accumulator[item.kind] = (accumulator[item.kind] ?? 0) + 1;
       return accumulator;
     }, {}),
   ).map(([kind, count]) => `${KIND_LABELS[kind]} ${count}`).join(", ");
+  const noteCount = workspaces.reduce((sum, item) => sum + item.note_count, 0);
+  const fileCount = workspaces.reduce((sum, item) => sum + item.changed_file_count, 0);
+  const guideCount = workspaces.filter((item) => item.guide_updated_at).length;
+  const createdCount = workspaces.filter((item) => item.created_in_window).length;
 
   const lines = [
     incomplete
-      ? `Partial scratch activity after ${since}. The feed's ${ACTIVITY_LIMIT}-entry window did not reach the previous checkpoint, so the checkpoint was not advanced.`
-      : `Scratch activity after ${since} through ${invokedAt}: ${items.length} event${items.length === 1 ? "" : "s"}.`,
+      ? `Partial scratch activity after ${since}. A feed limit was reached, so the checkpoint was not advanced.`
+      : `Scratch activity after ${since} through ${invokedAt}.`,
+    `Working activity: ${workspaces.length} workspace${workspaces.length === 1 ? "" : "s"}, ${noteCount} notes, ${fileCount} changed file paths, ${guideCount} guide updates, ${createdCount} new workspaces.`,
+    `Published advancement: ${published.length} event${published.length === 1 ? "" : "s"}${publishedCounts ? ` (${publishedCounts})` : ""}.`,
   ];
-  if (items.length === 0) {
-    lines.push("Nothing new was published.");
+  if (published.length === 0 && workspaces.length === 0) {
+    lines.push("Nothing changed in the scratch server during this window.");
     return lines.join("\n");
   }
-  lines.push(`Summary: ${counts}.`, "", ...items.map(formatEntry));
+  if (published.length > 0) lines.push("", "Published:", ...published.map(formatEntry));
+  if (workspaces.length > 0) lines.push("", "Workspaces:", ...workspaces.map(formatWorkspaceEntry));
   return lines.join("\n");
 }
 
@@ -224,28 +273,40 @@ export async function runScratchUpdates({
     const invokedAtMs = now();
     const invokedAt = new Date(invokedAtMs).toISOString();
     const since = await readCheckpoint(statePath, invokedAtMs);
-    const result = await exec(
-      "mcp",
-      ["call", MCP_TOOL, JSON.stringify({ limit: ACTIVITY_LIMIT })],
-      { signal, timeout: 10_000 },
-    );
-    if (result.code !== 0) {
+    const options = { signal, timeout: 10_000 };
+    const [publishedResult, workspaceResult] = await Promise.all([
+      exec("mcp", ["call", PUBLISHED_ACTIVITY_TOOL, JSON.stringify({ limit: ACTIVITY_LIMIT })], options),
+      exec("mcp", ["call", WORKSPACE_ACTIVITY_TOOL, JSON.stringify({
+        after: since,
+        before: invokedAt,
+        limit: ACTIVITY_LIMIT,
+      })], options),
+    ]);
+    for (const [name, result] of [
+      [PUBLISHED_ACTIVITY_TOOL, publishedResult],
+      [WORKSPACE_ACTIVITY_TOOL, workspaceResult],
+    ]) {
+      if (result.code === 0) continue;
       const diagnostic = truncateUtf8(result.stderr || result.stdout || `exit ${result.code}`, 1000);
-      throw new Error(`Could not read the math scratch activity feed: ${diagnostic}`);
+      throw new Error(`Could not call ${name}: ${diagnostic}`);
     }
-    const feed = parseActivity(result.stdout);
-    const oldest = feed.at(-1)?.at;
-    const incomplete = feed.length === ACTIVITY_LIMIT && oldest > since;
-    const items = feed.filter((item) => item.at > since && item.at <= invokedAt);
+    const publishedFeed = parseActivity(publishedResult.stdout);
+    const oldest = publishedFeed.at(-1)?.at;
+    const publishedIncomplete = publishedFeed.length === ACTIVITY_LIMIT && oldest > since;
+    const published = publishedFeed.filter((item) => item.at > since && item.at <= invokedAt);
+    const workspaceFeed = parseWorkspaceActivity(workspaceResult.stdout);
+    const incomplete = publishedIncomplete || workspaceFeed.truncated;
     if (!incomplete) await writeCheckpoint(statePath, invokedAt);
     return {
-      text: formatActivity(items, since, invokedAt, incomplete),
+      text: formatActivity(published, workspaceFeed.items, since, invokedAt, incomplete),
       details: {
         since,
         invokedAt,
         incomplete,
-        count: items.length,
-        items,
+        publishedCount: published.length,
+        workspaceCount: workspaceFeed.items.length,
+        published,
+        workspaces: workspaceFeed.items,
         statePath,
       },
     };
@@ -258,8 +319,8 @@ export function registerScratchUpdates(pi, options = {}) {
   pi.registerTool({
     name: TOOL_NAME,
     label: "Scratch Updates",
-    description: "Read published advancement from the math_scratch MCP server since this machine-wide tool was last invoked. The first invocation looks back one hour. Returns problem and formulation publications, settlements, solutions, reviews, reductions, and formulation links. Workspace notes and files are not part of the published activity feed.",
-    promptSnippet: "Read published math scratch activity since the previous invocation",
+    description: "Read everything new on the math_scratch MCP server since this machine-wide tool was last invoked. The first invocation looks back one hour. Reports workspace creation, guide edits, notes, and changed file paths alongside published problems, formulations, settlements, solutions, reviews, reductions, and links.",
+    promptSnippet: "Read math scratch work and publications since the previous invocation",
     parameters: Type.Object({}, { additionalProperties: false }),
     async execute(_toolCallId, _params, signal) {
       const result = await runScratchUpdates({
