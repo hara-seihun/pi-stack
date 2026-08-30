@@ -1,8 +1,5 @@
 import { describe, expect, it } from "vitest";
-import {
-  inferCursorContextWindow,
-  inferCursorMaxOutputTokens,
-} from "../src/models/limits.js";
+import { inferCursorContextWindow, inferCursorMaxOutputTokens } from "../src/models/limits.js";
 import { FALLBACK_MODELS } from "../src/models/parameterized.js";
 
 describe("bundled fallback catalog", () => {
