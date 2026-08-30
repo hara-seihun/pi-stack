@@ -80,6 +80,16 @@ export interface TaskSpec {
    * is boolean for a team lane. Any positive reading asks for the complete
    * roster, and missing roles are replaced without disturbing their peers. */
   readonly team?: TeamSpec;
+  /** Launch on operator authority instead of paced capacity. While the lane
+   * is eligible with unmet demand, every tick admits its sessions before the
+   * paced allocation and past plan-rate budgets, bootstrap caps, and duty
+   * cycles — the spawn command's "forced past pacing" path made durable.
+   * Stops are not pacing and still stop it: lane and machine pause, gate,
+   * demand, the error circuit breaker, credential custody, family halts
+   * (boost 0), access expiry, cooldowns, and the machine's concurrent-session
+   * ceiling all hold. The runs it creates are ledger facts, so paced lanes
+   * price the forced sessions into their own admission the same tick. */
+  readonly ignoreCapacity?: boolean;
 }
 
 export interface DemandState {
@@ -107,6 +117,9 @@ export interface TaskSnapshot {
    * running is what it is measured against; omitted by callers that do not
    * track it, which then allocate from empty. */
   readonly heldByTier?: Readonly<Partial<Record<Tier, number>>>;
+  /** Mirrors TaskSpec.ignoreCapacity so launch surfaces can say which lanes
+   * run past pacing. */
+  readonly ignoreCapacity?: boolean;
 }
 
 export interface EvaluateResult {

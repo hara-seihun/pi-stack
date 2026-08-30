@@ -1,8 +1,8 @@
-import type { Broker } from "../broker/broker.js";
+import type { Admission, Broker } from "../broker/broker.js";
 import type { Ledger, RunRow } from "../ledger/ledger.js";
 import type { Scheduler } from "../tasks/scheduler.js";
 import { allocate, desiredByTier } from "../tasks/allocate.js";
-import type { EvaluateResult, Tier } from "../tasks/types.js";
+import type { Assignment, EvaluateResult, Tier } from "../tasks/types.js";
 
 /**
  * The controller is the launch loop: each tick it reaps dead runs, evaluates
@@ -195,34 +195,62 @@ export class Controller {
         };
       });
 
+    const created: RunRow[] = [];
+    const admitInto = (
+      assignments: readonly Assignment[],
+      admit: (tier: Tier) => Admission | undefined,
+    ): void => {
+      for (const a of assignments) {
+        for (let i = 0; i < a.count; i++) {
+          const admission = admit(a.tier);
+          if (admission === undefined) {
+            skipped.push({ taskId: a.taskId, reason: "no-admission" });
+            break;
+          }
+          const teamRole = missingTeamRoles.get(a.taskId)?.shift();
+          const runId = this.ledger.createRun({
+            taskId: a.taskId,
+            tier: a.tier,
+            ...admission,
+            ...(teamRole === undefined
+              ? {}
+              : { teamRole: teamRole.role, teamSlot: teamRole.slot }),
+            at: now,
+          });
+          created.push(this.ledger.run(runId)!);
+        }
+      }
+    };
+
+    // Ignore-capacity lanes launch first, on operator authority: unlimited
+    // virtual slots satisfy their whole demand (the allocator still honours
+    // each lane's tier mix and unit cap), and admission walks past pacing.
+    // The stops that should stop them already have — pause, gate, demand,
+    // and the error circuit breaker were applied above; custody, family
+    // halts, and the machine ceiling hold inside the broker. Their runs are
+    // ledger facts before the paced arithmetic below reads it, so paced
+    // lanes price the forced sessions into their own admission this tick.
+    const forced = launchable.filter((t) => t.ignoreCapacity === true);
+    const paced = launchable.filter((t) => t.ignoreCapacity !== true);
+    const unlimited: Record<Tier, number> = {
+      light: Number.POSITIVE_INFINITY,
+      standard: Number.POSITIVE_INFINITY,
+      expert: Number.POSITIVE_INFINITY,
+    };
+    admitInto(allocate(forced, unlimited).assignments, (tier) =>
+      this.broker.admitForced(tier, now),
+    );
+
     // What the tiers are worth to the broker is what the claims would put in
     // them: a lane wanting twenty light sessions per standard one must not
     // have scarce standard accounts held for a standard session it is not
     // going to ask for, and must have light slots advertised in the quantity
     // it will actually take.
-    const demandByTier = desiredByTier(launchable, this.broker.maxSlotsPerCycle);
-    const created: RunRow[] = [];
-    const { assignments } = allocate(launchable, this.broker.slotsByTier(now, demandByTier));
-    for (const a of assignments) {
-      for (let i = 0; i < a.count; i++) {
-        const admission = this.broker.admit(a.tier, now);
-        if (admission === undefined) {
-          skipped.push({ taskId: a.taskId, reason: "no-admission" });
-          break;
-        }
-        const teamRole = missingTeamRoles.get(a.taskId)?.shift();
-        const runId = this.ledger.createRun({
-          taskId: a.taskId,
-          tier: a.tier,
-          ...admission,
-          ...(teamRole === undefined
-            ? {}
-            : { teamRole: teamRole.role, teamSlot: teamRole.slot }),
-          at: now,
-        });
-        created.push(this.ledger.run(runId)!);
-      }
-    }
+    const demandByTier = desiredByTier(paced, this.broker.maxSlotsPerCycle);
+    admitInto(
+      allocate(paced, this.broker.slotsByTier(now, demandByTier)).assignments,
+      (tier) => this.broker.admit(tier, now),
+    );
     return { evaluation, created, reaped, expired, skipped };
   }
 }

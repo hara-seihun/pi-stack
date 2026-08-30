@@ -6,7 +6,7 @@ import { TIERS, type TaskSpec, type TeamSpec, type Tier, type TierShare } from "
 const TASK_KEYS = new Set([
   "id", "demandCommand", "demandCommandFile", "demandConstant", "gate", "tiers", "share",
   "prompt", "promptFile", "cwd", "doctrineUrl", "opening", "openingFiles",
-  "openingProbe", "openingProbeFile", "team",
+  "openingProbe", "openingProbeFile", "team", "ignoreCapacity",
 ]);
 
 function object(value: unknown, where: string): Record<string, unknown> {
@@ -143,6 +143,7 @@ function task(raw: unknown, index: number, base: string): TaskSpec {
   const openingProbe = text(row, "openingProbe", "openingProbeFile", where, base);
   const demandConstant = optionalNumber(row, "demandConstant", where);
   const share = optionalNumber(row, "share", where);
+  const ignoreCapacity = optionalBoolean(row, "ignoreCapacity", where);
 
   return {
     id,
@@ -157,6 +158,7 @@ function task(raw: unknown, index: number, base: string): TaskSpec {
     opening: resolvedOpening,
     openingProbe,
     team: team(row.team, where, base),
+    ...(ignoreCapacity === undefined ? {} : { ignoreCapacity }),
   };
 }
 

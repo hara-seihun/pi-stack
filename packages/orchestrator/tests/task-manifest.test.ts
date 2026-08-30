@@ -76,6 +76,30 @@ describe("task manifests", () => {
     });
   });
 
+  it("carries ignoreCapacity through the ledger, and clearing it clears the row", () => {
+    const { ledger, manifest } = fixture();
+    writeFileSync(manifest, JSON.stringify({
+      version: 1,
+      tasks: [{ id: "forced", demandConstant: 1, tiers: ["standard"], ignoreCapacity: true }],
+    }));
+    reconcileTaskManifest(ledger, manifest);
+    expect(ledger.tasks()[0]?.ignoreCapacity).toBe(true);
+
+    writeFileSync(manifest, JSON.stringify({
+      version: 1,
+      tasks: [{ id: "forced", demandConstant: 1, tiers: ["standard"] }],
+    }));
+    reconcileTaskManifest(ledger, manifest);
+    expect(ledger.tasks()[0]?.ignoreCapacity).toBeUndefined();
+
+    writeFileSync(manifest, JSON.stringify({
+      version: 1,
+      tasks: [{ id: "forced", demandConstant: 1, tiers: ["standard"], ignoreCapacity: "yes" }],
+    }));
+    expect(() => loadTaskManifest(manifest)).toThrow(/ignoreCapacity must be a boolean/);
+    ledger.close();
+  });
+
   it("rejects misspelled fields and leaves the ledger unchanged on invalid tasks", () => {
     const { ledger, manifest } = fixture();
     ledger.upsertTask({ id: "kept", demandConstant: 1, tiers: [{ tier: "standard", weight: 1 }] });

@@ -513,6 +513,13 @@ ALTER TABLE task DROP COLUMN self_paced;
 ALTER TABLE run DROP COLUMN check_ins;
 `;
 
+/** A lane the operator has declared launches on authority rather than paced
+ * capacity; see TaskSpec.ignoreCapacity for what still stops it. */
+const IGNORE_CAPACITY_SCHEMA = `
+ALTER TABLE task ADD COLUMN ignore_capacity INTEGER NOT NULL DEFAULT 0
+  CHECK (ignore_capacity IN (0, 1));
+`;
+
 const MIGRATIONS: readonly string[] = [
   SCHEMA,
   TASK_SCHEMA,
@@ -543,6 +550,7 @@ const MIGRATIONS: readonly string[] = [
   RUN_ROLLING_DEPLOY_SCHEMA,
   RUN_RESULT_COLUMNS_REMOVAL_SCHEMA,
   SINGLE_TURN_SCHEMA,
+  IGNORE_CAPACITY_SCHEMA,
 ];
 
 export interface AccountRow {
@@ -1027,8 +1035,8 @@ export class Ledger {
     this.db
       .prepare(
         `INSERT INTO task (id, demand_command, demand_constant, gate, tiers, share, prompt, cwd,
-                           doctrine_url, opening, opening_probe, team, created_at)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                           doctrine_url, opening, opening_probe, team, ignore_capacity, created_at)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
          ON CONFLICT (id) DO UPDATE SET
            demand_command = excluded.demand_command,
            demand_constant = excluded.demand_constant,
@@ -1040,7 +1048,8 @@ export class Ledger {
            doctrine_url = excluded.doctrine_url,
            opening = excluded.opening,
            opening_probe = excluded.opening_probe,
-           team = excluded.team`,
+           team = excluded.team,
+           ignore_capacity = excluded.ignore_capacity`,
       )
       .run(
         t.id,
@@ -1055,6 +1064,7 @@ export class Ledger {
         t.opening === undefined ? null : JSON.stringify(t.opening),
         t.openingProbe ?? null,
         t.team === undefined ? null : JSON.stringify(t.team),
+        t.ignoreCapacity === true ? 1 : 0,
         Date.now(),
       );
   }
@@ -1087,7 +1097,7 @@ export class Ledger {
     const rows = this.db
       .prepare(
         `SELECT id, demand_command, demand_constant, gate, tiers, share, prompt, cwd,
-                doctrine_url, opening, opening_probe, team
+                doctrine_url, opening, opening_probe, team, ignore_capacity
          FROM task ORDER BY id`,
       )
       .all() as {
@@ -1103,6 +1113,7 @@ export class Ledger {
       opening: string | null;
       opening_probe: string | null;
       team: string | null;
+      ignore_capacity: number;
     }[];
     return rows.map((r) => ({
       id: r.id,
@@ -1117,6 +1128,7 @@ export class Ledger {
       opening: r.opening === null ? undefined : (JSON.parse(r.opening) as string[]),
       openingProbe: r.opening_probe ?? undefined,
       team: r.team === null ? undefined : JSON.parse(r.team),
+      ...(r.ignore_capacity === 1 ? { ignoreCapacity: true } : {}),
     }));
   }
 

@@ -99,6 +99,7 @@ async function status(ledger: Ledger): Promise<void> {
       `tiers=${formatTiers(t.tiers)}`,
       `share=${sharePercent(t, evaluation.tasks)}`,
     ];
+    if (t.ignoreCapacity === true) parts.push("ignore-capacity");
     if (t.error !== undefined) parts.push(`error=${t.error}`);
     console.log(`task ${t.taskId}: ${parts.join(" ")}`);
   }
@@ -813,6 +814,10 @@ export function taskSet(ledger: Ledger, args: string[]): void {
     fail("--share must be a positive number");
   }
 
+  const ignoreCapacity = named.has("ignore-capacity")
+    ? named.get("ignore-capacity") !== "false"
+    : current?.ignoreCapacity;
+
   // The two demand forms are exclusive, so naming one clears the other.
   const demandCommand = pick(
     "demand-command",
@@ -847,6 +852,7 @@ export function taskSet(ledger: Ledger, args: string[]): void {
     id,
     tiers,
     ...(share === undefined ? {} : { share }),
+    ...(ignoreCapacity === undefined ? {} : { ignoreCapacity }),
     demandCommand,
     demandConstant,
     gate: pick("gate", current?.gate),
@@ -887,11 +893,19 @@ export function spawn(ledger: Ledger, args: string[], cfg = loadConfig()): void 
   if (wantedModel !== undefined && candidates.length === 0) {
     fail(`tier ${tier} has no candidate matching model ${wantedModel}`);
   }
-  let admission = wanted === undefined && wantedModel === undefined
-    ? new Broker(ledger, brokerConfig(cfg)).admit(tier, now)
-    : undefined;
+  let admission: ReturnType<Broker["admit"]>;
   let forced = false;
-  if (admission === undefined) {
+  if (wanted === undefined && wantedModel === undefined) {
+    // The broker's forced path shares its meaning with ignore-capacity
+    // lanes: custody, family halts, and the machine ceiling still bind.
+    // Naming --account below is the override for even those.
+    const broker = new Broker(ledger, brokerConfig(cfg));
+    admission = broker.admit(tier, now);
+    if (admission === undefined) {
+      admission = broker.admitForced(tier, now);
+      forced = admission !== undefined;
+    }
+  } else {
     forced = true;
     const accounts = ledger
       .accounts()
@@ -914,7 +928,8 @@ export function spawn(ledger: Ledger, args: string[], cfg = loadConfig()): void 
   if (admission === undefined) {
     fail(
       wantedDetail(named.get("account")) +
-        `no ${tier} account is even forceable: every candidate is uncredentialed or cooling down`,
+        `no ${tier} account is even forceable: every candidate is uncredentialed, cooling down, ` +
+        "halted, or the machine is at its session ceiling (--account overrides all but custody)",
     );
   }
   const runId = ledger.createRun({ taskId, tier, ...admission, at: now });
@@ -966,6 +981,7 @@ async function main(): Promise<void> {
                 (t.team === undefined
                   ? ""
                   : ` team=${t.team.workers}+supervisor`) +
+                (t.ignoreCapacity === true ? " ignore-capacity" : "") +
                 (ledger.taskPaused(t.id) ? " HELD" : "") +
                 (t.prompt === undefined ? " (signal only)" : ""),
             );
@@ -1040,6 +1056,8 @@ async function main(): Promise<void> {
             "                               by lane, account, model, and largest session",
             "  task set <id> --tiers light:20,standard [--share N] [--demand-command CMD | --demand-constant N]",
             "               [--gate EXPR] [--prompt TEXT] [--cwd DIR]",
+            "               [--ignore-capacity true|false] launch past pacing on operator authority;",
+            "                                      halts, custody, and the session ceiling still bind",
             "               [--doctrine-url URL]   pin a fetched document into the lane's system prompts",
             "               [--opening file1,file2] lived opening exchange",
             "               [--opening-probe CMD]  command whose JSON stdout fills {{key}} placeholders",

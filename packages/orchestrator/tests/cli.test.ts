@@ -224,7 +224,7 @@ describe("spawn", () => {
     taskSet(ledger, ["signal", "--tiers", "standard", "--demand-constant", "1"]);
     expect(() => spawn(ledger, ["signal"], cfg)).toThrow(/pure demand signal/);
     taskSet(ledger, ["real", "--tiers", "standard", "--demand-constant", "1", "--prompt", "go"]);
-    expect(() => spawn(ledger, ["real"], cfg)).toThrow(/uncredentialed or cooling down/);
+    expect(() => spawn(ledger, ["real"], cfg)).toThrow(/uncredentialed, cooling down, halted/);
     ledger.close();
   });
 });

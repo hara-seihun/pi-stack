@@ -550,3 +550,62 @@ describe("run custody", () => {
     expect(second.claimed.some((l) => l.taskId === "produce")).toBe(true);
   });
 });
+
+describe("ignore-capacity lanes", () => {
+  it("launches the lane's whole demand past pacing in one cycle", async () => {
+    const { ledger, cycle } = build();
+    ledger.upsertTask({
+      id: "forced",
+      demandConstant: 5,
+      tiers: mix("standard"),
+      prompt: "Go.",
+      cwd: "/tmp",
+      ignoreCapacity: true,
+    });
+    // Two bootstrap accounts would pace this lane to two sessions; operator
+    // authority launches all five.
+    const first = await cycle(0);
+    expect(first.claimed).toHaveLength(5);
+    expect(new Set(first.claimed.map((l) => l.taskId))).toEqual(new Set(["forced"]));
+  });
+
+  it("still stops at the machine ceiling, and paced lanes price its runs in", async () => {
+    const { ledger, cycle } = build({}, { maxConcurrentSessions: 3 });
+    ledger.upsertTask({
+      id: "forced",
+      demandConstant: 5,
+      tiers: mix("standard"),
+      prompt: "Go.",
+      cwd: "/tmp",
+      ignoreCapacity: true,
+    });
+    ledger.upsertTask({
+      id: "paced",
+      demandConstant: 4,
+      tiers: mix("standard"),
+      prompt: "Go.",
+      cwd: "/tmp",
+    });
+    const first = await cycle(0);
+    // The forced lane fills the machine to its ceiling; the paced lane sees
+    // those runs as ledger facts and finds no capacity left this tick.
+    expect(first.claimed).toHaveLength(3);
+    expect(new Set(first.claimed.map((l) => l.taskId))).toEqual(new Set(["forced"]));
+  });
+
+  it("holds and releases like any lane: pause is honoured before force", async () => {
+    const { ledger, cycle } = build();
+    ledger.upsertTask({
+      id: "forced",
+      demandConstant: 2,
+      tiers: mix("standard"),
+      prompt: "Go.",
+      cwd: "/tmp",
+      ignoreCapacity: true,
+    });
+    ledger.setTaskPaused("forced", true);
+    expect((await cycle(0)).claimed).toHaveLength(0);
+    ledger.setTaskPaused("forced", false);
+    expect((await cycle(1000)).claimed).toHaveLength(2);
+  });
+});

@@ -111,6 +111,7 @@ export class Scheduler {
         eligible: !paused && gateOpen && units !== undefined && units > 0,
         paused,
         error: errorOf.get(t.id),
+        ...(t.ignoreCapacity === true ? { ignoreCapacity: true } : {}),
       };
     });
 

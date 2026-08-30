@@ -144,6 +144,43 @@ export class Broker {
   }
 
   /**
+   * Admits one session on operator authority. Stops still stop it — an
+   * account must be credentialed, its family not halted, its access
+   * unexpired, its cooldown over, and the machine must be under its
+   * concurrent-session ceiling — but pacing does not: plan-rate budgets,
+   * bootstrap caps, and duty cycles are exactly what this call exists to
+   * walk past. The paced choice is preferred when it exists, because its
+   * placement is measured; otherwise the tier's candidates are walked in
+   * order and the least-loaded eligible account takes the session. One
+   * meaning of "forced past pacing", shared by the spawn command and
+   * ignore-capacity lanes.
+   */
+  admitForced(tier: Tier, now: number, exclude?: ReadonlySet<string>): Admission | undefined {
+    const views = this.views(now);
+    const paced = this.pick(views, tier, now, exclude);
+    if (paced !== undefined) return paced;
+    const active = views.reduce((sum, v) => sum + v.active, 0);
+    if (active >= this.cfg.maxConcurrentSessions) return undefined;
+    for (const candidate of this.cfg.tiers[tier] ?? []) {
+      let best: AccountView | undefined;
+      for (const v of views) {
+        if (v.provider !== candidate.provider) continue;
+        if (exclude?.has(v.id)) continue;
+        if (best === undefined || v.active < best.active) best = v;
+      }
+      if (best !== undefined) {
+        return {
+          accountId: best.id,
+          provider: candidate.provider,
+          model: candidate.model,
+          thinking: candidate.thinking,
+        };
+      }
+    }
+    return undefined;
+  }
+
+  /**
    * Advertises launch slots per tier for one allocation cycle by virtually
    * admitting until refusal, so shared accounts are never double-counted
    * across tiers. `demand` caps each tier at what eligible tasks can actually

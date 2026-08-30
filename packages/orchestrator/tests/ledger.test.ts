@@ -101,7 +101,8 @@ describe("ledger", () => {
     Ledger.open(path).close();
     const db = new DatabaseSync(path);
     db.exec(
-      "ALTER TABLE task ADD COLUMN exit_when_drained INTEGER NOT NULL DEFAULT 0; " +
+      "ALTER TABLE task DROP COLUMN ignore_capacity; " +
+        "ALTER TABLE task ADD COLUMN exit_when_drained INTEGER NOT NULL DEFAULT 0; " +
         "ALTER TABLE task ADD COLUMN self_paced INTEGER NOT NULL DEFAULT 0; " +
         "ALTER TABLE run ADD COLUMN check_ins INTEGER NOT NULL DEFAULT 0; " +
         "DROP TRIGGER previous_team_waiting_to_idle; DROP INDEX run_team_idle; " +
@@ -146,7 +147,7 @@ describe("ledger", () => {
     migrated.close();
     expect(await exited, stderr).toBe(0);
     const verified = new DatabaseSync(path);
-    expect((verified.prepare("PRAGMA user_version").get() as { user_version: number }).user_version).toBe(29);
+    expect((verified.prepare("PRAGMA user_version").get() as { user_version: number }).user_version).toBe(30);
     expect(verified.prepare("SELECT session_id, idle_at, context_since FROM run LIMIT 1").all()).toEqual([]);
     const runColumns = (verified.prepare("PRAGMA table_info(run)").all() as { name: string }[])
       .map((column) => column.name);

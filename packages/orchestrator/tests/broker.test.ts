@@ -741,3 +741,38 @@ describe("duty cycle for an account that cannot afford a continuous session", ()
     });
   });
 });
+
+describe("forced admission", () => {
+  it("prefers the paced choice, then walks past pacing on operator authority", () => {
+    const ledger = openLedger();
+    const broker = new Broker(ledger, CONFIG);
+    // While pacing has room, forced admission is the paced admission.
+    expect(broker.admitForced("expert", 0)).toEqual(broker.admit("expert", 0));
+    // Bootstrap paces the account to one session; forced admission keeps
+    // admitting on it after paced admission refuses.
+    const paced = broker.admit("expert", 0)!;
+    ledger.createRun({ taskId: "t", tier: "expert", at: 0, ...paced });
+    expect(broker.admit("expert", 0)).toBeUndefined();
+    expect(broker.admitForced("expert", 0)?.accountId).toBe("anth-1");
+  });
+
+  it("a family halt still stops a forced admission", () => {
+    const ledger = openLedger();
+    const broker = new Broker(ledger, CONFIG);
+    ledger.setBoost("anthropic", 0);
+    expect(broker.admitForced("expert", 0)).toBeUndefined();
+    ledger.setBoost("anthropic", 1);
+    expect(broker.admitForced("expert", 0)?.accountId).toBe("anth-1");
+  });
+
+  it("the machine ceiling still stops a forced admission", () => {
+    const ledger = openLedger();
+    const broker = new Broker(ledger, { ...CONFIG, maxConcurrentSessions: 3 });
+    for (let i = 0; i < 3; i++) {
+      const a = broker.admitForced("standard", 0);
+      expect(a).toBeDefined();
+      ledger.createRun({ taskId: "t", tier: "standard", at: 0, ...a! });
+    }
+    expect(broker.admitForced("standard", 0)).toBeUndefined();
+  });
+});
