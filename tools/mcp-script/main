@@ -45,6 +45,13 @@ async function main() {
   process.stdout.write(`${JSON.stringify(result, null, 2)}\n`);
 }
 
+// Same as mcp: a reader that closes the pipe first ends the command, and
+// should not bury the output in an unhandled EPIPE trace.
+process.stdout.on("error", (error) => {
+  if (error?.code === "EPIPE") process.exit(0);
+  throw error;
+});
+
 main().catch((error) => {
   process.stdout.write(`${JSON.stringify({ error: { message: error?.message ?? String(error) } }, null, 2)}\n`);
   process.exitCode = 1;

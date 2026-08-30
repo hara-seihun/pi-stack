@@ -7,6 +7,13 @@ import { createInterface } from "node:readline";
 const tools = [
   { name: "refuse", description: "Always refuses", inputSchema: { type: "object", properties: {} } },
   { name: "accept", description: "Always succeeds", inputSchema: { type: "object", properties: {} } },
+  // A real catalogue prints far more than a pipe buffer holds, which is what
+  // makes a reader that stops at the first line reach a write that fails.
+  ...Array.from({ length: Number(process.env.STUB_FILLER_TOOLS ?? 0) }, (_unused, index) => ({
+    name: `filler${index}`,
+    description: "x".repeat(1000),
+    inputSchema: { type: "object", properties: {} },
+  })),
 ];
 
 function send(message) {

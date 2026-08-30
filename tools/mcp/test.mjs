@@ -71,3 +71,25 @@ test("a refused tool call exits non-zero while printing the result", async () =>
   assert.equal(accepted.code, 0);
   assert.equal(JSON.parse(accepted.out).isError, undefined);
 });
+
+test("a reader that leaves early ends the command quietly", async () => {
+  const root = mkdtempSync(join(tmpdir(), "mcp-cli-pipe-"));
+  const config = join(root, "mcp.json");
+  writeFileSync(config, JSON.stringify({
+    mcpServers: { stub: { command: process.execPath, args: [join(import.meta.dirname, "stub-server.mjs")] } },
+  }));
+  // Exactly what an agent types to inspect one tool of many: read the first
+  // line and go. The CLI used to answer that with an unhandled EPIPE trace.
+  const shell = spawn("/bin/sh", ["-c", `'${process.execPath}' '${join(import.meta.dirname, "main")}' --config '${config}' list stub | head -1`], {
+    stdio: ["ignore", "pipe", "pipe"],
+    env: { ...process.env, STUB_FILLER_TOOLS: "400" },
+  });
+  let out = "";
+  let err = "";
+  shell.stdout.on("data", (chunk) => { out += chunk; });
+  shell.stderr.on("data", (chunk) => { err += chunk; });
+  const code = await new Promise((done) => shell.on("close", done));
+  assert.equal(code, 0);
+  assert.equal(err, "");
+  assert.match(out, /^\[/);
+});

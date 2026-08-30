@@ -27,8 +27,26 @@ async function stdin() {
   return Buffer.concat(chunks).toString("utf8").trim();
 }
 
+// `mcp list math_scratch | head` is how you inspect one tool in a catalogue of
+// forty, and the reader closing the pipe first is the normal end of that
+// conversation. Node's default is an unhandled EPIPE stack trace over whatever
+// the agent was reading, so treat a departed reader as a clean finish.
+process.stdout.on("error", (error) => {
+  if (error?.code === "EPIPE") process.exit(0);
+  throw error;
+});
+
+function write(text) {
+  try {
+    process.stdout.write(text);
+  } catch (error) {
+    if (error?.code !== "EPIPE") throw error;
+    process.exit(0);
+  }
+}
+
 function output(value) {
-  process.stdout.write(`${JSON.stringify(value, null, 2)}\n`);
+  write(`${JSON.stringify(value, null, 2)}\n`);
 }
 
 async function main() {
@@ -60,7 +78,7 @@ async function main() {
     } else if (command === "instructions") {
       const server = args.shift();
       if (!server) throw new Error("instructions requires a server name");
-      process.stdout.write(`${await runtime.instructions(server)}\n`);
+      write(`${await runtime.instructions(server)}\n`);
     } else if (command === "connect") {
       const server = args.shift();
       if (!server) throw new Error("connect requires a server name");
