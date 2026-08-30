@@ -802,7 +802,7 @@ Three consumption modes, all exported as `pi-orchestrator/voice`:
 
 Standing math lanes are enabled. Their research-session contract and the
 transcript evidence that shaped it live in
-[`../math-research/docs/agent-research-capability.md`](../math-research/docs/agent-research-capability.md).
+[`agent-research-capability.md`](../../../math-research/docs/agent-research-capability.md).
 The deployed task ledger is the source of truth for definitions. Host task
 manifests own the active lanes, their prompts, and their demand. This package
 owns the scheduling semantics and does not carry a second list of what a host
