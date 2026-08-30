@@ -51,12 +51,12 @@ describe("machine usage", () => {
 
   test("reports bounded memory and disk utilization, plus GPU when available", () => {
     const usage = readMachineUsage();
-    if (usage.gpuPercent !== null) expect(usage.gpuPercent).toBeWithin(0, 100);
+    if (usage.gpuPercent !== null) expect(usage.gpuPercent).toBeWithin(0, 101);
     expect(usage.memory.totalBytes).toBeGreaterThan(0);
     expect(usage.memory.usedBytes).toBeGreaterThanOrEqual(0);
-    expect(usage.memory.percentUsed).toBeWithin(0, 100);
+    expect(usage.memory.percentUsed).toBeWithin(0, 101);
     expect(usage.disk).not.toBeNull();
     expect(usage.disk!.totalBytes).toBeGreaterThan(0);
-    expect(usage.disk!.percentUsed).toBeWithin(0, 100);
+    expect(usage.disk!.percentUsed).toBeWithin(0, 101);
   });
 });

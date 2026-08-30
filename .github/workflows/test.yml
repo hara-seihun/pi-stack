@@ -4,6 +4,9 @@ on:
   push:
   pull_request:
 
+permissions:
+  contents: read
+
 concurrency:
   group: test-${{ github.ref }}
   cancel-in-progress: true
@@ -13,11 +16,48 @@ jobs:
     runs-on: [self-hosted, pi-stack]
     timeout-minutes: 1
     steps:
-      - uses: actions/checkout@v4
-        with:
-          clean: false
       - name: check
+        env:
+          CI_GITHUB_TOKEN: ${{ github.token }}
         run: |
+          set -euo pipefail
+          repository="$CACHE_DIRECTORY/repository"
+          origin="$GITHUB_SERVER_URL/$GITHUB_REPOSITORY.git"
+          askpass=$(mktemp)
+          trap 'rm -f "$askpass"' EXIT
+          cat >"$askpass" <<'SH'
+          #!/usr/bin/env bash
+          case "$1" in
+            *Username*) printf '%s\n' x-access-token ;;
+            *Password*) printf '%s\n' "$CI_GITHUB_TOKEN" ;;
+            *) exit 1 ;;
+          esac
+          SH
+          chmod 0700 "$askpass"
+          export GIT_ASKPASS="$askpass" GIT_TERMINAL_PROMPT=0
+
+          if [[ ! -e "$repository/.git" ]]; then
+            mkdir -p "$repository"
+            [[ -z $(find "$repository" -mindepth 1 -print -quit) ]] || {
+              echo "$repository exists but is not a Git checkout" >&2
+              exit 1
+            }
+            git -C "$repository" init --quiet
+            git -C "$repository" remote add origin "$origin"
+          fi
+          [[ $(git -C "$repository" remote get-url origin) == "$origin" ]] || {
+            echo "$repository has the wrong origin" >&2
+            exit 1
+          }
+          git -C "$repository" fetch --quiet --no-tags --depth=1 origin "+$GITHUB_REF:refs/ci/event"
+          [[ $(git -C "$repository" rev-parse refs/ci/event) == "$GITHUB_SHA" ]]
+          git -C "$repository" checkout --quiet --detach --force "$GITHUB_SHA"
+          git -C "$repository" clean -dffx -e /node_modules/ -e '**/node_modules/'
+          rm -f "$askpass"
+          trap - EXIT
+          unset CI_GITHUB_TOKEN GIT_ASKPASS
+
+          cd "$repository"
           source deploy/lib
           pi_stack_prepare_dependencies "$PWD"
           npm run check
