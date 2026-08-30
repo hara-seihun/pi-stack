@@ -154,6 +154,12 @@ test("classifies active systemd workspace references", () => {
   assert.deepEqual(result.references.map(({ id, manager }) => ({ id, manager })), [
     { id: "worker.service", manager: "user" },
   ]);
+  const unavailable = workspaceTesting.systemdManagerSnapshot("user", () => ({
+    status: 1,
+    stdout: "",
+    stderr: "Failed to connect to user scope bus via local transport: $DBUS_SESSION_BUS_ADDRESS and $XDG_RUNTIME_DIR not defined",
+  }));
+  assert.deepEqual(unavailable, { units: [], available: false });
 });
 
 test("creates and releases a clean review checkout", () => {

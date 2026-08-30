@@ -421,9 +421,9 @@ function parseSystemdUnits(output, manager) {
   });
 }
 
-function systemdManagerSnapshot(manager) {
+function systemdManagerSnapshot(manager, execute = command) {
   const managerArgs = manager === "user" ? ["--user"] : [];
-  const listed = command("systemctl", [
+  const listed = execute("systemctl", [
     ...managerArgs,
     "list-units",
     "--all",
@@ -433,13 +433,13 @@ function systemdManagerSnapshot(manager) {
     "--no-legend",
     "--plain",
   ], { timeout: 20_000 });
-  if (listed.error?.code === "ENOENT" || /not been booted with systemd|failed to connect to bus/iu.test(listed.stderr)) {
+  if (listed.error?.code === "ENOENT" || /not been booted with systemd|failed to connect to (?:user scope )?bus|(?:DBUS_SESSION_BUS_ADDRESS|XDG_RUNTIME_DIR) not defined/iu.test(listed.stderr)) {
     return { units: [], available: false };
   }
   if (listed.status !== 0) return { units: [], available: true, error: listed.stderr || listed.stdout || "systemctl list-units failed" };
   const unitIds = listed.stdout.split("\n").map((line) => line.trim().split(/\s+/u)[0]).filter(Boolean);
   if (unitIds.length === 0) return { units: [], available: true };
-  const shown = command("systemctl", [
+  const shown = execute("systemctl", [
     ...managerArgs,
     "show",
     ...unitIds,
@@ -1189,7 +1189,7 @@ Records with the same --group lease, heartbeat, and release as one multi-reposit
 `);
 }
 
-export const workspaceTesting = { dockerSnapshot, parseSystemdUnits, systemdReferences };
+export const workspaceTesting = { dockerSnapshot, parseSystemdUnits, systemdManagerSnapshot, systemdReferences };
 
 export function main(argv = process.argv.slice(2), statePath = DEFAULT_STATE) {
   const [commandName, ...rest] = argv;
