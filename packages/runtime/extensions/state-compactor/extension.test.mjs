@@ -2,8 +2,11 @@ import test from "node:test";
 import assert from "node:assert/strict";
 import stateCompactor, {
   COMPACT_THRESHOLD_TOKENS,
+  COMPACTION_MODEL,
+  COMPACTION_PROVIDER,
   CONTINUATION_MESSAGE,
   RETAINED_SKILLS_TYPE,
+  compactionPrompt,
   retainedSkillContext,
 } from "./index.mjs";
 
@@ -48,7 +51,12 @@ test("guards provider requests with one native compaction at 250,000 tokens", ()
     },
   });
 
-  assert.deepEqual([...handlers.keys()], ["before_agent_start", "context", "before_provider_request"]);
+  assert.deepEqual([...handlers.keys()], [
+    "before_agent_start",
+    "context",
+    "session_before_compact",
+    "before_provider_request",
+  ]);
 
   let tokens = null;
   const compactions = [];
@@ -84,6 +92,74 @@ test("guards provider requests with one native compaction at 250,000 tokens", ()
       options: { triggerTurn: true },
     },
   ]);
+});
+
+test("routes Anthropic compaction through the independent OpenAI summarizer", async () => {
+  const handlers = new Map();
+  let request;
+  const model = { provider: COMPACTION_PROVIDER, id: COMPACTION_MODEL };
+  const usage = { totalTokens: 100 };
+  stateCompactor({
+    on: (event, handler) => handlers.set(event, handler),
+    sendMessage() {},
+  });
+  const preparation = {
+    messagesToSummarize: [{ role: "user", content: [{ type: "text", text: "Fix the broken thread" }] }],
+    turnPrefixMessages: [],
+    previousSummary: "Earlier work",
+    firstKeptEntryId: "kept",
+    tokensBefore: 251_000,
+  };
+  const result = await handlers.get("session_before_compact")(
+    { preparation, signal: new AbortController().signal },
+    {
+      model: { provider: "anthropic-3" },
+      modelRegistry: {
+        find: (provider, modelId) => {
+          assert.equal(provider, COMPACTION_PROVIDER);
+          assert.equal(modelId, COMPACTION_MODEL);
+          return model;
+        },
+        complete: async (...args) => {
+          request = args;
+          return { content: [{ type: "text", text: "  compacted work  " }], usage };
+        },
+      },
+    },
+  );
+  assert.equal(request[0], model);
+  assert.match(request[1].messages[0].content[0].text, /Fix the broken thread/);
+  assert.match(request[1].messages[0].content[0].text, /Earlier work/);
+  assert.equal(request[2].cacheRetention, "none");
+  assert.deepEqual(result, {
+    compaction: {
+      summary: "compacted work",
+      firstKeptEntryId: "kept",
+      tokensBefore: 251_000,
+      usage,
+    },
+  });
+});
+
+test("leaves non-Anthropic compaction on its current provider", async () => {
+  const handlers = new Map();
+  stateCompactor({ on: (event, handler) => handlers.set(event, handler), sendMessage() {} });
+  const result = await handlers.get("session_before_compact")(
+    { preparation: {}, signal: new AbortController().signal },
+    { model: { provider: "openai-codex" } },
+  );
+  assert.equal(result, undefined);
+});
+
+test("compaction prompt preserves split-turn and previous-summary context", () => {
+  const prompt = compactionPrompt({
+    messagesToSummarize: [{ role: "user", content: [{ type: "text", text: "history" }] }],
+    turnPrefixMessages: [{ role: "assistant", content: [{ type: "text", text: "turn prefix" }] }],
+    previousSummary: "previous",
+  });
+  assert.match(prompt, /history/);
+  assert.match(prompt, /turn prefix/);
+  assert.match(prompt, /<previous-summary>\nprevious/);
 });
 
 test("restores every fully loaded skill after compaction", () => {

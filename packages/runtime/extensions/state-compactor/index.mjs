@@ -1,10 +1,40 @@
 import { readFileSync } from "node:fs";
 import { homedir } from "node:os";
 import { isAbsolute, resolve } from "node:path";
+import { uuidv7 } from "@earendil-works/pi-ai";
+import { convertToLlm, serializeConversation } from "@earendil-works/pi-coding-agent";
 
 export const COMPACT_THRESHOLD_TOKENS = 250_000;
+export const COMPACTION_PROVIDER = "openai-codex";
+export const COMPACTION_MODEL = "gpt-5.4-mini";
 export const CONTINUATION_MESSAGE = "Your context was compacted, you now have tons of room to continue what you were doing ^-^";
 export const RETAINED_SKILLS_TYPE = "state-compactor-skills";
+
+const SUMMARY_PROMPT = `Replace the older part of this work log with a continuation record. Preserve concrete facts, exact identifiers, paths, commands, errors, decisions, unfinished work, and the user's requests. Distinguish completed work from plans. Do not continue the work or critique it.
+
+Use this format:
+
+## Goal
+## Constraints & preferences
+## Progress
+### Done
+### In progress
+### Blocked
+## Key decisions
+## Next steps
+## Critical context
+<read-files>
+</read-files>
+<modified-files>
+</modified-files>`;
+
+export function compactionPrompt(preparation) {
+  const messages = [...preparation.messagesToSummarize, ...preparation.turnPrefixMessages];
+  const previous = preparation.previousSummary
+    ? `\n\n<previous-summary>\n${preparation.previousSummary}\n</previous-summary>`
+    : "";
+  return `<work-log>\n${serializeConversation(convertToLlm(messages))}\n</work-log>${previous}\n\n${SUMMARY_PROMPT}`;
+}
 
 function contentText(content) {
   if (typeof content === "string") return content;
@@ -177,6 +207,43 @@ export default function stateCompactor(pi) {
     if (!retained) return;
     const messages = event.messages.filter((message) => message?.customType !== RETAINED_SKILLS_TYPE);
     return { messages: [retained, ...messages] };
+  });
+
+  pi.on("session_before_compact", async (event, ctx) => {
+    if (!ctx.model?.provider?.startsWith("anthropic")) return;
+    const model = ctx.modelRegistry.find(COMPACTION_PROVIDER, COMPACTION_MODEL);
+    if (!model) throw new Error(`Compaction model ${COMPACTION_PROVIDER}/${COMPACTION_MODEL} is unavailable`);
+    const response = await ctx.modelRegistry.complete(
+      model,
+      {
+        systemPrompt: "Write a faithful continuation record from the supplied work log.",
+        messages: [{
+          role: "user",
+          content: [{ type: "text", text: compactionPrompt(event.preparation) }],
+          timestamp: Date.now(),
+        }],
+      },
+      {
+        maxTokens: 12_000,
+        signal: event.signal,
+        cacheRetention: "none",
+        sessionId: uuidv7(),
+      },
+    );
+    const summary = response.content
+      .filter((part) => part.type === "text")
+      .map((part) => part.text)
+      .join("\n")
+      .trim();
+    if (!summary) throw new Error("Compaction model returned an empty continuation record");
+    return {
+      compaction: {
+        summary,
+        firstKeptEntryId: event.preparation.firstKeptEntryId,
+        tokensBefore: event.preparation.tokensBefore,
+        usage: response.usage,
+      },
+    };
   });
 
   pi.on("before_provider_request", (_event, ctx) => {
