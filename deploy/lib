@@ -39,7 +39,7 @@ pi_stack_enter_deployment() {
 
 pi_stack_dependency_key() {
   local root=$1
-  sha256sum "$root/package.json" "$root/package-lock.json" | sha256sum | cut -d' ' -f1
+  sha256sum "$root/package.json" "$root/package-lock.json" | cut -d' ' -f1 | sha256sum | cut -d' ' -f1
 }
 
 pi_stack_prepare_dependencies() {

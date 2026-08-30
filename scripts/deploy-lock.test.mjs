@@ -61,6 +61,29 @@ test("one host deployment installs its shared dependency tree once", () => {
   }
 });
 
+test("dependency receipts do not depend on checkout location", () => {
+  const first = mkdtempSync(join(tmpdir(), "pi-stack-dependency-key-a-"));
+  const second = mkdtempSync(join(tmpdir(), "pi-stack-dependency-key-b-"));
+  try {
+    for (const directory of [first, second]) {
+      writeFileSync(join(directory, "package.json"), "{}\n");
+      writeFileSync(join(directory, "package-lock.json"), "{\"lockfileVersion\":3}\n");
+    }
+    const result = spawnSync("bash", ["-c", `
+      source "$1"
+      pi_stack_dependency_key "$2"
+      pi_stack_dependency_key "$3"
+    `, "deploy-dependencies-test", helper, first, second], { encoding: "utf8" });
+    assert.equal(result.status, 0, result.stderr);
+    const keys = result.stdout.trim().split("\n");
+    assert.equal(keys.length, 2);
+    assert.equal(keys[0], keys[1]);
+  } finally {
+    rmSync(first, { recursive: true, force: true });
+    rmSync(second, { recursive: true, force: true });
+  }
+});
+
 test("a changed installed lock invalidates the dependency receipt", () => {
   const directory = mkdtempSync(join(tmpdir(), "pi-stack-dependencies-"));
   try {
