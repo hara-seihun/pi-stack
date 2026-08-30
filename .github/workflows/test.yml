@@ -21,7 +21,7 @@ jobs:
           CI_GITHUB_TOKEN: ${{ github.token }}
         run: |
           set -euo pipefail
-          repository="$CACHE_DIRECTORY/repository"
+          repository="$PI_STACK_CI_CACHE/repository"
           origin="$GITHUB_SERVER_URL/$GITHUB_REPOSITORY.git"
           askpass=$(mktemp)
           trap 'rm -f "$askpass"' EXIT
