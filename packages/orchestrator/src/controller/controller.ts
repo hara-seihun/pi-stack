@@ -11,10 +11,12 @@ import type { EvaluateResult, Tier } from "../tasks/types.js";
  * only channel to runners — and holds no state of its own, so a controller
  * restart (or update) affects no running agent.
  *
- * It also never ends one. A live session belongs to the agent working in it
- * until that agent has spent its asks, and composition is converged by what
- * the controller launches into slots as they free, never by taking a slot
- * back. The controller used to shed one surplus session per tick so a mix
+ * It does not end a session to rebalance fleet composition. A live session
+ * belongs to the agent working in it until that agent has spent its asks, and
+ * composition converges through newly freed slots. A team is different: its
+ * demand is desired state for one fixed room, so an exact zero asks every room
+ * member to stop instead of leaving idle sessions parked forever. The
+ * controller used to shed one surplus session per tick so a mix
  * change would land before attrition; on the night of 2026-08-22 that loop
  * killed fourteen consecutive frontier sessions, thirty seconds apart, each
  * one mid-thought in its first work turn, because the freed slot was never
@@ -134,6 +136,16 @@ export class Controller {
         desired.filter(({ role, slot }) => !held.has(`${role}:${slot}`)),
       );
     }
+    const completedTeams = new Set(
+      evaluation.tasks
+        .filter((snapshot) => snapshot.units === 0 && tasks.get(snapshot.taskId)?.team !== undefined)
+        .map((snapshot) => snapshot.taskId),
+    );
+    for (const run of activeRuns) {
+      if (run.teamRole === undefined || !completedTeams.has(run.taskId)) continue;
+      this.ledger.requestAbort(run.id);
+    }
+
     const activeTeamPresenceByTier = (taskId: string): Partial<Record<Tier, number>> => {
       const held: Partial<Record<Tier, number>> = {};
       for (const run of activeRuns) {

@@ -244,7 +244,9 @@ Three launch-side fields describe scheduling:
   roster, which starts a new session rather than holding the one that asked to
   stop. Without this an agent in a room had no exit at all: a worker whose
   supervisor kept answering, or a supervisor whose workers kept going idle, ran
-  until an operator killed it.
+  until an operator killed it. When team demand becomes exactly zero, the
+  controller asks every active room member to stop, including sessions parked
+  between turns. An unknown or failed demand reading does not stop the room.
 
   The supervisor's other team-specific tool is `read_compressed_context`. It
   requires the worker run id and the `since` timestamp from the idle

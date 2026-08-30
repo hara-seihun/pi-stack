@@ -150,7 +150,39 @@ describe("dispatch cycle", () => {
     const replacement = await cycle(1_000);
     expect(replacement.claimed).toHaveLength(1);
     expect(replacement.claimed[0]?.team).toMatchObject({ role: "worker", slot: 2 });
+  });
 
+  it("stops the whole room when team demand reaches zero", async () => {
+    let demand = 1;
+    const { ledger, runner, engine, cycle } = build({ "probe cayley": () => demand });
+    ledger.upsertTask({
+      id: "cayley",
+      demandCommand: "probe cayley",
+      tiers: mix("standard"),
+      prompt: "Finish the classification.",
+      cwd: "/work/cayley-ci",
+      team: {
+        workers: 1,
+        supervisorPrompt: "Keep the proof in view.",
+      },
+    });
+
+    const first = await cycle(0);
+    expect(first.claimed).toHaveLength(2);
+    const runIds = first.claimed.map((run) => run.runId);
+
+    demand = 0;
+    const stopped = await cycle(60_001);
+    expect(stopped.claimed).toHaveLength(0);
+    expect(new Set(engine.aborted)).toEqual(new Set(runIds));
+    expect(runIds.every((id) => ledger.run(id)?.abortRequested)).toBe(true);
+
+    for (const id of runIds) {
+      runner.runFinished(id, { state: "done", detail: "room complete" }, 60_002);
+    }
+    const afterExit = await cycle(60_003);
+    expect(afterExit.claimed).toHaveLength(0);
+    expect(ledger.runs({ state: "running" })).toHaveLength(0);
   });
 
   it("replaces a missing team role without treating the finished member as present", async () => {
