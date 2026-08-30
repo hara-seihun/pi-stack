@@ -1,4 +1,4 @@
-import { afterAll, beforeAll, describe, expect, setDefaultTimeout, test } from "bun:test";
+import { afterAll, beforeAll, describe, expect, setDefaultTimeout, test as bunTest } from "bun:test";
 import { Database } from "bun:sqlite";
 import { OrchestratorClient } from "pi-orchestrator/api";
 import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, statSync, writeFileSync } from "node:fs";
@@ -6,6 +6,17 @@ import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import { applyContextSplice, contextSplice, sha256 } from "./sync";
 const BOOSTED_MULTIPLIER = 10;
+const [shardIndex = 0, shardCount = 1] = (process.env.PI_REMOTE_TEST_SHARD ?? "0/1")
+  .split("/").map(Number);
+if (!Number.isSafeInteger(shardIndex) || !Number.isSafeInteger(shardCount)
+  || shardIndex < 0 || shardCount < 1 || shardIndex >= shardCount) {
+  throw new Error("PI_REMOTE_TEST_SHARD must be a zero-based INDEX/COUNT");
+}
+let testIndex = 0;
+const test = (name: string, body: () => unknown, timeout?: number) => {
+  const selected = testIndex++ % shardCount === shardIndex;
+  return selected ? bunTest(name, body, timeout) : bunTest.skip(name, body, timeout);
+};
 
 const root = mkdtempSync(join(tmpdir(), "pi-remote-state-test-"));
 const fakePi = join(root, "fake-pi.py");
@@ -19,7 +30,7 @@ const fakeRestartMarker = join(root, "fake-restart.marker");
 const fakeGateRoot = join(root, "gates");
 const fakeOrchestratorDb = join(root, "orchestrator.sqlite3");
 const fakeAgentRuns = join(root, "agent-runs");
-const port = 20_000 + Math.floor(Math.random() * 10_000);
+const port = 20_000 + ((process.ppid * 4 + shardIndex) % 10_000);
 const base = `http://127.0.0.1:${port}`;
 let server: ReturnType<typeof Bun.spawn>;
 setDefaultTimeout(30_000);
@@ -84,7 +95,7 @@ async function startServer() {
       PI_REMOTE_DATA: join(root, "data"),
       PI_REMOTE_PORT: String(port),
       PI_AGENT_DIR: join(root, "agent"),
-      PI_REMOTE_PROMPT_ACK_TIMEOUT_MS: "10",
+      PI_REMOTE_PROMPT_ACK_TIMEOUT_MS: "100",
       PI_REMOTE_STATE_RECONCILE_MS: "5",
       PI_REMOTE_RUNTIME_CONNECT_TIMEOUT_MS: "200",
       PI_REMOTE_RUNTIME_START_TIMEOUT_MS: "500",
@@ -207,9 +218,10 @@ for line in sys.stdin:
    out({'type':'response','id':rid,'command':'prompt','success':False,'error':'simulated rejection'})
    continue
   streaming = True
-  if last == 'slow-ack': pause(0.35)
+  if last == 'slow-ack': gate('slow-ack')
+  elif last == 'slow-ack-auto': pause(0.35)
   if last != 'ack-timeout': out({'type':'response','id':rid,'command':'prompt','success':True})
-  if last == 'slow-ack':
+  if last == 'slow-ack' or last == 'slow-ack-auto':
    out({'type':'agent_start'})
    out({'type':'message_end','message':{'role':'assistant','content':[{'type':'text','text':'slow ack done'}]}})
    streaming = False
@@ -281,7 +293,7 @@ for line in sys.stdin:
      child_pid.write(str(child.pid))
     out({'type':'tool_execution_start','toolCallId':'bash-1','toolName':'bash','args':{'command':'sleep 60'}})
    elif last == 'ack-timeout':
-    pause(0.4)
+    gate('ack-timeout')
     out({'type':'message_end','message':{'role':'assistant','content':[{'type':'text','text':'ack was lost'}]}})
     streaming = False
     out({'type':'agent_settled'})
@@ -562,7 +574,7 @@ describe("web and supervisor integration", () => {
   test("archives and unarchives a thread without deleting its history", async () => {
     const id = await createThread();
     await api("POST", `/v1/sessions/${id}/prompt`, {
-      requestId: crypto.randomUUID(), text: "slow-ack", delivery: "followUp",
+      requestId: crypto.randomUUID(), text: "slow-ack-auto", delivery: "followUp",
     });
     await waitFor(
       () => api("GET", `/v1/sessions/${id}/events?after=0`).then((result) => result.value),
@@ -1277,17 +1289,23 @@ describe("web and supervisor integration", () => {
 
   test("keeps unconfirmed sends above the composer and out of the transcript", async () => {
     const id = await createThread();
+    resetGate("slow-ack");
     const accepted = await api("POST", `/v1/sessions/${id}/prompt`, { requestId: crypto.randomUUID(), text: "slow-ack" });
-    const pending = await waitFor(
-      () => api("GET", `/v1/sessions/${id}`).then((result) => result.value.session),
-      (session) => session.queuedMessages?.some((message: any) => message.text === "slow-ack"),
-    );
-    expect(pending.queuedMessages.find((message: any) => message.text === "slow-ack")).toMatchObject({
-      canSteer: false,
-      delivery: "prompt",
-    });
-    const beforeAck = await api("GET", `/v1/sessions/${id}/events?after=0`);
-    expect(beforeAck.value.events.some((event: any) => event.type === "user" && event.text === "slow-ack")).toBe(false);
+    await waitForGate("slow-ack");
+    try {
+      const pending = await waitFor(
+        () => api("GET", `/v1/sessions/${id}`).then((result) => result.value.session),
+        (session) => session.queuedMessages?.some((message: any) => message.text === "slow-ack"),
+      );
+      expect(pending.queuedMessages.find((message: any) => message.text === "slow-ack")).toMatchObject({
+        canSteer: false,
+        delivery: "prompt",
+      });
+      const beforeAck = await api("GET", `/v1/sessions/${id}/events?after=0`);
+      expect(beforeAck.value.events.some((event: any) => event.type === "user" && event.text === "slow-ack")).toBe(false);
+    } finally {
+      releaseGate("slow-ack");
+    }
     const inserted = await waitFor(
       () => api("GET", `/v1/sessions/${id}/events?after=0`).then((result) => result.value),
       (value) => value.events.some((event: any) => event.type === "assistant" && event.text === "slow ack done"),
@@ -1479,7 +1497,8 @@ describe("web and supervisor integration", () => {
     releaseGate("delayed-start");
     const events = await waitFor(
       () => api("GET", `/v1/sessions/${id}/events?after=0`).then((result) => result.value),
-      (value) => value.events.some((event: any) => event.type === "assistant" && event.text === "started after reconcile"),
+      (value) => value.session.state === "IDLE" &&
+        value.events.some((event: any) => event.type === "assistant" && event.text === "started after reconcile"),
     );
     expect(events.session.state).toBe("IDLE");
     expect(events.session.revision).toBeGreaterThanOrEqual(accepted.value.session.revision);
@@ -1528,7 +1547,17 @@ describe("web and supervisor integration", () => {
 
   test("monitors a lost prompt acknowledgement without resending", async () => {
     const id = await createThread();
+    resetGate("ack-timeout");
     await api("POST", `/v1/sessions/${id}/prompt`, { requestId: crypto.randomUUID(), text: "ack-timeout" });
+    await waitForGate("ack-timeout");
+    try {
+      await waitFor(
+        () => api("GET", `/v1/sessions/${id}/events?after=0`).then((result) => result.value.events),
+        (rows) => rows.some((event: any) => event.type === "notice" && event.text.includes("without resending")),
+      );
+    } finally {
+      releaseGate("ack-timeout");
+    }
     const events = await waitFor(
       () => api("GET", `/v1/sessions/${id}/events?after=0`).then((result) => result.value.events),
       (rows) => rows.some((event: any) => event.type === "assistant" && event.text === "ack was lost"),

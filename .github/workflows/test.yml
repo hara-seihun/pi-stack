@@ -16,8 +16,8 @@ jobs:
       - uses: actions/checkout@v4
         with:
           clean: false
-      - name: dependencies
+      - name: check
         run: |
           source deploy/lib
           pi_stack_prepare_dependencies "$PWD"
-      - run: npm run check
+          npm run check

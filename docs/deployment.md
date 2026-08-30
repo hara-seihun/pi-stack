@@ -4,7 +4,7 @@ One reviewed commit goes to GMKtec and Converge. A host may build only what it r
 
 ## Source and state
 
-Both hosts check out this public repository at `/home/kenan/projects/pi-stack` through an authenticated HTTPS remote. A host that cannot run `git fetch --dry-run origin` cannot deploy. Build output goes under `/srv/pi`; services never execute a mutable checkout they cannot read.
+Both hosts check out this private repository at `/home/kenan/projects/pi-stack` through an authenticated HTTPS remote. A host that cannot run `git fetch --dry-run origin` cannot deploy. Build output goes under `/srv/pi`; services never execute a mutable checkout they cannot read.
 
 Host repositories own:
 

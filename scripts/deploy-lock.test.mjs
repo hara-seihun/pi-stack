@@ -117,17 +117,26 @@ test("every deployment process ends before the machine-wide ceiling", () => {
   const directory = mkdtempSync(join(tmpdir(), "pi-stack-deadline-"));
   try {
     const script = join(directory, "deploy");
-    writeFileSync(script, `#!/usr/bin/env bash\nset -euo pipefail\nsource ${JSON.stringify(helper)}\npi_stack_enforce_deploy_deadline "$0" "$@"\nsleep 3\n`, { mode: 0o755 });
+    const bin = join(directory, "bin");
+    const trace = join(directory, "timeout.trace");
+    mkdirSync(bin);
+    writeFileSync(script, `#!/usr/bin/env bash\nset -euo pipefail\nsource ${JSON.stringify(helper)}\npi_stack_enforce_deploy_deadline "$0" "$@"\nexit 99\n`, { mode: 0o755 });
+    writeFileSync(join(bin, "timeout"), "#!/bin/sh\nprintf '%s\\n' \"$*\" > \"$TRACE\"\nexit 124\n", { mode: 0o755 });
+    const env = {
+      ...process.env,
+      PATH: `${bin}:${process.env.PATH}`,
+      TRACE: trace,
+    };
     const timed = spawnSync(script, [], {
       encoding: "utf8",
-      env: { ...process.env, PI_STACK_DEPLOY_TIMEOUT_SECONDS: "1" },
-      timeout: 2_000,
+      env: { ...env, PI_STACK_DEPLOY_TIMEOUT_SECONDS: "1" },
     });
     assert.equal(timed.status, 124, timed.stderr);
+    assert.match(readFileSync(trace, "utf8"), /--signal=TERM --kill-after=2s 1s .*\/deploy/);
 
     const refused = spawnSync(script, [], {
       encoding: "utf8",
-      env: { ...process.env, PI_STACK_DEPLOY_TIMEOUT_SECONDS: "51" },
+      env: { ...env, PI_STACK_DEPLOY_TIMEOUT_SECONDS: "51" },
     });
     assert.equal(refused.status, 64);
     assert.match(refused.stderr, /1 through 50/);

@@ -25,7 +25,7 @@ npm run check
 npm run android:test --workspace=kenan
 ```
 
-`npm run check` launches builds, static checks, and independent suites together. It takes about ten seconds on GMKtec. GitHub sends the same gate to that machine's dedicated runner, whose checkout retains a lock-validated `node_modules` tree between pushes. The Android project keeps its Gradle build because it has no useful dependency boundary with the JavaScript workspaces.
+`npm run check` launches builds, static checks, and independent suites together. It takes about six seconds on GMKtec. GitHub sends the same gate to that machine's dedicated runner, whose checkout retains a lock-validated `node_modules` tree between pushes. The Android project keeps its Gradle build because it has no useful dependency boundary with the JavaScript workspaces.
 
 [`config/package-sets.json`](config/package-sets.json) owns package order by host role. [`config/skill-sets.json`](config/skill-sets.json) owns the first-party skills each role loads. Their checks reject unknown or misplaced entries, including a Pi Remote context observer that is not last.
 

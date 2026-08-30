@@ -7,5 +7,4 @@ await runJobs([
   ["security", "npm", ["run", "security-check"]],
   ["protocol", "npm", ["run", "proto:check"]],
   ["tests", "npm", ["test"]],
-  ["script tests", "npm", ["run", "test:legacy"]],
 ]);

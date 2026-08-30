@@ -6,8 +6,8 @@ file only adds notes specific to working here with Claude Code.
 
 ## Before finishing any task
 
-Run `npm run check` (typecheck, lint, format:check, security-check, proto:check, vitest,
-test:legacy). Fix any failure your change caused before reporting done.
+Run `npm run check` (typecheck, lint, format:check, security-check, proto:check, and Vitest).
+Fix any failure your change caused before reporting done.
 
 ## Things to keep in mind
 

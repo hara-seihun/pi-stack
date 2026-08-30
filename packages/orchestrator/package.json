@@ -37,8 +37,8 @@
   },
   "scripts": {
     "build": "tsc -p tsconfig.build.json",
-    "test": "vitest run",
-    "typecheck": "tsc --noEmit"
+    "test": "vitest run --maxWorkers=8",
+    "typecheck": "tsc --noEmit --incremental --tsBuildInfoFile ../../node_modules/.cache/orchestrator.tsbuildinfo"
   },
   "dependencies": {
     "@earendil-works/pi-ai": "0.84.2",

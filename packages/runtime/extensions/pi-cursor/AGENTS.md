@@ -29,21 +29,20 @@ npm run check
 
 ### Individual Development Commands
 
-| Command                  | Purpose                                                                                               |
-| :----------------------- | :---------------------------------------------------------------------------------------------------- |
-| `npm run typecheck`      | Run TypeScript compiler check without emitting (`tsc --noEmit`)                                       |
-| `npm test`               | Run Vitest unit tests (`vitest run`)                                                                  |
-| `npm run test:watch`     | Run Vitest in interactive watch mode                                                                  |
-| `npm run test:legacy`    | Run legacy standalone test scripts (routing, thinking levels, usage, context normalization, CLI auth) |
-| `npm run lint`           | Run ESLint across `src/` and `tests/`                                                                 |
-| `npm run lint:fix`       | Automatically fix ESLint errors                                                                       |
-| `npm run format`         | Format codebase using Prettier                                                                        |
-| `npm run format:check`   | Verify Prettier formatting compliance                                                                 |
-| `npm run build`          | Bundle TypeScript sources with `tsup` into `dist/`                                                    |
-| `npm run security-check` | Audit source for credential/token exposure leaks                                                      |
-| `npm run proto:gen`      | Compile `proto/agent.proto` into `src/proto/agent_pb.ts` using `buf`                                  |
-| `npm run proto:check`    | Verify `src/proto/agent_pb.ts` is up-to-date with `proto/agent.proto`                                 |
-| `npm run proto:sync`     | Fetch and update protobuf descriptors from upstream                                                   |
+| Command                  | Purpose                                                               |
+| :----------------------- | :-------------------------------------------------------------------- |
+| `npm run typecheck`      | Run TypeScript compiler check without emitting (`tsc --noEmit`)       |
+| `npm test`               | Run Vitest unit tests (`vitest run`)                                  |
+| `npm run test:watch`     | Run Vitest in interactive watch mode                                  |
+| `npm run lint`           | Run ESLint across `src/` and `tests/`                                 |
+| `npm run lint:fix`       | Automatically fix ESLint errors                                       |
+| `npm run format`         | Format codebase using Prettier                                        |
+| `npm run format:check`   | Verify Prettier formatting compliance                                 |
+| `npm run build`          | Bundle TypeScript sources with `tsup` into `dist/`                    |
+| `npm run security-check` | Audit source for credential/token exposure leaks                      |
+| `npm run proto:gen`      | Compile `proto/agent.proto` into `src/proto/agent_pb.ts` using `buf`  |
+| `npm run proto:check`    | Verify `src/proto/agent_pb.ts` is up-to-date with `proto/agent.proto` |
+| `npm run proto:sync`     | Fetch and update protobuf descriptors from upstream                   |
 
 ### Smoke Testing
 

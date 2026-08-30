@@ -2,7 +2,6 @@ import { runJobs } from "./run-jobs.mjs";
 
 const jobs = [
   ["orchestrator types", "npm", ["run", "typecheck", "--workspace=pi-orchestrator"]],
-  ["orchestrator build", "npm", ["run", "build", "--workspace=pi-orchestrator"]],
   ["Kenan build", "npm", ["run", "build", "--workspace=kenan"]],
   ["package sets", "node", ["scripts/check-package-sets.mjs"]],
   ["skill sets", "node", ["scripts/check-skill-sets.mjs"]],

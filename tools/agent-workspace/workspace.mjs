@@ -321,9 +321,11 @@ function processSnapshot() {
   const uid = process.getuid?.();
   if (uid === undefined) return [];
   const processes = [];
-  for (const entry of readdirSync("/proc", { withFileTypes: true })) {
-    if (!entry.isDirectory() || !/^\d+$/u.test(entry.name)) continue;
-    const pid = Number(entry.name);
+  let entries;
+  try { entries = readdirSync("/proc"); } catch { return []; }
+  for (const entry of entries) {
+    if (!/^\d+$/u.test(entry)) continue;
+    const pid = Number(entry);
     if (ignored.has(pid)) continue;
     const root = `/proc/${pid}`;
     try {
@@ -505,10 +507,12 @@ function gitAlternateSnapshot(database) {
 }
 
 function safetySnapshot(database) {
+  const isolated = process.env.NODE_TEST_CONTEXT !== undefined &&
+    process.env.PI_WORKSPACE_TEST_EXTERNAL_SAFETY === "empty";
   return {
-    processes: processSnapshot(),
-    docker: dockerSnapshot(),
-    systemd: systemdSnapshot(),
+    processes: isolated ? [] : processSnapshot(),
+    docker: isolated ? { containers: [], available: false } : dockerSnapshot(),
+    systemd: isolated ? { units: [], available: false } : systemdSnapshot(),
     gitAlternates: gitAlternateSnapshot(database),
   };
 }

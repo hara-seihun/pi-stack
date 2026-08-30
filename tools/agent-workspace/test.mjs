@@ -63,7 +63,10 @@ function fixture() {
     source,
     remote,
     workspaces,
-    env: { PI_WORKSPACE_STATE: state },
+    env: {
+      PI_WORKSPACE_STATE: state,
+      PI_WORKSPACE_TEST_EXTERNAL_SAFETY: "empty",
+    },
     close() { rmSync(root, { recursive: true, force: true }); },
   };
 }
@@ -487,10 +490,11 @@ test("expired live references require an explicit reap", async () => {
     sleeper = spawn("sleep", ["60"], { cwd: created.path, stdio: "ignore" });
     await new Promise((resolve) => setTimeout(resolve, 100));
     const exited = new Promise((resolve) => sleeper.once("exit", resolve));
-    const held = JSON.parse(await runAsync(["release", "--id", created.id, "--json"], f.env));
+    const liveSafety = { ...f.env, PI_WORKSPACE_TEST_EXTERNAL_SAFETY: "host" };
+    const held = JSON.parse(await runAsync(["release", "--id", created.id, "--json"], liveSafety));
     assert.equal(held.inspection.classification, "referenced");
     assert.equal(existsSync(created.path), true);
-    const reaped = JSON.parse(await runAsync(["release", "--id", created.id, "--reap-expired", "--json"], f.env));
+    const reaped = JSON.parse(await runAsync(["release", "--id", created.id, "--reap-expired", "--json"], liveSafety));
     assert.equal(reaped.action, "released");
     assert.equal(existsSync(created.path), false);
     await exited;
