@@ -32,7 +32,10 @@
       "id": "read-condensed-session",
       "hosts": ["local", "converge"],
       "fleet": true,
-      "commands": [{ "name": "read-condensed-session", "entry": "main" }]
+      "commands": [
+        { "name": "read-condensed-session", "entry": "main" },
+        { "name": "read-thread", "entry": "read-thread" }
+      ]
     }
   ]
 }

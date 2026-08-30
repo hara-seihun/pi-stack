@@ -1,6 +1,22 @@
-# read-condensed-session
+# Pi session readers
 
-`read-condensed-session` lets one agent read another Pi session without loading raw JSONL, signatures, or abandoned branches into context.
+## Fast Pi Remote thread reading
+
+`read-thread` is the normal way for one Pi Remote agent to read another thread. It resolves titles and ids through the current person's supervisor database, follows the active Pi branch, and renders the conversation and tool calls without making model requests.
+
+```bash
+read-thread --list
+read-thread "Cayley CI review"
+read-thread --work --tail 100 0a4b1d12
+read-thread --path "Cayley CI review"
+read-thread --output /tmp/thread.md "Cayley CI review"
+```
+
+The default view omits assistant thinking and successful tool results. `--work` includes both with per-block size limits. `--since` and `--tail` bound long sessions. `--path` prints the exact JSONL path when direct inspection is useful. The command reads `$PI_REMOTE_DATA/supervisor.sqlite3`, which Pi Remote supplies to every model process, so it selects the correct local or Converge thread store without a hard-coded personal path.
+
+## Model-assisted condensation
+
+`read-condensed-session` is for a session whose local transcript remains too large after selecting a useful window. It avoids raw JSONL, signatures, and abandoned branches, but it makes model calls on cache misses and is not the default thread reader.
 
 ```bash
 read-condensed-session /path/to/session.jsonl
@@ -60,6 +76,6 @@ npm test --workspace=@hara-seihun/read-condensed-session
 ../../deploy/tools local
 ```
 
-CI tests every shared command. `deploy/tools local` links `read-condensed-session` into both users' `~/.local/bin` and publishes the reviewed source at `/srv/pi/tools/read-condensed-session/main`. The release shares Pi Runtime's production dependencies. The deployed Pi coding-agent runtime remains the provider and credential source; this tool does not register a Pi extension.
+CI tests every shared command. `deploy/tools local` links both commands into the interactive and fleet users' `~/.local/bin` and publishes the reviewed source under `/srv/pi/tools/read-condensed-session`. The release shares Pi Runtime's production dependencies. The deployed Pi coding-agent runtime remains the provider and credential source for optional condensation; neither command registers a Pi extension.
 
 The 2026-08-25 full-session trial condensed the `User Message Extraction` session from 3,840,059 on-disk characters to 174,849 characters, down from 404,334 with the former per-block design. It generated 17 large-block pre-summaries and 16 episode summaries with no failures. Manual inspection recovered decisions, exact paths and commits, failed approaches, benchmark values, current state, and the recent tail; all user messages and answered assistant replies remained exact.

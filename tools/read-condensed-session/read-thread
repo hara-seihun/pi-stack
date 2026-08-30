@@ -1,0 +1,90 @@
+#!/usr/bin/env node
+import { existsSync, writeFileSync } from "node:fs";
+import { homedir } from "node:os";
+import { join, resolve } from "node:path";
+import { DatabaseSync } from "node:sqlite";
+import { takeFlag, takeOption } from "../shared/arguments.mjs";
+import { listThreads, renderThread, resolveThread } from "./thread-reader.mjs";
+
+const HELP = `usage: read-thread [OPTIONS] [THREAD]
+
+Find and render another Pi Remote thread locally. No model calls are made.
+THREAD may be a title, UUID, or unique UUID prefix. With no THREAD, list threads.
+
+options:
+  --list             list threads, newest first
+  --path             print only the exact Pi session JSONL path
+  --work             include bounded thinking and successful tool results
+  --since TIMESTAMP  include entries at or after this ISO timestamp
+  --tail N           include only the last N active-path entries
+  --output FILE      write the transcript to FILE and print its path
+  --db FILE          supervisor database (default: $PI_REMOTE_DATA/supervisor.sqlite3)`;
+
+function positiveInteger(value, label) {
+  const parsed = Number(value);
+  if (!Number.isInteger(parsed) || parsed < 1) throw new Error(`${label} must be a positive integer`);
+  return parsed;
+}
+
+function defaultDatabase() {
+  if (process.env.PI_REMOTE_DATA) return join(process.env.PI_REMOTE_DATA, "supervisor.sqlite3");
+  return join(process.env.XDG_STATE_HOME ?? join(homedir(), ".local", "state"), "pi-remote", "supervisor.sqlite3");
+}
+
+function main() {
+  const args = process.argv.slice(2);
+  if (takeFlag(args, "--help") || takeFlag(args, "-h")) {
+    console.log(HELP);
+    return;
+  }
+  const list = takeFlag(args, "--list");
+  const pathOnly = takeFlag(args, "--path");
+  const work = takeFlag(args, "--work");
+  const sinceOption = takeOption(args, "--since");
+  const tailOption = takeOption(args, "--tail");
+  const output = takeOption(args, "--output");
+  const dbPath = resolve(takeOption(args, "--db") ?? defaultDatabase());
+  if (!existsSync(dbPath)) throw new Error(`Pi Remote database not found at ${dbPath}; set PI_REMOTE_DATA or pass --db`);
+  if (args.length > 1) throw new Error("pass one thread title or id; quote titles containing spaces");
+  if (list && args.length > 0) throw new Error("--list does not take a thread selector");
+  if (pathOnly && (work || sinceOption !== undefined || tailOption !== undefined || output)) {
+    throw new Error("--path cannot be combined with transcript options");
+  }
+  const since = sinceOption === undefined ? undefined : Date.parse(sinceOption);
+  if (sinceOption !== undefined && !Number.isFinite(since)) throw new Error("--since must be an ISO timestamp");
+  const tail = tailOption === undefined ? undefined : positiveInteger(tailOption, "--tail");
+
+  const db = new DatabaseSync(dbPath, { readOnly: true });
+  try {
+    const rows = db.prepare("SELECT id,name,session_path,state,updated_at,archived_at FROM sessions ORDER BY updated_at DESC").all();
+    if (list || args.length === 0) {
+      console.log(listThreads(rows));
+      return;
+    }
+    const row = resolveThread(rows, args[0]);
+    if (!row.session_path || !existsSync(row.session_path)) {
+      throw new Error(`thread ${JSON.stringify(row.name)} has no readable Pi session file`);
+    }
+    if (pathOnly) {
+      console.log(row.session_path);
+      return;
+    }
+    const transcript = renderThread(row, { work, since, tail });
+    if (output) {
+      const destination = resolve(output);
+      writeFileSync(destination, `${transcript}\n`);
+      console.log(destination);
+    } else {
+      console.log(transcript);
+    }
+  } finally {
+    db.close();
+  }
+}
+
+try {
+  main();
+} catch (error) {
+  console.error(`read-thread: ${error?.message ?? error}`);
+  process.exitCode = 1;
+}

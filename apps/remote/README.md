@@ -18,7 +18,7 @@ Enter sends the composer only where a hardware keyboard is typing. On touch devi
 
 The Files drawer tab browses the selected environment from `/`. It includes dotfiles and reads one directory per request. Folder taps navigate and file taps download without opening a preview.
 
-Each runtime also loads `server/thread-context.ts`. The extension offers initialization only while the durable session title is numeric, removes that control from named threads, and treats process or model changes as continuation rather than a new thread. It tells the agent how to offer downloadable files. A `<pi-remote-file src="/absolute/path" />` tag becomes a normal link in both clients, and the session-scoped endpoint streams the file from the thread's host.
+Each runtime also loads `server/thread-context.ts`. The extension offers initialization only while the durable session title is numeric, removes that control from named threads, and treats process or model changes as continuation rather than a new thread. It tells every model to use `read-thread` for local, no-request access to another thread and reserves `read-condensed-session` for explicit semantic condensation. It also tells the agent how to offer downloadable files. A `<pi-remote-file src="/absolute/path" />` tag becomes a normal link in both clients, and the session-scoped endpoint streams the file from the thread's host.
 
 Pi Runtime's state-compactor keeps every skill read during a session in the provider view after compaction. It restores the exact current files before the compacted conversation and asks the agent to finish a paged read or refresh a changed file rather than retaining stale instructions.
 

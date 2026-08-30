@@ -3,6 +3,9 @@
   "version": "1.0.0",
   "private": true,
   "type": "module",
-  "bin": { "read-condensed-session": "./main" },
+  "bin": {
+    "read-condensed-session": "./main",
+    "read-thread": "./read-thread"
+  },
   "scripts": { "test": "node --test \"*.test.mjs\"" }
 }

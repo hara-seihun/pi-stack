@@ -15,7 +15,7 @@ const jobs = [
   ["remote", "npm", ["test", "--workspace=pi-remote"]],
   ["mcp", "npm", ["test", "--workspace=@hara-seihun/mcp-cli"]],
   ["mcp-script", "npm", ["test", "--workspace=@hara-seihun/mcp-script"]],
-  ["session reader", "npm", ["test", "--workspace=@hara-seihun/read-condensed-session"]],
+  ["session readers", "npm", ["test", "--workspace=@hara-seihun/read-condensed-session"]],
 ];
 
 await runJobs(jobs);

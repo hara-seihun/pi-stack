@@ -31,11 +31,13 @@ export function threadStateInstructions(options: {
   home: string;
 }): string {
   const file = `Pi Remote file delivery: To give the user a file, include <${options.fileTag} src="${options.home}/path/to/file" /> on its own line. Use an absolute path to an existing file. The client turns the tag into a download link.`;
+  const threads = "Other Pi Remote threads are available through `read-thread`. Run `read-thread --list` to find one, `read-thread TITLE` to read its active conversation and actions locally without model calls, or `read-thread --path TITLE` to print its exact JSONL path. Use this instead of `read-condensed-session` unless semantic condensation is specifically needed.";
   if (options.name && INITIAL_TITLE.test(options.name)) {
     return [
       `Pi Remote thread state: This is a new, uninitialized thread with numeric title ${options.name}.`,
       "As your first action, call initialize_thread once with a concise descriptive title of two or three words based on the user's first message. Do not ask permission or narrate initialization. Continue with the user's task immediately afterward. Surface every machine alert returned by initialize_thread prominently and verbatim.",
       file,
+      threads,
     ].join("\n\n");
   }
 
@@ -46,5 +48,6 @@ export function threadStateInstructions(options: {
   return [
     `Pi Remote thread state: You are continuing ${name}. The Pi session and conversation context survive process restarts, account routing, and model changes. Do not call initialize_thread.${continuation}`,
     file,
+    threads,
   ].join("\n\n");
 }
