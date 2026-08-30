@@ -27,6 +27,8 @@ interface FakeTurn {
   /** A before_provider_request extension aborts this run to compact, then
    * starts an internal continuation turn from its completion callback. */
   readonly compacts?: boolean;
+  /** The agent calls `end_shift` during this turn, with this reason. */
+  readonly endsShift?: string;
 }
 
 function harness(
@@ -130,6 +132,14 @@ function harness(
       if (turn.parks) await new Promise<void>((resolve) => { releasePark = resolve; });
       for (let i = 0; i < (turn.toolCalls ?? 0); i++) {
         notify({ type: "tool_execution_start", toolName: "bash", args: {} });
+      }
+      if (turn.endsShift !== undefined) {
+        const offered = sessionConfigs[0]?.customTools as
+          | { name: string; execute: (id: string, params: unknown) => Promise<unknown> }[]
+          | undefined;
+        const tool = offered?.find((candidate) => candidate.name === "end_shift");
+        if (tool === undefined) throw new Error("this session was never offered end_shift");
+        await tool.execute("call-1", { reason: turn.endsShift });
       }
       clock += turn.tookMs ?? 0;
       if (turn.compacts) {
@@ -548,14 +558,14 @@ describe("host shift loop", () => {
     expect(await supervisor.finished).toMatchObject({ state: "aborted" });
   });
 
-  it("gives team sessions no protocol tools beyond incremental context read", async () => {
+  it("gives team sessions no protocol tools beyond leaving and incremental context read", async () => {
     const worker = harness([{}], {
       team: { role: "worker", slot: 1, workers: 4 },
     });
     worker.host.launch(worker.spec);
     while (worker.sessionConfigs.length === 0) await new Promise((resolve) => setTimeout(resolve, 1));
     const workerTools = worker.sessionConfigs[0]!.customTools as { name: string }[];
-    expect(workerTools).toEqual([]);
+    expect(workerTools.map((tool) => tool.name)).toEqual(["end_shift"]);
     worker.host.kill(worker.spec.runId, "test complete");
     await worker.finished;
 
@@ -565,9 +575,54 @@ describe("host shift loop", () => {
     supervisor.host.launch(supervisor.spec);
     while (supervisor.sessionConfigs.length === 0) await new Promise((resolve) => setTimeout(resolve, 1));
     const supervisorTools = supervisor.sessionConfigs[0]!.customTools as { name: string }[];
-    expect(supervisorTools.map((tool) => tool.name)).toEqual(["read_compressed_context"]);
+    expect(supervisorTools.map((tool) => tool.name)).toEqual([
+      "end_shift",
+      "read_compressed_context",
+    ]);
     supervisor.host.kill(supervisor.spec.runId, "test complete");
     await supervisor.finished;
+  });
+
+  it("lets a worker end its own shift instead of waiting on the supervisor forever", async () => {
+    const worker = harness([{ endsShift: "the shared repository is green and I am done" }], {
+      team: { role: "worker", slot: 1, workers: 4 },
+    });
+    worker.host.launch(worker.spec);
+
+    expect(await worker.finished).toEqual({
+      state: "done",
+      detail: "ended by the session: the shared repository is green and I am done",
+    });
+    // Leaving is not going idle: nobody is told to wait for this worker.
+    expect(worker.teamStops()).toBe(0);
+    expect(worker.host.has(worker.spec.runId)).toBe(false);
+  });
+
+  it("lets a supervisor end its own shift, and records why", async () => {
+    const supervisor = harness([{}, { endsShift: "the room has nothing left to supervise" }], {
+      team: { role: "supervisor", slot: 0, workers: 4 },
+    });
+    supervisor.host.launch(supervisor.spec);
+    while (supervisor.prompts.length < 1) await new Promise((resolve) => setTimeout(resolve, 1));
+    supervisor.stopWorker();
+
+    expect(await supervisor.finished).toEqual({
+      state: "done",
+      detail: "ended by the session: the room has nothing left to supervise",
+    });
+    expect(supervisor.host.has(supervisor.spec.runId)).toBe(false);
+  });
+
+  it("leaves without a stated reason rather than refusing to leave", async () => {
+    const worker = harness([{ endsShift: "   " }], {
+      team: { role: "worker", slot: 1, workers: 4 },
+    });
+    worker.host.launch(worker.spec);
+
+    expect(await worker.finished).toEqual({
+      state: "done",
+      detail: "ended by the session: no reason given",
+    });
   });
 
   it("queues a supervisor Pi message without aborting the worker's active turn", async () => {

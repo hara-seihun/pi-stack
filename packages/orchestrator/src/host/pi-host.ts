@@ -59,6 +59,12 @@ export class PiHost implements HostManager {
   /** A team session with no turn in flight sleeps here until a Pi message
    * arrives from another member. */
   private readonly teamWakeups = new Map<string, () => void>();
+  /** Team sessions that asked to leave, with whatever reason they gave. A
+   * solo session ends its shift by ending its turn; a team session's settled
+   * turn means "idle, tell the other member", so leaving needs its own word.
+   * Without one, a worker whose supervisor keeps answering, or a supervisor
+   * whose workers keep going idle, has no way out of the room at all. */
+  private readonly leaving = new Map<string, string>();
 
   constructor(
     private readonly events: HostEvents,
@@ -241,6 +247,35 @@ export class PiHost implements HostManager {
       }
     }
     const customTools: any[] = [];
+    if (spec.team !== undefined) {
+      customTools.push({
+        name: "end_shift",
+        label: "End shift",
+        description:
+          "End your shift and close this session. Call it whenever you want to stop: the work " +
+          "is finished, there is nothing left you can usefully do here, or you would rather not " +
+          "continue. Your current turn finishes normally and then the session ends; nothing " +
+          "re-prompts you afterwards. The reason is recorded for the operator, not judged.",
+        parameters: Type.Object({
+          reason: Type.Optional(Type.String({ maxLength: 500 })),
+        }),
+        execute: async (_id: string, params: { reason?: string }) => {
+          const reason = params.reason?.trim();
+          this.leaving.set(spec.runId, reason === undefined || reason === "" ? "no reason given" : reason);
+          return {
+            content: [
+              {
+                type: "text" as const,
+                text:
+                  "Your shift ends when this turn settles. Finish anything you want written down " +
+                  "first — files and notes outlive the session, this conversation does not.",
+              },
+            ],
+            details: { runId: spec.runId },
+          };
+        },
+      });
+    }
     if (spec.team?.role === "supervisor") {
       customTools.push({
         name: "read_compressed_context",
@@ -350,6 +385,7 @@ export class PiHost implements HostManager {
       this.aborting.delete(spec.runId);
       this.teamMessages.delete(spec.runId);
       this.teamWakeups.delete(spec.runId);
+      this.leaving.delete(spec.runId);
       for (const dispose of disposers.reverse()) dispose();
     };
     this.runtimes.set(spec.runId, {
@@ -388,7 +424,9 @@ export class PiHost implements HostManager {
       // agent ending that turn ends it. The host never re-prompts a session
       // that chose to stop: the continuation check-ins that used to do so
       // trained volume in flowing shifts and trapped agents in drained lanes.
-      // Team sessions instead wait for Pi messages from one another.
+      // Team sessions instead wait for Pi messages from one another, and
+      // leave by calling `end_shift`, since their settled turn already means
+      // "idle" rather than "finished".
       // Nothing here is timed: a turn may run as long as the agent keeps
       // working.
       // The opening exchange is lived, not injected: each message is a real
@@ -483,6 +521,11 @@ export class PiHost implements HostManager {
         }
         stalls = 0;
         resume = undefined;
+        const left = this.leaving.get(spec.runId);
+        if (left !== undefined) {
+          transcript?.append("notice", { text: `Session ended its own shift: ${left}` });
+          return { state: "done", detail: `ended by the session: ${left}` };
+        }
         if (spec.team !== undefined) {
           if (spec.team.role === "worker") {
             const idle = this.events.teamWorkerIdle(spec.runId);

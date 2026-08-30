@@ -230,11 +230,23 @@ Three launch-side fields describe scheduling:
   timestamp and sends the supervisor an ordinary Pi user message containing the
   worker run id and the start of its new context window. The supervisor's
   assistant response is delivered verbatim as that worker's next ordinary user
-  message. There are no stop commands, waiting commands, intervention tools, or
-  team completion state. A team remains desired while its task demand is
-  positive. Change that desired state when the room should end.
+  message. There are no waiting commands, intervention tools, or team
+  completion state. A team remains desired while its task demand is positive.
+  Change that desired state when the room should end.
 
-  The supervisor's only team-specific tool is `read_compressed_context`. It
+  Every team session can leave. A solo session ends its shift by ending its
+  turn, but in a room a settled turn already means "idle, hand me to the other
+  member", so leaving has its own word: `end_shift`, offered to workers and
+  supervisors alike, ends the run as `done` once the current turn settles and
+  records the reason the session gave. Nothing re-prompts it, and a worker that
+  leaves is not reported idle, so nobody waits on it. The controller then
+  reconciles a fresh member into the empty slot while the lane still wants a
+  roster, which starts a new session rather than holding the one that asked to
+  stop. Without this an agent in a room had no exit at all: a worker whose
+  supervisor kept answering, or a supervisor whose workers kept going idle, ran
+  until an operator killed it.
+
+  The supervisor's other team-specific tool is `read_compressed_context`. It
   requires the worker run id and the `since` timestamp from the idle
   notification. The condenser reads the exact Pi session file, filters before
   summarizing, and prints the window's upper timestamp. This keeps repeated
