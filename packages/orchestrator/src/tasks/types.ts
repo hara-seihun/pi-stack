@@ -111,6 +111,10 @@ export interface TaskSnapshot {
   /** Lane-scoped launch control: this lane is held even though the machine
    * is launching. Omitted by callers that do not track it. */
   readonly paused?: boolean;
+  /** A session declared this lane's work finished (`pi-orchestrator
+   * complete`). Demand reads zero and a team lane's roster is asked to
+   * stop. */
+  readonly completed?: boolean;
   readonly error: string | undefined;
   /** Sessions this lane already holds, pending or running, split by tier.
    * The allocator targets the fleet's composition, so what a lane is already

@@ -93,7 +93,7 @@ async function status(ledger: Ledger): Promise<void> {
   const evaluation = await new Scheduler(ledger).evaluate();
   for (const t of evaluation.tasks) {
     const parts = [
-      t.paused ? "held" : t.eligible ? "eligible" : "waiting",
+      t.paused ? "held" : t.completed ? "complete" : t.eligible ? "eligible" : "waiting",
       `units=${t.units ?? "?"}`,
       `gate=${t.gateOpen ? "open" : "closed"}`,
       `tiers=${formatTiers(t.tiers)}`,
@@ -961,6 +961,23 @@ async function main(): Promise<void> {
       case "resume":
         launchControl(ledger, command, args);
         break;
+      case "complete": {
+        const [taskId, ...note] = args;
+        if (taskId === undefined) fail("complete <task-id> [note...]");
+        if (!ledger.tasks().some((t) => t.id === taskId)) fail(`unknown task ${taskId}`);
+        ledger.setTaskComplete(taskId, note.join(" "));
+        console.log(
+          `task ${taskId} complete: demand reads zero and any team roster is asked to stop (pi-orchestrator reopen ${taskId} to undo)`,
+        );
+        break;
+      }
+      case "reopen": {
+        const taskId = args[0] ?? fail("reopen <task-id>");
+        if (ledger.taskCompletion(taskId) === undefined) fail(`task ${taskId} is not complete`);
+        ledger.clearTaskComplete(taskId);
+        console.log(`task ${taskId} reopened: demand speaks again`);
+        break;
+      }
       case "account":
         await accountCommand(ledger, args);
         break;
@@ -983,6 +1000,7 @@ async function main(): Promise<void> {
                   : ` team=${t.team.workers}+supervisor`) +
                 (t.ignoreCapacity === true ? " ignore-capacity" : "") +
                 (ledger.taskPaused(t.id) ? " HELD" : "") +
+                (ledger.taskCompletion(t.id) !== undefined ? " COMPLETE" : "") +
                 (t.prompt === undefined ? " (signal only)" : ""),
             );
           }
@@ -1074,6 +1092,12 @@ async function main(): Promise<void> {
             "                               machine, or the named lanes",
             "  pause --except <task,...>    hold every other lane, so the fleet's whole",
             "                               capacity goes to the named ones",
+            "  complete <task> [note...]    declare a lane's work finished (durable ledger",
+            "                               row): demand reads zero, a team lane's whole",
+            "                               roster is asked to stop, and no session is",
+            "                               launched or revived until reopen. Any room",
+            "                               member may call this on its own lane.",
+            "  reopen <task>                clear a completion and let demand speak again",
             `  boost <family> [on|off|halt|N]  scale a family's spend pace (on = ${BOOSTED_MULTIPLIER}x,`,
             "                               halt = 0: no new launches for the family)",
             "  spawn <task-id> [--tier T] [--account ID] [--model ID]  create one pending run",

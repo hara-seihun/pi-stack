@@ -144,6 +144,41 @@ describe("scheduler", () => {
     ledger.close();
   });
 
+  it("a completed lane reads zero demand without probing, and reopen restores it", async () => {
+    const ledger = openLedger();
+    ledger.upsertTask({ id: "room", demandCommand: "probe-room", tiers: mix("standard") });
+    ledger.upsertTask({
+      id: "next",
+      demandConstant: 5,
+      gate: "room.demand == 0",
+      tiers: mix("standard"),
+    });
+    const probes = fakeProbes({ "probe-room": 1 });
+    const sched = new Scheduler(ledger, { demandTtlMs: 1, gateDebounceMs: 0 }, probes.runner);
+
+    let r = await sched.evaluate(1000);
+    expect(snap(r, "room").eligible).toBe(true);
+
+    // A room member declares the work finished. Demand is zero even though
+    // the probe would still say 1, the probe stops running, and a gate over
+    // the lane sees finished work.
+    ledger.setTaskComplete("room", "classification settled");
+    const probeCalls = probes.calls.get("probe-room") ?? 0;
+    r = await sched.evaluate(2000);
+    expect(snap(r, "room").units).toBe(0);
+    expect(snap(r, "room").eligible).toBe(false);
+    expect(snap(r, "room").completed).toBe(true);
+    expect(snap(r, "next").eligible).toBe(true);
+    expect(probes.calls.get("probe-room") ?? 0).toBe(probeCalls);
+
+    ledger.clearTaskComplete("room");
+    r = await sched.evaluate(3000);
+    expect(snap(r, "room").units).toBe(1);
+    expect(snap(r, "room").eligible).toBe(true);
+    expect(snap(r, "room").completed).toBeUndefined();
+    ledger.close();
+  });
+
   it("a held lane never launches, but still feeds the gates that read it", async () => {
     const ledger = openLedger();
     ledger.upsertTask({ id: "ingest", demandCommand: "count-pending", tiers: mix("standard") });

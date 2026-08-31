@@ -642,6 +642,15 @@ function taskPauseKey(taskId: string): string {
   return `launches:${taskId}`;
 }
 
+/** Completion, scoped to one lane. Any session on the machine may declare a
+ * lane's work finished; the row is durable ledger state like a pause, so the
+ * declaration survives restarts and manifest reconciliation, zeroes the
+ * lane's demand, and (for a team) asks the whole room to stop. `reopen`
+ * deletes the row. */
+function taskCompleteKey(taskId: string): string {
+  return `complete:${taskId}`;
+}
+
 export class Ledger {
   private constructor(private readonly db: DatabaseSync) {}
 
@@ -1305,6 +1314,23 @@ export class Ledger {
   setTaskPaused(taskId: string, paused: boolean): void {
     if (paused) this.setControl(taskPauseKey(taskId), "paused");
     else this.db.prepare("DELETE FROM control WHERE key = ?").run(taskPauseKey(taskId));
+  }
+
+  taskCompletion(taskId: string): { at: string; note: string } | undefined {
+    const value = this.getControl(taskCompleteKey(taskId));
+    if (value === undefined) return undefined;
+    return JSON.parse(value) as { at: string; note: string };
+  }
+
+  setTaskComplete(taskId: string, note: string, at = Date.now()): void {
+    this.setControl(
+      taskCompleteKey(taskId),
+      JSON.stringify({ at: new Date(at).toISOString(), note }),
+    );
+  }
+
+  clearTaskComplete(taskId: string): void {
+    this.db.prepare("DELETE FROM control WHERE key = ?").run(taskCompleteKey(taskId));
   }
 
   getControl(key: string): string | undefined {

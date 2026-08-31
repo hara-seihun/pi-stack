@@ -58,6 +58,7 @@ export class Scheduler {
     await Promise.all(
       tasks.map(async (t) => {
         if (t.demandCommand === undefined) return;
+        if (this.ledger.taskCompletion(t.id) !== undefined) return;
         const st = this.ledger.demandState(t.id);
         const fresh =
           st !== undefined &&
@@ -77,7 +78,12 @@ export class Scheduler {
     const unitsOf = new Map<string, number | undefined>();
     const errorOf = new Map<string, string | undefined>();
     for (const t of tasks) {
-      if (t.demandConstant !== undefined) {
+      // A completed lane reads zero demand everywhere: it launches nothing,
+      // its team is asked to stop, and gates over it see finished work.
+      if (this.ledger.taskCompletion(t.id) !== undefined) {
+        unitsOf.set(t.id, 0);
+        errorOf.set(t.id, undefined);
+      } else if (t.demandConstant !== undefined) {
         unitsOf.set(t.id, t.demandConstant);
         errorOf.set(t.id, undefined);
       } else {
@@ -111,6 +117,7 @@ export class Scheduler {
         eligible: !paused && gateOpen && units !== undefined && units > 0,
         paused,
         error: errorOf.get(t.id),
+        ...(this.ledger.taskCompletion(t.id) !== undefined ? { completed: true } : {}),
         ...(t.ignoreCapacity === true ? { ignoreCapacity: true } : {}),
       };
     });

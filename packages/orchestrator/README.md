@@ -365,6 +365,18 @@ is how the fleet's whole capacity is pointed at one lane without deleting the
 others' definitions. A held lane is still probed — its demand is a signal
 other lanes' gates read — and running agents are never touched.
 
+Completion is the third control row, and unlike a pause any session on the
+machine may set it: `pi-orchestrator complete <task> [note]` declares the
+lane's work finished (`complete:<taskId>` in the ledger). A completed lane's
+demand reads zero everywhere — its probe stops running, gates over it see
+finished work, and for a team lane the controller's existing zero-demand path
+asks the whole roster to stop. It exists because finished rooms used to be
+revived forever: the exit was a marker-file convention wired through per-lane
+demand scripts and known only to the supervisor, so a room whose supervisor
+aged out at the finish line refilled itself indefinitely. The row survives
+restarts and manifest reconciliation; `reopen <task>` deletes it and lets
+demand speak again.
+
 ## Broker (`src/broker/`)
 
 The broker owns account custody: which account and model a launch runs on,
