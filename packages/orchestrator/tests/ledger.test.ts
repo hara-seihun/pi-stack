@@ -212,13 +212,18 @@ describe("ledger", () => {
         "Look for one criterion that decides the whole family.",
         5,
       ),
-    ).toBe(true);
+    ).toBe("resumed");
     expect(ledger.run(worker)).toMatchObject({ idleAt: undefined, contextSince: 5 });
     expect(ledger.pendingRunMessages(worker)[0]).toMatchObject({
       senderRunId: supervisor,
       text: "Look for one criterion that decides the whole family.",
     });
-    expect(ledger.resumeTeamWorker(supervisor, worker, 4, "stale", 6)).toBe(false);
+    // A reply to an old idle notification is still delivered: the worker
+    // has moved on, so it queues for the next turn instead of resuming.
+    expect(ledger.resumeTeamWorker(supervisor, worker, 4, "stale", 6)).toBe("queued");
+    expect(ledger.run(worker)).toMatchObject({ idleAt: undefined });
+    const queued = ledger.pendingRunMessages(worker).find((m) => m.text === "stale");
+    expect(queued).toMatchObject({ senderRunId: supervisor });
     ledger.close();
   });
 

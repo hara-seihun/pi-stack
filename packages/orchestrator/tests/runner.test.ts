@@ -395,7 +395,7 @@ describe("operator messages reach a live session", () => {
         idle.idleAt,
         "Step back from the constant ladder and look for the general mechanism.",
       ),
-    ).toBe(true);
+    ).toBe("resumed");
     runner.tick(200);
     expect(engine.messages[1]).toEqual({
       runId: workerId,

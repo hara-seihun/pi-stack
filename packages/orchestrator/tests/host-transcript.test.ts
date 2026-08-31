@@ -21,7 +21,7 @@ function harness(runId: string) {
       teamWorkerIdle: (workerRunId) => ({
         taskId: "team", workerRunId, idleAt: 1, contextSince: 0,
       }),
-      teamSupervisorResponded: () => true,
+      teamSupervisorResponded: () => "resumed" as const,
       teamWorkerSession: (_supervisorRunId, workerRunId) => ({ runId: workerRunId }),
       turnFailed: () => undefined },
     { resolveModel: () => undefined },

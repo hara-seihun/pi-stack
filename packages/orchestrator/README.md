@@ -260,9 +260,16 @@ Three launch-side fields describe scheduling:
   timestamp also survives. A replacement supervisor receives fresh
   notifications for every idle worker, and an idle worker recovered on another
   runner waits rather than inventing a recovery turn. Replies carry the idle
-  timestamp they answer, so a delayed response cannot resume a worker that has
-  already moved to a later turn. Operator `say` messages use Pi's normal message
+  timestamp they answer, which guards the resume, not the delivery: a reply to
+  a worker that already moved to a later turn is queued for its next turn
+  boundary instead of being discarded, a reply to a worker idle at a newer
+  timestamp resumes it there, and only a worker that left the team loses the
+  message. Operator `say` messages use Pi's normal message
   delivery instead of a separate team channel.
+
+  A supervisor's `read_compressed_context` makes model calls on cache misses,
+  so its subprocess bound is fifteen minutes, not the attended-command
+  ceiling; a long new-activity window is legitimate work, not a hang.
 - `demand`: a constant or a cheap read-only probe command whose last stdout
   line is a work-unit count. `0` means no work; agents are never launched to
   discover idleness. Results are cached with a TTL and invalidated by task

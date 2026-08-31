@@ -229,7 +229,7 @@ export class Runner implements HostEvents {
     workerRunId: string,
     idleAt: number,
     text: string,
-  ): boolean {
+  ): "resumed" | "queued" | "lost" {
     return this.ledger.resumeTeamWorker(
       supervisorRunId,
       workerRunId,

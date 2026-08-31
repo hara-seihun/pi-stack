@@ -1216,16 +1216,23 @@ export class Ledger {
     });
   }
 
+  /** Delivers a supervisor's reply to a worker's idle notification. The
+   * expected timestamp guards the *resume* (a stale reply must not clear a
+   * newer idle state), never the *delivery*: a reply the supervisor spent
+   * minutes composing is not discarded because the worker moved on. A worker
+   * idle at a newer timestamp is resumed at that timestamp; a busy worker
+   * gets the text queued for its next turn boundary; only a worker that
+   * left the team loses the message, and the caller is told. */
   resumeTeamWorker(
     supervisorRunId: string,
     workerRunId: string,
     expectedIdleAt: number,
     text: string,
     at = Date.now(),
-  ): boolean {
+  ): "resumed" | "queued" | "lost" {
     const trimmed = text.trim();
     if (trimmed === "") throw new Error("the supervisor response must not be empty");
-    let delivered = false;
+    let outcome: "resumed" | "queued" | "lost" = "lost";
     this.immediate(() => {
       const supervisor = this.run(supervisorRunId);
       const worker = this.run(workerRunId);
@@ -1237,27 +1244,38 @@ export class Ledger {
         worker.teamRole !== "worker" ||
         worker.taskId !== supervisor.taskId
       ) {
-        throw new Error("the response target must be a live worker on this team");
+        return;
       }
-      if (worker.idleAt !== expectedIdleAt) return;
+      const deliver = (interrupt: 0 | 1) => {
+        this.db
+          .prepare(
+            `INSERT INTO run_message
+               (run_id, text, created_at, interrupt, sender_run_id, reply_run_id, reply_idle_at)
+             VALUES (?, ?, ?, ?, ?, NULL, NULL)`,
+          )
+          .run(worker.id, trimmed, at, interrupt, supervisor.id);
+      };
+      if (worker.idleAt === undefined) {
+        deliver(0);
+        outcome = "queued";
+        return;
+      }
       const resumed = this.db
         .prepare(
           `UPDATE run
            SET idle_at = NULL, context_since = ?, team_waiting = 0
            WHERE id = ? AND idle_at = ?`,
         )
-        .run(at, worker.id, expectedIdleAt);
-      if (resumed.changes !== 1) return;
-      this.db
-        .prepare(
-          `INSERT INTO run_message
-             (run_id, text, created_at, interrupt, sender_run_id, reply_run_id, reply_idle_at)
-           VALUES (?, ?, ?, 1, ?, NULL, NULL)`,
-        )
-        .run(worker.id, trimmed, at, supervisor.id);
-      delivered = true;
+        .run(at, worker.id, worker.idleAt);
+      if (resumed.changes !== 1) {
+        deliver(0);
+        outcome = "queued";
+        return;
+      }
+      deliver(1);
+      outcome = "resumed";
     });
-    return delivered;
+    return outcome;
   }
 
   private currentTeamSupervisor(taskId: string): string | undefined {

@@ -196,7 +196,7 @@ function harness(
       },
       teamSupervisorResponded: (_supervisorRunId, _workerRunId, _idleAt, text) => {
         teamResponses.push(text);
-        return true;
+        return "resumed" as const;
       },
       teamWorkerSession: (_supervisorRunId, workerRunId) => ({
         runId: workerRunId,

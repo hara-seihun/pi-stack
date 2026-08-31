@@ -98,13 +98,15 @@ export interface HostEvents {
   sessionStarted(runId: string, sessionId: string, sessionFile?: string): void;
   /** Record that a worker's Pi turn settled and notify the supervisor. */
   teamWorkerIdle(workerRunId: string): TeamIdle;
-  /** Route the supervisor's Pi response to the idle worker it was answering. */
+  /** Route the supervisor's Pi response to the worker it was answering:
+   * resumed while idle, queued for a worker that moved on, or lost when the
+   * worker left the team. */
   teamSupervisorResponded(
     supervisorRunId: string,
     workerRunId: string,
     idleAt: number,
     text: string,
-  ): boolean;
+  ): "resumed" | "queued" | "lost";
   /** Resolve the readable Pi session for one worker on this supervisor's team. */
   teamWorkerSession(
     supervisorRunId: string,

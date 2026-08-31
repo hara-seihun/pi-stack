@@ -2,7 +2,12 @@ import { execFile } from "node:child_process";
 
 import type { TeamLaunch } from "./types.js";
 
-const CONDENSE_TIMEOUT_MS = 55_000;
+/** Condensation makes model calls on cache misses, so a worker with a long
+ * new-activity window legitimately needs minutes. The attended-command
+ * 55-second ceiling is bash discipline and does not apply to a model-backed
+ * tool; this bound exists only so a truly hung subprocess cannot pin the
+ * supervisor forever. */
+const CONDENSE_TIMEOUT_MS = 15 * 60_000;
 
 function runFile(
   command: string,

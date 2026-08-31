@@ -549,9 +549,13 @@ export class PiHost implements HostManager {
                 envelope.replyIdleAt,
                 response,
               );
-              if (!delivered) {
+              if (delivered === "queued") {
                 transcript?.append("notice", {
-                  text: `Worker ${envelope.replyRunId} already moved past this idle notification; response not delivered.`,
+                  text: `Worker ${envelope.replyRunId} moved past this idle notification; response queued for its next turn.`,
+                });
+              } else if (delivered === "lost") {
+                transcript?.append("notice", {
+                  text: `Worker ${envelope.replyRunId} left the team before this response; not delivered.`,
                 });
               }
             }
