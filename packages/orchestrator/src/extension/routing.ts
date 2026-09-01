@@ -9,7 +9,7 @@ import { isRateLimitError, rateLimitCooldownMs } from "../provider-errors.js";
 import { interruptedTurnPrompt } from "../host/continuations.js";
 import customModelConfig from "../models.json" with { type: "json" };
 
-export function defaultLedgerPath():string{return process.env.PI_ORCHESTRATOR_LEDGER??join(homedir(),".local/share/pi-orchestrator/ledger.sqlite3");}
+export function defaultLedgerPath():string{return process.env.PI_ORCHESTRATOR_LEDGER||join(homedir(),".local/share/pi-orchestrator/ledger.sqlite3");}
 export function baseProvider(provider:string):string{return provider.replace(/-\d+$/u,"");}
 export function failoverPrompt(failure:string,account:string):string{return interruptedTurnPrompt(failure,`This session moved to another account (${account}) and is ready to keep going.`);}
 export function withCustomModels(provider:Provider):Provider{

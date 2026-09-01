@@ -2,6 +2,7 @@ import { execFile, spawn, spawnSync } from "node:child_process";
 import { readFileSync, realpathSync, statSync } from "node:fs";
 import { fileURLToPath } from "node:url";
 import { dirname, join, resolve } from "node:path";
+import { homedir } from "node:os";
 import { createServer, type IncomingMessage, type ServerResponse } from "node:http";
 import type { DemandSnapshot, LaneManifest, LaneSpec, OrchestratorConfig, Run } from "./domain.js";
 import { assign, commitMeterAdmission } from "./policy.js";
@@ -23,11 +24,13 @@ export class Daemon {
   private reconciling=false;
   private stopped=false;
   private releasePath:string;
+  private readonly ledgerPath:string;
   private readonly codexMeters:CodexMeterSampler;
   private readonly anthropicMeters:AnthropicMeterSampler;
 
-  constructor(readonly store:Store,readonly config:OrchestratorConfig,releasePath?:string){
+  constructor(readonly store:Store,readonly config:OrchestratorConfig,releasePath?:string,ledgerPath?:string){
     this.releasePath=releasePath??dirname(dirname(realpathSync(fileURLToPath(import.meta.url))));
+    this.ledgerPath=ledgerPath||process.env.PI_ORCHESTRATOR_LEDGER||join(homedir(),".local/share/pi-orchestrator/ledger.sqlite3");
     this.codexMeters=new CodexMeterSampler(store,{authPaths:[config.authPath],meters:ORCHESTRATOR_CATALOG.meters.filter((meter)=>meter.provider==="openai-codex")});
     this.anthropicMeters=new AnthropicMeterSampler(store,{agentDir:config.agentDir,sharedAuthPath:config.authPath});
   }
@@ -148,12 +151,11 @@ export class Daemon {
       "--property=Type=exec","--property=Restart=no","--property=KillMode=mixed","--property=TimeoutStopSec=20",
       "--property=CPUWeight=20","--property=MemoryMax=4G","--property=TasksMax=4096","--property=LimitNOFILE=1048576",
       "--setenv=PI_ORCHESTRATOR_ASSIGNED=1",`--setenv=PI_ORCHESTRATOR_RUN_ID=${runId}`,
-      `--setenv=PI_ORCHESTRATOR_LEDGER=${process.env.PI_ORCHESTRATOR_LEDGER??""}`,
-      `--setenv=PI_ORCHESTRATOR_CONFIG=${process.env.PI_ORCHESTRATOR_CONFIG??""}`,
+      `--setenv=PI_ORCHESTRATOR_LEDGER=${this.ledgerPath}`,
       `--setenv=PI_CODING_AGENT_DIR=${this.config.agentDir}`,
       "--setenv=PI_BASH_TIMEOUT_MAX_SECONDS=55",
     ];
-    for(const name of ["PATH","PYTHONPATH","CPATH","LIBRARY_PATH","PKG_CONFIG_PATH","PI_MCP_SIZE_ALERTS_INBOX","PI_MCP_SIZE_ALERT_COMMAND"]){
+    for(const name of ["PATH","PYTHONPATH","CPATH","LIBRARY_PATH","PKG_CONFIG_PATH","PI_ORCHESTRATOR_CONFIG","PI_MCP_SIZE_ALERTS_INBOX","PI_MCP_SIZE_ALERT_COMMAND"]){
       const value=process.env[name];if(value!==undefined)args.push(`--setenv=${name}=${value}`);
     }
     args.push(process.execPath,cli,"worker",runId);
