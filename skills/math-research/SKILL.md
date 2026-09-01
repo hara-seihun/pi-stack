@@ -4,7 +4,7 @@ description: Mandatory mathematical-research doctrine. Load for any mathematics,
 ---
 # LLMs are really good at math now
 
-Read this one first, read all of it, and then work the way it says. Three things here are binding rather than advice: attack the target itself, keep every computation under a minute, and never climb a ladder of constants. Where this guide and the instructions that opened your session disagree about what to attempt, how long to compute, or when to stop, this guide wins. Everything filed under *Some moves worth knowing* is a toolkit and you may ignore all of it.
+Read this one first, read all of it, and then work the way it says. Four things here are binding rather than advice: attack the target itself, keep every computation under a minute, never climb a ladder of constants, and state in Lean anything another result will stand on. Where this guide and the instructions that opened your session disagree about what to attempt, how long to compute, or when to stop, this guide wins. Everything filed under *Some moves worth knowing* is a toolkit and you may ignore all of it.
 
 No really, they are, and this includes you, the agent reading this. LLMs have been solving huge open problems in math quite frequently recently. Here are some examples.
 
@@ -113,9 +113,22 @@ An exploration program is part of the evidence. Make it deterministic or print i
 
 It is important to note that most agents will exhibit the behaviour of looking at a program where the previous agents had proved something along the lines of "X is true for r = 1, r = 2, r = 3, etc" then go on to prove X is true for r = 4, you should aggressively reject this unless you can prove to yourself beforehand that it's likely proving it for the next constant will reveal something that you will immediately use for something broader. Find the induction rule, find the generating function, do anything that isn't just constant chasing or ladder climbing 
 
+## State it in Lean before anything stands on it
+
+On the night of 2026-08-31, one campaign lost three successive proofs of its keystone theorem and six downstream approvals built on them. Every fatal defect was of the same species: a functional never defined on generators the proof retained, a map used as the identity but typed as something weaker, a branch whose coverage of its domain was asserted in prose and never established. Hostile byte-level review found each one in about a day. The same night, a room pointed the Lean elaborator at the same corpus and surfaced the same class of defect in minutes, at the definition site, before anything had been stacked on it — and proved the base lemma sorry-free while it was at it. The social machinery this system built to compensate — SHA custody chains, triple independent audits, exact-byte manifests — is a hand-rolled proof kernel that costs more per round than the real one. Use the real one.
+
+What is binding: before any result is consumed by another result — cited by a successor, built on by a cell, composed into an assembly — its exact statement exists in Lean and elaborates, with `sorry` for whatever is not yet proved. Statements are cheap: one declaration whose hypotheses are all named is a tenth the cost of the proof and catches the entire class of defect above at submission time rather than in round three of review. The rest is calibrated, not binding:
+
+- Formalize proofs greedily where cheap — finite objects, linear algebra over `ZMod p`, decidable statements — and opportunistically where decisive. A kernel-checked proof ends an argument permanently; no settlement built on prose tonight has managed that.
+- Keep every falsified statement formalized as a regression test. A definition under which a disproved statement becomes provable is the wrong definition, and this check is nearly free.
+- Exploration, counterexample searches, and computations need no formalization. Formalize the boundary other work crosses, not the scratchwork behind it.
+- Where prose and formalization disagree about what a theorem says, that disagreement is a finding to file, never a choice to make silently.
+
+The standing toolchain is the pinned Lean 4 + Mathlib workspace at `/home/orchestrator/work/math/mathlibplus` (`lake env lean /absolute/path/file.lean` from that directory; the bare `lean` elsewhere is an unselected shim) and the ledger's `check_lean`. A statement that will not elaborate is not yet a statement; treat elaborator refusals on faithful renderings as review findings about the prose.
+
 ## Before you submit
 
-Check the thing you are about to file against the three binding rules. If the title differs from something you already filed this session only in a number, you climbed a ladder and the entry you owe is the general statement or the obstruction that blocks it. If you waited more than a minute on a computation, the computation was the wrong one. If the entry is a bounded slice of your target, it is working material, so keep attacking and file the target.
+Check the thing you are about to file against the four binding rules. If the title differs from something you already filed this session only in a number, you climbed a ladder and the entry you owe is the general statement or the obstruction that blocks it. If you waited more than a minute on a computation, the computation was the wrong one. If the entry is a bounded slice of your target, it is working material, so keep attacking and file the target. If another result will stand on this one and its statement does not elaborate in Lean, you owe the statement first.
 
 ## Examine your priors
 
