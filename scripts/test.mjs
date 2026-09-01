@@ -10,7 +10,6 @@ const jobs = [
   ["tools", "node", ["scripts/check-tools.mjs"]],
   ["agent workspace", "npm", ["test", "--workspace=@hara-seihun/agent-workspace"]],
   ["runtime", "npm", ["test", "--workspace=@hara-seihun/pi-runtime"]],
-  ["cursor provider", "npm", ["run", "check", "--workspace=@rahularya01/pi-cursor"]],
   ["orchestrator", "npm", ["test", "--workspace=pi-orchestrator"]],
   ["remote", "npm", ["test", "--workspace=pi-remote"]],
   ["mcp", "npm", ["test", "--workspace=@hara-seihun/mcp-cli"]],

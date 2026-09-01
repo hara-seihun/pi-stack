@@ -9,7 +9,6 @@
     "apps/remote",
     "apps/kenan",
     "packages/*",
-    "packages/runtime/extensions/pi-cursor",
     "tools/*"
   ],
   "scripts": {

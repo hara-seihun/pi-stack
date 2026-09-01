@@ -29,8 +29,6 @@ fi
 
 cd "$root"
 pi_stack_prepare_dependencies "$root"
-rm -rf packages/runtime/extensions/pi-cursor/dist
-npm run build --workspace=@rahularya01/pi-cursor
 dependency_hash=$({
   sha256sum package.json package-lock.json
   printf '%s\n' workspace-production-closure-v1-atomic-settings-writes-v1
@@ -83,7 +81,7 @@ settings_manager="$dependency_release/node_modules/@earendil-works/pi-coding-age
 grep -q 'renameSync(temporary, path)' "$settings_manager"
 node --check "$settings_manager"
 
-extensions=(pi-claude-code-use state-compactor bash-timeout-guard publication-custody scratch-updates chatgpt-pro pi-cursor)
+extensions=(pi-claude-code-use state-compactor bash-timeout-guard publication-custody scratch-updates chatgpt-pro)
 # A release belongs to the reviewed source commit, even when two commits happen
 # to produce identical runtime files. This keeps the selected artifact's receipt
 # commit-consistent and makes the next deployment hit the unchanged fast path.
@@ -93,7 +91,6 @@ if [[ ! -d $runtime_release ]]; then
   install -d -m 700 "$stage/extensions"
   for extension in "${extensions[@]}"; do rsync -a "$runtime_source/extensions/$extension" "$stage/extensions/"; done
   rsync -a "$runtime_source/prompt-eval" "$stage/"
-  install -m 600 "$runtime_source/models.json" "$stage/models.json"
   ln -s "$dependency_release/node_modules" "$stage/node_modules"
   printf '%s\n' "$(git rev-parse HEAD)" > "$stage/.pi-stack-commit"
   mv "$stage" "$runtime_release"

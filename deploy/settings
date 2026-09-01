@@ -50,7 +50,6 @@ const paths = {
   "state-compactor": process.env.PI_STACK_STATE_COMPACTOR_PACKAGE || `${runtime}/extensions/state-compactor`,
   "bash-timeout-guard": process.env.PI_STACK_BASH_TIMEOUT_GUARD_PACKAGE || `${runtime}/extensions/bash-timeout-guard`,
   "scratch-updates": process.env.PI_STACK_SCRATCH_UPDATES_PACKAGE || `${runtime}/extensions/scratch-updates`,
-  "pi-cursor": process.env.PI_STACK_PI_CURSOR_PACKAGE || `${runtime}/extensions/pi-cursor`,
   remote: process.env.PI_STACK_REMOTE_PACKAGE,
 };
 const packages = names.map((name) => {

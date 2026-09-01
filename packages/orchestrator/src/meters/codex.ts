@@ -24,8 +24,8 @@ import { oauthCredential } from "../auth/shared-oauth.js";
  * reported rather than guessed at, because a mis-named meter would calibrate
  * one plan's drain against another's allowance.
  *
- * Two constraints from docs/provider-meter-notes.md are load-bearing here,
- * exactly as they are for Cursor: history cannot be backfilled, so readings
+ * Two constraints from docs/provider-meter-notes.md are load-bearing here:
+ * history cannot be backfilled, so readings
  * are captured continuously rather than on demand; and a sampler must never
  * refresh OAuth — refresh tokens are single-use, and an independent refresh
  * would revoke the token family out from under every pi session on the

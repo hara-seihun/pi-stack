@@ -13,7 +13,6 @@
     "extensions": [
       "./extensions/bash-timeout-guard/index.mjs",
       "./extensions/chatgpt-pro/index.ts",
-      "./extensions/pi-cursor/dist/index.js",
       "./extensions/publication-custody/index.mjs",
       "./extensions/scratch-updates/index.mjs",
       "./extensions/state-compactor/index.mjs",

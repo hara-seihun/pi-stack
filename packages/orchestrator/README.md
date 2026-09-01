@@ -113,11 +113,10 @@ three meters (5h, 7d, 7d_oi) on every response. Ledger location:
 ## Meter sampling (`src/meters/`)
 
 Providers that publish no rate-limit headers need a poller, or their meters
-have no source at all. Cursor's Connect stream carries no quota state, and pi
-talks to Codex over a WebSocket by default, so there is no HTTP response to
-carry headers there either. The controller daemon therefore samples both:
-Cursor's dashboard period-usage RPC, and Codex's account usage endpoint
-(`/backend-api/codex/usage`), writing ordinary meter readings for each.
+have no source at all. Pi talks to Codex over a WebSocket by default, so
+there is no HTTP response to carry headers there. The controller daemon
+therefore samples Codex's account usage endpoint
+(`/backend-api/codex/usage`), writing ordinary meter readings.
 
 Anthropic does publish headers, and they are still recorded for free by the
 usage-logger — but they describe *one response*, not the account, and both
@@ -147,8 +146,7 @@ at, because a mis-named meter would calibrate one plan's drain against another's
 allowance. Model-scoped `additional_rate_limits` are not the account plan and
 are not read.
 
-Readings are spaced by a sampling interval, only percentages are recorded (the
-dollar "included usage" figure Cursor reports gates nothing — see
+Readings are spaced by a sampling interval, only percentages are recorded (see
 [docs/provider-meter-notes.md](docs/provider-meter-notes.md)), and no sampler
 ever refreshes OAuth: an expired access token is recorded as a gap rather than
 a token-family revocation. Everything downstream — calibration, broker admission, and Pi Remote's plan cards — reads those same ledger facts. The Anthropic profile poll also records each account's relative plan capacity, so combining percentages does not let a smaller plan count the same as a larger one.
@@ -476,37 +474,29 @@ A family can also be limited by **rate** rather than by any allowance, and
 then a 429 means something different. The default cooldown for a rate-limit
 error that named no window is ten minutes, which fits a plan-metered family:
 its unnamed 429 usually means some window is empty and the next minute will
-not refill it. A burst-throttled endpoint is out for seconds. NVIDIA NIM's
-free tier answered again 2.6s and 5.1s after an ordinary 429, with the worst
-observed stretch clearing inside 15s. Ten minutes would bench a healthy account
-for two orders of magnitude longer than the condition lasted, and a single busy
-moment would cost the fleet the account for the rest of the wave. Such a
-family declares `throttleCooldownMs`, and every surface that cools an account
-down (runner classification, interactive failover) resolves the error against
-the family the ledger says the account belongs to. A **named** window still
-wins: a provider saying "weekly" is reporting an empty plan whatever its
-ordinary 429s mean.
+not refill it. A burst-throttled endpoint is out for seconds — measured burst
+throttles on a free tier cleared in 3–15s — so ten minutes would bench a
+healthy account for two orders of magnitude longer than the condition lasted,
+and a single busy moment would cost the fleet the account for the rest of the
+wave. Such a family declares `throttleCooldownMs`, and every surface that
+cools an account down (runner classification, interactive failover) resolves
+the error against the family the ledger says the account belongs to. A
+**named** window still wins: a provider saying "weekly" is reporting an empty
+plan whatever its ordinary 429s mean.
 
 Rate-limited families want their concurrency measured the same way, by
 watching the 429 rate climb with session count rather than by trusting a
-published number. NVIDIA NIM on Kimi K3 took two concurrent sessions with no
-429 at all, three at a 30% 429 rate, and five at 47%. NVIDIA later withdrew
-that endpoint, which changed its response to a permanent bare 429 while other
-models on the account still answered. Nemotron 3 Ultra then passed a complete
-hosted-agent probe, but Hara disabled NVIDIA NIM for the fleet on 2026-08-25.
-The operator config has no NVIDIA candidate or provider entry, so neither the
-scheduler nor an explicit account spawn can launch it. Pi's retry absorbs brief
-throttles, so an unmetered family that returns later should set
-`sessionCapacity` where the endpoint stops answering cleanly rather than where
-it stops answering at all.
+published number. Pi's retry absorbs brief throttles, so an unmetered family
+should set `sessionCapacity` where the endpoint stops answering cleanly
+rather than where it stops answering at all.
 
 The two declarations compose, and OpenRouter needs both: it has no window to
 pace (`sessionCapacity`) and, on a stealth preview model, a throttle that
 clears in seconds (`throttleCooldownMs`). Its 429s name
 `upstream_provider_shared_pool` — a pool shared with every other OpenRouter
-user of that model — so unlike NIM's per-account throttle, session count is
-not the dial that sets the 429 rate and lowering it does not reliably clear
-them. Capacity there buys exposure to a queue rather than a share of it.
+user of that model — so session count is not the dial that sets the 429 rate
+and lowering it does not reliably clear them. Capacity there buys exposure to
+a queue rather than a share of it.
 
 A quotient below one means a duty cycle, not a shutdown. An account whose
 single session burns faster than its plan sustains can still afford to run
@@ -516,10 +506,10 @@ in percent, times the family's boost — and rests while it is ahead of that
 line. The test is cumulative rather than a rate, which is what makes the cycle
 self-correcting: the burst itself pushes usage past the line, and admission
 resumes when the line catches up. Flooring the quotient to zero instead
-retired a subscription the moment measurement proved it expensive: Cursor's
-monthly plan measured one Grok session at 0.85%/h against a paced 0.13%/h, so
-the math-frontier lane lost its Grok agent for the rest of the month with 89%
-of a paid window left to expire unspent.
+retired a subscription the moment measurement proved it expensive: a
+since-removed monthly plan measured one session at 0.85%/h against a paced
+0.13%/h, so its lane lost that agent for the rest of the month with 89% of a
+paid window left to expire unspent.
 
 Pacing still uses the **most binding** meter, and calibration confidence still
 gates the token budgets. A fresh short-window reset must never let the broker

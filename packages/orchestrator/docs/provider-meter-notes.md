@@ -34,25 +34,13 @@ readings should be collected and interpreted here.
 ## Normalization
 
 The useful headline is **tokens per week per plan**: normalize every window
-to seven days so Codex/Anthropic weekly windows and Cursor's monthly billing
-cycle are directly comparable, and measure each account against whichever of
+to seven days so windows of different lengths (5-hour, weekly, monthly) are
+directly comparable, and measure each account against whichever of
 its meters exhausts first. Pricing account type against model (Codex Pro on
 Sol vs Luna, Max 20x on Opus vs Fable) requires solving meter movement
 against each account's model mix — Fable burns a half-sized scoped weekly
 meter that Opus never touches (see the Anthropic topology in the calibrator
 tests).
-
-## Cursor
-
-- Cursor publishes two counters for one cycle that disagree by roughly 13x.
-  Only the percentage (`monthly`) is a limit. The dollar figure its
-  dashboard calls "included usage" is a retail-value estimate that blocks
-  nothing; record it as a balance, never gate on it.
-- Cursor's agent stream carries no cache accounting at all, so stream-side
-  usage books the whole context as fresh input and shows a zero cache-hit
-  rate. That is a reporting gap, not a caching failure: the dashboard
-  `GetAggregatedUsageEvents` RPC reports the real split. Cost weights for
-  Cursor must be corrected from that RPC, not taken from stream usage.
 
 ## Anthropic
 

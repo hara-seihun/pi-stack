@@ -1,6 +1,6 @@
 # Provider icons
 
-The OpenAI and Anthropic logo path data comes from Simple Icons 14.15.0 (`simple-icons`), released under CC0-1.0. Both clients use those logos to say whose model a thread or a plan card belongs to. Cursor usage uses a local ring-shaped **C** monogram rather than importing another trademark asset.
+The OpenAI and Anthropic logo path data comes from Simple Icons 14.15.0 (`simple-icons`), released under CC0-1.0. Both clients use those logos to say whose model a thread or a plan card belongs to.
 
 The thread-creation menu asks a different question, so it answers with a different kind of sign. Its model choices wear local **S**, **O**, and **F** monograms drawn in one weight, because a logo there would say Anthropic twice and leave Opus and Fable to be told apart by nothing. Provider is carried by the dot's colour instead: OpenAI slate, Anthropic clay for Opus and gold for Fable.
 

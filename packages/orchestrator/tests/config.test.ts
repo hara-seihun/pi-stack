@@ -126,13 +126,13 @@ describe("operator config", () => {
   it("a burst-throttled family sits out seconds where a metered one sits out minutes", () => {
     const cooldown = cooldownPolicy({
       ...CONFIG,
-      providers: { ...CONFIG.providers, nvidia: { meters: [], sessionCapacity: 2, throttleCooldownMs: 30_000 } },
+      providers: { ...CONFIG.providers, burstpool: { meters: [], sessionCapacity: 2, throttleCooldownMs: 30_000 } },
     });
-    expect(cooldown("nvidia", '{"status":429,"title":"Too Many Requests"}')).toBe(30_000);
+    expect(cooldown("burstpool", '{"status":429,"title":"Too Many Requests"}')).toBe(30_000);
     expect(cooldown("anthropic", "429 too many requests")).toBe(10 * 60_000);
     expect(cooldown(undefined, "429 too many requests")).toBe(10 * 60_000);
     // A named window is the provider reporting an empty plan, whatever its
     // ordinary 429s mean, so it outranks the declared throttle class.
-    expect(cooldown("nvidia", "monthly spend limit reached")).toBe(24 * 60 * 60_000);
+    expect(cooldown("burstpool", "monthly spend limit reached")).toBe(24 * 60 * 60_000);
   });
 });

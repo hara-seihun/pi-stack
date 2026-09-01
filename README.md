@@ -11,9 +11,9 @@ This repository owns Hara's custom Pi runtime, agent orchestrator, remote client
 - [`skills`](skills/README.md) contains the shared first-party skills loaded by interactive and fleet agents.
 - [`tools`](tools/README.md) contains commands whose contracts depend on Pi or its session format.
 
-The component histories were imported into their final directories. `git log --follow` reaches work from the repositories that preceded this one. The upstream `pi-cursor` history is retained as merge ancestry from its import at version 1.4.27.
+The component histories were imported into their final directories. `git log --follow` reaches work from the repositories that preceded this one.
 
-Upstream Pi remains a pinned npm dependency. The reviewed `pi-cursor` source lives at [`packages/runtime/extensions/pi-cursor`](packages/runtime/extensions/pi-cursor/) and tracks upstream releases inside this repository. Machine identities, URLs, ports, credentials, services, and mutable state stay in the NixOS and Converge infrastructure repositories.
+Upstream Pi remains a pinned npm dependency. Machine identities, URLs, ports, credentials, services, and mutable state stay in the NixOS and Converge infrastructure repositories.
 
 ## Development
 

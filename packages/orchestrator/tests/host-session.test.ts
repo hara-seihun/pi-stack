@@ -46,7 +46,7 @@ function harness(
      * undefined for "nothing to wait for, end the run". */
     turnFailed?: (detail: string, attempt: number) => number | undefined;
     /** Undefined resolves the model inside the session, as an extension
-     * provider (cursor) does. */
+     * provider (chatgpt-pro) does. */
     resolveModel?: () => unknown;
     accountId?: string;
     provider?: string;
@@ -430,8 +430,8 @@ describe("host shift loop", () => {
     // it and was gone by the first prompt, with nothing anywhere saying so.
     const { host, spec, finished, retrySettings } = harness([{ toolCalls: 1 }, {}, {}], {
       resolveModel: () => undefined,
-      accountId: "cursor",
-      provider: "cursor",
+      accountId: "chatgpt-pro",
+      provider: "chatgpt-pro",
     });
     host.launch(spec);
     await finished;

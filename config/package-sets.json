@@ -6,7 +6,6 @@
     "state-compactor": "packages/runtime/extensions/state-compactor",
     "bash-timeout-guard": "packages/runtime/extensions/bash-timeout-guard",
     "scratch-updates": "packages/runtime/extensions/scratch-updates",
-    "pi-cursor": "packages/runtime/extensions/pi-cursor",
     "remote": "apps/remote"
   },
   "roles": {
@@ -16,15 +15,13 @@
       "state-compactor",
       "bash-timeout-guard",
       "scratch-updates",
-      "pi-cursor",
       "remote"
     ],
     "gmktec-fleet": [
       "orchestrator",
       "claude-code-use",
       "state-compactor",
-      "bash-timeout-guard",
-      "pi-cursor"
+      "bash-timeout-guard"
     ],
     "converge-user": [
       "orchestrator",

@@ -93,7 +93,7 @@ Document state and view state are separate. JSON parsing and entry modeling run 
 
 Every context entry has a stable key and a content signature. Reconciliation moves the existing view for a surviving key, updates it only when its signature changed, and creates as many missing views as fit an eight-millisecond frame budget. Backfilled rows never play arrival animations. Tool arguments, results, timing, and status update inside the existing card, so a growing result does not replay the card's entrance animation or lose its expanded state. A new context capture therefore does not recreate unchanged Markdown, tool cards, selections, or image state. Selection changes and context compaction invalidate only state whose keys no longer survive.
 
-The drawer's plan summary renders only cards with a measured percentage. Environments without an Anthropic or Cursor account do not get empty provider rows. Machine usage likewise omits unavailable hardware, such as the GPU row on a CPU-only VM. The server samples CPU every second independently of the 25-second client poll, so an idle connection does not turn the reading back into an unavailable value.
+The drawer's plan summary renders only cards with a measured percentage. Environments without an account for a plan's provider do not get empty provider rows. Machine usage likewise omits unavailable hardware, such as the GPU row on a CPU-only VM. The server samples CPU every second independently of the 25-second client poll, so an idle connection does not turn the reading back into an unavailable value.
 
 Slash-command discovery is lazy. Selecting or switching to an idle thread reads its context without starting its Pi runtime; typing `/` requests runtime-owned commands when they are actually needed.
 

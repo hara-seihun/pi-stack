@@ -14,7 +14,6 @@ import { reconcileTaskManifest } from "./task-manifest.js";
 import { credentialedAccountIds } from "./auth/credentials.js";
 import { brokerConfig, cooldownPolicy, defaultConfigPath, loadConfig } from "./config.js";
 import { catalogModel } from "./catalog.js";
-import { CURSOR_PROVIDER, CursorMeterSampler } from "./meters/cursor.js";
 import { CODEX_PROVIDER, CodexMeterSampler } from "./meters/codex.js";
 import { AnthropicMeterSampler } from "./meters/anthropic.js";
 import { MeterLog } from "./meters/log.js";
@@ -277,14 +276,7 @@ async function daemon(ledger: Ledger, args: string[]): Promise<void> {
     },
   );
   const intervalMs = Number(named.get("interval") ?? 30_000);
-  // Cursor publishes no meter headers, so its monthly meter is polled here
-  // rather than observed by the usage-logger extension. The daemon runs as
-  // the credential-custody user, so it can read the token without moving it.
-  const cursorMeter = cfg.providers[CURSOR_PROVIDER]?.meters[0];
-  const cursorSampler = cursorMeter
-    ? new CursorMeterSampler(ledger, { agentDir: agentDirPath(), meterId: cursorMeter.id })
-    : undefined;
-  // Codex publishes no meter headers to pi's WebSocket transport either, so
+  // Codex publishes no meter headers to pi's WebSocket transport, so
   // its windows are polled from the account usage endpoint. Credentials are
   // read (never refreshed) from the shared store first, then this user's own
   // agent dir for any Codex account whose custody was never moved.
@@ -316,9 +308,6 @@ async function daemon(ledger: Ledger, args: string[]): Promise<void> {
   console.log(`controller started (config: ${defaultConfigPath()})`);
   for (;;) {
     try {
-      for (const sample of (await cursorSampler?.sample()) ?? []) {
-        meterLog.report({ ...sample, meterId: cursorMeter?.id });
-      }
       for (const sample of (await codexSampler?.sample()) ?? []) meterLog.report(sample);
       for (const sample of await anthropicSampler.sample()) anthropicLog.report(sample);
       const report = await controller.tick();

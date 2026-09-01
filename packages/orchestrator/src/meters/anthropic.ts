@@ -23,13 +23,13 @@ import type { Ledger } from "../ledger/ledger.js";
  *
  * The account usage endpoint has neither problem: `GET /api/oauth/usage`
  * returns every bucket of the plan, on every call, whatever the account has
- * been running and wherever it ran. This sampler polls it beside the Cursor
- * and Codex samplers, writing the same ordinary meter readings the header
- * path writes, so calibration, broker admission, and Pi Remote's plan cards
- * read one complete set of facts.
+ * been running and wherever it ran. This sampler polls it beside the Codex
+ * sampler, writing the same ordinary meter readings the header path writes,
+ * so calibration, broker admission, and Pi Remote's plan cards read one
+ * complete set of facts.
  *
  * The same two constraints from docs/provider-meter-notes.md apply here as
- * for Cursor and Codex: only percentages are recorded, and a sampler must
+ * for Codex: only percentages are recorded, and a sampler must
  * never refresh OAuth — refresh tokens are single-use and an independent
  * refresh revokes the token family out from under every pi session using
  * that account. An expired access token is recorded as a gap by not sampling.

@@ -10,7 +10,6 @@ Reusable extensions and prompt-evaluation tools for [Pi](https://pi.dev).
 - `scratch-updates` reads math scratch workspace changes and publications since its preceding machine-wide invocation.
 - `pi-claude-code-use` adapts Pi tools and prompts for Anthropic subscription requests.
 - `chatgpt-pro` exposes ChatGPT Pro through short-lived, authenticated Kernel browsers and verifies the persisted model evidence before returning an answer.
-- `pi-cursor` adds Cursor subscription OAuth, live model discovery, usage reporting, and native Connect/protobuf streaming. Its imported upstream source is pinned at version 1.4.27.
 - `prompt-eval` runs reproducible Pi prompt comparisons in isolated workspaces.
 
 ## Install

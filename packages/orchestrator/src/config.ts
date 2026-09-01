@@ -44,10 +44,9 @@ export interface ProviderConfig {
    *
    * Plan-metered families want the long default: their unnamed 429 means an
    * empty window. A family that throttles bursts instead is out for seconds
-   * (NVIDIA NIM's free tier answered again 2.6s and 5.1s after a 429, and its
-   * worst observed stretch cleared inside 15s), so the default would bench a
-   * healthy account for two orders of magnitude longer than the condition
-   * lasts. Such a family declares its own class here. */
+   * (measured burst throttles have cleared in 3–15s), so the default would
+   * bench a healthy account for two orders of magnitude longer than the
+   * condition lasts. Such a family declares its own class here. */
   readonly throttleCooldownMs?: number;
 }
 

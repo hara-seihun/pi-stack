@@ -358,7 +358,7 @@ else: sys.exit(2)
   insertRun.run("opus-mixed", "sol-task", "running", "anthropic/claude-opus-5");
   for (let index = 0; index < 45; index++) insertRun.run(`luna-${index}`, "luna-task", "running", "openai-codex/gpt-5.6-luna");
   for (let index = 0; index < 4; index++) insertRun.run(`pro-${index}`, "pro-task", "running", "chatgpt-pro/gpt-5-6-pro-literal");
-  insertRun.run("grok", "grok-task", "running", "cursor/grok-4.6");
+  insertRun.run("sonnet", "sonnet-task", "running", "anthropic/claude-sonnet");
   insertRun.run("finished", "luna-task", "done", "openai-codex/gpt-5.6-luna");
   orchestrator.query(`UPDATE run SET started_at=1000,provider='openai-codex-3',thinking='xhigh',team_role='supervisor',team_slot=0
     WHERE id='sol-0'`).run();
@@ -483,21 +483,21 @@ describe("web and supervisor integration", () => {
         { key: "luna", label: "LUNA", count: 45 },
         { key: "pro", label: "PRO", count: 4 },
         { key: "opus", label: "OPUS", count: 1 },
-        { key: "grok", label: "GROK", count: 1 },
+        { key: "sonnet", label: "SONNET", count: 1 },
       ],
       models: [
         { key: "sol", label: "SOL", count: 122 },
         { key: "luna", label: "LUNA", count: 45 },
         { key: "pro", label: "PRO", count: 4 },
         { key: "opus", label: "OPUS", count: 1 },
-        { key: "grok", label: "GROK", count: 1 },
+        { key: "sonnet", label: "SONNET", count: 1 },
       ],
       locations: [{ key: "local", label: "THIS MACHINE", name: "This machine", total: 173, models: [
         { key: "sol", label: "SOL", count: 122 },
         { key: "luna", label: "LUNA", count: 45 },
         { key: "pro", label: "PRO", count: 4 },
         { key: "opus", label: "OPUS", count: 1 },
-        { key: "grok", label: "GROK", count: 1 },
+        { key: "sonnet", label: "SONNET", count: 1 },
       ], error: null }],
     });
   });
@@ -564,7 +564,7 @@ describe("web and supervisor integration", () => {
         { key: "luna", label: "LUNA", count: 45 },
         { key: "pro", label: "PRO", count: 4 },
         { key: "opus", label: "OPUS", count: 1 },
-        { key: "grok", label: "GROK", count: 1 },
+        { key: "sonnet", label: "SONNET", count: 1 },
       ],
     });
     await api("POST", `/v1/sessions/${id}/abort`, {});
@@ -708,7 +708,7 @@ describe("web and supervisor integration", () => {
       const response = await fetch(`${base}${asset}`);
       expect(response.status, `missing browser asset ${asset}`).toBe(200);
     }
-    for (const icon of ["openai", "opus", "sol", "fable", "house", "anthropic", "cursor", "personal", "work", "converge", "thunder"]) {
+    for (const icon of ["openai", "opus", "sol", "fable", "house", "anthropic", "personal", "work", "converge", "thunder"]) {
       const response = await fetch(`${base}/${icon}.svg`);
       expect(response.status).toBe(200);
       expect(response.headers.get("content-type")).toContain("image/svg+xml");

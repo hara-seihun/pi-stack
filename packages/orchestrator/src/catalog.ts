@@ -58,7 +58,6 @@ export const ORCHESTRATOR_CATALOG: OrchestratorCatalog = {
     { id: "opus", provider: "anthropic", model: "claude-opus-5", thinking: "xhigh", label: "OPUS", aliases: ["opus"], icon: "opus", accent: "#d9663d", meterClass: "opus" },
     { id: "fable", provider: "anthropic", model: "claude-fable-5", thinking: "high", label: "FABLE", aliases: ["fable"], icon: "fable", accent: "#e6a23c", meterClass: "fable" },
     { id: "sonnet", provider: "anthropic", model: "claude-sonnet", thinking: "high", label: "SONNET", aliases: ["sonnet"], icon: "sonnet", accent: "#d9663d" },
-    { id: "grok", provider: "cursor", model: "grok-4.6", thinking: "xhigh", label: "GROK", aliases: ["grok"], icon: "grok", accent: "#111111" },
     { id: "pro", provider: "chatgpt-pro", model: "gpt-5-6-pro-literal", thinking: "max", label: "PRO", aliases: ["pro", "gpt-5-6-pro", "gpt-5.6-pro"], icon: "pro", accent: "#5a6673" },
   ],
   meters: [
@@ -67,9 +66,8 @@ export const ORCHESTRATOR_CATALOG: OrchestratorCatalog = {
     { id: "anthropic-5h", provider: "anthropic", drainedBy: ["default:cost", "opus:cost", "fable:cost"], windowHours: 5 },
     { id: "anthropic-7d", provider: "anthropic", drainedBy: ["default:cost", "opus:cost", "fable:cost"], windowHours: 168 },
     { id: "anthropic-7d_oi", provider: "anthropic", drainedBy: ["fable:cost"], windowHours: 168 },
-    { id: "cursor-month", provider: "cursor", drainedBy: ["default:cost"], windowHours: 720 },
   ],
-  agentOrder: ["sol", "luna", "terra", "pro", "fable", "opus", "grok", "sonnet"],
+  agentOrder: ["sol", "luna", "terra", "pro", "fable", "opus", "sonnet"],
   plans: [
     {
       id: "openai", label: "OpenAI", icon: "openai", provider: "openai-codex", maxReadingAgeMs: HOUR,
@@ -81,10 +79,6 @@ export const ORCHESTRATOR_CATALOG: OrchestratorCatalog = {
         { id: "fable", model: "fable", label: "F", name: "Fable weekly", meters: ["anthropic-7d_oi"] },
         { id: "weekly", model: "opus", label: "W", name: "Weekly, all models including Opus", meters: ["anthropic-7d"] },
       ],
-    },
-    {
-      id: "cursor", label: "Cursor", icon: "cursor", provider: "cursor", maxReadingAgeMs: HOUR,
-      metrics: [{ id: "remaining", model: "grok", meters: ["cursor-month"] }],
     },
   ],
 };

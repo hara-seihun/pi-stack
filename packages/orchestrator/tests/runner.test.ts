@@ -435,8 +435,8 @@ describe("a session that stops making progress is torn down", () => {
     expect(runner.tick(1_500).stalled).toEqual([]);
     expect(engine.aborted).toEqual([]);
 
-    // One goes quiet. Cursor-style parks keep heartbeating, so only recorded
-    // session activity may hold a run open.
+    // One goes quiet. A run parked inside a provider call keeps heartbeating,
+    // so only recorded session activity may hold a run open.
     ledger.progressRun(healthy!, 2_100);
     ledger.heartbeatRun(stuck!, 2_100);
     expect(runner.tick(2_100).stalled).toEqual([]);

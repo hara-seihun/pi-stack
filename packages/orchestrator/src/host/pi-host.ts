@@ -75,7 +75,7 @@ export class PiHost implements HostManager {
        * family model onto the account's provider alias so credentials
        * resolve per account. Returning undefined defers to the session's own
        * model runtime, which is the only place extension-registered
-       * providers (cursor) exist. */
+       * providers (chatgpt-pro) exist. */
       readonly resolveModel: (spec: LaunchSpec) => unknown;
       /** Directory root for per-run transcripts; omit to disable them. */
       readonly runsRoot?: string;
@@ -304,7 +304,7 @@ export class PiHost implements HostManager {
     }
 
     // A builtin family resolves before the session exists; an extension
-    // provider (cursor) exists only inside the session's own model runtime,
+    // provider (chatgpt-pro) exists only inside the session's own model runtime,
     // because the extension that registers it is loaded per session.
     const preresolved = this.options.resolveModel(spec);
     const doctrine = spec.doctrineUrl === undefined ? undefined : await this.doctrine(spec.doctrineUrl);
