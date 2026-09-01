@@ -1,5 +1,5 @@
 import { readdirSync, readFileSync, statfsSync } from "node:fs";
-import { cpus, freemem, homedir, totalmem } from "node:os";
+import { cpus, freemem, homedir, platform, totalmem } from "node:os";
 
 type CpuTotals = { idle: number; total: number };
 type CpuSample = { at: number; totals: CpuTotals };
@@ -7,6 +7,7 @@ type CpuSample = { at: number; totals: CpuTotals };
 const CPU_SAMPLE_INTERVAL_MS = 1_000;
 const CPU_WINDOW_MS = 10_000;
 const DRM_CLASS_PATH = "/sys/class/drm";
+const LINUX_MEMINFO_PATH = "/proc/meminfo";
 
 // DRM card numbering is enumeration order, not identity: a driver
 // unbind/rebind renumbers the card (card0 -> card1). Resolve the current
@@ -116,11 +117,25 @@ function readGpuPercent(): number | null {
   }
 }
 
+export function parseLinuxAvailableMemoryBytes(meminfo: string): number | null {
+  const kibibytes = /^MemAvailable:\s+(\d+)\s+kB$/mu.exec(meminfo)?.[1];
+  if (!kibibytes) return null;
+  const bytes = Number(kibibytes) * 1_024;
+  return Number.isSafeInteger(bytes) ? bytes : null;
+}
+
+function readAvailableMemoryBytes(): number {
+  if (platform() !== "linux") return freemem();
+  const available = parseLinuxAvailableMemoryBytes(readFileSync(LINUX_MEMINFO_PATH, "utf8"));
+  if (available === null) throw new Error(`${LINUX_MEMINFO_PATH} does not report MemAvailable`);
+  return available;
+}
+
 export function readMachineUsage(): MachineUsageSnapshot {
   const cpuPercent = cpuUsage.read();
   const gpuPercent = readGpuPercent();
   const memoryTotal = totalmem();
-  const memoryUsed = Math.max(0, memoryTotal - freemem());
+  const memoryUsed = Math.max(0, memoryTotal - readAvailableMemoryBytes());
   let disk: MachineUsageSnapshot["disk"] = null;
   try {
     const stats = statfsSync(homedir());
