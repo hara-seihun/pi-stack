@@ -44,7 +44,16 @@ export class Daemon {
     await this.reconcile();
     console.log(`pi-orchestrator daemon listening on ${HOST}:${PORT}`);
     await new Promise<void>((resolve)=>{for(const signal of ["SIGINT","SIGTERM"] as const)process.once(signal,resolve);});
-    this.stopped=true;clearInterval(timer);await new Promise<void>((resolve)=>server.close(()=>resolve()));
+    this.stopped=true;clearInterval(timer);
+    await this.waitForReconcile();
+    await new Promise<void>((resolve)=>server.close(()=>resolve()));
+  }
+
+  private waitForReconcile():Promise<void>{
+    return new Promise((resolve)=>{
+      const settled=()=>{if(this.reconciling)setTimeout(settled,10);else resolve();};
+      settled();
+    });
   }
 
   private async loadManifest():Promise<void>{

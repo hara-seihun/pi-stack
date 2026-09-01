@@ -59,6 +59,14 @@ describe("current orchestrator state",()=>{
 
   it("resumes an interrupted assigned run without consuming another meter admission",()=>{const store=Store.open(":memory:");account(store);store.recordMeter("openai-codex-1","codex-5h",10,60_000,900);const choice=assign(store,"standard","background",config,1_000).assignment!;commitMeterAdmission(store,choice);const [id]=store.createRuns({count:1,source:"direct",prompt:"x",cwd:"/tmp",profile:"standard",budget:"background"});store.assignRun(id!,{...choice,unit:"run-a",releasePath:"/srv/releases/a"},1_000);store.updateRun(id!,{state:"running",sessionFile:"/sessions/a.jsonl"},1_100);store.endLease(`run:${id}`,1_200);store.updateRun(id!,{state:"queued"},1_200);expect(assign(store,"standard","background",config,1_300).assignment).toBeUndefined();expect(store.resumeAssignedRun(id!,1_300)).toBe(true);expect(store.run(id!)).toMatchObject({accountId:"openai-codex-1",releasePath:"/srv/releases/a",sessionFile:"/sessions/a.jsonl",state:"starting",workerUnit:"run-a"});expect(store.activeLeases(undefined,500,1_300)).toMatchObject([{account_id:"openai-codex-1",run_id:id}]);store.close();});
 
+  it("waits for in-flight reconciliation before releasing ledger custody",async()=>{
+    const store=Store.open(":memory:"),daemon=new Daemon(store,config,"/srv/releases/current") as any;
+    daemon.reconciling=true;
+    let settled=false;const waiting=daemon.waitForReconcile().then(()=>{settled=true;});
+    await Promise.resolve();expect(settled).toBe(false);
+    daemon.reconciling=false;await waiting;expect(settled).toBe(true);store.close();
+  });
+
   it("restarts an interrupted worker from its recorded release",()=>{
     const root=mkdtempSync(join(tmpdir(),"orchestrator-recovery-")),bin=join(root,"bin"),capture=join(root,"systemd-run.args");
     mkdirSync(bin);
