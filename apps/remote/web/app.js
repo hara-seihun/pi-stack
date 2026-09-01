@@ -723,7 +723,7 @@ async function toggleVoice() {
       sessionId: id,
       onState: (next, detail) => { if (voiceThreadId === id) renderVoiceState(next, detail); },
       onNotice: (message) => {
-        if (voiceThreadId === id && state.selectedId === id) { appendMessage("notice", "Voice", message); scrollBottom(); }
+        if (voiceThreadId === id && state.selectedId === id) appendMessage("notice", "Voice", message);
         else console.error(message);
       },
     });
@@ -800,7 +800,7 @@ function restoreThreadConversation(id) {
   clearAttachments(true);
   ui.transcript.replaceChildren(cached.fragment);
   setLive(cached.sessionLiveThinkingDocument?.document || "", cached.sessionLiveTextDocument?.document || "");
-  requestAnimationFrame(() => { ui.scrollback.scrollTop = cached.scrollTop; });
+  if (!cached.followTail) requestAnimationFrame(() => { ui.scrollback.scrollTop = cached.scrollTop; });
   return true;
 }
 function mergeSession(session) {
@@ -1403,13 +1403,7 @@ function trimTranscript() {
   }
 }
 function nearConversationBottom() {
-  return ui.scrollback.scrollHeight - ui.scrollback.scrollTop - ui.scrollback.clientHeight <= 80;
-}
-function scrollBottom() {
-  if (!state.followTail) return;
-  requestAnimationFrame(() => {
-    if (state.followTail) ui.scrollback.scrollTop = ui.scrollback.scrollHeight;
-  });
+  return Math.abs(ui.scrollback.scrollTop) <= 80;
 }
 let pendingLiveRender = null;
 let liveRenderFrame = 0;
@@ -1425,7 +1419,6 @@ function setLive(thinking, answer) {
     ui.liveThinking.hidden = !next.thinking;
     ui.liveAnswer.textContent = next.answer;
     ui.liveAnswer.hidden = !next.answer;
-    if (next.thinking || next.answer) scrollBottom();
   });
 }
 
@@ -1608,9 +1601,7 @@ function renderContextWindow(entries, start) {
     const earlier = node("button", "context-earlier", `Show ${Math.min(CONTEXT_WINDOW_SIZE, start)} earlier entries`);
     earlier.type = "button";
     earlier.addEventListener("click", () => {
-      const previousHeight = ui.scrollback.scrollHeight;
       renderContextWindow(state.contextEntries, Math.max(0, state.contextRenderStart - CONTEXT_WINDOW_SIZE));
-      requestAnimationFrame(() => { ui.scrollback.scrollTop += ui.scrollback.scrollHeight - previousHeight; });
     });
     ui.transcript.append(earlier);
   }
@@ -1630,11 +1621,9 @@ function renderContext(result) {
   renderContextWindow(entries, start);
   patchState({ contextCapturedAt: capturedAt, contextEntries: entries });
   setLive("", "");
-  scrollBottom();
 }
 
 function renderEvents(result) {
-  let added = false;
   for (const event of result.events || []) {
     patchState({ lastSeq: Math.max(state.lastSeq, Number(event.seq) || 0) });
     if (event.type === "user") {
@@ -1650,10 +1639,8 @@ function renderEvents(result) {
     else if (event.type === "notice") appendMessage("notice", "Status", event.text);
     else if (event.type === "tool_start") startTool(event);
     else if (event.type === "tool_end") finishTool(event);
-    added = true;
   }
   setLive(result.liveThinking || "", result.liveText || "");
-  if (added) scrollBottom();
 }
 setInterval(() => { for (const card of state.toolCards.values()) if (!card.finished) updateToolTiming(card); }, 1000);
 
