@@ -232,136 +232,31 @@ test("component publication atomically replaces directories and symlinks", () =>
   }
 });
 
-test("a changed host release rolls orchestrator workers and activates Pi Remote", () => {
-  const directory = mkdtempSync(join(tmpdir(), "pi-stack-host-roll-"));
+test("the Converge host transitions once and otherwise restarts only the daemon", () => {
+  const directory = mkdtempSync(join(tmpdir(), "pi-stack-host-current-"));
   try {
-    const repository = join(directory, "repo");
-    const deploy = join(repository, "deploy");
-    const remoteApp = join(repository, "apps", "remote");
-    const orchestratorSource = join(repository, "packages", "orchestrator", "src");
-    const supervisorSource = join(orchestratorSource, "host", "supervisor.ts");
-    const ledgerSource = join(orchestratorSource, "ledger", "ledger.ts");
-    const bin = join(directory, "bin");
-    mkdirSync(deploy, { recursive: true });
-    mkdirSync(remoteApp, { recursive: true });
-    mkdirSync(dirname(supervisorSource), { recursive: true });
-    mkdirSync(dirname(ledgerSource), { recursive: true });
-    writeFileSync(supervisorSource, "same\n");
-    writeFileSync(ledgerSource, "same\n");
-    mkdirSync(bin);
-    copyFileSync(join(root, "deploy", "host"), join(deploy, "host"));
-    chmodSync(join(deploy, "host"), 0o755);
-    writeFileSync(join(deploy, "lib"), `
-pi_stack_enter_deployment() { :; }
-pi_stack_prepare_dependencies() { :; }
-pi_stack_as_root() { "$@"; }
-`);
-    const component = `#!/usr/bin/env bash
-set -euo pipefail
-name=$(basename "$0")
-case "$name" in
-  runtime) destination=$PI_STACK_RUNTIME_ROOT ;;
-  orchestrator) destination=$PI_STACK_ORCHESTRATOR_DEST ;;
-  remote) destination=$PI_STACK_REMOTE_DEST ;;
-  tools) destination=$PI_STACK_TOOLS_DEST ;;
-  skills) destination=$PI_STACK_SKILLS_DEST ;;
-  settings) exit 0 ;;
-esac
-mkdir -p "$destination/dist"
-if [[ $name == orchestrator ]]; then
-  source_root=$(cd "$(dirname "$0")/../packages/orchestrator/src" && pwd)
-  mkdir -p "$destination/src/host" "$destination/src/ledger"
-  cp "$source_root/host/supervisor.ts" "$destination/src/host/supervisor.ts"
-  cp "$source_root/ledger/ledger.ts" "$destination/src/ledger/ledger.ts"
-fi
-git -C "$(cd "$(dirname "$0")/.." && pwd)" rev-parse HEAD > "$destination/.pi-stack-commit"
-`;
-    for (const name of ["runtime", "orchestrator", "remote", "tools", "skills", "settings"]) {
-      writeFileSync(join(deploy, name), component);
-      chmodSync(join(deploy, name), 0o755);
-    }
-    writeFileSync(join(remoteApp, "activate"), "#!/bin/sh\nprintf '%s\\n' \"${PI_REMOTE_SERVICE:-}\" >> \"$ACTIVATE_TRACE\"\n");
-    chmodSync(join(remoteApp, "activate"), 0o755);
-    assert.equal(spawnSync("git", ["init", "-q", repository]).status, 0);
-    assert.equal(spawnSync("git", ["-C", repository, "add", "deploy", "apps", "packages"]).status, 0);
-    assert.equal(spawnSync("git", ["-C", repository, "-c", "user.name=test", "-c", "user.email=test@example.test", "commit", "-qm", "fixture"]).status, 0);
-
-    const destinations = Object.fromEntries(["RUNTIME", "ORCHESTRATOR", "REMOTE", "TOOLS", "SKILLS"].map((name) =>
-      [`PI_STACK_${name}_DEST`, join(directory, name.toLowerCase())]));
-    destinations.PI_STACK_RUNTIME_ROOT = destinations.PI_STACK_RUNTIME_DEST;
-    delete destinations.PI_STACK_RUNTIME_DEST;
-    mkdirSync(destinations.PI_STACK_ORCHESTRATOR_DEST, { recursive: true });
-    writeFileSync(join(destinations.PI_STACK_ORCHESTRATOR_DEST, ".pi-stack-commit"), "previous\n");
-    const ledger = join(directory, "ledger.sqlite3");
-    writeFileSync(ledger, "ledger");
-    const trace = join(directory, "node.trace");
-    const activationTrace = join(directory, "activation.trace");
-    const systemctlTrace = join(directory, "systemctl.trace");
-    writeFileSync(join(bin, "node"), `#!/bin/sh\nprintf '%s\\n' "$*" >> "$TRACE"\n`);
-    chmodSync(join(bin, "node"), 0o755);
-    writeFileSync(join(bin, "systemctl"), "#!/bin/sh\nprintf '%s\\n' \"$*\" >> \"$SYSTEMCTL_TRACE\"\ncase $1 in --user|is-active|stop|restart|start) exit 0;; *) exit 1;; esac\n");
-    chmodSync(join(bin, "systemctl"), 0o755);
-    const env = {
-      ...process.env,
-      ...destinations,
-      PI_ORCHESTRATOR_LEDGER: ledger,
-      PI_ORCHESTRATOR_TASK_MANIFEST: "",
-      PATH: `${bin}:${process.env.PATH}`,
-      TRACE: trace,
-      ACTIVATE_TRACE: activationTrace,
-      SYSTEMCTL_TRACE: systemctlTrace,
-    };
-    // The previous artifact carries no contract sources, so the change is
-    // unknowable and must be treated as a contract change: restart, not drain.
-    const first = spawnSync(join(deploy, "host"), ["converge"], { encoding: "utf8", env });
-    assert.equal(first.status, 0, first.stderr);
-    assert.equal(existsSync(trace), false);
-    assert.match(readFileSync(systemctlTrace, "utf8"), /--user stop pi-orchestrator\.service\nstop pi-orchestrator-runner\.service\nstart pi-orchestrator-runner\.service\n--user start pi-orchestrator\.service/);
-    assert.match(readFileSync(systemctlTrace, "utf8"), /restart pi-orchestrator-voice\.service/);
-    assert.equal(readFileSync(activationTrace, "utf8"), "pi-remote.service\n");
-
-    rmSync(trace, { force: true });
-    const unchanged = spawnSync(join(deploy, "host"), ["converge"], { encoding: "utf8", env });
-    assert.equal(unchanged.status, 0, unchanged.stderr);
-    assert.equal(existsSync(trace), false);
-    assert.equal(readFileSync(activationTrace, "utf8"), "pi-remote.service\n");
-
-    writeFileSync(join(repository, "release"), "ordinary update\n");
-    assert.equal(spawnSync("git", ["-C", repository, "add", "release"]).status, 0);
-    assert.equal(spawnSync("git", ["-C", repository, "-c", "user.name=test", "-c", "user.email=test@example.test", "commit", "-qm", "ordinary update"]).status, 0);
-    rmSync(systemctlTrace, { force: true });
-    const ordinary = spawnSync(join(deploy, "host"), ["converge"], { encoding: "utf8", env });
-    assert.equal(ordinary.status, 0, ordinary.stderr);
-    assert.match(readFileSync(trace, "utf8"), /orchestrator\/dist\/cli\.js drain-runners/);
-    assert.doesNotMatch(readFileSync(systemctlTrace, "utf8"), /stop pi-orchestrator-runner\.service/);
-
-    rmSync(trace, { force: true });
-    writeFileSync(supervisorSource, "changed\n");
-    assert.equal(spawnSync("git", ["-C", repository, "add", supervisorSource]).status, 0);
-    assert.equal(spawnSync("git", ["-C", repository, "-c", "user.name=test", "-c", "user.email=test@example.test", "commit", "-qm", "supervisor update"]).status, 0);
-    rmSync(systemctlTrace, { force: true });
-    const supervisorChanged = spawnSync(join(deploy, "host"), ["converge"], {
-      encoding: "utf8",
-      env,
-    });
-    assert.equal(supervisorChanged.status, 0, supervisorChanged.stderr);
-    assert.equal(existsSync(trace), false);
-    assert.match(readFileSync(systemctlTrace, "utf8"), /--user stop pi-orchestrator\.service\nstop pi-orchestrator-runner\.service\nstart pi-orchestrator-runner\.service\n--user start pi-orchestrator\.service/);
-
-    writeFileSync(ledgerSource, "changed\n");
-    assert.equal(spawnSync("git", ["-C", repository, "add", ledgerSource]).status, 0);
-    assert.equal(spawnSync("git", ["-C", repository, "-c", "user.name=test", "-c", "user.email=test@example.test", "commit", "-qm", "ledger update"]).status, 0);
-    rmSync(systemctlTrace, { force: true });
-    const ledgerChanged = spawnSync(join(deploy, "host"), ["converge"], {
-      encoding: "utf8",
-      env,
-    });
-    assert.equal(ledgerChanged.status, 0, ledgerChanged.stderr);
-    assert.equal(existsSync(trace), false);
-    assert.match(readFileSync(systemctlTrace, "utf8"), /--user stop pi-orchestrator\.service\nstop pi-orchestrator-runner\.service\nstart pi-orchestrator-runner\.service\n--user start pi-orchestrator\.service/);
-  } finally {
-    rmSync(directory, { recursive: true, force: true });
-  }
+    const repository = join(directory, "repo"), deploy = join(repository, "deploy"), remoteApp = join(repository, "apps", "remote"), bin = join(directory, "bin");
+    mkdirSync(deploy, { recursive: true });mkdirSync(remoteApp, { recursive: true });mkdirSync(bin);
+    copyFileSync(join(root, "deploy", "host"), join(deploy, "host"));chmodSync(join(deploy, "host"), 0o755);
+    writeFileSync(join(deploy, "lib"), `pi_stack_enter_deployment() { :; }\npi_stack_prepare_dependencies() { :; }\npi_stack_as_root() { "$@"; }\n`);
+    const component=`#!/usr/bin/env bash\nset -euo pipefail\nname=$(basename "$0")\ncase "$name" in runtime) destination=$PI_STACK_RUNTIME_ROOT;; orchestrator) destination=$PI_STACK_ORCHESTRATOR_DEST;; remote) destination=$PI_STACK_REMOTE_DEST;; tools) destination=$PI_STACK_TOOLS_DEST;; skills) destination=$PI_STACK_SKILLS_DEST;; settings) exit 0;; esac\nmkdir -p "$destination/dist"\ngit -C "$(cd "$(dirname "$0")/.." && pwd)" rev-parse HEAD > "$destination/.pi-stack-commit"\n`;
+    for(const name of ["runtime","orchestrator","remote","tools","skills","settings"]){writeFileSync(join(deploy,name),component);chmodSync(join(deploy,name),0o755);}
+    writeFileSync(join(remoteApp,"activate"),"#!/bin/sh\nprintf '%s\\n' \"${PI_REMOTE_SERVICE:-}\" >> \"$ACTIVATE_TRACE\"\n");chmodSync(join(remoteApp,"activate"),0o755);
+    assert.equal(spawnSync("git",["init","-q",repository]).status,0);assert.equal(spawnSync("git",["-C",repository,"add","deploy","apps"]).status,0);assert.equal(spawnSync("git",["-C",repository,"-c","user.name=test","-c","user.email=test@example.test","commit","-qm","fixture"]).status,0);
+    const destinations=Object.fromEntries(["RUNTIME","ORCHESTRATOR","REMOTE","TOOLS","SKILLS"].map((name)=>[`PI_STACK_${name}_DEST`,join(directory,name.toLowerCase())]));destinations.PI_STACK_RUNTIME_ROOT=destinations.PI_STACK_RUNTIME_DEST;delete destinations.PI_STACK_RUNTIME_DEST;
+    const ledger=join(directory,"ledger.sqlite3"),trace=join(directory,"node.trace"),activationTrace=join(directory,"activation.trace"),systemctlTrace=join(directory,"systemctl.trace");
+    assert.equal(spawnSync("sqlite3",[ledger,"CREATE TABLE task(id TEXT);"]).status,0);
+    writeFileSync(join(bin,"node"),`#!/bin/sh\nprintf '%s\\n' "$*" >> "$TRACE"\n`);chmodSync(join(bin,"node"),0o755);
+    writeFileSync(join(bin,"systemctl"),"#!/bin/sh\nprintf '%s\\n' \"$*\" >> \"$SYSTEMCTL_TRACE\"\ncase $1 in --user|is-active|stop|start|try-restart) exit 0;; *) exit 1;; esac\n");chmodSync(join(bin,"systemctl"),0o755);
+    const env={...process.env,...destinations,PI_ORCHESTRATOR_LEDGER:ledger,PATH:`${bin}:${process.env.PATH}`,TRACE:trace,ACTIVATE_TRACE:activationTrace,SYSTEMCTL_TRACE:systemctlTrace};
+    const transition=spawnSync(join(deploy,"host"),["converge"],{encoding:"utf8",env});assert.equal(transition.status,0,transition.stderr);
+    assert.match(readFileSync(trace,"utf8"),/orchestrator\/dist\/cli\.js transition/);assert.equal(existsSync(join(directory,"ledger.before-current-schema.sqlite3")),true);
+    const transitionUnits=readFileSync(systemctlTrace,"utf8");assert.match(transitionUnits,/--user stop pi-orchestrator\.service/);assert.match(transitionUnits,/stop pi-orchestrator-runner\.service pi-orchestrator-voice\.service/);assert.match(transitionUnits,/--user start pi-orchestrator\.service/);assert.equal(readFileSync(activationTrace,"utf8"),"pi-remote.service\n");
+    assert.equal(spawnSync("sqlite3",[ledger,"CREATE TABLE meta(version INTEGER NOT NULL);"]).status,0);rmSync(trace,{force:true});rmSync(systemctlTrace,{force:true});
+    writeFileSync(join(repository,"release"),"ordinary\n");assert.equal(spawnSync("git",["-C",repository,"add","release"]).status,0);assert.equal(spawnSync("git",["-C",repository,"-c","user.name=test","-c","user.email=test@example.test","commit","-qm","ordinary"]).status,0);
+    const ordinary=spawnSync(join(deploy,"host"),["converge"],{encoding:"utf8",env});assert.equal(ordinary.status,0,ordinary.stderr);assert.equal(existsSync(trace),false);
+    const ordinaryUnits=readFileSync(systemctlTrace,"utf8");assert.match(ordinaryUnits,/--user try-restart pi-orchestrator\.service/);assert.doesNotMatch(ordinaryUnits,/pi-orchestrator-runner|pi-orchestrator-voice/);
+  } finally { rmSync(directory,{recursive:true,force:true}); }
 });
 
 test("deploys from one checkout serialize before reading or changing source", async () => {
