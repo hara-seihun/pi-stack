@@ -2,14 +2,15 @@
 
 This locally owned Pi package adapts Anthropic OAuth requests so Pi can use Claude subscription capacity. It recognizes both Pi's built-in `anthropic` provider and Multi-Pass account providers such as `anthropic-2` and `anthropic-3`.
 
-It does not register a new provider or replace Pi's Anthropic request transport. Pi core remains in charge of OAuth transport, headers, model definitions, and streaming.
+It does not register a new provider or replace Pi's Anthropic request transport. Pi core remains in charge of OAuth transport, model definitions, and streaming. This extension changes only the Claude Code user-agent header and request body.
 
 The implementation is derived from `@benvargas/pi-claude-code-use` 2.1.0. Local custody is required because the upstream release only activates for the exact provider name `anthropic`, while this machine routes additional subscriptions through numbered Multi-Pass providers. The source of truth is this directory in the private Pi runtime repository.
 
 ## What It Changes
 
-When Pi is using Anthropic OAuth, this extension intercepts outbound API requests via the `before_provider_request` hook and:
+When Pi is using Anthropic OAuth, this extension intercepts outbound API requests through the `before_provider_headers` and `before_provider_request` hooks and:
 
+- **Claude Code client version** -- replaces Pi core's stale Claude Code user agent with `claude-cli/2.1.257`. Anthropic requires Claude Code 2.1.251 or newer for Claude Fable 5.1.
 - **System prompt rewrite** -- rewrites a small set of Pi-identifying prompt phrases in system prompt text:
   - `pi itself` → `the cli itself`
   - `pi .md files` → `cli .md files`

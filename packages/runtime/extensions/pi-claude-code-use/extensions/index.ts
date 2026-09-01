@@ -1,7 +1,7 @@
 import { appendFileSync, existsSync, readFileSync } from "node:fs";
 import { join } from "node:path";
 import { type ExtensionAPI, getAgentDir, type MarkdownTransformContext } from "@earendil-works/pi-coding-agent";
-import { isAnthropicProvider } from "./provider.js";
+import { applyClaudeCodeHeaders, isAnthropicProvider } from "./provider.js";
 
 // ============================================================================
 // Types
@@ -880,6 +880,14 @@ export default async function piClaudeCodeUse(pi: ExtensionAPI): Promise<void> {
 		const rewritten = unaliasToolCalls(event.message);
 		if (!rewritten) return undefined;
 		return { message: rewritten as typeof event.message };
+	});
+
+	pi.on("before_provider_headers", (event, ctx) => {
+		const model = ctx.model;
+		if (!isAnthropicProvider(model?.provider) || !ctx.modelRegistry.isUsingOAuth(model)) {
+			return;
+		}
+		applyClaudeCodeHeaders(event.headers);
 	});
 
 	pi.on("before_provider_request", (event, ctx) => {
