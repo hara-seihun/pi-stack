@@ -92,7 +92,7 @@ cat > "$vcc_config" <<'JSON'
 {
   "overrideDefaultCompaction": true,
   "smartKeepTail": true,
-  "continueAfterThresholdCompact": true,
+  "continueAfterThresholdCompact": false,
   "debug": false
 }
 JSON
