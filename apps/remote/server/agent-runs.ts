@@ -3,10 +3,8 @@ import { catalogAgentType, tailRange, type ObservedRun } from "pi-orchestrator/a
 export { tailRange };
 
 // Read-only observation of autonomous pi-orchestrator agents. The orchestrator
-// on each agent host owns both authorities used here: the SQLite run ledger and
-// one append-only transcript per run under its runs directory. Pi Remote never
-// writes agent state; it only touches a `watch` marker so the owning agent host
-// knows a human is looking and starts publishing its live tail.
+// owns run state and live activity. Pi's session JSONL owns settled history.
+// Pi Remote reads both through the orchestrator package and never writes agent state.
 
 // Every host runs its own orchestrator, so a run id is only unique within its
 // host. Clients address a run by the composite key and never assemble one
@@ -138,11 +136,8 @@ function toolArgs(payload: Record<string, unknown>): Record<string, unknown> {
   } catch { return payload; }
 }
 
-// A transcript is appended by another process, possibly on another machine, so
-// a reader keeps a byte cursor per run and parses only newly written bytes.
-// Repeated polling of a long-running agent therefore costs the appended tail
-// rather than the whole file, whether the bytes arrive from local disk or over
-// SSH.
+// A transcript grows in another process, so a reader keeps a byte cursor per
+// run and parses only newly published bytes.
 export class TranscriptBuffer {
   offset = 0;
   touchedAt = 0;

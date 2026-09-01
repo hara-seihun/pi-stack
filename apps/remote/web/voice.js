@@ -1,4 +1,4 @@
-"use strict";
+import { API } from "./api.js";
 
 (() => {
   const MAX_CONTEXT_BYTES = 500;
@@ -114,6 +114,8 @@
       this.liveThinkingDocument = null;
       this.pollTimer = null;
       this.polling = false;
+      this.leaseId = null;
+      this.leaseTimer = null;
       this.delegations = [];
       this.lastLiveText = "";
       this.messageBuffer = "";
@@ -132,7 +134,7 @@
       this.setState("connecting", "Connecting…");
       try {
         if (!navigator.mediaDevices?.getUserMedia) throw new Error("Microphone capture is unavailable");
-        const configResponse = await piFetch("/v1/voice", { cache: "no-store" });
+        const configResponse = await piFetch(API.voice.path(), { cache: "no-store" });
         const config = await configResponse.json();
         if (!configResponse.ok || !config.enabled) throw new Error(config.error || "No GPT-Live accounts are available");
         await this.primeCursor();
@@ -168,14 +170,17 @@
         const offer = await peer.createOffer();
         await peer.setLocalDescription(offer);
         await waitForIce(peer);
-        const response = await piFetch(`/v1/voice/offer?sessionId=${encodeURIComponent(this.sessionId)}`, {
+        const response = await piFetch(API.voiceOffer.path({}, { sessionId: this.sessionId }), {
           method: "POST",
           headers: { "content-type": "application/sdp" },
           body: peer.localDescription?.sdp || offer.sdp || "",
         });
         if (!response.ok) throw new Error(await responseError(response, `Voice offer failed (${response.status})`));
+        const leaseId = response.headers.get("x-pi-voice-lease");
+        if (!leaseId) throw new Error("Voice offer did not include an account lease");
+        this.startLease(leaseId);
         const answer = await response.text();
-        if (generation !== this.generation) return;
+        if (generation !== this.generation) { this.stopLease(); return; }
         await peer.setRemoteDescription({ type: "answer", sdp: answer });
         await waitForChannel(channel);
         if (generation !== this.generation) return;
@@ -195,6 +200,7 @@
       if (this.pollTimer) clearTimeout(this.pollTimer);
       this.pollTimer = null;
       this.polling = false;
+      this.stopLease();
       this.delegations.length = 0;
       this.resetMessage();
       if (this.channel) { this.channel.onmessage = null; this.channel.close(); }
@@ -206,6 +212,23 @@
       if (this.speaker) { this.speaker.pause(); this.speaker.srcObject = null; }
       this.speaker = null;
       if (clearState) this.setState("idle", "Voice off");
+    }
+
+    startLease(id) {
+      this.stopLease();
+      this.leaseId = id;
+      this.leaseTimer = setInterval(() => {
+        piFetch(API.voiceLeaseHeartbeat.path({ leaseId: id }), { method: API.voiceLeaseHeartbeat.method })
+          .catch((error) => console.error("Could not heartbeat voice lease", error));
+      }, 30_000);
+    }
+
+    stopLease() {
+      if (this.leaseTimer) clearInterval(this.leaseTimer);
+      this.leaseTimer = null;
+      const id = this.leaseId;
+      this.leaseId = null;
+      if (id) piFetch(API.voiceLeaseRelease.path({ leaseId: id }), { method: API.voiceLeaseRelease.method }).catch(() => {});
     }
 
     toggleMute() {
@@ -259,12 +282,12 @@
     async submitDelegation(delegation) {
       const body = JSON.stringify({ requestId: crypto.randomUUID(), text: delegation.text, delivery: "followUp" });
       try {
-        let response = await piFetch(`/v1/sessions/${encodeURIComponent(this.sessionId)}/prompt`, {
+        let response = await piFetch(API.sessionPrompt.path({ sessionId: this.sessionId }), {
           method: "POST", headers: { "content-type": "application/json" }, body,
         });
         if (!response.ok && response.status >= 500) {
           await new Promise((resolve) => setTimeout(resolve, 400));
-          response = await piFetch(`/v1/sessions/${encodeURIComponent(this.sessionId)}/prompt`, {
+          response = await piFetch(API.sessionPrompt.path({ sessionId: this.sessionId }), {
             method: "POST", headers: { "content-type": "application/json" }, body,
           });
         }
@@ -309,7 +332,7 @@
     }
 
     async setMediumThinking() {
-      const response = await piFetch(`/v1/sessions/${encodeURIComponent(this.sessionId)}/settings`, {
+      const response = await piFetch(API.sessionSettings.path({ sessionId: this.sessionId }), {
         method: "PUT",
         headers: { "content-type": "application/json" },
         body: JSON.stringify({ thinkingLevel: "medium" }),
@@ -318,7 +341,7 @@
     }
 
     async primeCursor() {
-      const response = await piFetch(`/v1/sessions/${encodeURIComponent(this.sessionId)}/events?after=0`, { cache: "no-store" });
+      const response = await piFetch(API.sessionEvents.path({ sessionId: this.sessionId }, { after: 0 }), { cache: "no-store" });
       if (!response.ok) throw new Error(await responseError(response, "Could not open the thread"));
       const snapshot = await response.json();
       this.cursor = Math.max(0, ...(snapshot.events || []).map((event) => Number(event.seq) || 0));
@@ -337,7 +360,7 @@
       this.polling = true;
       let failed = false;
       try {
-        const response = await piFetch("/v1/sync", {
+        const response = await piFetch(API.sync.path(), {
           method: "POST",
           headers: { "content-type": "application/json" },
           body: JSON.stringify({

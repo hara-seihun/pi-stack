@@ -1,284 +1,66 @@
-import {
-  closeSync,
-  existsSync,
-  mkdirSync,
-  openSync,
-  readFileSync,
-  readSync,
-  statSync,
-  utimesSync,
-  writeFileSync,
-} from "node:fs";
-import { join } from "node:path";
+import { readFileSync } from "node:fs";
 import { ORCHESTRATOR_CATALOG, catalogMeter, type PlanDefinition } from "./catalog.js";
-import { Ledger, type AccountRow, type RunRow } from "./ledger/ledger.js";
-import { AnthropicMeterSampler } from "./meters/anthropic.js";
-import type { TranscriptLive } from "./host/transcript.js";
+import { Store } from "./store.js";
+import type { Run } from "./domain.js";
 
-export interface PlanMetricUsage {
-  readonly percentLeft: number | null;
-  readonly expectedPercentLeft: number | null;
-  readonly paceDelta: number | null;
+export interface PlanMetricUsage{readonly percentLeft:number|null;readonly expectedPercentLeft:number|null;readonly paceDelta:number|null;}
+export interface PlanUsage{readonly state:"ready"|"partial"|"unavailable";readonly metrics:Readonly<Record<string,PlanMetricUsage>>;readonly planCount:number;readonly checkedCount:number;}
+export interface PlanUsageSnapshot{readonly plans:Readonly<Record<string,PlanUsage>>;readonly updatedAt:string;}
+export interface ObservedRun{
+  readonly id:string;readonly taskId:string;readonly model:string;readonly thinking?:string;readonly provider?:string;
+  readonly state:string;readonly startedAt:number;readonly endedAt?:number;readonly detail?:string;readonly observable:boolean;
+  readonly teamRole:"worker"|"supervisor"|null;readonly teamSlot:number|null;
+  readonly live:{activity:string;liveText:string;liveThinking:string}|null;
 }
+export interface RunListing{readonly runs:readonly ObservedRun[];readonly running:number;readonly models:readonly {model:string;count:number}[];}
+export interface TranscriptTail{readonly run:ObservedRun|null;readonly size:number;readonly offset:number;readonly next:number;readonly chunk:string;}
+export interface OrchestratorObserver{listRuns(limit:number):Promise<RunListing>;tailRun(runId:string,offset:number,maxBytes:number,watch:boolean):Promise<TranscriptTail>;close():void;}
+export interface OrchestratorClientOptions{readonly ledgerPath:string;readonly runsRoot?:string;}
 
-export interface PlanUsage {
-  readonly state: "ready" | "partial" | "unavailable";
-  readonly metrics: Readonly<Record<string, PlanMetricUsage>>;
-  readonly planCount: number;
-  readonly checkedCount: number;
-}
-
-export interface PlanUsageSnapshot {
-  readonly plans: Readonly<Record<string, PlanUsage>>;
-  readonly updatedAt: string;
-}
-
-export interface ObservedRun extends RunRow {
-  readonly observable: boolean;
-  readonly live: TranscriptLive | null;
-}
-
-export interface RunListing {
-  readonly runs: readonly ObservedRun[];
-  readonly running: number;
-  readonly models: readonly { model: string; count: number }[];
-}
-
-export interface TranscriptTail {
-  readonly run: ObservedRun | null;
-  readonly size: number;
-  readonly offset: number;
-  readonly next: number;
-  readonly chunk: string;
-}
-
-/** The complete read surface an operator client needs. It deliberately uses
- * domain rows rather than exposing the ledger's SQLite schema. */
-export interface OrchestratorObserver {
-  listRuns(limit: number): Promise<RunListing>;
-  tailRun(runId: string, offset: number, maxBytes: number, watch: boolean): Promise<TranscriptTail>;
-  close(): void;
-}
-
-interface AccountMetric {
-  readonly percentLeft: number;
-  readonly expectedPercentLeft: number | null;
-  readonly weight: number;
-}
-
-const clampPercent = (value: number): number => Math.max(0, Math.min(100, value));
-const weightedMean = (values: readonly { value: number; weight: number }[]): number | null => {
-  const weight = values.reduce((sum, item) => sum + item.weight, 0);
-  return weight <= 0 ? null : values.reduce((sum, item) => sum + item.value * item.weight, 0) / weight;
-};
-const rounded = (value: number | null): number | null => value === null ? null : Math.round(value);
-
-function currentMetric(
-  ledger: Ledger,
-  accountId: string,
-  meters: readonly string[],
-  maxAgeMs: number,
-  now: number,
-): Omit<AccountMetric, "weight"> | null {
-  const values = meters.flatMap((meterId): Omit<AccountMetric, "weight">[] => {
-    const meter = catalogMeter(meterId);
-    if (meter === undefined) throw new Error(`plan references unknown meter ${meterId}`);
-    const reading = ledger.latestReading(accountId, meter.id);
-    if (reading === undefined || reading.at > now + 60_000 || now - reading.at > maxAgeMs) return [];
-    const reset = reading.resetAt;
-    if (reset !== undefined && reset <= now) return [{ percentLeft: 100, expectedPercentLeft: null }];
-    const expected = reset === undefined
-      ? null
-      : clampPercent((reset - now) * 100 / (meter.windowHours * 3_600_000));
-    return [{ percentLeft: clampPercent(100 - reading.usedPercent), expectedPercentLeft: expected }];
-  });
-  return values.sort((left, right) => left.percentLeft - right.percentLeft)[0] ?? null;
-}
-
-function projectPlan(ledger: Ledger, plan: PlanDefinition, now: number): PlanUsage {
-  const accounts = ledger.accounts().filter((account) =>
-    account.provider === plan.provider && (account.accessUntil === undefined || account.accessUntil > now));
-  const coverage: number[] = [];
-  const metrics: Record<string, PlanMetricUsage> = {};
-  for (const metric of plan.metrics) {
-    const values = accounts.map((account): AccountMetric | null => {
-      const value = currentMetric(ledger, account.id, metric.meters, plan.maxReadingAgeMs, now);
-      return value === null ? null : { ...value, weight: account.capacityWeight };
+const clamp=(value:number)=>Math.max(0,Math.min(100,value));
+const mean=(values:number[]):number|null=>values.length?values.reduce((sum,value)=>sum+value,0)/values.length:null;
+const rounded=(value:number|null)=>value===null?null:Math.round(value);
+function plan(store:Store,definition:PlanDefinition,now:number):PlanUsage{
+  const accounts=store.accounts().filter((account)=>account.provider===definition.provider&&account.enabled),coverage:number[]=[];
+  const metrics=Object.fromEntries(definition.metrics.map((metric)=>{
+    const values=accounts.flatMap((account)=>{
+      const available=metric.meters.flatMap((meterId)=>{const declared=catalogMeter(meterId),reading=store.latestReading(account.id,meterId);if(!declared||!reading||reading.at>now+60_000||now-reading.at>definition.maxReadingAgeMs)return[];const expected=reading.resetAt&&reading.resetAt>now?clamp((reading.resetAt-now)*100/(declared.windowHours*3_600_000)):null;return[{left:clamp(100-reading.usedPercent),expected}];}).sort((a,b)=>a.left-b.left)[0];return available?[available]:[];
     });
-    const available = values.filter((value): value is AccountMetric => value !== null);
-    const timed = available.filter((value): value is AccountMetric & { expectedPercentLeft: number } =>
-      value.expectedPercentLeft !== null);
-    if (available.length > 0) coverage.push(available.length);
-    const percentLeft = weightedMean(available.map((value) => ({ value: value.percentLeft, weight: value.weight })));
-    const expectedPercentLeft = weightedMean(timed.map((value) => ({ value: value.expectedPercentLeft, weight: value.weight })));
-    const paceDelta = weightedMean(timed.map((value) => ({ value: value.percentLeft - value.expectedPercentLeft, weight: value.weight })));
-    metrics[metric.id] = {
-      percentLeft: rounded(percentLeft),
-      expectedPercentLeft: rounded(expectedPercentLeft),
-      paceDelta: rounded(paceDelta),
-    };
-  }
-  const checkedCount = coverage.length === 0 ? 0 : Math.min(...coverage);
-  return {
-    state: checkedCount === accounts.length && accounts.length > 0
-      ? "ready"
-      : checkedCount > 0 ? "partial" : "unavailable",
-    metrics,
-    planCount: accounts.length,
-    checkedCount,
-  };
+    coverage.push(values.length);const timed=values.filter((value):value is {left:number;expected:number}=>value.expected!==null),left=mean(values.map((value)=>value.left)),expected=mean(timed.map((value)=>value.expected));
+    return[metric.id,{percentLeft:rounded(left),expectedPercentLeft:rounded(expected),paceDelta:left===null||expected===null?null:rounded(left-expected)}];
+  }));
+  const checked=coverage.length?Math.min(...coverage):0;return{state:accounts.length>0&&checked===accounts.length?"ready":checked>0?"partial":"unavailable",metrics,planCount:accounts.length,checkedCount:checked};
 }
 
-export function tailRange(
-  size: number,
-  offset: number,
-  maxBytes: number,
-): { start: number; end: number; fresh: boolean } {
-  const fresh = offset < 0 || offset > size;
-  const start = fresh ? Math.max(0, size - maxBytes) : offset;
-  return { start, end: Math.min(size, start + maxBytes), fresh };
+export function tailRange(size:number,offset:number,maxBytes:number):{start:number;end:number;fresh:boolean}{const fresh=offset<0||offset>size,start=fresh?Math.max(0,size-maxBytes):offset;return{start,end:Math.min(size,start+maxBytes),fresh};}
+function transformedSession(path:string):string{
+  let raw="";try{raw=readFileSync(path,"utf8");}catch{return"";}
+  let seq=0;const lines:string[]=[];const add=(time:string,type:string,payload:Record<string,unknown>)=>lines.push(JSON.stringify({seq:++seq,time,type,payload}));
+  for(const line of raw.split("\n")){if(!line)continue;let entry:any;try{entry=JSON.parse(line);}catch{continue;}if(entry.type!=="message")continue;const message=entry.message,time=entry.timestamp??new Date(message?.timestamp??Date.now()).toISOString();
+    if(message?.role==="user"){const text=(message.content??[]).filter((part:any)=>part.type==="text").map((part:any)=>part.text).join("");if(text)add(time,"user",{text});}
+    else if(message?.role==="assistant")for(const part of message.content??[]){if(part.type==="thinking")add(time,"thinking",{text:part.thinking??part.text??""});else if(part.type==="text")add(time,"assistant",{text:part.text??""});else if(part.type==="toolCall")add(time,"tool_start",{toolCallId:part.id,name:part.name,args:part.arguments??{}});}
+    else if(message?.role==="toolResult")add(time,"tool_end",{toolCallId:message.toolCallId,name:message.toolName,output:(message.content??[]).map((part:any)=>part.text??"").join("\n"),error:!!message.isError});
+  }
+  return lines.length?`${lines.join("\n")}\n`:"";
 }
 
-function alignedTail(
-  data: Buffer,
-  start: number,
-  end: number,
-  size: number,
-  fresh: boolean,
-): { chunk: string; offset: number; next: number } {
-  let body = data;
-  let offset = start;
-  if (fresh && start > 0) {
-    const newline = body.indexOf(0x0a);
-    if (newline < 0) return { chunk: "", offset: end, next: end };
-    body = body.subarray(newline + 1);
-    offset = start + newline + 1;
+export class OrchestratorClient implements OrchestratorObserver{
+  private readonly store:Store;
+  constructor(private readonly options:OrchestratorClientOptions){this.store=Store.open(options.ledgerPath);}
+  accounts(provider?:string){return this.store.accounts().filter((account)=>!provider||account.provider===provider);}
+  boost(provider:string):number{return Number(this.store.control(`boost:${provider}`)??"1");}
+  setBoost(provider:string,multiplier:number):void{this.store.setControl(`boost:${provider}`,String(multiplier));}
+  beginVoiceLease(accountId:string):string{
+    const account=this.store.account(accountId);if(!account||!account.enabled)throw new Error(`voice account ${accountId} is unavailable`);
+    if(this.store.activeLeases(accountId).length>=account.concurrency)throw new Error(`voice account ${accountId} reached its concurrency limit`);
+    const id=`voice:${crypto.randomUUID()}`;this.store.createLease(id,accountId,"voice");return id;
   }
-  if (end < size) {
-    const newline = body.lastIndexOf(0x0a);
-    if (newline < 0) return { chunk: "", offset, next: end };
-    body = body.subarray(0, newline + 1);
-  }
-  return { chunk: body.toString("utf8"), offset, next: offset + body.length };
-}
-
-function liveState(directory: string): TranscriptLive | null {
-  try {
-    return JSON.parse(readFileSync(join(directory, "live.json"), "utf8")) as TranscriptLive;
-  } catch {
-    return null;
-  }
-}
-
-function markWatched(directory: string): void {
-  if (!existsSync(directory)) return;
-  const marker = join(directory, "watch");
-  try {
-    if (existsSync(marker)) {
-      const stamp = new Date();
-      utimesSync(marker, stamp, stamp);
-    } else {
-      mkdirSync(directory, { recursive: true });
-      writeFileSync(marker, "", { mode: 0o600 });
-    }
-  } catch {
-    // Observation remains read-only when a purged or foreign run cannot be marked.
-  }
-}
-
-export interface OrchestratorClientOptions {
-  readonly ledgerPath: string;
-  readonly runsRoot: string;
-}
-
-/**
- * In-process client for the orchestrator's durable public model. Scheduling,
- * plan cards, voice account selection, governor controls, and run observation
- * now cross this boundary instead of each querying private tables themselves.
- */
-export class OrchestratorClient implements OrchestratorObserver {
-  private readonly ledger: Ledger;
-
-  constructor(private readonly options: OrchestratorClientOptions) {
-    this.ledger = Ledger.open(options.ledgerPath);
-  }
-
-  accounts(provider?: string, now = Date.now()): AccountRow[] {
-    return this.ledger.accounts().filter((account) =>
-      (provider === undefined || account.provider === provider) &&
-      (account.accessUntil === undefined || account.accessUntil > now));
-  }
-
-  boost(provider: string): number {
-    return this.ledger.boost(provider);
-  }
-
-  setBoost(provider: string, multiplier: number): void {
-    this.ledger.setBoost(provider, multiplier);
-  }
-
-  plans(definitions: readonly PlanDefinition[] = ORCHESTRATOR_CATALOG.plans, now = Date.now()): PlanUsageSnapshot {
-    return {
-      plans: Object.fromEntries(definitions.map((plan) => [plan.id, projectPlan(this.ledger, plan, now)])),
-      updatedAt: new Date(now).toISOString(),
-    };
-  }
-
-  /** Poll facts available only in this user's credential custody. Other
-   * provider samplers live in the controller and write into the same ledger. */
-  async refreshPlanFacts(agentDir: string): Promise<void> {
-    await new AnthropicMeterSampler(this.ledger, { agentDir }).sample();
-  }
-
-  async listRuns(limit: number): Promise<RunListing> {
-    const running = this.ledger.runs({ state: "running" })
-      .sort((left, right) => right.startedAt - left.startedAt);
-    const models = new Map<string, number>();
-    for (const run of running) models.set(run.model, (models.get(run.model) ?? 0) + 1);
-    return {
-      runs: running.slice(0, limit).map((run) => this.decorate(run)),
-      running: running.length,
-      models: [...models].sort(([left], [right]) => left.localeCompare(right))
-        .map(([model, count]) => ({ model, count })),
-    };
-  }
-
-  async tailRun(runId: string, offset: number, maxBytes: number, watch: boolean): Promise<TranscriptTail> {
-    const row = this.ledger.run(runId);
-    const directory = join(this.options.runsRoot, runId);
-    const file = join(directory, "events.jsonl");
-    let size = 0;
-    try { size = statSync(file).size; } catch { /* No transcript is a valid run state. */ }
-    const range = tailRange(size, offset, maxBytes);
-    let data = Buffer.alloc(0);
-    if (range.end > range.start) {
-      const handle = openSync(file, "r");
-      try {
-        const buffer = Buffer.allocUnsafe(range.end - range.start);
-        const read = readSync(handle, buffer, 0, buffer.length, range.start);
-        data = buffer.subarray(0, read);
-      } finally {
-        closeSync(handle);
-      }
-    }
-    if (watch && row?.state === "running") markWatched(directory);
-    return {
-      run: row === undefined ? null : this.decorate(row),
-      size,
-      ...alignedTail(data, range.start, range.end, size, range.fresh),
-    };
-  }
-
-  close(): void {
-    this.ledger.close();
-  }
-
-  private decorate(run: RunRow): ObservedRun {
-    const directory = join(this.options.runsRoot, run.id);
-    return {
-      ...run,
-      observable: existsSync(join(directory, "events.jsonl")),
-      live: liveState(directory),
-    };
-  }
+  heartbeatLease(id:string):void{this.store.heartbeatLease(id);}
+  endLease(id:string):void{this.store.endLease(id);}
+  plans(definitions:readonly PlanDefinition[]=ORCHESTRATOR_CATALOG.plans,now=Date.now()):PlanUsageSnapshot{return{plans:Object.fromEntries(definitions.map((definition)=>[definition.id,plan(this.store,definition,now)])),updatedAt:new Date(now).toISOString()};}
+  async refreshPlanFacts(_agentDir:string):Promise<void>{}
+  async listRuns(limit:number):Promise<RunListing>{const active=this.store.runs(["starting","running","parked"]).sort((a,b)=>(b.startedAt??b.createdAt)-(a.startedAt??a.createdAt)),models=new Map<string,number>();for(const run of active)models.set(run.model??"unknown",(models.get(run.model??"unknown")??0)+1);return{runs:active.slice(0,limit).map((run)=>this.decorate(run)),running:active.length,models:[...models].sort().map(([model,count])=>({model,count}))};}
+  async tailRun(runId:string,offset:number,maxBytes:number,_watch:boolean):Promise<TranscriptTail>{const run=this.store.run(runId);if(!run)return{run:null,size:0,offset:0,next:0,chunk:""};const text=run.sessionFile?transformedSession(run.sessionFile):"",bytes=Buffer.from(text),range=tailRange(bytes.length,offset,maxBytes);let start=range.start,end=range.end;if(range.fresh&&start>0){const newline=bytes.indexOf(10,start);start=newline<0?end:newline+1;}if(end<bytes.length){const newline=bytes.lastIndexOf(10,end-1);if(newline>=start)end=newline+1;}return{run:this.decorate(run),size:bytes.length,offset:start,next:end,chunk:bytes.subarray(start,end).toString("utf8")};}
+  close():void{this.store.close();}
+  private decorate(run:Run):ObservedRun{const live=this.store.db.prepare("SELECT * FROM live_state WHERE run_id=?").get(run.id) as any;return{id:run.id,taskId:run.sourceId??run.source,model:run.model??run.profile,thinking:run.thinking,provider:run.provider,state:run.state==="failed"?"error":run.state,startedAt:run.startedAt??run.createdAt,endedAt:run.endedAt,detail:run.result,observable:!!run.sessionFile,teamRole:run.roomId?(run.memberName==="coordinator"?"supervisor":"worker"):null,teamSlot:null,live:live?{activity:live.activity,liveText:live.text,liveThinking:live.thinking}:null};}
 }

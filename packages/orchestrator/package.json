@@ -1,7 +1,7 @@
 {
   "name": "pi-orchestrator",
   "version": "0.2.1",
-  "description": "Fleet orchestration for pi agents: multi-account calibration, quota governance, task scheduling",
+  "description": "Quota-aware Pi session orchestration",
   "type": "module",
   "license": "MIT",
   "repository": "github:hara-seihun/pi-stack",
@@ -22,11 +22,6 @@
       "types": "./src/boost.ts",
       "bun": "./src/boost.ts",
       "default": "./dist/boost.js"
-    },
-    "./voice": {
-      "types": "./src/voice/index.ts",
-      "bun": "./src/voice/index.ts",
-      "default": "./dist/voice/index.js"
     }
   },
   "pi": {
@@ -37,6 +32,7 @@
   },
   "scripts": {
     "build": "tsc -p tsconfig.build.json",
+    "docs": "npm run build && node scripts/generate-docs.mjs",
     "test": "vitest run --maxWorkers=8",
     "typecheck": "tsc --noEmit --incremental --tsBuildInfoFile ../../node_modules/.cache/orchestrator.tsbuildinfo"
   },

@@ -9,8 +9,7 @@ export {
   type PlanDefinition,
   type PlanMetric,
 } from "./catalog.js";
-export { loadTaskManifest, reconcileTaskManifest } from "./task-manifest.js";
-export type { TaskSpec, Tier, TierShare } from "./tasks/types.js";
+export type { LaneManifest, LaneSpec, DemandSnapshot, Run } from "./domain.js";
 export {
   OrchestratorClient,
   tailRange,

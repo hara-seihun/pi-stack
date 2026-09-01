@@ -11,8 +11,9 @@ import { displayContextDocument } from "./context-display";
 import { applyContextSplice, contextSplice, sha256, type ContextSplice } from "./sync";
 import { beginSupervisorGeneration, ensureSupervisorSchema } from "./database";
 import { BOOSTED_MULTIPLIER, nextBoost } from "pi-orchestrator/boost";
-import { DEFAULT_LIVE_MODEL, DEFAULT_LIVE_VOICE, VoiceBroker } from "pi-orchestrator/voice";
+import { DEFAULT_LIVE_MODEL, DEFAULT_LIVE_VOICE, VoiceBroker } from "./voice/broker";
 import { attachRuntimeHost, startRuntimeHost, type RuntimeTransport } from "./runtime-transport";
+import { API } from "../web/api.js";
 
 const VERSION = (JSON.parse(readFileSync(join(import.meta.dir, "../package.json"), "utf8")) as { version: string }).version;
 const ENVIRONMENT_ID = process.env.PI_REMOTE_ENVIRONMENT_ID ?? "local";
@@ -159,6 +160,8 @@ const voiceAccounts = new VoiceBroker({
   authPath: ORCHESTRATOR_AUTH_PATH,
   agentDir: AGENT_DIR,
   accounts: () => orchestrator.accounts("openai-codex"),
+  acquireLease: (accountId) => orchestrator.beginVoiceLease(accountId),
+  releaseLease: (leaseId) => orchestrator.endLease(leaseId),
 });
 const agentHost = new AgentHost(orchestrator, {
   key: "local", label: "THIS MACHINE", name: "This machine",
@@ -256,7 +259,7 @@ const API_CORS_HEADERS = {
   "access-control-allow-origin": "http://localhost",
   "access-control-allow-methods": "GET, HEAD, POST, PUT, PATCH, DELETE, OPTIONS",
   "access-control-allow-headers": "accept, content-type, if-none-match, range, x-chunk-sha256",
-  "access-control-expose-headers": "accept-ranges, content-disposition, content-length, content-range, etag, x-pi-voice-account",
+  "access-control-expose-headers": "accept-ranges, content-disposition, content-length, content-range, etag, x-pi-voice-account, x-pi-voice-lease",
 } as const;
 
 const json = (data: unknown, status = 200) => new Response(JSON.stringify(data), {
@@ -582,16 +585,16 @@ function localFileResponse(requested: string, method: string, req: Request): Res
 }
 
 function hostFileResponse(url: URL, method: string, req: Request): Response | null {
-  if (url.pathname !== "/v1/files/download" || (method !== "GET" && method !== "HEAD")) return null;
+  if (!API.fileDownload.match(method, url.pathname) && !API.fileDownloadHead.match(method, url.pathname)) return null;
   const requested = url.searchParams.get("path") ?? "";
   if (!isAbsolute(requested)) return new Response("Valid absolute file path required", { status: 400, headers: API_CORS_HEADERS });
   return localFileResponse(requested, method, req);
 }
 
 async function sessionFileResponse(url: URL, method: string, req: Request): Promise<Response | null> {
-  const match = url.pathname.match(/^\/v1\/sessions\/([0-9a-f-]+)\/files$/i);
-  if (!match || (method !== "GET" && method !== "HEAD")) return null;
-  const row = sessionRow.get(match[1]) as any;
+  const match = API.sessionFiles.match(method, url.pathname) ?? API.sessionFilesHead.match(method, url.pathname);
+  if (!match) return null;
+  const row = sessionRow.get(match.sessionId) as any;
   if (!row) return new Response("Session not found", { status: 404, headers: API_CORS_HEADERS });
   const requested = url.searchParams.get("path") ?? "";
   if (!isAbsolute(requested)) return new Response("Valid absolute file path required", { status: 400, headers: API_CORS_HEADERS });
@@ -1730,9 +1733,9 @@ const server = Bun.serve({
     if (hostFile) return hostFile;
     const web = webResponse(url.pathname, req.method);
     if (web) return web;
-    if (url.pathname === "/v1/health") return json({ ok: true, version: VERSION, environmentId: ENVIRONMENT_ID });
-    if (url.pathname === "/v1/environment" && req.method === "GET") return json({ environment: environmentMetadata() });
-    if (url.pathname === "/v1/files" && req.method === "GET") {
+    if (API.health.match(req.method, url.pathname)) return json({ ok: true, version: VERSION, environmentId: ENVIRONMENT_ID });
+    if (API.environment.match(req.method, url.pathname)) return json({ environment: environmentMetadata() });
+    if (API.files.match(req.method, url.pathname)) {
       const requested = url.searchParams.get("path") ?? "";
       if (!isAbsolute(requested)) return error("Valid absolute folder path required");
       try { return json({ directory: listDirectory(requested) }); }
@@ -1741,10 +1744,10 @@ const server = Bun.serve({
         return error(failure.message, failure.status);
       }
     }
-    if (url.pathname === "/v1/voice" && req.method === "GET") {
+    if (API.voice.match(req.method, url.pathname)) {
       return json({ ...voiceAccounts.status(), model: DEFAULT_LIVE_MODEL, voice: DEFAULT_LIVE_VOICE });
     }
-    if (url.pathname === "/v1/voice/offer" && req.method === "POST") {
+    if (API.voiceOffer.match(req.method, url.pathname)) {
       const sessionId = url.searchParams.get("sessionId") ?? "";
       const row = sessionRow.get(sessionId) as any;
       if (!row) return error("Session not found", 404);
@@ -1757,44 +1760,55 @@ const server = Bun.serve({
           "content-type": "application/sdp",
           "cache-control": "no-store",
           "x-pi-voice-account": result.account,
+          "x-pi-voice-lease": result.leaseId,
           ...API_CORS_HEADERS,
         },
       });
     }
-    if (url.pathname === "/v1/thread-starts" && req.method === "GET") {
+    const voiceLeaseHeartbeat = API.voiceLeaseHeartbeat.match(req.method, url.pathname);
+    if (voiceLeaseHeartbeat) {
+      orchestrator.heartbeatLease(voiceLeaseHeartbeat.leaseId);
+      return json({ ok: true });
+    }
+    const voiceLeaseRelease = API.voiceLeaseRelease.match(req.method, url.pathname);
+    if (voiceLeaseRelease) {
+      orchestrator.endLease(voiceLeaseRelease.leaseId);
+      return json({ ok: true });
+    }
+    if (API.threadStarts.match(req.method, url.pathname)) {
       return json({
         environment: { id: ENVIRONMENT_ID, name: ENVIRONMENT_NAME },
         home: HOME,
         destinations: threadStartProfiles(),
       });
     }
-    if (url.pathname === "/v1/governor-controls" && req.method === "GET") {
+    if (API.governors.match(req.method, url.pathname)) {
       try { return json({ governors: governorControls() }); }
       catch (cause: any) { return error(cause?.message ?? "Could not read governor controls", 503); }
     }
     // The drawer footer shows this host's load beside its controls. The long
     // poll carries it only while the drawer is open, so a direct read lets the
     // footer fill in the moment the drawer opens rather than after a poll.
-    if (url.pathname === "/v1/machine" && req.method === "GET") {
+    if (API.machine.match(req.method, url.pathname)) {
       try { return json({ machine: readMachineUsage() }); }
       catch (cause: any) { return error(cause?.message ?? "Could not read machine usage", 503); }
     }
-    const governorToggle = url.pathname.match(/^\/v1\/governor-controls\/(openai|anthropic)\/toggle$/);
-    if (governorToggle && req.method === "POST") {
-      try { return json({ governors: toggleGovernor(governorToggle[1] as GovernorProvider) }); }
+    const governorToggle = API.governorToggle.match(req.method, url.pathname);
+    if (governorToggle && ["openai", "anthropic"].includes(governorToggle.provider)) {
+      try { return json({ governors: toggleGovernor(governorToggle.provider as GovernorProvider) }); }
       catch (cause: any) { return error(cause?.message ?? "Could not toggle governor control", 503); }
     }
-    if (url.pathname === "/v1/audio/thunder" && req.method === "GET") {
+    if (API.thunder.match(req.method, url.pathname)) {
       try {
         return json({ thunder: thunderToggleOperation ? await thunderToggleOperation : await thunderStatus() });
       } catch (cause: any) { return error(cause?.message ?? "Could not read thunder status", 503); }
     }
-    if (url.pathname === "/v1/audio/thunder/toggle" && req.method === "POST") {
+    if (API.thunderToggle.match(req.method, url.pathname)) {
       try {
         return json({ thunder: await toggleThunder() });
       } catch (cause: any) { return error(cause?.message ?? "Could not toggle thunder", 503); }
     }
-    if (url.pathname === "/v1/uploads/init" && req.method === "POST") {
+    if (API.uploadInit.match(req.method, url.pathname)) {
       try {
         const body = await readBody(req);
         const requestId = String(body.requestId ?? "");
@@ -1817,10 +1831,10 @@ const server = Bun.serve({
         return json({ upload: { id, offset: 0, size } }, 201);
       } catch (cause: any) { return error(cause?.message ?? "Could not initialize upload", 400); }
     }
-    const uploadChunk = url.pathname.match(/^\/v1\/uploads\/([0-9a-f-]+)$/i);
-    if (uploadChunk && req.method === "PUT") {
+    const uploadChunk = API.upload.match(req.method, url.pathname);
+    if (uploadChunk && /^[0-9a-f-]+$/i.test(uploadChunk.id)) {
       try {
-        const transfer = db.query("SELECT * FROM upload_transfers WHERE id=?").get(uploadChunk[1]) as any;
+        const transfer = db.query("SELECT * FROM upload_transfers WHERE id=?").get(uploadChunk.id) as any;
         if (!transfer) return error("Upload not found", 404);
         const offset = Number(url.searchParams.get("offset"));
         if (!Number.isSafeInteger(offset) || offset !== Number(transfer.received_size))
@@ -1845,10 +1859,10 @@ const server = Bun.serve({
         return json({ upload: { id: transfer.id, offset: next, size: Number(transfer.expected_size) } });
       } catch (cause: any) { return error(cause?.message ?? "Could not store upload chunk", 400); }
     }
-    const uploadComplete = url.pathname.match(/^\/v1\/uploads\/([0-9a-f-]+)\/complete$/i);
-    if (uploadComplete && req.method === "POST") {
+    const uploadComplete = API.uploadComplete.match(req.method, url.pathname);
+    if (uploadComplete && /^[0-9a-f-]+$/i.test(uploadComplete.id)) {
       try {
-        const transfer = db.query("SELECT * FROM upload_transfers WHERE id=?").get(uploadComplete[1]) as any;
+        const transfer = db.query("SELECT * FROM upload_transfers WHERE id=?").get(uploadComplete.id) as any;
         if (!transfer) return error("Upload not found", 404);
         if (Number(transfer.received_size) !== Number(transfer.expected_size))
           return json({ error: "Upload is incomplete", offset: Number(transfer.received_size) }, 409);
@@ -1870,7 +1884,7 @@ const server = Bun.serve({
         return json({ file: { ...file, sha256: fileHash, environment: "local" } }, 201);
       } catch (cause: any) { return error(cause?.message ?? "Could not complete upload", 400); }
     }
-    if (url.pathname === "/v1/uploads" && req.method === "POST") {
+    if (API.uploads.match(req.method, url.pathname)) {
       try {
         const name = url.searchParams.get("name") ?? "";
         const uploadSessionId = url.searchParams.get("sessionId") ?? "";
@@ -1882,7 +1896,7 @@ const server = Bun.serve({
         return json({ file: { ...file, environment: "local" } }, 201);
       } catch (cause: any) { return error(cause?.message ?? "Upload failed", 400); }
     }
-    if (url.pathname === "/v1/uploads" && req.method === "DELETE") {
+    if (API.removeUploads.match(req.method, url.pathname)) {
       try {
         const requested = url.searchParams.get("name") ?? "";
         const name = uploadName(requested);
@@ -1899,7 +1913,7 @@ const server = Bun.serve({
     }
     // Read-only observation of this host's autonomous agents. There is no
     // prompt, steer, or abort surface here: the orchestrator owns their work.
-    if (url.pathname === "/v1/agents/runs" && req.method === "GET") {
+    if (API.agentRuns.match(req.method, url.pathname)) {
       try {
         const snapshot = await agentHost.runs();
         return json({
@@ -1917,9 +1931,9 @@ const server = Bun.serve({
       }
       catch (cause: any) { return error(cause?.message ?? "Could not read agent runs", 503); }
     }
-    const agentEvents = url.pathname.match(/^\/v1\/agents\/runs\/([^/]+)\/events$/);
-    if (agentEvents && req.method === "GET") {
-      const addressed = parseRunKey(decodeURIComponent(agentEvents[1]));
+    const agentEvents = API.agentEvents.match(req.method, url.pathname);
+    if (agentEvents) {
+      const addressed = parseRunKey(agentEvents.runId);
       if (!addressed || addressed.host !== agentHost.key) return error("Invalid agent run", 400);
       try {
         const after = Math.max(0, Number(url.searchParams.get("after") ?? 0) || 0);
@@ -1933,10 +1947,10 @@ const server = Bun.serve({
         });
       } catch (cause: any) { return error(cause?.message ?? "Could not read the agent transcript", 503); }
     }
-    if (url.pathname === "/v1/workspaces" && req.method === "GET") {
+    if (API.workspaces.match(req.method, url.pathname)) {
       return json({ workspaces: [...workspaces.values()].map(({ id, name, path }) => ({ id, name, path })) });
     }
-    if (url.pathname === "/v1/sync" && req.method === "POST") {
+    if (API.sync.match(req.method, url.pathname)) {
       try {
         const body = await readBody(req);
         const after = Math.max(0, Number(body.after ?? 0) || 0);
@@ -2050,7 +2064,7 @@ const server = Bun.serve({
         });
       } catch (cause: any) { return error(cause?.message ?? "Could not synchronize", 400); }
     }
-    if (url.pathname === "/v1/sessions" && req.method === "GET") {
+    if (API.sessions.match(req.method, url.pathname)) {
       refreshPlanUsageIfDue();
       const rows = db.query("SELECT * FROM sessions WHERE archived_at IS NULL ORDER BY created_at DESC").all();
       const archivedRows = archivedPage(0, ARCHIVED_PAGE_SIZE);
@@ -2064,7 +2078,7 @@ const server = Bun.serve({
         machine: readMachineUsage(),
       });
     }
-    if (url.pathname === "/v1/sessions/archived" && req.method === "GET") {
+    if (API.archivedSessions.match(req.method, url.pathname)) {
       const offset = Math.max(0, Math.floor(Number(url.searchParams.get("offset") ?? 0) || 0));
       const requested = Math.floor(Number(url.searchParams.get("limit") ?? ARCHIVED_PAGE_SIZE) || ARCHIVED_PAGE_SIZE);
       const limit = Math.min(ARCHIVED_MAX_PAGE_SIZE, Math.max(1, requested));
@@ -2072,7 +2086,7 @@ const server = Bun.serve({
       const sessions = publicSessions(archivedPage(offset, limit));
       return json({ sessions, total, offset, limit, hasMore: offset + sessions.length < total });
     }
-    if (url.pathname === "/v1/sessions" && req.method === "POST") {
+    if (API.createSession.match(req.method, url.pathname)) {
       try {
         const body = await readBody(req);
         const requestId = String(body.requestId ?? "");
@@ -2114,9 +2128,9 @@ const server = Bun.serve({
         return json(response, 201);
       } catch (e: any) { return error(e.message ?? "Invalid request"); }
     }
-    const queuedItemMatch = url.pathname.match(/^\/v1\/sessions\/([0-9a-f-]+)\/queue\/([0-9a-f-]+)$/i);
-    if (queuedItemMatch && req.method === "DELETE") {
-      const [_, sessionId, workId] = queuedItemMatch;
+    const queuedItemMatch = API.queueItem.match(req.method, url.pathname);
+    if (queuedItemMatch) {
+      const { sessionId, workId } = queuedItemMatch;
       const row = sessionRow.get(sessionId) as any;
       if (!row) return error("Session not found", 404);
       let found = false;
@@ -2139,9 +2153,9 @@ const server = Bun.serve({
       if (!cancelled) return error("Message has already started", 409);
       return json({ ok: true, workId, text: cancelled.text, session: publicSession(sessionRow.get(sessionId)) });
     }
-    const queueMatch = url.pathname.match(/^\/v1\/sessions\/([0-9a-f-]+)\/queue\/([0-9a-f-]+)\/steer$/i);
-    if (queueMatch && req.method === "POST") {
-      const [_, sessionId, workId] = queueMatch;
+    const queueMatch = API.queueSteer.match(req.method, url.pathname);
+    if (queueMatch) {
+      const { sessionId, workId } = queueMatch;
       const row = sessionRow.get(sessionId) as any;
       if (!row) return error("Session not found", 404);
       const work = db.query("SELECT rowid queue_order,* FROM work_items WHERE id=? AND session_id=?").get(workId, sessionId) as any;
@@ -2168,10 +2182,18 @@ const server = Bun.serve({
       kickSession(sessionId);
       return json({ ok: true, workId, delivery: "steer", session: publicSession(sessionRow.get(sessionId)) });
     }
-    const match = url.pathname.match(/^\/v1\/sessions\/([0-9a-f-]+)(?:\/(prompt|abort|events|context|settings|name|commands|command|unarchive))?$/i);
-    if (!match) return error("Not found", 404);
-    const id = match[1];
-    const action = match[2];
+    const sessionRoutes: Array<[string | undefined, (typeof API)[keyof typeof API]]> = [
+      [undefined, API.session], [undefined, API.archiveSession], [undefined, API.rejectSessionEdit],
+      ["unarchive", API.unarchiveSession], ["prompt", API.sessionPrompt], ["abort", API.sessionAbort],
+      ["events", API.sessionEvents], ["context", API.sessionContext], ["context", API.patchSessionContext],
+      ["context", API.replaceSessionContext], ["settings", API.sessionSettings], ["settings", API.updateSessionSettings],
+      ["commands", API.sessionCommands], ["command", API.sessionCommand], ["name", API.updateSessionName],
+    ];
+    const sessionMatch = sessionRoutes.map(([action, route]) => ({ action, params: route.match(req.method, url.pathname) }))
+      .find((candidate) => candidate.params !== null);
+    if (!sessionMatch?.params) return error("Not found", 404);
+    const id = sessionMatch.params.sessionId;
+    const action = sessionMatch.action;
     const row = sessionRow.get(id) as any;
     if (!row) return error("Session not found", 404);
     if (!action && req.method === "GET") return json({ session: publicSession(row) });

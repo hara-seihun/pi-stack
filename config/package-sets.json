@@ -3,7 +3,8 @@
   "packages": {
     "orchestrator": "packages/orchestrator",
     "claude-code-use": "packages/runtime/extensions/pi-claude-code-use",
-    "state-compactor": "packages/runtime/extensions/state-compactor",
+    "compaction-threshold": "packages/runtime/extensions/compaction-threshold",
+    "vcc": "npm:@sting8k/pi-vcc@0.7.0",
     "bash-timeout-guard": "packages/runtime/extensions/bash-timeout-guard",
     "browser-native": "npm:pi-agent-browser-native@0.5.0",
     "remote": "apps/remote"
@@ -12,7 +13,8 @@
     "gmktec-user": [
       "orchestrator",
       "claude-code-use",
-      "state-compactor",
+      "compaction-threshold",
+      "vcc",
       "bash-timeout-guard",
       "browser-native",
       "remote"
@@ -20,13 +22,15 @@
     "gmktec-fleet": [
       "orchestrator",
       "claude-code-use",
-      "state-compactor",
+      "compaction-threshold",
+      "vcc",
       "bash-timeout-guard",
       "browser-native"
     ],
     "converge-user": [
       "orchestrator",
-      "state-compactor",
+      "compaction-threshold",
+      "vcc",
       "bash-timeout-guard",
       "browser-native",
       "remote"

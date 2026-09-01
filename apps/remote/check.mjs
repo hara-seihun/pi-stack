@@ -5,7 +5,7 @@ import { runJobs } from "../../scripts/run-jobs.mjs";
 
 const integration = join("server", "server.integration.test.ts");
 const unitFiles = ["server", "web"].flatMap((directory) =>
-  readdirSync(new URL(directory, import.meta.url))
+  readdirSync(new URL(directory, import.meta.url), { recursive: true })
     .filter((file) => file.endsWith(".test.ts"))
     .map((file) => join(directory, file)))
   .filter((file) => file !== integration)

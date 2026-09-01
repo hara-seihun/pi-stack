@@ -1,4 +1,8 @@
-import type { ModelCandidate } from "./broker/broker.js";
+export interface ModelCandidate {
+  readonly provider: string;
+  readonly model: string;
+  readonly thinking?: string;
+}
 
 /**
  * Stable identities shared by scheduling, observation, and operator clients.

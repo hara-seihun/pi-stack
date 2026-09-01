@@ -88,6 +88,23 @@ function acquireLock(path: string, signal: AbortSignal): Promise<() => void> {
   return acquireDirectoryLock(path, signal, "Timed out waiting for the shared OAuth auth lock");
 }
 
+export async function transactSharedCredential<T>(path:string,alias:string,value:unknown,effect:()=>Promise<T>):Promise<T>{
+  const release=await acquireLock(path,new AbortController().signal);
+  try{
+    const auth=readAuth(path);
+    const previous={...auth};
+    if(value===undefined)delete auth[alias];
+    else{
+      const credential=oauthCredential(value);
+      if(credential===undefined)throw new Error(`Invalid OAuth credential for ${alias}`);
+      auth[alias]=credential;
+    }
+    writeAuth(path,auth);
+    try{return await effect();}
+    catch(error){writeAuth(path,previous);throw error;}
+  }finally{release();}
+}
+
 export class SharedOAuthAuth {
   readonly #path: string;
   readonly #providerId: string;

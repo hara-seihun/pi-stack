@@ -1,4 +1,6 @@
-"use strict";
+import { API } from "./api.js";
+import { createRemoteStore, initialRemoteState } from "./state-machine.js";
+import "./voice.js";
 
 const $ = (id) => document.getElementById(id);
 const ui = {
@@ -23,25 +25,26 @@ const ui = {
   speed: $("speed-select"),
 };
 
-const state = {
-  sessions: [], archivedSessions: [], archivedOlder: [], archivedTotal: 0, archivedLoading: false,
-  drawerTab: "threads", archiveSupported: false,
-  home: "/",
-  selectedId: null, selectedName: "Agent", selectedCwd: "/", selectedState: "STOPPED", selectedActivity: "IDLE", selectedTool: "",
-  steeringQueued: 0, followUpQueued: 0, queuedMessages: [], selectedRevision: 0,
-  selectionEpoch: 0, actionEpoch: 0, pendingActions: new Map(),
-  lastSeq: 0, contextCapturedAt: 0, contextEntries: [], pollBusy: false, pollAgain: false, pollController: null, settingsOpen: false,
-  syncSeq: 0, syncEpoch: "", contextDocument: null, contextSessionId: null,
-  agentLiveTextDocument: null, agentLiveThinkingDocument: null, agentDocumentRunId: null,
-  toolCards: new Map(), userMessageLabels: new Map(), followTail: true, attachments: [], attachmentGeneration: 0,
-  slashCommands: [], slashCommandsLoading: false,
-  planCards: [], agentModelCounts: new Map(),
-  agents: [], agentHosts: [], agentRunning: 0, agentRunId: null, agentRun: null, agentError: "", agentHostFailing: false,
-  agentExpandedGroups: new Set(),
-  machineUsageText: "CPU — · GPU — · RAM — · DISK —", machineUsageColor: "var(--muted)", machineUsageDescription: "CPU — · GPU — · RAM — · DISK —",
-  machineControlPending: new Set(), governors: { openai: {}, anthropic: {} },
-  threadStarts: [],
+const effects = {
+  "drawer-selected": (tab) => {
+    renderTabs();
+    renderThreads();
+    renderAgentList();
+    if (tab === "agents") refreshAgents();
+  },
 };
+const store = createRemoteStore(initialRemoteState(), effects);
+const state = new Proxy({}, {
+  get: (_target, key) => store.state[key],
+  set: (_target, key) => { throw new Error(`State ${String(key)} must change through the reducer`); },
+});
+const patchState = (value, requestedEffects = []) => store.dispatch({ type: "patch", value, effects: requestedEffects });
+const incrementState = (key, by = 1) => store.dispatch({ type: "increment", key, by });
+const mapState = (key, entry, value) => store.dispatch({ type: "map-set", key, entry, value });
+const deleteMapState = (key, entry) => store.dispatch({ type: "map-delete", key, entry });
+const clearMapState = (key) => store.dispatch({ type: "map-clear", key });
+const addSetState = (key, value) => store.dispatch({ type: "set-add", key, value });
+const deleteSetState = (key, value) => store.dispatch({ type: "set-delete", key, value });
 let voiceSession = null;
 let voiceThreadId = null;
 let threadStartMenu = null;
@@ -83,7 +86,7 @@ function presentationMarkdown(source) {
   value = value.replace(/<pi-remote-file\s+src=["']([^"']+)["']\s*\/\s*>/gi, (_match, path) => {
     const name = String(path).split("/").filter(Boolean).at(-1) || "Download file";
     const label = name.replaceAll("&", "&amp;").replaceAll("[", "&#91;").replaceAll("]", "&#93;").replace(/[\r\n]+/g, " ");
-    return `\n\n[${label}](/v1/sessions/${encodeURIComponent(state.selectedId)}/files?path=${encodeURIComponent(path)})\n\n`;
+    return `\n\n[${label}](${API.sessionFiles.path({ sessionId: state.selectedId }, { path })})\n\n`;
   });
   return value;
 }
@@ -210,7 +213,7 @@ async function responseJson(response) {
 }
 
 async function sendUnlock(key) {
-  const response = await fetch("/v1/unlock", {
+  const response = await fetch(API.unlock.path(), {
     method: "POST",
     headers: { accept: "application/json", "content-type": "application/json" },
     body: JSON.stringify({ key }),
@@ -301,7 +304,7 @@ async function syncRequest(body, signal, retryOnLock = true) {
   signal.addEventListener("abort", cancel, { once: true });
   const timer = setTimeout(() => { timedOut = true; controller.abort(); }, 35_000);
   try {
-    const response = await fetch("/v1/sync", {
+    const response = await fetch(API.sync.path(), {
       method: "POST",
       headers: { accept: "application/json", "content-type": "application/json" },
       body: JSON.stringify(body),
@@ -464,16 +467,16 @@ function renderSlashCommands() {
 }
 async function refreshSlashCommands() {
   const id = state.selectedId;
-  state.slashCommands = [];
+  patchState({ slashCommands: [] });
   renderSlashCommands();
   if (!id) return;
-  state.slashCommandsLoading = true;
+  patchState({ slashCommandsLoading: true });
   try {
-    const result = await api("GET", `/v1/sessions/${id}/commands`);
-    if (state.selectedId === id) { state.slashCommands = Array.isArray(result.commands) ? result.commands : []; renderSlashCommands(); updateComposer(); }
+    const result = await api(API.sessionCommands.method, API.sessionCommands.path({ sessionId: id }));
+    if (state.selectedId === id) { patchState({ slashCommands: Array.isArray(result.commands) ? result.commands : [] }); renderSlashCommands(); updateComposer(); }
   } catch (error) {
     if (state.selectedId === id) console.error(error);
-  } finally { state.slashCommandsLoading = false; }
+  } finally { patchState({ slashCommandsLoading: false }); }
 }
 function updateComposer() {
   // Observing an autonomous agent is read-only: the orchestrator owns its work,
@@ -560,7 +563,7 @@ function renderGovernorControls(governors, authoritative = false) {
     const name = provider === "openai" ? "OpenAI" : "Anthropic";
     const governor = { ...state.governors[provider], ...governors[provider] };
     if (!GOVERNOR_STATES.includes(governor.state)) governor.state = governor.boosted ? "blue" : "off";
-    state.governors[provider] = governor;
+    patchState({ governors: { ...state.governors, [provider]: governor } });
     const pending = state.machineControlPending.has(provider);
     const description = governorDescription(name, governor);
     button.classList.remove("active", "boost-green", "boost-blue", "halted");
@@ -582,8 +585,8 @@ function machineControlUnavailable(button, label, key) {
 }
 async function refreshMachineControls() {
   const [thunder, governors] = await Promise.allSettled([
-    api("GET", "/v1/audio/thunder"),
-    api("GET", "/v1/governor-controls"),
+    api(API.thunder.method, API.thunder.path()),
+    api(API.governors.method, API.governors.path()),
   ]);
   if (thunder.status === "fulfilled") renderThunderStatus(thunder.value.thunder);
   else machineControlUnavailable(ui.thunderControl, "Thunder control", "thunder");
@@ -595,32 +598,32 @@ async function refreshMachineControls() {
 }
 async function toggleThunder() {
   if (state.machineControlPending.has("thunder")) return;
-  state.machineControlPending.add("thunder");
+  addSetState("machineControlPending", "thunder");
   renderThunderStatus({ active: ui.thunderControl.classList.contains("active") }, true);
   try {
-    const result = await api("POST", "/v1/audio/thunder/toggle", {});
-    state.machineControlPending.delete("thunder");
+    const result = await api(API.thunderToggle.method, API.thunderToggle.path(), {});
+    deleteSetState("machineControlPending", "thunder");
     renderThunderStatus(result.thunder, true);
   } catch (error) {
-    state.machineControlPending.delete("thunder");
+    deleteSetState("machineControlPending", "thunder");
     console.error(error);
     refreshMachineControls();
   }
 }
 async function toggleGovernor(provider) {
   if (state.machineControlPending.has(provider)) return;
-  state.machineControlPending.add(provider);
+  addSetState("machineControlPending", provider);
   // Optimistically advance one step of the cycle; the authoritative render
   // from the response corrects any drift.
   const current = state.governors[provider]?.state ?? "off";
   const next = GOVERNOR_STATES[(GOVERNOR_STATES.indexOf(current) + 1) % GOVERNOR_STATES.length];
   renderGovernorControls({ [provider]: { ...state.governors[provider], state: next } }, true);
   try {
-    const result = await api("POST", `/v1/governor-controls/${provider}/toggle`, {});
-    state.machineControlPending.delete(provider);
+    const result = await api(API.governorToggle.method, API.governorToggle.path({ provider }), {});
+    deleteSetState("machineControlPending", provider);
     renderGovernorControls(result.governors, true);
   } catch (error) {
-    state.machineControlPending.delete(provider);
+    deleteSetState("machineControlPending", provider);
     console.error(error);
     refreshMachineControls();
   }
@@ -637,7 +640,7 @@ function closeDrawer() {
 }
 
 function uploadedFilePath(file) {
-  return `/v1/uploads?name=${encodeURIComponent(file.storedName)}&sessionId=${encodeURIComponent(file.sessionId)}&environment=${encodeURIComponent(file.environment || "local")}`;
+  return API.uploads.path({}, { name: file.storedName, sessionId: file.sessionId, environment: file.environment || "local" });
 }
 
 function renderAttachments() {
@@ -649,7 +652,7 @@ function renderAttachments() {
     remove.type = "button"; remove.ariaLabel = `Remove ${file.name}`; remove.disabled = file.uploading;
     remove.addEventListener("click", async () => {
       file.removed = true;
-      state.attachments = state.attachments.filter((candidate) => candidate !== file);
+      patchState({ attachments: state.attachments.filter((candidate) => candidate !== file) });
       renderAttachments(); updateComposer();
       if (file.storedName) api("DELETE", uploadedFilePath(file)).catch(() => {});
     });
@@ -660,8 +663,7 @@ function renderAttachments() {
 
 function clearAttachments(removeFiles = true) {
   const files = state.attachments;
-  state.attachmentGeneration++;
-  state.attachments = [];
+  patchState({ attachmentGeneration: state.attachmentGeneration + 1, attachments: [] });
   renderAttachments(); updateComposer();
   if (removeFiles) for (const file of files) {
     file.removed = true;
@@ -688,23 +690,25 @@ async function uploadFiles(files) {
   const generation = state.attachmentGeneration;
   const sessionId = state.selectedId;
   for (const source of files) {
-    const file = { name: source.name || "attachment", path: null, storedName: null, sessionId, uploading: true, removed: false };
-    state.attachments.push(file); renderAttachments(); updateComposer();
+    let file = { name: source.name || "attachment", path: null, storedName: null, sessionId, uploading: true, removed: false };
+    patchState({ attachments: [...state.attachments, file] }); renderAttachments(); updateComposer();
     try {
-      const response = await piFetch(`/v1/uploads?name=${encodeURIComponent(file.name)}&sessionId=${encodeURIComponent(file.sessionId)}`, {
+      const response = await piFetch(API.uploads.path({}, { name: file.name, sessionId: file.sessionId }), {
         method: "POST",
         headers: { "content-type": source.type || "application/octet-stream" },
         body: source,
       });
       const result = await response.json();
       if (!response.ok) throw new Error(result.error || `HTTP ${response.status}`);
-      file.uploading = false; file.path = result.file.path; file.storedName = result.file.name; file.environment = result.file.environment;
+      const pendingFile = file;
+      file = { ...file, uploading: false, path: result.file.path, storedName: result.file.name, environment: result.file.environment };
+      patchState({ attachments: state.attachments.map((candidate) => candidate === pendingFile ? file : candidate) });
       if (generation !== state.attachmentGeneration || file.removed) {
         api("DELETE", uploadedFilePath(file)).catch(() => {});
-        state.attachments = state.attachments.filter((candidate) => candidate !== file);
+        patchState({ attachments: state.attachments.filter((candidate) => candidate !== file) });
       }
     } catch (error) {
-      state.attachments = state.attachments.filter((candidate) => candidate !== file);
+      patchState({ attachments: state.attachments.filter((candidate) => candidate !== file) });
       console.error(error);
     }
     renderAttachments(); updateComposer();
@@ -747,17 +751,11 @@ async function toggleVoice() {
 }
 
 function clearConversation() {
-  state.lastSeq = 0;
-  state.contextCapturedAt = 0;
-  state.contextEntries = [];
-  state.contextDocument = null;
-  state.contextSessionId = null;
-  state.agentLiveTextDocument = null;
-  state.agentLiveThinkingDocument = null;
-  state.agentDocumentRunId = null;
-  state.followTail = true;
-  state.toolCards.clear();
-  state.userMessageLabels.clear();
+  patchState({
+    lastSeq: 0, contextCapturedAt: 0, contextEntries: [], contextDocument: null, contextSessionId: null,
+    agentLiveTextDocument: null, agentLiveThinkingDocument: null, agentDocumentRunId: null, followTail: true,
+    toolCards: new Map(), userMessageLabels: new Map(),
+  });
   clearAttachments(true);
   ui.transcript.replaceChildren();
   setLive("", "");
@@ -765,34 +763,33 @@ function clearConversation() {
 function mergeSession(session) {
   if (!session?.id) return;
   const index = state.sessions.findIndex((candidate) => candidate.id === session.id);
-  if (index < 0) state.sessions.unshift(session);
-  else if (Number(session.revision || 0) >= Number(state.sessions[index].revision || 0)) state.sessions[index] = session;
+  if (index < 0) patchState({ sessions: [session, ...state.sessions] });
+  else if (Number(session.revision || 0) >= Number(state.sessions[index].revision || 0)) patchState({ sessions: state.sessions.map((candidate, position) => position === index ? session : candidate) });
 }
 function applySelectedSession(session, force = false) {
   if (!session || session.id !== state.selectedId) return false;
   const revision = Number(session.revision || 0);
   if (!force && revision < state.selectedRevision) return false;
-  state.selectedRevision = revision;
-  state.selectedName = session.name || "Agent";
-  state.selectedCwd = session.cwd || "/";
-  state.selectedState = session.state || "STOPPED";
-  state.selectedActivity = session.activity || stateActivity(state.selectedState);
-  state.selectedTool = session.activeTool || "";
-  state.steeringQueued = Number(session.steeringQueued || 0);
-  state.followUpQueued = Number(session.followUpQueued || 0);
-  state.queuedMessages = Array.isArray(session.queuedMessages) ? session.queuedMessages : [];
+  const selectedState = session.state || "STOPPED";
+  patchState({
+    selectedRevision: revision, selectedName: session.name || "Agent", selectedCwd: session.cwd || "/",
+    selectedState, selectedActivity: session.activity || stateActivity(selectedState), selectedTool: session.activeTool || "",
+    steeringQueued: Number(session.steeringQueued || 0), followUpQueued: Number(session.followUpQueued || 0),
+    queuedMessages: Array.isArray(session.queuedMessages) ? session.queuedMessages : [],
+  });
   renderMessageQueue();
   return true;
 }
 function beginAction(id, type) {
-  const action = { id, type, token: ++state.actionEpoch };
-  state.pendingActions.set(id, action);
+  const action = { id, type, token: state.actionEpoch + 1 };
+  patchState({ actionEpoch: action.token });
+  mapState("pendingActions", id, action);
   updateChrome();
   return action;
 }
 function finishAction(action) {
-  if (state.pendingActions.get(action.id) === action) state.pendingActions.delete(action.id);
-  state.actionEpoch++;
+  if (state.pendingActions.get(action.id) === action) deleteMapState("pendingActions", action.id);
+  incrementState("actionEpoch");
 }
 // Orchestrator agents are a separate, read-only view of the same transcript
 // rendering. Selecting one leaves the thread selection untouched so returning
@@ -800,9 +797,7 @@ function finishAction(action) {
 function selectAgent(run) {
   if (state.agentRunId === run.id) return;
   stopVoice();
-  state.selectionEpoch++;
-  state.agentRunId = run.id;
-  state.agentRun = run;
+  patchState({ selectionEpoch: state.selectionEpoch + 1, agentRunId: run.id, agentRun: run });
   clearConversation();
   ui.empty.hidden = true;
   ui.conversation.hidden = false;
@@ -814,9 +809,7 @@ function selectAgent(run) {
 }
 function clearAgentSelection() {
   if (!state.agentRunId) return;
-  state.selectionEpoch++;
-  state.agentRunId = null;
-  state.agentRun = null;
+  patchState({ selectionEpoch: state.selectionEpoch + 1, agentRunId: null, agentRun: null });
   clearConversation();
   renderAgentList();
 }
@@ -889,8 +882,8 @@ function agentGroup(group, host) {
   const members = details.lastElementChild;
   for (const run of runs) members.append(agentRow(run, true));
   details.addEventListener("toggle", () => {
-    if (details.open) state.agentExpandedGroups.add(key);
-    else state.agentExpandedGroups.delete(key);
+    if (details.open) addSetState("agentExpandedGroups", key);
+    else deleteSetState("agentExpandedGroups", key);
   });
   return details;
 }
@@ -923,14 +916,14 @@ function renderAgentList() {
   }
 }
 function applyAgentList(result) {
-  state.agents = Array.isArray(result.runs) ? result.runs : [];
-  state.agentHosts = Array.isArray(result.hosts) ? result.hosts : [];
-  state.agentRunning = Number(result.running || 0);
-  state.agentError = "";
+  patchState({
+    agents: Array.isArray(result.runs) ? result.runs : [], agentHosts: Array.isArray(result.hosts) ? result.hosts : [],
+    agentRunning: Number(result.running || 0), agentError: "",
+  });
 }
 async function refreshAgents() {
-  try { applyAgentList(await api("GET", "/v1/agents/runs")); }
-  catch (error) { state.agentError = `Agents unavailable · ${error.message}`; }
+  try { applyAgentList(await api(API.agentRuns.method, API.agentRuns.path())); }
+  catch (error) { patchState({ agentError: `Agents unavailable · ${error.message}` }); }
   renderTabs();
   renderAgentList();
 }
@@ -938,18 +931,16 @@ const DRAWER_TAB_KEY = "pi-remote-drawer-tab";
 function restoreDrawerTab() {
   try {
     const stored = localStorage.getItem(DRAWER_TAB_KEY);
-    if (["threads", "agents", "archived"].includes(stored)) state.drawerTab = stored;
+    if (["threads", "agents", "archived"].includes(stored)) patchState({ drawerTab: stored });
   } catch (error) { console.error("Could not restore the drawer tab", error); }
 }
 function selectDrawerTab(tab) {
   if (state.drawerTab === tab) return;
-  state.drawerTab = tab;
+  patchState(
+    { drawerTab: tab, ...(tab === "archived" ? {} : { archivedOlder: [] }) },
+    [{ type: "drawer-selected", payload: tab }],
+  );
   try { localStorage.setItem(DRAWER_TAB_KEY, tab); } catch (error) { console.error("Could not save the drawer tab", error); }
-  if (tab !== "archived") state.archivedOlder = [];
-  renderTabs();
-  renderThreads();
-  renderAgentList();
-  if (tab === "agents") refreshAgents();
 }
 function renderTabs() {
   const failing = state.agentHostFailing || state.agentHosts.some((host) => host.error) || Boolean(state.agentError);
@@ -981,9 +972,7 @@ function selectThread(session) {
   clearAgentSelection();
   if (changed) {
     stopVoice();
-    state.selectionEpoch++;
-    state.selectedId = session.id;
-    state.selectedRevision = Number(session.revision || 0);
+    patchState({ selectionEpoch: state.selectionEpoch + 1, selectedId: session.id, selectedRevision: Number(session.revision || 0) });
   }
   applySelectedSession(session, changed);
   if (changed) {
@@ -1000,12 +989,12 @@ function selectThread(session) {
 }
 function clearSelection() {
   stopVoice();
-  state.selectionEpoch++;
-  state.selectedId = null; state.selectedName = "Agent"; state.selectedCwd = "/"; state.selectedState = "STOPPED";
-  state.selectedActivity = "IDLE"; state.selectedTool = ""; state.selectedRevision = 0;
-  state.steeringQueued = 0; state.followUpQueued = 0; state.queuedMessages = [];
+  patchState({
+    selectionEpoch: state.selectionEpoch + 1, selectedId: null, selectedName: "Agent", selectedCwd: "/", selectedState: "STOPPED",
+    selectedActivity: "IDLE", selectedTool: "", selectedRevision: 0, steeringQueued: 0, followUpQueued: 0, queuedMessages: [],
+  });
   renderMessageQueue();
-  clearConversation(); ui.prompt.value = ""; state.slashCommands = []; renderSlashCommands();
+  clearConversation(); ui.prompt.value = ""; patchState({ slashCommands: [] }); renderSlashCommands();
   ui.conversation.hidden = true; ui.empty.hidden = false;
   updateChrome();
 }
@@ -1066,16 +1055,18 @@ function loadedArchived() {
 }
 async function loadOlderArchived() {
   if (state.archivedLoading) return;
-  state.archivedLoading = true;
+  patchState({ archivedLoading: true });
   renderThreads();
   try {
     const offset = loadedArchived().length;
-    const page = await api("GET", `/v1/sessions/archived?offset=${offset}&limit=${ARCHIVED_PAGE_SIZE}`);
+    const page = await api(API.archivedSessions.method, API.archivedSessions.path({}, { offset, limit: ARCHIVED_PAGE_SIZE }));
     const known = new Set(loadedArchived().map((session) => session.id));
-    state.archivedOlder = [...state.archivedOlder, ...(page.sessions || []).filter((session) => !known.has(session.id))];
-    if (Number.isFinite(page.total)) state.archivedTotal = Number(page.total);
+    patchState({
+      archivedOlder: [...state.archivedOlder, ...(page.sessions || []).filter((session) => !known.has(session.id))],
+      ...(Number.isFinite(page.total) ? { archivedTotal: Number(page.total) } : {}),
+    });
   } catch (error) { console.error(error); }
-  finally { state.archivedLoading = false; renderTabs(); renderThreads(); }
+  finally { patchState({ archivedLoading: false }); renderTabs(); renderThreads(); }
 }
 function replaceAnimatedRows(container, rows, emptyText) {
   const previous = new Map([...container.querySelectorAll("[data-motion-key]")]
@@ -1121,12 +1112,14 @@ function renderThreads() {
 function renderAgents(agents) {
   const locations = new Map((agents?.locations || []).map((location) => [location.key, location]));
   const location = locations.values().next().value;
-  state.agentModelCounts = new Map((location?.models || []).map((model) => [model.key, Number(model.count || 0)]));
+  patchState({ agentModelCounts: new Map((location?.models || []).map((model) => [model.key, Number(model.count || 0)])) });
   renderCapacityRows();
   // Every thread poll carries the same fleet-wide running count the agent list
   // returns, so the tab stays honest without fetching a list nobody is reading.
-  if (Number.isFinite(agents?.sources?.orchestrator)) state.agentRunning = Number(agents.sources.orchestrator);
-  state.agentHostFailing = [...locations.values()].some((candidate) => Boolean(candidate.error));
+  patchState({
+    ...(Number.isFinite(agents?.sources?.orchestrator) ? { agentRunning: Number(agents.sources.orchestrator) } : {}),
+    agentHostFailing: [...locations.values()].some((candidate) => Boolean(candidate.error)),
+  });
 }
 
 function updateUsageSummary() {
@@ -1166,14 +1159,13 @@ function renderCapacityRows() {
   ui.planSummary.ariaLabel = description;
 }
 function renderPlan(plans) {
-  state.planCards = Array.isArray(plans?.cards) ? plans.cards : [];
+  patchState({ planCards: Array.isArray(plans?.cards) ? plans.cards : [] });
   renderCapacityRows();
 }
 function renderMachine(machine) {
   if (!machine) {
-    state.machineUsageText = "CPU — · GPU — · RAM — · DISK —";
-    state.machineUsageDescription = state.machineUsageText;
-    state.machineUsageColor = "var(--muted)";
+    const text = "CPU — · GPU — · RAM — · DISK —";
+    patchState({ machineUsageText: text, machineUsageDescription: text, machineUsageColor: "var(--muted)" });
     updateUsageSummary(); return;
   }
   const percent = (value) => value === null || value === undefined ? "—" : `${value}%`;
@@ -1181,24 +1173,26 @@ function renderMachine(machine) {
   const gpu = percent(machine.gpuPercent);
   const ram = percent(machine.memory?.percentUsed);
   const disk = percent(machine.disk?.percentUsed);
-  state.machineUsageText = `CPU ${cpu} · GPU ${gpu} · RAM ${ram} · DISK ${disk}`;
+  const text = `CPU ${cpu} · GPU ${gpu} · RAM ${ram} · DISK ${disk}`;
   const gib = (bytes) => `${(Number(bytes || 0) / 1073741824).toFixed(1)} GiB`;
-  state.machineUsageDescription = state.machineUsageText;
-  if (machine.memory) state.machineUsageDescription += `. RAM ${gib(machine.memory.usedBytes)} of ${gib(machine.memory.totalBytes)}`;
-  if (machine.disk) state.machineUsageDescription += `. Disk ${gib(machine.disk.usedBytes)} of ${gib(machine.disk.totalBytes)}`;
-  state.machineUsageColor = (machine.memory?.percentUsed ?? 0) >= 90 || (machine.disk?.percentUsed ?? 0) >= 90 ? "var(--danger)" : "var(--muted)";
+  let description = text;
+  if (machine.memory) description += `. RAM ${gib(machine.memory.usedBytes)} of ${gib(machine.memory.totalBytes)}`;
+  if (machine.disk) description += `. Disk ${gib(machine.disk.usedBytes)} of ${gib(machine.disk.totalBytes)}`;
+  patchState({
+    machineUsageText: text, machineUsageDescription: description,
+    machineUsageColor: (machine.memory?.percentUsed ?? 0) >= 90 || (machine.disk?.percentUsed ?? 0) >= 90 ? "var(--danger)" : "var(--muted)",
+  });
   updateUsageSummary();
 }
 
 async function poll(immediate = false) {
   if (state.pollBusy) {
-    state.pollAgain = true;
+    patchState({ pollAgain: true });
     state.pollController?.abort();
     return;
   }
-  state.pollBusy = true;
   const controller = new AbortController();
-  state.pollController = controller;
+  patchState({ pollBusy: true, pollController: controller });
   const requested = state.selectedId;
   const requestedAgent = state.agentRunId;
   const after = state.lastSeq;
@@ -1231,14 +1225,12 @@ async function poll(immediate = false) {
     if (controller.signal.aborted) throw new DOMException("Synchronization cancelled", "AbortError");
 
     if (state.syncEpoch && state.syncEpoch !== all.epoch) {
-      state.contextDocument = null;
-      state.contextSessionId = null;
-      state.agentLiveTextDocument = null;
-      state.agentLiveThinkingDocument = null;
-      state.agentDocumentRunId = null;
-      state.syncSeq = 0;
+      patchState({
+        contextDocument: null, contextSessionId: null, agentLiveTextDocument: null,
+        agentLiveThinkingDocument: null, agentDocumentRunId: null, syncSeq: 0,
+      });
     }
-    state.syncEpoch = String(all.epoch || "");
+    patchState({ syncEpoch: String(all.epoch || "") });
 
     if (all.agentRuns) applyAgentList(all.agentRuns);
     const sameAgent = requestedAgent && requestedAgent === state.agentRunId && selectionEpoch === state.selectionEpoch;
@@ -1248,10 +1240,10 @@ async function poll(immediate = false) {
       const nextText = await window.PiRemoteSync.update(baseText, all.agentEvents.liveTextUpdate);
       const nextThinking = await window.PiRemoteSync.update(baseThinking, all.agentEvents.liveThinkingUpdate);
       if (controller.signal.aborted) throw new DOMException("Synchronization cancelled", "AbortError");
-      state.agentLiveTextDocument = nextText;
-      state.agentLiveThinkingDocument = nextThinking;
-      state.agentDocumentRunId = requestedAgent;
-      if (all.agentEvents.run) state.agentRun = all.agentEvents.run;
+      patchState({
+        agentLiveTextDocument: nextText, agentLiveThinkingDocument: nextThinking, agentDocumentRunId: requestedAgent,
+        ...(all.agentEvents.run ? { agentRun: all.agentEvents.run } : {}),
+      });
       renderEvents({
         ...all.agentEvents,
         liveText: nextText?.document || "",
@@ -1265,13 +1257,15 @@ async function poll(immediate = false) {
       const old = previous.get(session.id);
       return old && Number(old.revision || 0) > Number(session.revision || 0) ? old : session;
     });
-    state.archiveSupported = true;
-    state.sessions = mergeListed(all.sessions);
-    state.archivedSessions = mergeListed(all.archivedSessions);
-    const listedArchived = new Set(state.archivedSessions.map((session) => session.id));
-    const liveIds = new Set(state.sessions.map((session) => session.id));
-    state.archivedOlder = state.archivedOlder.filter((session) => !listedArchived.has(session.id) && !liveIds.has(session.id));
-    state.archivedTotal = Number.isFinite(all.archivedTotal) ? Number(all.archivedTotal) : state.archivedSessions.length;
+    const sessions = mergeListed(all.sessions);
+    const archivedSessions = mergeListed(all.archivedSessions);
+    const listedArchived = new Set(archivedSessions.map((session) => session.id));
+    const liveIds = new Set(sessions.map((session) => session.id));
+    patchState({
+      archiveSupported: true, sessions, archivedSessions,
+      archivedOlder: state.archivedOlder.filter((session) => !listedArchived.has(session.id) && !liveIds.has(session.id)),
+      archivedTotal: Number.isFinite(all.archivedTotal) ? Number(all.archivedTotal) : archivedSessions.length,
+    });
     const sameSelection = selectionEpoch === state.selectionEpoch && requested === state.selectedId && !state.agentRunId;
     const mutationStable = actionEpoch === state.actionEpoch && !selectedPendingAction();
     if (sameSelection && mutationStable) {
@@ -1283,8 +1277,7 @@ async function poll(immediate = false) {
       const base = state.contextSessionId === requested ? state.contextDocument : null;
       const next = await window.PiRemoteSync.update(base, all.contextUpdate);
       if (controller.signal.aborted) throw new DOMException("Synchronization cancelled", "AbortError");
-      state.contextDocument = next;
-      state.contextSessionId = requested;
+      patchState({ contextDocument: next, contextSessionId: requested });
       if (all.selectedSession) mergeSession(all.selectedSession);
       if (mutationStable && all.selectedSession) applySelectedSession(all.selectedSession);
       renderContext({
@@ -1293,7 +1286,7 @@ async function poll(immediate = false) {
         session: all.selectedSession,
       });
     }
-    state.syncSeq = Number(all.seq || state.syncSeq);
+    patchState({ syncSeq: Number(all.seq || state.syncSeq) });
     if (!state.selectedId && !state.agentRunId && state.sessions.length && selectionEpoch === state.selectionEpoch) selectThread(state.sessions[0]);
     renderThreads();
     if (all.agents) renderAgents(all.agents);
@@ -1305,17 +1298,15 @@ async function poll(immediate = false) {
     ui.connection.hidden = true;
   } catch (error) {
     if (error?.name !== "AbortError") {
-      state.syncSeq = 0;
+      patchState({ syncSeq: 0 });
       retryDelay = 1_200;
       ui.connection.hidden = false;
       ui.connection.textContent = `●  Offline · ${error.message}`; ui.connection.style.color = "var(--danger)";
       ui.topState.textContent = "OFFLINE"; ui.topState.style.color = "var(--danger)";
     }
   } finally {
-    if (state.pollController === controller) state.pollController = null;
-    state.pollBusy = false;
     const again = state.pollAgain;
-    state.pollAgain = false;
+    patchState({ ...(state.pollController === controller ? { pollController: null } : {}), pollBusy: false, pollAgain: false });
     setTimeout(() => poll(again), again ? 0 : retryDelay);
   }
 }
@@ -1327,7 +1318,7 @@ function appendMessage(kind, label, text, eventSeq = 0) {
   item.append(labelNode, body);
   if (kind === "user" && eventSeq) {
     item.dataset.eventSeq = String(eventSeq);
-    state.userMessageLabels.set(Number(eventSeq), labelNode);
+    mapState("userMessageLabels", Number(eventSeq), labelNode);
   }
   renderMarkdown(body, text);
   ui.transcript.append(item); trimTranscript();
@@ -1338,8 +1329,8 @@ function trimTranscript() {
   if (!state.agentRunId) return;
   while (ui.transcript.children.length > 50) {
     const first = ui.transcript.firstElementChild;
-    for (const [id, card] of state.toolCards) if (card.root === first) state.toolCards.delete(id);
-    if (first?.dataset.eventSeq) state.userMessageLabels.delete(Number(first.dataset.eventSeq));
+    for (const [id, card] of state.toolCards) if (card.root === first) deleteMapState("toolCards", id);
+    if (first?.dataset.eventSeq) deleteMapState("userMessageLabels", Number(first.dataset.eventSeq));
     first?.remove();
   }
 }
@@ -1416,7 +1407,7 @@ function startTool(event) {
   root.append(header, timing, body, toggle); ui.transcript.append(root); trimTranscript();
   const timeout = args.timeoutMs !== undefined ? Math.max(0, Number(args.timeoutMs)) : args.timeout !== undefined ? Math.max(0, Number(args.timeout) * 1000) : -1;
   const card = { root, header, timing, body, toggle, startedAt: eventMillis(event.time), endedAt: 0, timeout, finished: false };
-  state.toolCards.set(id, card); updateToolTiming(card); return card;
+  mapState("toolCards", id, card); updateToolTiming(card); return card;
 }
 function finishTool(event) {
   const card = state.toolCards.get(event.toolCallId) || startTool(event);
@@ -1551,12 +1542,11 @@ function renderContext(result) {
   }
   while (state.contextEntries.length > shared) {
     const removed = state.contextEntries.pop();
-    if (removed.kind === "toolCall") state.toolCards.delete(String(removed.toolCall.id || ""));
+    if (removed.kind === "toolCall") deleteMapState("toolCards", String(removed.toolCall.id || ""));
     ui.transcript.lastElementChild?.remove();
   }
   for (let index = shared; index < entries.length; index++) appendContextEntry(entries[index]);
-  state.contextCapturedAt = capturedAt;
-  state.contextEntries = entries;
+  patchState({ contextCapturedAt: capturedAt, contextEntries: entries });
   setLive("", "");
   if (shared < entries.length) scrollBottom();
 }
@@ -1564,7 +1554,7 @@ function renderContext(result) {
 function renderEvents(result) {
   let added = false;
   for (const event of result.events || []) {
-    state.lastSeq = Math.max(state.lastSeq, Number(event.seq) || 0);
+    patchState({ lastSeq: Math.max(state.lastSeq, Number(event.seq) || 0) });
     if (event.type === "user") {
       const label = event.delivery === "steer" ? "You · Steer" : event.delivery === "followUp" ? "You · Later" : "You";
       appendMessage("user", label, event.text, event.seq);
@@ -1587,7 +1577,7 @@ setInterval(() => { for (const card of state.toolCards.values()) if (!card.finis
 
 async function newThread(destination, model) {
   try {
-    const result = await api("POST", "/v1/sessions", { requestId: crypto.randomUUID(), destination, model });
+    const result = await api(API.createSession.method, API.createSession.path(), { requestId: crypto.randomUUID(), destination, model });
     selectThread(result.session); closeDrawer();
   } catch (error) { console.error(error); }
 }
@@ -1770,16 +1760,15 @@ class ThreadStartMenu {
 async function loadThreadStarts() {
   if (!threadStartMenu) threadStartMenu = new ThreadStartMenu(ui.newThreadButtons);
   try {
-    const starts = await api("GET", "/v1/thread-starts");
-    if (starts.home) state.home = starts.home;
-    state.threadStarts = starts.destinations || [];
+    const starts = await api(API.threadStarts.method, API.threadStarts.path());
+    patchState({ ...(starts.home ? { home: starts.home } : {}), threadStarts: starts.destinations || [] });
     threadStartMenu.setDestinations(state.threadStarts);
   } catch (error) { console.error("Could not load thread destinations", error); }
 }
 async function archiveThread(session) {
   if (!state.archiveSupported) return false;
   try {
-    await api("DELETE", `/v1/sessions/${session.id}`);
+    await api(API.archiveSession.method, API.archiveSession.path({ sessionId: session.id }));
     if (state.selectedId === session.id) clearSelection();
     await poll();
     return true;
@@ -1787,8 +1776,8 @@ async function archiveThread(session) {
 }
 async function unarchiveThread(session) {
   try {
-    const result = await api("POST", `/v1/sessions/${session.id}/unarchive`, {});
-    state.archivedOlder = state.archivedOlder.filter((older) => older.id !== session.id);
+    const result = await api(API.unarchiveSession.method, API.unarchiveSession.path({ sessionId: session.id }), {});
+    patchState({ archivedOlder: state.archivedOlder.filter((older) => older.id !== session.id) });
     if (result.session) selectThread(result.session);
     await poll();
   } catch (error) { console.error(error); }
@@ -1812,7 +1801,11 @@ async function mutateQueuedMessage(message, actions, method, suffix, onSuccess) 
   if (!id || !message?.id) return;
   setQueuedActionsEnabled(actions, false);
   try {
-    const result = await api(method, `/v1/sessions/${id}/queue/${message.id}${suffix}`, method === "POST" ? {} : undefined);
+    const result = await api(
+      method,
+      (suffix ? API.queueSteer : API.queueItem).path({ sessionId: id, workId: message.id }),
+      method === "POST" ? {} : undefined,
+    );
     if (result.session) {
       mergeSession(result.session);
       if (state.selectedId === id) applySelectedSession(result.session);
@@ -1842,7 +1835,7 @@ async function runCommand(command) {
   saveDraft(id, "");
   const action = beginAction(id, "command");
   try {
-    const result = await api("POST", `/v1/sessions/${id}/command`, { requestId: crypto.randomUUID(), name: command.name, args }, 130000);
+    const result = await api(API.sessionCommand.method, API.sessionCommand.path({ sessionId: id }), { requestId: crypto.randomUUID(), name: command.name, args }, 130000);
     finishAction(action);
     if (result.session) { mergeSession(result.session); if (state.selectedId === id) applySelectedSession(result.session); }
   } catch (error) {
@@ -1866,12 +1859,12 @@ async function sendPrompt(delivery = "followUp") {
   const body = { requestId: crypto.randomUUID(), text: message, delivery };
   ui.prompt.value = "";
   saveDraft(id, "");
-  state.attachmentGeneration++; state.attachments = []; renderAttachments();
+  patchState({ attachmentGeneration: state.attachmentGeneration + 1, attachments: [] }); renderAttachments();
   const action = beginAction(id, "send");
   try {
     let accepted;
-    try { accepted = await api("POST", `/v1/sessions/${id}/prompt`, body); }
-    catch { await new Promise((resolve) => setTimeout(resolve, 500)); accepted = await api("POST", `/v1/sessions/${id}/prompt`, body); }
+    try { accepted = await api(API.sessionPrompt.method, API.sessionPrompt.path({ sessionId: id }), body); }
+    catch { await new Promise((resolve) => setTimeout(resolve, 500)); accepted = await api(API.sessionPrompt.method, API.sessionPrompt.path({ sessionId: id }), body); }
     finishAction(action);
     if (accepted.session) {
       mergeSession(accepted.session);
@@ -1881,7 +1874,7 @@ async function sendPrompt(delivery = "followUp") {
     finishAction(action);
     if (state.selectedId === id) {
       if (!ui.prompt.value.trim()) { ui.prompt.value = text; saveDraft(id, text); }
-      state.attachments = [...attachments, ...state.attachments]; renderAttachments();
+      patchState({ attachments: [...attachments, ...state.attachments] }); renderAttachments();
     }
     console.error(error);
   } finally { updateChrome(); poll(); }
@@ -1891,7 +1884,7 @@ async function abortSelected() {
   const id = state.selectedId;
   const action = beginAction(id, "abort");
   try {
-    const result = await api("POST", `/v1/sessions/${id}/abort`, {});
+    const result = await api(API.sessionAbort.method, API.sessionAbort.path({ sessionId: id }), {});
     finishAction(action);
     if (result.session) {
       mergeSession(result.session);
@@ -1905,11 +1898,11 @@ async function abortSelected() {
 
 function openSettings() {
   if (!state.selectedId) return;
-  state.settingsOpen = true; ui.settings.hidden = false; ui.settingsScrim.hidden = false;
+  patchState({ settingsOpen: true }); ui.settings.hidden = false; ui.settingsScrim.hidden = false;
   requestAnimationFrame(() => ui.settings.classList.add("open")); updateChrome(); loadSettings();
 }
 function closeSettings() {
-  state.settingsOpen = false; ui.settings.classList.remove("open"); ui.settingsScrim.hidden = true;
+  patchState({ settingsOpen: false }); ui.settings.classList.remove("open"); ui.settingsScrim.hidden = true;
   setTimeout(() => { if (!state.settingsOpen) ui.settings.hidden = true; }, 180);
 }
 async function loadSettings() {
@@ -1919,7 +1912,7 @@ async function loadSettings() {
   ui.thinking.replaceChildren(new Option("Loading…", ""));
   ui.speed.replaceChildren(new Option("Loading…", ""));
   try {
-    const { settings } = await api("GET", `/v1/sessions/${id}/settings`);
+    const { settings } = await api(API.sessionSettings.method, API.sessionSettings.path({ sessionId: id }));
     if (!state.settingsOpen || id !== state.selectedId) return;
     ui.model.replaceChildren();
     for (const [label, common] of [["Common models", true], ["Uncommon models", false]]) {
@@ -1950,7 +1943,7 @@ async function loadSettings() {
 async function updateSettings(body) {
   const id = state.selectedId; if (!id) return;
   ui.model.disabled = true; ui.thinking.disabled = true; ui.speed.disabled = true;
-  try { await api("PUT", `/v1/sessions/${id}/settings`, body); await loadSettings(); }
+  try { await api(API.updateSessionSettings.method, API.updateSessionSettings.path({ sessionId: id }), body); await loadSettings(); }
   catch (error) { console.error(error); loadSettings(); }
 }
 
@@ -1960,7 +1953,7 @@ ui.drawerScrim.addEventListener("click", closeDrawer);
 ui.settingsButton.addEventListener("click", openSettings);
 $("close-settings").addEventListener("click", closeSettings);
 ui.settingsScrim.addEventListener("click", closeSettings);
-ui.scrollback.addEventListener("scroll", () => { state.followTail = nearConversationBottom(); }, { passive: true });
+ui.scrollback.addEventListener("scroll", () => { patchState({ followTail: nearConversationBottom() }); }, { passive: true });
 ui.attach.addEventListener("click", () => ui.filePicker.click());
 ui.pasteText.addEventListener("click", openPasteTextDialog);
 ui.voice.addEventListener("click", toggleVoice);

@@ -1,0 +1,306 @@
+import { mkdirSync } from "node:fs";
+import { createRequire } from "node:module";
+import { dirname } from "node:path";
+import type { DatabaseSync } from "node:sqlite";
+import type { Account, BudgetClass, DemandSnapshot, FailureKind, LaneSpec, LeaseKind, Run, RunSource, RunState } from "./domain.js";
+
+const require = createRequire(import.meta.url);
+const SqliteDatabase: new (path: string) => DatabaseSync =
+  typeof (globalThis as { Bun?: unknown }).Bun === "undefined"
+    ? (require("node:sqlite") as { DatabaseSync: new (path: string) => DatabaseSync }).DatabaseSync
+    : (require("bun:sqlite") as { Database: new (path: string) => DatabaseSync }).Database;
+
+export const SCHEMA_VERSION = 1;
+export const SCHEMA = `
+CREATE TABLE meta (version INTEGER NOT NULL) STRICT;
+INSERT INTO meta VALUES (1);
+CREATE TABLE account (
+  id TEXT PRIMARY KEY,
+  provider TEXT NOT NULL CHECK (provider IN ('openai-codex','anthropic')),
+  label TEXT,
+  enabled INTEGER NOT NULL DEFAULT 1 CHECK (enabled IN (0,1)),
+  cooldown_until INTEGER,
+  concurrency INTEGER NOT NULL DEFAULT 1 CHECK (concurrency > 0),
+  last_admitted_meter_at INTEGER,
+  created_at INTEGER NOT NULL
+) STRICT;
+CREATE TABLE meter (
+  account_id TEXT NOT NULL REFERENCES account(id) ON DELETE CASCADE,
+  meter_id TEXT NOT NULL,
+  observed_at INTEGER NOT NULL,
+  used_percent REAL NOT NULL CHECK (used_percent >= 0 AND used_percent <= 100),
+  reset_at INTEGER,
+  PRIMARY KEY(account_id,meter_id,observed_at)
+) STRICT;
+CREATE INDEX meter_latest ON meter(account_id,meter_id,observed_at DESC);
+CREATE TABLE control (key TEXT PRIMARY KEY, value TEXT NOT NULL) STRICT;
+INSERT INTO control VALUES ('launches','enabled');
+CREATE TABLE lane (
+  id TEXT PRIMARY KEY,
+  prompt TEXT NOT NULL,
+  cwd TEXT NOT NULL,
+  profile TEXT NOT NULL,
+  weight REAL NOT NULL CHECK (weight > 0),
+  fixed_demand INTEGER,
+  priority INTEGER NOT NULL DEFAULT 0,
+  doctrine_url TEXT,
+  opening_probe TEXT,
+  updated_at INTEGER NOT NULL
+) STRICT;
+CREATE TABLE demand_snapshot (
+  revision TEXT PRIMARY KEY,
+  captured_at INTEGER NOT NULL,
+  body TEXT NOT NULL
+) STRICT;
+CREATE TABLE room (
+  id TEXT PRIMARY KEY,
+  name TEXT NOT NULL UNIQUE,
+  prompt TEXT NOT NULL,
+  coordinator_prompt TEXT,
+  cwd TEXT NOT NULL,
+  profile TEXT NOT NULL,
+  budget TEXT NOT NULL CHECK (budget IN ('background','force')),
+  desired_members INTEGER NOT NULL CHECK (desired_members >= 0),
+  closed_at INTEGER,
+  created_at INTEGER NOT NULL,
+  updated_at INTEGER NOT NULL
+) STRICT;
+CREATE TABLE run (
+  id TEXT PRIMARY KEY,
+  source TEXT NOT NULL CHECK (source IN ('direct','lane','room')),
+  source_id TEXT,
+  room_id TEXT REFERENCES room(id),
+  member_name TEXT,
+  prompt TEXT NOT NULL,
+  cwd TEXT NOT NULL,
+  profile TEXT NOT NULL,
+  budget TEXT NOT NULL CHECK (budget IN ('background','force')),
+  account_id TEXT REFERENCES account(id),
+  provider TEXT,
+  model TEXT,
+  thinking TEXT,
+  session_file TEXT,
+  state TEXT NOT NULL CHECK (state IN ('queued','starting','running','parked','done','failed','aborted')),
+  failure_kind TEXT CHECK (failure_kind IN ('provider','account','infrastructure','operator','task')),
+  result TEXT,
+  worker_unit TEXT,
+  release_path TEXT,
+  created_at INTEGER NOT NULL,
+  started_at INTEGER,
+  updated_at INTEGER NOT NULL,
+  progress_at INTEGER,
+  ended_at INTEGER
+) STRICT;
+CREATE INDEX run_state ON run(state,created_at);
+CREATE INDEX run_source ON run(source,source_id,state);
+CREATE INDEX run_room ON run(room_id,state);
+CREATE TABLE lease (
+  id TEXT PRIMARY KEY,
+  account_id TEXT NOT NULL REFERENCES account(id) ON DELETE CASCADE,
+  kind TEXT NOT NULL CHECK (kind IN ('fleet','interactive','voice')),
+  run_id TEXT,
+  started_at INTEGER NOT NULL,
+  heartbeat_at INTEGER NOT NULL,
+  ended_at INTEGER
+) STRICT;
+CREATE INDEX lease_active ON lease(account_id,ended_at,heartbeat_at);
+CREATE TABLE message (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  room_id TEXT NOT NULL REFERENCES room(id) ON DELETE CASCADE,
+  sender_run_id TEXT,
+  target_run_id TEXT,
+  body TEXT NOT NULL,
+  wake INTEGER NOT NULL DEFAULT 0 CHECK (wake IN (0,1)),
+  created_at INTEGER NOT NULL,
+  delivered_at INTEGER,
+  UNIQUE(id,target_run_id)
+) STRICT;
+CREATE INDEX message_pending ON message(target_run_id,delivered_at,id);
+CREATE TABLE live_state (
+  run_id TEXT PRIMARY KEY REFERENCES run(id) ON DELETE CASCADE,
+  activity TEXT NOT NULL,
+  text TEXT NOT NULL,
+  thinking TEXT NOT NULL,
+  tool TEXT,
+  updated_at INTEGER NOT NULL
+) STRICT;
+CREATE TABLE usage_hour (
+  account_id TEXT NOT NULL,
+  hour INTEGER NOT NULL,
+  source TEXT NOT NULL,
+  run_id TEXT NOT NULL DEFAULT '',
+  model TEXT NOT NULL DEFAULT '',
+  tokens REAL NOT NULL,
+  PRIMARY KEY(account_id,hour,source,run_id,model)
+) STRICT;
+`;
+
+function maybe<T>(value: T | null): T | undefined { return value === null ? undefined : value; }
+
+export class Store {
+  readonly db: DatabaseSync;
+
+  private constructor(db: DatabaseSync) { this.db = db; }
+
+  static open(path: string): Store {
+    if (path !== ":memory:") mkdirSync(dirname(path), { recursive: true });
+    const db = new SqliteDatabase(path);
+    db.exec("PRAGMA busy_timeout=5000; PRAGMA journal_mode=WAL; PRAGMA synchronous=NORMAL; PRAGMA foreign_keys=ON");
+    const meta = db.prepare("SELECT name FROM sqlite_master WHERE type='table' AND name='meta'").get();
+    if (!meta) {
+      const old = db.prepare("SELECT name FROM sqlite_master WHERE type='table' AND name='task'").get();
+      if (old) { db.close(); throw new Error("old orchestrator ledger requires `pi-orchestrator transition`"); }
+      db.exec(SCHEMA);
+    }
+    const row = db.prepare("SELECT version FROM meta").get() as { version: number };
+    if (row.version !== SCHEMA_VERSION) { db.close(); throw new Error(`unsupported orchestrator schema ${row.version}`); }
+    return new Store(db);
+  }
+
+  close(): void { this.db.close(); }
+  transaction<T>(fn: () => T): T {
+    this.db.exec("BEGIN IMMEDIATE");
+    try { const result=fn(); this.db.exec("COMMIT"); return result; }
+    catch(error){ this.db.exec("ROLLBACK"); throw error; }
+  }
+
+  control(key: string): string | undefined {
+    return maybe((this.db.prepare("SELECT value FROM control WHERE key=?").get(key) as { value: string } | undefined)?.value ?? null);
+  }
+  setControl(key: string, value: string): void {
+    this.db.prepare("INSERT INTO control(key,value) VALUES(?,?) ON CONFLICT(key) DO UPDATE SET value=excluded.value").run(key,value);
+  }
+
+  accounts(): Account[] {
+    return (this.db.prepare("SELECT * FROM account ORDER BY id").all() as any[]).map((r) => ({
+      id:r.id, provider:r.provider, label:maybe(r.label), enabled:!!r.enabled,
+      cooldownUntil:maybe(r.cooldown_until), concurrency:r.concurrency,
+    }));
+  }
+  account(id: string): Account | undefined { return this.accounts().find((a) => a.id === id); }
+  upsertAccount(input: Omit<Account,"enabled"|"concurrency"> & Partial<Pick<Account,"enabled"|"concurrency">>): void {
+    this.db.prepare(`INSERT INTO account(id,provider,label,enabled,concurrency,created_at) VALUES(?,?,?,?,?,?)
+      ON CONFLICT(id) DO UPDATE SET provider=excluded.provider,label=COALESCE(excluded.label,account.label),enabled=excluded.enabled,concurrency=excluded.concurrency`)
+      .run(input.id,input.provider,input.label??null,input.enabled===false?0:1,input.concurrency??1,Date.now());
+  }
+  setCooldown(id: string, until?: number): void { this.db.prepare("UPDATE account SET cooldown_until=? WHERE id=?").run(until??null,id); }
+  setAccountEnabled(id:string,enabled:boolean):void{this.db.prepare("UPDATE account SET enabled=? WHERE id=?").run(enabled?1:0,id);}
+  removeAccount(id: string): void { this.db.prepare("DELETE FROM account WHERE id=?").run(id); }
+
+  recordMeter(accountId:string,meterId:string,usedPercent:number,resetAt:number|undefined,observedAt=Date.now()): void {
+    this.db.prepare("INSERT OR IGNORE INTO meter VALUES(?,?,?,?,?)").run(accountId,meterId,observedAt,usedPercent,resetAt??null);
+    this.db.prepare(`DELETE FROM meter WHERE account_id=? AND meter_id=? AND observed_at NOT IN
+      (SELECT observed_at FROM meter WHERE account_id=? AND meter_id=? ORDER BY observed_at DESC LIMIT 96)`)
+      .run(accountId,meterId,accountId,meterId);
+  }
+  meters(accountId?:string): any[] {
+    return (accountId
+      ? this.db.prepare("SELECT * FROM meter WHERE account_id=? ORDER BY observed_at DESC").all(accountId)
+      : this.db.prepare("SELECT * FROM meter ORDER BY observed_at DESC").all()) as any[];
+  }
+  latestMeters(accountId:string): any[] {
+    return this.db.prepare(`SELECT m.* FROM meter m JOIN
+      (SELECT meter_id,MAX(observed_at) at FROM meter WHERE account_id=? GROUP BY meter_id) x
+      ON x.meter_id=m.meter_id AND x.at=m.observed_at WHERE m.account_id=?`).all(accountId,accountId) as any[];
+  }
+  latestReading(accountId:string,meterId:string):{at:number;usedPercent:number;resetAt?:number}|undefined{
+    const row=this.db.prepare("SELECT * FROM meter WHERE account_id=? AND meter_id=? ORDER BY observed_at DESC LIMIT 1").get(accountId,meterId) as any;
+    return row?{at:row.observed_at,usedPercent:row.used_percent,resetAt:maybe(row.reset_at)}:undefined;
+  }
+  recordReading(accountId:string,meterId:string,reading:{at:number;usedPercent:number;resetAt?:number}):void{
+    this.recordMeter(accountId,meterId,reading.usedPercent,reading.resetAt,reading.at);
+  }
+
+  reconcileLanes(lanes:readonly LaneSpec[], at=Date.now()): void {
+    this.transaction(() => {
+      const ids=new Set(lanes.map((lane)=>lane.id));
+      for (const lane of lanes) this.db.prepare(`INSERT INTO lane(id,prompt,cwd,profile,weight,fixed_demand,priority,doctrine_url,opening_probe,updated_at)
+        VALUES(?,?,?,?,?,?,?,?,?,?) ON CONFLICT(id) DO UPDATE SET prompt=excluded.prompt,cwd=excluded.cwd,profile=excluded.profile,
+        weight=excluded.weight,fixed_demand=excluded.fixed_demand,priority=excluded.priority,doctrine_url=excluded.doctrine_url,
+        opening_probe=excluded.opening_probe,updated_at=excluded.updated_at`)
+        .run(lane.id,lane.prompt,lane.cwd,lane.profile,lane.weight,lane.fixedDemand??null,lane.priority??0,lane.doctrineUrl??null,lane.openingProbe??null,at);
+      for (const row of this.db.prepare("SELECT id FROM lane").all() as {id:string}[]) if(!ids.has(row.id)) this.db.prepare("DELETE FROM lane WHERE id=?").run(row.id);
+    });
+  }
+  lanes(): LaneSpec[] { return (this.db.prepare("SELECT * FROM lane ORDER BY priority DESC,weight DESC,id").all() as any[]).map((r)=>({id:r.id,prompt:r.prompt,cwd:r.cwd,profile:r.profile,weight:r.weight,fixedDemand:maybe(r.fixed_demand),priority:r.priority,doctrineUrl:maybe(r.doctrine_url),openingProbe:maybe(r.opening_probe)})); }
+  lane(id:string):LaneSpec|undefined{return this.lanes().find((x)=>x.id===id);}
+  saveSnapshot(snapshot:DemandSnapshot,at=Date.now()):void{this.transaction(()=>{this.db.prepare("INSERT OR REPLACE INTO demand_snapshot VALUES(?,?,?)").run(snapshot.revision,at,JSON.stringify(snapshot));for(const [id,demand] of Object.entries(snapshot.lanes))if(demand.priority!==undefined)this.db.prepare("UPDATE lane SET priority=?,updated_at=? WHERE id=?").run(demand.priority,at,id);});}
+  latestSnapshot():any|undefined{const row=this.db.prepare("SELECT body FROM demand_snapshot ORDER BY captured_at DESC LIMIT 1").get() as {body:string}|undefined;return row?JSON.parse(row.body):undefined;}
+
+  createRuns(input:{count:number;source:RunSource;sourceId?:string;roomId?:string;prompt:string;cwd:string;profile:string;budget:BudgetClass;memberNames?:string[]}):string[]{
+    const now=Date.now(),ids:string[]=[];
+    this.transaction(()=>{for(let i=0;i<input.count;i++){const id=crypto.randomUUID();ids.push(id);this.db.prepare(`INSERT INTO run(id,source,source_id,room_id,member_name,prompt,cwd,profile,budget,state,created_at,updated_at)
+      VALUES(?,?,?,?,?,?,?,?,?,'queued',?,?)`).run(id,input.source,input.sourceId??null,input.roomId??null,input.memberNames?.[i]??null,input.prompt,input.cwd,input.profile,input.budget,now,now);}});
+    return ids;
+  }
+  run(id:string):Run|undefined{const r=this.db.prepare("SELECT * FROM run WHERE id=?").get(id) as any;return r?this.mapRun(r):undefined;}
+  runs(states?:readonly RunState[]):Run[]{const rows=states?.length?this.db.prepare(`SELECT * FROM run WHERE state IN (${states.map(()=>'?').join(',')}) ORDER BY created_at`).all(...states):this.db.prepare("SELECT * FROM run ORDER BY created_at").all();return (rows as any[]).map((r)=>this.mapRun(r));}
+  admissionQueue():Run[]{
+    const rows=this.db.prepare(`SELECT run.* FROM run LEFT JOIN lane ON run.source='lane' AND lane.id=run.source_id
+      WHERE run.state='queued'
+      ORDER BY CASE run.budget WHEN 'force' THEN 0 ELSE 1 END,
+        CASE run.source WHEN 'direct' THEN 0 WHEN 'room' THEN 1 ELSE 2 END,
+        COALESCE(lane.priority,0) DESC,
+        CASE WHEN lane.id IS NULL THEN 0 ELSE
+          CAST((SELECT count(*) FROM run active WHERE active.source='lane' AND active.source_id=run.source_id AND active.state IN ('starting','running','parked')) AS REAL)/lane.weight
+        END,
+        COALESCE(lane.weight,0) DESC,run.created_at,run.id`).all();
+    return (rows as any[]).map((row)=>this.mapRun(row));
+  }
+  private mapRun(r:any):Run{return{id:r.id,source:r.source,sourceId:maybe(r.source_id),roomId:maybe(r.room_id),memberName:maybe(r.member_name),prompt:r.prompt,cwd:r.cwd,profile:r.profile,budget:r.budget,accountId:maybe(r.account_id),provider:maybe(r.provider),model:maybe(r.model),thinking:maybe(r.thinking),sessionFile:maybe(r.session_file),state:r.state,failureKind:maybe(r.failure_kind),result:maybe(r.result),workerUnit:maybe(r.worker_unit),releasePath:maybe(r.release_path),createdAt:r.created_at,startedAt:maybe(r.started_at),updatedAt:r.updated_at,progressAt:maybe(r.progress_at),endedAt:maybe(r.ended_at)};}
+  assignRun(id:string,assignment:{accountId:string;provider:string;model:string;thinking?:string;unit:string;releasePath:string},at=Date.now()):boolean{
+    return this.transaction(()=>{const changed=this.db.prepare(`UPDATE run SET account_id=?,provider=?,model=?,thinking=?,worker_unit=?,release_path=?,state='starting',started_at=COALESCE(started_at,?),updated_at=?,progress_at=? WHERE id=? AND state='queued'`)
+      .run(assignment.accountId,assignment.provider,assignment.model,assignment.thinking??null,assignment.unit,assignment.releasePath,at,at,at,id).changes;if(changed!==1)return false;this.createLease(`run:${id}`,assignment.accountId,"fleet",id,at);return true;});
+  }
+  updateRun(id:string,patch:{state?:RunState;sessionFile?:string;progressAt?:number;result?:string;failureKind?:FailureKind;workerUnit?:string},at=Date.now()):void{
+    const current=this.run(id);if(!current)throw new Error(`unknown run ${id}`);const state=patch.state??current.state;const terminal=["done","failed","aborted"].includes(state);
+    this.db.prepare(`UPDATE run SET state=?,session_file=COALESCE(?,session_file),progress_at=COALESCE(?,progress_at),result=COALESCE(?,result),failure_kind=COALESCE(?,failure_kind),worker_unit=COALESCE(?,worker_unit),updated_at=?,ended_at=? WHERE id=?`)
+      .run(state,patch.sessionFile??null,patch.progressAt??null,patch.result??null,patch.failureKind??null,patch.workerUnit??null,at,terminal?at:null,id);
+    if(terminal)this.endLease(`run:${id}`,at);
+  }
+  activeCount(source?:RunSource,sourceId?:string):number{let sql="SELECT COUNT(*) n FROM run WHERE state IN ('queued','starting','running','parked')",args:any[]=[];if(source){sql+=" AND source=?";args.push(source);}if(sourceId){sql+=" AND source_id=?";args.push(sourceId);}return Number((this.db.prepare(sql).get(...args) as any).n);}
+
+  createLease(id:string,accountId:string,kind:LeaseKind,runId?:string,at=Date.now()):void{this.db.prepare(`INSERT INTO lease(id,account_id,kind,run_id,started_at,heartbeat_at,ended_at) VALUES(?,?,?,?,?,?,NULL)
+    ON CONFLICT(id) DO UPDATE SET account_id=excluded.account_id,kind=excluded.kind,run_id=excluded.run_id,heartbeat_at=excluded.heartbeat_at,ended_at=NULL`).run(id,accountId,kind,runId??null,at,at);}
+  heartbeatLease(id:string,at=Date.now()):void{this.db.prepare("UPDATE lease SET heartbeat_at=? WHERE id=? AND ended_at IS NULL").run(at,id);}
+  endLease(id:string,at=Date.now()):void{this.db.prepare("UPDATE lease SET ended_at=? WHERE id=? AND ended_at IS NULL").run(at,id);}
+  activeLeases(accountId?:string,maxAgeMs=120000,now=Date.now()):any[]{const cutoff=now-maxAgeMs;return (accountId?this.db.prepare("SELECT * FROM lease WHERE account_id=? AND ended_at IS NULL AND heartbeat_at>=?").all(accountId,cutoff):this.db.prepare("SELECT * FROM lease WHERE ended_at IS NULL AND heartbeat_at>=?").all(cutoff)) as any[];}
+
+  createRoom(input:{name:string;prompt:string;coordinatorPrompt?:string;cwd:string;profile:string;budget:BudgetClass;members:number}):{id:string;runIds:string[]}{
+    const id=crypto.randomUUID(),now=Date.now(),runIds:string[]=[];
+    const names=Array.from({length:input.members},(_,i)=>i===0&&input.coordinatorPrompt?"coordinator":`member-${i+1}`);
+    this.transaction(()=>{
+      this.db.prepare("INSERT INTO room VALUES(?,?,?,?,?,?,?,?,NULL,?,?)").run(id,input.name,input.prompt,input.coordinatorPrompt??null,input.cwd,input.profile,input.budget,input.members,now,now);
+      const insert=this.db.prepare(`INSERT INTO run(id,source,source_id,room_id,member_name,prompt,cwd,profile,budget,state,created_at,updated_at) VALUES(?,'room',?,?,?,?,?,?,?,'queued',?,?)`);
+      for(let i=0;i<input.members;i++){const runId=crypto.randomUUID();runIds.push(runId);insert.run(runId,id,id,names[i],names[i]==="coordinator"?input.coordinatorPrompt!:input.prompt,input.cwd,input.profile,input.budget,now,now);}
+    });
+    return{id,runIds};
+  }
+  rooms():any[]{return this.db.prepare("SELECT * FROM room ORDER BY created_at").all() as any[];}
+  room(idOrName:string):any|undefined{return this.db.prepare("SELECT * FROM room WHERE id=? OR name=?").get(idOrName,idOrName) as any;}
+  closeRoom(idOrName:string,at=Date.now()):void{
+    const room=this.room(idOrName);if(!room)throw new Error(`unknown room ${idOrName}`);
+    this.transaction(()=>{
+      const active=this.runs(["starting","running","parked"]).filter((run)=>run.roomId===room.id);
+      this.db.prepare("UPDATE room SET closed_at=?,desired_members=0,updated_at=? WHERE id=?").run(at,at,room.id);
+      this.db.prepare("UPDATE run SET state='aborted',failure_kind='operator',result='room closed',updated_at=?,ended_at=? WHERE room_id=? AND state IN ('queued','parked')").run(at,at,room.id);
+      for(const run of active)this.db.prepare("INSERT INTO control(key,value) VALUES(?,?) ON CONFLICT(key) DO UPDATE SET value=excluded.value").run(`abort:${run.id}`,"room closed");
+    });
+  }
+  postMessage(input:{roomId:string;senderRunId?:string;targetRunId?:string;body:string;wake?:boolean},at=Date.now()):number{
+    const insert=this.db.prepare("INSERT INTO message(room_id,sender_run_id,target_run_id,body,wake,created_at) VALUES(?,?,?,?,?,?)");
+    if(input.targetRunId)return Number(insert.run(input.roomId,input.senderRunId??null,input.targetRunId,input.body,1,at).lastInsertRowid);
+    let id=0;
+    this.transaction(()=>{
+      id=Number(insert.run(input.roomId,input.senderRunId??null,null,input.body,0,at).lastInsertRowid);
+      if(input.wake)for(const run of this.runs(["starting","running","parked"]).filter((run)=>run.roomId===input.roomId&&run.id!==input.senderRunId))insert.run(input.roomId,input.senderRunId??null,run.id,input.body,1,at);
+    });
+    return id;
+  }
+  roomMessages(roomId:string,after=0):any[]{return this.db.prepare("SELECT * FROM message WHERE room_id=? AND id>? AND target_run_id IS NULL ORDER BY id LIMIT 200").all(roomId,after) as any[];}
+  pendingMessages(runId:string):any[]{return this.db.prepare("SELECT * FROM message WHERE delivered_at IS NULL AND target_run_id=? ORDER BY id").all(runId) as any[];}
+  deliverMessage(id:number,at=Date.now()):void{this.db.prepare("UPDATE message SET delivered_at=? WHERE id=? AND delivered_at IS NULL").run(at,id);}
+
+  setLive(runId:string,input:{activity:string;text?:string;thinking?:string;tool?:string},at=Date.now()):void{this.db.prepare(`INSERT INTO live_state(run_id,activity,text,thinking,tool,updated_at) VALUES(?,?,?,?,?,?) ON CONFLICT(run_id) DO UPDATE SET activity=excluded.activity,text=excluded.text,thinking=excluded.thinking,tool=excluded.tool,updated_at=excluded.updated_at`).run(runId,input.activity,input.text??"",input.thinking??"",input.tool??null,at);}
+  live():any[]{return this.db.prepare("SELECT * FROM live_state").all() as any[];}
+}

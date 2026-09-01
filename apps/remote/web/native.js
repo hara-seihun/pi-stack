@@ -1,3 +1,5 @@
+import { API } from "./api.js";
+
 "use strict";
 
 // The browser and Android builds use this same client. Capacitor injects its
@@ -24,7 +26,7 @@
     prepare: async () => {},
     select: async ({ id }) => {
       const selected = browserSnapshot(id);
-      const response = await browserFetch(`${selected.baseUrl}/v1/health`, { cache: "no-store" });
+      const response = await browserFetch(`${selected.baseUrl}${API.health.path()}`, { cache: "no-store" });
       if (!response.ok) throw new Error(`${selected.name} returned HTTP ${response.status}`);
       localStorage.setItem("kenan-environment", id);
       return selected;

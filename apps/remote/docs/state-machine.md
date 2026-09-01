@@ -32,7 +32,7 @@ any live phase -> STOPPING -> STOPPED|FAILED
 FAILED|STOPPED -> STARTING         later activation/retry
 ```
 
-Only `RUNNING -> IDLE` can ordinarily settle dispatched work. `agent_settled` in `DISPATCHING` is stale and ignored. In `RUNNING`, it starts a next-tick `get_state` check rather than settling by itself. The state-compactor aborts the low-level run before Pi reports compaction, then starts a continuation from the compaction callback. Its intermediate `agent_settled` therefore arrives before `compaction_start`; Pi's state already reports the compaction, so the check keeps the work and runtime alive. During `ABORTING`, the abort handler owns the phase transition, while Pi may finish steering it already accepted before `abort()` returns. `STOPPING` suppresses output. An assistant message with `stopReason=error|aborted` is held until confirmed settlement: a later successful assistant message in the same run clears it, so automatic retry, account failover, or compaction does not expose a false terminal failure. If the run settles without recovery, the provider error remains in the supervisor event ledger for voice and diagnosis. The interactive view comes from Pi's model context rather than this event projection.
+Only `RUNNING -> IDLE` can ordinarily settle dispatched work. `agent_settled` in `DISPATCHING` is stale and ignored. In `RUNNING`, it starts a next-tick `get_state` check rather than settling by itself. The 250,000-token compaction trigger aborts the low-level run before Pi reports compaction, then starts a continuation from the compaction callback. Its intermediate `agent_settled` therefore arrives before `compaction_start`; Pi's state already reports the compaction, so the check keeps the work and runtime alive. During `ABORTING`, the abort handler owns the phase transition, while Pi may finish steering it already accepted before `abort()` returns. `STOPPING` suppresses output. An assistant message with `stopReason=error|aborted` is held until confirmed settlement: a later successful assistant message in the same run clears it, so automatic retry, account failover, or compaction does not expose a false terminal failure. If the run settles without recovery, the provider error remains in the supervisor event ledger for voice and diagnosis. The interactive view comes from Pi's model context rather than this event projection.
 
 ## Durable work
 
@@ -66,6 +66,8 @@ The normal runtime termination path is the idle reaper. After fifteen minutes in
 ## Revision ordering
 
 Every externally meaningful lifecycle mutation increments `sessions.revision`. Session snapshots in list, event, prompt, and abort responses carry this revision.
+
+The browser stores client state in `web/state-machine.js`. Events pass through one pure reducer. Collection events clone maps and sets rather than mutating shared objects. Declared effects run only after the reducer publishes the new state. `app.js` reads through a proxy that rejects direct property writes, so network handlers and UI callbacks cannot bypass the reducer.
 
 Both clients:
 
@@ -111,9 +113,9 @@ Autonomous orchestrator agents are outside this state machine. They have no supe
 
 The observation surface is therefore a pure projection with three rules:
 
-1. Pi Remote never writes agent lifecycle state. Its only write is touching a run's `watch` marker, which asks the owning agent host to publish partial output; losing that write degrades to message-granular updates, never to wrong state.
+1. Pi Remote never writes agent lifecycle state. Workers publish live state through the orchestrator daemon, and settled history comes from the Pi session JSONL.
 2. An observed agent's transcript is applied only to the selection generation that requested it, exactly as for threads, and a per-run byte cursor makes replay incremental. Opening an agent leaves thread selection untouched, and opening a thread ends observation.
-3. The list projects only the `running` rows of the ledger. Settlement is not a client state transition: a settled run simply leaves the list, and one already open stays open because observation fetches it by id and renders whatever terminal result the ledger holds.
+3. The list projects active orchestrator runs. Settlement is not a client state transition. A settled run leaves the list, and one already open remains readable by ID.
 
 ## Core invariants
 
