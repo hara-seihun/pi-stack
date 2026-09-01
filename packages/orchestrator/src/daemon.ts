@@ -158,7 +158,7 @@ export class Daemon {
     const args=[
       "--user","--collect",`--unit=${unit}`,
       "--property=Type=exec","--property=Restart=no","--property=KillMode=mixed","--property=TimeoutStopSec=20",
-      "--property=CPUWeight=20","--property=MemoryMax=4G","--property=TasksMax=4096","--property=LimitNOFILE=1048576",
+      "--property=CPUWeight=20","--property=MemoryHigh=6G","--property=MemoryMax=8G","--property=TasksMax=4096","--property=LimitNOFILE=1048576",
       "--setenv=PI_ORCHESTRATOR_ASSIGNED=1",`--setenv=PI_ORCHESTRATOR_RUN_ID=${runId}`,
       `--setenv=PI_ORCHESTRATOR_LEDGER=${this.ledgerPath}`,
       `--setenv=PI_CODING_AGENT_DIR=${this.config.agentDir}`,

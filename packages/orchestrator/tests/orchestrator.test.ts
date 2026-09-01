@@ -81,6 +81,7 @@ describe("current orchestrator state",()=>{
       store.updateRun(id!,{state:"queued"});
       (new Daemon(store,config,"/srv/releases/current","/srv/state/ledger.sqlite3") as any).recoverWorkers();
       expect(readFileSync(capture,"utf8")).toContain("--setenv=PI_ORCHESTRATOR_LEDGER=/srv/state/ledger.sqlite3");
+      expect(readFileSync(capture,"utf8")).toContain("--property=MemoryMax=8G");
       expect(readFileSync(capture,"utf8")).toContain("/srv/releases/a/dist/cli.js");
       expect(store.run(id!)).toMatchObject({releasePath:"/srv/releases/a",state:"starting",workerUnit:"run-a"});
     }finally{store.close();process.env.PATH=previousPath;rmSync(root,{recursive:true});}
