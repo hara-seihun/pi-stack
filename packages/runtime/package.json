@@ -12,18 +12,16 @@
   "pi": {
     "extensions": [
       "./extensions/bash-timeout-guard/index.mjs",
-      "./extensions/chatgpt-pro/index.ts",
       "./extensions/publication-custody/index.mjs",
-      "./extensions/scratch-updates/index.mjs",
       "./extensions/state-compactor/index.mjs",
       "./extensions/pi-claude-code-use/extensions/index.ts"
     ]
   },
   "scripts": {
-    "test": "node --test prompt-eval/prompt-eval.test.mjs extensions/chatgpt-pro/browser.test.mjs extensions/chatgpt-pro/launcher.test.mjs extensions/pi-claude-code-use/index.test.mjs extensions/state-compactor/extension.test.mjs extensions/bash-timeout-guard/guard.test.mjs extensions/publication-custody/custody.test.mjs extensions/scratch-updates/scratch-updates.test.mjs"
+    "test": "node --test prompt-eval/prompt-eval.test.mjs extensions/pi-claude-code-use/index.test.mjs extensions/state-compactor/extension.test.mjs extensions/bash-timeout-guard/guard.test.mjs extensions/publication-custody/custody.test.mjs"
   },
   "dependencies": {
-    "playwright-core": "1.59.1"
+    "agent-browser": "0.34.0"
   },
   "peerDependencies": {
     "@earendil-works/pi-coding-agent": ">=0.84.0 <0.85.0",

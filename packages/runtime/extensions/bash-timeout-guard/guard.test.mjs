@@ -31,20 +31,21 @@ test("the environment selects the timeout and foreground policy", () => {
   assert.equal(timeoutPolicy({}).maxTimeoutSeconds, MAX_TIMEOUT_SECONDS);
   assert.equal(timeoutPolicy({ PI_BASH_TIMEOUT_MAX_SECONDS: "bad" }).maxTimeoutSeconds, MAX_TIMEOUT_SECONDS);
   assert.equal(timeoutPolicy(fleet).maxTimeoutSeconds, 55);
-  assert.equal(timeoutPolicy({ PI_BASH_TIMEOUT_MAX_SECONDS: "300" }).maxTimeoutSeconds, 55);
+  assert.equal(timeoutPolicy({ PI_BASH_TIMEOUT_MAX_SECONDS: "300" }).maxTimeoutSeconds, 300);
+  assert.equal(timeoutPolicy({ PI_BASH_TIMEOUT_MAX_SECONDS: "7200" }).maxTimeoutSeconds, 7200);
   assert.equal(timeoutPolicy(fleet).foregroundOnly, true);
   assert.equal(timeoutPolicy({}).foregroundOnly, true);
 });
 
-test("interactive sessions get a thirty-minute ceiling, autonomous ones keep 55 seconds", () => {
+test("interactive sessions default to thirty minutes and remote settings take precedence", () => {
   assert.equal(timeoutPolicy({}, true).maxTimeoutSeconds, INTERACTIVE_MAX_TIMEOUT_SECONDS);
-  assert.equal(timeoutPolicy({ PI_BASH_TIMEOUT_MAX_SECONDS: "7200" }, true).maxTimeoutSeconds, 1800);
+  assert.equal(timeoutPolicy({ PI_BASH_TIMEOUT_MAX_SECONDS: "7200" }, true).maxTimeoutSeconds, 7200);
   assert.equal(timeoutPolicy(fleet, true).maxTimeoutSeconds, 55);
 
   const remote = { PI_REMOTE_BASH_TIMEOUT_MAX_SECONDS: "300" };
   assert.equal(timeoutPolicy(remote).maxTimeoutSeconds, 300);
   assert.equal(timeoutPolicy(remote, true).maxTimeoutSeconds, 300);
-  assert.equal(timeoutPolicy({ ...remote, PI_BASH_TIMEOUT_MAX_SECONDS: "120" }).maxTimeoutSeconds, 120);
+  assert.equal(timeoutPolicy({ ...remote, PI_BASH_TIMEOUT_MAX_SECONDS: "120" }).maxTimeoutSeconds, 300);
 
   const onToolCall = load().get("tool_call");
   assert.equal(onToolCall(bashCall({ command: "ls", timeout: 1800 }), ui), undefined);

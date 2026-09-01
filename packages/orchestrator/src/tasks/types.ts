@@ -69,10 +69,9 @@ export interface TaskSpec {
   readonly opening?: readonly string[];
   /** Command run at each launch whose stdout is a JSON object; every
    * `{{key}}` placeholder in the opening messages is replaced by the
-   * object's value for that key. This is what lets an opening exchange vary
-   * per session — the math lane samples a different famous open problem for
-   * each launch so a batch of agents does not crowd one anchor. The probe
-   * runs fresh every launch (a cache would hand a whole batch the same
+   * object's value for that key. This lets an opening exchange vary per
+   * session so a batch of agents does not crowd one example. The probe runs
+   * fresh every launch (a cache would hand a whole batch the same
    * draw), and a probe failure or an unresolved placeholder fails the
    * launch loudly rather than sending a template. */
   readonly openingProbe?: string;

@@ -191,10 +191,9 @@ Three launch-side fields describe scheduling:
   account's Pi agent directory, so a replacement runner inherits the last
   verified copy instead of depending on the doctrine host during recovery.
   Concurrent launches share one fetch. The task prompt is the first user message,
-  which is the first thing compaction summarizes away; doctrine that must
-  bind for a whole shift — the math ledger's attack guide, whose anti-ladder
-  rules override even the session's opening instructions — survives only in
-  the system prompt, which compaction preserves.
+  which is the first thing compaction summarizes away. Doctrine that must bind
+  for a whole shift survives only in the system prompt, which compaction
+  preserves.
 - `opening` (`task set … --opening file1,file2`): the opening exchange. The
   host sends each file's text
   as a real user turn, in order, before the task prompt; the agent answers
@@ -204,13 +203,9 @@ Three launch-side fields describe scheduling:
   time, so a launch never changes voice because a fetch failed; reconcile the
   task manifest to pick up file edits. An opening may be a template:
   `--opening-probe CMD` names a command that runs fresh at every launch and
-  prints one JSON object whose values fill `{{key}}` placeholders. The
-  math-frontier lane samples a different famous open problem per session this
-  way because a fixed example anchored whole batches on one target. A failed
-  probe or unresolved placeholder fails the launch. Measured on the
-  math-frontier lane on 2026-08-22, the exchange moved self-assessed odds on
-  an open target from about 0.1% to 25–40%; the experiment record lives in
-  `~/data/thread-lab/_experiments/2026-08-22-erdos647-priors/`.
+  prints one JSON object whose values fill `{{key}}` placeholders. A probe can
+  vary launch-specific examples so one fixed example does not anchor a whole
+  batch. A failed probe or unresolved placeholder fails the launch.
 - `team`: one durable room with a fixed number of workers and one supervisor.
   Positive demand asks for the complete roster. The controller reconciles each
   slot independently, so an infrastructure failure replaces one session rather
@@ -365,8 +360,8 @@ touching a prompt or a task definition.
 Launch control is one lever at two scopes, both `control` rows in the ledger
 and honoured by every evaluation regardless of who restarts which process:
 `launches = enabled|paused` for the machine, `launches:<taskId> = paused` for
-one lane. `pause --except math-review` holds every other defined lane, which
-is how the fleet's whole capacity is pointed at one lane without deleting the
+one lane. `pause --except review` holds every other defined lane, which is how
+the fleet's whole capacity is pointed at one lane without deleting the
 others' definitions. A held lane is still probed — its demand is a signal
 other lanes' gates read — and running agents are never touched.
 
@@ -811,9 +806,6 @@ Three consumption modes, all exported as `pi-orchestrator/voice`:
 
 ## Operator CLI (`src/cli.ts`)
 
-Standing math lanes are enabled. Their research-session contract and the
-transcript evidence that shaped it live in
-[`agent-research-capability.md`](../../../math-research/docs/agent-research-capability.md).
 The deployed task ledger is the source of truth for definitions. Host task
 manifests own the active lanes, their prompts, and their demand. This package
 owns the scheduling semantics and does not carry a second list of what a host

@@ -35,8 +35,6 @@ PI_STACK_REMOTE_PACKAGE="$remote" \
 PI_STACK_CLAUDE_CODE_USE_PACKAGE="${PI_STACK_CLAUDE_CODE_USE_PACKAGE:-}" \
 PI_STACK_STATE_COMPACTOR_PACKAGE="${PI_STACK_STATE_COMPACTOR_PACKAGE:-}" \
 PI_STACK_BASH_TIMEOUT_GUARD_PACKAGE="${PI_STACK_BASH_TIMEOUT_GUARD_PACKAGE:-}" \
-PI_STACK_SCRATCH_UPDATES_PACKAGE="${PI_STACK_SCRATCH_UPDATES_PACKAGE:-}" \
-PI_STACK_PI_CURSOR_PACKAGE="${PI_STACK_PI_CURSOR_PACKAGE:-}" \
 node --input-type=module <<'NODE'
 import { randomUUID } from "node:crypto";
 import { chownSync, existsSync, readFileSync, renameSync, rmSync, statSync, writeFileSync } from "node:fs";
@@ -49,13 +47,13 @@ const paths = {
   "claude-code-use": process.env.PI_STACK_CLAUDE_CODE_USE_PACKAGE || `${runtime}/extensions/pi-claude-code-use`,
   "state-compactor": process.env.PI_STACK_STATE_COMPACTOR_PACKAGE || `${runtime}/extensions/state-compactor`,
   "bash-timeout-guard": process.env.PI_STACK_BASH_TIMEOUT_GUARD_PACKAGE || `${runtime}/extensions/bash-timeout-guard`,
-  "scratch-updates": process.env.PI_STACK_SCRATCH_UPDATES_PACKAGE || `${runtime}/extensions/scratch-updates`,
+  "browser-native": manifest.packages["browser-native"],
   remote: process.env.PI_STACK_REMOTE_PACKAGE,
 };
 const packages = names.map((name) => {
   const path = paths[name];
   if (!path) throw new Error(`${name} needs a deployment path`);
-  if (!existsSync(path)) throw new Error(`${name} deployment does not exist at ${path}`);
+  if (!path.startsWith("npm:") && !existsSync(path)) throw new Error(`${name} deployment does not exist at ${path}`);
   return path;
 });
 const observer = names.indexOf(manifest.contextObserver);
@@ -86,6 +84,10 @@ try {
   await release();
 }
 NODE
+
+while IFS= read -r package; do
+  PI_CODING_AGENT_DIR="$agent_dir" "$runtime_root/current/node_modules/.bin/pi" install "$package"
+done < <(jq -r --arg role "$role" '.roles[$role][] as $name | .packages[$name] | select(startswith("npm:"))' "$manifest")
 
 jq -e --argjson expected "$(jq -c --arg role "$role" '.roles[$role] | length' "$manifest")" \
   '.packages | length == $expected' "$settings" >/dev/null

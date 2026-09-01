@@ -5,7 +5,7 @@
     "claude-code-use": "packages/runtime/extensions/pi-claude-code-use",
     "state-compactor": "packages/runtime/extensions/state-compactor",
     "bash-timeout-guard": "packages/runtime/extensions/bash-timeout-guard",
-    "scratch-updates": "packages/runtime/extensions/scratch-updates",
+    "browser-native": "npm:pi-agent-browser-native@0.5.0",
     "remote": "apps/remote"
   },
   "roles": {
@@ -14,19 +14,21 @@
       "claude-code-use",
       "state-compactor",
       "bash-timeout-guard",
-      "scratch-updates",
+      "browser-native",
       "remote"
     ],
     "gmktec-fleet": [
       "orchestrator",
       "claude-code-use",
       "state-compactor",
-      "bash-timeout-guard"
+      "bash-timeout-guard",
+      "browser-native"
     ],
     "converge-user": [
       "orchestrator",
       "state-compactor",
       "bash-timeout-guard",
+      "browser-native",
       "remote"
     ]
   },

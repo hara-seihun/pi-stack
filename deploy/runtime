@@ -20,9 +20,11 @@ commit=$(git -C "$root" rev-parse HEAD)
 current="$runtime_root/current"
 if [[ -f $runtime_root/.pi-stack-commit && $(<"$runtime_root/.pi-stack-commit") == "$commit" && \
       -f $current/.pi-stack-commit && $(<"$current/.pi-stack-commit") == "$commit" && \
-      -x $current/node_modules/.bin/pi ]]; then
+      -x $current/node_modules/.bin/pi && -x $current/node_modules/.bin/agent-browser ]]; then
   version=$("$current/node_modules/.bin/pi" --version)
+  browser_version=$("$current/node_modules/.bin/agent-browser" --version)
   [[ $version == 0.84.2 ]] || { echo "unexpected Pi version: $version" >&2; exit 1; }
+  [[ $browser_version == "agent-browser 0.34.0" ]] || { echo "unexpected agent-browser version: $browser_version" >&2; exit 1; }
   printf 'Pi %s from %s is already deployed\n' "$version" "$commit"
   exit 0
 fi
@@ -81,7 +83,7 @@ settings_manager="$dependency_release/node_modules/@earendil-works/pi-coding-age
 grep -q 'renameSync(temporary, path)' "$settings_manager"
 node --check "$settings_manager"
 
-extensions=(pi-claude-code-use state-compactor bash-timeout-guard publication-custody scratch-updates chatgpt-pro)
+extensions=(pi-claude-code-use state-compactor bash-timeout-guard publication-custody)
 # A release belongs to the reviewed source commit, even when two commits happen
 # to produce identical runtime files. This keeps the selected artifact's receipt
 # commit-consistent and makes the next deployment hit the unchanged fast path.
@@ -103,9 +105,12 @@ mv -Tf "$link_stage" "$current"
 printf '%s\n' "$(git rev-parse HEAD)" > "$runtime_root/.pi-stack-commit"
 install -d -m 700 "$bin_dir"
 ln -sfn "$current/node_modules/.bin/pi" "$bin_dir/pi"
+ln -sfn "$current/node_modules/.bin/agent-browser" "$bin_dir/agent-browser"
 ln -sfn "$current/prompt-eval/prompt-eval.mjs" "$bin_dir/prompt-eval"
-ln -sfn "$current/extensions/chatgpt-pro/pro" "$bin_dir/pro"
+rm -f "$bin_dir/pro"
 version=$("$bin_dir/pi" --version)
+browser_version=$("$bin_dir/agent-browser" --version)
 [[ $version == 0.84.2 ]] || { echo "unexpected Pi version: $version" >&2; exit 1; }
+[[ $browser_version == "agent-browser 0.34.0" ]] || { echo "unexpected agent-browser version: $browser_version" >&2; exit 1; }
 "$bin_dir/prompt-eval" --help | grep -q '^prompt-eval'
-printf 'deployed Pi %s from %s to %s\n' "$version" "$(git rev-parse HEAD)" "$runtime_release"
+printf 'deployed Pi %s and %s from %s to %s\n' "$version" "$browser_version" "$(git rev-parse HEAD)" "$runtime_release"

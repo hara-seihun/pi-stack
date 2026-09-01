@@ -5,9 +5,9 @@
 ```bash
 mcp status
 mcp search 'review queue'
-mcp describe math_review_queue
-mcp call math_review_queue '{"claim":false}'
-printf '%s\n' '{"query":"Cayley CI","limit":5}' | mcp call math_search
+mcp describe tracker_review_queue
+mcp call tracker_review_queue '{"claim":false}'
+printf '%s\n' '{"query":"CI","limit":5}' | mcp call tracker_search
 ```
 
 The client merges the standard global and project config files in this order:
@@ -22,7 +22,7 @@ Later definitions win. HTTP and stdio servers are supported. A `bearerToken` or 
 
 A tool call that the server refuses comes back as an ordinary MCP result carrying `isError`, not as a transport failure. `mcp call` prints that result and exits non-zero, so a rejected call fails in a shell loop instead of reading as success.
 
-Output is meant to be piped. A reader that leaves early, as `mcp list math_scratch | head` does, ends the command quietly with status 0 rather than printing an EPIPE stack trace over what you were reading.
+Output is meant to be piped. A reader that leaves early, as `mcp list issue_tracker | head` does, ends the command quietly with status 0 rather than printing an EPIPE stack trace over what you were reading.
 
 `mcp` opens connections only for one invocation and closes them before exit. Use [`mcp-script`](../mcp-script/README.md) when several calls need one process and JavaScript control flow.
 

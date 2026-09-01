@@ -345,8 +345,8 @@ ALTER TABLE task ADD COLUMN self_paced INTEGER NOT NULL DEFAULT 0
 
 /** Per-launch opening substitution (see tasks/types.ts): a command whose
  * JSON stdout fills `{{key}}` placeholders in the opening messages, so each
- * launch can live a different exchange — the math lane samples a different
- * famous open problem per session instead of anchoring every agent on one. */
+ * launch can live a different exchange instead of anchoring every agent in a
+ * batch on one example. */
 const OPENING_PROBE_SCHEMA = `
 ALTER TABLE task ADD COLUMN opening_probe TEXT;
 `;
@@ -354,8 +354,8 @@ ALTER TABLE task ADD COLUMN opening_probe TEXT;
 /** Check-ins the host has sent this run. A shift's whole claim on a session
  * is five of them, and the count belongs to the run rather than to the
  * process hosting it: a rule that lives only in one worker's memory is a
- * rule a stale worker keeps breaking, which is how a single math-cleanup
- * session took 52 kick-backs while a build that capped them was already
+ * rule a stale worker keeps breaking, which is how one cleanup session took
+ * 52 kick-backs while a build that capped them was already
  * deployed. Existing rows start at zero; a live run over the cap is asked
  * for nothing further. */
 const CHECK_IN_SCHEMA = `

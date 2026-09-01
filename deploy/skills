@@ -28,6 +28,14 @@ agent_home=$(dirname "$(dirname "$agent_dir")")
 agent_owner=$(stat -c %U "$agent_home")
 agent_group=$(stat -c %G "$agent_home")
 pi_stack_as_root install -d -m 755 -o "$agent_owner" -g "$agent_group" "$agent_dir" "$agent_dir/skills"
+while IFS= read -r -d '' target; do
+  link=$(readlink "$target")
+  [[ $link == "$dest/"* ]] || continue
+  skill=$(basename "$target")
+  if ! jq -e --arg role "$role" --arg skill "$skill" '.roles[$role] | index($skill) != null' "$manifest" >/dev/null; then
+    pi_stack_as_root rm "$target"
+  fi
+done < <(find "$agent_dir/skills" -mindepth 1 -maxdepth 1 -type l -print0)
 while IFS= read -r skill; do
   target="$agent_dir/skills/$skill"
   if jq -e --arg role "$role" --arg skill "$skill" '.roles[$role] | index($skill) != null' "$manifest" >/dev/null; then

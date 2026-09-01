@@ -3,8 +3,8 @@
 
 Reads the orchestrator's shared per-run transcripts, classifies every failed
 tool call, and prints the taxonomy with rates. The point is to separate the
-errors that are the machine's fault from the ones that are the mathematics
-being hard, because only the first kind is fixable from here.
+errors that are the machine's fault from failures in the agent's own work,
+because only the first kind is fixable from here.
 """
 
 from __future__ import annotations
@@ -24,7 +24,7 @@ RUNS = os.environ.get("PI_ORCHESTRATOR_RUNS", "/var/lib/pi-orchestrator/runs")
 # Ordered: the first pattern that matches wins, so put the specific causes
 # above the generic ones. A category is worth adding when you have looked at a
 # cluster and know what it means; anything left over lands in `agent's own
-# code`, which is the honest answer for a failing census or a broken proof.
+# work`, which is the honest answer for a failed task.
 RULES: list[tuple[str, str, str]] = [
     ("machine", "ledger unreachable (fetch failed / 5xx / refused)",
      r"ConnectionRefused|fetch failed|HTTP 50\d|Bad gateway|socket hang up|Connection refused"),
@@ -80,7 +80,7 @@ def classify(text: str) -> tuple[str, str]:
     for kind, name, pattern in RULES:
         if re.search(pattern, text, re.M):
             return kind, name
-    return "agent", "the agent's own code or mathematics"
+    return "agent", "the agent's own work"
 
 
 def failures(since: float, tool: str | None):
@@ -170,7 +170,7 @@ def main() -> None:
         "machine": "the machine is broken here; fix it",
         "interface": "a tool refused a call it could have served, or taught nothing",
         "workload": "the work did not fit the bounds it was given",
-        "agent": "the agent's own code or mathematics; not a machine fault",
+        "agent": "the agent's own work; not a machine fault",
     }
     for kind in ("machine", "interface", "workload", "agent"):
         rows = [(c, n) for c, n in counts.most_common() if c[0] == kind]

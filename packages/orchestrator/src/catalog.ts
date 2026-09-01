@@ -58,7 +58,6 @@ export const ORCHESTRATOR_CATALOG: OrchestratorCatalog = {
     { id: "opus", provider: "anthropic", model: "claude-opus-5", thinking: "xhigh", label: "OPUS", aliases: ["opus"], icon: "opus", accent: "#d9663d", meterClass: "opus" },
     { id: "fable", provider: "anthropic", model: "claude-fable-5", thinking: "high", label: "FABLE", aliases: ["fable"], icon: "fable", accent: "#e6a23c", meterClass: "fable" },
     { id: "sonnet", provider: "anthropic", model: "claude-sonnet", thinking: "high", label: "SONNET", aliases: ["sonnet"], icon: "sonnet", accent: "#d9663d" },
-    { id: "pro", provider: "chatgpt-pro", model: "gpt-5-6-pro-literal", thinking: "max", label: "PRO", aliases: ["pro", "gpt-5-6-pro", "gpt-5.6-pro"], icon: "pro", accent: "#5a6673" },
   ],
   meters: [
     { id: "codex-5h", provider: "openai-codex", drainedBy: ["luna:cost", "sol:cost", "terra:cost"], windowHours: 5 },
@@ -67,7 +66,7 @@ export const ORCHESTRATOR_CATALOG: OrchestratorCatalog = {
     { id: "anthropic-7d", provider: "anthropic", drainedBy: ["default:cost", "opus:cost", "fable:cost"], windowHours: 168 },
     { id: "anthropic-7d_oi", provider: "anthropic", drainedBy: ["fable:cost"], windowHours: 168 },
   ],
-  agentOrder: ["sol", "luna", "terra", "pro", "fable", "opus", "sonnet"],
+  agentOrder: ["sol", "luna", "terra", "fable", "opus", "sonnet"],
   plans: [
     {
       id: "openai", label: "OpenAI", icon: "openai", provider: "openai-codex", maxReadingAgeMs: HOUR,

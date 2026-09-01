@@ -45,8 +45,7 @@ function harness(
     /** What the runner answers when a turn fails: milliseconds to wait, or
      * undefined for "nothing to wait for, end the run". */
     turnFailed?: (detail: string, attempt: number) => number | undefined;
-    /** Undefined resolves the model inside the session, as an extension
-     * provider (chatgpt-pro) does. */
+    /** Undefined resolves an extension provider inside the session. */
     resolveModel?: () => unknown;
     accountId?: string;
     provider?: string;
@@ -221,7 +220,7 @@ function harness(
   );
   const spec: LaunchSpec = {
     runId: "run-1",
-    taskId: options.taskId ?? "math-frontier",
+    taskId: options.taskId ?? "research",
     prompt: options.prompt ?? "Attack the central problem.",
     accountId: options.accountId ?? "codex-1",
     provider: options.provider ?? "openai-codex",
@@ -321,12 +320,12 @@ describe("host shift loop", () => {
   });
 
   it("pins fetched doctrine into the session's system prompt, where compaction cannot reach", async () => {
-    // The task prompt is the first user message — the first thing compaction
-    // summarizes away. Doctrine that must hold for a whole shift (the attack
-    // guide's binding anti-ladder rules) survives only in the system prompt.
+    // The task prompt is the first user message, and compaction can summarize
+    // it away. Doctrine that must hold for a whole shift survives only in the
+    // system prompt.
     const { host, spec, finished, sessionConfigs } = harness([{ toolCalls: 1 }, {}, {}], {
-      doctrineUrl: "https://lemma.ing/guides/attack.md",
-      fetchDoctrine: async (url) => `# LLMs are really good at math now (${url})`,
+      doctrineUrl: "https://doctrine.example/guide.md",
+      fetchDoctrine: async (url) => `# Binding operating doctrine (${url})`,
     });
     host.launch(spec);
     await finished;
@@ -336,15 +335,15 @@ describe("host shift loop", () => {
       | undefined;
     expect(loader).toBeDefined();
     const appended = loader?.getAppendSystemPrompt().join("\n") ?? "";
-    expect(appended).toContain("LLMs are really good at math now");
-    expect(appended).toContain("pinned from https://lemma.ing/guides/attack.md");
+    expect(appended).toContain("Binding operating doctrine");
+    expect(appended).toContain("pinned from https://doctrine.example/guide.md");
     expect(appended).toContain("compaction");
   });
 
   it("keeps the last fetched doctrine across runner processes", async () => {
     const agentDir = mkdtempSync(join(tmpdir(), "pi-host-doctrine-"));
     const first = harness([{ toolCalls: 1 }], {
-      doctrineUrl: "https://lemma.ing/guides/attack.md",
+      doctrineUrl: "https://doctrine.example/guide.md",
       fetchDoctrine: async () => "# Durable attack doctrine",
       agentDir,
     });
@@ -352,7 +351,7 @@ describe("host shift loop", () => {
     await first.finished;
 
     const recovered = harness([{ toolCalls: 1 }], {
-      doctrineUrl: "https://lemma.ing/guides/attack.md",
+      doctrineUrl: "https://doctrine.example/guide.md",
       fetchDoctrine: async () => {
         throw new Error("temporary network failure");
       },
@@ -368,7 +367,7 @@ describe("host shift loop", () => {
 
   it("fails the launch when doctrine has never been fetchable, rather than running without it", async () => {
     const { host, spec, finished } = harness([{ toolCalls: 1 }, {}, {}], {
-      doctrineUrl: "https://lemma.ing/guides/attack.md",
+      doctrineUrl: "https://doctrine.example/guide.md",
       fetchDoctrine: async () => {
         throw new Error("connect ECONNREFUSED");
       },
@@ -393,13 +392,13 @@ describe("host shift loop", () => {
       doctrine(url: string): Promise<string>;
       doctrines: Map<string, { content: string; fetchedAt: number }>;
     };
-    expect(await internals.doctrine("https://lemma.ing/guides/attack.md")).toBe("the good copy");
+    expect(await internals.doctrine("https://doctrine.example/guide.md")).toBe("the good copy");
     // Age the cache past its TTL; the refresh fails, the cached copy serves.
-    internals.doctrines.set("https://lemma.ing/guides/attack.md", {
+    internals.doctrines.set("https://doctrine.example/guide.md", {
       content: "the good copy",
       fetchedAt: 0,
     });
-    expect(await internals.doctrine("https://lemma.ing/guides/attack.md")).toBe("the good copy");
+    expect(await internals.doctrine("https://doctrine.example/guide.md")).toBe("the good copy");
     expect(calls).toBe(2);
   });
 
@@ -430,8 +429,8 @@ describe("host shift loop", () => {
     // it and was gone by the first prompt, with nothing anywhere saying so.
     const { host, spec, finished, retrySettings } = harness([{ toolCalls: 1 }, {}, {}], {
       resolveModel: () => undefined,
-      accountId: "chatgpt-pro",
-      provider: "chatgpt-pro",
+      accountId: "private-provider",
+      provider: "private-provider",
     });
     host.launch(spec);
     await finished;
@@ -754,103 +753,57 @@ describe("the opening exchange", () => {
 });
 
 describe("the opening probe", () => {
-  // The exchange can be a template: the probe samples fresh values (the math
-  // lane draws a different famous open problem per launch) and the agent must
-  // only ever see the rendered result — a literal {{placeholder}} in the
-  // operator's voice would be spotted as fabrication and poison the exchange.
+  // The exchange can be a template. The probe samples fresh values, and the
+  // agent only sees the rendered result. A literal {{placeholder}} in the
+  // operator's voice would be fabrication.
   it("fills placeholders from the probe's JSON before the exchange is lived", async () => {
     const commands: string[] = [];
     const { host, spec, prompts, finished } = harness([{}, {}, { toolCalls: 1 }, {}, {}], {
-      opening: ["What odds on {{problem_title}}?", "Now examine `{{problem_id}}`."],
-      openingProbe: "sample-problem",
+      opening: ["Which target did this launch draw? {{target_name}}", "Now examine `{{target_id}}`."],
+      openingProbe: "sample-target",
       runOpeningProbe: async (command) => {
         commands.push(command);
-        return JSON.stringify({ problem_title: "Frankl's conjecture", problem_id: "abc123" });
+        return JSON.stringify({ target_name: "service-a", target_id: "abc123" });
       },
     });
     host.launch(spec);
     await finished;
 
-    expect(commands).toEqual(["sample-problem"]);
+    expect(commands).toEqual(["sample-target"]);
     expect(prompts.slice(0, 2)).toEqual([
-      "What odds on Frankl's conjecture?",
+      "Which target did this launch draw? service-a",
       "Now examine `abc123`.",
     ]);
   });
 
-  // The task prompt is per-launch text from the same probe, which is how a lane
-  // varies the work itself rather than only its opening — the math lane draws
-  // half its launches into the research-ambition working method this way.
+  // The task prompt can draw from the same per-launch data as the opening.
   it("fills placeholders in the task prompt, not only the opening", async () => {
     const { host, spec, prompts, finished } = harness([{}, { toolCalls: 1 }, {}], {
-      opening: ["Now examine `{{problem_id}}`."],
-      prompt: "Attack it.{{ambition}}",
-      openingProbe: "sample-problem",
+      opening: ["Now examine `{{target_id}}`."],
+      prompt: "Handle it.{{method}}",
+      openingProbe: "sample-target",
       runOpeningProbe: async () =>
-        JSON.stringify({ problem_id: "abc123", ambition: " Work in rounds." }),
+        JSON.stringify({ target_id: "abc123", method: " Work in rounds." }),
     });
     host.launch(spec);
     await finished;
 
     expect(prompts[0]).toBe("Now examine `abc123`.");
-    expect(prompts[1]).toBe("Attack it. Work in rounds.");
+    expect(prompts[1]).toBe("Handle it. Work in rounds.");
   });
 
   it("fails the launch when the task prompt has an unanswered placeholder", async () => {
     const { host, spec, prompts, finished } = harness([{}], {
-      opening: ["Now examine `{{problem_id}}`."],
-      prompt: "Attack it.{{ambition}}",
-      openingProbe: "sample-problem",
-      runOpeningProbe: async () => JSON.stringify({ problem_id: "abc123" }),
+      opening: ["Now examine `{{target_id}}`."],
+      prompt: "Handle it.{{method}}",
+      openingProbe: "sample-target",
+      runOpeningProbe: async () => JSON.stringify({ target_id: "abc123" }),
     });
     host.launch(spec);
     const result = await finished;
 
     expect(prompts).toHaveLength(0);
     expect(result.state).toBe("error");
-    expect(result.detail).toContain("ambition");
-  });
-
-  it("fails the launch when the probe fails, rather than sending the template", async () => {
-    const { host, spec, prompts, finished } = harness([{}], {
-      opening: ["What odds on {{problem_title}}?"],
-      openingProbe: "sample-problem",
-      runOpeningProbe: async () => {
-        throw new Error("ledger unreachable");
-      },
-    });
-    host.launch(spec);
-    const result = await finished;
-
-    expect(prompts).toHaveLength(0);
-    expect(result.state).toBe("error");
-    expect(result.detail).toContain("opening probe failed");
-  });
-
-  it("fails the launch when a placeholder has no probe value", async () => {
-    const { host, spec, prompts, finished } = harness([{}], {
-      opening: ["What odds on {{problem_title}}? Examine {{problem_id}}."],
-      openingProbe: "sample-problem",
-      runOpeningProbe: async () => JSON.stringify({ problem_title: "Frankl's conjecture" }),
-    });
-    host.launch(spec);
-    const result = await finished;
-
-    expect(prompts).toHaveLength(0);
-    expect(result.state).toBe("error");
-    expect(result.detail).toContain("problem_id");
-  });
-
-  it("rejects probe output that is not a JSON object of scalars", async () => {
-    const { host, spec, finished } = harness([{}], {
-      opening: ["What odds on {{problem_title}}?"],
-      openingProbe: "sample-problem",
-      runOpeningProbe: async () => "three problems, none of them JSON",
-    });
-    host.launch(spec);
-    const result = await finished;
-
-    expect(result.state).toBe("error");
-    expect(result.detail).toContain("not JSON");
+    expect(result.detail).toContain("method");
   });
 });

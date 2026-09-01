@@ -27,7 +27,7 @@ npm run android:test --workspace=kenan
 
 `npm run check` launches builds, static checks, and independent suites together. It takes about four seconds on GMKtec. GitHub runs the same gate from a private persistent checkout whose tracked source is reset for every event. Its lock-validated `node_modules` tree survives runner and machine restarts. The Android project keeps its Gradle build because it has no useful dependency boundary with the JavaScript workspaces.
 
-[`config/package-sets.json`](config/package-sets.json) owns package order by host role. [`config/skill-sets.json`](config/skill-sets.json) owns the first-party skills each role loads. Their checks reject unknown or misplaced entries, including a Pi Remote context observer that is not last.
+[`config/package-sets.json`](config/package-sets.json) owns package order by host role, including the pinned `npm:pi-agent-browser-native` package. Its separate `agent-browser` executable comes from the runtime dependency tree. [`config/skill-sets.json`](config/skill-sets.json) owns the first-party skills each role loads. Their checks reject unknown or misplaced entries, including a Pi Remote context observer that is not last.
 
 ## Deployments
 

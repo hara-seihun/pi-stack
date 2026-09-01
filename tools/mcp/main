@@ -17,7 +17,7 @@ commands:
   call TOOL [JSON]              call a tool; omit JSON to read it from stdin
   connect SERVER                connect and report discovered tool count
 
-Tool paths are SERVER_TOOL, for example math_search. Output is JSON except for
+Tool paths are SERVER_TOOL, for example tracker_search. Output is JSON except for
 instructions. Use mcp-script when several calls need shared JavaScript logic.`;
 
 async function stdin() {
@@ -27,8 +27,8 @@ async function stdin() {
   return Buffer.concat(chunks).toString("utf8").trim();
 }
 
-// `mcp list math_scratch | head` is how you inspect one tool in a catalogue of
-// forty, and the reader closing the pipe first is the normal end of that
+// `mcp list issue_tracker | head` is how you inspect one tool in a large
+// catalogue, and the reader closing the pipe first is the normal end of that
 // conversation. Node's default is an unhandled EPIPE stack trace over whatever
 // the agent was reading, so treat a departed reader as a clean finish.
 process.stdout.on("error", (error) => {

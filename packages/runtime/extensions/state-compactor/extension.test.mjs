@@ -12,9 +12,9 @@ import stateCompactor, {
 } from "./index.mjs";
 
 const skill = {
-  name: "math-research",
-  description: "Load for mathematics",
-  filePath: "/skills/math-research/SKILL.md",
+  name: "software-engineering",
+  description: "Load for software work",
+  filePath: "/skills/software-engineering/SKILL.md",
 };
 
 function readCall(id, path, args = {}) {
