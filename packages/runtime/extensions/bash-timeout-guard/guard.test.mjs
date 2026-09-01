@@ -41,6 +41,11 @@ test("interactive sessions get a thirty-minute ceiling, autonomous ones keep 55 
   assert.equal(timeoutPolicy({ PI_BASH_TIMEOUT_MAX_SECONDS: "7200" }, true).maxTimeoutSeconds, 1800);
   assert.equal(timeoutPolicy(fleet, true).maxTimeoutSeconds, 55);
 
+  const remote = { PI_REMOTE_BASH_TIMEOUT_MAX_SECONDS: "300" };
+  assert.equal(timeoutPolicy(remote).maxTimeoutSeconds, 300);
+  assert.equal(timeoutPolicy(remote, true).maxTimeoutSeconds, 300);
+  assert.equal(timeoutPolicy({ ...remote, PI_BASH_TIMEOUT_MAX_SECONDS: "120" }).maxTimeoutSeconds, 120);
+
   const onToolCall = load().get("tool_call");
   assert.equal(onToolCall(bashCall({ command: "ls", timeout: 1800 }), ui), undefined);
   const blocked = onToolCall(bashCall({ command: "ls", timeout: 1801 }), ui);
@@ -62,7 +67,7 @@ test("only bounded positive timeouts are accepted", () => {
   }
 });
 
-test("every session has a hard ceiling below one minute", () => {
+test("fleet sessions have a hard ceiling below one minute", () => {
   const onToolCall = load(fleet).get("tool_call");
   assert.equal(
     onToolCall(bashCall({ command: "ls", timeout: 55 })),

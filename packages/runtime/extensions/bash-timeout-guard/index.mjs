@@ -21,13 +21,16 @@ const detachmentRefusal = (found, policy) =>
   policy.rule;
 
 /**
- * A session with a UI attached (TUI or Pi Remote over RPC) has an operator
- * watching it and may run a bounded command for up to thirty minutes.
- * Autonomous sessions (embedded fleet runs, print, json) keep the 55-second
- * ceiling that the process sweep and pacing assume.
+ * A session with a UI attached has an operator watching it and may run a
+ * bounded command for up to thirty minutes. Pi Remote may declare its own
+ * ceiling because RPC runtimes do not always report a UI. Autonomous sessions
+ * keep the 55-second ceiling that the process sweep and pacing assume.
  */
 export function timeoutPolicy(environment = process.env, interactive = false) {
-  const ceiling = interactive ? INTERACTIVE_MAX_TIMEOUT_SECONDS : MAX_TIMEOUT_SECONDS;
+  const remoteCeiling = positiveSeconds(environment.PI_REMOTE_BASH_TIMEOUT_MAX_SECONDS, NaN);
+  const ceiling = Number.isFinite(remoteCeiling)
+    ? remoteCeiling
+    : interactive ? INTERACTIVE_MAX_TIMEOUT_SECONDS : MAX_TIMEOUT_SECONDS;
   const requested = positiveSeconds(environment.PI_BASH_TIMEOUT_MAX_SECONDS, ceiling);
   const maxTimeoutSeconds = Math.min(requested, ceiling);
   return {

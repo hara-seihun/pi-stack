@@ -46,6 +46,7 @@ Pi Remote loads `$XDG_CONFIG_HOME/pi-remote/config.json`, falling back to `~/.co
     "PI_REMOTE_DATA": "/var/lib/pi-remote",
     "PI_REMOTE_HOST": "127.0.0.1",
     "PI_REMOTE_PORT": 8788,
+    "PI_REMOTE_BASH_TIMEOUT_MAX_SECONDS": 300,
     "PI_REMOTE_ORCHESTRATOR_DB": "/var/lib/pi-orchestrator/ledger.sqlite3",
     "PI_REMOTE_ORCHESTRATOR_RUNS": "/var/lib/pi-orchestrator/runs",
     "PI_REMOTE_WORKSPACES": [
@@ -56,7 +57,7 @@ Pi Remote loads `$XDG_CONFIG_HOME/pi-remote/config.json`, falling back to `~/.co
 }
 ```
 
-Values in `environment` become process environment variables before the supervisor loads. Existing process variables win, which makes service-level overrides straightforward. Arrays and objects are JSON-encoded automatically.
+Values in `environment` become process environment variables before the supervisor loads. Existing process variables win, which makes service-level overrides straightforward. Arrays and objects are JSON-encoded automatically. `PI_REMOTE_BASH_TIMEOUT_MAX_SECONDS` sets the maximum foreground bash call for threads on that host.
 
 Host identities, Tailscale names, private directory paths, alert integration, remote targets, workspace menus, app branding, and provider custody belong in this untracked configuration or in the host's service manager, not in the repository.
 
