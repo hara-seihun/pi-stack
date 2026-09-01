@@ -8,6 +8,7 @@ export function initialRemoteState(){return{
   selectionEpoch:0,actionEpoch:0,pendingActions:new Map(),
   lastSeq:0,contextCapturedAt:0,contextEntries:[],pollBusy:false,pollAgain:false,pollController:null,settingsOpen:false,
   syncSeq:0,syncEpoch:"",contextDocument:null,contextSessionId:null,
+  sessionLiveTextDocument:null,sessionLiveThinkingDocument:null,sessionLiveDocumentId:null,
   agentLiveTextDocument:null,agentLiveThinkingDocument:null,agentDocumentRunId:null,
   toolCards:new Map(),userMessageLabels:new Map(),followTail:true,attachments:[],attachmentGeneration:0,
   slashCommands:[],slashCommandsLoading:false,planCards:[],agentModelCounts:new Map(),

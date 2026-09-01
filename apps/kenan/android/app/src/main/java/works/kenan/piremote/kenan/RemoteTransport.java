@@ -21,8 +21,12 @@ final class RemoteTransport {
     private Session sshSession;
     private RemoteEnvironment.Ssh activeConfig;
 
-    synchronized void ensure(RemoteEnvironment.Endpoint endpoint) throws IOException {
+    synchronized void prepare(RemoteEnvironment.Endpoint endpoint) throws IOException {
         if (endpoint.authentication == RemoteEnvironment.Authentication.SSH) ensureSsh(endpoint.ssh);
+    }
+
+    synchronized void verify(RemoteEnvironment.Endpoint endpoint) throws IOException {
+        prepare(endpoint);
         try {
             verifyEndpoint(endpoint);
         } catch (IOException failure) {

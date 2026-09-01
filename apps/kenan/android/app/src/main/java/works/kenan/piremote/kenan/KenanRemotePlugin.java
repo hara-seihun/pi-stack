@@ -34,7 +34,7 @@ public final class KenanRemotePlugin extends Plugin {
     public void prepare(PluginCall call) {
         transportExecutor.execute(() -> {
             try {
-                transport.ensure(environments.current());
+                transport.prepare(environments.current());
                 call.resolve(snapshot());
             } catch (Exception failure) {
                 call.reject(failure.getMessage(), failure);
@@ -58,7 +58,7 @@ public final class KenanRemotePlugin extends Plugin {
             try {
                 RemoteEnvironment.Endpoint current = environments.current();
                 RemoteEnvironment.Endpoint next = RemoteEnvironment.find(id);
-                transport.ensure(next);
+                transport.verify(next);
                 if (current != next) {
                     environments.select(id);
                     if (next.authentication == RemoteEnvironment.Authentication.DIRECT)
@@ -84,6 +84,7 @@ public final class KenanRemotePlugin extends Plugin {
             .put("name", selected.name)
             .put("baseUrl", selected.baseUrl)
             .put("requiresUnlock", selected.requiresUnlock)
+            .put("requiresPreparation", selected.authentication == RemoteEnvironment.Authentication.SSH)
             .put("environments", choices);
     }
 

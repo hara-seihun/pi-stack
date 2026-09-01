@@ -289,6 +289,25 @@ function signalSync() {
   for (const wake of syncWaiters) wake();
   syncWaiters.clear();
 }
+
+const LIVE_SYNC_INTERVAL_MS = 16;
+let liveSyncTimer: ReturnType<typeof setTimeout> | null = null;
+let liveSyncPending = false;
+function signalLiveSync() {
+  if (liveSyncTimer) {
+    liveSyncPending = true;
+    return;
+  }
+  signalSync();
+  liveSyncTimer = setTimeout(() => {
+    liveSyncTimer = null;
+    if (liveSyncPending) {
+      liveSyncPending = false;
+      signalLiveSync();
+    }
+  }, LIVE_SYNC_INTERVAL_MS);
+}
+
 async function awaitSync(after: number, waitMs: number) {
   if (after !== syncSequence) return;
   await new Promise<void>((resolve) => {
@@ -1013,6 +1032,7 @@ function handleRpcEvent(sessionId: string, rt: Runtime, event: any) {
   } else if (event.type === "message_update" && event.assistantMessageEvent?.type === "text_delta") {
     proveRunning();
     rt.liveText += event.assistantMessageEvent.delta ?? "";
+    signalLiveSync();
   } else if (event.type === "message_update" && event.assistantMessageEvent?.type === "thinking_start") {
     proveRunning();
     rt.liveThinking = "";
@@ -1020,6 +1040,7 @@ function handleRpcEvent(sessionId: string, rt: Runtime, event: any) {
   } else if (event.type === "message_update" && event.assistantMessageEvent?.type === "thinking_delta") {
     proveRunning();
     rt.liveThinking += event.assistantMessageEvent.delta ?? "";
+    signalLiveSync();
   } else if (event.type === "message_update" && event.assistantMessageEvent?.type === "thinking_end") {
     const thinking = rt.liveThinking || String(event.assistantMessageEvent.content ?? "");
     if (thinking) emit(sessionId, "thinking", { text: thinking });

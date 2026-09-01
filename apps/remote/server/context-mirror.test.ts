@@ -28,12 +28,10 @@ const server = Bun.serve({
 });
 const previousSessionId = process.env.PI_REMOTE_SESSION_ID;
 const previousServer = process.env.PI_REMOTE_SERVER_URL;
-const previousUpdateInterval = process.env.PI_REMOTE_CONTEXT_UPDATE_MS;
 
 beforeAll(() => {
   process.env.PI_REMOTE_SESSION_ID = "00000000-0000-0000-0000-000000000001";
   process.env.PI_REMOTE_SERVER_URL = server.url.origin;
-  process.env.PI_REMOTE_CONTEXT_UPDATE_MS = "5";
 });
 
 afterAll(() => {
@@ -41,8 +39,6 @@ afterAll(() => {
   else process.env.PI_REMOTE_SESSION_ID = previousSessionId;
   if (previousServer === undefined) delete process.env.PI_REMOTE_SERVER_URL;
   else process.env.PI_REMOTE_SERVER_URL = previousServer;
-  if (previousUpdateInterval === undefined) delete process.env.PI_REMOTE_CONTEXT_UPDATE_MS;
-  else process.env.PI_REMOTE_CONTEXT_UPDATE_MS = previousUpdateInterval;
   server.stop(true);
 });
 
@@ -60,7 +56,7 @@ function assistant(text: string, stopReason = "pending") {
 }
 
 describe("context mirror", () => {
-  test("publishes Pi's final generic context and updates the streaming assistant in place", async () => {
+  test("publishes Pi's generic context only at durable message boundaries", async () => {
     captures.length = 0;
     document = "";
     const handlers = new Map<string, Handler>();
@@ -77,10 +73,9 @@ describe("context mirror", () => {
     contextMirror(pi);
 
     const contextHandler = handlers.get("context");
-    const updateHandler = handlers.get("message_update");
     const endHandler = handlers.get("message_end");
     expect(contextHandler).toBeDefined();
-    expect(updateHandler).toBeDefined();
+    expect(handlers.get("message_update")).toBeUndefined();
     expect(endHandler).toBeDefined();
 
     await contextHandler?.({
@@ -93,15 +88,9 @@ describe("context mirror", () => {
       messages: [{ role: "user", content: [{ type: "text", text: "Hello" }] }],
     });
 
-    await updateHandler?.({ type: "message_update", message: assistant("Working") }, {});
-    for (let attempt = 0; attempt < 100; attempt++) {
-      const messages = captures.at(-1)?.context.messages as Array<{ content: Array<{ text: string }> }>;
-      if (messages.at(-1)?.content[0].text === "Working") break;
-      await Bun.sleep(1);
-    }
-    expect((captures.at(-1)?.context.messages as Array<{ content: Array<{ text: string }> }>).at(-1)?.content[0].text).toBe("Working");
-
+    const captureCount = captures.length;
     await endHandler?.({ type: "message_end", message: assistant("Finished", "stop") }, {});
+    expect(captures).toHaveLength(captureCount + 1);
     const messages = captures.at(-1)?.context.messages as Array<{ role: string; content: Array<{ text: string }> }>;
     expect(messages.map((message) => message.role)).toEqual(["user", "assistant"]);
     expect(messages.at(-1)?.content[0].text).toBe("Finished");

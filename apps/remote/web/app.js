@@ -1199,6 +1199,8 @@ async function poll(immediate = false) {
   const selectionEpoch = state.selectionEpoch;
   const actionEpoch = state.actionEpoch;
   const requestedContext = requested && state.contextSessionId === requested ? state.contextDocument : null;
+  const requestedSessionText = requested && state.sessionLiveDocumentId === requested ? state.sessionLiveTextDocument : null;
+  const requestedSessionThinking = requested && state.sessionLiveDocumentId === requested ? state.sessionLiveThinkingDocument : null;
   const requestedAgentText = requestedAgent && state.agentDocumentRunId === requestedAgent ? state.agentLiveTextDocument : null;
   const requestedAgentThinking = requestedAgent && state.agentDocumentRunId === requestedAgent ? state.agentLiveThinkingDocument : null;
   let retryDelay = 0;
@@ -1213,7 +1215,11 @@ async function poll(immediate = false) {
     };
     if (requested && !requestedAgent) {
       body.selectedId = requested;
+      body.eventSessionId = requested;
+      body.eventAfter = Number.MAX_SAFE_INTEGER;
       if (requestedContext) body.contextHash = requestedContext.hash;
+      if (requestedSessionText) body.eventLiveTextHash = requestedSessionText.hash;
+      if (requestedSessionThinking) body.eventLiveThinkingHash = requestedSessionThinking.hash;
     }
     if (requestedAgent) {
       body.agentRunId = requestedAgent;
@@ -1226,8 +1232,9 @@ async function poll(immediate = false) {
 
     if (state.syncEpoch && state.syncEpoch !== all.epoch) {
       patchState({
-        contextDocument: null, contextSessionId: null, agentLiveTextDocument: null,
-        agentLiveThinkingDocument: null, agentDocumentRunId: null, syncSeq: 0,
+        contextDocument: null, contextSessionId: null,
+        sessionLiveTextDocument: null, sessionLiveThinkingDocument: null, sessionLiveDocumentId: null,
+        agentLiveTextDocument: null, agentLiveThinkingDocument: null, agentDocumentRunId: null, syncSeq: 0,
       });
     }
     patchState({ syncEpoch: String(all.epoch || "") });
@@ -1268,6 +1275,20 @@ async function poll(immediate = false) {
     });
     const sameSelection = selectionEpoch === state.selectionEpoch && requested === state.selectedId && !state.agentRunId;
     const mutationStable = actionEpoch === state.actionEpoch && !selectedPendingAction();
+    let synchronizedLive = null;
+    if (sameSelection && all.sessionEvents) {
+      const baseText = state.sessionLiveDocumentId === requested ? state.sessionLiveTextDocument : null;
+      const baseThinking = state.sessionLiveDocumentId === requested ? state.sessionLiveThinkingDocument : null;
+      const nextText = await window.PiRemoteSync.update(baseText, all.sessionEvents.liveTextUpdate);
+      const nextThinking = await window.PiRemoteSync.update(baseThinking, all.sessionEvents.liveThinkingUpdate);
+      if (controller.signal.aborted) throw new DOMException("Synchronization cancelled", "AbortError");
+      patchState({
+        sessionLiveTextDocument: nextText,
+        sessionLiveThinkingDocument: nextThinking,
+        sessionLiveDocumentId: requested,
+      });
+      synchronizedLive = { text: nextText?.document || "", thinking: nextThinking?.document || "" };
+    }
     if (sameSelection && mutationStable) {
       const selected = all.selectedSession || state.sessions.find((session) => session.id === requested);
       if (selected) applySelectedSession(selected);
@@ -1286,6 +1307,7 @@ async function poll(immediate = false) {
         session: all.selectedSession,
       });
     }
+    if (synchronizedLive) setLive(synchronizedLive.thinking, synchronizedLive.text);
     patchState({ syncSeq: Number(all.seq || state.syncSeq) });
     if (!state.selectedId && !state.agentRunId && state.sessions.length && selectionEpoch === state.selectionEpoch) selectThread(state.sessions[0]);
     renderThreads();
@@ -1343,12 +1365,22 @@ function scrollBottom() {
     if (state.followTail) ui.scrollback.scrollTop = ui.scrollback.scrollHeight;
   });
 }
+let pendingLiveRender = null;
+let liveRenderFrame = 0;
 function setLive(thinking, answer) {
-  renderMarkdown(ui.liveThinking, thinking);
-  ui.liveThinking.hidden = !thinking;
-  renderMarkdown(ui.liveAnswer, answer);
-  ui.liveAnswer.hidden = !answer;
-  if (thinking || answer) scrollBottom();
+  pendingLiveRender = { thinking, answer };
+  if (liveRenderFrame) return;
+  liveRenderFrame = requestAnimationFrame(() => {
+    liveRenderFrame = 0;
+    const next = pendingLiveRender;
+    pendingLiveRender = null;
+    if (!next) return;
+    ui.liveThinking.textContent = next.thinking;
+    ui.liveThinking.hidden = !next.thinking;
+    ui.liveAnswer.textContent = next.answer;
+    ui.liveAnswer.hidden = !next.answer;
+    if (next.thinking || next.answer) scrollBottom();
+  });
 }
 
 function shortPath(path = "") {

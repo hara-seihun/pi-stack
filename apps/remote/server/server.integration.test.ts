@@ -242,7 +242,14 @@ for line in sys.stdin:
    out({'type':'agent_settled'})
   else:
    out({'type':'agent_start'})
-   if last == 'release-later':
+   if last == 'live-stream':
+    out({'type':'message_update','message':{'role':'assistant','content':[{'type':'thinking','thinking':'thinking now'}]},'assistantMessageEvent':{'type':'thinking_delta','delta':'thinking now'}})
+    out({'type':'message_update','message':{'role':'assistant','content':[{'type':'text','text':'instant text'}]},'assistantMessageEvent':{'type':'text_delta','delta':'instant text'}})
+    gate('live-stream')
+    out({'type':'message_end','message':{'role':'assistant','content':[{'type':'text','text':'instant text'}]}})
+    streaming = False
+    out({'type':'agent_settled'})
+   elif last == 'release-later':
     threading.Thread(target=finish_release_later, daemon=True).start()
    elif last == 'later-run' or '<new_user_message>\\nlater-run\\n</new_user_message>' in last:
     out({'type':'message_end','message':{'role':'assistant','content':[{'type':'text','text':'later ran'}]}})
@@ -546,6 +553,27 @@ describe("web and supervisor integration", () => {
     });
     expect(second.value.contextUpdate.kind).toBe("splice");
     expect(applyContextSplice(baseDocument, second.value.contextUpdate.splice)).toBe(targetDocument);
+  });
+
+  test("publishes live model text without waiting for a context checkpoint", async () => {
+    const id = await createThread("home", "sol");
+    resetGate("live-stream");
+    try {
+      await api("POST", `/v1/sessions/${id}/prompt`, { requestId: crypto.randomUUID(), text: "live-stream" });
+      await waitForGate("live-stream");
+      const result = await api("POST", "/v1/sync", {
+        after: 0,
+        waitMs: 0,
+        selectedId: id,
+        eventSessionId: id,
+        eventAfter: Number.MAX_SAFE_INTEGER,
+        includeDashboard: false,
+      });
+      expect(result.value.sessionEvents.liveTextUpdate).toMatchObject({ kind: "full", document: "instant text" });
+      expect(result.value.sessionEvents.liveThinkingUpdate).toMatchObject({ kind: "full", document: "thinking now" });
+    } finally {
+      releaseGate("live-stream");
+    }
   });
 
   test("confirms an empty selected context even when the client has not loaded its cache yet", async () => {

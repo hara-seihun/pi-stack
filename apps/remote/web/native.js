@@ -19,7 +19,7 @@ import { API } from "./api.js";
   const browserSnapshot = (id) => {
     const selected = browserEnvironments.find((environment) => environment.id === id);
     if (!selected) throw new Error(`Unknown Pi Remote environment: ${id}`);
-    return { ...selected, environments: browserEnvironments.map(({ id, name }) => ({ id, name })) };
+    return { ...selected, requiresPreparation: false, environments: browserEnvironments.map(({ id, name }) => ({ id, name })) };
   };
   const browserRemote = {
     getState: async () => browserSnapshot(localStorage.getItem("kenan-environment") || "local"),
@@ -57,6 +57,8 @@ import { API } from "./api.js";
   }
 
   async function prepare() {
+    const environment = await getState();
+    if (!environment.requiresPreparation) return;
     if (preparePromise) return preparePromise;
     if (Date.now() < preparedUntil) return;
     preparePromise = remote.prepare()

@@ -145,7 +145,7 @@ button:focus-visible, input:focus-visible, textarea:focus-visible, select:focus-
 .message.assistant .message-label { color: var(--success); }
 .message.thinking { padding: 11px 13px; background: var(--pending); color: var(--muted); font-size: 14px; font-style: italic; }
 .message.notice { color: var(--muted); font-size: 14px; }
-.live-thinking, .live-answer { width: min(100%, 980px); margin: 18px auto 0; overflow-wrap: anywhere; line-height: 1.45; user-select: text; }
+.live-thinking, .live-answer { width: min(100%, 980px); margin: 18px auto 0; overflow-wrap: anywhere; white-space: pre-wrap; line-height: 1.45; user-select: text; }
 .live-thinking { padding: 11px 13px; background: var(--pending); color: var(--muted); font-style: italic; font-size: 14px; }
 .live-thinking::before, .live-answer::before { display: block; margin-bottom: 5px; font-size: 11px; font-weight: 850; }
 .live-thinking::before { content: "THINKING"; color: var(--muted); }

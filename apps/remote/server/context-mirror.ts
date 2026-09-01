@@ -8,7 +8,6 @@ type ModelContext = { systemPrompt: string; tools: ModelTool[]; messages: ModelM
 export default function contextMirror(pi: ExtensionAPI) {
   const sessionId = process.env.PI_REMOTE_SESSION_ID;
   const server = process.env.PI_REMOTE_SERVER_URL;
-  const updateIntervalMs = Math.max(1, Number(process.env.PI_REMOTE_CONTEXT_UPDATE_MS ?? "1000"));
   if (!sessionId || !server) return;
 
   let context: ModelContext | null = null;
@@ -17,7 +16,6 @@ export default function contextMirror(pi: ExtensionAPI) {
   let pending: { capturedAt: number; context: ModelContext; compact: boolean; replacement?: "compaction" } | null = null;
   let publishedDocument: string | null = null;
   let draining: Promise<void> | null = null;
-  let updateTimer: ReturnType<typeof setTimeout> | null = null;
 
   const nextCaptureTime = () => {
     capturedAt = Math.max(Date.now(), capturedAt + 1);
@@ -105,24 +103,12 @@ export default function contextMirror(pi: ExtensionAPI) {
         .map(({ name, description, parameters }) => ({ name, description, parameters })),
       messages: baseMessages,
     };
-    if (updateTimer) {
-      clearTimeout(updateTimer);
-      updateTimer = null;
-    }
     await publishCurrent(true, replacement);
   };
 
   const replaceContextFromSession = async (ctx: ExtensionContext, replacement?: "compaction") => {
     const session = buildSessionContext(ctx.sessionManager.getBranch());
     await replaceContext(session.messages, ctx, replacement);
-  };
-
-  const scheduleCurrent = () => {
-    if (updateTimer || !context) return;
-    updateTimer = setTimeout(() => {
-      updateTimer = null;
-      void publishCurrent().catch((error) => console.error(`Pi Remote context mirror failed: ${error instanceof Error ? error.message : error}`));
-    }, updateIntervalMs);
   };
 
   pi.on("context", async (event, ctx) => {
@@ -141,28 +127,14 @@ export default function contextMirror(pi: ExtensionAPI) {
     await replaceContextFromSession(ctx);
   });
 
-  pi.on("message_update", (event) => {
-    if (!context || event.message.role !== "assistant") return;
-    context = { ...context, messages: [...baseMessages, ...convertToLlm([event.message])] };
-    scheduleCurrent();
-  });
-
   pi.on("message_end", async (event) => {
     if (!context || (event.message.role !== "assistant" && event.message.role !== "toolResult")) return;
     baseMessages = [...baseMessages, ...convertToLlm([event.message])];
     context = { ...context, messages: baseMessages };
-    if (updateTimer) {
-      clearTimeout(updateTimer);
-      updateTimer = null;
-    }
     await publishCurrent(true);
   });
 
   pi.on("session_shutdown", async (_event, ctx) => {
-    if (updateTimer) {
-      clearTimeout(updateTimer);
-      updateTimer = null;
-    }
     await replaceContextFromSession(ctx);
     if (draining) await draining;
   });
