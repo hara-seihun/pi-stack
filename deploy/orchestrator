@@ -7,11 +7,37 @@ pi_stack_enter_deployment "$0" "$root" "$@"
 dest=${PI_STACK_ORCHESTRATOR_DEST:-/srv/pi/pi-orchestrator}
 runtime_root=${PI_STACK_RUNTIME_ROOT:-$HOME/.local/share/pi-runtime}
 commit=$(git -C "$root" rev-parse HEAD)
+
+# Every account that runs orchestrator commands reaches the CLI through
+# ~/.local/bin/pi-orchestrator. A deployment that publishes the artifact but
+# not the links leaves fleet sessions without their required complete/status
+# workflow, so the links are reconciled on every run, including the
+# already-deployed fast path.
+reconcile_cli_links() {
+  local user_home=${PI_STACK_USER_HOME:-/home/kenan}
+  local fleet_home=${PI_STACK_FLEET_HOME:-/home/orchestrator}
+  local home owner group link
+  for home in "$user_home" "$fleet_home"; do
+    [[ -d $home ]] || continue
+    owner=$(stat -c %U "$home")
+    group=$(stat -c %G "$home")
+    link=$home/.local/bin/pi-orchestrator
+    pi_stack_as_root install -d -m 755 -o "$owner" -g "$group" "$home/.local/bin"
+    pi_stack_as_root ln -sfn "$dest/dist/cli.js" "$link"
+    pi_stack_as_root chown -h "$owner:$group" "$link"
+    [[ $(pi_stack_as_root readlink "$link") == "$dest/dist/cli.js" && -x $dest/dist/cli.js ]] || {
+      echo "$link does not reach an executable Pi Orchestrator CLI" >&2
+      exit 1
+    }
+  done
+}
+
 if [[ -f $dest/.pi-stack-commit && $(<"$dest/.pi-stack-commit") == "$commit" && -x $dest/dist/cli.js ]]; then
   pi_stack_validate_task_manifest \
     "$dest/dist/task-manifest.js" \
     "${PI_ORCHESTRATOR_TASK_MANIFEST:-}"
   "$dest/dist/cli.js" help | grep -q '^usage: pi-orchestrator'
+  reconcile_cli_links
   printf 'Pi Orchestrator from %s is already deployed\n' "$commit"
   exit 0
 fi
@@ -41,4 +67,5 @@ pi_stack_validate_task_manifest \
 pi_stack_publish_release "$root" "$stage/release" "$dest" orchestrator
 
 "$dest/dist/cli.js" help | grep -q '^usage: pi-orchestrator'
+reconcile_cli_links
 printf 'deployed Pi Orchestrator from %s to %s\n' "$commit" "$dest"
