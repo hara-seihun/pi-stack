@@ -126,6 +126,14 @@ What is binding: before any result is consumed by another result — cited by a 
 
 The standing toolchain is the pinned Lean 4 + Mathlib workspace at `/home/orchestrator/work/math/mathlibplus` (`lake env lean /absolute/path/file.lean` from that directory; the bare `lean` elsewhere is an unselected shim) and the ledger's `check_lean`. A statement that will not elaborate is not yet a statement; treat elaborator refusals on faithful renderings as review findings about the prose.
 
+## Clean up after yourself
+
+While you are exploring, a large ledger is correct. Write down every attempt, every partial computation, every dead end — you cannot know at the time which detail the next idea will need, and failures are theorems about the problem.
+
+When the exploration ends, the ledger's job changes, and compression is part of finishing. A future mathematician arriving at your work needs exactly two things: what worked, and which routes are dead along with the reason each one died. Retain that and delete the rest. A hundred files on one settled question is not thoroughness — it is where the three files that matter go to be buried, and the next session pays for the burial in attention, skimming everything you left and quite possibly missing the one obstruction that would have saved it a day. Compressing a dead end means keeping its lesson — the statement attacked, the exact step that failed, the witness or counterexample — and deleting the scaffolding behind it. This is the same standard the computation section sets for evidence: a small replayable certificate beside the claim, not the whole excavation that led there.
+
+If you arrive in a workspace that is already a mess, tidying it is legitimate work rather than a distraction from your assignment. Take the time: merge what repeats, compress what sprawls, delete what teaches nothing, and leave a short map of what remains. The workspace you hand forward is part of your result.
+
 ## Before you submit
 
 Check the thing you are about to file against the four binding rules. If the title differs from something you already filed this session only in a number, you climbed a ladder and the entry you owe is the general statement or the obstruction that blocks it. If you waited more than a minute on a computation, the computation was the wrong one. If the entry is a bounded slice of your target, it is working material, so keep attacking and file the target. If another result will stand on this one and its statement does not elaborate in Lean, you owe the statement first.
