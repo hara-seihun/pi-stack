@@ -245,8 +245,10 @@ for line in sys.stdin:
    if last == 'live-stream':
     out({'type':'message_update','message':{'role':'assistant','content':[{'type':'thinking','thinking':'thinking now'}]},'assistantMessageEvent':{'type':'thinking_delta','delta':'thinking now'}})
     out({'type':'message_update','message':{'role':'assistant','content':[{'type':'text','text':'instant text'}]},'assistantMessageEvent':{'type':'text_delta','delta':'instant text'}})
+    gate('live-stream-next')
+    out({'type':'message_update','message':{'role':'assistant','content':[{'type':'text','text':'instant text second'}]},'assistantMessageEvent':{'type':'text_delta','delta':' second'}})
     gate('live-stream')
-    out({'type':'message_end','message':{'role':'assistant','content':[{'type':'text','text':'instant text'}]}})
+    out({'type':'message_end','message':{'role':'assistant','content':[{'type':'text','text':'instant text second'}]}})
     streaming = False
     out({'type':'agent_settled'})
    elif last == 'release-later':
@@ -555,23 +557,46 @@ describe("web and supervisor integration", () => {
     expect(applyContextSplice(baseDocument, second.value.contextUpdate.splice)).toBe(targetDocument);
   });
 
-  test("publishes live model text without waiting for a context checkpoint", async () => {
+  test("publishes live model text without rebuilding unchanged application state", async () => {
     const id = await createThread("home", "sol");
+    resetGate("live-stream-next");
     resetGate("live-stream");
     try {
       await api("POST", `/v1/sessions/${id}/prompt`, { requestId: crypto.randomUUID(), text: "live-stream" });
-      await waitForGate("live-stream");
-      const result = await api("POST", "/v1/sync", {
+      await waitForGate("live-stream-next");
+      const first = await api("POST", "/v1/sync", {
         after: 0,
+        stateAfter: 0,
         waitMs: 0,
         selectedId: id,
         eventSessionId: id,
         eventAfter: Number.MAX_SAFE_INTEGER,
         includeDashboard: false,
       });
-      expect(result.value.sessionEvents.liveTextUpdate).toMatchObject({ kind: "full", document: "instant text" });
-      expect(result.value.sessionEvents.liveThinkingUpdate).toMatchObject({ kind: "full", document: "thinking now" });
+      expect(first.value.sessionEvents.liveTextUpdate).toMatchObject({ kind: "full", document: "instant text" });
+      expect(first.value.sessionEvents.liveThinkingUpdate).toMatchObject({ kind: "full", document: "thinking now" });
+
+      releaseGate("live-stream-next");
+      await waitForGate("live-stream");
+      const second = await api("POST", "/v1/sync", {
+        after: first.value.seq,
+        stateAfter: first.value.stateSeq,
+        epoch: first.value.epoch,
+        waitMs: 1_000,
+        selectedId: id,
+        eventSessionId: id,
+        eventAfter: Number.MAX_SAFE_INTEGER,
+        eventLiveTextHash: first.value.sessionEvents.liveTextUpdate.hash,
+        eventLiveThinkingHash: first.value.sessionEvents.liveThinkingUpdate.hash,
+        includeDashboard: false,
+      });
+      expect(second.value.sessions).toBeNull();
+      expect(second.value.selectedSession).toBeNull();
+      expect(second.value.contextUpdate).toBeNull();
+      expect(second.value.stateSeq).toBe(first.value.stateSeq);
+      expect(applyContextSplice("instant text", second.value.sessionEvents.liveTextUpdate.splice)).toBe("instant text second");
     } finally {
+      releaseGate("live-stream-next");
       releaseGate("live-stream");
     }
   });

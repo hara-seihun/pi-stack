@@ -106,10 +106,6 @@ function node(tag, className, text) {
 }
 
 const motionStates = new WeakMap();
-const movingElements = new Set();
-const reducedMotion = matchMedia("(prefers-reduced-motion: reduce)");
-let motionFrame = 0;
-let motionTime = 0;
 
 function motionState(element) {
   let state = motionStates.get(element);
@@ -140,52 +136,6 @@ function setMotion(element, values) {
     channel.velocity = 0;
   }
   paintMotion(element, state);
-}
-
-function springMotion(element, values, stiffness = 380, damping = 0.62) {
-  if (reducedMotion.matches) { setMotion(element, values); return; }
-  const state = motionState(element);
-  for (const [property, target] of Object.entries(values)) {
-    const channel = state[property];
-    channel.target = target;
-    channel.stiffness = stiffness;
-    channel.damping = damping;
-  }
-  movingElements.add(element);
-  if (!motionFrame) {
-    motionTime = performance.now();
-    motionFrame = requestAnimationFrame(stepMotion);
-  }
-}
-
-function stepMotion(now) {
-  const elapsed = Math.min(0.034, Math.max(0.001, (now - motionTime) / 1000));
-  motionTime = now;
-  const steps = Math.max(1, Math.ceil(elapsed * 120));
-  const dt = elapsed / steps;
-  for (const element of [...movingElements]) {
-    const state = motionState(element);
-    let moving = false;
-    for (const channel of Object.values(state)) {
-      if (channel.stiffness === undefined) continue;
-      const drag = 2 * channel.damping * Math.sqrt(channel.stiffness);
-      for (let step = 0; step < steps; step++) {
-        const acceleration = channel.stiffness * (channel.target - channel.value) - drag * channel.velocity;
-        channel.velocity += acceleration * dt;
-        channel.value += channel.velocity * dt;
-      }
-      const distance = Math.abs(channel.target - channel.value);
-      const speed = Math.abs(channel.velocity);
-      if (distance < 0.001 && speed < 0.01) {
-        channel.value = channel.target;
-        channel.velocity = 0;
-        channel.stiffness = undefined;
-      } else moving = true;
-    }
-    paintMotion(element, state);
-    if (!moving) movingElements.delete(element);
-  }
-  motionFrame = movingElements.size ? requestAnimationFrame(stepMotion) : 0;
 }
 
 // A supervisor only runs while its owner's key is in memory, so 423 is the
@@ -1022,7 +972,7 @@ function renderTabs() {
   ui.archivedTab.ariaLabel = `Archived threads · ${counts.archived}`;
 }
 
-function selectThread(session) {
+function selectThread(session, synchronize = true) {
   const changed = state.selectedId !== session.id || Boolean(state.agentRunId);
   if (state.selectedId !== session.id) stashThreadConversation();
   clearAgentSelection();
@@ -1040,7 +990,7 @@ function selectThread(session) {
   ui.conversation.hidden = false;
   updateChrome();
   renderThreads();
-  poll();
+  if (synchronize) poll();
 }
 function clearSelection() {
   stopVoice();
@@ -1123,39 +1073,19 @@ async function loadOlderArchived() {
   } catch (error) { console.error(error); }
   finally { patchState({ archivedLoading: false }); renderTabs(); renderThreads(); }
 }
-function replaceAnimatedRows(container, rows, emptyText) {
-  const previous = new Map([...container.querySelectorAll("[data-motion-key]")]
-    .map((row) => [row.dataset.motionKey, row.getBoundingClientRect()]));
+function replaceRows(container, rows, emptyText) {
   container.replaceChildren(...(rows.length ? rows : [node("div", "agent-empty", emptyText)]));
-  requestAnimationFrame(() => {
-    let entering = 0;
-    for (const row of container.querySelectorAll("[data-motion-key]")) {
-      const before = previous.get(row.dataset.motionKey);
-      const after = row.getBoundingClientRect();
-      if (before) {
-        const delta = before.top - after.top;
-        setMotion(row, { y: delta, opacity: 1 });
-        if (Math.abs(delta) > 0.5) springMotion(row, { y: 0 }, 550, 0.9);
-      } else {
-        setMotion(row, { x: -18, opacity: 0 });
-        const delay = entering++ * 38;
-        setTimeout(() => {
-          if (row.isConnected) springMotion(row, { x: 0, opacity: 1 }, 900, 0.58);
-        }, delay);
-      }
-    }
-  });
 }
 
 function renderThreads() {
   if (state.drawerTab === "threads") {
-    replaceAnimatedRows(ui.threadList, state.sessions.map((session) => threadRow(session)), "No threads");
+    replaceRows(ui.threadList, state.sessions.map((session) => threadRow(session)), "No threads");
     return;
   }
   if (state.drawerTab !== "archived") return;
   const archived = loadedArchived();
   const total = Math.max(state.archivedTotal, archived.length);
-  replaceAnimatedRows(ui.archivedList, archived.map((session) => threadRow(session, true)), "No archived threads");
+  replaceRows(ui.archivedList, archived.map((session) => threadRow(session, true)), "No archived threads");
   if (!total || archived.length >= total) return;
   const more = node("button", "archived-more", state.archivedLoading ? "Loading older threads…" : `Show older · ${total - archived.length} more`);
   more.type = "button";
@@ -1262,6 +1192,8 @@ async function poll(immediate = false) {
   try {
     const body = {
       after: state.syncSeq,
+      stateAfter: state.syncStateSeq,
+      epoch: state.syncEpoch,
       waitMs: immediate ? 0 : 25_000,
       contextProjection: "display",
       includeArchived: true,
@@ -1289,7 +1221,8 @@ async function poll(immediate = false) {
       patchState({
         contextDocument: null, contextSessionId: null, threadViews: new Map(),
         sessionLiveTextDocument: null, sessionLiveThinkingDocument: null, sessionLiveDocumentId: null,
-        agentLiveTextDocument: null, agentLiveThinkingDocument: null, agentDocumentRunId: null, syncSeq: 0,
+        agentLiveTextDocument: null, agentLiveThinkingDocument: null, agentDocumentRunId: null,
+        syncSeq: 0, syncStateSeq: 0,
       });
     }
     patchState({ syncEpoch: String(all.epoch || "") });
@@ -1311,23 +1244,27 @@ async function poll(immediate = false) {
         liveText: nextText?.document || "",
         liveThinking: nextThinking?.document || "",
       });
+      renderAgentList();
     }
-    renderAgentList();
 
-    const previous = new Map([...state.sessions, ...state.archivedSessions].map((session) => [session.id, session]));
-    const mergeListed = (sessions) => (sessions || []).map((session) => {
-      const old = previous.get(session.id);
-      return old && Number(old.revision || 0) > Number(session.revision || 0) ? old : session;
-    });
-    const sessions = mergeListed(all.sessions);
-    const archivedSessions = mergeListed(all.archivedSessions);
-    const listedArchived = new Set(archivedSessions.map((session) => session.id));
-    const liveIds = new Set(sessions.map((session) => session.id));
-    patchState({
-      archiveSupported: true, sessions, archivedSessions,
-      archivedOlder: state.archivedOlder.filter((session) => !listedArchived.has(session.id) && !liveIds.has(session.id)),
-      archivedTotal: Number.isFinite(all.archivedTotal) ? Number(all.archivedTotal) : archivedSessions.length,
-    });
+    let sessionsChanged = false;
+    if (Array.isArray(all.sessions)) {
+      const previous = new Map([...state.sessions, ...state.archivedSessions].map((session) => [session.id, session]));
+      const mergeListed = (sessions) => sessions.map((session) => {
+        const old = previous.get(session.id);
+        return old && Number(old.revision || 0) > Number(session.revision || 0) ? old : session;
+      });
+      const sessions = mergeListed(all.sessions);
+      const archivedSessions = Array.isArray(all.archivedSessions) ? mergeListed(all.archivedSessions) : state.archivedSessions;
+      const listedArchived = new Set(archivedSessions.map((session) => session.id));
+      const liveIds = new Set(sessions.map((session) => session.id));
+      patchState({
+        archiveSupported: true, sessions, archivedSessions,
+        archivedOlder: state.archivedOlder.filter((session) => !listedArchived.has(session.id) && !liveIds.has(session.id)),
+        archivedTotal: Number.isFinite(all.archivedTotal) ? Number(all.archivedTotal) : state.archivedTotal,
+      });
+      sessionsChanged = true;
+    }
     const sameSelection = selectionEpoch === state.selectionEpoch && requested === state.selectedId && !state.agentRunId;
     const mutationStable = actionEpoch === state.actionEpoch && !selectedPendingAction();
     let synchronizedLive = null;
@@ -1344,7 +1281,7 @@ async function poll(immediate = false) {
       });
       synchronizedLive = { text: nextText?.document || "", thinking: nextThinking?.document || "" };
     }
-    if (sameSelection && mutationStable) {
+    if (sameSelection && mutationStable && (all.selectedSession || sessionsChanged)) {
       const selected = all.selectedSession || state.sessions.find((session) => session.id === requested);
       if (selected) applySelectedSession(selected);
       else if (requested) clearSelection();
@@ -1363,19 +1300,22 @@ async function poll(immediate = false) {
       });
     }
     if (synchronizedLive) setLive(synchronizedLive.thinking, synchronizedLive.text);
-    patchState({ syncSeq: Number(all.seq || state.syncSeq) });
+    patchState({
+      syncSeq: Number(all.seq || state.syncSeq),
+      syncStateSeq: Number(all.stateSeq || state.syncStateSeq),
+    });
     if (!state.selectedId && !state.agentRunId && state.sessions.length && selectionEpoch === state.selectionEpoch) selectThread(state.sessions[0]);
-    renderThreads();
+    if (sessionsChanged) renderThreads();
     if (all.agents) renderAgents(all.agents);
-    renderTabs();
+    if (sessionsChanged || all.agentRuns || all.agents) renderTabs();
     if (all.plans) renderPlan(all.plans);
     if (all.governors) renderGovernorControls(all.governors);
     if (all.machine) renderMachine(all.machine);
-    updateChrome();
+    if (sessionsChanged || all.selectedSession || all.agentEvents || all.agentRuns) updateChrome();
     ui.connection.hidden = true;
   } catch (error) {
     if (error?.name !== "AbortError") {
-      patchState({ syncSeq: 0 });
+      patchState({ syncSeq: 0, syncStateSeq: 0 });
       retryDelay = 1_200;
       ui.connection.hidden = false;
       ui.connection.textContent = `●  Offline · ${error.message}`; ui.connection.style.color = "var(--danger)";
@@ -1663,10 +1603,40 @@ function renderEvents(result) {
 setInterval(() => { for (const card of state.toolCards.values()) if (!card.finished) updateToolTiming(card); }, 1000);
 
 async function newThread(destination, model) {
+  const previous = state.sessions.find((session) => session.id === state.selectedId) || null;
+  const sessionId = crypto.randomUUID();
+  const optimistic = {
+    id: sessionId,
+    name: "New thread",
+    cwd: "",
+    workspaceName: "Starting",
+    environment: destination,
+    state: "STARTING",
+    activity: "STARTING",
+    provider: model === "fable" || model === "opus" ? "anthropic" : "openai",
+    revision: 0,
+    steeringQueued: 0,
+    followUpQueued: 0,
+    queuedMessages: [],
+  };
+  mergeSession(optimistic);
+  selectThread(optimistic, false);
+  closeDrawer();
   try {
-    const result = await api(API.createSession.method, API.createSession.path(), { requestId: crypto.randomUUID(), destination, model });
-    selectThread(result.session); closeDrawer();
-  } catch (error) { console.error(error); }
+    const result = await api(API.createSession.method, API.createSession.path(), {
+      requestId: crypto.randomUUID(), sessionId, destination, model,
+    });
+    mergeSession(result.session);
+    if (state.selectedId === sessionId) applySelectedSession(result.session, true);
+    poll();
+  } catch (error) {
+    patchState({ sessions: state.sessions.filter((session) => session.id !== sessionId) });
+    if (state.selectedId === sessionId) {
+      if (previous) selectThread(previous);
+      else clearSelection();
+    }
+    console.error(error);
+  }
 }
 
 function glyphOn(accent) {
@@ -1683,7 +1653,6 @@ class ThreadStartMenu {
     this.modelPairs = [];
     this.chosen = null;
     this.expanded = false;
-    this.animationVersion = 0;
     this.shapes = node("div", "new-thread-shapes");
     this.faces = node("div", "new-thread-faces");
     root.replaceChildren(this.shapes, this.faces);
@@ -1725,9 +1694,6 @@ class ThreadStartMenu {
     setMotion(shape, { x: 0, y: 0, scale: trigger ? 1 : 0, opacity: 1 });
     setMotion(face, { x: 0, y: 0, scale: trigger ? 1 : 0, opacity: trigger ? 1 : 0 });
     setMotion(glyph, { scale: 1 });
-    face.addEventListener("pointerdown", () => springMotion(glyph, { scale: 0.86 }, 2600, 0.62));
-    for (const event of ["pointerup", "pointercancel", "pointerleave"])
-      face.addEventListener(event, () => springMotion(glyph, { scale: 1 }, 2600, 0.62));
     return { shape, face, glyph, choice, target: 0 };
   }
 
@@ -1741,47 +1707,36 @@ class ThreadStartMenu {
     if (this.expanded || !this.destinations.length) return;
     this.expanded = true;
     this.chosen = null;
-    const version = ++this.animationVersion;
     this.root.classList.add("expanded");
     this.trigger.face.disabled = true;
-    springMotion(this.trigger.shape, { scale: 0 }, 380, 0.62);
-    springMotion(this.trigger.face, { scale: 0, opacity: 0 }, 900, 1);
-    springMotion(ui.drawerTabs, { scale: 0.82, opacity: 0 }, 900, 1);
+    setMotion(this.trigger.shape, { scale: 0 });
+    setMotion(this.trigger.face, { scale: 0, opacity: 0 });
+    setMotion(ui.drawerTabs, { scale: 0.82, opacity: 0 });
     ui.drawerTabs.style.pointerEvents = "none";
-    this.showRow(this.destinations, 0, "destination", version);
+    this.showRow(this.destinations, 0, "destination");
   }
 
   collapse(force = false) {
     if (!this.expanded && !force) return;
     this.expanded = false;
     this.chosen = null;
-    const version = ++this.animationVersion;
     this.root.classList.remove("expanded");
-    for (const pair of [...this.destinationPairs, ...this.modelPairs]) {
-      pair.face.disabled = true;
-      springMotion(pair.shape, { x: 0, y: 0, scale: 0 }, 900, 1);
-      springMotion(pair.face, { x: 0, y: 0, scale: 0, opacity: 0 }, 900, 1);
-    }
-    springMotion(this.trigger.shape, { scale: 1 }, 900, 0.7);
-    springMotion(this.trigger.face, { scale: 1, opacity: 1 }, 900, 0.55);
-    springMotion(ui.drawerTabs, { scale: 1, opacity: 1 }, 900, 0.55);
+    this.clearPairs(this.destinationPairs);
+    this.clearPairs(this.modelPairs);
+    this.destinationPairs = [];
+    this.modelPairs = [];
+    setMotion(this.trigger.shape, { scale: 1 });
+    setMotion(this.trigger.face, { scale: 1, opacity: 1 });
+    setMotion(ui.drawerTabs, { scale: 1, opacity: 1 });
     ui.drawerTabs.style.pointerEvents = "";
-    setTimeout(() => {
-      if (version !== this.animationVersion) return;
-      this.clearPairs(this.destinationPairs);
-      this.clearPairs(this.modelPairs);
-      this.destinationPairs = [];
-      this.modelPairs = [];
-      this.shapes.classList.remove("moving");
-      this.trigger.face.disabled = this.destinations.length === 0;
-    }, reducedMotion.matches ? 0 : 520);
+    this.trigger.face.disabled = this.destinations.length === 0;
   }
 
   clearPairs(pairs) {
     for (const pair of pairs) { pair.shape.remove(); pair.face.remove(); }
   }
 
-  showRow(choices, origin, stage, version) {
+  showRow(choices, origin, stage) {
     const count = choices.length;
     const gap = 14;
     const available = this.root.clientWidth - gap * Math.max(0, count - 1);
@@ -1794,21 +1749,12 @@ class ThreadStartMenu {
         : choice.models?.length ? `${choice.label} threads` : `Start a ${choice.label} thread`;
       pair.face.title = pair.face.ariaLabel;
       pair.face.addEventListener("click", () => stage === "model" ? this.chooseModel(pair) : this.chooseDestination(pair));
-      setMotion(pair.shape, { x: origin, y: 0, scale: 0, opacity: 1 });
-      setMotion(pair.face, { x: origin, y: 0, scale: 0, opacity: 0 });
-      setTimeout(() => {
-        if (!this.expanded || version !== this.animationVersion) return;
-        springMotion(pair.shape, { x: pair.target, scale: 1 }, 380, 0.62);
-        springMotion(pair.face, { x: pair.target, scale: 1, opacity: 1 }, 900, 0.5);
-      }, reducedMotion.matches ? 0 : index * 45);
+      setMotion(pair.shape, { x: pair.target, y: 0, scale: 1, opacity: 1 });
+      setMotion(pair.face, { x: pair.target, y: 0, scale: 1, opacity: 1 });
       return pair;
     });
     if (stage === "model") this.modelPairs = pairs;
     else this.destinationPairs = pairs;
-    this.shapes.classList.add("moving");
-    setTimeout(() => {
-      if (version === this.animationVersion) this.shapes.classList.remove("moving");
-    }, reducedMotion.matches ? 0 : count * 45 + 620);
   }
 
   chooseDestination(pair) {
@@ -1820,19 +1766,9 @@ class ThreadStartMenu {
       return;
     }
     this.chosen = destination;
-    const version = ++this.animationVersion;
-    this.shapes.classList.add("moving");
-    for (const candidate of this.destinationPairs) {
-      candidate.face.disabled = true;
-      if (candidate === pair) {
-        springMotion(candidate.shape, { scale: 0 }, 380, 1);
-        springMotion(candidate.face, { scale: 0, opacity: 0 }, 900, 1);
-      } else {
-        springMotion(candidate.shape, { y: 150, scale: 0 }, 520, 1);
-        springMotion(candidate.face, { y: 150, scale: 0, opacity: 0 }, 150, 1);
-      }
-    }
-    this.showRow(destination.models, pair.target, "model", version);
+    this.clearPairs(this.destinationPairs);
+    this.destinationPairs = [];
+    this.showRow(destination.models, pair.target, "model");
   }
 
   chooseModel(pair) {
@@ -1854,23 +1790,54 @@ async function loadThreadStarts() {
 }
 async function archiveThread(session) {
   if (!state.archiveSupported) return false;
+  const previousSessions = state.sessions;
+  const wasSelected = state.selectedId === session.id;
+  patchState({ sessions: state.sessions.filter((candidate) => candidate.id !== session.id) });
+  renderThreads(); renderTabs();
+  if (wasSelected) clearSelection();
   try {
     await api(API.archiveSession.method, API.archiveSession.path({ sessionId: session.id }));
     const views = new Map(state.threadViews);
+    const settingsCache = new Map(state.settingsCache);
     views.delete(session.id);
-    patchState({ threadViews: views });
-    if (state.selectedId === session.id) clearSelection();
-    await poll();
+    settingsCache.delete(session.id);
+    patchState({ threadViews: views, settingsCache });
+    poll();
     return true;
-  } catch (error) { console.error(error); return false; }
+  } catch (error) {
+    patchState({ sessions: previousSessions });
+    if (wasSelected) selectThread(session);
+    else { renderThreads(); renderTabs(); }
+    console.error(error);
+    return false;
+  }
 }
 async function unarchiveThread(session) {
+  const previousArchived = state.archivedSessions;
+  const previousOlder = state.archivedOlder;
+  const optimistic = { ...session, archivedAt: null, state: "STOPPED", activity: "IDLE" };
+  patchState({
+    archivedSessions: state.archivedSessions.filter((candidate) => candidate.id !== session.id),
+    archivedOlder: state.archivedOlder.filter((candidate) => candidate.id !== session.id),
+  });
+  mergeSession(optimistic);
+  selectThread(optimistic, false);
   try {
     const result = await api(API.unarchiveSession.method, API.unarchiveSession.path({ sessionId: session.id }), {});
-    patchState({ archivedOlder: state.archivedOlder.filter((older) => older.id !== session.id) });
-    if (result.session) selectThread(result.session);
-    await poll();
-  } catch (error) { console.error(error); }
+    if (result.session) {
+      mergeSession(result.session);
+      if (state.selectedId === session.id) applySelectedSession(result.session, true);
+    }
+    poll();
+  } catch (error) {
+    patchState({
+      sessions: state.sessions.filter((candidate) => candidate.id !== session.id),
+      archivedSessions: previousArchived,
+      archivedOlder: previousOlder,
+    });
+    clearSelection(); renderThreads(); renderTabs();
+    console.error(error);
+  }
 }
 function setQueuedActionsEnabled(actions, enabled) {
   for (const button of actions.querySelectorAll("button")) button.disabled = !enabled;
@@ -1954,7 +1921,7 @@ async function sendPrompt(delivery = "followUp") {
   try {
     let accepted;
     try { accepted = await api(API.sessionPrompt.method, API.sessionPrompt.path({ sessionId: id }), body); }
-    catch { await new Promise((resolve) => setTimeout(resolve, 500)); accepted = await api(API.sessionPrompt.method, API.sessionPrompt.path({ sessionId: id }), body); }
+    catch { accepted = await api(API.sessionPrompt.method, API.sessionPrompt.path({ sessionId: id }), body); }
     finishAction(action);
     if (accepted.session) {
       mergeSession(accepted.session);
@@ -1989,52 +1956,62 @@ async function abortSelected() {
 function openSettings() {
   if (!state.selectedId) return;
   patchState({ settingsOpen: true }); ui.settings.hidden = false; ui.settingsScrim.hidden = false;
-  requestAnimationFrame(() => ui.settings.classList.add("open")); updateChrome(); loadSettings();
+  ui.settings.classList.add("open"); updateChrome(); loadSettings();
 }
 function closeSettings() {
-  patchState({ settingsOpen: false }); ui.settings.classList.remove("open"); ui.settingsScrim.hidden = true;
-  setTimeout(() => { if (!state.settingsOpen) ui.settings.hidden = true; }, 180);
+  patchState({ settingsOpen: false }); ui.settings.classList.remove("open"); ui.settingsScrim.hidden = true; ui.settings.hidden = true;
 }
+function renderSettings(settings) {
+  ui.model.replaceChildren();
+  for (const [label, common] of [["Common models", true], ["Uncommon models", false]]) {
+    const models = (settings.models || []).filter((model) => Boolean(model.common) === common);
+    if (!models.length) continue;
+    const group = document.createElement("optgroup"); group.label = label;
+    for (const model of models) {
+      const option = new Option(`${model.name || model.id} · ${model.provider}`, `${model.provider}\u0000${model.id}`);
+      option.selected = model.provider === settings.model?.provider && model.id === settings.model?.id;
+      group.append(option);
+    }
+    ui.model.append(group);
+  }
+  ui.model.disabled = ui.model.options.length === 0;
+  ui.thinking.replaceChildren();
+  for (const level of settings.thinkingLevels || ["off"]) {
+    const option = new Option(level.toUpperCase(), level); option.selected = level === settings.thinkingLevel; ui.thinking.add(option);
+  }
+  ui.thinking.disabled = ui.thinking.options.length === 0;
+  ui.speed.replaceChildren();
+  for (const mode of settings.speedModes || []) {
+    const option = new Option(mode.toUpperCase(), mode); option.selected = mode === settings.speedMode; ui.speed.add(option);
+  }
+  if (!ui.speed.options.length) ui.speed.add(new Option("Unavailable for this model", ""));
+  ui.speed.disabled = !settings.speedModes?.length;
+}
+
 async function loadSettings() {
   const id = state.selectedId;
-  ui.model.disabled = true; ui.thinking.disabled = true; ui.speed.disabled = true;
-  ui.model.replaceChildren(new Option("Loading…", ""));
-  ui.thinking.replaceChildren(new Option("Loading…", ""));
-  ui.speed.replaceChildren(new Option("Loading…", ""));
+  const cached = state.settingsCache.get(id);
+  if (cached) renderSettings(cached);
+  else {
+    ui.model.disabled = true; ui.thinking.disabled = true; ui.speed.disabled = true;
+    ui.model.replaceChildren(new Option("Loading…", ""));
+    ui.thinking.replaceChildren(new Option("Loading…", ""));
+    ui.speed.replaceChildren(new Option("Loading…", ""));
+  }
   try {
     const { settings } = await api(API.sessionSettings.method, API.sessionSettings.path({ sessionId: id }));
-    if (!state.settingsOpen || id !== state.selectedId) return;
-    ui.model.replaceChildren();
-    for (const [label, common] of [["Common models", true], ["Uncommon models", false]]) {
-      const models = (settings.models || []).filter((model) => Boolean(model.common) === common);
-      if (!models.length) continue;
-      const group = document.createElement("optgroup"); group.label = label;
-      for (const model of models) {
-        const option = new Option(`${model.name || model.id} · ${model.provider}`, `${model.provider}\u0000${model.id}`);
-        option.selected = model.provider === settings.model?.provider && model.id === settings.model?.id;
-        group.append(option);
-      }
-      ui.model.append(group);
-    }
-    ui.model.disabled = ui.model.options.length === 0;
-    ui.thinking.replaceChildren();
-    for (const level of settings.thinkingLevels || ["off"]) {
-      const option = new Option(level.toUpperCase(), level); option.selected = level === settings.thinkingLevel; ui.thinking.add(option);
-    }
-    ui.thinking.disabled = ui.thinking.options.length === 0;
-    ui.speed.replaceChildren();
-    for (const mode of settings.speedModes || []) {
-      const option = new Option(mode.toUpperCase(), mode); option.selected = mode === settings.speedMode; ui.speed.add(option);
-    }
-    if (!ui.speed.options.length) ui.speed.add(new Option("Unavailable for this model", ""));
-    ui.speed.disabled = !settings.speedModes?.length;
+    mapState("settingsCache", id, settings);
+    if (state.settingsOpen && id === state.selectedId) renderSettings(settings);
   } catch (error) { console.error(error); }
 }
 async function updateSettings(body) {
   const id = state.selectedId; if (!id) return;
   ui.model.disabled = true; ui.thinking.disabled = true; ui.speed.disabled = true;
-  try { await api(API.updateSessionSettings.method, API.updateSessionSettings.path({ sessionId: id }), body); await loadSettings(); }
-  catch (error) { console.error(error); loadSettings(); }
+  try {
+    const { settings } = await api(API.updateSessionSettings.method, API.updateSessionSettings.path({ sessionId: id }), body);
+    mapState("settingsCache", id, settings);
+    if (state.settingsOpen && id === state.selectedId) renderSettings(settings);
+  } catch (error) { console.error(error); loadSettings(); }
 }
 
 $("open-drawer").addEventListener("click", openDrawer);

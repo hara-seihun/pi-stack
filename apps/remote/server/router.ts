@@ -28,6 +28,7 @@ if (PEOPLE.length === 0) throw new Error("PI_REMOTE_USERS must list at least one
 
 const byLogin = new Map(PEOPLE.map((person) => [person.login.toLowerCase(), person]));
 const byUser = new Map(PEOPLE.map((person) => [person.user, person]));
+const activeUsers = new Set<string>();
 
 function identify(req: Request): Person | null {
   const login = req.headers.get("tailscale-user-login");
@@ -54,6 +55,13 @@ async function unitActive(user: string): Promise<boolean> {
   return (await activeState(user)) === "active";
 }
 
+async function routedActive(user: string): Promise<boolean> {
+  if (activeUsers.has(user)) return true;
+  const active = await unitActive(user);
+  if (active) activeUsers.add(user);
+  return active;
+}
+
 // A wrong key fails the mount, and the unit is restarted a few times before
 // systemd's start limit gives up. `failed` and `inactive` are the two ways it
 // stops trying; anything else means it is still on its way up.
@@ -71,6 +79,7 @@ async function systemctl(...args: string[]): Promise<{ ok: boolean; message: str
 async function supervisorHealthy(person: Person): Promise<boolean> {
   try {
     const response = await fetch(`http://127.0.0.1:${person.port}/v1/health`, { signal: AbortSignal.timeout(1_500) });
+    if (response.ok) activeUsers.add(person.user);
     return response.ok;
   } catch { return false; }
 }
@@ -116,6 +125,7 @@ async function unlock(person: Person, key: string): Promise<{ ok: true } | { ok:
 // Locking is stopping the unit and forgetting the key, in that order. The stop
 // takes the mount namespace with it.
 async function forget(person: Person): Promise<{ ok: boolean; message: string }> {
+  activeUsers.delete(person.user);
   const stopped = await systemctl("stop", `pi-remote@${person.user}.service`);
   await unlink(join(KEY_DIR, person.user)).catch(() => {});
   await systemctl("reset-failed", `pi-remote@${person.user}.service`);
@@ -154,6 +164,7 @@ async function proxy(person: Person, req: Request, url: URL): Promise<Response> 
     for (const name of HOP_BY_HOP) out.delete(name);
     return new Response(response.body, { status: response.status, statusText: response.statusText, headers: out });
   } catch (cause: any) {
+    activeUsers.delete(person.user);
     return Response.json({ error: `Supervisor unreachable: ${cause?.message ?? cause}` }, { status: 502 });
   }
 }
@@ -174,7 +185,7 @@ Bun.serve({
       return Response.json({ error: "This machine does not know you. Ask to be added to Pi Remote." }, { status: 403 });
     }
 
-    if (url.pathname === "/v1/environment" && req.method === "GET" && !(await unitActive(person.user))) {
+    if (url.pathname === "/v1/environment" && req.method === "GET" && !(await routedActive(person.user))) {
       return Response.json({ environment: {
         id: ENVIRONMENT_ID,
         name: ENVIRONMENT_NAME,
@@ -198,7 +209,7 @@ Bun.serve({
       return Response.json({ user: person.user, unlocked: await unitActive(person.user) });
     }
 
-    if (await unitActive(person.user)) return proxy(person, req, url);
+    if (await routedActive(person.user)) return proxy(person, req, url);
 
     const asset = webAsset(url.pathname);
     if (asset) return asset;

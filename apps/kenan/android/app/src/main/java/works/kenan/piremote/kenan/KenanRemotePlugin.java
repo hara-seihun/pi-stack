@@ -1,5 +1,7 @@
 package works.kenan.piremote.kenan;
 
+import android.util.Log;
+
 import com.getcapacitor.JSArray;
 import com.getcapacitor.JSObject;
 import com.getcapacitor.Plugin;
@@ -23,6 +25,13 @@ public final class KenanRemotePlugin extends Plugin {
     @Override
     public void load() {
         environments = new RemoteEnvironment(getContext().getApplicationContext());
+        transportExecutor.execute(() -> {
+            try {
+                transport.prepare(RemoteEnvironment.find("converge"));
+            } catch (Exception failure) {
+                Log.w("KenanRemote", "Could not warm the Converge transport", failure);
+            }
+        });
     }
 
     @PluginMethod

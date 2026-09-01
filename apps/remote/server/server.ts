@@ -283,11 +283,16 @@ function compressedJson(req: Request, data: unknown, status = 200): Response {
 }
 
 let syncSequence = 1;
+let stateSequence = 1;
 const syncWaiters = new Set<() => void>();
-function signalSync() {
+function wakeSync() {
   syncSequence++;
   for (const wake of syncWaiters) wake();
   syncWaiters.clear();
+}
+function signalSync() {
+  stateSequence++;
+  wakeSync();
 }
 
 const LIVE_SYNC_INTERVAL_MS = 16;
@@ -298,7 +303,7 @@ function signalLiveSync() {
     liveSyncPending = true;
     return;
   }
-  signalSync();
+  wakeSync();
   liveSyncTimer = setTimeout(() => {
     liveSyncTimer = null;
     if (liveSyncPending) {
@@ -325,6 +330,7 @@ async function awaitSync(after: number, waitMs: number) {
 }
 
 const contextVersions = new Map<string, Map<string, string>>();
+const storedContextCache = new Map<string, { capturedAt: number; document: string; hash: string } | null>();
 const displayContexts = new Map<string, { sourceHash: string; document: string; hash: string }>();
 function rememberContext(sessionId: string, document: string): string {
   const hash = sha256(document);
@@ -364,8 +370,12 @@ function textUpdate(key: string, baseHash: unknown, target: string): any {
 }
 
 function storedContext(sessionId: string): { capturedAt: number; document: string; hash: string } | null {
+  if (storedContextCache.has(sessionId)) return storedContextCache.get(sessionId) ?? null;
   const base = db.query("SELECT captured_at,context FROM session_contexts WHERE session_id=?").get(sessionId) as any;
-  if (!base) return null;
+  if (!base) {
+    storedContextCache.set(sessionId, null);
+    return null;
+  }
   let document = String(base.context);
   let capturedAt = Number(base.captured_at);
   for (const row of db.query("SELECT * FROM session_context_patches WHERE session_id=? ORDER BY seq").all(sessionId) as any[]) {
@@ -379,7 +389,9 @@ function storedContext(sessionId: string): { capturedAt: number; document: strin
     capturedAt = Number(row.captured_at);
     rememberContext(sessionId, document);
   }
-  return { capturedAt, document, hash: rememberContext(sessionId, document) };
+  const stored = { capturedAt, document, hash: rememberContext(sessionId, document) };
+  storedContextCache.set(sessionId, stored);
+  return stored;
 }
 
 function clearStoredContext(sessionId: string) {
@@ -388,6 +400,7 @@ function clearStoredContext(sessionId: string) {
     db.query("DELETE FROM session_contexts WHERE session_id=?").run(sessionId);
   })();
   contextVersions.delete(sessionId);
+  storedContextCache.set(sessionId, null);
   displayContexts.delete(sessionId);
   signalSync();
 }
@@ -1977,12 +1990,17 @@ const server = Bun.serve({
         const after = Math.max(0, Number(body.after ?? 0) || 0);
         await awaitSync(after, Number(body.waitMs ?? 25_000));
         const sequence = syncSequence;
-        const rows = db.query("SELECT * FROM sessions WHERE archived_at IS NULL ORDER BY created_at DESC").all() as any[];
-        const includeArchived = body.includeArchived === true;
+        const includeState = body.epoch !== SUPERVISOR_EPOCH
+          || Number(body.stateAfter ?? 0) !== stateSequence
+          || after === sequence;
+        const rows = includeState
+          ? db.query("SELECT * FROM sessions WHERE archived_at IS NULL ORDER BY created_at DESC").all() as any[]
+          : [];
+        const includeArchived = includeState && body.includeArchived === true;
         const selectedId = typeof body.selectedId === "string" ? body.selectedId : "";
         let contextUpdate: any = null;
         let selectedSession: any = null;
-        if (selectedId) {
+        if (selectedId && includeState) {
           const selected = sessionRow.get(selectedId) as any;
           if (selected) {
             selectedSession = publicSession(selected);
@@ -2020,12 +2038,12 @@ const server = Bun.serve({
               events,
               liveTextUpdate: textUpdate(`session:${eventSessionId}:text`, body.eventLiveTextHash, runtime?.liveText ?? ""),
               liveThinkingUpdate: textUpdate(`session:${eventSessionId}:thinking`, body.eventLiveThinkingHash, runtime?.liveThinking ?? ""),
-              session: publicSession(eventRow),
+              session: includeState ? publicSession(eventRow) : null,
             };
           }
         }
         let runList: any = null;
-        if (body.includeAgentList === true) {
+        if (includeState && body.includeAgentList === true) {
           const snapshot = await agentHost.runs();
           runList = {
             runs: snapshot.runs,
@@ -2053,7 +2071,7 @@ const server = Bun.serve({
             };
           }
         }
-        const watched = Array.isArray(body.watchedIds)
+        const watched = includeState && Array.isArray(body.watchedIds)
           ? body.watchedIds.slice(0, 100).map((id: unknown) => sessionRow.get(String(id)) as any).filter(Boolean).map((watchedRow: any) => {
               const session = publicSession(watchedRow) as any;
               if (!["RUNNING", "STARTING", "ABORTING"].includes(String(watchedRow.state))) {
@@ -2065,23 +2083,24 @@ const server = Bun.serve({
               return session;
             })
           : [];
-        refreshPlanUsageIfDue();
+        if (includeState) refreshPlanUsageIfDue();
         return compressedJson(req, {
           epoch: SUPERVISOR_EPOCH,
           seq: sequence,
-          sessions: body.includeSessions === false ? null : publicSessions(rows),
+          stateSeq: stateSequence,
+          sessions: includeState && body.includeSessions !== false ? publicSessions(rows) : null,
           archivedSessions: includeArchived ? publicSessions(archivedPage(0, ARCHIVED_PAGE_SIZE)) : null,
-          archivedTotal: archivedCount(),
+          archivedTotal: includeState ? archivedCount() : null,
           selectedSession,
           contextUpdate,
           watched,
           sessionEvents,
           agentRuns: runList,
           agentEvents: runEvents,
-          agents: body.includeDashboard === false ? null : await activeAgents(),
-          plans: body.includeDashboard === false ? null : { cards: planCards(planUsage), updatedAt: planUsage?.updatedAt ?? null },
-          governors: body.includeDashboard === false ? null : governorControls(),
-          machine: body.includeDashboard === false ? null : readMachineUsage(),
+          agents: !includeState || body.includeDashboard === false ? null : await activeAgents(),
+          plans: !includeState || body.includeDashboard === false ? null : { cards: planCards(planUsage), updatedAt: planUsage?.updatedAt ?? null },
+          governors: !includeState || body.includeDashboard === false ? null : governorControls(),
+          machine: !includeState || body.includeDashboard === false ? null : readMachineUsage(),
         });
       } catch (cause: any) { return error(cause?.message ?? "Could not synchronize", 400); }
     }
@@ -2130,7 +2149,9 @@ const server = Bun.serve({
         };
         const workspaceId = destination.workspaceId;
         const name = nextThreadName();
-        const id = crypto.randomUUID();
+        const requestedId = body.sessionId == null ? crypto.randomUUID() : String(body.sessionId);
+        if (!/^[0-9a-f-]{36}$/i.test(requestedId)) return error("Valid sessionId required");
+        const id = requestedId;
         const time = now();
         db.query(`
           INSERT INTO sessions(
@@ -2280,6 +2301,7 @@ const server = Bun.serve({
           VALUES(?,?,?,?,?,?,?)
         `).run(id, capturedAt, splice.baseHash, splice.targetHash, splice.prefixBytes, splice.deleteBytes, splice.insertBase64);
         rememberContext(id, document);
+        storedContextCache.set(id, { capturedAt, document, hash: splice.targetHash });
         signalSync();
         return json({ ok: true, capturedAt, hash: splice.targetHash });
       } catch (cause: any) { return error(cause?.message ?? "Could not patch model context", 409); }
@@ -2317,6 +2339,7 @@ const server = Bun.serve({
         })();
         if (changed) {
           rememberContext(id, document);
+          storedContextCache.set(id, { capturedAt: acknowledgedCapturedAt, document, hash: acknowledgedHash });
           if (compactionReplacement && runtime) runtime.compactionContextHash = acknowledgedHash;
           signalSync();
         }
