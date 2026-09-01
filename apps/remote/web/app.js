@@ -188,11 +188,6 @@ function stepMotion(now) {
   motionFrame = movingElements.size ? requestAnimationFrame(stepMotion) : 0;
 }
 
-function animateConversationIn() {
-  setMotion(ui.conversation, { y: 10, scale: 0.992, opacity: 0 });
-  requestAnimationFrame(() => springMotion(ui.conversation, { y: 0, scale: 1, opacity: 1 }, 550, 0.88));
-}
-
 // A supervisor only runs while its owner's key is in memory, so 423 is the
 // ordinary state of a machine that has just rebooted rather than an error. Every
 // call goes through here, so unlocking is handled once: the stored key is tried
@@ -750,15 +745,75 @@ async function toggleVoice() {
   await voiceSession.start();
 }
 
+const THREAD_VIEW_CACHE_LIMIT = 8;
+
 function clearConversation() {
   patchState({
     lastSeq: 0, contextCapturedAt: 0, contextEntries: [], contextDocument: null, contextSessionId: null,
+    sessionLiveTextDocument: null, sessionLiveThinkingDocument: null, sessionLiveDocumentId: null,
     agentLiveTextDocument: null, agentLiveThinkingDocument: null, agentDocumentRunId: null, followTail: true,
     toolCards: new Map(), userMessageLabels: new Map(),
   });
   clearAttachments(true);
   ui.transcript.replaceChildren();
   setLive("", "");
+}
+
+function stashThreadConversation() {
+  const id = state.selectedId;
+  if (!id || state.agentRunId) return;
+  const fragment = document.createDocumentFragment();
+  fragment.append(...ui.transcript.childNodes);
+  const cached = {
+    fragment,
+    scrollTop: ui.scrollback.scrollTop,
+    lastSeq: state.lastSeq,
+    contextCapturedAt: state.contextCapturedAt,
+    contextEntries: state.contextEntries,
+    contextDocument: state.contextDocument,
+    contextSessionId: state.contextSessionId,
+    sessionLiveTextDocument: state.sessionLiveTextDocument,
+    sessionLiveThinkingDocument: state.sessionLiveThinkingDocument,
+    sessionLiveDocumentId: state.sessionLiveDocumentId,
+    followTail: state.followTail,
+    toolCards: state.toolCards,
+    userMessageLabels: state.userMessageLabels,
+  };
+  const views = new Map(state.threadViews);
+  views.delete(id);
+  views.set(id, cached);
+  while (views.size > THREAD_VIEW_CACHE_LIMIT) views.delete(views.keys().next().value);
+  patchState({ threadViews: views });
+}
+
+function restoreThreadConversation(id) {
+  const cached = state.threadViews.get(id);
+  if (!cached) return false;
+  const views = new Map(state.threadViews);
+  views.delete(id);
+  views.set(id, cached);
+  patchState({
+    threadViews: views,
+    lastSeq: cached.lastSeq,
+    contextCapturedAt: cached.contextCapturedAt,
+    contextEntries: cached.contextEntries,
+    contextDocument: cached.contextDocument,
+    contextSessionId: cached.contextSessionId,
+    sessionLiveTextDocument: cached.sessionLiveTextDocument,
+    sessionLiveThinkingDocument: cached.sessionLiveThinkingDocument,
+    sessionLiveDocumentId: cached.sessionLiveDocumentId,
+    agentLiveTextDocument: null,
+    agentLiveThinkingDocument: null,
+    agentDocumentRunId: null,
+    followTail: cached.followTail,
+    toolCards: cached.toolCards,
+    userMessageLabels: cached.userMessageLabels,
+  });
+  clearAttachments(true);
+  ui.transcript.replaceChildren(cached.fragment);
+  setLive(cached.sessionLiveThinkingDocument?.document || "", cached.sessionLiveTextDocument?.document || "");
+  requestAnimationFrame(() => { ui.scrollback.scrollTop = cached.scrollTop; });
+  return true;
 }
 function mergeSession(session) {
   if (!session?.id) return;
@@ -797,11 +852,11 @@ function finishAction(action) {
 function selectAgent(run) {
   if (state.agentRunId === run.id) return;
   stopVoice();
+  stashThreadConversation();
   patchState({ selectionEpoch: state.selectionEpoch + 1, agentRunId: run.id, agentRun: run });
   clearConversation();
   ui.empty.hidden = true;
   ui.conversation.hidden = false;
-  animateConversationIn();
   updateChrome();
   renderThreads();
   renderAgentList();
@@ -969,6 +1024,7 @@ function renderTabs() {
 
 function selectThread(session) {
   const changed = state.selectedId !== session.id || Boolean(state.agentRunId);
+  if (state.selectedId !== session.id) stashThreadConversation();
   clearAgentSelection();
   if (changed) {
     stopVoice();
@@ -976,13 +1032,12 @@ function selectThread(session) {
   }
   applySelectedSession(session, changed);
   if (changed) {
-    clearConversation();
+    if (!restoreThreadConversation(session.id)) clearConversation();
     ui.prompt.value = loadDraft(session.id);
     refreshSlashCommands();
   }
   ui.empty.hidden = true;
   ui.conversation.hidden = false;
-  if (changed) animateConversationIn();
   updateChrome();
   renderThreads();
   poll();
@@ -1232,7 +1287,7 @@ async function poll(immediate = false) {
 
     if (state.syncEpoch && state.syncEpoch !== all.epoch) {
       patchState({
-        contextDocument: null, contextSessionId: null,
+        contextDocument: null, contextSessionId: null, threadViews: new Map(),
         sessionLiveTextDocument: null, sessionLiveThinkingDocument: null, sessionLiveDocumentId: null,
         agentLiveTextDocument: null, agentLiveThinkingDocument: null, agentDocumentRunId: null, syncSeq: 0,
       });
@@ -1368,13 +1423,13 @@ function scrollBottom() {
 let pendingLiveRender = null;
 let liveRenderFrame = 0;
 function setLive(thinking, answer) {
-  pendingLiveRender = { thinking, answer };
+  pendingLiveRender = { thinking, answer, selectionEpoch: state.selectionEpoch };
   if (liveRenderFrame) return;
   liveRenderFrame = requestAnimationFrame(() => {
     liveRenderFrame = 0;
     const next = pendingLiveRender;
     pendingLiveRender = null;
-    if (!next) return;
+    if (!next || next.selectionEpoch !== state.selectionEpoch) return;
     ui.liveThinking.textContent = next.thinking;
     ui.liveThinking.hidden = !next.thinking;
     ui.liveAnswer.textContent = next.answer;
@@ -1801,6 +1856,9 @@ async function archiveThread(session) {
   if (!state.archiveSupported) return false;
   try {
     await api(API.archiveSession.method, API.archiveSession.path({ sessionId: session.id }));
+    const views = new Map(state.threadViews);
+    views.delete(session.id);
+    patchState({ threadViews: views });
     if (state.selectedId === session.id) clearSelection();
     await poll();
     return true;
