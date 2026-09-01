@@ -33,7 +33,6 @@ PI_STACK_RUNTIME_CURRENT="$runtime_root/current" \
 PI_STACK_ORCHESTRATOR_PACKAGE="$orchestrator" \
 PI_STACK_REMOTE_PACKAGE="$remote" \
 PI_STACK_CLAUDE_CODE_USE_PACKAGE="${PI_STACK_CLAUDE_CODE_USE_PACKAGE:-}" \
-PI_STACK_COMPACTION_THRESHOLD_PACKAGE="${PI_STACK_COMPACTION_THRESHOLD_PACKAGE:-}" \
 PI_STACK_BASH_TIMEOUT_GUARD_PACKAGE="${PI_STACK_BASH_TIMEOUT_GUARD_PACKAGE:-}" \
 node --input-type=module <<'NODE'
 import { randomUUID } from "node:crypto";
@@ -45,7 +44,6 @@ const runtime = process.env.PI_STACK_RUNTIME_CURRENT;
 const paths = {
   orchestrator: process.env.PI_STACK_ORCHESTRATOR_PACKAGE,
   "claude-code-use": process.env.PI_STACK_CLAUDE_CODE_USE_PACKAGE || `${runtime}/extensions/pi-claude-code-use`,
-  "compaction-threshold": process.env.PI_STACK_COMPACTION_THRESHOLD_PACKAGE || `${runtime}/extensions/compaction-threshold`,
   vcc: manifest.packages.vcc,
   "bash-timeout-guard": process.env.PI_STACK_BASH_TIMEOUT_GUARD_PACKAGE || `${runtime}/extensions/bash-timeout-guard`,
   "browser-native": manifest.packages["browser-native"],
@@ -71,7 +69,7 @@ try {
   const next = {
     ...current,
     packages,
-    compaction: { ...(current.compaction ?? {}), enabled: false },
+    compaction: { ...(current.compaction ?? {}), enabled: true },
     retry: { enabled: true, maxRetries: 6, baseDelayMs: 5000 },
   };
   const temporary = `${path}.${process.pid}.${randomUUID()}.tmp`;
@@ -92,7 +90,7 @@ cat > "$vcc_config" <<'JSON'
 {
   "overrideDefaultCompaction": true,
   "smartKeepTail": true,
-  "continueAfterThresholdCompact": false,
+  "continueAfterThresholdCompact": true,
   "debug": false
 }
 JSON

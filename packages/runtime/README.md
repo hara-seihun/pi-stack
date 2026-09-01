@@ -4,7 +4,6 @@ Reusable extensions and prompt-evaluation tools for [Pi](https://pi.dev).
 
 ## Packages
 
-- `compaction-threshold` asks the configured compactor to run before a provider request at 500,000 active-context tokens for Fable and Opus, and 250,000 for Sol and other models. Host package sets use `@sting8k/pi-vcc` for the compaction.
 - `bash-timeout-guard` requires a bounded bash call, defaults to 30 minutes with a UI and 55 seconds for autonomous sessions, accepts a host-configured ceiling, and forbids detached work.
 - `publication-custody` ends model-side CI polling after a durable publication handoff.
 - `pi-claude-code-use` adapts Pi tools and prompts for Anthropic subscription requests.

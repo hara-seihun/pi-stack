@@ -13,12 +13,11 @@
     "extensions": [
       "./extensions/bash-timeout-guard/index.mjs",
       "./extensions/publication-custody/index.mjs",
-      "./extensions/compaction-threshold/index.mjs",
       "./extensions/pi-claude-code-use/extensions/index.ts"
     ]
   },
   "scripts": {
-    "test": "node --test prompt-eval/prompt-eval.test.mjs extensions/pi-claude-code-use/index.test.mjs extensions/bash-timeout-guard/guard.test.mjs extensions/publication-custody/custody.test.mjs extensions/compaction-threshold/index.test.mjs"
+    "test": "node --test prompt-eval/prompt-eval.test.mjs extensions/pi-claude-code-use/index.test.mjs extensions/bash-timeout-guard/guard.test.mjs extensions/publication-custody/custody.test.mjs"
   },
   "dependencies": {
     "agent-browser": "0.34.0"
