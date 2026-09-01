@@ -1,5 +1,5 @@
 import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
-import type { Model } from "@earendil-works/pi-ai";
+import type { Model, Provider } from "@earendil-works/pi-ai";
 import { builtinProviders } from "@earendil-works/pi-ai/providers/all";
 import { homedir } from "node:os";
 import { join } from "node:path";
@@ -7,13 +7,19 @@ import { Store } from "../store.js";
 import { defaultSharedAuthPath, SharedOAuthAuth, sharedOAuthProvider } from "../auth/shared-oauth.js";
 import { isRateLimitError, rateLimitCooldownMs } from "../provider-errors.js";
 import { interruptedTurnPrompt } from "../host/continuations.js";
+import customModelConfig from "../models.json" with { type: "json" };
 
 export function defaultLedgerPath():string{return process.env.PI_ORCHESTRATOR_LEDGER??join(homedir(),".local/share/pi-orchestrator/ledger.sqlite3");}
 export function baseProvider(provider:string):string{return provider.replace(/-\d+$/u,"");}
 export function failoverPrompt(failure:string,account:string):string{return interruptedTurnPrompt(failure,`This session moved to another account (${account}) and is ready to keep going.`);}
+export function withCustomModels(provider:Provider):Provider{
+  if(provider.id!=="anthropic")return provider;
+  const custom=customModelConfig.providers.anthropic.models as unknown as Model<"anthropic-messages">[];
+  return{...provider,getModels:()=>{const replacements=new Map(custom.map((model)=>[model.id,model]));return[...provider.getModels().filter((model)=>!replacements.has(model.id)),...custom];}};
+}
 
 export default function routing(pi:ExtensionAPI):void{
-  const ledgerPath=defaultLedgerPath(),store=Store.open(ledgerPath),families=new Map(builtinProviders().map((provider)=>[provider.id,provider]));
+  const ledgerPath=defaultLedgerPath(),store=Store.open(ledgerPath),families=new Map(builtinProviders().map((raw)=>{const provider=withCustomModels(raw);return[provider.id,provider] as const;}));
   const shared=new Map<string,SharedOAuthAuth>();
   for(const family of families.values()){
     const oauth=family.auth.oauth;if(!oauth)continue;

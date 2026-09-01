@@ -6,11 +6,16 @@ import { Store } from "../src/store.js";
 import { assign, commitMeterAdmission } from "../src/policy.js";
 import type { OrchestratorConfig } from "../src/domain.js";
 import { transactSharedCredential } from "../src/auth/shared-oauth.js";
+import { builtinProviders } from "@earendil-works/pi-ai/providers/all";
+import { withCustomModels } from "../src/extension/routing.js";
+import { catalogModel } from "../src/catalog.js";
 
 const config:OrchestratorConfig={profiles:{standard:[{provider:"openai-codex",model:"gpt-5.6-sol",thinking:"xhigh"}]},backgroundSpendFraction:.8,maxConcurrentSessions:8,defaultAccountConcurrency:2,meterMaxAgeMs:60_000,snapshotIntervalMs:30_000,reconcileIntervalMs:1000,stallAfterMs:60_000,killAfterMs:120_000,authPath:"/tmp/auth",agentDir:"/tmp/agent"};
 function account(store:Store,id="openai-codex-1"){store.upsertAccount({id,provider:"openai-codex",concurrency:2});}
 
 describe("current orchestrator state",()=>{
+  it("launches every Fable selection on Claude Fable 5.1",()=>{const anthropic=builtinProviders().find((provider)=>provider.id==="anthropic")!;const models=withCustomModels(anthropic).getModels();expect(models.some((model)=>model.id==="claude-fable-5")).toBe(true);expect(models.find((model)=>model.id==="claude-fable-5-1")?.cost.cacheRead).toBe(.25);expect(catalogModel("fable")?.model).toBe("claude-fable-5-1");});
+
   it("reconciles lane manifests as desired state",()=>{const store=Store.open(":memory:");store.reconcileLanes([{id:"one",prompt:"a",cwd:"/tmp",profile:"standard",weight:1},{id:"two",prompt:"b",cwd:"/tmp",profile:"standard",weight:2}]);store.reconcileLanes([{id:"two",prompt:"changed",cwd:"/work",profile:"standard",weight:3,fixedDemand:2}]);expect(store.lanes()).toEqual([{id:"two",prompt:"changed",cwd:"/work",profile:"standard",weight:3,fixedDemand:2,priority:0,doctrineUrl:undefined,openingProbe:undefined}]);store.close();});
 
   it("rolls credential custody back when account import fails",async()=>{const root=mkdtempSync(join(tmpdir(),"orchestrator-auth-")),path=join(root,"auth.json");writeFileSync(path,"{}\n");const credential={type:"oauth" as const,access:"access",refresh:"refresh",expires:Date.now()+60_000};await expect(transactSharedCredential(path,"openai-codex-1",credential,async()=>{throw new Error("ledger unavailable");})).rejects.toThrow("ledger unavailable");expect(JSON.parse(readFileSync(path,"utf8"))).toEqual({});rmSync(root,{recursive:true});});

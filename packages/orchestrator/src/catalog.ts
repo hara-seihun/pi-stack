@@ -60,7 +60,7 @@ export const ORCHESTRATOR_CATALOG: OrchestratorCatalog = {
     { id: "luna", provider: "openai-codex", model: "gpt-5.6-luna", thinking: "max", label: "LUNA", aliases: ["luna"], icon: "luna", accent: "#5a6673", meterClass: "luna" },
     { id: "terra", provider: "openai-codex", model: "gpt-5.6-terra", thinking: "max", label: "TERRA", aliases: ["terra"], icon: "terra", accent: "#5a6673", meterClass: "terra" },
     { id: "opus", provider: "anthropic", model: "claude-opus-5", thinking: "xhigh", label: "OPUS", aliases: ["opus"], icon: "opus", accent: "#d9663d", meterClass: "opus" },
-    { id: "fable", provider: "anthropic", model: "claude-fable-5", thinking: "high", label: "FABLE", aliases: ["fable"], icon: "fable", accent: "#e6a23c", meterClass: "fable" },
+    { id: "fable", provider: "anthropic", model: "claude-fable-5-1", thinking: "high", label: "FABLE", aliases: ["fable"], icon: "fable", accent: "#e6a23c", meterClass: "fable" },
     { id: "sonnet", provider: "anthropic", model: "claude-sonnet", thinking: "high", label: "SONNET", aliases: ["sonnet"], icon: "sonnet", accent: "#d9663d" },
   ],
   meters: [

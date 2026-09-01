@@ -1387,7 +1387,7 @@ function canonicalModelProvider(provider: string): string {
 }
 
 function commonModelRank(model: any): number {
-  if (model.provider === "anthropic" && model.id === "claude-fable-5") return 0;
+  if (model.provider === "anthropic" && model.id === "claude-fable-5-1") return 0;
   if (model.provider === "anthropic" && model.id === "claude-opus-5") return 1;
   if (model.provider === "openai-codex" && /^gpt-5\.6(?:-|$)/.test(model.id)) return 2;
   return Number.POSITIVE_INFINITY;

@@ -99,6 +99,29 @@ JSON
 chmod 600 "$vcc_config"
 if (( EUID == 0 )); then chown --reference="$settings" "$vcc_config"; fi
 
+models="$agent_dir/models.json"
+PI_STACK_MODELS="$models" PI_STACK_CUSTOM_MODELS="$orchestrator/dist/models.json" PI_STACK_SETTINGS="$settings" node --input-type=module <<'NODE'
+import { randomUUID } from "node:crypto";
+import { chownSync, existsSync, readFileSync, renameSync, rmSync, statSync, writeFileSync } from "node:fs";
+
+const path=process.env.PI_STACK_MODELS;
+const custom=JSON.parse(readFileSync(process.env.PI_STACK_CUSTOM_MODELS,"utf8"));
+const current=existsSync(path)?JSON.parse(readFileSync(path,"utf8")):{};
+const providers={...(current.providers??{})};
+for(const [providerId,addition] of Object.entries(custom.providers)){
+  const provider=providers[providerId]??{};
+  const replacements=new Map(addition.models.map((model)=>[model.id,model]));
+  providers[providerId]={...provider,models:[...(provider.models??[]).filter((model)=>!replacements.has(model.id)),...replacements.values()]};
+}
+const ownership=statSync(process.env.PI_STACK_SETTINGS);
+const temporary=`${path}.${process.pid}.${randomUUID()}.tmp`;
+try{
+  writeFileSync(temporary,`${JSON.stringify({...current,providers},null,2)}\n`,{mode:0o600});
+  chownSync(temporary,ownership.uid,ownership.gid);
+  renameSync(temporary,path);
+}finally{rmSync(temporary,{force:true});}
+NODE
+
 while IFS= read -r package; do
   PI_CODING_AGENT_DIR="$agent_dir" "$runtime_root/current/node_modules/.bin/pi" install "$package"
 done < <(jq -r --arg role "$role" '.roles[$role][] as $name | .packages[$name] | select(startswith("npm:"))' "$manifest")

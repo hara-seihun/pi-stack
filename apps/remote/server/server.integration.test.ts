@@ -153,7 +153,7 @@ def gate(name):
  os.unlink(ready)
  os.unlink(release)
 provider = sys.argv[sys.argv.index('--provider') + 1] if '--provider' in sys.argv else 'anthropic'
-model_id = sys.argv[sys.argv.index('--model') + 1] if '--model' in sys.argv else 'claude-fable-5'
+model_id = sys.argv[sys.argv.index('--model') + 1] if '--model' in sys.argv else 'claude-fable-5-1'
 thinking_level = sys.argv[sys.argv.index('--thinking') + 1] if '--thinking' in sys.argv else 'off'
 with open(os.environ['PI_FAKE_LAUNCH'], 'w') as launch:
  json.dump({'argv': sys.argv, 'pid': os.getpid(), 'sessionId': os.environ.get('PI_REMOTE_SESSION_ID'), 'serverUrl': os.environ.get('PI_REMOTE_SERVER_URL'), 'serviceTierFile': os.environ.get('PI_REMOTE_SERVICE_TIER_FILE'), 'agentDir': os.environ.get('PI_CODING_AGENT_DIR'), 'offline': os.environ.get('PI_OFFLINE')}, launch)
@@ -191,9 +191,9 @@ for line in sys.stdin:
    {'provider':'openai-codex','id':'gpt-5.6-sol','name':'GPT-5.6 Sol'},
    {'provider':'openai-codex','id':'gpt-5.6-luna','name':'GPT-5.6 Luna'},
    {'provider':'openai-codex','id':'gpt-5.5','name':'GPT-5.5'},
-   {'provider':'anthropic','id':'claude-fable-5','name':'Claude Fable 5'},
-   {'provider':'anthropic-2','id':'claude-fable-5','name':'Claude Fable 5 (#2)'},
-   {'provider':'anthropic-3','id':'claude-fable-5','name':'Claude Fable 5 (#3)'},
+   {'provider':'anthropic','id':'claude-fable-5-1','name':'Claude Fable 5.1'},
+   {'provider':'anthropic-2','id':'claude-fable-5-1','name':'Claude Fable 5.1 (#2)'},
+   {'provider':'anthropic-3','id':'claude-fable-5-1','name':'Claude Fable 5.1 (#3)'},
    {'provider':'anthropic','id':'claude-opus-5','name':'Claude Opus 5'},
    {'provider':'anthropic-2','id':'claude-opus-5','name':'Claude Opus 5 (#2)'},
    {'provider':'anthropic-3','id':'claude-opus-5','name':'Claude Opus 5 (#3)'},
