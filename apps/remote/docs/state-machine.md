@@ -87,7 +87,7 @@ Canonical interactive context remains the exact JSON document captured by Pi. Th
 
 Live text for observed orchestrator agents and GPT-Live delegation follows the same verified splice rule. Event rows still use their durable sequence cursor.
 
-The client keeps the verified document, rendered transcript subtree, tool-card state, live text, and scroll position for the eight most recently viewed threads. Switching to one of them restores that detached subtree synchronously, then sends its document hash in the background poll. The server returns only a splice if it changed. A process restart drops this in-memory cache, so the first visit to a thread still loads its authoritative context from the endpoint. Outgoing prompts enter an app-private outbox before the composer clears. Retries retain the same request ID, and the supervisor's request ledger makes delivery idempotent across lost acknowledgements and process death.
+The client keeps the verified document, rendered transcript subtree, tool-card state, live text, and scroll position for the eight most recently viewed threads. Switching to one of them restores that detached subtree synchronously, then sends its document hash in the background poll. The server returns only a splice if it changed. The 32 most recent verified documents also remain in app-private IndexedDB across process restarts. The client reads that cache before starting a first-visit network request, then reconciles its hash normally. Outgoing prompts enter an app-private outbox before the composer clears. Retries retain the same request ID, and the supervisor's request ledger makes delivery idempotent across lost acknowledgements and process death.
 
 ## Android context rendering
 

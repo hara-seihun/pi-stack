@@ -417,6 +417,14 @@ async function createThread(destination = "home", model?: string) {
 }
 
 describe("web and supervisor integration", () => {
+  test("serves the complete browser module graph", async () => {
+    for (const path of ["/app.js", "/api.js", "/context-cache.js", "/state-machine.js", "/native.js"]) {
+      const response = await fetch(base + path);
+      expect(response.status).toBe(200);
+      expect(response.headers.get("content-type")).toContain("text/javascript");
+    }
+  });
+
   test("lists this host's working agents for observation", async () => {
     const listed = await api("GET", "/v1/agents/runs");
     expect(listed.status).toBe(200);

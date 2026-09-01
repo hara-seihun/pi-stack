@@ -11,7 +11,7 @@ export function initialRemoteState(){return{
   sessionLiveTextDocument:null,sessionLiveThinkingDocument:null,sessionLiveDocumentId:null,
   agentLiveTextDocument:null,agentLiveThinkingDocument:null,agentDocumentRunId:null,
   toolCards:new Map(),userMessageLabels:new Map(),settingsCache:new Map(),followTail:true,attachments:[],attachmentGeneration:0,
-  slashCommands:[],slashCommandsLoading:false,planCards:[],agentModelCounts:new Map(),
+  slashCommands:[],slashCommandsLoading:false,slashCommandsLoadedId:null,planCards:[],agentModelCounts:new Map(),
   agents:[],agentHosts:[],agentRunning:0,agentRunId:null,agentRun:null,agentError:"",agentHostFailing:false,
   agentExpandedGroups:new Set(),
   machineUsageText:"CPU — · GPU — · RAM — · DISK —",machineUsageColor:"var(--muted)",machineUsageDescription:"CPU — · GPU — · RAM — · DISK —",

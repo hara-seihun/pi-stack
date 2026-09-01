@@ -1,4 +1,5 @@
 import { API } from "./api.js";
+import { deleteCachedContext, readCachedContext, writeCachedContext } from "./context-cache.js";
 import { createRemoteStore, initialRemoteState } from "./state-machine.js";
 import "./voice.js";
 
@@ -51,6 +52,35 @@ let threadStartMenu = null;
 
 // The thread poll carries only the newest archived page; older pages load on request.
 const ARCHIVED_PAGE_SIZE = 20;
+
+async function contextCacheKey(id) {
+  const environment = await window.KenanRemote?.getState?.().catch(() => null);
+  return `${environment?.id || location.origin}:${id}`;
+}
+
+function persistContext(id, context) {
+  if (!id || !context) return;
+  void contextCacheKey(id)
+    .then((key) => writeCachedContext(key, context))
+    .catch((error) => console.error("Could not cache thread context", error));
+}
+
+async function restorePersistedContext(id, selectionEpoch) {
+  try {
+    const cached = await readCachedContext(await contextCacheKey(id));
+    if (!cached || state.selectedId !== id || state.selectionEpoch !== selectionEpoch || state.contextDocument) return;
+    const context = { document: cached.document, hash: cached.hash, capturedAt: cached.capturedAt };
+    const parsed = JSON.parse(context.document);
+    patchState({ contextDocument: context, contextSessionId: id });
+    renderContext({ capturedAt: context.capturedAt, context: parsed, session: null });
+  } catch (error) { console.error("Could not restore cached thread context", error); }
+}
+
+function forgetPersistedContext(id) {
+  void contextCacheKey(id)
+    .then(deleteCachedContext)
+    .catch((error) => console.error("Could not remove cached thread context", error));
+}
 
 const DRAFT_PREFIX = "pi-remote-draft:";
 function loadDraft(id) {
@@ -410,15 +440,21 @@ function renderSlashCommands() {
   }
   ui.slashCommands.hidden = !completionActive || visible.length === 0;
 }
+const BUILTIN_SLASH_COMMANDS = [{ name: "compact", description: "Compact the current conversation context" }];
+
 async function refreshSlashCommands() {
   const id = state.selectedId;
-  patchState({ slashCommands: [] });
-  renderSlashCommands();
-  if (!id) return;
+  if (!id || state.slashCommandsLoading || state.slashCommandsLoadedId === id) return;
   patchState({ slashCommandsLoading: true });
   try {
     const result = await api(API.sessionCommands.method, API.sessionCommands.path({ sessionId: id }));
-    if (state.selectedId === id) { patchState({ slashCommands: Array.isArray(result.commands) ? result.commands : [] }); renderSlashCommands(); updateComposer(); }
+    if (state.selectedId === id) {
+      patchState({
+        slashCommands: Array.isArray(result.commands) ? result.commands : BUILTIN_SLASH_COMMANDS,
+        slashCommandsLoadedId: id,
+      });
+      renderSlashCommands(); updateComposer();
+    }
   } catch (error) {
     if (state.selectedId === id) console.error(error);
   } finally { patchState({ slashCommandsLoading: false }); }
@@ -981,16 +1017,28 @@ function selectThread(session, synchronize = true) {
     patchState({ selectionEpoch: state.selectionEpoch + 1, selectedId: session.id, selectedRevision: Number(session.revision || 0) });
   }
   applySelectedSession(session, changed);
+  let synchronizeNow = synchronize;
   if (changed) {
-    if (!restoreThreadConversation(session.id)) clearConversation();
+    const restored = restoreThreadConversation(session.id);
+    if (!restored) {
+      clearConversation();
+      if (synchronize) {
+        synchronizeNow = false;
+        const epoch = state.selectionEpoch;
+        void restorePersistedContext(session.id, epoch).finally(() => {
+          if (state.selectedId === session.id && state.selectionEpoch === epoch) poll();
+        });
+      }
+    }
     ui.prompt.value = loadDraft(session.id);
-    refreshSlashCommands();
+    patchState({ slashCommands: BUILTIN_SLASH_COMMANDS, slashCommandsLoadedId: null });
+    renderSlashCommands();
   }
   ui.empty.hidden = true;
   ui.conversation.hidden = false;
   updateChrome();
   renderThreads();
-  if (synchronize) poll();
+  if (synchronizeNow) poll();
 }
 function clearSelection() {
   stopVoice();
@@ -999,7 +1047,7 @@ function clearSelection() {
     selectedActivity: "IDLE", selectedTool: "", selectedRevision: 0, steeringQueued: 0, followUpQueued: 0, queuedMessages: [],
   });
   renderMessageQueue();
-  clearConversation(); ui.prompt.value = ""; patchState({ slashCommands: [] }); renderSlashCommands();
+  clearConversation(); ui.prompt.value = ""; patchState({ slashCommands: [], slashCommandsLoadedId: null }); renderSlashCommands();
   ui.conversation.hidden = true; ui.empty.hidden = false;
   updateChrome();
 }
@@ -1291,6 +1339,7 @@ async function poll(immediate = false) {
       const next = await window.PiRemoteSync.update(base, all.contextUpdate);
       if (controller.signal.aborted) throw new DOMException("Synchronization cancelled", "AbortError");
       patchState({ contextDocument: next, contextSessionId: requested });
+      persistContext(requested, next);
       if (all.selectedSession) mergeSession(all.selectedSession);
       if (mutationStable && all.selectedSession) applySelectedSession(all.selectedSession);
       renderContext({
@@ -1801,6 +1850,7 @@ async function archiveThread(session) {
     const settingsCache = new Map(state.settingsCache);
     views.delete(session.id);
     settingsCache.delete(session.id);
+    forgetPersistedContext(session.id);
     patchState({ threadViews: views, settingsCache });
     poll();
     return true;
@@ -2046,7 +2096,11 @@ ui.archivedTab.addEventListener("click", () => selectDrawerTab("archived"));
 ui.thunderControl.addEventListener("click", toggleThunder);
 ui.openaiGovernorControl.addEventListener("click", () => toggleGovernor("openai"));
 ui.anthropicGovernorControl.addEventListener("click", () => toggleGovernor("anthropic"));
-ui.prompt.addEventListener("input", () => { saveDraft(state.selectedId, ui.prompt.value); updateComposer(); });
+ui.prompt.addEventListener("input", () => {
+  saveDraft(state.selectedId, ui.prompt.value);
+  if (ui.prompt.value.trimStart().startsWith("/")) refreshSlashCommands();
+  updateComposer();
+});
 // On a soft keyboard Enter is the newline key and the send button is the only way to send,
 // so the composer must not steal it. A hardware keyboard keeps Enter as send.
 const softKeyboard = matchMedia("(hover: none) and (pointer: coarse)");
