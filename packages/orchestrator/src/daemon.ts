@@ -104,14 +104,13 @@ export class Daemon {
       for(const run of this.store.admissionQueue())await this.launch(run);
       const now=Date.now();
       for(const run of this.store.runs(["starting","running"])){
+        const progress=run.progressAt??run.startedAt??run.createdAt;
+        if(now-progress>this.config.killAfterMs){this.stopUnit(run.workerUnit);this.store.updateRun(run.id,{state:"failed",failureKind:"infrastructure",result:"session made no progress"});continue;}
         if(process.env.PI_ORCHESTRATOR_WORKER_LAUNCH!=="process"&&run.workerUnit&&spawnSync("systemctl",["--user","is-active","--quiet",run.workerUnit]).status!==0){
-          this.store.endLease(`run:${run.id}`);
-          this.store.updateRun(run.id,{state:"queued",result:"worker process stopped; recovering the saved Pi session"});
+          this.restartAssignedWorker(run,now);
           continue;
         }
-        const progress=run.progressAt??run.startedAt??run.createdAt;
-        if(now-progress>this.config.killAfterMs){this.stopUnit(run.workerUnit);this.store.updateRun(run.id,{state:"failed",failureKind:"infrastructure",result:"session made no progress"});}
-        else if(now-progress>this.config.stallAfterMs)this.store.setControl(`abort:${run.id}`,"stalled");
+        if(now-progress>this.config.stallAfterMs)this.store.setControl(`abort:${run.id}`,"stalled");
       }
     }finally{this.reconciling=false;}
   }
@@ -139,11 +138,11 @@ export class Daemon {
     const unit=`pi-orchestrator-run-${run.id.replaceAll("-","")}`;
     if(!this.store.assignRun(run.id,{...choice.assignment,unit,releasePath:this.releasePath}))return;
     commitMeterAdmission(this.store,choice.assignment);
-    try{this.startUnit(unit,run.id);}catch(error){this.store.updateRun(run.id,{state:"queued",result:String(error)});this.store.endLease(`run:${run.id}`);}
+    try{this.startUnit(unit,run.id,this.releasePath);}catch(error){this.store.updateRun(run.id,{state:"failed",failureKind:"infrastructure",result:`worker launch failed: ${String(error)}`});}
   }
 
-  private startUnit(unit:string,runId:string):void{
-    const cli=join(this.releasePath,"dist/cli.js");
+  private startUnit(unit:string,runId:string,releasePath:string):void{
+    const cli=join(releasePath,"dist/cli.js");
     const args=[
       "--user","--collect",`--unit=${unit}`,
       "--property=Type=exec","--property=Restart=no","--property=KillMode=mixed","--property=TimeoutStopSec=20",
@@ -166,12 +165,21 @@ export class Daemon {
   }
 
   private stopUnit(unit?:string):void{if(!unit)return;spawn("systemctl",["--user","stop",unit],{stdio:"ignore"}).unref();}
-  private recoverWorkers():void{for(const run of this.store.runs(["starting","running"])){
-    const alive=run.workerUnit&&spawnSync("systemctl",["--user","is-active","--quiet",run.workerUnit]).status===0;
-    if(alive)continue;
-    this.store.endLease(`run:${run.id}`);
-    this.store.updateRun(run.id,{state:"queued",workerUnit:""});
-  }}
+  private recoverWorkers():void{
+    for(const run of this.store.runs(["queued","starting","running"])){
+      if(!run.accountId||!run.provider||!run.model||!run.workerUnit||!run.releasePath)continue;
+      const alive=spawnSync("systemctl",["--user","is-active","--quiet",run.workerUnit]).status===0;
+      if(!alive)this.restartAssignedWorker(run);
+    }
+  }
+  private restartAssignedWorker(run:Run,at=Date.now()):void{
+    const progress=run.progressAt??run.startedAt??run.createdAt;
+    if(at-progress>this.config.killAfterMs){this.store.updateRun(run.id,{state:"failed",failureKind:"infrastructure",result:"session made no progress"},at);return;}
+    if(!this.store.resumeAssignedRun(run.id,at))return;
+    spawnSync("systemctl",["--user","reset-failed",run.workerUnit!],{stdio:"ignore"});
+    try{this.startUnit(run.workerUnit!,run.id,run.releasePath!);}
+    catch(error){this.store.updateRun(run.id,{state:"failed",failureKind:"infrastructure",result:`worker recovery failed: ${String(error)}`},at);}
+  }
 
   private async request(req:IncomingMessage,res:ServerResponse):Promise<void>{
     try{

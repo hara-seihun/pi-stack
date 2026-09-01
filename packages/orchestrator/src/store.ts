@@ -258,6 +258,17 @@ export class Store {
       .run(state,patch.sessionFile??null,patch.progressAt??null,patch.result??null,patch.failureKind??null,patch.workerUnit??null,at,terminal?at:null,id);
     if(terminal)this.endLease(`run:${id}`,at);
   }
+  resumeAssignedRun(id:string,at=Date.now()):boolean{
+    return this.transaction(()=>{
+      const run=this.run(id);
+      if(!run?.accountId||!run.provider||!run.model||!run.workerUnit||!run.releasePath)return false;
+      const changed=this.db.prepare(`UPDATE run SET state='starting',result='worker process stopped; recovering the saved Pi session',updated_at=?,ended_at=NULL WHERE id=? AND state IN ('queued','starting','running')`).run(at,id).changes;
+      if(changed!==1)return false;
+      this.endLease(`run:${id}`,at);
+      this.createLease(`run:${id}`,run.accountId,"fleet",id,at);
+      return true;
+    });
+  }
   activeCount(source?:RunSource,sourceId?:string):number{let sql="SELECT COUNT(*) n FROM run WHERE state IN ('queued','starting','running','parked')",args:any[]=[];if(source){sql+=" AND source=?";args.push(source);}if(sourceId){sql+=" AND source_id=?";args.push(sourceId);}return Number((this.db.prepare(sql).get(...args) as any).n);}
 
   createLease(id:string,accountId:string,kind:LeaseKind,runId?:string,at=Date.now()):void{this.db.prepare(`INSERT INTO lease(id,account_id,kind,run_id,started_at,heartbeat_at,ended_at) VALUES(?,?,?,?,?,?,NULL)
