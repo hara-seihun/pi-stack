@@ -683,11 +683,8 @@ describe("a hosted session reports that it is doing something", () => {
 });
 
 describe("the opening exchange", () => {
-  // The exchange is lived, not injected: each message is a real turn the
-  // agent answers, and the lived record is what the pin extension replays
-  // verbatim through every compaction. See RESULTS-mcp.md in the thread-lab
-  // experiments: the same corpus read as depletion or as terrain depending
-  // on one operator sentence, and a paraphrased opening loses that force.
+  // Each opening message is a real turn. Session replay and compaction must
+  // preserve that exact exchange rather than replacing it with one prompt.
   it("sends each opening message as a real turn before the task prompt", async () => {
     const { host, spec, prompts, finished } = harness([{}, {}, { toolCalls: 1 }, {}, {}], {
       opening: ["Here's something I wrote.", "Now examine the ledger."],
