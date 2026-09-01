@@ -735,7 +735,7 @@ const THREAD_VIEW_CACHE_LIMIT = 8;
 
 function clearConversation() {
   patchState({
-    lastSeq: 0, contextCapturedAt: 0, contextEntries: [], contextDocument: null, contextSessionId: null,
+    lastSeq: 0, contextCapturedAt: 0, contextEntries: [], contextRenderStart: 0, contextDocument: null, contextSessionId: null,
     sessionLiveTextDocument: null, sessionLiveThinkingDocument: null, sessionLiveDocumentId: null,
     agentLiveTextDocument: null, agentLiveThinkingDocument: null, agentDocumentRunId: null, followTail: true,
     toolCards: new Map(), userMessageLabels: new Map(),
@@ -756,6 +756,7 @@ function stashThreadConversation() {
     lastSeq: state.lastSeq,
     contextCapturedAt: state.contextCapturedAt,
     contextEntries: state.contextEntries,
+    contextRenderStart: state.contextRenderStart,
     contextDocument: state.contextDocument,
     contextSessionId: state.contextSessionId,
     sessionLiveTextDocument: state.sessionLiveTextDocument,
@@ -783,6 +784,7 @@ function restoreThreadConversation(id) {
     lastSeq: cached.lastSeq,
     contextCapturedAt: cached.contextCapturedAt,
     contextEntries: cached.contextEntries,
+    contextRenderStart: cached.contextRenderStart,
     contextDocument: cached.contextDocument,
     contextSessionId: cached.contextSessionId,
     sessionLiveTextDocument: cached.sessionLiveTextDocument,
@@ -1597,34 +1599,38 @@ function appendContextEntry(entry) {
   });
   return card.root;
 }
+const CONTEXT_WINDOW_SIZE = 60;
+
+function renderContextWindow(entries, start) {
+  patchState({ toolCards: new Map(), userMessageLabels: new Map(), contextRenderStart: start });
+  ui.transcript.replaceChildren();
+  if (start > 0) {
+    const earlier = node("button", "context-earlier", `Show ${Math.min(CONTEXT_WINDOW_SIZE, start)} earlier entries`);
+    earlier.type = "button";
+    earlier.addEventListener("click", () => {
+      const previousHeight = ui.scrollback.scrollHeight;
+      renderContextWindow(state.contextEntries, Math.max(0, state.contextRenderStart - CONTEXT_WINDOW_SIZE));
+      requestAnimationFrame(() => { ui.scrollback.scrollTop += ui.scrollback.scrollHeight - previousHeight; });
+    });
+    ui.transcript.append(earlier);
+  }
+  for (let index = start; index < entries.length; index++) appendContextEntry(entries[index]);
+}
+
 function renderContext(result) {
   const capturedAt = Number(result.capturedAt || 0);
   if (capturedAt === state.contextCapturedAt && state.contextEntries.length) return;
   const entries = modelContextEntries(result.context);
-  let shared = 0;
-  while (shared < entries.length && shared < state.contextEntries.length
-    && entries[shared].signature === state.contextEntries[shared].signature) shared++;
-  while (shared < entries.length && shared < state.contextEntries.length
-    && entries[shared].key === state.contextEntries[shared].key && entries[shared].kind !== "toolCall") {
-    const root = ui.transcript.children[shared];
-    if (root) {
-      root.className = `message ${entries[shared].kind}`;
-      const label = root.querySelector(".message-label");
-      if (label) label.textContent = entries[shared].label.toUpperCase();
-      const body = root.querySelector(".markdown-body");
-      if (body) renderMarkdown(body, entries[shared].text);
-    }
-    shared++;
-  }
-  while (state.contextEntries.length > shared) {
-    const removed = state.contextEntries.pop();
-    if (removed.kind === "toolCall") deleteMapState("toolCards", String(removed.toolCall.id || ""));
-    ui.transcript.lastElementChild?.remove();
-  }
-  for (let index = shared; index < entries.length; index++) appendContextEntry(entries[index]);
+  const newestWindow = Math.max(0, entries.length - CONTEXT_WINDOW_SIZE);
+  const cold = state.contextEntries.length === 0
+    || (state.contextEntries.length === 1 && state.contextEntries[0].key === "waiting");
+  const start = cold || state.followTail
+    ? newestWindow
+    : Math.min(state.contextRenderStart, newestWindow);
+  renderContextWindow(entries, start);
   patchState({ contextCapturedAt: capturedAt, contextEntries: entries });
   setLive("", "");
-  if (shared < entries.length) scrollBottom();
+  scrollBottom();
 }
 
 function renderEvents(result) {

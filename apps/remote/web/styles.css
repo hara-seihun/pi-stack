@@ -138,8 +138,9 @@ button:focus-visible, input:focus-visible, textarea:focus-visible, select:focus-
 .conversation { min-height: 0; flex: 1; display: flex; flex-direction: column; }
 .scrollback { min-height: 0; flex: 1; overflow: auto; padding: 18px clamp(16px, 3vw, 42px) 16px; overflow-anchor: none; }
 .transcript { width: min(100%, 980px); margin: 0 auto; }
-.message { margin-top: 22px; overflow-wrap: anywhere; font-size: 16px; line-height: 1.48; user-select: text; }
+.message { margin-top: 22px; overflow-wrap: anywhere; font-size: 16px; line-height: 1.48; user-select: text; content-visibility: auto; contain-intrinsic-block-size: auto 160px; }
 .message:first-child { margin-top: 0; }
+.context-earlier { display: block; margin: 0 auto 18px; padding: 8px 12px; border: 1px solid var(--border); color: var(--muted); background: var(--surface); font: inherit; }
 .message-label { display: block; margin-bottom: 5px; color: var(--muted); font-size: 11px; font-weight: 850; letter-spacing: .06em; }
 .message.user .message-label { color: var(--accent); }
 .message.assistant .message-label { color: var(--success); }
@@ -232,7 +233,7 @@ button:focus-visible, input:focus-visible, textarea:focus-visible, select:focus-
 .paste-text-actions button { min-height: 42px; padding: 0 15px; color: var(--text); background: var(--surface-2); font-weight: 750; }
 .paste-text-actions .accent { color: var(--bg); background: var(--accent); }
 
-.tool-card { margin-top: 18px; padding: 11px 13px; background: var(--pending); user-select: text; }
+.tool-card { margin-top: 18px; padding: 11px 13px; background: var(--pending); user-select: text; content-visibility: auto; contain-intrinsic-block-size: auto 160px; }
 .tool-card.success { background: var(--tool-ok); }
 .tool-card.error { background: var(--tool-error); }
 .tool-header, .tool-body { margin: 0; font: 14px/1.4 ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; white-space: pre-wrap; overflow-wrap: anywhere; }
