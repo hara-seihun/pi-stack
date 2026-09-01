@@ -88,6 +88,9 @@ NODE
 while IFS= read -r package; do
   PI_CODING_AGENT_DIR="$agent_dir" "$runtime_root/current/node_modules/.bin/pi" install "$package"
 done < <(jq -r --arg role "$role" '.roles[$role][] as $name | .packages[$name] | select(startswith("npm:"))' "$manifest")
+if (( EUID == 0 )) && [[ -d $agent_dir/npm ]]; then
+  chown -R --reference="$settings" "$agent_dir/npm"
+fi
 
 jq -e --argjson expected "$(jq -c --arg role "$role" '.roles[$role] | length' "$manifest")" \
   '.packages | length == $expected' "$settings" >/dev/null
