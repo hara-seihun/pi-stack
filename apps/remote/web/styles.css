@@ -146,15 +146,19 @@ button:focus-visible, input:focus-visible, textarea:focus-visible, select:focus-
 .message-header { min-height: 28px; display: flex; align-items: flex-start; gap: 8px; margin-bottom: 5px; }
 .message-label { display: block; flex: 1; min-width: 0; padding-top: 5px; color: var(--muted); font-size: 11px; font-weight: 850; letter-spacing: .06em; }
 .message-actions { flex: 0 0 auto; display: flex; align-items: center; gap: 3px; }
-.message-action { min-width: 48px; height: 28px; padding: 0 7px; color: var(--muted); background: var(--surface-2); font-size: 9px; font-weight: 850; letter-spacing: .035em; }
+.message-action { width: 30px; min-width: 30px; height: 28px; display: grid; place-items: center; padding: 0; color: var(--muted); background: var(--surface-2); }
+.message-action svg, .icon-message-action svg { width: 15px; height: 15px; fill: none; stroke: currentColor; stroke-width: 1.8; stroke-linecap: round; stroke-linejoin: round; }
 .message-action:hover, .message-action:focus-visible { color: var(--text); }
 .message-action.edit-message { color: var(--accent); }
+.message-action.copied, .icon-message-action.copied { color: var(--success); }
+.message-action.failed, .icon-message-action.failed { color: var(--danger); }
+.message-action.editing { opacity: .55; }
 .message.user .message-label { color: var(--accent); }
 .message.assistant .message-label { color: var(--success); }
 .message.thinking { padding: 11px 13px; background: var(--pending); color: var(--muted); font-size: 14px; font-style: italic; }
 .message.notice { color: var(--muted); font-size: 14px; }
-.live-thinking, .live-answer { position: relative; width: min(100%, 980px); margin: 18px auto 0; padding-right: 62px; overflow-wrap: anywhere; white-space: pre-wrap; line-height: 1.45; user-select: text; }
-.live-thinking { padding: 11px 62px 11px 13px; background: var(--pending); color: var(--muted); font-style: italic; font-size: 14px; }
+.live-thinking, .live-answer { position: relative; width: min(100%, 980px); margin: 18px auto 0; padding-right: 40px; overflow-wrap: anywhere; white-space: pre-wrap; line-height: 1.45; user-select: text; }
+.live-thinking { padding: 11px 40px 11px 13px; background: var(--pending); color: var(--muted); font-style: italic; font-size: 14px; }
 .live-thinking > .message-action, .live-answer > .message-action { position: absolute; top: 5px; right: 0; }
 .live-thinking > .message-action { right: 7px; background: var(--surface); }
 .live-thinking::before, .live-answer::before { display: block; margin-bottom: 5px; font-size: 11px; font-weight: 850; }
@@ -191,6 +195,7 @@ button:focus-visible, input:focus-visible, textarea:focus-visible, select:focus-
 .queued-message-preview { display: block; overflow: hidden; color: var(--text); font-size: 12px; white-space: nowrap; text-overflow: ellipsis; }
 .queued-message-actions { flex: 0 0 auto; display: flex; gap: 3px; }
 .queued-message-action { height: 32px; padding: 0 7px; color: var(--muted); background: var(--surface-2); font-size: 9px; font-weight: 850; }
+.queued-message-action.icon-message-action { width: 30px; display: grid; place-items: center; padding: 0; }
 .steer-instead, .edit-queued { color: var(--accent); }
 .cancel-queued { color: var(--danger); }
 .attachments { flex: 0 0 auto; display: flex; gap: 6px; max-width: 100%; padding: 7px 9px; overflow-x: auto; background: color-mix(in srgb, var(--surface) 92%, transparent); border-top: 1px solid var(--border); }

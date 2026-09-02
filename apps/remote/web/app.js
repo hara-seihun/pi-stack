@@ -462,8 +462,7 @@ function renderMessageQueue() {
     copy.append(node("span", "queued-message-label", message.status || "Queued"), node("span", "queued-message-preview", queuedPreview(message.text)));
     row.append(copy);
     const actions = node("div", "queued-message-actions");
-    const copyMessage = node("button", "queued-message-action", "COPY");
-    copyMessage.type = "button"; copyMessage.title = "Copy queued message";
+    const copyMessage = messageActionButton("queued-message-action icon-message-action", "clipboard", "Copy queued message");
     copyMessage.addEventListener("click", () => copyMessageText(copyMessage, () => message.text));
     actions.append(copyMessage);
     if (message.canSteer) {
@@ -473,8 +472,7 @@ function renderMessageQueue() {
       actions.append(steer);
     }
     if (message.canCancel) {
-      const edit = node("button", "queued-message-action edit-queued", "EDIT");
-      edit.type = "button"; edit.title = "Cancel and return this message to the composer";
+      const edit = messageActionButton("queued-message-action icon-message-action edit-queued", "pencil", "Cancel and return this message to the composer");
       edit.addEventListener("click", () => cancelQueuedMessage(message, true, actions));
       const cancel = node("button", "queued-message-action cancel-queued", "CANCEL");
       cancel.type = "button"; cancel.title = "Cancel this queued message";
@@ -1490,29 +1488,49 @@ async function poll(immediate = false) {
   }
 }
 
+const messageActionIcons = Object.freeze({
+  clipboard: '<svg viewBox="0 0 24 24" aria-hidden="true"><rect x="6" y="5" width="12" height="16" rx="2"/><path d="M9 5V3h6v2M9 5h6"/></svg>',
+  pencil: '<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M21.2 8.4 8.4 21.2a2 2 0 0 1-1.4.6H3.3a1 1 0 0 1-1-1V17a2 2 0 0 1 .6-1.4L15.6 2.8a2 2 0 0 1 2.8 0l2.8 2.8a2 2 0 0 1 0 2.8ZM14 4l6 6"/></svg>',
+});
+
+function messageActionButton(className, icon, label) {
+  const button = node("button", className);
+  button.type = "button";
+  button.innerHTML = messageActionIcons[icon];
+  button.title = label;
+  button.setAttribute("aria-label", label);
+  button.dataset.actionLabel = label;
+  return button;
+}
+
 async function copyMessageText(button, readText) {
-  const previous = button.textContent;
   try {
     await navigator.clipboard.writeText(String(readText() || ""));
-    button.textContent = "COPIED";
+    button.classList.add("copied");
+    button.title = "Copied";
+    button.setAttribute("aria-label", "Copied");
   } catch (error) {
-    button.textContent = "FAILED";
+    button.classList.add("failed");
+    button.title = "Copy failed";
+    button.setAttribute("aria-label", "Copy failed");
     console.error("Could not copy message", error);
   }
-  setTimeout(() => { if (button.isConnected) button.textContent = previous; }, 1_200);
+  setTimeout(() => {
+    if (!button.isConnected) return;
+    button.classList.remove("copied", "failed");
+    const label = button.dataset.actionLabel || "Copy message";
+    button.title = label;
+    button.setAttribute("aria-label", label);
+  }, 1_200);
 }
 
 function messageActions(readText, editable = null) {
   const actions = node("div", "message-actions");
-  const copy = node("button", "message-action", "COPY");
-  copy.type = "button";
-  copy.title = "Copy message";
+  const copy = messageActionButton("message-action", "clipboard", "Copy message");
   copy.addEventListener("click", () => copyMessageText(copy, readText));
   actions.append(copy);
   if (editable) {
-    const edit = node("button", "message-action edit-message", "EDIT");
-    edit.type = "button";
-    edit.title = "Edit and resend from this point in the conversation";
+    const edit = messageActionButton("message-action edit-message", "pencil", "Edit and resend from this point in the conversation");
     edit.addEventListener("click", () => editFromMessage(editable, edit));
     actions.append(edit);
   }
@@ -1563,6 +1581,10 @@ function setLive(thinking, answer) {
     ui.liveAnswer.hidden = !next.answer;
   });
 }
+ui.copyLiveThinking.innerHTML = messageActionIcons.clipboard;
+ui.copyLiveThinking.dataset.actionLabel = "Copy thinking";
+ui.copyLiveAnswer.innerHTML = messageActionIcons.clipboard;
+ui.copyLiveAnswer.dataset.actionLabel = "Copy response";
 ui.copyLiveThinking.addEventListener("click", () => copyMessageText(ui.copyLiveThinking, () => ui.liveThinkingContent.textContent));
 ui.copyLiveAnswer.addEventListener("click", () => copyMessageText(ui.copyLiveAnswer, () => ui.liveAnswerContent.textContent));
 
@@ -2079,14 +2101,13 @@ function cancelQueuedMessage(message, edit, actions) {
 async function editFromMessage(message, button) {
   const id = state.selectedId;
   if (!id || state.agentRunId || selectedPendingAction()) return;
-  if (working(state.selectedState)) {
-    button.textContent = "WAIT";
-    setTimeout(() => { if (button.isConnected) button.textContent = "EDIT"; }, 1_200);
-    return;
-  }
+  if (working(state.selectedState)) return;
   const action = beginAction(id, "fork");
   const body = { requestId: crypto.randomUUID(), messageTimestamp: message.messageTimestamp };
-  button.textContent = "EDITING";
+  button.disabled = true;
+  button.classList.add("editing");
+  button.title = "Editing from this message";
+  button.setAttribute("aria-label", "Editing from this message");
   try {
     let result;
     try { result = await api(API.sessionFork.method, API.sessionFork.path({ sessionId: id }), body, 45_000); }
@@ -2107,9 +2128,23 @@ async function editFromMessage(message, button) {
     ui.prompt.setSelectionRange(ui.prompt.value.length, ui.prompt.value.length);
     updateComposer();
   } catch (error) {
-    button.textContent = "FAILED";
+    if (button.isConnected) {
+      button.classList.add("failed");
+      button.title = "Edit failed";
+      button.setAttribute("aria-label", "Edit failed");
+      setTimeout(() => {
+        if (!button.isConnected) return;
+        button.classList.remove("failed");
+        button.title = button.dataset.actionLabel;
+        button.setAttribute("aria-label", button.dataset.actionLabel);
+      }, 1_200);
+    }
     console.error(error);
   } finally {
+    if (button.isConnected) {
+      button.disabled = false;
+      button.classList.remove("editing");
+    }
     finishAction(action);
     updateChrome();
     poll(true);
