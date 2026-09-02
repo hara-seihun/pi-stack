@@ -99,7 +99,8 @@ button:focus-visible, input:focus-visible, textarea:focus-visible, select:focus-
 .agent-empty { padding: 12px 17px; color: var(--muted); font-size: 12px; font-weight: 700; }
 .agent-banner { padding: 10px clamp(16px, 3vw, 42px); border-top: 1px solid var(--border); background: var(--surface); color: var(--muted); font-size: 12px; font-weight: 750; }
 .drawer-footer { flex: 0 0 auto; min-height: 195px; padding: 8px 18px; border-top: 1px solid var(--border); display: grid; gap: 3px; }
-.machine-controls { height: 44px; display: grid; grid-template-columns: repeat(3, 1fr); gap: 4px; }
+.machine-controls { height: 44px; display: grid; grid-auto-flow: column; grid-auto-columns: 1fr; gap: 4px; }
+.machine-actions { display: contents; }
 .machine-control { min-width: 0; display: grid; place-items: center; padding: 0; background: var(--surface-2); }
 .machine-control img { width: 22px; height: 22px; opacity: .42; filter: grayscale(1); pointer-events: none; }
 .machine-control.active { background: var(--tool-ok); }

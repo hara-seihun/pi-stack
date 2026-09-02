@@ -90,7 +90,7 @@ async function startServer() {
       ...process.env,
       PATH: `${root}:${process.env.PATH ?? ""}`,
       PI_BIN: fakePi,
-      PI_REMOTE_AUDIO_BIN: fakeAudio,
+      PI_REMOTE_ACTIONS: JSON.stringify([{ id: "thunder", label: "Thunder", icon: "thunder", status: [fakeAudio, "status"], on: [fakeAudio, "thunder"], off: [fakeAudio, "stop"] }]),
       PI_FAKE_AUDIO_STATE: fakeAudioState,
       PI_REMOTE_DATA: join(root, "data"),
       PI_REMOTE_PORT: String(port),
@@ -344,9 +344,10 @@ def write(value):
  with open(state_path, 'w') as state: json.dump(value, state)
  print(json.dumps(value))
 if action == 'status':
- if os.path.exists(state_path):
-  with open(state_path) as state: print(state.read())
- else: print(json.dumps({'status':'stopped'}))
+ # Exit 0 while playing, 1 while stopped: the contract of a Pi Remote action.
+ value = json.load(open(state_path)) if os.path.exists(state_path) else {'status':'stopped'}
+ print(json.dumps(value))
+ sys.exit(0 if value.get('status') == 'playing' else 1)
 elif action == 'thunder': write({'kind':'thunder','status':'playing'})
 elif action == 'stop': write({'status':'stopped'})
 else: sys.exit(2)
@@ -417,8 +418,18 @@ async function createThread(destination = "home", model?: string) {
 }
 
 describe("web and supervisor integration", () => {
+  test("exposes host-configured actions as toggles it knows nothing about", async () => {
+    const before = await (await fetch(`${base}/v1/actions`)).json();
+    expect(before.actions).toEqual([{ id: "thunder", label: "Thunder", icon: "thunder", active: false }]);
+    const on = await (await fetch(`${base}/v1/actions/thunder/toggle`, { method: "POST" })).json();
+    expect(on.action.active).toBe(true);
+    const off = await (await fetch(`${base}/v1/actions/thunder/toggle`, { method: "POST" })).json();
+    expect(off.action.active).toBe(false);
+    expect((await fetch(`${base}/v1/actions/nope/toggle`, { method: "POST" })).status).toBe(404);
+  });
+
   test("serves the complete browser module graph", async () => {
-    for (const path of ["/app.js", "/api.js", "/context-cache.js", "/reconciliation.js", "/state-machine.js", "/native.js"]) {
+    for (const path of ["/app.js", "/api.js", "/context-cache.js", "/reconciliation.js", "/state-machine.js", "/native.js", "/person.js"]) {
       const response = await fetch(base + path);
       expect(response.status).toBe(200);
       expect(response.headers.get("content-type")).toContain("text/javascript");

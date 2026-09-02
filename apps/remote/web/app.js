@@ -13,7 +13,7 @@ const ui = {
   agentList: $("agent-list"), agentBanner: $("agent-banner"), composer: $("composer"),
   connection: $("connection"), planSummary: $("plan-summary"),
   usageSummary: $("usage-summary"), newThreadButtons: $("new-thread-buttons"),
-  thunderControl: $("thunder-control"), openaiGovernorControl: $("openai-governor-control"), anthropicGovernorControl: $("anthropic-governor-control"),
+  machineActions: $("machine-actions"), openaiGovernorControl: $("openai-governor-control"), anthropicGovernorControl: $("anthropic-governor-control"),
   topTitle: $("top-title"), topState: $("top-state"), settingsButton: $("open-settings"),
   empty: $("empty-state"), conversation: $("conversation"), scrollback: $("scrollback"), transcript: $("transcript"),
   liveThinking: $("live-thinking"), liveAnswer: $("live-answer"), prompt: $("prompt"), action: $("action"), voice: $("voice"),
@@ -587,11 +587,36 @@ function renderMachineToggle(button, active, activeDescription, inactiveDescript
   button.ariaLabel = description;
   button.title = description;
 }
-function renderThunderStatus(thunder, authoritative = false) {
-  if (!authoritative && state.machineControlPending.has("thunder")) return;
-  renderMachineToggle(ui.thunderControl, Boolean(thunder?.active),
-    "Thunder sounds are on. Select to turn them off",
-    "Thunder sounds are off. Select to turn them on", "thunder");
+// Host-configured actions: one toggle button each, rendered from what the
+// server reports. The client neither knows nor cares what they do.
+function actionButton(action) {
+  let button = ui.machineActions.querySelector(`[data-action="${action.id}"]`);
+  if (!button) {
+    button = document.createElement("button");
+    button.type = "button";
+    button.className = "machine-control";
+    button.dataset.action = action.id;
+    const image = document.createElement("img");
+    image.alt = "";
+    image.src = action.icon.startsWith("/") || action.icon.startsWith("data:") ? action.icon : `/${action.icon}.svg`;
+    button.append(image);
+    button.addEventListener("click", () => toggleAction(action.id));
+    ui.machineActions.append(button);
+  }
+  return button;
+}
+function renderActions(actions, authoritative = false) {
+  const seen = new Set();
+  for (const action of actions) {
+    seen.add(action.id);
+    if (!authoritative && state.machineControlPending.has(`action:${action.id}`)) continue;
+    renderMachineToggle(actionButton(action), Boolean(action.active),
+      `${action.label} is on. Select to turn it off`,
+      `${action.label} is off. Select to turn it on`, `action:${action.id}`);
+  }
+  for (const button of [...ui.machineActions.querySelectorAll("[data-action]")]) {
+    if (!seen.has(button.dataset.action)) button.remove();
+  }
 }
 // The drawer button cycles the orchestrator's boost states: normal pace,
 // 3× (green), 10× (blue), then halted (red — no new fleet launches for the
@@ -643,28 +668,30 @@ function machineControlUnavailable(button, label, key) {
   button.title = `${label} unavailable`;
 }
 async function refreshMachineControls() {
-  const [thunder, governors] = await Promise.allSettled([
-    api(API.thunder.method, API.thunder.path()),
+  const [actions, governors] = await Promise.allSettled([
+    api(API.actions.method, API.actions.path()),
     api(API.governors.method, API.governors.path()),
   ]);
-  if (thunder.status === "fulfilled") renderThunderStatus(thunder.value.thunder);
-  else machineControlUnavailable(ui.thunderControl, "Thunder control", "thunder");
+  if (actions.status === "fulfilled") renderActions(actions.value.actions);
+  else for (const button of ui.machineActions.querySelectorAll("[data-action]")) machineControlUnavailable(button, button.title, `action:${button.dataset.action}`);
   if (governors.status === "fulfilled") renderGovernorControls(governors.value.governors);
   else {
     machineControlUnavailable(ui.openaiGovernorControl, "OpenAI governor control", "openai");
     machineControlUnavailable(ui.anthropicGovernorControl, "Anthropic governor control", "anthropic");
   }
 }
-async function toggleThunder() {
-  if (state.machineControlPending.has("thunder")) return;
-  addSetState("machineControlPending", "thunder");
-  renderThunderStatus({ active: ui.thunderControl.classList.contains("active") }, true);
+async function toggleAction(id) {
+  const key = `action:${id}`;
+  if (state.machineControlPending.has(key)) return;
+  addSetState("machineControlPending", key);
+  const button = ui.machineActions.querySelector(`[data-action="${id}"]`);
+  if (button) renderMachineToggle(button, button.classList.contains("active"), button.title, button.title, key);
   try {
-    const result = await api(API.thunderToggle.method, API.thunderToggle.path(), {});
-    deleteSetState("machineControlPending", "thunder");
-    renderThunderStatus(result.thunder, true);
+    const result = await api(API.actionToggle.method, API.actionToggle.path({ id }), {});
+    deleteSetState("machineControlPending", key);
+    renderActions([result.action], true);
   } catch (error) {
-    deleteSetState("machineControlPending", "thunder");
+    deleteSetState("machineControlPending", key);
     console.error(error);
     refreshMachineControls();
   }
@@ -2164,7 +2191,6 @@ ui.pasteTextForm.addEventListener("submit", (event) => {
 ui.threadsTab.addEventListener("click", () => selectDrawerTab("threads"));
 ui.agentsTab.addEventListener("click", () => selectDrawerTab("agents"));
 ui.archivedTab.addEventListener("click", () => selectDrawerTab("archived"));
-ui.thunderControl.addEventListener("click", toggleThunder);
 ui.openaiGovernorControl.addEventListener("click", () => toggleGovernor("openai"));
 ui.anthropicGovernorControl.addEventListener("click", () => toggleGovernor("anthropic"));
 ui.prompt.addEventListener("input", () => {

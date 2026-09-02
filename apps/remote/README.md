@@ -70,6 +70,17 @@ The registry file is the whole per-person configuration. Its `environment` objec
 }
 ```
 
+`PI_REMOTE_ACTIONS` adds toggle buttons to the drawer for things the host can do: each action has an `id`, `label`, `icon` (a web asset name such as `thunder`, or a `/path.svg` or `data:` URL), a `status` argv whose exit code 0 means on and 1 means off, and `on` and `off` argvs. Pi Remote runs them and shows the result; it knows nothing about what they do. GMKtec configures one for its thunder ambience:
+
+```json
+"PI_REMOTE_ACTIONS": [{
+  "id": "thunder", "label": "Thunder", "icon": "thunder",
+  "status": ["bash", "-c", "audio status | jq -e '.kind == \"thunder\" and .status != \"stopped\"' >/dev/null"],
+  "on": ["/home/kenan/.local/bin/audio", "thunder"],
+  "off": ["/home/kenan/.local/bin/audio", "stop"]
+}]
+```
+
 Values in `environment` become process environment variables before the supervisor loads. Existing process variables win. Arrays and objects are JSON-encoded automatically. `PI_REMOTE_BASH_TIMEOUT_MAX_SECONDS` sets the maximum foreground bash call for threads on that host. All persons on a machine must agree on the environment id and name.
 
 ### The front door

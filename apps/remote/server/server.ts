@@ -26,7 +26,6 @@ const HOME = homedir();
 const DATA = process.env.PI_REMOTE_DATA ?? join(process.env.XDG_STATE_HOME ?? join(HOME, ".local/state"), "pi-remote");
 const INGESTION = process.env.PI_REMOTE_INGESTION ?? join(DATA, "ingestion");
 const PI = process.env.PI_BIN ?? "pi";
-const AUDIO = process.env.PI_REMOTE_AUDIO_BIN ?? "audio";
 const PRIVATE_ID = process.env.PI_REMOTE_PRIVATE_ID ?? "private";
 const PRIVATE_NAME = process.env.PI_REMOTE_PRIVATE_NAME ?? "Private";
 const PRIVATE_DIR = process.env.PI_REMOTE_PRIVATE_DIR ?? join(HOME, PRIVATE_ID);
@@ -466,7 +465,6 @@ function listDirectory(requested: string) {
   return { path, parent: path === "/" ? null : dirname(path), entries };
 }
 
-type ThunderStatus = { active: boolean; status: string };
 type GovernorProvider = "openai" | "anthropic";
 /** The drawer button's four states, in cycle order: normal pace, 3× (green),
  * 10× (blue), and halted (red — the orchestrator refuses every new launch
@@ -476,7 +474,6 @@ type GovernorControls = Record<
   GovernorProvider,
   { state: GovernorState; boosted: boolean; multiplier: number; boostedMultiplier: number }
 >;
-let thunderToggleOperation: Promise<ThunderStatus> | null = null;
 
 // The drawer's allowance controls are a direct view of the orchestrator's own
 // boost rows: one durable multiplier per provider family on the paced spend its
@@ -526,38 +523,50 @@ function toggleGovernor(provider: GovernorProvider): GovernorControls {
   return controls;
 }
 
-async function audioCommand(action: "status" | "thunder" | "stop"): Promise<any> {
-  const proc = Bun.spawn([AUDIO, action], { stdout: "pipe", stderr: "pipe" });
-  const [stdout, stderr, exitCode] = await Promise.all([
-    new Response(proc.stdout).text(),
-    new Response(proc.stderr).text(),
-    proc.exited,
-  ]);
-  if (exitCode !== 0) throw new Error(stderr.trim() || `Audio command failed (${exitCode})`);
-  try { return JSON.parse(stdout); }
-  catch { throw new Error("Audio command returned invalid state"); }
-}
-
-async function thunderStatus(): Promise<ThunderStatus> {
-  const status = await audioCommand("status");
-  return {
-    active: status.kind === "thunder" && status.status !== "stopped",
-    status: String(status.status ?? "stopped"),
-  };
-}
-
-function toggleThunder(): Promise<ThunderStatus> {
-  if (thunderToggleOperation) return thunderToggleOperation;
-  thunderToggleOperation = (async () => {
-    const current = await thunderStatus();
-    if (current.active) {
-      await audioCommand("stop");
-      return { active: false, status: "stopped" };
+// Drawer actions are whatever the host configures: each one is a status
+// command whose exit code says whether it is on, and a command for each
+// direction. Pi Remote knows nothing about what they do. This host happens to
+// configure a thunder ambience; another may configure nothing and show nothing.
+type MachineAction = { id: string; label: string; icon: string; status: string[]; on: string[]; off: string[] };
+const MACHINE_ACTIONS: MachineAction[] = (JSON.parse(process.env.PI_REMOTE_ACTIONS ?? "[]") as MachineAction[]).map((action) => {
+  for (const key of ["status", "on", "off"] as const) {
+    if (!Array.isArray(action[key]) || action[key].length === 0 || action[key].some((part) => typeof part !== "string")) {
+      throw new Error(`PI_REMOTE_ACTIONS: action ${action.id} needs a ${key} argv array`);
     }
-    await audioCommand("thunder");
-    return { active: true, status: "playing" };
-  })().finally(() => { thunderToggleOperation = null; });
-  return thunderToggleOperation;
+  }
+  if (!/^[a-z][a-z0-9-]{0,31}$/.test(action.id)) throw new Error(`PI_REMOTE_ACTIONS: invalid action id ${action.id}`);
+  return { ...action, label: String(action.label ?? action.id), icon: String(action.icon ?? action.id) };
+});
+const actionToggles = new Map<string, Promise<{ id: string; label: string; icon: string; active: boolean }>>();
+
+async function runAction(argv: string[], timeoutMs = 15_000): Promise<number> {
+  const proc = Bun.spawn(argv, { stdout: "ignore", stderr: "pipe" });
+  const timer = setTimeout(() => proc.kill(), timeoutMs);
+  try {
+    const [code, stderr] = await Promise.all([proc.exited, new Response(proc.stderr).text()]);
+    if (code !== 0 && code !== 1) throw new Error(stderr.trim() || `${argv[0]} exited ${code}`);
+    return code;
+  } finally { clearTimeout(timer); }
+}
+
+async function actionStatus(action: MachineAction) {
+  return { id: action.id, label: action.label, icon: action.icon, active: (await runAction(action.status)) === 0 };
+}
+
+function machineActions() {
+  return Promise.all(MACHINE_ACTIONS.map((action) => actionToggles.get(action.id) ?? actionStatus(action)));
+}
+
+function toggleAction(action: MachineAction) {
+  const pending = actionToggles.get(action.id);
+  if (pending) return pending;
+  const operation = (async () => {
+    const current = await actionStatus(action);
+    await runAction(current.active ? action.off : action.on);
+    return actionStatus(action);
+  })().finally(() => { actionToggles.delete(action.id); });
+  actionToggles.set(action.id, operation);
+  return operation;
 }
 const webAssets = new Map<string, readonly [string, string]>([
   ["/", ["index.html", "text/html; charset=utf-8"]],
@@ -568,6 +577,7 @@ const webAssets = new Map<string, readonly [string, string]>([
   ["/reconciliation.js", ["reconciliation.js", "text/javascript; charset=utf-8"]],
   ["/state-machine.js", ["state-machine.js", "text/javascript; charset=utf-8"]],
   ["/native.js", ["native.js", "text/javascript; charset=utf-8"]],
+  ["/person.js", ["person.js", "text/javascript; charset=utf-8"]],
   ["/voice.js", ["voice.js", "text/javascript; charset=utf-8"]],
   ["/sync.js", ["sync.js", "text/javascript; charset=utf-8"]],
   ["/voice-page.js", ["voice-page.js", "text/javascript; charset=utf-8"]],
@@ -1857,15 +1867,16 @@ const server = Bun.serve({
       try { return json({ governors: toggleGovernor(governorToggle.provider as GovernorProvider) }); }
       catch (cause: any) { return error(cause?.message ?? "Could not toggle governor control", 503); }
     }
-    if (API.thunder.match(req.method, url.pathname)) {
-      try {
-        return json({ thunder: thunderToggleOperation ? await thunderToggleOperation : await thunderStatus() });
-      } catch (cause: any) { return error(cause?.message ?? "Could not read thunder status", 503); }
+    if (API.actions.match(req.method, url.pathname)) {
+      try { return json({ actions: await machineActions() }); }
+      catch (cause: any) { return error(cause?.message ?? "Could not read machine actions", 503); }
     }
-    if (API.thunderToggle.match(req.method, url.pathname)) {
-      try {
-        return json({ thunder: await toggleThunder() });
-      } catch (cause: any) { return error(cause?.message ?? "Could not toggle thunder", 503); }
+    const actionToggle = API.actionToggle.match(req.method, url.pathname);
+    if (actionToggle) {
+      const action = MACHINE_ACTIONS.find((candidate) => candidate.id === actionToggle.id);
+      if (!action) return error("Unknown machine action", 404);
+      try { return json({ action: await toggleAction(action) }); }
+      catch (cause: any) { return error(cause?.message ?? "Could not toggle machine action", 503); }
     }
     if (API.uploadInit.match(req.method, url.pathname)) {
       try {
