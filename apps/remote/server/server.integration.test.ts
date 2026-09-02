@@ -4,7 +4,7 @@ import { OrchestratorClient } from "pi-orchestrator/api";
 import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
-import { applyContextSplice, contextSplice, sha256 } from "./sync";
+import { applyContextSplice, contextSplice, messageFinalizationKey, sha256 } from "./sync";
 const BOOSTED_MULTIPLIER = 10;
 const [shardIndex = 0, shardCount = 1] = (process.env.PI_REMOTE_TEST_SHARD ?? "0/1")
   .split("/").map(Number);
@@ -644,6 +644,21 @@ describe("web and supervisor integration", () => {
       expect(second.value.contextUpdate).toBeNull();
       expect(second.value.stateVersion).toBe(first.value.stateVersion);
       expect(applyContextSplice("instant text", second.value.sessionEvents.liveTextUpdate.splice)).toBe("instant text second");
+
+      releaseGate("live-stream");
+      await waitFor(async () => (await api("GET", `/v1/sessions/${id}/events?after=0`)).value, (value) => value.session.state === "IDLE");
+      const beforeContext = await api("GET", `/v1/sessions/${id}/events?after=0`);
+      expect(beforeContext.value.liveText).toBe("instant text second");
+
+      const finalMessage = { role: "assistant", content: [{ type: "text", text: "instant text second" }] };
+      await api("PUT", `/v1/sessions/${id}/context`, {
+        capturedAt: 400,
+        context: { systemPrompt: "System", tools: [], messages: [finalMessage] },
+        finalizesMessage: messageFinalizationKey(finalMessage),
+      });
+      const afterContext = await api("GET", `/v1/sessions/${id}/events?after=0`);
+      expect(afterContext.value.liveText).toBe("");
+      expect((await api("GET", `/v1/sessions/${id}/context`)).value.context.messages).toEqual([finalMessage]);
     } finally {
       releaseGate("live-stream-next");
       releaseGate("live-stream");

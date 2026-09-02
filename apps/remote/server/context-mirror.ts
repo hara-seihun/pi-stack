@@ -1,5 +1,5 @@
 import { buildSessionContext, convertToLlm, type ExtensionAPI, type ExtensionContext } from "@earendil-works/pi-coding-agent";
-import { contextSplice, sha256 } from "./sync";
+import { contextSplice, messageFinalizationKey, sha256 } from "./sync";
 
 type ModelMessage = ReturnType<typeof convertToLlm>[number];
 type ModelTool = { name: string; description: string; parameters: unknown };
@@ -13,7 +13,13 @@ export default function contextMirror(pi: ExtensionAPI) {
   let context: ModelContext | null = null;
   let baseMessages: ModelMessage[] = [];
   let capturedAt = 0;
-  let pending: { capturedAt: number; context: ModelContext; compact: boolean; replacement?: "compaction" } | null = null;
+  let pending: {
+    capturedAt: number;
+    context: ModelContext;
+    compact: boolean;
+    replacement?: "compaction";
+    finalizesMessage?: string;
+  } | null = null;
   let publishedDocument: string | null = null;
   let draining: Promise<void> | null = null;
 
@@ -22,71 +28,90 @@ export default function contextMirror(pi: ExtensionAPI) {
     return capturedAt;
   };
 
+  const post = (method: "PATCH" | "PUT", body: unknown) => fetch(
+    `${server}/v1/sessions/${sessionId}/context`,
+    {
+      method,
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify(body),
+      signal: AbortSignal.timeout(10_000),
+    },
+  );
+
   const drain = () => {
     if (draining) return draining;
     draining = (async () => {
+      let retryDelay = 25;
       while (pending) {
         const snapshot = pending;
-        pending = null;
         const document = JSON.stringify(snapshot.context);
-        let response: Response;
-        if (publishedDocument !== null && !snapshot.compact) {
-          response = await fetch(`${server}/v1/sessions/${sessionId}/context`, {
-            method: "PATCH",
-            headers: { "content-type": "application/json" },
-            body: JSON.stringify({ capturedAt: snapshot.capturedAt, splice: contextSplice(publishedDocument, document) }),
-          });
-          if (response.status === 409) {
-            response = await fetch(`${server}/v1/sessions/${sessionId}/context`, {
-              method: "PUT",
-              headers: { "content-type": "application/json" },
-              body: JSON.stringify({
-                capturedAt: snapshot.capturedAt,
+        const common = {
+          capturedAt: snapshot.capturedAt,
+          finalizesMessage: snapshot.finalizesMessage,
+        };
+        try {
+          let response: Response;
+          if (publishedDocument !== null && !snapshot.compact) {
+            response = await post("PATCH", {
+              ...common,
+              splice: contextSplice(publishedDocument, document),
+            });
+            if (response.status === 409) {
+              response = await post("PUT", {
+                ...common,
                 context: snapshot.context,
                 replacement: snapshot.replacement,
-              }),
-            });
-          }
-        } else {
-          response = await fetch(`${server}/v1/sessions/${sessionId}/context`, {
-            method: "PUT",
-            headers: { "content-type": "application/json" },
-            body: JSON.stringify({
-              capturedAt: snapshot.capturedAt,
+              });
+            }
+          } else {
+            response = await post("PUT", {
+              ...common,
               context: snapshot.context,
               replacement: snapshot.replacement,
-            }),
-          });
+            });
+          }
+          if (!response.ok) throw new Error(await response.text() || `Context mirror failed (${response.status})`);
+          const result = await response.json() as { hash?: string };
+          if (result.hash && result.hash !== sha256(document)) throw new Error("Context mirror acknowledgement hash does not match");
+          publishedDocument = document;
+          if (pending === snapshot) pending = null;
+          retryDelay = 25;
+        } catch (cause) {
+          console.error(`Pi Remote context mirror will retry: ${cause instanceof Error ? cause.message : cause}`);
+          await new Promise((resolve) => setTimeout(resolve, retryDelay));
+          retryDelay = Math.min(1_000, retryDelay * 2);
         }
-        if (!response.ok) throw new Error(await response.text() || `Context mirror failed (${response.status})`);
-        const result = await response.json() as { hash?: string };
-        if (result.hash && result.hash !== sha256(document)) throw new Error("Context mirror acknowledgement hash does not match");
-        publishedDocument = document;
       }
     })().finally(() => {
       draining = null;
-      if (pending) {
-        void drain().catch((error) => console.error(
-          `Pi Remote context mirror failed: ${error instanceof Error ? error.message : error}`,
-        ));
-      }
+      if (pending) void drain();
     });
     return draining;
   };
 
-  const publish = (next: ModelContext, compact = false, replacement?: "compaction") => {
+  const publish = (
+    next: ModelContext,
+    compact = false,
+    replacement?: "compaction",
+    finalizesMessage?: string,
+  ) => {
     pending = {
       capturedAt: nextCaptureTime(),
       context: next,
       compact: compact || pending?.compact === true,
       replacement: replacement ?? pending?.replacement,
+      finalizesMessage: finalizesMessage ?? pending?.finalizesMessage,
     };
     return drain();
   };
 
-  const publishCurrent = async (compact = false, replacement?: "compaction") => {
+  const publishCurrent = async (
+    compact = false,
+    replacement?: "compaction",
+    finalizesMessage?: string,
+  ) => {
     if (!context) return;
-    await publish(context, compact, replacement);
+    await publish(context, compact, replacement, finalizesMessage);
   };
 
   const replaceContext = async (
@@ -131,7 +156,11 @@ export default function contextMirror(pi: ExtensionAPI) {
     if (!context || (event.message.role !== "assistant" && event.message.role !== "toolResult")) return;
     baseMessages = [...baseMessages, ...convertToLlm([event.message])];
     context = { ...context, messages: baseMessages };
-    await publishCurrent(true);
+    await publishCurrent(
+      true,
+      undefined,
+      event.message.role === "assistant" ? messageFinalizationKey(event.message) : undefined,
+    );
   });
 
   pi.on("session_shutdown", async (_event, ctx) => {

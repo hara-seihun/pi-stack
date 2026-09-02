@@ -8,7 +8,7 @@ import { ORCHESTRATOR_CATALOG, OrchestratorClient, catalogAgentType, type PlanUs
 import { planCards } from "./catalog-presentation";
 import { readMachineUsage } from "./machine-usage";
 import { displayContextDocument } from "./context-display";
-import { applyContextSplice, contextSplice, sha256, type ContextSplice } from "./sync";
+import { applyContextSplice, contextSplice, messageFinalizationKey, sha256, type ContextSplice } from "./sync";
 import { beginSupervisorGeneration, ensureSupervisorSchema } from "./database";
 import { DEFAULT_LIVE_MODEL, DEFAULT_LIVE_VOICE, VoiceBroker } from "./voice/broker";
 import { attachRuntimeHost, startRuntimeHost, type RuntimeTransport } from "./runtime-transport";
@@ -195,6 +195,7 @@ type RuntimeHandoff = {
   retrying: boolean;
   liveText: string;
   liveThinking: string;
+  pendingContextFinalization: string | null;
   pendingModelFailure: string | null;
   lastActivity: number;
   activeTools: Array<[string, string]>;
@@ -231,6 +232,7 @@ interface Runtime {
   suppressOutput: boolean;
   liveText: string;
   liveThinking: string;
+  pendingContextFinalization: string | null;
   pendingModelFailure: string | null;
   expectedExit: boolean;
   lastActivity: number;
@@ -243,6 +245,7 @@ interface Runtime {
   replaceAfterSettle: boolean;
 }
 const runtimes = new Map<string, Runtime>();
+const contextFinalizedMessages = new Map<string, string>();
 // A runtime's phase changes underneath awaits and inside callees; reading it
 // through a call keeps TypeScript from narrowing a value that has moved on.
 const phaseOf = (rt: Runtime): RuntimePhase => rt.phase;
@@ -436,6 +439,18 @@ function requireCompactionContext(sessionId: string, rt: Runtime) {
   const stored = storedContext(sessionId);
   if (!rt.compactionContextHash || stored?.hash !== rt.compactionContextHash) clearStoredContext(sessionId);
   rt.compactionContextHash = null;
+}
+
+function acknowledgeMessageContext(sessionId: string, finalizesMessage: unknown) {
+  if (typeof finalizesMessage !== "string" || !finalizesMessage) return;
+  contextFinalizedMessages.set(sessionId, finalizesMessage);
+  const rt = runtimes.get(sessionId);
+  if (!rt || rt.pendingContextFinalization !== finalizesMessage) return;
+  rt.pendingContextFinalization = null;
+  rt.liveText = "";
+  rt.liveThinking = "";
+  signalLiveSync();
+  kickSession(sessionId);
 }
 
 const error = (message: string, status = 400) => json({ error: message }, status);
@@ -794,10 +809,17 @@ function handleRpcEvent(sessionId: string, rt: Runtime, event: any) {
     proveRunning();
   } else if (event.type === "message_update" && event.assistantMessageEvent?.type === "text_delta") {
     proveRunning();
+    if (rt.pendingContextFinalization) {
+      rt.pendingContextFinalization = null;
+      rt.liveText = "";
+      rt.liveThinking = "";
+    }
     rt.liveText += event.assistantMessageEvent.delta ?? "";
     signalLiveSync();
   } else if (event.type === "message_update" && event.assistantMessageEvent?.type === "thinking_start") {
     proveRunning();
+    rt.pendingContextFinalization = null;
+    rt.liveText = "";
     rt.liveThinking = "";
     touchSession(sessionId);
   } else if (event.type === "message_update" && event.assistantMessageEvent?.type === "thinking_delta") {
@@ -812,13 +834,22 @@ function handleRpcEvent(sessionId: string, rt: Runtime, event: any) {
   } else if (event.type === "message_end") {
     proveRunning();
     const text = textFromMessage(event.message);
+    if (event.message?.role === "assistant") {
+      const finalization = messageFinalizationKey(event.message);
+      if (contextFinalizedMessages.get(sessionId) === finalization) {
+        rt.pendingContextFinalization = null;
+        rt.liveText = "";
+        rt.liveThinking = "";
+      } else {
+        rt.pendingContextFinalization = finalization;
+        if (text) rt.liveText = text;
+      }
+    }
     if (text) emit(sessionId, "assistant", { text });
     const failure = modelFailureText(event.message);
     if (failure) rt.pendingModelFailure = failure;
     else if (event.message?.role === "assistant") rt.pendingModelFailure = null;
     if (rt.liveThinking) emit(sessionId, "thinking", { text: rt.liveThinking });
-    rt.liveText = "";
-    rt.liveThinking = "";
   } else if (event.type === "tool_execution_start") {
     proveRunning();
     const toolCallId = String(event.toolCallId ?? crypto.randomUUID());
@@ -896,8 +927,10 @@ function settleRuntime(sessionId: string, rt: Runtime, emitEvent: boolean): bool
   rt.activeTools.clear();
   rt.steeringQueued = 0;
   rt.followUpQueued = 0;
-  rt.liveText = "";
-  rt.liveThinking = "";
+  if (!rt.pendingContextFinalization) {
+    rt.liveText = "";
+    rt.liveThinking = "";
+  }
   rt.lastActivity = Date.now();
   if (rt.dispatchedWorkIds.size > 0) {
     const completedAt = now();
@@ -973,6 +1006,7 @@ function runtimeFromHandoff(row: any, handoff?: RuntimeHandoff): Runtime {
     suppressOutput: false,
     liveText: handoff?.liveText ?? "",
     liveThinking: handoff?.liveThinking ?? "",
+    pendingContextFinalization: handoff?.pendingContextFinalization ?? null,
     pendingModelFailure: handoff?.pendingModelFailure ?? null,
     expectedExit: false,
     lastActivity: handoff?.lastActivity ?? Date.now(),
@@ -1377,6 +1411,7 @@ async function drainSession(sessionId: string) {
       if (!wasBusy) {
         rt.liveText = "";
         rt.liveThinking = "";
+        rt.pendingContextFinalization = null;
         setRuntimePhase(sessionId, rt, "DISPATCHING", "RUNNING");
       } else {
         setState(sessionId, "RUNNING");
@@ -2050,7 +2085,10 @@ const server = Bun.serve({
         if (!Number.isSafeInteger(capturedAt) || capturedAt <= 0 || !splice) return error("Valid context patch required");
         const current = storedContext(id);
         if (!current) return error("Context base is missing", 409);
-        if (capturedAt <= current.capturedAt) return json({ ok: true, capturedAt: current.capturedAt, hash: current.hash });
+        if (capturedAt <= current.capturedAt) {
+          if (current.hash === splice.targetHash) acknowledgeMessageContext(id, body.finalizesMessage);
+          return json({ ok: true, capturedAt: current.capturedAt, hash: current.hash });
+        }
         const document = applyContextSplice(current.document, splice);
         db.query(`
           INSERT INTO session_context_patches(session_id,captured_at,base_hash,target_hash,prefix_bytes,delete_bytes,insert_base64)
@@ -2058,6 +2096,7 @@ const server = Bun.serve({
         `).run(id, capturedAt, splice.baseHash, splice.targetHash, splice.prefixBytes, splice.deleteBytes, splice.insertBase64);
         rememberContext(id, document);
         storedContextCache.set(id, { capturedAt, document, hash: splice.targetHash });
+        acknowledgeMessageContext(id, body.finalizesMessage);
         signalSync();
         return json({ ok: true, capturedAt, hash: splice.targetHash });
       } catch (cause: any) { return error(cause?.message ?? "Could not patch model context", 409); }
@@ -2097,7 +2136,10 @@ const server = Bun.serve({
           rememberContext(id, document);
           storedContextCache.set(id, { capturedAt: acknowledgedCapturedAt, document, hash: acknowledgedHash });
           if (compactionReplacement && runtime) runtime.compactionContextHash = acknowledgedHash;
+          if (acknowledgedHash === sha256(document)) acknowledgeMessageContext(id, body.finalizesMessage);
           signalSync();
+        } else if (acknowledgedHash === sha256(document)) {
+          acknowledgeMessageContext(id, body.finalizesMessage);
         }
         return json({ ok: true, capturedAt: acknowledgedCapturedAt, hash: acknowledgedHash });
       } catch (cause: any) { return error(cause?.message ?? "Could not store model context", 400); }
@@ -2280,6 +2322,7 @@ const server = Bun.serve({
       rt.followUpQueued = 0;
       rt.liveText = "";
       rt.liveThinking = "";
+      rt.pendingContextFinalization = null;
       rt.lastActivity = Date.now();
       const supervisorQueued = Number((db.query(
         "SELECT COUNT(*) count FROM work_items WHERE session_id=? AND state IN ('queued','running')",
@@ -2378,6 +2421,7 @@ function handoffDocument() {
       retrying: rt.retrying,
       liveText: rt.liveText,
       liveThinking: rt.liveThinking,
+      pendingContextFinalization: rt.pendingContextFinalization,
       pendingModelFailure: rt.pendingModelFailure,
       lastActivity: rt.lastActivity,
       activeTools: [...rt.activeTools],

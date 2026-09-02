@@ -1,11 +1,16 @@
 import { afterAll, beforeAll, describe, expect, test } from "bun:test";
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 import contextMirror from "./context-mirror";
-import { applyContextSplice, sha256 } from "./sync";
+import { applyContextSplice, messageFinalizationKey, sha256 } from "./sync";
 
 type Handler = (event: Record<string, unknown>, context: Record<string, unknown>) => unknown | Promise<unknown>;
 
-const captures: Array<{ capturedAt: number; context: Record<string, unknown>; replacement?: string }> = [];
+const captures: Array<{
+  capturedAt: number;
+  context: Record<string, unknown>;
+  replacement?: string;
+  finalizesMessage?: string;
+}> = [];
 let document = "";
 let failNextCapture = false;
 let captureStarted: (() => void) | undefined;
@@ -16,7 +21,12 @@ const server = Bun.serve({
     const body = await request.json() as any;
     if (request.method === "PATCH") document = applyContextSplice(document, body.splice);
     else document = JSON.stringify(body.context);
-    captures.push({ capturedAt: body.capturedAt, context: JSON.parse(document), replacement: body.replacement });
+    captures.push({
+      capturedAt: body.capturedAt,
+      context: JSON.parse(document),
+      replacement: body.replacement,
+      finalizesMessage: body.finalizesMessage,
+    });
     if (failNextCapture) {
       failNextCapture = false;
       captureStarted?.();
@@ -94,9 +104,10 @@ describe("context mirror", () => {
     const messages = captures.at(-1)?.context.messages as Array<{ role: string; content: Array<{ text: string }> }>;
     expect(messages.map((message) => message.role)).toEqual(["user", "assistant"]);
     expect(messages.at(-1)?.content[0].text).toBe("Finished");
+    expect(captures.at(-1)?.finalizesMessage).toBe(messageFinalizationKey(assistant("Finished", "stop")));
   });
 
-  test("publishes a newer snapshot queued while the current capture fails", async () => {
+  test("retries an unacknowledged final capture instead of losing it", async () => {
     captures.length = 0;
     document = "";
     failNextCapture = true;
@@ -113,26 +124,16 @@ describe("context mirror", () => {
     } as unknown as ExtensionAPI;
     contextMirror(pi);
 
-    const extensionContext = { getSystemPrompt: () => "System" };
-    const first = handlers.get("context")?.({
+    const publishing = handlers.get("context")?.({
       type: "context",
-      messages: [{ role: "user", content: [{ type: "text", text: "first" }], timestamp: 1 }],
-    }, extensionContext) as Promise<void>;
+      messages: [{ role: "user", content: [{ type: "text", text: "must survive" }], timestamp: 1 }],
+    }, { getSystemPrompt: () => "System" }) as Promise<void>;
     await firstCaptureStarted;
-    const second = handlers.get("context")?.({
-      type: "context",
-      messages: [{ role: "user", content: [{ type: "text", text: "second" }], timestamp: 2 }],
-    }, extensionContext) as Promise<void>;
-    const firstFailure = first.catch((error) => error as Error);
-    void second.catch(() => {});
     releaseCapture();
-    expect((await firstFailure as Error).message).toContain("acknowledgement hash");
-    for (let attempt = 0; attempt < 100 && !JSON.stringify(captures.at(-1)?.context).includes("second"); attempt++) {
-      await Bun.sleep(1);
-    }
+    await publishing;
 
     expect(captures.length).toBeGreaterThanOrEqual(2);
-    expect(JSON.stringify(captures.at(-1)?.context)).toContain("second");
+    expect(JSON.stringify(captures.at(-1)?.context)).toContain("must survive");
     captureStarted = undefined;
     blockedCapture = undefined;
   });
