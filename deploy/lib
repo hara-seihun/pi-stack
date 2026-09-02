@@ -30,6 +30,10 @@ pi_stack_enter_deployment() {
   local script=$1 root=$2
   shift 2
   pi_stack_enforce_deploy_deadline "$script" "$@"
+  if [[ ${PI_STACK_DEPLOY_LOCK_HELD:-0} == 1 ]]; then
+    # A child of a deployment that already holds the lock and checked the tree.
+    return
+  fi
   pi_stack_acquire_deploy_lock "$root"
   if [[ ${PI_STACK_ALLOW_DIRTY:-0} != 1 && -n $(git -C "$root" status --porcelain) ]]; then
     echo "refusing to deploy an uncommitted Pi stack; set PI_STACK_ALLOW_DIRTY=1 only for a temporary test" >&2
@@ -94,6 +98,9 @@ pi_stack_users() {
     fi
   } | awk 'NF && !seen[$0]++'
 }
+# Another account may not be able to read the checkout's .git; the parent hands
+# the commit down instead.
+pi_stack_commit() { printf '%s\n' "${PI_STACK_COMMIT:-$(git -C "${PI_STACK_ROOT_DIR:-.}" rev-parse HEAD)}"; }
 pi_stack_home() {
   # Tests point the invoking account at a scratch home.
   if [[ $1 == "$(id -un)" && -n ${PI_STACK_HOME_OVERRIDE:-} ]]; then printf '%s\n' "$PI_STACK_HOME_OVERRIDE"; return; fi
@@ -111,7 +118,7 @@ pi_stack_run_as() {
   local -a become
   if [[ $EUID == 0 ]]; then become=(runuser -u "$user" --); else become=(sudo -n -u "$user"); fi
   "${become[@]}" env HOME="$(pi_stack_home "$user")" \
-    PI_STACK_DEPLOY_LOCK_HELD=1 PI_STACK_DEPLOY_DEADLINE_ACTIVE=1 \
+    PI_STACK_DEPLOY_LOCK_HELD=1 PI_STACK_DEPLOY_DEADLINE_ACTIVE=1 PI_STACK_COMMIT="$(pi_stack_commit)" \
     PI_STACK_DEPENDENCIES_READY="${PI_STACK_DEPENDENCIES_READY:-}" \
     PI_STACK_HOST_FILE="$(pi_stack_host_file)" PI_REMOTE_PERSONS_DIR="$(pi_stack_persons_dir)" \
     PI_STACK_DEPLOY_NO_SUDO="${PI_STACK_DEPLOY_NO_SUDO:-0}" "$@"

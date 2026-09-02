@@ -8,6 +8,7 @@
 set -euo pipefail
 
 root=$(cd "$(dirname "$0")/.." && pwd)
+export PI_STACK_ROOT_DIR=$root
 source "$root/deploy/lib"
 pi_stack_enter_deployment "$0" "$root" "$@"
 user=${1:-$(id -un)}
@@ -127,4 +128,4 @@ done < <(jq -r '.packages[].source | select(startswith("npm:"))' "$manifest")
 
 expected=$(( $(jq '.packages | length' "$manifest") + $(jq 'length' <<<"$host_packages") ))
 jq -e --argjson expected "$expected" '.packages | length == $expected' "$settings" >/dev/null
-printf 'deployed Pi settings from %s for %s\n' "$(git -C "$root" rev-parse HEAD)" "$user"
+printf 'deployed Pi settings from %s for %s\n' "$(pi_stack_commit)" "$user"
