@@ -72,6 +72,7 @@ export const API = Object.freeze({
   sessionFilesHead: route("HEAD", "/v1/sessions/:sessionId/files"),
   unarchiveSession: route("POST", "/v1/sessions/:sessionId/unarchive"),
   sessionPrompt: route("POST", "/v1/sessions/:sessionId/prompt"),
+  sessionFork: route("POST", "/v1/sessions/:sessionId/fork"),
   sessionAbort: route("POST", "/v1/sessions/:sessionId/abort"),
   sessionEvents: route("GET", "/v1/sessions/:sessionId/events"),
   sessionContext: route("GET", "/v1/sessions/:sessionId/context"),

@@ -92,7 +92,7 @@ The client keeps the verified document, rendered transcript subtree, tool-card s
 
 ## Android context rendering
 
-Every context entry has a stable key and a content signature. Reconciliation retains the common prefix, updates a surviving keyed message in place, and creates only the changed suffix. Tool arguments, results, timing, and status update inside the existing card, so a new context capture does not recreate unchanged Markdown or lose an expanded tool card. Compaction replaces entries whose keys no longer survive.
+Every context entry has a stable key and a content signature. Reconciliation retains the common prefix, updates a surviving keyed message in place, and creates only the changed suffix. Every message, tool card, queued message, and live model block exposes its source text through a copy action. Tool arguments, results, timing, and status update inside the existing card, so a new context capture does not recreate unchanged Markdown or lose an expanded tool card. Compaction replaces entries whose keys no longer survive.
 
 Live model output is plain text and updates at most once per display frame. The finalized context replaces it with rendered Markdown once. Thread selection has no entrance animation; navigation never hides content behind a decorative transition.
 
@@ -101,6 +101,8 @@ The drawer's plan summary renders only cards with a measured percentage. Environ
 Slash-command discovery is lazy. Selecting or switching to an idle thread reads its context without starting its Pi runtime; typing `/` requests runtime-owned commands when they are actually needed.
 
 Attachments upload in hash-checked chunks. Initialization by request ID returns the committed byte offset, so reconnecting resumes rather than creates another file. Completion checks the whole-file hash before the file enters ingestion. Downloads carry validators and byte-range support.
+
+Editing a finalized user message is an idle-only session transition. The server reads Pi's append-only entries, resolves the displayed message timestamp on the active branch, and uses Pi's supported `fork` command to create history immediately before it. The thread adopts the forked session file, its recovery and voice event projection is rebuilt from that branch, and the context mirror replaces the visible transcript. The client clears its old cached projection and puts Pi's returned original text in the composer. Sending remains a separate user action.
 
 ## Android file browsing
 

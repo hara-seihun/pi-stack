@@ -251,6 +251,7 @@ const contextFinalizedMessages = new Map<string, string>();
 const phaseOf = (rt: Runtime): RuntimePhase => rt.phase;
 const activations = new Map<string, Promise<Runtime>>();
 const sessionWorkers = new Map<string, Promise<void>>();
+const forkingSessions = new Set<string>();
 const retryTimers = new Map<string, Timer>();
 let shuttingDown = false;
 let releaseHandoffRequested = false;
@@ -700,9 +701,54 @@ function publicSession(row: any, prepared?: PreparedQueue) {
     archivedAt: row.archived_at ?? null,
   };
 }
+function contentText(content: unknown): string {
+  if (typeof content === "string") return content;
+  if (!Array.isArray(content)) return "";
+  return content.filter((block: any) => block?.type === "text").map((block: any) => String(block.text ?? "")).join("");
+}
+
 function textFromMessage(message: any): string {
-  if (!message || message.role !== "assistant" || !Array.isArray(message.content)) return "";
-  return message.content.filter((x: any) => x?.type === "text").map((x: any) => x.text ?? "").join("");
+  return message?.role === "assistant" ? contentText(message.content) : "";
+}
+
+function activeSessionEntries(entries: any[], leafId: unknown): any[] {
+  const byId = new Map(entries.map((entry) => [String(entry?.id ?? ""), entry]));
+  const branch: any[] = [];
+  const visited = new Set<string>();
+  let id = typeof leafId === "string" ? leafId : "";
+  while (id) {
+    if (visited.has(id)) throw new Error("Session branch contains a cycle");
+    visited.add(id);
+    const entry = byId.get(id);
+    if (!entry) throw new Error("Session branch is missing an entry");
+    branch.push(entry);
+    id = typeof entry.parentId === "string" ? entry.parentId : "";
+  }
+  return branch.reverse();
+}
+
+function replaceConversationEvents(sessionId: string, entries: any[]) {
+  db.transaction(() => {
+    db.query("DELETE FROM events WHERE session_id=?").run(sessionId);
+    const insert = db.query("INSERT INTO events(session_id,time,type,payload) VALUES(?,?,?,?)");
+    for (const entry of entries) {
+      if (entry?.type !== "message") continue;
+      const message = entry.message;
+      const time = typeof entry.timestamp === "string" ? entry.timestamp : now();
+      if (message?.role === "user") {
+        const text = contentText(message.content);
+        if (text) insert.run(sessionId, time, "user", JSON.stringify({ text, delivery: "prompt" }));
+      } else if (message?.role === "assistant") {
+        const thinking = Array.isArray(message.content)
+          ? message.content.filter((block: any) => block?.type === "thinking").map((block: any) => String(block.thinking ?? "")).join("")
+          : "";
+        const text = contentText(message.content);
+        if (thinking) insert.run(sessionId, time, "thinking", JSON.stringify({ text: thinking }));
+        if (text) insert.run(sessionId, time, "assistant", JSON.stringify({ text }));
+      }
+    }
+  })();
+  signalSync();
 }
 
 function modelFailureText(message: any): string {
@@ -1368,7 +1414,7 @@ function scheduleSession(sessionId: string, delayMs: number) {
 
 async function drainSession(sessionId: string) {
   while (true) {
-    if (!ownsSupervisorLease()) return;
+    if (!ownsSupervisorLease() || forkingSessions.has(sessionId)) return;
     const knownRuntime = runtimes.get(sessionId);
     const runtimeBusy = knownRuntime && ["DISPATCHING", "RUNNING"].includes(knownRuntime.phase);
     const item = db.query(`
@@ -2017,7 +2063,7 @@ const server = Bun.serve({
     }
     const sessionRoutes: Array<[string | undefined, (typeof API)[keyof typeof API]]> = [
       [undefined, API.session], [undefined, API.archiveSession], [undefined, API.rejectSessionEdit],
-      ["unarchive", API.unarchiveSession], ["prompt", API.sessionPrompt], ["abort", API.sessionAbort],
+      ["unarchive", API.unarchiveSession], ["prompt", API.sessionPrompt], ["fork", API.sessionFork], ["abort", API.sessionAbort],
       ["events", API.sessionEvents], ["context", API.sessionContext], ["context", API.patchSessionContext],
       ["context", API.replaceSessionContext], ["settings", API.sessionSettings], ["settings", API.updateSessionSettings],
       ["commands", API.sessionCommands], ["command", API.sessionCommand], ["name", API.updateSessionName],
@@ -2228,6 +2274,60 @@ const server = Bun.serve({
         return json({ settings: await threadSettings(sessionRow.get(id)) });
       } catch (e: any) { return error(e.message ?? "Could not update thread settings", 500); }
     }
+    if (action === "fork" && req.method === "POST") {
+      try {
+        const body = await readBody(req);
+        const requestId = String(body.requestId ?? "");
+        const previous = requestResult(requestId);
+        if (previous) return json(JSON.parse(previous.response), previous.status);
+        if (!/^[0-9a-f-]{36}$/i.test(requestId)) return error("Valid requestId required");
+        const messageTimestamp = Number(body.messageTimestamp);
+        if (!Number.isSafeInteger(messageTimestamp) || messageTimestamp <= 0) return error("Valid message timestamp required");
+        if (forkingSessions.has(id)) return error("The conversation is already being edited", 409);
+        forkingSessions.add(id);
+        try {
+          const rt = await activate(row);
+          if (!ownsSupervisorLease()) return error("Supervisor instance was replaced", 503);
+          const pendingWork = Number((db.query(
+            "SELECT COUNT(*) AS count FROM work_items WHERE session_id=? AND state IN ('queued','running','dispatched')",
+          ).get(id) as any)?.count ?? 0);
+          if (rt.phase !== "IDLE" || pendingWork > 0) return error("Wait for the thread to become idle before editing an earlier message", 409);
+          const before = await rpc(rt, "get_entries", {}, 10_000) as any;
+          const branch = activeSessionEntries(Array.isArray(before.entries) ? before.entries : [], before.leafId);
+          const selected = branch.findLast((entry) => entry?.type === "message"
+            && entry.message?.role === "user"
+            && Number(entry.message.timestamp) === messageTimestamp);
+          if (!selected) return error("That user message is no longer on the active conversation branch", 409);
+          const forked = await rpc(rt, "fork", { entryId: selected.id }, 30_000) as any;
+          if (!ownsSupervisorLease()) return error("Supervisor instance was replaced", 503);
+          if (forked.cancelled) return error("Editing from that message was cancelled", 409);
+          const after = await rpc(rt, "get_entries", {}, 10_000) as any;
+          if (!ownsSupervisorLease()) return error("Supervisor instance was replaced", 503);
+          replaceConversationEvents(id, activeSessionEntries(Array.isArray(after.entries) ? after.entries : [], after.leafId));
+          const runtimeState = await rpc(rt, "get_state", {}, 10_000) as any;
+          const changedAt = now();
+          db.query("UPDATE sessions SET session_path=?,state='IDLE',last_error=NULL,updated_at=?,revision=revision+1 WHERE id=?")
+            .run(runtimeState.sessionFile ? String(runtimeState.sessionFile) : row.session_path, changedAt, id);
+          rt.liveText = "";
+          rt.liveThinking = "";
+          rt.pendingContextFinalization = null;
+          rt.activeTools.clear();
+          rt.phaseVersion++;
+          signalSync();
+          const response = {
+            ok: true,
+            text: typeof forked.text === "string" ? forked.text : contentText(selected.message.content),
+            session: publicSession(sessionRow.get(id)),
+          };
+          saveRequest(requestId, id, "fork", 200, response);
+          return json(response);
+        } finally {
+          forkingSessions.delete(id);
+          kickSession(id);
+          if (releaseHandoffRequested) queueMicrotask(() => void handoffRelease());
+        }
+      } catch (e: any) { return error(e.message ?? "Could not edit from that message", 400); }
+    }
     if (action === "prompt" && req.method === "POST") {
       try {
         const body = await readBody(req);
@@ -2237,6 +2337,7 @@ const server = Bun.serve({
         if (!/^[0-9a-f-]{36}$/i.test(requestId)) return error("Valid requestId required");
         const text = String(body.text ?? "").trim();
         if (!text) return error("Prompt is empty");
+        if (forkingSessions.has(id)) return error("Wait for the conversation edit to finish", 409);
         const rt = runtimes.get(id);
         if (rt && ["ABORTING", "STOPPING"].includes(rt.phase)) return error("Thread is stopping; wait for it to become resumable", 409);
         const delivery = body.delivery === "steer" ? "steer" : body.delivery == null || body.delivery === "followUp" ? "followUp" : null;
@@ -2447,8 +2548,8 @@ function stopSupervisorTimers() {
 async function handoffRelease() {
   if (shuttingDown) return;
   releaseHandoffRequested = true;
-  if ([...runtimes.values()].some((runtime) => runtime.phase === "ABORTING")) {
-    console.log("Pi Remote release handoff waiting for an in-flight abort to resolve");
+  if ([...runtimes.values()].some((runtime) => runtime.phase === "ABORTING") || forkingSessions.size > 0) {
+    console.log("Pi Remote release handoff waiting for an in-flight session operation to resolve");
     return;
   }
   shuttingDown = true;

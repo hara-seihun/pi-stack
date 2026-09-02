@@ -16,7 +16,9 @@ const ui = {
   machineActions: $("machine-actions"), openaiGovernorControl: $("openai-governor-control"), anthropicGovernorControl: $("anthropic-governor-control"),
   topTitle: $("top-title"), topState: $("top-state"), settingsButton: $("open-settings"),
   empty: $("empty-state"), conversation: $("conversation"), scrollback: $("scrollback"), transcript: $("transcript"),
-  liveThinking: $("live-thinking"), liveAnswer: $("live-answer"), prompt: $("prompt"), action: $("action"), voice: $("voice"),
+  liveThinking: $("live-thinking"), liveThinkingContent: $("live-thinking-content"), copyLiveThinking: $("copy-live-thinking"),
+  liveAnswer: $("live-answer"), liveAnswerContent: $("live-answer-content"), copyLiveAnswer: $("copy-live-answer"),
+  prompt: $("prompt"), action: $("action"), voice: $("voice"),
   slashCommands: $("slash-commands"), queueStatus: $("queue-status"), messageQueue: $("message-queue"),
   attachments: $("attachments"), attach: $("attach"), pasteText: $("paste-text"), filePicker: $("file-picker"),
   unlockDialog: $("unlock-dialog"), unlockForm: $("unlock-form"), unlockKey: $("unlock-key"),
@@ -460,6 +462,10 @@ function renderMessageQueue() {
     copy.append(node("span", "queued-message-label", message.status || "Queued"), node("span", "queued-message-preview", queuedPreview(message.text)));
     row.append(copy);
     const actions = node("div", "queued-message-actions");
+    const copyMessage = node("button", "queued-message-action", "COPY");
+    copyMessage.type = "button"; copyMessage.title = "Copy queued message";
+    copyMessage.addEventListener("click", () => copyMessageText(copyMessage, () => message.text));
+    actions.append(copyMessage);
     if (message.canSteer) {
       const steer = node("button", "queued-message-action steer-instead", "STEER");
       steer.type = "button"; steer.title = "Deliver after the current tool calls";
@@ -1484,11 +1490,42 @@ async function poll(immediate = false) {
   }
 }
 
-function appendMessage(kind, label, text, eventSeq = 0) {
+async function copyMessageText(button, readText) {
+  const previous = button.textContent;
+  try {
+    await navigator.clipboard.writeText(String(readText() || ""));
+    button.textContent = "COPIED";
+  } catch (error) {
+    button.textContent = "FAILED";
+    console.error("Could not copy message", error);
+  }
+  setTimeout(() => { if (button.isConnected) button.textContent = previous; }, 1_200);
+}
+
+function messageActions(readText, editable = null) {
+  const actions = node("div", "message-actions");
+  const copy = node("button", "message-action", "COPY");
+  copy.type = "button";
+  copy.title = "Copy message";
+  copy.addEventListener("click", () => copyMessageText(copy, readText));
+  actions.append(copy);
+  if (editable) {
+    const edit = node("button", "message-action edit-message", "EDIT");
+    edit.type = "button";
+    edit.title = "Edit and resend from this point in the conversation";
+    edit.addEventListener("click", () => editFromMessage(editable, edit));
+    actions.append(edit);
+  }
+  return actions;
+}
+
+function appendMessage(kind, label, text, eventSeq = 0, editable = null) {
   const item = node("div", `message ${kind}`);
   const body = node("div", "markdown-body");
   const labelNode = node("span", "message-label", label.toUpperCase());
-  item.append(labelNode, body);
+  const header = node("div", "message-header");
+  header.append(labelNode, messageActions(() => text, editable));
+  item.append(header, body);
   if (kind === "user" && eventSeq) {
     item.dataset.eventSeq = String(eventSeq);
     mapState("userMessageLabels", Number(eventSeq), labelNode);
@@ -1520,12 +1557,14 @@ function setLive(thinking, answer) {
     const next = pendingLiveRender;
     pendingLiveRender = null;
     if (!next || next.selectionEpoch !== state.selectionEpoch) return;
-    ui.liveThinking.textContent = next.thinking;
+    ui.liveThinkingContent.textContent = next.thinking;
     ui.liveThinking.hidden = !next.thinking;
-    ui.liveAnswer.textContent = next.answer;
+    ui.liveAnswerContent.textContent = next.answer;
     ui.liveAnswer.hidden = !next.answer;
   });
 }
+ui.copyLiveThinking.addEventListener("click", () => copyMessageText(ui.copyLiveThinking, () => ui.liveThinkingContent.textContent));
+ui.copyLiveAnswer.addEventListener("click", () => copyMessageText(ui.copyLiveAnswer, () => ui.liveAnswerContent.textContent));
 
 function shortPath(path = "") {
   const home = state.home;
@@ -1580,7 +1619,8 @@ function startTool(event) {
     const collapsed = root.classList.toggle("collapsed");
     toggle.textContent = collapsed ? "Show more" : "Show less";
   });
-  root.append(header, timing, body, toggle); ui.transcript.append(root); trimTranscript();
+  const actions = messageActions(() => [header.textContent, body.textContent].filter(Boolean).join("\n\n"));
+  root.append(header, timing, body, toggle, actions); ui.transcript.append(root); trimTranscript();
   const timeout = args.timeoutMs !== undefined ? Math.max(0, Number(args.timeoutMs)) : args.timeout !== undefined ? Math.max(0, Number(args.timeout) * 1000) : -1;
   const card = { root, header, timing, body, toggle, startedAt: eventMillis(event.time), endedAt: 0, timeout, finished: false };
   mapState("toolCards", id, card); updateToolTiming(card); return card;
@@ -1680,12 +1720,18 @@ function modelContextEntries(context) {
       kind: role === "user" ? "user" : role === "assistant" ? "assistant" : role === "toolResult" && message?.isError ? "notice" : "tool",
       label: role === "user" ? "User" : role === "assistant" ? "Assistant" : role === "toolResult" ? `Tool result · ${message.toolName || "tool"}` : role,
       text: contextContentMarkdown(message?.content),
+      messageTimestamp: Number(message?.timestamp || 0),
     });
   }
   return entries;
 }
 function appendContextEntry(entry) {
-  if (entry.kind !== "toolCall") return appendMessage(entry.kind, entry.label, entry.text);
+  if (entry.kind !== "toolCall") {
+    const editable = entry.kind === "user" && entry.messageTimestamp > 0
+      ? { messageTimestamp: entry.messageTimestamp, text: entry.text }
+      : null;
+    return appendMessage(entry.kind, entry.label, entry.text, 0, editable);
+  }
   const call = entry.toolCall;
   const event = { toolCallId: call.id, name: call.name, args: call.arguments || {}, time: new Date(Number(entry.time || Date.now())).toISOString() };
   const card = startTool(event);
@@ -2028,6 +2074,46 @@ function cancelQueuedMessage(message, edit, actions) {
   return mutateQueuedMessage(message, actions, "DELETE", "", (result, id) => {
     if (edit && state.selectedId === id) restoreQueuedDraft(result.text ?? message.text);
   });
+}
+
+async function editFromMessage(message, button) {
+  const id = state.selectedId;
+  if (!id || state.agentRunId || selectedPendingAction()) return;
+  if (working(state.selectedState)) {
+    button.textContent = "WAIT";
+    setTimeout(() => { if (button.isConnected) button.textContent = "EDIT"; }, 1_200);
+    return;
+  }
+  const action = beginAction(id, "fork");
+  const body = { requestId: crypto.randomUUID(), messageTimestamp: message.messageTimestamp };
+  button.textContent = "EDITING";
+  try {
+    let result;
+    try { result = await api(API.sessionFork.method, API.sessionFork.path({ sessionId: id }), body, 45_000); }
+    catch { result = await api(API.sessionFork.method, API.sessionFork.path({ sessionId: id }), body, 45_000); }
+    if (state.selectedId !== id) return;
+    const views = new Map(state.threadViews);
+    views.delete(id);
+    patchState({ threadViews: views });
+    forgetPersistedContext(id);
+    clearConversation();
+    if (result.session) {
+      mergeSession(result.session);
+      applySelectedSession(result.session, true);
+    }
+    ui.prompt.value = String(result.text ?? message.text ?? "");
+    saveDraft(id, ui.prompt.value);
+    ui.prompt.focus();
+    ui.prompt.setSelectionRange(ui.prompt.value.length, ui.prompt.value.length);
+    updateComposer();
+  } catch (error) {
+    button.textContent = "FAILED";
+    console.error(error);
+  } finally {
+    finishAction(action);
+    updateChrome();
+    poll(true);
+  }
 }
 
 async function runCommand(command) {

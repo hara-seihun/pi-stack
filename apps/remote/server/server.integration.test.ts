@@ -168,6 +168,13 @@ steering = []
 follow_up = []
 first_state = True
 child = None
+editable_entries = [
+ {'type':'message','id':'edit-u1','parentId':None,'timestamp':'2026-09-02T00:00:00.000Z','message':{'role':'user','content':'keep this','timestamp':100}},
+ {'type':'message','id':'edit-a1','parentId':'edit-u1','timestamp':'2026-09-02T00:00:01.000Z','message':{'role':'assistant','content':[{'type':'text','text':'keep reply'}],'timestamp':101}},
+ {'type':'message','id':'edit-u2','parentId':'edit-a1','timestamp':'2026-09-02T00:00:02.000Z','message':{'role':'user','content':'edit this','timestamp':200}},
+ {'type':'message','id':'edit-a2','parentId':'edit-u2','timestamp':'2026-09-02T00:00:03.000Z','message':{'role':'assistant','content':[{'type':'text','text':'remove reply'}],'timestamp':201}},
+]
+editable_leaf = 'edit-a2'
 def out(value):
  print(json.dumps(value), flush=True)
 def finish_release_later():
@@ -183,7 +190,25 @@ for line in sys.stdin:
   rpc_log.write(json.dumps({'sessionId': os.environ.get('PI_REMOTE_SESSION_ID'), **request}) + '\\n')
  kind = request.get('type')
  rid = request.get('id')
- if kind == 'get_state':
+ if kind == 'get_entries':
+  out({'type':'response','id':rid,'command':'get_entries','success':True,'data':{'entries':editable_entries,'leafId':editable_leaf}})
+ elif kind == 'fork':
+  selected = next((entry for entry in editable_entries if entry['id'] == request.get('entryId')), None)
+  if not selected or selected.get('message', {}).get('role') != 'user':
+   out({'type':'response','id':rid,'command':'fork','success':False,'error':'Invalid entry ID for forking'})
+  else:
+   target = selected.get('parentId')
+   keep = []
+   current = target
+   by_id = {entry['id']:entry for entry in editable_entries}
+   while current:
+    keep.append(by_id[current]); current = by_id[current].get('parentId')
+   editable_entries[:] = list(reversed(keep))
+   editable_leaf = target
+   content = selected['message'].get('content', '')
+   text = content if isinstance(content, str) else ''.join(block.get('text', '') for block in content if block.get('type') == 'text')
+   out({'type':'response','id':rid,'command':'fork','success':True,'data':{'text':text,'cancelled':False}})
+ elif kind == 'get_state':
   if first_state:
    first_state = False
    pause(0.12)
@@ -663,6 +688,25 @@ describe("web and supervisor integration", () => {
       releaseGate("live-stream-next");
       releaseGate("live-stream");
     }
+  });
+
+  test("forks before a selected user message and rebuilds the durable conversation projection", async () => {
+    const id = await createThread("home", "sol");
+    const request = { requestId: crypto.randomUUID(), messageTimestamp: 200 };
+    const forked = await api("POST", `/v1/sessions/${id}/fork`, request);
+    expect(forked.status).toBe(200);
+    expect(forked.value.text).toBe("edit this");
+    expect(forked.value.session.state).toBe("IDLE");
+
+    const commands = readFileSync(fakeRpcLog, "utf8").trim().split("\n").map((line) => JSON.parse(line));
+    expect(commands.filter((command) => command.sessionId === id && command.type === "fork" && command.entryId === "edit-u2")).toHaveLength(1);
+    const repeated = await api("POST", `/v1/sessions/${id}/fork`, request);
+    expect(repeated.value.text).toBe("edit this");
+    const afterRepeat = readFileSync(fakeRpcLog, "utf8").trim().split("\n").map((line) => JSON.parse(line));
+    expect(afterRepeat.filter((command) => command.sessionId === id && command.type === "fork")).toHaveLength(1);
+    const events = await api("GET", `/v1/sessions/${id}/events?after=0`);
+    expect(events.value.events.filter((event: any) => event.type === "user").map((event: any) => event.text)).toEqual(["keep this"]);
+    expect(events.value.events.filter((event: any) => event.type === "assistant").map((event: any) => event.text)).toEqual(["keep reply"]);
   });
 
   test("confirms an empty selected context even when the client has not loaded its cache yet", async () => {

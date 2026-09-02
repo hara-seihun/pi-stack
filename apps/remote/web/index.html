@@ -86,8 +86,14 @@
         <div id="scrollback" class="scrollback">
           <div class="scroll-content">
             <div id="transcript" class="transcript"></div>
-            <div id="live-thinking" class="live-thinking markdown-body" hidden></div>
-            <div id="live-answer" class="live-answer markdown-body" hidden></div>
+            <div id="live-thinking" class="live-thinking markdown-body" hidden>
+              <div id="live-thinking-content"></div>
+              <button id="copy-live-thinking" class="message-action" type="button">COPY</button>
+            </div>
+            <div id="live-answer" class="live-answer markdown-body" hidden>
+              <div id="live-answer-content"></div>
+              <button id="copy-live-answer" class="message-action" type="button">COPY</button>
+            </div>
           </div>
         </div>
         <div id="queue-status" class="queue-status" hidden></div>

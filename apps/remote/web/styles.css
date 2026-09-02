@@ -143,13 +143,20 @@ button:focus-visible, input:focus-visible, textarea:focus-visible, select:focus-
 .message { margin-top: 22px; overflow-wrap: anywhere; font-size: 16px; line-height: 1.48; user-select: text; content-visibility: auto; contain-intrinsic-block-size: auto 160px; }
 .message:first-child { margin-top: 0; }
 .context-earlier { display: block; margin: 0 auto 18px; padding: 8px 12px; border: 1px solid var(--border); color: var(--muted); background: var(--surface); font: inherit; }
-.message-label { display: block; margin-bottom: 5px; color: var(--muted); font-size: 11px; font-weight: 850; letter-spacing: .06em; }
+.message-header { min-height: 28px; display: flex; align-items: flex-start; gap: 8px; margin-bottom: 5px; }
+.message-label { display: block; flex: 1; min-width: 0; padding-top: 5px; color: var(--muted); font-size: 11px; font-weight: 850; letter-spacing: .06em; }
+.message-actions { flex: 0 0 auto; display: flex; align-items: center; gap: 3px; }
+.message-action { min-width: 48px; height: 28px; padding: 0 7px; color: var(--muted); background: var(--surface-2); font-size: 9px; font-weight: 850; letter-spacing: .035em; }
+.message-action:hover, .message-action:focus-visible { color: var(--text); }
+.message-action.edit-message { color: var(--accent); }
 .message.user .message-label { color: var(--accent); }
 .message.assistant .message-label { color: var(--success); }
 .message.thinking { padding: 11px 13px; background: var(--pending); color: var(--muted); font-size: 14px; font-style: italic; }
 .message.notice { color: var(--muted); font-size: 14px; }
-.live-thinking, .live-answer { width: min(100%, 980px); margin: 18px auto 0; overflow-wrap: anywhere; white-space: pre-wrap; line-height: 1.45; user-select: text; }
-.live-thinking { padding: 11px 13px; background: var(--pending); color: var(--muted); font-style: italic; font-size: 14px; }
+.live-thinking, .live-answer { position: relative; width: min(100%, 980px); margin: 18px auto 0; padding-right: 62px; overflow-wrap: anywhere; white-space: pre-wrap; line-height: 1.45; user-select: text; }
+.live-thinking { padding: 11px 62px 11px 13px; background: var(--pending); color: var(--muted); font-style: italic; font-size: 14px; }
+.live-thinking > .message-action, .live-answer > .message-action { position: absolute; top: 5px; right: 0; }
+.live-thinking > .message-action { right: 7px; background: var(--surface); }
 .live-thinking::before, .live-answer::before { display: block; margin-bottom: 5px; font-size: 11px; font-weight: 850; }
 .live-thinking::before { content: "THINKING"; color: var(--muted); }
 .live-answer::before { content: "PI · WORKING"; color: var(--success); }
@@ -249,6 +256,7 @@ button:focus-visible, input:focus-visible, textarea:focus-visible, select:focus-
 .tool-card.collapsed .tool-header { display: -webkit-box; -webkit-line-clamp: 1; -webkit-box-orient: vertical; overflow: hidden; }
 .tool-card.collapsed .tool-body { display: -webkit-box; -webkit-line-clamp: 5; -webkit-box-orient: vertical; overflow: hidden; }
 .tool-toggle { margin-top: 7px; padding: 5px 0; color: var(--accent); background: transparent; font-size: 13px; font-weight: 750; }
+.tool-card > .message-actions { justify-content: flex-end; margin-top: 6px; }
 
 .settings { position: fixed; z-index: 50; inset: 0 0 0 auto; width: min(370px, calc(100vw - 44px)); background: var(--surface); transform: translateX(102%); }
 .settings.open { transform: translateX(0); }
