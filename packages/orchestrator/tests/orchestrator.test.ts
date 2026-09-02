@@ -11,11 +11,24 @@ import { withCustomModels } from "../src/extension/routing.js";
 import { catalogModel } from "../src/catalog.js";
 import { Daemon } from "../src/daemon.js";
 import { loadConfig } from "../src/config.js";
+import { ACCOUNT_USAGE, dispatch } from "../src/commands.js";
 
 const config:OrchestratorConfig={profiles:{standard:[{provider:"openai-codex",model:"gpt-5.6-sol",thinking:"xhigh"}]},backgroundSpendFraction:.8,maxConcurrentSessions:8,defaultAccountConcurrency:2,meterMaxAgeMs:60_000,snapshotIntervalMs:30_000,reconcileIntervalMs:1000,stallAfterMs:60_000,killAfterMs:120_000,authPath:"/tmp/auth",agentDir:"/tmp/agent"};
 function account(store:Store,id="openai-codex-1"){store.upsertAccount({id,provider:"openai-codex",concurrency:2});}
 
 describe("current orchestrator state",()=>{
+  it("prints account help without requiring an account id",async()=>{
+    const lines:string[]=[];
+    const previous=console.log;
+    console.log=(value?:unknown)=>lines.push(String(value));
+    try{
+      await dispatch(["account","--help"]);
+    }finally{
+      console.log=previous;
+    }
+    expect(lines).toEqual([ACCOUNT_USAGE]);
+  });
+
   it("launches every Fable selection on Claude Fable 5.1",()=>{const anthropic=builtinProviders().find((provider)=>provider.id==="anthropic")!;const models=withCustomModels(anthropic).getModels();expect(models.some((model)=>model.id==="claude-fable-5")).toBe(true);expect(models.find((model)=>model.id==="claude-fable-5-1")?.cost.cacheRead).toBe(.25);expect(catalogModel("fable")?.model).toBe("claude-fable-5-1");});
 
   it("reconciles lane manifests as desired state",()=>{const store=Store.open(":memory:");store.reconcileLanes([{id:"one",prompt:"a",cwd:"/tmp",profile:"standard",weight:1},{id:"two",prompt:"b",cwd:"/tmp",profile:"standard",weight:2}]);store.reconcileLanes([{id:"two",prompt:"changed",cwd:"/work",profile:"standard",weight:3,fixedDemand:2}]);expect(store.lanes()).toEqual([{id:"two",prompt:"changed",cwd:"/work",profile:"standard",weight:3,fixedDemand:2,priority:0,doctrineUrl:undefined,openingProbe:undefined}]);store.close();});

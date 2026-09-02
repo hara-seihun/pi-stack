@@ -20,6 +20,7 @@ export const COMMANDS=[
   ["account","Import, remove, or list pooled accounts"],
 ] as const;
 export const USAGE=`usage: pi-orchestrator ${COMMANDS.map(([name])=>name.replace(" / ","|")).join("|")}`;
+export const ACCOUNT_USAGE=`usage: pi-orchestrator account list | import ID --provider openai-codex|anthropic --credential-file FILE [--label LABEL] [--concurrency N] | remove ID`;
 
 const BASE=`http://${process.env.PI_ORCHESTRATOR_HOST??"127.0.0.1"}:${process.env.PI_ORCHESTRATOR_PORT??"2460"}`;
 const ledgerPath=()=>process.env.PI_ORCHESTRATOR_LEDGER||join(homedir(),".local/share/pi-orchestrator/ledger.sqlite3");
@@ -45,6 +46,10 @@ export async function dispatch(argv:string[]):Promise<void>{
   if(command==="boost"){const {named,positional}=flags(rest),provider=positional[0],value=positional[1]??named.get("multiplier");if(!provider||value===undefined)throw new Error("boost requires provider and multiplier");output(await request("/v1/control","POST",{key:`boost:${provider}`,value:String(value)}));return;}
   if(command==="account"){
     const [action,...tail]=rest;
+    if(action===undefined||action==="help"||action==="--help"){
+      console.log(ACCOUNT_USAGE);
+      return;
+    }
     if(action==="list"){output((await request("/v1/plans")).accounts);return;}
     const {named,positional}=flags(tail),id=named.get("id")??positional[0];if(!id)throw new Error(`account ${action} requires an id`);
     const config=loadConfig();
