@@ -1,0 +1,73 @@
+#!/usr/bin/env bash
+# Walk the live front door the way the clients do, right after a deployment.
+# A release that passes its tests can still lock a person out of the app if
+# the front door and the client disagree about a header, a preflight, or a
+# route; this is the check that catches that before anybody opens their phone.
+#
+#   deploy/smoke [BASE_URL]      defaults to http://127.0.0.1:8788
+set -uo pipefail
+
+root=$(cd "$(dirname "$0")/.." && pwd)
+source "$root/deploy/lib"
+base=${1:-http://127.0.0.1:${PI_REMOTE_ROUTER_PORT:-8788}}
+failures=0
+fail() { echo "smoke: $*" >&2; failures=$((failures + 1)); }
+get() { curl -sS -o "$2" -w '%{http_code}' --max-time 10 "${@:3}" "$base$1" 2>/dev/null || echo 000; }
+
+body=$(mktemp); trap 'rm -f "$body"' EXIT
+
+# The web client, served to anyone: it is what asks for a name and a key.
+code=$(get / "$body")
+[[ $code == 200 ]] && grep -q '<html' "$body" || fail "GET / returned $code without the web client"
+for asset in /app.js /person.js /native.js /api.js /sync.js; do
+  code=$(get "$asset" "$body")
+  [[ $code == 200 ]] || fail "GET $asset returned $code"
+done
+
+# The Android shell calls from http://localhost with the person header, which
+# makes every request a CORS preflight first. If this fails, the phone is out.
+code=$(get /v1/environment "$body" -X OPTIONS -H 'origin: http://localhost' \
+  -H 'access-control-request-method: GET' -H 'access-control-request-headers: x-pi-remote-user' \
+  -D "$body.headers")
+[[ $code == 204 ]] || fail "preflight returned $code"
+grep -qi '^access-control-allow-headers:.*x-pi-remote-user' "$body.headers" 2>/dev/null || fail "preflight does not allow x-pi-remote-user"
+rm -f "$body.headers"
+
+# What an unnamed client learns: the environment and who it could be.
+code=$(get /v1/environment "$body" -H 'origin: http://localhost' -D "$body.headers")
+[[ $code == 200 ]] || fail "GET /v1/environment returned $code"
+grep -qi '^access-control-allow-origin:' "$body.headers" 2>/dev/null || fail "GET /v1/environment carries no CORS header"
+rm -f "$body.headers"
+environment=$(jq -r '.environment.id // empty' "$body" 2>/dev/null)
+[[ -n $environment ]] || fail "GET /v1/environment carries no environment id"
+code=$(get /v1/environments "$body")
+[[ $code == 200 ]] && jq -e '.environments | type == "array" and length > 0' "$body" >/dev/null 2>&1 || fail "GET /v1/environments returned $code or no list"
+
+# Every person: the front door knows her, and if her supervisor is up, the
+# supervisor answers the calls the app makes first.
+persons_dir=$(pi_stack_persons_dir)
+for file in "$persons_dir"/*.json; do
+  [[ -f $file ]] || continue
+  user=$(pi_stack_as_root jq -r '.user' "$file")
+  code=$(get /v1/lock-status "$body" -H "x-pi-remote-user: $user")
+  [[ $code == 200 ]] || { fail "$user: GET /v1/lock-status returned $code"; continue; }
+  if [[ $(jq -r '.unlocked' "$body") != true ]]; then
+    echo "smoke: $user is locked; front door answers for her"
+    continue
+  fi
+  for path in /v1/health /v1/environment /v1/sessions /v1/actions /v1/workspaces; do
+    code=$(get "$path" "$body" -H "x-pi-remote-user: $user" -H 'origin: http://localhost' -D "$body.headers")
+    [[ $code == 200 ]] || fail "$user: GET $path returned $code"
+    grep -qi '^access-control-allow-origin:' "$body.headers" 2>/dev/null || fail "$user: GET $path carries no CORS header"
+    rm -f "$body.headers"
+  done
+  code=$(get /v1/health "$body" -H "x-pi-remote-user: $user")
+  [[ $(jq -r '.environmentId // empty' "$body") == "$environment" ]] || fail "$user: supervisor reports a different environment than the front door"
+  echo "smoke: $user is unlocked and her supervisor answers"
+done
+
+if (( failures > 0 )); then
+  echo "smoke: $failures failure(s) against $base" >&2
+  exit 1
+fi
+echo "smoke: the front door at $base answers every client path"

@@ -26,7 +26,17 @@ skills=${PI_STACK_SKILLS_DEST:-/srv/pi/skills}
 tools=${PI_STACK_TOOLS_DEST:-/srv/pi/tools}
 fleet=$(pi_stack_fleet_user)
 previous_remote=""
-[[ ! -f $remote/.pi-stack-commit ]] || previous_remote=$(<"$remote/.pi-stack-commit")
+previous_remote_release=""
+if [[ -f $remote/.pi-stack-commit ]]; then
+  previous_remote=$(<"$remote/.pi-stack-commit")
+  previous_remote_release=$(readlink -f "$remote")
+fi
+# A deployment aimed at scratch destinations is a rehearsal: it must never
+# touch the machine's services or walk its live front door.
+services=1
+if [[ -n ${PI_STACK_REMOTE_DEST:-}${PI_STACK_ORCHESTRATOR_DEST:-}${PI_STACK_RUNTIME_DEST:-} && ${PI_STACK_SERVICES:-0} != 1 ]]; then
+  services=0
+fi
 mapfile -t users < <(pi_stack_users)
 (( ${#users[@]} > 0 )) || { echo "no Pi accounts: set fleetUser in $PI_STACK_HOST_FILE or add a person with pi-remote person add" >&2; exit 64; }
 
@@ -46,16 +56,44 @@ for artifact in "$runtime" "$orchestrator" "$remote" "$skills" "$tools"; do
   }
 done
 
-# The daemon restarts on every release; live workers keep the release they
-# recorded. The router restarts only when Pi Remote changed, and each running
-# supervisor is then handed the new release without ending active turns.
-if [[ -n $fleet ]]; then
-  pi_stack_as_root systemctl try-restart "pi-orchestrator@$fleet.service" 2>/dev/null || true
+if (( ! services )); then
+  printf 'deployed Pi stack %s for %s into overridden destinations; services left alone\n' "$expected" "${users[*]}"
+  exit 0
 fi
-if [[ $previous_remote != "$expected" ]]; then
+
+# The daemon restarts on every release; live workers keep the release they
+# recorded. The front door restarts only when Pi Remote changed, and each
+# running supervisor is then handed the new release without ending active turns.
+activate_remote() {
   pi_stack_as_root systemctl try-restart pi-remote-router.service 2>/dev/null || true
   while read -r service _; do
     [[ -n $service ]] && PI_REMOTE_SERVICE=$service "$root/apps/remote/activate"
   done < <(systemctl list-units 'pi-remote@*.service' --type=service --state=active --legend=no --plain --no-pager 2>/dev/null)
+}
+if [[ -n $fleet ]]; then
+  pi_stack_as_root systemctl try-restart "pi-orchestrator@$fleet.service" 2>/dev/null || true
+fi
+if [[ $previous_remote != "$expected" ]]; then
+  activate_remote
+fi
+
+# Then walk the front door the way the clients do. A release that locks a
+# person out of the app goes back to the previous Pi Remote release on the
+# spot, and the deployment fails loudly instead of quietly.
+if systemctl is-active --quiet pi-remote-router.service 2>/dev/null; then
+  sleep 1
+  if ! "$root/deploy/smoke"; then
+    if [[ -n $previous_remote_release && $previous_remote != "$expected" && -d $previous_remote_release ]]; then
+      echo "smoke check failed; returning Pi Remote to $previous_remote" >&2
+      candidate="$(dirname "$remote")/.pi-stack-releases/.rollback.$$"
+      pi_stack_as_root ln -s "$previous_remote_release" "$candidate"
+      pi_stack_as_root mv -Tf "$candidate" "$remote"
+      activate_remote
+      sleep 1
+      "$root/deploy/smoke" || echo "smoke check still fails on the previous release; the machine, not the release, is the problem" >&2
+    fi
+    echo "Pi stack $expected is not accepted on this host" >&2
+    exit 1
+  fi
 fi
 printf 'deployed Pi stack %s for %s\n' "$expected" "${users[*]}"

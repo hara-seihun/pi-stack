@@ -97,8 +97,11 @@ async function startServer() {
       PI_AGENT_DIR: join(root, "agent"),
       PI_REMOTE_PROMPT_ACK_TIMEOUT_MS: "100",
       PI_REMOTE_STATE_RECONCILE_MS: "5",
-      PI_REMOTE_RUNTIME_CONNECT_TIMEOUT_MS: "200",
-      PI_REMOTE_RUNTIME_START_TIMEOUT_MS: "500",
+      // A runtime host is a fresh bun process; four shards starting hosts on a
+      // loaded CI runner need seconds, not the sub-second budgets the rest of
+      // this fixture uses. Nothing here waits for a host that never comes up.
+      PI_REMOTE_RUNTIME_CONNECT_TIMEOUT_MS: "2000",
+      PI_REMOTE_RUNTIME_START_TIMEOUT_MS: "8000",
       PI_REMOTE_RUNTIME_TERMINATE_TIMEOUT_MS: "200",
       PI_REMOTE_RUNTIME_START_POLL_MS: "2",
       PI_REMOTE_RUNTIME_RESTART_DELAY_MS: "20",

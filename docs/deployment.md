@@ -38,8 +38,9 @@ Persons are not in the host file. They are Pi Remote's registry, `/var/lib/pi-re
 3. For every account (each person plus the fleet user): links `pi`, `agent-browser`, `pi-orchestrator`, `pi-remote`, and every tool command into `~/.local/bin`; links the reviewed skills and the host's skills into `~/.pi/agent/skills`; rewrites the `packages` list in `~/.pi/agent/settings.json` under Pi's own lock, installs the pinned npm packages, and writes the VCC policy and custom model catalog.
 4. Restarts the fleet daemon. Live workers keep the release they recorded in their run row.
 5. If Pi Remote changed, restarts the front door and hands each running supervisor the new release. Active Pi turns keep their process and stream; the replacement supervisor adopts them and replaces each runtime after it settles.
+6. Walks the live front door the way the clients do (`deploy/smoke`): the web assets, the Android preflight for the person header, the environment and person lists, and for every unlocked person the first calls the app makes. A release that fails this is switched back to the previous Pi Remote release on the spot, the supervisors are handed that release again, and the command fails. Tests prove a release works; this proves nobody is locked out of the app by it.
 
-An unchanged host redeploy takes about a second. A clean dependency install takes a few seconds.
+An unchanged host redeploy takes about a second. A clean dependency install takes a few seconds. A deployment whose destinations are overridden with `PI_STACK_*_DEST` is a rehearsal: it publishes into those paths and touches no service unless `PI_STACK_SERVICES=1`.
 
 ## Build checks
 
