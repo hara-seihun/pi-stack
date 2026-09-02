@@ -3,7 +3,7 @@
   "packages": [
     { "id": "orchestrator", "source": "packages/orchestrator", "deployed": "/srv/pi/pi-orchestrator" },
     { "id": "claude-code-use", "source": "packages/runtime/extensions/pi-claude-code-use", "deployed": "/srv/pi/runtime/extensions/pi-claude-code-use" },
-    { "id": "vcc", "source": "git:github.com/hara-seihun/pi-vcc@b5c57b47803e04352a9347c6d8aef1a8c8e4a0d2" },
+    { "id": "vcc", "source": "git:github.com/hara-seihun/pi-vcc@a4bc3046ba41d4c720f114d957497ecf2b3b6b66" },
     { "id": "bash-timeout-guard", "source": "packages/runtime/extensions/bash-timeout-guard", "deployed": "/srv/pi/runtime/extensions/bash-timeout-guard" },
     { "id": "browser-native", "source": "npm:pi-agent-browser-native@0.5.0" },
     { "id": "remote", "source": "apps/remote", "deployed": "/srv/pi/pi-remote" }

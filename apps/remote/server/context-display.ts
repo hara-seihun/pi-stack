@@ -1,16 +1,44 @@
 type JsonObject = Record<string, unknown>;
 
+export const COMPACTION_CONTINUATION_MESSAGE =
+  "your context was compacted, you now have tons of space to keep working as long as you like";
+export const COMPACTION_NOTICE_TYPE = "pi-remote-context-compacted";
+
 function object(value: unknown): JsonObject | null {
   return value !== null && typeof value === "object" && !Array.isArray(value) ? value as JsonObject : null;
 }
 
-/** Removes provider continuation metadata that no transcript renderer displays. */
+function contentText(content: unknown): string {
+  if (typeof content === "string") return content;
+  if (!Array.isArray(content)) return "";
+  return content
+    .map((value) => object(value))
+    .filter((block): block is JsonObject => block?.type === "text")
+    .map((block) => String(block.text ?? ""))
+    .join("");
+}
+
+function isCompactionContinuation(value: unknown): boolean {
+  const message = object(value);
+  return message?.role === "user" && contentText(message.content) === COMPACTION_CONTINUATION_MESSAGE;
+}
+
+/** Builds the smaller transcript-only document shared by the browser and Android clients. */
 export function displayContextDocument(document: string): string {
   const context = JSON.parse(document) as JsonObject;
   const messages = Array.isArray(context.messages) ? context.messages : [];
-  const projected = messages.map((value) => {
+  const projected = messages.map((value, index) => {
     const original = object(value);
     if (!original) return value;
+    if (original.role === "assistant" && original.stopReason === "aborted"
+      && isCompactionContinuation(messages[index + 1])) {
+      return {
+        role: "custom",
+        customType: COMPACTION_NOTICE_TYPE,
+        content: "Context compacted",
+        timestamp: original.timestamp,
+      };
+    }
     const message = { ...original };
     if (message.role === "assistant") {
       for (const key of ["api", "provider", "model", "usage", "stopReason", "responseId", "rawStopReason"])

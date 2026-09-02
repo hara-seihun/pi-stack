@@ -1,5 +1,9 @@
 import { describe, expect, test } from "bun:test";
-import { displayContextDocument } from "./context-display";
+import {
+  COMPACTION_CONTINUATION_MESSAGE,
+  COMPACTION_NOTICE_TYPE,
+  displayContextDocument,
+} from "./context-display";
 
 describe("display context projection", () => {
   test("removes provider continuation metadata without changing visible content", () => {
@@ -62,6 +66,33 @@ describe("display context projection", () => {
       ],
     });
     expect(context.messages[1]).toHaveProperty("responseId", "response");
+  });
+
+  test("presents a compacted request as context compaction once the continuation proves it", () => {
+    const context = {
+      systemPrompt: "prompt",
+      tools: [],
+      messages: [
+        { role: "assistant", content: [], stopReason: "aborted", errorMessage: "Request aborted", timestamp: 10 },
+        { role: "user", content: [{ type: "text", text: COMPACTION_CONTINUATION_MESSAGE }], timestamp: 11 },
+      ],
+    };
+
+    expect(JSON.parse(displayContextDocument(JSON.stringify(context))).messages).toEqual([
+      {
+        role: "custom",
+        customType: COMPACTION_NOTICE_TYPE,
+        content: "Context compacted",
+        timestamp: 10,
+      },
+      context.messages[1],
+    ]);
+  });
+
+  test("does not disguise an ordinary aborted request", () => {
+    const message = { role: "assistant", content: [], stopReason: "aborted", errorMessage: "Request aborted", timestamp: 10 };
+    const projected = JSON.parse(displayContextDocument(JSON.stringify({ messages: [message] })));
+    expect(projected.messages).toEqual([{ role: "assistant", content: [], errorMessage: "Request aborted", timestamp: 10 }]);
   });
 
   test("leaves unknown message and content schemas intact", () => {
