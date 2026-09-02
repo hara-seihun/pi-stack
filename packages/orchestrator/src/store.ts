@@ -266,6 +266,13 @@ export class Store {
     });
   }
   activeCount(source?:RunSource,sourceId?:string):number{let sql="SELECT COUNT(*) n FROM run WHERE state IN ('queued','starting','running','parked')",args:any[]=[];if(source){sql+=" AND source=?";args.push(source);}if(sourceId){sql+=" AND source_id=?";args.push(sourceId);}return Number((this.db.prepare(sql).get(...args) as any).n);}
+  admittedLaneCount(sourceId:string):number{return Number((this.db.prepare("SELECT COUNT(*) n FROM run WHERE source='lane' AND source_id=? AND state IN ('starting','running','parked')").get(sourceId) as any).n);}
+  trimQueuedLane(sourceId:string,keep:number,at=Date.now()):number{
+    const rows=this.db.prepare("SELECT id FROM run WHERE source='lane' AND source_id=? AND state='queued' ORDER BY created_at,id").all(sourceId) as {id:string}[];
+    const removed=rows.slice(Math.max(0,keep));
+    this.transaction(()=>{for(const {id} of removed)this.db.prepare("UPDATE run SET state='aborted',failure_kind='task',result='lane demand withdrawn before admission',updated_at=?,ended_at=? WHERE id=? AND state='queued'").run(at,at,id);});
+    return removed.length;
+  }
 
   createLease(id:string,accountId:string,kind:LeaseKind,runId?:string,at=Date.now()):void{this.db.prepare(`INSERT INTO lease(id,account_id,kind,run_id,started_at,heartbeat_at,ended_at) VALUES(?,?,?,?,?,?,NULL)
     ON CONFLICT(id) DO UPDATE SET account_id=excluded.account_id,kind=excluded.kind,run_id=excluded.run_id,heartbeat_at=excluded.heartbeat_at,ended_at=NULL`).run(id,accountId,kind,runId??null,at,at);}

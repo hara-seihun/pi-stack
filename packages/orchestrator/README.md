@@ -49,7 +49,7 @@ A lane manifest has `version: 2`, an optional `snapshotCommand`, and a `lanes` a
 }
 ```
 
-The daemon validates the whole snapshot before publishing it. A failed snapshot keeps the last valid revision and reports the error in status.
+The daemon validates the whole snapshot before publishing it. A failed probe reports the error in status and sets every dynamic lane's current demand to zero. It retains the last valid revision only as history. When demand falls, queued workers above the new count are withdrawn before admission.
 
 ## Operations
 

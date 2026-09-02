@@ -57,6 +57,30 @@ describe("current orchestrator state",()=>{
 
   it("applies every dynamic lane count and priority as one snapshot revision",()=>{const store=Store.open(":memory:");store.reconcileLanes([{id:"one",prompt:"a",cwd:"/tmp",profile:"standard",weight:1},{id:"two",prompt:"b",cwd:"/tmp",profile:"standard",weight:1}]);store.saveSnapshot({revision:"postgres:42",lanes:{one:{count:3,priority:10},two:{count:1,priority:90}}},1234);expect(store.latestSnapshot()).toEqual({revision:"postgres:42",lanes:{one:{count:3,priority:10},two:{count:1,priority:90}}});expect(store.lanes().map((lane)=>[lane.id,lane.priority])).toEqual([["two",90],["one",10]]);store.close();});
 
+  it("fails dynamic demand closed when its snapshot command fails",async()=>{
+    const store=Store.open(":memory:"),daemon=new Daemon(store,config,"/srv/releases/current") as any;
+    store.setControl("snapshot_command",`printf '%s' '{"revision":"ready","lanes":{"work":{"count":1}}}'`);
+    expect(await daemon.demand()).toEqual({revision:"ready",lanes:{work:{count:1}}});
+    store.setControl("snapshot_command","printf 'broken probe' >&2; exit 7");daemon.snapshotAt=0;
+    expect(await daemon.demand()).toBeUndefined();
+    expect(await daemon.demand()).toBeUndefined();
+    expect(store.latestSnapshot()).toEqual({revision:"ready",lanes:{work:{count:1}}});
+    expect(store.control("snapshot_error")).toContain("broken probe");
+    store.close();
+  });
+
+  it("withdraws queued lane runs when current demand disappears",()=>{
+    const store=Store.open(":memory:");
+    store.reconcileLanes([{id:"work",prompt:"w",cwd:"/tmp",profile:"standard",weight:1}]);
+    const ids=store.createRuns({count:3,source:"lane",sourceId:"work",prompt:"w",cwd:"/tmp",profile:"standard",budget:"background"});
+    expect(store.trimQueuedLane("work",1,1234)).toBe(2);
+    expect(store.activeCount("lane","work")).toBe(1);
+    const runs=ids.map((id)=>store.run(id)!);
+    expect(runs.filter((run)=>run.state==="queued")).toHaveLength(1);
+    for(const run of runs.filter((candidate)=>candidate.state==="aborted"))expect(run).toMatchObject({failureKind:"task",result:"lane demand withdrawn before admission",endedAt:1234});
+    store.close();
+  });
+
   it("orders lane admission by priority and weighted active share",()=>{
     const store=Store.open(":memory:");
     store.reconcileLanes([

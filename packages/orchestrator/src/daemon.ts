@@ -21,6 +21,7 @@ function exec(command:string,cwd?:string,timeout=30_000):Promise<string>{return 
 export class Daemon {
   private manifestMtime=0;
   private snapshotAt=0;
+  private currentSnapshot:DemandSnapshot|undefined;
   private reconciling=false;
   private stopped=false;
   private releasePath:string;
@@ -77,8 +78,8 @@ export class Daemon {
 
   private async demand():Promise<DemandSnapshot|undefined>{
     const command=this.store.control("snapshot_command");
-    if(!command)return this.store.latestSnapshot();
-    if(Date.now()-this.snapshotAt<this.config.snapshotIntervalMs)return this.store.latestSnapshot();
+    if(!command)return undefined;
+    if(Date.now()-this.snapshotAt<this.config.snapshotIntervalMs)return this.currentSnapshot;
     this.snapshotAt=Date.now();
     try{
       const snapshot=JSON.parse(await exec(command)) as DemandSnapshot;
@@ -86,8 +87,9 @@ export class Daemon {
       for(const [id,value] of Object.entries(snapshot.lanes))if(!Number.isInteger(value.count)||value.count<0)throw new Error(`invalid demand for ${id}`);
       this.store.saveSnapshot(snapshot);
       this.store.setControl("snapshot_error","");
+      this.currentSnapshot=snapshot;
       return snapshot;
-    }catch(error){this.store.setControl("snapshot_error",String(error));return this.store.latestSnapshot();}
+    }catch(error){this.store.setControl("snapshot_error",String(error));this.currentSnapshot=undefined;return undefined;}
   }
 
   async reconcile():Promise<void>{
@@ -99,6 +101,8 @@ export class Daemon {
       for(const lane of this.store.lanes()){
         if(this.store.control(`complete:${lane.id}`)!==undefined)continue;
         const desired=lane.fixedDemand??snapshot?.lanes?.[lane.id]?.count??0;
+        const admitted=this.store.admittedLaneCount(lane.id);
+        this.store.trimQueuedLane(lane.id,Math.max(0,desired-admitted));
         const active=this.store.activeCount("lane",lane.id);
         if(desired>active){
           try{
