@@ -18,6 +18,7 @@ import { unlink, writeFile, mkdir, chmod } from "node:fs/promises";
 import { join } from "node:path";
 import { listPersons, publicPerson, type Person } from "./persons";
 import { proxyFetch } from "./proxy-fetch";
+import { routerPreflight, withRouterCors } from "./router-cors";
 
 const PORT = Number(process.env.PI_REMOTE_ROUTER_PORT ?? "8788");
 const HOST = process.env.PI_REMOTE_ROUTER_HOST ?? "127.0.0.1";
@@ -189,12 +190,7 @@ async function startOpenPersons() {
 }
 await startOpenPersons();
 
-Bun.serve({
-  hostname: HOST,
-  port: PORT,
-  idleTimeout: 60,
-  async fetch(req) {
-    const url = new URL(req.url);
+async function route(req: Request, url: URL): Promise<Response> {
     if (url.pathname === "/v1/router-health") {
       const people = await Promise.all(PEOPLE.map(async (person) => ({ user: person.user, unlocked: await unitActive(person) })));
       return Response.json({ ok: true, version: VERSION, environmentId: ENVIRONMENT_ID, people });
@@ -238,6 +234,17 @@ Bun.serve({
     const asset = webAsset(url.pathname);
     if (asset) return asset;
     return Response.json({ error: "Locked", locked: true, user: person.user, persons }, { status: 423 });
+}
+
+Bun.serve({
+  hostname: HOST,
+  port: PORT,
+  idleTimeout: 60,
+  async fetch(req) {
+    const url = new URL(req.url);
+    if (req.method === "OPTIONS" && url.pathname.startsWith("/v1/")) return routerPreflight();
+    const response = await route(req, url);
+    return url.pathname.startsWith("/v1/") ? withRouterCors(response) : response;
   },
 });
 
