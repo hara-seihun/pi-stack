@@ -53,7 +53,6 @@ if [[ -f $dest/.pi-stack-commit && $(<"$dest/.pi-stack-commit") == "$commit" && 
 fi
 
 cd "$root"
-pi_stack_prepare_dependencies "$root"
 pi_stack_as_root install -d -m 755 "$dependencies_root"
 dependency_hash=$({
   sha256sum package.json package-lock.json
