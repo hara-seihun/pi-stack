@@ -21,7 +21,14 @@ const DEFAULT_STATE = process.env.PI_WORKSPACE_STATE ?? path.join(
   "pi-workspaces",
   "registry.sqlite3",
 );
-const DEFAULT_CACHE_PATHS = ["node_modules", "**/node_modules", ".nx", ".converge-cache"];
+const DEFAULT_CACHE_PATHS = [
+  "node_modules",
+  "**/node_modules",
+  "dist",
+  "**/dist",
+  ".nx",
+  ".converge-cache",
+];
 const DEFAULT_LEASE_SECONDS = 6 * 60 * 60;
 const DEFAULT_MAX_COUNT = 32;
 const DEFAULT_MIN_FREE_GIB = 30;
