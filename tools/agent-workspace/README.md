@@ -43,4 +43,6 @@ Use `--nested-groups` when each direct child is a task directory containing sibl
 
 An expired lease with a live process, active systemd unit, or Docker container remains referenced. `--reap-expired` fences that owner, stops user units, removes containers, terminates processes, and continues reconciliation. System units remain blocked for their owning service lifecycle. Use reaping only for roots whose workers honor workspace leases.
 
+An executing reconcile also forgets released records older than thirty days whose trees are gone, so the registry stays the size of the pool's recent history rather than its whole past.
+
 The registry defaults to `~/.local/state/pi-workspaces/registry.sqlite3`. Set `PI_WORKSPACE_STATE` when a host needs another persistent location. Removed trees are atomically moved into the registry's `gc/` directory and deleted by a detached low-priority collector, so large dependency trees disappear from the active pool immediately.

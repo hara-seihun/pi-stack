@@ -1142,8 +1142,25 @@ function releaseCommand(database, args, statePath) {
   print(result.length === 1 ? result[0] : result, bool(args, "json"));
 }
 
+// A released workspace whose tree is gone is history, not state. Keep a month
+// of it for questions like "what happened to that checkout" and no more; a
+// busy fleet registers thousands of checkouts and each one used to stay forever.
+const RELEASED_RETENTION_MS = 30 * 24 * 60 * 60_000;
+function pruneReleased(database, now = Date.now()) {
+  const stale = database.prepare("SELECT id, path FROM workspace WHERE state = 'released' AND updated_at < ?").all(now - RELEASED_RETENTION_MS);
+  const remove = database.prepare("DELETE FROM workspace WHERE id = ?");
+  let pruned = 0;
+  for (const row of stale) {
+    if (existsSync(row.path)) continue;
+    remove.run(row.id);
+    pruned += 1;
+  }
+  return pruned;
+}
+
 function reconcileCommand(database, args, statePath) {
   assertOnly(args, ["root", "id", "path", "execute", "reap-expired", "ignore-lease", "json"]);
+  if (bool(args, "execute")) pruneReleased(database);
   let records;
   if (one(args, "id") !== undefined || one(args, "path") !== undefined) records = [recordBy(database, selectorFrom(args))];
   else records = listRecords(database, one(args, "root"));
@@ -1193,7 +1210,7 @@ Records with the same --group lease, heartbeat, and release as one multi-reposit
 `);
 }
 
-export const workspaceTesting = { dockerSnapshot, parseSystemdUnits, systemdManagerSnapshot, systemdReferences };
+export const workspaceTesting = { dockerSnapshot, parseSystemdUnits, pruneReleased, systemdManagerSnapshot, systemdReferences };
 
 export function main(argv = process.argv.slice(2), statePath = DEFAULT_STATE) {
   const [commandName, ...rest] = argv;

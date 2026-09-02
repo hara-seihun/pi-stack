@@ -120,6 +120,28 @@ test("a reader that closes the output pipe does not crash the command", async ()
   }
 });
 
+test("released records whose trees are gone leave the registry after a month", () => {
+  const root = mkdtempSync(path.join(tmpdir(), "agent-workspace-prune-"));
+  const state = path.join(root, "registry.sqlite3");
+  try {
+    run(["status", "--json"], { PI_WORKSPACE_STATE: state });
+    const database = new DatabaseSync(state);
+    const insert = database.prepare(`INSERT INTO workspace (id, path, root, kind, mode, owner, checkout_type, cache_paths,
+      created_at, updated_at, lease_expires_at, state, detail) VALUES (?, ?, ?, 'test', 'writer', 'test', 'clone', '[]', ?, ?, 0, ?, '')`);
+    const now = Date.now();
+    const old = now - 40 * 24 * 60 * 60_000;
+    insert.run("gone-old", path.join(root, "gone-old"), root, old, old, "released");
+    insert.run("gone-new", path.join(root, "gone-new"), root, now, now, "released");
+    insert.run("present-old", root, root, old, old, "released");
+    insert.run("active-old", path.join(root, "active-old"), root, old, old, "active");
+    assert.equal(workspaceTesting.pruneReleased(database, now), 1);
+    assert.deepEqual(database.prepare("SELECT id FROM workspace ORDER BY id").all().map((row) => row.id), ["active-old", "gone-new", "present-old"]);
+    database.close();
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
 test("migrates a registry created before workspace groups", () => {
   const root = mkdtempSync(path.join(tmpdir(), "agent-workspace-migration-"));
   const state = path.join(root, "registry.sqlite3");
