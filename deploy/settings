@@ -49,8 +49,9 @@ import { existsSync, readFileSync, renameSync, rmSync, writeFileSync } from "nod
 
 const manifest = JSON.parse(readFileSync(process.env.PI_STACK_MANIFEST, "utf8"));
 const roots = { "/srv/pi/runtime": process.env.PI_STACK_RUNTIME_DEST, "/srv/pi/pi-orchestrator": process.env.PI_STACK_ORCHESTRATOR_DEST, "/srv/pi/pi-remote": process.env.PI_STACK_REMOTE_DEST };
+const isExternalPackage = (source) => source.startsWith("npm:") || source.startsWith("git:") || source.includes("://");
 const deployedPath = (entry) => {
-  if (entry.source.startsWith("npm:")) return entry.source;
+  if (isExternalPackage(entry.source)) return entry.source;
   for (const [standard, actual] of Object.entries(roots)) {
     if (entry.deployed === standard || entry.deployed.startsWith(`${standard}/`)) return actual + entry.deployed.slice(standard.length);
   }
@@ -62,7 +63,7 @@ if (observer.id !== manifest.contextObserver) throw new Error(`${manifest.contex
 const hostPackages = JSON.parse(process.env.PI_STACK_HOST_PACKAGES);
 const packages = [...reviewed.map((entry) => entry.path), ...hostPackages, observer.path];
 for (const path of packages) {
-  if (!path.startsWith("npm:") && !existsSync(path)) throw new Error(`package does not exist at ${path}`);
+  if (!isExternalPackage(path) && !existsSync(path)) throw new Error(`package does not exist at ${path}`);
 }
 const { default: lockfile } = await import(process.env.PI_STACK_LOCKFILE_MODULE);
 const path = process.env.PI_STACK_SETTINGS;
@@ -96,6 +97,7 @@ cat > "$vcc_config" <<'JSON'
   "overrideDefaultCompaction": true,
   "smartKeepTail": true,
   "continueAfterThresholdCompact": true,
+  "interTurnCompactionTokens": 250000,
   "debug": false
 }
 JSON
@@ -124,7 +126,7 @@ NODE
 
 while IFS= read -r package; do
   PI_CODING_AGENT_DIR="$agent_dir" "$runtime/node_modules/.bin/pi" install "$package"
-done < <(jq -r '.packages[].source | select(startswith("npm:"))' "$manifest")
+done < <(jq -r '.packages[].source | select(startswith("npm:") or startswith("git:") or contains("://"))' "$manifest")
 
 expected=$(( $(jq '.packages | length' "$manifest") + $(jq 'length' <<<"$host_packages") ))
 jq -e --argjson expected "$expected" '.packages | length == $expected' "$settings" >/dev/null

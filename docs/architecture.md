@@ -12,7 +12,7 @@ The runtime package owns the exact Pi development dependency. Root npm overrides
 
 Pi applies extensions in package order. Pi Remote's `context-mirror.ts` records the context after every other extension has transformed it, so it must load last.
 
-[`../config/packages.json`](../config/packages.json) names the package order. Every account on every host loads the same list, plus whatever the host file adds ahead of the observer. `scripts/check-manifests.mjs` checks the ordering rule, and Pi Remote checks the effective settings file at startup.
+[`../config/packages.json`](../config/packages.json) names the package order. Every account on every host loads the same list, plus whatever the host file adds ahead of the observer. Repository packages name their deployed path. External npm and Git packages use Pi's pinned source syntax directly. `scripts/check-manifests.mjs` checks the ordering rule, and Pi Remote checks the effective settings file at startup.
 
 ## Environments
 
