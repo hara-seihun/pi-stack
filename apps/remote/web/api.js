@@ -35,6 +35,7 @@ export const API = Object.freeze({
   unlock: route("POST", "/v1/unlock"),
   health: route("GET", "/v1/health"),
   environment: route("GET", "/v1/environment"),
+  environments: route("GET", "/v1/environments"),
   files: route("GET", "/v1/files"),
   fileDownload: route("GET", "/v1/files/download"),
   fileDownloadHead: route("HEAD", "/v1/files/download"),

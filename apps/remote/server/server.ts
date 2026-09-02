@@ -14,7 +14,7 @@ import { BOOSTED_MULTIPLIER, nextBoost } from "pi-orchestrator/boost";
 import { DEFAULT_LIVE_MODEL, DEFAULT_LIVE_VOICE, VoiceBroker } from "./voice/broker";
 import { attachRuntimeHost, startRuntimeHost, type RuntimeTransport } from "./runtime-transport";
 import { API } from "../web/api.js";
-import { listPersons, publicPerson } from "./persons";
+import { knownEnvironments, listPersons, publicPerson } from "./persons";
 
 const VERSION = (JSON.parse(readFileSync(join(import.meta.dir, "../package.json"), "utf8")) as { version: string }).version;
 const ENVIRONMENT_ID = process.env.PI_REMOTE_ENVIRONMENT_ID ?? "local";
@@ -1804,6 +1804,7 @@ const server = Bun.serve({
     if (web) return web;
     if (API.health.match(req.method, url.pathname)) return json({ ok: true, version: VERSION, environmentId: ENVIRONMENT_ID });
     if (API.environment.match(req.method, url.pathname)) return json({ environment: environmentMetadata() });
+    if (API.environments.match(req.method, url.pathname)) return json({ environments: knownEnvironments() });
     if (API.files.match(req.method, url.pathname)) {
       const requested = url.searchParams.get("path") ?? "";
       if (!isAbsolute(requested)) return error("Valid absolute folder path required");

@@ -38,7 +38,7 @@ Pi Remote environments are independent servers:
 - `local` runs Personal and Home threads on GMKtec.
 - `converge` runs one work profile directly on Converge.
 
-The Kenan drawer switches between them. Endpoint URLs enter the build through `apps/kenan/android/local.properties`; they are not committed.
+The Kenan drawer switches between them, and would between more. The browser client reads the list from the host that served it; the Android build embeds its own list from a file named in `apps/kenan/android/local.properties`, which is not committed.
 
 ## Architecture
 

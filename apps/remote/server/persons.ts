@@ -44,3 +44,21 @@ export function listPersons(dir = PERSONS_DIR): Person[] {
 export function publicPerson(person: Person) {
   return { user: person.user, displayName: person.displayName, requiresUnlock: Boolean(person.unlock) };
 }
+
+/**
+ * The environments a browser client served from this host may switch among:
+ * this one and any others reachable through a path prefix on the same origin.
+ * Declared in each person's environment as PI_REMOTE_ENVIRONMENTS; the default
+ * is this host alone.
+ */
+export function knownEnvironments(environment: Record<string, unknown> = process.env as Record<string, unknown>) {
+  const own = { id: String(environment.PI_REMOTE_ENVIRONMENT_ID ?? "local"), name: String(environment.PI_REMOTE_ENVIRONMENT_NAME ?? "Local"), baseUrl: "" };
+  const raw = environment.PI_REMOTE_ENVIRONMENTS;
+  if (raw === undefined || raw === "") return [own];
+  const declared = (typeof raw === "string" ? JSON.parse(raw) : raw) as Array<{ id: string; name?: string; baseUrl?: string }>;
+  if (!Array.isArray(declared) || declared.length === 0) throw new Error("PI_REMOTE_ENVIRONMENTS must be a non-empty list");
+  return declared.map((entry) => {
+    if (!/^[a-z][a-z0-9-]{0,31}$/.test(entry.id)) throw new Error(`PI_REMOTE_ENVIRONMENTS: invalid id ${entry.id}`);
+    return { id: entry.id, name: String(entry.name ?? entry.id), baseUrl: String(entry.baseUrl ?? "").replace(/\/+$/, "") };
+  });
+}

@@ -16,7 +16,7 @@
 import { existsSync } from "node:fs";
 import { unlink, writeFile, mkdir, chmod } from "node:fs/promises";
 import { join } from "node:path";
-import { listPersons, publicPerson, type Person } from "./persons";
+import { knownEnvironments, listPersons, publicPerson, type Person } from "./persons";
 import { proxyFetch } from "./proxy-fetch";
 import { routerPreflight, withRouterCors } from "./router-cors";
 
@@ -169,6 +169,7 @@ async function proxy(person: Person, req: Request, url: URL): Promise<Response> 
 }
 
 const persons = PEOPLE.map(publicPerson);
+const environments = knownEnvironments(PEOPLE[0]!.environment);
 const lockedEnvironment = () => ({
   id: ENVIRONMENT_ID,
   name: ENVIRONMENT_NAME,
@@ -195,6 +196,8 @@ async function route(req: Request, url: URL): Promise<Response> {
       const people = await Promise.all(PEOPLE.map(async (person) => ({ user: person.user, unlocked: await unitActive(person) })));
       return Response.json({ ok: true, version: VERSION, environmentId: ENVIRONMENT_ID, people });
     }
+
+    if (url.pathname === "/v1/environments" && req.method === "GET") return Response.json({ environments });
 
     const person = identify(req);
     if (!person) {

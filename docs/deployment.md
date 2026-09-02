@@ -53,22 +53,7 @@ CI runs the same gate from a persistent self-hosted checkout. Deployment does no
 
 ## Kenan
 
-The Android app embeds endpoint access from `apps/kenan/android/local.properties`, which is not committed:
-
-```properties
-piRemoteLocalUrl=https://gmktec.example-tailnet.ts.net
-piRemoteConvergeAuth=ssh
-piRemoteConvergeSshHost=converge.example.net
-piRemoteConvergeSshPort=22
-piRemoteConvergeSshUser=pi-remote-android
-piRemoteConvergeSshPrivateKeyFile=/owner-only/path/to/android-converge-key
-piRemoteConvergeSshHostKey=ecdsa-sha2-nistp256 <base64-encoded host key>
-piRemoteConvergeSshLocalPort=8789
-piRemoteConvergeSshRemoteHost=127.0.0.1
-piRemoteConvergeSshRemotePort=8788
-```
-
-The SSH account must allow local forwarding only to the front door's port.
+The Android app embeds its endpoint list from a JSON file named in `apps/kenan/android/local.properties`, which is not committed; see [the Kenan README](../apps/kenan/README.md#build-configuration). An SSH endpoint's account must allow local forwarding only to the front door's port. The browser client instead asks the host it was served from for its environment list (`PI_REMOTE_ENVIRONMENTS` in the person files).
 
 ## Release verification
 

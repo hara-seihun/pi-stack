@@ -3,7 +3,15 @@ package works.kenan.piremote.kenan;
 import android.content.Context;
 import android.content.SharedPreferences;
 
+import org.json.JSONArray;
+import org.json.JSONException;
+import org.json.JSONObject;
+
+import java.util.ArrayList;
+import java.util.Collections;
+import java.util.HashSet;
 import java.util.List;
+import java.util.Set;
 
 final class RemoteEnvironment {
     enum Authentication {
@@ -87,9 +95,7 @@ final class RemoteEnvironment {
 
     private static final String PREFERENCES = "kenan-environment";
     private static final String SELECTED = "selected";
-    private static final Endpoint LOCAL = Endpoint.direct("local", "Local", BuildConfig.LOCAL_SERVER_URL, true);
-    private static final Endpoint CONVERGE = converge();
-    private static final List<Endpoint> ALL = List.of(LOCAL, CONVERGE);
+    private static final List<Endpoint> ALL = parse(BuildConfig.ENDPOINTS);
 
     private final SharedPreferences preferences;
     private volatile Endpoint selected;
@@ -98,27 +104,47 @@ final class RemoteEnvironment {
         preferences = context.getSharedPreferences(PREFERENCES, Context.MODE_PRIVATE);
         Endpoint initial;
         try {
-            initial = find(preferences.getString(SELECTED, LOCAL.id));
+            initial = find(preferences.getString(SELECTED, ALL.get(0).id));
         } catch (IllegalArgumentException ignored) {
-            initial = LOCAL;
+            initial = ALL.get(0);
             preferences.edit().putString(SELECTED, initial.id).apply();
         }
         selected = initial;
     }
 
-    private static Endpoint converge() {
-        Authentication authentication = Authentication.parse(BuildConfig.CONVERGE_AUTH);
-        if (authentication == Authentication.DIRECT)
-            return Endpoint.direct("converge", "Converge", BuildConfig.CONVERGE_SERVER_URL, false);
-        return Endpoint.ssh("converge", "Converge", false, new Ssh(
-            BuildConfig.CONVERGE_SSH_HOST,
-            BuildConfig.CONVERGE_SSH_PORT,
-            BuildConfig.CONVERGE_SSH_USER,
-            BuildConfig.CONVERGE_SSH_PRIVATE_KEY_BASE64,
-            BuildConfig.CONVERGE_SSH_HOST_KEY,
-            BuildConfig.CONVERGE_SSH_LOCAL_PORT,
-            BuildConfig.CONVERGE_SSH_REMOTE_HOST,
-            BuildConfig.CONVERGE_SSH_REMOTE_PORT));
+    /** The build's endpoint declaration: a JSON list, direct URLs or pinned SSH forwards. */
+    static List<Endpoint> parse(String json) {
+        try {
+            JSONArray declared = new JSONArray(json);
+            if (declared.length() == 0) throw new IllegalArgumentException("No Pi Remote endpoints declared");
+            List<Endpoint> endpoints = new ArrayList<>();
+            Set<String> ids = new HashSet<>();
+            for (int index = 0; index < declared.length(); index++) {
+                JSONObject entry = declared.getJSONObject(index);
+                String id = entry.getString("id");
+                if (!ids.add(id)) throw new IllegalArgumentException("Repeated Pi Remote endpoint id: " + id);
+                String name = entry.optString("name", id);
+                boolean requiresUnlock = entry.optBoolean("requiresUnlock", false);
+                Authentication authentication = Authentication.parse(entry.optString("auth", "direct"));
+                if (authentication == Authentication.DIRECT) {
+                    endpoints.add(Endpoint.direct(id, name, entry.getString("url"), requiresUnlock));
+                } else {
+                    JSONObject ssh = entry.getJSONObject("ssh");
+                    endpoints.add(Endpoint.ssh(id, name, requiresUnlock, new Ssh(
+                        ssh.getString("host"),
+                        ssh.optInt("port", 22),
+                        ssh.getString("user"),
+                        ssh.getString("privateKeyBase64"),
+                        ssh.getString("hostKey"),
+                        ssh.getInt("localPort"),
+                        ssh.optString("remoteHost", "127.0.0.1"),
+                        ssh.optInt("remotePort", 8788))));
+                }
+            }
+            return Collections.unmodifiableList(endpoints);
+        } catch (JSONException cause) {
+            throw new IllegalArgumentException("Invalid Pi Remote endpoint declaration: " + cause.getMessage(), cause);
+        }
     }
 
     Endpoint current() {

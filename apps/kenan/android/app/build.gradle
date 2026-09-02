@@ -5,25 +5,36 @@ apply plugin: 'com.android.application'
 Properties remote = new Properties()
 File remoteFile = rootProject.file('local.properties')
 if (remoteFile.exists()) remoteFile.withInputStream { remote.load(it) }
-def localUrl = remote.getProperty('piRemoteLocalUrl', remote.getProperty('piRemoteUrl', 'http://127.0.0.1:8788'))
-def convergeAuth = remote.getProperty('piRemoteConvergeAuth', 'direct')
-def convergeUrl = remote.getProperty('piRemoteConvergeUrl', 'http://127.0.0.1:8789')
-def convergeSshHost = remote.getProperty('piRemoteConvergeSshHost', '')
-def convergeSshPort = remote.getProperty('piRemoteConvergeSshPort', '22')
-def convergeSshUser = remote.getProperty('piRemoteConvergeSshUser', '')
-def convergeSshHostKey = remote.getProperty('piRemoteConvergeSshHostKey', '')
-def convergeSshLocalPort = remote.getProperty('piRemoteConvergeSshLocalPort', '8789')
-def convergeSshRemoteHost = remote.getProperty('piRemoteConvergeSshRemoteHost', '127.0.0.1')
-def convergeSshRemotePort = remote.getProperty('piRemoteConvergeSshRemotePort', '8788')
-def convergeSshPrivateKey = ''
-if (convergeAuth.equalsIgnoreCase('ssh')) {
-    def keySetting = remote.getProperty('piRemoteConvergeSshPrivateKeyFile', '')
-    if (keySetting.isBlank()) throw new GradleException('piRemoteConvergeSshPrivateKeyFile is required for SSH authentication')
-    File keyFile = new File(keySetting)
-    if (!keyFile.isAbsolute()) keyFile = remoteFile.parentFile.toPath().resolve(keySetting).normalize().toFile()
-    if (!keyFile.isFile()) throw new GradleException('Pi Remote Converge SSH private key file does not exist')
-    convergeSshPrivateKey = Base64.encoder.encodeToString(keyFile.bytes)
+// Endpoints the app can reach, one JSON list. A direct endpoint is a URL; an
+// SSH endpoint names a restricted forwarding identity whose private key file
+// is read here and embedded in the build. Without a declaration the app talks
+// to a loopback development server.
+def endpointsSetting = remote.getProperty('piRemoteEndpoints', '')
+def endpointsFileSetting = remote.getProperty('piRemoteEndpointsFile', '')
+def endpoints
+if (!endpointsSetting.isBlank()) {
+    endpoints = new JsonSlurper().parseText(endpointsSetting)
+} else if (!endpointsFileSetting.isBlank()) {
+    File endpointsFile = new File(endpointsFileSetting)
+    if (!endpointsFile.isAbsolute()) endpointsFile = remoteFile.parentFile.toPath().resolve(endpointsFileSetting).normalize().toFile()
+    if (!endpointsFile.isFile()) throw new GradleException("Pi Remote endpoints file does not exist: $endpointsFile")
+    endpoints = new JsonSlurper().parse(endpointsFile)
+} else {
+    endpoints = [[id: 'local', name: 'Local', auth: 'direct', url: 'http://127.0.0.1:8788', requiresUnlock: false]]
 }
+if (!(endpoints instanceof List) || endpoints.isEmpty()) throw new GradleException('piRemoteEndpoints must be a non-empty JSON list')
+endpoints.each { endpoint ->
+    if (endpoint.auth == 'ssh') {
+        def keySetting = endpoint.ssh?.privateKeyFile ?: ''
+        if (keySetting.isBlank()) throw new GradleException("endpoint ${endpoint.id} needs ssh.privateKeyFile")
+        File keyFile = new File(keySetting)
+        if (!keyFile.isAbsolute()) keyFile = remoteFile.parentFile.toPath().resolve(keySetting).normalize().toFile()
+        if (!keyFile.isFile()) throw new GradleException("Pi Remote SSH private key file does not exist for ${endpoint.id}")
+        endpoint.ssh.privateKeyBase64 = Base64.encoder.encodeToString(keyFile.bytes)
+        endpoint.ssh.remove('privateKeyFile')
+    }
+}
+def endpointsJson = groovy.json.JsonOutput.toJson(endpoints)
 def javaString = { value -> '"' + value.replace('\\', '\\\\').replace('"', '\\"') + '"' }
 def packageConfig = new JsonSlurper().parse(rootProject.file('../package.json'))
 def capacitorConfig = new JsonSlurper().parse(rootProject.file('../capacitor.config.json'))
@@ -41,17 +52,7 @@ android {
         versionCode 97
         versionName versionNameValue
         testInstrumentationRunner "androidx.test.runner.AndroidJUnitRunner"
-        buildConfigField "String", "LOCAL_SERVER_URL", javaString(localUrl)
-        buildConfigField "String", "CONVERGE_SERVER_URL", javaString(convergeUrl)
-        buildConfigField "String", "CONVERGE_AUTH", javaString(convergeAuth)
-        buildConfigField "String", "CONVERGE_SSH_HOST", javaString(convergeSshHost)
-        buildConfigField "int", "CONVERGE_SSH_PORT", convergeSshPort
-        buildConfigField "String", "CONVERGE_SSH_USER", javaString(convergeSshUser)
-        buildConfigField "String", "CONVERGE_SSH_PRIVATE_KEY_BASE64", javaString(convergeSshPrivateKey)
-        buildConfigField "String", "CONVERGE_SSH_HOST_KEY", javaString(convergeSshHostKey)
-        buildConfigField "int", "CONVERGE_SSH_LOCAL_PORT", convergeSshLocalPort
-        buildConfigField "String", "CONVERGE_SSH_REMOTE_HOST", javaString(convergeSshRemoteHost)
-        buildConfigField "int", "CONVERGE_SSH_REMOTE_PORT", convergeSshRemotePort
+        buildConfigField "String", "ENDPOINTS", javaString(endpointsJson)
         aaptOptions {
              // Files and dirs to omit from the packaged assets dir, modified to accommodate modern web apps.
              // Default: https://android.googlesource.com/platform/frameworks/base/+/282e181b58cf72b6ca770dc7ca5f91f135444502/tools/aapt/AaptAssets.cpp#61

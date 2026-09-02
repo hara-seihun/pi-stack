@@ -27,9 +27,9 @@ The two current environments are:
 
 Both hosts run the same front door and one supervisor per person. A person's registry file says whether her folder is encrypted; the front door starts an open person's supervisor at boot and an encrypted person's when her key arrives.
 
-Kenan knows how to reach both endpoints because it cannot discover a server before choosing one. It verifies the reported ID before sending ordinary requests. A connection aimed at the wrong server fails instead of mixing state.
+Kenan's build carries the list of endpoints it can reach because it cannot discover a server before choosing one; the browser client asks the host that served it. It verifies the reported ID before sending ordinary requests. A connection aimed at the wrong server fails instead of mixing state.
 
-An endpoint can use direct network access or an SSH local-forward. Local uses its existing Tailscale Serve URL. Converge binds Pi Remote to loopback and accepts only the app's restricted SSH identity, which may forward to that listener but cannot open a shell or reach another port. Ignored local properties supply the Converge SSH host, pinned host key, user, and owner-only private-key path. The build embeds that key in the app artifact.
+An endpoint can use direct network access or an SSH local-forward. Local uses its existing Tailscale Serve URL. Converge binds Pi Remote to loopback and accepts only the app's restricted SSH identity, which may forward to that listener but cannot open a shell or reach another port. An ignored endpoint declaration supplies each SSH endpoint's host, pinned host key, user, and owner-only private-key path. The build embeds that key in the app artifact.
 
 ## Kenan state
 

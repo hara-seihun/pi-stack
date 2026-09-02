@@ -12,20 +12,28 @@ import { API } from "./api.js";
   if (!nativePlatform && !browserPlatform) return;
 
   const browserFetch = window.fetch.bind(window);
-  const browserEnvironments = [
-    { id: "local", name: "Local", baseUrl: "", requiresUnlock: false },
-    { id: "converge", name: "Converge", baseUrl: "/dev-converge", requiresUnlock: false },
-  ];
-  const browserSnapshot = (id) => {
-    const selected = browserEnvironments.find((environment) => environment.id === id);
-    if (!selected) throw new Error(`Unknown Pi Remote environment: ${id}`);
-    return { ...selected, requiresPreparation: false, environments: browserEnvironments.map(({ id, name }) => ({ id, name })) };
+  // The host this page came from says which environments it can reach and by
+  // which path prefix; the page hardcodes none of them.
+  let browserEnvironments = null;
+  async function loadBrowserEnvironments() {
+    if (browserEnvironments) return browserEnvironments;
+    const response = await browserFetch(API.environments.path(), { cache: "no-store" });
+    if (!response.ok) throw new Error(`Environment list returned HTTP ${response.status}`);
+    const { environments } = await response.json();
+    browserEnvironments = environments.map((environment) => ({ ...environment, requiresUnlock: false }));
+    return browserEnvironments;
+  }
+  const browserSnapshot = async (id) => {
+    const environments = await loadBrowserEnvironments();
+    const selected = environments.find((environment) => environment.id === id) ?? environments[0];
+    return { ...selected, requiresPreparation: false, environments: environments.map(({ id, name }) => ({ id, name })) };
   };
   const browserRemote = {
-    getState: async () => browserSnapshot(localStorage.getItem("kenan-environment") || "local"),
+    getState: async () => browserSnapshot(localStorage.getItem("kenan-environment") || ""),
     prepare: async () => {},
     select: async ({ id }) => {
-      const selected = browserSnapshot(id);
+      const selected = await browserSnapshot(id);
+      if (selected.id !== id) throw new Error(`Unknown Pi Remote environment: ${id}`);
       const response = await browserFetch(`${selected.baseUrl}${API.health.path()}`, { cache: "no-store" });
       if (!response.ok) throw new Error(`${selected.name} returned HTTP ${response.status}`);
       localStorage.setItem("kenan-environment", id);

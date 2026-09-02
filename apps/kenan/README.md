@@ -4,23 +4,31 @@ Kenan is the Android client for Pi Remote. Its package id is `works.kenan.piremo
 
 The browser and Android app have one interface source: [`../remote/web`](../remote/web). `build.mjs` copies those files into Capacitor's generated assets. Do not edit `dist` or `android/app/src/main/assets/public`; both are generated.
 
-The native layer keeps the WebView below Android's system bars, translates touches into system haptics, remembers the selected environment, opens the pinned Converge SSH forward, and tells the shared client which endpoint owns each API call. Synchronization, context rendering, the drawer, composer, uploads, voice, files, and settings run from the same JavaScript and CSS as the browser. The launcher artwork comes from the native Kenan implementation this app replaced.
+The native layer keeps the WebView below Android's system bars, translates touches into system haptics, remembers the selected environment, opens a pinned SSH forward for endpoints that need one, and tells the shared client which endpoint owns each API call. Synchronization, context rendering, the drawer, composer, uploads, voice, files, and settings run from the same JavaScript and CSS as the browser. The launcher artwork comes from the native Kenan implementation this app replaced.
 
 ## Build configuration
 
-Ignored [`android/local.properties`](android/local.properties) supplies endpoint URLs and Converge SSH credentials. The build requires Android SDK 36 and Java 21.
+Ignored [`android/local.properties`](android/local.properties) names the endpoint declaration, a JSON list of every host the app may switch among. The build requires Android SDK 36 and Java 21.
 
 ```properties
-piRemoteLocalUrl=https://local-pi-remote.example.ts.net
-piRemoteConvergeAuth=ssh
-piRemoteConvergeSshHost=converge.example.net
-piRemoteConvergeSshPort=22
-piRemoteConvergeSshUser=pi-remote-android
-piRemoteConvergeSshPrivateKeyFile=/owner-only/path/to/android-converge-key
-piRemoteConvergeSshHostKey=ecdsa-sha2-nistp256 <base64-encoded host key>
-piRemoteConvergeSshLocalPort=8789
-piRemoteConvergeSshRemoteHost=127.0.0.1
-piRemoteConvergeSshRemotePort=8788
+piRemoteEndpointsFile=/owner-only/path/to/endpoints.json
+```
+
+A direct endpoint is a URL. An SSH endpoint names a restricted forwarding identity; the build reads the private key file and embeds it, and the app pins the host key and opens only the declared forward. The first entry is the default. Add a host by adding an entry; nothing in the Java layer names a particular machine.
+
+```json
+[
+  { "id": "local", "name": "Local", "auth": "direct", "url": "https://local-pi-remote.example.ts.net", "requiresUnlock": true },
+  {
+    "id": "converge", "name": "Converge", "auth": "ssh", "requiresUnlock": false,
+    "ssh": {
+      "host": "converge.example.net", "port": 22, "user": "pi-remote-android",
+      "privateKeyFile": "/owner-only/path/to/android-converge-key",
+      "hostKey": "ecdsa-sha2-nistp256 <base64-encoded host key>",
+      "localPort": 8789, "remoteHost": "127.0.0.1", "remotePort": 8788
+    }
+  }
+]
 ```
 
 Build and test with:
