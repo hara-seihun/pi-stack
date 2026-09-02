@@ -12,7 +12,7 @@ The default ceiling depends on who is watching. A session with a UI attached (`c
 
 The extension adds the rule to the system prompt once and checks every bash tool call before execution. A long job must become faster, split into bounded foreground work, or transfer to a durable service that owns its result.
 
-Host timers run `sweep USER` every five seconds against the fleet account only. It kills a command carrying `PI_SESSION_ID` after age 50, which catches commands started by an older session or hidden behind another process. The tool timeout normally acts first at 55 seconds. Interactive sessions run as their human's account, which the sweep never touches, so their longer commands survive.
+Host timers run `sweep` every five seconds. It kills a command carrying `PI_SESSION_ID` after age 50 when the process lives in a `pi-orchestrator-run-*` unit, which catches commands started by an older fleet session or hidden behind another process. The tool timeout normally acts first at 55 seconds. Interactive sessions live in their person's Pi Remote unit, not a fleet run unit, so their longer commands survive even when the same account runs the fleet.
 
 ## Test
 

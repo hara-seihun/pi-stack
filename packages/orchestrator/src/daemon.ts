@@ -36,6 +36,14 @@ export class Daemon {
   }
 
   async start():Promise<void>{
+    // Workers are transient units in this account's own user manager. A system
+    // unit with User= does not point systemctl at that manager, so derive the
+    // runtime directory from the real uid when the environment does not say.
+    const uid=process.getuid?.();
+    if(uid!==undefined){
+      process.env.XDG_RUNTIME_DIR??=`/run/user/${uid}`;
+      process.env.DBUS_SESSION_BUS_ADDRESS??=`unix:path=${process.env.XDG_RUNTIME_DIR}/bus`;
+    }
     await this.loadManifest();
     this.recoverWorkers();
     const server=createServer((req,res)=>void this.request(req,res));

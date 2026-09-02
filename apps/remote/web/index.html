@@ -14,6 +14,7 @@
   <script src="/vendor/katex.min.js" defer></script>
   <script src="/vendor/texmath.js" defer></script>
   <script src="/vendor/pi-markdown-compat.js" defer></script>
+  <script src="/person.js"></script>
   <script type="module" src="/native.js"></script>
   <script src="/sync.js" defer></script>
   <script type="module" src="/app.js"></script>
@@ -123,8 +124,14 @@
       <form id="unlock-form" class="unlock-form">
         <h2 id="unlock-title">Unlock your folder</h2>
         <p id="unlock-explanation">Your threads and your private folder are encrypted on the machine. This key stays on this device and opens them for as long as your agents are running.</p>
-        <label for="unlock-key">Key</label>
-        <input id="unlock-key" type="password" autocomplete="current-password" spellcheck="false" required>
+        <div id="unlock-person-field" class="unlock-field" hidden>
+          <label for="unlock-person">Person</label>
+          <select id="unlock-person"></select>
+        </div>
+        <div id="unlock-key-field" class="unlock-field">
+          <label for="unlock-key">Key</label>
+          <input id="unlock-key" type="password" autocomplete="current-password" spellcheck="false" required>
+        </div>
         <p id="unlock-error" class="unlock-error" hidden></p>
         <div class="unlock-actions">
           <button id="submit-unlock" class="accent" type="submit">Unlock</button>

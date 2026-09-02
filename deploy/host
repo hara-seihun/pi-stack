@@ -1,48 +1,61 @@
 #!/usr/bin/env bash
+# Deploy the checked-out Pi stack commit to this machine.
+#
+#   deploy/host [HOST_FILE]     defaults to /etc/pi-stack/host.json
+#
+# The host file names the account that runs the fleet daemon and any packages
+# and skills this machine adds for every person. Persons come from Pi Remote's
+# registry under /var/lib/pi-remote/persons. Everything else is the same on
+# every host: one runtime under /srv/pi, one orchestrator, one Pi Remote, the
+# tools, the skills, and each account's Pi settings and command links.
 set -euo pipefail
 
 root=$(cd "$(dirname "$0")/.." && pwd)
 source "$root/deploy/lib"
 pi_stack_enter_deployment "$0" "$root" "$@"
-
-role=${1:-}
-[[ $role == converge ]] || { echo "usage: deploy/host converge" >&2; exit 64; }
-
-user_systemctl() {
-  XDG_RUNTIME_DIR=${XDG_RUNTIME_DIR:-/run/user/$(id -u)} \
-    DBUS_SESSION_BUS_ADDRESS=${DBUS_SESSION_BUS_ADDRESS:-unix:path=/run/user/$(id -u)/bus} \
-    systemctl --user "$@"
-}
+export PI_STACK_HOST_FILE=${1:-$(pi_stack_host_file)}
+[[ -f $PI_STACK_HOST_FILE ]] || { echo "usage: deploy/host [HOST_FILE]; $PI_STACK_HOST_FILE does not exist" >&2; exit 64; }
+jq -e '.version == 1' "$PI_STACK_HOST_FILE" >/dev/null || { echo "$PI_STACK_HOST_FILE must declare version 1" >&2; exit 64; }
 
 pi_stack_prepare_dependencies "$root"
 expected=$(git -C "$root" rev-parse HEAD)
+runtime=${PI_STACK_RUNTIME_DEST:-/srv/pi/runtime}
 orchestrator=${PI_STACK_ORCHESTRATOR_DEST:-/srv/pi/pi-orchestrator}
 remote=${PI_STACK_REMOTE_DEST:-/srv/pi/pi-remote}
+skills=${PI_STACK_SKILLS_DEST:-/srv/pi/skills}
+tools=${PI_STACK_TOOLS_DEST:-/srv/pi/tools}
+fleet=$(pi_stack_fleet_user)
 previous_remote=""
 [[ ! -f $remote/.pi-stack-commit ]] || previous_remote=$(<"$remote/.pi-stack-commit")
+mapfile -t users < <(pi_stack_users)
+(( ${#users[@]} > 0 )) || { echo "no Pi accounts: set fleetUser in $PI_STACK_HOST_FILE or add a person with pi-remote person add" >&2; exit 64; }
 
 "$root/deploy/runtime"
 "$root/deploy/orchestrator"
 "$root/deploy/remote"
-"$root/deploy/tools" converge
-"$root/deploy/skills" converge-user
-"$root/deploy/settings" converge-user
+"$root/deploy/tools"
+for user in "${users[@]}"; do
+  "$root/deploy/skills" "$user"
+  "$root/deploy/settings" "$user"
+done
 
-for artifact in \
-  "${PI_STACK_RUNTIME_ROOT:-$HOME/.local/share/pi-runtime}" \
-  "$orchestrator" \
-  "$remote" \
-  "${PI_STACK_SKILLS_DEST:-/srv/pi/skills}" \
-  "${PI_STACK_TOOLS_DEST:-/srv/pi/tools}"; do
+for artifact in "$runtime" "$orchestrator" "$remote" "$skills" "$tools"; do
   [[ -f $artifact/.pi-stack-commit && $(<"$artifact/.pi-stack-commit") == "$expected" ]] || {
     echo "$artifact does not carry Pi stack $expected" >&2
     exit 1
   }
 done
 
-user_systemctl try-restart pi-orchestrator.service 2>/dev/null || true
-remote_service=${PI_REMOTE_SERVICE:-pi-remote.service}
-if [[ $previous_remote != "$expected" ]] && systemctl is-active --quiet "$remote_service"; then
-  PI_REMOTE_SERVICE=$remote_service "$root/apps/remote/activate"
+# The daemon restarts on every release; live workers keep the release they
+# recorded. The router restarts only when Pi Remote changed, and each running
+# supervisor is then handed the new release without ending active turns.
+if [[ -n $fleet ]]; then
+  pi_stack_as_root systemctl try-restart "pi-orchestrator@$fleet.service" 2>/dev/null || true
 fi
-printf 'deployed and activated Pi stack %s for Converge\n' "$expected"
+if [[ $previous_remote != "$expected" ]]; then
+  pi_stack_as_root systemctl try-restart pi-remote-router.service 2>/dev/null || true
+  while read -r service _; do
+    [[ -n $service ]] && PI_REMOTE_SERVICE=$service "$root/apps/remote/activate"
+  done < <(systemctl list-units 'pi-remote@*.service' --type=service --state=active --legend=no --plain --no-pager 2>/dev/null)
+fi
+printf 'deployed Pi stack %s for %s\n' "$expected" "${users[*]}"

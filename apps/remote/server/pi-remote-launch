@@ -1,5 +1,6 @@
 #!/usr/bin/env bash
-# Mount this person's folder, then become her supervisor.
+# Mount this person's folder if she has an encrypted one, then become her
+# supervisor.
 #
 # The unit runs with PrivateMounts=yes, so this whole script is already inside a
 # mount namespace of its own with private propagation. The mount below is
@@ -9,9 +10,7 @@
 # plaintext view goes with it.
 set -euo pipefail
 
-: "${PI_REMOTE_CIPHER_DIR:?ciphertext directory required}"
-: "${PI_REMOTE_PRIVATE_DIR:?mountpoint required}"
-: "${CREDENTIALS_DIRECTORY:?systemd credentials required}"
+: "${PI_REMOTE_CONFIG:?person file required}"
 
 # This is a system service with User=, so systemd's %U is the system manager's
 # UID (root), not this process's UID. Derive the user runtime directory here;
@@ -21,17 +20,21 @@ runtime_dir="/run/user/$(id -u)"
 export XDG_RUNTIME_DIR="$runtime_dir"
 export DBUS_SESSION_BUS_ADDRESS="unix:path=$runtime_dir/bus"
 
-key="$CREDENTIALS_DIRECTORY/key"
-[[ -r $key ]] || { echo "no key credential" >&2; exit 78; }
+cipher_dir=$(jq -r '.unlock.cipherDir // empty' "$PI_REMOTE_CONFIG")
+mountpoint_dir=$(jq -r '.unlock.mountpoint // empty' "$PI_REMOTE_CONFIG")
 
-mkdir -p -- "$PI_REMOTE_PRIVATE_DIR"
-
-if ! mountpoint -q -- "$PI_REMOTE_PRIVATE_DIR"; then
-  # gocryptfs forks a daemon that stays in this namespace and this cgroup, so
-  # the unit owns it and KillMode=control-group takes it down with everything
-  # else. A wrong key fails here and the unit never starts, which is what tells
-  # the router to report the key as wrong rather than serving an empty folder.
-  gocryptfs -q -passfile "$key" -- "$PI_REMOTE_CIPHER_DIR" "$PI_REMOTE_PRIVATE_DIR"
+if [[ -n $cipher_dir ]]; then
+  key="${CREDENTIALS_DIRECTORY:?systemd credentials required}/key"
+  [[ -s $key ]] || { echo "no key credential for $cipher_dir" >&2; exit 78; }
+  mkdir -p -- "$mountpoint_dir"
+  if ! mountpoint -q -- "$mountpoint_dir"; then
+    # gocryptfs forks a daemon that stays in this namespace and this cgroup, so
+    # the unit owns it and KillMode=control-group takes it down with everything
+    # else. A wrong key fails here and the unit never starts, which is what
+    # tells the front door to report the key as wrong rather than serving an
+    # empty folder.
+    gocryptfs -q -passfile "$key" -- "$cipher_dir" "$mountpoint_dir"
+  fi
 fi
 
 exec "$(dirname "$0")/pi-remote-supervise" "$@"

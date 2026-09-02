@@ -111,31 +111,6 @@ test("a changed installed lock invalidates the dependency receipt", () => {
   }
 });
 
-test("a candidate orchestrator validates the installed task manifest before publication", () => {
-  const directory = mkdtempSync(join(tmpdir(), "pi-stack-manifest-preflight-"));
-  try {
-    const loader = join(directory, "task-manifest.mjs");
-    const manifest = join(directory, "tasks.json");
-    writeFileSync(loader, `
-import { readFileSync } from "node:fs";
-export function loadTaskManifest(path) {
-  const document = JSON.parse(readFileSync(path, "utf8"));
-  if (document.retiredField) throw new Error("unknown task manifest field retiredField");
-}
-`);
-    writeFileSync(manifest, '{"retiredField":true}\n');
-    const invalid = spawnSync("bash", ["-c", 'source "$1"; pi_stack_validate_task_manifest "$2" "$3"', "manifest-preflight-test", helper, loader, manifest], { encoding: "utf8" });
-    assert.notEqual(invalid.status, 0);
-    assert.match(invalid.stderr, /unknown task manifest field retiredField/);
-
-    writeFileSync(manifest, '{}\n');
-    const valid = spawnSync("bash", ["-c", 'source "$1"; pi_stack_validate_task_manifest "$2" "$3"', "manifest-preflight-test", helper, loader, manifest], { encoding: "utf8" });
-    assert.equal(valid.status, 0, valid.stderr);
-  } finally {
-    rmSync(directory, { recursive: true, force: true });
-  }
-});
-
 test("every deployment process ends before the machine-wide ceiling", () => {
   const directory = mkdtempSync(join(tmpdir(), "pi-stack-deadline-"));
   try {
@@ -232,26 +207,33 @@ test("component publication atomically replaces directories and symlinks", () =>
   }
 });
 
-test("the Converge host restarts only the daemon and activates a changed Pi Remote", () => {
+test("the host deployment restarts the daemon and activates a changed Pi Remote", () => {
   const directory = mkdtempSync(join(tmpdir(), "pi-stack-host-current-"));
   try {
     const repository = join(directory, "repo"), deploy = join(repository, "deploy"), remoteApp = join(repository, "apps", "remote"), bin = join(directory, "bin");
     mkdirSync(deploy, { recursive: true });mkdirSync(remoteApp, { recursive: true });mkdirSync(bin);
     copyFileSync(join(root, "deploy", "host"), join(deploy, "host"));chmodSync(join(deploy, "host"), 0o755);
-    writeFileSync(join(deploy, "lib"), `pi_stack_enter_deployment() { :; }\npi_stack_prepare_dependencies() { :; }\npi_stack_as_root() { "$@"; }\n`);
-    const component=`#!/usr/bin/env bash\nset -euo pipefail\nname=$(basename "$0")\ncase "$name" in runtime) destination=$PI_STACK_RUNTIME_ROOT;; orchestrator) destination=$PI_STACK_ORCHESTRATOR_DEST;; remote) destination=$PI_STACK_REMOTE_DEST;; tools) destination=$PI_STACK_TOOLS_DEST;; skills) destination=$PI_STACK_SKILLS_DEST;; settings) exit 0;; esac\nmkdir -p "$destination/dist"\ngit -C "$(cd "$(dirname "$0")/.." && pwd)" rev-parse HEAD > "$destination/.pi-stack-commit"\n`;
+    writeFileSync(join(deploy, "lib"), `${readFileSync(join(root, "deploy", "lib"), "utf8")}\npi_stack_prepare_dependencies() { :; }\n`);
+    const component=`#!/usr/bin/env bash\nset -euo pipefail\nname=$(basename "$0")\ncase "$name" in runtime) destination=$PI_STACK_RUNTIME_DEST;; orchestrator) destination=$PI_STACK_ORCHESTRATOR_DEST;; remote) destination=$PI_STACK_REMOTE_DEST;; tools) destination=$PI_STACK_TOOLS_DEST;; skills) destination=$PI_STACK_SKILLS_DEST;; settings) printf '%s\\n' "$1" >> "$SETTINGS_TRACE"; exit 0;; esac\nmkdir -p "$destination/dist"\ngit -C "$(cd "$(dirname "$0")/.." && pwd)" rev-parse HEAD > "$destination/.pi-stack-commit"\n`;
     for(const name of ["runtime","orchestrator","remote","tools","skills","settings"]){writeFileSync(join(deploy,name),component);chmodSync(join(deploy,name),0o755);}
     writeFileSync(join(remoteApp,"activate"),"#!/bin/sh\nprintf '%s\\n' \"${PI_REMOTE_SERVICE:-}\" >> \"$ACTIVATE_TRACE\"\n");chmodSync(join(remoteApp,"activate"),0o755);
     assert.equal(spawnSync("git",["init","-q",repository]).status,0);assert.equal(spawnSync("git",["-C",repository,"add","deploy","apps"]).status,0);assert.equal(spawnSync("git",["-C",repository,"-c","user.name=test","-c","user.email=test@example.test","commit","-qm","fixture"]).status,0);
-    const destinations=Object.fromEntries(["RUNTIME","ORCHESTRATOR","REMOTE","TOOLS","SKILLS"].map((name)=>[`PI_STACK_${name}_DEST`,join(directory,name.toLowerCase())]));destinations.PI_STACK_RUNTIME_ROOT=destinations.PI_STACK_RUNTIME_DEST;delete destinations.PI_STACK_RUNTIME_DEST;
-    const activationTrace=join(directory,"activation.trace"),systemctlTrace=join(directory,"systemctl.trace");
-    writeFileSync(join(bin,"systemctl"),"#!/bin/sh\nprintf '%s\\n' \"$*\" >> \"$SYSTEMCTL_TRACE\"\ncase $1 in --user|is-active|stop|start|try-restart) exit 0;; *) exit 1;; esac\n");chmodSync(join(bin,"systemctl"),0o755);
-    const env={...process.env,...destinations,PATH:`${bin}:${process.env.PATH}`,ACTIVATE_TRACE:activationTrace,SYSTEMCTL_TRACE:systemctlTrace};
-    const first=spawnSync(join(deploy,"host"),["converge"],{encoding:"utf8",env});assert.equal(first.status,0,first.stderr);
-    const firstUnits=readFileSync(systemctlTrace,"utf8");assert.match(firstUnits,/--user try-restart pi-orchestrator\.service/);assert.doesNotMatch(firstUnits,/ stop | start /);assert.equal(readFileSync(activationTrace,"utf8"),"pi-remote.service\n");
+    const destinations=Object.fromEntries(["RUNTIME","ORCHESTRATOR","REMOTE","TOOLS","SKILLS"].map((name)=>[`PI_STACK_${name}_DEST`,join(directory,name.toLowerCase())]));
+    const user=process.env.USER??spawnSync("id",["-un"],{encoding:"utf8"}).stdout.trim();
+    const hostFile=join(directory,"host.json");writeFileSync(hostFile,JSON.stringify({version:1,fleetUser:user}));
+    const personsDir=join(directory,"persons");mkdirSync(personsDir);writeFileSync(join(personsDir,"guest.json"),JSON.stringify({version:1,user:"guest-person",displayName:"Guest",port:18799,environment:{}}));
+    const activationTrace=join(directory,"activation.trace"),systemctlTrace=join(directory,"systemctl.trace"),settingsTrace=join(directory,"settings.trace");
+    writeFileSync(join(bin,"systemctl"),"#!/bin/sh\nprintf '%s\\n' \"$*\" >> \"$SYSTEMCTL_TRACE\"\ncase $1 in list-units) echo 'pi-remote@alice.service loaded active running';; esac\nexit 0\n");chmodSync(join(bin,"systemctl"),0o755);
+    const env={...process.env,...destinations,PATH:`${bin}:${process.env.PATH}`,ACTIVATE_TRACE:activationTrace,SYSTEMCTL_TRACE:systemctlTrace,SETTINGS_TRACE:settingsTrace,PI_REMOTE_PERSONS_DIR:personsDir,PI_STACK_DEPLOY_NO_SUDO:"1",PI_STACK_ALLOW_DIRTY:"1"};
+    const first=spawnSync(join(deploy,"host"),[hostFile],{encoding:"utf8",env});assert.equal(first.status,0,first.stderr);
+    const firstUnits=readFileSync(systemctlTrace,"utf8");
+    assert.match(firstUnits,new RegExp(`try-restart pi-orchestrator@${user}\\.service`));assert.match(firstUnits,/try-restart pi-remote-router\.service/);
+    assert.equal(readFileSync(activationTrace,"utf8"),"pi-remote@alice.service\n");
+    assert.equal(readFileSync(settingsTrace,"utf8"),`${user}\nguest-person\n`);
     rmSync(systemctlTrace,{force:true});
-    const unchanged=spawnSync(join(deploy,"host"),["converge"],{encoding:"utf8",env});assert.equal(unchanged.status,0,unchanged.stderr);
-    assert.equal(readFileSync(activationTrace,"utf8"),"pi-remote.service\n");assert.match(readFileSync(systemctlTrace,"utf8"),/--user try-restart pi-orchestrator\.service/);
+    const unchanged=spawnSync(join(deploy,"host"),[hostFile],{encoding:"utf8",env});assert.equal(unchanged.status,0,unchanged.stderr);
+    assert.equal(readFileSync(activationTrace,"utf8"),"pi-remote@alice.service\n");
+    const again=readFileSync(systemctlTrace,"utf8");assert.match(again,/try-restart pi-orchestrator@/);assert.doesNotMatch(again,/pi-remote-router/);
   } finally { rmSync(directory,{recursive:true,force:true}); }
 });
 

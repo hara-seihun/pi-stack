@@ -217,6 +217,8 @@ button:focus-visible, input:focus-visible, textarea:focus-visible, select:focus-
 .unlock-dialog::backdrop { background: rgb(0 0 0 / 82%); }
 .unlock-form { display: flex; flex-direction: column; gap: 10px; padding: 20px; }
 .unlock-form h2 { margin: 0; font-size: 17px; }
+.unlock-field { display: flex; flex-direction: column; gap: 6px; }
+.unlock-field select { font: inherit; padding: 8px 10px; color: var(--text); background: var(--surface-2, var(--surface)); border: 1px solid var(--border); border-radius: 8px; }
 .unlock-form p { margin: 0; font-size: 13px; color: var(--muted); line-height: 1.45; }
 .unlock-form label { font-size: 12px; color: var(--muted); }
 .unlock-form input { padding: 9px 10px; font: inherit; color: var(--text); background: var(--surface-2, #17191d); border: 1px solid var(--border); border-radius: 8px; }

@@ -1,39 +1,59 @@
 # Deployment
 
-One reviewed commit goes to GMKtec and Converge. A host may build only what it runs, but it may not combine components from different commits.
+One reviewed commit goes to every host with one command:
 
-## Source and state
+```bash
+cd /home/kenan/projects/pi-stack && git pull --ff-only && deploy/host
+```
 
-Both hosts check out this private repository at `/home/kenan/projects/pi-stack` through an authenticated HTTPS remote. A host that cannot run `git fetch --dry-run origin` cannot deploy. Build output goes under `/srv/pi`; services never execute a mutable checkout they cannot read.
+`deploy/host` reads `/etc/pi-stack/host.json`, refuses a dirty checkout, holds one lock on the checkout, and must finish inside 50 seconds. Every artifact it publishes carries the commit in a `.pi-stack-commit` file; the deployed commit on a host is whatever `/srv/pi/pi-remote/.pi-stack-commit` says.
 
-Host repositories own:
+## What a host provides
 
-- systemd units and service users;
-- endpoint URLs and ports;
-- Pi Remote profiles and workspaces;
-- endpoint network access and SSH forwarding identities;
-- account configuration and credentials;
-- authoritative task manifests and their prompt/probe files;
-- mutable ledgers, sessions, uploads, and encrypted folders.
+The stack is the same on every machine. A host supplies three things.
 
-A host points Orchestrator's operator config at its version-2 lane manifest. The daemon rereads the file when it changes and replaces its lane declarations atomically, so replacing a host does not depend on remembered commands and a removed lane cannot linger in SQLite. Pause and boost controls remain mutable ledger state.
+**Unix accounts.** One for each person who uses Pi Remote, and one that runs the fleet daemon. The fleet account is ordinarily a person too.
 
-This repository owns build commands, package and skill roles, API contracts, and component tests. CI runs the complete check before publication. Its dedicated self-hosted runner keeps a private checkout across runner and machine restarts. Every event resets tracked source, removes generated output other than dependency trees, and uses `pi_stack_prepare_dependencies` to prove the installed lock before reuse. An absent or mismatched tree gets a clean install. Deployment builds the two compiled packages and does not repeat tests that already passed on the immutable commit.
+**The host file** at `/etc/pi-stack/host.json`:
 
-`deploy/runtime`, `deploy/orchestrator`, `deploy/remote`, `deploy/tools`, and `deploy/skills` publish commit-addressed releases. Runtime owns one lockfile-addressed production dependency tree under `/srv/pi/dependencies`. Runtime, Orchestrator, and tools link that tree instead of copying hundreds of megabytes. Component destinations switch to complete releases with an atomic filesystem exchange. `/srv/pi/.pi-stack-releases` retains prior component generations for processes that loaded them before the exchange.
+```json
+{
+  "version": 1,
+  "fleetUser": "kenan",
+  "packages": ["/etc/nixos/pi-agent/extensions/scratch-updates"],
+  "skills": ["/etc/nixos/pi-agent/skills/math-research"]
+}
+```
 
-Every deployment command locks its checkout before reading source. A dependency receipt avoids reinstalling an unchanged development tree and invalidates itself if npm changes the installed lock. `deploy/settings ROLE` reconciles Pi's ordered package list. The host keeps the source lock until every artifact carries the same commit. The outer deployment process has a 50-second deadline, including lock wait and all child deployments. An isolated first publication measured 6.33 seconds with a prepared development tree. A clean npm install measured 3.12 seconds. An unchanged host redeploy measured 1.06 seconds.
+`fleetUser` runs `pi-orchestrator@<user>.service`. `packages` are extra Pi packages every account loads, placed after the reviewed ones and before the Pi Remote context observer. `skills` are extra skill directories linked into every account's skill directory under their own names. Both are optional and point at paths the host owns.
+
+**systemd units.** [`deploy/systemd`](../deploy/systemd) holds reference units for `pi-remote-router.service`, `pi-remote@.service`, and `pi-orchestrator@.service`, written for a Debian host with Bun and Node under `/usr/local/bin`. A Debian host installs them as they are; a NixOS host declares the same units in its configuration. They point at stable paths under `/srv/pi`, so a release never changes them.
+
+Persons are not in the host file. They are Pi Remote's registry, `/var/lib/pi-remote/persons/<user>.json`, created with `pi-remote person add`. See [the Pi Remote README](../apps/remote/README.md#persons).
+
+## What deploy/host does
+
+1. Installs the dependency tree once per lockfile under `/srv/pi/dependencies`. Runtime, Orchestrator, and tools link that tree instead of copying it.
+2. Publishes commit-addressed releases of the runtime (`/srv/pi/runtime`: Pi, `agent-browser`, and the runtime extensions), the Orchestrator, Pi Remote, the tools, and the skills. Each destination is a symlink switched atomically; prior generations stay under `/srv/pi/.pi-stack-releases` for processes that loaded them.
+3. For every account (each person plus the fleet user): links `pi`, `agent-browser`, `pi-orchestrator`, `pi-remote`, and every tool command into `~/.local/bin`; links the reviewed skills and the host's skills into `~/.pi/agent/skills`; rewrites the `packages` list in `~/.pi/agent/settings.json` under Pi's own lock, installs the pinned npm packages, and writes the VCC policy and custom model catalog.
+4. Restarts the fleet daemon. Live workers keep the release they recorded in their run row.
+5. If Pi Remote changed, restarts the front door and hands each running supervisor the new release. Active Pi turns keep their process and stream; the replacement supervisor adopts them and replaces each runtime after it settles.
+
+An unchanged host redeploy takes about a second. A clean dependency install takes a few seconds.
 
 ## Build checks
 
 ```bash
-cd /home/kenan/projects/pi-stack
 npm ci --ignore-scripts
 npm run check
 npm run android:test --workspace=kenan
 ```
 
-Kenan reads endpoint access from `apps/kenan/android/local.properties`. A direct endpoint needs only its URL. An SSH endpoint uses a loopback URL created by the app and requires its forwarding identity:
+CI runs the same gate from a persistent self-hosted checkout. Deployment does not repeat tests that already passed on the commit.
+
+## Kenan
+
+The Android app embeds endpoint access from `apps/kenan/android/local.properties`, which is not committed:
 
 ```properties
 piRemoteLocalUrl=https://gmktec.example-tailnet.ts.net
@@ -48,51 +68,12 @@ piRemoteConvergeSshRemoteHost=127.0.0.1
 piRemoteConvergeSshRemotePort=8788
 ```
 
-Hostnames and credentials belong in machine-local configuration, not documentation or source. The SSH account must allow local forwarding only to the configured Pi Remote port.
-
-`deploy/remote` publishes without ending active work. Host deployment calls `apps/remote/activate` after every changed Pi Remote release. You can run it directly to repeat activation. It switches the supervisor to the selected release immediately. The systemd service keeps a small launcher as its main process. Each Pi RPC child runs behind a runtime host in the same encrypted mount namespace and service cgroup. During activation, the old supervisor writes its runtime state, disconnects from those hosts, and exits. The launcher starts the selected supervisor, which reconnects to every host before serving requests. Active turns keep their process, stream, and RPC state. They are neither aborted nor replayed. After an adopted runtime settles, the supervisor replaces it before its next use so provider and extension changes take effect. A full service stop still kills the whole cgroup and unmounts the encrypted folder.
-
-## GMKtec
-
-The NixOS repository owns the deployment command and service definitions. It publishes:
-
-- Pi and runtime releases under `~/.local/share/pi-runtime`;
-- Orchestrator under `/srv/pi/pi-orchestrator`;
-- fleet-readable extensions, skills, providers, and shell tools under `/srv/pi`;
-- Pi Remote from `apps/remote` behind its identity router.
-
-Local Pi Remote reports environment ID `local`, requires unlock, and offers only Personal and Home after the Converge cutover.
-
-An Orchestrator update restarts the daemon and nothing else. Each admitted run is its own transient user unit that recorded the release directory it launched from, so live workers keep running on their generation while new runs start from the selected release. The candidate Orchestrator parses the host's current lane manifest before publication; an incompatible manifest fails the deployment while the selected release remains unchanged.
-
-## Converge
-
-Converge OpenTofu owns one `pi_stack_commit`. Its startup configuration clones that commit and runs the atomic host deployment:
-
-```bash
-deploy/host converge
-```
-
-The command publishes runtime, Orchestrator, Pi Remote, tools, skills, and settings while holding one source lock. It derives the deployed skill and package lists from the checked manifests. The candidate Orchestrator must parse the current lane manifest before its release can be selected. The daemon restarts; live workers finish on the release they recorded. If Pi Remote changed, it performs a live supervisor handoff before returning. The whole command must finish within 50 seconds. A timeout is a deployment failure, never permission to raise the limit.
-
-Converge Pi Remote reports environment ID `converge`. It has one profile rooted at `/home/kenan/converge` and executes Pi directly on that machine.
-
-Pi Remote listens on loopback. Kenan opens a pinned SSH connection and forwards its app-local port to that listener. A dedicated SSH account accepts the app key with forwarding restricted to `127.0.0.1:8788`; it cannot open a shell. No GCP firewall rule exposes the application port.
-
-## Environment ownership
-
-Work threads and autonomous work agents belong to Converge. Personal and Home threads belong to Local. Each Pi Remote reads only its host's orchestrator through `OrchestratorClient`; environment aggregation happens in Android, not through an SSH work bridge or a copied ledger.
+The SSH account must allow local forwarding only to the front door's port.
 
 ## Release verification
 
-A release is complete when:
-
-- `git rev-parse HEAD` matches on both hosts;
-- root checks and Android tests pass;
-- each service reports the intended environment ID;
-- Pi settings match the role in `config/package-sets.json`;
-- Pi Remote is last for roles that load it;
-- Tailscale reaches Local, the restricted SSH key reaches Converge, and GCP exposes no Pi Remote port;
-- Kenan can switch repeatedly without crossing threads, keys, voice, or downloads;
-- a migrated Work thread resumes on Converge;
-- both machine handbooks point here.
+- `/srv/pi/pi-remote/.pi-stack-commit` matches on every host;
+- `pi-remote-router.service`, each unlocked `pi-remote@<user>.service`, and `pi-orchestrator@<fleet>.service` are active;
+- `curl -H 'x-pi-remote-user: <user>' http://127.0.0.1:8788/v1/health` reports the intended environment id;
+- `pi-orchestrator status` answers;
+- Kenan can switch environments without crossing threads, keys, voice, or downloads.

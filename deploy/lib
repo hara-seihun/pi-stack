@@ -61,28 +61,60 @@ pi_stack_prepare_dependencies() {
   export PI_STACK_DEPENDENCIES_READY=$key
 }
 
-pi_stack_validate_task_manifest() {
-  local module=$1 manifest=${2:-}
-  [[ -n $manifest ]] || return
-  [[ -f $manifest ]] || {
-    echo "orchestrator task manifest does not exist: $manifest" >&2
-    return 1
-  }
-  node --input-type=module - "$module" "$manifest" <<'JS'
-import { pathToFileURL } from "node:url";
-
-const [modulePath, manifestPath] = process.argv.slice(2);
-const { loadTaskManifest } = await import(pathToFileURL(modulePath).href);
-loadTaskManifest(manifestPath);
-JS
-}
-
 pi_stack_as_root() {
   if [[ $EUID == 0 || ${PI_STACK_DEPLOY_NO_SUDO:-0} == 1 ]]; then
     "$@"
   else
     sudo -n "$@"
   fi
+}
+
+# The host file says what this machine adds to the stack: which user runs the
+# fleet daemon, and which local packages and skills every person loads besides
+# the reviewed ones. Persons themselves live in Pi Remote's registry.
+pi_stack_host_file() { printf '%s\n' "${PI_STACK_HOST_FILE:-/etc/pi-stack/host.json}"; }
+pi_stack_host_value() {
+  local file
+  file=$(pi_stack_host_file)
+  [[ -f $file ]] || { echo "Pi stack host file is missing: $file" >&2; return 1; }
+  jq -r "$1" "$file"
+}
+pi_stack_persons_dir() { printf '%s\n' "${PI_REMOTE_PERSONS_DIR:-/var/lib/pi-remote/persons}"; }
+pi_stack_fleet_user() { pi_stack_host_value '.fleetUser // empty'; }
+# Every unix account that runs Pi here: each Pi Remote person plus the fleet user.
+pi_stack_users() {
+  local dir file
+  dir=$(pi_stack_persons_dir)
+  {
+    pi_stack_fleet_user
+    if [[ -d $dir ]]; then
+      for file in "$dir"/*.json; do
+        [[ -f $file ]] && pi_stack_as_root jq -r '.user' "$file"
+      done
+    fi
+  } | awk 'NF && !seen[$0]++'
+}
+pi_stack_home() {
+  # Tests point the invoking account at a scratch home.
+  if [[ $1 == "$(id -un)" && -n ${PI_STACK_HOME_OVERRIDE:-} ]]; then printf '%s\n' "$PI_STACK_HOME_OVERRIDE"; return; fi
+  getent passwd "$1" | cut -d: -f6
+}
+# Run a command as another account with the deployment already entered, so the
+# child neither waits on the lock its parent holds nor starts a second deadline.
+pi_stack_run_as() {
+  local user=$1
+  shift
+  if [[ $user == "$(id -un)" ]]; then
+    "$@"
+    return
+  fi
+  local -a become
+  if [[ $EUID == 0 ]]; then become=(runuser -u "$user" --); else become=(sudo -n -u "$user"); fi
+  "${become[@]}" env HOME="$(pi_stack_home "$user")" \
+    PI_STACK_DEPLOY_LOCK_HELD=1 PI_STACK_DEPLOY_DEADLINE_ACTIVE=1 \
+    PI_STACK_DEPENDENCIES_READY="${PI_STACK_DEPENDENCIES_READY:-}" \
+    PI_STACK_HOST_FILE="$(pi_stack_host_file)" PI_REMOTE_PERSONS_DIR="$(pi_stack_persons_dir)" \
+    PI_STACK_DEPLOY_NO_SUDO="${PI_STACK_DEPLOY_NO_SUDO:-0}" "$@"
 }
 
 pi_stack_release_for_commit() {

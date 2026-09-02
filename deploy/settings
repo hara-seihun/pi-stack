@@ -1,65 +1,70 @@
 #!/usr/bin/env bash
+# Reconcile one account's Pi settings: the ordered package list from
+# config/packages.json with the host's own packages folded in ahead of the
+# context observer, the VCC compaction policy, the custom model catalog, and
+# the pinned npm packages.
+#
+#   deploy/settings [USER]      defaults to the invoking account
 set -euo pipefail
 
 root=$(cd "$(dirname "$0")/.." && pwd)
 source "$root/deploy/lib"
 pi_stack_enter_deployment "$0" "$root" "$@"
-role=${1:-}
-manifest="$root/config/package-sets.json"
-jq -e --arg role "$role" '.roles[$role] | type == "array"' "$manifest" >/dev/null || {
-  echo "usage: deploy/settings {gmktec-user|gmktec-fleet|converge-user}" >&2
-  exit 64
-}
-
-runtime_root=${PI_STACK_RUNTIME_ROOT:-$HOME/.local/share/pi-runtime}
+user=${1:-$(id -un)}
+if [[ $user != "$(id -un)" ]]; then
+  pi_stack_run_as "$user" "$0" "$user"
+  exit
+fi
+manifest="$root/config/packages.json"
+runtime=${PI_STACK_RUNTIME_DEST:-/srv/pi/runtime}
 orchestrator=${PI_STACK_ORCHESTRATOR_DEST:-/srv/pi/pi-orchestrator}
 remote=${PI_STACK_REMOTE_DEST:-/srv/pi/pi-remote}
-agent_dir=${PI_AGENT_DIR:-${PI_CODING_AGENT_DIR:-$HOME/.pi/agent}}
-settings=${PI_STACK_SETTINGS_PATH:-$agent_dir/settings.json}
-lockfile_module="$runtime_root/current/node_modules/@earendil-works/pi-coding-agent/node_modules/proper-lockfile/index.js"
+# The invoking process may itself be a Pi session carrying PI_AGENT_DIR for
+# some other account; the settings being reconciled belong to this user's home.
+agent_dir=$(pi_stack_home "$user")/.pi/agent
+settings=$agent_dir/settings.json
+lockfile_module="$runtime/node_modules/@earendil-works/pi-coding-agent/node_modules/proper-lockfile/index.js"
 [[ -f $lockfile_module ]] || { echo "deploy Pi Runtime before settings" >&2; exit 66; }
 install -d -m 700 "$agent_dir"
 if [[ ! -e $settings ]]; then
   printf '{}\n' > "$settings"
   chmod 600 "$settings"
 fi
+host_packages="[]"
+if [[ -f $(pi_stack_host_file) ]]; then
+  host_packages=$(pi_stack_host_value '[.packages[]? // empty]' | jq -c .)
+fi
 
-PI_STACK_ROOT="$root" \
-PI_STACK_ROLE="$role" \
 PI_STACK_MANIFEST="$manifest" \
+PI_STACK_HOST_PACKAGES="$host_packages" \
 PI_STACK_SETTINGS="$settings" \
 PI_STACK_LOCKFILE_MODULE="$lockfile_module" \
-PI_STACK_RUNTIME_CURRENT="$runtime_root/current" \
-PI_STACK_ORCHESTRATOR_PACKAGE="$orchestrator" \
-PI_STACK_REMOTE_PACKAGE="$remote" \
-PI_STACK_CLAUDE_CODE_USE_PACKAGE="${PI_STACK_CLAUDE_CODE_USE_PACKAGE:-}" \
-PI_STACK_BASH_TIMEOUT_GUARD_PACKAGE="${PI_STACK_BASH_TIMEOUT_GUARD_PACKAGE:-}" \
+PI_STACK_RUNTIME_DEST="$runtime" \
+PI_STACK_ORCHESTRATOR_DEST="$orchestrator" \
+PI_STACK_REMOTE_DEST="$remote" \
 node --input-type=module <<'NODE'
 import { randomUUID } from "node:crypto";
-import { chownSync, existsSync, readFileSync, renameSync, rmSync, statSync, writeFileSync } from "node:fs";
+import { existsSync, readFileSync, renameSync, rmSync, writeFileSync } from "node:fs";
 
 const manifest = JSON.parse(readFileSync(process.env.PI_STACK_MANIFEST, "utf8"));
-const names = manifest.roles[process.env.PI_STACK_ROLE];
-const runtime = process.env.PI_STACK_RUNTIME_CURRENT;
-const paths = {
-  orchestrator: process.env.PI_STACK_ORCHESTRATOR_PACKAGE,
-  "claude-code-use": process.env.PI_STACK_CLAUDE_CODE_USE_PACKAGE || `${runtime}/extensions/pi-claude-code-use`,
-  vcc: manifest.packages.vcc,
-  "bash-timeout-guard": process.env.PI_STACK_BASH_TIMEOUT_GUARD_PACKAGE || `${runtime}/extensions/bash-timeout-guard`,
-  "browser-native": manifest.packages["browser-native"],
-  remote: process.env.PI_STACK_REMOTE_PACKAGE,
+const roots = { "/srv/pi/runtime": process.env.PI_STACK_RUNTIME_DEST, "/srv/pi/pi-orchestrator": process.env.PI_STACK_ORCHESTRATOR_DEST, "/srv/pi/pi-remote": process.env.PI_STACK_REMOTE_DEST };
+const deployedPath = (entry) => {
+  if (entry.source.startsWith("npm:")) return entry.source;
+  for (const [standard, actual] of Object.entries(roots)) {
+    if (entry.deployed === standard || entry.deployed.startsWith(`${standard}/`)) return actual + entry.deployed.slice(standard.length);
+  }
+  return entry.deployed;
 };
-const packages = names.map((name) => {
-  const path = paths[name];
-  if (!path) throw new Error(`${name} needs a deployment path`);
-  if (!path.startsWith("npm:") && !existsSync(path)) throw new Error(`${name} deployment does not exist at ${path}`);
-  return path;
-});
-const observer = names.indexOf(manifest.contextObserver);
-if (observer !== -1 && observer !== names.length - 1) throw new Error(`${manifest.contextObserver} must load last`);
+const reviewed = manifest.packages.map((entry) => ({ id: entry.id, path: deployedPath(entry) }));
+const observer = reviewed.pop();
+if (observer.id !== manifest.contextObserver) throw new Error(`${manifest.contextObserver} must be the last reviewed package`);
+const hostPackages = JSON.parse(process.env.PI_STACK_HOST_PACKAGES);
+const packages = [...reviewed.map((entry) => entry.path), ...hostPackages, observer.path];
+for (const path of packages) {
+  if (!path.startsWith("npm:") && !existsSync(path)) throw new Error(`package does not exist at ${path}`);
+}
 const { default: lockfile } = await import(process.env.PI_STACK_LOCKFILE_MODULE);
 const path = process.env.PI_STACK_SETTINGS;
-const ownership = statSync(path);
 const release = await lockfile.lock(path, {
   realpath: false,
   retries: { retries: 50, factor: 1, minTimeout: 20, maxTimeout: 20 },
@@ -75,7 +80,6 @@ try {
   const temporary = `${path}.${process.pid}.${randomUUID()}.tmp`;
   try {
     writeFileSync(temporary, `${JSON.stringify(next, null, 2)}\n`, { mode: 0o600 });
-    chownSync(temporary, ownership.uid, ownership.gid);
     renameSync(temporary, path);
   } finally {
     rmSync(temporary, { force: true });
@@ -95,12 +99,11 @@ cat > "$vcc_config" <<'JSON'
 }
 JSON
 chmod 600 "$vcc_config"
-if (( EUID == 0 )); then chown --reference="$settings" "$vcc_config"; fi
 
 models="$agent_dir/models.json"
-PI_STACK_MODELS="$models" PI_STACK_CUSTOM_MODELS="$orchestrator/dist/models.json" PI_STACK_SETTINGS="$settings" node --input-type=module <<'NODE'
+PI_STACK_MODELS="$models" PI_STACK_CUSTOM_MODELS="$orchestrator/dist/models.json" node --input-type=module <<'NODE'
 import { randomUUID } from "node:crypto";
-import { chownSync, existsSync, readFileSync, renameSync, rmSync, statSync, writeFileSync } from "node:fs";
+import { existsSync, readFileSync, renameSync, rmSync, writeFileSync } from "node:fs";
 
 const path=process.env.PI_STACK_MODELS;
 const custom=JSON.parse(readFileSync(process.env.PI_STACK_CUSTOM_MODELS,"utf8"));
@@ -111,22 +114,17 @@ for(const [providerId,addition] of Object.entries(custom.providers)){
   const replacements=new Map(addition.models.map((model)=>[model.id,model]));
   providers[providerId]={...provider,models:[...(provider.models??[]).filter((model)=>!replacements.has(model.id)),...replacements.values()]};
 }
-const ownership=statSync(process.env.PI_STACK_SETTINGS);
 const temporary=`${path}.${process.pid}.${randomUUID()}.tmp`;
 try{
   writeFileSync(temporary,`${JSON.stringify({...current,providers},null,2)}\n`,{mode:0o600});
-  chownSync(temporary,ownership.uid,ownership.gid);
   renameSync(temporary,path);
 }finally{rmSync(temporary,{force:true});}
 NODE
 
 while IFS= read -r package; do
-  PI_CODING_AGENT_DIR="$agent_dir" "$runtime_root/current/node_modules/.bin/pi" install "$package"
-done < <(jq -r --arg role "$role" '.roles[$role][] as $name | .packages[$name] | select(startswith("npm:"))' "$manifest")
-if (( EUID == 0 )) && [[ -d $agent_dir/npm ]]; then
-  chown -R --reference="$settings" "$agent_dir/npm"
-fi
+  PI_CODING_AGENT_DIR="$agent_dir" "$runtime/node_modules/.bin/pi" install "$package"
+done < <(jq -r '.packages[].source | select(startswith("npm:"))' "$manifest")
 
-jq -e --argjson expected "$(jq -c --arg role "$role" '.roles[$role] | length' "$manifest")" \
-  '.packages | length == $expected' "$settings" >/dev/null
-printf 'deployed %s Pi settings from %s to %s\n' "$role" "$(git -C "$root" rev-parse HEAD)" "$settings"
+expected=$(( $(jq '.packages | length' "$manifest") + $(jq 'length' <<<"$host_packages") ))
+jq -e --argjson expected "$expected" '.packages | length == $expected' "$settings" >/dev/null
+printf 'deployed Pi settings from %s for %s\n' "$(git -C "$root" rev-parse HEAD)" "$user"

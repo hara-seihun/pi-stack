@@ -1,0 +1,24 @@
+# Pi Remote front door. One process on the published port, holding no state and
+# no keys, whose job is to decide which person is asking and hand the request to
+# that person's supervisor, starting it when a key arrives. Reference unit for
+# a Debian host; NixOS declares the same unit in its configuration.
+[Unit]
+Description=Pi Remote front door
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+WorkingDirectory=/srv/pi/pi-remote
+Environment=PI_REMOTE_ROUTER_HOST=127.0.0.1
+Environment=PI_REMOTE_ROUTER_PORT=8788
+Environment=PI_REMOTE_PERSONS_DIR=/var/lib/pi-remote/persons
+Environment=PI_REMOTE_KEY_DIR=/run/pi-remote-keys
+ExecStart=/usr/local/bin/bun /srv/pi/pi-remote/server/router.ts
+Restart=always
+RestartSec=2
+UMask=0077
+MemoryMax=512M
+
+[Install]
+WantedBy=multi-user.target

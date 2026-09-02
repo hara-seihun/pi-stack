@@ -27,11 +27,11 @@ npm run android:test --workspace=kenan
 
 `npm run check` launches builds, static checks, and independent suites together. It takes about four seconds on GMKtec. GitHub runs the same gate from a private persistent checkout whose tracked source is reset for every event. Its lock-validated `node_modules` tree survives runner and machine restarts. The Android project keeps its Gradle build because it has no useful dependency boundary with the JavaScript workspaces.
 
-[`config/package-sets.json`](config/package-sets.json) owns package order by host role, including the pinned `npm:pi-agent-browser-native` package. Its separate `agent-browser` executable comes from the runtime dependency tree. [`config/skill-sets.json`](config/skill-sets.json) owns the first-party skills each role loads. Their checks reject unknown or misplaced entries, including a Pi Remote context observer that is not last.
+[`config/packages.json`](config/packages.json) owns the Pi package order every account loads, including the pinned `npm:pi-agent-browser-native` package; its separate `agent-browser` executable comes from the runtime dependency tree. [`config/skills.json`](config/skills.json) lists the first-party skills and [`config/tools.json`](config/tools.json) the commands. The checks reject unknown or misplaced entries, including a Pi Remote context observer that is not last.
 
 ## Deployments
 
-GMKtec and Converge deploy one reviewed repository commit. Host configuration supplies local values. The scripts under [`deploy`](deploy) refuse an uncommitted checkout, serialize work from the same source tree, and enforce a 50-second deadline. Commit-addressed releases share one production dependency tree and switch atomically. Host deployment keeps the source lock until every artifact carries one commit. `deploy/settings` and `deploy/skills` derive each role from the manifests. See [`docs/deployment.md`](docs/deployment.md).
+Every host deploys one reviewed commit with `deploy/host`, which reads a small host file naming the fleet account and any local packages and skills. Persons come from Pi Remote's registry. The scripts under [`deploy`](deploy) refuse an uncommitted checkout, serialize work from the same source tree, and enforce a 50-second deadline. Commit-addressed releases share one production dependency tree and switch atomically. See [`docs/deployment.md`](docs/deployment.md).
 
 Pi Remote environments are independent servers:
 

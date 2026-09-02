@@ -20,6 +20,8 @@ const ui = {
   slashCommands: $("slash-commands"), queueStatus: $("queue-status"), messageQueue: $("message-queue"),
   attachments: $("attachments"), attach: $("attach"), pasteText: $("paste-text"), filePicker: $("file-picker"),
   unlockDialog: $("unlock-dialog"), unlockForm: $("unlock-form"), unlockKey: $("unlock-key"),
+  unlockPerson: $("unlock-person"), unlockPersonField: $("unlock-person-field"), unlockKeyField: $("unlock-key-field"),
+  unlockTitle: $("unlock-title"), submitUnlock: $("submit-unlock"),
   pasteTextDialog: $("paste-text-dialog"), pasteTextForm: $("paste-text-form"), pasteTextName: $("paste-text-name"),
   pasteTextContent: $("paste-text-content"), uploadPastedText: $("upload-pasted-text"),
   settings: $("settings"), settingsScrim: $("settings-scrim"), settingsThread: $("settings-thread"),
@@ -174,19 +176,34 @@ function setMotion(element, values) {
   paintMotion(element, state);
 }
 
-// A supervisor only runs while its owner's key is in memory, so 423 is the
-// ordinary state of a machine that has just rebooted rather than an error. Every
-// call goes through here, so unlocking is handled once: the stored key is tried
-// silently, the person is asked only if there isn't one or it no longer works,
-// and the original request is then retried as if nothing had happened.
-const KEY_STORAGE = "pi-remote-key";
+// A supervisor for an encrypted folder only runs while its owner's key is in
+// memory, so 423 is the ordinary state of a machine that has just rebooted
+// rather than an error. Every call goes through here, so unlocking is handled
+// once: the stored key is tried silently, the person is asked only if there
+// isn't one or it no longer works, and the original request is then retried as
+// if nothing had happened. A machine with several persons also needs to know
+// who is asking; that choice is made in the same dialog and remembered.
+const LEGACY_KEY_STORAGE = "pi-remote-key";
+const person = window.PiRemotePerson;
 let unlocking = null;
+let knownPersons = [];
 
+function keyStorage() {
+  const user = person?.get() || "";
+  return user ? `pi-remote-key:${user}` : LEGACY_KEY_STORAGE;
+}
 function storedKey() {
-  try { return localStorage.getItem(KEY_STORAGE) ?? ""; } catch { return ""; }
+  try {
+    const key = localStorage.getItem(keyStorage());
+    if (key) return key;
+    // Keys were stored without a person before the front door learned names.
+    const legacy = localStorage.getItem(LEGACY_KEY_STORAGE) ?? "";
+    if (legacy && keyStorage() !== LEGACY_KEY_STORAGE) { localStorage.setItem(keyStorage(), legacy); localStorage.removeItem(LEGACY_KEY_STORAGE); }
+    return legacy;
+  } catch { return ""; }
 }
 function rememberKey(key) {
-  try { localStorage.setItem(KEY_STORAGE, key); } catch {}
+  try { localStorage.setItem(keyStorage(), key); } catch {}
 }
 async function responseJson(response) {
   const text = await response.text();
@@ -201,22 +218,65 @@ async function sendUnlock(key) {
     cache: "no-store",
   });
   const result = await responseJson(response);
+  if (response.status === 403) { person?.set(""); throw new Error(result.error || "This machine does not know you"); }
   if (!response.ok) throw new Error(result.error || `HTTP ${response.status}`);
   return result;
 }
 
-function askForKey(message) {
+async function loadPersons() {
+  try {
+    const response = await fetch(API.environment.path(), { cache: "no-store", headers: { accept: "application/json" } });
+    const result = await responseJson(response);
+    if (Array.isArray(result?.environment?.persons)) knownPersons = result.environment.persons;
+    else if (Array.isArray(result?.persons)) knownPersons = result.persons;
+  } catch {}
+  return knownPersons;
+}
+
+function selectedPerson() {
+  const user = person?.get() || "";
+  return knownPersons.find((candidate) => candidate.user === user) ?? null;
+}
+
+// The dialog asks for whatever is missing: a name when the machine has several
+// persons, a key when the chosen person's folder is encrypted.
+function askToUnlock(message) {
   return new Promise((resolve) => {
     const error = $("unlock-error");
     error.hidden = !message;
     error.textContent = message ?? "";
+    const chooser = ui.unlockPerson;
+    const multiple = knownPersons.length > 1;
+    chooser.replaceChildren(...knownPersons.map((candidate) => {
+      const option = document.createElement("option");
+      option.value = candidate.user;
+      option.textContent = candidate.displayName || candidate.user;
+      return option;
+    }));
+    const current = person?.get() || knownPersons[0]?.user || "";
+    if (current) chooser.value = current;
+    ui.unlockPersonField.hidden = !multiple;
+    const syncKeyField = () => {
+      const chosen = knownPersons.find((candidate) => candidate.user === chooser.value);
+      const needsKey = chosen ? chosen.requiresUnlock : true;
+      ui.unlockKeyField.hidden = !needsKey;
+      ui.unlockKey.required = needsKey;
+      ui.unlockTitle.textContent = needsKey ? "Unlock your folder" : "Who are you?";
+      ui.submitUnlock.textContent = needsKey ? "Unlock" : "Continue";
+    };
+    chooser.onchange = syncKeyField;
+    syncKeyField();
     ui.unlockKey.value = "";
     if (!ui.unlockDialog.open) ui.unlockDialog.showModal();
-    ui.unlockKey.focus();
+    (multiple && !ui.unlockKey.required ? chooser : ui.unlockKey).focus();
     ui.unlockForm.onsubmit = (event) => {
       event.preventDefault();
+      const user = multiple ? chooser.value : (knownPersons[0]?.user || person?.get() || "");
+      const chosen = knownPersons.find((candidate) => candidate.user === user);
+      const needsKey = chosen ? chosen.requiresUnlock : true;
       const key = ui.unlockKey.value;
-      if (key) resolve(key);
+      if (needsKey && !key) return;
+      resolve({ user, key: needsKey ? key : "" });
     };
   });
 }
@@ -224,18 +284,29 @@ function askForKey(message) {
 async function ensureUnlocked() {
   if (unlocking) return unlocking;
   unlocking = (async () => {
-    let key = storedKey();
+    await loadPersons();
+    if (!person?.get() && knownPersons.length === 1) person?.set(knownPersons[0].user);
     let message = null;
+    let silent = true;
     for (;;) {
-      if (key) {
-        try {
-          await sendUnlock(key);
-          rememberKey(key);
-          if (ui.unlockDialog.open) ui.unlockDialog.close();
-          return;
-        } catch (error) { message = error?.message || "Could not unlock"; }
+      const chosen = selectedPerson();
+      const identified = Boolean(person?.get()) || knownPersons.length <= 1;
+      const needsKey = chosen ? chosen.requiresUnlock : knownPersons.length === 0;
+      let key = storedKey();
+      if (!silent || !identified || (needsKey && !key)) {
+        const answer = await askToUnlock(message);
+        if (answer.user) person?.set(answer.user);
+        key = answer.key || storedKey();
       }
-      key = await askForKey(message);
+      try {
+        await sendUnlock(key);
+        if (key) rememberKey(key);
+        if (ui.unlockDialog.open) ui.unlockDialog.close();
+        return;
+      } catch (error) {
+        message = error?.message || "Could not unlock";
+        silent = false;
+      }
     }
   })().finally(() => { unlocking = null; });
   return unlocking;

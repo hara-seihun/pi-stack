@@ -1,76 +1,15 @@
 {
+  "version": 2,
   "tools": [
-    {
-      "id": "agent-workspace",
-      "hosts": [
-        "local",
-        "converge"
-      ],
-      "fleet": true,
-      "commands": [
-        {
-          "name": "agent-workspace",
-          "entry": "main"
-        }
-      ]
-    },
-    {
-      "id": "fleet-errors",
-      "hosts": [
-        "local",
-        "converge"
-      ],
-      "commands": [
-        {
-          "name": "fleet-errors",
-          "entry": "main"
-        }
-      ]
-    },
-    {
-      "id": "mcp",
-      "hosts": [
-        "local",
-        "converge"
-      ],
-      "fleet": true,
-      "commands": [
-        {
-          "name": "mcp",
-          "entry": "main"
-        }
-      ]
-    },
-    {
-      "id": "mcp-script",
-      "hosts": [
-        "local",
-        "converge"
-      ],
-      "fleet": true,
-      "commands": [
-        {
-          "name": "mcp-script",
-          "entry": "main"
-        }
-      ]
-    },
+    { "id": "agent-workspace", "commands": [{ "name": "agent-workspace", "entry": "main" }] },
+    { "id": "fleet-errors", "commands": [{ "name": "fleet-errors", "entry": "main" }] },
+    { "id": "mcp", "commands": [{ "name": "mcp", "entry": "main" }] },
+    { "id": "mcp-script", "commands": [{ "name": "mcp-script", "entry": "main" }] },
     {
       "id": "read-condensed-session",
-      "hosts": [
-        "local",
-        "converge"
-      ],
-      "fleet": true,
       "commands": [
-        {
-          "name": "read-condensed-session",
-          "entry": "main"
-        },
-        {
-          "name": "read-thread",
-          "entry": "read-thread"
-        }
+        { "name": "read-condensed-session", "entry": "main" },
+        { "name": "read-thread", "entry": "read-thread" }
       ]
     }
   ]

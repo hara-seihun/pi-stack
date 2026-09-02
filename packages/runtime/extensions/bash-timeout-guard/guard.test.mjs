@@ -156,10 +156,12 @@ test("detachment is refused in every session, and refused kindly", () => {
   assert.match(blocked.reason, /foreground/);
 });
 
-test("the process sweep requires an explicit account", () => {
-  const result = spawnSync(sweep, [], { encoding: "utf8" });
-  assert.equal(result.status, 64);
-  assert.match(result.stderr, /usage: sweep USER/);
+test("the process sweep leaves everything outside fleet run units alone", () => {
+  // This test process carries no pi-orchestrator-run cgroup, so a sweep run
+  // here must exit cleanly without killing anything, including itself.
+  const result = spawnSync(sweep, [], { encoding: "utf8", env: { ...process.env, PI_SESSION_ID: "sweep-test" } });
+  assert.equal(result.status, 0, result.stderr);
+  assert.equal(result.stdout, "");
 });
 
 test("the matching rule is stated once in the system prompt", () => {

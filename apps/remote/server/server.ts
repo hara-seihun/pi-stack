@@ -14,6 +14,7 @@ import { BOOSTED_MULTIPLIER, nextBoost } from "pi-orchestrator/boost";
 import { DEFAULT_LIVE_MODEL, DEFAULT_LIVE_VOICE, VoiceBroker } from "./voice/broker";
 import { attachRuntimeHost, startRuntimeHost, type RuntimeTransport } from "./runtime-transport";
 import { API } from "../web/api.js";
+import { listPersons, publicPerson } from "./persons";
 
 const VERSION = (JSON.parse(readFileSync(join(import.meta.dir, "../package.json"), "utf8")) as { version: string }).version;
 const ENVIRONMENT_ID = process.env.PI_REMOTE_ENVIRONMENT_ID ?? "local";
@@ -122,11 +123,16 @@ function threadStartProfiles() {
   }));
 }
 
+function knownPersons() {
+  try { return listPersons().map(publicPerson); } catch { return []; }
+}
+
 function environmentMetadata() {
   return {
     id: ENVIRONMENT_ID,
     name: ENVIRONMENT_NAME,
     requiresUnlock: ENVIRONMENT_REQUIRES_UNLOCK,
+    persons: knownPersons(),
     profiles: threadStartProfiles(),
     capabilities: { voice: true, downloads: true, notifications: true, files: true },
   };

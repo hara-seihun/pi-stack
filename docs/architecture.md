@@ -10,9 +10,9 @@ The runtime package owns the exact Pi development dependency. Root npm overrides
 
 ## Pi package order
 
-Pi applies extensions in package order. Pi Remote's `context-mirror.ts` records the context after every other extension has transformed it, so any role that loads Pi Remote must load it last.
+Pi applies extensions in package order. Pi Remote's `context-mirror.ts` records the context after every other extension has transformed it, so it must load last.
 
-[`../config/package-sets.json`](../config/package-sets.json) names the package order for each role. `scripts/check-package-sets.mjs` checks the ordering rule. Pi Remote also checks the effective settings file at startup.
+[`../config/packages.json`](../config/packages.json) names the package order. Every account on every host loads the same list, plus whatever the host file adds ahead of the observer. `scripts/check-manifests.mjs` checks the ordering rule, and Pi Remote checks the effective settings file at startup.
 
 ## Environments
 
@@ -22,8 +22,10 @@ The two current environments are:
 
 | ID | Name | Host | Profiles | Unlock |
 |---|---|---|---|---|
-| `local` | Local | GMKtec | Personal, Home | encrypted folder key |
+| `local` | Local | GMKtec | Personal, Home | each person's encrypted folder key |
 | `converge` | Converge | `converge-kenan` | one work profile | none |
+
+Both hosts run the same front door and one supervisor per person. A person's registry file says whether her folder is encrypted; the front door starts an open person's supervisor at boot and an encrypted person's when her key arrives.
 
 Kenan knows how to reach both endpoints because it cannot discover a server before choosing one. It verifies the reported ID before sending ordinary requests. A connection aimed at the wrong server fails instead of mixing state.
 

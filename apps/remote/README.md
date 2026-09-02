@@ -2,7 +2,7 @@
 
 A self-hosted web and Android controller for persistent [Pi](https://pi.dev) coding-agent sessions.
 
-Pi Remote keeps session state in SQLite, talks to Pi through RPC mode, survives browser or app disconnects, queues prompts durably, and streams tool and model activity. It observes autonomous agents through Pi Orchestrator's public read model rather than reading that service's SQLite tables. The Orchestrator tab folds each team into one collapsed group; opening it lists the supervisor first, then workers by slot. An optional identity router starts per-user supervisors whose private directories are mounted only while unlocked.
+Pi Remote keeps session state in SQLite, talks to Pi through RPC mode, survives browser or app disconnects, queues prompts durably, and streams tool and model activity. It observes autonomous agents through Pi Orchestrator's public read model rather than reading that service's SQLite tables. The Orchestrator tab folds each team into one collapsed group; opening it lists the supervisor first, then workers by slot. A front door starts one supervisor per person, and a person's private directory is mounted only while she has unlocked it.
 
 Interactive Pi children run at normal scheduler priority. Background services and CI must yield through their own scheduler settings. Lowering the interactive child priority makes every compiler, test, and file scan it starts lose CPU at the exact moment an operator is waiting for it.
 
@@ -26,88 +26,77 @@ Model menus, autonomous-agent labels, and plan cards use the catalog exported by
 
 ## Requirements
 
-- [Bun](https://bun.sh/)
+- [Bun](https://bun.sh/), `jq`, and `gocryptfs` for encrypted folders
 - Pi on the supervisor's `PATH`
 - `apps/remote` installed as Pi's final configured package
 - the root npm workspaces installed and Pi Orchestrator built
 - Android SDK 36 and Java 21 to build Kenan
 
-## Configuration
+## Persons
 
-Pi Remote loads `$XDG_CONFIG_HOME/pi-remote/config.json`, falling back to `~/.config/pi-remote/config.json`. Set `PI_REMOTE_CONFIG` to use another path.
+Every machine runs one front door, `pi-remote-router.service`, and one supervisor per person, `pi-remote@<user>.service`. A person is a unix account with a registry file under `/var/lib/pi-remote/persons/<user>.json`:
+
+```bash
+sudo pi-remote person add sibyl --display-name Sibyl            # encrypted folder, key printed once
+sudo pi-remote person add kenan --display-name Kenan --no-encrypt --folder converge --environment converge --environment-name Converge
+pi-remote person list
+sudo pi-remote person remove sibyl                              # forgets her; deletes nothing
+```
+
+`add` creates `/home/<user>/<folder>` (the folder defaults to the user name). Unless `--no-encrypt` is given, that folder is a [gocryptfs](https://nuetzlich.net/gocryptfs/) mount of `/home/<user>/.<folder>.crypt`, and the command prints the key exactly once. **Losing the key is unrecoverable data loss**; there is no admin who can help, which is the point. `--existing` adopts a crypt directory that already exists and prints nothing.
+
+The registry file is the whole per-person configuration. Its `environment` object is what the supervisor loads as `PI_REMOTE_CONFIG`, so edit it to change workspaces, thread destinations, models, the data directory, or the orchestrator ledger path; the front door reads it again on restart. `port` is the supervisor's loopback port, and `unlock` names the crypt directory and mountpoint when the folder is encrypted.
 
 ```json
 {
   "version": 1,
+  "user": "kenan",
+  "displayName": "Hara",
+  "port": 18790,
+  "unlock": { "cipherDir": "/home/kenan/.hara.crypt", "mountpoint": "/home/kenan/hara" },
   "environment": {
     "PI_REMOTE_ENVIRONMENT_ID": "local",
     "PI_REMOTE_ENVIRONMENT_NAME": "Local",
     "PI_REMOTE_REQUIRES_UNLOCK": true,
-    "PI_REMOTE_DATA": "/var/lib/pi-remote",
-    "PI_REMOTE_HOST": "127.0.0.1",
-    "PI_REMOTE_PORT": 8788,
+    "PI_REMOTE_PRIVATE_DIR": "/home/kenan/hara",
+    "PI_REMOTE_DATA": "/home/kenan/hara/.pi-remote",
+    "PI_REMOTE_PORT": 18790,
+    "PI_REMOTE_ORCHESTRATOR_DB": "/home/kenan/.local/share/pi-orchestrator/ledger.sqlite3",
+    "PI_REMOTE_ORCHESTRATOR_RUNS": "/home/kenan/.local/share/pi-orchestrator/runs",
     "PI_REMOTE_BASH_TIMEOUT_MAX_SECONDS": 300,
-    "PI_REMOTE_ORCHESTRATOR_DB": "/var/lib/pi-orchestrator/ledger.sqlite3",
-    "PI_REMOTE_ORCHESTRATOR_RUNS": "/var/lib/pi-orchestrator/runs",
-    "PI_REMOTE_WORKSPACES": [
-      { "id": "home", "name": "Home", "path": "/home/agent" }
-    ],
+    "PI_REMOTE_WORKSPACES": [{ "id": "home", "name": "Kenan", "path": "/home/kenan" }],
     "PI_REMOTE_DESTINATIONS": "home"
   }
 }
 ```
 
-Values in `environment` become process environment variables before the supervisor loads. Existing process variables win, which makes service-level overrides straightforward. Arrays and objects are JSON-encoded automatically. `PI_REMOTE_BASH_TIMEOUT_MAX_SECONDS` sets the maximum foreground bash call for threads on that host.
+Values in `environment` become process environment variables before the supervisor loads. Existing process variables win. Arrays and objects are JSON-encoded automatically. `PI_REMOTE_BASH_TIMEOUT_MAX_SECONDS` sets the maximum foreground bash call for threads on that host. All persons on a machine must agree on the environment id and name.
 
-Host identities, Tailscale names, private directory paths, alert integration, remote targets, workspace menus, app branding, and provider custody belong in this untracked configuration or in the host's service manager, not in the repository.
+### The front door
 
-Kenan reads ignored [`../kenan/android/local.properties`](../kenan/android/local.properties) values. Direct endpoints use a URL:
+The front door listens on the published port (8788), holds no state and no keys, and hands each request to the right supervisor. Identity is the `x-pi-remote-user` header, which the web client and the Android app send once a person has been chosen; a machine with one person needs no header. The folders are what protect anything worth protecting, and they are open exactly while their owner is working, so a name on a request grants nothing a key does not already grant.
 
-```properties
-piRemoteLocalUrl=https://local-pi-remote.example.ts.net
-piRemoteConvergeAuth=direct
-piRemoteConvergeUrl=https://converge-pi-remote.example.ts.net
-piRemoteApplicationId=dev.example.piremote
-piRemoteAppLabel=Pi Remote
-```
+A person with an encrypted folder has a supervisor only while her key is in memory. Her unit runs with `PrivateMounts=yes`; [`server/pi-remote-launch`](server/pi-remote-launch) mounts the folder inside that namespace and then becomes the supervisor, so every Pi thread she runs sees an ordinary directory and nothing else on the machine sees anything. The key reaches the unit as a systemd credential from a root-only tmpfs file that the front door writes on unlock and removes on lock. Stopping the unit destroys the namespace, the mount, and the key together. A wrong key fails the mount; the unit's start limit (five tries in a minute) is how the front door tells a wrong key from a slow one. Locked requests answer `423`, and both clients respond by unlocking with the stored key and repeating the request.
 
-An SSH-backed Converge endpoint replaces its direct URL with a restricted local-forward:
+A person without an encrypted folder is started by the front door when it starts and whenever her unit is found down. Nothing is ever locked for her.
 
-```properties
-piRemoteConvergeAuth=ssh
-piRemoteConvergeSshHost=converge.example.net
-piRemoteConvergeSshPort=22
-piRemoteConvergeSshUser=pi-remote-android
-piRemoteConvergeSshPrivateKeyFile=/owner-only/path/to/android-converge-key
-piRemoteConvergeSshHostKey=ecdsa-sha2-nistp256 <base64-encoded host key>
-piRemoteConvergeSshLocalPort=8789
-piRemoteConvergeSshRemoteHost=127.0.0.1
-piRemoteConvergeSshRemotePort=8788
-```
-
-The app pins the SSH host key and opens only the declared forward. Keep the private key out of Git.
+Root can still read a running mount by entering a live supervisor's namespace. The guarantee is that a folder is unreadable while its owner is not working, including to disk theft and to every backup; it is not a guarantee against another administrator attacking a live session.
 
 ## Run
 
-Install Pi Remote after every other Pi package. This is what makes the read-only context mirror the final `context` handler; the supervisor refuses to start if the ordering invariant is missing.
+Install the root workspaces, build the orchestrator, and add a person. `deploy/host` does all of this on a real machine; by hand:
 
 ```sh
 cd /absolute/path/to/pi-stack
 npm ci --ignore-scripts
 npm run build
-pi install /absolute/path/to/pi-stack/apps/remote
-npm start --workspace=pi-remote
+sudo PI_REMOTE_PERSONS_DIR=/var/lib/pi-remote/persons bun apps/remote/server/person-cli.ts person add "$USER" --display-name Me --no-encrypt
+sudo systemctl start pi-remote-router
 ```
 
-If another package was installed later, remove and reinstall the `apps/remote` path so it returns to the end.
+The reference units in [`../../deploy/systemd`](../../deploy/systemd) show what the front door and supervisor need. Pi Remote must be the last configured Pi package so its read-only context mirror is the final `context` handler; the supervisor refuses to start otherwise.
 
-For the router, supply `PI_REMOTE_USERS` as a JSON array and run:
-
-```sh
-bun server/router.ts
-```
-
-The router expects systemd template units named `pi-remote@<user>.service`. `server/pi-remote-launch` mounts the person's gocryptfs folder and remains as the service's generation launcher. A reload replaces the supervisor process immediately. Per-thread runtime hosts remain in the same service cgroup and mount namespace, so active Pi processes finish their turns and the replacement supervisor adopts their RPC streams. Once an adopted runtime settles, the supervisor replaces it before its next use so provider and extension changes take effect. Stopping the unit still kills every process and destroys the private mount.
+A reload of a supervisor unit replaces the supervisor process immediately. Per-thread runtime hosts remain in the same service cgroup and mount namespace, so active Pi processes finish their turns and the replacement supervisor adopts their RPC streams. Once an adopted runtime settles, the supervisor replaces it before its next use so provider and extension changes take effect. Stopping the unit still kills every process and destroys the private mount.
 
 ## Test
 

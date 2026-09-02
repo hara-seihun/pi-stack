@@ -1,36 +1,60 @@
 #!/usr/bin/env bash
+# Publish the pinned Pi, agent-browser, and the runtime extensions under
+# /srv/pi/runtime, backed by one production dependency tree that every other
+# component links instead of copying. Then point each Pi account's ~/.local/bin
+# at the selected release.
 set -euo pipefail
 
 root=$(cd "$(dirname "$0")/.." && pwd)
 source "$root/deploy/lib"
 pi_stack_enter_deployment "$0" "$root" "$@"
 runtime_source="$root/packages/runtime"
-runtime_root=${PI_STACK_RUNTIME_ROOT:-$HOME/.local/share/pi-runtime}
-bin_dir=${PI_STACK_USER_BIN:-$HOME/.local/bin}
+dest=${PI_STACK_RUNTIME_DEST:-/srv/pi/runtime}
 dependencies_root=${PI_STACK_DEPENDENCIES_ROOT:-/srv/pi/dependencies}
-releases_root="$runtime_root/releases"
+PI_VERSION=0.84.2
+BROWSER_VERSION="agent-browser 0.34.0"
 stage=""
 cleanup() { [[ -z $stage ]] || rm -rf "$stage"; }
 trap cleanup EXIT
-install -d -m 700 "$runtime_root" "$releases_root"
-pi_stack_as_root install -d -m 755 "$dependencies_root"
-exec 9>"$runtime_root/deploy.lock"
-flock 9
 commit=$(git -C "$root" rev-parse HEAD)
-current="$runtime_root/current"
-if [[ -f $runtime_root/.pi-stack-commit && $(<"$runtime_root/.pi-stack-commit") == "$commit" && \
-      -f $current/.pi-stack-commit && $(<"$current/.pi-stack-commit") == "$commit" && \
-      -x $current/node_modules/.bin/pi && -x $current/node_modules/.bin/agent-browser ]]; then
-  version=$("$current/node_modules/.bin/pi" --version)
-  browser_version=$("$current/node_modules/.bin/agent-browser" --version)
-  [[ $version == 0.84.2 ]] || { echo "unexpected Pi version: $version" >&2; exit 1; }
-  [[ $browser_version == "agent-browser 0.34.0" ]] || { echo "unexpected agent-browser version: $browser_version" >&2; exit 1; }
-  printf 'Pi %s from %s is already deployed\n' "$version" "$commit"
+
+check_release() {
+  local release=$1 version browser_version
+  version=$("$release/node_modules/.bin/pi" --version)
+  browser_version=$("$release/node_modules/.bin/agent-browser" --version)
+  [[ $version == "$PI_VERSION" ]] || { echo "unexpected Pi version: $version" >&2; exit 1; }
+  [[ $browser_version == "$BROWSER_VERSION" ]] || { echo "unexpected agent-browser version: $browser_version" >&2; exit 1; }
+}
+
+# Every Pi account reaches the release through ~/.local/bin, so the links are
+# reconciled on every run, including the already-deployed fast path: a person
+# added since the last release must not wait for the next one.
+reconcile_links() {
+  local user home bin owner group
+  while IFS= read -r user; do
+    home=$(pi_stack_home "$user")
+    [[ -n $home && -d $home ]] || continue
+    bin="$home/.local/bin"
+    owner=$(stat -c %U "$home"); group=$(stat -c %G "$home")
+    pi_stack_as_root install -d -m 755 -o "$owner" -g "$group" "$home/.local" "$bin"
+    for name in pi agent-browser; do
+      pi_stack_as_root ln -sfn "$dest/node_modules/.bin/$name" "$bin/$name"
+      pi_stack_as_root chown -h "$owner:$group" "$bin/$name"
+    done
+    pi_stack_as_root rm -f "$bin/pro" "$bin/prompt-eval"
+  done < <(pi_stack_users)
+}
+
+if [[ -f $dest/.pi-stack-commit && $(<"$dest/.pi-stack-commit") == "$commit" && -x $dest/node_modules/.bin/pi ]]; then
+  check_release "$dest"
+  reconcile_links
+  printf 'Pi %s from %s is already deployed\n' "$PI_VERSION" "$commit"
   exit 0
 fi
 
 cd "$root"
 pi_stack_prepare_dependencies "$root"
+pi_stack_as_root install -d -m 755 "$dependencies_root"
 dependency_hash=$({
   sha256sum package.json package-lock.json
   printf '%s\n' workspace-production-closure-v1-atomic-settings-writes-v1
@@ -44,6 +68,8 @@ if [[ ! -x $dependency_release/node_modules/.bin/pi ]]; then
     install -m 644 "$manifest" "$stage/$manifest"
   done < <(find apps packages tools -name node_modules -prune -o -name package.json -print)
   (cd "$stage" && npm ci --omit=dev --ignore-scripts --prefer-offline --no-audit --no-fund)
+  # Pi rewrites settings.json in place. Two sessions starting together used to
+  # observe a truncated file, so the pinned copy writes a temporary and renames.
   settings_manager="$stage/node_modules/@earendil-works/pi-coding-agent/dist/core/settings-manager.js"
   SETTINGS_MANAGER="$settings_manager" node --input-type=module <<'NODE'
 import { readFileSync, writeFileSync } from "node:fs";
@@ -83,31 +109,15 @@ settings_manager="$dependency_release/node_modules/@earendil-works/pi-coding-age
 grep -q 'renameSync(temporary, path)' "$settings_manager"
 node --check "$settings_manager"
 
-extensions=(pi-claude-code-use bash-timeout-guard)
-# A release belongs to the reviewed source commit, even when two commits happen
-# to produce identical runtime files. This keeps the selected artifact's receipt
-# commit-consistent and makes the next deployment hit the unchanged fast path.
-runtime_release=$(pi_stack_release_for_commit "$root" "$releases_root")
-if [[ ! -d $runtime_release ]]; then
-  stage=$(mktemp -d "$releases_root/.stage.XXXXXXXX")
-  install -d -m 700 "$stage/extensions"
-  for extension in "${extensions[@]}"; do rsync -a "$runtime_source/extensions/$extension" "$stage/extensions/"; done
-  ln -s "$dependency_release/node_modules" "$stage/node_modules"
-  printf '%s\n' "$(git rev-parse HEAD)" > "$stage/.pi-stack-commit"
-  mv "$stage" "$runtime_release"
-  stage=""
-fi
+stage=$(mktemp -d "${TMPDIR:-/tmp}/pi-runtime.XXXXXXXX")
+install -d -m 755 "$stage/release/extensions"
+for extension in pi-claude-code-use bash-timeout-guard; do
+  rsync -a --chmod=D755,Fu=rwX,Fgo=rX "$runtime_source/extensions/$extension" "$stage/release/extensions/"
+done
+ln -s "$dependency_release/node_modules" "$stage/release/node_modules"
+printf '%s\n' "$commit" > "$stage/release/.pi-stack-commit"
+pi_stack_publish_release "$root" "$stage/release" "$dest" runtime
 
-link_stage="$current.stage.$$"
-ln -s "$runtime_release" "$link_stage"
-mv -Tf "$link_stage" "$current"
-printf '%s\n' "$(git rev-parse HEAD)" > "$runtime_root/.pi-stack-commit"
-install -d -m 700 "$bin_dir"
-ln -sfn "$current/node_modules/.bin/pi" "$bin_dir/pi"
-ln -sfn "$current/node_modules/.bin/agent-browser" "$bin_dir/agent-browser"
-rm -f "$bin_dir/pro" "$bin_dir/prompt-eval"
-version=$("$bin_dir/pi" --version)
-browser_version=$("$bin_dir/agent-browser" --version)
-[[ $version == 0.84.2 ]] || { echo "unexpected Pi version: $version" >&2; exit 1; }
-[[ $browser_version == "agent-browser 0.34.0" ]] || { echo "unexpected agent-browser version: $browser_version" >&2; exit 1; }
-printf 'deployed Pi %s and %s from %s to %s\n' "$version" "$browser_version" "$(git rev-parse HEAD)" "$runtime_release"
+check_release "$dest"
+reconcile_links
+printf 'deployed Pi %s and %s from %s to %s\n' "$PI_VERSION" "$BROWSER_VERSION" "$commit" "$dest"

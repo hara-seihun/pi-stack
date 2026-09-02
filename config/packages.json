@@ -1,0 +1,12 @@
+{
+  "version": 2,
+  "packages": [
+    { "id": "orchestrator", "source": "packages/orchestrator", "deployed": "/srv/pi/pi-orchestrator" },
+    { "id": "claude-code-use", "source": "packages/runtime/extensions/pi-claude-code-use", "deployed": "/srv/pi/runtime/extensions/pi-claude-code-use" },
+    { "id": "vcc", "source": "npm:@sting8k/pi-vcc@0.7.0" },
+    { "id": "bash-timeout-guard", "source": "packages/runtime/extensions/bash-timeout-guard", "deployed": "/srv/pi/runtime/extensions/bash-timeout-guard" },
+    { "id": "browser-native", "source": "npm:pi-agent-browser-native@0.5.0" },
+    { "id": "remote", "source": "apps/remote", "deployed": "/srv/pi/pi-remote" }
+  ],
+  "contextObserver": "remote"
+}

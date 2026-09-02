@@ -1,0 +1,11 @@
+# Kill fleet agent commands that outlive the autonomous bash cap. The guard
+# extension bounds every attended command at 55 seconds; this sweep catches a
+# command an older session left behind or hid behind another process.
+# Reference unit for a Debian host; NixOS declares the same unit and timer.
+[Unit]
+Description=Kill fleet agent commands that outlive the bash timeout cap
+ConditionFileIsExecutable=/srv/pi/runtime/extensions/bash-timeout-guard/sweep
+
+[Service]
+Type=oneshot
+ExecStart=/srv/pi/runtime/extensions/bash-timeout-guard/sweep

@@ -5,44 +5,46 @@ root=$(cd "$(dirname "$0")/.." && pwd)
 source "$root/deploy/lib"
 pi_stack_enter_deployment "$0" "$root" "$@"
 dest=${PI_STACK_ORCHESTRATOR_DEST:-/srv/pi/pi-orchestrator}
-runtime_root=${PI_STACK_RUNTIME_ROOT:-$HOME/.local/share/pi-runtime}
+runtime=${PI_STACK_RUNTIME_DEST:-/srv/pi/runtime}
 commit=$(git -C "$root" rev-parse HEAD)
 
 # Every account that runs orchestrator commands reaches the CLI through
-# ~/.local/bin/pi-orchestrator. A deployment that publishes the artifact but
-# not the links leaves fleet sessions without their required complete/status
-# workflow, so the links are reconciled on every run, including the
-# already-deployed fast path.
+# ~/.local/bin/pi-orchestrator, so the links are reconciled on every run,
+# including the already-deployed fast path.
 reconcile_cli_links() {
-  local user_home=${PI_STACK_USER_HOME:-/home/kenan}
-  local fleet_home=${PI_STACK_FLEET_HOME:-/home/orchestrator}
-  local home owner group link
-  for home in "$user_home" "$fleet_home"; do
-    [[ -d $home ]] || continue
-    owner=$(stat -c %U "$home")
-    group=$(stat -c %G "$home")
+  local user home owner group link
+  while IFS= read -r user; do
+    home=$(pi_stack_home "$user")
+    [[ -n $home && -d $home ]] || continue
+    owner=$(stat -c %U "$home"); group=$(stat -c %G "$home")
     link=$home/.local/bin/pi-orchestrator
-    pi_stack_as_root install -d -m 755 -o "$owner" -g "$group" "$home/.local/bin"
+    pi_stack_as_root install -d -m 755 -o "$owner" -g "$group" "$home/.local" "$home/.local/bin"
     pi_stack_as_root ln -sfn "$dest/dist/cli.js" "$link"
     pi_stack_as_root chown -h "$owner:$group" "$link"
-    [[ $(pi_stack_as_root readlink "$link") == "$dest/dist/cli.js" && -x $dest/dist/cli.js ]] || {
-      echo "$link does not reach an executable Pi Orchestrator CLI" >&2
-      exit 1
-    }
-  done
+  done < <(pi_stack_users)
 }
 
+# The fleet user's operator config names the lane manifest. A release whose
+# daemon cannot parse the live manifest must not be selected.
 validate_manifest() {
-  local manifest=${PI_ORCHESTRATOR_TASK_MANIFEST:-}
-  [[ -z $manifest ]] && return
-  node - "$manifest" <<'NODE'
-const manifest = JSON.parse(require("node:fs").readFileSync(process.argv[2], "utf8"));
+  local fleet home config manifest
+  fleet=$(pi_stack_fleet_user)
+  [[ -n $fleet ]] || return 0
+  home=$(pi_stack_home "$fleet")
+  config=${PI_ORCHESTRATOR_CONFIG:-$home/.config/pi-orchestrator/config.json}
+  [[ -f $config ]] || return 0
+  manifest=$(pi_stack_as_root jq -r '.taskManifest // empty' "$config")
+  [[ -n $manifest ]] || return 0
+  pi_stack_as_root test -f "$manifest" || { echo "orchestrator lane manifest does not exist: $manifest" >&2; return 1; }
+  pi_stack_as_root cat "$manifest" | node - <<'NODE'
+const chunks=[];process.stdin.on("data",(c)=>chunks.push(c)).on("end",()=>{
+const manifest = JSON.parse(Buffer.concat(chunks).toString("utf8"));
 if (manifest.version !== 2 || !Array.isArray(manifest.lanes)) throw new Error("lane manifest version 2 required");
 for (const lane of manifest.lanes) {
   for (const key of ["id", "cwd", "profile"]) if (typeof lane[key] !== "string" || !lane[key]) throw new Error(`lane ${key} is required`);
   if ((typeof lane.prompt !== "string" || !lane.prompt) && (typeof lane.promptFile !== "string" || !lane.promptFile)) throw new Error(`lane ${lane.id} needs prompt or promptFile`);
   if (!(Number(lane.weight) > 0)) throw new Error(`lane ${lane.id} needs a positive weight`);
-}
+}});
 NODE
 }
 
@@ -58,11 +60,11 @@ trap 'rm -rf "$stage"' EXIT
 
 cd "$root"
 pi_stack_prepare_dependencies "$root"
-[[ -f $runtime_root/.pi-stack-commit && $(<"$runtime_root/.pi-stack-commit") == "$commit" ]] || {
+[[ -f $runtime/.pi-stack-commit && $(<"$runtime/.pi-stack-commit") == "$commit" ]] || {
   echo "deploy Pi Runtime $commit before Pi Orchestrator" >&2
   exit 66
 }
-dependencies=$(readlink -f "$runtime_root/current/node_modules")
+dependencies=$(readlink -f "$runtime/node_modules")
 [[ -d $dependencies ]] || { echo "Pi Runtime dependencies are missing at $dependencies" >&2; exit 66; }
 rm -rf packages/orchestrator/dist
 npm run build --workspace=pi-orchestrator

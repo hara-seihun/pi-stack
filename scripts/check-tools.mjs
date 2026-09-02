@@ -5,6 +5,7 @@ import { join } from "node:path";
 
 const root = new URL("..", import.meta.url).pathname;
 const manifest = JSON.parse(await readFile(join(root, "config/tools.json"), "utf8"));
+if (manifest.version !== 2) throw new Error("Unknown tools manifest version");
 const ids = new Set();
 const commands = new Set();
 
@@ -27,8 +28,6 @@ function help(entry) {
 for (const tool of manifest.tools) {
   if (!/^[a-z0-9-]+$/.test(tool.id) || ids.has(tool.id)) throw new Error(`invalid or repeated tool id: ${tool.id}`);
   ids.add(tool.id);
-  if (!Array.isArray(tool.hosts) || tool.hosts.length === 0 || tool.hosts.some((host) => !["local", "converge"].includes(host)))
-    throw new Error(`${tool.id} has invalid hosts`);
   await access(join(root, "tools", tool.id, "README.md"), constants.R_OK);
   for (const command of tool.commands) {
     if (!/^[a-z0-9-]+$/.test(command.name) || commands.has(command.name))

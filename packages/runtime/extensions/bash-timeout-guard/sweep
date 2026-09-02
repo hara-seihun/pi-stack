@@ -1,9 +1,9 @@
 #!/usr/bin/env bash
+# Kill fleet agent commands that outlived the autonomous bash cap. Every fleet
+# run is a transient `pi-orchestrator-run-*` unit, so its cgroup is what marks a
+# process as fleet work; the account running the fleet may also be a person
+# whose interactive commands are allowed much longer and are left alone.
 set -uo pipefail
-
-user=${1:-}
-[[ -n $user ]] || { echo "usage: sweep USER" >&2; exit 64; }
-target_uid=$(id -u "$user")
 
 kill_tree() {
   local pid=$1 child
@@ -13,13 +13,13 @@ kill_tree() {
   kill -KILL "$pid" 2>/dev/null
 }
 
-while read -r pid age uid command; do
+while read -r pid age command; do
   ((age > 50)) || continue
-  [[ $uid == "$target_uid" ]] || continue
+  grep -q 'pi-orchestrator-run-' "/proc/$pid/cgroup" 2>/dev/null || continue
   case "$command" in
-    *"dist/cli.js daemon"*|*"dist/cli.js runner"*|*"dist/cli.js supervisor"*) continue ;;
+    *"dist/cli.js worker"*) continue ;;
   esac
   grep -qz '^PI_SESSION_ID=' "/proc/$pid/environ" 2>/dev/null || continue
   printf 'killing %s after %ss: %s\n' "$pid" "$age" "$command"
   kill_tree "$pid"
-done < <(ps -eo pid=,etimes=,euid=,args= 2>/dev/null)
+done < <(ps -eo pid=,etimes=,args= 2>/dev/null)
