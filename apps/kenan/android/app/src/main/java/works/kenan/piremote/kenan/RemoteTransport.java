@@ -25,21 +25,22 @@ final class RemoteTransport {
         if (endpoint.authentication == RemoteEnvironment.Authentication.SSH) ensureSsh(endpoint.ssh);
     }
 
-    synchronized void verify(RemoteEnvironment.Endpoint endpoint) throws IOException {
+    synchronized void verify(RemoteEnvironment.Endpoint endpoint, String user) throws IOException {
         prepare(endpoint);
         try {
-            verifyEndpoint(endpoint);
+            verifyEndpoint(endpoint, user);
         } catch (IOException failure) {
             if (endpoint.authentication == RemoteEnvironment.Authentication.SSH) disconnect();
             throw failure;
         }
     }
 
-    private void verifyEndpoint(RemoteEnvironment.Endpoint endpoint) throws IOException {
+    private void verifyEndpoint(RemoteEnvironment.Endpoint endpoint, String user) throws IOException {
         HttpURLConnection connection = (HttpURLConnection) new URL(endpoint.baseUrl + "/v1/health").openConnection();
         connection.setConnectTimeout(CONNECT_TIMEOUT_MS);
         connection.setReadTimeout(CONNECT_TIMEOUT_MS);
         connection.setUseCaches(false);
+        if (user != null && !user.isBlank()) connection.setRequestProperty("x-pi-remote-user", user);
         try {
             int status = connection.getResponseCode();
             String body = "";

@@ -63,11 +63,12 @@ public final class KenanRemotePlugin extends Plugin {
     @PluginMethod
     public void select(PluginCall call) {
         String id = call.getString("id", "");
+        String user = call.getString("user", "");
         transportExecutor.execute(() -> {
             try {
                 RemoteEnvironment.Endpoint current = environments.current();
                 RemoteEnvironment.Endpoint next = RemoteEnvironment.find(id);
-                transport.verify(next);
+                transport.verify(next, user);
                 if (current != next) {
                     environments.select(id);
                     if (next.authentication == RemoteEnvironment.Authentication.DIRECT)

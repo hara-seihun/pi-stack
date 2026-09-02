@@ -153,7 +153,7 @@ import { API } from "./api.js";
       select.addEventListener("change", async () => {
         select.disabled = true;
         try {
-          current = await remote.select({ id: select.value });
+          current = await remote.select({ id: select.value, user: window.PiRemotePerson?.get() || "" });
           statePromise = Promise.resolve(current);
           preparedUntil = 0;
           await prepare();
