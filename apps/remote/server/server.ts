@@ -259,12 +259,17 @@ const API_CORS_HEADERS = {
   "access-control-allow-origin": "http://localhost",
   "access-control-allow-methods": "GET, HEAD, POST, PUT, PATCH, DELETE, OPTIONS",
   "access-control-allow-headers": "accept, content-type, if-none-match, range, x-chunk-sha256",
-  "access-control-expose-headers": "accept-ranges, content-disposition, content-length, content-range, etag, x-pi-voice-account, x-pi-voice-lease",
+  "access-control-expose-headers": "accept-ranges, content-disposition, content-length, content-range, etag, x-pi-state-version, x-pi-voice-account, x-pi-voice-lease",
 } as const;
 
 const json = (data: unknown, status = 200) => new Response(JSON.stringify(data), {
   status,
-  headers: { ...API_CORS_HEADERS, "content-type": "application/json", "cache-control": "no-store" },
+  headers: {
+    ...API_CORS_HEADERS,
+    "content-type": "application/json",
+    "cache-control": "no-store",
+    "x-pi-state-version": `${SUPERVISOR_EPOCH}/${currentStateVersion()}`,
+  },
 });
 
 function compressedJson(req: Request, data: unknown, status = 200): Response {
@@ -274,6 +279,7 @@ function compressedJson(req: Request, data: unknown, status = 200): Response {
     "content-type": "application/json",
     "cache-control": "no-store",
     vary: "accept-encoding",
+    "x-pi-state-version": `${SUPERVISOR_EPOCH}/${currentStateVersion()}`,
   };
   if (encoded.length >= 1_024 && /(?:^|,)\s*gzip(?:\s*;|\s*,|$)/i.test(req.headers.get("accept-encoding") ?? "")) {
     headers["content-encoding"] = "gzip";
@@ -283,7 +289,11 @@ function compressedJson(req: Request, data: unknown, status = 200): Response {
 }
 
 let syncSequence = 1;
-let stateSequence = 1;
+let inMemoryStateVersion = 1;
+const totalChangesRow = db.query("SELECT total_changes() AS value");
+function currentStateVersion(): number {
+  return inMemoryStateVersion + Number((totalChangesRow.get() as any)?.value ?? 0);
+}
 const syncWaiters = new Set<() => void>();
 function wakeSync() {
   syncSequence++;
@@ -291,7 +301,7 @@ function wakeSync() {
   syncWaiters.clear();
 }
 function signalSync() {
-  stateSequence++;
+  inMemoryStateVersion++;
   wakeSync();
 }
 
@@ -313,18 +323,23 @@ function signalLiveSync() {
   }, LIVE_SYNC_INTERVAL_MS);
 }
 
-async function awaitSync(after: number, waitMs: number) {
-  if (after !== syncSequence) return;
+async function awaitSync(after: number, stateVersion: number, epoch: string, waitMs: number) {
+  const synchronized = () => after === syncSequence
+    && stateVersion === currentStateVersion()
+    && epoch === SUPERVISOR_EPOCH;
+  if (!synchronized()) return;
   await new Promise<void>((resolve) => {
     let settled = false;
     const finish = () => {
       if (settled) return;
       settled = true;
       clearTimeout(timer);
+      clearInterval(versionCheck);
       syncWaiters.delete(finish);
       resolve();
     };
     const timer = setTimeout(finish, Math.min(30_000, Math.max(0, waitMs)));
+    const versionCheck = setInterval(() => { if (!synchronized()) finish(); }, 100);
     syncWaiters.add(finish);
   });
 }
@@ -544,6 +559,7 @@ const webAssets = new Map<string, readonly [string, string]>([
   ["/app.js", ["app.js", "text/javascript; charset=utf-8"]],
   ["/api.js", ["api.js", "text/javascript; charset=utf-8"]],
   ["/context-cache.js", ["context-cache.js", "text/javascript; charset=utf-8"]],
+  ["/reconciliation.js", ["reconciliation.js", "text/javascript; charset=utf-8"]],
   ["/state-machine.js", ["state-machine.js", "text/javascript; charset=utf-8"]],
   ["/native.js", ["native.js", "text/javascript; charset=utf-8"]],
   ["/voice.js", ["voice.js", "text/javascript; charset=utf-8"]],
@@ -1991,10 +2007,12 @@ const server = Bun.serve({
       try {
         const body = await readBody(req);
         const after = Math.max(0, Number(body.after ?? 0) || 0);
-        await awaitSync(after, Number(body.waitMs ?? 25_000));
+        const requestedStateVersion = Math.max(0, Number(body.stateVersion ?? 0) || 0);
+        await awaitSync(after, requestedStateVersion, String(body.epoch ?? ""), Number(body.waitMs ?? 25_000));
         const sequence = syncSequence;
+        const snapshotStateVersion = currentStateVersion();
         const includeState = body.epoch !== SUPERVISOR_EPOCH
-          || Number(body.stateAfter ?? 0) !== stateSequence
+          || requestedStateVersion !== snapshotStateVersion
           || after === sequence;
         const rows = includeState
           ? db.query("SELECT * FROM sessions WHERE archived_at IS NULL ORDER BY created_at DESC").all() as any[]
@@ -2090,7 +2108,7 @@ const server = Bun.serve({
         return compressedJson(req, {
           epoch: SUPERVISOR_EPOCH,
           seq: sequence,
-          stateSeq: stateSequence,
+          stateVersion: snapshotStateVersion,
           sessions: includeState && body.includeSessions !== false ? publicSessions(rows) : null,
           archivedSessions: includeArchived ? publicSessions(archivedPage(0, ARCHIVED_PAGE_SIZE)) : null,
           archivedTotal: includeState ? archivedCount() : null,

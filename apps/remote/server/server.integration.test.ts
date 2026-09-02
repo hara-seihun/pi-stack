@@ -42,7 +42,7 @@ async function api(method: string, path: string, body?: unknown) {
     body: body === undefined ? undefined : JSON.stringify(body),
   });
   const value = await response.json() as any;
-  return { status: response.status, value };
+  return { status: response.status, value, stateVersion: response.headers.get("x-pi-state-version") };
 }
 
 async function waitFor<T>(read: () => Promise<T>, accept: (value: T) => boolean, timeoutMs = 8_000): Promise<T> {
@@ -418,11 +418,38 @@ async function createThread(destination = "home", model?: string) {
 
 describe("web and supervisor integration", () => {
   test("serves the complete browser module graph", async () => {
-    for (const path of ["/app.js", "/api.js", "/context-cache.js", "/state-machine.js", "/native.js"]) {
+    for (const path of ["/app.js", "/api.js", "/context-cache.js", "/reconciliation.js", "/state-machine.js", "/native.js"]) {
       const response = await fetch(base + path);
       expect(response.status).toBe(200);
       expect(response.headers.get("content-type")).toContain("text/javascript");
     }
+  });
+
+  test("reconciles every acknowledged mutation through its committed state version", async () => {
+    const id = await createThread("home", "sol");
+    const before = await api("POST", "/v1/sync", {
+      after: 0,
+      stateVersion: 0,
+      waitMs: 0,
+      includeDashboard: false,
+    });
+    const renamed = await fetch(`${base}/v1/sessions/${id}/name`, { method: "PUT", body: "Reconciled thread" });
+    expect(renamed.status).toBe(200);
+    const target = renamed.headers.get("x-pi-state-version") || "";
+    const separator = target.lastIndexOf("/");
+    expect(target.slice(0, separator)).toBe(before.value.epoch);
+    const targetVersion = Number(target.slice(separator + 1));
+    expect(targetVersion).toBeGreaterThan(before.value.stateVersion);
+
+    const reconciled = await api("POST", "/v1/sync", {
+      after: before.value.seq,
+      stateVersion: before.value.stateVersion,
+      epoch: before.value.epoch,
+      waitMs: 25_000,
+      includeDashboard: false,
+    });
+    expect(reconciled.value.stateVersion).toBeGreaterThanOrEqual(targetVersion);
+    expect(reconciled.value.sessions.find((session: any) => session.id === id)?.name).toBe("Reconciled thread");
   });
 
   test("lists this host's working agents for observation", async () => {
@@ -574,7 +601,7 @@ describe("web and supervisor integration", () => {
       await waitForGate("live-stream-next");
       const first = await api("POST", "/v1/sync", {
         after: 0,
-        stateAfter: 0,
+        stateVersion: 0,
         waitMs: 0,
         selectedId: id,
         eventSessionId: id,
@@ -588,7 +615,7 @@ describe("web and supervisor integration", () => {
       await waitForGate("live-stream");
       const second = await api("POST", "/v1/sync", {
         after: first.value.seq,
-        stateAfter: first.value.stateSeq,
+        stateVersion: first.value.stateVersion,
         epoch: first.value.epoch,
         waitMs: 1_000,
         selectedId: id,
@@ -601,7 +628,7 @@ describe("web and supervisor integration", () => {
       expect(second.value.sessions).toBeNull();
       expect(second.value.selectedSession).toBeNull();
       expect(second.value.contextUpdate).toBeNull();
-      expect(second.value.stateSeq).toBe(first.value.stateSeq);
+      expect(second.value.stateVersion).toBe(first.value.stateVersion);
       expect(applyContextSplice("instant text", second.value.sessionEvents.liveTextUpdate.splice)).toBe("instant text second");
     } finally {
       releaseGate("live-stream-next");

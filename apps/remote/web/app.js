@@ -1,5 +1,6 @@
 import { API } from "./api.js";
 import { deleteCachedContext, readCachedContext, writeCachedContext } from "./context-cache.js";
+import { createStateReconciler } from "./reconciliation.js";
 import { createRemoteStore, initialRemoteState } from "./state-machine.js";
 import "./voice.js";
 
@@ -49,6 +50,11 @@ const deleteSetState = (key, value) => store.dispatch({ type: "set-delete", key,
 let voiceSession = null;
 let voiceThreadId = null;
 let threadStartMenu = null;
+
+const stateReconciler = createStateReconciler(localStorage, () => poll(true));
+function requestStateReconciliation(encoded) {
+  stateReconciler.require(encoded, state.syncEpoch, state.syncStateVersion);
+}
 
 // The thread poll carries only the newest archived page; older pages load on request.
 const ARCHIVED_PAGE_SIZE = 20;
@@ -264,6 +270,7 @@ async function api(method, path, body, timeout = 20000, retryOnLock = true) {
       return api(method, path, body, timeout, false);
     }
     if (!response.ok) throw new Error(result.error || `HTTP ${response.status}`);
+    if (method !== "GET" && method !== "HEAD") requestStateReconciliation(response.headers.get("x-pi-state-version"));
     return result;
   } catch (error) {
     if (error?.name === "AbortError") throw new Error("Request timed out");
@@ -1242,7 +1249,7 @@ async function poll(immediate = false) {
   try {
     const body = {
       after: state.syncSeq,
-      stateAfter: state.syncStateSeq,
+      stateVersion: state.syncStateVersion,
       epoch: state.syncEpoch,
       waitMs: immediate ? 0 : 25_000,
       contextProjection: "display",
@@ -1272,12 +1279,16 @@ async function poll(immediate = false) {
         contextDocument: null, contextSessionId: null, threadViews: new Map(),
         sessionLiveTextDocument: null, sessionLiveThinkingDocument: null, sessionLiveDocumentId: null,
         agentLiveTextDocument: null, agentLiveThinkingDocument: null, agentDocumentRunId: null,
-        syncSeq: 0, syncStateSeq: 0,
+        syncSeq: 0, syncStateVersion: 0,
       });
     }
-    patchState({ syncEpoch: String(all.epoch || "") });
+    const responseEpoch = String(all.epoch || "");
+    const synchronizedStateVersion = Number(all.stateVersion || state.syncStateVersion);
+    const authoritativeSnapshot = Array.isArray(all.sessions);
+    const acceptAuthoritativeState = stateReconciler.accepts(responseEpoch, synchronizedStateVersion);
+    patchState({ syncEpoch: responseEpoch });
 
-    if (all.agentRuns) applyAgentList(all.agentRuns);
+    if (acceptAuthoritativeState && all.agentRuns) applyAgentList(all.agentRuns);
     const sameAgent = requestedAgent && requestedAgent === state.agentRunId && selectionEpoch === state.selectionEpoch;
     if (all.agentEvents && sameAgent) {
       const baseText = state.agentDocumentRunId === requestedAgent ? state.agentLiveTextDocument : null;
@@ -1298,14 +1309,9 @@ async function poll(immediate = false) {
     }
 
     let sessionsChanged = false;
-    if (Array.isArray(all.sessions)) {
-      const previous = new Map([...state.sessions, ...state.archivedSessions].map((session) => [session.id, session]));
-      const mergeListed = (sessions) => sessions.map((session) => {
-        const old = previous.get(session.id);
-        return old && Number(old.revision || 0) > Number(session.revision || 0) ? old : session;
-      });
-      const sessions = mergeListed(all.sessions);
-      const archivedSessions = Array.isArray(all.archivedSessions) ? mergeListed(all.archivedSessions) : state.archivedSessions;
+    if (authoritativeSnapshot && acceptAuthoritativeState) {
+      const sessions = all.sessions;
+      const archivedSessions = Array.isArray(all.archivedSessions) ? all.archivedSessions : state.archivedSessions;
       const listedArchived = new Set(archivedSessions.map((session) => session.id));
       const liveIds = new Set(sessions.map((session) => session.id));
       patchState({
@@ -1331,12 +1337,12 @@ async function poll(immediate = false) {
       });
       synchronizedLive = { text: nextText?.document || "", thinking: nextThinking?.document || "" };
     }
-    if (sameSelection && mutationStable && (all.selectedSession || sessionsChanged)) {
+    if (acceptAuthoritativeState && sameSelection && mutationStable && (all.selectedSession || sessionsChanged)) {
       const selected = all.selectedSession || state.sessions.find((session) => session.id === requested);
       if (selected) applySelectedSession(selected);
       else if (requested) clearSelection();
     }
-    if (sameSelection && all.contextUpdate) {
+    if (acceptAuthoritativeState && sameSelection && all.contextUpdate) {
       const base = state.contextSessionId === requested ? state.contextDocument : null;
       const next = await window.PiRemoteSync.update(base, all.contextUpdate);
       if (controller.signal.aborted) throw new DOMException("Synchronization cancelled", "AbortError");
@@ -1353,20 +1359,21 @@ async function poll(immediate = false) {
     if (synchronizedLive) setLive(synchronizedLive.thinking, synchronizedLive.text);
     patchState({
       syncSeq: Number(all.seq || state.syncSeq),
-      syncStateSeq: Number(all.stateSeq || state.syncStateSeq),
+      syncStateVersion: synchronizedStateVersion,
     });
+    stateReconciler.settle(responseEpoch, synchronizedStateVersion, authoritativeSnapshot && acceptAuthoritativeState);
     if (!state.selectedId && !state.agentRunId && state.sessions.length && selectionEpoch === state.selectionEpoch) selectThread(state.sessions[0]);
     if (sessionsChanged) renderThreads();
-    if (all.agents) renderAgents(all.agents);
-    if (sessionsChanged || all.agentRuns || all.agents) renderTabs();
-    if (all.plans) renderPlan(all.plans);
-    if (all.governors) renderGovernorControls(all.governors);
-    if (all.machine) renderMachine(all.machine);
-    if (sessionsChanged || all.selectedSession || all.agentEvents || all.agentRuns) updateChrome();
+    if (acceptAuthoritativeState && all.agents) renderAgents(all.agents);
+    if (sessionsChanged || (acceptAuthoritativeState && (all.agentRuns || all.agents))) renderTabs();
+    if (acceptAuthoritativeState && all.plans) renderPlan(all.plans);
+    if (acceptAuthoritativeState && all.governors) renderGovernorControls(all.governors);
+    if (acceptAuthoritativeState && all.machine) renderMachine(all.machine);
+    if (sessionsChanged || (acceptAuthoritativeState && all.selectedSession) || all.agentEvents || (acceptAuthoritativeState && all.agentRuns)) updateChrome();
     ui.connection.hidden = true;
   } catch (error) {
     if (error?.name !== "AbortError") {
-      patchState({ syncSeq: 0, syncStateSeq: 0 });
+      patchState({ syncSeq: 0, syncStateVersion: 0 });
       retryDelay = 1_200;
       ui.connection.hidden = false;
       ui.connection.textContent = `●  Offline · ${error.message}`; ui.connection.style.color = "var(--danger)";
