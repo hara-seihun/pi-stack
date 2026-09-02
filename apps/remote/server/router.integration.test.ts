@@ -75,8 +75,10 @@ describe("Pi Remote front door", () => {
     const index = await fetch(`${base}/`);
     expect(index.status).toBe(200);
     expect(index.headers.get("content-type")).toContain("text/html");
-    const script = await fetch(`${base}/person.js`);
-    expect(script.status).toBe(200);
+    const html = await index.text();
+    const scriptPath = html.match(/src="(\/assets\/[^"]+\.js)"/)?.[1];
+    expect(scriptPath).toBeTruthy();
+    expect((await fetch(`${base}${scriptPath}`)).status).toBe(200);
   });
 
   test("answers the Android preflight for the person header before any identity is known", async () => {

@@ -15,7 +15,7 @@
     "@capacitor/core": "8.5.0"
   },
   "devDependencies": {
-    "@capacitor/cli": "8.5.0"
+    "@capacitor/cli": "8.4.3"
   },
   "engines": {
     "node": ">=22"

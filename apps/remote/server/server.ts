@@ -12,7 +12,7 @@ import { applyContextSplice, contextSplice, messageFinalizationKey, sha256, type
 import { beginSupervisorGeneration, ensureSupervisorSchema } from "./database";
 import { DEFAULT_LIVE_MODEL, DEFAULT_LIVE_VOICE, VoiceBroker } from "./voice/broker";
 import { attachRuntimeHost, startRuntimeHost, type RuntimeTransport } from "./runtime-transport";
-import { API } from "../web/api.js";
+import { API } from "./api";
 import { knownEnvironments, listPersons, publicPerson } from "./persons";
 import { API_CORS_HEADERS } from "./cors";
 import { fileBrowserError, listDirectory, localFileResponse, registerIconAssets, webResponse } from "./files";
@@ -44,7 +44,7 @@ const LOCAL_AGENT_MAX_AGE_MS = Math.max(0, Number(process.env.PI_REMOTE_LOCAL_AG
 const HOST = process.env.PI_REMOTE_HOST ?? "127.0.0.1";
 const PORT = Number(process.env.PI_REMOTE_PORT ?? "8788");
 const AGENT_DIR = process.env.PI_AGENT_DIR ?? join(HOME, ".pi/agent");
-const WEB_DIR = join(import.meta.dir, "../web");
+const WEB_DIR = join(import.meta.dir, "../web/dist");
 const PACKAGE_ROOT = realpathSync(join(import.meta.dir, ".."));
 const RELEASE_COMMIT_PATH = join(PACKAGE_ROOT, ".pi-stack-commit");
 const RELEASE_COMMIT = existsSync(RELEASE_COMMIT_PATH) ? readFileSync(RELEASE_COMMIT_PATH, "utf8").trim() : null;

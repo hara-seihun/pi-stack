@@ -23,7 +23,7 @@ import { preflight, withCors } from "./cors";
 const PORT = Number(process.env.PI_REMOTE_ROUTER_PORT ?? "8788");
 const HOST = process.env.PI_REMOTE_ROUTER_HOST ?? "127.0.0.1";
 const KEY_DIR = process.env.PI_REMOTE_KEY_DIR ?? "/run/pi-remote-keys";
-const WEB_DIR = join(import.meta.dir, "../web");
+const WEB_DIR = join(import.meta.dir, "../web/dist");
 const UNLOCK_TIMEOUT_MS = Number(process.env.PI_REMOTE_UNLOCK_TIMEOUT_MS ?? "20000");
 const VERSION = "2.0.0";
 

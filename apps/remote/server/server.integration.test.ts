@@ -460,12 +460,15 @@ describe("web and supervisor integration", () => {
     expect((await fetch(`${base}/v1/actions/nope/toggle`, { method: "POST" })).status).toBe(404);
   });
 
-  test("serves the complete browser module graph", async () => {
-    for (const path of ["/app.js", "/api.js", "/context-cache.js", "/reconciliation.js", "/state-machine.js", "/thread-order.js", "/native.js", "/person.js"]) {
-      const response = await fetch(base + path);
-      expect(response.status).toBe(200);
-      expect(response.headers.get("content-type")).toContain("text/javascript");
-    }
+  test("serves the compiled React client", async () => {
+    const response = await fetch(base + "/");
+    expect(response.status).toBe(200);
+    expect(response.headers.get("content-type")).toContain("text/html");
+    const html = await response.text();
+    const assets = [...html.matchAll(/(?:src|href)="(\/assets\/[^"]+)"/g)].map((match) => match[1]);
+    expect(assets.length).toBeGreaterThan(0);
+    for (const path of assets) expect((await fetch(base + path)).status).toBe(200);
+    expect((await fetch(base + "/voice.html")).status).toBe(200);
   });
 
   test("persists a complete active thread order", async () => {

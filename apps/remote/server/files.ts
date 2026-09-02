@@ -79,63 +79,34 @@ export function localFileResponse(requested: string, method: string, req: Reques
   } catch { return new Response("File not found", { status: 404, headers: API_CORS_HEADERS }); }
 }
 
-const WEB_ASSETS = new Map<string, readonly [string, string]>([
-  ["/", ["index.html", "text/html; charset=utf-8"]],
-  ["/index.html", ["index.html", "text/html; charset=utf-8"]],
-  ["/app.js", ["app.js", "text/javascript; charset=utf-8"]],
-  ["/api.js", ["api.js", "text/javascript; charset=utf-8"]],
-  ["/context-cache.js", ["context-cache.js", "text/javascript; charset=utf-8"]],
-  ["/reconciliation.js", ["reconciliation.js", "text/javascript; charset=utf-8"]],
-  ["/state-machine.js", ["state-machine.js", "text/javascript; charset=utf-8"]],
-  ["/thread-order.js", ["thread-order.js", "text/javascript; charset=utf-8"]],
-  ["/native.js", ["native.js", "text/javascript; charset=utf-8"]],
-  ["/person.js", ["person.js", "text/javascript; charset=utf-8"]],
-  ["/voice.js", ["voice.js", "text/javascript; charset=utf-8"]],
-  ["/sync.js", ["sync.js", "text/javascript; charset=utf-8"]],
-  ["/voice-page.js", ["voice-page.js", "text/javascript; charset=utf-8"]],
-  ["/voice.html", ["voice.html", "text/html; charset=utf-8"]],
-  ["/styles.css", ["styles.css", "text/css; charset=utf-8"]],
-  ["/manifest.webmanifest", ["manifest.webmanifest", "application/manifest+json"]],
-  ["/icon.svg", ["icon.svg", "image/svg+xml"]],
-  ["/openai.svg", ["openai.svg", "image/svg+xml"]],
-  ["/anthropic.svg", ["anthropic.svg", "image/svg+xml"]],
-  ["/work.svg", ["work.svg", "image/svg+xml"]],
-  ["/personal.svg", ["personal.svg", "image/svg+xml"]],
-  ["/converge.svg", ["converge.svg", "image/svg+xml"]],
-  ["/thunder.svg", ["thunder.svg", "image/svg+xml"]],
-]);
-const VENDOR_CONTENT_TYPES: Record<string, string> = {
-  ".css": "text/css; charset=utf-8",
+const WEB_CONTENT_TYPES: Record<string, string> = {
+  ".html": "text/html; charset=utf-8",
   ".js": "text/javascript; charset=utf-8",
+  ".css": "text/css; charset=utf-8",
+  ".svg": "image/svg+xml",
+  ".json": "application/json; charset=utf-8",
+  ".webmanifest": "application/manifest+json",
   ".ttf": "font/ttf",
   ".woff": "font/woff",
   ".woff2": "font/woff2",
 };
 
-/** Any icon the catalog or a destination names becomes a servable asset. */
-export function registerIconAssets(icons: Iterable<string>) {
-  for (const icon of icons) if (/^[a-z0-9_-]+$/.test(icon)) WEB_ASSETS.set(`/${icon}.svg`, [`${icon}.svg`, "image/svg+xml"]);
-}
+export function registerIconAssets(_icons: Iterable<string>) {}
 
 export function webResponse(webDir: string, pathname: string, method: string): Response | null {
   if (method !== "GET" && method !== "HEAD") return null;
-  let asset = WEB_ASSETS.get(pathname);
-  if (!asset && pathname.startsWith("/vendor/")) {
-    const relative = pathname.slice(1);
-    if (relative.split("/").some((part) => !part || part === "." || part === "..")) return null;
-    const file = join(webDir, relative);
-    const extension = relative.slice(relative.lastIndexOf("."));
-    const contentType = VENDOR_CONTENT_TYPES[extension];
-    if (contentType && existsSync(file)) asset = [relative, contentType];
-  }
-  if (!asset) return null;
-  const body = method === "HEAD" ? null : Bun.file(join(webDir, asset[0]));
-  return new Response(body, {
+  const relative = pathname === "/" ? "index.html" : pathname.replace(/^\/+/, "");
+  if (!relative || relative.split("/").some((part) => !part || part === "." || part === "..")) return null;
+  const extension = relative.slice(relative.lastIndexOf("."));
+  const contentType = WEB_CONTENT_TYPES[extension];
+  const file = join(webDir, relative);
+  if (!contentType || !existsSync(file) || !statSync(file).isFile()) return null;
+  return new Response(method === "HEAD" ? null : Bun.file(file), {
     headers: {
-      "content-type": asset[1],
+      "content-type": contentType,
       "cache-control": "no-cache",
       "x-content-type-options": "nosniff",
-      "content-security-policy": "default-src 'self'; connect-src 'self'; img-src 'self'; style-src 'self' 'unsafe-inline'; script-src 'self'; object-src 'none'; frame-ancestors 'none'",
+      "content-security-policy": "default-src 'self'; connect-src 'self'; img-src 'self' data:; style-src 'self' 'unsafe-inline'; script-src 'self'; object-src 'none'; frame-ancestors 'none'",
     },
   });
 }

@@ -1,5 +1,5 @@
 import { describe, expect, test } from "bun:test";
-import { API } from "./api.js";
+import { API } from "../server/api";
 
 describe("shared API routes",()=>{
   test("encodes client paths and query values",()=>{

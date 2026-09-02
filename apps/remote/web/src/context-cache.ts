@@ -2,10 +2,11 @@ const DATABASE = "pi-remote-contexts";
 const STORE = "contexts";
 const MAX_CONTEXTS = 32;
 
-let databasePromise;
+export interface CachedContext extends SyncDocument { key: string; updatedAt: number }
+let databasePromise: Promise<IDBDatabase> | null = null;
 
 function database() {
-  if (!databasePromise) databasePromise = new Promise((resolve, reject) => {
+  if (!databasePromise) databasePromise = new Promise<IDBDatabase>((resolve, reject) => {
     const request = indexedDB.open(DATABASE, 1);
     request.onupgradeneeded = () => {
       const store = request.result.createObjectStore(STORE, { keyPath: "key" });
@@ -17,20 +18,20 @@ function database() {
   return databasePromise;
 }
 
-function completion(transaction) {
-  return new Promise((resolve, reject) => {
+function completion(transaction: IDBTransaction) {
+  return new Promise<void>((resolve, reject) => {
     transaction.oncomplete = () => resolve();
     transaction.onerror = () => reject(transaction.error || new Error("Context cache transaction failed"));
     transaction.onabort = () => reject(transaction.error || new Error("Context cache transaction aborted"));
   });
 }
 
-export async function readCachedContext(key) {
+export async function readCachedContext(key: string): Promise<CachedContext | null> {
   const db = await database();
   const transaction = db.transaction(STORE, "readonly");
   const done = completion(transaction);
   const request = transaction.objectStore(STORE).get(key);
-  const value = await new Promise((resolve, reject) => {
+  const value = await new Promise<CachedContext | null>((resolve, reject) => {
     request.onsuccess = () => resolve(request.result || null);
     request.onerror = () => reject(request.error || new Error("Could not read cached context"));
   });
@@ -38,13 +39,13 @@ export async function readCachedContext(key) {
   return value;
 }
 
-export async function writeCachedContext(key, context) {
+export async function writeCachedContext(key: string, context: SyncDocument) {
   const db = await database();
   const transaction = db.transaction(STORE, "readwrite");
   const done = completion(transaction);
   const store = transaction.objectStore(STORE);
   store.put({ key, ...context, updatedAt: Date.now() });
-  const keys = await new Promise((resolve, reject) => {
+  const keys = await new Promise<IDBValidKey[]>((resolve, reject) => {
     const request = store.index("updatedAt").getAllKeys();
     request.onsuccess = () => resolve(request.result);
     request.onerror = () => reject(request.error || new Error("Could not prune cached contexts"));
@@ -53,7 +54,7 @@ export async function writeCachedContext(key, context) {
   await done;
 }
 
-export async function deleteCachedContext(key) {
+export async function deleteCachedContext(key: string) {
   const db = await database();
   const transaction = db.transaction(STORE, "readwrite");
   const done = completion(transaction);

@@ -1,5 +1,5 @@
 import { describe, expect, test } from "bun:test";
-import { moveThreadToIndex, threadsInOrder } from "./thread-order.js";
+import { moveThreadToIndex, threadsInOrder } from "./src/thread-order";
 
 const threads = [{ id: "a", value: 1 }, { id: "b", value: 2 }, { id: "c", value: 3 }];
 

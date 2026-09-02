@@ -25,8 +25,10 @@ orchestrator_release=$(readlink -f "$orchestrator")
   exit 66
 }
 
-mkdir -p "$stage/release/node_modules"
-rsync -a --chmod=D755,Fu=rwX,Fgo=rX apps/remote/package.json apps/remote/server apps/remote/web "$stage/release/"
+npm run build --workspace=pi-remote
+mkdir -p "$stage/release/node_modules" "$stage/release/web"
+rsync -a --chmod=D755,Fu=rwX,Fgo=rX apps/remote/package.json apps/remote/server "$stage/release/"
+rsync -a --chmod=D755,Fu=rwX,Fgo=rX apps/remote/web/dist "$stage/release/web/"
 for executable in pi-remote pi-remote-launch pi-remote-supervise; do
   test -x "$stage/release/server/$executable" || {
     printf 'staged Pi Remote executable is not executable: %s\n' "$executable" >&2

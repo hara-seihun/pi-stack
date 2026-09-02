@@ -2,9 +2,9 @@
 
 Kenan is the Android client for Pi Remote. Its package id is `works.kenan.piremote.kenan`, so a deployment updates the installed app in place.
 
-The browser and Android app have one interface source: [`../remote/web`](../remote/web). `build.mjs` copies those files into Capacitor's generated assets. Do not edit `dist` or `android/app/src/main/assets/public`; both are generated.
+The browser and Android app have one React and TypeScript interface source in [`../remote/web/src`](../remote/web/src). `build.mjs` compiles it with Vite into Capacitor's generated assets. Do not edit `dist` or `android/app/src/main/assets/public`; both are generated.
 
-The native layer keeps the WebView below Android's system bars, translates touches into system haptics, remembers the selected environment, opens a pinned SSH forward for endpoints that need one, and tells the shared client which endpoint owns each API call. Synchronization, context rendering, the drawer, composer, uploads, voice, files, and settings run from the same JavaScript and CSS as the browser. The launcher artwork comes from the native Kenan implementation this app replaced.
+The native layer keeps the WebView below Android's system bars, translates touches into system haptics, remembers the selected environment, opens a pinned SSH forward for endpoints that need one, and tells the shared client which endpoint owns each API call. Synchronization, context rendering, the drawer, composer, uploads, voice, files, and settings run from the same compiled application and CSS as the browser. The launcher artwork comes from the native Kenan implementation this app replaced.
 
 ## Build configuration
 

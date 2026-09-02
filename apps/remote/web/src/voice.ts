@@ -1,4 +1,5 @@
-import { API } from "./api.js";
+import { API } from "../../server/api";
+import { piFetch } from "./client";
 
 (() => {
   const MAX_CONTEXT_BYTES = 500;
@@ -39,7 +40,7 @@ import { API } from "./api.js";
 
   function utf8Chunks(value, maxBytes = MAX_CONTEXT_BYTES) {
     const encoder = new TextEncoder();
-    const chunks = [];
+    const chunks: string[] = [];
     let chunk = "", bytes = 0;
     for (const character of value) {
       const size = encoder.encode(character).byteLength;
@@ -57,8 +58,8 @@ import { API } from "./api.js";
 
   async function waitForReady(target, options) {
     if (options.ready()) return;
-    await new Promise((resolve, reject) => {
-      const finish = (error) => {
+    await new Promise<void>((resolve, reject) => {
+      const finish = (error?: Error) => {
         clearTimeout(timeout);
         target.removeEventListener(options.readyEvent, ready);
         if (options.failureEvent) target.removeEventListener(options.failureEvent, failed);
@@ -97,6 +98,8 @@ import { API } from "./api.js";
   }
 
   class VoiceSession {
+    [key: string]: any;
+
     constructor(options) {
       this.sessionId = options.sessionId;
       this.onState = options.onState || (() => {});
@@ -455,5 +458,5 @@ import { API } from "./api.js";
     }
   }
 
-  window.PiRemoteVoice = { create: (options) => new VoiceSession(options) };
+  window.PiRemoteVoice = { create: (options) => new VoiceSession(options) as any };
 })();

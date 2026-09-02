@@ -13,9 +13,9 @@ function renderer() {
   context.globalThis = context;
   createContext(context);
   for (const asset of ["markdown-it.min.js", "katex.min.js", "texmath.js"]) {
-    runInContext(readFileSync(join(import.meta.dir, "vendor", asset), "utf8"), context, { filename: asset });
+    runInContext(readFileSync(join(import.meta.dir, "public", "vendor", asset), "utf8"), context, { filename: asset });
   }
-  runInContext(readFileSync(join(import.meta.dir, "vendor", "pi-markdown-compat.js"), "utf8"), context, { filename: "pi-markdown-compat.js" });
+  runInContext(readFileSync(join(import.meta.dir, "public", "vendor", "pi-markdown-compat.js"), "utf8"), context, { filename: "pi-markdown-compat.js" });
   const markdown = context.markdownit({ html: false, breaks: true, linkify: true }).use(context.texmath, {
     engine: context.katex,
     delimiters: ["dollars", "brackets", "beg_end"],
