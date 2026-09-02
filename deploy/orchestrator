@@ -36,15 +36,14 @@ validate_manifest() {
   manifest=$(pi_stack_as_root jq -r '.taskManifest // empty' "$config")
   [[ -n $manifest ]] || return 0
   pi_stack_as_root test -f "$manifest" || { echo "orchestrator lane manifest does not exist: $manifest" >&2; return 1; }
-  pi_stack_as_root cat "$manifest" | node - <<'NODE'
-const chunks=[];process.stdin.on("data",(c)=>chunks.push(c)).on("end",()=>{
-const manifest = JSON.parse(Buffer.concat(chunks).toString("utf8"));
+  PI_STACK_LANE_MANIFEST="$(pi_stack_as_root cat "$manifest")" node - <<'NODE'
+const manifest = JSON.parse(process.env.PI_STACK_LANE_MANIFEST);
 if (manifest.version !== 2 || !Array.isArray(manifest.lanes)) throw new Error("lane manifest version 2 required");
 for (const lane of manifest.lanes) {
   for (const key of ["id", "cwd", "profile"]) if (typeof lane[key] !== "string" || !lane[key]) throw new Error(`lane ${key} is required`);
   if ((typeof lane.prompt !== "string" || !lane.prompt) && (typeof lane.promptFile !== "string" || !lane.promptFile)) throw new Error(`lane ${lane.id} needs prompt or promptFile`);
   if (!(Number(lane.weight) > 0)) throw new Error(`lane ${lane.id} needs a positive weight`);
-}});
+}
 NODE
 }
 
