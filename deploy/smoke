@@ -19,7 +19,9 @@ body=$(mktemp); trap 'rm -f "$body"' EXIT
 # The web client, served to anyone: it is what asks for a name and a key.
 code=$(get / "$body")
 [[ $code == 200 ]] && grep -q '<html' "$body" || fail "GET / returned $code without the web client"
-for asset in /app.js /person.js /native.js /api.js /sync.js; do
+mapfile -t assets < <(grep -oE '(src|href)="/[^"]+"' "$body" | cut -d\" -f2 | sort -u)
+(( ${#assets[@]} > 0 )) || fail "GET / named no client assets"
+for asset in "${assets[@]}"; do
   code=$(get "$asset" "$body")
   [[ $code == 200 ]] || fail "GET $asset returned $code"
 done
