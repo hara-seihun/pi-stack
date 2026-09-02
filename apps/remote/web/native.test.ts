@@ -70,7 +70,7 @@ test("offers environment switching on the main browser page and carries person i
     baseUrl: "",
     environments: [
       { id: "local", name: "Local", baseUrl: "" },
-      { id: "converge", name: "Converge", baseUrl: "/dev-converge" },
+      { id: "converge", name: "Converge", baseUrl: "/converge" },
     ],
   };
   const select = {
@@ -119,7 +119,7 @@ test("offers environment switching on the main browser page and carries person i
 
     select.value = "converge";
     await change?.();
-    expect(healthRequest?.input).toBe("/dev-converge/v1/health");
+    expect(healthRequest?.input).toBe("/converge/v1/health");
     expect(healthRequest?.init?.headers).toEqual({ "x-pi-remote-user": "kenan" });
     expect(values.get("kenan-environment")).toBe("converge");
     expect(reloaded).toBe(true);

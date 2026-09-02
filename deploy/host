@@ -65,31 +65,53 @@ fi
 # recorded. The front door restarts only when Pi Remote changed, and each
 # running supervisor is then handed the new release without ending active turns.
 activate_remote() {
+  local target_commit=$1 service user response deadline ready
+  local -a activated_users=()
   pi_stack_as_root systemctl try-restart pi-remote-router.service 2>/dev/null || true
   while read -r service _; do
-    [[ -n $service ]] && PI_REMOTE_SERVICE=$service "$root/apps/remote/activate"
+    if [[ -n $service ]]; then
+      PI_REMOTE_SERVICE=$service "$root/apps/remote/activate"
+      user=${service#pi-remote@}
+      activated_users+=("${user%.service}")
+    fi
   done < <(systemctl list-units 'pi-remote@*.service' --type=service --state=active --legend=no --plain --no-pager 2>/dev/null)
+
+  for user in "${activated_users[@]}"; do
+    deadline=$((SECONDS + 20))
+    ready=
+    while (( SECONDS < deadline )); do
+      response=$(curl -fsS --max-time 2 -H "x-pi-remote-user: $user" http://127.0.0.1:8788/v1/health 2>/dev/null || true)
+      if [[ $(jq -r '.releaseCommit // empty' <<<"$response" 2>/dev/null) == "$target_commit" ]]; then
+        ready=1
+        break
+      fi
+      sleep 0.1
+    done
+    if [[ -z $ready ]]; then
+      echo "pi-remote@$user.service did not activate Pi Remote $target_commit" >&2
+      return 1
+    fi
+  done
 }
 if [[ -n $fleet ]]; then
   pi_stack_as_root systemctl try-restart "pi-orchestrator@$fleet.service" 2>/dev/null || true
 fi
-if [[ $previous_remote != "$expected" ]]; then
-  activate_remote
+activation_failed=0
+if [[ $previous_remote != "$expected" ]] && ! activate_remote "$expected"; then
+  activation_failed=1
 fi
 
 # Then walk the front door the way the clients do. A release that locks a
 # person out of the app goes back to the previous Pi Remote release on the
 # spot, and the deployment fails loudly instead of quietly.
 if systemctl is-active --quiet pi-remote-router.service 2>/dev/null; then
-  sleep 1
-  if ! "$root/deploy/smoke"; then
+  if (( activation_failed )) || ! "$root/deploy/smoke"; then
     if [[ -n $previous_remote_release && $previous_remote != "$expected" && -d $previous_remote_release ]]; then
-      echo "smoke check failed; returning Pi Remote to $previous_remote" >&2
+      echo "activation or smoke check failed; returning Pi Remote to $previous_remote" >&2
       candidate="$(dirname "$remote")/.pi-stack-releases/.rollback.$$"
       pi_stack_as_root ln -s "$previous_remote_release" "$candidate"
       pi_stack_as_root mv -Tf "$candidate" "$remote"
-      activate_remote
-      sleep 1
+      activate_remote "$previous_remote" || true
       "$root/deploy/smoke" || echo "smoke check still fails on the previous release; the machine, not the release, is the problem" >&2
     fi
     echo "Pi stack $expected is not accepted on this host" >&2

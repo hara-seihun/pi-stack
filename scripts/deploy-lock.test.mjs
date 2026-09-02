@@ -225,6 +225,7 @@ test("the host deployment restarts the daemon and activates a changed Pi Remote"
     const personsDir=join(directory,"persons");mkdirSync(personsDir);writeFileSync(join(personsDir,"guest.json"),JSON.stringify({version:1,user:"guest-person",displayName:"Guest",port:18799,environment:{}}));
     const activationTrace=join(directory,"activation.trace"),systemctlTrace=join(directory,"systemctl.trace"),settingsTrace=join(directory,"settings.trace");
     writeFileSync(join(bin,"systemctl"),"#!/bin/sh\nprintf '%s\\n' \"$*\" >> \"$SYSTEMCTL_TRACE\"\ncase $1 in list-units) echo 'pi-remote@alice.service loaded active running';; is-active) exit 0;; esac\nexit 0\n");chmodSync(join(bin,"systemctl"),0o755);
+    writeFileSync(join(bin,"curl"),"#!/bin/sh\nprintf '{\"releaseCommit\":\"%s\"}\\n' \"$(cat \"$PI_STACK_REMOTE_DEST/.pi-stack-commit\")\"\n");chmodSync(join(bin,"curl"),0o755);
     const env={...process.env,...destinations,PATH:`${bin}:${process.env.PATH}`,ACTIVATE_TRACE:activationTrace,SYSTEMCTL_TRACE:systemctlTrace,SETTINGS_TRACE:settingsTrace,PI_REMOTE_PERSONS_DIR:personsDir,PI_STACK_DEPLOY_NO_SUDO:"1",PI_STACK_ALLOW_DIRTY:"1",PI_STACK_SERVICES:"1"};
     const first=spawnSync(join(deploy,"host"),[hostFile],{encoding:"utf8",env});assert.equal(first.status,0,first.stderr);
     const firstUnits=readFileSync(systemctlTrace,"utf8");

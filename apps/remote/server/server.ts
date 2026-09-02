@@ -46,6 +46,8 @@ const PORT = Number(process.env.PI_REMOTE_PORT ?? "8788");
 const AGENT_DIR = process.env.PI_AGENT_DIR ?? join(HOME, ".pi/agent");
 const WEB_DIR = join(import.meta.dir, "../web");
 const PACKAGE_ROOT = realpathSync(join(import.meta.dir, ".."));
+const RELEASE_COMMIT_PATH = join(PACKAGE_ROOT, ".pi-stack-commit");
+const RELEASE_COMMIT = existsSync(RELEASE_COMMIT_PATH) ? readFileSync(RELEASE_COMMIT_PATH, "utf8").trim() : null;
 
 function configuredPackageSource(entry: unknown): string | null {
   if (typeof entry === "string") return entry;
@@ -1599,7 +1601,7 @@ const server = Bun.serve({
     }
     const web = webResponse(WEB_DIR, url.pathname, req.method);
     if (web) return web;
-    if (API.health.match(req.method, url.pathname)) return json({ ok: true, version: VERSION, environmentId: ENVIRONMENT_ID });
+    if (API.health.match(req.method, url.pathname)) return json({ ok: true, version: VERSION, environmentId: ENVIRONMENT_ID, releaseCommit: RELEASE_COMMIT });
     if (API.environment.match(req.method, url.pathname)) return json({ environment: environmentMetadata() });
     if (API.environments.match(req.method, url.pathname)) return json({ environments: knownEnvironments() });
     if (API.files.match(req.method, url.pathname)) {
