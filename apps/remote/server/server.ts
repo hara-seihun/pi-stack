@@ -197,6 +197,7 @@ type RuntimeHandoff = {
   retrying: boolean;
   liveText: string;
   liveThinking: string;
+  thinkingRecorded: boolean;
   pendingContextFinalization: string | null;
   pendingModelFailure: string | null;
   lastActivity: number;
@@ -234,6 +235,7 @@ interface Runtime {
   suppressOutput: boolean;
   liveText: string;
   liveThinking: string;
+  thinkingRecorded: boolean;
   pendingContextFinalization: string | null;
   pendingModelFailure: string | null;
   expectedExit: boolean;
@@ -452,6 +454,7 @@ function acknowledgeMessageContext(sessionId: string, finalizesMessage: unknown)
   rt.pendingContextFinalization = null;
   rt.liveText = "";
   rt.liveThinking = "";
+  rt.thinkingRecorded = false;
   signalLiveSync();
   kickSession(sessionId);
 }
@@ -866,6 +869,7 @@ function handleRpcEvent(sessionId: string, rt: Runtime, event: any) {
       rt.pendingContextFinalization = null;
       rt.liveText = "";
       rt.liveThinking = "";
+      rt.thinkingRecorded = false;
     }
     rt.liveText += event.assistantMessageEvent.delta ?? "";
     signalLiveSync();
@@ -874,6 +878,7 @@ function handleRpcEvent(sessionId: string, rt: Runtime, event: any) {
     rt.pendingContextFinalization = null;
     rt.liveText = "";
     rt.liveThinking = "";
+    rt.thinkingRecorded = false;
     touchSession(sessionId);
   } else if (event.type === "message_update" && event.assistantMessageEvent?.type === "thinking_delta") {
     proveRunning();
@@ -881,8 +886,11 @@ function handleRpcEvent(sessionId: string, rt: Runtime, event: any) {
     signalLiveSync();
   } else if (event.type === "message_update" && event.assistantMessageEvent?.type === "thinking_end") {
     const thinking = rt.liveThinking || String(event.assistantMessageEvent.content ?? "");
-    if (thinking) emit(sessionId, "thinking", { text: thinking });
-    rt.liveThinking = "";
+    if (thinking) {
+      rt.liveThinking = thinking;
+      emit(sessionId, "thinking", { text: thinking });
+      rt.thinkingRecorded = true;
+    }
     touchSession(sessionId);
   } else if (event.type === "message_end") {
     proveRunning();
@@ -893,6 +901,7 @@ function handleRpcEvent(sessionId: string, rt: Runtime, event: any) {
         rt.pendingContextFinalization = null;
         rt.liveText = "";
         rt.liveThinking = "";
+        rt.thinkingRecorded = false;
       } else {
         rt.pendingContextFinalization = finalization;
         if (text) rt.liveText = text;
@@ -902,7 +911,10 @@ function handleRpcEvent(sessionId: string, rt: Runtime, event: any) {
     const failure = modelFailureText(event.message);
     if (failure) rt.pendingModelFailure = failure;
     else if (event.message?.role === "assistant") rt.pendingModelFailure = null;
-    if (rt.liveThinking) emit(sessionId, "thinking", { text: rt.liveThinking });
+    if (rt.liveThinking && !rt.thinkingRecorded) {
+      emit(sessionId, "thinking", { text: rt.liveThinking });
+      rt.thinkingRecorded = true;
+    }
   } else if (event.type === "tool_execution_start") {
     proveRunning();
     const toolCallId = String(event.toolCallId ?? crypto.randomUUID());
@@ -983,6 +995,7 @@ function settleRuntime(sessionId: string, rt: Runtime, emitEvent: boolean): bool
   if (!rt.pendingContextFinalization) {
     rt.liveText = "";
     rt.liveThinking = "";
+    rt.thinkingRecorded = false;
   }
   rt.lastActivity = Date.now();
   if (rt.dispatchedWorkIds.size > 0) {
@@ -1059,6 +1072,7 @@ function runtimeFromHandoff(row: any, handoff?: RuntimeHandoff): Runtime {
     suppressOutput: false,
     liveText: handoff?.liveText ?? "",
     liveThinking: handoff?.liveThinking ?? "",
+    thinkingRecorded: handoff?.thinkingRecorded ?? false,
     pendingContextFinalization: handoff?.pendingContextFinalization ?? null,
     pendingModelFailure: handoff?.pendingModelFailure ?? null,
     expectedExit: false,
@@ -1465,6 +1479,7 @@ async function drainSession(sessionId: string) {
       if (!wasBusy) {
         rt.liveText = "";
         rt.liveThinking = "";
+        rt.thinkingRecorded = false;
         rt.pendingContextFinalization = null;
         setRuntimePhase(sessionId, rt, "DISPATCHING", "RUNNING");
       } else {
@@ -1637,6 +1652,7 @@ async function abortCurrentOperation(sessionId: string): Promise<AbortOperationR
   rt.followUpQueued = 0;
   rt.liveText = "";
   rt.liveThinking = "";
+  rt.thinkingRecorded = false;
   rt.pendingContextFinalization = null;
   rt.lastActivity = Date.now();
   const supervisorQueued = Number((db.query(
@@ -2454,6 +2470,7 @@ const server = Bun.serve({
             .run(runtimeState.sessionFile ? String(runtimeState.sessionFile) : row.session_path, changedAt, id);
           rt.liveText = "";
           rt.liveThinking = "";
+          rt.thinkingRecorded = false;
           rt.pendingContextFinalization = null;
           rt.activeTools.clear();
           rt.phaseVersion++;
@@ -2584,6 +2601,7 @@ function handoffDocument() {
       retrying: rt.retrying,
       liveText: rt.liveText,
       liveThinking: rt.liveThinking,
+      thinkingRecorded: rt.thinkingRecorded,
       pendingContextFinalization: rt.pendingContextFinalization,
       pendingModelFailure: rt.pendingModelFailure,
       lastActivity: rt.lastActivity,

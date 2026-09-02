@@ -272,11 +272,12 @@ for line in sys.stdin:
    out({'type':'agent_start'})
    if last == 'live-stream':
     out({'type':'message_update','message':{'role':'assistant','content':[{'type':'thinking','thinking':'thinking now'}]},'assistantMessageEvent':{'type':'thinking_delta','delta':'thinking now'}})
+    out({'type':'message_update','message':{'role':'assistant','content':[{'type':'thinking','thinking':'thinking now'}]},'assistantMessageEvent':{'type':'thinking_end','content':'thinking now'}})
     out({'type':'message_update','message':{'role':'assistant','content':[{'type':'text','text':'instant text'}]},'assistantMessageEvent':{'type':'text_delta','delta':'instant text'}})
     gate('live-stream-next')
     out({'type':'message_update','message':{'role':'assistant','content':[{'type':'text','text':'instant text second'}]},'assistantMessageEvent':{'type':'text_delta','delta':' second'}})
     gate('live-stream')
-    out({'type':'message_end','message':{'role':'assistant','content':[{'type':'text','text':'instant text second'}]}})
+    out({'type':'message_end','message':{'role':'assistant','content':[{'type':'thinking','thinking':'thinking now'},{'type':'text','text':'instant text second'}]}})
     streaming = False
     out({'type':'agent_settled'})
    elif last == 'release-later':
@@ -698,8 +699,10 @@ describe("web and supervisor integration", () => {
       await waitFor(async () => (await api("GET", `/v1/sessions/${id}/events?after=0`)).value, (value) => value.session.state === "IDLE");
       const beforeContext = await api("GET", `/v1/sessions/${id}/events?after=0`);
       expect(beforeContext.value.liveText).toBe("instant text second");
+      expect(beforeContext.value.liveThinking).toBe("thinking now");
+      expect(beforeContext.value.events.filter((event: any) => event.type === "thinking")).toHaveLength(1);
 
-      const finalMessage = { role: "assistant", content: [{ type: "text", text: "instant text second" }] };
+      const finalMessage = { role: "assistant", content: [{ type: "thinking", thinking: "thinking now" }, { type: "text", text: "instant text second" }] };
       await api("PUT", `/v1/sessions/${id}/context`, {
         capturedAt: 400,
         context: { systemPrompt: "System", tools: [], messages: [finalMessage] },
@@ -707,6 +710,7 @@ describe("web and supervisor integration", () => {
       });
       const afterContext = await api("GET", `/v1/sessions/${id}/events?after=0`);
       expect(afterContext.value.liveText).toBe("");
+      expect(afterContext.value.liveThinking).toBe("");
       expect((await api("GET", `/v1/sessions/${id}/context`)).value.context.messages).toEqual([finalMessage]);
     } finally {
       releaseGate("live-stream-next");
