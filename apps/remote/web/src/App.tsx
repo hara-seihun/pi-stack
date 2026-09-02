@@ -6,6 +6,7 @@ import { API } from "../../server/api";
 import { deleteCachedContext, readCachedContext, writeCachedContext } from "./context-cache";
 import { api, piFetch, registerUnlockHandler, syncRequest } from "./client";
 import { ContextTranscript, CopyButton, modelContextEntries } from "./context";
+import { createPollSchedule } from "./poll-schedule";
 import { threadsInOrder } from "./thread-order";
 import type { AgentHost, AgentRun, Attachment, ContextEntry, Governor, MachineAction, PlanCard, QueuedMessage, Session, Settings, ThreadStart } from "./types";
 
@@ -242,12 +243,16 @@ export default function App() {
   const [voiceDetail, setVoiceDetail] = useState("");
   const voice = useRef<VoiceSession | null>(null);
   const syncController = useRef<AbortController | null>(null);
+  const syncSchedule = useRef(createPollSchedule());
   const syncMeta = useRef({ seq: 0, version: 0, epoch: "", lastAgentSeq: 0 });
   const dragSensors = useSensors(
     useSensor(PointerSensor, { activationConstraint: { delay: 350, tolerance: 10 } }),
     useSensor(KeyboardSensor, { coordinateGetter: sortableKeyboardCoordinates }),
   );
-  const kick = useCallback(() => syncController.current?.abort(), []);
+  const kick = useCallback(() => {
+    syncSchedule.current.requestImmediate();
+    syncController.current?.abort();
+  }, []);
 
   useEffect(() => () => voice.current?.stop(), []);
   useEffect(() => {
@@ -280,11 +285,14 @@ export default function App() {
     patch({ selectedId: session.id, selected: session, agentRunId: null, agentRun: null, contextEntries: [], contextDocument: null, contextSessionId: session.id, liveTextDocument: null, liveThinkingDocument: null, agentEntries: [] });
     setPrompt(loadDraft(session.id));
     stateRef.current.drawerOpen && innerWidth < 1000 && patch({ drawerOpen: false });
+    kick();
     try {
       const cached: any = await readCachedContext(await cacheKey(session.id));
-      if (stateRef.current.selectedId === session.id && !stateRef.current.contextDocument && cached?.document) patch({ contextDocument: cached, contextEntries: modelContextEntries(JSON.parse(cached.document)) });
+      if (stateRef.current.selectedId === session.id && !stateRef.current.contextDocument && cached?.document) {
+        patch({ contextDocument: cached, contextEntries: modelContextEntries(JSON.parse(cached.document)) });
+        kick();
+      }
     } catch (error) { console.error(error); }
-    kick();
   }, [cacheKey, kick, patch, stateRef]);
 
   const selectAgent = useCallback((run: AgentRun) => {
@@ -303,7 +311,8 @@ export default function App() {
       const current = stateRef.current;
       const selectedId = current.selectedId;
       const agentRunId = current.agentRunId;
-      const body: any = { after: syncMeta.current.seq, stateVersion: syncMeta.current.version, epoch: syncMeta.current.epoch, waitMs: 25_000, contextProjection: "display", includeArchived: true, includeAgentList: current.drawerTab === "agents" || Boolean(agentRunId), includeDashboard: true };
+      const waitMs = syncSchedule.current.takeWaitMs();
+      const body: any = { after: syncMeta.current.seq, stateVersion: syncMeta.current.version, epoch: syncMeta.current.epoch, waitMs, contextProjection: "display", includeArchived: true, includeAgentList: current.drawerTab === "agents" || Boolean(agentRunId), includeDashboard: true };
       if (selectedId && !agentRunId) {
         body.selectedId = selectedId; body.eventSessionId = selectedId; body.eventAfter = Number.MAX_SAFE_INTEGER;
         if (current.contextSessionId === selectedId && current.contextDocument) body.contextHash = current.contextDocument.hash;
@@ -361,6 +370,7 @@ export default function App() {
         if (all.plans) update.plans = all.plans.cards || [];
         if (all.governors) update.governors = all.governors;
         if (all.machine) update.machine = all.machine;
+        if (controller.signal.aborted || stopped) throw new DOMException("cancelled", "AbortError");
         patch(update);
       } catch (error) {
         if (!(error instanceof DOMException && error.name === "AbortError")) { patch({ offline: error instanceof Error ? error.message : String(error) }); delay = 1_200; }
