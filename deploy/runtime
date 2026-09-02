@@ -83,7 +83,7 @@ settings_manager="$dependency_release/node_modules/@earendil-works/pi-coding-age
 grep -q 'renameSync(temporary, path)' "$settings_manager"
 node --check "$settings_manager"
 
-extensions=(pi-claude-code-use bash-timeout-guard publication-custody)
+extensions=(pi-claude-code-use bash-timeout-guard)
 # A release belongs to the reviewed source commit, even when two commits happen
 # to produce identical runtime files. This keeps the selected artifact's receipt
 # commit-consistent and makes the next deployment hit the unchanged fast path.
@@ -92,7 +92,6 @@ if [[ ! -d $runtime_release ]]; then
   stage=$(mktemp -d "$releases_root/.stage.XXXXXXXX")
   install -d -m 700 "$stage/extensions"
   for extension in "${extensions[@]}"; do rsync -a "$runtime_source/extensions/$extension" "$stage/extensions/"; done
-  rsync -a "$runtime_source/prompt-eval" "$stage/"
   ln -s "$dependency_release/node_modules" "$stage/node_modules"
   printf '%s\n' "$(git rev-parse HEAD)" > "$stage/.pi-stack-commit"
   mv "$stage" "$runtime_release"
@@ -106,11 +105,9 @@ printf '%s\n' "$(git rev-parse HEAD)" > "$runtime_root/.pi-stack-commit"
 install -d -m 700 "$bin_dir"
 ln -sfn "$current/node_modules/.bin/pi" "$bin_dir/pi"
 ln -sfn "$current/node_modules/.bin/agent-browser" "$bin_dir/agent-browser"
-ln -sfn "$current/prompt-eval/prompt-eval.mjs" "$bin_dir/prompt-eval"
-rm -f "$bin_dir/pro"
+rm -f "$bin_dir/pro" "$bin_dir/prompt-eval"
 version=$("$bin_dir/pi" --version)
 browser_version=$("$bin_dir/agent-browser" --version)
 [[ $version == 0.84.2 ]] || { echo "unexpected Pi version: $version" >&2; exit 1; }
 [[ $browser_version == "agent-browser 0.34.0" ]] || { echo "unexpected agent-browser version: $browser_version" >&2; exit 1; }
-"$bin_dir/prompt-eval" --help | grep -q '^prompt-eval'
 printf 'deployed Pi %s and %s from %s to %s\n' "$version" "$browser_version" "$(git rev-parse HEAD)" "$runtime_release"

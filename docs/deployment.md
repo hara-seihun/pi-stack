@@ -16,7 +16,7 @@ Host repositories own:
 - authoritative task manifests and their prompt/probe files;
 - mutable ledgers, sessions, uploads, and encrypted folders.
 
-A host points Orchestrator's operator config at its version-1 task manifest. Controller startup reconciles the complete set atomically, so replacing a host does not depend on remembered `task set` commands and a removed lane cannot linger in SQLite. Pause controls remain mutable ledger state and survive reconciliation.
+A host points Orchestrator's operator config at its version-2 lane manifest. The daemon rereads the file when it changes and replaces its lane declarations atomically, so replacing a host does not depend on remembered commands and a removed lane cannot linger in SQLite. Pause and boost controls remain mutable ledger state.
 
 This repository owns build commands, package and skill roles, API contracts, and component tests. CI runs the complete check before publication. Its dedicated self-hosted runner keeps a private checkout across runner and machine restarts. Every event resets tracked source, removes generated output other than dependency trees, and uses `pi_stack_prepare_dependencies` to prove the installed lock before reuse. An absent or mismatched tree gets a clean install. Deployment builds the two compiled packages and does not repeat tests that already passed on the immutable commit.
 
@@ -63,7 +63,7 @@ The NixOS repository owns the deployment command and service definitions. It pub
 
 Local Pi Remote reports environment ID `local`, requires unlock, and offers only Personal and Home after the Converge cutover.
 
-An ordinary Orchestrator update does not restart the runner service. The host deployment bumps the runner generation, and the supervisor starts a worker from the new release while existing workers finish on their current generation. The candidate Orchestrator parses the host's current task manifest before publication. An incompatible manifest fails the deployment while the selected release remains unchanged. Changes to `host/supervisor.ts` or `ledger/ledger.ts` stop the controller and runner before publishing the new artifacts. Deployment then starts the runner and controller on the new build. The supervisor cannot reload its own module, and storage migrations cannot race workers or a controller using the previous schema. Runner startup requeues every persisted session from the stopped workers, and the new worker reopens them. Every Orchestrator release also restarts the stateless voice broker so it loads the same build.
+An Orchestrator update restarts the daemon and nothing else. Each admitted run is its own transient user unit that recorded the release directory it launched from, so live workers keep running on their generation while new runs start from the selected release. The candidate Orchestrator parses the host's current lane manifest before publication; an incompatible manifest fails the deployment while the selected release remains unchanged.
 
 ## Converge
 
@@ -73,7 +73,7 @@ Converge OpenTofu owns one `pi_stack_commit`. Its startup configuration clones t
 deploy/host converge
 ```
 
-The command publishes runtime, Orchestrator, Pi Remote, tools, skills, and settings while holding one source lock. It derives the deployed skill and package lists from the checked manifests. The candidate Orchestrator must parse the current task manifest before its release can be selected. If a live Orchestrator ledger exists and an ordinary release changed, the command bumps the runner generation instead of restarting workers. Supervisor and runner-storage changes stop the controller and runner before publication, reopen persisted sessions on the new build, then start the new controller. The stateless voice broker restarts on every Orchestrator release. If Pi Remote changed, it performs a live supervisor handoff before returning. The whole command must finish within 50 seconds. A timeout is a deployment failure, never permission to raise the limit.
+The command publishes runtime, Orchestrator, Pi Remote, tools, skills, and settings while holding one source lock. It derives the deployed skill and package lists from the checked manifests. The candidate Orchestrator must parse the current lane manifest before its release can be selected. The daemon restarts; live workers finish on the release they recorded. If Pi Remote changed, it performs a live supervisor handoff before returning. The whole command must finish within 50 seconds. A timeout is a deployment failure, never permission to raise the limit.
 
 Converge Pi Remote reports environment ID `converge`. It has one profile rooted at `/home/kenan/converge` and executes Pi directly on that machine.
 

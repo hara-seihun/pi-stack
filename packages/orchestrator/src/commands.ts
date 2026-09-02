@@ -4,7 +4,6 @@ import { homedir } from "node:os";
 import { loadConfig } from "./config.js";
 import { Daemon } from "./daemon.js";
 import { Store } from "./store.js";
-import { transitionLedger } from "./transition.js";
 import { work } from "./worker.js";
 import { transactSharedCredential } from "./auth/shared-oauth.js";
 
@@ -36,7 +35,6 @@ export async function dispatch(argv:string[]):Promise<void>{
   }
   if(command==="daemon"){const store=Store.open(ledgerPath());try{await new Daemon(store,loadConfig()).start();}finally{store.close();}return;}
   if(command==="worker"){const id=rest[0];if(!id)throw new Error("worker run id is required");await work(id);return;}
-  if(command==="transition"){transitionLedger(ledgerPath());console.log("ledger transitioned");return;}
   if(command==="status"){output(await request("/v1/status"));return;}
   if(command==="pause"){output(await request("/v1/control","POST",{key:"launches",value:"paused"}));return;}
   if(command==="resume"){output(await request("/v1/control","POST",{key:"launches",value:"enabled"}));return;}

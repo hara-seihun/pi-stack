@@ -232,7 +232,7 @@ test("component publication atomically replaces directories and symlinks", () =>
   }
 });
 
-test("the Converge host transitions once and otherwise restarts only the daemon", () => {
+test("the Converge host restarts only the daemon and activates a changed Pi Remote", () => {
   const directory = mkdtempSync(join(tmpdir(), "pi-stack-host-current-"));
   try {
     const repository = join(directory, "repo"), deploy = join(repository, "deploy"), remoteApp = join(repository, "apps", "remote"), bin = join(directory, "bin");
@@ -244,18 +244,14 @@ test("the Converge host transitions once and otherwise restarts only the daemon"
     writeFileSync(join(remoteApp,"activate"),"#!/bin/sh\nprintf '%s\\n' \"${PI_REMOTE_SERVICE:-}\" >> \"$ACTIVATE_TRACE\"\n");chmodSync(join(remoteApp,"activate"),0o755);
     assert.equal(spawnSync("git",["init","-q",repository]).status,0);assert.equal(spawnSync("git",["-C",repository,"add","deploy","apps"]).status,0);assert.equal(spawnSync("git",["-C",repository,"-c","user.name=test","-c","user.email=test@example.test","commit","-qm","fixture"]).status,0);
     const destinations=Object.fromEntries(["RUNTIME","ORCHESTRATOR","REMOTE","TOOLS","SKILLS"].map((name)=>[`PI_STACK_${name}_DEST`,join(directory,name.toLowerCase())]));destinations.PI_STACK_RUNTIME_ROOT=destinations.PI_STACK_RUNTIME_DEST;delete destinations.PI_STACK_RUNTIME_DEST;
-    const ledger=join(directory,"ledger.sqlite3"),trace=join(directory,"node.trace"),activationTrace=join(directory,"activation.trace"),systemctlTrace=join(directory,"systemctl.trace");
-    assert.equal(spawnSync("sqlite3",[ledger,"CREATE TABLE task(id TEXT);"]).status,0);
-    writeFileSync(join(bin,"node"),`#!/bin/sh\nprintf '%s\\n' "$*" >> "$TRACE"\n`);chmodSync(join(bin,"node"),0o755);
+    const activationTrace=join(directory,"activation.trace"),systemctlTrace=join(directory,"systemctl.trace");
     writeFileSync(join(bin,"systemctl"),"#!/bin/sh\nprintf '%s\\n' \"$*\" >> \"$SYSTEMCTL_TRACE\"\ncase $1 in --user|is-active|stop|start|try-restart) exit 0;; *) exit 1;; esac\n");chmodSync(join(bin,"systemctl"),0o755);
-    const env={...process.env,...destinations,PI_ORCHESTRATOR_LEDGER:ledger,PATH:`${bin}:${process.env.PATH}`,TRACE:trace,ACTIVATE_TRACE:activationTrace,SYSTEMCTL_TRACE:systemctlTrace};
-    const transition=spawnSync(join(deploy,"host"),["converge"],{encoding:"utf8",env});assert.equal(transition.status,0,transition.stderr);
-    assert.match(readFileSync(trace,"utf8"),/orchestrator\/dist\/cli\.js transition/);assert.equal(existsSync(join(directory,"ledger.before-current-schema.sqlite3")),true);
-    const transitionUnits=readFileSync(systemctlTrace,"utf8");assert.match(transitionUnits,/--user stop pi-orchestrator\.service/);assert.match(transitionUnits,/stop pi-orchestrator-runner\.service pi-orchestrator-voice\.service/);assert.match(transitionUnits,/--user start pi-orchestrator\.service/);assert.equal(readFileSync(activationTrace,"utf8"),"pi-remote.service\n");
-    assert.equal(spawnSync("sqlite3",[ledger,"CREATE TABLE meta(version INTEGER NOT NULL);"]).status,0);rmSync(trace,{force:true});rmSync(systemctlTrace,{force:true});
-    writeFileSync(join(repository,"release"),"ordinary\n");assert.equal(spawnSync("git",["-C",repository,"add","release"]).status,0);assert.equal(spawnSync("git",["-C",repository,"-c","user.name=test","-c","user.email=test@example.test","commit","-qm","ordinary"]).status,0);
-    const ordinary=spawnSync(join(deploy,"host"),["converge"],{encoding:"utf8",env});assert.equal(ordinary.status,0,ordinary.stderr);assert.equal(existsSync(trace),false);
-    const ordinaryUnits=readFileSync(systemctlTrace,"utf8");assert.match(ordinaryUnits,/--user try-restart pi-orchestrator\.service/);assert.doesNotMatch(ordinaryUnits,/pi-orchestrator-runner|pi-orchestrator-voice/);
+    const env={...process.env,...destinations,PATH:`${bin}:${process.env.PATH}`,ACTIVATE_TRACE:activationTrace,SYSTEMCTL_TRACE:systemctlTrace};
+    const first=spawnSync(join(deploy,"host"),["converge"],{encoding:"utf8",env});assert.equal(first.status,0,first.stderr);
+    const firstUnits=readFileSync(systemctlTrace,"utf8");assert.match(firstUnits,/--user try-restart pi-orchestrator\.service/);assert.doesNotMatch(firstUnits,/ stop | start /);assert.equal(readFileSync(activationTrace,"utf8"),"pi-remote.service\n");
+    rmSync(systemctlTrace,{force:true});
+    const unchanged=spawnSync(join(deploy,"host"),["converge"],{encoding:"utf8",env});assert.equal(unchanged.status,0,unchanged.stderr);
+    assert.equal(readFileSync(activationTrace,"utf8"),"pi-remote.service\n");assert.match(readFileSync(systemctlTrace,"utf8"),/--user try-restart pi-orchestrator\.service/);
   } finally { rmSync(directory,{recursive:true,force:true}); }
 });
 

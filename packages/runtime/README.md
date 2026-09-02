@@ -1,13 +1,11 @@
 # Pi runtime packages
 
-Reusable extensions and prompt-evaluation tools for [Pi](https://pi.dev).
+Reusable extensions for [Pi](https://pi.dev), plus the pinned Pi and `agent-browser` versions every host runs.
 
 ## Packages
 
 - `bash-timeout-guard` requires a bounded bash call, defaults to 30 minutes with a UI and 55 seconds for autonomous sessions, accepts a host-configured ceiling, and forbids detached work.
-- `publication-custody` ends model-side CI polling after a durable publication handoff.
-- `pi-claude-code-use` adapts Pi tools and prompts for Anthropic subscription requests.
-- `prompt-eval` runs reproducible Pi prompt comparisons in isolated workspaces.
+- `pi-claude-code-use` adapts Pi tools and prompts for Anthropic subscription requests. It is loaded on every host and does nothing until a session uses Anthropic OAuth.
 
 ## Install
 
@@ -22,8 +20,6 @@ The root package enables every extension. Use Pi's package filters when only som
 ## Configuration
 
 The packages contain no host identities, credential values, deployment paths, or service policy. Configuration stays on the machine running Pi. Each component README lists its environment variables and local files.
-
-The guards work with defaults and accept environment overrides. A host may connect reporting hooks to an alert command or inbox without making that mechanism part of this repository.
 
 ## Development
 

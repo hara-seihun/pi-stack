@@ -72,4 +72,4 @@ Import reads credentials from a file so tokens do not enter process arguments. `
 
 The daemon serves its public API on `127.0.0.1:2460` by default. Pi Remote consumes the package's observation API and does not query private tables.
 
-Generated command and table lists live in [docs/reference.md](docs/reference.md). The current schema is created directly. Production upgrades use a bounded transition executable, verify the result, and then delete transition code rather than keeping a migration chain.
+Generated command and table lists live in [docs/reference.md](docs/reference.md). A fresh ledger gets the current schema directly. A schema change ships as a bounded transition command that is deleted once both hosts have run it, so there is no migration chain to maintain.

@@ -4,7 +4,7 @@ This repository owns Hara's custom Pi runtime, agent orchestrator, remote client
 
 ## Contents
 
-- [`packages/runtime`](packages/runtime/README.md) pins Pi and owns the runtime extensions, model catalog, and prompt evaluator.
+- [`packages/runtime`](packages/runtime/README.md) pins Pi and owns the runtime extensions.
 - [`packages/orchestrator`](packages/orchestrator/README.md) schedules and hosts persistent agent work.
 - [`apps/remote`](apps/remote/README.md) contains the Pi Remote supervisor, shared client, and context mirror extension.
 - [`apps/kenan`](apps/kenan/README.md) packages the shared client for Android.

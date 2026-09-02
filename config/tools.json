@@ -2,39 +2,75 @@
   "tools": [
     {
       "id": "agent-workspace",
-      "hosts": ["local", "converge"],
+      "hosts": [
+        "local",
+        "converge"
+      ],
       "fleet": true,
-      "commands": [{ "name": "agent-workspace", "entry": "main" }]
+      "commands": [
+        {
+          "name": "agent-workspace",
+          "entry": "main"
+        }
+      ]
     },
     {
       "id": "fleet-errors",
-      "hosts": ["local", "converge"],
-      "commands": [{ "name": "fleet-errors", "entry": "main" }]
-    },
-    {
-      "id": "hara-messages",
-      "hosts": ["local"],
-      "commands": [{ "name": "hara-messages", "entry": "main" }]
+      "hosts": [
+        "local",
+        "converge"
+      ],
+      "commands": [
+        {
+          "name": "fleet-errors",
+          "entry": "main"
+        }
+      ]
     },
     {
       "id": "mcp",
-      "hosts": ["local", "converge"],
+      "hosts": [
+        "local",
+        "converge"
+      ],
       "fleet": true,
-      "commands": [{ "name": "mcp", "entry": "main" }]
+      "commands": [
+        {
+          "name": "mcp",
+          "entry": "main"
+        }
+      ]
     },
     {
       "id": "mcp-script",
-      "hosts": ["local", "converge"],
+      "hosts": [
+        "local",
+        "converge"
+      ],
       "fleet": true,
-      "commands": [{ "name": "mcp-script", "entry": "main" }]
+      "commands": [
+        {
+          "name": "mcp-script",
+          "entry": "main"
+        }
+      ]
     },
     {
       "id": "read-condensed-session",
-      "hosts": ["local", "converge"],
+      "hosts": [
+        "local",
+        "converge"
+      ],
       "fleet": true,
       "commands": [
-        { "name": "read-condensed-session", "entry": "main" },
-        { "name": "read-thread", "entry": "read-thread" }
+        {
+          "name": "read-condensed-session",
+          "entry": "main"
+        },
+        {
+          "name": "read-thread",
+          "entry": "read-thread"
+        }
       ]
     }
   ]

@@ -18,36 +18,11 @@ pi_stack_prepare_dependencies "$root"
 expected=$(git -C "$root" rev-parse HEAD)
 orchestrator=${PI_STACK_ORCHESTRATOR_DEST:-/srv/pi/pi-orchestrator}
 remote=${PI_STACK_REMOTE_DEST:-/srv/pi/pi-remote}
-ledger=${PI_ORCHESTRATOR_LEDGER:-$HOME/.local/share/pi-orchestrator/ledger.sqlite3}
 previous_remote=""
 [[ ! -f $remote/.pi-stack-commit ]] || previous_remote=$(<"$remote/.pi-stack-commit")
 
-transition_required=0
-services_stopped=0
-restore_daemon() {
-  if (( services_stopped )); then
-    set +e
-    user_systemctl start pi-orchestrator.service
-  fi
-}
-trap restore_daemon EXIT
-if [[ -f $ledger ]] &&
-   ! sqlite3 "$ledger" "SELECT 1 FROM sqlite_master WHERE type='table' AND name='meta'" | grep -qx 1; then
-  transition_required=1
-  services_stopped=1
-  user_systemctl stop pi-orchestrator.service 2>/dev/null || true
-  pi_stack_as_root systemctl stop pi-orchestrator-runner.service pi-orchestrator-voice.service 2>/dev/null || true
-  backup="${ledger%/*}/ledger.before-current-schema.sqlite3"
-  rm -f "$backup"
-  sqlite3 "$ledger" ".backup '$backup'"
-  chmod --reference="$ledger" "$backup"
-fi
-
 "$root/deploy/runtime"
 "$root/deploy/orchestrator"
-if (( transition_required )); then
-  PI_ORCHESTRATOR_LEDGER="$ledger" node "$orchestrator/dist/cli.js" transition
-fi
 "$root/deploy/remote"
 "$root/deploy/tools" converge
 "$root/deploy/skills" converge-user
@@ -65,13 +40,7 @@ for artifact in \
   }
 done
 
-if (( services_stopped )); then
-  user_systemctl start pi-orchestrator.service 2>/dev/null || true
-  services_stopped=0
-else
-  user_systemctl try-restart pi-orchestrator.service 2>/dev/null || true
-fi
-trap - EXIT
+user_systemctl try-restart pi-orchestrator.service 2>/dev/null || true
 remote_service=${PI_REMOTE_SERVICE:-pi-remote.service}
 if [[ $previous_remote != "$expected" ]] && systemctl is-active --quiet "$remote_service"; then
   PI_REMOTE_SERVICE=$remote_service "$root/apps/remote/activate"

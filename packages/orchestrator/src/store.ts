@@ -147,11 +147,7 @@ export class Store {
     const db = new SqliteDatabase(path);
     db.exec("PRAGMA busy_timeout=5000; PRAGMA journal_mode=WAL; PRAGMA synchronous=NORMAL; PRAGMA foreign_keys=ON");
     const meta = db.prepare("SELECT name FROM sqlite_master WHERE type='table' AND name='meta'").get();
-    if (!meta) {
-      const old = db.prepare("SELECT name FROM sqlite_master WHERE type='table' AND name='task'").get();
-      if (old) { db.close(); throw new Error("old orchestrator ledger requires `pi-orchestrator transition`"); }
-      db.exec(SCHEMA);
-    }
+    if (!meta) db.exec(SCHEMA);
     const row = db.prepare("SELECT version FROM meta").get() as { version: number };
     if (row.version !== SCHEMA_VERSION) { db.close(); throw new Error(`unsupported orchestrator schema ${row.version}`); }
     return new Store(db);
