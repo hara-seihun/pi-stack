@@ -474,6 +474,12 @@ function renderMessageQueue() {
       steer.addEventListener("click", () => steerQueuedMessage(message, actions));
       actions.append(steer);
     }
+    if (message.canHardSteer) {
+      const hardSteer = node("button", "queued-message-action hard-steer", "HARD STEER");
+      hardSteer.type = "button"; hardSteer.title = "Stop the current operation and send this message next";
+      hardSteer.addEventListener("click", () => hardSteerQueuedMessage(message, actions));
+      actions.append(hardSteer);
+    }
     if (message.canCancel) {
       const edit = messageActionButton("queued-message-action icon-message-action edit-queued", "pencil", "Cancel and return this message to the composer");
       edit.addEventListener("click", () => cancelQueuedMessage(message, true, actions));
@@ -2201,15 +2207,15 @@ function restoreQueuedDraft(text) {
   saveDraft(state.selectedId, ui.prompt.value);
   updateComposer();
 }
-async function mutateQueuedMessage(message, actions, method, suffix, onSuccess) {
+async function mutateQueuedMessage(message, actions, route, onSuccess) {
   const id = state.selectedId;
   if (!id || !message?.id) return;
   setQueuedActionsEnabled(actions, false);
   try {
     const result = await api(
-      method,
-      (suffix ? API.queueSteer : API.queueItem).path({ sessionId: id, workId: message.id }),
-      method === "POST" ? {} : undefined,
+      route.method,
+      route.path({ sessionId: id, workId: message.id }),
+      route.method === "POST" ? {} : undefined,
     );
     if (result.session) {
       mergeSession(result.session);
@@ -2222,10 +2228,13 @@ async function mutateQueuedMessage(message, actions, method, suffix, onSuccess) 
   } finally { poll(); }
 }
 function steerQueuedMessage(message, actions) {
-  return mutateQueuedMessage(message, actions, "POST", "/steer");
+  return mutateQueuedMessage(message, actions, API.queueSteer);
+}
+function hardSteerQueuedMessage(message, actions) {
+  return mutateQueuedMessage(message, actions, API.queueHardSteer);
 }
 function cancelQueuedMessage(message, edit, actions) {
-  return mutateQueuedMessage(message, actions, "DELETE", "", (result, id) => {
+  return mutateQueuedMessage(message, actions, API.queueItem, (result, id) => {
     if (edit && state.selectedId === id) restoreQueuedDraft(result.text ?? message.text);
   });
 }

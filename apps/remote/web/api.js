@@ -86,4 +86,5 @@ export const API = Object.freeze({
   updateSessionName: route("PUT", "/v1/sessions/:sessionId/name"),
   queueItem: route("DELETE", "/v1/sessions/:sessionId/queue/:workId"),
   queueSteer: route("POST", "/v1/sessions/:sessionId/queue/:workId/steer"),
+  queueHardSteer: route("POST", "/v1/sessions/:sessionId/queue/:workId/hard-steer"),
 });

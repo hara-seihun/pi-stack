@@ -668,10 +668,12 @@ function publicSession(row: any, prepared?: PreparedQueue) {
     state: String(item.state),
     status: item.state === "dispatched" ? "Sent · awaiting confirmation"
       : item.state === "running" ? "Sending to agent"
+      : item.delivery === "hardSteer" ? "Hard steering after current operation stops"
       : item.delivery === "steer" ? "Steering after current tool calls"
       : item.delivery === "followUp" ? "Queued for after completion"
       : "Sending to agent",
     canSteer: item.state === "queued" && item.delivery === "followUp",
+    canHardSteer: item.state === "queued" && item.delivery === "followUp",
     canCancel: item.state === "queued",
     createdAt: item.created_at,
     lastError: item.last_error,
@@ -1421,12 +1423,13 @@ async function drainSession(sessionId: string) {
   while (true) {
     if (!ownsSupervisorLease() || forkingSessions.has(sessionId)) return;
     const knownRuntime = runtimes.get(sessionId);
+    if (knownRuntime && ["ABORTING", "STOPPING"].includes(knownRuntime.phase)) return;
     const runtimeBusy = knownRuntime && ["DISPATCHING", "RUNNING"].includes(knownRuntime.phase);
     const item = db.query(`
       SELECT * FROM work_items
       WHERE session_id=? AND state='queued' AND available_at<=?
         ${runtimeBusy ? "AND delivery='steer'" : ""}
-      ORDER BY created_at,rowid LIMIT 1
+      ORDER BY CASE WHEN delivery='hardSteer' THEN 0 ELSE 1 END,created_at,rowid LIMIT 1
     `).get(sessionId, Date.now()) as any;
     if (!item) return;
     db.query("UPDATE work_items SET state='running',updated_at=? WHERE id=?").run(now(), item.id);
@@ -1557,6 +1560,91 @@ function enqueuePrompt(sessionId: string, requestId: string, text: string, deliv
   saveRequest(requestId, sessionId, "prompt", 202, response);
   kickSession(sessionId);
   return response;
+}
+
+type AbortOperationResult =
+  | { ok: true; aborting?: true; retainedQueued?: number }
+  | { ok: false; status: 409; error: string };
+
+async function abortCurrentOperation(sessionId: string): Promise<AbortOperationResult> {
+  const activeItems = db.query(`
+    SELECT rowid queue_order,id,state,inserted_at FROM work_items
+    WHERE session_id=? AND state IN ('queued','running','dispatched')
+    ORDER BY created_at,rowid
+  `).all(sessionId) as any[];
+  const rt = runtimes.get(sessionId);
+  const activeRuntime = !!rt && ["DISPATCHING", "RUNNING", "ABORTING"].includes(rt.phase);
+  const currentWork = activeItems.find((item) => item.state === "running" || item.state === "dispatched")
+    ?? (!activeRuntime ? activeItems[0] : undefined);
+  const retainedCount = activeItems.filter((item) => item.id !== currentWork?.id).length;
+  if (rt?.phase === "ABORTING") return { ok: true, aborting: true };
+  if (rt?.phase === "STOPPING") return { ok: false, status: 409, error: "Agent is pausing after inactivity" };
+
+  if (!rt || rt.phase === "STARTING" || rt.phase === "IDLE") {
+    if (currentWork) {
+      db.query("UPDATE work_items SET state='cancelled',updated_at=?,last_error='Current turn stopped by user' WHERE id=?")
+        .run(now(), currentWork.id);
+    }
+    const retryTimer = retryTimers.get(sessionId);
+    if (retryTimer) clearTimeout(retryTimer);
+    retryTimers.delete(sessionId);
+    if (!rt) {
+      setState(sessionId, retainedCount > 0 ? "RUNNING" : "STOPPED");
+      if (retainedCount > 0) kickSession(sessionId);
+    } else if (rt.phase === "IDLE") {
+      rt.retrying = false;
+      setRuntimePhase(sessionId, rt, "IDLE", retainedCount > 0 ? "RUNNING" : "IDLE");
+      if (retainedCount > 0) kickSession(sessionId);
+    } else {
+      touchSession(sessionId);
+    }
+    return { ok: true, retainedQueued: retainedCount };
+  }
+
+  setRuntimePhase(sessionId, rt, "ABORTING", "ABORTING");
+  let abortFailure: unknown = null;
+  try { await rpc(rt, "abort", {}, 10_000); }
+  catch (cause) { abortFailure = cause; }
+  if (abortFailure) {
+    try {
+      const state = await rpc(rt, "get_state", {}, 2_000);
+      const active = Boolean(state.isStreaming || state.isCompacting || Number(state.pendingMessageCount ?? 0) > 0);
+      if (active) {
+        setRuntimePhase(sessionId, rt, "RUNNING", "RUNNING", `Could not stop current operation: ${String((abortFailure as any)?.message ?? abortFailure)}`);
+        return { ok: false, status: 409, error: "Could not stop the current operation; the agent is still running" };
+      }
+    } catch {
+      setRuntimePhase(sessionId, rt, "RUNNING", "RUNNING", `Could not confirm stop: ${String((abortFailure as any)?.message ?? abortFailure)}`);
+      return { ok: false, status: 409, error: "Could not confirm that the current operation stopped; the agent process was left running" };
+    }
+  }
+
+  const changedAt = now();
+  if (currentWork) {
+    db.query("UPDATE work_items SET state='cancelled',updated_at=?,last_error='Current turn stopped by user' WHERE id=?")
+      .run(changedAt, currentWork.id);
+    rt.dispatchedWorkIds.delete(String(currentWork.id));
+  }
+  for (const workId of rt.dispatchedWorkIds) {
+    db.query("UPDATE work_items SET state='complete',updated_at=?,last_error=NULL WHERE id=? AND state='dispatched'")
+      .run(changedAt, workId);
+  }
+  rt.dispatchedWorkIds.clear();
+  rt.compacting = false;
+  rt.retrying = false;
+  rt.activeTools.clear();
+  rt.steeringQueued = 0;
+  rt.followUpQueued = 0;
+  rt.liveText = "";
+  rt.liveThinking = "";
+  rt.pendingContextFinalization = null;
+  rt.lastActivity = Date.now();
+  const supervisorQueued = Number((db.query(
+    "SELECT COUNT(*) count FROM work_items WHERE session_id=? AND state IN ('queued','running')",
+  ).get(sessionId) as any)?.count ?? 0);
+  setRuntimePhase(sessionId, rt, "IDLE", supervisorQueued > 0 ? "RUNNING" : "IDLE");
+  if (supervisorQueued > 0) kickSession(sessionId);
+  return { ok: true, retainedQueued: retainedCount };
 }
 
 function recoverUnansweredPrompts() {
@@ -2058,6 +2146,33 @@ const server = Bun.serve({
       if (!cancelled) return error("Message has already started", 409);
       return json({ ok: true, workId, text: cancelled.text, session: publicSession(sessionRow.get(sessionId)) });
     }
+    const hardSteerMatch = API.queueHardSteer.match(req.method, url.pathname);
+    if (hardSteerMatch) {
+      const { sessionId, workId } = hardSteerMatch;
+      const row = sessionRow.get(sessionId) as any;
+      if (!row) return error("Session not found", 404);
+      const work = db.query("SELECT rowid queue_order,* FROM work_items WHERE id=? AND session_id=?").get(workId, sessionId) as any;
+      if (!work) return error("Queued message not found", 404);
+      if (work.state !== "queued" || work.delivery !== "followUp") return error("Message has already started", 409);
+      const earlierWork = Number((db.query(`
+        SELECT COUNT(*) count FROM work_items
+        WHERE session_id=? AND rowid<? AND state IN ('queued','running','dispatched')
+      `).get(sessionId, work.queue_order) as any)?.count ?? 0);
+      const rt = runtimes.get(sessionId);
+      const canHardSteer = earlierWork > 0 || !!rt && ["STARTING", "DISPATCHING", "RUNNING"].includes(rt.phase);
+      if (!canHardSteer) return error("The agent has already finished; this message will start normally", 409);
+      db.query("UPDATE work_items SET delivery='hardSteer',updated_at=? WHERE id=? AND state='queued'").run(now(), workId);
+      touchSession(sessionId);
+      const aborted = await abortCurrentOperation(sessionId);
+      if (!aborted.ok) {
+        const reverted = db.query("UPDATE work_items SET delivery='followUp',updated_at=? WHERE id=? AND state='queued' AND delivery='hardSteer'")
+          .run(now(), workId);
+        if (reverted.changes > 0) touchSession(sessionId);
+        return error(aborted.error, aborted.status);
+      }
+      kickSession(sessionId);
+      return json({ ...aborted, hardSteer: true, workId, delivery: "hardSteer", session: publicSession(sessionRow.get(sessionId)) });
+    }
     const queueMatch = API.queueSteer.match(req.method, url.pathname);
     if (queueMatch) {
       const { sessionId, workId } = queueMatch;
@@ -2375,91 +2490,9 @@ const server = Bun.serve({
       } catch (e: any) { return error(e.message ?? "Prompt failed", 400); }
     }
     if (action === "abort" && req.method === "POST") {
-      const activeItems = db.query(`
-        SELECT rowid queue_order,id,state,inserted_at FROM work_items
-        WHERE session_id=? AND state IN ('queued','running','dispatched')
-        ORDER BY created_at,rowid
-      `).all(id) as any[];
-      const rt = runtimes.get(id);
-      const activeRuntime = !!rt && ["DISPATCHING", "RUNNING", "ABORTING"].includes(rt.phase);
-      const currentWork = activeItems.find((item) => item.state === "running" || item.state === "dispatched")
-        ?? (!activeRuntime ? activeItems[0] : undefined);
-      const retainedCount = activeItems.filter((item) => item.id !== currentWork?.id).length;
-      if (rt?.phase === "ABORTING") return json({ ok: true, aborting: true, session: publicSession(sessionRow.get(id)) });
-      if (rt?.phase === "STOPPING") return error("Agent is pausing after inactivity", 409);
-
-      // A claimed message can be cancelled while the runtime is still starting;
-      // the activation and worker both re-check its durable state before dispatch.
-      if (!rt || rt.phase === "STARTING" || rt.phase === "IDLE") {
-        if (currentWork) {
-          db.query("UPDATE work_items SET state='cancelled',updated_at=?,last_error='Current turn stopped by user' WHERE id=?")
-            .run(now(), currentWork.id);
-        }
-        const retryTimer = retryTimers.get(id);
-        if (retryTimer) clearTimeout(retryTimer);
-        retryTimers.delete(id);
-        if (!rt) {
-          setState(id, retainedCount > 0 ? "RUNNING" : "STOPPED");
-          if (retainedCount > 0) kickSession(id);
-        } else if (rt.phase === "IDLE") {
-          rt.retrying = false;
-          setRuntimePhase(id, rt, "IDLE", retainedCount > 0 ? "RUNNING" : "IDLE");
-          if (retainedCount > 0) kickSession(id);
-        } else {
-          touchSession(id);
-        }
-        return json({ ok: true, retainedQueued: retainedCount, session: publicSession(sessionRow.get(id)) });
-      }
-
-      // Abort only the active operation. The Pi RPC child remains alive and owns
-      // any steering already accepted into its queue; supervisor-held follow-ups
-      // remain in SQLite. Process termination is reserved for the idle reaper.
-      setRuntimePhase(id, rt, "ABORTING", "ABORTING");
-      let abortFailure: unknown = null;
-      try { await rpc(rt, "abort", {}, 10_000); }
-      catch (cause) { abortFailure = cause; }
-      if (abortFailure) {
-        try {
-          const state = await rpc(rt, "get_state", {}, 2_000);
-          const active = Boolean(state.isStreaming || state.isCompacting || Number(state.pendingMessageCount ?? 0) > 0);
-          if (active) {
-            setRuntimePhase(id, rt, "RUNNING", "RUNNING", `Could not stop current operation: ${String((abortFailure as any)?.message ?? abortFailure)}`);
-            return error("Could not stop the current operation; the agent is still running", 409);
-          }
-        } catch {
-          setRuntimePhase(id, rt, "RUNNING", "RUNNING", `Could not confirm stop: ${String((abortFailure as any)?.message ?? abortFailure)}`);
-          return error("Could not confirm that the current operation stopped; the agent process was left running", 409);
-        }
-      }
-
-      const changedAt = now();
-      if (currentWork) {
-        db.query("UPDATE work_items SET state='cancelled',updated_at=?,last_error='Current turn stopped by user' WHERE id=?")
-          .run(changedAt, currentWork.id);
-        rt.dispatchedWorkIds.delete(String(currentWork.id));
-      }
-      // session.abort() waits until Pi is idle, including steering that Pi already
-      // accepted. Those inserted messages therefore completed in this same child.
-      for (const workId of rt.dispatchedWorkIds) {
-        db.query("UPDATE work_items SET state='complete',updated_at=?,last_error=NULL WHERE id=? AND state='dispatched'")
-          .run(changedAt, workId);
-      }
-      rt.dispatchedWorkIds.clear();
-      rt.compacting = false;
-      rt.retrying = false;
-      rt.activeTools.clear();
-      rt.steeringQueued = 0;
-      rt.followUpQueued = 0;
-      rt.liveText = "";
-      rt.liveThinking = "";
-      rt.pendingContextFinalization = null;
-      rt.lastActivity = Date.now();
-      const supervisorQueued = Number((db.query(
-        "SELECT COUNT(*) count FROM work_items WHERE session_id=? AND state IN ('queued','running')",
-      ).get(id) as any)?.count ?? 0);
-      setRuntimePhase(id, rt, "IDLE", supervisorQueued > 0 ? "RUNNING" : "IDLE");
-      if (supervisorQueued > 0) kickSession(id);
-      return json({ ok: true, retainedQueued: retainedCount, session: publicSession(sessionRow.get(id)) });
+      const aborted = await abortCurrentOperation(id);
+      if (!aborted.ok) return error(aborted.error, aborted.status);
+      return json({ ...aborted, session: publicSession(sessionRow.get(id)) });
     }
     return error("Not found", 404);
   },

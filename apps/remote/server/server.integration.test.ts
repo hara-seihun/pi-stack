@@ -281,6 +281,10 @@ for line in sys.stdin:
     out({'type':'agent_settled'})
    elif last == 'release-later':
     threading.Thread(target=finish_release_later, daemon=True).start()
+   elif last == 'hard-steer-now':
+    out({'type':'message_end','message':{'role':'assistant','content':[{'type':'text','text':'hard steer ran'}]}})
+    streaming = False
+    out({'type':'agent_settled'})
    elif last == 'later-run' or '<new_user_message>\\nlater-run\\n</new_user_message>' in last:
     out({'type':'message_end','message':{'role':'assistant','content':[{'type':'text','text':'later ran'}]}})
     streaming = False
@@ -1195,6 +1199,55 @@ describe("web and supervisor integration", () => {
     ]);
   }, 20_000);
 
+  test("hard steer aborts the active operation and sends the chosen message next", async () => {
+    const id = await createThread();
+    rmSync(fakeChildPid, { force: true });
+    await api("POST", `/v1/sessions/${id}/prompt`, { requestId: crypto.randomUUID(), text: "group-child" });
+    const childPid = await waitFor(
+      async () => existsSync(fakeChildPid) ? Number(readFileSync(fakeChildPid, "utf8")) : 0,
+      (pid) => pid > 1,
+    );
+    await api("POST", `/v1/sessions/${id}/prompt`, {
+      requestId: crypto.randomUUID(), text: "later-run", delivery: "followUp",
+    });
+    await api("POST", `/v1/sessions/${id}/prompt`, {
+      requestId: crypto.randomUUID(), text: "hard-steer-now", delivery: "followUp",
+    });
+    const queued = await waitFor(
+      () => api("GET", `/v1/sessions/${id}`).then((result) => result.value.session),
+      (session) => session.queuedMessages?.some((message: any) => message.text === "hard-steer-now"),
+    );
+    const chosen = queued.queuedMessages.find((message: any) => message.text === "hard-steer-now");
+    expect(chosen).toMatchObject({ delivery: "followUp", canHardSteer: true });
+
+    const steered = await api("POST", `/v1/sessions/${id}/queue/${chosen.id}/hard-steer`, {});
+    expect(steered).toMatchObject({ status: 200, value: { ok: true, hardSteer: true, workId: chosen.id } });
+    await waitFor(
+      async () => {
+        try { process.kill(childPid, 0); return false; } catch { return true; }
+      },
+      Boolean,
+    );
+    await waitFor(
+      () => api("GET", `/v1/sessions/${id}/events?after=0`).then((result) => result.value),
+      (value) => value.session.state === "IDLE"
+        && value.events.some((event: any) => event.type === "assistant" && event.text === "hard steer ran")
+        && value.events.some((event: any) => event.type === "assistant" && event.text === "later ran"),
+    );
+    const prompts = readJsonLines(fakeRpcLog)
+      .filter((entry: any) => entry.sessionId === id && entry.type === "prompt")
+      .map((entry: any) => entry.message);
+    expect(prompts).toEqual(["group-child", "hard-steer-now", "later-run"]);
+    const ledger = new Database(join(root, "data", "supervisor.sqlite3"), { readonly: true });
+    const work = ledger.query("SELECT text,delivery,state FROM work_items WHERE session_id=? ORDER BY created_at,rowid").all(id) as any[];
+    ledger.close();
+    expect(work).toEqual([
+      { text: "group-child", delivery: "prompt", state: "cancelled" },
+      { text: "later-run", delivery: "followUp", state: "complete" },
+      { text: "hard-steer-now", delivery: "hardSteer", state: "complete" },
+    ]);
+  }, 20_000);
+
   test("leaves the agent process running when Pi refuses an abort", async () => {
     const id = await createThread();
     const runtimePid = JSON.parse(readFileSync(fakeLaunch, "utf8")).pid;
@@ -1205,6 +1258,20 @@ describe("web and supervisor integration", () => {
     const session = await api("GET", `/v1/sessions/${id}`);
     expect(session.value.session.state).toBe("RUNNING");
     expect(JSON.parse(readFileSync(fakeLaunch, "utf8")).pid).toBe(runtimePid);
+
+    await api("POST", `/v1/sessions/${id}/prompt`, {
+      requestId: crypto.randomUUID(), text: "hard-steer-now", delivery: "followUp",
+    });
+    const queued = await waitFor(
+      () => api("GET", `/v1/sessions/${id}`).then((result) => result.value.session),
+      (value) => value.queuedMessages?.some((message: any) => message.text === "hard-steer-now"),
+    );
+    const chosen = queued.queuedMessages.find((message: any) => message.text === "hard-steer-now");
+    const hardSteer = await api("POST", `/v1/sessions/${id}/queue/${chosen.id}/hard-steer`, {});
+    expect(hardSteer).toMatchObject({ status: 409, value: { error: expect.stringContaining("still running") } });
+    const restored = await api("GET", `/v1/sessions/${id}`);
+    expect(restored.value.session.queuedMessages.find((message: any) => message.id === chosen.id))
+      .toMatchObject({ delivery: "followUp", canHardSteer: true });
     await api("DELETE", `/v1/sessions/${id}`);
   }, 20_000);
 
