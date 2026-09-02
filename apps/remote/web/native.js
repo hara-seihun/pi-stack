@@ -3,13 +3,11 @@ import { API } from "./api.js";
 "use strict";
 
 // The browser and Android builds use this same client. Capacitor injects its
-// bridge only in the Android shell, so ordinary web sessions leave fetch and
-// the interface untouched.
+// bridge only in the Android shell; browsers discover reachable environments
+// from the host that served the page.
 (() => {
   const capacitor = window.Capacitor;
   const nativePlatform = capacitor?.isNativePlatform?.() === true;
-  const browserPlatform = /^\/dev(?:\/|$)/.test(window.location.pathname);
-  if (!nativePlatform && !browserPlatform) return;
 
   const browserFetch = window.fetch.bind(window);
   // The host this page came from says which environments it can reach and by
@@ -31,10 +29,11 @@ import { API } from "./api.js";
   const browserRemote = {
     getState: async () => browserSnapshot(localStorage.getItem("kenan-environment") || ""),
     prepare: async () => {},
-    select: async ({ id }) => {
+    select: async ({ id, user }) => {
       const selected = await browserSnapshot(id);
       if (selected.id !== id) throw new Error(`Unknown Pi Remote environment: ${id}`);
-      const response = await browserFetch(`${selected.baseUrl}${API.health.path()}`, { cache: "no-store" });
+      const headers = user ? { "x-pi-remote-user": user } : undefined;
+      const response = await browserFetch(`${selected.baseUrl}${API.health.path()}`, { cache: "no-store", headers });
       if (!response.ok) throw new Error(`${selected.name} returned HTTP ${response.status}`);
       localStorage.setItem("kenan-environment", id);
       return selected;
@@ -137,8 +136,8 @@ import { API } from "./api.js";
   }
 
   async function mountEnvironmentControl() {
-    const row = document.getElementById("native-environment");
-    const select = document.getElementById("native-environment-select");
+    const row = document.getElementById("environment-control");
+    const select = document.getElementById("environment-select");
     if (!row || !select) return;
     try {
       const environment = await getState();
