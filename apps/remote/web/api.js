@@ -2,7 +2,11 @@
 
 /** @typedef {{ method: string, template: string, path(params?: Record<string, string | number>, query?: Record<string, string | number | boolean | null | undefined>): string, match(method: string, pathname: string): Record<string, string> | null }} Route */
 
-/** @returns {Route} */
+/**
+ * @param {string} method
+ * @param {string} template
+ * @returns {Route}
+ */
 function route(method, template) {
   const names = [...template.matchAll(/:([A-Za-z][A-Za-z0-9_]*)/g)].map((match) => match[1]);
   const pattern = new RegExp(`^${template.replace(/[.*+?^${}()|[\]\\]/g, "\\$&").replace(/:([A-Za-z][A-Za-z0-9_]*)/g, "([^/]+)")}$`, "i");
@@ -10,7 +14,7 @@ function route(method, template) {
     method,
     template,
     path(params = {}, query = {}) {
-      const pathname = template.replace(/:([A-Za-z][A-Za-z0-9_]*)/g, (_token, name) => {
+      const pathname = template.replace(/:([A-Za-z][A-Za-z0-9_]*)/g, (/** @type {string} */ _token, /** @type {string} */ name) => {
         const value = params[name];
         if (value === undefined) throw new Error(`Missing API path parameter ${name}`);
         return encodeURIComponent(String(value));

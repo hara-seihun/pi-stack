@@ -13,6 +13,7 @@ const unitFiles = ["server", "web"].flatMap((directory) =>
 const shardCount = Math.min(4, availableParallelism());
 
 await runJobs([
+  ["types", join("..", "..", "node_modules", ".bin", "tsc"), ["-p", "tsconfig.json"]],
   ["unit", "bun", ["test", ...unitFiles]],
   ...Array.from({ length: shardCount }, (_, index) => [
     `integration ${index + 1}/${shardCount}`,

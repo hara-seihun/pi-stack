@@ -10,11 +10,15 @@ import { readMachineUsage } from "./machine-usage";
 import { displayContextDocument } from "./context-display";
 import { applyContextSplice, contextSplice, sha256, type ContextSplice } from "./sync";
 import { beginSupervisorGeneration, ensureSupervisorSchema } from "./database";
-import { BOOSTED_MULTIPLIER, nextBoost } from "pi-orchestrator/boost";
 import { DEFAULT_LIVE_MODEL, DEFAULT_LIVE_VOICE, VoiceBroker } from "./voice/broker";
 import { attachRuntimeHost, startRuntimeHost, type RuntimeTransport } from "./runtime-transport";
 import { API } from "../web/api.js";
 import { knownEnvironments, listPersons, publicPerson } from "./persons";
+import { API_CORS_HEADERS } from "./cors";
+import { fileBrowserError, listDirectory, localFileResponse, registerIconAssets, webResponse } from "./files";
+import { governorControls, isGovernorProvider, toggleGovernor } from "./governors";
+import { MachineActions } from "./machine-actions";
+import { availableUploadPath, storeUpload, uploadName } from "./uploads";
 
 const VERSION = (JSON.parse(readFileSync(join(import.meta.dir, "../package.json"), "utf8")) as { version: string }).version;
 const ENVIRONMENT_ID = process.env.PI_REMOTE_ENVIRONMENT_ID ?? "local";
@@ -106,6 +110,13 @@ const destinationDefinitions = JSON.parse(process.env.PI_REMOTE_THREAD_DESTINATI
 const THREAD_DESTINATIONS = new Map(destinationDefinitions
   .filter((destination) => OFFERED_DESTINATIONS.includes(destination.id))
   .map((destination) => [destination.id, destination]));
+
+registerIconAssets([
+  ...ORCHESTRATOR_CATALOG.plans.map((plan) => plan.icon),
+  ...[...THREAD_MODELS.values()].map((model) => model.icon),
+  ...[...THREAD_DESTINATIONS.values()].map((destination) => destination.icon),
+]);
+const machineActions = new MachineActions();
 
 function threadStartProfiles() {
   return [...THREAD_DESTINATIONS.values()].map((destination) => ({
@@ -232,6 +243,9 @@ interface Runtime {
   replaceAfterSettle: boolean;
 }
 const runtimes = new Map<string, Runtime>();
+// A runtime's phase changes underneath awaits and inside callees; reading it
+// through a call keeps TypeScript from narrowing a value that has moved on.
+const phaseOf = (rt: Runtime): RuntimePhase => rt.phase;
 const activations = new Map<string, Promise<Runtime>>();
 const sessionWorkers = new Map<string, Promise<void>>();
 const retryTimers = new Map<string, Timer>();
@@ -259,13 +273,6 @@ function refreshPlanUsageIfDue() {
     planUsage = orchestrator.plans();
   })().finally(() => { planUsageRefresh = null; });
 }
-
-const API_CORS_HEADERS = {
-  "access-control-allow-origin": "http://localhost",
-  "access-control-allow-methods": "GET, HEAD, POST, PUT, PATCH, DELETE, OPTIONS",
-  "access-control-allow-headers": "accept, content-type, if-none-match, range, x-chunk-sha256",
-  "access-control-expose-headers": "accept-ranges, content-disposition, content-length, content-range, etag, x-pi-state-version, x-pi-voice-account, x-pi-voice-lease",
-} as const;
 
 const json = (data: unknown, status = 200) => new Response(JSON.stringify(data), {
   status,
@@ -433,262 +440,12 @@ function requireCompactionContext(sessionId: string, rt: Runtime) {
 
 const error = (message: string, status = 400) => json({ error: message }, status);
 
-type FileBrowserEntry = {
-  name: string;
-  path: string;
-  kind: "directory" | "file" | "other";
-};
-
-function fileBrowserError(cause: any): { message: string; status: number } {
-  if (cause?.code === "EACCES" || cause?.code === "EPERM") return { message: "Permission denied", status: 403 };
-  if (cause?.code === "ENOENT" || cause?.code === "ENOTDIR") return { message: "Folder not found", status: 404 };
-  return { message: cause?.message ?? "Could not read folder", status: 500 };
-}
-
-function listDirectory(requested: string) {
-  if (!isAbsolute(requested)) throw Object.assign(new Error("Valid absolute folder path required"), { code: "EINVAL" });
-  const path = resolve(requested);
-  const entries: FileBrowserEntry[] = readdirSync(path, { withFileTypes: true }).map((entry) => {
-    const child = join(path, entry.name);
-    let kind: FileBrowserEntry["kind"] = entry.isDirectory() ? "directory" : entry.isFile() ? "file" : "other";
-    if (entry.isSymbolicLink()) {
-      try {
-        const target = statSync(child);
-        kind = target.isDirectory() ? "directory" : target.isFile() ? "file" : "other";
-      } catch {}
-    }
-    return { name: entry.name, path: child, kind };
-  });
-  const rank = { directory: 0, file: 1, other: 2 } as const;
-  entries.sort((left, right) => rank[left.kind] - rank[right.kind]
-    || left.name.localeCompare(right.name, undefined, { numeric: true, sensitivity: "base" }));
-  return { path, parent: path === "/" ? null : dirname(path), entries };
-}
-
-type GovernorProvider = "openai" | "anthropic";
-/** The drawer button's four states, in cycle order: normal pace, 3× (green),
- * 10× (blue), and halted (red — the orchestrator refuses every new launch
- * for the family while running sessions finish naturally). */
-type GovernorState = "off" | "green" | "blue" | "red";
-type GovernorControls = Record<
-  GovernorProvider,
-  { state: GovernorState; boosted: boolean; multiplier: number; boostedMultiplier: number }
->;
-
-// The drawer's allowance controls are a direct view of the orchestrator's own
-// boost rows: one durable multiplier per provider family on the paced spend its
-// broker admits against. The supervisor holds no governor state of its own —
-// it reads and writes the orchestrator's ledger, and takes what "boosted" means
-// from the orchestrator package, so the CLI, the controller, and both clients
-// always agree on both the state and the number.
-const GOVERNOR_FAMILIES: Record<GovernorProvider, string> = {
-  openai: "openai-codex",
-  anthropic: "anthropic",
-};
-function boostMultiplier(family: string): number {
-  return orchestrator.boost(family);
-}
-
-function governorState(multiplier: number): GovernorState {
-  if (multiplier === 0) return "red";
-  if (multiplier === 1) return "off";
-  return multiplier >= BOOSTED_MULTIPLIER ? "blue" : "green";
-}
-
-function governorControls(): GovernorControls | null {
-  try {
-    const controls = {} as GovernorControls;
-    for (const [provider, family] of Object.entries(GOVERNOR_FAMILIES) as [GovernorProvider, string][]) {
-      const multiplier = boostMultiplier(family);
-      controls[provider] = {
-        state: governorState(multiplier),
-        boosted: multiplier > 1,
-        multiplier,
-        boostedMultiplier: BOOSTED_MULTIPLIER,
-      };
-    }
-    return controls;
-  } catch {
-    // An orchestrator ledger without boost custody is not an error here:
-    // clients hide the controls when governors is null.
-    return null;
-  }
-}
-
-function toggleGovernor(provider: GovernorProvider): GovernorControls {
-  const family = GOVERNOR_FAMILIES[provider];
-  orchestrator.setBoost(family, nextBoost(boostMultiplier(family)));
-  const controls = governorControls();
-  if (!controls) throw new Error("Governor controls are unavailable");
-  return controls;
-}
-
-// Drawer actions are whatever the host configures: each one is a status
-// command whose exit code says whether it is on, and a command for each
-// direction. Pi Remote knows nothing about what they do. This host happens to
-// configure a thunder ambience; another may configure nothing and show nothing.
-type MachineAction = { id: string; label: string; icon: string; status: string[]; on: string[]; off: string[] };
-const MACHINE_ACTIONS: MachineAction[] = (JSON.parse(process.env.PI_REMOTE_ACTIONS ?? "[]") as MachineAction[]).map((action) => {
-  for (const key of ["status", "on", "off"] as const) {
-    if (!Array.isArray(action[key]) || action[key].length === 0 || action[key].some((part) => typeof part !== "string")) {
-      throw new Error(`PI_REMOTE_ACTIONS: action ${action.id} needs a ${key} argv array`);
-    }
-  }
-  if (!/^[a-z][a-z0-9-]{0,31}$/.test(action.id)) throw new Error(`PI_REMOTE_ACTIONS: invalid action id ${action.id}`);
-  return { ...action, label: String(action.label ?? action.id), icon: String(action.icon ?? action.id) };
-});
-const actionToggles = new Map<string, Promise<{ id: string; label: string; icon: string; active: boolean }>>();
-
-async function runAction(argv: string[], timeoutMs = 15_000): Promise<number> {
-  const proc = Bun.spawn(argv, { stdout: "ignore", stderr: "pipe" });
-  const timer = setTimeout(() => proc.kill(), timeoutMs);
-  try {
-    const [code, stderr] = await Promise.all([proc.exited, new Response(proc.stderr).text()]);
-    if (code !== 0 && code !== 1) throw new Error(stderr.trim() || `${argv[0]} exited ${code}`);
-    return code;
-  } finally { clearTimeout(timer); }
-}
-
-async function actionStatus(action: MachineAction) {
-  return { id: action.id, label: action.label, icon: action.icon, active: (await runAction(action.status)) === 0 };
-}
-
-function machineActions() {
-  return Promise.all(MACHINE_ACTIONS.map((action) => actionToggles.get(action.id) ?? actionStatus(action)));
-}
-
-function toggleAction(action: MachineAction) {
-  const pending = actionToggles.get(action.id);
-  if (pending) return pending;
-  const operation = (async () => {
-    const current = await actionStatus(action);
-    await runAction(current.active ? action.off : action.on);
-    return actionStatus(action);
-  })().finally(() => { actionToggles.delete(action.id); });
-  actionToggles.set(action.id, operation);
-  return operation;
-}
-const webAssets = new Map<string, readonly [string, string]>([
-  ["/", ["index.html", "text/html; charset=utf-8"]],
-  ["/index.html", ["index.html", "text/html; charset=utf-8"]],
-  ["/app.js", ["app.js", "text/javascript; charset=utf-8"]],
-  ["/api.js", ["api.js", "text/javascript; charset=utf-8"]],
-  ["/context-cache.js", ["context-cache.js", "text/javascript; charset=utf-8"]],
-  ["/reconciliation.js", ["reconciliation.js", "text/javascript; charset=utf-8"]],
-  ["/state-machine.js", ["state-machine.js", "text/javascript; charset=utf-8"]],
-  ["/native.js", ["native.js", "text/javascript; charset=utf-8"]],
-  ["/person.js", ["person.js", "text/javascript; charset=utf-8"]],
-  ["/voice.js", ["voice.js", "text/javascript; charset=utf-8"]],
-  ["/sync.js", ["sync.js", "text/javascript; charset=utf-8"]],
-  ["/voice-page.js", ["voice-page.js", "text/javascript; charset=utf-8"]],
-  ["/voice.html", ["voice.html", "text/html; charset=utf-8"]],
-  ["/styles.css", ["styles.css", "text/css; charset=utf-8"]],
-  ["/manifest.webmanifest", ["manifest.webmanifest", "application/manifest+json"]],
-  ["/icon.svg", ["icon.svg", "image/svg+xml"]],
-  ["/openai.svg", ["openai.svg", "image/svg+xml"]],
-  ["/anthropic.svg", ["anthropic.svg", "image/svg+xml"]],
-  ["/work.svg", ["work.svg", "image/svg+xml"]],
-  ["/personal.svg", ["personal.svg", "image/svg+xml"]],
-  ["/converge.svg", ["converge.svg", "image/svg+xml"]],
-  ["/thunder.svg", ["thunder.svg", "image/svg+xml"]],
-]);
-for (const icon of [
-  ...ORCHESTRATOR_CATALOG.plans.map((plan) => plan.icon),
-  ...[...THREAD_MODELS.values()].map((model) => model.icon),
-  ...[...THREAD_DESTINATIONS.values()].map((destination) => destination.icon),
-]) {
-  if (/^[a-z0-9_-]+$/.test(icon)) webAssets.set(`/${icon}.svg`, [`${icon}.svg`, "image/svg+xml"]);
-}
-const vendorContentTypes: Record<string, string> = {
-  ".css": "text/css; charset=utf-8",
-  ".js": "text/javascript; charset=utf-8",
-  ".ttf": "font/ttf",
-  ".woff": "font/woff",
-  ".woff2": "font/woff2",
-};
-
-function downloadHeaders(path: string, size: number, contentType: string, etagValue = `${size}`): Headers {
-  const name = basename(path) || "download";
-  const fallback = name.replace(/[^\x20-\x7e]|["\\]/g, "_") || "download";
-  const encoded = encodeURIComponent(name).replace(/[!'()*]/g, (character) => `%${character.charCodeAt(0).toString(16).toUpperCase()}`);
-  return new Headers({
-    "content-type": contentType || "application/octet-stream",
-    "content-length": String(size),
-    "content-disposition": `attachment; filename="${fallback}"; filename*=UTF-8''${encoded}`,
-    "cache-control": "private, no-cache",
-    "accept-ranges": "bytes",
-    etag: `\"${sha256(`${path}:${etagValue}`)}\"`,
-    "x-content-type-options": "nosniff",
-    ...API_CORS_HEADERS,
-  });
-}
-
-function byteRange(value: string | null, size: number): { start: number; end: number } | null {
-  if (!value) return null;
-  const match = value.match(/^bytes=(\d+)-(\d*)$/);
-  if (!match) return null;
-  const start = Number(match[1]);
-  const end = match[2] ? Math.min(size - 1, Number(match[2])) : size - 1;
-  return Number.isSafeInteger(start) && Number.isSafeInteger(end) && start >= 0 && start <= end && start < size
-    ? { start, end }
-    : null;
-}
-
-function localFileResponse(requested: string, method: string, req: Request): Response {
-  try {
-    const path = realpathSync(requested);
-    const stat = statSync(path);
-    if (!stat.isFile()) return new Response("File not found", { status: 404, headers: API_CORS_HEADERS });
-    const file = Bun.file(path);
-    const headers = downloadHeaders(path, stat.size, file.type, `${stat.size}:${stat.mtimeMs}`);
-    const range = method === "GET" ? byteRange(req.headers.get("range"), stat.size) : null;
-    if (req.headers.has("range") && method === "GET" && !range)
-      return new Response(null, { status: 416, headers: { ...API_CORS_HEADERS, "content-range": `bytes */${stat.size}` } });
-    if (!range) return new Response(method === "HEAD" ? null : file, { headers });
-    headers.set("content-range", `bytes ${range.start}-${range.end}/${stat.size}`);
-    headers.set("content-length", String(range.end - range.start + 1));
-    return new Response(file.slice(range.start, range.end + 1), { status: 206, headers });
-  } catch { return new Response("File not found", { status: 404, headers: API_CORS_HEADERS }); }
-}
-
-function hostFileResponse(url: URL, method: string, req: Request): Response | null {
-  if (!API.fileDownload.match(method, url.pathname) && !API.fileDownloadHead.match(method, url.pathname)) return null;
-  const requested = url.searchParams.get("path") ?? "";
-  if (!isAbsolute(requested)) return new Response("Valid absolute file path required", { status: 400, headers: API_CORS_HEADERS });
-  return localFileResponse(requested, method, req);
-}
-
 async function sessionFileResponse(url: URL, method: string, req: Request): Promise<Response | null> {
   const match = API.sessionFiles.match(method, url.pathname) ?? API.sessionFilesHead.match(method, url.pathname);
   if (!match) return null;
   const row = sessionRow.get(match.sessionId) as any;
   if (!row) return new Response("Session not found", { status: 404, headers: API_CORS_HEADERS });
-  const requested = url.searchParams.get("path") ?? "";
-  if (!isAbsolute(requested)) return new Response("Valid absolute file path required", { status: 400, headers: API_CORS_HEADERS });
-  return localFileResponse(requested, method, req);
-}
-
-function webResponse(pathname: string, method: string): Response | null {
-  if (method !== "GET" && method !== "HEAD") return null;
-  let asset = webAssets.get(pathname);
-  if (!asset && pathname.startsWith("/vendor/")) {
-    const relative = pathname.slice(1);
-    if (relative.split("/").some((part) => !part || part === "." || part === "..")) return null;
-    const file = join(WEB_DIR, relative);
-    const extension = relative.slice(relative.lastIndexOf("."));
-    const contentType = vendorContentTypes[extension];
-    if (contentType && existsSync(file)) asset = [relative, contentType];
-  }
-  if (!asset) return null;
-  const body = method === "HEAD" ? null : Bun.file(join(WEB_DIR, asset[0]));
-  return new Response(body, {
-    headers: {
-      "content-type": asset[1],
-      "cache-control": "no-cache",
-      "x-content-type-options": "nosniff",
-      "content-security-policy": "default-src 'self'; connect-src 'self'; img-src 'self'; style-src 'self' 'unsafe-inline'; script-src 'self'; object-src 'none'; frame-ancestors 'none'",
-    },
-  });
+  return localFileResponse(url.searchParams.get("path") ?? "", method, req);
 }
 
 function voiceInstructions(row: any): string {
@@ -702,48 +459,6 @@ function voiceInstructions(row: any): string {
     return `${speaker}: ${String(payload.text ?? "").slice(0, 1_500)}`;
   }).join("\n");
   return `You are the realtime voice interface for Pi Remote thread ${String(row.name)}. Keep your own replies brief and conversational. Delegate every substantive request to the client coding agent; do not attempt the work yourself and do not claim completion before the client reports it. You may acknowledge a delegation naturally while it runs. Relay client updates accurately and ask concise follow-up questions when the client needs information.${history ? `\n\nRecent thread transcript:\n${history}` : ""}`;
-}
-
-function uploadName(raw: string): string {
-  const value = basename(raw).replace(/[\u0000-\u001f\u007f]/g, "").trim();
-  if (!value || value === "." || value === "..") throw new Error("Valid file name required");
-  return value.slice(0, 180);
-}
-
-function availableUploadPath(root: string, name: string): string {
-  let candidate = join(root, name);
-  if (!existsSync(candidate)) return candidate;
-  const extension = extname(name);
-  const stem = extension ? name.slice(0, -extension.length) : name;
-  for (let index = 2; index < 10_000; index++) {
-    candidate = join(root, `${stem}-${index}${extension}`);
-    if (!existsSync(candidate)) return candidate;
-  }
-  return join(root, `${stem}-${crypto.randomUUID()}${extension}`);
-}
-
-async function storeUpload(req: Request, requestedName: string, root = INGESTION) {
-  mkdirSync(root, { recursive: true, mode: 0o700 });
-  const path = availableUploadPath(root, uploadName(requestedName));
-  const writer = Bun.file(path).writer();
-  let size = 0;
-  try {
-    const reader = req.body?.getReader();
-    if (reader) {
-      while (true) {
-        const { value, done } = await reader.read();
-        if (done) break;
-        size += value.byteLength;
-        writer.write(value);
-      }
-    }
-    await writer.end();
-    return { name: basename(path), path, size };
-  } catch (cause) {
-    try { await writer.end(); } catch {}
-    if (existsSync(path)) unlinkSync(path);
-    throw cause;
-  }
 }
 
 const sessionRow = db.query("SELECT * FROM sessions WHERE id=?");
@@ -1065,7 +780,7 @@ function handleRpcEvent(sessionId: string, rt: Runtime, event: any) {
   // Abort owns the lifecycle transition, but Pi can finish already accepted
   // steering before abort() returns. Keep those real transcript events; only a
   // process that is actually stopping suppresses output.
-  if (rt.phase === "STOPPING" || rt.suppressOutput) return;
+  if (phaseOf(rt) === "STOPPING" || rt.suppressOutput) return;
   // Any agent event invalidates an in-flight get_state snapshot taken before it.
   rt.phaseVersion++;
 
@@ -1516,10 +1231,10 @@ async function runCommand(row: any, requestId: string, name: string, args: strin
     setRuntimePhase(row.id, rt, "DISPATCHING", "RUNNING");
     try {
       await rpc(rt, "compact", args ? { customInstructions: args } : {}, 120_000);
-      if (rt.phase === "DISPATCHING") setRuntimePhase(row.id, rt, "RUNNING", "RUNNING");
-      if (rt.phase === "RUNNING") settleRuntime(row.id, rt, true);
+      if (phaseOf(rt) === "DISPATCHING") setRuntimePhase(row.id, rt, "RUNNING", "RUNNING");
+      if (phaseOf(rt) === "RUNNING") settleRuntime(row.id, rt, true);
     } catch (cause) {
-      if (rt.phase === "DISPATCHING") setRuntimePhase(row.id, rt, "IDLE", "IDLE");
+      if (phaseOf(rt) === "DISPATCHING") setRuntimePhase(row.id, rt, "IDLE", "IDLE");
       throw cause;
     }
   } else {
@@ -1798,9 +1513,10 @@ const server = Bun.serve({
     if (!ownsSupervisorLease()) return error("Supervisor instance was replaced", 503);
     const deliveredFile = await sessionFileResponse(url, req.method, req);
     if (deliveredFile) return deliveredFile;
-    const hostFile = hostFileResponse(url, req.method, req);
-    if (hostFile) return hostFile;
-    const web = webResponse(url.pathname, req.method);
+    if (API.fileDownload.match(req.method, url.pathname) || API.fileDownloadHead.match(req.method, url.pathname)) {
+      return localFileResponse(url.searchParams.get("path") ?? "", req.method, req);
+    }
+    const web = webResponse(WEB_DIR, url.pathname, req.method);
     if (web) return web;
     if (API.health.match(req.method, url.pathname)) return json({ ok: true, version: VERSION, environmentId: ENVIRONMENT_ID });
     if (API.environment.match(req.method, url.pathname)) return json({ environment: environmentMetadata() });
@@ -1853,7 +1569,7 @@ const server = Bun.serve({
       });
     }
     if (API.governors.match(req.method, url.pathname)) {
-      try { return json({ governors: governorControls() }); }
+      try { return json({ governors: governorControls(orchestrator) }); }
       catch (cause: any) { return error(cause?.message ?? "Could not read governor controls", 503); }
     }
     // The drawer footer shows this host's load beside its controls. The long
@@ -1864,19 +1580,19 @@ const server = Bun.serve({
       catch (cause: any) { return error(cause?.message ?? "Could not read machine usage", 503); }
     }
     const governorToggle = API.governorToggle.match(req.method, url.pathname);
-    if (governorToggle && ["openai", "anthropic"].includes(governorToggle.provider)) {
-      try { return json({ governors: toggleGovernor(governorToggle.provider as GovernorProvider) }); }
+    if (governorToggle && isGovernorProvider(governorToggle.provider)) {
+      try { return json({ governors: toggleGovernor(orchestrator, governorToggle.provider) }); }
       catch (cause: any) { return error(cause?.message ?? "Could not toggle governor control", 503); }
     }
     if (API.actions.match(req.method, url.pathname)) {
-      try { return json({ actions: await machineActions() }); }
+      try { return json({ actions: await machineActions.all() }); }
       catch (cause: any) { return error(cause?.message ?? "Could not read machine actions", 503); }
     }
     const actionToggle = API.actionToggle.match(req.method, url.pathname);
     if (actionToggle) {
-      const action = MACHINE_ACTIONS.find((candidate) => candidate.id === actionToggle.id);
+      const action = machineActions.find(actionToggle.id);
       if (!action) return error("Unknown machine action", 404);
-      try { return json({ action: await toggleAction(action) }); }
+      try { return json({ action: await machineActions.toggle(action) }); }
       catch (cause: any) { return error(cause?.message ?? "Could not toggle machine action", 503); }
     }
     if (API.uploadInit.match(req.method, url.pathname)) {
@@ -2138,7 +1854,7 @@ const server = Bun.serve({
           agentEvents: runEvents,
           agents: !includeState || body.includeDashboard === false ? null : await activeAgents(),
           plans: !includeState || body.includeDashboard === false ? null : { cards: planCards(planUsage), updatedAt: planUsage?.updatedAt ?? null },
-          governors: !includeState || body.includeDashboard === false ? null : governorControls(),
+          governors: !includeState || body.includeDashboard === false ? null : governorControls(orchestrator),
           machine: !includeState || body.includeDashboard === false ? null : readMachineUsage(),
         });
       } catch (cause: any) { return error(cause?.message ?? "Could not synchronize", 400); }
@@ -2153,7 +1869,7 @@ const server = Bun.serve({
         archivedTotal: archivedCount(),
         agents: await activeAgents(),
         plans: { cards: planCards(planUsage), updatedAt: planUsage?.updatedAt ?? null },
-        governors: governorControls(),
+        governors: governorControls(orchestrator),
         machine: readMachineUsage(),
       });
     }
@@ -2215,7 +1931,8 @@ const server = Bun.serve({
       const row = sessionRow.get(sessionId) as any;
       if (!row) return error("Session not found", 404);
       let found = false;
-      let cancelled: { text: string } | null = null;
+      // Assigned inside the transaction callback, which TypeScript cannot see.
+      let cancelled = null as { text: string } | null;
       db.transaction(() => {
         const work = db.query("SELECT text,state,inserted_at FROM work_items WHERE id=? AND session_id=?").get(workId, sessionId) as any;
         if (!work) return;

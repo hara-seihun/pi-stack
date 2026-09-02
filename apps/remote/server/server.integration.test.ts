@@ -13,7 +13,7 @@ if (!Number.isSafeInteger(shardIndex) || !Number.isSafeInteger(shardCount)
   throw new Error("PI_REMOTE_TEST_SHARD must be a zero-based INDEX/COUNT");
 }
 let testIndex = 0;
-const test = (name: string, body: () => unknown, timeout?: number) => {
+const test = (name: string, body: () => Promise<unknown> | void, timeout?: number) => {
   const selected = testIndex++ % shardCount === shardIndex;
   return selected ? bunTest(name, body, timeout) : bunTest.skip(name, body, timeout);
 };

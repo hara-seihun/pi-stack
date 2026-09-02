@@ -126,7 +126,7 @@ describe("context mirror", () => {
     const firstFailure = first.catch((error) => error as Error);
     void second.catch(() => {});
     releaseCapture();
-    expect((await firstFailure).message).toContain("acknowledgement hash");
+    expect((await firstFailure as Error).message).toContain("acknowledgement hash");
     for (let attempt = 0; attempt < 100 && !JSON.stringify(captures.at(-1)?.context).includes("second"); attempt++) {
       await Bun.sleep(1);
     }

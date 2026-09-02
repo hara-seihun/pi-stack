@@ -62,7 +62,7 @@ esac
     try { if ((await fetch(`${base}/v1/router-health`)).ok) return; } catch {}
     await Bun.sleep(50);
   }
-  throw new Error(`router did not start: ${await new Response(router.stderr).text()}`);
+  throw new Error(`router did not start: ${await new Response(router.stderr as ReadableStream).text()}`);
 });
 
 afterAll(() => {

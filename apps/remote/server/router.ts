@@ -18,7 +18,7 @@ import { unlink, writeFile, mkdir, chmod } from "node:fs/promises";
 import { join } from "node:path";
 import { knownEnvironments, listPersons, publicPerson, type Person } from "./persons";
 import { proxyFetch } from "./proxy-fetch";
-import { routerPreflight, withRouterCors } from "./router-cors";
+import { preflight, withCors } from "./cors";
 
 const PORT = Number(process.env.PI_REMOTE_ROUTER_PORT ?? "8788");
 const HOST = process.env.PI_REMOTE_ROUTER_HOST ?? "127.0.0.1";
@@ -245,9 +245,9 @@ Bun.serve({
   idleTimeout: 60,
   async fetch(req) {
     const url = new URL(req.url);
-    if (req.method === "OPTIONS" && url.pathname.startsWith("/v1/")) return routerPreflight();
+    if (req.method === "OPTIONS" && url.pathname.startsWith("/v1/")) return preflight();
     const response = await route(req, url);
-    return url.pathname.startsWith("/v1/") ? withRouterCors(response) : response;
+    return url.pathname.startsWith("/v1/") ? withCors(response) : response;
   },
 });
 
