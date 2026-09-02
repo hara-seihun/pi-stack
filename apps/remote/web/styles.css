@@ -18,7 +18,7 @@
   color: var(--text);
 }
 * { box-sizing: border-box; }
-html, body, #app { width: 100%; height: 100%; margin: 0; overflow: hidden; background: var(--bg); }
+html, body, #root, #app { width: 100%; height: 100%; margin: 0; overflow: hidden; background: var(--bg); }
 button, input, textarea, select { font: inherit; }
 button { border: 0; border-radius: 0; cursor: pointer; -webkit-tap-highlight-color: transparent; }
 button:disabled { cursor: default; opacity: .45; }
