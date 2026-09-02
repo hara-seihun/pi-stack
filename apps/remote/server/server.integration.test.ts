@@ -655,7 +655,7 @@ describe("web and supervisor integration", () => {
     try {
       await api("POST", `/v1/sessions/${id}/prompt`, { requestId: crypto.randomUUID(), text: "live-stream" });
       await waitForGate("live-stream-next");
-      const first = await api("POST", "/v1/sync", {
+      const first = await waitFor(() => api("POST", "/v1/sync", {
         after: 0,
         stateVersion: 0,
         waitMs: 0,
@@ -663,7 +663,7 @@ describe("web and supervisor integration", () => {
         eventSessionId: id,
         eventAfter: Number.MAX_SAFE_INTEGER,
         includeDashboard: false,
-      });
+      }), (result) => result.value.sessionEvents?.liveTextUpdate?.document === "instant text");
       expect(first.value.sessionEvents.liveTextUpdate).toMatchObject({ kind: "full", document: "instant text" });
       expect(first.value.sessionEvents.liveThinkingUpdate).toMatchObject({ kind: "full", document: "thinking now" });
 
