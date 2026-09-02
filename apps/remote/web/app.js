@@ -1358,7 +1358,7 @@ function replaceRows(container, rows, emptyText) {
 }
 
 function renderThreads() {
-  if (threadPress?.active) return;
+  if (threadPress) return;
   if (state.drawerTab === "threads") {
     replaceRows(ui.threadList, state.sessions.map((session) => threadRow(session)), "No threads");
     return;
