@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { chmodSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { chmodSync, mkdirSync, mkdtempSync, readFileSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { Store } from "../src/store.js";
@@ -10,6 +10,7 @@ import { builtinProviders } from "@earendil-works/pi-ai/providers/all";
 import { withCustomModels } from "../src/extension/routing.js";
 import { catalogModel } from "../src/catalog.js";
 import { Daemon } from "../src/daemon.js";
+import { loadConfig } from "../src/config.js";
 
 const config:OrchestratorConfig={profiles:{standard:[{provider:"openai-codex",model:"gpt-5.6-sol",thinking:"xhigh"}]},backgroundSpendFraction:.8,maxConcurrentSessions:8,defaultAccountConcurrency:2,meterMaxAgeMs:60_000,snapshotIntervalMs:30_000,reconcileIntervalMs:1000,stallAfterMs:60_000,killAfterMs:120_000,authPath:"/tmp/auth",agentDir:"/tmp/agent"};
 function account(store:Store,id="openai-codex-1"){store.upsertAccount({id,provider:"openai-codex",concurrency:2});}
@@ -20,6 +21,20 @@ describe("current orchestrator state",()=>{
   it("reconciles lane manifests as desired state",()=>{const store=Store.open(":memory:");store.reconcileLanes([{id:"one",prompt:"a",cwd:"/tmp",profile:"standard",weight:1},{id:"two",prompt:"b",cwd:"/tmp",profile:"standard",weight:2}]);store.reconcileLanes([{id:"two",prompt:"changed",cwd:"/work",profile:"standard",weight:3,fixedDemand:2}]);expect(store.lanes()).toEqual([{id:"two",prompt:"changed",cwd:"/work",profile:"standard",weight:3,fixedDemand:2,priority:0,doctrineUrl:undefined,openingProbe:undefined}]);store.close();});
 
   it("rolls credential custody back when account import fails",async()=>{const root=mkdtempSync(join(tmpdir(),"orchestrator-auth-")),path=join(root,"auth.json");writeFileSync(path,"{}\n");const credential={type:"oauth" as const,access:"access",refresh:"refresh",expires:Date.now()+60_000};await expect(transactSharedCredential(path,"openai-codex-1",credential,async()=>{throw new Error("ledger unavailable");})).rejects.toThrow("ledger unavailable");expect(JSON.parse(readFileSync(path,"utf8"))).toEqual({});rmSync(root,{recursive:true});});
+
+  it("finds shared OAuth beside the canonical ledger behind a per-user symlink",()=>{
+    const root=mkdtempSync(join(tmpdir(),"orchestrator-config-")),canonical=join(root,"canonical"),user=join(root,"user"),configPath=join(root,"config.json");
+    mkdirSync(canonical);mkdirSync(user);writeFileSync(join(canonical,"ledger.sqlite3"),"");symlinkSync(join(canonical,"ledger.sqlite3"),join(user,"ledger.sqlite3"));writeFileSync(configPath,"{}\n");
+    const oldLedger=process.env.PI_ORCHESTRATOR_LEDGER,oldAuth=process.env.PI_ORCHESTRATOR_AUTH;
+    try{
+      process.env.PI_ORCHESTRATOR_LEDGER=join(user,"ledger.sqlite3");delete process.env.PI_ORCHESTRATOR_AUTH;
+      expect(loadConfig(configPath).authPath).toBe(join(canonical,"auth.json"));
+    }finally{
+      if(oldLedger===undefined)delete process.env.PI_ORCHESTRATOR_LEDGER;else process.env.PI_ORCHESTRATOR_LEDGER=oldLedger;
+      if(oldAuth===undefined)delete process.env.PI_ORCHESTRATOR_AUTH;else process.env.PI_ORCHESTRATOR_AUTH=oldAuth;
+      rmSync(root,{recursive:true});
+    }
+  });
 
   it("permits one calibration probe, then requires new meter evidence",()=>{const store=Store.open(":memory:");account(store);const first=assign(store,"standard","background",config);expect(first.assignment?.accountId).toBe("openai-codex-1");const [runId]=store.createRuns({count:1,source:"direct",prompt:"x",cwd:"/tmp",profile:"standard",budget:"background"});store.assignRun(runId!,{...first.assignment!,unit:"u",releasePath:"/release/a"});store.updateRun(runId!,{state:"done"});expect(assign(store,"standard","background",config).assignment).toBeUndefined();store.recordMeter("openai-codex-1","codex-5h",10,Date.now()+3_600_000);const next=assign(store,"standard","background",config);expect(next.assignment).toBeDefined();commitMeterAdmission(store,next.assignment!);expect(assign(store,"standard","background",config).assignment).toBeUndefined();store.close();});
 
