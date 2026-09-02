@@ -87,6 +87,7 @@ const WEB_ASSETS = new Map<string, readonly [string, string]>([
   ["/context-cache.js", ["context-cache.js", "text/javascript; charset=utf-8"]],
   ["/reconciliation.js", ["reconciliation.js", "text/javascript; charset=utf-8"]],
   ["/state-machine.js", ["state-machine.js", "text/javascript; charset=utf-8"]],
+  ["/thread-order.js", ["thread-order.js", "text/javascript; charset=utf-8"]],
   ["/native.js", ["native.js", "text/javascript; charset=utf-8"]],
   ["/person.js", ["person.js", "text/javascript; charset=utf-8"]],
   ["/voice.js", ["voice.js", "text/javascript; charset=utf-8"]],

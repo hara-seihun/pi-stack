@@ -38,6 +38,11 @@ test("the supervisor adopts endpoint-local profiles and drops remote execution c
     ]);
     const sessionColumns = (db.query("PRAGMA table_info(sessions)").all() as any[]).map((column) => column.name);
     expect(sessionColumns).toContain("profile_id");
+    expect(sessionColumns).toContain("display_order");
+    expect(db.query("SELECT id,display_order FROM sessions ORDER BY id").all()).toEqual([
+      { id: "personal", display_order: 0 },
+      { id: "remote", display_order: 0 },
+    ]);
     expect(sessionColumns).not.toContain("execution_target");
     expect(sessionColumns).not.toContain("remote_cwd");
     expect((db.query("PRAGMA table_info(uploads)").all() as any[]).map((column) => column.name))

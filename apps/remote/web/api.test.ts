@@ -11,6 +11,8 @@ describe("shared API routes",()=>{
     expect(API.queueSteer.match("POST","/v1/sessions/session-1/queue/work%2F2/steer")).toEqual({sessionId:"session-1",workId:"work/2"});
     expect(API.queueSteer.match("DELETE","/v1/sessions/session-1/queue/work-2/steer")).toBeNull();
     expect(API.sessionFork.match("POST","/v1/sessions/session-1/fork")).toEqual({sessionId:"session-1"});
+    expect(API.reorderSessions.match("PUT","/v1/sessions/order")).toEqual({});
+    expect(API.reorderSessions.match("POST","/v1/sessions/order")).toBeNull();
     expect(API.session.match("GET","/v1/sessions/session-1/more")).toBeNull();
   });
 });

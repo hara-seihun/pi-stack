@@ -20,7 +20,8 @@ CREATE TABLE IF NOT EXISTS sessions (
   profile_id TEXT NOT NULL,
   revision INTEGER NOT NULL DEFAULT 0,
   service_tier TEXT NOT NULL DEFAULT 'default',
-  archived_at TEXT
+  archived_at TEXT,
+  display_order INTEGER NOT NULL DEFAULT 0
 );
 CREATE TABLE IF NOT EXISTS events (
   seq INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -94,7 +95,7 @@ CREATE TABLE IF NOT EXISTS metadata (
 );
 `);
   const sessionColumns = new Set((db.query("PRAGMA table_info(sessions)").all() as any[]).map((column) => String(column.name)));
-  for (const [name, type] of [["initial_provider", "TEXT"], ["current_provider", "TEXT"], ["initial_model", "TEXT"], ["initial_thinking", "TEXT"], ["revision", "INTEGER NOT NULL DEFAULT 0"], ["service_tier", "TEXT NOT NULL DEFAULT 'default'"], ["archived_at", "TEXT"]]) {
+  for (const [name, type] of [["initial_provider", "TEXT"], ["current_provider", "TEXT"], ["initial_model", "TEXT"], ["initial_thinking", "TEXT"], ["revision", "INTEGER NOT NULL DEFAULT 0"], ["service_tier", "TEXT NOT NULL DEFAULT 'default'"], ["archived_at", "TEXT"], ["display_order", "INTEGER NOT NULL DEFAULT 0"]]) {
     if (!sessionColumns.has(name)) db.exec(`ALTER TABLE sessions ADD COLUMN ${name} ${type}`);
   }
   if (!sessionColumns.has("profile_id")) {

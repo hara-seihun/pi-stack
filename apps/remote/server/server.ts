@@ -480,6 +480,9 @@ function voiceInstructions(row: any): string {
 }
 
 const sessionRow = db.query("SELECT * FROM sessions WHERE id=?");
+const activeSessionRows = db.query(
+  "SELECT * FROM sessions WHERE archived_at IS NULL ORDER BY display_order ASC, created_at DESC",
+);
 // Archived threads accumulate without bound, so every poll carries only the newest page;
 // clients ask for older pages explicitly.
 const ARCHIVED_PAGE_SIZE = 20;
@@ -1831,9 +1834,7 @@ const server = Bun.serve({
         const includeState = body.epoch !== SUPERVISOR_EPOCH
           || requestedStateVersion !== snapshotStateVersion
           || after === sequence;
-        const rows = includeState
-          ? db.query("SELECT * FROM sessions WHERE archived_at IS NULL ORDER BY created_at DESC").all() as any[]
-          : [];
+        const rows = includeState ? activeSessionRows.all() as any[] : [];
         const includeArchived = includeState && body.includeArchived === true;
         const selectedId = typeof body.selectedId === "string" ? body.selectedId : "";
         let contextUpdate: any = null;
@@ -1944,7 +1945,7 @@ const server = Bun.serve({
     }
     if (API.sessions.match(req.method, url.pathname)) {
       refreshPlanUsageIfDue();
-      const rows = db.query("SELECT * FROM sessions WHERE archived_at IS NULL ORDER BY created_at DESC").all();
+      const rows = activeSessionRows.all();
       const archivedRows = archivedPage(0, ARCHIVED_PAGE_SIZE);
       return json({
         sessions: publicSessions(rows),
@@ -1963,6 +1964,26 @@ const server = Bun.serve({
       const total = archivedCount();
       const sessions = publicSessions(archivedPage(offset, limit));
       return json({ sessions, total, offset, limit, hasMore: offset + sessions.length < total });
+    }
+    if (API.reorderSessions.match(req.method, url.pathname)) {
+      try {
+        const body = await readBody(req);
+        const requested: string[] | null = Array.isArray(body.sessionIds)
+          ? body.sessionIds.map((id: unknown) => String(id))
+          : null;
+        if (!requested || new Set(requested).size !== requested.length) return error("Complete unique sessionIds required");
+        const current = activeSessionRows.all() as any[];
+        const currentIds = new Set(current.map((row) => String(row.id)));
+        if (requested.length !== currentIds.size || requested.some((id) => !currentIds.has(id)))
+          return error("Thread list changed; refresh before reordering", 409);
+        if (!ownsSupervisorLease()) return error("Supervisor instance was replaced", 503);
+        db.transaction(() => {
+          const update = db.query("UPDATE sessions SET display_order=? WHERE id=? AND archived_at IS NULL");
+          requested.forEach((id, index) => update.run(index, id));
+        })();
+        signalSync();
+        return json({ ok: true, sessions: publicSessions(activeSessionRows.all() as any[]) });
+      } catch (cause: any) { return error(cause?.message ?? "Could not reorder threads", 400); }
     }
     if (API.createSession.match(req.method, url.pathname)) {
       try {
@@ -1991,14 +2012,17 @@ const server = Bun.serve({
         if (!/^[0-9a-f-]{36}$/i.test(requestedId)) return error("Valid sessionId required");
         const id = requestedId;
         const time = now();
-        db.query(`
-          INSERT INTO sessions(
-            id,name,workspace_id,session_path,state,created_at,updated_at,last_error,
-            initial_provider,current_provider,initial_model,initial_thinking,profile_id,service_tier
-          ) VALUES(?,?,?,?,?,?,?,NULL,?,?,?,?,?,?)
-        `).run(id, name, workspaceId, null, "STOPPED", time, time,
-          preset.provider, preset.provider, preset.modelId, preset.thinkingLevel, destination.id,
-          model.id === "sol" ? "priority" : "default");
+        db.transaction(() => {
+          db.query("UPDATE sessions SET display_order=display_order+1 WHERE archived_at IS NULL").run();
+          db.query(`
+            INSERT INTO sessions(
+              id,name,workspace_id,session_path,state,created_at,updated_at,last_error,
+              initial_provider,current_provider,initial_model,initial_thinking,profile_id,service_tier,display_order
+            ) VALUES(?,?,?,?,?,?,?,NULL,?,?,?,?,?,?,0)
+          `).run(id, name, workspaceId, null, "STOPPED", time, time,
+            preset.provider, preset.provider, preset.modelId, preset.thinkingLevel, destination.id,
+            model.id === "sol" ? "priority" : "default");
+        })();
         const response = { session: publicSession(sessionRow.get(id)) };
         saveRequest(requestId, id, "create", 201, response);
         activate(sessionRow.get(id)).catch((e) => {
@@ -2081,8 +2105,11 @@ const server = Bun.serve({
     if (action === "unarchive" && req.method === "POST") {
       if (!row.archived_at) return json({ ok: true, session: publicSession(row) });
       const changedAt = now();
-      db.query("UPDATE sessions SET archived_at=NULL,state='STOPPED',last_error=NULL,updated_at=?,revision=revision+1 WHERE id=?")
-        .run(changedAt, id);
+      db.transaction(() => {
+        db.query("UPDATE sessions SET display_order=display_order+1 WHERE archived_at IS NULL").run();
+        db.query("UPDATE sessions SET archived_at=NULL,display_order=0,state='STOPPED',last_error=NULL,updated_at=?,revision=revision+1 WHERE id=?")
+          .run(changedAt, id);
+      })();
       return json({ ok: true, session: publicSession(sessionRow.get(id)) });
     }
     if (!action && req.method === "PUT") return error("Threads cannot be edited", 405);

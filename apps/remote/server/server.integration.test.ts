@@ -457,11 +457,28 @@ describe("web and supervisor integration", () => {
   });
 
   test("serves the complete browser module graph", async () => {
-    for (const path of ["/app.js", "/api.js", "/context-cache.js", "/reconciliation.js", "/state-machine.js", "/native.js", "/person.js"]) {
+    for (const path of ["/app.js", "/api.js", "/context-cache.js", "/reconciliation.js", "/state-machine.js", "/thread-order.js", "/native.js", "/person.js"]) {
       const response = await fetch(base + path);
       expect(response.status).toBe(200);
       expect(response.headers.get("content-type")).toContain("text/javascript");
     }
+  });
+
+  test("persists a complete active thread order", async () => {
+    await createThread("home", "sol");
+    await createThread("home", "sol");
+    const before = await api("GET", "/v1/sessions");
+    const currentIds = before.value.sessions.map((session: any) => session.id as string);
+    const requestedIds = [currentIds.at(-1), ...currentIds.slice(0, -1)];
+
+    const reordered = await api("PUT", "/v1/sessions/order", { sessionIds: requestedIds });
+    expect(reordered.status).toBe(200);
+    expect(reordered.value.sessions.map((session: any) => session.id)).toEqual(requestedIds);
+    expect((await api("GET", "/v1/sessions")).value.sessions.map((session: any) => session.id)).toEqual(requestedIds);
+
+    const incomplete = await api("PUT", "/v1/sessions/order", { sessionIds: requestedIds.slice(1) });
+    expect(incomplete).toMatchObject({ status: 409, value: { error: "Thread list changed; refresh before reordering" } });
+    expect((await api("GET", "/v1/sessions")).value.sessions.map((session: any) => session.id)).toEqual(requestedIds);
   });
 
   test("reconciles every acknowledged mutation through its committed state version", async () => {

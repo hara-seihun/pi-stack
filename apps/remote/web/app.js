@@ -2,6 +2,7 @@ import { API } from "./api.js";
 import { deleteCachedContext, readCachedContext, writeCachedContext } from "./context-cache.js";
 import { createStateReconciler } from "./reconciliation.js";
 import { createRemoteStore, initialRemoteState } from "./state-machine.js";
+import { moveThreadToIndex, threadsInOrder } from "./thread-order.js";
 import "./voice.js";
 
 const $ = (id) => document.getElementById(id);
@@ -54,6 +55,8 @@ const deleteSetState = (key, value) => store.dispatch({ type: "set-delete", key,
 let voiceSession = null;
 let voiceThreadId = null;
 let threadStartMenu = null;
+let threadPress = null;
+let suppressedThreadOpen = null;
 
 const stateReconciler = createStateReconciler(localStorage, () => poll(true));
 function requestStateReconciliation(encoded) {
@@ -1163,6 +1166,117 @@ function clearSelection() {
   updateChrome();
 }
 
+const THREAD_LONG_PRESS_MS = 350;
+const THREAD_PRESS_MOVE_PX = 10;
+
+function consumeSuppressedThreadOpen(id) {
+  if (!suppressedThreadOpen || suppressedThreadOpen.id !== id || performance.now() > suppressedThreadOpen.until) return false;
+  suppressedThreadOpen = null;
+  return true;
+}
+
+function clearThreadPress(render = false) {
+  const press = threadPress;
+  if (!press) return;
+  clearTimeout(press.timer);
+  press.controller.abort();
+  press.row.classList.remove("thread-drag-placeholder");
+  press.ghost?.remove();
+  ui.threadList.classList.remove("reordering");
+  threadPress = null;
+  if (render) renderThreads();
+}
+
+function positionThreadDrag(press, clientY) {
+  const listRect = ui.threadList.getBoundingClientRect();
+  const edge = Math.min(54, listRect.height / 4);
+  if (clientY < listRect.top + edge) ui.threadList.scrollTop -= 14;
+  else if (clientY > listRect.bottom - edge) ui.threadList.scrollTop += 14;
+  press.ghost.style.top = `${clientY - press.offsetY}px`;
+  const rows = [...ui.threadList.querySelectorAll(".thread-row:not(.thread-drag-placeholder)")];
+  const before = rows.find((row) => clientY < row.getBoundingClientRect().top + row.offsetHeight / 2);
+  ui.threadList.insertBefore(press.row, before || null);
+}
+
+function activateThreadPress(press) {
+  if (threadPress !== press || !press.row.isConnected || state.threadOrderPending) return clearThreadPress();
+  press.active = true;
+  const rect = press.row.getBoundingClientRect();
+  press.offsetY = Math.max(0, Math.min(rect.height, press.clientY - rect.top));
+  press.ghost = press.row.cloneNode(true);
+  press.ghost.classList.add("thread-drag-ghost");
+  press.ghost.classList.remove("selected", "can-archive");
+  press.ghost.setAttribute("aria-hidden", "true");
+  Object.assign(press.ghost.style, { left: `${rect.left}px`, top: `${rect.top}px`, width: `${rect.width}px`, height: `${rect.height}px` });
+  document.body.append(press.ghost);
+  press.row.classList.add("thread-drag-placeholder");
+  ui.threadList.classList.add("reordering");
+  window.getSelection()?.removeAllRanges();
+  positionThreadDrag(press, press.clientY);
+}
+
+async function persistThreadOrder(ordered, previousIds) {
+  const ids = ordered.map((session) => session.id);
+  patchState({ sessions: ordered, threadOrderPending: ids });
+  renderThreads();
+  try {
+    const result = await api(API.reorderSessions.method, API.reorderSessions.path(), { sessionIds: ids });
+    patchState({ sessions: Array.isArray(result.sessions) ? result.sessions : threadsInOrder(state.sessions, ids), threadOrderPending: null });
+  } catch (error) {
+    patchState({ sessions: threadsInOrder(state.sessions, previousIds), threadOrderPending: null });
+    console.error(error);
+  }
+  renderThreads();
+  poll();
+}
+
+function finishThreadPress(commit) {
+  const press = threadPress;
+  if (!press) return;
+  const active = press.active;
+  const targetIndex = active ? [...ui.threadList.querySelectorAll(".thread-row")].indexOf(press.row) : -1;
+  clearThreadPress();
+  if (!active) return;
+  suppressedThreadOpen = { id: press.id, until: performance.now() + 700 };
+  if (!commit || targetIndex < 0) return renderThreads();
+  const previousIds = state.sessions.map((session) => session.id);
+  const ordered = moveThreadToIndex(state.sessions, press.id, targetIndex);
+  if (ordered.every((session, index) => session.id === previousIds[index])) return renderThreads();
+  void persistThreadOrder(ordered, previousIds);
+}
+
+function beginThreadPress(event, row, session) {
+  if (event.button !== 0 || !event.isPrimary || state.threadOrderPending || state.sessions.length < 2) return;
+  clearThreadPress(true);
+  const controller = new AbortController();
+  const press = {
+    id: session.id, row, pointerId: event.pointerId, pointerType: event.pointerType,
+    startX: event.clientX, startY: event.clientY, clientY: event.clientY,
+    active: false, ghost: null, offsetY: 0, controller, timer: null,
+  };
+  threadPress = press;
+  press.timer = setTimeout(() => activateThreadPress(press), THREAD_LONG_PRESS_MS);
+  document.addEventListener("pointermove", (move) => {
+    if (move.pointerId !== press.pointerId || threadPress !== press) return;
+    press.clientY = move.clientY;
+    if (!press.active) {
+      if (Math.hypot(move.clientX - press.startX, move.clientY - press.startY) > THREAD_PRESS_MOVE_PX) clearThreadPress();
+      return;
+    }
+    move.preventDefault();
+    positionThreadDrag(press, move.clientY);
+  }, { capture: true, passive: false, signal: controller.signal });
+  document.addEventListener("touchmove", (move) => {
+    if (press.active && threadPress === press) move.preventDefault();
+  }, { capture: true, passive: false, signal: controller.signal });
+  document.addEventListener("pointerup", (up) => {
+    if (up.pointerId === press.pointerId && threadPress === press) finishThreadPress(true);
+  }, { capture: true, signal: controller.signal });
+  document.addEventListener("pointercancel", (cancel) => {
+    if (cancel.pointerId === press.pointerId && threadPress === press) finishThreadPress(false);
+  }, { capture: true, signal: controller.signal });
+}
+
 function threadProvider(session) {
   return session.environment === "work" ? "work"
     : session.environment === "converge" ? "converge"
@@ -1173,6 +1287,7 @@ function threadRow(session, archived = false) {
   const canArchive = !archived && state.archiveSupported;
   const row = node("div", `thread-row${session.id === state.selectedId && !state.agentRunId ? " selected" : ""}${archived ? " archived" : ""}${canArchive ? " can-archive" : ""}`);
   row.dataset.motionKey = `${archived ? "archived" : "active"}:${session.id}`;
+  row.dataset.threadId = session.id;
   const open = node(archived ? "div" : "button", "thread-open");
   if (!archived) open.type = "button";
   open.append(node("span", "thread-name", session.name || "Agent"));
@@ -1193,7 +1308,13 @@ function threadRow(session, archived = false) {
     action.addEventListener("click", () => unarchiveThread(session));
     row.append(open, action);
   } else {
-    open.addEventListener("click", () => { selectThread(session); closeDrawer(); });
+    open.title = "Long press and drag to reorder";
+    open.addEventListener("pointerdown", (event) => beginThreadPress(event, row, session));
+    open.addEventListener("contextmenu", (event) => { if (threadPress?.id === session.id) event.preventDefault(); });
+    open.addEventListener("click", (event) => {
+      if (consumeSuppressedThreadOpen(session.id)) return event.preventDefault();
+      selectThread(session); closeDrawer();
+    });
     row.append(open);
     if (canArchive) {
       const action = node("button", "archive-thread", "×");
@@ -1237,6 +1358,7 @@ function replaceRows(container, rows, emptyText) {
 }
 
 function renderThreads() {
+  if (threadPress?.active) return;
   if (state.drawerTab === "threads") {
     replaceRows(ui.threadList, state.sessions.map((session) => threadRow(session)), "No threads");
     return;
@@ -1412,7 +1534,7 @@ async function poll(immediate = false) {
 
     let sessionsChanged = false;
     if (authoritativeSnapshot && acceptAuthoritativeState) {
-      const sessions = all.sessions;
+      const sessions = state.threadOrderPending ? threadsInOrder(all.sessions, state.threadOrderPending) : all.sessions;
       const archivedSessions = Array.isArray(all.archivedSessions) ? all.archivedSessions : state.archivedSessions;
       const listedArchived = new Set(archivedSessions.map((session) => session.id));
       const liveIds = new Set(sessions.map((session) => session.id));

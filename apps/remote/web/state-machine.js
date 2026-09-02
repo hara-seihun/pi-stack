@@ -1,7 +1,7 @@
 // @ts-check
 
 export function initialRemoteState(){return{
-  sessions:[],archivedSessions:[],archivedOlder:[],archivedTotal:0,archivedLoading:false,
+  sessions:[],archivedSessions:[],archivedOlder:[],archivedTotal:0,archivedLoading:false,threadOrderPending:null,
   drawerTab:"threads",archiveSupported:false,home:"/",
   selectedId:null,selectedName:"Agent",selectedCwd:"/",selectedState:"STOPPED",selectedActivity:"IDLE",selectedTool:"",
   steeringQueued:0,followUpQueued:0,queuedMessages:[],selectedRevision:0,

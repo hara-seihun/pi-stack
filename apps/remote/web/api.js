@@ -64,6 +64,7 @@ export const API = Object.freeze({
   sync: route("POST", "/v1/sync"),
   sessions: route("GET", "/v1/sessions"),
   createSession: route("POST", "/v1/sessions"),
+  reorderSessions: route("PUT", "/v1/sessions/order"),
   archivedSessions: route("GET", "/v1/sessions/archived"),
   session: route("GET", "/v1/sessions/:sessionId"),
   archiveSession: route("DELETE", "/v1/sessions/:sessionId"),
