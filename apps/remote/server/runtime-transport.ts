@@ -1,4 +1,4 @@
-import { existsSync, mkdirSync, unlinkSync } from "node:fs";
+import { existsSync, mkdirSync } from "node:fs";
 import { createConnection, type Socket } from "node:net";
 import { join } from "node:path";
 
@@ -128,8 +128,8 @@ async function connectHost(socketPath: string, onOutput: RuntimeOutput, timeoutM
   });
 }
 
-export function runtimeSocketPath(data: string, sessionId: string): string {
-  return join(data, "runtime-hosts", `${sessionId}.sock`);
+export function runtimeSocketPath(data: string, sessionId: string, runtimeId: string = crypto.randomUUID()): string {
+  return join(data, "runtime-hosts", `${sessionId}.${runtimeId}.sock`);
 }
 
 export async function attachRuntimeHost(socketPath: string, onOutput: RuntimeOutput): Promise<RuntimeTransport> {
@@ -149,11 +149,6 @@ export async function startRuntimeHost(options: {
   const directory = join(options.data, "runtime-hosts");
   mkdirSync(directory, { recursive: true, mode: 0o700 });
   const socketPath = runtimeSocketPath(options.data, options.sessionId);
-  if (existsSync(socketPath)) {
-    const existing = await connectHost(socketPath, options.onOutput, Math.min(250, CONNECT_TIMEOUT_MS));
-    if (!("error" in existing)) return existing.transport;
-    try { unlinkSync(socketPath); } catch {}
-  }
   const encodedArgs = Buffer.from(JSON.stringify(options.args)).toString("base64url");
   Bun.spawn([process.execPath, join(import.meta.dir, "runtime-host.ts"), socketPath, options.cwd, encodedArgs], {
     cwd: options.cwd,

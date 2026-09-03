@@ -21,7 +21,8 @@ CREATE TABLE IF NOT EXISTS sessions (
   revision INTEGER NOT NULL DEFAULT 0,
   service_tier TEXT NOT NULL DEFAULT 'default',
   archived_at TEXT,
-  display_order INTEGER NOT NULL DEFAULT 0
+  display_order INTEGER NOT NULL DEFAULT 0,
+  named_at_message_count INTEGER NOT NULL DEFAULT 0
 );
 CREATE TABLE IF NOT EXISTS events (
   seq INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -97,6 +98,12 @@ CREATE TABLE IF NOT EXISTS metadata (
   const sessionColumns = new Set((db.query("PRAGMA table_info(sessions)").all() as any[]).map((column) => String(column.name)));
   for (const [name, type] of [["initial_provider", "TEXT"], ["current_provider", "TEXT"], ["initial_model", "TEXT"], ["initial_thinking", "TEXT"], ["revision", "INTEGER NOT NULL DEFAULT 0"], ["service_tier", "TEXT NOT NULL DEFAULT 'default'"], ["archived_at", "TEXT"], ["display_order", "INTEGER NOT NULL DEFAULT 0"]]) {
     if (!sessionColumns.has(name)) db.exec(`ALTER TABLE sessions ADD COLUMN ${name} ${type}`);
+  }
+  if (!sessionColumns.has("named_at_message_count")) {
+    db.exec("ALTER TABLE sessions ADD COLUMN named_at_message_count INTEGER NOT NULL DEFAULT 0");
+    db.exec(`UPDATE sessions SET named_at_message_count=(
+      SELECT COUNT(*) FROM events WHERE events.session_id=sessions.id AND events.type IN ('user','assistant')
+    )`);
   }
   if (!sessionColumns.has("profile_id")) {
     db.exec("ALTER TABLE sessions ADD COLUMN profile_id TEXT");

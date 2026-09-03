@@ -197,6 +197,7 @@ type RuntimePhase = "STARTING" | "IDLE" | "DISPATCHING" | "RUNNING" | "ABORTING"
 type RuntimeHandoff = {
   sessionId: string;
   socketPath: string;
+  pid?: number;
   phase: RuntimePhase;
   compacting: boolean;
   compactionContextHash: string | null;
@@ -222,7 +223,7 @@ function loadHandoff(): RuntimeHandoff[] {
     const document = JSON.parse(readFileSync(HANDOFF_PATH, "utf8"));
     if (document?.version !== 1 || !Array.isArray(document.runtimes)) throw new Error("invalid handoff document");
     return document.runtimes.filter((item: any) => typeof item?.sessionId === "string"
-      && typeof item?.socketPath === "string" && existsSync(item.socketPath));
+      && typeof item?.socketPath === "string");
   } catch (cause) {
     console.error("Could not read supervisor handoff", cause);
     return [];
@@ -618,7 +619,7 @@ function confirmWorkInserted(sessionId: string, workId: string): number {
       .run(sequence, time, time, workId);
     db.query("UPDATE sessions SET revision=revision+1,updated_at=? WHERE id=?").run(time, sessionId);
   })();
-  if (sequence) conversationalMessageInserted(sessionId);
+  if (sequence) scheduleThreadNameIfDue(sessionId);
   return sequence;
 }
 function confirmDispatchedWork(sessionId: string, delivery?: string, limit = Number.POSITIVE_INFINITY) {
@@ -714,12 +715,16 @@ async function nameThread(sessionId: string): Promise<void> {
     if (exitCode !== 0) throw new Error(stderr.trim() || `Pi exited ${exitCode}`);
     const name = generatedThreadName(stdout);
     const row = sessionRow.get(sessionId) as any;
-    const runtime = runtimes.get(sessionId);
-    if (!row || !runtime || row.name === name) return;
-    await rpc(runtime, "set_session_name", { name }, 10_000);
-    if (!ownsSupervisorLease() || runtimes.get(sessionId) !== runtime) return;
-    db.query("UPDATE sessions SET name=?,updated_at=?,revision=revision+1 WHERE id=?").run(name, now(), sessionId);
+    if (!row || !ownsSupervisorLease()) return;
+    const messageCount = Number((db.query("SELECT COUNT(*) count FROM events WHERE session_id=? AND type IN ('user','assistant')").get(sessionId) as any)?.count ?? 0);
+    db.query("UPDATE sessions SET name=?,named_at_message_count=?,updated_at=?,revision=revision+1 WHERE id=?")
+      .run(name, messageCount, now(), sessionId);
     signalSync();
+    const runtime = runtimes.get(sessionId);
+    if (runtime && runtime.phase !== "STOPPING") {
+      try { await rpc(runtime, "set_session_name", { name }, 10_000); }
+      catch (cause) { console.error(`Pi Remote could not copy thread name into runtime ${sessionId}: ${cause instanceof Error ? cause.message : cause}`); }
+    }
   } finally {
     rmSync(scratch, { recursive: true, force: true });
   }
@@ -730,6 +735,10 @@ async function drainThreadNames(sessionId: string): Promise<void> {
   namingThreads.add(sessionId);
   try {
     while (pendingThreadNames.delete(sessionId)) {
+      const row = sessionRow.get(sessionId) as any;
+      if (!row) continue;
+      const count = Number((db.query("SELECT COUNT(*) count FROM events WHERE session_id=? AND type IN ('user','assistant')").get(sessionId) as any)?.count ?? 0);
+      if (!shouldNameThread(String(row.name), count, Number(row.named_at_message_count ?? 0))) continue;
       try {
         await nameThread(sessionId);
       } catch (cause) {
@@ -741,9 +750,11 @@ async function drainThreadNames(sessionId: string): Promise<void> {
   }
 }
 
-function conversationalMessageInserted(sessionId: string) {
+function scheduleThreadNameIfDue(sessionId: string) {
+  const row = sessionRow.get(sessionId) as any;
+  if (!row || !runtimes.has(sessionId)) return;
   const count = Number((db.query("SELECT COUNT(*) count FROM events WHERE session_id=? AND type IN ('user','assistant')").get(sessionId) as any)?.count ?? 0);
-  if (!shouldNameThread(count)) return;
+  if (!shouldNameThread(String(row.name), count, Number(row.named_at_message_count ?? 0))) return;
   pendingThreadNames.set(sessionId, count);
   void drainThreadNames(sessionId);
 }
@@ -1073,7 +1084,7 @@ function handleRpcEvent(sessionId: string, rt: Runtime, event: any) {
     }
     if (text) {
       emit(sessionId, "assistant", { text });
-      conversationalMessageInserted(sessionId);
+      scheduleThreadNameIfDue(sessionId);
     }
     const failure = modelFailureText(event.message);
     if (failure) rt.pendingModelFailure = failure;
@@ -1343,6 +1354,10 @@ async function startRuntime(row: any): Promise<Runtime> {
     if (state.sessionFile) db.query("UPDATE sessions SET session_path=? WHERE id=?").run(state.sessionFile, row.id);
     if (state.model?.provider) db.query("UPDATE sessions SET current_provider=?,revision=revision+1,updated_at=? WHERE id=?")
       .run(String(state.model.provider), now(), row.id);
+    const latestRow = sessionRow.get(row.id) as any;
+    if (latestRow && !/^\d+$/.test(String(latestRow.name)) && state.sessionName !== latestRow.name) {
+      await rpc(rt, "set_session_name", { name: String(latestRow.name) }, 10_000);
+    }
     const historyCount = (db.query("SELECT count(*) count FROM events WHERE session_id=? AND type IN ('user','assistant')").get(row.id) as any)?.count ?? 0;
     rt.historyNeedsRestore = Number(state.messageCount ?? 0) === 0 && historyCount > 0;
     const pendingWork = Number((db.query(
@@ -1350,6 +1365,7 @@ async function startRuntime(row: any): Promise<Runtime> {
     ).get(row.id) as any)?.count ?? 0);
     setRuntimePhase(row.id, rt, "IDLE", pendingWork > 0 ? "RUNNING" : "IDLE");
     if (rt.historyNeedsRestore) emit(row.id, "notice", { text: "Conversation context will be restored with the next message" });
+    scheduleThreadNameIfDue(row.id);
     return rt;
   } catch (cause) {
     const cancelled = rt.expectedExit;
@@ -1371,6 +1387,18 @@ function recoverFailedHandoff(sessionId: string) {
   db.query("UPDATE sessions SET state='STOPPED',updated_at=?,last_error=NULL,revision=revision+1 WHERE id=?").run(time, sessionId);
   db.query("UPDATE work_items SET state='queued',resume=CASE WHEN state='dispatched' THEN 1 ELSE resume END,available_at=?,updated_at=? WHERE session_id=? AND state IN ('running','dispatched')")
     .run(Date.now(), time, sessionId);
+}
+
+async function terminateFailedHandoff(handoff: RuntimeHandoff) {
+  const pid = Number(handoff.pid ?? 0);
+  if (!Number.isSafeInteger(pid) || pid <= 1) return;
+  try { process.kill(-pid, "SIGTERM"); } catch { return; }
+  const deadline = Date.now() + 2_000;
+  while (Date.now() < deadline) {
+    try { process.kill(-pid, 0); } catch { return; }
+    await Bun.sleep(50);
+  }
+  try { process.kill(-pid, "SIGKILL"); } catch {}
 }
 
 async function adoptHandoffRuntimes() {
@@ -1398,10 +1426,12 @@ async function adoptHandoffRuntimes() {
     } catch (cause) {
       console.error(`Could not adopt runtime ${row.id}`, cause);
       runtimes.delete(row.id);
+      await terminateFailedHandoff(handoff);
       recoverFailedHandoff(row.id);
     }
   }
   try { unlinkSync(HANDOFF_PATH); } catch {}
+  for (const sessionId of runtimes.keys()) scheduleThreadNameIfDue(sessionId);
 }
 
 async function reapUnclaimedRuntimeHosts() {
@@ -2700,6 +2730,7 @@ function handoffDocument() {
     return [{
       sessionId,
       socketPath: rt.transport.socketPath,
+      pid: rt.transport.pid,
       phase: rt.phase,
       compacting: rt.compacting,
       compactionContextHash: rt.compactionContextHash,

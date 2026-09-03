@@ -8,7 +8,7 @@ if (!Array.isArray(args) || args.length === 0 || args.some((value) => typeof val
   throw new Error("runtime-host received invalid command arguments");
 }
 
-if (existsSync(socketPath)) unlinkSync(socketPath);
+if (existsSync(socketPath)) throw new Error(`runtime host socket already exists: ${socketPath}`);
 let client: Socket | null = null;
 let input = "";
 let sequence = 0;

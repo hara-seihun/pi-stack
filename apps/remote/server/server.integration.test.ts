@@ -145,9 +145,19 @@ import json, os, subprocess, sys, threading, time
 scale = float(os.environ.get('PI_FAKE_TIME_SCALE', '1'))
 def pause(seconds): time.sleep(seconds * scale)
 if '--print' in sys.argv:
- with open(os.environ['PI_FAKE_NAMING_LOG'], 'a') as naming_log:
+ transcript_path = next((arg[1:] for arg in sys.argv if arg.startswith('@')), '')
+ transcript = open(transcript_path).read() if transcript_path else ''
+ with open(os.environ['PI_FAKE_NAMING_LOG'], 'a+') as naming_log:
   naming_log.write(json.dumps({'argv': sys.argv}) + '\\n')
- print('Automatic Thread Name')
+  naming_log.flush()
+  naming_log.seek(0)
+  attempt = sum(1 for line in naming_log if line.strip())
+ if 'retry thread naming' in transcript and attempt == 1:
+  print('This title has too many words')
+ elif 'retry thread naming' in transcript:
+  print('Retry Thread Name')
+ else:
+  print('Automatic Thread Name')
  sys.exit(0)
 def gate(name):
  root = os.environ['PI_FAKE_GATE_ROOT']
@@ -339,6 +349,10 @@ for line in sys.stdin:
     streaming = True
     out({'type':'agent_start'})
     out({'type':'message_end','message':{'role':'assistant','content':[{'type':'text','text':'done'}]}})
+    streaming = False
+    out({'type':'agent_settled'})
+   elif last == 'retry thread naming':
+    out({'type':'message_end','message':{'role':'assistant','content':[{'type':'text','text':'naming retry reply'}]}})
     streaming = False
     out({'type':'agent_settled'})
    elif last == 'model-refusal':
@@ -565,6 +579,18 @@ describe("web and supervisor integration", () => {
     expect(reconciled.value.state.sessions.find((session: any) => session.id === id)?.name).toBe("Automatic Thread Name");
   });
 
+  test("retries a malformed first title after the assistant reply", async () => {
+    rmSync(fakeNamingLog, { force: true });
+    const id = await createThread("home", "sol");
+    await api("POST", `/v1/sessions/${id}/prompt`, { requestId: crypto.randomUUID(), text: "retry thread naming" });
+    const renamed = await waitFor(
+      () => api("GET", "/v1/sessions").then((result) => result.value.sessions.find((session: any) => session.id === id)),
+      (session) => session?.name === "Retry Thread Name",
+    );
+    expect(renamed.name).toBe("Retry Thread Name");
+    expect(readJsonLines(fakeNamingLog)).toHaveLength(2);
+  });
+
   test("lists this host's working agents for observation", async () => {
     const listed = await api("GET", "/v1/agents/runs");
     expect(listed.status).toBe(200);
@@ -729,6 +755,10 @@ describe("web and supervisor integration", () => {
     try {
       await api("POST", `/v1/sessions/${id}/prompt`, { requestId: crypto.randomUUID(), text: "live-stream" });
       await waitForGate("live-stream-next");
+      await waitFor(
+        () => api("GET", "/v1/sessions").then((result) => result.value.sessions.find((session: any) => session.id === id)),
+        (session) => session?.name === "Automatic Thread Name",
+      );
       const first = await waitFor(() => api("POST", "/v1/sync", {
         seq: 0,
         stateVersion: 0,

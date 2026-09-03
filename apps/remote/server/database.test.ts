@@ -19,6 +19,11 @@ test("the supervisor adopts endpoint-local profiles and drops remote execution c
         revision INTEGER NOT NULL DEFAULT 0, service_tier TEXT NOT NULL DEFAULT 'default',
         archived_at TEXT
       );
+      CREATE TABLE events (
+        seq INTEGER PRIMARY KEY AUTOINCREMENT,
+        session_id TEXT NOT NULL REFERENCES sessions(id) ON DELETE CASCADE,
+        time TEXT NOT NULL, type TEXT NOT NULL, payload TEXT NOT NULL
+      );
       CREATE TABLE uploads (
         path TEXT PRIMARY KEY, session_id TEXT NOT NULL REFERENCES sessions(id) ON DELETE CASCADE,
         environment TEXT NOT NULL, created_at TEXT NOT NULL
@@ -26,6 +31,7 @@ test("the supervisor adopts endpoint-local profiles and drops remote execution c
       INSERT INTO sessions(id,name,workspace_id,state,created_at,updated_at,execution_target)
         VALUES ('personal','1','hara','STOPPED','t','t','local'),
                ('remote','2','home','STOPPED','t','t','converge');
+      INSERT INTO events(session_id,time,type,payload) VALUES ('personal','t','user','{}');
       INSERT INTO uploads(path,session_id,environment,created_at)
         VALUES ('/tmp/file','personal','local','t');
     `);
@@ -39,9 +45,10 @@ test("the supervisor adopts endpoint-local profiles and drops remote execution c
     const sessionColumns = (db.query("PRAGMA table_info(sessions)").all() as any[]).map((column) => column.name);
     expect(sessionColumns).toContain("profile_id");
     expect(sessionColumns).toContain("display_order");
-    expect(db.query("SELECT id,display_order FROM sessions ORDER BY id").all()).toEqual([
-      { id: "personal", display_order: 0 },
-      { id: "remote", display_order: 0 },
+    expect(sessionColumns).toContain("named_at_message_count");
+    expect(db.query("SELECT id,display_order,named_at_message_count FROM sessions ORDER BY id").all()).toEqual([
+      { id: "personal", display_order: 0, named_at_message_count: 1 },
+      { id: "remote", display_order: 0, named_at_message_count: 0 },
     ]);
     expect(sessionColumns).not.toContain("execution_target");
     expect(sessionColumns).not.toContain("remote_cwd");

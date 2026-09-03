@@ -9,13 +9,20 @@ describe("thread naming", () => {
     expect(() => threadNamingModel("openrouter/stealth/ox-alpha:low")).toThrow("OpenAI model");
   });
 
-  test("runs on the first conversational message and every twentieth message", () => {
-    expect([0, 1, 2, 19, 20, 21, 40].filter(shouldNameThread)).toEqual([1, 20, 40]);
+  test("keeps trying a numeric thread, then runs once per twentieth-message interval", () => {
+    expect(shouldNameThread("950", 0, 0)).toBe(false);
+    expect(shouldNameThread("950", 1, 0)).toBe(true);
+    expect(shouldNameThread("950", 2, 0)).toBe(true);
+    expect(shouldNameThread("Named Thread", 19, 2)).toBe(false);
+    expect(shouldNameThread("Named Thread", 20, 2)).toBe(true);
+    expect(shouldNameThread("Named Thread", 21, 20)).toBe(false);
+    expect(shouldNameThread("Named Thread", 40, 20)).toBe(true);
   });
 
   test("normalizes the model's first output line", () => {
     expect(generatedThreadName('## "Thread Naming".\nExplanation')).toBe("Thread Naming");
     expect(generatedThreadName("Title: Alert Delivery")).toBe("Alert Delivery");
+    expect(generatedThreadName("Here is the title:\nEndpoint Workflow")).toBe("Endpoint Workflow");
     expect(() => generatedThreadName("1")).toThrow("invalid title");
     expect(() => generatedThreadName("This title has too many words")).toThrow("invalid title");
   });

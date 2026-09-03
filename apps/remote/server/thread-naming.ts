@@ -10,21 +10,30 @@ export function threadNamingModel(value: string | undefined): string {
   return selection;
 }
 
-export function shouldNameThread(messageCount: number): boolean {
-  return messageCount === 1 || messageCount > 0 && messageCount % THREAD_NAMING_INTERVAL === 0;
+export function shouldNameThread(name: string, messageCount: number, namedAtMessageCount: number): boolean {
+  if (messageCount < 1) return false;
+  if (/^\d+$/.test(name)) return true;
+  const latestInterval = Math.floor(messageCount / THREAD_NAMING_INTERVAL) * THREAD_NAMING_INTERVAL;
+  return latestInterval >= THREAD_NAMING_INTERVAL && namedAtMessageCount < latestInterval;
 }
 
-export function generatedThreadName(output: string): string {
-  const first = output.split(/\r?\n/).map((line) => line.trim()).find(Boolean) ?? "";
-  const name = first
+function titleFromLine(line: string): string | null {
+  const name = line
+    .trim()
     .replace(/^#{1,6}\s*/, "")
     .replace(/^(?:title|name)\s*:\s*/i, "")
     .replace(/^[`"']+|[`"'.!?]+$/g, "")
     .replace(/\s+/g, " ")
     .trim();
   const words = name.split(" ");
-  if (name.length < 3 || name.length > 60 || words.length > 3 || /^\d+$/.test(name) || /[\u0000-\u001f\u007f]/.test(name)) {
-    throw new Error("Thread naming model returned an invalid title");
+  return name.length >= 3 && name.length <= 60 && words.length <= 3
+    && !/^\d+$/.test(name) && !/[\u0000-\u001f\u007f]/.test(name) ? name : null;
+}
+
+export function generatedThreadName(output: string): string {
+  for (const line of output.split(/\r?\n/)) {
+    const name = titleFromLine(line);
+    if (name) return name;
   }
-  return name;
+  throw new Error("Thread naming model returned an invalid title");
 }
