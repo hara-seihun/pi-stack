@@ -787,7 +787,7 @@ function publicSession(row: any, prepared?: PreparedQueue) {
     state: String(item.state),
     status: item.state === "dispatched" ? "Sent · awaiting confirmation"
       : item.state === "running" ? "Sending to agent"
-      : item.delivery === "hardSteer" ? "Hard steering after current operation stops"
+      : item.delivery === "hardSteer" ? "Aborting current operation · steering next"
       : item.delivery === "steer" ? "Steering after current tool calls"
       : item.delivery === "followUp" ? "Queued for after completion"
       : "Sending to agent",
@@ -1231,8 +1231,10 @@ function monitorRuntime(row: any, rt: Runtime) {
     runtimes.delete(row.id);
     if (shuttingDown || !ownsSupervisorLease()) return;
     const retryAt = Date.now() + RUNTIME_RESTART_DELAY_MS;
-    db.query("UPDATE work_items SET state='queued',resume=1,available_at=?,updated_at=?,last_error='Agent stopped before settling' WHERE session_id=? AND state='dispatched'")
-      .run(retryAt, now(), row.id);
+    if (!rt.expectedExit) {
+      db.query("UPDATE work_items SET state='queued',resume=1,available_at=?,updated_at=?,last_error='Agent stopped before settling' WHERE session_id=? AND state='dispatched'")
+        .run(retryAt, now(), row.id);
+    }
     rt.dispatchedWorkIds.clear();
     if (!sessionRow.get(row.id)) return;
     const pendingWork = Number((db.query(
@@ -1712,6 +1714,51 @@ function enqueuePrompt(sessionId: string, requestId: string, text: string, deliv
 type AbortOperationResult =
   | { ok: true; aborting?: true; retainedQueued?: number }
   | { ok: false; status: 409; error: string };
+
+async function hardSteerCurrentOperation(sessionId: string, workId: string): Promise<AbortOperationResult> {
+  const rt = runtimes.get(sessionId);
+  if (rt?.phase === "ABORTING") return { ok: false, status: 409, error: "Another abort is already in progress" };
+  if (rt?.phase === "STOPPING") return { ok: false, status: 409, error: "Agent is already stopping" };
+  const wasActive = !!rt && ["DISPATCHING", "RUNNING"].includes(rt.phase);
+
+  if (rt && wasActive) {
+    // Pi's ordinary abort waits for its already accepted steering queue to run.
+    // Hard steer means preemption, so retire that process group instead: this
+    // stops the provider request and every active tool before a new Pi process
+    // receives the selected message.
+    rt.expectedExit = true;
+    rt.suppressOutput = true;
+    setRuntimePhase(sessionId, rt, "STOPPING", "ABORTING");
+    await terminateRuntimeProcess(rt);
+    if (runtimes.get(sessionId) === rt) {
+      rt.expectedExit = false;
+      rt.suppressOutput = false;
+      setRuntimePhase(sessionId, rt, "RUNNING", "RUNNING", "Could not stop the current operation for hard steer");
+      return { ok: false, status: 409, error: "Could not stop the current operation; the agent is still running" };
+    }
+    await sessionWorkers.get(sessionId);
+  }
+
+  const fallbackCurrent = !wasActive ? db.query(`
+    SELECT id FROM work_items
+    WHERE session_id=? AND id<>? AND state IN ('queued','running','dispatched')
+    ORDER BY created_at,rowid LIMIT 1
+  `).get(sessionId, workId) as { id: string } | null : null;
+  const changedAt = now();
+  db.query(`
+    UPDATE work_items
+    SET state='cancelled',updated_at=?,last_error='Current turn stopped by hard steer'
+    WHERE session_id=? AND id<>?
+      AND (state IN ('running','dispatched') OR id=?)
+  `).run(changedAt, sessionId, workId, fallbackCurrent?.id ?? "");
+  const retainedQueued = Number((db.query(`
+    SELECT COUNT(*) count FROM work_items
+    WHERE session_id=? AND id<>? AND state='queued'
+  `).get(sessionId, workId) as any)?.count ?? 0);
+  setState(sessionId, "RUNNING");
+  kickSession(sessionId);
+  return { ok: true, retainedQueued };
+}
 
 async function abortCurrentOperation(sessionId: string): Promise<AbortOperationResult> {
   const activeItems = db.query(`
@@ -2313,7 +2360,7 @@ const server = Bun.serve({
       if (!canHardSteer) return error("The agent has already finished; this message will start normally", 409);
       db.query("UPDATE work_items SET delivery='hardSteer',updated_at=? WHERE id=? AND state='queued'").run(now(), workId);
       touchSession(sessionId);
-      const aborted = await abortCurrentOperation(sessionId);
+      const aborted = await hardSteerCurrentOperation(sessionId, workId);
       if (!aborted.ok) {
         const reverted = db.query("UPDATE work_items SET delivery='followUp',updated_at=? WHERE id=? AND state='queued' AND delivery='hardSteer'")
           .run(now(), workId);

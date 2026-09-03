@@ -15,7 +15,7 @@ Each live RPC child has exactly one phase:
 | `DISPATCHING` | An idle `prompt` was durably dispatched, but `agent_start` has not proved the run yet | `RUNNING` / `QUEUED` |
 | `RUNNING` | Pi has proved an active run; steering/follow-up messages stay in this phase | `RUNNING` |
 | `ABORTING` | Pi is stopping the active operation in the existing child; accepted steering may still complete | `ABORTING` |
-| `STOPPING` | The idle reaper, archiving, or supervisor shutdown is removing the child | `ABORTING` until process exit, then `STOPPED` |
+| `STOPPING` | Hard steer, the idle reaper, archiving, or supervisor shutdown is removing the child process group | `ABORTING` until process exit, then `STOPPED` |
 
 `phaseVersion` changes on phase transitions, dispatches, queue changes, and Pi activity. A `get_state` reconciliation captures this version before its RPC request and discards the response if the version changed while it was in flight. This prevents an old inactive snapshot from settling newer work.
 
@@ -27,6 +27,7 @@ IDLE -> DISPATCHING -> RUNNING -> IDLE
 RUNNING -> RUNNING                 queued steer/follow-up
 STARTING -> STARTING                   cancel claimed work before dispatch
 DISPATCHING|RUNNING -> ABORTING -> IDLE
+DISPATCHING|RUNNING -> STOPPING -> STARTING   hard steer
 IDLE -> STOPPING                       fifteen-minute inactivity reaper
 any live phase -> STOPPING -> STOPPED|FAILED
 FAILED|STOPPED -> STARTING         later activation/retry
@@ -50,7 +51,7 @@ queued -> running -> dispatched -> complete
 - `dispatched` means exactly one RPC command was written; acknowledgement loss never causes a duplicate send. Pi's next context snapshot contains the user message after RPC acknowledgement or subsequent Pi activity proves insertion, and the pending composer card disappears in the same durable update.
 - A `followUp` created during `RUNNING` remains `queued` under supervisor ownership. It is not handed to Pi until the current run settles, so it can be atomically promoted to `steer` or cancelled. While busy, the worker skips held follow-ups and dispatches only promoted steering items; while idle, it starts the oldest queued item as the next prompt.
 - Cancellation succeeds only while the supervisor still owns an item in `queued`; it atomically marks the item `cancelled` before any Pi insertion. Client-side Edit uses this same cancellation endpoint and copies the returned canonical text into the composer without creating a second server-side message.
-- Soft steer promotes a pending follow-up into Pi's current run. Hard steer marks the chosen follow-up as next, aborts the current operation, and starts a new run with that message. Other follow-ups retain their relative order.
+- Soft steer promotes a pending follow-up into Pi's current run. Hard steer marks the chosen follow-up as next, terminates the active Pi process group immediately, and starts a fresh process on the same session with that message. Work already dispatched into the interrupted run is cancelled; supervisor-owned follow-ups retain their relative order.
 - Promotion normally updates a still-pending durable work item before it has any event entry. An already-inserted item keeps its delivery event accurate for voice consumers.
 - All dispatched items in one Pi run complete only when reconciliation confirms Pi inactive from the `RUNNING` phase. An `agent_settled` event requests that reconciliation but cannot complete work on its own.
 - Cancellation is terminal for the active item. Stop requeues every later queued/running/dispatched item with `resume=0`; a dispatch error checks each durable state before retrying, so the cancelled active turn cannot resurrect while retained messages remain sendable.
@@ -60,9 +61,11 @@ queued -> running -> dispatched -> complete
 
 Abort stops only the current operation through Pi's RPC `abort`; it never terminates the Pi RPC child. This propagates cancellation into the active local or remote tool while preserving the thread process, model state, and session. A claimed message can be cancelled during `STARTING` before dispatch without cancelling activation. A prompt waiting in retry backoff has no active Pi operation, so abort cancels that durable item directly, clears its retry timer, and returns the existing child to `IDLE` instead of briefly displaying `ABORTING` and resuming the retry loop.
 
-Pi owns steering it has already acknowledged, while the supervisor continues to own uninserted follow-ups. Because `session.abort()` waits for Pi to become idle, accepted steering may complete before the abort response and its real transcript output remains visible. The active work item becomes `cancelled`, accepted steering completed by Pi becomes `complete`, and supervisor-held work then dispatches normally through the same child. Hard steer gives its chosen supervisor-owned message priority once abort finishes. If Pi refuses or cannot confirm abort, the endpoint restores that message as an ordinary follow-up and leaves the child and active work running; it never substitutes process termination for operation cancellation.
+Pi owns steering it has already acknowledged, while the supervisor continues to own uninserted follow-ups. An ordinary abort uses Pi's RPC command and keeps the process alive. Because `session.abort()` waits for Pi to become idle, accepted steering may complete before that response; its real transcript output remains visible and its work becomes complete.
 
-The normal runtime termination path is the idle reaper. After fifteen minutes in `IDLE`, it preserves the Pi JSONL session and stops the child and its runtime host. Release activation replaces the supervisor immediately while runtime hosts keep active children alive. The old supervisor writes one handoff document, disconnects, and exits with status 75. The service launcher starts the selected release, which adopts those hosts and continues their event streams before opening the HTTP listener. A handoff waits only for an in-flight abort operation because its durable cancellation decision belongs to the supervisor that started it. Explicit thread retirement, full service shutdown, activation failure, and unexpected child failure remain distinct termination paths. Archiving an ordinary thread sets `sessions.archived_at`, cancels unfinished durable work, and stops the child while preserving events, settings, and Pi JSONL resume state. Archived threads cannot activate or accept new work until unarchived.
+Hard steer is deliberately stronger. Pi has no RPC command that can clear or reprioritize an accepted steering queue, so waiting for its ordinary abort would let those messages run first. Hard steer instead suppresses late output, terminates the Pi process group and active tools, cancels every item dispatched into that run, and starts a new Pi process from the same JSONL session. The selected message is the first dispatch to that process. Supervisor-owned follow-ups remain queued behind it. If process-group termination cannot be confirmed, the endpoint restores the selected message as an ordinary follow-up and reports failure instead of claiming it was preempted.
+
+The normal passive runtime termination path is the idle reaper. After fifteen minutes in `IDLE`, it preserves the Pi JSONL session and stops the child and its runtime host. Release activation replaces the supervisor immediately while runtime hosts keep active children alive. The old supervisor writes one handoff document, disconnects, and exits with status 75. The service launcher starts the selected release, which adopts those hosts and continues their event streams before opening the HTTP listener. A handoff waits only for an in-flight ordinary abort operation because its durable cancellation decision belongs to the supervisor that started it. Explicit hard steer, thread retirement, full service shutdown, activation failure, and unexpected child failure remain distinct termination paths. Archiving an ordinary thread sets `sessions.archived_at`, cancels unfinished durable work, and stops the child while preserving events, settings, and Pi JSONL resume state. Archived threads cannot activate or accept new work until unarchived.
 
 ## Revision ordering
 
@@ -121,7 +124,7 @@ The observation surface is therefore a pure projection with three rules:
 5. Only an inactive Pi state confirmed from `RUNNING` may settle and complete dispatched work.
 6. `ABORTING` preserves real transcript output while owning settlement; only `STOPPING` suppresses output.
 7. A stale reconciliation response cannot change phase.
-8. The cancelled active item is never retried; Pi-owned accepted steering and supervisor-owned pending work each continue from their canonical owner without duplication.
+8. An ordinary abort never retries its cancelled active item. A hard steer cancels every item owned by the retired Pi process and dispatches the selected supervisor-owned message first in its replacement.
 9. A completed compaction can expose only the replacement context acknowledged during that compaction. A missing or mismatched replacement clears the prior document.
 10. Client context snapshots are applied only to the selection generation that requested them; their capture times never move backward.
 11. Client authoritative lifecycle snapshots never move backward in revision.
