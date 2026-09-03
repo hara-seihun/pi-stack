@@ -22,7 +22,9 @@ Enter sends the composer only where a hardware keyboard is typing. On touch devi
 
 The drawer tabs use an icon and count for Interactive threads, Orchestrator agents, archived threads, and host files. The Files tab is a lazy tree rooted at `/`: opening a folder requests only that directory, dotfiles remain visible, and selecting a regular file downloads it. Headless Tree supplies keyboard and screen-reader tree behavior, while TanStack Virtual keeps directories such as `/nix/store` from creating tens of thousands of DOM rows. The tree remains mounted when another drawer tab is selected, so open folders and the current path survive tab switches.
 
-Each runtime also loads `server/thread-context.ts`. The extension offers initialization only while the durable session title is numeric, removes that control from named threads, and treats process or model changes as continuation rather than a new thread. It tells every model to use `read-thread` for local, no-request access to another thread and reserves `read-condensed-session` for explicit semantic condensation. It also tells the agent how to offer downloadable files. A `<pi-remote-file src="/absolute/path" />` tag becomes a normal link in both clients, and the session-scoped endpoint streams the file from the thread's host.
+Each runtime also loads `server/thread-context.ts`. On a new thread's first request, the extension puts waiting machine alerts directly into model context and removes the consumed inbox files once the run starts. There is no thread-initialization tool. The extension treats process or model changes as continuation rather than a new thread, tells every model to use `read-thread` for local access to another thread, and reserves `read-condensed-session` for explicit semantic condensation. It also tells the agent how to offer downloadable files. A `<pi-remote-file src="/absolute/path" />` tag becomes a normal link in both clients, and the session-scoped endpoint streams the file from the thread's host.
+
+The supervisor names a thread after its first user message and updates the name every 20 user or assistant messages. It gives the latest 12 messages to a short-lived, tool-free `pi --print` process and applies the process's first output line to both the Pi session and the supervisor database. `PI_REMOTE_THREAD_NAMING_MODEL` is required and must explicitly select an OpenAI provider, model, and thinking level, such as `openai-codex/gpt-5.6-luna:low`.
 
 Model menus, autonomous-agent labels, and plan cards use the catalog exported by `pi-orchestrator/api`. Plan cards project the orchestrator's account and meter facts; Pi Remote carries no provider usage parser or duplicate provider manifest. New Sol threads start in OpenAI's priority service tier. Existing threads keep their saved mode, and other models start in normal mode.
 
@@ -30,6 +32,7 @@ Model menus, autonomous-agent labels, and plan cards use the catalog exported by
 
 - [Bun](https://bun.sh/), `jq`, and `gocryptfs` for encrypted folders
 - Pi on the supervisor's `PATH`
+- `PI_REMOTE_THREAD_NAMING_MODEL` set to an explicit OpenAI Pi model selection
 - `apps/remote` installed as Pi's final configured package
 - the root npm workspaces installed and Pi Orchestrator built
 - Android SDK 36 and Java 21 to build Kenan
@@ -39,8 +42,8 @@ Model menus, autonomous-agent labels, and plan cards use the catalog exported by
 Every machine runs one front door, `pi-remote-router.service`, and one supervisor per person, `pi-remote@<user>.service`. A person is a unix account with a registry file under `/var/lib/pi-remote/persons/<user>.json`:
 
 ```bash
-sudo pi-remote person add sibyl --display-name Sibyl            # encrypted folder, key printed once
-sudo pi-remote person add kenan --display-name Kenan --no-encrypt --folder converge --environment converge --environment-name Converge
+sudo pi-remote person add sibyl --display-name Sibyl --thread-naming-model openai-codex/gpt-5.6-luna:low
+sudo pi-remote person add kenan --display-name Kenan --thread-naming-model openai-codex/gpt-5.6-luna:low --no-encrypt --folder converge --environment converge --environment-name Converge
 pi-remote person list
 sudo pi-remote person remove sibyl                              # forgets her; deletes nothing
 ```
@@ -63,6 +66,7 @@ The registry file is the whole per-person configuration. Its `environment` objec
     "PI_REMOTE_PRIVATE_DIR": "/home/kenan/hara",
     "PI_REMOTE_DATA": "/home/kenan/hara/.pi-remote",
     "PI_REMOTE_PORT": 18790,
+    "PI_REMOTE_THREAD_NAMING_MODEL": "openai-codex/gpt-5.6-luna:low",
     "PI_REMOTE_ORCHESTRATOR_DB": "/home/kenan/.local/share/pi-orchestrator/ledger.sqlite3",
     "PI_REMOTE_ORCHESTRATOR_RUNS": "/home/kenan/.local/share/pi-orchestrator/runs",
     "PI_REMOTE_BASH_TIMEOUT_MAX_SECONDS": 300,
@@ -104,7 +108,7 @@ cd /absolute/path/to/pi-stack
 npm ci --ignore-scripts
 npm run build
 npm run build --workspace=pi-remote
-sudo PI_REMOTE_PERSONS_DIR=/var/lib/pi-remote/persons bun apps/remote/server/person-cli.ts person add "$USER" --display-name Me --no-encrypt
+sudo PI_REMOTE_PERSONS_DIR=/var/lib/pi-remote/persons bun apps/remote/server/person-cli.ts person add "$USER" --display-name Me --thread-naming-model openai-codex/gpt-5.6-luna:low --no-encrypt
 sudo systemctl start pi-remote-router
 ```
 

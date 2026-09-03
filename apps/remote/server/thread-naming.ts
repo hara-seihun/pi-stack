@@ -1,0 +1,30 @@
+export const THREAD_NAMING_INSTRUCTION = "This is a thread. Please make a title for this thread that, in one to three words, summarises what the thread is about";
+export const THREAD_NAMING_INTERVAL = 20;
+export const THREAD_NAMING_HISTORY = 12;
+
+export function threadNamingModel(value: string | undefined): string {
+  const selection = value?.trim() ?? "";
+  if (!/^(?:openai|openai-codex)\/[^/:\s]+:(?:off|minimal|low|medium|high|xhigh|max)$/.test(selection)) {
+    throw new Error("PI_REMOTE_THREAD_NAMING_MODEL must name an OpenAI model as openai/MODEL:THINKING or openai-codex/MODEL:THINKING");
+  }
+  return selection;
+}
+
+export function shouldNameThread(messageCount: number): boolean {
+  return messageCount === 1 || messageCount > 0 && messageCount % THREAD_NAMING_INTERVAL === 0;
+}
+
+export function generatedThreadName(output: string): string {
+  const first = output.split(/\r?\n/).map((line) => line.trim()).find(Boolean) ?? "";
+  const name = first
+    .replace(/^#{1,6}\s*/, "")
+    .replace(/^(?:title|name)\s*:\s*/i, "")
+    .replace(/^[`"']+|[`"'.!?]+$/g, "")
+    .replace(/\s+/g, " ")
+    .trim();
+  const words = name.split(" ");
+  if (name.length < 3 || name.length > 60 || words.length > 3 || /^\d+$/.test(name) || /[\u0000-\u001f\u007f]/.test(name)) {
+    throw new Error("Thread naming model returned an invalid title");
+  }
+  return name;
+}

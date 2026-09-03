@@ -9,11 +9,13 @@ import { chmodSync, chownSync, existsSync, mkdirSync, mkdtempSync, rmSync, write
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { listPersons, personPath, PERSONS_DIR, type Person } from "./persons";
+import { threadNamingModel } from "./thread-naming";
 
 const USAGE = `usage:
   pi-remote person list
-  pi-remote person add USER --display-name NAME [--folder NAME] [--no-encrypt] [--existing]
-                            [--port N] [--environment ID] [--environment-name NAME]
+  pi-remote person add USER --display-name NAME --thread-naming-model PROVIDER/MODEL:THINKING
+                            [--folder NAME] [--no-encrypt] [--existing] [--port N]
+                            [--environment ID] [--environment-name NAME]
   pi-remote person remove USER
 
 add creates /home/USER/FOLDER (default FOLDER is USER). With encryption the
@@ -50,7 +52,7 @@ function requireRoot(): void {
   if (process.getuid?.() !== 0) throw new Error("this command needs root; run it with sudo");
 }
 
-function defaultEnvironment(person: Omit<Person, "environment">, folder: string, home: string, homeName: string, environmentId: string, environmentName: string) {
+function defaultEnvironment(person: Omit<Person, "environment">, folder: string, home: string, homeName: string, environmentId: string, environmentName: string, threadNamingModel: string) {
   const privateDir = person.unlock?.mountpoint ?? join(home, folder);
   return {
     PI_REMOTE_ENVIRONMENT_ID: environmentId,
@@ -63,6 +65,7 @@ function defaultEnvironment(person: Omit<Person, "environment">, folder: string,
     PI_REMOTE_DATA: join(privateDir, ".pi-remote"),
     PI_REMOTE_INGESTION: join(privateDir, ".ingestion"),
     PI_REMOTE_PORT: person.port,
+    PI_REMOTE_THREAD_NAMING_MODEL: threadNamingModel,
     PI_REMOTE_DESTINATIONS: "personal,home",
     PI_REMOTE_ORCHESTRATOR_DB: join(home, ".local/share/pi-orchestrator/ledger.sqlite3"),
     PI_REMOTE_ORCHESTRATOR_RUNS: join(home, ".local/share/pi-orchestrator/runs"),
@@ -85,6 +88,9 @@ function add(args: string[]): void {
   if (existsSync(personPath(user))) throw new Error(`${user} is already a Pi Remote person (${personPath(user)})`);
   const displayName = named.get("display-name");
   if (!displayName) throw new Error("--display-name is required");
+  const namingModel = named.get("thread-naming-model");
+  if (!namingModel) throw new Error("--thread-naming-model is required");
+  const configuredNamingModel = threadNamingModel(namingModel);
   const { uid, gid, home } = account(user);
   const folder = named.get("folder") ?? user;
   if (!/^[a-z][a-z0-9-]{0,31}$/.test(folder)) throw new Error("--folder must be a short lowercase name");
@@ -125,7 +131,7 @@ function add(args: string[]): void {
     ...(encrypt ? { unlock: { cipherDir, mountpoint } } : {}),
   };
   const homeName = named.get("home-name") ?? user.charAt(0).toUpperCase() + user.slice(1);
-  const person: Person = { ...base, environment: defaultEnvironment(base, folder, home, homeName, environmentId, environmentName) };
+  const person: Person = { ...base, environment: defaultEnvironment(base, folder, home, homeName, environmentId, environmentName, configuredNamingModel) };
   mkdirSync(PERSONS_DIR, { recursive: true, mode: 0o755 });
   writeFileSync(personPath(user), `${JSON.stringify(person, null, 2)}\n`, { mode: 0o644 });
   chmodSync(personPath(user), 0o644);

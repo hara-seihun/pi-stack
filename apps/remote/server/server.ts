@@ -1,5 +1,5 @@
 import { Database } from "bun:sqlite";
-import { closeSync, existsSync, mkdirSync, openSync, readFileSync, readdirSync, realpathSync, renameSync, statSync, unlinkSync, writeFileSync, writeSync } from "node:fs";
+import { closeSync, existsSync, mkdirSync, mkdtempSync, openSync, readFileSync, readdirSync, realpathSync, renameSync, rmSync, statSync, unlinkSync, writeFileSync, writeSync } from "node:fs";
 import { homedir } from "node:os";
 import { basename, dirname, extname, isAbsolute, join, resolve } from "node:path";
 import { parseRunKey } from "./agent-runs";
@@ -19,6 +19,13 @@ import { fileBrowserError, listDirectory, localFileResponse, registerIconAssets,
 import { governorControls, isGovernorProvider, toggleGovernor } from "./governors";
 import { MachineActions } from "./machine-actions";
 import { availableUploadPath, storeUpload, uploadName } from "./uploads";
+import {
+  generatedThreadName,
+  shouldNameThread,
+  THREAD_NAMING_HISTORY,
+  THREAD_NAMING_INSTRUCTION,
+  threadNamingModel,
+} from "./thread-naming";
 
 const VERSION = (JSON.parse(readFileSync(join(import.meta.dir, "../package.json"), "utf8")) as { version: string }).version;
 const ENVIRONMENT_ID = process.env.PI_REMOTE_ENVIRONMENT_ID ?? "local";
@@ -30,6 +37,8 @@ const HOME = homedir();
 const DATA = process.env.PI_REMOTE_DATA ?? join(process.env.XDG_STATE_HOME ?? join(HOME, ".local/state"), "pi-remote");
 const INGESTION = process.env.PI_REMOTE_INGESTION ?? join(DATA, "ingestion");
 const PI = process.env.PI_BIN ?? "pi";
+const THREAD_NAMING_MODEL = threadNamingModel(process.env.PI_REMOTE_THREAD_NAMING_MODEL);
+const THREAD_NAMING_DIR = join(DATA, "thread-naming");
 const PRIVATE_ID = process.env.PI_REMOTE_PRIVATE_ID ?? "private";
 const PRIVATE_NAME = process.env.PI_REMOTE_PRIVATE_NAME ?? "Private";
 const PRIVATE_DIR = process.env.PI_REMOTE_PRIVATE_DIR ?? join(HOME, PRIVATE_ID);
@@ -166,6 +175,7 @@ for (const workspace of workspaces.values()) workspace.path = realpathSync(works
 mkdirSync(DATA, { recursive: true, mode: 0o700 });
 mkdirSync(join(DATA, "sessions"), { recursive: true, mode: 0o700 });
 mkdirSync(SERVICE_TIER_DIR, { recursive: true, mode: 0o700 });
+mkdirSync(THREAD_NAMING_DIR, { recursive: true, mode: 0o700 });
 mkdirSync(INGESTION, { recursive: true, mode: 0o700 });
 const db = new Database(join(DATA, "supervisor.sqlite3"), { create: true, strict: true });
 const orchestrator = new OrchestratorClient({
@@ -580,6 +590,7 @@ function confirmWorkInserted(sessionId: string, workId: string): number {
       .run(sequence, time, time, workId);
     db.query("UPDATE sessions SET revision=revision+1,updated_at=? WHERE id=?").run(time, sessionId);
   })();
+  if (sequence) conversationalMessageInserted(sessionId);
   return sequence;
 }
 function confirmDispatchedWork(sessionId: string, delivery?: string, limit = Number.POSITIVE_INFINITY) {
@@ -616,19 +627,97 @@ function setRuntimePhase(id: string, rt: Runtime, phase: RuntimePhase, state?: s
 function runtimeWorking(rt: Runtime | undefined): boolean {
   return !!rt && ["STARTING", "DISPATCHING", "RUNNING", "ABORTING"].includes(rt.phase);
 }
-function normalizeThreadName(value: string): string {
-  const name = value.trim().replace(/\s+/g, " ");
-  if (name.length < 3 || name.length > 60 || /[\u0000-\u001f\u007f]/.test(name)) throw new Error("Thread title must be 3–60 characters");
-  const words = name.split(" ");
-  if (words.length < 2 || words.length > 3) throw new Error("Thread title must contain two or three words");
-  if (/^\d+$/.test(name)) throw new Error("Thread title must not be numeric");
-  return name;
-}
 function nextThreadName(): string {
   const current = Number((db.query("SELECT value FROM metadata WHERE key='last_thread_number'").get() as any)?.value ?? 0);
   const next = current + 1;
   db.query("UPDATE metadata SET value=? WHERE key='last_thread_number'").run(String(next));
   return String(next);
+}
+
+const pendingThreadNames = new Map<string, number>();
+const namingThreads = new Set<string>();
+
+function recentThreadTranscript(sessionId: string): string {
+  return (db.query(`
+    SELECT type,payload FROM events
+    WHERE session_id=? AND type IN ('user','assistant')
+    ORDER BY seq DESC LIMIT ?
+  `).all(sessionId, THREAD_NAMING_HISTORY) as any[]).reverse().map((event) => {
+    const payload = JSON.parse(event.payload);
+    return `${event.type === "user" ? "User" : "Agent"}: ${String(payload.text ?? "").slice(0, 3_000)}`;
+  }).join("\n\n");
+}
+
+async function nameThread(sessionId: string): Promise<void> {
+  const transcript = recentThreadTranscript(sessionId);
+  if (!transcript) return;
+  const scratch = mkdtempSync(join(THREAD_NAMING_DIR, `${sessionId}-`));
+  const transcriptPath = join(scratch, "messages.txt");
+  writeFileSync(transcriptPath, transcript, { mode: 0o600 });
+  try {
+    const child = Bun.spawn([
+      PI,
+      "--print",
+      "--no-session",
+      "--no-tools",
+      "--no-skills",
+      "--no-context-files",
+      "--model", THREAD_NAMING_MODEL,
+      "--system-prompt", THREAD_NAMING_INSTRUCTION,
+      `@${transcriptPath}`,
+    ], {
+      cwd: HOME,
+      env: {
+        ...process.env,
+        HOME,
+        PATH: `${join(HOME, ".local/bin")}:${join(HOME, ".bun/bin")}:${process.env.PATH ?? ""}`,
+        PI_CODING_AGENT_DIR: AGENT_DIR,
+      },
+      stdin: "ignore",
+      stdout: "pipe",
+      stderr: "pipe",
+    });
+    const timeout = setTimeout(() => child.kill(), 60_000);
+    const [stdout, stderr, exitCode] = await Promise.all([
+      new Response(child.stdout).text(),
+      new Response(child.stderr).text(),
+      child.exited,
+    ]).finally(() => clearTimeout(timeout));
+    if (exitCode !== 0) throw new Error(stderr.trim() || `Pi exited ${exitCode}`);
+    const name = generatedThreadName(stdout);
+    const row = sessionRow.get(sessionId) as any;
+    const runtime = runtimes.get(sessionId);
+    if (!row || !runtime || row.name === name) return;
+    await rpc(runtime, "set_session_name", { name }, 10_000);
+    if (!ownsSupervisorLease() || runtimes.get(sessionId) !== runtime) return;
+    db.query("UPDATE sessions SET name=?,updated_at=?,revision=revision+1 WHERE id=?").run(name, now(), sessionId);
+    signalSync();
+  } finally {
+    rmSync(scratch, { recursive: true, force: true });
+  }
+}
+
+async function drainThreadNames(sessionId: string): Promise<void> {
+  if (namingThreads.has(sessionId)) return;
+  namingThreads.add(sessionId);
+  try {
+    while (pendingThreadNames.delete(sessionId)) {
+      try {
+        await nameThread(sessionId);
+      } catch (cause) {
+        console.error(`Pi Remote could not name thread ${sessionId}: ${cause instanceof Error ? cause.message : cause}`);
+      }
+    }
+  } finally {
+    namingThreads.delete(sessionId);
+  }
+}
+
+function conversationalMessageInserted(sessionId: string) {
+  const count = Number((db.query("SELECT COUNT(*) count FROM events WHERE session_id=? AND type IN ('user','assistant')").get(sessionId) as any)?.count ?? 0);
+  if (!shouldNameThread(count)) return;
+  pendingThreadNames.set(sessionId, count);
+  void drainThreadNames(sessionId);
 }
 
 type AgentModelCount = { key: string; label: string; count: number };
@@ -968,7 +1057,10 @@ function handleRpcEvent(sessionId: string, rt: Runtime, event: any) {
         if (text) rt.liveText = text;
       }
     }
-    if (text) emit(sessionId, "assistant", { text });
+    if (text) {
+      emit(sessionId, "assistant", { text });
+      conversationalMessageInserted(sessionId);
+    }
     const failure = modelFailureText(event.message);
     if (failure) rt.pendingModelFailure = failure;
     else if (event.message?.role === "assistant") rt.pendingModelFailure = null;
@@ -2284,7 +2376,7 @@ const server = Bun.serve({
       ["unarchive", API.unarchiveSession], ["prompt", API.sessionPrompt], ["fork", API.sessionFork], ["abort", API.sessionAbort],
       ["events", API.sessionEvents], ["context", API.sessionContext], ["context", API.patchSessionContext],
       ["context", API.replaceSessionContext], ["settings", API.sessionSettings], ["settings", API.updateSessionSettings],
-      ["commands", API.sessionCommands], ["command", API.sessionCommand], ["name", API.updateSessionName],
+      ["commands", API.sessionCommands], ["command", API.sessionCommand],
     ];
     const sessionMatch = sessionRoutes.map(([action, route]) => ({ action, params: route.match(req.method, url.pathname) }))
       .find((candidate) => candidate.params !== null);
@@ -2431,21 +2523,6 @@ const server = Bun.serve({
         liveThinking: rt?.liveThinking ?? "",
         session: publicSession(sessionRow.get(id)),
       });
-    }
-    if (action === "name" && req.method === "PUT") {
-      try {
-        const name = normalizeThreadName(await req.text());
-        if (!/^\d+$/.test(row.name)) {
-          if (row.name === name) return json({ ok: true, name });
-          return error("Thread has already been renamed", 409);
-        }
-        const rt = runtimes.get(id);
-        if (!rt) return error("Agent is not active", 409);
-        await rpc(rt, "set_session_name", { name }, 10_000);
-        if (!ownsSupervisorLease()) return error("Supervisor instance was replaced", 503);
-        db.query("UPDATE sessions SET name=?,updated_at=?,revision=revision+1 WHERE id=?").run(name, now(), id);
-        return json({ ok: true, name });
-      } catch (e: any) { return error(e.message ?? "Could not rename thread", 400); }
     }
     if (action === "commands" && req.method === "GET") {
       try { return json(await threadCommands(row)); }

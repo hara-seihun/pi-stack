@@ -23,6 +23,7 @@ const fakePi = join(root, "fake-pi.py");
 const fakeAudio = join(root, "fake-audio.py");
 const fakeAudioState = join(root, "fake-audio-state.json");
 const fakeLaunch = join(root, "fake-launch.json");
+const fakeNamingLog = join(root, "fake-naming.jsonl");
 const fakeRpcLog = join(root, "fake-rpc.jsonl");
 const fakeChildPid = join(root, "fake-child.pid");
 const fakeCrashMarker = join(root, "fake-crash.marker");
@@ -107,6 +108,7 @@ async function startServer() {
       PI_REMOTE_RUNTIME_RESTART_DELAY_MS: "20",
       PI_REMOTE_INGESTION: join(root, "ingestion"),
       PI_FAKE_LAUNCH: fakeLaunch,
+      PI_FAKE_NAMING_LOG: fakeNamingLog,
       PI_FAKE_RPC_LOG: fakeRpcLog,
       PI_FAKE_CHILD_PID: fakeChildPid,
       PI_FAKE_CRASH_MARKER: fakeCrashMarker,
@@ -119,6 +121,7 @@ async function startServer() {
       PI_REMOTE_LOCAL_AGENT_MAX_AGE_MS: "0",
       PI_REMOTE_ENVIRONMENT_ID: "local",
       PI_REMOTE_ENVIRONMENT_NAME: "Local",
+      PI_REMOTE_THREAD_NAMING_MODEL: "openai-codex/gpt-5.6-luna:low",
       PI_REMOTE_REQUIRES_UNLOCK: "true",
       PI_REMOTE_PRIVATE_ID: "private",
       PI_REMOTE_PRIVATE_NAME: "Private",
@@ -143,6 +146,11 @@ beforeAll(async () => {
 import json, os, subprocess, sys, threading, time
 scale = float(os.environ.get('PI_FAKE_TIME_SCALE', '1'))
 def pause(seconds): time.sleep(seconds * scale)
+if '--print' in sys.argv:
+ with open(os.environ['PI_FAKE_NAMING_LOG'], 'a') as naming_log:
+  naming_log.write(json.dumps({'argv': sys.argv}) + '\\n')
+ print('Automatic Thread Name')
+ sys.exit(0)
 def gate(name):
  root = os.environ['PI_FAKE_GATE_ROOT']
  os.makedirs(root, exist_ok=True)
@@ -496,7 +504,8 @@ describe("web and supervisor integration", () => {
     expect((await api("GET", "/v1/sessions")).value.sessions.map((session: any) => session.id)).toEqual(requestedIds);
   });
 
-  test("reconciles every acknowledged mutation through its committed state version", async () => {
+  test("names the first message through a configured tool-free Pi model", async () => {
+    rmSync(fakeNamingLog, { force: true });
     const id = await createThread("home", "sol");
     const before = await api("POST", "/v1/sync", {
       after: 0,
@@ -504,13 +513,17 @@ describe("web and supervisor integration", () => {
       waitMs: 0,
       includeDashboard: false,
     });
-    const renamed = await fetch(`${base}/v1/sessions/${id}/name`, { method: "PUT", body: "Reconciled thread" });
-    expect(renamed.status).toBe(200);
-    const target = renamed.headers.get("x-pi-state-version") || "";
-    const separator = target.lastIndexOf("/");
-    expect(target.slice(0, separator)).toBe(before.value.epoch);
-    const targetVersion = Number(target.slice(separator + 1));
-    expect(targetVersion).toBeGreaterThan(before.value.stateVersion);
+    await api("POST", `/v1/sessions/${id}/prompt`, { requestId: crypto.randomUUID(), text: "name this conversation" });
+    const renamed = await waitFor(
+      () => api("GET", "/v1/sessions").then((result) => result.value.sessions.find((session: any) => session.id === id)),
+      (session) => session?.name === "Automatic Thread Name",
+    );
+    expect(renamed.revision).toBeGreaterThan(0);
+    const invocation = readJsonLines(fakeNamingLog).at(-1);
+    expect(invocation.argv).toContain("--print");
+    expect(invocation.argv).toContain("--no-tools");
+    expect(invocation.argv).toContain("openai-codex/gpt-5.6-luna:low");
+    expect(invocation.argv.some((argument: string) => argument.startsWith("@") && argument.endsWith("/messages.txt"))).toBe(true);
 
     const reconciled = await api("POST", "/v1/sync", {
       after: before.value.seq,
@@ -519,8 +532,7 @@ describe("web and supervisor integration", () => {
       waitMs: 25_000,
       includeDashboard: false,
     });
-    expect(reconciled.value.stateVersion).toBeGreaterThanOrEqual(targetVersion);
-    expect(reconciled.value.sessions.find((session: any) => session.id === id)?.name).toBe("Reconciled thread");
+    expect(reconciled.value.sessions.find((session: any) => session.id === id)?.name).toBe("Automatic Thread Name");
   });
 
   test("lists this host's working agents for observation", async () => {
@@ -684,7 +696,7 @@ describe("web and supervisor integration", () => {
 
       releaseGate("live-stream-next");
       await waitForGate("live-stream");
-      const second = await api("POST", "/v1/sync", {
+      const second = await waitFor(() => api("POST", "/v1/sync", {
         after: first.value.seq,
         stateVersion: first.value.stateVersion,
         epoch: first.value.epoch,
@@ -695,7 +707,7 @@ describe("web and supervisor integration", () => {
         eventLiveTextHash: first.value.sessionEvents.liveTextUpdate.hash,
         eventLiveThinkingHash: first.value.sessionEvents.liveThinkingUpdate.hash,
         includeDashboard: false,
-      });
+      }), (result) => Boolean(result.value.sessionEvents?.liveTextUpdate));
       expect(second.value.sessions).toBeNull();
       expect(second.value.selectedSession).toBeNull();
       expect(second.value.contextUpdate).toBeNull();
@@ -739,7 +751,10 @@ describe("web and supervisor integration", () => {
         finalizesMessage: finalization,
       });
 
-      const streaming = await api("GET", `/v1/sessions/${id}/events?after=0`);
+      const streaming = await waitFor(
+        () => api("GET", `/v1/sessions/${id}/events?after=0`),
+        (result) => result.value.liveThinking === "visible thought",
+      );
       expect(streaming.value.liveThinking).toBe("visible thought");
       expect(streaming.value.session.state).toBe("RUNNING");
 

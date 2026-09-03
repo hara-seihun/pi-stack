@@ -2,17 +2,13 @@ import { readFileSync, readdirSync, unlinkSync } from "node:fs";
 import { homedir } from "node:os";
 import { resolve } from "node:path";
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
-import { Type } from "typebox";
-import {
-  INITIAL_TITLE,
-  surfacedInAssistantReply,
-  threadStateInstructions,
-  type AgentMessage,
-} from "./thread-context-state";
+import { threadStateInstructions } from "./thread-context-state";
 
-function readAlerts(directory: string | undefined): Array<{ file: string; path?: string; text: string; error?: string }> {
+type Alert = { file: string; path?: string; text: string; error?: string };
+
+function readAlerts(directory: string | undefined): Alert[] {
   if (!directory) return [];
-  const alerts: Array<{ file: string; path?: string; text: string; error?: string }> = [];
+  const alerts: Alert[] = [];
   let entries;
   try {
     entries = readdirSync(directory, { withFileTypes: true }).filter((entry) => entry.isFile()).sort((a, b) => a.name.localeCompare(b.name));
@@ -22,8 +18,7 @@ function readAlerts(directory: string | undefined): Array<{ file: string; path?:
   for (const entry of entries) {
     const path = resolve(directory, entry.name);
     try {
-      const text = readFileSync(path, "utf8");
-      alerts.push({ file: entry.name, path, text });
+      alerts.push({ file: entry.name, path, text: readFileSync(path, "utf8") });
     } catch (error) {
       alerts.push({ file: entry.name, text: "", error: error instanceof Error ? error.message : String(error) });
     }
@@ -31,63 +26,47 @@ function readAlerts(directory: string | undefined): Array<{ file: string; path?:
   return alerts;
 }
 
+function alertText(alerts: Alert[]): string {
+  return alerts.map((alert) => alert.error
+    ? `## ${alert.file}\nAlert could not be consumed: ${alert.error}`
+    : `## ${alert.file}\n${alert.text.trimEnd() || "[empty alert]"}`).join("\n\n");
+}
+
 export default function threadContext(pi: ExtensionAPI) {
-  const pendingAlerts = new Map<string, { expected: string; text: string }>();
+  const pendingAlerts = new Map<string, string>();
 
-  pi.registerTool({
-    name: "initialize_thread",
-    label: "Initialize thread",
-    description: "Give a new numeric Pi Remote thread its permanent descriptive title and consume local machine alerts",
-    parameters: Type.Object({ title: Type.String({ description: "Concise two- or three-word title" }) }),
-    async execute(_id, { title }) {
-      const sessionId = process.env.PI_REMOTE_SESSION_ID;
-      const server = process.env.PI_REMOTE_SERVER_URL;
-      if (!sessionId || !server) throw new Error("Pi Remote thread control plane is unavailable");
-      const response = await fetch(`${server}/v1/sessions/${sessionId}/name`, { method: "PUT", body: title });
-      const text = await response.text();
-      if (!response.ok) throw new Error(text || `Thread initialization failed (${response.status})`);
-      const details = JSON.parse(text) as object;
-      pi.setActiveTools(pi.getActiveTools().filter((tool) => tool !== "initialize_thread"));
-      const alerts = readAlerts(process.env.PI_REMOTE_ALERTS_INBOX);
-      for (const alert of alerts) {
-        if (alert.path && !alert.error) pendingAlerts.set(alert.path, {
-          expected: alert.text.trimEnd() || "[empty alert]",
-          text: alert.text,
-        });
-      }
-      const alertText = alerts.length === 0
-        ? "No machine alerts were waiting."
-        : alerts.map((alert) => alert.error
-          ? `## ${alert.file}\nAlert could not be consumed: ${alert.error}`
-          : `## ${alert.file}\n${alert.text.trimEnd() || "[empty alert]"}`).join("\n\n");
-      return {
-        content: [{ type: "text", text: `Thread initialized as ${JSON.stringify(title)}.\n\n${alertText}` }],
-        details: { ...details, alerts: alerts.map(({ file, text, error }) => ({ file, text, error })) },
-      };
-    },
-  });
-
-  pi.on("before_agent_start", async (event) => {
-    const name = pi.getSessionName();
-    const active = pi.getActiveTools();
-    const hasInitialize = active.includes("initialize_thread");
-    const needsInitialize = Boolean(name && INITIAL_TITLE.test(name));
-    if (needsInitialize && !hasInitialize) pi.setActiveTools([...active, "initialize_thread"]);
-    if (!needsInitialize && hasInitialize) pi.setActiveTools(active.filter((tool) => tool !== "initialize_thread"));
+  pi.on("before_agent_start", async (event, ctx) => {
     const instructions = threadStateInstructions({
-      name,
+      name: pi.getSessionName(),
       prompt: event.prompt,
       fileTag: process.env.PI_REMOTE_FILE_TAG ?? "pi-remote-file",
       home: process.env.HOME || homedir(),
     });
-    return { systemPrompt: `${event.systemPrompt}\n\n${instructions}` };
+    const userMessages = ctx.sessionManager.getBranch().filter((entry: any) => entry?.type === "message" && entry.message?.role === "user").length;
+    if (userMessages !== 1 || !/^\d+$/.test(pi.getSessionName() ?? "")) {
+      return { systemPrompt: `${event.systemPrompt}\n\n${instructions}` };
+    }
+
+    const alerts = readAlerts(process.env.PI_REMOTE_ALERTS_INBOX);
+    for (const alert of alerts) {
+      if (alert.path && !alert.error) pendingAlerts.set(alert.path, alert.text);
+    }
+    return {
+      systemPrompt: `${event.systemPrompt}\n\n${instructions}`,
+      ...(alerts.length ? {
+        message: {
+          customType: "pi-remote-machine-alerts",
+          content: alertText(alerts),
+          display: true,
+        },
+      } : {}),
+    };
   });
 
-  pi.on("agent_end", async (event) => {
-    for (const [path, alert] of pendingAlerts) {
-      if (!surfacedInAssistantReply(event.messages as AgentMessage[], alert.expected)) continue;
+  pi.on("agent_start", async () => {
+    for (const [path, text] of pendingAlerts) {
       try {
-        if (readFileSync(path, "utf8") === alert.text) unlinkSync(path);
+        if (readFileSync(path, "utf8") === text) unlinkSync(path);
       } catch (error: any) {
         if (error?.code !== "ENOENT") console.error(`Pi Remote could not consume machine alert ${path}: ${error?.message ?? error}`);
       }
