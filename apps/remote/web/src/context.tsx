@@ -250,7 +250,7 @@ function DetailGroup({ entries, newest, sessionId, home, onEdit }: { entries: Co
       </summary>
       {expanded && <div className="detail-group-entries">{entries.map((entry) => <DetailEntry key={entry.key} entry={entry} sessionId={sessionId} home={home} onEdit={onEdit} />)}</div>}
     </details>
-    {!expanded && newest && latest && <div className="detail-group-entries detail-group-latest"><DetailEntry entry={latest} sessionId={sessionId} home={home} onEdit={onEdit} /></div>}
+    {!expanded && newest && latest && <div className="detail-group-entries detail-group-latest"><DetailEntry key={latest.key} entry={latest} sessionId={sessionId} home={home} onEdit={onEdit} /></div>}
   </div>;
 }
 
