@@ -207,8 +207,9 @@ type RuntimeHandoff = {
   retrying: boolean;
   liveText: string;
   liveThinking: string;
-  thinkingRecorded: boolean;
-  thinkingEventSeq: number | null;
+  thinkingBlockStart?: number;
+  pendingContextTextLength?: number;
+  pendingContextThinkingLength?: number;
   pendingContextFinalization: string | null;
   pendingModelFailure: string | null;
   lastActivity: number;
@@ -246,8 +247,9 @@ interface Runtime {
   suppressOutput: boolean;
   liveText: string;
   liveThinking: string;
-  thinkingRecorded: boolean;
-  thinkingEventSeq: number | null;
+  thinkingBlockStart: number;
+  pendingContextTextLength: number;
+  pendingContextThinkingLength: number;
   pendingContextFinalization: string | null;
   pendingModelFailure: string | null;
   expectedExit: boolean;
@@ -477,10 +479,12 @@ function acknowledgeMessageContext(sessionId: string, finalizesMessage: unknown)
   const rt = runtimes.get(sessionId);
   if (!rt || rt.pendingContextFinalization !== finalizesMessage) return;
   rt.pendingContextFinalization = null;
-  rt.liveText = "";
-  rt.liveThinking = "";
-  rt.thinkingRecorded = false;
-  rt.thinkingEventSeq = null;
+  rt.liveText = rt.liveText.slice(Math.min(rt.pendingContextTextLength, rt.liveText.length));
+  const removedThinkingLength = Math.min(rt.pendingContextThinkingLength, rt.liveThinking.length);
+  rt.liveThinking = rt.liveThinking.slice(removedThinkingLength);
+  rt.thinkingBlockStart = Math.max(0, rt.thinkingBlockStart - removedThinkingLength);
+  rt.pendingContextTextLength = 0;
+  rt.pendingContextThinkingLength = 0;
   signalLiveSync();
   kickSession(sessionId);
 }
@@ -538,37 +542,10 @@ function emit(sessionId: string, type: string, payload: unknown = {}): number {
   return Number(result.lastInsertRowid);
 }
 
-function finalizeThinkingEvent(sessionId: string, rt: Runtime, text: string, finalizesMessage: string) {
+function recordThinkingEvent(sessionId: string, text: string, finalizesMessage: string) {
   if (!ownsSupervisorLease() || !text) return;
-  let sequence = rt.thinkingEventSeq;
-  let row = sequence
-    ? db.query("SELECT payload FROM events WHERE seq=? AND session_id=? AND type='thinking'").get(sequence, sessionId) as any
-    : null;
-  if (!row) {
-    const latest = db.query("SELECT seq,payload FROM events WHERE session_id=? AND type='thinking' ORDER BY seq DESC LIMIT 1").get(sessionId) as any;
-    if (latest) {
-      try {
-        const payload = JSON.parse(latest.payload);
-        if (payload.text === text && !payload.finalizesMessage) {
-          sequence = Number(latest.seq);
-          row = latest;
-        }
-      } catch {}
-    }
-  }
-  if (!row || !sequence) {
-    sequence = emit(sessionId, "thinking", { text });
-    row = { payload: JSON.stringify({ text }) };
-  }
-  if (!sequence) return;
-  const payload = JSON.parse(row.payload);
-  payload.text = text;
-  payload.finalizesMessage = finalizesMessage;
-  db.query("UPDATE events SET payload=? WHERE seq=? AND session_id=? AND type='thinking'")
-    .run(JSON.stringify(payload), sequence, sessionId);
-  rt.thinkingEventSeq = sequence;
   displayContexts.delete(sessionId);
-  signalSync();
+  emit(sessionId, "thinking", { text, finalizesMessage });
 }
 
 function touchSession(id: string) {
@@ -860,6 +837,14 @@ function textFromMessage(message: any): string {
   return message?.role === "assistant" ? contentText(message.content) : "";
 }
 
+function thinkingFromMessage(message: any): string {
+  if (message?.role !== "assistant" || !Array.isArray(message.content)) return "";
+  return message.content
+    .filter((block: any) => block?.type === "thinking")
+    .map((block: any) => String(block.thinking ?? ""))
+    .join("");
+}
+
 function activeSessionEntries(entries: any[], leafId: unknown): any[] {
   const byId = new Map(entries.map((entry) => [String(entry?.id ?? ""), entry]));
   const branch: any[] = [];
@@ -1004,57 +989,47 @@ function handleRpcEvent(sessionId: string, rt: Runtime, event: any) {
     proveRunning();
   } else if (event.type === "message_update" && event.assistantMessageEvent?.type === "text_delta") {
     proveRunning();
-    if (rt.pendingContextFinalization) {
-      rt.pendingContextFinalization = null;
-      rt.liveText = "";
-      rt.liveThinking = "";
-      rt.thinkingRecorded = false;
-      rt.thinkingEventSeq = null;
-    }
     rt.liveText += event.assistantMessageEvent.delta ?? "";
     signalLiveSync();
   } else if (event.type === "message_update" && event.assistantMessageEvent?.type === "thinking_start") {
     proveRunning();
-    rt.pendingContextFinalization = null;
-    rt.liveText = "";
-    rt.liveThinking = "";
-    rt.thinkingRecorded = false;
-    rt.thinkingEventSeq = null;
+    // A provider can open several thinking content blocks in one assistant
+    // message. Keep their deltas together until message_end identifies the
+    // durable message that owns them.
+    rt.thinkingBlockStart = rt.liveThinking.length;
     touchSession(sessionId);
   } else if (event.type === "message_update" && event.assistantMessageEvent?.type === "thinking_delta") {
     proveRunning();
     rt.liveThinking += event.assistantMessageEvent.delta ?? "";
     signalLiveSync();
   } else if (event.type === "message_update" && event.assistantMessageEvent?.type === "thinking_end") {
-    const thinking = rt.liveThinking || String(event.assistantMessageEvent.content ?? "");
-    if (thinking) {
-      rt.liveThinking = thinking;
-      if (!rt.thinkingRecorded) {
-        rt.thinkingEventSeq = emit(sessionId, "thinking", { text: thinking });
-        rt.thinkingRecorded = true;
-      }
-    }
+    const block = String(event.assistantMessageEvent.content ?? "");
+    if (block && rt.liveThinking.length === rt.thinkingBlockStart) rt.liveThinking += block;
     touchSession(sessionId);
   } else if (event.type === "message_end") {
     proveRunning();
     const text = textFromMessage(event.message);
-    const completedThinking = rt.liveThinking;
-    if (completedThinking && !rt.thinkingRecorded) {
-      rt.thinkingEventSeq = emit(sessionId, "thinking", { text: completedThinking });
-      rt.thinkingRecorded = true;
-    }
     if (event.message?.role === "assistant") {
+      const textPrefix = rt.liveText.slice(0, Math.min(rt.pendingContextTextLength, rt.liveText.length));
+      if (text) rt.liveText = textPrefix + text;
+      const thinkingPrefix = rt.liveThinking.slice(0, Math.min(rt.pendingContextThinkingLength, rt.liveThinking.length));
+      const streamedThinking = rt.liveThinking.slice(thinkingPrefix.length);
+      const completedThinking = thinkingFromMessage(event.message) || streamedThinking;
+      if (completedThinking) rt.liveThinking = thinkingPrefix + completedThinking;
       const finalization = messageFinalizationKey(event.message);
-      if (completedThinking) finalizeThinkingEvent(sessionId, rt, completedThinking, finalization);
+      recordThinkingEvent(sessionId, completedThinking, finalization);
       if (contextFinalizedMessages.get(sessionId) === finalization) {
         rt.pendingContextFinalization = null;
         rt.liveText = "";
         rt.liveThinking = "";
-        rt.thinkingRecorded = false;
-        rt.thinkingEventSeq = null;
+        rt.thinkingBlockStart = 0;
+        rt.pendingContextTextLength = 0;
+        rt.pendingContextThinkingLength = 0;
       } else {
         rt.pendingContextFinalization = finalization;
-        if (text) rt.liveText = text;
+        rt.pendingContextTextLength = rt.liveText.length;
+        rt.pendingContextThinkingLength = rt.liveThinking.length;
+        rt.thinkingBlockStart = rt.liveThinking.length;
       }
     }
     if (text) {
@@ -1144,8 +1119,9 @@ function settleRuntime(sessionId: string, rt: Runtime, emitEvent: boolean): bool
   if (!rt.pendingContextFinalization) {
     rt.liveText = "";
     rt.liveThinking = "";
-    rt.thinkingRecorded = false;
-    rt.thinkingEventSeq = null;
+    rt.thinkingBlockStart = 0;
+    rt.pendingContextTextLength = 0;
+    rt.pendingContextThinkingLength = 0;
   }
   rt.lastActivity = Date.now();
   if (rt.dispatchedWorkIds.size > 0) {
@@ -1222,8 +1198,11 @@ function runtimeFromHandoff(row: any, handoff?: RuntimeHandoff): Runtime {
     suppressOutput: false,
     liveText: handoff?.liveText ?? "",
     liveThinking: handoff?.liveThinking ?? "",
-    thinkingRecorded: handoff?.thinkingRecorded ?? false,
-    thinkingEventSeq: handoff?.thinkingEventSeq ?? null,
+    thinkingBlockStart: handoff?.thinkingBlockStart ?? handoff?.liveThinking.length ?? 0,
+    pendingContextTextLength: handoff?.pendingContextTextLength
+      ?? (handoff?.pendingContextFinalization ? handoff.liveText.length : 0),
+    pendingContextThinkingLength: handoff?.pendingContextThinkingLength
+      ?? (handoff?.pendingContextFinalization ? handoff.liveThinking.length : 0),
     pendingContextFinalization: handoff?.pendingContextFinalization ?? null,
     pendingModelFailure: handoff?.pendingModelFailure ?? null,
     expectedExit: false,
@@ -1630,8 +1609,9 @@ async function drainSession(sessionId: string) {
       if (!wasBusy) {
         rt.liveText = "";
         rt.liveThinking = "";
-        rt.thinkingRecorded = false;
-        rt.thinkingEventSeq = null;
+        rt.thinkingBlockStart = 0;
+        rt.pendingContextTextLength = 0;
+        rt.pendingContextThinkingLength = 0;
         rt.pendingContextFinalization = null;
         setRuntimePhase(sessionId, rt, "DISPATCHING", "RUNNING");
       } else {
@@ -1804,8 +1784,9 @@ async function abortCurrentOperation(sessionId: string): Promise<AbortOperationR
   rt.followUpQueued = 0;
   rt.liveText = "";
   rt.liveThinking = "";
-  rt.thinkingRecorded = false;
-  rt.thinkingEventSeq = null;
+  rt.thinkingBlockStart = 0;
+  rt.pendingContextTextLength = 0;
+  rt.pendingContextThinkingLength = 0;
   rt.pendingContextFinalization = null;
   rt.lastActivity = Date.now();
   const supervisorQueued = Number((db.query(
@@ -2608,8 +2589,9 @@ const server = Bun.serve({
             .run(runtimeState.sessionFile ? String(runtimeState.sessionFile) : row.session_path, changedAt, id);
           rt.liveText = "";
           rt.liveThinking = "";
-          rt.thinkingRecorded = false;
-          rt.thinkingEventSeq = null;
+          rt.thinkingBlockStart = 0;
+          rt.pendingContextTextLength = 0;
+          rt.pendingContextThinkingLength = 0;
           rt.pendingContextFinalization = null;
           rt.activeTools.clear();
           rt.phaseVersion++;
@@ -2740,8 +2722,9 @@ function handoffDocument() {
       retrying: rt.retrying,
       liveText: rt.liveText,
       liveThinking: rt.liveThinking,
-      thinkingRecorded: rt.thinkingRecorded,
-      thinkingEventSeq: rt.thinkingEventSeq,
+      thinkingBlockStart: rt.thinkingBlockStart,
+      pendingContextTextLength: rt.pendingContextTextLength,
+      pendingContextThinkingLength: rt.pendingContextThinkingLength,
       pendingContextFinalization: rt.pendingContextFinalization,
       pendingModelFailure: rt.pendingModelFailure,
       lastActivity: rt.lastActivity,

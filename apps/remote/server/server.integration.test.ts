@@ -295,6 +295,29 @@ for line in sys.stdin:
     out({'type':'message_end','message':{'role':'assistant','content':[{'type':'thinking','thinking':''},{'type':'text','text':'done thinking'}]}})
     streaming = False
     out({'type':'agent_settled'})
+   elif last == 'thinking-blocks':
+    out({'type':'message_update','message':{'role':'assistant','content':[{'type':'thinking','thinking':''}]},'assistantMessageEvent':{'type':'thinking_start'}})
+    out({'type':'message_update','message':{'role':'assistant','content':[{'type':'thinking','thinking':'first thought\\n\\n'}]},'assistantMessageEvent':{'type':'thinking_delta','delta':'first thought\\n\\n'}})
+    out({'type':'message_update','message':{'role':'assistant','content':[{'type':'thinking','thinking':'first thought\\n\\n'}]},'assistantMessageEvent':{'type':'thinking_end','content':'first thought'}})
+    out({'type':'message_update','message':{'role':'assistant','content':[{'type':'thinking','thinking':'first thought\\n\\n'}]},'assistantMessageEvent':{'type':'thinking_start'}})
+    out({'type':'message_update','message':{'role':'assistant','content':[{'type':'thinking','thinking':'first thought\\n\\nsecond thought'}]},'assistantMessageEvent':{'type':'thinking_delta','delta':'second thought'}})
+    out({'type':'message_update','message':{'role':'assistant','content':[{'type':'thinking','thinking':'first thought\\n\\nsecond thought'}]},'assistantMessageEvent':{'type':'thinking_end','content':'second thought'}})
+    gate('thinking-blocks')
+    out({'type':'message_end','message':{'role':'assistant','content':[{'type':'thinking','thinking':''},{'type':'text','text':'block answer'}]}})
+    streaming = False
+    out({'type':'agent_settled'})
+   elif last == 'thinking-handoff':
+    out({'type':'message_update','message':{'role':'assistant','content':[{'type':'thinking','thinking':'first message\\n\\n'}]},'assistantMessageEvent':{'type':'thinking_delta','delta':'first message\\n\\n'}})
+    out({'type':'message_update','message':{'role':'assistant','content':[{'type':'thinking','thinking':'first message\\n\\n'}]},'assistantMessageEvent':{'type':'thinking_end','content':'first message'}})
+    out({'type':'message_end','message':{'role':'assistant','content':[{'type':'thinking','thinking':'first message\\n\\n'},{'type':'text','text':'first answer'}]}})
+    gate('thinking-handoff-next')
+    out({'type':'message_update','message':{'role':'assistant','content':[{'type':'thinking','thinking':''}]},'assistantMessageEvent':{'type':'thinking_start'}})
+    out({'type':'message_update','message':{'role':'assistant','content':[{'type':'thinking','thinking':'second message'}]},'assistantMessageEvent':{'type':'thinking_delta','delta':'second message'}})
+    out({'type':'message_update','message':{'role':'assistant','content':[{'type':'thinking','thinking':'second message'}]},'assistantMessageEvent':{'type':'thinking_end','content':'second message'}})
+    gate('thinking-handoff-current')
+    out({'type':'message_end','message':{'role':'assistant','content':[{'type':'thinking','thinking':'second message'},{'type':'text','text':'second answer'}]}})
+    streaming = False
+    out({'type':'agent_settled'})
    elif last == 'release-later':
     threading.Thread(target=finish_release_later, daemon=True).start()
    elif last == 'hard-steer-now':
@@ -734,6 +757,61 @@ describe("web and supervisor integration", () => {
     } finally {
       releaseGate("live-stream-next");
       releaseGate("live-stream");
+    }
+  });
+
+  test("keeps every thinking content block visible until its message commits", async () => {
+    const id = await createThread("home", "sol");
+    resetGate("thinking-blocks");
+    try {
+      await api("POST", `/v1/sessions/${id}/prompt`, { requestId: crypto.randomUUID(), text: "thinking-blocks" });
+      await waitForGate("thinking-blocks");
+      const streaming = await waitFor(async () => (await api("GET", `/v1/sessions/${id}/events?after=0`)).value,
+        (value) => value.liveThinking === "first thought\n\nsecond thought");
+      expect(streaming.events.filter((event: any) => event.type === "thinking")).toHaveLength(0);
+
+      releaseGate("thinking-blocks");
+      const settled = await waitFor(async () => (await api("GET", `/v1/sessions/${id}/events?after=0`)).value,
+        (value) => value.session.state === "IDLE");
+      const finalMessage = { role: "assistant", content: [{ type: "thinking", thinking: "" }, { type: "text", text: "block answer" }] };
+      const finalization = messageFinalizationKey(finalMessage);
+      expect(settled.liveThinking).toBe("first thought\n\nsecond thought");
+      expect(settled.events.filter((event: any) => event.type === "thinking")).toEqual([
+        expect.objectContaining({ text: "first thought\n\nsecond thought", finalizesMessage: finalization }),
+      ]);
+    } finally {
+      releaseGate("thinking-blocks");
+    }
+  });
+
+  test("does not clear newer thinking when an earlier message context arrives", async () => {
+    const id = await createThread("home", "sol");
+    resetGate("thinking-handoff-next");
+    resetGate("thinking-handoff-current");
+    try {
+      await api("POST", `/v1/sessions/${id}/prompt`, { requestId: crypto.randomUUID(), text: "thinking-handoff" });
+      await waitForGate("thinking-handoff-next");
+      releaseGate("thinking-handoff-next");
+      await waitForGate("thinking-handoff-current");
+      await waitFor(async () => (await api("GET", `/v1/sessions/${id}/events?after=0`)).value,
+        (value) => value.liveThinking === "first message\n\nsecond message");
+
+      const firstMessage = { role: "assistant", content: [{ type: "thinking", thinking: "first message\n\n" }, { type: "text", text: "first answer" }] };
+      await api("PUT", `/v1/sessions/${id}/context`, {
+        capturedAt: 440,
+        context: { systemPrompt: "System", tools: [], messages: [firstMessage] },
+        finalizesMessage: messageFinalizationKey(firstMessage),
+      });
+      const afterContext = await api("GET", `/v1/sessions/${id}/events?after=0`);
+      expect(afterContext.value.liveThinking).toBe("second message");
+
+      releaseGate("thinking-handoff-current");
+      const settled = await waitFor(async () => (await api("GET", `/v1/sessions/${id}/events?after=0`)).value,
+        (value) => value.session.state === "IDLE");
+      expect(settled.liveThinking).toBe("second message");
+    } finally {
+      releaseGate("thinking-handoff-next");
+      releaseGate("thinking-handoff-current");
     }
   });
 
