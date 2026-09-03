@@ -3,7 +3,18 @@
 # run is a transient `pi-orchestrator-run-*` unit, so its cgroup is what marks a
 # process as fleet work; the account running the fleet may also be a person
 # whose interactive commands are allowed much longer and are left alone.
+# `--dry-run` reports the same decisions without signalling anything, so a test
+# or an operator can watch the sweep against live processes safely.
 set -uo pipefail
+
+verb=killing
+kills=1
+for argument in "$@"; do
+  case "$argument" in
+    --dry-run) verb="would kill"; kills= ;;
+    *) printf 'usage: sweep [--dry-run]\n' >&2; exit 2 ;;
+  esac
+done
 
 kill_tree() {
   local pid=$1 child
@@ -20,6 +31,6 @@ while read -r pid age command; do
     *"dist/cli.js worker"*) continue ;;
   esac
   grep -qz '^PI_SESSION_ID=' "/proc/$pid/environ" 2>/dev/null || continue
-  printf 'killing %s after %ss: %s\n' "$pid" "$age" "$command"
-  kill_tree "$pid"
+  printf '%s %s after %ss: %s\n' "$verb" "$pid" "$age" "$command"
+  [[ -n $kills ]] && kill_tree "$pid"
 done < <(ps -eo pid=,etimes=,args= 2>/dev/null)

@@ -166,8 +166,10 @@ def gate(name):
 provider = sys.argv[sys.argv.index('--provider') + 1] if '--provider' in sys.argv else 'anthropic'
 model_id = sys.argv[sys.argv.index('--model') + 1] if '--model' in sys.argv else 'claude-fable-5-1'
 thinking_level = sys.argv[sys.argv.index('--thinking') + 1] if '--thinking' in sys.argv else 'off'
-with open(os.environ['PI_FAKE_LAUNCH'], 'w') as launch:
+# Published by rename so a reader never catches a half-written launch record.
+with open(os.environ['PI_FAKE_LAUNCH'] + '.writing', 'w') as launch:
  json.dump({'argv': sys.argv, 'pid': os.getpid(), 'sessionId': os.environ.get('PI_REMOTE_SESSION_ID'), 'serverUrl': os.environ.get('PI_REMOTE_SERVER_URL'), 'serviceTierFile': os.environ.get('PI_REMOTE_SERVICE_TIER_FILE'), 'agentDir': os.environ.get('PI_CODING_AGENT_DIR'), 'offline': os.environ.get('PI_OFFLINE')}, launch)
+os.replace(os.environ['PI_FAKE_LAUNCH'] + '.writing', os.environ['PI_FAKE_LAUNCH'])
 streaming = False
 compacting = False
 last = ''
@@ -365,7 +367,7 @@ for line in sys.stdin:
     streaming = False
     out({'type':'agent_settled'})
    elif last == 'lease-exit':
-    pause(0.3)
+    gate('lease-exit')
     os._exit(143)
    elif last == 'group-child':
     child = subprocess.Popen(['sleep', '60'])
@@ -1456,11 +1458,19 @@ describe("web and supervisor integration", () => {
   test("a replaced supervisor cannot publish late child-exit state", async () => {
     const id = await createThread();
     await api("POST", `/v1/sessions/${id}/prompt`, { requestId: crypto.randomUUID(), text: "lease-exit" });
+    // The agent waits at its gate, so the epoch changes before the child exits
+    // however loaded the machine is.
+    await waitForGate("lease-exit");
     const ledger = new Database(join(root, "data", "supervisor.sqlite3"));
     ledger.exec("PRAGMA busy_timeout=5000");
     const epoch = String((ledger.query("SELECT value FROM metadata WHERE key='supervisor_epoch'").get() as any).value);
     try {
       ledger.query("UPDATE metadata SET value='replacement-test' WHERE key='supervisor_epoch'").run();
+      releaseGate("lease-exit");
+      await waitFor(
+        async () => { try { process.kill(JSON.parse(readFileSync(fakeLaunch, "utf8")).pid, 0); return false; } catch { return true; } },
+        Boolean,
+      );
       await Bun.sleep(50);
       const row = ledger.query("SELECT state,last_error FROM sessions WHERE id=?").get(id) as any;
       expect(row.state).toBe("RUNNING");

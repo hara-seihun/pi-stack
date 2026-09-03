@@ -1,5 +1,6 @@
 import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";
+import { readFileSync } from "node:fs";
 import { fileURLToPath } from "node:url";
 import test from "node:test";
 import {
@@ -157,11 +158,24 @@ test("detachment is refused in every session, and refused kindly", () => {
 });
 
 test("the process sweep leaves everything outside fleet run units alone", () => {
-  // This test process carries no pi-orchestrator-run cgroup, so a sweep run
-  // here must exit cleanly without killing anything, including itself.
-  const result = spawnSync(sweep, [], { encoding: "utf8", env: { ...process.env, PI_SESSION_ID: "sweep-test" } });
+  // This test process carries no pi-orchestrator-run cgroup, so the sweep must
+  // pass over it and its parent. Dry run keeps the suite from signalling a real
+  // fleet command that happens to be running on the host right now.
+  const result = spawnSync(sweep, ["--dry-run"], { encoding: "utf8", env: { ...process.env, PI_SESSION_ID: "sweep-test" } });
   assert.equal(result.status, 0, result.stderr);
-  assert.equal(result.stdout, "");
+  const reported = result.stdout.split("\n").filter(Boolean).map((line) => Number(line.split(" ")[2]));
+  assert.ok(reported.every((pid) => pid !== process.pid && pid !== process.ppid), result.stdout);
+  for (const pid of reported) {
+    let cgroup;
+    try { cgroup = readFileSync(`/proc/${pid}/cgroup`, "utf8"); } catch { continue; }
+    assert.match(cgroup, /pi-orchestrator-run-/, result.stdout);
+  }
+});
+
+test("the process sweep refuses arguments it does not understand", () => {
+  const result = spawnSync(sweep, ["--kill-everything"], { encoding: "utf8" });
+  assert.equal(result.status, 2);
+  assert.match(result.stderr, /usage: sweep/);
 });
 
 test("the matching rule is stated once in the system prompt", () => {
