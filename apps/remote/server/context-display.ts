@@ -1,3 +1,5 @@
+import { messageFinalizationKey } from "./sync";
+
 type JsonObject = Record<string, unknown>;
 
 export const COMPACTION_CONTINUATION_MESSAGE =
@@ -23,22 +25,37 @@ function isCompactionContinuation(value: unknown): boolean {
   return message?.role === "user" && contentText(message.content) === COMPACTION_CONTINUATION_MESSAGE;
 }
 
+function restoreStreamedThinking(message: JsonObject, fallback: string | undefined): JsonObject {
+  if (!fallback || !Array.isArray(message.content)) return message;
+  const content = [...message.content];
+  const thinkingIndex = content.findIndex((value) => object(value)?.type === "thinking");
+  if (thinkingIndex < 0) content.unshift({ type: "thinking", thinking: fallback });
+  else {
+    const thinking = object(content[thinkingIndex]);
+    if (thinking && !String(thinking.thinking ?? "")) content[thinkingIndex] = { ...thinking, thinking: fallback };
+  }
+  return { ...message, content };
+}
+
 /** Builds the smaller transcript-only document shared by the browser and Android clients. */
-export function displayContextDocument(document: string): string {
+export function displayContextDocument(document: string, streamedThinking: ReadonlyMap<string, string> = new Map()): string {
   const context = JSON.parse(document) as JsonObject;
   const messages = Array.isArray(context.messages) ? context.messages : [];
   const projected = messages.map((value, index) => {
-    const original = object(value);
-    if (!original) return value;
-    if (original.role === "assistant" && original.stopReason === "aborted"
+    const source = object(value);
+    if (!source) return value;
+    if (source.role === "assistant" && source.stopReason === "aborted"
       && isCompactionContinuation(messages[index + 1])) {
       return {
         role: "custom",
         customType: COMPACTION_NOTICE_TYPE,
         content: "Context compacted",
-        timestamp: original.timestamp,
+        timestamp: source.timestamp,
       };
     }
+    const original = source.role === "assistant"
+      ? restoreStreamedThinking(source, streamedThinking.get(messageFinalizationKey(source)))
+      : source;
     const message = { ...original };
     if (message.role === "assistant") {
       for (const key of ["api", "provider", "model", "usage", "stopReason", "responseId", "rawStopReason"])

@@ -280,6 +280,13 @@ for line in sys.stdin:
     out({'type':'message_end','message':{'role':'assistant','content':[{'type':'thinking','thinking':'thinking now'},{'type':'text','text':'instant text second'}]}})
     streaming = False
     out({'type':'agent_settled'})
+   elif last == 'thinking-omitted':
+    out({'type':'message_update','message':{'role':'assistant','content':[{'type':'thinking','thinking':'visible thought'}]},'assistantMessageEvent':{'type':'thinking_delta','delta':'visible thought'}})
+    out({'type':'message_update','message':{'role':'assistant','content':[{'type':'thinking','thinking':'visible thought'}]},'assistantMessageEvent':{'type':'thinking_end','content':'visible thought'}})
+    gate('thinking-omitted')
+    out({'type':'message_end','message':{'role':'assistant','content':[{'type':'thinking','thinking':''},{'type':'text','text':'done thinking'}]}})
+    streaming = False
+    out({'type':'agent_settled'})
    elif last == 'release-later':
     threading.Thread(target=finish_release_later, daemon=True).start()
    elif last == 'hard-steer-now':
@@ -715,6 +722,46 @@ describe("web and supervisor integration", () => {
     } finally {
       releaseGate("live-stream-next");
       releaseGate("live-stream");
+    }
+  });
+
+  test("retains streamed thinking when context commits first and the final message omits it", async () => {
+    const id = await createThread("home", "sol");
+    resetGate("thinking-omitted");
+    try {
+      await api("POST", `/v1/sessions/${id}/prompt`, { requestId: crypto.randomUUID(), text: "thinking-omitted" });
+      await waitForGate("thinking-omitted");
+      const finalMessage = { role: "assistant", content: [{ type: "thinking", thinking: "" }, { type: "text", text: "done thinking" }] };
+      const finalization = messageFinalizationKey(finalMessage);
+      await api("PUT", `/v1/sessions/${id}/context`, {
+        capturedAt: 450,
+        context: { systemPrompt: "System", tools: [], messages: [finalMessage] },
+        finalizesMessage: finalization,
+      });
+
+      const streaming = await api("GET", `/v1/sessions/${id}/events?after=0`);
+      expect(streaming.value.liveThinking).toBe("visible thought");
+      expect(streaming.value.session.state).toBe("RUNNING");
+
+      releaseGate("thinking-omitted");
+      const settled = await waitFor(async () => (await api("GET", `/v1/sessions/${id}/events?after=0`)).value, (value) => value.session.state === "IDLE");
+      expect(settled.liveThinking).toBe("");
+      const thinking = settled.events.find((event: any) => event.type === "thinking");
+      expect(thinking).toMatchObject({ text: "visible thought", finalizesMessage: finalization });
+      expect((await api("GET", `/v1/sessions/${id}/context`)).value.context.messages).toEqual([finalMessage]);
+
+      const display = await api("POST", "/v1/sync", {
+        after: 0,
+        stateVersion: 0,
+        waitMs: 0,
+        selectedId: id,
+        contextProjection: "display",
+        includeDashboard: false,
+      });
+      const displayed = JSON.parse(display.value.contextUpdate.document);
+      expect(displayed.messages[0].content[0]).toEqual({ type: "thinking", thinking: "visible thought" });
+    } finally {
+      releaseGate("thinking-omitted");
     }
   });
 

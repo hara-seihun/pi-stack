@@ -4,6 +4,7 @@ import {
   COMPACTION_NOTICE_TYPE,
   displayContextDocument,
 } from "./context-display";
+import { messageFinalizationKey } from "./sync";
 
 describe("display context projection", () => {
   test("removes provider continuation metadata without changing visible content", () => {
@@ -66,6 +67,20 @@ describe("display context projection", () => {
       ],
     });
     expect(context.messages[1]).toHaveProperty("responseId", "response");
+  });
+
+  test("restores streamed thinking omitted from the provider's final message", () => {
+    const toolCall = { type: "toolCall", id: "call", name: "read", arguments: { path: "/tmp" } };
+    const message = { role: "assistant", timestamp: 4, content: [toolCall] };
+    const thinking = new Map([[messageFinalizationKey(message), "Visible while streaming"]]);
+
+    const projected = JSON.parse(displayContextDocument(JSON.stringify({ messages: [message] }), thinking));
+
+    expect(projected.messages[0].content).toEqual([
+      { type: "thinking", thinking: "Visible while streaming" },
+      toolCall,
+    ]);
+    expect(message.content).toEqual([toolCall]);
   });
 
   test("presents a compacted request as context compaction once the continuation proves it", () => {

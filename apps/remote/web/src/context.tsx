@@ -171,11 +171,12 @@ function duration(ms: number) {
 }
 
 const ToolEntry = memo(function ToolEntry({ entry, home }: { entry: ContextEntry; home: string }) {
-  const [expanded, setExpanded] = useState(false);
+  const [completedExpanded, setCompletedExpanded] = useState(false);
   const [, tick] = useState(0);
   const call = entry.toolCall || {};
   const args = call.arguments || {};
   const result = entry.toolResult;
+  const expanded = !result || completedExpanded;
   const startedAt = Number(entry.time || Date.now());
   const endedAt = Number(result?.timestamp || 0);
   useEffect(() => {
@@ -195,7 +196,7 @@ const ToolEntry = memo(function ToolEntry({ entry, home }: { entry: ContextEntry
     <pre className="tool-header">{result ? result.isError ? "×  " : "✓  " : "…  "}{summary}</pre>
     <div className="tool-timing">{timing}</div>
     {body && <pre className="tool-body">{body}</pre>}
-    {expandable && <button type="button" className="tool-toggle" onClick={() => setExpanded(!expanded)}>{expanded ? "Show less" : "Show more"}</button>}
+    {result && expandable && <button type="button" className="tool-toggle" onClick={() => setCompletedExpanded(!completedExpanded)}>{completedExpanded ? "Show less" : "Show more"}</button>}
     <div className="message-actions"><CopyButton text={[summary, body].filter(Boolean).join("\n\n")} /></div>
   </div>;
 }, (before, after) => before.entry.signature === after.entry.signature && before.home === after.home);
