@@ -2,6 +2,7 @@ import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { DndContext, KeyboardSensor, PointerSensor, closestCenter, useSensor, useSensors, type DragEndEvent } from "@dnd-kit/core";
 import { SortableContext, arrayMove, sortableKeyboardCoordinates, useSortable, verticalListSortingStrategy } from "@dnd-kit/sortable";
 import { CSS } from "@dnd-kit/utilities";
+import { AnimatePresence, MotionConfig, motion } from "motion/react";
 import { API } from "../../server/api";
 import { deleteCachedContext, readCachedContext, writeCachedContext } from "./context-cache";
 import { api, piFetch, registerUnlockHandler, syncRequest } from "./client";
@@ -184,37 +185,115 @@ function AgentList({ runs, hosts, selectedId, onSelect }: { runs: AgentRun[]; ho
   })}</div>;
 }
 
+type ThreadStartChoice = { id: string; label: string; icon: string; accent?: string; models?: ThreadStart["models"] };
+
+function darkGlyph(accent = "#89b4fa") {
+  if (!/^#[0-9a-f]{6}$/i.test(accent)) return true;
+  const [red, green, blue] = [1, 3, 5].map((at) => parseInt(accent.slice(at, at + 2), 16));
+  return (0.2126 * red + 0.7152 * green + 0.0722 * blue) / 255 >= 0.5;
+}
+
 function ThreadStartMenu({ starts, onCreate }: { starts: ThreadStart[]; onCreate(destination: string, model: string | null): void }) {
+  const root = useRef<HTMLDivElement>(null);
   const [open, setOpen] = useState(false);
   const [chosen, setChosen] = useState<ThreadStart | null>(null);
-  const choices: Array<{ id: string; label: string; icon: string; accent?: string; models?: ThreadStart["models"] }> = chosen?.models || starts;
-  return <div className={`new-thread-buttons react-thread-start${open ? " expanded" : ""}`}>
-    {open && <div className="react-thread-choices">{choices.map((choice) => <button key={choice.id} type="button" className="react-thread-choice" style={{ background: choice.accent || "var(--accent)" }} aria-label={choice.label} onClick={() => {
-      if (!chosen && choice.models?.length) setChosen(choice as ThreadStart);
-      else { onCreate(chosen?.id || choice.id, chosen ? choice.id : null); setOpen(false); setChosen(null); }
-    }}><img src={`/${choice.icon}.svg`} alt="" /></button>)}</div>}
-    <button type="button" className="react-thread-trigger" aria-label="New thread" disabled={!starts.length} onClick={() => { setOpen(!open); if (open) setChosen(null); }}><span /></button>
-  </div>;
+  const [origin, setOrigin] = useState(0);
+  const choices: ThreadStartChoice[] = chosen?.models || starts;
+  const stage = chosen?.id || "destinations";
+  const size = Math.max(34, Math.min(42, Math.floor((310 - 12 * Math.max(0, choices.length - 1)) / Math.max(1, choices.length))));
+  const target = (index: number) => -(choices.length - 1 - index) * (size + 12);
+  const close = useCallback(() => { setOpen(false); setChosen(null); setOrigin(0); }, []);
+
+  useEffect(() => {
+    if (!open) return;
+    const onPointerDown = (event: PointerEvent) => { if (!root.current?.contains(event.target as Node)) close(); };
+    const onKeyDown = (event: KeyboardEvent) => { if (event.key === "Escape") close(); };
+    document.addEventListener("pointerdown", onPointerDown, true);
+    window.addEventListener("keydown", onKeyDown);
+    return () => { document.removeEventListener("pointerdown", onPointerDown, true); window.removeEventListener("keydown", onKeyDown); };
+  }, [close, open]);
+
+  useEffect(() => { close(); }, [close, starts]);
+
+  const choose = (choice: ThreadStartChoice, index: number) => {
+    if (!chosen && choice.models?.length) {
+      setOrigin(target(index));
+      setChosen(choice as ThreadStart);
+      return;
+    }
+    onCreate(chosen?.id || choice.id, chosen ? choice.id : null);
+    close();
+  };
+  const shapeTransition = { type: "spring" as const, stiffness: 390, damping: 18, mass: 0.8 };
+  const faceTransition = { type: "spring" as const, stiffness: 650, damping: 28, mass: 0.7 };
+
+  return <MotionConfig reducedMotion="user"><div ref={root} className={`new-thread-buttons react-thread-start${open ? " expanded" : ""}`}>
+    <svg className="motion-definitions" aria-hidden="true"><defs><filter id="thread-goo" x="-40%" y="-240%" width="180%" height="580%" colorInterpolationFilters="sRGB"><feGaussianBlur in="SourceGraphic" stdDeviation="8" result="blurred" /><feColorMatrix in="blurred" type="matrix" values="1 0 0 0 0  0 1 0 0 0  0 0 1 0 0  0 0 0 26 -10" /></filter></defs></svg>
+    <div className="new-thread-shapes">
+      <AnimatePresence initial={false}>
+        {!open && <motion.span key="trigger-shape" className="thread-start-shape trigger" initial={{ scale: 0 }} animate={{ scale: 1 }} exit={{ scale: 0 }} transition={shapeTransition} />}
+        {open && choices.map((choice, index) => <motion.span key={`${stage}:${choice.id}:shape`} className="thread-start-shape" style={{ width: size, height: size, marginTop: -size / 2, background: choice.accent || "var(--accent)" }} initial={{ x: origin, scale: 0 }} animate={{ x: target(index), y: 0, scale: 1 }} exit={{ x: open ? target(index) : 0, y: chosen ? 110 : 0, scale: 0 }} transition={{ ...shapeTransition, delay: index * 0.04 }} />)}
+      </AnimatePresence>
+    </div>
+    <div className="new-thread-faces">
+      <AnimatePresence initial={false}>
+        {!open && <motion.button key="trigger-face" type="button" className="provider-button trigger" aria-label="New thread" disabled={!starts.length} initial={{ scale: 0, opacity: 0 }} animate={{ scale: 1, opacity: 1 }} exit={{ scale: 0, opacity: 0 }} transition={faceTransition} onClick={() => setOpen(true)} whileTap={{ scale: 0.86 }}><span className="glyph" /></motion.button>}
+        {open && choices.map((choice, index) => {
+          const label = chosen ? `Start a ${chosen.label} thread on ${choice.label}` : choice.models?.length ? `${choice.label} threads` : `Start a ${choice.label} thread`;
+          return <motion.button key={`${stage}:${choice.id}:face`} type="button" className="provider-button" style={{ width: size, height: size, marginTop: -size / 2 }} aria-label={label} title={label} initial={{ x: origin, scale: 0, opacity: 0 }} animate={{ x: target(index), y: 0, scale: 1, opacity: 1 }} exit={{ x: open ? target(index) : 0, y: chosen ? 110 : 0, scale: 0, opacity: 0 }} transition={{ ...faceTransition, delay: index * 0.04 }} whileTap={{ scale: 0.84 }} onClick={() => choose(choice, index)}><span className={`glyph${darkGlyph(choice.accent) ? " dark" : ""}`}><img src={`/${choice.icon}.svg`} alt="" draggable={false} /></span></motion.button>;
+        })}
+      </AnimatePresence>
+    </div>
+  </div></MotionConfig>;
+}
+
+function settingLabel(value: string) {
+  if (value === "xhigh") return "Extra high";
+  return value ? value[0].toUpperCase() + value.slice(1).replaceAll("_", " ") : "";
 }
 
 function SettingsPanel({ session, open, onClose, onChanged }: { session: Session | null; open: boolean; onClose(): void; onChanged(settings: Settings): void }) {
   const [settings, setSettings] = useState<Settings | null>(null);
+  const [saving, setSaving] = useState("");
   useEffect(() => {
     if (!open || !session) return;
+    let cancelled = false;
     setSettings(null);
-    api(API.sessionSettings.method, API.sessionSettings.path({ sessionId: session.id })).then((result) => setSettings(result.settings)).catch(console.error);
+    setSaving("");
+    api(API.sessionSettings.method, API.sessionSettings.path({ sessionId: session.id }))
+      .then((result) => { if (!cancelled) setSettings(result.settings); })
+      .catch(console.error);
+    return () => { cancelled = true; };
   }, [open, session?.id]);
-  const update = async (body: unknown) => {
-    if (!session) return;
-    const result = await api(API.updateSessionSettings.method, API.updateSessionSettings.path({ sessionId: session.id }), body);
-    setSettings(result.settings); onChanged(result.settings);
+  const update = async (field: string, body: Record<string, string>) => {
+    if (!session || saving) return;
+    setSaving(field);
+    try {
+      const result = await api(API.updateSessionSettings.method, API.updateSessionSettings.path({ sessionId: session.id }), body);
+      setSettings(result.settings);
+      onChanged(result.settings);
+    } catch (error) { console.error(error); }
+    finally { setSaving(""); }
   };
-  if (!open) return null;
-  return <><div className="scrim settings-scrim" onClick={onClose} /><aside className="settings open"><header className="drawer-heading"><div><strong>Thread settings</strong><span>{session?.name}</span></div><button type="button" className="icon-button" onClick={onClose}>×</button></header><div className="settings-body">
-    <label>Model<select value={settings ? `${settings.model?.provider}\0${settings.model?.id}` : ""} disabled={!settings} onChange={(event) => { const [modelProvider, modelId] = event.target.value.split("\0"); void update({ modelProvider, modelId }); }}><option value="">Loading…</option>{settings?.models?.map((model) => <option key={`${model.provider}:${model.id}`} value={`${model.provider}\0${model.id}`}>{model.name || model.id} · {model.provider}</option>)}</select></label>
-    <label>Thinking<select value={settings?.thinkingLevel || ""} disabled={!settings} onChange={(event) => void update({ thinkingLevel: event.target.value })}>{(settings?.thinkingLevels || []).map((level) => <option key={level} value={level}>{level.toUpperCase()}</option>)}</select></label>
-    <label>Speed<select value={settings?.speedMode || ""} disabled={!settings?.speedModes?.length} onChange={(event) => void update({ speedMode: event.target.value })}>{(settings?.speedModes || []).map((mode) => <option key={mode} value={mode}>{mode.toUpperCase()}</option>)}</select></label>
-  </div></aside></>;
+  return <><AnimatePresence>{open && <motion.div key="settings-scrim" className="scrim settings-scrim" initial={{ opacity: 0 }} animate={{ opacity: 1 }} exit={{ opacity: 0 }} transition={{ duration: 0.18 }} onClick={onClose} />}</AnimatePresence>
+    <AnimatePresence>{open && <motion.aside key="settings-panel" className="settings" aria-label="Thread settings" initial={{ x: "100%" }} animate={{ x: 0 }} exit={{ x: "100%" }} transition={{ type: "spring", stiffness: 520, damping: 42, mass: 0.9 }}>
+      <header className="settings-header"><div className="settings-title"><span>Thread settings</span><h2 title={session?.name}>{session?.name || "Thread"}</h2></div><button type="button" className="settings-close" aria-label="Close thread settings" onClick={onClose}>×</button></header>
+      <div className="settings-body">{!settings ? <div className="settings-loading" aria-label="Loading thread settings"><span /><span /><span /></div> : <>
+        <section className="setting-card">
+          <div className="setting-heading"><div><h3>Model</h3><p>The model used for new messages</p></div>{saving === "model" && <span className="setting-saving">Saving</span>}</div>
+          <div className="setting-select"><select aria-label="Model" value={`${settings.model?.provider}\0${settings.model?.id}`} disabled={Boolean(saving)} onChange={(event) => { const [modelProvider, modelId] = event.target.value.split("\0"); void update("model", { modelProvider, modelId }); }}>{settings.models?.map((model) => <option key={`${model.provider}:${model.id}`} value={`${model.provider}\0${model.id}`}>{model.name || model.id} · {model.provider}</option>)}</select><span aria-hidden="true">⌄</span></div>
+        </section>
+        <section className="setting-card">
+          <div className="setting-heading"><div><h3>Thinking</h3><p>How much reasoning the model can use</p></div>{saving === "thinking" && <span className="setting-saving">Saving</span>}</div>
+          <div className="setting-options thinking-options" role="radiogroup" aria-label="Thinking level">{(settings.thinkingLevels || []).map((level) => <button key={level} type="button" role="radio" aria-checked={settings.thinkingLevel === level} className={settings.thinkingLevel === level ? "selected" : ""} disabled={Boolean(saving)} onClick={() => void update("thinking", { thinkingLevel: level })}>{settingLabel(level)}</button>)}</div>
+        </section>
+        <section className="setting-card">
+          <div className="setting-heading"><div><h3>Speed</h3><p>Request scheduling priority</p></div>{saving === "speed" && <span className="setting-saving">Saving</span>}</div>
+          {settings.speedModes?.length ? <div className="setting-options speed-options" role="radiogroup" aria-label="Speed mode">{settings.speedModes.map((mode) => <button key={mode} type="button" role="radio" aria-checked={settings.speedMode === mode} className={settings.speedMode === mode ? "selected" : ""} disabled={Boolean(saving)} onClick={() => void update("speed", { speedMode: mode })}>{settingLabel(mode)}</button>)}</div> : <p className="setting-unavailable">This model does not offer speed controls.</p>}
+        </section>
+      </>}</div>
+    </motion.aside>}</AnimatePresence>
+  </>;
 }
 
 function eventEntries(current: ContextEntry[], events: any[]): ContextEntry[] {
