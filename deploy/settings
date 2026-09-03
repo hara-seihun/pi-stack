@@ -125,7 +125,10 @@ try{
 NODE
 
 while IFS= read -r package; do
-  PI_CODING_AGENT_DIR="$agent_dir" "$runtime/node_modules/.bin/pi" install "$package"
+  # npm's advisory and funding lookups do not participate in installing a
+  # reviewed pin. Keeping them out of the deployment prevents a slow audit
+  # endpoint from consuming the host release deadline.
+  npm_config_audit=false npm_config_fund=false PI_CODING_AGENT_DIR="$agent_dir" "$runtime/node_modules/.bin/pi" install "$package"
 done < <(jq -r '.packages[].source | select(startswith("npm:") or startswith("git:") or contains("://"))' "$manifest")
 
 expected=$(( $(jq '.packages | length' "$manifest") + $(jq 'length' <<<"$host_packages") ))
