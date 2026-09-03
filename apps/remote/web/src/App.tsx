@@ -129,7 +129,7 @@ function UnlockDialog() {
 function EnvironmentControl() {
   const [environment, setEnvironment] = useState<any>(null);
   const [failed, setFailed] = useState("");
-  useEffect(() => { window.KenanRemote?.getState().then((value) => { setEnvironment(value); document.title = "Kenan"; }).catch((error) => setFailed(String(error?.message || error))); }, []);
+  useEffect(() => { window.KenanRemote?.getState().then((value) => { setEnvironment(value); document.title = `kenan — ${value.id}`; }).catch((error) => setFailed(String(error?.message || error))); }, []);
   if (!environment && !failed) return null;
   return <div className={`environment-control${failed ? " failed" : ""}`} title={failed}>
     <label htmlFor="environment-select">Environment</label>
