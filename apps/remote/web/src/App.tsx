@@ -55,12 +55,18 @@ const initialState: AppState = {
   governors: { openai: {}, anthropic: {} }, actions: [], threadStarts: [], attachments: [], slashCommands: [], offline: "", home: "/",
 };
 
+function normalizedActivity(activity = "IDLE") {
+  return activity.trim().toUpperCase().replace(/[\s-]+/g, "_") || "IDLE";
+}
 function activityLabel(activity = "IDLE", tool = "") {
-  if (activity === "WAITING_ON_TOOL") return tool ? `WAITING ON ${tool.toUpperCase()}` : "WAITING ON TOOL";
-  return ["THINKING", "COMPACTING", "RETRYING", "QUEUED", "WORKING", "RUNNING", "STARTING", "ABORTING", "FAILED"].includes(activity) ? (activity === "RUNNING" ? "WORKING" : activity) : "IDLE";
+  const normalized = normalizedActivity(activity);
+  if (normalized === "WAITING_ON_TOOL") return tool ? `WAITING ON ${tool.toUpperCase()}` : "WAITING ON TOOL";
+  if (normalized === "RUNNING") return "WORKING";
+  return normalized.replaceAll("_", " ");
 }
 function activityColor(activity = "IDLE") {
-  return ["FAILED", "ABORTING"].includes(activity) ? "var(--danger)" : activity === "IDLE" ? "var(--muted)" : "var(--accent)";
+  const normalized = normalizedActivity(activity);
+  return ["FAILED", "ABORTING"].includes(normalized) ? "var(--danger)" : normalized === "IDLE" ? "var(--muted)" : "var(--accent)";
 }
 function working(session: Session | null) { return Boolean(session && ["RUNNING", "STARTING", "ABORTING"].includes(session.state)); }
 function threadProvider(session: Session) {

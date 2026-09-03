@@ -38,6 +38,7 @@ export interface AgentLiveState {
   activity?: string;
   liveText?: string;
   liveThinking?: string;
+  activeTool?: string | null;
 }
 
 export type AgentRunRow = ObservedRun;
@@ -56,6 +57,7 @@ export interface AgentRunSummary {
   key: string;
   status: string;
   activity: string;
+  activeTool: string | null;
   startedAt: string;
   finishedAt: string | null;
   elapsedMs: number;
@@ -80,6 +82,18 @@ const MAX_DELIVERED_EVENTS = 150;
 function iso(value: unknown): string {
   const millis = Number(value);
   return Number.isFinite(millis) && millis > 0 ? new Date(millis).toISOString() : new Date(0).toISOString();
+}
+
+function normalizedActivity(status: string, live: AgentLiveState | null): string {
+  if (status === "starting") return "STARTING";
+  if (status !== "running") return "IDLE";
+  const activity = String(live?.activity ?? RUNNING_ACTIVITY).trim().toUpperCase().replace(/[\s-]+/g, "_");
+  if (["RUNNING", "RESPONDING", "RESUMING", "SETTLING"].includes(activity)) {
+    return live?.liveThinking && !live.liveText ? "THINKING" : "WORKING";
+  }
+  if (activity === "TOOL") return "WAITING_ON_TOOL";
+  if (activity === "PARKED") return "IDLE";
+  return activity || RUNNING_ACTIVITY;
 }
 
 export function summarizeAgentRun(
@@ -108,7 +122,8 @@ export function summarizeAgentRun(
     label: type.label,
     key: type.key,
     status,
-    activity: running ? String(live?.activity ?? RUNNING_ACTIVITY) : "IDLE",
+    activity: normalizedActivity(status, live),
+    activeTool: running && live?.activeTool ? String(live.activeTool) : null,
     startedAt: iso(row.startedAt),
     finishedAt: endedAt,
     elapsedMs: Math.max(0, (row.endedAt ?? at) - row.startedAt),

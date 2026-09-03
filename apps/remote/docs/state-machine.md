@@ -111,7 +111,7 @@ Autonomous orchestrator agents are outside this state machine. They have no supe
 
 The observation surface is therefore a pure projection with three rules:
 
-1. Pi Remote never writes agent lifecycle state. Workers publish live state through the orchestrator daemon, and settled history comes from the Pi session JSONL.
+1. Pi Remote never writes agent lifecycle state. Workers publish live state through the orchestrator daemon, and settled history comes from the Pi session JSONL. Worker activity uses the same uppercase public vocabulary as interactive threads. The observation boundary normalizes activity from workers that survived a release handoff, and clients render an unknown activity literally instead of misreporting it as idle.
 2. An observed agent's transcript is applied only to the selection generation that requested it, exactly as for threads, and a per-run byte cursor makes replay incremental. Opening an agent leaves thread selection untouched, and opening a thread ends observation.
 3. The list projects active orchestrator runs. Settlement is not a client state transition. A settled run leaves the list, and one already open remains readable by ID.
 

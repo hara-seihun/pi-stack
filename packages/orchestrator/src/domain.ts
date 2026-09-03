@@ -5,6 +5,7 @@ export type RunSource = "direct" | "lane" | "room";
 export type RunState = "queued" | "starting" | "running" | "parked" | "done" | "failed" | "aborted";
 export type LeaseKind = "fleet" | "interactive" | "voice";
 export type FailureKind = "provider" | "account" | "infrastructure" | "operator" | "task";
+export type RunActivity = "IDLE" | "STARTING" | "WORKING" | "THINKING" | "COMPACTING" | "WAITING_ON_TOOL";
 
 export interface Account {
   readonly id: string;

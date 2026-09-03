@@ -2,7 +2,7 @@ import { DefaultResourceLoader, SessionManager, type AgentSession } from "@earen
 import { builtinProviders } from "@earendil-works/pi-ai/providers/all";
 import { Type } from "typebox";
 import { loadConfig } from "./config.js";
-import type { Run } from "./domain.js";
+import type { Run, RunActivity } from "./domain.js";
 import { interruptedTurnPrompt } from "./host/continuations.js";
 import { openHostedSession } from "./host/session-lifecycle.js";
 import { isCredentialError, isRateLimitError } from "./provider-errors.js";
@@ -49,21 +49,22 @@ export async function work(runId:string):Promise<void>{
     onExtensionError:(path,error)=>console.error(`extension ${path}:`,error),
   });
   const session=hosted.session;
-  let liveText="",liveThinking="",activeTool:string|undefined,lastProgress=0,aborting=false,leaving=false;
-  const report=(activity:string,progress=true)=>{const now=Date.now();if(!progress&&now-lastProgress<5000)return;if(progress)lastProgress=now;void post(`/internal/runs/${runId}/heartbeat`,{progress,activity,text:liveText,thinking:liveThinking,tool:activeTool}).catch(console.error);};
+  let liveText="",liveThinking="",activeTool:string|undefined,lastProgress=0,aborting=false,leaving=false,currentActivity:RunActivity="STARTING";
+  const report=(activity:RunActivity,progress=true)=>{currentActivity=activity;const now=Date.now();if(!progress&&now-lastProgress<5000)return;if(progress)lastProgress=now;void post(`/internal/runs/${runId}/heartbeat`,{progress,activity,text:liveText,thinking:liveThinking,tool:activeTool}).catch(console.error);};
   const unsubscribe=session.subscribe((event:any)=>{
     if(event.type==="message_update"){
       const update=event.assistantMessageEvent;
+      let activity:RunActivity="WORKING";
       if(update?.type==="text_delta")liveText+=update.delta??"";
-      else if(update?.type==="thinking_start")liveThinking="";
-      else if(update?.type==="thinking_delta")liveThinking+=update.delta??"";
-      report("responding");
-    }else if(event.type==="tool_execution_start"){activeTool=String(event.toolName??"tool");report("tool");}
-    else if(event.type==="tool_execution_end"){activeTool=undefined;report("responding");}
-    else if(event.type==="message_end"){liveText="";liveThinking="";report("settling");}
-    else if(event.type==="compaction_start")report("compacting");
+      else if(update?.type==="thinking_start"){liveThinking="";activity="THINKING";}
+      else if(update?.type==="thinking_delta"){liveThinking+=update.delta??"";activity="THINKING";}
+      report(activity);
+    }else if(event.type==="tool_execution_start"){activeTool=String(event.toolName??"tool");report("WAITING_ON_TOOL");}
+    else if(event.type==="tool_execution_end"){activeTool=undefined;report("WORKING");}
+    else if(event.type==="message_end"){liveText="";liveThinking="";report("WORKING");}
+    else if(event.type==="compaction_start")report("COMPACTING");
   });
-  const heartbeat=setInterval(()=>report(session.isStreaming?"running":"parked",false),15_000);
+  const heartbeat=setInterval(()=>report(currentActivity,false),15_000);
   const inbox=setInterval(()=>void (async()=>{
     const value=await request(`/internal/runs/${runId}/messages`);
     if(value.abort&&!aborting){aborting=true;session.abort();}
@@ -73,7 +74,7 @@ export async function work(runId:string):Promise<void>{
     }
   })().catch(console.error),2_000);
   try{
-    await post(`/internal/runs/${runId}/state`,{state:"running",sessionFile:session.sessionManager.getSessionFile(),progressAt:Date.now(),activity:"starting"});
+    await post(`/internal/runs/${runId}/state`,{state:"running",sessionFile:session.sessionManager.getSessionFile(),progressAt:Date.now(),activity:"STARTING"});
     let message=run.sessionFile?interruptedTurnPrompt("the process hosting this session stopped","I reopened this exact Pi session from its durable JSONL record."):run.prompt;
     for(;;){
       await promptAndSettle(session,message);
@@ -88,14 +89,16 @@ export async function work(runId:string):Promise<void>{
       }
       if(last?.stopReason==="aborted"||aborting){await post(`/internal/runs/${runId}/state`,{state:"aborted",failureKind:"operator",result:"aborted"});break;}
       if(!run.roomId){await post(`/internal/runs/${runId}/state`,{state:"done",result:lastAssistantText(session)});break;}
-      await post(`/internal/runs/${runId}/state`,{state:"parked",progressAt:Date.now(),activity:"parked"});
+      currentActivity="IDLE";
+      await post(`/internal/runs/${runId}/state`,{state:"parked",progressAt:Date.now(),activity:currentActivity});
       let pending:any[]=[];
       while(!pending.length&&!aborting&&!leaving){const value=await request(`/internal/runs/${runId}/messages`);pending=value.messages??[];if(value.abort)aborting=true;if(!pending.length)await sleep(2000);}
       if(aborting){await post(`/internal/runs/${runId}/state`,{state:"aborted",failureKind:"operator",result:"aborted"});break;}
       if(leaving)break;
       message=pending.map((entry)=>entry.body).join("\n\n");
       for(const entry of pending)await post(`/internal/runs/${runId}/messages/${entry.id}`);
-      await post(`/internal/runs/${runId}/state`,{state:"running",progressAt:Date.now(),activity:"resuming"});
+      currentActivity="WORKING";
+      await post(`/internal/runs/${runId}/state`,{state:"running",progressAt:Date.now(),activity:currentActivity});
     }
   }finally{clearInterval(heartbeat);clearInterval(inbox);unsubscribe();hosted.dispose();}
 }

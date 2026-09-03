@@ -2,7 +2,7 @@ import { mkdirSync } from "node:fs";
 import { createRequire } from "node:module";
 import { dirname } from "node:path";
 import type { DatabaseSync } from "node:sqlite";
-import type { Account, BudgetClass, DemandSnapshot, FailureKind, LaneSpec, LeaseKind, Run, RunSource, RunState } from "./domain.js";
+import type { Account, BudgetClass, DemandSnapshot, FailureKind, LaneSpec, LeaseKind, Run, RunActivity, RunSource, RunState } from "./domain.js";
 
 const require = createRequire(import.meta.url);
 const SqliteDatabase: new (path: string) => DatabaseSync =
@@ -315,6 +315,6 @@ export class Store {
   pendingMessages(runId:string):any[]{return this.db.prepare("SELECT * FROM message WHERE delivered_at IS NULL AND target_run_id=? ORDER BY id").all(runId) as any[];}
   deliverMessage(id:number,at=Date.now()):void{this.db.prepare("UPDATE message SET delivered_at=? WHERE id=? AND delivered_at IS NULL").run(at,id);}
 
-  setLive(runId:string,input:{activity:string;text?:string;thinking?:string;tool?:string},at=Date.now()):void{this.db.prepare(`INSERT INTO live_state(run_id,activity,text,thinking,tool,updated_at) VALUES(?,?,?,?,?,?) ON CONFLICT(run_id) DO UPDATE SET activity=excluded.activity,text=excluded.text,thinking=excluded.thinking,tool=excluded.tool,updated_at=excluded.updated_at`).run(runId,input.activity,input.text??"",input.thinking??"",input.tool??null,at);}
+  setLive(runId:string,input:{activity:RunActivity;text?:string;thinking?:string;tool?:string},at=Date.now()):void{this.db.prepare(`INSERT INTO live_state(run_id,activity,text,thinking,tool,updated_at) VALUES(?,?,?,?,?,?) ON CONFLICT(run_id) DO UPDATE SET activity=excluded.activity,text=excluded.text,thinking=excluded.thinking,tool=excluded.tool,updated_at=excluded.updated_at`).run(runId,input.activity,input.text??"",input.thinking??"",input.tool??null,at);}
   live():any[]{return this.db.prepare("SELECT * FROM live_state").all() as any[];}
 }
