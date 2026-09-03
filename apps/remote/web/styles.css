@@ -282,16 +282,17 @@ button:focus-visible, input:focus-visible, textarea:focus-visible, select:focus-
 .paste-text-actions .accent { color: var(--bg); background: var(--accent); }
 
 .detail-group { margin-top: 18px; background: var(--surface); color: var(--muted); }
-.detail-group > summary { min-height: 44px; display: flex; align-items: center; gap: 9px; padding: 8px 12px; list-style: none; cursor: pointer; user-select: none; }
-.detail-group > summary::-webkit-details-marker { display: none; }
-.detail-group > summary:hover { background: var(--surface-2); color: var(--text); }
+.detail-group > details > summary { min-height: 44px; display: flex; align-items: center; gap: 9px; padding: 8px 12px; list-style: none; cursor: pointer; user-select: none; }
+.detail-group > details > summary::-webkit-details-marker { display: none; }
+.detail-group > details > summary:hover { background: var(--surface-2); color: var(--text); }
 .detail-group-chevron { flex: 0 0 auto; color: var(--accent); font-size: 22px; line-height: 1; transform: rotate(0); }
-.detail-group[open] .detail-group-chevron { transform: rotate(90deg); }
+.detail-group > details[open] .detail-group-chevron { transform: rotate(90deg); }
 .detail-group-label { flex: 1; min-width: 0; color: inherit; font-size: 12px; font-weight: 800; letter-spacing: .04em; text-transform: uppercase; }
 .detail-group-count { flex: 0 0 auto; min-width: 58px; padding: 3px 7px; background: var(--pending); color: var(--accent); font-size: 11px; font-weight: 850; text-align: center; }
 .detail-group.running .detail-group-count { color: var(--text); background: var(--accent); }
 .detail-group-entries { padding: 0 12px 12px; border-top: 1px solid var(--border); }
 .detail-group-entries > :first-child { margin-top: 12px; }
+.detail-group-latest { background: var(--surface); }
 
 .tool-card { margin-top: 18px; padding: 11px 13px; background: var(--pending); user-select: text; content-visibility: auto; contain-intrinsic-block-size: auto 160px; }
 .tool-card.success { background: var(--tool-ok); }

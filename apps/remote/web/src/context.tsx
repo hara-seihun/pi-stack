@@ -230,20 +230,28 @@ const ToolEntry = memo(function ToolEntry({ entry, home }: { entry: ContextEntry
   </div>;
 }, (before, after) => before.entry.signature === after.entry.signature && before.home === after.home);
 
-function DetailGroup({ entries, sessionId, home, onEdit }: { entries: ContextEntry[]; sessionId: string; home: string; onEdit(entry: ContextEntry): void }) {
+function DetailEntry({ entry, sessionId, home, onEdit }: { entry: ContextEntry; sessionId: string; home: string; onEdit(entry: ContextEntry): void }) {
+  return entry.kind === "toolCall"
+    ? <ToolEntry entry={entry} home={home} />
+    : <MessageEntry entry={entry} sessionId={sessionId} onEdit={onEdit} />;
+}
+
+function DetailGroup({ entries, newest, sessionId, home, onEdit }: { entries: ContextEntry[]; newest: boolean; sessionId: string; home: string; onEdit(entry: ContextEntry): void }) {
   const [expanded, setExpanded] = useState(false);
   const count = entries.length;
   const running = entries.some((entry) => entry.streaming || entry.kind === "toolCall" && !entry.toolResult);
-  return <details className={`detail-group${running ? " running" : ""}`} onToggle={(event) => setExpanded(event.currentTarget.open)}>
-    <summary>
-      <span className="detail-group-chevron" aria-hidden="true">›</span>
-      <span className="detail-group-label">Agent details</span>
-      <span className="detail-group-count">{count} {count === 1 ? "box" : "boxes"}</span>
-    </summary>
-    {expanded && <div className="detail-group-entries">{entries.map((entry) => entry.kind === "toolCall"
-      ? <ToolEntry key={entry.key} entry={entry} home={home} />
-      : <MessageEntry key={entry.key} entry={entry} sessionId={sessionId} onEdit={onEdit} />)}</div>}
-  </details>;
+  const latest = entries.at(-1);
+  return <div className={`detail-group${running ? " running" : ""}`}>
+    <details onToggle={(event) => setExpanded(event.currentTarget.open)}>
+      <summary>
+        <span className="detail-group-chevron" aria-hidden="true">›</span>
+        <span className="detail-group-label">Agent details</span>
+        <span className="detail-group-count">{count} {count === 1 ? "box" : "boxes"}</span>
+      </summary>
+      {expanded && <div className="detail-group-entries">{entries.map((entry) => <DetailEntry key={entry.key} entry={entry} sessionId={sessionId} home={home} onEdit={onEdit} />)}</div>}
+    </details>
+    {!expanded && newest && latest && <div className="detail-group-entries detail-group-latest"><DetailEntry entry={latest} sessionId={sessionId} home={home} onEdit={onEdit} /></div>}
+  </div>;
 }
 
 const CONTEXT_WINDOW_SIZE = 60;
@@ -261,8 +269,8 @@ export function ContextTranscript({ entries, liveThinking, sessionId, home, onEd
   }, [items.length, newest]);
   return <div className="transcript">
     {start > 0 && <button type="button" className="context-earlier" onClick={() => setStart(Math.max(0, start - CONTEXT_WINDOW_SIZE))}>Show {Math.min(CONTEXT_WINDOW_SIZE, start)} earlier entries</button>}
-    {items.slice(start).map((item) => item.kind === "details"
-      ? <DetailGroup key={`${sessionId}:${item.key}`} entries={item.entries} sessionId={sessionId} home={home} onEdit={onEdit} />
+    {items.slice(start).map((item, index, visible) => item.kind === "details"
+      ? <DetailGroup key={`${sessionId}:${item.key}`} entries={item.entries} newest={index === visible.length - 1} sessionId={sessionId} home={home} onEdit={onEdit} />
       : <MessageEntry key={item.key} entry={item.entry} sessionId={sessionId} onEdit={onEdit} />)}
   </div>;
 }
