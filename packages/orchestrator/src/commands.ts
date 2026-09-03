@@ -3,7 +3,7 @@ import { join } from "node:path";
 import { homedir } from "node:os";
 import { loadConfig } from "./config.js";
 import { Daemon } from "./daemon.js";
-import { Store } from "./store.js";
+import { SCHEMA_VERSION, Store, USAGE_HOUR_SCHEMA, openLedgerDatabase } from "./store.js";
 import { work } from "./worker.js";
 import { transactSharedCredential } from "./auth/shared-oauth.js";
 
@@ -17,6 +17,7 @@ export const COMMANDS=[
   ["abort / kill","Stop one run gracefully or immediately"],
   ["boost","Set a provider pacing multiplier or halt"],
   ["account","Import, remove, or list pooled accounts"],
+  ["usage-components","Transition: record usage tokens per component; delete this command once both hosts have run it"],
 ] as const;
 export const USAGE=`usage: pi-orchestrator ${COMMANDS.map(([name])=>name.replace(" / ","|")).join("|")}`;
 export const ACCOUNT_USAGE=`usage: pi-orchestrator account list | import ID --provider openai-codex|anthropic --credential-file FILE [--label LABEL] [--concurrency N] | remove ID`;
@@ -36,6 +37,20 @@ export async function dispatch(argv:string[]):Promise<void>{
   if(command==="daemon"){const store=Store.open(ledgerPath());try{await new Daemon(store,loadConfig()).start();}finally{store.close();}return;}
   if(command==="worker"){const id=rest[0];if(!id)throw new Error("worker run id is required");await work(id);return;}
   if(command==="status"){output(await request("/v1/status"));return;}
+  if(command==="usage-components"){
+    // Hourly usage rows written before this upgrade added input, output, and
+    // cache tokens into one number that no reader can take apart, and nothing
+    // consumed them, so the transition starts the table over.
+    const path=ledgerPath(),db=openLedgerDatabase(path);
+    try{
+      const {version}=db.prepare("SELECT version FROM meta").get() as {version:number};
+      if(version===SCHEMA_VERSION){console.log(`${path} already records usage per component`);return;}
+      if(version!==1)throw new Error(`${path} is at schema ${version}; this transition upgrades 1 to ${SCHEMA_VERSION}`);
+      db.exec(`BEGIN IMMEDIATE;DROP TABLE usage_hour;${USAGE_HOUR_SCHEMA}UPDATE meta SET version=${SCHEMA_VERSION};COMMIT`);
+      console.log(`${path} now records usage per component; hourly totals from before the upgrade were dropped`);
+    }finally{db.close();}
+    return;
+  }
   if(command==="pause"){output(await request("/v1/control","POST",{key:"launches",value:"paused"}));return;}
   if(command==="resume"){output(await request("/v1/control","POST",{key:"launches",value:"enabled"}));return;}
   if(command==="abort"||command==="kill"){if(!rest[0])throw new Error(`${command} requires a run id`);output(await request(`/v1/runs/${encodeURIComponent(rest[0])}/${command}`,"POST"));return;}

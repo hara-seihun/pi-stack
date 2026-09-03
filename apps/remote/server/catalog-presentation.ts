@@ -9,6 +9,7 @@ export interface PlanMetricRow {
   model: string;
   modelLabel: string;
   text: string;
+  cacheText: string;
   description: string;
 }
 
@@ -40,6 +41,7 @@ export function planCards(snapshot: PlanUsageSnapshot | null): PlanCard[] {
     const rendered = plan.metrics.map((metric) => {
       const value = usage?.metrics[metric.id]?.percentLeft ?? null;
       const paceText = pace(usage?.metrics[metric.id]?.paceDelta);
+      const cache = usage?.metrics[metric.id]?.cachePercent ?? null;
       const model = catalogModel(metric.model);
       if (!model) throw new Error(`Plan ${plan.id} names unknown model ${metric.model}`);
       return {
@@ -47,7 +49,8 @@ export function planCards(snapshot: PlanUsageSnapshot | null): PlanCard[] {
         model: model.id,
         modelLabel: model.label,
         text: value === null ? "—" : `${percent(value)}%${paceText}`,
-        description: `${metric.name ?? metric.label ?? plan.label} ${value === null ? "usage unavailable" : `${percent(value)}% remaining${paceText ? `, pace ${paceText.trim()}` : ""}`}`,
+        cacheText: cache === null ? "" : `${percent(cache)}%`,
+        description: `${metric.name ?? metric.label ?? plan.label} ${value === null ? "usage unavailable" : `${percent(value)}% remaining${paceText ? `, pace ${paceText.trim()}` : ""}`}${cache === null ? ", no calls in the last 24 hours" : `, ${percent(cache)}% of prompt tokens read from cache over the last 24 hours`}`,
       };
     });
     const planCount = usage?.planCount ?? 0;

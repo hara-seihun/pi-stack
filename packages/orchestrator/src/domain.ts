@@ -66,6 +66,21 @@ export interface Run {
   readonly endedAt?: number;
 }
 
+/** The parts a provider reports for one assistant message. */
+export type UsageComponent = "input" | "output" | "cacheRead" | "cacheWrite";
+
+export interface UsageEntry {
+  readonly accountId: string;
+  readonly hour: number;
+  readonly source: string;
+  readonly runId: string;
+  readonly model: string;
+  readonly component: UsageComponent;
+  readonly tokens: number;
+}
+
+export type UsageTotal = Pick<UsageEntry, "accountId" | "model" | "component" | "tokens">;
+
 export interface OrchestratorConfig {
   readonly profiles: Readonly<Record<string, readonly ModelCandidate[]>>;
   readonly backgroundSpendFraction: number;

@@ -11,6 +11,7 @@ export {
 } from "./catalog.js";
 export type { LaneManifest, LaneSpec, DemandSnapshot, Run } from "./domain.js";
 export {
+  CACHE_WINDOW_MS,
   OrchestratorClient,
   tailRange,
   type ObservedRun,

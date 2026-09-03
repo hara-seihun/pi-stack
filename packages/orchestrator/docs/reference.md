@@ -13,6 +13,7 @@ Run `npm run docs --workspace=pi-orchestrator` after changing commands or durabl
 - `abort / kill`: Stop one run gracefully or immediately.
 - `boost`: Set a provider pacing multiplier or halt.
 - `account`: Import, remove, or list pooled accounts.
+- `usage-components`: Transition: record usage tokens per component; delete this command once both hosts have run it.
 
 ## Durable tables
 

@@ -2,7 +2,7 @@ import { mkdirSync } from "node:fs";
 import { createRequire } from "node:module";
 import { dirname } from "node:path";
 import type { DatabaseSync } from "node:sqlite";
-import type { Account, BudgetClass, DemandSnapshot, FailureKind, LaneSpec, LeaseKind, Run, RunActivity, RunSource, RunState } from "./domain.js";
+import type { Account, BudgetClass, DemandSnapshot, FailureKind, LaneSpec, LeaseKind, Run, RunActivity, RunSource, RunState, UsageEntry, UsageTotal } from "./domain.js";
 
 const require = createRequire(import.meta.url);
 const SqliteDatabase: new (path: string) => DatabaseSync =
@@ -10,10 +10,23 @@ const SqliteDatabase: new (path: string) => DatabaseSync =
     ? (require("node:sqlite") as { DatabaseSync: new (path: string) => DatabaseSync }).DatabaseSync
     : (require("bun:sqlite") as { Database: new (path: string) => DatabaseSync }).Database;
 
-export const SCHEMA_VERSION = 1;
+export const SCHEMA_VERSION = 2;
+export const USAGE_HOUR_SCHEMA = `
+CREATE TABLE usage_hour (
+  account_id TEXT NOT NULL,
+  hour INTEGER NOT NULL,
+  source TEXT NOT NULL,
+  run_id TEXT NOT NULL DEFAULT '',
+  model TEXT NOT NULL DEFAULT '',
+  component TEXT NOT NULL CHECK (component IN ('input','output','cacheRead','cacheWrite')),
+  tokens REAL NOT NULL,
+  PRIMARY KEY(account_id,hour,source,run_id,model,component)
+) STRICT;
+CREATE INDEX usage_hour_recent ON usage_hour(hour);
+`;
 export const SCHEMA = `
 CREATE TABLE meta (version INTEGER NOT NULL) STRICT;
-INSERT INTO meta VALUES (1);
+INSERT INTO meta VALUES (2);
 CREATE TABLE account (
   id TEXT PRIMARY KEY,
   provider TEXT NOT NULL CHECK (provider IN ('openai-codex','anthropic')),
@@ -124,18 +137,17 @@ CREATE TABLE live_state (
   tool TEXT,
   updated_at INTEGER NOT NULL
 ) STRICT;
-CREATE TABLE usage_hour (
-  account_id TEXT NOT NULL,
-  hour INTEGER NOT NULL,
-  source TEXT NOT NULL,
-  run_id TEXT NOT NULL DEFAULT '',
-  model TEXT NOT NULL DEFAULT '',
-  tokens REAL NOT NULL,
-  PRIMARY KEY(account_id,hour,source,run_id,model)
-) STRICT;
-`;
+${USAGE_HOUR_SCHEMA}`;
 
 function maybe<T>(value: T | null): T | undefined { return value === null ? undefined : value; }
+
+/** Opens the ledger file itself, before anything knows which schema it holds. */
+export function openLedgerDatabase(path: string): DatabaseSync {
+  if (path !== ":memory:") mkdirSync(dirname(path), { recursive: true });
+  const db = new SqliteDatabase(path);
+  db.exec("PRAGMA busy_timeout=5000; PRAGMA journal_mode=WAL; PRAGMA synchronous=NORMAL; PRAGMA foreign_keys=ON");
+  return db;
+}
 
 export class Store {
   readonly db: DatabaseSync;
@@ -143,9 +155,7 @@ export class Store {
   private constructor(db: DatabaseSync) { this.db = db; }
 
   static open(path: string): Store {
-    if (path !== ":memory:") mkdirSync(dirname(path), { recursive: true });
-    const db = new SqliteDatabase(path);
-    db.exec("PRAGMA busy_timeout=5000; PRAGMA journal_mode=WAL; PRAGMA synchronous=NORMAL; PRAGMA foreign_keys=ON");
+    const db = openLedgerDatabase(path);
     const meta = db.prepare("SELECT name FROM sqlite_master WHERE type='table' AND name='meta'").get();
     if (!meta) db.exec(SCHEMA);
     const row = db.prepare("SELECT version FROM meta").get() as { version: number };
@@ -205,6 +215,19 @@ export class Store {
   }
   recordReading(accountId:string,meterId:string,reading:{at:number;usedPercent:number;resetAt?:number}):void{
     this.recordMeter(accountId,meterId,reading.usedPercent,reading.resetAt,reading.at);
+  }
+
+  /** Tokens are kept per component so a reader can tell cache reads from fresh input. */
+  recordUsage(entry:UsageEntry):void{
+    this.db.prepare(`INSERT INTO usage_hour(account_id,hour,source,run_id,model,component,tokens) VALUES(?,?,?,?,?,?,?)
+      ON CONFLICT(account_id,hour,source,run_id,model,component) DO UPDATE SET tokens=tokens+excluded.tokens`)
+      .run(entry.accountId,entry.hour,entry.source,entry.runId,entry.model,entry.component,entry.tokens);
+  }
+  /** Totals for every hour bucket that starts at or after `since`. */
+  usageSince(since:number):UsageTotal[]{
+    return (this.db.prepare(`SELECT account_id,model,component,SUM(tokens) tokens FROM usage_hour
+      WHERE hour>=? GROUP BY account_id,model,component`).all(since) as any[])
+      .map((row)=>({accountId:row.account_id,model:row.model,component:row.component,tokens:row.tokens}));
   }
 
   reconcileLanes(lanes:readonly LaneSpec[], at=Date.now()): void {

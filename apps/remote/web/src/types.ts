@@ -86,7 +86,7 @@ export interface ThreadStart {
 export interface PlanCard {
   icon: string;
   label: string;
-  metrics?: Array<{ model: string; modelLabel: string; text: string; description: string }>;
+  metrics?: Array<{ model: string; modelLabel: string; text: string; cacheText: string; description: string }>;
 }
 
 export interface MachineAction {

@@ -40,6 +40,18 @@ Persons are not in the host file. They are Pi Remote's registry, `/var/lib/pi-re
 5. If Pi Remote changed, restarts the front door and hands each running supervisor the new release. Active Pi turns keep their process and stream; the replacement supervisor adopts them and replaces each runtime after it settles. Deployment waits until each supervisor's health response names the selected commit, so a slow handoff cannot race the smoke check or rollback.
 6. Walks the live front door the way the clients do (`deploy/smoke`): the web assets, the Android preflight for the person header, the environment and person lists, and for every unlocked person the first calls the app makes. A release that fails this is switched back to the previous Pi Remote release on the spot, the supervisors are handed that release again, and the command fails. Tests prove a release works; this proves nobody is locked out of the app by it.
 
+## Ledger transition in flight
+
+Until both hosts have run it, deploying this commit needs one step first, on each host, for every account that owns a ledger:
+
+```bash
+npm run build --workspace=pi-orchestrator
+node packages/orchestrator/dist/cli.js usage-components
+sudo -u sibyl node /home/kenan/projects/pi-stack/packages/orchestrator/dist/cli.js usage-components
+```
+
+It upgrades the ledger to schema 2, which the release expects and which the running daemon and supervisors, holding their ledgers open, do not notice. Skipping it makes the new supervisors fail to open the ledger, which fails the smoke check and rolls Pi Remote back. If a rollback ever needs schema 1 again, recreate `usage_hour` without its `component` column and set `meta.version` to 1; the rows are hourly token counts nothing reads. Delete this section, the command, and its test once both hosts are on schema 2.
+
 An unchanged host redeploy takes about a second. A clean dependency install takes a few seconds. A deployment whose destinations are overridden with `PI_STACK_*_DEST` is a rehearsal: it publishes into those paths and touches no service unless `PI_STACK_SERVICES=1`.
 
 ## Build checks

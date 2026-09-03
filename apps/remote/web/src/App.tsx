@@ -163,7 +163,7 @@ function MachineControls({ actions, governors, onAction, onGovernor }: { actions
 function PlanSummary({ plans, counts }: { plans: PlanCard[]; counts: Map<string, number> }) {
   return <div className="plan-summary muted">{plans.flatMap((card) => (card.metrics || []).filter((metric) => metric.text !== "—").map((metric) => {
     const description = `${card.label} ${metric.modelLabel}, ${counts.get(metric.model) || 0} in use, ${metric.description}`;
-    return <div className="capacity-row" key={`${card.icon}:${metric.model}`} title={description} aria-label={description}><img src={`/${encodeURIComponent(card.icon)}.svg`} alt={card.label} /><span className="capacity-model">{metric.modelLabel}</span><span className="capacity-count">{counts.get(metric.model) || 0}</span><span className="capacity-value">{metric.text}</span></div>;
+    return <div className="capacity-row" key={`${card.icon}:${metric.model}`} title={description} aria-label={description}><img src={`/${encodeURIComponent(card.icon)}.svg`} alt={card.label} /><span className="capacity-model">{metric.modelLabel}</span><span className="capacity-count">{counts.get(metric.model) || 0}</span><span className="capacity-cache">{metric.cacheText}</span><span className="capacity-value">{metric.text}</span></div>;
   }))}</div>;
 }
 

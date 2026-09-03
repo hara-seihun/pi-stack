@@ -155,10 +155,11 @@ button:focus-visible, input:focus-visible, textarea:focus-visible, select:focus-
 .environment-control select { min-width: 0; flex: 1; height: 30px; padding: 0 8px; border: 1px solid var(--border); border-radius: 0; color: var(--text); background: var(--surface-2); font: 750 11px/1 sans-serif; }
 .plan-summary, .usage-summary { min-width: 0; font-size: 11px; font-weight: 750; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 .plan-summary { display: grid; gap: 3px; }
-.capacity-row { min-width: 0; display: grid; grid-template-columns: 14px minmax(46px, 1fr) minmax(18px, auto) auto; align-items: center; gap: 7px; font-variant-numeric: tabular-nums; }
+.capacity-row { min-width: 0; display: grid; grid-template-columns: 14px minmax(46px, 1fr) minmax(18px, auto) auto auto; align-items: center; gap: 7px; font-variant-numeric: tabular-nums; }
 .capacity-row img { width: 14px; height: 14px; object-fit: contain; }
 .capacity-model { min-width: 0; overflow: hidden; text-overflow: ellipsis; color: var(--text); letter-spacing: .03em; }
 .capacity-count { color: var(--text); text-align: right; }
+.capacity-cache { color: var(--accent); text-align: right; }
 .capacity-value { color: var(--muted); text-align: right; }
 .connection { font-size: 12px; font-weight: 750; align-self: center; }
 .connection[hidden] { display: none; }

@@ -2,7 +2,7 @@ import { describe, expect, it } from "vitest";
 import { chmodSync, mkdirSync, mkdtempSync, readFileSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { Store } from "../src/store.js";
+import { SCHEMA, Store, openLedgerDatabase } from "../src/store.js";
 import { assign, commitMeterAdmission } from "../src/policy.js";
 import type { OrchestratorConfig } from "../src/domain.js";
 import { transactSharedCredential } from "../src/auth/shared-oauth.js";
@@ -12,6 +12,7 @@ import { catalogModel } from "../src/catalog.js";
 import { Daemon } from "../src/daemon.js";
 import { loadConfig } from "../src/config.js";
 import { ACCOUNT_USAGE, dispatch } from "../src/commands.js";
+import { CACHE_WINDOW_MS, OrchestratorClient } from "../src/client.js";
 
 const config:OrchestratorConfig={profiles:{standard:[{provider:"openai-codex",model:"gpt-5.6-sol",thinking:"xhigh"}]},backgroundSpendFraction:.8,maxConcurrentSessions:8,defaultAccountConcurrency:2,meterMaxAgeMs:60_000,snapshotIntervalMs:30_000,reconcileIntervalMs:1000,stallAfterMs:60_000,killAfterMs:120_000,authPath:"/tmp/auth",agentDir:"/tmp/agent"};
 function account(store:Store,id="openai-codex-1"){store.upsertAccount({id,provider:"openai-codex",concurrency:2});}
@@ -30,6 +31,59 @@ describe("current orchestrator state",()=>{
   });
 
   it("launches every Fable selection on Claude Fable 5.1",()=>{const anthropic=builtinProviders().find((provider)=>provider.id==="anthropic")!;const models=withCustomModels(anthropic).getModels();expect(models.some((model)=>model.id==="claude-fable-5")).toBe(true);expect(models.find((model)=>model.id==="claude-fable-5-1")?.cost.cacheRead).toBe(.25);expect(catalogModel("fable")?.model).toBe("claude-fable-5-1");});
+
+  it("reports the share of prompt tokens read from cache over the last 24 hours",()=>{
+    const now=Date.now(),ledger=join(mkdtempSync(join(tmpdir(),"ledger-")),"ledger.sqlite3");
+    const store=Store.open(ledger);
+    store.upsertAccount({id:"anthropic-1",provider:"anthropic",concurrency:1});
+    const hour=(agoHours:number)=>Math.floor((now-agoHours*3_600_000)/3_600_000)*3_600_000;
+    const record=(component:"input"|"output"|"cacheRead"|"cacheWrite",tokens:number,agoHours=1)=>
+      store.recordUsage({accountId:"anthropic-1",hour:hour(agoHours),source:"interactive",runId:"r",model:"claude-opus-5",component,tokens});
+    record("cacheRead",750);
+    record("input",150);
+    record("cacheWrite",100);
+    record("output",4_000);
+    record("input",9_000,30);
+    store.close();
+
+    const client=new OrchestratorClient({ledgerPath:ledger});
+    const anthropic=client.plans(undefined,now).plans.anthropic!;
+    expect(anthropic.metrics.weekly?.cachePercent).toBe(75);
+    expect(anthropic.metrics.fable?.cachePercent).toBeNull();
+    expect(client.plans(undefined,now+CACHE_WINDOW_MS).plans.anthropic!.metrics.weekly?.cachePercent).toBeNull();
+    client.close();
+    rmSync(ledger,{force:true});
+  });
+
+  it("upgrades a version 1 ledger to record usage components",async()=>{
+    const ledger=join(mkdtempSync(join(tmpdir(),"ledger-")),"ledger.sqlite3");
+    const database=openLedgerDatabase(ledger);
+    database.exec(SCHEMA.replace("INSERT INTO meta VALUES (2)","INSERT INTO meta VALUES (1)"));
+    database.exec("DROP INDEX usage_hour_recent; DROP TABLE usage_hour; CREATE TABLE usage_hour (account_id TEXT NOT NULL,hour INTEGER NOT NULL,source TEXT NOT NULL,run_id TEXT NOT NULL DEFAULT '',model TEXT NOT NULL DEFAULT '',tokens REAL NOT NULL,PRIMARY KEY(account_id,hour,source,run_id,model)) STRICT");
+    database.prepare("INSERT INTO usage_hour VALUES(?,?,?,?,?,?)").run("anthropic-1",0,"interactive","r","claude-opus-5",42);
+    database.close();
+    expect(()=>Store.open(ledger)).toThrow(/unsupported orchestrator schema 1/);
+
+    const previous=process.env.PI_ORCHESTRATOR_LEDGER,lines:string[]=[],log=console.log;
+    process.env.PI_ORCHESTRATOR_LEDGER=ledger;
+    console.log=(value?:unknown)=>lines.push(String(value));
+    try{
+      await dispatch(["usage-components"]);
+      await dispatch(["usage-components"]);
+    }finally{
+      console.log=log;
+      if(previous===undefined)delete process.env.PI_ORCHESTRATOR_LEDGER;else process.env.PI_ORCHESTRATOR_LEDGER=previous;
+    }
+    expect(lines[0]).toContain("now records usage per component");
+    expect(lines[1]).toContain("already records usage per component");
+
+    const store=Store.open(ledger);
+    expect(store.usageSince(0)).toEqual([]);
+    store.recordUsage({accountId:"anthropic-1",hour:0,source:"interactive",runId:"r",model:"claude-opus-5",component:"cacheRead",tokens:5});
+    expect(store.usageSince(0)).toEqual([{accountId:"anthropic-1",model:"claude-opus-5",component:"cacheRead",tokens:5}]);
+    store.close();
+    rmSync(ledger,{force:true});
+  });
 
   it("reconciles lane manifests as desired state",()=>{const store=Store.open(":memory:");store.reconcileLanes([{id:"one",prompt:"a",cwd:"/tmp",profile:"standard",weight:1},{id:"two",prompt:"b",cwd:"/tmp",profile:"standard",weight:2}]);store.reconcileLanes([{id:"two",prompt:"changed",cwd:"/work",profile:"standard",weight:3,fixedDemand:2}]);expect(store.lanes()).toEqual([{id:"two",prompt:"changed",cwd:"/work",profile:"standard",weight:3,fixedDemand:2,priority:0,doctrineUrl:undefined,openingProbe:undefined}]);store.close();});
 

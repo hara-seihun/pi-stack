@@ -21,7 +21,7 @@ Ordinary work preserves the configured reserve, blocks on stale meters, compares
 
 `run --force`, `wave --force`, and `room create --force` are operator-authorized urgent work. They bypass ordinary pacing but not exhausted provider quota or a provider halt. Provider boost controls multiply ordinary pacing. A multiplier of zero halts that provider.
 
-The routing extension uses the same account registry for interactive Pi sessions. It keeps a session on one account unless that account fails. The usage extension aggregates attribution hourly and records provider meter headers.
+The routing extension uses the same account registry for interactive Pi sessions. It keeps a session on one account unless that account fails. The usage extension aggregates attribution hourly, one row per input, output, cache read, and cache write, and records provider meter headers. Keeping the components apart is what lets `plans()` report the share of prompt tokens a model read from cache over the last 24 hours.
 
 ## Configuration
 
@@ -73,3 +73,5 @@ Import reads credentials from a file so tokens do not enter process arguments. `
 The daemon serves its public API on `127.0.0.1:2460` by default. Pi Remote consumes the package's observation API and does not query private tables.
 
 Generated command and table lists live in [docs/reference.md](docs/reference.md). A fresh ledger gets the current schema directly. A schema change ships as a bounded transition command that is deleted once both hosts have run it, so there is no migration chain to maintain.
+
+Schema 2 is in transition. `pi-orchestrator usage-components` rewrites `usage_hour` so tokens are stored per component and drops the hourly totals written before it, which mixed the components into one unusable number that no reader consumed. Run it on a host before deploying the release that expects schema 2: a daemon or supervisor already running holds its ledger open and is unaffected, while anything that starts afterwards needs the new table. Delete the command and this paragraph once both hosts have run it.
