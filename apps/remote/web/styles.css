@@ -193,13 +193,9 @@ button:focus-visible, input:focus-visible, textarea:focus-visible, select:focus-
 .message.assistant .message-label { color: var(--success); }
 .message.thinking { padding: 11px 13px; background: var(--pending); color: var(--muted); font-size: 14px; font-style: italic; }
 .message.notice { color: var(--muted); font-size: 14px; }
-.live-thinking, .live-answer { position: relative; width: min(100%, 980px); margin: 18px auto 0; padding-right: 40px; overflow-wrap: anywhere; line-height: 1.45; user-select: text; }
-.live-thinking { padding: 11px 40px 11px 13px; background: var(--pending); color: var(--muted); font-style: italic; font-size: 14px; }
-.live-thinking > .message-action, .live-answer > .message-action { position: absolute; top: 5px; right: 0; }
-.live-thinking > .message-action { right: 7px; background: var(--surface); }
-.live-thinking::before, .live-answer::before { display: block; margin-bottom: 5px; font-size: 11px; font-weight: 850; }
-.live-thinking::before { content: "THINKING"; color: var(--muted); }
-.live-answer::before { content: "PI · WORKING"; color: var(--success); }
+.live-answer { position: relative; width: min(100%, 980px); margin: 18px auto 0; padding-right: 40px; overflow-wrap: anywhere; line-height: 1.45; user-select: text; }
+.live-answer > .message-action { position: absolute; top: 5px; right: 0; }
+.live-answer::before { display: block; margin-bottom: 5px; color: var(--success); font-size: 11px; font-weight: 850; content: "PI · WORKING"; }
 
 .markdown-body { min-width: 0; white-space: normal; overflow-wrap: anywhere; }
 .markdown-body > :first-child { margin-top: 0; }
@@ -222,7 +218,7 @@ button:focus-visible, input:focus-visible, textarea:focus-visible, select:focus-
 .markdown-body img { display: block; max-width: 100%; margin: .9em 0; }
 .markdown-body .katex-display, .markdown-body eqn { max-width: 100%; overflow-x: auto; overflow-y: hidden; padding: .2em 0; }
 .markdown-body .katex { font-size: 1.05em !important; }
-.live-thinking > .markdown-body, .live-answer > .markdown-body { font-size: inherit; }
+.live-answer > .markdown-body { font-size: inherit; }
 .queue-status { flex: 0 0 auto; padding: 6px 11px; border-top: 1px solid var(--border); color: var(--muted); background: var(--surface); font-size: 11px; font-weight: 750; }
 .message-queue { flex: 0 0 auto; max-height: 180px; overflow-y: auto; border-top: 1px solid var(--border); background: var(--surface); }
 .queued-message { min-height: 46px; display: flex; align-items: center; gap: 6px; padding: 6px 7px 6px 11px; border-bottom: 1px solid var(--border); }
@@ -284,6 +280,18 @@ button:focus-visible, input:focus-visible, textarea:focus-visible, select:focus-
 .paste-text-actions { display: flex; justify-content: flex-end; gap: 8px; margin-top: 10px; }
 .paste-text-actions button { min-height: 42px; padding: 0 15px; color: var(--text); background: var(--surface-2); font-weight: 750; }
 .paste-text-actions .accent { color: var(--bg); background: var(--accent); }
+
+.detail-group { margin-top: 18px; background: var(--surface); color: var(--muted); }
+.detail-group > summary { min-height: 44px; display: flex; align-items: center; gap: 9px; padding: 8px 12px; list-style: none; cursor: pointer; user-select: none; }
+.detail-group > summary::-webkit-details-marker { display: none; }
+.detail-group > summary:hover { background: var(--surface-2); color: var(--text); }
+.detail-group-chevron { flex: 0 0 auto; color: var(--accent); font-size: 22px; line-height: 1; transform: rotate(0); }
+.detail-group[open] .detail-group-chevron { transform: rotate(90deg); }
+.detail-group-label { flex: 1; min-width: 0; color: inherit; font-size: 12px; font-weight: 800; letter-spacing: .04em; text-transform: uppercase; }
+.detail-group-count { flex: 0 0 auto; min-width: 58px; padding: 3px 7px; background: var(--pending); color: var(--accent); font-size: 11px; font-weight: 850; text-align: center; }
+.detail-group.running .detail-group-count { color: var(--text); background: var(--accent); }
+.detail-group-entries { padding: 0 12px 12px; border-top: 1px solid var(--border); }
+.detail-group-entries > :first-child { margin-top: 12px; }
 
 .tool-card { margin-top: 18px; padding: 11px 13px; background: var(--pending); user-select: text; content-visibility: auto; contain-intrinsic-block-size: auto 160px; }
 .tool-card.success { background: var(--tool-ok); }

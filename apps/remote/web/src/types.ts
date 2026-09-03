@@ -14,6 +14,7 @@ export interface ContextEntry {
   toolCall?: any;
   toolResult?: any;
   time?: number;
+  streaming?: boolean;
 }
 
 export interface Attachment {

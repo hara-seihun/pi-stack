@@ -2,6 +2,7 @@ import { memo, useEffect, useLayoutEffect, useMemo, useRef, useState } from "rea
 import { API } from "../../server/api";
 import { applyHtml } from "./markdown-dom";
 import { streamingMarkdown } from "./streaming-markdown";
+import { groupTranscriptEntries } from "./transcript-groups";
 import type { ContextEntry } from "./types";
 
 // A streamed message is rendered again on every chunk, and KaTeX is by far the
@@ -164,7 +165,7 @@ const MessageEntry = memo(function MessageEntry({ entry, sessionId, onEdit }: { 
         {entry.kind === "user" && Number(entry.messageTimestamp) > 0 && <button type="button" className="message-action edit-message" title="Edit and resend from this point in the conversation" aria-label="Edit and resend from this point in the conversation" onClick={() => onEdit(entry)}><PencilIcon /></button>}
       </div>
     </div>
-    <Markdown source={text} sessionId={sessionId} />
+    <Markdown source={text} sessionId={sessionId} streaming={entry.streaming} />
   </div>;
 }, (before, after) => before.entry.signature === after.entry.signature && before.sessionId === after.sessionId && before.onEdit === after.onEdit);
 
@@ -229,20 +230,39 @@ const ToolEntry = memo(function ToolEntry({ entry, home }: { entry: ContextEntry
   </div>;
 }, (before, after) => before.entry.signature === after.entry.signature && before.home === after.home);
 
+function DetailGroup({ entries, sessionId, home, onEdit }: { entries: ContextEntry[]; sessionId: string; home: string; onEdit(entry: ContextEntry): void }) {
+  const [expanded, setExpanded] = useState(false);
+  const count = entries.length;
+  const running = entries.some((entry) => entry.streaming || entry.kind === "toolCall" && !entry.toolResult);
+  return <details className={`detail-group${running ? " running" : ""}`} onToggle={(event) => setExpanded(event.currentTarget.open)}>
+    <summary>
+      <span className="detail-group-chevron" aria-hidden="true">›</span>
+      <span className="detail-group-label">Agent details</span>
+      <span className="detail-group-count">{count} {count === 1 ? "box" : "boxes"}</span>
+    </summary>
+    {expanded && <div className="detail-group-entries">{entries.map((entry) => entry.kind === "toolCall"
+      ? <ToolEntry key={entry.key} entry={entry} home={home} />
+      : <MessageEntry key={entry.key} entry={entry} sessionId={sessionId} onEdit={onEdit} />)}</div>}
+  </details>;
+}
+
 const CONTEXT_WINDOW_SIZE = 60;
-export function ContextTranscript({ entries, sessionId, home, onEdit }: { entries: ContextEntry[]; sessionId: string; home: string; onEdit(entry: ContextEntry): void }) {
-  const newest = Math.max(0, entries.length - CONTEXT_WINDOW_SIZE);
+export function ContextTranscript({ entries, liveThinking, sessionId, home, onEdit }: { entries: ContextEntry[]; liveThinking?: string; sessionId: string; home: string; onEdit(entry: ContextEntry): void }) {
+  const items = useMemo(() => groupTranscriptEntries(liveThinking ? [...entries, {
+    key: "live-thinking", signature: `live-thinking:${liveThinking}`, kind: "thinking", label: "Thinking", text: liveThinking, streaming: true,
+  }] : entries), [entries, liveThinking]);
+  const newest = Math.max(0, items.length - CONTEXT_WINDOW_SIZE);
   const [start, setStart] = useState(newest);
   const previousCount = useRef(0);
   useEffect(() => { previousCount.current = 0; setStart(newest); }, [sessionId]);
   useEffect(() => {
     setStart((value) => previousCount.current === 0 ? newest : Math.min(value, newest));
-    previousCount.current = entries.length;
-  }, [entries.length, newest]);
+    previousCount.current = items.length;
+  }, [items.length, newest]);
   return <div className="transcript">
     {start > 0 && <button type="button" className="context-earlier" onClick={() => setStart(Math.max(0, start - CONTEXT_WINDOW_SIZE))}>Show {Math.min(CONTEXT_WINDOW_SIZE, start)} earlier entries</button>}
-    {entries.slice(start).map((entry) => entry.kind === "toolCall"
-      ? <ToolEntry key={entry.key} entry={entry} home={home} />
-      : <MessageEntry key={entry.key} entry={entry} sessionId={sessionId} onEdit={onEdit} />)}
+    {items.slice(start).map((item) => item.kind === "details"
+      ? <DetailGroup key={`${sessionId}:${item.key}`} entries={item.entries} sessionId={sessionId} home={home} onEdit={onEdit} />
+      : <MessageEntry key={item.key} entry={item.entry} sessionId={sessionId} onEdit={onEdit} />)}
   </div>;
 }
