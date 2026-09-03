@@ -201,6 +201,8 @@ test("creates and releases a clean review checkout", () => {
       "dist",
       "**/dist",
       ".nx",
+      ".react-router",
+      "**/.react-router",
       ".converge-cache",
       "build",
       "**/build",
@@ -331,6 +333,8 @@ test("keeps local commits but strips declared caches", () => {
     writeFileSync(path.join(created.path, "packages", "api", "node_modules", "package", "index.js"), "generated\n");
     mkdirSync(path.join(created.path, "apps", "web", "dist"), { recursive: true });
     writeFileSync(path.join(created.path, "apps", "web", "dist", "app.js"), "generated\n");
+    mkdirSync(path.join(created.path, "apps", "web", ".react-router", "types"), { recursive: true });
+    writeFileSync(path.join(created.path, "apps", "web", ".react-router", "types", "routes.ts"), "generated\n");
     mkdirSync(path.join(created.path, "tools", "__pycache__"), { recursive: true });
     writeFileSync(path.join(created.path, "tools", "__pycache__", "harness.pyc"), "generated\n");
     mkdirSync(path.join(created.path, "build", "CMakeFiles"), { recursive: true });
@@ -344,6 +348,7 @@ test("keeps local commits but strips declared caches", () => {
     assert.equal(existsSync(path.join(created.path, "node_modules")), false);
     assert.equal(existsSync(path.join(created.path, "packages", "api", "node_modules")), false);
     assert.equal(existsSync(path.join(created.path, "apps", "web", "dist")), false);
+    assert.equal(existsSync(path.join(created.path, "apps", "web", ".react-router")), false);
     assert.equal(existsSync(path.join(created.path, "tools", "__pycache__")), false);
     assert.equal(existsSync(path.join(created.path, "build")), false);
     assert.equal(existsSync(path.join(created.path, ".lake")), false);

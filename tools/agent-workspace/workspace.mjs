@@ -27,6 +27,8 @@ const DEFAULT_CACHE_PATHS = [
   "dist",
   "**/dist",
   ".nx",
+  ".react-router",
+  "**/.react-router",
   ".converge-cache",
   "build",
   "**/build",
