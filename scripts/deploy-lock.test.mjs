@@ -217,16 +217,18 @@ test("the host deployment restarts the daemon and activates a changed Pi Remote"
     const component=`#!/usr/bin/env bash\nset -euo pipefail\nname=$(basename "$0")\ncommit=$(git -C "$(cd "$(dirname "$0")/.." && pwd)" rev-parse HEAD)\ncase "$name" in runtime) destination=$PI_STACK_RUNTIME_DEST;; orchestrator) destination=$PI_STACK_ORCHESTRATOR_DEST;; tools) destination=$PI_STACK_TOOLS_DEST;; skills) destination=$PI_STACK_SKILLS_DEST;; settings) printf '%s\\n' "$1" >> "$SETTINGS_TRACE"; exit 0;;\n remote) destination=$PI_STACK_REMOTE_DEST; release="$(dirname "$destination")/.pi-stack-releases/remote/$commit"; mkdir -p "$release/dist"; printf '%s\\n' "$commit" > "$release/.pi-stack-commit"; ln -sfn "$release" "$destination.tmp"; mv -Tf "$destination.tmp" "$destination"; exit 0;; esac\nmkdir -p "$destination/dist"\nprintf '%s\\n' "$commit" > "$destination/.pi-stack-commit"\n`;
     for(const name of ["runtime","orchestrator","remote","tools","skills","settings"]){writeFileSync(join(deploy,name),component);chmodSync(join(deploy,name),0o755);}
     writeFileSync(join(deploy,"smoke"),"#!/bin/sh\nexit \"${SMOKE_EXIT:-0}\"\n");chmodSync(join(deploy,"smoke"),0o755);
-    writeFileSync(join(remoteApp,"activate"),"#!/bin/sh\nprintf '%s\\n' \"${PI_REMOTE_SERVICE:-}\" >> \"$ACTIVATE_TRACE\"\n");chmodSync(join(remoteApp,"activate"),0o755);
+    // Activation hands the supervisor the selected release; its health then names that commit.
+    writeFileSync(join(remoteApp,"activate"),"#!/bin/sh\nprintf '%s\\n' \"${PI_REMOTE_SERVICE:-}\" >> \"$ACTIVATE_TRACE\"\ncat \"$PI_STACK_REMOTE_DEST/.pi-stack-commit\" > \"$SUPERVISOR_COMMIT\"\n");chmodSync(join(remoteApp,"activate"),0o755);
     assert.equal(spawnSync("git",["init","-q",repository]).status,0);assert.equal(spawnSync("git",["-C",repository,"add","deploy","apps"]).status,0);assert.equal(spawnSync("git",["-C",repository,"-c","user.name=test","-c","user.email=test@example.test","commit","-qm","fixture"]).status,0);
     const destinations=Object.fromEntries(["RUNTIME","ORCHESTRATOR","REMOTE","TOOLS","SKILLS"].map((name)=>[`PI_STACK_${name}_DEST`,join(directory,name.toLowerCase())]));
     const user=process.env.USER??spawnSync("id",["-un"],{encoding:"utf8"}).stdout.trim();
     const hostFile=join(directory,"host.json");writeFileSync(hostFile,JSON.stringify({version:1,fleetUser:user}));
     const personsDir=join(directory,"persons");mkdirSync(personsDir);writeFileSync(join(personsDir,"guest.json"),JSON.stringify({version:1,user:"guest-person",displayName:"Guest",port:18799,environment:{}}));
-    const activationTrace=join(directory,"activation.trace"),systemctlTrace=join(directory,"systemctl.trace"),settingsTrace=join(directory,"settings.trace");
+    const activationTrace=join(directory,"activation.trace"),systemctlTrace=join(directory,"systemctl.trace"),settingsTrace=join(directory,"settings.trace"),supervisorCommit=join(directory,"supervisor.commit");
     writeFileSync(join(bin,"systemctl"),"#!/bin/sh\nprintf '%s\\n' \"$*\" >> \"$SYSTEMCTL_TRACE\"\ncase $1 in list-units) echo 'pi-remote@alice.service loaded active running';; is-active) exit 0;; esac\nexit 0\n");chmodSync(join(bin,"systemctl"),0o755);
-    writeFileSync(join(bin,"curl"),"#!/bin/sh\nprintf '{\"releaseCommit\":\"%s\"}\\n' \"$(cat \"$PI_STACK_REMOTE_DEST/.pi-stack-commit\")\"\n");chmodSync(join(bin,"curl"),0o755);
-    const env={...process.env,...destinations,PATH:`${bin}:${process.env.PATH}`,ACTIVATE_TRACE:activationTrace,SYSTEMCTL_TRACE:systemctlTrace,SETTINGS_TRACE:settingsTrace,PI_REMOTE_PERSONS_DIR:personsDir,PI_STACK_DEPLOY_NO_SUDO:"1",PI_STACK_ALLOW_DIRTY:"1",PI_STACK_SERVICES:"1"};
+    // The front door names its unlocked people; each supervisor names the release it runs.
+    writeFileSync(join(bin,"curl"),"#!/bin/sh\nfor arg; do case $arg in */v1/router-health) printf '{\"people\":[{\"user\":\"alice\",\"unlocked\":true}]}\\n'; exit 0;; esac; done\nprintf '{\"releaseCommit\":\"%s\"}\\n' \"$(cat \"$SUPERVISOR_COMMIT\" 2>/dev/null)\"\n");chmodSync(join(bin,"curl"),0o755);
+    const env={...process.env,...destinations,PATH:`${bin}:${process.env.PATH}`,ACTIVATE_TRACE:activationTrace,SUPERVISOR_COMMIT:supervisorCommit,SYSTEMCTL_TRACE:systemctlTrace,SETTINGS_TRACE:settingsTrace,PI_REMOTE_PERSONS_DIR:personsDir,PI_STACK_DEPLOY_NO_SUDO:"1",PI_STACK_ALLOW_DIRTY:"1",PI_STACK_SERVICES:"1"};
     const first=spawnSync(join(deploy,"host"),[hostFile],{encoding:"utf8",env});assert.equal(first.status,0,first.stderr);
     const firstUnits=readFileSync(systemctlTrace,"utf8");
     assert.match(firstUnits,new RegExp(`try-restart pi-orchestrator@${user}\\.service`));assert.match(firstUnits,/try-restart pi-remote-router\.service/);
@@ -245,6 +247,7 @@ test("the host deployment restarts the daemon and activates a changed Pi Remote"
     assert.match(broken.stderr,/returning Pi Remote to/);
     assert.equal(readlinkSync(destinations.PI_STACK_REMOTE_DEST),before);
     assert.equal(readFileSync(activationTrace,"utf8"),"pi-remote@alice.service\npi-remote@alice.service\n");
+    assert.match(readFileSync(systemctlTrace,"utf8"),/reset-failed pi-remote@\*\.service/);
   } finally { rmSync(directory,{recursive:true,force:true}); }
 });
 

@@ -74,33 +74,42 @@ fi
 # The daemon restarts on every release; live workers keep the release they
 # recorded. The front door restarts only when Pi Remote changed, and each
 # running supervisor is then handed the new release without ending active turns.
+router_base=http://127.0.0.1:${PI_REMOTE_ROUTER_PORT:-8788}
+# The front door starts every open person's supervisor before it listens, so
+# right after a restart the port is closed for as long as those starts take.
+# Nothing may judge the release through a closed port.
+wait_for_router() {
+  local deadline=$((SECONDS + 20))
+  while (( SECONDS < deadline )); do
+    curl -fsS --max-time 2 "$router_base/v1/router-health" >/dev/null 2>&1 && return 0
+    sleep 0.1
+  done
+  echo "pi-remote-router.service did not answer within 20 seconds" >&2
+  return 1
+}
+supervisor_commit() {
+  curl -fsS --max-time 2 -H "x-pi-remote-user: $1" "$router_base/v1/health" 2>/dev/null | jq -r '.releaseCommit // empty' 2>/dev/null
+}
 activate_remote() {
-  local target_commit=$1 service user response deadline ready
-  local -a activated_users=()
+  local target_commit=$1 user response deadline
+  local -a unlocked_users=()
   pi_stack_as_root systemctl try-restart pi-remote-router.service 2>/dev/null || true
-  while read -r service _; do
-    if [[ -n $service ]]; then
-      PI_REMOTE_SERVICE=$service "$root/apps/remote/activate"
-      user=${service#pi-remote@}
-      activated_users+=("${user%.service}")
-    fi
-  done < <(systemctl list-units 'pi-remote@*.service' --type=service --state=active --legend=no --plain --no-pager 2>/dev/null)
-
-  for user in "${activated_users[@]}"; do
+  wait_for_router || return 1
+  # A supervisor the front door has just started already runs the selected
+  # release; only one that reports another commit is asked to hand over.
+  mapfile -t unlocked_users < <(curl -fsS --max-time 2 "$router_base/v1/router-health" 2>/dev/null | jq -r '.people[] | select(.unlocked) | .user' 2>/dev/null)
+  for user in "${unlocked_users[@]}"; do
+    [[ $(supervisor_commit "$user") == "$target_commit" ]] && continue
+    PI_REMOTE_SERVICE="pi-remote@$user.service" "$root/apps/remote/activate"
+  done
+  for user in "${unlocked_users[@]}"; do
     deadline=$((SECONDS + 20))
-    ready=
     while (( SECONDS < deadline )); do
-      response=$(curl -fsS --max-time 2 -H "x-pi-remote-user: $user" http://127.0.0.1:8788/v1/health 2>/dev/null || true)
-      if [[ $(jq -r '.releaseCommit // empty' <<<"$response" 2>/dev/null) == "$target_commit" ]]; then
-        ready=1
-        break
-      fi
+      [[ $(supervisor_commit "$user") == "$target_commit" ]] && continue 2
       sleep 0.1
     done
-    if [[ -z $ready ]]; then
-      echo "pi-remote@$user.service did not activate Pi Remote $target_commit" >&2
-      return 1
-    fi
+    echo "pi-remote@$user.service did not activate Pi Remote $target_commit" >&2
+    return 1
   done
 }
 if [[ -n $fleet ]]; then
@@ -121,6 +130,10 @@ if systemctl is-active --quiet pi-remote-router.service 2>/dev/null; then
       candidate="$(dirname "$remote")/.pi-stack-releases/.rollback.$$"
       pi_stack_as_root ln -s "$previous_remote_release" "$candidate"
       pi_stack_as_root mv -Tf "$candidate" "$remote"
+      # A supervisor that crashed on the rejected release may have hit its
+      # start limit; the previous release cannot come back through a unit
+      # systemd refuses to start.
+      pi_stack_as_root systemctl reset-failed 'pi-remote@*.service' 2>/dev/null || true
       activate_remote "$previous_remote" || true
       "$root/deploy/smoke" || echo "smoke check still fails on the previous release; the machine, not the release, is the problem" >&2
     fi
