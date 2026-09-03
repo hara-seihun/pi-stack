@@ -9,7 +9,7 @@ interface MarkdownRenderer {
 interface Window {
   markdownit(options: Record<string, unknown>): MarkdownRenderer;
   texmath: unknown;
-  katex: unknown;
+  katex: { renderToString(tex: string, options: { displayMode?: boolean }): string };
   normalizeLatexDelimiters(source: string): string;
   PiRemotePerson: { get(): string; set(user: string): void; header: string };
   PiRemoteSync: {

@@ -1,10 +1,28 @@
-import { memo, useEffect, useMemo, useRef, useState } from "react";
+import { memo, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
 import { API } from "../../server/api";
+import { applyHtml } from "./markdown-dom";
+import { streamingMarkdown } from "./streaming-markdown";
 import type { ContextEntry } from "./types";
+
+// A streamed message is rendered again on every chunk, and KaTeX is by far the
+// most expensive part of that. The formulas already on screen never change, so
+// remember what they compiled to.
+const formulas = new Map<string, string>();
+const katexEngine = {
+  renderToString(tex: string, options: { displayMode?: boolean }) {
+    const key = `${options?.displayMode ? "block" : "inline"}\u0000${tex}`;
+    const known = formulas.get(key);
+    if (known !== undefined) return known;
+    const rendered = window.katex.renderToString(tex, options);
+    if (formulas.size > 2_000) formulas.clear();
+    formulas.set(key, rendered);
+    return rendered;
+  },
+};
 
 const markdown = window.markdownit({ html: false, breaks: true, linkify: true })
   .use(window.texmath, {
-    engine: window.katex,
+    engine: katexEngine,
     delimiters: ["dollars", "brackets", "beg_end"],
     katexOptions: { throwOnError: false, strict: "ignore", trust: false },
   });
@@ -24,14 +42,24 @@ function presentationMarkdown(source: string, sessionId: string) {
   });
 }
 
-export const Markdown = memo(function Markdown({ source, sessionId, className = "markdown-body" }: { source: string; sessionId: string; className?: string }) {
+export function renderMarkdown(source: string, sessionId: string, streaming = false) {
+  const normalized = window.normalizeLatexDelimiters(presentationMarkdown(source || "", sessionId));
+  return markdown.render(streaming ? streamingMarkdown(normalized) : normalized);
+}
+
+// The DOM is patched rather than replaced, and a render that throws keeps the
+// previous output, so a message that is already rendered never drops back to
+// its source text between chunks.
+export const Markdown = memo(function Markdown({ source, sessionId, streaming = false, className = "markdown-body" }: { source: string; sessionId: string; streaming?: boolean; className?: string }) {
+  const element = useRef<HTMLDivElement>(null);
+  const previous = useRef("");
   const html = useMemo(() => {
-    try { return markdown.render(window.normalizeLatexDelimiters(presentationMarkdown(source || "", sessionId))); }
-    catch { return ""; }
-  }, [source, sessionId]);
-  return html
-    ? <div className={className} dangerouslySetInnerHTML={{ __html: html }} />
-    : <div className={className}>{source}</div>;
+    try { return renderMarkdown(source, sessionId, streaming); }
+    catch { return previous.current; }
+  }, [source, sessionId, streaming]);
+  previous.current = html;
+  useLayoutEffect(() => { if (element.current) applyHtml(element.current, html); }, [html]);
+  return <div ref={element} className={className} />;
 });
 
 function formatJson(value: unknown) {

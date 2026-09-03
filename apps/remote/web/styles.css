@@ -192,7 +192,7 @@ button:focus-visible, input:focus-visible, textarea:focus-visible, select:focus-
 .message.assistant .message-label { color: var(--success); }
 .message.thinking { padding: 11px 13px; background: var(--pending); color: var(--muted); font-size: 14px; font-style: italic; }
 .message.notice { color: var(--muted); font-size: 14px; }
-.live-thinking, .live-answer { position: relative; width: min(100%, 980px); margin: 18px auto 0; padding-right: 40px; overflow-wrap: anywhere; white-space: pre-wrap; line-height: 1.45; user-select: text; }
+.live-thinking, .live-answer { position: relative; width: min(100%, 980px); margin: 18px auto 0; padding-right: 40px; overflow-wrap: anywhere; line-height: 1.45; user-select: text; }
 .live-thinking { padding: 11px 40px 11px 13px; background: var(--pending); color: var(--muted); font-style: italic; font-size: 14px; }
 .live-thinking > .message-action, .live-answer > .message-action { position: absolute; top: 5px; right: 0; }
 .live-thinking > .message-action { right: 7px; background: var(--surface); }
@@ -221,7 +221,7 @@ button:focus-visible, input:focus-visible, textarea:focus-visible, select:focus-
 .markdown-body img { display: block; max-width: 100%; margin: .9em 0; }
 .markdown-body .katex-display, .markdown-body eqn { max-width: 100%; overflow-x: auto; overflow-y: hidden; padding: .2em 0; }
 .markdown-body .katex { font-size: 1.05em !important; }
-.live-thinking.markdown-body, .live-answer.markdown-body { font-size: inherit; }
+.live-thinking > .markdown-body, .live-answer > .markdown-body { font-size: inherit; }
 .queue-status { flex: 0 0 auto; padding: 6px 11px; border-top: 1px solid var(--border); color: var(--muted); background: var(--surface); font-size: 11px; font-weight: 750; }
 .message-queue { flex: 0 0 auto; max-height: 180px; overflow-y: auto; border-top: 1px solid var(--border); background: var(--surface); }
 .queued-message { min-height: 46px; display: flex; align-items: center; gap: 6px; padding: 6px 7px 6px 11px; border-bottom: 1px solid var(--border); }
