@@ -73,5 +73,3 @@ Import reads credentials from a file so tokens do not enter process arguments. `
 The daemon serves its public API on `127.0.0.1:2460` by default. Pi Remote consumes the package's observation API and does not query private tables.
 
 Generated command and table lists live in [docs/reference.md](docs/reference.md). A fresh ledger gets the current schema directly. A schema change ships as a bounded transition command that is deleted once both hosts have run it, so there is no migration chain to maintain.
-
-Schema 2 is in transition. `pi-orchestrator usage-components` rewrites `usage_hour` so tokens are stored per component and drops the hourly totals written before it, which mixed the components into one unusable number that no reader consumed. Run it on a host before deploying the release that expects schema 2: a daemon or supervisor already running holds its ledger open and is unaffected, while anything that starts afterwards needs the new table. Delete the command and this paragraph once both hosts have run it.

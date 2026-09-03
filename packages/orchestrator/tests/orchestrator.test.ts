@@ -2,7 +2,7 @@ import { describe, expect, it } from "vitest";
 import { chmodSync, mkdirSync, mkdtempSync, readFileSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { SCHEMA, Store, openLedgerDatabase } from "../src/store.js";
+import { Store } from "../src/store.js";
 import { assign, commitMeterAdmission } from "../src/policy.js";
 import type { OrchestratorConfig } from "../src/domain.js";
 import { transactSharedCredential } from "../src/auth/shared-oauth.js";
@@ -52,36 +52,6 @@ describe("current orchestrator state",()=>{
     expect(anthropic.metrics.fable?.cachePercent).toBeNull();
     expect(client.plans(undefined,now+CACHE_WINDOW_MS).plans.anthropic!.metrics.weekly?.cachePercent).toBeNull();
     client.close();
-    rmSync(ledger,{force:true});
-  });
-
-  it("upgrades a version 1 ledger to record usage components",async()=>{
-    const ledger=join(mkdtempSync(join(tmpdir(),"ledger-")),"ledger.sqlite3");
-    const database=openLedgerDatabase(ledger);
-    database.exec(SCHEMA.replace("INSERT INTO meta VALUES (2)","INSERT INTO meta VALUES (1)"));
-    database.exec("DROP INDEX usage_hour_recent; DROP TABLE usage_hour; CREATE TABLE usage_hour (account_id TEXT NOT NULL,hour INTEGER NOT NULL,source TEXT NOT NULL,run_id TEXT NOT NULL DEFAULT '',model TEXT NOT NULL DEFAULT '',tokens REAL NOT NULL,PRIMARY KEY(account_id,hour,source,run_id,model)) STRICT");
-    database.prepare("INSERT INTO usage_hour VALUES(?,?,?,?,?,?)").run("anthropic-1",0,"interactive","r","claude-opus-5",42);
-    database.close();
-    expect(()=>Store.open(ledger)).toThrow(/unsupported orchestrator schema 1/);
-
-    const previous=process.env.PI_ORCHESTRATOR_LEDGER,lines:string[]=[],log=console.log;
-    process.env.PI_ORCHESTRATOR_LEDGER=ledger;
-    console.log=(value?:unknown)=>lines.push(String(value));
-    try{
-      await dispatch(["usage-components"]);
-      await dispatch(["usage-components"]);
-    }finally{
-      console.log=log;
-      if(previous===undefined)delete process.env.PI_ORCHESTRATOR_LEDGER;else process.env.PI_ORCHESTRATOR_LEDGER=previous;
-    }
-    expect(lines[0]).toContain("now records usage per component");
-    expect(lines[1]).toContain("already records usage per component");
-
-    const store=Store.open(ledger);
-    expect(store.usageSince(0)).toEqual([]);
-    store.recordUsage({accountId:"anthropic-1",hour:0,source:"interactive",runId:"r",model:"claude-opus-5",component:"cacheRead",tokens:5});
-    expect(store.usageSince(0)).toEqual([{accountId:"anthropic-1",model:"claude-opus-5",component:"cacheRead",tokens:5}]);
-    store.close();
     rmSync(ledger,{force:true});
   });
 

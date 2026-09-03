@@ -11,7 +11,7 @@ const SqliteDatabase: new (path: string) => DatabaseSync =
     : (require("bun:sqlite") as { Database: new (path: string) => DatabaseSync }).Database;
 
 export const SCHEMA_VERSION = 2;
-export const USAGE_HOUR_SCHEMA = `
+const USAGE_HOUR_SCHEMA = `
 CREATE TABLE usage_hour (
   account_id TEXT NOT NULL,
   hour INTEGER NOT NULL,
