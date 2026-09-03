@@ -12,11 +12,9 @@ export { tailRange };
 const HOST_KEY = /^[a-z][a-z0-9-]{0,15}$/;
 const RUN_ID = /^[0-9a-zA-Z_.-]{1,64}$/;
 
-export interface AgentHostRef {
-  key: string;
-  label: string;
-  name: string;
-}
+import type { AgentHostRef, AgentRun as AgentRunSummary, AgentRunEvent } from "./protocol";
+
+export type { AgentHostRef, AgentRunSummary, AgentRunEvent };
 
 export function runKey(host: string, runId: string): string {
   return `${host}:${runId}`;
@@ -43,38 +41,6 @@ export interface AgentLiveState {
 
 export type AgentRunRow = ObservedRun;
 
-export interface AgentRunSummary {
-  id: string;
-  host: string;
-  hostLabel: string;
-  hostName: string;
-  runId: string;
-  taskId: string;
-  model: string;
-  thinking: string;
-  provider: string;
-  label: string;
-  key: string;
-  status: string;
-  activity: string;
-  activeTool: string | null;
-  startedAt: string;
-  finishedAt: string | null;
-  elapsedMs: number;
-  observable: boolean;
-  dispatched: boolean;
-  teamRole: "worker" | "supervisor" | null;
-  teamSlot: number | null;
-  error: string | null;
-}
-
-export interface AgentRunEvent {
-  seq: number;
-  time: string;
-  type: string;
-  [key: string]: unknown;
-}
-
 const RUNNING_ACTIVITY = "WORKING";
 const MAX_BUFFERED_EVENTS = 400;
 const MAX_DELIVERED_EVENTS = 150;
@@ -96,11 +62,7 @@ function normalizedActivity(status: string, live: AgentLiveState | null): string
   return activity || RUNNING_ACTIVITY;
 }
 
-export function summarizeAgentRun(
-  row: AgentRunRow,
-  host: AgentHostRef,
-  at = Date.now(),
-): AgentRunSummary {
+export function summarizeAgentRun(row: AgentRunRow, host: AgentHostRef): AgentRunSummary {
   const model = String(row.model ?? "unknown");
   const type = catalogAgentType(model);
   const status = String(row.state);
@@ -126,9 +88,7 @@ export function summarizeAgentRun(
     activeTool: running && live?.activeTool ? String(live.activeTool) : null,
     startedAt: iso(row.startedAt),
     finishedAt: endedAt,
-    elapsedMs: Math.max(0, (row.endedAt ?? at) - row.startedAt),
     observable: row.observable === true,
-    dispatched: false,
     teamRole: row.teamRole ?? null,
     teamSlot: row.teamSlot ?? null,
     error: status === "error" ? detail : null,

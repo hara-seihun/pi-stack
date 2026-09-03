@@ -4,24 +4,9 @@ import {
   type PlanUsageSnapshot,
 } from "pi-orchestrator/api";
 
-export interface PlanMetricRow {
-  id: string;
-  model: string;
-  modelLabel: string;
-  text: string;
-  cacheText: string;
-  description: string;
-}
+import type { PlanCard, PlanMetricRow } from "./protocol";
 
-export interface PlanCard {
-  id: string;
-  label: string;
-  icon: string;
-  state: string;
-  text: string;
-  description: string;
-  metrics: PlanMetricRow[];
-}
+export type { PlanCard, PlanMetricRow };
 
 function percent(value: number): string {
   return Number.isInteger(value) ? String(value) : value.toFixed(1).replace(/\.0$/, "");

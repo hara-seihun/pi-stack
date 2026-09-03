@@ -12,9 +12,6 @@ interface Window {
   katex: { renderToString(tex: string, options: { displayMode?: boolean }): string };
   normalizeLatexDelimiters(source: string): string;
   PiRemotePerson: { get(): string; set(user: string): void; header: string };
-  PiRemoteSync: {
-    update(current: SyncDocument | null, update: any): Promise<SyncDocument | null>;
-  };
   PiRemoteVoice: {
     create(options: { sessionId: string; onState(state: string, detail?: string): void; onNotice(message: string): void }): VoiceSession;
   };

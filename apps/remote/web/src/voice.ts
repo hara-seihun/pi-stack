@@ -1,38 +1,10 @@
 import { API } from "../../server/api";
 import { piFetch } from "./client";
+import { updateDocument } from "./sync";
 
 (() => {
   const MAX_CONTEXT_BYTES = 500;
   const POLL_MS = 1_000;
-
-  async function sha256(value) {
-    const digest = await crypto.subtle.digest("SHA-256", new TextEncoder().encode(value));
-    return [...new Uint8Array(digest)].map((byte) => byte.toString(16).padStart(2, "0")).join("");
-  }
-
-  async function applyTextUpdate(current, update) {
-    if (!update) return current;
-    if (update.kind === "clear") return null;
-    if (update.kind === "full") {
-      if (await sha256(update.document) !== update.hash) throw new Error("Live transcript hash verification failed");
-      return { value: update.document, hash: update.hash };
-    }
-    if (update.kind !== "splice" || !current || current.hash !== update.splice?.baseHash)
-      throw new Error("Live transcript resynchronization required");
-    const source = new TextEncoder().encode(current.value);
-    const prefix = Number(update.splice.prefixBytes);
-    const deleted = Number(update.splice.deleteBytes);
-    const inserted = Uint8Array.from(atob(update.splice.insertBase64), (character) => character.charCodeAt(0));
-    if (!Number.isSafeInteger(prefix) || !Number.isSafeInteger(deleted) || prefix < 0 || deleted < 0 || prefix + deleted > source.length)
-      throw new Error("Live transcript splice is invalid");
-    const result = new Uint8Array(source.length - deleted + inserted.length);
-    result.set(source.subarray(0, prefix));
-    result.set(inserted, prefix);
-    result.set(source.subarray(prefix + deleted), prefix + inserted.length);
-    const value = new TextDecoder("utf-8", { fatal: true }).decode(result);
-    if (await sha256(value) !== update.hash) throw new Error("Live transcript splice hash verification failed");
-    return { value, hash: update.hash };
-  }
 
   function asRecord(value) {
     return value && typeof value === "object" && !Array.isArray(value) ? value : null;
@@ -112,6 +84,7 @@ import { piFetch } from "./client";
       this.speaker = null;
       this.generation = 0;
       this.cursor = 0;
+      this.syncEpoch = "";
       this.syncSequence = 0;
       this.liveTextDocument = null;
       this.liveThinkingDocument = null;
@@ -367,22 +340,25 @@ import { piFetch } from "./client";
           method: "POST",
           headers: { "content-type": "application/json" },
           body: JSON.stringify({
-            after: this.syncSequence,
+            epoch: this.syncEpoch,
+            seq: this.syncSequence,
             waitMs: 25_000,
-            includeDashboard: false,
-            eventSessionId: this.sessionId,
-            eventAfter: this.cursor,
-            eventLiveTextHash: this.liveTextDocument?.hash || "",
-            eventLiveThinkingHash: this.liveThinkingDocument?.hash || "",
+            session: {
+              id: this.sessionId,
+              eventsAfter: this.cursor,
+              liveTextHash: this.liveTextDocument?.hash,
+              liveThinkingHash: this.liveThinkingDocument?.hash,
+            },
           }),
         });
         if (!response.ok) throw new Error(await responseError(response, "Voice lost the thread"));
         const synchronized = await response.json();
+        this.syncEpoch = String(synchronized.epoch || this.syncEpoch);
         this.syncSequence = Number(synchronized.seq || this.syncSequence);
-        const snapshot = synchronized.sessionEvents || { events: [] };
-        this.liveTextDocument = await applyTextUpdate(this.liveTextDocument, snapshot.liveTextUpdate);
-        this.liveThinkingDocument = await applyTextUpdate(this.liveThinkingDocument, snapshot.liveThinkingUpdate);
-        for (const event of snapshot.events || []) {
+        const snapshot = synchronized.session || { events: [], liveText: null, liveThinking: null };
+        this.liveTextDocument = await updateDocument(this.liveTextDocument, snapshot.liveText);
+        this.liveThinkingDocument = await updateDocument(this.liveThinkingDocument, snapshot.liveThinking);
+        for (const event of snapshot.events) {
           this.cursor = Math.max(this.cursor, Number(event.seq) || 0);
           if (event.type === "user") {
             const text = String(event.text || "").trim();
@@ -410,7 +386,7 @@ import { piFetch } from "./client";
             this.setState("live", this.delegations.length ? "Agent queued…" : "Listening");
           }
         }
-        this.observeLiveText(this.liveTextDocument?.value || "");
+        this.observeLiveText(this.liveTextDocument?.document || "");
       } catch (cause) {
         failed = true;
         this.onNotice(String(cause?.message || cause));

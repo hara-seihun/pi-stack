@@ -28,12 +28,9 @@ function findGpuBusyPercentPath(): string | null {
   return null;
 }
 
-export interface MachineUsageSnapshot {
-  cpuPercent: number | null;
-  gpuPercent: number | null;
-  memory: { usedBytes: number; totalBytes: number; percentUsed: number };
-  disk: { usedBytes: number; totalBytes: number; availableBytes: number; percentUsed: number } | null;
-}
+import type { MachineUsage } from "./protocol";
+
+export type MachineUsageSnapshot = MachineUsage;
 
 function percent(used: number, total: number): number {
   if (!Number.isFinite(used) || !Number.isFinite(total) || total <= 0) return 0;

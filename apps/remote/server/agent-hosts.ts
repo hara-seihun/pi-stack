@@ -18,8 +18,6 @@ export interface AgentHostOptions {
   key: string;
   label: string;
   name: string;
-  /** How long a listing may be served before a refresh is started. */
-  maxAgeMs?: number;
   runningLimit?: number;
   maxTailBytes?: number;
   maxWatchedRuns?: number;
@@ -34,7 +32,6 @@ export class AgentHost {
   readonly ref: AgentHostRef;
   private readonly buffers = new Map<string, TranscriptBuffer>();
   private snapshot: AgentHostSnapshot = { runs: [], running: 0, models: [], updatedAt: null, error: null };
-  private fetchedAt = 0;
   private inflight: Promise<void> | null = null;
 
   constructor(private readonly orchestrator: OrchestratorObserver, private readonly options: AgentHostOptions) {
@@ -42,14 +39,6 @@ export class AgentHost {
   }
 
   get key(): string { return this.options.key; }
-
-  // A first listing is awaited so an unopened drawer never claims there are
-  // no agents. Later stale listings are served while a refresh runs.
-  async runs(maxAgeMs = this.options.maxAgeMs ?? 0): Promise<AgentHostSnapshot> {
-    if (!this.fetchedAt) await this.refresh();
-    else if (Date.now() - this.fetchedAt >= maxAgeMs) void this.refresh();
-    return this.snapshot;
-  }
 
   cached(): AgentHostSnapshot { return this.snapshot; }
 
@@ -60,7 +49,7 @@ export class AgentHost {
       try {
         const listing = await this.orchestrator.listRuns(this.options.runningLimit ?? 400);
         this.snapshot = {
-          runs: listing.runs.map((row) => summarizeAgentRun(row, this.ref, at)),
+          runs: listing.runs.map((row) => summarizeAgentRun(row, this.ref)),
           running: listing.running,
           models: [...listing.models],
           updatedAt: new Date(at).toISOString(),
@@ -69,7 +58,6 @@ export class AgentHost {
       } catch (cause: any) {
         this.snapshot = { ...this.snapshot, error: cause?.message ?? `${this.options.name} agents unavailable` };
       } finally {
-        this.fetchedAt = Date.now();
         this.inflight = null;
       }
     })();

@@ -1,12 +1,7 @@
 import { createHash } from "node:crypto";
+import type { ContextSplice } from "./protocol";
 
-export type ContextSplice = {
-  baseHash: string;
-  targetHash: string;
-  prefixBytes: number;
-  deleteBytes: number;
-  insertBase64: string;
-};
+export type { ContextSplice };
 
 export function sha256(value: string | Uint8Array): string {
   return createHash("sha256").update(value).digest("hex");

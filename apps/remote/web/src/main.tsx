@@ -1,6 +1,5 @@
 import "./person";
 import "./native";
-import "./sync";
 import "./voice";
 import { StrictMode } from "react";
 import { createRoot } from "react-dom/client";

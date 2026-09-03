@@ -4,55 +4,50 @@ import { SortableContext, arrayMove, sortableKeyboardCoordinates, useSortable, v
 import { CSS } from "@dnd-kit/utilities";
 import { AnimatePresence, MotionConfig, motion } from "motion/react";
 import { API } from "../../server/api";
+import type { GovernorProvider, GovernorState, ThreadStartModel } from "../../server/protocol";
 import { deleteCachedContext, readCachedContext, writeCachedContext } from "./context-cache";
 import { api, piFetch, registerUnlockHandler, syncRequest } from "./client";
 import { ContextTranscript, CopyButton, Markdown, modelContextEntries } from "./context";
 import { FileExplorer } from "./file-explorer";
 import { createPollSchedule } from "./poll-schedule";
+import { updateDocument } from "./sync";
 import { threadsInOrder } from "./thread-order";
-import type { AgentHost, AgentRun, Attachment, ContextEntry, Governor, MachineAction, PlanCard, QueuedMessage, Session, Settings, ThreadStart } from "./types";
+import type { AgentHostStatus, AgentRun, AgentRunEvent, Attachment, ContextEntry, Dashboard, Governor, GovernorControls, MachineActionState, PlanCard, QueuedMessage, Session, SlashCommand, SyncRequest, ThreadSettings, ThreadStart } from "./types";
 
+// Everything the server owns arrives through one long poll and is replaced
+// wholesale per section; the client never patches a server-owned value from a
+// mutation response. What remains local is the view (which thread, which
+// drawer tab), the verified documents for that view, and composer scratch.
 interface AppState {
+  selectedId: string | null;
+  agentRunId: string | null;
+  drawerTab: DrawerTab;
+  drawerOpen: boolean;
+  settingsOpen: boolean;
   sessions: Session[];
   archived: Session[];
   archivedTotal: number;
-  selectedId: string | null;
-  selected: Session | null;
-  agentRunId: string | null;
+  /** A dropped drawer order shown until the server confirms it. */
+  pendingOrder: string[] | null;
+  dashboard: Dashboard | null;
+  context: SyncDocument | null;
+  liveText: SyncDocument | null;
+  liveThinking: SyncDocument | null;
   agentRun: AgentRun | null;
-  drawerTab: "threads" | "agents" | "archived" | "files";
-  drawerOpen: boolean;
-  settingsOpen: boolean;
-  contextEntries: ContextEntry[];
-  contextDocument: SyncDocument | null;
-  contextSessionId: string | null;
-  liveTextDocument: SyncDocument | null;
-  liveThinkingDocument: SyncDocument | null;
-  agentTextDocument: SyncDocument | null;
-  agentThinkingDocument: SyncDocument | null;
   agentEntries: ContextEntry[];
-  agents: AgentRun[];
-  agentHosts: AgentHost[];
-  agentRunning: number;
-  plans: PlanCard[];
-  modelCounts: Map<string, number>;
-  machine: any;
-  governors: Record<string, Governor>;
-  actions: MachineAction[];
-  threadStarts: ThreadStart[];
+  agentText: SyncDocument | null;
+  agentThinking: SyncDocument | null;
   attachments: Attachment[];
-  slashCommands: Array<{ name: string; description?: string; source?: string }>;
+  slashCommands: SlashCommand[];
   offline: string;
-  home: string;
 }
 
 const initialState: AppState = {
-  sessions: [], archived: [], archivedTotal: 0, selectedId: null, selected: null,
-  agentRunId: null, agentRun: null, drawerTab: "threads", drawerOpen: innerWidth >= 1000, settingsOpen: false,
-  contextEntries: [], contextDocument: null, contextSessionId: null,
-  liveTextDocument: null, liveThinkingDocument: null, agentTextDocument: null, agentThinkingDocument: null,
-  agentEntries: [], agents: [], agentHosts: [], agentRunning: 0, plans: [], modelCounts: new Map(), machine: null,
-  governors: { openai: {}, anthropic: {} }, actions: [], threadStarts: [], attachments: [], slashCommands: [], offline: "", home: "/",
+  selectedId: null, agentRunId: null, drawerTab: "threads", drawerOpen: innerWidth >= 1000, settingsOpen: false,
+  sessions: [], archived: [], archivedTotal: 0, pendingOrder: null, dashboard: null,
+  context: null, liveText: null, liveThinking: null,
+  agentRun: null, agentEntries: [], agentText: null, agentThinking: null,
+  attachments: [], slashCommands: [], offline: "",
 };
 
 function normalizedActivity(activity = "IDLE") {
@@ -142,32 +137,29 @@ function EnvironmentControl() {
   </div>;
 }
 
-function MachineControls({ actions, governors, onAction, onGovernor }: { actions: MachineAction[]; governors: Record<string, Governor>; onAction(id: string): void; onGovernor(provider: string): void }) {
-  const description = (name: string, governor: Governor) => {
-    const state = governor.state || (governor.boosted ? "blue" : "off");
-    const current: Record<string, string> = { off: "normal local allowance", green: "3× local allowance", blue: `${governor.boostedMultiplier ?? 10}× local allowance`, red: "a launch halt" };
-    return `${name} governor is using ${current[state]}. Select to change it`;
-  };
+const GOVERNOR_CLASS: Record<GovernorState, string> = { off: "", green: " active boost-green", blue: " active boost-blue", red: " active halted" };
+function governorDescription(name: string, governor: Governor) {
+  const current: Record<GovernorState, string> = { off: "normal local allowance", green: "3× local allowance", blue: `${governor.boostedMultiplier}× local allowance`, red: "a launch halt" };
+  return `${name} governor is using ${current[governor.state]}. Select to change it`;
+}
+function MachineControls({ actions, governors, onAction, onGovernor }: { actions: MachineActionState[]; governors: GovernorControls | null; onAction(id: string): void; onGovernor(provider: GovernorProvider): void }) {
   return <div className="machine-controls" aria-label="This machine controls">
     {actions.map((action) => <button key={action.id} className={`machine-control${action.active ? " active" : ""}`} type="button" aria-label={`${action.label} is ${action.active ? "on" : "off"}. Select to turn it ${action.active ? "off" : "on"}`} onClick={() => onAction(action.id)}><img src={action.icon.startsWith("/") || action.icon.startsWith("data:") ? action.icon : `/${action.icon}.svg`} alt="" /></button>)}
-    {["openai", "anthropic"].map((provider) => {
-      const governor = governors[provider] || {};
-      const state = governor.state || (governor.boosted ? "blue" : "off");
-      const className = state === "green" ? " active boost-green" : state === "blue" ? " active boost-blue" : state === "red" ? " active halted" : "";
-      const name = provider === "openai" ? "OpenAI" : "Anthropic";
-      return <button key={provider} className={`machine-control${className}`} type="button" aria-label={description(name, governor)} title={description(name, governor)} onClick={() => onGovernor(provider)}><img src={`/${provider}.svg`} alt="" /></button>;
+    {governors && (["openai", "anthropic"] as const).map((provider) => {
+      const description = governorDescription(provider === "openai" ? "OpenAI" : "Anthropic", governors[provider]);
+      return <button key={provider} className={`machine-control${GOVERNOR_CLASS[governors[provider].state]}`} type="button" aria-label={description} title={description} onClick={() => onGovernor(provider)}><img src={`/${provider}.svg`} alt="" /></button>;
     })}
   </div>;
 }
 
 function PlanSummary({ plans, counts }: { plans: PlanCard[]; counts: Map<string, number> }) {
-  return <div className="plan-summary muted">{plans.flatMap((card) => (card.metrics || []).filter((metric) => metric.text !== "—").map((metric) => {
+  return <div className="plan-summary muted">{plans.flatMap((card) => card.metrics.filter((metric) => metric.text !== "—").map((metric) => {
     const description = `${card.label} ${metric.modelLabel}, ${counts.get(metric.model) || 0} in use, ${metric.description}`;
     return <div className="capacity-row" key={`${card.icon}:${metric.model}`} title={description} aria-label={description}><img src={`/${encodeURIComponent(card.icon)}.svg`} alt={card.label} /><span className="capacity-model">{metric.modelLabel}</span><span className="capacity-count">{counts.get(metric.model) || 0}</span><span className="capacity-cache">{metric.cacheText}</span><span className="capacity-value">{metric.text}</span></div>;
   }))}</div>;
 }
 
-type DrawerTab = AppState["drawerTab"];
+type DrawerTab = "threads" | "agents" | "archived" | "files";
 
 function DrawerTabIcon({ tab }: { tab: DrawerTab }) {
   if (tab === "threads") return <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M4 5h16v11H9l-5 4V5Zm4 5h8" /></svg>;
@@ -176,13 +168,13 @@ function DrawerTabIcon({ tab }: { tab: DrawerTab }) {
   return <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M3 6.5h7l2 2h9v10H3v-12Z" /></svg>;
 }
 
-function ThreadRow({ session, selected, archived, onSelect, onArchive, onUnarchive }: { session: Session; selected: boolean; archived?: boolean; onSelect(session: Session): void; onArchive(session: Session): void; onUnarchive(session: Session): void }) {
+function ThreadRow({ session, selected, archived, onSelect, onArchive, onUnarchive }: { session: Session; selected: boolean; archived?: boolean; onSelect(id: string): void; onArchive(id: string): void; onUnarchive(id: string): void }) {
   const provider = threadProvider(session);
   const alt = provider === "work" ? "Work" : provider === "converge" ? "Cloud" : provider === "personal" ? "Personal" : provider === "anthropic" ? "Anthropic" : "OpenAI";
-  const content = <><span className="thread-name">{session.name || "Agent"}</span><span className="thread-meta"><img className="thread-provider" src={`/${provider}.svg`} alt={alt} title={`${alt} thread`} /><span className="thread-state" style={{ color: activityColor(archived ? "IDLE" : session.activity) }}>{archived ? "ARCHIVED" : activityLabel(session.activity, session.activeTool)}</span></span></>;
+  const content = <><span className="thread-name">{session.name || "Agent"}</span><span className="thread-meta"><img className="thread-provider" src={`/${provider}.svg`} alt={alt} title={`${alt} thread`} /><span className="thread-state" style={{ color: activityColor(archived ? "IDLE" : session.activity) }}>{archived ? "ARCHIVED" : activityLabel(session.activity, session.activeTool ?? "")}</span></span></>;
   return <div className={`thread-row${selected ? " selected" : ""}${archived ? " archived" : " can-archive"}`}>
-    {archived ? <div className="thread-open">{content}</div> : <button type="button" className="thread-open" onClick={() => onSelect(session)}>{content}</button>}
-    {archived ? <button type="button" className="unarchive-thread" onClick={() => onUnarchive(session)}>Unarchive</button> : <button type="button" className="archive-thread" aria-label={`Archive thread ${session.name}`} title={`Archive ${session.name}`} onClick={() => onArchive(session)}>×</button>}
+    {archived ? <div className="thread-open">{content}</div> : <button type="button" className="thread-open" onClick={() => onSelect(session.id)}>{content}</button>}
+    {archived ? <button type="button" className="unarchive-thread" onClick={() => onUnarchive(session.id)}>Unarchive</button> : <button type="button" className="archive-thread" aria-label={`Archive thread ${session.name}`} title={`Archive ${session.name}`} onClick={() => onArchive(session.id)}>×</button>}
   </div>;
 }
 
@@ -193,15 +185,14 @@ function SortableThreadRow({ session, ...props }: Omit<React.ComponentProps<type
   </div>;
 }
 
-function AgentList({ runs, hosts, selectedId, onSelect }: { runs: AgentRun[]; hosts: AgentHost[]; selectedId: string | null; onSelect(run: AgentRun): void }) {
-  const listed = hosts.length ? hosts : [{ key: "local", name: "This machine", running: runs.length }];
-  return <div className="agent-list">{listed.map((host) => {
-    const owned = runs.filter((run) => (run.host || "local") === host.key);
-    return <div key={host.key}><div className={`agent-host${host.error ? " failed" : ""}`}><span>{host.name || host.label || host.key}</span><span>{host.error ? "unreachable" : host.running ?? owned.length}</span></div>{host.error ? <div className="agent-empty">{host.error}</div> : !owned.length ? <div className="agent-empty">No agents working</div> : owned.map((run) => <button key={run.id} type="button" className={`agent-row${selectedId === run.id ? " selected" : ""}`} onClick={() => onSelect(run)}><span className="agent-row-title"><span className="agent-row-label">{run.teamRole === "supervisor" ? "SUPERVISOR" : run.teamRole === "worker" ? `WORKER ${run.teamSlot ?? ""}` : run.label}</span><span className="agent-row-task">{run.taskId}</span></span><span className="agent-row-meta" style={{ color: run.status === "running" ? activityColor(run.activity || "WORKING") : "var(--muted)" }}>{run.status === "running" ? activityLabel(run.activity || "WORKING", run.activeTool) : run.status.toUpperCase()}</span></button>)}</div>;
+function AgentList({ runs, hosts, selectedId, onSelect }: { runs: AgentRun[]; hosts: AgentHostStatus[]; selectedId: string | null; onSelect(run: AgentRun): void }) {
+  return <div className="agent-list">{hosts.map((host) => {
+    const owned = runs.filter((run) => run.host === host.key);
+    return <div key={host.key}><div className={`agent-host${host.error ? " failed" : ""}`}><span>{host.name}</span><span>{host.error ? "unreachable" : host.running}</span></div>{host.error ? <div className="agent-empty">{host.error}</div> : !owned.length ? <div className="agent-empty">No agents working</div> : owned.map((run) => <button key={run.id} type="button" className={`agent-row${selectedId === run.id ? " selected" : ""}`} onClick={() => onSelect(run)}><span className="agent-row-title"><span className="agent-row-label">{run.teamRole === "supervisor" ? "SUPERVISOR" : run.teamRole === "worker" ? `WORKER ${run.teamSlot ?? ""}` : run.label}</span><span className="agent-row-task">{run.taskId}</span></span><span className="agent-row-meta" style={{ color: run.status === "running" ? activityColor(run.activity) : "var(--muted)" }}>{run.status === "running" ? activityLabel(run.activity, run.activeTool ?? "") : run.status.toUpperCase()}</span></button>)}</div>;
   })}</div>;
 }
 
-type ThreadStartChoice = { id: string; label: string; icon: string; accent?: string; models?: ThreadStart["models"] };
+type ThreadStartChoice = { id: string; label: string; icon: string; accent?: string; models?: ThreadStartModel[] };
 
 function darkGlyph(accent = "#89b4fa") {
   if (!/^#[0-9a-f]{6}$/i.test(accent)) return true;
@@ -268,53 +259,55 @@ function settingLabel(value: string) {
   return value ? value[0].toUpperCase() + value.slice(1).replaceAll("_", " ") : "";
 }
 
-function SettingsPanel({ session, open, onClose, onChanged }: { session: Session | null; open: boolean; onClose(): void; onChanged(settings: Settings): void }) {
-  const [settings, setSettings] = useState<Settings | null>(null);
+function SettingsPanel({ session, open, onClose }: { session: Session | null; open: boolean; onClose(): void }) {
+  const [settings, setSettings] = useState<ThreadSettings | null>(null);
   const [saving, setSaving] = useState("");
+  const [failure, setFailure] = useState("");
   useEffect(() => {
     if (!open || !session) return;
     let cancelled = false;
     setSettings(null);
     setSaving("");
+    setFailure("");
     api(API.sessionSettings.method, API.sessionSettings.path({ sessionId: session.id }))
       .then((result) => { if (!cancelled) setSettings(result.settings); })
-      .catch(console.error);
+      .catch((error) => { if (!cancelled) setFailure(error?.message || String(error)); });
     return () => { cancelled = true; };
   }, [open, session?.id]);
   const update = async (field: string, body: Record<string, string>) => {
     if (!session || saving) return;
     setSaving(field);
+    setFailure("");
     try {
       const result = await api(API.updateSessionSettings.method, API.updateSessionSettings.path({ sessionId: session.id }), body);
       setSettings(result.settings);
-      onChanged(result.settings);
-    } catch (error) { console.error(error); }
+    } catch (error) { setFailure(error?.message || String(error)); }
     finally { setSaving(""); }
   };
   return <><AnimatePresence>{open && <motion.div key="settings-scrim" className="scrim settings-scrim" initial={{ opacity: 0 }} animate={{ opacity: 1 }} exit={{ opacity: 0 }} transition={{ duration: 0.18 }} onClick={onClose} />}</AnimatePresence>
     <AnimatePresence>{open && <motion.aside key="settings-panel" className="settings" aria-label="Thread settings" initial={{ x: "100%" }} animate={{ x: 0 }} exit={{ x: "100%" }} transition={{ type: "spring", stiffness: 520, damping: 42, mass: 0.9 }}>
       <header className="settings-header"><div className="settings-title"><span>Thread settings</span><h2 title={session?.name}>{session?.name || "Thread"}</h2></div><button type="button" className="settings-close" aria-label="Close thread settings" onClick={onClose}>×</button></header>
-      <div className="settings-body">{!settings ? <div className="settings-loading" aria-label="Loading thread settings"><span /><span /><span /></div> : <>
+      <div className="settings-body">{failure && <p className="setting-unavailable" role="alert">{failure}</p>}{!settings ? !failure && <div className="settings-loading" aria-label="Loading thread settings"><span /><span /><span /></div> : <>
         <section className="setting-card">
           <div className="setting-heading"><div><h3>Model</h3><p>The model used for new messages</p></div>{saving === "model" && <span className="setting-saving">Saving</span>}</div>
-          <div className="setting-select"><select aria-label="Model" value={`${settings.model?.provider}\0${settings.model?.id}`} disabled={Boolean(saving)} onChange={(event) => { const [modelProvider, modelId] = event.target.value.split("\0"); void update("model", { modelProvider, modelId }); }}>{settings.models?.map((model) => <option key={`${model.provider}:${model.id}`} value={`${model.provider}\0${model.id}`}>{model.name || model.id} · {model.provider}</option>)}</select><span aria-hidden="true">⌄</span></div>
+          <div className="setting-select"><select aria-label="Model" value={`${settings.model?.provider}\0${settings.model?.id}`} disabled={Boolean(saving)} onChange={(event) => { const [modelProvider, modelId] = event.target.value.split("\0"); void update("model", { modelProvider, modelId }); }}>{settings.models.map((model) => <option key={`${model.provider}:${model.id}`} value={`${model.provider}\0${model.id}`}>{model.name || model.id} · {model.provider}</option>)}</select><span aria-hidden="true">⌄</span></div>
         </section>
         <section className="setting-card">
           <div className="setting-heading"><div><h3>Thinking</h3><p>How much reasoning the model can use</p></div>{saving === "thinking" && <span className="setting-saving">Saving</span>}</div>
-          <div className="setting-options thinking-options" role="radiogroup" aria-label="Thinking level">{(settings.thinkingLevels || []).map((level) => <button key={level} type="button" role="radio" aria-checked={settings.thinkingLevel === level} className={settings.thinkingLevel === level ? "selected" : ""} disabled={Boolean(saving)} onClick={() => void update("thinking", { thinkingLevel: level })}>{settingLabel(level)}</button>)}</div>
+          <div className="setting-options thinking-options" role="radiogroup" aria-label="Thinking level">{settings.thinkingLevels.map((level) => <button key={level} type="button" role="radio" aria-checked={settings.thinkingLevel === level} className={settings.thinkingLevel === level ? "selected" : ""} disabled={Boolean(saving)} onClick={() => void update("thinking", { thinkingLevel: level })}>{settingLabel(level)}</button>)}</div>
         </section>
         <section className="setting-card">
           <div className="setting-heading"><div><h3>Speed</h3><p>Request scheduling priority</p></div>{saving === "speed" && <span className="setting-saving">Saving</span>}</div>
-          {settings.speedModes?.length ? <div className="setting-options speed-options" role="radiogroup" aria-label="Speed mode">{settings.speedModes.map((mode) => <button key={mode} type="button" role="radio" aria-checked={settings.speedMode === mode} className={settings.speedMode === mode ? "selected" : ""} disabled={Boolean(saving)} onClick={() => void update("speed", { speedMode: mode })}>{settingLabel(mode)}</button>)}</div> : <p className="setting-unavailable">This model does not offer speed controls.</p>}
+          {settings.speedModes.length ? <div className="setting-options speed-options" role="radiogroup" aria-label="Speed mode">{settings.speedModes.map((mode) => <button key={mode} type="button" role="radio" aria-checked={settings.speedMode === mode} className={settings.speedMode === mode ? "selected" : ""} disabled={Boolean(saving)} onClick={() => void update("speed", { speedMode: mode })}>{settingLabel(mode)}</button>)}</div> : <p className="setting-unavailable">This model does not offer speed controls.</p>}
         </section>
       </>}</div>
     </motion.aside>}</AnimatePresence>
   </>;
 }
 
-function eventEntries(current: ContextEntry[], events: any[]): ContextEntry[] {
+function eventEntries(current: ContextEntry[], events: AgentRunEvent[]): ContextEntry[] {
   const next = [...current];
-  for (const event of events || []) {
+  for (const event of events as any[]) {
     const key = event.type === "tool_start" || event.type === "tool_end" ? `toolCall:${event.toolCallId}` : `event:${event.seq}`;
     if (event.type === "tool_start") next.push({ key, signature: `start:${JSON.stringify(event)}`, kind: "toolCall", toolCall: { id: event.toolCallId, name: event.name, arguments: event.args || {} }, time: Date.parse(event.time) || Date.now() });
     else if (event.type === "tool_end") {
@@ -341,7 +334,7 @@ export default function App() {
   const promptElement = useRef<HTMLTextAreaElement>(null);
   const syncController = useRef<AbortController | null>(null);
   const syncSchedule = useRef(createPollSchedule());
-  const syncMeta = useRef({ seq: 0, version: 0, epoch: "", lastAgentSeq: 0 });
+  const syncMeta = useRef({ epoch: "", seq: 0, stateVersion: 0, dashboardVersion: 0, agentSeq: 0, orderCommitted: false });
   const dragSensors = useSensors(
     useSensor(PointerSensor, { activationConstraint: { delay: 350, tolerance: 10 } }),
     useSensor(KeyboardSensor, { coordinateGetter: sortableKeyboardCoordinates }),
@@ -350,6 +343,10 @@ export default function App() {
     syncSchedule.current.requestImmediate();
     syncController.current?.abort();
   }, []);
+  const selectedSession = useCallback(() => {
+    const current = stateRef.current;
+    return current.sessions.find((session) => session.id === current.selectedId) ?? null;
+  }, [stateRef]);
   const resizePrompt = useCallback(() => {
     const textarea = promptElement.current;
     if (!textarea) return;
@@ -370,6 +367,11 @@ export default function App() {
     window.addEventListener("resize", resizePrompt);
     return () => window.removeEventListener("resize", resizePrompt);
   }, [resizePrompt]);
+  useEffect(() => {
+    const onVisible = () => { if (document.visibilityState === "visible") kick(); };
+    document.addEventListener("visibilitychange", onVisible);
+    return () => document.removeEventListener("visibilitychange", onVisible);
+  }, [kick]);
   useEffect(() => () => voice.current?.stop(), []);
   useEffect(() => {
     voice.current?.stop();
@@ -379,7 +381,7 @@ export default function App() {
   }, [state.selectedId]);
 
   const toggleVoice = async () => {
-    const session = stateRef.current.selected;
+    const session = selectedSession();
     if (!session) return;
     if (voice.current && ["connecting", "live"].includes(voiceState)) {
       voice.current.stop(); voice.current = null; setVoiceState("idle"); return;
@@ -397,23 +399,22 @@ export default function App() {
     return `${environment?.id || location.origin}:${id}`;
   }, []);
 
-  const selectThread = useCallback(async (session: Session) => {
-    patch({ selectedId: session.id, selected: session, agentRunId: null, agentRun: null, contextEntries: [], contextDocument: null, contextSessionId: session.id, liveTextDocument: null, liveThinkingDocument: null, agentEntries: [] });
-    setPrompt(loadDraft(session.id));
-    stateRef.current.drawerOpen && innerWidth < 1000 && patch({ drawerOpen: false });
+  const selectThread = useCallback(async (id: string) => {
+    patch({ selectedId: id, agentRunId: null, agentRun: null, context: null, liveText: null, liveThinking: null, drawerOpen: innerWidth >= 1000 });
+    setPrompt(loadDraft(id));
     kick();
     try {
-      const cached: any = await readCachedContext(await cacheKey(session.id));
-      if (stateRef.current.selectedId === session.id && !stateRef.current.contextDocument && cached?.document) {
-        patch({ contextDocument: cached, contextEntries: modelContextEntries(JSON.parse(cached.document)) });
+      const cached = await readCachedContext(await cacheKey(id));
+      if (stateRef.current.selectedId === id && !stateRef.current.context && cached) {
+        patch({ context: cached });
         kick();
       }
     } catch (error) { console.error(error); }
   }, [cacheKey, kick, patch, stateRef]);
 
   const selectAgent = useCallback((run: AgentRun) => {
-    syncMeta.current.lastAgentSeq = 0;
-    patch({ agentRunId: run.id, agentRun: run, agentEntries: [], agentTextDocument: null, agentThinkingDocument: null, drawerOpen: innerWidth >= 1000 });
+    syncMeta.current.agentSeq = 0;
+    patch({ agentRunId: run.id, agentRun: run, agentEntries: [], agentText: null, agentThinking: null, drawerOpen: innerWidth >= 1000 });
     kick();
   }, [kick, patch]);
 
@@ -425,69 +426,47 @@ export default function App() {
       const controller = new AbortController();
       syncController.current = controller;
       const current = stateRef.current;
-      const selectedId = current.selectedId;
-      const agentRunId = current.agentRunId;
-      const waitMs = syncSchedule.current.takeWaitMs();
-      const body: any = { after: syncMeta.current.seq, stateVersion: syncMeta.current.version, epoch: syncMeta.current.epoch, waitMs, contextProjection: "display", includeArchived: true, includeAgentList: current.drawerTab === "agents" || Boolean(agentRunId), includeDashboard: true };
-      if (selectedId && !agentRunId) {
-        body.selectedId = selectedId; body.eventSessionId = selectedId; body.eventAfter = Number.MAX_SAFE_INTEGER;
-        if (current.contextSessionId === selectedId && current.contextDocument) body.contextHash = current.contextDocument.hash;
-        if (current.liveTextDocument) body.eventLiveTextHash = current.liveTextDocument.hash;
-        if (current.liveThinkingDocument) body.eventLiveThinkingHash = current.liveThinkingDocument.hash;
-      }
-      if (agentRunId) {
-        body.agentRunId = agentRunId; body.agentAfter = syncMeta.current.lastAgentSeq;
-        if (current.agentTextDocument) body.agentLiveTextHash = current.agentTextDocument.hash;
-        if (current.agentThinkingDocument) body.agentLiveThinkingHash = current.agentThinkingDocument.hash;
-      }
+      const meta = syncMeta.current;
+      const { selectedId, agentRunId } = current;
+      const request: SyncRequest = { epoch: meta.epoch, seq: meta.seq, stateVersion: meta.stateVersion, dashboardVersion: meta.dashboardVersion, waitMs: syncSchedule.current.takeWaitMs() };
+      if (selectedId && !agentRunId) request.session = { id: selectedId, contextHash: current.context?.hash, liveTextHash: current.liveText?.hash, liveThinkingHash: current.liveThinking?.hash };
+      if (agentRunId) request.agent = { id: agentRunId, after: meta.agentSeq, liveTextHash: current.agentText?.hash, liveThinkingHash: current.agentThinking?.hash };
       let delay = 0;
       try {
-        const all = await syncRequest(body, controller.signal);
-        if (controller.signal.aborted || stopped) throw new DOMException("cancelled", "AbortError");
-        if (syncMeta.current.epoch && syncMeta.current.epoch !== all.epoch) {
-          syncMeta.current = { seq: 0, version: 0, epoch: String(all.epoch || ""), lastAgentSeq: 0 };
-          patch({ contextDocument: null, contextEntries: [], liveTextDocument: null, liveThinkingDocument: null, agentTextDocument: null, agentThinkingDocument: null });
-        }
-        syncMeta.current.seq = Number(all.seq || syncMeta.current.seq);
-        syncMeta.current.version = Number(all.stateVersion || syncMeta.current.version);
-        syncMeta.current.epoch = String(all.epoch || syncMeta.current.epoch);
+        const response = await syncRequest(request, controller.signal);
+        const cancelled = () => controller.signal.aborted || stopped;
+        if (cancelled()) return;
+        meta.epoch = response.epoch;
+        meta.seq = response.seq;
+        meta.stateVersion = response.stateVersion;
+        meta.dashboardVersion = response.dashboardVersion;
         const update: Partial<AppState> = { offline: "" };
-        if (Array.isArray(all.sessions)) {
-          update.sessions = all.sessions as Session[];
-          update.archived = Array.isArray(all.archivedSessions) ? all.archivedSessions : current.archived;
-          update.archivedTotal = Number.isFinite(all.archivedTotal) ? Number(all.archivedTotal) : current.archivedTotal;
-          if (!selectedId && all.sessions.length) queueMicrotask(() => void selectThread(all.sessions[0] as Session));
+        if (response.state) {
+          Object.assign(update, response.state);
+          if (meta.orderCommitted) { update.pendingOrder = null; meta.orderCommitted = false; }
         }
-        if (all.selectedSession && stateRef.current.selectedId === selectedId) update.selected = all.selectedSession;
-        if (all.contextUpdate && stateRef.current.selectedId === selectedId) {
-          const base = current.contextSessionId === selectedId ? current.contextDocument : null;
-          const document = await window.PiRemoteSync.update(base, all.contextUpdate);
-          update.contextDocument = document; update.contextSessionId = selectedId;
-          update.contextEntries = modelContextEntries(document ? JSON.parse(document.document) : null);
-          if (document && selectedId) void cacheKey(selectedId).then((key) => writeCachedContext(key, document)).catch(console.error);
+        if (response.dashboard) update.dashboard = response.dashboard;
+        const live = stateRef.current;
+        if (response.session && live.selectedId === selectedId && !live.agentRunId) {
+          update.context = await updateDocument(current.context, response.session.context);
+          update.liveText = await updateDocument(current.liveText, response.session.liveText);
+          update.liveThinking = await updateDocument(current.liveThinking, response.session.liveThinking);
+          if (update.context !== current.context && selectedId) {
+            const document = update.context;
+            void cacheKey(selectedId).then((key) => document ? writeCachedContext(key, document) : deleteCachedContext(key)).catch(console.error);
+          }
         }
-        if (all.sessionEvents && stateRef.current.selectedId === selectedId) {
-          update.liveTextDocument = await window.PiRemoteSync.update(current.liveTextDocument, all.sessionEvents.liveTextUpdate);
-          update.liveThinkingDocument = await window.PiRemoteSync.update(current.liveThinkingDocument, all.sessionEvents.liveThinkingUpdate);
+        if (response.agent && live.agentRunId === agentRunId) {
+          update.agentRun = response.agent.run;
+          update.agentText = await updateDocument(current.agentText, response.agent.liveText);
+          update.agentThinking = await updateDocument(current.agentThinking, response.agent.liveThinking);
+          update.agentEntries = eventEntries(current.agentEntries, response.agent.events);
+          for (const event of response.agent.events) meta.agentSeq = Math.max(meta.agentSeq, Number(event.seq) || 0);
         }
-        if (all.agentRuns) { update.agents = all.agentRuns.runs || []; update.agentHosts = all.agentRuns.hosts || []; update.agentRunning = Number(all.agentRuns.running || 0); }
-        if (all.agentEvents && stateRef.current.agentRunId === agentRunId) {
-          update.agentRun = all.agentEvents.run || current.agentRun;
-          update.agentTextDocument = await window.PiRemoteSync.update(current.agentTextDocument, all.agentEvents.liveTextUpdate);
-          update.agentThinkingDocument = await window.PiRemoteSync.update(current.agentThinkingDocument, all.agentEvents.liveThinkingUpdate);
-          update.agentEntries = eventEntries(current.agentEntries, all.agentEvents.events || []);
-          for (const event of all.agentEvents.events || []) syncMeta.current.lastAgentSeq = Math.max(syncMeta.current.lastAgentSeq, Number(event.seq) || 0);
-        }
-        if (all.agents) {
-          const location = all.agents.locations?.[0];
-          update.modelCounts = new Map((location?.models || []).map((model: any) => [model.key, Number(model.count || 0)]));
-          if (Number.isFinite(all.agents.sources?.orchestrator)) update.agentRunning = Number(all.agents.sources.orchestrator);
-        }
-        if (all.plans) update.plans = all.plans.cards || [];
-        if (all.governors) update.governors = all.governors;
-        if (all.machine) update.machine = all.machine;
-        if (controller.signal.aborted || stopped) throw new DOMException("cancelled", "AbortError");
+        if (cancelled()) return;
         patch(update);
+        const settled = stateRef.current;
+        if (!settled.selectedId && !settled.agentRunId && settled.sessions.length) void selectThread(settled.sessions[0].id);
       } catch (error) {
         if (!(error instanceof DOMException && error.name === "AbortError")) { patch({ offline: error instanceof Error ? error.message : String(error) }); delay = 1_200; }
       } finally {
@@ -498,41 +477,34 @@ export default function App() {
     return () => { stopped = true; syncController.current?.abort(); if (timer) clearTimeout(timer); };
   }, [cacheKey, patch, selectThread, stateRef]);
 
-  useEffect(() => {
-    Promise.all([api(API.actions.method, API.actions.path()), api(API.governors.method, API.governors.path()), api(API.threadStarts.method, API.threadStarts.path())])
-      .then(([actions, governors, starts]) => patch({ actions: actions.actions || [], governors, threadStarts: starts.destinations || [], home: starts.home || "/" })).catch(console.error);
-  }, [patch]);
-
-  const mutateSession = useCallback((session: Session) => {
-    patch((current) => ({ sessions: current.sessions.map((candidate) => candidate.id === session.id ? session : candidate), selected: current.selectedId === session.id ? session : current.selected }));
-  }, [patch]);
-
   const createThread = async (destination: string, model: string | null) => {
     const sessionId = crypto.randomUUID();
-    const result = await api(API.createSession.method, API.createSession.path(), { requestId: crypto.randomUUID(), sessionId, destination, model });
-    patch((current) => ({ sessions: [result.session, ...current.sessions.filter((session) => session.id !== sessionId)] }));
-    await selectThread(result.session); kick();
+    await api(API.createSession.method, API.createSession.path(), { requestId: crypto.randomUUID(), sessionId, destination, model });
+    await selectThread(sessionId);
   };
-  const archive = async (session: Session) => {
-    await api(API.archiveSession.method, API.archiveSession.path({ sessionId: session.id }));
-    void cacheKey(session.id).then(deleteCachedContext).catch(console.error);
-    patch((current) => ({ sessions: current.sessions.filter((candidate) => candidate.id !== session.id), selectedId: current.selectedId === session.id ? null : current.selectedId, selected: current.selectedId === session.id ? null : current.selected })); kick();
+  const archive = async (id: string) => {
+    await api(API.archiveSession.method, API.archiveSession.path({ sessionId: id }));
+    void cacheKey(id).then(deleteCachedContext).catch(console.error);
+    if (stateRef.current.selectedId === id) patch({ selectedId: null, context: null, liveText: null, liveThinking: null });
+    kick();
   };
-  const unarchive = async (session: Session) => {
-    const result = await api(API.unarchiveSession.method, API.unarchiveSession.path({ sessionId: session.id }), {});
-    patch((current) => ({ archived: current.archived.filter((candidate) => candidate.id !== session.id), sessions: [result.session, ...current.sessions] }));
-    await selectThread(result.session); kick();
+  const unarchive = async (id: string) => {
+    await api(API.unarchiveSession.method, API.unarchiveSession.path({ sessionId: id }), {});
+    await selectThread(id);
   };
   const reorder = async ({ active, over }: DragEndEvent) => {
     if (!over || active.id === over.id) return;
-    const previous = stateRef.current.sessions;
+    const previous = orderedSessions(stateRef.current);
     const sourceIndex = previous.findIndex((session) => session.id === active.id);
     const targetIndex = previous.findIndex((session) => session.id === over.id);
     if (sourceIndex < 0 || targetIndex < 0) return;
-    const ordered = arrayMove(previous, sourceIndex, targetIndex);
-    patch({ sessions: ordered });
-    try { const result = await api(API.reorderSessions.method, API.reorderSessions.path(), { sessionIds: ordered.map((session) => session.id) }); patch({ sessions: result.sessions || threadsInOrder(ordered, ordered.map((session) => session.id)) }); }
-    catch (error) { patch({ sessions: previous }); console.error(error); }
+    const ordered = arrayMove(previous, sourceIndex, targetIndex).map((session) => session.id);
+    patch({ pendingOrder: ordered });
+    try {
+      await api(API.reorderSessions.method, API.reorderSessions.path(), { sessionIds: ordered });
+      syncMeta.current.orderCommitted = true;
+      syncMeta.current.stateVersion = 0;
+    } catch (error) { patch({ pendingOrder: null }); console.error(error); }
     kick();
   };
   const loadOlder = async () => {
@@ -548,9 +520,10 @@ export default function App() {
     try {
       const result = await api(API.sessionFork.method, API.sessionFork.path({ sessionId: id }), { requestId: crypto.randomUUID(), messageTimestamp: entry.messageTimestamp }, 45_000);
       if (stateRef.current.selectedId !== id) return;
-      setPrompt(String(result.text ?? entry.text ?? "")); saveDraft(id, String(result.text ?? entry.text ?? ""));
-      patch({ contextEntries: [], contextDocument: null, selected: result.session || stateRef.current.selected }); kick();
-    } finally { setPending(false); }
+      const text = String(result.text ?? entry.text ?? "");
+      setPrompt(text); saveDraft(id, text);
+      patch({ context: null });
+    } finally { setPending(false); kick(); }
   }, [kick, patch, pending, stateRef]);
 
   const uploadFiles = async (files: File[]) => {
@@ -572,13 +545,15 @@ export default function App() {
   };
 
   const send = async () => {
-    const session = stateRef.current.selected;
+    const session = selectedSession();
     if (!session || pending) return;
     const attachments = stateRef.current.attachments.filter((file) => file.path && !file.uploading);
     const text = prompt.trim();
     if (!text && !attachments.length) {
       if (working(session)) {
-        setPending(true); try { const result = await api(API.sessionAbort.method, API.sessionAbort.path({ sessionId: session.id }), {}); if (result.session) mutateSession(result.session); } finally { setPending(false); kick(); }
+        setPending(true);
+        try { await api(API.sessionAbort.method, API.sessionAbort.path({ sessionId: session.id }), {}); }
+        finally { setPending(false); kick(); }
       }
       return;
     }
@@ -587,10 +562,8 @@ export default function App() {
     try {
       const attachmentText = attachments.length ? `The following files were attached to this message:\n${attachments.map((file) => `- ${file.path}`).join("\n")}` : "";
       const bodyText = [text, attachmentText].filter(Boolean).join("\n\n");
-      const result = command && !attachments.length
-        ? await api(API.sessionCommand.method, API.sessionCommand.path({ sessionId: session.id }), { requestId: crypto.randomUUID(), name: command.name, args: text.slice(command.name.length + 2).trim() }, 130_000)
-        : await api(API.sessionPrompt.method, API.sessionPrompt.path({ sessionId: session.id }), { requestId: crypto.randomUUID(), text: bodyText, delivery: "followUp" });
-      if (result.session) mutateSession(result.session);
+      if (command && !attachments.length) await api(API.sessionCommand.method, API.sessionCommand.path({ sessionId: session.id }), { requestId: crypto.randomUUID(), name: command.name, args: text.slice(command.name.length + 2).trim() }, 130_000);
+      else await api(API.sessionPrompt.method, API.sessionPrompt.path({ sessionId: session.id }), { requestId: crypto.randomUUID(), text: bodyText, delivery: "followUp" });
       patch({ attachments: [] });
     } catch (error) { setPrompt(text); saveDraft(session.id, text); console.error(error); }
     finally { setPending(false); kick(); }
@@ -603,27 +576,34 @@ export default function App() {
   }, [patch, prompt, state.selectedId, state.slashCommands.length]);
 
   const mutateQueued = async (message: QueuedMessage, route: typeof API.queueItem, edit = false) => {
-    const session = stateRef.current.selected;
+    const session = selectedSession();
     if (!session) return;
-    const result = await api(route.method, route.path({ sessionId: session.id, workId: message.id }), route.method === "POST" ? {} : undefined);
-    if (result.session) mutateSession(result.session);
-    if (edit) {
-      const text = String(result.text ?? message.text ?? "");
-      setPrompt((current) => current.trim() ? `${text}\n\n${current}` : text);
-      saveDraft(session.id, text);
-    }
-    kick();
+    try {
+      const result = await api(route.method, route.path({ sessionId: session.id, workId: message.id }), route.method === "POST" ? {} : undefined);
+      if (edit) {
+        const text = String(result.text ?? message.text ?? "");
+        setPrompt((current) => current.trim() ? `${text}\n\n${current}` : text);
+        saveDraft(session.id, text);
+      }
+    } finally { kick(); }
   };
-  const toggleAction = async (id: string) => { const result = await api(API.actionToggle.method, API.actionToggle.path({ id }), {}); patch((current) => ({ actions: current.actions.map((action) => action.id === id ? result.action : action) })); };
-  const toggleGovernor = async (provider: string) => { const result = await api(API.governorToggle.method, API.governorToggle.path({ provider }), {}); patch((current) => ({ governors: { ...current.governors, [provider]: result.governor } })); };
-  const selectedActivity = state.agentRunId ? state.agentRun?.activity || state.agentRun?.status || "IDLE" : state.selected?.activity || "IDLE";
-  const selectedTool = state.agentRunId ? state.agentRun?.activeTool : state.selected?.activeTool;
-  const title = state.agentRunId ? state.agentRun ? `${state.agentRun.label} · ${state.agentRun.taskId}` : "Agent" : state.selected?.name || "Pi Remote";
-  const machineText = state.machine ? `CPU ${state.machine.cpuPercent ?? "—"}% · GPU ${state.machine.gpuPercent ?? "—"}% · RAM ${state.machine.memory?.percentUsed ?? "—"}% · DISK ${state.machine.disk?.percentUsed ?? "—"}%` : "CPU — · GPU — · RAM — · DISK —";
-  const entries = state.agentRunId ? state.agentEntries : state.contextEntries;
-  const liveThinking = state.agentRunId ? state.agentThinkingDocument?.document || "" : state.liveThinkingDocument?.document || "";
-  const liveText = state.agentRunId ? state.agentTextDocument?.document || "" : state.liveTextDocument?.document || "";
-  const drawerCounts: Record<DrawerTab, number> = { threads: state.sessions.length, agents: state.agentRunning, archived: Math.max(state.archivedTotal, state.archived.length), files: rootFileCount };
+  const toggleAction = async (id: string) => { try { await api(API.actionToggle.method, API.actionToggle.path({ id }), {}); } finally { kick(); } };
+  const toggleGovernor = async (provider: GovernorProvider) => { try { await api(API.governorToggle.method, API.governorToggle.path({ provider }), {}); } finally { kick(); } };
+
+  const sessions = orderedSessions(state);
+  const selected = sessions.find((session) => session.id === state.selectedId) ?? null;
+  const contextEntries = useMemo(() => modelContextEntries(state.context ? JSON.parse(state.context.document) : null), [state.context]);
+  const modelCounts = useMemo(() => new Map((state.dashboard?.modelCounts ?? []).map((model) => [model.key, model.count])), [state.dashboard]);
+  const dashboard = state.dashboard;
+  const selectedActivity = state.agentRunId ? state.agentRun?.activity || state.agentRun?.status || "IDLE" : selected?.activity || "IDLE";
+  const selectedTool = state.agentRunId ? state.agentRun?.activeTool : selected?.activeTool;
+  const title = state.agentRunId ? state.agentRun ? `${state.agentRun.label} · ${state.agentRun.taskId}` : "Agent" : selected?.name || "Pi Remote";
+  const machine = dashboard?.machine;
+  const machineText = machine ? `CPU ${machine.cpuPercent ?? "—"}% · GPU ${machine.gpuPercent ?? "—"}% · RAM ${machine.memory?.percentUsed ?? "—"}% · DISK ${machine.disk?.percentUsed ?? "—"}%` : "CPU — · GPU — · RAM — · DISK —";
+  const entries = state.agentRunId ? state.agentEntries : contextEntries;
+  const liveThinking = state.agentRunId ? state.agentThinking?.document || "" : state.liveThinking?.document || "";
+  const liveText = state.agentRunId ? state.agentText?.document || "" : state.liveText?.document || "";
+  const drawerCounts: Record<DrawerTab, number> = { threads: sessions.length, agents: dashboard?.agents.running ?? 0, archived: Math.max(state.archivedTotal, state.archived.length), files: rootFileCount };
   const drawerLabels: Record<DrawerTab, string> = { threads: "Interactive", agents: "Orchestrator", archived: "Archived", files: "Files" };
   const slashToken = prompt.startsWith("/") && !/\s/.test(prompt) ? prompt.slice(1).toLowerCase() : null;
   const visibleCommands = slashToken === null ? [] : state.slashCommands.filter((command) => command.source === "skill" && !command.name.toLowerCase().includes("mcp") && command.name.toLowerCase().startsWith(slashToken));
@@ -632,21 +612,25 @@ export default function App() {
     <UnlockDialog />
     {state.drawerOpen && innerWidth < 1000 && <div className="scrim" onClick={() => patch({ drawerOpen: false })} />}
     <aside id="drawer" className={state.drawerOpen ? "open" : ""} aria-label="Navigation">
-      <header className="drawer-heading thread-start-heading"><nav className="drawer-tabs" role="tablist" aria-label="Drawer sections">{(["threads", "agents", "archived", "files"] as const).map((tab) => <button key={tab} className="drawer-tab" type="button" role="tab" aria-label={`${drawerLabels[tab]}, ${drawerCounts[tab]}`} title={drawerLabels[tab]} aria-selected={state.drawerTab === tab} onClick={() => { patch({ drawerTab: tab }); kick(); }}><DrawerTabIcon tab={tab} /><span className="drawer-tab-count">{drawerCounts[tab]}</span></button>)}</nav><ThreadStartMenu starts={state.threadStarts} onCreate={(destination, model) => void createThread(destination, model)} /></header>
-      {state.drawerTab === "threads" && <DndContext sensors={dragSensors} collisionDetection={closestCenter} onDragEnd={(event) => void reorder(event)}><SortableContext items={state.sessions.map((session) => session.id)} strategy={verticalListSortingStrategy}><div className="thread-list">{state.sessions.length ? state.sessions.map((session) => <SortableThreadRow key={session.id} session={session} selected={!state.agentRunId && state.selectedId === session.id} onSelect={(value) => void selectThread(value)} onArchive={(value) => void archive(value)} onUnarchive={() => {}} />) : <div className="agent-empty">No threads</div>}</div></SortableContext></DndContext>}
-      {state.drawerTab === "agents" && <AgentList runs={state.agents} hosts={state.agentHosts} selectedId={state.agentRunId} onSelect={selectAgent} />}
-      {state.drawerTab === "archived" && <div className="thread-list">{state.archived.length ? state.archived.map((session) => <ThreadRow key={session.id} archived session={session} selected={false} onSelect={() => {}} onArchive={() => {}} onUnarchive={(value) => void unarchive(value)} />) : <div className="agent-empty">No archived threads</div>}{state.archived.length < state.archivedTotal && <button type="button" className="archived-more" onClick={() => void loadOlder()}>Show older · {state.archivedTotal - state.archived.length} more</button>}</div>}
+      <header className="drawer-heading thread-start-heading"><nav className="drawer-tabs" role="tablist" aria-label="Drawer sections">{(["threads", "agents", "archived", "files"] as const).map((tab) => <button key={tab} className="drawer-tab" type="button" role="tab" aria-label={`${drawerLabels[tab]}, ${drawerCounts[tab]}`} title={drawerLabels[tab]} aria-selected={state.drawerTab === tab} onClick={() => patch({ drawerTab: tab })}><DrawerTabIcon tab={tab} /><span className="drawer-tab-count">{drawerCounts[tab]}</span></button>)}</nav><ThreadStartMenu starts={dashboard?.threadStarts ?? []} onCreate={(destination, model) => void createThread(destination, model)} /></header>
+      {state.drawerTab === "threads" && <DndContext sensors={dragSensors} collisionDetection={closestCenter} onDragEnd={(event) => void reorder(event)}><SortableContext items={sessions.map((session) => session.id)} strategy={verticalListSortingStrategy}><div className="thread-list">{sessions.length ? sessions.map((session) => <SortableThreadRow key={session.id} session={session} selected={!state.agentRunId && state.selectedId === session.id} onSelect={(id) => void selectThread(id)} onArchive={(id) => void archive(id)} onUnarchive={() => {}} />) : <div className="agent-empty">No threads</div>}</div></SortableContext></DndContext>}
+      {state.drawerTab === "agents" && <AgentList runs={dashboard?.agents.runs ?? []} hosts={dashboard?.agents.hosts ?? []} selectedId={state.agentRunId} onSelect={selectAgent} />}
+      {state.drawerTab === "archived" && <div className="thread-list">{state.archived.length ? state.archived.map((session) => <ThreadRow key={session.id} archived session={session} selected={false} onSelect={() => {}} onArchive={() => {}} onUnarchive={(id) => void unarchive(id)} />) : <div className="agent-empty">No archived threads</div>}{state.archived.length < state.archivedTotal && <button type="button" className="archived-more" onClick={() => void loadOlder()}>Show older · {state.archivedTotal - state.archived.length} more</button>}</div>}
       <FileExplorer hidden={state.drawerTab !== "files"} onRootCount={setRootFileCount} />
-      <footer className="drawer-footer"><MachineControls actions={state.actions} governors={state.governors} onAction={(id) => void toggleAction(id)} onGovernor={(provider) => void toggleGovernor(provider)} /><EnvironmentControl /><PlanSummary plans={state.plans} counts={state.modelCounts} /><div className="usage-summary muted">{machineText}</div>{state.offline && <div className="connection" style={{ color: "var(--danger)" }}>● Offline · {state.offline}</div>}</footer>
+      <footer className="drawer-footer"><MachineControls actions={dashboard?.actions ?? []} governors={dashboard?.governors ?? null} onAction={(id) => void toggleAction(id)} onGovernor={(provider) => void toggleGovernor(provider)} /><EnvironmentControl /><PlanSummary plans={dashboard?.plans ?? []} counts={modelCounts} /><div className="usage-summary muted">{machineText}</div>{state.offline && <div className="connection" style={{ color: "var(--danger)" }}>● Offline · {state.offline}</div>}</footer>
     </aside>
-    <main id="main"><header className="topbar"><button className="icon-button" aria-label="Open navigation" onClick={() => patch({ drawerOpen: true })}>☰</button><div className="top-title">{title}</div><div className="top-state" style={{ color: state.offline ? "var(--danger)" : activityColor(selectedActivity) }}>{state.offline ? "OFFLINE" : activityLabel(selectedActivity, selectedTool)}</div><button className="icon-button" aria-label="Open thread settings" disabled={!state.selectedId || Boolean(state.agentRunId)} onClick={() => patch({ settingsOpen: true })}>⚙</button></header>
-      {!state.selectedId && !state.agentRunId ? <section className="empty-state"><strong>No threads</strong><span>Open the drawer to create one.</span></section> : <section className="conversation"><div className="scrollback"><div className="scroll-content"><ContextTranscript entries={entries} sessionId={state.selectedId || ""} home={state.home} onEdit={editFrom} />{liveThinking && <div className="live-thinking"><Markdown source={liveThinking} sessionId={state.selectedId || ""} streaming /><CopyButton text={liveThinking} label="Copy thinking" /></div>}{liveText && <div className="live-answer"><Markdown source={liveText} sessionId={state.selectedId || ""} streaming /><CopyButton text={liveText} label="Copy response" /></div>}</div></div>
-        {state.selected?.queuedMessages?.length ? <div className="message-queue">{state.selected.queuedMessages.map((message: QueuedMessage) => <div className="queued-message" key={message.id}><div className="queued-message-copy"><span className="queued-message-label">{message.status || "Queued"}</span><span className="queued-message-preview">{message.text.split("\n").find((line) => line.trim()) || "Attached files"}</span></div><div className="queued-message-actions"><CopyButton text={message.text} className="queued-message-action icon-message-action" />{message.canSteer && <button className="queued-message-action steer-instead" type="button" onClick={() => void mutateQueued(message, API.queueSteer)}>STEER</button>}{message.canHardSteer && <button className="queued-message-action hard-steer" type="button" onClick={() => void mutateQueued(message, API.queueHardSteer)}>HARD STEER</button>}{message.canCancel && <><button className="queued-message-action edit-queued" type="button" onClick={() => void mutateQueued(message, API.queueItem, true)}>EDIT</button><button className="queued-message-action cancel-queued" type="button" onClick={() => void mutateQueued(message, API.queueItem)}>CANCEL</button></>}</div></div>)}</div> : null}
+    <main id="main"><header className="topbar"><button className="icon-button" aria-label="Open navigation" onClick={() => patch({ drawerOpen: true })}>☰</button><div className="top-title">{title}</div><div className="top-state" style={{ color: state.offline ? "var(--danger)" : activityColor(selectedActivity) }}>{state.offline ? "OFFLINE" : activityLabel(selectedActivity, selectedTool ?? "")}</div><button className="icon-button" aria-label="Open thread settings" disabled={!selected || Boolean(state.agentRunId)} onClick={() => patch({ settingsOpen: true })}>⚙</button></header>
+      {!state.selectedId && !state.agentRunId ? <section className="empty-state"><strong>No threads</strong><span>Open the drawer to create one.</span></section> : <section className="conversation"><div className="scrollback"><div className="scroll-content"><ContextTranscript entries={entries} sessionId={state.selectedId || ""} home={dashboard?.home ?? "/"} onEdit={editFrom} />{liveThinking && <div className="live-thinking"><Markdown source={liveThinking} sessionId={state.selectedId || ""} streaming /><CopyButton text={liveThinking} label="Copy thinking" /></div>}{liveText && <div className="live-answer"><Markdown source={liveText} sessionId={state.selectedId || ""} streaming /><CopyButton text={liveText} label="Copy response" /></div>}</div></div>
+        {selected?.queuedMessages.length ? <div className="message-queue">{selected.queuedMessages.map((message) => <div className="queued-message" key={message.id}><div className="queued-message-copy"><span className="queued-message-label">{message.status || "Queued"}</span><span className="queued-message-preview">{message.text.split("\n").find((line) => line.trim()) || "Attached files"}</span></div><div className="queued-message-actions"><CopyButton text={message.text} className="queued-message-action icon-message-action" />{message.canSteer && <button className="queued-message-action steer-instead" type="button" onClick={() => void mutateQueued(message, API.queueSteer)}>STEER</button>}{message.canHardSteer && <button className="queued-message-action hard-steer" type="button" onClick={() => void mutateQueued(message, API.queueHardSteer)}>HARD STEER</button>}{message.canCancel && <><button className="queued-message-action edit-queued" type="button" onClick={() => void mutateQueued(message, API.queueItem, true)}>EDIT</button><button className="queued-message-action cancel-queued" type="button" onClick={() => void mutateQueued(message, API.queueItem)}>CANCEL</button></>}</div></div>)}</div> : null}
         {state.attachments.length > 0 && <div className="attachments">{state.attachments.map((attachment) => <div className={`attachment-chip${attachment.uploading ? " uploading" : ""}`} key={attachment.localId}><span className="attachment-name">{attachment.name}{attachment.uploading ? " · uploading" : ""}</span><button className="attachment-remove" type="button" onClick={() => void removeAttachment(attachment)}>×</button></div>)}</div>}
-        {state.agentRunId ? <div className="agent-banner">Observing {state.agentRun?.label} on {state.agentRun?.taskId} · read-only</div> : <form className="composer" onSubmit={(event) => { event.preventDefault(); void send(); }}>{visibleCommands.length > 0 && <div className="slash-commands" role="listbox">{visibleCommands.map((command) => <button key={command.name} type="button" className="slash-command" onClick={() => setPrompt(`/${command.name} `)}><strong className="slash-command-name">/{command.name}</strong>{command.description && <span className="slash-command-description">{command.description}</span>}</button>)}</div>}<textarea ref={promptElement} id="prompt" rows={1} maxLength={200000} placeholder={`Message ${state.selected?.name || "Agent"}`} value={prompt} onChange={(event) => { setPrompt(event.target.value); if (state.selectedId) saveDraft(state.selectedId, event.target.value); }} onKeyDown={(event) => { if (event.key === "Enter" && !event.shiftKey && !event.nativeEvent.isComposing && matchMedia("(hover: hover) and (pointer: fine)").matches) { event.preventDefault(); void send(); } }} /><div className="composer-actions"><label className="composer-icon" aria-label="Attach files"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M16.5 6.5 8.7 14.3a2.5 2.5 0 0 0 3.5 3.5l8.1-8.1a4.5 4.5 0 0 0-6.4-6.4L5.5 11.7a6.5 6.5 0 0 0 9.2 9.2l6.1-6.1"/></svg><input type="file" multiple hidden onChange={(event) => { void uploadFiles([...event.target.files || []]); event.target.value = ""; }} /></label><button className="composer-icon" type="button" aria-label="Paste text document" onClick={() => setPasteOpen(true)}><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M9 5.5V4h6v1.5M9 5.5h6M9 5.5H7v15h10v-15h-2M9 10h6m-6 4h6m-6 4h4"/></svg></button><span className="composer-spacer"/><button id="voice" className={`composer-icon voice${voiceState === "idle" ? "" : ` ${voiceState}`}`} type="button" aria-label={voiceState === "live" ? "Hang up voice" : "Start voice"} title={voiceDetail || undefined} onClick={() => void toggleVoice()}><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 3a3 3 0 0 0-3 3v6a3 3 0 0 0 6 0V6a3 3 0 0 0-3-3Z"/><path d="M5.5 11.5a6.5 6.5 0 0 0 13 0M12 18v3m-3 0h6"/></svg></button><button id="action" className={`composer-icon send${working(state.selected) && !prompt.trim() ? " abort" : ""}`} type="submit" disabled={pending || state.attachments.some((file) => file.uploading)} aria-label={working(state.selected) && !prompt.trim() ? "Abort agent" : "Send message"}><svg className="send-icon" viewBox="0 0 24 24" aria-hidden="true"><path d="m3 3 18 9-18 9 4-9-4-9Zm4 9h14"/></svg><span className="stop-icon" aria-hidden="true">■</span></button></div></form>}
+        {state.agentRunId ? <div className="agent-banner">Observing {state.agentRun?.label} on {state.agentRun?.taskId} · read-only</div> : <form className="composer" onSubmit={(event) => { event.preventDefault(); void send(); }}>{visibleCommands.length > 0 && <div className="slash-commands" role="listbox">{visibleCommands.map((command) => <button key={command.name} type="button" className="slash-command" onClick={() => setPrompt(`/${command.name} `)}><strong className="slash-command-name">/{command.name}</strong>{command.description && <span className="slash-command-description">{command.description}</span>}</button>)}</div>}<textarea ref={promptElement} id="prompt" rows={1} maxLength={200000} placeholder={`Message ${selected?.name || "Agent"}`} value={prompt} onChange={(event) => { setPrompt(event.target.value); if (state.selectedId) saveDraft(state.selectedId, event.target.value); }} onKeyDown={(event) => { if (event.key === "Enter" && !event.shiftKey && !event.nativeEvent.isComposing && matchMedia("(hover: hover) and (pointer: fine)").matches) { event.preventDefault(); void send(); } }} /><div className="composer-actions"><label className="composer-icon" aria-label="Attach files"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M16.5 6.5 8.7 14.3a2.5 2.5 0 0 0 3.5 3.5l8.1-8.1a4.5 4.5 0 0 0-6.4-6.4L5.5 11.7a6.5 6.5 0 0 0 9.2 9.2l6.1-6.1"/></svg><input type="file" multiple hidden onChange={(event) => { void uploadFiles([...event.target.files || []]); event.target.value = ""; }} /></label><button className="composer-icon" type="button" aria-label="Paste text document" onClick={() => setPasteOpen(true)}><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M9 5.5V4h6v1.5M9 5.5h6M9 5.5H7v15h10v-15h-2M9 10h6m-6 4h6m-6 4h4"/></svg></button><span className="composer-spacer"/><button id="voice" className={`composer-icon voice${voiceState === "idle" ? "" : ` ${voiceState}`}`} type="button" aria-label={voiceState === "live" ? "Hang up voice" : "Start voice"} title={voiceDetail || undefined} onClick={() => void toggleVoice()}><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 3a3 3 0 0 0-3 3v6a3 3 0 0 0 6 0V6a3 3 0 0 0-3-3Z"/><path d="M5.5 11.5a6.5 6.5 0 0 0 13 0M12 18v3m-3 0h6"/></svg></button><button id="action" className={`composer-icon send${working(selected) && !prompt.trim() ? " abort" : ""}`} type="submit" disabled={pending || state.attachments.some((file) => file.uploading)} aria-label={working(selected) && !prompt.trim() ? "Abort agent" : "Send message"}><svg className="send-icon" viewBox="0 0 24 24" aria-hidden="true"><path d="m3 3 18 9-18 9 4-9-4-9Zm4 9h14"/></svg><span className="stop-icon" aria-hidden="true">■</span></button></div></form>}
       </section>}
     </main>
-    <SettingsPanel session={state.selected} open={state.settingsOpen} onClose={() => patch({ settingsOpen: false })} onChanged={() => {}} />
+    <SettingsPanel session={selected} open={state.settingsOpen} onClose={() => patch({ settingsOpen: false })} />
     {pasteOpen && <dialog className="paste-text-dialog" open><form className="paste-text-form" onSubmit={(event) => { event.preventDefault(); const name = /\.[^./\\]+$/.test(pasteName) ? pasteName : `${pasteName}.txt`; void uploadFiles([new File([pasteContent], name, { type: "text/plain;charset=utf-8" })]); setPasteOpen(false); setPasteContent(""); }}><h2>Paste text document</h2><label>Document name</label><input value={pasteName} onChange={(event) => setPasteName(event.target.value)} /><label>Text</label><textarea value={pasteContent} onChange={(event) => setPasteContent(event.target.value)} /><div className="paste-text-actions"><button type="button" onClick={() => setPasteOpen(false)}>Cancel</button><button className="accent" type="submit" disabled={!pasteContent.trim()}>Attach</button></div></form></dialog>}
   </div>;
+}
+
+function orderedSessions(state: Pick<AppState, "sessions" | "pendingOrder">) {
+  return state.pendingOrder ? threadsInOrder(state.sessions, state.pendingOrder) : state.sessions;
 }

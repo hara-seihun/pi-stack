@@ -1,4 +1,5 @@
 import { API } from "../../server/api";
+import type { SyncRequest, SyncResponse } from "../../server/protocol";
 
 const LEGACY_KEY_STORAGE = "pi-remote-key";
 let unlockHandler: ((message: string) => Promise<string>) | null = null;
@@ -104,7 +105,7 @@ export async function api(method: string, path: string, body?: unknown, timeout 
   }
 }
 
-export async function syncRequest(body: unknown, signal: AbortSignal): Promise<any> {
+export async function syncRequest(body: SyncRequest, signal: AbortSignal): Promise<SyncResponse> {
   let timedOut = false;
   const controller = new AbortController();
   const cancel = () => controller.abort();
@@ -120,7 +121,7 @@ export async function syncRequest(body: unknown, signal: AbortSignal): Promise<a
     });
     const result = await responseJson(response);
     if (!response.ok) throw new Error(result.error || `HTTP ${response.status}`);
-    return result;
+    return result as SyncResponse;
   } catch (error) {
     if (error instanceof DOMException && error.name === "AbortError" && timedOut) throw new Error("Synchronization timed out");
     throw error;

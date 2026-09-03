@@ -5,7 +5,6 @@ import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, wr
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import { applyContextSplice, contextSplice, messageFinalizationKey, sha256 } from "./sync";
-const BOOSTED_MULTIPLIER = 10;
 const [shardIndex = 0, shardCount = 1] = (process.env.PI_REMOTE_TEST_SHARD ?? "0/1")
   .split("/").map(Number);
 if (!Number.isSafeInteger(shardIndex) || !Number.isSafeInteger(shardCount)
@@ -118,7 +117,6 @@ async function startServer() {
       PI_REMOTE_ORCHESTRATOR_DB: fakeOrchestratorDb,
       PI_ORCHESTRATOR_AUTH: join(root, "agent", "auth.json"),
       PI_REMOTE_ORCHESTRATOR_RUNS: fakeAgentRuns,
-      PI_REMOTE_LOCAL_AGENT_MAX_AGE_MS: "0",
       PI_REMOTE_ENVIRONMENT_ID: "local",
       PI_REMOTE_ENVIRONMENT_NAME: "Local",
       PI_REMOTE_THREAD_NAMING_MODEL: "openai-codex/gpt-5.6-luna:low",
@@ -492,13 +490,26 @@ async function createThread(destination = "home", model?: string) {
 
 describe("web and supervisor integration", () => {
   test("exposes host-configured actions as toggles it knows nothing about", async () => {
-    const before = await (await fetch(`${base}/v1/actions`)).json();
-    expect(before.actions).toEqual([{ id: "thunder", label: "Thunder", icon: "thunder", active: false }]);
+    const before = await api("POST", "/v1/sync", { seq: 0, dashboardVersion: 0, waitMs: 0 });
+    expect(before.value.dashboard.actions).toEqual([{ id: "thunder", label: "Thunder", icon: "thunder", active: false }]);
     const on = await (await fetch(`${base}/v1/actions/thunder/toggle`, { method: "POST" })).json();
     expect(on.action.active).toBe(true);
+    const woken = await api("POST", "/v1/sync", { epoch: before.value.epoch, seq: before.value.seq, dashboardVersion: before.value.dashboardVersion, waitMs: 5_000 });
+    expect(woken.value.dashboard.actions[0].active).toBe(true);
+    expect(woken.value.dashboardVersion).not.toBe(before.value.dashboardVersion);
     const off = await (await fetch(`${base}/v1/actions/thunder/toggle`, { method: "POST" })).json();
     expect(off.action.active).toBe(false);
     expect((await fetch(`${base}/v1/actions/nope/toggle`, { method: "POST" })).status).toBe(404);
+  });
+
+  test("wakes the dashboard when an allowance governor changes", async () => {
+    const before = await api("POST", "/v1/sync", { seq: 0, dashboardVersion: 0, waitMs: 0 });
+    const initial = before.value.dashboard.governors.openai.state;
+    const toggled = await api("POST", "/v1/governor-controls/openai/toggle", {});
+    expect(toggled.status).toBe(200);
+    const woken = await api("POST", "/v1/sync", { epoch: before.value.epoch, seq: before.value.seq, dashboardVersion: before.value.dashboardVersion, waitMs: 5_000 });
+    expect(woken.value.dashboard.governors.openai.state).not.toBe(initial);
+    expect(woken.value.dashboard.governors.openai.state).toBe(toggled.value.governors.openai.state);
   });
 
   test("serves the compiled React client", async () => {
@@ -532,12 +543,7 @@ describe("web and supervisor integration", () => {
   test("names the first message through a configured tool-free Pi model", async () => {
     rmSync(fakeNamingLog, { force: true });
     const id = await createThread("home", "sol");
-    const before = await api("POST", "/v1/sync", {
-      after: 0,
-      stateVersion: 0,
-      waitMs: 0,
-      includeDashboard: false,
-    });
+    const before = await api("POST", "/v1/sync", { seq: 0, stateVersion: 0, waitMs: 0 });
     await api("POST", `/v1/sessions/${id}/prompt`, { requestId: crypto.randomUUID(), text: "name this conversation" });
     const renamed = await waitFor(
       () => api("GET", "/v1/sessions").then((result) => result.value.sessions.find((session: any) => session.id === id)),
@@ -551,13 +557,12 @@ describe("web and supervisor integration", () => {
     expect(invocation.argv.some((argument: string) => argument.startsWith("@") && argument.endsWith("/messages.txt"))).toBe(true);
 
     const reconciled = await api("POST", "/v1/sync", {
-      after: before.value.seq,
+      seq: before.value.seq,
       stateVersion: before.value.stateVersion,
       epoch: before.value.epoch,
       waitMs: 25_000,
-      includeDashboard: false,
     });
-    expect(reconciled.value.sessions.find((session: any) => session.id === id)?.name).toBe("Automatic Thread Name");
+    expect(reconciled.value.state.sessions.find((session: any) => session.id === id)?.name).toBe("Automatic Thread Name");
   });
 
   test("lists this host's working agents for observation", async () => {
@@ -652,23 +657,14 @@ describe("web and supervisor integration", () => {
     const firstResponse = await fetch(`${base}/v1/sync`, {
       method: "POST",
       headers: { "content-type": "application/json", "accept-encoding": "gzip" },
-      body: JSON.stringify({ after: 0, waitMs: 0, selectedId: id, contextHash: "", includeDashboard: false }),
+      body: JSON.stringify({ seq: 0, waitMs: 0, session: { id, contextHash: "" } }),
     });
     expect(firstResponse.headers.get("content-encoding")).toBe("gzip");
     const first = await firstResponse.json() as any;
-    expect(first.contextUpdate.kind).toBe("full");
-    expect(JSON.parse(first.contextUpdate.document)).toEqual(firstContext);
-    expect(first.archivedSessions).toBeNull();
-
-    const display = await api("POST", "/v1/sync", {
-      after: 0,
-      waitMs: 0,
-      selectedId: id,
-      contextHash: "",
-      contextProjection: "display",
-      includeDashboard: false,
-    });
-    const displayDocument = JSON.parse(display.value.contextUpdate.document);
+    expect(first.state).toBeNull();
+    expect(first.dashboard).toBeNull();
+    expect(first.session.context.kind).toBe("full");
+    const displayDocument = JSON.parse(first.session.context.document);
     expect(displayDocument).toEqual({
       systemPrompt: firstContext.systemPrompt,
       tools: [],
@@ -680,7 +676,10 @@ describe("web and supervisor integration", () => {
         ],
       }],
     });
-    expect(display.value.contextUpdate.hash).not.toBe(first.contextUpdate.hash);
+    expect((await api("GET", `/v1/sessions/${id}/context`)).value.context).toEqual(firstContext);
+
+    const unchanged = await api("POST", "/v1/sync", { seq: first.seq, waitMs: 0, session: { id, contextHash: first.session.context.hash } });
+    expect(unchanged.value.session.context).toBeNull();
 
     const secondContext = { ...firstContext, messages: [{ role: "assistant", content: [{ type: "text", text: "first and second" }] }] };
     const baseDocument = JSON.stringify(firstContext);
@@ -689,15 +688,38 @@ describe("web and supervisor integration", () => {
       capturedAt: 301,
       splice: contextSplice(baseDocument, targetDocument),
     });
-    const second = await api("POST", "/v1/sync", {
-      after: first.seq,
-      waitMs: 0,
-      selectedId: id,
-      contextHash: first.contextUpdate.hash,
-      includeDashboard: false,
-    });
-    expect(second.value.contextUpdate.kind).toBe("splice");
-    expect(applyContextSplice(baseDocument, second.value.contextUpdate.splice)).toBe(targetDocument);
+    const second = await api("POST", "/v1/sync", { seq: first.seq, waitMs: 0, session: { id, contextHash: first.session.context.hash } });
+    expect(second.value.session.context.kind).toBe("splice");
+    const displayed = applyContextSplice(first.session.context.document, second.value.session.context.splice);
+    expect(JSON.parse(displayed).messages).toEqual([{ role: "assistant", content: [{ type: "text", text: "first and second" }] }]);
+  });
+
+  test("delivers a newly selected context while live text keeps waking the poll", async () => {
+    const streaming = await createThread("home", "sol");
+    const idle = await createThread("home", "sol");
+    const idleContext = { systemPrompt: "quiet", tools: [], messages: [{ role: "assistant", content: [{ type: "text", text: "done earlier" }] }] };
+    await api("PUT", `/v1/sessions/${idle}/context`, { capturedAt: 500, context: idleContext });
+    resetGate("live-stream-next");
+    resetGate("live-stream");
+    try {
+      await api("POST", `/v1/sessions/${streaming}/prompt`, { requestId: crypto.randomUUID(), text: "live-stream" });
+      await waitForGate("live-stream-next");
+      const caughtUp = await api("POST", "/v1/sync", { seq: 0, stateVersion: 0, waitMs: 0, session: { id: streaming } });
+      releaseGate("live-stream-next");
+      await waitForGate("live-stream");
+      const switched = await api("POST", "/v1/sync", {
+        epoch: caughtUp.value.epoch,
+        seq: caughtUp.value.seq,
+        stateVersion: caughtUp.value.stateVersion,
+        waitMs: 0,
+        session: { id: idle },
+      });
+      expect(switched.value.session.context).toMatchObject({ kind: "full" });
+      expect(JSON.parse(switched.value.session.context.document).messages).toEqual(idleContext.messages);
+    } finally {
+      releaseGate("live-stream-next");
+      releaseGate("live-stream");
+    }
   });
 
   test("publishes live model text without rebuilding unchanged application state", async () => {
@@ -708,36 +730,27 @@ describe("web and supervisor integration", () => {
       await api("POST", `/v1/sessions/${id}/prompt`, { requestId: crypto.randomUUID(), text: "live-stream" });
       await waitForGate("live-stream-next");
       const first = await waitFor(() => api("POST", "/v1/sync", {
-        after: 0,
+        seq: 0,
         stateVersion: 0,
         waitMs: 0,
-        selectedId: id,
-        eventSessionId: id,
-        eventAfter: Number.MAX_SAFE_INTEGER,
-        includeDashboard: false,
-      }), (result) => result.value.sessionEvents?.liveTextUpdate?.document === "instant text");
-      expect(first.value.sessionEvents.liveTextUpdate).toMatchObject({ kind: "full", document: "instant text" });
-      expect(first.value.sessionEvents.liveThinkingUpdate).toMatchObject({ kind: "full", document: "thinking now" });
+        session: { id },
+      }), (result) => result.value.session?.liveText?.document === "instant text");
+      expect(first.value.session.liveText).toMatchObject({ kind: "full", document: "instant text" });
+      expect(first.value.session.liveThinking).toMatchObject({ kind: "full", document: "thinking now" });
 
       releaseGate("live-stream-next");
       await waitForGate("live-stream");
       const second = await waitFor(() => api("POST", "/v1/sync", {
-        after: first.value.seq,
+        seq: first.value.seq,
         stateVersion: first.value.stateVersion,
         epoch: first.value.epoch,
         waitMs: 1_000,
-        selectedId: id,
-        eventSessionId: id,
-        eventAfter: Number.MAX_SAFE_INTEGER,
-        eventLiveTextHash: first.value.sessionEvents.liveTextUpdate.hash,
-        eventLiveThinkingHash: first.value.sessionEvents.liveThinkingUpdate.hash,
-        includeDashboard: false,
-      }), (result) => Boolean(result.value.sessionEvents?.liveTextUpdate));
-      expect(second.value.sessions).toBeNull();
-      expect(second.value.selectedSession).toBeNull();
-      expect(second.value.contextUpdate).toBeNull();
+        session: { id, liveTextHash: first.value.session.liveText.hash, liveThinkingHash: first.value.session.liveThinking.hash },
+      }), (result) => Boolean(result.value.session?.liveText));
+      expect(second.value.state).toBeNull();
+      expect(second.value.session.context).toEqual({ kind: "clear", capturedAt: 0, hash: "" });
       expect(second.value.stateVersion).toBe(first.value.stateVersion);
-      expect(applyContextSplice("instant text", second.value.sessionEvents.liveTextUpdate.splice)).toBe("instant text second");
+      expect(applyContextSplice("instant text", second.value.session.liveText.splice)).toBe("instant text second");
 
       releaseGate("live-stream");
       await waitFor(async () => (await api("GET", `/v1/sessions/${id}/events?after=0`)).value, (value) => value.session.state === "IDLE");
@@ -845,15 +858,8 @@ describe("web and supervisor integration", () => {
       expect(thinking).toMatchObject({ text: "visible thought", finalizesMessage: finalization });
       expect((await api("GET", `/v1/sessions/${id}/context`)).value.context.messages).toEqual([finalMessage]);
 
-      const display = await api("POST", "/v1/sync", {
-        after: 0,
-        stateVersion: 0,
-        waitMs: 0,
-        selectedId: id,
-        contextProjection: "display",
-        includeDashboard: false,
-      });
-      const displayed = JSON.parse(display.value.contextUpdate.document);
+      const display = await api("POST", "/v1/sync", { seq: 0, waitMs: 0, session: { id } });
+      const displayed = JSON.parse(display.value.session.context.document);
       expect(displayed.messages[0].content[0]).toEqual({ type: "thinking", thinking: "visible thought" });
     } finally {
       releaseGate("thinking-omitted");
@@ -881,13 +887,8 @@ describe("web and supervisor integration", () => {
 
   test("confirms an empty selected context even when the client has not loaded its cache yet", async () => {
     const id = await createThread("home", "sol");
-    const result = await api("POST", "/v1/sync", {
-      after: 0,
-      waitMs: 0,
-      selectedId: id,
-      includeDashboard: false,
-    });
-    expect(result.value.contextUpdate).toEqual({ kind: "clear", capturedAt: 0, hash: "" });
+    const result = await api("POST", "/v1/sync", { seq: 0, waitMs: 0, session: { id } });
+    expect(result.value.session.context).toEqual({ kind: "clear", capturedAt: 0, hash: "" });
   });
 
   test("resumes uploads by committed offset and serves byte ranges", async () => {
@@ -1107,12 +1108,6 @@ describe("web and supervisor integration", () => {
         (session) => session?.activity === "COMPACTING",
       );
       expect(compacting.activity).toBe("COMPACTING");
-      const sync = await api("POST", "/v1/sync", {
-        after: 0, waitMs: 0, includeSessions: false, includeDashboard: false, watchedIds: [id],
-      });
-      expect(sync.value.watched).toEqual([
-        expect.objectContaining({ id, state: "RUNNING", activity: "COMPACTING" }),
-      ]);
       const inProgressEvents = await api("GET", `/v1/sessions/${id}/events?after=0`);
       expect(inProgressEvents.value.events.some((event: any) => event.type === "settled")).toBe(false);
     } finally {

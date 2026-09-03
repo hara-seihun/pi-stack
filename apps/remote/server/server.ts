@@ -17,6 +17,7 @@ import { knownEnvironments, listPersons, publicPerson } from "./persons";
 import { API_CORS_HEADERS } from "./cors";
 import { fileBrowserError, listDirectory, localFileResponse, registerIconAssets, webResponse } from "./files";
 import { governorControls, isGovernorProvider, toggleGovernor } from "./governors";
+import type { AgentModelCount, Dashboard, DocumentUpdate, QueuedMessage, Session, SupervisorState, SyncRequest, SyncResponse } from "./protocol";
 import { MachineActions } from "./machine-actions";
 import { availableUploadPath, storeUpload, uploadName } from "./uploads";
 import {
@@ -48,8 +49,6 @@ const SERVICE_TIER_DIR = join(DATA, "service-tiers");
 const ORCHESTRATOR_DB_PATH = process.env.PI_REMOTE_ORCHESTRATOR_DB ?? join(HOME, ".local/share/pi-orchestrator/ledger.sqlite3");
 const ORCHESTRATOR_AUTH_PATH = process.env.PI_ORCHESTRATOR_AUTH ?? join(dirname(realpathSync(ORCHESTRATOR_DB_PATH)), "auth.json");
 const ORCHESTRATOR_RUNS_ROOT = process.env.PI_REMOTE_ORCHESTRATOR_RUNS ?? join(HOME, ".local/share/pi-orchestrator/runs");
-const AGENT_REFRESH_MS = Math.max(5_000, Number(process.env.PI_REMOTE_AGENT_REFRESH_MS ?? "15000"));
-const LOCAL_AGENT_MAX_AGE_MS = Math.max(0, Number(process.env.PI_REMOTE_LOCAL_AGENT_MAX_AGE_MS ?? "500"));
 const HOST = process.env.PI_REMOTE_HOST ?? "127.0.0.1";
 const PORT = Number(process.env.PI_REMOTE_PORT ?? "8788");
 const AGENT_DIR = process.env.PI_AGENT_DIR ?? join(HOME, ".pi/agent");
@@ -191,10 +190,7 @@ const voiceAccounts = new VoiceBroker({
   acquireLease: (accountId) => orchestrator.beginVoiceLease(accountId),
   releaseLease: (leaseId) => orchestrator.endLease(leaseId),
 });
-const agentHost = new AgentHost(orchestrator, {
-  key: "local", label: "THIS MACHINE", name: "This machine",
-  maxAgeMs: LOCAL_AGENT_MAX_AGE_MS,
-});
+const agentHost = new AgentHost(orchestrator, { key: "local", label: "THIS MACHINE", name: "This machine" });
 ensureSupervisorSchema(db);
 const HANDOFF_PATH = join(DATA, "supervisor-handoff.json");
 type RuntimePhase = "STARTING" | "IDLE" | "DISPATCHING" | "RUNNING" | "ABORTING" | "STOPPING";
@@ -339,6 +335,58 @@ function signalSync() {
   wakeSync();
 }
 
+// The drawer footer and the Orchestrator tab change on their own clock:
+// meters, load, agent lifecycles, and host toggles. None of that is
+// supervisor SQLite, so it gets its own version. A client echoes the version
+// it rendered; a tick that finds the snapshot unchanged does not wake anyone.
+const DASHBOARD_TICK_MS = Math.max(1_000, Number(process.env.PI_REMOTE_DASHBOARD_TICK_MS ?? "10000"));
+const DASHBOARD_IDLE_MS = 60_000;
+let dashboardVersion = 1;
+let dashboardSnapshot: Dashboard | null = null;
+let dashboardEncoded = "";
+let dashboardRefreshes = Promise.resolve();
+let dashboardBusy = false;
+let lastSyncRequestAt = 0;
+async function buildDashboard(): Promise<Dashboard> {
+  const [agents, actions] = await Promise.all([activeAgents(), machineActions.refresh()]);
+  return {
+    plans: planCards(planUsage),
+    governors: governorControls(orchestrator),
+    actions,
+    machine: readMachineUsage(),
+    agents: { runs: agents.runs, hosts: agents.hosts, running: agents.running },
+    modelCounts: agents.models,
+    threadStarts: threadStartProfiles(),
+    home: HOME,
+  };
+}
+// Refreshes are serialized so a toggle's refresh always observes the toggle,
+// even when a tick's refresh was already in flight when the toggle landed.
+function refreshDashboard(): Promise<void> {
+  const run = dashboardRefreshes.then(async () => {
+    dashboardBusy = true;
+    try {
+      refreshPlanUsageIfDue();
+      const next = await buildDashboard();
+      const encoded = JSON.stringify(next);
+      if (encoded === dashboardEncoded) return;
+      dashboardSnapshot = next;
+      dashboardEncoded = encoded;
+      dashboardVersion++;
+      wakeSync();
+    } catch (cause) {
+      console.error("Dashboard refresh failed", cause);
+    } finally {
+      dashboardBusy = false;
+    }
+  });
+  dashboardRefreshes = run;
+  return run;
+}
+const dashboardTicker = setInterval(() => {
+  if (!dashboardBusy && Date.now() - lastSyncRequestAt < DASHBOARD_IDLE_MS) void refreshDashboard();
+}, DASHBOARD_TICK_MS);
+
 const LIVE_SYNC_INTERVAL_MS = 16;
 let liveSyncTimer: ReturnType<typeof setTimeout> | null = null;
 let liveSyncPending = false;
@@ -357,10 +405,13 @@ function signalLiveSync() {
   }, LIVE_SYNC_INTERVAL_MS);
 }
 
-async function awaitSync(after: number, stateVersion: number, epoch: string, waitMs: number) {
+async function awaitSync(request: SyncRequest) {
+  const after = Math.max(0, Number(request.seq ?? 0) || 0);
+  const waitMs = Number(request.waitMs ?? 25_000);
   const synchronized = () => after === syncSequence
-    && stateVersion === currentStateVersion()
-    && epoch === SUPERVISOR_EPOCH;
+    && request.epoch === SUPERVISOR_EPOCH
+    && (request.stateVersion === undefined || request.stateVersion === currentStateVersion())
+    && (request.dashboardVersion === undefined || request.dashboardVersion === dashboardVersion);
   if (!synchronized()) return;
   await new Promise<void>((resolve) => {
     let settled = false;
@@ -422,7 +473,7 @@ function displayContext(sessionId: string, sourceHash: string, sourceDocument: s
   return projected;
 }
 
-function textUpdate(key: string, baseHash: unknown, target: string): any {
+function textUpdate(key: string, baseHash: unknown, target: string): DocumentUpdate | null {
   const targetHash = rememberContext(key, target);
   if (baseHash === targetHash) return null;
   const base = typeof baseHash === "string" ? contextVersions.get(key)?.get(baseHash) : undefined;
@@ -697,7 +748,6 @@ function conversationalMessageInserted(sessionId: string) {
   void drainThreadNames(sessionId);
 }
 
-type AgentModelCount = { key: string; label: string; count: number };
 const agentModelOrder = new Map(ORCHESTRATOR_CATALOG.agentOrder.map((key, index) => [key, index]));
 function addAgentModel(models: Map<string, AgentModelCount>, raw: string, count = 1) {
   if (count <= 0) return;
@@ -711,34 +761,23 @@ function sortedAgentModels(models: Map<string, AgentModelCount>): AgentModelCoun
     (agentModelOrder.get(left.key) ?? 999) - (agentModelOrder.get(right.key) ?? 999) || left.label.localeCompare(right.label));
 }
 async function activeAgents() {
-  const snapshot = await agentHost.runs();
+  await agentHost.refresh();
+  const snapshot = agentHost.cached();
   const models = new Map<string, AgentModelCount>();
   for (const row of snapshot.models) addAgentModel(models, row.model, row.count);
-  let piRemote = 0;
-  for (const rt of runtimes.values()) if (runtimeWorking(rt)) {
-    piRemote++;
-    addAgentModel(models, rt.modelId || "unknown");
-  }
-  const modelGroups = sortedAgentModels(models);
+  for (const rt of runtimes.values()) if (runtimeWorking(rt)) addAgentModel(models, rt.modelId || "unknown");
   return {
-    total: piRemote + snapshot.running,
-    groups: [
-      { key: "pi-remote", label: "REMOTE", count: piRemote },
-      { key: "orchestrator", label: "ORCH", count: snapshot.running },
-      ...modelGroups,
-    ],
-    models: modelGroups,
-    locations: [{
-      key: agentHost.key,
-      label: agentHost.ref.label,
-      name: agentHost.ref.name,
-      total: piRemote + snapshot.running,
-      models: modelGroups,
-      updatedAt: snapshot.updatedAt,
-      error: snapshot.error,
-    }],
-    sources: { piRemote, orchestrator: snapshot.running },
-    updatedAt: now(),
+    runs: snapshot.runs,
+    running: snapshot.running,
+    models: sortedAgentModels(models),
+    hosts: [{ ...agentHost.ref, running: snapshot.running, updatedAt: snapshot.updatedAt, error: snapshot.error }],
+  };
+}
+function supervisorState(): SupervisorState {
+  return {
+    sessions: publicSessions(activeSessionRows.all() as any[]),
+    archived: publicSessions(archivedPage(0, ARCHIVED_PAGE_SIZE)),
+    archivedTotal: archivedCount(),
   };
 }
 
@@ -764,7 +803,7 @@ function publicSessions(rows: any[]): any[] {
   return rows.map((row) => publicSession(row, queues.get(String(row.id))));
 }
 
-function publicSession(row: any, prepared?: PreparedQueue) {
+function publicSession(row: any, prepared?: PreparedQueue): Session {
   const rt = runtimes.get(row.id);
   const preset = workspaces.get(row.workspace_id);
   const cwd = preset?.path ?? row.workspace_id;
@@ -780,8 +819,8 @@ function publicSession(row: any, prepared?: PreparedQueue) {
     WHERE session_id=? AND state IN ('queued','running','dispatched') AND inserted_at IS NULL
     ORDER BY created_at,rowid LIMIT 50
   `).all(row.id) as any[];
-  const queuedMessages = queuedSource.map((item) => ({
-    id: item.id,
+  const queuedMessages: QueuedMessage[] = queuedSource.map((item) => ({
+    id: String(item.id),
     text: String(item.text),
     delivery: String(item.delivery),
     state: String(item.state),
@@ -794,8 +833,8 @@ function publicSession(row: any, prepared?: PreparedQueue) {
     canSteer: item.state === "queued" && item.delivery === "followUp",
     canHardSteer: item.state === "queued" && item.delivery === "followUp",
     canCancel: item.state === "queued",
-    createdAt: item.created_at,
-    lastError: item.last_error,
+    createdAt: String(item.created_at),
+    lastError: item.last_error ?? null,
   }));
   const activity = row.state === "FAILED" ? "FAILED"
     : rt?.phase === "STARTING" || row.state === "STARTING" ? "STARTING"
@@ -808,19 +847,19 @@ function publicSession(row: any, prepared?: PreparedQueue) {
     : rt?.phase === "DISPATCHING" || row.state === "RUNNING" ? "QUEUED"
     : "IDLE";
   return {
-    id: row.id,
-    name: row.name,
+    id: String(row.id),
+    name: String(row.name ?? ""),
     cwd,
     workspaceName: preset?.name ?? cwd,
-    environment: row.profile_id,
-    state: row.state,
+    environment: String(row.profile_id ?? ""),
+    state: String(row.state),
     activity,
     activeTool: toolNames.at(-1) ?? null,
     provider: String(row.current_provider ?? row.initial_provider ?? "").toLowerCase().startsWith("anthropic") ? "anthropic" : "openai",
-    createdAt: row.created_at,
-    updatedAt: row.updated_at,
+    createdAt: String(row.created_at),
+    updatedAt: String(row.updated_at),
     revision: Number(row.revision ?? 0),
-    lastError: row.last_error,
+    lastError: row.last_error ?? null,
     steeringQueued: durableSteering + (rt?.steeringQueued ?? 0),
     followUpQueued: durableFollowUps + (rt?.followUpQueued ?? 0),
     queuedMessages,
@@ -1932,39 +1971,27 @@ const server = Bun.serve({
       orchestrator.endLease(voiceLeaseRelease.leaseId);
       return json({ ok: true });
     }
-    if (API.threadStarts.match(req.method, url.pathname)) {
-      return json({
-        environment: { id: ENVIRONMENT_ID, name: ENVIRONMENT_NAME },
-        home: HOME,
-        destinations: threadStartProfiles(),
-      });
-    }
-    if (API.governors.match(req.method, url.pathname)) {
-      try { return json({ governors: governorControls(orchestrator) }); }
-      catch (cause: any) { return error(cause?.message ?? "Could not read governor controls", 503); }
-    }
-    // The drawer footer shows this host's load beside its controls. The long
-    // poll carries it only while the drawer is open, so a direct read lets the
-    // footer fill in the moment the drawer opens rather than after a poll.
-    if (API.machine.match(req.method, url.pathname)) {
-      try { return json({ machine: readMachineUsage() }); }
-      catch (cause: any) { return error(cause?.message ?? "Could not read machine usage", 503); }
-    }
     const governorToggle = API.governorToggle.match(req.method, url.pathname);
     if (governorToggle && isGovernorProvider(governorToggle.provider)) {
-      try { return json({ governors: toggleGovernor(orchestrator, governorToggle.provider) }); }
-      catch (cause: any) { return error(cause?.message ?? "Could not toggle governor control", 503); }
+      try {
+        const governors = toggleGovernor(orchestrator, governorToggle.provider);
+        await refreshDashboard();
+        return json({ governors });
+      } catch (cause: any) { return error(cause?.message ?? "Could not toggle governor control", 503); }
     }
     if (API.actions.match(req.method, url.pathname)) {
-      try { return json({ actions: await machineActions.all() }); }
+      try { return json({ actions: await machineActions.refresh() }); }
       catch (cause: any) { return error(cause?.message ?? "Could not read machine actions", 503); }
     }
     const actionToggle = API.actionToggle.match(req.method, url.pathname);
     if (actionToggle) {
       const action = machineActions.find(actionToggle.id);
       if (!action) return error("Unknown machine action", 404);
-      try { return json({ action: await machineActions.toggle(action) }); }
-      catch (cause: any) { return error(cause?.message ?? "Could not toggle machine action", 503); }
+      try {
+        const state = await machineActions.toggle(action);
+        await refreshDashboard();
+        return json({ action: state });
+      } catch (cause: any) { return error(cause?.message ?? "Could not toggle machine action", 503); }
     }
     if (API.uploadInit.match(req.method, url.pathname)) {
       try {
@@ -2072,21 +2099,7 @@ const server = Bun.serve({
     // Read-only observation of this host's autonomous agents. There is no
     // prompt, steer, or abort surface here: the orchestrator owns their work.
     if (API.agentRuns.match(req.method, url.pathname)) {
-      try {
-        const snapshot = await agentHost.runs();
-        return json({
-          runs: snapshot.runs,
-          running: snapshot.running,
-          hosts: [{
-            key: agentHost.ref.key,
-            label: agentHost.ref.label,
-            name: agentHost.ref.name,
-            running: snapshot.running,
-            updatedAt: snapshot.updatedAt,
-            error: snapshot.error,
-          }],
-        });
-      }
+      try { return json(await activeAgents()); }
       catch (cause: any) { return error(cause?.message ?? "Could not read agent runs", 503); }
     }
     const agentEvents = API.agentEvents.match(req.method, url.pathname);
@@ -2110,137 +2123,65 @@ const server = Bun.serve({
     }
     if (API.sync.match(req.method, url.pathname)) {
       try {
-        const body = await readBody(req);
-        const after = Math.max(0, Number(body.after ?? 0) || 0);
-        const requestedStateVersion = Math.max(0, Number(body.stateVersion ?? 0) || 0);
-        await awaitSync(after, requestedStateVersion, String(body.epoch ?? ""), Number(body.waitMs ?? 25_000));
+        const request = await readBody(req) as SyncRequest;
+        lastSyncRequestAt = Date.now();
+        if (!dashboardSnapshot) await refreshDashboard();
+        await awaitSync(request);
         const sequence = syncSequence;
-        const snapshotStateVersion = currentStateVersion();
-        const includeState = body.epoch !== SUPERVISOR_EPOCH
-          || requestedStateVersion !== snapshotStateVersion
-          || after === sequence;
-        const rows = includeState ? activeSessionRows.all() as any[] : [];
-        const includeArchived = includeState && body.includeArchived === true;
-        const selectedId = typeof body.selectedId === "string" ? body.selectedId : "";
-        let contextUpdate: any = null;
-        let selectedSession: any = null;
-        if (selectedId && includeState) {
-          const selected = sessionRow.get(selectedId) as any;
-          if (selected) {
-            selectedSession = publicSession(selected);
-            const stored = storedContext(selectedId);
-            if (stored) {
-              const projected = body.contextProjection === "display";
-              const display = projected ? displayContext(selectedId, stored.hash, stored.document) : null;
-              const document = display?.document ?? stored.document;
-              const hash = display?.hash ?? stored.hash;
-              const baseHash = typeof body.contextHash === "string" ? body.contextHash : "";
-              if (baseHash !== hash) {
-                const candidate = contextVersions.get(selectedId)?.get(baseHash);
-                // A cache written before display projection contains provider
-                // signatures throughout the document. Send one compact full
-                // projection instead of representing those scattered removals
-                // as a nearly full-size splice.
-                const base = projected && candidate?.includes('"thinkingSignature"') ? undefined : candidate;
-                contextUpdate = base === undefined
-                  ? { kind: "full", capturedAt: stored.capturedAt, hash, document }
-                  : { kind: "splice", capturedAt: stored.capturedAt, hash, splice: contextSplice(base, document) };
-              }
-            } else contextUpdate = { kind: "clear", capturedAt: 0, hash: "" };
+        const stateVersion = currentStateVersion();
+        const fresh = request.epoch !== SUPERVISOR_EPOCH;
+        const state = request.stateVersion !== undefined && (fresh || request.stateVersion !== stateVersion) ? supervisorState() : null;
+        const dashboard = request.dashboardVersion !== undefined && (fresh || request.dashboardVersion !== dashboardVersion) ? dashboardSnapshot : null;
+        const response: SyncResponse = { epoch: SUPERVISOR_EPOCH, seq: sequence, stateVersion, dashboardVersion, state, dashboard, session: null, agent: null };
+        const sessionId = typeof request.session?.id === "string" ? request.session.id : "";
+        if (sessionId && sessionRow.get(sessionId)) {
+          const id = sessionId;
+          const { contextHash, liveTextHash, liveThinkingHash, eventsAfter } = request.session!;
+          const stored = storedContext(id);
+          let context: DocumentUpdate | null = { kind: "clear", capturedAt: 0, hash: "" };
+          if (stored) {
+            const display = displayContext(id, stored.hash, stored.document);
+            const baseHash = typeof contextHash === "string" ? contextHash : "";
+            if (baseHash === display.hash) context = null;
+            else {
+              const candidate = contextVersions.get(id)?.get(baseHash);
+              // A cache written before display projection contains provider
+              // signatures throughout the document. Send one compact full
+              // projection instead of representing those scattered removals
+              // as a nearly full-size splice.
+              const base = candidate?.includes('"thinkingSignature"') ? undefined : candidate;
+              context = base === undefined
+                ? { kind: "full", capturedAt: stored.capturedAt, hash: display.hash, document: display.document }
+                : { kind: "splice", capturedAt: stored.capturedAt, hash: display.hash, splice: contextSplice(base, display.document) };
+            }
           }
-        }
-        let sessionEvents: any = null;
-        if (typeof body.eventSessionId === "string" && body.eventSessionId) {
-          const eventSessionId = String(body.eventSessionId);
-          const eventRow = sessionRow.get(eventSessionId) as any;
-          if (eventRow) {
-            const eventAfter = Math.max(0, Number(body.eventAfter ?? 0) || 0);
-            const events = db.query("SELECT seq,time,type,payload FROM events WHERE session_id=? AND seq>? ORDER BY seq LIMIT 150")
-              .all(eventSessionId, eventAfter).map((entry: any) => ({ seq: entry.seq, time: entry.time, type: entry.type, ...JSON.parse(entry.payload) }));
-            const runtime = runtimes.get(eventSessionId);
-            sessionEvents = {
-              events,
-              liveTextUpdate: textUpdate(`session:${eventSessionId}:text`, body.eventLiveTextHash, runtime?.liveText ?? ""),
-              liveThinkingUpdate: textUpdate(`session:${eventSessionId}:thinking`, body.eventLiveThinkingHash, runtime?.liveThinking ?? ""),
-              session: includeState ? publicSession(eventRow) : null,
-            };
-          }
-        }
-        let runList: any = null;
-        if (includeState && body.includeAgentList === true) {
-          const snapshot = await agentHost.runs();
-          runList = {
-            runs: snapshot.runs,
-            running: snapshot.running,
-            hosts: [{
-              key: agentHost.key,
-              label: agentHost.ref.label,
-              name: agentHost.ref.name,
-              running: snapshot.running,
-              updatedAt: snapshot.updatedAt,
-              error: snapshot.error,
-            }],
+          const runtime = runtimes.get(id);
+          const events = eventsAfter === undefined ? [] : (db.query("SELECT seq,time,type,payload FROM events WHERE session_id=? AND seq>? ORDER BY seq LIMIT 150")
+            .all(id, Math.max(0, Number(eventsAfter) || 0)) as any[]).map((entry) => ({ seq: entry.seq, time: entry.time, type: entry.type, ...JSON.parse(entry.payload) }));
+          response.session = {
+            context,
+            liveText: textUpdate(`session:${id}:text`, liveTextHash, runtime?.liveText ?? ""),
+            liveThinking: textUpdate(`session:${id}:thinking`, liveThinkingHash, runtime?.liveThinking ?? ""),
+            events,
           };
         }
-        let runEvents: any = null;
-        if (typeof body.agentRunId === "string" && body.agentRunId) {
-          const addressed = parseRunKey(body.agentRunId);
+        if (typeof request.agent?.id === "string") {
+          const addressed = parseRunKey(request.agent.id);
           if (addressed?.host === agentHost.key) {
-            const stream = await agentHost.events(addressed.runId, Math.max(0, Number(body.agentAfter ?? 0) || 0));
-            if (stream.run) runEvents = {
+            const stream = await agentHost.events(addressed.runId, Math.max(0, Number(request.agent.after ?? 0) || 0));
+            if (stream.run) response.agent = {
               run: stream.run,
               events: stream.events,
-              liveTextUpdate: textUpdate(`agent:${body.agentRunId}:text`, body.agentLiveTextHash, stream.liveText),
-              liveThinkingUpdate: textUpdate(`agent:${body.agentRunId}:thinking`, body.agentLiveThinkingHash, stream.liveThinking),
+              liveText: textUpdate(`agent:${request.agent.id}:text`, request.agent.liveTextHash, stream.liveText),
+              liveThinking: textUpdate(`agent:${request.agent.id}:thinking`, request.agent.liveThinkingHash, stream.liveThinking),
             };
           }
         }
-        const watched = includeState && Array.isArray(body.watchedIds)
-          ? body.watchedIds.slice(0, 100).map((id: unknown) => sessionRow.get(String(id)) as any).filter(Boolean).map((watchedRow: any) => {
-              const session = publicSession(watchedRow) as any;
-              if (!["RUNNING", "STARTING", "ABORTING"].includes(String(watchedRow.state))) {
-                const event = db.query("SELECT payload FROM events WHERE session_id=? AND type='assistant' ORDER BY seq DESC LIMIT 1").get(watchedRow.id) as any;
-                if (event?.payload) {
-                  try { session.lastAssistantText = String(JSON.parse(event.payload).text ?? "").slice(0, 4_000); } catch {}
-                }
-              }
-              return session;
-            })
-          : [];
-        if (includeState) refreshPlanUsageIfDue();
-        return compressedJson(req, {
-          epoch: SUPERVISOR_EPOCH,
-          seq: sequence,
-          stateVersion: snapshotStateVersion,
-          sessions: includeState && body.includeSessions !== false ? publicSessions(rows) : null,
-          archivedSessions: includeArchived ? publicSessions(archivedPage(0, ARCHIVED_PAGE_SIZE)) : null,
-          archivedTotal: includeState ? archivedCount() : null,
-          selectedSession,
-          contextUpdate,
-          watched,
-          sessionEvents,
-          agentRuns: runList,
-          agentEvents: runEvents,
-          agents: !includeState || body.includeDashboard === false ? null : await activeAgents(),
-          plans: !includeState || body.includeDashboard === false ? null : { cards: planCards(planUsage), updatedAt: planUsage?.updatedAt ?? null },
-          governors: !includeState || body.includeDashboard === false ? null : governorControls(orchestrator),
-          machine: !includeState || body.includeDashboard === false ? null : readMachineUsage(),
-        });
+        return compressedJson(req, response);
       } catch (cause: any) { return error(cause?.message ?? "Could not synchronize", 400); }
     }
     if (API.sessions.match(req.method, url.pathname)) {
-      refreshPlanUsageIfDue();
-      const rows = activeSessionRows.all();
-      const archivedRows = archivedPage(0, ARCHIVED_PAGE_SIZE);
-      return json({
-        sessions: publicSessions(rows),
-        archivedSessions: publicSessions(archivedRows),
-        archivedTotal: archivedCount(),
-        agents: await activeAgents(),
-        plans: { cards: planCards(planUsage), updatedAt: planUsage?.updatedAt ?? null },
-        governors: governorControls(orchestrator),
-        machine: readMachineUsage(),
-      });
+      return json(supervisorState());
     }
     if (API.archivedSessions.match(req.method, url.pathname)) {
       const offset = Math.max(0, Math.floor(Number(url.searchParams.get("offset") ?? 0) || 0));
@@ -2709,10 +2650,6 @@ const stateReconciler = setInterval(() => {
   }
 }, STATE_RECONCILE_MS);
 
-// Agent counts stay warm even when nobody has the drawer open, so a host that
-// went unreachable is already reported the moment somebody looks.
-const agentRefresher = setInterval(() => void agentHost.refresh(), AGENT_REFRESH_MS);
-
 // The nightly backup runs as root, outside this supervisor's mount namespace,
 // so it cannot reach the ledger to take a consistent copy the way it used to.
 // This is where that copy has to come from: SQLite writes it under its own
@@ -2789,7 +2726,7 @@ function handoffDocument() {
 function stopSupervisorTimers() {
   clearInterval(reaper);
   clearInterval(stateReconciler);
-  clearInterval(agentRefresher);
+  clearInterval(dashboardTicker);
   clearInterval(ledgerSnapshotter);
   for (const timer of retryTimers.values()) clearTimeout(timer);
   retryTimers.clear();

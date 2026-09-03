@@ -4,13 +4,9 @@
 // reads and writes the orchestrator's ledger and takes what "boosted" means
 // from the orchestrator package, so the CLI, the daemon, and both clients agree.
 import { BOOSTED_MULTIPLIER, nextBoost } from "pi-orchestrator/boost";
+import type { GovernorControls, GovernorProvider, GovernorState } from "./protocol";
 
-export type GovernorProvider = "openai" | "anthropic";
-/** The drawer button's four states, in cycle order: normal pace, 3× (green),
- * 10× (blue), and halted (red: the orchestrator refuses every new launch for
- * the family while running sessions finish naturally). */
-export type GovernorState = "off" | "green" | "blue" | "red";
-export type GovernorControls = Record<GovernorProvider, { state: GovernorState; boosted: boolean; multiplier: number; boostedMultiplier: number }>;
+export type { GovernorControls, GovernorProvider, GovernorState };
 
 const FAMILIES: Record<GovernorProvider, string> = { openai: "openai-codex", anthropic: "anthropic" };
 
