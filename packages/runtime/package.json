@@ -11,12 +11,11 @@
   ],
   "pi": {
     "extensions": [
-      "./extensions/bash-timeout-guard/index.mjs",
-      "./extensions/pi-claude-code-use/extensions/index.ts"
+      "./extensions/bash-timeout-guard/index.mjs"
     ]
   },
   "scripts": {
-    "test": "node --test extensions/pi-claude-code-use/index.test.mjs extensions/bash-timeout-guard/guard.test.mjs"
+    "test": "node --test extensions/bash-timeout-guard/guard.test.mjs"
   },
   "dependencies": {
     "agent-browser": "0.34.0"

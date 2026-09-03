@@ -5,7 +5,6 @@ Reusable extensions for [Pi](https://pi.dev), plus the pinned Pi and `agent-brow
 ## Packages
 
 - `bash-timeout-guard` requires a bounded bash call, defaults to 30 minutes with a UI and 55 seconds for autonomous sessions, accepts a host-configured ceiling, and forbids detached work.
-- `pi-claude-code-use` adapts Pi tools and prompts for Anthropic subscription requests. It is loaded on every host and does nothing until a session uses Anthropic OAuth.
 
 ## Install
 
