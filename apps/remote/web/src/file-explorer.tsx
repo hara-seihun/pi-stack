@@ -1,7 +1,7 @@
 import { asyncDataLoaderFeature, buildProxiedInstance, hotkeysCoreFeature, selectionFeature } from "@headless-tree/core";
 import { useTree } from "@headless-tree/react";
 import { useVirtualizer, type Virtualizer } from "@tanstack/react-virtual";
-import { useCallback, useRef, useState } from "react";
+import { memo, useCallback, useRef, useState } from "react";
 import { API } from "../../server/api";
 import { api } from "./client";
 
@@ -42,7 +42,7 @@ function DownloadIcon() {
   return <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 3v12m-4-4 4 4 4-4M5 20h14" /></svg>;
 }
 
-export function FileExplorer({ hidden, onRootCount }: { hidden: boolean; onRootCount(count: number): void }) {
+function FileExplorerView({ hidden, onRootCount }: { hidden: boolean; onRootCount(count: number): void }) {
   const [selectedPath, setSelectedPath] = useState("/");
   const [refreshing, setRefreshing] = useState(false);
   const scrollElement = useRef<HTMLDivElement>(null);
@@ -130,3 +130,5 @@ export function FileExplorer({ hidden, onRootCount }: { hidden: boolean; onRootC
     </div>
   </section>;
 }
+
+export const FileExplorer = memo(FileExplorerView);
