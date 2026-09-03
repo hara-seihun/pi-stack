@@ -86,6 +86,7 @@ function UnlockDialog() {
   const dialog = useRef<HTMLDialogElement>(null);
   const resolver = useRef<((key: string) => void) | null>(null);
   const [people, setPeople] = useState<Array<{ user: string; displayName?: string }>>([]);
+  const [selectedUser, setSelectedUser] = useState("");
   const [key, setKey] = useState("");
   const [message, setMessage] = useState("");
   useEffect(() => {
@@ -95,7 +96,12 @@ function UnlockDialog() {
       try {
         const response = await fetch(API.environment.path(), { cache: "no-store", headers: { accept: "application/json" } });
         const result = await response.json();
-        setPeople(result?.environment?.persons || result?.persons || []);
+        const nextPeople = result?.environment?.persons || result?.persons || [];
+        const savedUser = window.PiRemotePerson?.get() || "";
+        const nextUser = nextPeople.some((person: { user: string }) => person.user === savedUser) ? savedUser : nextPeople[0]?.user || "";
+        setPeople(nextPeople);
+        setSelectedUser(nextUser);
+        window.PiRemotePerson?.set(nextUser);
       } catch {}
       dialog.current?.showModal();
       return new Promise<string>((resolve) => { resolver.current = resolve; });
@@ -112,7 +118,7 @@ function UnlockDialog() {
     <form className="unlock-form" onSubmit={submit}>
       <h2 id="unlock-title">Unlock your folder</h2>
       <p>Your threads and private folder are encrypted on the machine. This key stays on this device and opens them while your agents are running.</p>
-      {people.length > 1 && <div className="unlock-field"><label htmlFor="unlock-person">Person</label><select id="unlock-person" value={window.PiRemotePerson?.get() || people[0]?.user || ""} onChange={(event) => window.PiRemotePerson?.set(event.target.value)}>{people.map((person) => <option key={person.user} value={person.user}>{person.displayName || person.user}</option>)}</select></div>}
+      {people.length > 1 && <div className="unlock-field"><label htmlFor="unlock-person">Person</label><select id="unlock-person" value={selectedUser} onChange={(event) => { setSelectedUser(event.target.value); window.PiRemotePerson?.set(event.target.value); }}>{people.map((person) => <option key={person.user} value={person.user}>{person.displayName || person.user}</option>)}</select></div>}
       <div className="unlock-field"><label htmlFor="unlock-key">Key</label><input id="unlock-key" type="password" autoComplete="current-password" spellCheck={false} required value={key} onChange={(event) => setKey(event.target.value)} /></div>
       {message && <p className="unlock-error">{message}</p>}
       <div className="unlock-actions"><button className="accent" type="submit">Unlock</button></div>
