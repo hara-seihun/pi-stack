@@ -28,6 +28,14 @@ const DEFAULT_CACHE_PATHS = [
   "**/dist",
   ".nx",
   ".converge-cache",
+  "build",
+  "**/build",
+  "**/__pycache__",
+  "**/.pytest_cache",
+  "**/.mypy_cache",
+  "**/.ruff_cache",
+  ".lake",
+  "**/.lake",
 ];
 const DEFAULT_LEASE_SECONDS = 6 * 60 * 60;
 const DEFAULT_MAX_COUNT = 32;
@@ -642,12 +650,22 @@ function matchingCacheTargets(workspacePath, relative) {
   return matches;
 }
 
+/* A declared cache path may collide with a directory the repository actually tracks, such as a
+ * committed `build`. Generated output is never tracked, so tracked content is not the cache. */
+function holdsTrackedFiles(workspacePath, target) {
+  const relative = path.relative(workspacePath, target);
+  const result = command("git", ["-C", workspacePath, "ls-files", "--", `:(literal)${relative}`]);
+  if (result.status !== 0) return true;
+  return result.stdout.length > 0;
+}
+
 function stripCaches(record, statePath) {
   const removed = [];
   const seen = new Set();
   for (const relative of record.cachePaths) {
     for (const target of matchingCacheTargets(record.path, relative)) {
       if (seen.has(target) || !within(record.path, target) || target === record.path || !existsSync(target)) continue;
+      if (holdsTrackedFiles(record.path, target)) continue;
       seen.add(target);
       const cacheKey = createHash("sha256").update(path.relative(record.path, target)).digest("hex").slice(0, 12);
       const destination = gcDestination(statePath, record, `${path.basename(target)}-${cacheKey}`);

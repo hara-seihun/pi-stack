@@ -202,6 +202,14 @@ test("creates and releases a clean review checkout", () => {
       "**/dist",
       ".nx",
       ".converge-cache",
+      "build",
+      "**/build",
+      "**/__pycache__",
+      "**/.pytest_cache",
+      "**/.mypy_cache",
+      "**/.ruff_cache",
+      ".lake",
+      "**/.lake",
       "ignored-output",
     ]);
     assert.equal(existsSync(created.path), true);
@@ -323,6 +331,12 @@ test("keeps local commits but strips declared caches", () => {
     writeFileSync(path.join(created.path, "packages", "api", "node_modules", "package", "index.js"), "generated\n");
     mkdirSync(path.join(created.path, "apps", "web", "dist"), { recursive: true });
     writeFileSync(path.join(created.path, "apps", "web", "dist", "app.js"), "generated\n");
+    mkdirSync(path.join(created.path, "tools", "__pycache__"), { recursive: true });
+    writeFileSync(path.join(created.path, "tools", "__pycache__", "harness.pyc"), "generated\n");
+    mkdirSync(path.join(created.path, "build", "CMakeFiles"), { recursive: true });
+    writeFileSync(path.join(created.path, "build", "CMakeFiles", "link.txt"), "generated\n");
+    mkdirSync(path.join(created.path, ".lake", "build"), { recursive: true });
+    writeFileSync(path.join(created.path, ".lake", "build", "Module.olean"), "generated\n");
     const result = JSON.parse(run(["release", "--id", created.id, "--json"], f.env));
     assert.equal(result.inspection.classification, "repair-required");
     assert.match(result.inspection.reason, /commits absent from remote refs/);
@@ -330,7 +344,34 @@ test("keeps local commits but strips declared caches", () => {
     assert.equal(existsSync(path.join(created.path, "node_modules")), false);
     assert.equal(existsSync(path.join(created.path, "packages", "api", "node_modules")), false);
     assert.equal(existsSync(path.join(created.path, "apps", "web", "dist")), false);
+    assert.equal(existsSync(path.join(created.path, "tools", "__pycache__")), false);
+    assert.equal(existsSync(path.join(created.path, "build")), false);
+    assert.equal(existsSync(path.join(created.path, ".lake")), false);
     assert.equal(readFileSync(path.join(created.path, "file.txt"), "utf8"), "changed\n");
+  } finally {
+    f.close();
+  }
+});
+
+test("leaves a tracked directory alone when its name matches a cache path", () => {
+  const f = fixture();
+  try {
+    const created = JSON.parse(run([
+      "create", "--root", f.workspaces, "--name", "writer-tracked-build", "--repo", f.remote,
+      "--mode", "writer", "--min-free-gib", "0", "--json",
+    ], f.env));
+    git(created.path, "config", "user.name", "Test");
+    git(created.path, "config", "user.email", "test@example.invalid");
+    mkdirSync(path.join(created.path, "build"), { recursive: true });
+    writeFileSync(path.join(created.path, "build", "release.sh"), "echo build\n");
+    git(created.path, "add", "build/release.sh");
+    git(created.path, "commit", "-m", "tracked build directory");
+    mkdirSync(path.join(created.path, "__pycache__"), { recursive: true });
+    writeFileSync(path.join(created.path, "__pycache__", "tool.pyc"), "generated\n");
+    const result = JSON.parse(run(["release", "--id", created.id, "--json"], f.env));
+    assert.equal(result.inspection.classification, "repair-required");
+    assert.equal(existsSync(path.join(created.path, "__pycache__")), false);
+    assert.equal(readFileSync(path.join(created.path, "build", "release.sh"), "utf8"), "echo build\n");
   } finally {
     f.close();
   }
