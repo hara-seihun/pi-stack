@@ -7,6 +7,7 @@ import { API } from "../../server/api";
 import { deleteCachedContext, readCachedContext, writeCachedContext } from "./context-cache";
 import { api, piFetch, registerUnlockHandler, syncRequest } from "./client";
 import { ContextTranscript, CopyButton, modelContextEntries } from "./context";
+import { FileExplorer } from "./file-explorer";
 import { createPollSchedule } from "./poll-schedule";
 import { threadsInOrder } from "./thread-order";
 import type { AgentHost, AgentRun, Attachment, ContextEntry, Governor, MachineAction, PlanCard, QueuedMessage, Session, Settings, ThreadStart } from "./types";
@@ -19,7 +20,7 @@ interface AppState {
   selected: Session | null;
   agentRunId: string | null;
   agentRun: AgentRun | null;
-  drawerTab: "threads" | "agents" | "archived";
+  drawerTab: "threads" | "agents" | "archived" | "files";
   drawerOpen: boolean;
   settingsOpen: boolean;
   contextEntries: ContextEntry[];
@@ -158,6 +159,15 @@ function PlanSummary({ plans, counts }: { plans: PlanCard[]; counts: Map<string,
     const description = `${card.label} ${metric.modelLabel}, ${counts.get(metric.model) || 0} in use, ${metric.description}`;
     return <div className="capacity-row" key={`${card.icon}:${metric.model}`} title={description} aria-label={description}><img src={`/${encodeURIComponent(card.icon)}.svg`} alt={card.label} /><span className="capacity-model">{metric.modelLabel}</span><span className="capacity-count">{counts.get(metric.model) || 0}</span><span className="capacity-value">{metric.text}</span></div>;
   }))}</div>;
+}
+
+type DrawerTab = AppState["drawerTab"];
+
+function DrawerTabIcon({ tab }: { tab: DrawerTab }) {
+  if (tab === "threads") return <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M4 5h16v11H9l-5 4V5Zm4 5h8" /></svg>;
+  if (tab === "agents") return <svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="12" cy="5" r="2.5" /><circle cx="6" cy="18" r="2.5" /><circle cx="18" cy="18" r="2.5" /><path d="M12 7.5v4M6 15.5v-4h12v4" /></svg>;
+  if (tab === "archived") return <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M4 8h16v12H4V8Zm-1-4h18v4H3V4Zm6 9h6" /></svg>;
+  return <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M3 6.5h7l2 2h9v10H3v-12Z" /></svg>;
 }
 
 function ThreadRow({ session, selected, archived, onSelect, onArchive, onUnarchive }: { session: Session; selected: boolean; archived?: boolean; onSelect(session: Session): void; onArchive(session: Session): void; onUnarchive(session: Session): void }) {
@@ -318,6 +328,7 @@ export default function App() {
   const [pasteOpen, setPasteOpen] = useState(false);
   const [pasteName, setPasteName] = useState("pasted-text.txt");
   const [pasteContent, setPasteContent] = useState("");
+  const [rootFileCount, setRootFileCount] = useState(0);
   const [voiceState, setVoiceState] = useState<"idle" | "connecting" | "live" | "error">("idle");
   const [voiceDetail, setVoiceDetail] = useState("");
   const voice = useRef<VoiceSession | null>(null);
@@ -586,21 +597,23 @@ export default function App() {
   const entries = state.agentRunId ? state.agentEntries : state.contextEntries;
   const liveThinking = state.agentRunId ? state.agentThinkingDocument?.document || "" : state.liveThinkingDocument?.document || "";
   const liveText = state.agentRunId ? state.agentTextDocument?.document || "" : state.liveTextDocument?.document || "";
-  const drawerCounts = { threads: state.sessions.length, agents: state.agentRunning, archived: Math.max(state.archivedTotal, state.archived.length) };
+  const drawerCounts: Record<DrawerTab, number> = { threads: state.sessions.length, agents: state.agentRunning, archived: Math.max(state.archivedTotal, state.archived.length), files: rootFileCount };
+  const drawerLabels: Record<DrawerTab, string> = { threads: "Interactive", agents: "Orchestrator", archived: "Archived", files: "Files" };
   const slashToken = prompt.startsWith("/") && !/\s/.test(prompt) ? prompt.slice(1).toLowerCase() : null;
   const visibleCommands = slashToken === null ? [] : state.slashCommands.filter((command) => command.source === "skill" && !command.name.toLowerCase().includes("mcp") && command.name.toLowerCase().startsWith(slashToken));
 
   return <div id="app">
     <UnlockDialog />
     {state.drawerOpen && innerWidth < 1000 && <div className="scrim" onClick={() => patch({ drawerOpen: false })} />}
-    <aside id="drawer" className={state.drawerOpen ? "open" : ""} aria-label="Threads">
-      <header className="drawer-heading thread-start-heading"><nav className="drawer-tabs" role="tablist" aria-label="Drawer sections">{(["threads", "agents", "archived"] as const).map((tab) => <button key={tab} className="drawer-tab" type="button" role="tab" aria-selected={state.drawerTab === tab} onClick={() => { patch({ drawerTab: tab }); kick(); }}><span className="drawer-tab-name">{tab === "threads" ? "Interactive" : tab === "agents" ? "Orchestrator" : "Archived"}</span><span className="drawer-tab-count">{drawerCounts[tab]}</span></button>)}</nav><ThreadStartMenu starts={state.threadStarts} onCreate={(destination, model) => void createThread(destination, model)} /></header>
+    <aside id="drawer" className={state.drawerOpen ? "open" : ""} aria-label="Navigation">
+      <header className="drawer-heading thread-start-heading"><nav className="drawer-tabs" role="tablist" aria-label="Drawer sections">{(["threads", "agents", "archived", "files"] as const).map((tab) => <button key={tab} className="drawer-tab" type="button" role="tab" aria-label={`${drawerLabels[tab]}, ${drawerCounts[tab]}`} title={drawerLabels[tab]} aria-selected={state.drawerTab === tab} onClick={() => { patch({ drawerTab: tab }); kick(); }}><DrawerTabIcon tab={tab} /><span className="drawer-tab-count">{drawerCounts[tab]}</span></button>)}</nav><ThreadStartMenu starts={state.threadStarts} onCreate={(destination, model) => void createThread(destination, model)} /></header>
       {state.drawerTab === "threads" && <DndContext sensors={dragSensors} collisionDetection={closestCenter} onDragEnd={(event) => void reorder(event)}><SortableContext items={state.sessions.map((session) => session.id)} strategy={verticalListSortingStrategy}><div className="thread-list">{state.sessions.length ? state.sessions.map((session) => <SortableThreadRow key={session.id} session={session} selected={!state.agentRunId && state.selectedId === session.id} onSelect={(value) => void selectThread(value)} onArchive={(value) => void archive(value)} onUnarchive={() => {}} />) : <div className="agent-empty">No threads</div>}</div></SortableContext></DndContext>}
       {state.drawerTab === "agents" && <AgentList runs={state.agents} hosts={state.agentHosts} selectedId={state.agentRunId} onSelect={selectAgent} />}
       {state.drawerTab === "archived" && <div className="thread-list">{state.archived.length ? state.archived.map((session) => <ThreadRow key={session.id} archived session={session} selected={false} onSelect={() => {}} onArchive={() => {}} onUnarchive={(value) => void unarchive(value)} />) : <div className="agent-empty">No archived threads</div>}{state.archived.length < state.archivedTotal && <button type="button" className="archived-more" onClick={() => void loadOlder()}>Show older · {state.archivedTotal - state.archived.length} more</button>}</div>}
+      <FileExplorer hidden={state.drawerTab !== "files"} onRootCount={setRootFileCount} />
       <footer className="drawer-footer"><MachineControls actions={state.actions} governors={state.governors} onAction={(id) => void toggleAction(id)} onGovernor={(provider) => void toggleGovernor(provider)} /><EnvironmentControl /><PlanSummary plans={state.plans} counts={state.modelCounts} /><div className="usage-summary muted">{machineText}</div>{state.offline && <div className="connection" style={{ color: "var(--danger)" }}>● Offline · {state.offline}</div>}</footer>
     </aside>
-    <main id="main"><header className="topbar"><button className="icon-button" aria-label="Open threads" onClick={() => patch({ drawerOpen: true })}>☰</button><div className="top-title">{title}</div><div className="top-state" style={{ color: state.offline ? "var(--danger)" : activityColor(selectedActivity) }}>{state.offline ? "OFFLINE" : activityLabel(selectedActivity, selectedTool)}</div><button className="icon-button" aria-label="Open thread settings" disabled={!state.selectedId || Boolean(state.agentRunId)} onClick={() => patch({ settingsOpen: true })}>⚙</button></header>
+    <main id="main"><header className="topbar"><button className="icon-button" aria-label="Open navigation" onClick={() => patch({ drawerOpen: true })}>☰</button><div className="top-title">{title}</div><div className="top-state" style={{ color: state.offline ? "var(--danger)" : activityColor(selectedActivity) }}>{state.offline ? "OFFLINE" : activityLabel(selectedActivity, selectedTool)}</div><button className="icon-button" aria-label="Open thread settings" disabled={!state.selectedId || Boolean(state.agentRunId)} onClick={() => patch({ settingsOpen: true })}>⚙</button></header>
       {!state.selectedId && !state.agentRunId ? <section className="empty-state"><strong>No threads</strong><span>Open the drawer to create one.</span></section> : <section className="conversation"><div className="scrollback"><div className="scroll-content"><ContextTranscript entries={entries} sessionId={state.selectedId || ""} home={state.home} onEdit={editFrom} />{liveThinking && <div className="live-thinking markdown-body"><div>{liveThinking}</div><CopyButton text={liveThinking} label="Copy thinking" /></div>}{liveText && <div className="live-answer markdown-body"><div>{liveText}</div><CopyButton text={liveText} label="Copy response" /></div>}</div></div>
         {state.selected?.queuedMessages?.length ? <div className="message-queue">{state.selected.queuedMessages.map((message: QueuedMessage) => <div className="queued-message" key={message.id}><div className="queued-message-copy"><span className="queued-message-label">{message.status || "Queued"}</span><span className="queued-message-preview">{message.text.split("\n").find((line) => line.trim()) || "Attached files"}</span></div><div className="queued-message-actions"><CopyButton text={message.text} className="queued-message-action icon-message-action" />{message.canSteer && <button className="queued-message-action steer-instead" type="button" onClick={() => void mutateQueued(message, API.queueSteer)}>STEER</button>}{message.canHardSteer && <button className="queued-message-action hard-steer" type="button" onClick={() => void mutateQueued(message, API.queueHardSteer)}>HARD STEER</button>}{message.canCancel && <><button className="queued-message-action edit-queued" type="button" onClick={() => void mutateQueued(message, API.queueItem, true)}>EDIT</button><button className="queued-message-action cancel-queued" type="button" onClick={() => void mutateQueued(message, API.queueItem)}>CANCEL</button></>}</div></div>)}</div> : null}
         {state.attachments.length > 0 && <div className="attachments">{state.attachments.map((attachment) => <div className={`attachment-chip${attachment.uploading ? " uploading" : ""}`} key={attachment.localId}><span className="attachment-name">{attachment.name}{attachment.uploading ? " · uploading" : ""}</span><button className="attachment-remove" type="button" onClick={() => void removeAttachment(attachment)}>×</button></div>)}</div>}

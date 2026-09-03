@@ -2,7 +2,7 @@
 
 A self-hosted web and Android controller for persistent [Pi](https://pi.dev) coding-agent sessions.
 
-Pi Remote keeps session state in SQLite, talks to Pi through RPC mode, survives browser or app disconnects, queues prompts durably, and streams tool and model activity. It observes autonomous agents through Pi Orchestrator's public read model rather than reading that service's SQLite tables. The Orchestrator tab folds each team into one collapsed group; opening it lists the supervisor first, then workers by slot. A front door starts one supervisor per person, and a person's private directory is mounted only while she has unlocked it.
+Pi Remote keeps session state in SQLite, talks to Pi through RPC mode, survives browser or app disconnects, queues prompts durably, and streams tool and model activity. It observes autonomous agents through Pi Orchestrator's public read model rather than reading that service's SQLite tables. The Orchestrator tab groups running agents by host. A front door starts one supervisor per person, and a person's private directory is mounted only while she has unlocked it.
 
 Interactive Pi children run at normal scheduler priority. Background services and CI must yield through their own scheduler settings. Lowering the interactive child priority makes every compiler, test, and file scan it starts lose CPU at the exact moment an operator is waiting for it.
 
@@ -20,7 +20,7 @@ The drawer reports only measured plan and hardware rows. CPU sampling runs indep
 
 Enter sends the composer only where a hardware keyboard is typing. On touch devices the media query `(hover: none) and (pointer: coarse)` matches, Enter inserts a newline, the key is labelled as a return key, and the send button submits. Phone keyboards have no comfortable way to type a newline otherwise, so sending on Enter cost multi-paragraph prompts.
 
-The Files drawer tab browses the selected environment from `/`. It includes dotfiles and reads one directory per request. Folder taps navigate and file taps download without opening a preview.
+The drawer tabs use an icon and count for Interactive threads, Orchestrator agents, archived threads, and host files. The Files tab is a lazy tree rooted at `/`: opening a folder requests only that directory, dotfiles remain visible, and selecting a regular file downloads it. Headless Tree supplies keyboard and screen-reader tree behavior, while TanStack Virtual keeps directories such as `/nix/store` from creating tens of thousands of DOM rows. The tree remains mounted when another drawer tab is selected, so open folders and the current path survive tab switches.
 
 Each runtime also loads `server/thread-context.ts`. The extension offers initialization only while the durable session title is numeric, removes that control from named threads, and treats process or model changes as continuation rather than a new thread. It tells every model to use `read-thread` for local, no-request access to another thread and reserves `read-condensed-session` for explicit semantic condensation. It also tells the agent how to offer downloadable files. A `<pi-remote-file src="/absolute/path" />` tag becomes a normal link in both clients, and the session-scoped endpoint streams the file from the thread's host.
 
