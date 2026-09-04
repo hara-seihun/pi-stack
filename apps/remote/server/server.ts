@@ -1409,6 +1409,27 @@ async function terminateFailedHandoff(handoff: RuntimeHandoff) {
   try { process.kill(-pid, "SIGKILL"); } catch {}
 }
 
+async function reconcileAdoptedRuntime(row: any, rt: Runtime) {
+  try {
+    const state = await rpc(rt, "get_state", {}, 5_000);
+    if (!ownsSupervisorLease() || runtimes.get(row.id) !== rt) return;
+    if (state.model?.id) rt.modelId = String(state.model.id);
+    if (state.sessionFile) db.query("UPDATE sessions SET session_path=? WHERE id=?").run(state.sessionFile, row.id);
+    const active = Boolean(state.isStreaming || state.isCompacting || Number(state.pendingMessageCount ?? 0) > 0);
+    if (active && !["RUNNING", "ABORTING"].includes(rt.phase)) setRuntimePhase(row.id, rt, "RUNNING", "RUNNING");
+    else if (!active && rt.phase === "RUNNING") settleRuntime(row.id, rt, true);
+    else if (!active && rt.phase === "STARTING") {
+      setRuntimePhase(row.id, rt, "IDLE", "IDLE");
+      rt.expectedExit = true;
+      rt.suppressOutput = true;
+      setRuntimePhase(row.id, rt, "STOPPING");
+      void terminateRuntimeProcess(rt);
+    }
+  } catch (cause) {
+    console.error(`Could not reconcile adopted runtime ${row.id}`, cause);
+  }
+}
+
 async function adoptHandoffRuntimes() {
   await Promise.all(pendingHandoff.map(async (handoff) => {
     const row = sessionRow.get(handoff.sessionId) as any;
@@ -1418,18 +1439,13 @@ async function adoptHandoffRuntimes() {
     try {
       rt.transport = await attachRuntimeHost(handoff.socketPath, (line) => handleRuntimeOutput(row.id, rt, line));
       monitorRuntime(row, rt);
-      const state = await rpc(rt, "get_state", {}, 5_000);
-      if (state.model?.id) rt.modelId = String(state.model.id);
-      if (state.sessionFile) db.query("UPDATE sessions SET session_path=? WHERE id=?").run(state.sessionFile, row.id);
-      const active = Boolean(state.isStreaming || state.isCompacting || Number(state.pendingMessageCount ?? 0) > 0);
-      if (active && !["RUNNING", "ABORTING"].includes(rt.phase)) setRuntimePhase(row.id, rt, "RUNNING", "RUNNING");
-      else if (!active && rt.phase === "RUNNING") settleRuntime(row.id, rt, true);
-      else if (!active) {
-        if (rt.phase === "STARTING") setRuntimePhase(row.id, rt, "IDLE", "IDLE");
+      if (rt.phase === "IDLE") {
         rt.expectedExit = true;
         rt.suppressOutput = true;
         setRuntimePhase(row.id, rt, "STOPPING");
         void terminateRuntimeProcess(rt);
+      } else {
+        void reconcileAdoptedRuntime(row, rt);
       }
     } catch (cause) {
       console.error(`Could not adopt runtime ${row.id}`, cause);
@@ -1944,7 +1960,7 @@ function recoverUnansweredPrompts() {
 recoverUnansweredPrompts();
 
 await adoptHandoffRuntimes();
-await reapUnclaimedRuntimeHosts();
+void reapUnclaimedRuntimeHosts().catch((cause) => console.error("Could not reap unclaimed runtime hosts", cause));
 
 const server = Bun.serve({
   hostname: HOST,
