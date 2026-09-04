@@ -288,6 +288,17 @@ export class Store {
       return true;
     });
   }
+  adoptAssignedRun(id:string,at=Date.now()):boolean{
+    return this.transaction(()=>{
+      const run=this.run(id);
+      if(!run?.accountId||!run.provider||!run.model||!run.workerUnit||!run.releasePath)return false;
+      const changed=this.db.prepare(`UPDATE run SET state='running',result=NULL,failure_kind=NULL,updated_at=?,ended_at=NULL WHERE id=? AND state IN ('queued','starting','running','failed')`).run(at,id).changes;
+      if(changed!==1)return false;
+      this.endLease(`run:${id}`,at);
+      this.createLease(`run:${id}`,run.accountId,"fleet",id,at);
+      return true;
+    });
+  }
   activeCount(source?:RunSource,sourceId?:string):number{let sql="SELECT COUNT(*) n FROM run WHERE state IN ('queued','starting','running','parked')",args:any[]=[];if(source){sql+=" AND source=?";args.push(source);}if(sourceId){sql+=" AND source_id=?";args.push(sourceId);}return Number((this.db.prepare(sql).get(...args) as any).n);}
   admittedLaneCount(sourceId:string):number{return Number((this.db.prepare("SELECT COUNT(*) n FROM run WHERE source='lane' AND source_id=? AND state IN ('starting','running','parked')").get(sourceId) as any).n);}
   trimQueuedLane(sourceId:string,keep:number,at=Date.now()):number{

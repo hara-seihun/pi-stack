@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { chmodSync, mkdirSync, mkdtempSync, readFileSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
+import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { Store } from "../src/store.js";
@@ -158,6 +158,55 @@ describe("current orchestrator state",()=>{
     let settled=false;const waiting=daemon.waitForReconcile().then(()=>{settled=true;});
     await Promise.resolve();expect(settled).toBe(false);
     daemon.reconciling=false;await waiting;expect(settled).toBe(true);store.close();
+  });
+
+  it("reopens an infrastructure-failed row when its worker is still active",()=>{
+    const root=mkdtempSync(join(tmpdir(),"orchestrator-active-failed-")),bin=join(root,"bin"),started=join(root,"systemd-run.called");
+    mkdirSync(bin);
+    writeFileSync(join(bin,"systemctl"),'#!/bin/sh\ncase "$*" in *is-active*) exit 0;; esac\nexit 0\n');
+    writeFileSync(join(bin,"systemd-run"),`#!/bin/sh\ntouch ${JSON.stringify(started)}\nexit 1\n`);
+    chmodSync(join(bin,"systemctl"),0o755);chmodSync(join(bin,"systemd-run"),0o755);
+    const previousPath=process.env.PATH;process.env.PATH=`${bin}:${previousPath}`;
+    const store=Store.open(":memory:");
+    try{
+      account(store);const [id]=store.createRuns({count:1,source:"direct",prompt:"x",cwd:"/tmp",profile:"standard",budget:"force"});
+      store.assignRun(id!,{accountId:"openai-codex-1",provider:"openai-codex",model:"gpt-5.6-sol",unit:"run-a.service",releasePath:"/srv/releases/a"});
+      store.updateRun(id!,{state:"failed",failureKind:"infrastructure",result:"worker recovery raced its active unit"});
+      (new Daemon(store,config,"/srv/releases/current","/srv/state/ledger.sqlite3") as any).recoverWorkers();
+      expect(store.run(id!)).toMatchObject({state:"running",workerUnit:"run-a.service"});
+      expect(store.run(id!)?.failureKind).toBeUndefined();
+      expect(store.run(id!)?.result).toBeUndefined();
+      expect(existsSync(started)).toBe(false);
+      expect(store.activeLeases().map((lease)=>lease.run_id)).toContain(id);
+    }finally{store.close();process.env.PATH=previousPath;rmSync(root,{recursive:true});}
+  });
+
+  it("adopts a still-loaded worker when recovery races systemd",()=>{
+    const root=mkdtempSync(join(tmpdir(),"orchestrator-adoption-")),bin=join(root,"bin"),counter=join(root,"is-active.count");
+    mkdirSync(bin);writeFileSync(counter,"0\n");
+    writeFileSync(join(bin,"systemctl"),`#!/bin/sh
+case "$*" in
+  *is-active*) n=$(cat ${JSON.stringify(counter)}); n=$((n+1)); printf '%s\\n' "$n" > ${JSON.stringify(counter)}; test "$n" -ge 3;;
+  *start*) exit 0;;
+  *) exit 0;;
+esac
+`);
+    writeFileSync(join(bin,"systemd-run"),'#!/bin/sh\necho "Unit run-a.service was already loaded or has a fragment file" >&2\nexit 1\n');
+    chmodSync(join(bin,"systemctl"),0o755);chmodSync(join(bin,"systemd-run"),0o755);
+    const previousPath=process.env.PATH;process.env.PATH=`${bin}:${previousPath}`;
+    const store=Store.open(":memory:");
+    try{
+      account(store);const [id]=store.createRuns({count:1,source:"direct",prompt:"x",cwd:"/tmp",profile:"standard",budget:"force"});
+      store.assignRun(id!,{accountId:"openai-codex-1",provider:"openai-codex",model:"gpt-5.6-sol",unit:"run-a.service",releasePath:"/srv/releases/a"});
+      store.updateRun(id!,{state:"failed",failureKind:"infrastructure",result:"old failure"});
+      store.updateRun(id!,{state:"queued"});
+      (new Daemon(store,config,"/srv/releases/current","/srv/state/ledger.sqlite3") as any).recoverWorkers();
+      expect(store.run(id!)).toMatchObject({state:"running",workerUnit:"run-a.service"});
+      expect(store.run(id!)?.failureKind).toBeUndefined();
+      expect(store.run(id!)?.result).toBeUndefined();
+      expect(store.run(id!)?.endedAt).toBeUndefined();
+      expect(readFileSync(counter,"utf8").trim()).toBe("3");
+    }finally{store.close();process.env.PATH=previousPath;rmSync(root,{recursive:true});}
   });
 
   it("restarts an interrupted worker from its recorded release",()=>{

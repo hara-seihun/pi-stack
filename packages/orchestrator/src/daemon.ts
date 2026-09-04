@@ -136,7 +136,7 @@ export class Daemon {
       for(const run of this.store.runs(["starting","running"])){
         const progress=run.progressAt??run.startedAt??run.createdAt;
         if(now-progress>this.config.killAfterMs){this.stopUnit(run.workerUnit);this.store.updateRun(run.id,{state:"failed",failureKind:"infrastructure",result:"session made no progress"});continue;}
-        if(process.env.PI_ORCHESTRATOR_WORKER_LAUNCH!=="process"&&run.workerUnit&&spawnSync("systemctl",["--user","is-active","--quiet",run.workerUnit]).status!==0){
+        if(process.env.PI_ORCHESTRATOR_WORKER_LAUNCH!=="process"&&run.workerUnit&&!this.unitIsActive(run.workerUnit)){
           this.restartAssignedWorker(run,now);
           continue;
         }
@@ -194,20 +194,36 @@ export class Daemon {
   }
 
   private stopUnit(unit?:string):void{if(!unit)return;spawn("systemctl",["--user","stop",unit],{stdio:"ignore"}).unref();}
+  private unitIsActive(unit:string):boolean{
+    return spawnSync("systemctl",["--user","is-active","--quiet",unit]).status===0;
+  }
+  private startExistingUnit(unit:string):boolean{
+    const started=spawnSync("systemctl",["--user","start",unit],{stdio:"ignore"});
+    return started.status===0&&this.unitIsActive(unit);
+  }
   private recoverWorkers():void{
-    for(const run of this.store.runs(["queued","starting","running"])){
+    for(const run of this.store.runs(["queued","starting","running","failed"])){
       if(!run.accountId||!run.provider||!run.model||!run.workerUnit||!run.releasePath)continue;
-      const alive=spawnSync("systemctl",["--user","is-active","--quiet",run.workerUnit]).status===0;
-      if(!alive)this.restartAssignedWorker(run);
+      if(this.unitIsActive(run.workerUnit)){
+        if(run.state!=="running")this.store.adoptAssignedRun(run.id);
+      }else if(run.state!=="failed")this.restartAssignedWorker(run);
     }
   }
   private restartAssignedWorker(run:Run,at=Date.now()):void{
     const progress=run.progressAt??run.startedAt??run.createdAt;
     if(at-progress>this.config.killAfterMs){this.store.updateRun(run.id,{state:"failed",failureKind:"infrastructure",result:"session made no progress"},at);return;}
     if(!this.store.resumeAssignedRun(run.id,at))return;
+    // A daemon restart can race the user manager's state transition for a worker that never stopped.
+    // Adopt it instead of trying to redefine its still-loaded transient unit.
+    if(this.unitIsActive(run.workerUnit!)){this.store.adoptAssignedRun(run.id,at);return;}
     spawnSync("systemctl",["--user","reset-failed",run.workerUnit!],{stdio:"ignore"});
     try{this.startUnit(run.workerUnit!,run.id,run.releasePath!);}
-    catch(error){this.store.updateRun(run.id,{state:"failed",failureKind:"infrastructure",result:`worker recovery failed: ${String(error)}`},at);}
+    catch(error){
+      // systemd-run refuses an existing transient unit. `start` is a no-op when that unit is already
+      // active and restarts its recorded immutable release when it is loaded but inactive.
+      if(this.startExistingUnit(run.workerUnit!)){this.store.adoptAssignedRun(run.id,at);return;}
+      this.store.updateRun(run.id,{state:"failed",failureKind:"infrastructure",result:`worker recovery failed: ${String(error)}`},at);
+    }
   }
 
   private async request(req:IncomingMessage,res:ServerResponse):Promise<void>{

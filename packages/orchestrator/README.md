@@ -13,7 +13,7 @@ The daemon reconciles four inputs:
 
 A lane is recurring desired demand. A wave is a one-off launch. A room is a set of warm peer Pi sessions with a durable feed and direct messages. Room members have no hidden hierarchy. A coordinator prompt is only another prompt.
 
-Workers write progress through the daemon's loopback API. Their full context remains in Pi's session JSONL. If a worker process or machine stops, the next worker reopens that same file. The run row records the immutable release path and transient unit name, so a daemon deployment does not replace live workers.
+Workers write progress through the daemon's loopback API. Their full context remains in Pi's session JSONL. If a worker process or machine stops, the next worker reopens that same file. The run row records the immutable release path and transient unit name, so a daemon deployment does not replace live workers. Recovery adopts a still-active unit when a daemon restart races the user manager; an already-loaded inactive transient unit restarts from its recorded release instead of being redefined.
 
 ## Quota policy
 
