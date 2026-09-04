@@ -215,6 +215,7 @@ test("creates and releases a clean review checkout", () => {
       "ignored-output",
     ]);
     assert.equal(existsSync(created.path), true);
+    assert.equal(git(created.path, "config", "--bool", "core.commitGraph"), "false");
     mkdirSync(path.join(created.path, "ignored-output"));
     writeFileSync(path.join(created.path, "ignored-output", "generated.txt"), "generated\n");
     const released = JSON.parse(run(["release", "--id", created.id, "--json"], f.env));

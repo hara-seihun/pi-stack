@@ -1116,6 +1116,10 @@ function createCommand(database, args, statePath) {
       run("git", ["clone", "--reference-if-able", mirror, "--no-checkout", repository, destination], { timeout: 120_000 });
       git(destination, ["remote", "set-url", "origin", upstream.fetch]);
       git(destination, ["remote", "set-url", "--push", "origin", upstream.push]);
+      // The shared mirror rewrites its commit-graph chain as it fetches. An incremental graph in a
+      // reference clone can retain hashes of mirror graph files that no longer exist, making routine
+      // Git commands warn even though every object remains available through alternates.
+      git(destination, ["config", "core.commitGraph", "false"]);
       if (mode === "review") git(destination, ["checkout", "--detach", sourceCommit]);
       else git(destination, ["checkout", "-b", branch, sourceCommit]);
     }
