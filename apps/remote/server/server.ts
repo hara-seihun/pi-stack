@@ -267,6 +267,7 @@ interface Runtime {
   replaceAfterSettle: boolean;
 }
 const runtimes = new Map<string, Runtime>();
+let runtimeAdoption = Promise.resolve();
 const contextFinalizedMessages = new Map<string, string>();
 // A runtime's phase changes underneath awaits and inside callees; reading it
 // through a call keeps TypeScript from narrowing a value that has moved on.
@@ -1478,6 +1479,7 @@ async function reapUnclaimedRuntimeHosts() {
 }
 
 async function activate(row: any): Promise<Runtime> {
+  await runtimeAdoption;
   const current = sessionRow.get(row.id) as any;
   if (!current || current.archived_at) throw new Error("Thread is archived; unarchive it before continuing");
   row = current;
@@ -1962,8 +1964,9 @@ function recoverUnansweredPrompts() {
 
 recoverUnansweredPrompts();
 
-await adoptHandoffRuntimes();
-void reapUnclaimedRuntimeHosts().catch((cause) => console.error("Could not reap unclaimed runtime hosts", cause));
+runtimeAdoption = adoptHandoffRuntimes();
+void runtimeAdoption.then(reapUnclaimedRuntimeHosts)
+  .catch((cause) => console.error("Could not finish runtime adoption", cause));
 
 const server = Bun.serve({
   hostname: HOST,
@@ -2810,6 +2813,7 @@ function stopSupervisorTimers() {
 async function handoffRelease() {
   if (shuttingDown) return;
   releaseHandoffRequested = true;
+  await runtimeAdoption;
   if ([...runtimes.values()].some((runtime) => runtime.phase === "ABORTING") || forkingSessions.size > 0) {
     console.log("Pi Remote release handoff waiting for an in-flight session operation to resolve");
     return;
