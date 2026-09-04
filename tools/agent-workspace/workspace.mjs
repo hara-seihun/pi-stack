@@ -1207,15 +1207,37 @@ function reconcileCommand(database, args, statePath) {
 }
 
 function statusCommand(database, args) {
-  assertOnly(args, ["root", "json"]);
-  const records = listRecords(database, one(args, "root"));
+  assertOnly(args, ["root", "json", "path", "owner"]);
+  const all = listRecords(database, one(args, "root"));
+  const pathFilter = one(args, "path");
+  const ownerFilter = one(args, "owner");
+  let records = all;
+  if (pathFilter !== undefined) {
+    const resolved = path.resolve(pathFilter);
+    records = records.filter((record) => record.path === resolved || record.path.includes(pathFilter));
+  }
+  if (ownerFilter !== undefined) {
+    records = records.filter((record) => (record.owner ?? "").includes(ownerFilter));
+  }
   if (bool(args, "json")) {
     print(records, true);
     return;
   }
+  const filtered = pathFilter !== undefined || ownerFilter !== undefined;
+  if (filtered && records.length === 0) {
+    process.stdout.write(`no registered workspace matches that filter; ${all.length} record(s) are known, and a checkout absent from all of them was never registered\n`);
+    return;
+  }
   const summary = new Map();
   for (const record of records) summary.set(record.state, (summary.get(record.state) ?? 0) + 1);
-  process.stdout.write(`${records.length} registered workspace(s): ${[...summary].map(([state, count]) => `${state}=${count}`).join(" ")}\n`);
+  const scope = filtered ? ` (filtered from ${all.length})` : "";
+  process.stdout.write(`${records.length} registered workspace(s)${scope}: ${[...summary].map(([state, count]) => `${state}=${count}`).join(" ")}\n`);
+  if (filtered) {
+    for (const record of records) {
+      process.stdout.write(`${record.path}\n  state ${record.state}: ${record.detail}\n  owner ${record.owner ?? "(none)"}  mode ${record.mode}  present-on-disk ${existsSync(record.path)}\n`);
+    }
+    return;
+  }
   print(records, false);
 }
 
@@ -1227,13 +1249,16 @@ function help() {
   agent-workspace heartbeat (--id ID|--path PATH) [--lease-seconds N]
   agent-workspace release (--id ID|--path PATH) [--reap-expired]
   agent-workspace reconcile [--root PATH] [--execute] [--reap-expired]
-  agent-workspace status [--root PATH] [--json]
+  agent-workspace status [--root PATH] [--path SUBSTRING] [--owner SUBSTRING] [--json]
+  agent-workspace list ...                    alias for status
 
 The registry defaults to ${DEFAULT_STATE}. Set PI_WORKSPACE_STATE to move it.
 Repeat --cache to declare ignored generated paths that release may remove; these extend the default cache set.
 Use a Git ref the source repository can fetch, such as refs/heads/main or a branch name, not origin/main.
 A lease expiry permits reconciliation; it never makes dirty or unpushed work disposable.
 Records with the same --group lease, heartbeat, and release as one multi-repository workspace.
+Records outlive the directory, so status explains what became of a checkout that is gone;
+--path takes a substring, so "status --path ob50" answers that without reading every record.
 `);
 }
 
@@ -1261,8 +1286,11 @@ export function main(argv = process.argv.slice(2), statePath = DEFAULT_STATE) {
     else if (commandName === "heartbeat") heartbeatCommand(database, args);
     else if (commandName === "release") releaseCommand(database, args, statePath);
     else if (commandName === "reconcile") reconcileCommand(database, args, statePath);
-    else if (commandName === "status") statusCommand(database, args);
-    else fail(`unknown command: ${commandName}`);
+    else if (commandName === "status" || commandName === "list") statusCommand(database, args);
+    else {
+      help();
+      fail(`unknown command: ${commandName}`);
+    }
   } finally {
     database.close();
   }

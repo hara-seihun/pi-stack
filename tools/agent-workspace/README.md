@@ -29,6 +29,22 @@ A released or expired checkout is reclaimable only when it is clean and every lo
 
 Give related repositories the same `--group` value when one agent task spans them. A heartbeat on any member renews the whole group. Release removes the group only when every member is recoverable, so a clean frontend checkout cannot disappear while its backend peer still contains unique work.
 
+## Finding out what became of a checkout
+
+Records outlive the directory. When a checkout is gone, the registry still holds why, so this is answerable rather than a matter of guesswork:
+
+```bash
+agent-workspace status --path p3-ob50-review          # substring, not the full path
+agent-workspace status --owner some-task --json
+agent-workspace status                               # the whole pool
+```
+
+`list` is accepted as an alias, since that is what people reach for first.
+
+The answer that matters is the `state` and its `detail`. `released` with `every local branch commit exists on a remote ref` means the manager proved the work was on a remote before removing the tree: the commits are safe, and a local hash that no longer resolves was almost certainly rewritten by a rebase before the push. Look for the content on `main` rather than for the hash. `repair-required` is the opposite, and means unique local work is still there and the tree was kept.
+
+A path that matches no record was never registered, and the manager never touched it.
+
 ## Reconciliation
 
 Adopt existing children of a pool, then inspect before changing anything:

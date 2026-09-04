@@ -576,3 +576,53 @@ test("expired live references require an explicit reap", async () => {
     f.close();
   }
 });
+
+test("status answers what became of a checkout whose directory is gone", () => {
+  const f = fixture();
+  try {
+    run(["status", "--json"], f.env);
+    const database = new DatabaseSync(f.env.PI_WORKSPACE_STATE);
+    database.prepare(`INSERT INTO workspace
+      (id,path,root,kind,mode,owner,repository,source_commit,checkout_type,
+       cache_paths,created_at,updated_at,lease_expires_at,state,detail,group_id)
+      VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,NULL)`).run(
+      "gone-1", path.join(f.workspaces, "p3-ob50-review-someone"), f.workspaces,
+      "agent", "writer", "p3-ob50-review-someone", f.remote, "a".repeat(40), "clone",
+      JSON.stringify([]), 1, 1, 0, "released", "every local branch commit exists on a remote ref",
+    );
+    database.close();
+
+    const byPath = run(["status", "--path", "ob50"], f.env);
+    assert.match(byPath, /state released: every local branch commit exists on a remote ref/);
+    assert.match(byPath, /present-on-disk false/);
+
+    const byOwner = run(["list", "--owner", "ob50"], f.env);
+    assert.match(byOwner, /p3-ob50-review-someone/);
+
+    const missing = run(["status", "--path", "never-registered-anywhere"], f.env);
+    assert.match(missing, /no registered workspace matches that filter/);
+  } finally {
+    f.close();
+  }
+});
+
+test("an unrecognised command prints the usage that names the real ones", () => {
+  const f = fixture();
+  try {
+    let stdout = "";
+    let code = 0;
+    try {
+      stdout = execFileSync(entry, ["list-workspaces"], {
+        env: { ...process.env, ...f.env }, encoding: "utf8", timeout: 30_000,
+      });
+    } catch (error) {
+      code = error.status;
+      stdout = error.stdout ?? "";
+    }
+    assert.equal(code, 2);
+    assert.match(stdout, /agent-workspace status/);
+    assert.match(stdout, /alias for status/);
+  } finally {
+    f.close();
+  }
+});
