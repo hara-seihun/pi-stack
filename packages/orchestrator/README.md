@@ -21,7 +21,7 @@ Ordinary work preserves the configured reserve, blocks on stale meters, compares
 
 `run --force`, `wave --force`, and `room create --force` are operator-authorized urgent work. They bypass ordinary pacing but not exhausted provider quota or a provider halt. Provider boost controls multiply ordinary pacing. A multiplier of zero halts that provider.
 
-The routing extension uses the same account registry for interactive Pi sessions. It keeps a session on one account unless that account fails. The usage extension aggregates attribution hourly, one row per input, output, cache read, and cache write, and records provider meter headers. Keeping the components apart is what lets `plans()` report the share of prompt tokens a model read from cache over the last 24 hours.
+The routing extension uses the same account registry for interactive Pi sessions. It keeps a session on one account unless that account fails. A response that reaches the provider's output-token limit is continued inside the same Pi run: the provider ended it with `stopReason=length`, so the agent did not choose to stop and the session must not settle there. This is separate from the removed fleet check-ins, which used to restart turns that agents had ended normally. The usage extension aggregates attribution hourly, one row per input, output, cache read, and cache write, and records provider meter headers. Keeping the components apart is what lets `plans()` report the share of prompt tokens a model read from cache over the last 24 hours.
 
 ## Configuration
 

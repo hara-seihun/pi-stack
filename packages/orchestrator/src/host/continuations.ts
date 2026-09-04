@@ -16,6 +16,10 @@
  * agent ending its turn ends it. The night it was removed, check-ins had
  * pinned a fleet of drained-queue agents against a folder none of them could
  * finish, unable to work and unable to stop.
+ *
+ * A provider output limit is not such a check-in: stopReason=length means the
+ * agent never ended its own turn. The prompt below resumes that interrupted
+ * turn and only that turn.
  */
 
 export function interruptedTurnPrompt(failure: string, remedy: string): string {
@@ -26,6 +30,21 @@ export function interruptedTurnPrompt(failure: string, remedy: string): string {
     "still in context, so pick up exactly where you stopped instead of starting over. " +
     "The one thing worth re-checking is any tool call whose result you never saw: run " +
     "it again before you rely on it."
+  );
+}
+
+/** Return a continuation only when the latest assistant response was truncated.
+ * Tool-result messages can follow a length-limited assistant response because
+ * Pi rejects tool calls whose arguments may have been cut in half. */
+export function outputLimitContinuation(messages: readonly unknown[]): string | undefined {
+  const assistant = [...messages].reverse().find((value) => {
+    const message = value as { role?: unknown } | null;
+    return message?.role === "assistant";
+  }) as { stopReason?: unknown } | undefined;
+  if (assistant?.stopReason !== "length") return undefined;
+  return interruptedTurnPrompt(
+    "its response reached the output-token limit",
+    "This session is ready to keep going.",
   );
 }
 

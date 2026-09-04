@@ -27,7 +27,8 @@
   "pi": {
     "extensions": [
       "./src/extension/usage-logger.ts",
-      "./src/extension/routing.ts"
+      "./src/extension/routing.ts",
+      "./src/extension/output-limit-continuation.ts"
     ]
   },
   "scripts": {
