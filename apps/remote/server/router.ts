@@ -9,10 +9,13 @@
 // encrypted folder has nothing to unlock, and her supervisor is started when
 // the front door starts.
 //
-// Identity is whatever the client says it is, in `x-pi-remote-user`. The
-// folders are what protect anything worth protecting, and they are open
-// exactly when their owner is working; a name on a request grants nothing a
-// key does not already grant. A host with one person needs no header at all.
+// Identity is whatever the client says it is, in `x-pi-remote-user`, or in
+// the `user` query for a navigation that cannot carry a header: a download
+// link opened in a tab or saved from its context menu reaches this process
+// with nothing but its URL. The folders are what protect anything worth
+// protecting, and they are open exactly when their owner is working; a name
+// on a request grants nothing a key does not already grant. A host with one
+// person needs no name at all.
 import { existsSync } from "node:fs";
 import { unlink, writeFile, mkdir, chmod } from "node:fs/promises";
 import { join } from "node:path";
@@ -39,8 +42,12 @@ const byUser = new Map(PEOPLE.map((person) => [person.user, person]));
 const activeUsers = new Set<string>();
 const unit = (person: Person) => `pi-remote@${person.user}.service`;
 
-function identify(req: Request): Person | null {
-  const asserted = req.headers.get("x-pi-remote-user");
+function assertedName(req: Request, url: URL): string | null {
+  return req.headers.get("x-pi-remote-user") ?? url.searchParams.get("user");
+}
+
+function identify(req: Request, url: URL): Person | null {
+  const asserted = assertedName(req, url);
   if (asserted) return byUser.get(asserted) ?? null;
   return PEOPLE.length === 1 ? PEOPLE[0]! : null;
 }
@@ -199,12 +206,12 @@ async function route(req: Request, url: URL): Promise<Response> {
 
     if (url.pathname === "/v1/environments" && req.method === "GET") return Response.json({ environments });
 
-    const person = identify(req);
+    const person = identify(req, url);
     if (!person) {
       if (url.pathname === "/v1/environment" && req.method === "GET") return Response.json({ environment: lockedEnvironment() });
       const asset = req.method === "GET" ? webAsset(url.pathname) : null;
       if (asset) return asset;
-      if (req.headers.has("x-pi-remote-user")) return Response.json({ error: "This machine does not know you. Ask to be added to Pi Remote.", persons }, { status: 403 });
+      if (assertedName(req, url)) return Response.json({ error: "This machine does not know you. Ask to be added to Pi Remote.", persons }, { status: 403 });
       return Response.json({ error: "Say who you are", choosePerson: true, persons }, { status: 423 });
     }
 

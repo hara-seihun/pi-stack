@@ -39,7 +39,8 @@ function presentationMarkdown(source: string, sessionId: string) {
   return source.replace(/<pi-remote-file\s+src=["']([^"']+)["']\s*\/\s*>/gi, (_match, path) => {
     const name = String(path).split("/").filter(Boolean).at(-1) || "Download file";
     const label = name.replaceAll("&", "&amp;").replaceAll("[", "&#91;").replaceAll("]", "&#93;").replace(/[\r\n]+/g, " ");
-    return `\n\n[${label}](${API.sessionFiles.path({ sessionId }, { path })})\n\n`;
+    const link = API.sessionFiles.path({ sessionId }, { path });
+    return `\n\n[${label}](${window.PiRemotePerson?.href(link) ?? link})\n\n`;
   });
 }
 

@@ -2,7 +2,10 @@
 // than one person needs a name on every API request; the folder key is what
 // actually opens anything, so the name is just an address. Loaded before any
 // other script so every fetch in the app, the voice page, and the native shell
-// carries the header without knowing about it.
+// carries the header without knowing about it. A navigation cannot carry a
+// header, so a link to the API (a download opened in a tab, or saved from its
+// context menu) names the person in its query instead; the front door reads
+// either.
 (() => {
   "use strict";
   const PERSON_STORAGE = "pi-remote-person";
@@ -27,5 +30,13 @@
     return original(request);
   };
 
-  window.PiRemotePerson = Object.freeze({ get: read, set: write, header: "x-pi-remote-user" });
+  const href = (path: string) => {
+    const user = read();
+    if (!user) return path;
+    const url = new URL(path, window.location.href);
+    if (!url.searchParams.has("user")) url.searchParams.set("user", user);
+    return url.origin === window.location.origin ? `${url.pathname}${url.search}${url.hash}` : url.href;
+  };
+
+  window.PiRemotePerson = Object.freeze({ get: read, set: write, header: "x-pi-remote-user", href });
 })();

@@ -11,7 +11,7 @@ interface Window {
   texmath: unknown;
   katex: { renderToString(tex: string, options: { displayMode?: boolean }): string };
   normalizeLatexDelimiters(source: string): string;
-  PiRemotePerson: { get(): string; set(user: string): void; header: string };
+  PiRemotePerson: { get(): string; set(user: string): void; header: string; href(path: string): string };
   PiRemoteVoice: {
     create(options: { sessionId: string; onState(state: string, detail?: string): void; onNotice(message: string): void }): VoiceSession;
   };

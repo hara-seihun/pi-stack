@@ -24,7 +24,8 @@ function errorEntry(path: string, cause: unknown): { id: string; data: FileBrows
 
 function download(entry: FileBrowserEntry) {
   const anchor = document.createElement("a");
-  anchor.href = API.fileDownload.path({}, { path: entry.path });
+  const link = API.fileDownload.path({}, { path: entry.path });
+  anchor.href = window.PiRemotePerson?.href(link) ?? link;
   anchor.download = entry.name;
   anchor.rel = "noopener noreferrer";
   document.body.append(anchor);

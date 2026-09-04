@@ -130,6 +130,17 @@ describe("Pi Remote front door", () => {
     expect(response.status).toBe(403);
   });
 
+  test("a download link opened in a tab names its person in the query, since a navigation cannot carry a header", async () => {
+    const status = await fetch(`${base}/v1/lock-status?user=alice`);
+    expect(status.status).toBe(200);
+    expect(await status.json()).toEqual({ user: "alice", unlocked: false });
+    const locked = await fetch(`${base}/v1/sessions/thread/files?path=%2Ftmp%2Fnotes.md&user=alice`);
+    expect(locked.status).toBe(423);
+    expect((await locked.json()).locked).toBe(true);
+    const unknown = await fetch(`${base}/v1/lock-status?user=mallory`);
+    expect(unknown.status).toBe(403);
+  });
+
   test("an encrypted person needs a key, and a key that does not open the folder is reported as wrong", async () => {
     const missing = await fetch(`${base}/v1/unlock`, { method: "POST", headers: { "x-pi-remote-user": "alice", "content-type": "application/json" }, body: "{}" });
     expect(missing.status).toBe(400);
