@@ -1410,9 +1410,9 @@ async function terminateFailedHandoff(handoff: RuntimeHandoff) {
 }
 
 async function adoptHandoffRuntimes() {
-  for (const handoff of pendingHandoff) {
+  await Promise.all(pendingHandoff.map(async (handoff) => {
     const row = sessionRow.get(handoff.sessionId) as any;
-    if (!row) continue;
+    if (!row) return;
     const rt = runtimeFromHandoff(row, handoff);
     runtimes.set(row.id, rt);
     try {
@@ -1437,7 +1437,7 @@ async function adoptHandoffRuntimes() {
       await terminateFailedHandoff(handoff);
       recoverFailedHandoff(row.id);
     }
-  }
+  }));
   try { unlinkSync(HANDOFF_PATH); } catch {}
   for (const sessionId of runtimes.keys()) scheduleThreadNameIfDue(sessionId);
 }
@@ -1446,17 +1446,16 @@ async function reapUnclaimedRuntimeHosts() {
   const directory = join(DATA, "runtime-hosts");
   if (!existsSync(directory)) return;
   const claimed = new Set([...runtimes.values()].map((rt) => rt.transport.socketPath));
-  for (const name of readdirSync(directory)) {
-    if (!name.endsWith(".sock")) continue;
+  await Promise.all(readdirSync(directory).filter((name) => name.endsWith(".sock")).map(async (name) => {
     const socketPath = join(directory, name);
-    if (claimed.has(socketPath)) continue;
+    if (claimed.has(socketPath)) return;
     try {
       const transport = await attachRuntimeHost(socketPath, () => {});
       await transport.terminate();
     } catch {
       try { unlinkSync(socketPath); } catch {}
     }
-  }
+  }));
 }
 
 async function activate(row: any): Promise<Runtime> {
