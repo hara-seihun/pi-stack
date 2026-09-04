@@ -79,6 +79,15 @@ describe("Pi Remote front door", () => {
     const scriptPath = html.match(/src="(\/assets\/[^"]+\.js)"/)?.[1];
     expect(scriptPath).toBeTruthy();
     expect((await fetch(`${base}${scriptPath}`)).status).toBe(200);
+
+    const stylesheetPath = html.match(/href="(\/vendor\/katex\/katex\.min\.css)"/)?.[1];
+    expect(stylesheetPath).toBeTruthy();
+    const stylesheet = await (await fetch(`${base}${stylesheetPath}`)).text();
+    const fontPath = stylesheet.match(/url\((fonts\/KaTeX_Main-Regular\.woff2)\)/)?.[1];
+    expect(fontPath).toBeTruthy();
+    const font = await fetch(new URL(fontPath!, `${base}${stylesheetPath}`));
+    expect(font.status).toBe(200);
+    expect(font.headers.get("content-type")).toBe("font/woff2");
   });
 
   test("answers the Android preflight for the person header before any identity is known", async () => {

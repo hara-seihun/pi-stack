@@ -269,6 +269,7 @@ function SettingsPanel({ session, open, onClose }: { session: Session | null; op
   const [settings, setSettings] = useState<ThreadSettings | null>(null);
   const [saving, setSaving] = useState("");
   const [failure, setFailure] = useState("");
+  const editable = Boolean(session) && normalizedActivity(session?.activity) === "IDLE" && session?.queuedMessages.length === 0;
   useEffect(() => {
     if (!open || !session) return;
     let cancelled = false;
@@ -294,17 +295,18 @@ function SettingsPanel({ session, open, onClose }: { session: Session | null; op
     <AnimatePresence>{open && <motion.aside key="settings-panel" className="settings" aria-label="Thread settings" initial={{ x: "100%" }} animate={{ x: 0 }} exit={{ x: "100%" }} transition={{ type: "spring", stiffness: 520, damping: 42, mass: 0.9 }}>
       <header className="settings-header"><div className="settings-title"><span>Thread settings</span><h2 title={session?.name}>{session?.name || "Thread"}</h2></div><button type="button" className="settings-close" aria-label="Close thread settings" onClick={onClose}>×</button></header>
       <div className="settings-body">{failure && <p className="setting-unavailable" role="alert">{failure}</p>}{!settings ? !failure && <div className="settings-loading" aria-label="Loading thread settings"><span /><span /><span /></div> : <>
+        {!editable && <p className="setting-unavailable">Settings can be changed when the thread is idle.</p>}
         <section className="setting-card">
           <div className="setting-heading"><div><h3>Model</h3><p>The model used for new messages</p></div>{saving === "model" && <span className="setting-saving">Saving</span>}</div>
-          <div className="setting-select"><select aria-label="Model" value={`${settings.model?.provider}\0${settings.model?.id}`} disabled={Boolean(saving)} onChange={(event) => { const [modelProvider, modelId] = event.target.value.split("\0"); void update("model", { modelProvider, modelId }); }}>{settings.models.map((model) => <option key={`${model.provider}:${model.id}`} value={`${model.provider}\0${model.id}`}>{model.name || model.id} · {model.provider}</option>)}</select><span aria-hidden="true">⌄</span></div>
+          <div className="setting-select"><select aria-label="Model" value={`${settings.model?.provider}\0${settings.model?.id}`} disabled={Boolean(saving) || !editable} onChange={(event) => { const [modelProvider, modelId] = event.target.value.split("\0"); void update("model", { modelProvider, modelId }); }}>{settings.models.map((model) => <option key={`${model.provider}:${model.id}`} value={`${model.provider}\0${model.id}`}>{model.name || model.id} · {model.provider}</option>)}</select><span aria-hidden="true">⌄</span></div>
         </section>
         <section className="setting-card">
           <div className="setting-heading"><div><h3>Thinking</h3><p>How much reasoning the model can use</p></div>{saving === "thinking" && <span className="setting-saving">Saving</span>}</div>
-          <div className="setting-options thinking-options" role="radiogroup" aria-label="Thinking level">{settings.thinkingLevels.map((level) => <button key={level} type="button" role="radio" aria-checked={settings.thinkingLevel === level} className={settings.thinkingLevel === level ? "selected" : ""} disabled={Boolean(saving)} onClick={() => void update("thinking", { thinkingLevel: level })}>{settingLabel(level)}</button>)}</div>
+          <div className="setting-options thinking-options" role="radiogroup" aria-label="Thinking level">{settings.thinkingLevels.map((level) => <button key={level} type="button" role="radio" aria-checked={settings.thinkingLevel === level} className={settings.thinkingLevel === level ? "selected" : ""} disabled={Boolean(saving) || !editable} onClick={() => void update("thinking", { thinkingLevel: level })}>{settingLabel(level)}</button>)}</div>
         </section>
         <section className="setting-card">
           <div className="setting-heading"><div><h3>Speed</h3><p>Request scheduling priority</p></div>{saving === "speed" && <span className="setting-saving">Saving</span>}</div>
-          {settings.speedModes.length ? <div className="setting-options speed-options" role="radiogroup" aria-label="Speed mode">{settings.speedModes.map((mode) => <button key={mode} type="button" role="radio" aria-checked={settings.speedMode === mode} className={settings.speedMode === mode ? "selected" : ""} disabled={Boolean(saving)} onClick={() => void update("speed", { speedMode: mode })}>{settingLabel(mode)}</button>)}</div> : <p className="setting-unavailable">This model does not offer speed controls.</p>}
+          {settings.speedModes.length ? <div className="setting-options speed-options" role="radiogroup" aria-label="Speed mode">{settings.speedModes.map((mode) => <button key={mode} type="button" role="radio" aria-checked={settings.speedMode === mode} className={settings.speedMode === mode ? "selected" : ""} disabled={Boolean(saving) || !editable} onClick={() => void update("speed", { speedMode: mode })}>{settingLabel(mode)}</button>)}</div> : <p className="setting-unavailable">This model does not offer speed controls.</p>}
         </section>
       </>}</div>
     </motion.aside>}</AnimatePresence>
