@@ -1450,8 +1450,11 @@ async function adoptHandoffRuntimes() {
     } catch (cause) {
       console.error(`Could not adopt runtime ${row.id}`, cause);
       runtimes.delete(row.id);
-      await terminateFailedHandoff(handoff);
-      recoverFailedHandoff(row.id);
+      void (async () => {
+        if (existsSync(handoff.socketPath)) await terminateFailedHandoff(handoff);
+        recoverFailedHandoff(row.id);
+        kickSession(row.id);
+      })().catch((recoveryCause) => console.error(`Could not recover runtime ${row.id}`, recoveryCause));
     }
   }));
   try { unlinkSync(HANDOFF_PATH); } catch {}
