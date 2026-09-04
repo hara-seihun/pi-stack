@@ -1065,6 +1065,17 @@ function repositoryRemotes(repository) {
   return { fetch: fetch.stdout, push: push.status === 0 && push.stdout.length > 0 ? push.stdout : fetch.stdout };
 }
 
+// An explicit push URL disables Git's `url.<base>.pushInsteadOf` rewriting for the remote, so a
+// checkout only records one when the source really pushes somewhere other than it fetches. A
+// programme checkout cloned from a read-only URL then still pushes through the host's rewrite.
+function configurePushUrl(gitArgs, upstream) {
+  if (upstream.push !== upstream.fetch) {
+    run("git", [...gitArgs, "remote", "set-url", "--push", "origin", upstream.push]);
+  } else if (command("git", [...gitArgs, "config", "--get", "remote.origin.pushurl"]).status === 0) {
+    run("git", [...gitArgs, "config", "--unset-all", "remote.origin.pushurl"]);
+  }
+}
+
 function prepareMirror(mirror, repository, upstream) {
   mkdirSync(path.dirname(mirror), { recursive: true, mode: 0o700 });
   if (!existsSync(mirror)) run("git", ["init", "--bare", mirror]);
@@ -1072,7 +1083,7 @@ function prepareMirror(mirror, repository, upstream) {
     const exists = command("git", ["--git-dir", mirror, "remote", "get-url", name]).status === 0;
     run("git", ["--git-dir", mirror, "remote", exists ? "set-url" : "add", name, url]);
   }
-  run("git", ["--git-dir", mirror, "remote", "set-url", "--push", "origin", upstream.push]);
+  configurePushUrl(["--git-dir", mirror], upstream);
   run("git", ["--git-dir", mirror, "config", "remote.origin.mirror", "false"]);
   run("git", [
     "--git-dir", mirror, "config", "--replace-all", "remote.origin.fetch",
@@ -1115,7 +1126,7 @@ function createCommand(database, args, statePath) {
     } else {
       run("git", ["clone", "--reference-if-able", mirror, "--no-checkout", repository, destination], { timeout: 120_000 });
       git(destination, ["remote", "set-url", "origin", upstream.fetch]);
-      git(destination, ["remote", "set-url", "--push", "origin", upstream.push]);
+      configurePushUrl(["-C", destination], upstream);
       // The shared mirror rewrites its commit-graph chain as it fetches. An incremental graph in a
       // reference clone can retain hashes of mirror graph files that no longer exist, making routine
       // Git commands warn even though every object remains available through alternates.
