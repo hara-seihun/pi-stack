@@ -4,7 +4,7 @@ import { SortableContext, arrayMove, sortableKeyboardCoordinates, useSortable, v
 import { CSS } from "@dnd-kit/utilities";
 import { AnimatePresence, MotionConfig, motion } from "motion/react";
 import { API } from "../../server/api";
-import type { GovernorProvider, GovernorState, ThreadStartModel } from "../../server/protocol";
+import { BASH_TIMEOUT_OPTIONS, type GovernorProvider, type GovernorState, type ThreadStartModel } from "../../server/protocol";
 import { deleteCachedContext, readCachedContext, writeCachedContext } from "./context-cache";
 import { api, piFetch, registerUnlockHandler, syncRequest } from "./client";
 import { ContextTranscript, CopyButton, Markdown, modelContextEntries } from "./context";
@@ -265,6 +265,12 @@ function settingLabel(value: string) {
   return value ? value[0].toUpperCase() + value.slice(1).replaceAll("_", " ") : "";
 }
 
+function bashTimeoutLabel(seconds: number) {
+  if (seconds === 60) return "60 seconds";
+  if (seconds === 300) return "5 minutes";
+  return "Half an hour";
+}
+
 function SettingsPanel({ session, open, onClose }: { session: Session | null; open: boolean; onClose(): void }) {
   const [settings, setSettings] = useState<ThreadSettings | null>(null);
   const [saving, setSaving] = useState("");
@@ -281,7 +287,7 @@ function SettingsPanel({ session, open, onClose }: { session: Session | null; op
       .catch((error) => { if (!cancelled) setFailure(error?.message || String(error)); });
     return () => { cancelled = true; };
   }, [open, session?.id]);
-  const update = async (field: string, body: Record<string, string>) => {
+  const update = async (field: string, body: Record<string, string | number>) => {
     if (!session || saving) return;
     setSaving(field);
     setFailure("");
@@ -307,6 +313,10 @@ function SettingsPanel({ session, open, onClose }: { session: Session | null; op
         <section className="setting-card">
           <div className="setting-heading"><div><h3>Speed</h3><p>Request scheduling priority</p></div>{saving === "speed" && <span className="setting-saving">Saving</span>}</div>
           {settings.speedModes.length ? <div className="setting-options speed-options" role="radiogroup" aria-label="Speed mode">{settings.speedModes.map((mode) => <button key={mode} type="button" role="radio" aria-checked={settings.speedMode === mode} className={settings.speedMode === mode ? "selected" : ""} disabled={Boolean(saving) || !editable} onClick={() => void update("speed", { speedMode: mode })}>{settingLabel(mode)}</button>)}</div> : <p className="setting-unavailable">This model does not offer speed controls.</p>}
+        </section>
+        <section className="setting-card">
+          <div className="setting-heading"><div><h3>Bash timeout</h3><p>Maximum time each bash command may run</p></div>{saving === "bash-timeout" && <span className="setting-saving">Saving</span>}</div>
+          <div className="setting-select"><select aria-label="Bash timeout" value={settings.bashTimeoutSeconds} disabled={Boolean(saving) || !editable} onChange={(event) => void update("bash-timeout", { bashTimeoutSeconds: Number(event.target.value) })}>{BASH_TIMEOUT_OPTIONS.map((seconds) => <option key={seconds} value={seconds}>{bashTimeoutLabel(seconds)}</option>)}</select><span aria-hidden="true">⌄</span></div>
         </section>
       </>}</div>
     </motion.aside>}</AnimatePresence>

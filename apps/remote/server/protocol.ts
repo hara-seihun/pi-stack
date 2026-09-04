@@ -240,6 +240,10 @@ export interface SyncResponse {
   } | null;
 }
 
+export const BASH_TIMEOUT_OPTIONS = [60, 300, 1800] as const;
+export type BashTimeoutSeconds = (typeof BASH_TIMEOUT_OPTIONS)[number];
+export const DEFAULT_BASH_TIMEOUT_SECONDS: BashTimeoutSeconds = 1800;
+
 export interface ThreadSettings {
   models: Array<{ id: string; name?: string; provider: string; common?: boolean }>;
   model: { id: string; provider: string } | null;
@@ -247,6 +251,7 @@ export interface ThreadSettings {
   thinkingLevel: string | null;
   speedModes: string[];
   speedMode: string | null;
+  bashTimeoutSeconds: BashTimeoutSeconds;
 }
 
 export interface SlashCommand {

@@ -176,7 +176,7 @@ model_id = sys.argv[sys.argv.index('--model') + 1] if '--model' in sys.argv else
 thinking_level = sys.argv[sys.argv.index('--thinking') + 1] if '--thinking' in sys.argv else 'off'
 # Published by rename so a reader never catches a half-written launch record.
 with open(os.environ['PI_FAKE_LAUNCH'] + '.writing', 'w') as launch:
- json.dump({'argv': sys.argv, 'pid': os.getpid(), 'sessionId': os.environ.get('PI_REMOTE_SESSION_ID'), 'serverUrl': os.environ.get('PI_REMOTE_SERVER_URL'), 'serviceTierFile': os.environ.get('PI_REMOTE_SERVICE_TIER_FILE'), 'agentDir': os.environ.get('PI_CODING_AGENT_DIR'), 'offline': os.environ.get('PI_OFFLINE')}, launch)
+ json.dump({'argv': sys.argv, 'pid': os.getpid(), 'sessionId': os.environ.get('PI_REMOTE_SESSION_ID'), 'serverUrl': os.environ.get('PI_REMOTE_SERVER_URL'), 'serviceTierFile': os.environ.get('PI_REMOTE_SERVICE_TIER_FILE'), 'bashTimeoutSeconds': os.environ.get('PI_REMOTE_BASH_TIMEOUT_MAX_SECONDS'), 'agentDir': os.environ.get('PI_CODING_AGENT_DIR'), 'offline': os.environ.get('PI_OFFLINE')}, launch)
 os.replace(os.environ['PI_FAKE_LAUNCH'] + '.writing', os.environ['PI_FAKE_LAUNCH'])
 streaming = False
 compacting = False
@@ -535,6 +535,24 @@ describe("web and supervisor integration", () => {
     expect(assets.length).toBeGreaterThan(0);
     for (const path of assets) expect((await fetch(base + path)).status).toBe(200);
     expect((await fetch(base + "/voice.html")).status).toBe(200);
+  });
+
+  test("stores a bash timeout per thread and restarts its runtime with that limit", async () => {
+    const id = await createThread();
+    const before = await api("GET", `/v1/sessions/${id}/settings`);
+    expect(before.value.settings.bashTimeoutSeconds).toBe(1800);
+    const previousPid = Number(JSON.parse(readFileSync(fakeLaunch, "utf8")).pid);
+
+    const updated = await api("PUT", `/v1/sessions/${id}/settings`, { bashTimeoutSeconds: 300 });
+    expect(updated.status).toBe(200);
+    expect(updated.value.settings.bashTimeoutSeconds).toBe(300);
+    const launch = JSON.parse(readFileSync(fakeLaunch, "utf8"));
+    expect(Number(launch.pid)).not.toBe(previousPid);
+    expect(launch.bashTimeoutSeconds).toBe("300");
+
+    const invalid = await api("PUT", `/v1/sessions/${id}/settings`, { bashTimeoutSeconds: 61 });
+    expect(invalid.status).toBe(400);
+    expect((await api("GET", `/v1/sessions/${id}/settings`)).value.settings.bashTimeoutSeconds).toBe(300);
   });
 
   test("persists a complete active thread order", async () => {

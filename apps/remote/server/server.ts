@@ -17,7 +17,7 @@ import { knownEnvironments, listPersons, publicPerson } from "./persons";
 import { API_CORS_HEADERS } from "./cors";
 import { fileBrowserError, listDirectory, localFileResponse, registerIconAssets, webResponse } from "./files";
 import { governorControls, isGovernorProvider, toggleGovernor } from "./governors";
-import type { AgentModelCount, Dashboard, DocumentUpdate, QueuedMessage, Session, SupervisorState, SyncRequest, SyncResponse } from "./protocol";
+import { BASH_TIMEOUT_OPTIONS, DEFAULT_BASH_TIMEOUT_SECONDS, type AgentModelCount, type BashTimeoutSeconds, type Dashboard, type DocumentUpdate, type QueuedMessage, type Session, type SupervisorState, type SyncRequest, type SyncResponse } from "./protocol";
 import { MachineActions } from "./machine-actions";
 import { availableUploadPath, storeUpload, uploadName } from "./uploads";
 import {
@@ -56,6 +56,13 @@ const WEB_DIR = join(import.meta.dir, "../web/dist");
 const PACKAGE_ROOT = realpathSync(join(import.meta.dir, ".."));
 const RELEASE_COMMIT_PATH = join(PACKAGE_ROOT, ".pi-stack-commit");
 const RELEASE_COMMIT = existsSync(RELEASE_COMMIT_PATH) ? readFileSync(RELEASE_COMMIT_PATH, "utf8").trim() : null;
+
+function bashTimeoutSeconds(value: unknown): BashTimeoutSeconds {
+  const seconds = Number(value);
+  return BASH_TIMEOUT_OPTIONS.some((option) => option === seconds)
+    ? seconds as BashTimeoutSeconds
+    : DEFAULT_BASH_TIMEOUT_SECONDS;
+}
 
 function configuredPackageSource(entry: unknown): string | null {
   if (typeof entry === "string") return entry;
@@ -1309,6 +1316,7 @@ function runtimeEnvironment(row: any) {
     HOME,
     PATH: `${join(HOME, ".local/bin")}:${join(HOME, ".bun/bin")}:${process.env.PATH ?? ""}`,
     PI_REMOTE_SESSION_ID: row.id,
+    PI_REMOTE_BASH_TIMEOUT_MAX_SECONDS: String(bashTimeoutSeconds(row.bash_timeout_seconds)),
     PI_REMOTE_SERVICE_TIER_FILE: serviceTierPath(row.id),
     PI_REMOTE_SERVER_URL: `http://${HOST}:${PORT}`,
     PI_CODING_AGENT_DIR: AGENT_DIR,
@@ -1588,6 +1596,7 @@ async function threadSettings(row: any) {
     thinkingLevel: state.thinkingLevel ?? "off",
     speedMode: latest?.service_tier === "priority" ? "priority" : "normal",
     speedModes: supportsPriority ? ["normal", "priority"] : [],
+    bashTimeoutSeconds: bashTimeoutSeconds(latest?.bash_timeout_seconds),
     models,
     thinkingLevels: availableThinking.levels ?? ["off"],
   };
@@ -2567,6 +2576,23 @@ const server = Bun.serve({
           const tier = speedMode === "priority" ? "priority" : "default";
           writeServiceTier(id, tier);
           db.query("UPDATE sessions SET service_tier=?,updated_at=?,revision=revision+1 WHERE id=?").run(tier, now(), id);
+        }
+        if (body.bashTimeoutSeconds != null) {
+          const timeout = Number(body.bashTimeoutSeconds);
+          if (!BASH_TIMEOUT_OPTIONS.some((option) => option === timeout)) {
+            return error(`bashTimeoutSeconds must be one of ${BASH_TIMEOUT_OPTIONS.join(", ")}`);
+          }
+          const current = sessionRow.get(id) as any;
+          if (bashTimeoutSeconds(current?.bash_timeout_seconds) !== timeout) {
+            db.query("UPDATE sessions SET bash_timeout_seconds=?,updated_at=?,revision=revision+1 WHERE id=?")
+              .run(timeout, now(), id);
+            rt.expectedExit = true;
+            rt.suppressOutput = true;
+            setRuntimePhase(id, rt, "STOPPING");
+            await terminateRuntimeProcess(rt);
+            if (runtimes.get(id) === rt) return error("Could not restart the thread with its new bash timeout", 500);
+            await activate(sessionRow.get(id));
+          }
         }
         return json({ settings: await threadSettings(sessionRow.get(id)) });
       } catch (e: any) { return error(e.message ?? "Could not update thread settings", 500); }

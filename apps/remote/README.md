@@ -69,7 +69,6 @@ The registry file is the whole per-person configuration. Its `environment` objec
     "PI_REMOTE_THREAD_NAMING_MODEL": "openai-codex/gpt-5.6-luna:low",
     "PI_REMOTE_ORCHESTRATOR_DB": "/home/kenan/.local/share/pi-orchestrator/ledger.sqlite3",
     "PI_REMOTE_ORCHESTRATOR_RUNS": "/home/kenan/.local/share/pi-orchestrator/runs",
-    "PI_REMOTE_BASH_TIMEOUT_MAX_SECONDS": 300,
     "PI_REMOTE_WORKSPACES": [{ "id": "home", "name": "Kenan", "path": "/home/kenan" }],
     "PI_REMOTE_DESTINATIONS": "home"
   }
@@ -87,7 +86,9 @@ The registry file is the whole per-person configuration. Its `environment` objec
 }]
 ```
 
-Values in `environment` become process environment variables before the supervisor loads. Existing process variables win. Arrays and objects are JSON-encoded automatically. `PI_REMOTE_BASH_TIMEOUT_MAX_SECONDS` sets the maximum foreground bash call for threads on that host. All persons on a machine must agree on the environment id and name.
+Values in `environment` become process environment variables before the supervisor loads. Existing process variables win. Arrays and objects are JSON-encoded automatically. All persons on a machine must agree on the environment id and name.
+
+Each thread starts with a 30-minute maximum for foreground bash calls. Its Thread settings panel can change that limit to 60 seconds, 5 minutes, or half an hour. Pi Remote stores the choice with the thread and restarts its idle runtime so the next agent request receives the new limit.
 
 ### The front door
 

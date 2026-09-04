@@ -46,9 +46,10 @@ test("the supervisor adopts endpoint-local profiles and drops remote execution c
     expect(sessionColumns).toContain("profile_id");
     expect(sessionColumns).toContain("display_order");
     expect(sessionColumns).toContain("named_at_message_count");
-    expect(db.query("SELECT id,display_order,named_at_message_count FROM sessions ORDER BY id").all()).toEqual([
-      { id: "personal", display_order: 0, named_at_message_count: 1 },
-      { id: "remote", display_order: 0, named_at_message_count: 0 },
+    expect(sessionColumns).toContain("bash_timeout_seconds");
+    expect(db.query("SELECT id,display_order,named_at_message_count,bash_timeout_seconds FROM sessions ORDER BY id").all()).toEqual([
+      { id: "personal", display_order: 0, named_at_message_count: 1, bash_timeout_seconds: 1800 },
+      { id: "remote", display_order: 0, named_at_message_count: 0, bash_timeout_seconds: 1800 },
     ]);
     expect(sessionColumns).not.toContain("execution_target");
     expect(sessionColumns).not.toContain("remote_cwd");
