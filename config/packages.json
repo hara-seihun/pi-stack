@@ -2,7 +2,7 @@
   "version": 2,
   "packages": [
     { "id": "orchestrator", "source": "packages/orchestrator", "deployed": "/srv/pi/pi-orchestrator" },
-    { "id": "claude-oauth", "source": "npm:@pi-plugins/claude-oauth@0.3.3" },
+    { "id": "claude-oauth", "source": "git:github.com/hara-seihun/pi-plugins@94c58101baa87f482b776dfd7e46216c2228996c" },
     { "id": "vcc", "source": "git:github.com/hara-seihun/pi-vcc@a4bc3046ba41d4c720f114d957497ecf2b3b6b66" },
     { "id": "bash-timeout-guard", "source": "packages/runtime/extensions/bash-timeout-guard", "deployed": "/srv/pi/runtime/extensions/bash-timeout-guard" },
     { "id": "browser-native", "source": "npm:pi-agent-browser-native@0.5.0" },
