@@ -35,7 +35,7 @@ PI_ORCHESTRATOR_HOST
 PI_ORCHESTRATOR_PORT
 ```
 
-The JSON config may set model `profiles`, `backgroundSpendFraction`, machine and account concurrency, meter age, reconciliation periods, stall limits, `taskManifest`, `authPath`, and `agentDir`.
+The JSON config may set model `profiles`, `backgroundSpendFraction`, machine and account concurrency, meter age, reconciliation periods, stall limits, `taskManifest`, `authPath`, and `agentDir`. The strict `sol` and `opus` profiles are always available alongside configured profiles.
 
 A lane manifest has `version: 2`, an optional `snapshotCommand`, and a `lanes` array. Every lane declares `id`, `prompt`, `cwd`, `profile`, and positive `weight`. `fixedDemand` makes demand static. The snapshot command prints one atomic object:
 
@@ -58,6 +58,8 @@ pi-orchestrator status
 pi-orchestrator run --prompt "..." --profile standard
 pi-orchestrator wave review --count 3
 pi-orchestrator room create --name search --prompt "..." --members 4
+pi-orchestrator room add search --members 2 --profile opus
+pi-orchestrator room resize search --members 8
 pi-orchestrator room message search --message "New evidence" --wake
 pi-orchestrator room close search
 pi-orchestrator abort RUN_ID
@@ -67,6 +69,8 @@ pi-orchestrator resume
 pi-orchestrator boost openai-codex 3
 pi-orchestrator account import openai-codex-3 --provider openai-codex --credential-file credential.json
 ```
+
+`room add` creates additional members immediately and can give them a different profile from the room default. `room resize` changes the room's ongoing membership target; reducing it stops the newest non-coordinator members first.
 
 Import reads credentials from a file so tokens do not enter process arguments. `account remove` disables admission and removes the credential while historical attribution remains intact.
 

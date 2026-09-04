@@ -113,7 +113,13 @@ export class Daemon {
         }
       }
       for(const room of this.store.rooms().filter((room)=>!room.closed_at)){
-        const activeRuns=this.store.runs(["queued","starting","running","parked"]).filter((run)=>run.roomId===room.id);
+        let activeRuns=this.store.runs(["queued","starting","running","parked"]).filter((run)=>run.roomId===room.id);
+        const excess=activeRuns.length-Number(room.desired_members);
+        if(excess>0){
+          const remove=[...activeRuns].sort((a,b)=>Number(a.memberName==="coordinator")-Number(b.memberName==="coordinator")||b.createdAt-a.createdAt||b.id.localeCompare(a.id)).slice(0,excess);
+          for(const run of remove)if(run.state==="queued")this.store.updateRun(run.id,{state:"aborted",failureKind:"operator",result:"room membership reduced"});else this.store.setControl(`abort:${run.id}`,"room membership reduced");
+          activeRuns=activeRuns.filter((run)=>!remove.some((candidate)=>candidate.id===run.id));
+        }
         let missing=Number(room.desired_members)-activeRuns.length;
         if(missing>0&&room.coordinator_prompt&&!activeRuns.some((run)=>run.memberName==="coordinator")){
           this.store.createRuns({count:1,source:"room",sourceId:room.id,roomId:room.id,prompt:room.coordinator_prompt,cwd:room.cwd,profile:room.profile,budget:room.budget,memberNames:["coordinator"]});
@@ -237,6 +243,8 @@ export class Daemon {
       if(method==="POST"&&url.pathname==="/v1/run"){const input=await body(req);const ids=this.store.createRuns({count:Number(input.count??1),source:"direct",prompt:String(input.prompt),cwd:String(input.cwd??process.cwd()),profile:String(input.profile??"standard"),budget:input.force?"force":"background"});void this.reconcile();return json(res,201,{runIds:ids});}
       if(method==="POST"&&url.pathname==="/v1/wave"){const input=await body(req),lane=this.store.lane(String(input.lane));if(!lane)return json(res,404,{error:"lane not found"});const ids=this.store.createRuns({count:Number(input.count??1),source:"direct",sourceId:lane.id,prompt:lane.prompt,cwd:lane.cwd,profile:lane.profile,budget:input.force?"force":"background"});void this.reconcile();return json(res,201,{runIds:ids});}
       if(method==="POST"&&url.pathname==="/v1/rooms"){const created=this.store.createRoom(await body(req));void this.reconcile();return json(res,201,created);}
+      const roomMembers=/^\/v1\/rooms\/([^/]+)\/members$/.exec(url.pathname);if(method==="POST"&&roomMembers){const input=await body(req),created=this.store.addRoomMembers(decodeURIComponent(roomMembers[1]!),Number(input.members),input.profile===undefined?undefined:String(input.profile));void this.reconcile();return json(res,201,created);}
+      const roomResize=/^\/v1\/rooms\/([^/]+)\/resize$/.exec(url.pathname);if(method==="POST"&&roomResize){const input=await body(req),room=this.store.resizeRoom(decodeURIComponent(roomResize[1]!),Number(input.members));void this.reconcile();return json(res,200,{room});}
       const roomClose=/^\/v1\/rooms\/([^/]+)\/close$/.exec(url.pathname);if(method==="POST"&&roomClose){this.store.closeRoom(decodeURIComponent(roomClose[1]!));return json(res,200,{ok:true});}
       const roomMessage=/^\/v1\/rooms\/([^/]+)\/messages$/.exec(url.pathname);
       if(method==="GET"&&roomMessage){const room=this.store.room(decodeURIComponent(roomMessage[1]!));if(!room)return json(res,404,{error:"room not found"});return json(res,200,{messages:this.store.roomMessages(room.id,Number(url.searchParams.get("after")??0))});}

@@ -8,7 +8,7 @@ Run `npm run docs --workspace=pi-orchestrator` after changing commands or durabl
 - `status`: Print accounts, lanes, rooms, leases, and active runs.
 - `run`: Start one or more direct sessions.
 - `wave`: Start a one-off wave from a declared lane.
-- `room`: Create, inspect, message, or close a warm room.
+- `room`: Create, add to, resize, inspect, message, or close a warm room.
 - `pause / resume`: Set or clear the global launch halt.
 - `abort / kill`: Stop one run gracefully or immediately.
 - `boost`: Set a provider pacing multiplier or halt.

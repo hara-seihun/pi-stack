@@ -315,6 +315,23 @@ export class Store {
   }
   rooms():any[]{return this.db.prepare("SELECT * FROM room ORDER BY created_at").all() as any[];}
   room(idOrName:string):any|undefined{return this.db.prepare("SELECT * FROM room WHERE id=? OR name=?").get(idOrName,idOrName) as any;}
+  addRoomMembers(idOrName:string,members:number,profile?:string,at=Date.now()):{room:any;runIds:string[]}{
+    if(!Number.isInteger(members)||members<1)throw new Error("room members must be a positive integer");
+    const room=this.room(idOrName);if(!room)throw new Error(`unknown room ${idOrName}`);if(room.closed_at)throw new Error(`room ${idOrName} is closed`);
+    const existing=Number((this.db.prepare("SELECT COUNT(*) count FROM run WHERE room_id=?").get(room.id) as any).count),runIds:string[]=[];
+    this.transaction(()=>{
+      this.db.prepare("UPDATE room SET desired_members=desired_members+?,updated_at=? WHERE id=?").run(members,at,room.id);
+      const insert=this.db.prepare(`INSERT INTO run(id,source,source_id,room_id,member_name,prompt,cwd,profile,budget,state,created_at,updated_at) VALUES(?,'room',?,?,?,?,?,?,?,'queued',?,?)`);
+      for(let i=0;i<members;i++){const runId=crypto.randomUUID();runIds.push(runId);insert.run(runId,room.id,room.id,`member-${existing+i+1}`,room.prompt,room.cwd,profile??room.profile,room.budget,at,at);}
+    });
+    return{room:this.room(room.id),runIds};
+  }
+  resizeRoom(idOrName:string,members:number,at=Date.now()):any{
+    if(!Number.isInteger(members)||members<1)throw new Error("room members must be a positive integer");
+    const room=this.room(idOrName);if(!room)throw new Error(`unknown room ${idOrName}`);if(room.closed_at)throw new Error(`room ${idOrName} is closed`);
+    this.db.prepare("UPDATE room SET desired_members=?,updated_at=? WHERE id=?").run(members,at,room.id);
+    return this.room(room.id);
+  }
   closeRoom(idOrName:string,at=Date.now()):void{
     const room=this.room(idOrName);if(!room)throw new Error(`unknown room ${idOrName}`);
     this.transaction(()=>{

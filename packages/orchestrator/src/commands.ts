@@ -12,7 +12,7 @@ export const COMMANDS=[
   ["status","Print accounts, lanes, rooms, leases, and active runs"],
   ["run","Start one or more direct sessions"],
   ["wave","Start a one-off wave from a declared lane"],
-  ["room","Create, inspect, message, or close a warm room"],
+  ["room","Create, add to, resize, inspect, message, or close a warm room"],
   ["pause / resume","Set or clear the global launch halt"],
   ["abort / kill","Stop one run gracefully or immediately"],
   ["boost","Set a provider pacing multiplier or halt"],
@@ -60,9 +60,11 @@ export async function dispatch(argv:string[]):Promise<void>{
     if(action==="status"){const status=await request("/v1/status");output(name?status.rooms.filter((room:any)=>room.name===name||room.id===name):status.rooms);return;}
     if(!name)throw new Error(`room ${action} requires --name`);
     if(action==="create"){output(await request("/v1/rooms","POST",{name,prompt:required(named,"prompt"),coordinatorPrompt:named.get("coordinator-prompt"),cwd:named.get("cwd")??process.cwd(),profile:named.get("profile")??"standard",budget:named.has("force")?"force":"background",members:Number(named.get("members")??2)}));return;}
+    if(action==="add"){output(await request(`/v1/rooms/${encodeURIComponent(name)}/members`,"POST",{members:Number(required(named,"members")),profile:named.get("profile")}));return;}
+    if(action==="resize"){output(await request(`/v1/rooms/${encodeURIComponent(name)}/resize`,"POST",{members:Number(required(named,"members"))}));return;}
     if(action==="message"){output(await request(`/v1/rooms/${encodeURIComponent(name)}/messages`,"POST",{targetRunId:named.get("run"),body:required(named,"message"),wake:named.has("wake")}));return;}
     if(action==="close"){output(await request(`/v1/rooms/${encodeURIComponent(name)}/close`,"POST"));return;}
-    throw new Error("room action must be create, status, message, or close");
+    throw new Error("room action must be create, add, resize, status, message, or close");
   }
   throw new Error(USAGE);
 }

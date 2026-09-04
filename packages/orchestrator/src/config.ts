@@ -11,9 +11,14 @@ const expert = catalogModel("opus")!;
 export function loadConfig(path = process.env.PI_ORCHESTRATOR_CONFIG ?? join(homedir(), ".config/pi-orchestrator/config.json")): OrchestratorConfig {
   let local: any = {};
   try { local = JSON.parse(readFileSync(path,"utf8")); } catch (error: any) { if(error?.code!=="ENOENT") throw error; }
-  const profiles = local.profiles ?? {
-    standard: [standard, expert].map(({provider,model,thinking})=>({provider,model,thinking})),
-    expert: [expert, standard].map(({provider,model,thinking})=>({provider,model,thinking})),
+  const candidate=({provider,model,thinking}:{provider:string;model:string;thinking?:string})=>({provider,model,thinking});
+  const profiles = {
+    ...(local.profiles ?? {
+      standard: [candidate(standard),candidate(expert)],
+      expert: [candidate(expert),candidate(standard)],
+    }),
+    sol: [candidate(standard)],
+    opus: [candidate(expert)],
   };
   return {
     profiles,
