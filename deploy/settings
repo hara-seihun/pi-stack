@@ -98,6 +98,10 @@ cat > "$vcc_config" <<'JSON'
   "smartKeepTail": true,
   "continueAfterThresholdCompact": true,
   "interTurnCompactionTokens": 250000,
+  "interTurnCompactionTokensByModel": {
+    "openai/gpt-6-astra": 500000,
+    "openai-codex/gpt-6-astra": 500000
+  },
   "debug": false
 }
 JSON
