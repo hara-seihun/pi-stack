@@ -1,10 +1,11 @@
 # Pi runtime packages
 
-Reusable extensions for [Pi](https://pi.dev), plus the pinned Pi and `agent-browser` versions every host runs.
+Reusable extensions for [Pi](https://pi.dev). The [stack manifest](../../package.json) pins Pi and the browser packages every host runs.
 
 ## Packages
 
 - `bash-timeout-guard` requires a bounded bash call, defaults to 30 minutes with a UI and 55 seconds for autonomous sessions, accepts a host-configured ceiling, and forbids detached work.
+- [Browser runtime](extensions/browser/README.md) loads the native browser tool with its executable from the same immutable dependency tree.
 
 ## Install
 
@@ -18,7 +19,9 @@ The root package enables every extension. Use Pi's package filters when only som
 
 ## Browser dependency
 
-The runtime manifest pins the `agent-browser` executable; [`config/packages.json`](../../config/packages.json) pins its native Pi wrapper. Deployment derives the expected executable version from the manifest. The upgrade to wrapper 0.6.6 and executable 0.36.0 includes upstream's stdout-spill ordering repair. With wrapper 0.5.0, a large news-player QA response exposed a race that reordered output chunks while opening the spill file and corrupted the JSON.
+The stack manifest pins `agent-browser` and `pi-agent-browser-native` together. [`config/packages.json`](../../config/packages.json) loads the browser runtime entrypoint instead of installing the native package into each account's mutable npm tree. Deployment derives the expected executable version from the manifest.
+
+On 2026-09-05, a running worker retained a native extension requiring 0.34.0 while a release switched its shared executable to 0.36.0. The entrypoint now resolves both packages and pins the process's executable path when the extension loads. The 0.6.6 native package also includes upstream's stdout-spill ordering repair for large JSON diagnostics.
 
 ## Configuration
 

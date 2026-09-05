@@ -5,7 +5,7 @@
     { "id": "claude-oauth", "source": "git:github.com/hara-seihun/pi-plugins@137178712077f45217c241638e1414b59cd1d849" },
     { "id": "vcc", "source": "git:github.com/hara-seihun/pi-vcc@49bfd19143e3af33ed1b719373206618d57fd1a6" },
     { "id": "bash-timeout-guard", "source": "packages/runtime/extensions/bash-timeout-guard", "deployed": "/srv/pi/runtime/extensions/bash-timeout-guard" },
-    { "id": "browser-native", "source": "npm:pi-agent-browser-native@0.6.6" },
+    { "id": "browser-native", "source": "packages/runtime/extensions/browser", "deployed": "/srv/pi/runtime/extensions/browser" },
     { "id": "remote", "source": "apps/remote", "deployed": "/srv/pi/pi-remote" }
   ],
   "contextObserver": "remote"

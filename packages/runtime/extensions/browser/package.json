@@ -1,0 +1,10 @@
+{
+  "name": "@hara-seihun/pi-browser-runtime",
+  "version": "1.0.0",
+  "description": "Load the native browser tool with its release-owned executable",
+  "license": "MIT",
+  "type": "module",
+  "keywords": ["pi-package", "pi-extension"],
+  "pi": { "extensions": ["./index.mjs"] },
+  "peerDependencies": { "@earendil-works/pi-coding-agent": "*" }
+}

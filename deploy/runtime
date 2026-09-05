@@ -12,7 +12,7 @@ runtime_source="$root/packages/runtime"
 dest=${PI_STACK_RUNTIME_DEST:-/srv/pi/runtime}
 dependencies_root=${PI_STACK_DEPENDENCIES_ROOT:-/srv/pi/dependencies}
 PI_VERSION=0.85.0
-BROWSER_VERSION="agent-browser $(node -p 'require(process.argv[1]).dependencies["agent-browser"]' "$runtime_source/package.json")"
+BROWSER_VERSION="agent-browser $(node -p 'require(process.argv[1]).dependencies["agent-browser"]' "$root/package.json")"
 stage=""
 cleanup() { [[ -z $stage ]] || rm -rf "$stage"; }
 trap cleanup EXIT
@@ -37,7 +37,7 @@ reconcile_links() {
     bin="$home/.local/bin"
     owner=$(stat -c %U "$home"); group=$(stat -c %G "$home")
     pi_stack_as_root install -d -m 755 -o "$owner" -g "$group" "$home/.local" "$bin"
-    for name in pi agent-browser; do
+    for name in pi agent-browser pi-agent-browser-doctor; do
       pi_stack_as_root ln -sfn "$dest/node_modules/.bin/$name" "$bin/$name"
       pi_stack_as_root chown -h "$owner:$group" "$bin/$name"
     done
@@ -112,7 +112,7 @@ node --check "$settings_manager"
 
 stage=$(mktemp -d "${TMPDIR:-/tmp}/pi-runtime.XXXXXXXX")
 install -d -m 755 "$stage/release/extensions"
-for extension in bash-timeout-guard; do
+for extension in bash-timeout-guard browser; do
   rsync -a --chmod=D755,Fu=rwX,Fgo=rX "$runtime_source/extensions/$extension" "$stage/release/extensions/"
 done
 ln -s "$dependency_release/node_modules" "$stage/release/node_modules"
