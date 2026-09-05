@@ -113,7 +113,7 @@ activate_remote() {
   done
 }
 if [[ -n $fleet ]]; then
-  pi_stack_as_root systemctl try-restart "pi-orchestrator@$fleet.service" 2>/dev/null || true
+  pi_stack_as_root systemctl restart "pi-orchestrator@$fleet.service"
 fi
 activation_failed=0
 if [[ $previous_remote != "$expected" ]] && ! activate_remote "$expected"; then
