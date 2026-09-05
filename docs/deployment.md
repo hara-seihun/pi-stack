@@ -42,6 +42,8 @@ Persons are not in the host file. They are Pi Remote's registry, `/var/lib/pi-re
 
 An unchanged host redeploy takes about a second. A clean dependency install takes a few seconds. A deployment whose destinations are overridden with `PI_STACK_*_DEST` is a rehearsal: it publishes into those paths and touches no service unless `PI_STACK_SERVICES=1`.
 
+Pi normally comes from the npm registry. When an unpublished upstream commit is selected, [`vendor/pi`](../vendor/pi/README.md) holds the built source packages and their exact provenance. `deploy/runtime` copies those packages into its isolated production install before running `npm ci`.
+
 ## Build checks
 
 ```bash

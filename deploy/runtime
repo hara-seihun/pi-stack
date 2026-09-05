@@ -11,7 +11,7 @@ pi_stack_enter_deployment "$0" "$root" "$@"
 runtime_source="$root/packages/runtime"
 dest=${PI_STACK_RUNTIME_DEST:-/srv/pi/runtime}
 dependencies_root=${PI_STACK_DEPENDENCIES_ROOT:-/srv/pi/dependencies}
-PI_VERSION=0.84.2
+PI_VERSION=0.85.0
 BROWSER_VERSION="agent-browser 0.34.0"
 stage=""
 cleanup() { [[ -z $stage ]] || rm -rf "$stage"; }
@@ -62,6 +62,8 @@ dependency_release="$dependencies_root/$dependency_hash"
 if [[ ! -x $dependency_release/node_modules/.bin/pi ]]; then
   stage=$(mktemp -d "${TMPDIR:-/tmp}/pi-runtime-dependencies.XXXXXXXX")
   install -m 644 package.json package-lock.json "$stage/"
+  install -d "$stage/vendor/pi"
+  install -m 644 vendor/pi/*.tgz "$stage/vendor/pi/"
   while IFS= read -r manifest; do
     install -d "$stage/$(dirname "$manifest")"
     install -m 644 "$manifest" "$stage/$manifest"
