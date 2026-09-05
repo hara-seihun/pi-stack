@@ -15,16 +15,15 @@ function run(store:Store,laneId="math",budget:"background"|"force"="background")
   store.updateRun(id!,{state:"running",sessionFile:"/saved.jsonl"});return id!;
 }
 
-describe("quota-paced execution",()=>{
-  it("treats the existing worker abort acknowledgement as a saved pause, not task completion",async()=>{
-    const store=Store.open(":memory:");account(store);const id=run(store);store.suspendRun(id,"ahead of plan");
-    expect(store.activeLeases()).toHaveLength(1);
+describe("quota-paced admission",()=>{
+  it("still honors explicit operator aborts",async()=>{
+    const store=Store.open(":memory:");account(store);const id=run(store);
     const daemon=new Daemon(store,config,"/release") as any;
     const req=Readable.from([JSON.stringify({state:"aborted",failureKind:"operator",result:"aborted"})]) as any;
     req.method="POST";req.url=`/internal/runs/${id}/state`;
     let response="";await daemon.request(req,{writeHead:()=>{},end:(value:string)=>{response=value;}});
     expect(JSON.parse(response)).toEqual({ok:true});
-    expect(store.run(id)).toMatchObject({state:"running",sessionFile:"/saved.jsonl",suspension:{reason:"ahead of plan"}});
+    expect(store.run(id)).toMatchObject({state:"aborted",sessionFile:"/saved.jsonl"});
     expect(store.activeLeases()).toHaveLength(0);store.close();
   });
 
@@ -66,17 +65,22 @@ describe("quota-paced execution",()=>{
     expect(accountCapacity(store,"openai-codex","background",config,now)).toMatchObject({sessions:0,reason:"meter is stale"});store.close();
   });
 
-  it("checkpoints overspending workers and preserves their holds through recovery",()=>{
+  it("lets admitted workers finish while denying new launches above pacing and machine ceilings",async()=>{
     const store=Store.open(":memory:"),now=Date.now();account(store);store.reconcileLanes([lane("math")]);
     const ids=[run(store),run(store)];store.recordMeter("openai-codex","codex-7d",65,now+144*HOUR,now);
-    const daemon=new Daemon(store,config,"/release") as any;
-    daemon.unitIsActive=()=>false;daemon.startUnit=()=>{throw new Error("paused workers must not restart");};
-    daemon.reconcileCapacity();expect(store.activeLeases()).toHaveLength(0);
-    expect(store.admittedLaneCount("math")).toBe(0);
-    for(const id of ids)expect(store.run(id)).toMatchObject({state:"running",sessionFile:"/saved.jsonl",suspension:{reason:expect.stringContaining("paced allowance")}});
-    daemon.recoverWorkers();
-    store.unsuspendRun(ids[0]!,now+HOUR);expect(store.run(ids[0]!)).toMatchObject({progressAt:now+HOUR,sessionFile:"/saved.jsonl"});
-    expect(store.run(ids[0]!)?.suspension).toBeUndefined();expect(store.activeLeases(undefined,120_000,now+HOUR)).toHaveLength(1);store.close();
+    const daemon=new Daemon(store,{...config,maxConcurrentSessions:1},"/release") as any;
+    daemon.loadManifest=async()=>{};daemon.codexMeters.sample=async()=>{};daemon.anthropicMeters.sample=async()=>{};
+    daemon.unitIsActive=()=>true;daemon.startUnit=()=>{throw new Error("new launches must be refused");};
+    daemon.stopUnit=()=>{throw new Error("existing workers must not stop");};
+    await daemon.reconcile();
+    expect(store.activeLeases()).toHaveLength(2);expect(store.admittedLaneCount("math")).toBe(2);
+    for(const id of ids){
+      expect(store.run(id)).toMatchObject({state:"running",sessionFile:"/saved.jsonl"});
+      const req={method:"GET",url:`/internal/runs/${id}/control`} as any;
+      let response="";await daemon.request(req,{writeHead:()=>{},end:(value:string)=>{response=value;}});
+      expect(JSON.parse(response)).toEqual({});
+    }
+    expect(store.runs()).toHaveLength(2);store.close();
   });
 
   it("fills weighted lanes without targets or preallocating a worker queue",async()=>{
@@ -88,12 +92,13 @@ describe("quota-paced execution",()=>{
     expect(store.runs(["queued"])).toEqual([]);store.close();
   });
 
-  it("resumes saved workers before creating replacements when quota recovers",async()=>{
+  it("recovers already admitted sessions even when quota refuses new work",async()=>{
     const store=Store.open(":memory:"),now=Date.now();account(store);store.reconcileLanes([lane("math")]);
-    const id=run(store);store.suspendRun(id,"ahead of plan");store.endLease(`run:${id}`);store.recordMeter("openai-codex","codex-7d",0,now+168*HOUR,now);
+    const id=run(store);store.endLease(`run:${id}`);store.recordMeter("openai-codex","codex-7d",65,now+144*HOUR,now);
     const daemon=new Daemon(store,config,"/release") as any,resumed:string[]=[];
-    daemon.unitIsActive=()=>false;daemon.restartAssignedWorker=(saved:{id:string})=>resumed.push(saved.id);
-    daemon.startUnit=()=>{throw new Error("must resume the existing session");};
-    await daemon.fillCapacity();expect(resumed).toEqual([id]);expect(store.run(id)?.suspension).toBeUndefined();expect(store.runs()).toHaveLength(1);store.close();
+    daemon.unitIsActive=()=>false;daemon.startUnit=(_unit:string,savedId:string)=>resumed.push(savedId);
+    daemon.recoverWorkers();await daemon.fillCapacity();
+    expect(resumed).toEqual([id]);expect(store.run(id)).toMatchObject({state:"starting",sessionFile:"/saved.jsonl",model:"gpt-6-astra",releasePath:"/release"});
+    expect(store.activeLeases()).toHaveLength(1);expect(store.runs()).toHaveLength(1);store.close();
   });
 });

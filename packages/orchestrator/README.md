@@ -16,9 +16,9 @@ Ordinary work must stay within the elapsed share of each provider window's allow
 
 The account concurrency ceiling also uses up to six hours of same-window consumption divided by recorded session-hours, with one percentage point added for meter uncertainty. Meter history is retained for 24 hours rather than a fixed sample count. At least 15 minutes of evidence is required to move beyond one calibration session. Fleet, interactive, and voice leases share the account and machine ceilings. New work consumes at most one admission per meter observation.
 
-Every reconciliation applies these ceilings to running workers as well as admissions. Excess workers receive an abort through the existing worker control API, save their interrupted turn, and exit. An unresponsive worker is stopped after 15 seconds. The ledger retains a `suspend:<run-id>` control with the reason and time; leases remain charged until the worker acknowledges its checkpoint or exits. A restart preserves these holds. When quota permits, the daemon reopens the same run, account, release, and Pi JSONL before creating a replacement for that lane. Paused time does not count as a stall.
+These ceilings govern admission only. Already admitted workers finish even when pacing, reserves, account reservations, provider boosts, or machine limits would refuse new work. Their leases remain charged, so replacements cannot bypass those limits. Worker recovery retains the same run, account, release, model, thinking level, and Pi JSONL without a new quota admission. Explicit operator aborts and stall handling still apply.
 
-`status` exposes calculated account ceilings and reasons, plus each lane's active and paused counts. Pi Remote reports held sessions as paused and excludes them from its running total.
+`status` exposes calculated account ceilings and reasons, plus each lane's active count. Pi Remote includes every starting or running session in its running total.
 
 `run --force` and `wave --force` are operator-authorized urgent work. They bypass ordinary pacing but not exhausted provider quota or a provider halt. Provider boost controls multiply ordinary pacing. A multiplier of zero halts that provider.
 

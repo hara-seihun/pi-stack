@@ -66,7 +66,6 @@ export interface Run {
   readonly updatedAt: number;
   readonly progressAt?: number;
   readonly endedAt?: number;
-  readonly suspension?: { readonly since:number; readonly reason:string };
 }
 
 /** The parts a provider reports for one assistant message. */

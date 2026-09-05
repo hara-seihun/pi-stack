@@ -234,12 +234,12 @@ export class Store {
         CASE run.source WHEN 'direct' THEN 0 ELSE 1 END,
         COALESCE(lane.priority,0) DESC,
         CASE WHEN lane.id IS NULL THEN 0 ELSE
-          CAST((SELECT count(*) FROM run active WHERE active.source='lane' AND active.source_id=run.source_id AND active.state IN ('starting','running') AND NOT EXISTS (SELECT 1 FROM control WHERE key='suspend:'||active.id)) AS REAL)/lane.weight
+          CAST((SELECT count(*) FROM run active WHERE active.source='lane' AND active.source_id=run.source_id AND active.state IN ('starting','running')) AS REAL)/lane.weight
         END,
         COALESCE(lane.weight,0) DESC,run.created_at,run.id`).all();
     return (rows as any[]).map((row)=>this.mapRun(row));
   }
-  private mapRun(r:any):Run{return{id:r.id,source:r.source,sourceId:maybe(r.source_id),prompt:r.prompt,cwd:r.cwd,profile:r.profile,budget:r.budget,accountId:maybe(r.account_id),provider:maybe(r.provider),model:maybe(r.model),thinking:maybe(r.thinking),sessionFile:maybe(r.session_file),state:r.state,failureKind:maybe(r.failure_kind),result:maybe(r.result),workerUnit:maybe(r.worker_unit),releasePath:maybe(r.release_path),createdAt:r.created_at,startedAt:maybe(r.started_at),updatedAt:r.updated_at,progressAt:maybe(r.progress_at),endedAt:maybe(r.ended_at),suspension:this.suspension(r.id)};}
+  private mapRun(r:any):Run{return{id:r.id,source:r.source,sourceId:maybe(r.source_id),prompt:r.prompt,cwd:r.cwd,profile:r.profile,budget:r.budget,accountId:maybe(r.account_id),provider:maybe(r.provider),model:maybe(r.model),thinking:maybe(r.thinking),sessionFile:maybe(r.session_file),state:r.state,failureKind:maybe(r.failure_kind),result:maybe(r.result),workerUnit:maybe(r.worker_unit),releasePath:maybe(r.release_path),createdAt:r.created_at,startedAt:maybe(r.started_at),updatedAt:r.updated_at,progressAt:maybe(r.progress_at),endedAt:maybe(r.ended_at)};}
   assignRun(id:string,assignment:ProfileCandidate & {accountId:string;unit:string;releasePath:string},at=Date.now()):boolean{
     return this.transaction(()=>{
       const run=this.run(id);
@@ -263,7 +263,7 @@ export class Store {
     const current=this.run(id);if(!current)throw new Error(`unknown run ${id}`);const state=patch.state??current.state;const terminal=["done","failed","aborted"].includes(state);
     this.db.prepare(`UPDATE run SET state=?,session_file=COALESCE(?,session_file),progress_at=COALESCE(?,progress_at),result=COALESCE(?,result),failure_kind=COALESCE(?,failure_kind),worker_unit=COALESCE(?,worker_unit),updated_at=?,ended_at=? WHERE id=?`)
       .run(state,patch.sessionFile??null,patch.progressAt??null,patch.result??null,patch.failureKind??null,patch.workerUnit??null,at,terminal?at:null,id);
-    if(terminal){this.endLease(`run:${id}`,at);this.db.prepare("DELETE FROM control WHERE key=?").run(`suspend:${id}`);}
+    if(terminal)this.endLease(`run:${id}`,at);
   }
   resumeAssignedRun(id:string,at=Date.now()):boolean{
     return this.transaction(()=>{
@@ -288,17 +288,7 @@ export class Store {
     });
   }
   activeCount(source?:RunSource,sourceId?:string):number{let sql="SELECT COUNT(*) n FROM run WHERE state IN ('queued','starting','running')",args:any[]=[];if(source){sql+=" AND source=?";args.push(source);}if(sourceId){sql+=" AND source_id=?";args.push(sourceId);}return Number((this.db.prepare(sql).get(...args) as any).n);}
-  admittedLaneCount(sourceId:string):number{return this.runs(["starting","running"]).filter((run)=>run.source==="lane"&&run.sourceId===sourceId&&!run.suspension).length;}
-  suspension(id:string):Run["suspension"]{const value=this.control(`suspend:${id}`);return value?JSON.parse(value):undefined;}
-  suspendRun(id:string,reason:string,at=Date.now()):void{
-    if(!this.suspension(id))this.setControl(`suspend:${id}`,JSON.stringify({since:at,reason}));
-  }
-  unsuspendRun(id:string,at=Date.now()):void{
-    this.transaction(()=>{const run=this.run(id);if(!run?.suspension||!run.accountId)return;
-      this.db.prepare("DELETE FROM control WHERE key=?").run(`suspend:${id}`);
-      this.updateRun(id,{progressAt:at},at);this.createLease(`run:${id}`,run.accountId,"fleet",id,at);
-    });
-  }
+  admittedLaneCount(sourceId:string):number{return this.runs(["starting","running"]).filter((run)=>run.source==="lane"&&run.sourceId===sourceId).length;}
   trimQueuedLane(sourceId:string,keep:number,at=Date.now()):number{
     const rows=this.db.prepare("SELECT id FROM run WHERE source='lane' AND source_id=? AND state='queued' ORDER BY created_at,id").all(sourceId) as {id:string}[];
     const removed=rows.slice(Math.max(0,keep));
