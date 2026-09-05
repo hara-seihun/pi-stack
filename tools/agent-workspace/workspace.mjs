@@ -7,6 +7,7 @@ import {
   readFileSync,
   readdirSync,
   readlinkSync,
+  realpathSync,
   renameSync,
   rmdirSync,
   rmSync,
@@ -15,6 +16,7 @@ import {
 import { homedir } from "node:os";
 import path from "node:path";
 import { DatabaseSync } from "node:sqlite";
+import { pathToFileURL } from "node:url";
 
 const DEFAULT_STATE = process.env.PI_WORKSPACE_STATE ?? path.join(
   process.env.XDG_STATE_HOME ?? path.join(homedir(), ".local", "state"),
@@ -111,9 +113,19 @@ function assertOnly(args, names) {
   for (const name of args.named.keys()) if (!accepted.has(name)) fail(`unknown flag --${name}`);
 }
 
+function currentDirectory() {
+  try {
+    return process.cwd();
+  } catch (error) {
+    if (error?.code !== "ENOENT") throw error;
+    return undefined;
+  }
+}
+
 function command(executable, commandArgs, options = {}) {
   const result = spawnSync(executable, commandArgs, {
-    cwd: options.cwd,
+    // Git operands are resolved before launch; a released caller directory may vanish mid-command.
+    cwd: options.cwd ?? homedir(),
     encoding: "utf8",
     env: { ...process.env, GIT_TERMINAL_PROMPT: "0" },
     maxBuffer: 16 * 1024 * 1024,
@@ -1055,6 +1067,14 @@ function mirrorFor(statePath, repository) {
   return path.join(path.dirname(statePath), "mirrors", `${digest}.git`);
 }
 
+function repositoryLocation(value, directory) {
+  if (path.isAbsolute(value) || /^[^/\s]+:/u.test(value)) return value;
+  if (directory === undefined) {
+    fail("the current directory was removed; --repo must be an absolute path or a Git URL");
+  }
+  return path.resolve(directory, value);
+}
+
 function repositoryRemotes(repository) {
   if (!existsSync(repository)) return { fetch: repository, push: repository };
   const valid = command("git", ["-C", repository, "rev-parse", "--git-dir"]);
@@ -1062,7 +1082,11 @@ function repositoryRemotes(repository) {
   const fetch = command("git", ["-C", repository, "remote", "get-url", "origin"]);
   if (fetch.status !== 0 || fetch.stdout.length === 0) return { fetch: repository, push: repository };
   const push = command("git", ["-C", repository, "remote", "get-url", "--push", "origin"]);
-  return { fetch: fetch.stdout, push: push.status === 0 && push.stdout.length > 0 ? push.stdout : fetch.stdout };
+  const directory = realpathSync(repository);
+  return {
+    fetch: repositoryLocation(fetch.stdout, directory),
+    push: repositoryLocation(push.status === 0 && push.stdout.length > 0 ? push.stdout : fetch.stdout, directory),
+  };
 }
 
 // An explicit push URL disables Git's `url.<base>.pushInsteadOf` rewriting for the remote, so a
@@ -1080,8 +1104,11 @@ function prepareMirror(mirror, repository, upstream) {
   mkdirSync(path.dirname(mirror), { recursive: true, mode: 0o700 });
   if (!existsSync(mirror)) run("git", ["init", "--bare", mirror]);
   for (const [name, url] of [["origin", upstream.fetch], ["workspace-source", repository]]) {
-    const exists = command("git", ["--git-dir", mirror, "remote", "get-url", name]).status === 0;
-    run("git", ["--git-dir", mirror, "remote", exists ? "set-url" : "add", name, url]);
+    const existing = command("git", ["--git-dir", mirror, "remote", "get-url", name]);
+    if (existing.status !== 0 && existing.status !== 2) {
+      fail(`cannot read mirror remote ${name}: ${existing.stderr || existing.error?.message || `exit ${existing.status}`}`);
+    }
+    run("git", ["--git-dir", mirror, "remote", existing.status === 0 ? "set-url" : "add", name, url]);
   }
   configurePushUrl(["--git-dir", mirror], upstream);
   run("git", ["--git-dir", mirror, "config", "remote.origin.mirror", "false"]);
@@ -1106,7 +1133,7 @@ function createCommand(database, args, statePath) {
   const name = safeName(required(args, "name"));
   const destination = path.join(root, name);
   if (existsSync(destination)) fail(`workspace already exists: ${destination}`);
-  const repository = required(args, "repo");
+  const repository = repositoryLocation(required(args, "repo"), currentDirectory());
   const ref = one(args, "ref", "HEAD");
   const mode = one(args, "mode", "writer");
   if (!["writer", "review"].includes(mode)) fail("--mode must be writer or review");
@@ -1311,7 +1338,8 @@ export function main(argv = process.argv.slice(2), statePath = DEFAULT_STATE) {
   }
 }
 
-if (import.meta.url === `file://${process.argv[1]}`) {
+if (process.argv[1] !== undefined && existsSync(process.argv[1])
+  && import.meta.url === pathToFileURL(realpathSync(process.argv[1])).href) {
   for (const stream of [process.stdout, process.stderr]) {
     stream.on("error", (error) => {
       if (error.code === "EPIPE") process.exit(0);

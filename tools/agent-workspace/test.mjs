@@ -89,6 +89,40 @@ test("capacity follows available storage unless a caller imposes a count limit",
   }
 });
 
+test("allocates from a reclaimed caller directory without changing valid relative paths", () => {
+  const f = fixture();
+  try {
+    git(f.source, "remote", "set-url", "origin", "../remote.git");
+    const fromRemovedDirectory = (name, repository) => {
+      const gone = path.join(f.root, `caller-${name}`);
+      mkdirSync(gone);
+      return execFileSync("bash", ["-c", 'rmdir -- "$1"; shift; exec "$@"', "removed-cwd",
+        gone, entry, "create", "--root", f.workspaces, "--name", name,
+        "--repo", repository, "--min-free-gib", "0", "--json"], {
+        cwd: gone,
+        env: { ...process.env, ...f.env },
+        encoding: "utf8",
+        timeout: 30_000,
+      });
+    };
+    const relative = JSON.parse(run(["create", "--root", "workspaces", "--name", "relative",
+      "--repo", "source", "--min-free-gib", "0", "--json"], f.env, f.root));
+    assert.equal(relative.sourceCommit, git(f.source, "rev-parse", "HEAD"));
+    for (const [name, repository, origin] of [
+      ["local", f.source, f.remote],
+      ["remote", `file://${f.remote}`, `file://${f.remote}`],
+    ]) {
+      const record = JSON.parse(fromRemovedDirectory(name, repository));
+      assert.equal(record.sourceCommit, relative.sourceCommit);
+      assert.equal(git(record.path, "remote", "get-url", "origin"), origin);
+    }
+    assert.throws(() => fromRemovedDirectory("unresolved", "source"),
+      /current directory was removed; --repo must be an absolute path or a Git URL/);
+  } finally {
+    f.close();
+  }
+});
+
 test("offers help through the installed command and each subcommand", () => {
   const root = mkdtempSync(path.join(tmpdir(), "agent-workspace-link-"));
   try {

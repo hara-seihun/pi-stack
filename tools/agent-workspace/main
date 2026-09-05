@@ -1,4 +1,1 @@
-#!/usr/bin/env bash
-set -euo pipefail
-self=$(readlink -f "$0")
-exec node "$(dirname "$self")/workspace.mjs" "$@"
+workspace.mjs
