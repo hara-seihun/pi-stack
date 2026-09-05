@@ -71,6 +71,24 @@ function fixture() {
   };
 }
 
+test("capacity follows available storage unless a caller imposes a count limit", () => {
+  const f = fixture();
+  try {
+    for (let index = 0; index < 40; index += 1) {
+      mkdirSync(path.join(f.workspaces, `retained-${index}`), { recursive: true });
+    }
+    const args = ["create", "--root", f.workspaces, "--repo", f.remote, "--json"];
+    const record = JSON.parse(run([...args, "--name", "admitted", "--min-free-gib", "0"], f.env));
+    assert.equal(record.path, path.join(f.workspaces, "admitted"));
+    assert.throws(() => run([...args, "--name", "blocked", "--max-count", "41"], f.env),
+      /limit is 41/);
+    assert.throws(() => run([...args, "--name", "disk-blocked", "--min-free-gib", "1000000000"], f.env),
+      /GiB is required/);
+  } finally {
+    f.close();
+  }
+});
+
 test("offers help through the installed command and each subcommand", () => {
   const root = mkdtempSync(path.join(tmpdir(), "agent-workspace-link-"));
   try {
