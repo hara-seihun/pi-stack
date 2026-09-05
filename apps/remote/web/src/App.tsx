@@ -9,6 +9,7 @@ import { deleteCachedContext, readCachedContext, writeCachedContext } from "./co
 import { api, piFetch, registerUnlockHandler, syncRequest } from "./client";
 import { ContextTranscript, CopyButton, Markdown, modelContextEntries } from "./context";
 import { FileExplorer } from "./file-explorer";
+import { listenForFileDrops } from "./file-drop";
 import { createPollSchedule } from "./poll-schedule";
 import { updateDocument } from "./sync";
 import { threadsInOrder } from "./thread-order";
@@ -343,6 +344,7 @@ export default function App() {
   const [prompt, setPrompt] = useState("");
   const [pending, setPending] = useState(false);
   const [pasteOpen, setPasteOpen] = useState(false);
+  const [fileDrag, setFileDrag] = useState(false);
   const [pasteName, setPasteName] = useState("pasted-text.txt");
   const [pasteContent, setPasteContent] = useState("");
   const [rootFileCount, setRootFileCount] = useState(0);
@@ -544,8 +546,9 @@ export default function App() {
     } finally { setPending(false); kick(); }
   }, [kick, patch, pending, stateRef]);
 
-  const uploadFiles = async (files: File[]) => {
-    const id = stateRef.current.selectedId; if (!id) return;
+  const uploadFiles = useCallback(async (files: File[]) => {
+    const id = stateRef.current.selectedId;
+    if (!id || stateRef.current.agentRunId) return;
     for (const source of files) {
       const localId = crypto.randomUUID();
       const attachment: Attachment = { localId, name: source.name || "attachment", path: null, storedName: null, sessionId: id, uploading: true };
@@ -556,7 +559,11 @@ export default function App() {
         patch((current) => ({ attachments: current.attachments.map((item) => item.localId === localId ? { ...item, uploading: false, path: result.file.path, storedName: result.file.name, environment: result.file.environment } : item) }));
       } catch (error) { patch((current) => ({ attachments: current.attachments.filter((item) => item.localId !== localId) })); console.error(error); }
     }
-  };
+  }, [patch, stateRef]);
+  useEffect(() => listenForFileDrops(window,
+    () => !!stateRef.current.selectedId && !stateRef.current.agentRunId,
+    (files) => { void uploadFiles(files); }, setFileDrag,
+  ), [stateRef, uploadFiles]);
   const removeAttachment = async (attachment: Attachment) => {
     patch((current) => ({ attachments: current.attachments.filter((item) => item.localId !== attachment.localId) }));
     if (attachment.storedName) await api(API.removeUploads.method, API.removeUploads.path({}, { name: attachment.storedName, sessionId: attachment.sessionId })).catch(console.error);
@@ -564,8 +571,10 @@ export default function App() {
 
   const send = async () => {
     const session = selectedSession();
-    if (!session || pending) return;
-    const attachments = stateRef.current.attachments.filter((file) => file.path && !file.uploading);
+    if (!session || pending || stateRef.current.agentRunId) return;
+    const sessionAttachments = stateRef.current.attachments.filter((file) => file.sessionId === session.id);
+    if (sessionAttachments.some((file) => file.uploading)) return;
+    const attachments = sessionAttachments.filter((file) => file.path);
     const text = prompt.trim();
     if (!text && !attachments.length) {
       if (working(session)) {
@@ -582,7 +591,8 @@ export default function App() {
       const bodyText = [text, attachmentText].filter(Boolean).join("\n\n");
       if (command && !attachments.length) await api(API.sessionCommand.method, API.sessionCommand.path({ sessionId: session.id }), { requestId: crypto.randomUUID(), name: command.name, args: text.slice(command.name.length + 2).trim() }, 130_000);
       else await api(API.sessionPrompt.method, API.sessionPrompt.path({ sessionId: session.id }), { requestId: crypto.randomUUID(), text: bodyText, delivery: "followUp" });
-      patch({ attachments: [] });
+      const sentIds = new Set(attachments.map((file) => file.localId));
+      patch((current) => ({ attachments: current.attachments.filter((file) => !sentIds.has(file.localId)) }));
     } catch (error) { setPrompt(text); saveDraft(session.id, text); console.error(error); }
     finally { setPending(false); kick(); }
   };
@@ -610,6 +620,7 @@ export default function App() {
 
   const sessions = orderedSessions(state);
   const selected = sessions.find((session) => session.id === state.selectedId) ?? null;
+  const visibleAttachments = state.agentRunId ? [] : state.attachments.filter((file) => file.sessionId === state.selectedId);
   const contextEntries = useMemo(() => modelContextEntries(state.context ? JSON.parse(state.context.document) : null), [state.context]);
   const modelCounts = useMemo(() => new Map((state.dashboard?.modelCounts ?? []).map((model) => [model.key, model.count])), [state.dashboard]);
   const dashboard = state.dashboard;
@@ -628,6 +639,7 @@ export default function App() {
 
   return <div id="app">
     <UnlockDialog />
+    {fileDrag && state.selectedId && !state.agentRunId && <div className="file-drop-overlay" role="status">Drop files to attach to {selected?.name || "this conversation"}</div>}
     {state.drawerOpen && innerWidth < 1000 && <div className="scrim" onClick={() => patch({ drawerOpen: false })} />}
     <aside id="drawer" className={state.drawerOpen ? "open" : ""} aria-label="Navigation">
       <header className="drawer-heading thread-start-heading"><nav className="drawer-tabs" role="tablist" aria-label="Drawer sections">{(["threads", "agents", "archived", "files"] as const).map((tab) => <button key={tab} className="drawer-tab" type="button" role="tab" aria-label={`${drawerLabels[tab]}, ${drawerCounts[tab]}`} title={drawerLabels[tab]} aria-selected={state.drawerTab === tab} onClick={() => patch({ drawerTab: tab })}><DrawerTabIcon tab={tab} /><span className="drawer-tab-count">{drawerCounts[tab]}</span></button>)}</nav><ThreadStartMenu starts={dashboard?.threadStarts ?? []} onCreate={(destination, model) => void createThread(destination, model)} /></header>
@@ -640,8 +652,8 @@ export default function App() {
     <main id="main"><header className="topbar"><button className="icon-button" aria-label="Open navigation" onClick={() => patch({ drawerOpen: true })}>☰</button><div className="top-title">{title}</div><div className="top-state" style={{ color: state.offline ? "var(--danger)" : activityColor(selectedActivity) }}>{state.offline ? "OFFLINE" : activityLabel(selectedActivity, selectedTool ?? "")}</div><button className="icon-button" aria-label="Open thread settings" disabled={!selected || Boolean(state.agentRunId)} onClick={() => patch({ settingsOpen: true })}>⚙</button></header>
       {!state.selectedId && !state.agentRunId ? <section className="empty-state"><strong>No threads</strong><span>Open the drawer to create one.</span></section> : <section className="conversation"><div className="scrollback"><div className="scroll-content"><ContextTranscript entries={entries} liveThinking={liveThinking} sessionId={state.selectedId || ""} home={dashboard?.home ?? "/"} onEdit={editFrom} />{liveText && <div className="live-answer"><Markdown source={liveText} sessionId={state.selectedId || ""} streaming /><CopyButton text={liveText} label="Copy response" /></div>}</div></div>
         {selected?.queuedMessages.length ? <div className="message-queue">{selected.queuedMessages.map((message) => <div className="queued-message" key={message.id}><div className="queued-message-copy"><span className="queued-message-label">{message.status || "Queued"}</span><span className="queued-message-preview">{message.text.split("\n").find((line) => line.trim()) || "Attached files"}</span></div><div className="queued-message-actions"><CopyButton text={message.text} className="queued-message-action icon-message-action" />{message.canSteer && <button className="queued-message-action steer-instead" type="button" onClick={() => void mutateQueued(message, API.queueSteer)}>STEER</button>}{message.canHardSteer && <button className="queued-message-action hard-steer" type="button" onClick={() => void mutateQueued(message, API.queueHardSteer)}>HARD STEER</button>}{message.canCancel && <><button className="queued-message-action edit-queued" type="button" onClick={() => void mutateQueued(message, API.queueItem, true)}>EDIT</button><button className="queued-message-action cancel-queued" type="button" onClick={() => void mutateQueued(message, API.queueItem)}>CANCEL</button></>}</div></div>)}</div> : null}
-        {state.attachments.length > 0 && <div className="attachments">{state.attachments.map((attachment) => <div className={`attachment-chip${attachment.uploading ? " uploading" : ""}`} key={attachment.localId}><span className="attachment-name">{attachment.name}{attachment.uploading ? " · uploading" : ""}</span><button className="attachment-remove" type="button" onClick={() => void removeAttachment(attachment)}>×</button></div>)}</div>}
-        {state.agentRunId ? <div className="agent-banner">Observing {state.agentRun?.label} on {state.agentRun?.taskId} · read-only</div> : <form className="composer" onSubmit={(event) => { event.preventDefault(); void send(); }}>{visibleCommands.length > 0 && <div className="slash-commands" role="listbox">{visibleCommands.map((command) => <button key={command.name} type="button" className="slash-command" onClick={() => setPrompt(`/${command.name} `)}><strong className="slash-command-name">/{command.name}</strong>{command.description && <span className="slash-command-description">{command.description}</span>}</button>)}</div>}<textarea ref={promptElement} id="prompt" rows={1} maxLength={200000} placeholder={`Message ${selected?.name || "Agent"}`} value={prompt} onChange={(event) => { setPrompt(event.target.value); if (state.selectedId) saveDraft(state.selectedId, event.target.value); }} onKeyDown={(event) => { if (event.key === "Enter" && !event.shiftKey && !event.nativeEvent.isComposing && matchMedia("(hover: hover) and (pointer: fine)").matches) { event.preventDefault(); void send(); } }} /><div className="composer-actions"><label className="composer-icon" aria-label="Attach files"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M16.5 6.5 8.7 14.3a2.5 2.5 0 0 0 3.5 3.5l8.1-8.1a4.5 4.5 0 0 0-6.4-6.4L5.5 11.7a6.5 6.5 0 0 0 9.2 9.2l6.1-6.1"/></svg><input type="file" multiple hidden onChange={(event) => { void uploadFiles([...event.target.files || []]); event.target.value = ""; }} /></label><button className="composer-icon" type="button" aria-label="Paste text document" onClick={() => setPasteOpen(true)}><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M9 5.5V4h6v1.5M9 5.5h6M9 5.5H7v15h10v-15h-2M9 10h6m-6 4h6m-6 4h4"/></svg></button><span className="composer-spacer"/><button id="voice" className={`composer-icon voice${voiceState === "idle" ? "" : ` ${voiceState}`}`} type="button" aria-label={voiceState === "live" ? "Hang up voice" : "Start voice"} title={voiceDetail || undefined} onClick={() => void toggleVoice()}><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 3a3 3 0 0 0-3 3v6a3 3 0 0 0 6 0V6a3 3 0 0 0-3-3Z"/><path d="M5.5 11.5a6.5 6.5 0 0 0 13 0M12 18v3m-3 0h6"/></svg></button><button id="action" className={`composer-icon send${working(selected) && !prompt.trim() ? " abort" : ""}`} type="submit" disabled={pending || state.attachments.some((file) => file.uploading)} aria-label={working(selected) && !prompt.trim() ? "Abort agent" : "Send message"}><svg className="send-icon" viewBox="0 0 24 24" aria-hidden="true"><path d="m3 3 18 9-18 9 4-9-4-9Zm4 9h14"/></svg><span className="stop-icon" aria-hidden="true">■</span></button></div></form>}
+        {visibleAttachments.length > 0 && <div className="attachments">{visibleAttachments.map((attachment) => <div className={`attachment-chip${attachment.uploading ? " uploading" : ""}`} key={attachment.localId}><span className="attachment-name">{attachment.name}{attachment.uploading ? " · uploading" : ""}</span><button className="attachment-remove" type="button" onClick={() => void removeAttachment(attachment)}>×</button></div>)}</div>}
+        {state.agentRunId ? <div className="agent-banner">Observing {state.agentRun?.label} on {state.agentRun?.taskId} · read-only</div> : <form className="composer" onSubmit={(event) => { event.preventDefault(); void send(); }}>{visibleCommands.length > 0 && <div className="slash-commands" role="listbox">{visibleCommands.map((command) => <button key={command.name} type="button" className="slash-command" onClick={() => setPrompt(`/${command.name} `)}><strong className="slash-command-name">/{command.name}</strong>{command.description && <span className="slash-command-description">{command.description}</span>}</button>)}</div>}<textarea ref={promptElement} id="prompt" rows={1} maxLength={200000} placeholder={`Message ${selected?.name || "Agent"}`} value={prompt} onChange={(event) => { setPrompt(event.target.value); if (state.selectedId) saveDraft(state.selectedId, event.target.value); }} onKeyDown={(event) => { if (event.key === "Enter" && !event.shiftKey && !event.nativeEvent.isComposing && matchMedia("(hover: hover) and (pointer: fine)").matches) { event.preventDefault(); void send(); } }} /><div className="composer-actions"><label className="composer-icon" aria-label="Attach files"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M16.5 6.5 8.7 14.3a2.5 2.5 0 0 0 3.5 3.5l8.1-8.1a4.5 4.5 0 0 0-6.4-6.4L5.5 11.7a6.5 6.5 0 0 0 9.2 9.2l6.1-6.1"/></svg><input type="file" multiple hidden onChange={(event) => { void uploadFiles([...event.target.files || []]); event.target.value = ""; }} /></label><button className="composer-icon" type="button" aria-label="Paste text document" onClick={() => setPasteOpen(true)}><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M9 5.5V4h6v1.5M9 5.5h6M9 5.5H7v15h10v-15h-2M9 10h6m-6 4h6m-6 4h4"/></svg></button><span className="composer-spacer"/><button id="voice" className={`composer-icon voice${voiceState === "idle" ? "" : ` ${voiceState}`}`} type="button" aria-label={voiceState === "live" ? "Hang up voice" : "Start voice"} title={voiceDetail || undefined} onClick={() => void toggleVoice()}><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 3a3 3 0 0 0-3 3v6a3 3 0 0 0 6 0V6a3 3 0 0 0-3-3Z"/><path d="M5.5 11.5a6.5 6.5 0 0 0 13 0M12 18v3m-3 0h6"/></svg></button><button id="action" className={`composer-icon send${working(selected) && !prompt.trim() ? " abort" : ""}`} type="submit" disabled={pending || visibleAttachments.some((file) => file.uploading)} aria-label={working(selected) && !prompt.trim() ? "Abort agent" : "Send message"}><svg className="send-icon" viewBox="0 0 24 24" aria-hidden="true"><path d="m3 3 18 9-18 9 4-9-4-9Zm4 9h14"/></svg><span className="stop-icon" aria-hidden="true">■</span></button></div></form>}
       </section>}
     </main>
     <SettingsPanel session={selected} open={state.settingsOpen} onClose={() => patch({ settingsOpen: false })} />

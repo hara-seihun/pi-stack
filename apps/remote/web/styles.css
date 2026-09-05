@@ -230,6 +230,7 @@ button:focus-visible, input:focus-visible, textarea:focus-visible, select:focus-
 .queued-message-action.icon-message-action { width: 30px; display: grid; place-items: center; padding: 0; }
 .steer-instead, .edit-queued { color: var(--accent); }
 .hard-steer, .cancel-queued { color: var(--danger); }
+.file-drop-overlay { position: fixed; inset: 12px; z-index: 10000; pointer-events: none; display: grid; place-items: center; border: 2px dashed var(--text); background: color-mix(in srgb, var(--surface) 90%, transparent); color: var(--text); font-size: 20px; text-align: center; padding: 24px; }
 .attachments { flex: 0 0 auto; display: flex; gap: 6px; max-width: 100%; padding: 7px 9px; overflow-x: auto; background: color-mix(in srgb, var(--surface) 92%, transparent); border-top: 1px solid var(--border); }
 .attachment-chip { flex: 0 0 auto; max-width: min(280px, 72vw); height: 32px; display: flex; align-items: center; gap: 5px; padding-left: 10px; background: var(--surface-2); color: var(--text); font-size: 12px; }
 .attachment-chip.uploading { color: var(--muted); }

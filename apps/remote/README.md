@@ -18,6 +18,8 @@ The drawer reports only measured plan and hardware rows. Each plan row also carr
 
 [`apps/kenan`](../kenan/README.md) packages the same compiled React client with Capacitor as the Kenan Android app. A small native plugin owns endpoint selection, haptics, system-bar layout, and the pinned Converge SSH tunnel.
 
+Drop files anywhere in the client window to attach them to the open conversation's draft. A window-wide overlay names the destination. Dropping never sends a message, and read-only agent views do not accept attachments. Attachments stay with their conversation when switching threads, including while an upload is running.
+
 Enter sends the composer only where a hardware keyboard is typing. On touch devices the media query `(hover: none) and (pointer: coarse)` matches, Enter inserts a newline, the key is labelled as a return key, and the send button submits. Phone keyboards have no comfortable way to type a newline otherwise, so sending on Enter cost multi-paragraph prompts.
 
 The drawer tabs use an icon and count for Interactive threads, Orchestrator agents, archived threads, and host files. The Files tab is a lazy tree rooted at `/`: opening a folder requests only that directory, dotfiles remain visible, and selecting a regular file downloads it. Headless Tree supplies keyboard and screen-reader tree behavior, while TanStack Virtual keeps directories such as `/nix/store` from creating tens of thousands of DOM rows. The tree remains mounted when another drawer tab is selected, so open folders and the current path survive tab switches.
