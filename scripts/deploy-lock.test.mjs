@@ -231,13 +231,13 @@ test("the host deployment restarts the daemon and activates a changed Pi Remote"
     const env={...process.env,...destinations,PATH:`${bin}:${process.env.PATH}`,ACTIVATE_TRACE:activationTrace,SUPERVISOR_COMMIT:supervisorCommit,SYSTEMCTL_TRACE:systemctlTrace,SETTINGS_TRACE:settingsTrace,PI_REMOTE_PERSONS_DIR:personsDir,PI_STACK_DEPLOY_NO_SUDO:"1",PI_STACK_ALLOW_DIRTY:"1",PI_STACK_SERVICES:"1"};
     const first=spawnSync(join(deploy,"host"),[hostFile],{encoding:"utf8",env});assert.equal(first.status,0,first.stderr);
     const firstUnits=readFileSync(systemctlTrace,"utf8");
-    assert.match(firstUnits,new RegExp(`try-restart pi-orchestrator@${user}\\.service`));assert.match(firstUnits,/try-restart pi-remote-router\.service/);
+    assert.match(firstUnits,new RegExp(`^restart pi-orchestrator@${user}\\.service$`, 'm'));assert.match(firstUnits,/try-restart pi-remote-router\.service/);
     assert.equal(readFileSync(activationTrace,"utf8"),"pi-remote@alice.service\n");
     assert.equal(readFileSync(settingsTrace,"utf8"),`${user}\nguest-person\n`);
     rmSync(systemctlTrace,{force:true});
     const unchanged=spawnSync(join(deploy,"host"),[hostFile],{encoding:"utf8",env});assert.equal(unchanged.status,0,unchanged.stderr);
     assert.equal(readFileSync(activationTrace,"utf8"),"pi-remote@alice.service\n");
-    const again=readFileSync(systemctlTrace,"utf8");assert.match(again,/try-restart pi-orchestrator@/);assert.doesNotMatch(again,/try-restart pi-remote-router/);
+    const again=readFileSync(systemctlTrace,"utf8");assert.match(again,/^restart pi-orchestrator@/m);assert.doesNotMatch(again,/try-restart pi-remote-router/);
 
     // A release the clients cannot use goes back to the previous Pi Remote.
     const before=readlinkSync(destinations.PI_STACK_REMOTE_DEST);

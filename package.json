@@ -30,7 +30,7 @@
   },
   "allowScripts": {
     "esbuild@0.28.2": true,
-    "agent-browser@0.34.0": true,
+    "agent-browser@0.36.0": true,
     "@google/genai@1.52.0": true,
     "protobufjs@7.6.5": true
   }
