@@ -65,6 +65,8 @@ pi-orchestrator boost openai-codex 3
 pi-orchestrator account import openai-codex-3 --provider openai-codex --credential-file credential.json
 ```
 
+`pi-orchestrator account use ID voice` reserves a Codex account for GPT Live. Fleet admission, including forced and pinned runs, and interactive routing exclude it. Pi Remote uses the reserved voice accounts when any are enabled; otherwise it uses shared Codex accounts. `account use ID shared` returns it to the shared pool. The reservation lives in the ledger's `control` table under `account-use:ID` and appears as `use` in account listings. Existing runs are not killed by this command; stop them with `kill RUN_ID` after reserving the account. Interactive sessions move off a reserved account before their next turn.
+
 Import reads credentials from a file so tokens do not enter process arguments. `account remove` disables admission and removes the credential while historical attribution remains intact.
 
 The daemon serves its public API on `127.0.0.1:2460` by default. Pi Remote consumes the package's observation API and does not query private tables.

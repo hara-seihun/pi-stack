@@ -153,6 +153,7 @@ export class Store {
     return (this.db.prepare("SELECT * FROM account ORDER BY id").all() as any[]).map((r) => ({
       id:r.id, provider:r.provider, label:maybe(r.label), enabled:!!r.enabled,
       cooldownUntil:maybe(r.cooldown_until), concurrency:r.concurrency,
+      use:this.control(`account-use:${r.id}`)==="voice"?"voice":"shared",
     }));
   }
   account(id: string): Account | undefined { return this.accounts().find((a) => a.id === id); }

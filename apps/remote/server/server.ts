@@ -193,7 +193,7 @@ const orchestrator = new OrchestratorClient({
 const voiceAccounts = new VoiceBroker({
   authPath: ORCHESTRATOR_AUTH_PATH,
   agentDir: AGENT_DIR,
-  accounts: () => orchestrator.accounts("openai-codex"),
+  accounts: () => orchestrator.voiceAccounts(),
   acquireLease: (accountId) => orchestrator.beginVoiceLease(accountId),
   releaseLease: (leaseId) => orchestrator.endLease(leaseId),
 });

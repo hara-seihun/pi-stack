@@ -14,6 +14,11 @@ export interface Account {
   readonly enabled: boolean;
   readonly cooldownUntil?: number;
   readonly concurrency: number;
+  readonly use?: "shared" | "voice";
+}
+
+export function allowsAccountUse(account: Account, kind: LeaseKind): boolean {
+  return account.enabled && (account.use !== "voice" || kind === "voice");
 }
 
 export interface LaneSpec {

@@ -1,5 +1,5 @@
 import type { ModelCandidate } from "./catalog.js";
-import type { BudgetClass, OrchestratorConfig } from "./domain.js";
+import { allowsAccountUse, type BudgetClass, type OrchestratorConfig } from "./domain.js";
 import type { Store } from "./store.js";
 
 export interface Assignment extends ModelCandidate { readonly accountId:string; readonly meterAt?:number; }
@@ -44,7 +44,7 @@ export function assign(store:Store,profile:string,budget:BudgetClass,cfg:Orchest
   const refusals:Refusal[]=[];const choices:Assignment[]=[];
   for(const candidate of candidates){
     for(const account of store.accounts().filter((a)=>a.provider===candidate.provider&&(pinnedAccount===undefined||a.id===pinnedAccount))){
-      if(!account.enabled){refusals.push({accountId:account.id,reason:"disabled"});continue;}
+      if(!allowsAccountUse(account,"fleet")){refusals.push({accountId:account.id,reason:account.enabled?"reserved for voice":"disabled"});continue;}
       if(account.cooldownUntil&&account.cooldownUntil>now){refusals.push({accountId:account.id,reason:`cooling until ${new Date(account.cooldownUntil).toISOString()}`});continue;}
       const active=store.activeLeases(account.id,120_000,now).length;
       if(active>=account.concurrency){refusals.push({accountId:account.id,reason:`concurrency ${active}/${account.concurrency}`});continue;}

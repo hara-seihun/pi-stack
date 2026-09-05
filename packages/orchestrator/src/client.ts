@@ -1,7 +1,7 @@
 import { readFileSync } from "node:fs";
 import { ORCHESTRATOR_CATALOG, catalogAgentType, catalogMeter, type PlanDefinition } from "./catalog.js";
 import { Store } from "./store.js";
-import type { Run, UsageTotal } from "./domain.js";
+import { allowsAccountUse, type Run, type UsageTotal } from "./domain.js";
 
 export const CACHE_WINDOW_MS=24*3_600_000;
 export interface PlanMetricUsage{readonly percentLeft:number|null;readonly expectedPercentLeft:number|null;readonly paceDelta:number|null;readonly cachePercent:number|null;}
@@ -62,10 +62,11 @@ export class OrchestratorClient implements OrchestratorObserver{
   private readonly store:Store;
   constructor(private readonly options:OrchestratorClientOptions){this.store=Store.open(options.ledgerPath);}
   accounts(provider?:string){return this.store.accounts().filter((account)=>!provider||account.provider===provider);}
+  voiceAccounts(){const accounts=this.accounts("openai-codex").filter((account)=>allowsAccountUse(account,"voice"));const reserved=accounts.filter((account)=>account.use==="voice");return reserved.length?reserved:accounts;}
   boost(provider:string):number{return Number(this.store.control(`boost:${provider}`)??"1");}
   setBoost(provider:string,multiplier:number):void{this.store.setControl(`boost:${provider}`,String(multiplier));}
   beginVoiceLease(accountId:string):string{
-    const account=this.store.account(accountId);if(!account||!account.enabled)throw new Error(`voice account ${accountId} is unavailable`);
+    const account=this.store.account(accountId);if(!account||account.provider!=="openai-codex"||!allowsAccountUse(account,"voice"))throw new Error(`voice account ${accountId} is unavailable`);
     if(this.store.activeLeases(accountId).length>=account.concurrency)throw new Error(`voice account ${accountId} reached its concurrency limit`);
     const id=`voice:${crypto.randomUUID()}`;this.store.createLease(id,accountId,"voice");return id;
   }

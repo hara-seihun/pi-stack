@@ -4,7 +4,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { Store } from "../src/store.js";
 import { assign, commitMeterAdmission } from "../src/policy.js";
-import type { OrchestratorConfig } from "../src/domain.js";
+import { allowsAccountUse, type OrchestratorConfig } from "../src/domain.js";
 import { transactSharedCredential } from "../src/auth/shared-oauth.js";
 import { builtinProviders } from "@earendil-works/pi-ai/providers/all";
 import { withCustomModels } from "../src/extension/routing.js";
@@ -19,6 +19,22 @@ const config:OrchestratorConfig={profiles:{standard:[{provider:"openai-codex",mo
 function account(store:Store,id="openai-codex-1"){store.upsertAccount({id,provider:"openai-codex",concurrency:2});}
 
 describe("current orchestrator state",()=>{
+  it("reserves voice accounts across restart and excludes even forced or pinned agents",()=>{
+    const root=mkdtempSync(join(tmpdir(),"voice-reservation-")),ledger=join(root,"ledger.sqlite3");
+    const store=Store.open(ledger);
+    account(store,"openai-codex-1");account(store,"openai-codex-2");
+    store.setControl("account-use:openai-codex-1","voice");
+    expect(assign(store,"standard","force",config).assignment?.accountId).toBe("openai-codex-2");
+    expect(assign(store,"standard","force",config,Date.now(),"openai-codex-1").assignment).toBeUndefined();
+    expect(allowsAccountUse(store.account("openai-codex-1")!,"interactive")).toBe(false);
+    store.close();
+    const client=new OrchestratorClient({ledgerPath:ledger});
+    expect(client.voiceAccounts().map((a)=>a.id)).toEqual(["openai-codex-1"]);
+    const lease=client.beginVoiceLease("openai-codex-1");client.endLease(lease);client.close();
+    const reopened=Store.open(ledger);reopened.setControl("account-use:openai-codex-1","shared");
+    expect(allowsAccountUse(reopened.account("openai-codex-1")!,"interactive")).toBe(true);
+    reopened.close();rmSync(root,{recursive:true});
+  });
   it("prints account help without requiring an account id",async()=>{
     const lines:string[]=[];
     const previous=console.log;

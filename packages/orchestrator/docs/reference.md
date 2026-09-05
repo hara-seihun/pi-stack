@@ -11,7 +11,7 @@ Run `npm run docs --workspace=pi-orchestrator` after changing commands or durabl
 - `pause / resume`: Set or clear the global launch halt.
 - `abort / kill`: Stop one run gracefully or immediately.
 - `boost`: Set a provider pacing multiplier or halt.
-- `account`: Import, remove, or list pooled accounts.
+- `account`: Import, remove, list, or reserve pooled accounts.
 
 ## Durable tables
 

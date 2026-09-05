@@ -234,6 +234,15 @@ export class Daemon {
         this.store.upsertAccount({id:String(input.id),provider:input.provider,label:input.label,enabled:true,concurrency:Number(input.concurrency??this.config.defaultAccountConcurrency)});
         return json(res,201,{ok:true});
       }
+      const accountUse=/^\/v1\/accounts\/([^/]+)\/use$/.exec(url.pathname);
+      if(method==="PUT"&&accountUse){
+        const id=decodeURIComponent(accountUse[1]!),account=this.store.account(id),input=await body(req);
+        if(!account)return json(res,404,{error:"account not found"});
+        if(input.use!=="shared"&&input.use!=="voice")return json(res,400,{error:"use must be shared or voice"});
+        if(input.use==="voice"&&account.provider!=="openai-codex")return json(res,400,{error:"GPT Live requires an openai-codex account"});
+        this.store.setControl(`account-use:${id}`,input.use);
+        return json(res,200,{account:this.store.account(id)});
+      }
       const accountRemove=/^\/v1\/accounts\/([^/]+)$/.exec(url.pathname);
       if(method==="DELETE"&&accountRemove){this.store.setAccountEnabled(decodeURIComponent(accountRemove[1]!),false);return json(res,200,{ok:true});}
       if(method==="POST"&&url.pathname==="/v1/run"){const input=await body(req);const ids=this.store.createRuns({count:Number(input.count??1),source:"direct",prompt:String(input.prompt),cwd:String(input.cwd??process.cwd()),profile:String(input.profile??"standard"),budget:input.force?"force":"background"});void this.reconcile();return json(res,201,{runIds:ids});}
