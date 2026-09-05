@@ -35,7 +35,7 @@ PI_ORCHESTRATOR_HOST
 PI_ORCHESTRATOR_PORT
 ```
 
-The JSON config may set model `profiles`, `backgroundSpendFraction`, machine and account concurrency, meter age, reconciliation periods, stall limits, `taskManifest`, `authPath`, and `agentDir`. The strict `sol` and `opus` profiles are always available alongside configured profiles.
+The JSON config may set model `profiles`, `backgroundSpendFraction`, machine and account concurrency, meter age, reconciliation periods, stall limits, `taskManifest`, `authPath`, and `agentDir`. The strict `astra` and `opus` profiles are always available alongside configured profiles.
 
 A lane manifest has `version: 2`, an optional `snapshotCommand`, and a `lanes` array. Every lane declares `id`, `prompt`, `cwd`, `profile`, and positive `weight`. `fixedDemand` makes demand static. The snapshot command prints one atomic object:
 

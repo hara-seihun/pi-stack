@@ -37,7 +37,7 @@ The useful headline is **tokens per week per plan**: normalize every window
 to seven days so windows of different lengths (5-hour, weekly, monthly) are
 directly comparable, and measure each account against whichever of
 its meters exhausts first. Pricing account type against model (Codex Pro on
-Sol vs Luna, Max 20x on Opus vs Fable) requires solving meter movement
+Astra vs Luna, Max 20x on Opus vs Fable) requires solving meter movement
 against each account's model mix — Fable burns a half-sized scoped weekly
 meter that Opus never touches (see the Anthropic topology in the calibrator
 tests).

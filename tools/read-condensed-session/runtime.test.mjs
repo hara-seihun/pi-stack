@@ -3,8 +3,8 @@ import { test } from "node:test";
 import { candidateModels, summarizeWithRuntime } from "./runtime.mjs";
 
 const models = [
-  { provider: "account-b", id: "gpt-5.6-sol" },
-  { provider: "account-a", id: "gpt-5.6-sol" },
+  { provider: "account-b", id: "gpt-6-astra" },
+  { provider: "account-a", id: "gpt-6-astra" },
   { provider: "other", id: "other-model" },
 ];
 
@@ -21,9 +21,9 @@ function fakeRuntime(complete) {
 
 test("candidate selection awaits availability and honors preferred and pinned providers", async () => {
   const runtime = fakeRuntime();
-  assert.deepEqual((await candidateModels(runtime, { model: "gpt-5.6-sol", preferredProvider: "account-b" })).map((model) => model.provider), ["account-b", "account-a"]);
-  assert.deepEqual((await candidateModels(runtime, { model: "account-a/gpt-5.6-sol" })).map((model) => model.provider), ["account-a"]);
-  await assert.rejects(candidateModels(runtime, { model: "missing/gpt-5.6-sol" }), /has no model/);
+  assert.deepEqual((await candidateModels(runtime, { model: "gpt-6-astra", preferredProvider: "account-b" })).map((model) => model.provider), ["account-b", "account-a"]);
+  assert.deepEqual((await candidateModels(runtime, { model: "account-a/gpt-6-astra" })).map((model) => model.provider), ["account-a"]);
+  await assert.rejects(candidateModels(runtime, { model: "missing/gpt-6-astra" }), /has no model/);
 });
 
 test("direct summarization sends exactly one user message and no agent context", async () => {
@@ -33,7 +33,7 @@ test("direct summarization sends exactly one user message and no agent context",
     return { role: "assistant", content: [{ type: "thinking", thinking: "hidden" }, { type: "text", text: "  summary text  " }], stopReason: "stop" };
   });
   const result = await summarizeWithRuntime(runtime, "PROMPT", {
-    model: "account-a/gpt-5.6-sol", thinking: "medium", timeoutMs: 10_000,
+    model: "account-a/gpt-6-astra", thinking: "medium", timeoutMs: 10_000,
   });
   assert.deepEqual(request.context, {
     messages: [{ role: "user", content: [{ type: "text", text: "PROMPT" }], timestamp: request.context.messages[0].timestamp }],
@@ -44,7 +44,7 @@ test("direct summarization sends exactly one user message and no agent context",
   assert.equal(request.options.cacheRetention, "none");
   assert.equal(typeof request.options.sessionId, "string");
   assert.equal(result.text, "summary text");
-  assert.equal(result.model, "account-a/gpt-5.6-sol");
+  assert.equal(result.model, "account-a/gpt-6-astra");
 });
 
 test("a failed provider falls through to the next alias", async () => {
@@ -55,10 +55,10 @@ test("a failed provider falls through to the next alias", async () => {
     return { role: "assistant", content: [{ type: "text", text: "fallback summary" }], stopReason: "stop" };
   });
   const result = await summarizeWithRuntime(runtime, "PROMPT", {
-    model: "gpt-5.6-sol", preferredProvider: "account-a", timeoutMs: 10_000,
+    model: "gpt-6-astra", preferredProvider: "account-a", timeoutMs: 10_000,
   });
   assert.deepEqual(called, ["account-a", "account-b"]);
-  assert.equal(result.model, "account-b/gpt-5.6-sol");
+  assert.equal(result.model, "account-b/gpt-6-astra");
 });
 
 test("all provider errors are reported together", async () => {
@@ -66,7 +66,7 @@ test("all provider errors are reported together", async () => {
     throw new Error(`${model.provider} down`);
   });
   await assert.rejects(
-    summarizeWithRuntime(runtime, "PROMPT", { model: "gpt-5.6-sol", timeoutMs: 10_000 }),
+    summarizeWithRuntime(runtime, "PROMPT", { model: "gpt-6-astra", timeoutMs: 10_000 }),
     /account-a: account-a down; account-b: account-b down/,
   );
 });

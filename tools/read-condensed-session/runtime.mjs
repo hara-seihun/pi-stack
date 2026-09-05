@@ -4,7 +4,7 @@ import { homedir } from "node:os";
 import { join } from "node:path";
 import { pathToFileURL } from "node:url";
 
-export const DEFAULT_MODEL = "gpt-5.6-sol";
+export const DEFAULT_MODEL = "gpt-6-astra";
 export const SUMMARY_MAX_TOKENS = 2_000;
 export const CALL_TIMEOUT_MS = 240_000;
 

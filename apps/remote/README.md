@@ -26,7 +26,7 @@ Each runtime also loads `server/thread-context.ts`. On a new thread's first requ
 
 The supervisor names a thread after its first user message and updates the name every 20 user or assistant messages. It gives the latest 12 messages to a short-lived, tool-free `pi --print` process and applies the process's first output line to both the Pi session and the supervisor database. `PI_REMOTE_THREAD_NAMING_MODEL` is required and must explicitly select an OpenAI provider, model, and thinking level, such as `openai-codex/gpt-5.6-luna:low`.
 
-Model menus, autonomous-agent labels, and plan cards use the catalog exported by `pi-orchestrator/api`. Plan cards project the orchestrator's account and meter facts; Pi Remote carries no provider usage parser or duplicate provider manifest. New Sol threads start in OpenAI's priority service tier. Existing threads keep their saved mode, and other models start in normal mode.
+Model menus, autonomous-agent labels, and plan cards use the catalog exported by `pi-orchestrator/api`. Plan cards project the orchestrator's account and meter facts; Pi Remote carries no provider usage parser or duplicate provider manifest. New Astra threads start in OpenAI's priority service tier. Existing threads keep their saved mode, and other models start in normal mode.
 
 ## Requirements
 

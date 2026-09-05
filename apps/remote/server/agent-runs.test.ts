@@ -8,7 +8,7 @@ function run(live: ObservedRun["live"], state = "running"): ObservedRun {
   return {
     id: "run-1",
     taskId: "direct",
-    model: "gpt-5.6-sol",
+    model: "gpt-6-astra",
     provider: "openai-codex",
     state,
     startedAt: 1_000,

@@ -122,7 +122,7 @@ const THREAD_MODELS = new Map(ORCHESTRATOR_CATALOG.models.map((model) => [model.
 // why the work machine has no second step: Anthropic models do not run there.
 const OFFERED_DESTINATIONS = (process.env.PI_REMOTE_DESTINATIONS ?? "home").split(",").map((id) => id.trim()).filter(Boolean);
 const destinationDefinitions = JSON.parse(process.env.PI_REMOTE_THREAD_DESTINATIONS ?? JSON.stringify([
-  { id: "home", label: "HOME", icon: "house", accent: "#3fb950", workspaceId: "home", thinkingLevel: "high", models: ["sol", "fable", "opus"], defaultModel: "opus" },
+  { id: "home", label: "HOME", icon: "house", accent: "#3fb950", workspaceId: "home", thinkingLevel: "high", models: ["astra", "fable", "opus"], defaultModel: "opus" },
 ])) as Array<{ id: string; label: string; icon: string; accent: string; workspaceId: string; thinkingLevel: string; models: string[]; defaultModel: string }>;
 const THREAD_DESTINATIONS = new Map(destinationDefinitions
   .filter((destination) => OFFERED_DESTINATIONS.includes(destination.id))
@@ -2307,7 +2307,7 @@ const server = Bun.serve({
             ) VALUES(?,?,?,?,?,?,?,NULL,?,?,?,?,?,?,0)
           `).run(id, name, workspaceId, null, "STOPPED", time, time,
             preset.provider, preset.provider, preset.modelId, preset.thinkingLevel, destination.id,
-            model.id === "sol" ? "priority" : "default");
+            model.id === "astra" ? "priority" : "default");
         })();
         const response = { session: publicSession(sessionRow.get(id)) };
         saveRequest(requestId, id, "create", 201, response);

@@ -15,7 +15,7 @@ import { ACCOUNT_USAGE, dispatch } from "../src/commands.js";
 import { CACHE_WINDOW_MS, OrchestratorClient } from "../src/client.js";
 import { outputLimitContinuation } from "../src/host/continuations.js";
 
-const config:OrchestratorConfig={profiles:{standard:[{provider:"openai-codex",model:"gpt-5.6-sol",thinking:"xhigh"}]},backgroundSpendFraction:.8,maxConcurrentSessions:8,defaultAccountConcurrency:2,meterMaxAgeMs:60_000,snapshotIntervalMs:30_000,reconcileIntervalMs:1000,stallAfterMs:60_000,killAfterMs:120_000,authPath:"/tmp/auth",agentDir:"/tmp/agent"};
+const config:OrchestratorConfig={profiles:{standard:[{provider:"openai-codex",model:"gpt-6-astra",thinking:"xhigh"}]},backgroundSpendFraction:.8,maxConcurrentSessions:8,defaultAccountConcurrency:2,meterMaxAgeMs:60_000,snapshotIntervalMs:30_000,reconcileIntervalMs:1000,stallAfterMs:60_000,killAfterMs:120_000,authPath:"/tmp/auth",agentDir:"/tmp/agent"};
 function account(store:Store,id="openai-codex-1"){store.upsertAccount({id,provider:"openai-codex",concurrency:2});}
 
 describe("current orchestrator state",()=>{
@@ -33,7 +33,7 @@ describe("current orchestrator state",()=>{
 
   it("launches every Fable selection on Claude Fable 5.1",()=>{const anthropic=builtinProviders().find((provider)=>provider.id==="anthropic")!;const models=withCustomModels(anthropic).getModels();expect(models.some((model)=>model.id==="claude-fable-5")).toBe(true);expect(models.find((model)=>model.id==="claude-fable-5-1")?.cost.cacheRead).toBe(.25);expect(catalogModel("fable")?.model).toBe("claude-fable-5-1");});
 
-  it("offers strict Sol and Opus scheduling profiles",()=>{const profiles=loadConfig("/definitely/missing/pi-orchestrator-config.json").profiles;expect(profiles.sol).toEqual([{provider:"openai-codex",model:"gpt-5.6-sol",thinking:"xhigh"}]);expect(profiles.opus).toEqual([{provider:"anthropic",model:"claude-opus-5",thinking:"xhigh"}]);});
+  it("offers strict Astra and Opus scheduling profiles",()=>{const profiles=loadConfig("/definitely/missing/pi-orchestrator-config.json").profiles;expect(profiles.astra).toEqual([{provider:"openai-codex",model:"gpt-6-astra",thinking:"xhigh"}]);expect(profiles.opus).toEqual([{provider:"anthropic",model:"claude-opus-5",thinking:"xhigh"}]);});
 
   it("continues a provider-truncated turn even when rejected tool calls follow it",()=>{
     const prompt=outputLimitContinuation([
@@ -148,7 +148,7 @@ describe("current orchestrator state",()=>{
 
   it("expires, heartbeats, and releases voice leases",()=>{const store=Store.open(":memory:");account(store);store.createLease("voice:one","openai-codex-1","voice",undefined,1_000);expect(store.activeLeases(undefined,500,1_600)).toHaveLength(0);store.heartbeatLease("voice:one",1_500);expect(store.activeLeases(undefined,500,1_600)).toHaveLength(1);store.endLease("voice:one",1_700);expect(store.activeLeases(undefined,500,1_700)).toHaveLength(0);store.close();});
 
-  it("pins each launched run to an immutable release path",()=>{const store=Store.open(":memory:");account(store);const [id]=store.createRuns({count:1,source:"direct",prompt:"x",cwd:"/tmp",profile:"standard",budget:"force"});expect(store.assignRun(id!,{accountId:"openai-codex-1",provider:"openai-codex",model:"gpt-5.6-sol",unit:"run-a",releasePath:"/srv/releases/a"})).toBe(true);expect(store.run(id!)?.releasePath).toBe("/srv/releases/a");expect(store.assignRun(id!,{accountId:"openai-codex-1",provider:"openai-codex",model:"gpt-5.6-sol",unit:"run-b",releasePath:"/srv/releases/b"})).toBe(false);expect(store.run(id!)?.releasePath).toBe("/srv/releases/a");store.close();});
+  it("pins each launched run to an immutable release path",()=>{const store=Store.open(":memory:");account(store);const [id]=store.createRuns({count:1,source:"direct",prompt:"x",cwd:"/tmp",profile:"standard",budget:"force"});expect(store.assignRun(id!,{accountId:"openai-codex-1",provider:"openai-codex",model:"gpt-6-astra",unit:"run-a",releasePath:"/srv/releases/a"})).toBe(true);expect(store.run(id!)?.releasePath).toBe("/srv/releases/a");expect(store.assignRun(id!,{accountId:"openai-codex-1",provider:"openai-codex",model:"gpt-6-astra",unit:"run-b",releasePath:"/srv/releases/b"})).toBe(false);expect(store.run(id!)?.releasePath).toBe("/srv/releases/a");store.close();});
 
   it("resumes an interrupted assigned run without consuming another meter admission",()=>{const store=Store.open(":memory:");account(store);store.recordMeter("openai-codex-1","codex-5h",10,60_000,900);const choice=assign(store,"standard","background",config,1_000).assignment!;commitMeterAdmission(store,choice);const [id]=store.createRuns({count:1,source:"direct",prompt:"x",cwd:"/tmp",profile:"standard",budget:"background"});store.assignRun(id!,{...choice,unit:"run-a",releasePath:"/srv/releases/a"},1_000);store.updateRun(id!,{state:"running",sessionFile:"/sessions/a.jsonl"},1_100);store.endLease(`run:${id}`,1_200);store.updateRun(id!,{state:"queued"},1_200);expect(assign(store,"standard","background",config,1_300).assignment).toBeUndefined();expect(store.resumeAssignedRun(id!,1_300)).toBe(true);expect(store.run(id!)).toMatchObject({accountId:"openai-codex-1",releasePath:"/srv/releases/a",sessionFile:"/sessions/a.jsonl",state:"starting",workerUnit:"run-a"});expect(store.activeLeases(undefined,500,1_300)).toMatchObject([{account_id:"openai-codex-1",run_id:id}]);store.close();});
 
@@ -170,7 +170,7 @@ describe("current orchestrator state",()=>{
     const store=Store.open(":memory:");
     try{
       account(store);const [id]=store.createRuns({count:1,source:"direct",prompt:"x",cwd:"/tmp",profile:"standard",budget:"force"});
-      store.assignRun(id!,{accountId:"openai-codex-1",provider:"openai-codex",model:"gpt-5.6-sol",unit:"run-a.service",releasePath:"/srv/releases/a"});
+      store.assignRun(id!,{accountId:"openai-codex-1",provider:"openai-codex",model:"gpt-6-astra",unit:"run-a.service",releasePath:"/srv/releases/a"});
       store.updateRun(id!,{state:"failed",failureKind:"infrastructure",result:"worker recovery raced its active unit"});
       (new Daemon(store,config,"/srv/releases/current","/srv/state/ledger.sqlite3") as any).recoverWorkers();
       expect(store.run(id!)).toMatchObject({state:"running",workerUnit:"run-a.service"});
@@ -197,7 +197,7 @@ esac
     const store=Store.open(":memory:");
     try{
       account(store);const [id]=store.createRuns({count:1,source:"direct",prompt:"x",cwd:"/tmp",profile:"standard",budget:"force"});
-      store.assignRun(id!,{accountId:"openai-codex-1",provider:"openai-codex",model:"gpt-5.6-sol",unit:"run-a.service",releasePath:"/srv/releases/a"});
+      store.assignRun(id!,{accountId:"openai-codex-1",provider:"openai-codex",model:"gpt-6-astra",unit:"run-a.service",releasePath:"/srv/releases/a"});
       store.updateRun(id!,{state:"failed",failureKind:"infrastructure",result:"old failure"});
       store.updateRun(id!,{state:"queued"});
       (new Daemon(store,config,"/srv/releases/current","/srv/state/ledger.sqlite3") as any).recoverWorkers();
@@ -219,7 +219,7 @@ esac
     const store=Store.open(":memory:");
     try{
       account(store);const [id]=store.createRuns({count:1,source:"direct",prompt:"x",cwd:"/tmp",profile:"standard",budget:"force"});
-      store.assignRun(id!,{accountId:"openai-codex-1",provider:"openai-codex",model:"gpt-5.6-sol",unit:"run-a",releasePath:"/srv/releases/a"});
+      store.assignRun(id!,{accountId:"openai-codex-1",provider:"openai-codex",model:"gpt-6-astra",unit:"run-a",releasePath:"/srv/releases/a"});
       store.updateRun(id!,{state:"queued"});
       (new Daemon(store,config,"/srv/releases/current","/srv/state/ledger.sqlite3") as any).recoverWorkers();
       expect(readFileSync(capture,"utf8")).toContain("--setenv=PI_ORCHESTRATOR_LEDGER=/srv/state/ledger.sqlite3");

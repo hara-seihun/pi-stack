@@ -131,8 +131,8 @@ async function startServer() {
         { id: "pi-remote", name: "Pi Remote", path: join(import.meta.dir, "..") },
       ]),
       PI_REMOTE_THREAD_DESTINATIONS: JSON.stringify([
-        { id: "personal", label: "PERSONAL", icon: "personal", accent: "#a371f7", workspaceId: "private", thinkingLevel: "low", models: ["sol", "opus", "fable"], defaultModel: "fable" },
-        { id: "home", label: "HOME", icon: "house", accent: "#3fb950", workspaceId: "home", thinkingLevel: "high", models: ["sol", "fable", "opus"], defaultModel: "opus" },
+        { id: "personal", label: "PERSONAL", icon: "personal", accent: "#a371f7", workspaceId: "private", thinkingLevel: "low", models: ["astra", "opus", "fable"], defaultModel: "fable" },
+        { id: "home", label: "HOME", icon: "house", accent: "#3fb950", workspaceId: "home", thinkingLevel: "high", models: ["astra", "fable", "opus"], defaultModel: "opus" },
       ]),
     },
   });
@@ -233,8 +233,8 @@ for line in sys.stdin:
   out({'type':'response','id':rid,'command':'get_state','success':True,'data':{'isStreaming':streaming,'isCompacting':compacting,'pendingMessageCount':len(steering)+len(follow_up),'messageCount':0,'thinkingLevel':thinking_level,'sessionFile':None,'sessionName':session_name,'model':{'provider':provider,'id':model_id,'name':model_id}}})
  elif kind == 'get_available_models':
   out({'type':'response','id':rid,'command':kind,'success':True,'data':{'models':[
-   {'provider':'openai-codex-2','id':'gpt-5.6-sol','name':'GPT-5.6 Sol duplicate'},
-   {'provider':'openai-codex','id':'gpt-5.6-sol','name':'GPT-5.6 Sol'},
+   {'provider':'openai-codex-2','id':'gpt-6-astra','name':'GPT-6 Astra duplicate'},
+   {'provider':'openai-codex','id':'gpt-6-astra','name':'GPT-6 Astra'},
    {'provider':'openai-codex','id':'gpt-5.6-luna','name':'GPT-5.6 Luna'},
    {'provider':'openai-codex','id':'gpt-5.5','name':'GPT-5.5'},
    {'provider':'anthropic','id':'claude-fable-5-1','name':'Claude Fable 5.1'},
@@ -451,18 +451,18 @@ else: sys.exit(2)
   const insertRun = orchestrator.query(`INSERT INTO run
     (id,source,source_id,prompt,cwd,profile,budget,account_id,state,created_at,updated_at,started_at,provider,model)
     VALUES(?,\"lane\",?,\"work\",\"/tmp\",\"standard\",\"background\",\"openai-codex\",?,0,0,0,\"openai-codex\",?)`);
-  for (let index = 0; index < 122; index++) insertRun.run(`sol-${index}`, "sol-task", "running", "openai-codex/gpt-5.6-sol");
-  insertRun.run("opus-mixed", "sol-task", "running", "anthropic/claude-opus-5");
+  for (let index = 0; index < 122; index++) insertRun.run(`astra-${index}`, "astra-task", "running", "openai-codex/gpt-6-astra");
+  insertRun.run("opus-mixed", "astra-task", "running", "anthropic/claude-opus-5");
   for (let index = 0; index < 45; index++) insertRun.run(`luna-${index}`, "luna-task", "running", "openai-codex/gpt-5.6-luna");
   insertRun.run("sonnet", "sonnet-task", "running", "anthropic/claude-sonnet");
   insertRun.run("finished", "luna-task", "done", "openai-codex/gpt-5.6-luna");
-  const sessionFile = join(fakeAgentRuns, "sol-0.jsonl");
+  const sessionFile = join(fakeAgentRuns, "astra-0.jsonl");
   orchestrator.query(`UPDATE run SET started_at=1000,provider='openai-codex-3',thinking='xhigh',room_id='room-1',member_name='coordinator',session_file=?
-    WHERE id='sol-0'`).run(sessionFile);
-  orchestrator.query(`UPDATE run SET room_id='room-1',member_name='member-2' WHERE id='sol-1'`).run();
+    WHERE id='astra-0'`).run(sessionFile);
+  orchestrator.query(`UPDATE run SET room_id='room-1',member_name='member-2' WHERE id='astra-1'`).run();
   orchestrator.query(`UPDATE run SET started_at=500,ended_at=900,provider='openai-codex-2',thinking='max'
     WHERE id='finished'`).run();
-  orchestrator.query(`INSERT INTO live_state(run_id,activity,text,thinking,updated_at) VALUES('sol-0','THINKING','','weighing options',0)`).run();
+  orchestrator.query(`INSERT INTO live_state(run_id,activity,text,thinking,updated_at) VALUES('astra-0','THINKING','','weighing options',0)`).run();
   orchestrator.close();
   mkdirSync(fakeAgentRuns, { recursive: true });
   writeFileSync(sessionFile, [
@@ -556,8 +556,8 @@ describe("web and supervisor integration", () => {
   });
 
   test("persists a complete active thread order", async () => {
-    await createThread("home", "sol");
-    await createThread("home", "sol");
+    await createThread("home", "astra");
+    await createThread("home", "astra");
     const before = await api("GET", "/v1/sessions");
     const currentIds = before.value.sessions.map((session: any) => session.id as string);
     const requestedIds = [currentIds.at(-1), ...currentIds.slice(0, -1)];
@@ -574,7 +574,7 @@ describe("web and supervisor integration", () => {
 
   test("names the first message through a configured tool-free Pi model", async () => {
     rmSync(fakeNamingLog, { force: true });
-    const id = await createThread("home", "sol");
+    const id = await createThread("home", "astra");
     const before = await api("POST", "/v1/sync", { seq: 0, stateVersion: 0, waitMs: 0 });
     await api("POST", `/v1/sessions/${id}/prompt`, { requestId: crypto.randomUUID(), text: "name this conversation" });
     const renamed = await waitFor(
@@ -599,7 +599,7 @@ describe("web and supervisor integration", () => {
 
   test("retries a malformed first title after the assistant reply", async () => {
     rmSync(fakeNamingLog, { force: true });
-    const id = await createThread("home", "sol");
+    const id = await createThread("home", "astra");
     await api("POST", `/v1/sessions/${id}/prompt`, { requestId: crypto.randomUUID(), text: "retry thread naming" });
     const renamed = await waitFor(
       () => api("GET", "/v1/sessions").then((result) => result.value.sessions.find((session: any) => session.id === id)),
@@ -616,10 +616,10 @@ describe("web and supervisor integration", () => {
     expect(listed.value.hosts).toEqual([
       { key: "local", label: "THIS MACHINE", name: "This machine", running: 169, updatedAt: expect.any(String), error: null },
     ]);
-    const observable = listed.value.runs.find((run: any) => run.id === "local:sol-0");
+    const observable = listed.value.runs.find((run: any) => run.id === "local:astra-0");
     expect(observable).toMatchObject({
-      host: "local", hostName: "This machine", runId: "sol-0",
-      taskId: "sol-task", status: "running", label: "SOL", provider: "openai-codex-3",
+      host: "local", hostName: "This machine", runId: "astra-0",
+      taskId: "astra-task", status: "running", label: "ASTRA", provider: "openai-codex-3",
       thinking: "xhigh", teamRole: "supervisor", teamSlot: null,
       observable: true, activity: "THINKING",
     });
@@ -633,24 +633,24 @@ describe("web and supervisor integration", () => {
   });
 
   test("streams one agent's transcript incrementally without any control surface", async () => {
-    const first = await api("GET", "/v1/agents/runs/local:sol-0/events");
+    const first = await api("GET", "/v1/agents/runs/local:astra-0/events");
     expect(first.status).toBe(200);
     expect(first.value.events.map((event: any) => event.type)).toEqual(["user", "tool_start", "tool_end"]);
     expect(first.value.events[0].text).toBe("claim one unit");
     expect(first.value.events[2]).toMatchObject({ toolCallId: "t1", name: "bash", output: "ledger.sqlite3", error: false });
     expect(first.value.liveThinking).toBe("weighing options");
-    expect(first.value.run).toMatchObject({ id: "local:sol-0", taskId: "sol-task", activity: "THINKING" });
+    expect(first.value.run).toMatchObject({ id: "local:astra-0", taskId: "astra-task", activity: "THINKING" });
 
-    expect((await api("GET", "/v1/agents/runs/local:sol-0/events?after=3")).value.events).toEqual([]);
+    expect((await api("GET", "/v1/agents/runs/local:astra-0/events?after=3")).value.events).toEqual([]);
     expect((await api("GET", "/v1/agents/runs/local:missing-run/events")).status).toBe(404);
     expect((await api("GET", "/v1/agents/runs/local:%2E%2E%2Fescape/events")).status).toBe(400);
-    expect((await api("GET", "/v1/agents/runs/nowhere:sol-0/events")).status).toBe(400);
-    expect((await api("GET", "/v1/agents/runs/sol-0/events")).status).toBe(400);
-    expect((await api("POST", "/v1/agents/runs/local:sol-0/events", {})).status).toBe(404);
+    expect((await api("GET", "/v1/agents/runs/nowhere:astra-0/events")).status).toBe(400);
+    expect((await api("GET", "/v1/agents/runs/astra-0/events")).status).toBe(400);
+    expect((await api("POST", "/v1/agents/runs/local:astra-0/events", {})).status).toBe(404);
   });
 
   test("serves Pi's provider-neutral context as the entire interactive transcript", async () => {
-    const id = await createThread("home", "sol");
+    const id = await createThread("home", "astra");
     const empty = await api("GET", `/v1/sessions/${id}/context`);
     expect(empty).toMatchObject({ status: 200, value: { capturedAt: 0, context: null } });
 
@@ -681,7 +681,7 @@ describe("web and supervisor integration", () => {
   });
 
   test("synchronizes a selected context with compressed verified splices", async () => {
-    const id = await createThread("home", "sol");
+    const id = await createThread("home", "astra");
     const firstContext = {
       systemPrompt: "System ".repeat(400),
       tools: [],
@@ -739,8 +739,8 @@ describe("web and supervisor integration", () => {
   });
 
   test("delivers a newly selected context while live text keeps waking the poll", async () => {
-    const streaming = await createThread("home", "sol");
-    const idle = await createThread("home", "sol");
+    const streaming = await createThread("home", "astra");
+    const idle = await createThread("home", "astra");
     const idleContext = { systemPrompt: "quiet", tools: [], messages: [{ role: "assistant", content: [{ type: "text", text: "done earlier" }] }] };
     await api("PUT", `/v1/sessions/${idle}/context`, { capturedAt: 500, context: idleContext });
     resetGate("live-stream-next");
@@ -767,7 +767,7 @@ describe("web and supervisor integration", () => {
   });
 
   test("publishes live model text without rebuilding unchanged application state", async () => {
-    const id = await createThread("home", "sol");
+    const id = await createThread("home", "astra");
     resetGate("live-stream-next");
     resetGate("live-stream");
     try {
@@ -824,7 +824,7 @@ describe("web and supervisor integration", () => {
   });
 
   test("keeps every thinking content block visible until its message commits", async () => {
-    const id = await createThread("home", "sol");
+    const id = await createThread("home", "astra");
     resetGate("thinking-blocks");
     try {
       await api("POST", `/v1/sessions/${id}/prompt`, { requestId: crypto.randomUUID(), text: "thinking-blocks" });
@@ -848,7 +848,7 @@ describe("web and supervisor integration", () => {
   });
 
   test("does not clear newer thinking when an earlier message context arrives", async () => {
-    const id = await createThread("home", "sol");
+    const id = await createThread("home", "astra");
     resetGate("thinking-handoff-next");
     resetGate("thinking-handoff-current");
     try {
@@ -879,7 +879,7 @@ describe("web and supervisor integration", () => {
   });
 
   test("retains streamed thinking when context commits first and the final message omits it", async () => {
-    const id = await createThread("home", "sol");
+    const id = await createThread("home", "astra");
     resetGate("thinking-omitted");
     try {
       await api("POST", `/v1/sessions/${id}/prompt`, { requestId: crypto.randomUUID(), text: "thinking-omitted" });
@@ -915,7 +915,7 @@ describe("web and supervisor integration", () => {
   });
 
   test("forks before a selected user message and rebuilds the durable conversation projection", async () => {
-    const id = await createThread("home", "sol");
+    const id = await createThread("home", "astra");
     const request = { requestId: crypto.randomUUID(), messageTimestamp: 200 };
     const forked = await api("POST", `/v1/sessions/${id}/fork`, request);
     expect(forked.status).toBe(200);
@@ -934,13 +934,13 @@ describe("web and supervisor integration", () => {
   });
 
   test("confirms an empty selected context even when the client has not loaded its cache yet", async () => {
-    const id = await createThread("home", "sol");
+    const id = await createThread("home", "astra");
     const result = await api("POST", "/v1/sync", { seq: 0, waitMs: 0, session: { id } });
     expect(result.value.session.context).toEqual({ kind: "clear", capturedAt: 0, hash: "" });
   });
 
   test("resumes uploads by committed offset and serves byte ranges", async () => {
-    const id = await createThread("home", "sol");
+    const id = await createThread("home", "astra");
     const content = Buffer.from("resumable attachment content");
     const requestId = crypto.randomUUID();
     const initialized = await api("POST", "/v1/uploads/init", {

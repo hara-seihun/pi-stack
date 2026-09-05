@@ -55,13 +55,13 @@ This topology follows conversational work episodes rather than the accidental bo
 
 ## Model requests and cache
 
-Each cache miss is a direct `ModelRuntime.complete` request with exactly one user message. It does not call `session.prompt` and sends no Pi coding prompt, tools, skills, `AGENTS.md`, extensions, or conversation history. A lightweight session bootstrap is used only to load extension-registered provider aliases and credentials. The default model is `gpt-5.6-sol`; when several authenticated providers serve it, a failed provider falls through to the next alias.
+Each cache miss is a direct `ModelRuntime.complete` request with exactly one user message. It does not call `session.prompt` and sends no Pi coding prompt, tools, skills, `AGENTS.md`, extensions, or conversation history. A lightweight session bootstrap is used only to load extension-registered provider aliases and credentials. The default model is `gpt-6-astra`; when several authenticated providers serve it, a failed provider falls through to the next alias.
 
 Defaults and overrides:
 
 | Setting | Default |
 |---|---|
-| `--model` / `SESSION_CONDENSER_MODEL` | `gpt-5.6-sol` |
+| `--model` / `SESSION_CONDENSER_MODEL` | `gpt-6-astra` |
 | `SESSION_CONDENSER_PROVIDER` | any authenticated provider serving the model |
 | `--thinking` | `low` |
 | `--concurrency` / `SESSION_CONDENSER_CONCURRENCY` | 16 |

@@ -198,7 +198,7 @@ test("summary database stores and retrieves prompt-addressed records", () => {
   try {
     const db = openSummaryDb(join(dir, "nested", "summaries.sqlite3"));
     const hash = hashJob("episode", "source");
-    storeSummary(db, { hash, kind: "episode", chars: 9, model: "openai-codex/gpt-5.6-sol", summary: "short" });
+    storeSummary(db, { hash, kind: "episode", chars: 9, model: "openai-codex/gpt-6-astra", summary: "short" });
     const found = lookupSummaries(db, [hash, "absent"]);
     assert.equal(found.get(hash).summary, "short");
     assert.equal(found.has("absent"), false);

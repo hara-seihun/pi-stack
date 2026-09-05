@@ -5,7 +5,7 @@ import { catalogModel } from "./catalog.js";
 import type { OrchestratorConfig } from "./domain.js";
 import { defaultSharedAuthPath } from "./auth/shared-oauth.js";
 
-const standard = catalogModel("sol")!;
+const standard = catalogModel("astra")!;
 const expert = catalogModel("opus")!;
 
 export function loadConfig(path = process.env.PI_ORCHESTRATOR_CONFIG ?? join(homedir(), ".config/pi-orchestrator/config.json")): OrchestratorConfig {
@@ -17,7 +17,7 @@ export function loadConfig(path = process.env.PI_ORCHESTRATOR_CONFIG ?? join(hom
       standard: [candidate(standard),candidate(expert)],
       expert: [candidate(expert),candidate(standard)],
     }),
-    sol: [candidate(standard)],
+    astra: [candidate(standard)],
     opus: [candidate(expert)],
   };
   return {

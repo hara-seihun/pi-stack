@@ -56,7 +56,7 @@ const DAY = 24 * HOUR;
 
 export const ORCHESTRATOR_CATALOG: OrchestratorCatalog = {
   models: [
-    { id: "sol", provider: "openai-codex", model: "gpt-5.6-sol", thinking: "xhigh", label: "SOL", aliases: ["sol"], icon: "sol", accent: "#5a6673", meterClass: "sol" },
+    { id: "astra", provider: "openai-codex", model: "gpt-6-astra", thinking: "xhigh", label: "ASTRA", aliases: ["astra"], icon: "astra", accent: "#5a6673", meterClass: "astra" },
     { id: "luna", provider: "openai-codex", model: "gpt-5.6-luna", thinking: "max", label: "LUNA", aliases: ["luna"], icon: "luna", accent: "#5a6673", meterClass: "luna" },
     { id: "terra", provider: "openai-codex", model: "gpt-5.6-terra", thinking: "max", label: "TERRA", aliases: ["terra"], icon: "terra", accent: "#5a6673", meterClass: "terra" },
     { id: "opus", provider: "anthropic", model: "claude-opus-5", thinking: "xhigh", label: "OPUS", aliases: ["opus"], icon: "opus", accent: "#d9663d", meterClass: "opus" },
@@ -64,17 +64,17 @@ export const ORCHESTRATOR_CATALOG: OrchestratorCatalog = {
     { id: "sonnet", provider: "anthropic", model: "claude-sonnet", thinking: "high", label: "SONNET", aliases: ["sonnet"], icon: "sonnet", accent: "#d9663d" },
   ],
   meters: [
-    { id: "codex-5h", provider: "openai-codex", drainedBy: ["luna:cost", "sol:cost", "terra:cost"], windowHours: 5 },
-    { id: "codex-7d", provider: "openai-codex", drainedBy: ["luna:cost", "sol:cost", "terra:cost"], windowHours: 168 },
+    { id: "codex-5h", provider: "openai-codex", drainedBy: ["luna:cost", "astra:cost", "terra:cost"], windowHours: 5 },
+    { id: "codex-7d", provider: "openai-codex", drainedBy: ["luna:cost", "astra:cost", "terra:cost"], windowHours: 168 },
     { id: "anthropic-5h", provider: "anthropic", drainedBy: ["default:cost", "opus:cost", "fable:cost"], windowHours: 5 },
     { id: "anthropic-7d", provider: "anthropic", drainedBy: ["default:cost", "opus:cost", "fable:cost"], windowHours: 168 },
     { id: "anthropic-7d_oi", provider: "anthropic", drainedBy: ["fable:cost"], windowHours: 168 },
   ],
-  agentOrder: ["sol", "luna", "terra", "fable", "opus", "sonnet"],
+  agentOrder: ["astra", "luna", "terra", "fable", "opus", "sonnet"],
   plans: [
     {
       id: "openai", label: "OpenAI", icon: "openai", provider: "openai-codex", maxReadingAgeMs: HOUR,
-      metrics: [{ id: "remaining", model: "sol", meters: ["codex-5h", "codex-7d"] }],
+      metrics: [{ id: "remaining", model: "astra", meters: ["codex-5h", "codex-7d"] }],
     },
     {
       id: "anthropic", label: "Anthropic", icon: "anthropic", provider: "anthropic", maxReadingAgeMs: 14 * DAY,
