@@ -1,8 +1,8 @@
-import { catalogMeter, type ModelCandidate } from "./catalog.js";
-import { allowsAccountUse, type BudgetClass, type OrchestratorConfig } from "./domain.js";
+import { catalogMeter } from "./catalog.js";
+import { allowsAccountUse, type BudgetClass, type OrchestratorConfig, type ProfileCandidate } from "./domain.js";
 import type { Store } from "./store.js";
 
-export interface Assignment extends ModelCandidate { readonly accountId:string; readonly meterAt?:number; }
+export type Assignment = ProfileCandidate & { readonly accountId:string; readonly meterAt?:number; };
 export interface Refusal { readonly accountId:string; readonly reason:string; }
 export interface Capacity { readonly sessions:number; readonly spent:number; readonly meterAt?:number; readonly reason:string; }
 

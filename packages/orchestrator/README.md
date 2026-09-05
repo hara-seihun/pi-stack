@@ -38,6 +38,10 @@ PI_ORCHESTRATOR_PORT
 
 The JSON config may set model `profiles`, `backgroundSpendFraction`, machine and account concurrency, meter age, reconciliation periods, stall limits, `taskManifest`, `authPath`, and `agentDir`. The strict `astra` and `opus` profiles are always available alongside configured profiles.
 
+Profile candidates retain their priority order. A candidate can replace `thinking` with `thinkingPair: ["high", "max"]` to assign equal numbers of new runs to those levels, in randomly ordered pairs. The first admission draws one level; the next admission of that profile/provider/model consumes the other. The pending level lives in the ledger's `control` table and commits atomically with the run and lease, so restarts, quota refusals and failed database transactions do not consume a slot. Different profiles and models have separate pairs. Existing and recovered runs retain their recorded level. Provider and account selection stay unchanged. Configuration changes require a daemon restart.
+
+For an experiment, record the activation time and compare new runs by `run.thinking`. `run.id` joins their token totals in `usage_hour`; session files retain the work and results. Equal admission counts do not imply equal concurrent counts or equal completion counts. A worker-launch failure remains an assigned trial and is recorded as such rather than silently replaced in the allocation.
+
 A lane manifest has `version: 2` and a `lanes` array. Every lane declares `id`, `prompt`, `cwd`, `profile`, and positive `weight`. Unknown fields are rejected, including worker targets.
 
 Without a `snapshotCommand`, lanes are continuously eligible. An optional command reports whether each queue has unclaimed work, never how many workers to run:

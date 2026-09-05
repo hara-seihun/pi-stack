@@ -20,6 +20,17 @@ export function loadConfig(path = process.env.PI_ORCHESTRATOR_CONFIG ?? join(hom
     astra: [candidate(standard)],
     opus: [candidate(expert)],
   };
+  const levels = new Set(["off", "minimal", "low", "medium", "high", "xhigh", "max"]);
+  for (const [profile, candidates] of Object.entries(profiles)) {
+    for (const entry of candidates as any[]) {
+      if (entry.thinkingPair === undefined) continue;
+      const pair = entry.thinkingPair;
+      if (entry.thinking !== undefined || !Array.isArray(pair) || pair.length !== 2 ||
+          pair[0] === pair[1] || pair.some(level => !levels.has(level))) {
+        throw new Error(`profile ${profile}: thinkingPair requires two distinct thinking levels and no thinking field`);
+      }
+    }
+  }
   return {
     profiles,
     backgroundSpendFraction: Number(local.backgroundSpendFraction ?? 0.8),

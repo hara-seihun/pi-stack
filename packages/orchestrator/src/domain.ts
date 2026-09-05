@@ -84,8 +84,13 @@ export interface UsageEntry {
 
 export type UsageTotal = Pick<UsageEntry, "accountId" | "model" | "component" | "tokens">;
 
+export type ProfileCandidate = Omit<ModelCandidate, "thinking"> & (
+  | { readonly thinking?: string; readonly thinkingPair?: never }
+  | { readonly thinking?: never; readonly thinkingPair: readonly [string, string] }
+);
+
 export interface OrchestratorConfig {
-  readonly profiles: Readonly<Record<string, readonly ModelCandidate[]>>;
+  readonly profiles: Readonly<Record<string, readonly ProfileCandidate[]>>;
   readonly backgroundSpendFraction: number;
   readonly maxConcurrentSessions: number;
   readonly defaultAccountConcurrency: number;

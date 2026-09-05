@@ -1,8 +1,9 @@
 import { mkdirSync } from "node:fs";
+import { randomInt } from "node:crypto";
 import { createRequire } from "node:module";
 import { dirname } from "node:path";
 import type { DatabaseSync } from "node:sqlite";
-import type { Account, BudgetClass, FailureKind, LaneSpec, LeaseKind, Run, RunActivity, RunSource, RunState, UsageEntry, UsageTotal } from "./domain.js";
+import type { Account, BudgetClass, FailureKind, LaneSpec, LeaseKind, ProfileCandidate, Run, RunActivity, RunSource, RunState, UsageEntry, UsageTotal } from "./domain.js";
 
 const require = createRequire(import.meta.url);
 const SqliteDatabase: new (path: string) => DatabaseSync =
@@ -239,9 +240,24 @@ export class Store {
     return (rows as any[]).map((row)=>this.mapRun(row));
   }
   private mapRun(r:any):Run{return{id:r.id,source:r.source,sourceId:maybe(r.source_id),prompt:r.prompt,cwd:r.cwd,profile:r.profile,budget:r.budget,accountId:maybe(r.account_id),provider:maybe(r.provider),model:maybe(r.model),thinking:maybe(r.thinking),sessionFile:maybe(r.session_file),state:r.state,failureKind:maybe(r.failure_kind),result:maybe(r.result),workerUnit:maybe(r.worker_unit),releasePath:maybe(r.release_path),createdAt:r.created_at,startedAt:maybe(r.started_at),updatedAt:r.updated_at,progressAt:maybe(r.progress_at),endedAt:maybe(r.ended_at),suspension:this.suspension(r.id)};}
-  assignRun(id:string,assignment:{accountId:string;provider:string;model:string;thinking?:string;unit:string;releasePath:string},at=Date.now()):boolean{
-    return this.transaction(()=>{const changed=this.db.prepare(`UPDATE run SET account_id=?,provider=?,model=?,thinking=?,worker_unit=?,release_path=?,state='starting',started_at=COALESCE(started_at,?),updated_at=?,progress_at=? WHERE id=? AND state='queued'`)
-      .run(assignment.accountId,assignment.provider,assignment.model,assignment.thinking??null,assignment.unit,assignment.releasePath,at,at,at,id).changes;if(changed!==1)return false;this.createLease(`run:${id}`,assignment.accountId,"fleet",id,at);return true;});
+  assignRun(id:string,assignment:ProfileCandidate & {accountId:string;unit:string;releasePath:string},at=Date.now()):boolean{
+    return this.transaction(()=>{
+      const run=this.run(id);
+      if(!run || run.state!=="queued" || run.accountId)return false;
+      let thinking=assignment.thinking;
+      if(assignment.thinkingPair){
+        const pair=assignment.thinkingPair;
+        const key=`thinking-pair:${JSON.stringify([run.profile,assignment.provider,assignment.model,[...pair].sort()])}`;
+        const pending=this.control(key);
+        if(pending && !pair.includes(pending))throw new Error(`invalid pending thinking level for ${key}`);
+        thinking=pending || pair[randomInt(2)]!;
+        this.setControl(key,pending ? "" : pair.find(level=>level!==thinking)!);
+      }
+      this.db.prepare(`UPDATE run SET account_id=?,provider=?,model=?,thinking=?,worker_unit=?,release_path=?,state='starting',started_at=COALESCE(started_at,?),updated_at=?,progress_at=? WHERE id=?`)
+        .run(assignment.accountId,assignment.provider,assignment.model,thinking??null,assignment.unit,assignment.releasePath,at,at,at,id);
+      this.createLease(`run:${id}`,assignment.accountId,"fleet",id,at);
+      return true;
+    });
   }
   updateRun(id:string,patch:{state?:RunState;sessionFile?:string;progressAt?:number;result?:string;failureKind?:FailureKind;workerUnit?:string},at=Date.now()):void{
     const current=this.run(id);if(!current)throw new Error(`unknown run ${id}`);const state=patch.state??current.state;const terminal=["done","failed","aborted"].includes(state);
