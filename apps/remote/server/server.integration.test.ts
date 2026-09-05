@@ -445,8 +445,6 @@ else: sys.exit(2)
   orchestrator.exec(`
     INSERT INTO account(id,provider,created_at) VALUES
       ('openai-codex','openai-codex',0),('anthropic','anthropic',0);
-    INSERT INTO room(id,name,prompt,cwd,profile,budget,desired_members,created_at,updated_at)
-      VALUES('room-1','fixture room','work','/tmp','standard','background',2,0,0);
   `);
   const insertRun = orchestrator.query(`INSERT INTO run
     (id,source,source_id,prompt,cwd,profile,budget,account_id,state,created_at,updated_at,started_at,provider,model)
@@ -457,9 +455,8 @@ else: sys.exit(2)
   insertRun.run("sonnet", "sonnet-task", "running", "anthropic/claude-sonnet");
   insertRun.run("finished", "luna-task", "done", "openai-codex/gpt-5.6-luna");
   const sessionFile = join(fakeAgentRuns, "astra-0.jsonl");
-  orchestrator.query(`UPDATE run SET started_at=1000,provider='openai-codex-3',thinking='xhigh',room_id='room-1',member_name='coordinator',session_file=?
+  orchestrator.query(`UPDATE run SET started_at=1000,provider='openai-codex-3',thinking='xhigh',session_file=?
     WHERE id='astra-0'`).run(sessionFile);
-  orchestrator.query(`UPDATE run SET room_id='room-1',member_name='member-2' WHERE id='astra-1'`).run();
   orchestrator.query(`UPDATE run SET started_at=500,ended_at=900,provider='openai-codex-2',thinking='max'
     WHERE id='finished'`).run();
   orchestrator.query(`INSERT INTO live_state(run_id,activity,text,thinking,updated_at) VALUES('astra-0','THINKING','','weighing options',0)`).run();
@@ -620,7 +617,7 @@ describe("web and supervisor integration", () => {
     expect(observable).toMatchObject({
       host: "local", hostName: "This machine", runId: "astra-0",
       taskId: "astra-task", status: "running", label: "ASTRA", provider: "openai-codex-3",
-      thinking: "xhigh", teamRole: "supervisor", teamSlot: null,
+      thinking: "xhigh",
       observable: true, activity: "THINKING",
     });
     // Settled runs never appear in the list, but stay observable by id so a run

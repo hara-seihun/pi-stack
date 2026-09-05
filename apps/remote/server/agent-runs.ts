@@ -58,7 +58,6 @@ function normalizedActivity(status: string, live: AgentLiveState | null): string
     return live?.liveThinking && !live.liveText ? "THINKING" : "WORKING";
   }
   if (activity === "TOOL") return "WAITING_ON_TOOL";
-  if (activity === "PARKED") return "IDLE";
   return activity || RUNNING_ACTIVITY;
 }
 
@@ -89,8 +88,6 @@ export function summarizeAgentRun(row: AgentRunRow, host: AgentHostRef): AgentRu
     startedAt: iso(row.startedAt),
     finishedAt: endedAt,
     observable: row.observable === true,
-    teamRole: row.teamRole ?? null,
-    teamSlot: row.teamSlot ?? null,
     error: status === "error" ? detail : null,
   };
 }

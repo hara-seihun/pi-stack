@@ -9,10 +9,9 @@ import { transactSharedCredential } from "./auth/shared-oauth.js";
 
 export const COMMANDS=[
   ["daemon","Run reconciliation and the local API"],
-  ["status","Print accounts, lanes, rooms, leases, and active runs"],
+  ["status","Print accounts, lanes, leases, and active runs"],
   ["run","Start one or more direct sessions"],
   ["wave","Start a one-off wave from a declared lane"],
-  ["room","Create, add to, resize, inspect, message, or close a warm room"],
   ["pause / resume","Set or clear the global launch halt"],
   ["abort / kill","Stop one run gracefully or immediately"],
   ["boost","Set a provider pacing multiplier or halt"],
@@ -54,17 +53,6 @@ export async function dispatch(argv:string[]):Promise<void>{
     if(action==="import"){const provider=named.get("provider")??positional[1];if(provider!=="openai-codex"&&provider!=="anthropic")throw new Error("--provider must be openai-codex or anthropic");const credentialFile=required(named,"credential-file"),credential=JSON.parse(readFileSync(credentialFile,"utf8"));output(await transactSharedCredential(config.authPath,id,credential,()=>request("/v1/accounts","POST",{id,provider,label:named.get("label"),concurrency:Number(named.get("concurrency")??config.defaultAccountConcurrency)})));return;}
     if(action==="remove"){output(await transactSharedCredential(config.authPath,id,undefined,()=>request(`/v1/accounts/${encodeURIComponent(id)}`,"DELETE")));return;}
     throw new Error("account action must be import, remove, or list");
-  }
-  if(command==="room"){
-    const [action,...tail]=rest,{named,positional}=flags(tail),name=named.get("name")??positional[0];
-    if(action==="status"){const status=await request("/v1/status");output(name?status.rooms.filter((room:any)=>room.name===name||room.id===name):status.rooms);return;}
-    if(!name)throw new Error(`room ${action} requires --name`);
-    if(action==="create"){output(await request("/v1/rooms","POST",{name,prompt:required(named,"prompt"),coordinatorPrompt:named.get("coordinator-prompt"),cwd:named.get("cwd")??process.cwd(),profile:named.get("profile")??"standard",budget:named.has("force")?"force":"background",members:Number(named.get("members")??2)}));return;}
-    if(action==="add"){output(await request(`/v1/rooms/${encodeURIComponent(name)}/members`,"POST",{members:Number(required(named,"members")),profile:named.get("profile")}));return;}
-    if(action==="resize"){output(await request(`/v1/rooms/${encodeURIComponent(name)}/resize`,"POST",{members:Number(required(named,"members"))}));return;}
-    if(action==="message"){output(await request(`/v1/rooms/${encodeURIComponent(name)}/messages`,"POST",{targetRunId:named.get("run"),body:required(named,"message"),wake:named.has("wake")}));return;}
-    if(action==="close"){output(await request(`/v1/rooms/${encodeURIComponent(name)}/close`,"POST"));return;}
-    throw new Error("room action must be create, add, resize, status, message, or close");
   }
   throw new Error(USAGE);
 }

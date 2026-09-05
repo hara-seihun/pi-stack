@@ -90,8 +90,6 @@ export interface AgentRun {
   startedAt: string;
   finishedAt: string | null;
   observable: boolean;
-  teamRole: "worker" | "supervisor" | null;
-  teamSlot: number | null;
   error: string | null;
 }
 

@@ -13,8 +13,6 @@ function run(live: ObservedRun["live"], state = "running"): ObservedRun {
     state,
     startedAt: 1_000,
     observable: true,
-    teamRole: null,
-    teamSlot: null,
     live,
   };
 }

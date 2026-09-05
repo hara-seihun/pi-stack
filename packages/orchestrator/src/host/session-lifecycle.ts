@@ -16,8 +16,6 @@ export interface HostedSessionOptions {
   readonly modelId?: string;
   readonly accountId?: string;
   readonly tools?: string[];
-  readonly customTools?: unknown[];
-  readonly resourceLoader?: unknown;
   readonly sessionManager?: unknown;
   readonly openSession?: typeof createAgentSession;
   readonly onExtensionError?: (extensionPath: string, error: unknown) => void;
@@ -43,8 +41,6 @@ export async function openHostedSession(options: HostedSessionOptions): Promise<
     model: options.model as never,
     thinkingLevel: options.thinkingLevel as never,
     ...(options.tools === undefined ? {} : { tools: options.tools }),
-    ...(options.customTools === undefined ? {} : { customTools: options.customTools as never }),
-    ...(options.resourceLoader === undefined ? {} : { resourceLoader: options.resourceLoader as never }),
     ...(options.sessionManager === undefined ? {} : { sessionManager: options.sessionManager as never }),
   });
   const sessionId = session.sessionManager.getSessionId();

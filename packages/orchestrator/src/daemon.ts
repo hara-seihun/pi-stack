@@ -112,25 +112,6 @@ export class Daemon {
           }catch(error){this.store.setControl(`refusal:lane:${lane.id}`,String(error));}
         }
       }
-      for(const room of this.store.rooms().filter((room)=>!room.closed_at)){
-        let activeRuns=this.store.runs(["queued","starting","running","parked"]).filter((run)=>run.roomId===room.id);
-        const excess=activeRuns.length-Number(room.desired_members);
-        if(excess>0){
-          const remove=[...activeRuns].sort((a,b)=>Number(a.memberName==="coordinator")-Number(b.memberName==="coordinator")||b.createdAt-a.createdAt||b.id.localeCompare(a.id)).slice(0,excess);
-          for(const run of remove)if(run.state==="queued")this.store.updateRun(run.id,{state:"aborted",failureKind:"operator",result:"room membership reduced"});else this.store.setControl(`abort:${run.id}`,"room membership reduced");
-          activeRuns=activeRuns.filter((run)=>!remove.some((candidate)=>candidate.id===run.id));
-        }
-        let missing=Number(room.desired_members)-activeRuns.length;
-        if(missing>0&&room.coordinator_prompt&&!activeRuns.some((run)=>run.memberName==="coordinator")){
-          this.store.createRuns({count:1,source:"room",sourceId:room.id,roomId:room.id,prompt:room.coordinator_prompt,cwd:room.cwd,profile:room.profile,budget:room.budget,memberNames:["coordinator"]});
-          missing--;
-        }
-        if(missing>0){
-          const existing=this.store.runs().filter((run)=>run.roomId===room.id).length;
-          const names=Array.from({length:missing},(_,i)=>`member-${existing+i+1}`);
-          this.store.createRuns({count:missing,source:"room",sourceId:room.id,roomId:room.id,prompt:room.prompt,cwd:room.cwd,profile:room.profile,budget:room.budget,memberNames:names});
-        }
-      }
       for(const run of this.store.admissionQueue())await this.launch(run);
       const now=Date.now();
       for(const run of this.store.runs(["starting","running"])){
@@ -230,12 +211,12 @@ export class Daemon {
     try{
       const url=new URL(req.url??"/",`http://${HOST}:${PORT}`),method=req.method??"GET";
       if(method==="GET"&&url.pathname==="/v1/status")return json(res,200,this.status());
-      if(method==="GET"&&url.pathname==="/v1/runs")return json(res,200,{runs:this.store.runs(),live:this.store.live(),rooms:this.store.rooms()});
+      if(method==="GET"&&url.pathname==="/v1/runs")return json(res,200,{runs:this.store.runs(),live:this.store.live()});
       if(method==="GET"&&url.pathname==="/v1/plans")return json(res,200,{accounts:this.store.accounts(),meters:this.store.meters(),leases:this.store.activeLeases(),controls:Object.fromEntries((this.store.db.prepare("SELECT * FROM control").all() as any[]).map((r)=>[r.key,r.value]))});
       if(method==="GET"&&url.pathname.startsWith("/internal/runs/")){
         const parts=url.pathname.split("/"),id=parts[3]!,action=parts[4];const run=this.store.run(id);if(!run)return json(res,404,{error:"run not found"});
-        if(action==="messages")return json(res,200,{messages:this.store.pendingMessages(id),abort:this.store.control(`abort:${id}`)});
-        return json(res,200,{run});
+        if(action==="control"&&parts.length===5)return json(res,200,{abort:this.store.control(`abort:${id}`)});
+        if(parts.length===4)return json(res,200,{run});
       }
       if(method==="POST"&&url.pathname.startsWith("/internal/runs/")){
         const parts=url.pathname.split("/"),id=parts[3]!,action=parts[4],input=await body(req);
@@ -247,7 +228,6 @@ export class Daemon {
           return json(res,200,{ok:true});
         }
         if(action==="heartbeat"){this.store.heartbeatLease(`run:${id}`);this.store.updateRun(id,{progressAt:input.progress?Date.now():undefined});if(input.activity)this.store.setLive(id,input);return json(res,200,{ok:true});}
-        if(action==="messages"&&parts[5]){this.store.deliverMessage(Number(parts[5]));return json(res,200,{ok:true});}
       }
       if(method==="POST"&&url.pathname==="/v1/accounts"){
         const input=await body(req);
@@ -258,18 +238,11 @@ export class Daemon {
       if(method==="DELETE"&&accountRemove){this.store.setAccountEnabled(decodeURIComponent(accountRemove[1]!),false);return json(res,200,{ok:true});}
       if(method==="POST"&&url.pathname==="/v1/run"){const input=await body(req);const ids=this.store.createRuns({count:Number(input.count??1),source:"direct",prompt:String(input.prompt),cwd:String(input.cwd??process.cwd()),profile:String(input.profile??"standard"),budget:input.force?"force":"background"});void this.reconcile();return json(res,201,{runIds:ids});}
       if(method==="POST"&&url.pathname==="/v1/wave"){const input=await body(req),lane=this.store.lane(String(input.lane));if(!lane)return json(res,404,{error:"lane not found"});const ids=this.store.createRuns({count:Number(input.count??1),source:"direct",sourceId:lane.id,prompt:lane.prompt,cwd:lane.cwd,profile:lane.profile,budget:input.force?"force":"background"});void this.reconcile();return json(res,201,{runIds:ids});}
-      if(method==="POST"&&url.pathname==="/v1/rooms"){const created=this.store.createRoom(await body(req));void this.reconcile();return json(res,201,created);}
-      const roomMembers=/^\/v1\/rooms\/([^/]+)\/members$/.exec(url.pathname);if(method==="POST"&&roomMembers){const input=await body(req),created=this.store.addRoomMembers(decodeURIComponent(roomMembers[1]!),Number(input.members),input.profile===undefined?undefined:String(input.profile));void this.reconcile();return json(res,201,created);}
-      const roomResize=/^\/v1\/rooms\/([^/]+)\/resize$/.exec(url.pathname);if(method==="POST"&&roomResize){const input=await body(req),room=this.store.resizeRoom(decodeURIComponent(roomResize[1]!),Number(input.members));void this.reconcile();return json(res,200,{room});}
-      const roomClose=/^\/v1\/rooms\/([^/]+)\/close$/.exec(url.pathname);if(method==="POST"&&roomClose){this.store.closeRoom(decodeURIComponent(roomClose[1]!));return json(res,200,{ok:true});}
-      const roomMessage=/^\/v1\/rooms\/([^/]+)\/messages$/.exec(url.pathname);
-      if(method==="GET"&&roomMessage){const room=this.store.room(decodeURIComponent(roomMessage[1]!));if(!room)return json(res,404,{error:"room not found"});return json(res,200,{messages:this.store.roomMessages(room.id,Number(url.searchParams.get("after")??0))});}
-      if(method==="POST"&&roomMessage){const room=this.store.room(decodeURIComponent(roomMessage[1]!)),input=await body(req);if(!room)return json(res,404,{error:"room not found"});const id=this.store.postMessage({roomId:room.id,senderRunId:input.senderRunId,targetRunId:input.targetRunId,body:String(input.body),wake:!!input.wake});return json(res,201,{id});}
       const runAbort=/^\/v1\/runs\/([^/]+)\/(abort|kill)$/.exec(url.pathname);if(method==="POST"&&runAbort){const id=runAbort[1]!,action=runAbort[2]!;this.store.setControl(`abort:${id}`,action);if(action==="kill"){const run=this.store.run(id);this.stopUnit(run?.workerUnit);this.store.updateRun(id,{state:"aborted",failureKind:"operator",result:"killed by operator"});}return json(res,200,{ok:true});}
       if(method==="POST"&&url.pathname==="/v1/control"){const input=await body(req);this.store.setControl(String(input.key),String(input.value));return json(res,200,{ok:true});}
       json(res,404,{error:"not found"});
     }catch(error){json(res,500,{error:String(error)});}
   }
 
-  private status():unknown{return{launches:this.store.control("launches")??"enabled",snapshotError:this.store.control("snapshot_error")||undefined,accounts:this.store.accounts(),lanes:this.store.lanes().map((lane)=>({...lane,active:this.store.activeCount("lane",lane.id)})),runs:this.store.runs(["queued","starting","running","parked"]),rooms:this.store.rooms(),leases:this.store.activeLeases()};}
+  private status():unknown{return{launches:this.store.control("launches")??"enabled",snapshotError:this.store.control("snapshot_error")||undefined,accounts:this.store.accounts(),lanes:this.store.lanes().map((lane)=>({...lane,active:this.store.activeCount("lane",lane.id)})),runs:this.store.runs(["queued","starting","running"]),leases:this.store.activeLeases()};}
 }
