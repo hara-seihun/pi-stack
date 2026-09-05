@@ -90,6 +90,8 @@ The registry file is the whole per-person configuration. Its `environment` objec
 
 Values in `environment` become process environment variables before the supervisor loads. Existing process variables win. Arrays and objects are JSON-encoded automatically. All persons on a machine must agree on the environment id and name.
 
+New persons' Personal and Home destinations start threads at `high` thinking. Existing persons configure this through `thinkingLevel` in `PI_REMOTE_THREAD_DESTINATIONS`. Changing a destination affects new threads; existing threads keep their saved thinking level.
+
 Each thread starts with a 30-minute maximum for foreground bash calls. Its Thread settings panel can change that limit to 60 seconds, 5 minutes, or half an hour. Pi Remote stores the choice with the thread and restarts its idle runtime so the next agent request receives the new limit.
 
 ### The front door
