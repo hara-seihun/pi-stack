@@ -2,7 +2,7 @@ import { mkdirSync } from "node:fs";
 import { createRequire } from "node:module";
 import { dirname } from "node:path";
 import type { DatabaseSync } from "node:sqlite";
-import type { Account, BudgetClass, DemandSnapshot, FailureKind, LaneSpec, LeaseKind, Run, RunActivity, RunSource, RunState, UsageEntry, UsageTotal } from "./domain.js";
+import type { Account, BudgetClass, FailureKind, LaneSpec, LeaseKind, Run, RunActivity, RunSource, RunState, UsageEntry, UsageTotal } from "./domain.js";
 
 const require = createRequire(import.meta.url);
 const SqliteDatabase: new (path: string) => DatabaseSync =
@@ -54,16 +54,10 @@ CREATE TABLE lane (
   cwd TEXT NOT NULL,
   profile TEXT NOT NULL,
   weight REAL NOT NULL CHECK (weight > 0),
-  fixed_demand INTEGER,
   priority INTEGER NOT NULL DEFAULT 0,
   doctrine_url TEXT,
   opening_probe TEXT,
   updated_at INTEGER NOT NULL
-) STRICT;
-CREATE TABLE demand_snapshot (
-  revision TEXT PRIMARY KEY,
-  captured_at INTEGER NOT NULL,
-  body TEXT NOT NULL
 ) STRICT;
 CREATE TABLE run (
   id TEXT PRIMARY KEY,
@@ -168,9 +162,8 @@ export class Store {
 
   recordMeter(accountId:string,meterId:string,usedPercent:number,resetAt:number|undefined,observedAt=Date.now()): void {
     this.db.prepare("INSERT OR IGNORE INTO meter VALUES(?,?,?,?,?)").run(accountId,meterId,observedAt,usedPercent,resetAt??null);
-    this.db.prepare(`DELETE FROM meter WHERE account_id=? AND meter_id=? AND observed_at NOT IN
-      (SELECT observed_at FROM meter WHERE account_id=? AND meter_id=? ORDER BY observed_at DESC LIMIT 96)`)
-      .run(accountId,meterId,accountId,meterId);
+    this.db.prepare("DELETE FROM meter WHERE account_id=? AND meter_id=? AND observed_at<?")
+      .run(accountId,meterId,observedAt-24*3_600_000);
   }
   meters(accountId?:string): any[] {
     return (accountId
@@ -204,20 +197,26 @@ export class Store {
   }
 
   reconcileLanes(lanes:readonly LaneSpec[], at=Date.now()): void {
+    const ids=new Set<string>();
+    for(const lane of lanes){
+      for(const key of Object.keys(lane))if(!["id","prompt","cwd","profile","weight","priority","doctrineUrl","openingProbe"].includes(key))throw new Error(`unsupported lane field ${key}`);
+      if(!lane.id||ids.has(lane.id))throw new Error(`invalid or duplicate lane id ${lane.id}`);
+      ids.add(lane.id);
+      if(!Number.isFinite(lane.weight)||lane.weight<=0)throw new Error(`lane ${lane.id} requires a positive weight`);
+      for(const key of ["prompt","cwd","profile"] as const)if(typeof lane[key]!=="string"||!lane[key])throw new Error(`lane ${lane.id} requires ${key}`);
+    }
     this.transaction(() => {
       const ids=new Set(lanes.map((lane)=>lane.id));
-      for (const lane of lanes) this.db.prepare(`INSERT INTO lane(id,prompt,cwd,profile,weight,fixed_demand,priority,doctrine_url,opening_probe,updated_at)
-        VALUES(?,?,?,?,?,?,?,?,?,?) ON CONFLICT(id) DO UPDATE SET prompt=excluded.prompt,cwd=excluded.cwd,profile=excluded.profile,
-        weight=excluded.weight,fixed_demand=excluded.fixed_demand,priority=excluded.priority,doctrine_url=excluded.doctrine_url,
+      for (const lane of lanes) this.db.prepare(`INSERT INTO lane(id,prompt,cwd,profile,weight,priority,doctrine_url,opening_probe,updated_at)
+        VALUES(?,?,?,?,?,?,?,?,?) ON CONFLICT(id) DO UPDATE SET prompt=excluded.prompt,cwd=excluded.cwd,profile=excluded.profile,
+        weight=excluded.weight,priority=excluded.priority,doctrine_url=excluded.doctrine_url,
         opening_probe=excluded.opening_probe,updated_at=excluded.updated_at`)
-        .run(lane.id,lane.prompt,lane.cwd,lane.profile,lane.weight,lane.fixedDemand??null,lane.priority??0,lane.doctrineUrl??null,lane.openingProbe??null,at);
+        .run(lane.id,lane.prompt,lane.cwd,lane.profile,lane.weight,lane.priority??0,lane.doctrineUrl??null,lane.openingProbe??null,at);
       for (const row of this.db.prepare("SELECT id FROM lane").all() as {id:string}[]) if(!ids.has(row.id)) this.db.prepare("DELETE FROM lane WHERE id=?").run(row.id);
     });
   }
-  lanes(): LaneSpec[] { return (this.db.prepare("SELECT * FROM lane ORDER BY priority DESC,weight DESC,id").all() as any[]).map((r)=>({id:r.id,prompt:r.prompt,cwd:r.cwd,profile:r.profile,weight:r.weight,fixedDemand:maybe(r.fixed_demand),priority:r.priority,doctrineUrl:maybe(r.doctrine_url),openingProbe:maybe(r.opening_probe)})); }
+  lanes(): LaneSpec[] { return (this.db.prepare("SELECT * FROM lane ORDER BY priority DESC,weight DESC,id").all() as any[]).map((r)=>({id:r.id,prompt:r.prompt,cwd:r.cwd,profile:r.profile,weight:r.weight,priority:r.priority,doctrineUrl:maybe(r.doctrine_url),openingProbe:maybe(r.opening_probe)})); }
   lane(id:string):LaneSpec|undefined{return this.lanes().find((x)=>x.id===id);}
-  saveSnapshot(snapshot:DemandSnapshot,at=Date.now()):void{this.transaction(()=>{this.db.prepare("INSERT OR REPLACE INTO demand_snapshot VALUES(?,?,?)").run(snapshot.revision,at,JSON.stringify(snapshot));for(const [id,demand] of Object.entries(snapshot.lanes))if(demand.priority!==undefined)this.db.prepare("UPDATE lane SET priority=?,updated_at=? WHERE id=?").run(demand.priority,at,id);});}
-  latestSnapshot():any|undefined{const row=this.db.prepare("SELECT body FROM demand_snapshot ORDER BY captured_at DESC LIMIT 1").get() as {body:string}|undefined;return row?JSON.parse(row.body):undefined;}
 
   createRuns(input:{count:number;source:RunSource;sourceId?:string;prompt:string;cwd:string;profile:string;budget:BudgetClass}):string[]{
     const now=Date.now(),ids:string[]=[];
@@ -234,12 +233,12 @@ export class Store {
         CASE run.source WHEN 'direct' THEN 0 ELSE 1 END,
         COALESCE(lane.priority,0) DESC,
         CASE WHEN lane.id IS NULL THEN 0 ELSE
-          CAST((SELECT count(*) FROM run active WHERE active.source='lane' AND active.source_id=run.source_id AND active.state IN ('starting','running')) AS REAL)/lane.weight
+          CAST((SELECT count(*) FROM run active WHERE active.source='lane' AND active.source_id=run.source_id AND active.state IN ('starting','running') AND NOT EXISTS (SELECT 1 FROM control WHERE key='suspend:'||active.id)) AS REAL)/lane.weight
         END,
         COALESCE(lane.weight,0) DESC,run.created_at,run.id`).all();
     return (rows as any[]).map((row)=>this.mapRun(row));
   }
-  private mapRun(r:any):Run{return{id:r.id,source:r.source,sourceId:maybe(r.source_id),prompt:r.prompt,cwd:r.cwd,profile:r.profile,budget:r.budget,accountId:maybe(r.account_id),provider:maybe(r.provider),model:maybe(r.model),thinking:maybe(r.thinking),sessionFile:maybe(r.session_file),state:r.state,failureKind:maybe(r.failure_kind),result:maybe(r.result),workerUnit:maybe(r.worker_unit),releasePath:maybe(r.release_path),createdAt:r.created_at,startedAt:maybe(r.started_at),updatedAt:r.updated_at,progressAt:maybe(r.progress_at),endedAt:maybe(r.ended_at)};}
+  private mapRun(r:any):Run{return{id:r.id,source:r.source,sourceId:maybe(r.source_id),prompt:r.prompt,cwd:r.cwd,profile:r.profile,budget:r.budget,accountId:maybe(r.account_id),provider:maybe(r.provider),model:maybe(r.model),thinking:maybe(r.thinking),sessionFile:maybe(r.session_file),state:r.state,failureKind:maybe(r.failure_kind),result:maybe(r.result),workerUnit:maybe(r.worker_unit),releasePath:maybe(r.release_path),createdAt:r.created_at,startedAt:maybe(r.started_at),updatedAt:r.updated_at,progressAt:maybe(r.progress_at),endedAt:maybe(r.ended_at),suspension:this.suspension(r.id)};}
   assignRun(id:string,assignment:{accountId:string;provider:string;model:string;thinking?:string;unit:string;releasePath:string},at=Date.now()):boolean{
     return this.transaction(()=>{const changed=this.db.prepare(`UPDATE run SET account_id=?,provider=?,model=?,thinking=?,worker_unit=?,release_path=?,state='starting',started_at=COALESCE(started_at,?),updated_at=?,progress_at=? WHERE id=? AND state='queued'`)
       .run(assignment.accountId,assignment.provider,assignment.model,assignment.thinking??null,assignment.unit,assignment.releasePath,at,at,at,id).changes;if(changed!==1)return false;this.createLease(`run:${id}`,assignment.accountId,"fleet",id,at);return true;});
@@ -248,7 +247,7 @@ export class Store {
     const current=this.run(id);if(!current)throw new Error(`unknown run ${id}`);const state=patch.state??current.state;const terminal=["done","failed","aborted"].includes(state);
     this.db.prepare(`UPDATE run SET state=?,session_file=COALESCE(?,session_file),progress_at=COALESCE(?,progress_at),result=COALESCE(?,result),failure_kind=COALESCE(?,failure_kind),worker_unit=COALESCE(?,worker_unit),updated_at=?,ended_at=? WHERE id=?`)
       .run(state,patch.sessionFile??null,patch.progressAt??null,patch.result??null,patch.failureKind??null,patch.workerUnit??null,at,terminal?at:null,id);
-    if(terminal)this.endLease(`run:${id}`,at);
+    if(terminal){this.endLease(`run:${id}`,at);this.db.prepare("DELETE FROM control WHERE key=?").run(`suspend:${id}`);}
   }
   resumeAssignedRun(id:string,at=Date.now()):boolean{
     return this.transaction(()=>{
@@ -273,16 +272,26 @@ export class Store {
     });
   }
   activeCount(source?:RunSource,sourceId?:string):number{let sql="SELECT COUNT(*) n FROM run WHERE state IN ('queued','starting','running')",args:any[]=[];if(source){sql+=" AND source=?";args.push(source);}if(sourceId){sql+=" AND source_id=?";args.push(sourceId);}return Number((this.db.prepare(sql).get(...args) as any).n);}
-  admittedLaneCount(sourceId:string):number{return Number((this.db.prepare("SELECT COUNT(*) n FROM run WHERE source='lane' AND source_id=? AND state IN ('starting','running')").get(sourceId) as any).n);}
+  admittedLaneCount(sourceId:string):number{return this.runs(["starting","running"]).filter((run)=>run.source==="lane"&&run.sourceId===sourceId&&!run.suspension).length;}
+  suspension(id:string):Run["suspension"]{const value=this.control(`suspend:${id}`);return value?JSON.parse(value):undefined;}
+  suspendRun(id:string,reason:string,at=Date.now()):void{
+    if(!this.suspension(id))this.setControl(`suspend:${id}`,JSON.stringify({since:at,reason}));
+  }
+  unsuspendRun(id:string,at=Date.now()):void{
+    this.transaction(()=>{const run=this.run(id);if(!run?.suspension||!run.accountId)return;
+      this.db.prepare("DELETE FROM control WHERE key=?").run(`suspend:${id}`);
+      this.updateRun(id,{progressAt:at},at);this.createLease(`run:${id}`,run.accountId,"fleet",id,at);
+    });
+  }
   trimQueuedLane(sourceId:string,keep:number,at=Date.now()):number{
     const rows=this.db.prepare("SELECT id FROM run WHERE source='lane' AND source_id=? AND state='queued' ORDER BY created_at,id").all(sourceId) as {id:string}[];
     const removed=rows.slice(Math.max(0,keep));
-    this.transaction(()=>{for(const {id} of removed)this.db.prepare("UPDATE run SET state='aborted',failure_kind='task',result='lane demand withdrawn before admission',updated_at=?,ended_at=? WHERE id=? AND state='queued'").run(at,at,id);});
+    this.transaction(()=>{for(const {id} of removed)this.db.prepare("UPDATE run SET state='aborted',failure_kind='task',result='unused lane queue entry withdrawn',updated_at=?,ended_at=? WHERE id=? AND state='queued'").run(at,at,id);});
     return removed.length;
   }
 
   createLease(id:string,accountId:string,kind:LeaseKind,runId?:string,at=Date.now()):void{this.db.prepare(`INSERT INTO lease(id,account_id,kind,run_id,started_at,heartbeat_at,ended_at) VALUES(?,?,?,?,?,?,NULL)
-    ON CONFLICT(id) DO UPDATE SET account_id=excluded.account_id,kind=excluded.kind,run_id=excluded.run_id,heartbeat_at=excluded.heartbeat_at,ended_at=NULL`).run(id,accountId,kind,runId??null,at,at);}
+    ON CONFLICT(id) DO UPDATE SET account_id=excluded.account_id,kind=excluded.kind,run_id=excluded.run_id,started_at=excluded.started_at,heartbeat_at=excluded.heartbeat_at,ended_at=NULL`).run(id,accountId,kind,runId??null,at,at);}
   heartbeatLease(id:string,at=Date.now()):void{this.db.prepare("UPDATE lease SET heartbeat_at=? WHERE id=? AND ended_at IS NULL").run(at,id);}
   endLease(id:string,at=Date.now()):void{this.db.prepare("UPDATE lease SET ended_at=? WHERE id=? AND ended_at IS NULL").run(at,id);}
   activeLeases(accountId?:string,maxAgeMs=120000,now=Date.now()):any[]{const cutoff=now-maxAgeMs;return (accountId?this.db.prepare("SELECT * FROM lease WHERE account_id=? AND ended_at IS NULL AND heartbeat_at>=?").all(accountId,cutoff):this.db.prepare("SELECT * FROM lease WHERE ended_at IS NULL AND heartbeat_at>=?").all(cutoff)) as any[];}

@@ -20,7 +20,6 @@ Run `npm run docs --workspace=pi-orchestrator` after changing commands or durabl
 - `meter`
 - `control`
 - `lane`
-- `demand_snapshot`
 - `run`
 - `lease`
 - `live_state`

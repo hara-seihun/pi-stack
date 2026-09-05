@@ -4,20 +4,21 @@ Pi Orchestrator runs unattended Pi sessions against pooled subscription accounts
 
 ## Runtime model
 
-The daemon reconciles four inputs:
+The daemon reconciles provider meters, weighted lanes, optional queue readiness, and explicit requests for direct runs.
 
-- an account registry and fresh provider meter readings;
-- a versioned lane manifest;
-- one optional demand snapshot command for all dynamic lanes;
-- explicit operator requests for direct runs.
-
-A lane is recurring desired demand. A wave is a one-off launch. Each run ends when its agent finishes its turn.
+A lane has a positive weight, not a worker target. Available quota determines fleet size; weights divide that capacity among eligible lanes. A wave remains a one-off batch, not a standing target. Each run ends when its agent finishes its turn.
 
 Workers write progress through the daemon's loopback API. Their full context remains in Pi's session JSONL. If a worker process or machine stops, the next worker reopens that same file. The run row records the immutable release path and transient unit name, so a daemon deployment does not replace live workers. Recovery adopts a still-active unit when a daemon restart races the user manager; an already-loaded inactive transient unit restarts from its recorded release instead of being redefined.
 
 ## Quota policy
 
-Ordinary work preserves the configured reserve, blocks on stale meters, compares recent usage slope with time to reset, and admits at most one run from each new meter observation. A new account gets one calibration probe before the daemon requires meter evidence. The allocator chooses the least-spent eligible account and counts fleet, interactive, and voice leases against account and machine ceilings.
+Ordinary work must stay within the elapsed share of each provider window's allowance, including the configured reserve. A whole-percentage-point tolerance accounts for provider rounding. Every binding meter must be fresh. A flat pair of readings cannot erase earlier overspending.
+
+The account concurrency ceiling also uses up to six hours of same-window consumption divided by recorded session-hours, with one percentage point added for meter uncertainty. Meter history is retained for 24 hours rather than a fixed sample count. At least 15 minutes of evidence is required to move beyond one calibration session. Fleet, interactive, and voice leases share the account and machine ceilings. New work consumes at most one admission per meter observation.
+
+Every reconciliation applies these ceilings to running workers as well as admissions. Excess workers receive an abort through the existing worker control API, save their interrupted turn, and exit. An unresponsive worker is stopped after 15 seconds. The ledger retains a `suspend:<run-id>` control with the reason and time; leases remain charged until the worker acknowledges its checkpoint or exits. A restart preserves these holds. When quota permits, the daemon reopens the same run, account, release, and Pi JSONL before creating a replacement for that lane. Paused time does not count as a stall.
+
+`status` exposes calculated account ceilings and reasons, plus each lane's active and paused counts. Pi Remote reports held sessions as paused and excludes them from its running total.
 
 `run --force` and `wave --force` are operator-authorized urgent work. They bypass ordinary pacing but not exhausted provider quota or a provider halt. Provider boost controls multiply ordinary pacing. A multiplier of zero halts that provider.
 
@@ -37,19 +38,21 @@ PI_ORCHESTRATOR_PORT
 
 The JSON config may set model `profiles`, `backgroundSpendFraction`, machine and account concurrency, meter age, reconciliation periods, stall limits, `taskManifest`, `authPath`, and `agentDir`. The strict `astra` and `opus` profiles are always available alongside configured profiles.
 
-A lane manifest has `version: 2`, an optional `snapshotCommand`, and a `lanes` array. Every lane declares `id`, `prompt`, `cwd`, `profile`, and positive `weight`. `fixedDemand` makes demand static. The snapshot command prints one atomic object:
+A lane manifest has `version: 2` and a `lanes` array. Every lane declares `id`, `prompt`, `cwd`, `profile`, and positive `weight`. Unknown fields are rejected, including worker targets.
+
+Without a `snapshotCommand`, lanes are continuously eligible. An optional command reports whether each queue has unclaimed work, never how many workers to run:
 
 ```json
 {
   "revision": "business-state-version",
   "lanes": {
-    "review": { "count": 2, "priority": 20 },
-    "publication": { "count": 1 }
+    "review": { "ready": true },
+    "publication": { "ready": false }
   }
 }
 ```
 
-The daemon validates the whole snapshot before publishing it. A failed probe reports the error in status and sets every dynamic lane's current demand to zero. It retains the last valid revision only as history. When demand falls, queued workers above the new count are withdrawn before admission.
+The daemon validates the whole readiness snapshot. A missing lane or failed probe prevents new work in that lane without interrupting its already-assigned sessions. A readiness observation permits at most one launch per lane before the next 30-second refresh, allowing the worker to claim its task. Numerical counts are rejected. Lanes do not preallocate worker queues.
 
 ## Operations
 

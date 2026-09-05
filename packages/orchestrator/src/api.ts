@@ -9,7 +9,7 @@ export {
   type PlanDefinition,
   type PlanMetric,
 } from "./catalog.js";
-export type { LaneManifest, LaneSpec, DemandSnapshot, Run } from "./domain.js";
+export type { LaneManifest, LaneSpec, LaneReadiness, Run } from "./domain.js";
 export {
   CACHE_WINDOW_MS,
   OrchestratorClient,

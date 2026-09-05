@@ -27,20 +27,19 @@ export interface LaneSpec {
   readonly cwd: string;
   readonly profile: string;
   readonly weight: number;
-  readonly fixedDemand?: number;
   readonly priority?: number;
   readonly doctrineUrl?: string;
   readonly openingProbe?: string;
 }
 
-export interface DemandSnapshot {
-  readonly revision: string;
-  readonly lanes: Readonly<Record<string, { readonly count: number; readonly priority?: number }>>;
+export interface LaneReadiness {
+  readonly revision:string;
+  readonly lanes:Readonly<Record<string,{readonly ready:boolean}>>;
 }
 
 export interface LaneManifest {
   readonly version: 2;
-  readonly snapshotCommand?: string;
+  readonly snapshotCommand?:string;
   readonly lanes: readonly (LaneSpec | (Omit<LaneSpec,"prompt"> & { readonly promptFile:string }))[];
 }
 
@@ -67,6 +66,7 @@ export interface Run {
   readonly updatedAt: number;
   readonly progressAt?: number;
   readonly endedAt?: number;
+  readonly suspension?: { readonly since:number; readonly reason:string };
 }
 
 /** The parts a provider reports for one assistant message. */
@@ -90,7 +90,6 @@ export interface OrchestratorConfig {
   readonly maxConcurrentSessions: number;
   readonly defaultAccountConcurrency: number;
   readonly meterMaxAgeMs: number;
-  readonly snapshotIntervalMs: number;
   readonly reconcileIntervalMs: number;
   readonly stallAfterMs: number;
   readonly killAfterMs: number;

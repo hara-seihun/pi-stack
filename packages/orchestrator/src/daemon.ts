@@ -4,8 +4,8 @@ import { fileURLToPath } from "node:url";
 import { dirname, join, resolve } from "node:path";
 import { homedir } from "node:os";
 import { createServer, type IncomingMessage, type ServerResponse } from "node:http";
-import type { DemandSnapshot, LaneManifest, LaneSpec, OrchestratorConfig, Run } from "./domain.js";
-import { assign, commitMeterAdmission } from "./policy.js";
+import type { LaneReadiness, LaneManifest, LaneSpec, OrchestratorConfig, Run } from "./domain.js";
+import { accountCapacity, assign, commitMeterAdmission } from "./policy.js";
 import { Store } from "./store.js";
 import { CodexMeterSampler } from "./meters-codex.js";
 import { AnthropicMeterSampler } from "./meters-anthropic.js";
@@ -20,8 +20,9 @@ function exec(command:string,cwd?:string,timeout=30_000):Promise<string>{return 
 
 export class Daemon {
   private manifestMtime=0;
-  private snapshotAt=0;
-  private currentSnapshot:DemandSnapshot|undefined;
+  private snapshotCommand?:string;
+  private readinessAt=0;
+  private readiness?:LaneReadiness;
   private reconciling=false;
   private stopped=false;
   private releasePath:string;
@@ -70,26 +71,12 @@ export class Daemon {
     const mtime=statSync(path).mtimeMs;if(mtime===this.manifestMtime)return;
     const manifest=JSON.parse(readFileSync(path,"utf8")) as LaneManifest;
     if(manifest.version!==2||!Array.isArray(manifest.lanes))throw new Error("lane manifest version 2 required");
-    const lanes=manifest.lanes.map((lane)=>"prompt" in lane?lane:{...lane,prompt:readFileSync(resolve(dirname(path),lane.promptFile),"utf8")});
+    for(const key of Object.keys(manifest))if(!["version","lanes","snapshotCommand"].includes(key))throw new Error(`unsupported lane manifest field ${key}`);
+    const lanes=manifest.lanes.map((lane)=>{if("prompt" in lane)return lane;const {promptFile,...spec}=lane;return{...spec,prompt:readFileSync(resolve(dirname(path),promptFile),"utf8")};});
     this.store.reconcileLanes(lanes);
-    this.store.setControl("snapshot_command",manifest.snapshotCommand??"");
+    this.snapshotCommand=manifest.snapshotCommand;
+    this.readinessAt=0;this.readiness=undefined;
     this.manifestMtime=mtime;
-  }
-
-  private async demand():Promise<DemandSnapshot|undefined>{
-    const command=this.store.control("snapshot_command");
-    if(!command)return undefined;
-    if(Date.now()-this.snapshotAt<this.config.snapshotIntervalMs)return this.currentSnapshot;
-    this.snapshotAt=Date.now();
-    try{
-      const snapshot=JSON.parse(await exec(command)) as DemandSnapshot;
-      if(typeof snapshot.revision!=="string"||!snapshot.lanes||typeof snapshot.lanes!=="object")throw new Error("invalid demand snapshot");
-      for(const [id,value] of Object.entries(snapshot.lanes))if(!Number.isInteger(value.count)||value.count<0)throw new Error(`invalid demand for ${id}`);
-      this.store.saveSnapshot(snapshot);
-      this.store.setControl("snapshot_error","");
-      this.currentSnapshot=snapshot;
-      return snapshot;
-    }catch(error){this.store.setControl("snapshot_error",String(error));this.currentSnapshot=undefined;return undefined;}
   }
 
   async reconcile():Promise<void>{
@@ -97,24 +84,16 @@ export class Daemon {
     try{
       await this.loadManifest();
       await Promise.all([this.codexMeters.sample(),this.anthropicMeters.sample()]);
-      const snapshot=await this.demand();
-      for(const lane of this.store.lanes()){
-        if(this.store.control(`complete:${lane.id}`)!==undefined)continue;
-        const desired=lane.fixedDemand??snapshot?.lanes?.[lane.id]?.count??0;
-        const admitted=this.store.admittedLaneCount(lane.id);
-        this.store.trimQueuedLane(lane.id,Math.max(0,desired-admitted));
-        const active=this.store.activeCount("lane",lane.id);
-        if(desired>active){
-          try{
-            const prompt=await this.lanePrompt(lane);
-            this.store.createRuns({count:desired-active,source:"lane",sourceId:lane.id,prompt,cwd:lane.cwd,profile:lane.profile,budget:"background"});
-            this.store.setControl(`refusal:lane:${lane.id}`,"");
-          }catch(error){this.store.setControl(`refusal:lane:${lane.id}`,String(error));}
-        }
+      await this.refreshReadiness();
+      this.reconcileCapacity();
+      for(const run of this.store.admissionQueue()){
+        if(run.source==="lane"){this.store.trimQueuedLane(run.sourceId!,0);continue;}
+        await this.launch(run);
       }
-      for(const run of this.store.admissionQueue())await this.launch(run);
+      await this.fillCapacity();
       const now=Date.now();
       for(const run of this.store.runs(["starting","running"])){
+        if(run.suspension)continue;
         const progress=run.progressAt??run.startedAt??run.createdAt;
         if(now-progress>this.config.killAfterMs){this.stopUnit(run.workerUnit);this.store.updateRun(run.id,{state:"failed",failureKind:"infrastructure",result:"session made no progress"});continue;}
         if(process.env.PI_ORCHESTRATOR_WORKER_LAUNCH!=="process"&&run.workerUnit&&!this.unitIsActive(run.workerUnit)){
@@ -124,6 +103,86 @@ export class Daemon {
         if(now-progress>this.config.stallAfterMs)this.store.setControl(`abort:${run.id}`,"stalled");
       }
     }finally{this.reconciling=false;}
+  }
+
+  private async refreshReadiness():Promise<void>{
+    if(!this.snapshotCommand||Date.now()-this.readinessAt<30_000)return;
+    this.readinessAt=Date.now();
+    try{
+      const snapshot=JSON.parse(await exec(this.snapshotCommand)) as LaneReadiness;
+      if(typeof snapshot.revision!=="string"||!snapshot.lanes||typeof snapshot.lanes!=="object"||Array.isArray(snapshot.lanes))throw new Error("invalid lane readiness snapshot");
+      for(const [id,value] of Object.entries(snapshot.lanes))if(!value||typeof value.ready!=="boolean"||Object.keys(value).some((key)=>key!=="ready"))throw new Error(`lane ${id} requires ready: boolean, not a worker count`);
+      this.readiness=snapshot;this.store.setControl("readiness_error","");
+    }catch(error){this.readiness=undefined;this.store.setControl("readiness_error",String(error));}
+  }
+
+  private laneReady(id:string):boolean{
+    return !this.snapshotCommand||(this.readiness?.lanes[id]?.ready===true&&Number(this.store.control(`readiness-admitted:${id}`)??0)<this.readinessAt);
+  }
+
+  private laneEnabled(id:string):boolean{return !!this.store.lane(id)&&this.store.control(`complete:${id}`)===undefined;}
+
+  private reconcileCapacity():void{
+    const now=Date.now(),external=this.store.activeLeases(undefined,120_000,now).filter((lease)=>lease.kind!=="fleet");
+    const used=new Map<string,number>();for(const lease of external)used.set(lease.account_id,(used.get(lease.account_id)??0)+1);
+    let total=external.length;
+    const laneCounts=new Map<string,number>();
+    const runs=this.store.runs(["starting","running"]).filter((run)=>!run.suspension);
+    const capacity=new Map(this.store.accounts().flatMap((account)=>(["background","force"] as const).map((budget)=>[`${account.id}:${budget}`,accountCapacity(this.store,account.id,budget,this.config,now)] as const)));
+    while(runs.length){
+      runs.sort((a,b)=>Number(b.budget==="force")-Number(a.budget==="force")||Number(b.source==="direct")-Number(a.source==="direct")||this.share(a.sourceId,laneCounts)-this.share(b.sourceId,laneCounts)||(a.startedAt??0)-(b.startedAt??0));
+      const run=runs.shift()!,accountId=run.accountId!;
+      const cap=capacity.get(`${accountId}:${run.budget}`)!;
+      const enabled=run.source!=="lane"||this.laneEnabled(run.sourceId!);
+      if(!enabled||total>=this.config.maxConcurrentSessions||(used.get(accountId)??0)>=cap.sessions){
+        this.store.suspendRun(run.id,!enabled?"lane removed or completed":total>=this.config.maxConcurrentSessions?"machine session ceiling":cap.reason,now);
+      }else{
+        used.set(accountId,(used.get(accountId)??0)+1);total++;
+        if(run.source==="lane")laneCounts.set(run.sourceId!,(laneCounts.get(run.sourceId!)??0)+1);
+      }
+    }
+    for(const run of this.store.runs(["starting","running"]).filter((run)=>run.suspension)){
+      if(!this.unitIsActive(run.workerUnit!))this.store.endLease(`run:${run.id}`,now);
+      else if(now-run.suspension!.since>15_000)this.stopUnit(run.workerUnit);
+    }
+  }
+
+  private share(laneId:string|undefined,counts?:Map<string,number>):number{
+    const lane=laneId?this.store.lane(laneId):undefined;
+    return lane?(1+(counts?.get(lane.id)??(counts?0:this.store.admittedLaneCount(lane.id))))/lane.weight:0;
+  }
+
+  private async fillCapacity():Promise<void>{
+    const failed=new Set<string>();
+    for(let slot=0;slot<this.config.maxConcurrentSessions;slot++){
+      const held=this.store.runs(["starting","running"]).filter((run)=>run.suspension&&(run.source!=="lane"||this.laneEnabled(run.sourceId!)));
+      const lanes=this.store.lanes().filter((lane)=>this.laneEnabled(lane.id)&&this.laneReady(lane.id));
+      const options=[...held.map((run)=>({key:run.id,laneId:run.source==="lane"?run.sourceId:undefined,run,lane:undefined as LaneSpec|undefined})),...lanes.map((lane)=>({key:`lane:${lane.id}`,laneId:lane.id,run:undefined as Run|undefined,lane}))];
+      options.sort((a,b)=>Number(b.run?.budget==="force")-Number(a.run?.budget==="force")||Number(b.run?.source==="direct")-Number(a.run?.source==="direct")||this.share(a.laneId)-this.share(b.laneId)||a.key.localeCompare(b.key));
+      let admitted=false;
+      for(const option of options){
+        if(failed.has(option.key))continue;
+        const profile=option.run?.profile??option.lane!.profile,budget=option.run?.budget??"background";
+        const choice=assign(this.store,profile,budget,this.config,Date.now(),option.run?.accountId);
+        if(!choice.assignment){this.store.setControl(`refusal:${option.key}`,choice.refusals.map((r)=>`${r.accountId}: ${r.reason}`).join("; "));continue;}
+        if(option.run){
+          if(this.unitIsActive(option.run.workerUnit!))continue;
+          commitMeterAdmission(this.store,choice.assignment);
+          this.store.unsuspendRun(option.run.id);
+          this.restartAssignedWorker(this.store.run(option.run.id)!);
+        }else{
+          try{
+            const lane=option.lane!,prompt=await this.lanePrompt(lane);
+            const [id]=this.store.createRuns({count:1,source:"lane",sourceId:lane.id,prompt,cwd:lane.cwd,profile:lane.profile,budget:"background"});
+            if(!await this.launch(this.store.run(id!)!)){failed.add(option.key);this.store.trimQueuedLane(lane.id,0);continue;}
+            if(this.snapshotCommand)this.store.setControl(`readiness-admitted:${lane.id}`,String(this.readinessAt));
+            this.store.setControl(`refusal:${option.key}`,"");
+          }catch(error){failed.add(option.key);this.store.setControl(`refusal:${option.key}`,String(error));continue;}
+        }
+        admitted=true;break;
+      }
+      if(!admitted)break;
+    }
   }
 
   private async lanePrompt(lane:LaneSpec):Promise<string>{
@@ -143,13 +202,13 @@ export class Daemon {
     return prompt;
   }
 
-  private async launch(run:Run):Promise<void>{
+  private async launch(run:Run):Promise<boolean>{
     const choice=assign(this.store,run.profile,run.budget,this.config,Date.now());
-    if(!choice.assignment){this.store.setControl(`refusal:${run.id}`,choice.refusals.map((r)=>`${r.accountId}: ${r.reason}`).join("; "));return;}
+    if(!choice.assignment){this.store.setControl(`refusal:${run.id}`,choice.refusals.map((r)=>`${r.accountId}: ${r.reason}`).join("; "));return false;}
     const unit=`pi-orchestrator-run-${run.id.replaceAll("-","")}`;
-    if(!this.store.assignRun(run.id,{...choice.assignment,unit,releasePath:this.releasePath}))return;
+    if(!this.store.assignRun(run.id,{...choice.assignment,unit,releasePath:this.releasePath}))return false;
     commitMeterAdmission(this.store,choice.assignment);
-    try{this.startUnit(unit,run.id,this.releasePath);}catch(error){this.store.updateRun(run.id,{state:"failed",failureKind:"infrastructure",result:`worker launch failed: ${String(error)}`});}
+    try{this.startUnit(unit,run.id,this.releasePath);return true;}catch(error){this.store.updateRun(run.id,{state:"failed",failureKind:"infrastructure",result:`worker launch failed: ${String(error)}`});return false;}
   }
 
   private startUnit(unit:string,runId:string,releasePath:string):void{
@@ -174,7 +233,11 @@ export class Daemon {
     if(result.status!==0)throw new Error(result.stderr.trim()||`systemd-run exited ${result.status}`);
   }
 
-  private stopUnit(unit?:string):void{if(!unit)return;spawn("systemctl",["--user","stop",unit],{stdio:"ignore"}).unref();}
+  private stopUnit(unit?:string):void{
+    if(!unit)return;
+    const result=spawnSync("systemctl",["--user","--no-block","stop",unit],{encoding:"utf8",timeout:10_000});
+    if(result.error||result.status!==0)throw new Error(`worker stop failed: ${result.error??result.stderr.trim()}`);
+  }
   private unitIsActive(unit:string):boolean{
     return spawnSync("systemctl",["--user","is-active","--quiet",unit]).status===0;
   }
@@ -185,6 +248,7 @@ export class Daemon {
   private recoverWorkers():void{
     for(const run of this.store.runs(["queued","starting","running","failed"])){
       if(!run.accountId||!run.provider||!run.model||!run.workerUnit||!run.releasePath)continue;
+      if(run.suspension)continue;
       if(this.unitIsActive(run.workerUnit)){
         if(run.state!=="running")this.store.adoptAssignedRun(run.id);
       }else if(run.state!=="failed")this.restartAssignedWorker(run);
@@ -215,12 +279,16 @@ export class Daemon {
       if(method==="GET"&&url.pathname==="/v1/plans")return json(res,200,{accounts:this.store.accounts(),meters:this.store.meters(),leases:this.store.activeLeases(),controls:Object.fromEntries((this.store.db.prepare("SELECT * FROM control").all() as any[]).map((r)=>[r.key,r.value]))});
       if(method==="GET"&&url.pathname.startsWith("/internal/runs/")){
         const parts=url.pathname.split("/"),id=parts[3]!,action=parts[4];const run=this.store.run(id);if(!run)return json(res,404,{error:"run not found"});
-        if(action==="control"&&parts.length===5)return json(res,200,{abort:this.store.control(`abort:${id}`)});
+        if(action==="control"&&parts.length===5)return json(res,200,{abort:this.store.control(`abort:${id}`)??run.suspension?.reason});
         if(parts.length===4)return json(res,200,{run});
       }
       if(method==="POST"&&url.pathname.startsWith("/internal/runs/")){
         const parts=url.pathname.split("/"),id=parts[3]!,action=parts[4],input=await body(req);
         if(action==="state"){
+          if(this.store.run(id)?.suspension&&input.state==="aborted"){
+            this.store.endLease(`run:${id}`);
+            return json(res,200,{ok:true});
+          }
           this.store.updateRun(id,input);
           const run=this.store.run(id);
           if(input.cooldownUntil&&run?.accountId)this.store.setCooldown(run.accountId,Number(input.cooldownUntil));
@@ -247,11 +315,11 @@ export class Daemon {
       if(method==="DELETE"&&accountRemove){this.store.setAccountEnabled(decodeURIComponent(accountRemove[1]!),false);return json(res,200,{ok:true});}
       if(method==="POST"&&url.pathname==="/v1/run"){const input=await body(req);const ids=this.store.createRuns({count:Number(input.count??1),source:"direct",prompt:String(input.prompt),cwd:String(input.cwd??process.cwd()),profile:String(input.profile??"standard"),budget:input.force?"force":"background"});void this.reconcile();return json(res,201,{runIds:ids});}
       if(method==="POST"&&url.pathname==="/v1/wave"){const input=await body(req),lane=this.store.lane(String(input.lane));if(!lane)return json(res,404,{error:"lane not found"});const ids=this.store.createRuns({count:Number(input.count??1),source:"direct",sourceId:lane.id,prompt:lane.prompt,cwd:lane.cwd,profile:lane.profile,budget:input.force?"force":"background"});void this.reconcile();return json(res,201,{runIds:ids});}
-      const runAbort=/^\/v1\/runs\/([^/]+)\/(abort|kill)$/.exec(url.pathname);if(method==="POST"&&runAbort){const id=runAbort[1]!,action=runAbort[2]!;this.store.setControl(`abort:${id}`,action);if(action==="kill"){const run=this.store.run(id);this.stopUnit(run?.workerUnit);this.store.updateRun(id,{state:"aborted",failureKind:"operator",result:"killed by operator"});}return json(res,200,{ok:true});}
+      const runAbort=/^\/v1\/runs\/([^/]+)\/(abort|kill)$/.exec(url.pathname);if(method==="POST"&&runAbort){const id=runAbort[1]!,action=runAbort[2]!;this.store.setControl(`abort:${id}`,action);const run=this.store.run(id);if(action==="kill"||run?.suspension||run?.state==="queued"){this.stopUnit(run?.workerUnit);this.store.updateRun(id,{state:"aborted",failureKind:"operator",result:`${action} by operator`});}return json(res,200,{ok:true});}
       if(method==="POST"&&url.pathname==="/v1/control"){const input=await body(req);this.store.setControl(String(input.key),String(input.value));return json(res,200,{ok:true});}
       json(res,404,{error:"not found"});
     }catch(error){json(res,500,{error:String(error)});}
   }
 
-  private status():unknown{return{launches:this.store.control("launches")??"enabled",snapshotError:this.store.control("snapshot_error")||undefined,accounts:this.store.accounts(),lanes:this.store.lanes().map((lane)=>({...lane,active:this.store.activeCount("lane",lane.id)})),runs:this.store.runs(["queued","starting","running"]),leases:this.store.activeLeases()};}
+  private status():unknown{return{launches:this.store.control("launches")??"enabled",readinessError:this.store.control("readiness_error")||undefined,capacity:this.store.accounts().map((account)=>({accountId:account.id,...accountCapacity(this.store,account.id,"background",this.config)})),accounts:this.store.accounts(),lanes:this.store.lanes().map((lane)=>({...lane,active:this.store.admittedLaneCount(lane.id),paused:this.store.runs(["starting","running"]).filter((run)=>run.sourceId===lane.id&&run.suspension).length})),runs:this.store.runs(["queued","starting","running"]),leases:this.store.activeLeases()};}
 }

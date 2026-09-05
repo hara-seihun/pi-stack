@@ -15,7 +15,7 @@ import { ACCOUNT_USAGE, dispatch } from "../src/commands.js";
 import { CACHE_WINDOW_MS, OrchestratorClient } from "../src/client.js";
 import { outputLimitContinuation } from "../src/host/continuations.js";
 
-const config:OrchestratorConfig={profiles:{standard:[{provider:"openai-codex",model:"gpt-6-astra",thinking:"xhigh"}]},backgroundSpendFraction:.8,maxConcurrentSessions:8,defaultAccountConcurrency:2,meterMaxAgeMs:60_000,snapshotIntervalMs:30_000,reconcileIntervalMs:1000,stallAfterMs:60_000,killAfterMs:120_000,authPath:"/tmp/auth",agentDir:"/tmp/agent"};
+const config:OrchestratorConfig={profiles:{standard:[{provider:"openai-codex",model:"gpt-6-astra",thinking:"xhigh"}]},backgroundSpendFraction:.8,maxConcurrentSessions:8,defaultAccountConcurrency:2,meterMaxAgeMs:60_000,reconcileIntervalMs:1000,stallAfterMs:60_000,killAfterMs:120_000,authPath:"/tmp/auth",agentDir:"/tmp/agent"};
 function account(store:Store,id="openai-codex-1"){store.upsertAccount({id,provider:"openai-codex",concurrency:2});}
 
 describe("current orchestrator state",()=>{
@@ -84,7 +84,7 @@ describe("current orchestrator state",()=>{
     rmSync(ledger,{force:true});
   });
 
-  it("reconciles lane manifests as desired state",()=>{const store=Store.open(":memory:");store.reconcileLanes([{id:"one",prompt:"a",cwd:"/tmp",profile:"standard",weight:1},{id:"two",prompt:"b",cwd:"/tmp",profile:"standard",weight:2}]);store.reconcileLanes([{id:"two",prompt:"changed",cwd:"/work",profile:"standard",weight:3,fixedDemand:2}]);expect(store.lanes()).toEqual([{id:"two",prompt:"changed",cwd:"/work",profile:"standard",weight:3,fixedDemand:2,priority:0,doctrineUrl:undefined,openingProbe:undefined}]);store.close();});
+  it("reconciles lane manifests as desired state",()=>{const store=Store.open(":memory:");store.reconcileLanes([{id:"one",prompt:"a",cwd:"/tmp",profile:"standard",weight:1},{id:"two",prompt:"b",cwd:"/tmp",profile:"standard",weight:2}]);store.reconcileLanes([{id:"two",prompt:"changed",cwd:"/work",profile:"standard",weight:3}]);expect(store.lanes()).toEqual([{id:"two",prompt:"changed",cwd:"/work",profile:"standard",weight:3,priority:0,doctrineUrl:undefined,openingProbe:undefined}]);store.close();});
 
   it("rolls credential custody back when account import fails",async()=>{const root=mkdtempSync(join(tmpdir(),"orchestrator-auth-")),path=join(root,"auth.json");writeFileSync(path,"{}\n");const credential={type:"oauth" as const,access:"access",refresh:"refresh",expires:Date.now()+60_000};await expect(transactSharedCredential(path,"openai-codex-1",credential,async()=>{throw new Error("ledger unavailable");})).rejects.toThrow("ledger unavailable");expect(JSON.parse(readFileSync(path,"utf8"))).toEqual({});rmSync(root,{recursive:true});});
 
@@ -106,18 +106,10 @@ describe("current orchestrator state",()=>{
 
   it("keeps urgent work available while ordinary pacing preserves reserve",()=>{const store=Store.open(":memory:");account(store);store.recordMeter("openai-codex-1","codex-5h",85,Date.now()+3_600_000);expect(assign(store,"standard","background",config).refusals[0]?.reason).toContain("reserve");expect(assign(store,"standard","force",config).assignment).toBeDefined();store.setControl("boost:openai-codex","0");expect(assign(store,"standard","force",config).assignment).toBeUndefined();expect(assign(store,"standard","background",config).assignment).toBeUndefined();store.close();});
 
-  it("applies every dynamic lane count and priority as one snapshot revision",()=>{const store=Store.open(":memory:");store.reconcileLanes([{id:"one",prompt:"a",cwd:"/tmp",profile:"standard",weight:1},{id:"two",prompt:"b",cwd:"/tmp",profile:"standard",weight:1}]);store.saveSnapshot({revision:"postgres:42",lanes:{one:{count:3,priority:10},two:{count:1,priority:90}}},1234);expect(store.latestSnapshot()).toEqual({revision:"postgres:42",lanes:{one:{count:3,priority:10},two:{count:1,priority:90}}});expect(store.lanes().map((lane)=>[lane.id,lane.priority])).toEqual([["two",90],["one",10]]);store.close();});
-
-  it("fails dynamic demand closed when its snapshot command fails",async()=>{
-    const store=Store.open(":memory:"),daemon=new Daemon(store,config,"/srv/releases/current") as any;
-    store.setControl("snapshot_command",`printf '%s' '{"revision":"ready","lanes":{"work":{"count":1}}}'`);
-    expect(await daemon.demand()).toEqual({revision:"ready",lanes:{work:{count:1}}});
-    store.setControl("snapshot_command","printf 'broken probe' >&2; exit 7");daemon.snapshotAt=0;
-    expect(await daemon.demand()).toBeUndefined();
-    expect(await daemon.demand()).toBeUndefined();
-    expect(store.latestSnapshot()).toEqual({revision:"ready",lanes:{work:{count:1}}});
-    expect(store.control("snapshot_error")).toContain("broken probe");
-    store.close();
+  it("rejects worker targets rather than silently ignoring them",()=>{
+    const store=Store.open(":memory:");
+    expect(()=>store.reconcileLanes([{id:"work",prompt:"w",cwd:"/tmp",profile:"standard",weight:1,fixedDemand:3} as any])).toThrow("unsupported lane field");
+    expect(store.lanes()).toEqual([]);store.close();
   });
 
   it("withdraws queued lane runs when current demand disappears",()=>{
@@ -128,7 +120,7 @@ describe("current orchestrator state",()=>{
     expect(store.activeCount("lane","work")).toBe(1);
     const runs=ids.map((id)=>store.run(id)!);
     expect(runs.filter((run)=>run.state==="queued")).toHaveLength(1);
-    for(const run of runs.filter((candidate)=>candidate.state==="aborted"))expect(run).toMatchObject({failureKind:"task",result:"lane demand withdrawn before admission",endedAt:1234});
+    for(const run of runs.filter((candidate)=>candidate.state==="aborted"))expect(run).toMatchObject({failureKind:"task",result:"unused lane queue entry withdrawn",endedAt:1234});
     store.close();
   });
 

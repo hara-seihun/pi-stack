@@ -26,7 +26,6 @@ export function loadConfig(path = process.env.PI_ORCHESTRATOR_CONFIG ?? join(hom
     maxConcurrentSessions: Number(local.maxConcurrentSessions ?? 40),
     defaultAccountConcurrency: Number(local.defaultAccountConcurrency ?? 4),
     meterMaxAgeMs: Number(local.meterMaxAgeMs ?? 90*60_000),
-    snapshotIntervalMs: Number(local.snapshotIntervalMs ?? 30_000),
     reconcileIntervalMs: Number(local.reconcileIntervalMs ?? 5_000),
     stallAfterMs: Number(local.stallAfterMs ?? 20*60_000),
     killAfterMs: Number(local.killAfterMs ?? 30*60_000),

@@ -1,64 +1,86 @@
-import type { ModelCandidate } from "./catalog.js";
+import { catalogMeter, type ModelCandidate } from "./catalog.js";
 import { allowsAccountUse, type BudgetClass, type OrchestratorConfig } from "./domain.js";
 import type { Store } from "./store.js";
 
 export interface Assignment extends ModelCandidate { readonly accountId:string; readonly meterAt?:number; }
 export interface Refusal { readonly accountId:string; readonly reason:string; }
+export interface Capacity { readonly sessions:number; readonly spent:number; readonly meterAt?:number; readonly reason:string; }
 
-function accountPace(store:Store,accountId:string,budget:BudgetClass,cfg:OrchestratorConfig,now:number):{ok:boolean;spent:number;meterAt?:number;reason?:string}{
-  const provider=store.account(accountId)?.provider;
-  const multiplier=Number(store.control(`boost:${provider}`)??"1");
-  if(multiplier===0)return{ok:false,spent:0,reason:"provider halted"};
+const HOUR=3_600_000;
+const HISTORY=6*HOUR;
+
+/** A ceiling for all consumers of one account, not a desired worker count. */
+export function accountCapacity(store:Store,accountId:string,budget:BudgetClass,cfg:OrchestratorConfig,now=Date.now()):Capacity{
+  const account=store.account(accountId)!;
+  const multiplier=Number(store.control(`boost:${account.provider}`)??"1");
   const meters=store.latestMeters(accountId);
-  if(meters.length===0){
-    if(budget==="force")return{ok:true,spent:0};
+  const spent=Math.max(0,...meters.map((m)=>Number(m.used_percent)));
+  const meterAt=meters.length?Math.max(...meters.map((m)=>Number(m.observed_at))):undefined;
+  const stop=(reason:string):Capacity=>({sessions:0,spent,meterAt,reason});
+  if(!allowsAccountUse(account,"fleet"))return stop(account.enabled?"reserved for voice":"disabled");
+  if(account.cooldownUntil&&account.cooldownUntil>now)return stop("account cooling down");
+  if(!Number.isFinite(multiplier)||multiplier<=0)return stop("provider halted");
+  if(meters.some((m)=>m.used_percent>=100))return stop("provider quota exhausted");
+  if(budget==="force")return{sessions:account.concurrency,spent,meterAt,reason:"urgent spend"};
+  if(!meters.length){
     const probed=store.db.prepare("SELECT 1 FROM lease WHERE account_id=? AND kind='fleet' LIMIT 1").get(accountId);
-    return probed?{ok:false,spent:0,reason:"awaiting a meter after the calibration probe"}:{ok:true,spent:0,reason:"probe"};
+    const activeProbe=store.activeLeases(accountId,120_000,now).some((lease)=>lease.kind==="fleet");
+    return{sessions:!probed||activeProbe?1:0,spent,reason:"calibration probe awaiting meter evidence"};
   }
-  const freshest=Math.max(...meters.map((m)=>Number(m.observed_at)));
-  const spent=Math.max(...meters.map((m)=>Number(m.used_percent)));
-  if(meters.some((m)=>Number(m.used_percent)>=100))return{ok:false,spent,meterAt:freshest,reason:"provider quota exhausted"};
-  if(budget==="force")return{ok:true,spent,meterAt:freshest};
-  if(now-freshest>cfg.meterMaxAgeMs)return{ok:false,spent,meterAt:freshest,reason:"meter is stale"};
+  if(meters.some((m)=>now-m.observed_at>cfg.meterMaxAgeMs||m.observed_at>now+60_000))return stop("meter is stale");
   const limit=Math.min(100,cfg.backgroundSpendFraction*100*multiplier);
-  if(meters.some((m)=>Number(m.used_percent)>=limit))return{ok:false,spent,meterAt:freshest,reason:`background reserve reached (${limit}%)`};
+  if(meters.some((m)=>m.used_percent>=limit))return stop(`background reserve reached (${limit}%)`);
+  let sessions=account.concurrency;
+  let reason="within paced allowance";
+  const history=store.meters(accountId);
+  const leases=store.db.prepare("SELECT * FROM lease WHERE account_id=? AND (ended_at IS NULL OR ended_at>=?)").all(accountId,now-HISTORY) as any[];
   for(const latest of meters){
-    const previous=(store.meters(accountId) as any[]).find((m)=>m.meter_id===latest.meter_id&&m.observed_at<latest.observed_at);
-    if(!previous||!latest.reset_at)continue;
-    const hours=(latest.observed_at-previous.observed_at)/3_600_000;
-    const remainingHours=(latest.reset_at-now)/3_600_000;
-    if(hours<=0||remainingHours<=0)continue;
-    const slope=(latest.used_percent-previous.used_percent)/hours;
+    const declared=catalogMeter(latest.meter_id);
+    if(!declared)return stop(`unknown meter ${latest.meter_id}`);
+    if(!latest.reset_at){
+      if(latest.used_percent!==0)return stop(`missing reset for ${latest.meter_id}`);
+      continue;
+    }
+    if(latest.reset_at<=now)return stop(`awaiting reset observation for ${latest.meter_id}`);
+    const remainingHours=(latest.reset_at-now)/HOUR;
+    const elapsedHours=Math.max(0,declared.windowHours-remainingHours);
+    const allowance=Math.min(limit,cfg.backgroundSpendFraction*100*multiplier*elapsedHours/declared.windowHours);
+    // Whole-percent provider meters have one percentage point of resolution.
+    if(latest.used_percent>allowance+1)return stop(`${latest.meter_id}: spent ${latest.used_percent}% exceeds paced allowance ${allowance.toFixed(1)}%`);
+    const previous=history.filter((m)=>m.meter_id===latest.meter_id&&m.observed_at<latest.observed_at&&m.observed_at>=now-HISTORY&&Math.abs((m.reset_at??0)-latest.reset_at)<60_000&&m.used_percent<=latest.used_percent).at(-1);
+    if(!previous||latest.observed_at-previous.observed_at<15*60_000){
+      sessions=Math.min(sessions,1);reason="calibrating consumption over at least 15 minutes";continue;
+    }
+    const exposure=leases.reduce((sum,lease)=>{
+      const end=Math.min(latest.observed_at,lease.ended_at??lease.heartbeat_at);
+      return sum+Math.max(0,end-Math.max(previous.observed_at,lease.started_at))/HOUR;
+    },0);
+    if(exposure<=0){sessions=Math.min(sessions,1);reason="calibrating session consumption";continue;}
+    const cost=(latest.used_percent-previous.used_percent+1)/exposure;
     const permitted=(limit-latest.used_percent)/remainingHours;
-    if(slope>permitted&&latest.used_percent>0)return{ok:false,spent,meterAt:freshest,reason:`usage slope ${slope.toFixed(2)}%/h exceeds ${permitted.toFixed(2)}%/h pace`};
+    const ceiling=Math.max(0,Math.floor(permitted/cost));
+    if(ceiling<sessions){sessions=ceiling;reason=`${latest.meter_id}: ${permitted.toFixed(2)}%/h available, ${cost.toFixed(2)}% per session-hour`;}
   }
-  const admitted=(store.db.prepare("SELECT last_admitted_meter_at FROM account WHERE id=?").get(accountId) as any)?.last_admitted_meter_at;
-  if(admitted!=null&&Number(admitted)>=freshest)return{ok:false,spent,meterAt:freshest,reason:"already admitted from this meter observation"};
-  return{ok:true,spent,meterAt:freshest};
+  return{sessions,spent,meterAt,reason};
 }
 
 export function assign(store:Store,profile:string,budget:BudgetClass,cfg:OrchestratorConfig,now=Date.now(),pinnedAccount?:string):{assignment?:Assignment;refusals:Refusal[]}{
   if(store.control("launches")==="paused")return{refusals:[{accountId:"*",reason:"emergency halt"}]};
   if(store.activeLeases(undefined,120_000,now).length>=cfg.maxConcurrentSessions)return{refusals:[{accountId:"*",reason:"machine session ceiling"}]};
   const candidates=cfg.profiles[profile];if(!candidates?.length)throw new Error(`unknown model profile ${profile}`);
-  const refusals:Refusal[]=[];const choices:Assignment[]=[];
+  const refusals:Refusal[]=[];const choices:(Assignment&{spent:number})[]=[];
   for(const candidate of candidates){
     for(const account of store.accounts().filter((a)=>a.provider===candidate.provider&&(pinnedAccount===undefined||a.id===pinnedAccount))){
-      if(!allowsAccountUse(account,"fleet")){refusals.push({accountId:account.id,reason:account.enabled?"reserved for voice":"disabled"});continue;}
-      if(account.cooldownUntil&&account.cooldownUntil>now){refusals.push({accountId:account.id,reason:`cooling until ${new Date(account.cooldownUntil).toISOString()}`});continue;}
+      const capacity=accountCapacity(store,account.id,budget,cfg,now);
       const active=store.activeLeases(account.id,120_000,now).length;
-      if(active>=account.concurrency){refusals.push({accountId:account.id,reason:`concurrency ${active}/${account.concurrency}`});continue;}
-      const pace=accountPace(store,account.id,budget,cfg,now);
-      if(!pace.ok){refusals.push({accountId:account.id,reason:pace.reason!});continue;}
-      choices.push({accountId:account.id,...candidate,meterAt:pace.meterAt});
+      if(active>=capacity.sessions){refusals.push({accountId:account.id,reason:`capacity ${active}/${capacity.sessions}: ${capacity.reason}`});continue;}
+      const admitted=(store.db.prepare("SELECT last_admitted_meter_at FROM account WHERE id=?").get(account.id) as any)?.last_admitted_meter_at;
+      if(budget!=="force"&&admitted!=null&&capacity.meterAt!==undefined&&Number(admitted)>=capacity.meterAt){refusals.push({accountId:account.id,reason:"already admitted from this meter observation"});continue;}
+      choices.push({accountId:account.id,...candidate,meterAt:capacity.meterAt,spent:capacity.spent});
     }
     if(choices.length)break;
   }
-  choices.sort((a,b)=>{
-    const pa=accountPace(store,a.accountId,budget,cfg,now).spent,pb=accountPace(store,b.accountId,budget,cfg,now).spent;
-    const la=store.activeLeases(a.accountId,120_000,now).length,lb=store.activeLeases(b.accountId,120_000,now).length;
-    return pa-pb||la-lb||a.accountId.localeCompare(b.accountId);
-  });
+  choices.sort((a,b)=>a.spent-b.spent||store.activeLeases(a.accountId,120_000,now).length-store.activeLeases(b.accountId,120_000,now).length||a.accountId.localeCompare(b.accountId));
   return{assignment:choices[0],refusals};
 }
 
