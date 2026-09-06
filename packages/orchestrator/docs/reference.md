@@ -6,6 +6,7 @@ Run `npm run docs --workspace=pi-orchestrator` after changing commands or durabl
 
 - `daemon`: Run reconciliation and the local API.
 - `status`: Print accounts, lanes, leases, and active runs.
+- `usage-evidence`: Print a read-only 24-hour quota and token snapshot; optional --ledger FILE.
 - `run`: Start one or more direct sessions.
 - `wave`: Start a one-off wave from a declared lane.
 - `pause / resume`: Set or clear the global launch halt.

@@ -10,6 +10,7 @@ export {
   type PlanMetric,
 } from "./catalog.js";
 export type { LaneManifest, LaneSpec, LaneReadiness, Run } from "./domain.js";
+export { readUsageEvidence, type UsageEvidence } from "./usage-evidence.js";
 export {
   CACHE_WINDOW_MS,
   OrchestratorClient,

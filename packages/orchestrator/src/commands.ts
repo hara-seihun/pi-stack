@@ -4,12 +4,14 @@ import { homedir } from "node:os";
 import { loadConfig } from "./config.js";
 import { Daemon } from "./daemon.js";
 import { Store } from "./store.js";
+import { readUsageEvidence } from "./usage-evidence.js";
 import { work } from "./worker.js";
 import { transactSharedCredential } from "./auth/shared-oauth.js";
 
 export const COMMANDS=[
   ["daemon","Run reconciliation and the local API"],
   ["status","Print accounts, lanes, leases, and active runs"],
+  ["usage-evidence","Print a read-only 24-hour quota and token snapshot; optional --ledger FILE"],
   ["run","Start one or more direct sessions"],
   ["wave","Start a one-off wave from a declared lane"],
   ["pause / resume","Set or clear the global launch halt"],
@@ -34,6 +36,14 @@ export async function dispatch(argv:string[]):Promise<void>{
   }
   if(command==="daemon"){const store=Store.open(ledgerPath());try{await new Daemon(store,loadConfig()).start();}finally{store.close();}return;}
   if(command==="worker"){const id=rest[0];if(!id)throw new Error("worker run id is required");await work(id);return;}
+  if(command==="usage-evidence"){
+    if(rest.length!==0&&(rest.length!==2||rest[0]!=="--ledger")){
+      console.error("usage: pi-orchestrator usage-evidence [--ledger FILE]");process.exitCode=1;return;
+    }
+    const result=readUsageEvidence(rest[1]??ledgerPath());
+    if(result.ok)output(result.value);else{console.error(result.error);process.exitCode=1;}
+    return;
+  }
   if(command==="status"){output(await request("/v1/status"));return;}
   if(command==="pause"){output(await request("/v1/control","POST",{key:"launches",value:"paused"}));return;}
   if(command==="resume"){output(await request("/v1/control","POST",{key:"launches",value:"enabled"}));return;}

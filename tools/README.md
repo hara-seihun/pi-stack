@@ -6,6 +6,7 @@ These commands depend on Pi sessions, Pi models, or the orchestrator ledger.
 |---|---|---|
 | [`agent-workspace`](agent-workspace/README.md) | `agent-workspace` | Lease, recover, and release agent Git checkouts. |
 | [`fleet-errors`](fleet-errors/README.md) | `fleet-errors` | Classify failed fleet tool calls. |
+| [`user-usage`](user-usage/README.md) | `pi-user-usage` | Count a person's recorded tokens, logged API value, and estimated subscription dollars. |
 | [`mcp`](mcp/README.md) | `mcp` | Discover and call configured MCP servers. |
 | [`mcp-script`](mcp-script/README.md) | `mcp-script` | Run JavaScript over one MCP client. |
 | [`read-condensed-session`](read-condensed-session/README.md) | `read-thread`, `read-condensed-session` | Find and render Pi Remote threads locally; use model-assisted condensation only when needed. |

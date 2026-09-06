@@ -1,15 +1,10 @@
 import { mkdirSync } from "node:fs";
 import { randomInt } from "node:crypto";
-import { createRequire } from "node:module";
 import { dirname } from "node:path";
 import type { DatabaseSync } from "node:sqlite";
 import type { Account, BudgetClass, FailureKind, LaneSpec, LeaseKind, ProfileCandidate, Run, RunActivity, RunSource, RunState, UsageEntry, UsageTotal } from "./domain.js";
 
-const require = createRequire(import.meta.url);
-const SqliteDatabase: new (path: string) => DatabaseSync =
-  typeof (globalThis as { Bun?: unknown }).Bun === "undefined"
-    ? (require("node:sqlite") as { DatabaseSync: new (path: string) => DatabaseSync }).DatabaseSync
-    : (require("bun:sqlite") as { Database: new (path: string) => DatabaseSync }).Database;
+import { openSqlite } from "./sqlite.js";
 
 export const SCHEMA_VERSION = 3;
 const USAGE_HOUR_SCHEMA = `
@@ -111,7 +106,7 @@ function maybe<T>(value: T | null): T | undefined { return value === null ? unde
 /** Opens the ledger file itself, before anything knows which schema it holds. */
 export function openLedgerDatabase(path: string): DatabaseSync {
   if (path !== ":memory:") mkdirSync(dirname(path), { recursive: true });
-  const db = new SqliteDatabase(path);
+  const db = openSqlite(path);
   db.exec("PRAGMA busy_timeout=5000; PRAGMA journal_mode=WAL; PRAGMA synchronous=NORMAL; PRAGMA foreign_keys=ON");
   return db;
 }
