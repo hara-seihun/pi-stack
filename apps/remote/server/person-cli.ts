@@ -118,6 +118,8 @@ function add(args: string[]): void {
         writeFileSync(passfile, key, { mode: 0o600 });
         chownSync(passfile, uid, gid);
         chownSync(scratch, uid, gid);
+        mkdirSync(cipherDir, { mode: 0o700 });
+        chownSync(cipherDir, uid, gid);
         asUser(user, ["gocryptfs", "-init", "-q", "-passfile", passfile, "--", cipherDir]);
       } finally {
         rmSync(scratch, { recursive: true, force: true });
