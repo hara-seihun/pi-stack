@@ -75,6 +75,14 @@ The shared React client keeps its rendered state and a current-state ref in lock
 
 This keeps thread identity, lifecycle, context capture time, and local actions separate. A response for thread A cannot mutate thread B, and a synchronization request made before a selection change cannot put its context into the new view.
 
+## New thread picker
+
+The shared browser and Android picker has one local state machine in [`web/src/thread-start-state.ts`](../web/src/thread-start-state.ts): closed, destinations, models, creating, or failed. Opening captures the current destination and model catalogue for that interaction. Dashboard replacements never close the picker or move the choices under a finger. The next opening uses the latest catalogue; the server still validates each creation request.
+
+Back returns from models to destinations. Cancel, Escape, an outside pointer press, and closing the drawer dismiss the picker. Buttons leaving through an animation are disabled immediately, and choice events name their stage so an outgoing destination cannot be mistaken for a model selection.
+
+Creation keeps the picker visible and disables further choices until the request settles. Failure shows an error and Retry reuses the same request and session IDs. A successful request selects its new thread only while that interaction is still open. Dismissal does not undo a request already sent to the server; its thread will appear through synchronization, but a late response cannot reopen the drawer or replace a newer selection.
+
 ## Network synchronization
 
 The shared client uses one resumable long poll for the visible environment. Selecting a thread or observed agent aborts that request and starts an immediate reconciliation; it never waits for the previous selection's 25-second idle poll to expire. The Android shell warms SSH-backed environments before the web client uses them, and the client reconciles immediately when its page becomes visible again.

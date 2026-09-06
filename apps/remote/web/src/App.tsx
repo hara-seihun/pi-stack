@@ -2,9 +2,9 @@ import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } fr
 import { DndContext, KeyboardSensor, PointerSensor, closestCenter, useSensor, useSensors, type DragEndEvent } from "@dnd-kit/core";
 import { SortableContext, arrayMove, sortableKeyboardCoordinates, useSortable, verticalListSortingStrategy } from "@dnd-kit/sortable";
 import { CSS } from "@dnd-kit/utilities";
-import { AnimatePresence, MotionConfig, motion } from "motion/react";
+import { AnimatePresence, motion } from "motion/react";
 import { API } from "../../server/api";
-import { BASH_TIMEOUT_OPTIONS, type GovernorProvider, type GovernorState, type ThreadStartModel } from "../../server/protocol";
+import { BASH_TIMEOUT_OPTIONS, type GovernorProvider, type GovernorState } from "../../server/protocol";
 import { deleteCachedContext, readCachedContext, writeCachedContext } from "./context-cache";
 import { api, piFetch, registerUnlockHandler, syncRequest } from "./client";
 import { ContextTranscript, CopyButton, Markdown, modelContextEntries } from "./context";
@@ -13,7 +13,8 @@ import { listenForFileDrops } from "./file-drop";
 import { createPollSchedule } from "./poll-schedule";
 import { updateDocument } from "./sync";
 import { threadsInOrder } from "./thread-order";
-import type { AgentHostStatus, AgentRun, AgentRunEvent, Attachment, ContextEntry, Dashboard, Governor, GovernorControls, MachineActionState, PlanCard, QueuedMessage, Session, SlashCommand, SyncRequest, ThreadSettings, ThreadStart } from "./types";
+import { ThreadStartMenu } from "./thread-start-menu";
+import type { AgentHostStatus, AgentRun, AgentRunEvent, Attachment, ContextEntry, Dashboard, Governor, GovernorControls, MachineActionState, PlanCard, QueuedMessage, Session, SlashCommand, SyncRequest, ThreadSettings } from "./types";
 
 // Everything the server owns arrives through one long poll and is replaced
 // wholesale per section; the client never patches a server-owned value from a
@@ -199,68 +200,6 @@ function AgentList({ runs, hosts, selectedId, onSelect }: { runs: AgentRun[]; ho
   })}</div>;
 }
 
-type ThreadStartChoice = { id: string; label: string; icon: string; accent?: string; models?: ThreadStartModel[] };
-
-function darkGlyph(accent = "#89b4fa") {
-  if (!/^#[0-9a-f]{6}$/i.test(accent)) return true;
-  const [red, green, blue] = [1, 3, 5].map((at) => parseInt(accent.slice(at, at + 2), 16));
-  return (0.2126 * red + 0.7152 * green + 0.0722 * blue) / 255 >= 0.5;
-}
-
-function ThreadStartMenu({ starts, onCreate }: { starts: ThreadStart[]; onCreate(destination: string, model: string | null): void }) {
-  const root = useRef<HTMLDivElement>(null);
-  const [open, setOpen] = useState(false);
-  const [chosen, setChosen] = useState<ThreadStart | null>(null);
-  const [origin, setOrigin] = useState(0);
-  const choices: ThreadStartChoice[] = chosen?.models || starts;
-  const stage = chosen?.id || "destinations";
-  const size = Math.max(34, Math.min(42, Math.floor((310 - 12 * Math.max(0, choices.length - 1)) / Math.max(1, choices.length))));
-  const target = (index: number) => -(choices.length - 1 - index) * (size + 12);
-  const close = useCallback(() => { setOpen(false); setChosen(null); setOrigin(0); }, []);
-
-  useEffect(() => {
-    if (!open) return;
-    const onPointerDown = (event: PointerEvent) => { if (!root.current?.contains(event.target as Node)) close(); };
-    const onKeyDown = (event: KeyboardEvent) => { if (event.key === "Escape") close(); };
-    document.addEventListener("pointerdown", onPointerDown, true);
-    window.addEventListener("keydown", onKeyDown);
-    return () => { document.removeEventListener("pointerdown", onPointerDown, true); window.removeEventListener("keydown", onKeyDown); };
-  }, [close, open]);
-
-  useEffect(() => { close(); }, [close, starts]);
-
-  const choose = (choice: ThreadStartChoice, index: number) => {
-    if (!chosen && choice.models?.length) {
-      setOrigin(target(index));
-      setChosen(choice as ThreadStart);
-      return;
-    }
-    onCreate(chosen?.id || choice.id, chosen ? choice.id : null);
-    close();
-  };
-  const shapeTransition = { type: "spring" as const, stiffness: 390, damping: 18, mass: 0.8 };
-  const faceTransition = { type: "spring" as const, stiffness: 650, damping: 28, mass: 0.7 };
-
-  return <MotionConfig reducedMotion="user"><div ref={root} className={`new-thread-buttons react-thread-start${open ? " expanded" : ""}`}>
-    <svg className="motion-definitions" aria-hidden="true"><defs><filter id="thread-goo" x="-40%" y="-240%" width="180%" height="580%" colorInterpolationFilters="sRGB"><feGaussianBlur in="SourceGraphic" stdDeviation="8" result="blurred" /><feColorMatrix in="blurred" type="matrix" values="1 0 0 0 0  0 1 0 0 0  0 0 1 0 0  0 0 0 26 -10" /></filter></defs></svg>
-    <div className="new-thread-shapes">
-      <AnimatePresence initial={false}>
-        {!open && <motion.span key="trigger-shape" className="thread-start-shape trigger" initial={{ scale: 0 }} animate={{ scale: 1 }} exit={{ scale: 0 }} transition={shapeTransition} />}
-        {open && choices.map((choice, index) => <motion.span key={`${stage}:${choice.id}:shape`} className="thread-start-shape" style={{ width: size, height: size, marginTop: -size / 2, background: choice.accent || "var(--accent)" }} initial={{ x: origin, scale: 0 }} animate={{ x: target(index), y: 0, scale: 1 }} exit={{ x: open ? target(index) : 0, y: chosen ? 110 : 0, scale: 0 }} transition={{ ...shapeTransition, delay: index * 0.04 }} />)}
-      </AnimatePresence>
-    </div>
-    <div className="new-thread-faces">
-      <AnimatePresence initial={false}>
-        {!open && <motion.button key="trigger-face" type="button" className="provider-button trigger" aria-label="New thread" disabled={!starts.length} initial={{ scale: 0, opacity: 0 }} animate={{ scale: 1, opacity: 1 }} exit={{ scale: 0, opacity: 0 }} transition={faceTransition} onClick={() => setOpen(true)} whileTap={{ scale: 0.86 }}><span className="glyph" /></motion.button>}
-        {open && choices.map((choice, index) => {
-          const label = chosen ? `Start a ${chosen.label} thread on ${choice.label}` : choice.models?.length ? `${choice.label} threads` : `Start a ${choice.label} thread`;
-          return <motion.button key={`${stage}:${choice.id}:face`} type="button" className="provider-button" style={{ width: size, height: size, marginTop: -size / 2 }} aria-label={label} title={label} initial={{ x: origin, scale: 0, opacity: 0 }} animate={{ x: target(index), y: 0, scale: 1, opacity: 1 }} exit={{ x: open ? target(index) : 0, y: chosen ? 110 : 0, scale: 0, opacity: 0 }} transition={{ ...faceTransition, delay: index * 0.04 }} whileTap={{ scale: 0.84 }} onClick={() => choose(choice, index)}><span className={`glyph${darkGlyph(choice.accent) ? " dark" : ""}`}><img src={`/${choice.icon}.svg`} alt="" draggable={false} /></span></motion.button>;
-        })}
-      </AnimatePresence>
-    </div>
-  </div></MotionConfig>;
-}
-
 function settingLabel(value: string) {
   if (value === "xhigh") return "Extra high";
   return value ? value[0].toUpperCase() + value.slice(1).replaceAll("_", " ") : "";
@@ -419,8 +358,8 @@ export default function App() {
     return `${environment?.id || location.origin}:${id}`;
   }, []);
 
-  const selectThread = useCallback(async (id: string) => {
-    patch({ selectedId: id, agentRunId: null, agentRun: null, context: null, liveText: null, liveThinking: null, drawerOpen: innerWidth >= 1000 });
+  const selectThread = useCallback(async (id: string, closeDrawer = true) => {
+    patch({ selectedId: id, agentRunId: null, agentRun: null, context: null, liveText: null, liveThinking: null, ...(closeDrawer ? { drawerOpen: innerWidth >= 1000 } : {}) });
     setPrompt(loadDraft(id));
     kick();
     try {
@@ -486,7 +425,7 @@ export default function App() {
         if (cancelled()) return;
         patch(update);
         const settled = stateRef.current;
-        if (!settled.selectedId && !settled.agentRunId && settled.sessions.length) void selectThread(settled.sessions[0].id);
+        if (!settled.selectedId && !settled.agentRunId && settled.sessions.length) void selectThread(settled.sessions[0].id, false);
       } catch (error) {
         if (!(error instanceof DOMException && error.name === "AbortError")) { patch({ offline: error instanceof Error ? error.message : String(error) }); delay = 1_200; }
       } finally {
@@ -497,11 +436,6 @@ export default function App() {
     return () => { stopped = true; syncController.current?.abort(); if (timer) clearTimeout(timer); };
   }, [cacheKey, patch, selectThread, stateRef]);
 
-  const createThread = async (destination: string, model: string | null) => {
-    const sessionId = crypto.randomUUID();
-    await api(API.createSession.method, API.createSession.path(), { requestId: crypto.randomUUID(), sessionId, destination, model });
-    await selectThread(sessionId);
-  };
   const archive = async (id: string) => {
     await api(API.archiveSession.method, API.archiveSession.path({ sessionId: id }));
     void cacheKey(id).then(deleteCachedContext).catch(console.error);
@@ -642,7 +576,7 @@ export default function App() {
     {fileDrag && state.selectedId && !state.agentRunId && <div className="file-drop-overlay" role="status">Drop files to attach to {selected?.name || "this conversation"}</div>}
     {state.drawerOpen && innerWidth < 1000 && <div className="scrim" onClick={() => patch({ drawerOpen: false })} />}
     <aside id="drawer" className={state.drawerOpen ? "open" : ""} aria-label="Navigation">
-      <header className="drawer-heading thread-start-heading"><nav className="drawer-tabs" role="tablist" aria-label="Drawer sections">{(["threads", "agents", "archived", "files"] as const).map((tab) => <button key={tab} className="drawer-tab" type="button" role="tab" aria-label={`${drawerLabels[tab]}, ${drawerCounts[tab]}`} title={drawerLabels[tab]} aria-selected={state.drawerTab === tab} onClick={() => patch({ drawerTab: tab })}><DrawerTabIcon tab={tab} /><span className="drawer-tab-count">{drawerCounts[tab]}</span></button>)}</nav><ThreadStartMenu starts={dashboard?.threadStarts ?? []} onCreate={(destination, model) => void createThread(destination, model)} /></header>
+      <header className="drawer-heading thread-start-heading"><nav className="drawer-tabs" role="tablist" aria-label="Drawer sections">{(["threads", "agents", "archived", "files"] as const).map((tab) => <button key={tab} className="drawer-tab" type="button" role="tab" aria-label={`${drawerLabels[tab]}, ${drawerCounts[tab]}`} title={drawerLabels[tab]} aria-selected={state.drawerTab === tab} onClick={() => patch({ drawerTab: tab })}><DrawerTabIcon tab={tab} /><span className="drawer-tab-count">{drawerCounts[tab]}</span></button>)}</nav>{state.drawerOpen && <ThreadStartMenu starts={dashboard?.threadStarts ?? []} onCreated={selectThread} onSettled={kick} />}</header>
       {state.drawerTab === "threads" && <DndContext sensors={dragSensors} collisionDetection={closestCenter} onDragEnd={(event) => void reorder(event)}><SortableContext items={sessions.map((session) => session.id)} strategy={verticalListSortingStrategy}><div className="thread-list">{sessions.length ? sessions.map((session) => <SortableThreadRow key={session.id} session={session} selected={!state.agentRunId && state.selectedId === session.id} onSelect={(id) => void selectThread(id)} onArchive={(id) => void archive(id)} onUnarchive={() => {}} />) : <div className="agent-empty">No threads</div>}</div></SortableContext></DndContext>}
       {state.drawerTab === "agents" && <AgentList runs={dashboard?.agents.runs ?? []} hosts={dashboard?.agents.hosts ?? []} selectedId={state.agentRunId} onSelect={selectAgent} />}
       {state.drawerTab === "archived" && <div className="thread-list">{state.archived.length ? state.archived.map((session) => <ThreadRow key={session.id} archived session={session} selected={false} onSelect={() => {}} onArchive={() => {}} onUnarchive={(id) => void unarchive(id)} />) : <div className="agent-empty">No archived threads</div>}{state.archived.length < state.archivedTotal && <button type="button" className="archived-more" onClick={() => void loadOlder()}>Show older · {state.archivedTotal - state.archived.length} more</button>}</div>}

@@ -40,6 +40,10 @@ button:focus-visible, input:focus-visible, textarea:focus-visible, select:focus-
 .new-thread-buttons, .new-thread-shapes, .new-thread-faces { position: absolute; inset: 0; overflow: visible; pointer-events: none; }
 .new-thread-buttons { z-index: 3; }
 .new-thread-shapes { filter: url(#thread-goo); }
+.thread-start-status { position: absolute; top: 100%; inset-inline: 0; display: flex; align-items: center; justify-content: flex-end; flex-wrap: wrap; gap: 8px; padding: 8px; background: var(--surface); border-bottom: 1px solid var(--border); box-shadow: 0 6px 12px rgb(0 0 0 / 25%); pointer-events: auto; }
+.thread-start-status button { min-height: 40px; padding: 8px 12px; background: var(--surface-2); color: var(--text); }
+.thread-start-status [role="status"] { flex: 1; color: var(--muted); }
+.thread-start-status [role="alert"] { flex-basis: 100%; overflow-wrap: anywhere; color: var(--danger); }
 .thread-start-shape, .provider-button { position: absolute; top: 50%; right: 9px; border-radius: 50%; transform-origin: center; will-change: transform, opacity; }
 .thread-start-shape { pointer-events: none; }
 .thread-start-shape.trigger { width: 44px; height: 44px; margin-top: -22px; background: var(--accent); }

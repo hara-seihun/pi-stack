@@ -1,0 +1,59 @@
+import type { ThreadStart } from "./types";
+
+export type ThreadCreation = { requestId: string; sessionId: string; destination: string; model: string | null };
+type Destinations = { kind: "destinations"; starts: ThreadStart[] };
+type Models = { kind: "models"; starts: ThreadStart[]; destination: ThreadStart; origin: number };
+type Selection = Destinations | Models;
+export type ThreadStartState =
+  | { kind: "closed" }
+  | Selection
+  | { kind: "creating"; selection: Selection; request: ThreadCreation }
+  | { kind: "failed"; selection: Selection; request: ThreadCreation; error: string };
+export type ThreadStartEvent =
+  | { type: "open"; starts: ThreadStart[] }
+  | { type: "dismiss" }
+  | { type: "back" }
+  | { type: "choose"; stage: string; id: string; origin: number; requestId: string; sessionId: string }
+  | { type: "failed"; requestId: string; error: string }
+  | { type: "created"; requestId: string }
+  | { type: "retry" };
+
+export function threadStartSelection(state: ThreadStartState): Selection | null {
+  return state.kind === "closed" ? null : state.kind === "creating" || state.kind === "failed" ? state.selection : state;
+}
+
+export function threadStartStage(selection: Selection | null): string {
+  return selection?.kind === "models" ? `models:${selection.destination.id}` : "destinations";
+}
+
+export function threadStartReducer(state: ThreadStartState, event: ThreadStartEvent): ThreadStartState {
+  switch (event.type) {
+    case "open":
+      return state.kind === "closed" && event.starts.length ? { kind: "destinations", starts: event.starts } : state;
+    case "dismiss":
+      return { kind: "closed" };
+    case "back":
+      return state.kind === "models" ? { kind: "destinations", starts: state.starts } : state;
+    case "choose": {
+      if (state.kind !== "destinations" && state.kind !== "models") return state;
+      if (event.stage !== threadStartStage(state)) return state;
+      const choice = (state.kind === "models" ? state.destination.models : state.starts).find((choice) => choice.id === event.id);
+      if (!choice) return state;
+      const destination = state.kind === "destinations" ? state.starts.find((start) => start.id === event.id) : null;
+      if (destination?.models.length) {
+        return { kind: "models", starts: state.starts, destination, origin: event.origin };
+      }
+      return { kind: "creating", selection: state, request: {
+        requestId: event.requestId, sessionId: event.sessionId,
+        destination: state.kind === "models" ? state.destination.id : choice.id,
+        model: state.kind === "models" ? choice.id : null,
+      } };
+    }
+    case "failed":
+      return state.kind === "creating" && state.request.requestId === event.requestId ? { ...state, kind: "failed", error: event.error } : state;
+    case "created":
+      return state.kind === "creating" && state.request.requestId === event.requestId ? { kind: "closed" } : state;
+    case "retry":
+      return state.kind === "failed" ? { kind: "creating", selection: state.selection, request: state.request } : state;
+  }
+}
