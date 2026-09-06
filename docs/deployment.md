@@ -33,7 +33,7 @@ Persons are not in the host file. They are Pi Remote's registry, `/var/lib/pi-re
 
 ## What deploy/host does
 
-1. Installs the dependency tree once per lockfile under `/srv/pi/dependencies`. Runtime, Orchestrator, and tools link that tree instead of copying it.
+1. Installs the dependency tree once per manifest, lockfile and stack doctor source under `/srv/pi/dependencies`. Runtime, Orchestrator, and tools link that tree instead of copying it.
 2. Publishes commit-addressed releases of the runtime (`/srv/pi/runtime`: Pi, `agent-browser`, and the runtime extensions), the Orchestrator, Pi Remote, the tools, and the skills. Each destination is a symlink switched atomically; prior generations stay under `/srv/pi/.pi-stack-releases` for processes that loaded them.
 3. For every account (each person plus the fleet user): links `pi`, `agent-browser`, `pi-agent-browser-doctor`, `pi-orchestrator`, `pi-remote`, and every tool command into `~/.local/bin`; links the reviewed skills and the host's skills into `~/.pi/agent/skills`; rewrites the `packages` list in `~/.pi/agent/settings.json` under Pi's own lock, installs the pinned npm packages, and writes the VCC policy and custom model catalog.
 4. Loads the deployed native browser tool under the fleet account's normal settings and proves open, interactive snapshot, title, and isolated-browser cleanup against a loopback page. A failure blocks service activation. Then restarts the fleet daemon. Live workers keep the release they recorded in their run row.
@@ -59,13 +59,13 @@ A version mismatch is evidence that the loaded native tool and executable came f
 To prove native browser availability without asking a model or changing research history:
 
 ```sh
-node deploy/browser-smoke.mjs
-node deploy/browser-smoke.mjs \
+pi-agent-browser-doctor
+pi-agent-browser-doctor \
   --worker-release /srv/pi/.pi-stack-releases/orchestrator/COMMIT \
   --session-file /absolute/path/to/settled-session.jsonl
 ```
 
-The recovery probe copies the JSONL into a temporary directory and opens it through the recorded release's SDK. Use a settled session because its extension startup hooks may recover browser cleanup leases. The browser script uses a separate, disposable browser identity. Success removes the probe files; failure reports the retained session path and cleanup state. The canonical JSONL and Orchestrator ledger are not written. This proves browser recovery, not a new research turn.
+The stack's [doctor](../packages/runtime/browser-doctor.mjs) uses actual Pi source registration and the native version guard, rather than upstream's package-name heuristic. The recovery probe copies the JSONL into a temporary directory and opens it through the recorded release's SDK. Use a settled session because its extension startup hooks may recover browser cleanup leases. The browser script uses a separate, disposable browser identity. Success removes the probe files; failure reports the retained session path and cleanup state. The canonical JSONL and Orchestrator ledger are not written. This proves browser recovery, not a new research turn. Cached npm copies from earlier installations can be removed after their loading processes exit; deployment does not uninstall code underneath them.
 
 To test release switching against the deployed SDK and bundled RPC:
 

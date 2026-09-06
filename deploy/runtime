@@ -24,6 +24,9 @@ check_release() {
   browser_version=$("$release/node_modules/.bin/agent-browser" --version)
   [[ $version == "$PI_VERSION" ]] || { echo "unexpected Pi version: $version" >&2; exit 1; }
   [[ $browser_version == "$BROWSER_VERSION" ]] || { echo "unexpected agent-browser version: $browser_version" >&2; exit 1; }
+  cmp -s "$runtime_source/browser-doctor.mjs" "$release/node_modules/.bin/pi-agent-browser-doctor" || {
+    echo "the browser doctor does not match this release" >&2; exit 1;
+  }
 }
 
 # Every Pi account reaches the release through ~/.local/bin, so the links are
@@ -55,7 +58,7 @@ fi
 cd "$root"
 pi_stack_as_root install -d -m 755 "$dependencies_root"
 dependency_hash=$({
-  sha256sum package.json package-lock.json
+  sha256sum package.json package-lock.json packages/runtime/browser-doctor.mjs
   printf '%s\n' workspace-production-closure-v1-atomic-settings-writes-v1
 } | sha256sum | cut -d' ' -f1)
 dependency_release="$dependencies_root/$dependency_hash"
@@ -69,6 +72,8 @@ if [[ ! -x $dependency_release/node_modules/.bin/pi ]]; then
     install -m 644 "$manifest" "$stage/$manifest"
   done < <(find apps packages tools -name node_modules -prune -o -name package.json -print)
   (cd "$stage" && npm ci --omit=dev --ignore-scripts --prefer-offline --no-audit --no-fund)
+  install -m 755 packages/runtime/browser-doctor.mjs "$stage/browser-doctor.mjs"
+  ln -sfn ../../browser-doctor.mjs "$stage/node_modules/.bin/pi-agent-browser-doctor"
   # Pi rewrites settings.json in place. Two sessions starting together used to
   # observe a truncated file, so the pinned copy writes a temporary and renames.
   settings_manager="$stage/node_modules/@earendil-works/pi-coding-agent/dist/core/settings-manager.js"

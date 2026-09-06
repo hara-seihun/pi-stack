@@ -1,10 +1,10 @@
 import assert from "node:assert/strict";
-import { fork } from "node:child_process";
+import { fork, spawnSync } from "node:child_process";
 import { once } from "node:events";
 import { copyFileSync, mkdirSync, mkdtempSync, renameSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { fileURLToPath } from "node:url";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { dirname, join } from "node:path";
 import { test } from "node:test";
 const runtimeEntry = process.env.PI_TEST_RUNTIME_ENTRY ?? import.meta.resolve("@earendil-works/pi-coding-agent");
 const { createAgentSession, DefaultResourceLoader, RpcClient, SessionManager, SettingsManager } = await import(runtimeEntry);
@@ -133,6 +133,29 @@ test("Pi reload selects both dependencies again after a release switch and rollb
   } finally {
     if (path === undefined) delete process.env.PATH;
     else process.env.PATH = path;
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("the stack doctor rejects missing and duplicate native sources without recommending npm installation", () => {
+  const root = mkdtempSync(join(tmpdir(), "pi-browser-doctor-"));
+  try {
+    const runtime = release(root, "0.36.0");
+    const scope = join(runtime, "node_modules/@earendil-works");
+    mkdirSync(scope);
+    symlinkSync(dirname(dirname(fileURLToPath(runtimeEntry))), join(scope, "pi-coding-agent"));
+    const agentDir = join(root, ".pi/agent");
+    mkdirSync(agentDir, { recursive: true });
+    for (const packages of [[], [join(runtime, "extensions/browser"), join(runtime, "node_modules/pi-agent-browser-native/dist/extensions/agent-browser/index.js")]]) {
+      writeFileSync(join(agentDir, "settings.json"), JSON.stringify({ packages }));
+      const result = spawnSync(process.execPath, [fileURLToPath(new URL("../../browser-doctor.mjs", import.meta.url))], {
+        cwd: root, encoding: "utf8", timeout: 10000,
+        env: { ...process.env, HOME: root, PI_CODING_AGENT_DIR: agentDir, PI_OFFLINE: "1", PI_STACK_RUNTIME_DEST: runtime },
+      });
+      assert.equal(result.status, 1, result.stderr);
+      assert.match(result.stderr, /restore exactly one browser entrypoint with the host's pi-stack-release command, not pi install npm/);
+    }
+  } finally {
     rmSync(root, { recursive: true, force: true });
   }
 });

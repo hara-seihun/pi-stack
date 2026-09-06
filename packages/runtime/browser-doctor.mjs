@@ -1,3 +1,4 @@
+#!/usr/bin/env node
 import assert from "node:assert/strict";
 import { execFileSync } from "node:child_process";
 import { randomUUID } from "node:crypto";
@@ -9,7 +10,17 @@ import { delimiter, dirname, join } from "node:path";
 import { pathToFileURL } from "node:url";
 import { parseArgs } from "node:util";
 
-const { values } = parseArgs({ options: { "worker-release": { type: "string" }, "session-file": { type: "string" } } });
+const { values } = parseArgs({ options: { help: { type: "boolean", short: "h" }, "worker-release": { type: "string" }, "session-file": { type: "string" } } });
+if (values.help) {
+  console.log(`pi-agent-browser-doctor [--worker-release PATH] [--session-file PATH]
+
+Check the selected Pi stack browser through normal settings and a disposable
+loopback browser. No model request or signed-in profile is used. --worker-release
+selects an earlier host SDK; --session-file copies a settled JSONL for recovery
+proof without writing its canonical file. Restore a missing or duplicate browser
+entrypoint with the host's pi-stack-release command, not pi install npm.`);
+  process.exit(0);
+}
 const runtime = realpathSync(process.env.PI_STACK_RUNTIME_DEST ?? "/srv/pi/runtime");
 const host = realpathSync(values["worker-release"] ?? runtime);
 const sdk = realpathSync(join(host, "node_modules/@earendil-works/pi-coding-agent/dist/index.js"));
@@ -30,6 +41,7 @@ const server = createServer((_req, res) => {
 });
 let session;
 let accepted = false;
+let browserAttempted = !!values["session-file"];
 try {
   await new Promise((resolve, reject) => { server.once("error", reject); server.listen(0, "127.0.0.1", resolve); });
   const opened = await createAgentSession({
@@ -37,7 +49,11 @@ try {
     sessionManager: SessionManager.open(sessionFile, undefined, directory),
   });
   session = opened.session;
-  assert.deepEqual(opened.extensionsResult.errors, [], "configured extensions must load");
+  const setupRepair = "restore exactly one browser entrypoint with the host's pi-stack-release command, not pi install npm";
+  assert.deepEqual(opened.extensionsResult.errors, [], `configured extensions must load; ${setupRepair}`);
+  const browserExtensions = opened.extensionsResult.extensions.filter((extension) => extension.tools.has("agent_browser"));
+  assert.equal(browserExtensions.length, 1, setupRepair);
+  assert.equal(realpathSync(browserExtensions[0].resolvedPath), join(runtime, "extensions/browser/index.mjs"), "the native browser must load through the selected stack entrypoint");
   const extensionErrors = [];
   await session.bindExtensions({ mode: "print", onError: (error) => extensionErrors.push(error) });
   assert.deepEqual(extensionErrors, [], "configured extensions must initialize");
@@ -46,6 +62,7 @@ try {
   const tools = session.agent.state.tools.filter((tool) => tool.name === "agent_browser");
   assert.equal(tools.length, 1, "exactly one native browser tool must be active");
   const url = `http://127.0.0.1:${server.address().port}/`;
+  browserAttempted = true;
   const result = await tools[0].execute(randomUUID(), {
     script: `
       const opened = await browser({ args: ["open", ${JSON.stringify(url)}] });
@@ -67,6 +84,6 @@ try {
 } finally {
   session?.dispose();
   await new Promise((resolve) => server.close(resolve));
-  if (accepted) rmSync(directory, { recursive: true, force: true });
+  if (accepted || !browserAttempted) rmSync(directory, { recursive: true, force: true });
   else console.error(`Browser proof failed. Session and cleanup state retained at ${sessionFile}`);
 }
