@@ -1,5 +1,5 @@
 import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
-import type { Model, Provider } from "@earendil-works/pi-ai";
+import { cleanupSessionResources, type Model, type Provider } from "@earendil-works/pi-ai";
 import { builtinProviders } from "@earendil-works/pi-ai/providers/all";
 import { homedir } from "node:os";
 import { join } from "node:path";
@@ -30,6 +30,8 @@ export default function routing(pi:ExtensionAPI):void{
     const family=families.get(account.provider),auth=shared.get(account.provider);if(!family||!auth||!allowsAccountUse(account,"interactive"))continue;
     pi.registerProvider(sharedOAuthProvider(family,account.id,account.label,auth));
   }
+  // The bundled CLI and extension providers have separate pi-ai resource registries.
+  pi.on("session_shutdown",(_event,ctx)=>cleanupSessionResources(ctx.sessionManager.getSessionId()));
   if(process.env.PI_ORCHESTRATOR_ASSIGNED==="1"){pi.on("session_shutdown",()=>store.close());return;}
   const familyOf=(provider:string)=>store.account(provider)?.provider??baseProvider(provider);
   const resolve=(accountId:string,family:string,modelId:string):Model<never>|undefined=>{const model=families.get(family)?.getModels().find((candidate)=>candidate.id===modelId);return model?(accountId===family?model:{...model,provider:accountId}) as Model<never>:undefined;};
