@@ -1,6 +1,6 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { mkdtemp, writeFile, rm } from "node:fs/promises";
+import { mkdtemp, mkdir, readFile, writeFile, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { spawnSync } from "node:child_process";
@@ -90,6 +90,28 @@ test("session branches deduplicate copied calls, retain abandoned calls, and nev
     assert.equal(cut.value.responses, 1);
     await writeFile(join(root, "broken.jsonl"), "broken\n");
     assert.equal((await scanSessions(root, 0, start + 2 * HOUR)).ok, false);
+  } finally { await rm(root, { recursive: true }); }
+});
+
+test("a named person's private ledger is read as that person, even when her sessions are directly readable", async () => {
+  const root = await mkdtemp(join(tmpdir(), "pi-usage-person-"));
+  try {
+    const bin = join(root, "bin"), registry = join(root, "persons"), data = join(root, "data");
+    await Promise.all([mkdir(bin), mkdir(registry), mkdir(join(data, "sessions"), { recursive: true })]);
+    const user = "usage-test-person", ledger = "/private/person/ledger.sqlite3";
+    await writeFile(join(registry, `${user}.json`), JSON.stringify({ user, environment: {
+      PI_REMOTE_DATA: data, PI_REMOTE_ORCHESTRATOR_DB: ledger,
+    } }));
+    await writeFile(join(bin, "pi-orchestrator"), `#!/usr/bin/env node\nconsole.log(${JSON.stringify(JSON.stringify(fixture()))});\n`, { mode: 0o755 });
+    await writeFile(join(bin, "sudo"), '#!/bin/sh\nprintf "%s\\n" "$@" > "$USAGE_TEST_CALL"\nshift 3\nexec "$@"\n', { mode: 0o755 });
+    const result = spawnSync(process.execPath, [new URL("main", import.meta.url).pathname, user, "--json"], {
+      encoding: "utf8", env: { ...process.env, PATH: `${bin}:${process.env.PATH}`,
+        PI_REMOTE_PERSONS_DIR: registry, USAGE_TEST_CALL: join(root, "call") },
+    });
+    assert.equal(result.status, 0, result.stderr);
+    assert.equal(JSON.parse(result.stdout).calibrationError, null);
+    assert.deepEqual((await readFile(join(root, "call"), "utf8")).trim().split("\n"),
+      ["-n", "-u", user, join(bin, "pi-orchestrator"), "usage-evidence", "--ledger", ledger]);
   } finally { await rm(root, { recursive: true }); }
 });
 

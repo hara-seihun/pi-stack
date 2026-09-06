@@ -1,5 +1,5 @@
 #!/usr/bin/env node
-import { readFileSync, accessSync, constants } from "node:fs";
+import { readFileSync, accessSync, realpathSync, constants } from "node:fs";
 import { join, resolve } from "node:path";
 import { userInfo } from "node:os";
 import { spawnSync } from "node:child_process";
@@ -35,6 +35,26 @@ function command(program, args, input) {
   return { ok: true, value: result.stdout };
 }
 
+function personCommand(user, encrypted, argv, input) {
+  if (encrypted) {
+    const pid = command("systemctl", ["show", `pi-remote@${user}`, "--property=MainPID", "--value"]);
+    if (!pid.ok) return pid;
+    if (!/^[1-9]\d*$/.test(pid.value.trim())) return { ok: false,
+      error: `${user} is locked or her supervisor is stopped. Unlock Pi Remote before reading her logs.` };
+    return command("sudo", ["-n", "nsenter", "-t", pid.value.trim(), "-m", "--", "sudo", "-n", "-u", user, ...argv], input);
+  }
+  return command("sudo", ["-n", "-u", user, ...argv], input);
+}
+
+function executable(name) {
+  for (const directory of (process.env.PATH ?? "").split(":")) {
+    const path = resolve(directory, name);
+    try { accessSync(path, constants.X_OK); return { ok: true, value: realpathSync(path) }; }
+    catch { /* Continue executable lookup through PATH, just as the shell does. */ }
+  }
+  return { ok: false, error: `${name} is not installed on PATH` };
+}
+
 function timestamp(value, now, duration = false) {
   if (duration && /^\d+[hdw]$/.test(value)) {
     return now - Number(value.slice(0, -1)) * ({ h: 3_600_000, d: 86_400_000, w: 604_800_000 }[value.at(-1)]);
@@ -59,11 +79,12 @@ async function personUsage(user, values, since, until) {
     return { ok: false, error: `Person ${user} has no valid PI_REMOTE_DATA directory` };
   }
   const root = join(data, "sessions"), ledger = values.ledger ?? person.environment.PI_REMOTE_ORCHESTRATOR_DB;
+  const reader = { user, encrypted: Boolean(person.unlock) };
   let readable = false;
   try { accessSync(root, constants.R_OK | constants.X_OK); readable = true; } catch { /* The mount may exist only in the supervisor. */ }
   if (readable) {
     const result = await scanSessions(root, since, until);
-    return result.ok ? { ok: true, value: { usage: result.value, root, ledger } } : result;
+    return result.ok ? { ok: true, value: { usage: result.value, root, ledger, reader } } : result;
   }
   // A task checkout can be private to its owner. Send the self-contained scanner over stdin.
   const source = readFileSync(new URL("sessions.mjs", import.meta.url), "utf8") + `
@@ -73,19 +94,11 @@ if (result.ok) console.log(JSON.stringify(result));
 else { console.error(result.error); process.exitCode = 1; }
 `;
   const scan = [process.execPath, "--input-type=module", "-", root, String(since), String(until)];
-  let args;
-  if (person.unlock) {
-    const pid = command("systemctl", ["show", `pi-remote@${user}`, "--property=MainPID", "--value"]);
-    if (!pid.ok) return pid;
-    if (!/^[1-9]\d*$/.test(pid.value.trim())) return { ok: false,
-      error: `${user} is locked or her supervisor is stopped. Unlock Pi Remote before reading her logs.` };
-    args = ["-n", "nsenter", "-t", pid.value.trim(), "-m", "--", "sudo", "-n", "-u", user, ...scan];
-  } else args = ["-n", "-u", user, ...scan];
-  const child = command("sudo", args, source);
+  const child = personCommand(user, Boolean(person.unlock), scan, source);
   if (!child.ok) return child;
   try {
     const result = JSON.parse(child.value);
-    return result.ok ? { ok: true, value: { usage: result.value, root, ledger } } : result;
+    return result.ok ? { ok: true, value: { usage: result.value, root, ledger, reader } } : result;
   } catch (error) { return { ok: false, error: `Invalid person scanner response: ${String(error)}` }; }
 }
 
@@ -152,7 +165,10 @@ async function main() {
     else {
       const args = ["usage-evidence"];
       if (scanned.value.ledger) args.push("--ledger", scanned.value.ledger);
-      const result = command("pi-orchestrator", args);
+      const cli = executable("pi-orchestrator"), reader = scanned.value.reader;
+      const result = !cli.ok ? cli : reader && reader.user !== userInfo().username && !values.ledger
+        ? personCommand(reader.user, reader.encrypted, [cli.value, ...args])
+        : command(cli.value, args);
       if (result.ok) evidence = JSON.parse(result.value); else calibrationError = result.error;
     }
   } catch (error) { calibrationError = `Cannot load quota evidence: ${String(error)}`; }
