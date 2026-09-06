@@ -12,7 +12,6 @@ export type ThreadStartState =
 export type ThreadStartEvent =
   | { type: "open"; starts: ThreadStart[] }
   | { type: "dismiss" }
-  | { type: "back" }
   | { type: "choose"; stage: string; id: string; origin: number; requestId: string; sessionId: string }
   | { type: "failed"; requestId: string; error: string }
   | { type: "created"; requestId: string }
@@ -32,8 +31,6 @@ export function threadStartReducer(state: ThreadStartState, event: ThreadStartEv
       return state.kind === "closed" && event.starts.length ? { kind: "destinations", starts: event.starts } : state;
     case "dismiss":
       return { kind: "closed" };
-    case "back":
-      return state.kind === "models" ? { kind: "destinations", starts: state.starts } : state;
     case "choose": {
       if (state.kind !== "destinations" && state.kind !== "models") return state;
       if (event.stage !== threadStartStage(state)) return state;

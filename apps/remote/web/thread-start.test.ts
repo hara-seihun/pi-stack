@@ -19,7 +19,6 @@ test("an open gesture owns its options until dismissed, then opening captures th
     expect(threadStartSelection(state)?.starts).toBe(starts);
   }
   expect(models.kind).toBe("models");
-  expect(reduce(models, { type: "back" })).toEqual(destinations);
   expect(reduce(reduce(models, { type: "dismiss" }), { type: "open", starts: refreshed })).toEqual({ kind: "destinations", starts: refreshed });
 });
 

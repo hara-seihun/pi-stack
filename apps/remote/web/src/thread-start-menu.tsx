@@ -13,7 +13,7 @@ function darkGlyph(accent = "#89b4fa") {
 
 function MenuButton({ disabled, style, ...props }: HTMLMotionProps<"button">) {
   const present = useIsPresent();
-  return <motion.button {...props} disabled={disabled || !present} style={{ ...style, ...(!present ? { pointerEvents: "none" } : {}) }} />;
+  return <motion.button {...props} data-thread-start-button={present || undefined} disabled={disabled || !present} style={{ ...style, ...(!present ? { pointerEvents: "none" } : {}) }} />;
 }
 
 export function ThreadStartMenu({ starts, onCreated, onSettled }: { starts: ThreadStart[]; onCreated(id: string): void; onSettled(): void }) {
@@ -37,15 +37,26 @@ export function ThreadStartMenu({ starts, onCreated, onSettled }: { starts: Thre
 
   useEffect(() => {
     if (!open) return;
-    const onPointerDown = (event: PointerEvent) => { if (!root.current?.contains(event.target as Node)) dispatch({ type: "dismiss" }); };
+    const onOutsidePress = (event: PointerEvent | MouseEvent) => {
+      const button = event.target instanceof Element ? event.target.closest("button[data-thread-start-button]") : null;
+      if (button && root.current?.contains(button)) return;
+      event.preventDefault();
+      event.stopPropagation();
+      if (event.type === "click") dispatch({ type: "dismiss" });
+    };
     const onKeyDown = (event: KeyboardEvent) => {
       if (event.key !== "Escape") return;
       event.preventDefault();
       dispatch({ type: "dismiss" });
     };
-    document.addEventListener("pointerdown", onPointerDown, true);
+    document.addEventListener("pointerdown", onOutsidePress, true);
+    document.addEventListener("click", onOutsidePress, true);
     window.addEventListener("keydown", onKeyDown);
-    return () => { document.removeEventListener("pointerdown", onPointerDown, true); window.removeEventListener("keydown", onKeyDown); };
+    return () => {
+      document.removeEventListener("pointerdown", onOutsidePress, true);
+      document.removeEventListener("click", onOutsidePress, true);
+      window.removeEventListener("keydown", onKeyDown);
+    };
   }, [open, dispatch]);
 
   useEffect(() => {
@@ -82,11 +93,9 @@ export function ThreadStartMenu({ starts, onCreated, onSettled }: { starts: Thre
         })}
       </AnimatePresence>
     </div>
-    {open && <div className="thread-start-status">
-      {state.kind === "models" && <button type="button" onClick={() => dispatch({ type: "back" })}>Back</button>}
+    {(busy || state.kind === "failed") && <div className="thread-start-status">
       {busy && <span role="status">Creating thread…</span>}
-      {state.kind === "failed" && <><span role="alert">{state.error}</span><button type="button" onClick={() => dispatch({ type: "retry" })}>Retry</button></>}
-      <button type="button" onClick={() => dispatch({ type: "dismiss" })}>{busy ? "Dismiss" : "Cancel"}</button>
+      {state.kind === "failed" && <><span role="alert">{state.error}</span><button type="button" data-thread-start-button onClick={() => dispatch({ type: "retry" })}>Retry</button></>}
     </div>}
   </div></MotionConfig>;
 }
