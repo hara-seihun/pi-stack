@@ -71,6 +71,8 @@ if (( ! services )); then
   exit 0
 fi
 
+pi_stack_run_as "${fleet:-${users[0]}}" node "$root/deploy/browser-smoke.mjs"
+
 # The daemon restarts on every release; live workers keep the release they
 # recorded. The front door restarts only when Pi Remote changed, and each
 # running supervisor is then handed the new release without ending active turns.

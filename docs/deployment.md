@@ -36,15 +36,43 @@ Persons are not in the host file. They are Pi Remote's registry, `/var/lib/pi-re
 1. Installs the dependency tree once per lockfile under `/srv/pi/dependencies`. Runtime, Orchestrator, and tools link that tree instead of copying it.
 2. Publishes commit-addressed releases of the runtime (`/srv/pi/runtime`: Pi, `agent-browser`, and the runtime extensions), the Orchestrator, Pi Remote, the tools, and the skills. Each destination is a symlink switched atomically; prior generations stay under `/srv/pi/.pi-stack-releases` for processes that loaded them.
 3. For every account (each person plus the fleet user): links `pi`, `agent-browser`, `pi-agent-browser-doctor`, `pi-orchestrator`, `pi-remote`, and every tool command into `~/.local/bin`; links the reviewed skills and the host's skills into `~/.pi/agent/skills`; rewrites the `packages` list in `~/.pi/agent/settings.json` under Pi's own lock, installs the pinned npm packages, and writes the VCC policy and custom model catalog.
-4. Restarts the fleet daemon. Live workers keep the release they recorded in their run row.
+4. Loads the deployed native browser tool under the fleet account's normal settings and proves open, interactive snapshot, title, and isolated-browser cleanup against a loopback page. A failure blocks service activation. Then restarts the fleet daemon. Live workers keep the release they recorded in their run row.
 5. If Pi Remote changed, restarts the front door and hands each running supervisor the new release. Active Pi turns keep their process and stream; the replacement supervisor adopts them and replaces each runtime after it settles. The front door starts every open person's supervisor before it listens, so deployment first waits for `/v1/router-health`, then asks only the supervisors reporting another commit to hand over, then waits until every unlocked person's health response names the selected commit. A slow start or handoff therefore cannot race the smoke check or rollback. A rollback resets the supervisor units first, since one that crashed on the rejected release may have exhausted its start limit.
 6. Walks the live front door the way the clients do (`deploy/smoke`): the web assets, the Android preflight for the person header, the environment and person lists, and for every unlocked person the first calls the app makes. A release that fails this is switched back to the previous Pi Remote release on the spot, the supervisors are handed that release again, and the command fails. Tests prove a release works; this proves nobody is locked out of the app by it.
 
-An unchanged host redeploy takes about a second. A clean dependency install takes a few seconds. A deployment whose destinations are overridden with `PI_STACK_*_DEST` is a rehearsal: it publishes into those paths and touches no service unless `PI_STACK_SERVICES=1`.
+An unchanged host redeploy takes a few seconds, including the native browser probe. A clean dependency install takes a few seconds. A deployment whose destinations are overridden with `PI_STACK_*_DEST` is a rehearsal: it publishes into those paths and touches no service unless `PI_STACK_SERVICES=1`.
 
-The native browser extension and executable belong to the same immutable dependency tree. The [browser runtime entrypoint](../packages/runtime/extensions/browser/README.md) resolves that tree when Pi loads it and puts its physical `.bin` path first in the process environment. Live turns keep their pair across a release switch. New, recovered and reloaded sessions select both together. The native extension is not installed into an account's mutable npm directory.
+The native browser extension and executable belong to the same immutable dependency tree. The [browser runtime entrypoint](../packages/runtime/extensions/browser/README.md) resolves that tree when Pi loads it and puts its physical `.bin` path first in the process environment. Live turns keep their pair across a release switch. New, recovered and reloaded sessions select both together. The native extension is not installed into an account's mutable npm directory. Pi resolves the physical extension entrypoint before importing it, so its native ESM cache cannot keep the first target of a switched symlink on reload.
+
+Retain runtime releases and their dependency trees while any Pi process or browser daemon uses them. A run's recorded Orchestrator release is not a complete browser reference: recovery may load a newer browser pair through current settings. Deployment does not garbage-collect these trees.
 
 Pi normally comes from the npm registry. When an unpublished upstream commit is selected, [`vendor/pi`](../vendor/pi/README.md) holds the built source packages and their exact provenance. `deploy/runtime` copies those packages into its isolated production install before running `npm ci`.
+
+## Browser recovery
+
+A version mismatch is evidence that the loaded native tool and executable came from different installations. Do not disable the guard, downgrade the shared command, or export a different PATH in a child shell. A child shell cannot repair its parent Pi process.
+
+- Interactive Pi with the patched loader can use `/reload` while idle. Processes started before the loader fix need one process replacement, reopening the same file with `pi --session /absolute/path/session.jsonl`. A reload in that earlier process can still retain its original factory.
+- Pi Remote deployment replaces idle runtimes and adopts active turns until they settle. The next runtime loads the selected pair. It does not replay a completed turn.
+- Fleet workers keep their process during deployment. Workers using the browser entrypoint retain a matched pair and need no restart. A worker loaded before that entrypoint must reach its checkpoint before process replacement. The daemon recovers an interrupted, still-admitted run using its recorded Orchestrator release and exact JSONL; current settings select the browser pair. `abort` and `kill` are terminal operator actions, not dependency-reload commands. Completed research remains completed unless its owner explicitly resumes it.
+
+To prove native browser availability without asking a model or changing research history:
+
+```sh
+node deploy/browser-smoke.mjs
+node deploy/browser-smoke.mjs \
+  --worker-release /srv/pi/.pi-stack-releases/orchestrator/COMMIT \
+  --session-file /absolute/path/to/settled-session.jsonl
+```
+
+The recovery probe copies the JSONL into a temporary directory and opens it through the recorded release's SDK. Use a settled session because its extension startup hooks may recover browser cleanup leases. The browser script uses a separate, disposable browser identity. Success removes the probe files; failure reports the retained session path and cleanup state. The canonical JSONL and Orchestrator ledger are not written. This proves browser recovery, not a new research turn.
+
+To test release switching against the deployed SDK and bundled RPC:
+
+```sh
+PI_TEST_RUNTIME_ENTRY=file:///srv/pi/runtime/node_modules/@earendil-works/pi-coding-agent/dist/index.js \
+  node --test packages/runtime/extensions/browser/browser.test.mjs
+```
 
 ## Build checks
 

@@ -2,9 +2,12 @@ import assert from "node:assert/strict";
 import { fork } from "node:child_process";
 import { once } from "node:events";
 import { copyFileSync, mkdirSync, mkdtempSync, renameSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
+import { fileURLToPath } from "node:url";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
+const runtimeEntry = process.env.PI_TEST_RUNTIME_ENTRY ?? import.meta.resolve("@earendil-works/pi-coding-agent");
+const { createAgentSession, DefaultResourceLoader, RpcClient, SessionManager, SettingsManager } = await import(runtimeEntry);
 
 function release(root, version) {
   const path = join(root, version);
@@ -20,15 +23,22 @@ function release(root, version) {
   writeFileSync(join(dependencies, ".bin/agent-browser"), `#!${process.execPath}\nconsole.log(${JSON.stringify(version)});\n`, { mode: 0o755 });
   writeFileSync(join(native, "dist/extensions/agent-browser/index.js"), `
     import { execFileSync } from "node:child_process";
+    const probe = () => ({ wrapper: ${JSON.stringify(version)}, executable: execFileSync("agent-browser", ["--version"], { encoding: "utf8" }).trim() });
     export default function (pi) {
       pi.registerTool({
-        name: "agent_browser",
-        execute() {
-          return { wrapper: ${JSON.stringify(version)}, executable: execFileSync("agent-browser", ["--version"], { encoding: "utf8" }).trim() };
+        name: "agent_browser", label: "Browser", description: "Release probe",
+        parameters: { type: "object", properties: {} },
+        execute() { return { content: [], details: probe() }; },
+      });
+      pi.registerCommand("browser-probe", {
+        handler: async (args, ctx) => {
+          if (args === "reload") { await ctx.reload(); return; }
+          pi.appendEntry("browser-probe", probe());
         },
       });
     }
   `);
+  copyFileSync(new URL("package.json", import.meta.url), join(extension, "package.json"));
   copyFileSync(new URL("index.mjs", import.meta.url), join(extension, "index.mjs"));
   symlinkSync(dependencies, join(path, "node_modules"));
   return path;
@@ -47,9 +57,9 @@ test("a running tool retains its pair after deployment; a new process selects th
       import { pathToFileURL } from "node:url";
       const { default: browser } = await import(pathToFileURL(process.argv[2]).href);
       let tool;
-      await browser({ registerTool(value) { tool = value; } });
-      process.on("message", () => process.send(tool.execute()));
-      process.send(tool.execute());
+      await browser({ registerTool(value) { tool = value; }, registerCommand() {} });
+      process.on("message", () => process.send(tool.execute().details));
+      process.send(tool.execute().details);
     `);
     const start = () => {
       const child = fork(runner, [join(selected, "extensions/browser/index.mjs")], {
@@ -75,6 +85,89 @@ test("a running tool retains its pair after deployment; a new process selects th
       child.kill();
       await exited;
     }));
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("Pi reload selects both dependencies again after a release switch and rollback", async () => {
+  const root = mkdtempSync(join(tmpdir(), "pi-browser-reload-"));
+  const path = process.env.PATH;
+  try {
+    const first = release(root, "0.34.0");
+    const second = release(root, "0.36.0");
+    const selected = join(root, "runtime");
+    symlinkSync(first, selected);
+    const settingsManager = SettingsManager.inMemory({ packages: [join(selected, "extensions/browser")] });
+    const loader = new DefaultResourceLoader({
+      cwd: root,
+      agentDir: join(root, "agent"),
+      settingsManager,
+      noSkills: true, noPromptTemplates: true, noThemes: true, noContextFiles: true,
+    });
+    await loader.reload();
+    const { session } = await createAgentSession({
+      cwd: root, agentDir: join(root, "agent"), resourceLoader: loader, settingsManager,
+      sessionManager: SessionManager.inMemory(root),
+    });
+    try {
+      await session.bindExtensions({ mode: "print" });
+      const probe = async () => {
+        assert.deepEqual(loader.getExtensions().errors, []);
+        const tools = session.agent.state.tools.filter((tool) => tool.name === "agent_browser");
+        assert.equal(tools.length, 1);
+        return (await tools[0].execute("probe", {})).details;
+      };
+      assert.deepEqual(await probe(), { wrapper: "0.34.0", executable: "0.34.0" });
+      symlinkSync(second, `${selected}.next`);
+      renameSync(`${selected}.next`, selected);
+      assert.deepEqual(await probe(), { wrapper: "0.34.0", executable: "0.34.0" });
+      await session.reload();
+      assert.deepEqual(await probe(), { wrapper: "0.36.0", executable: "0.36.0" });
+      symlinkSync(first, `${selected}.next`);
+      renameSync(`${selected}.next`, selected);
+      await session.reload();
+      assert.deepEqual(await probe(), { wrapper: "0.34.0", executable: "0.34.0" });
+    } finally {
+      session.dispose();
+    }
+  } finally {
+    if (path === undefined) delete process.env.PATH;
+    else process.env.PATH = path;
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("bundled RPC reloads the selected pair without restarting the process", async () => {
+  const root = mkdtempSync(join(tmpdir(), "pi-browser-rpc-"));
+  let client;
+  try {
+    const first = release(root, "0.34.0");
+    const second = release(root, "0.36.0");
+    const selected = join(root, "runtime");
+    symlinkSync(first, selected);
+    const agentDir = join(root, "agent");
+    mkdirSync(agentDir);
+    writeFileSync(join(agentDir, "settings.json"), JSON.stringify({ packages: [join(selected, "extensions/browser")] }));
+    client = new RpcClient({
+      cliPath: fileURLToPath(new URL("bundle/cli.js", runtimeEntry)), cwd: root,
+      env: { PI_CODING_AGENT_DIR: agentDir },
+      args: ["--offline", "--no-skills", "--no-prompt-templates", "--no-context-files", "--no-session"],
+    });
+    await client.start();
+    const probe = async () => {
+      await client.prompt("/browser-probe");
+      const { entries } = await client.getEntries();
+      return entries.filter((entry) => entry.type === "custom" && entry.customType === "browser-probe").at(-1).data;
+    };
+    assert.deepEqual(await probe(), { wrapper: "0.34.0", executable: "0.34.0" });
+    for (const [releasePath, version] of [[second, "0.36.0"], [first, "0.34.0"]]) {
+      symlinkSync(releasePath, `${selected}.next`);
+      renameSync(`${selected}.next`, selected);
+      await client.prompt("/browser-probe reload");
+      assert.deepEqual(await probe(), { wrapper: version, executable: version });
+    }
+  } finally {
+    await client?.stop();
     rmSync(root, { recursive: true, force: true });
   }
 });

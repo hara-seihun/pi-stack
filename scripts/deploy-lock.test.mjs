@@ -217,6 +217,7 @@ test("the host deployment restarts the daemon and activates a changed Pi Remote"
     const component=`#!/usr/bin/env bash\nset -euo pipefail\nname=$(basename "$0")\ncommit=$(git -C "$(cd "$(dirname "$0")/.." && pwd)" rev-parse HEAD)\ncase "$name" in runtime) destination=$PI_STACK_RUNTIME_DEST;; orchestrator) destination=$PI_STACK_ORCHESTRATOR_DEST;; tools) destination=$PI_STACK_TOOLS_DEST;; skills) destination=$PI_STACK_SKILLS_DEST;; settings) printf '%s\\n' "$1" >> "$SETTINGS_TRACE"; exit 0;;\n remote) destination=$PI_STACK_REMOTE_DEST; release="$(dirname "$destination")/.pi-stack-releases/remote/$commit"; mkdir -p "$release/dist"; printf '%s\\n' "$commit" > "$release/.pi-stack-commit"; ln -sfn "$release" "$destination.tmp"; mv -Tf "$destination.tmp" "$destination"; exit 0;; esac\nmkdir -p "$destination/dist"\nprintf '%s\\n' "$commit" > "$destination/.pi-stack-commit"\n`;
     for(const name of ["runtime","orchestrator","remote","tools","skills","settings"]){writeFileSync(join(deploy,name),component);chmodSync(join(deploy,name),0o755);}
     writeFileSync(join(deploy,"smoke"),"#!/bin/sh\nexit \"${SMOKE_EXIT:-0}\"\n");chmodSync(join(deploy,"smoke"),0o755);
+    writeFileSync(join(deploy,"browser-smoke.mjs"), "process.exit(Number(process.env.BROWSER_SMOKE_EXIT ?? 0));\n");
     // Activation hands the supervisor the selected release; its health then names that commit.
     writeFileSync(join(remoteApp,"activate"),"#!/bin/sh\nprintf '%s\\n' \"${PI_REMOTE_SERVICE:-}\" >> \"$ACTIVATE_TRACE\"\ncat \"$PI_STACK_REMOTE_DEST/.pi-stack-commit\" > \"$SUPERVISOR_COMMIT\"\n");chmodSync(join(remoteApp,"activate"),0o755);
     assert.equal(spawnSync("git",["init","-q",repository]).status,0);assert.equal(spawnSync("git",["-C",repository,"add","deploy","apps"]).status,0);assert.equal(spawnSync("git",["-C",repository,"-c","user.name=test","-c","user.email=test@example.test","commit","-qm","fixture"]).status,0);
@@ -238,6 +239,11 @@ test("the host deployment restarts the daemon and activates a changed Pi Remote"
     const unchanged=spawnSync(join(deploy,"host"),[hostFile],{encoding:"utf8",env});assert.equal(unchanged.status,0,unchanged.stderr);
     assert.equal(readFileSync(activationTrace,"utf8"),"pi-remote@alice.service\n");
     const again=readFileSync(systemctlTrace,"utf8");assert.match(again,/^restart pi-orchestrator@/m);assert.doesNotMatch(again,/try-restart pi-remote-router/);
+
+    rmSync(systemctlTrace,{force:true});
+    const browserFailure=spawnSync(join(deploy,"host"),[hostFile],{encoding:"utf8",env:{...env,BROWSER_SMOKE_EXIT:"1"}});
+    assert.notEqual(browserFailure.status,0);
+    assert.equal(existsSync(systemctlTrace),false,"a missing native browser blocks service activation");
 
     // A release the clients cannot use goes back to the previous Pi Remote.
     const before=readlinkSync(destinations.PI_STACK_REMOTE_DEST);
