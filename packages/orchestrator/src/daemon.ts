@@ -5,6 +5,7 @@ import { dirname, join, resolve } from "node:path";
 import { homedir } from "node:os";
 import { createServer, type IncomingMessage, type ServerResponse } from "node:http";
 import type { LaneReadiness, LaneManifest, LaneSpec, OrchestratorConfig, Run } from "./domain.js";
+import { ISOLATED_TOOLS } from "./domain.js";
 import { accountCapacity, assign, commitMeterAdmission } from "./policy.js";
 import { Store } from "./store.js";
 import { CodexMeterSampler } from "./meters-codex.js";
@@ -271,7 +272,14 @@ export class Daemon {
       }
       const accountRemove=/^\/v1\/accounts\/([^/]+)$/.exec(url.pathname);
       if(method==="DELETE"&&accountRemove){this.store.setAccountEnabled(decodeURIComponent(accountRemove[1]!),false);return json(res,200,{ok:true});}
-      if(method==="POST"&&url.pathname==="/v1/run"){const input=await body(req);const ids=this.store.createRuns({count:Number(input.count??1),source:"direct",prompt:String(input.prompt),cwd:String(input.cwd??process.cwd()),profile:String(input.profile??"standard"),budget:input.force?"force":"background"});void this.reconcile();return json(res,201,{runIds:ids});}
+      if(method==="POST"&&(url.pathname==="/v1/run"||url.pathname==="/v1/run/isolated")){
+        const input=await body(req);
+        if(url.pathname==="/v1/run/isolated"&&input.context===undefined)return json(res,400,{error:"An isolated run requires context.tools"});
+        if(input.context!==undefined&&(!input.context||Object.keys(input.context).some(key=>key!=="tools")||!Array.isArray(input.context.tools)||input.context.tools.some((tool:unknown)=>!ISOLATED_TOOLS.includes(tool as never))))return json(res,400,{error:"context must contain a tools allowlist of supported isolated tools"});
+        if(input.context&&(!input.cwd||!Number.isInteger(input.count??1)||(input.count??1)!==1))return json(res,400,{error:"Isolated runs require an explicit workspace cwd and count 1"});
+        const ids=this.store.createRuns({count:Number(input.count??1),source:"direct",prompt:String(input.prompt),cwd:String(input.cwd??process.cwd()),profile:String(input.profile??"standard"),budget:input.force?"force":"background",context:input.context});
+        void this.reconcile();return json(res,201,{runIds:ids});
+      }
       if(method==="POST"&&url.pathname==="/v1/wave"){const input=await body(req),lane=this.store.lane(String(input.lane));if(!lane)return json(res,404,{error:"lane not found"});const ids=this.store.createRuns({count:Number(input.count??1),source:"direct",sourceId:lane.id,prompt:lane.prompt,cwd:lane.cwd,profile:lane.profile,budget:input.force?"force":"background"});void this.reconcile();return json(res,201,{runIds:ids});}
       const runAbort=/^\/v1\/runs\/([^/]+)\/(abort|kill)$/.exec(url.pathname);if(method==="POST"&&runAbort){const id=runAbort[1]!,action=runAbort[2]!;this.store.setControl(`abort:${id}`,action);const run=this.store.run(id);if(action==="kill"||run?.state==="queued"){this.stopUnit(run?.workerUnit);this.store.updateRun(id,{state:"aborted",failureKind:"operator",result:`${action} by operator`});}return json(res,200,{ok:true});}
       if(method==="POST"&&url.pathname==="/v1/control"){const input=await body(req);this.store.setControl(String(input.key),String(input.value));return json(res,200,{ok:true});}

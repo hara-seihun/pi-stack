@@ -1,6 +1,8 @@
 import {
   createAgentSession,
   type AgentSession,
+  type ResourceLoader,
+  type SettingsManager,
 } from "@earendil-works/pi-coding-agent";
 
 /** A retry window long enough to cover ordinary provider throttles while Pi
@@ -16,6 +18,8 @@ export interface HostedSessionOptions {
   readonly modelId?: string;
   readonly accountId?: string;
   readonly tools?: string[];
+  readonly resourceLoader?: ResourceLoader;
+  readonly settingsManager?: SettingsManager;
   readonly sessionManager?: unknown;
   readonly openSession?: typeof createAgentSession;
   readonly onExtensionError?: (extensionPath: string, error: unknown) => void;
@@ -41,6 +45,8 @@ export async function openHostedSession(options: HostedSessionOptions): Promise<
     model: options.model as never,
     thinkingLevel: options.thinkingLevel as never,
     ...(options.tools === undefined ? {} : { tools: options.tools }),
+    ...(options.resourceLoader === undefined ? {} : { resourceLoader: options.resourceLoader }),
+    ...(options.settingsManager === undefined ? {} : { settingsManager: options.settingsManager }),
     ...(options.sessionManager === undefined ? {} : { sessionManager: options.sessionManager as never }),
   });
   const sessionId = session.sessionManager.getSessionId();

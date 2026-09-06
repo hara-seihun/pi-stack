@@ -78,6 +78,16 @@ Import reads credentials from a file so tokens do not enter process arguments. `
 
 The daemon serves its public API on `127.0.0.1:2460` by default. Pi Remote consumes the package's observation API and does not query private tables.
 
+## Application-owned workspaces
+
+`POST /v1/run/isolated` requires `context: { tools: ["read", "write", "edit", "bash", "agent_browser"] }`. This selects an isolated context rather than the fleet's normal environment. The dedicated endpoint fails without launching anything on a host that has not deployed this feature. `/v1/run` also accepts the same context contract. It requires an explicit `cwd` and one run. An empty tool list creates a tool-free agent. Supported names are declared in `src/domain.ts`; unknown tools and context fields are rejected.
+
+The daemon stores the contract atomically with the run in its `run-context:<id>` control record. Recovery uses the same contract. The worker creates its HOME, temporary files, XDG directories, and Pi configuration inside `cwd/.home`. Sessions remain in the fleet's durable session directory, outside the disposable workspace. Pi loads no discovered instructions, skills, templates, settings, or extensions. Only pooled authentication, usage accounting, output-limit continuation, and the extensions required by the requested tools load. Remote-thread identifiers and inherited credential environment variables are removed.
+
+This is context isolation for trusted agents, not an OS security boundary. Bash still executes arbitrary code as the fleet user and can address files or services outside the workspace. The submitting application owns workspace creation, allowed reference files, result validation, accepted artifact storage, and cleanup after completion or failure. The orchestrator never deletes a caller-supplied `cwd`.
+
+EverythingLIVE uses this API for its commercial author/review jobs. Each turn gets a fresh folder containing scene definitions, authoring helpers, brand references, and the preceding turn's draft. Its service exposes generation, inspection, and preview operations through the workspace CLI, accepts validated JSON and its media/components, and reclaims workspaces during normal operation and restart recovery.
+
 ## Usage evidence
 
 `pi-orchestrator usage-evidence [--ledger FILE]` prints a transaction-consistent, read-only JSON snapshot of the last 24 hours of quota meters and hourly token totals. It includes account aliases, providers, voice reservations, and the catalog's weekly meter scopes. It excludes credentials, account labels, run ids, and transcript paths. It does not contact providers, initialize missing databases, or require the daemon to be running.

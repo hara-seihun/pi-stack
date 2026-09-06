@@ -1,5 +1,7 @@
 import { SessionManager, type AgentSession } from "@earendil-works/pi-coding-agent";
 import { builtinProviders } from "@earendil-works/pi-ai/providers/all";
+import { join } from "node:path";
+import { isolatedContext } from "./host/isolated-context.js";
 import { loadConfig } from "./config.js";
 import type { Run, RunActivity } from "./domain.js";
 import { interruptedTurnPrompt } from "./host/continuations.js";
@@ -27,6 +29,7 @@ export async function work(runId:string):Promise<void>{
     cwd:run.cwd,agentDir:config.agentDir,model:modelFor(run),thinkingLevel:run.thinking,
     provider:run.provider,modelId:run.model,accountId:run.accountId,
     sessionManager:run.sessionFile?SessionManager.open(run.sessionFile,undefined,run.cwd):undefined,
+    ...(run.context ? await isolatedContext(run, join(config.agentDir,"sessions")) : {}),
     onExtensionError:(path,error)=>console.error(`extension ${path}:`,error),
   });
   const session=hosted.session;
