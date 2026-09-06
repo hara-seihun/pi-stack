@@ -23,7 +23,7 @@ export async function isolatedContext(run: Run, sessionDirectory: string) {
   }
   const settingsManager = SettingsManager.inMemory();
   const runtime = process.env.PI_STACK_RUNTIME_DEST ?? "/srv/pi/runtime";
-  const additionalExtensionPaths: string[] = [];
+  const additionalExtensionPaths = await Promise.all((run.context.extensions ?? []).map(path => realpath(path)));
   if (run.context.tools.includes("bash")) additionalExtensionPaths.push(await realpath(join(runtime, "extensions/bash-timeout-guard/index.mjs")));
   if (run.context.tools.includes("agent_browser")) additionalExtensionPaths.push(await realpath(join(runtime, "extensions/browser/index.mjs")));
   const resourceLoader = new DefaultResourceLoader({
@@ -34,8 +34,11 @@ export async function isolatedContext(run: Run, sessionDirectory: string) {
     extensionFactories: [routing, usageLogger, outputLimitContinuation],
   });
   await resourceLoader.reload();
-  const errors = resourceLoader.getExtensions().errors;
+  const { errors, extensions } = resourceLoader.getExtensions();
   if (errors.length) throw new Error(`Isolated context failed to load: ${JSON.stringify(errors)}`);
+  const available = new Set(['read', 'write', 'edit', 'bash', 'grep', 'find', 'ls', ...extensions.flatMap(extension => [...extension.tools.keys()])]);
+  const missing = run.context.tools.filter(name => !available.has(name));
+  if (missing.length) throw new Error(`Isolated tools were not registered: ${missing.join(', ')}`);
   return {
     agentDir, settingsManager, resourceLoader, tools: [...run.context.tools],
     sessionManager: run.sessionFile ? SessionManager.open(run.sessionFile, undefined, run.cwd) : SessionManager.create(run.cwd, sessionDirectory),

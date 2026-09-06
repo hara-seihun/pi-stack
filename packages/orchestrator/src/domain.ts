@@ -3,7 +3,7 @@ import type { ModelCandidate } from "./catalog.js";
 export type BudgetClass = "background" | "force";
 export type RunSource = "direct" | "lane";
 export const ISOLATED_TOOLS = ["read", "write", "edit", "bash", "grep", "find", "ls", "agent_browser"] as const;
-export type RunContext = { readonly tools: readonly (typeof ISOLATED_TOOLS)[number][] };
+export type RunContext = { readonly tools: readonly string[]; readonly extensions?: readonly string[] };
 export type RunState = "queued" | "starting" | "running" | "done" | "failed" | "aborted";
 export type LeaseKind = "fleet" | "interactive" | "voice";
 export type FailureKind = "provider" | "account" | "infrastructure" | "operator" | "task";
