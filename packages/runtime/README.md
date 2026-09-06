@@ -27,6 +27,8 @@ On 2026-09-05, a running worker retained a native extension requiring 0.34.0 whi
 
 The packages contain no host identities, credential values, deployment paths, or service policy. Configuration stays on the machine running Pi. Each component README lists its environment variables and local files.
 
+Thinking defaults initialize sessions without a saved or explicit thinking level. Once set, the session's level survives model changes, account routing, and resume. Global and per-model startup defaults do not overwrite it. Explicit thinking selections and scoped-model levels still apply, and Pi clamps unsupported levels to the selected model's capabilities. The [Pi source package](../../vendor/pi/README.md) owns this behavior for both the SDK and bundled CLI/RPC.
+
 ## Development
 
 ```sh
@@ -36,6 +38,13 @@ npm run check
 ```
 
 The supported Pi peer is `@earendil-works/pi-coding-agent` 0.85.x. Tests run without account credentials or browser sessions.
+
+To check thinking precedence against the deployed SDK and bundled RPC without making provider requests:
+
+```sh
+PI_TEST_RUNTIME_ENTRY=file:///srv/pi/runtime/node_modules/@earendil-works/pi-coding-agent/dist/index.js \
+  node --test packages/runtime/session-thinking.test.mjs
+```
 
 ## License
 

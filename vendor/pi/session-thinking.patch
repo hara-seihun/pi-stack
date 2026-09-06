@@ -1,0 +1,254 @@
+diff --git a/packages/coding-agent/src/core/agent-session.ts b/packages/coding-agent/src/core/agent-session.ts
+index ac2bd4b18..b7bf9c724 100644
+--- a/packages/coding-agent/src/core/agent-session.ts
++++ b/packages/coding-agent/src/core/agent-session.ts
+@@ -65,7 +65,7 @@ import {
+ 	prepareCompaction,
+ 	shouldCompact,
+ } from "./compaction/index.ts";
+-import { DEFAULT_THINKING_LEVEL, THINKING_LEVEL_OPTIONS } from "./defaults.ts";
++import { THINKING_LEVEL_OPTIONS } from "./defaults.ts";
+ import { exportSessionToHtml, type ToolHtmlRenderer } from "./export-html/index.ts";
+ import { createToolHtmlRenderer } from "./export-html/tool-renderer.ts";
+ import {
+@@ -1661,7 +1661,7 @@ export class AgentSession {
+ 		}
+ 
+ 		const previousModel = this.model;
+-		const thinkingLevel = this._getThinkingLevelForModelSwitch(model);
++		const thinkingLevel = this.thinkingLevel;
+ 		this.agent.state.model = model;
+ 		this.sessionManager.appendModelChange(model.provider, model.id);
+ 		if (options.persist) {
+@@ -1669,9 +1669,6 @@ export class AgentSession {
+ 			this._addPersistedDefaultToNonEmptyScope(model);
+ 		}
+ 
+-		// Apply thinking level for the new model.
+-		// Per-model thinking level overrides take priority over the global default.
+-		// Model persistence does not implicitly rewrite the global thinking default.
+ 		this.setThinkingLevel(thinkingLevel);
+ 
+ 		await this._emitModelSelect(model, previousModel, "set");
+@@ -1726,7 +1723,7 @@ export class AgentSession {
+ 		const len = scopedModels.length;
+ 		const nextIndex = direction === "forward" ? (currentIndex + 1) % len : (currentIndex - 1 + len) % len;
+ 		const next = scopedModels[nextIndex];
+-		const thinkingLevel = this._getThinkingLevelForModelSwitch(next.model, next.thinkingLevel);
++		const thinkingLevel = next.thinkingLevel ?? this.thinkingLevel;
+ 
+ 		// Apply model
+ 		this.agent.state.model = next.model;
+@@ -1736,11 +1733,6 @@ export class AgentSession {
+ 			this._addPersistedDefaultToNonEmptyScope(next.model);
+ 		}
+ 
+-		// Apply thinking level for the new model.
+-		// - Explicit scoped model thinking level overrides defaults
+-		// - Per-model thinking level overrides take priority over the global default
+-		// setThinkingLevel clamps to model capabilities.
+-		// Model persistence does not implicitly rewrite the global thinking default.
+ 		this.setThinkingLevel(thinkingLevel);
+ 
+ 		await this._emitModelSelect(next.model, currentModel, "cycle");
+@@ -1763,7 +1755,7 @@ export class AgentSession {
+ 		const nextIndex = direction === "forward" ? (currentIndex + 1) % len : (currentIndex - 1 + len) % len;
+ 		const nextModel = availableModels[nextIndex];
+ 
+-		const thinkingLevel = this._getThinkingLevelForModelSwitch(nextModel);
++		const thinkingLevel = this.thinkingLevel;
+ 		this.agent.state.model = nextModel;
+ 		this.sessionManager.appendModelChange(nextModel.provider, nextModel.id);
+ 		if (options.persist) {
+@@ -1771,8 +1763,6 @@ export class AgentSession {
+ 			this._addPersistedDefaultToNonEmptyScope(nextModel);
+ 		}
+ 
+-		// Apply thinking level for the new model.
+-		// Model persistence does not implicitly rewrite the global thinking default.
+ 		this.setThinkingLevel(thinkingLevel);
+ 
+ 		await this._emitModelSelect(nextModel, currentModel, "cycle");
+@@ -1847,20 +1837,6 @@ export class AgentSession {
+ 		return !!this.model?.reasoning;
+ 	}
+ 
+-	private _getThinkingLevelForModelSwitch(targetModel?: Model<any>, explicitLevel?: ThinkingLevel): ThinkingLevel {
+-		if (explicitLevel !== undefined) {
+-			return explicitLevel;
+-		}
+-		// Per-model default takes priority when switching to a model that has one
+-		if (targetModel) {
+-			const perModel = this.settingsManager.getModelThinkingLevel(targetModel.provider, targetModel.id);
+-			if (perModel !== undefined) {
+-				return perModel;
+-			}
+-		}
+-		return this.settingsManager.getDefaultThinkingLevel() ?? this.thinkingLevel ?? DEFAULT_THINKING_LEVEL;
+-	}
+-
+ 	private _clampThinkingLevel(level: ThinkingLevel, _availableLevels: ThinkingLevel[]): ThinkingLevel {
+ 		return this.model ? (clampThinkingLevel(this.model, level) as ThinkingLevel) : "off";
+ 	}
+diff --git a/packages/coding-agent/src/core/sdk.ts b/packages/coding-agent/src/core/sdk.ts
+index adbf102a3..d5809ab19 100644
+--- a/packages/coding-agent/src/core/sdk.ts
++++ b/packages/coding-agent/src/core/sdk.ts
+@@ -228,11 +228,8 @@ export async function createAgentSession(options: CreateAgentSessionOptions = {}
+ 
+ 	let thinkingLevel = options.thinkingLevel;
+ 
+-	// If session has data, restore thinking level from it
+-	if (thinkingLevel === undefined && hasExistingSession) {
+-		thinkingLevel = hasThinkingEntry
+-			? (existingSession.thinkingLevel as ThinkingLevel)
+-			: (settingsManager.getDefaultThinkingLevel() ?? DEFAULT_THINKING_LEVEL);
++	if (thinkingLevel === undefined && hasThinkingEntry) {
++		thinkingLevel = existingSession.thinkingLevel as ThinkingLevel;
+ 	}
+ 
+ 	// Fall back to per-model override, then global default
+diff --git a/packages/coding-agent/src/modes/interactive/interactive-mode.ts b/packages/coding-agent/src/modes/interactive/interactive-mode.ts
+index 8db1b8027..6e8004b82 100644
+--- a/packages/coding-agent/src/modes/interactive/interactive-mode.ts
++++ b/packages/coding-agent/src/modes/interactive/interactive-mode.ts
+@@ -4649,24 +4649,9 @@ export class InteractiveMode {
+ 					},
+ 					onModelThinkingLevelChange: (provider, modelId, level) => {
+ 						this.settingsManager.setModelThinkingLevel(provider, modelId, level);
+-						// If the override is for the current model, apply it to the session too
+-						const current = this.session.model;
+-						if (current && current.provider === provider && current.id === modelId) {
+-							this.session.setThinkingLevel(level);
+-							this.footer.invalidate();
+-							this.updateEditorBorderColor();
+-						}
+ 					},
+ 					onModelThinkingLevelRemove: (provider, modelId) => {
+ 						this.settingsManager.removeModelThinkingLevel(provider, modelId);
+-						// If the override was for the current model, revert to global default
+-						const current = this.session.model;
+-						if (current && current.provider === provider && current.id === modelId) {
+-							const globalDefault = this.settingsManager.getDefaultThinkingLevel() ?? DEFAULT_THINKING_LEVEL;
+-							this.session.setThinkingLevel(globalDefault);
+-							this.footer.invalidate();
+-							this.updateEditorBorderColor();
+-						}
+ 					},
+ 					onThemeChange: (themeSetting) => {
+ 						this.settingsManager.setTheme(themeSetting);
+diff --git a/packages/coding-agent/test/suite/agent-session-model-extension.test.ts b/packages/coding-agent/test/suite/agent-session-model-extension.test.ts
+index f024a67d1..cdf2d2cb7 100644
+--- a/packages/coding-agent/test/suite/agent-session-model-extension.test.ts
++++ b/packages/coding-agent/test/suite/agent-session-model-extension.test.ts
+@@ -104,7 +104,7 @@ describe("AgentSession model and extension characterization", () => {
+ 		expect(harness.settingsManager.getDefaultThinkingLevel()).toBe("low");
+ 	});
+ 
+-	it("applies per-model thinking level override on model switch", async () => {
++	it("preserves session thinking over global and per-model defaults on model switch", async () => {
+ 		const harness = await createHarness({
+ 			models: [
+ 				{ id: "faux-1", name: "One", reasoning: true },
+@@ -114,22 +114,19 @@ describe("AgentSession model and extension characterization", () => {
+ 		});
+ 		harnesses.push(harness);
+ 
+-		// Set a per-model override for faux-2
+ 		harness.settingsManager.setModelThinkingLevel("faux", "faux-2", "low");
+ 
+-		// Session starts on faux-1 with default thinking
+ 		harness.session.setThinkingLevel("high");
+ 		expect(harness.session.thinkingLevel).toBe("high");
+ 
+-		// Switch to faux-2 → per-model override should apply
+ 		const model2 = harness.getModel("faux-2")!;
+ 		await harness.session.setModel(model2);
+-		expect(harness.session.thinkingLevel).toBe("low");
++		expect(harness.session.thinkingLevel).toBe("high");
+ 
+-		// Switch back to faux-1 → no per-model override, uses global default
+ 		const model1 = harness.getModel("faux-1")!;
+ 		await harness.session.setModel(model1);
+-		expect(harness.session.thinkingLevel).toBe("medium");
++		expect(harness.session.thinkingLevel).toBe("high");
++		expect(harness.eventsOfType("thinking_level_changed")).toHaveLength(1);
+ 	});
+ 
+ 	it("falls back to current session thinking level when no per-model or global default is configured", async () => {
+@@ -146,7 +143,7 @@ describe("AgentSession model and extension characterization", () => {
+ 		expect(harness.session.thinkingLevel).toBe("high");
+ 	});
+ 
+-	it("per-model override takes priority over global default during model switch", async () => {
++	it("preserves an explicit off level during model cycling despite configured defaults", async () => {
+ 		const harness = await createHarness({
+ 			models: [
+ 				{ id: "faux-1", name: "One", reasoning: true },
+@@ -159,10 +156,15 @@ describe("AgentSession model and extension characterization", () => {
+ 		});
+ 		harnesses.push(harness);
+ 
+-		// Start on a non-thinking model, then switch to faux-2
+-		const model2 = harness.getModel("faux-2")!;
+-		await harness.session.setModel(model2);
+-		expect(harness.session.thinkingLevel).toBe("minimal");
++		harness.session.setThinkingLevel("off");
++		await harness.session.cycleModel();
++		expect(harness.session.model?.id).toBe("faux-2");
++		expect(harness.session.thinkingLevel).toBe("off");
++
++		harness.session.setScopedModels(harness.models.map((model) => ({ model })));
++		await harness.session.cycleModel();
++		expect(harness.session.model?.id).toBe("faux-1");
++		expect(harness.session.thinkingLevel).toBe("off");
+ 	});
+ 
+ 	it("cycles through scoped models and preserves the scoped thinking preference", async () => {
+diff --git a/packages/coding-agent/test/suite/session-thinking.test.ts b/packages/coding-agent/test/suite/session-thinking.test.ts
+new file mode 100644
+index 000000000..47ec85a8e
+--- /dev/null
++++ b/packages/coding-agent/test/suite/session-thinking.test.ts
+@@ -0,0 +1,41 @@
++import type { ThinkingLevel } from "@earendil-works/pi-agent-core";
++import { afterEach, describe, expect, it } from "vitest";
++import { createAgentSession } from "../../src/core/sdk.ts";
++import { SessionManager } from "../../src/core/session-manager.ts";
++import { createHarness, type Harness } from "./harness.ts";
++
++describe("session thinking defaults", () => {
++	const harnesses: Harness[] = [];
++	afterEach(() => {
++		while (harnesses.length) harnesses.pop()?.cleanup();
++	});
++
++	it.each([undefined, "high", "off"] as const)(
++		"restores saved thinking %s before defaults, even without messages",
++		async (saved: ThinkingLevel | undefined) => {
++			const harness = await createHarness({
++				models: [{ id: "faux-1", reasoning: true }],
++				settings: { defaultThinkingLevel: "low" },
++			});
++			harnesses.push(harness);
++			const sessionManager = SessionManager.inMemory(harness.tempDir);
++			if (saved !== undefined) sessionManager.appendThinkingLevelChange(saved);
++			const { session } = await createAgentSession({
++				cwd: harness.tempDir,
++				model: harness.getModel(),
++				modelRuntime: harness.session.modelRuntime,
++				resourceLoader: harness.session.resourceLoader,
++				settingsManager: harness.settingsManager,
++				sessionManager,
++			});
++			try {
++				expect(session.thinkingLevel).toBe(saved ?? "low");
++				harness.settingsManager.setDefaultThinkingLevel("minimal");
++				await session.setModel(harness.getModel());
++				expect(session.thinkingLevel).toBe(saved ?? "low");
++			} finally {
++				session.dispose();
++			}
++		},
++	);
++});
