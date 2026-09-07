@@ -10,6 +10,7 @@ import { readMachineUsage } from "./machine-usage";
 import { displayContextDocument, type ContextImage } from "./context-display";
 import { applyContextSplice, contextSplice, DocumentHistory, messageFinalizationKey, sha256, type ContextSplice } from "./sync";
 import { beginSupervisorGeneration, ensureSupervisorSchema } from "./database";
+import { startLedgerSnapshots } from "./ledger-snapshot";
 import { DEFAULT_LIVE_MODEL, DEFAULT_LIVE_VOICE, VoiceBroker } from "./voice/broker";
 import { attachRuntimeHost, startRuntimeHost, type RuntimeTransport } from "./runtime-transport";
 import { API } from "./api";
@@ -2745,26 +2746,10 @@ const stateReconciler = setInterval(() => {
   }
 }, STATE_RECONCILE_MS);
 
-// The nightly backup runs as root, outside this supervisor's mount namespace,
-// so it cannot reach the ledger to take a consistent copy the way it used to.
-// This is where that copy has to come from: SQLite writes it under its own
-// locking, it lands inside the encrypted tree, and the backup then picks it up
-// as ciphertext with everything else.
-function writeLedgerSnapshot() {
-  const directory = join(DATA, "backup");
-  try {
-    mkdirSync(directory, { recursive: true, mode: 0o700 });
-    const target = join(directory, "supervisor.sqlite3");
-    const staging = `${target}.writing`;
-    if (existsSync(staging)) unlinkSync(staging);
-    db.query(`VACUUM INTO '${staging.replaceAll("'", "''")}'`).run();
-    renameSync(staging, target);
-  } catch (cause: any) {
-    console.error(`[supervisor] ledger snapshot failed: ${cause?.message ?? cause}`);
-  }
-}
-writeLedgerSnapshot();
-const ledgerSnapshotter = setInterval(writeLedgerSnapshot, 6 * 60 * 60_000);
+const stopLedgerSnapshots = startLedgerSnapshots(
+  join(DATA, "supervisor.sqlite3"), join(DATA, "backup", "supervisor.sqlite3"),
+  (error) => console.error(`[supervisor] ledger snapshot failed: ${error}`),
+);
 
 function pruneUploadTransfers() {
   const cutoff = new Date(Date.now() - 24 * 60 * 60_000).toISOString();
@@ -2823,7 +2808,7 @@ function stopSupervisorTimers() {
   clearInterval(reaper);
   clearInterval(stateReconciler);
   clearInterval(dashboardTicker);
-  clearInterval(ledgerSnapshotter);
+  stopLedgerSnapshots();
   for (const timer of retryTimers.values()) clearTimeout(timer);
   retryTimers.clear();
 }
