@@ -1,5 +1,5 @@
 import { describe, expect, test } from "bun:test";
-import { applyContextSplice, contextSplice, DocumentHistory, sha256 } from "./sync";
+import { applyContextSplice, contextSplice, DocumentHistory, restoreContextSplices, sha256 } from "./sync";
 
 describe("context synchronization", () => {
   test("a verified byte splice reproduces arbitrary context changes", () => {
@@ -15,6 +15,24 @@ describe("context synchronization", () => {
       expect(applyContextSplice(base, splice)).toBe(target);
       expect(splice.targetHash).toBe(sha256(target));
     }
+  });
+
+  test("large shared ranges and multi-patch restoration preserve byte boundaries", () => {
+    const base = "日本".repeat(30_000);
+    for (const at of [0, 1, 65_535, 65_536, base.length - 1, base.length]) {
+      const target = `${base.slice(0, at)}🌙${base.slice(at)}`;
+      expect(applyContextSplice(base, contextSplice(base, target))).toBe(target);
+    }
+    const values = [base, `start ${base} end`, `${base.slice(0, 65_536)}🌙${base.slice(65_537)}`, "", "a", "あ", "日本 🌙"];
+    const splices = values.slice(1).map((value, index) => contextSplice(values[index], value));
+    for (let count = 0; count <= splices.length; count++) {
+      expect(restoreContextSplices(base, splices.slice(0, count))).toEqual({ ok: true, document: values[count], hash: sha256(values[count]) });
+    }
+    expect(restoreContextSplices("stale", splices).ok).toBe(false);
+    const patch = contextSplice("abc", "abcd");
+    expect(restoreContextSplices("abc", [{ ...patch, insertBase64: "ZQ==" }]).ok).toBe(false);
+    expect(restoreContextSplices("abc", [{ ...patch, prefixBytes: -1 }]).ok).toBe(false);
+    expect(restoreContextSplices("abc", [patch, patch]).ok).toBe(false);
   });
 
   test("history bounds all threads by bytes and entries without retaining oversized documents", () => {

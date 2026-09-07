@@ -18,7 +18,6 @@ export default function contextMirror(pi: ExtensionAPI) {
   let pending: {
     capturedAt: number;
     context: ModelContext;
-    compact: boolean;
     replacement?: "compaction";
     finalizesMessage?: string;
   } | null = null;
@@ -47,17 +46,20 @@ export default function contextMirror(pi: ExtensionAPI) {
       while (pending) {
         const snapshot = pending;
         const document = JSON.stringify(snapshot.context);
+        if (document === publishedDocument && !snapshot.replacement && !snapshot.finalizesMessage) {
+          if (pending === snapshot) pending = null;
+          continue;
+        }
         const common = {
           capturedAt: snapshot.capturedAt,
           finalizesMessage: snapshot.finalizesMessage,
         };
         try {
           let response: Response;
-          if (publishedDocument !== null && !snapshot.compact) {
-            response = await post("PATCH", {
-              ...common,
-              splice: contextSplice(publishedDocument, document),
-            });
+          const splice = publishedDocument !== null && !snapshot.replacement
+            ? contextSplice(publishedDocument, document) : null;
+          if (splice && splice.insertBase64.length + 256 < Buffer.byteLength(document)) {
+            response = await post("PATCH", { ...common, splice });
             if (response.status === 409) {
               response = await post("PUT", {
                 ...common,
@@ -93,14 +95,12 @@ export default function contextMirror(pi: ExtensionAPI) {
 
   const publish = (
     next: ModelContext,
-    compact = false,
     replacement?: "compaction",
     finalizesMessage?: string,
   ) => {
     pending = {
       capturedAt: nextCaptureTime(),
       context: next,
-      compact: compact || pending?.compact === true,
       replacement: replacement ?? pending?.replacement,
       finalizesMessage: finalizesMessage ?? pending?.finalizesMessage,
     };
@@ -108,12 +108,11 @@ export default function contextMirror(pi: ExtensionAPI) {
   };
 
   const publishCurrent = async (
-    compact = false,
     replacement?: "compaction",
     finalizesMessage?: string,
   ) => {
     if (!context) return;
-    await publish(context, compact, replacement, finalizesMessage);
+    await publish(context, replacement, finalizesMessage);
   };
 
   const replaceContext = async (
@@ -134,7 +133,7 @@ export default function contextMirror(pi: ExtensionAPI) {
         .map(({ name, description, parameters }) => ({ name, description, parameters })),
       messages: baseMessages,
     };
-    await publishCurrent(true, replacement);
+    await publishCurrent(replacement);
   };
 
   const replaceContextFromSession = async (ctx: ExtensionContext, replacement?: "compaction") => {
@@ -163,7 +162,6 @@ export default function contextMirror(pi: ExtensionAPI) {
     baseMessages = [...baseMessages, ...convertToLlm([event.message])];
     context = { ...context, messages: baseMessages };
     await publishCurrent(
-      true,
       undefined,
       event.message.role === "assistant" ? messageFinalizationKey(event.message) : undefined,
     );

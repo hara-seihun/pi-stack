@@ -8,7 +8,8 @@ import { ORCHESTRATOR_CATALOG, OrchestratorClient, catalogAgentType, type PlanUs
 import { planCards } from "./catalog-presentation";
 import { readMachineUsage } from "./machine-usage";
 import { displayContextDocument, type ContextImage } from "./context-display";
-import { applyContextSplice, contextSplice, DocumentHistory, messageFinalizationKey, sha256, type ContextSplice } from "./sync";
+import { contextSplice, DocumentHistory, messageFinalizationKey, sha256, type ContextSplice } from "./sync";
+import { appendContextPatch, readContext } from "./context-journal";
 import { beginSupervisorGeneration, ensureSupervisorSchema } from "./database";
 import { startLedgerSnapshots } from "./ledger-snapshot";
 import { DEFAULT_LIVE_MODEL, DEFAULT_LIVE_VOICE, VoiceBroker } from "./voice/broker";
@@ -510,24 +511,7 @@ function storedContext(sessionId: string): { capturedAt: number; document: strin
     cacheStoredContext(sessionId, stored);
     return stored;
   }
-  const base = db.query("SELECT captured_at,context FROM session_contexts WHERE session_id=?").get(sessionId) as any;
-  if (!base) {
-    cacheStoredContext(sessionId, null);
-    return null;
-  }
-  let document = String(base.context);
-  let capturedAt = Number(base.captured_at);
-  for (const row of db.query("SELECT * FROM session_context_patches WHERE session_id=? ORDER BY seq").all(sessionId) as any[]) {
-    document = applyContextSplice(document, {
-      baseHash: String(row.base_hash),
-      targetHash: String(row.target_hash),
-      prefixBytes: Number(row.prefix_bytes),
-      deleteBytes: Number(row.delete_bytes),
-      insertBase64: String(row.insert_base64),
-    });
-    capturedAt = Number(row.captured_at);
-  }
-  const stored = { capturedAt, document, hash: sha256(document) };
+  const stored = readContext(db, sessionId);
   cacheStoredContext(sessionId, stored);
   return stored;
 }
@@ -2495,16 +2479,13 @@ const server = Bun.serve({
         if (!Number.isSafeInteger(capturedAt) || capturedAt <= 0 || !splice) return error("Valid context patch required");
         const current = storedContext(id);
         if (!current) return error("Context base is missing", 409);
-        if (capturedAt <= current.capturedAt) {
+        if (capturedAt <= current.capturedAt || current.hash === splice.targetHash) {
           if (current.hash === splice.targetHash) acknowledgeMessageContext(id, body.finalizesMessage);
           return json({ ok: true, capturedAt: current.capturedAt, hash: current.hash });
         }
-        const document = applyContextSplice(current.document, splice);
-        db.query(`
-          INSERT INTO session_context_patches(session_id,captured_at,base_hash,target_hash,prefix_bytes,delete_bytes,insert_base64)
-          VALUES(?,?,?,?,?,?,?)
-        `).run(id, capturedAt, splice.baseHash, splice.targetHash, splice.prefixBytes, splice.deleteBytes, splice.insertBase64);
-        cacheStoredContext(id, { capturedAt, document, hash: splice.targetHash });
+        const appended = appendContextPatch(db, id, current, capturedAt, splice);
+        if (!appended.ok) return error(appended.error, 409);
+        cacheStoredContext(id, appended.value);
         acknowledgeMessageContext(id, body.finalizesMessage);
         signalSync();
         return json({ ok: true, capturedAt, hash: splice.targetHash });

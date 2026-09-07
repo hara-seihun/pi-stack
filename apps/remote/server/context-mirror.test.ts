@@ -12,15 +12,22 @@ const captures: Array<{
   finalizesMessage?: string;
 }> = [];
 let document = "";
+const requests: Array<{ method: string; bytes: number }> = [];
 let failNextCapture = false;
 let captureStarted: (() => void) | undefined;
 let blockedCapture: Promise<void> | undefined;
 const server = Bun.serve({
   port: 0,
   async fetch(request) {
-    const body = await request.json() as any;
-    if (request.method === "PATCH") document = applyContextSplice(document, body.splice);
-    else document = JSON.stringify(body.context);
+    const encoded = await request.text();
+    requests.push({ method: request.method, bytes: Buffer.byteLength(encoded) });
+    const body = JSON.parse(encoded);
+    if (request.method === "PATCH") {
+      if (sha256(document) !== body.splice.targetHash) {
+        if (sha256(document) !== body.splice.baseHash) return new Response("Context base changed", { status: 409 });
+        document = applyContextSplice(document, body.splice);
+      }
+    } else document = JSON.stringify(body.context);
     captures.push({
       capturedAt: body.capturedAt,
       context: JSON.parse(document),
@@ -138,6 +145,33 @@ describe("context mirror", () => {
     expect(messages.map((message) => message.role)).toEqual(["user", "assistant"]);
     expect(messages.at(-1)?.content[0].text).toBe("Finished");
     expect(captures.at(-1)?.finalizesMessage).toBe(messageFinalizationKey(assistant("Finished", "stop")));
+  });
+
+  test("sends small boundary patches, skips unchanged captures, and replaces a lost base", async () => {
+    captures.length = 0;
+    requests.length = 0;
+    document = "";
+    const handlers = new Map<string, Handler>();
+    contextMirror({
+      on(type: string, handler: Handler) { handlers.set(type, handler); },
+      getActiveTools() { return []; },
+      getAllTools() { return []; },
+    } as unknown as ExtensionAPI);
+    const context = { mode: "rpc", getSystemPrompt: () => "System" };
+    const event = { messages: [{ role: "user", content: [{ type: "image", mimeType: "image/png", data: "A".repeat(2 * 1024 * 1024) }], timestamp: 1 }] };
+    await handlers.get("context")?.(event, context);
+    expect(requests[0].method).toBe("PUT");
+    await handlers.get("context")?.(event, context);
+    expect(requests).toHaveLength(1);
+    await handlers.get("message_end")?.({ message: assistant("An incremental answer", "stop") }, context);
+    expect(requests[1].method).toBe("PATCH");
+    expect(requests[1].bytes).toBeLessThan(1024);
+    expect(captures.at(-1)?.finalizesMessage).toBe(messageFinalizationKey(assistant("An incremental answer", "stop")));
+
+    document = "";
+    await handlers.get("message_end")?.({ message: assistant("After the server lost its base", "stop") }, context);
+    expect(requests.slice(-2).map((request) => request.method)).toEqual(["PATCH", "PUT"]);
+    expect(JSON.parse(document).messages.at(-1).content[0].text).toBe("After the server lost its base");
   });
 
   test("retries an unacknowledged final capture instead of losing it", async () => {
