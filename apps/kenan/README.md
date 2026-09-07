@@ -8,7 +8,7 @@ The native layer keeps the WebView below Android's system bars, translates touch
 
 ## Build configuration
 
-Ignored [`android/local.properties`](android/local.properties) names the endpoint declaration, a JSON list of every host the app may switch among. The build requires Android SDK 36 and Java 21.
+Ignored [`android/local.properties`](android/local.properties) names the endpoint declaration, a JSON list of every host the app may switch among. The build requires Android SDK 36, Java 21, and Bun for the connection tests.
 
 ```properties
 piRemoteEndpointsFile=/owner-only/path/to/endpoints.json
@@ -42,6 +42,15 @@ npm run android:test --workspace=kenan
 ```sh
 apps/kenan/deploy
 ```
+
+[`connect-adb`](connect-adb) uses an authorized attached phone, its last successful endpoint, or wireless-debugging mDNS. It accepts LAN endpoints as well as other reachable addresses. It no longer scans 35,000 tailnet ports when debugging is unavailable. If discovery cannot reach the phone, enable Wireless debugging and supply the endpoint explicitly before deploying:
+
+```sh
+apps/kenan/connect-adb HOST:PORT
+apps/kenan/deploy
+```
+
+The selected endpoint lives in `${XDG_CACHE_HOME:-$HOME/.cache}/pi-remote/android-adb-endpoint`. ADB starts from that directory so its persistent daemon cannot keep a task checkout referenced. Automatic discovery selects `PI_REMOTE_ANDROID_MODEL`, defaulting to ADB's `Pixel_7` model name. An explicit endpoint takes precedence. Unpaired devices require Android's pairing flow, and discovery across networks requires an explicit reachable endpoint.
 
 The drawer footer shows the Git revision compiled into the shared client, so an installed app can be distinguished from a newer server release even when the Android package version is unchanged.
 

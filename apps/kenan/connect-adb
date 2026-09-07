@@ -1,80 +1,53 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-peer_name=${PI_REMOTE_ANDROID_TAILSCALE_NAME:-pixel-7-1}
+usage() {
+  echo 'usage: connect-adb [HOST:PORT]'
+  echo 'Find the authorized phone through ADB, a saved endpoint, or wireless-debugging mDNS.'
+}
+case ${1:-} in --help|-h) usage; exit 0 ;; esac
+(($# <= 1)) || { usage >&2; exit 64; }
+explicit=${1:-}
+[[ -z $explicit || ( $explicit == *:* && $explicit != -* ) ]] || { usage >&2; exit 64; }
+model=${PI_REMOTE_ANDROID_MODEL:-Pixel_7}
 state_dir=${XDG_CACHE_HOME:-$HOME/.cache}/pi-remote
-endpoint_file=$state_dir/android-adb-endpoint
 mkdir -p "$state_dir"
 chmod 700 "$state_dir"
-
-connected_endpoint() {
-  adb devices -l | awk '$2 == "device" && $0 ~ /model:Pixel_7/ { print $1; exit }'
-}
+cd "$state_dir"
+endpoint_file=android-adb-endpoint
 
 verify_endpoint() {
   local endpoint=$1
-  timeout 5 adb connect "$endpoint" >/dev/null 2>&1 || true
-  [[ $(timeout 5 adb -s "$endpoint" get-state 2>/dev/null || true) == device ]]
+  if [[ $endpoint == *:* ]]; then timeout 3 adb connect "$endpoint" >/dev/null 2>&1 || true; fi
+  [[ $(timeout 1 adb -s "$endpoint" get-state 2>/dev/null || true) == device ]]
+}
+remember_endpoint() {
+  printf '%s\n' "$1" > "$endpoint_file"
+  chmod 600 "$endpoint_file"
+  printf '%s\n' "$1"
 }
 
-endpoint=$(connected_endpoint)
-if [[ -n $endpoint ]] && verify_endpoint "$endpoint"; then
-  printf '%s\n' "$endpoint" > "$endpoint_file"
-  chmod 600 "$endpoint_file"
-  printf '%s\n' "$endpoint"
-  exit 0
+if [[ -n $explicit ]]; then
+  if verify_endpoint "$explicit"; then remember_endpoint "$explicit"; exit 0; fi
+  echo "ADB could not authorize $explicit. Enable Wireless debugging and pair this host if Android requests it." >&2
+  exit 1
 fi
 
-phone_ip=$(tailscale status --json | jq -r --arg peer "$peer_name" '
-  [.Peer[] | select(.Online == true)
-    | select((.DNSName | split(".")[0]) == $peer or .HostName == $peer)
-    | .TailscaleIPs[0]][0] // empty')
-[[ -n $phone_ip ]] || { echo "online Tailscale peer $peer_name not found" >&2; exit 1; }
+endpoint=$(timeout 3 adb devices -l | awk -v model="model:$model" '$2 == "device" && index($0, model) { print $1; exit }')
+if [[ -n $endpoint ]] && verify_endpoint "$endpoint"; then remember_endpoint "$endpoint"; exit 0; fi
 
 if [[ -s $endpoint_file ]]; then
   endpoint=$(<"$endpoint_file")
-  if [[ $endpoint == "$phone_ip:"* ]] && verify_endpoint "$endpoint"; then
-    printf '%s\n' "$endpoint"
-    exit 0
-  fi
+  if verify_endpoint "$endpoint"; then remember_endpoint "$endpoint"; exit 0; fi
 fi
 
-mapfile -t open_ports < <(python3 - "$phone_ip" <<'PY'
-import asyncio
-import sys
-
-host = sys.argv[1]
-
-async def probe(port: int, semaphore: asyncio.Semaphore):
-    async with semaphore:
-        try:
-            _reader, writer = await asyncio.wait_for(asyncio.open_connection(host, port), 0.5)
-            writer.close()
-            await writer.wait_closed()
-            return port
-        except (TimeoutError, OSError, asyncio.TimeoutError):
-            return None
-
-async def main():
-    semaphore = asyncio.Semaphore(128)
-    results = await asyncio.gather(*(probe(port, semaphore) for port in range(30000, 65001)))
-    for port in results:
-        if port is not None:
-            print(port)
-
-asyncio.run(main())
-PY
-)
-
-for port in "${open_ports[@]}"; do
-  endpoint="$phone_ip:$port"
+mapfile -t candidates < <(timeout 5 adb mdns services | awk '$2 ~ /^_adb-tls-connect\._tcp\.?$/ && !seen[$3]++ { print $3; if (++n == 8) exit }')
+for endpoint in "${candidates[@]}"; do
   if verify_endpoint "$endpoint"; then
-    printf '%s\n' "$endpoint" > "$endpoint_file"
-    chmod 600 "$endpoint_file"
-    printf '%s\n' "$endpoint"
-    exit 0
+    connected=$(timeout 1 adb devices -l | awk -v endpoint="$endpoint" -v model="model:$model" '$1 == endpoint && $2 == "device" && index($0, model) { print $1; exit }')
+    if [[ -n $connected ]]; then remember_endpoint "$endpoint"; exit 0; fi
   fi
 done
 
-echo "Pixel 7 is online at $phone_ip, but no authorized wireless ADB endpoint was found" >&2
+echo "No authorized $model ADB endpoint is available. Enable Wireless debugging and pass its HOST:PORT to connect-adb; pair this host if needed. Off-LAN discovery requires an explicit reachable endpoint." >&2
 exit 1
