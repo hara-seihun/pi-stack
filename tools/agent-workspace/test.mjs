@@ -435,6 +435,39 @@ test("leaves a tracked directory alone when its name matches a cache path", () =
   }
 });
 
+test("preserves tracked cache names inside nested submodules while removing generated caches", () => {
+  const f = fixture();
+  try {
+    const created = JSON.parse(run([
+      "create", "--root", f.workspaces, "--name", "submodules", "--repo", f.remote,
+      "--mode", "writer", "--min-free-gib", "0", "--json",
+    ], f.env));
+    const child = path.join(created.path, "dependency");
+    const grandchild = path.join(child, "dependency");
+    git(created.path, "-c", "protocol.file.allow=always", "submodule", "add", f.remote, "dependency");
+    git(child, "-c", "protocol.file.allow=always", "submodule", "add", f.remote, "dependency");
+    for (const repository of [grandchild, child, created.path]) {
+      git(repository, "config", "user.name", "Test");
+      git(repository, "config", "user.email", "test@example.invalid");
+      mkdirSync(path.join(repository, "build"));
+      writeFileSync(path.join(repository, "build", "release.sh"), "echo source\n");
+      git(repository, "add", ".");
+      git(repository, "commit", "-m", "track build source and dependencies");
+      mkdirSync(path.join(repository, "__pycache__"));
+      writeFileSync(path.join(repository, "__pycache__", "generated.pyc"), "generated\n");
+    }
+    const result = JSON.parse(run(["release", "--id", created.id, "--json"], f.env));
+    assert.equal(result.inspection.classification, "repair-required");
+    for (const repository of [created.path, child, grandchild]) {
+      assert.equal(readFileSync(path.join(repository, "build", "release.sh"), "utf8"), "echo source\n");
+      assert.equal(existsSync(path.join(repository, "__pycache__")), false);
+      assert.equal(git(repository, "status", "--porcelain"), "");
+    }
+  } finally {
+    f.close();
+  }
+});
+
 test("releases a writer after its branch is pushed", () => {
   const f = fixture();
   try {
