@@ -11,6 +11,9 @@ import { Store } from "./store.js";
 import { CodexMeterSampler } from "./meters-codex.js";
 import { AnthropicMeterSampler } from "./meters-anthropic.js";
 import { ORCHESTRATOR_CATALOG } from "./catalog.js";
+import { anthropicProvider } from "@earendil-works/pi-ai/providers/anthropic";
+import { openaiCodexProvider } from "@earendil-works/pi-ai/providers/openai-codex";
+import { providerOAuth } from "./auth/shared-oauth.js";
 
 const HOST=process.env.PI_ORCHESTRATOR_HOST??"127.0.0.1";
 const PORT=Number(process.env.PI_ORCHESTRATOR_PORT??"2460");
@@ -34,8 +37,8 @@ export class Daemon {
   constructor(readonly store:Store,readonly config:OrchestratorConfig,releasePath?:string,ledgerPath?:string){
     this.releasePath=releasePath??dirname(dirname(realpathSync(fileURLToPath(import.meta.url))));
     this.ledgerPath=ledgerPath||process.env.PI_ORCHESTRATOR_LEDGER||join(homedir(),".local/share/pi-orchestrator/ledger.sqlite3");
-    this.codexMeters=new CodexMeterSampler(store,{authPaths:[config.authPath],meters:ORCHESTRATOR_CATALOG.meters.filter((meter)=>meter.provider==="openai-codex")});
-    this.anthropicMeters=new AnthropicMeterSampler(store,{agentDir:config.agentDir,sharedAuthPath:config.authPath});
+    this.codexMeters=new CodexMeterSampler(store,{auth:providerOAuth(openaiCodexProvider(),config.authPath),meters:ORCHESTRATOR_CATALOG.meters.filter((meter)=>meter.provider==="openai-codex")});
+    this.anthropicMeters=new AnthropicMeterSampler(store,{auth:providerOAuth(anthropicProvider(),config.authPath)});
   }
 
   async start():Promise<void>{
@@ -84,7 +87,17 @@ export class Daemon {
     if(this.reconciling||this.stopped)return;this.reconciling=true;
     try{
       await this.loadManifest();
-      await Promise.all([this.codexMeters.sample(),this.anthropicMeters.sample()]);
+      const samples=(await Promise.all([this.codexMeters.sample(),this.anthropicMeters.sample()])).flat();
+      for(const account of this.store.accounts()){
+        const observed=samples.filter((sample)=>sample.accountId===account.id&&sample.outcome!=="not-due");
+        if(!observed.length)continue;
+        const failures=observed.filter((sample)=>sample.outcome!=="recorded"&&sample.outcome!=="stale-reading");
+        const key=`meter-error:${account.id}`,error=failures.length?JSON.stringify(failures):"";
+        if(error!==(this.store.control(key)??"")){
+          this.store.setControl(key,error);
+          console.error(`meter ${account.id}: ${error||"recovered"}`);
+        }
+      }
       await this.refreshReadiness();
       for(const run of this.store.admissionQueue()){
         if(run.source==="lane"){this.store.trimQueuedLane(run.sourceId!,0);continue;}
@@ -287,5 +300,5 @@ export class Daemon {
     }catch(error){json(res,500,{error:String(error)});}
   }
 
-  private status():unknown{return{launches:this.store.control("launches")??"enabled",readinessError:this.store.control("readiness_error")||undefined,capacity:this.store.accounts().map((account)=>({accountId:account.id,...accountCapacity(this.store,account.id,"background",this.config)})),accounts:this.store.accounts(),lanes:this.store.lanes().map((lane)=>({...lane,active:this.store.admittedLaneCount(lane.id)})),runs:this.store.runs(["queued","starting","running"]),leases:this.store.activeLeases()};}
+  private status():unknown{return{launches:this.store.control("launches")??"enabled",readinessError:this.store.control("readiness_error")||undefined,meterErrors:this.store.accounts().flatMap((account)=>{const error=this.store.control(`meter-error:${account.id}`);return error?JSON.parse(error):[];}),capacity:this.store.accounts().map((account)=>({accountId:account.id,...accountCapacity(this.store,account.id,"background",this.config)})),accounts:this.store.accounts(),lanes:this.store.lanes().map((lane)=>({...lane,active:this.store.admittedLaneCount(lane.id)})),runs:this.store.runs(["queued","starting","running"]),leases:this.store.activeLeases()};}
 }

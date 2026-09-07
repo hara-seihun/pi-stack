@@ -214,6 +214,20 @@ export function dropLocalCredential(agentAuthPath: string, alias: string): boole
   return true;
 }
 
+export function providerOAuth(family: Provider, path: string): SharedOAuthAuth {
+  const oauth = family.auth.oauth;
+  if (!oauth) throw new Error(`${family.id} has no OAuth provider`);
+  return new SharedOAuthAuth({
+    path,
+    providerId: family.id,
+    refresh: (credential, signal) => oauth.refresh(credential, signal),
+    toAuth: (credential) => oauth.toAuth(credential),
+    identity: family.id === "openai-codex"
+      ? (credential) => typeof credential.accountId === "string" ? credential.accountId : undefined
+      : undefined,
+  });
+}
+
 export function sharedOAuthProvider(
   family: Provider,
   alias: string,

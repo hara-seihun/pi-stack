@@ -65,11 +65,48 @@ describe("quota-paced admission",()=>{
     expect(accountCapacity(store,"openai-codex","background",config,now)).toMatchObject({sessions:0,reason:"meter is stale"});store.close();
   });
 
+  it("multiplies calculated capacity after calibration and fills from one meter even ahead of calendar pace",async()=>{
+    const store=Store.open(":memory:"),now=Date.now(),reset=now+144*HOUR;
+    store.upsertAccount({id:"openai-codex",provider:"openai-codex",concurrency:4});
+    store.reconcileLanes([lane("math")]);
+    store.createLease("history","openai-codex","fleet",undefined,now-4*HOUR);
+    store.endLease("history",now);
+    store.recordMeter("openai-codex","codex-7d",8,reset,now-4*HOUR);
+    store.recordMeter("openai-codex","codex-7d",9,reset,now);
+    const cfg={...config,backgroundSpendFraction:1,maxConcurrentSessions:90};
+    expect(accountCapacity(store,"openai-codex","background",cfg,now).sessions).toBe(1);
+    store.setControl("boost:openai-codex","10");
+    expect(accountCapacity(store,"openai-codex","background",cfg,now)).toMatchObject({sessions:10,reason:expect.stringContaining("1 base × 10 = 10")});
+    const daemon=new Daemon(store,cfg,"/release") as any;daemon.startUnit=()=>{};
+    await daemon.fillCapacity();expect(store.admittedLaneCount("math")).toBe(10);
+    store.recordMeter("openai-codex","codex-7d",25,reset,now+1000);
+    expect(accountCapacity(store,"openai-codex","background",cfg,now+1000).reason).not.toContain("exceeds paced allowance");
+    store.setControl("boost:openai-codex","1");
+    expect(accountCapacity(store,"openai-codex","background",cfg,now+1000).reason).toContain("exceeds paced allowance");
+    store.setControl("boost:openai-codex","10");
+    store.recordMeter("openai-codex","codex-7d",100,reset,now+2000);
+    expect(accountCapacity(store,"openai-codex","background",cfg,now+2000)).toMatchObject({sessions:0,reason:"provider quota exhausted"});
+    store.close();
+  });
+
+  it("scales the base account ceiling but still honors the machine ceiling",async()=>{
+    const store=Store.open(":memory:"),now=Date.now();account(store);
+    store.reconcileLanes([lane("math")]);
+    store.createLease("history","openai-codex","fleet",undefined,now-4*HOUR);store.endLease("history",now);
+    store.recordMeter("openai-codex","codex-7d",10,now+HOUR,now-4*HOUR);
+    store.recordMeter("openai-codex","codex-7d",10,now+HOUR,now);
+    store.setControl("boost:openai-codex","10");
+    expect(accountCapacity(store,"openai-codex","background",config,now).sessions).toBe(100);
+    const daemon=new Daemon(store,{...config,maxConcurrentSessions:12},"/release") as any;daemon.startUnit=()=>{};
+    await daemon.fillCapacity();expect(store.admittedLaneCount("math")).toBe(12);
+    store.close();
+  });
+
   it("lets admitted workers finish while denying new launches above pacing and machine ceilings",async()=>{
     const store=Store.open(":memory:"),now=Date.now();account(store);store.reconcileLanes([lane("math")]);
     const ids=[run(store),run(store)];store.recordMeter("openai-codex","codex-7d",65,now+144*HOUR,now);
     const daemon=new Daemon(store,{...config,maxConcurrentSessions:1},"/release") as any;
-    daemon.loadManifest=async()=>{};daemon.codexMeters.sample=async()=>{};daemon.anthropicMeters.sample=async()=>{};
+    daemon.loadManifest=async()=>{};daemon.codexMeters.sample=async()=>[];daemon.anthropicMeters.sample=async()=>[];
     daemon.unitIsActive=()=>true;daemon.startUnit=()=>{throw new Error("new launches must be refused");};
     daemon.stopUnit=()=>{throw new Error("existing workers must not stop");};
     await daemon.reconcile();

@@ -5,7 +5,7 @@ import { homedir } from "node:os";
 import { join } from "node:path";
 import { Store } from "../store.js";
 import { allowsAccountUse } from "../domain.js";
-import { defaultSharedAuthPath, SharedOAuthAuth, sharedOAuthProvider } from "../auth/shared-oauth.js";
+import { defaultSharedAuthPath, SharedOAuthAuth, providerOAuth, sharedOAuthProvider } from "../auth/shared-oauth.js";
 import { isRateLimitError, rateLimitCooldownMs } from "../provider-errors.js";
 import { interruptedTurnPrompt } from "../host/continuations.js";
 import customModelConfig from "../models.json" with { type: "json" };
@@ -24,7 +24,7 @@ export default function routing(pi:ExtensionAPI):void{
   const shared=new Map<string,SharedOAuthAuth>();
   for(const family of families.values()){
     const oauth=family.auth.oauth;if(!oauth)continue;
-    shared.set(family.id,new SharedOAuthAuth({path:defaultSharedAuthPath(ledgerPath),providerId:family.id,refresh:(credential,signal)=>oauth.refresh(credential,signal),toAuth:(credential)=>oauth.toAuth(credential),identity:family.id==="openai-codex"?(credential)=>typeof (credential as any).accountId==="string"?(credential as any).accountId:undefined:undefined}));
+    shared.set(family.id,providerOAuth(family,defaultSharedAuthPath(ledgerPath)));
   }
   for(const account of store.accounts()){
     const family=families.get(account.provider),auth=shared.get(account.provider);if(!family||!auth||!allowsAccountUse(account,"interactive"))continue;

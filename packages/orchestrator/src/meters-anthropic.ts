@@ -1,5 +1,5 @@
-import { readFileSync } from "node:fs";
-import { join } from "node:path";
+import type { SharedOAuthAuth } from "./auth/shared-oauth.js";
+import { meterCredential } from "./auth/meter-credential.js";
 import type { Store } from "./store.js";
 
 /**
@@ -28,11 +28,9 @@ import type { Store } from "./store.js";
  * so calibration, broker admission, and Pi Remote's plan cards read one
  * complete set of facts.
  *
- * The same two constraints from docs/provider-meter-notes.md apply here as
- * for Codex: only percentages are recorded, and a sampler must
- * never refresh OAuth — refresh tokens are single-use and an independent
- * refresh revokes the token family out from under every pi session using
- * that account. An expired access token is recorded as a gap by not sampling.
+ * Credentials resolve through SharedOAuthAuth, using the same lock and
+ * atomic write as interactive and fleet sessions. Idle accounts can refresh
+ * without racing another consumer's single-use refresh token.
  */
 
 export const ANTHROPIC_PROVIDER = "anthropic";
@@ -80,7 +78,7 @@ export type AnthropicSampleOutcome =
   | "recorded"
   | "not-due"
   | "no-credential"
-  | "expired-credential"
+  | "credential-failed"
   | "request-failed"
   | "unreadable-response"
   | "unmapped-scope"
@@ -196,10 +194,7 @@ export async function fetchAnthropicUsage(
 }
 
 export interface AnthropicMeterSamplerOptions {
-  /** pi agent directory whose auth.json holds this domain's exclusive credentials. */
-  readonly agentDir: string;
-  /** Central auth.json for accounts shared across runtime users. */
-  readonly sharedAuthPath?: string;
+  readonly auth: SharedOAuthAuth;
   /** Minimum age of the stalest meter before an account is polled again. */
   readonly intervalMs?: number;
   readonly requestTimeoutMs?: number;
@@ -210,7 +205,8 @@ const DEFAULT_INTERVAL_MS = 10 * 60_000;
 const DEFAULT_REQUEST_TIMEOUT_MS = 10_000;
 
 export class AnthropicMeterSampler {
-  private readonly authPaths: readonly string[];
+  private readonly auth: SharedOAuthAuth;
+  private readonly attemptedAt = new Map<string, number>();
   private readonly intervalMs: number;
   private readonly requestTimeoutMs: number;
   private readonly fetchFn: FetchLike;
@@ -219,31 +215,10 @@ export class AnthropicMeterSampler {
     private readonly ledger: Store,
     options: AnthropicMeterSamplerOptions,
   ) {
-    this.authPaths = [options.sharedAuthPath, join(options.agentDir, "auth.json")].filter((path): path is string => path !== undefined);
+    this.auth = options.auth;
     this.intervalMs = options.intervalMs ?? DEFAULT_INTERVAL_MS;
     this.requestTimeoutMs = options.requestTimeoutMs ?? DEFAULT_REQUEST_TIMEOUT_MS;
     this.fetchFn = options.fetch ?? fetch;
-  }
-
-  /** Access token for `accountId`, read without ever refreshing it. */
-  private accessToken(accountId: string, now: number): { token: string } | { gap: AnthropicSampleOutcome } {
-    let expired = false;
-    for (const path of this.authPaths) {
-      let auth: Record<string, unknown>;
-      try {
-        auth = JSON.parse(readFileSync(path, "utf8")) as Record<string, unknown>;
-      } catch {
-        continue;
-      }
-      const credential = record(auth[accountId]) as { access?: unknown; expires?: unknown } | undefined;
-      if (credential === undefined || typeof credential.access !== "string" || credential.access.length === 0) continue;
-      if (typeof credential.expires === "number" && credential.expires <= now) {
-        expired = true;
-        continue;
-      }
-      return { token: credential.access };
-    }
-    return { gap: expired ? "expired-credential" : "no-credential" };
   }
 
   /**
@@ -255,6 +230,8 @@ export class AnthropicMeterSampler {
    * busy account permanently "not due" and never close the hole.
    */
   private due(accountId: string, now: number): boolean {
+    const attempted = this.attemptedAt.get(accountId);
+    if (attempted !== undefined && now - attempted < this.intervalMs) return false;
     return Object.values(ANTHROPIC_METER_IDS).some((meterId) => {
       const last = this.ledger.latestReading(accountId, meterId);
       return last === undefined || now - last.at >= this.intervalMs;
@@ -262,7 +239,7 @@ export class AnthropicMeterSampler {
   }
 
   /**
-   * Samples every Anthropic account whose credential lives in either supplied
+   * Samples every Anthropic account whose credential lives in the shared
    * auth store and whose meters are due. Accounts credentialed in another
    * custody domain are skipped, not failed: their own owner polls them. Never
    * throws — a provider outage is a gap in evidence, not a controller fault.
@@ -275,14 +252,15 @@ export class AnthropicMeterSampler {
         reports.push({ accountId: account.id, outcome: "not-due" });
         continue;
       }
-      const credential = this.accessToken(account.id, now);
-      if ("gap" in credential) {
-        reports.push({ accountId: account.id, outcome: credential.gap });
+      this.attemptedAt.set(account.id, now);
+      const credential = await meterCredential(this.auth, account.id, this.requestTimeoutMs);
+      if (!credential.ok) {
+        reports.push({ accountId: account.id, outcome: credential.outcome, detail: credential.detail });
         continue;
       }
       let usage: AnthropicUsageReading;
       try {
-        usage = await fetchAnthropicUsage(credential.token, this.fetchFn, this.requestTimeoutMs);
+        usage = await fetchAnthropicUsage(credential.credential.access, this.fetchFn, this.requestTimeoutMs);
       } catch (error) {
         reports.push({ accountId: account.id, outcome: "request-failed", detail: String(error) });
         continue;

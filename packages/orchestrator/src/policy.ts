@@ -28,7 +28,7 @@ export function accountCapacity(store:Store,accountId:string,budget:BudgetClass,
     return{sessions:!probed||activeProbe?1:0,spent,reason:"calibration probe awaiting meter evidence"};
   }
   if(meters.some((m)=>now-m.observed_at>cfg.meterMaxAgeMs||m.observed_at>now+60_000))return stop("meter is stale");
-  const limit=Math.min(100,cfg.backgroundSpendFraction*100*multiplier);
+  const limit=Math.min(100,cfg.backgroundSpendFraction*100);
   if(meters.some((m)=>m.used_percent>=limit))return stop(`background reserve reached (${limit}%)`);
   let sessions=account.concurrency;
   let reason="within paced allowance";
@@ -44,9 +44,9 @@ export function accountCapacity(store:Store,accountId:string,budget:BudgetClass,
     if(latest.reset_at<=now)return stop(`awaiting reset observation for ${latest.meter_id}`);
     const remainingHours=(latest.reset_at-now)/HOUR;
     const elapsedHours=Math.max(0,declared.windowHours-remainingHours);
-    const allowance=Math.min(limit,cfg.backgroundSpendFraction*100*multiplier*elapsedHours/declared.windowHours);
-    // Whole-percent provider meters have one percentage point of resolution.
-    if(latest.used_percent>allowance+1)return stop(`${latest.meter_id}: spent ${latest.used_percent}% exceeds paced allowance ${allowance.toFixed(1)}%`);
+    const allowance=limit*elapsedHours/declared.windowHours;
+    // Boost deliberately spends ahead of the calendar; provider exhaustion still stops admission.
+    if(multiplier<=1&&latest.used_percent>allowance+1)return stop(`${latest.meter_id}: spent ${latest.used_percent}% exceeds paced allowance ${allowance.toFixed(1)}%`);
     const previous=history.filter((m)=>m.meter_id===latest.meter_id&&m.observed_at<latest.observed_at&&m.observed_at>=now-HISTORY&&Math.abs((m.reset_at??0)-latest.reset_at)<60_000&&m.used_percent<=latest.used_percent).at(-1);
     if(!previous||latest.observed_at-previous.observed_at<15*60_000){
       sessions=Math.min(sessions,1);reason="calibrating consumption over at least 15 minutes";continue;
@@ -61,7 +61,8 @@ export function accountCapacity(store:Store,accountId:string,budget:BudgetClass,
     const ceiling=Math.max(0,Math.floor(permitted/cost));
     if(ceiling<sessions){sessions=ceiling;reason=`${latest.meter_id}: ${permitted.toFixed(2)}%/h available, ${cost.toFixed(2)}% per session-hour`;}
   }
-  return{sessions,spent,meterAt,reason};
+  const boosted=Math.floor(sessions*multiplier);
+  return{sessions:boosted,spent,meterAt,reason:multiplier===1?reason:`${sessions} base × ${multiplier} = ${boosted} sessions; ${reason}`};
 }
 
 export function assign(store:Store,profile:string,budget:BudgetClass,cfg:OrchestratorConfig,now=Date.now(),pinnedAccount?:string):{assignment?:Assignment;refusals:Refusal[]}{
@@ -75,7 +76,7 @@ export function assign(store:Store,profile:string,budget:BudgetClass,cfg:Orchest
       const active=store.activeLeases(account.id,120_000,now).length;
       if(active>=capacity.sessions){refusals.push({accountId:account.id,reason:`capacity ${active}/${capacity.sessions}: ${capacity.reason}`});continue;}
       const admitted=(store.db.prepare("SELECT last_admitted_meter_at FROM account WHERE id=?").get(account.id) as any)?.last_admitted_meter_at;
-      if(budget!=="force"&&admitted!=null&&capacity.meterAt!==undefined&&Number(admitted)>=capacity.meterAt){refusals.push({accountId:account.id,reason:"already admitted from this meter observation"});continue;}
+      if(budget!=="force"&&Number(store.control(`boost:${account.provider}`)??"1")<=1&&admitted!=null&&capacity.meterAt!==undefined&&Number(admitted)>=capacity.meterAt){refusals.push({accountId:account.id,reason:"already admitted from this meter observation"});continue;}
       choices.push({accountId:account.id,...candidate,meterAt:capacity.meterAt,spent:capacity.spent});
     }
     if(choices.length)break;

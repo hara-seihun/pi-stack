@@ -12,15 +12,15 @@ Workers write progress through the daemon's loopback API. Their full context rem
 
 ## Quota policy
 
-Ordinary work must stay within the elapsed share of each provider window's allowance, including the configured reserve. A whole-percentage-point tolerance accounts for provider rounding. Every binding meter must be fresh. A flat pair of readings cannot erase earlier overspending.
+At 1×, ordinary work stays within the elapsed share of each provider window's allowance, including the configured reserve. A whole-percentage-point tolerance accounts for provider rounding. Every binding meter must be fresh. A flat pair of readings cannot erase earlier overspending.
 
-The account concurrency ceiling also uses up to six hours of same-window consumption divided by recorded session-hours, with one percentage point added for meter uncertainty. Meter history is retained for 24 hours rather than a fixed sample count. At least 15 minutes of evidence is required to move beyond one calibration session. Fleet, interactive, and voice leases share the account and machine ceilings. New work consumes at most one admission per meter observation.
+The account concurrency ceiling also uses up to six hours of same-window consumption divided by recorded session-hours, with one percentage point added for meter uncertainty. Meter history is retained for 24 hours rather than a fixed sample count. At least 15 minutes of evidence is required to move beyond one calibration session. Fleet, interactive, and voice leases share the account and machine ceilings. At 1×, new work consumes at most one admission per meter observation.
 
 These ceilings govern admission only. Already admitted workers finish even when pacing, reserves, account reservations, provider boosts, or machine limits would refuse new work. Their leases remain charged, so replacements cannot bypass those limits. Worker recovery retains the same run, account, release, model, thinking level, and Pi JSONL without a new quota admission. Explicit operator aborts and stall handling still apply.
 
 `status` exposes calculated account ceilings and reasons, plus each lane's active count. Pi Remote includes every starting or running session in its running total.
 
-`run --force` and `wave --force` are operator-authorized urgent work. They bypass ordinary pacing but not exhausted provider quota or a provider halt. Provider boost controls multiply ordinary pacing. A multiplier of zero halts that provider.
+`run --force` and `wave --force` are operator-authorized urgent work. They bypass ordinary pacing but not exhausted provider quota or a provider halt. Provider boosts multiply the calculated session ceiling directly, after the base account ceiling and consumption estimate. A base capacity of 2 becomes 20 at 10×, not 4 because of an unscaled account cap. Boosts above 1 bypass calendar pacing and the one-admission-per-observation gate, so the scheduler fills the boosted capacity immediately. They do not raise the quota allowance. Fresh meters, provider exhaustion, cooldowns, reservations, the background reserve and the machine ceiling still apply. A multiplier of zero halts new launches for that provider. Ten times the sustainable rate aims to spend a week's allowance in about 16.8 hours; rounding, changing measured consumption and other binding windows affect the actual duration.
 
 The routing extension uses the same account registry for interactive Pi sessions. It keeps a session on one account unless that account fails. On session shutdown it closes provider resources through the same external `pi-ai` module that supplied its providers. Pi's bundled CLI has a separate resource registry; relying on its cleanup alone leaves a completed Codex WebSocket alive until the five-minute idle timeout, keeping one-shot processes and their callers waiting. A response that reaches the provider's output-token limit is continued inside the same Pi run: the provider ended it with `stopReason=length`, so the agent did not choose to stop and the session must not settle there. This is separate from the removed fleet check-ins, which used to restart turns that agents had ended normally. The usage extension aggregates attribution hourly, one row per input, output, cache read, and cache write, and records provider meter headers. Keeping the components apart is what lets `plans()` report the share of prompt tokens a model read from cache over the last 24 hours.
 
@@ -87,6 +87,10 @@ The daemon stores the contract atomically with the run in its `run-context:<id>`
 This is context isolation for trusted agents, not an OS security boundary. Bash still executes arbitrary code as the fleet user and can address files or services outside the workspace. The submitting application owns workspace creation, allowed reference files, result validation, accepted artifact storage, and cleanup after completion or failure. The orchestrator never deletes a caller-supplied `cwd`.
 
 EverythingLIVE uses this API for its commercial author/review jobs. Each turn gets a fresh folder containing scene definitions, authoring helpers, brand references, and the preceding turn's draft. Its service exposes generation, inspection, and preview operations through the workspace CLI, accepts validated JSON and its media/components, and reclaims workspaces during normal operation and restart recovery.
+
+## Meter authentication
+
+Both provider samplers resolve and refresh credentials through the same `SharedOAuthAuth` lock as interactive and fleet sessions. An idle account does not need a model request to restore its meters. Failed refreshes preserve the credential and appear in `status.meterErrors` and the daemon journal; sampling recovery clears the error. Attempts remain spaced by the normal sampling interval. See [provider meter notes](docs/provider-meter-notes.md) for the refresh incident and provider-specific collection rules.
 
 ## Usage evidence
 

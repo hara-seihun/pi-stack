@@ -1,7 +1,7 @@
-import { readFileSync } from "node:fs";
 import { request as httpsRequest } from "node:https";
 import type { Store } from "./store.js";
-import { oauthCredential } from "./auth/shared-oauth.js";
+import type { SharedOAuthAuth } from "./auth/shared-oauth.js";
+import { meterCredential } from "./auth/meter-credential.js";
 
 /**
  * Codex meter sampling.
@@ -24,12 +24,9 @@ import { oauthCredential } from "./auth/shared-oauth.js";
  * reported rather than guessed at, because a mis-named meter would calibrate
  * one plan's drain against another's allowance.
  *
- * Two constraints from docs/provider-meter-notes.md are load-bearing here:
- * history cannot be backfilled, so readings
- * are captured continuously rather than on demand; and a sampler must never
- * refresh OAuth — refresh tokens are single-use, and an independent refresh
- * would revoke the token family out from under every pi session on the
- * machine. An expired access token is a gap, recorded by not sampling.
+ * History cannot be backfilled, so readings are captured continuously.
+ * Credentials resolve through the shared OAuth lock, including refresh for
+ * idle accounts, just as they do for interactive and fleet sessions.
  */
 
 export const CODEX_PROVIDER = "openai-codex";
@@ -94,7 +91,7 @@ export type CodexSampleOutcome =
   | "recorded"
   | "not-due"
   | "no-credential"
-  | "expired-credential"
+  | "credential-failed"
   | "request-failed"
   | "unreadable-response"
   | "unmapped-window"
@@ -173,12 +170,7 @@ export async function fetchCodexUsage(
 }
 
 export interface CodexMeterSamplerOptions {
-  /**
-   * Credential stores to look in, in order: the shared OAuth store beside
-   * the ledger first, then the daemon user's own `auth.json` for accounts
-   * whose custody was never moved.
-   */
-  readonly authPaths: readonly string[];
+  readonly auth: SharedOAuthAuth;
   /** Meters this deployment declares for Codex, from operator config. */
   readonly meters: readonly CodexMeterSpec[];
   /** Minimum spacing between readings for one account. */
@@ -193,7 +185,8 @@ const DEFAULT_REQUEST_TIMEOUT_MS = 10_000;
 const WINDOW_TOLERANCE = 0.1;
 
 export class CodexMeterSampler {
-  private readonly authPaths: readonly string[];
+  private readonly auth: SharedOAuthAuth;
+  private readonly attemptedAt = new Map<string, number>();
   private readonly meters: readonly CodexMeterSpec[];
   private readonly intervalMs: number;
   private readonly requestTimeoutMs: number;
@@ -203,7 +196,7 @@ export class CodexMeterSampler {
     private readonly ledger: Store,
     options: CodexMeterSamplerOptions,
   ) {
-    this.authPaths = options.authPaths;
+    this.auth = options.auth;
     this.meters = options.meters;
     this.intervalMs = options.intervalMs ?? DEFAULT_INTERVAL_MS;
     this.requestTimeoutMs = options.requestTimeoutMs ?? DEFAULT_REQUEST_TIMEOUT_MS;
@@ -217,31 +210,6 @@ export class CodexMeterSampler {
       if (Math.abs(windowSeconds - declared) <= declared * WINDOW_TOLERANCE) return meter.id;
     }
     return undefined;
-  }
-
-  /** Credential for `accountId`, read without ever refreshing it. */
-  private credential(
-    accountId: string,
-    now: number,
-  ): { token: string; chatgptAccountId: string } | { gap: CodexSampleOutcome } {
-    let expired = false;
-    for (const path of this.authPaths) {
-      let auth: Record<string, unknown>;
-      try {
-        auth = JSON.parse(readFileSync(path, "utf8")) as Record<string, unknown>;
-      } catch {
-        continue;
-      }
-      const credential = oauthCredential(auth[accountId]);
-      const chatgptAccountId = (credential as { accountId?: unknown } | undefined)?.accountId;
-      if (credential === undefined || typeof chatgptAccountId !== "string" || chatgptAccountId.length === 0) continue;
-      if (credential.expires <= now) {
-        expired = true;
-        continue;
-      }
-      return { token: credential.access, chatgptAccountId };
-    }
-    return { gap: expired ? "expired-credential" : "no-credential" };
   }
 
   /**
@@ -261,20 +229,27 @@ export class CodexMeterSampler {
         .map((meter) => this.ledger.latestReading(account.id, meter.id)?.at)
         .filter((at): at is number => at !== undefined)
         .reduce<number | undefined>((newest, at) => (newest === undefined || at > newest ? at : newest), undefined);
-      if (last !== undefined && now - last < this.intervalMs) {
+      const attempted = this.attemptedAt.get(account.id);
+      if ((attempted !== undefined && now - attempted < this.intervalMs) || (last !== undefined && now - last < this.intervalMs)) {
         reports.push({ accountId: account.id, outcome: "not-due" });
         continue;
       }
-      const credential = this.credential(account.id, now);
-      if ("gap" in credential) {
-        reports.push({ accountId: account.id, outcome: credential.gap });
+      this.attemptedAt.set(account.id, now);
+      const credential = await meterCredential(this.auth, account.id, this.requestTimeoutMs);
+      if (!credential.ok) {
+        reports.push({ accountId: account.id, outcome: credential.outcome, detail: credential.detail });
+        continue;
+      }
+      const chatgptAccountId = credential.credential.accountId;
+      if (typeof chatgptAccountId !== "string" || !chatgptAccountId) {
+        reports.push({ accountId: account.id, outcome: "credential-failed", detail: "missing ChatGPT account id" });
         continue;
       }
       let windows: CodexWindowUsage[];
       try {
         windows = await fetchCodexUsage(
-          credential.token,
-          credential.chatgptAccountId,
+          credential.credential.access,
+          chatgptAccountId,
           this.fetchFn,
           this.requestTimeoutMs,
           now,

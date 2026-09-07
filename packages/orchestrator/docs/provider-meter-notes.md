@@ -16,20 +16,20 @@ readings should be collected and interpreted here.
   unrecoverable evidence of what that window bought, which is why readings
   should be captured continuously (response headers on every request, or a
   sampler) rather than on demand.
-- Never refresh OAuth tokens from a sampler. Refresh tokens are single-use;
-  an independent refresh revokes the token family out from under pi. Read
-  `auth.json` access tokens without refreshing and record an expired token as
-  a gap.
-- Because of that rule, only a pi session keeps a credential alive, so an
-  account nothing is running goes blind: an Anthropic access token lasts about
-  nine hours, and an account in a day-long cooldown outlives its token with
-  nothing able to renew it. Expect `expired-credential` on idle accounts, and
-  expect it to clear by itself when the account next runs. `account list`
-  prints each credential's expiry so this is visible without the journal, and
-  a gap is announced once when it opens rather than on every poll.
-- Repairing one by hand is a deliberate act, not a sampler behaviour: refresh
-  through `AuthStorage.modify` from pi's own package, which takes the same
-  lock a session takes, and only when no session is running that account.
+- Both samplers resolve credentials through `SharedOAuthAuth` in
+  `src/auth/shared-oauth.ts`, exactly as interactive and fleet sessions do.
+  The shared directory lock covers reading, refreshing and atomically writing
+  the credential. A competing consumer rereads the rotated credential after
+  taking that lock, rather than spending the same refresh token twice.
+- On 2026-09-07, refusing sampler refresh stranded two idle Anthropic accounts.
+  Expired tokens prevented fresh meters, and stale meters prevented the next
+  session that could refresh them. Sampling now refreshes idle credentials
+  automatically, without a model request or an account reset.
+- Refresh failures preserve the credential and appear in `status.meterErrors`
+  and the daemon journal. Successful sampling clears the error. Attempts are
+  spaced by the provider's sampling interval even when credentials or requests
+  fail, or an account does not report every declared bucket. Provider-rejected
+  refresh credentials require a new provider-issued OAuth login.
 
 ## Normalization
 

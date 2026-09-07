@@ -1,13 +1,10 @@
 /**
  * What the boost states mean, for every surface that offers them as a
  * control rather than a number: `pi-orchestrator boost` and the Pi Remote
- * drawer's per-family buttons both write this multiplier onto the family's
- * paced spend, and both read the ledger row back, so the CLI, the
- * controller, and both clients always agree on the state and the number.
- *
- * A multiplier above 1 is a deliberate overspend against a measured
- * sustainable rate, not a ceiling: meters, per-account capacity, and the
- * machine's concurrent-session limit still bound what it admits. `0` is the
+ * drawer's per-family buttons both multiply the family's calculated session
+ * ceiling. The base account cap is scaled too. Above 1, calendar pacing and
+ * single-admission-per-observation throttling do not apply; fresh meters,
+ * provider exhaustion, reservations and the machine limit still do. `0` is the
  * halt state — the broker refuses every new launch for the family while
  * running sessions finish naturally.
  */
