@@ -735,6 +735,25 @@ describe("web and supervisor integration", () => {
     expect(JSON.parse(displayed).messages).toEqual([{ role: "assistant", content: [{ type: "text", text: "first and second" }] }]);
   });
 
+  test("loads transcript images separately without changing canonical context", async () => {
+    const id = await createThread("home", "astra");
+    const data = Buffer.alloc(1024 * 1024, 42).toString("base64");
+    const context = { systemPrompt: "system", tools: [], messages: [{ role: "toolResult", content: [{ type: "image", mimeType: "image/png", data }] }] };
+    await api("PUT", `/v1/sessions/${id}/context`, { capturedAt: 450, context });
+    const sync = await api("POST", "/v1/sync", { waitMs: 0, session: { id } });
+    const document = sync.value.session.context.document;
+    expect(document.length).toBeLessThan(500);
+    const image = JSON.parse(document).messages[0].content[0];
+    expect(image.data).toBeUndefined();
+    const response = await fetch(base + image.src);
+    expect(response.status).toBe(200);
+    expect(response.headers.get("content-type")).toBe("image/png");
+    expect(Buffer.from(await response.arrayBuffer()).toString("base64")).toBe(data);
+    const cached = await fetch(base + image.src, { headers: { "if-none-match": response.headers.get("etag")! } });
+    expect(cached.status).toBe(304);
+    expect((await api("GET", `/v1/sessions/${id}/context`)).value.context).toEqual(context);
+  });
+
   test("delivers a newly selected context while live text keeps waking the poll", async () => {
     const streaming = await createThread("home", "astra");
     const idle = await createThread("home", "astra");
@@ -761,6 +780,29 @@ describe("web and supervisor integration", () => {
       releaseGate("live-stream-next");
       releaseGate("live-stream");
     }
+  });
+
+  test("an idle selection ignores another thread's token wakes", async () => {
+    const streaming = await createThread("home", "astra");
+    const idle = await createThread("home", "astra");
+    resetGate("live-stream-next");
+    resetGate("live-stream");
+    try {
+      await api("POST", `/v1/sessions/${streaming}/prompt`, { requestId: crypto.randomUUID(), text: "live-stream" });
+      await waitForGate("live-stream-next");
+      const first = (await api("POST", "/v1/sync", { waitMs: 0, session: { id: idle } })).value;
+      const started = Date.now();
+      const waiting = api("POST", "/v1/sync", {
+        epoch: first.epoch, seq: first.seq, waitMs: 150,
+        session: { id: idle, liveTextHash: first.session.liveText.hash, liveThinkingHash: first.session.liveThinking.hash },
+      });
+      releaseGate("live-stream-next");
+      await waitForGate("live-stream");
+      const result = await waiting;
+      expect(Date.now() - started).toBeGreaterThanOrEqual(130);
+      expect(result.value.session.liveText).toBeNull();
+      expect(result.value.session.liveThinking).toBeNull();
+    } finally { releaseGate("live-stream-next"); releaseGate("live-stream"); }
   });
 
   test("publishes live model text without rebuilding unchanged application state", async () => {

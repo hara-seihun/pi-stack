@@ -7,6 +7,40 @@ export function sha256(value: string | Uint8Array): string {
   return createHash("sha256").update(value).digest("hex");
 }
 
+export class DocumentHistory {
+  private entries = new Map<string, { namespace: string; document: string; bytes: number }>();
+  private bytes = 0;
+  constructor(private maximumBytes = 32 * 1024 * 1024, private maximumEntries = 128) {}
+
+  remember(namespace: string, document: string): string {
+    const hash = sha256(document);
+    const key = `${namespace}\0${hash}`;
+    if (!this.entries.has(key)) {
+      const bytes = Buffer.byteLength(document);
+      if (bytes > this.maximumBytes) return hash;
+      this.entries.set(key, { namespace, document, bytes });
+      this.bytes += bytes;
+      const versions = [...this.entries].filter(([, entry]) => entry.namespace === namespace);
+      for (const [expired] of versions.slice(0, Math.max(0, versions.length - 12))) this.remove(expired);
+      while (this.bytes > this.maximumBytes || this.entries.size > this.maximumEntries) this.remove(this.entries.keys().next().value!);
+    }
+    return hash;
+  }
+
+  get(namespace: string, hash: string): string | undefined {
+    return this.entries.get(`${namespace}\0${hash}`)?.document;
+  }
+
+  delete(namespace: string) {
+    for (const [key, entry] of this.entries) if (entry.namespace === namespace) this.remove(key);
+  }
+
+  private remove(key: string) {
+    this.bytes -= this.entries.get(key)!.bytes;
+    this.entries.delete(key);
+  }
+}
+
 export function messageFinalizationKey(message: any): string {
   return sha256(JSON.stringify({
     role: message?.role ?? null,

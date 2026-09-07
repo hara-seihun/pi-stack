@@ -7,8 +7,8 @@ import { AgentHost } from "./agent-hosts";
 import { ORCHESTRATOR_CATALOG, OrchestratorClient, catalogAgentType, type PlanUsageSnapshot } from "pi-orchestrator/api";
 import { planCards } from "./catalog-presentation";
 import { readMachineUsage } from "./machine-usage";
-import { displayContextDocument } from "./context-display";
-import { applyContextSplice, contextSplice, messageFinalizationKey, sha256, type ContextSplice } from "./sync";
+import { displayContextDocument, type ContextImage } from "./context-display";
+import { applyContextSplice, contextSplice, DocumentHistory, messageFinalizationKey, sha256, type ContextSplice } from "./sync";
 import { beginSupervisorGeneration, ensureSupervisorSchema } from "./database";
 import { DEFAULT_LIVE_MODEL, DEFAULT_LIVE_VOICE, VoiceBroker } from "./voice/broker";
 import { attachRuntimeHost, startRuntimeHost, type RuntimeTransport } from "./runtime-transport";
@@ -337,7 +337,6 @@ const syncWaiters = new Set<() => void>();
 function wakeSync() {
   syncSequence++;
   for (const wake of syncWaiters) wake();
-  syncWaiters.clear();
 }
 function signalSync() {
   inMemoryStateVersion++;
@@ -414,14 +413,22 @@ function signalLiveSync() {
   }, LIVE_SYNC_INTERVAL_MS);
 }
 
-async function awaitSync(request: SyncRequest) {
+async function awaitSync(request: SyncRequest, signal: AbortSignal) {
   const after = Math.max(0, Number(request.seq ?? 0) || 0);
-  const waitMs = Number(request.waitMs ?? 25_000);
-  const synchronized = () => after === syncSequence
-    && request.epoch === SUPERVISOR_EPOCH
-    && (request.stateVersion === undefined || request.stateVersion === currentStateVersion())
-    && (request.dashboardVersion === undefined || request.dashboardVersion === dashboardVersion);
-  if (!synchronized()) return;
+  const waitMs = Math.min(30_000, Math.max(0, Number(request.waitMs ?? 25_000) || 0));
+  const synchronized = () => {
+    if (request.epoch !== SUPERVISOR_EPOCH
+      || request.stateVersion !== undefined && request.stateVersion !== currentStateVersion()
+      || request.dashboardVersion !== undefined && request.dashboardVersion !== dashboardVersion) return false;
+    if (request.agent || request.session?.eventsAfter !== undefined || !request.session) return after === syncSequence;
+    const { id, contextHash, liveTextHash, liveThinkingHash } = request.session;
+    const stored = storedContext(id);
+    const runtime = runtimes.get(id);
+    return (stored ? displayContext(id, stored.hash, stored.document).hash === contextHash : !contextHash)
+      && sha256(runtime?.liveText ?? "") === liveTextHash
+      && sha256(runtime?.liveThinking ?? "") === liveThinkingHash;
+  };
+  if (!synchronized() || !waitMs || signal.aborted) return;
   await new Promise<void>((resolve) => {
     let settled = false;
     const finish = () => {
@@ -429,29 +436,23 @@ async function awaitSync(request: SyncRequest) {
       settled = true;
       clearTimeout(timer);
       clearInterval(versionCheck);
-      syncWaiters.delete(finish);
+      syncWaiters.delete(check);
+      signal.removeEventListener("abort", finish);
       resolve();
     };
-    const timer = setTimeout(finish, Math.min(30_000, Math.max(0, waitMs)));
-    const versionCheck = setInterval(() => { if (!synchronized()) finish(); }, 100);
-    syncWaiters.add(finish);
+    const check = () => { if (!synchronized()) finish(); };
+    const timer = setTimeout(finish, waitMs);
+    const versionCheck = setInterval(check, 100);
+    syncWaiters.add(check);
+    signal.addEventListener("abort", finish, { once: true });
   });
 }
 
-const contextVersions = new Map<string, Map<string, string>>();
+const contextVersions = new DocumentHistory();
 const storedContextCache = new Map<string, { capturedAt: number; document: string; hash: string } | null>();
-const displayContexts = new Map<string, { sourceHash: string; document: string; hash: string }>();
+const displayContexts = new Map<string, { sourceHash: string; document: string; hash: string; images: Map<string, ContextImage> }>();
 function rememberContext(sessionId: string, document: string): string {
-  const hash = sha256(document);
-  let versions = contextVersions.get(sessionId);
-  if (!versions) {
-    versions = new Map();
-    contextVersions.set(sessionId, versions);
-  }
-  versions.delete(hash);
-  versions.set(hash, document);
-  while (versions.size > 12) versions.delete(versions.keys().next().value!);
-  return hash;
+  return contextVersions.remember(sessionId, document);
 }
 
 function streamedThinkingByMessage(sessionId: string): Map<string, string> {
@@ -474,8 +475,13 @@ function displayContext(sessionId: string, sourceHash: string, sourceDocument: s
     displayContexts.set(sessionId, cached);
     return cached;
   }
-  const document = displayContextDocument(sourceDocument, streamedThinkingByMessage(sessionId));
-  const projected = { sourceHash, document, hash: rememberContext(sessionId, document) };
+  const images = new Map<string, ContextImage>();
+  const document = displayContextDocument(sourceDocument, streamedThinkingByMessage(sessionId), (image) => {
+    const hash = sha256(`${image.mimeType}\0${image.data}`);
+    images.set(hash, image);
+    return API.sessionImage.path({ sessionId, hash });
+  });
+  const projected = { sourceHash, document, hash: rememberContext(sessionId, document), images };
   displayContexts.delete(sessionId);
   displayContexts.set(sessionId, projected);
   while (displayContexts.size > 4) displayContexts.delete(displayContexts.keys().next().value!);
@@ -485,17 +491,27 @@ function displayContext(sessionId: string, sourceHash: string, sourceDocument: s
 function textUpdate(key: string, baseHash: unknown, target: string): DocumentUpdate | null {
   const targetHash = rememberContext(key, target);
   if (baseHash === targetHash) return null;
-  const base = typeof baseHash === "string" ? contextVersions.get(key)?.get(baseHash) : undefined;
+  const base = typeof baseHash === "string" ? contextVersions.get(key, baseHash) : undefined;
   return base === undefined
     ? { kind: "full", capturedAt: Date.now(), hash: targetHash, document: target }
     : { kind: "splice", capturedAt: Date.now(), hash: targetHash, splice: contextSplice(base, target) };
 }
 
+function cacheStoredContext(sessionId: string, stored: { capturedAt: number; document: string; hash: string } | null) {
+  storedContextCache.delete(sessionId);
+  storedContextCache.set(sessionId, stored);
+  while (storedContextCache.size > 4) storedContextCache.delete(storedContextCache.keys().next().value!);
+}
+
 function storedContext(sessionId: string): { capturedAt: number; document: string; hash: string } | null {
-  if (storedContextCache.has(sessionId)) return storedContextCache.get(sessionId) ?? null;
+  if (storedContextCache.has(sessionId)) {
+    const stored = storedContextCache.get(sessionId) ?? null;
+    cacheStoredContext(sessionId, stored);
+    return stored;
+  }
   const base = db.query("SELECT captured_at,context FROM session_contexts WHERE session_id=?").get(sessionId) as any;
   if (!base) {
-    storedContextCache.set(sessionId, null);
+    cacheStoredContext(sessionId, null);
     return null;
   }
   let document = String(base.context);
@@ -509,10 +525,9 @@ function storedContext(sessionId: string): { capturedAt: number; document: strin
       insertBase64: String(row.insert_base64),
     });
     capturedAt = Number(row.captured_at);
-    rememberContext(sessionId, document);
   }
-  const stored = { capturedAt, document, hash: rememberContext(sessionId, document) };
-  storedContextCache.set(sessionId, stored);
+  const stored = { capturedAt, document, hash: sha256(document) };
+  cacheStoredContext(sessionId, stored);
   return stored;
 }
 
@@ -522,7 +537,7 @@ function clearStoredContext(sessionId: string) {
     db.query("DELETE FROM session_contexts WHERE session_id=?").run(sessionId);
   })();
   contextVersions.delete(sessionId);
-  storedContextCache.set(sessionId, null);
+  cacheStoredContext(sessionId, null);
   displayContexts.delete(sessionId);
   signalSync();
 }
@@ -1981,6 +1996,15 @@ const server = Bun.serve({
       });
     }
     if (!ownsSupervisorLease()) return error("Supervisor instance was replaced", 503);
+    const imageRequest = API.sessionImage.match(req.method, url.pathname);
+    if (imageRequest) {
+      const stored = storedContext(imageRequest.sessionId);
+      const image = stored && displayContext(imageRequest.sessionId, stored.hash, stored.document).images.get(imageRequest.hash);
+      if (!image || !/^image\/(png|jpeg|gif|webp|bmp|avif)$/.test(image.mimeType)) return error("Context image not found", 404);
+      const headers = { ...API_CORS_HEADERS, "content-type": image.mimeType, "cache-control": "private, max-age=31536000, immutable", etag: `"${imageRequest.hash}"` };
+      if (req.headers.get("if-none-match") === headers.etag) return new Response(null, { status: 304, headers });
+      return new Response(Buffer.from(image.data, "base64"), { headers });
+    }
     const deliveredFile = await sessionFileResponse(url, req.method, req);
     if (deliveredFile) return deliveredFile;
     if (API.fileDownload.match(req.method, url.pathname) || API.fileDownloadHead.match(req.method, url.pathname)) {
@@ -2186,7 +2210,8 @@ const server = Bun.serve({
         const request = await readBody(req) as SyncRequest;
         lastSyncRequestAt = Date.now();
         if (!dashboardSnapshot) await refreshDashboard();
-        await awaitSync(request);
+        await awaitSync(request, req.signal);
+        if (req.signal.aborted) return new Response(null, { status: 499 });
         const sequence = syncSequence;
         const stateVersion = currentStateVersion();
         const fresh = request.epoch !== SUPERVISOR_EPOCH;
@@ -2204,12 +2229,7 @@ const server = Bun.serve({
             const baseHash = typeof contextHash === "string" ? contextHash : "";
             if (baseHash === display.hash) context = null;
             else {
-              const candidate = contextVersions.get(id)?.get(baseHash);
-              // A cache written before display projection contains provider
-              // signatures throughout the document. Send one compact full
-              // projection instead of representing those scattered removals
-              // as a nearly full-size splice.
-              const base = candidate?.includes('"thinkingSignature"') ? undefined : candidate;
+              const base = contextVersions.get(id, baseHash);
               context = base === undefined
                 ? { kind: "full", capturedAt: stored.capturedAt, hash: display.hash, document: display.document }
                 : { kind: "splice", capturedAt: stored.capturedAt, hash: display.hash, splice: contextSplice(base, display.document) };
@@ -2482,8 +2502,7 @@ const server = Bun.serve({
           INSERT INTO session_context_patches(session_id,captured_at,base_hash,target_hash,prefix_bytes,delete_bytes,insert_base64)
           VALUES(?,?,?,?,?,?,?)
         `).run(id, capturedAt, splice.baseHash, splice.targetHash, splice.prefixBytes, splice.deleteBytes, splice.insertBase64);
-        rememberContext(id, document);
-        storedContextCache.set(id, { capturedAt, document, hash: splice.targetHash });
+        cacheStoredContext(id, { capturedAt, document, hash: splice.targetHash });
         acknowledgeMessageContext(id, body.finalizesMessage);
         signalSync();
         return json({ ok: true, capturedAt, hash: splice.targetHash });
@@ -2521,8 +2540,7 @@ const server = Bun.serve({
           changed = true;
         })();
         if (changed) {
-          rememberContext(id, document);
-          storedContextCache.set(id, { capturedAt: acknowledgedCapturedAt, document, hash: acknowledgedHash });
+          cacheStoredContext(id, { capturedAt: acknowledgedCapturedAt, document, hash: acknowledgedHash });
           if (compactionReplacement && runtime) runtime.compactionContextHash = acknowledgedHash;
           if (acknowledgedHash === sha256(document)) acknowledgeMessageContext(id, body.finalizesMessage);
           signalSync();

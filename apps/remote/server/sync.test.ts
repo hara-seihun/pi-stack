@@ -1,5 +1,5 @@
 import { describe, expect, test } from "bun:test";
-import { applyContextSplice, contextSplice, sha256 } from "./sync";
+import { applyContextSplice, contextSplice, DocumentHistory, sha256 } from "./sync";
 
 describe("context synchronization", () => {
   test("a verified byte splice reproduces arbitrary context changes", () => {
@@ -15,6 +15,19 @@ describe("context synchronization", () => {
       expect(applyContextSplice(base, splice)).toBe(target);
       expect(splice.targetHash).toBe(sha256(target));
     }
+  });
+
+  test("history bounds all threads by bytes and entries without retaining oversized documents", () => {
+    const history = new DocumentHistory(8, 2);
+    const first = history.remember("one", "日本");
+    const second = history.remember("two", "abc");
+    expect(history.get("one", first)).toBeUndefined();
+    expect(history.get("two", second)).toBe("abc");
+    history.remember("three", "d");
+    history.remember("four", "e");
+    expect(history.get("two", second)).toBeUndefined();
+    const large = history.remember("large", "0123456789");
+    expect(history.get("large", large)).toBeUndefined();
   });
 
   test("a stale or damaged splice is rejected", () => {

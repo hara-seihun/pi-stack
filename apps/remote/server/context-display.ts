@@ -1,6 +1,8 @@
 import { messageFinalizationKey } from "./sync";
 
 type JsonObject = Record<string, unknown>;
+export interface ContextImage { data: string; mimeType: string }
+export type ImageReference = (image: ContextImage) => string;
 
 export const COMPACTION_CONTINUATION_MESSAGE =
   "your context was compacted, you now have tons of space to keep working as long as you like";
@@ -38,7 +40,7 @@ function restoreStreamedThinking(message: JsonObject, fallback: string | undefin
 }
 
 /** Builds the smaller transcript-only document shared by the browser and Android clients. */
-export function displayContextDocument(document: string, streamedThinking: ReadonlyMap<string, string> = new Map()): string {
+export function displayContextDocument(document: string, streamedThinking: ReadonlyMap<string, string> = new Map(), imageReference?: ImageReference): string {
   const context = JSON.parse(document) as JsonObject;
   const messages = Array.isArray(context.messages) ? context.messages : [];
   const projected = messages.map((value, index) => {
@@ -71,6 +73,11 @@ export function displayContextDocument(document: string, streamedThinking: Reado
     } else if (message.role === "toolResult") {
       delete message.details;
     }
+    if (imageReference && Array.isArray(message.content)) message.content = message.content.map((value) => {
+      const block = object(value);
+      if (block?.type !== "image" || typeof block.data !== "string" || typeof block.mimeType !== "string") return value;
+      return { type: "image", mimeType: block.mimeType, src: imageReference({ data: block.data, mimeType: block.mimeType }) };
+    });
     return message;
   });
   return JSON.stringify({ ...context, messages: projected });

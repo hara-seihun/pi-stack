@@ -1,4 +1,5 @@
 import { API } from "../../server/api";
+import { abortable, deadline } from "./abortable";
 
 interface EnvironmentChoice { id: string; name: string }
 interface EnvironmentState {
@@ -57,19 +58,29 @@ const remote: RemoteBridge = !nativePlatform
         select: (options) => capacitor.nativePromise("KenanRemote", "select", options),
         haptic: (options) => capacitor.nativePromise("KenanRemote", "haptic", options),
       };
-let statePromise = remote.getState();
+let statePromise: Promise<EnvironmentState> | null = null;
 let current: EnvironmentState | null = null;
 let preparePromise: Promise<void> | null = null;
 let preparedUntil = 0;
+let reconnect = false;
 
 async function getState() {
-  current = current ?? await statePromise;
+  if (current) return current;
+  statePromise ??= deadline(remote.getState(), 10_000, "Environment discovery").finally(() => { statePromise = null; });
+  current = await statePromise;
   return current;
 }
 async function prepare() {
   const environment = await getState();
   if (!environment.requiresPreparation || Date.now() < preparedUntil) return;
-  if (!preparePromise) preparePromise = remote.prepare().then(() => { preparedUntil = Date.now() + 10_000; }).finally(() => { preparePromise = null; });
+  if (!preparePromise) {
+    const reset = reconnect;
+    reconnect = false;
+    preparePromise = deadline(remote.prepare({ reconnect: reset }), 12_000, "Connection setup")
+      .then(() => { preparedUntil = Date.now() + 10_000; })
+      .catch((error) => { reconnect = true; throw error; })
+      .finally(() => { preparePromise = null; });
+  }
   return preparePromise;
 }
 function apiPath(input: RequestInfo | URL) {
@@ -85,13 +96,19 @@ async function remoteUrl(path: string) {
 window.fetch = async (input, init) => {
   const path = apiPath(input);
   if (!path) return browserFetch(input, init);
-  const target = await remoteUrl(path);
+  const signal = init?.signal ?? (input instanceof Request ? input.signal : undefined);
   try {
+    signal?.throwIfAborted();
+    const target = await (signal ? abortable(remoteUrl(path), signal) : remoteUrl(path));
+    signal?.throwIfAborted();
     return typeof input === "string" || input instanceof URL
       ? await browserFetch(target, init)
       : await browserFetch(new Request(target, input), init);
   } catch (error) {
-    preparedUntil = 0;
+    if (!signal?.aborted || signal.reason?.name !== "AbortError") {
+      preparedUntil = 0;
+      reconnect = true;
+    }
     throw error;
   }
 };
@@ -107,6 +124,9 @@ window.KenanRemote = {
   },
   resolveApiUrl(path: string) { return current ? `${current.baseUrl}${path}` : path; },
 };
+
+window.addEventListener("online", () => { preparedUntil = 0; });
+document.addEventListener("visibilitychange", () => { if (document.visibilityState === "visible") preparedUntil = 0; });
 
 if (nativePlatform && remote.haptic) {
   const tactileSelector = "button:not(:disabled), select:not(:disabled), input:not(:disabled), [role=button]";

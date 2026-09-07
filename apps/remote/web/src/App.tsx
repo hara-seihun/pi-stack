@@ -10,7 +10,7 @@ import { api, piFetch, registerUnlockHandler, syncRequest } from "./client";
 import { ContextTranscript, CopyButton, Markdown, modelContextEntries } from "./context";
 import { FileExplorer } from "./file-explorer";
 import { listenForFileDrops } from "./file-drop";
-import { createPollSchedule } from "./poll-schedule";
+import { createSyncLoop, type SyncLoop } from "./sync-loop";
 import { updateDocument } from "./sync";
 import { threadsInOrder } from "./thread-order";
 import { ThreadStartMenu } from "./thread-start-menu";
@@ -42,6 +42,7 @@ interface AppState {
   attachments: Attachment[];
   slashCommands: SlashCommand[];
   offline: string;
+  syncing: boolean;
 }
 
 const initialState: AppState = {
@@ -49,7 +50,7 @@ const initialState: AppState = {
   sessions: [], archived: [], archivedTotal: 0, pendingOrder: null, dashboard: null,
   context: null, liveText: null, liveThinking: null,
   agentRun: null, agentEntries: [], agentText: null, agentThinking: null,
-  attachments: [], slashCommands: [], offline: "",
+  attachments: [], slashCommands: [], offline: "", syncing: true,
 };
 
 function normalizedActivity(activity = "IDLE") {
@@ -291,16 +292,14 @@ export default function App() {
   const [voiceDetail, setVoiceDetail] = useState("");
   const voice = useRef<VoiceSession | null>(null);
   const promptElement = useRef<HTMLTextAreaElement>(null);
-  const syncController = useRef<AbortController | null>(null);
-  const syncSchedule = useRef(createPollSchedule());
+  const syncLoop = useRef<SyncLoop | null>(null);
   const syncMeta = useRef({ epoch: "", seq: 0, stateVersion: 0, dashboardVersion: 0, agentSeq: 0, orderCommitted: false });
   const dragSensors = useSensors(
     useSensor(PointerSensor, { activationConstraint: { delay: 350, tolerance: 10 } }),
     useSensor(KeyboardSensor, { coordinateGetter: sortableKeyboardCoordinates }),
   );
   const kick = useCallback(() => {
-    syncSchedule.current.requestImmediate();
-    syncController.current?.abort();
+    syncLoop.current?.kick();
   }, []);
   const selectedSession = useCallback(() => {
     const current = stateRef.current;
@@ -329,7 +328,15 @@ export default function App() {
   useEffect(() => {
     const onVisible = () => { if (document.visibilityState === "visible") kick(); };
     document.addEventListener("visibilitychange", onVisible);
-    return () => document.removeEventListener("visibilitychange", onVisible);
+    window.addEventListener("online", kick);
+    window.addEventListener("pageshow", kick);
+    window.addEventListener("focus", kick);
+    return () => {
+      document.removeEventListener("visibilitychange", onVisible);
+      window.removeEventListener("online", kick);
+      window.removeEventListener("pageshow", kick);
+      window.removeEventListener("focus", kick);
+    };
   }, [kick]);
   useEffect(() => () => voice.current?.stop(), []);
   useEffect(() => {
@@ -359,12 +366,12 @@ export default function App() {
   }, []);
 
   const selectThread = useCallback(async (id: string, closeDrawer = true) => {
-    patch({ selectedId: id, agentRunId: null, agentRun: null, context: null, liveText: null, liveThinking: null, ...(closeDrawer ? { drawerOpen: innerWidth >= 1000 } : {}) });
+    patch({ selectedId: id, agentRunId: null, agentRun: null, context: null, liveText: null, liveThinking: null, slashCommands: [], syncing: true, ...(closeDrawer ? { drawerOpen: innerWidth >= 1000 } : {}) });
     setPrompt(loadDraft(id));
     kick();
     try {
       const cached = await readCachedContext(await cacheKey(id));
-      if (stateRef.current.selectedId === id && !stateRef.current.context && cached) {
+      if (stateRef.current.selectedId === id && stateRef.current.syncing && !stateRef.current.context && cached) {
         patch({ context: cached });
         kick();
       }
@@ -373,67 +380,72 @@ export default function App() {
 
   const selectAgent = useCallback((run: AgentRun) => {
     syncMeta.current.agentSeq = 0;
-    patch({ agentRunId: run.id, agentRun: run, agentEntries: [], agentText: null, agentThinking: null, drawerOpen: innerWidth >= 1000 });
+    patch({ agentRunId: run.id, agentRun: run, agentEntries: [], agentText: null, agentThinking: null, syncing: true, drawerOpen: innerWidth >= 1000 });
     kick();
   }, [kick, patch]);
 
   useEffect(() => {
-    let stopped = false;
-    let timer: ReturnType<typeof setTimeout> | null = null;
-    const poll = async () => {
-      if (stopped) return;
-      const controller = new AbortController();
-      syncController.current = controller;
+    let fullResync = false;
+    const loop = createSyncLoop(async (signal, waitMs) => {
       const current = stateRef.current;
       const meta = syncMeta.current;
       const { selectedId, agentRunId } = current;
-      const request: SyncRequest = { epoch: meta.epoch, seq: meta.seq, stateVersion: meta.stateVersion, dashboardVersion: meta.dashboardVersion, waitMs: syncSchedule.current.takeWaitMs() };
+      const request: SyncRequest = { epoch: meta.epoch, seq: meta.seq, stateVersion: meta.stateVersion, dashboardVersion: meta.dashboardVersion, waitMs };
       if (selectedId && !agentRunId) request.session = { id: selectedId, contextHash: current.context?.hash, liveTextHash: current.liveText?.hash, liveThinkingHash: current.liveThinking?.hash };
       if (agentRunId) request.agent = { id: agentRunId, after: meta.agentSeq, liveTextHash: current.agentText?.hash, liveThinkingHash: current.agentThinking?.hash };
-      let delay = 0;
+      if (fullResync) {
+        request.stateVersion = 0;
+        request.dashboardVersion = 0;
+        request.waitMs = 0;
+        if (request.session) request.session = { id: request.session.id };
+        if (request.agent) request.agent = { id: request.agent.id, after: meta.agentSeq };
+      }
+      const response = await syncRequest(request, signal);
+      signal.throwIfAborted();
       try {
-        const response = await syncRequest(request, controller.signal);
-        const cancelled = () => controller.signal.aborted || stopped;
-        if (cancelled()) return;
-        meta.epoch = response.epoch;
-        meta.seq = response.seq;
-        meta.stateVersion = response.stateVersion;
-        meta.dashboardVersion = response.dashboardVersion;
-        const update: Partial<AppState> = { offline: "" };
+        const update: Partial<AppState> = { offline: "", syncing: false };
         if (response.state) {
           Object.assign(update, response.state);
-          if (meta.orderCommitted) { update.pendingOrder = null; meta.orderCommitted = false; }
+          if (meta.orderCommitted) update.pendingOrder = null;
         }
         if (response.dashboard) update.dashboard = response.dashboard;
         const live = stateRef.current;
         if (response.session && live.selectedId === selectedId && !live.agentRunId) {
-          update.context = await updateDocument(current.context, response.session.context);
-          update.liveText = await updateDocument(current.liveText, response.session.liveText);
-          update.liveThinking = await updateDocument(current.liveThinking, response.session.liveThinking);
-          if (update.context !== current.context && selectedId) {
-            const document = update.context;
-            void cacheKey(selectedId).then((key) => document ? writeCachedContext(key, document) : deleteCachedContext(key)).catch(console.error);
-          }
+          [update.context, update.liveText, update.liveThinking] = await Promise.all([
+            updateDocument(current.context, response.session.context),
+            updateDocument(current.liveText, response.session.liveText),
+            updateDocument(current.liveThinking, response.session.liveThinking),
+          ]);
+          if (update.context && update.context !== current.context) JSON.parse(update.context.document);
         }
         if (response.agent && live.agentRunId === agentRunId) {
           update.agentRun = response.agent.run;
-          update.agentText = await updateDocument(current.agentText, response.agent.liveText);
-          update.agentThinking = await updateDocument(current.agentThinking, response.agent.liveThinking);
+          [update.agentText, update.agentThinking] = await Promise.all([
+            updateDocument(current.agentText, response.agent.liveText),
+            updateDocument(current.agentThinking, response.agent.liveThinking),
+          ]);
           update.agentEntries = eventEntries(current.agentEntries, response.agent.events);
-          for (const event of response.agent.events) meta.agentSeq = Math.max(meta.agentSeq, Number(event.seq) || 0);
         }
-        if (cancelled()) return;
+        signal.throwIfAborted();
+        Object.assign(meta, { epoch: response.epoch, seq: response.seq, stateVersion: response.stateVersion, dashboardVersion: response.dashboardVersion });
+        if (response.state && meta.orderCommitted) meta.orderCommitted = false;
+        if (response.agent) for (const event of response.agent.events) meta.agentSeq = Math.max(meta.agentSeq, Number(event.seq) || 0);
+        fullResync = false;
         patch(update);
+        if (update.context !== undefined && update.context !== current.context && selectedId) {
+          const document = update.context;
+          void cacheKey(selectedId).then((key) => document ? writeCachedContext(key, document) : deleteCachedContext(key)).catch(console.error);
+        }
         const settled = stateRef.current;
         if (!settled.selectedId && !settled.agentRunId && settled.sessions.length) void selectThread(settled.sessions[0].id, false);
       } catch (error) {
-        if (!(error instanceof DOMException && error.name === "AbortError")) { patch({ offline: error instanceof Error ? error.message : String(error) }); delay = 1_200; }
-      } finally {
-        if (!stopped) timer = setTimeout(poll, delay);
+        if (!signal.aborted) fullResync = true;
+        throw error;
       }
-    };
-    void poll();
-    return () => { stopped = true; syncController.current?.abort(); if (timer) clearTimeout(timer); };
+    }, (error) => patch({ offline: error instanceof Error ? error.message : String(error) }));
+    syncLoop.current = loop;
+    loop.start();
+    return () => { loop.stop(); syncLoop.current = null; };
   }, [cacheKey, patch, selectThread, stateRef]);
 
   const archive = async (id: string) => {
@@ -581,9 +593,9 @@ export default function App() {
       {state.drawerTab === "agents" && <AgentList runs={dashboard?.agents.runs ?? []} hosts={dashboard?.agents.hosts ?? []} selectedId={state.agentRunId} onSelect={selectAgent} />}
       {state.drawerTab === "archived" && <div className="thread-list">{state.archived.length ? state.archived.map((session) => <ThreadRow key={session.id} archived session={session} selected={false} onSelect={() => {}} onArchive={() => {}} onUnarchive={(id) => void unarchive(id)} />) : <div className="agent-empty">No archived threads</div>}{state.archived.length < state.archivedTotal && <button type="button" className="archived-more" onClick={() => void loadOlder()}>Show older · {state.archivedTotal - state.archived.length} more</button>}</div>}
       <FileExplorer hidden={state.drawerTab !== "files"} onRootCount={setRootFileCount} />
-      <footer className="drawer-footer"><MachineControls actions={dashboard?.actions ?? []} governors={dashboard?.governors ?? null} onAction={(id) => void toggleAction(id)} onGovernor={(provider) => void toggleGovernor(provider)} /><EnvironmentControl /><PlanSummary plans={dashboard?.plans ?? []} counts={modelCounts} /><div className="usage-summary muted">{machineText}</div>{state.offline && <div className="connection" style={{ color: "var(--danger)" }}>● Offline · {state.offline}</div>}</footer>
+      <footer className="drawer-footer"><MachineControls actions={dashboard?.actions ?? []} governors={dashboard?.governors ?? null} onAction={(id) => void toggleAction(id)} onGovernor={(provider) => void toggleGovernor(provider)} /><EnvironmentControl /><PlanSummary plans={dashboard?.plans ?? []} counts={modelCounts} /><div className="usage-summary muted">{machineText}</div><div className="usage-summary muted" title={__PI_REMOTE_REVISION__}>Client {__PI_REMOTE_REVISION__.slice(0, 12)}</div>{state.offline && <div className="connection" style={{ color: "var(--danger)" }}>● Offline · {state.offline}</div>}</footer>
     </aside>
-    <main id="main"><header className="topbar"><button className="icon-button" aria-label="Open navigation" onClick={() => patch({ drawerOpen: true })}>☰</button><div className="top-title">{title}</div><div className="top-state" style={{ color: state.offline ? "var(--danger)" : activityColor(selectedActivity) }}>{state.offline ? "OFFLINE" : activityLabel(selectedActivity, selectedTool ?? "")}</div><button className="icon-button" aria-label="Open thread settings" disabled={!selected || Boolean(state.agentRunId)} onClick={() => patch({ settingsOpen: true })}>⚙</button></header>
+    <main id="main"><header className="topbar"><button className="icon-button" aria-label="Open navigation" onClick={() => patch({ drawerOpen: true })}>☰</button><div className="top-title">{title}</div><div className="top-state" style={{ color: state.offline ? "var(--danger)" : activityColor(selectedActivity) }}>{state.offline ? "OFFLINE" : state.syncing ? "SYNCING" : activityLabel(selectedActivity, selectedTool ?? "")}</div>{state.offline && <button type="button" onClick={kick} title={state.offline}>Reconnect</button>}<button className="icon-button" aria-label="Open thread settings" disabled={!selected || Boolean(state.agentRunId)} onClick={() => patch({ settingsOpen: true })}>⚙</button></header>
       {!state.selectedId && !state.agentRunId ? <section className="empty-state"><strong>No threads</strong><span>Open the drawer to create one.</span></section> : <section className="conversation"><div className="scrollback"><div className="scroll-content"><ContextTranscript entries={entries} liveThinking={liveThinking} sessionId={state.selectedId || ""} home={dashboard?.home ?? "/"} onEdit={editFrom} />{liveText && <div className="live-answer"><Markdown source={liveText} sessionId={state.selectedId || ""} streaming /><CopyButton text={liveText} label="Copy response" /></div>}</div></div>
         {selected?.queuedMessages.length ? <div className="message-queue">{selected.queuedMessages.map((message) => <div className="queued-message" key={message.id}><div className="queued-message-copy"><span className="queued-message-label">{message.status || "Queued"}</span><span className="queued-message-preview">{message.text.split("\n").find((line) => line.trim()) || "Attached files"}</span></div><div className="queued-message-actions"><CopyButton text={message.text} className="queued-message-action icon-message-action" />{message.canSteer && <button className="queued-message-action steer-instead" type="button" onClick={() => void mutateQueued(message, API.queueSteer)}>STEER</button>}{message.canHardSteer && <button className="queued-message-action hard-steer" type="button" onClick={() => void mutateQueued(message, API.queueHardSteer)}>HARD STEER</button>}{message.canCancel && <><button className="queued-message-action edit-queued" type="button" onClick={() => void mutateQueued(message, API.queueItem, true)}>EDIT</button><button className="queued-message-action cancel-queued" type="button" onClick={() => void mutateQueued(message, API.queueItem)}>CANCEL</button></>}</div></div>)}</div> : null}
         {visibleAttachments.length > 0 && <div className="attachments">{visibleAttachments.map((attachment) => <div className={`attachment-chip${attachment.uploading ? " uploading" : ""}`} key={attachment.localId}><span className="attachment-name">{attachment.name}{attachment.uploading ? " · uploading" : ""}</span><button className="attachment-remove" type="button" onClick={() => void removeAttachment(attachment)}>×</button></div>)}</div>}

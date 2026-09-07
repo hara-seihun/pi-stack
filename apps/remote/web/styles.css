@@ -308,6 +308,7 @@ button:focus-visible, input:focus-visible, textarea:focus-visible, select:focus-
 .tool-card.error .tool-header, .tool-card.error .tool-body { color: var(--danger); }
 .tool-timing { margin-top: 5px; color: var(--muted); font-size: 12px; }
 .tool-body { margin-top: 9px; color: var(--text); }
+.context-image { display: block; max-width: 100%; height: auto; margin-top: 9px; }
 .tool-card.collapsed .tool-header { display: -webkit-box; -webkit-line-clamp: 1; -webkit-box-orient: vertical; overflow: hidden; }
 .tool-card.collapsed .tool-body { display: -webkit-box; -webkit-line-clamp: 5; -webkit-box-orient: vertical; overflow: hidden; }
 .tool-toggle { margin-top: 7px; padding: 5px 0; color: var(--accent); background: transparent; font-size: 13px; font-weight: 750; }

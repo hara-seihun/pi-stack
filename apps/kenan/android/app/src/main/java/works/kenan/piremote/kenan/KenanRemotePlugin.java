@@ -43,6 +43,7 @@ public final class KenanRemotePlugin extends Plugin {
     public void prepare(PluginCall call) {
         transportExecutor.execute(() -> {
             try {
+                if (Boolean.TRUE.equals(call.getBoolean("reconnect", false))) transport.close();
                 transport.prepare(environments.current());
                 call.resolve(snapshot());
             } catch (Exception failure) {

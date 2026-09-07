@@ -27,6 +27,12 @@ const markdown = window.markdownit({ html: false, breaks: true, linkify: true })
     delimiters: ["dollars", "brackets", "beg_end"],
     katexOptions: { throwOnError: false, strict: "ignore", trust: false },
   });
+const defaultImage = markdown.renderer.rules.image!;
+markdown.renderer.rules.image = (tokens, index, options, env, renderer) => {
+  tokens[index].attrSet("loading", "lazy");
+  tokens[index].attrSet("decoding", "async");
+  return defaultImage(tokens, index, options, env, renderer);
+};
 const defaultLinkOpen = markdown.renderer.rules.link_open
   || ((tokens: any[], index: number, options: any, _env: any, renderer: any) => renderer.renderToken(tokens, index, options));
 markdown.renderer.rules.link_open = (tokens, index, options, env, renderer) => {
@@ -76,7 +82,15 @@ function fencedContext(value: unknown, language = "json") {
   return `${fence}${language}\n${text}\n${fence}`;
 }
 
-function contextContentMarkdown(content: any): string {
+function imageUrl(block: any): string {
+  if (typeof block.src === "string" && block.src.startsWith("/v1/sessions/")) {
+    const path = window.PiRemotePerson?.href(block.src) ?? block.src;
+    return window.KenanRemote?.resolveApiUrl(path) ?? path;
+  }
+  return block.data ? `data:${block.mimeType};base64,${block.data}` : "";
+}
+
+function contextContentMarkdown(content: any, includeImages = true): string {
   if (typeof content === "string") return content;
   if (!Array.isArray(content)) return fencedContext(formatJson(content));
   return content.map((block) => {
@@ -85,8 +99,8 @@ function contextContentMarkdown(content: any): string {
     if (block.type === "thinking") return `*Thinking*\n\n${String(block.thinking || "")}`;
     if (block.type === "image") {
       const mime = String(block.mimeType || "application/octet-stream");
-      const data = String(block.data || "");
-      return data ? `![Context image](data:${mime};base64,${data})` : `*Image · ${mime}*`;
+      const src = includeImages ? imageUrl(block) : "";
+      return src ? `![Context image](${src})` : `*Image · ${mime}*`;
     }
     if (block.type === "toolCall") {
       const namespace = block.namespace ? `${block.namespace}.` : "";
@@ -215,7 +229,8 @@ const ToolEntry = memo(function ToolEntry({ entry, home }: { entry: ContextEntry
     return () => clearInterval(timer);
   }, [result]);
   const input = toolInput(call.name, args);
-  const output = result ? contextContentMarkdown(result.content) : "";
+  const output = result ? contextContentMarkdown(result.content, false) : "";
+  const images = Array.isArray(result?.content) ? result.content.filter((block: any) => block?.type === "image") : [];
   const body = [input, output].filter(Boolean).join("\n\n");
   const summary = toolSummary(call.name, args, home);
   const expandable = summary.length > 100 || body.length > 320 || body.split("\n").length > 5;
@@ -225,8 +240,9 @@ const ToolEntry = memo(function ToolEntry({ entry, home }: { entry: ContextEntry
   return <div className={`tool-card${expanded ? "" : " collapsed"}${result ? result.isError ? " error" : " success" : ""}`}>
     <pre className="tool-header">{result ? result.isError ? "×  " : "✓  " : "…  "}{summary}</pre>
     <div className="tool-timing">{timing}</div>
-    {body && <pre className="tool-body">{body}</pre>}
-    {result && expandable && <button type="button" className="tool-toggle" onClick={() => setCompletedExpanded(!completedExpanded)}>{completedExpanded ? "Show less" : "Show more"}</button>}
+    {body && <pre className="tool-body">{expanded ? body : body.slice(0, 320)}</pre>}
+    {expanded && images.map((image: any, index: number) => <img key={index} className="context-image" src={imageUrl(image)} alt="Tool result" loading="lazy" decoding="async" />)}
+    {result && (expandable || images.length > 0) && <button type="button" className="tool-toggle" onClick={() => setCompletedExpanded(!completedExpanded)}>{completedExpanded ? "Show less" : "Show more"}</button>}
     <div className="message-actions"><CopyButton text={[summary, body].filter(Boolean).join("\n\n")} /></div>
   </div>;
 }, (before, after) => before.entry.signature === after.entry.signature && before.home === after.home);

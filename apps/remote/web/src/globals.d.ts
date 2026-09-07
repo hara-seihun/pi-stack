@@ -1,3 +1,5 @@
+declare const __PI_REMOTE_REVISION__: string;
+
 interface MarkdownRenderer {
   render(source: string): string;
   use(plugin: unknown, options: unknown): MarkdownRenderer;

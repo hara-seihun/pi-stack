@@ -1,4 +1,5 @@
 import { API } from "../../server/api";
+import { abortable } from "./abortable";
 import type { SyncRequest, SyncResponse } from "../../server/protocol";
 
 const LEGACY_KEY_STORAGE = "pi-remote-key";
@@ -80,15 +81,18 @@ async function ensureUnlocked() {
 }
 
 export async function piFetch(input: RequestInfo | URL, init?: RequestInit, retryOnLock = true): Promise<Response> {
-  const response = await fetch(input, init);
+  const signal = init?.signal ?? (input instanceof Request ? input.signal : undefined);
+  const wait = <T>(operation: Promise<T>) => signal ? abortable(operation, signal) : operation;
+  const response = await wait(fetch(input, init));
   if (response.status !== 423 || !retryOnLock) return response;
-  await ensureUnlocked();
-  return fetch(input, init);
+  await wait(ensureUnlocked());
+  signal?.throwIfAborted();
+  return wait(fetch(input, init));
 }
 
 export async function api(method: string, path: string, body?: unknown, timeout = 20_000): Promise<any> {
   const controller = new AbortController();
-  const timer = setTimeout(() => controller.abort(), timeout);
+  const timer = setTimeout(() => controller.abort(new Error("Request timed out")), timeout);
   try {
     const response = await piFetch(path, {
       method,
@@ -106,11 +110,11 @@ export async function api(method: string, path: string, body?: unknown, timeout 
 }
 
 export async function syncRequest(body: SyncRequest, signal: AbortSignal): Promise<SyncResponse> {
-  let timedOut = false;
   const controller = new AbortController();
-  const cancel = () => controller.abort();
-  signal.addEventListener("abort", cancel, { once: true });
-  const timer = setTimeout(() => { timedOut = true; controller.abort(); }, 35_000);
+  const cancel = () => controller.abort(signal.reason);
+  if (signal.aborted) cancel();
+  else signal.addEventListener("abort", cancel, { once: true });
+  const timer = setTimeout(() => controller.abort(new Error("Synchronization timed out")), 35_000);
   try {
     const response = await piFetch(API.sync.path(), {
       method: "POST",
@@ -122,9 +126,6 @@ export async function syncRequest(body: SyncRequest, signal: AbortSignal): Promi
     const result = await responseJson(response);
     if (!response.ok) throw new Error(result.error || `HTTP ${response.status}`);
     return result as SyncResponse;
-  } catch (error) {
-    if (error instanceof DOMException && error.name === "AbortError" && timedOut) throw new Error("Synchronization timed out");
-    throw error;
   } finally {
     clearTimeout(timer);
     signal.removeEventListener("abort", cancel);
