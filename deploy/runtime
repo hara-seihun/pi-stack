@@ -58,7 +58,7 @@ fi
 cd "$root"
 pi_stack_as_root install -d -m 755 "$dependencies_root"
 dependency_hash=$({
-  sha256sum package.json package-lock.json packages/runtime/browser-doctor.mjs
+  sha256sum package.json package-lock.json packages/runtime/browser-doctor.mjs packages/runtime/patch-browser-qa.mjs
   printf '%s\n' workspace-production-closure-v1-atomic-settings-writes-v1
 } | sha256sum | cut -d' ' -f1)
 dependency_release="$dependencies_root/$dependency_hash"
@@ -96,6 +96,9 @@ if (patched === source || !patched.includes("renameSync(temporary, path)")) {
 writeFileSync(path, patched);
 NODE
   node --check "$settings_manager"
+  browser_job="$stage/node_modules/pi-agent-browser-native/dist/extensions/agent-browser/lib/input-modes/job.js"
+  node "$runtime_source/patch-browser-qa.mjs" "$browser_job"
+  node --check "$browser_job"
   rm -f "$stage/node_modules/pi-orchestrator" "$stage/node_modules/pi-remote"
   rm -rf "$stage/node_modules/@hara-seihun"
   dependency_stage="$dependencies_root/.stage.$$.${RANDOM}"

@@ -37,7 +37,7 @@ else writeFileSync(sessionFile, `${JSON.stringify({ type: "session", version: 3,
 const title = `pi-browser-${randomUUID()}`;
 const server = createServer((_req, res) => {
   res.writeHead(200, { "content-type": "text/html" });
-  res.end(`<title>${title}</title><h1>${title}</h1><button>Probe</button>`);
+  res.end(`<title>${title}</title><h1><span>${title.slice(0, 5)}</span><span>${title.slice(5)}</span></h1><button>Probe</button>`);
 });
 let session;
 let accepted = false;
@@ -62,6 +62,9 @@ try {
   const tools = session.agent.state.tools.filter((tool) => tool.name === "agent_browser");
   assert.equal(tools.length, 1, "exactly one native browser tool must be active");
   const url = `http://127.0.0.1:${server.address().port}/`;
+  const nativeRoot = dirname(selected.resolve("pi-agent-browser-native/package.json"));
+  const { compileAgentBrowserQaPreset } = await import(pathToFileURL(join(nativeRoot, "dist/extensions/agent-browser/lib/input-modes/job.js")).href);
+  const visibleTextCheck = compileAgentBrowserQaPreset({ attached: true, expectedText: title }).compiled.steps.find((step) => step.action === "assertText").args;
   browserAttempted = true;
   const result = await tools[0].execute(randomUUID(), {
     script: `
@@ -69,6 +72,8 @@ try {
       if (!opened.ok) throw new Error(opened.error);
       const snapshot = await browser({ args: ["snapshot", "-i"] });
       if (!snapshot.ok) throw new Error(snapshot.error);
+      const visibleText = await browser({ args: ${JSON.stringify(visibleTextCheck)} });
+      if (!visibleText.ok) throw new Error(visibleText.error);
       const title = await browser({ args: ["get", "title"] });
       if (!title.ok) throw new Error(title.error);
       emit({ title: title.data.title, refs: Object.keys(snapshot.data.refs).length });
@@ -80,7 +85,7 @@ try {
   assert.ok(result.details.data.refs >= 2);
   assert.equal(result.details.scriptSession.cleanup, "closed", "the probe browser must be closed");
   accepted = true;
-  console.log(JSON.stringify({ host: hostname(), sdk, runtime, bin, wrapperVersion, browserVersion, recovered: !!values["session-file"], nativeOpen: true, snapshot: true, cleanup: "closed" }));
+  console.log(JSON.stringify({ host: hostname(), sdk, runtime, bin, wrapperVersion, browserVersion, recovered: !!values["session-file"], nativeOpen: true, snapshot: true, visibleText: true, cleanup: "closed" }));
 } finally {
   session?.dispose();
   await new Promise((resolve) => server.close(resolve));
