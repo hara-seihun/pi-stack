@@ -1333,6 +1333,7 @@ function runtimeEnvironment(row: any) {
     HOME,
     PATH: `${join(HOME, ".local/bin")}:${join(HOME, ".bun/bin")}:${process.env.PATH ?? ""}`,
     PI_REMOTE_SESSION_ID: row.id,
+    PI_REMOTE_CONTEXT_OWNER_PID: "",
     PI_REMOTE_BASH_TIMEOUT_MAX_SECONDS: String(bashTimeoutSeconds(row.bash_timeout_seconds)),
     PI_REMOTE_SERVICE_TIER_FILE: serviceTierPath(row.id),
     PI_REMOTE_SERVER_URL: `http://${HOST}:${PORT}`,

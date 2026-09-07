@@ -9,6 +9,8 @@ export default function contextMirror(pi: ExtensionAPI) {
   const sessionId = process.env.PI_REMOTE_SESSION_ID;
   const server = process.env.PI_REMOTE_SERVER_URL;
   if (!sessionId || !server) return;
+  const ownerPid = process.env.PI_REMOTE_CONTEXT_OWNER_PID;
+  if (ownerPid && ownerPid !== String(process.pid)) return;
 
   let context: ModelContext | null = null;
   let baseMessages: ModelMessage[] = [];
@@ -119,6 +121,10 @@ export default function contextMirror(pi: ExtensionAPI) {
     ctx: ExtensionContext,
     replacement?: "compaction",
   ) => {
+    if (ctx.mode !== "rpc") return;
+    // Shell tools inherit this marker. Nested Pi sessions must not publish into
+    // the parent thread merely because they inherited its Remote environment.
+    process.env.PI_REMOTE_CONTEXT_OWNER_PID = String(process.pid);
     const active = new Set(pi.getActiveTools());
     baseMessages = convertToLlm(messages);
     context = {

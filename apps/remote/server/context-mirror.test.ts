@@ -38,10 +38,12 @@ const server = Bun.serve({
 });
 const previousSessionId = process.env.PI_REMOTE_SESSION_ID;
 const previousServer = process.env.PI_REMOTE_SERVER_URL;
+const previousOwner = process.env.PI_REMOTE_CONTEXT_OWNER_PID;
 
 beforeAll(() => {
   process.env.PI_REMOTE_SESSION_ID = "00000000-0000-0000-0000-000000000001";
   process.env.PI_REMOTE_SERVER_URL = server.url.origin;
+  delete process.env.PI_REMOTE_CONTEXT_OWNER_PID;
 });
 
 afterAll(() => {
@@ -49,6 +51,8 @@ afterAll(() => {
   else process.env.PI_REMOTE_SESSION_ID = previousSessionId;
   if (previousServer === undefined) delete process.env.PI_REMOTE_SERVER_URL;
   else process.env.PI_REMOTE_SERVER_URL = previousServer;
+  if (previousOwner === undefined) delete process.env.PI_REMOTE_CONTEXT_OWNER_PID;
+  else process.env.PI_REMOTE_CONTEXT_OWNER_PID = previousOwner;
   server.stop(true);
 });
 
@@ -66,6 +70,34 @@ function assistant(text: string, stopReason = "pending") {
 }
 
 describe("context mirror", () => {
+  test("diagnostic and nested sessions cannot overwrite the parent thread", async () => {
+    captures.length = 0;
+    const handlers = new Map<string, Handler>();
+    const pi = {
+      on(type: string, handler: Handler) { handlers.set(type, handler); },
+      getActiveTools() { throw new Error("unowned session inspected tools"); },
+    } as unknown as ExtensionAPI;
+    contextMirror(pi);
+    for (const mode of ["print", "json", "tui"]) {
+      const context = { mode, sessionManager: { getBranch: () => [] } };
+      await handlers.get("session_start")?.({}, context);
+      await handlers.get("context")?.({ messages: [] }, context);
+      await handlers.get("message_end")?.({ message: assistant("diagnostic output", "stop") }, context);
+      await handlers.get("session_shutdown")?.({}, context);
+    }
+    expect(captures).toHaveLength(0);
+    expect(process.env.PI_REMOTE_CONTEXT_OWNER_PID).toBeUndefined();
+
+    process.env.PI_REMOTE_CONTEXT_OWNER_PID = String(process.pid + 1);
+    try {
+      handlers.clear();
+      contextMirror(pi);
+      expect(handlers.size).toBe(0);
+    } finally {
+      delete process.env.PI_REMOTE_CONTEXT_OWNER_PID;
+    }
+  });
+
   test("publishes Pi's generic context only at durable message boundaries", async () => {
     captures.length = 0;
     document = "";
@@ -91,7 +123,8 @@ describe("context mirror", () => {
     await contextHandler?.({
       type: "context",
       messages: [{ role: "user", content: [{ type: "text", text: "Hello" }], timestamp: 1 }],
-    }, { getSystemPrompt: () => "System with AGENTS.md" });
+    }, { mode: "rpc", getSystemPrompt: () => "System with AGENTS.md" });
+    expect(process.env.PI_REMOTE_CONTEXT_OWNER_PID).toBe(String(process.pid));
     expect(captures.at(-1)?.context).toMatchObject({
       systemPrompt: "System with AGENTS.md",
       tools: [{ name: "read", description: "Read a file", parameters: { type: "object" } }],
@@ -127,7 +160,7 @@ describe("context mirror", () => {
     const publishing = handlers.get("context")?.({
       type: "context",
       messages: [{ role: "user", content: [{ type: "text", text: "must survive" }], timestamp: 1 }],
-    }, { getSystemPrompt: () => "System" }) as Promise<void>;
+    }, { mode: "rpc", getSystemPrompt: () => "System" }) as Promise<void>;
     await firstCaptureStarted;
     releaseCapture();
     await publishing;
@@ -150,6 +183,7 @@ describe("context mirror", () => {
     contextMirror(pi);
 
     const extensionContext = {
+      mode: "rpc",
       getSystemPrompt: () => "Current system prompt",
       sessionManager: {
         getBranch: () => [
