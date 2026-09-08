@@ -40,11 +40,11 @@ it("balances admissions across restart without changing provider priority or res
       expect(store.db.prepare("SELECT * FROM control ORDER BY key").all()).toEqual(after);
       store.updateRun(id,{state:"done"});
       if(i%2===0){
-        store.setControl("boost:openai-codex","0");
+        store.setAccountEnabled("codex",false);
         const opus=admit(create());
         expect(opus).toMatchObject({provider:"anthropic",thinking:"max"});
         store.updateRun(opus.id,{state:"done"});
-        store.setControl("boost:openai-codex","1");
+        store.setAccountEnabled("codex",true);
         const expert=admit(create("expert"),"expert");
         expect(expert.thinking).toBe("xhigh");
         store.updateRun(expert.id,{state:"done"});

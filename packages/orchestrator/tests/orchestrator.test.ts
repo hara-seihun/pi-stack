@@ -104,7 +104,25 @@ describe("current orchestrator state",()=>{
 
   it("permits one calibration probe, then requires new meter evidence",()=>{const store=Store.open(":memory:");account(store);const first=assign(store,"standard","background",config);expect(first.assignment?.accountId).toBe("openai-codex-1");const [runId]=store.createRuns({count:1,source:"direct",prompt:"x",cwd:"/tmp",profile:"standard",budget:"background"});store.assignRun(runId!,{...first.assignment!,unit:"u",releasePath:"/release/a"});store.updateRun(runId!,{state:"done"});expect(assign(store,"standard","background",config).assignment).toBeUndefined();store.recordMeter("openai-codex-1","codex-5h",10,Date.now()+3_600_000);const next=assign(store,"standard","background",config);expect(next.assignment).toBeDefined();commitMeterAdmission(store,next.assignment!);expect(assign(store,"standard","background",config).assignment).toBeUndefined();store.close();});
 
-  it("keeps urgent work available while ordinary pacing preserves reserve",()=>{const store=Store.open(":memory:");account(store);store.recordMeter("openai-codex-1","codex-5h",85,Date.now()+3_600_000);expect(assign(store,"standard","background",config).refusals[0]?.reason).toContain("reserve");expect(assign(store,"standard","force",config).assignment).toBeDefined();store.setControl("boost:openai-codex","0");expect(assign(store,"standard","force",config).assignment).toBeUndefined();expect(assign(store,"standard","background",config).assignment).toBeUndefined();store.close();});
+  it("admits operator-requested work through reserves and 0× without bypassing hard stops",()=>{
+    const store=Store.open(":memory:");account(store);
+    const now=Date.now();
+    store.recordMeter("openai-codex-1","codex-5h",85,now+3_600_000,now);
+    expect(assign(store,"standard","background",config,now).refusals[0]?.reason).toContain("reserve");
+    expect(assign(store,"standard","force",config,now).assignment).toBeDefined();
+    store.setControl("boost:openai-codex","0");
+    const forced=assign(store,"standard","force",config,now);
+    expect(forced.assignment?.accountId).toBe("openai-codex-1");
+    commitMeterAdmission(store,forced.assignment!);
+    expect(assign(store,"standard","force",config,now+config.meterMaxAgeMs+1).assignment).toBeDefined();
+    expect(assign(store,"standard","background",config,now).refusals[0]?.reason).toContain("background launches halted");
+    store.setControl("launches","paused");
+    expect(assign(store,"standard","force",config,now).refusals[0]?.reason).toBe("emergency halt");
+    store.setControl("launches","enabled");
+    store.recordMeter("openai-codex-1","codex-5h",100,now+3_600_000,now+1);
+    expect(assign(store,"standard","force",config,now+1).refusals[0]?.reason).toContain("provider quota exhausted");
+    store.close();
+  });
 
   it("rejects worker targets rather than silently ignoring them",()=>{
     const store=Store.open(":memory:");

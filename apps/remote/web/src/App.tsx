@@ -148,7 +148,7 @@ function EnvironmentControl() {
 
 const GOVERNOR_CLASS: Record<GovernorState, string> = { off: "", green: " active boost-green", blue: " active boost-blue", red: " active halted" };
 function governorDescription(name: string, governor: Governor) {
-  const current: Record<GovernorState, string> = { off: "normal local allowance", green: "3× local allowance", blue: `${governor.boostedMultiplier}× local allowance`, red: "a launch halt" };
+  const current: Record<GovernorState, string> = { off: "normal local allowance", green: "3× local allowance", blue: `${governor.boostedMultiplier}× local allowance`, red: "a background launch halt; operator-requested runs can still start" };
   return `${name} governor is using ${current[governor.state]}. Select to change it`;
 }
 function MachineControls({ actions, governors, onAction, onGovernor }: { actions: MachineActionState[]; governors: GovernorControls | null; onAction(id: string): void; onGovernor(provider: GovernorProvider): void }) {

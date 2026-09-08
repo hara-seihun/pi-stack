@@ -145,7 +145,7 @@ button:focus-visible, input:focus-visible, textarea:focus-visible, select:focus-
 .machine-control img { width: 22px; height: 22px; opacity: .42; filter: grayscale(1); pointer-events: none; }
 .machine-control.active { background: var(--tool-ok); }
 .machine-control.active img { opacity: 1; filter: brightness(0) saturate(100%) invert(88%) sepia(22%) saturate(827%) hue-rotate(61deg) brightness(98%) contrast(86%); }
-/* Governor boost cycle: green 3x, blue 10x, red halted (no new fleet launches). */
+/* Governor boost cycle: green 3x, blue 10x, red halted (no new background launches). */
 .machine-control.boost-blue { background: #1f2a3a; }
 .machine-control.boost-blue img { filter: brightness(0) saturate(100%) invert(72%) sepia(14%) saturate(1447%) hue-rotate(184deg) brightness(101%) contrast(96%); }
 .machine-control.halted { background: var(--tool-error); }

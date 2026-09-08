@@ -121,8 +121,8 @@ export interface PlanCard {
 
 export type GovernorProvider = "openai" | "anthropic";
 /** The drawer button's four states, in cycle order: normal pace, 3× (green),
- * 10× (blue), and halted (red: the orchestrator refuses every new launch for
- * the family while running sessions finish naturally). */
+ * 10× (blue), and background halted (red). Forced runs bypass these controls;
+ * running sessions finish naturally. */
 export type GovernorState = "off" | "green" | "blue" | "red";
 export interface Governor {
   state: GovernorState;

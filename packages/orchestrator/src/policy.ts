@@ -19,9 +19,9 @@ export function accountCapacity(store:Store,accountId:string,budget:BudgetClass,
   const stop=(reason:string):Capacity=>({sessions:0,spent,meterAt,reason});
   if(!allowsAccountUse(account,"fleet"))return stop(account.enabled?"reserved for voice":"disabled");
   if(account.cooldownUntil&&account.cooldownUntil>now)return stop("account cooling down");
-  if(!Number.isFinite(multiplier)||multiplier<=0)return stop("provider halted");
   if(meters.some((m)=>m.used_percent>=100))return stop("provider quota exhausted");
   if(budget==="force")return{sessions:account.concurrency,spent,meterAt,reason:"urgent spend"};
+  if(!Number.isFinite(multiplier)||multiplier<=0)return stop("background launches halted");
   if(!meters.length){
     const probed=store.db.prepare("SELECT 1 FROM lease WHERE account_id=? AND kind='fleet' LIMIT 1").get(accountId);
     const activeProbe=store.activeLeases(accountId,120_000,now).some((lease)=>lease.kind==="fleet");

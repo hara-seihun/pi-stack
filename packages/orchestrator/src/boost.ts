@@ -5,7 +5,7 @@
  * ceiling. The base account cap is scaled too. Above 1, calendar pacing and
  * single-admission-per-observation throttling do not apply; fresh meters,
  * provider exhaustion, reservations and the machine limit still do. `0` is the
- * halt state — the broker refuses every new launch for the family while
+ * background halt state. Operator-requested forced runs bypass these controls;
  * running sessions finish naturally.
  */
 export const BOOSTED_MULTIPLIER = 10;
