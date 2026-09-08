@@ -1764,7 +1764,7 @@ async function drainSession(sessionId: string) {
       const retryError = `Queued work retrying: ${String(cause?.message ?? cause)}`;
       setState(sessionId, active?.phase === "RUNNING" ? "RUNNING" : "FAILED", retryError);
       if (active) { active.retrying = true; touchSession(sessionId); }
-      emit(sessionId, "notice", { text: `Message retained; retrying in ${Math.round(delay / 1000)} seconds` });
+      emit(sessionId, "notice", { text: `Message retained; retrying in ${Math.round(delay / 1000)} seconds: ${String(cause?.message ?? cause)}` });
       scheduleSession(sessionId, delay);
       return;
     }

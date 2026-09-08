@@ -24,7 +24,7 @@ entrypoint with the host's pi-stack-release command, not pi install npm.`);
 const runtime = realpathSync(process.env.PI_STACK_RUNTIME_DEST ?? "/srv/pi/runtime");
 const host = realpathSync(values["worker-release"] ?? runtime);
 const sdk = realpathSync(join(host, "node_modules/@earendil-works/pi-coding-agent/dist/index.js"));
-const { createAgentSession, SessionManager } = await import(pathToFileURL(sdk).href);
+const { createAgentSession, DefaultResourceLoader, SessionManager } = await import(pathToFileURL(sdk).href);
 const selected = createRequire(join(runtime, "package.json"));
 const browserPackage = selected.resolve("agent-browser/package.json");
 const bin = realpathSync(join(dirname(dirname(browserPackage)), ".bin"));
@@ -44,8 +44,11 @@ let accepted = false;
 let browserAttempted = !!values["session-file"];
 try {
   await new Promise((resolve, reject) => { server.once("error", reject); server.listen(0, "127.0.0.1", resolve); });
+  const agentDir = join(homedir(), ".pi/agent");
+  const resourceLoader = new DefaultResourceLoader({ cwd: directory, agentDir });
+  await resourceLoader.reload({ resolveProjectTrust: async () => true });
   const opened = await createAgentSession({
-    cwd: directory, agentDir: join(homedir(), ".pi/agent"), tools: ["agent_browser"],
+    cwd: directory, agentDir, resourceLoader, tools: ["agent_browser"],
     sessionManager: SessionManager.open(sessionFile, undefined, directory),
   });
   session = opened.session;

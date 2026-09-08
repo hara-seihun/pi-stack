@@ -104,7 +104,7 @@ test("Pi reload selects both dependencies again after a release switch and rollb
       settingsManager,
       noSkills: true, noPromptTemplates: true, noThemes: true, noContextFiles: true,
     });
-    await loader.reload();
+    await loader.reload({ resolveProjectTrust: async () => true });
     const { session } = await createAgentSession({
       cwd: root, agentDir: join(root, "agent"), resourceLoader: loader, settingsManager,
       sessionManager: SessionManager.inMemory(root),

@@ -12,7 +12,7 @@ read-thread --path "Cayley CI review"
 read-thread --output /tmp/thread.md "Cayley CI review"
 ```
 
-The default view omits assistant thinking and successful tool results. `--work` includes both with per-block size limits. `--since` and `--tail` bound long sessions. `--path` prints the exact JSONL path when direct inspection is useful. The command reads `$PI_REMOTE_DATA/supervisor.sqlite3`, which Pi Remote supplies to every model process, so it selects the correct local or Converge thread store without a hard-coded personal path.
+The default view omits assistant thinking and successful tool results. `--work` includes both with per-block size limits. `--since` and `--tail` bound long sessions. `--path` prints the exact JSONL path when direct inspection is useful. The command reads `$PI_REMOTE_DATA/supervisor.sqlite3`, which Pi Remote supplies to every model process, so it selects the correct local or Converge thread store without a hard-coded personal path. In an SSH shell, it reads the current Unix user's `PI_REMOTE_DATA` from `/var/lib/pi-remote/persons/<user>.json`. If a request failed before Pi wrote a session file, the reader displays the supervisor's retained requests and events, explicitly labelled as supervisor records. `--path` still requires an existing JSONL.
 
 ## Model-assisted condensation
 

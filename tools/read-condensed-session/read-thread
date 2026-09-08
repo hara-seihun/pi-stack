@@ -1,10 +1,10 @@
 #!/usr/bin/env node
-import { existsSync, writeFileSync } from "node:fs";
-import { homedir } from "node:os";
+import { existsSync, readFileSync, writeFileSync } from "node:fs";
+import { homedir, userInfo } from "node:os";
 import { join, resolve } from "node:path";
 import { DatabaseSync } from "node:sqlite";
 import { takeFlag, takeOption } from "../shared/arguments.mjs";
-import { listThreads, renderThread, resolveThread } from "./thread-reader.mjs";
+import { listThreads, renderSupervisorRecords, renderThread, resolveThread } from "./thread-reader.mjs";
 
 const HELP = `usage: read-thread [OPTIONS] [THREAD]
 
@@ -28,6 +28,12 @@ function positiveInteger(value, label) {
 
 function defaultDatabase() {
   if (process.env.PI_REMOTE_DATA) return join(process.env.PI_REMOTE_DATA, "supervisor.sqlite3");
+  const personFile = join(process.env.PI_REMOTE_PERSONS_DIR ?? "/var/lib/pi-remote/persons", `${userInfo().username}.json`);
+  if (existsSync(personFile)) {
+    const data = JSON.parse(readFileSync(personFile, "utf8")).environment?.PI_REMOTE_DATA;
+    if (typeof data !== "string" || !data) throw new Error(`${personFile} must configure PI_REMOTE_DATA`);
+    return join(data, "supervisor.sqlite3");
+  }
   return join(process.env.XDG_STATE_HOME ?? join(homedir(), ".local", "state"), "pi-remote", "supervisor.sqlite3");
 }
 
@@ -62,14 +68,18 @@ function main() {
       return;
     }
     const row = resolveThread(rows, args[0]);
-    if (!row.session_path || !existsSync(row.session_path)) {
-      throw new Error(`thread ${JSON.stringify(row.name)} has no readable Pi session file`);
-    }
+    const hasSession = row.session_path && existsSync(row.session_path);
     if (pathOnly) {
+      if (!hasSession) throw new Error(`thread ${JSON.stringify(row.name)} has no Pi session file; omit --path to inspect its supervisor records`);
       console.log(row.session_path);
       return;
     }
-    const transcript = renderThread(row, { work, since, tail });
+    const transcript = hasSession ? renderThread(row, { work, since, tail }) : renderSupervisorRecords(
+      row,
+      db.prepare("SELECT text,state,attempts,last_error,created_at FROM work_items WHERE session_id=? ORDER BY created_at").all(row.id),
+      db.prepare("SELECT time,type,payload FROM events WHERE session_id=? ORDER BY seq").all(row.id),
+      { since, tail },
+    );
     if (output) {
       const destination = resolve(output);
       writeFileSync(destination, `${transcript}\n`);

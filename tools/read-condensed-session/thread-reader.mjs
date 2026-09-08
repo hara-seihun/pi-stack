@@ -96,6 +96,20 @@ function renderEntry(entry, options) {
   return rendered.join("\n");
 }
 
+export function renderSupervisorRecords(row, work, events, options = {}) {
+  let records = [
+    ...work.map((item) => ({ time: item.created_at, text: `request ${item.state}, ${item.attempts} attempts\n${item.text}${item.last_error ? `\nLast error: ${item.last_error}` : ""}` })),
+    ...events.map((event) => ({ time: event.time, text: `${event.type}\n${event.payload}` })),
+  ].sort((a, b) => String(a.time).localeCompare(String(b.time)));
+  if (options.since !== undefined) records = records.filter((record) => Date.parse(record.time) >= options.since);
+  if (options.tail !== undefined) records = records.slice(-options.tail);
+  return [
+    `# ${row.name}`, `thread: ${row.id}`, `state: ${row.state}`,
+    "Pi session file is not available. These are supervisor request and event records, not a model transcript.",
+    ...records.map((record) => `\n[${record.time}] ${record.text}`),
+  ].join("\n");
+}
+
 export function renderThread(row, options = {}) {
   const settings = {
     work: Boolean(options.work),
