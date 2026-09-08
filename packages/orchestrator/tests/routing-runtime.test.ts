@@ -4,25 +4,25 @@ import { promisify } from 'node:util';
 import { mkdtemp, writeFile, rm, symlink } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
-import { fileURLToPath } from 'node:url';
+import { fileURLToPath, pathToFileURL } from 'node:url';
 
-const [agentEntry, aiEntry] = JSON.parse(execFileSync(process.execPath, ['--input-type=module', '-e', `console.log(JSON.stringify(['@earendil-works/pi-coding-agent', '@earendil-works/pi-ai'].map(name => import.meta.resolve(name))))`], { encoding: 'utf8' })) as string[];
-const cli = join(dirname(fileURLToPath(agentEntry!)), 'bundle/cli.js');
-const ai = fileURLToPath(aiEntry!);
-let buildRoot: string, routing: string;
+let buildRoot: string, routing: string, ai: string, sdk: string, cli: string;
 beforeAll(async () => {
   buildRoot = await mkdtemp(join(tmpdir(), 'pi-routing-build-'));
   await symlink(fileURLToPath(new URL('../../../node_modules', import.meta.url)), join(buildRoot, 'node_modules'));
   await promisify(execFile)('tsc', ['-p', fileURLToPath(new URL('../tsconfig.build.json', import.meta.url)), '--outDir', join(buildRoot, 'compiled')], { timeout: 5000 });
   await writeFile(join(buildRoot, 'package.json'), '{"type":"module"}');
   routing = process.env.PI_TEST_ROUTING_ENTRY ?? join(buildRoot, 'compiled/extension/routing.js');
+  [sdk, ai] = JSON.parse(execFileSync(process.execPath, ['--experimental-import-meta-resolve', '--input-type=module', '-e', `console.log(JSON.stringify(['@earendil-works/pi-coding-agent', '@earendil-works/pi-ai'].map(name => import.meta.resolve(name, process.argv[1]))))`, pathToFileURL(routing).href], { encoding: 'utf8' })) as [string, string];
+  cli = join(dirname(fileURLToPath(sdk)), 'bundle/cli.js');
 });
 afterAll(async () => { if (buildRoot) await rm(buildRoot, { recursive: true, force: true }); });
 
 test.each(['0', '1'])('bundled CLI cleans extension-provider resources on shutdown, assigned=%s', async assigned => {
   const root = await mkdtemp(join(tmpdir(), 'pi-provider-cleanup-'));
-  const fixture = join(root, 'fixture.mjs');
-  await writeFile(fixture, `import { registerSessionResourceCleanup } from ${JSON.stringify(ai)};
+  // Match source extensions' Pi import aliases or compiled providers' native ESM registry.
+  const fixture = join(root, routing.endsWith('.ts') ? 'fixture.ts' : 'fixture.mjs');
+  await writeFile(fixture, `import { registerSessionResourceCleanup } from ${JSON.stringify(routing.endsWith('.ts') ? '@earendil-works/pi-ai' : ai)};
 export default function(pi) {
   pi.on('session_start', (_event, ctx) => {
     const id = ctx.sessionManager.getSessionId();
@@ -54,7 +54,7 @@ test.each(['anthropic', 'openai-codex'])('restores saved thinking with late prov
 import assert from 'node:assert/strict';
 import { mkdirSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
-import { createAgentSession, DefaultResourceLoader, ModelRuntime, SessionManager, SettingsManager } from ${JSON.stringify(agentEntry)};
+import { createAgentSession, DefaultResourceLoader, ModelRuntime, SessionManager, SettingsManager } from ${JSON.stringify(sdk)};
 import { Store } from ${JSON.stringify(join(buildRoot, 'compiled/store.js'))};
 const family = ${JSON.stringify(family)};
 const modelId = family === 'anthropic' ? 'claude-fable-5-1' : 'gpt-6-astra';
