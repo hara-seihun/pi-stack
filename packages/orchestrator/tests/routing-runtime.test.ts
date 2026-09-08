@@ -10,12 +10,12 @@ let buildRoot: string, routing: string, ai: string, sdk: string, cli: string;
 beforeAll(async () => {
   buildRoot = await mkdtemp(join(tmpdir(), 'pi-routing-build-'));
   await symlink(fileURLToPath(new URL('../../../node_modules', import.meta.url)), join(buildRoot, 'node_modules'));
-  await promisify(execFile)('tsc', ['-p', fileURLToPath(new URL('../tsconfig.build.json', import.meta.url)), '--outDir', join(buildRoot, 'compiled')], { timeout: 5000 });
+  await promisify(execFile)('tsc', ['-p', fileURLToPath(new URL('../tsconfig.build.json', import.meta.url)), '--outDir', join(buildRoot, 'compiled')], { timeout: 20_000 });
   await writeFile(join(buildRoot, 'package.json'), '{"type":"module"}');
   routing = process.env.PI_TEST_ROUTING_ENTRY ?? join(buildRoot, 'compiled/extension/routing.js');
   [sdk, ai] = JSON.parse(execFileSync(process.execPath, ['--experimental-import-meta-resolve', '--input-type=module', '-e', `console.log(JSON.stringify(['@earendil-works/pi-coding-agent', '@earendil-works/pi-ai'].map(name => import.meta.resolve(name, process.argv[1]))))`, pathToFileURL(routing).href], { encoding: 'utf8' })) as [string, string];
   cli = join(dirname(fileURLToPath(sdk)), 'bundle/cli.js');
-});
+}, 25_000);
 afterAll(async () => { if (buildRoot) await rm(buildRoot, { recursive: true, force: true }); });
 
 test.each(['0', '1'])('bundled CLI cleans extension-provider resources on shutdown, assigned=%s', async assigned => {

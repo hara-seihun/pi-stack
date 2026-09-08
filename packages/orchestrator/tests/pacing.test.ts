@@ -44,6 +44,24 @@ describe("quota-paced admission",()=>{
     expect(accountCapacity(store,"openai-codex","force",config,now).sessions).toBe(10);store.close();
   });
 
+  it("admits one discrete worker while spend remains within calendar pace",()=>{
+    const store=Store.open(":memory:"),now=Date.now(),reset=now+150*HOUR;account(store);
+    store.createLease("history","openai-codex","fleet",undefined,now-20*60_000);
+    store.endLease("history",now);
+    store.recordMeter("openai-codex","codex-7d",3,reset,now-20*60_000);
+    store.recordMeter("openai-codex","codex-7d",4,reset,now);
+    expect(accountCapacity(store,"openai-codex","background",config,now)).toMatchObject({
+      sessions:1,
+      reason:expect.stringContaining("% per session-hour"),
+    });
+    store.recordMeter("openai-codex","codex-7d",10,reset,now+1000);
+    expect(accountCapacity(store,"openai-codex","background",config,now+1000)).toMatchObject({
+      sessions:0,
+      reason:expect.stringContaining("exceeds paced allowance"),
+    });
+    store.close();
+  });
+
   it("uses hours of consumption and lease exposure, not the last flat sample",()=>{
     const store=Store.open(":memory:"),now=Date.now(),reset=now+84*HOUR;account(store);
     for(let i=0;i<4;i++)store.createLease(`session:${i}`,"openai-codex","fleet",undefined,now-4*HOUR);

@@ -58,7 +58,10 @@ export function accountCapacity(store:Store,accountId:string,budget:BudgetClass,
     if(exposure<=0){sessions=Math.min(sessions,1);reason="calibrating session consumption";continue;}
     const cost=(latest.used_percent-previous.used_percent+1)/exposure;
     const permitted=(limit-latest.used_percent)/remainingHours;
-    const ceiling=Math.max(0,Math.floor(permitted/cost));
+    // A worker is a discrete admission, not a promise to hold this concurrency
+    // continuously until reset. Calendar pacing and the per-observation gate
+    // stop successors once measured spend catches up.
+    const ceiling=Math.max(1,Math.floor(permitted/cost));
     if(ceiling<sessions){sessions=ceiling;reason=`${latest.meter_id}: ${permitted.toFixed(2)}%/h available, ${cost.toFixed(2)}% per session-hour`;}
   }
   const boosted=Math.floor(sessions*multiplier);
