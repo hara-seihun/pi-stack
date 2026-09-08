@@ -1,5 +1,5 @@
 import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
-import { cleanupSessionResources, type Model, type Provider } from "@earendil-works/pi-ai";
+import { cleanupSessionResources, getSupportedThinkingLevels, type Model, type Provider } from "@earendil-works/pi-ai";
 import { builtinProviders } from "@earendil-works/pi-ai/providers/all";
 import { homedir } from "node:os";
 import { join } from "node:path";
@@ -9,6 +9,8 @@ import { defaultSharedAuthPath, SharedOAuthAuth, providerOAuth, sharedOAuthProvi
 import { isRateLimitError, rateLimitCooldownMs } from "../provider-errors.js";
 import { interruptedTurnPrompt } from "../host/continuations.js";
 import customModelConfig from "../models.json" with { type: "json" };
+
+type ThinkingLevel = ReturnType<ExtensionAPI["getThinkingLevel"]>;
 
 export function defaultLedgerPath():string{return process.env.PI_ORCHESTRATOR_LEDGER||join(homedir(),".local/share/pi-orchestrator/ledger.sqlite3");}
 export function baseProvider(provider:string):string{return provider.replace(/-\d+$/u,"");}
@@ -39,19 +41,40 @@ export default function routing(pi:ExtensionAPI):void{
     const spent=(id:string)=>Math.max(0,...store.latestMeters(id).map((meter)=>Number(meter.used_percent)));
     return spent(a.id)-spent(b.id)||store.activeLeases(a.id).length-store.activeLeases(b.id).length||a.id.localeCompare(b.id);
   })[0];
-  const bind=async(ctx:ExtensionContext,exclude?:Set<string>,requested?:{family:string;modelId:string}):Promise<string|undefined>=>{
-    const current=ctx.model;if(!current&&!requested)return;
+  const select=async(ctx:ExtensionContext,model:Model<never>,thinking:ThinkingLevel):Promise<boolean>=>{
+    await ctx.modelRegistry.refresh({providers:[model.provider],allowNetwork:false});
+    if(!await pi.setModel(model))return false;
+    pi.setThinkingLevel(thinking);
+    return true;
+  };
+  const bind=async(ctx:ExtensionContext,exclude?:Set<string>,requested?:{family:string;modelId:string;thinking:ThinkingLevel}):Promise<string|undefined>=>{
+    const current=ctx.model,thinking=requested?.thinking??pi.getThinkingLevel();if(!current&&!requested)return;
     const family=requested?.family??familyOf(current!.provider),modelId=requested?.modelId??current!.id,choice=choose(family,exclude);
     if(!choice)return;
-    if(choice.id===current?.provider&&modelId===current.id)return;
+    if(!requested&&choice.id===current?.provider&&modelId===current.id)return choice.id;
     const next=resolve(choice.id,family,modelId);if(!next)return;
-    await ctx.modelRegistry.refresh({providers:[choice.id],allowNetwork:false});
-    return await pi.setModel(next)?choice.id:undefined;
+    return await select(ctx,next,thinking)?choice.id:undefined;
   };
   let leaseId:string|undefined,timer:ReturnType<typeof setInterval>|undefined;
   pi.on("session_start",async(event,ctx)=>{
     const branch=ctx.sessionManager.getBranch(),history=branch.some((entry)=>entry.type==="message"&&entry.message.role==="assistant");
-    if(history){let selected:{provider:string;modelId:string}|undefined;for(const entry of branch)if(entry.type==="model_change")selected={provider:entry.provider,modelId:entry.modelId};if(selected){const family=familyOf(selected.provider),saved=resolve(selected.provider,family,selected.modelId);await ctx.modelRegistry.refresh({providers:[selected.provider],allowNetwork:false});if(!(saved&&store.account(selected.provider)&&allowsAccountUse(store.account(selected.provider)!,"interactive")&&await pi.setModel(saved)))await bind(ctx,undefined,{family,modelId:selected.modelId});}}
+    if(history){
+      let selected:{provider:string;modelId:string}|undefined;
+      let thinking=pi.getThinkingLevel();
+      for(const entry of branch){
+        if(entry.type==="model_change")selected={provider:entry.provider,modelId:entry.modelId};
+        else if(entry.type==="thinking_level_change")thinking=entry.thinkingLevel as ThinkingLevel;
+      }
+      if(selected){
+        const family=familyOf(selected.provider),saved=resolve(selected.provider,family,selected.modelId),account=store.account(selected.provider);
+        if(saved&&ctx.model?.provider===selected.provider&&ctx.model.id===selected.modelId&&getSupportedThinkingLevels(saved).includes(pi.getThinkingLevel())){
+          thinking=pi.getThinkingLevel();
+        }
+        if(!(saved&&account&&allowsAccountUse(account,"interactive")&&await select(ctx,saved,thinking))){
+          await bind(ctx,undefined,{family,modelId:selected.modelId,thinking});
+        }
+      }
+    }
     else if(event.reason==="startup"||event.reason==="new")await bind(ctx);
     const account=ctx.model?.provider;if(store.account(account??"")){leaseId=`interactive:${ctx.sessionManager.getSessionId()}`;store.createLease(leaseId!,account!,"interactive");timer=setInterval(()=>store.heartbeatLease(leaseId!),30_000);}
   });
