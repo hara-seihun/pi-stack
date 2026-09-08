@@ -7,6 +7,8 @@ Reusable extensions for [Pi](https://pi.dev). The [stack manifest](../../package
 - `bash-timeout-guard` requires a bounded bash call, defaults to 30 minutes with a UI and 55 seconds for autonomous sessions, accepts a host-configured ceiling, and forbids detached work.
 - [Browser runtime](extensions/browser/README.md) loads the native browser tool with its executable from the same immutable dependency tree.
 
+The stack also supplies native [Image 2.5 generation](../orchestrator/docs/image-generation.md) through the Orchestrator routing extension, which owns its OpenAI account selection and leases.
+
 ## Install
 
 Install the runtime workspace from a Pi stack checkout:

@@ -7,6 +7,8 @@ import { Store } from "../store.js";
 import { allowsAccountUse } from "../domain.js";
 import { defaultSharedAuthPath, SharedOAuthAuth, providerOAuth, sharedOAuthProvider } from "../auth/shared-oauth.js";
 import { isRateLimitError, rateLimitCooldownMs } from "../provider-errors.js";
+import { chooseInteractiveAccount } from "../auth/account-selection.js";
+import { installImageGeneration } from "./image-generation.js";
 import { interruptedTurnPrompt } from "../host/continuations.js";
 import customModelConfig from "../models.json" with { type: "json" };
 
@@ -32,15 +34,13 @@ export default function routing(pi:ExtensionAPI):void{
     const family=families.get(account.provider),auth=shared.get(account.provider);if(!family||!auth||!allowsAccountUse(account,"interactive"))continue;
     pi.registerProvider(sharedOAuthProvider(family,account.id,account.label,auth));
   }
+  installImageGeneration(pi, store, shared.get("openai-codex"));
   // The bundled CLI and extension providers have separate pi-ai resource registries.
   pi.on("session_shutdown",(_event,ctx)=>cleanupSessionResources(ctx.sessionManager.getSessionId()));
   if(process.env.PI_ORCHESTRATOR_ASSIGNED==="1"){pi.on("session_shutdown",()=>store.close());return;}
   const familyOf=(provider:string)=>store.account(provider)?.provider??baseProvider(provider);
   const resolve=(accountId:string,family:string,modelId:string):Model<never>|undefined=>{const model=families.get(family)?.getModels().find((candidate)=>candidate.id===modelId);return model?(accountId===family?model:{...model,provider:accountId}) as Model<never>:undefined;};
-  const choose=(family:string,exclude=new Set<string>())=>store.accounts().filter((account)=>account.provider===family&&allowsAccountUse(account,"interactive")&&!exclude.has(account.id)&&(!account.cooldownUntil||account.cooldownUntil<=Date.now())&&shared.get(family)?.has(account.id)).sort((a,b)=>{
-    const spent=(id:string)=>Math.max(0,...store.latestMeters(id).map((meter)=>Number(meter.used_percent)));
-    return spent(a.id)-spent(b.id)||store.activeLeases(a.id).length-store.activeLeases(b.id).length||a.id.localeCompare(b.id);
-  })[0];
+  const choose=(family:string,exclude=new Set<string>())=>chooseInteractiveAccount(store,shared.get(family),family,exclude);
   const select=async(ctx:ExtensionContext,model:Model<never>,thinking:ThinkingLevel):Promise<boolean>=>{
     await ctx.modelRegistry.refresh({providers:[model.provider],allowNetwork:false});
     if(!await pi.setModel(model))return false;

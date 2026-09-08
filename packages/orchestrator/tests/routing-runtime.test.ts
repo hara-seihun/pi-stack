@@ -33,7 +33,10 @@ export default function(pi) {
       process.stdout.write('provider-resource-closed\\n');
     });
   });
-  pi.on('input', () => ({ action: 'handled' }));
+  pi.on('input', () => {
+    if (pi.getActiveTools().length) throw new Error('--no-tools was overridden');
+    return { action: 'handled' };
+  });
 }
 `);
   const env = { ...process.env, HOME: root, PI_CODING_AGENT_DIR: join(root, 'agent'), PI_ORCHESTRATOR_LEDGER: join(root, 'ledger.sqlite3'), PI_ORCHESTRATOR_ASSIGNED: assigned, PI_SKIP_VERSION_CHECK: '1' };
@@ -83,18 +86,20 @@ for (const account of [family + '-2', family + '-99']) {
     try {
       await session.bindExtensions({mode:'print',onError:e=>errors.push(e)});
       assert.deepEqual(errors, []);
+      assert.equal(session.getActiveToolNames().includes('image_generation'), family === 'openai-codex');
       assert.equal(session.model.provider, family + '-2');
       assert.equal(session.model.id, modelId);
       assert.equal(session.thinkingLevel, thinking);
       assert.equal(sm.buildSessionContext().thinkingLevel, thinking);
     } finally { await session.extensionRunner.emit({type:'session_shutdown',reason:'quit'}); session.dispose(); }
     await resourceLoader.reload();
-    const {session: overridden} = await createAgentSession({cwd:root,agentDir:dir,modelRuntime,settingsManager,resourceLoader,sessionManager:sm,thinkingLevel:'low'});
+    const {session: overridden} = await createAgentSession({cwd:root,agentDir:dir,modelRuntime,settingsManager,resourceLoader,sessionManager:sm,thinkingLevel:'low',tools:[]});
     try {
       assert.equal(overridden.thinkingLevel, 'low');
       await overridden.bindExtensions({mode:'print',onError:e=>errors.push(e)});
       assert.deepEqual(errors, []);
       assert.equal(overridden.thinkingLevel, 'low');
+      assert.deepEqual(overridden.getActiveToolNames(), []);
     } finally { await overridden.extensionRunner.emit({type:'session_shutdown',reason:'quit'}); overridden.dispose(); }
   }
 }
