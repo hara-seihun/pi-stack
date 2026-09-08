@@ -19,7 +19,8 @@
 import { existsSync } from "node:fs";
 import { unlink, writeFile, mkdir, chmod } from "node:fs/promises";
 import { join } from "node:path";
-import { knownEnvironments, listPersons, publicPerson, type Person } from "./persons";
+import { listPersons, publicPerson, type Person } from "./persons";
+import { knownEnvironments } from "./environments";
 import { proxyFetch } from "./proxy-fetch";
 import { preflight, withCors } from "./cors";
 
@@ -176,7 +177,7 @@ async function proxy(person: Person, req: Request, url: URL): Promise<Response> 
 }
 
 const persons = PEOPLE.map(publicPerson);
-const environments = knownEnvironments(PEOPLE[0]!.environment);
+const environments = knownEnvironments({ PI_REMOTE_ENVIRONMENT_ID: ENVIRONMENT_ID, PI_REMOTE_ENVIRONMENT_NAME: ENVIRONMENT_NAME });
 const lockedEnvironment = () => ({
   id: ENVIRONMENT_ID,
   name: ENVIRONMENT_NAME,

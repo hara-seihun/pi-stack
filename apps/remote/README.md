@@ -22,7 +22,7 @@ The New Thread picker keeps its destination and model choices open across dashbo
 
 The drawer reports only measured plan and hardware rows. Each plan row also carries how much of that model's prompt tokens came from the provider's cache over the last 24 hours, read from the orchestrator's usage ledger; a model nobody called in that window shows nothing rather than a zero. CPU sampling runs independently of client polling, and Android warms SSH-backed environments in the background so switching does not pay connection setup in the foreground.
 
-[`apps/kenan`](../kenan/README.md) packages the same compiled React client with Capacitor as the Kenan Android app. A small native plugin owns endpoint selection, haptics, system-bar layout, and the pinned Converge SSH tunnel.
+[`apps/kenan`](../kenan/README.md) packages the same compiled React client with Capacitor as the Kenan Android app. A small native plugin owns endpoint selection, haptics, system-bar layout, and the pinned Converge SSH tunnel. The browser's environment selector reads `environments` from `/etc/pi-stack/host.json`, as described in [deployment](../../docs/deployment.md#what-a-host-provides). That list belongs to the host, not to any person; adding a person cannot change the available hosts.
 
 Drop files anywhere in the client window to attach them to the open conversation's draft. A window-wide overlay names the destination. Dropping never sends a message, and read-only agent views do not accept attachments. Attachments stay with their conversation when switching threads, including while an upload is running.
 

@@ -21,13 +21,16 @@ function person(user: string, encrypted: boolean, supervisorPort: number) {
     ...(encrypted ? { unlock: { cipherDir: `/home/${user}/.x.crypt`, mountpoint: `/home/${user}/x` } } : {}),
     environment: {
       PI_REMOTE_ENVIRONMENT_ID: "testenv", PI_REMOTE_ENVIRONMENT_NAME: "Test",
-      PI_REMOTE_ENVIRONMENTS: [{ id: "testenv", name: "Test", baseUrl: "" }, { id: "other", name: "Other", baseUrl: "/other" }],
     },
   }));
 }
 
 beforeAll(async () => {
   for (const directory of [persons, bin, units, keys]) mkdirSync(directory, { recursive: true });
+  writeFileSync(join(root, "host.json"), JSON.stringify({ version: 1, environments: [
+    { id: "testenv", name: "Test", baseUrl: "" },
+    { id: "other", name: "Other", baseUrl: "/other" },
+  ] }));
   person("alice", true, 19998);
   person("bob", false, 19999);
   // `start` records the unit as active; `show` reports it; `stop` forgets it.
@@ -53,6 +56,7 @@ esac
       PATH: `${bin}:${process.env.PATH ?? ""}`,
       PI_REMOTE_ROUTER_PORT: String(port),
       PI_REMOTE_PERSONS_DIR: persons,
+      PI_STACK_HOST_FILE: join(root, "host.json"),
       PI_REMOTE_KEY_DIR: keys,
       PI_REMOTE_UNLOCK_TIMEOUT_MS: "300",
     },
@@ -117,7 +121,7 @@ describe("Pi Remote front door", () => {
     expect((await locked.json()).choosePerson).toBe(true);
   });
 
-  test("lists the environments the page may switch among", async () => {
+  test("discovers host environments before identity, without copying routes into person files", async () => {
     const response = await fetch(`${base}/v1/environments`);
     expect(await response.json()).toEqual({ environments: [
       { id: "testenv", name: "Test", baseUrl: "" },

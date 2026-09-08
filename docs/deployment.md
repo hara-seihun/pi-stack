@@ -20,10 +20,16 @@ The stack is the same on every machine. A host supplies three things.
 {
   "version": 1,
   "fleetUser": "kenan",
+  "environments": [
+    { "id": "local", "name": "Local", "baseUrl": "" },
+    { "id": "converge", "name": "Converge", "baseUrl": "/converge" }
+  ],
   "packages": ["/etc/nixos/pi-agent/extensions/scratch-updates"],
   "skills": ["/etc/nixos/pi-agent/skills/math-research"]
 }
 ```
+
+`environments` lists the browser's host choices and their same-origin path prefixes. It is optional; without it, clients see only this host. The router and supervisors read this list from the host file, independent of the person registry. `PI_STACK_HOST_FILE` selects another host file for tests or custom installations. Restart the router after changing the list.
 
 `fleetUser` runs `pi-orchestrator@<user>.service`. `packages` are extra Pi packages every account loads, placed after the reviewed ones and before the Pi Remote context observer. `skills` are extra skill directories linked into every account's skill directory under their own names. Both are optional and point at paths the host owns.
 
@@ -86,7 +92,7 @@ CI runs the same gate from a persistent self-hosted checkout. Deployment does no
 
 ## Kenan
 
-The Android app embeds its endpoint list from a JSON file named in `apps/kenan/android/local.properties`, which is not committed; see [the Kenan README](../apps/kenan/README.md#build-configuration). An SSH endpoint's account must allow local forwarding only to the front door's port. The browser client instead asks the host it was served from for its environment list (`PI_REMOTE_ENVIRONMENTS` in the person files).
+The Android app embeds its endpoint list from a JSON file named in `apps/kenan/android/local.properties`, which is not committed; see [the Kenan README](../apps/kenan/README.md#build-configuration). An SSH endpoint's account must allow local forwarding only to the front door's port. The browser client instead asks the host it was served from for its environment list, declared once as `environments` in `/etc/pi-stack/host.json`.
 
 ## Release verification
 
