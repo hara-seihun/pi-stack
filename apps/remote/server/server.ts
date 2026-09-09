@@ -15,6 +15,7 @@ import { startLedgerSnapshots } from "./ledger-snapshot";
 import { DEFAULT_LIVE_MODEL, DEFAULT_LIVE_VOICE, VoiceBroker } from "./voice/broker";
 import { attachRuntimeHost, startRuntimeHost, type RuntimeTransport } from "./runtime-transport";
 import { API } from "./api";
+import { idleNotifications } from "./notifications";
 import { listPersons, publicPerson } from "./persons";
 import { knownEnvironments } from "./environments";
 import { API_CORS_HEADERS } from "./cors";
@@ -2188,6 +2189,11 @@ const server = Bun.serve({
           liveThinking: stream.liveThinking,
         });
       } catch (cause: any) { return error(cause?.message ?? "Could not read the agent transcript", 503); }
+    }
+    if (API.notifications.match(req.method, url.pathname)) {
+      const after = url.searchParams.has("after") ? Number(url.searchParams.get("after")) : null;
+      if (after !== null && (!Number.isSafeInteger(after) || after < 0)) return error("Invalid notification cursor", 400);
+      return json({ environmentId: ENVIRONMENT_ID, ...idleNotifications(db, after) });
     }
     if (API.workspaces.match(req.method, url.pathname)) {
       return json({ workspaces: [...workspaces.values()].map(({ id, name, path }) => ({ id, name, path })) });

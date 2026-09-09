@@ -17,7 +17,7 @@ import java.util.Base64;
 
 final class RemoteTransport {
     private static final int CONNECT_TIMEOUT_MS = 7_000;
-    private static final String HOST_KEY_ALIAS = "kenan-converge";
+    private static final String HOST_KEY_ALIAS = "kenan-remote";
     private Session sshSession;
     private RemoteEnvironment.Ssh activeConfig;
 
@@ -61,10 +61,6 @@ final class RemoteTransport {
         } catch (JSONException invalid) {
             throw new IOException("Pi Remote health check returned invalid JSON", invalid);
         }
-    }
-
-    synchronized void environmentChanged() {
-        disconnect();
     }
 
     synchronized void close() {

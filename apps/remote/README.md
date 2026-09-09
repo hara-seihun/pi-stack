@@ -36,6 +36,16 @@ The supervisor names a thread after its first user message and updates the name 
 
 Model menus, autonomous-agent labels, and plan cards use the catalog exported by `pi-orchestrator/api`. Plan cards project the orchestrator's account and meter facts; Pi Remote carries no provider usage parser or duplicate provider manifest. New Astra threads start in OpenAI's priority service tier. Existing threads keep their saved mode, and other models start in normal mode.
 
+## Idle notifications
+
+The drawer's **Enable notifications** button asks for notification permission. Once enabled, both clients monitor every configured environment, not just the selected one. A notification names the environment and thread. Tapping it selects that environment and opens the thread.
+
+The supervisor commits an `idle_notifications` row in the same SQLite transaction that changes a session from RUNNING or ABORTING to IDLE. Opening an idle runtime, repeated idle updates, and supervisor startup do not create notifications. A queued follow-up keeps the session RUNNING until its work settles. `GET /v1/notifications` establishes a cursor without replaying history; `?after=CURSOR` returns up to 100 later transitions. The feed includes its environment identity. The [feed implementation](server/notifications.ts) and [schema](server/database.ts) own this contract.
+
+Clients poll each environment independently every five seconds and retain separate cursors for each person and environment. An unavailable host does not stop another host's notifications. Reconnection replays transitions since the saved cursor, including sessions that completed entirely while the client was disconnected. Locked environments report that they need unlocking rather than asking for a key in the background.
+
+Android's [notification service](../kenan/android/app/src/main/java/works/kenan/piremote/kenan/IdleNotificationService.java) runs outside the WebView and keeps an ongoing monitoring notification with connection status. Environment selection does not close other environments' SSH tunnels. Cursors live in app-private `idle-notifications` preferences. Android may delay delivery during network loss or device sleep; force-stopping the app stops monitoring until it is opened again. The browser monitors while its page is open and executing, with cursors in localStorage and Web Locks preventing duplicate delivery across tabs. Browser suspension delays delivery until the page resumes. Neither client requires a third-party push service.
+
 ## Requirements
 
 - [Bun](https://bun.sh/), `jq`, and `gocryptfs` for encrypted folders

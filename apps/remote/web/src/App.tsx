@@ -9,6 +9,7 @@ import { deleteCachedContext, readCachedContext, writeCachedContext } from "./co
 import { api, piFetch, registerUnlockHandler, syncRequest } from "./client";
 import { ContextTranscript, CopyButton, Markdown, modelContextEntries } from "./context";
 import { FileExplorer } from "./file-explorer";
+import { NotificationControl, takeNotificationTarget, retainNotificationTarget } from "./notifications";
 import { listenForFileDrops } from "./file-drop";
 import { createSyncLoop, type SyncLoop } from "./sync-loop";
 import { updateDocument } from "./sync";
@@ -378,6 +379,25 @@ export default function App() {
     } catch (error) { console.error(error); }
   }, [cacheKey, kick, patch, stateRef]);
 
+  useEffect(() => {
+    const openNotification = async () => {
+      try {
+        const target = await takeNotificationTarget();
+        if (!target?.sessionId || !target.environment) return;
+        const environment = await window.KenanRemote?.getState();
+        if (target.environment !== environment?.id || target.user !== (window.PiRemotePerson?.get() || "")) {
+          retainNotificationTarget(target);
+          window.PiRemotePerson?.set(target.user || "");
+          await window.KenanRemote?.select({ id: target.environment, user: target.user || "" });
+          location.reload();
+        } else await selectThread(target.sessionId);
+      } catch (cause) { patch({ offline: `Could not open notification: ${String(cause)}` }); }
+    };
+    void openNotification();
+    window.addEventListener("pi-notification", openNotification);
+    return () => window.removeEventListener("pi-notification", openNotification);
+  }, [selectThread, patch]);
+
   const selectAgent = useCallback((run: AgentRun) => {
     syncMeta.current.agentSeq = 0;
     patch({ agentRunId: run.id, agentRun: run, agentEntries: [], agentText: null, agentThinking: null, syncing: true, drawerOpen: innerWidth >= 1000 });
@@ -593,7 +613,7 @@ export default function App() {
       {state.drawerTab === "agents" && <AgentList runs={dashboard?.agents.runs ?? []} hosts={dashboard?.agents.hosts ?? []} selectedId={state.agentRunId} onSelect={selectAgent} />}
       {state.drawerTab === "archived" && <div className="thread-list">{state.archived.length ? state.archived.map((session) => <ThreadRow key={session.id} archived session={session} selected={false} onSelect={() => {}} onArchive={() => {}} onUnarchive={(id) => void unarchive(id)} />) : <div className="agent-empty">No archived threads</div>}{state.archived.length < state.archivedTotal && <button type="button" className="archived-more" onClick={() => void loadOlder()}>Show older · {state.archivedTotal - state.archived.length} more</button>}</div>}
       <FileExplorer hidden={state.drawerTab !== "files"} onRootCount={setRootFileCount} />
-      <footer className="drawer-footer"><MachineControls actions={dashboard?.actions ?? []} governors={dashboard?.governors ?? null} onAction={(id) => void toggleAction(id)} onGovernor={(provider) => void toggleGovernor(provider)} /><EnvironmentControl /><PlanSummary plans={dashboard?.plans ?? []} counts={modelCounts} /><div className="usage-summary muted">{machineText}</div><div className="usage-summary muted" title={__PI_REMOTE_REVISION__}>Client {__PI_REMOTE_REVISION__.slice(0, 12)}</div>{state.offline && <div className="connection" style={{ color: "var(--danger)" }}>● Offline · {state.offline}</div>}</footer>
+      <footer className="drawer-footer"><MachineControls actions={dashboard?.actions ?? []} governors={dashboard?.governors ?? null} onAction={(id) => void toggleAction(id)} onGovernor={(provider) => void toggleGovernor(provider)} /><EnvironmentControl /><NotificationControl /><PlanSummary plans={dashboard?.plans ?? []} counts={modelCounts} /><div className="usage-summary muted">{machineText}</div><div className="usage-summary muted" title={__PI_REMOTE_REVISION__}>Client {__PI_REMOTE_REVISION__.slice(0, 12)}</div>{state.offline && <div className="connection" style={{ color: "var(--danger)" }}>● Offline · {state.offline}</div>}</footer>
     </aside>
     <main id="main"><header className="topbar"><button className="icon-button" aria-label="Open navigation" onClick={() => patch({ drawerOpen: true })}>☰</button><div className="top-title">{title}</div><div className="top-state" style={{ color: state.offline ? "var(--danger)" : activityColor(selectedActivity) }}>{state.offline ? "OFFLINE" : state.syncing ? "SYNCING" : activityLabel(selectedActivity, selectedTool ?? "")}</div>{state.offline && <button type="button" onClick={kick} title={state.offline}>Reconnect</button>}<button className="icon-button" aria-label="Open thread settings" disabled={!selected || Boolean(state.agentRunId)} onClick={() => patch({ settingsOpen: true })}>⚙</button></header>
       {!state.selectedId && !state.agentRunId ? <section className="empty-state"><strong>No threads</strong><span>Open the drawer to create one.</span></section> : <section className="conversation"><div className="scrollback"><div className="scroll-content"><ContextTranscript entries={entries} liveThinking={liveThinking} sessionId={state.selectedId || ""} home={dashboard?.home ?? "/"} onEdit={editFrom} />{liveText && <div className="live-answer"><Markdown source={liveText} sessionId={state.selectedId || ""} streaming /><CopyButton text={liveText} label="Copy response" /></div>}</div></div>

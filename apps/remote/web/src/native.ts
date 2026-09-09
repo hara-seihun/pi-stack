@@ -14,6 +14,8 @@ interface RemoteBridge {
   prepare(options?: object): Promise<void>;
   select(options: { id: string; user: string }): Promise<EnvironmentState>;
   haptic?(options: { kind: string }): Promise<void>;
+  notifications?(options: { user: string; request: boolean }): Promise<{ enabled: boolean }>;
+  notificationTarget?(): Promise<{ environment?: string; sessionId?: string; user?: string }>;
 }
 
 const capacitor = window.Capacitor;
@@ -57,7 +59,11 @@ const remote: RemoteBridge = !nativePlatform
         prepare: (options = {}) => capacitor.nativePromise("KenanRemote", "prepare", options),
         select: (options) => capacitor.nativePromise("KenanRemote", "select", options),
         haptic: (options) => capacitor.nativePromise("KenanRemote", "haptic", options),
+        notifications: (options) => capacitor.nativePromise("KenanRemote", "notifications", options),
+        notificationTarget: () => capacitor.nativePromise("KenanRemote", "notificationTarget", {}),
       };
+export { nativePlatform, remote, browserFetch, loadBrowserEnvironments };
+
 let statePromise: Promise<EnvironmentState> | null = null;
 let current: EnvironmentState | null = null;
 let preparePromise: Promise<void> | null = null;

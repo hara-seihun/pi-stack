@@ -26,6 +26,17 @@ CREATE TABLE IF NOT EXISTS sessions (
   display_order INTEGER NOT NULL DEFAULT 0,
   named_at_message_count INTEGER NOT NULL DEFAULT 0
 );
+CREATE TABLE IF NOT EXISTS idle_notifications (
+  seq INTEGER PRIMARY KEY AUTOINCREMENT,
+  session_id TEXT NOT NULL,
+  name TEXT NOT NULL,
+  time TEXT NOT NULL
+);
+CREATE TRIGGER IF NOT EXISTS session_became_idle AFTER UPDATE OF state ON sessions
+WHEN NEW.state = 'IDLE' AND OLD.state IN ('RUNNING', 'ABORTING')
+BEGIN
+  INSERT INTO idle_notifications(session_id,name,time) VALUES(NEW.id,NEW.name,NEW.updated_at);
+END;
 CREATE TABLE IF NOT EXISTS events (
   seq INTEGER PRIMARY KEY AUTOINCREMENT,
   session_id TEXT NOT NULL REFERENCES sessions(id) ON DELETE CASCADE,

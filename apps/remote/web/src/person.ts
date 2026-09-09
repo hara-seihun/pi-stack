@@ -10,7 +10,10 @@
   "use strict";
   const PERSON_STORAGE = "pi-remote-person";
   const read = () => { try { return localStorage.getItem(PERSON_STORAGE) || ""; } catch { return ""; } };
-  const write = (user: string) => { try { user ? localStorage.setItem(PERSON_STORAGE, user) : localStorage.removeItem(PERSON_STORAGE); } catch {} };
+  const write = (user: string) => {
+    try { user ? localStorage.setItem(PERSON_STORAGE, user) : localStorage.removeItem(PERSON_STORAGE); } catch {}
+    window.dispatchEvent(new Event("pi-person"));
+  };
 
   const original = window.fetch.bind(window);
   window.fetch = (input, init) => {

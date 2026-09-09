@@ -6,6 +6,8 @@ The browser and Android app have one React and TypeScript interface source in [`
 
 The native layer keeps the WebView below Android's system bars, translates touches into system haptics, remembers the selected environment, opens a pinned SSH forward for endpoints that need one, and tells the shared client which endpoint owns each API call. Synchronization, context rendering, the drawer, composer, uploads, voice, files, and settings run from the same compiled application and CSS as the browser. The shared client bounds native environment discovery and SSH preparation separately. Failed discovery is retryable, and a failed network request marks the tunnel for replacement on the next preparation instead of trusting JSch's stale connected flag. Cancelling a selection does not tear down a healthy tunnel. The launcher artwork comes from the native Kenan implementation this app replaced.
 
+Idle notifications use a native foreground service that watches every configured environment, even when the WebView is in the background. Enable them once in the drawer and allow Android's notification permission. The ongoing monitoring notification reports connection or unlock failures. The service and UI share one independently reconnectable transport per environment. [Pi Remote's notification contract](../remote/README.md#idle-notifications) describes replay, cursor storage, and delivery limits.
+
 ## Build configuration
 
 Ignored [`android/local.properties`](android/local.properties) names the endpoint declaration, a JSON list of every host the app may switch among. The build requires Android SDK 36, Java 21, and Bun for the connection tests.

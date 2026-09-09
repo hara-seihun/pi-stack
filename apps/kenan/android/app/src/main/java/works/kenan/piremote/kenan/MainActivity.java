@@ -1,6 +1,7 @@
 package works.kenan.piremote.kenan;
 
 import android.graphics.Color;
+import android.content.Intent;
 import android.os.Bundle;
 import android.view.View;
 import android.view.ViewGroup;
@@ -18,6 +19,13 @@ public class MainActivity extends BridgeActivity {
         registerPlugin(KenanRemotePlugin.class);
         super.onCreate(savedInstanceState);
         keepSharedClientBelowSystemBars();
+    }
+
+    @Override
+    protected void onNewIntent(Intent intent) {
+        super.onNewIntent(intent);
+        setIntent(intent);
+        if (bridge != null) bridge.triggerWindowJSEvent("pi-notification");
     }
 
     @Override

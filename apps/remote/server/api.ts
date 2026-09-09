@@ -32,6 +32,7 @@ function route(method: string, template: string): Route {
 
 export const API = Object.freeze({
   unlock: route("POST", "/v1/unlock"), health: route("GET", "/v1/health"), environment: route("GET", "/v1/environment"), environments: route("GET", "/v1/environments"),
+  notifications: route("GET", "/v1/notifications"),
   files: route("GET", "/v1/files"), fileDownload: route("GET", "/v1/files/download"), fileDownloadHead: route("HEAD", "/v1/files/download"),
   voice: route("GET", "/v1/voice"), voiceOffer: route("POST", "/v1/voice/offer"), voiceLeaseHeartbeat: route("PATCH", "/v1/voice/leases/:leaseId"), voiceLeaseRelease: route("DELETE", "/v1/voice/leases/:leaseId"),
   governorToggle: route("POST", "/v1/governor-controls/:provider/toggle"),

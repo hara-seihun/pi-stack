@@ -500,6 +500,21 @@ async function createThread(destination = "home", model?: string) {
 }
 
 describe("web and supervisor integration", () => {
+  test("replays idle transitions without requiring a selected thread or a connected client", async () => {
+    const initial = await api("GET", "/v1/notifications");
+    expect(initial.status).toBe(200);
+    expect(initial.value.notifications).toEqual([]);
+    const id = await createThread();
+    expect((await api("GET", `/v1/notifications?after=${initial.value.cursor}`)).value.notifications).toEqual([]);
+    await api("POST", `/v1/sessions/${id}/prompt`, { requestId: crypto.randomUUID(), text: "later-run" });
+    const feed = await waitFor(() => api("GET", `/v1/notifications?after=${initial.value.cursor}`),
+      (result) => result.value.notifications?.some((event: any) => event.sessionId === id));
+    expect(feed.value.environmentId).toBe((await api("GET", "/v1/health")).value.environmentId);
+    expect(feed.value.notifications.filter((event: any) => event.sessionId === id)).toHaveLength(1);
+    expect((await api("GET", `/v1/notifications?after=${feed.value.cursor}`)).value.notifications).toEqual([]);
+    expect((await api("GET", "/v1/notifications?after=-1")).status).toBe(400);
+  });
+
   test("exposes host-configured actions as toggles it knows nothing about", async () => {
     const before = await api("POST", "/v1/sync", { seq: 0, dashboardVersion: 0, waitMs: 0 });
     expect(before.value.dashboard.actions).toEqual([{ id: "thunder", label: "Thunder", icon: "thunder", active: false }]);

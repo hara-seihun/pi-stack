@@ -1,6 +1,12 @@
 package works.kenan.piremote.kenan;
 
 import android.util.Log;
+import android.Manifest;
+import android.content.Intent;
+import android.os.Build;
+import com.getcapacitor.PermissionState;
+import com.getcapacitor.annotation.Permission;
+import com.getcapacitor.annotation.PermissionCallback;
 
 import com.getcapacitor.JSArray;
 import com.getcapacitor.JSObject;
@@ -12,24 +18,26 @@ import com.getcapacitor.annotation.CapacitorPlugin;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
 
-@CapacitorPlugin(name = "KenanRemote")
+@CapacitorPlugin(name = "KenanRemote", permissions = {
+    @Permission(alias = "notifications", strings = { Manifest.permission.POST_NOTIFICATIONS })
+})
 public final class KenanRemotePlugin extends Plugin {
     private final ExecutorService transportExecutor = Executors.newSingleThreadExecutor(runnable -> {
         Thread thread = new Thread(runnable, "kenan-transport");
         thread.setDaemon(true);
         return thread;
     });
-    private final RemoteTransport transport = new RemoteTransport();
+    private final ExecutorService warmingExecutor = Executors.newCachedThreadPool();
     private RemoteEnvironment environments;
 
     @Override
     public void load() {
         environments = new RemoteEnvironment(getContext().getApplicationContext());
-        transportExecutor.execute(() -> {
+        for (RemoteEnvironment.Endpoint endpoint : environments.all()) warmingExecutor.execute(() -> {
             try {
-                transport.prepare(RemoteEnvironment.find("converge"));
+                RemoteConnections.forEndpoint(endpoint).prepare(endpoint);
             } catch (Exception failure) {
-                Log.w("KenanRemote", "Could not warm the Converge transport", failure);
+                Log.w("KenanRemote", "Could not warm " + endpoint.id, failure);
             }
         });
     }
@@ -43,6 +51,7 @@ public final class KenanRemotePlugin extends Plugin {
     public void prepare(PluginCall call) {
         transportExecutor.execute(() -> {
             try {
+                RemoteTransport transport = RemoteConnections.forEndpoint(environments.current());
                 if (Boolean.TRUE.equals(call.getBoolean("reconnect", false))) transport.close();
                 transport.prepare(environments.current());
                 call.resolve(snapshot());
@@ -69,17 +78,48 @@ public final class KenanRemotePlugin extends Plugin {
             try {
                 RemoteEnvironment.Endpoint current = environments.current();
                 RemoteEnvironment.Endpoint next = RemoteEnvironment.find(id);
-                transport.verify(next, user);
+                RemoteConnections.forEndpoint(next).verify(next, user);
                 if (current != next) {
                     environments.select(id);
-                    if (next.authentication == RemoteEnvironment.Authentication.DIRECT)
-                        transport.environmentChanged();
                 }
                 call.resolve(snapshot());
             } catch (Exception failure) {
                 call.reject(failure.getMessage(), failure);
             }
         });
+    }
+
+    @PluginMethod
+    public void notifications(PluginCall call) {
+        if (Build.VERSION.SDK_INT >= 33 && getPermissionState("notifications") != PermissionState.GRANTED) {
+            if (Boolean.TRUE.equals(call.getBoolean("request", false))) {
+                requestPermissionForAlias("notifications", call, "notificationPermission");
+            } else call.resolve(new JSObject().put("enabled", false));
+            return;
+        }
+        notificationPermission(call);
+    }
+
+    @PermissionCallback
+    private void notificationPermission(PluginCall call) {
+        boolean granted = Build.VERSION.SDK_INT < 33 || getPermissionState("notifications") == PermissionState.GRANTED;
+        if (granted) {
+            Intent intent = new Intent(getContext(), IdleNotificationService.class);
+            intent.putExtra("user", call.getString("user", ""));
+            androidx.core.content.ContextCompat.startForegroundService(getContext(), intent);
+        }
+        call.resolve(new JSObject().put("enabled", granted));
+    }
+
+    @PluginMethod
+    public void notificationTarget(PluginCall call) {
+        Intent intent = getActivity().getIntent();
+        JSObject target = new JSObject();
+        for (String key : new String[] { "environment", "sessionId", "user" }) {
+            target.put(key, intent.getStringExtra(key));
+            intent.removeExtra(key);
+        }
+        call.resolve(target);
     }
 
     private JSObject snapshot() {
@@ -101,7 +141,7 @@ public final class KenanRemotePlugin extends Plugin {
 
     @Override
     protected void handleOnDestroy() {
-        transport.close();
         transportExecutor.shutdownNow();
+        warmingExecutor.shutdownNow();
     }
 }
