@@ -14,7 +14,8 @@ export type ImageRequest = {
 };
 export type ImageAuth = { kind: "codex" | "api"; headers: Headers };
 export type ImageFailure = { kind: "http" | "protocol" | "cancelled" | "transport"; message: string; status?: number; retryAfterMs?: number };
-export type ImageResult = { ok: true; bytes: Buffer; responseId: string; model: string; usage: unknown }
+export type GeneratedImage = { id: string; bytes: Buffer };
+export type ImageResult = { ok: true; images: GeneratedImage[]; responseId: string; model: string; usage: unknown }
   | { ok: false; error: ImageFailure };
 type ObjectValue = Record<string, any>;
 
@@ -89,15 +90,18 @@ export async function requestImage(request: ImageRequest, auth: ImageAuth, signa
     if (streamFailure) return failure("protocol", `OpenAI image generation failed: ${streamFailure}`);
     if (!completed) return failure("protocol", "Image stream ended without response.completed. No automatic retry was made.");
     for (const item of completed.output ?? []) items.set(item.id, item);
-    const images = [...items.values()].filter(item => item.type === "image_generation_call" && item.status === "completed");
-    if (images.length !== 1 || typeof images[0].result !== "string") {
-      return failure("protocol", `Expected one completed image, received ${images.length}. Response: ${completed.id ?? "unknown"}.`);
-    }
+    const calls = [...items.values()].filter(item => item.type === "image_generation_call" && item.status === "completed");
+    if (!calls.length) return failure("protocol", `No completed images. Response: ${completed.id ?? "unknown"}.`);
     const model = request.model ?? IMAGE_MODELS[0];
-    if (images[0].model && images[0].model !== model) return failure("protocol", `OpenAI returned ${images[0].model} instead of ${model}.`);
-    const bytes = Buffer.from(images[0].result, "base64");
-    if (!bytes.subarray(0, 8).equals(PNG_SIGNATURE)) return failure("protocol", "OpenAI returned an invalid PNG payload.");
-    return { ok: true, bytes, responseId: String(completed.id), model, usage: completed.usage };
+    const images: GeneratedImage[] = [];
+    for (const call of calls) {
+      if (call.model && call.model !== model) return failure("protocol", `OpenAI returned ${call.model} instead of ${model}.`);
+      if (typeof call.result !== "string") return failure("protocol", `OpenAI returned no image payload for ${call.id}.`);
+      const bytes = Buffer.from(call.result, "base64");
+      if (!bytes.subarray(0, 8).equals(PNG_SIGNATURE)) return failure("protocol", `OpenAI returned an invalid PNG payload for ${call.id}.`);
+      images.push({ id: String(call.id), bytes });
+    }
+    return { ok: true, images, responseId: String(completed.id), model, usage: completed.usage };
   } catch (error) {
     return failure(signal.aborted ? "cancelled" : "transport", signal.aborted
       ? "Image generation cancelled or exceeded its five-minute deadline. No automatic retry was made."

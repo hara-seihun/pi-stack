@@ -93,7 +93,42 @@ test("pooled generation explicitly requests Image 2.5, leases the account, and s
   expect(f.store.activeLeases()).toHaveLength(0);
   await expect(f.execute()).rejects.toThrow("already exists");
   expect(transport).toHaveBeenCalledTimes(1);
-  expect((await readdir(f.root)).some(name => name.includes("tmp.png"))).toBe(false);
+  expect((await readdir(f.root)).some(name => name.includes("staging-"))).toBe(false);
+});
+
+test("multiple completed calls are deduplicated, saved, and return the final preview without another request", async () => {
+  const f = fixture(); f.account(); f.reconcile();
+  const event = completed();
+  const first = { ...event.response.output[0], id: "image-first" };
+  event.response.output.unshift(first);
+  const transport = vi.fn(async () => stream([
+    { type: "response.output_item.done", item: first }, event,
+  ], true));
+  vi.stubGlobal("fetch", transport);
+  const result = await f.execute();
+  expect(result.details).toMatchObject({ path: join(f.root, "image.png"), paths: [join(f.root, "image.image-1.png"), join(f.root, "image.png")] });
+  expect(readFileSync(join(f.root, "image.image-1.png"))).toEqual(png);
+  expect(readFileSync(join(f.root, "image.png"))).toEqual(png);
+  expect(result.content[1]).toEqual({ type: "image", data: png.toString("base64"), mimeType: "image/png" });
+  expect(transport).toHaveBeenCalledTimes(1);
+  expect((await readdir(f.root)).some(name => name.includes("staging-"))).toBe(false);
+});
+
+test("publication collision preserves every generated image and its receipt without overwriting", async () => {
+  const f = fixture(); f.account(); f.reconcile();
+  writeFileSync(join(f.root, "image.image-1.png"), "concurrent output");
+  const event = completed();
+  event.response.output.unshift({ ...event.response.output[0], id: "image-first" });
+  const transport = vi.fn(async () => stream([event]));
+  vi.stubGlobal("fetch", transport);
+  await expect(f.execute()).rejects.toThrow("Image output retained at");
+  const staging = (await readdir(f.root)).find(name => name.includes("staging-"))!;
+  expect(readFileSync(join(f.root, staging, "1.png"))).toEqual(png);
+  expect(readFileSync(join(f.root, staging, "2.png"))).toEqual(png);
+  expect(JSON.parse(readFileSync(join(f.root, staging, "receipt.json"), "utf8")).responseId).toBe("resp-test");
+  expect(readFileSync(join(f.root, "image.image-1.png"), "utf8")).toBe("concurrent output");
+  expect(transport).toHaveBeenCalledTimes(1);
+  expect(f.store.activeLeases()).toHaveLength(0);
 });
 
 test.each(["openai", "openai-codex"])("personal %s credentials support edits without a pooled account", async provider => {

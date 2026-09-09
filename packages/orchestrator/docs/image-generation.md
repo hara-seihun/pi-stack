@@ -22,19 +22,21 @@ Codex subscriptions use `https://chatgpt.com/backend-api/codex/responses`. API a
 The tool accepts:
 
 - `prompt`: image description or editing instructions.
-- `outputPath`: a new `.png` file, relative to the session's working directory or absolute.
+- `outputPath`: a new `.png` file for the final completed image, relative to the session's working directory or absolute. If the router makes multiple image calls, earlier images go to `NAME.image-1.png`, `NAME.image-2.png`, and so on beside it.
 - `model`: either Image 2.5 ID above.
 - `quality`: `auto`, `low`, `medium`, `high`, `xhigh` or `max`.
 - `size`: `auto`, `1024x1024`, `1536x1024` or `1024x1536`.
 - `inputPaths`: up to 16 local PNG, JPEG or WebP files to edit, totaling at most 32 MiB.
 
-Quality and size default to `auto`. With input files the request selects editing; otherwise it selects generation. Pi returns the image preview, absolute output path, requested image model, response ID and provider-reported usage. Raw provider usage remains in tool-result details rather than being assigned an invented image price.
+Quality and size default to `auto`. With input files the request selects editing; otherwise it selects generation. Pi saves every completed image, deduplicated by provider call ID. It returns the final image preview, primary absolute output path, all image paths and call IDs, requested image model, response ID and provider-reported usage. Raw provider usage remains in tool-result details rather than being assigned an invented image price.
 
 ## Files and failures
 
 The caller owns the PNG and chooses its location and retention. Pi does not keep a separate image cache or credential store. The existing session transcript owns the preview and tool receipt. Pi Remote's existing image renderer displays the preview, and its normal file-delivery mechanism can deliver the PNG.
 
-Writes share Pi's per-file mutation queue. An existing output is refused before any generation request. Pi reserves writable staging storage first and publishes the completed PNG without overwriting a concurrent writer. If publication fails, the error identifies the staging PNG containing the generated result. Other failures remove staging files.
+Writes share Pi's per-file mutation queue. An existing primary output is refused before any generation request. Pi reserves a staging directory first, saves all completed PNGs and a receipt there, then publishes them with exclusive hard links. It never overwrites a concurrent writer, including at numbered image paths. If publication fails, the error identifies the retained directory and response ID. Its `receipt.json` maps staged PNGs to their intended paths so the caller can finish publication without another paid request. Provider failures remove empty staging storage.
+
+The router can make sequential image calls even with `parallel_tool_calls: false`. Multiple completed calls are valid output, not a reason to repeat generation. Requests use `store: false`; a response ID alone cannot recover bytes discarded by an earlier tool version.
 
 A request has a five-minute deadline and follows Pi cancellation. Provider refusal, a truncated stream, invalid image data or an explicitly reported wrong model is an error. Generation is never automatically retried or moved to another account after failure, because an interrupted request may already have consumed allowance.
 

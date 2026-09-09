@@ -1,4 +1,4 @@
-import { access, link, mkdir, readFile, stat, unlink, writeFile } from "node:fs/promises";
+import { access, link, mkdir, mkdtemp, readFile, rm, stat, writeFile } from "node:fs/promises";
 import { dirname, extname, join, resolve } from "node:path";
 import { homedir } from "node:os";
 import { Type, type Static } from "typebox";
@@ -11,7 +11,7 @@ import { IMAGE_MODELS, IMAGE_QUALITIES, IMAGE_SIZES, PNG_SIGNATURE, requestImage
 
 const parameters = Type.Object({
   prompt: Type.String({ minLength: 1, maxLength: 32000, description: "Image description or editing instructions." }),
-  outputPath: Type.String({ minLength: 1, description: "New PNG file path, absolute or relative to the working directory. Existing files are not overwritten." }),
+  outputPath: Type.String({ minLength: 1, description: "New PNG file path for the final image, absolute or relative to the working directory. Additional provider images are saved as NAME.image-N.png. Existing files are not overwritten." }),
   model: Type.Optional(StringEnum(IMAGE_MODELS, { description: "Defaults to Image 2.5 Flare. Sunburst specializes in precise editing." })),
   quality: Type.Optional(StringEnum(IMAGE_QUALITIES)),
   size: Type.Optional(StringEnum(IMAGE_SIZES)),
@@ -115,7 +115,7 @@ export function installImageGeneration(pi: ExtensionAPI, store: Store, shared: S
       registered = true;
       pi.registerTool({
         name: "image_generation", label: "Generate image", parameters,
-        description: "Generate or edit an image using OpenAI Image 2.5. Saves a PNG and returns its image preview and absolute path. Requires a connected OpenAI account; works regardless of the current chat model. Requests have a five-minute deadline and are never automatically retried.",
+        description: "Generate or edit an image using OpenAI Image 2.5. Saves every completed image and returns the final image preview and all absolute paths. Requires a connected OpenAI account; works regardless of the current chat model. Requests have a five-minute deadline and are never automatically retried.",
         async execute(_id, params, signal, onUpdate, ctx) {
           const path = imagePath(params.outputPath, ctx.cwd);
           if (extname(path).toLowerCase() !== ".png") throw new Error("outputPath must end in .png");
@@ -123,30 +123,40 @@ export function installImageGeneration(pi: ExtensionAPI, store: Store, shared: S
           const requestSignal = AbortSignal.any([AbortSignal.timeout(300_000), ...(signal ? [signal] : [])]);
           return withFileMutationQueue(path, async () => {
             requestSignal.throwIfAborted();
-            // Exclusive staging reserves writable storage before making a paid request.
             await mkdir(dirname(path), { recursive: true });
-            const staging = `${path}.${crypto.randomUUID()}.tmp.png`;
             try { await access(path); throw new Error(`Image output already exists: ${path}`); }
             catch (error) { if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error; }
-            await writeFile(staging, Buffer.alloc(0), { flag: "wx", mode: 0o600 });
+            const staging = await mkdtemp(`${path}.staging-`);
             let preserve = false;
             try {
               onUpdate?.({ content: [{ type: "text", text: `Generating with ${params.model ?? IMAGE_MODELS[0]}…` }], details: {} });
               const result = await generate(params, ctx, requestSignal);
               if (!result.ok) throw new Error(result.error);
-              await writeFile(staging, result.value.bytes);
+              const { images, model, responseId, usage } = result.value;
+              const outputs = images.map((image, index) => ({
+                id: image.id,
+                path: index === images.length - 1 ? path : `${path.slice(0, -4)}.image-${index + 1}.png`,
+                staging: join(staging, `${index + 1}.png`),
+              }));
               preserve = true;
-              try { await link(staging, path); }
-              catch (error) { throw new Error(`Generated image saved at ${staging}; could not publish ${path}: ${error instanceof Error ? error.message : String(error)}`); }
+              try {
+                await writeFile(join(staging, "receipt.json"), JSON.stringify({ responseId, model, providerUsage: usage, outputs }), { flag: "wx", mode: 0o600 });
+                for (let index = 0; index < images.length; index++) {
+                  await writeFile(outputs[index].staging, images[index].bytes, { flag: "wx", mode: 0o600 });
+                }
+                for (const output of outputs) await link(output.staging, output.path);
+              } catch (error) {
+                throw new Error(`Image output retained at ${staging}; response ${responseId}. Publication failed: ${error instanceof Error ? error.message : String(error)}. No automatic retry was made.`);
+              }
               preserve = false;
               return {
                 content: [
-                  { type: "text" as const, text: `Saved ${path}\nModel: ${result.value.model}\nResponse: ${result.value.responseId}` },
-                  { type: "image" as const, mimeType: "image/png", data: result.value.bytes.toString("base64") },
+                  { type: "text" as const, text: `Saved ${path}\nAll images:\n${outputs.map(output => output.path).join("\n")}\nModel: ${model}\nResponse: ${responseId}` },
+                  { type: "image" as const, mimeType: "image/png", data: images[images.length - 1].bytes.toString("base64") },
                 ],
-                details: { path, model: result.value.model, responseId: result.value.responseId, providerUsage: result.value.usage },
+                details: { path, paths: outputs.map(output => output.path), images: outputs.map(({ id, path }) => ({ id, path })), model, responseId, providerUsage: usage },
               };
-            } finally { if (!preserve) await unlink(staging); }
+            } finally { if (!preserve) await rm(staging, { recursive: true }); }
           });
         },
       });
