@@ -104,7 +104,7 @@ The registry file is the whole per-person configuration. Its `environment` objec
 }]
 ```
 
-Values in `environment` become process environment variables before the supervisor loads. Existing process variables win. Arrays and objects are JSON-encoded automatically. All persons on a machine must agree on the environment id and name.
+The `environment` map accepts ordinary process variable names, including host runtime settings such as `NX_NATIVE_FILE_CACHE_DIRECTORY`. Values become process environment variables before the supervisor loads. Existing process variables win. Arrays and objects are JSON-encoded automatically. All persons on a machine must agree on the environment id and name.
 
 New persons' Personal and Home destinations start threads at `high` thinking. Existing persons configure this through `thinkingLevel` in `PI_REMOTE_THREAD_DESTINATIONS`. Changing a destination affects new threads; existing threads keep their saved thinking level.
 

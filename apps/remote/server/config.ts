@@ -24,7 +24,7 @@ export function applyLocalConfig(path = configPath()): string {
     throw new Error(`Pi Remote config at ${path} must have version 1 and an environment object`);
   }
   for (const [name, value] of Object.entries(config.environment)) {
-    if (!/^PI_[A-Z0-9_]+$/.test(name)) throw new Error(`Invalid environment key in ${path}: ${name}`);
+    if (!/^[A-Za-z_][A-Za-z0-9_]*$/.test(name)) throw new Error(`Invalid environment key in ${path}: ${name}`);
     if (process.env[name] !== undefined) continue;
     process.env[name] = typeof value === "object" ? JSON.stringify(value) : String(value);
   }
