@@ -1,3 +1,4 @@
+import type { OAuthCredential } from "@earendil-works/pi-ai";
 import type { SharedOAuthAuth } from "./auth/shared-oauth.js";
 import { meterCredential } from "./auth/meter-credential.js";
 import type { Store } from "./store.js";
@@ -168,6 +169,14 @@ function requestHeaders(accessToken: string): Record<string, string> {
   };
 }
 
+/** A usage request the provider refused on the credential, not the request. */
+export class AnthropicUnauthorizedError extends Error {
+  constructor(label: string, readonly status: number) {
+    super(`anthropic ${label} HTTP ${status}`);
+    this.name = "AnthropicUnauthorizedError";
+  }
+}
+
 async function fetchAnthropicJson(
   url: string,
   label: string,
@@ -179,6 +188,7 @@ async function fetchAnthropicJson(
     headers: requestHeaders(accessToken),
     signal: AbortSignal.timeout(requestTimeoutMs),
   });
+  if (response.status === 401) throw new AnthropicUnauthorizedError(label, response.status);
   if (!response.ok) throw new Error(`anthropic ${label} HTTP ${response.status}`);
   return response.json();
 }
@@ -239,6 +249,30 @@ export class AnthropicMeterSampler {
   }
 
   /**
+   * One usage read, repairing the credential if the provider rejects it.
+   *
+   * A provider can invalidate an access token before its stated expiry, and
+   * expiry-driven refresh alone then leaves the account permanently
+   * unauthenticated with a working refresh token in hand. This poll is the
+   * one thing that touches every account on a schedule, so it is where that
+   * is caught and repaired. A 401 that survives a fresh token is a real
+   * authorization problem and is reported.
+   */
+  private async read(accountId: string, credential: OAuthCredential): Promise<AnthropicUsageReading> {
+    try {
+      return await fetchAnthropicUsage(credential.access, this.fetchFn, this.requestTimeoutMs);
+    } catch (error) {
+      if (!(error instanceof AnthropicUnauthorizedError)) throw error;
+      const repaired = await this.auth.refreshRejected(
+        accountId,
+        credential.access,
+        AbortSignal.timeout(this.requestTimeoutMs),
+      );
+      return await fetchAnthropicUsage(repaired.access, this.fetchFn, this.requestTimeoutMs);
+    }
+  }
+
+  /**
    * Samples every Anthropic account whose credential lives in the shared
    * auth store and whose meters are due. Accounts credentialed in another
    * custody domain are skipped, not failed: their own owner polls them. Never
@@ -260,7 +294,7 @@ export class AnthropicMeterSampler {
       }
       let usage: AnthropicUsageReading;
       try {
-        usage = await fetchAnthropicUsage(credential.credential.access, this.fetchFn, this.requestTimeoutMs);
+        usage = await this.read(account.id, credential.credential);
       } catch (error) {
         reports.push({ accountId: account.id, outcome: "request-failed", detail: String(error) });
         continue;

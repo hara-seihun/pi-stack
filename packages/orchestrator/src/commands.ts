@@ -6,7 +6,8 @@ import { Daemon } from "./daemon.js";
 import { Store } from "./store.js";
 import { readUsageEvidence } from "./usage-evidence.js";
 import { work } from "./worker.js";
-import { transactSharedCredential } from "./auth/shared-oauth.js";
+import { providerOAuth, transactSharedCredential } from "./auth/shared-oauth.js";
+import { builtinProviders } from "@earendil-works/pi-ai/providers/all";
 
 export const COMMANDS=[
   ["daemon","Run reconciliation and the local API"],
@@ -17,10 +18,10 @@ export const COMMANDS=[
   ["pause / resume","Set or clear the global launch halt"],
   ["abort / kill","Stop one run gracefully or immediately"],
   ["boost","Set a provider pacing multiplier or halt"],
-  ["account","Import, remove, list, or reserve pooled accounts"],
+  ["account","Import, refresh, remove, list, or reserve pooled accounts"],
 ] as const;
 export const USAGE=`usage: pi-orchestrator ${COMMANDS.map(([name])=>name.replace(" / ","|")).join("|")}`;
-export const ACCOUNT_USAGE=`usage: pi-orchestrator account list | import ID --provider openai-codex|anthropic --credential-file FILE [--label LABEL] [--concurrency N] | remove ID | use ID shared|voice`;
+export const ACCOUNT_USAGE=`usage: pi-orchestrator account list | import ID --provider openai-codex|anthropic --credential-file FILE [--label LABEL] [--concurrency N] | refresh ID | remove ID | use ID shared|voice`;
 
 const BASE=`http://${process.env.PI_ORCHESTRATOR_HOST??"127.0.0.1"}:${process.env.PI_ORCHESTRATOR_PORT??"2460"}`;
 const ledgerPath=()=>process.env.PI_ORCHESTRATOR_LEDGER||join(homedir(),".local/share/pi-orchestrator/ledger.sqlite3");
@@ -63,7 +64,23 @@ export async function dispatch(argv:string[]):Promise<void>{
     const config=loadConfig();
     if(action==="import"){const provider=named.get("provider")??positional[1];if(provider!=="openai-codex"&&provider!=="anthropic")throw new Error("--provider must be openai-codex or anthropic");const credentialFile=required(named,"credential-file"),credential=JSON.parse(readFileSync(credentialFile,"utf8"));output(await transactSharedCredential(config.authPath,id,credential,()=>request("/v1/accounts","POST",{id,provider,label:named.get("label"),concurrency:Number(named.get("concurrency")??config.defaultAccountConcurrency)})));return;}
     if(action==="remove"){output(await transactSharedCredential(config.authPath,id,undefined,()=>request(`/v1/accounts/${encodeURIComponent(id)}`,"DELETE")));return;}
-    throw new Error("account action must be import, remove, list, or use");
+    // Exchanges the account's refresh token for a new access token whatever
+    // the stored expiry claims. The samplers and interactive routing do this
+    // on their own when a provider refuses a token, so this is for the case
+    // where an operator has other evidence a credential is dead and wants it
+    // replaced now rather than at the next poll.
+    if(action==="refresh"){
+      const account=(await request("/v1/plans")).accounts.find((candidate:{id:string})=>candidate.id===id);
+      if(!account)throw new Error(`account ${id} is not registered`);
+      const family=builtinProviders().find((provider)=>provider.id===account.provider);
+      if(!family)throw new Error(`account ${id} names an unknown provider family ${account.provider}`);
+      const auth=providerOAuth(family,config.authPath),signal=AbortSignal.timeout(60_000);
+      const current=await auth.credential(id,signal);
+      const refreshed=await auth.refreshRejected(id,current.access,signal);
+      output({id,provider:account.provider,expires:new Date(refreshed.expires).toISOString()});
+      return;
+    }
+    throw new Error("account action must be import, refresh, remove, list, or use");
   }
   throw new Error(USAGE);
 }

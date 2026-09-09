@@ -1,4 +1,5 @@
 import { request as httpsRequest } from "node:https";
+import type { OAuthCredential } from "@earendil-works/pi-ai";
 import type { Store } from "./store.js";
 import type { SharedOAuthAuth } from "./auth/shared-oauth.js";
 import { meterCredential } from "./auth/meter-credential.js";
@@ -148,6 +149,14 @@ export function parseCodexUsage(value: unknown, now = Date.now()): CodexWindowUs
   );
 }
 
+/** A usage request the provider refused on the credential, not the request. */
+export class CodexUnauthorizedError extends Error {
+  constructor(readonly status: number) {
+    super(`codex usage HTTP ${status}`);
+    this.name = "CodexUnauthorizedError";
+  }
+}
+
 export async function fetchCodexUsage(
   accessToken: string,
   chatgptAccountId: string,
@@ -165,6 +174,7 @@ export async function fetchCodexUsage(
     },
     signal: AbortSignal.timeout(requestTimeoutMs),
   });
+  if (response.status === 401) throw new CodexUnauthorizedError(response.status);
   if (!response.ok) throw new Error(`codex usage HTTP ${response.status}`);
   return parseCodexUsage(await response.json(), now);
 }
@@ -213,6 +223,36 @@ export class CodexMeterSampler {
   }
 
   /**
+   * One usage read, repairing the credential if the provider rejects it.
+   *
+   * The sampler is the fleet's standing health check on Codex credentials:
+   * it touches every account every few minutes whether or not anyone is
+   * using it. So it is also where a token invalidated ahead of its stated
+   * expiry gets noticed first, and refreshing it here returns the account to
+   * service without waiting for a session to fail on it. A second 401 after
+   * a successful refresh is a real authorization problem — a revoked grant,
+   * a closed account — and is reported rather than retried again.
+   */
+  private async read(
+    accountId: string,
+    credential: OAuthCredential,
+    chatgptAccountId: string,
+    now: number,
+  ): Promise<CodexWindowUsage[]> {
+    try {
+      return await fetchCodexUsage(credential.access, chatgptAccountId, this.fetchFn, this.requestTimeoutMs, now);
+    } catch (thrown) {
+      if (!(thrown instanceof CodexUnauthorizedError)) throw thrown;
+      const repaired = await this.auth.refreshRejected(
+        accountId,
+        credential.access,
+        AbortSignal.timeout(this.requestTimeoutMs),
+      );
+      return await fetchCodexUsage(repaired.access, chatgptAccountId, this.fetchFn, this.requestTimeoutMs, now);
+    }
+  }
+
+  /**
    * Samples every Codex account with a readable credential whose last
    * reading is older than the sampling interval, and records one reading per
    * declared window. Never throws: a provider outage is a gap in evidence,
@@ -247,13 +287,7 @@ export class CodexMeterSampler {
       }
       let windows: CodexWindowUsage[];
       try {
-        windows = await fetchCodexUsage(
-          credential.credential.access,
-          chatgptAccountId,
-          this.fetchFn,
-          this.requestTimeoutMs,
-          now,
-        );
+        windows = await this.read(account.id, credential.credential, chatgptAccountId, now);
       } catch (thrown) {
         reports.push({ accountId: account.id, outcome: "request-failed", detail: String(thrown) });
         continue;

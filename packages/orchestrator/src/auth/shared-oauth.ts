@@ -163,6 +163,54 @@ export class SharedOAuthAuth {
     }
   }
 
+  /**
+   * Replaces an access token the provider rejected, whatever its stated
+   * expiry says.
+   *
+   * Expiry-driven refresh assumes the only way a token stops working is the
+   * clock running out. OpenAI invalidates an account's issued access tokens
+   * when its auth session rotates, so a credential with days of nominal life
+   * left is answered `401 Provided authentication token is expired.` — and
+   * `credential()` hands that same dead token to the next caller, and the
+   * one after that, forever. On 2026-09-09 the `openai-codex` account sat
+   * broken this way with a perfectly good refresh token: Pi Remote thread
+   * naming, pinned to that account, silently left every new thread numbered,
+   * and the usage meter logged 401 every five minutes without repairing
+   * anything.
+   *
+   * The rejected token is named by the caller so this is compare-and-swap,
+   * not a blind refresh: if another process already replaced the credential
+   * while this request was in flight, its work stands and this caller simply
+   * takes the newer token. Otherwise concurrent 401s from one account's
+   * sessions would each spend a rotation of the refresh token and race over
+   * which result lands in the file.
+   */
+  async refreshRejected(
+    alias: string,
+    rejectedAccessToken: string,
+    signal: AbortSignal,
+  ): Promise<OAuthCredential> {
+    const release = await acquireLock(this.#path, signal);
+    try {
+      const auth = readAuth(this.#path);
+      const current = oauthCredential(auth[alias]);
+      if (current === undefined) throw new Error(`${alias} has no shared ${this.#providerId} OAuth credential`);
+      if (current.access !== rejectedAccessToken) return current;
+      const refreshed = oauthCredential(await this.#refresh(current, signal));
+      if (refreshed === undefined) throw new Error(`${this.#providerId} OAuth refresh for ${alias} returned an invalid credential`);
+      const oldIdentity = this.#identity?.(current);
+      const newIdentity = this.#identity?.(refreshed);
+      if (oldIdentity !== undefined && newIdentity !== oldIdentity) {
+        throw new Error(`${this.#providerId} OAuth refresh for ${alias} changed account identity`);
+      }
+      auth[alias] = refreshed;
+      writeAuth(this.#path, auth);
+      return refreshed;
+    } finally {
+      release();
+    }
+  }
+
   async resolve(alias: string, signal: AbortSignal): Promise<ModelAuth> {
     return this.#toAuth(await this.credential(alias, signal));
   }

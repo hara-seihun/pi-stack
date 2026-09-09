@@ -6,7 +6,7 @@ import { join } from "node:path";
 import { Store } from "../store.js";
 import { allowsAccountUse } from "../domain.js";
 import { defaultSharedAuthPath, SharedOAuthAuth, providerOAuth, sharedOAuthProvider } from "../auth/shared-oauth.js";
-import { isRateLimitError, rateLimitCooldownMs } from "../provider-errors.js";
+import { isRateLimitError, isRejectedTokenError, rateLimitCooldownMs } from "../provider-errors.js";
 import { chooseInteractiveAccount } from "../auth/account-selection.js";
 import { installImageGeneration } from "./image-generation.js";
 import { interruptedTurnPrompt } from "../host/continuations.js";
@@ -17,6 +17,7 @@ type ThinkingLevel = ReturnType<ExtensionAPI["getThinkingLevel"]>;
 export function defaultLedgerPath():string{return process.env.PI_ORCHESTRATOR_LEDGER||join(homedir(),".local/share/pi-orchestrator/ledger.sqlite3");}
 export function baseProvider(provider:string):string{return provider.replace(/-\d+$/u,"");}
 export function failoverPrompt(failure:string,account:string):string{return interruptedTurnPrompt(failure,`This session moved to another account (${account}) and is ready to keep going.`);}
+export function credentialRepairPrompt(failure:string,account:string):string{return interruptedTurnPrompt(failure,`The credential for ${account} was refreshed and this session is ready to keep going on the same account.`);}
 export function withCustomModels(provider:Provider):Provider{
   if(provider.id!=="anthropic")return provider;
   const custom=customModelConfig.providers.anthropic.models as unknown as Model<"anthropic-messages">[];
@@ -86,8 +87,45 @@ export default function routing(pi:ExtensionAPI):void{
       if(leaseId)store.createLease(leaseId,moved,"interactive");
     }
   });
-  let unresolved:{failure:string;account:string}|undefined;
-  pi.on("agent_end",async(event,ctx)=>{unresolved=undefined;const last=event.messages.at(-1) as any;if(last?.role!=="assistant"||last.stopReason!=="error"||!isRateLimitError(last.errorMessage??""))return;const failing=ctx.model?.provider;if(!failing)return;if(store.account(failing))store.setCooldown(failing,Date.now()+rateLimitCooldownMs(last.errorMessage));const moved=await bind(ctx,new Set([failing]));if(moved)unresolved={failure:last.errorMessage,account:moved};});
-  pi.on("agent_settled",()=>{const notice=unresolved;unresolved=undefined;if(notice)pi.sendUserMessage(failoverPrompt(notice.failure,notice.account));});
+  let unresolved:{failure:string;account:string;prompt:(failure:string,account:string)=>string}|undefined;
+  /**
+   * Accounts this session has already had a token refreshed for. A provider
+   * that keeps refusing a freshly issued token is not going to be talked
+   * round by a third one, and retrying would spin the session between the
+   * same two states forever, so the second rejection falls through to
+   * ordinary failover.
+   */
+  const repaired=new Set<string>();
+  /**
+   * A rejected access token is the account's problem, not the session's, and
+   * it is usually one refresh away from fixed: providers invalidate issued
+   * tokens when an auth session rotates, well before the expiry the store
+   * knows about. Repairing it in place keeps the session on the account it
+   * has context and quota on, instead of failing the turn or migrating it
+   * away over a token.
+   */
+  const repairCredential=async(account:string):Promise<boolean>=>{
+    const auth=shared.get(familyOf(account));if(!auth||!store.account(account)||repaired.has(account))return false;
+    repaired.add(account);
+    try{
+      const signal=AbortSignal.timeout(30_000);
+      const current=await auth.credential(account,signal);
+      await auth.refreshRejected(account,current.access,signal);
+      return true;
+    }catch{return false;}
+  };
+  pi.on("agent_end",async(event,ctx)=>{
+    unresolved=undefined;
+    const last=event.messages.at(-1) as any;
+    if(last?.role!=="assistant"||last.stopReason!=="error")return;
+    const failure:string=last.errorMessage??"";
+    const failing=ctx.model?.provider;if(!failing)return;
+    if(isRejectedTokenError(failure)&&await repairCredential(failing)){unresolved={failure,account:failing,prompt:credentialRepairPrompt};return;}
+    if(!isRateLimitError(failure))return;
+    if(store.account(failing))store.setCooldown(failing,Date.now()+rateLimitCooldownMs(failure));
+    const moved=await bind(ctx,new Set([failing]));
+    if(moved)unresolved={failure,account:moved,prompt:failoverPrompt};
+  });
+  pi.on("agent_settled",()=>{const notice=unresolved;unresolved=undefined;if(notice)pi.sendUserMessage(notice.prompt(notice.failure,notice.account));});
   pi.on("session_shutdown",()=>{if(timer)clearInterval(timer);if(leaseId)store.endLease(leaseId);store.close();});
 }

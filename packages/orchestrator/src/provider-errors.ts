@@ -75,7 +75,31 @@ const CREDENTIAL_PATTERNS = [
   /oauth refresh failed/i,
   /credential store modify failed/i,
   /\b401\b|unauthorized|invalid[_ ]?(api[_ ]?key|token|grant)/i,
+  // OpenAI refuses a token its auth session no longer backs with "Provided
+  // authentication token is expired." and no status code in the text. Read as
+  // an unclassified error it looked like weather, so sessions sat retrying a
+  // credential that would never work again (2026-09-09, the `openai-codex`
+  // account).
+  /(authentication |access |bearer )?token (is |has )?expired|expired (authentication |access |bearer )?token/i,
 ];
+
+/**
+ * The provider rejected the credential itself, so a fresh access token is
+ * worth trying before the account is written off. Distinguished from the
+ * wider credential class, which includes a store this process cannot read
+ * and a refresh that already failed — refreshing again answers neither.
+ */
+const REJECTED_TOKEN_PATTERNS = [
+  /\b401\b/,
+  /unauthorized/i,
+  /invalid[_ ]?(token|grant)/i,
+  /(authentication |access |bearer )?token (is |has )?expired|expired (authentication |access |bearer )?token/i,
+];
+
+export function isRejectedTokenError(message: string): boolean {
+  if (/oauth refresh failed/i.test(message)) return false;
+  return REJECTED_TOKEN_PATTERNS.some((p) => p.test(message));
+}
 
 /**
  * The failure will be identical on the next attempt, so waiting for it is
