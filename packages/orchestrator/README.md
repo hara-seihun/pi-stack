@@ -80,7 +80,7 @@ pi-orchestrator account import openai-codex-3 --provider openai-codex --credenti
 
 `pi-orchestrator account use ID voice` reserves a Codex account for GPT Live. Fleet admission, including forced and pinned runs, and interactive routing exclude it. Pi Remote uses the reserved voice accounts when any are enabled; otherwise it uses shared Codex accounts. `account use ID shared` returns it to the shared pool. The reservation lives in the ledger's `control` table under `account-use:ID` and appears as `use` in account listings. Existing runs are not killed by this command; stop them with `kill RUN_ID` after reserving the account. Interactive sessions move off a reserved account before their next turn.
 
-Import reads credentials from a file so tokens do not enter process arguments. `account remove` disables admission and removes the credential while historical attribution remains intact.
+Import reads credentials from a file so tokens do not enter process arguments. `account remove` disables admission and removes the credential while historical attribution remains intact. `account refresh ID` exchanges the account's refresh token for a new access token whatever the stored expiry claims, for the case where an operator already knows a credential is dead; the samplers and interactive routing do this on their own when a provider refuses one.
 
 The daemon serves its public API on `127.0.0.1:2460` by default. Pi Remote consumes the package's observation API and does not query private tables.
 
@@ -96,7 +96,9 @@ EverythingLIVE uses this API for its commercial author/review jobs. Each turn ge
 
 ## Meter authentication
 
-Both provider samplers resolve and refresh credentials through the same `SharedOAuthAuth` lock as interactive and fleet sessions. An idle account does not need a model request to restore its meters. Failed refreshes preserve the credential and appear in `status.meterErrors` and the daemon journal; sampling recovery clears the error. Attempts remain spaced by the normal sampling interval. See [provider meter notes](docs/provider-meter-notes.md) for the refresh incident and provider-specific collection rules.
+Both provider samplers resolve and refresh credentials through the same `SharedOAuthAuth` lock as interactive and fleet sessions. An idle account does not need a model request to restore its meters. Failed refreshes preserve the credential and appear in `status.meterErrors` and the daemon journal; sampling recovery clears the error. Attempts remain spaced by the normal sampling interval.
+
+Expiry is not the only way a token dies. A provider that rotates an account's auth session invalidates the tokens it issued, so a credential with days of nominal life left is answered `401` and expiry-driven refresh never touches it. A sampler that is refused refreshes the rejected token and repeats its poll, which returns the account to service within a sampling interval whether or not any session is on it; because the sampler names the token it wants replaced, concurrent repairs spend one rotation instead of racing. A 401 that survives a fresh token is reported as `request-failed` rather than refreshed again, and needs a new provider-issued login. See [provider meter notes](docs/provider-meter-notes.md) for the refresh incident and provider-specific collection rules.
 
 ## Usage evidence
 
