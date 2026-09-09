@@ -21,7 +21,7 @@ export const COMMANDS=[
   ["account","Import, refresh, remove, list, or reserve pooled accounts"],
 ] as const;
 export const USAGE=`usage: pi-orchestrator ${COMMANDS.map(([name])=>name.replace(" / ","|")).join("|")}`;
-export const ACCOUNT_USAGE=`usage: pi-orchestrator account list | import ID --provider openai-codex|anthropic --credential-file FILE [--label LABEL] [--concurrency N] | refresh ID | remove ID | use ID shared|voice`;
+export const ACCOUNT_USAGE=`usage: pi-orchestrator account list | import ID --provider openai-codex|anthropic --credential-file FILE [--label LABEL] [--concurrency N] | refresh ID | disable ID | enable ID | remove ID | use ID shared|voice`;
 
 const BASE=`http://${process.env.PI_ORCHESTRATOR_HOST??"127.0.0.1"}:${process.env.PI_ORCHESTRATOR_PORT??"2460"}`;
 const ledgerPath=()=>process.env.PI_ORCHESTRATOR_LEDGER||join(homedir(),".local/share/pi-orchestrator/ledger.sqlite3");
@@ -61,6 +61,11 @@ export async function dispatch(argv:string[]):Promise<void>{
     if(action==="list"){output((await request("/v1/plans")).accounts);return;}
     const {named,positional}=flags(tail),id=named.get("id")??positional[0];if(!id)throw new Error(`account ${action} requires an id`);
     if(action==="use"){const use=positional[1];if(use!=="shared"&&use!=="voice")throw new Error("account use requires shared or voice");output(await request(`/v1/accounts/${encodeURIComponent(id)}/use`,"PUT",{use}));return;}
+    // Suspends or restores an account without touching its credential, for a
+    // subscription that lapsed or a login that has to be replaced. Nothing
+    // new is admitted on a disabled account, and its meters stop being
+    // polled; admitted workers keep their leases as usual.
+    if(action==="disable"||action==="enable"){output(await request(`/v1/accounts/${encodeURIComponent(id)}/enabled`,"PUT",{enabled:action==="enable"}));return;}
     const config=loadConfig();
     if(action==="import"){const provider=named.get("provider")??positional[1];if(provider!=="openai-codex"&&provider!=="anthropic")throw new Error("--provider must be openai-codex or anthropic");const credentialFile=required(named,"credential-file"),credential=JSON.parse(readFileSync(credentialFile,"utf8"));output(await transactSharedCredential(config.authPath,id,credential,()=>request("/v1/accounts","POST",{id,provider,label:named.get("label"),concurrency:Number(named.get("concurrency")??config.defaultAccountConcurrency)})));return;}
     if(action==="remove"){output(await transactSharedCredential(config.authPath,id,undefined,()=>request(`/v1/accounts/${encodeURIComponent(id)}`,"DELETE")));return;}

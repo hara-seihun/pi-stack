@@ -134,3 +134,30 @@ it("retains failed refresh credentials, reports the blocker, and spaces attempts
     store.close(); rmSync(root, { recursive: true });
   }
 });
+
+it.each(["anthropic", "openai-codex"] as const)("stops sampling a disabled %s account and clears its meter error", async provider => {
+  const root = mkdtempSync(join(tmpdir(), "meter-auth-disabled-")), path = join(root, "auth.json"), now = Date.now();
+  const store = Store.open(":memory:");
+  try {
+    // A lapsed subscription answers with a window this deployment does not
+    // declare. Once the account is disabled it is unschedulable, so the
+    // sampler must leave it alone instead of reporting that forever.
+    const credential = { type: "oauth" as const, access: "live", refresh: "live", expires: now + 3_600_000, accountId: "account" };
+    writeFileSync(path, JSON.stringify({ [provider]: credential }));
+    store.upsertAccount({ id: provider, provider, concurrency: 4 });
+    const auth = new SharedOAuthAuth({ path, providerId: provider, refresh: async () => credential, toAuth: async () => ({ apiKey: "unused" }) });
+    const fetch = vi.fn(async () => Response.json(provider === "anthropic"
+      ? { limits: [] }
+      : { rate_limit: { primary_window: { used_percent: 0, limit_window_seconds: 2_592_000, reset_at: (now + 86_400_000) / 1000 } } }));
+    const sampler = provider === "anthropic"
+      ? new AnthropicMeterSampler(store, { auth, fetch })
+      : new CodexMeterSampler(store, { auth, fetch, meters: [{ id: "codex-7d", windowHours: 168 }] });
+    const first = await sampler.sample(now);
+    expect(first.map(report => report.outcome)).toEqual([provider === "anthropic" ? "unreadable-response" : "unmapped-window"]);
+    store.setAccountEnabled(provider, false);
+    expect(await sampler.sample(now + 3_600_000)).toEqual([]);
+    expect(fetch).toHaveBeenCalledTimes(1);
+  } finally {
+    store.close(); rmSync(root, { recursive: true });
+  }
+});

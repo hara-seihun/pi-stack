@@ -282,6 +282,9 @@ export class AnthropicMeterSampler {
     const reports: AnthropicSampleReport[] = [];
     for (const account of this.ledger.accounts()) {
       if (account.provider !== ANTHROPIC_PROVIDER) continue;
+      // Disabled accounts are unschedulable, so sampling them buys no
+      // evidence and their failures would linger in status forever.
+      if (!account.enabled) continue;
       if (!this.due(account.id, now)) {
         reports.push({ accountId: account.id, outcome: "not-due" });
         continue;

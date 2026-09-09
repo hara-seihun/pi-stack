@@ -262,6 +262,11 @@ export class CodexMeterSampler {
     const reports: CodexSampleReport[] = [];
     for (const account of this.ledger.accounts()) {
       if (account.provider !== CODEX_PROVIDER) continue;
+      // A disabled account cannot be admitted, so its meters measure nothing
+      // schedulable. Polling one only keeps its last failure alive in status:
+      // a lapsed subscription reports windows this deployment does not
+      // declare, and that report would sit in `meterErrors` for good.
+      if (!account.enabled) continue;
       // Due-ness is judged on the freshest reading across this account's
       // meters: one request answers for every window at once, so a meter the
       // account does not report must not make the account due forever.

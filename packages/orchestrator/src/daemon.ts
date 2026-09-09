@@ -274,6 +274,19 @@ export class Daemon {
         this.store.upsertAccount({id:String(input.id),provider:input.provider,label:input.label,enabled:true,concurrency:Number(input.concurrency??this.config.defaultAccountConcurrency)});
         return json(res,201,{ok:true});
       }
+      // Suspending an account keeps its credential and its usage history: a
+      // lapsed subscription or a login that needs replacing must leave the
+      // schedulable pool without discarding the evidence needed to bring it
+      // back. Removal is the destructive path and stays separate.
+      const accountEnabled=/^\/v1\/accounts\/([^/]+)\/enabled$/.exec(url.pathname);
+      if(method==="PUT"&&accountEnabled){
+        const id=decodeURIComponent(accountEnabled[1]!),account=this.store.account(id),input=await body(req);
+        if(!account)return json(res,404,{error:"account not found"});
+        if(typeof input.enabled!=="boolean")return json(res,400,{error:"enabled must be true or false"});
+        this.store.setAccountEnabled(id,input.enabled);
+        void this.reconcile();
+        return json(res,200,{account:this.store.account(id)});
+      }
       const accountUse=/^\/v1\/accounts\/([^/]+)\/use$/.exec(url.pathname);
       if(method==="PUT"&&accountUse){
         const id=decodeURIComponent(accountUse[1]!),account=this.store.account(id),input=await body(req);
