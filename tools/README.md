@@ -5,6 +5,7 @@ These commands depend on Pi sessions, Pi models, or the orchestrator ledger.
 | Directory | Command | Purpose |
 |---|---|---|
 | [`agent-workspace`](agent-workspace/README.md) | `agent-workspace` | Lease, recover, and release agent Git checkouts. |
+| [`codex-reset`](codex-reset/README.md) | `codex-reset` | Spend banked OpenAI rate-limit resets across the Codex account pool. |
 | [`fleet-errors`](fleet-errors/README.md) | `fleet-errors` | Classify failed fleet tool calls. |
 | [`user-usage`](user-usage/README.md) | `pi-user-usage` | Count a person's recorded tokens, logged API value, and estimated subscription dollars. |
 | [`mcp`](mcp/README.md) | `mcp` | Discover and call configured MCP servers. |
