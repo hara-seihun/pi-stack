@@ -18,6 +18,7 @@ CREATE TABLE IF NOT EXISTS sessions (
   current_provider TEXT,
   initial_model TEXT,
   initial_thinking TEXT,
+  meeting_id TEXT,
   profile_id TEXT NOT NULL,
   revision INTEGER NOT NULL DEFAULT 0,
   service_tier TEXT NOT NULL DEFAULT 'default',
@@ -75,6 +76,7 @@ CREATE TABLE IF NOT EXISTS work_items (
   request_id TEXT NOT NULL UNIQUE,
   event_seq INTEGER NOT NULL,
   text TEXT NOT NULL,
+  images TEXT NOT NULL DEFAULT '[]',
   delivery TEXT NOT NULL DEFAULT 'followUp',
   resume INTEGER NOT NULL DEFAULT 0,
   state TEXT NOT NULL,
@@ -86,6 +88,11 @@ CREATE TABLE IF NOT EXISTS work_items (
   inserted_at TEXT
 );
 CREATE INDEX IF NOT EXISTS work_items_session_state ON work_items(session_id, state, available_at);
+CREATE TABLE IF NOT EXISTS thread_delegations (
+  work_id TEXT PRIMARY KEY REFERENCES work_items(id) ON DELETE CASCADE,
+  parent_session_id TEXT NOT NULL REFERENCES sessions(id) ON DELETE CASCADE,
+  reply_work_id TEXT REFERENCES work_items(id)
+);
 CREATE TABLE IF NOT EXISTS uploads (
   path TEXT PRIMARY KEY,
   session_id TEXT NOT NULL REFERENCES sessions(id) ON DELETE CASCADE,
@@ -109,7 +116,7 @@ CREATE TABLE IF NOT EXISTS metadata (
 );
 `);
   const sessionColumns = new Set((db.query("PRAGMA table_info(sessions)").all() as any[]).map((column) => String(column.name)));
-  for (const [name, type] of [["initial_provider", "TEXT"], ["current_provider", "TEXT"], ["initial_model", "TEXT"], ["initial_thinking", "TEXT"], ["revision", "INTEGER NOT NULL DEFAULT 0"], ["service_tier", "TEXT NOT NULL DEFAULT 'default'"], ["bash_timeout_seconds", `INTEGER NOT NULL DEFAULT ${DEFAULT_BASH_TIMEOUT_SECONDS}`], ["archived_at", "TEXT"], ["display_order", "INTEGER NOT NULL DEFAULT 0"]]) {
+  for (const [name, type] of [["initial_provider", "TEXT"], ["current_provider", "TEXT"], ["initial_model", "TEXT"], ["initial_thinking", "TEXT"], ["meeting_id", "TEXT"], ["revision", "INTEGER NOT NULL DEFAULT 0"], ["service_tier", "TEXT NOT NULL DEFAULT 'default'"], ["bash_timeout_seconds", `INTEGER NOT NULL DEFAULT ${DEFAULT_BASH_TIMEOUT_SECONDS}`], ["archived_at", "TEXT"], ["display_order", "INTEGER NOT NULL DEFAULT 0"]]) {
     if (!sessionColumns.has(name)) db.exec(`ALTER TABLE sessions ADD COLUMN ${name} ${type}`);
   }
   if (!sessionColumns.has("named_at_message_count")) {
@@ -137,6 +144,7 @@ CREATE TABLE IF NOT EXISTS metadata (
   const workColumns = new Set((db.query("PRAGMA table_info(work_items)").all() as any[]).map((column) => String(column.name)));
   if (!workColumns.has("delivery")) db.exec("ALTER TABLE work_items ADD COLUMN delivery TEXT NOT NULL DEFAULT 'followUp'");
   if (!workColumns.has("resume")) db.exec("ALTER TABLE work_items ADD COLUMN resume INTEGER NOT NULL DEFAULT 0");
+  if (!workColumns.has("images")) db.exec("ALTER TABLE work_items ADD COLUMN images TEXT NOT NULL DEFAULT '[]'");
   if (!workColumns.has("inserted_at")) {
     db.exec("ALTER TABLE work_items ADD COLUMN inserted_at TEXT");
     db.exec("UPDATE work_items SET inserted_at=created_at WHERE event_seq>0");

@@ -36,6 +36,7 @@ orchestrator_release=$(readlink -f "$orchestrator")
 npm run build --workspace=pi-remote
 mkdir -p "$stage/release/node_modules" "$stage/release/web"
 rsync -a --chmod=D755,Fu=rwX,Fgo=rX apps/remote/package.json apps/remote/server "$stage/release/"
+rsync -aL --chmod=D755,Fu=rwX,Fgo=rX apps/remote/skills "$stage/release/"
 rsync -a --chmod=D755,Fu=rwX,Fgo=rX apps/remote/web/dist "$stage/release/web/"
 for executable in pi-remote pi-remote-launch pi-remote-supervise; do
   test -x "$stage/release/server/$executable" || {

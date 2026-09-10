@@ -1,0 +1,15 @@
+[Unit]
+Description=Pi Remote local live backend
+After=pi-remote@kenan.service pi-stack-voice.service
+Requires=pi-stack-voice.service
+BindsTo=pi-remote@kenan.service
+
+[Service]
+Type=notify
+NotifyAccess=all
+Environment=PATH=/run/wrappers/bin:/run/current-system/sw/bin
+ExecStart=/run/current-system/sw/bin/node /home/kenan/projects/pi-stack/apps/remote/dev-supervisor.mjs pi-remote@kenan.service
+ExecStopPost=/run/current-system/sw/bin/node /home/kenan/projects/pi-stack/apps/remote/dev-supervisor.mjs pi-remote@kenan.service --restore
+KillMode=process
+TimeoutStartSec=45
+TimeoutStopSec=30

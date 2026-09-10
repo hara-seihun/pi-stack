@@ -1,4 +1,5 @@
 import "./person";
+import "./native";
 import "./voice";
 
 const element = <T extends HTMLElement>(id: string) => {
@@ -37,6 +38,7 @@ if (!sessionId) {
   });
   start.addEventListener("click", () => void voice.start());
   mute.addEventListener("click", () => { mute.textContent = voice.toggleMute() ? "Unmute" : "Mute"; });
+  element("play").addEventListener("click", () => void voice.resumePlayback());
   element("hush").addEventListener("click", () => voice.hush());
   element("hangup").addEventListener("click", () => voice.stop());
   window.addEventListener("pagehide", () => voice.stop());

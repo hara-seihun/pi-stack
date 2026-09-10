@@ -17,7 +17,7 @@
     #orb.error { border-color:#ff7b72; }
     #orb svg { width:62px; fill:none; stroke:#f1f4f8; stroke-width:1.8; stroke-linecap:round; }
     #start { height:54px; border:0; border-radius:14px; background:#89b4fa; color:#0b0d10; font-size:17px; font-weight:700; }
-    #controls { display:flex; justify-content:center; gap:14px; }
+    #controls { display:flex; flex-wrap:wrap; justify-content:center; gap:14px; }
     #controls button { min-width:104px; height:48px; border:1px solid #30363d; border-radius:12px; background:#1f232a; color:#f1f4f8; font-weight:650; }
     #hangup { color:#ff7b72!important; }
     [hidden] { display:none!important; }
@@ -31,6 +31,7 @@
     <div id="status">Ready to connect</div>
     <button id="start" type="button">Start voice</button>
     <div id="controls" hidden>
+      <button id="play" type="button">Play Kenan audio</button>
       <button id="mute" type="button">Mute</button>
       <button id="hush" type="button">Stop talking</button>
       <button id="hangup" type="button">Hang up</button>

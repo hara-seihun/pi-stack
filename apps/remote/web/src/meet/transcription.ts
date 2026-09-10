@@ -14,6 +14,7 @@ export class MeetTranscription {
   private stopped = false;
   private readonly ready: Promise<void>;
   private voiceQueue = Promise.resolve();
+  private readonly handedOff = new Map<string, string>();
   private readonly uploads = new Map<string, { path: string; init: RequestInit }>();
   constructor(private readonly room: MeetRoom, private readonly onError: (message: string) => void) {
     this.ready = Promise.all([this.audio.resume(), this.audio.audioWorklet.addModule("/meet-pcm.js")]).then(() => {});
@@ -72,15 +73,15 @@ export class MeetTranscription {
     this.captures.delete(id);
     this.track(this.flush(capture).finally(() => { capture.source.disconnect(); capture.node.disconnect(); }));
   }
-  saveVoice(turn: { id: string; text: string; final: boolean; startedAt: number }) {
-    const send = () => this.send(turn.id, { path: this.room.path("/transcript/assistant"), init: post(turn) });
+  saveVoice(fragment: { id: string; text: string; voiceSessionId: string; startMs: number; endMs: number; startedAt: number }) {
+    const send = () => this.send(fragment.id, { path: this.room.path("/transcript/assistant"), init: post({ ...fragment, final: true }) });
     this.voiceQueue = this.voiceQueue.then(send, send);
     this.track(this.voiceQueue);
   }
   async read(): Promise<MeetTranscriptTurn[]> {
     return (await meetRequest<{ turns: MeetTranscriptTurn[] }>(meetPath(this.room.snapshot.id, "/transcript"), this.room.owner)).turns;
   }
-  async handoff(): Promise<string> {
+  async handoff(): Promise<{ text: string; commit(): void }> {
     await this.ready;
     await Promise.all([...this.captures.values()].map((capture) => this.flush(capture)));
     await Promise.all([...this.pending]);
@@ -92,7 +93,17 @@ export class MeetTranscription {
       const failed = turns.find((turn) => turn.status === "failed");
       if (failed) throw new Error(`Transcript handoff stopped: ${failed.speaker}: ${failed.error}`);
       if (!turns.some((turn) => turn.status === "queued" || turn.status === "processing")) {
-        return JSON.stringify({ meetingTranscript: turns.filter((turn) => turn.text.trim()) });
+        const changed = turns.filter((turn) => turn.text.trim() && this.handedOff.get(turn.id) !== turn.text);
+        const lines = changed.map((turn) => {
+          const previous = this.handedOff.get(turn.id);
+          const continuation = previous && turn.text.startsWith(previous);
+          const text = continuation ? turn.text.slice(previous.length).trim() : turn.text.trim();
+          return `${turn.speaker}${continuation ? " continued" : previous ? " corrected" : ""}: ${text}`;
+        });
+        return {
+          text: lines.length ? `Conversation since the last handoff:\n${lines.join("\n")}` : "No new meeting transcript since the last handoff.",
+          commit: () => { for (const turn of changed) this.handedOff.set(turn.id, turn.text); },
+        };
       }
       if (Date.now() > deadline) throw new Error("Transcript is still processing; the handoff has not been sent");
       await new Promise((resolve) => setTimeout(resolve, 250));

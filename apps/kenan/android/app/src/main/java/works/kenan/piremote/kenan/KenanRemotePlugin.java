@@ -71,6 +71,15 @@ public final class KenanRemotePlugin extends Plugin {
     }
 
     @PluginMethod
+    public void keepAwake(PluginCall call) {
+        boolean enabled = Boolean.TRUE.equals(call.getBoolean("enabled", false));
+        getActivity().runOnUiThread(() -> {
+            getBridge().getWebView().setKeepScreenOn(enabled);
+            call.resolve();
+        });
+    }
+
+    @PluginMethod
     public void select(PluginCall call) {
         String id = call.getString("id", "");
         String user = call.getString("user", "");

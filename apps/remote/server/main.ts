@@ -16,3 +16,7 @@ await import("./server");
 process.off("SIGUSR2", holdHandoff);
 process.off("SIGHUP", holdHandoff);
 if (handoffRequested) process.emit("SIGUSR2", "SIGUSR2");
+if (process.env.PI_REMOTE_DEV_NOTIFY === "1") {
+  const result = Bun.spawnSync(["systemd-notify", "--ready"]);
+  if (result.exitCode !== 0) throw new Error("Could not notify the live supervisor's service owner");
+}

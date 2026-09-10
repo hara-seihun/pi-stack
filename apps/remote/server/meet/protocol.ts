@@ -7,13 +7,30 @@ export interface MeetSignal {
 }
 export interface MeetEnvelope { seq: number; from: string; signal: MeetSignal }
 export interface MeetIceServer { urls: string[]; username: string; credential: string }
+export interface MeetThreadState {
+  id: string;
+  name: string;
+  state: string;
+  tools: string[];
+  output: string;
+  events: Array<{ id: number; kind: string; name: string; text: string }>;
+}
+export interface MeetVoiceControl { muted: boolean; revision: number }
+export function meetVoiceControl(value: unknown): MeetVoiceControl | null {
+  if (!value || typeof value !== "object") return null;
+  const state = value as MeetVoiceControl;
+  return typeof state.muted === "boolean" && Number.isSafeInteger(state.revision) && state.revision >= 0 ? state : null;
+}
 export interface MeetSnapshot {
+  voiceMuted: boolean;
+  voiceRevision: number;
+  threads: MeetThreadState[];
   id: string;
   sessionId: string;
   apiUrl: string;
   iceServers: MeetIceServer[];
   participants: MeetParticipant[];
-  browser: { endpoint: string; url: string } | null;
+  browser: { endpoint: string; url: string; error: string | null; watchPath: string | null; watchError: string | null } | null;
 }
 export interface MeetJoined { room: MeetSnapshot; participant: MeetParticipant }
 export interface MeetPoll extends MeetSnapshot { messages: MeetEnvelope[] }

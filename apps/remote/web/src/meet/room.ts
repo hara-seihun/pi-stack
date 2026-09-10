@@ -1,5 +1,5 @@
 import { piFetch } from "../client";
-import { meetPath, type MeetJoined, type MeetParticipant, type MeetPoll, type MeetSignal, type MeetSnapshot, type MeetTrackKind } from "../../../server/meet/protocol";
+import { meetPath, type MeetJoined, type MeetParticipant, type MeetPoll, type MeetSignal, type MeetSnapshot, type MeetTrackKind, type MeetVoiceControl } from "../../../server/meet/protocol";
 import type { MeetMediaSource } from "./media";
 
 type Peer = {
@@ -38,6 +38,12 @@ export class MeetRoom {
     readonly onFailure: (message: string) => void,
   ) { this.snapshot = joined.room; }
 
+  applyVoiceControl(state: MeetVoiceControl) {
+    if (state.revision < this.snapshot.voiceRevision) return;
+    this.snapshot = { ...this.snapshot, voiceMuted: state.muted, voiceRevision: state.revision };
+    this.onSnapshot(this.snapshot);
+  }
+
   path(suffix: string, extra: Record<string, string> = {}) {
     const query = new URLSearchParams({ participant: this.joined.participant.id, ...extra });
     return `${meetPath(this.joined.room.id, suffix)}?${query}`;
@@ -46,6 +52,13 @@ export class MeetRoom {
   publish(kind: MeetTrackKind, stream: MediaStream) {
     this.published.set(kind, stream);
     for (const peer of this.peers.values()) this.reconcileTracks(peer);
+  }
+
+  unpublish(kind: MeetTrackKind) {
+    const stream = this.published.get(kind);
+    this.published.delete(kind);
+    for (const peer of this.peers.values()) this.reconcileTracks(peer);
+    stream?.getTracks().forEach((track) => track.stop());
   }
 
   private reconcileTracks(peer: Peer) {
@@ -134,6 +147,10 @@ export class MeetRoom {
     try {
       const snapshot = await meetRequest<MeetPoll>(this.path("/poll", { after: String(this.cursor) }), this.owner, { signal: this.abort.signal });
       if (this.stopped) return;
+      if (snapshot.voiceRevision < this.snapshot.voiceRevision) {
+        snapshot.voiceMuted = this.snapshot.voiceMuted;
+        snapshot.voiceRevision = this.snapshot.voiceRevision;
+      }
       this.snapshot = snapshot;
       this.onSnapshot(snapshot);
       for (const [id, peer] of this.peers) if (!snapshot.participants.some((participant) => participant.id === id)) {
