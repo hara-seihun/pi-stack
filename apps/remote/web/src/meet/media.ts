@@ -38,7 +38,7 @@ export class MeetMedia {
   }
 }
 
-export async function avatarStream(src: string): Promise<MediaStream> {
+export async function avatarStream(src: string): Promise<{ stream: MediaStream; close(): void }> {
   const image = new Image();
   image.src = src;
   await image.decode();
@@ -49,6 +49,9 @@ export async function avatarStream(src: string): Promise<MediaStream> {
   context.fillRect(0, 0, 512, 512);
   const scale = Math.min(400 / image.naturalWidth, 400 / image.naturalHeight);
   const width = image.naturalWidth * scale, height = image.naturalHeight * scale;
-  context.drawImage(image, (512 - width) / 2, (512 - height) / 2, width, height);
-  return canvas.captureStream(1);
+  const draw = () => context.drawImage(image, (512 - width) / 2, (512 - height) / 2, width, height);
+  const stream = canvas.captureStream(2);
+  draw();
+  const timer = setInterval(draw, 500);
+  return { stream, close() { clearInterval(timer); stream.getTracks().forEach((track) => track.stop()); } };
 }

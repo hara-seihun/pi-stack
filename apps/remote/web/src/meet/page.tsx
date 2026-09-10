@@ -61,6 +61,7 @@ function MeetPage() {
   const mixer = useRef<MeetMedia | null>(null);
   const voice = useRef<VoiceSession | null>(null);
   const owned = useRef<MediaStream[]>([]);
+  const closeAvatar = useRef<(() => void) | null>(null);
   const timers = useRef<Set<ReturnType<typeof setTimeout>>>(new Set());
   const generation = useRef(0);
   const cameraVideo = useRef<HTMLVideoElement | null>(null);
@@ -111,6 +112,7 @@ function MeetPage() {
     timers.current.clear();
     for (const stream of owned.current) stream.getTracks().forEach((track) => track.stop());
     owned.current = [];
+    closeAvatar.current?.(); closeAvatar.current = null;
     local.current = null;
     if (cameraVideo.current) { cameraVideo.current.pause(); cameraVideo.current.srcObject = null; cameraVideo.current = null; }
     if (mixer.current) void mixer.current.close().catch((cause) => setNotice(`Audio cleanup: ${String(cause)}`));
@@ -221,9 +223,10 @@ function MeetPage() {
       }
       if (joined.participant.host) {
         const avatar = await avatarStream("/kenan.png");
-        if (room.current !== current) { avatar.getTracks().forEach((track) => track.stop()); return; }
-        owned.current.push(avatar); current.publish("pi-camera", avatar);
-        acceptMedia({ participant: joined.participant, kind: "pi-camera", stream: avatar });
+        if (room.current !== current) { avatar.close(); return; }
+        closeAvatar.current = avatar.close;
+        current.publish("pi-camera", avatar.stream);
+        acceptMedia({ participant: joined.participant, kind: "pi-camera", stream: avatar.stream });
         void startVoice();
       }
     } catch (cause) { setNotice(String(cause.message || cause)); leave(); }
