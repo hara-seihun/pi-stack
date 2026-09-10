@@ -407,13 +407,14 @@ import { updateDocument } from "./sync";
         await this.handoffContext?.();
         if (generation !== this.generation) return;
         const lines: Array<{ role: string; text: string }> = [];
-        if (!this.handoffContext) for (const fragment of this.transcript.slice(this.sentTranscriptCursor, end)) {
+        for (const fragment of this.transcript.slice(this.sentTranscriptCursor, end)) {
           const last = lines.at(-1);
           if (last && last.role === fragment.role) last.text += fragment.text;
           else lines.push({ role: fragment.role, text: fragment.text });
         }
-        const conversation = lines.map((line) => `${line.role === "user" ? "User" : "Kenan"}: ${line.text.trim()}`).join("\n");
-        delegation.text = ["Voice handoff", this.meetingContext?.(), conversation].filter(Boolean).join("\n\n");
+        const conversation = lines.map((line) => `${line.role === "user" ? (this.meetingContext ? "Mixed meeting audio" : "User") : "Kenan"}: ${line.text.trim()}`).join("\n");
+        const voiceTranscript = conversation ? `Live voice transcript for this handoff:\n${conversation}` : "";
+        delegation.text = ["Voice handoff", this.meetingContext?.(), voiceTranscript].filter(Boolean).join("\n\n");
         const body = JSON.stringify({ requestId: delegation.requestId, text: delegation.text, delivery: "followUp", includeMeetingImages: Boolean(this.meetingContext) });
         const response = await this.request(API.sessionPrompt.path({ sessionId: this.sessionId }), {
           method: "POST", headers: { "content-type": "application/json" }, body,
