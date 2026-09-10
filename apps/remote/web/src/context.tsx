@@ -41,12 +41,18 @@ markdown.renderer.rules.link_open = (tokens, index, options, env, renderer) => {
   return defaultLinkOpen(tokens, index, options, env, renderer);
 };
 
+const INLINE_IMAGE = /\.(png|jpe?g|gif|webp|avif|svg)$/i;
+
+// A file tag naming an image shows the picture itself; any other file becomes
+// a download link. The link stays under an image so the original can be saved.
 function presentationMarkdown(source: string, sessionId: string) {
   return source.replace(/<pi-remote-file\s+src=["']([^"']+)["']\s*\/\s*>/gi, (_match, path) => {
     const name = String(path).split("/").filter(Boolean).at(-1) || "Download file";
     const label = name.replaceAll("&", "&amp;").replaceAll("[", "&#91;").replaceAll("]", "&#93;").replace(/[\r\n]+/g, " ");
     const link = API.sessionFiles.path({ sessionId }, { path });
-    return `\n\n[${label}](${window.PiRemotePerson?.href(link) ?? link})\n\n`;
+    const href = window.PiRemotePerson?.href(link) ?? link;
+    if (INLINE_IMAGE.test(name)) return `\n\n[![${label}](${href})](${href})\n\n`;
+    return `\n\n[${label}](${href})\n\n`;
   });
 }
 

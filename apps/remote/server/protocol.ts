@@ -20,6 +20,9 @@ export type Activity =
   | "IDLE" | "FAILED" | "STARTING" | "ABORTING" | "RUNNING" | "WORKING" | "THINKING"
   | "COMPACTING" | "RETRYING" | "QUEUED" | "WAITING_ON_TOOL" | (string & {});
 
+export interface IdleNotification { seq: number; sessionId: string; name: string; time: string }
+export interface IdleNotificationFeed { cursor: number; notifications: IdleNotification[] }
+
 export interface QueuedMessage {
   id: string;
   text: string;

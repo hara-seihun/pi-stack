@@ -1,6 +1,6 @@
 import { useEffect, useState } from "react";
 import { API } from "../../server/api";
-import type { IdleNotificationFeed } from "../../server/notifications";
+import type { IdleNotificationFeed } from "../../server/protocol";
 import { browserFetch, loadBrowserEnvironments, nativePlatform, remote } from "./native";
 import { ThreadNotifications, threadNotificationKey } from "./thread-notifications";
 
