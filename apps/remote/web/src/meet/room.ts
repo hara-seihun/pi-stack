@@ -1,0 +1,167 @@
+import { piFetch } from "../client";
+import { meetPath, type MeetJoined, type MeetParticipant, type MeetPoll, type MeetSignal, type MeetSnapshot, type MeetTrackKind } from "../../../server/meet/protocol";
+import type { MeetMediaSource } from "./media";
+
+type Peer = {
+  connection: RTCPeerConnection; participant: MeetParticipant; streams: Record<string, MeetTrackKind>;
+  makingOffer: boolean; ignoredOffer: boolean; candidates: RTCIceCandidateInit[];
+  queue: Promise<void>;
+};
+
+export async function meetRequest<T>(path: string, owner: string, init: RequestInit = {}): Promise<T> {
+  const headers = new Headers(init.headers);
+  if (owner) headers.set("x-pi-remote-user", owner);
+  const deadline = AbortSignal.timeout(20_000);
+  const request = { ...init, headers, signal: init.signal ? AbortSignal.any([init.signal, deadline]) : deadline, cache: "no-store" as const };
+  const response = owner && owner !== window.PiRemotePerson.get() ? await fetch(path, request) : await piFetch(path, request);
+  if (response.status === 423) throw new Error("The meeting host must unlock Pi Remote before guests can join");
+  if (!response.ok) throw new Error((await response.json()).error || `Meet HTTP ${response.status}`);
+  return response.json() as Promise<T>;
+}
+export const post = (body: unknown): RequestInit => ({ method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify(body) });
+
+export class MeetRoom {
+  readonly peers = new Map<string, Peer>();
+  readonly published = new Map<MeetTrackKind, MediaStream>();
+  snapshot: MeetSnapshot;
+  private cursor = 0;
+  private stopped = false;
+  private timer: ReturnType<typeof setTimeout> | null = null;
+  private readonly abort = new AbortController();
+
+  constructor(
+    readonly joined: MeetJoined,
+    readonly owner: string,
+    readonly onSnapshot: (room: MeetSnapshot) => void,
+    readonly onMedia: (source: MeetMediaSource) => void,
+    readonly onLeave: (id: string) => void,
+    readonly onFailure: (message: string) => void,
+  ) { this.snapshot = joined.room; }
+
+  path(suffix: string, extra: Record<string, string> = {}) {
+    const query = new URLSearchParams({ participant: this.joined.participant.id, ...extra });
+    return `${meetPath(this.joined.room.id, suffix)}?${query}`;
+  }
+
+  publish(kind: MeetTrackKind, stream: MediaStream) {
+    this.published.set(kind, stream);
+    for (const peer of this.peers.values()) this.reconcileTracks(peer);
+  }
+
+  private reconcileTracks(peer: Peer) {
+    const tracks = [...this.published.values()].flatMap((stream) => stream.getTracks());
+    for (const sender of peer.connection.getSenders()) if (sender.track && !tracks.includes(sender.track)) peer.connection.removeTrack(sender);
+    for (const stream of this.published.values()) for (const track of stream.getTracks()) {
+      if (!peer.connection.getSenders().some((sender) => sender.track === track)) peer.connection.addTrack(track, stream);
+    }
+  }
+
+  private async signal(id: string, signal: MeetSignal) {
+    if (this.stopped) return;
+    const response = await fetch(this.path("/signal"), {
+      ...post({ to: id, signal }),
+      headers: { "content-type": "application/json", "x-pi-remote-user": this.owner }, signal: AbortSignal.any([this.abort.signal, AbortSignal.timeout(20_000)]),
+    });
+    if (response.status === 410) return;
+    if (!response.ok) throw new Error((await response.json()).error || "Meet signaling failed");
+  }
+
+  private fail(cause: unknown) {
+    if (this.stopped) return;
+    this.onFailure(String(cause instanceof Error ? cause.message : cause));
+    this.close();
+  }
+
+  private peer(participant: MeetParticipant) {
+    const existing = this.peers.get(participant.id);
+    if (existing) return existing;
+    const connection = new RTCPeerConnection({ iceServers: this.snapshot.iceServers });
+    const peer: Peer = { connection, participant, streams: {}, makingOffer: false, ignoredOffer: false, candidates: [], queue: Promise.resolve() };
+    this.peers.set(participant.id, peer);
+    const failed = (cause: unknown) => { if (this.peers.get(participant.id) === peer) this.fail(cause); };
+    connection.onicecandidate = (event) => {
+      if (event.candidate) void this.signal(participant.id, { candidate: { ...event.candidate.toJSON(), candidate: event.candidate.candidate } }).catch(failed);
+    };
+    connection.onnegotiationneeded = async () => {
+      try {
+        peer.makingOffer = true;
+        await connection.setLocalDescription();
+        await this.signal(participant.id, {
+          description: { type: connection.localDescription!.type as "offer" | "answer", sdp: connection.localDescription!.sdp },
+          streams: Object.fromEntries([...this.published].map(([kind, stream]) => [stream.id, kind])),
+        });
+      } catch (cause) { failed(cause); }
+      finally { peer.makingOffer = false; }
+    };
+    connection.ontrack = (event) => {
+      const stream = event.streams[0];
+      if (!stream) { this.fail("A meeting adapter sent an unlabelled media track"); return; }
+      const kind = peer.streams[stream.id];
+      if (!kind) { this.fail("A meeting adapter omitted its stream identity"); return; }
+      this.onMedia({ participant, kind, stream });
+    };
+    connection.onconnectionstatechange = () => {
+      if (connection.connectionState === "failed") this.fail(`Media connection to ${participant.name} failed. Check Tailscale and the host's Meet TURN relay.`);
+    };
+    this.reconcileTracks(peer);
+    return peer;
+  }
+
+  private async receive(peer: Peer, signal: MeetSignal) {
+    const connection = peer.connection;
+    if (signal.streams) peer.streams = signal.streams;
+    if (signal.description) {
+      const collision = signal.description.type === "offer" && (peer.makingOffer || connection.signalingState !== "stable");
+      peer.ignoredOffer = collision && this.joined.participant.id < peer.participant.id;
+      if (peer.ignoredOffer) return;
+      await connection.setRemoteDescription(signal.description);
+      for (const candidate of peer.candidates.splice(0)) await connection.addIceCandidate(candidate);
+      if (signal.description.type === "offer") {
+        await connection.setLocalDescription();
+        await this.signal(peer.participant.id, {
+          description: { type: "answer", sdp: connection.localDescription!.sdp },
+          streams: Object.fromEntries([...this.published].map(([kind, stream]) => [stream.id, kind])),
+        });
+      }
+    } else if (signal.candidate && !peer.ignoredOffer) {
+      if (connection.remoteDescription) await connection.addIceCandidate(signal.candidate);
+      else peer.candidates.push(signal.candidate);
+    }
+  }
+
+  async poll() {
+    if (this.stopped) return;
+    try {
+      const snapshot = await meetRequest<MeetPoll>(this.path("/poll", { after: String(this.cursor) }), this.owner, { signal: this.abort.signal });
+      if (this.stopped) return;
+      this.snapshot = snapshot;
+      this.onSnapshot(snapshot);
+      for (const [id, peer] of this.peers) if (!snapshot.participants.some((participant) => participant.id === id)) {
+        peer.connection.close(); this.peers.delete(id); this.onLeave(id);
+      }
+      for (const participant of snapshot.participants) if (participant.id !== this.joined.participant.id) this.peer(participant);
+      for (const message of snapshot.messages) {
+        const peer = this.peers.get(message.from);
+        if (peer) {
+          peer.queue = peer.queue.then(() => this.receive(peer, message.signal));
+          await peer.queue;
+        }
+        this.cursor = Math.max(this.cursor, message.seq);
+      }
+      if (!this.stopped) this.timer = setTimeout(() => void this.poll(), 750);
+    } catch (cause) { this.fail(cause); }
+  }
+
+  close() {
+    if (this.stopped) return;
+    this.stopped = true;
+    this.abort.abort();
+    if (this.timer) clearTimeout(this.timer);
+    const peers = [...this.peers.values()];
+    this.peers.clear();
+    for (const peer of peers) peer.connection.close();
+    void meetRequest(this.path("/leave"), this.owner, { method: "POST", keepalive: true }).catch((cause) => {
+      console.warn("Meet leave request failed; the server's participant lease owns cleanup within 45 seconds", cause);
+    });
+  }
+}

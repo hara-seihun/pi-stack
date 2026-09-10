@@ -74,6 +74,9 @@ import { updateDocument } from "./sync";
 
     constructor(options) {
       this.sessionId = options.sessionId;
+      this.input = options.input;
+      this.onOutput = options.onOutput;
+      this.meetingContext = options.meetingContext;
       this.onState = options.onState || (() => {});
       this.onNotice = options.onNotice || (() => {});
       this.onTranscript = options.onTranscript || (() => {});
@@ -109,14 +112,15 @@ import { updateDocument } from "./sync";
       const generation = ++this.generation;
       this.setState("connecting", "Connecting…");
       try {
-        if (!navigator.mediaDevices?.getUserMedia) throw new Error("Microphone capture is unavailable");
+        if (!this.input && !navigator.mediaDevices?.getUserMedia) throw new Error("Microphone capture is unavailable");
         const configResponse = await piFetch(API.voice.path(), { cache: "no-store" });
         const config = await configResponse.json();
         if (!configResponse.ok || !config.enabled) throw new Error(config.error || "No GPT-Live accounts are available");
         await this.primeCursor();
         this.setState("connecting", "Setting agent thinking to medium…");
         await this.setMediumThinking();
-        const microphone = await navigator.mediaDevices.getUserMedia({
+        if (generation !== this.generation) return;
+        const microphone = this.input ? new MediaStream(this.input.getAudioTracks().map((track) => track.clone())) : await navigator.mediaDevices.getUserMedia({
           audio: { echoCancellation: true, noiseSuppression: true, autoGainControl: true, channelCount: { ideal: 1 } },
         });
         if (generation !== this.generation) { this.stopStream(microphone); return; }
@@ -131,6 +135,7 @@ import { updateDocument } from "./sync";
           speaker.setAttribute("playsinline", "");
           speaker.srcObject = event.streams[0] || new MediaStream([event.track]);
           this.speaker = speaker;
+          this.onOutput?.(speaker.srcObject);
           void speaker.play().catch(() => this.onNotice("Tap the screen once if speaker audio is paused"));
         });
         peer.addEventListener("connectionstatechange", () => {
@@ -154,13 +159,17 @@ import { updateDocument } from "./sync";
         if (!response.ok) throw new Error(await responseError(response, `Voice offer failed (${response.status})`));
         const leaseId = response.headers.get("x-pi-voice-lease");
         if (!leaseId) throw new Error("Voice offer did not include an account lease");
-        this.startLease(leaseId);
         const answer = await response.text();
-        if (generation !== this.generation) { this.stopLease(); return; }
+        if (generation !== this.generation) {
+          void piFetch(API.voiceLeaseRelease.path({ leaseId }), { method: API.voiceLeaseRelease.method });
+          return;
+        }
+        this.startLease(leaseId);
         await peer.setRemoteDescription({ type: "answer", sdp: answer });
         await waitForChannel(channel);
         if (generation !== this.generation) return;
         this.setState("live", "Listening");
+        if (this.meetingContext) this.appendContext(this.meetingContext(), "commentary");
         this.schedulePoll(0);
       } catch (cause) {
         if (generation !== this.generation) return;
@@ -256,7 +265,8 @@ import { updateDocument } from "./sync";
     }
 
     async submitDelegation(delegation) {
-      const body = JSON.stringify({ requestId: crypto.randomUUID(), text: delegation.text, delivery: "followUp" });
+      const context = this.meetingContext?.();
+      const body = JSON.stringify({ requestId: crypto.randomUUID(), text: delegation.text + (context ? `\n\nPiStack Meet context:\n${context}` : ""), delivery: "followUp" });
       try {
         let response = await piFetch(API.sessionPrompt.path({ sessionId: this.sessionId }), {
           method: "POST", headers: { "content-type": "application/json" }, body,

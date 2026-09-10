@@ -14,6 +14,7 @@ export default defineConfig({
       input: {
         index: resolve(import.meta.dirname, "web/index.html"),
         voice: resolve(import.meta.dirname, "web/voice.html"),
+        meet: resolve(import.meta.dirname, "web/meet.html"),
       },
     },
   },

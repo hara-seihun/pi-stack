@@ -15,7 +15,15 @@ interface Window {
   normalizeLatexDelimiters(source: string): string;
   PiRemotePerson: { get(): string; set(user: string): void; header: string; href(path: string): string };
   PiRemoteVoice: {
-    create(options: { sessionId: string; onState(state: string, detail?: string): void; onNotice(message: string): void }): VoiceSession;
+    create(options: {
+      sessionId: string;
+      input?: MediaStream;
+      onOutput?(stream: MediaStream): void;
+      meetingContext?(): string;
+      onState(state: string, detail?: string): void;
+      onNotice(message: string): void;
+      onTranscript?(role: string, text: string): void;
+    }): VoiceSession;
   };
   KenanRemote?: {
     enabled: boolean;

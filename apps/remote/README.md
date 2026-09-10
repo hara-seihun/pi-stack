@@ -36,6 +36,10 @@ The supervisor names a thread after its first user message and updates the name 
 
 Model menus, autonomous-agent labels, and plan cards use the catalog exported by `pi-orchestrator/api`. Plan cards project the orchestrator's account and meter facts; Pi Remote carries no provider usage parser or duplicate provider manifest. New Astra threads start in OpenAI's priority service tier. Existing threads keep their saved mode, and other models start in normal mode.
 
+## PiStack Meet
+
+The thread header's Meet link opens `/meet.html` in the regular frontend. Meet keeps each person's camera and microphone separate, connects the room to PiStack Voice, publishes Kenan's avatar as its camera, and shares an agent-controlled browser. The host tab owns the Voice connection and stays open for the meeting. [Meet operations and adapter contract](docs/meet.md) covers media, camera snapshots, browser control, TURN configuration, and room cleanup.
+
 ## Idle notifications
 
 The drawer's **Enable notifications** button asks for notification permission and disappears once notifications are enabled. Both clients then monitor every configured environment, not just the selected one. Notifications use the Kenan head artwork and name the environment and thread. Tapping one selects that environment and opens the thread. Viewing a thread clears its notifications and suppresses new ones while it stays visible. Backgrounding the app restores delivery. Other threads, environments and people are unaffected. Browser tabs share visible-thread locks and broadcast dismissal to each other; Android's activity lifecycle and notification service share the selected thread.

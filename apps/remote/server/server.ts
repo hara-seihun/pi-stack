@@ -13,6 +13,7 @@ import { appendContextPatch, readContext } from "./context-journal";
 import { beginSupervisorGeneration, ensureSupervisorSchema } from "./database";
 import { startLedgerSnapshots } from "./ledger-snapshot";
 import { DEFAULT_LIVE_MODEL, DEFAULT_LIVE_VOICE, VoiceBroker } from "./voice/broker";
+import { MeetServer } from "./meet/server";
 import { attachRuntimeHost, startRuntimeHost, type RuntimeTransport } from "./runtime-transport";
 import { API } from "./api";
 import { idleNotifications } from "./notifications";
@@ -1971,6 +1972,11 @@ runtimeAdoption = adoptHandoffRuntimes();
 void runtimeAdoption.then(reapUnclaimedRuntimeHosts)
   .catch((cause) => console.error("Could not finish runtime adoption", cause));
 
+const meet = new MeetServer((id) => {
+  const row = sessionRow.get(id) as any;
+  return Boolean(row && !row.archived_at);
+});
+
 const server = Bun.serve({
   hostname: HOST,
   port: PORT,
@@ -1984,6 +1990,8 @@ const server = Bun.serve({
       });
     }
     if (!ownsSupervisorLease()) return error("Supervisor instance was replaced", 503);
+    const meetingResponse = await meet.handle(req);
+    if (meetingResponse) return meetingResponse;
     const imageRequest = API.sessionImage.match(req.method, url.pathname);
     if (imageRequest) {
       const stored = storedContext(imageRequest.sessionId);
@@ -2816,6 +2824,7 @@ async function handoffRelease() {
   writeFileSync(staging, `${JSON.stringify(handoffDocument())}\n`, { mode: 0o600 });
   renameSync(staging, HANDOFF_PATH);
   for (const rt of runtimes.values()) rt.transport.detach();
+  await meet.close();
   server.stop(true);
   agentHost.close();
   db.close();
@@ -2841,6 +2850,7 @@ async function shutdown() {
     exits.push(terminateRuntimeProcess(rt));
   }
   await Promise.race([Promise.all(exits), Bun.sleep(3_000)]);
+  await meet.close();
   server.stop();
   agentHost.close();
   db.close();
