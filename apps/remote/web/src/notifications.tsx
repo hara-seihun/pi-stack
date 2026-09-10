@@ -2,6 +2,7 @@ import { useEffect, useState } from "react";
 import { API } from "../../server/api";
 import type { IdleNotificationFeed } from "../../server/notifications";
 import { browserFetch, loadBrowserEnvironments, nativePlatform, remote } from "./native";
+import { ThreadNotifications, threadNotificationKey } from "./thread-notifications";
 
 export interface NotificationTarget { environment?: string; sessionId?: string; user?: string }
 const TARGET = "pi-notification-target";
@@ -22,7 +23,14 @@ export function retainNotificationTarget(target: NotificationTarget) {
   sessionStorage.setItem(TARGET, JSON.stringify(target));
 }
 
-export function NotificationControl() {
+export function NotificationControl({ sessionId }: { sessionId: string | null }) {
+  const [browserNotifications, setBrowserNotifications] = useState<ThreadNotifications | null>(null);
+  useEffect(() => {
+    if (nativePlatform || !("Notification" in window)) return;
+    const notifications = new ThreadNotifications();
+    setBrowserNotifications(notifications);
+    return () => notifications.dispose();
+  }, []);
   const [enabled, setEnabled] = useState(false);
   const [error, setError] = useState("");
   const [user, setUser] = useState(window.PiRemotePerson?.get() || "");
@@ -39,9 +47,44 @@ export function NotificationControl() {
       setError("");
     } catch (cause) { setError(String(cause)); }
   };
-  useEffect(() => { void configure(false); }, [user]);
   useEffect(() => {
-    if (nativePlatform || !enabled) return;
+    void configure(false);
+    const refresh = () => { if (document.visibilityState === "visible") void configure(false); };
+    document.addEventListener("visibilitychange", refresh);
+    return () => document.removeEventListener("visibilitychange", refresh);
+  }, [user]);
+  useEffect(() => {
+    let disposed = false;
+    let viewing: AbortController | null = null;
+    const update = async () => {
+      viewing?.abort();
+      const controller = new AbortController();
+      viewing = controller;
+      try {
+        const environment = await window.KenanRemote!.getState();
+        if (disposed || controller.signal.aborted) return;
+        if (nativePlatform) {
+          await remote.notificationThread!({ user, environment: environment.id, sessionId: sessionId || "" });
+        } else if (sessionId && document.visibilityState === "visible") {
+          await browserNotifications?.view(threadNotificationKey(user, environment.id, sessionId), controller.signal);
+        }
+      } catch (cause) { if (!disposed && !controller.signal.aborted) setError(String(cause)); }
+    };
+    void update();
+    document.addEventListener("visibilitychange", update);
+    const hide = () => viewing?.abort();
+    window.addEventListener("pagehide", hide);
+    window.addEventListener("pageshow", update);
+    return () => {
+      disposed = true;
+      viewing?.abort();
+      document.removeEventListener("visibilitychange", update);
+      window.removeEventListener("pagehide", hide);
+      window.removeEventListener("pageshow", update);
+    };
+  }, [sessionId, user, browserNotifications]);
+  useEffect(() => {
+    if (nativePlatform || !enabled || !browserNotifications) return;
     const controller = new AbortController();
     const timers = new Set<ReturnType<typeof setTimeout>>();
     const failures = new Map<string, string>();
@@ -59,17 +102,13 @@ export function NotificationControl() {
         if (feed.environmentId !== environment.id) throw new Error("Environment identity mismatch");
         controller.signal.throwIfAborted();
         for (const event of feed.notifications) {
-          const notification = new Notification(`${environment.name} · ${event.name}`, {
-            body: "Session is idle", tag: `${key}:${event.seq}`,
-          });
-          notification.onclick = () => {
+          await browserNotifications.show(threadNotificationKey(user, environment.id, event.sessionId), `${environment.name} · ${event.name}`, () => {
             const url = new URL(location.href);
             url.searchParams.set("environment", environment.id);
             url.searchParams.set("idleSession", event.sessionId);
             url.searchParams.set("user", user);
             window.open(url, "_blank");
-            notification.close();
-          };
+          });
         }
         localStorage.setItem(key, String(feed.cursor));
         });
@@ -87,9 +126,9 @@ export function NotificationControl() {
       if (!controller.signal.aborted) for (const environment of environments) void poll(environment);
     }).catch((cause) => { if (!controller.signal.aborted) setError(String(cause)); });
     return () => { controller.abort(); for (const timer of timers) clearTimeout(timer); };
-  }, [enabled, user]);
+  }, [enabled, user, browserNotifications]);
   return <div className="usage-summary" title={error || (nativePlatform ? "Monitors every environment, including in the background" : "Monitors every environment while this page is open")}>
-    <button onClick={() => void configure(true)}>{enabled ? "Notifications on · all environments" : "Enable notifications"}</button>
+    {!enabled && <button onClick={() => void configure(true)}>Enable notifications</button>}
     {error && <div role="status">{error}</div>}
   </div>;
 }

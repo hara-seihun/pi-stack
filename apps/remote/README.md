@@ -38,7 +38,7 @@ Model menus, autonomous-agent labels, and plan cards use the catalog exported by
 
 ## Idle notifications
 
-The drawer's **Enable notifications** button asks for notification permission. Once enabled, both clients monitor every configured environment, not just the selected one. A notification names the environment and thread. Tapping it selects that environment and opens the thread.
+The drawer's **Enable notifications** button asks for notification permission and disappears once notifications are enabled. Both clients then monitor every configured environment, not just the selected one. Notifications use the Kenan head artwork and name the environment and thread. Tapping one selects that environment and opens the thread. Viewing a thread clears its notifications and suppresses new ones while it stays visible. Backgrounding the app restores delivery. Other threads, environments and people are unaffected. Browser tabs share visible-thread locks and broadcast dismissal to each other; Android's activity lifecycle and notification service share the selected thread.
 
 The supervisor commits an `idle_notifications` row in the same SQLite transaction that changes a session from RUNNING or ABORTING to IDLE. Opening an idle runtime, repeated idle updates, and supervisor startup do not create notifications. A queued follow-up keeps the session RUNNING until its work settles. `GET /v1/notifications` establishes a cursor without replaying history; `?after=CURSOR` returns up to 100 later transitions. The feed includes its environment identity. The [feed implementation](server/notifications.ts) and [schema](server/database.ts) own this contract.
 

@@ -76,13 +76,16 @@ public final class IdleNotificationService extends Service {
             if (!owner.equals(user) || Thread.currentThread().isInterrupted()) return;
             for (int index = 0; index < events.length(); index++) {
                 JSONObject event = events.getJSONObject(index);
+                String thread = ThreadNotifications.key(owner, endpoint.id, event.getString("sessionId"));
                 Intent open = new Intent(this, MainActivity.class)
                     .setAction("idle:" + key + ":" + event.getLong("seq"))
                     .putExtra("environment", endpoint.id).putExtra("sessionId", event.getString("sessionId")).putExtra("user", owner)
                     .addFlags(Intent.FLAG_ACTIVITY_SINGLE_TOP | Intent.FLAG_ACTIVITY_CLEAR_TOP);
                 PendingIntent target = PendingIntent.getActivity(this, 0, open, PendingIntent.FLAG_UPDATE_CURRENT | PendingIntent.FLAG_IMMUTABLE);
-                notifications.notify(key + ":" + event.getLong("seq"), 2, new NotificationCompat.Builder(this, IDLE)
+                ThreadNotifications.show(this, thread, new NotificationCompat.Builder(this, IDLE)
                     .setSmallIcon(R.drawable.ic_notification)
+                    .setLargeIcon(android.graphics.BitmapFactory.decodeResource(getResources(), R.mipmap.ic_launcher_foreground))
+                    .addExtras(ThreadNotifications.extras(thread))
                     .setContentTitle(endpoint.name + " · " + event.getString("name"))
                     .setContentText("Session is idle")
                     .setContentIntent(target).setAutoCancel(true).setOnlyAlertOnce(true)
@@ -105,6 +108,7 @@ public final class IdleNotificationService extends Service {
         String detail = status.isEmpty() ? "Connecting to all environments" : String.join(" · ", status.values());
         PendingIntent open = PendingIntent.getActivity(this, 0, new Intent(this, MainActivity.class), PendingIntent.FLAG_IMMUTABLE);
         return new NotificationCompat.Builder(this, WATCHING).setSmallIcon(R.drawable.ic_notification)
+            .setLargeIcon(android.graphics.BitmapFactory.decodeResource(getResources(), R.mipmap.ic_launcher_foreground))
             .setContentTitle("Pi Remote session notifications").setContentText(detail)
             .setStyle(new NotificationCompat.BigTextStyle().bigText(detail)).setContentIntent(open)
             .setOngoing(true).setOnlyAlertOnce(true).build();

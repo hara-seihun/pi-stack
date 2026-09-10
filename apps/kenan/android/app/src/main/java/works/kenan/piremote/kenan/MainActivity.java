@@ -22,6 +22,18 @@ public class MainActivity extends BridgeActivity {
     }
 
     @Override
+    public void onResume() {
+        super.onResume();
+        ThreadNotifications.resume(this, true);
+    }
+
+    @Override
+    public void onPause() {
+        ThreadNotifications.resume(this, false);
+        super.onPause();
+    }
+
+    @Override
     protected void onNewIntent(Intent intent) {
         super.onNewIntent(intent);
         setIntent(intent);

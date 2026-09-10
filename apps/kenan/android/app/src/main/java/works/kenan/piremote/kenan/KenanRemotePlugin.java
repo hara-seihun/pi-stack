@@ -112,6 +112,13 @@ public final class KenanRemotePlugin extends Plugin {
     }
 
     @PluginMethod
+    public void notificationThread(PluginCall call) {
+        ThreadNotifications.select(getContext(), call.getString("user", ""),
+            call.getString("environment", ""), call.getString("sessionId", ""));
+        call.resolve();
+    }
+
+    @PluginMethod
     public void notificationTarget(PluginCall call) {
         Intent intent = getActivity().getIntent();
         JSObject target = new JSObject();
