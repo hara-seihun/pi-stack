@@ -17,11 +17,11 @@ Before a handoff, Meet flushes unfinished microphone utterances, waits for their
 
 Every participant with a camera also uploads one 640×360 JPEG every two seconds. The agent can read the latest image through the room API. These are snapshots, not continuous video perception by the voice model. Meet retains only the latest frame per participant in memory. It does not keep a video or mixed-audio recording. Microphone audio remains in the transcription queue until processed; failed jobs retain their audio for recovery. A completed transcription clears its audio. Voice requests delegated to Pi also remain in the thread's ordinary history.
 
-The current web adapter uses peer-to-peer connections and admits at most twelve people. A host advertises its TURN servers through `meetIceServers` in `/etc/pi-stack/host.json`, for example:
+The current web adapter uses peer-to-peer connections and admits at most twelve people. A host advertises its TURN servers through `iceServers` in `/etc/pi-stack/meet.json`, for example:
 
 ```json
 {
-  "meetIceServers": [{
+  "iceServers": [{
     "urls": ["turn:PRIVATE_HOST:3478?transport=udp", "turn:PRIVATE_HOST:3478?transport=tcp"],
     "username": "YOUR_TURN_USERNAME",
     "credential": "YOUR_TURN_CREDENTIAL"
@@ -29,7 +29,7 @@ The current web adapter uses peer-to-peer connections and admits at most twelve 
 }
 ```
 
-This configuration is sent to joining browsers. Do not put an administrative credential here. The host owns the relay and its access boundary. An empty list permits direct connections only. Private HTTP is sufficient for server API calls; browser camera and microphone capture require localhost or HTTPS. GMKtec publishes the page through Tailscale Serve and provides a tailnet-only coturn relay for both environments.
+`PI_STACK_MEET_FILE` selects a different component configuration file. The separate file survives host provisioning that regenerates `host.json`. This configuration is sent to joining browsers. Do not put an administrative credential here. The host owns the relay and its access boundary. An empty list permits direct connections only. Private HTTP is sufficient for server API calls; browser camera and microphone capture require localhost or HTTPS. GMKtec publishes the page through Tailscale Serve and provides a tailnet-only coturn relay for both environments.
 
 ## Browser sharing
 
