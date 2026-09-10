@@ -268,6 +268,10 @@ test("creates and releases a clean review checkout", () => {
     ]);
     assert.equal(existsSync(created.path), true);
     assert.equal(git(created.path, "config", "--bool", "core.commitGraph"), "false");
+    assert.equal(git(created.path, "config", "--bool", "gc.writeCommitGraph"), "false");
+    assert.equal(git(created.path, "config", "--bool", "fetch.writeCommitGraph"), "false");
+    assert.equal(git(created.path, "config", "--int", "gc.auto"), "0");
+    assert.equal(git(created.path, "config", "--bool", "maintenance.auto"), "false");
     mkdirSync(path.join(created.path, "ignored-output"));
     writeFileSync(path.join(created.path, "ignored-output", "generated.txt"), "generated\n");
     const released = JSON.parse(run(["release", "--id", created.id, "--json"], f.env));
@@ -280,6 +284,47 @@ test("creates and releases a clean review checkout", () => {
     ], f.env));
     const output = run(["release", "--id", plain.id], f.env);
     assert.equal(output, `${plain.id}\treclaimable\t${plain.path}\treleased\tcheckout remains at its durable source commit`);
+  } finally {
+    f.close();
+  }
+});
+
+test("repairs reference-clone maintenance during an active lease without pruning work", () => {
+  const f = fixture();
+  try {
+    const created = JSON.parse(run(["create", "--root", f.workspaces, "--name", "publication",
+      "--repo", f.remote, "--min-free-gib", "0", "--json"], f.env));
+    git(created.path, "config", "user.name", "Test");
+    git(created.path, "config", "user.email", "test@example.invalid");
+    git(created.path, "commit", "--allow-empty", "-m", "Unpublished work");
+    const head = git(created.path, "rev-parse", "HEAD");
+    writeFileSync(path.join(created.path, "file.txt"), "unfinished work\n");
+    const objects = git(created.path, "count-objects", "-v");
+    for (const [key, value] of [["gc.writeCommitGraph", "true"], ["fetch.writeCommitGraph", "true"],
+      ["gc.auto", "1"], ["maintenance.auto", "true"]]) git(created.path, "config", key, value);
+    const log = path.join(created.path, ".git", "gc.log");
+    const warning = "warning: attempting to write a commit-graph, but 'core.commitGraph' is disabled\n"
+      + "warning: There are too many unreachable loose objects; run 'git prune' to remove them.\n";
+    writeFileSync(log, warning);
+    const planned = JSON.parse(run(["maintain", "--path", created.path, "--json"], f.env))[0];
+    assert.equal(planned.gcLog, "would-remove-diagnosed-warning");
+    assert.equal(readFileSync(log, "utf8"), warning);
+    assert.equal(git(created.path, "config", "gc.auto"), "1");
+    const [result] = JSON.parse(run(["reconcile", "--path", created.path, "--execute", "--json"], f.env));
+    assert.equal(result.inspection.classification, "active");
+    assert.equal(result.gitMaintenance.gcLog, "removed-diagnosed-warning");
+    assert.equal(existsSync(log), false);
+    assert.equal(git(created.path, "rev-parse", "HEAD"), head);
+    assert.equal(git(created.path, "count-objects", "-v"), objects);
+    assert.equal(readFileSync(path.join(created.path, "file.txt"), "utf8"), "unfinished work\n");
+    git(created.path, "commit", "--allow-empty", "-m", "Normal publication commit");
+    assert.equal(existsSync(log), false);
+    const [settled] = JSON.parse(run(["maintain", "--path", created.path, "--execute", "--json"], f.env));
+    assert.deepEqual(settled.settings, []);
+    writeFileSync(log, "fatal: object database is damaged\n");
+    assert.throws(() => workspaceTesting.maintainReferenceClone(created.path, true), /unrecognized Git maintenance failure retained/);
+    assert.equal(readFileSync(log, "utf8"), "fatal: object database is damaged\n");
+    assert.equal(workspaceTesting.maintainReferenceClone(f.source, true), null);
   } finally {
     f.close();
   }

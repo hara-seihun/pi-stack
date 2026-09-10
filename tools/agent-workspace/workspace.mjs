@@ -256,8 +256,49 @@ function normalizeCachePaths(values) {
   }))];
 }
 
+const REFERENCE_CLONE_CONFIG = {
+  "core.commitGraph": "false",
+  "gc.writeCommitGraph": "false",
+  "fetch.writeCommitGraph": "false",
+  "gc.auto": "0",
+  "maintenance.auto": "false",
+};
+const REFERENCE_GC_WARNINGS = new Set([
+  "warning: attempting to write a commit-graph, but 'core.commitGraph' is disabled",
+  "warning: There are too many unreachable loose objects; run 'git prune' to remove them.",
+]);
+
+function maintainReferenceClone(workspace, execute) {
+  const gitDirectory = path.join(workspace, ".git");
+  const alternates = path.join(gitDirectory, "objects", "info", "alternates");
+  if (!existsSync(alternates) || !readFileSync(alternates, "utf8").trim()) return null;
+  const configuration = git(workspace, ["config", "--local", "--null", "--list"]);
+  const values = new Map(configuration.split("\0").filter(Boolean).map((entry) => {
+    const separator = entry.indexOf("\n");
+    return [entry.slice(0, separator), entry.slice(separator + 1)];
+  }));
+  const settings = Object.entries(REFERENCE_CLONE_CONFIG)
+    .filter(([name, value]) => values.get(name.toLowerCase()) !== value);
+  if (execute) for (const [name, value] of settings) git(workspace, ["config", "--local", "--replace-all", name, value]);
+  const log = path.join(gitDirectory, "gc.log");
+  let gcLog = "absent";
+  if (existsSync(log)) {
+    const contents = readFileSync(log, "utf8").trim();
+    if (!contents || !contents.split(/\r?\n/u).every((line) => REFERENCE_GC_WARNINGS.has(line))) {
+      fail(`unrecognized Git maintenance failure retained at ${log}; inspect it before repair`);
+    }
+    if (existsSync(path.join(gitDirectory, "gc.pid"))) {
+      fail(`Git maintenance still owns ${gitDirectory}/gc.pid; retry after it finishes`);
+    }
+    gcLog = execute ? "removed-diagnosed-warning" : "would-remove-diagnosed-warning";
+    if (execute) rmSync(log);
+  }
+  return { path: workspace, settings: settings.map(([name]) => name), gcLog };
+}
+
 function register(database, input) {
   const info = gitInfo(input.path);
+  maintainReferenceClone(input.path, true);
   const now = Date.now();
   const existing = database.prepare("SELECT * FROM workspace WHERE path = ?").get(path.resolve(input.path));
   if (existing !== undefined && existing.state !== "released") {
@@ -944,8 +985,10 @@ function reconcileRecords(database, selected, options) {
     const records = recordsInGroup(database, selectedRecord);
     records.forEach((record) => visited.add(record.id));
     try {
-      if (records.length > 1) results.push(...groupReconciliation(database, records, options));
-      else if (records.length === 1) results.push(reconcileRecord(database, records[0], options));
+      const maintenance = new Map(records.map((record) => [record.id, maintainReferenceClone(record.path, options.execute)]));
+      const reconciled = records.length > 1 ? groupReconciliation(database, records, options)
+        : records.length === 1 ? [reconcileRecord(database, records[0], options)] : [];
+      results.push(...reconciled.map((result) => ({ ...result, gitMaintenance: maintenance.get(result.record.id) })));
     } catch (error) {
       results.push(...blockedReconciliation(database, records, error, options.execute));
     }
@@ -1154,13 +1197,10 @@ function createCommand(database, args, statePath) {
       else worktreeArgs.push("-b", branch, destination, sourceCommit);
       run("git", worktreeArgs);
     } else {
-      run("git", ["clone", "--reference-if-able", mirror, "--no-checkout", repository, destination], { timeout: 120_000 });
+      run("git", ["clone", ...Object.entries(REFERENCE_CLONE_CONFIG).flatMap(([name, value]) => ["--config", `${name}=${value}`]),
+        "--reference-if-able", mirror, "--no-checkout", repository, destination], { timeout: 120_000 });
       git(destination, ["remote", "set-url", "origin", upstream.fetch]);
       configurePushUrl(["-C", destination], upstream);
-      // The shared mirror rewrites its commit-graph chain as it fetches. An incremental graph in a
-      // reference clone can retain hashes of mirror graph files that no longer exist, making routine
-      // Git commands warn even though every object remains available through alternates.
-      git(destination, ["config", "core.commitGraph", "false"]);
       if (mode === "review") git(destination, ["checkout", "--detach", sourceCommit]);
       else git(destination, ["checkout", "-b", branch, sourceCommit]);
     }
@@ -1251,6 +1291,24 @@ function reconcileCommand(database, args, statePath) {
   print(results, bool(args, "json"));
 }
 
+function maintainCommand(database, args) {
+  assertOnly(args, ["root", "id", "path", "execute", "json"]);
+  const records = one(args, "id") !== undefined || one(args, "path") !== undefined
+    ? [recordBy(database, selectorFrom(args))] : listRecords(database, one(args, "root"));
+  const results = [];
+  for (const record of records) {
+    try {
+      const result = maintainReferenceClone(record.path, bool(args, "execute"));
+      if (result) results.push(result);
+    } catch (error) {
+      results.push({ path: record.path, error: error instanceof Error ? error.message : String(error) });
+      process.exitCode = 1;
+    }
+  }
+  if (bool(args, "json")) print(results, true);
+  else for (const result of results) process.stdout.write(`${result.path}\t${result.error ?? `${result.settings.join(",") || "configured"}; gc.log ${result.gcLog}`}\n`);
+}
+
 function statusCommand(database, args) {
   assertOnly(args, ["root", "json", "path", "owner"]);
   const all = listRecords(database, one(args, "root"));
@@ -1294,6 +1352,7 @@ function help() {
   agent-workspace heartbeat (--id ID|--path PATH) [--lease-seconds N]
   agent-workspace release (--id ID|--path PATH) [--reap-expired]
   agent-workspace reconcile [--root PATH] [--execute] [--reap-expired]
+  agent-workspace maintain [--root PATH | --path PATH] [--execute] [--json]
   agent-workspace status [--root PATH] [--path SUBSTRING] [--owner SUBSTRING] [--json]
   agent-workspace list ...                    alias for status
 
@@ -1307,7 +1366,7 @@ Records outlive the directory, so status explains what became of a checkout that
 `);
 }
 
-export const workspaceTesting = { dockerSnapshot, parseSystemdUnits, pruneReleased, systemdManagerSnapshot, systemdReferences };
+export const workspaceTesting = { dockerSnapshot, maintainReferenceClone, parseSystemdUnits, pruneReleased, systemdManagerSnapshot, systemdReferences };
 
 export function main(argv = process.argv.slice(2), statePath = DEFAULT_STATE) {
   const [commandName, ...rest] = argv;
@@ -1322,7 +1381,7 @@ export function main(argv = process.argv.slice(2), statePath = DEFAULT_STATE) {
   }
   const args = parseArgs(rest);
   if (args.positional.length > 0) fail(`unexpected argument: ${args.positional[0]}`);
-  drainGc(statePath);
+  if (commandName !== "maintain") drainGc(statePath);
   const database = openRegistry(statePath);
   try {
     if (commandName === "create") createCommand(database, args, statePath);
@@ -1331,6 +1390,7 @@ export function main(argv = process.argv.slice(2), statePath = DEFAULT_STATE) {
     else if (commandName === "heartbeat") heartbeatCommand(database, args);
     else if (commandName === "release") releaseCommand(database, args, statePath);
     else if (commandName === "reconcile") reconcileCommand(database, args, statePath);
+    else if (commandName === "maintain") maintainCommand(database, args);
     else if (commandName === "status" || commandName === "list") statusCommand(database, args);
     else {
       help();

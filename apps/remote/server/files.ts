@@ -79,34 +79,19 @@ export function localFileResponse(requested: string, method: string, req: Reques
   } catch { return new Response("File not found", { status: 404, headers: API_CORS_HEADERS }); }
 }
 
-const WEB_CONTENT_TYPES: Record<string, string> = {
-  ".html": "text/html; charset=utf-8",
-  ".js": "text/javascript; charset=utf-8",
-  ".css": "text/css; charset=utf-8",
-  ".svg": "image/svg+xml",
-  ".json": "application/json; charset=utf-8",
-  ".webmanifest": "application/manifest+json",
-  ".ttf": "font/ttf",
-  ".woff": "font/woff",
-  ".woff2": "font/woff2",
-};
-
-export function registerIconAssets(_icons: Iterable<string>) {}
-
 export function webResponse(webDir: string, pathname: string, method: string): Response | null {
   if (method !== "GET" && method !== "HEAD") return null;
   const relative = pathname === "/" ? "index.html" : pathname.replace(/^\/+/, "");
   if (!relative || relative.split("/").some((part) => !part || part === "." || part === "..")) return null;
-  const extension = relative.slice(relative.lastIndexOf("."));
-  const contentType = WEB_CONTENT_TYPES[extension];
   const file = join(webDir, relative);
-  if (!contentType || !existsSync(file) || !statSync(file).isFile()) return null;
-  return new Response(method === "HEAD" ? null : Bun.file(file), {
+  if (!existsSync(file) || !statSync(file).isFile()) return null;
+  const asset = Bun.file(file);
+  return new Response(method === "HEAD" ? null : asset, {
     headers: {
-      "content-type": contentType,
+      "content-type": asset.type || "application/octet-stream",
       "cache-control": "no-cache",
       "x-content-type-options": "nosniff",
-      "content-security-policy": "default-src 'self'; connect-src 'self'; img-src 'self' data:; style-src 'self' 'unsafe-inline'; script-src 'self'; object-src 'none'; frame-ancestors 'none'",
+      "content-security-policy": "default-src 'self'; connect-src 'self'; img-src 'self' data: blob:; media-src 'self' blob:; worker-src 'self' blob:; style-src 'self' 'unsafe-inline'; script-src 'self' blob:; object-src 'none'; frame-ancestors 'none'",
     },
   });
 }

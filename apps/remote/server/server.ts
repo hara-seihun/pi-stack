@@ -26,7 +26,7 @@ import { idleNotifications } from "./notifications";
 import { listPersons, publicPerson } from "./persons";
 import { knownEnvironments } from "./environments";
 import { API_CORS_HEADERS } from "./cors";
-import { fileBrowserError, listDirectory, localFileResponse, registerIconAssets, webResponse } from "./files";
+import { fileBrowserError, listDirectory, localFileResponse, webResponse } from "./files";
 import { governorControls, isGovernorProvider, toggleGovernor } from "./governors";
 import { BASH_TIMEOUT_OPTIONS, DEFAULT_BASH_TIMEOUT_SECONDS, type AgentModelCount, type BashTimeoutSeconds, type Dashboard, type DocumentUpdate, type QueuedMessage, type Session, type SupervisorState, type SyncRequest, type SyncResponse } from "./protocol";
 import { MachineActions } from "./machine-actions";
@@ -138,11 +138,6 @@ const THREAD_DESTINATIONS = new Map(destinationDefinitions
   .filter((destination) => OFFERED_DESTINATIONS.includes(destination.id))
   .map((destination) => [destination.id, destination]));
 
-registerIconAssets([
-  ...ORCHESTRATOR_CATALOG.plans.map((plan) => plan.icon),
-  ...[...THREAD_MODELS.values()].map((model) => model.icon),
-  ...[...THREAD_DESTINATIONS.values()].map((destination) => destination.icon),
-]);
 const machineActions = new MachineActions();
 
 function threadStartProfiles() {

@@ -16,7 +16,7 @@
 // protecting, and they are open exactly when their owner is working; a name
 // on a request grants nothing a key does not already grant. A host with one
 // person needs no name at all.
-import { existsSync } from "node:fs";
+import { webResponse } from "./files";
 import { unlink, writeFile, mkdir, chmod } from "node:fs/promises";
 import { join } from "node:path";
 import { listPersons, publicPerson, type Person } from "./persons";
@@ -139,25 +139,6 @@ async function forget(person: Person): Promise<{ ok: boolean; message: string }>
   return stopped;
 }
 
-const CONTENT_TYPES: Record<string, string> = {
-  ".html": "text/html; charset=utf-8", ".js": "text/javascript; charset=utf-8", ".css": "text/css; charset=utf-8",
-  ".svg": "image/svg+xml", ".json": "application/json; charset=utf-8", ".webmanifest": "application/manifest+json",
-  ".woff": "font/woff", ".woff2": "font/woff2", ".ttf": "font/ttf", ".png": "image/png", ".ico": "image/x-icon",
-};
-
-// While a supervisor is down its owner still has to be able to load the app,
-// because the app is what asks for the key. The front door serves exactly the
-// same files the supervisor would, so there is no second login page to
-// maintain and no way for the two to drift apart.
-function webAsset(pathname: string): Response | null {
-  const relative = pathname === "/" ? "index.html" : pathname.replace(/^\/+/, "");
-  if (relative.includes("..")) return null;
-  const file = Bun.file(join(WEB_DIR, relative));
-  if (!existsSync(join(WEB_DIR, relative))) return null;
-  const extension = relative.slice(relative.lastIndexOf("."));
-  return new Response(file, { headers: { "content-type": CONTENT_TYPES[extension] ?? "application/octet-stream", "cache-control": "no-store" } });
-}
-
 const HOP_BY_HOP = new Set(["connection", "keep-alive", "transfer-encoding", "upgrade", "proxy-authorization", "te", "trailer"]);
 
 async function proxy(person: Person, req: Request, url: URL): Promise<Response> {
@@ -210,7 +191,7 @@ async function route(req: Request, url: URL): Promise<Response> {
     const person = identify(req, url);
     if (!person) {
       if (url.pathname === "/v1/environment" && req.method === "GET") return Response.json({ environment: lockedEnvironment() });
-      const asset = req.method === "GET" ? webAsset(url.pathname) : null;
+      const asset = webResponse(WEB_DIR, url.pathname, req.method);
       if (asset) return asset;
       if (assertedName(req, url)) return Response.json({ error: "This machine does not know you. Ask to be added to Pi Remote.", persons }, { status: 403 });
       return Response.json({ error: "Say who you are", choosePerson: true, persons }, { status: 423 });
@@ -242,7 +223,7 @@ async function route(req: Request, url: URL): Promise<Response> {
       return Response.json({ error: result.error }, { status: 503 });
     }
 
-    const asset = webAsset(url.pathname);
+    const asset = webResponse(WEB_DIR, url.pathname, req.method);
     if (asset) return asset;
     return Response.json({ error: "Locked", locked: true, user: person.user, persons }, { status: 423 });
 }
