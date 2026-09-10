@@ -54,6 +54,8 @@ Retain runtime releases and their dependency trees while any Pi process or brows
 
 Pi normally comes from the npm registry. When an unpublished upstream commit is selected, [`vendor/pi`](../vendor/pi/README.md) holds the built source packages and their exact provenance. `deploy/runtime` copies those packages into its isolated production install before running `npm ci`.
 
+Pi Remote links its declared dependencies and peers from the same immutable production dependency tree, while keeping `pi-orchestrator` pinned to the matching code release. Before publication, deployment resolves the supervisor, router, and person CLI import graphs from the staged artifact with Bun. This check does not start services or open person data, and runs even when every person is locked; dependencies available only in the source checkout cannot mask an incomplete release. An unchanged redeploy repeats the import check.
+
 ## Browser recovery
 
 A version mismatch is evidence that the loaded native tool and executable came from different installations. Do not disable the guard, downgrade the shared command, or export a different PATH in a child shell. A child shell cannot repair its parent Pi process.
