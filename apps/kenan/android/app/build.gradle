@@ -72,6 +72,31 @@ android {
     }
 }
 
+def liveServerUrl = providers.gradleProperty('piRemoteLiveServerUrl').orElse('').get().trim()
+if (!liveServerUrl.isEmpty()) {
+    def liveUri = new URI(liveServerUrl)
+    if (liveUri.scheme != 'https' || !liveUri.host || liveUri.userInfo || liveUri.query || liveUri.fragment) {
+        throw new GradleException('piRemoteLiveServerUrl must be an HTTPS frontend URL')
+    }
+    def liveAssets = layout.buildDirectory.dir('generated/liveClientAssets')
+    def generateLiveClientConfig = tasks.register('generateLiveClientConfig') {
+        inputs.property('liveServerUrl', liveServerUrl)
+        inputs.file('src/main/assets/capacitor.config.json')
+        outputs.dir(liveAssets)
+        doLast {
+            def config = new JsonSlurper().parse(file('src/main/assets/capacitor.config.json'))
+            config.server = (config.server ?: [:]) + [url: liveServerUrl]
+            File target = new File(liveAssets.get().asFile, 'capacitor.config.json')
+            target.parentFile.mkdirs()
+            target.text = groovy.json.JsonOutput.toJson(config)
+        }
+    }
+    android.sourceSets.debug.assets.srcDir(liveAssets)
+    tasks.matching { it.name == 'mergeDebugAssets' }.configureEach {
+        dependsOn(generateLiveClientConfig)
+    }
+}
+
 repositories {
     flatDir{
         dirs '../capacitor-cordova-android-plugins/src/main/libs', 'libs'

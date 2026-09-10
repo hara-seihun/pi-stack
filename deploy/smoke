@@ -17,14 +17,18 @@ get() { curl -sS -o "$2" -w '%{http_code}' --max-time 10 "${@:3}" "$base$1" 2>/d
 body=$(mktemp); trap 'rm -f "$body"' EXIT
 
 # The web client, served to anyone: it is what asks for a name and a key.
-code=$(get / "$body")
-[[ $code == 200 ]] && grep -q '<html' "$body" || fail "GET / returned $code without the web client"
-mapfile -t assets < <(grep -oE '(src|href)="/[^"]+"' "$body" | cut -d\" -f2 | sort -u)
-(( ${#assets[@]} > 0 )) || fail "GET / named no client assets"
-for asset in "${assets[@]}"; do
-  code=$(get "$asset" "$body")
-  [[ $code == 200 ]] || fail "GET $asset returned $code"
+for page in / /meet.html /voice.html; do
+  code=$(get "$page" "$body")
+  [[ $code == 200 ]] && grep -q '<html' "$body" || fail "GET $page returned $code without the web client"
+  mapfile -t assets < <(grep -oE '(src|href)="/[^"]+"' "$body" | cut -d\" -f2 | sort -u)
+  (( ${#assets[@]} > 0 )) || fail "GET $page named no client assets"
+  for asset in "${assets[@]}"; do
+    code=$(get "$asset" "$body")
+    [[ $code == 200 ]] || fail "GET $asset returned $code"
+  done
 done
+code=$(get /meet-adapter.js "$body")
+[[ $code == 200 ]] && grep -q startMeetAdapter "$body" || fail 'Meet external adapter bundle is missing'
 
 # The Android shell calls from http://localhost with the person header, which
 # makes every request a CORS preflight first. If this fails, the phone is out.
@@ -65,7 +69,12 @@ for file in "$persons_dir"/*.json; do
   done
   code=$(get /v1/health "$body" -H "x-pi-remote-user: $user")
   [[ $(jq -r '.environmentId // empty' "$body") == "$environment" ]] || fail "$user: supervisor reports a different environment than the front door"
-  echo "smoke: $user is unlocked and her supervisor answers"
+  release=$(jq -r '.releaseCommit // empty' "$body")
+  code=$(get /v1/voice "$body" -H "x-pi-remote-user: $user")
+  [[ $code == 200 ]] && jq -e --arg commit "$release" '.enabled == true and .releaseCommit == $commit' "$body" >/dev/null 2>&1 || fail "$user: Voice is not running the supervisor release"
+  code=$(get /v1/meet "$body" -H "x-pi-remote-user: $user")
+  [[ $code == 200 ]] && jq -e '.transcriptionAvailable == true' "$body" >/dev/null 2>&1 || fail "$user: Meet transcription runtime is unavailable"
+  echo "smoke: $user is unlocked and her supervisor, Meet and Voice answer"
 done
 
 if (( failures > 0 )); then

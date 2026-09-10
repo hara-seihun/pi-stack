@@ -7,12 +7,25 @@ const request = (path: string, method = "GET", body?: unknown) => new Request(`h
 });
 
 async function start(server: MeetServer) {
-  const response = await server.handle(request("", "POST", { sessionId: "thread", name: "Host" }));
+  const response = await server.handle(request("", "POST", { requestId: crypto.randomUUID(), sessionId: "thread", name: "Host" }));
   expect(response!.status).toBe(201);
   return response!.json();
 }
 
 describe("PiStack Meet", () => {
+  test("a lost creation response does not create a second room or host", async () => {
+    const server = new MeetServer(() => true);
+    try {
+      const body = { requestId: crypto.randomUUID(), sessionId: "thread", name: "Host" };
+      const first = await (await server.handle(request("", "POST", body)))!.json();
+      const second = await (await server.handle(request("", "POST", body)))!.json();
+      expect(second).toEqual(first);
+      expect((await (await server.handle(request("")))!.json()).rooms).toHaveLength(1);
+      expect((await server.handle(request("", "POST", { ...body, sessionId: "another" })))!.status).toBe(409);
+      await server.handle(request(`/${first.room.id}/leave?participant=${first.participant.id}`, "POST"));
+      expect((await server.handle(request("", "POST", body)))!.status).toBe(409);
+    } finally { await server.close(); }
+  });
   test("signaling is replayed until acknowledged, belongs to a recipient, and dies with the host", async () => {
     const server = new MeetServer((id) => id === "thread");
     try {

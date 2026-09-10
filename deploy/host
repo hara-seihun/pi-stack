@@ -17,6 +17,15 @@ export PI_STACK_HOST_FILE=${1:-$(pi_stack_host_file)}
 [[ -f $PI_STACK_HOST_FILE ]] || { echo "usage: deploy/host [HOST_FILE]; $PI_STACK_HOST_FILE does not exist" >&2; exit 64; }
 jq -e '.version == 1' "$PI_STACK_HOST_FILE" >/dev/null || { echo "$PI_STACK_HOST_FILE must declare version 1" >&2; exit 64; }
 
+# Rehearsals never touch host services or require their credentials.
+services=1
+if [[ -n ${PI_STACK_REMOTE_DEST:-}${PI_STACK_ORCHESTRATOR_DEST:-}${PI_STACK_RUNTIME_DEST:-} && ${PI_STACK_SERVICES:-0} != 1 ]]; then
+  services=0
+fi
+if (( services )); then
+  "$root/deploy/voice" --check
+fi
+
 # A changed lockfile requires both the checkout's build dependencies and the
 # production runtime tree. They are independent npm installations, so doing
 # them serially can consume the whole machine-wide deployment deadline.
@@ -44,12 +53,6 @@ previous_remote_release=""
 if [[ -f $remote/.pi-stack-commit ]]; then
   previous_remote=$(<"$remote/.pi-stack-commit")
   previous_remote_release=$(readlink -f "$remote")
-fi
-# A deployment aimed at scratch destinations is a rehearsal: it must never
-# touch the machine's services or walk its live front door.
-services=1
-if [[ -n ${PI_STACK_REMOTE_DEST:-}${PI_STACK_ORCHESTRATOR_DEST:-}${PI_STACK_RUNTIME_DEST:-} && ${PI_STACK_SERVICES:-0} != 1 ]]; then
-  services=0
 fi
 mapfile -t users < <(pi_stack_users)
 (( ${#users[@]} > 0 )) || { echo "no Pi accounts: set fleetUser in $PI_STACK_HOST_FILE or add a person with pi-remote person add" >&2; exit 64; }
@@ -98,7 +101,7 @@ supervisor_commit() {
 activate_remote() {
   local target_commit=$1 user response deadline
   local -a unlocked_users=()
-  pi_stack_as_root systemctl try-restart pi-remote-router.service 2>/dev/null || true
+  pi_stack_as_root systemctl restart pi-remote-router.service || return 1
   wait_for_router || return 1
   # A supervisor the front door has just started already runs the selected
   # release; only one that reports another commit is asked to hand over.
@@ -121,15 +124,16 @@ if [[ -n $fleet ]]; then
   pi_stack_as_root systemctl restart "pi-orchestrator@$fleet.service"
 fi
 activation_failed=0
-if [[ $previous_remote != "$expected" ]] && ! activate_remote "$expected"; then
+if ! "$root/deploy/voice" --activate; then
+  activation_failed=1
+elif [[ $previous_remote != "$expected" ]] && ! activate_remote "$expected"; then
   activation_failed=1
 fi
 
 # Then walk the front door the way the clients do. A release that locks a
 # person out of the app goes back to the previous Pi Remote release on the
 # spot, and the deployment fails loudly instead of quietly.
-if systemctl is-active --quiet pi-remote-router.service 2>/dev/null; then
-  if (( activation_failed )) || ! "$root/deploy/smoke"; then
+if (( activation_failed )) || ! "$root/deploy/smoke"; then
     if [[ -n $previous_remote_release && $previous_remote != "$expected" && -d $previous_remote_release ]]; then
       echo "activation or smoke check failed; returning Pi Remote to $previous_remote" >&2
       candidate="$(dirname "$remote")/.pi-stack-releases/.rollback.$$"
@@ -139,11 +143,17 @@ if systemctl is-active --quiet pi-remote-router.service 2>/dev/null; then
       # start limit; the previous release cannot come back through a unit
       # systemd refuses to start.
       pi_stack_as_root systemctl reset-failed 'pi-remote@*.service' 2>/dev/null || true
+      if [[ -f $previous_remote_release/server/voice/service.ts ]]; then
+        "$root/deploy/voice" --activate || echo 'Voice rollback failed' >&2
+      else
+        pi_stack_as_root systemctl stop pi-stack-voice.service
+      fi
       activate_remote "$previous_remote" || true
-      "$root/deploy/smoke" || echo "smoke check still fails on the previous release; the machine, not the release, is the problem" >&2
+      if [[ -x $previous_remote_release/deploy/smoke ]]; then
+        "$previous_remote_release/deploy/smoke" || echo 'The restored release failed its own smoke check' >&2
+      fi
     fi
     echo "Pi stack $expected is not accepted on this host" >&2
     exit 1
-  fi
 fi
 printf 'deployed Pi stack %s for %s\n' "$expected" "${users[*]}"

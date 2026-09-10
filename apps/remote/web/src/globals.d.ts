@@ -17,11 +17,15 @@ interface Window {
   PiRemoteVoice: {
     create(options: {
       sessionId: string;
+      request?: import("./meet/transport").MeetRequest;
       input?: MediaStream;
       onOutput?(stream: MediaStream): void;
       meetingContext?(): string;
-      handoffContext?(): Promise<string>;
-      onTurn?(turn: { id: string; role: "user" | "assistant"; text: string; final: boolean; startedAt: number }): void;
+      handoffContext?(): Promise<void>;
+      outputMuted?: boolean;
+      onVoiceControl?(state: import("../../server/meet/protocol").MeetVoiceControl): void;
+      onFragment?(fragment: { id: string; role: "user" | "assistant"; text: string; voiceSessionId: string; startMs: number; endMs: number; startedAt: number }): void;
+      onPlayback?(state: "playing" | "blocked" | "muted" | "stopped"): void;
       onState(state: string, detail?: string): void;
       onNotice(message: string): void;
       onTranscript?(role: string, text: string): void;
@@ -45,7 +49,10 @@ interface SyncDocument {
 interface VoiceSession {
   state: string;
   start(): Promise<void>;
-  stop(): void;
+  suspend(): void;
+  stop(): Promise<void>;
   toggleMute(): boolean;
   hush(): void;
+  resumePlayback(): Promise<void>;
+  setOutputMuted(muted: boolean): void;
 }

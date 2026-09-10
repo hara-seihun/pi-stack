@@ -1,39 +1,46 @@
-import { afterEach, describe, expect, test } from "bun:test";
+import { afterEach, describe, expect, mock, spyOn, test } from "bun:test";
 import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { VoiceBroker } from "./broker";
 
-const roots:string[]=[];
-afterEach(()=>{for(const root of roots.splice(0))rmSync(root,{recursive:true,force:true});});
+const roots: string[] = [];
+afterEach(() => {
+  mock.restore();
+  for (const root of roots.splice(0)) rmSync(root, { recursive: true, force: true });
+});
 
-function broker(responses:Response[]){
-  const root=mkdtempSync(join(tmpdir(),"voice-broker-"));roots.push(root);
-  const authPath=join(root,"auth.json");
-  writeFileSync(authPath,JSON.stringify({"openai-codex-1":{type:"oauth",access:"access",refresh:"refresh",expires:Date.now()+3_600_000,accountId:"account"}}));
-  const acquired:string[]=[];const released:string[]=[];
-  return {
-    acquired,released,
-    value:new VoiceBroker({authPath,accounts:()=>[{id:"openai-codex-1",provider:"openai-codex"}],acquireLease:(account)=>{acquired.push(account);return`voice:${account}`;},releaseLease:(lease)=>released.push(lease),fetch:async()=>responses.shift()!}),
-  };
+function broker(response: Response) {
+  const root = mkdtempSync(join(tmpdir(), "voice-broker-")); roots.push(root);
+  const credential = join(root, "openai-api-key");
+  writeFileSync(credential, "sk-unit-test");
+  const network = spyOn(globalThis, "fetch").mockResolvedValue(response);
+  return { value: new VoiceBroker(credential), network };
 }
+const offer = "v=0\r\no=- 0 0 IN IP4 127.0.0.1\r\n";
 
-const offer="v=0\r\no=- 0 0 IN IP4 127.0.0.1\r\n";
-
-describe("voice account leases",()=>{
-  test("returns the live lease with a successful WebRTC negotiation",async()=>{
-    const run=broker([Response.json({rate_limit:{primary_window:{used_percent:10}}}),new Response("answer",{status:201})]);
-    expect(await run.value.negotiate(offer,"instructions")).toMatchObject({ok:true,account:"openai-codex-1",leaseId:"voice:openai-codex-1"});
-    expect(run.acquired).toEqual(["openai-codex-1"]);expect(run.released).toEqual([]);
+describe("Voice API broker", () => {
+  test("creates a client-delegated WebRTC session without provider credential data in the result", async () => {
+    const run = broker(Response.json({ session: { id: "live-session", client_secret: "provider-private" }, transport: { sdp: "answer" } }));
+    expect(await run.value.negotiate(offer, "instructions")).toEqual({ ok: true, value: {
+      session: { id: "live-session" }, transport: { type: "webrtc", sdp: "answer" },
+    } });
+    const body = JSON.parse(String(run.network.mock.calls[0]![1]!.body));
+    expect(body.session.delegation).toEqual({ type: "client" });
+    expect(body.transport).toEqual({ type: "webrtc", sdp: offer });
+    expect(body.session.store).toBe(false);
   });
 
-  test("releases the lease after quota refusal or negotiation failure",async()=>{
-    const exhausted=broker([Response.json({rate_limit:{primary_window:{used_percent:100}}})]);
-    expect(await exhausted.value.negotiate(offer,"instructions")).toMatchObject({ok:false,status:429});
-    expect(exhausted.released).toEqual(["voice:openai-codex-1"]);
+  test("refuses malformed SDP without calling OpenAI", async () => {
+    const run = broker(new Response("unused"));
+    expect(await run.value.negotiate("not SDP", "instructions")).toMatchObject({ ok: false, status: 400 });
+    expect(run.network).not.toHaveBeenCalled();
+  });
 
-    const failed=broker([Response.json({rate_limit:{primary_window:{used_percent:10}}}),new Response("upstream failed",{status:500})]);
-    expect(await failed.value.negotiate(offer,"instructions")).toMatchObject({ok:false,status:503});
-    expect(failed.released).toEqual(["voice:openai-codex-1"]);
+  test("keeps provider failures bounded and treats an already-closed session as closed", async () => {
+    const run = broker(new Response("provider-private-detail", { status: 429 }));
+    expect(await run.value.negotiate(offer, "instructions")).toEqual({ ok: false, status: 429, error: "OpenAI Live session creation failed (HTTP 429)" });
+    run.network.mockResolvedValue(new Response(null, { status: 404 }));
+    expect(await run.value.close("live-session")).toEqual({ ok: true, value: { closed: true } });
   });
 });

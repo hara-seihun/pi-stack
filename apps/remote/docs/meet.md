@@ -6,14 +6,16 @@ Meet is `/meet.html` in the regular Pi Remote frontend. The thread header's Meet
 
 Each person publishes a separate camera/audio MediaStream over WebRTC. The room adds two outgoing PiStack streams:
 
-- `pi-camera` contains the same `/kenan.png` artwork used by the client and PiStack Voice's audio output.
+- `pi-camera` contains Kenan's artwork, Voice/mute/playback state and the connected threads' tool activity and assistant output. Its square dashboard rotates through thread details. Voice's audible output is its audio track.
 - `pi-screen` contains the host-controlled Chromium tab, sampled at five frames per second.
 
 The host tab runs the Voice connection. It mixes participant microphones only into Voice's single conversational audio input. Voice output never enters that mixer. Independently, the host captures each participant's microphone through its own AudioWorklet. Silence or a twelve-second bound closes an utterance; PiStack transcribes that source with a local, multilingual Whisper base model. Speaker identity comes from the stream's participant ID and name, not a guess from mixed audio. Two people speaking at once produce independent transcript entries. Duplicate display names remain distinct through their IDs.
 
-Voice's `turn.created`, `turn.delta`, and `turn.done` events save Kenan's speech, including unfinished turns. Meet ignores Voice's mixed-room user transcript in favour of the separately transcribed microphones. The existing delegation path sends work to the chosen Pi Remote thread and returns the agent's progress through Voice.
+Meet saves Kenan's spoken output, including unfinished fragments, separately from participant recognition. It ignores Voice's mixed-room user transcript in favour of the independently transcribed microphones. Rooms start with Kenan muted. The host control and agents' `meet_voice` tool change the same server-owned mute state; listening and work continue while muted.
 
-Before a handoff, Meet flushes unfinished microphone utterances, waits for their durable save acknowledgements and transcription, and takes a bounded transcript snapshot. Later speech does not keep that handoff waiting. The request includes JSON `meetingTranscript` turns with `id`, `speakerId`, `speaker`, `startedAt`, `text`, and `final`, plus room metadata and browser/camera URLs. Each handoff includes the complete snapshot rather than maintaining a second delivery cursor. Failed transcription stops the handoff and reports the error; it never substitutes guessed speaker labels or incomplete speech.
+Delegation reuses a suitable existing worker thread by default. `threadId` selects a particular worker; `newThread` requests independent concurrent work. Every meeting-associated thread receives the shared room/browser context and the reviewed livedev skill from the installed release.
+
+Before delivering meeting work, the supervisor increments `transcriptFlushRevision`. The host sees it in the room poll, flushes its microphone buffers and acknowledges `/transcript/flushed` with `{revision}` or `{revision,error}`. The server then waits for the bounded recognition snapshot and computes what the receiving thread has not seen. Durable work-item receipts record each delivered turn's text. A continuation receives only its new suffix; a corrected turn is labelled as a correction. Delivery state belongs to each thread, not the browser or a global meeting cursor, so another worker can receive its own missing history. Failed flushes or transcription retain the queued work and report the recovery needed instead of delivering incomplete speech.
 
 Every participant with a camera also uploads one 640×360 JPEG every two seconds. The agent can read the latest image through the room API. These are snapshots, not continuous video perception by the voice model. Meet retains only the latest frame per participant in memory. It does not keep a video or mixed-audio recording. Microphone audio remains in the transcription queue until processed; failed jobs retain their audio for recovery. A completed transcription clears its audio. Voice requests delegated to Pi also remain in the thread's ordinary history.
 
@@ -35,7 +37,9 @@ The current web adapter uses peer-to-peer connections and admits at most twelve 
 
 Share browser starts a new, isolated Chromium context on the selected PiStack host. It does not reuse another browser's login or profile. `PI_MEET_CHROMIUM` selects an executable; otherwise the host's `chromium` or `google-chrome` command must exist. PiStack's pinned `playwright-core` dependency controls startup, CDP screencasting, navigation, and shutdown.
 
-The API reports a loopback CDP endpoint. The connected agent can attach its ordinary `agent_browser` tool using `connect PORT` with `sessionMode: "fresh"`, then `get url`, `snapshot -i`, and the normal browser controls. Operate the shared tab. Creating another tab does not change which tab Meet broadcasts. The page's Address field navigates that same tab.
+The API reports a loopback CDP endpoint. The connected agent can attach its ordinary `agent_browser` tool using `connect ENDPOINT` with `sessionMode: "fresh"`, then `get url`, `snapshot -i`, and the normal browser controls. Newly opened or focused tabs become the broadcast tab. Closing that tab selects a remaining one. The page's Address field navigates the shared tab.
+
+Meeting agents also have `meet_room`, `meet_voice`, `meet_share_screen` and `meet_stop_sharing`. `meet_share_screen` can open an app URL and watch an absolute source directory for page reloads. Apps with their own hot reload need no watcher. Stopping sharing closes Chromium and its watcher. Watch and navigation failures appear in the room state.
 
 Chromium profiles live in temporary `pi-meet-*` directories and are deleted when the browser closes. The browser closes with the host's room, including a host departure during startup. An ungraceful host loss expires its room after 45 seconds without polling. Supervisor deployment or restart ends live media connections; guests see the disconnection and can rejoin a new room. Saved transcripts and accepted transcription jobs survive. Interrupted jobs resume when the supervisor starts.
 
@@ -47,13 +51,31 @@ Audio enters SQLite before an acknowledgement is returned to the host. The recog
 
 [`deploy/transcription`](../../../deploy/transcription) installs the hash-locked Python dependencies and revision-pinned model under `/srv/pi/.pi-transcription/HASH`, with `/srv/pi/transcription` selecting the prepared tree. It requires `uv` and uses Python 3.12. The model provenance and dependency lock live in [`server/meet/asr`](../server/meet/asr). No transcription API key is used and microphone audio does not leave the selected PiStack host for recognition. The conversational Voice connection still sends audio to its existing provider. `deploy/host` prepares transcription alongside runtime dependencies. `PI_STACK_TRANSCRIPTION_DEST` selects a different runtime for deployment rehearsals and supervisor operation.
 
-Converge's implementation informed the separation between the meeting transcript and the Voice handoff. Its `products/kenan/src/meeting-agent/recall.ts` configures Recall streaming transcription with `use_separate_streams_when_available`; its record store retains speaker-attributed segments. `output-media-page.ts` separately captures unfinished Voice turns, and `handoff-transcript.ts` and `pi-agent.ts` track what each agent session has received. PiStack does not depend on Converge's Recall service, credentials, or work data.
+The shared Voice service is `pi-stack-voice.service` on loopback port `8796`. Its OpenAI API credential stays with the host's credential owner and reaches the dynamic service user through systemd. It is not an Orchestrator OAuth consumer. Voice session leases survive service restart in `/var/lib/pi-stack-voice-runtime/sessions.sqlite3`. [Deployment](../../../docs/deployment.md) owns unit installation, release identity checks and rollback.
+
+Converge owns its Recall/calendar credentials, scheduling, attendance policy and platform records. Its Recall transcript can retain platform speaker attribution. Recall's browser microphone supplies mixed audio to the shared adapter, so PiStack labels that source `Mixed meeting audio` rather than inventing individual speakers.
 
 ## Adapter contract
 
 [`server/meet/protocol.ts`](../server/meet/protocol.ts) owns room snapshots, signaling messages, and stream kinds. [`web/src/meet/media.ts`](../web/src/meet/media.ts) defines `MeetMediaSource`, which carries a participant, a stream kind, and a MediaStream. `MeetMedia.attach` supplies a participant's audio to Voice without losing the original stream. `detach` removes that participant from the mixer.
 
-[`MeetRoom`](../web/src/meet/room.ts) is the first transport adapter. `publish(kind, stream)` publishes camera, audio, and browser media; `onMedia` delivers each remote participant's labelled streams separately. A connector to another conferencing system supplies the same media contract and consumes the PiStack output streams. No Zoom, Teams, or Google Meet connector is included.
+[`MeetRoom`](../web/src/meet/room.ts) handles room polling, signaling and participant streams. `publish(kind, stream)` publishes camera, audio, and browser media; `onMedia` delivers each remote participant's labelled streams separately.
+
+[`web/src/meet/adapter.ts`](../web/src/meet/adapter.ts) exports `startMeetAdapter({request, namespace, eventKey, name?, container})`. It returns state, camera/browser streams, `suspend`, `close`, mute, sharing and recovery controls. The injected `request` has type `(path: string, init: RequestInit) => Promise<Response>`. It preserves HTTP status, headers, text/binary bodies and `init.signal` cancellation across the transport. All room, Voice, transcript and browser API traffic uses it. The regular build emits a standalone ESM `web/dist/meet-adapter.js` containing its artwork and microphone worklet, with no sibling asset dependency.
+
+Converge's native wrapper reads that exact installed bundle from `/srv/pi/pi-remote/web/dist/meet-adapter.js` and transfers it over its existing authenticated WebSocket relay to the thin Recall output page. The page imports it as an ES module, then calls `startMeetAdapter` with its relay request function and stable calendar identity. It does not load Pi Remote's standalone page bootstrap or select a person through browser-local state. Await `close()` before ending a graceful meeting so pending speech reaches durable storage; an aborted request or failed close reports an error rather than claiming that transcript delivery succeeded. It forwards API traffic to the person's Pi Remote supervisor through the normal router. Pi Remote stays private; no extra listener or public Remote endpoint is needed. Converge owns transport authorization and restricts it to the relevant meeting operations. PiStack owns the renderer, Voice, recognition, thread delegation and transcript delivery. There is no separate Converge meeting engine or copied browser bundle.
+
+### Disconnect and shutdown
+
+`suspend(): Promise<void>` immediately stops physical microphone tracks, silences Voice input/output, and stops camera/browser media and room polling before awaiting anything. It then flushes unfinished PCM into the retained upload outbox. State becomes `suspended`; that handle never resumes capture.
+
+`close()` owns recovery. It suspends capture, awaits Voice shutdown, reopens the same stable external room and host, then replays retained PCM and assistant uploads under their original IDs. Only acknowledged uploads permit capture disposal and the final external-room stop. A disconnected relay makes `close()` reject while retaining the bytes. After reconnect, call `close()` again on the same handle. The wrapper does not implement another upload or room-recovery loop. `retryTranscription()` remains available without restarting suspended capture.
+
+If startup fails and cleanup cannot finish, `MeetAdapterStartError.recovery` retains `state`, `suspend`, `close` and `retryTranscription`. Keep that recovery handle and complete its `close()` before starting a replacement adapter. Dropping the handle or destroying its page can lose audio that the server has not acknowledged.
+
+### External room API
+
+`POST /v1/meet/external` takes `{namespace,eventKey,name?}` and returns the ordinary `{room,participant}` shape. The namespace and stable event key select deterministic room/thread identities. Repeated starts reuse their stored history. The host participant is explicitly `Mixed meeting audio`. `POST /v1/meet/external/ROOM/stop` ends that room. `GET /v1/meet/external/transcript?namespace=NS&eventKey=KEY`, optionally `format=text`, exports its saved transcript and reports the room/thread IDs in response headers.
 
 The supervisor owns these endpoints, all below `/v1/meet`:
 
@@ -68,7 +90,9 @@ The supervisor owns these endpoints, all below `/v1/meet`:
 | Leave, or end the room as host | `POST /ROOM/leave?participant=ID` |
 | Publish latest camera snapshot | `PUT /ROOM/frame?participant=ID`, `image/jpeg` |
 | Submit one labelled microphone utterance | `POST /ROOM/transcript/audio?participant=HOST_ID&speaker=SOURCE_ID&id=UUID&startedAt=MILLISECONDS`, mono 16 kHz PCM16, `audio/pcm` |
-| Save a Voice turn | `POST /ROOM/transcript/assistant?participant=HOST_ID`, JSON `{id,text,final,startedAt}` |
+| Save a Voice turn | `POST /ROOM/transcript/assistant?participant=HOST_ID`, JSON `{id,text,final,startedAt}`, optionally `voiceSessionId,startMs,endMs` for output fragments |
+| Acknowledge a requested microphone flush | `POST /ROOM/transcript/flushed?participant=HOST_ID`, JSON `{revision,error?}` |
+| Mute or unmute Kenan | `POST /ROOM/voice?participant=HOST_ID`, JSON `{muted}` |
 | Read saved transcript | `GET /ROOM/transcript`, or `?format=text` for a sentence-labelled download |
 | List a thread's meetings | `GET /?sessionId=THREAD_ID` |
 | Retry failed recognition | `POST /ROOM/transcript/retry?participant=HOST_ID`; the participant parameter is unnecessary once the room has ended |
@@ -80,6 +104,6 @@ Create and join return `{room, participant}`. Polling is also the participant he
 
 ## Ownership and checks
 
-Implementation belongs to `apps/remote/server/meet` and `apps/remote/web/src/meet`. The regular Vite build includes the page, and `deploy/host` publishes its server, assets, and browser dependency with the rest of Pi Remote. Host-specific TURN addresses and Chromium installation belong to host configuration.
+Implementation belongs to `apps/remote/server/meet` and `apps/remote/web/src/meet`. The regular build includes the page and standalone adapter; `deploy/host` publishes their server, assets, Voice service code, livedev skill and browser dependency with the rest of Pi Remote. Its staged-artifact check resolves imports outside the checkout's hoisted dependencies, and its live smoke checks Meet, Voice release identity and transcription availability. Host-specific TURN addresses and Chromium installation belong to host configuration.
 
 `bun test apps/remote/server/meet.test.ts` exercises signaling acknowledgement, recipient isolation, host cleanup during browser startup, and per-person frame deletion. `npm run typecheck --workspace=pi-remote` checks the shared browser and server contracts. A deployed media check should join two clients, check separate camera and PiStack streams, navigate the shared browser, and leave the room. A forced-relay WebRTC connection checks TURN separately from a same-machine direct connection.

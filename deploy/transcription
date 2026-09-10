@@ -2,6 +2,7 @@
 set -euo pipefail
 root=$(cd "$(dirname "$0")/.." && pwd)
 source "$root/deploy/lib"
+pi_stack_enter_deployment "$0" "$root" "$@"
 source_dir="$root/apps/remote/server/meet/asr"
 key=$(cat "$source_dir/requirements.lock" "$source_dir/model.json" | sha256sum | cut -d' ' -f1)
 base=${PI_STACK_TRANSCRIPTION_DEST:-/srv/pi/transcription}
@@ -23,6 +24,12 @@ PY
   chmod -R a+rX "$tree"
   touch "$tree/ready"
 fi
-pi_stack_as_root ln -sfn "$tree" "$base.next"
-pi_stack_as_root mv -Tf "$base.next" "$base"
+[[ -x $tree/venv/bin/python && -d $tree/model ]] || {
+  echo "PiStack transcription runtime is incomplete at $tree" >&2
+  exit 66
+}
+next="$base.next.$$"
+trap 'pi_stack_as_root rm -f "$next"' EXIT
+pi_stack_as_root ln -s "$tree" "$next"
+pi_stack_as_root mv -Tf "$next" "$base"
 echo "PiStack transcription ready: $key"

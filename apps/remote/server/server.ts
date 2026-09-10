@@ -1,4 +1,5 @@
 import { Database } from "bun:sqlite";
+import type { ImageContent } from "@earendil-works/pi-ai";
 import { closeSync, existsSync, mkdirSync, mkdtempSync, openSync, readFileSync, readdirSync, realpathSync, renameSync, rmSync, statSync, unlinkSync, writeFileSync, writeSync } from "node:fs";
 import { homedir } from "node:os";
 import { basename, dirname, extname, isAbsolute, join, resolve } from "node:path";
@@ -12,8 +13,13 @@ import { contextSplice, DocumentHistory, messageFinalizationKey, sha256, type Co
 import { appendContextPatch, readContext } from "./context-journal";
 import { beginSupervisorGeneration, ensureSupervisorSchema } from "./database";
 import { startLedgerSnapshots } from "./ledger-snapshot";
-import { DEFAULT_LIVE_MODEL, DEFAULT_LIVE_VOICE, VoiceBroker } from "./voice/broker";
+import { VoiceClient } from "./voice/client";
 import { MeetServer } from "./meet/server";
+import { meetingActivity } from "./meet/activity";
+import { meetingHandoffText, prepareMeetingHandoff } from "./meet/handoff";
+import { externalMeetingRequest } from "./meet/external";
+import { liveDevInstructions } from "./skills";
+import { THREAD_THINKING_LEVELS } from "./thread-tools";
 import { attachRuntimeHost, startRuntimeHost, type RuntimeTransport } from "./runtime-transport";
 import { API } from "./api";
 import { idleNotifications } from "./notifications";
@@ -52,7 +58,6 @@ const SERVICE_TIER_EXTENSION = join(import.meta.dir, "service-tier.ts");
 const THREAD_CONTEXT_EXTENSION = join(import.meta.dir, "thread-context.ts");
 const SERVICE_TIER_DIR = join(DATA, "service-tiers");
 const ORCHESTRATOR_DB_PATH = process.env.PI_REMOTE_ORCHESTRATOR_DB ?? join(HOME, ".local/share/pi-orchestrator/ledger.sqlite3");
-const ORCHESTRATOR_AUTH_PATH = process.env.PI_ORCHESTRATOR_AUTH ?? join(dirname(realpathSync(ORCHESTRATOR_DB_PATH)), "auth.json");
 const ORCHESTRATOR_RUNS_ROOT = process.env.PI_REMOTE_ORCHESTRATOR_RUNS ?? join(HOME, ".local/share/pi-orchestrator/runs");
 const HOST = process.env.PI_REMOTE_HOST ?? "127.0.0.1";
 const PORT = Number(process.env.PI_REMOTE_PORT ?? "8788");
@@ -193,15 +198,7 @@ const orchestrator = new OrchestratorClient({
   ledgerPath: ORCHESTRATOR_DB_PATH,
   runsRoot: ORCHESTRATOR_RUNS_ROOT,
 });
-// Voice, plan cards, governor controls, and autonomous-run observation all
-// consume the orchestrator's public model instead of its private tables.
-const voiceAccounts = new VoiceBroker({
-  authPath: ORCHESTRATOR_AUTH_PATH,
-  agentDir: AGENT_DIR,
-  accounts: () => orchestrator.voiceAccounts(),
-  acquireLease: (accountId) => orchestrator.beginVoiceLease(accountId),
-  releaseLease: (leaseId) => orchestrator.endLease(leaseId),
-});
+const voice = new VoiceClient(DATA);
 const agentHost = new AgentHost(orchestrator, { key: "local", label: "THIS MACHINE", name: "This machine" });
 ensureSupervisorSchema(db);
 const HANDOFF_PATH = join(DATA, "supervisor-handoff.json");
@@ -562,6 +559,10 @@ async function sessionFileResponse(url: URL, method: string, req: Request): Prom
   return localFileResponse(url.searchParams.get("path") ?? "", method, req);
 }
 
+function meetingInstructions(sessionId: string): string {
+  return (sessionRow.get(sessionId) as any)?.meeting_id ? liveDevInstructions() : "";
+}
+
 function voiceInstructions(row: any): string {
   const history = (db.query(`
     SELECT type,payload FROM events
@@ -572,7 +573,13 @@ function voiceInstructions(row: any): string {
     const speaker = event.type === "user" ? "User" : "Agent";
     return `${speaker}: ${String(payload.text ?? "").slice(0, 1_500)}`;
   }).join("\n");
-  return `You are the realtime voice interface for Pi Remote thread ${String(row.name)}. Keep your own replies brief and conversational. Delegate every substantive request to the client coding agent; do not attempt the work yourself and do not claim completion before the client reports it. You may acknowledge a delegation naturally while it runs. Relay client updates accurately and ask concise follow-up questions when the client needs information.${history ? `\n\nRecent thread transcript:\n${history}` : ""}`;
+  const policy = readFileSync(new URL("./voice/delegation-policy.md", import.meta.url), "utf8").trim();
+  return [
+    policy,
+    `Connected Pi thread: ${JSON.stringify({ id: row.id, name: row.name, meeting: Boolean(row.meeting_id) })}`,
+    meetingInstructions(row.id),
+    history ? `Recent thread transcript:\n${history}` : "",
+  ].filter(Boolean).join("\n\n");
 }
 
 const sessionRow = db.query("SELECT * FROM sessions WHERE id=?");
@@ -620,11 +627,11 @@ function confirmWorkInserted(sessionId: string, workId: string): number {
   if (!ownsSupervisorLease()) return 0;
   let sequence = 0;
   db.transaction(() => {
-    const work = db.query("SELECT text,delivery,inserted_at FROM work_items WHERE id=? AND session_id=?").get(workId, sessionId) as any;
+    const work = db.query("SELECT text,delivery,request_id,inserted_at,meeting_transcript FROM work_items WHERE id=? AND session_id=?").get(workId, sessionId) as any;
     if (!work || work.inserted_at) return;
     const time = now();
     const result = db.query("INSERT INTO events(session_id,time,type,payload) VALUES(?,?,?,?)")
-      .run(sessionId, time, "user", JSON.stringify({ text: String(work.text), delivery: String(work.delivery), workId }));
+      .run(sessionId, time, "user", JSON.stringify({ text: [String(work.text), meetingHandoffText(JSON.parse(work.meeting_transcript))].filter(Boolean).join("\n\n"), delivery: String(work.delivery), workId, requestId: String(work.request_id) }));
     sequence = Number(result.lastInsertRowid);
     db.query("UPDATE work_items SET event_seq=?,inserted_at=?,updated_at=? WHERE id=? AND inserted_at IS NULL")
       .run(sequence, time, time, workId);
@@ -825,6 +832,20 @@ function publicSessions(rows: any[]): any[] {
   return rows.map((row) => publicSession(row, queues.get(String(row.id))));
 }
 
+function sessionActivity(row: any): Session["activity"] {
+  const rt = runtimes.get(row.id);
+  return row.state === "FAILED" ? "FAILED"
+    : rt?.phase === "STARTING" || row.state === "STARTING" ? "STARTING"
+    : rt?.phase === "ABORTING" || rt?.phase === "STOPPING" || row.state === "ABORTING" ? "ABORTING"
+    : rt?.compacting ? "COMPACTING"
+    : rt?.retrying ? "RETRYING"
+    : rt?.phase === "RUNNING" && rt.activeTools.size ? "WAITING_ON_TOOL"
+    : rt?.phase === "RUNNING" && rt.liveThinking ? "THINKING"
+    : rt?.phase === "RUNNING" ? "WORKING"
+    : rt?.phase === "DISPATCHING" || row.state === "RUNNING" ? "QUEUED"
+    : "IDLE";
+}
+
 function publicSession(row: any, prepared?: PreparedQueue): Session {
   const rt = runtimes.get(row.id);
   const preset = workspaces.get(row.workspace_id);
@@ -858,16 +879,7 @@ function publicSession(row: any, prepared?: PreparedQueue): Session {
     createdAt: String(item.created_at),
     lastError: item.last_error ?? null,
   }));
-  const activity = row.state === "FAILED" ? "FAILED"
-    : rt?.phase === "STARTING" || row.state === "STARTING" ? "STARTING"
-    : rt?.phase === "ABORTING" || rt?.phase === "STOPPING" || row.state === "ABORTING" ? "ABORTING"
-    : rt?.compacting ? "COMPACTING"
-    : rt?.retrying ? "RETRYING"
-    : rt?.phase === "RUNNING" && toolNames.length ? "WAITING_ON_TOOL"
-    : rt?.phase === "RUNNING" && rt.liveThinking ? "THINKING"
-    : rt?.phase === "RUNNING" ? "WORKING"
-    : rt?.phase === "DISPATCHING" || row.state === "RUNNING" ? "QUEUED"
-    : "IDLE";
+  const activity = sessionActivity(row);
   return {
     id: String(row.id),
     name: String(row.name ?? ""),
@@ -1169,7 +1181,8 @@ async function verifyRuntimeSettlement(sessionId: string, rt: Runtime) {
 
 function settleRuntime(sessionId: string, rt: Runtime, emitEvent: boolean): boolean {
   if (rt.phase !== "RUNNING") return false;
-  if (rt.pendingModelFailure) emit(sessionId, "notice", { text: rt.pendingModelFailure });
+  const modelFailure = rt.pendingModelFailure;
+  if (modelFailure) emit(sessionId, "notice", { text: modelFailure });
   rt.pendingModelFailure = null;
   setRuntimePhase(sessionId, rt, "IDLE");
   rt.compacting = false;
@@ -1188,8 +1201,8 @@ function settleRuntime(sessionId: string, rt: Runtime, emitEvent: boolean): bool
   if (rt.dispatchedWorkIds.size > 0) {
     const completedAt = now();
     for (const workId of rt.dispatchedWorkIds) {
-      db.query("UPDATE work_items SET state='complete',updated_at=?,last_error=NULL WHERE id=? AND state='dispatched'")
-        .run(completedAt, workId);
+      db.query("UPDATE work_items SET state='complete',updated_at=?,last_error=? WHERE id=? AND state='dispatched'")
+        .run(completedAt, modelFailure, workId);
     }
     rt.dispatchedWorkIds.clear();
   }
@@ -1198,6 +1211,7 @@ function settleRuntime(sessionId: string, rt: Runtime, emitEvent: boolean): bool
   ).get(sessionId) as any)?.count ?? 0);
   setState(sessionId, pendingWork > 0 ? "RUNNING" : "IDLE");
   if (emitEvent) emit(sessionId, "settled");
+  relayThreadResults();
   if (rt.replaceAfterSettle && pendingWork === 0) {
     rt.expectedExit = true;
     rt.suppressOutput = true;
@@ -1320,6 +1334,7 @@ function runtimeEnvironment(row: any) {
     HOME,
     PATH: `${join(HOME, ".local/bin")}:${join(HOME, ".bun/bin")}:${process.env.PATH ?? ""}`,
     PI_REMOTE_SESSION_ID: row.id,
+    PI_REMOTE_MEETING_ID: row.meeting_id ?? "",
     PI_REMOTE_CONTEXT_OWNER_PID: "",
     PI_REMOTE_BASH_TIMEOUT_MAX_SECONDS: String(bashTimeoutSeconds(row.bash_timeout_seconds)),
     PI_REMOTE_SERVICE_TIER_FILE: serviceTierPath(row.id),
@@ -1685,6 +1700,9 @@ async function drainSession(sessionId: string) {
       const row = sessionRow.get(sessionId) as any;
       if (!row || row.archived_at) return;
       const rt = await activate(row);
+      if (row.meeting_id && !item.inserted_at) await meet.flushTranscript(row.meeting_id);
+      const transcript = row.meeting_id && !item.inserted_at
+        ? await prepareMeetingHandoff(db, meet.transcripts, row.meeting_id, sessionId) : [];
       if (!ownsSupervisorLease()) return;
       // Abort can run while this worker is suspended in activation. Re-check the
       // durable claim before changing runtime phase or consuming restore context.
@@ -1694,6 +1712,7 @@ async function drainSession(sessionId: string) {
         db.query("UPDATE work_items SET state='queued',updated_at=? WHERE id=? AND state='running'").run(now(), item.id);
         return;
       }
+      if (!item.inserted_at) db.query("UPDATE work_items SET meeting_transcript=? WHERE id=?").run(JSON.stringify(transcript), item.id);
       let message = item.text;
       if (rt.historyNeedsRestore) {
         const beforeSeq = Number((db.query("SELECT coalesce(max(seq),0)+1 before_seq FROM events WHERE session_id=?").get(sessionId) as any)?.before_seq ?? 1);
@@ -1707,6 +1726,8 @@ async function drainSession(sessionId: string) {
       } else if (item.resume) {
         message = `The previous agent operation was interrupted after this request entered the conversation. Continue its unfinished work from the current session state without repeating completed actions.\n\n<interrupted_user_request>\n${item.text}\n</interrupted_user_request>`;
       }
+      const meetingContext = meetingHandoffText(transcript);
+      if (meetingContext) message += `\n\n${meetingContext}`;
       if (["ABORTING", "STOPPING"].includes(rt.phase)) return;
       rt.retrying = false;
       const wasBusy = rt.phase === "DISPATCHING" || rt.phase === "RUNNING";
@@ -1730,7 +1751,7 @@ async function drainSession(sessionId: string) {
       // A Pi steering/follow-up queue continues inside the current agent run and does
       // not emit a fresh agent_start. The phase remains RUNNING for queued messages;
       // only an idle prompt enters DISPATCHING until agent_start proves the new run.
-      await rpc(rt, commandType, { message }, PROMPT_ACK_TIMEOUT_MS);
+      await rpc(rt, commandType, { message, images: JSON.parse(item.images) }, PROMPT_ACK_TIMEOUT_MS);
       confirmWorkInserted(sessionId, item.id);
     } catch (cause: any) {
       if (!ownsSupervisorLease()) return;
@@ -1791,15 +1812,15 @@ function kickSession(sessionId: string) {
   sessionWorkers.set(sessionId, worker);
 }
 
-function enqueuePrompt(sessionId: string, requestId: string, text: string, delivery: "steer" | "followUp") {
+function enqueuePrompt(sessionId: string, requestId: string, text: string, delivery: "steer" | "followUp", images: ImageContent[] = [], start = true) {
   const workId = crypto.randomUUID();
   const time = now();
   const activeWork = Number((db.query("SELECT count(*) count FROM work_items WHERE session_id=? AND state IN ('queued','running','dispatched')").get(sessionId) as any)?.count ?? 0);
   const phase = runtimes.get(sessionId)?.phase;
   const queuedBehindWork = phase === "DISPATCHING" || phase === "RUNNING" || activeWork > 0;
   const effectiveDelivery = queuedBehindWork ? delivery : "prompt";
-  db.query("INSERT INTO work_items(id,session_id,request_id,event_seq,text,delivery,state,attempts,available_at,created_at,updated_at,last_error,inserted_at) VALUES(?,?,?,?,?,?,'queued',0,?,?,?,NULL,NULL)")
-    .run(workId, sessionId, requestId, 0, text, effectiveDelivery, Date.now(), time, time);
+  db.query("INSERT INTO work_items(id,session_id,request_id,event_seq,text,delivery,images,state,attempts,available_at,created_at,updated_at,last_error,inserted_at) VALUES(?,?,?,?,?,?,?,'queued',0,?,?,?,NULL,NULL)")
+    .run(workId, sessionId, requestId, 0, text, effectiveDelivery, JSON.stringify(images), Date.now(), time, time);
   setState(sessionId, "RUNNING");
   const response = {
     accepted: true,
@@ -1809,8 +1830,59 @@ function enqueuePrompt(sessionId: string, requestId: string, text: string, deliv
     session: publicSession(sessionRow.get(sessionId)),
   };
   saveRequest(requestId, sessionId, "prompt", 202, response);
-  kickSession(sessionId);
+  if (start) kickSession(sessionId);
   return response;
+}
+
+function enqueueDelegation(sessionId: string, parent: any, task: string) {
+  const cameras = parent.meeting_id ? meet.captureDelegation(parent.meeting_id) : { images: [], note: "" };
+  const work = enqueuePrompt(sessionId, crypto.randomUUID(), task + (cameras.note ? `\n\n${cameras.note}` : ""), "followUp", cameras.images, false);
+  db.query("INSERT INTO thread_delegations(work_id,parent_session_id) VALUES(?,?)").run(work.workId, parent.id);
+  return { workId: work.workId, parentSessionId: parent.id, notification: "automatic" };
+}
+
+function meetingDestination() {
+  const candidates = [...THREAD_DESTINATIONS.values()].filter((destination) => destination.defaultModel === "astra" || destination.models.includes("astra"));
+  return candidates.find((destination) => destination.id === "home") ?? candidates[0];
+}
+
+function insertThread(id: string, name: string, destination: { workspaceId: string; id: string },
+  preset: { provider: string; modelId: string; thinkingLevel: string }, meetingId: string | null, priority: boolean) {
+  const time = now();
+  db.query("UPDATE sessions SET display_order=display_order+1 WHERE archived_at IS NULL").run();
+  db.query(`INSERT INTO sessions(id,name,workspace_id,session_path,state,created_at,updated_at,last_error,
+    initial_provider,current_provider,initial_model,initial_thinking,profile_id,service_tier,meeting_id,display_order)
+    VALUES(?,?,?,?,?,?,?,NULL,?,?,?,?,?,?,?,0)`).run(id, name, destination.workspaceId, null, "STOPPED", time, time,
+      preset.provider, preset.provider, preset.modelId, preset.thinkingLevel, destination.id, priority ? "priority" : "default", meetingId);
+}
+
+function relayThreadResults() {
+  if (!ownsSupervisorLease()) return;
+  const ready = db.query(`
+    SELECT d.work_id,d.parent_session_id,w.session_id,w.event_seq,w.text,w.state,w.last_error,s.name
+    FROM thread_delegations d JOIN work_items w ON w.id=d.work_id
+    JOIN sessions s ON s.id=w.session_id JOIN sessions p ON p.id=d.parent_session_id
+    WHERE d.reply_work_id IS NULL AND w.state IN ('complete','cancelled') AND p.archived_at IS NULL
+  `).all() as Array<{ work_id: string; parent_session_id: string; session_id: string; event_seq: number; text: string; state: string; last_error: string | null; name: string }>;
+  for (const work of ready) {
+    db.transaction(() => {
+      const event = work.event_seq > 0 ? db.query(`
+        SELECT payload FROM events WHERE session_id=? AND seq>? AND type='assistant'
+        AND seq < COALESCE((SELECT MIN(seq) FROM events WHERE session_id=? AND seq>? AND type='settled'),9223372036854775807)
+        ORDER BY seq DESC LIMIT 1
+      `).get(work.session_id, work.event_seq, work.session_id, work.event_seq) as { payload: string } | null : null;
+      const output = event ? String(JSON.parse(event.payload).text ?? "") : "";
+      const text = JSON.stringify({
+        type: "thread_result", threadId: work.session_id, threadName: work.name,
+        status: work.last_error && work.state !== "cancelled" ? "failed" : work.state,
+        task: work.text, result: output.slice(0, 32_000), resultTruncated: output.length > 32_000,
+        error: work.last_error,
+      });
+      const reply = enqueuePrompt(work.parent_session_id, `thread-result-${work.work_id}`, text, "followUp", [], false);
+      db.query("UPDATE thread_delegations SET reply_work_id=? WHERE work_id=? AND reply_work_id IS NULL").run(reply.workId, work.work_id);
+    })();
+    kickSession(work.parent_session_id);
+  }
 }
 
 type AbortOperationResult =
@@ -1975,7 +2047,12 @@ void runtimeAdoption.then(reapUnclaimedRuntimeHosts)
 const meet = new MeetServer((id) => {
   const row = sessionRow.get(id) as any;
   return Boolean(row && !row.archived_at);
-}, undefined, db);
+}, undefined, db, (meetingId, rootId) => meetingActivity(db, meetingId, rootId, (row) => {
+  const runtime = runtimes.get(row.id);
+  return { state: sessionActivity(row), tools: [...(runtime?.activeTools.values() ?? [])], output: runtime?.liveText ?? "" };
+}));
+db.query(`UPDATE sessions SET meeting_id=(SELECT id FROM meet_records WHERE session_id=sessions.id ORDER BY created_at DESC LIMIT 1)
+  WHERE meeting_id IS NULL AND EXISTS (SELECT 1 FROM meet_records WHERE session_id=sessions.id)`).run();
 
 const server = Bun.serve({
   hostname: HOST,
@@ -1990,8 +2067,33 @@ const server = Bun.serve({
       });
     }
     if (!ownsSupervisorLease()) return error("Supervisor instance was replaced", 503);
+    const externalResponse = await externalMeetingRequest(req, meet, (sessionId, meetingId, name) => {
+      const existing = sessionRow.get(sessionId) as any;
+      if (existing) {
+        if (existing.archived_at || existing.meeting_id !== meetingId) throw new Error("The external meeting's thread is unavailable");
+        return;
+      }
+      const destination = meetingDestination();
+      const model = THREAD_MODELS.get("astra")!;
+      if (!destination) throw new Error("This host needs a configured Astra destination for meetings");
+      db.transaction(() => insertThread(sessionId, name, destination,
+        { provider: model.provider, modelId: model.modelId, thinkingLevel: "off" }, meetingId, true))();
+    });
+    if (externalResponse) return externalResponse;
     const meetingResponse = await meet.handle(req);
     if (meetingResponse) return meetingResponse;
+    const agentMeetingRequest = [API.sessionMeeting, API.sessionMeetingVoice, API.sessionMeetingShare, API.sessionMeetingStop, API.sessionMeetingFrame]
+      .map((route) => route.match(req.method, url.pathname)).find(Boolean);
+    if (agentMeetingRequest) {
+      const row = sessionRow.get(agentMeetingRequest.sessionId) as any;
+      if (!row?.meeting_id) return error("This is not a Meet thread", 404);
+      return meet.handleAgent(req, row.meeting_id);
+    }
+    const instructionsRequest = API.sessionInstructions.match(req.method, url.pathname);
+    if (instructionsRequest) {
+      if (!sessionRow.get(instructionsRequest.sessionId)) return error("Session not found", 404);
+      return json({ instructions: meetingInstructions(instructionsRequest.sessionId) });
+    }
     const imageRequest = API.sessionImage.match(req.method, url.pathname);
     if (imageRequest) {
       const stored = storedContext(imageRequest.sessionId);
@@ -2021,35 +2123,33 @@ const server = Bun.serve({
       }
     }
     if (API.voice.match(req.method, url.pathname)) {
-      return json({ ...voiceAccounts.status(), model: DEFAULT_LIVE_MODEL, voice: DEFAULT_LIVE_VOICE });
+      const result = await voice.status();
+      return result.ok ? json(result.value) : error(result.error, result.status);
     }
     if (API.voiceOffer.match(req.method, url.pathname)) {
       const sessionId = url.searchParams.get("sessionId") ?? "";
       const row = sessionRow.get(sessionId) as any;
       if (!row) return error("Session not found", 404);
       if (row.archived_at) return error("Thread is archived", 409);
-      const result = await voiceAccounts.negotiate(await req.text(), voiceInstructions(row));
-      if (!result.ok) return error(result.error, result.status);
-      return new Response(result.sdp, {
-        status: 201,
-        headers: {
-          "content-type": "application/sdp",
-          "cache-control": "no-store",
-          "x-pi-voice-account": result.account,
-          "x-pi-voice-lease": result.leaseId,
-          ...API_CORS_HEADERS,
-        },
-      });
+      const result = await voice.negotiate(row.id, await req.text(), voiceInstructions(row));
+      return result.ok ? json(result.value, 201) : error(result.error, result.status);
     }
-    const voiceLeaseHeartbeat = API.voiceLeaseHeartbeat.match(req.method, url.pathname);
-    if (voiceLeaseHeartbeat) {
-      orchestrator.heartbeatLease(voiceLeaseHeartbeat.leaseId);
-      return json({ ok: true });
-    }
-    const voiceLeaseRelease = API.voiceLeaseRelease.match(req.method, url.pathname);
-    if (voiceLeaseRelease) {
-      orchestrator.endLease(voiceLeaseRelease.leaseId);
-      return json({ ok: true });
+    const voiceSessionUpdate = API.voiceSessionUpdate.match(req.method, url.pathname);
+    const voiceSessionClose = API.voiceSessionClose.match(req.method, url.pathname);
+    const voiceSessionRequest = voiceSessionUpdate ?? voiceSessionClose;
+    if (voiceSessionRequest) {
+      const { sessionId, voiceId } = voiceSessionRequest;
+      if (!sessionRow.get(sessionId)) return error("Thread not found", 404);
+      if (voiceSessionUpdate) {
+        const body = await readBody(req);
+        const result = await voice.heartbeat(sessionId, voiceId, Number(body.seconds), body.finalized === true);
+        if (result.ok && body.diagnostics && typeof body.diagnostics === "object" && JSON.stringify(body.diagnostics).length <= 12_000) {
+          emit(sessionId, "voice", { voiceId, finalized: body.finalized === true, diagnostics: body.diagnostics });
+        }
+        return result.ok ? json(result.value) : error(result.error, result.status);
+      }
+      const result = await voice.close(sessionId, voiceId);
+      return result.ok ? json(result.value) : error(result.error, result.status);
     }
     const governorToggle = API.governorToggle.match(req.method, url.pathname);
     if (governorToggle && isGovernorProvider(governorToggle.provider)) {
@@ -2299,9 +2399,15 @@ const server = Bun.serve({
         const old = requestResult(requestId);
         if (old) return json(JSON.parse(old.response), old.status);
         if (!/^[0-9a-f-]{36}$/i.test(requestId)) return error("Valid requestId required");
-        const destination = THREAD_DESTINATIONS.get(String(body.destination ?? "home"));
+        const parent = body.parentSessionId == null ? null : sessionRow.get(String(body.parentSessionId)) as any;
+        if (body.parentSessionId != null && (!parent || parent.archived_at)) return error("Parent thread is unavailable", 409);
+        const task = parent ? String(body.task ?? "").trim() : "";
+        if (parent && !task) return error("A delegated task is required");
+        const destination = THREAD_DESTINATIONS.get(String(body.destination ?? parent?.profile_id ?? (body.meetingId ? meetingDestination()?.id : "home")));
         if (!destination) return error("Unknown thread destination");
-        const modelId = String(body.model ?? destination.defaultModel);
+        const meetingId = parent ? parent.meeting_id : body.meetingId == null ? null : String(body.meetingId);
+        if (meetingId !== null && !/^[0-9a-f-]{36}$/i.test(meetingId)) return error("Valid meetingId required");
+        const modelId = meetingId && !parent ? "astra" : String(body.model ?? (parent ? "astra" : destination.defaultModel));
         // A destination only starts the models it actually offers, so an out-of-date client
         // cannot place an Anthropic thread on a machine that has no Anthropic access.
         if (modelId !== destination.defaultModel && !destination.models.includes(modelId))
@@ -2311,28 +2417,45 @@ const server = Bun.serve({
         const preset = {
           provider: model.provider,
           modelId: model.modelId,
-          thinkingLevel: destination.thinkingLevel,
+          thinkingLevel: meetingId && !parent ? "off" : String(body.thinkingLevel ?? (parent ? "high" : destination.thinkingLevel)),
         };
-        const workspaceId = destination.workspaceId;
+        if (!THREAD_THINKING_LEVELS.some((level) => level === preset.thinkingLevel)) return error("Unknown thinking level");
+        if (parent && body.threadId && body.newThread === true) return error("Choose threadId or newThread, not both");
+        if (parent && body.newThread !== true) {
+          const candidates = db.query(`SELECT DISTINCT s.* FROM thread_delegations d
+            JOIN work_items w ON w.id=d.work_id JOIN sessions s ON s.id=w.session_id
+            WHERE d.parent_session_id=? AND s.archived_at IS NULL AND s.profile_id=?
+            AND s.meeting_id IS ? ORDER BY s.updated_at DESC,s.created_at DESC`).all(parent.id, destination.id, meetingId) as any[];
+          const target = body.threadId ? candidates.find((candidate) => candidate.id === String(body.threadId))
+            : candidates.find((candidate) => (!body.model || candidate.initial_model === model.modelId)
+              && !["ABORTING", "STOPPING"].includes(runtimes.get(candidate.id)?.phase ?? candidate.state));
+          if (body.threadId && !target) return error("That worker does not belong to this thread's destination and meeting", 409);
+          if (target) {
+            if (body.model && target.initial_model !== model.modelId) return error("That worker uses another model; omit model to keep it or request a new thread", 409);
+            if (["ABORTING", "STOPPING"].includes(runtimes.get(target.id)?.phase ?? target.state)) return error("That worker is stopping; continue it after it settles", 409);
+            const response = db.transaction(() => {
+              const delegation = enqueueDelegation(target.id, parent, task);
+              const response = { session: publicSession(sessionRow.get(target.id)), delegation, reused: true };
+              saveRequest(requestId, target.id, "delegate", 200, response);
+              return response;
+            })();
+            kickSession(target.id);
+            return json(response);
+          }
+        }
         const name = nextThreadName();
         const requestedId = body.sessionId == null ? crypto.randomUUID() : String(body.sessionId);
         if (!/^[0-9a-f-]{36}$/i.test(requestedId)) return error("Valid sessionId required");
         const id = requestedId;
-        const time = now();
-        db.transaction(() => {
-          db.query("UPDATE sessions SET display_order=display_order+1 WHERE archived_at IS NULL").run();
-          db.query(`
-            INSERT INTO sessions(
-              id,name,workspace_id,session_path,state,created_at,updated_at,last_error,
-              initial_provider,current_provider,initial_model,initial_thinking,profile_id,service_tier,display_order
-            ) VALUES(?,?,?,?,?,?,?,NULL,?,?,?,?,?,?,0)
-          `).run(id, name, workspaceId, null, "STOPPED", time, time,
-            preset.provider, preset.provider, preset.modelId, preset.thinkingLevel, destination.id,
-            model.id === "astra" ? "priority" : "default");
+        const response = db.transaction(() => {
+          insertThread(id, name, destination, preset, meetingId, model.id === "astra");
+          const delegation = parent ? enqueueDelegation(id, parent, task) : null;
+          const response = { session: publicSession(sessionRow.get(id)), ...(delegation ? { delegation, reused: false } : {}) };
+          saveRequest(requestId, id, "create", 201, response);
+          return response;
         })();
-        const response = { session: publicSession(sessionRow.get(id)) };
-        saveRequest(requestId, id, "create", 201, response);
-        activate(sessionRow.get(id)).catch((e) => {
+        if (parent) kickSession(id);
+        else activate(sessionRow.get(id)).catch((e) => {
           const latest = sessionRow.get(id) as any;
           if (latest && !["STOPPED", "IDLE"].includes(String(latest.state))) setState(id, "FAILED", String(e.message ?? e));
         });
@@ -2705,7 +2828,11 @@ const server = Bun.serve({
         if (rt && ["ABORTING", "STOPPING"].includes(rt.phase)) return error("Thread is stopping; wait for it to become resumable", 409);
         const delivery = body.delivery === "steer" ? "steer" : body.delivery == null || body.delivery === "followUp" ? "followUp" : null;
         if (!delivery) return error("delivery must be steer or followUp");
-        return json(enqueuePrompt(id, requestId, text, delivery), 202);
+        const roomImages = body.includeMeetingImages === true && row.meeting_id
+          ? meet.captureDelegation(row.meeting_id)
+          : { images: [], note: "" };
+        const message = text + (roomImages.note ? `\n\n${roomImages.note}` : "");
+        return json(enqueuePrompt(id, requestId, message, delivery, roomImages.images), 202);
       } catch (e: any) { return error(e.message ?? "Prompt failed", 400); }
     }
     if (action === "abort" && req.method === "POST") {
@@ -2737,6 +2864,7 @@ for (const row of db.query("SELECT DISTINCT session_id FROM work_items WHERE sta
 // Periodically reconcile the in-memory projection with Pi's own state. This
 // repairs dropped settled/compaction events and prevents stale mobile controls.
 const stateReconciler = setInterval(() => {
+  relayThreadResults();
   for (const [id, rt] of runtimes) {
     if (["ABORTING", "STOPPING"].includes(rt.phase) || rt.reconciling) continue;
     void reconcileRuntimeState(id, rt).catch((cause) => console.error(`State reconciliation failed for ${id}`, cause));

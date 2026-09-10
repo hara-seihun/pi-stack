@@ -1,6 +1,7 @@
 import { piFetch } from "../client";
-import { meetPath, type MeetJoined, type MeetParticipant, type MeetPoll, type MeetSignal, type MeetSnapshot, type MeetTrackKind } from "../../../server/meet/protocol";
+import { meetPath, type MeetJoined, type MeetParticipant, type MeetPoll, type MeetSignal, type MeetSnapshot, type MeetTrackKind, type MeetVoiceControl } from "../../../server/meet/protocol";
 import type { MeetMediaSource } from "./media";
+import { meetJson, type MeetRequest } from "./transport";
 
 type Peer = {
   connection: RTCPeerConnection; participant: MeetParticipant; streams: Record<string, MeetTrackKind>;
@@ -8,15 +9,26 @@ type Peer = {
   queue: Promise<void>;
 };
 
-export async function meetRequest<T>(path: string, owner: string, init: RequestInit = {}): Promise<T> {
-  const headers = new Headers(init.headers);
-  if (owner) headers.set("x-pi-remote-user", owner);
-  const deadline = AbortSignal.timeout(20_000);
-  const request = { ...init, headers, signal: init.signal ? AbortSignal.any([init.signal, deadline]) : deadline, cache: "no-store" as const };
-  const response = owner && owner !== window.PiRemotePerson.get() ? await fetch(path, request) : await piFetch(path, request);
-  if (response.status === 423) throw new Error("The meeting host must unlock Pi Remote before guests can join");
-  if (!response.ok) throw new Error((await response.json()).error || `Meet HTTP ${response.status}`);
-  return response.json() as Promise<T>;
+function browserRequest(owner: string): MeetRequest {
+  return async (path, init = {}) => {
+    const headers = new Headers(init.headers);
+    if (owner) headers.set("x-pi-remote-user", owner);
+    const response = owner && owner !== window.PiRemotePerson.get()
+      ? await fetch(path, { ...init, headers }) : await piFetch(path, { ...init, headers });
+    if (response.status === 423) throw new Error("The meeting host must unlock Pi Remote before guests can join");
+    return response;
+  };
+}
+
+function boundedRequest(request: MeetRequest): MeetRequest {
+  return (path, init = {}) => {
+    const deadline = AbortSignal.timeout(20_000);
+    return request(path, { ...init, signal: init.signal ? AbortSignal.any([init.signal, deadline]) : deadline, cache: "no-store" });
+  };
+}
+
+export function meetRequest<T>(path: string, owner: string, init: RequestInit = {}): Promise<T> {
+  return meetJson<T>(boundedRequest(browserRequest(owner)), path, init);
 }
 export const post = (body: unknown): RequestInit => ({ method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify(body) });
 
@@ -28,6 +40,7 @@ export class MeetRoom {
   private stopped = false;
   private timer: ReturnType<typeof setTimeout> | null = null;
   private readonly abort = new AbortController();
+  readonly request: MeetRequest;
 
   constructor(
     readonly joined: MeetJoined,
@@ -36,7 +49,18 @@ export class MeetRoom {
     readonly onMedia: (source: MeetMediaSource) => void,
     readonly onLeave: (id: string) => void,
     readonly onFailure: (message: string) => void,
-  ) { this.snapshot = joined.room; }
+    request: MeetRequest = browserRequest(owner),
+  ) { this.snapshot = joined.room; this.request = boundedRequest(request); }
+
+  json<T>(path: string, init: RequestInit = {}): Promise<T> {
+    return meetJson<T>(this.request, path, init);
+  }
+
+  applyVoiceControl(state: MeetVoiceControl) {
+    if (state.revision < this.snapshot.voiceRevision) return;
+    this.snapshot = { ...this.snapshot, voiceMuted: state.muted, voiceRevision: state.revision };
+    this.onSnapshot(this.snapshot);
+  }
 
   path(suffix: string, extra: Record<string, string> = {}) {
     const query = new URLSearchParams({ participant: this.joined.participant.id, ...extra });
@@ -46,6 +70,13 @@ export class MeetRoom {
   publish(kind: MeetTrackKind, stream: MediaStream) {
     this.published.set(kind, stream);
     for (const peer of this.peers.values()) this.reconcileTracks(peer);
+  }
+
+  unpublish(kind: MeetTrackKind) {
+    const stream = this.published.get(kind);
+    this.published.delete(kind);
+    for (const peer of this.peers.values()) this.reconcileTracks(peer);
+    stream?.getTracks().forEach((track) => track.stop());
   }
 
   private reconcileTracks(peer: Peer) {
@@ -58,9 +89,9 @@ export class MeetRoom {
 
   private async signal(id: string, signal: MeetSignal) {
     if (this.stopped) return;
-    const response = await fetch(this.path("/signal"), {
+    const response = await this.request(this.path("/signal"), {
       ...post({ to: id, signal }),
-      headers: { "content-type": "application/json", "x-pi-remote-user": this.owner }, signal: AbortSignal.any([this.abort.signal, AbortSignal.timeout(20_000)]),
+      signal: this.abort.signal,
     });
     if (response.status === 410) return;
     if (!response.ok) throw new Error((await response.json()).error || "Meet signaling failed");
@@ -69,7 +100,7 @@ export class MeetRoom {
   private fail(cause: unknown) {
     if (this.stopped) return;
     this.onFailure(String(cause instanceof Error ? cause.message : cause));
-    this.close();
+    this.close(false);
   }
 
   private peer(participant: MeetParticipant) {
@@ -132,8 +163,12 @@ export class MeetRoom {
   async poll() {
     if (this.stopped) return;
     try {
-      const snapshot = await meetRequest<MeetPoll>(this.path("/poll", { after: String(this.cursor) }), this.owner, { signal: this.abort.signal });
+      const snapshot = await this.json<MeetPoll>(this.path("/poll", { after: String(this.cursor) }), { signal: this.abort.signal });
       if (this.stopped) return;
+      if (snapshot.voiceRevision < this.snapshot.voiceRevision) {
+        snapshot.voiceMuted = this.snapshot.voiceMuted;
+        snapshot.voiceRevision = this.snapshot.voiceRevision;
+      }
       this.snapshot = snapshot;
       this.onSnapshot(snapshot);
       for (const [id, peer] of this.peers) if (!snapshot.participants.some((participant) => participant.id === id)) {
@@ -152,7 +187,7 @@ export class MeetRoom {
     } catch (cause) { this.fail(cause); }
   }
 
-  close() {
+  close(leave = true) {
     if (this.stopped) return;
     this.stopped = true;
     this.abort.abort();
@@ -160,7 +195,7 @@ export class MeetRoom {
     const peers = [...this.peers.values()];
     this.peers.clear();
     for (const peer of peers) peer.connection.close();
-    void meetRequest(this.path("/leave"), this.owner, { method: "POST", keepalive: true }).catch((cause) => {
+    if (leave) void this.json(this.path("/leave"), { method: "POST", keepalive: true }).catch((cause) => {
       console.warn("Meet leave request failed; the server's participant lease owns cleanup within 45 seconds", cause);
     });
   }

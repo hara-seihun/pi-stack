@@ -1,8 +1,8 @@
 import { API } from "../../server/api";
+import { meetVoiceControl } from "../../server/meet/protocol";
 import { piFetch } from "./client";
 import { updateDocument } from "./sync";
 
-(() => {
   const MAX_CONTEXT_BYTES = 500;
   const POLL_MS = 1_000;
 
@@ -39,7 +39,7 @@ import { updateDocument } from "./sync";
       };
       const ready = () => { if (options.ready()) finish(); };
       const failed = () => finish(new Error(options.failureMessage));
-      const timeout = setTimeout(() => finish(new Error(options.timeoutMessage)), 15_000);
+      const timeout = setTimeout(() => finish(new Error(options.timeoutMessage)), options.timeoutMs ?? 15_000);
       target.addEventListener(options.readyEvent, ready);
       if (options.failureEvent) target.addEventListener(options.failureEvent, failed);
     });
@@ -69,17 +69,32 @@ import { updateDocument } from "./sync";
     catch { return text || fallback; }
   }
 
-  class VoiceSession {
+  export class VoiceSession {
     [key: string]: any;
 
-    constructor(options) {
+    constructor(options: Parameters<Window["PiRemoteVoice"]["create"]>[0]) {
+      this.request = options.request || piFetch;
       this.sessionId = options.sessionId;
       this.input = options.input;
       this.onOutput = options.onOutput;
       this.meetingContext = options.meetingContext;
       this.handoffContext = options.handoffContext;
-      this.onTurn = options.onTurn;
-      this.turns = new Map();
+      this.onFragment = options.onFragment;
+      this.onPlayback = options.onPlayback || (() => {});
+      this.controlledOutput = options.outputMuted !== undefined;
+      this.outputMuted = options.outputMuted ?? false;
+      this.onVoiceControl = options.onVoiceControl;
+      this.delegationQueue = Promise.resolve();
+      this.sentTranscriptCursor = 0;
+      this.transcript = [];
+      this.seenEvents = new Set();
+      this.events = new EventTarget();
+      this.started = false;
+      this.closed = false;
+      this.usageSeconds = 0;
+      this.closing = null;
+
+      this.pollAbort = null;
       this.onState = options.onState || (() => {});
       this.onNotice = options.onNotice || (() => {});
       this.onTranscript = options.onTranscript || (() => {});
@@ -96,9 +111,14 @@ import { updateDocument } from "./sync";
       this.liveThinkingDocument = null;
       this.pollTimer = null;
       this.polling = false;
-      this.leaseId = null;
-      this.leaseTimer = null;
+      this.voiceId = null;
+      this.usageTimer = null;
       this.delegations = [];
+      this.threadWorking = false;
+      this.eventCounts = {};
+      this.delegationsSubmitted = 0;
+      this.lastDelegationError = null;
+      this.lastProtocolError = null;
       this.lastLiveText = "";
       this.messageBuffer = "";
       this.pendingAssistant = "";
@@ -112,16 +132,24 @@ import { updateDocument } from "./sync";
 
     async start() {
       if (this.state === "connecting" || this.state === "live") return;
+      if (this.closing) await this.closing;
+      this.started = false; this.closed = false; this.suspended = false; this.startupError = "";
+      this.transcript = []; this.seenEvents.clear(); this.usageSeconds = 0;
+      this.sentTranscriptCursor = 0; this.delegationQueue = Promise.resolve();
+      this.eventCounts = {}; this.delegationsSubmitted = 0;
+      this.lastDelegationError = null; this.lastProtocolError = null;
+      this.sessionOrigin = Date.now();
+      this.pollAbort = new AbortController();
       const generation = ++this.generation;
       this.setState("connecting", "Connecting…");
       try {
         if (!this.input && !navigator.mediaDevices?.getUserMedia) throw new Error("Microphone capture is unavailable");
-        const configResponse = await piFetch(API.voice.path(), { cache: "no-store" });
+        const configResponse = await this.request(API.voice.path(), { cache: "no-store" });
         const config = await configResponse.json();
-        if (!configResponse.ok || !config.enabled) throw new Error(config.error || "No GPT-Live accounts are available");
+        if (!configResponse.ok || !config.enabled) throw new Error(config.error || "The PiStack Voice API service is unavailable");
         await this.primeCursor();
-        this.setState("connecting", "Setting agent thinking to medium…");
-        await this.setMediumThinking();
+        this.setState("connecting", this.meetingContext ? "Setting agent thinking to its lowest level…" : "Setting agent thinking to medium…");
+        await this.setVoiceThinking();
         if (generation !== this.generation) return;
         const microphone = this.input ? new MediaStream(this.input.getAudioTracks().map((track) => track.clone())) : await navigator.mediaDevices.getUserMedia({
           audio: { echoCancellation: true, noiseSuppression: true, autoGainControl: true, channelCount: { ideal: 1 } },
@@ -133,13 +161,22 @@ import { updateDocument } from "./sync";
         this.peer = peer;
         for (const track of microphone.getAudioTracks()) peer.addTrack(track, microphone);
         peer.addEventListener("track", (event) => {
+          if (generation !== this.generation) return;
+          if (event.track.kind !== "audio") return;
+          const stream = new MediaStream([event.track]);
           const speaker = this.speaker || new Audio();
+          speaker.muted = this.outputMuted;
           speaker.autoplay = true;
           speaker.setAttribute("playsinline", "");
-          speaker.srcObject = event.streams[0] || new MediaStream([event.track]);
+          speaker.onplaying = () => this.onPlayback(speaker.muted ? "muted" : "playing");
+          speaker.onerror = () => {
+            this.onPlayback("blocked");
+            this.onNotice(`Speaker playback failed: ${speaker.error?.message || "audio output unavailable"}`);
+          };
+          speaker.srcObject = stream;
           this.speaker = speaker;
-          this.onOutput?.(speaker.srcObject);
-          void speaker.play().catch(() => this.onNotice("Tap the screen once if speaker audio is paused"));
+          this.onOutput?.(stream);
+          void this.resumePlayback();
         });
         peer.addEventListener("connectionstatechange", () => {
           if (generation !== this.generation) return;
@@ -150,29 +187,34 @@ import { updateDocument } from "./sync";
         });
         const channel = peer.createDataChannel("oai-events");
         this.channel = channel;
-        channel.addEventListener("message", (event) => this.handleRealtimeMessage(event.data));
+        channel.addEventListener("message", (event) => { if (this.channel === channel) this.handleLiveMessage(event.data); });
+        channel.addEventListener("close", () => { if (this.channel === channel) this.events.dispatchEvent(new Event("disconnected")); });
         const offer = await peer.createOffer();
         await peer.setLocalDescription(offer);
         await waitForIce(peer);
-        const response = await piFetch(API.voiceOffer.path({}, { sessionId: this.sessionId }), {
+        const response = await this.request(API.voiceOffer.path({}, { sessionId: this.sessionId }), {
           method: "POST",
           headers: { "content-type": "application/sdp" },
           body: peer.localDescription?.sdp || offer.sdp || "",
         });
         if (!response.ok) throw new Error(await responseError(response, `Voice offer failed (${response.status})`));
-        const leaseId = response.headers.get("x-pi-voice-lease");
-        if (!leaseId) throw new Error("Voice offer did not include an account lease");
-        const answer = await response.text();
-        if (generation !== this.generation) {
-          void piFetch(API.voiceLeaseRelease.path({ leaseId }), { method: API.voiceLeaseRelease.method });
-          return;
-        }
-        this.startLease(leaseId);
-        await peer.setRemoteDescription({ type: "answer", sdp: answer });
+        const connection = await response.json();
+        const voiceId = connection.session?.id;
+        if (!voiceId || !connection.transport?.sdp) throw new Error("Voice API returned no session ID or SDP answer");
+        if (generation !== this.generation) { await this.closeRemote(voiceId); return; }
+        this.voiceId = voiceId;
+        this.usageTimer = setInterval(() => void this.reportUsage(), 30_000);
+        await peer.setRemoteDescription({ type: "answer", sdp: connection.transport.sdp });
         await waitForChannel(channel);
+        if (this.startupError) throw new Error(this.startupError);
+        await waitForReady(this.events, {
+          ready: () => this.started, readyEvent: "started", failureEvent: "disconnected",
+          failureMessage: "GPT-Live disconnected during startup", timeoutMessage: "GPT-Live did not emit session.started",
+        });
         if (generation !== this.generation) return;
         this.setState("live", "Listening");
-        if (this.meetingContext) this.appendContext(this.meetingContext(), "commentary");
+        if (this.meetingContext) this.appendContext(
+          `You receive audio only. Pi receives available camera images with each delegation and can use computer and browser tools. Meeting voice is ${this.outputMuted ? "muted. You can hear people, but they cannot hear you" : "unmuted. People can hear you"}. Pi can change this with meet_voice.`, "commentary");
         this.schedulePoll(0);
       } catch (cause) {
         if (generation !== this.generation) return;
@@ -183,53 +225,112 @@ import { updateDocument } from "./sync";
       }
     }
 
-    stop(clearState = true) {
+    suspend() {
+      this.suspended = true;
       this.generation++;
+      this.stopStream(this.microphone); this.microphone = null;
+      if (this.speaker) { this.speaker.muted = true; this.speaker.pause(); this.speaker.srcObject = null; }
+      this.onPlayback("stopped");
+    }
+
+    stop(clearState = true) {
+      this.suspend();
+      if (this.closing) return this.closing;
+      if (clearState) this.setState("closing", "Ending voice…");
       if (this.pollTimer) clearTimeout(this.pollTimer);
       this.pollTimer = null;
-      this.polling = false;
-      this.stopLease();
+      this.pollAbort?.abort();
+      if (this.usageTimer) clearInterval(this.usageTimer);
+      this.usageTimer = null;
       this.delegations.length = 0;
       this.resetMessage();
-      if (this.channel) { this.channel.onmessage = null; this.channel.close(); }
-      this.channel = null;
-      if (this.peer) { this.peer.ontrack = null; this.peer.close(); }
-      this.peer = null;
-      this.stopStream(this.microphone);
-      this.microphone = null;
-      if (this.speaker) { this.speaker.pause(); this.speaker.srcObject = null; }
-      this.speaker = null;
-      if (clearState) this.setState("idle", "Voice off");
+      const voiceId = this.voiceId;
+      this.closing = (async () => {
+        const closed = this.started && this.channel?.readyState === "open"
+          ? waitForReady(this.events, {
+            ready: () => this.closed, readyEvent: "closed", failureEvent: "disconnected", timeoutMs: 15_000,
+            failureMessage: "Voice disconnected before final usage arrived", timeoutMessage: "Voice final usage did not arrive",
+          }).catch((cause) => this.onNotice(String(cause.message || cause)))
+          : Promise.resolve();
+        if (this.started && !this.closed) this.send({ type: "session.close", event_id: crypto.randomUUID() });
+        await closed;
+        if (!this.closed && voiceId) await this.closeRemote(voiceId);
+        await this.reportUsage(this.closed);
+        this.channel?.close(); this.channel = null;
+        this.peer?.close(); this.peer = null;
+        this.stopStream(this.microphone); this.microphone = null;
+        if (this.speaker) { this.speaker.pause(); this.speaker.srcObject = null; }
+        this.speaker = null;
+        this.onPlayback("stopped");
+        this.voiceId = null; this.polling = false;
+        if (clearState) this.setState("idle", "Voice off");
+      })().finally(() => { this.closing = null; });
+      return this.closing;
     }
 
-    startLease(id) {
-      this.stopLease();
-      this.leaseId = id;
-      this.leaseTimer = setInterval(() => {
-        piFetch(API.voiceLeaseHeartbeat.path({ leaseId: id }), { method: API.voiceLeaseHeartbeat.method })
-          .catch((error) => console.error("Could not heartbeat voice lease", error));
-      }, 30_000);
+    async closeRemote(voiceId) {
+      try {
+        const response = await this.request(API.voiceSessionClose.path({ sessionId: this.sessionId, voiceId }), {
+          method: "DELETE", keepalive: true, signal: AbortSignal.timeout(15_000),
+        });
+        if (!response.ok) throw new Error(await responseError(response, "Could not close the billed Voice session"));
+      } catch (cause) { this.onNotice(String(cause.message || cause)); }
     }
 
-    stopLease() {
-      if (this.leaseTimer) clearInterval(this.leaseTimer);
-      this.leaseTimer = null;
-      const id = this.leaseId;
-      this.leaseId = null;
-      if (id) piFetch(API.voiceLeaseRelease.path({ leaseId: id }), { method: API.voiceLeaseRelease.method }).catch(() => {});
+    async reportUsage(finalized = false) {
+      if (!this.voiceId) return;
+      try {
+        const response = await this.request(API.voiceSessionUpdate.path({ sessionId: this.sessionId, voiceId: this.voiceId }), {
+          method: "PATCH", headers: { "content-type": "application/json" }, keepalive: finalized,
+          body: JSON.stringify({ seconds: this.usageSeconds, finalized, diagnostics: {
+            eventCounts: this.eventCounts, delegationsSubmitted: this.delegationsSubmitted,
+            lastDelegationError: this.lastDelegationError, lastProtocolError: this.lastProtocolError,
+            connectionState: this.peer?.connectionState,
+            playback: this.speaker ? { paused: this.speaker.paused, muted: this.speaker.muted,
+              readyState: this.speaker.readyState, currentTime: this.speaker.currentTime,
+              error: this.speaker.error?.message || null } : null,
+          } }), signal: AbortSignal.timeout(10_000),
+        });
+        if (!response.ok) throw new Error(await responseError(response, "Could not save Voice usage"));
+      } catch (cause) { this.onNotice(String(cause.message || cause)); }
     }
 
     toggleMute() {
       const track = this.microphone?.getAudioTracks()[0];
       if (!track) return false;
       track.enabled = !track.enabled;
+      this.send({ type: track.enabled ? "session.input_audio.unmute" : "session.input_audio.mute", event_id: crypto.randomUUID() });
       this.onState(this.state, track.enabled ? "Listening" : "Muted");
       return !track.enabled;
     }
 
+    async resumePlayback() {
+      if (this.suspended || !this.speaker) return;
+      if (!this.controlledOutput) this.outputMuted = false;
+      this.speaker.muted = this.outputMuted;
+      this.speaker.volume = 1;
+      try {
+        await this.speaker.play();
+        this.onPlayback(this.outputMuted ? "muted" : "playing");
+      } catch (cause) {
+        this.onPlayback("blocked");
+        this.onNotice(`Speaker paused. Use Play Kenan audio to enable it. ${String(cause?.message || cause)}`);
+      }
+    }
+
+    setOutputMuted(muted) {
+      if (this.outputMuted === muted) return;
+      this.outputMuted = muted;
+      if (this.speaker) this.speaker.muted = muted;
+      if (muted) this.onPlayback("muted");
+      else void this.resumePlayback();
+      if (this.started && this.meetingContext) this.appendContext(
+        `Meeting voice is now ${muted ? "muted. You can hear people, but they cannot hear you" : "unmuted. People can hear you"}.`, "commentary");
+    }
+
     hush() {
-      this.send({ type: "response.cancel" });
-      this.send({ type: "output_audio_buffer.clear" });
+      this.setOutputMuted(true);
+      this.onNotice(this.controlledOutput ? "Kenan muted" : "Speaker silenced until you speak again");
     }
 
     stopStream(stream) {
@@ -237,67 +338,94 @@ import { updateDocument } from "./sync";
     }
 
     send(event) {
-      if (this.channel?.readyState === "open") this.channel.send(JSON.stringify(event));
+      if (this.channel?.readyState === "open") {
+        this.channel.send(JSON.stringify(event));
+        const key = `sent:${event.type}`;
+        this.eventCounts[key] = (this.eventCounts[key] || 0) + 1;
+      }
     }
 
-    handleRealtimeMessage(payload) {
+    handleLiveMessage(payload) {
       let event;
-      try { event = asRecord(JSON.parse(String(payload))); }
-      catch { return; }
+      try { event = asRecord(JSON.parse(String(payload))); } catch { return; }
       if (!event) return;
-      if (event.type === "delegation.created") {
-        const item = asRecord(event.item);
-        const text = (Array.isArray(item?.content) ? item.content : [])
-          .map(asRecord).filter((part) => part?.type === "input_text" && typeof part.text === "string")
-          .map((part) => part.text).join("").trim();
-        if (!item?.id || !text) return;
-        const delegation = { id: item.id, text, workId: null, started: false };
+      this.eventCounts[event.type] = (this.eventCounts[event.type] || 0) + 1;
+      if (event.event_id) {
+        if (this.seenEvents.has(event.event_id)) return;
+        this.seenEvents.add(event.event_id);
+      }
+      if (event.type === "session.started") {
+        this.started = true;
+        this.events.dispatchEvent(new Event("started"));
+      } else if (event.type === "session.closed") {
+        this.closed = true;
+        this.usageSeconds = Number(event.usage?.seconds ?? this.usageSeconds);
+        this.events.dispatchEvent(new Event("closed"));
+        if (!this.closing) void this.stop();
+      } else if (event.type === "session.usage.updated") {
+        this.usageSeconds = Number(event.usage?.seconds ?? this.usageSeconds);
+      } else if (event.type === "session.delegation.created" && !this.closing) {
+        const item = asRecord(event.delegation);
+        if (!item?.id || item.target !== "client") return;
+        const delegation = { id: item.id, requestId: crypto.randomUUID(), offsetMs: event.offset_ms, text: "", workId: null, started: false, submitted: false };
         this.delegations.push(delegation);
         this.setState("live", "Agent queued…");
-        void this.submitDelegation(delegation);
-        return;
-      }
-      if (["turn.created", "turn.delta", "turn.done"].includes(event.type)) {
-        const turn = asRecord(event.turn);
-        const id = String(turn?.id || event.turn_id || "");
-        let captured = this.turns.get(id);
-        if (id && (turn?.role === "user" || turn?.role === "assistant")) {
-          captured ??= { id, role: turn.role, text: "", final: false, startedAt: Date.now() };
-          if (typeof turn.transcript === "string") captured.text = turn.transcript;
-          captured.final = event.type === "turn.done";
-          this.turns.set(id, captured);
+        if (this.transcript.some((part) => part.role === "user")) void this.submitDelegation(delegation);
+      } else if (["session.input_transcript.delta", "session.output_transcript.delta"].includes(event.type)) {
+        if (typeof event.delta !== "string" || !Number.isFinite(event.start_ms) || !Number.isFinite(event.end_ms)) return;
+        const role = event.type === "session.input_transcript.delta" ? "user" : "assistant";
+        const fragment = { id: event.event_id, role, text: event.delta, startMs: event.start_ms, endMs: event.end_ms };
+        this.transcript.push(fragment);
+        this.onTranscript(role, event.delta);
+        this.onFragment?.({ id: event.event_id, role, text: event.delta,
+          voiceSessionId: this.voiceId, startMs: event.start_ms, endMs: event.end_ms,
+          startedAt: this.sessionOrigin + event.start_ms });
+        if (role === "user") {
+          if (!this.controlledOutput && this.speaker?.muted) void this.resumePlayback();
+          for (const delegation of this.delegations) if (!delegation.submitted) void this.submitDelegation(delegation);
         }
-        if (captured && event.type === "turn.delta" && typeof event.delta === "string") captured.text += event.delta;
-        if (captured) this.onTurn?.({ ...captured });
-        if (event.type !== "turn.done") return;
-        if ((turn?.role === "user" || turn?.role === "assistant") && typeof turn.transcript === "string" && turn.transcript.trim()) {
-          this.onTranscript(turn.role, turn.transcript.trim());
-        }
-        return;
+      } else if (event.type === "error") {
+        const message = String(asRecord(event.error)?.message || "protocol error");
+        this.lastProtocolError = message;
+        this.onNotice(`GPT-Live: ${message}`);
+        if (!this.started) { this.startupError = message; this.events.dispatchEvent(new Event("disconnected")); }
       }
-      if (event.type === "error") this.onNotice(`GPT-Live: ${asRecord(event.error)?.message || "protocol error"}`);
     }
 
-    async submitDelegation(delegation) {
+    submitDelegation(delegation) {
+      if (delegation.submitted) return;
+      delegation.submitted = true;
       const generation = this.generation;
+      this.delegationQueue = this.delegationQueue.then(() => this.performDelegation(delegation, generation));
+      return this.delegationQueue;
+    }
+
+    async performDelegation(delegation, generation) {
+      if (generation !== this.generation) return;
       try {
-        const context = [this.meetingContext?.(), await this.handoffContext?.()].filter(Boolean).join("\n");
+        const end = this.transcript.length;
+        await this.handoffContext?.();
         if (generation !== this.generation) return;
-        const body = JSON.stringify({ requestId: crypto.randomUUID(), text: delegation.text + (context ? `\n\nPiStack Meet context:\n${context}` : ""), delivery: "followUp" });
-        let response = await piFetch(API.sessionPrompt.path({ sessionId: this.sessionId }), {
+        const lines: Array<{ role: string; text: string }> = [];
+        if (!this.handoffContext) for (const fragment of this.transcript.slice(this.sentTranscriptCursor, end)) {
+          const last = lines.at(-1);
+          if (last && last.role === fragment.role) last.text += fragment.text;
+          else lines.push({ role: fragment.role, text: fragment.text });
+        }
+        const conversation = lines.map((line) => `${line.role === "user" ? "User" : "Kenan"}: ${line.text.trim()}`).join("\n");
+        delegation.text = ["Voice handoff", this.meetingContext?.(), conversation].filter(Boolean).join("\n\n");
+        const body = JSON.stringify({ requestId: delegation.requestId, text: delegation.text, delivery: "followUp", includeMeetingImages: Boolean(this.meetingContext) });
+        const response = await this.request(API.sessionPrompt.path({ sessionId: this.sessionId }), {
           method: "POST", headers: { "content-type": "application/json" }, body,
         });
-        if (!response.ok && response.status >= 500) {
-          await new Promise((resolve) => setTimeout(resolve, 400));
-          response = await piFetch(API.sessionPrompt.path({ sessionId: this.sessionId }), {
-            method: "POST", headers: { "content-type": "application/json" }, body,
-          });
-        }
         if (!response.ok) throw new Error(await responseError(response, "The agent rejected the delegation"));
         const accepted = await response.json();
         delegation.workId = typeof accepted.workId === "string" ? accepted.workId : null;
+        this.sentTranscriptCursor = end;
+        this.delegationsSubmitted++;
       } catch (cause) {
-        this.onNotice(String(cause?.message || cause));
+        this.lastDelegationError = String(cause?.message || cause);
+        this.onNotice(this.lastDelegationError);
         this.appendContext(String(cause?.message || cause), "speakable", delegation.id);
         this.delegations = this.delegations.filter((candidate) => candidate !== delegation);
         this.setState("live", this.delegations.length ? "Agent queued…" : "Listening");
@@ -311,43 +439,35 @@ import { updateDocument } from "./sync";
     appendContext(text, channel, delegationId = this.activeDelegation()?.id) {
       if (!text.trim()) return;
       for (const part of utf8Chunks(text.trim())) {
-        this.send(delegationId ? {
-          type: "delegation.context.append",
-          delegation_item_id: delegationId,
-          channel,
-          content: [{ type: "input_text", text: part }],
-        } : {
-          type: "session.context.append",
-          channel,
-          content: [{ type: "input_text", text: part }],
+        this.send({
+          type: channel === "speakable" ? "session.commentary.append" : "session.thinking.append",
+          event_id: crypto.randomUUID(),
+          delegation_id: delegationId ?? null,
+          content: part,
         });
       }
     }
 
     appendProgress(text) {
-      for (const part of utf8Chunks(text.trim())) {
-        this.send({
-          type: "session.context.append",
-          channel: "speakable",
-          content: [{ type: "input_text", text: part }],
-        });
-      }
+      this.appendContext(text, "speakable");
     }
 
-    async setMediumThinking() {
-      const response = await piFetch(API.sessionSettings.path({ sessionId: this.sessionId }), {
+    async setVoiceThinking() {
+      const response = await this.request(API.sessionSettings.path({ sessionId: this.sessionId }), {
         method: "PUT",
         headers: { "content-type": "application/json" },
-        body: JSON.stringify({ thinkingLevel: "medium" }),
+        body: JSON.stringify({ thinkingLevel: this.meetingContext ? "off" : "medium" }),
       });
-      if (!response.ok) throw new Error(await responseError(response, "Could not set medium thinking for voice"));
+      if (!response.ok) throw new Error(await responseError(response, "Could not set agent thinking for voice"));
     }
 
     async primeCursor() {
-      const response = await piFetch(API.sessionEvents.path({ sessionId: this.sessionId }, { after: 0 }), { cache: "no-store" });
+      const response = await this.request(API.sessionEvents.path({ sessionId: this.sessionId }, { after: 0 }), { cache: "no-store" });
       if (!response.ok) throw new Error(await responseError(response, "Could not open the thread"));
       const snapshot = await response.json();
       this.cursor = Math.max(0, ...(snapshot.events || []).map((event) => Number(event.seq) || 0));
+      this.threadWorking = snapshot.session?.state === "RUNNING";
+      this.lastLiveText = String(snapshot.liveText || "");
     }
 
     schedulePoll(delay = POLL_MS) {
@@ -363,8 +483,8 @@ import { updateDocument } from "./sync";
       this.polling = true;
       let failed = false;
       try {
-        const response = await piFetch(API.sync.path(), {
-          method: "POST",
+        const response = await this.request(API.sync.path(), {
+          method: "POST", signal: this.pollAbort?.signal,
           headers: { "content-type": "application/json" },
           body: JSON.stringify({
             epoch: this.syncEpoch,
@@ -391,23 +511,26 @@ import { updateDocument } from "./sync";
             const text = String(event.text || "").trim();
             const workId = typeof event.workId === "string" ? event.workId : null;
             const matching = this.delegations.find((delegation) => !delegation.started
-              && ((delegation.workId && delegation.workId === workId) || (!delegation.workId && delegation.text === text)));
-            if (matching) {
-              matching.started = true;
-              this.resetMessage();
-              this.setState("live", "Agent working…");
-            }
+              && (delegation.requestId === event.requestId || (delegation.workId && delegation.workId === workId) || (!delegation.workId && delegation.text === text)));
+            if (matching) matching.started = true;
+            this.threadWorking = true;
+            this.flushMessage("commentary");
+            this.setState("live", "Agent working…");
             continue;
           }
           const active = this.activeDelegation();
-          if (!active) continue;
           if (event.type === "assistant") this.observeAssistant(String(event.text || ""));
           else if (event.type === "tool_start") {
             this.flushMessage("commentary");
             this.appendContext(`The agent is using ${String(event.name || "a tool")}.`, "commentary");
+          } else if (event.type === "tool_end" && event.name === "meet_voice" && !event.error && this.onVoiceControl) {
+            const control = meetVoiceControl(JSON.parse(String(event.output || "null")));
+            if (!control) throw new Error("Meeting voice control returned an invalid state");
+            this.onVoiceControl(control);
           } else if (event.type === "notice" && /fail|error|could not|limit/i.test(String(event.text || ""))) {
             this.appendContext(String(event.text || ""), "commentary");
           } else if (event.type === "settled") {
+            this.threadWorking = false;
             this.flushMessage("speakable");
             this.delegations = this.delegations.filter((delegation) => delegation !== active);
             this.setState("live", this.delegations.length ? "Agent queued…" : "Listening");
@@ -415,8 +538,10 @@ import { updateDocument } from "./sync";
         }
         this.observeLiveText(this.liveTextDocument?.document || "");
       } catch (cause) {
-        failed = true;
-        this.onNotice(String(cause?.message || cause));
+        if (!this.pollAbort?.signal.aborted) {
+          failed = true;
+          this.onNotice(String(cause?.message || cause));
+        }
       } finally {
         this.polling = false;
         this.schedulePoll(failed ? POLL_MS : 0);
@@ -424,7 +549,7 @@ import { updateDocument } from "./sync";
     }
 
     observeLiveText(text) {
-      if (!this.activeDelegation()) { this.lastLiveText = text; return; }
+      if (!this.threadWorking) { this.lastLiveText = text; return; }
       if (!text && this.lastLiveText) { this.lastLiveText = ""; return; }
       let delta;
       if (text.startsWith(this.lastLiveText)) delta = text.slice(this.lastLiveText.length);
@@ -462,4 +587,3 @@ import { updateDocument } from "./sync";
   }
 
   window.PiRemoteVoice = { create: (options) => new VoiceSession(options) as any };
-})();

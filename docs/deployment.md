@@ -33,18 +33,22 @@ The stack is the same on every machine. A host supplies three things.
 
 `fleetUser` runs `pi-orchestrator@<user>.service`. `packages` are extra Pi packages every account loads, placed after the reviewed ones and before the Pi Remote context observer. `skills` are extra skill directories linked into every account's skill directory under their own names. Both are optional and point at paths the host owns.
 
-**systemd units.** [`deploy/systemd`](../deploy/systemd) holds reference units for `pi-remote-router.service`, `pi-remote@.service`, and `pi-orchestrator@.service`, written for a Debian host with Bun and Node under `/usr/local/bin`. A Debian host installs them as they are; a NixOS host declares the same units in its configuration. They point at stable paths under `/srv/pi`, so a release never changes them.
+**systemd units.** [`deploy/systemd`](../deploy/systemd) holds reference units for `pi-remote-router.service`, `pi-remote@.service`, `pi-orchestrator@.service`, and `pi-stack-voice.service`. Debian installs these references; NixOS declares matching units with its packaged executables. Host release wrappers install changed references before `deploy/host`. The units select stable paths under `/srv/pi`; code releases do not rewrite unit files. Voice uses `/usr/bin/env bun` with both hosts' system paths and requires `systemd-notify`.
+
+Voice requires `/var/lib/pi-stack-voice/openai-api-key`, root-owned mode `0600` in a root-owned `0700` directory. The host credential owner provisions it; deployment never fetches or copies a key. `LoadCredential` gives the dynamic service user a private copy. Its persistent session leases and expiry state live in `/var/lib/pi-stack-voice-runtime/sessions.sqlite3`. This is an OpenAI API connection, independent of Orchestrator OAuth credentials. Its loopback listener is `127.0.0.1:8796`; supervisors use `PI_STACK_VOICE_URL` to select another endpoint. Browser clients never receive the key.
 
 Persons are not in the host file. They are Pi Remote's registry, `/var/lib/pi-remote/persons/<user>.json`, created with `pi-remote person add`. See [the Pi Remote README](../apps/remote/README.md#persons).
 
 ## What deploy/host does
 
+Before publishing anything, `deploy/host` checks that the Voice unit and credential exist and that live-dev services and Voice source overrides have been retired. A rehearsal with overridden destinations skips host-service checks.
+
 1. Prepares PiStack Meet's local transcription runtime through `deploy/transcription`. Its pinned Whisper model and hash-locked Python dependencies live under `/srv/pi/.pi-transcription`, selected by `/srv/pi/transcription`. Hosts need `uv`; model preparation runs alongside JavaScript dependency installation. `PI_STACK_TRANSCRIPTION_DEST` selects a separate destination for a rehearsal. Installs the JavaScript dependency tree once per manifest, lockfile and stack doctor source under `/srv/pi/dependencies`. Runtime, Orchestrator, and tools link that tree instead of copying it.
 2. Publishes commit-addressed releases of the runtime (`/srv/pi/runtime`: Pi, `agent-browser`, and the runtime extensions), the Orchestrator, Pi Remote, the tools, and the skills. Each destination is a symlink switched atomically; prior generations stay under `/srv/pi/.pi-stack-releases` for processes that loaded them.
 3. For every account (each person plus the fleet user): links `pi`, `agent-browser`, `pi-agent-browser-doctor`, `pi-orchestrator`, `pi-remote`, and every tool command into `~/.local/bin`; links the reviewed skills and the host's skills into `~/.pi/agent/skills`; rewrites the `packages` list in `~/.pi/agent/settings.json` under Pi's own lock, installs the pinned npm packages, and writes the VCC policy and custom model catalog.
 4. Loads the deployed native browser tool under the fleet account's normal settings and proves open, interactive snapshot, title, and isolated-browser cleanup against a loopback page. A failure blocks service activation. Then restarts the fleet daemon. Live workers keep the release they recorded in their run row.
-5. If Pi Remote changed, restarts the front door and hands each running supervisor the new release. Active Pi turns keep their process and stream; the replacement supervisor adopts them and replaces each runtime after it settles. The front door starts every open person's supervisor before it listens, so deployment first waits for `/v1/router-health`, then asks only the supervisors reporting another commit to hand over, then waits until every unlocked person's health response names the selected commit. A slow start or handoff therefore cannot race the smoke check or rollback. A rollback resets the supervisor units first, since one that crashed on the rejected release may have exhausted its start limit.
-6. Walks the live front door the way the clients do (`deploy/smoke`): the web assets, the Android preflight for the person header, the environment and person lists, and for every unlocked person the first calls the app makes. A release that fails this is switched back to the previous Pi Remote release on the spot, the supervisors are handed that release again, and the command fails. Tests prove a release works; this proves nobody is locked out of the app by it.
+5. Enables Voice and starts the selected release when `/status` reports another commit. Voice's notify readiness and `/status.releaseCommit` must match Pi Remote before supervisor activation. Its provider sessions and heartbeat database survive a service restart. If Pi Remote changed, restarts the front door and hands each running supervisor the new release. Active Pi turns keep their process and stream; the replacement supervisor adopts them and replaces each runtime after it settles. The front door starts every open person's supervisor before it listens, so deployment first waits for `/v1/router-health`, then asks only the supervisors reporting another commit to hand over, then waits until every unlocked person's health response names the selected commit. A slow start or handoff therefore cannot race the smoke check or rollback. A rollback resets the supervisor units first, since one that crashed on the rejected release may have exhausted its start limit.
+6. Walks the live front door through `deploy/smoke`: all three web entrypoints, their assets, the standalone Meet adapter, Android CORS, environment/person discovery, and every unlocked person's initial app calls, Voice release identity and transcription availability. A dead router is a failure, not a skipped check. Failure restores the previous Pi Remote selection and its Voice implementation before handing supervisors back. A generation without the shared Voice implementation stops that new unit. Each new Remote release carries its own smoke script and helper so rollback checks the restored release's contract rather than requiring new assets from older code.
 
 An unchanged host redeploy takes a few seconds, including the native browser probe. A clean dependency install takes a few seconds. A deployment whose destinations are overridden with `PI_STACK_*_DEST` is a rehearsal: it publishes into those paths and touches no service unless `PI_STACK_SERVICES=1`.
 
@@ -54,7 +58,46 @@ Retain runtime releases and their dependency trees while any Pi process or brows
 
 Pi normally comes from the npm registry. When an unpublished upstream commit is selected, [`vendor/pi`](../vendor/pi/README.md) holds the built source packages and their exact provenance. `deploy/runtime` copies those packages into its isolated production install before running `npm ci`.
 
-Pi Remote links its declared dependencies and peers from the same immutable production dependency tree, while keeping `pi-orchestrator` pinned to the matching code release. Before publication, deployment resolves the supervisor, router, and person CLI import graphs from the staged artifact with Bun. This check does not start services or open person data, and runs even when every person is locked; dependencies available only in the source checkout cannot mask an incomplete release. An unchanged redeploy repeats the import check.
+Pi Remote links its declared dependencies and peers from the same immutable production dependency tree, while keeping `pi-orchestrator` pinned to the matching code release. Before publication, deployment resolves the supervisor, router, person CLI and shared Voice service import graphs from the staged artifact with Bun. It also requires the livedev skill, Voice delegation policy, ASR worker/model/lock, normal frontend pages and artwork, and the self-contained `web/dist/meet-adapter.js`. `apps/remote/skills` is dereferenced into the artifact, so a checkout-relative symlink cannot escape the installed release. Converge reads that exact adapter bundle from the selected Remote release; there is no independent browser asset deployment. This check does not start services or open person data, and runs even when every person is locked; dependencies available only in the source checkout cannot mask an incomplete release. An unchanged redeploy repeats the import check.
+
+## Leaving live development
+
+The September 10 Meet release was assembled in `/home/kenan/work/clones/meet-converge` while `/home/kenan/projects/pi-stack` continued serving live development. Finish the shared release, its adapter integration and required checks before changing services. A supervisor handoff ends live rooms, so end the meeting and save its final transcript first.
+
+Preserve the source checkout's work in the final Git ancestry rather than resetting a dirty tree. After all source writers have settled:
+
+1. Review and commit the original live-dev changes in `/home/kenan/projects/pi-stack`. Record that snapshot SHA. Do not add ignored credential or Android local-configuration files.
+2. Commit the completed tree in the shared release checkout. Fetch the snapshot locally with `git fetch /home/kenan/projects/pi-stack SNAPSHOT_SHA`. Compare it with the release tree and incorporate any useful late changes that were not copied.
+3. Once the release tree includes or deliberately replaces every snapshot change, run `git merge -s ours --no-ff FETCH_HEAD -m 'Retain Meet live-development provenance'`. This preserves the working snapshot as an ancestor without undoing the integrated release tree. Publish the resulting final release through the normal owner. The canonical checkout can now fast-forward; no `reset`, `clean` or stash is needed.
+
+GMKtec's `/etc/nixos/pi-voice.nix` declaration and import must be installed before `deploy/host`. Stage new Nix files so flake evaluation sees them, build the system to an explicit store path, and inspect its dry activation through the host's `machine/operations.md`. Prepare that build before stopping live development. The unit's `ConditionPathExists` skips startup until the selected Remote release contains the Voice service.
+
+When the complete release is ready, retire the active development services and restore the existing frontend route:
+
+```sh
+sudo systemctl stop pi-remote-dev-web.service pi-remote-dev-supervisor.service
+sudo tailscale serve --bg --yes --https=443 --set-path=/ http://127.0.0.1:8788
+sudo systemctl stop pi-stack-voice.service
+sudo rm -f /run/systemd/system/pi-stack-voice.service.d/source.conf \
+  /run/systemd/system/pi-stack-voice.service \
+  /run/systemd/system/pi-remote-dev-supervisor.service \
+  /run/systemd/system/pi-remote-dev-web.service
+sudo rmdir --ignore-fail-on-non-empty /run/systemd/system/pi-stack-voice.service.d
+sudo systemctl daemon-reload
+```
+
+Stopping the live-dev supervisor restores the deployed capture package and resumes its original supervisor wrapper. Do not restart `pi-remote@kenan.service`; that would kill active Pi turns. Change only the root Tailscale route, not the other applications or `/converge` route.
+
+Persist the prepared Nix generation in `/nix/var/nix/profiles/system` and activate it through a separate root transient systemd unit, exactly as the GMKtec handbook describes. Never run the switch inside the supervisor's cgroup. Then release the same final SHA on both machines:
+
+```sh
+/home/kenan/machine/pi-stack-release FINAL_SHA
+ssh converge-kenan /home/kenan/machine/pi-stack-release FINAL_SHA
+```
+
+Converge's release wrapper installs `pi-stack-voice.service`; its `kenan-vm.tf` boot unit list must carry the same reference. Converge's credential is provisioned from its existing `production-openai-api-key` Secret Manager secret, as recorded in that host's `machine/secrets.md`. Neither release command changes credential custody. The Converge adapter owner then activates the wrapper against this exact installed bundle through Converge's publication workflow.
+
+After release, `systemctl show pi-stack-voice.service -p FragmentPath -p DropInPaths -p Environment` must select the host's production declaration, with no working-checkout override. `deploy/voice --check`, `deploy/smoke`, both live commit markers and each host wrapper's own checks must pass. `tailscale serve status` must show `/` proxying `8788`, not Vite's `5175`. No live-dev process should own a service or selected Pi package. Remove preparation-only handbook notes once both deployments are accepted.
 
 ## Browser recovery
 
@@ -99,7 +142,9 @@ The Android app embeds its endpoint list from a JSON file named in `apps/kenan/a
 ## Release verification
 
 - `/srv/pi/pi-remote/.pi-stack-commit` matches on every host;
-- `pi-remote-router.service`, each unlocked `pi-remote@<user>.service`, and `pi-orchestrator@<fleet>.service` are active;
+- `pi-remote-router.service`, each unlocked `pi-remote@<user>.service`, `pi-stack-voice.service`, and `pi-orchestrator@<fleet>.service` are active;
+- `curl -fsS http://127.0.0.1:8796/status` reports the same `releaseCommit`;
+- `/v1/meet` reports `transcriptionAvailable: true`, and `/meet-adapter.js` exports `startMeetAdapter`;
 - `curl -H 'x-pi-remote-user: <user>' http://127.0.0.1:8788/v1/health` reports the intended environment id;
 - `pi-orchestrator status` answers;
 - Kenan can switch environments without crossing threads, keys, voice, or downloads.
