@@ -50,3 +50,21 @@ it("suspends and restores an account without touching its credential", async () 
     store.close();
   }
 });
+
+it("retires a disabled account's meter error instead of reporting it forever", async () => {
+  const store = Store.open(":memory:");
+  store.upsertAccount({ id: "openai-codex-3", provider: "openai-codex", concurrency: 4 });
+  store.setControl("meter-error:openai-codex-3", JSON.stringify([{ accountId: "openai-codex-3", outcome: "unmapped-window" }]));
+  const daemon = new Daemon(store, loadConfig("/definitely/missing/config.json"), "/release") as any;
+  daemon.codexMeters.sample = async () => [];
+  daemon.anthropicMeters.sample = async () => [];
+  try {
+    await daemon.reconcile();
+    expect(daemon.status().meterErrors).toEqual([{ accountId: "openai-codex-3", outcome: "unmapped-window" }]);
+    store.setAccountEnabled("openai-codex-3", false);
+    await daemon.reconcile();
+    expect(daemon.status().meterErrors).toEqual([]);
+  } finally {
+    store.close();
+  }
+});

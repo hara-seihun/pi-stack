@@ -89,6 +89,14 @@ export class Daemon {
       await this.loadManifest();
       const samples=(await Promise.all([this.codexMeters.sample(),this.anthropicMeters.sample()])).flat();
       for(const account of this.store.accounts()){
+        // A disabled account is never sampled again, so whatever failure it
+        // reported last would stay in status for good. Suspension answers the
+        // alarm; retiring it here is what makes the alarm trustworthy.
+        if(!account.enabled){
+          const key=`meter-error:${account.id}`;
+          if(this.store.control(key))this.store.setControl(key,"");
+          continue;
+        }
         const observed=samples.filter((sample)=>sample.accountId===account.id&&sample.outcome!=="not-due");
         if(!observed.length)continue;
         const failures=observed.filter((sample)=>sample.outcome!=="recorded"&&sample.outcome!=="stale-reading");
