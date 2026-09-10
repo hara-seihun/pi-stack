@@ -119,7 +119,7 @@ async function startServer() {
       PI_REMOTE_ORCHESTRATOR_RUNS: fakeAgentRuns,
       PI_REMOTE_ENVIRONMENT_ID: "local",
       PI_REMOTE_ENVIRONMENT_NAME: "Local",
-      PI_REMOTE_THREAD_NAMING_MODEL: "openai-codex/gpt-5.6-luna:low",
+      PI_REMOTE_THREAD_NAMING_MODEL: "openai-codex-12/gpt-5.6-luna:low",
       PI_REMOTE_REQUIRES_UNLOCK: "true",
       PI_REMOTE_PRIVATE_ID: "private",
       PI_REMOTE_PRIVATE_NAME: "Private",
@@ -597,7 +597,7 @@ describe("web and supervisor integration", () => {
     const invocation = readJsonLines(fakeNamingLog).at(-1);
     expect(invocation.argv).toContain("--print");
     expect(invocation.argv).toContain("--no-tools");
-    expect(invocation.argv).toContain("openai-codex/gpt-5.6-luna:low");
+    expect(invocation.argv).toContain("openai-codex-12/gpt-5.6-luna:low");
     expect(invocation.argv.some((argument: string) => argument.startsWith("@") && argument.endsWith("/messages.txt"))).toBe(true);
 
     const reconciled = await api("POST", "/v1/sync", {

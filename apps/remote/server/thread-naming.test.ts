@@ -9,6 +9,20 @@ describe("thread naming", () => {
     expect(() => threadNamingModel("openrouter/stealth/ox-alpha:low")).toThrow("OpenAI model");
   });
 
+  test("accepts numbered OpenAI account aliases used by the shared pool", () => {
+    for (const provider of ["openai", "openai-2", "openai-codex", "openai-codex-12"]) {
+      const selection = `${provider}/gpt-5.6-luna:low`;
+      expect(threadNamingModel(` ${selection} `)).toBe(selection);
+    }
+    for (const selection of [
+      "anthropic-2/claude-opus-5:low",
+      "openai-codex-other/gpt-5.6-luna:low",
+      "openai-codex-12/gpt-5.6-luna",
+      "openai-codex-12/gpt-5.6-luna:invalid",
+      "openai-codex-12/nested/model:low",
+    ]) expect(() => threadNamingModel(selection)).toThrow("OpenAI model");
+  });
+
   test("keeps trying a numeric thread, then runs once per twentieth-message interval", () => {
     expect(shouldNameThread("950", 0, 0)).toBe(false);
     expect(shouldNameThread("950", 1, 0)).toBe(true);

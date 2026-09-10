@@ -4,8 +4,8 @@ export const THREAD_NAMING_HISTORY = 12;
 
 export function threadNamingModel(value: string | undefined): string {
   const selection = value?.trim() ?? "";
-  if (!/^(?:openai|openai-codex)\/[^/:\s]+:(?:off|minimal|low|medium|high|xhigh|max)$/.test(selection)) {
-    throw new Error("PI_REMOTE_THREAD_NAMING_MODEL must name an OpenAI model as openai/MODEL:THINKING or openai-codex/MODEL:THINKING");
+  if (!/^(?:openai|openai-codex)(?:-\d+)?\/[^/:\s]+:(?:off|minimal|low|medium|high|xhigh|max)$/.test(selection)) {
+    throw new Error("PI_REMOTE_THREAD_NAMING_MODEL must name an OpenAI model as openai/MODEL:THINKING or openai-codex/MODEL:THINKING (numbered account aliases are supported)");
   }
   return selection;
 }
