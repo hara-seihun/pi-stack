@@ -18,8 +18,8 @@ endpoint_file=android-adb-endpoint
 
 verify_endpoint() {
   local endpoint=$1
-  if [[ $endpoint == *:* ]]; then timeout 3 adb connect "$endpoint" >/dev/null 2>&1 || true; fi
-  [[ $(timeout 1 adb -s "$endpoint" get-state 2>/dev/null || true) == device ]]
+  if [[ $endpoint == *:* ]]; then timeout 8 adb connect "$endpoint" >/dev/null 2>&1 || true; fi
+  [[ $(timeout 3 adb -s "$endpoint" get-state 2>/dev/null || true) == device ]]
 }
 remember_endpoint() {
   printf '%s\n' "$1" > "$endpoint_file"
