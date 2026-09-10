@@ -20,6 +20,8 @@ interface Window {
       input?: MediaStream;
       onOutput?(stream: MediaStream): void;
       meetingContext?(): string;
+      handoffContext?(): Promise<string>;
+      onTurn?(turn: { id: string; role: "user" | "assistant"; text: string; final: boolean; startedAt: number }): void;
       onState(state: string, detail?: string): void;
       onNotice(message: string): void;
       onTranscript?(role: string, text: string): void;

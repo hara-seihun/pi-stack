@@ -77,6 +77,9 @@ import { updateDocument } from "./sync";
       this.input = options.input;
       this.onOutput = options.onOutput;
       this.meetingContext = options.meetingContext;
+      this.handoffContext = options.handoffContext;
+      this.onTurn = options.onTurn;
+      this.turns = new Map();
       this.onState = options.onState || (() => {});
       this.onNotice = options.onNotice || (() => {});
       this.onTranscript = options.onTranscript || (() => {});
@@ -254,8 +257,19 @@ import { updateDocument } from "./sync";
         void this.submitDelegation(delegation);
         return;
       }
-      if (event.type === "turn.done") {
+      if (["turn.created", "turn.delta", "turn.done"].includes(event.type)) {
         const turn = asRecord(event.turn);
+        const id = String(turn?.id || event.turn_id || "");
+        let captured = this.turns.get(id);
+        if (id && (turn?.role === "user" || turn?.role === "assistant")) {
+          captured ??= { id, role: turn.role, text: "", final: false, startedAt: Date.now() };
+          if (typeof turn.transcript === "string") captured.text = turn.transcript;
+          captured.final = event.type === "turn.done";
+          this.turns.set(id, captured);
+        }
+        if (captured && event.type === "turn.delta" && typeof event.delta === "string") captured.text += event.delta;
+        if (captured) this.onTurn?.({ ...captured });
+        if (event.type !== "turn.done") return;
         if ((turn?.role === "user" || turn?.role === "assistant") && typeof turn.transcript === "string" && turn.transcript.trim()) {
           this.onTranscript(turn.role, turn.transcript.trim());
         }
@@ -265,9 +279,11 @@ import { updateDocument } from "./sync";
     }
 
     async submitDelegation(delegation) {
-      const context = this.meetingContext?.();
-      const body = JSON.stringify({ requestId: crypto.randomUUID(), text: delegation.text + (context ? `\n\nPiStack Meet context:\n${context}` : ""), delivery: "followUp" });
+      const generation = this.generation;
       try {
+        const context = [this.meetingContext?.(), await this.handoffContext?.()].filter(Boolean).join("\n");
+        if (generation !== this.generation) return;
+        const body = JSON.stringify({ requestId: crypto.randomUUID(), text: delegation.text + (context ? `\n\nPiStack Meet context:\n${context}` : ""), delivery: "followUp" });
         let response = await piFetch(API.sessionPrompt.path({ sessionId: this.sessionId }), {
           method: "POST", headers: { "content-type": "application/json" }, body,
         });
@@ -281,6 +297,7 @@ import { updateDocument } from "./sync";
         const accepted = await response.json();
         delegation.workId = typeof accepted.workId === "string" ? accepted.workId : null;
       } catch (cause) {
+        this.onNotice(String(cause?.message || cause));
         this.appendContext(String(cause?.message || cause), "speakable", delegation.id);
         this.delegations = this.delegations.filter((candidate) => candidate !== delegation);
         this.setState("live", this.delegations.length ? "Agent queued…" : "Listening");

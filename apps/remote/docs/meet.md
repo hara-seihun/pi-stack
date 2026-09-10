@@ -9,9 +9,13 @@ Each person publishes a separate camera/audio MediaStream over WebRTC. The room 
 - `pi-camera` contains the same `/kenan.png` artwork used by the client and PiStack Voice's audio output.
 - `pi-screen` contains the host-controlled Chromium tab, sampled at five frames per second.
 
-The host tab runs the Voice connection. It mixes participant microphones into Voice's single audio input, without mixing their tracks in the meeting. Voice output never enters that mixer. The room retains participant identities, but the Voice provider transcribes the combined input as the room rather than identifying individual speakers. Its existing delegation path sends work to the chosen Pi Remote thread and returns the agent's progress through Voice. Meet includes room metadata and browser/camera URLs with each delegation.
+The host tab runs the Voice connection. It mixes participant microphones only into Voice's single conversational audio input. Voice output never enters that mixer. Independently, the host captures each participant's microphone through its own AudioWorklet. Silence or a twelve-second bound closes an utterance; PiStack transcribes that source with a local, multilingual Whisper base model. Speaker identity comes from the stream's participant ID and name, not a guess from mixed audio. Two people speaking at once produce independent transcript entries. Duplicate display names remain distinct through their IDs.
 
-Every participant with a camera also uploads one 640×360 JPEG every two seconds. The agent can read the latest image through the room API. These are snapshots, not continuous video perception by the voice model. Meet retains only the latest frame per participant in memory. It does not record media. Voice requests delegated to Pi remain in the thread's ordinary history.
+Voice's `turn.created`, `turn.delta`, and `turn.done` events save Kenan's speech, including unfinished turns. Meet ignores Voice's mixed-room user transcript in favour of the separately transcribed microphones. The existing delegation path sends work to the chosen Pi Remote thread and returns the agent's progress through Voice.
+
+Before a handoff, Meet flushes unfinished microphone utterances, waits for their durable save acknowledgements and transcription, and takes a bounded transcript snapshot. Later speech does not keep that handoff waiting. The request includes JSON `meetingTranscript` turns with `id`, `speakerId`, `speaker`, `startedAt`, `text`, and `final`, plus room metadata and browser/camera URLs. Each handoff includes the complete snapshot rather than maintaining a second delivery cursor. Failed transcription stops the handoff and reports the error; it never substitutes guessed speaker labels or incomplete speech.
+
+Every participant with a camera also uploads one 640×360 JPEG every two seconds. The agent can read the latest image through the room API. These are snapshots, not continuous video perception by the voice model. Meet retains only the latest frame per participant in memory. It does not keep a video or mixed-audio recording. Microphone audio remains in the transcription queue until processed; failed jobs retain their audio for recovery. A completed transcription clears its audio. Voice requests delegated to Pi also remain in the thread's ordinary history.
 
 The current web adapter uses peer-to-peer connections and admits at most twelve people. A host advertises its TURN servers through `meetIceServers` in `/etc/pi-stack/host.json`, for example:
 
@@ -33,7 +37,17 @@ Share browser starts a new, isolated Chromium context on the selected PiStack ho
 
 The API reports a loopback CDP endpoint. The connected agent can attach its ordinary `agent_browser` tool using `connect PORT` with `sessionMode: "fresh"`, then `get url`, `snapshot -i`, and the normal browser controls. Operate the shared tab. Creating another tab does not change which tab Meet broadcasts. The page's Address field navigates that same tab.
 
-Chromium profiles live in temporary `pi-meet-*` directories and are deleted when the browser closes. The browser closes with the host's room, including a host departure during startup. An ungraceful host loss expires its room after 45 seconds without polling. Supervisor deployment or restart ends live meetings; guests see the disconnection and can rejoin a new room. No room database or recovery recording exists.
+Chromium profiles live in temporary `pi-meet-*` directories and are deleted when the browser closes. The browser closes with the host's room, including a host departure during startup. An ungraceful host loss expires its room after 45 seconds without polling. Supervisor deployment or restart ends live media connections; guests see the disconnection and can rejoin a new room. Saved transcripts and accepted transcription jobs survive. Interrupted jobs resume when the supervisor starts.
+
+## Saved transcripts and recovery
+
+The person's existing `supervisor.sqlite3` owns `meet_records` and `meet_transcript`. On GMKtec, Kenan's database is `~/hara/.pi-remote/supervisor.sqlite3`, inside her encrypted folder. The meeting record links the transcript to its Pi Remote thread. This is the canonical transcript, not browser sessionStorage. Every participant can read the live transcript in the room. After the meeting, selecting its thread on the Meet page lists saved transcript downloads. Text downloads prefix every sentence with timestamp, speaker name and participant ID. JSON retains the original turn boundaries and completion state.
+
+Audio enters SQLite before an acknowledgement is returned to the host. The recognizer keeps its model loaded and processes each source independently. Successful jobs remove their PCM bytes; failed jobs retain them with an error. Retry transcription resubmits any browser-held unacknowledged uploads under the same IDs and requeues failed server jobs. `POST /ROOM/transcript/retry` also works after the room ends. Explicit End meeting flushes and acknowledges the last captured speech before closing. Force-closing or losing the host tab can lose audio that had not yet reached the server; already acknowledged audio and text remain saved.
+
+[`deploy/transcription`](../../../deploy/transcription) installs the hash-locked Python dependencies and revision-pinned model under `/srv/pi/.pi-transcription/HASH`, with `/srv/pi/transcription` selecting the prepared tree. It requires `uv` and uses Python 3.12. The model provenance and dependency lock live in [`server/meet/asr`](../server/meet/asr). No transcription API key is used and microphone audio does not leave the selected PiStack host for recognition. The conversational Voice connection still sends audio to its existing provider. `deploy/host` prepares transcription alongside runtime dependencies. `PI_STACK_TRANSCRIPTION_DEST` selects a different runtime for deployment rehearsals and supervisor operation.
+
+Converge's implementation informed the separation between the meeting transcript and the Voice handoff. Its `products/kenan/src/meeting-agent/recall.ts` configures Recall streaming transcription with `use_separate_streams_when_available`; its record store retains speaker-attributed segments. `output-media-page.ts` separately captures unfinished Voice turns, and `handoff-transcript.ts` and `pi-agent.ts` track what each agent session has received. PiStack does not depend on Converge's Recall service, credentials, or work data.
 
 ## Adapter contract
 
@@ -53,6 +67,11 @@ The supervisor owns these endpoints, all below `/v1/meet`:
 | Send SDP, ICE, or stream labels | `POST /ROOM/signal?participant=ID`, JSON `{to, signal}` |
 | Leave, or end the room as host | `POST /ROOM/leave?participant=ID` |
 | Publish latest camera snapshot | `PUT /ROOM/frame?participant=ID`, `image/jpeg` |
+| Submit one labelled microphone utterance | `POST /ROOM/transcript/audio?participant=HOST_ID&speaker=SOURCE_ID&id=UUID&startedAt=MILLISECONDS`, mono 16 kHz PCM16, `audio/pcm` |
+| Save a Voice turn | `POST /ROOM/transcript/assistant?participant=HOST_ID`, JSON `{id,text,final,startedAt}` |
+| Read saved transcript | `GET /ROOM/transcript`, or `?format=text` for a sentence-labelled download |
+| List a thread's meetings | `GET /?sessionId=THREAD_ID` |
+| Retry failed recognition | `POST /ROOM/transcript/retry?participant=HOST_ID`; the participant parameter is unnecessary once the room has ended |
 | Read a camera snapshot | `GET /ROOM/participants/ID/frame` |
 | Start or navigate the shared browser | `POST /ROOM/browser?participant=HOST_ID`, JSON `{url}` |
 | Read browser connection or JPEG | `GET /ROOM/browser` or `/ROOM/browser/frame` |

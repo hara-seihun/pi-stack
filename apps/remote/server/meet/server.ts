@@ -1,3 +1,6 @@
+import { Database } from "bun:sqlite";
+import { MeetTranscriptStore, transcriptText } from "./transcript";
+import { MeetTranscriber } from "./transcriber";
 import { API_CORS_HEADERS } from "../cors";
 import { MeetBrowser } from "./browser";
 import { meetIceServers } from "./config";
@@ -5,7 +8,7 @@ import type { MeetEnvelope, MeetParticipant, MeetSignal, MeetSnapshot } from "./
 
 type Member = { participant: MeetParticipant; seen: number; messages: MeetEnvelope[]; frame: Buffer | null };
 type Room = {
-  id: string; sessionId: string; apiUrl: string; members: Map<string, Member>; seq: number;
+  id: string; sessionId: string; apiUrl: string; members: Map<string, Member>; speakers: Map<string, MeetParticipant>; seq: number;
   browser: MeetBrowser | null; opening: Promise<void> | null; closed: boolean;
 };
 const json = (value: unknown, status = 200) => Response.json(value, { status, headers: { ...API_CORS_HEADERS, "cache-control": "no-store" } });
@@ -31,7 +34,11 @@ function signalValue(value: unknown): MeetSignal | null {
 export class MeetServer {
   private readonly rooms = new Map<string, Room>();
   private readonly timer: ReturnType<typeof setInterval>;
-  constructor(private readonly sessionExists: (id: string) => boolean, private readonly openBrowser = MeetBrowser.open) {
+  readonly transcripts: MeetTranscriptStore;
+  private readonly transcriber: MeetTranscriber;
+  constructor(private readonly sessionExists: (id: string) => boolean, private readonly openBrowser = MeetBrowser.open, db?: Database) {
+    this.transcripts = new MeetTranscriptStore(db ?? new Database(":memory:"));
+    this.transcriber = new MeetTranscriber(this.transcripts);
     this.timer = setInterval(() => {
       for (const room of this.rooms.values()) for (const member of room.members.values()) {
         if (Date.now() - member.seen > 45_000) this.leave(room, member.participant.id);
@@ -45,6 +52,7 @@ export class MeetServer {
     room.members.delete(id);
     if (member?.participant.host) {
       room.closed = true;
+      this.transcripts.end(room.id);
       this.rooms.delete(room.id);
       void room.browser?.close().catch((cause) => console.error("Meet browser cleanup failed", cause));
     }
@@ -52,9 +60,10 @@ export class MeetServer {
 
   async close() {
     clearInterval(this.timer);
+    this.transcriber.close();
     const rooms = [...this.rooms.values()];
     this.rooms.clear();
-    for (const room of rooms) room.closed = true;
+    for (const room of rooms) { room.closed = true; this.transcripts.end(room.id); }
     await Promise.all(rooms.map(async (room) => { await room.opening; await room.browser?.close(); }));
   }
 
@@ -80,15 +89,29 @@ export class MeetServer {
       if (!body || typeof body.sessionId !== "string" || !this.sessionExists(body.sessionId)) return fail("Choose an active Pi Remote thread");
       if (this.rooms.size >= 16) return fail("This supervisor already has 16 meetings", 409);
       const id = crypto.randomUUID();
-      const room: Room = { id, sessionId: body.sessionId, apiUrl: `${url.origin}/v1/meet/${id}`, members: new Map(), seq: 0, browser: null, opening: null, closed: false };
+      const room: Room = { id, sessionId: body.sessionId, apiUrl: `${url.origin}/v1/meet/${id}`, members: new Map(), speakers: new Map(), seq: 0, browser: null, opening: null, closed: false };
       const participant: MeetParticipant = { id: crypto.randomUUID(), name: String(body.name || "Host").slice(0, 80), host: true };
       room.members.set(participant.id, { participant, seen: Date.now(), messages: [], frame: null });
+      room.speakers.set(participant.id, participant);
+      this.transcripts.create(room.id, room.sessionId);
       this.rooms.set(room.id, room);
       return json({ room: snapshot(room), participant }, 201);
     }
-    if (!roomId && req.method === "GET") return json({ rooms: [...this.rooms.values()].map(snapshot) });
+    if (!roomId && req.method === "GET") return json({ rooms: [...this.rooms.values()].map(snapshot), meetings: this.transcripts.meetings(url.searchParams.get("sessionId") || ""), transcriptionAvailable: this.transcriber.available() });
+    if (roomId && parts[3] === "transcript" && parts.length === 4 && req.method === "GET") {
+      if (!this.transcripts.has(roomId)) return fail("Meeting transcript not found", 404);
+      const turns = this.transcripts.read(roomId);
+      return url.searchParams.get("format") === "text"
+        ? new Response(transcriptText(turns), { headers: { ...API_CORS_HEADERS, "content-type": "text/plain; charset=utf-8", "content-disposition": `attachment; filename="meet-${roomId}.txt"`, "cache-control": "no-store" } })
+        : json({ turns });
+    }
     const room = this.rooms.get(roomId ?? "");
-    if (!room) return fail("Meeting ended or does not exist", 404);
+    if (!room) {
+      if (roomId && this.transcripts.has(roomId) && parts[3] === "transcript" && parts[4] === "retry" && req.method === "POST") {
+        this.transcripts.retry(roomId); this.transcriber.wake(); return json({ ok: true });
+      }
+      return fail("Meeting ended or does not exist", 404);
+    }
     if (parts.length === 3 && req.method === "GET") return json(snapshot(room));
     if (parts[3] === "join" && req.method === "POST") {
       const body = await this.body(req);
@@ -96,6 +119,7 @@ export class MeetServer {
       if (room.members.size >= 12) return fail("This peer-to-peer room is full, maximum 12 people", 409);
       const participant: MeetParticipant = { id: crypto.randomUUID(), name: body.name.trim().slice(0, 80), host: false };
       room.members.set(participant.id, { participant, seen: Date.now(), messages: [], frame: null });
+      room.speakers.set(participant.id, participant);
       return json({ room: snapshot(room), participant }, 201);
     }
     if (parts[3] === "browser" && req.method === "GET") return parts[4] === "frame" ? image(room.browser?.frame ?? null) : json(snapshot(room).browser);
@@ -108,6 +132,33 @@ export class MeetServer {
       if (!Number.isSafeInteger(after) || after < 0) return fail("Invalid signal cursor");
       member.messages = member.messages.filter((message) => message.seq > after);
       return json({ ...snapshot(room), messages: member.messages });
+    }
+    if (parts[3] === "transcript" && parts[4] === "audio" && req.method === "POST") {
+      if (!this.transcriber.available()) return fail("PiStack transcription is not installed on this host", 503);
+      const speakerId = url.searchParams.get("speaker") || member.participant.id;
+      const speaker = room.speakers.get(speakerId);
+      if (!speaker || (speakerId !== member.participant.id && !member.participant.host)) return fail("Unknown microphone source", 403);
+      const id = url.searchParams.get("id") || "";
+      const startedAt = Number(url.searchParams.get("startedAt"));
+      if (!/^[0-9a-f-]{36}$/.test(id) || !Number.isFinite(startedAt) || startedAt < 0) return fail("Invalid utterance identity or timestamp");
+      if (this.transcripts.countPending() >= 128) return fail("Transcription queue is full; microphone capture must pause", 429);
+      const audio = new Uint8Array(await req.arrayBuffer());
+      if (req.headers.get("content-type") !== "audio/pcm" || audio.length < 2 || audio.length > 512_000 || audio.length % 2) return fail("16 kHz mono signed little-endian PCM16 audio required, maximum 16 seconds");
+      const key = `${room.id}:${speakerId}:${id}`;
+      if (!this.transcripts.enqueue(key, room.id, speakerId, speaker.name, startedAt, audio)) return fail("Utterance identity conflict", 409);
+      this.transcriber.wake();
+      return json({ id: key }, 202);
+    }
+    if (parts[3] === "transcript" && parts[4] === "assistant" && req.method === "POST") {
+      if (!member.participant.host) return fail("Only the host records Voice output", 403);
+      const body = await this.body(req);
+      if (!body || typeof body.id !== "string" || !body.id || body.id.length > 200 || typeof body.text !== "string" || typeof body.final !== "boolean" || !Number.isFinite(body.startedAt)) return fail("Invalid Voice turn");
+      this.transcripts.assistant(`${room.id}:pi:${body.id}`, room.id, body.text, body.final, body.startedAt);
+      return json({ ok: true });
+    }
+    if (parts[3] === "transcript" && parts[4] === "retry" && req.method === "POST") {
+      if (!member.participant.host) return fail("Only the host can retry transcription", 403);
+      this.transcripts.retry(room.id); this.transcriber.wake(); return json({ ok: true });
     }
     if (parts[3] === "leave" && req.method === "POST") { this.leave(room, member.participant.id); return json({ ok: true }); }
     if (parts[3] === "signal" && req.method === "POST") {

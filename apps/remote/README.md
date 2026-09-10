@@ -38,7 +38,7 @@ Model menus, autonomous-agent labels, and plan cards use the catalog exported by
 
 ## PiStack Meet
 
-The thread header's Meet link opens `/meet.html` in the regular frontend. Meet keeps each person's camera and microphone separate, connects the room to PiStack Voice, publishes Kenan's avatar as its camera, and shares an agent-controlled browser. The host tab owns the Voice connection and stays open for the meeting. [Meet operations and adapter contract](docs/meet.md) covers media, camera snapshots, browser control, TURN configuration, and room cleanup.
+The thread header's Meet link opens `/meet.html` in the regular frontend. Meet keeps each person's camera and microphone separate, connects the room to PiStack Voice, publishes Kenan's avatar as its camera, and shares an agent-controlled browser. Each microphone is transcribed separately on the host, and speaker-labelled transcripts are saved in the person's supervisor database. Handoffs include those transcripts, including unfinished speech. The host tab owns the Voice connection and stays open for the meeting. [Meet operations and adapter contract](docs/meet.md) covers media, camera snapshots, browser control, TURN configuration, and room cleanup.
 
 ## Idle notifications
 

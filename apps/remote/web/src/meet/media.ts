@@ -17,6 +17,7 @@ export class MeetMedia {
   attach(source: MeetMediaSource) {
     const key = `${source.participant.id}:${source.stream.id}`;
     if (source.kind !== "camera" || !source.stream.getAudioTracks().length || this.inputs.has(key)) return;
+    this.detach(source.participant.id);
     const input = this.audio.createMediaStreamSource(source.stream);
     input.connect(this.compressor);
     this.inputs.set(key, input);

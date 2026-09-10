@@ -4,7 +4,8 @@ import "../voice";
 import React, { useEffect, useRef, useState } from "react";
 import { createRoot } from "react-dom/client";
 import { API } from "../../../server/api";
-import { meetPath, type MeetJoined, type MeetSnapshot } from "../../../server/meet/protocol";
+import { MeetTranscription } from "./transcription";
+import { meetPath, type MeetJoined, type MeetSnapshot, type MeetTranscriptTurn } from "../../../server/meet/protocol";
 import { piFetch, registerUnlockHandler } from "../client";
 import { avatarStream, MeetMedia, type MeetMediaSource } from "./media";
 import { meetRequest, MeetRoom, post } from "./room";
@@ -48,7 +49,9 @@ function MeetPage() {
   const [sources, setSources] = useState<MeetMediaSource[]>([]);
   const [notice, setNotice] = useState("");
   const [voiceState, setVoiceState] = useState("Voice off");
-  const [transcript, setTranscript] = useState<Array<{ role: string; text: string }>>([]);
+  const [transcript, setTranscript] = useState<MeetTranscriptTurn[]>([]);
+  const [meetings, setMeetings] = useState<Array<{ id: string; createdAt: number }>>([]);
+  const transcription = useRef<MeetTranscription | null>(null);
   const [browserUrl, setBrowserUrl] = useState("https://example.com");
   const [browserBusy, setBrowserBusy] = useState(false);
   const [unlock, setUnlock] = useState<{ message: string; resolve(key: string): void } | null>(null);
@@ -77,6 +80,16 @@ function MeetPage() {
     return () => { window.removeEventListener("pagehide", stop); leave(); };
   }, []);
 
+  useEffect(() => {
+    if (!sessionId) return;
+    void environmentReady.then(() => meetRequest<{ meetings: Array<{ id: string; createdAt: number }> }>(`${meetPath()}?sessionId=${encodeURIComponent(sessionId)}`, owner))
+      .then((result) => setMeetings(result.meetings)).catch((cause) => setNotice(String(cause.message || cause)));
+  }, [sessionId, snapshot?.id]);
+
+  function transcriptLink(id: string) {
+    return window.KenanRemote!.resolveApiUrl(`${meetPath(id, "/transcript")}?format=text&user=${encodeURIComponent(owner)}`);
+  }
+
   function later(fn: () => void, ms: number) {
     const timer = setTimeout(() => { timers.current.delete(timer); fn(); }, ms);
     timers.current.add(timer);
@@ -84,12 +97,15 @@ function MeetPage() {
 
   function acceptMedia(source: MeetMediaSource) {
     mixer.current?.attach(source);
+    transcription.current?.attach(source);
     setSources((current) => [...current.filter((item) => sourceKey(item) !== sourceKey(source)), source]);
   }
 
   function leave() {
     generation.current++;
     voice.current?.stop(); voice.current = null;
+    if (transcription.current) void transcription.current.close().catch((cause) => setNotice(`Transcript finalization: ${String(cause.message || cause)}`));
+    transcription.current = null;
     room.current?.close(); room.current = null;
     for (const timer of timers.current) clearTimeout(timer);
     timers.current.clear();
@@ -100,6 +116,13 @@ function MeetPage() {
     if (mixer.current) void mixer.current.close().catch((cause) => setNotice(`Audio cleanup: ${String(cause)}`));
     mixer.current = null; screenCanvas.current = null;
     setSnapshot(null); setSources([]); setVoiceState("Voice off"); setBusy(false); setBrowserBusy(false);
+  }
+
+  async function finishMeeting() {
+    setBusy(true);
+    voice.current?.stop();
+    try { await transcription.current?.close(); transcription.current = null; leave(); }
+    catch (cause) { setBusy(false); setNotice(`Could not save the last microphone segment: ${String(cause.message || cause)}`); }
   }
 
   function context() {
@@ -122,9 +145,10 @@ function MeetPage() {
     voice.current = window.PiRemoteVoice.create({
       sessionId: current.snapshot.sessionId, input: mixer.current.voiceInput.stream,
       meetingContext: context,
+      handoffContext: () => transcription.current!.handoff(),
+      onTurn: (turn) => { if (turn.role === "assistant") transcription.current?.saveVoice(turn); },
       onState: (_state, detail) => setVoiceState(detail || _state),
       onNotice: setNotice,
-      onTranscript: (role, text) => setTranscript((lines) => [...lines.slice(-99), { role, text }]),
       onOutput: (stream) => {
         if (room.current !== current) return;
         const avatar = current.published.get("pi-camera")!;
@@ -163,7 +187,10 @@ function MeetPage() {
       await environmentReady;
       if (attempt !== generation.current) return;
       if (!window.isSecureContext || !navigator.mediaDevices) throw new Error("Open Meet on the Tailscale HTTPS link to use your microphone and camera");
-      if (!inviteRoom) { media = new MeetMedia(); await media.audio.resume(); mixer.current = media; }
+      if (!inviteRoom) {
+        const configuration = await meetRequest<{ transcriptionAvailable: boolean }>(meetPath(), owner);
+        if (!configuration.transcriptionAvailable) throw new Error("This host needs deploy/transcription before it can save speaker-labelled meetings");
+        media = new MeetMedia(); await media.audio.resume(); mixer.current = media; }
       const stream = microphone || camera ? await navigator.mediaDevices.getUserMedia({
         audio: microphone ? { echoCancellation: true, noiseSuppression: true, autoGainControl: true } : false,
         video: camera ? { width: { ideal: 960 }, height: { ideal: 540 } } : false,
@@ -172,11 +199,17 @@ function MeetPage() {
       local.current = stream; owned.current.push(stream);
       localStorage.setItem("pi-meet-name", name.trim());
       const joined = await meetRequest<MeetJoined>(inviteRoom ? meetPath(inviteRoom, "/join") : meetPath(), owner, post({ sessionId, name: name.trim() }));
-      const current = new MeetRoom(joined, owner, setSnapshot, acceptMedia, (id) => {
-        mixer.current?.detach(id); setSources((items) => items.filter((item) => item.participant.id !== id));
+      const current = new MeetRoom(joined, owner, (next) => {
+        setSnapshot(next);
+        void meetRequest<{ turns: MeetTranscriptTurn[] }>(meetPath(next.id, "/transcript"), owner).then((result) => {
+          if (room.current === current) setTranscript(result.turns);
+        }).catch((cause) => setNotice(`Transcript: ${String(cause.message || cause)}`));
+      }, acceptMedia, (id) => {
+        mixer.current?.detach(id); transcription.current?.detach(id); setSources((items) => items.filter((item) => item.participant.id !== id));
       }, (message) => { setNotice(message); leave(); });
       if (attempt !== generation.current) { current.close(); return; }
       room.current = current; setSnapshot(joined.room);
+      if (joined.participant.host) transcription.current = new MeetTranscription(current, setNotice);
       current.publish("camera", stream);
       acceptMedia({ participant: joined.participant, kind: "camera", stream });
       void current.poll();
@@ -255,15 +288,16 @@ function MeetPage() {
         <label>Your name<input value={name} maxLength={80} onChange={(event) => setName(event.target.value)} required/></label>
         {!inviteRoom && <label>Pi Remote thread<select value={sessionId} onChange={(event) => setSessionId(event.target.value)} required><option value="">Choose a thread</option>{sessionId && !sessions.some((session) => session.id === sessionId) && <option value={sessionId}>Selected thread</option>}{sessions.map((session) => <option key={session.id} value={session.id}>{session.name}</option>)}</select></label>}
         <label className="check"><input type="checkbox" checked={microphone} onChange={(event) => setMicrophone(event.target.checked)}/>Microphone</label><label className="check"><input type="checkbox" checked={camera} onChange={(event) => setCamera(event.target.checked)}/>Camera</label>
-        <p className="privacy">Audio goes to PiStack Voice. The agent can read each camera's latest snapshot. Meet does not record media; Voice requests and agent work stay in the thread. Frames disappear when you leave. Keep the host tab open.</p>
+        <p className="privacy">Audio goes to PiStack Voice. The agent can read each camera's latest snapshot. Each microphone is transcribed separately on the PiStack host. Speaker-labelled transcripts are saved with this thread, including Kenan's speech. Audio is kept only while transcription is pending or needs recovery. Frames disappear when you leave. Keep the host tab open.</p>
         <button className="primary" disabled={busy}>{busy ? "Connecting…" : inviteRoom ? "Join meeting" : "Start meeting"}</button>
+        {meetings.length > 0 && <section className="saved-meetings"><h2>Saved transcripts</h2>{meetings.map((meeting) => <p key={meeting.id}><a href={transcriptLink(meeting.id)}>Download {new Date(meeting.createdAt).toLocaleString()}</a></p>)}</section>}
       </form></section> : <>
       <div className="room-heading"><div><h1>Meeting room</h1><p>{snapshot.participants.length} {snapshot.participants.length === 1 ? "person" : "people"} · {isHost ? voiceState : "Connected to host"}</p></div><button onClick={() => void invite()}>Copy invite link</button></div>
       <div className="meeting-layout"><section className="stage" aria-label="Meeting streams">{[...sources].sort((a, b) => Number(b.kind.endsWith("screen")) - Number(a.kind.endsWith("screen"))).map((source) => <MediaTile key={sourceKey(source)} source={source} muted={source.participant.id === room.current?.joined.participant.id}/>)}</section>
         <aside><h2>In this room</h2>{snapshot.participants.map((participant) => <div className="person" key={participant.id}><span>{participant.name}</span><small>{participant.host ? "Host" : "Guest"}</small></div>)}<div className="person"><span>Kenan</span><small>PiStack Voice</small></div>
-          {isHost && <><h2>Shared browser</h2><form onSubmit={(event) => { event.preventDefault(); void shareBrowser(); }}><label>Address<input type="url" value={browserUrl} onChange={(event) => setBrowserUrl(event.target.value)} required/></label><button disabled={browserBusy}>{browserBusy ? "Opening…" : snapshot.browser ? "Navigate" : "Share browser"}</button></form><p className="hint">This browser runs on the PiStack host. Kenan can operate it through the browser tool.</p>{snapshot.browser && <details><summary>Browser connection</summary><code>{snapshot.browser.endpoint}</code></details>}<h2>Voice transcript</h2><div className="transcript" aria-live="polite">{transcript.length ? transcript.map((line, index) => <p key={index}><strong>{line.role === "assistant" ? "Kenan" : "Room"}</strong> {line.text}</p>) : <p className="hint">Speech appears here during the call.</p>}</div></>}
+          {isHost && <><h2>Shared browser</h2><form onSubmit={(event) => { event.preventDefault(); void shareBrowser(); }}><label>Address<input type="url" value={browserUrl} onChange={(event) => setBrowserUrl(event.target.value)} required/></label><button disabled={browserBusy}>{browserBusy ? "Opening…" : snapshot.browser ? "Navigate" : "Share browser"}</button></form><p className="hint">This browser runs on the PiStack host. Kenan can operate it through the browser tool.</p>{snapshot.browser && <details><summary>Browser connection</summary><code>{snapshot.browser.endpoint}</code></details>}</>}<h2>Saved transcript</h2><a href={transcriptLink(snapshot.id)}>Download transcript</a><div className="transcript" aria-live="polite">{transcript.length ? transcript.map((line) => <p key={line.id}><strong title={line.speakerId}>{line.speaker}</strong> {line.text || (line.status === "failed" ? line.error : "Transcribing…")}{line.text && !line.final ? " …" : ""}</p>) : <p className="hint">Each speaker's words appear here and stay saved after the meeting.</p>}</div>{isHost && <button onClick={() => void transcription.current?.retry().then(() => setNotice("Transcription retry accepted"), (cause) => setNotice(String(cause.message || cause)))}>Retry transcription</button>}
         </aside></div>
-      <footer className="controls"><button aria-pressed={!microphone} onClick={() => toggle("audio")}>{microphone ? "Mute mic" : "Unmute mic"}</button><button aria-pressed={!camera} onClick={() => toggle("video")}>{camera ? "Camera off" : "Camera on"}</button>{isHost && <><button onClick={() => voice.current?.hush()}>Hush Kenan</button><button onClick={() => void startVoice()}>Reconnect voice</button></>}<button className="leave" onClick={leave}>{isHost ? "End meeting" : "Leave"}</button></footer>
+      <footer className="controls"><button aria-pressed={!microphone} onClick={() => toggle("audio")}>{microphone ? "Mute mic" : "Unmute mic"}</button><button aria-pressed={!camera} onClick={() => toggle("video")}>{camera ? "Camera off" : "Camera on"}</button>{isHost && <><button onClick={() => voice.current?.hush()}>Hush Kenan</button><button onClick={() => void startVoice()}>Reconnect voice</button></>}<button className="leave" disabled={busy} onClick={() => void finishMeeting()}>{busy ? "Saving…" : isHost ? "End meeting" : "Leave"}</button></footer>
     </>}
     {unlock && <div className="unlock"><form onSubmit={(event) => { event.preventDefault(); unlock.resolve(key); setKey(""); setUnlock(null); }}><h2>Unlock Pi Remote</h2><p>{unlock.message}</p><label>Folder key<input type="password" value={key} onChange={(event) => setKey(event.target.value)} autoFocus required/></label><button className="primary">Unlock</button></form></div>}
   </main>;

@@ -24,9 +24,12 @@ pi_stack_prepare_dependencies "$root" &
 build_dependencies_pid=$!
 "$root/deploy/runtime" &
 runtime_pid=$!
+"$root/deploy/transcription" &
+transcription_pid=$!
 preparation_failed=0
 wait "$build_dependencies_pid" || preparation_failed=1
 wait "$runtime_pid" || preparation_failed=1
+wait "$transcription_pid" || preparation_failed=1
 (( preparation_failed == 0 )) || exit 1
 
 expected=$(git -C "$root" rev-parse HEAD)

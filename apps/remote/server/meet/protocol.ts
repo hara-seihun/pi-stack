@@ -17,5 +17,9 @@ export interface MeetSnapshot {
 }
 export interface MeetJoined { room: MeetSnapshot; participant: MeetParticipant }
 export interface MeetPoll extends MeetSnapshot { messages: MeetEnvelope[] }
+export interface MeetTranscriptTurn {
+  id: string; speakerId: string; speaker: string; startedAt: number; text: string; final: boolean;
+  status: "queued" | "processing" | "partial" | "done" | "failed"; error: string | null;
+}
 export type MeetResult<T> = { ok: true; value: T } | { ok: false; error: string };
 export const meetPath = (roomId = "", suffix = "") => `/v1/meet${roomId ? `/${encodeURIComponent(roomId)}` : ""}${suffix}`;

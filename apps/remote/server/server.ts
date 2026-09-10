@@ -1975,7 +1975,7 @@ void runtimeAdoption.then(reapUnclaimedRuntimeHosts)
 const meet = new MeetServer((id) => {
   const row = sessionRow.get(id) as any;
   return Boolean(row && !row.archived_at);
-});
+}, undefined, db);
 
 const server = Bun.serve({
   hostname: HOST,
