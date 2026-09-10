@@ -6,7 +6,7 @@ Pi Orchestrator runs unattended Pi sessions against pooled subscription accounts
 
 The daemon reconciles provider meters, weighted lanes, optional queue readiness, and explicit requests for direct runs.
 
-A lane has a positive weight, not a worker target. Available quota determines fleet size; weights divide that capacity among eligible lanes. A wave remains a one-off batch, not a standing target. Each run ends when its agent finishes its turn.
+A lane has a positive weight, not a worker target. Weights divide available concurrency among eligible lanes. The manifest selects paced background admission or work-driven forced admission. A wave remains a one-off batch, not a standing target. Each run ends when its agent finishes its turn.
 
 Workers write progress through the daemon's loopback API. Their full context remains in Pi's session JSONL. If a worker process or machine stops, the next worker reopens that same file. The run row records the immutable release path and transient unit name, so a daemon deployment does not replace live workers. Recovery adopts a still-active unit when a daemon restart races the user manager; an already-loaded inactive transient unit restarts from its recorded release instead of being redefined.
 
@@ -18,7 +18,7 @@ The account concurrency ceiling also uses up to six hours of same-window consump
 
 These ceilings govern admission only. Already admitted workers finish even when pacing, reserves, account reservations, provider boosts, or machine limits would refuse new work. Their leases remain charged, so replacements cannot bypass those limits. Worker recovery retains the same run, account, release, model, thinking level, and Pi JSONL without a new quota admission. Explicit operator aborts and stall handling still apply.
 
-`status` exposes calculated account ceilings and reasons, plus each lane's active count. Pi Remote includes every starting or running session in its running total.
+`status` exposes the manifest's `laneBudget`, account ceilings and reasons under that budget, and each lane's active count. Pi Remote includes every starting or running session in its running total.
 
 `run --force` and `wave --force` are operator-authorized urgent work. API callers select the same policy with `force: true`, including EverythingLIVE's author/review jobs. These runs bypass background pacing, reserves, meter freshness, observation throttling, and provider multipliers, including 0×. Exhausted provider quota, cooldowns, disabled or reserved accounts, account and machine concurrency ceilings, and the global `pause` still apply.
 
@@ -50,7 +50,9 @@ For an experiment, record the activation time and compare new runs by `run.think
 
 A lane manifest has `version: 2` and a `lanes` array. Every lane declares `id`, `prompt`, `cwd`, `profile`, and positive `weight`. Unknown fields are rejected, including worker targets.
 
-Without a `snapshotCommand`, lanes are continuously eligible. An optional command reports whether each queue has unclaimed work, never how many workers to run:
+The manifest's optional `budget` is `background` by default. Setting it to `force` makes every lane use the existing urgent admission policy, without background pacing, reserve, meter-age or multiplier gates. This mode requires a non-empty `snapshotCommand`. Its current readiness decides whether another worker is needed; `ready: false` stops new workers until work appears again. Actual provider exhaustion, disabled or reserved accounts, cooldowns, account and machine ceilings, and global pause still apply. The daemon owns continuation, with no repeated waves or waiting model session. Manifest reload changes new admissions only. Each run records its selected budget, so existing runs retain their policy across restarts.
+
+Without a `snapshotCommand`, background lanes are continuously eligible. An optional command reports whether each queue has unclaimed work, never how many workers to run:
 
 ```json
 {
@@ -62,7 +64,7 @@ Without a `snapshotCommand`, lanes are continuously eligible. An optional comman
 }
 ```
 
-The daemon validates the whole readiness snapshot. A missing lane or failed probe prevents new work in that lane without interrupting its already-assigned sessions. A readiness observation permits at most one launch per lane before the next 30-second refresh, allowing the worker to claim its task. Numerical counts are rejected. Lanes do not preallocate worker queues.
+The daemon validates the whole readiness snapshot. Every declared lane needs an explicit readiness value. A missing lane or failed probe reports a readiness error and prevents new lane admissions without interrupting already-assigned sessions. A readiness observation permits at most one launch per lane before the next 30-second refresh, allowing the worker to claim its task. Numerical counts are rejected. Lanes do not preallocate worker queues.
 
 ## Operations
 

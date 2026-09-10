@@ -41,6 +41,7 @@ export interface LaneReadiness {
 
 export interface LaneManifest {
   readonly version: 2;
+  readonly budget?: BudgetClass;
   readonly snapshotCommand?:string;
   readonly lanes: readonly (LaneSpec | (Omit<LaneSpec,"prompt"> & { readonly promptFile:string }))[];
 }

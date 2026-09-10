@@ -4,7 +4,7 @@ import { fileURLToPath } from "node:url";
 import { dirname, join, resolve } from "node:path";
 import { homedir } from "node:os";
 import { createServer, type IncomingMessage, type ServerResponse } from "node:http";
-import type { LaneReadiness, LaneManifest, LaneSpec, OrchestratorConfig, Run } from "./domain.js";
+import type { BudgetClass, LaneReadiness, LaneManifest, LaneSpec, OrchestratorConfig, Run } from "./domain.js";
 import { isRunContext } from "./isolated-context-contract.js";
 import { accountCapacity, assign, commitMeterAdmission } from "./policy.js";
 import { Store } from "./store.js";
@@ -24,6 +24,7 @@ function exec(command:string,cwd?:string,timeout=30_000):Promise<string>{return 
 
 export class Daemon {
   private manifestMtime=0;
+  private laneBudget:BudgetClass="background";
   private snapshotCommand?:string;
   private readinessAt=0;
   private readiness?:LaneReadiness;
@@ -75,9 +76,14 @@ export class Daemon {
     const mtime=statSync(path).mtimeMs;if(mtime===this.manifestMtime)return;
     const manifest=JSON.parse(readFileSync(path,"utf8")) as LaneManifest;
     if(manifest.version!==2||!Array.isArray(manifest.lanes))throw new Error("lane manifest version 2 required");
-    for(const key of Object.keys(manifest))if(!["version","lanes","snapshotCommand"].includes(key))throw new Error(`unsupported lane manifest field ${key}`);
+    for(const key of Object.keys(manifest))if(!["version","budget","lanes","snapshotCommand"].includes(key))throw new Error(`unsupported lane manifest field ${key}`);
+    const budget=manifest.budget===undefined?"background":manifest.budget;
+    if(budget!=="background"&&budget!=="force")throw new Error("lane manifest budget must be background or force");
+    if(manifest.snapshotCommand!==undefined&&(typeof manifest.snapshotCommand!=="string"||!manifest.snapshotCommand.trim()))throw new Error("snapshotCommand must be a non-empty command");
+    if(budget==="force"&&!manifest.snapshotCommand)throw new Error("force lane budget requires a snapshotCommand that reports unfinished work");
     const lanes=manifest.lanes.map((lane)=>{if("prompt" in lane)return lane;const {promptFile,...spec}=lane;return{...spec,prompt:readFileSync(resolve(dirname(path),promptFile),"utf8")};});
     this.store.reconcileLanes(lanes);
+    this.laneBudget=budget;
     this.snapshotCommand=manifest.snapshotCommand;
     this.readinessAt=0;this.readiness=undefined;
     this.manifestMtime=mtime;
@@ -132,6 +138,7 @@ export class Daemon {
       const snapshot=JSON.parse(await exec(this.snapshotCommand)) as LaneReadiness;
       if(typeof snapshot.revision!=="string"||!snapshot.lanes||typeof snapshot.lanes!=="object"||Array.isArray(snapshot.lanes))throw new Error("invalid lane readiness snapshot");
       for(const [id,value] of Object.entries(snapshot.lanes))if(!value||typeof value.ready!=="boolean"||Object.keys(value).some((key)=>key!=="ready"))throw new Error(`lane ${id} requires ready: boolean, not a worker count`);
+      for(const lane of this.store.lanes())if(!Object.hasOwn(snapshot.lanes,lane.id))throw new Error(`readiness snapshot omitted lane ${lane.id}`);
       this.readiness=snapshot;this.store.setControl("readiness_error","");
     }catch(error){this.readiness=undefined;this.store.setControl("readiness_error",String(error));}
   }
@@ -155,11 +162,11 @@ export class Daemon {
       for(const lane of lanes){
         const key=`lane:${lane.id}`;
         if(failed.has(key))continue;
-        const choice=assign(this.store,lane.profile,"background",this.config);
+        const choice=assign(this.store,lane.profile,this.laneBudget,this.config);
         if(!choice.assignment){this.store.setControl(`refusal:${key}`,choice.refusals.map((r)=>`${r.accountId}: ${r.reason}`).join("; "));continue;}
         try{
           const prompt=await this.lanePrompt(lane);
-          const [id]=this.store.createRuns({count:1,source:"lane",sourceId:lane.id,prompt,cwd:lane.cwd,profile:lane.profile,budget:"background"});
+          const [id]=this.store.createRuns({count:1,source:"lane",sourceId:lane.id,prompt,cwd:lane.cwd,profile:lane.profile,budget:this.laneBudget});
           if(!await this.launch(this.store.run(id!)!)){failed.add(key);this.store.trimQueuedLane(lane.id,0);continue;}
           if(this.snapshotCommand)this.store.setControl(`readiness-admitted:${lane.id}`,String(this.readinessAt));
           this.store.setControl(`refusal:${key}`,"");
@@ -321,5 +328,12 @@ export class Daemon {
     }catch(error){json(res,500,{error:String(error)});}
   }
 
-  private status():unknown{return{launches:this.store.control("launches")??"enabled",readinessError:this.store.control("readiness_error")||undefined,meterErrors:this.store.accounts().flatMap((account)=>{const error=this.store.control(`meter-error:${account.id}`);return error?JSON.parse(error):[];}),capacity:this.store.accounts().map((account)=>({accountId:account.id,...accountCapacity(this.store,account.id,"background",this.config)})),accounts:this.store.accounts(),lanes:this.store.lanes().map((lane)=>({...lane,active:this.store.admittedLaneCount(lane.id)})),runs:this.store.runs(["queued","starting","running"]),leases:this.store.activeLeases()};}
+  private status():unknown{return{
+    launches:this.store.control("launches")??"enabled",laneBudget:this.laneBudget,
+    readinessError:this.store.control("readiness_error")||undefined,
+    meterErrors:this.store.accounts().flatMap((account)=>{const error=this.store.control(`meter-error:${account.id}`);return error?JSON.parse(error):[];}),
+    capacity:this.store.accounts().map((account)=>({accountId:account.id,...accountCapacity(this.store,account.id,this.laneBudget,this.config)})),
+    accounts:this.store.accounts(),lanes:this.store.lanes().map((lane)=>({...lane,active:this.store.admittedLaneCount(lane.id)})),
+    runs:this.store.runs(["queued","starting","running"]),leases:this.store.activeLeases(),
+  };}
 }
