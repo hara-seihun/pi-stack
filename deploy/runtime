@@ -25,6 +25,8 @@ check_release() {
   [[ $version == "$PI_VERSION" ]] || { echo "unexpected Pi version: $version" >&2; exit 1; }
   [[ $browser_version == "$BROWSER_VERSION" ]] || { echo "unexpected agent-browser version: $browser_version" >&2; exit 1; }
   node --check "$release/node_modules/@earendil-works/pi-coding-agent/dist/modes/rpc/shared-rpc-mode.js"
+  grep -q 'replaceSessionFileDurably(this.sessionFile' "$release/node_modules/@earendil-works/pi-coding-agent/dist/core/session-manager.js"
+  grep -rlq 'replaceSessionFileDurably(this.sessionFile' "$release/node_modules/@earendil-works/pi-coding-agent/dist/bundle/chunks"
   cmp -s "$runtime_source/browser-doctor.mjs" "$release/node_modules/.bin/pi-agent-browser-doctor" || {
     echo "the browser doctor does not match this release" >&2; exit 1;
   }
@@ -59,8 +61,8 @@ fi
 cd "$root"
 pi_stack_as_root install -d -m 755 "$dependencies_root"
 dependency_hash=$({
-  sha256sum package.json package-lock.json packages/runtime/browser-doctor.mjs packages/runtime/patch-browser-qa.mjs packages/runtime/patch-codex-sse.mjs packages/runtime/patch-compaction-cut.mjs packages/runtime/patch-shared-rpc.mjs
-  printf '%s\n' workspace-production-closure-v1-atomic-settings-writes-v1
+  sha256sum package.json package-lock.json packages/runtime/browser-doctor.mjs packages/runtime/patch-browser-qa.mjs packages/runtime/patch-codex-sse.mjs packages/runtime/patch-compaction-cut.mjs packages/runtime/patch-session-durability.mjs packages/runtime/patch-shared-rpc.mjs
+  printf '%s\n' workspace-production-closure-v1-atomic-settings-writes-v1-durable-sessions-v1
 } | sha256sum | cut -d' ' -f1)
 dependency_release="$dependencies_root/$dependency_hash"
 if [[ ! -x $dependency_release/node_modules/.bin/pi ]]; then
@@ -102,6 +104,7 @@ NODE
   node "$runtime_source/patch-browser-qa.mjs" "$browser_job"
   node --check "$browser_job"
   node "$runtime_source/patch-compaction-cut.mjs" "$stage/node_modules"
+  node "$runtime_source/patch-session-durability.mjs" "$stage/node_modules"
   node "$runtime_source/patch-shared-rpc.mjs" "$stage/node_modules"
   rm -f "$stage/node_modules/pi-orchestrator" "$stage/node_modules/pi-remote"
   rm -rf "$stage/node_modules/@hara-seihun"

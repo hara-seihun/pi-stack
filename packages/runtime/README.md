@@ -34,6 +34,10 @@ That version's QA text predicate misses phrases split across React text nodes, i
 
 [`patch-compaction-cut.mjs`](patch-compaction-cut.mjs) fixes the companion cut-selection defect in Pi's SDK and bundled copies. When the trailing tool results alone exceeded `keepRecentTokens`, Pi found no later valid cut and retained the entire transcript, declining compaction. The patch chooses the preceding assistant call when no later cut exists, keeping that batch together. [`compaction-cut.test.mjs`](compaction-cut.test.mjs) covers that boundary; the extension's lifecycle test runs a complete parallel tool batch, native compaction and continuation inside one Pi run.
 
+## Session crash durability
+
+Pi 0.85 closes JSONL files after writes without syncing them. A hard host reset can therefore persist a new gocryptfs file length without the complete authenticated final block, making every later read that reaches that block fail with `EIO`. [`patch-session-durability.mjs`](patch-session-durability.mjs) repairs both the SDK and bundled CLI copies. Appends are synced before returning, initial and fork writes are completed and synced as one file, and rewrites use a synced temporary file followed by an atomic rename and parent-directory sync. [`session-durability.test.mjs`](session-durability.test.mjs) checks both deployed source forms and their syntax.
+
 ## Configuration
 
 The packages contain no host identities, credential values, deployment paths, or service policy. Configuration stays on the machine running Pi. Each component README lists its environment variables and local files.
