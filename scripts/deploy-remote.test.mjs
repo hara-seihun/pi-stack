@@ -6,6 +6,11 @@ import { dirname, join, resolve } from "node:path";
 import { test } from "node:test";
 
 const root = resolve(import.meta.dirname, "..");
+const releaseResources = [
+  "deploy/lib", "deploy/smoke", "skills/livedev/SKILL.md", "server/voice/delegation-policy.md",
+  "server/meet/asr/worker.py", "server/meet/asr/model.json", "server/meet/asr/requirements.lock",
+  "web/dist/index.html", "web/dist/meet.html", "web/dist/meet-adapter.js", "web/dist/voice.html", "web/dist/kenan.png",
+];
 function fixture() {
   const dir = mkdtempSync(join(tmpdir(), "pi-remote-deploy-test-"));
   const repo = join(dir, "repo"), dest = join(dir, "remote"), orchestrator = join(dir, "orchestrator");
@@ -14,15 +19,17 @@ function fixture() {
     mkdirSync(dirname(path), { recursive: true });
     writeFileSync(path, text, { mode });
   };
-  for (const file of ["deploy/remote", "deploy/lib", "scripts/check-remote-imports.ts"]) {
+  for (const file of ["deploy/remote", "deploy/lib", "deploy/smoke", "scripts/check-remote-imports.ts"]) {
     mkdirSync(dirname(join(repo, file)), { recursive: true });
     cpSync(join(root, file), join(repo, file));
   }
   put(join(bin, "npm"), "#!/bin/sh\nexit 0\n", 0o755);
   put(join(repo, "apps/remote/package.json"), JSON.stringify({type: "module", dependencies: {"pi-orchestrator": "1.0.0", "playwright-core": "1.0.0"}}));
-  put(join(repo, "apps/remote/web/dist/index.html"), "ok");
+  for (const resource of releaseResources.filter((path) => !path.startsWith("deploy/"))) {
+    put(join(repo, "apps/remote", resource), "fixture\n");
+  }
   put(join(repo, "apps/remote/server/main.ts"), 'import { chromium } from "playwright-core"; import { ok } from "pi-orchestrator/api"; console.log(chromium, ok);');
-  for (const entry of ["router.ts", "person-cli.ts"]) put(join(repo, "apps/remote/server", entry), "export {};");
+  for (const entry of ["router.ts", "person-cli.ts", "voice/service.ts"]) put(join(repo, "apps/remote/server", entry), "export {};");
   for (const entry of ["pi-remote", "pi-remote-launch", "pi-remote-supervise"]) put(join(repo, "apps/remote/server", entry), "#!/bin/sh\nexit 0\n", 0o755);
   put(join(orchestrator, "package.json"), JSON.stringify({name: "pi-orchestrator", exports: {"./api": "./src/api.ts"}}));
   put(join(orchestrator, "src/api.ts"), "export const ok = true;");
@@ -50,12 +57,30 @@ test("Remote publishes production dependencies and checks the unchanged release"
     assert.equal(result.status, 0, result.stderr);
     assert.equal(realpathSync(join(f.dest, "node_modules/playwright-core")), join(f.dependencies, "playwright-core"));
     assert.equal(realpathSync(join(f.dest, "node_modules/pi-orchestrator")), f.orchestrator);
+    for (const resource of releaseResources) assert.ok(existsSync(join(f.dest, resource)), resource);
     result = f.run();
     assert.equal(result.status, 0, result.stderr);
     rmSync(join(f.dest, "node_modules/playwright-core"));
     result = f.run();
     assert.notEqual(result.status, 0);
     assert.match(result.stderr, /playwright-core/);
+  } finally { rmSync(f.dir, {recursive: true, force: true}); }
+});
+
+test("Remote rejects an incomplete release even on unchanged redeploy", () => {
+  const f = fixture();
+  try {
+    const deployed = f.run();
+    assert.equal(deployed.status, 0, deployed.stderr);
+    for (const resource of releaseResources) {
+      const path = join(f.dest, resource), saved = join(f.dir, "resource");
+      cpSync(path, saved);
+      rmSync(path);
+      const result = f.run();
+      assert.notEqual(result.status, 0, resource);
+      assert.ok(result.stderr.includes(resource), result.stderr);
+      cpSync(saved, path);
+    }
   } finally { rmSync(f.dir, {recursive: true, force: true}); }
 });
 
@@ -71,17 +96,17 @@ test("Remote prefers workspace-local dependencies", () => {
 });
 
 test("Remote rejects missing declared or transitive first-party imports before publication", () => {
-  for (const missingDeclared of [true, false]) {
+  for (const entrypoint of [null, "main.ts", "voice/service.ts"]) {
     const f = fixture();
     try {
-      if (missingDeclared) rmSync(join(f.dependencies, "playwright-core"), {recursive: true});
+      if (entrypoint === null) rmSync(join(f.dependencies, "playwright-core"), {recursive: true});
       else {
-        f.put(join(f.repo, "apps/remote/server/main.ts"), 'import "./meet/browser";');
+        f.put(join(f.repo, "apps/remote/server", entrypoint), `import "${entrypoint === "main.ts" ? "./" : "../"}meet/browser";`);
         f.put(join(f.repo, "apps/remote/server/meet/browser.ts"), 'import "missing-meet-dependency";');
       }
       const result = f.run();
       assert.notEqual(result.status, 0);
-      assert.match(result.stderr, missingDeclared ? /playwright-core/ : /missing-meet-dependency/);
+      assert.match(result.stderr, entrypoint === null ? /playwright-core/ : /missing-meet-dependency/);
       assert.equal(existsSync(f.dest), false);
     } finally { rmSync(f.dir, {recursive: true, force: true}); }
   }

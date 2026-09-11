@@ -1,4 +1,4 @@
-import { describe, expect, test } from "bun:test";
+import { describe, expect, spyOn, test } from "bun:test";
 import { existsSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -32,31 +32,49 @@ describe("thread lifecycle context", () => {
     expect(instructions).toContain("without repeating setup or completed actions");
   });
 
-  test("injects machine alerts into the first request without registering a tool", async () => {
+  test.each([false, true])("injects machine alerts into the first request with remote tools enabled=%s", async (remote) => {
     const inbox = mkdtempSync(join(tmpdir(), "pi-remote-alerts-"));
     const alert = join(inbox, "disk.txt");
-    const previousInbox = process.env.PI_REMOTE_ALERTS_INBOX;
+    const environment = {
+      PI_REMOTE_ALERTS_INBOX: inbox,
+      PI_REMOTE_SESSION_ID: remote ? "test-session" : undefined,
+      PI_REMOTE_SERVER_URL: remote ? "http://remote.test" : undefined,
+      PI_REMOTE_MEETING_ID: undefined,
+    };
+    const previous = Object.fromEntries(Object.keys(environment).map((key) => [key, process.env[key]]));
     writeFileSync(alert, "Disk needs attention\n");
-    process.env.PI_REMOTE_ALERTS_INBOX = inbox;
     const handlers = new Map<string, (...args: any[]) => Promise<any>>();
+    const tools: string[] = [];
+    const network = spyOn(globalThis, "fetch").mockResolvedValue(Response.json({ instructions: "Thread instructions" }));
     const pi = {
       getSessionName: () => "83",
+      registerTool: (tool: { name: string }) => tools.push(tool.name),
       on: (name: string, handler: (...args: any[]) => Promise<any>) => handlers.set(name, handler),
     };
     try {
+      for (const [key, value] of Object.entries(environment)) {
+        if (value === undefined) delete process.env[key];
+        else process.env[key] = value;
+      }
       threadContext(pi as any);
-      expect((pi as any).registerTool).toBeUndefined();
+      expect(tools).toEqual(remote ? ["thread_thinking", "thread_delegate"] : []);
       const result = await handlers.get("before_agent_start")!(
         { prompt: "Help", systemPrompt: "System" },
         { sessionManager: { getBranch: () => [{ type: "message", message: { role: "user" } }] } },
       );
       expect(result.message).toMatchObject({ customType: "pi-remote-machine-alerts", display: true });
       expect(result.message.content).toContain("Disk needs attention");
+      expect(network).toHaveBeenCalledTimes(remote ? 1 : 0);
+      if (remote) expect(result.systemPrompt).toContain("Thread instructions");
+      expect(existsSync(alert)).toBe(true);
       await handlers.get("agent_start")!();
       expect(existsSync(alert)).toBe(false);
     } finally {
-      if (previousInbox === undefined) delete process.env.PI_REMOTE_ALERTS_INBOX;
-      else process.env.PI_REMOTE_ALERTS_INBOX = previousInbox;
+      network.mockRestore();
+      for (const [key, value] of Object.entries(previous)) {
+        if (value === undefined) delete process.env[key];
+        else process.env[key] = value;
+      }
       rmSync(inbox, { recursive: true, force: true });
     }
   });

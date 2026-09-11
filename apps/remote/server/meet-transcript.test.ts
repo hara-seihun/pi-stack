@@ -20,7 +20,10 @@ test("overlapping microphones retain identity, accepted audio survives restart, 
     store.end("room");
     const turns = recovered.read("room");
     expect(turns.map((turn) => turn.speakerId)).toEqual(["person-a", "person-b"]);
-    expect(transcriptText(turns).match(/Alex \[person-a\]:/g)?.length).toBe(2);
+    const lines = transcriptText(turns).trimEnd().split("\n");
+    expect(lines).toHaveLength(2);
+    expect(lines[0]).toContain("Alex [person-a]: Hello. Two sentences.");
+    expect(lines[1]).toContain("Alex [person-b]: [failed: Recognizer unavailable] [unfinished]");
     expect(db.query("SELECT audio FROM meet_transcript WHERE id='one'").get()).toEqual({ audio: null });
     expect(db.query("SELECT audio FROM meet_transcript WHERE id='two'").get()).toEqual({ audio });
     recovered.retry("room");

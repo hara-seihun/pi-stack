@@ -28,10 +28,12 @@ describe("current orchestrator state",()=>{
     expect(assign(store,"standard","force",config,Date.now(),"openai-codex-1").assignment).toBeUndefined();
     expect(allowsAccountUse(store.account("openai-codex-1")!,"interactive")).toBe(false);
     store.close();
-    const client=new OrchestratorClient({ledgerPath:ledger});
-    expect(client.voiceAccounts().map((a)=>a.id)).toEqual(["openai-codex-1"]);
-    const lease=client.beginVoiceLease("openai-codex-1");client.endLease(lease);client.close();
-    const reopened=Store.open(ledger);reopened.setControl("account-use:openai-codex-1","shared");
+    const reopened=Store.open(ledger);
+    expect(reopened.account("openai-codex-1")?.use).toBe("voice");
+    expect(assign(reopened,"standard","force",config).assignment?.accountId).toBe("openai-codex-2");
+    expect(assign(reopened,"standard","force",config,Date.now(),"openai-codex-1").assignment).toBeUndefined();
+    expect(allowsAccountUse(reopened.account("openai-codex-1")!,"interactive")).toBe(false);
+    reopened.setControl("account-use:openai-codex-1","shared");
     expect(allowsAccountUse(reopened.account("openai-codex-1")!,"interactive")).toBe(true);
     reopened.close();rmSync(root,{recursive:true});
   });
