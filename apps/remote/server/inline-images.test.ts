@@ -1,6 +1,6 @@
 import { afterEach, expect, test } from "bun:test";
 import { Database } from "bun:sqlite";
-import { mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
+import { mkdtemp, readFile, readdir, rm, truncate, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { parseInlineImageTags } from "./inline-image-contract";
@@ -13,7 +13,7 @@ const success = () => ({ ok: true as const, images: [{ id: "provider-image", byt
 async function fixture(generate: InlineImageGenerator, concurrency = 2) {
   const root = await mkdtemp(join(tmpdir(), "pi-inline-images-"));
   const db = new Database(join(root, "state.sqlite3"));
-  db.exec("PRAGMA journal_mode=WAL; CREATE TABLE sessions(id TEXT PRIMARY KEY); INSERT INTO sessions VALUES('thread'),('other');");
+  db.exec("PRAGMA journal_mode=WAL; PRAGMA foreign_keys=ON; CREATE TABLE sessions(id TEXT PRIMARY KEY); INSERT INTO sessions VALUES('thread'),('other');");
   let wake = () => {};
   const service = new InlineImages(db, join(root, "images"), generate, () => wake(), concurrency);
   cleanup.push(async () => { service.stop(); db.close(); await rm(root, { recursive: true, force: true }); });
@@ -93,6 +93,43 @@ test("missing dependencies, cycles, failed parents and display-only tags never c
   expect(images.find(image => image.id === "child")?.error?.code).toBe("dependency_failed");
   expect(calls).toBe(1);
   expect(f.service.snapshot("other").images).toEqual([]);
+});
+
+test("combined reference size is rejected before any input copy or provider call", async () => {
+  let calls = 0;
+  const f = await fixture(async () => { calls++; return success(); });
+  const paths = [join(f.root, "first input.png"), join(f.root, "second, input.png")];
+  for (const path of paths) { await writeFile(path, ""); await truncate(path, 20 * 1024 * 1024); }
+  f.service.accept("thread", "large-inputs", `<pi-remote-image id="large" prompt="Too large" refs='${JSON.stringify(paths)}' />`);
+  await f.service.start();
+  await f.until(() => f.service.snapshot("thread").images[0]?.state === "error");
+  expect(f.service.snapshot("thread").images[0].error).toMatchObject({ code: "input_error", message: expect.stringContaining("32 MiB") });
+  const row = f.db.query("SELECT attempt_dir FROM inline_images").get() as { attempt_dir: string };
+  expect(await readdir(row.attempt_dir)).toEqual([]);
+  expect(calls).toBe(0);
+});
+
+test.each([true, false])("session deletion during provider completion cannot resurrect jobs, success=%s", async successful => {
+  let release!: () => void;
+  let started!: () => void;
+  const claimed = new Promise<void>(resolve => { started = resolve; });
+  const response = new Promise<void>(resolve => { release = resolve; });
+  const f = await fixture(async request => {
+    if (request.prompt === "Delete me") {
+      started(); await response;
+      return successful ? success() : { ok: false, error: { message: "Provider failed" } };
+    }
+    return success();
+  }, 1);
+  f.service.accept("thread", "deleted", '<pi-remote-image id="deleted" prompt="Delete me" />');
+  f.service.accept("other", "retained", '<pi-remote-image id="retained" prompt="Keep me" />');
+  await f.service.start();
+  await claimed;
+  f.db.query("DELETE FROM sessions WHERE id='thread'").run();
+  release();
+  await f.until(() => f.service.snapshot("other").images[0]?.state === "complete");
+  expect(f.service.snapshot("thread")).toEqual({ version: 0, images: [] });
+  expect(f.db.query("SELECT * FROM inline_image_messages WHERE session_id='thread'").all()).toEqual([]);
 });
 
 test("restart resumes queued rows but never resubmits a claimed provider attempt", async () => {

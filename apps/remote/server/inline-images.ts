@@ -52,6 +52,7 @@ export class InlineImages {
   accept(sessionId: string, messageKey: string, text: string) {
     if (!text.includes("<pi-remote-image")) return;
     const accepted = this.db.transaction(() => {
+      if (!this.db.query("SELECT 1 FROM sessions WHERE id=?").get(sessionId)) return false;
       if (this.db.query("SELECT 1 FROM inline_image_messages WHERE session_id=? AND message_key=?").get(sessionId, messageKey)) return false;
       this.db.query("INSERT INTO inline_image_messages VALUES(?,?)").run(sessionId, messageKey);
       for (const tag of parseInlineImageTags(text)) {
@@ -113,12 +114,22 @@ export class InlineImages {
     const row = this.db.query("SELECT value FROM inline_images WHERE session_id=? AND image_id=?").get(sessionId, id) as { value: string } | null;
     return row ? JSON.parse(row.value) : null;
   }
-  private save(sessionId: string, image: InlineImage, attemptDir?: string) {
-    this.db.transaction(() => {
-      this.db.query(`INSERT INTO inline_images(session_id,image_id,value,attempt_dir) VALUES(?,?,?,?)
+  private save(sessionId: string, image: InlineImage, attemptDir?: string): boolean {
+    return this.db.transaction(() => {
+      const result = this.db.query(`INSERT INTO inline_images(session_id,image_id,value,attempt_dir)
+        SELECT ?,?,?,? WHERE EXISTS(SELECT 1 FROM sessions WHERE id=?)
         ON CONFLICT(session_id,image_id) DO UPDATE SET value=excluded.value,attempt_dir=COALESCE(excluded.attempt_dir,inline_images.attempt_dir)`)
-        .run(sessionId, image.id, JSON.stringify({ ...image, updatedAt: time() }), attemptDir ?? null);
+        .run(sessionId, image.id, JSON.stringify({ ...image, updatedAt: time() }), attemptDir ?? null, sessionId);
+      if (!result.changes) return false;
       this.db.query(`INSERT INTO inline_image_versions VALUES(?,1) ON CONFLICT(session_id) DO UPDATE SET version=version+1`).run(sessionId);
+      return true;
+    })();
+  }
+  private finish(sessionId: string, id: string, result: Partial<InlineImage>) {
+    if (this.stopped || !this.isOwner()) return;
+    this.db.transaction(() => {
+      const image = this.get(sessionId, id);
+      if (image?.state === "generating") this.save(sessionId, { ...image, ...result });
     })();
   }
   private fail(sessionId: string, image: InlineImage, code: InlineImageErrorCode, message: string) {
@@ -186,7 +197,7 @@ export class InlineImages {
         const key = `${row.session_id}:${image.id}`;
         const directory = join(this.root, hash(row.session_id), image.id);
         // A durable claim precedes even auth/input preparation. Uncertainty never resubmits.
-        this.save(row.session_id, { ...image, state: "generating" }, directory);
+        if (!this.save(row.session_id, { ...image, state: "generating" }, directory)) continue;
         this.active.set(key, controller);
         void this.run(row.session_id, image, directory, controller.signal).finally(() => {
           this.active.delete(key);
@@ -204,27 +215,30 @@ export class InlineImages {
       await syncDirectory(this.root);
       await mkdir(directory, { mode: 0o700 });
       await syncDirectory(parent);
+      const sources = await Promise.all(image.refs.map(async ref => {
+        const path = ref.startsWith("/") ? ref : this.get(sessionId, ref)?.path;
+        if (!path) throw new Error(`Missing completed image ${ref}`);
+        const info = await stat(path);
+        if (!info.isFile()) throw new Error(`Invalid image reference: ${ref}`);
+        return { path, size: info.size };
+      }));
+      if (sources.reduce((total, source) => total + source.size, 0) > 32 * 1024 * 1024) throw new Error("Image inputs exceed 32 MiB");
       const inputs: string[] = [];
       let totalBytes = 0;
-      for (let i = 0; i < image.refs.length; i++) {
-        const ref = image.refs[i];
-        const source = ref.startsWith("/") ? ref : this.get(sessionId, ref)?.path;
-        if (!source) throw new Error(`Missing completed image ${ref}`);
+      for (let i = 0; i < sources.length; i++) {
         // Snapshot external inputs once. The job owns their bytes even if the source is edited later.
-        const info = await stat(source);
-        if (!info.isFile() || info.size + totalBytes > 32 * 1024 * 1024) throw new Error(`Invalid image reference or inputs exceed 32 MiB: ${ref}`);
         const target = join(directory, `input-${i}`);
-        const bytes = await readFile(source, { signal });
+        const bytes = await readFile(sources[i].path, { signal });
         totalBytes += bytes.length;
         if (totalBytes > 32 * 1024 * 1024) throw new Error("Image inputs exceed 32 MiB");
         await durableFile(target, bytes);
         inputs.push(target);
       }
       signal.throwIfAborted();
-      if (!this.isOwner()) return;
+      if (!this.isOwner() || !this.get(sessionId, image.id)) return;
       const result = await this.generate({ prompt: image.prompt, inputPaths: inputs }, AbortSignal.any([signal, AbortSignal.timeout(300_000)]));
       if (!result.ok) {
-        if (!this.stopped && this.isOwner()) this.fail(sessionId, this.get(sessionId, image.id)!, "provider_error", result.error.message);
+        this.finish(sessionId, image.id, { state: "error", waitingFor: [], error: problem("provider_error", result.error.message) });
         return;
       }
       providerCompleted = true;
@@ -243,10 +257,10 @@ export class InlineImages {
       await durableFile(join(directory, "receipt.writing"), JSON.stringify({ ...receipt, hashes }));
       await rename(join(directory, "receipt.writing"), join(directory, "receipt.json"));
       await syncDirectory(directory);
-      if (!this.stopped && this.isOwner()) this.save(sessionId, { ...this.get(sessionId, image.id)!, ...receipt, state: "complete", error: null });
+      this.finish(sessionId, image.id, { ...receipt, state: "complete", error: null });
     } catch (error) {
-      if (!this.stopped && this.isOwner()) this.fail(sessionId, this.get(sessionId, image.id)!, providerCompleted ? "publication_error" : "input_error",
-        `${error instanceof Error ? error.message : String(error)}. Artifacts: ${directory}. No automatic retry was made.`);
+      this.finish(sessionId, image.id, { state: "error", waitingFor: [], error: problem(providerCompleted ? "publication_error" : "input_error",
+        `${error instanceof Error ? error.message : String(error)}. Artifacts: ${directory}. No automatic retry was made.`) });
     }
   }
   private async recover(directory: string): Promise<Pick<InlineImage, "path" | "paths" | "model" | "responseId"> | null> {
