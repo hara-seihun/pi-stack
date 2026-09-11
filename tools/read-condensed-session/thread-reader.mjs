@@ -64,7 +64,7 @@ function entryTime(entry) {
   return timestampMs(entry?.message?.timestamp ?? entry?.timestamp);
 }
 
-function renderEntry(entry, options) {
+export function renderEntry(entry, options) {
   if (entry.type === "compaction") {
     const summary = String(entry.summary ?? "").trim();
     return `\n[${stamp(entry.timestamp)}] compaction${summary ? `\n${summary}` : ""}`;

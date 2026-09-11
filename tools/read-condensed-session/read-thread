@@ -5,6 +5,7 @@ import { join, resolve } from "node:path";
 import { DatabaseSync } from "node:sqlite";
 import { takeFlag, takeOption } from "../shared/arguments.mjs";
 import { listThreads, renderSupervisorRecords, renderThread, resolveThread } from "./thread-reader.mjs";
+import { subagentPage, threadPage } from "./thread-pages.mjs";
 
 const HELP = `usage: read-thread [OPTIONS] [THREAD]
 
@@ -13,6 +14,14 @@ THREAD may be a title, UUID, or unique UUID prefix. With no THREAD, list threads
 
 options:
   --list             list threads, newest first
+  --subagents        list direct children of THREAD as JSON, by most recent message
+  --include-idle     include settled and archived children, not only active ones
+  --json             read paginated conversation/actions as JSON; --work adds tool results
+  --limit N          page size, default 20 children or 10 transcript entries
+  --cursor CURSOR    nextCursor from the preceding page
+  --entry ID         read the full text of one transcript entry in chunks
+  --offset N         character offset within --entry, default 0
+  --max-chars N      characters per entry chunk, default 16000, maximum 48000
   --path             print only the exact Pi session JSONL path
   --work             include bounded thinking and successful tool results
   --since TIMESTAMP  include entries at or after this ISO timestamp
@@ -44,6 +53,14 @@ function main() {
     return;
   }
   const list = takeFlag(args, "--list");
+  const subagents = takeFlag(args, "--subagents");
+  const includeIdle = takeFlag(args, "--include-idle");
+  const json = takeFlag(args, "--json");
+  const limitOption = takeOption(args, "--limit");
+  const cursor = takeOption(args, "--cursor");
+  const entryId = takeOption(args, "--entry");
+  const offsetOption = takeOption(args, "--offset");
+  const maxCharsOption = takeOption(args, "--max-chars");
   const pathOnly = takeFlag(args, "--path");
   const work = takeFlag(args, "--work");
   const sinceOption = takeOption(args, "--since");
@@ -56,6 +73,12 @@ function main() {
   if (pathOnly && (work || sinceOption !== undefined || tailOption !== undefined || output)) {
     throw new Error("--path cannot be combined with transcript options");
   }
+  if ((subagents || json) && (list || pathOnly || sinceOption !== undefined || tailOption !== undefined || output)) throw new Error("Paged reads cannot be combined with --list, --path, --since, --tail or --output");
+  if (includeIdle && !subagents) throw new Error("--include-idle requires --subagents");
+  if ((limitOption !== undefined || cursor || entryId || offsetOption !== undefined || maxCharsOption !== undefined) && !subagents && !json) throw new Error("Page options require --json or --subagents");
+  if (subagents && (entryId || offsetOption !== undefined || maxCharsOption !== undefined)) throw new Error("Entry options require a transcript read");
+  if ((offsetOption !== undefined || maxCharsOption !== undefined) && !entryId) throw new Error("Chunk options require --entry");
+  if (entryId && cursor) throw new Error("Choose --entry or --cursor");
   const since = sinceOption === undefined ? undefined : Date.parse(sinceOption);
   if (sinceOption !== undefined && !Number.isFinite(since)) throw new Error("--since must be an ISO timestamp");
   const tail = tailOption === undefined ? undefined : positiveInteger(tailOption, "--tail");
@@ -63,11 +86,22 @@ function main() {
   const db = new DatabaseSync(dbPath, { readOnly: true });
   try {
     const rows = db.prepare("SELECT id,name,session_path,state,updated_at,archived_at FROM sessions ORDER BY updated_at DESC").all();
-    if (list || args.length === 0) {
+    if (list || (args.length === 0 && !subagents && !json)) {
       console.log(listThreads(rows));
       return;
     }
-    const row = resolveThread(rows, args[0]);
+    const selector = args[0] ?? (subagents ? process.env.PI_REMOTE_SESSION_ID : undefined);
+    if (!selector) throw new Error("A thread title or ID is required");
+    const row = resolveThread(rows, selector);
+    if (subagents || json) {
+      const limit = limitOption === undefined ? undefined : positiveInteger(limitOption, "--limit");
+      const page = subagents ? subagentPage(db, row.id, { includeIdle, limit, cursor })
+        : threadPage(db, row, { includeTools: work, limit, cursor, entryId,
+          offset: offsetOption === undefined ? undefined : Number(offsetOption),
+          maxChars: maxCharsOption === undefined ? undefined : positiveInteger(maxCharsOption, "--max-chars") });
+      console.log(JSON.stringify(page));
+      return;
+    }
     const hasSession = row.session_path && existsSync(row.session_path);
     if (pathOnly) {
       if (!hasSession) throw new Error(`thread ${JSON.stringify(row.name)} has no Pi session file; omit --path to inspect its supervisor records`);

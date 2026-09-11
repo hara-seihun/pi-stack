@@ -14,7 +14,7 @@ describe("thread lifecycle context", () => {
         process.env.PI_SUBAGENT_MODEL = model;
         const tools: string[] = [];
         registerThreadTools({ registerTool: (tool: { name: string }) => tools.push(tool.name) } as any);
-        expect(tools).toEqual(["thread_thinking"]);
+        expect(tools).toEqual(["thread_thinking", "thread_read", "thread_subagents"]);
       }
     } finally {
       if (previous === undefined) delete process.env.PI_SUBAGENT_MODEL;
@@ -73,7 +73,7 @@ describe("thread lifecycle context", () => {
         else process.env[key] = value;
       }
       threadContext(pi as any);
-      expect(tools).toEqual(remote ? ["thread_thinking", "thread_delegate"] : []);
+      expect(tools).toEqual(remote ? ["thread_thinking", "thread_read", "thread_subagents", "thread_delegate"] : []);
       const result = await handlers.get("before_agent_start")!(
         { prompt: "Help", systemPrompt: "System" },
         { sessionManager: { getBranch: () => [{ type: "message", message: { role: "user" } }] } },

@@ -14,6 +14,24 @@ read-thread --output /tmp/thread.md "Cayley CI review"
 
 The default view omits assistant thinking and successful tool results. `--work` includes both with per-block size limits. `--since` and `--tail` bound long sessions. `--path` prints the exact JSONL path when direct inspection is useful. The command reads `$PI_REMOTE_DATA/supervisor.sqlite3`, which Pi Remote supplies to every model process, so it selects the correct local or Converge thread store without a hard-coded personal path. In an SSH shell, it reads the current Unix user's `PI_REMOTE_DATA` from `/var/lib/pi-remote/persons/<user>.json`. If a request failed before Pi wrote a session file, the reader displays the supervisor's retained requests and events, explicitly labelled as supervisor records. `--path` still requires an existing JSONL.
 
+## Native thread tools and pages
+
+Pi Remote registers `thread_read` and `thread_subagents` for coordinators and children. Both call this reader locally without inference. Children can inspect threads but cannot delegate.
+
+`thread_subagents` accepts `thread`, `includeIdle`, `limit` and `cursor`. The default thread is the caller, the default limit is 20, and idle inclusion defaults to false. It lists direct children by their latest user or assistant message, not by runtime heartbeats or title updates. `includeIdle: true` includes settled and archived children. Each row includes its transcript ID, model, state and last-message time. The frontend still shows only active children. `nextCursor` continues a bounded snapshot with the same thread and idle filter.
+
+`thread_read` accepts a title, UUID or unique prefix in `thread`. Its default page contains the latest ten visible transcript entries, in chronological order within that page. `includeTools` defaults to true. `nextCursor` reads the preceding page on the same active branch. New messages do not shift an ongoing read. A changed branch produces an explicit restart error. Deliberation is omitted from these pages. A preview marked `truncated` supplies `entryId`; reading that entry with `offset` and `maxChars` returns `nextOffset` until every character has been read. Threads without a Pi session file return labelled supervisor events.
+
+The same operations are available from the shell:
+
+```bash
+read-thread --subagents --include-idle --limit 20 THREAD
+read-thread --subagents --include-idle --cursor CURSOR THREAD
+read-thread --json --work --limit 10 THREAD
+read-thread --json --work --cursor CURSOR THREAD
+read-thread --json --work --entry ENTRY --offset 0 --max-chars 16000 THREAD
+```
+
 ## Model-assisted condensation
 
 `read-condensed-session` is for a session whose local transcript remains too large after selecting a useful window. It avoids raw JSONL, signatures, and abandoned branches, but it makes model calls on cache misses and is not the default thread reader.

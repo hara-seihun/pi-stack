@@ -1,4 +1,6 @@
 import { createHash } from "node:crypto";
+import { execFile } from "node:child_process";
+import { promisify } from "node:util";
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 import { StringEnum } from "@earendil-works/pi-ai";
 import { Type } from "typebox";
@@ -7,6 +9,17 @@ import { API } from "./api";
 
 export const THREAD_THINKING_LEVELS = ["off", "minimal", "low", "medium", "high", "xhigh", "max"] as const;
 const result = (value: unknown) => ({ content: [{ type: "text" as const, text: JSON.stringify(value) }], details: value });
+
+const execReader = promisify(execFile);
+async function readThread(args: string[], signal?: AbortSignal) {
+  try {
+    const { stdout } = await execReader("read-thread", args, { signal, timeout: 15_000, maxBuffer: 2_000_000 });
+    return result(JSON.parse(stdout));
+  } catch (cause) {
+    const failure = cause as Error & { stderr?: string };
+    return { ...result({ error: failure.stderr?.trim() || failure.message }), isError: true };
+  }
+}
 
 export function registerThreadTools(pi: ExtensionAPI) {
   pi.registerTool({
@@ -17,6 +30,50 @@ export function registerThreadTools(pi: ExtensionAPI) {
     async execute(_id, params) {
       pi.setThinkingLevel(params.level);
       return result({ thinkingLevel: pi.getThinkingLevel() });
+    },
+  });
+
+  pi.registerTool({
+    name: "thread_read",
+    label: "Read a thread",
+    description: "Read another agent's conversation and actions without a model call. Accepts a title, UUID or unique ID prefix, including settled threads. Starts at the newest page; nextCursor reads older entries. Truncated entries can be read completely with entryId and successive nextOffset values. Deliberation is omitted.",
+    parameters: Type.Object({
+      thread: Type.String({ minLength: 1 }),
+      includeTools: Type.Optional(Type.Boolean({ description: "Include tool results. Defaults to true." })),
+      limit: Type.Optional(Type.Integer({ minimum: 1, maximum: 20 })),
+      cursor: Type.Optional(Type.String()),
+      entryId: Type.Optional(Type.String()),
+      offset: Type.Optional(Type.Integer({ minimum: 0 })),
+      maxChars: Type.Optional(Type.Integer({ minimum: 1, maximum: 48000 })),
+    }),
+    async execute(_id, params, signal) {
+      const args = ["--json"];
+      if (params.includeTools !== false) args.push("--work");
+      for (const [key, value] of Object.entries({ limit: params.limit, cursor: params.cursor, entry: params.entryId, offset: params.offset, "max-chars": params.maxChars })) {
+        if (value !== undefined) args.push(`--${key}`, String(value));
+      }
+      args.push(params.thread);
+      return readThread(args, signal);
+    },
+  });
+
+  pi.registerTool({
+    name: "thread_subagents",
+    label: "List a thread's subagents",
+    description: "List a thread's direct subagents, sorted by most recent user or assistant message. Defaults to this thread and active children only. includeIdle also returns settled and archived children with their transcript IDs. nextCursor continues the same snapshot; use the same thread and includeIdle value on later pages.",
+    parameters: Type.Object({
+      thread: Type.Optional(Type.String({ minLength: 1 })),
+      includeIdle: Type.Optional(Type.Boolean()),
+      limit: Type.Optional(Type.Integer({ minimum: 1, maximum: 100 })),
+      cursor: Type.Optional(Type.String()),
+    }),
+    async execute(_id, params, signal) {
+      const args = ["--subagents"];
+      if (params.includeIdle) args.push("--include-idle");
+      if (params.limit !== undefined) args.push("--limit", String(params.limit));
+      if (params.cursor) args.push("--cursor", params.cursor);
+      args.push(params.thread ?? process.env.PI_REMOTE_SESSION_ID!);
+      return readThread(args, signal);
     },
   });
 
