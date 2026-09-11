@@ -50,6 +50,23 @@ test("runner rejects excess residency and admits again after one session closes"
   expect(second.pid).toBe(first.pid);
 });
 
+test("coordinator reserve admits priority work after leaf residency fills",async()=>{
+  const options=fixture(6);
+  for (const sessionId of ["leaf1","leaf2"]) transports.push(await startRuntimeHost({...options,sessionId,onOutput(){}}));
+  await expect(startRuntimeHost({...options,sessionId:"leaf3",onOutput(){}})).rejects.toThrow("Runner capacity busy");
+  const coordinator=await startRuntimeHost({...options,sessionId:"coordinator",priority:true,onOutput(){}});transports.push(coordinator);
+  expect(coordinator.pid).toBe(transports[0]!.pid);
+});
+
+test("repeated open rejoins the same session without consuming another slot",async()=>{
+  const options=fixture(1);
+  const first=await startRuntimeHost({...options,sessionId:"stable",onOutput(){}});
+  first.detach();
+  const resumed=await startRuntimeHost({...options,sessionId:"stable",onOutput(){}});transports.push(resumed);
+  expect(resumed.socketPath).toBe(first.socketPath);
+  expect(resumed.pid).toBe(first.pid);
+});
+
 test("shared sessions fit Linux sockets under production-length encrypted data paths",async()=>{
   const options=fixture();
   options.data=join(options.data,"hara",".pi-remote");mkdirSync(options.data,{recursive:true});

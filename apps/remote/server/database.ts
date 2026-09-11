@@ -145,7 +145,7 @@ CREATE TABLE IF NOT EXISTS metadata (
 );
 `);
   const sessionColumns = new Set((db.query("PRAGMA table_info(sessions)").all() as any[]).map((column) => String(column.name)));
-  for (const [name, type] of [["initial_provider", "TEXT"], ["current_provider", "TEXT"], ["initial_model", "TEXT"], ["initial_thinking", "TEXT"], ["meeting_id", "TEXT"], ["revision", "INTEGER NOT NULL DEFAULT 0"], ["service_tier", "TEXT NOT NULL DEFAULT 'default'"], ["bash_timeout_seconds", `INTEGER NOT NULL DEFAULT ${DEFAULT_BASH_TIMEOUT_SECONDS}`], ["archived_at", "TEXT"], ["display_order", "INTEGER NOT NULL DEFAULT 0"]]) {
+  for (const [name, type] of [["initial_provider", "TEXT"], ["current_provider", "TEXT"], ["initial_model", "TEXT"], ["initial_thinking", "TEXT"], ["meeting_id", "TEXT"], ["revision", "INTEGER NOT NULL DEFAULT 0"], ["service_tier", "TEXT NOT NULL DEFAULT 'default'"], ["bash_timeout_seconds", `INTEGER NOT NULL DEFAULT ${DEFAULT_BASH_TIMEOUT_SECONDS}`], ["archived_at", "TEXT"], ["display_order", "INTEGER NOT NULL DEFAULT 0"], ["admission_priority", "INTEGER NOT NULL DEFAULT 0"]]) {
     if (!sessionColumns.has(name)) db.exec(`ALTER TABLE sessions ADD COLUMN ${name} ${type}`);
   }
   if (!sessionColumns.has("named_at_message_count")) {

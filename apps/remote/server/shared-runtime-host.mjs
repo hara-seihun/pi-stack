@@ -11,7 +11,7 @@ const { openSession } = await import(process.env.PI_REMOTE_SESSION_FACTORY || '.
 const sessions = new Map();
 let stopping = false;
 let idleTimer;
-const MAX_SESSIONS = Number(process.env.PI_REMOTE_MAX_ACTIVE_RUNTIMES || 8);
+const MAX_SESSIONS = Number(process.env.PI_REMOTE_MAX_ACTIVE_RUNTIMES || 64);
 const MAX_RSS = Number(process.env.PI_REMOTE_RUNNER_MAX_RSS_MB || 6144) * 1024 * 1024;
 
 function lines(socket, onLine) {
@@ -27,7 +27,8 @@ function reply(socket, value) { if (socket.writable) socket.write(JSON.stringify
 async function open(options) {
   if (stopping) throw new Error('Runner is stopping');
   if (sessions.has(options.socketPath)) return;
-  if (sessions.size >= MAX_SESSIONS || process.memoryUsage().rss >= MAX_RSS || underMemoryPressure()) throw new Error('Runner capacity busy; work remains queued');
+  const limit = options.priority ? MAX_SESSIONS : Math.max(1, MAX_SESSIONS - 4);
+  if (sessions.size >= limit || process.memoryUsage().rss >= MAX_RSS || underMemoryPressure()) throw new Error('Runner capacity busy; work remains queued');
   clearTimeout(idleTimer);
   const {socketPath} = options;
   if (existsSync(socketPath)) throw new Error('Session socket already exists');
@@ -112,7 +113,7 @@ const server = createServer(socket => {
   lines(socket, value => {
     if (value.type === 'open') void open(value.options).then(() => reply(socket,{ok:true,pid:process.pid}),error => reply(socket,{error:String(error)}));
     else if (value.type === 'close') void Promise.resolve(sessions.get(value.socketPath)?.close()).then(() => reply(socket,{ok:true}));
-    else if (value.type === 'status') reply(socket,{ok:true,pid:process.pid,sessions:sessions.size,sessionIds:[...sessions.values()].map(session=>session.id),rss:process.memoryUsage().rss});
+    else if (value.type === 'status') reply(socket,{ok:true,pid:process.pid,sessions:sessions.size,sessionIds:[...sessions.values()].map(session=>session.id),maxSessions:MAX_SESSIONS,rss:process.memoryUsage().rss});
   });
 });
 server.on('error', error => { if (error.code === 'EADDRINUSE') process.exit(0); throw error; });

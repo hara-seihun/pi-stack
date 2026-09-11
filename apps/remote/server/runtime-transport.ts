@@ -146,6 +146,7 @@ export async function attachRuntimeHost(socketPath: string, onOutput: RuntimeOut
 export async function startCommandRuntimeHost(options: {
   data: string;
   sessionId: string;
+  priority?: boolean;
   cwd: string;
   args: string[];
   env: Record<string, string | undefined>;
@@ -225,7 +226,12 @@ export async function startRuntimeHost(options: StartOptions): Promise<RuntimeTr
   let starting = runnerStarts.get(control);
   if (!starting) {
     starting = (async () => {
-      if (existsSync(control)) { try { await runnerRequest(control, {type:"status"}); return; } catch {} }
+      if (existsSync(control)) {
+        try { await runnerRequest(control, {type:"status"}); return; }
+        catch (error: any) {
+          if (!["ECONNREFUSED", "ENOENT"].includes(error.code)) throw new Error(`Runner capacity busy: ${error.message}`);
+        }
+      }
       try { unlinkSync(control); } catch {}
       const env = {...options.env};
       for (const key of Object.keys(env)) if (/^(PI_REMOTE_SESSION_ID|PI_REMOTE_CONTEXT_OWNER_PID|PI_SUBAGENT_MODEL|PI_REMOTE_MEETING_ID|PI_REMOTE_SERVICE_TIER_FILE)$/.test(key)) delete env[key];
@@ -246,8 +252,15 @@ export async function startRuntimeHost(options: StartOptions): Promise<RuntimeTr
   options.signal?.throwIfAborted();
   // Linux sockaddr_un allows 107 pathname bytes. Full thread + launch UUIDs
   // exceed that under a real person's encrypted data directory in Node.
-  const socketPath = join(options.data, "runtime-hosts", `${crypto.randomUUID()}.sock`);
-  await runnerRequest(control, {type:"open",options:{socketPath,sessionId:options.sessionId,cwd:options.cwd,args:options.args,env:options.env}});
+  const socketPath = join(options.data, "runtime-hosts", `${generation}.${createHash("sha256").update(options.sessionId).digest("hex").slice(0, 20)}.sock`);
+  try {
+    await runnerRequest(control, {type:"open",options:{socketPath,sessionId:options.sessionId,priority:options.priority,cwd:options.cwd,args:options.args,env:options.env}});
+  } catch (error: any) {
+    // A timed-out open may already own a live session. Retrying the same socket
+    // rejoins it rather than creating an unclaimed sibling.
+    if (error.message === "Shared runner control timed out") throw new Error(`Runner capacity busy: ${error.message}`);
+    throw error;
+  }
   const connected = await connectHost(socketPath, options.onOutput, CONNECT_TIMEOUT_MS);
   if ("error" in connected) {
     await runnerRequest(control, {type:"close",socketPath}).catch(() => {});

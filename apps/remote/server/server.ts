@@ -23,6 +23,7 @@ import { liveDevInstructions } from "./skills";
 import { THREAD_THINKING_LEVELS } from "./thread-tools";
 import { defaultThreadDestinations, type ThreadDestination } from "./thread-model-defaults";
 import { attachRuntimeHost, startRuntimeHost, type RuntimeTransport } from "./runtime-transport";
+import { RuntimeAdmission } from "./runtime-admission";
 import { API } from "./api";
 import { idleNotifications } from "./notifications";
 import { listPersons, publicPerson } from "./persons";
@@ -1399,6 +1400,7 @@ async function startRuntime(row: any): Promise<Runtime> {
       sessionId: row.id,
       cwd,
       args,
+      priority: admissionPriority(row.id) > 0,
       env: runtimeEnvironment(row),
       signal: rt.startupAbort.signal,
       onOutput: (line) => handleRuntimeOutput(row.id, rt, line),
@@ -1528,6 +1530,12 @@ async function reapUnclaimedRuntimeHosts() {
   }));
 }
 
+const runtimeAdmission = new RuntimeAdmission();
+function admissionPriority(id: string): number {
+  const row = sessionRow.get(id) as any;
+  return row?.admission_priority ? 2 : subagentIdentity(id) ? 0 : 1;
+}
+
 async function activate(row: any): Promise<Runtime> {
   await runtimeAdoption;
   const current = sessionRow.get(row.id) as any;
@@ -1537,7 +1545,11 @@ async function activate(row: any): Promise<Runtime> {
   if (inProgress) return inProgress;
   const existing = runtimes.get(row.id);
   if (existing) return existing;
-  const activation = startRuntime(row).finally(() => {
+  const activation = runtimeAdmission.admit(() => admissionPriority(row.id), async () => {
+    const current = sessionRow.get(row.id) as any;
+    if (!current || current.archived_at) throw new Error("Activation cancelled");
+    return startRuntime(current);
+  }).finally(() => {
     activations.delete(row.id);
   });
   activations.set(row.id, activation);
@@ -2612,7 +2624,7 @@ const server = Bun.serve({
       ["unarchive", API.unarchiveSession], ["prompt", API.sessionPrompt], ["fork", API.sessionFork], ["abort", API.sessionAbort],
       ["events", API.sessionEvents], ["context", API.sessionContext], ["context", API.patchSessionContext],
       ["context", API.replaceSessionContext], ["settings", API.sessionSettings], ["settings", API.updateSessionSettings],
-      ["commands", API.sessionCommands], ["command", API.sessionCommand],
+      ["commands", API.sessionCommands], ["command", API.sessionCommand], ["admission", API.sessionAdmission],
     ];
     const sessionMatch = sessionRoutes.map(([action, route]) => ({ action, params: route.match(req.method, url.pathname) }))
       .find((candidate) => candidate.params !== null);
@@ -2658,6 +2670,16 @@ const server = Bun.serve({
     }
     if (row.archived_at && action !== "events" && !(action === "context" && req.method === "GET"))
       return error("Thread is archived; unarchive it before continuing", 409);
+    if (action === "admission" && req.method === "PUT") {
+      const body = await readBody(req);
+      if (typeof body.priority !== "boolean") return error("priority must be a boolean", 400);
+      db.query("UPDATE sessions SET admission_priority=?,updated_at=?,revision=revision+1 WHERE id=?")
+        .run(body.priority ? 1 : 0, now(), id);
+      db.query("UPDATE work_items SET available_at=? WHERE session_id=? AND state='queued'")
+        .run(Date.now(), id);
+      kickSession(id);
+      return json({ sessionId: id, priority: body.priority, state: (sessionRow.get(id) as any).state });
+    }
     if (action === "context" && req.method === "GET") {
       const stored = storedContext(id);
       const hash = stored?.hash ?? "empty";
