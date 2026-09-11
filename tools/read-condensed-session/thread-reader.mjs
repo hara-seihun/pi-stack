@@ -64,7 +64,7 @@ function entryTime(entry) {
   return timestampMs(entry?.message?.timestamp ?? entry?.timestamp);
 }
 
-function renderEntry(entry, options) {
+export function renderEntry(entry, options) {
   if (entry.type === "compaction" || entry.type === "branch_summary") {
     const summary = String(entry.summary ?? "").trim();
     return `\n[${stamp(entry.timestamp)}] ${entry.type}${summary ? `\n${summary}` : ""}`;

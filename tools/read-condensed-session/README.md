@@ -30,6 +30,29 @@ Stored JSONL is the history source of truth. Compaction changes model context, n
 
 [`contract.mjs`](contract.mjs) owns the reader's command syntax, option descriptions and exported `HISTORY_MARKER`, `pi-stored-jsonl-history`. It generates `read-thread --help`; `read-thread --contract` emits the same contract as JSON without resolving any session or database. The shared Pi package reads that contract once per extension instance and adds generated JSON metadata containing it and the current session file. The metadata stays byte-identical while the branch advances; it changes only when the session file or loaded contract changes. It contains command facts, not a separate behavioral prompt. An incompatible native compaction checkpoint does not replace the stored history authority: its notice identifies checkpoint availability, while the retained tail and raw JSONL remain accessible.
 
+## Native thread tools and pages
+
+Pi Remote registers `thread_read` and `thread_subagents` for coordinators and children. Both call this reader locally without inference. Children can inspect threads but cannot delegate.
+
+`thread_subagents` accepts `thread`, `includeIdle`, `limit` and `cursor`. The default thread is the caller, the default limit is 20, and idle inclusion defaults to false. It lists direct children by their latest user or assistant message, not by runtime heartbeats or title updates. `includeIdle: true` includes settled and archived children. Each row includes its transcript ID, model, state and last-message time. The frontend still shows only active children. `nextCursor` continues a bounded snapshot with the same thread and idle filter.
+
+`thread_read` accepts a title, UUID or unique prefix in `thread`. Its default page contains the latest ten visible transcript entries, in chronological order within that page. `includeTools` defaults to true. `nextCursor` reads the preceding page on the same active branch. New messages do not shift an ongoing read. A changed branch produces an explicit restart error. Deliberation is omitted from these pages. A preview marked `truncated` supplies `entryId`; reading that entry with `offset` and `maxChars` returns `nextOffset` until every character has been read. Threads without a Pi session file return labelled supervisor events.
+
+The same operations are available from the shell:
+
+```bash
+read-thread --subagents --include-idle --limit 20 THREAD
+read-thread --subagents --include-idle --cursor CURSOR THREAD
+read-thread --json --work --limit 10 THREAD
+read-thread --json --work --cursor CURSOR THREAD
+read-thread --json --work --entry ENTRY --offset 0 --max-chars 16000 THREAD
+read-thread --json --work --limit 10 self
+```
+
+`--json` also accepts self or an explicit JSONL path without a Remote database. `--subagents` requires Remote discovery; an omitted selector or `self` uses `PI_REMOTE_SESSION_ID`. Shell JSON pages omit successful tool results unless `--work` is present, while the native `thread_read` tool includes them by default. Deliberation remains omitted from pages in either mode.
+
+`--limit` defaults to 10 transcript entries with a maximum of 20, or 20 children with a maximum of 100. Search retains its separate default of 20 matches and maximum of 50. `--offset` counts characters with `--json --entry` and matching records with `--search`. Paged reads reject search, raw/full output, alternate branch selection, time/tail filters and output-file flags instead of silently ignoring them. `--entry` chunks use `nextOffset`; ordinary pages use `nextCursor`.
+
 ## Model-assisted condensation
 
 `read-condensed-session` is for a session whose local transcript remains too large after selecting a useful window. It avoids raw JSONL, signatures, and abandoned branches, but it makes model calls on cache misses and is not the default thread reader.

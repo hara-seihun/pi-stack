@@ -40,7 +40,7 @@ A different model receives the factual `native-checkpoint-unavailable` notice, t
 
 Resume, forks, tree navigation and repeated compaction locate the latest compaction on the active branch. A first native compaction starts from Pi's effective context, including any existing summary and kept messages, rather than replaying an oversized raw transcript. Session JSONL remains the source of full historical text; there is no separate recall cache.
 
-Compaction failures cancel Pi's operation and leave the previous context intact. A malformed checkpoint or a missing/duplicated request marker aborts the request. Other extensions may add live context, but changing the checkpoint's retained boundary is rejected rather than silently deleting their messages. Nested compaction uses the current system prompt, tools and model options; it does not replay unrelated extensions' chat-only payload rewrites.
+Compaction failures cancel Pi's operation and leave the previous context intact. Failures and blocked checkpoint requests emit structured stderr diagnostics containing the concrete error, phase, session, account and model, including in headless and fleet modes. UI notifications are additional, not the diagnostic source. A malformed checkpoint or a missing/duplicated request marker aborts the request. Other extensions may add live context, but changing the checkpoint's retained boundary is rejected rather than silently deleting their messages. Nested compaction uses the current system prompt, tools and model options; it does not replay unrelated extensions' chat-only payload rewrites.
 
 ## Checks
 

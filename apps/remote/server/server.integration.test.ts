@@ -519,6 +519,9 @@ describe("web and supervisor integration", () => {
     expect(created.status).toBe(201);
     const child = created.value.session.id;
     expect(created.value.session.subagent).toEqual({ parentSessionId, model: "gpt-5.6-luna" });
+    const nested = await api("POST", "/v1/sessions", { requestId: crypto.randomUUID(), parentSessionId: child, task: "nested task", model: "astra" });
+    expect(nested.status).toBe(403);
+    expect(nested.value.error).toContain("Subagents cannot delegate");
     expect((await api("POST", "/v1/sessions", request)).value).toEqual(created.value);
     await waitFor(() => api("GET", `/v1/sessions/${parentSessionId}/events`).then((r) => r.value),
       (value) => value.events.some((e: any) => e.type === "user" && e.text.includes('"type":"thread_result"')));
@@ -554,6 +557,16 @@ describe("web and supervisor integration", () => {
     } finally { ledger.close(); }
     await waitFor(() => api("GET", "/v1/sessions").then((r) => r.value.sessions),
       (sessions) => sessions.filter((s: any) => [parentSessionId, child, escalated.value.session.id, ...extraChildren].includes(s.id)).every((s: any) => s.state === "IDLE"));
+    const finalMessage = { role: "assistant", content: [{ type: "text", text: "done" }] };
+    await api("PUT", `/v1/sessions/${child}/context`, {
+      capturedAt: Date.now(), context: { systemPrompt: "System", tools: [], messages: [finalMessage] },
+      finalizesMessage: messageFinalizationKey(finalMessage),
+    });
+    await waitFor(() => api("GET", `/v1/sessions/${child}`).then(r => r.value.session), s => s.state === "STOPPED");
+    expect((await api("GET", `/v1/sessions/${child}/context`)).value.context.messages).toEqual([finalMessage]);
+    const resumed = await api("POST", "/v1/sessions", { ...request, requestId: crypto.randomUUID(), threadId: child, task: "delegate resumed task" });
+    expect(resumed.status).toBe(200);
+    expect(resumed.value.session.id).toBe(child);
   });
   test("replays idle transitions without requiring a selected thread or a connected client", async () => {
     const initial = await api("GET", "/v1/notifications");

@@ -105,11 +105,16 @@ export function checkpointSummary(model, sessionFile) {
   ].join("\n");
 }
 
+export function reportDiagnostic(ctx, phase, error, reason) {
+  console.error(JSON.stringify({ component: "codex-compaction", phase, sessionId: ctx.sessionManager.getSessionId(), provider: ctx.model?.provider, model: ctx.model?.id, reason, error }));
+  ctx.ui.notify(`Codex ${phase}: ${error}`, "error");
+}
+
 export default function codexCompaction(pi) {
   const block = (ctx, error) => {
     // Throwing alone does not block: Pi logs extension-handler errors and continues.
     void ctx.abort();
-    ctx.ui.notify(`Codex checkpoint: ${error}`, "error");
+    reportDiagnostic(ctx, "request-blocked", error);
   };
   pi.on("context", (event, ctx) => {
     const result = checkpointContext(event.messages, ctx.sessionManager.getBranch(), ctx.model);
@@ -136,7 +141,7 @@ export default function codexCompaction(pi) {
     let result;
     try { result = await createCheckpoint(pi, ctx, event); } catch (error) { result = failure(error); }
     if (!result.ok) {
-      if (!event.signal.aborted) ctx.ui.notify(`Codex compaction failed: ${result.error}`, "error");
+      if (!event.signal.aborted) reportDiagnostic(ctx, "compaction-failed", result.error, event.reason);
       return { cancel: true };
     }
     return {

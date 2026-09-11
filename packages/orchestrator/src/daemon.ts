@@ -10,6 +10,7 @@ import { accountCapacity, assign, commitMeterAdmission } from "./policy.js";
 import { Store } from "./store.js";
 import { Fleet } from "./fleet.js";
 import { CompletionService } from "./completion.js";
+import { accountReservation, isAccountReservation, prioritizeReservedCompletions, reservationKey } from "./admission-reservation.js";
 import { COMPLETION_OPENAPI } from "./completion-openapi.js";
 import { reconcileCompletionReceipts } from "./host/completion-worker.js";
 import type { CompletionOutcome } from "./completion-contract.js";
@@ -124,11 +125,11 @@ export class Daemon {
         }
       }
       await this.refreshReadiness();
-      this.resumeCoordinators();
-      for(const run of this.store.admissionQueue()){
+      for(const run of prioritizeReservedCompletions(this.store,this.store.admissionQueue())){
         if(run.source==="lane"){this.store.trimQueuedLane(run.sourceId!,0);continue;}
         await this.launch(run);
       }
+      this.resumeCoordinators();
       await this.fillCapacity();
       const now=Date.now();
       for(const run of this.store.runs(["starting","running"])){
@@ -209,7 +210,7 @@ export class Daemon {
   private async launch(run:Run):Promise<boolean>{
     const fixed=this.store.fleetChild(run.id)?.assignment;
     const config=fixed?{...this.config,profiles:{...this.config.profiles,[run.profile]:[fixed]}}:this.config;
-    const choice=assign(this.store,run.profile,run.budget,config,Date.now());
+    const choice=assign(this.store,run.profile,run.budget,config,Date.now(),undefined,run.id);
     if(!choice.assignment){this.store.setControl(`refusal:${run.id}`,choice.refusals.map((r)=>`${r.accountId}: ${r.reason}`).join("; "));return false;}
     const unit=`pi-orchestrator-run-${run.id.replaceAll("-","")}`;
     if(!this.store.assignRun(run.id,{...choice.assignment,unit,releasePath:this.releasePath}))return false;
@@ -258,8 +259,8 @@ export class Daemon {
       if(this.unitIsActive(run.workerUnit))continue;
       if(this.store.activeLeases().length>=this.config.maxConcurrentSessions)return;
       const resumeConfig={...this.config,profiles:{...this.config.profiles,[run.profile]:[{provider:run.provider!,model:run.model!,thinking:run.thinking}]}};
-      const preferred=assign(this.store,run.profile,"force",resumeConfig,Date.now(),run.accountId);
-      const choice=preferred.assignment?preferred:assign(this.store,run.profile,"force",resumeConfig);
+      const preferred=assign(this.store,run.profile,"force",resumeConfig,Date.now(),run.accountId,run.id);
+      const choice=preferred.assignment?preferred:assign(this.store,run.profile,"force",resumeConfig,Date.now(),undefined,run.id);
       if(!choice.assignment){this.store.setControl(`refusal:${run.id}`,choice.refusals.map(refusal=>`${refusal.accountId}: ${refusal.reason}`).join("; "));continue;}
       if(!this.store.resumeAssignedRun(run.id,Date.now(),choice.assignment.accountId))continue;
       this.store.updateRun(run.id,{progressAt:Date.now()});
@@ -362,6 +363,21 @@ export class Daemon {
       // lapsed subscription or a login that needs replacing must leave the
       // schedulable pool without discarding the evidence needed to bring it
       // back. Removal is the destructive path and stays separate.
+      const reservationRoute=/^\/v1\/accounts\/([^/]+)\/reservation$/.exec(url.pathname);
+      if(reservationRoute){
+        const id=decodeURIComponent(reservationRoute[1]!);
+        if(method==="GET")return json(res,200,{reservation:accountReservation(this.store,id)??null});
+        if(method==="PUT"){
+          const input=await body(req);
+          if(!isAccountReservation(input))return json(res,400,{error:"Expected nonempty completion metadata string selectors and a reservation reason"});
+          this.store.setControl(reservationKey(id),JSON.stringify(input));
+          return json(res,200,{reservation:input});
+        }
+        if(method==="DELETE"){
+          this.store.setControl(reservationKey(id),"");
+          return json(res,200,{reservation:null});
+        }
+      }
       const accountEnabled=/^\/v1\/accounts\/([^/]+)\/enabled$/.exec(url.pathname);
       if(method==="PUT"&&accountEnabled){
         const id=decodeURIComponent(accountEnabled[1]!),account=this.store.account(id),input=await body(req);

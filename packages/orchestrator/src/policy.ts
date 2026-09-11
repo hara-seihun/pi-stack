@@ -1,4 +1,5 @@
 import { catalogMeter } from "./catalog.js";
+import { reservationMatchesRun } from "./admission-reservation.js";
 import { allowsAccountUse, type BudgetClass, type OrchestratorConfig, type ProfileCandidate } from "./domain.js";
 import type { Store } from "./store.js";
 
@@ -10,7 +11,7 @@ const HOUR=3_600_000;
 const HISTORY=6*HOUR;
 
 /** A ceiling for all consumers of one account, not a desired worker count. */
-export function accountCapacity(store:Store,accountId:string,budget:BudgetClass,cfg:OrchestratorConfig,now=Date.now()):Capacity{
+export function accountCapacity(store:Store,accountId:string,budget:BudgetClass,cfg:OrchestratorConfig,now=Date.now(),runId?:string):Capacity{
   const account=store.account(accountId)!;
   const multiplier=Number(store.control(`boost:${account.provider}`)??"1");
   const meters=store.latestMeters(accountId);
@@ -18,6 +19,7 @@ export function accountCapacity(store:Store,accountId:string,budget:BudgetClass,
   const meterAt=meters.length?Math.max(...meters.map((m)=>Number(m.observed_at))):undefined;
   const stop=(reason:string):Capacity=>({sessions:0,spent,meterAt,reason});
   if(!allowsAccountUse(account,"fleet"))return stop(account.enabled?"reserved for voice":"disabled");
+  if(account.reservation&&!reservationMatchesRun(store,account.reservation,runId))return stop(`reserved capacity: ${account.reservation.reason}`);
   if(account.cooldownUntil&&account.cooldownUntil>now)return stop("account cooling down");
   if(meters.some((m)=>m.used_percent>=100))return stop("provider quota exhausted");
   if(budget==="force")return{sessions:account.concurrency,spent,meterAt,reason:"urgent spend"};
@@ -68,14 +70,14 @@ export function accountCapacity(store:Store,accountId:string,budget:BudgetClass,
   return{sessions:boosted,spent,meterAt,reason:multiplier===1?reason:`${sessions} base × ${multiplier} = ${boosted} sessions; ${reason}`};
 }
 
-export function assign(store:Store,profile:string,budget:BudgetClass,cfg:OrchestratorConfig,now=Date.now(),pinnedAccount?:string):{assignment?:Assignment;refusals:Refusal[]}{
+export function assign(store:Store,profile:string,budget:BudgetClass,cfg:OrchestratorConfig,now=Date.now(),pinnedAccount?:string,runId?:string):{assignment?:Assignment;refusals:Refusal[]}{
   if(store.control("launches")==="paused")return{refusals:[{accountId:"*",reason:"emergency halt"}]};
   if(store.activeLeases(undefined,120_000,now).length>=cfg.maxConcurrentSessions)return{refusals:[{accountId:"*",reason:"machine session ceiling"}]};
   const candidates=cfg.profiles[profile];if(!candidates?.length)throw new Error(`unknown model profile ${profile}`);
   const refusals:Refusal[]=[];const choices:(Assignment&{spent:number})[]=[];
   for(const candidate of candidates){
     for(const account of store.accounts().filter((a)=>a.provider===candidate.provider&&(pinnedAccount===undefined||a.id===pinnedAccount))){
-      const capacity=accountCapacity(store,account.id,budget,cfg,now);
+      const capacity=accountCapacity(store,account.id,budget,cfg,now,runId);
       const active=store.activeLeases(account.id,120_000,now).length;
       if(active>=capacity.sessions){refusals.push({accountId:account.id,reason:`capacity ${active}/${capacity.sessions}: ${capacity.reason}`});continue;}
       const admitted=(store.db.prepare("SELECT last_admitted_meter_at FROM account WHERE id=?").get(account.id) as any)?.last_admitted_meter_at;

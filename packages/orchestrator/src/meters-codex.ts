@@ -280,56 +280,52 @@ export class CodexMeterSampler {
         continue;
       }
       this.attemptedAt.set(account.id, now);
-      const credential = await meterCredential(this.auth, account.id, this.requestTimeoutMs);
-      if (!credential.ok) {
-        reports.push({ accountId: account.id, outcome: credential.outcome, detail: credential.detail });
-        continue;
-      }
+      reports.push(...await this.sampleAccount(account.id, now));
+    }
+    return reports;
+  }
+
+  async sampleAccount(accountId: string, now = Date.now()): Promise<CodexSampleReport[]> {
+      const reports: CodexSampleReport[] = [];
+      const credential = await meterCredential(this.auth, accountId, this.requestTimeoutMs);
+      if (!credential.ok) return [{ accountId, outcome: credential.outcome, detail: credential.detail }];
       const chatgptAccountId = credential.credential.accountId;
-      if (typeof chatgptAccountId !== "string" || !chatgptAccountId) {
-        reports.push({ accountId: account.id, outcome: "credential-failed", detail: "missing ChatGPT account id" });
-        continue;
-      }
+      if (typeof chatgptAccountId !== "string" || !chatgptAccountId) return [{ accountId, outcome: "credential-failed", detail: "missing ChatGPT account id" }];
       let windows: CodexWindowUsage[];
       try {
-        windows = await this.read(account.id, credential.credential, chatgptAccountId, now);
+        windows = await this.read(accountId, credential.credential, chatgptAccountId, now);
       } catch (thrown) {
-        reports.push({ accountId: account.id, outcome: "request-failed", detail: String(thrown) });
-        continue;
+        return [{ accountId, outcome: "request-failed", detail: String(thrown) }];
       }
-      if (windows.length === 0) {
-        reports.push({ accountId: account.id, outcome: "unreadable-response" });
-        continue;
-      }
+      if (windows.length === 0) return [{ accountId, outcome: "unreadable-response" }];
       for (const usage of windows) {
         const meterId = this.meterFor(usage.windowSeconds);
         if (meterId === undefined) {
           reports.push({
-            accountId: account.id,
+            accountId,
             outcome: "unmapped-window",
             detail: `no meter declared for a ${Math.round(usage.windowSeconds / 3_600)}h window`,
           });
           continue;
         }
-        const previous = this.ledger.latestReading(account.id, meterId);
+        const previous = this.ledger.latestReading(accountId, meterId);
         const at = Date.now();
         if (previous && at < previous.at) {
-          reports.push({ accountId: account.id, meterId, outcome: "stale-reading" });
+          reports.push({ accountId, meterId, outcome: "stale-reading" });
           continue;
         }
-        this.ledger.recordReading(account.id, meterId, {
+        this.ledger.recordReading(accountId, meterId, {
           at,
           usedPercent: Math.round(Math.max(0, Math.min(100, usage.usedPercent))),
           resetAt: usage.resetAt,
         });
         reports.push({
-          accountId: account.id,
+          accountId,
           meterId,
           outcome: "recorded",
           usedPercent: usage.usedPercent,
         });
       }
-    }
     return reports;
   }
 }

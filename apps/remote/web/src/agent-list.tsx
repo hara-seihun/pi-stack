@@ -1,5 +1,5 @@
 import type { AgentHostStatus, AgentRun, Session } from "./types";
-import { activityColor, activityLabel } from "./agent-placement";
+import { activityColor, activityLabel, isActiveAgentRun, isActiveSubagent, subagentRoot } from "./agent-placement";
 
 export function AgentList({ runs, hosts, subagents, sessions, selectedRunId, selectedSessionId, onSelectRun, onSelectThread }: {
   runs: AgentRun[];
@@ -11,13 +11,15 @@ export function AgentList({ runs, hosts, subagents, sessions, selectedRunId, sel
   onSelectRun(id: string): void;
   onSelectThread(id: string): void;
 }) {
-  const parents = [...new Set(subagents.map(session => session.subagent!.parentSessionId))];
+  const active = subagents.filter(isActiveSubagent);
+  const roots = new Map(active.map(session => [session.id, subagentRoot(session, sessions)]));
+  const parents = [...new Set(roots.values())].sort((a, b) => a.localeCompare(b));
   return <div className="agent-list">
     {parents.map(parentId => {
       const parent = sessions.find(session => session.id === parentId);
-      const children = subagents.filter(session => session.subagent!.parentSessionId === parentId);
+      const children = active.filter(session => roots.get(session.id) === parentId);
       return <section key={parentId} aria-label={`Subagents of ${parent?.name || parentId}`}>
-        <div className="agent-host"><span>Thread subagents</span><span>{children.length}</span></div>
+        <div className="agent-host"><span>{parent?.name || "Thread subagents"}</span><span>{children.length} active</span></div>
         <button type="button" className="agent-parent" disabled={!parent} title={parentId} onClick={() => onSelectThread(parentId)}>Parent: {parent?.name || parentId}</button>
         {children.map(session => <button key={session.id} type="button" className={`agent-row grouped${!selectedRunId && selectedSessionId === session.id ? " selected" : ""}`} onClick={() => onSelectThread(session.id)} aria-label={`Open transcript: ${session.name}`}>
           <span className="agent-row-title"><span className="agent-row-task">{session.name}</span></span>
@@ -28,7 +30,7 @@ export function AgentList({ runs, hosts, subagents, sessions, selectedRunId, sel
       </section>;
     })}
     {hosts.map(host => {
-      const owned = runs.filter(run => run.host === host.key);
+      const owned = runs.filter(run => run.host === host.key && isActiveAgentRun(run));
       return <section key={host.key} aria-label={host.name}>
         <div className={`agent-host${host.error ? " failed" : ""}`}><span>{host.name}</span><span>{host.error ? "unreachable" : host.running}</span></div>
         {host.error && <div className="agent-empty">{host.error}</div>}
@@ -44,6 +46,6 @@ export function AgentList({ runs, hosts, subagents, sessions, selectedRunId, sel
         </div>)}
       </section>;
     })}
-    {!subagents.length && !hosts.length && <div className="agent-empty">No agents</div>}
+    {!active.length && !hosts.length && <div className="agent-empty">No agents</div>}
   </div>;
 }

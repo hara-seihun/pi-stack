@@ -1,7 +1,7 @@
 import { writeFileSync } from "node:fs";
 import { dirname, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
-import { COMMANDS } from "../dist/commands.js";
+import { ACCOUNT_USAGE, COMMANDS } from "../dist/commands.js";
 import { SCHEMA } from "../dist/store.js";
 
 const root=resolve(dirname(fileURLToPath(import.meta.url)),"..");
@@ -13,6 +13,12 @@ Run \`npm run docs --workspace=pi-orchestrator\` after changing commands or dura
 ## Commands
 
 ${COMMANDS.map(([name,summary])=>`- \`${name}\`: ${summary}.`).join("\n")}
+
+## Account operations
+
+\`\`\`text
+${ACCOUNT_USAGE}
+\`\`\`
 
 ## Durable tables
 

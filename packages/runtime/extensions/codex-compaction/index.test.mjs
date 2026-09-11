@@ -128,19 +128,22 @@ test("SSE observation handles split bytes, terminal-only output and rejects inco
   }
 });
 
-test("malformed checkpoints and missing payload markers abort rather than leaking reduced context", async () => {
+test("malformed checkpoints and missing payload markers abort rather than leaking reduced context", async t => {
+  const diagnostic = t.mock.method(console, "error", () => {});
   const f = fixture();
   codexCompaction(f.pi);
   f.sm.appendCompaction("checkpoint", f.first, 100, { kind: KIND, version: VERSION, modelKey: modelKey(model), replacementHistory: [item] });
   f.handlers.get("before_provider_request")({ payload: { input: [] } }, f.ctx);
   assert.equal(f.aborted, true);
   assert.match(f.notifications[0][0], /removed or duplicated/u);
+  assert.equal(JSON.parse(diagnostic.mock.calls[0].arguments[0]).phase, "request-blocked");
   f.sm.appendCompaction("broken", f.first, 100, { kind: KIND, version: VERSION, replacementHistory: [] });
   assert.equal(findCheckpoint(f.sm.getBranch()).ok, false);
   assert.equal(checkpointContext(buildSessionContext(f.sm.getBranch()).messages, f.sm.getBranch(), model).ok, false);
 });
 
-test("failed native compaction cancels Pi's operation and leaves session unchanged", async () => {
+test("failed native compaction cancels Pi's operation and leaves session unchanged", async t => {
+  const diagnostic = t.mock.method(console, "error", () => {});
   const f = fixture();
   codexCompaction(f.pi);
   const before = JSON.stringify(f.sm.getEntries());
@@ -148,8 +151,28 @@ test("failed native compaction cancels Pi's operation and leaves session unchang
   assert.deepEqual(await f.handlers.get("session_before_compact")(f.event, f.ctx), { cancel: true });
   assert.equal(JSON.stringify(f.sm.getEntries()), before);
   assert.match(f.notifications[0][0], /401 token expired/u);
+  const record = JSON.parse(diagnostic.mock.calls[0].arguments[0]);
+  assert.equal(record.phase, "compaction-failed");
+  assert.equal(record.error, "401 token expired");
+  assert.equal(record.reason, "threshold");
+  assert.equal(record.provider, model.provider);
+  f.ctx.ui.notify = () => {};
+  await f.handlers.get("session_before_compact")(f.event, f.ctx);
+  assert.equal(JSON.parse(diagnostic.mock.calls[1].arguments[0]).error, "401 token expired");
   assert.equal(f.handlers.has("turn_end"), false);
   assert.equal(f.handlers.has("agent_settled"), false);
+});
+
+for (const stopReason of ["error", "aborted"]) test(`overflow excludes ${stopReason} terminal content through Pi's serializer`, async () => {
+  const f = fixture();
+  f.sm.appendMessage({ role: "assistant", content: [{ type: "text", text: "terminal-content-must-not-replay" }, { type: "toolCall", id: "unfinished", name: "read", arguments: { path: "never-executed" } }], api: model.api, provider: model.provider, model: model.id, usage: zero, stopReason, timestamp: 5 });
+  const result = await createCheckpoint(f.pi, f.ctx, { ...f.event, branchEntries: f.sm.getBranch(), reason: "overflow", willRetry: true }, async (_url, options) => {
+    const text = options.headers.get("content-encoding") === "zstd" ? zstdDecompressSync(options.body).toString() : options.body;
+    assert.doesNotMatch(text, /terminal-content-must-not-replay|never-executed|unfinished/u);
+    assert.equal(JSON.parse(text).input.filter(item => item.type === "function_call_output").length, 2);
+    return new Response(sse(completed()));
+  });
+  assert.equal(result.ok, true, result.error);
 });
 
 test("retention bounds user text without retaining assistant output", () => {

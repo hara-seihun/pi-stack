@@ -145,12 +145,14 @@ export async function startRuntimeHost(options: {
   args: string[];
   env: Record<string, string | undefined>;
   onOutput: RuntimeOutput;
+  signal?: AbortSignal;
 }): Promise<RuntimeTransport> {
   const directory = join(options.data, "runtime-hosts");
   mkdirSync(directory, { recursive: true, mode: 0o700 });
   const socketPath = runtimeSocketPath(options.data, options.sessionId);
   const encodedArgs = Buffer.from(JSON.stringify(options.args)).toString("base64url");
-  Bun.spawn([process.execPath, join(import.meta.dir, "runtime-host.ts"), socketPath, options.cwd, encodedArgs], {
+  options.signal?.throwIfAborted();
+  const host = Bun.spawn([process.execPath, join(import.meta.dir, "runtime-host.ts"), socketPath, options.cwd, encodedArgs], {
     cwd: options.cwd,
     detached: true,
     stdin: "ignore",
@@ -160,13 +162,26 @@ export async function startRuntimeHost(options: {
   });
   const deadline = Date.now() + START_TIMEOUT_MS;
   let lastError = new Error("Runtime host did not start");
-  while (Date.now() < deadline) {
-    if (existsSync(socketPath)) {
-      const connected = await connectHost(socketPath, options.onOutput, Math.min(250, CONNECT_TIMEOUT_MS));
-      if (!("error" in connected)) return connected.transport;
-      lastError = connected.error;
+  try {
+    while (Date.now() < deadline) {
+      options.signal?.throwIfAborted();
+      if (existsSync(socketPath)) {
+        const connected = await connectHost(socketPath, options.onOutput, Math.min(250, CONNECT_TIMEOUT_MS));
+        if (!("error" in connected)) {
+          if (options.signal?.aborted) {
+            await connected.transport.terminate();
+            options.signal.throwIfAborted();
+          }
+          return connected.transport;
+        }
+        lastError = connected.error;
+      }
+      await Bun.sleep(START_POLL_MS);
     }
-    await Bun.sleep(START_POLL_MS);
+    throw lastError;
+  } catch (cause) {
+    host.kill("SIGTERM");
+    await host.exited;
+    throw cause;
   }
-  throw lastError;
 }

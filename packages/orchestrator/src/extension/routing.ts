@@ -33,8 +33,9 @@ export default function routing(pi:ExtensionAPI):void{
     const oauth=family.auth.oauth;if(!oauth)continue;
     shared.set(family.id,providerOAuth(family,defaultSharedAuthPath(ledgerPath)));
   }
+  const assigned=process.env.PI_ORCHESTRATOR_ASSIGNED==="1"&&process.env.PI_ORCHESTRATOR_RUN_ID?store.run(process.env.PI_ORCHESTRATOR_RUN_ID):undefined;
   for(const account of store.accounts()){
-    const family=families.get(account.provider),auth=shared.get(account.provider);if(!family||!auth||!allowsAccountUse(account,"interactive"))continue;
+    const family=families.get(account.provider),auth=shared.get(account.provider);if(!family||!auth||(!allowsAccountUse(account,"interactive")&&assigned?.accountId!==account.id))continue;
     pi.registerProvider(sharedOAuthProvider(family,account.id,account.label,auth));
   }
   installImageGeneration(pi, store, shared.get("openai-codex"));
@@ -58,7 +59,6 @@ export default function routing(pi:ExtensionAPI):void{
     const next=resolve(choice.id,family,modelId);if(!next)return;
     return await select(ctx,next,thinking)?choice.id:undefined;
   };
-  const assigned=process.env.PI_ORCHESTRATOR_ASSIGNED==="1"&&process.env.PI_ORCHESTRATOR_RUN_ID?store.run(process.env.PI_ORCHESTRATOR_RUN_ID):undefined;
   const requestedPin=process.env.PI_SUBAGENT_MODEL;
   const pinned=assigned?.provider&&assigned.model?{provider:assigned.provider,model:assigned.model,thinking:assigned.thinking}:ORCHESTRATOR_CATALOG.models.find(model=>model.id===requestedPin||model.model===requestedPin);
   const hasPin=!!pinned||!!requestedPin;
@@ -121,7 +121,12 @@ export default function routing(pi:ExtensionAPI):void{
         }
       }
     }
-    else if(event.reason==="startup"||event.reason==="new")await bind(ctx);
+    else if(event.reason==="startup"||event.reason==="new"){
+      const explicit=ctx.model?.provider&&/-\d+$/.test(ctx.model.provider)?store.account(ctx.model.provider):undefined;
+      const retain=explicit&&allowsAccountUse(explicit,"interactive")
+        &&(!explicit.cooldownUntil||explicit.cooldownUntil<=Date.now())&&shared.get(explicit.provider)?.has(explicit.id);
+      if(!retain)await bind(ctx);
+    }
     reconcileLease(ctx);
   });
   pi.on("before_agent_start",async(_event,ctx)=>{

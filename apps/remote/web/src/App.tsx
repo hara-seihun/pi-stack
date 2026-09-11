@@ -14,7 +14,7 @@ import { listenForFileDrops } from "./file-drop";
 import { createSyncLoop, type SyncLoop } from "./sync-loop";
 import { updateDocument } from "./sync";
 import { threadsInOrder } from "./thread-order";
-import { activityColor, activityLabel, normalizedActivity, partitionThreads, threadDrawerTab } from "./agent-placement";
+import { activityColor, activityLabel, normalizedActivity, partitionThreads, threadDrawerTab, isActiveAgentRun } from "./agent-placement";
 import { AgentList } from "./agent-list";
 import { ThreadStartMenu } from "./thread-start-menu";
 import type { AgentRun, AgentRunEvent, Attachment, ContextEntry, Dashboard, Governor, GovernorControls, MachineActionState, PlanCard, QueuedMessage, Session, SlashCommand, SyncRequest, ThreadSettings } from "./types";
@@ -590,7 +590,7 @@ export default function App() {
   const images = useMemo(() => state.images ? new Map(state.images.images.map(image => [image.id, image])) : null, [state.images]);
   const liveThinking = state.agentRunId ? state.agentThinking?.document || "" : state.liveThinking?.document || "";
   const liveText = state.agentRunId ? state.agentText?.document || "" : state.liveText?.document || "";
-  const drawerCounts: Record<DrawerTab, number> = { threads: sessions.length, agents: (dashboard?.agents.runs.length ?? 0) + subagents.length, archived: Math.max(state.archivedTotal, state.archived.length), files: rootFileCount };
+  const drawerCounts: Record<DrawerTab, number> = { threads: sessions.length, agents: (dashboard?.agents.runs.filter(isActiveAgentRun).length ?? 0) + subagents.length, archived: Math.max(state.archivedTotal, state.archived.length), files: rootFileCount };
   const drawerLabels: Record<DrawerTab, string> = { threads: "Interactive", agents: "Orchestrator", archived: "Archived", files: "Files" };
   const slashToken = prompt.startsWith("/") && !/\s/.test(prompt) ? prompt.slice(1).toLowerCase() : null;
   const visibleCommands = slashToken === null ? [] : state.slashCommands.filter((command) => command.source === "skill" && !command.name.toLowerCase().includes("mcp") && command.name.toLowerCase().startsWith(slashToken));

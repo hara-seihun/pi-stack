@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, test } from "bun:test";
-import { existsSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, readdirSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { attachRuntimeHost, runtimeSocketPath, startRuntimeHost, type RuntimeTransport } from "./runtime-transport";
@@ -13,6 +13,17 @@ afterEach(async () => {
 });
 
 describe("runtime host identity", () => {
+  test("cancelling startup reaps the detached host before returning", async () => {
+    const root = mkdtempSync(join(tmpdir(), "pi-runtime-cancel-"));
+    roots.push(root);
+    const controller = new AbortController();
+    const starting = startRuntimeHost({ data: root, sessionId: "cancelled", cwd: root,
+      args: [process.execPath, "-e", "setInterval(() => {}, 10000)"], env: process.env,
+      signal: controller.signal, onOutput() {} });
+    controller.abort(new Error("Startup cancelled"));
+    await expect(starting).rejects.toThrow("Startup cancelled");
+    expect(readdirSync(join(root, "runtime-hosts"))).toEqual([]);
+  });
   test("gives every launch its own socket even for the same thread", async () => {
     const root = mkdtempSync(join(tmpdir(), "pi-remote-runtime-"));
     roots.push(root);

@@ -55,12 +55,61 @@ test("self and explicit JSONL paths share complete history and bounded search wi
     assert.ok(next.stdout.length < 2500);
     assert.match(run("--all", "--search", "abandoned", session).stdout, /:4 \[entry other\]/);
     assert.match(run("--regex", "--search", "distant.*needle", "self").stdout, /distant needle/);
+    const page = JSON.parse(run("--json", "--work", "--limit", "2", "self").stdout);
+    assert.deepEqual(page.entries.map(entry => entry.entryId), ["compact", "final"]);
+    const previous = JSON.parse(run("--json", "--work", "--limit", "2", "--cursor", page.nextCursor, "self").stdout);
+    assert.deepEqual(previous.entries.map(entry => entry.entryId), ["u", "result"]);
+    assert.equal(previous.entries[1].truncated, true);
+    const chunk = JSON.parse(run("--json", "--work", "--entry", "result", "--offset", "4000", "--max-chars", "100", session).stdout);
+    assert.equal(chunk.text, "x".repeat(100));
+    assert.equal(chunk.nextOffset, 4100);
+    assert.deepEqual(JSON.parse(run("--json", session).stdout).entries.map(entry => entry.entryId), ["u", "compact", "final"]);
+    for (const flags of [["--search", "needle"], ["--all"], ["--leaf", "u"], ["--raw"], ["--full"]]) {
+      assert.equal(run("--json", ...flags, "self").status, 1);
+    }
+    assert.equal(run("--json", "--limit", "21", "self").status, 1);
+    assert.equal(run("--search", "needle", "--limit", "51", "self").status, 1);
     assert.equal(run("--regex", "--search", "[", "self").status, 1);
     assert.equal(run("--all", "--leaf", "other", "self").status, 1);
     assert.equal(run("--output", session, "self").status, 1);
     assert.equal(readFileSync(session, "utf8"), source);
     delete env.PI_SESSION_FILE;
     assert.match(run("--path", "self").stderr, /self requires PI_SESSION_FILE/);
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("subagent CLI discovers the caller, pages direct children and retains its distinct limits", () => {
+  const root = mkdtempSync(join(tmpdir(), "read-thread-subagents-"));
+  try {
+    const db = new DatabaseSync(join(root, "supervisor.sqlite3"));
+    db.exec(`
+      CREATE TABLE sessions(id,name,session_path,state,updated_at,archived_at,created_at);
+      CREATE TABLE subagents(session_id,parent_session_id,model);
+      CREATE TABLE events(seq INTEGER PRIMARY KEY,session_id,type,time,payload);
+      INSERT INTO sessions VALUES('root','Coordinator',NULL,'RUNNING','2025-01-01',NULL,'2025-01-01');
+      INSERT INTO sessions VALUES('child','Child',NULL,'RUNNING','2025-01-01',NULL,'2025-01-01');
+      INSERT INTO sessions VALUES('settled','Settled',NULL,'IDLE','2025-01-01',NULL,'2025-01-01');
+      INSERT INTO subagents VALUES('child','root','luna'),('settled','root','astra');
+      INSERT INTO events VALUES(1,'child','assistant','2025-01-02','answer'),(2,'settled','assistant','2025-01-03','done');
+    `);
+    db.close();
+    const env = { ...process.env, PI_REMOTE_DATA: root, PI_REMOTE_SESSION_ID: "root" };
+    const run = (...args) => spawnSync(process.execPath, [new URL("read-thread", import.meta.url).pathname, ...args], { env, encoding: "utf8", timeout: 2000 });
+    const active = JSON.parse(run("--subagents").stdout);
+    assert.deepEqual(active.subagents.map(child => child.threadId), ["child"]);
+    assert.deepEqual(JSON.parse(run("--subagents", "self").stdout).subagents, active.subagents);
+    const first = JSON.parse(run("--subagents", "--include-idle", "--limit", "1", "Coordinator").stdout);
+    assert.equal(first.subagents[0].threadId, "settled");
+    const second = JSON.parse(run("--subagents", "--include-idle", "--limit", "100", "--cursor", first.nextCursor, "root").stdout);
+    assert.equal(second.subagents[0].threadId, "child");
+    assert.equal(second.nextCursor, null);
+    assert.equal(run("--subagents", "--limit", "101").status, 1);
+    assert.equal(run("--subagents", "--search", "needle").status, 1);
+    const transcript = JSON.parse(run("--json", "Child").stdout);
+    assert.equal(transcript.source, "supervisor-events");
+    assert.match(transcript.entries[0].text, /answer/);
   } finally {
     rmSync(root, { recursive: true, force: true });
   }
