@@ -24,7 +24,7 @@ An assistant can put image declarations between paragraphs of its reply:
 
 Pi Remote owns generation after accepting the declaration. The agent can finish its reply without calling `image_generation` or waiting for the provider. The client shows "Generating image" until it has the PNG, then displays the image linked to its original. Dependent images wait for their inputs; independent images can run concurrently. Closing the client does not cancel the work.
 
-Only complete declarations in assistant text submit work. User messages, system instructions, tool results and code examples do not submit image requests. Streaming placeholders do not start requests from the browser.
+Complete declarations submit work when their assistant message finalizes. User messages, system instructions, tool results and code examples do not submit image requests. Streaming placeholders do not start requests from the browser.
 
 ### IDs and references
 
@@ -36,7 +36,7 @@ Display an image again without defining another job:
 <pi-remote-image id="garden" />
 ```
 
-References can name generated IDs or absolute paths to existing PNG, JPEG or WebP files, including uploaded attachments:
+References can name earlier IDs, definitions in the same finalized message, or absolute paths to existing PNG, JPEG or WebP files, including uploaded attachments. An ID defined only in a later message is a missing reference:
 
 ```xml
 <pi-remote-image id="poster" prompt="Make a travel poster using the garden composition and the supplied logo." refs="garden,/home/kenan/reference-logo.png" />
