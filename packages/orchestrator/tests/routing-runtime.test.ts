@@ -8,7 +8,9 @@ import { fileURLToPath, pathToFileURL } from 'node:url';
 
 let buildRoot: string, routing: string, ai: string, sdk: string, cli: string;
 
-test.each(['remote', 'remote-physical', 'fleet'])('keeps the pinned model through history restore and model selection: %s', async kind => {
+test.each(['remote', 'remote-physical', 'fleet', 'fresh-astra', 'fresh-sol', 'fresh-terra', 'fresh-luna'])('binds pooled credentials and keeps the pinned model: %s', async kind => {
+  const fresh = kind.startsWith('fresh-');
+  const selectedModel = fresh ? (kind === 'fresh-astra' ? 'gpt-6-astra' : `gpt-5.6-${kind.slice(6)}`) : 'gpt-5.6-luna';
   const root = await mkdtemp(join(tmpdir(), 'pi-pinned-model-'));
   const fixture = join(root, 'fixture.mjs');
   await writeFile(fixture, `
@@ -29,28 +31,31 @@ if (${JSON.stringify(kind)} === 'fleet') {
   const [id]=store.createRuns({count:1,source:'direct',prompt:'fixture',cwd:root,profile:'luna',budget:'force'});
   store.assignRun(id,{accountId:account,provider:'openai-codex',model:'gpt-5.6-luna',thinking:'high',unit:'fixture',releasePath:root});
   process.env.PI_ORCHESTRATOR_RUN_ID=id;
-} else process.env.PI_SUBAGENT_MODEL=${JSON.stringify(kind)} === 'remote-physical' ? 'gpt-5.6-luna' : 'luna';
+} else process.env.PI_SUBAGENT_MODEL=${JSON.stringify(selectedModel)};
 store.close();
 const manager=SessionManager.inMemory(root);
+if(!${fresh}){
 manager.appendModelChange(account,'gpt-5.6-terra');
 manager.appendThinkingLevelChange('high');
 manager.appendMessage({role:'assistant',content:[],api:'openai-codex-responses',provider:account,model:'gpt-5.6-terra',usage:{input:0,output:0,cacheRead:0,cacheWrite:0,totalTokens:0,cost:{input:0,output:0,cacheRead:0,cacheWrite:0,total:0}},stopReason:'stop',timestamp:Date.now()});
+}
 const settingsManager=SettingsManager.inMemory();
 const modelRuntime=await ModelRuntime.create({authPath:join(dir,'auth.json'),modelsPath:join(dir,'models.json')});
 const resourceLoader=new DefaultResourceLoader({cwd:root,agentDir:dir,settingsManager,noExtensions:true,noSkills:true,noContextFiles:true,noPromptTemplates:true,noThemes:true,additionalExtensionPaths:[${JSON.stringify(routing)}]});
 await resourceLoader.reload();
-const {session}=await createAgentSession({cwd:root,agentDir:dir,modelRuntime,settingsManager,resourceLoader,sessionManager:manager});
+const {session}=await createAgentSession({cwd:root,agentDir:dir,modelRuntime,settingsManager,resourceLoader,sessionManager:manager,...(${fresh}?{model:modelRuntime.getModel('openai-codex',${JSON.stringify(selectedModel)}),thinkingLevel:'medium'}:{})});
 const errors=[];
 try {
   await session.bindExtensions({mode:'print',onError:error=>errors.push(error)});
   assert.deepEqual(errors,[]);
-  assert.equal(session.model.id,'gpt-5.6-luna');
+  assert.equal(session.model.id,${JSON.stringify(selectedModel)});
   assert.equal(session.model.provider,account);
-  await session.setModel(session.modelRuntime.getModel(account,'gpt-5.6-terra'));
-  assert.equal(session.model.id,'gpt-5.6-luna');
+  if(${fresh})assert.equal(session.thinkingLevel,'medium');
+  await session.setModel(session.modelRuntime.getModel(account,${JSON.stringify(selectedModel === 'gpt-5.6-terra' ? 'gpt-5.6-luna' : 'gpt-5.6-terra')}));
+  assert.equal(session.model.id,${JSON.stringify(selectedModel)});
   assert.equal(session.model.provider,account);
-  await session.setModel(session.modelRuntime.getModel('openai-codex-3','gpt-5.6-luna'));
-  assert.equal(session.model.id,'gpt-5.6-luna');
+  await session.setModel(session.modelRuntime.getModel('openai-codex-3',${JSON.stringify(selectedModel)}));
+  assert.equal(session.model.id,${JSON.stringify(selectedModel)});
   assert.equal(session.model.provider,'openai-codex-3');
   assert.deepEqual(errors,[]);
 } finally {await session.extensionRunner.emit({type:'session_shutdown',reason:'quit'});session.dispose();}

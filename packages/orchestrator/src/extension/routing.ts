@@ -60,7 +60,12 @@ export default function routing(pi:ExtensionAPI):void{
   const requestedPin=process.env.PI_SUBAGENT_MODEL;
   const pinned=assigned?.provider&&assigned.model?{provider:assigned.provider,model:assigned.model,thinking:assigned.thinking}:ORCHESTRATOR_CATALOG.models.find(model=>model.id===requestedPin||model.model===requestedPin);
   const hasPin=!!pinned||!!requestedPin;
-  const matchesPin=(ctx:ExtensionContext)=>!hasPin||!!pinned&&ctx.model?.id===pinned.model&&familyOf(ctx.model.provider)===pinned.provider;
+  const matchesPin=(ctx:ExtensionContext)=>{
+    if(!hasPin)return true;
+    if(!pinned||ctx.model?.id!==pinned.model||familyOf(ctx.model.provider)!==pinned.provider)return false;
+    const account=store.account(ctx.model.provider);
+    return !!account&&!!shared.get(pinned.provider)?.has(account.id)&&!!(assigned||allowsAccountUse(account,"interactive"));
+  };
   const enforcePin=async(ctx:ExtensionContext)=>{
     if(matchesPin(ctx))return;
     if(!pinned){void ctx.abort();throw new Error(`Unknown subagent model pin ${requestedPin}`);}
