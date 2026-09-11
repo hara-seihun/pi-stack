@@ -1,13 +1,13 @@
-import { access, link, mkdir, mkdtemp, readFile, rm, stat, writeFile } from "node:fs/promises";
-import { dirname, extname, join, resolve } from "node:path";
-import { homedir } from "node:os";
+import { access, link, mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
+import { dirname, extname, join } from "node:path";
 import { Type, type Static } from "typebox";
-import { StringEnum, type ModelAuth } from "@earendil-works/pi-ai";
+import { StringEnum } from "@earendil-works/pi-ai";
 import { withFileMutationQueue, type ExtensionAPI, type ExtensionContext } from "@earendil-works/pi-coding-agent";
 import type { Store } from "../store.js";
 import type { SharedOAuthAuth } from "../auth/shared-oauth.js";
 import { chooseInteractiveAccount } from "../auth/account-selection.js";
-import { IMAGE_MODELS, IMAGE_QUALITIES, IMAGE_SIZES, PNG_SIGNATURE, requestImage, type ImageAuth, type ImageFailure } from "../image-generation.js";
+import { IMAGE_MODELS, IMAGE_QUALITIES, IMAGE_SIZES, requestImage } from "../image-generation.js";
+import { createSharedImageGenerationService, imageAuth, imagePath, loadImageInputs, type SharedImageResult } from "../image-service.js";
 
 const parameters = Type.Object({
   prompt: Type.String({ minLength: 1, maxLength: 32000, description: "Image description or editing instructions." }),
@@ -18,94 +18,32 @@ const parameters = Type.Object({
   inputPaths: Type.Optional(Type.Array(Type.String({ minLength: 1 }), { minItems: 1, maxItems: 16, description: "Local PNG, JPEG or WebP images to edit. Maximum combined input size is 32 MiB." })),
 });
 export type ImageToolInput = Static<typeof parameters>;
-type Result<T> = { ok: true; value: T } | { ok: false; error: string };
-type Connection = { kind: "shared"; account: string } | { kind: "personal"; provider: "openai-codex" | "openai" };
-
-function imagePath(path: string, cwd: string) {
-  path = path.replace(/^@/, "");
-  return resolve(cwd, path.startsWith("~/") ? join(homedir(), path.slice(2)) : path);
-}
-
-async function inputImages(paths: readonly string[], cwd: string): Promise<Result<string[]>> {
-  try {
-    const images: string[] = [];
-    let total = 0;
-    for (const path of paths) {
-      const absolute = imagePath(path, cwd);
-      const info = await stat(absolute);
-      if (info.size + total > 32 * 1024 * 1024) return { ok: false, error: "Image inputs exceed 32 MiB." };
-      const bytes = await readFile(absolute);
-      total += bytes.length;
-      if (total > 32 * 1024 * 1024) return { ok: false, error: "Image inputs exceed 32 MiB." };
-      const mime = bytes.subarray(0, 8).equals(PNG_SIGNATURE) ? "image/png"
-        : bytes[0] === 255 && bytes[1] === 216 && bytes[2] === 255 ? "image/jpeg"
-        : bytes.toString("ascii", 0, 4) === "RIFF" && bytes.toString("ascii", 8, 12) === "WEBP" ? "image/webp" : undefined;
-      if (!mime) return { ok: false, error: `Unsupported image input: ${path}` };
-      images.push(`data:${mime};base64,${bytes.toString("base64")}`);
-    }
-    return { ok: true, value: images };
-  } catch (error) { return { ok: false, error: `Cannot read image input: ${error instanceof Error ? error.message : String(error)}` }; }
-}
+type Connection = { kind: "shared" } | { kind: "personal"; provider: "openai-codex" | "openai" };
 
 export function installImageGeneration(pi: ExtensionAPI, store: Store, shared: SharedOAuthAuth | undefined) {
+  const service = createSharedImageGenerationService({ store, shared });
+  pi.on("session_shutdown", () => service.close());
   const connection = (ctx: ExtensionContext): Connection | undefined => {
     const account = chooseInteractiveAccount(store, shared, "openai-codex");
-    if (account) return { kind: "shared", account: account.id };
+    if (account) return { kind: "shared" };
     for (const provider of ["openai-codex", "openai"] as const) {
       if (ctx.modelRegistry.getProviderAuthStatus(provider).configured) return { kind: "personal", provider };
     }
     return undefined;
   };
-  const credential = async (selected: Connection, ctx: ExtensionContext, signal: AbortSignal): Promise<Result<ImageAuth>> => {
+  const generate = async (params: ImageToolInput, ctx: ExtensionContext, signal: AbortSignal): Promise<SharedImageResult> => {
+    const selected = connection(ctx);
+    if (!selected || selected.kind === "shared") return service.generateImageWithSharedAccount(params, { cwd: ctx.cwd, signal });
     try {
-      const pooled = selected.kind === "shared" ? await shared!.credential(selected.account, signal) : undefined;
-      const auth: ModelAuth | undefined = selected.kind === "shared" ? { apiKey: pooled!.access }
-        : (await ctx.modelRegistry.getProviderAuth(selected.provider))?.auth;
-      if (!auth?.apiKey) return { ok: false, error: "OpenAI authentication is unavailable. Connect an OpenAI account and reload Pi." };
-      const headers = new Headers();
-      for (const [key, value] of Object.entries(auth.headers ?? {})) if (typeof value === "string") headers.set(key, value);
-      headers.set("Authorization", `Bearer ${auth.apiKey}`);
-      const kind = selected.kind === "shared" || selected.provider === "openai-codex" ? "codex" : "api";
-      if (kind === "codex" && !headers.has("chatgpt-account-id")) {
-        const accountId = pooled?.accountId ?? JSON.parse(Buffer.from(auth.apiKey.split(".")[1], "base64url").toString("utf8"))["https://api.openai.com/auth"]?.chatgpt_account_id;
-        if (typeof accountId !== "string" || !accountId) return { ok: false, error: "OpenAI Codex authentication has no ChatGPT account ID." };
-        headers.set("chatgpt-account-id", accountId);
-      }
-      return { ok: true, value: { kind, headers } };
-    } catch (error) { return { ok: false, error: `OpenAI authentication failed: ${error instanceof Error ? error.message : String(error)}` }; }
-  };
-  const generate = async (params: ImageToolInput, ctx: ExtensionContext, signal: AbortSignal) => {
-    let lease: string | undefined;
-    let timer: ReturnType<typeof setInterval> | undefined;
-    const heartbeatFailure = new AbortController();
-    const requestSignal = AbortSignal.any([signal, heartbeatFailure.signal]);
-    try {
-      const selected = store.transaction(() => {
-        const selected = connection(ctx);
-        if (selected?.kind === "shared") {
-          lease = `interactive:image:${crypto.randomUUID()}`;
-          store.createLease(lease, selected.account, "interactive");
-        }
-        return selected;
-      });
-      if (!selected) return { ok: false as const, error: "Image generation requires a connected, eligible OpenAI account." };
-      if (lease) timer = setInterval(() => {
-        try { store.heartbeatLease(lease!); }
-        catch (error) { heartbeatFailure.abort(error); }
-      }, 30_000);
-      const auth = await credential(selected, ctx, requestSignal);
+      const credential = (await ctx.modelRegistry.getProviderAuth(selected.provider))?.auth;
+      const auth = imageAuth(credential, selected.provider === "openai-codex" ? "codex" : "api");
       if (!auth.ok) return auth;
-      const inputs = await inputImages(params.inputPaths ?? [], ctx.cwd);
+      const inputs = await loadImageInputs(params, ctx.cwd, signal);
       if (!inputs.ok) return inputs;
-      const result = await requestImage({ ...params, images: inputs.value }, auth.value, requestSignal);
-      if (!result.ok) {
-        const error: ImageFailure = result.error;
-        if (error.status === 429 && selected.kind === "shared") store.setCooldown(selected.account, Date.now() + (error.retryAfterMs ?? 60_000));
-        return { ok: false as const, error: error.message };
-      }
-      return { ok: true as const, value: result };
-    } catch (error) { return { ok: false as const, error: error instanceof Error ? error.message : String(error) }; }
-    finally { clearInterval(timer); if (lease) store.endLease(lease); }
+      return requestImage({ ...params, images: inputs.value }, auth.value, signal);
+    } catch (error) {
+      return { ok: false, error: { kind: "authentication", message: `OpenAI authentication failed: ${error instanceof Error ? error.message : String(error)}` } };
+    }
   };
   let registered = false;
   let disabledForAccount = false;
@@ -131,8 +69,8 @@ export function installImageGeneration(pi: ExtensionAPI, store: Store, shared: S
             try {
               onUpdate?.({ content: [{ type: "text", text: `Generating with ${params.model ?? IMAGE_MODELS[0]}…` }], details: {} });
               const result = await generate(params, ctx, requestSignal);
-              if (!result.ok) throw new Error(result.error);
-              const { images, model, responseId, usage } = result.value;
+              if (!result.ok) throw new Error(result.error.message);
+              const { images, model, responseId, usage } = result;
               const outputs = images.map((image, index) => ({
                 id: image.id,
                 path: index === images.length - 1 ? path : `${path.slice(0, -4)}.image-${index + 1}.png`,

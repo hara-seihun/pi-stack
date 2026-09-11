@@ -30,6 +30,8 @@ The routing extension uses the same account registry for interactive Pi sessions
 
 The routing extension provides a native [`image_generation` tool](docs/image-generation.md) when an OpenAI account is connected. It works from any chat model, defaults to Image 2.5 Flare, and also supports Image 2.5 Sunburst and image editing. Shared requests use the existing account registry, OAuth lock and leases. Pi saves a PNG and returns an image preview.
 
+The [shared image generation API](docs/image-service.md), exported through `pi-orchestrator/api`, exposes that same pooled generation owner to the Remote supervisor. It returns image bytes and provider metadata; Remote owns durable jobs and artifacts. Its lifecycle closes active requests before releasing the ledger connection.
+
 ## Configuration
 
 Set paths with:
