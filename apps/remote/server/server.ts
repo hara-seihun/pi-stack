@@ -569,6 +569,15 @@ function meetingInstructions(sessionId: string): string {
   return (sessionRow.get(sessionId) as any)?.meeting_id ? liveDevInstructions() : "";
 }
 
+function threadInstructions(sessionId: string): string {
+  const snapshot = inlineImages.snapshot(sessionId);
+  const registry = snapshot.images.map(({ id, state, refs, path, paths, error, conflict }) => ({ id, state, refs, path, paths, error, conflict }));
+  return [
+    meetingInstructions(sessionId),
+    registry.length ? `Pi Remote image registry: ${JSON.stringify({ version: snapshot.version, images: registry })}` : "",
+  ].filter(Boolean).join("\n\n");
+}
+
 function voiceInstructions(row: any): string {
   const history = (db.query(`
     SELECT type,payload FROM events
@@ -583,7 +592,7 @@ function voiceInstructions(row: any): string {
   return [
     policy,
     `Connected Pi thread: ${JSON.stringify({ id: row.id, name: row.name, meeting: Boolean(row.meeting_id) })}`,
-    meetingInstructions(row.id),
+    threadInstructions(row.id),
     history ? `Recent thread transcript:\n${history}` : "",
   ].filter(Boolean).join("\n\n");
 }
@@ -2100,7 +2109,7 @@ const server = Bun.serve({
     const instructionsRequest = API.sessionInstructions.match(req.method, url.pathname);
     if (instructionsRequest) {
       if (!sessionRow.get(instructionsRequest.sessionId)) return error("Session not found", 404);
-      return json({ instructions: meetingInstructions(instructionsRequest.sessionId) });
+      return json({ instructions: threadInstructions(instructionsRequest.sessionId) });
     }
     const imageRequest = API.sessionImage.match(req.method, url.pathname);
     if (imageRequest) {
