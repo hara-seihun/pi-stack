@@ -54,7 +54,8 @@ it("admits the queued Atlas request ahead of older force backlog, retaining rese
   daemon.anthropicMeters.sample = async () => [];
   daemon.unitIsActive = () => true;
   const launched: string[] = [];
-  daemon.startUnit = (_unit: string, id: string) => launched.push(id);
+  daemon.startUnit = () => { throw new Error("Tool-free requests must not spawn agent workers"); };
+  daemon.completionPool.start = (run: { id: string }) => launched.push(run.id);
   try {
     account(store);
     store.setControl("launches", "enabled");

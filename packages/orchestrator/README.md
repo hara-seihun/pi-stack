@@ -111,7 +111,7 @@ The daemon serves its public API on `127.0.0.1:2460` by default. Config `listenH
 
 ## Tool-free completion API
 
-Applications can submit durable Luna or Terra inference through [`CompletionClient` and the completion HTTP API](docs/completions.md). Caller system and user prompts remain separate. The existing daemon owns admission, cancellation, provider usage and idempotent result replay. Native strict JSON schema is supported; a supplied output-token cap returns HTTP 422 because the Codex endpoint rejects that parameter. [OpenAPI](docs/completions.openapi.json) is generated from the runtime TypeBox schemas.
+Applications can submit durable Luna or Terra inference through [`CompletionClient` and the completion HTTP API](docs/completions.md). Caller system and user prompts remain separate. The existing daemon owns admission, cancellation, provider usage and idempotent result replay. Tool-free completions share one asynchronous executor without per-request processes or agent-session concurrency caps. Fresh quotas, exhaustion, cooldowns, reservations and pause still apply; completion leases remain visible for ownership and usage but do not occupy agent-session slots. Native strict JSON schema is supported; a supplied output-token cap returns HTTP 422 because the Codex endpoint rejects that parameter. [OpenAPI](docs/completions.openapi.json) is generated from the runtime TypeBox schemas.
 
 ## Application-owned workspaces
 

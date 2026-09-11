@@ -352,6 +352,11 @@ export class Store {
   endLease(id:string,at=Date.now()):void{this.db.prepare("UPDATE lease SET ended_at=? WHERE id=? AND ended_at IS NULL").run(at,id);}
   activeLeases(accountId?:string,maxAgeMs=120000,now=Date.now()):any[]{const cutoff=now-maxAgeMs;return (accountId?this.db.prepare("SELECT * FROM lease WHERE account_id=? AND ended_at IS NULL AND heartbeat_at>=?").all(accountId,cutoff):this.db.prepare("SELECT * FROM lease WHERE ended_at IS NULL AND heartbeat_at>=?").all(cutoff)) as any[];}
 
+  activeSessionLeases(accountId?:string,maxAgeMs=120000,now=Date.now()):any[]{
+    return this.db.prepare(`SELECT l.* FROM lease l WHERE l.ended_at IS NULL AND l.heartbeat_at>=? AND (? IS NULL OR l.account_id=?)
+      AND NOT EXISTS (SELECT 1 FROM control c WHERE c.key='completion-run:'||l.run_id)`).all(now-maxAgeMs,accountId??null,accountId??null) as any[];
+  }
+
   setLive(runId:string,input:{activity:RunActivity;text?:string;thinking?:string;tool?:string},at=Date.now()):void{this.db.prepare(`INSERT INTO live_state(run_id,activity,text,thinking,tool,updated_at) VALUES(?,?,?,?,?,?) ON CONFLICT(run_id) DO UPDATE SET activity=excluded.activity,text=excluded.text,thinking=excluded.thinking,tool=excluded.tool,updated_at=excluded.updated_at`).run(runId,input.activity,input.text??"",input.thinking??"",input.tool??null,at);}
   live():any[]{return this.db.prepare("SELECT * FROM live_state").all() as any[];}
 }

@@ -26,7 +26,7 @@ export function accountCapacity(store:Store,accountId:string,budget:BudgetClass,
   if(!Number.isFinite(multiplier)||multiplier<=0)return stop("background launches halted");
   if(!meters.length){
     const probed=store.db.prepare("SELECT 1 FROM lease WHERE account_id=? AND kind='fleet' LIMIT 1").get(accountId);
-    const activeProbe=store.activeLeases(accountId,120_000,now).some((lease)=>lease.kind==="fleet");
+    const activeProbe=store.activeSessionLeases(accountId,120_000,now).some((lease)=>lease.kind==="fleet");
     return{sessions:!probed||activeProbe?1:0,spent,reason:"calibration probe awaiting meter evidence"};
   }
   if(meters.some((m)=>now-m.observed_at>cfg.meterMaxAgeMs||m.observed_at>now+60_000))return stop("meter is stale");
@@ -72,13 +72,13 @@ export function accountCapacity(store:Store,accountId:string,budget:BudgetClass,
 
 export function assign(store:Store,profile:string,budget:BudgetClass,cfg:OrchestratorConfig,now=Date.now(),pinnedAccount?:string,runId?:string):{assignment?:Assignment;refusals:Refusal[]}{
   if(store.control("launches")==="paused")return{refusals:[{accountId:"*",reason:"emergency halt"}]};
-  if(store.activeLeases(undefined,120_000,now).length>=cfg.maxConcurrentSessions)return{refusals:[{accountId:"*",reason:"machine session ceiling"}]};
+  if(store.activeSessionLeases(undefined,120_000,now).length>=cfg.maxConcurrentSessions)return{refusals:[{accountId:"*",reason:"machine session ceiling"}]};
   const candidates=cfg.profiles[profile];if(!candidates?.length)throw new Error(`unknown model profile ${profile}`);
   const refusals:Refusal[]=[];const choices:(Assignment&{spent:number})[]=[];
   for(const candidate of candidates){
     for(const account of store.accounts().filter((a)=>a.provider===candidate.provider&&(pinnedAccount===undefined||a.id===pinnedAccount))){
       const capacity=accountCapacity(store,account.id,budget,cfg,now,runId);
-      const active=store.activeLeases(account.id,120_000,now).length;
+      const active=store.activeSessionLeases(account.id,120_000,now).length;
       if(active>=capacity.sessions){refusals.push({accountId:account.id,reason:`capacity ${active}/${capacity.sessions}: ${capacity.reason}`});continue;}
       const admitted=(store.db.prepare("SELECT last_admitted_meter_at FROM account WHERE id=?").get(account.id) as any)?.last_admitted_meter_at;
       if(budget!=="force"&&Number(store.control(`boost:${account.provider}`)??"1")<=1&&admitted!=null&&capacity.meterAt!==undefined&&Number(admitted)>=capacity.meterAt){refusals.push({accountId:account.id,reason:"already admitted from this meter observation"});continue;}
@@ -86,7 +86,28 @@ export function assign(store:Store,profile:string,budget:BudgetClass,cfg:Orchest
     }
     if(choices.length)break;
   }
-  choices.sort((a,b)=>a.spent-b.spent||store.activeLeases(a.accountId,120_000,now).length-store.activeLeases(b.accountId,120_000,now).length||a.accountId.localeCompare(b.accountId));
+  choices.sort((a,b)=>a.spent-b.spent||store.activeSessionLeases(a.accountId,120_000,now).length-store.activeSessionLeases(b.accountId,120_000,now).length||a.accountId.localeCompare(b.accountId));
+  return{assignment:choices[0],refusals};
+}
+
+export function assignCompletion(store:Store,runId:string,profile:string,cfg:OrchestratorConfig,now=Date.now()):{assignment?:Assignment;refusals:Refusal[]}{
+  if(store.control("launches")==="paused")return{refusals:[{accountId:"*",reason:"emergency halt"}]};
+  const candidates=cfg.profiles[profile];if(!candidates?.length)throw new Error(`unknown completion profile ${profile}`);
+  const refusals:Refusal[]=[],choices:(Assignment&{spent:number;reserved:boolean})[]=[];
+  for(const candidate of candidates){
+    for(const account of store.accounts().filter(account=>account.provider===candidate.provider)){
+      const meters=store.latestMeters(account.id);
+      const reason=!allowsAccountUse(account,"fleet")?"account unavailable"
+        :account.reservation&&!reservationMatchesRun(store,account.reservation,runId)?"reserved for another completion queue"
+        :account.cooldownUntil&&account.cooldownUntil>now?"account cooling down"
+        :!meters.length||meters.some(meter=>now-meter.observed_at>cfg.meterMaxAgeMs||meter.observed_at>now+60_000)?"missing or stale provider quota"
+        :meters.some(meter=>meter.used_percent>=100)?"provider quota exhausted":undefined;
+      if(reason){refusals.push({accountId:account.id,reason});continue;}
+      choices.push({...candidate,accountId:account.id,spent:Math.max(...meters.map(meter=>meter.used_percent)),reserved:!!account.reservation});
+    }
+    if(choices.length)break;
+  }
+  choices.sort((a,b)=>Number(b.reserved)-Number(a.reserved)||a.spent-b.spent||a.accountId.localeCompare(b.accountId));
   return{assignment:choices[0],refusals};
 }
 

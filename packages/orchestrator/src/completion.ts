@@ -123,6 +123,7 @@ export class CompletionService {
         result: outcome.state === "completed" ? outcome.result.text : outcome.error.message,
         ...(outcome.state === "completed" ? {} : { failureKind: outcome.state === "cancelled" ? "operator" as const : "provider" as const }),
       });
+      this.store.endLease(`run:${runId}`);
       return { ok: true, value: value.record };
     });
   }
@@ -137,6 +138,7 @@ export class CompletionService {
         this.save(value);
         this.store.setControl(`abort:${value.record.runId}`, "abort");
         this.store.updateRun(value.record.runId, { state: "aborted", failureKind: "operator", result: value.record.error.message });
+        if (value.attemptId) this.store.db.prepare("UPDATE lease SET ended_at=NULL WHERE id=?").run(`run:${value.record.runId}`);
       }
       return { ok: true, value: value.record };
     });

@@ -6,10 +6,11 @@ import { homedir } from "node:os";
 import { createServer, type IncomingMessage, type ServerResponse } from "node:http";
 import type { BudgetClass, LaneReadiness, LaneManifest, LaneSpec, OrchestratorConfig, Run } from "./domain.js";
 import { isRunContext } from "./isolated-context-contract.js";
-import { accountCapacity, assign, commitMeterAdmission } from "./policy.js";
+import { accountCapacity, assign, assignCompletion, commitMeterAdmission } from "./policy.js";
 import { Store } from "./store.js";
 import { Fleet } from "./fleet.js";
 import { CompletionService } from "./completion.js";
+import { CompletionPool } from "./host/completion-pool.js";
 import { accountReservation, isAccountReservation, prioritizeReservedCompletions, reservationKey } from "./admission-reservation.js";
 import { COMPLETION_OPENAPI } from "./completion-openapi.js";
 import { reconcileCompletionReceipts } from "./host/completion-worker.js";
@@ -42,10 +43,12 @@ export class Daemon {
   private readonly anthropicMeters:AnthropicMeterSampler;
   private readonly fleet:Fleet;
   private readonly completions:CompletionService;
+  private readonly completionPool:CompletionPool;
 
   constructor(readonly store:Store,readonly config:OrchestratorConfig,releasePath?:string,ledgerPath?:string){
     this.fleet=new Fleet(store);
     this.completions=new CompletionService(store,process.cwd());
+    this.completionPool=new CompletionPool(store,this.completions,config);
     this.releasePath=releasePath??dirname(dirname(realpathSync(fileURLToPath(import.meta.url))));
     this.ledgerPath=ledgerPath||process.env.PI_ORCHESTRATOR_LEDGER||join(homedir(),".local/share/pi-orchestrator/ledger.sqlite3");
     this.codexMeters=new CodexMeterSampler(store,{auth:providerOAuth(openaiCodexProvider(),config.authPath),meters:ORCHESTRATOR_CATALOG.meters.filter((meter)=>meter.provider==="openai-codex")});
@@ -67,11 +70,13 @@ export class Daemon {
     const server=createServer((req,res)=>void this.request(req,res));
     await new Promise<void>((resolve,reject)=>{server.once("error",reject);server.listen(PORT,this.config.listenHost??HOST,resolve);});
     const timer=setInterval(()=>void this.reconcile().catch((error)=>console.error("reconcile:",error)),this.config.reconcileIntervalMs);
+    const completionTimer=setInterval(()=>this.completionPool.tick(),1_000);
     await this.reconcile();
     console.log(`pi-orchestrator daemon listening on ${this.config.listenHost??HOST}:${PORT}`);
     await new Promise<void>((resolve)=>{for(const signal of ["SIGINT","SIGTERM"] as const)process.once(signal,resolve);});
-    this.stopped=true;clearInterval(timer);
+    this.stopped=true;clearInterval(timer);clearInterval(completionTimer);
     await this.waitForReconcile();
+    await this.completionPool.close();
     await new Promise<void>((resolve)=>server.close(()=>resolve()));
   }
 
@@ -133,6 +138,7 @@ export class Daemon {
       await this.fillCapacity();
       const now=Date.now();
       for(const run of this.store.runs(["starting","running"])){
+        if(this.completionPool.owns(run))continue;
         const progress=run.progressAt??run.startedAt??run.createdAt;
         if(now-progress>this.config.killAfterMs){this.stopUnit(run.workerUnit);this.store.updateRun(run.id,{state:"failed",failureKind:"infrastructure",result:"session made no progress"});continue;}
         if(process.env.PI_ORCHESTRATOR_WORKER_LAUNCH!=="process"&&run.workerUnit&&!this.unitIsActive(run.workerUnit)){
@@ -210,10 +216,13 @@ export class Daemon {
   private async launch(run:Run):Promise<boolean>{
     const fixed=this.store.fleetChild(run.id)?.assignment;
     const config=fixed?{...this.config,profiles:{...this.config.profiles,[run.profile]:[fixed]}}:this.config;
-    const choice=assign(this.store,run.profile,run.budget,config,Date.now(),undefined,run.id);
+    const completion=!!this.completions.byRun(run.id);
+    const choice=completion?assignCompletion(this.store,run.id,run.profile,config):assign(this.store,run.profile,run.budget,config,Date.now(),undefined,run.id);
     if(!choice.assignment){this.store.setControl(`refusal:${run.id}`,choice.refusals.map((r)=>`${r.accountId}: ${r.reason}`).join("; "));return false;}
-    const unit=`pi-orchestrator-run-${run.id.replaceAll("-","")}`;
+    const unit=completion?`completion:${run.id}`:`pi-orchestrator-run-${run.id.replaceAll("-","")}`;
     if(!this.store.assignRun(run.id,{...choice.assignment,unit,releasePath:this.releasePath}))return false;
+    this.store.setControl(`refusal:${run.id}`,"");
+    if(completion){this.completionPool.start(this.store.run(run.id)!);return true;}
     commitMeterAdmission(this.store,choice.assignment);
     try{this.startUnit(unit,run.id,this.releasePath);return true;}catch(error){this.store.updateRun(run.id,{state:"failed",failureKind:"infrastructure",result:`worker launch failed: ${String(error)}`});return false;}
   }
@@ -241,7 +250,7 @@ export class Daemon {
   }
 
   private stopUnit(unit?:string):void{
-    if(!unit)return;
+    if(!unit||unit.startsWith("completion:")){this.completionPool.tick();return;}
     const result=spawnSync("systemctl",["--user","--no-block","stop",unit],{encoding:"utf8",timeout:10_000});
     if(result.error||result.status!==0)throw new Error(`worker stop failed: ${result.error??result.stderr.trim()}`);
   }
@@ -257,7 +266,7 @@ export class Daemon {
     for(const run of this.store.runs(["waiting"])){
       if(!this.fleet.pending(run.id).length||!run.accountId||!run.workerUnit||!run.releasePath)continue;
       if(this.unitIsActive(run.workerUnit))continue;
-      if(this.store.activeLeases().length>=this.config.maxConcurrentSessions)return;
+      if(this.store.activeSessionLeases().length>=this.config.maxConcurrentSessions)return;
       const resumeConfig={...this.config,profiles:{...this.config.profiles,[run.profile]:[{provider:run.provider!,model:run.model!,thinking:run.thinking}]}};
       const preferred=assign(this.store,run.profile,"force",resumeConfig,Date.now(),run.accountId,run.id);
       const choice=preferred.assignment?preferred:assign(this.store,run.profile,"force",resumeConfig,Date.now(),undefined,run.id);
@@ -270,6 +279,10 @@ export class Daemon {
   }
   private recoverWorkers():void{
     for(const run of this.store.runs(["queued","starting","running","failed"])){
+      if(this.completionPool.owns(run)){
+        if(run.state!=="failed")this.completionPool.start(run);
+        continue;
+      }
       if(!run.accountId||!run.provider||!run.model||!run.workerUnit||!run.releasePath)continue;
       if(this.unitIsActive(run.workerUnit)){
         if(run.state!=="running")this.store.adoptAssignedRun(run.id);
@@ -407,7 +420,7 @@ export class Daemon {
         void this.reconcile();return json(res,201,{runIds:ids});
       }
       if(method==="POST"&&url.pathname==="/v1/wave"){const input=await body(req),lane=this.store.lane(String(input.lane));if(!lane)return json(res,404,{error:"lane not found"});const ids=this.store.createRuns({count:Number(input.count??1),source:"direct",sourceId:lane.id,prompt:lane.prompt,cwd:lane.cwd,profile:lane.profile,budget:input.force?"force":"background"});void this.reconcile();return json(res,201,{runIds:ids});}
-      const runAbort=/^\/v1\/runs\/([^/]+)\/(abort|kill)$/.exec(url.pathname);if(method==="POST"&&runAbort){const id=runAbort[1]!,action=runAbort[2]!;this.store.setControl(`abort:${id}`,action);const run=this.store.run(id);if(action==="kill"||run?.state==="queued"||run?.state==="waiting"){this.stopUnit(run?.workerUnit);this.store.updateRun(id,{state:"aborted",failureKind:"operator",result:`${action} by operator`});}return json(res,200,{ok:true});}
+      const runAbort=/^\/v1\/runs\/([^/]+)\/(abort|kill)$/.exec(url.pathname);if(method==="POST"&&runAbort){const id=runAbort[1]!,action=runAbort[2]!;this.store.setControl(`abort:${id}`,action);const run=this.store.run(id);const completion=this.completions.byRun(id);if(completion){const outcome=this.completions.cancel(completion.requestId);this.stopUnit(run?.workerUnit);return completionReply(outcome);}if(action==="kill"||run?.state==="queued"||run?.state==="waiting"){this.stopUnit(run?.workerUnit);this.store.updateRun(id,{state:"aborted",failureKind:"operator",result:`${action} by operator`});}return json(res,200,{ok:true});}
       if(method==="POST"&&url.pathname==="/v1/control"){const input=await body(req);this.store.setControl(String(input.key),String(input.value));return json(res,200,{ok:true});}
       json(res,404,{error:"not found"});
     }catch(error){json(res,500,{error:String(error)});}
