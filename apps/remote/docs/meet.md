@@ -1,6 +1,6 @@
 # PiStack Meet
 
-Meet is `/meet.html` in the regular Pi Remote frontend. The thread header's Meet link opens it with that thread and environment selected. A host chooses her name and devices, starts the room, and shares its invite link. Guests need network access to the Pi Remote host. The host's supervisor must remain unlocked.
+Meet is `/meet.html` in the regular Pi Remote frontend. The thread header's camera icon beside the settings gear opens it with that thread and environment selected. A host chooses her name and devices, starts the room, and shares its invite link. Guests need network access to the Pi Remote host. The host's supervisor must remain unlocked.
 
 ## Media
 

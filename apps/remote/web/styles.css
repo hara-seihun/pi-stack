@@ -23,11 +23,11 @@ button, input, textarea, select { font: inherit; }
 button { border: 0; border-radius: 0; cursor: pointer; -webkit-tap-highlight-color: transparent; }
 button:disabled { cursor: default; opacity: .45; }
 .motion-definitions { position: fixed; width: 0; height: 0; overflow: hidden; pointer-events: none; }
-button:focus-visible, input:focus-visible, textarea:focus-visible, select:focus-visible, summary:focus-visible { outline: 2px solid var(--accent); outline-offset: -2px; }
+.icon-button:focus-visible, button:focus-visible, input:focus-visible, textarea:focus-visible, select:focus-visible, summary:focus-visible { outline: 2px solid var(--accent); outline-offset: -2px; }
 [hidden] { display: none !important; }
 .muted { color: var(--muted); }
 .accent { color: var(--bg); background: var(--accent); font-weight: 750; padding: 0 15px; min-height: 42px; }
-.icon-button { width: 48px; height: 48px; color: var(--text); background: var(--surface-2); font-size: 21px; font-weight: 700; }
+.icon-button { display: inline-flex; align-items: center; justify-content: center; width: 48px; height: 48px; padding: 0; color: var(--text); background: var(--surface-2); font-size: 21px; font-weight: 700; text-decoration: none; }
 .scrim { position: fixed; inset: 0; z-index: 30; background: rgb(0 0 0 / 70%); }
 
 #drawer { position: fixed; z-index: 40; inset: 0 auto 0 0; width: min(var(--drawer), calc(100vw - 44px)); background: var(--surface); display: flex; flex-direction: column; transform: translateX(-102%); }
