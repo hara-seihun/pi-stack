@@ -220,6 +220,15 @@ button:disabled { cursor: default; opacity: .45; }
 .markdown-body table { display: block; max-width: 100%; margin: .75em 0; overflow-x: auto; border-collapse: collapse; }
 .markdown-body th, .markdown-body td { padding: 6px 9px; border: 1px solid var(--border); text-align: left; }
 .markdown-body img { display: block; max-width: 100%; margin: .9em 0; }
+.inline-image { display: block; width: min(100%, 560px); margin: .9em 0; }
+.inline-image-placeholder { display: flex; min-height: 180px; padding: 24px; flex-direction: column; align-items: center; justify-content: center; gap: 10px; border: 1px solid var(--border); border-radius: 12px; background: var(--surface-2); color: var(--muted); text-align: center; }
+.inline-image-placeholder strong { color: var(--text); font-weight: 500; }
+.inline-image-placeholder[aria-busy="true"]::before { content: ""; width: 24px; height: 24px; border: 2px solid var(--border); border-top-color: var(--accent); border-radius: 50%; animation: inline-image-spin 1.2s linear infinite; }
+.inline-image-error { display: block; color: var(--danger); }
+.inline-image-placeholder.inline-image-error { display: flex; }
+.markdown-body .inline-image img { width: auto; height: auto; max-height: 700px; margin: 0; border-radius: 12px; }
+@keyframes inline-image-spin { to { transform: rotate(360deg); } }
+@media (prefers-reduced-motion: reduce) { .inline-image-placeholder[aria-busy="true"]::before { animation: none; } }
 .markdown-body .katex-display, .markdown-body eqn { max-width: 100%; overflow-x: auto; overflow-y: hidden; padding: .2em 0; }
 .markdown-body .katex { font-size: 1.05em !important; }
 .live-answer > .markdown-body { font-size: inherit; }

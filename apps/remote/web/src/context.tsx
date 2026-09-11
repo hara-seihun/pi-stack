@@ -1,4 +1,9 @@
-import { memo, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
+import { createContext, memo, useContext, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
+import type { InlineImage } from "../../server/inline-image-contract";
+import { installInlineImages, presentInlineImages, type ImagePresentation } from "./inline-images";
+import { resourceUrl } from "./resource-url";
+
+export const InlineImagesContext = createContext<ReadonlyMap<string, InlineImage> | null>(null);
 import { API } from "../../server/api";
 import { applyHtml } from "./markdown-dom";
 import { streamingMarkdown } from "./streaming-markdown";
@@ -41,6 +46,8 @@ markdown.renderer.rules.link_open = (tokens, index, options, env, renderer) => {
   return defaultLinkOpen(tokens, index, options, env, renderer);
 };
 
+installInlineImages(markdown);
+
 const INLINE_IMAGE = /\.(png|jpe?g|gif|webp|avif|svg)$/i;
 
 // A file tag naming an image shows the picture itself; any other file becomes
@@ -50,30 +57,31 @@ function presentationMarkdown(source: string, sessionId: string) {
     const name = String(path).split("/").filter(Boolean).at(-1) || "Download file";
     const label = name.replaceAll("&", "&amp;").replaceAll("[", "&#91;").replaceAll("]", "&#93;").replace(/[\r\n]+/g, " ");
     const link = API.sessionFiles.path({ sessionId }, { path });
-    const href = window.PiRemotePerson?.href(link) ?? link;
+    const href = resourceUrl(link);
     if (INLINE_IMAGE.test(name)) return `\n\n[![${label}](${href})](${href})\n\n`;
     return `\n\n[${label}](${href})\n\n`;
   });
 }
 
-export function renderMarkdown(source: string, sessionId: string, streaming = false) {
-  const normalized = window.normalizeLatexDelimiters(presentationMarkdown(source || "", sessionId));
-  return markdown.render(streaming ? streamingMarkdown(normalized) : normalized);
+export function renderMarkdown(source: string, sessionId: string, streaming = false, presentation: ImagePresentation = {}) {
+  const prepared = presentInlineImages(source || "", sessionId, { ...presentation, streaming });
+  const normalized = window.normalizeLatexDelimiters(presentationMarkdown(prepared.source, sessionId));
+  return markdown.render(streaming ? streamingMarkdown(normalized) : normalized, { inlineImages: prepared.inlineImages });
 }
 
-// The DOM is patched rather than replaced, and a render that throws keeps the
-// previous output, so a message that is already rendered never drops back to
-// its source text between chunks.
-export const Markdown = memo(function Markdown({ source, sessionId, streaming = false, className = "markdown-body" }: { source: string; sessionId: string; streaming?: boolean; className?: string }) {
+export const Markdown = memo(function Markdown({ source, sessionId, streaming = false, assistant = false, className = "markdown-body" }: { source: string; sessionId: string; streaming?: boolean; assistant?: boolean; className?: string }) {
   const element = useRef<HTMLDivElement>(null);
-  const previous = useRef("");
-  const html = useMemo(() => {
-    try { return renderMarkdown(source, sessionId, streaming); }
-    catch { return previous.current; }
-  }, [source, sessionId, streaming]);
-  previous.current = html;
+  const images = useContext(InlineImagesContext);
+  const [failedUrls, setFailedUrls] = useState<ReadonlySet<string>>(() => new Set());
+  const html = useMemo(() => renderMarkdown(source, sessionId, streaming, { assistant, images, failedUrls }), [source, sessionId, streaming, assistant, images, failedUrls]);
   useLayoutEffect(() => { if (element.current) applyHtml(element.current, html); }, [html]);
-  return <div ref={element} className={className} />;
+  return <div ref={element} className={className} onErrorCapture={(event) => {
+    const image = event.target;
+    if (image instanceof HTMLImageElement && image.dataset.inlineImage) {
+      const url = image.getAttribute("src");
+      if (url) setFailedUrls(current => new Set([...current, url]));
+    }
+  }} />;
 });
 
 function formatJson(value: unknown) {
@@ -90,8 +98,7 @@ function fencedContext(value: unknown, language = "json") {
 
 function imageUrl(block: any): string {
   if (typeof block.src === "string" && block.src.startsWith("/v1/sessions/")) {
-    const path = window.PiRemotePerson?.href(block.src) ?? block.src;
-    return window.KenanRemote?.resolveApiUrl(path) ?? path;
+    return resourceUrl(block.src);
   }
   return block.data ? `data:${block.mimeType};base64,${block.data}` : "";
 }
@@ -186,7 +193,7 @@ const MessageEntry = memo(function MessageEntry({ entry, sessionId, onEdit }: { 
         {entry.kind === "user" && Number(entry.messageTimestamp) > 0 && <button type="button" className="message-action edit-message" title="Edit and resend from this point in the conversation" aria-label="Edit and resend from this point in the conversation" onClick={() => onEdit(entry)}><PencilIcon /></button>}
       </div>
     </div>
-    <Markdown source={text} sessionId={sessionId} streaming={entry.streaming} />
+    <Markdown source={text} sessionId={sessionId} streaming={entry.streaming} assistant={entry.kind === "assistant"} />
   </div>;
 }, (before, after) => before.entry.signature === after.entry.signature && before.sessionId === after.sessionId && before.onEdit === after.onEdit);
 

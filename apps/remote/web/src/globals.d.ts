@@ -1,7 +1,7 @@
 declare const __PI_REMOTE_REVISION__: string;
 
 interface MarkdownRenderer {
-  render(source: string): string;
+  render(source: string, env?: Record<string, unknown>): string;
   use(plugin: unknown, options: unknown): MarkdownRenderer;
   renderer: {
     rules: Record<string, ((tokens: any[], index: number, options: any, env: any, renderer: any) => string) | undefined>;
