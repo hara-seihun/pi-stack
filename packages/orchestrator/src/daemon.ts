@@ -145,7 +145,7 @@ export class Daemon {
         if(this.completionPool.owns(run))continue;
         const progress=run.progressAt??run.startedAt??run.createdAt;
         if(now-progress>this.config.killAfterMs){this.stopUnit(run.workerUnit);this.store.updateRun(run.id,{state:"failed",failureKind:"infrastructure",result:"session made no progress"});continue;}
-        if(process.env.PI_ORCHESTRATOR_WORKER_LAUNCH!=="process"&&run.workerUnit&&!this.unitIsActive(run.workerUnit)){
+        if(process.env.PI_ORCHESTRATOR_WORKER_LAUNCH!=="process"&&run.workerUnit&&!await this.unitIsActiveAsync(run.workerUnit)){
           this.restartAssignedWorker(run,now);
           continue;
         }
@@ -257,6 +257,13 @@ export class Daemon {
     if(!unit||unit.startsWith("completion:")){this.completionPool.tick();return;}
     const result=spawnSync("systemctl",["--user","--no-block","stop",unit],{encoding:"utf8",timeout:10_000});
     if(result.error||result.status!==0)throw new Error(`worker stop failed: ${result.error??result.stderr.trim()}`);
+  }
+  private unitIsActiveAsync(unit:string):Promise<boolean>{
+    return new Promise((resolve,reject)=>execFile("systemctl",["--user","is-active","--quiet",unit],{timeout:10_000},error=>{
+      if(!error)return resolve(true);
+      if(error.code===3||error.code===4)return resolve(false);
+      reject(error);
+    }));
   }
   private unitIsActive(unit:string):boolean{
     return spawnSync("systemctl",["--user","is-active","--quiet",unit]).status===0;

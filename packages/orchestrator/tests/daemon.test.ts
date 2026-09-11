@@ -37,6 +37,25 @@ it("serves worker abort controls and rejects unknown worker actions", async () =
   }
 });
 
+it("serves HTTP while worker health checks are pending", async () => {
+  const store=Store.open(":memory:"), daemon=new Daemon(store,loadConfig("/missing"),"/release") as any;
+  store.upsertAccount({id:"account",provider:"openai-codex"});
+  const [id]=store.createRuns({count:1,source:"direct",prompt:"work",cwd:"/tmp",profile:"luna",budget:"force"});
+  store.assignRun(id!,{accountId:"account",provider:"openai-codex",model:"gpt-5.6-luna",unit:"unit",releasePath:"/release"});
+  daemon.codexMeters.sample=async()=>[];daemon.anthropicMeters.sample=async()=>[];
+  let entered!:()=>void, release!:()=>void;
+  const waiting=new Promise<void>(resolve=>{entered=resolve;});
+  daemon.unitIsActiveAsync=()=>{entered();return new Promise<boolean>(resolve=>{release=()=>resolve(true);});};
+  const server=createServer((req,res)=>void daemon.request(req,res));
+  let reconciling:Promise<void>|undefined;
+  try{
+    await new Promise<void>(resolve=>server.listen(0,"127.0.0.1",resolve));
+    reconciling=daemon.reconcile();await waiting;
+    const response=await fetch(`http://127.0.0.1:${(server.address() as {port:number}).port}/v1/status`,{signal:AbortSignal.timeout(1000)});
+    expect(response.status).toBe(200);expect((await response.json()).runs[0].id).toBe(id);
+  }finally{release?.();await reconciling;await new Promise<void>(resolve=>server.close(()=>resolve()));store.close();}
+});
+
 it("suspends and restores an account without touching its credential", async () => {
   const store = Store.open(":memory:");
   store.upsertAccount({ id: "openai-codex-3", provider: "openai-codex", concurrency: 4 });

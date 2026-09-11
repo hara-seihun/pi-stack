@@ -345,8 +345,8 @@ export class Store {
       return true;
     });
   }
-  activeCount(source?:RunSource,sourceId?:string):number{return this.runs(["queued","starting","running","waiting"]).filter(run=>(!source||run.source===source)&&(!sourceId||run.sourceId===sourceId)).length;}
-  admittedLaneCount(sourceId:string):number{return this.runs(["starting","running","waiting"]).filter((run)=>run.source==="lane"&&run.sourceId===sourceId).length;}
+  activeCount(source?:RunSource,sourceId?:string):number{return Number((this.db.prepare("SELECT count(*) count FROM run WHERE state IN ('queued','starting','running') AND (? IS NULL OR source=?) AND (? IS NULL OR source_id=?)").get(source??null,source??null,sourceId??null,sourceId??null) as {count:number}).count);}
+  admittedLaneCount(sourceId:string):number{return Number((this.db.prepare("SELECT count(*) count FROM run WHERE source='lane' AND source_id=? AND state IN ('starting','running')").get(sourceId) as {count:number}).count);}
   trimQueuedLane(sourceId:string,keep:number,at=Date.now()):number{
     const rows=this.db.prepare("SELECT id FROM run WHERE source='lane' AND source_id=? AND state='queued' ORDER BY created_at,id").all(sourceId) as {id:string}[];
     const removed=rows.slice(Math.max(0,keep));

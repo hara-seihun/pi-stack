@@ -125,7 +125,7 @@ describe("quota-paced admission",()=>{
     const ids=[run(store),run(store)];store.recordMeter("openai-codex","codex-7d",65,now+144*HOUR,now);
     const daemon=new Daemon(store,{...config,maxConcurrentSessions:1},"/release") as any;
     daemon.loadManifest=async()=>{};daemon.codexMeters.sample=async()=>[];daemon.anthropicMeters.sample=async()=>[];
-    daemon.unitIsActive=()=>true;daemon.startUnit=()=>{throw new Error("new launches must be refused");};
+    daemon.unitIsActive=()=>true;daemon.unitIsActiveAsync=async()=>true;daemon.startUnit=()=>{throw new Error("new launches must be refused");};
     daemon.stopUnit=()=>{throw new Error("existing workers must not stop");};
     await daemon.reconcile();
     expect(store.activeLeases()).toHaveLength(2);expect(store.admittedLaneCount("math")).toBe(2);
@@ -151,7 +151,7 @@ describe("quota-paced admission",()=>{
     const store=Store.open(":memory:"),now=Date.now();account(store);store.reconcileLanes([lane("math")]);
     const id=run(store);store.endLease(`run:${id}`);store.recordMeter("openai-codex","codex-7d",65,now+144*HOUR,now);
     const daemon=new Daemon(store,config,"/release") as any,resumed:string[]=[];
-    daemon.unitIsActive=()=>false;daemon.startUnit=(_unit:string,savedId:string)=>resumed.push(savedId);
+    daemon.unitIsActive=()=>false;daemon.unitIsActiveAsync=async()=>false;daemon.startUnit=(_unit:string,savedId:string)=>resumed.push(savedId);
     daemon.recoverWorkers();await daemon.fillCapacity();
     expect(resumed).toEqual([id]);expect(store.run(id)).toMatchObject({state:"starting",sessionFile:"/saved.jsonl",model:"gpt-6-astra",releasePath:"/release"});
     expect(store.activeLeases()).toHaveLength(1);expect(store.runs()).toHaveLength(1);store.close();

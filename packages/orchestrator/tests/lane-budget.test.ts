@@ -33,7 +33,7 @@ function fixture(budget:unknown="force",maxConcurrentSessions=10){
     const instance=new Daemon(store,config,"/release") as any;
     instance.codexMeters.sample=async()=>[];instance.anthropicMeters.sample=async()=>[];
     instance.startUnit=(_unit:string,id:string)=>store.updateRun(id,{state:"running"});
-    instance.unitIsActive=()=>true;
+    instance.unitIsActive=()=>true;instance.unitIsActiveAsync=async()=>true;
     instance.stopUnit=()=>{throw new Error("admitted workers must survive admission changes");};
     return instance;
   };
