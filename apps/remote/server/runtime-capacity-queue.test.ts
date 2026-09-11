@@ -21,3 +21,15 @@ test("overlapping probes and a slow control channel cannot restart waiting work"
   const check=queue.check();await queue.check();expect(probes).toBe(1);
   queue.stop();resolve(1);await check;expect(resumed).toBe(0);
 });
+
+test("coordinator priority and cancellation remain effective during capacity checks",async()=>{
+  let resolve!:(slots:number)=>void;
+  const order:string[]=[];
+  const queue=new RuntimeCapacityQueue(()=>new Promise<number>(r=>{resolve=r;}),60_000);
+  try {
+    queue.block("leaf",()=>order.push("leaf"),()=>0);
+    queue.block("root",()=>order.push("root"),()=>1);
+    const first=queue.check();resolve(1);await first;expect(order).toEqual(["root"]);
+    const next=queue.check();queue.cancel("leaf");resolve(1);await next;expect(order).toEqual(["root"]);
+  }finally{queue.stop();}
+});

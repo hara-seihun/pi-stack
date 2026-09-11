@@ -29,6 +29,7 @@ export class RuntimeCapacityQueue {
       const slots = Math.max(0, Math.floor(await this.capacity(priority)));
       if (this.stopped) return;
       for (const [id, entry] of ordered.filter(([,entry])=>entry.priority()===priority).slice(0, slots)) {
+        if (this.waiting.get(id) !== entry) continue;
         this.waiting.delete(id);
         entry.resume();
       }
