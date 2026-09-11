@@ -90,7 +90,12 @@ async function open(options) {
     finally { finish(); }
   }
   sessions.set(socketPath, {close});
-  channel.listen(socketPath);
+  try {
+    await new Promise((resolve, reject) => {
+      channel.once('error', reject);
+      channel.listen(socketPath, resolve);
+    });
+  } catch (error) { finish(1); throw error; }
   const ready = scope.run(env, () => openSession(options, publish, finish)).then(value => { adapter = value; }).catch(error => {
     publish({type:'extension_error',error:String(error)});
     console.error(`Runner session ${options.sessionId}:`,error);

@@ -1,5 +1,5 @@
 import {afterEach, expect, test} from "bun:test";
-import {mkdtempSync, writeFileSync, rmSync} from "node:fs";
+import {mkdtempSync, mkdirSync, writeFileSync, rmSync} from "node:fs";
 import {tmpdir} from "node:os";
 import {join} from "node:path";
 import {pathToFileURL} from "node:url";
@@ -48,6 +48,14 @@ test("runner rejects excess residency and admits again after one session closes"
   await first.terminate();
   const second=await startRuntimeHost({...options,sessionId:"second",onOutput(){}});transports.push(second);
   expect(second.pid).toBe(first.pid);
+});
+
+test("shared sessions fit Linux sockets under production-length encrypted data paths",async()=>{
+  const options=fixture();
+  options.data=join(options.data,"hara",".pi-remote");mkdirSync(options.data,{recursive:true});
+  const host=await startRuntimeHost({...options,sessionId:crypto.randomUUID(),onOutput(){}});transports.push(host);
+  expect(Buffer.byteLength(host.socketPath)).toBeLessThan(108);
+  expect(host.shared).toBe(true);
 });
 
 test("session output survives supervisor detach and can be acknowledged repeatedly",async()=>{

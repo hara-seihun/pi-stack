@@ -1431,11 +1431,9 @@ async function startRuntime(row: any): Promise<Runtime> {
     await terminateRuntimeProcess(rt);
     if (runtimes.get(row.id) === rt) runtimes.delete(row.id);
     if (cancelled || !ownsSupervisorLease() || String(cause).includes("Runner capacity busy")) throw cause;
-    if (resumePath) {
-      db.query("UPDATE sessions SET session_path=NULL WHERE id=?").run(row.id);
-      emit(row.id, "notice", { text: "Session could not resume; restoring from saved conversation history" });
-      return startRuntime({ ...row, session_path: null });
-    }
+    // A transport, capacity, or extension failure does not invalidate a saved
+    // session file. Retry that exact file; only the missing-file check above
+    // switches to reconstruction from the conversation ledger.
     throw cause;
   }
 }

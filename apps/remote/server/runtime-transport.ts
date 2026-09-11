@@ -244,7 +244,9 @@ export async function startRuntimeHost(options: StartOptions): Promise<RuntimeTr
   }
   await starting;
   options.signal?.throwIfAborted();
-  const socketPath = runtimeSocketPath(options.data, options.sessionId);
+  // Linux sockaddr_un allows 107 pathname bytes. Full thread + launch UUIDs
+  // exceed that under a real person's encrypted data directory in Node.
+  const socketPath = join(options.data, "runtime-hosts", `${crypto.randomUUID()}.sock`);
   await runnerRequest(control, {type:"open",options:{socketPath,sessionId:options.sessionId,cwd:options.cwd,args:options.args,env:options.env}});
   const connected = await connectHost(socketPath, options.onOutput, CONNECT_TIMEOUT_MS);
   if ("error" in connected) {

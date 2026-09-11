@@ -20,8 +20,11 @@ export async function openSession({ cwd, args, env }, output, exit) {
     const provider = value('--provider'), modelId = value('--model');
     const model = provider && modelId ? services.modelRuntime.getModel(provider, modelId) : undefined;
     if (provider && modelId && !model) throw new Error(`Model not found: ${provider}/${modelId}`);
+    const threadEnv = Object.fromEntries(Object.entries(env).filter(([key]) => key.startsWith('PI_REMOTE_') || key === 'PI_SUBAGENT_MODEL'));
     const bash = createBashTool(targetCwd, {spawnHook: context => ({...context,
-      env: {...context.env, ...env, PI_REMOTE_CONTEXT_OWNER_PID: String(process.pid)}})});
+      // Preserve the native extension's release-pinned PATH while supplying
+      // this thread's identity to subprocesses instead of a shared global.
+      env: {...context.env, ...threadEnv, PI_REMOTE_CONTEXT_OWNER_PID: String(process.pid)}})});
     const created = await createAgentSessionFromServices({services, sessionManager: manager, sessionStartEvent,
       model, thinkingLevel: value('--thinking'), customTools: [bash]});
     return {...created, services, diagnostics: services.diagnostics};
