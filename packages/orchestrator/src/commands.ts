@@ -65,7 +65,7 @@ export async function dispatch(argv:string[]):Promise<void>{
       const store=Store.open(ledgerPath());
       try {
         const owner=new AccountTransfer(store,loadConfig().authPath,transferEndpoint(ledgerPath())),signal=AbortSignal.timeout(30_000);
-        let input:any;try{input=JSON.parse(readFileSync(0,"utf8"));}catch{throw new Error("Invalid transfer input");}
+        let input:any;try{let text="";for await(const chunk of process.stdin)text+=chunk.toString();input=JSON.parse(text);}catch{throw new Error("Invalid transfer input");}
         if(tail[0]==="inspect")output(await owner.inspect(input.alias,signal));
         else if(tail[0]==="receive")output(await owner.receive(input,signal));
         else throw new Error("Transfer receiver requires inspect or receive");
