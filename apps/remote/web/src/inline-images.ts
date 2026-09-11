@@ -14,7 +14,7 @@ function escape(value: string) {
 }
 
 function imageHtml(tag: InlineImageTag, sessionId: string, presentation: ImagePresentation): string {
-  const image = presentation.images?.get(tag.id);
+  const image = tag.partial ? undefined : presentation.images?.get(tag.id);
   const error = tag.error || image?.error?.message;
   const warning = image?.conflict ? `<span class="inline-image-error" role="alert">${escape(image.conflict)}</span>` : "";
   const label = escape(tag.id || "Image");
@@ -54,7 +54,7 @@ export function installInlineImages(markdown: any) {
 export function presentInlineImages(source: string, sessionId: string, presentation: ImagePresentation) {
   const inlineImages = new Map<string, string>();
   if (!presentation.assistant || !sessionId) return { source, inlineImages };
-  const tags = parseInlineImageTags(source);
+  const tags = parseInlineImageTags(source, { streaming: presentation.streaming });
   let prefix = "<\uE000image";
   while (source.includes(prefix)) prefix += "x";
   let result = "";

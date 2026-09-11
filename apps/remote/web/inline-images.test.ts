@@ -28,6 +28,24 @@ describe("inline image presentation", () => {
     }
   });
 
+  test("streaming hides every unfinished tag prefix and keeps code examples inert", () => {
+    for (let length = 1; length < tag.length; length++) {
+      const html = render("Before " + tag.slice(0, length), { assistant: true, streaming: true });
+      expect(html).not.toContain("&lt;");
+      expect(html).not.toContain('prompt=');
+    }
+    const partial = '<pi-remote-image id="scene" prompt="An ocean\nwith `backticks` and <pi-remote-image';
+    const html = render(partial, { assistant: true, streaming: true, images: new Map([["scene", image({ state: "complete", path: "/existing.png" })]]) });
+    expect(html).toContain('aria-busy="true"');
+    expect(html).toContain('<span class="inline-image-label">scene</span>');
+    expect(html).not.toContain("<img");
+    expect(html).not.toContain("backticks");
+    for (const prefix of ["`", "```xml\n", "~~~\n", "    ", "\\"]) {
+      expect(render(prefix + tag, { assistant: true, streaming: true })).not.toContain('class="inline-image"');
+    }
+    expect(render(partial, { assistant: false, streaming: true })).not.toContain('class="inline-image"');
+  });
+
   test("replaces queued state with lazy image using selected person and native environment", () => {
     const original = globalThis.window;
     globalThis.window = {
