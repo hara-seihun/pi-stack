@@ -2967,6 +2967,12 @@ function stopSupervisorTimers() {
   retryTimers.clear();
 }
 
+async function closeImageGeneration() {
+  inlineImages.stop();
+  try { await imageProvider?.close(); }
+  finally { await inlineImages.close(); }
+}
+
 async function handoffRelease() {
   if (shuttingDown) return;
   releaseHandoffRequested = true;
@@ -2983,7 +2989,7 @@ async function handoffRelease() {
   for (const rt of runtimes.values()) rt.transport.detach();
   await meet.close();
   server.stop(true);
-  await imageProvider?.close();
+  await closeImageGeneration();
   agentHost.close();
   db.close();
   console.log("Pi Remote supervisor handed active runtimes to the selected release");
@@ -3010,7 +3016,7 @@ async function shutdown() {
   await Promise.race([Promise.all(exits), Bun.sleep(3_000)]);
   await meet.close();
   server.stop();
-  await imageProvider?.close();
+  await closeImageGeneration();
   agentHost.close();
   db.close();
   process.exit(0);

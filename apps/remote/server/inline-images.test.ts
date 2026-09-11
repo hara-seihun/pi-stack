@@ -22,7 +22,7 @@ async function fixture(generate: InlineImageGenerator, concurrency = 2) {
   const listeners = new Set<() => void>();
   const changed = () => { for (const listener of listeners) listener(); };
   const service = new InlineImages(db, join(root, "images"), generate, changed, concurrency);
-  cleanup.push(async () => { service.stop(); db.close(); await rm(root, { recursive: true, force: true }); });
+  cleanup.push(async () => { await service.close(); db.close(); await rm(root, { recursive: true, force: true }); });
   const until = (condition: () => boolean) => new Promise<void>((resolve, reject) => {
     const timer = setTimeout(() => { listeners.delete(check); reject(new Error("Image service did not settle")); }, 1500);
     const check = () => { if (condition()) { clearTimeout(timer); listeners.delete(check); resolve(); } };
@@ -194,8 +194,9 @@ test("restart resumes queued rows but never resubmits a claimed provider attempt
   await f.service.start();
   await started.promise;
   expect(calls).toBe(1);
-  f.service.stop();
+  const closing = f.service.close();
   await interrupted.promise;
+  await closing;
   let recoveredCalls = 0;
   const replacement = new InlineImages(f.db, join(f.root, "images"), async () => { recoveredCalls++; return success(); }, f.changed);
   await replacement.start();
@@ -203,7 +204,26 @@ test("restart resumes queued rows but never resubmits a claimed provider attempt
   await f.until(() => replacement.snapshot("thread").images[1]?.state === "complete");
   expect(recoveredCalls).toBe(1);
   expect(replacement.snapshot("thread").images[1].state).toBe("complete");
-  replacement.stop();
+  await replacement.close();
+});
+
+test("graceful close drains successful publication before the next supervisor recovers it", async () => {
+  const returned = deferred();
+  const f = await fixture(async () => { returned.resolve(); return success(); });
+  f.service.accept("thread", "request", '<pi-remote-image id="published" prompt="Published" />');
+  await f.service.start();
+  await returned.promise;
+  await f.service.close();
+  expect(f.service.snapshot("thread").images[0].state).toBe("generating");
+  const row = f.db.query("SELECT attempt_dir FROM inline_images").get() as { attempt_dir: string };
+  const receipt = JSON.parse(await readFile(join(row.attempt_dir, "receipt.json"), "utf8"));
+  expect(await readFile(receipt.path)).toEqual(png);
+  let calls = 0;
+  const replacement = new InlineImages(f.db, join(f.root, "images"), async () => { calls++; return success(); }, f.changed);
+  await replacement.start();
+  expect(replacement.snapshot("thread").images[0]).toMatchObject({ state: "complete", path: receipt.path });
+  expect(calls).toBe(0);
+  await replacement.close();
 });
 
 test("restart publishes an fsynced provider receipt without another request", async () => {
@@ -219,5 +239,5 @@ test("restart publishes an fsynced provider receipt without another request", as
   await replacement.start();
   expect(replacement.snapshot("thread").images[0]).toMatchObject({ state: "complete", path: image.path });
   expect(calls).toBe(0);
-  replacement.stop();
+  await replacement.close();
 });

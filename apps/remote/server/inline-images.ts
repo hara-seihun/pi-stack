@@ -22,7 +22,7 @@ async function syncDirectory(path: string) {
 }
 
 export class InlineImages {
-  private active = new Map<string, AbortController>();
+  private active = new Map<string, { controller: AbortController; task: Promise<void> }>();
   private stopped = true;
   private pumping = false;
   private scheduled = false;
@@ -102,8 +102,13 @@ export class InlineImages {
 
   stop() {
     this.stopped = true;
-    for (const controller of this.active.values()) controller.abort();
+    for (const { controller } of this.active.values()) controller.abort();
     // In-flight rows remain generating until the next owner reconciles their receipts.
+  }
+
+  async close(): Promise<void> {
+    this.stop();
+    await Promise.all([...this.active.values()].map(({ task }) => task));
   }
 
   private rows(sessionId?: string): Row[] {
@@ -198,11 +203,11 @@ export class InlineImages {
         const directory = join(this.root, hash(row.session_id), image.id);
         // A durable claim precedes even auth/input preparation. Uncertainty never resubmits.
         if (!this.save(row.session_id, { ...image, state: "generating" }, directory)) continue;
-        this.active.set(key, controller);
-        void this.run(row.session_id, image, directory, controller.signal).finally(() => {
+        const task = this.run(row.session_id, image, directory, controller.signal).finally(() => {
           this.active.delete(key);
           if (!this.stopped) { this.pump(); this.changed(); }
         });
+        this.active.set(key, { controller, task });
       }
     } finally { this.pumping = false; }
     this.changed();
