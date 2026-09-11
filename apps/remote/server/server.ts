@@ -1413,7 +1413,8 @@ async function startRuntime(row: any): Promise<Runtime> {
     if (rt.expectedExit || rt.startupAbort.signal.aborted) throw new Error("Activation cancelled");
     setRuntimePhase(row.id, rt, "STARTING", "STARTING");
     const state = await rpc(rt, "get_state", {}, 120_000);
-    if (!ownsSupervisorLease() || rt.phase !== "STARTING") throw new Error("Activation cancelled");
+    if (!ownsSupervisorLease() || rt.expectedExit || rt.startupAbort.signal.aborted
+      || runtimes.get(row.id) !== rt || ["ABORTING", "STOPPING"].includes(phaseOf(rt))) throw new Error("Activation cancelled");
     if (state.model?.id) rt.modelId = String(state.model.id);
     if (state.sessionFile) db.query("UPDATE sessions SET session_path=? WHERE id=?").run(state.sessionFile, row.id);
     if (state.model?.provider) db.query("UPDATE sessions SET current_provider=?,revision=revision+1,updated_at=? WHERE id=?")
@@ -1427,7 +1428,12 @@ async function startRuntime(row: any): Promise<Runtime> {
     const pendingWork = Number((db.query(
       "SELECT COUNT(*) AS count FROM work_items WHERE session_id=? AND state IN ('queued','running')",
     ).get(row.id) as any)?.count ?? 0);
-    setRuntimePhase(row.id, rt, "IDLE", pendingWork > 0 ? "RUNNING" : "IDLE");
+    // Replayed/live events may advance this runtime while get_state is in flight.
+    // That is successful activation, not cancellation; never overwrite it with IDLE.
+    if (rt.phase === "STARTING") {
+      const working = Boolean(state.isStreaming || state.isCompacting || Number(state.pendingMessageCount ?? 0));
+      setRuntimePhase(row.id, rt, working ? "RUNNING" : "IDLE", working || pendingWork > 0 ? "RUNNING" : "IDLE");
+    }
     if (rt.historyNeedsRestore) emit(row.id, "notice", { text: "Conversation context will be restored with the next message" });
     scheduleThreadNameIfDue(row.id);
     return rt;

@@ -34,6 +34,7 @@ const port = 20_000 + ((process.ppid * 4 + shardIndex) % 10_000);
 const base = `http://127.0.0.1:${port}`;
 let server: ReturnType<typeof Bun.spawn>;
 let sharedRunnerFixture = false;
+let startupEventsFixture = false;
 setDefaultTimeout(30_000);
 
 async function api(method: string, path: string, body?: unknown) {
@@ -91,6 +92,7 @@ async function startServer() {
       ...process.env,
       PATH: `${root}:${process.env.PATH ?? ""}`,
       PI_BIN: fakePi,
+      PI_FAKE_STARTUP_EVENTS: startupEventsFixture ? "1" : "",
       PI_REMOTE_ACTIONS: JSON.stringify([{ id: "thunder", label: "Thunder", icon: "thunder", status: [fakeAudio, "status"], on: [fakeAudio, "thunder"], off: [fakeAudio, "stop"] }]),
       PI_FAKE_AUDIO_STATE: fakeAudioState,
       PI_REMOTE_DATA: join(root, "data"),
@@ -233,6 +235,9 @@ for line in sys.stdin:
   if first_state:
    first_state = False
    pause(0.12)
+   if os.environ.get('PI_FAKE_STARTUP_EVENTS'):
+    streaming = True
+    out({'type':'agent_start'})
   out({'type':'response','id':rid,'command':'get_state','success':True,'data':{'isStreaming':streaming,'isCompacting':compacting,'pendingMessageCount':len(steering)+len(follow_up),'messageCount':0,'thinkingLevel':thinking_level,'sessionFile':None,'sessionName':session_name,'model':{'provider':provider,'id':model_id,'name':model_id}}})
  elif kind == 'get_available_models':
   out({'type':'response','id':rid,'command':kind,'success':True,'data':{'models':[
@@ -514,6 +519,27 @@ async function createThread(destination = "home", model?: string) {
 }
 
 describe("web and supervisor integration", () => {
+  test("live events during activation are not cancellation and preserve RUNNING", async () => {
+    server.kill(); await server.exited;
+    startupEventsFixture = true;
+    await startServer();
+    let id: string | undefined;
+    try {
+      const created = await api("POST", "/v1/sessions", {requestId:crypto.randomUUID(),destination:"home",model:"astra"});
+      expect(created.status).toBe(201); id = created.value.session.id;
+      const read = () => api("GET", `/v1/sessions/${id}`).then(result=>result.value.session);
+      await waitFor(read, session=>session?.state === "RUNNING" || session?.state === "FAILED");
+      await Bun.sleep(100);
+      const session = await read();
+      expect(session.state).toBe("RUNNING");
+      expect(session.lastError).toBeNull();
+    } finally {
+      if(id)await api("DELETE", `/v1/sessions/${id}`);
+      server.kill(); await server.exited;
+      startupEventsFixture=false; await startServer();
+    }
+  });
+
   test("capacity-blocked shared sessions remain QUEUED without revision churn and can be cancelled", async () => {
     server.kill(); await server.exited;
     sharedRunnerFixture = true;
