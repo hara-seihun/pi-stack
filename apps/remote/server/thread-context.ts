@@ -6,6 +6,7 @@ import { threadStateInstructions } from "./thread-context-state";
 import { API } from "./api";
 import { registerMeetTools } from "./meet/tools";
 import { registerThreadTools } from "./thread-tools";
+import { sessionEnvironment } from "./session-environment";
 
 type Alert = { file: string; path?: string; text: string; error?: string };
 
@@ -36,14 +37,15 @@ function alertText(alerts: Alert[]): string {
 }
 
 export default function threadContext(pi: ExtensionAPI) {
-  if (process.env.PI_REMOTE_SESSION_ID && process.env.PI_REMOTE_SERVER_URL) registerThreadTools(pi);
-  if (process.env.PI_REMOTE_MEETING_ID) registerMeetTools(pi);
+  const environment = sessionEnvironment();
+  if (environment.PI_REMOTE_SESSION_ID && environment.PI_REMOTE_SERVER_URL) registerThreadTools(pi);
+  if (environment.PI_REMOTE_MEETING_ID) registerMeetTools(pi);
   const pendingAlerts = new Map<string, string>();
 
   pi.on("before_agent_start", async (event, ctx) => {
     let meetingInstructions = "";
-    if (process.env.PI_REMOTE_SERVER_URL && process.env.PI_REMOTE_SESSION_ID) {
-      const url = new URL(API.sessionInstructions.path({ sessionId: process.env.PI_REMOTE_SESSION_ID }), process.env.PI_REMOTE_SERVER_URL);
+    if (environment.PI_REMOTE_SERVER_URL && environment.PI_REMOTE_SESSION_ID) {
+      const url = new URL(API.sessionInstructions.path({ sessionId: environment.PI_REMOTE_SESSION_ID }), environment.PI_REMOTE_SERVER_URL);
       const response = await fetch(url, { signal: AbortSignal.timeout(5_000) });
       if (!response.ok) throw new Error(`Thread instructions failed: HTTP ${response.status}`);
       meetingInstructions = ((await response.json()) as { instructions: string }).instructions;
@@ -51,16 +53,16 @@ export default function threadContext(pi: ExtensionAPI) {
     const instructions = threadStateInstructions({
       name: pi.getSessionName(),
       prompt: event.prompt,
-      fileTag: process.env.PI_REMOTE_FILE_TAG ?? "pi-remote-file",
-      home: process.env.HOME || homedir(),
-      inlineImages: !!(process.env.PI_REMOTE_SESSION_ID && process.env.PI_REMOTE_SERVER_URL),
+      fileTag: environment.PI_REMOTE_FILE_TAG ?? "pi-remote-file",
+      home: environment.HOME || homedir(),
+      inlineImages: !!(environment.PI_REMOTE_SESSION_ID && environment.PI_REMOTE_SERVER_URL),
     }) + (meetingInstructions ? `\n\n${meetingInstructions}` : "");
     const userMessages = ctx.sessionManager.getBranch().filter((entry: any) => entry?.type === "message" && entry.message?.role === "user").length;
     if (userMessages !== 1 || !/^\d+$/.test(pi.getSessionName() ?? "")) {
       return { systemPrompt: `${event.systemPrompt}\n\n${instructions}` };
     }
 
-    const alerts = readAlerts(process.env.PI_REMOTE_ALERTS_INBOX);
+    const alerts = readAlerts(environment.PI_REMOTE_ALERTS_INBOX);
     for (const alert of alerts) {
       if (alert.path && !alert.error) pendingAlerts.set(alert.path, alert.text);
     }

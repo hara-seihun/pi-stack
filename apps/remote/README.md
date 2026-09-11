@@ -2,7 +2,13 @@
 
 A self-hosted web and Android controller for persistent [Pi](https://pi.dev) coding-agent sessions.
 
-Pi Remote keeps session state in SQLite, talks to Pi through RPC mode, survives browser or app disconnects, queues prompts durably, and streams tool and model activity. It observes autonomous agents through Pi Orchestrator's public read model rather than reading that service's SQLite tables. The Orchestrator tab groups running agents by host. A front door starts one supervisor per person, and a person's private directory is mounted only while she has unlocked it.
+Pi Remote keeps session state in SQLite, talks to Pi through its RPC protocol, survives browser or app disconnects, queues prompts durably, and streams tool and model activity. It observes autonomous agents through Pi Orchestrator's public read model rather than reading that service's SQLite tables. The Orchestrator tab groups running agents by host. A front door starts one supervisor per person, and a person's private directory is mounted only while she has unlocked it.
+
+Parents and delegated subagents share one Node SDK runner per person and release generation. Each conversation has its own AgentSession, cwd, extension instances, async-scoped environment, RPC socket and durable session file; opening a child does not launch another Pi CLI or Bun relay. Closing one conversation disposes only that session and its extension resources. Session lifecycle operations use the socket, never the shared PID. The pinned upstream RPC implementation is adapted by `packages/runtime/patch-shared-rpc.mjs`, preserving its command and extension UI contract while moving stdin/stdout, signals and process exit to the host.
+
+The runner admits at most eight resident sessions by default (`PI_REMOTE_MAX_ACTIVE_RUNTIMES`), stops admission at 6 GiB RSS (`PI_REMOTE_RUNNER_MAX_RSS_MB`) or 80% of a cgroup memory ceiling, and leaves excess work in SQLite for retry. An idle session with committed context and no pending work can unload to make room; its saved conversation is retained. Each runner has an 8 GiB V8 heap ceiling. Browser and shell subprocesses remain separate and count toward the service's memory budget. This runner owns Remote threads and their delegated children; Orchestrator fleet workers retain their own transient-unit lifecycle.
+
+RPC output awaiting supervisor acknowledgement is spooled beside the session socket instead of accumulating in RAM. Reattachment streams the unacknowledged records with backpressure. Once all sessions close, the runner exits after five seconds. Runtime control sockets are under the person's data directory in `runtime-runners/`, separate from per-session sockets in `runtime-hosts/`.
 
 Interactive Pi children run at normal scheduler priority. Background services and CI must yield through their own scheduler settings. Lowering the interactive child priority makes every compiler, test, and file scan it starts lose CPU at the exact moment an operator is waiting for it.
 
@@ -67,7 +73,7 @@ Android's [notification service](../kenan/android/app/src/main/java/works/kenan/
 ## Requirements
 
 - [Bun](https://bun.sh/), `jq`, and `gocryptfs` for encrypted folders
-- Pi on the supervisor's `PATH`
+- Node.js on the supervisor's `PATH` and the pinned Pi SDK in the deployed dependency tree
 - `PI_REMOTE_THREAD_NAMING_MODEL` set to an explicit OpenAI Pi model selection
 - `apps/remote` installed as Pi's final configured package
 - the root npm workspaces installed and Pi Orchestrator built
@@ -155,7 +161,7 @@ sudo systemctl start pi-remote-router
 
 The reference units in [`../../deploy/systemd`](../../deploy/systemd) show what the front door and supervisor need. Pi Remote must be the last configured Pi package so its read-only context mirror is the final `context` handler; the supervisor refuses to start otherwise.
 
-A reload of a supervisor unit replaces the supervisor process immediately. Per-thread runtime hosts remain in the same service cgroup and mount namespace, so active Pi processes finish their turns and the replacement supervisor reconnects their RPC streams in parallel. Health and saved thread state remain available during that reconnection; an action that needs a runtime waits for it to finish. Once an adopted runtime settles, the supervisor replaces it before its next use so provider and extension changes take effect. Stopping the unit still kills every process and destroys the private mount. The encrypted ledger backup runs in an owned worker on a separate SQLite connection. It retains the last good snapshot on failure and reuses snapshots younger than six hours across restarts. Copying a large database cannot block the supervisor's runtime-attachment deadlines or client requests.
+A reload of a supervisor unit replaces the supervisor process immediately. Shared runners remain in the same service cgroup and mount namespace, so active sessions finish their turns and the replacement supervisor reconnects their RPC streams in parallel. Health and saved thread state remain available during that reconnection; an action that needs a runtime waits for it to finish. Once an adopted session settles, the supervisor replaces it before its next use so provider and extension changes take effect. A release handoff can temporarily retain the preceding runner generation until its active turns finish. Stopping the unit still kills every process and destroys the private mount. The encrypted ledger backup runs in an owned worker on a separate SQLite connection. It retains the last good snapshot on failure and reuses snapshots younger than six hours across restarts. Copying a large database cannot block the supervisor's runtime-attachment deadlines or client requests.
 
 ## Test
 

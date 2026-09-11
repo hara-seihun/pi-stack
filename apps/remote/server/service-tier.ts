@@ -1,9 +1,10 @@
 import { readFileSync } from "node:fs";
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
+import { sessionEnvironment } from "./session-environment";
 
 /** Applies the per-thread speed mode maintained by the Pi Remote supervisor. */
 export default function piRemoteServiceTier(pi: ExtensionAPI) {
-  const path = process.env.PI_REMOTE_SERVICE_TIER_FILE;
+  const path = sessionEnvironment().PI_REMOTE_SERVICE_TIER_FILE;
   if (!path) return;
 
   pi.on("before_provider_request", (event, context) => {

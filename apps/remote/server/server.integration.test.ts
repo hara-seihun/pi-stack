@@ -107,6 +107,7 @@ async function startServer() {
       PI_REMOTE_RUNTIME_RESTART_DELAY_MS: "20",
       PI_REMOTE_INGESTION: join(root, "ingestion"),
       PI_FAKE_LAUNCH: fakeLaunch,
+      PI_REMOTE_RUNTIME_DRIVER: "command",
       PI_FAKE_NAMING_LOG: fakeNamingLog,
       PI_FAKE_RPC_LOG: fakeRpcLog,
       PI_FAKE_CHILD_PID: fakeChildPid,

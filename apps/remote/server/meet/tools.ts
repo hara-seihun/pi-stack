@@ -2,10 +2,12 @@ import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 import { Type } from "typebox";
 import { API, type Route } from "../api";
 import type { MeetSnapshot } from "./protocol";
+import { sessionEnvironment } from "../session-environment";
 
 export function registerMeetTools(pi: ExtensionAPI) {
-  const sessionId = process.env.PI_REMOTE_SESSION_ID!;
-  const server = process.env.PI_REMOTE_SERVER_URL!;
+  const environment = sessionEnvironment();
+  const sessionId = environment.PI_REMOTE_SESSION_ID!;
+  const server = environment.PI_REMOTE_SERVER_URL!;
 
   async function request(route: Route, signal?: AbortSignal, body?: unknown) {
     const url = new URL(route.path({ sessionId }), server);

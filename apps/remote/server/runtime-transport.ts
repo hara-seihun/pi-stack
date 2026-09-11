@@ -1,4 +1,5 @@
-import { existsSync, mkdirSync } from "node:fs";
+import { existsSync, mkdirSync, unlinkSync } from "node:fs";
+import { createHash } from "node:crypto";
 import { createConnection, type Socket } from "node:net";
 import { join } from "node:path";
 
@@ -7,6 +8,7 @@ type RuntimeExit = (code: number) => void;
 
 export interface RuntimeTransport {
   readonly pid: number;
+  readonly shared: boolean;
   readonly socketPath: string;
   send(value: unknown): void;
   terminate(): Promise<void>;
@@ -38,6 +40,7 @@ async function connectHost(socketPath: string, onOutput: RuntimeOutput, timeoutM
     let attached = false;
     let detached = false;
     let pid = 0;
+    let shared = false;
     let lastSequence = 0;
     let resolveExit!: (code: number) => void;
     let exitCode: number | null = null;
@@ -53,6 +56,7 @@ async function connectHost(socketPath: string, onOutput: RuntimeOutput, timeoutM
 
     const transport: RuntimeTransport = {
       get pid() { return pid; },
+      get shared() { return shared; },
       socketPath,
       send(value) {
         if (!socket.writable || detached) throw new Error("Runtime host is disconnected");
@@ -84,6 +88,7 @@ async function connectHost(socketPath: string, onOutput: RuntimeOutput, timeoutM
       }
       if (value?.type === "attached") {
         pid = Number(value.pid ?? 0);
+        shared = value.shared === true;
         if (!Number.isSafeInteger(pid) || pid <= 1) return finish({ error: new Error("Runtime host returned an invalid child pid") });
         attached = true;
         finish({ transport });
@@ -138,7 +143,7 @@ export async function attachRuntimeHost(socketPath: string, onOutput: RuntimeOut
   return connected.transport;
 }
 
-export async function startRuntimeHost(options: {
+export async function startCommandRuntimeHost(options: {
   data: string;
   sessionId: string;
   cwd: string;
@@ -184,4 +189,68 @@ export async function startRuntimeHost(options: {
     await host.exited;
     throw cause;
   }
+}
+
+type StartOptions = Parameters<typeof startCommandRuntimeHost>[0];
+const runnerStarts = new Map<string, Promise<void>>();
+
+function runnerRequest(path: string, value: unknown): Promise<any> {
+  return new Promise((resolve, reject) => {
+    const socket = createConnection(path);
+    let input = "";
+    const timer = setTimeout(() => { socket.destroy(); reject(new Error("Shared runner control timed out")); }, 5_000);
+    socket.on("connect", () => socket.write(JSON.stringify(value) + "\n"));
+    socket.on("data", chunk => {
+      input += chunk.toString();
+      if (!input.includes("\n")) return;
+      clearTimeout(timer); socket.end();
+      try { const response = JSON.parse(input.slice(0, input.indexOf("\n"))); response.error ? reject(new Error(response.error)) : resolve(response); }
+      catch (error) { reject(error); }
+    });
+    socket.on("error", error => { clearTimeout(timer); reject(error); });
+    socket.on("close", () => { clearTimeout(timer); reject(new Error("Shared runner control closed")); });
+  });
+}
+
+export async function startRuntimeHost(options: StartOptions): Promise<RuntimeTransport> {
+  options.signal?.throwIfAborted();
+  // Explicit external RPC executables remain useful for transport fixtures.
+  // Production Pi always uses the shared SDK host.
+  if (options.env.PI_REMOTE_RUNTIME_DRIVER === "command") return startCommandRuntimeHost(options);
+  const directory = join(options.data, "runtime-runners");
+  mkdirSync(directory, {recursive:true,mode:0o700});
+  mkdirSync(join(options.data, "runtime-hosts"), {recursive:true,mode:0o700});
+  const generation = createHash("sha256").update(import.meta.dir).digest("hex").slice(0,16);
+  const control = join(directory, `${generation}.sock`);
+  let starting = runnerStarts.get(control);
+  if (!starting) {
+    starting = (async () => {
+      if (existsSync(control)) { try { await runnerRequest(control, {type:"status"}); return; } catch {} }
+      try { unlinkSync(control); } catch {}
+      const env = {...options.env};
+      for (const key of Object.keys(env)) if (/^(PI_REMOTE_SESSION_ID|PI_REMOTE_CONTEXT_OWNER_PID|PI_SUBAGENT_MODEL|PI_REMOTE_MEETING_ID|PI_REMOTE_SERVICE_TIER_FILE)$/.test(key)) delete env[key];
+      const host = Bun.spawn(["node", "--max-old-space-size=8192", join(import.meta.dir,"shared-runtime-host.mjs"), control], {
+        cwd: options.env.HOME, detached:true, stdin:"ignore", stdout:"inherit", stderr:"inherit", env,
+      });
+      const deadline = Date.now() + 15_000;
+      while (Date.now() < deadline) {
+        if (host.exitCode !== null) throw new Error(`Shared runner exited ${host.exitCode}`);
+        if (existsSync(control)) { try { await runnerRequest(control,{type:"status"}); return; } catch {} }
+        await Bun.sleep(50);
+      }
+      host.kill("SIGTERM"); throw new Error("Shared runner did not start");
+    })().finally(() => runnerStarts.delete(control));
+    runnerStarts.set(control, starting);
+  }
+  await starting;
+  options.signal?.throwIfAborted();
+  const socketPath = runtimeSocketPath(options.data, options.sessionId);
+  await runnerRequest(control, {type:"open",options:{socketPath,sessionId:options.sessionId,cwd:options.cwd,args:options.args,env:options.env}});
+  const connected = await connectHost(socketPath, options.onOutput, CONNECT_TIMEOUT_MS);
+  if ("error" in connected) {
+    await runnerRequest(control, {type:"close",socketPath}).catch(() => {});
+    throw connected.error;
+  }
+  if (options.signal?.aborted) { await connected.transport.terminate(); options.signal.throwIfAborted(); }
+  return connected.transport;
 }

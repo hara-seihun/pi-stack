@@ -191,5 +191,5 @@ export function registerGuard(pi, environment = process.env) {
 }
 
 export default function (pi) {
-  registerGuard(pi);
+  registerGuard(pi, globalThis[Symbol.for("pi-stack.session-environment")]?.getStore() ?? process.env);
 }

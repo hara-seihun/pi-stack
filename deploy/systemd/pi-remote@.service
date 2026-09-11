@@ -31,6 +31,10 @@ KillMode=control-group
 TimeoutStopSec=10
 UMask=0077
 LimitNOFILE=1048576
-MemoryHigh=24G
-MemoryMax=24G
+# Shared SDK sessions and all their tool/browser children share this budget.
+# Keep reclaim from freezing the supervisor; the runner queues new sessions
+# at 80% of the cgroup limit and the hard cap contains a runaway child.
+MemoryHigh=16G
+MemoryMax=16G
+MemorySwapMax=1G
 OOMPolicy=continue

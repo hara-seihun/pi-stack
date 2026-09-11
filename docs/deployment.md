@@ -41,6 +41,8 @@ Persons are not in the host file. They are Pi Remote's registry, `/var/lib/pi-re
 
 ## What deploy/host does
 
+Pi Remote runs parent and delegated child sessions in one SDK runner per person and release generation; see [runner ownership and admission](../apps/remote/README.md). The reference supervisor unit caps its complete process tree at 16 GiB RAM and 1 GiB swap. Hosts with multiple people also declare an aggregate cap on the implicit `system-pi\x2dremote.slice` (GMKtec uses the same 16 GiB / 1 GiB ceiling across all people). The runner checks constrained ancestors before admitting another session, including memory used by browser children. These limits contain runaway subprocesses; sharing SDK sessions does not make browser subprocesses share a heap. Keep `MemoryHigh` at the hard limit on these hosts to avoid the prolonged reclaim stalls seen with a lower soft limit.
+
 Before publishing anything, `deploy/host` checks that the Voice unit and credential exist and that live-dev services and Voice source overrides have been retired. A rehearsal with overridden destinations skips host-service checks.
 
 1. Prepares PiStack Meet's local transcription runtime through `deploy/transcription`. Its pinned Whisper model and hash-locked Python dependencies live under `/srv/pi/.pi-transcription`, selected by `/srv/pi/transcription`. Hosts need `uv`; model preparation runs alongside JavaScript dependency installation. `PI_STACK_TRANSCRIPTION_DEST` selects a separate destination for a rehearsal. Installs the JavaScript dependency tree once per manifest, lockfile and stack doctor source under `/srv/pi/dependencies`. Runtime, Orchestrator, and tools link that tree instead of copying it.

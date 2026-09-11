@@ -186,6 +186,7 @@ type RuntimeHandoff = {
   sessionId: string;
   socketPath: string;
   pid?: number;
+  shared?: boolean;
   phase: RuntimePhase;
   compacting: boolean;
   compactionContextHash: string | null;
@@ -1429,7 +1430,7 @@ async function startRuntime(row: any): Promise<Runtime> {
     setRuntimePhase(row.id, rt, "STOPPING");
     await terminateRuntimeProcess(rt);
     if (runtimes.get(row.id) === rt) runtimes.delete(row.id);
-    if (cancelled || !ownsSupervisorLease()) throw cause;
+    if (cancelled || !ownsSupervisorLease() || String(cause).includes("Runner capacity busy")) throw cause;
     if (resumePath) {
       db.query("UPDATE sessions SET session_path=NULL WHERE id=?").run(row.id);
       emit(row.id, "notice", { text: "Session could not resume; restoring from saved conversation history" });
@@ -1447,6 +1448,9 @@ function recoverFailedHandoff(sessionId: string) {
 }
 
 async function terminateFailedHandoff(handoff: RuntimeHandoff) {
+  // A session socket is the lifecycle boundary. Its PID may also own other
+  // conversations; failed adoption must never kill those siblings.
+  if (handoff.shared) return;
   const pid = Number(handoff.pid ?? 0);
   if (!Number.isSafeInteger(pid) || pid <= 1) return;
   try { process.kill(-pid, "SIGTERM"); } catch { return; }
@@ -1791,6 +1795,25 @@ async function drainSession(sessionId: string) {
       confirmWorkInserted(sessionId, item.id);
     } catch (cause: any) {
       if (!ownsSupervisorLease()) return;
+      if (String(cause?.message ?? cause).includes("Runner capacity busy")) {
+        // Make room by unloading a durable idle session, never an active turn
+        // or one whose final context has not been committed yet.
+        const idle = [...runtimes].filter(([id, rt]) => rt.phase === "IDLE" && !rt.pendingContextFinalization
+          && !db.query("SELECT 1 FROM work_items WHERE session_id=? AND state IN ('queued','running','dispatched') LIMIT 1").get(id))
+          .sort((a, b) => a[1].lastActivity - b[1].lastActivity)[0];
+        if (idle) {
+          const [id, rt] = idle;
+          rt.expectedExit = true;
+          rt.suppressOutput = true;
+          setRuntimePhase(id, rt, "STOPPING");
+          await terminateRuntimeProcess(rt);
+        }
+        db.query("UPDATE work_items SET state='queued',available_at=?,updated_at=?,last_error=? WHERE id=? AND state='running'")
+          .run(Date.now() + 5_000, now(), "Waiting for shared runner capacity", item.id);
+        setState(sessionId, "STOPPED", "Queued: waiting for shared runner capacity");
+        scheduleSession(sessionId, 5_000);
+        return;
+      }
       const active = runtimes.get(sessionId);
       const latest = db.query("SELECT state FROM work_items WHERE id=?").get(item.id) as any;
       const session = sessionRow.get(sessionId) as any;
@@ -2959,6 +2982,7 @@ function handoffDocument() {
       sessionId,
       socketPath: rt.transport.socketPath,
       pid: rt.transport.pid,
+      shared: rt.transport.shared,
       phase: rt.phase,
       compacting: rt.compacting,
       compactionContextHash: rt.compactionContextHash,

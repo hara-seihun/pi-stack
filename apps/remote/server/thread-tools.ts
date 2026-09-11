@@ -6,6 +6,7 @@ import { StringEnum } from "@earendil-works/pi-ai";
 import { Type } from "typebox";
 import { SUBAGENT_MODEL_DESCRIPTIONS } from "pi-orchestrator/api";
 import { API } from "./api";
+import { sessionEnvironment } from "./session-environment";
 
 export const THREAD_THINKING_LEVELS = ["off", "minimal", "low", "medium", "high", "xhigh", "max"] as const;
 const result = (value: unknown) => ({ content: [{ type: "text" as const, text: JSON.stringify(value) }], details: value });
@@ -22,6 +23,7 @@ async function readThread(args: string[], signal?: AbortSignal) {
 }
 
 export function registerThreadTools(pi: ExtensionAPI) {
+  const environment = sessionEnvironment();
   pi.registerTool({
     name: "thread_thinking",
     label: "Thread thinking",
@@ -72,12 +74,12 @@ export function registerThreadTools(pi: ExtensionAPI) {
       if (params.includeIdle) args.push("--include-idle");
       if (params.limit !== undefined) args.push("--limit", String(params.limit));
       if (params.cursor) args.push("--cursor", params.cursor);
-      args.push(params.thread ?? process.env.PI_REMOTE_SESSION_ID!);
+      args.push(params.thread ?? environment.PI_REMOTE_SESSION_ID!);
       return readThread(args, signal);
     },
   });
 
-  if (process.env.PI_SUBAGENT_MODEL) return;
+  if (environment.PI_SUBAGENT_MODEL) return;
 
   pi.registerTool({
     name: "thread_delegate",
@@ -91,10 +93,10 @@ export function registerThreadTools(pi: ExtensionAPI) {
       thinkingLevel: Type.Optional(StringEnum(THREAD_THINKING_LEVELS, { description: "Reasoning effort for a new worker. Existing workers keep their level. Defaults to high." })),
     }),
     async execute(toolCallId, params, signal) {
-      const parentSessionId = process.env.PI_REMOTE_SESSION_ID!;
+      const parentSessionId = environment.PI_REMOTE_SESSION_ID!;
       const hash = createHash("sha256").update(`${parentSessionId}:${toolCallId}`).digest("hex");
       const requestId = `${hash.slice(0, 8)}-${hash.slice(8, 12)}-${hash.slice(12, 16)}-${hash.slice(16, 20)}-${hash.slice(20, 32)}`;
-      const response = await fetch(new URL(API.createSession.path(), process.env.PI_REMOTE_SERVER_URL!), {
+      const response = await fetch(new URL(API.createSession.path(), environment.PI_REMOTE_SERVER_URL!), {
         method: "POST", headers: { "content-type": "application/json" },
         body: JSON.stringify({ ...params, requestId, parentSessionId }),
         signal: signal ? AbortSignal.any([signal, AbortSignal.timeout(30_000)]) : AbortSignal.timeout(30_000),

@@ -27,13 +27,14 @@ export function withCustomModels(provider:Provider):Provider{
 }
 
 export default function routing(pi:ExtensionAPI):void{
+  const environment:NodeJS.ProcessEnv=(globalThis as any)[Symbol.for("pi-stack.session-environment")]?.getStore()??process.env;
   const ledgerPath=defaultLedgerPath(),store=Store.open(ledgerPath),families=new Map(builtinProviders().map((raw)=>{const provider=withCustomModels(raw);return[provider.id,provider] as const;}));
   const shared=new Map<string,SharedOAuthAuth>();
   for(const family of families.values()){
     const oauth=family.auth.oauth;if(!oauth)continue;
     shared.set(family.id,providerOAuth(family,defaultSharedAuthPath(ledgerPath)));
   }
-  const assigned=process.env.PI_ORCHESTRATOR_ASSIGNED==="1"&&process.env.PI_ORCHESTRATOR_RUN_ID?store.run(process.env.PI_ORCHESTRATOR_RUN_ID):undefined;
+  const assigned=environment.PI_ORCHESTRATOR_ASSIGNED==="1"&&environment.PI_ORCHESTRATOR_RUN_ID?store.run(environment.PI_ORCHESTRATOR_RUN_ID):undefined;
   for(const account of store.accounts()){
     const family=families.get(account.provider),auth=shared.get(account.provider);if(!family||!auth||(!allowsAccountUse(account,"interactive")&&assigned?.accountId!==account.id))continue;
     pi.registerProvider(sharedOAuthProvider(family,account.id,account.label,auth));
@@ -59,7 +60,7 @@ export default function routing(pi:ExtensionAPI):void{
     const next=resolve(choice.id,family,modelId);if(!next)return;
     return await select(ctx,next,thinking)?choice.id:undefined;
   };
-  const requestedPin=process.env.PI_SUBAGENT_MODEL;
+  const requestedPin=environment.PI_SUBAGENT_MODEL;
   const pinned=assigned?.provider&&assigned.model?{provider:assigned.provider,model:assigned.model,thinking:assigned.thinking}:ORCHESTRATOR_CATALOG.models.find(model=>model.id===requestedPin||model.model===requestedPin);
   const hasPin=!!pinned||!!requestedPin;
   const matchesPin=(ctx:ExtensionContext)=>{
@@ -86,7 +87,7 @@ export default function routing(pi:ExtensionAPI):void{
       if(!matchesPin(ctx)){void ctx.abort();throw new Error(`Model change refused: this run is pinned to ${pinned?.model??requestedPin}`);}
     });
   }
-  if(process.env.PI_ORCHESTRATOR_ASSIGNED==="1"){pi.on("session_shutdown",()=>store.close());return;}
+  if(environment.PI_ORCHESTRATOR_ASSIGNED==="1"){pi.on("session_shutdown",()=>store.close());return;}
   let leaseId:string|undefined,timer:ReturnType<typeof setInterval>|undefined;
   const reconcileLease=(ctx:ExtensionContext)=>{
     const account=ctx.model?.provider;

@@ -2,7 +2,7 @@ import { afterEach, describe, expect, test } from "bun:test";
 import { existsSync, mkdirSync, mkdtempSync, readdirSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { attachRuntimeHost, runtimeSocketPath, startRuntimeHost, type RuntimeTransport } from "./runtime-transport";
+import { attachRuntimeHost, runtimeSocketPath, startCommandRuntimeHost as startRuntimeHost, type RuntimeTransport } from "./runtime-transport";
 
 const roots: string[] = [];
 const transports: RuntimeTransport[] = [];
@@ -55,7 +55,7 @@ describe("runtime host identity", () => {
     mkdirSync(data, { recursive: true });
     const launcher = join(root, "launcher.ts");
     writeFileSync(launcher, `
-      import {startRuntimeHost} from ${JSON.stringify(join(import.meta.dir, "runtime-transport.ts"))};
+      import {startCommandRuntimeHost as startRuntimeHost} from ${JSON.stringify(join(import.meta.dir, "runtime-transport.ts"))};
       const host = await startRuntimeHost({ data: ${JSON.stringify(data)}, sessionId: crypto.randomUUID(), cwd: ${JSON.stringify(root)}, args: [process.execPath, "-e", "setInterval(() => {}, 10000)"], env: process.env, onOutput() {} });
       console.log(JSON.stringify({socketPath:host.socketPath,pid:host.pid}));
       host.detach();
