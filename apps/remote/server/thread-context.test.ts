@@ -16,9 +16,6 @@ describe("thread lifecycle context", () => {
     expect(existing).not.toContain("initialize_thread");
     expect(existing).toContain('<pi-file src="/home/a/path/to/file" />');
     expect(existing).toContain("download link");
-    expect(existing).toContain("`read-thread --list`");
-    expect(existing).toContain("without model calls");
-    expect(existing).toContain("instead of `read-condensed-session`");
   });
 
   test("marks an interrupted prompt as the same unfinished task", () => {

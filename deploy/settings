@@ -1,8 +1,7 @@
 #!/usr/bin/env bash
 # Reconcile one account's Pi settings: the ordered package list from
 # config/packages.json with the host's own packages folded in ahead of the
-# context observer, the VCC compaction policy, the custom model catalog, and
-# the pinned npm packages.
+# context observer, the custom model catalog, and the pinned external packages.
 #
 #   deploy/settings [USER]      defaults to the invoking account
 set -euo pipefail
@@ -90,22 +89,6 @@ try {
   await release();
 }
 NODE
-
-vcc_config="$agent_dir/pi-vcc-config.json"
-cat > "$vcc_config" <<'JSON'
-{
-  "overrideDefaultCompaction": true,
-  "smartKeepTail": true,
-  "continueAfterThresholdCompact": true,
-  "interTurnCompactionTokens": 250000,
-  "interTurnCompactionTokensByModel": {
-    "openai/gpt-6-astra": 500000,
-    "openai-codex/gpt-6-astra": 500000
-  },
-  "debug": false
-}
-JSON
-chmod 600 "$vcc_config"
 
 models="$agent_dir/models.json"
 PI_STACK_MODELS="$models" PI_STACK_CUSTOM_MODELS="$orchestrator/dist/models.json" node --input-type=module <<'NODE'

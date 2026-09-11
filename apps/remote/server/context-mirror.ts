@@ -1,11 +1,13 @@
 import { buildSessionContext, convertToLlm, type ExtensionAPI, type ExtensionContext } from "@earendil-works/pi-coding-agent";
 import { contextSplice, messageFinalizationKey, sha256 } from "./sync";
+import { registerSessionHistory } from "./session-history";
 
 type ModelMessage = ReturnType<typeof convertToLlm>[number];
 type ModelTool = { name: string; description: string; parameters: unknown };
 type ModelContext = { systemPrompt: string; tools: ModelTool[]; messages: ModelMessage[] };
 
 export default function contextMirror(pi: ExtensionAPI) {
+  registerSessionHistory(pi);
   const sessionId = process.env.PI_REMOTE_SESSION_ID;
   const server = process.env.PI_REMOTE_SERVER_URL;
   if (!sessionId || !server) return;

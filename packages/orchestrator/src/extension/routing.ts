@@ -10,6 +10,7 @@ import { defaultSharedAuthPath, SharedOAuthAuth, providerOAuth, sharedOAuthProvi
 import { isRateLimitError, isRejectedTokenError, rateLimitCooldownMs } from "../provider-errors.js";
 import { chooseInteractiveAccount } from "../auth/account-selection.js";
 import { installImageGeneration } from "./image-generation.js";
+import { installProviderOperations } from "./provider-operation.js";
 import { interruptedTurnPrompt } from "../host/continuations.js";
 import customModelConfig from "../models.json" with { type: "json" };
 
@@ -37,6 +38,7 @@ export default function routing(pi:ExtensionAPI):void{
     pi.registerProvider(sharedOAuthProvider(family,account.id,account.label,auth));
   }
   installImageGeneration(pi, store, shared.get("openai-codex"));
+  installProviderOperations(pi, store, shared);
   // The bundled CLI and extension providers have separate pi-ai resource registries.
   pi.on("session_shutdown",(_event,ctx)=>cleanupSessionResources(ctx.sessionManager.getSessionId()));
   const familyOf=(provider:string)=>store.account(provider)?.provider??baseProvider(provider);
@@ -86,6 +88,19 @@ export default function routing(pi:ExtensionAPI):void{
   }
   if(process.env.PI_ORCHESTRATOR_ASSIGNED==="1"){pi.on("session_shutdown",()=>store.close());return;}
   let leaseId:string|undefined,timer:ReturnType<typeof setInterval>|undefined;
+  const reconcileLease=(ctx:ExtensionContext)=>{
+    const account=ctx.model?.provider;
+    if(store.account(account??"")){
+      leaseId??=`interactive:${ctx.sessionManager.getSessionId()}`;
+      store.createLease(leaseId,account!,"interactive");
+      timer??=setInterval(()=>store.heartbeatLease(leaseId!),30_000);
+    }else{
+      if(timer)clearInterval(timer);
+      if(leaseId)store.endLease(leaseId);
+      timer=undefined;leaseId=undefined;
+    }
+  };
+  pi.on("model_select",(_event,ctx)=>reconcileLease(ctx));
   pi.on("session_start",async(event,ctx)=>{
     const branch=ctx.sessionManager.getBranch(),history=branch.some((entry)=>entry.type==="message"&&entry.message.role==="assistant");
     if(hasPin){await enforcePin(ctx);}
@@ -107,7 +122,7 @@ export default function routing(pi:ExtensionAPI):void{
       }
     }
     else if(event.reason==="startup"||event.reason==="new")await bind(ctx);
-    const account=ctx.model?.provider;if(store.account(account??"")){leaseId=`interactive:${ctx.sessionManager.getSessionId()}`;store.createLease(leaseId!,account!,"interactive");timer=setInterval(()=>store.heartbeatLease(leaseId!),30_000);}
+    reconcileLease(ctx);
   });
   pi.on("before_agent_start",async(_event,ctx)=>{
     const current=store.account(ctx.model?.provider??"");

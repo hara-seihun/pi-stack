@@ -58,7 +58,7 @@ fi
 cd "$root"
 pi_stack_as_root install -d -m 755 "$dependencies_root"
 dependency_hash=$({
-  sha256sum package.json package-lock.json packages/runtime/browser-doctor.mjs packages/runtime/patch-browser-qa.mjs
+  sha256sum package.json package-lock.json packages/runtime/browser-doctor.mjs packages/runtime/patch-browser-qa.mjs packages/runtime/patch-codex-sse.mjs packages/runtime/patch-compaction-cut.mjs
   printf '%s\n' workspace-production-closure-v1-atomic-settings-writes-v1
 } | sha256sum | cut -d' ' -f1)
 dependency_release="$dependencies_root/$dependency_hash"
@@ -96,9 +96,11 @@ if (patched === source || !patched.includes("renameSync(temporary, path)")) {
 writeFileSync(path, patched);
 NODE
   node --check "$settings_manager"
+  node "$runtime_source/patch-codex-sse.mjs" "$stage/node_modules"
   browser_job="$stage/node_modules/pi-agent-browser-native/dist/extensions/agent-browser/lib/input-modes/job.js"
   node "$runtime_source/patch-browser-qa.mjs" "$browser_job"
   node --check "$browser_job"
+  node "$runtime_source/patch-compaction-cut.mjs" "$stage/node_modules"
   rm -f "$stage/node_modules/pi-orchestrator" "$stage/node_modules/pi-remote"
   rm -rf "$stage/node_modules/@hara-seihun"
   dependency_stage="$dependencies_root/.stage.$$.${RANDOM}"
@@ -120,9 +122,9 @@ node --check "$settings_manager"
 
 stage=$(mktemp -d "${TMPDIR:-/tmp}/pi-runtime.XXXXXXXX")
 install -d -m 755 "$stage/release/extensions"
-for extension in bash-timeout-guard browser; do
-  rsync -a --chmod=D755,Fu=rwX,Fgo=rX "$runtime_source/extensions/$extension" "$stage/release/extensions/"
-done
+while IFS= read -r extension; do
+  rsync -a --chmod=D755,Fu=rwX,Fgo=rX "$root/$extension" "$stage/release/extensions/"
+done < <(jq -r '.packages[].source | select(startswith("packages/runtime/extensions/"))' "$root/config/packages.json")
 ln -s "$dependency_release/node_modules" "$stage/release/node_modules"
 printf '%s\n' "$commit" > "$stage/release/.pi-stack-commit"
 pi_stack_publish_release "$root" "$stage/release" "$dest" runtime

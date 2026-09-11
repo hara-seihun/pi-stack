@@ -3,6 +3,8 @@ import { mkdirSync } from "node:fs";
 import { dirname } from "node:path";
 import { DatabaseSync } from "node:sqlite";
 import { promptForJob } from "./prompts.mjs";
+import { timestampMs } from "./session-jsonl.mjs";
+export { activePath, parseSession, timestampMs } from "./session-jsonl.mjs";
 
 export const DEFAULT_THRESHOLD = 16_000;
 export const VERBATIM_TAIL_CALLS = 10;
@@ -17,36 +19,6 @@ export function hashBlock(text) {
 /** Cache identity includes the exact prompt, not only source content. */
 export function hashJob(kind, text) {
   return hashBlock(promptForJob(kind, text));
-}
-
-export function parseSession(text) {
-  const entries = [];
-  for (const line of text.split("\n")) {
-    if (!line.trim()) continue;
-    try {
-      entries.push(JSON.parse(line));
-    } catch {
-      // A torn final line from a live session is expected; anything else
-      // would also be unparseable by Pi itself.
-    }
-  }
-  return entries;
-}
-
-/** Follow the parent chain of the newest entry and omit abandoned branches. */
-export function activePath(entries) {
-  const byId = new Map();
-  for (const entry of entries) if (entry.id) byId.set(entry.id, entry);
-  let leaf;
-  for (let i = entries.length - 1; i >= 0; i--) {
-    if (entries[i].id) {
-      leaf = entries[i];
-      break;
-    }
-  }
-  const path = [];
-  for (let cursor = leaf; cursor; cursor = byId.get(cursor.parentId)) path.push(cursor);
-  return path.reverse();
 }
 
 const blockText = (block) =>
@@ -99,11 +71,6 @@ export function flattenPath(path) {
     }
   }
   return items;
-}
-
-export function timestampMs(value) {
-  const parsed = typeof value === "number" ? value : Date.parse(value ?? "");
-  return Number.isFinite(parsed) ? parsed : undefined;
 }
 
 /** Keep only session activity in the requested incremental window. */

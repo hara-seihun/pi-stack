@@ -1,9 +1,5 @@
 import { describe, expect, test } from "bun:test";
-import {
-  COMPACTION_CONTINUATION_MESSAGE,
-  COMPACTION_NOTICE_TYPE,
-  displayContextDocument,
-} from "./context-display";
+import { displayContextDocument } from "./context-display";
 import { messageFinalizationKey } from "./sync";
 
 describe("display context projection", () => {
@@ -83,21 +79,21 @@ describe("display context projection", () => {
     expect(message.content).toEqual([toolCall]);
   });
 
-  test("presents a compacted request as context compaction once the continuation proves it", () => {
+  test("historical continuation text cannot rewrite an assistant error", () => {
     const context = {
       systemPrompt: "prompt",
       tools: [],
       messages: [
         { role: "assistant", content: [], stopReason: "aborted", errorMessage: "Request aborted", timestamp: 10 },
-        { role: "user", content: [{ type: "text", text: COMPACTION_CONTINUATION_MESSAGE }], timestamp: 11 },
+        { role: "user", content: [{ type: "text", text: "your context was compacted, you now have tons of space to keep working as long as you like" }], timestamp: 11 },
       ],
     };
 
     expect(JSON.parse(displayContextDocument(JSON.stringify(context))).messages).toEqual([
       {
-        role: "custom",
-        customType: COMPACTION_NOTICE_TYPE,
-        content: "Context compacted",
+        role: "assistant",
+        content: [],
+        errorMessage: "Request aborted",
         timestamp: 10,
       },
       context.messages[1],

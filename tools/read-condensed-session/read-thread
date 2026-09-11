@@ -1,28 +1,16 @@
 #!/usr/bin/env node
-import { existsSync, readFileSync, writeFileSync } from "node:fs";
+import { existsSync, readFileSync, statSync, writeFileSync } from "node:fs";
 import { homedir, userInfo } from "node:os";
-import { join, resolve } from "node:path";
+import { basename, isAbsolute, join, resolve } from "node:path";
 import { DatabaseSync } from "node:sqlite";
 import { takeFlag, takeOption } from "../shared/arguments.mjs";
 import { listThreads, renderSupervisorRecords, renderThread, resolveThread } from "./thread-reader.mjs";
 
-const HELP = `usage: read-thread [OPTIONS] [THREAD]
+import { READ_THREAD_CONTRACT, readerHelp } from "./contract.mjs";
 
-Find and render another Pi Remote thread locally. No model calls are made.
-THREAD may be a title, UUID, or unique UUID prefix. With no THREAD, list threads.
-
-options:
-  --list             list threads, newest first
-  --path             print only the exact Pi session JSONL path
-  --work             include bounded thinking and successful tool results
-  --since TIMESTAMP  include entries at or after this ISO timestamp
-  --tail N           include only the last N active-path entries
-  --output FILE      write the transcript to FILE and print its path
-  --db FILE          supervisor database (default: $PI_REMOTE_DATA/supervisor.sqlite3)`;
-
-function positiveInteger(value, label) {
+function integer(value, label, minimum = 1) {
   const parsed = Number(value);
-  if (!Number.isInteger(parsed) || parsed < 1) throw new Error(`${label} must be a positive integer`);
+  if (!Number.isSafeInteger(parsed) || parsed < minimum) throw new Error(`${label} must be an integer >= ${minimum}`);
   return parsed;
 }
 
@@ -40,55 +28,98 @@ function defaultDatabase() {
 function main() {
   const args = process.argv.slice(2);
   if (takeFlag(args, "--help") || takeFlag(args, "-h")) {
-    console.log(HELP);
+    console.log(readerHelp());
+    return;
+  }
+  if (takeFlag(args, "--contract")) {
+    if (args.length) throw new Error("--contract takes no other arguments");
+    console.log(JSON.stringify(READ_THREAD_CONTRACT));
     return;
   }
   const list = takeFlag(args, "--list");
   const pathOnly = takeFlag(args, "--path");
-  const work = takeFlag(args, "--work");
+  const options = {
+    work: takeFlag(args, "--work"),
+    full: takeFlag(args, "--full"),
+    raw: takeFlag(args, "--raw"),
+    all: takeFlag(args, "--all"),
+    regex: takeFlag(args, "--regex"),
+    leaf: takeOption(args, "--leaf"),
+    search: takeOption(args, "--search"),
+  };
   const sinceOption = takeOption(args, "--since");
   const tailOption = takeOption(args, "--tail");
+  const limitOption = takeOption(args, "--limit");
+  const offsetOption = takeOption(args, "--offset");
   const output = takeOption(args, "--output");
-  const dbPath = resolve(takeOption(args, "--db") ?? defaultDatabase());
-  if (!existsSync(dbPath)) throw new Error(`Pi Remote database not found at ${dbPath}; set PI_REMOTE_DATA or pass --db`);
-  if (args.length > 1) throw new Error("pass one thread title or id; quote titles containing spaces");
+  const database = takeOption(args, "--db");
+  const unknown = args.find((arg) => arg.startsWith("--"));
+  if (unknown) throw new Error(`unknown option ${unknown}`);
+  if (args.length > 1) throw new Error("pass one selector; quote titles and paths containing spaces");
   if (list && args.length > 0) throw new Error("--list does not take a thread selector");
-  if (pathOnly && (work || sinceOption !== undefined || tailOption !== undefined || output)) {
-    throw new Error("--path cannot be combined with transcript options");
-  }
-  const since = sinceOption === undefined ? undefined : Date.parse(sinceOption);
-  if (sinceOption !== undefined && !Number.isFinite(since)) throw new Error("--since must be an ISO timestamp");
-  const tail = tailOption === undefined ? undefined : positiveInteger(tailOption, "--tail");
+  if (options.all && options.leaf !== undefined) throw new Error("--all and --leaf are mutually exclusive");
+  if (options.search === "") throw new Error("--search cannot be empty");
+  if (options.search === undefined && (options.regex || limitOption !== undefined || offsetOption !== undefined)) throw new Error("--regex, --limit and --offset require --search");
+  if (options.raw && (options.search !== undefined || options.work || options.full)) throw new Error("--raw cannot be combined with --search, --work or --full");
+  const transcriptOptions = Object.values(options).some((value) => value !== false && value !== undefined)
+    || sinceOption !== undefined || tailOption !== undefined || output !== undefined;
+  if (pathOnly && transcriptOptions) throw new Error("--path cannot be combined with transcript options");
+  if ((list || args.length === 0) && (pathOnly || transcriptOptions)) throw new Error("these options require self, a JSONL path, or a Remote thread selector");
+  options.since = sinceOption === undefined ? undefined : Date.parse(sinceOption);
+  if (sinceOption !== undefined && !Number.isFinite(options.since)) throw new Error("--since must be an ISO timestamp");
+  options.tail = tailOption === undefined ? undefined : integer(tailOption, "--tail");
+  options.limit = limitOption === undefined ? 20 : integer(limitOption, "--limit");
+  if (options.limit > 50) throw new Error("--limit must be <= 50");
+  options.offset = offsetOption === undefined ? 0 : integer(offsetOption, "--offset", 0);
 
-  const db = new DatabaseSync(dbPath, { readOnly: true });
+  let db;
   try {
-    const rows = db.prepare("SELECT id,name,session_path,state,updated_at,archived_at FROM sessions ORDER BY updated_at DESC").all();
-    if (list || args.length === 0) {
-      console.log(listThreads(rows));
-      return;
+    const selector = args[0];
+    let row;
+    if (selector === "self" || (selector && (isAbsolute(selector) || selector.startsWith("./") || selector.startsWith("../") || selector.endsWith(".jsonl") || existsSync(selector)))) {
+      const file = selector === "self" ? process.env.PI_SESSION_FILE : selector;
+      if (!file) throw new Error("self requires PI_SESSION_FILE from a persistent Pi shell tool; alternatively pass an explicit JSONL path");
+      const path = resolve(file);
+      if (!existsSync(path)) throw new Error(`Pi session JSONL not found at ${path}; a new session may not have flushed its first assistant message yet`);
+      row = { id: selector === "self" ? process.env.PI_SESSION_ID ?? "self" : basename(path), name: basename(path), session_path: path, updated_at: "read from stored JSONL" };
+    } else {
+      const dbPath = resolve(database ?? defaultDatabase());
+      if (!existsSync(dbPath)) throw new Error(`Pi Remote database not found at ${dbPath}; set PI_REMOTE_DATA or pass --db. self and JSONL paths do not need a database`);
+      db = new DatabaseSync(dbPath, { readOnly: true });
+      const rows = db.prepare("SELECT id,name,session_path,state,updated_at,archived_at FROM sessions ORDER BY updated_at DESC").all();
+      if (list || !selector) {
+        console.log(listThreads(rows));
+        return;
+      }
+      row = resolveThread(rows, selector);
     }
-    const row = resolveThread(rows, args[0]);
     const hasSession = row.session_path && existsSync(row.session_path);
     if (pathOnly) {
       if (!hasSession) throw new Error(`thread ${JSON.stringify(row.name)} has no Pi session file; omit --path to inspect its supervisor records`);
-      console.log(row.session_path);
+      console.log(resolve(row.session_path));
       return;
     }
-    const transcript = hasSession ? renderThread(row, { work, since, tail }) : renderSupervisorRecords(
+    if (!hasSession && (options.all || options.leaf || options.raw || options.search !== undefined || options.full)) throw new Error(`thread ${JSON.stringify(row.name)} has no Pi session JSONL to read or search`);
+    const transcript = hasSession ? renderThread(row, options) : renderSupervisorRecords(
       row,
       db.prepare("SELECT text,state,attempts,last_error,created_at FROM work_items WHERE session_id=? ORDER BY created_at").all(row.id),
       db.prepare("SELECT time,type,payload FROM events WHERE session_id=? ORDER BY seq").all(row.id),
-      { since, tail },
+      options,
     );
     if (output) {
       const destination = resolve(output);
+      if (hasSession && existsSync(destination)) {
+        const source = statSync(row.session_path);
+        const target = statSync(destination);
+        if (source.dev === target.dev && source.ino === target.ino) throw new Error("--output cannot overwrite the source session JSONL");
+      }
       writeFileSync(destination, `${transcript}\n`);
       console.log(destination);
     } else {
       console.log(transcript);
     }
   } finally {
-    db.close();
+    db?.close();
   }
 }
 

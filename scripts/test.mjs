@@ -7,7 +7,6 @@ const jobs = [
   ["skill deployment", "node", ["--test", "scripts/deploy-skills.test.mjs"]],
   ["deploy lock", "node", ["--test", "scripts/deploy-lock.test.mjs"]],
   ["remote deployment", "node", ["--test", "scripts/deploy-remote.test.mjs"]],
-  ["compaction policy", "node", ["--test", "scripts/compaction-policy.test.mjs"]],
   ["tools", "node", ["scripts/check-tools.mjs"]],
   ["user usage", "node", ["--test", "tools/user-usage/usage.test.mjs"]],
   ["agent workspace", "npm", ["test", "--workspace=@hara-seihun/agent-workspace"]],

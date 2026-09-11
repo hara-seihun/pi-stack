@@ -140,10 +140,6 @@ export function modelContextEntries(context: any): ContextEntry[] {
   const pairedResults = new Set<any>();
   for (const [messageIndex, message] of (context.messages || []).entries()) {
     const role = String(message?.role || "message");
-    if (role === "custom" && message?.customType === "pi-remote-context-compacted") {
-      entries.push({ key: `context-compacted:${message.timestamp || messageIndex}`, signature: `context-compacted:${message.timestamp || messageIndex}`, kind: "notice", label: "Context", text: "Context compacted" });
-      continue;
-    }
     if (role === "assistant" && Array.isArray(message.content)) {
       for (const [blockIndex, block] of message.content.entries()) {
         if (block?.type === "toolCall") {

@@ -1,18 +1,34 @@
 # Pi session readers
 
-## Fast Pi Remote thread reading
+## Stored history reading and search
 
-`read-thread` is the normal way for one Pi Remote agent to read another thread. It resolves titles and ids through the current person's supervisor database, follows the active Pi branch, and renders the conversation and tool calls without making model requests.
+`read-thread` reads the current session and other sessions through the same local command. It makes no model calls and has no recall cache or index. `self` resolves Pi's built-in `PI_SESSION_FILE`, refreshed for each shell-tool invocation. An explicit JSONL path works in ordinary shells and fleet workers without a Remote database. Remote titles and ids resolve through the current person's supervisor database.
 
 ```bash
+read-thread --path self
+read-thread --work --tail 100 self
+read-thread --search 'deployment decision' self
+read-thread --all --search 'error|failed' --regex --limit 20 --offset 20 self
+read-thread --leaf a1b2c3d4 self
+read-thread --all --raw --output /tmp/session.jsonl self
+read-thread --full --output /tmp/thread.md /path/to/session.jsonl
 read-thread --list
 read-thread "Cayley CI review"
-read-thread --work --tail 100 0a4b1d12
 read-thread --path "Cayley CI review"
-read-thread --output /tmp/thread.md "Cayley CI review"
+rg -n -m 20 --max-columns 1000 --max-columns-preview 'pattern' "$PI_SESSION_FILE"
 ```
 
-The default view omits assistant thinking and successful tool results. `--work` includes both with per-block size limits. `--since` and `--tail` bound long sessions. `--path` prints the exact JSONL path when direct inspection is useful. The command reads `$PI_REMOTE_DATA/supervisor.sqlite3`, which Pi Remote supplies to every model process, so it selects the correct local or Converge thread store without a hard-coded personal path. In an SSH shell, it reads the current Unix user's `PI_REMOTE_DATA` from `/var/lib/pi-remote/persons/<user>.json`. If a request failed before Pi wrote a session file, the reader displays the supervisor's retained requests and events, explicitly labelled as supervisor records. `--path` still requires an existing JSONL.
+The default scope follows the parent chain through the newest stored entry, including all pre-compaction history. It is not Pi's compacted model context. `--leaf ID` follows an explicit entry's parent chain, including a live runtime's selected tip after tree navigation. The shared Pi package reports the session file and reader contract as generated JSON metadata in Remote and fleet system context. It omits the changing branch leaf so advancing the conversation does not change the system-prompt prefix. `--leaf ID` remains an explicit selection using an entry id from the transcript. A runtime can navigate without appending an entry, so its live leaf can differ from the newest stored entry. `--all` reads every branch in file order. Each rendered entry names its original JSONL line and entry id.
+
+The default view omits assistant thinking and successful tool results. `--work` includes both with per-block limits of 4,000 characters and tool arguments capped at 1,000. `--full` removes those caps. `--raw` emits exact selected JSONL records, including metadata, embedded compaction checkpoints, signatures and image bytes. `--all --raw` exposes every complete stored record. It does not reconstruct missing text from opaque provider data. `--since` and `--tail` select entries before rendering or searching. A partial final JSONL line is omitted while a live writer finishes it; malformed complete lines fail with their original line number.
+
+`--search TEXT` scans complete JSONL records, including tool results, thinking and fields omitted from the rendered view. Matching is case-insensitive literal text unless `--regex` selects a JavaScript regular expression. Search returns one excerpt per matching record, at most 1,000 source characters near the first match, with the source path, line and entry id. It defaults to 20 matches and accepts at most 50. `--offset` pages matches; an explicit continuation marker reports another page. Direct `read`, `rg`, or `--raw` can inspect the complete source. No reader writes or deletes session history; `--output` writes only the requested output file.
+
+Remote discovery reads `$PI_REMOTE_DATA/supervisor.sqlite3`. In an SSH shell, it reads the current Unix user's `PI_REMOTE_DATA` from `/var/lib/pi-remote/persons/<user>.json`. If a request failed before Pi wrote a session file, the default reader displays retained supervisor requests and events, explicitly labelled as supervisor records. JSONL-only options report that no transcript exists. `self` reports an absent persistent file rather than selecting another thread. On a fresh session, Pi may not flush the file until the first assistant message.
+
+Stored JSONL is the history source of truth. Compaction changes model context, not this reader's access to earlier entries. Removing VCC does not require deleting or converting JSONL, and reading history does not depend on VCC state.
+
+[`contract.mjs`](contract.mjs) owns the reader's command syntax, option descriptions and exported `HISTORY_MARKER`, `pi-stored-jsonl-history`. It generates `read-thread --help`; `read-thread --contract` emits the same contract as JSON without resolving any session or database. The shared Pi package reads that contract once per extension instance and adds generated JSON metadata containing it and the current session file. The metadata stays byte-identical while the branch advances; it changes only when the session file or loaded contract changes. It contains command facts, not a separate behavioral prompt. An incompatible native compaction checkpoint does not replace the stored history authority: its notice identifies checkpoint availability, while the retained tail and raw JSONL remain accessible.
 
 ## Model-assisted condensation
 

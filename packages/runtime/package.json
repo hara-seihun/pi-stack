@@ -11,6 +11,7 @@
   ],
   "pi": {
     "extensions": [
+      "./extensions/codex-compaction/index.mjs",
       "./extensions/bash-timeout-guard/index.mjs",
       "./extensions/browser/index.mjs"
     ]

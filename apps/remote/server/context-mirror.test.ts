@@ -99,7 +99,7 @@ describe("context mirror", () => {
     try {
       handlers.clear();
       contextMirror(pi);
-      expect(handlers.size).toBe(0);
+      expect([...handlers.keys()]).toEqual(["before_agent_start"]);
     } finally {
       delete process.env.PI_REMOTE_CONTEXT_OWNER_PID;
     }

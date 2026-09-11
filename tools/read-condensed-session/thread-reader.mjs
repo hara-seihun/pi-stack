@@ -1,5 +1,5 @@
 import { readFileSync } from "node:fs";
-import { activePath, parseSession, timestampMs } from "./condense.mjs";
+import { activePath, sessionRecords, timestampMs } from "./session-jsonl.mjs";
 
 const cap = (text, limit) => text.length > limit
   ? `${text.slice(0, limit)} …[${text.length.toLocaleString("en-US")} chars]`
@@ -65,16 +65,22 @@ function entryTime(entry) {
 }
 
 function renderEntry(entry, options) {
-  if (entry.type === "compaction") {
+  if (entry.type === "compaction" || entry.type === "branch_summary") {
     const summary = String(entry.summary ?? "").trim();
-    return `\n[${stamp(entry.timestamp)}] compaction${summary ? `\n${summary}` : ""}`;
+    return `\n[${stamp(entry.timestamp)}] ${entry.type}${summary ? `\n${summary}` : ""}`;
+  }
+  if (entry.type === "custom_message") {
+    return `\n[${stamp(entry.timestamp)}] custom ${entry.customType}\n${blocks(entry.content).map(blockText).join("\n")}`;
   }
   if (entry.type !== "message") return "";
   const message = entry.message ?? {};
   const time = stamp(message.timestamp ?? entry.timestamp);
-  if (message.role === "user") {
+  if (message.role === "bashExecution") {
+    return `\n[${time}] bash ${message.command}\n${cap(String(message.output ?? ""), options.bodyCap)}`;
+  }
+  if (message.role === "user" || message.role === "custom") {
     const text = blocks(message.content).map((block) => block.type === "image" ? "[image]" : blockText(block)).filter(Boolean).join("\n");
-    return text ? `\n[${time}] user\n${text}` : "";
+    return text ? `\n[${time}] ${message.role}\n${text}` : "";
   }
   if (message.role === "toolResult") {
     if (!options.work && !message.isError) return "";
@@ -93,6 +99,7 @@ function renderEntry(entry, options) {
       rendered.push(`\n[${time}] assistant thinking\n${cap(String(block.thinking), options.bodyCap)}`);
     } else if (block.type === "image") rendered.push(`\n[${time}] assistant\n[image]`);
   }
+  if (message.errorMessage) rendered.push(`\n[${time}] assistant ${message.stopReason ?? "error"}\n${message.errorMessage}`);
   return rendered.join("\n");
 }
 
@@ -110,31 +117,62 @@ export function renderSupervisorRecords(row, work, events, options = {}) {
   ].join("\n");
 }
 
+function searchRecords(records, path, options) {
+  const pattern = options.regex ? new RegExp(options.search, "i") : null;
+  const needle = options.search.toLowerCase();
+  const limit = options.limit ?? 20;
+  const offset = options.offset ?? 0;
+  const matches = [];
+  let count = 0;
+  for (const { entry, raw, line } of records) {
+    const position = pattern ? raw.search(pattern) : raw.toLowerCase().indexOf(needle);
+    if (position < 0) continue;
+    if (count++ < offset) continue;
+    if (matches.length === limit) break;
+    const start = Math.max(0, position - 160);
+    const excerpt = `${start ? "…" : ""}${cap(raw.slice(start), 1_000)}`;
+    matches.push(`${path}:${line} [entry ${entry.id ?? "header"}] ${excerpt}`);
+  }
+  if (count > offset + limit) matches.push(`[more matches; next --offset ${offset + limit}]`);
+  return matches.join("\n");
+}
+
 export function renderThread(row, options = {}) {
   const settings = {
-    work: Boolean(options.work),
+    work: Boolean(options.work || options.full),
     since: options.since,
     tail: options.tail,
-    argumentCap: options.argumentCap ?? 1_000,
-    bodyCap: options.bodyCap ?? 4_000,
-    errorCap: options.errorCap ?? 4_000,
+    argumentCap: options.full ? Infinity : options.argumentCap ?? 1_000,
+    bodyCap: options.full ? Infinity : options.bodyCap ?? 4_000,
+    errorCap: options.full ? Infinity : options.errorCap ?? 4_000,
   };
-  const entries = activePath(parseSession(readFileSync(row.session_path, "utf8")));
-  let selected = settings.since === undefined
-    ? entries
-    : entries.filter((entry) => {
-      const time = entryTime(entry);
-      return time !== undefined && time >= settings.since;
-    });
+  const records = sessionRecords(readFileSync(row.session_path, "utf8"));
+  const branch = options.all ? null : new Set(activePath(records.map((record) => record.entry), options.leaf));
+  let selected = records.filter(({ entry }) => !branch || branch.has(entry));
+  if (settings.since !== undefined) selected = selected.filter(({ entry }) => {
+    const time = entryTime(entry);
+    return time !== undefined && time >= settings.since;
+  });
   if (settings.tail !== undefined) selected = selected.slice(-settings.tail);
-  const body = selected.map((entry) => renderEntry(entry, settings)).filter(Boolean).join("\n").trim();
-  const mode = settings.work ? "conversation, actions, bounded thinking and results" : "conversation and actions; successful tool results omitted";
+  if (options.raw) return selected.map(({ raw }) => raw).join("\n");
+  const scope = options.all ? "all stored branches" : `parent chain through ${options.leaf ?? "newest stored entry"}; includes pre-compaction history`;
+  const body = options.search !== undefined
+    ? searchRecords(selected, row.session_path, options)
+    : selected.map(({ entry, line }) => {
+      const rendered = renderEntry(entry, settings);
+      return rendered ? `\n[line ${line}, entry ${entry.id}]${rendered}` : "";
+    }).filter(Boolean).join("\n").trim();
+  const mode = options.full ? "conversation, actions, thinking and results without per-block caps"
+    : settings.work ? "conversation, actions, bounded thinking and results"
+      : "conversation and actions; successful tool results omitted";
   return [
     `# ${row.name}`,
     `thread: ${row.id}`,
     `updated: ${row.updated_at}`,
     `session: ${row.session_path}`,
-    `view: ${mode}`,
+    ...records.filter(({ entry }) => entry.type === "session" && entry.parentSession).map(({ entry }) => `parent session: ${entry.parentSession}`),
+    `scope: ${scope}`,
+    `view: ${options.search !== undefined ? "search of complete stored JSONL records" : mode}`,
     settings.since === undefined ? null : `since: ${new Date(settings.since).toISOString()}`,
     "",
     body || "[no matching transcript entries]",
