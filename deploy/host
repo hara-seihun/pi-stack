@@ -98,6 +98,15 @@ wait_for_router() {
 supervisor_commit() {
   curl -fsS --max-time 2 -H "x-pi-remote-user: $1" "$router_base/v1/health" 2>/dev/null | jq -r '.releaseCommit // empty' 2>/dev/null
 }
+remote_matches_release() {
+  local target_commit=$1 user
+  local -a unlocked_users=()
+  wait_for_router || return 1
+  mapfile -t unlocked_users < <(curl -fsS --max-time 2 "$router_base/v1/router-health" 2>/dev/null | jq -r '.people[] | select(.unlocked) | .user' 2>/dev/null)
+  for user in "${unlocked_users[@]}"; do
+    [[ $(supervisor_commit "$user") == "$target_commit" ]] || return 1
+  done
+}
 activate_remote() {
   local target_commit=$1 user response deadline
   local -a unlocked_users=()
@@ -126,8 +135,12 @@ fi
 activation_failed=0
 if ! "$root/deploy/voice" --activate; then
   activation_failed=1
-elif [[ $previous_remote != "$expected" ]] && ! activate_remote "$expected"; then
-  activation_failed=1
+elif [[ $previous_remote != "$expected" ]]; then
+  activate_remote "$expected" || activation_failed=1
+elif ! remote_matches_release "$expected"; then
+  # Publication can finish before a deployment is interrupted. Reconcile a
+  # selected release whose supervisors never received the activation handoff.
+  activate_remote "$expected" || activation_failed=1
 fi
 
 # Then walk the front door the way the clients do. A release that locks a
