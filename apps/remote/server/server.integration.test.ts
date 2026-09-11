@@ -87,7 +87,7 @@ async function startServer() {
   server = Bun.spawn([process.execPath, join(import.meta.dir, "server.ts")], {
     cwd: import.meta.dir,
     stdout: "ignore",
-    stderr: "pipe",
+    stderr: "inherit",
     env: {
       ...process.env,
       PATH: `${root}:${process.env.PATH ?? ""}`,

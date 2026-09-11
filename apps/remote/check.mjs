@@ -1,7 +1,14 @@
+import { execFileSync } from "node:child_process";
 import { readdirSync } from "node:fs";
+import { fileURLToPath } from "node:url";
 import { availableParallelism } from "node:os";
 import { join } from "node:path";
 import { runJobs } from "../../scripts/run-jobs.mjs";
+
+execFileSync(process.execPath, [
+  fileURLToPath(new URL("../../packages/runtime/patch-shared-rpc.mjs", import.meta.url)),
+  fileURLToPath(new URL("../../node_modules", import.meta.url)),
+], { stdio: "inherit" });
 
 const integration = join("server", "server.integration.test.ts");
 const unitFiles = ["server", "web"].flatMap((directory) =>
