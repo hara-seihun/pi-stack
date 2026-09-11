@@ -38,9 +38,11 @@ describe("inline image presentation", () => {
       const queued = render(tag, { assistant: true, images: new Map([["scene", image({ waitingFor: ["seed"] })]]) });
       expect(queued).toContain("Waiting for seed");
       expect(queued).not.toContain("<img");
+      expect(queued).toContain('<span class="inline-image-label">scene</span>');
       const complete = image({ state: "complete", path: "/images/ocean & sky.png", conflict: "ID already has a different prompt" });
       const ready = render('<pi-remote-image id="scene" />', { assistant: true, images: new Map([["scene", complete]]) });
       expect(ready).toContain('loading="lazy"');
+      expect(ready).toContain('<span class="inline-image-label">scene</span>');
       expect(ready).toContain('src="http://127.0.0.1:43123/v1/sessions/thread%2Fone/files?path=%2Fimages%2Focean+%26+sky.png&amp;user=hara"');
       expect(ready).not.toContain("Generating image");
       expect(ready).toContain("ID already has a different prompt");
@@ -57,6 +59,7 @@ describe("inline image presentation", () => {
     const html = render(tag, { assistant: true, images: new Map([["scene", failed]]) });
     expect(html).toContain('&lt;script&gt;failed&lt;/script&gt;');
     expect(html).toContain('role="alert"');
+    expect(html).toContain('<span class="inline-image-label">scene</span>');
     expect(html).not.toContain('<script>');
     expect(render('<pi-remote-image id="absent" />', { assistant: true, images: new Map() })).toContain('role="alert"');
   });

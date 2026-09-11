@@ -18,7 +18,7 @@ function imageHtml(tag: InlineImageTag, sessionId: string, presentation: ImagePr
   const error = tag.error || image?.error?.message;
   const warning = image?.conflict ? `<span class="inline-image-error" role="alert">${escape(image.conflict)}</span>` : "";
   const label = escape(tag.id || "Image");
-  const shell = (body: string) => `<span class="inline-image" data-image-id="${label}">${body}${warning}</span>`;
+  const shell = (body: string) => `<span class="inline-image" data-image-id="${label}">${body}<span class="inline-image-label">${label}</span>${warning}</span>`;
   if (error) return shell(`<span class="inline-image-placeholder inline-image-error" role="alert"><strong>Image failed</strong><span>${escape(error)}</span></span>`);
   if (image?.state === "complete" && image.path) {
     const href = resourceUrl(API.sessionFiles.path({ sessionId }, { path: image.path }));

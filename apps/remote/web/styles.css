@@ -221,6 +221,7 @@ button:disabled { cursor: default; opacity: .45; }
 .markdown-body th, .markdown-body td { padding: 6px 9px; border: 1px solid var(--border); text-align: left; }
 .markdown-body img { display: block; max-width: 100%; margin: .9em 0; }
 .inline-image { display: block; width: min(100%, 560px); margin: .9em 0; }
+.inline-image-label { display: block; margin-top: 6px; color: var(--muted); font: 12px/1.4 ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; user-select: text; }
 .inline-image-placeholder { display: flex; min-height: 180px; padding: 24px; flex-direction: column; align-items: center; justify-content: center; gap: 10px; border: 1px solid var(--border); border-radius: 12px; background: var(--surface-2); color: var(--muted); text-align: center; }
 .inline-image-placeholder strong { color: var(--text); font-weight: 500; }
 .inline-image-placeholder[aria-busy="true"]::before { content: ""; width: 24px; height: 24px; border: 2px solid var(--border); border-top-color: var(--accent); border-radius: 50%; animation: inline-image-spin 1.2s linear infinite; }
