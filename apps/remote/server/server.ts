@@ -5,7 +5,8 @@ import { homedir } from "node:os";
 import { basename, dirname, extname, isAbsolute, join, resolve } from "node:path";
 import { parseRunKey } from "./agent-runs";
 import { AgentHost } from "./agent-hosts";
-import { ORCHESTRATOR_CATALOG, OrchestratorClient, catalogAgentType, type PlanUsageSnapshot } from "pi-orchestrator/api";
+import { ORCHESTRATOR_CATALOG, OrchestratorClient, catalogAgentType, createSharedImageGenerationService, type SharedImageGenerationService, type PlanUsageSnapshot } from "pi-orchestrator/api";
+import { InlineImages } from "./inline-images";
 import { planCards } from "./catalog-presentation";
 import { readMachineUsage } from "./machine-usage";
 import { displayContextDocument, type ContextImage } from "./context-display";
@@ -330,6 +331,15 @@ const totalChangesRow = db.query("SELECT total_changes() AS value");
 function currentStateVersion(): number {
   return inMemoryStateVersion + Number((totalChangesRow.get() as any)?.value ?? 0);
 }
+let imageProvider: SharedImageGenerationService | undefined;
+const inlineImages = new InlineImages(db, join(DATA, "inline-images"), async (input, signal) => {
+  try {
+    imageProvider ??= createSharedImageGenerationService({ ledgerPath: ORCHESTRATOR_DB_PATH });
+    return await imageProvider.generateImageWithSharedAccount(input, { signal });
+  } catch (cause) {
+    return { ok: false, error: { message: cause instanceof Error ? cause.message : String(cause) } };
+  }
+}, signalSync, 2, ownsSupervisorLease);
 const syncWaiters = new Set<() => void>();
 function wakeSync() {
   syncSequence++;
@@ -423,7 +433,8 @@ async function awaitSync(request: SyncRequest, signal: AbortSignal) {
     const runtime = runtimes.get(id);
     return (stored ? displayContext(id, stored.hash, stored.document).hash === contextHash : !contextHash)
       && sha256(runtime?.liveText ?? "") === liveTextHash
-      && sha256(runtime?.liveThinking ?? "") === liveThinkingHash;
+      && sha256(runtime?.liveThinking ?? "") === liveThinkingHash
+      && (request.session.imagesVersion === undefined || inlineImages.version(id) === request.session.imagesVersion);
   };
   if (!synchronized() || !waitMs || signal.aborted) return;
   await new Promise<void>((resolve) => {
@@ -1078,6 +1089,7 @@ function handleRpcEvent(sessionId: string, rt: Runtime, event: any) {
     proveRunning();
     const text = textFromMessage(event.message);
     if (event.message?.role === "assistant") {
+      inlineImages.accept(sessionId, sha256(text), text);
       const textPrefix = rt.liveText.slice(0, Math.min(rt.pendingContextTextLength, rt.liveText.length));
       if (text) rt.liveText = textPrefix + text;
       const thinkingPrefix = rt.liveThinking.slice(0, Math.min(rt.pendingContextThinkingLength, rt.liveThinking.length));
@@ -2035,6 +2047,7 @@ function recoverUnansweredPrompts() {
 
 recoverUnansweredPrompts();
 
+await inlineImages.start();
 runtimeAdoption = adoptHandoffRuntimes();
 void runtimeAdoption.then(reapUnclaimedRuntimeHosts)
   .catch((cause) => console.error("Could not finish runtime adoption", cause));
@@ -2097,6 +2110,11 @@ const server = Bun.serve({
       const headers = { ...API_CORS_HEADERS, "content-type": image.mimeType, "cache-control": "private, max-age=31536000, immutable", etag: `"${imageRequest.hash}"` };
       if (req.headers.get("if-none-match") === headers.etag) return new Response(null, { status: 304, headers });
       return new Response(Buffer.from(image.data, "base64"), { headers });
+    }
+    const imagesRequest = API.sessionImages.match(req.method, url.pathname);
+    if (imagesRequest) {
+      if (!sessionRow.get(imagesRequest.sessionId)) return error("Session not found", 404);
+      return json(inlineImages.snapshot(imagesRequest.sessionId));
     }
     const deliveredFile = await sessionFileResponse(url, req.method, req);
     if (deliveredFile) return deliveredFile;
@@ -2336,6 +2354,7 @@ const server = Bun.serve({
             .all(id, Math.max(0, Number(eventsAfter) || 0)) as any[]).map((entry) => ({ seq: entry.seq, time: entry.time, type: entry.type, ...JSON.parse(entry.payload) }));
           response.session = {
             context,
+            images: fresh || request.session!.imagesVersion !== inlineImages.version(id) ? inlineImages.snapshot(id) : null,
             liveText: textUpdate(`session:${id}:text`, liveTextHash, runtime?.liveText ?? ""),
             liveThinking: textUpdate(`session:${id}:thinking`, liveThinkingHash, runtime?.liveThinking ?? ""),
             events,
@@ -2616,7 +2635,11 @@ const server = Bun.serve({
           if (current.hash === splice.targetHash) acknowledgeMessageContext(id, body.finalizesMessage);
           return json({ ok: true, capturedAt: current.capturedAt, hash: current.hash });
         }
-        const appended = appendContextPatch(db, id, current, capturedAt, splice);
+        const appended = db.transaction(() => {
+          const result = appendContextPatch(db, id, current, capturedAt, splice);
+          if (result.ok) inlineImages.acceptContext(id, result.value.document);
+          return result;
+        })();
         if (!appended.ok) return error(appended.error, 409);
         cacheStoredContext(id, appended.value);
         acknowledgeMessageContext(id, body.finalizesMessage);
@@ -2653,6 +2676,7 @@ const server = Bun.serve({
             ON CONFLICT(session_id) DO UPDATE SET captured_at=excluded.captured_at,context=excluded.context
           `).run(id, acknowledgedCapturedAt, document);
           db.query("DELETE FROM session_context_patches WHERE session_id=?").run(id);
+          inlineImages.acceptContext(id, document);
           changed = true;
         })();
         if (changed) {
@@ -2925,6 +2949,7 @@ function handoffDocument() {
 }
 
 function stopSupervisorTimers() {
+  inlineImages.stop();
   clearInterval(reaper);
   clearInterval(stateReconciler);
   clearInterval(dashboardTicker);
@@ -2949,6 +2974,7 @@ async function handoffRelease() {
   for (const rt of runtimes.values()) rt.transport.detach();
   await meet.close();
   server.stop(true);
+  await imageProvider?.close();
   agentHost.close();
   db.close();
   console.log("Pi Remote supervisor handed active runtimes to the selected release");
@@ -2975,6 +3001,7 @@ async function shutdown() {
   await Promise.race([Promise.all(exits), Bun.sleep(3_000)]);
   await meet.close();
   server.stop();
+  await imageProvider?.close();
   agentHost.close();
   db.close();
   process.exit(0);

@@ -3,7 +3,7 @@ import { existsSync, readFileSync } from "node:fs";
 import { DEFAULT_BASH_TIMEOUT_SECONDS } from "./protocol";
 
 export function ensureSupervisorSchema(db: Database): void {
-  db.exec("PRAGMA journal_mode=WAL; PRAGMA foreign_keys=ON; PRAGMA secure_delete=ON; PRAGMA busy_timeout=5000;");
+  db.exec("PRAGMA journal_mode=WAL; PRAGMA synchronous=FULL; PRAGMA foreign_keys=ON; PRAGMA secure_delete=ON; PRAGMA busy_timeout=5000;");
   db.exec(`
 CREATE TABLE IF NOT EXISTS sessions (
   id TEXT PRIMARY KEY,

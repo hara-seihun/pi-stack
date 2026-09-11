@@ -3,6 +3,9 @@
 // imports the same file, so a field renamed on one side fails to compile on
 // the other instead of silently reading undefined at runtime.
 
+import type { InlineImage, InlineImageSnapshot } from "./inline-image-contract";
+export type { InlineImage, InlineImageSnapshot };
+
 export type ContextSplice = {
   baseHash: string;
   targetHash: string;
@@ -203,6 +206,8 @@ export interface SyncRequest {
   session?: {
     id: string;
     contextHash?: string;
+    /** Last image snapshot version. Omit to request the full current snapshot. */
+    imagesVersion?: number;
     liveTextHash?: string;
     liveThinkingHash?: string;
     /** Durable event cursor; omit when the caller renders from context. */
@@ -229,6 +234,7 @@ export interface SyncResponse {
    * document is null when the caller's hash already matches. */
   session: {
     context: DocumentUpdate | null;
+    images: InlineImageSnapshot | null;
     liveText: DocumentUpdate | null;
     liveThinking: DocumentUpdate | null;
     events: SessionEvent[];
