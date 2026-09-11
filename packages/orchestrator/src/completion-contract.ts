@@ -31,9 +31,11 @@ export const CompletionErrorSchema = Type.Object({
     Type.Literal("invalid-request"), Type.Literal("unsupported-option"), Type.Literal("not-found"),
     Type.Literal("request-conflict"), Type.Literal("invalid-state"), Type.Literal("provider"),
     Type.Literal("authentication"), Type.Literal("cancelled"), Type.Literal("indeterminate"),
-    Type.Literal("missing-provider-evidence"), Type.Literal("transport"), Type.Literal("protocol"),
+    Type.Literal("missing-provider-evidence"), Type.Literal("transport"), Type.Literal("protocol"), Type.Literal("rate-limited"),
   ]),
   message: Type.String(),
+  httpStatus: Type.Optional(Type.Integer({ minimum: 100, maximum: 599 })),
+  retryAfterMs: Type.Optional(Type.Integer({ minimum: 0 })),
 }, { additionalProperties: false });
 const completed = { state: Type.Literal("completed"), result: CompletionResultSchema };
 const failed = {
@@ -44,10 +46,18 @@ export const CompletionExecutionSchema = Type.Union([
   Type.Object(completed, { additionalProperties: false }),
   Type.Object(failed, { additionalProperties: false }),
 ]);
+export const CompletionAttemptSchema = Type.Object({
+  attemptId: Type.String(), runId: Type.String(), accountId: Type.String(), provider: Type.String(), model: Type.String(),
+  startedAt: Type.Integer({ minimum: 0 }), outcome: Type.Optional(CompletionExecutionSchema),
+  recoveryReason: Type.Optional(Type.String()),
+}, { additionalProperties: false });
+export const CompletionAttemptsSchema = Type.Object({ attempts: Type.Array(CompletionAttemptSchema) }, { additionalProperties: false });
+export type CompletionAttempt = Static<typeof CompletionAttemptSchema>;
 const identity = {
   requestId: CompletionRequestIdSchema, runId: Type.String(), model: CompletionModelSchema,
   metadata: Type.Optional(Type.Record(Type.String(), Type.Unknown())),
   createdAt: Type.Integer({ minimum: 0 }), updatedAt: Type.Integer({ minimum: 0 }),
+  attemptCount: Type.Optional(Type.Integer({ minimum: 0 })), retryAt: Type.Optional(Type.Integer({ minimum: 0 })),
 };
 export const CompletionRecordSchema = Type.Union([
   Type.Object({ ...identity, state: Type.Union([Type.Literal("queued"), Type.Literal("running")]) }, { additionalProperties: false }),

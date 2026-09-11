@@ -11,8 +11,10 @@ The worker calls Pi's native provider directly. It loads no AgentSession, extens
 - `PUT /v1/completions/{requestId}` accepts `CompletionInput` and returns `CompletionRecord`.
 - `GET /v1/completions/{requestId}` returns the current record without starting work.
 - `POST /v1/completions/{requestId}/cancel` cancels unfinished work. Terminal records remain unchanged.
+- `POST /v1/completions/{requestId}/retry` requeues only a definitively rejected rate-limited attempt. Request ID, run ID, input and selected model remain unchanged. Repeated calls replay queued, running or completed state. Cancelled, indeterminate and other failed outcomes are refused.
+- `GET /v1/completions/{requestId}/attempts` returns immutable assignment and receipt history, including the original rejected receipt and any caller-authorized recovery reason.
 
-`CompletionClient`, exported from `pi-orchestrator/api`, provides `submit(requestId, input)`, `get(requestId)` and `cancel(requestId)`. Each returns a typed `CompletionOutcome<CompletionRecord>`. Its options include `baseUrl`, injectable `fetch` and a per-HTTP-call `timeoutMs`. Its default address is the existing Orchestrator loopback address. Aborting a client HTTP call does not cancel durable work; cancellation has its own endpoint.
+`CompletionClient`, exported from `pi-orchestrator/api`, provides `submit(requestId, input)`, `get(requestId)`, `cancel(requestId)` and `retryRejected(requestId)`. Each returns a typed `CompletionOutcome<CompletionRecord>`. Its options include `baseUrl`, injectable `fetch` and a per-HTTP-call `timeoutMs`. Its default address is the existing Orchestrator loopback address. Aborting a client HTTP call does not cancel durable work; cancellation has its own endpoint.
 
 The input selects `model: "luna" | "terra"`, a required `prompt`, optional `systemPrompt`, optional native `responseFormat`, and optional JSON-object `metadata`. `responseFormat` has `type: "json_schema"`, `name`, `schema`, and optional `strict`, which defaults to true. Schemas travel as native `text.format`, not as extra prompt text.
 
@@ -35,6 +37,14 @@ One daemon timer renews active completion leases in one transaction and applies 
 `GET /v1/plans` returns account, meter, lease and admission-control data, not completion records, run-context payloads or child tasks. Read completion records through their request-ID endpoint. This prevents dashboard polling from serializing the entire inference history.
 
 `pi-orchestrator status` reports durable queued and running runs and all active leases. Multiplexed completion runs carry `workerUnit: completion:RUN_ID`; this identifies their daemon execution, not a systemd unit. A queued run's `refusal:RUN_ID` control names the actual admission blocker. The focused concurrency test admits and holds 315 independent requests simultaneously with both agent ceilings set to one, then checks unique requests, leases and once-only usage settlement.
+
+## Explicit provider rejection recovery
+
+HTTP 429 received before an SSE response is an explicit rejection, not an unknown execution outcome. The native transport records HTTP status and `Retry-After` without retrying within that transport invocation. Settlement first writes an immutable attempt receipt, then requeues the same logical request and run. `attemptCount` and `retryAt` identify the latest scheduling state. Replayed settlement for a prior attempt returns current state without rewriting its receipt or recording usage again. Provider connection loss after acceptance remains indeterminate and cannot use this recovery path.
+
+The September 11 source-mapping failures predate status capture. Their retained receipt contains the exact Codex HTTP error envelope `{"detail":"Rate limit exceeded"}` with `error.code=provider`. The deployed provider adapter passes that raw envelope from its non-success HTTP branch. Explicit `/retry` adopts only this exact envelope or a new status-bearing rate-limit receipt; it does not match arbitrary error text. Original filesystem receipts remain with the application. The service copies assignment and rejection into append-only attempt custody before moving the current record back to queued. No failed or indeterminate row is mass-reset at startup.
+
+Provider feedback sets account cooldown from `Retry-After`, or exponential backoff from one second up to one minute when no header exists. Rejections within the same cooldown count as one feedback wave. The new admission window is half the observed in-flight requests, with a minimum of one; there is no configured low concurrency ceiling. A window of successful completions doubles the allowance again. Unaffected accounts retain uncapped completion admission. Fresh quota, exhaustion, reservation and enabled-account checks still apply, and no banked reset is used. `completion-feedback:ACCOUNT` in plans controls records this measured window, cooldown and success count. Attempts and full receipts are served by their owning endpoints, not copied into plans.
 
 ## Native provider evidence
 

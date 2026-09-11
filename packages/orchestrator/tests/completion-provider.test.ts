@@ -53,6 +53,12 @@ it("does not spend on unsupported output caps or retry known provider rejection"
   expect(transport).toHaveBeenCalledTimes(1);
 });
 
+it("retains authoritative HTTP429 and Retry-After without retrying inside the transport", async () => {
+  const transport=vi.fn(async()=>new Response('{"detail":"Rate limit exceeded"}',{status:429,headers:{'retry-after':'2'}}));
+  expect(await executeCompletion(input,run,options(transport))).toEqual({state:"failed",error:{code:"rate-limited",message:'{"detail":"Rate limit exceeded"}',httpStatus:429,retryAfterMs:2000}});
+  expect(transport).toHaveBeenCalledTimes(1);
+});
+
 it("marks accepted stream loss indeterminate and never retries provider dispatch", async () => {
   const transport = vi.fn(async () => new Response(events(false), { headers: { "content-type": "text/event-stream" } }));
   expect(await executeCompletion(input, run, options(transport))).toMatchObject({ state: "indeterminate", error: { code: "indeterminate" } });

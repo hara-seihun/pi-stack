@@ -1,3 +1,4 @@
+import { completionFeedbackRefusal } from "./completion-feedback.js";
 import { catalogMeter } from "./catalog.js";
 import { reservationMatchesRun } from "./admission-reservation.js";
 import { allowsAccountUse, type BudgetClass, type OrchestratorConfig, type ProfileCandidate } from "./domain.js";
@@ -92,6 +93,10 @@ export function assign(store:Store,profile:string,budget:BudgetClass,cfg:Orchest
 
 export function assignCompletion(store:Store,runId:string,profile:string,cfg:OrchestratorConfig,now=Date.now()):{assignment?:Assignment;refusals:Refusal[]}{
   if(store.control("launches")==="paused")return{refusals:[{accountId:"*",reason:"emergency halt"}]};
+  const requestId=store.control(`completion-run:${runId}`);
+  const saved=requestId?store.control(`completion:${requestId}`):undefined;
+  const retryAt=saved?JSON.parse(saved).record.retryAt:undefined;
+  if(retryAt>now)return{refusals:[{accountId:"*",reason:`provider retry scheduled at ${retryAt}`} ]};
   const candidates=cfg.profiles[profile];if(!candidates?.length)throw new Error(`unknown completion profile ${profile}`);
   const refusals:Refusal[]=[],choices:(Assignment&{spent:number;reserved:boolean})[]=[];
   for(const candidate of candidates){
@@ -101,7 +106,7 @@ export function assignCompletion(store:Store,runId:string,profile:string,cfg:Orc
         :account.reservation&&!reservationMatchesRun(store,account.reservation,runId)?"reserved for another completion queue"
         :account.cooldownUntil&&account.cooldownUntil>now?"account cooling down"
         :!meters.length||meters.some(meter=>now-meter.observed_at>cfg.meterMaxAgeMs||meter.observed_at>now+60_000)?"missing or stale provider quota"
-        :meters.some(meter=>meter.used_percent>=100)?"provider quota exhausted":undefined;
+        :meters.some(meter=>meter.used_percent>=100)?"provider quota exhausted":completionFeedbackRefusal(store,account.id,now);
       if(reason){refusals.push({accountId:account.id,reason});continue;}
       choices.push({...candidate,accountId:account.id,spent:Math.max(...meters.map(meter=>meter.used_percent)),reserved:!!account.reservation});
     }

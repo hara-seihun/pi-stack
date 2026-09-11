@@ -1,13 +1,15 @@
 import { builtinProviders } from "@earendil-works/pi-ai/providers/all";
 import { catalogModel } from "./catalog.js";
-import { completionCanonical, completionError, isCompletionExecution, isCompletionInput, isCompletionRequestId, type CompletionExecution, type CompletionInput, type CompletionOutcome, type CompletionRecord } from "./completion-contract.js";
+import { completionCanonical, completionError, isCompletionExecution, isCompletionInput, isCompletionRequestId, type CompletionExecution, type CompletionInput, type CompletionOutcome, type CompletionRecord, type CompletionAttempt } from "./completion-contract.js";
 import type { Store } from "./store.js";
+import { recordCompletionRejection, recordCompletionSuccess } from "./completion-feedback.js";
 
 interface StoredCompletion {
   input: CompletionInput;
   record: CompletionRecord;
   attemptId?: string;
   receipt?: CompletionExecution;
+  attemptCount?: number;
 }
 export interface CompletionClaim {
   readonly execute: boolean;
@@ -39,6 +41,56 @@ export class CompletionService {
       message: run.result ?? "Completion worker ended without a durable provider result.",
     } };
     this.save(value);
+  }
+
+  private evidence(key: string, value: unknown): void {
+    const previous = this.store.control(key), encoded = JSON.stringify(value);
+    if (previous) { if (completionCanonical(JSON.parse(previous)) !== completionCanonical(value)) throw new Error(`Conflicting immutable completion evidence ${key}`); return; }
+    this.store.setControl(key, encoded);
+  }
+  private rememberAttempt(value: StoredCompletion): void {
+    if (!value.attemptId) return;
+    const run = this.store.run(value.record.runId)!;
+    const key = `completion-attempt:${run.id}:${value.attemptId}`;
+    if (!this.store.control(key)) this.evidence(key, { attemptId: value.attemptId, runId: run.id, accountId: run.accountId!, provider: run.provider!, model: run.model!, startedAt: run.startedAt ?? value.record.createdAt } satisfies CompletionAttempt);
+    if (value.receipt) this.evidence(`completion-receipt:${run.id}:${value.attemptId}`, value.receipt);
+  }
+  attempts(requestId: string): CompletionAttempt[] | undefined {
+    const value = this.stored(requestId); if (!value) return;
+    const prefix = `completion-attempt:${value.record.runId}:`;
+    const attempts = (this.store.db.prepare("SELECT value FROM control WHERE key>=? AND key<?").all(prefix, prefix + '\uffff') as {value:string}[]).map(row => {
+      const attempt = JSON.parse(row.value) as CompletionAttempt;
+      const outcome = this.store.control(`completion-receipt:${attempt.runId}:${attempt.attemptId}`);
+      const recoveryReason = this.store.control(`completion-recovery:${attempt.runId}:${attempt.attemptId}`);
+      return { ...attempt, ...(outcome ? { outcome: JSON.parse(outcome) as CompletionExecution } : {}), ...(recoveryReason ? { recoveryReason: JSON.parse(recoveryReason) as string } : {}) };
+    });
+    return attempts.sort((a,b) => a.startedAt-b.startedAt || a.attemptId.localeCompare(b.attemptId));
+  }
+  private requeue(value: StoredCompletion, retryAt: number): CompletionRecord {
+    const { requestId, runId, model, metadata, createdAt } = value.record;
+    value.attemptCount ??= value.attemptId ? 1 : 0;
+    value.record = { requestId, runId, model, metadata, createdAt, updatedAt: Date.now(), state: "queued", attemptCount: value.attemptCount, retryAt };
+    delete value.attemptId; delete value.receipt;
+    this.store.requeueRejectedCompletion(runId);
+    this.save(value);
+    return value.record;
+  }
+  retry(requestId: string): CompletionOutcome<CompletionRecord> {
+    return this.store.transaction(() => {
+      const value = this.stored(requestId); if (!value) return completionError("not-found", "Completion not found.");
+      this.synchronize(value);
+      if (["queued", "running", "completed"].includes(value.record.state)) return { ok: true, value: value.record };
+      const receipt = value.receipt;
+      const explicit = receipt?.state === "failed" && ((receipt.error.code === "rate-limited" && receipt.error.httpStatus === 429)
+        || (receipt.error.code === "provider" && receipt.error.message.trim() === '{"detail":"Rate limit exceeded"}'));
+      if (value.record.state !== "failed" || !explicit || !value.attemptId) return completionError("invalid-state", "Only explicit pre-execution rate-limit rejection can be retried. Cancelled and indeterminate outcomes remain fenced.");
+      const run = this.store.run(value.record.runId)!;
+      this.rememberAttempt(value);
+      this.evidence(`completion-recovery:${run.id}:${value.attemptId}`, "Caller-authorized recovery of an explicit Codex rate-limit rejection; original receipt retained.");
+      const observed = Number((this.store.db.prepare("SELECT count(*) n FROM run WHERE account_id=? AND started_at<=? AND (ended_at IS NULL OR ended_at>=?)").get(run.accountId!, value.record.updatedAt, value.record.updatedAt) as {n:number}).n);
+      const retryAt = recordCompletionRejection(this.store, run.accountId!, Date.now(), undefined, Math.max(1, observed));
+      return { ok: true, value: this.requeue(value, retryAt) };
+    });
   }
 
   submit(requestId: string, input: unknown): CompletionOutcome<CompletionRecord> {
@@ -82,7 +134,7 @@ export class CompletionService {
       const requestId = this.requestId(runId), value = requestId === undefined ? undefined : this.stored(requestId);
       if (!value) return completionError("not-found", "Completion not found.");
       this.synchronize(value);
-      if (terminal(value.record)) return { ok: true, value: { execute: false, record: value.record } };
+      if (terminal(value.record) || this.store.control(`completion-receipt:${runId}:${attemptId}`)) return { ok: true, value: { execute: false, record: value.record } };
       const run = this.store.run(runId)!;
       if (!run.accountId || !run.provider || !run.model) return completionError("invalid-state", "Completion has no admitted account assignment.");
       if (value.attemptId && value.attemptId !== attemptId) {
@@ -91,8 +143,10 @@ export class CompletionService {
         this.store.updateRun(runId, { state: "failed", failureKind: "infrastructure", result: value.record.error.message });
         return { ok: true, value: { execute: false, record: value.record } };
       }
+      if (!value.attemptId) value.attemptCount = (value.attemptCount ?? 0) + 1;
       value.attemptId = attemptId;
-      value.record = { ...value.record, state: "running", updatedAt: Date.now() };
+      this.rememberAttempt(value);
+      value.record = { ...value.record, state: "running", updatedAt: Date.now(), attemptCount: value.attemptCount ?? 1 };
       this.save(value);
       this.store.updateRun(runId, { state: "running", progressAt: Date.now() });
       return { ok: true, value: { execute: true, record: value.record, input: value.input } };
@@ -105,18 +159,28 @@ export class CompletionService {
       const requestId = this.requestId(runId), value = requestId === undefined ? undefined : this.stored(requestId);
       if (!value) return completionError("not-found", "Completion not found.");
       this.synchronize(value);
+      const previous = this.store.control(`completion-receipt:${runId}:${attemptId}`);
+      if (previous) return completionCanonical(JSON.parse(previous)) === completionCanonical(outcome)
+        ? { ok: true, value: value.record } : completionError("request-conflict", "Attempt already has a different immutable receipt.");
       if (value.attemptId !== attemptId) return completionError("request-conflict", "Receipt does not belong to the claimed attempt.");
       if (value.receipt) return completionCanonical(value.receipt) === completionCanonical(outcome)
         ? { ok: true, value: value.record } : completionError("request-conflict", "Completion already has a different receipt.");
       const run = this.store.run(runId)!;
+      if (outcome.state === "completed" && outcome.result.provider !== run.provider) return completionError("invalid-request", "Receipt provider differs from the admitted provider.");
+      this.rememberAttempt(value);
+      this.evidence(`completion-receipt:${runId}:${attemptId}`, outcome);
+      if (outcome.state === "failed" && outcome.error.code === "rate-limited" && outcome.error.httpStatus === 429 && value.record.state !== "cancelled") {
+        const retryAt = recordCompletionRejection(this.store, run.accountId!, Date.now(), outcome.error.retryAfterMs);
+        return { ok: true, value: this.requeue(value, retryAt) };
+      }
       if (outcome.state === "completed") {
-        if (outcome.result.provider !== run.provider) return completionError("invalid-request", "Receipt provider differs from the admitted provider.");
+        recordCompletionSuccess(this.store, run.accountId!, Date.now());
         for (const component of ["input", "output", "cacheRead", "cacheWrite"] as const) {
           this.store.recordUsage({ accountId: run.accountId!, hour: Math.floor(Date.now() / 3_600_000) * 3_600_000, source: "completion", runId, model: outcome.result.model, component, tokens: outcome.result.usage[component] });
         }
       }
       value.receipt = outcome;
-      if (value.record.state !== "cancelled") value.record = { requestId: value.record.requestId, runId, model: value.record.model, metadata: value.record.metadata, createdAt: value.record.createdAt, updatedAt: Date.now(), ...outcome };
+      if (value.record.state !== "cancelled") value.record = { requestId: value.record.requestId, runId, model: value.record.model, metadata: value.record.metadata, createdAt: value.record.createdAt, updatedAt: Date.now(), attemptCount: value.attemptCount ?? 1, ...outcome };
       this.save(value);
       if (value.record.state !== "cancelled") this.store.finishCompletionRun(runId, {
         state: outcome.state === "completed" ? "done" : outcome.state === "cancelled" ? "aborted" : "failed",

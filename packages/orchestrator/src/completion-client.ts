@@ -22,6 +22,9 @@ export class CompletionClient {
   get(requestId: string, options: CompletionCallOptions = {}): Promise<CompletionOutcome<CompletionRecord>> {
     return this.call(requestId, "GET", "", undefined, options);
   }
+  retryRejected(requestId: string, options: CompletionCallOptions = {}): Promise<CompletionOutcome<CompletionRecord>> {
+    return this.call(requestId, "POST", "/retry", undefined, options);
+  }
   cancel(requestId: string, options: CompletionCallOptions = {}): Promise<CompletionOutcome<CompletionRecord>> {
     return this.call(requestId, "POST", "/cancel", undefined, options);
   }

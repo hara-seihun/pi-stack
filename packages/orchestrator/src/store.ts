@@ -307,6 +307,12 @@ export class Store {
       .run(state==="waiting"?"running":state,patch.sessionFile??null,patch.progressAt??null,patch.result??null,patch.failureKind??null,patch.workerUnit??null,at,terminal?at:null,id);
     if(terminal||state==="waiting")this.endLease(`run:${id}`,at);
   }
+  requeueRejectedCompletion(id:string):void{
+    if(!this.control(`completion-run:${id}`))throw new Error(`Run ${id} is not a completion`);
+    const run=this.run(id);if(!run||run.state==="aborted"||run.state==="done")throw new Error("Only rejected completion work can be requeued");
+    this.endLease(`run:${id}`);
+    this.db.prepare("UPDATE run SET state='queued',account_id=NULL,worker_unit=NULL,release_path=NULL,started_at=NULL,progress_at=NULL,ended_at=NULL,failure_kind=NULL,result=NULL,updated_at=? WHERE id=?").run(Date.now(),id);
+  }
   finishCompletionRun(id:string,patch:Parameters<Store["updateRun"]>[1],at=Date.now()):void{
     this.transaction(()=>{
       if(!this.control(`completion-run:${id}`))throw new Error(`Run ${id} is not a completion`);
