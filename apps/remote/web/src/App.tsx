@@ -57,7 +57,7 @@ const initialState: AppState = {
   attachments: [], slashCommands: [], offline: "", syncing: true,
 };
 
-function working(session: Session | null) { return Boolean(session && ["RUNNING", "STARTING", "ABORTING"].includes(session.state)); }
+function working(session: Session | null) { return Boolean(session && ["QUEUED", "RUNNING", "STARTING", "ABORTING"].includes(session.state)); }
 function threadProvider(session: Session) {
   return session.environment === "work" ? "work" : session.environment === "converge" ? "converge" : session.environment === "personal" ? "personal" : session.provider === "anthropic" ? "anthropic" : "openai";
 }

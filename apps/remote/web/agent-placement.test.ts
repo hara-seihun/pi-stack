@@ -28,14 +28,14 @@ function buttons(node: ReactNode): ReactElement<Record<string, any>>[] {
 
 describe("subagent placement", () => {
   test("keeps children out of Interactive across lifecycle updates, including nested and meeting workers", () => {
-    for (const state of ["STARTING", "RUNNING", "IDLE", "STOPPED", "FAILED"]) {
+    for (const state of ["QUEUED", "STARTING", "RUNNING", "IDLE", "STOPPED", "FAILED"]) {
       const worker = { ...child, state };
       const nested = session("nested", { subagent: { parentSessionId: child.id, model: "gpt-6-astra" } });
       const meeting = session("meeting", { environment: "personal" });
       const meetingWorker = session("meeting-worker", { environment: "personal", subagent: { parentSessionId: meeting.id, model: "gpt-5.6-terra" } });
       const partition = partitionThreads([worker, parent, nested, meeting, meetingWorker]);
       expect(partition.interactive).toEqual([parent, meeting]);
-      expect(partition.subagents).toEqual(["STARTING", "RUNNING"].includes(state) ? [worker] : []);
+      expect(partition.subagents).toEqual(["QUEUED", "STARTING", "RUNNING"].includes(state) ? [worker] : []);
       expect(subagentRoot(nested, [parent, child, nested])).toBe(parent.id);
       expect(threadDrawerTab(worker)).toBe("agents");
       expect(threadDrawerTab(parent)).toBe("threads");

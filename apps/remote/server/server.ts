@@ -22,8 +22,9 @@ import { externalMeetingRequest } from "./meet/external";
 import { liveDevInstructions } from "./skills";
 import { THREAD_THINKING_LEVELS } from "./thread-tools";
 import { defaultThreadDestinations, type ThreadDestination } from "./thread-model-defaults";
-import { attachRuntimeHost, startRuntimeHost, type RuntimeTransport } from "./runtime-transport";
+import { attachRuntimeHost, startRuntimeHost, runtimeCapacity, type RuntimeTransport } from "./runtime-transport";
 import { RuntimeAdmission } from "./runtime-admission";
+import { RuntimeCapacityQueue } from "./runtime-capacity-queue";
 import { API } from "./api";
 import { idleNotifications } from "./notifications";
 import { listPersons, publicPerson } from "./persons";
@@ -182,7 +183,7 @@ const voice = new VoiceClient(DATA);
 const agentHost = new AgentHost(orchestrator, { key: "local", label: "THIS MACHINE", name: "This machine" });
 ensureSupervisorSchema(db);
 const HANDOFF_PATH = join(DATA, "supervisor-handoff.json");
-type RuntimePhase = "STARTING" | "IDLE" | "DISPATCHING" | "RUNNING" | "ABORTING" | "STOPPING";
+type RuntimePhase = "WAITING" | "STARTING" | "IDLE" | "DISPATCHING" | "RUNNING" | "ABORTING" | "STOPPING";
 type RuntimeHandoff = {
   sessionId: string;
   socketPath: string;
@@ -260,6 +261,7 @@ const activations = new Map<string, Promise<Runtime>>();
 const sessionWorkers = new Map<string, Promise<void>>();
 const forkingSessions = new Set<string>();
 const retryTimers = new Map<string, Timer>();
+const runtimeCapacityQueue = new RuntimeCapacityQueue(priority => runtimeCapacity(DATA, priority > 0));
 let shuttingDown = false;
 let releaseHandoffRequested = false;
 
@@ -836,6 +838,7 @@ function publicSessions(rows: any[]): any[] {
 function sessionActivity(row: any): Session["activity"] {
   const rt = runtimes.get(row.id);
   return row.state === "FAILED" ? "FAILED"
+    : row.state === "QUEUED" || rt?.phase === "WAITING" ? "QUEUED"
     : rt?.phase === "STARTING" || row.state === "STARTING" ? "STARTING"
     : rt?.phase === "ABORTING" || rt?.phase === "STOPPING" || row.state === "ABORTING" ? "ABORTING"
     : rt?.compacting ? "COMPACTING"
@@ -1282,12 +1285,12 @@ async function reconcileRuntimeState(sessionId: string, rt: Runtime): Promise<an
   }
 }
 
-function runtimeFromHandoff(row: any, handoff?: RuntimeHandoff): Runtime {
+function runtimeFromHandoff(row: any, handoff?: RuntimeHandoff, initialPhase: RuntimePhase = "STARTING"): Runtime {
   return {
     transport: null,
     startupAbort: new AbortController(),
     pending: new Map(),
-    phase: handoff?.phase ?? "STARTING",
+    phase: handoff?.phase ?? initialPhase,
     phaseVersion: 0,
     compacting: handoff?.compacting ?? false,
     compactionContextHash: handoff?.compactionContextHash ?? null,
@@ -1328,6 +1331,7 @@ function monitorRuntime(row: any, rt: Runtime) {
     if (runtimes.get(row.id) !== rt) return;
     setRuntimePhase(row.id, rt, "STOPPING");
     runtimes.delete(row.id);
+    runtimeCapacityQueue.wake();
     if (shuttingDown || !ownsSupervisorLease()) return;
     const retryAt = Date.now() + RUNTIME_RESTART_DELAY_MS;
     if (!rt.expectedExit) {
@@ -1391,8 +1395,8 @@ async function startRuntime(row: any): Promise<Runtime> {
     if (row.initial_provider && row.initial_model) args.push("--provider", row.initial_provider, "--model", row.initial_model);
     if (row.initial_thinking) args.push("--thinking", row.initial_thinking);
   }
-  setState(row.id, "STARTING");
-  const rt = runtimeFromHandoff(row);
+  setState(row.id, "QUEUED", row.state === "QUEUED" ? row.last_error : null);
+  const rt = runtimeFromHandoff(row, undefined, "WAITING");
   runtimes.set(row.id, rt);
   try {
     rt.transport = await startRuntimeHost({
@@ -1407,6 +1411,7 @@ async function startRuntime(row: any): Promise<Runtime> {
     });
     monitorRuntime(row, rt);
     if (rt.expectedExit || rt.startupAbort.signal.aborted) throw new Error("Activation cancelled");
+    setRuntimePhase(row.id, rt, "STARTING", "STARTING");
     const state = await rpc(rt, "get_state", {}, 120_000);
     if (!ownsSupervisorLease() || rt.phase !== "STARTING") throw new Error("Activation cancelled");
     if (state.model?.id) rt.modelId = String(state.model.id);
@@ -1432,6 +1437,9 @@ async function startRuntime(row: any): Promise<Runtime> {
     setRuntimePhase(row.id, rt, "STOPPING");
     await terminateRuntimeProcess(rt);
     if (runtimes.get(row.id) === rt) runtimes.delete(row.id);
+    if (!cancelled && ownsSupervisorLease() && String(cause).includes("Runner capacity busy")) {
+      setState(row.id, "QUEUED", "Waiting for shared runner capacity");
+    }
     if (cancelled || !ownsSupervisorLease() || String(cause).includes("Runner capacity busy")) throw cause;
     // A transport, capacity, or extension failure does not invalidate a saved
     // session file. Retry that exact file; only the missing-file check above
@@ -1715,6 +1723,7 @@ function restoredContext(sessionId: string, beforeSeq: number, limit = 120_000):
 }
 
 function scheduleSession(sessionId: string, delayMs: number) {
+  if (runtimeCapacityQueue.has(sessionId)) return;
   const session = sessionRow.get(sessionId) as any;
   if (!session || session.archived_at) return;
   const old = retryTimers.get(sessionId);
@@ -1819,9 +1828,12 @@ async function drainSession(sessionId: string) {
           await terminateRuntimeProcess(rt);
         }
         db.query("UPDATE work_items SET state='queued',available_at=?,updated_at=?,last_error=? WHERE id=? AND state='running'")
-          .run(Date.now() + 5_000, now(), "Waiting for shared runner capacity", item.id);
-        setState(sessionId, "STOPPED", "Queued: waiting for shared runner capacity");
-        scheduleSession(sessionId, 5_000);
+          .run(Date.now(), now(), "Waiting for shared runner capacity", item.id);
+        setState(sessionId, "QUEUED", "Waiting for shared runner capacity");
+        const retry = retryTimers.get(sessionId);
+        if (retry) clearTimeout(retry);
+        retryTimers.delete(sessionId);
+        runtimeCapacityQueue.block(sessionId, () => kickSession(sessionId), () => admissionPriority(sessionId));
         return;
       }
       const active = runtimes.get(sessionId);
@@ -1864,6 +1876,7 @@ async function drainSession(sessionId: string) {
 }
 
 function kickSession(sessionId: string) {
+  if (runtimeCapacityQueue.has(sessionId)) return;
   const session = sessionRow.get(sessionId) as any;
   if (!session || session.archived_at || sessionWorkers.has(sessionId)) return;
   const worker = drainSession(sessionId)
@@ -1876,7 +1889,7 @@ function kickSession(sessionId: string) {
         SELECT min(available_at) available_at FROM work_items
         WHERE session_id=? AND state='queued' ${busy ? "AND delivery='steer'" : ""}
       `).get(sessionId) as any;
-      if (next?.available_at != null) scheduleSession(sessionId, Math.max(0, Number(next.available_at) - Date.now()));
+      if (next?.available_at != null && !runtimeCapacityQueue.has(sessionId)) scheduleSession(sessionId, Math.max(0, Number(next.available_at) - Date.now()));
     });
   sessionWorkers.set(sessionId, worker);
 }
@@ -1890,7 +1903,7 @@ function enqueuePrompt(sessionId: string, requestId: string, text: string, deliv
   const effectiveDelivery = queuedBehindWork ? delivery : "prompt";
   db.query("INSERT INTO work_items(id,session_id,request_id,event_seq,text,delivery,images,state,attempts,available_at,created_at,updated_at,last_error,inserted_at) VALUES(?,?,?,?,?,?,?,'queued',0,?,?,?,NULL,NULL)")
     .run(workId, sessionId, requestId, 0, text, effectiveDelivery, JSON.stringify(images), Date.now(), time, time);
-  setState(sessionId, "RUNNING");
+  setState(sessionId, runtimeWorking(runtimes.get(sessionId)) ? "RUNNING" : "QUEUED");
   const response = {
     accepted: true,
     queued: queuedBehindWork,
@@ -2013,7 +2026,7 @@ async function abortCurrentOperation(sessionId: string): Promise<AbortOperationR
   if (rt?.phase === "ABORTING") return { ok: true, aborting: true };
   if (rt?.phase === "STOPPING") return { ok: false, status: 409, error: "Agent is pausing after inactivity" };
 
-  if (!rt || rt.phase === "STARTING" || rt.phase === "IDLE") {
+  if (!rt || rt.phase === "WAITING" || rt.phase === "STARTING" || rt.phase === "IDLE") {
     if (currentWork) {
       db.query("UPDATE work_items SET state='cancelled',updated_at=?,last_error='Current turn stopped by user' WHERE id=?")
         .run(now(), currentWork.id);
@@ -2021,6 +2034,7 @@ async function abortCurrentOperation(sessionId: string): Promise<AbortOperationR
     const retryTimer = retryTimers.get(sessionId);
     if (retryTimer) clearTimeout(retryTimer);
     retryTimers.delete(sessionId);
+    runtimeCapacityQueue.cancel(sessionId);
     if (!rt) {
       setState(sessionId, retainedCount > 0 ? "RUNNING" : "STOPPED");
       if (retainedCount > 0) kickSession(sessionId);
@@ -2532,7 +2546,7 @@ const server = Bun.serve({
         if (parent) kickSession(id);
         else activate(sessionRow.get(id)).catch((e) => {
           const latest = sessionRow.get(id) as any;
-          if (latest && !["STOPPED", "IDLE"].includes(String(latest.state))) setState(id, "FAILED", String(e.message ?? e));
+          if (latest && !["STOPPED", "IDLE", "QUEUED"].includes(String(latest.state))) setState(id, "FAILED", String(e.message ?? e));
         });
         return json(response, 201);
       } catch (e: any) { return error(e.message ?? "Invalid request"); }
@@ -2657,6 +2671,7 @@ const server = Bun.serve({
       }
       const timer = retryTimers.get(id); if (timer) clearTimeout(timer);
       retryTimers.delete(id);
+      runtimeCapacityQueue.cancel(id);
       const rt = runtimes.get(id);
       if (rt) {
         rt.expectedExit = true;
@@ -2677,6 +2692,7 @@ const server = Bun.serve({
         .run(body.priority ? 1 : 0, now(), id);
       db.query("UPDATE work_items SET available_at=? WHERE session_id=? AND state='queued'")
         .run(Date.now(), id);
+      runtimeCapacityQueue.wake();
       kickSession(id);
       return json({ sessionId: id, priority: body.priority, state: (sessionRow.get(id) as any).state });
     }
@@ -3027,6 +3043,7 @@ function handoffDocument() {
 }
 
 function stopSupervisorTimers() {
+  runtimeCapacityQueue.stop();
   inlineImages.stop();
   clearInterval(reaper);
   clearInterval(stateReconciler);

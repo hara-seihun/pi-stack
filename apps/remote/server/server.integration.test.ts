@@ -33,6 +33,7 @@ const fakeAgentRuns = join(root, "agent-runs");
 const port = 20_000 + ((process.ppid * 4 + shardIndex) % 10_000);
 const base = `http://127.0.0.1:${port}`;
 let server: ReturnType<typeof Bun.spawn>;
+let sharedRunnerFixture = false;
 setDefaultTimeout(30_000);
 
 async function api(method: string, path: string, body?: unknown) {
@@ -107,7 +108,8 @@ async function startServer() {
       PI_REMOTE_RUNTIME_RESTART_DELAY_MS: "20",
       PI_REMOTE_INGESTION: join(root, "ingestion"),
       PI_FAKE_LAUNCH: fakeLaunch,
-      PI_REMOTE_RUNTIME_DRIVER: "command",
+      PI_REMOTE_RUNTIME_DRIVER: sharedRunnerFixture ? "shared" : "command",
+      PI_REMOTE_MAX_ACTIVE_RUNTIMES: sharedRunnerFixture ? "0" : "8",
       PI_FAKE_NAMING_LOG: fakeNamingLog,
       PI_FAKE_RPC_LOG: fakeRpcLog,
       PI_FAKE_CHILD_PID: fakeChildPid,
@@ -512,6 +514,35 @@ async function createThread(destination = "home", model?: string) {
 }
 
 describe("web and supervisor integration", () => {
+  test("capacity-blocked shared sessions remain QUEUED without revision churn and can be cancelled", async () => {
+    server.kill(); await server.exited;
+    sharedRunnerFixture = true;
+    await startServer();
+    let id: string | undefined;
+    try {
+      const created = await api("POST", "/v1/sessions", {requestId:crypto.randomUUID(),destination:"home",model:"astra"});
+      expect(created.status).toBe(201); id = created.value.session.id;
+      await api("POST", `/v1/sessions/${id}/prompt`, {requestId:crypto.randomUUID(),text:"capacity fixture"});
+      const read = () => api("GET", `/v1/sessions/${id}`).then(result=>result.value.session);
+      await waitFor(read, session=>session?.state==="QUEUED" && session?.lastError==="Waiting for shared runner capacity");
+      await Bun.sleep(50);
+      const before = await read();
+      await Bun.sleep(2200);
+      const after = await read();
+      expect(after.state).toBe("QUEUED");
+      expect(after.activity).toBe("QUEUED");
+      expect(after.revision).toBe(before.revision);
+      expect(after.queuedMessages[0].state).toBe("queued");
+      const aborted = await api("POST", `/v1/sessions/${id}/abort`);
+      expect(aborted.status).toBe(200);
+      expect((await read()).state).toBe("STOPPED");
+    } finally {
+      if(id)await api("DELETE", `/v1/sessions/${id}`);
+      server.kill();await server.exited;
+      sharedRunnerFixture=false;await startServer();
+    }
+  });
+
   test("delegation pins models, reuses matching children and returns one durable result", async () => {
     const parentSessionId = await createThread("home", "astra");
     const requestId = crypto.randomUUID();

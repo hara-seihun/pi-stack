@@ -12,7 +12,7 @@ export function isActiveAgentRun(run: AgentRun): boolean {
 }
 
 export function isActiveSubagent(session: Session): boolean {
-  return Boolean(session.subagent) && !session.archivedAt && ["STARTING", "RUNNING", "ABORTING"].includes(session.state);
+  return Boolean(session.subagent) && !session.archivedAt && ["QUEUED", "STARTING", "RUNNING", "ABORTING"].includes(session.state);
 }
 
 export function subagentRoot(session: Session, sessions: Session[]): string {

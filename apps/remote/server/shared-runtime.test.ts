@@ -1,5 +1,5 @@
 import {afterEach, expect, test} from "bun:test";
-import {mkdtempSync, mkdirSync, writeFileSync, rmSync} from "node:fs";
+import {mkdtempSync, mkdirSync, writeFileSync, rmSync, readdirSync, statSync, unlinkSync} from "node:fs";
 import {tmpdir} from "node:os";
 import {join} from "node:path";
 import {pathToFileURL} from "node:url";
@@ -97,4 +97,44 @@ test("environment scopes preserve nested and concurrent identities without chang
     expect(values).toEqual(["parent","child"]);
     expect(sessionEnvironment()).toBe(process.env);
   }finally{target[key]=previous;}
+});
+
+test("a paused runner retains its socket and kernel lease across control timeouts", async()=>{
+  const options=fixture(), output:string[]=[];
+  const first=await startRuntimeHost({...options,sessionId:"owner",onOutput:line=>output.push(line)});transports.push(first);
+  const directory=join(options.data,"runtime-runners");
+  const control=join(directory,readdirSync(directory).find(name=>name.endsWith('.sock'))!);
+  const inode=statSync(control).ino;
+  const previous=process.env.PI_REMOTE_RUNNER_CONTROL_TIMEOUT_MS;
+  process.env.PI_REMOTE_RUNNER_CONTROL_TIMEOUT_MS="100";
+  process.kill(first.pid,"SIGSTOP");
+  try {
+    await expect(startRuntimeHost({...options,sessionId:"contender",onOutput(){}})).rejects.toThrow("control response delayed");
+    expect(statSync(control).ino).toBe(inode);
+    const contender=Bun.spawn(["flock","-n","-E","75",control+".lock","true"]);
+    expect(await contender.exited).toBe(75);
+  } finally {
+    process.kill(first.pid,"SIGCONT");
+    if(previous===undefined)delete process.env.PI_REMOTE_RUNNER_CONTROL_TIMEOUT_MS;else process.env.PI_REMOTE_RUNNER_CONTROL_TIMEOUT_MS=previous;
+  }
+  first.send({type:"get_state",id:"alive"});await waitFor(()=>output.length>0);
+  const second=await startRuntimeHost({...options,sessionId:"sibling",onOutput(){}});transports.push(second);
+  expect(second.pid).toBe(first.pid);
+});
+
+test("an unlinked control socket cannot bypass a live owner's kernel lease",async()=>{
+  const options=fixture();
+  const first=await startRuntimeHost({...options,sessionId:"owner",onOutput(){}});transports.push(first);
+  const directory=join(options.data,"runtime-runners");
+  unlinkSync(join(directory,readdirSync(directory).find(name=>name.endsWith('.sock'))!));
+  await expect(startRuntimeHost({...options,sessionId:"contender",onOutput(){}})).rejects.toThrow("owner is initializing or stopping");
+  expect(()=>process.kill(first.pid,0)).not.toThrow();
+});
+
+test("a dead owner releases the kernel lease and its stale socket is recoverable",async()=>{
+  const options=fixture();
+  const first=await startRuntimeHost({...options,sessionId:"owner",onOutput(){}});transports.push(first);
+  process.kill(first.pid,"SIGKILL");await first.exited;
+  const second=await startRuntimeHost({...options,sessionId:"replacement",onOutput(){}});transports.push(second);
+  expect(second.pid).not.toBe(first.pid);
 });

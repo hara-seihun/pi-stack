@@ -2,6 +2,7 @@ import { AsyncLocalStorage } from 'node:async_hooks';
 import { createServer } from 'node:net';
 import { appendFileSync, closeSync, createReadStream, existsSync, openSync, truncateSync, unlinkSync } from 'node:fs';
 import { createInterface } from 'node:readline';
+import { basename, dirname, join } from 'node:path';
 import { underMemoryPressure } from './shared-runtime-memory.mjs';
 
 const [controlPath] = process.argv.slice(2);
@@ -13,6 +14,10 @@ let stopping = false;
 let idleTimer;
 const MAX_SESSIONS = Number(process.env.PI_REMOTE_MAX_ACTIVE_RUNTIMES || 64);
 const MAX_RSS = Number(process.env.PI_REMOTE_RUNNER_MAX_RSS_MB || 6144) * 1024 * 1024;
+function availableSlots(priority = false) {
+  const limit = priority ? MAX_SESSIONS : Math.min(MAX_SESSIONS, Math.max(1, MAX_SESSIONS - 4));
+  return stopping || process.memoryUsage().rss >= MAX_RSS || underMemoryPressure() ? 0 : Math.max(0, limit - sessions.size);
+}
 
 function lines(socket, onLine) {
   const reader = createInterface({input: socket, crlfDelay: Infinity});
@@ -27,13 +32,16 @@ function reply(socket, value) { if (socket.writable) socket.write(JSON.stringify
 async function open(options) {
   if (stopping) throw new Error('Runner is stopping');
   if (sessions.has(options.socketPath)) return;
-  const limit = options.priority ? MAX_SESSIONS : Math.max(1, MAX_SESSIONS - 4);
-  if (sessions.size >= limit || process.memoryUsage().rss >= MAX_RSS || underMemoryPressure()) throw new Error('Runner capacity busy; work remains queued');
+  if (!availableSlots(options.priority)) throw new Error('Runner capacity busy; work remains queued');
   clearTimeout(idleTimer);
   const {socketPath} = options;
-  if (existsSync(socketPath)) throw new Error('Session socket already exists');
+  const generation = basename(controlPath, '.sock');
+  if (dirname(socketPath) !== join(dirname(controlPath), '..', 'runtime-hosts') || !basename(socketPath).startsWith(generation + '.')) throw new Error('Invalid session socket');
   const env = {...options.env};
   const spoolPath = socketPath + '.events';
+  // Idempotent session addresses can survive a dead owner. Our kernel lease
+  // proves no live runner owns this generation before reclaiming its files.
+  for (const path of [socketPath, spoolPath]) { try { unlinkSync(path); } catch (error) { if (error.code !== 'ENOENT') throw error; } }
   const fd = openSync(spoolPath, 'ax', 0o600);
   let client = null, sequence = 0, acknowledged = 0, closed = false, replaying = false, adapter;
   const channel = createServer(socket => {
@@ -113,11 +121,14 @@ const server = createServer(socket => {
   lines(socket, value => {
     if (value.type === 'open') void open(value.options).then(() => reply(socket,{ok:true,pid:process.pid}),error => reply(socket,{error:String(error)}));
     else if (value.type === 'close') void Promise.resolve(sessions.get(value.socketPath)?.close()).then(() => reply(socket,{ok:true}));
-    else if (value.type === 'status') reply(socket,{ok:true,pid:process.pid,sessions:sessions.size,sessionIds:[...sessions.values()].map(session=>session.id),maxSessions:MAX_SESSIONS,rss:process.memoryUsage().rss});
+    else if (value.type === 'status') reply(socket,{ok:true,pid:process.pid,sessions:sessions.size,availableSlots:availableSlots(true),backgroundSlots:availableSlots(false),sessionIds:[...sessions.values()].map(session=>session.id),maxSessions:MAX_SESSIONS,rss:process.memoryUsage().rss});
   });
 });
-server.on('error', error => { if (error.code === 'EADDRINUSE') process.exit(0); throw error; });
+server.on('error', error => { console.error(error); process.exit(1); });
+// The transport launches us under flock --no-fork; ownership precedes unlink.
+try { unlinkSync(controlPath); } catch (error) { if (error.code !== 'ENOENT') throw error; }
 server.listen(controlPath);
+idleTimer = setTimeout(() => { if (!sessions.size) void stop(); }, 5000);
 async function stop() {
   if (stopping) return;
   stopping = true; clearTimeout(idleTimer);

@@ -1,7 +1,8 @@
-import { existsSync, mkdirSync, unlinkSync } from "node:fs";
+import { existsSync, mkdirSync } from "node:fs";
 import { createHash } from "node:crypto";
 import { createConnection, type Socket } from "node:net";
-import { join } from "node:path";
+import { basename, join } from "node:path";
+import { underMemoryPressure } from "./shared-runtime-memory.mjs";
 
 type RuntimeOutput = (line: string) => void;
 type RuntimeExit = (code: number) => void;
@@ -195,11 +196,29 @@ export async function startCommandRuntimeHost(options: {
 type StartOptions = Parameters<typeof startCommandRuntimeHost>[0];
 const runnerStarts = new Map<string, Promise<void>>();
 
+function runnerControl(data: string) {
+  const generation = createHash("sha256").update(import.meta.dir).digest("hex").slice(0,16);
+  return join(data, "runtime-runners", `${generation}.sock`);
+}
+
+export async function runtimeCapacity(data: string, priority = false): Promise<number> {
+  if (process.env.PI_REMOTE_RUNTIME_DRIVER === "command") return 1;
+  if (underMemoryPressure()) return 0;
+  const control = runnerControl(data);
+  if (!existsSync(control)) return 1;
+  try { const status = await runnerRequest(control, {type:"status"}); return Number((priority ? status.availableSlots : status.backgroundSlots) ?? 0); }
+  catch (error: any) {
+    // Only a refused/missing endpoint permits a launch attempt; flock still
+    // arbitrates ownership if a live runner is initializing or shutting down.
+    return ["ENOENT", "ECONNREFUSED"].includes(error.code) ? 1 : 0;
+  }
+}
+
 function runnerRequest(path: string, value: unknown): Promise<any> {
   return new Promise((resolve, reject) => {
     const socket = createConnection(path);
     let input = "";
-    const timer = setTimeout(() => { socket.destroy(); reject(new Error("Shared runner control timed out")); }, 5_000);
+    const timer = setTimeout(() => { socket.destroy(); reject(new Error("Runner capacity busy: control response delayed")); }, duration("PI_REMOTE_RUNNER_CONTROL_TIMEOUT_MS", 5_000));
     socket.on("connect", () => socket.write(JSON.stringify(value) + "\n"));
     socket.on("data", chunk => {
       input += chunk.toString();
@@ -221,8 +240,7 @@ export async function startRuntimeHost(options: StartOptions): Promise<RuntimeTr
   const directory = join(options.data, "runtime-runners");
   mkdirSync(directory, {recursive:true,mode:0o700});
   mkdirSync(join(options.data, "runtime-hosts"), {recursive:true,mode:0o700});
-  const generation = createHash("sha256").update(import.meta.dir).digest("hex").slice(0,16);
-  const control = join(directory, `${generation}.sock`);
+  const control = runnerControl(options.data);
   let starting = runnerStarts.get(control);
   if (!starting) {
     starting = (async () => {
@@ -232,15 +250,17 @@ export async function startRuntimeHost(options: StartOptions): Promise<RuntimeTr
           if (!["ECONNREFUSED", "ENOENT"].includes(error.code)) throw new Error(`Runner capacity busy: ${error.message}`);
         }
       }
-      try { unlinkSync(control); } catch {}
       const env = {...options.env};
       for (const key of Object.keys(env)) if (/^(PI_REMOTE_SESSION_ID|PI_REMOTE_CONTEXT_OWNER_PID|PI_SUBAGENT_MODEL|PI_REMOTE_MEETING_ID|PI_REMOTE_SERVICE_TIER_FILE)$/.test(key)) delete env[key];
-      const host = Bun.spawn(["node", "--max-old-space-size=8192", join(import.meta.dir,"shared-runtime-host.mjs"), control], {
+      // The kernel holds this lease for the Node process's lifetime. Only its
+      // owner may remove a stale socket. A timeout cannot create a second host.
+      const host = Bun.spawn(["flock", "--no-fork", "--nonblock", "--conflict-exit-code", "75", `${control}.lock`,
+        "node", "--max-old-space-size=8192", join(import.meta.dir,"shared-runtime-host.mjs"), control], {
         cwd: options.env.HOME, detached:true, stdin:"ignore", stdout:"inherit", stderr:"inherit", env,
       });
       const deadline = Date.now() + 15_000;
       while (Date.now() < deadline) {
-        if (host.exitCode !== null) throw new Error(`Shared runner exited ${host.exitCode}`);
+        if (host.exitCode !== null) throw new Error(host.exitCode === 75 ? "Runner capacity busy: owner is initializing or stopping" : `Shared runner exited ${host.exitCode}`);
         if (existsSync(control)) { try { await runnerRequest(control,{type:"status"}); return; } catch {} }
         await Bun.sleep(50);
       }
@@ -252,6 +272,7 @@ export async function startRuntimeHost(options: StartOptions): Promise<RuntimeTr
   options.signal?.throwIfAborted();
   // Linux sockaddr_un allows 107 pathname bytes. Full thread + launch UUIDs
   // exceed that under a real person's encrypted data directory in Node.
+  const generation = basename(control, ".sock");
   const socketPath = join(options.data, "runtime-hosts", `${generation}.${createHash("sha256").update(options.sessionId).digest("hex").slice(0, 20)}.sock`);
   try {
     await runnerRequest(control, {type:"open",options:{socketPath,sessionId:options.sessionId,priority:options.priority,cwd:options.cwd,args:options.args,env:options.env}});
