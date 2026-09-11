@@ -62,6 +62,30 @@ test("multiline prompt contents cannot change Markdown state or submit embedded 
   expect(source.slice(tags[1].start, tags[1].end)).toBe('<pi-remote-image id="following" prompt="A real request" />');
 });
 
+test("streaming mode exposes unfinished spans without changing closed-only acceptance or code exclusions", () => {
+  for (const fragment of ["<pi-remote-i", "<pi-remote-image", '<pi-remote-image id="sce', '<pi-remote-image id="scene" prompt="A scene',
+    '<pi-remote-image id="scene" prompt=\'A scene\n<pi-remote-image id="nested" prompt="Not a request" />',
+    '<pi-remote-image id="scene" prompt=\'A scene\n```\n<pi-remote-image id="nested" prompt="Not a request" />']) {
+    const source = "Before\n" + fragment;
+    const tags = parseInlineImageTags(source, { streaming: true });
+    expect(tags).toHaveLength(1);
+    expect(tags[0]).toMatchObject({ start: 7, end: source.length, partial: true, definition: null, error: null });
+    expect(tags[0].id).toBe(fragment.includes('id="scene"') ? "scene" : "");
+    expect(parseInlineImageTags(source)).toEqual([]);
+  }
+  const fragment = '<pi-remote-image id="scene" prompt="A scene';
+  for (const prefix of ["`", "```xml\n", "~~~\n", "    ", "> ```\n> ", "\\", "<!-- ", "<pre>"]) {
+    expect(parseInlineImageTags(prefix + fragment, { streaming: true })).toEqual([]);
+  }
+  const closed = '<pi-remote-image id="ready" prompt="Ready" />';
+  const tags = parseInlineImageTags(closed + "\n" + fragment, { streaming: true });
+  expect(tags).toHaveLength(2);
+  expect(tags[0].partial).toBeUndefined();
+  expect(tags[0].definition?.id).toBe("ready");
+  expect(tags[1].partial).toBe(true);
+  expect(parseInlineImageTags('<pi-remote-image id="scene">', { streaming: true })).toEqual([]);
+});
+
 test("durable queue chains ID and file inputs, enforces concurrency, publishes after the turn", async () => {
   const calls: Array<{ prompt: string; inputPaths: string[]; finish: () => void }> = [];
   const started = new Map(["First", "Second", "Third"].map(prompt => [prompt, deferred()]));

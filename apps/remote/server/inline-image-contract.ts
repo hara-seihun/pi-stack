@@ -19,7 +19,10 @@ export interface InlineImage {
   responseId: string | null;
 }
 export interface InlineImageSnapshot { version: number; images: InlineImage[] }
+export interface InlineImageParseOptions { streaming?: boolean }
 export interface InlineImageTag {
+  /** Present only for an unfinished trailing tag returned in streaming mode. */
+  partial?: true;
   start: number;
   end: number;
   id: string;
@@ -37,8 +40,36 @@ function decodeAttribute(value: string): string {
   });
 }
 
-/** UTF-16 source offsets, shared by the supervisor and renderer. Only closed tags count. */
-export function parseInlineImageTags(source: string): InlineImageTag[] {
+function imageAttributes(source: string, partial = false) {
+  const attributes: Record<string, string> = {};
+  let rest = source;
+  let error: string | null = null;
+  while (rest.trim()) {
+    const attribute = /^\s+([a-zA-Z][\w-]*)\s*=\s*(?:"([^"]*)"|'([^']*)')/.exec(rest);
+    if (!attribute) { if (!partial) error = "Attributes must have quoted values."; break; }
+    const name = attribute[1];
+    if (Object.hasOwn(attributes, name)) error = `Duplicate attribute: ${name}`;
+    if (!["id", "prompt", "refs"].includes(name)) error = `Unknown attribute: ${name}`;
+    attributes[name] = decodeAttribute(attribute[2] ?? attribute[3]);
+    rest = rest.slice(attribute[0].length);
+  }
+  return { attributes, error };
+}
+
+function partialImageTag(source: string, start: number): InlineImageTag | null {
+  const attributesSource = source.slice(start + "<pi-remote-image".length);
+  let quote = "";
+  for (const character of attributesSource) {
+    if (quote) { if (character === quote) quote = ""; }
+    else if (character === '"' || character === "'") quote = character;
+    else if (character === ">") return null;
+  }
+  const { attributes } = imageAttributes(attributesSource, true);
+  return { start, end: source.length, partial: true, id: ID.test(attributes.id ?? "") ? attributes.id : "", definition: null, error: null };
+}
+
+/** UTF-16 offsets. The backend default accepts only closed tags; streaming also exposes an unfinished tail. */
+export function parseInlineImageTags(source: string, options: InlineImageParseOptions = {}): InlineImageTag[] {
   const tags: InlineImageTag[] = [];
   let fence: { character: string; length: number } | null = null;
   let inlineTicks = 0;
@@ -73,25 +104,25 @@ export function parseInlineImageTags(source: string): InlineImageTag[] {
         inlineTicks = inlineTicks === ticks ? 0 : inlineTicks || ticks;
         i += ticks; continue;
       }
-      if (inlineTicks) { i++; continue; }
+      if (inlineTicks || line[i] !== "<") { i++; continue; }
       const raw = /^<(pre|code|script|style)(?:\s[^>]*|)>/i.exec(line.slice(i));
       if (raw) { rawBlock = raw[1].toLowerCase(); i += raw[0].length; continue; }
-      if (!line.startsWith("<pi-remote-image", i) || !/[\s/>]/.test(line[i + 16] ?? "")) { i++; continue; }
       const start = offset + i;
-      const match = /^<pi-remote-image\b((?:[^'">]|"[^"]*"|'[^']*')*)\/>/.exec(source.slice(start));
-      if (!match) { i++; continue; }
-      const attributes: Record<string, string> = {};
-      let rest = match[1];
-      let error: string | null = null;
-      while (rest.trim()) {
-        const attribute = /^\s+([a-zA-Z][\w-]*)\s*=\s*(?:"([^"]*)"|'([^']*)')/.exec(rest);
-        if (!attribute) { error = "Attributes must have quoted values."; break; }
-        const name = attribute[1];
-        if (Object.hasOwn(attributes, name)) error = `Duplicate attribute: ${name}`;
-        if (!["id", "prompt", "refs"].includes(name)) error = `Unknown attribute: ${name}`;
-        attributes[name] = decodeAttribute(attribute[2] ?? attribute[3]);
-        rest = rest.slice(attribute[0].length);
+      const tail = source.slice(start);
+      if (options.streaming && tail.startsWith("<pi-remote-") && "<pi-remote-image".startsWith(tail)) {
+        tags.push(partialImageTag(source, start)!);
+        return tags;
       }
+      if (!line.startsWith("<pi-remote-image", i) || !/[\s/>]/.test(tail[16] ?? "")) { i++; continue; }
+      const match = /^<pi-remote-image\b((?:[^'">]|"[^"]*"|'[^']*')*)\/>/.exec(tail);
+      if (!match) {
+        const partial = partialImageTag(source, start);
+        if (partial) { if (options.streaming) tags.push(partial); return tags; }
+        i++; continue;
+      }
+      const parsed = imageAttributes(match[1]);
+      const { attributes } = parsed;
+      let error = parsed.error;
       const id = attributes.id ?? "";
       if (!ID.test(id)) error = "Image ID must start with a letter and contain at most 64 letters, digits, underscores or hyphens.";
       let refs: string[] = [];
