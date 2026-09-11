@@ -38,6 +38,23 @@ test("shared parser excludes examples, escaped tags and raw code; decodes multil
   expect(parseInlineImageTags('<pi-remote-image id="x" prompt="a" prompt="b" />')[0].error).toContain("Duplicate");
 });
 
+test("multiline prompt contents cannot change Markdown state or submit embedded tags", () => {
+  const source = [
+    '<pi-remote-image id="outer" prompt=\'An image containing literal text:',
+    '```',
+    '<pi-remote-image id="embedded" prompt="Not a request" />',
+    '`unmatched backtick and <!-- comment-looking text',
+    'Last line\' /> <pi-remote-image id="following" prompt="A real request" />',
+    '`<pi-remote-image id="code" prompt="An example" />`',
+    '\\<pi-remote-image id="escaped" prompt="Another example" />',
+  ].join('\n');
+  const tags = parseInlineImageTags(source);
+  expect(tags.map(tag => tag.id)).toEqual(["outer", "following"]);
+  expect(tags.every(tag => tag.error === null)).toBe(true);
+  expect(tags[0].definition?.prompt).toContain('<pi-remote-image id="embedded" prompt="Not a request" />');
+  expect(source.slice(tags[1].start, tags[1].end)).toBe('<pi-remote-image id="following" prompt="A real request" />');
+});
+
 test("durable queue chains ID and file inputs, enforces concurrency, publishes after the turn", async () => {
   const calls: Array<{ prompt: string; inputPaths: string[]; finish: () => void }> = [];
   const f = await fixture(async input => { await new Promise<void>(resolve => calls.push({ ...input, finish: resolve })); return success(); }, 2);
