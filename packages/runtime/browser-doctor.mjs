@@ -90,8 +90,12 @@ try {
   accepted = true;
   console.log(JSON.stringify({ host: hostname(), sdk, runtime, bin, wrapperVersion, browserVersion, recovered: !!values["session-file"], nativeOpen: true, snapshot: true, visibleText: true, cleanup: "closed" }));
 } finally {
-  session?.dispose();
-  await new Promise((resolve) => server.close(resolve));
-  if (accepted || !browserAttempted) rmSync(directory, { recursive: true, force: true });
-  else console.error(`Browser proof failed. Session and cleanup state retained at ${sessionFile}`);
+  try {
+    if (session) await session.extensionRunner.emit({ type: "session_shutdown", reason: "quit" });
+  } finally {
+    session?.dispose();
+    await new Promise((resolve) => server.close(resolve));
+    if (accepted || !browserAttempted) rmSync(directory, { recursive: true, force: true });
+    else console.error(`Browser proof failed. Session and cleanup state retained at ${sessionFile}`);
+  }
 }
