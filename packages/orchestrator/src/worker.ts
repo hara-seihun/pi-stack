@@ -44,7 +44,14 @@ export async function work(runId:string):Promise<void>{
   const session=hosted.session;
   const delivery=run.context?undefined:new FleetResultDelivery(session,deliveryIds=>post(`/internal/runs/${runId}/acknowledge`,{deliveryIds}),error=>console.error("fleet result receipt will retry:",error));
   let liveText="",liveThinking="",activeTool:string|undefined,lastProgress=0,aborting=false,currentActivity:RunActivity="STARTING";
-  const report=(activity:RunActivity,progress=true)=>{currentActivity=activity;const now=Date.now();if(!progress&&now-lastProgress<5000)return;if(progress)lastProgress=now;void post(`/internal/runs/${runId}/heartbeat`,{progress,activity,text:liveText,thinking:liveThinking,tool:activeTool}).catch(console.error);};
+  let reportPending=false,progressPending=false,reportInFlight=false;
+  const report=(activity:RunActivity,progress=true)=>{currentActivity=activity;const now=Date.now();if(!progress&&now-lastProgress<5000)return;if(progress)lastProgress=now;reportPending=true;progressPending ||= progress;};
+  const reportTimer=setInterval(()=>{
+    if(!reportPending||reportInFlight)return;
+    const progress=progressPending;reportPending=false;progressPending=false;reportInFlight=true;
+    void post(`/internal/runs/${runId}/heartbeat`,{progress,activity:currentActivity,text:liveText,thinking:liveThinking,tool:activeTool})
+      .catch(error=>{reportPending=true;progressPending ||= progress;console.error(error);}).finally(()=>{reportInFlight=false;});
+  },250);
   const unsubscribe=session.subscribe((event:any)=>{
     if(event.type==="message_update"){
       const update=event.assistantMessageEvent;
@@ -84,7 +91,7 @@ export async function work(runId:string):Promise<void>{
     }
     if(last?.stopReason==="aborted"||aborting){await post(`/internal/runs/${runId}/state`,{state:"aborted",failureKind:"operator",result:"aborted"});return;}
     await post(`/internal/runs/${runId}/state`,{state:"done",result:lastAssistantText(session)});
-  }finally{clearInterval(heartbeat);clearInterval(control);unsubscribe();try{await delivery?.close();}finally{hosted.dispose();}}
+  }finally{clearInterval(reportTimer);clearInterval(heartbeat);clearInterval(control);unsubscribe();try{await delivery?.close();}finally{hosted.dispose();}}
 }
 
 async function promptAndSettle(session:AgentSession,message:string):Promise<void>{await session.prompt(message);await sleep(0);for(;;){if(session.isCompacting)await waitForCompaction(session);await sleep(0);if(session.isStreaming){await session.waitForIdle();await sleep(0);continue;}if(!session.isCompacting)return;}}

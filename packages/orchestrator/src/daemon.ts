@@ -8,6 +8,7 @@ import type { BudgetClass, LaneReadiness, LaneManifest, LaneSpec, OrchestratorCo
 import { isRunContext } from "./isolated-context-contract.js";
 import { accountCapacity, assign, assignCompletion, commitMeterAdmission } from "./policy.js";
 import { Store } from "./store.js";
+import { Heartbeats } from "./heartbeats.js";
 import { Fleet } from "./fleet.js";
 import { CompletionService } from "./completion.js";
 import { CompletionPool } from "./host/completion-pool.js";
@@ -44,9 +45,11 @@ export class Daemon {
   private readonly fleet:Fleet;
   private readonly completions:CompletionService;
   private readonly completionPool:CompletionPool;
+  private readonly heartbeats:Heartbeats;
 
   constructor(readonly store:Store,readonly config:OrchestratorConfig,releasePath?:string,ledgerPath?:string){
     this.fleet=new Fleet(store);
+    this.heartbeats=new Heartbeats(store);
     this.completions=new CompletionService(store,process.cwd());
     this.completionPool=new CompletionPool(store,this.completions,config);
     this.releasePath=releasePath??dirname(dirname(realpathSync(fileURLToPath(import.meta.url))));
@@ -77,6 +80,7 @@ export class Daemon {
     this.stopped=true;clearInterval(timer);clearInterval(completionTimer);
     await this.waitForReconcile();
     await this.completionPool.close();
+    this.heartbeats.flush();
     await new Promise<void>((resolve)=>server.close(()=>resolve()));
   }
 
@@ -344,6 +348,7 @@ export class Daemon {
       }
       if(method==="POST"&&url.pathname.startsWith("/internal/runs/")){
         const parts=url.pathname.split("/"),id=parts[3]!,action=parts[4],input=await body(req);
+        if(action==="heartbeat")return this.heartbeats.accept(id,input)?json(res,200,{ok:true}):json(res,404,{error:"run not found"});
         if(!this.store.run(id))return json(res,404,{error:"run not found"});
         if(action==="completion"&&parts[5]==="claim")return completionReply(this.completions.claim(id,input.attemptId));
         if(action==="completion"&&parts[5]==="settle")return completionReply(this.completions.settle(id,input.attemptId,input.outcome));
@@ -365,7 +370,6 @@ export class Daemon {
           if(input.activity)this.store.setLive(id,input);
           return json(res,200,{ok:true});
         }
-        if(action==="heartbeat"){this.store.transaction(()=>{this.store.heartbeatLease(`run:${id}`);this.store.updateRun(id,{progressAt:input.progress?Date.now():undefined});if(input.activity)this.store.setLive(id,input);});return json(res,200,{ok:true});}
       }
       if(method==="POST"&&url.pathname==="/v1/accounts"){
         const input=await body(req);
