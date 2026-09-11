@@ -52,7 +52,7 @@ function quotaReady(store: Store, alias: string, now: number, maxAgeMs: number, 
   const account = store.account(alias);
   const meters = store.latestMeters(alias);
   return Boolean(account && (account.enabled || allowDisabled) && account.use === "shared" && (!account.cooldownUntil || account.cooldownUntil <= now)
-    && ["codex-5h", "codex-7d"].every(id => meters.some(meter => meter.meter_id === id && meter.used_percent < 100 && now - meter.observed_at <= maxAgeMs && meter.observed_at <= now + 60_000)));
+    && meters.length > 0 && meters.every(meter => meter.used_percent < 100 && now - meter.observed_at <= maxAgeMs && meter.observed_at <= now + 60_000));
 }
 function facts(store: Store, alias: string, now: number): Facts {
   const account = store.db.prepare("SELECT * FROM account WHERE id=?").get(alias) as Row;
@@ -81,7 +81,7 @@ export class AccountTransfer {
     signal.throwIfAborted();
     const reports = await sampler.sampleAccount(alias);
     signal.throwIfAborted();
-    if (!["codex-5h", "codex-7d"].every(id => reports.some(report => report.meterId === id && report.outcome === "recorded")))
+    if (!reports.length || reports.some(report => report.outcome !== "recorded" || !report.meterId))
       throw new Error(`Post-drain meter refresh failed; source stays disabled: ${reports.map(report => report.outcome + (report.detail ? `: ${report.detail}` : "")).join(", ")}`);
   }
 
@@ -139,7 +139,7 @@ export class AccountTransfer {
       const meters = this.store.latestMeters(alias) as Row[];
       const blocked = blockers(this.store, alias, Date.now());
       if (!quotaReady(this.store, alias, Date.now(), 15_000, true)
-        || !["codex-5h", "codex-7d"].every(id => meters.some(meter => meter.meter_id === id && Number(meter.observed_at) >= checkedAt))) {
+        || !meters.every(meter => Number(meter.observed_at) >= checkedAt)) {
         blocked.push(...meters.map(meter => `quota:${meter.meter_id}=${meter.used_percent}%`));
         if (!meters.length) blocked.push("quota:missing post-drain readings");
       }

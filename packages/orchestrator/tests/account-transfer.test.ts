@@ -153,6 +153,17 @@ describe("exclusive account transfer",()=>{
     }finally{f.close();}
   });
 
+  it("transfers accounts whose provider exposes only a weekly quota window",async()=>{
+    const f=fixture();try{
+      f.source.db.prepare("DELETE FROM meter WHERE meter_id=?").run("codex-5h");
+      const packet=await f.from.prepare("openai-codex-12",f.to.endpoint,f.signal) as TransferPacket;
+      expect(packet.facts.meters.every(meter=>meter.meter_id==="codex-7d")).toBe(true);
+      expect(f.probe.reads).toBe(1);
+      await f.to.receive(packet,f.signal);
+      expect(f.target.account(packet.alias)?.enabled).toBe(true);
+    }finally{f.close();}
+  });
+
   it("refreshes depleted post-drain quota without enabling or handing off the account",async()=>{
     const f=fixture();try{
       f.probe.spent=100;
