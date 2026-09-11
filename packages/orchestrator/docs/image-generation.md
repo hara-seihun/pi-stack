@@ -32,7 +32,7 @@ Quality and size default to `auto`. With input files the request selects editing
 
 ## Files and failures
 
-The caller owns the PNG and chooses its location and retention. Pi does not keep a separate image cache or credential store. The existing session transcript owns the preview and tool receipt. Pi Remote's existing image renderer displays the preview, and its normal file-delivery mechanism can deliver the PNG.
+The caller owns the PNG and chooses its location and retention. Pi does not keep a separate image cache or credential store. The existing session transcript owns the preview and tool receipt. Pi Remote's existing image renderer displays the preview, and its normal file-delivery mechanism can deliver the PNG. Remote also supports [background inline image declarations](../../../apps/remote/docs/inline-images.md) for replies that should finish before generation does.
 
 Writes share Pi's per-file mutation queue. An existing primary output is refused before any generation request. Pi reserves a staging directory first, saves all completed PNGs and a receipt there, then publishes them with exclusive hard links. It never overwrites a concurrent writer, including at numbered image paths. If publication fails, the error identifies the retained directory and response ID. Its `receipt.json` maps staged PNGs to their intended paths so the caller can finish publication without another paid request. Provider failures remove empty staging storage.
 

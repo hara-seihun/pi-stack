@@ -52,8 +52,16 @@ Attribute values use XML escaping. For example, `&quot;` represents a double quo
 
 ## Provider and failures
 
-Background jobs use the same [Orchestrator image-generation implementation](../../../packages/orchestrator/docs/image-generation.md) and connected OpenAI accounts as the native tool. The default model is Image 2.5 Flare. The provider receives only the image prompt and reference images, not the surrounding conversation.
+Background jobs use the [Orchestrator image-generation implementation](../../../packages/orchestrator/docs/image-generation.md) and its shared Codex account pool. The native tool additionally supports personal Pi credentials. The default model is Image 2.5 Flare. The provider receives only the image prompt and reference images, not the surrounding conversation.
 
 The UI shows missing references, dependency cycles, failed dependencies, invalid inputs and provider failures as errors. Failed or interrupted provider requests are not automatically repeated, because the request may already have consumed allowance. A deliberate new ID requests another generation.
 
 Queued jobs survive supervisor restarts. A running request with no saved result becomes an explicit interruption error. Saved output can be recovered without generating it again. Generated IDs and output paths remain available to later agent turns through thread instructions.
+
+## State and operations
+
+The person's supervisor database owns job definitions, status, message deduplication and version counters. Files live under `PI_REMOTE_DATA/inline-images/<thread-hash>/<image-id>/`: copied reference inputs, every completed PNG and a provider receipt. These are retained thread artifacts, not a disposable cache. Keep this directory with the supervisor database when backing up or restoring a person. Removing a source reference after the worker has copied it does not remove the job's input.
+
+`GET /v1/sessions/:sessionId/images` returns the thread's image registry without submitting work. Normal client synchronization carries changed image state through the existing long poll. The session file endpoint serves completed PNGs using the selected person and environment. Neither endpoint calls the provider.
+
+The supervisor runs at most two image requests concurrently. Each request has a five-minute deadline. Restarting the supervisor recovers queued jobs and saved receipts; it does not retry uncertain provider calls. Image artifacts remain with the person's Remote data until that data is explicitly removed.
