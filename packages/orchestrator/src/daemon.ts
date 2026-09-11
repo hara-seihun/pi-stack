@@ -335,7 +335,7 @@ export class Daemon {
       }
       if(method==="GET"&&url.pathname==="/v1/status")return json(res,200,this.status());
       if(method==="GET"&&url.pathname==="/v1/runs")return json(res,200,{runs:this.store.runs(),live:this.store.live()});
-      if(method==="GET"&&url.pathname==="/v1/plans")return json(res,200,{accounts:this.store.accounts(),meters:this.store.meters(),leases:this.store.activeLeases(),controls:Object.fromEntries((this.store.db.prepare("SELECT * FROM control").all() as any[]).map((r)=>[r.key,r.value]))});
+      if(method==="GET"&&url.pathname==="/v1/plans")return json(res,200,{accounts:this.store.accounts(),meters:this.store.meters(),leases:this.store.activeLeases(),controls:Object.fromEntries((this.store.db.prepare("SELECT key,value FROM control INDEXED BY sqlite_autoindex_control_1 WHERE key NOT GLOB 'completion:*' AND key NOT GLOB 'run-context:*' AND key NOT GLOB 'fleet-child:*'").all() as any[]).map((r)=>[r.key,r.value]))});
       if(method==="GET"&&url.pathname.startsWith("/internal/runs/")){
         const parts=url.pathname.split("/"),id=parts[3]!,action=parts[4];const run=this.store.run(id);if(!run)return json(res,404,{error:"run not found"});
         if(action==="completion"&&parts.length===5)return json(res,200,{completion:this.completions.byRun(id)});
