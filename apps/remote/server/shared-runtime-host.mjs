@@ -16,6 +16,9 @@ const MAX_RSS = Number(process.env.PI_REMOTE_RUNNER_MAX_RSS_MB || 6144) * 1024 *
 
 function lines(socket, onLine) {
   const reader = createInterface({input: socket, crlfDelay: Infinity});
+  // readline forwards input errors independently of the socket's listener.
+  // A supervisor disconnect must not take down every session in the runner.
+  reader.on('error', () => socket.destroy());
   reader.on('line', line => { try { onLine(JSON.parse(line)); } catch (error) { socket.end(JSON.stringify({error: String(error)}) + '\n'); } });
   socket.on('error', () => {});
 }
@@ -89,7 +92,7 @@ async function open(options) {
     catch (error) { console.error('Session close:', error); }
     finally { finish(); }
   }
-  sessions.set(socketPath, {close});
+  sessions.set(socketPath, {close,id:options.sessionId});
   try {
     await new Promise((resolve, reject) => {
       channel.once('error', reject);
@@ -109,7 +112,7 @@ const server = createServer(socket => {
   lines(socket, value => {
     if (value.type === 'open') void open(value.options).then(() => reply(socket,{ok:true,pid:process.pid}),error => reply(socket,{error:String(error)}));
     else if (value.type === 'close') void Promise.resolve(sessions.get(value.socketPath)?.close()).then(() => reply(socket,{ok:true}));
-    else if (value.type === 'status') reply(socket,{ok:true,pid:process.pid,sessions:sessions.size,rss:process.memoryUsage().rss});
+    else if (value.type === 'status') reply(socket,{ok:true,pid:process.pid,sessions:sessions.size,sessionIds:[...sessions.values()].map(session=>session.id),rss:process.memoryUsage().rss});
   });
 });
 server.on('error', error => { if (error.code === 'EADDRINUSE') process.exit(0); throw error; });

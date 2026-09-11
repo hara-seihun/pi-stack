@@ -1245,7 +1245,7 @@ function settleRuntime(sessionId: string, rt: Runtime, emitEvent: boolean): bool
 }
 
 async function reconcileRuntimeState(sessionId: string, rt: Runtime): Promise<any> {
-  if (rt.reconciling || ["ABORTING", "STOPPING"].includes(rt.phase)) return null;
+  if (!rt.transport || rt.reconciling || ["ABORTING", "STOPPING"].includes(rt.phase)) return null;
   rt.reconciling = true;
   const phaseVersion = rt.phaseVersion;
   try {
