@@ -1,0 +1,39 @@
+# Durable tool-free completions
+
+Pi Stack accepts application inference through the existing Orchestrator daemon, ledger, account pool and run units. Completion runs use `context: { tools: [] }` and the strict `luna` or `terra` profile. They use forced admission, including the existing account and machine concurrency limits, provider exhaustion checks, cooldowns and global pause.
+
+The worker calls Pi's native provider directly. It loads no AgentSession, extensions, skills, context files, templates or tool definitions. The caller's `systemPrompt` becomes native `instructions` without modification. The caller's `prompt` remains one user message. An omitted or empty system prompt produces empty instructions, not a default assistant prompt. Metadata stays in the Orchestrator ledger and is not forwarded to OpenAI. Credentials remain in Pi's shared OAuth store.
+
+## API and types
+
+[`completion-contract.ts`](../src/completion-contract.ts) owns the TypeBox schemas, runtime validation and derived TypeScript types. [`completion-openapi.ts`](../src/completion-openapi.ts) uses those same schemas. The daemon serves the document at `GET /v1/completions/openapi.json`; the generated repository copy is [`completions.openapi.json`](completions.openapi.json). `npm run docs --workspace=pi-orchestrator` regenerates it, and the completion tests reject drift.
+
+- `PUT /v1/completions/{requestId}` accepts `CompletionInput` and returns `CompletionRecord`.
+- `GET /v1/completions/{requestId}` returns the current record without starting work.
+- `POST /v1/completions/{requestId}/cancel` cancels unfinished work. Terminal records remain unchanged.
+
+`CompletionClient`, exported from `pi-orchestrator/api`, provides `submit(requestId, input)`, `get(requestId)` and `cancel(requestId)`. Each returns a typed `CompletionOutcome<CompletionRecord>`. Its options include `baseUrl`, injectable `fetch` and a per-HTTP-call `timeoutMs`. Its default address is the existing Orchestrator loopback address. Aborting a client HTTP call does not cancel durable work; cancellation has its own endpoint.
+
+The input selects `model: "luna" | "terra"`, a required `prompt`, optional `systemPrompt`, optional native `responseFormat`, and optional JSON-object `metadata`. `responseFormat` has `type: "json_schema"`, `name`, `schema`, and optional `strict`, which defaults to true. Schemas travel as native `text.format`, not as extra prompt text.
+
+`maxOutputTokens` is reserved in the contract but unsupported by the current Codex route. Supplying it returns HTTP 422 with `error.code: "unsupported-option"` before creating a run. It is never omitted on behalf of a caller or approximated with local truncation. Omniscience's caller explicitly omits this option.
+
+A record identifies both `requestId` and `runId`, preserves the selected short model name and metadata, and carries millisecond timestamps. Its state is `queued`, `running`, `completed`, `failed`, `cancelled`, or `indeterminate`. Completed records contain exact output text, the provider-reported model and response ID, native token usage, and `stopReason: "stop" | "length"`. A length-limited result remains distinguishable from a normally completed response. Input token counts exclude separately reported cache reads and writes. Reasoning tokens are a subset of output tokens, not additional spending. Missing native model or usage evidence is an error, not an estimated success.
+
+## Idempotency and recovery
+
+A caller chooses and persists its request ID before submission. IDs use 1 to 256 letters, digits, periods, underscores, colons or hyphens. `openapi.json` is reserved for the schema endpoint.
+
+The daemon commits input, request identity and one run in the same SQLite transaction. Repeating an ID with the same canonical JSON input returns that record. Object-key ordering does not matter. Different input conflicts with HTTP 409. Completion records remain in the ledger so later replays cannot create a second run.
+
+Before sending to the provider, a worker obtains a durable attempt claim. Provider transport uses SSE with no automatic retries or WebSocket fallback. If another worker finds a prior claim without a receipt, the request becomes `indeterminate`; it is not sent again. A lost transport after provider acceptance or the five-minute provider deadline also produces `indeterminate`. Caller cancellation is a separate state and may occur after tokens have been spent.
+
+The worker fsyncs its result to `agentDir/completion-receipts/RUN_ID.json` before posting settlement. Settlement records provider usage and the result in one transaction. Replaying a receipt cannot charge usage twice. A successful acknowledgement removes the receipt and fsyncs its directory. The daemon also reconciles these receipts at startup and before worker recovery, including receipts belonging to terminal runs. It only settles existing receipts; it never generates another response. Caller cancellation remains terminal even when a late receipt supplies token accounting.
+
+Run heartbeat renews the lease without claiming artificial progress. Provider execution has a five-minute deadline. The daemon, not the submitting connection, owns admission and recovery.
+
+## Native provider evidence
+
+On September 11, 2026, independent shared-account SSE probes returned HTTP 200 for strict JSON schema on both models. The schema excluded an extra field requested by the user input, and both responses contained only `{"ok":true}`. Terra reported 64 input and 14 output tokens; Luna reported 64 input and 67 output tokens. OpenAI attributed input tokens separately to `instructions` and `text.format`.
+
+Both models rejected `max_output_tokens: 128` with HTTP 400, `Unsupported parameter: max_output_tokens`. The schema-only probes used request IDs `e90aa730-54e8-4897-b00d-da7d8159f20b` and `c9df8da9-886d-416b-a75c-2696843188b5`; their usage is recorded under `native-format-probe` in the existing ledger. No retry, transport fallback or banked reset was used.

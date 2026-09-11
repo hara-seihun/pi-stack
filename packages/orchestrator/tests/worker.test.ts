@@ -3,6 +3,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 const hosted = vi.hoisted(() => ({ open: vi.fn() }));
 vi.mock("../src/host/session-lifecycle.js", () => ({ openHostedSession: hosted.open }));
 vi.mock("../src/config.js", () => ({ loadConfig: () => ({ agentDir: "/tmp/agent" }) }));
+vi.mock("../src/host/completion-worker.js", () => ({ workCompletion: async () => false }));
 
 import { work } from "../src/worker.js";
 
@@ -65,7 +66,7 @@ describe("worker settlement", () => {
     expect(patches.map(patch => patch.state)).toEqual(["running", "done"]);
     expect(patches.at(-1).result).toBe("Finished.");
     expect(dispose).toHaveBeenCalledOnce();
-    expect(unsubscribe).toHaveBeenCalledOnce();
+    expect(unsubscribe).toHaveBeenCalledTimes(2);
   });
 
   it("waits for an asynchronous continuation before finishing", async () => {

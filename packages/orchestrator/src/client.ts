@@ -8,7 +8,7 @@ export interface PlanMetricUsage{readonly percentLeft:number|null;readonly expec
 export interface PlanUsage{readonly state:"ready"|"partial"|"unavailable";readonly metrics:Readonly<Record<string,PlanMetricUsage>>;readonly planCount:number;readonly checkedCount:number;}
 export interface PlanUsageSnapshot{readonly plans:Readonly<Record<string,PlanUsage>>;readonly updatedAt:string;}
 export interface ObservedRun{
-  readonly id:string;readonly taskId:string;readonly model:string;readonly thinking?:string;readonly provider?:string;
+  readonly id:string;readonly parentRunId?:string;readonly rootRunId?:string;readonly childRunIds?:readonly string[];readonly requestedModel?:string;readonly escalatesRunId?:string;readonly deliveryState?:"pending"|"delivered";readonly taskId:string;readonly model:string;readonly thinking?:string;readonly provider?:string;
   readonly state:string;readonly startedAt:number;readonly endedAt?:number;readonly detail?:string;readonly observable:boolean;
   readonly live:{activity:string;liveText:string;liveThinking:string;activeTool:string|null}|null;
 }
@@ -50,7 +50,7 @@ export function tailRange(size:number,offset:number,maxBytes:number):{start:numb
 function transformedSession(path:string):string{
   let raw="";try{raw=readFileSync(path,"utf8");}catch{return"";}
   let seq=0;const lines:string[]=[];const add=(time:string,type:string,payload:Record<string,unknown>)=>lines.push(JSON.stringify({seq:++seq,time,type,payload}));
-  for(const line of raw.split("\n")){if(!line)continue;let entry:any;try{entry=JSON.parse(line);}catch{continue;}if(entry.type!=="message")continue;const message=entry.message,time=entry.timestamp??new Date(message?.timestamp??Date.now()).toISOString();
+  for(const line of raw.split("\n")){if(!line)continue;let entry:any;try{entry=JSON.parse(line);}catch{continue;}if(entry.type==="custom_message"&&entry.customType==="fleet-result"){add(entry.timestamp,"user",{text:typeof entry.content==="string"?entry.content:JSON.stringify(entry.content),deliveryId:entry.details?.deliveryId});continue;}if(entry.type!=="message")continue;const message=entry.message,time=entry.timestamp??new Date(message?.timestamp??Date.now()).toISOString();
     if(message?.role==="user"){const text=(message.content??[]).filter((part:any)=>part.type==="text").map((part:any)=>part.text).join("");if(text)add(time,"user",{text});}
     else if(message?.role==="assistant")for(const part of message.content??[]){if(part.type==="thinking")add(time,"thinking",{text:part.thinking??part.text??""});else if(part.type==="text")add(time,"assistant",{text:part.text??""});else if(part.type==="toolCall")add(time,"tool_start",{toolCallId:part.id,name:part.name,args:part.arguments??{}});}
     else if(message?.role==="toolResult")add(time,"tool_end",{toolCallId:message.toolCallId,name:message.toolName,output:(message.content??[]).map((part:any)=>part.text??"").join("\n"),error:!!message.isError});
@@ -66,8 +66,12 @@ export class OrchestratorClient implements OrchestratorObserver{
   setBoost(provider:string,multiplier:number):void{this.store.setControl(`boost:${provider}`,String(multiplier));}
   plans(definitions:readonly PlanDefinition[]=ORCHESTRATOR_CATALOG.plans,now=Date.now()):PlanUsageSnapshot{const totals=this.store.usageSince(now-CACHE_WINDOW_MS);return{plans:Object.fromEntries(definitions.map((definition)=>[definition.id,plan(this.store,definition,totals,now)])),updatedAt:new Date(now).toISOString()};}
   async refreshPlanFacts(_agentDir:string):Promise<void>{}
-  async listRuns(limit:number):Promise<RunListing>{const active=this.store.runs(["starting","running"]).sort((a,b)=>(b.startedAt??b.createdAt)-(a.startedAt??a.createdAt)),models=new Map<string,number>();for(const run of active)models.set(run.model??"unknown",(models.get(run.model??"unknown")??0)+1);return{runs:active.slice(0,limit).map((run)=>this.decorate(run)),running:active.length,models:[...models].sort().map(([model,count])=>({model,count}))};}
+  async listRuns(limit:number):Promise<RunListing>{
+    const active=this.store.runs(["starting","running"]),models=new Map<string,number>();
+    for(const run of active)models.set(run.model??"unknown",(models.get(run.model??"unknown")??0)+1);
+    return{runs:this.store.observedRuns(limit).map(run=>this.decorate(run)),running:active.length,models:[...models].sort().map(([model,count])=>({model,count}))};
+  }
   async tailRun(runId:string,offset:number,maxBytes:number,_watch:boolean):Promise<TranscriptTail>{const run=this.store.run(runId);if(!run)return{run:null,size:0,offset:0,next:0,chunk:""};const text=run.sessionFile?transformedSession(run.sessionFile):"",bytes=Buffer.from(text),range=tailRange(bytes.length,offset,maxBytes);let start=range.start,end=range.end;if(range.fresh&&start>0){const newline=bytes.indexOf(10,start);start=newline<0?end:newline+1;}if(end<bytes.length){const newline=bytes.lastIndexOf(10,end-1);if(newline>=start)end=newline+1;}return{run:this.decorate(run),size:bytes.length,offset:start,next:end,chunk:bytes.subarray(start,end).toString("utf8")};}
   close():void{this.store.close();}
-  private decorate(run:Run):ObservedRun{const live=this.store.db.prepare("SELECT * FROM live_state WHERE run_id=?").get(run.id) as any;return{id:run.id,taskId:run.sourceId??run.source,model:run.model??run.profile,thinking:run.thinking,provider:run.provider,state:run.state==="failed"?"error":run.state,startedAt:run.startedAt??run.createdAt,endedAt:run.endedAt,detail:run.result,observable:!!run.sessionFile,live:live?{activity:live.activity,liveText:live.text,liveThinking:live.thinking,activeTool:live.tool??null}:null};}
+  private decorate(run:Run):ObservedRun{const live=this.store.db.prepare("SELECT * FROM live_state WHERE run_id=?").get(run.id) as any;return{id:run.id,parentRunId:run.parentRunId,rootRunId:run.rootRunId,childRunIds:run.childRunIds,requestedModel:run.requestedModel,escalatesRunId:run.escalatesRunId,deliveryState:run.deliveryState,taskId:run.sourceId??run.source,model:run.model??run.profile,thinking:run.thinking,provider:run.provider,state:run.state==="failed"?"error":run.state,startedAt:run.startedAt??run.createdAt,endedAt:run.endedAt,detail:run.result,observable:!!run.sessionFile,live:live?{activity:live.activity,liveText:live.text,liveThinking:live.thinking,activeTool:live.tool??null}:null};}
 }

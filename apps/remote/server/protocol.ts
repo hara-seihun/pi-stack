@@ -41,6 +41,7 @@ export interface QueuedMessage {
 
 export interface Session {
   id: string;
+  subagent?: { parentSessionId: string; model: string };
   name: string;
   cwd: string;
   workspaceName: string;
@@ -84,6 +85,7 @@ export interface AgentRun {
   hostLabel: string;
   hostName: string;
   runId: string;
+  parentRunId?: string;
   taskId: string;
   model: string;
   thinking: string;

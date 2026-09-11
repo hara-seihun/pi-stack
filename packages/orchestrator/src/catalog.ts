@@ -51,26 +51,35 @@ export interface OrchestratorCatalog {
   readonly plans: readonly PlanDefinition[];
 }
 
+export const SUBAGENT_MODEL_DESCRIPTIONS = [
+  "Astra is like a staff engineer.",
+  "Sol is a senior engineer.",
+  "Terra is an intermediate engineer.",
+  "Luna is a junior engineer.",
+  'With the exception of the fact that even weaker models are very good at classification tasks and inference tasks. If the goal is "here\'s a big chunk of text, discover something" or "here\'s a big chunk of text, make an inference," basically any model can do that almost perfectly.',
+].join(" ");
+
 const HOUR = 3_600_000;
 const DAY = 24 * HOUR;
 
 export const ORCHESTRATOR_CATALOG: OrchestratorCatalog = {
   models: [
     { id: "astra", provider: "openai-codex", model: "gpt-6-astra", thinking: "xhigh", label: "ASTRA", aliases: ["astra"], icon: "astra", accent: "#5a6673", meterClass: "astra" },
-    { id: "luna", provider: "openai-codex", model: "gpt-5.6-luna", thinking: "max", label: "LUNA", aliases: ["luna"], icon: "luna", accent: "#5a6673", meterClass: "luna" },
+    { id: "sol", provider: "openai-codex", model: "gpt-5.6-sol", thinking: "max", label: "SOL", aliases: ["sol"], icon: "sol", accent: "#5a6673", meterClass: "sol" },
     { id: "terra", provider: "openai-codex", model: "gpt-5.6-terra", thinking: "max", label: "TERRA", aliases: ["terra"], icon: "terra", accent: "#5a6673", meterClass: "terra" },
+    { id: "luna", provider: "openai-codex", model: "gpt-5.6-luna", thinking: "max", label: "LUNA", aliases: ["luna"], icon: "luna", accent: "#5a6673", meterClass: "luna" },
     { id: "opus", provider: "anthropic", model: "claude-opus-5", thinking: "xhigh", label: "OPUS", aliases: ["opus"], icon: "opus", accent: "#d9663d", meterClass: "opus" },
     { id: "fable", provider: "anthropic", model: "claude-fable-5-1", thinking: "high", label: "FABLE", aliases: ["fable"], icon: "fable", accent: "#e6a23c", meterClass: "fable" },
     { id: "sonnet", provider: "anthropic", model: "claude-sonnet", thinking: "high", label: "SONNET", aliases: ["sonnet"], icon: "sonnet", accent: "#d9663d" },
   ],
   meters: [
-    { id: "codex-5h", provider: "openai-codex", drainedBy: ["luna:cost", "astra:cost", "terra:cost"], windowHours: 5 },
-    { id: "codex-7d", provider: "openai-codex", drainedBy: ["luna:cost", "astra:cost", "terra:cost"], windowHours: 168 },
+    { id: "codex-5h", provider: "openai-codex", drainedBy: ["astra:cost", "sol:cost", "terra:cost", "luna:cost"], windowHours: 5 },
+    { id: "codex-7d", provider: "openai-codex", drainedBy: ["astra:cost", "sol:cost", "terra:cost", "luna:cost"], windowHours: 168 },
     { id: "anthropic-5h", provider: "anthropic", drainedBy: ["default:cost", "opus:cost", "fable:cost"], windowHours: 5 },
     { id: "anthropic-7d", provider: "anthropic", drainedBy: ["default:cost", "opus:cost", "fable:cost"], windowHours: 168 },
     { id: "anthropic-7d_oi", provider: "anthropic", drainedBy: ["fable:cost"], windowHours: 168 },
   ],
-  agentOrder: ["astra", "luna", "terra", "fable", "opus", "sonnet"],
+  agentOrder: ["astra", "sol", "terra", "luna", "fable", "opus", "sonnet"],
   plans: [
     {
       id: "openai", label: "OpenAI", icon: "openai", provider: "openai-codex", maxReadingAgeMs: HOUR,
@@ -98,7 +107,10 @@ export function catalogAgentType(raw: string): { key: string; label: string } {
   const value = raw.toLowerCase();
   const match = ORCHESTRATOR_CATALOG.models.find((model) => {
     const names = [model.model, `${model.provider}/${model.model}`, ...model.aliases];
-    return names.some((name) => value === name.toLowerCase() || value.includes(name.toLowerCase()));
+    return names.some((name) => {
+      const escaped = name.toLowerCase().replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+      return new RegExp(`(^|[^a-z0-9])${escaped}($|[^a-z0-9])`).test(value);
+    });
   });
   if (match) return { key: match.id, label: match.label };
   const bare = raw.split("/").at(-1)?.split(":")[0] || "unknown";

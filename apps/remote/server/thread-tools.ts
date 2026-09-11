@@ -2,6 +2,7 @@ import { createHash } from "node:crypto";
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 import { StringEnum } from "@earendil-works/pi-ai";
 import { Type } from "typebox";
+import { SUBAGENT_MODEL_DESCRIPTIONS } from "pi-orchestrator/api";
 import { API } from "./api";
 
 export const THREAD_THINKING_LEVELS = ["off", "minimal", "low", "medium", "high", "xhigh", "max"] as const;
@@ -27,7 +28,7 @@ export function registerThreadTools(pi: ExtensionAPI) {
       task: Type.String({ minLength: 1 }),
       threadId: Type.Optional(Type.String({ description: "An existing worker thread to continue." })),
       newThread: Type.Optional(Type.Boolean({ description: "Create a separate worker instead of reusing one. Defaults to false." })),
-      model: Type.Optional(Type.String({ description: "Optional model constraint, such as astra, fable or opus. Existing workers keep their model; a new worker defaults to astra." })),
+      model: Type.Optional(Type.String({ description: `Optional model constraint, such as astra, sol, terra or luna. Existing workers keep their model; a new worker defaults to astra. ${SUBAGENT_MODEL_DESCRIPTIONS}` })),
       thinkingLevel: Type.Optional(StringEnum(THREAD_THINKING_LEVELS, { description: "Reasoning effort for a new worker. Existing workers keep their level. Defaults to high." })),
     }),
     async execute(toolCallId, params, signal) {

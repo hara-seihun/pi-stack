@@ -218,8 +218,7 @@ esac
     try{
       account(store);const [id]=store.createRuns({count:1,source:"direct",prompt:"x",cwd:"/tmp",profile:"standard",budget:"force"});
       store.assignRun(id!,{accountId:"openai-codex-1",provider:"openai-codex",model:"gpt-6-astra",unit:"run-a.service",releasePath:"/srv/releases/a"});
-      store.updateRun(id!,{state:"failed",failureKind:"infrastructure",result:"old failure"});
-      store.updateRun(id!,{state:"queued"});
+      store.updateRun(id!,{state:"queued",failureKind:"infrastructure",result:"prior recovery failure"});
       (new Daemon(store,config,"/srv/releases/current","/srv/state/ledger.sqlite3") as any).recoverWorkers();
       expect(store.run(id!)).toMatchObject({state:"running",workerUnit:"run-a.service"});
       expect(store.run(id!)?.failureKind).toBeUndefined();

@@ -52,7 +52,7 @@ function iso(value: unknown): string {
 
 function normalizedActivity(status: string, live: AgentLiveState | null): string {
   if (status === "starting") return "STARTING";
-  if (status !== "running") return "IDLE";
+  if (status !== "running") return status.toUpperCase();
   const activity = String(live?.activity ?? RUNNING_ACTIVITY).trim().toUpperCase().replace(/[\s-]+/g, "_");
   if (["RUNNING", "RESPONDING", "RESUMING", "SETTLING"].includes(activity)) {
     return live?.liveThinking && !live.liveText ? "THINKING" : "WORKING";
@@ -76,6 +76,7 @@ export function summarizeAgentRun(row: AgentRunRow, host: AgentHostRef): AgentRu
     hostLabel: host.label,
     hostName: host.name,
     runId,
+    ...(row.parentRunId ? { parentRunId: runKey(host.key, row.parentRunId) } : {}),
     taskId: row.taskId,
     model,
     thinking: String(row.thinking ?? ""),

@@ -7,10 +7,67 @@ import { dirname, join } from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 
 let buildRoot: string, routing: string, ai: string, sdk: string, cli: string;
+
+test.each(['remote', 'remote-physical', 'fleet'])('keeps the pinned model through history restore and model selection: %s', async kind => {
+  const root = await mkdtemp(join(tmpdir(), 'pi-pinned-model-'));
+  const fixture = join(root, 'fixture.mjs');
+  await writeFile(fixture, `
+import assert from 'node:assert/strict';
+import { mkdirSync, writeFileSync } from 'node:fs';
+import { join } from 'node:path';
+import { createAgentSession, DefaultResourceLoader, ModelRuntime, SessionManager, SettingsManager } from ${JSON.stringify(sdk)};
+import { Store } from ${JSON.stringify(join(buildRoot, 'compiled/store.js'))};
+const root=process.env.HOME,dir=join(root,'agent'),account='openai-codex-2';
+mkdirSync(dir);
+writeFileSync(join(dir,'auth.json'),'{}');
+const credential={type:'oauth',access:'test',refresh:'test',expires:Date.now()+3600000};
+writeFileSync(join(root,'auth.json'),JSON.stringify({[account]:credential,'openai-codex-3':credential}));
+const store=Store.open(process.env.PI_ORCHESTRATOR_LEDGER);
+store.upsertAccount({id:account,provider:'openai-codex'});
+store.upsertAccount({id:'openai-codex-3',provider:'openai-codex'});
+if (${JSON.stringify(kind)} === 'fleet') {
+  const [id]=store.createRuns({count:1,source:'direct',prompt:'fixture',cwd:root,profile:'luna',budget:'force'});
+  store.assignRun(id,{accountId:account,provider:'openai-codex',model:'gpt-5.6-luna',thinking:'high',unit:'fixture',releasePath:root});
+  process.env.PI_ORCHESTRATOR_RUN_ID=id;
+} else process.env.PI_SUBAGENT_MODEL=${JSON.stringify(kind)} === 'remote-physical' ? 'gpt-5.6-luna' : 'luna';
+store.close();
+const manager=SessionManager.inMemory(root);
+manager.appendModelChange(account,'gpt-5.6-terra');
+manager.appendThinkingLevelChange('high');
+manager.appendMessage({role:'assistant',content:[],api:'openai-codex-responses',provider:account,model:'gpt-5.6-terra',usage:{input:0,output:0,cacheRead:0,cacheWrite:0,totalTokens:0,cost:{input:0,output:0,cacheRead:0,cacheWrite:0,total:0}},stopReason:'stop',timestamp:Date.now()});
+const settingsManager=SettingsManager.inMemory();
+const modelRuntime=await ModelRuntime.create({authPath:join(dir,'auth.json'),modelsPath:join(dir,'models.json')});
+const resourceLoader=new DefaultResourceLoader({cwd:root,agentDir:dir,settingsManager,noExtensions:true,noSkills:true,noContextFiles:true,noPromptTemplates:true,noThemes:true,additionalExtensionPaths:[${JSON.stringify(routing)}]});
+await resourceLoader.reload();
+const {session}=await createAgentSession({cwd:root,agentDir:dir,modelRuntime,settingsManager,resourceLoader,sessionManager:manager});
+const errors=[];
+try {
+  await session.bindExtensions({mode:'print',onError:error=>errors.push(error)});
+  assert.deepEqual(errors,[]);
+  assert.equal(session.model.id,'gpt-5.6-luna');
+  assert.equal(session.model.provider,account);
+  await session.setModel(session.modelRuntime.getModel(account,'gpt-5.6-terra'));
+  assert.equal(session.model.id,'gpt-5.6-luna');
+  assert.equal(session.model.provider,account);
+  await session.setModel(session.modelRuntime.getModel('openai-codex-3','gpt-5.6-luna'));
+  assert.equal(session.model.id,'gpt-5.6-luna');
+  assert.equal(session.model.provider,'openai-codex-3');
+  assert.deepEqual(errors,[]);
+} finally {await session.extensionRunner.emit({type:'session_shutdown',reason:'quit'});session.dispose();}
+console.log('model pin held');
+`);
+  const env = { ...process.env, HOME: root, PI_CODING_AGENT_DIR: join(root, 'agent'), PI_ORCHESTRATOR_LEDGER: join(root, 'ledger.sqlite3'), PI_ORCHESTRATOR_AUTH: join(root, 'auth.json'), PI_ORCHESTRATOR_ASSIGNED: kind === 'fleet' ? '1' : '0', PI_OFFLINE: '1' };
+  for (const key of Object.keys(env)) if (/^PI_REMOTE_|^PI_SESSION_|^PI_SUBAGENT_MODEL$|^PI_ORCHESTRATOR_RUN_ID$|_API_KEY$/.test(key)) delete env[key as keyof typeof env];
+  try {
+    const result = await promisify(execFile)(process.execPath, [fixture], { cwd: root, env, timeout: 4000 });
+    expect(result.stdout).toContain('model pin held');
+  } finally { await rm(root, { recursive: true, force: true }); }
+}, 6000);
+
 beforeAll(async () => {
   buildRoot = await mkdtemp(join(tmpdir(), 'pi-routing-build-'));
   await symlink(fileURLToPath(new URL('../../../node_modules', import.meta.url)), join(buildRoot, 'node_modules'));
-  await promisify(execFile)('tsc', ['-p', fileURLToPath(new URL('../tsconfig.build.json', import.meta.url)), '--outDir', join(buildRoot, 'compiled')], { timeout: 20_000 });
+  await promisify(execFile)(process.execPath, [fileURLToPath(new URL('../../../node_modules/typescript/bin/tsc', import.meta.url)), '-p', fileURLToPath(new URL('../tsconfig.build.json', import.meta.url)), '--outDir', join(buildRoot, 'compiled')], { timeout: 20_000 });
   await writeFile(join(buildRoot, 'package.json'), '{"type":"module"}');
   routing = process.env.PI_TEST_ROUTING_ENTRY ?? join(buildRoot, 'compiled/extension/routing.js');
   [sdk, ai] = JSON.parse(execFileSync(process.execPath, ['--experimental-import-meta-resolve', '--input-type=module', '-e', `console.log(JSON.stringify(['@earendil-works/pi-coding-agent', '@earendil-works/pi-ai'].map(name => import.meta.resolve(name, process.argv[1]))))`, pathToFileURL(routing).href], { encoding: 'utf8' })) as [string, string];

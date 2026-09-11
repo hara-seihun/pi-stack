@@ -1,5 +1,6 @@
 export {
   ORCHESTRATOR_CATALOG,
+  SUBAGENT_MODEL_DESCRIPTIONS,
   catalogAgentType,
   catalogMeter,
   catalogModel,
@@ -9,7 +10,12 @@ export {
   type PlanDefinition,
   type PlanMetric,
 } from "./catalog.js";
-export type { LaneManifest, LaneSpec, LaneReadiness, Run } from "./domain.js";
+export type { LaneManifest, LaneSpec, LaneReadiness, Run, FleetModel, FleetDispatch, FleetResult } from "./domain.js";
+export { CompletionClient, type CompletionClientOptions, type CompletionCallOptions } from "./completion-client.js";
+export { COMPLETION_OPENAPI } from "./completion-openapi.js";
+export { CompletionInputSchema, CompletionRecordSchema, CompletionResultSchema, CompletionUsageSchema, CompletionErrorResponseSchema,
+  type CompletionInput, type CompletionRecord, type CompletionResult, type CompletionUsage, type CompletionError,
+  type CompletionModel, type CompletionExecution, type CompletionOutcome } from "./completion-contract.js";
 export {
   createSharedImageGenerationService,
   generateImageWithSharedAccount,

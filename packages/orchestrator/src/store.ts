@@ -2,7 +2,7 @@ import { mkdirSync } from "node:fs";
 import { randomInt } from "node:crypto";
 import { dirname } from "node:path";
 import type { DatabaseSync } from "node:sqlite";
-import type { Account, BudgetClass, FailureKind, LaneSpec, LeaseKind, ProfileCandidate, Run, RunActivity, RunContext, RunSource, RunState, UsageEntry, UsageTotal } from "./domain.js";
+import type { Account, BudgetClass, FailureKind, FleetChild, LaneSpec, LeaseKind, ProfileCandidate, Run, RunActivity, RunContext, RunSource, RunState, UsageEntry, UsageTotal } from "./domain.js";
 
 import { openSqlite } from "./sqlite.js";
 
@@ -107,12 +107,13 @@ function maybe<T>(value: T | null): T | undefined { return value === null ? unde
 export function openLedgerDatabase(path: string): DatabaseSync {
   if (path !== ":memory:") mkdirSync(dirname(path), { recursive: true });
   const db = openSqlite(path);
-  db.exec("PRAGMA busy_timeout=5000; PRAGMA journal_mode=WAL; PRAGMA synchronous=NORMAL; PRAGMA foreign_keys=ON");
+  db.exec("PRAGMA busy_timeout=5000; PRAGMA journal_mode=WAL; PRAGMA synchronous=FULL; PRAGMA foreign_keys=ON");
   return db;
 }
 
 export class Store {
   readonly db: DatabaseSync;
+  private transactionDepth=0;
 
   private constructor(db: DatabaseSync) { this.db = db; }
 
@@ -127,9 +128,12 @@ export class Store {
 
   close(): void { this.db.close(); }
   transaction<T>(fn: () => T): T {
-    this.db.exec("BEGIN IMMEDIATE");
-    try { const result=fn(); this.db.exec("COMMIT"); return result; }
-    catch(error){ this.db.exec("ROLLBACK"); throw error; }
+    const depth=this.transactionDepth++,savepoint=`orchestrator_${depth}`;
+    try {
+      this.db.exec(depth===0?"BEGIN IMMEDIATE":`SAVEPOINT ${savepoint}`);
+      try {const result=fn();this.db.exec(depth===0?"COMMIT":`RELEASE SAVEPOINT ${savepoint}`);return result;}
+      catch(error){this.db.exec(depth===0?"ROLLBACK":`ROLLBACK TO SAVEPOINT ${savepoint}; RELEASE SAVEPOINT ${savepoint}`);throw error;}
+    }finally{this.transactionDepth--;}
   }
 
   control(key: string): string | undefined {
@@ -214,17 +218,20 @@ export class Store {
   lanes(): LaneSpec[] { return (this.db.prepare("SELECT * FROM lane ORDER BY priority DESC,weight DESC,id").all() as any[]).map((r)=>({id:r.id,prompt:r.prompt,cwd:r.cwd,profile:r.profile,weight:r.weight,priority:r.priority,doctrineUrl:maybe(r.doctrine_url),openingProbe:maybe(r.opening_probe)})); }
   lane(id:string):LaneSpec|undefined{return this.lanes().find((x)=>x.id===id);}
 
-  createRuns(input:{count:number;source:RunSource;sourceId?:string;prompt:string;cwd:string;profile:string;budget:BudgetClass;context?:RunContext}):string[]{
+  fleetChild(id:string):FleetChild|undefined{return JSON.parse(this.control(`fleet-child:${id}`)??"null")??undefined;}
+  childRunIds(id:string):string[]{return (this.db.prepare("SELECT substr(key,13) id FROM control WHERE key LIKE 'fleet-child:%' AND json_extract(value,'$.parentRunId')=? ORDER BY key").all(id) as {id:string}[]).map(row=>row.id);}
+  isWaiting(id:string):boolean{return this.control(`fleet-waiting:${id}`)==="1";}
+  createRuns(input:{count:number;source:RunSource;sourceId?:string;prompt:string;cwd:string;profile:string;budget:BudgetClass;context?:RunContext;child?:FleetChild}):string[]{
     const now=Date.now(),ids:string[]=[];
     this.transaction(()=>{for(let i=0;i<input.count;i++){const id=crypto.randomUUID();ids.push(id);this.db.prepare(`INSERT INTO run(id,source,source_id,prompt,cwd,profile,budget,state,created_at,updated_at)
-      VALUES(?,?,?,?,?,?,?,'queued',?,?)`).run(id,input.source,input.sourceId??null,input.prompt,input.cwd,input.profile,input.budget,now,now);if(input.context)this.setControl(`run-context:${id}`,JSON.stringify(input.context));}});
+      VALUES(?,?,?,?,?,?,?,'queued',?,?)`).run(id,input.source,input.sourceId??null,input.prompt,input.cwd,input.profile,input.budget,now,now);if(input.context)this.setControl(`run-context:${id}`,JSON.stringify(input.context));if(input.child)this.setControl(`fleet-child:${id}`,JSON.stringify(input.child));}});
     return ids;
   }
-  run(id:string):Run|undefined{const r=this.db.prepare("SELECT * FROM run WHERE id=?").get(id) as any;return r?this.mapRun(r):undefined;}
-  runs(states?:readonly RunState[]):Run[]{const rows=states?.length?this.db.prepare(`SELECT * FROM run WHERE state IN (${states.map(()=>'?').join(',')}) ORDER BY created_at`).all(...states):this.db.prepare("SELECT * FROM run ORDER BY created_at").all();return (rows as any[]).map((r)=>this.mapRun(r));}
+  run(id:string):Run|undefined{const r=this.db.prepare("SELECT * FROM run WHERE id=?").get(id) as any;return r?this.mapRuns([r])[0]:undefined;}
+  runs(states?:readonly RunState[]):Run[]{const storedStates=states?.map(state=>state==="waiting"?"running":state);const rows=storedStates?.length?this.db.prepare(`SELECT * FROM run WHERE state IN (${storedStates.map(()=>'?').join(',')}) ORDER BY created_at`).all(...storedStates):this.db.prepare("SELECT * FROM run ORDER BY created_at").all();return this.mapRuns(rows as any[]).filter(run=>!states?.length||states.includes(run.state));}
   admissionQueue():Run[]{
     const rows=this.db.prepare(`SELECT run.* FROM run LEFT JOIN lane ON run.source='lane' AND lane.id=run.source_id
-      WHERE run.state='queued'
+      WHERE run.state='queued' AND run.account_id IS NULL
       ORDER BY CASE run.budget WHEN 'force' THEN 0 ELSE 1 END,
         CASE run.source WHEN 'direct' THEN 0 ELSE 1 END,
         COALESCE(lane.priority,0) DESC,
@@ -232,13 +239,40 @@ export class Store {
           CAST((SELECT count(*) FROM run active WHERE active.source='lane' AND active.source_id=run.source_id AND active.state IN ('starting','running')) AS REAL)/lane.weight
         END,
         COALESCE(lane.weight,0) DESC,run.created_at,run.id`).all();
-    return (rows as any[]).map((row)=>this.mapRun(row));
+    return this.mapRuns(rows as any[]);
   }
-  private mapRun(r:any):Run{return{id:r.id,source:r.source,sourceId:maybe(r.source_id),prompt:r.prompt,cwd:r.cwd,profile:r.profile,budget:r.budget,context:JSON.parse(this.control(`run-context:${r.id}`)??"null")??undefined,accountId:maybe(r.account_id),provider:maybe(r.provider),model:maybe(r.model),thinking:maybe(r.thinking),sessionFile:maybe(r.session_file),state:r.state,failureKind:maybe(r.failure_kind),result:maybe(r.result),workerUnit:maybe(r.worker_unit),releasePath:maybe(r.release_path),createdAt:r.created_at,startedAt:maybe(r.started_at),updatedAt:r.updated_at,progressAt:maybe(r.progress_at),endedAt:maybe(r.ended_at)};}
+  observedRuns(limit:number):Run[]{
+    const rows=this.db.prepare(`WITH family AS MATERIALIZED (
+      SELECT substr(key,13) id,json_extract(value,'$.parentRunId') parent,json_extract(value,'$.rootRunId') root FROM control WHERE key LIKE 'fleet-child:%'
+    ) SELECT * FROM run WHERE state IN ('queued','starting','running') OR id IN (SELECT id FROM family UNION SELECT parent FROM family UNION SELECT root FROM family)
+      ORDER BY CASE WHEN state IN ('done','failed','aborted') THEN 1 ELSE 0 END,COALESCE(started_at,created_at) DESC,id LIMIT ?`).all(Math.max(0,Math.floor(limit)));
+    return this.mapRuns(rows as any[]);
+  }
+  private mapRuns(rows:any[]):Run[]{
+    if(!rows.length)return[];
+    const controls=new Map((this.db.prepare("SELECT key,value FROM control WHERE key LIKE 'fleet-%' OR key LIKE 'run-context:%'").all() as {key:string;value:string}[]).map(row=>[row.key,row.value]));
+    const children=new Map<string,FleetChild>(),childIds=new Map<string,string[]>();
+    for(const [key,value] of controls)if(key.startsWith("fleet-child:")){
+      const id=key.slice(12),child=JSON.parse(value) as FleetChild;
+      children.set(id,child);
+      const ids=childIds.get(child.parentRunId)??[];ids.push(id);childIds.set(child.parentRunId,ids);
+    }
+    return rows.map(r=>{
+      const child=children.get(r.id),ids=childIds.get(r.id)??[];
+      return{parentRunId:child?.parentRunId,rootRunId:child?.rootRunId??(ids.length?r.id:undefined),requestedModel:child?.model,escalatesRunId:child?.escalatesRunId,childRunIds:ids,
+        deliveryState:child?(controls.has(`fleet-delivered:${r.id}`)?"delivered":"pending"):undefined,
+        id:r.id,source:r.source,sourceId:maybe(r.source_id),prompt:r.prompt,cwd:r.cwd,profile:r.profile,budget:r.budget,
+        context:JSON.parse(controls.get(`run-context:${r.id}`)??"null")??undefined,accountId:maybe(r.account_id),provider:maybe(r.provider),model:maybe(r.model),thinking:maybe(r.thinking),sessionFile:maybe(r.session_file),
+        state:r.state==="running"&&controls.get(`fleet-waiting:${r.id}`)==="1"?"waiting":r.state,failureKind:maybe(r.failure_kind),result:maybe(r.result),workerUnit:maybe(r.worker_unit),releasePath:maybe(r.release_path),
+        createdAt:r.created_at,startedAt:maybe(r.started_at),updatedAt:r.updated_at,progressAt:maybe(r.progress_at),endedAt:maybe(r.ended_at)};
+    });
+  }
   assignRun(id:string,assignment:ProfileCandidate & {accountId:string;unit:string;releasePath:string},at=Date.now()):boolean{
     return this.transaction(()=>{
       const run=this.run(id);
       if(!run || run.state!=="queued" || run.accountId)return false;
+      const fixed=this.fleetChild(id)?.assignment;
+      if(fixed&&(fixed.provider!==assignment.provider||fixed.model!==assignment.model||fixed.thinking!==assignment.thinking||assignment.thinkingPair))return false;
       let thinking=assignment.thinking;
       if(assignment.thinkingPair){
         const pair=assignment.thinkingPair;
@@ -255,19 +289,38 @@ export class Store {
     });
   }
   updateRun(id:string,patch:{state?:RunState;sessionFile?:string;progressAt?:number;result?:string;failureKind?:FailureKind;workerUnit?:string},at=Date.now()):void{
-    const current=this.run(id);if(!current)throw new Error(`unknown run ${id}`);const state=patch.state??current.state;const terminal=["done","failed","aborted"].includes(state);
+    const current=this.run(id);if(!current)throw new Error(`unknown run ${id}`);
+    if(["done","failed","aborted"].includes(current.state))return;
+    const state=patch.state??current.state;const terminal=["done","failed","aborted"].includes(state);
+    if(state==="waiting")this.setControl(`fleet-waiting:${id}`,"1");
+    else if(patch.state)this.db.prepare("DELETE FROM control WHERE key=?").run(`fleet-waiting:${id}`);
     this.db.prepare(`UPDATE run SET state=?,session_file=COALESCE(?,session_file),progress_at=COALESCE(?,progress_at),result=COALESCE(?,result),failure_kind=COALESCE(?,failure_kind),worker_unit=COALESCE(?,worker_unit),updated_at=?,ended_at=? WHERE id=?`)
-      .run(state,patch.sessionFile??null,patch.progressAt??null,patch.result??null,patch.failureKind??null,patch.workerUnit??null,at,terminal?at:null,id);
-    if(terminal)this.endLease(`run:${id}`,at);
+      .run(state==="waiting"?"running":state,patch.sessionFile??null,patch.progressAt??null,patch.result??null,patch.failureKind??null,patch.workerUnit??null,at,terminal?at:null,id);
+    if(terminal||state==="waiting")this.endLease(`run:${id}`,at);
   }
-  resumeAssignedRun(id:string,at=Date.now()):boolean{
+  finishCompletionRun(id:string,patch:Parameters<Store["updateRun"]>[1],at=Date.now()):void{
+    this.transaction(()=>{
+      if(!this.control(`completion-run:${id}`))throw new Error(`Run ${id} is not a completion`);
+      const current=this.run(id);if(!current)throw new Error(`Unknown completion run ${id}`);
+      if(current.state==="aborted")return;
+      const state=patch.state??current.state;
+      if(!["done","failed","aborted"].includes(state))throw new Error("A completion receipt must be terminal");
+      this.db.prepare(`UPDATE run SET state=?,session_file=COALESCE(?,session_file),progress_at=COALESCE(?,progress_at),result=?,failure_kind=?,worker_unit=COALESCE(?,worker_unit),updated_at=?,ended_at=? WHERE id=?`)
+        .run(state,patch.sessionFile??null,patch.progressAt??null,patch.result??current.result??null,state==="done"?null:patch.failureKind??null,patch.workerUnit??null,at,at,id);
+      this.endLease(`run:${id}`,at);
+    });
+  }
+  resumeAssignedRun(id:string,at=Date.now(),accountId?:string):boolean{
     return this.transaction(()=>{
       const run=this.run(id);
       if(!run?.accountId||!run.provider||!run.model||!run.workerUnit||!run.releasePath)return false;
-      const changed=this.db.prepare(`UPDATE run SET state='starting',result='worker process stopped; recovering the saved Pi session',updated_at=?,ended_at=NULL WHERE id=? AND state IN ('queued','starting','running')`).run(at,id).changes;
+      const targetAccount=accountId??run.accountId;
+      if(this.account(targetAccount)?.provider!==run.provider)return false;
+      const changed=this.db.prepare(`UPDATE run SET account_id=?,state='starting',result='worker process stopped; recovering the saved Pi session',updated_at=?,ended_at=NULL WHERE id=? AND state IN ('queued','starting','running')`).run(targetAccount,at,id).changes;
       if(changed!==1)return false;
+      this.db.prepare("DELETE FROM control WHERE key=?").run(`fleet-waiting:${id}`);
       this.endLease(`run:${id}`,at);
-      this.createLease(`run:${id}`,run.accountId,"fleet",id,at);
+      this.createLease(`run:${id}`,targetAccount,"fleet",id,at);
       return true;
     });
   }
@@ -275,6 +328,7 @@ export class Store {
     return this.transaction(()=>{
       const run=this.run(id);
       if(!run?.accountId||!run.provider||!run.model||!run.workerUnit||!run.releasePath)return false;
+      if(run.state==="failed"&&(run.parentRunId||run.childRunIds?.length))return false;
       const changed=this.db.prepare(`UPDATE run SET state='running',result=NULL,failure_kind=NULL,updated_at=?,ended_at=NULL WHERE id=? AND state IN ('queued','starting','running','failed')`).run(at,id).changes;
       if(changed!==1)return false;
       this.endLease(`run:${id}`,at);
@@ -282,8 +336,8 @@ export class Store {
       return true;
     });
   }
-  activeCount(source?:RunSource,sourceId?:string):number{let sql="SELECT COUNT(*) n FROM run WHERE state IN ('queued','starting','running')",args:any[]=[];if(source){sql+=" AND source=?";args.push(source);}if(sourceId){sql+=" AND source_id=?";args.push(sourceId);}return Number((this.db.prepare(sql).get(...args) as any).n);}
-  admittedLaneCount(sourceId:string):number{return this.runs(["starting","running"]).filter((run)=>run.source==="lane"&&run.sourceId===sourceId).length;}
+  activeCount(source?:RunSource,sourceId?:string):number{return this.runs(["queued","starting","running","waiting"]).filter(run=>(!source||run.source===source)&&(!sourceId||run.sourceId===sourceId)).length;}
+  admittedLaneCount(sourceId:string):number{return this.runs(["starting","running","waiting"]).filter((run)=>run.source==="lane"&&run.sourceId===sourceId).length;}
   trimQueuedLane(sourceId:string,keep:number,at=Date.now()):number{
     const rows=this.db.prepare("SELECT id FROM run WHERE source='lane' AND source_id=? AND state='queued' ORDER BY created_at,id").all(sourceId) as {id:string}[];
     const removed=rows.slice(Math.max(0,keep));

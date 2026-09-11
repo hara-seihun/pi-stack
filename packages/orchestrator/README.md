@@ -10,6 +10,10 @@ A lane has a positive weight, not a worker target. Weights divide available conc
 
 Workers write progress through the daemon's loopback API. Their full context remains in Pi's session JSONL. If a worker process or machine stops, the next worker reopens that same file. The run row records the immutable release path and transient unit name, so a daemon deployment does not replace live workers. Recovery adopts a still-active unit when a daemon restart races the user manager; an already-loaded inactive transient unit restarts from its recorded release instead of being redefined.
 
+## Fleet coordination
+
+Normal Astra and Sol fleet runs can dispatch fixed-model Astra/Sol/Terra/Luna children. The daemon parks coordinators between turns, returns child results through durable transcript receipts, and resumes the same session after restarts. Parent links, waiting state, terminal children and transcripts are available through the observation API. See [fleet dispatch and coordinator return](docs/fleet-dispatch.md) for the tool, storage and recovery contracts. Isolated application runs keep their existing contract.
+
 ## Quota policy
 
 At 1×, ordinary work stays within the elapsed share of each provider window's allowance, including the configured reserve. A whole-percentage-point tolerance accounts for provider rounding. Every binding meter must be fresh. A flat pair of readings cannot erase earlier overspending.
@@ -41,10 +45,17 @@ PI_ORCHESTRATOR_CONFIG
 PI_ORCHESTRATOR_LEDGER
 PI_ORCHESTRATOR_AUTH
 PI_ORCHESTRATOR_HOST
+PI_ORCHESTRATOR_LISTEN_HOST
 PI_ORCHESTRATOR_PORT
 ```
 
-The JSON config may set model `profiles`, `backgroundSpendFraction`, machine and account concurrency, meter age, reconciliation periods, stall limits, `taskManifest`, `authPath`, and `agentDir`. The strict `astra` and `opus` profiles are always available alongside configured profiles.
+The JSON config may set model `profiles`, `backgroundSpendFraction`, machine and account concurrency, meter age, reconciliation periods, stall limits, `taskManifest`, `authPath`, and `agentDir`. The strict `astra`, `sol`, `terra`, `luna`, and `opus` profiles are always available alongside configured profiles. Each selects exactly one catalog model, even if a local profile uses the same name.
+
+The [shared catalog](src/catalog.ts) maps Astra to `openai-codex/gpt-6-astra` and Sol, Terra, and Luna to `openai-codex/gpt-5.6-sol`, `gpt-5.6-terra`, and `gpt-5.6-luna`. All four share the Codex five-hour and weekly meters. Their strict profiles use the catalog's thinking defaults, `xhigh` for Astra and `max` for Sol, Terra, and Luna. Host-defined profiles can choose different thinking levels.
+
+`SUBAGENT_MODEL_DESCRIPTIONS`, exported through `pi-orchestrator/api`, contains Hara's four verbatim engineering-level descriptions and her classification/inference exception, supplied on September 11, 2026. Tool schemas share that text without adding a model-selection policy.
+
+Model availability does not assign a model to a lane. Autonomous coordinator selection belongs to the submitting application or host lane manifest, which can name `astra` or `sol`. Task workers can select any of the four. Pi Stack leaves configured profile candidate order and lane defaults unchanged, including Converge's. Without configured profiles, `standard` still tries Astra then Opus and `expert` tries Opus then Astra. These general scheduling profiles do not identify coordinator roles.
 
 Profile candidates retain their priority order. A candidate can replace `thinking` with `thinkingPair: ["high", "max"]` to assign equal numbers of new runs to those levels, in randomly ordered pairs. The first admission draws one level; the next admission of that profile/provider/model consumes the other. The pending level lives in the ledger's `control` table and commits atomically with the run and lease, so restarts, quota refusals and failed database transactions do not consume a slot. Different profiles and models have separate pairs. Existing and recovered runs retain their recorded level. Provider and account selection stay unchanged. Configuration changes require a daemon restart.
 
@@ -88,7 +99,11 @@ pi-orchestrator account enable openai-codex-3
 
 Import reads credentials from a file so tokens do not enter process arguments. `account disable ID` takes an account out of fleet admission, interactive routing and meter sampling while keeping its credential and readings, which is what a lapsed subscription or a login awaiting replacement needs; `account enable ID` puts it back. A disabled account reports `disabled` in `status` capacity and produces no meter errors. `account remove` is the destructive path: it disables admission and deletes the credential while historical attribution remains intact. `account refresh ID` exchanges the account's refresh token for a new access token whatever the stored expiry claims, for the case where an operator already knows a credential is dead; the samplers and interactive routing do this on their own when a provider refuses one.
 
-The daemon serves its public API on `127.0.0.1:2460` by default. Pi Remote consumes the package's observation API and does not query private tables.
+The daemon serves its public API on `127.0.0.1:2460` by default. Config `listenHost` or `PI_ORCHESTRATOR_LISTEN_HOST` changes only the bind address; worker and CLI connections retain `PI_ORCHESTRATOR_HOST`, which defaults to loopback. A private-network deployment can bind `0.0.0.0` behind its existing VPC ingress firewall, without a credentials proxy. The daemon API is a trusted-network API, not a public endpoint. Pi Remote consumes the package's observation API and does not query private tables.
+
+## Tool-free completion API
+
+Applications can submit durable Luna or Terra inference through [`CompletionClient` and the completion HTTP API](docs/completions.md). Caller system and user prompts remain separate. The existing daemon owns admission, cancellation, provider usage and idempotent result replay. Native strict JSON schema is supported; a supplied output-token cap returns HTTP 422 because the Codex endpoint rejects that parameter. [OpenAPI](docs/completions.openapi.json) is generated from the runtime TypeBox schemas.
 
 ## Application-owned workspaces
 

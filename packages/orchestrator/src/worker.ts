@@ -3,7 +3,11 @@ import { builtinProviders } from "@earendil-works/pi-ai/providers/all";
 import { join } from "node:path";
 import { isolatedContext } from "./host/isolated-context.js";
 import { loadConfig } from "./config.js";
-import type { Run, RunActivity } from "./domain.js";
+import type { FleetResult, Run, RunActivity } from "./domain.js";
+import { isFleetCoordinator } from "./fleet.js";
+import { workCompletion } from "./host/completion-worker.js";
+import { fleetTools, recoverFleetDispatches } from "./host/fleet-tools.js";
+import { FleetResultDelivery, fleetTurnSettled } from "./host/fleet-results.js";
 import { interruptedTurnPrompt } from "./host/continuations.js";
 import { openHostedSession } from "./host/session-lifecycle.js";
 import { isCredentialError, isRateLimitError } from "./provider-errors.js";
@@ -22,17 +26,23 @@ function modelFor(run:Run):unknown{
 
 export async function work(runId:string):Promise<void>{
   process.env.PI_ORCHESTRATOR_ASSIGNED="1";
+  process.env.PI_ORCHESTRATOR_RUN_ID=runId;
+  for(const key of Object.keys(process.env))if(/^(PI_REMOTE_|PI_SESSION_)/.test(key))delete process.env[key];
   const config=loadConfig();
-  const {run}=await request(`/internal/runs/${runId}`) as {run:Run};
+  const {run,results=[]}=await request(`/internal/runs/${runId}`) as {run:Run;results?:FleetResult[]};
+  if(await workCompletion(run,config,post,request))return;
+  if(["done","failed","aborted","waiting"].includes(run.state))return;
   if(!run.accountId||!run.provider||!run.model)throw new Error("run has no account assignment");
   const hosted=await openHostedSession({
     cwd:run.cwd,agentDir:config.agentDir,model:modelFor(run),thinkingLevel:run.thinking,
     provider:run.provider,modelId:run.model,accountId:run.accountId,
     sessionManager:run.sessionFile?SessionManager.open(run.sessionFile,undefined,run.cwd):undefined,
+    ...(isFleetCoordinator(run)?{customTools:fleetTools(input=>post(`/internal/runs/${runId}/dispatch`,input))}:{}),
     ...(run.context ? await isolatedContext(run, join(config.agentDir,"sessions")) : {}),
     onExtensionError:(path,error)=>console.error(`extension ${path}:`,error),
   });
   const session=hosted.session;
+  const delivery=run.context?undefined:new FleetResultDelivery(session,deliveryIds=>post(`/internal/runs/${runId}/acknowledge`,{deliveryIds}),error=>console.error("fleet result receipt will retry:",error));
   let liveText="",liveThinking="",activeTool:string|undefined,lastProgress=0,aborting=false,currentActivity:RunActivity="STARTING";
   const report=(activity:RunActivity,progress=true)=>{currentActivity=activity;const now=Date.now();if(!progress&&now-lastProgress<5000)return;if(progress)lastProgress=now;void post(`/internal/runs/${runId}/heartbeat`,{progress,activity,text:liveText,thinking:liveThinking,tool:activeTool}).catch(console.error);};
   const unsubscribe=session.subscribe((event:any)=>{
@@ -52,11 +62,17 @@ export async function work(runId:string):Promise<void>{
   const control=setInterval(()=>void (async()=>{
     const value=await request(`/internal/runs/${runId}/control`);
     if(value.abort&&!aborting){aborting=true;await session.abort();}
+    else if(!aborting)await delivery?.receive(value.results??[],true);
   })().catch(console.error),2_000);
   try{
     await post(`/internal/runs/${runId}/state`,{state:"running",sessionFile:session.sessionManager.getSessionFile(),progressAt:Date.now(),activity:"STARTING"});
-    const message=run.sessionFile?interruptedTurnPrompt("the process hosting this session stopped","I reopened this exact Pi session from its durable JSONL record."):run.prompt;
-    await promptAndSettle(session,message);
+    if(run.sessionFile&&isFleetCoordinator(run))await recoverFleetDispatches(session,input=>post(`/internal/runs/${runId}/dispatch`,input));
+    await delivery?.receive(results);
+    if(!run.sessionFile||run.context||!fleetTurnSettled(session)){
+      const message=results.length?JSON.stringify({type:"fleet-results-ready",runId,deliveryIds:results.map(result=>result.deliveryId)}):run.sessionFile?interruptedTurnPrompt("the process hosting this session stopped","I reopened this exact Pi session from its durable JSONL record."):run.prompt;
+      await promptAndSettle(session,message);
+    }
+    await delivery?.flush();
     const current=(await request(`/internal/runs/${runId}`)).run as Run;
     if(["done","aborted","failed"].includes(current.state))return;
     const last=lastAssistant(session);
@@ -68,7 +84,7 @@ export async function work(runId:string):Promise<void>{
     }
     if(last?.stopReason==="aborted"||aborting){await post(`/internal/runs/${runId}/state`,{state:"aborted",failureKind:"operator",result:"aborted"});return;}
     await post(`/internal/runs/${runId}/state`,{state:"done",result:lastAssistantText(session)});
-  }finally{clearInterval(heartbeat);clearInterval(control);unsubscribe();hosted.dispose();}
+  }finally{clearInterval(heartbeat);clearInterval(control);unsubscribe();try{await delivery?.close();}finally{hosted.dispose();}}
 }
 
 async function promptAndSettle(session:AgentSession,message:string):Promise<void>{await session.prompt(message);await sleep(0);for(;;){if(session.isCompacting)await waitForCompaction(session);await sleep(0);if(session.isStreaming){await session.waitForIdle();await sleep(0);continue;}if(!session.isCompacting)return;}}

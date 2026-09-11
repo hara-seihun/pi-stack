@@ -117,6 +117,9 @@ button:disabled { cursor: default; opacity: .45; }
 .agent-host-count { flex: 0 0 auto; }
 .agent-host.failed { color: var(--danger); text-transform: none; letter-spacing: 0; font-weight: 750; }
 .agent-row { width: 100%; min-height: 56px; display: block; padding: 8px 14px; border-left: 3px solid transparent; background: var(--surface); color: var(--text); text-align: left; }
+.agent-parent { display: block; width: 100%; padding: 8px 14px; background: var(--surface); color: var(--muted); text-align: left; font-size: 12px; overflow-wrap: anywhere; }
+.agent-parent-link { padding: 0; background: transparent; color: var(--accent); text-align: left; overflow-wrap: anywhere; }
+.agent-row-error { display: block; margin-top: 4px; color: var(--danger); font-size: 11px; overflow-wrap: anywhere; }
 .agent-row.selected { border-left-color: var(--accent); background: var(--surface-2); }
 .agent-row-title { display: flex; align-items: baseline; gap: 7px; min-width: 0; }
 .agent-row-label { flex: 0 0 auto; font-size: 12px; font-weight: 850; letter-spacing: .05em; color: var(--accent); }

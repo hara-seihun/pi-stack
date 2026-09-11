@@ -10,6 +10,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { listPersons, personPath, PERSONS_DIR, type Person } from "./persons";
 import { threadNamingModel } from "./thread-naming";
+import { defaultThreadDestinations } from "./thread-model-defaults";
 
 const USAGE = `usage:
   pi-remote person list
@@ -73,10 +74,7 @@ function defaultEnvironment(person: Omit<Person, "environment">, folder: string,
       { id: "home", name: homeName, path: home },
       { id: folder, name: person.displayName, path: privateDir },
     ],
-    PI_REMOTE_THREAD_DESTINATIONS: [
-      { id: "personal", label: "PERSONAL", icon: "personal", accent: "#a371f7", workspaceId: folder, thinkingLevel: "high", models: ["astra", "opus", "fable"], defaultModel: "fable" },
-      { id: "home", label: "HOME", icon: "house", accent: "#3fb950", workspaceId: "home", thinkingLevel: "high", models: ["astra", "fable", "opus"], defaultModel: "opus" },
-    ],
+    PI_REMOTE_THREAD_DESTINATIONS: defaultThreadDestinations(folder),
   };
 }
 

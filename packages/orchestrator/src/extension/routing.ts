@@ -5,6 +5,7 @@ import { homedir } from "node:os";
 import { join } from "node:path";
 import { Store } from "../store.js";
 import { allowsAccountUse } from "../domain.js";
+import { ORCHESTRATOR_CATALOG } from "../catalog.js";
 import { defaultSharedAuthPath, SharedOAuthAuth, providerOAuth, sharedOAuthProvider } from "../auth/shared-oauth.js";
 import { isRateLimitError, isRejectedTokenError, rateLimitCooldownMs } from "../provider-errors.js";
 import { chooseInteractiveAccount } from "../auth/account-selection.js";
@@ -38,7 +39,6 @@ export default function routing(pi:ExtensionAPI):void{
   installImageGeneration(pi, store, shared.get("openai-codex"));
   // The bundled CLI and extension providers have separate pi-ai resource registries.
   pi.on("session_shutdown",(_event,ctx)=>cleanupSessionResources(ctx.sessionManager.getSessionId()));
-  if(process.env.PI_ORCHESTRATOR_ASSIGNED==="1"){pi.on("session_shutdown",()=>store.close());return;}
   const familyOf=(provider:string)=>store.account(provider)?.provider??baseProvider(provider);
   const resolve=(accountId:string,family:string,modelId:string):Model<never>|undefined=>{const model=families.get(family)?.getModels().find((candidate)=>candidate.id===modelId);return model?(accountId===family?model:{...model,provider:accountId}) as Model<never>:undefined;};
   const choose=(family:string,exclude=new Set<string>())=>chooseInteractiveAccount(store,shared.get(family),family,exclude);
@@ -56,10 +56,35 @@ export default function routing(pi:ExtensionAPI):void{
     const next=resolve(choice.id,family,modelId);if(!next)return;
     return await select(ctx,next,thinking)?choice.id:undefined;
   };
+  const assigned=process.env.PI_ORCHESTRATOR_ASSIGNED==="1"&&process.env.PI_ORCHESTRATOR_RUN_ID?store.run(process.env.PI_ORCHESTRATOR_RUN_ID):undefined;
+  const requestedPin=process.env.PI_SUBAGENT_MODEL;
+  const pinned=assigned?.provider&&assigned.model?{provider:assigned.provider,model:assigned.model,thinking:assigned.thinking}:ORCHESTRATOR_CATALOG.models.find(model=>model.id===requestedPin||model.model===requestedPin);
+  const hasPin=!!pinned||!!requestedPin;
+  const matchesPin=(ctx:ExtensionContext)=>!hasPin||!!pinned&&ctx.model?.id===pinned.model&&familyOf(ctx.model.provider)===pinned.provider;
+  const enforcePin=async(ctx:ExtensionContext)=>{
+    if(matchesPin(ctx))return;
+    if(!pinned){void ctx.abort();throw new Error(`Unknown subagent model pin ${requestedPin}`);}
+    const current=store.account(ctx.model?.provider??"");
+    const accountId=assigned?.accountId??(current?.provider===pinned.provider&&allowsAccountUse(current,"interactive")?current.id:choose(pinned.provider)?.id);
+    const model=accountId?resolve(accountId,pinned.provider,pinned.model):undefined;
+    if(!model||!await select(ctx,model,assigned?.thinking as ThinkingLevel??(pi.getThinkingLevel()==="off"?pinned.thinking as ThinkingLevel:pi.getThinkingLevel()))){
+      void ctx.abort();throw new Error(`Pinned model ${pinned.provider}/${pinned.model} has no available account`);
+    }
+  };
+  if(hasPin){
+    pi.on("session_start",async(_event,ctx)=>enforcePin(ctx));
+    pi.on("model_select",async(_event,ctx)=>enforcePin(ctx));
+    pi.on("before_agent_start",async(_event,ctx)=>enforcePin(ctx));
+    pi.on("before_provider_request",(_event,ctx)=>{
+      if(!matchesPin(ctx)){void ctx.abort();throw new Error(`Model change refused: this run is pinned to ${pinned?.model??requestedPin}`);}
+    });
+  }
+  if(process.env.PI_ORCHESTRATOR_ASSIGNED==="1"){pi.on("session_shutdown",()=>store.close());return;}
   let leaseId:string|undefined,timer:ReturnType<typeof setInterval>|undefined;
   pi.on("session_start",async(event,ctx)=>{
     const branch=ctx.sessionManager.getBranch(),history=branch.some((entry)=>entry.type==="message"&&entry.message.role==="assistant");
-    if(history){
+    if(hasPin){await enforcePin(ctx);}
+    else if(history){
       let selected:{provider:string;modelId:string}|undefined;
       let thinking=pi.getThinkingLevel();
       for(const entry of branch){

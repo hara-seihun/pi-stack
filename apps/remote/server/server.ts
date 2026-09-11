@@ -21,6 +21,7 @@ import { meetingHandoffText, prepareMeetingHandoff } from "./meet/handoff";
 import { externalMeetingRequest } from "./meet/external";
 import { liveDevInstructions } from "./skills";
 import { THREAD_THINKING_LEVELS } from "./thread-tools";
+import { defaultThreadDestinations, type ThreadDestination } from "./thread-model-defaults";
 import { attachRuntimeHost, startRuntimeHost, type RuntimeTransport } from "./runtime-transport";
 import { API } from "./api";
 import { idleNotifications } from "./notifications";
@@ -105,22 +106,6 @@ function assertContextMirrorLoadsLast() {
 
 assertContextMirrorLoadsLast();
 
-// Starting a thread is two independent choices: where it runs, and which model runs there.
-// Both clients read these server profiles, whose models come from the orchestrator catalog.
-// Luna is still an orchestrator agent; it is only the hand-started thread that does not offer
-// it, because two GPT choices in a wordless menu are one choice too many to tell apart.
-//
-// Two rules make a wordless menu navigable, and both live here rather than in a client.
-//
-// Order is rarest first, because the choices are laid out rightward toward the button that
-// became them: the last one lands exactly under the finger that opened the menu, so the
-// everyday pick costs no travel and the whole path — Home, then Opus — is two taps in one
-// spot. Each destination orders its own models by how often it is that destination's answer.
-//
-// Colour says what kind of thing a dot is, and the glyph says which one. Destinations wear
-// cool place colours and a pictogram; models wear their provider's colour and their own
-// initial, so the two Claude models read as a pair without either being mistaken for the
-// other. Green is the default place and the loudest, blue the cloud and the quietest.
 const THREAD_MODELS = new Map(ORCHESTRATOR_CATALOG.models.map((model) => [model.id, {
   id: model.id,
   label: model.label,
@@ -129,12 +114,10 @@ const THREAD_MODELS = new Map(ORCHESTRATOR_CATALOG.models.map((model) => [model.
   provider: model.provider,
   modelId: model.model,
 }]));
-// A destination that offers no model choice is started straight from its default, which is
-// why the work machine has no second step: Anthropic models do not run there.
 const OFFERED_DESTINATIONS = (process.env.PI_REMOTE_DESTINATIONS ?? "home").split(",").map((id) => id.trim()).filter(Boolean);
-const destinationDefinitions = JSON.parse(process.env.PI_REMOTE_THREAD_DESTINATIONS ?? JSON.stringify([
-  { id: "home", label: "HOME", icon: "house", accent: "#3fb950", workspaceId: "home", thinkingLevel: "high", models: ["astra", "fable", "opus"], defaultModel: "opus" },
-])) as Array<{ id: string; label: string; icon: string; accent: string; workspaceId: string; thinkingLevel: string; models: string[]; defaultModel: string }>;
+const destinationDefinitions: ThreadDestination[] = process.env.PI_REMOTE_THREAD_DESTINATIONS === undefined
+  ? defaultThreadDestinations()
+  : JSON.parse(process.env.PI_REMOTE_THREAD_DESTINATIONS);
 const THREAD_DESTINATIONS = new Map(destinationDefinitions
   .filter((destination) => OFFERED_DESTINATIONS.includes(destination.id))
   .map((destination) => [destination.id, destination]));
@@ -861,8 +844,14 @@ function sessionActivity(row: any): Session["activity"] {
     : "IDLE";
 }
 
+function subagentIdentity(sessionId: string) {
+  return db.query("SELECT parent_session_id,provider,model FROM subagents WHERE session_id=?").get(sessionId) as
+    { parent_session_id: string; provider: string; model: string } | null;
+}
+
 function publicSession(row: any, prepared?: PreparedQueue): Session {
   const rt = runtimes.get(row.id);
+  const subagent = subagentIdentity(row.id);
   const preset = workspaces.get(row.workspace_id);
   const cwd = preset?.path ?? row.workspace_id;
   const toolNames = rt ? [...rt.activeTools.values()] : [];
@@ -897,6 +886,7 @@ function publicSession(row: any, prepared?: PreparedQueue): Session {
   const activity = sessionActivity(row);
   return {
     id: String(row.id),
+    ...(subagent ? { subagent: { parentSessionId: subagent.parent_session_id, model: subagent.model } } : {}),
     name: String(row.name ?? ""),
     cwd,
     workspaceName: preset?.name ?? cwd,
@@ -1350,6 +1340,7 @@ function runtimeEnvironment(row: any) {
     HOME,
     PATH: `${join(HOME, ".local/bin")}:${join(HOME, ".bun/bin")}:${process.env.PATH ?? ""}`,
     PI_REMOTE_SESSION_ID: row.id,
+    PI_SUBAGENT_MODEL: subagentIdentity(row.id)?.model ?? "",
     PI_REMOTE_MEETING_ID: row.meeting_id ?? "",
     PI_REMOTE_CONTEXT_OWNER_PID: "",
     PI_REMOTE_BASH_TIMEOUT_MAX_SECONDS: String(bashTimeoutSeconds(row.bash_timeout_seconds)),
@@ -1373,8 +1364,11 @@ async function startRuntime(row: any): Promise<Runtime> {
     "--extension", SERVICE_TIER_EXTENSION,
     "--extension", THREAD_CONTEXT_EXTENSION,
   ];
-  if (resumePath) args.push("--session", resumePath);
-  else {
+  const subagent = subagentIdentity(row.id);
+  if (resumePath) {
+    args.push("--session", resumePath);
+    if (subagent) args.push("--provider", subagent.provider, "--model", subagent.model);
+  } else {
     args.push("--name", row.name);
     if (row.initial_provider && row.initial_model) args.push("--provider", row.initial_provider, "--model", row.initial_model);
     if (row.initial_thinking) args.push("--thinking", row.initial_thinking);
@@ -1645,7 +1639,8 @@ async function threadSettings(row: any) {
   }
   const latest = sessionRow.get(row.id) as any;
   const supportsPriority = String(state.model?.provider ?? latest?.current_provider ?? "").startsWith("openai");
-  const models = rolledUpModels(availableModels.models ?? []);
+  const selected = subagentIdentity(row.id);
+  const models = rolledUpModels(availableModels.models ?? []).filter((model: any) => !selected || model.id === selected.model);
   return {
     model,
     thinkingLevel: state.thinkingLevel ?? "off",
@@ -1741,6 +1736,12 @@ async function drainSession(sessionId: string) {
         rt.historyNeedsRestore = false;
       } else if (item.resume) {
         message = `The previous agent operation was interrupted after this request entered the conversation. Continue its unfinished work from the current session state without repeating completed actions.\n\n<interrupted_user_request>\n${item.text}\n</interrupted_user_request>`;
+      }
+      if (item.resume) {
+        const accepted = db.query(`SELECT w.id workId,w.session_id threadId,w.text task,w.state,s.model
+          FROM thread_delegations d JOIN work_items w ON w.id=d.work_id JOIN subagents s ON s.session_id=w.session_id
+          WHERE d.parent_session_id=? AND w.created_at>=? ORDER BY w.rowid`).all(sessionId, item.created_at);
+        if (accepted.length) message += `\n\n${JSON.stringify({ type: "accepted_delegations", delegations: accepted })}`;
       }
       const meetingContext = meetingHandoffText(transcript);
       if (meetingContext) message += `\n\n${meetingContext}`;
@@ -1875,26 +1876,22 @@ function insertThread(id: string, name: string, destination: { workspaceId: stri
 function relayThreadResults() {
   if (!ownsSupervisorLease()) return;
   const ready = db.query(`
-    SELECT d.work_id,d.parent_session_id,w.session_id,w.event_seq,w.text,w.state,w.last_error,s.name
+    SELECT d.work_id,d.parent_session_id,w.session_id,w.text,r.status,r.result,r.error,s.name
     FROM thread_delegations d JOIN work_items w ON w.id=d.work_id
+    JOIN delegation_results r ON r.work_id=d.work_id
     JOIN sessions s ON s.id=w.session_id JOIN sessions p ON p.id=d.parent_session_id
-    WHERE d.reply_work_id IS NULL AND w.state IN ('complete','cancelled') AND p.archived_at IS NULL
-  `).all() as Array<{ work_id: string; parent_session_id: string; session_id: string; event_seq: number; text: string; state: string; last_error: string | null; name: string }>;
+    WHERE d.reply_work_id IS NULL AND p.archived_at IS NULL
+  `).all() as Array<{ work_id: string; parent_session_id: string; session_id: string; text: string; status: string; result: string; error: string | null; name: string }>;
   for (const work of ready) {
     db.transaction(() => {
-      const event = work.event_seq > 0 ? db.query(`
-        SELECT payload FROM events WHERE session_id=? AND seq>? AND type='assistant'
-        AND seq < COALESCE((SELECT MIN(seq) FROM events WHERE session_id=? AND seq>? AND type='settled'),9223372036854775807)
-        ORDER BY seq DESC LIMIT 1
-      `).get(work.session_id, work.event_seq, work.session_id, work.event_seq) as { payload: string } | null : null;
-      const output = event ? String(JSON.parse(event.payload).text ?? "") : "";
       const text = JSON.stringify({
         type: "thread_result", threadId: work.session_id, threadName: work.name,
-        status: work.last_error && work.state !== "cancelled" ? "failed" : work.state,
-        task: work.text, result: output.slice(0, 32_000), resultTruncated: output.length > 32_000,
-        error: work.last_error,
+        workId: work.work_id, model: subagentIdentity(work.session_id)?.model,
+        status: work.status,
+        task: work.text, result: work.result.slice(0, 32_000), resultTruncated: work.result.length > 32_000,
+        error: work.error,
       });
-      const reply = enqueuePrompt(work.parent_session_id, `thread-result-${work.work_id}`, text, "followUp", [], false);
+      const reply = enqueuePrompt(work.parent_session_id, `thread-result-${work.work_id}`, text, "steer", [], false);
       db.query("UPDATE thread_delegations SET reply_work_id=? WHERE work_id=? AND reply_work_id IS NULL").run(reply.workId, work.work_id);
     })();
     kickSession(work.parent_session_id);
@@ -2402,7 +2399,7 @@ const server = Bun.serve({
           ? body.sessionIds.map((id: unknown) => String(id))
           : null;
         if (!requested || new Set(requested).size !== requested.length) return error("Complete unique sessionIds required");
-        const current = activeSessionRows.all() as any[];
+        const current = (activeSessionRows.all() as any[]).filter((row) => !subagentIdentity(row.id));
         const currentIds = new Set(current.map((row) => String(row.id)));
         if (requested.length !== currentIds.size || requested.some((id) => !currentIds.has(id)))
           return error("Thread list changed; refresh before reordering", 409);
@@ -2433,7 +2430,8 @@ const server = Bun.serve({
         const modelId = meetingId && !parent ? "astra" : String(body.model ?? (parent ? "astra" : destination.defaultModel));
         // A destination only starts the models it actually offers, so an out-of-date client
         // cannot place an Anthropic thread on a machine that has no Anthropic access.
-        if (modelId !== destination.defaultModel && !destination.models.includes(modelId))
+        if (!(parent && ["astra", "sol", "terra", "luna"].includes(modelId))
+          && modelId !== destination.defaultModel && !destination.models.includes(modelId))
           return error("Model not available at this destination");
         const model = THREAD_MODELS.get(modelId);
         if (!model) return error("Unknown thread model");
@@ -2445,9 +2443,8 @@ const server = Bun.serve({
         if (!THREAD_THINKING_LEVELS.some((level) => level === preset.thinkingLevel)) return error("Unknown thinking level");
         if (parent && body.threadId && body.newThread === true) return error("Choose threadId or newThread, not both");
         if (parent && body.newThread !== true) {
-          const candidates = db.query(`SELECT DISTINCT s.* FROM thread_delegations d
-            JOIN work_items w ON w.id=d.work_id JOIN sessions s ON s.id=w.session_id
-            WHERE d.parent_session_id=? AND s.archived_at IS NULL AND s.profile_id=?
+          const candidates = db.query(`SELECT s.* FROM subagents child JOIN sessions s ON s.id=child.session_id
+            WHERE child.parent_session_id=? AND s.archived_at IS NULL AND s.profile_id=?
             AND s.meeting_id IS ? ORDER BY s.updated_at DESC,s.created_at DESC`).all(parent.id, destination.id, meetingId) as any[];
           const target = body.threadId ? candidates.find((candidate) => candidate.id === String(body.threadId))
             : candidates.find((candidate) => (!body.model || candidate.initial_model === model.modelId)
@@ -2472,6 +2469,8 @@ const server = Bun.serve({
         const id = requestedId;
         const response = db.transaction(() => {
           insertThread(id, name, destination, preset, meetingId, model.id === "astra");
+          if (parent) db.query("INSERT INTO subagents(session_id,parent_session_id,provider,model) VALUES(?,?,?,?)")
+            .run(id, parent.id, preset.provider, preset.modelId);
           const delegation = parent ? enqueueDelegation(id, parent, task) : null;
           const response = { session: publicSession(sessionRow.get(id)), ...(delegation ? { delegation, reused: false } : {}) };
           saveRequest(requestId, id, "create", 201, response);
@@ -2742,6 +2741,11 @@ const server = Bun.serve({
     if (action === "settings" && req.method === "PUT") {
       try {
         const body = await readBody(req);
+        const subagent = subagentIdentity(id);
+        if (subagent && (body.modelProvider != null || body.modelId != null)
+          && (String(body.modelId ?? "") !== subagent.model
+            || canonicalModelProvider(String(body.modelProvider ?? "")) !== canonicalModelProvider(subagent.provider)))
+          return error("Subagent models are immutable; dispatch a new subagent instead", 409);
         const rt = await activate(row);
         const pendingWork = Number((db.query(
           "SELECT COUNT(*) AS count FROM work_items WHERE session_id=? AND state IN ('queued','running','dispatched')",

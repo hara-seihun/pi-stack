@@ -20,8 +20,7 @@ export function loadConfig(
       standard: [candidate(standard),candidate(expert)],
       expert: [candidate(expert),candidate(standard)],
     }),
-    astra: [candidate(standard)],
-    opus: [candidate(expert)],
+    ...Object.fromEntries(["astra", "sol", "terra", "luna", "opus"].map(id => [id, [candidate(catalogModel(id)!)]])),
   };
   const levels = new Set(["off", "minimal", "low", "medium", "high", "xhigh", "max"]);
   for (const [profile, candidates] of Object.entries(profiles)) {
@@ -35,6 +34,7 @@ export function loadConfig(
     }
   }
   return {
+    listenHost: process.env.PI_ORCHESTRATOR_LISTEN_HOST || local.listenHost,
     profiles,
     backgroundSpendFraction: Number(local.backgroundSpendFraction ?? 0.8),
     maxConcurrentSessions: Number(local.maxConcurrentSessions ?? 40),

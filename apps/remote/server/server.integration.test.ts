@@ -176,7 +176,7 @@ model_id = sys.argv[sys.argv.index('--model') + 1] if '--model' in sys.argv else
 thinking_level = sys.argv[sys.argv.index('--thinking') + 1] if '--thinking' in sys.argv else 'off'
 # Published by rename so a reader never catches a half-written launch record.
 with open(os.environ['PI_FAKE_LAUNCH'] + '.writing', 'w') as launch:
- json.dump({'argv': sys.argv, 'pid': os.getpid(), 'sessionId': os.environ.get('PI_REMOTE_SESSION_ID'), 'serverUrl': os.environ.get('PI_REMOTE_SERVER_URL'), 'serviceTierFile': os.environ.get('PI_REMOTE_SERVICE_TIER_FILE'), 'bashTimeoutSeconds': os.environ.get('PI_REMOTE_BASH_TIMEOUT_MAX_SECONDS'), 'agentDir': os.environ.get('PI_CODING_AGENT_DIR'), 'offline': os.environ.get('PI_OFFLINE')}, launch)
+ json.dump({'argv': sys.argv, 'pid': os.getpid(), 'sessionId': os.environ.get('PI_REMOTE_SESSION_ID'), 'subagentModel': os.environ.get('PI_SUBAGENT_MODEL'), 'serverUrl': os.environ.get('PI_REMOTE_SERVER_URL'), 'serviceTierFile': os.environ.get('PI_REMOTE_SERVICE_TIER_FILE'), 'bashTimeoutSeconds': os.environ.get('PI_REMOTE_BASH_TIMEOUT_MAX_SECONDS'), 'agentDir': os.environ.get('PI_CODING_AGENT_DIR'), 'offline': os.environ.get('PI_OFFLINE')}, launch)
 os.replace(os.environ['PI_FAKE_LAUNCH'] + '.writing', os.environ['PI_FAKE_LAUNCH'])
 streaming = False
 compacting = False
@@ -351,6 +351,10 @@ for line in sys.stdin:
     out({'type':'message_end','message':{'role':'assistant','content':[{'type':'text','text':'done'}]}})
     streaming = False
     out({'type':'agent_settled'})
+   elif 'delegate ' in last or '"type":"thread_result"' in last:
+    out({'type':'message_end','message':{'role':'assistant','content':[{'type':'text','text':'done'}]}})
+    streaming = False
+    out({'type':'agent_settled'})
    elif last == 'retry thread naming':
     out({'type':'message_end','message':{'role':'assistant','content':[{'type':'text','text':'naming retry reply'}]}})
     streaming = False
@@ -395,6 +399,13 @@ for line in sys.stdin:
   steering.append(request.get('message',''))
   out({'type':'queue_update','steering':steering,'followUp':follow_up})
   out({'type':'response','id':rid,'command':'steer','success':True})
+  if '"type":"thread_result"' in request.get('message',''):
+   steering.clear()
+   out({'type':'queue_update','steering':steering,'followUp':follow_up})
+   out({'type':'message_end','message':{'role':'assistant','content':[{'type':'text','text':'received steered result'}]}})
+   if last != 'holding coordinator':
+    streaming = False
+    out({'type':'agent_settled'})
  elif kind == 'follow_up':
   follow_up.append(request.get('message',''))
   out({'type':'queue_update','steering':steering,'followUp':follow_up})
@@ -500,6 +511,50 @@ async function createThread(destination = "home", model?: string) {
 }
 
 describe("web and supervisor integration", () => {
+  test("delegation pins models, reuses matching children and returns one durable result", async () => {
+    const parentSessionId = await createThread("home", "astra");
+    const requestId = crypto.randomUUID();
+    const request = { requestId, parentSessionId, model: "luna", task: "delegate first task" };
+    const created = await api("POST", "/v1/sessions", request);
+    expect(created.status).toBe(201);
+    const child = created.value.session.id;
+    expect(created.value.session.subagent).toEqual({ parentSessionId, model: "gpt-5.6-luna" });
+    expect((await api("POST", "/v1/sessions", request)).value).toEqual(created.value);
+    await waitFor(() => api("GET", `/v1/sessions/${parentSessionId}/events`).then((r) => r.value),
+      (value) => value.events.some((e: any) => e.type === "user" && e.text.includes('"type":"thread_result"')));
+    const settings = await api("PUT", `/v1/sessions/${child}/settings`, { modelProvider: "openai-codex", modelId: "gpt-6-astra" });
+    expect(settings.status).toBe(409);
+    expect(settings.value.error).toContain("immutable");
+    const mismatch = await api("POST", "/v1/sessions", { ...request, requestId: crypto.randomUUID(), threadId: child, model: "astra" });
+    expect(mismatch.status).toBe(409);
+    const continued = await api("POST", "/v1/sessions", { ...request, requestId: crypto.randomUUID(), threadId: child, task: "delegate second task" });
+    expect(continued.status).toBe(200);
+    expect(continued.value.session.id).toBe(child);
+    expect(continued.value.reused).toBe(true);
+    const escalated = await api("POST", "/v1/sessions", { ...request, requestId: crypto.randomUUID(), model: "astra", task: "delegate escalated task" });
+    expect(escalated.status).toBe(201);
+    expect(escalated.value.session.id).not.toBe(child);
+    expect(escalated.value.session.subagent.model).toBe("gpt-6-astra");
+    const extraChildren: string[] = [];
+    for (const model of ["sol", "terra"]) {
+      const extra = await api("POST", "/v1/sessions", { ...request, requestId: crypto.randomUUID(), model, newThread: true, task: `delegate ${model} task` });
+      expect(extra.status).toBe(201);
+      expect(extra.value.session.subagent).toEqual({ parentSessionId, model: `gpt-5.6-${model}` });
+      extraChildren.push(extra.value.session.id);
+    }
+    await waitFor(async () => {
+      const ledger = new Database(join(root, "data", "supervisor.sqlite3"), { readonly: true });
+      try { return ledger.query("SELECT reply_work_id FROM thread_delegations WHERE parent_session_id=?").all(parentSessionId) as any[]; }
+      finally { ledger.close(); }
+    }, (rows) => rows.length === 5 && rows.every((row) => row.reply_work_id));
+    const ledger = new Database(join(root, "data", "supervisor.sqlite3"), { readonly: true });
+    try {
+      expect(ledger.query("SELECT count(*) AS n FROM work_items WHERE request_id=?").get(`thread-result-${created.value.delegation.workId}`)).toEqual({ n: 1 });
+      expect(ledger.query("SELECT status,result FROM delegation_results WHERE work_id=?").get(created.value.delegation.workId)).toEqual({ status: "complete", result: "done" });
+    } finally { ledger.close(); }
+    await waitFor(() => api("GET", "/v1/sessions").then((r) => r.value.sessions),
+      (sessions) => sessions.filter((s: any) => [parentSessionId, child, escalated.value.session.id, ...extraChildren].includes(s.id)).every((s: any) => s.state === "IDLE"));
+  });
   test("replays idle transitions without requiring a selected thread or a connected client", async () => {
     const initial = await api("GET", "/v1/notifications");
     expect(initial.status).toBe(200);
@@ -571,17 +626,18 @@ describe("web and supervisor integration", () => {
     await createThread("home", "astra");
     await createThread("home", "astra");
     const before = await api("GET", "/v1/sessions");
-    const currentIds = before.value.sessions.map((session: any) => session.id as string);
-    const requestedIds = [currentIds.at(-1), ...currentIds.slice(0, -1)];
+    const interactiveIds = (sessions: any[]) => sessions.filter((session) => !session.subagent).map((session) => session.id as string);
+    const currentIds = interactiveIds(before.value.sessions);
+    const requestedIds = [currentIds.at(-1)!, ...currentIds.slice(0, -1)];
 
     const reordered = await api("PUT", "/v1/sessions/order", { sessionIds: requestedIds });
     expect(reordered.status).toBe(200);
-    expect(reordered.value.sessions.map((session: any) => session.id)).toEqual(requestedIds);
-    expect((await api("GET", "/v1/sessions")).value.sessions.map((session: any) => session.id)).toEqual(requestedIds);
+    expect(interactiveIds(reordered.value.sessions)).toEqual(requestedIds);
+    expect(interactiveIds((await api("GET", "/v1/sessions")).value.sessions)).toEqual(requestedIds);
 
     const incomplete = await api("PUT", "/v1/sessions/order", { sessionIds: requestedIds.slice(1) });
     expect(incomplete).toMatchObject({ status: 409, value: { error: "Thread list changed; refresh before reordering" } });
-    expect((await api("GET", "/v1/sessions")).value.sessions.map((session: any) => session.id)).toEqual(requestedIds);
+    expect(interactiveIds((await api("GET", "/v1/sessions")).value.sessions)).toEqual(requestedIds);
   });
 
   test("names the first message through a configured tool-free Pi model", async () => {
@@ -1583,6 +1639,73 @@ describe("web and supervisor integration", () => {
     const removed = await api("DELETE", `/v1/sessions/${id}`);
     expect(removed.status).toBe(200);
   }, 20_000);
+
+  test("a busy coordinator receives child results by steer before its turn ends", async () => {
+    const parent = await createThread("home", "astra");
+    await api("POST", `/v1/sessions/${parent}/prompt`, { requestId: crypto.randomUUID(), text: "holding coordinator" });
+    const child = await api("POST", "/v1/sessions", { requestId: crypto.randomUUID(), parentSessionId: parent, model: "luna", task: "delegate busy result" });
+    expect(child.status).toBe(201);
+    const received = await waitFor(() => api("GET", `/v1/sessions/${parent}/events`).then((r) => r.value),
+      (value) => value.events.some((event: any) => event.type === "assistant" && event.text === "received steered result"));
+    expect(received.session.state).toBe("RUNNING");
+    const deliveries = readJsonLines(fakeRpcLog).filter((entry) => entry.sessionId === parent && ["prompt", "steer", "follow_up"].includes(entry.type));
+    expect(deliveries.filter((entry) => entry.type === "steer" && entry.message.includes('"type":"thread_result"'))).toHaveLength(1);
+    expect(deliveries.filter((entry) => entry.type === "follow_up")).toHaveLength(0);
+    await api("POST", `/v1/sessions/${parent}/abort`, { requestId: crypto.randomUUID() });
+  });
+
+  test("an interrupted coordinator receives accepted delegation receipts before continuing", async () => {
+    const parent = await createThread("home", "astra");
+    await api("POST", `/v1/sessions/${parent}/prompt`, { requestId: crypto.randomUUID(), text: "holding coordinator" });
+    const accepted = await api("POST", "/v1/sessions", { requestId: crypto.randomUUID(), parentSessionId: parent, model: "luna", task: "delegate accepted before disconnect" });
+    expect(accepted.status).toBe(201);
+    const child = accepted.value.session.id;
+    await waitFor(() => api("GET", `/v1/sessions/${child}`).then((r) => r.value.session), (session) => session.state === "IDLE");
+    server.kill("SIGTERM");
+    await server.exited;
+    await startServer();
+    const prompts = await waitFor(async () => readJsonLines(fakeRpcLog).filter((entry) => entry.sessionId === parent && entry.type === "prompt"),
+      (entries) => entries.some((entry) => entry.message.includes('"type":"accepted_delegations"')));
+    const recovery = prompts.find((entry) => entry.message.includes('"type":"accepted_delegations"'));
+    expect(recovery.message).toContain(child);
+    expect(recovery.message).toContain(accepted.value.delegation.workId);
+  });
+
+  test("a completed subagent delivers its saved result once after the coordinator supervisor restarts", async () => {
+    const parent = await createThread("home", "astra");
+    server.kill("SIGTERM");
+    await server.exited;
+    const child = crypto.randomUUID();
+    const work = crypto.randomUUID();
+    const ledger = new Database(join(root, "data", "supervisor.sqlite3"));
+    ledger.exec("PRAGMA foreign_keys=ON");
+    ledger.transaction(() => {
+      ledger.query(`INSERT INTO sessions(id,name,workspace_id,state,created_at,updated_at,profile_id,initial_provider,initial_model)
+        VALUES(?,'saved child','home','IDLE','t','t','home','openai-codex','gpt-5.6-luna')`).run(child);
+      ledger.query("INSERT INTO subagents VALUES(?,?,'openai-codex','gpt-5.6-luna')").run(child, parent);
+      const event = ledger.query("INSERT INTO events(session_id,time,type,payload) VALUES(?,'t','user','{}')").run(child);
+      ledger.query(`INSERT INTO work_items(id,session_id,request_id,event_seq,text,state,available_at,created_at,updated_at)
+        VALUES(?,?,?,?,'delegate persisted task','dispatched',0,'t','t')`).run(work, child, crypto.randomUUID(), event.lastInsertRowid);
+      ledger.query("INSERT INTO thread_delegations VALUES(?,?,NULL)").run(work, parent);
+      ledger.query("INSERT INTO events(session_id,time,type,payload) VALUES(?,'t','assistant',?)")
+        .run(child, JSON.stringify({ text: "saved result before supervisor loss" }));
+      ledger.query("UPDATE work_items SET state='complete' WHERE id=?").run(work);
+    })();
+    ledger.close();
+    await startServer();
+    await waitFor(() => api("GET", `/v1/sessions/${parent}/events`).then((r) => r.value),
+      (value) => value.events.some((event: any) => event.type === "user" && event.text.includes("saved result before supervisor loss")));
+    server.kill("SIGTERM");
+    await server.exited;
+    await startServer();
+    const events = (await api("GET", `/v1/sessions/${parent}/events`)).value.events;
+    expect(events.filter((event: any) => event.type === "user" && event.text.includes("saved result before supervisor loss"))).toHaveLength(1);
+    const persisted = new Database(join(root, "data", "supervisor.sqlite3"), { readonly: true });
+    try {
+      expect(persisted.query("SELECT count(*) AS n FROM work_items WHERE request_id=?").get(`thread-result-${work}`)).toEqual({ n: 1 });
+      expect((await api("GET", `/v1/sessions/${child}`)).value.session.subagent).toEqual({ parentSessionId: parent, model: "gpt-5.6-luna" });
+    } finally { persisted.close(); }
+  });
 
   test("a replacement supervisor resumes active work exactly once", async () => {
     const id = await createThread();
