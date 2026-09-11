@@ -112,7 +112,7 @@ export class AccountTransfer {
         const saved = this.store.control(key(alias));
         const preparing = saved ? JSON.parse(saved) as TransferDrain : undefined;
         if (preparing && (!sameEndpoint(preparing.destination, destination) || preparing.identity !== accountIdentity)) throw new Error("Preparation already belongs to another destination or identity");
-        if (!preparing && !quotaReady(this.store, alias, now, maxAgeMs, true)) throw new Error("Account needs fresh remaining quota and shared eligibility");
+        if (!preparing && registered.use !== "shared") throw new Error("Account needs shared eligibility");
         const remaining = this.store.accounts().filter(account => account.id !== alias && account.provider === "openai-codex" && quotaReady(this.store, account.id, now, maxAgeMs));
         if (remaining.length < 2) throw new Error("Transfer would leave fewer than two eligible Codex accounts on the source");
         this.store.db.exec(`CREATE TRIGGER IF NOT EXISTS account_transfer_exclusive BEFORE UPDATE OF enabled ON account

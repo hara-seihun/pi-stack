@@ -177,15 +177,16 @@ describe("exclusive account transfer",()=>{
     }finally{f.close();}
   });
 
-  it("refuses depleted quota, identity collisions and source capacity loss",async()=>{
+  it("refreshes a disabled source with stale meters and refuses identity collisions and source capacity loss",async()=>{
     const f=fixture();try{
       f.source.setAccountEnabled("keep-a",false);
       await expect(f.from.prepare("openai-codex-12",f.to.endpoint,f.signal)).rejects.toThrow("fewer than two");
       f.source.setAccountEnabled("keep-a",true);
-      f.source.recordMeter("openai-codex-12","codex-7d",100,Date.now()+86400000,Date.now()+1);
-      await expect(f.from.prepare("openai-codex-12",f.to.endpoint,f.signal)).rejects.toThrow("remaining quota");
-      f.source.recordMeter("openai-codex-12","codex-7d",82,Date.now()+86400000,Date.now()+2);
+      f.source.setAccountEnabled("openai-codex-12",false);
+      f.source.db.prepare("UPDATE meter SET observed_at=observed_at-3600000 WHERE account_id=?").run("openai-codex-12");
       const packet=await f.from.prepare("openai-codex-12",f.to.endpoint,f.signal) as TransferPacket;
+      expect(f.probe.reads).toBe(1);
+      expect(f.source.account(packet.alias)?.enabled).toBe(false);
       writeFileSync(f.targetAuth,JSON.stringify({other:credential()}));
       await expect(f.to.receive(packet,f.signal)).rejects.toThrow("another alias");
       await expect(f.from.prepare(packet.alias,{host:"other",ledger:"/other"},f.signal)).rejects.toThrow("another destination");
