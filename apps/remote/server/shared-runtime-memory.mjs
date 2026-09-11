@@ -10,7 +10,13 @@ export function underMemoryPressure(read = path => readFileSync(path, 'utf8')) {
     let directory = join('/sys/fs/cgroup', path);
     while (directory.startsWith('/sys/fs/cgroup')) {
       const max = Number(read(join(directory, 'memory.max')).trim());
-      if (Number.isFinite(max) && max > 0 && Number(read(join(directory, 'memory.current'))) >= max * 0.8) return true;
+      let inactiveFile = 0;
+      try { inactiveFile = Number(read(join(directory, 'memory.stat')).match(/^inactive_file\s+(\d+)$/m)?.[1] || 0); } catch {}
+      // The kernel reclaims inactive file cache at the cgroup boundary. Counting
+      // a large source-tree scan as resident agent memory would stall admission
+      // indefinitely even after all its processes finished.
+      const workingSet = Math.max(0, Number(read(join(directory, 'memory.current'))) - inactiveFile);
+      if (Number.isFinite(max) && max > 0 && workingSet >= max * 0.8) return true;
       if (directory === '/sys/fs/cgroup') break;
       directory = dirname(directory);
     }

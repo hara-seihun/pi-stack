@@ -10,6 +10,9 @@ test("admission includes ancestor memory used by other Pi services and browsers"
     "/sys/fs/cgroup/pi.slice/memory.current": "1700",
   };
   expect(underMemoryPressure(path => { if (!(path in values)) throw new Error(path); return values[path]!; })).toBe(true);
+  values["/sys/fs/cgroup/pi.slice/memory.stat"] = "anon 900\ninactive_file 800\n";
+  expect(underMemoryPressure(path => { if (!(path in values)) throw new Error(path); return values[path]!; })).toBe(false);
+  delete values["/sys/fs/cgroup/pi.slice/memory.stat"];
   values["/sys/fs/cgroup/pi.slice/memory.current"] = "1000";
   expect(underMemoryPressure(path => { if (!(path in values)) throw new Error(path); return values[path]!; })).toBe(false);
   expect(underMemoryPressure(() => {throw new Error("not Linux");})).toBe(false);
