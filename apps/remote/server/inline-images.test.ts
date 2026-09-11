@@ -10,19 +10,26 @@ const cleanup: Array<() => Promise<void>> = [];
 afterEach(async () => { for (const close of cleanup.splice(0)) await close(); });
 const png = Buffer.from("89504e470d0a1a0a", "hex");
 const success = () => ({ ok: true as const, images: [{ id: "provider-image", bytes: png }], model: "test", responseId: "response", usage: {} });
+function deferred() {
+  let resolve!: () => void;
+  const promise = new Promise<void>(done => { resolve = done; });
+  return { promise, resolve };
+}
 async function fixture(generate: InlineImageGenerator, concurrency = 2) {
   const root = await mkdtemp(join(tmpdir(), "pi-inline-images-"));
   const db = new Database(join(root, "state.sqlite3"));
   db.exec("PRAGMA journal_mode=WAL; PRAGMA foreign_keys=ON; CREATE TABLE sessions(id TEXT PRIMARY KEY); INSERT INTO sessions VALUES('thread'),('other');");
-  let wake = () => {};
-  const service = new InlineImages(db, join(root, "images"), generate, () => wake(), concurrency);
+  const listeners = new Set<() => void>();
+  const changed = () => { for (const listener of listeners) listener(); };
+  const service = new InlineImages(db, join(root, "images"), generate, changed, concurrency);
   cleanup.push(async () => { service.stop(); db.close(); await rm(root, { recursive: true, force: true }); });
   const until = (condition: () => boolean) => new Promise<void>((resolve, reject) => {
-    const timer = setTimeout(() => reject(new Error("Image service did not settle")), 1500);
-    wake = () => { if (condition()) { clearTimeout(timer); resolve(); } };
-    wake();
+    const timer = setTimeout(() => { listeners.delete(check); reject(new Error("Image service did not settle")); }, 1500);
+    const check = () => { if (condition()) { clearTimeout(timer); listeners.delete(check); resolve(); } };
+    listeners.add(check);
+    check();
   });
-  return { root, db, service, until };
+  return { root, db, service, until, changed };
 }
 
 test("shared parser excludes examples, escaped tags and raw code; decodes multiline attributes", () => {
@@ -57,19 +64,24 @@ test("multiline prompt contents cannot change Markdown state or submit embedded 
 
 test("durable queue chains ID and file inputs, enforces concurrency, publishes after the turn", async () => {
   const calls: Array<{ prompt: string; inputPaths: string[]; finish: () => void }> = [];
-  const f = await fixture(async input => { await new Promise<void>(resolve => calls.push({ ...input, finish: resolve })); return success(); }, 2);
+  const started = new Map(["First", "Second", "Third"].map(prompt => [prompt, deferred()]));
+  const f = await fixture(async input => {
+    const completion = deferred();
+    calls.push({ ...input, finish: completion.resolve });
+    started.get(input.prompt)!.resolve();
+    await completion.promise;
+    return success();
+  }, 2);
   const source = join(f.root, "source.png"); await writeFile(source, png);
   f.service.accept("thread", "message", `<pi-remote-image id="first" prompt="First" refs="${source}" />\n<pi-remote-image id="second" prompt="Second" refs="first" />\n<pi-remote-image id="third" prompt="Third" />`);
   expect(f.service.snapshot("thread").images.every(image => image.state === "queued")).toBe(true);
   await f.service.start();
-  // The generator starts after asynchronous input snapshots. A changed event follows completion,
-  // so await its first calls directly through the next event-loop boundary.
-  await new Promise(resolve => setTimeout(resolve, 15));
+  await Promise.all([started.get("First")!.promise, started.get("Third")!.promise]);
   expect(calls.map(call => call.prompt).sort()).toEqual(["First", "Third"]);
   expect(await readFile(calls.find(call => call.prompt === "First")!.inputPaths[0])).toEqual(png);
   calls.find(call => call.prompt === "First")!.finish();
   await f.until(() => f.service.snapshot("thread").images.find(image => image.id === "first")?.state === "complete");
-  await new Promise(resolve => setTimeout(resolve, 15));
+  await started.get("Second")!.promise;
   expect(calls.find(call => call.prompt === "Second")).toBeDefined();
   calls.find(call => call.prompt === "Second")!.finish(); calls.find(call => call.prompt === "Third")!.finish();
   await f.until(() => f.service.snapshot("thread").images.every(image => image.state === "complete"));
@@ -93,6 +105,40 @@ test("missing dependencies, cycles, failed parents and display-only tags never c
   expect(images.find(image => image.id === "child")?.error?.code).toBe("dependency_failed");
   expect(calls).toBe(1);
   expect(f.service.snapshot("other").images).toEqual([]);
+});
+
+test("persisted context accepts assistant text only and replay reuses its completed image", async () => {
+  const calls: string[] = [];
+  const f = await fixture(async input => { calls.push(input.prompt); return success(); });
+  const tag = (id: string) => `<pi-remote-image id="${id}" prompt="${id}" />`;
+  const assistantText = tag("accepted");
+  const context = JSON.stringify({
+    systemPrompt: tag("systemPrompt"), tools: [{ description: tag("schema") }],
+    messages: [
+      { role: "system", content: tag("system") },
+      { role: "user", content: [{ type: "text", text: tag("user") }] },
+      { role: "toolResult", content: [{ type: "text", text: tag("result") }] },
+      { role: "assistant", content: [
+        { type: "thinking", thinking: tag("thinking") },
+        { type: "toolCall", name: "example", arguments: { text: tag("arguments") } },
+        { type: "text", text: '```xml\n' + tag("code") + '\n```\n' + assistantText.slice(0, 30) },
+        { type: "text", text: assistantText.slice(30) },
+      ] },
+    ],
+  });
+  f.db.exec("CREATE TABLE persisted_context(document TEXT NOT NULL)");
+  f.db.query("INSERT INTO persisted_context VALUES(?)").run(context);
+  const saved = () => (f.db.query("SELECT document FROM persisted_context").get() as { document: string }).document;
+  expect(f.service.snapshot("thread")).toEqual({ version: 0, images: [] });
+  f.service.acceptContext("thread", saved());
+  expect(f.service.snapshot("thread").images.map(image => [image.id, image.state])).toEqual([["accepted", "queued"]]);
+  await f.service.start();
+  await f.until(() => f.service.snapshot("thread").images[0]?.state === "complete");
+  const completed = f.service.snapshot("thread");
+  f.service.acceptContext("thread", saved());
+  expect(f.service.snapshot("thread")).toEqual(completed);
+  expect(calls).toEqual(["accepted"]);
+  expect(await readFile(completed.images[0].path!)).toEqual(png);
 });
 
 test("combined reference size is rejected before any input copy or provider call", async () => {
@@ -134,18 +180,27 @@ test.each([true, false])("session deletion during provider completion cannot res
 
 test("restart resumes queued rows but never resubmits a claimed provider attempt", async () => {
   let calls = 0;
-  const f = await fixture(async (_input, signal) => { calls++; await new Promise<void>(resolve => signal.addEventListener("abort", () => resolve(), { once: true })); return { ok: false, error: { message: "interrupted" } }; }, 1);
+  const started = deferred();
+  const interrupted = deferred();
+  const f = await fixture(async (_input, signal) => {
+    calls++;
+    const aborted = new Promise<void>(resolve => signal.addEventListener("abort", () => resolve(), { once: true }));
+    started.resolve();
+    await aborted;
+    interrupted.resolve();
+    return { ok: false, error: { message: "interrupted" } };
+  }, 1);
   f.service.accept("thread", "request", '<pi-remote-image id="claimed" prompt="One" />\n<pi-remote-image id="queued" prompt="Two" />');
   await f.service.start();
-  await new Promise(resolve => setTimeout(resolve, 15));
+  await started.promise;
   expect(calls).toBe(1);
   f.service.stop();
-  await new Promise(resolve => setTimeout(resolve, 1));
+  await interrupted.promise;
   let recoveredCalls = 0;
-  const replacement = new InlineImages(f.db, join(f.root, "images"), async () => { recoveredCalls++; return success(); }, () => {});
+  const replacement = new InlineImages(f.db, join(f.root, "images"), async () => { recoveredCalls++; return success(); }, f.changed);
   await replacement.start();
   expect(replacement.snapshot("thread").images[0].error?.code).toBe("interrupted");
-  await new Promise(resolve => setTimeout(resolve, 20));
+  await f.until(() => replacement.snapshot("thread").images[1]?.state === "complete");
   expect(recoveredCalls).toBe(1);
   expect(replacement.snapshot("thread").images[1].state).toBe("complete");
   replacement.stop();
