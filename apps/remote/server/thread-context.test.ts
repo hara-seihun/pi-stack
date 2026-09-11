@@ -4,8 +4,23 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import threadContext from "./thread-context";
 import { threadStateInstructions } from "./thread-context-state";
+import { registerThreadTools } from "./thread-tools";
 
 describe("thread lifecycle context", () => {
+  test("subagents keep thinking control but cannot register delegation", () => {
+    const previous = process.env.PI_SUBAGENT_MODEL;
+    try {
+      for (const model of ["gpt-6-astra", "gpt-5.6-sol", "gpt-5.6-terra", "gpt-5.6-luna"]) {
+        process.env.PI_SUBAGENT_MODEL = model;
+        const tools: string[] = [];
+        registerThreadTools({ registerTool: (tool: { name: string }) => tools.push(tool.name) } as any);
+        expect(tools).toEqual(["thread_thinking"]);
+      }
+    } finally {
+      if (previous === undefined) delete process.env.PI_SUBAGENT_MODEL;
+      else process.env.PI_SUBAGENT_MODEL = previous;
+    }
+  });
   test("describes new and continuing threads without a naming tool", () => {
     const fresh = threadStateInstructions({ name: "83", prompt: "Fix it", fileTag: "pi-file", home: "/home/a" });
     expect(fresh).toContain("starting a new thread");
@@ -40,6 +55,7 @@ describe("thread lifecycle context", () => {
       PI_REMOTE_SESSION_ID: remote ? "test-session" : undefined,
       PI_REMOTE_SERVER_URL: remote ? "http://remote.test" : undefined,
       PI_REMOTE_MEETING_ID: undefined,
+      PI_SUBAGENT_MODEL: undefined,
     };
     const previous = Object.fromEntries(Object.keys(environment).map((key) => [key, process.env[key]]));
     writeFileSync(alert, "Disk needs attention\n");

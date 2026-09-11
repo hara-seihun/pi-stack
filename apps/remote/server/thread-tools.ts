@@ -20,6 +20,8 @@ export function registerThreadTools(pi: ExtensionAPI) {
     },
   });
 
+  if (process.env.PI_SUBAGENT_MODEL) return;
+
   pi.registerTool({
     name: "thread_delegate",
     label: "Delegate to a thread",

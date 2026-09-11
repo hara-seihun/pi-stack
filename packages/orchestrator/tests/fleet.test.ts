@@ -64,6 +64,10 @@ it("Astra and Sol dispatch all four fixed models; replay and escalation keep dis
         expect(store.fleetChild(run.id)?.assignment.model).toBe(catalogModel(target)?.model);
         expect(store.assignRun(run.id,{...catalogModel(target==="astra"?"sol":"astra")!,accountId:"account",unit:"wrong",releasePath:"/release"})).toBe(false);
         expect(fleet.dispatch(id,{task:"different",model:target,requestId:target})).toEqual({ok:false,error:"request-conflict"});
+        expect(store.assignRun(run.id,{...catalogModel(target)!,accountId:"account",unit:`unit-${run.id}`,releasePath:"/release"})).toBe(true);
+        store.updateRun(run.id,{state:"running"});
+        expect(fleet.dispatch(run.id,{task:"nested",model:"luna",requestId:"nested"})).toEqual({ok:false,error:"not-coordinator"});
+        expect(store.childRunIds(run.id)).toEqual([]);
       }
       const prior=child(fleet,id,"terra");
       const escalated=fleet.dispatch(id,{task:"higher effort",model:"astra",requestId:"escalate",escalatesRunId:prior.id});

@@ -12,7 +12,7 @@ Workers write progress through the daemon's loopback API. Their full context rem
 
 ## Fleet coordination
 
-Normal Astra and Sol fleet runs can dispatch fixed-model Astra/Sol/Terra/Luna children. The daemon parks coordinators between turns, returns child results through durable transcript receipts, and resumes the same session after restarts. Parent links, waiting state, terminal children and transcripts are available through the observation API. See [fleet dispatch and coordinator return](docs/fleet-dispatch.md) for the tool, storage and recovery contracts. Isolated application runs keep their existing contract.
+Root Astra and Sol fleet runs can dispatch fixed-model Astra/Sol/Terra/Luna children. Children cannot delegate further. The daemon parks coordinators between turns, returns child results through durable transcript receipts, and resumes the same session after restarts. Parent links, waiting state, terminal children and transcripts are available through the observation API. See [fleet dispatch and coordinator return](docs/fleet-dispatch.md) for the tool, storage and recovery contracts. Isolated application runs keep their existing contract.
 
 ## Quota policy
 

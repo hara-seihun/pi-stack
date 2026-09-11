@@ -221,7 +221,8 @@ const pendingHandoff = loadHandoff();
 beginSupervisorGeneration(db, SUPERVISOR_EPOCH, new Set(pendingHandoff.map((item) => item.sessionId)));
 
 interface Runtime {
-  transport: RuntimeTransport;
+  transport: RuntimeTransport | null;
+  startupAbort: AbortController;
   pending: Map<string, { resolve: (value: any) => void; reject: (error: Error) => void; timer: Timer }>;
   phase: RuntimePhase;
   phaseVersion: number;
@@ -535,7 +536,7 @@ function acknowledgeMessageContext(sessionId: string, finalizesMessage: unknown)
   rt.pendingContextTextLength = 0;
   rt.pendingContextThinkingLength = 0;
   signalLiveSync();
-  kickSession(sessionId);
+  if (!retireSettledSubagent(sessionId, rt)) kickSession(sessionId);
 }
 
 const error = (message: string, status = 400) => json({ error: message }, status);
@@ -998,11 +999,13 @@ function toolResultText(result: any): string {
 }
 
 function sendLine(rt: Runtime, value: unknown) {
+  if (!rt.transport) throw new Error("Agent transport is not connected");
   rt.transport.send(value);
 }
 
 async function terminateRuntimeProcess(rt: Runtime) {
-  await rt.transport.terminate();
+  rt.startupAbort.abort();
+  await rt.transport?.terminate();
 }
 class RpcTimeoutError extends Error {
   constructor(readonly command: string) { super(`${command} timed out`); this.name = "RpcTimeoutError"; }
@@ -1185,6 +1188,16 @@ async function verifyRuntimeSettlement(sessionId: string, rt: Runtime) {
   await reconcileRuntimeState(sessionId, rt);
 }
 
+function retireSettledSubagent(sessionId: string, rt: Runtime): boolean {
+  if (!subagentIdentity(sessionId) || rt.phase !== "IDLE" || rt.pendingContextFinalization) return false;
+  if (db.query("SELECT 1 FROM work_items WHERE session_id=? AND state IN ('queued','running','dispatched') LIMIT 1").get(sessionId)) return false;
+  rt.expectedExit = true;
+  rt.suppressOutput = true;
+  setRuntimePhase(sessionId, rt, "STOPPING");
+  void terminateRuntimeProcess(rt);
+  return true;
+}
+
 function settleRuntime(sessionId: string, rt: Runtime, emitEvent: boolean): boolean {
   if (rt.phase !== "RUNNING") return false;
   const modelFailure = rt.pendingModelFailure;
@@ -1218,6 +1231,7 @@ function settleRuntime(sessionId: string, rt: Runtime, emitEvent: boolean): bool
   setState(sessionId, pendingWork > 0 ? "RUNNING" : "IDLE");
   if (emitEvent) emit(sessionId, "settled");
   relayThreadResults();
+  if (retireSettledSubagent(sessionId, rt)) return true;
   if (rt.replaceAfterSettle && pendingWork === 0) {
     rt.expectedExit = true;
     rt.suppressOutput = true;
@@ -1268,7 +1282,8 @@ async function reconcileRuntimeState(sessionId: string, rt: Runtime): Promise<an
 
 function runtimeFromHandoff(row: any, handoff?: RuntimeHandoff): Runtime {
   return {
-    transport: null as unknown as RuntimeTransport,
+    transport: null,
+    startupAbort: new AbortController(),
     pending: new Map(),
     phase: handoff?.phase ?? "STARTING",
     phaseVersion: 0,
@@ -1304,6 +1319,7 @@ function handleRuntimeOutput(sessionId: string, rt: Runtime, line: string) {
 }
 
 function monitorRuntime(row: any, rt: Runtime) {
+  if (!rt.transport) throw new Error("Cannot monitor an unconnected runtime");
   rt.transport.onExit((code) => {
     for (const pending of rt.pending.values()) { clearTimeout(pending.timer); pending.reject(new Error("Agent stopped")); }
     rt.pending.clear();
@@ -1383,9 +1399,11 @@ async function startRuntime(row: any): Promise<Runtime> {
       cwd,
       args,
       env: runtimeEnvironment(row),
+      signal: rt.startupAbort.signal,
       onOutput: (line) => handleRuntimeOutput(row.id, rt, line),
     });
     monitorRuntime(row, rt);
+    if (rt.expectedExit || rt.startupAbort.signal.aborted) throw new Error("Activation cancelled");
     const state = await rpc(rt, "get_state", {}, 120_000);
     if (!ownsSupervisorLease() || rt.phase !== "STARTING") throw new Error("Activation cancelled");
     if (state.model?.id) rt.modelId = String(state.model.id);
@@ -1409,7 +1427,8 @@ async function startRuntime(row: any): Promise<Runtime> {
     const cancelled = rt.expectedExit;
     rt.expectedExit = true;
     setRuntimePhase(row.id, rt, "STOPPING");
-    if (rt.transport) await terminateRuntimeProcess(rt);
+    await terminateRuntimeProcess(rt);
+    if (runtimes.get(row.id) === rt) runtimes.delete(row.id);
     if (cancelled || !ownsSupervisorLease()) throw cause;
     if (resumePath) {
       db.query("UPDATE sessions SET session_path=NULL WHERE id=?").run(row.id);
@@ -1494,7 +1513,7 @@ async function adoptHandoffRuntimes() {
 async function reapUnclaimedRuntimeHosts() {
   const directory = join(DATA, "runtime-hosts");
   if (!existsSync(directory)) return;
-  const claimed = new Set([...runtimes.values()].map((rt) => rt.transport.socketPath));
+  const claimed = new Set([...runtimes.values()].flatMap((rt) => rt.transport ? [rt.transport.socketPath] : []));
   await Promise.all(readdirSync(directory).filter((name) => name.endsWith(".sock")).map(async (name) => {
     const socketPath = join(directory, name);
     if (claimed.has(socketPath)) return;
@@ -2421,6 +2440,7 @@ const server = Bun.serve({
         if (!/^[0-9a-f-]{36}$/i.test(requestId)) return error("Valid requestId required");
         const parent = body.parentSessionId == null ? null : sessionRow.get(String(body.parentSessionId)) as any;
         if (body.parentSessionId != null && (!parent || parent.archived_at)) return error("Parent thread is unavailable", 409);
+        if (parent && subagentIdentity(parent.id)) return error("Subagents cannot delegate; return the work to the parent coordinator", 403);
         const task = parent ? String(body.task ?? "").trim() : "";
         if (parent && !task) return error("A delegated task is required");
         const destination = THREAD_DESTINATIONS.get(String(body.destination ?? parent?.profile_id ?? (body.meetingId ? meetingDestination()?.id : "home")));
@@ -2921,6 +2941,7 @@ const reaper = setInterval(() => {
   const cutoff = Date.now() - 15 * 60_000;
   pruneUploadTransfers();
   for (const [id, rt] of runtimes) {
+    if (retireSettledSubagent(id, rt)) continue;
     if (rt.phase === "IDLE" && rt.lastActivity < cutoff) {
       rt.expectedExit = true;
       rt.suppressOutput = true;
@@ -2990,7 +3011,7 @@ async function handoffRelease() {
   const staging = `${HANDOFF_PATH}.writing`;
   writeFileSync(staging, `${JSON.stringify(handoffDocument())}\n`, { mode: 0o600 });
   renameSync(staging, HANDOFF_PATH);
-  for (const rt of runtimes.values()) rt.transport.detach();
+  for (const rt of runtimes.values()) rt.transport?.detach();
   await meet.close();
   server.stop(true);
   await closeImageGeneration();

@@ -1,10 +1,31 @@
-import type { Session } from "./types";
+import type { AgentRun, Session } from "./types";
 
 export function partitionThreads(sessions: Session[]) {
   return {
     interactive: sessions.filter(session => !session.subagent),
-    subagents: sessions.filter(session => Boolean(session.subagent)),
+    subagents: sessions.filter(isActiveSubagent),
   };
+}
+
+export function isActiveAgentRun(run: AgentRun): boolean {
+  return ["queued", "starting", "running", "waiting"].includes(run.status);
+}
+
+export function isActiveSubagent(session: Session): boolean {
+  return Boolean(session.subagent) && !session.archivedAt && ["STARTING", "RUNNING", "ABORTING"].includes(session.state);
+}
+
+export function subagentRoot(session: Session, sessions: Session[]): string {
+  const byId = new Map(sessions.map(item => [item.id, item]));
+  const seen = new Set([session.id]);
+  let parentId = session.subagent!.parentSessionId;
+  while (!seen.has(parentId)) {
+    seen.add(parentId);
+    const parent = byId.get(parentId);
+    if (!parent?.subagent) return parentId;
+    parentId = parent.subagent.parentSessionId;
+  }
+  return session.subagent!.parentSessionId;
 }
 
 export function threadDrawerTab(session: Session | undefined): "threads" | "agents" {

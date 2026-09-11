@@ -1,7 +1,7 @@
 import { describe, expect, test } from "bun:test";
 import { renderToStaticMarkup } from "react-dom/server";
 import { isValidElement, type ReactElement, type ReactNode } from "react";
-import { partitionThreads, threadDrawerTab } from "./src/agent-placement";
+import { partitionThreads, threadDrawerTab, subagentRoot, isActiveAgentRun } from "./src/agent-placement";
 import { AgentList } from "./src/agent-list";
 import type { AgentRun, Session } from "./src/types";
 
@@ -35,10 +35,32 @@ describe("subagent placement", () => {
       const meetingWorker = session("meeting-worker", { environment: "personal", subagent: { parentSessionId: meeting.id, model: "gpt-5.6-terra" } });
       const partition = partitionThreads([worker, parent, nested, meeting, meetingWorker]);
       expect(partition.interactive).toEqual([parent, meeting]);
-      expect(partition.subagents).toEqual([worker, nested, meetingWorker]);
+      expect(partition.subagents).toEqual(["STARTING", "RUNNING"].includes(state) ? [worker] : []);
+      expect(subagentRoot(nested, [parent, child, nested])).toBe(parent.id);
       expect(threadDrawerTab(worker)).toBe("agents");
       expect(threadDrawerTab(parent)).toBe("threads");
     }
+  });
+
+  test("terminal fleet children remain readable but do not count as active cards", () => {
+    const completed = { ...run, id: "completed", status: "done" };
+    expect(isActiveAgentRun(completed)).toBe(false);
+    expect(isActiveAgentRun(run)).toBe(true);
+    const panel = AgentList({ runs: [run, completed], hosts: [host], subagents: [], sessions: [],
+      selectedRunId: completed.id, selectedSessionId: null, onSelectThread() {}, onSelectRun() {} });
+    expect(buttons(panel).filter(button => button.props["aria-label"]?.startsWith("Open transcript:"))).toHaveLength(1);
+  });
+
+  test("groups active descendants once under the root and excludes settled workers", () => {
+    const nested = { ...child, id: "nested", name: "nested", subagent: { ...child.subagent!, parentSessionId: child.id } };
+    const settled = { ...child, id: "settled", name: "settled", state: "STOPPED" };
+    const panel = AgentList({ runs: [], hosts: [], subagents: [child, nested, settled], sessions: [parent, child, nested, settled],
+      selectedRunId: null, selectedSessionId: null, onSelectThread() {}, onSelectRun() {} });
+    const html = renderToStaticMarkup(panel);
+    expect((html.match(/aria-label="Subagents of/g) ?? []).length).toBe(1);
+    expect(html).toContain("2 active");
+    expect(html).not.toContain("Open transcript: settled");
+    expect(buttons(panel).filter(button => button.props.className === "agent-parent")).toHaveLength(1);
   });
 
   test("opens Remote transcripts as sessions and fleet transcripts as host-qualified runs", () => {
