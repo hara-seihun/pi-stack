@@ -51,6 +51,28 @@ it("observes a bounded page without one relationship scan per historical run",()
   }finally{store.close();}
 });
 
+it("single-run reads use indexed custody without scanning unrelated completion history",()=>{
+  const store=Store.open(":memory:");
+  try{
+    const id=parent(store),fleet=new Fleet(store),own=child(fleet,id);
+    store.transaction(()=>{for(let n=0;n<5000;n++)store.setControl(`completion:history-${n}`,JSON.stringify({input:{prompt:"x".repeat(2048)}}));});
+    const prepare=vi.spyOn(store.db,"prepare");
+    const start=performance.now();
+    for(let n=0;n<100;n++){
+      expect(store.run(own.id)?.parentRunId).toBe(id);
+      expect(store.run(id)?.childRunIds).toEqual([own.id]);
+    }
+    expect(performance.now()-start).toBeLessThan(1000);
+    const queries=prepare.mock.calls.map(([sql])=>String(sql));prepare.mockRestore();
+    for(const sql of new Set(queries.filter(sql=>sql.includes("FROM control")))){
+      const count=sql.split('?').length-1;
+      const plan=store.db.prepare(`EXPLAIN QUERY PLAN ${sql}`).all(...Array(count).fill(id)) as {detail:string}[];
+      expect(plan.some(row=>row.detail.includes("SCAN control"))).toBe(false);
+      expect(plan.some(row=>row.detail.includes("SEARCH control"))).toBe(true);
+    }
+  }finally{store.close();}
+});
+
 it("Astra and Sol dispatch all four fixed models; replay and escalation keep distinct custody",()=>{
   const store=Store.open(":memory:"),fleet=new Fleet(store);
   try{

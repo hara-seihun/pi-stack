@@ -25,10 +25,13 @@ export class CompletionPool {
     }).finally(() => this.active.delete(run.id));
   }
   tick(): void {
-    for (const [id, entry] of this.active) {
-      if (this.store.control(`abort:${id}`)) entry.controller.abort();
-      this.store.heartbeatLease(`run:${id}`);
-    }
+    if (!this.active.size) return;
+    this.store.transaction(() => {
+      for (const [id, entry] of this.active) {
+        if (this.store.control(`abort:${id}`)) entry.controller.abort();
+        this.store.heartbeatLease(`run:${id}`);
+      }
+    });
   }
   async close(): Promise<void> {
     for (const entry of this.active.values()) entry.controller.abort();

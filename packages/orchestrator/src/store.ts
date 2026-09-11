@@ -123,6 +123,7 @@ export class Store {
     if (!meta) db.exec(SCHEMA);
     const row = db.prepare("SELECT version FROM meta").get() as { version: number };
     if (row.version !== SCHEMA_VERSION) { db.close(); throw new Error(`unsupported orchestrator schema ${row.version}`); }
+    db.exec(`CREATE INDEX IF NOT EXISTS control_fleet_parent ON control(json_extract(value,'$.parentRunId')) WHERE key >= 'fleet-child:' AND key < 'fleet-child;'`);
     return new Store(db);
   }
 
@@ -251,7 +252,14 @@ export class Store {
   }
   private mapRuns(rows:any[]):Run[]{
     if(!rows.length)return[];
-    const controls=new Map((this.db.prepare("SELECT key,value FROM control WHERE key LIKE 'fleet-%' OR key LIKE 'run-context:%'").all() as {key:string;value:string}[]).map(row=>[row.key,row.value]));
+    const controls=new Map<string,string>();
+    for(let offset=0;offset<rows.length;offset+=200){
+      const ids=rows.slice(offset,offset+200).map(row=>row.id as string);
+      const keys=ids.flatMap(id=>[`fleet-child:${id}`,`fleet-delivered:${id}`,`fleet-waiting:${id}`,`run-context:${id}`]);
+      const own=this.db.prepare(`SELECT key,value FROM control WHERE key IN (${keys.map(()=>'?').join(',')})`).all(...keys) as {key:string;value:string}[];
+      const children=this.db.prepare(`SELECT key,value FROM control WHERE key >= 'fleet-child:' AND key < 'fleet-child;' AND json_extract(value,'$.parentRunId') IN (${ids.map(()=>'?').join(',')})`).all(...ids) as {key:string;value:string}[];
+      for(const row of [...own,...children])controls.set(row.key,row.value);
+    }
     const children=new Map<string,FleetChild>(),childIds=new Map<string,string[]>();
     for(const [key,value] of controls)if(key.startsWith("fleet-child:")){
       const id=key.slice(12),child=JSON.parse(value) as FleetChild;

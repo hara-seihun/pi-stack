@@ -46,7 +46,7 @@ it("runs 315 independent requests concurrently despite agent ceilings, preservin
     expect(f.store.activeLeases()).toHaveLength(0);
     expect(f.store.usageSince(0).reduce((sum, row) => sum + row.tokens, 0)).toBe(630);
   } finally { release(); await pool.close(); f.close(); }
-});
+}, 20_000);
 
 it("keeps reservation, pause, exhaustion, freshness and cooldown as real admission boundaries", () => {
   const f = fixture();

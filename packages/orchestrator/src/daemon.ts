@@ -365,7 +365,7 @@ export class Daemon {
           if(input.activity)this.store.setLive(id,input);
           return json(res,200,{ok:true});
         }
-        if(action==="heartbeat"){this.store.heartbeatLease(`run:${id}`);this.store.updateRun(id,{progressAt:input.progress?Date.now():undefined});if(input.activity)this.store.setLive(id,input);return json(res,200,{ok:true});}
+        if(action==="heartbeat"){this.store.transaction(()=>{this.store.heartbeatLease(`run:${id}`);this.store.updateRun(id,{progressAt:input.progress?Date.now():undefined});if(input.activity)this.store.setLive(id,input);});return json(res,200,{ok:true});}
       }
       if(method==="POST"&&url.pathname==="/v1/accounts"){
         const input=await body(req);
