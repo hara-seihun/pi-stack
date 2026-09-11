@@ -53,6 +53,7 @@ export default function threadContext(pi: ExtensionAPI) {
       prompt: event.prompt,
       fileTag: process.env.PI_REMOTE_FILE_TAG ?? "pi-remote-file",
       home: process.env.HOME || homedir(),
+      inlineImages: !!(process.env.PI_REMOTE_SESSION_ID && process.env.PI_REMOTE_SERVER_URL),
     }) + (meetingInstructions ? `\n\n${meetingInstructions}` : "");
     const userMessages = ctx.sessionManager.getBranch().filter((entry: any) => entry?.type === "message" && entry.message?.role === "user").length;
     if (userMessages !== 1 || !/^\d+$/.test(pi.getSessionName() ?? "")) {

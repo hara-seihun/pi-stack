@@ -65,7 +65,12 @@ describe("thread lifecycle context", () => {
       expect(result.message).toMatchObject({ customType: "pi-remote-machine-alerts", display: true });
       expect(result.message.content).toContain("Disk needs attention");
       expect(network).toHaveBeenCalledTimes(remote ? 1 : 0);
-      if (remote) expect(result.systemPrompt).toContain("Thread instructions");
+      if (remote) {
+        expect(result.systemPrompt).toContain("Thread instructions");
+        expect(result.systemPrompt).toContain("<pi-remote-image");
+      } else {
+        expect(result.systemPrompt).not.toContain("<pi-remote-image");
+      }
       expect(existsSync(alert)).toBe(true);
       await handlers.get("agent_start")!();
       expect(existsSync(alert)).toBe(false);
