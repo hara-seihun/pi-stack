@@ -1,5 +1,8 @@
 import {
   chmodSync,
+  closeSync,
+  fsyncSync,
+  openSync,
   existsSync,
   mkdirSync,
   readFileSync,
@@ -69,7 +72,11 @@ function writeAuth(path: string, auth: Record<string, unknown>): void {
   const temporary = join(dirname(path), `.auth.json.shared-${crypto.randomUUID()}`);
   writeFileSync(temporary, JSON.stringify(auth, null, 2), { encoding: "utf8", mode: 0o660 });
   chmodSync(temporary, 0o660);
+  const fd = openSync(temporary, "r");
+  try { fsyncSync(fd); } finally { closeSync(fd); }
   renameSync(temporary, path);
+  const directory = openSync(dirname(path), "r");
+  try { fsyncSync(directory); } finally { closeSync(directory); }
 }
 
 function ensureAuth(path: string): void {
@@ -88,10 +95,25 @@ function acquireLock(path: string, signal: AbortSignal): Promise<() => void> {
   return acquireDirectoryLock(path, signal, "Timed out waiting for the shared OAuth auth lock");
 }
 
+export async function withSharedAuth<T>(path: string, signal: AbortSignal, effect: (auth: Record<string, unknown>, save: () => void) => T): Promise<T> {
+  const release = await acquireLock(path, signal);
+  try {
+    const auth = readAuth(path);
+    return effect(auth, () => writeAuth(path, auth));
+  } finally { release(); }
+}
+
+function assertMutableCredential(value: unknown, alias: string): void {
+  if (String(record(value)?.type ?? "").startsWith("account-transfer")) {
+    throw new Error(`Account ${alias} belongs to an exclusive transfer; resume that transfer instead`);
+  }
+}
+
 export async function transactSharedCredential<T>(path:string,alias:string,value:unknown,effect:()=>Promise<T>):Promise<T>{
   const release=await acquireLock(path,new AbortController().signal);
   try{
     const auth=readAuth(path);
+    assertMutableCredential(auth[alias], alias);
     const previous={...auth};
     if(value===undefined)delete auth[alias];
     else{
@@ -221,6 +243,7 @@ export class SharedOAuthAuth {
     const release = await acquireLock(this.#path, signal);
     try {
       const auth = readAuth(this.#path);
+      assertMutableCredential(auth[alias], alias);
       const identity = this.#identity?.(credential);
       if (identity !== undefined) {
         for (const [otherAlias, otherValue] of Object.entries(auth)) {
@@ -241,6 +264,7 @@ export class SharedOAuthAuth {
     const release = await acquireLock(this.#path, signal);
     try {
       const auth = readAuth(this.#path);
+      assertMutableCredential(auth[alias], alias);
       delete auth[alias];
       writeAuth(this.#path, auth);
     } finally {
@@ -257,6 +281,7 @@ export function dropLocalCredential(agentAuthPath: string, alias: string): boole
     return false;
   }
   if (!(alias in auth)) return false;
+  assertMutableCredential(auth[alias], alias);
   delete auth[alias];
   writeAuth(agentAuthPath, auth);
   return true;

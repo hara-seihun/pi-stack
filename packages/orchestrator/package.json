@@ -34,7 +34,7 @@
   "scripts": {
     "build": "tsc -p tsconfig.build.json",
     "docs": "npm run build && node scripts/generate-docs.mjs && node scripts/generate-completion-openapi.mjs",
-    "test": "vitest run --maxWorkers=8",
+    "test": "vitest run --maxWorkers=1",
     "typecheck": "tsc --noEmit --incremental --tsBuildInfoFile ../../node_modules/.cache/orchestrator.tsbuildinfo"
   },
   "dependencies": {

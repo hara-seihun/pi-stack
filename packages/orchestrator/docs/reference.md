@@ -12,7 +12,13 @@ Run `npm run docs --workspace=pi-orchestrator` after changing commands or durabl
 - `pause / resume`: Set or clear the global launch halt.
 - `abort / kill`: Stop one run gracefully or immediately.
 - `boost`: Set a provider pacing multiplier or halt.
-- `account`: Import, remove, list, or reserve pooled accounts.
+- `account`: Import, refresh, remove, list, reserve, or exclusively transfer pooled accounts.
+
+## Account operations
+
+```text
+usage: pi-orchestrator account list | import ID --provider openai-codex|anthropic --credential-file FILE [--label LABEL] [--concurrency N] | refresh ID | disable ID | enable ID | remove ID | use ID shared|voice | transfer ID --to SSH_HOST | transfer-status ID | reserve ID --metadata JSON --reason TEXT | unreserve ID | reservation ID
+```
 
 ## Durable tables
 

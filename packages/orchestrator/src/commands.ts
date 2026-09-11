@@ -8,6 +8,8 @@ import { readUsageEvidence } from "./usage-evidence.js";
 import { work } from "./worker.js";
 import { providerOAuth, transactSharedCredential } from "./auth/shared-oauth.js";
 import { builtinProviders } from "@earendil-works/pi-ai/providers/all";
+import { AccountTransfer, transferEndpoint, transferPeer } from "./auth/account-transfer.js";
+import { isAccountReservation } from "./admission-reservation.js";
 
 export const COMMANDS=[
   ["daemon","Run reconciliation and the local API"],
@@ -18,10 +20,10 @@ export const COMMANDS=[
   ["pause / resume","Set or clear the global launch halt"],
   ["abort / kill","Stop one run gracefully or immediately"],
   ["boost","Set a provider pacing multiplier or halt"],
-  ["account","Import, refresh, remove, list, or reserve pooled accounts"],
+  ["account","Import, refresh, remove, list, reserve, or exclusively transfer pooled accounts"],
 ] as const;
 export const USAGE=`usage: pi-orchestrator ${COMMANDS.map(([name])=>name.replace(" / ","|")).join("|")}`;
-export const ACCOUNT_USAGE=`usage: pi-orchestrator account list | import ID --provider openai-codex|anthropic --credential-file FILE [--label LABEL] [--concurrency N] | refresh ID | disable ID | enable ID | remove ID | use ID shared|voice`;
+export const ACCOUNT_USAGE=`usage: pi-orchestrator account list | import ID --provider openai-codex|anthropic --credential-file FILE [--label LABEL] [--concurrency N] | refresh ID | disable ID | enable ID | remove ID | use ID shared|voice | transfer ID --to SSH_HOST | transfer-status ID | reserve ID --metadata JSON --reason TEXT | unreserve ID | reservation ID`;
 
 const BASE=`http://${process.env.PI_ORCHESTRATOR_HOST??"127.0.0.1"}:${process.env.PI_ORCHESTRATOR_PORT??"2460"}`;
 const ledgerPath=()=>process.env.PI_ORCHESTRATOR_LEDGER||join(homedir(),".local/share/pi-orchestrator/ledger.sqlite3");
@@ -59,7 +61,55 @@ export async function dispatch(argv:string[]):Promise<void>{
       return;
     }
     if(action==="list"){output((await request("/v1/plans")).accounts);return;}
+    if(action==="transfer-receive"){
+      const store=Store.open(ledgerPath());
+      try {
+        const owner=new AccountTransfer(store,loadConfig().authPath,transferEndpoint(ledgerPath())),signal=AbortSignal.timeout(30_000);
+        let input:any;try{input=JSON.parse(readFileSync(0,"utf8"));}catch{throw new Error("Invalid transfer input");}
+        if(tail[0]==="inspect")output(await owner.inspect(input.alias,signal));
+        else if(tail[0]==="receive")output(await owner.receive(input,signal));
+        else throw new Error("Transfer receiver requires inspect or receive");
+      }catch(error){output({error:error instanceof Error?error.message:"Transfer receiver failed"});}
+      finally{store.close();}
+      return;
+    }
     const {named,positional}=flags(tail),id=named.get("id")??positional[0];if(!id)throw new Error(`account ${action} requires an id`);
+    if(action==="reserve"||action==="unreserve"||action==="reservation"){
+      const path=`/v1/accounts/${encodeURIComponent(id)}/reservation`;
+      if(action==="reservation")output(await request(path));
+      else if(action==="unreserve")output(await request(path,"DELETE"));
+      else {
+        let metadata:unknown;
+        try{metadata=JSON.parse(required(named,"metadata"));}catch{throw new Error("--metadata must be a JSON object");}
+        const reservation={metadata,reason:required(named,"reason")};
+        if(!isAccountReservation(reservation))throw new Error("--metadata must be a nonempty object of string values and --reason must be nonempty");
+        output(await request(path,"PUT",reservation));
+      }
+      return;
+    }
+    if(action==="transfer"||action==="transfer-status"){
+      const store=Store.open(ledgerPath());
+      try {
+        const owner=new AccountTransfer(store,loadConfig().authPath,transferEndpoint(ledgerPath())),signal=AbortSignal.timeout(45_000);
+        if(action==="transfer-status"){
+          const record=store.control(`account-transfer:${id}`);
+          output({id,transfer:record?JSON.parse(record):null,enabled:store.account(id)?.enabled,activeLeases:store.activeLeases(id).map(lease=>lease.id)});return;
+        }
+        const target=required(named,"to"),existing=await owner.outgoing(id,signal);
+        if(existing){
+          const configured=store.control(`account-transfer-target:${id}`);
+          if(configured!==target)throw new Error("Transfer destination differs from its recorded SSH host");
+          if("type" in existing){output(existing);return;}
+        }
+        const destination=existing?.destination??await transferPeer(target,"inspect",{alias:id},signal);
+        store.setControl(`account-transfer-target:${id}`,target);
+        const prepared=existing??await owner.prepare(id,destination,signal);
+        if("type" in prepared){output(prepared);return;}
+        const accepted=await transferPeer(target,"receive",prepared,signal);
+        output(await owner.finish(id,accepted,signal));
+      }finally{store.close();}
+      return;
+    }
     if(action==="use"){const use=positional[1];if(use!=="shared"&&use!=="voice")throw new Error("account use requires shared or voice");output(await request(`/v1/accounts/${encodeURIComponent(id)}/use`,"PUT",{use}));return;}
     // Suspends or restores an account without touching its credential, for a
     // subscription that lapsed or a login that has to be replaced. Nothing

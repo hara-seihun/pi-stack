@@ -148,6 +148,7 @@ export class Store {
       id:r.id, provider:r.provider, label:maybe(r.label), enabled:!!r.enabled,
       cooldownUntil:maybe(r.cooldown_until), concurrency:r.concurrency,
       use:this.control(`account-use:${r.id}`)==="voice"?"voice":"shared",
+      reservation:JSON.parse(this.control(`account-reservation:${r.id}`)||"null")??undefined,
     }));
   }
   account(id: string): Account | undefined { return this.accounts().find((a) => a.id === id); }

@@ -8,7 +8,7 @@ import { fileURLToPath, pathToFileURL } from 'node:url';
 
 let buildRoot: string, routing: string, ai: string, sdk: string, cli: string;
 
-test.each(['remote', 'remote-physical', 'fleet', 'fresh-astra', 'fresh-sol', 'fresh-terra', 'fresh-luna'])('binds pooled credentials and keeps the pinned model: %s', async kind => {
+test.each(['remote', 'remote-physical', 'fleet', 'fleet-reserved', 'fresh-astra', 'fresh-sol', 'fresh-terra', 'fresh-luna'])('binds pooled credentials and keeps the pinned model: %s', async kind => {
   const fresh = kind.startsWith('fresh-');
   const selectedModel = fresh ? (kind === 'fresh-astra' ? 'gpt-6-astra' : `gpt-5.6-${kind.slice(6)}`) : 'gpt-5.6-luna';
   const root = await mkdtemp(join(tmpdir(), 'pi-pinned-model-'));
@@ -27,10 +27,11 @@ writeFileSync(join(root,'auth.json'),JSON.stringify({[account]:credential,'opena
 const store=Store.open(process.env.PI_ORCHESTRATOR_LEDGER);
 store.upsertAccount({id:account,provider:'openai-codex'});
 store.upsertAccount({id:'openai-codex-3',provider:'openai-codex'});
-if (${JSON.stringify(kind)} === 'fleet') {
+if (${JSON.stringify(kind)}.startsWith('fleet')) {
   const [id]=store.createRuns({count:1,source:'direct',prompt:'fixture',cwd:root,profile:'luna',budget:'force'});
   store.assignRun(id,{accountId:account,provider:'openai-codex',model:'gpt-5.6-luna',thinking:'high',unit:'fixture',releasePath:root});
   process.env.PI_ORCHESTRATOR_RUN_ID=id;
+  if(${JSON.stringify(kind)}==='fleet-reserved')store.setControl('account-reservation:'+account,JSON.stringify({metadata:{purpose:'reserved'},reason:'new admissions only'}));
 } else process.env.PI_SUBAGENT_MODEL=${JSON.stringify(selectedModel)};
 store.close();
 const manager=SessionManager.inMemory(root);
@@ -61,13 +62,56 @@ try {
 } finally {await session.extensionRunner.emit({type:'session_shutdown',reason:'quit'});session.dispose();}
 console.log('model pin held');
 `);
-  const env = { ...process.env, HOME: root, PI_CODING_AGENT_DIR: join(root, 'agent'), PI_ORCHESTRATOR_LEDGER: join(root, 'ledger.sqlite3'), PI_ORCHESTRATOR_AUTH: join(root, 'auth.json'), PI_ORCHESTRATOR_ASSIGNED: kind === 'fleet' ? '1' : '0', PI_OFFLINE: '1' };
+  const env = { ...process.env, HOME: root, PI_CODING_AGENT_DIR: join(root, 'agent'), PI_ORCHESTRATOR_LEDGER: join(root, 'ledger.sqlite3'), PI_ORCHESTRATOR_AUTH: join(root, 'auth.json'), PI_ORCHESTRATOR_ASSIGNED: kind.startsWith('fleet') ? '1' : '0', PI_OFFLINE: '1' };
   for (const key of Object.keys(env)) if (/^PI_REMOTE_|^PI_SESSION_|^PI_SUBAGENT_MODEL$|^PI_ORCHESTRATOR_RUN_ID$|_API_KEY$/.test(key)) delete env[key as keyof typeof env];
   try {
     const result = await promisify(execFile)(process.execPath, [fixture], { cwd: root, env, timeout: 4000 });
     expect(result.stdout).toContain('model pin held');
   } finally { await rm(root, { recursive: true, force: true }); }
 }, 6000);
+
+test.each(['explicit', 'family', 'reserved', 'cooldown', 'missing-credential'])('fresh ordinary startup honors eligible explicit naming alias: %s', async kind => {
+  const root=await mkdtemp(join(tmpdir(),'pi-naming-account-')),fixture=join(root,'fixture.mjs');
+  await writeFile(fixture, `
+import assert from 'node:assert/strict';
+import {mkdirSync,writeFileSync} from 'node:fs';
+import {join} from 'node:path';
+import {createAgentSession,DefaultResourceLoader,ModelRuntime,SessionManager,SettingsManager} from ${JSON.stringify(sdk)};
+import {Store} from ${JSON.stringify(join(buildRoot,'compiled/store.js'))};
+const root=process.env.HOME,dir=join(root,'agent'),kind=${JSON.stringify(kind)};
+mkdirSync(dir);writeFileSync(join(dir,'auth.json'),'{}');
+const credential={type:'oauth',access:'test',refresh:'test',expires:Date.now()+3600000};
+writeFileSync(join(root,'auth.json'),JSON.stringify({'openai-codex-9':credential,...(kind==='missing-credential'?{}:{'openai-codex-11':credential})}));
+const store=Store.open(process.env.PI_ORCHESTRATOR_LEDGER);
+for(const [id,spent] of [['openai-codex-11',96],['openai-codex-9',75]]){
+  store.upsertAccount({id,provider:'openai-codex'});
+  store.recordMeter(id,'codex-7d',spent,Date.now()+86400000,Date.now());
+}
+if(kind==='reserved')store.setControl('account-reservation:openai-codex-11',JSON.stringify({metadata:{purpose:'other'},reason:'reserved'}));
+if(kind==='cooldown')store.setCooldown('openai-codex-11',Date.now()+3600000);
+const modelRuntime=await ModelRuntime.create({authPath:join(dir,'auth.json'),modelsPath:join(dir,'models.json')});
+const settingsManager=SettingsManager.inMemory(),manager=SessionManager.inMemory(root);
+const resourceLoader=new DefaultResourceLoader({cwd:root,agentDir:dir,settingsManager,noExtensions:true,noSkills:true,noContextFiles:true,noPromptTemplates:true,noThemes:true,additionalExtensionPaths:[${JSON.stringify(routing)}]});
+await resourceLoader.reload();
+const base=modelRuntime.getModel('openai-codex','gpt-5.6-luna');
+const {session}=await createAgentSession({cwd:root,agentDir:dir,modelRuntime,settingsManager,resourceLoader,sessionManager:manager,model:{...base,provider:kind==='family'?'openai-codex':'openai-codex-11'},thinkingLevel:'low'});
+const errors=[];
+try{
+  await session.bindExtensions({mode:'print',onError:error=>errors.push(error)});
+  assert.deepEqual(errors,[]);
+  const expected=kind==='explicit'?'openai-codex-11':'openai-codex-9';
+  assert.equal(session.model.provider,expected);
+  assert.equal(session.model.id,'gpt-5.6-luna');
+  assert.equal(session.thinkingLevel,'low');
+  assert.equal(store.activeLeases()[0].account_id,expected);
+}finally{await session.extensionRunner.emit({type:'session_shutdown',reason:'quit'});session.dispose();store.close();}
+console.log('fresh naming account selected');
+`);
+  const env={...process.env,HOME:root,PI_CODING_AGENT_DIR:join(root,'agent'),PI_ORCHESTRATOR_LEDGER:join(root,'ledger.sqlite3'),PI_ORCHESTRATOR_AUTH:join(root,'auth.json'),PI_ORCHESTRATOR_ASSIGNED:'0',PI_OFFLINE:'1'};
+  for(const key of Object.keys(env))if(/^PI_REMOTE_|^PI_SESSION_|^PI_SUBAGENT_MODEL$|^PI_ORCHESTRATOR_RUN_ID$|_API_KEY$/.test(key))delete env[key as keyof typeof env];
+  try{const result=await promisify(execFile)(process.execPath,[fixture],{cwd:root,env,timeout:4000});expect(result.stdout).toContain('fresh naming account selected');}
+  finally{await rm(root,{recursive:true,force:true});}
+},6000);
 
 beforeAll(async () => {
   buildRoot = await mkdtemp(join(tmpdir(), 'pi-routing-build-'));
@@ -102,7 +146,7 @@ export default function(pi) {
 }
 `);
   const env = { ...process.env, HOME: root, PI_CODING_AGENT_DIR: join(root, 'agent'), PI_ORCHESTRATOR_LEDGER: join(root, 'ledger.sqlite3'), PI_ORCHESTRATOR_ASSIGNED: assigned, PI_SKIP_VERSION_CHECK: '1' };
-  for (const key of Object.keys(env)) if (/^PI_REMOTE_|^PI_SESSION_|^PI_ORCHESTRATOR_RUN_ID$/.test(key)) delete env[key as keyof typeof env];
+  for (const key of Object.keys(env)) if (/^PI_REMOTE_|^PI_SESSION_|^PI_SUBAGENT_MODEL$|^PI_ORCHESTRATOR_RUN_ID$/.test(key)) delete env[key as keyof typeof env];
   try {
     const pending = promisify(execFile)(process.execPath, [cli, '--print', '--no-session', '--no-tools', '--no-extensions', '--no-context-files', '--no-skills', '--no-prompt-templates', '--no-approve', '--model', 'openai-codex/gpt-6-astra', '-e', routing, '-e', fixture, 'handled locally'], { cwd: root, env, timeout: 4000 });
     pending.child.stdin!.end();
@@ -168,7 +212,7 @@ for (const account of [family + '-2', family + '-99']) {
 console.log('saved thinking restored');
 `);
   const env = { ...process.env, HOME: root, PI_CODING_AGENT_DIR: join(root, 'agent'), PI_ORCHESTRATOR_LEDGER: join(root, 'ledger.sqlite3'), PI_ORCHESTRATOR_AUTH: join(root, 'auth.json'), PI_ORCHESTRATOR_ASSIGNED: '0', PI_OFFLINE: '1' };
-  for (const key of Object.keys(env)) if (/^PI_REMOTE_|^PI_SESSION_|^PI_ORCHESTRATOR_RUN_ID$|_API_KEY$/.test(key)) delete env[key as keyof typeof env];
+  for (const key of Object.keys(env)) if (/^PI_REMOTE_|^PI_SESSION_|^PI_SUBAGENT_MODEL$|^PI_ORCHESTRATOR_RUN_ID$|_API_KEY$/.test(key)) delete env[key as keyof typeof env];
   try {
     const result = await promisify(execFile)(process.execPath, [fixture], { cwd: root, env, timeout: 4000 });
     expect(result.stdout).toContain('saved thinking restored');
