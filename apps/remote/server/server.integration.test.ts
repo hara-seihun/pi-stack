@@ -213,7 +213,9 @@ for line in sys.stdin:
   rpc_log.write(json.dumps({'sessionId': os.environ.get('PI_REMOTE_SESSION_ID'), **request}) + '\\n')
  kind = request.get('type')
  rid = request.get('id')
- if kind == 'get_entries':
+ if kind == 'get_portable_conversation':
+  out({'type':'response','id':rid,'command':kind,'success':True,'data':{'version':1,'sourceCore':os.environ.get('PI_STACK_CORE','pi'),'messages':[{'role':'user','content':[{'type':'text','text':'Prior conversation'}]}],'agents':[]}})
+ elif kind == 'get_entries':
   out({'type':'response','id':rid,'command':'get_entries','success':True,'data':{'entries':editable_entries,'leafId':editable_leaf}})
  elif kind == 'fork':
   selected = next((entry for entry in editable_entries if entry['id'] == request.get('entryId')), None)
@@ -532,6 +534,23 @@ async function createThread(destination = "home", model?: string) {
 }
 
 describe("web and supervisor integration", () => {
+  test("switches an idle core using a saved transfer and pins the selected generation", async () => {
+    const id = await createThread("home","astra");
+    const switched = await api("PUT",`/v1/sessions/${id}/settings`,{core:"codex"});
+    expect(switched.status).toBe(200);
+    expect(switched.value.settings).toMatchObject({core:"codex",bashTimeoutSupported:false});
+    const ledger = new Database(join(root,"data","supervisor.sqlite3"),{readonly:true});
+    try {
+      const pinned = ledger.query("SELECT core,state_dir FROM session_cores WHERE session_id=?").get(id) as any;
+      expect(pinned.core).toBe("codex");
+      expect(JSON.parse(readFileSync(join(pinned.state_dir,"transfer.json"),"utf8")).messages[0].content[0].text).toBe("Prior conversation");
+      expect((ledger.query("SELECT state FROM core_switches WHERE session_id=?").get(id) as any).state).toBe("complete");
+      const restored = await api("PUT",`/v1/sessions/${id}/settings`,{core:"pi"});
+      expect(restored.status).toBe(200);
+      expect(restored.value.settings.core).toBe("pi");
+    } finally { ledger.close(); }
+  },15_000);
+
   test("live events during activation are not cancellation and preserve RUNNING", async () => {
     server.kill(); await server.exited;
     startupEventsFixture = true;
