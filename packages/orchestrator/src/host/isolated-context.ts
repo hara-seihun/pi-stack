@@ -2,11 +2,21 @@ import { DefaultResourceLoader, SettingsManager, SessionManager } from "@earendi
 import { mkdir, realpath } from "node:fs/promises";
 import { join } from "node:path";
 import type { Run } from "../domain.js";
+import { argument, type CoreSessionOptions } from "../cores/contracts.js";
+import { isRunContext } from "../isolated-context-contract.js";
 import routing from "../extension/routing.js";
 import usageLogger from "../extension/usage-logger.js";
 import outputLimitContinuation from "../extension/output-limit-continuation.js";
 
-export async function isolatedContext(run: Run, sessionDirectory: string) {
+export async function isolatedCoreContext(options: CoreSessionOptions) {
+  const raw = argument(options.args, "--orchestrator-context");
+  if (raw === undefined) return undefined;
+  const context: unknown = JSON.parse(raw);
+  if (!isRunContext(context)) throw new Error("Invalid isolated core context");
+  return isolatedContext({ cwd: options.cwd, context, sessionFile: argument(options.args, "--session") }, join(options.stateDir, "sessions"));
+}
+
+export async function isolatedContext(run: Pick<Run, "cwd" | "context" | "sessionFile">, sessionDirectory: string) {
   if (!run.context) throw new Error("Missing isolated run context");
   const home = join(run.cwd, ".home"), agentDir = join(home, ".pi/agent");
   await mkdir(agentDir, { recursive: true });

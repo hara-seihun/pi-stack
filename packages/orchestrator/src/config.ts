@@ -4,6 +4,13 @@ import { readFileSync } from "node:fs";
 import { catalogModel } from "./catalog.js";
 import type { OrchestratorConfig } from "./domain.js";
 import { defaultSharedAuthPath } from "./auth/shared-oauth.js";
+import { isCoreId, type CoreId } from "./cores/contracts.js";
+
+export function resolveCore(config: Pick<OrchestratorConfig, "core" | "profileCores">, profile: string, override?: CoreId): CoreId {
+  const core = override ?? config.profileCores?.[profile] ?? config.core ?? "pi";
+  if (!isCoreId(core)) throw new Error(`Unknown agent core ${String(core)}`);
+  return core;
+}
 
 const standard = catalogModel("astra")!;
 const expert = catalogModel("opus")!;
@@ -22,6 +29,11 @@ export function loadConfig(
     }),
     ...Object.fromEntries(["astra", "sol", "terra", "luna", "opus"].map(id => [id, [candidate(catalogModel(id)!)]])),
   };
+  if (local.core !== undefined && !isCoreId(local.core)) throw new Error(`Unknown agent core ${String(local.core)}`);
+  if (local.profileCores !== undefined && (!local.profileCores || typeof local.profileCores !== "object" || Array.isArray(local.profileCores))) throw new Error("profileCores must map profile names to core IDs");
+  for (const [profile, core] of Object.entries(local.profileCores ?? {})) {
+    if (!isCoreId(core)) throw new Error(`profile ${profile}: unknown agent core ${String(core)}`);
+  }
   const levels = new Set(["off", "minimal", "low", "medium", "high", "xhigh", "max"]);
   for (const [profile, candidates] of Object.entries(profiles)) {
     for (const entry of candidates as any[]) {
@@ -36,6 +48,8 @@ export function loadConfig(
   return {
     listenHost: process.env.PI_ORCHESTRATOR_LISTEN_HOST || local.listenHost,
     profiles,
+    core: local.core ?? "pi",
+    profileCores: local.profileCores ?? {},
     backgroundSpendFraction: Number(local.backgroundSpendFraction ?? 0.8),
     maxConcurrentSessions: Number(local.maxConcurrentSessions ?? 40),
     defaultAccountConcurrency: Number(local.defaultAccountConcurrency ?? 4),

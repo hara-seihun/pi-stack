@@ -14,6 +14,8 @@ function parent(store:Store,model="astra",context?:{tools:string[]}) {
   const [id]=store.createRuns({count:1,source:"direct",prompt:"coordinate",cwd:"/tmp",profile:model,budget:"force",context});
   store.assignRun(id!,{...catalogModel(model)!,accountId:"account",unit:`unit-${id}`,releasePath:"/release"});
   store.updateRun(id!,{state:"running",sessionFile:`/tmp/${id}.jsonl`});
+  // These fixtures represent coordinators admitted by the external-child worker release.
+  store.db.prepare("DELETE FROM control WHERE key=?").run(`run-core:${id}`);
   return id!;
 }
 function child(fleet:Fleet,parentId:string,model:"astra"|"sol"|"terra"|"luna"="terra",requestId=model) {

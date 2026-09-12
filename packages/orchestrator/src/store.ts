@@ -1,6 +1,7 @@
 import { mkdirSync } from "node:fs";
 import { randomInt } from "node:crypto";
-import { dirname } from "node:path";
+import { dirname, join, resolve } from "node:path";
+import { isCoreId, type CoreId } from "./cores/contracts.js";
 import type { DatabaseSync } from "node:sqlite";
 import type { Account, BudgetClass, FailureKind, FleetChild, LaneSpec, LeaseKind, ProfileCandidate, Run, RunActivity, RunContext, RunSource, RunState, UsageEntry, UsageTotal } from "./domain.js";
 
@@ -115,7 +116,7 @@ export class Store {
   readonly db: DatabaseSync;
   private transactionDepth=0;
 
-  private constructor(db: DatabaseSync) { this.db = db; }
+  private constructor(db: DatabaseSync, private readonly path: string) { this.db = db; }
 
   static open(path: string): Store {
     const db = openLedgerDatabase(path);
@@ -124,7 +125,7 @@ export class Store {
     const row = db.prepare("SELECT version FROM meta").get() as { version: number };
     if (row.version !== SCHEMA_VERSION) { db.close(); throw new Error(`unsupported orchestrator schema ${row.version}`); }
     db.exec(`CREATE INDEX IF NOT EXISTS control_fleet_parent ON control(json_extract(value,'$.parentRunId')) WHERE key >= 'fleet-child:' AND key < 'fleet-child;'`);
-    return new Store(db);
+    return new Store(db, resolve(path));
   }
 
   close(): void { this.db.close(); }
@@ -201,9 +202,10 @@ export class Store {
   reconcileLanes(lanes:readonly LaneSpec[], at=Date.now()): void {
     const ids=new Set<string>();
     for(const lane of lanes){
-      for(const key of Object.keys(lane))if(!["id","prompt","cwd","profile","weight","priority","doctrineUrl","openingProbe"].includes(key))throw new Error(`unsupported lane field ${key}`);
+      for(const key of Object.keys(lane))if(!["id","prompt","cwd","profile","core","weight","priority","doctrineUrl","openingProbe"].includes(key))throw new Error(`unsupported lane field ${key}`);
       if(!lane.id||ids.has(lane.id))throw new Error(`invalid or duplicate lane id ${lane.id}`);
       ids.add(lane.id);
+      if(lane.core!==undefined&&!isCoreId(lane.core))throw new Error(`lane ${lane.id}: unknown agent core ${String(lane.core)}`);
       if(!Number.isFinite(lane.weight)||lane.weight<=0)throw new Error(`lane ${lane.id} requires a positive weight`);
       for(const key of ["prompt","cwd","profile"] as const)if(typeof lane[key]!=="string"||!lane[key])throw new Error(`lane ${lane.id} requires ${key}`);
     }
@@ -214,19 +216,29 @@ export class Store {
         weight=excluded.weight,priority=excluded.priority,doctrine_url=excluded.doctrine_url,
         opening_probe=excluded.opening_probe,updated_at=excluded.updated_at`)
         .run(lane.id,lane.prompt,lane.cwd,lane.profile,lane.weight,lane.priority??0,lane.doctrineUrl??null,lane.openingProbe??null,at);
-      for (const row of this.db.prepare("SELECT id FROM lane").all() as {id:string}[]) if(!ids.has(row.id)) this.db.prepare("DELETE FROM lane WHERE id=?").run(row.id);
+      for (const lane of lanes) {
+        if(lane.core)this.setControl(`lane-core:${lane.id}`,lane.core);
+        else this.db.prepare("DELETE FROM control WHERE key=?").run(`lane-core:${lane.id}`);
+      }
+      for (const row of this.db.prepare("SELECT id FROM lane").all() as {id:string}[]) if(!ids.has(row.id)) {
+        this.db.prepare("DELETE FROM lane WHERE id=?").run(row.id);
+        this.db.prepare("DELETE FROM control WHERE key=?").run(`lane-core:${row.id}`);
+      }
     });
   }
-  lanes(): LaneSpec[] { return (this.db.prepare("SELECT * FROM lane ORDER BY priority DESC,weight DESC,id").all() as any[]).map((r)=>({id:r.id,prompt:r.prompt,cwd:r.cwd,profile:r.profile,weight:r.weight,priority:r.priority,doctrineUrl:maybe(r.doctrine_url),openingProbe:maybe(r.opening_probe)})); }
+  lanes(): LaneSpec[] { return (this.db.prepare("SELECT * FROM lane ORDER BY priority DESC,weight DESC,id").all() as any[]).map((r)=>({id:r.id,prompt:r.prompt,cwd:r.cwd,profile:r.profile,core:this.control(`lane-core:${r.id}`) as CoreId|undefined,weight:r.weight,priority:r.priority,doctrineUrl:maybe(r.doctrine_url),openingProbe:maybe(r.opening_probe)})); }
   lane(id:string):LaneSpec|undefined{return this.lanes().find((x)=>x.id===id);}
 
   fleetChild(id:string):FleetChild|undefined{return JSON.parse(this.control(`fleet-child:${id}`)??"null")??undefined;}
   childRunIds(id:string):string[]{return (this.db.prepare("SELECT substr(key,13) id FROM control WHERE key LIKE 'fleet-child:%' AND json_extract(value,'$.parentRunId')=? ORDER BY key").all(id) as {id:string}[]).map(row=>row.id);}
   isWaiting(id:string):boolean{return this.control(`fleet-waiting:${id}`)==="1";}
-  createRuns(input:{count:number;source:RunSource;sourceId?:string;prompt:string;cwd:string;profile:string;budget:BudgetClass;context?:RunContext;child?:FleetChild}):string[]{
+  createRuns(input:{count:number;source:RunSource;sourceId?:string;prompt:string;cwd:string;profile:string;budget:BudgetClass;core?:CoreId;context?:RunContext;child?:FleetChild}):string[]{
+    const core=input.core??"pi";
+    if(!isCoreId(core))throw new Error(`Unknown agent core ${String(core)}`);
+    if(core==="codex"&&input.context)throw new Error("Codex core does not support isolated tools/extensions contracts");
     const now=Date.now(),ids:string[]=[];
     this.transaction(()=>{for(let i=0;i<input.count;i++){const id=crypto.randomUUID();ids.push(id);this.db.prepare(`INSERT INTO run(id,source,source_id,prompt,cwd,profile,budget,state,created_at,updated_at)
-      VALUES(?,?,?,?,?,?,?,'queued',?,?)`).run(id,input.source,input.sourceId??null,input.prompt,input.cwd,input.profile,input.budget,now,now);if(input.context)this.setControl(`run-context:${id}`,JSON.stringify(input.context));if(input.child)this.setControl(`fleet-child:${id}`,JSON.stringify(input.child));}});
+      VALUES(?,?,?,?,?,?,?,'queued',?,?)`).run(id,input.source,input.sourceId??null,input.prompt,input.cwd,input.profile,input.budget,now,now);this.setControl(`run-core:${id}`,JSON.stringify({core,coreStateDir:join(dirname(resolve(this.path)),"runs",id),childrenOwner:"core"}));if(input.context)this.setControl(`run-context:${id}`,JSON.stringify(input.context));if(input.child)this.setControl(`fleet-child:${id}`,JSON.stringify(input.child));}});
     return ids;
   }
   run(id:string):Run|undefined{const r=this.db.prepare("SELECT * FROM run WHERE id=?").get(id) as any;return r?this.mapRuns([r])[0]:undefined;}
@@ -255,7 +267,7 @@ export class Store {
     const controls=new Map<string,string>();
     for(let offset=0;offset<rows.length;offset+=200){
       const ids=rows.slice(offset,offset+200).map(row=>row.id as string);
-      const keys=ids.flatMap(id=>[`fleet-child:${id}`,`fleet-delivered:${id}`,`fleet-waiting:${id}`,`run-context:${id}`]);
+      const keys=ids.flatMap(id=>[`fleet-child:${id}`,`fleet-delivered:${id}`,`fleet-waiting:${id}`,`run-context:${id}`,`run-core:${id}`]);
       const own=this.db.prepare(`SELECT key,value FROM control WHERE key IN (${keys.map(()=>'?').join(',')})`).all(...keys) as {key:string;value:string}[];
       const children=this.db.prepare(`SELECT key,value FROM control WHERE key >= 'fleet-child:' AND key < 'fleet-child;' AND json_extract(value,'$.parentRunId') IN (${ids.map(()=>'?').join(',')})`).all(...ids) as {key:string;value:string}[];
       for(const row of [...own,...children])controls.set(row.key,row.value);
@@ -271,6 +283,7 @@ export class Store {
       return{parentRunId:child?.parentRunId,rootRunId:child?.rootRunId??(ids.length?r.id:undefined),requestedModel:child?.model,escalatesRunId:child?.escalatesRunId,childRunIds:ids,
         deliveryState:child?(controls.has(`fleet-delivered:${r.id}`)?"delivered":"pending"):undefined,
         id:r.id,source:r.source,sourceId:maybe(r.source_id),prompt:r.prompt,cwd:r.cwd,profile:r.profile,budget:r.budget,
+        ...JSON.parse(controls.get(`run-core:${r.id}`)??'{"core":"pi","childrenOwner":"orchestrator"}'),
         context:JSON.parse(controls.get(`run-context:${r.id}`)??"null")??undefined,accountId:maybe(r.account_id),provider:maybe(r.provider),model:maybe(r.model),thinking:maybe(r.thinking),sessionFile:maybe(r.session_file),
         state:r.state==="running"&&controls.get(`fleet-waiting:${r.id}`)==="1"?"waiting":r.state,failureKind:maybe(r.failure_kind),result:maybe(r.result),workerUnit:maybe(r.worker_unit),releasePath:maybe(r.release_path),
         createdAt:r.created_at,startedAt:maybe(r.started_at),updatedAt:r.updated_at,progressAt:maybe(r.progress_at),endedAt:maybe(r.ended_at)};
@@ -282,6 +295,7 @@ export class Store {
       if(!run || run.state!=="queued" || run.accountId)return false;
       const fixed=this.fleetChild(id)?.assignment;
       if(fixed&&(fixed.provider!==assignment.provider||fixed.model!==assignment.model||fixed.thinking!==assignment.thinking||assignment.thinkingPair))return false;
+      if(!this.control(`run-core:${id}`))this.setControl(`run-core:${id}`,JSON.stringify({core:"pi",coreStateDir:join(dirname(resolve(this.path)),"runs",id),childrenOwner:"core"}));
       let thinking=assignment.thinking;
       if(assignment.thinkingPair){
         const pair=assignment.thinkingPair;
@@ -297,15 +311,22 @@ export class Store {
       return true;
     });
   }
-  updateRun(id:string,patch:{state?:RunState;sessionFile?:string;progressAt?:number;result?:string;failureKind?:FailureKind;workerUnit?:string},at=Date.now()):void{
+  updateRun(id:string,patch:{state?:RunState;sessionFile?:string;nativeSessionId?:string;portableSessionFile?:string;progressAt?:number;result?:string;failureKind?:FailureKind;workerUnit?:string},at=Date.now()):void{
+    this.transaction(()=>{
     const current=this.run(id);if(!current)throw new Error(`unknown run ${id}`);
     if(["done","failed","aborted"].includes(current.state))return;
+    const custody=this.control(`run-core:${id}`);
+    if(custody&&(patch.nativeSessionId!==undefined||patch.portableSessionFile!==undefined)) {
+      for(const key of ["nativeSessionId","portableSessionFile"] as const)if(patch[key]!==undefined&&(typeof patch[key]!=="string"||!patch[key]))throw new Error(`Invalid ${key}`);
+      this.setControl(`run-core:${id}`,JSON.stringify({...JSON.parse(custody),...(patch.nativeSessionId===undefined?{}:{nativeSessionId:patch.nativeSessionId}),...(patch.portableSessionFile===undefined?{}:{portableSessionFile:patch.portableSessionFile})}));
+    }
     const state=patch.state??current.state;const terminal=["done","failed","aborted"].includes(state);
     if(state==="waiting")this.setControl(`fleet-waiting:${id}`,"1");
     else if(patch.state)this.db.prepare("DELETE FROM control WHERE key=?").run(`fleet-waiting:${id}`);
     this.db.prepare(`UPDATE run SET state=?,session_file=COALESCE(?,session_file),progress_at=COALESCE(?,progress_at),result=COALESCE(?,result),failure_kind=COALESCE(?,failure_kind),worker_unit=COALESCE(?,worker_unit),updated_at=?,ended_at=? WHERE id=?`)
       .run(state==="waiting"?"running":state,patch.sessionFile??null,patch.progressAt??null,patch.result??null,patch.failureKind??null,patch.workerUnit??null,at,terminal?at:null,id);
     if(terminal||state==="waiting")this.endLease(`run:${id}`,at);
+    });
   }
   requeueRejectedCompletion(id:string):void{
     if(!this.control(`completion-run:${id}`))throw new Error(`Run ${id} is not a completion`);
@@ -331,7 +352,7 @@ export class Store {
       if(!run?.accountId||!run.provider||!run.model||!run.workerUnit||!run.releasePath)return false;
       const targetAccount=accountId??run.accountId;
       if(this.account(targetAccount)?.provider!==run.provider)return false;
-      const changed=this.db.prepare(`UPDATE run SET account_id=?,state='starting',result='worker process stopped; recovering the saved Pi session',updated_at=?,ended_at=NULL WHERE id=? AND state IN ('queued','starting','running')`).run(targetAccount,at,id).changes;
+      const changed=this.db.prepare(`UPDATE run SET account_id=?,state='starting',result='worker process stopped; recovering the recorded core session',updated_at=?,ended_at=NULL WHERE id=? AND state IN ('queued','starting','running')`).run(targetAccount,at,id).changes;
       if(changed!==1)return false;
       this.db.prepare("DELETE FROM control WHERE key=?").run(`fleet-waiting:${id}`);
       this.endLease(`run:${id}`,at);

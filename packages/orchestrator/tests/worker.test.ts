@@ -1,111 +1,133 @@
-import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
+import type { CoreOutput, OpenCoreSession } from "../src/cores/contracts.js";
+import type { Run } from "../src/domain.js";
+import { assistantUsage, coreOptions, runCoreWorker } from "../src/host/core-worker.js";
 
-const hosted = vi.hoisted(() => ({ open: vi.fn() }));
-vi.mock("../src/host/session-lifecycle.js", () => ({ openHostedSession: hosted.open }));
-vi.mock("../src/config.js", () => ({ loadConfig: () => ({ agentDir: "/tmp/agent" }) }));
-vi.mock("../src/host/completion-worker.js", () => ({ workCompletion: async () => false }));
+const run: Run = { id: "run", source: "direct", profile: "astra", budget: "force", state: "starting", prompt: "Do the work", cwd: "/tmp/work",
+  core: "pi", childrenOwner: "core", coreStateDir: "/tmp/custody/run", accountId: "openai-codex-2", provider: "openai-codex", model: "gpt-6-astra", thinking: "xhigh", createdAt: 1, updatedAt: 1 };
+const assistant = { role: "assistant", timestamp: 42, provider: "openai-codex-2", model: "gpt-6-astra", stopReason: "stop", content: [{ type: "text", text: "Finished" }], usage: { input: 2, output: 3 } };
+function fixture(saved: Partial<Run> = {}) {
+  const currentRun = { ...run, ...saved };
+  const calls: { type: string; [key: string]: any }[] = [], posts: { path: string; value: any }[] = [];
+  let output: (event: CoreOutput) => void;
+  let state: any = { core: currentRun.core, treeComplete: true, nativeSessionId: "native-id", sessionFile: "/tmp/native.jsonl", portableFile: "/tmp/portable.jsonl" };
+  let prompt = async () => { state.lastAssistantMessage = assistant; output({ type: "message_end", message: assistant }); };
+  const close = vi.fn(async () => {});
+  const open: OpenCoreSession = async (_options, publish) => {
+    output = publish;
+    return { close, command: async command => {
+      calls.push(command);
+      if (command.type === "prompt") await prompt();
+      if (command.type === "abort") { state.treeComplete = true; state.lastAssistantMessage = { ...assistant, stopReason: "aborted" }; }
+      output({ type: "response", id: command.id, command: command.type, success: true, data: command.type === "get_state" ? state : undefined });
+    } };
+  };
+  let control: any = {};
+  const post = async (path: string, value: any) => { posts.push({ path, value }); };
+  return {
+    calls, posts, close, state, setPrompt: (fn: typeof prompt) => { prompt = fn; }, emit: (event: CoreOutput) => output(event),
+    setControl: (value: any) => { control = value; },
+    work: () => runCoreWorker(currentRun, coreOptions(currentRun, {}), open, post, async () => control),
+  };
+}
+afterEach(() => vi.restoreAllMocks());
 
-import { work } from "../src/worker.js";
+describe("core worker", () => {
+  it("uses the pinned engine/model/effort and persists native and portable references", async () => {
+    const f = fixture();
+    await f.work();
+    expect(coreOptions(run, { PI_STACK_CORE: "codex" })).toMatchObject({ stateDir: run.coreStateDir, sessionId: run.id, env: { PI_STACK_CORE: "pi" } });
+    expect(coreOptions(run, {}).args).toEqual(["--core", "pi", "--provider", "openai-codex", "--model", "gpt-6-astra", "--thinking", "xhigh"]);
+    expect(f.calls.find(call => call.type === "prompt")?.message).toBe(run.prompt);
+    expect(f.posts[0]?.value).toEqual({ nativeSessionId: "native-id", sessionFile: "/tmp/native.jsonl", portableSessionFile: "/tmp/portable.jsonl" });
+    expect(f.posts.at(-1)?.value).toEqual({ state: "done", result: "Finished" });
+    expect(f.posts.find(post => post.path.endsWith("/usage"))?.value.usage).toEqual({ input: 2, output: 3 });
+    expect(f.close).toHaveBeenCalledOnce();
+  });
 
-describe("worker settlement", () => {
-  let state: string;
-  let patches: any[];
-  let session: any;
-  let dispose: ReturnType<typeof vi.fn>;
-  let unsubscribe: ReturnType<typeof vi.fn>;
-  let control: (() => void) | undefined;
+  it("settles an already completed recovered tree without another prompt", async () => {
+    const f = fixture({ nativeSessionId: "native-id" });
+    f.state.lastAssistantMessage = assistant;
+    await f.work();
+    expect(f.calls.some(call => call.type === "prompt")).toBe(false);
+    expect(f.posts.at(-1)?.value.state).toBe("done");
+  });
 
-  beforeEach(() => {
-    state = "starting";
-    patches = [];
-    control = undefined;
-    dispose = vi.fn();
-    unsubscribe = vi.fn();
-    session = {
-      prompt: vi.fn(async () => {}),
-      abort: vi.fn(async () => {}),
-      subscribe: vi.fn(() => unsubscribe),
-      sessionManager: { getSessionFile: () => "/tmp/session.jsonl" },
-      messages: [{ role: "assistant", stopReason: "stop", content: [{ type: "text", text: "Finished." }] }],
-      isStreaming: false,
-      isCompacting: false,
-    };
-    hosted.open.mockResolvedValue({ session, dispose });
-    vi.spyOn(globalThis, "setInterval").mockImplementation(((callback: () => void, ms: number) => {
-      if (ms === 2000) control = callback;
-      return 1;
+  it("submits the original task after a crash between session creation and first prompt", async () => {
+    const f = fixture({ nativeSessionId: "native-id", sessionFile: "/tmp/native.jsonl" });
+    f.state.messageCount = 0;
+    await f.work();
+    expect(f.calls.find(call => call.type === "prompt")).toMatchObject({ id: "run:run:initial", message: run.prompt });
+  });
+
+  it("does not settle on root agent_end while the core owns unfinished children", async () => {
+    const f = fixture();
+    f.setPrompt(async () => {
+      f.state.treeComplete = false;
+      f.state.lastAssistantMessage = assistant;
+      f.emit({ type: "agent_end" });
+      setTimeout(() => {
+        expect(f.posts.some(post => post.value.state === "done")).toBe(false);
+        f.state.treeComplete = true;
+        f.emit({ type: "core_agent", agent: { id: "child", state: "idle" } });
+      }, 5);
+    });
+    await f.work();
+    expect(f.posts.at(-1)?.value.state).toBe("done");
+  });
+
+  it("maps deltas/tools to heartbeat and sends abort through the command wire", async () => {
+    const f = fixture();
+    let control: (() => void) | undefined;
+    const original = globalThis.setInterval;
+    vi.spyOn(globalThis, "setInterval").mockImplementation(((callback: () => void, delay: number) => {
+      if (delay === 2_000) control = callback;
+      return original(callback, delay);
     }) as any);
-    vi.spyOn(globalThis, "clearInterval").mockImplementation(() => {});
-    vi.stubGlobal("fetch", vi.fn(async (url: string, init?: RequestInit) => {
-      const path = new URL(url).pathname;
-      if (path.endsWith("/state")) {
-        const patch = JSON.parse(String(init?.body));
-        patches.push(patch);
-        state = patch.state;
-        return Response.json({ ok: true });
-      }
-      if (path.endsWith("/control")) return Response.json({ abort: "operator request" });
-      if (path === "/internal/runs/test-run") return Response.json({ run: {
-        id: "test-run", source: "direct", state, prompt: "Do the work.", cwd: "/tmp",
-        accountId: "openai-codex", provider: "openai-codex", model: "gpt-6-astra",
-      } });
-      throw new Error(`unexpected request ${path}`);
-    }));
-  });
-
-  afterEach(() => {
-    vi.restoreAllMocks();
-    vi.unstubAllGlobals();
-    vi.unstubAllEnvs();
-  });
-
-  it("finishes after one settled turn and releases its session", async () => {
-    vi.stubEnv("PI_ORCHESTRATOR_ASSIGNED", "");
-    await work("test-run");
-    expect(session.prompt).toHaveBeenCalledExactlyOnceWith("Do the work.");
-    expect(patches.map(patch => patch.state)).toEqual(["running", "done"]);
-    expect(patches.at(-1).result).toBe("Finished.");
-    expect(dispose).toHaveBeenCalledOnce();
-    expect(unsubscribe).toHaveBeenCalledTimes(2);
-  });
-
-  it("waits for an asynchronous continuation before finishing", async () => {
-    vi.stubEnv("PI_ORCHESTRATOR_ASSIGNED", "");
-    session.prompt.mockImplementation(async () => { session.isStreaming = true; });
-    session.waitForIdle = vi.fn(async () => {
-      expect(state).toBe("running");
-      session.messages.push({ role: "assistant", stopReason: "stop", content: [{ type: "text", text: "Continuation finished." }] });
-      session.isStreaming = false;
+    f.setControl({ abort: true });
+    f.setPrompt(async () => {
+      f.state.lastAssistantMessage = assistant;
+      f.emit({ type: "message_update", assistantMessageEvent: { type: "text_delta", delta: "working" } });
+      f.emit({ type: "tool_execution_start", toolName: "bash" });
+      control!();
     });
-    await work("test-run");
-    expect(session.waitForIdle).toHaveBeenCalledOnce();
-    expect(patches.at(-1)).toEqual({ state: "done", result: "Continuation finished." });
+    await f.work();
+    expect(f.calls.some(call => call.type === "abort")).toBe(true);
+    expect(f.posts.find(post => post.path.endsWith("/heartbeat"))?.value).toMatchObject({ activity: "WAITING_ON_TOOL", text: "working", tool: "bash", progress: true });
+    expect(f.posts.at(-1)?.value.state).toBe("aborted");
   });
 
-  it("honours an operator abort through the worker control endpoint", async () => {
-    vi.stubEnv("PI_ORCHESTRATOR_ASSIGNED", "");
-    session.prompt.mockImplementation(async () => { control!(); });
-    await work("test-run");
-    expect(session.abort).toHaveBeenCalledOnce();
-    expect(patches.at(-1)).toEqual({ state: "aborted", failureKind: "operator", result: "aborted" });
-    expect(dispose).toHaveBeenCalledOnce();
+  it("rejects missing completion authority and unconfirmed isolation before prompting", async () => {
+    for (const isolated of [false, true]) {
+      const f = fixture(isolated ? { context: { tools: ["bash"], extensions: ["/app/tool.ts"] } } : {});
+      if (!isolated) delete f.state.treeComplete;
+      await f.work();
+      expect(f.calls.some(call => call.type === "prompt")).toBe(false);
+      expect(f.posts.at(-1)?.value.state).toBe("failed");
+    }
+    expect(() => coreOptions({ ...run, core: "codex", context: { tools: [] } }, {})).toThrow("does not support isolated");
   });
 
-  it("records native compaction failure instead of reporting done or operator-aborted", async () => {
-    session.prompt.mockImplementation(async () => {
-      for (const [listener] of session.subscribe.mock.calls) listener({ type: "compaction_end", errorMessage: "Native compaction idle-timeout; explicit recovery required", aborted: false });
-      session.messages.push({ role: "assistant", stopReason: "aborted", content: [] });
+  it("fails recovery rather than replacing pinned native custody with a fresh session", async () => {
+    const f = fixture({ nativeSessionId: "original-native" });
+    await f.work();
+    expect(f.calls.some(call => call.type === "prompt")).toBe(false);
+    expect(f.posts.at(-1)?.value).toMatchObject({ state: "failed", failureKind: "infrastructure", result: expect.stringContaining("replaced") });
+    expect(f.posts.some(post => post.value.nativeSessionId)).toBe(false);
+  });
+
+  it("keeps compaction/provider failures distinct from operator abort", async () => {
+    const f = fixture();
+    f.setPrompt(async () => {
+      f.emit({ type: "compaction_end", errorMessage: "Native compaction failed" });
+      f.state.lastAssistantMessage = { ...assistant, stopReason: "aborted" };
     });
-    await work("test-run");
-    expect(patches.at(-1)).toEqual({ state: "failed", failureKind: "provider", result: "Native compaction idle-timeout; explicit recovery required" });
+    await f.work();
+    expect(f.posts.at(-1)?.value).toMatchObject({ state: "failed", failureKind: "provider" });
   });
 
-  it("does not overwrite a terminal state set by the daemon", async () => {
-    vi.stubEnv("PI_ORCHESTRATOR_ASSIGNED", "");
-    session.prompt.mockImplementation(async () => { state = "aborted"; });
-    await work("test-run");
-    expect(patches.map(patch => patch.state)).toEqual(["running"]);
-    expect(state).toBe("aborted");
-    expect(dispose).toHaveBeenCalledOnce();
+  it("gives replayed usage the same receipt", () => {
+    const event = { type: "message_end", message: assistant };
+    expect(assistantUsage(event)).toEqual(assistantUsage(JSON.parse(JSON.stringify(event))));
   });
 });

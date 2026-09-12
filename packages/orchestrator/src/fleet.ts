@@ -6,7 +6,7 @@ export type FleetError = "invalid-dispatch" | "parent-not-found" | "not-coordina
 export type FleetOutcome<T> = {ok:true;value:T} | {ok:false;error:FleetError};
 const terminal = (run:Run) => ["done","failed","aborted"].includes(run.state);
 export function isFleetCoordinator(run:Run):boolean {
-  return !run.parentRunId && !run.context && ["astra","sol"].includes(catalogAgentType(run.model??"").key);
+  return run.childrenOwner!=="core" && !run.parentRunId && !run.context && ["astra","sol"].includes(catalogAgentType(run.model??"").key);
 }
 export function isFleetDispatch(input:unknown):input is FleetDispatch {
   if(!input||typeof input!=="object"||Array.isArray(input))return false;

@@ -1,6 +1,6 @@
 # Pi Orchestrator
 
-Pi Orchestrator runs unattended Pi sessions against pooled subscription accounts. One daemon owns policy and SQLite state. Each admitted run gets a separate transient user systemd unit and keeps the release that launched it until the run ends.
+Pi Orchestrator runs unattended agent cores against pooled subscription accounts. One daemon owns policy and SQLite state. Each admitted run gets a separate transient user systemd unit and keeps the release that launched it until the run ends.
 
 ## Runtime model
 
@@ -8,11 +8,11 @@ The daemon reconciles provider meters, weighted lanes, optional queue readiness,
 
 A lane has a positive weight, not a worker target. Weights divide available concurrency among eligible lanes. The manifest selects paced background admission or work-driven forced admission. A wave remains a one-off batch, not a standing target. Each run ends when its agent finishes its turn.
 
-Workers write progress through the daemon's loopback API. Their full context remains in Pi's session JSONL. If a worker process or machine stops, the next worker reopens that same file. The run row records the immutable release path and transient unit name, so a daemon deployment does not replace live workers. Recovery adopts a still-active unit when a daemon restart races the user manager; an already-loaded inactive transient unit restarts from its recorded release instead of being redefined.
+Workers write progress through the daemon's loopback API. Each run pins its agent core and durable state directory. If a worker process or machine stops, the next worker reopens that same core state. Native and portable session references remain in run custody. See [agent cores](docs/agent-cores.md) for selection, the worker wire and isolated-context requirements. The run row records the immutable release path and transient unit name, so a daemon deployment does not replace live workers. Recovery adopts a still-active unit when a daemon restart races the user manager; an already-loaded inactive transient unit restarts from its recorded release instead of being redefined.
 
 ## Fleet coordination
 
-Root Astra and Sol fleet runs can dispatch fixed-model Astra/Sol/Terra/Luna children. Children cannot delegate further. The daemon parks coordinators between turns, returns child results through durable transcript receipts, and resumes the same session after restarts. Parent links, waiting state, terminal children and transcripts are available through the observation API. See [fleet dispatch and coordinator return](docs/fleet-dispatch.md) for the tool, storage and recovery contracts. Isolated application runs keep their existing contract.
+New runs delegate through their selected core, which owns its child tree and completion. Workers no longer expose `fleet_dispatch`. Existing external-child coordinators retain their recorded worker release and the daemon's receipt, waiting and wakeup path. Parent links, waiting state, terminal children and transcripts remain observable. See [external fleet records](docs/fleet-dispatch.md) for their active recovery contracts. Isolated application runs require Pi; unsupported Codex tools/extensions contracts fail explicitly.
 
 ## Quota policy
 
@@ -20,7 +20,7 @@ At 1×, ordinary work stays within the elapsed share of each provider window's a
 
 The account concurrency ceiling also uses up to six hours of same-window consumption divided by recorded session-hours, with one percentage point added for meter uncertainty. Meter history is retained for 24 hours rather than a fixed sample count. At least 15 minutes of evidence is required to move beyond one calibration session. While spend remains within calendar pace, the ceiling keeps one discrete admission even when the measured rate cannot sustain one continuously; the next meter observation and calendar gate decide whether a successor may start. Fleet, interactive, and voice leases share the account and machine ceilings. At 1×, new work consumes at most one admission per meter observation.
 
-These ceilings govern admission only. Already admitted workers finish even when pacing, reserves, account reservations, provider boosts, or machine limits would refuse new work. Their leases remain charged, so replacements cannot bypass those limits. Worker recovery retains the same run, account, release, model, thinking level, and Pi JSONL without a new quota admission. Explicit operator aborts and stall handling still apply.
+These ceilings govern admission only. Already admitted workers finish even when pacing, reserves, account reservations, provider boosts, or machine limits would refuse new work. Their leases remain charged, so replacements cannot bypass those limits. Worker recovery retains the same run, account, release, model, thinking level, core and native/portable state without a new quota admission. Explicit operator aborts and stall handling still apply.
 
 `status` exposes the manifest's `laneBudget`, account ceilings and reasons under that budget, and each lane's active count. Pi Remote includes every starting or running session in its running total.
 
@@ -57,7 +57,7 @@ PI_ORCHESTRATOR_LISTEN_HOST
 PI_ORCHESTRATOR_PORT
 ```
 
-The JSON config may set model `profiles`, `backgroundSpendFraction`, machine and account concurrency, meter age, reconciliation periods, stall limits, `taskManifest`, `authPath`, and `agentDir`. The strict `astra`, `sol`, `terra`, `luna`, and `opus` profiles are always available alongside configured profiles. Each selects exactly one catalog model, even if a local profile uses the same name.
+The JSON config may set `core`, `profileCores`, model `profiles`, `backgroundSpendFraction`, machine and account concurrency, meter age, reconciliation periods, stall limits, `taskManifest`, `authPath`, and `agentDir`. The strict `astra`, `sol`, `terra`, `luna`, and `opus` profiles are always available alongside configured profiles. Each selects exactly one catalog model, even if a local profile uses the same name.
 
 The [shared catalog](src/catalog.ts) maps Astra to `openai-codex/gpt-6-astra` and Sol, Terra, and Luna to `openai-codex/gpt-5.6-sol`, `gpt-5.6-terra`, and `gpt-5.6-luna`. All four share the Codex five-hour and weekly meters. Their strict profiles use the catalog's thinking defaults, `xhigh` for Astra and `max` for Sol, Terra, and Luna. Host-defined profiles can choose different thinking levels.
 
@@ -69,7 +69,7 @@ Profile candidates retain their priority order. A candidate can replace `thinkin
 
 For an experiment, record the activation time and compare new runs by `run.thinking`. `run.id` joins their token totals in `usage_hour`; session files retain the work and results. Equal admission counts do not imply equal concurrent counts or equal completion counts. A worker-launch failure remains an assigned trial and is recorded as such rather than silently replaced in the allocation.
 
-A lane manifest has `version: 2` and a `lanes` array. Every lane declares `id`, `prompt`, `cwd`, `profile`, and positive `weight`. Unknown fields are rejected, including worker targets.
+A lane manifest has `version: 2` and a `lanes` array. Every lane declares `id`, `prompt`, `cwd`, `profile`, and positive `weight`. Optional `core` overrides the profile/config core for new runs. Unknown fields are rejected, including worker targets.
 
 The manifest's optional `budget` is `background` by default. Setting it to `force` makes every lane use the existing urgent admission policy, without background pacing, reserve, meter-age or multiplier gates. This mode requires a non-empty `snapshotCommand`. Its current readiness decides whether another worker is needed; `ready: false` stops new workers until work appears again. Actual provider exhaustion, disabled or reserved accounts, cooldowns, account and machine ceilings, and global pause still apply. The daemon owns continuation, with no repeated waves or waiting model session. Manifest reload changes new admissions only. Each run records its selected budget, so existing runs retain their policy across restarts.
 
@@ -119,9 +119,9 @@ Applications can submit durable Luna or Terra inference through [`CompletionClie
 
 ## Application-owned workspaces
 
-`POST /v1/run/isolated` requires `context: { tools: ["read", "write", "edit", "bash", "agent_browser"] }`. This selects an isolated context rather than the fleet's normal environment. The dedicated endpoint fails without launching anything on a host that has not deployed this feature. `/v1/run` also accepts the same context contract. It requires an explicit `cwd` and one run. An empty tool list creates a tool-free agent. Built-in names are declared in `src/domain.ts`. Applications can also supply `extensions: ["/absolute/path/to/tool.ts"]` and select their registered tool names in `tools`. The worker fails before prompting if any requested tool did not load. Other context fields are rejected. Application extensions execute as the fleet user, just like the application's bash tool; these paths are an explicit trusted-code input.
+`POST /v1/run/isolated` requires the Pi core and `context: { tools: ["read", "write", "edit", "bash", "agent_browser"] }`. This selects an isolated context rather than the fleet's normal environment. The dedicated endpoint fails without launching anything on a host that has not deployed this feature. `/v1/run` also accepts the same context contract. It requires an explicit `cwd` and one run. An empty tool list creates a tool-free agent. Built-in names are declared in `src/domain.ts`. Applications can also supply `extensions: ["/absolute/path/to/tool.ts"]` and select their registered tool names in `tools`. The worker fails before prompting if any requested tool did not load. Other context fields are rejected. Application extensions execute as the fleet user, just like the application's bash tool; these paths are an explicit trusted-code input.
 
-The daemon stores the contract atomically with the run in its `run-context:<id>` control record. Recovery uses the same contract. The worker creates its HOME, temporary files, XDG directories, and Pi configuration inside `cwd/.home`. Sessions remain in the fleet's durable session directory, outside the disposable workspace. Pi loads no discovered instructions, skills, templates, settings, or extensions. Only pooled authentication, usage accounting, output-limit continuation, and the extensions required by the requested tools load. Remote-thread identifiers and inherited credential environment variables are removed.
+The daemon stores the contract atomically with the run in its `run-context:<id>` control record. Recovery uses the same contract. The worker creates its HOME, temporary files, XDG directories, and Pi configuration inside `cwd/.home`. Sessions remain in the run's durable core directory, outside the disposable workspace. Pi loads no discovered instructions, skills, templates, settings, or extensions. Only pooled authentication, usage accounting, output-limit continuation, and the extensions required by the requested tools load. Remote-thread identifiers and inherited credential environment variables are removed.
 
 This is context isolation for trusted agents, not an OS security boundary. Bash still executes arbitrary code as the fleet user and can address files or services outside the workspace. The submitting application owns workspace creation, allowed reference files, result validation, accepted artifact storage, and cleanup after completion or failure. The orchestrator never deletes a caller-supplied `cwd`.
 

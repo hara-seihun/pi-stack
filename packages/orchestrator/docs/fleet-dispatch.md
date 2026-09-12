@@ -1,6 +1,8 @@
-# Fleet children and coordinator return
+# External fleet children and coordinator return
 
-A root fleet run assigned Astra or Sol receives `fleet_dispatch`. The tool accepts `task`, an exact `model` from Astra/Sol/Terra/Luna, an optional `requestId`, and an optional `escalatesRunId`. Model descriptions come from Hara's verbatim text in the shared catalog. The tool description includes the [shared Codex-derived delegation guidance](delegation-policy.md), also used by Remote text threads. Delegation is optional, with immediate blocking work kept local and independent work delegated when it can run alongside useful local work. The worker adds no separate system prompt.
+New runs use [core-owned trees](agent-cores.md). This page describes active records admitted by the external-child worker release. The daemon still settles and recovers those records using each coordinator's immutable release. New core-owned runs cannot use this dispatch API.
+
+A root fleet run admitted by that release and assigned Astra or Sol receives `fleet_dispatch`. The tool accepts `task`, an exact `model` from Astra/Sol/Terra/Luna, an optional `requestId`, and an optional `escalatesRunId`. Model descriptions come from Hara's verbatim text in the shared catalog. The tool description includes the [shared Codex-derived delegation guidance](delegation-policy.md), also used by Remote text threads. Delegation is optional, with immediate blocking work kept local and independent work delegated when it can run alongside useful local work. The worker adds no separate system prompt.
 
 The child receives the supplied task, the parent's cwd and budget, and the normal fleet environment. It starts its own transcript. It does not copy the coordinator's transcript. No child can dispatch another child, regardless of its model. Both tool registration and the dispatch endpoint enforce this boundary. Isolated application runs receive no fleet tools, cannot use the dispatch endpoint, and keep their existing context and single-turn completion contract.
 
@@ -58,4 +60,4 @@ The caller's listing limit still applies. A missing parent row can be fetched di
 
 ## Local proof
 
-Run `npm test -w pi-orchestrator` and `npm run typecheck -w pi-orchestrator` from the repository root. Fleet tests cover all model choices, escalation and replay, isolated-run rejection, completion/settlement races, ledger reopening, a busy parent's steering receipt before its final response, transcript receipt deduplication after interrupted acknowledgement, recovery of an accepted dispatch with a lost response, and coordinator wakeup from the recorded release with one machine slot. Existing isolated-context and worker tests run in the same suite.
+`tests/fleet.test.ts` creates external-child records and covers model choices, escalation and replay, isolated-run rejection, completion/settlement races, ledger reopening, and coordinator wakeup from the recorded release with one machine slot. `tests/core-custody.test.ts` proves new runs cannot dispatch external children. The recorded worker release retains its own transcript delivery implementation; current workers contain no external result scheduler.

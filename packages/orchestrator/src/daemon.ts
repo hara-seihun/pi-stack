@@ -6,6 +6,8 @@ import { homedir } from "node:os";
 import { createServer, type IncomingMessage, type ServerResponse } from "node:http";
 import type { BudgetClass, LaneReadiness, LaneManifest, LaneSpec, OrchestratorConfig, Run } from "./domain.js";
 import { isRunContext } from "./isolated-context-contract.js";
+import { resolveCore } from "./config.js";
+import { isCoreId } from "./cores/contracts.js";
 import { accountCapacity, assign, assignCompletion, commitMeterAdmission } from "./policy.js";
 import { Store } from "./store.js";
 import { Heartbeats } from "./heartbeats.js";
@@ -189,7 +191,7 @@ export class Daemon {
         if(!choice.assignment){this.store.setControl(`refusal:${key}`,choice.refusals.map((r)=>`${r.accountId}: ${r.reason}`).join("; "));continue;}
         try{
           const prompt=await this.lanePrompt(lane);
-          const [id]=this.store.createRuns({count:1,source:"lane",sourceId:lane.id,prompt,cwd:lane.cwd,profile:lane.profile,budget:this.laneBudget});
+          const [id]=this.store.createRuns({count:1,source:"lane",sourceId:lane.id,prompt,cwd:lane.cwd,profile:lane.profile,core:resolveCore(this.config,lane.profile,lane.core),budget:this.laneBudget});
           if(!await this.launch(this.store.run(id!)!)){failed.add(key);this.store.trimQueuedLane(lane.id,0);continue;}
           if(this.snapshotCommand)this.store.setControl(`readiness-admitted:${lane.id}`,String(this.readinessAt));
           this.store.setControl(`refusal:${key}`,"");
@@ -219,8 +221,11 @@ export class Daemon {
 
   private async launch(run:Run):Promise<boolean>{
     const fixed=this.store.fleetChild(run.id)?.assignment;
-    const config=fixed?{...this.config,profiles:{...this.config.profiles,[run.profile]:[fixed]}}:this.config;
     const completion=!!this.completions.byRun(run.id);
+    const candidates=fixed?[fixed]:this.config.profiles[run.profile]??[];
+    const supported=run.core==="codex"&&!completion?candidates.filter(candidate=>candidate.provider==="openai-codex"):candidates;
+    if(!supported.length&&run.core==="codex"&&!completion){this.store.updateRun(run.id,{state:"failed",failureKind:"task",result:`Codex core requires an openai-codex model in profile ${run.profile}`});return true;}
+    const config={...this.config,profiles:{...this.config.profiles,[run.profile]:supported}};
     const choice=completion?assignCompletion(this.store,run.id,run.profile,config):assign(this.store,run.profile,run.budget,config,Date.now(),undefined,run.id);
     if(!choice.assignment){this.store.setControl(`refusal:${run.id}`,choice.refusals.map((r)=>`${r.accountId}: ${r.reason}`).join("; "));return false;}
     const unit=completion?`completion:${run.id}`:`pi-orchestrator-run-${run.id.replaceAll("-","")}`;
@@ -352,7 +357,7 @@ export class Daemon {
       }
       if(method==="GET"&&url.pathname==="/v1/status")return json(res,200,this.status());
       if(method==="GET"&&url.pathname==="/v1/runs")return json(res,200,{runs:this.store.runs(),live:this.store.live()});
-      if(method==="GET"&&url.pathname==="/v1/plans")return json(res,200,{accounts:this.store.accounts(),meters:this.store.meters(),leases:this.store.activeLeases(),controls:Object.fromEntries((this.store.db.prepare("SELECT key,value FROM control INDEXED BY sqlite_autoindex_control_1 WHERE key NOT GLOB 'completion:*' AND key NOT GLOB 'completion-attempt:*' AND key NOT GLOB 'completion-receipt:*' AND key NOT GLOB 'completion-recovery:*' AND key NOT GLOB 'run-context:*' AND key NOT GLOB 'fleet-child:*'").all() as any[]).map((r)=>[r.key,r.value]))});
+      if(method==="GET"&&url.pathname==="/v1/plans")return json(res,200,{accounts:this.store.accounts(),meters:this.store.meters(),leases:this.store.activeLeases(),controls:Object.fromEntries((this.store.db.prepare("SELECT key,value FROM control INDEXED BY sqlite_autoindex_control_1 WHERE key NOT GLOB 'completion:*' AND key NOT GLOB 'completion-attempt:*' AND key NOT GLOB 'completion-receipt:*' AND key NOT GLOB 'completion-recovery:*' AND key NOT GLOB 'run-context:*' AND key NOT GLOB 'run-core:*' AND key NOT GLOB 'run-usage:*' AND key NOT GLOB 'fleet-child:*'").all() as any[]).map((r)=>[r.key,r.value]))});
       if(method==="GET"&&url.pathname.startsWith("/internal/runs/")){
         const parts=url.pathname.split("/"),id=parts[3]!,action=parts[4];const run=this.store.run(id);if(!run)return json(res,404,{error:"run not found"});
         if(action==="completion"&&parts.length===5)return json(res,200,{completion:this.completions.byRun(id)});
@@ -365,6 +370,23 @@ export class Daemon {
         if(!this.store.run(id))return json(res,404,{error:"run not found"});
         if(action==="completion"&&parts[5]==="claim")return completionReply(this.completions.claim(id,input.attemptId));
         if(action==="completion"&&parts[5]==="settle")return completionReply(this.completions.settle(id,input.attemptId,input.outcome));
+        if(action==="usage"){
+          const run=this.store.run(id)!;
+          if(run.childrenOwner!=="core"||!run.accountId)return json(res,409,{error:"Run does not use worker-owned core accounting"});
+          if(typeof input.receiptId!=="string"||! /^[a-f0-9]{64}$/.test(input.receiptId)||!input.usage||typeof input.usage!=="object")return json(res,400,{error:"Invalid core usage receipt"});
+          const accountId=input.accountId===undefined||input.accountId===run.provider?run.accountId:String(input.accountId);
+          if(!this.store.account(accountId))return json(res,400,{error:"Unknown core usage account"});
+          const components=["input","output","cacheRead","cacheWrite"] as const;
+          if(components.some(component=>input.usage[component]!==undefined&&(!Number.isFinite(input.usage[component])||input.usage[component]<0)))return json(res,400,{error:"Invalid core token usage"});
+          this.store.transaction(()=>{
+            const key=`run-usage:${id}:${input.receiptId}`;
+            if(this.store.control(key))return;
+            const hour=Math.floor(Date.now()/3_600_000)*3_600_000;
+            for(const component of components)if(input.usage[component]>0)this.store.recordUsage({accountId,hour,source:"fleet",runId:id,model:String(input.model??run.model),component,tokens:input.usage[component]});
+            this.store.setControl(key,"1");
+          });
+          return json(res,200,{ok:true});
+        }
         if(action==="dispatch"){
           const outcome=this.fleet.dispatch(id,input);
           if(!outcome.ok)return json(res,400,{error:outcome.error});
@@ -376,7 +398,7 @@ export class Daemon {
           return outcome.ok?json(res,200,{ok:true}):json(res,400,{error:outcome.error});
         }
         if(action==="state"){
-          if(input.state==="done"&&!this.store.run(id)!.context)this.fleet.settle(id,input.result??"");
+          if(input.state==="done"&&this.store.run(id)!.childrenOwner!=="core"&&!this.store.run(id)!.context)this.fleet.settle(id,input.result??"");
           else this.store.updateRun(id,input);
           const run=this.store.run(id);
           if(input.cooldownUntil&&run?.accountId)this.store.setCooldown(run.accountId,Number(input.cooldownUntil));
@@ -433,10 +455,13 @@ export class Daemon {
         if(url.pathname==="/v1/run/isolated"&&input.context===undefined)return json(res,400,{error:"An isolated run requires context.tools"});
         if(input.context!==undefined&&!isRunContext(input.context))return json(res,400,{error:"context requires a tools allowlist and optional absolute application extension paths"});
         if(input.context&&(!input.cwd||!Number.isInteger(input.count??1)||(input.count??1)!==1))return json(res,400,{error:"Isolated runs require an explicit workspace cwd and count 1"});
-        const ids=this.store.createRuns({count:Number(input.count??1),source:"direct",prompt:String(input.prompt),cwd:String(input.cwd??process.cwd()),profile:String(input.profile??"standard"),budget:input.force?"force":"background",context:input.context});
+        if(input.core!==undefined&&!isCoreId(input.core))return json(res,400,{error:"core must be pi or codex"});
+        const profile=String(input.profile??"standard"),core=resolveCore(this.config,profile,input.core);
+        if(core==="codex"&&input.context)return json(res,422,{error:"Codex core does not support isolated tools/extensions contracts"});
+        const ids=this.store.createRuns({count:Number(input.count??1),source:"direct",prompt:String(input.prompt),cwd:String(input.cwd??process.cwd()),profile,core,budget:input.force?"force":"background",context:input.context});
         void this.reconcile();return json(res,201,{runIds:ids});
       }
-      if(method==="POST"&&url.pathname==="/v1/wave"){const input=await body(req),lane=this.store.lane(String(input.lane));if(!lane)return json(res,404,{error:"lane not found"});const ids=this.store.createRuns({count:Number(input.count??1),source:"direct",sourceId:lane.id,prompt:lane.prompt,cwd:lane.cwd,profile:lane.profile,budget:input.force?"force":"background"});void this.reconcile();return json(res,201,{runIds:ids});}
+      if(method==="POST"&&url.pathname==="/v1/wave"){const input=await body(req),lane=this.store.lane(String(input.lane));if(!lane)return json(res,404,{error:"lane not found"});if(input.core!==undefined&&!isCoreId(input.core))return json(res,400,{error:"core must be pi or codex"});const ids=this.store.createRuns({count:Number(input.count??1),source:"direct",sourceId:lane.id,prompt:lane.prompt,cwd:lane.cwd,profile:lane.profile,core:resolveCore(this.config,lane.profile,input.core??lane.core),budget:input.force?"force":"background"});void this.reconcile();return json(res,201,{runIds:ids});}
       const runAbort=/^\/v1\/runs\/([^/]+)\/(abort|kill)$/.exec(url.pathname);if(method==="POST"&&runAbort){const id=runAbort[1]!,action=runAbort[2]!;this.store.setControl(`abort:${id}`,action);const run=this.store.run(id);const completion=this.completions.byRun(id);if(completion){const outcome=this.completions.cancel(completion.requestId);this.stopUnit(run?.workerUnit);return completionReply(outcome);}if(action==="kill"||run?.state==="queued"||run?.state==="waiting"){this.stopUnit(run?.workerUnit);this.store.updateRun(id,{state:"aborted",failureKind:"operator",result:`${action} by operator`});}return json(res,200,{ok:true});}
       if(method==="POST"&&url.pathname==="/v1/control"){const input=await body(req);this.store.setControl(String(input.key),String(input.value));return json(res,200,{ok:true});}
       json(res,404,{error:"not found"});

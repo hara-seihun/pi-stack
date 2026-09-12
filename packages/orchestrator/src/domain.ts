@@ -1,5 +1,6 @@
 import type { ModelCandidate } from "./catalog.js";
 import type { AccountReservation } from "./admission-reservation.js";
+import type { CoreId } from "./cores/contracts.js";
 
 export type BudgetClass = "background" | "force";
 export type RunSource = "direct" | "lane";
@@ -53,6 +54,7 @@ export interface LaneSpec {
   readonly prompt: string;
   readonly cwd: string;
   readonly profile: string;
+  readonly core?: CoreId;
   readonly weight: number;
   readonly priority?: number;
   readonly doctrineUrl?: string;
@@ -79,6 +81,11 @@ export interface Run {
   readonly cwd: string;
   readonly profile: string;
   readonly budget: BudgetClass;
+  readonly core?: CoreId;
+  readonly coreStateDir?: string;
+  readonly nativeSessionId?: string;
+  readonly portableSessionFile?: string;
+  readonly childrenOwner?: "core" | "orchestrator";
   readonly context?: RunContext;
   readonly parentRunId?: string;
   readonly rootRunId?: string;
@@ -125,6 +132,8 @@ export type ProfileCandidate = Omit<ModelCandidate, "thinking"> & (
 
 export interface OrchestratorConfig {
   readonly listenHost?: string;
+  readonly core?: CoreId;
+  readonly profileCores?: Readonly<Record<string, CoreId>>;
   readonly profiles: Readonly<Record<string, readonly ProfileCandidate[]>>;
   readonly backgroundSpendFraction: number;
   readonly maxConcurrentSessions: number;
