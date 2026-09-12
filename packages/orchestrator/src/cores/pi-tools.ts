@@ -1,4 +1,4 @@
-import { defineTool } from "@earendil-works/pi-coding-agent";
+import { defineTool, type ExtensionContext } from "@earendil-works/pi-coding-agent";
 import { Type } from "typebox";
 import { DELEGATION_POLICY } from "../delegation-policy.js";
 import { SUBAGENT_MODEL_DESCRIPTIONS } from "../catalog.js";
@@ -6,7 +6,8 @@ import type { PiToolsHost } from "./pi-types.js";
 
 const result = (value: unknown) => ({ content: [{ type: "text" as const, text: JSON.stringify(value) }], details: value });
 
-export function piChildTools(host: PiToolsHost, agentId: string) {
+export function piChildTools(host: PiToolsHost) {
+  const caller = (ctx: ExtensionContext) => host.caller(ctx.sessionManager.getSessionId());
   return [
     defineTool({
       name: "core_delegate", label: "Delegate to a Pi child",
@@ -23,7 +24,7 @@ export function piChildTools(host: PiToolsHost, agentId: string) {
           root: Type.String({ description: "Absolute workspace pool directory." }),
         })),
       }),
-      execute: async (id, request) => result(await host.delegate(agentId, id, request)),
+      execute: async (id, request, _signal, _update, ctx) => result(await host.delegate(caller(ctx), id, request)),
     }),
     defineTool({
       name: "core_read", label: "Read a Pi agent",
@@ -35,17 +36,19 @@ export function piChildTools(host: PiToolsHost, agentId: string) {
       name: "core_list", label: "List Pi agents",
       description: "List a Pi agent's direct subagents, including settled children with their native session IDs. Defaults to this agent.",
       parameters: Type.Object({ parentId: Type.Optional(Type.String()) }),
-      execute: async (_id, p) => result(host.list(p.parentId ?? agentId)),
+      execute: async (_id, p, _signal, _update, ctx) => result(host.list(p.parentId ?? caller(ctx))),
     }),
     defineTool({
       name: "core_control", label: "Control a Pi child",
       description: "Send a message or stop a Pi child. Steer changes its current work; follow_up queues another message. Abort stops the child's whole subtree.",
       parameters: Type.Object({ agentId: Type.String(), action: Type.Union(["steer", "follow_up", "abort"].map(value => Type.Literal(value))), message: Type.Optional(Type.String()) }),
-      execute: async (_id, p) => {
+      execute: async (id, p, _signal, _update, ctx) => {
+        const agentId = caller(ctx);
         if (p.agentId === agentId) throw new Error("Use the current turn to control this agent; core_control targets another agent.");
         if (p.action !== "abort" && !p.message) throw new Error("message is required");
-        await host.control(p.agentId, { type: p.action, message: p.message }, agentId);
-        return result({ agentId: p.agentId, action: p.action });
+        const workId = `control:${agentId}:${id}`;
+        const operation = await host.control(p.agentId, { type: p.action, workId, message: p.message }, agentId);
+        return result({ agentId: p.agentId, action: p.action, workId, operation });
       },
     }),
   ];

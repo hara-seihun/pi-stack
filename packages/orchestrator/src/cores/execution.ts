@@ -2,7 +2,7 @@ import { createHash } from "node:crypto";
 import { existsSync, readFileSync } from "node:fs";
 import { join } from "node:path";
 import { writeCoreState } from "./journal.js";
-import type { CoreExecutionSnapshot, CoreOperation, CoreOperationState, CoreOperationKind, CoreResult } from "./contracts.js";
+import type { CoreExecutionBaseline, CoreExecutionSnapshot, CoreOperation, CoreOperationState, CoreOperationKind, CoreResult } from "./contracts.js";
 
 export const isTerminalOperation = (state: CoreOperationState): boolean =>
   state === "succeeded" || state === "failed" || state === "cancelled";
@@ -12,8 +12,10 @@ export class CoreExecutionLedger {
   private stopping = false;
   private readonly operations = new Map<string, CoreOperation>();
   private readonly hashes = new Map<string, string>();
+  private readonly sealedInputs = new Map<string, string>();
+  readonly baseline?: CoreExecutionBaseline;
   private readonly path: string;
-  constructor(directory: string, private readonly emit: (event: { type: "execution_update"; execution: CoreExecutionSnapshot }) => void) {
+  constructor(directory: string, private readonly emit: (event: { type: "execution_update"; execution: CoreExecutionSnapshot }) => void, baseline?: CoreExecutionBaseline) {
     this.path = join(directory, "execution.json");
     if (existsSync(this.path)) {
       const state = JSON.parse(readFileSync(this.path, "utf8"));
@@ -21,8 +23,15 @@ export class CoreExecutionLedger {
       this.revision = state.execution.revision;
       for (const operation of state.execution.operations) this.operations.set(operation.workId, operation);
       for (const [id, hash] of state.hashes) this.hashes.set(id, hash);
+      for (const [id, hash] of state.sealedInputs ?? []) this.sealedInputs.set(id, hash);
+      this.baseline = state.baseline;
+    } else if (baseline) {
+      if (!baseline.id || !baseline.sessionId) throw new Error("Execution baseline requires its host seal and session identity");
+      this.baseline = structuredClone(baseline);
+      this.publish();
     }
   }
+  isSealed(workId: string): boolean { return this.sealedInputs.has(workId); }
   snapshot(): CoreExecutionSnapshot {
     const operations = [...this.operations.values()].map(operation => structuredClone(operation));
     const status = operations.some(operation => operation.state === "unknown") ? "blocked"
@@ -31,6 +40,7 @@ export class CoreExecutionLedger {
   }
   begin(workId: string, input: unknown, agentId?: string, kind?: CoreOperationKind): { operation: CoreOperation; dispatch: boolean } {
     if (!workId) throw new Error("Core work identity is required");
+    if (this.isSealed(workId)) throw new Error(`Core work belongs to sealed baseline ${this.baseline?.id}; it cannot be replayed: ${workId}`);
     const hash = createHash("sha256").update(JSON.stringify(input)).digest("hex");
     const previous = this.operations.get(workId);
     if (previous) {
@@ -44,12 +54,18 @@ export class CoreExecutionLedger {
     return { operation: structuredClone(operation), dispatch: true };
   }
   adopt(operation: CoreOperation, inputHash: string): void {
-    if (this.operations.has(operation.workId)) return;
+    if (this.operations.has(operation.workId) || this.isSealed(operation.workId)) return;
+    if (this.baseline && operation.state === "unknown") {
+      this.sealedInputs.set(operation.workId, inputHash);
+      this.publish();
+      return;
+    }
     this.operations.set(operation.workId, structuredClone(operation));
     this.hashes.set(operation.workId, inputHash);
     this.publish();
   }
   transition(workId: string, state: CoreOperationState, error?: string, result?: CoreResult): void {
+    if (this.isSealed(workId)) return;
     const operation = this.operations.get(workId);
     if (!operation) throw new Error(`Unknown core work: ${workId}`);
     if (isTerminalOperation(operation.state)) return;
@@ -82,7 +98,7 @@ export class CoreExecutionLedger {
   private publish(): void {
     this.revision++;
     const execution = this.snapshot();
-    writeCoreState(this.path, { version: 1, execution, hashes: [...this.hashes] });
+    writeCoreState(this.path, { version: 1, execution, hashes: [...this.hashes], baseline: this.baseline, sealedInputs: [...this.sealedInputs] });
     this.emit({ type: "execution_update", execution });
   }
 }

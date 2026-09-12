@@ -4,7 +4,7 @@ import { argument, isCoreId, type CoreCommand, type CoreId, type CoreOutput, typ
 import { CoreJournal, readPortableConversation } from "./journal.js";
 export { CORE_IDS, isCoreId } from "./contracts.js";
 export type { CoreId, CoreAgent, CoreCommand, CoreOutput, CoreSession, CoreSessionOptions, OpenCoreSession, PortableConversation,
-  CoreDispatch, CoreOutcome, CoreFailureKind, CoreResponse, CoreExecutionUpdate, CoreResult, CoreOperation, CoreOperationKind, CoreOperationState, CoreExecutionSnapshot } from "./contracts.js";
+  CoreDispatch, CoreOutcome, CoreFailureKind, CoreResponse, CoreExecutionUpdate, CoreResult, CoreOperation, CoreOperationKind, CoreOperationState, CoreExecutionSnapshot, CoreExecutionBaseline } from "./contracts.js";
 export { CoreController } from "./controller.js";
 export { isCoreExecutionSnapshot, isTerminalOperation } from "./execution.js";
 export { CoreJournal, readPortableConversation, writeCoreState } from "./journal.js";
@@ -18,6 +18,9 @@ export function configuredCore(value: unknown = process.env.PI_STACK_DEFAULT_COR
 export async function openCoreSession(options: CoreSessionOptions, output: (event: CoreOutput) => void, exit: (code?: number) => void,
   factory?: OpenCoreSession): Promise<CoreSession> {
   const core = configuredCore(options.env.PI_STACK_CORE);
+  const baseline = options.executionBaseline ?? (options.env.PI_STACK_EXECUTION_BASELINE ? JSON.parse(options.env.PI_STACK_EXECUTION_BASELINE) : undefined);
+  if (baseline && (typeof baseline.id !== "string" || !baseline.id || baseline.sessionId !== options.sessionId)) throw new Error("Execution baseline must name this root and its host seal");
+  options = { ...options, executionBaseline: baseline };
   const transferPath = join(options.stateDir, "transfer.json");
   const transfer = options.transfer ?? (existsSync(transferPath) ? JSON.parse(readFileSync(transferPath, "utf8")) as PortableConversation : undefined);
   const journal = new CoreJournal(options.stateDir, core, options.sessionId, options.cwd, transfer);

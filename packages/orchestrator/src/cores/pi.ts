@@ -1,7 +1,7 @@
 import { createHash, randomUUID } from "node:crypto";
 import { join } from "node:path";
 import { catalogModel } from "../catalog.js";
-import { argument, type CoreAgent, type CoreCommand, type CoreOutput, type CoreOperationKind, type CoreResponse, type CoreSession,
+import { argument, type CoreAgent, type CoreCommand, type CoreOutput, type CoreOperation, type CoreExecutionSnapshot, type CoreOperationKind, type CoreResponse, type CoreSession,
   type CoreSessionOptions, type OpenCoreSession } from "./contracts.js";
 import { openPiNative } from "./pi-native.js";
 import { PiTreeStore } from "./pi-store.js";
@@ -41,7 +41,8 @@ export class PiCoreSession implements CoreSession, PiToolsHost {
   constructor(private readonly options: CoreSessionOptions, private readonly output: (event: CoreOutput) => void,
     private readonly exit: (code?: number) => void, private readonly openNative: OpenPiNative = openPiNative) {
     this.store = new PiTreeStore(options.stateDir, options.sessionId);
-    this.execution = new CoreExecutionLedger(options.stateDir, output);
+    if (options.executionBaseline && options.executionBaseline.sessionId !== options.sessionId) throw new Error("Execution baseline belongs to a different root");
+    this.execution = new CoreExecutionLedger(options.stateDir, output, options.executionBaseline);
   }
 
   async open(): Promise<this> {
@@ -72,13 +73,15 @@ export class PiCoreSession implements CoreSession, PiToolsHost {
     }
     for (const node of this.store.nodes.values()) {
       if (node.work && !this.execution.snapshot().operations.some(operation => operation.workId === node.work!.id)) {
-        this.execution.begin(node.work.id, { importedWork: node.work.id }, node.id);
-        this.execution.transition(node.work.id, "unknown", "Native work predates durable execution outcomes");
+        this.execution.adopt({ workId: node.work.id, agentId: node.id, state: "unknown", error: "Native work predates durable execution outcomes" },
+          createHash("sha256").update(JSON.stringify({ importedWork: node.work.id })).digest("hex"));
       }
+      if (node.work && this.execution.isSealed(node.work.id)) { node.work = undefined; node.state = "idle"; }
       node.busy = false;
       this.observe(node);
     }
-    if (!this.options.transfer && !this.execution.snapshot().operations.length && this.native.get(root.id)?.snapshot().messages.length) {
+    for (const delivery of this.store.deliveries.values()) if (this.execution.isSealed(delivery.workId) && delivery.delivery === "pending") delivery.delivery = "cancelled";
+    if (!this.execution.baseline && !this.options.transfer && !this.execution.snapshot().operations.length && this.native.get(root.id)?.snapshot().messages.length) {
       const workId = `native:${root.id}:untracked`;
       this.execution.begin(workId, { nativeSessionId: root.nativeSessionId }, root.id);
       this.execution.transition(workId, "unknown", "Native conversation has no durable execution receipts");
@@ -103,6 +106,13 @@ export class PiCoreSession implements CoreSession, PiToolsHost {
     return node;
   }
   private children(id: string): PiNode[] { return [...this.store.nodes.values()].filter(node => node.parentId === id); }
+  private deliveries(id: string) { return [...this.store.deliveries.values()].filter(delivery => delivery.parentId === id && delivery.delivery === "pending"); }
+  private recordResult(node: PiNode, cancelled = false): void {
+    if (!node.parentId || node.work?.status !== "complete" || this.store.deliveries.has(node.work.id)) return;
+    this.store.deliveries.set(node.work.id, { workId: node.work.id, agentId: node.id, parentId: node.parentId,
+      state: node.state, result: node.work.result ?? "", nativeSessionId: node.nativeSessionId, sessionFile: node.sessionFile,
+      delivery: cancelled ? "cancelled" : "pending" });
+  }
   private observe(node: PiNode): void {
     this.output({ type: "core_agent", core: "pi", rootId: this.options.sessionId, agent: publicAgent(node),
       nativeSessionFile: node.sessionFile, cwd: node.cwd, workId: node.work?.id });
@@ -145,7 +155,8 @@ export class PiCoreSession implements CoreSession, PiToolsHost {
     const local = this.native.get(id)?.snapshot();
     const descendants = this.subtree(id).slice(1);
     const snapshots = descendants.map(child => this.native.get(child.id)?.snapshot());
-    const pendingChildren = descendants.filter(child => child.busy || child.work && !child.work.delivered).length;
+    const pendingChildren = descendants.filter(child => child.busy || child.work?.status === "running"
+      || [...this.store.deliveries.values()].some(delivery => delivery.agentId === child.id && delivery.delivery === "pending")).length;
     const nativeIsStreaming = Boolean(state.isStreaming ?? local?.isStreaming ?? node.busy);
     const isStreaming = nativeIsStreaming || node.busy || pendingChildren > 0;
     const isCompacting = Boolean(state.isCompacting ?? local?.isCompacting) || snapshots.some(snapshot => snapshot?.isCompacting);
@@ -167,6 +178,8 @@ export class PiCoreSession implements CoreSession, PiToolsHost {
           event.success === false ? String(event.error ?? "Pi rejected the dispatch") : undefined);
         if (event.success === false && node.work?.id === workId) {
           node.work.status = "complete"; node.work.result = String(event.error ?? "Pi rejected the dispatch");
+          node.state = "failed";
+          this.recordResult(node);
         }
       }
     }
@@ -194,6 +207,7 @@ export class PiCoreSession implements CoreSession, PiToolsHost {
       node.busy = false; node.state = "idle";
       if (node.work?.status === "running") {
         node.work.status = "complete"; node.work.result = "Native session replaced"; node.state = "cancelled";
+        this.recordResult(node);
       }
       this.settling.set(node.id, { type: "agent_settled" });
       this.refresh(node); this.store.save(); this.observe(node); this.schedule(); return;
@@ -234,8 +248,8 @@ export class PiCoreSession implements CoreSession, PiToolsHost {
           error: message.errorMessage ? String(message.errorMessage) : undefined });
       }
       if (message?.customType === "core_child_result" && details?.workId) {
-        const child = this.children(node.id).find(child => child.work?.id === details.workId);
-        if (child?.work) child.work.delivered = true;
+        const delivery = this.store.deliveries.get(String(details.workId));
+        if (delivery?.parentId === node.id) delivery.delivery = "received";
       }
     }
     if (event.type === "queue_update") this.schedule();
@@ -262,10 +276,10 @@ export class PiCoreSession implements CoreSession, PiToolsHost {
     this.failing.add(node.id);
     node.busy = true;
     const finish = (failure: string) => {
-      for (const child of this.children(node.id)) if (child.work) child.work.delivered = true;
+      for (const delivery of this.deliveries(node.id)) delivery.delivery = "cancelled";
       node.busy = false; node.state = "failed"; node.error = failure;
       this.execution.settleAgent(node.id, "failed", failure);
-      if (node.work) { node.work.status = "complete"; node.work.result = failure; }
+      if (node.work) { node.work.status = "complete"; node.work.result = failure; this.recordResult(node); }
       const event: CoreOutput = { type: "core_error", error: failure };
       this.output(node.parentId ? { type: "core_child_event", core: "pi", rootId: this.options.sessionId,
         agentId: node.id, parentId: node.parentId, event } : event);
@@ -293,24 +307,23 @@ export class PiCoreSession implements CoreSession, PiToolsHost {
       const local = this.native.get(node.id)?.snapshot();
       if (local?.isStreaming || local?.isCompacting) continue;
       const children = this.children(node.id);
-      const ready = node.state === "failed" ? undefined : children.find(child => child.work?.status === "complete" && !child.work.delivered && !this.injecting.has(child.work.id));
-      if (ready?.work) {
-        const work = ready.work;
-        this.injecting.add(work.id);
+      const ready = node.state === "failed" ? undefined : this.deliveries(node.id).find(delivery => !this.injecting.has(delivery.workId));
+      if (ready) {
+        this.injecting.add(ready.workId);
         this.track((async () => {
           const engine = await this.ensure(node.id);
           if (this.closed || this.stopping.has(node.id)) return;
           const received = engine.snapshot().entries.some(entry => entry.customType === "core_child_result"
-            && (entry.details as { workId?: string } | undefined)?.workId === work.id);
+            && (entry.details as { workId?: string } | undefined)?.workId === ready.workId);
           if (received) {
-            work.delivered = true;
+            ready.delivery = "received";
             this.store.save();
-          } else this.inject(node, engine, "core_child_result", { agentId: ready.id, workId: work.id,
-            state: ready.state, result: work.result ?? "", nativeSessionId: ready.nativeSessionId, sessionFile: ready.sessionFile });
-        })().finally(() => this.injecting.delete(work.id)), node);
+          } else this.inject(node, engine, "core_child_result", { agentId: ready.agentId, workId: ready.workId,
+            state: ready.state, result: ready.result, nativeSessionId: ready.nativeSessionId, sessionFile: ready.sessionFile });
+        })().finally(() => this.injecting.delete(ready.workId)), node);
         continue;
       }
-      if (children.some(child => child.work?.status === "running" || child.work && !child.work.delivered)) continue;
+      if (children.some(child => child.work?.status === "running") || this.deliveries(node.id).length) continue;
       if (local?.pendingMessageCount) continue;
       const settled = this.settling.get(node.id);
       if (!settled) continue;
@@ -328,6 +341,7 @@ export class PiCoreSession implements CoreSession, PiToolsHost {
       if (node.work?.status === "running") {
         node.work.result = node.error ?? result?.error ?? result?.text ?? "";
         node.work.status = "complete";
+        this.recordResult(node);
       }
       this.results.delete(node.id);
       this.store.save(); this.observe(node);
@@ -359,11 +373,11 @@ export class PiCoreSession implements CoreSession, PiToolsHost {
     }
     if (!request.task.trim()) throw new Error("A child task is required");
     let child = request.threadId ? this.node(request.threadId) : !request.newThread
-      ? this.children(parentId).find(node => !node.busy && node.work?.delivered && !request.workspace && !request.cwd
+      ? this.children(parentId).find(node => !node.busy && node.work?.status !== "running" && !request.workspace && !request.cwd
         && (!request.model || node.model === (catalogModel(request.model)?.model ?? request.model.split("/").slice(1).join("/")))) : undefined;
     const reused = !!child;
     if (child && child.parentId !== parentId) throw new Error("Only a direct child can be continued");
-    if (child && (child.busy || child.work && !child.work.delivered)) throw new Error("Child still owns unfinished work");
+    if (child && (child.busy || child.work?.status === "running")) throw new Error("Child still owns running work");
     if (!child) {
       const model = catalogModel(request.model ?? "astra");
       const [provider, ...modelParts] = (request.model ?? "").split("/");
@@ -412,7 +426,8 @@ export class PiCoreSession implements CoreSession, PiToolsHost {
         }
         node.busy = false; node.state = "cancelled";
         this.execution.settleAgent(node.id, "cancelled", "Aborted");
-        if (node.work) { node.work.status = "complete"; node.work.result = "Aborted"; node.work.delivered = node.id !== id; }
+        if (node.work?.status === "running") { node.work.status = "complete"; node.work.result = "Aborted"; this.recordResult(node, node.id !== id); }
+        if (node.id !== id) for (const delivery of this.store.deliveries.values()) if (delivery.agentId === node.id && delivery.delivery === "pending") delivery.delivery = "cancelled";
         this.settling.delete(node.id); this.observe(node);
       }));
       this.store.save();
@@ -426,26 +441,28 @@ export class PiCoreSession implements CoreSession, PiToolsHost {
     this.stopping.add(id);
     try {
       await Promise.all(this.children(id).map(child => this.abortTree(child.id)));
-      for (const child of this.children(id)) if (child.work) child.work.delivered = true;
+      for (const delivery of this.deliveries(id)) delivery.delivery = "cancelled";
       this.store.save();
     } finally { this.stopping.delete(id); }
   }
-  async control(id: string, command: CoreCommand, callerId?: string): Promise<void> {
+  caller(nativeSessionId: string): string {
+    const node = [...this.store.nodes.values()].find(node => node.nativeSessionId === nativeSessionId);
+    if (!node) throw new Error(`Native Pi tool invocation has no core owner: ${nativeSessionId}`);
+    return node.id;
+  }
+  async control(id: string, command: CoreCommand, callerId?: string): Promise<CoreOperation | undefined> {
     if (this.closed) throw new Error("Pi core is closed");
     if (callerId && (id === callerId || !this.subtree(callerId).some(node => node.id === id))) {
-      throw new Error("An agent can control only its descendants; PiStack can control the whole tree");
+      throw new Error(`An agent can control only its descendants: caller=${callerId}, target=${id}, targetParent=${this.store.nodes.get(id)?.parentId}, root=${this.options.sessionId}`);
     }
     const node = this.node(id);
     if (command.type === "abort" || command.type === "compact") {
-      await this.maintain(node, { ...command, type: command.type });
-      return;
+      return (await this.maintain(node, { ...command, type: command.type })).operation;
     }
-    if (["steer","follow_up"].includes(command.type) && !this.activity(id).coreBusy) command = {...command,type:"prompt"};
+    const startsRun = ["steer", "follow_up"].includes(command.type) && !this.activity(id).coreBusy;
     if (["prompt", "steer", "follow_up"].includes(command.type)) {
       const workId = command.workId ?? command.id ?? randomUUID();
-      if (node.parentId && command.type === "prompt") node.work = { id: workId, task: command.message ?? "", status: "running" };
-      await this.dispatch(node, { ...command, workId });
-      return;
+      return (await this.dispatch(node, { ...command, workId }, false, startsRun ? "prompt" : command.type)).operation;
     }
     const engine = await this.ensure(id);
     const requestId = randomUUID();
@@ -458,7 +475,7 @@ export class PiCoreSession implements CoreSession, PiToolsHost {
       this.refresh(node); this.store.save();
     } finally { this.replies.delete(requestId); }
   }
-  private async dispatch(node: PiNode, command: CoreCommand, reserved = false): Promise<unknown> {
+  private async dispatch(node: PiNode, command: CoreCommand, reserved = false, nativeType = command.type): Promise<{ operation: CoreOperation; execution: CoreExecutionSnapshot }> {
     const workId = typeof command.workId === "string" ? command.workId : command.id ?? randomUUID();
     if (!reserved) {
       const begun = this.execution.begin(workId, { type: command.type, message: command.message, images: command.images ?? [] }, node.id, command.type as CoreOperationKind);
@@ -466,7 +483,11 @@ export class PiCoreSession implements CoreSession, PiToolsHost {
     }
     if (command.resume === true || this.execution.snapshot().operations.some(operation => operation.state === "unknown" && operation.workId !== workId)) {
       this.execution.transition(workId, "unknown", "Native work requires explicit reconciliation; automatic replay is disabled");
-      return { operation: this.execution.snapshot().operations.find(operation => operation.workId === workId), execution: this.execution.snapshot() };
+      return this.receipt(workId);
+    }
+    if (node.parentId && nativeType === "prompt") {
+      this.recordResult(node);
+      node.work = { id: workId, task: command.message ?? "", status: "running" };
     }
     const requestId = randomUUID();
     const reply: NativeReply = {};
@@ -481,7 +502,7 @@ export class PiCoreSession implements CoreSession, PiToolsHost {
     this.store.save(); this.observe(node);
     try {
       const engine = await this.ensure(node.id);
-      await engine.command({ ...command, workId, id: requestId });
+      await engine.command({ ...command, type: nativeType, workId, id: requestId });
       if (!reply.event && !isTerminalOperation(this.execution.snapshot().operations.find(operation => operation.workId === workId)!.state)) await acknowledgement;
       const operation = this.execution.snapshot().operations.find(operation => operation.workId === workId)!;
       if (!reply.event && !isTerminalOperation(operation.state)) this.execution.transition(workId, "unknown", "Native Pi did not acknowledge dispatch; effects may have occurred");
@@ -493,10 +514,17 @@ export class PiCoreSession implements CoreSession, PiToolsHost {
       this.dispatchRequests.delete(requestId); this.replies.delete(requestId);
       this.refresh(node); this.store.save();
     }
-    return { operation: this.execution.snapshot().operations.find(operation => operation.workId === workId), execution: this.execution.snapshot() };
+    return this.receipt(workId);
   }
 
-  private async maintain(node: PiNode, command: CoreCommand & { type: "abort" | "compact" }): Promise<unknown> {
+  private receipt(workId: string): { operation: CoreOperation; execution: CoreExecutionSnapshot } {
+    const execution = this.execution.snapshot();
+    const operation = execution.operations.find(operation => operation.workId === workId);
+    if (!operation) throw new Error(`Core lost its own operation: ${workId}`);
+    return { operation, execution };
+  }
+
+  private async maintain(node: PiNode, command: CoreCommand & { type: "abort" | "compact" }): Promise<{ operation: CoreOperation; execution: CoreExecutionSnapshot }> {
     const workId = command.workId ?? command.id ?? randomUUID();
     const begun = this.execution.begin(workId, { type: command.type, customInstructions: command.customInstructions }, node.id, command.type);
     if (begun.dispatch) {
@@ -522,7 +550,7 @@ export class PiCoreSession implements CoreSession, PiToolsHost {
         }
       } catch (error) { this.execution.transition(workId, "unknown", textError(error)); }
     }
-    return { operation: this.execution.snapshot().operations.find(operation => operation.workId === workId), execution: this.execution.snapshot() };
+    return this.receipt(workId);
   }
 
   async command(command: CoreCommand): Promise<void> {
@@ -541,7 +569,8 @@ export class PiCoreSession implements CoreSession, PiToolsHost {
         case "core_agent_command": {
           const { agentId, action, id: _id, type: _type, ...parameters } = command;
           if (!action) throw new Error("A core agent action is required");
-          await this.control(String(agentId), { ...parameters, type: action }); respond(); return;
+          const operation = await this.control(String(agentId), { ...parameters, type: action });
+          respond({ operation, execution: this.execution.snapshot() }); return;
         }
         case "abort": case "compact":
           respond(await this.maintain(this.node(this.options.sessionId), { ...command, type: command.type }));

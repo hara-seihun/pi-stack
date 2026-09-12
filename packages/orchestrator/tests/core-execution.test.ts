@@ -13,6 +13,16 @@ const snapshot = (revision: number, state: "running" | "succeeded"): CoreExecuti
   status: state === "running" ? "running" : "idle", operations: [{ workId: "work", state, agentId: "root", ...(state === "succeeded" ? { result: { text: "requested result" } } : {}) }] });
 
 describe("durable execution ownership", () => {
+  it("never applies a host baseline over an existing unresolved execution ledger", () => {
+    const path = directory();
+    const first = new CoreExecutionLedger(path, () => {});
+    first.begin("effect", "sent", "root");
+    const reopened = new CoreExecutionLedger(path, () => {}, { id: "later-host-seal", sessionId: "root" });
+    reopened.recover();
+    expect(reopened.baseline).toBeUndefined();
+    expect(reopened.snapshot()).toMatchObject({ status: "blocked", operations: [{ workId: "effect", state: "unknown" }] });
+  });
+
   it("retains every steer outcome and never lets a delayed acceptance overwrite settlement", () => {
     const ledger = new CoreExecutionLedger(directory(), () => {});
     for (const workId of ["prompt", "steer-a", "steer-b"]) ledger.begin(workId, workId, "root");

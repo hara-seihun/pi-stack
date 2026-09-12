@@ -76,7 +76,7 @@ export const openPiNative: OpenPiNative = async (options, node, tools, output, e
         PI_SESSION_FILE: sessionManager.getSessionFile(), PI_REMOTE_CONTEXT_OWNER_PID: String(process.pid) } }) });
       const created = await createAgentSessionFromServices({ services, sessionManager, sessionStartEvent, model,
         thinkingLevel: node.thinkingLevel as never, tools: isolated?.tools,
-        customTools: [bash, ...piChildTools(tools, node.id)] });
+        customTools: [bash, ...piChildTools(tools)] });
       const agentPrompt = created.session.agent.prompt.bind(created.session.agent);
       const agentContinue = created.session.agent.continue.bind(created.session.agent);
       const assertRun = () => {

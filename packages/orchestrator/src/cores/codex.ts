@@ -65,7 +65,8 @@ export function createCodexSession(dependencies: CodexDependencies): OpenCoreSes
     const guard = credentialGuard();
     const emit = (event: CoreOutput) => output(guard.clean(event));
     const save = () => writeCoreState(statePath, guard.clean(state));
-    const execution = new CoreExecutionLedger(options.stateDir, emit);
+    if (options.executionBaseline && options.executionBaseline.sessionId !== options.sessionId) fail("Execution baseline belongs to a different root");
+    const execution = new CoreExecutionLedger(options.stateDir, emit, options.executionBaseline);
     const transition = execution.transition.bind(execution);
     execution.recover("Codex restarted without an authoritative turn outcome");
     const hasStoredOwnership = execution.snapshot().operations.length > 0 || Object.keys(state.receipts).length > 0;
@@ -97,6 +98,7 @@ export function createCodexSession(dependencies: CodexDependencies): OpenCoreSes
     const active = new Map<string, string>();
     const completedTurns = new Map<string, Turn>();
     const settlingTurns = new Set<string>();
+    const pendingRootTurns = new Map<string, Turn>();
     const turnKey = (threadId: string, turnId: string) => `${threadId}:${turnId}`;
     const compactingThreads = new Set<string>();
     const manualCompactions = new Map<string, string>();
@@ -197,6 +199,7 @@ export function createCodexSession(dependencies: CodexDependencies): OpenCoreSes
         state.receipts[workId] = { hash, state: "accepted", threadId, turnId, native: turnId ? "turn" : "child" };
         save();
       }
+      if (execution.isSealed(workId)) return workId;
       const operation = execution.begin(workId, workId, threadId);
       if (operation.dispatch) transition(workId, "running");
       return workId;
@@ -233,12 +236,24 @@ export function createCodexSession(dependencies: CodexDependencies): OpenCoreSes
         receipt.threadId = threadId;
         if (turn.status === "inProgress") transition(workId, "running");
         else if (!settlingTurns.has(key)) {
+          if (threadId === state.threadId && execution.snapshot().operations.some(operation => operation.agentId !== undefined && !isTerminalOperation(operation.state))) {
+            pendingRootTurns.set(key, turn);
+            continue;
+          }
           const outcome = turn.status === "completed" ? "succeeded" : turn.status === "failed" ? "failed" : turn.status === "interrupted" ? "cancelled" : "unknown";
           transition(workId, outcome, guard.clean(turn.error?.message), { text: state.results?.[key] ?? "" });
         }
       }
       save();
+      settleRootTurns();
     };
+    function settleRootTurns() {
+      if (execution.snapshot().operations.some(operation => operation.agentId !== undefined && !isTerminalOperation(operation.state))) return;
+      for (const [key, turn] of [...pendingRootTurns]) {
+        pendingRootTurns.delete(key);
+        observeTurn(state.threadId!, turn);
+      }
+    }
     function observeChildTool(item: Extract<ThreadItem, { type: "collabAgentToolCall" }>) {
       for (const id of item.receiverThreadIds) {
         const status = item.agentsStates[id];
@@ -250,6 +265,7 @@ export function createCodexSession(dependencies: CodexDependencies): OpenCoreSes
         if (outcome) transition(workId, outcome, outcome === "failed" ? guard.clean(status.message ?? status.status) : undefined,
           guard.clean({ text: status.message ?? "" }));
       }
+      settleRootTurns();
     }
     const announce = (thread: Thread) => {
       nativeStatus.set(thread.id, thread.status.type);
@@ -713,6 +729,7 @@ export function createCodexSession(dependencies: CodexDependencies): OpenCoreSes
           if (accountingFailure) fail("Codex usage accounting needs repair before starting work");
           const content = await input(command);
           const key = needString(command.workId ?? command.id, "workId");
+          if (execution.isSealed(key)) fail("Codex work belongs to the sealed host baseline and cannot be replayed");
           const hash = createHash("sha256").update(JSON.stringify({ threadId, type: command.type, content })).digest("hex");
           if (state.receipts[key]) {
             const receipt = state.receipts[key];
@@ -872,8 +889,12 @@ export function createCodexSession(dependencies: CodexDependencies): OpenCoreSes
             const data = await run(command);
             reconcileLifecycle();
             emit({ type: "response", id: command.id, command: command.type, success: true, data });
-          } catch (error) { emit({ type: "response", id: command.id, command: command.type, success: false,
-            error: error instanceof Failure ? error.message : "Codex command failed" }); }
+          } catch (error) {
+            const receipt = execution.snapshot().operations.find(operation => operation.workId === (command.workId ?? command.id));
+            emit({ type: "response", id: command.id, command: command.type, success: false,
+              errorKind: error instanceof UnknownDispatch || !(error instanceof Failure) || receipt?.state === "unknown" || receipt?.state === "pending" ? "unknown" : "rejected",
+              error: error instanceof Failure ? error.message : "Codex command failed" });
+          }
           finally {
             handlingCommand = false;
             if (pendingExit) { const { code } = pendingExit; pendingExit = undefined; notifyExit(code); }

@@ -84,8 +84,11 @@ export interface CoreCommand {
   streamingBehavior?: "steer" | "followUp";
 }
 
+export interface CoreExecutionBaseline { id: string; sessionId: string }
+
 export interface CoreSessionOptions {
   cwd: string;
+  executionBaseline?: CoreExecutionBaseline;
   args: string[];
   env: Record<string, string | undefined>;
   /** Stable PiStack thread/run identity, independent of the engine's native session ID. */

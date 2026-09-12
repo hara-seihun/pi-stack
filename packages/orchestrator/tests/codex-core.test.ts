@@ -402,7 +402,7 @@ describe("Codex app-server adapter", () => {
     release({ ok: true, value: { data: [{ ...thread("child", "root"), status: { type: "active" } }], nextCursor: null } });
     await session.command({ type: "core_agent_read", id: "registered", agentId: "child" });
     await session.command({ type: "core_agents", id: "drain-discovery" });
-    expect(f.execution().operations.find(operation => operation.workId === "root-work")?.state).toBe("succeeded");
+    expect(f.execution().operations.find(operation => operation.workId === "root-work")?.state).toBe("running");
     expect(f.execution().operations.some(operation => operation.agentId === "child" && operation.state === "running")).toBe(true);
     f.send("thread/status/changed", { threadId: "child", status: { type: "idle" } });
     expect(f.execution().status).toBe("running");
@@ -411,6 +411,7 @@ describe("Codex app-server adapter", () => {
     expect(f.requests.filter(request => request.method === "turn/start")).toHaveLength(1);
     f.send("turn/completed", { threadId: "child", turn: { id: "child-turn", status: "interrupted", items: [] } });
     expect(f.execution().operations.filter(operation => operation.agentId === "child").every(operation => operation.state === "cancelled")).toBe(true);
+    expect(f.execution().operations.find(operation => operation.workId === "root-work")?.state).toBe("succeeded");
     expect(f.execution().status).toBe("idle");
     await session.close();
   });

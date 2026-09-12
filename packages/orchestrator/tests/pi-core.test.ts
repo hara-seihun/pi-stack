@@ -3,7 +3,8 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
 import { PiCoreSession } from "../src/cores/pi.js";
-import type { CoreCommand, CoreOutput, CoreSessionOptions } from "../src/cores/contracts.js";
+import { piChildTools } from "../src/cores/pi-tools.js";
+import type { CoreCommand, CoreExecutionBaseline, CoreOutput, CoreSessionOptions } from "../src/cores/contracts.js";
 import type { OpenPiNative, PiNative, PiNode, PiSnapshot, PiToolsHost } from "../src/cores/pi-types.js";
 
 const cleanups: (() => void | Promise<void>)[] = [];
@@ -45,14 +46,14 @@ class Fixture implements PiNative {
   async close() { this.closed++; }
 }
 
-async function setup(existing?: string, configure?: (fixture: Fixture) => void) {
+async function setup(existing?: string, configure?: (fixture: Fixture) => void, executionBaseline?: CoreExecutionBaseline) {
   const directory = existing ?? mkdtempSync(join(tmpdir(), "pi-core-"));
   if (!existing) cleanups.push(() => rmSync(directory, { recursive: true, force: true }));
   const fixtures = new Map<string, Fixture>();
   const output: CoreOutput[] = [];
   let exits = 0;
   const options: CoreSessionOptions = { cwd: directory, args: ["--provider", "fixture", "--model", "root", "--thinking", "low"],
-    env: {}, sessionId: "root", stateDir: directory };
+    env: {}, sessionId: "root", stateDir: directory, executionBaseline };
   const open: OpenPiNative = async (_options, node, tools, emit) => {
     const fixture = new Fixture(node, tools, emit);
     fixtures.set(node.id, fixture);
@@ -66,6 +67,38 @@ async function setup(existing?: string, configure?: (fixture: Fixture) => void) 
 const childId = (receipt: unknown) => (receipt as { agent: { id: string } }).agent.id;
 
 describe("Pi-owned delegation", () => {
+  it("accepts a sealed host baseline without inventing outcomes from historical output", async () => {
+    const first = await setup();
+    await first.core.close();
+    const path = join(first.directory, "pi-tree.json");
+    const tree = JSON.parse(readFileSync(path, "utf8"));
+    tree.dispatches = [["historic", { hash: "previous-input", state: "accepted" }]];
+    tree.nodes[0].work = { id: "historic", task: "finished task", status: "complete", result: "report" };
+    writeFileSync(path, JSON.stringify(tree));
+    const reopened = await setup(first.directory, fixture => fixture.state.messages.push({ role: "assistant", content: "historical report" }), { id: "sealed-idle-1", sessionId: "root" });
+    await reopened.core.command({ type: "get_state", id: "baseline" });
+    expect(reopened.output.at(-1)).toMatchObject({ data: { execution: { status: "idle", operations: [] } } });
+    await reopened.core.command({ type: "prompt", workId: "historic", id: "repeat", message: "finished task" });
+    expect(reopened.output.at(-1)).toMatchObject({ id: "repeat", success: false, error: expect.stringContaining("cannot be replayed") });
+    expect(reopened.fixtures.get("root")!.commands.filter(command => command.type === "prompt")).toHaveLength(0);
+    await reopened.core.command({ type: "prompt", workId: "new-work", message: "new task" });
+    expect(reopened.fixtures.get("root")!.commands.filter(command => command.type === "prompt")).toHaveLength(1);
+  });
+
+  it("routes child tools by their invoking native session, not captured or ambient agent identity", async () => {
+    const { core, fixtures } = await setup();
+    const first = childId(await core.delegate("root", "first", { task: "first task" }));
+    const second = childId(await core.delegate("root", "second", { task: "second task", newThread: true }));
+    await turn();
+    const tool = piChildTools(core).find(tool => tool.name === "core_control")!;
+    const invoke = (toolCallId: string, nativeSessionId: string, agentId: string) => tool.execute(toolCallId,
+      { agentId, action: "steer", message: "adjust" } as never, undefined, undefined,
+      { sessionManager: { getSessionId: () => nativeSessionId } } as never);
+    await expect(invoke("root-tool", "native-root", second)).resolves.toMatchObject({ details: { workId: "control:root:root-tool", operation: { state: "running" } } });
+    await expect(invoke("child-tool", `native-${first}`, second)).rejects.toThrow(`caller=${first}`);
+    expect(fixtures.get(second)!.commands.filter(command => command.type === "steer")).toHaveLength(1);
+  });
+
   it("waits for asynchronous native preflight without treating command() return as acceptance", async () => {
     const { core, fixtures, output } = await setup();
     fixtures.get("root")!.command = async command => {
@@ -207,6 +240,39 @@ describe("Pi-owned delegation", () => {
     expect(output.at(-1)).toMatchObject({ id: "idle-tree", data: { isStreaming: false, pendingMessageCount: 0, coreBusy: false,
       treeComplete: true, messageCount: 2, execution: { status: "idle", operations: expect.arrayContaining([expect.objectContaining({ workId: "root-prompt", agentId: "root", state: "succeeded", result: { text: "all done" } })]) } } });
     expect(output.some(event => event.type === "core_child_event" && event.agentId === second)).toBe(true);
+  });
+
+  it("continues idle children while retaining every undelivered result", async () => {
+    const { core, fixtures, output, directory } = await setup();
+    await core.command({ type: "prompt", workId: "parent", message: "coordinate" });
+    const child = childId(await core.delegate("root", "first-child-work", { task: "first" }));
+    await turn();
+    fixtures.get(child)!.finish("first report");
+    await turn();
+    expect(core.list().find(agent => agent.id === child)?.state).toBe("idle");
+    expect(fixtures.get("root")!.injections).toHaveLength(0);
+    await core.command({ type: "core_agent_command", id: "followup", agentId: child, action: "follow_up", workId: "second-child-work", message: "second" });
+    expect(output.at(-1)).toMatchObject({ id: "followup", success: true });
+    fixtures.get(child)!.finish("second report");
+    await turn();
+    await core.command({ type: "core_agent_command", id: "followup-retry", agentId: child, action: "follow_up", workId: "second-child-work", message: "second" });
+    expect(output.at(-1)).toMatchObject({ id: "followup-retry", success: true });
+    expect(core.list().find(agent => agent.id === child)?.state).toBe("idle");
+    expect(fixtures.get(child)!.commands.filter(command => command.type === "prompt")).toHaveLength(2);
+    const saved = JSON.parse(readFileSync(join(directory, "pi-tree.json"), "utf8"));
+    expect(saved.deliveries.map(([, receipt]: [string, any]) => receipt)).toMatchObject([
+      { result: "first report", delivery: "pending" }, { result: "second report", delivery: "pending" },
+    ]);
+    fixtures.get("root")!.finish("consume reports");
+    await turn();
+    expect(fixtures.get("root")!.injections[0].data.result).toBe("first report");
+    fixtures.get("root")!.finish("first integrated");
+    await turn();
+    expect(fixtures.get("root")!.injections[1].data.result).toBe("second report");
+    fixtures.get("root")!.finish("all integrated");
+    await turn();
+    await core.command({ type: "get_state", id: "settled", workId: "parent" });
+    expect(output.at(-1)).toMatchObject({ data: { operation: { state: "succeeded", result: { text: "all integrated" } }, execution: { status: "idle" } } });
   });
 
   it("deduplicates tool retries and reuses settled native children", async () => {

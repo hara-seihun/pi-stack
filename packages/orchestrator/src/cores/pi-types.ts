@@ -1,11 +1,10 @@
-import type { CoreAgent, CoreCommand, CoreOutput, CoreSessionOptions } from "./contracts.js";
+import type { CoreAgent, CoreCommand, CoreOperation, CoreOutput, CoreSessionOptions } from "./contracts.js";
 
 export interface PiWork {
   id: string;
   task: string;
   status: "running" | "complete";
   result?: string;
-  delivered?: boolean;
 }
 export interface PiNode extends CoreAgent {
   cwd: string;
@@ -48,10 +47,11 @@ export interface PiDelegate {
   workspace?: { repo: string; root: string };
 }
 export interface PiToolsHost {
+  caller(nativeSessionId: string): string;
   delegate(parentId: string, requestId: string, request: PiDelegate): Promise<unknown>;
   list(parentId?: string): CoreAgent[];
   read(id: string, offset?: number, limit?: number): Promise<unknown>;
-  control(id: string, command: CoreCommand, callerId?: string): Promise<void>;
+  control(id: string, command: CoreCommand, callerId?: string): Promise<CoreOperation | undefined>;
   beforeReplace(id: string): Promise<void>;
 }
 export type OpenPiNative = (options: CoreSessionOptions, node: PiNode, tools: PiToolsHost,
