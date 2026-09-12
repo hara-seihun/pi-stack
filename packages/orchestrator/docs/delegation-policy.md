@@ -1,6 +1,6 @@
 # Delegation guidance
 
-[`src/delegation-policy.ts`](../src/delegation-policy.ts) owns the shared tool-description policy for Remote's `thread_delegate` and the fleet's `fleet_dispatch`. It is exported through `pi-orchestrator/api`. Registration includes it only where delegation is available; children still cannot delegate.
+[`src/delegation-policy.ts`](../src/delegation-policy.ts) owns the shared tool-description policy for Remote's `thread_delegate` and the fleet's `fleet_dispatch`. It is exported through `pi-orchestrator/api`. Registration includes it only where delegation is available. External Remote threads and fleet runs retain single-level delegation. The [Pi engine](pi-core.md) installs the same policy on every engine-owned agent, so native Pi children can delegate within their own tree.
 
 Regular agents can choose delegation for independent work while they make useful progress locally. Immediate blocking tasks stay local. The policy covers task decomposition, non-overlapping edits, automatic result delivery and integration. Model-selection descriptions do not establish a reason to delegate. Thinking level does not change this policy.
 
@@ -23,7 +23,7 @@ Most task-selection and decomposition wording is copied verbatim. Pi Stack chang
 - Forked-workspace and uploaded-change wording becomes agent-workspace and shared-filesystem wording. Results include the changed paths and commit.
 - `wait_agent` guidance becomes automatic-delivery guidance. A parent can end its turn and resume on the result rather than poll. Failures and unfinished work remain visible.
 - Verification guidance respects the user's request and applicable instructions.
-- Pi Stack retains its model selection, single-level delegation, thread reuse and durable result delivery.
+- External Remote/fleet paths retain their model selection, single-level delegation, thread reuse and durable result delivery. The Pi engine reuses the policy for recursive core-owned children and owns their result delivery.
 
 ## License and attribution
 
