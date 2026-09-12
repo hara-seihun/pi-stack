@@ -7,9 +7,11 @@ import type { ExtensionAPI, ExtensionContext, ToolDefinition } from "@earendil-w
 import { Store } from "../src/store.js";
 import { SharedOAuthAuth } from "../src/auth/shared-oauth.js";
 import { installImageGeneration } from "../src/extension/image-generation.js";
+import { imagePreview } from "../src/extension/image-preview.js";
+import { boundedModelImage } from "../../runtime/model-payload.mjs";
 import { requestImage, IMAGE_MODELS } from "../src/image-generation.js";
 
-const png = Buffer.from("iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAusB9Wl6kXIAAAAASUVORK5CYII=", "base64");
+const png = Buffer.from("iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAAEElEQVR4AQEFAPr/AChQeP8DhAHwYchg3gAAAABJRU5ErkJggg==", "base64");
 const roots: string[] = [];
 const stores: Store[] = [];
 afterEach(async () => {
@@ -49,7 +51,7 @@ function fixture() {
     registerTool: (tool: ToolDefinition) => { tools.set(tool.name, tool); active.push(tool.name); },
     getActiveTools: () => active,
     setActiveTools: (names: string[]) => { active = names; },
-  } as unknown as ExtensionAPI, store, shared);
+  } as unknown as ExtensionAPI, store, shared, (bytes, path) => imagePreview(bytes, path, boundedModelImage));
   function account(enabled = true, use: "shared" | "voice" = "shared") {
     store.upsertAccount({ id: "codex-test", provider: "openai-codex", enabled });
     store.setControl("account-use:codex-test", use);
@@ -112,6 +114,19 @@ test("multiple completed calls are deduplicated, saved, and return the final pre
   expect(result.content[1]).toEqual({ type: "image", data: png.toString("base64"), mimeType: "image/png" });
   expect(transport).toHaveBeenCalledTimes(1);
   expect((await readdir(f.root)).some(name => name.includes("staging-"))).toBe(false);
+});
+
+test("preview failure returns the saved paths and an explicit error without retrying generation", async () => {
+  const f = fixture(); f.account(); f.reconcile();
+  const invalid = Buffer.concat([Buffer.from([137, 80, 78, 71, 13, 10, 26, 10]), Buffer.from("invalid PNG content")]);
+  const transport = vi.fn(async () => stream([completed(IMAGE_MODELS[0], invalid.toString("base64"))]));
+  vi.stubGlobal("fetch", transport);
+  const result = await f.execute();
+  expect(readFileSync(join(f.root, "image.png"))).toEqual(invalid);
+  expect(result.content).toHaveLength(1);
+  expect(result.content[0]).toMatchObject({ type: "text", text: expect.stringContaining("original is intact") });
+  expect(result.details).toMatchObject({ preview: { error: expect.stringContaining("No generation retry") } });
+  expect(transport).toHaveBeenCalledTimes(1);
 });
 
 test("publication collision preserves every generated image and its receipt without overwriting", async () => {

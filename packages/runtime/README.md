@@ -38,6 +38,10 @@ That version's QA text predicate misses phrases split across React text nodes, i
 
 [`patch-compaction-cut.mjs`](patch-compaction-cut.mjs) fixes the companion cut-selection defect in Pi's SDK and bundled copies. When the trailing tool results alone exceeded `keepRecentTokens`, Pi found no later valid cut and retained the entire transcript, declining compaction. The patch chooses the preceding assistant call when no later cut exists, keeping that batch together. [`compaction-cut.test.mjs`](compaction-cut.test.mjs) covers that boundary; the extension's lifecycle test runs a complete parallel tool batch, native compaction and continuation inside one Pi run.
 
+## Model image payloads
+
+[The image-payload repair and September 12 incident](image-payload.md) separate full image originals from bounded model representations. It patches every pinned SDK and bundled CLI text provider after extension payload hooks, adds exact HTTP-body measurements where Pi exposes fetch, and keeps byte refusals separate from token compaction. The incident's 18-image request falls from 34,531,753 to 3,258,607 HTTP-body bytes without dropping images. Image generation uses the same memoized converter for its preview; saved originals stay intact.
+
 ## Session crash durability
 
 Pi 0.85 closes JSONL files after writes without syncing them. A hard host reset can therefore persist a new gocryptfs file length without the complete authenticated final block, making every later read that reaches that block fail with `EIO`. [`patch-session-durability.mjs`](patch-session-durability.mjs) repairs both the SDK and bundled CLI copies. Appends are synced before returning, initial and fork writes are completed and synced as one file, and rewrites use a synced temporary file followed by an atomic rename and parent-directory sync. [`session-durability.test.mjs`](session-durability.test.mjs) checks both deployed source forms and their syntax.

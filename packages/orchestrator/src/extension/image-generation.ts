@@ -8,6 +8,7 @@ import type { SharedOAuthAuth } from "../auth/shared-oauth.js";
 import { chooseInteractiveAccount } from "../auth/account-selection.js";
 import { IMAGE_MODELS, IMAGE_QUALITIES, IMAGE_SIZES, requestImage } from "../image-generation.js";
 import { createSharedImageGenerationService, imageAuth, imagePath, loadImageInputs, type SharedImageResult } from "../image-service.js";
+import { imagePreview } from "./image-preview.js";
 
 const parameters = Type.Object({
   prompt: Type.String({ minLength: 1, maxLength: 32000, description: "Image description or editing instructions." }),
@@ -20,7 +21,7 @@ const parameters = Type.Object({
 export type ImageToolInput = Static<typeof parameters>;
 type Connection = { kind: "shared" } | { kind: "personal"; provider: "openai-codex" | "openai" };
 
-export function installImageGeneration(pi: ExtensionAPI, store: Store, shared: SharedOAuthAuth | undefined) {
+export function installImageGeneration(pi: ExtensionAPI, store: Store, shared: SharedOAuthAuth | undefined, previewImage: typeof imagePreview = imagePreview) {
   const service = createSharedImageGenerationService({ store, shared });
   pi.on("session_shutdown", () => service.close());
   const connection = (ctx: ExtensionContext): Connection | undefined => {
@@ -87,12 +88,13 @@ export function installImageGeneration(pi: ExtensionAPI, store: Store, shared: S
                 throw new Error(`Image output retained at ${staging}; response ${responseId}. Publication failed: ${error instanceof Error ? error.message : String(error)}. No automatic retry was made.`);
               }
               preserve = false;
+              const preview = await previewImage(images[images.length - 1].bytes, path);
               return {
                 content: [
-                  { type: "text" as const, text: `Saved ${path}\nAll images:\n${outputs.map(output => output.path).join("\n")}\nModel: ${model}\nResponse: ${responseId}` },
-                  { type: "image" as const, mimeType: "image/png", data: images[images.length - 1].bytes.toString("base64") },
+                  { type: "text" as const, text: `Saved ${path}\nAll images:\n${outputs.map(output => output.path).join("\n")}\nModel: ${model}\nResponse: ${responseId}\n${preview.ok ? preview.text : preview.error}` },
+                  ...(preview.ok ? [preview.image] : []),
                 ],
-                details: { path, paths: outputs.map(output => output.path), images: outputs.map(({ id, path }) => ({ id, path })), model, responseId, providerUsage: usage },
+                details: { path, paths: outputs.map(output => output.path), images: outputs.map(({ id, path }) => ({ id, path })), model, responseId, providerUsage: usage, preview: preview.ok ? preview.metadata : { error: preview.error } },
               };
             } finally { if (!preserve) await rm(staging, { recursive: true }); }
           });
