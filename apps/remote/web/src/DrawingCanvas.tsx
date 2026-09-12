@@ -267,6 +267,9 @@ export function DrawingCanvas({ onAttach, onClose }: DrawingCanvasProps) {
         onPointerCancel={event => finish(event, true)} onLostPointerCapture={event => finish(event, true)}
         onPointerLeave={() => { cursorRef.current = null; redraw(); }} onContextMenu={event => event.preventDefault()} />
     </div>
+    <button type="button" className="drawing-done drawing-exit" aria-label="Cancel drawing" title="Cancel drawing" disabled={attaching} onClick={() => { resetPointers(); setError(null); onClose(); }}>
+      <svg viewBox="0 0 24 24" aria-hidden="true"><path d="m6 6 12 12M18 6 6 18" /></svg>
+    </button>
     <div className="drawing-controls">
       <DrawingColourPicker color={color} onChange={setColor} disabled={attaching} />
       <button type="button" className="drawing-done" onClick={() => void done()} disabled={attaching}>{attaching ? "Saving…" : "Done"}</button>
