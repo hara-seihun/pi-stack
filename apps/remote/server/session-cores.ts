@@ -1,9 +1,10 @@
 import type { Database } from "bun:sqlite";
 import { join } from "node:path";
-import { configuredCore, type CoreAgent, type CoreId } from "pi-orchestrator/api";
+import { createHash } from "node:crypto";
+import { configuredCore, type CoreAgent, type CoreId, type CoreCommand } from "pi-orchestrator/api";
 
 export interface SessionCore { core: CoreId; stateDir: string }
-export interface CoreDispatch { type: string; message: string; images: unknown[]; resume?: boolean }
+export interface CoreDispatch { type: "prompt" | "steer" | "follow_up" | "compact"; message: string; images: NonNullable<CoreCommand["images"]>; resume?: boolean; customInstructions?: string }
 export class SessionCores {
   constructor(private readonly db: Database, private readonly data: string) {
     db.exec(`CREATE TABLE IF NOT EXISTS session_cores (
@@ -33,10 +34,18 @@ export class SessionCores {
       state TEXT NOT NULL,
       error TEXT
     );`);
+    for (const row of db.query("SELECT id FROM sessions WHERE id NOT IN (SELECT session_id FROM session_cores)").all() as { id: string }[]) this.create(row.id, "pi");
   }
   get(sessionId: string): SessionCore {
     const row = this.db.query("SELECT core,state_dir FROM session_cores WHERE session_id=?").get(sessionId) as {core:string;state_dir:string} | null;
-    return row ? {core: configuredCore(row.core),stateDir:row.state_dir} : {core:"pi",stateDir:join(this.data,"core-sessions",sessionId)};
+    if (!row) throw new Error(`Session has no selected core: ${sessionId}`);
+    return {core: configuredCore(row.core),stateDir:row.state_dir};
+  }
+  generation(sessionId: string): string {
+    return createHash("sha256").update(this.get(sessionId).stateDir).digest("hex");
+  }
+  current(sessionId: string, generation: unknown): boolean {
+    return typeof generation === "string" && generation === this.generation(sessionId);
   }
   set(sessionId: string, value: SessionCore): void {
     this.db.query("INSERT INTO session_cores(session_id,core,state_dir) VALUES(?,?,?) ON CONFLICT(session_id) DO UPDATE SET core=excluded.core,state_dir=excluded.state_dir")
@@ -66,7 +75,8 @@ export class SessionCores {
       return JSON.parse(row.payload) as CoreDispatch;
     })();
   }
-  recordAgent(sessionId: string, agent: CoreAgent): void {
+  recordAgent(sessionId: string, generation: string, agent: CoreAgent): void {
+    if (!this.current(sessionId, generation)) return;
     if (!agent?.id || !["running","idle","failed","cancelled"].includes(agent.state)) throw new Error("Invalid core agent state");
     this.db.query("INSERT INTO core_agents VALUES(?,?,?,?) ON CONFLICT(session_id,state_dir,agent_id) DO UPDATE SET data=excluded.data")
       .run(sessionId,this.get(sessionId).stateDir,agent.id,JSON.stringify(agent));

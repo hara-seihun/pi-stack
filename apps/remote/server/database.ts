@@ -78,6 +78,8 @@ CREATE TABLE IF NOT EXISTS work_items (
   text TEXT NOT NULL,
   images TEXT NOT NULL DEFAULT '[]',
   meeting_transcript TEXT NOT NULL DEFAULT '[]',
+  command_type TEXT,
+  command_args TEXT,
   delivery TEXT NOT NULL DEFAULT 'followUp',
   resume INTEGER NOT NULL DEFAULT 0,
   state TEXT NOT NULL,
@@ -111,14 +113,13 @@ CREATE TABLE IF NOT EXISTS delegation_results (
   status TEXT NOT NULL,
   error TEXT
 );
-CREATE TRIGGER IF NOT EXISTS delegation_completed AFTER UPDATE OF state ON work_items
+DROP TRIGGER IF EXISTS delegation_completed;
+CREATE TRIGGER delegation_completed AFTER UPDATE OF state ON work_items
 WHEN NEW.state IN ('complete','cancelled') AND OLD.state NOT IN ('complete','cancelled')
   AND EXISTS (SELECT 1 FROM thread_delegations WHERE work_id=NEW.id)
 BEGIN
   INSERT OR IGNORE INTO delegation_results(work_id,result,status,error)
-  VALUES(NEW.id, COALESCE((SELECT json_extract(payload,'$.text') FROM events
-    WHERE session_id=NEW.session_id AND seq>NEW.event_seq AND type='assistant' AND NEW.event_seq>0
-    ORDER BY seq DESC LIMIT 1), ''),
+  VALUES(NEW.id, '',
     CASE WHEN NEW.state='cancelled' THEN 'cancelled' WHEN NEW.last_error IS NOT NULL THEN 'failed' ELSE 'complete' END,
     NEW.last_error);
 END;
@@ -175,6 +176,8 @@ CREATE TABLE IF NOT EXISTS metadata (
   if (!workColumns.has("resume")) db.exec("ALTER TABLE work_items ADD COLUMN resume INTEGER NOT NULL DEFAULT 0");
   if (!workColumns.has("images")) db.exec("ALTER TABLE work_items ADD COLUMN images TEXT NOT NULL DEFAULT '[]'");
   if (!workColumns.has("meeting_transcript")) db.exec("ALTER TABLE work_items ADD COLUMN meeting_transcript TEXT NOT NULL DEFAULT '[]'");
+  if (!workColumns.has("command_type")) db.exec("ALTER TABLE work_items ADD COLUMN command_type TEXT");
+  if (!workColumns.has("command_args")) db.exec("ALTER TABLE work_items ADD COLUMN command_args TEXT");
   if (!workColumns.has("inserted_at")) {
     db.exec("ALTER TABLE work_items ADD COLUMN inserted_at TEXT");
     db.exec("UPDATE work_items SET inserted_at=created_at WHERE event_seq>0");
@@ -184,11 +187,7 @@ CREATE TABLE IF NOT EXISTS metadata (
     FROM thread_delegations d JOIN work_items w ON w.id=d.work_id JOIN sessions s ON s.id=w.session_id
     WHERE s.initial_provider IS NOT NULL AND s.initial_model IS NOT NULL ORDER BY w.rowid;
     INSERT OR IGNORE INTO delegation_results(work_id,result,status,error)
-    SELECT w.id,COALESCE((SELECT json_extract(e.payload,'$.text') FROM events e
-      WHERE e.session_id=w.session_id AND e.seq>w.event_seq AND e.type='assistant' AND w.event_seq>0
-      AND e.seq<COALESCE((SELECT MIN(boundary.seq) FROM events boundary
-        WHERE boundary.session_id=w.session_id AND boundary.seq>w.event_seq AND boundary.type='settled'),9223372036854775807)
-      ORDER BY e.seq DESC LIMIT 1),''),
+    SELECT w.id,'',
       CASE WHEN w.state='cancelled' THEN 'cancelled' WHEN w.last_error IS NOT NULL THEN 'failed' ELSE 'complete' END,w.last_error
     FROM thread_delegations d JOIN work_items w ON w.id=d.work_id WHERE w.state IN ('complete','cancelled');
     UPDATE work_items SET delivery='steer' WHERE state IN ('queued','running') AND delivery='followUp'

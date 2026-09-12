@@ -27,6 +27,7 @@ export default function contextMirror(pi: ExtensionAPI) {
   } | null = null;
   let publishedDocument: string | null = null;
   let draining: Promise<void> | null = null;
+  let retired = false;
 
   const nextCaptureTime = () => {
     capturedAt = Math.max(Date.now(), capturedAt + 1);
@@ -55,6 +56,8 @@ export default function contextMirror(pi: ExtensionAPI) {
           continue;
         }
         const common = {
+          coreGeneration: environment.PI_REMOTE_CORE_GENERATION,
+          runtimeInstance: environment.PI_REMOTE_RUNTIME_INSTANCE,
           capturedAt: snapshot.capturedAt,
           finalizesMessage: snapshot.finalizesMessage,
         };
@@ -78,6 +81,7 @@ export default function contextMirror(pi: ExtensionAPI) {
               replacement: snapshot.replacement,
             });
           }
+          if (response.status === 410) { retired = true; pending = null; return; }
           if (!response.ok) throw new Error(await response.text() || `Context mirror failed (${response.status})`);
           const result = await response.json() as { hash?: string };
           if (result.hash && result.hash !== sha256(document)) throw new Error("Context mirror acknowledgement hash does not match");
@@ -102,6 +106,7 @@ export default function contextMirror(pi: ExtensionAPI) {
     replacement?: "compaction",
     finalizesMessage?: string,
   ) => {
+    if (retired) return Promise.resolve();
     pending = {
       capturedAt: nextCaptureTime(),
       context: next,

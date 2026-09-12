@@ -1,6 +1,6 @@
 # Pi Remote state machine
 
-Pi Remote treats SQLite and one per-thread runtime projection as the authority. Clients are projections only: they may show a short-lived local action overlay, but they never invent an authoritative lifecycle transition.
+Pi Remote owns admission and its durable work outbox in SQLite. The selected core owns execution and publishes revisioned receipts for individual work IDs. `CoreController` validates those receipts for both Remote and fleet workers. Remote's `ExecutionController` commits them to its work ledger. Runtime phases, activity events, context captures and client views are projections, not evidence that work completed.
 
 Each supervisor process first writes a random `supervisor_epoch` lease to SQLite. Every API request, runtime event, reconciliation, activation continuation, work worker, and child-exit callback verifies that lease before durable mutation. This fences an old supervisor incarnation that is still unwinding while its replacement has already reset and adopted the database; its late `SIGTERM` child exit cannot overwrite the replacement's `STOPPED` state with `FAILED`.
 
@@ -11,13 +11,15 @@ Each live RPC child has exactly one phase:
 | Phase | Meaning | Public state |
 |---|---|---|
 | `STARTING` | Child exists; initial `get_state` has not completed | `STARTING` |
-| `IDLE` | Child is ready and Pi has no active or pending run | `IDLE` |
-| `DISPATCHING` | An idle `prompt` was durably dispatched, but `agent_start` has not proved the run yet | `RUNNING` / `QUEUED` |
-| `RUNNING` | Pi has proved an active run; steering/follow-up messages stay in this phase | `RUNNING` |
+| `WAITING` | Admission has not allocated a runtime | `QUEUED` |
+| `IDLE` | Core reports no active work, or blocked execution awaits an explicit repair | `IDLE` / `FAILED` |
+| `DISPATCHING` | A work envelope was durably dispatched and awaits its receipt | `RUNNING` |
+| `RUNNING` | Core's execution snapshot reports running or stopping | `RUNNING` |
+| `UNAVAILABLE` | Core transport or execution contract failed; dispatched work retains custody | `FAILED` |
 | `ABORTING` | Pi is stopping the active operation in the existing child; accepted steering may still complete | `ABORTING` |
 | `STOPPING` | Hard steer, the idle reaper, archiving, or supervisor shutdown is removing the child process group | `ABORTING` until process exit, then `STOPPED` |
 
-`phaseVersion` changes on phase transitions, dispatches, queue changes, and Pi activity. A `get_state` reconciliation captures this version before its RPC request and discards the response if the version changed while it was in flight. This prevents an old inactive snapshot from settling newer work.
+Execution snapshots have a monotonic core revision. Remote binds each observation to a thread, selected core generation and runtime instance. A retired owner cannot publish receipts or context. `phaseVersion` guards presentation updates across asynchronous requests; it does not decide execution outcomes. Session controls run through one per-thread command queue, including settings, switching, fork and abort.
 
 ### Valid transitions
 
@@ -33,7 +35,7 @@ any live phase -> STOPPING -> STOPPED|FAILED
 FAILED|STOPPED -> STARTING         later activation/retry
 ```
 
-Only `RUNNING -> IDLE` can ordinarily settle dispatched work. `agent_settled` in `DISPATCHING` is stale and ignored. In `RUNNING`, it starts a next-tick `get_state` check rather than settling by itself. Pi owns retry, compaction and queued continuation. The state check keeps dispatched work alive while Pi reports any pending activity, independently of the runtime's compaction policy. During `ABORTING`, the abort handler owns the phase transition, while Pi may finish steering it already accepted before `abort()` returns. `STOPPING` suppresses output. An assistant message with `stopReason=error|aborted` is held until confirmed settlement: a later successful assistant message in the same run clears it, so automatic retry, account failover, or compaction does not expose a false terminal failure. If the run settles without recovery, the provider error remains in the supervisor event ledger for voice and diagnosis. The interactive view comes from Pi's model context rather than this event projection.
+Each `succeeded`, `failed` or `cancelled` receipt settles only its named work item. `pending`, `accepted`, `running` and `unknown` cannot settle work. An `agent_settled` presentation event requests reconciliation but proves nothing by itself. The core owns retries, compaction and its child tree. During `ABORTING`, receipts still commit while the abort handler owns the runtime phase. `STOPPING` suppresses output. An idle core with unresolved dispatched work does not permit another dispatch. Missing execution contracts fail visibly rather than treating missing activity as idle.
 
 ## Durable work
 
@@ -48,14 +50,15 @@ queued -> running -> dispatched -> complete
 
 - SQLite contains the message before the API acknowledges it, but Pi's model context does not. Until Pi confirms insertion, clients show the work item above the composer with its canonical `queued`, `running`, or `dispatched` status.
 - `running` means the worker has claimed it but has not handed it to Pi.
-- `dispatched` means exactly one RPC command was written; acknowledgement loss never causes a duplicate send. Pi's next context snapshot contains the user message after RPC acknowledgement or subsequent Pi activity proves insertion, and the pending composer card disappears in the same durable update.
+- `dispatched` means Remote transferred a frozen envelope with a stable work ID to its selected core. Recovery may present that same envelope again. The core's durable receipts prevent a second native execution. Acceptance and terminal receipts, not generic RPC acknowledgements or activity, commit insertion and completion.
 - A `followUp` created during `RUNNING` remains `queued` under supervisor ownership. It is not handed to Pi until the current run settles, so it can be atomically promoted to `steer` or cancelled. While busy, the worker skips held follow-ups and dispatches only promoted steering items; while idle, it starts the oldest queued item as the next prompt.
 - Cancellation succeeds only while the supervisor still owns an item in `queued`; it atomically marks the item `cancelled` before any Pi insertion. Client-side Edit uses this same cancellation endpoint and copies the returned canonical text into the composer without creating a second server-side message.
 - Soft steer promotes a pending follow-up into Pi's current run. Hard steer marks the chosen follow-up as next, terminates the active Pi process group immediately, and starts a fresh process on the same session with that message. Work already dispatched into the interrupted run is cancelled; supervisor-owned follow-ups retain their relative order.
 - Promotion normally updates a still-pending durable work item before it has any event entry. An already-inserted item keeps its delivery event accurate for voice consumers.
-- All dispatched items in one Pi run complete only when reconciliation confirms Pi inactive from the `RUNNING` phase. An `agent_settled` event requests that reconciliation but cannot complete work on its own.
-- Cancellation is terminal for the active item. Stop requeues every later queued/running/dispatched item with `resume=0`; a dispatch error checks each durable state before retrying, so the cancelled active turn cannot resurrect while retained messages remain sendable.
-- A live release handoff keeps `dispatched` work attached to its existing runtime host and releases a supervisor-only `running` claim back to `queued`. A crash or full service restart terminates unclaimed runtime hosts, requeues `running`/`dispatched` work, and resumes an interrupted inserted turn through the supported RPC `prompt` command with an explicit continuation instruction. Startup never invents protocol commands that Pi does not support.
+- Receipt insertion, work completion and delegated result recording commit in one transaction. A result belongs to its work ID, never to the last assistant message Remote happened to see.
+- Cancellation is terminal. Ordinary abort cancels supervisor-owned queued work directly, but core-owned work needs explicit cancellation receipts. An unconfirmed abort retains custody and reports failure.
+- A live release handoff keeps `dispatched` work attached to its existing runtime instance and releases supervisor-only claims back to the outbox. Crash recovery reconciles the same frozen envelope and native receipt. Remote never reconstructs a prompt from its display history or manufactures a continuation instruction.
+- Slash commands use the same durable outbox. Compaction has its own work ID and receipt; a lost HTTP or RPC response cannot start another compaction.
 
 ## Abort ownership
 
@@ -149,8 +152,8 @@ The observation surface is therefore a pure projection with three rules:
 1. Exactly one supervisor epoch may publish durable state; callbacks from replaced incarnations are read-only and terminate locally.
 2. One server runtime at most per thread ID. Each RPC wrapper and all descendants run in a dedicated process group; stop waits for the whole group and escalates from `SIGTERM` to `SIGKILL`.
 3. One serialized durable worker at most per thread ID.
-4. A runtime event is bound to the thread ID captured when that child was spawned.
-5. Only an inactive Pi state confirmed from `RUNNING` may settle and complete dispatched work.
+4. Runtime events, context publishers and asynchronous controls are fenced by supervisor epoch, thread, core generation and runtime instance.
+5. Only an explicit terminal receipt may complete its named core-owned work. Idle status, missing activity, a transport failure and the latest assistant text cannot substitute for a receipt.
 6. `ABORTING` preserves real transcript output while owning settlement; only `STOPPING` suppresses output.
 7. A stale reconciliation response cannot change phase.
 8. An ordinary abort never retries its cancelled active item. A hard steer cancels every item owned by the retired Pi process and dispatches the selected supervisor-owned message first in its replacement.
