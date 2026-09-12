@@ -59,6 +59,8 @@ export function registerThreadTools(pi: ExtensionAPI) {
     },
   });
 
+  if (environment.PI_STACK_CORE_OWNS_CHILDREN === "1") return;
+
   pi.registerTool({
     name: "thread_subagents",
     label: "List a thread's subagents",
@@ -79,7 +81,7 @@ export function registerThreadTools(pi: ExtensionAPI) {
     },
   });
 
-  if (environment.PI_SUBAGENT_MODEL || environment.PI_STACK_CORE_OWNS_CHILDREN === "1") return;
+  if (environment.PI_SUBAGENT_MODEL) return;
 
   pi.registerTool({
     name: "thread_delegate",

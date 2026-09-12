@@ -1524,25 +1524,20 @@ describe("web and supervisor integration", () => {
     expect(commands.some((entry: any) => entry.sessionId === id && entry.type === "prompt")).toBe(false);
   }, 15_000);
 
-  test("abort cancels a queued prompt that is waiting to retry", async () => {
+  test("a core command refusal finishes its receipt without a host retry", async () => {
     const id = await createThread();
-    const runtimePid = JSON.parse(readFileSync(fakeLaunch, "utf8")).pid;
     await api("POST", `/v1/sessions/${id}/prompt`, { requestId: crypto.randomUUID(), text: "retry-prompt" });
-    const retrying = await waitFor(
-      () => api("GET", `/v1/sessions/${id}`).then((result) => result.value.session),
-      (session) => session.activity === "RETRYING",
-    );
-    expect(retrying.state).toBe("RUNNING");
-
-    const aborted = await api("POST", `/v1/sessions/${id}/abort`, {});
-    expect(aborted).toMatchObject({ status: 200, value: { ok: true, retainedQueued: 0 } });
-    expect(aborted.value.session).toMatchObject({ state: "IDLE", activity: "IDLE" });
-    expect(JSON.parse(readFileSync(fakeLaunch, "utf8")).pid).toBe(runtimePid);
-
     const ledger = new Database(join(root, "data", "supervisor.sqlite3"), { readonly: true });
-    const work = ledger.query("SELECT state,last_error FROM work_items WHERE session_id=? ORDER BY created_at DESC LIMIT 1").get(id) as any;
-    ledger.close();
-    expect(work).toEqual({ state: "cancelled", last_error: "Current turn stopped by user" });
+    try {
+      const work = await waitFor(
+        async () => ledger.query("SELECT state,last_error FROM work_items WHERE session_id=? ORDER BY created_at DESC LIMIT 1").get(id) as any,
+        work => work?.state === "complete",
+      );
+      expect(work).toEqual({state:"complete",last_error:"simulated rejection"});
+      const commands = readJsonLines(fakeRpcLog).filter((entry: any) => entry.sessionId === id && entry.type === "prompt");
+      expect(commands).toHaveLength(1);
+      expect(commands[0].workId).toBeTruthy();
+    } finally { ledger.close(); }
   }, 15_000);
 
   test("monitors a lost prompt acknowledgement without resending", async () => {

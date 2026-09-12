@@ -3,6 +3,7 @@ import { join } from "node:path";
 import { configuredCore, type CoreAgent, type CoreId } from "pi-orchestrator/api";
 
 export interface SessionCore { core: CoreId; stateDir: string }
+export interface CoreDispatch { type: string; message: string; images: unknown[] }
 export class SessionCores {
   constructor(private readonly db: Database, private readonly data: string) {
     db.exec(`CREATE TABLE IF NOT EXISTS session_cores (
@@ -16,6 +17,12 @@ export class SessionCores {
       agent_id TEXT NOT NULL,
       data TEXT NOT NULL,
       PRIMARY KEY(session_id,state_dir,agent_id)
+    );
+    CREATE TABLE IF NOT EXISTS core_dispatches (
+      work_id TEXT PRIMARY KEY,
+      session_id TEXT NOT NULL REFERENCES sessions(id) ON DELETE CASCADE,
+      state_dir TEXT NOT NULL,
+      payload TEXT NOT NULL
     );
     CREATE TABLE IF NOT EXISTS core_switches (
       id TEXT PRIMARY KEY,
@@ -48,6 +55,15 @@ export class SessionCores {
         this.db.query("UPDATE core_switches SET state=?,error=? WHERE id=?")
           .run(complete ? "complete" : "failed",complete ? null : "Switch interrupted before target selection; source core retained",operation.id);
       }
+    })();
+  }
+  dispatch(sessionId: string, workId: string, payload: CoreDispatch): CoreDispatch {
+    const stateDir = this.get(sessionId).stateDir;
+    return this.db.transaction(() => {
+      this.db.query("INSERT OR IGNORE INTO core_dispatches VALUES(?,?,?,?)").run(workId,sessionId,stateDir,JSON.stringify(payload));
+      const row = this.db.query("SELECT session_id,state_dir,payload FROM core_dispatches WHERE work_id=?").get(workId) as {session_id:string;state_dir:string;payload:string};
+      if (row.session_id !== sessionId || row.state_dir !== stateDir) throw new Error("Core dispatch belongs to another session generation");
+      return JSON.parse(row.payload) as CoreDispatch;
     })();
   }
   recordAgent(sessionId: string, agent: CoreAgent): void {

@@ -10,7 +10,7 @@ PiStack sends commands rather than inspecting a core's internal objects. Steerin
 
 Budget and concurrency policy are unchanged. Hara proposed removing them but did not settle that decision. Tool discovery is treated as PiStack's selection of available core and host capabilities; the core still owns execution and its prompt representation. Workspace and persistent-memory behavior remain engine-specific rather than acquiring a new cross-engine policy.
 
-The shared boundary is [`cores/contracts.ts`](../packages/orchestrator/src/cores/contracts.ts). [`cores/index.ts`](../packages/orchestrator/src/cores/index.ts) selects an adapter and attaches the portable journal. The runtime command and event wire is shared by interactive and fleet hosts. Native engine objects stay behind the adapter.
+The shared boundary is [`cores/contracts.ts`](../packages/orchestrator/src/cores/contracts.ts). [`cores/index.ts`](../packages/orchestrator/src/cores/index.ts) selects an adapter and attaches the portable journal. The runtime command and event wire is shared by interactive and fleet hosts. Native engine objects stay behind the adapter. The [Pi adapter](../packages/orchestrator/docs/pi-core.md), [Codex adapter](../packages/orchestrator/docs/codex-core.md), [account bridge](../packages/orchestrator/docs/core-accounts.md), and [lane/run lifecycle](../packages/orchestrator/docs/agent-cores.md) own their implementation details and limitations.
 
 ## Selecting a core
 
@@ -34,6 +34,8 @@ Each generation contains:
 On a switch, PiStack exports the active conversation and saves `transfer.json` in a new generation. The destination engine creates a new native session from that data. Provider-specific thought signatures and encrypted checkpoint fields are not portable. The source engine's records remain referenced by `core_switches`, which records the source, target and outcome. Selection and session references change in one database transaction. A failed startup stops the candidate before restoring the source selection. If the candidate cannot stop, its selection stays pinned rather than pointing a live process at the wrong engine. After a supervisor interruption, startup reconciles the switch receipt against the committed selection. Messages and conversation edits wait until the switch finishes.
 
 A fork changes the active portable branch without erasing earlier records. Transfer uses the active branch. Native compaction does not erase the original activity record.
+
+Remote freezes Codex dispatch payloads in `core_dispatches` before sending them, with the durable work ID as the native receipt key. Recovery resends that same envelope for receipt reconciliation, never a rewritten request. The adapter acknowledges already accepted work without executing it again. Unknown native outcomes remain failures requiring inspection. Explicit command refusals finish the work item with its error rather than entering a host retry loop. Core-native retries remain native.
 
 `read-thread` selects the portable journal for a Remote thread once one exists. Direct native file paths still read the native file. Both formats retain their original provenance.
 

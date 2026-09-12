@@ -6,6 +6,11 @@ import { join } from "node:path";
 import { runJobs } from "../../scripts/run-jobs.mjs";
 
 execFileSync(process.execPath, [
+  fileURLToPath(new URL("../../node_modules/typescript/bin/tsc", import.meta.url)),
+  "-p", fileURLToPath(new URL("../../packages/orchestrator/tsconfig.build.json", import.meta.url)),
+], { stdio: "inherit" });
+
+execFileSync(process.execPath, [
   fileURLToPath(new URL("../../packages/runtime/patch-shared-rpc.mjs", import.meta.url)),
   fileURLToPath(new URL("../../node_modules", import.meta.url)),
 ], { stdio: "inherit" });

@@ -92,7 +92,7 @@ export async function runCoreWorker(run: Run, options: CoreSessionOptions, open:
   let changed: (() => void) | undefined;
   const enqueue = (operation: () => Promise<unknown>): void => { effects = effects.then(operation).then(() => {}, error => { effectFailure ??= error; }); };
   const wire = new CoreWire(event => {
-    if (event.type === "core_error") effectFailure ??= new Error(String(event.error ?? "Core failed"));
+    if (event.type === "core_error" && event.willRetry !== true) effectFailure ??= new Error(String(event.error ?? "Core failed"));
     if (event.type === "message_update") {
       const update = event.assistantMessageEvent as Json | undefined;
       activity = "WORKING";
@@ -160,10 +160,13 @@ export async function runCoreWorker(run: Run, options: CoreSessionOptions, open:
         } finally { controlling = false; }
       });
     }, 2_000);
+    if (current.unresolvedCommands?.length) throw new Error(`Core has unresolved dispatch outcomes: ${current.unresolvedCommands.join(", ")}`);
     const recovered = Boolean(current.messageCount > 0 || current.lastAssistantMessage);
     const active = current.coreBusy || current.isStreaming || current.isCompacting || current.pendingMessageCount > 0 || current.agents?.some((agent: Json) => agent.state === "running");
     if (!active && (!recovered || !current.lastAssistantMessage || !current.treeComplete)) {
-      await wire.command("prompt", { ...(!recovered ? { id: `run:${run.id}:initial` } : {}), message: recovered
+      await wire.command("prompt", { ...(!recovered ? { id: `run:${run.id}:initial` } : {}),
+        workId: !recovered ? `run:${run.id}:initial` : `run:${run.id}:continue:${current.nativeSessionId}:${current.messageCount}`,
+        message: recovered
         ? interruptedTurnPrompt("the process hosting this session stopped", "I reopened this run's recorded core session.")
         : run.prompt });
       current = await state();

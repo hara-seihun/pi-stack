@@ -203,6 +203,7 @@ type RuntimeHandoff = {
   pendingContextThinkingLength?: number;
   pendingContextFinalization: string | null;
   pendingModelFailure: string | null;
+  pendingCoreFailure?: string | null;
   lastActivity: number;
   activeTools: Array<[string, string]>;
   dispatchedWorkIds: string[];
@@ -244,6 +245,7 @@ interface Runtime {
   pendingContextThinkingLength: number;
   pendingContextFinalization: string | null;
   pendingModelFailure: string | null;
+  pendingCoreFailure: string | null;
   expectedExit: boolean;
   lastActivity: number;
   activeTools: Map<string, string>;
@@ -1052,6 +1054,7 @@ async function terminateRuntimeProcess(rt: Runtime) {
 class RpcTimeoutError extends Error {
   constructor(readonly command: string) { super(`${command} timed out`); this.name = "RpcTimeoutError"; }
 }
+class CoreCommandError extends Error {}
 
 function rpc(rt: Runtime, type: string, body: Record<string, unknown> = {}, timeoutMs = 15000): Promise<any> {
   const id = crypto.randomUUID();
@@ -1078,14 +1081,17 @@ function handleRpcEvent(sessionId: string, rt: Runtime, event: any) {
     if (pending) {
       clearTimeout(pending.timer);
       rt.pending.delete(event.id);
-      event.success ? pending.resolve(event.data ?? {}) : pending.reject(new Error(event.error ?? "RPC command failed"));
+      event.success ? pending.resolve(event.data ?? {}) : pending.reject(new CoreCommandError(event.error ?? "Core command failed"));
     }
     return;
   }
   if (!ownsSupervisorLease() || runtimes.get(sessionId) !== rt || rt.phase === "STOPPING") return;
   if (event.type === "core_agent") {
+    rt.phaseVersion++;
     sessionCores.recordAgent(sessionId, event.agent as CoreAgent);
     emit(sessionId, "core_agent", { agent: event.agent });
+    if (event.agent?.state === "running" && ["IDLE","DISPATCHING"].includes(rt.phase)) setRuntimePhase(sessionId,rt,"RUNNING","RUNNING");
+    else if (event.agent?.state !== "running") void verifyRuntimeSettlement(sessionId,rt).catch(cause => console.error("Core tree reconciliation failed",cause));
     touchSession(sessionId);
     return;
   }
@@ -1098,7 +1104,8 @@ function handleRpcEvent(sessionId: string, rt: Runtime, event: any) {
     storeContextCapture(sessionId, { context: event.context,
       capturedAt: Math.max(Date.now(), (storedContext(sessionId)?.capturedAt ?? 0) + 1),
       replacement: rt.compacting ? "compaction" : undefined,
-      finalizesMessage: event.finalizesMessage ?? event.finalizedMessage ?? (last ? messageFinalizationKey(last) : undefined) });
+      finalizesMessage: typeof event.finalizesMessage === "string" ? event.finalizesMessage
+        : messageFinalizationKey(event.finalizedMessage?.role === "assistant" ? event.finalizedMessage : last) });
     return;
   }
   if (event.type === "queue_update") {
@@ -1230,6 +1237,12 @@ function handleRpcEvent(sessionId: string, rt: Runtime, event: any) {
           ? "Context compaction failed; retrying…"
           : `Context compaction failed${event.errorMessage ? `: ${String(event.errorMessage)}` : ""}`;
     emit(sessionId, "notice", { text });
+  } else if (event.type === "core_error") {
+    const detail = String(event.error ?? "Agent core failed");
+    if (!event.willRetry) rt.pendingCoreFailure = detail;
+    rt.retrying = event.willRetry === true;
+    emit(sessionId, "notice", {text:detail});
+    touchSession(sessionId);
   } else if (event.type === "extension_error") {
     emit(sessionId, "notice", { text: "Extension error" });
   } else if (event.type === "extension_ui_request") {
@@ -1266,8 +1279,9 @@ function retireSettledSubagent(sessionId: string, rt: Runtime): boolean {
 
 function settleRuntime(sessionId: string, rt: Runtime, emitEvent: boolean): boolean {
   if (rt.phase !== "RUNNING") return false;
-  const modelFailure = rt.pendingModelFailure;
+  const modelFailure = rt.pendingCoreFailure ?? rt.pendingModelFailure;
   if (modelFailure) emit(sessionId, "notice", { text: modelFailure });
+  rt.pendingCoreFailure = null;
   rt.pendingModelFailure = null;
   setRuntimePhase(sessionId, rt, "IDLE");
   rt.compacting = false;
@@ -1367,6 +1381,7 @@ function runtimeFromHandoff(row: any, handoff?: RuntimeHandoff, initialPhase: Ru
       ?? (handoff?.pendingContextFinalization ? handoff.liveThinking.length : 0),
     pendingContextFinalization: handoff?.pendingContextFinalization ?? null,
     pendingModelFailure: handoff?.pendingModelFailure ?? null,
+    pendingCoreFailure: handoff?.pendingCoreFailure ?? null,
     expectedExit: false,
     lastActivity: handoff?.lastActivity ?? Date.now(),
     activeTools: new Map(handoff?.activeTools ?? []),
@@ -1442,6 +1457,7 @@ async function startRuntime(row: any): Promise<Runtime> {
   const preset = workspaces.get(row.workspace_id);
   const cwd = realpathSync(preset?.path ?? row.workspace_id);
   const resumePath = row.session_path && existsSync(row.session_path) ? row.session_path : null;
+  if (row.session_path && !resumePath && sessionCores.get(row.id).core !== "pi") throw new Error("The recorded native core state is missing; repair its custody before reopening");
   if (row.session_path && !resumePath) {
     db.query("UPDATE sessions SET session_path=NULL WHERE id=?").run(row.id);
     emit(row.id, "notice", { text: "Session file was missing; restoring from saved conversation history" });
@@ -1732,7 +1748,7 @@ async function runCommand(row: any, requestId: string, name: string, args: strin
       setRuntimePhase(row.id, rt, "DISPATCHING", "RUNNING");
     }
     try {
-      await rpc(rt, "prompt", { message: text }, PROMPT_ACK_TIMEOUT_MS);
+      await rpc(rt, "prompt", { message: text, workId: requestId }, PROMPT_ACK_TIMEOUT_MS);
     } catch (cause) {
       if (startsAgent && rt.phase === "DISPATCHING") setRuntimePhase(row.id, rt, "IDLE", "IDLE");
       throw cause;
@@ -1928,7 +1944,8 @@ async function drainSession(sessionId: string) {
       }
       if (!item.inserted_at) db.query("UPDATE work_items SET meeting_transcript=? WHERE id=?").run(JSON.stringify(transcript), item.id);
       let message = item.text;
-      if (rt.historyNeedsRestore) {
+      const nativeDispatchRecovery = sessionCores.get(sessionId).core === "codex";
+      if (rt.historyNeedsRestore && !nativeDispatchRecovery) {
         const beforeSeq = Number((db.query("SELECT coalesce(max(seq),0)+1 before_seq FROM events WHERE session_id=?").get(sessionId) as any)?.before_seq ?? 1);
         const context = restoredContext(sessionId, beforeSeq);
         if (context) {
@@ -1937,10 +1954,10 @@ async function drainSession(sessionId: string) {
             : `This Pi thread is being restored from its durable conversation ledger. Use the transcript below as prior context. Do not summarize or respond to the transcript itself; answer only the new user message after it.\n\n<prior_conversation>\n${context}\n</prior_conversation>\n\n<new_user_message>\n${item.text}\n</new_user_message>`;
         }
         rt.historyNeedsRestore = false;
-      } else if (item.resume) {
+      } else if (item.resume && !nativeDispatchRecovery) {
         message = `The previous agent operation was interrupted after this request entered the conversation. Continue its unfinished work from the current session state without repeating completed actions.\n\n<interrupted_user_request>\n${item.text}\n</interrupted_user_request>`;
       }
-      if (item.resume) {
+      if (item.resume && !nativeDispatchRecovery) {
         const accepted = db.query(`SELECT w.id workId,w.session_id threadId,w.text task,w.state,s.model
           FROM thread_delegations d JOIN work_items w ON w.id=d.work_id JOIN subagents s ON s.session_id=w.session_id
           WHERE d.parent_session_id=? AND w.created_at>=? ORDER BY w.rowid`).all(sessionId, item.created_at);
@@ -1965,13 +1982,16 @@ async function drainSession(sessionId: string) {
       rt.lastActivity = Date.now();
       const delivery = item.delivery === "steer" ? "steer" : "followUp";
       const commandType = wasBusy ? (delivery === "steer" ? "steer" : "follow_up") : "prompt";
+      const dispatch = nativeDispatchRecovery
+        ? sessionCores.dispatch(sessionId,item.id,{type:commandType,message,images:JSON.parse(item.images)})
+        : {type:commandType,message,images:JSON.parse(item.images)};
       db.query("UPDATE work_items SET state='dispatched',updated_at=?,last_error=NULL WHERE id=?").run(now(), item.id);
       rt.dispatchedWorkIds.add(item.id);
       rt.phaseVersion++;
       // A Pi steering/follow-up queue continues inside the current agent run and does
       // not emit a fresh agent_start. The phase remains RUNNING for queued messages;
       // only an idle prompt enters DISPATCHING until agent_start proves the new run.
-      await rpc(rt, commandType, { message, images: JSON.parse(item.images) }, PROMPT_ACK_TIMEOUT_MS);
+      await rpc(rt, dispatch.type, { message:dispatch.message,images:dispatch.images,workId:item.id }, PROMPT_ACK_TIMEOUT_MS);
       confirmWorkInserted(sessionId, item.id);
     } catch (cause: any) {
       if (!ownsSupervisorLease()) return;
@@ -2022,6 +2042,13 @@ async function drainSession(sessionId: string) {
       }
       if (active?.phase === "DISPATCHING") setRuntimePhase(sessionId, active, "IDLE");
       active?.dispatchedWorkIds.delete(item.id);
+      if (cause instanceof CoreCommandError) {
+        db.query("UPDATE work_items SET state='complete',updated_at=?,last_error=? WHERE id=?").run(now(),cause.message,item.id);
+        setState(sessionId, active?.phase === "RUNNING" ? "RUNNING" : "FAILED", cause.message);
+        emit(sessionId,"notice",{text:cause.message});
+        relayThreadResults();
+        return;
+      }
       const attempts = Number(item.attempts ?? 0) + 1;
       const delay = Math.min(300_000, 5_000 * (2 ** Math.min(6, attempts - 1)));
       db.query("UPDATE work_items SET state='queued',attempts=?,available_at=?,updated_at=?,last_error=? WHERE id=?")
@@ -3188,6 +3215,7 @@ function handoffDocument() {
       pendingContextThinkingLength: rt.pendingContextThinkingLength,
       pendingContextFinalization: rt.pendingContextFinalization,
       pendingModelFailure: rt.pendingModelFailure,
+      pendingCoreFailure: rt.pendingCoreFailure,
       lastActivity: rt.lastActivity,
       activeTools: [...rt.activeTools],
       dispatchedWorkIds: [...rt.dispatchedWorkIds],
