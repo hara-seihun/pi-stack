@@ -169,6 +169,7 @@ async function startServer() {
       PI_FAKE_CRASH_MARKER: fakeCrashMarker,
       PI_FAKE_RESTART_MARKER: fakeRestartMarker,
       PI_FAKE_GATE_ROOT: fakeGateRoot,
+      PI_FAKE_TEST_OWNER_PID: String(process.pid),
       PI_FAKE_TIME_SCALE: "0.05",
       PI_REMOTE_ORCHESTRATOR_DB: fakeOrchestratorDb,
       PI_ORCHESTRATOR_AUTH: join(root, "agent", "auth.json"),
@@ -197,7 +198,7 @@ async function startServer() {
 
 beforeAll(async () => {
   await Bun.write(fakePi, `#!/usr/bin/env python3
-import json, os, subprocess, sys, threading, time
+import json, os, signal, subprocess, sys, threading, time
 scale = float(os.environ.get('PI_FAKE_TIME_SCALE', '1'))
 def pause(seconds): time.sleep(seconds * scale)
 if '--print' in sys.argv:
@@ -215,6 +216,15 @@ if '--print' in sys.argv:
  else:
   print('Automatic Thread Name')
  sys.exit(0)
+def watch_test_owner():
+ owner_pid = int(os.environ['PI_FAKE_TEST_OWNER_PID'])
+ while True:
+  try: os.kill(owner_pid, 0)
+  except ProcessLookupError:
+   os.killpg(os.getpgrp(), signal.SIGTERM)
+   return
+  time.sleep(0.05)
+threading.Thread(target=watch_test_owner, daemon=True).start()
 def gate(name):
  root = os.environ['PI_FAKE_GATE_ROOT']
  os.makedirs(root, exist_ok=True)
@@ -262,9 +272,9 @@ def publish_execution():
  global execution_revision
  execution_revision += 1
  print(json.dumps({'type':'execution_update','execution':execution_snapshot()}), flush=True)
-def transition_work(work_id, state, error=None):
+def transition_work(work_id, state, error=None, result=None):
  if not work_id or work_id not in operations or operations[work_id]['state'] in ('succeeded','failed','cancelled'): return
- operations[work_id] = {'workId':work_id,'state':state,**({'error':error} if error else {})}
+ operations[work_id] = {'workId':work_id,'state':state,**({'error':error} if error else {}),**({'result':{'text':result}} if result is not None else {})}
  publish_execution()
 def begin_work(request):
  global terminal_candidate, last_operation_error
@@ -277,9 +287,9 @@ def begin_work(request):
   operation_kinds[work_id] = request.get('type')
   publish_execution()
  transition_work(work_id,'accepted')
-def finish_active(state, error=None):
+def finish_active(state, error=None, result=None):
  for work_id, operation in list(operations.items()):
-  if operation['state'] in ('pending','accepted','running'): transition_work(work_id,state,error)
+  if operation['state'] in ('pending','accepted','running'): transition_work(work_id,state,error,result)
 def out(value):
  global terminal_candidate, last_operation_error
  kind = value.get('type')
@@ -290,7 +300,8 @@ def out(value):
   last_operation_error = value.get('errorMessage')
  elif kind == 'message_end' and value.get('message',{}).get('role') == 'assistant':
   message = value['message']; reason = message.get('stopReason')
-  terminal_candidate = ('failed', message.get('errorMessage') or last_operation_error or 'Core operation failed') if reason == 'error' else (('cancelled', message.get('errorMessage') or last_operation_error or 'Core operation cancelled') if reason == 'aborted' else ('succeeded', None))
+  result = ''.join(block.get('text','') for block in message.get('content',[]) if block.get('type') == 'text')
+  terminal_candidate = ('failed', message.get('errorMessage') or last_operation_error or 'Core operation failed', None) if reason == 'error' else (('cancelled', message.get('errorMessage') or last_operation_error or 'Core operation cancelled', None) if reason == 'aborted' else ('succeeded', None, result))
  elif kind == 'agent_settled' and terminal_candidate:
   finish_active(*terminal_candidate)
   terminal_candidate = None
@@ -388,7 +399,7 @@ for line in sys.stdin:
    out({'type':'agent_settled'})
   elif last == 'stale-settled':
    out({'type':'agent_settled'})
-   pause(0.2)
+   gate('stale-settled')
    out({'type':'agent_start'})
    pause(0.2)
    out({'type':'message_end','message':{'role':'assistant','content':[{'type':'text','text':'done once'}]}})
@@ -1435,22 +1446,20 @@ describe("web and supervisor integration", () => {
     await api("DELETE", `/v1/sessions/${id}`);
   }, 15_000);
 
-  test("keeps unconfirmed sends above the composer and out of the transcript", async () => {
+  test("an accepted receipt confirms a send even when its command acknowledgement is lost", async () => {
     const id = await createThread();
     resetGate("slow-ack");
     const accepted = await api("POST", `/v1/sessions/${id}/prompt`, { requestId: crypto.randomUUID(), text: "slow-ack" });
     await waitForGate("slow-ack");
     try {
-      const pending = await waitFor(
-        () => api("GET", `/v1/sessions/${id}`).then((result) => result.value.session),
-        (session) => session.queuedMessages?.some((message: any) => message.text === "slow-ack"),
+      const confirmed = await waitFor(
+        () => api("GET", `/v1/sessions/${id}/events?after=0`).then((result) => result.value),
+        (value) => value.events.some((event: any) => event.type === "user" && event.text === "slow-ack"),
       );
-      expect(pending.queuedMessages.find((message: any) => message.text === "slow-ack")).toMatchObject({
-        canSteer: false,
-        delivery: "prompt",
-      });
-      const beforeAck = await api("GET", `/v1/sessions/${id}/events?after=0`);
-      expect(beforeAck.value.events.some((event: any) => event.type === "user" && event.text === "slow-ack")).toBe(false);
+      expect(confirmed.session.queuedMessages.some((message: any) => message.text === "slow-ack")).toBe(false);
+      expect(confirmed.events.some((event: any) => event.type === "assistant" && event.text === "slow ack done")).toBe(false);
+      const receipt = confirmed.events.find((event: any) => event.type === "user" && event.text === "slow-ack");
+      expect(receipt.workId).toBe(accepted.value.workId);
     } finally {
       releaseGate("slow-ack");
     }
@@ -1458,9 +1467,7 @@ describe("web and supervisor integration", () => {
       () => api("GET", `/v1/sessions/${id}/events?after=0`).then((result) => result.value),
       (value) => value.events.some((event: any) => event.type === "assistant" && event.text === "slow ack done"),
     );
-    const userEvents = inserted.events.filter((event: any) => event.type === "user" && event.text === "slow-ack");
-    expect(userEvents).toHaveLength(1);
-    expect(userEvents[0].workId).toBe(accepted.value.workId);
+    expect(inserted.events.filter((event: any) => event.type === "user" && event.text === "slow-ack")).toHaveLength(1);
     expect(inserted.session.queuedMessages).toEqual([]);
   }, 15_000);
 
@@ -1577,7 +1584,7 @@ describe("web and supervisor integration", () => {
       },
     });
     resetGate("compaction");
-    await api("POST", `/v1/sessions/${id}/prompt`, { requestId: crypto.randomUUID(), text: "compact" });
+    const accepted = await api("POST", `/v1/sessions/${id}/prompt`, { requestId: crypto.randomUUID(), text: "compact" });
     await waitForGate("compaction");
     try {
       const compacting = await waitFor(
@@ -1585,8 +1592,12 @@ describe("web and supervisor integration", () => {
         (session) => session?.activity === "COMPACTING",
       );
       expect(compacting.activity).toBe("COMPACTING");
-      const inProgressEvents = await api("GET", `/v1/sessions/${id}/events?after=0`);
-      expect(inProgressEvents.value.events.some((event: any) => event.type === "settled")).toBe(false);
+      const ledger = new Database(join(root, "data", "supervisor.sqlite3"), { readonly: true });
+      try {
+        expect(ledger.query("SELECT state FROM work_items WHERE id=?").get(accepted.value.workId)).toEqual({ state: "dispatched" });
+      } finally {
+        ledger.close();
+      }
     } finally {
       releaseGate("compaction");
     }
@@ -1666,17 +1677,26 @@ describe("web and supervisor integration", () => {
 
   test("does not let a stale settled event complete a newly dispatched message", async () => {
     const id = await createThread();
-    await api("POST", `/v1/sessions/${id}/prompt`, { requestId: crypto.randomUUID(), text: "stale-settled" });
+    resetGate("stale-settled");
+    const accepted = await api("POST", `/v1/sessions/${id}/prompt`, { requestId: crypto.randomUUID(), text: "stale-settled" });
+    await waitForGate("stale-settled");
+    try {
+      const ledger = new Database(join(root, "data", "supervisor.sqlite3"), { readonly: true });
+      try {
+        expect(ledger.query("SELECT state FROM work_items WHERE id=?").get(accepted.value.workId)).toEqual({ state: "dispatched" });
+      } finally {
+        ledger.close();
+      }
+      expect((await api("GET", `/v1/sessions/${id}`)).value.session.state).toBe("RUNNING");
+    } finally {
+      releaseGate("stale-settled");
+    }
     const events = await waitFor(
-      () => api("GET", `/v1/sessions/${id}/events?after=0`).then((result) => result.value.events),
-      (rows) => rows.some((event: any) => event.type === "assistant" && event.text === "done once"),
+      () => api("GET", `/v1/sessions/${id}/events?after=0`).then((result) => result.value),
+      (value) => value.session.state === "IDLE"
+        && value.events.some((event: any) => event.type === "assistant" && event.text === "done once"),
     );
-    expect(events.some((event: any) => event.type === "notice" && event.text.includes("stale settled"))).toBe(true);
-    const session = await waitFor(
-      () => api("GET", `/v1/sessions/${id}`).then((result) => result.value.session),
-      (value) => value?.state === "IDLE",
-    );
-    expect(session.activity).toBe("IDLE");
+    expect(events.events.filter((event: any) => event.type === "assistant" && event.text === "done once")).toHaveLength(1);
   }, 15_000);
 
   test("keeps accepted execution running before any presentation start event", async () => {
@@ -1931,9 +1951,18 @@ describe("web and supervisor integration", () => {
     await api("POST", `/v1/sessions/${id}/prompt`, { requestId: crypto.randomUUID(), text: "abort-refuse" });
     await waitFor(() => api("GET", `/v1/sessions/${id}`).then((result) => result.value.session), (session) => session?.state === "RUNNING");
     const aborted = await api("POST", `/v1/sessions/${id}/abort`, {});
-    expect(aborted).toMatchObject({ status: 409, value: { error: expect.stringContaining("still running") } });
+    expect(aborted).toMatchObject({ status: 409, value: { error: "Cancellation is not confirmed; work remains owned by the core" } });
     const session = await api("GET", `/v1/sessions/${id}`);
-    expect(session.value.session.state).toBe("RUNNING");
+    expect(session.value.session).toMatchObject({
+      state: "FAILED",
+      lastError: expect.stringContaining("Cancellation outcome requires reconciliation"),
+    });
+    const ledger = new Database(join(root, "data", "supervisor.sqlite3"), { readonly: true });
+    try {
+      expect(ledger.query("SELECT state FROM work_items WHERE session_id=?").get(id)).toEqual({ state: "dispatched" });
+    } finally {
+      ledger.close();
+    }
     expect(JSON.parse(readFileSync(fakeLaunch, "utf8")).pid).toBe(runtimePid);
     await api("DELETE", `/v1/sessions/${id}`);
   }, 20_000);
@@ -2014,7 +2043,7 @@ describe("web and supervisor integration", () => {
     await api("POST", `/v1/sessions/${parent}/abort`, { requestId: crypto.randomUUID() });
   });
 
-  test("an interrupted coordinator receives accepted delegation receipts before continuing", async () => {
+  test("an interrupted coordinator resumes with the same native dispatch envelope", async () => {
     const parent = await createThread("home", "astra");
     await api("POST", `/v1/sessions/${parent}/prompt`, { requestId: crypto.randomUUID(), text: "holding coordinator" });
     const accepted = await api("POST", "/v1/sessions", { requestId: crypto.randomUUID(), parentSessionId: parent, model: "luna", task: "delegate accepted before disconnect" });
@@ -2024,11 +2053,15 @@ describe("web and supervisor integration", () => {
     server.kill("SIGTERM");
     await server.exited;
     await startServer();
-    const prompts = await waitFor(async () => readJsonLines(fakeRpcLog).filter((entry) => entry.sessionId === parent && entry.type === "prompt"),
-      (entries) => entries.some((entry) => entry.message.includes('"type":"accepted_delegations"')));
-    const recovery = prompts.find((entry) => entry.message.includes('"type":"accepted_delegations"'));
-    expect(recovery.message).toContain(child);
-    expect(recovery.message).toContain(accepted.value.delegation.workId);
+    const prompts = await waitFor(
+      async () => readJsonLines(fakeRpcLog).filter((entry) => entry.sessionId === parent && entry.type === "prompt"),
+      (entries) => entries.length >= 2,
+    );
+    expect(prompts.slice(0, 2).map((entry) => ({ workId: entry.workId, message: entry.message, resume: entry.resume }))).toEqual([
+      { workId: prompts[0].workId, message: "holding coordinator", resume: false },
+      { workId: prompts[0].workId, message: "holding coordinator", resume: false },
+    ]);
+    expect(prompts.some((entry) => entry.message.includes('"type":"accepted_delegations"'))).toBe(false);
   });
 
   test("a completed subagent delivers its saved result once after the coordinator supervisor restarts", async () => {

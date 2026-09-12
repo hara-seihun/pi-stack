@@ -19,7 +19,7 @@ function fixture(db: Database) {
     .run(JSON.stringify({ text: "first result" }));
 }
 
-test("completion atomically saves the result before settlement, survives restart, and cannot be overwritten by a follow-up", () => {
+test("completion records its outcome without inferring a result from assistant presentation events", () => {
   const root = mkdtempSync(join(tmpdir(), "pi-subagent-result-"));
   const path = join(root, "state.sqlite3");
   let db = new Database(path);
@@ -32,6 +32,10 @@ test("completion atomically saves the result before settlement, survives restart
     expect(fail).toThrow("crash before commit");
     expect(db.query("SELECT * FROM delegation_results").all()).toEqual([]);
     db.query("UPDATE work_items SET state='complete' WHERE id='task'").run();
+    expect(db.query("SELECT * FROM delegation_results").all()).toEqual([
+      { work_id: "task", result: "", status: "complete", error: null },
+    ]);
+    db.query("UPDATE delegation_results SET result='named native result' WHERE work_id='task'").run();
     db.close();
     db = new Database(path);
     ensureSupervisorSchema(db);
@@ -40,7 +44,7 @@ test("completion atomically saves the result before settlement, survives restart
       .run(JSON.stringify({ text: "another task's result" }));
     ensureSupervisorSchema(db);
     expect(db.query("SELECT * FROM delegation_results").all()).toEqual([
-      { work_id: "task", result: "first result", status: "complete", error: null },
+      { work_id: "task", result: "named native result", status: "complete", error: null },
     ]);
     expect(db.query("SELECT reply_work_id FROM thread_delegations WHERE work_id='task'").get()).toEqual({ reply_work_id: null });
     expect(() => db.query("UPDATE subagents SET model='gpt-6-astra' WHERE session_id='child'").run()).toThrow("immutable");
