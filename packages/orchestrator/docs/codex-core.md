@@ -1,6 +1,6 @@
 # Codex app-server core
 
-`src/cores/codex.ts` adapts the installed Codex 0.146.0 app-server to PiStack's runtime wire. Codex owns instructions, native tools, skills, compaction, and child agents. PiStack chooses the starting model and effort, supplies an account lease, and controls dispatch. No Pi system prompt or Pi tools are installed into Codex.
+`src/cores/codex.ts` adapts the pinned Codex 0.146.0 app-server to PiStack's runtime wire. The default launcher resolves the executable from Orchestrator's immutable dependency closure, not the caller's PATH. Codex owns instructions, native tools, skills, compaction, and child agents. PiStack chooses the starting model and effort, supplies an account lease, and controls dispatch. No Pi system prompt or Pi tools are installed into Codex.
 
 ## Bind the account broker
 

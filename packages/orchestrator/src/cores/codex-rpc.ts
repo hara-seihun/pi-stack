@@ -1,4 +1,6 @@
 import { createInterface } from "node:readline";
+import { dirname, join } from "node:path";
+import { fileURLToPath } from "node:url";
 import { openCodexProcess } from "./codex-process.js";
 
 export type Json = Record<string, unknown>;
@@ -22,7 +24,8 @@ export interface CodexRpcOptions {
 export type OpenCodexRpc = (options: CodexRpcOptions) => CodexRpc;
 
 export const openCodexRpc: OpenCodexRpc = options => {
-  const owner = (options.launchProcess ?? openCodexProcess)({ binary: options.binary ?? "codex",
+  const binary = options.binary ?? join(dirname(fileURLToPath(import.meta.resolve("@openai/codex/package.json"))), "bin", "codex.js");
+  const owner = (options.launchProcess ?? openCodexProcess)({ binary,
     args: ["app-server", "--listen", "stdio://", ...(options.args ?? [])], cwd: options.cwd, env: options.env });
   const child = owner.child;
   // Native diagnostics can contain request bodies. They never enter portable logs.
@@ -52,7 +55,7 @@ export const openCodexRpc: OpenCodexRpc = options => {
     rejectPending();
     if (exitNotified) return;
     exitNotified = true;
-    // The adapter learns about process exit only after the owned cgroup is stopped.
+    // Publish exit only after the inherited process tree has stopped.
     void close().then(() => options.exit(code), () => options.exit(1));
   };
   child.once("error", () => finish(1));
