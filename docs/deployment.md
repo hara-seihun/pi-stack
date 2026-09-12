@@ -1,12 +1,16 @@
 # Deployment
 
-One reviewed commit goes to every host with one command:
+Submit an immutable source commit to the durable publication worker from a writer checkout:
 
 ```bash
-cd /home/kenan/projects/pi-stack && git pull --ff-only && deploy/host
+deploy/publication submit "$(git rev-parse HEAD)"
 ```
 
-`deploy/host` reads `/etc/pi-stack/host.json`, refuses a dirty checkout, holds one lock on the checkout, and must finish inside 50 seconds. Every artifact it publishes carries the commit in a `.pi-stack-commit` file; the deployed commit on a host is whatever `/srv/pi/pi-remote/.pi-stack-commit` says.
+The returned receipt acknowledges custody. The worker owns integration checks, merging `main`, both host deployments and terminal reporting. `deploy/publication inspect REQUEST` reads its progress. Failed requests retain their source ref, logs and repair details. After fixing the recorded cause, use `deploy/publication retry REQUEST`.
+
+`deploy/publication install` installs the GMKtec worker and timer from this checkout. Its state lives at `~/.local/state/pi-stack-publication/`. This publisher was introduced in source commit `34fcf7b23c0a6895a574bfc8d90d55f14d3bc878` with the execution-state rewrite. Its current implementation also accepts ordinary releases that do not change that execution contract. Those releases use live handoff. Only a target implementing `core-execution-v1` enters that contract's first-activation gate. Once either host adopts the contract, the worker refuses a target that removes it.
+
+The worker invokes each host's release wrapper, which calls `deploy/host`. `deploy/host` reads `/etc/pi-stack/host.json`, refuses a dirty checkout, holds one lock on the checkout, and must finish inside 50 seconds. Every artifact it publishes carries the commit in a `.pi-stack-commit` file; the deployed commit on a host is whatever `/srv/pi/pi-remote/.pi-stack-commit` says.
 
 ## What a host provides
 

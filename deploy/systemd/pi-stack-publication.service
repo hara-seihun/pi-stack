@@ -1,0 +1,16 @@
+[Unit]
+Description=Recover, integrate, and release durable Pi Stack publications
+Wants=network-online.target
+After=network-online.target
+
+[Service]
+Type=oneshot
+ExecStart=/home/kenan/machine/pi-stack-publication drain
+TimeoutStartSec=30min
+Restart=on-failure
+RestartSec=15s
+KillMode=control-group
+UMask=0077
+Nice=10
+IOSchedulingClass=best-effort
+IOSchedulingPriority=6

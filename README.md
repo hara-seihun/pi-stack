@@ -35,7 +35,7 @@ On September 12, 2026, a controlled replay of a failed Remote greeting isolated 
 
 ## Deployments
 
-Every host deploys one reviewed commit with `deploy/host`, which reads a small host file naming the fleet account and any local packages and skills. Persons come from Pi Remote's registry. The scripts under [`deploy`](deploy) refuse an uncommitted checkout, serialize work from the same source tree, and enforce a 50-second deadline. Commit-addressed releases share one production dependency tree and switch atomically. See [`docs/deployment.md`](docs/deployment.md).
+`deploy/publication submit SHA` hands a source commit to the durable worker for integration and deployment on both hosts. Its host wrappers call `deploy/host`, which reads a small host file naming the fleet account and any local packages and skills. Persons come from Pi Remote's registry. The scripts under [`deploy`](deploy) refuse an uncommitted checkout, serialize work from the same source tree, and enforce a 50-second deadline. Commit-addressed releases share one production dependency tree and switch atomically. See [`docs/deployment.md`](docs/deployment.md).
 
 Pi Remote environments are independent servers:
 
