@@ -1,0 +1,11 @@
+[Unit]
+Description=Resume interrupted Pi Stack publications
+
+[Timer]
+OnBootSec=30s
+OnUnitInactiveSec=1min
+Persistent=true
+Unit=pi-stack-publication.service
+
+[Install]
+WantedBy=timers.target

@@ -1,10 +1,31 @@
 # Deployment
 
-One reviewed commit goes to every host with one command:
+## Publication owner
+
+Submit one clean, committed source tree from its checkout:
 
 ```bash
-cd /home/kenan/projects/pi-stack && git pull --ff-only && deploy/host
+deploy/publication submit "$(git rev-parse HEAD)"
 ```
+
+The command pushes the exact source SHA to a request-specific remote ref, writes and fsyncs a request under `~/.local/state/pi-stack-publication/requests`, starts `pi-stack-publication.service`, and prints its custody receipt. Stop there. Do not watch CI or deployment from the submitting model session.
+
+The GMKtec user service owns the rest. It serializes requests, merges the submitted SHA into the latest `main` without a pull request, runs `npm run check` and the Kenan Android test/build, pushes the checked integration commit, then calls both host wrappers with that exact integration SHA:
+
+```bash
+/home/kenan/machine/pi-stack-release INTEGRATION_SHA
+ssh converge-kenan /home/kenan/machine/pi-stack-release INTEGRATION_SHA
+```
+
+Those commands are publisher internals, not a second release path. The request records the submitted source SHA, main base, integration SHA, check log, and hashed proof from GMKtec and `converge-kenan`. A terminal receipt has `status: "published"` and both hosts at `status: "passed"`. A failed step has `status: "failed"`, retains its source ref and compact log, and files a machine alert with the exact repair command. `deploy/publication retry REQUEST` resumes the same source and integration after repair. The minute timer resumes `queued`, `running`, `blocked`, and `finalizing` requests after a process or machine restart. It never asks a model to poll.
+
+The currently deployed Remote predates the `state.execution` contract and has no quiesce endpoint. The publisher therefore refuses to infer whether one of its runtime processes is idle. Before the first incompatible activation, it records a process census on both hosts and leaves the request `blocked` while any pre-contract `shared-runtime-host.mjs` or `runtime-host.ts` process exists.
+
+When both censuses are empty, the owner seals one host at a time. It stops the router, freezes every running supervisor cgroup, then reads each supervisor database through that supervisor's mount namespace. The frozen snapshot must have no running or dispatched work item, running core agent, starting core switch, generating inline image, open meeting, processing transcript, active upload, or non-supervisor process. A write that began before the freeze either appears in this snapshot or prevents the bounded SQLite read, which restores the old router and leaves publication blocked. Queued work is allowed and remains unchanged. Only a clear frozen snapshot permits a full stop of the runtime-free supervisors. The second host must clear the same gate before `main` changes. Any second-host refusal restarts the first host on its old release.
+
+The host wrappers start fresh supervisors from the integrated release. No old runtime is handed off, killed, continued, or replayed across the boundary. The old router cannot accept requests during the short frozen interval, but a request acknowledged before the fence remains in SQLite. A future Remote quiesce API must accept new prompts into the durable queue while preventing dispatch, retire the old runtime under its owning supervisor, and report the core's explicit `state.execution` before the publisher may replace this bootstrap gate.
+
+Install or repair the owner from a Pi Stack checkout with `deploy/publication install`. This copies the command to `~/machine/pi-stack-publication`, installs the user service and timer, and starts only the timer. A successful publication refreshes those installed files from canonical `main`. It does not restart a Pi service during installation.
 
 `deploy/host` reads `/etc/pi-stack/host.json`, refuses a dirty checkout, holds one lock on the checkout, and must finish inside 50 seconds. Every artifact it publishes carries the commit in a `.pi-stack-commit` file; the deployed commit on a host is whatever `/srv/pi/pi-remote/.pi-stack-commit` says.
 
@@ -92,14 +113,13 @@ sudo systemctl daemon-reload
 
 Stopping the live-dev supervisor restores the deployed capture package and resumes its original supervisor wrapper. Do not restart `pi-remote@kenan.service`; that would kill active Pi turns. Change only the root Tailscale route, not the other applications or `/converge` route.
 
-Persist the prepared Nix generation in `/nix/var/nix/profiles/system` and activate it through a separate root transient systemd unit, exactly as the GMKtec handbook describes. Never run the switch inside the supervisor's cgroup. Then release the same final SHA on both machines:
+Persist the prepared Nix generation in `/nix/var/nix/profiles/system` and activate it through a separate root transient systemd unit, exactly as the GMKtec handbook describes. Never run the switch inside the supervisor's cgroup. Then submit the final source SHA to the publication owner:
 
 ```sh
-/home/kenan/machine/pi-stack-release FINAL_SHA
-ssh converge-kenan /home/kenan/machine/pi-stack-release FINAL_SHA
+deploy/publication submit FINAL_SHA
 ```
 
-Converge's release wrapper installs `pi-stack-voice.service`; its `kenan-vm.tf` boot unit list must carry the same reference. Converge's credential is provisioned from its existing `production-openai-api-key` Secret Manager secret, as recorded in that host's `machine/secrets.md`. Neither release command changes credential custody. The Converge adapter owner then activates the wrapper against this exact installed bundle through Converge's publication workflow.
+The custody receipt ends the model session's responsibility. The publisher integrates and releases its recorded integration SHA on both machines. Converge's release wrapper installs `pi-stack-voice.service`; its `kenan-vm.tf` boot unit list must carry the same reference. Converge's credential is provisioned from its existing `production-openai-api-key` Secret Manager secret, as recorded in that host's `machine/secrets.md`. Publication does not change credential custody. The Converge adapter owner activates the wrapper against the exact installed bundle only after the terminal receipt proves both hosts.
 
 After release, `systemctl show pi-stack-voice.service -p FragmentPath -p DropInPaths -p Environment` must select the host's production declaration, with no working-checkout override. `deploy/voice --check`, `deploy/smoke`, both live commit markers and each host wrapper's own checks must pass. `tailscale serve status` must show `/` proxying `8788`, not Vite's `5175`. No live-dev process should own a service or selected Pi package. Remove preparation-only handbook notes once both deployments are accepted.
 
