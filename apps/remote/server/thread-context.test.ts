@@ -9,9 +9,14 @@ import { DELEGATION_POLICY } from "pi-orchestrator/api";
 
 describe("thread lifecycle context", () => {
   test.each([undefined, "meeting-id"])("root delegation uses shared guidance and scopes meeting details: %s", (meeting) => {
-    const previous = { PI_SUBAGENT_MODEL: process.env.PI_SUBAGENT_MODEL, PI_REMOTE_MEETING_ID: process.env.PI_REMOTE_MEETING_ID };
+    const previous = {
+      PI_SUBAGENT_MODEL: process.env.PI_SUBAGENT_MODEL,
+      PI_REMOTE_MEETING_ID: process.env.PI_REMOTE_MEETING_ID,
+      PI_STACK_CORE_OWNS_CHILDREN: process.env.PI_STACK_CORE_OWNS_CHILDREN,
+    };
     try {
       delete process.env.PI_SUBAGENT_MODEL;
+      delete process.env.PI_STACK_CORE_OWNS_CHILDREN;
       if (meeting) process.env.PI_REMOTE_MEETING_ID = meeting;
       else delete process.env.PI_REMOTE_MEETING_ID;
       const tools: { name: string; description: string }[] = [];
@@ -27,8 +32,12 @@ describe("thread lifecycle context", () => {
     }
   });
   test("subagents keep thinking control but cannot register delegation", () => {
-    const previous = process.env.PI_SUBAGENT_MODEL;
+    const previous = {
+      PI_SUBAGENT_MODEL: process.env.PI_SUBAGENT_MODEL,
+      PI_STACK_CORE_OWNS_CHILDREN: process.env.PI_STACK_CORE_OWNS_CHILDREN,
+    };
     try {
+      delete process.env.PI_STACK_CORE_OWNS_CHILDREN;
       for (const model of ["gpt-6-astra", "gpt-5.6-sol", "gpt-5.6-terra", "gpt-5.6-luna"]) {
         process.env.PI_SUBAGENT_MODEL = model;
         const tools: string[] = [];
@@ -36,8 +45,10 @@ describe("thread lifecycle context", () => {
         expect(tools).toEqual(["thread_thinking", "thread_read", "thread_subagents"]);
       }
     } finally {
-      if (previous === undefined) delete process.env.PI_SUBAGENT_MODEL;
-      else process.env.PI_SUBAGENT_MODEL = previous;
+      for (const [key, value] of Object.entries(previous)) {
+        if (value === undefined) delete process.env[key];
+        else process.env[key] = value;
+      }
     }
   });
   test("describes new and continuing threads without a naming tool", () => {
@@ -72,6 +83,7 @@ describe("thread lifecycle context", () => {
       PI_REMOTE_SERVER_URL: remote ? "http://remote.test" : undefined,
       PI_REMOTE_MEETING_ID: undefined,
       PI_SUBAGENT_MODEL: undefined,
+      PI_STACK_CORE_OWNS_CHILDREN: undefined,
     };
     const previous = Object.fromEntries(Object.keys(environment).map((key) => [key, process.env[key]]));
     writeFileSync(alert, "Disk needs attention\n");
