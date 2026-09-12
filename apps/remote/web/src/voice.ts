@@ -105,6 +105,7 @@ import { updateDocument } from "./sync";
       this.speaker = null;
       this.generation = 0;
       this.cursor = 0;
+      this.coreGeneration = "";
       this.syncEpoch = "";
       this.syncSequence = 0;
       this.liveTextDocument = null;
@@ -214,7 +215,7 @@ import { updateDocument } from "./sync";
         if (generation !== this.generation) return;
         this.setState("live", "Listening");
         if (this.meetingContext) this.appendContext(
-          `You receive audio only. Pi receives available camera images with each delegation and can use computer and browser tools. Meeting voice is ${this.outputMuted ? "muted. You can hear people, but they cannot hear you" : "unmuted. People can hear you"}. Pi can change this with meet_voice.`, "commentary");
+          `You receive audio only. The thread agent receives available camera images with each delegation and can use computer and browser tools. Meeting voice is ${this.outputMuted ? "muted. You can hear people, but they cannot hear you" : "unmuted. People can hear you"}. The agent can change this with meet_voice.`, "commentary");
         this.schedulePoll(0);
       } catch (cause) {
         if (generation !== this.generation) return;
@@ -456,15 +457,22 @@ import { updateDocument } from "./sync";
       const response = await this.request(API.sessionSettings.path({ sessionId: this.sessionId }), {
         method: "PUT",
         headers: { "content-type": "application/json" },
-        body: JSON.stringify({ thinkingLevel: this.meetingContext ? "off" : "medium" }),
+        body: JSON.stringify({
+          coreGeneration: this.coreGeneration,
+          thinkingLevel: this.meetingContext ? "off" : "medium",
+        }),
       });
       if (!response.ok) throw new Error(await responseError(response, "Could not set agent thinking for voice"));
+      const result = await response.json();
+      if (result?.accepted !== true) throw new Error("Agent thinking mutation was not accepted");
     }
 
     async primeCursor() {
       const response = await this.request(API.sessionEvents.path({ sessionId: this.sessionId }, { after: 0 }), { cache: "no-store" });
       if (!response.ok) throw new Error(await responseError(response, "Could not open the thread"));
       const snapshot = await response.json();
+      this.coreGeneration = String(snapshot.session?.coreGeneration || "");
+      if (!this.coreGeneration) throw new Error("Thread did not identify its core generation");
       this.cursor = Math.max(0, ...(snapshot.events || []).map((event) => Number(event.seq) || 0));
       this.threadWorking = snapshot.session?.state === "RUNNING";
       this.lastLiveText = String(snapshot.liveText || "");
@@ -492,6 +500,7 @@ import { updateDocument } from "./sync";
             waitMs: 25_000,
             session: {
               id: this.sessionId,
+              coreGeneration: this.coreGeneration,
               eventsAfter: this.cursor,
               liveTextHash: this.liveTextDocument?.hash,
               liveThinkingHash: this.liveThinkingDocument?.hash,
@@ -502,9 +511,14 @@ import { updateDocument } from "./sync";
         const synchronized = await response.json();
         this.syncEpoch = String(synchronized.epoch || this.syncEpoch);
         this.syncSequence = Number(synchronized.seq || this.syncSequence);
-        const snapshot = synchronized.session || { events: [], liveText: null, liveThinking: null };
-        this.liveTextDocument = await updateDocument(this.liveTextDocument, snapshot.liveText);
-        this.liveThinkingDocument = await updateDocument(this.liveThinkingDocument, snapshot.liveThinking);
+        const snapshot = synchronized.session;
+        if (!snapshot || snapshot.id !== this.sessionId) throw new Error("Voice synchronization returned another thread");
+        const nextGeneration = String(snapshot.coreGeneration || "");
+        if (!nextGeneration) throw new Error("Voice synchronization omitted the core generation");
+        const generationChanged = nextGeneration !== this.coreGeneration;
+        this.liveTextDocument = await updateDocument(generationChanged ? null : this.liveTextDocument, snapshot.liveText);
+        this.liveThinkingDocument = await updateDocument(generationChanged ? null : this.liveThinkingDocument, snapshot.liveThinking);
+        this.coreGeneration = nextGeneration;
         for (const event of snapshot.events) {
           this.cursor = Math.max(this.cursor, Number(event.seq) || 0);
           if (event.type === "user") {

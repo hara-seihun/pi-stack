@@ -6,13 +6,13 @@ const STORE = "contexts";
 const MAX_CONTEXTS = 32;
 const MAX_CONTEXT_BYTES = 2 * 1024 * 1024;
 
-export interface CachedContext extends SyncDocument { key: string; updatedAt: number }
+export interface CachedContext extends SyncDocument { key: string; coreGeneration: string; updatedAt: number }
 let databasePromise: Promise<IDBDatabase> | null = null;
 
 function database() {
   if (!databasePromise) {
     const opening = new Promise<IDBDatabase>((resolve, reject) => {
-      const request = indexedDB.open(DATABASE, 2);
+      const request = indexedDB.open(DATABASE, 3);
       request.onupgradeneeded = () => {
         // Cache only the small display projection, not prior canonical images.
         if (request.result.objectStoreNames.contains(STORE)) request.result.deleteObjectStore(STORE);
@@ -40,7 +40,7 @@ function completion(transaction: IDBTransaction) {
   });
 }
 
-export async function readCachedContext(key: string): Promise<CachedContext | null> {
+export async function readCachedContext(key: string, coreGeneration: string): Promise<CachedContext | null> {
   const db = await database();
   const transaction = db.transaction(STORE, "readonly");
   const done = completion(transaction);
@@ -51,6 +51,7 @@ export async function readCachedContext(key: string): Promise<CachedContext | nu
   }), done]);
   if (!value) return null;
   try {
+    if (value.coreGeneration !== coreGeneration) throw new Error("Cached context belongs to another core generation");
     if (typeof value.document !== "string" || value.document.length * 2 > MAX_CONTEXT_BYTES) throw new Error("Invalid cached context size");
     await updateDocument(null, { kind: "full", document: value.document, hash: value.hash, capturedAt: value.capturedAt ?? 0 });
     JSON.parse(value.document);
@@ -61,13 +62,14 @@ export async function readCachedContext(key: string): Promise<CachedContext | nu
   }
 }
 
-export async function writeCachedContext(key: string, context: SyncDocument) {
+export async function writeCachedContext(key: string, coreGeneration: string, context: SyncDocument) {
+  if (!coreGeneration) throw new Error("A core generation is required to cache context");
   if (context.document.length * 2 > MAX_CONTEXT_BYTES) return deleteCachedContext(key);
   const db = await database();
   const transaction = db.transaction(STORE, "readwrite");
   const done = completion(transaction);
   const store = transaction.objectStore(STORE);
-  store.put({ key, ...context, updatedAt: Date.now() });
+  store.put({ key, coreGeneration, ...context, updatedAt: Date.now() });
   const request = store.index("updatedAt").getAllKeys();
   request.onsuccess = () => {
     const keys = request.result;

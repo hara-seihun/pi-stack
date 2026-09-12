@@ -42,6 +42,7 @@ export interface QueuedMessage {
 export interface Session {
   id: string;
   core?: "pi" | "codex";
+  coreGeneration: string;
   subagent?: { parentSessionId: string; model: string };
   name: string;
   cwd: string;
@@ -208,6 +209,10 @@ export interface SyncRequest {
   dashboardVersion?: number;
   session?: {
     id: string;
+    /** Request the current core's settings and agent tree. */
+    settings?: boolean;
+    /** Opaque generation owning document hashes and core commands. */
+    coreGeneration?: string;
     contextHash?: string;
     /** Last image snapshot version. Omit to request the full current snapshot. */
     imagesVersion?: number;
@@ -236,6 +241,10 @@ export interface SyncResponse {
   /** Present whenever a session was requested and still exists. Each
    * document is null when the caller's hash already matches. */
   session: {
+    id: string;
+    coreGeneration: string;
+    revision: number;
+    settings: ThreadSettings | null;
     context: DocumentUpdate | null;
     images: InlineImageSnapshot | null;
     liveText: DocumentUpdate | null;
@@ -255,6 +264,8 @@ export type BashTimeoutSeconds = (typeof BASH_TIMEOUT_OPTIONS)[number];
 export const DEFAULT_BASH_TIMEOUT_SECONDS: BashTimeoutSeconds = 1800;
 
 export interface ThreadSettings {
+  coreGeneration: string;
+  revision: number;
   core: "pi" | "codex";
   cores: Array<"pi" | "codex">;
   agents: Array<{ id: string; parentId: string | null; name: string; model?: string; state: string }>;
@@ -266,6 +277,23 @@ export interface ThreadSettings {
   speedModes: string[];
   speedMode: string | null;
   bashTimeoutSeconds: BashTimeoutSeconds;
+}
+
+export interface AcceptedMutation { accepted: true }
+export interface CoreGenerationRequest { coreGeneration: string }
+
+export interface ThreadSettingsMutation extends CoreGenerationRequest {
+  core?: "pi" | "codex";
+  modelProvider?: string;
+  modelId?: string;
+  thinkingLevel?: string;
+  speedMode?: string;
+  bashTimeoutSeconds?: BashTimeoutSeconds;
+}
+
+export interface CoreAgentCommand extends CoreGenerationRequest {
+  action: "steer" | "abort";
+  message?: string;
 }
 
 export interface SlashCommand {

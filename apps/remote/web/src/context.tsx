@@ -124,7 +124,7 @@ function contextContentMarkdown(content: any, includeImages = true): string {
 }
 
 export function modelContextEntries(context: any): ContextEntry[] {
-  if (!context) return [{ key: "waiting", signature: "waiting", kind: "notice", label: "Context", text: "Context will appear when Pi makes its next model request." }];
+  if (!context) return [{ key: "waiting", signature: "waiting", kind: "notice", label: "Context", text: "Context will appear when the agent makes its next model request." }];
   const entries: ContextEntry[] = [{
     key: "system", signature: `system:${context.systemPrompt || ""}`, kind: "system", label: "System", text: String(context.systemPrompt || ""),
   }];
