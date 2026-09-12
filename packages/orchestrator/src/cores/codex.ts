@@ -354,8 +354,23 @@ export function createCodexSession(dependencies: CodexDependencies): OpenCoreSes
       } else if (text.startsWith("/")) fail("Codex app-server does not execute slash commands; use a runtime command or /skill:name");
       return data;
     };
+    const readChild = async (threadId: string) => {
+      const thread = (await call<{ thread: Thread }>("thread/read", { threadId, includeTurns: false })).thread;
+      announce(thread);
+      const history = await turns(threadId);
+      const snapshot = new CodexProjection(() => nativeSettings.get(threadId)?.model ?? agents.get(threadId)?.model ?? "", () => {}, stamp);
+      snapshot.restore(history);
+      const running = history.find(turn => turn.status === "inProgress" && !completedTurns.has(turn.id));
+      if (running) active.set(threadId, running.id);
+      else if (thread.status.type !== "active") active.delete(threadId);
+      return { thread, snapshot };
+    };
     const run = async (command: CoreCommand): Promise<unknown> => {
       if (closed) fail("Codex session is closed");
+      if (command.type === "core_agent_read" || command.type === "core_agent_command") {
+        const id = needString(command.agentId, "agentId");
+        if (!agents.has(id)) await discover();
+      }
       const threadId = target(command), root = threadId === state.threadId;
       const current = projection(threadId);
       const selectedModel = root ? state.model : nativeSettings.get(threadId)?.model ?? agents.get(threadId)?.model;
@@ -377,13 +392,33 @@ export function createCodexSession(dependencies: CodexDependencies): OpenCoreSes
           if (list.data.some(entry => entry.errors.length)) fail("Codex skill discovery reported errors");
           return { commands: list.data.flatMap(entry => entry.skills.filter(skill => skill.enabled).map(skill => ({ name: `skill:${skill.name}`, description: skill.description, source: "skill" }))) };
         }
-        case "get_agents": await discover(); return { agents: [...agents.values()] };
+        case "core_agents": await discover(); return { agents: [...agents.values()] };
+        case "core_agent_read": {
+          const { thread, snapshot } = await readChild(threadId);
+          const messages = snapshot.entries.map(entry => entry.message);
+          return { agent: agents.get(threadId), messages, state: {
+            ...await run({ type: "get_state", agentId: threadId }) as Json,
+            isStreaming: active.has(threadId) || thread.status.type === "active",
+            messageCount: messages.length,
+            lastAssistantMessage: [...messages].reverse().find(message => message.role === "assistant"),
+            canAcceptDirectInput: thread.canAcceptDirectInput,
+          } };
+        }
+        case "core_agent_command": {
+          if (command.action !== "steer" && command.action !== "abort") fail("Codex child action must be steer or abort");
+          if (command.action === "abort") {
+            const { thread } = await readChild(threadId);
+            if (thread.status.type === "active" && !active.has(threadId)) fail("Codex child has no interruptible active turn");
+          }
+          const result = await run({ ...command, type: command.action });
+          return { ...result as Json, accepted: true, agentId: threadId, action: command.action };
+        }
         case "get_messages": case "get_entries": {
-          if (!root) { current.restore(await turns(threadId)); current.context(); }
-          if (command.type === "get_messages") return { messages: current.entries.map(entry => entry.message) };
-          const since = command.since === undefined ? -1 : current.entries.findIndex(entry => entry.id === command.since);
+          const view = root ? current : (await readChild(threadId)).snapshot;
+          if (command.type === "get_messages") return { messages: view.entries.map(entry => entry.message) };
+          const since = command.since === undefined ? -1 : view.entries.findIndex(entry => entry.id === command.since);
           if (command.since !== undefined && since < 0) fail("Codex entry not found");
-          return { entries: current.entries.slice(since + 1), leafId: current.entries.at(-1)?.id ?? null };
+          return { entries: view.entries.slice(since + 1), leafId: view.entries.at(-1)?.id ?? null };
         }
         case "prompt": case "follow_up": case "steer": {
           if (accountingFailure) fail("Codex usage accounting needs repair before starting work");

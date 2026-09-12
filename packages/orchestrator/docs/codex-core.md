@@ -51,9 +51,13 @@ Every response has `type: "response"`, the original `id`, `command`, and `succes
 | `get_commands` | Lists enabled native skills. `/skill:name` in a prompt resolves to a native skill input. |
 | `get_messages`, `get_entries` | Return the activity projection. Entry IDs derive from native item IDs; entries include native turn IDs. `get_entries` accepts `since`. |
 | `fork` | Switches the adapter to a native fork before the selected user-message turn. Returns the selected text, like Pi's edit-message workflow. Mid-turn steering entries cannot be forked separately. |
-| `get_agents` | Reconciles all descendant native threads, including grandchildren. |
+| `core_agents` | Returns `{agents}` after reconciling all descendant native threads, including grandchildren. |
+| `core_agent_read` | Requires `agentId`; returns `{agent, messages, state}`. `state` uses the runtime state shape and includes `canAcceptDirectInput`. Reading history does not clear streamed child messages. |
+| `core_agent_command` | Requires `agentId` and `action: "steer"` or `"abort"`. Returns `{accepted: true, agentId, action}` with a native turn ID when available. |
 
-Use `agentId` on a command to target a known native child. Read operations work on stored children. Input requires the native child to advertise `canAcceptDirectInput`. Active children are joined with `thread/resume` to subscribe to their events; this does not submit a prompt. Native child forking into a PiStack root is unsupported.
+Child steering requires `message` and the native child to advertise `canAcceptDirectInput`. It steers an active turn or starts a continuation when idle. Aborting refreshes native history to find the active turn, so it does not rely on having observed that turn's start. An idle abort is an accepted no-op; an abort acknowledgement does not mean the turn has stopped. Read operations work on stored children. Missing IDs, unknown children, other actions, unavailable native history, and active children without an interruptible turn fail explicitly. Pending native children can be listed before their history is materialized, but cannot yet be read.
+
+Active children are joined with `thread/resume` to subscribe to their events; this does not submit a prompt. Native child forking into a PiStack root is unsupported.
 
 Queue modes, auto-compaction toggles, Pi session switching, arbitrary slash commands, Pi extensions, dynamic client tools, approval dialogs, MCP elicitation, and interactive user-input requests are not implemented. Unsupported runtime commands and native client requests fail explicitly. Hard steer is PiStack's interrupt/wait/dispatch policy, not a second native command.
 
@@ -63,7 +67,7 @@ The adapter reads `--provider`, `--model`, `--thinking`, `--name`, and `--sandbo
 
 Root activity emits `agent_start`, `agent_end`, `turn_start`, `turn_end`, `message_start`, `message_update`, `message_end`, `tool_execution_start`, `tool_execution_update`, `tool_execution_end`, and compaction events. Reasoning summaries stream as thinking. Native token usage goes to the broker rather than synthetic message usage fields.
 
-`context_update` contains `context: {systemPrompt, tools, messages}` and, when a message completes, `finalizedMessage`. Its `projection: "activity"` and `core: "codex"` fields matter. `systemPrompt` is empty because app-server does not expose the assembled prompt. `tools` lists observed native tool names with `activityOnly: true`, not model-visible tool schemas. The messages are native activity rendered into portable records. Compaction does not erase historical activity from this projection.
+`context_update` contains `context: {systemPrompt, tools, messages}`. It follows finalized `message_end` events. The adapter omits the optional `finalizesMessage` field; Remote derives its finalization key from the last assistant message. It does not send a message object in place of that key. Its `projection: "activity"` and `core: "codex"` fields matter. `systemPrompt` is empty because app-server does not expose the assembled prompt. `tools` lists observed native tool names with `activityOnly: true`, not model-visible tool schemas. The messages are native activity rendered into portable records. Compaction does not erase historical activity from this projection.
 
 Every native child emits `core_agent` with a `CoreAgent` record. Root parent IDs use the stable PiStack session ID; deeper parent IDs use native child IDs. Parentage can be temporarily null when activity precedes metadata. Child activity uses `core_child_event: {agentId, event}` for the portable journal's child stores and never merges into the root's message stream or context. `canAcceptDirectInput` accompanies metadata updates.
 

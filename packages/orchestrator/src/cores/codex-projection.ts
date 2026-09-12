@@ -52,11 +52,11 @@ export class CodexProjection {
   constructor(private readonly model: () => string, private readonly emit: (event: CoreOutput) => void,
     private readonly stamp: (id: string, suggested?: number) => number) {}
 
-  context(finalizedMessage?: Message) {
+  context() {
     this.emit({ type: "context_update", projection: "activity", core: "codex", context: {
       systemPrompt: "", tools: [...this.tools].map(name => ({ name, activityOnly: true })),
       messages: this.entries.map(entry => entry.message),
-    }, ...(finalizedMessage ? { finalizedMessage } : {}) });
+    } });
   }
   private message(item: ThreadItem, turnId: string, suggested?: number): Message | undefined {
     const base = { id: item.id, timestamp: this.stamp(item.id, suggested), nativeTurnId: turnId };
@@ -96,7 +96,7 @@ export class CodexProjection {
     }
     this.live.delete(item.id);
     this.append(message, turnId);
-    if (emit) { this.emit({ type: "message_end", message }); this.context(message); }
+    if (emit) { this.emit({ type: "message_end", message }); this.context(); }
     if (name) {
       const result = toolResult(item);
       const toolMessage: Message = { id: `${item.id}:result`, role: "toolResult", toolCallId: item.id, toolName: name,
@@ -105,7 +105,7 @@ export class CodexProjection {
       if (emit) {
         this.emit({ type: "tool_execution_end", toolCallId: item.id, toolName: name, result: { content: result.content }, isError: result.isError });
         this.emit({ type: "message_end", message: toolMessage });
-        this.context(toolMessage);
+        this.context();
       }
     }
   }
@@ -123,7 +123,7 @@ export class CodexProjection {
     const message: Message = { id, role: "assistant", content: [], timestamp: this.stamp(id), model: this.model(), provider: "openai-codex",
       stopReason: turn.status === "interrupted" ? "aborted" : "error", errorMessage: turn.error?.message ?? "Codex turn interrupted" };
     this.append(message, turn.id);
-    if (emit) { this.emit({ type: "message_end", message }); this.context(message); }
+    if (emit) { this.emit({ type: "message_end", message }); this.context(); }
   }
   restore(turns: Turn[], transferred: Record<string, unknown>[] = []) {
     this.entries.length = 0; this.tools.clear(); this.live.clear();

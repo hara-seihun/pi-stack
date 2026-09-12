@@ -62,6 +62,53 @@ function fixture(existingOptions?: CoreSessionOptions) {
 }
 
 describe("Codex app-server adapter", () => {
+  it("serves the child inspection/control rendezvous without disturbing streamed child messages", async () => {
+    const f = fixture();
+    f.children([thread("child", "root"), thread("grandchild", "child")]);
+    const session = await f.open();
+    let running = false;
+    f.hook((method, params) => {
+      if (method === "thread/turns/list" && params.threadId === "child") return { ok: true, value: {
+        data: [{ id: "turn-1", status: running ? "inProgress" : "completed", startedAt: 10, items: [
+          { type: "agentMessage", id: "stored-child", text: "Stored child answer" },
+        ] }], nextCursor: null,
+      } };
+      return undefined;
+    });
+    await session.command({ type: "core_agents", id: "agents" });
+    expect(f.response("agents")?.data).toMatchObject({ agents: [
+      { id: "child", parentId: "portable-root" }, { id: "grandchild", parentId: "child" },
+    ] });
+    f.send("item/started", { threadId: "child", turnId: "live", item: { type: "agentMessage", id: "stream", text: "" } });
+    f.send("item/agentMessage/delta", { threadId: "child", itemId: "stream", delta: "A" });
+    await session.command({ type: "core_agent_read", id: "read", agentId: "child" });
+    expect(f.response("read")?.data).toMatchObject({
+      agent: { id: "child" }, messages: [{ role: "assistant", content: [{ text: "Stored child answer" }] }],
+      state: { nativeSessionId: "child", messageCount: 1, canAcceptDirectInput: true },
+    });
+    f.send("item/agentMessage/delta", { threadId: "child", itemId: "stream", delta: "B" });
+    const update = [...f.events].reverse().find(event => event.type === "core_child_event" && (event.event as any)?.type === "message_update");
+    expect((update?.event as any).message.content[0].text).toBe("AB");
+    expect(f.requests.some(request => request.method === "thread/resume")).toBe(false);
+    await session.command({ type: "core_agent_command", id: "continue-child", agentId: "child", action: "steer", message: "Continue" });
+    expect(f.response("continue-child")?.data).toMatchObject({ accepted: true, agentId: "child", action: "steer" });
+    expect(f.requests.find(request => request.method === "turn/start")?.params.threadId).toBe("child");
+    running = true;
+    await session.command({ type: "core_agent_command", id: "steer-child", agentId: "child", action: "steer", message: "Use README" });
+    expect(f.requests.find(request => request.method === "turn/steer")?.params.expectedTurnId).toBe("turn-1");
+    await session.command({ type: "core_agent_command", id: "abort-child", agentId: "child", action: "abort" });
+    expect(f.response("abort-child")?.data).toMatchObject({ accepted: true, agentId: "child", action: "abort" });
+    expect(f.requests.find(request => request.method === "turn/interrupt")?.params).toEqual({ threadId: "child", turnId: "turn-1" });
+    await session.command({ type: "core_agent_read", id: "missing-id" });
+    expect(f.response("missing-id")?.error).toMatch(/agentId is required/);
+    await session.command({ type: "core_agent_command", id: "bad-action", agentId: "child", action: "delete" });
+    expect(f.response("bad-action")?.error).toMatch(/steer or abort/);
+    f.hook(method => method === "thread/read" ? { ok: true, value: { thread: { ...thread("child", "root"), canAcceptDirectInput: false } } } : undefined);
+    await session.command({ type: "core_agent_command", id: "unavailable", agentId: "child", action: "steer", message: "Continue" });
+    expect(f.response("unavailable")?.error).toMatch(/does not accept direct input/);
+    await session.close();
+  });
+
   it("acks on native acceptance, isolates auth callbacks, steers, and leaves busy queues to PiStack", async () => {
     const f = fixture(), session = await f.open();
     await session.command({ type: "prompt", id: "prompt", workId: "work", message: "Read the repo", images: [{ data: "aGVsbG8=", mimeType: "image/png" }] });
@@ -168,6 +215,8 @@ describe("Codex app-server adapter", () => {
     expect(f.events.find(event => event.type === "tool_execution_end")?.result).toEqual({ content: [{ type: "text", text: "/repo" }] });
     const context = [...f.events].reverse().find(event => event.type === "context_update")!;
     expect(context.projection).toBe("activity");
+    expect(context).not.toHaveProperty("finalizedMessage");
+    expect(context).not.toHaveProperty("finalizesMessage");
     expect((context.context as any).systemPrompt).toBe("");
     expect(JSON.stringify(context)).not.toContain("Child done");
     expect(f.events.some(event => event.type === "core_child_event" && event.agentId === "child" && (event.event as any)?.type === "message_end")).toBe(true);
