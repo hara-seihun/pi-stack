@@ -19,10 +19,10 @@ it("owns the portable record and preserves native session state behind the adapt
     });
     await session.command({type:"prompt",id:"input",message:"work"});
     await session.command({type:"get_state",id:"state"});
-    expect(events.at(-1)?.data).toMatchObject({core:"codex",sessionFile:"native-reference",portableFile:join(stateDir,"conversation.jsonl")});
+    expect(events.at(-1)).toMatchObject({data:{core:"codex",sessionFile:"native-reference",portableFile:join(stateDir,"conversation.jsonl")}});
     await session.command({type:"get_portable_conversation",id:"export"});
     expect(JSON.stringify(events.at(-1))).not.toContain("native-only");
-    expect((events.at(-1)?.data as any).messages[0].content[0].text).toBe("done");
+    expect(events.at(-1)).toMatchObject({data:{messages:[{content:[{text:"done"}]}]}});
     await session.close();await session.close();
     expect(closed).toBe(1);
     const count=events.length;

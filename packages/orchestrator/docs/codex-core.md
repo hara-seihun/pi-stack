@@ -37,12 +37,12 @@ Every response has `type: "response"`, the original `id`, `command`, and `succes
 
 | Command | Behavior |
 | --- | --- |
-| `get_state` | Portable identity, native identity, model/effort/name, unresolved dispatch IDs, and last assistant message. Root `isStreaming`, `coreBusy`, and compaction flags include descendants. `treeComplete` becomes true only when the native tree is idle. |
+| `get_state` | Portable/native custody, model settings and `execution: CoreExecutionSnapshot`. A supplied `workId` selects its `operation`. Activity flags and transcript projections are not completion authority. |
 | `prompt` | Sends `turn/start` only when the native tree is idle. Acknowledges native acceptance without waiting for generation. Text and base64 images are supported. |
 | `steer` | Sends `turn/steer` with the active turn ID. Starts a turn when idle. |
 | `follow_up` | Starts a turn when idle. Fails while busy so PiStack retains the queue. |
-| `abort` | Interrupts the root and all discovered descendants, including child-only activity, and terminates their native background terminals. The stop policy also catches children announced while interruption is in progress. Acceptance does not mean interruption has finished; wait for aggregate idle state. |
-| `compact` | Starts native compaction and acknowledges acceptance. Completion arrives through lifecycle events. Custom instructions are unsupported. |
+| `abort` | Interrupts the root and all discovered descendants, including child-only activity, and terminates their native background terminals. The stop policy also catches children announced while interruption is in progress. Acceptance does not mean interruption has finished; wait for the abort operation's terminal receipt. |
+| `compact` | Persists a work receipt before starting native compaction. Its terminal outcome follows the native compaction lifecycle, not the start acknowledgement. Custom instructions are unsupported. |
 | `set_model` | Updates the native thread's model for subsequent turns, using the native catalog. |
 | `set_thinking_level` | Updates native effort. Pi `off` maps to Codex `none`; native effort names otherwise remain unchanged. |
 | `set_session_name` | Sets the native thread name and durable adapter setting. |
@@ -83,13 +83,17 @@ Every native child emits `core_agent` with a `CoreAgent` record. Root parent IDs
 
 ## Durable state and continuation
 
-One runtime owner opens a given `stateDir`. `codex-session.json` stores the native thread ID, saved provider/model settings, message timestamps, transfer status, transferred activity records, and dispatch receipts. Writes use atomic replacement. This is adapter state, not a Pi session file. `get_state.sessionFile` points to it so callers must not open it with Pi's session parser.
+One runtime owner opens a given `stateDir`. `codex-session.json` stores native thread custody, model settings, message timestamps, transfer state and native dispatch associations. `execution.json` owns the shared per-work receipts and monotonic revision. Writes use atomic replacement with file and directory sync. This is adapter state, not a Pi session file. `get_state.sessionFile` points to it so callers must not open it with Pi's session parser.
 
 `stateDir/codex` is the private native `CODEX_HOME`, including native history. The adapter links existing `config.toml`, `AGENTS.md`, `skills`, `agents`, `rules`, and `plugins` from the configured `CODEX_HOME`, or the user's `.codex`, into that directory. It does not copy native auth or unrelated threads. The external token login and ephemeral credential store keep auth out of files. Recovery requires both the adapter state and native home. Deleting either loses native continuation; there is no automatic conversation replay.
 
 A fresh empty thread is not materialized by Codex. History listing is unavailable until the first user message or explicit history injection. Reopening an untouched empty session creates another empty native thread with the same portable identity. `get_state.nativeSessionDurable` is false during this empty pre-work period, so fleet custody records the adapter file but does not pin that provisional native ID. Once work may have been accepted, the adapter reports it durable, resumes the recorded thread and never replaces it automatically.
 
-Send a stable `workId` with prompt/steer/follow-up commands. RPC `id` is only the fallback receipt key. The adapter persists a pending receipt before dispatch and records native acceptance before acknowledging. A repeated accepted work ID returns its receipt without another turn. Reusing an ID with different content fails. A crash or transport timeout leaves an unknown outcome. On resume, native `userMessage.clientId` can resolve that receipt. Otherwise `get_state.unresolvedCommands` exposes it and retries fail rather than replaying work.
+Send a stable `workId` with prompt, steer, follow-up, compact and abort. The adapter persists pending work before native submission and records acceptance separately from completion. A repeated work ID returns the existing receipt without another effect; changed content is rejected. Each steer retains its own identity and result even when several inputs share a native turn.
+
+Native turn and compaction completion events own terminal outcomes. Root operations remain unresolved while their owned descendants still need settlement. Result capture belongs to the requested turn, not the last projected assistant message. Empty teardown output cannot erase an earlier substantive final.
+
+A crash or transport timeout leaves an unknown outcome. Reopen retains native ownership without replaying that work. A delayed reply cannot turn unknown into accepted or terminal. Pre-contract native work without receipts blocks execution rather than exposing an empty idle snapshot. Hosts consume `execution_update` and `get_state.execution` through the [shared controller](agent-cores.md); they never settle from inactive thread status or last-assistant projections.
 
 `transfer` is explicit cross-engine conversation data. The adapter injects native Responses message items without starting a turn, setting a system prompt, or adding developer instructions. Plain user/assistant text retains its role. Tool results and other structured blocks become attributed JSON data in user messages, not executable tool calls. Agent metadata is also attributed data; it does not recreate native children. Image blocks in transferred history remain structured data rather than image inputs. Fresh prompt images remain native image inputs. Codex retains injected history but does not return those pre-turn items through its activity API. The adapter therefore retains the supplied transfer projection for `context_update` and message reads. Forking inside that transferred pre-turn history is unsupported; later native user turns can be forked.
 

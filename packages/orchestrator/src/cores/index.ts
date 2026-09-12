@@ -3,7 +3,10 @@ import { join } from "node:path";
 import { argument, isCoreId, type CoreCommand, type CoreId, type CoreOutput, type CoreSession, type CoreSessionOptions, type OpenCoreSession, type PortableConversation } from "./contracts.js";
 import { CoreJournal, readPortableConversation } from "./journal.js";
 export { CORE_IDS, isCoreId } from "./contracts.js";
-export type { CoreId, CoreAgent, CoreCommand, CoreOutput, CoreSession, CoreSessionOptions, OpenCoreSession, PortableConversation } from "./contracts.js";
+export type { CoreId, CoreAgent, CoreCommand, CoreOutput, CoreSession, CoreSessionOptions, OpenCoreSession, PortableConversation,
+  CoreDispatch, CoreOutcome, CoreFailureKind, CoreResponse, CoreExecutionUpdate, CoreResult, CoreOperation, CoreOperationKind, CoreOperationState, CoreExecutionSnapshot } from "./contracts.js";
+export { CoreController } from "./controller.js";
+export { isCoreExecutionSnapshot, isTerminalOperation } from "./execution.js";
 export { CoreJournal, readPortableConversation, writeCoreState } from "./journal.js";
 
 export function configuredCore(value: unknown = process.env.PI_STACK_DEFAULT_CORE): CoreId {

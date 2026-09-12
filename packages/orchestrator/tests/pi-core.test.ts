@@ -14,6 +14,7 @@ class Fixture implements PiNative {
   commands: CoreCommand[] = [];
   injections: { kind: string; data: Record<string, unknown> }[] = [];
   closed = 0;
+  activeWorkId?: string;
   state: PiSnapshot;
   constructor(readonly node: PiNode, readonly tools: PiToolsHost, readonly output: (event: CoreOutput) => void) {
     this.state = { nativeSessionId: `native-${node.id}`, sessionFile: node.sessionFile,
@@ -22,7 +23,8 @@ class Fixture implements PiNative {
   snapshot() { return this.state; }
   async command(command: CoreCommand) {
     this.commands.push(command);
-    if (command.type === "prompt") this.output({ type: "agent_start" });
+    if (command.type === "prompt") { this.activeWorkId = command.workId ?? command.id; this.output({ type: "agent_start", workId: this.activeWorkId }); }
+    if (["prompt", "steer", "follow_up"].includes(command.type)) this.output({ type: "message_start", message: { role: "user", content: command.message } });
     if (command.type === "abort") this.output({ type: "agent_settled" });
     this.output({ type: "response", id: command.id, command: command.type, success: true,
       ...(command.type === "get_state" ? { data: { isStreaming: false, pendingMessageCount: 0, sessionFile: this.state.sessionFile } } : {}) });
@@ -34,9 +36,11 @@ class Fixture implements PiNative {
     this.output({ type: "message_end", message: { role: "custom", customType: kind, details: data } });
   }
   finish(text: string) {
-    this.state.messages.push({ role: "assistant", content: [{ type: "text", text }], stopReason: "stop" });
+    const message = { role: "assistant", content: [{ type: "text", text }], stopReason: "stop" };
+    this.state.messages.push(message);
+    this.output({ type: "message_end", message });
     this.output({ type: "agent_end" });
-    this.output({ type: "agent_settled" });
+    this.output({ type: "agent_settled", workId: this.activeWorkId });
   }
   async close() { this.closed++; }
 }
@@ -62,9 +66,89 @@ async function setup(existing?: string, configure?: (fixture: Fixture) => void) 
 const childId = (receipt: unknown) => (receipt as { agent: { id: string } }).agent.id;
 
 describe("Pi-owned delegation", () => {
+  it("waits for asynchronous native preflight without treating command() return as acceptance", async () => {
+    const { core, fixtures, output } = await setup();
+    fixtures.get("root")!.command = async command => {
+      setImmediate(() => {
+        fixtures.get("root")!.output({ type: "response", id: command.id, command: command.type, success: true });
+      });
+    };
+    await core.command({ type: "prompt", workId: "delayed", id: "dispatch", message: "task" });
+    expect(output.at(-1)).toMatchObject({ id: "dispatch", data: { operation: { state: "accepted" } } });
+  });
+
+  it("retains each steer result and does not settle new work from an earlier result", async () => {
+    const { core, fixtures, output } = await setup();
+    await core.command({ type: "prompt", workId: "initial", message: "task" });
+    await core.command({ type: "steer", workId: "steer-a", message: "a" });
+    await core.command({ type: "steer", workId: "steer-b", message: "b" });
+    fixtures.get("root")!.finish("integrated");
+    await turn();
+    await core.command({ type: "prompt", workId: "next", message: "next" });
+    await core.command({ type: "get_state", id: "state", workId: "next" });
+    expect(output.at(-1)).toMatchObject({ data: { operation: { workId: "next", state: "running" }, execution: { operations: [
+      { workId: "initial", state: "succeeded", result: { text: "integrated" } },
+      { workId: "steer-a", state: "succeeded", result: { text: "integrated" } },
+      { workId: "steer-b", state: "succeeded", result: { text: "integrated" } },
+      { workId: "next", state: "running" },
+    ] } } });
+  });
+
+  it("keeps substantive root output when descendant teardown yields an empty final", async () => {
+    const { core, fixtures, output } = await setup();
+    await core.command({ type: "prompt", workId: "report", message: "audit" });
+    const child = childId(await core.delegate("root", "child", { task: "check" }));
+    await turn();
+    fixtures.get("root")!.finish("Substantive audit report");
+    await turn();
+    await core.control(child, { type: "abort", workId: "cancel-child" });
+    await turn();
+    fixtures.get("root")!.finish("");
+    await turn();
+    await core.command({ type: "get_state", workId: "report", id: "result" });
+    expect(output.at(-1)).toMatchObject({ data: { operation: { state: "succeeded", result: { text: "Substantive audit report" } } } });
+  });
+
+  it("owns compact completion and deduplicates its work identity", async () => {
+    const { core, fixtures, output } = await setup();
+    let finish!: () => void;
+    let calls = 0;
+    const fixture = fixtures.get("root")!;
+    const original = fixture.command.bind(fixture);
+    fixture.command = async command => {
+      if (command.type !== "compact") return original(command);
+      calls++;
+      await new Promise<void>(resolve => { finish = resolve; });
+      fixture.output({ type: "response", id: command.id, command: command.type, success: true, data: { summary: "compacted" } });
+    };
+    const compact = core.command({ type: "compact", id: "compact-rpc", workId: "compact", customInstructions: "keep decisions" });
+    await turn();
+    await core.command({ type: "get_state", id: "during", workId: "compact" });
+    expect(output.at(-1)).toMatchObject({ data: { operation: { state: "running" }, execution: { status: "running" } } });
+    await core.command({ type: "compact", workId: "compact", customInstructions: "keep decisions" });
+    expect(calls).toBe(1);
+    finish(); await compact;
+    expect(output.at(-1)).toMatchObject({ id: "compact-rpc", data: { operation: { state: "succeeded" } } });
+  });
+
+  it("keeps ambiguous native dispatch unknown even after unrelated terminal events", async () => {
+    const { core, fixtures, output } = await setup();
+    const fixture = fixtures.get("root")!;
+    const original = fixture.command.bind(fixture);
+    fixture.command = async command => {
+      if (command.type === "prompt") throw new Error("native disconnected after send");
+      return original(command);
+    };
+    await core.command({ type: "prompt", workId: "ambiguous", message: "effect" });
+    fixture.output({ type: "agent_settled", workId: "ambiguous" });
+    await turn();
+    await core.command({ type: "get_state", workId: "ambiguous", id: "unknown" });
+    expect(output.at(-1)).toMatchObject({ data: { operation: { state: "unknown" }, execution: { status: "blocked" } } });
+  });
+
   it("reconciles root dispatch receipts without replaying the host's request", async () => {
     const first = await setup();
-    const command = {type:"prompt",message:"Original task",workId:"durable-work"};
+    const command: CoreCommand = {type:"prompt",message:"Original task",workId:"durable-work"};
     await first.core.command({...command,id:"rpc-1"});
     await first.core.command({...command,id:"rpc-2"});
     expect(first.fixtures.get("root")!.commands.filter(command => command.type === "prompt")).toHaveLength(1);
@@ -74,24 +158,26 @@ describe("Pi-owned delegation", () => {
     const recovered = await setup(first.directory);
     await recovered.core.command({...command,id:"rpc-3"});
     expect(recovered.fixtures.get("root")!.commands.filter(command => command.type === "prompt")).toHaveLength(0);
-    expect(recovered.fixtures.get("root")!.injections).toMatchObject([{kind:"core_recovery",data:{workId:"durable-work",task:"Original task"}}]);
+    expect(recovered.fixtures.get("root")!.injections).toEqual([]);
+    await recovered.core.command({ type: "get_state", id: "reopened" });
+    expect(recovered.output.at(-1)).toMatchObject({ data: { execution: { status: "blocked", operations: [{ workId: "durable-work", state: "unknown" }] } } });
     await recovered.core.command({...command,id:"changed",message:"Different task"});
     expect(recovered.output.at(-1)).toMatchObject({id:"changed",success:false});
   });
 
-  it("adopts completed pre-core work without a continuation request", async () => {
+  it("blocks adoption without a native receipt even when previous assistant output looks complete", async () => {
     const {core,fixtures,output} = await setup(undefined,fixture => fixture.state.messages.push({role:"assistant",stopReason:"stop",content:[{type:"text",text:"Already finished"}]}));
     await core.command({type:"prompt",id:"adopt",workId:"pre-core",message:"Prior task",resume:true});
     expect(fixtures.get("root")!.commands).toHaveLength(0);
     expect(fixtures.get("root")!.injections).toHaveLength(0);
     await core.command({type:"get_state",id:"complete"});
-    expect(output.at(-1)).toMatchObject({data:{treeComplete:true}});
+    expect(output.at(-1)).toMatchObject({data:{execution:{status:"blocked",operations:expect.arrayContaining([expect.objectContaining({workId:"pre-core",state:"unknown"})])}}});
   });
 
   it("keeps root wire commands and waits for the complete child tree before settling", async () => {
     const { core, fixtures, output } = await setup();
     await core.command({ type: "prompt", id: "root-prompt", message: "work" });
-    expect(output).toContainEqual({ type: "response", id: "root-prompt", command: "prompt", success: true });
+    expect(output.find(event => event.type === "response" && event.id === "root-prompt")).toMatchObject({ command: "prompt", success: true, data: { operation: { workId: "root-prompt", state: "running" } } });
     const first = childId(await core.delegate("root", "delegate-1", { task: "bounded work" }));
     await turn();
     const second = childId(await core.delegate(first, "delegate-2", { task: "independent part" }));
@@ -119,7 +205,7 @@ describe("Pi-owned delegation", () => {
     expect(core.list().every(agent => agent.state === "idle")).toBe(true);
     await core.command({ type: "get_state", id: "idle-tree" });
     expect(output.at(-1)).toMatchObject({ id: "idle-tree", data: { isStreaming: false, pendingMessageCount: 0, coreBusy: false,
-      treeComplete: true, messageCount: 2, lastAssistantMessage: { role: "assistant", content: [{ type: "text", text: "all done" }] } } });
+      treeComplete: true, messageCount: 2, execution: { status: "idle", operations: expect.arrayContaining([expect.objectContaining({ workId: "root-prompt", agentId: "root", state: "succeeded", result: { text: "all done" } })]) } } });
     expect(output.some(event => event.type === "core_child_event" && event.agentId === second)).toBe(true);
   });
 
@@ -154,7 +240,7 @@ describe("Pi-owned delegation", () => {
     expect(exits()).toBe(1);
   });
 
-  it("recovers durable child identities and resumes interrupted native work without re-delegating", async () => {
+  it("recovers durable child identities and blocks interrupted effects without re-delegating", async () => {
     const first = await setup();
     const child = childId(await first.core.delegate("root", "request", { task: "work" }));
     await turn();
@@ -164,14 +250,13 @@ describe("Pi-owned delegation", () => {
     const recovered = await setup(first.directory);
     await turn();
     expect(recovered.core.list().find(agent => agent.id === child)?.nativeSessionId).toBe(`native-${child}`);
-    expect(recovered.fixtures.get(child)!.commands).toHaveLength(0);
-    expect(recovered.fixtures.get(child)!.injections).toEqual([{ kind: "core_recovery", data: { agentId: child, workId: "request", task: "work", status: "interrupted" } }]);
-    recovered.fixtures.get(child)!.finish("recovered result");
-    await turn();
-    expect(recovered.fixtures.get("root")!.injections).toHaveLength(1);
+    expect(recovered.fixtures.has(child)).toBe(false);
+    expect(recovered.fixtures.get("root")!.injections).toHaveLength(0);
+    await recovered.core.command({ type: "get_state", id: "reopened" });
+    expect(recovered.output.at(-1)).toMatchObject({ data: { execution: { status: "blocked", operations: [{ state: "unknown", agentId: child }] } } });
   });
 
-  it.each([false, true])("recovers the result outbox across a receipt boundary, received=%s", async received => {
+  it.each([false, true])("does not replay parent effects across a result receipt boundary, received=%s", async received => {
     const first = await setup();
     await first.core.command({ type: "prompt", message: "parent work" });
     const child = childId(await first.core.delegate("root", "work-id", { task: "child work" }));
@@ -186,8 +271,7 @@ describe("Pi-owned delegation", () => {
       if (fixture.node.id === "root" && received) fixture.state.entries.push({ type: "custom_message", customType: "core_child_result", details: { workId: "work-id" } });
     });
     await turn();
-    expect(reopened.fixtures.get("root")!.injections).toHaveLength(1);
-    expect(reopened.fixtures.get("root")!.injections[0].kind).toBe(received ? "core_recovery" : "core_child_result");
+    expect(reopened.fixtures.get("root")!.injections).toHaveLength(0);
     expect(reopened.fixtures.has(child)).toBe(false);
   });
 
@@ -199,7 +283,8 @@ describe("Pi-owned delegation", () => {
       fixtures.get(child)!.output({ type: "response", id: command.id, command: command.type, success: false, error: "fixture rejected control" });
     };
     await core.command({ type: "core_agent_command", id: "control", agentId: child, action: "steer", message: "adjust" });
-    expect(output.at(-1)).toMatchObject({ id: "control", success: false, error: "fixture rejected control" });
+    await core.command({ type: "get_state", id: "rejected" });
+    expect(output.at(-1)).toMatchObject({ data: { execution: { operations: expect.arrayContaining([expect.objectContaining({ state: "failed", error: "fixture rejected control" })]) } } });
   });
 
   it("exposes the Remote inspection/control wire and rejects ancestor control", async () => {

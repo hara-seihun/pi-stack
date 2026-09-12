@@ -31,6 +31,9 @@ export const openPiNative: OpenPiNative = async (options, node, tools, output, e
     let generation = 0;
     let closing = false;
     const runs = new AsyncLocalStorage<number>();
+    const dispatches = new AsyncLocalStorage<string>();
+    const publish = (event: CoreOutput) => output((event.type === "agent_start" || event.type === "agent_settled")
+      && dispatches.getStore() ? { ...event, workId: dispatches.getStore() } : event);
     const extensions = options.args.flatMap((arg, index) => arg === "--extension" ? [resolve(options.cwd, options.args[index + 1])] : []);
     const agentDir = env.PI_CODING_AGENT_DIR ?? getAgentDir();
     if (!existsSync(node.sessionFile)) {
@@ -51,6 +54,7 @@ export const openPiNative: OpenPiNative = async (options, node, tools, output, e
         } : { additionalExtensionPaths: extensions,
           extensionFactories: [{ name: "pi-core-context", factory: pi => {
             pi.on("context", (event, ctx) => {
+              if (!node.parentId && env.PI_REMOTE_SESSION_ID) return;
               const active = new Set(pi.getActiveTools());
               output({ type: "context_update", context: { systemPrompt: ctx.getSystemPrompt(),
                 tools: pi.getAllTools().filter(tool => active.has(tool.name))
@@ -91,7 +95,7 @@ export const openPiNative: OpenPiNative = async (options, node, tools, output, e
         });
         try {
           await prompt(...args);
-          if (!activity && !created.session.isStreaming && !closing && runs.getStore() === generation) output({ type: "agent_settled" });
+          if (!activity && !created.session.isStreaming && !closing && runs.getStore() === generation) publish({ type: "agent_settled" });
         } finally { unsubscribe(); }
       });
       created.session.settingsManager.applyOverrides({ retry: { ...SESSION_RETRY } });
@@ -145,7 +149,7 @@ export const openPiNative: OpenPiNative = async (options, node, tools, output, e
         }
         if (event.type === "extension_ui_request" && ["select", "confirm", "input", "editor"].includes(String(event.method))) dialogs.add(String(event.id));
         if (event.type === "message_end" || event.type === "agent_settled") checkpointPiSession(runtime.session.sessionManager);
-        output(event);
+        publish(event);
       } });
       checkpointPiSession(runtime.session.sessionManager);
       return {
@@ -155,13 +159,24 @@ export const openPiNative: OpenPiNative = async (options, node, tools, output, e
             output({ type: "response", id: command.id, command: command.type, success: true, data: context() });
             return;
           }
+          if (command.type === "compact") {
+            try {
+              const result = await runtime.session.compact(command.customInstructions);
+              checkpointPiSession(runtime.session.sessionManager);
+              output({ type: "response", id: command.id, command: command.type, success: true, data: result });
+            } catch (error) {
+              output({ type: "response", id: command.id, command: command.type, success: false, error: error instanceof Error ? error.message : String(error) });
+            }
+            return;
+          }
           if (command.type === "abort") {
             generation++;
             for (const id of dialogs) await rpc.command({ type: "extension_ui_response", id, cancelled: true });
             dialogs.clear();
           }
           if (command.type === "extension_ui_response") dialogs.delete(String(command.id));
-          await rpc.command(command);
+          if (command.workId) await dispatches.run(command.workId, () => rpc.command(command));
+          else await rpc.command(command);
           checkpointPiSession(runtime.session.sessionManager);
         }),
         inject: (customType, data) => scope.run(env, () => runs.run(generation, () => runtime.session.sendCustomMessage({

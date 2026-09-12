@@ -6,7 +6,7 @@ import { SessionManager } from "@earendil-works/pi-coding-agent";
 import { Store } from "../src/store.js";
 import { openPiSession } from "../src/cores/pi.js";
 import { seedPiSession } from "../src/cores/pi-transfer.js";
-import type { CoreCommand, CoreOutput, CoreSessionOptions } from "../src/cores/contracts.js";
+import type { CoreCommand, CoreOutput, CoreResponse, CoreSessionOptions } from "../src/cores/contracts.js";
 
 const cleanups: (() => void | Promise<void>)[] = [];
 afterEach(async () => { for (const cleanup of cleanups.splice(0).reverse()) await cleanup(); });
@@ -54,7 +54,7 @@ it("retains SDK discovery, core tools, shared RPC commands and durable session r
   const request = async (command: CoreCommand) => {
     const id = `${command.type}-${output.length}`;
     await core.command({ ...command, id });
-    return [...output].reverse().find(event => event.type === "response" && event.id === id)!;
+    return [...output].reverse().find((event): event is CoreResponse => event.type === "response" && event.id === id)!;
   };
   const state = await request({ type: "get_state" });
   expect(state).toMatchObject({ success: true, data: { sessionName: "Fixture session", messageCount: 1, core: "pi", coreBusy: false, treeComplete: true } });
@@ -109,7 +109,7 @@ it("consumes and confirms the isolated fleet context without restoring scrubbed 
     await core.command({ type: "get_state", id: "isolated-state" });
     expect(events.at(-1)).toMatchObject({ id: "isolated-state", data: { context, treeComplete: true, messageCount: 0 } });
     await core.command({ type: "get_core_context", id: "isolated-context" });
-    const selected = events.at(-1)?.data as { systemPrompt: string; tools: { name: string }[] };
+    const selected = (events.at(-1) as CoreResponse).data as { systemPrompt: string; tools: { name: string }[] };
     expect(selected.tools.map(tool => tool.name).sort()).toEqual([...context.tools].sort());
     expect(selected.systemPrompt).not.toContain("UNSELECTED HOST CONTEXT");
     expect(process.env.HOME).toBe(join(cwd, ".home"));
