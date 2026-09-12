@@ -29,6 +29,10 @@ npm run android:test --workspace=kenan
 
 [`config/packages.json`](config/packages.json) owns the Pi package order every account loads, including upstream `@pi-plugins/claude-oauth` 0.3.5 and the browser runtime entrypoint. The Claude adapter preserves Pi's model-specific output limits and request-specific feature betas. Those upstream fixes replace the temporary `hara-seihun/pi-plugins` fork. That entrypoint loads `pi-agent-browser-native` and pins `agent-browser` from the same immutable dependency tree. [`config/skills.json`](config/skills.json) lists the first-party skills and [`config/tools.json`](config/tools.json) the commands. The checks reject unknown or misplaced entries, including a Pi Remote context observer that is not last.
 
+### Fable tool-description refusal
+
+On September 12, 2026, a controlled replay of a failed Remote greeting isolated Fable 5.1's policy refusal to the sentence `Deliberation is omitted.` in the `thread_read` description. Keeping the full system prompt and AGENTS.md unchanged, the original description refused three times and removing that sentence succeeded three times. The description now says `Results contain messages and tool activity only.` Two full-request probes with that wording succeeded. The reader's filtering and tool schema are unchanged. Hara authorized the wording change with: "fix this, you have permission to edit the phrasing".
+
 ## Deployments
 
 Every host deploys one reviewed commit with `deploy/host`, which reads a small host file naming the fleet account and any local packages and skills. Persons come from Pi Remote's registry. The scripts under [`deploy`](deploy) refuse an uncommitted checkout, serialize work from the same source tree, and enforce a 50-second deadline. Commit-addressed releases share one production dependency tree and switch atomically. See [`docs/deployment.md`](docs/deployment.md).

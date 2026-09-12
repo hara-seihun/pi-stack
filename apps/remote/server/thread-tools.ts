@@ -38,7 +38,7 @@ export function registerThreadTools(pi: ExtensionAPI) {
   pi.registerTool({
     name: "thread_read",
     label: "Read a thread",
-    description: "Read another agent's conversation and actions without a model call. Accepts a title, UUID or unique ID prefix, including settled threads. Starts at the newest page; nextCursor reads older entries. Truncated entries can be read completely with entryId and successive nextOffset values. Deliberation is omitted.",
+    description: "Read another agent's conversation and actions without a model call. Accepts a title, UUID or unique ID prefix, including settled threads. Starts at the newest page; nextCursor reads older entries. Truncated entries can be read completely with entryId and successive nextOffset values. Results contain messages and tool activity only.",
     parameters: Type.Object({
       thread: Type.String({ minLength: 1 }),
       includeTools: Type.Optional(Type.Boolean({ description: "Include tool results. Defaults to true." })),
