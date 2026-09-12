@@ -89,6 +89,28 @@ test("session output survives supervisor detach and can be acknowledged repeated
   expect(JSON.parse(replay[1]!).id).toBe("after");
 });
 
+test("image-sized output survives live backpressure without a second command or session",async()=>{
+  const options=fixture();
+  writeFileSync(join(options.data,"factory.mjs"),`export async function openSession(options,output,exit){
+    let commands=0;
+    return {async command(value){
+      commands++;
+      for(let i=0;i<4;i++)output({type:'image',index:i,data:'x'.repeat(5*1024*1024)});
+      output({type:'done',commands});
+    },async close(){exit(0);}};
+  }`);
+  const output:any[]=[];
+  const host=await startRuntimeHost({...options,sessionId:"images",onOutput:line=>{
+    const value=JSON.parse(line);output.push({type:value.type,index:value.index,commands:value.commands});
+  }});transports.push(host);
+  const exits:number[]=[];host.onExit(code=>exits.push(code));
+  host.send({type:"generate"});
+  await waitFor(()=>output.some(value=>value.type==='done'));
+  expect(output.filter(value=>value.type==='image').map(value=>value.index)).toEqual([0,1,2,3]);
+  expect(output.at(-1)).toEqual({type:'done',index:undefined,commands:1});
+  expect(exits).toEqual([]);
+});
+
 test("environment scopes preserve nested and concurrent identities without changing process.env",async()=>{
   const key=Symbol.for("pi-stack.session-environment"),target=globalThis as any;
   const previous=target[key];target[key]=new AsyncLocalStorage();

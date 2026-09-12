@@ -1,6 +1,8 @@
 import { afterEach, describe, expect, test } from "bun:test";
 import { existsSync, mkdirSync, mkdtempSync, readdirSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
+import { createServer } from "node:net";
+import { createInterface } from "node:readline";
 import { join } from "node:path";
 import { attachRuntimeHost, runtimeSocketPath, startCommandRuntimeHost as startRuntimeHost, type RuntimeTransport } from "./runtime-transport";
 
@@ -70,6 +72,55 @@ describe("runtime host identity", () => {
     const attached = await attachRuntimeHost(socketPath, () => {});
     transports.push(attached);
     expect(attached.pid).toBe(pid);
+  });
+
+  test("rejoins a shed shared socket without reporting exit or replaying commands", async () => {
+    const root = mkdtempSync(join(tmpdir(), "pi-runtime-rejoin-"));
+    roots.push(root);
+    const path = join(root, "host.sock");
+    const delivered: string[] = [];
+    const commands: unknown[] = [];
+    const cursors: number[] = [];
+    const exits: number[] = [];
+    const server = createServer(socket => {
+      createInterface({ input: socket }).on("line", line => {
+        const value = JSON.parse(line);
+        if (value.type === "attach") {
+          cursors.push(value.after);
+          socket.write(JSON.stringify({ type: "attached", pid: process.pid, shared: true }) + "\n");
+          if (cursors.length === 1) {
+            socket.write(JSON.stringify({ type: "output", sequence: 1, line: "before image" }) + "\n");
+          } else {
+            socket.write(JSON.stringify({ type: "output", sequence: 1, line: "duplicate" }) + "\n");
+            socket.write(JSON.stringify({ type: "output", sequence: 2, line: "retained image" }) + "\n");
+          }
+        } else if (value.type === "command") {
+          commands.push(value.value);
+          socket.write('{"type":"output","sequence":2,"line":"partial');
+          setTimeout(() => socket.destroy(), 5);
+        } else if (value.type === "terminate") {
+          socket.end('{"type":"exit","code":0}\n');
+        }
+      });
+    });
+    await new Promise<void>(resolve => server.listen(path, resolve));
+    try {
+      const host = await attachRuntimeHost(path, line => delivered.push(line));
+      transports.push(host);
+      host.onExit(code => exits.push(code));
+      host.send({ type: "prompt", message: "one paid request" });
+      const deadline = Date.now() + 2000;
+      while (delivered.length < 2 && Date.now() < deadline) await Bun.sleep(5);
+      expect(cursors).toEqual([0, 1]);
+      expect(delivered).toEqual(["before image", "retained image"]);
+      expect(commands).toEqual([{ type: "prompt", message: "one paid request" }]);
+      expect(exits).toEqual([]);
+      await host.terminate();
+      expect(exits).toEqual([0]);
+      transports.splice(transports.indexOf(host), 1);
+    } finally {
+      await new Promise<void>(resolve => server.close(() => resolve()));
+    }
   });
 
   test("includes a launch identity in generated paths", () => {

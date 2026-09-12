@@ -2,6 +2,7 @@ import { existsSync, mkdirSync } from "node:fs";
 import { createHash } from "node:crypto";
 import { createConnection, type Socket } from "node:net";
 import { basename, join } from "node:path";
+import { StringDecoder } from "node:string_decoder";
 import { underMemoryPressure } from "./shared-runtime-memory.mjs";
 
 type RuntimeOutput = (line: string) => void;
@@ -36,9 +37,13 @@ function errorValue(cause: unknown): Error {
 
 async function connectHost(socketPath: string, onOutput: RuntimeOutput, timeoutMs = CONNECT_TIMEOUT_MS): Promise<ConnectionResult> {
   return new Promise((resolve) => {
-    const socket = createConnection(socketPath);
+    let socket: Socket;
     let input = "";
+    let decoder = new StringDecoder("utf8");
     let attached = false;
+    let connected = false;
+    let reconnectTimer: ReturnType<typeof setTimeout> | undefined;
+    const unsent: string[] = [];
     let detached = false;
     let pid = 0;
     let shared = false;
@@ -60,15 +65,21 @@ async function connectHost(socketPath: string, onOutput: RuntimeOutput, timeoutM
       get shared() { return shared; },
       socketPath,
       send(value) {
-        if (!socket.writable || detached) throw new Error("Runtime host is disconnected");
-        socket.write(`${JSON.stringify({ type: "command", value })}\n`);
+        if (detached || exitCode !== null) throw new Error("Runtime host is disconnected");
+        const line = `${JSON.stringify({ type: "command", value })}\n`;
+        if (connected && socket.writable) socket.write(line);
+        else unsent.push(line);
       },
       async terminate() {
-        if (socket.writable && !detached) socket.write('{"type":"terminate"}\n');
+        if (!detached && exitCode === null) {
+          if (connected && socket.writable) socket.write('{"type":"terminate"}\n');
+          else unsent.push('{"type":"terminate"}\n');
+        }
         await Promise.race([exited, Bun.sleep(TERMINATE_TIMEOUT_MS)]);
       },
       detach() {
         detached = true;
+        clearTimeout(reconnectTimer);
         socket.end();
       },
       onExit(listener) {
@@ -92,45 +103,69 @@ async function connectHost(socketPath: string, onOutput: RuntimeOutput, timeoutM
         shared = value.shared === true;
         if (!Number.isSafeInteger(pid) || pid <= 1) return finish({ error: new Error("Runtime host returned an invalid child pid") });
         attached = true;
+        connected = true;
+        for (const line of unsent.splice(0)) socket.write(line);
         finish({ transport });
         return;
       }
       if (value?.type === "exit") {
         const code = Number(value.code ?? 1);
-        exitCode = code;
-        resolveExit(code);
-        for (const listener of exitListeners) listener(code);
-        exitListeners.clear();
+        end(code);
         return;
       }
       if (value?.type === "host_error") console.error(`[runtime host] ${String(value.error ?? "unknown error")}`);
     }
 
-    socket.setNoDelay(true);
-    socket.on("connect", () => socket.write('{"type":"attach","after":0}\n'));
-    socket.on("data", (chunk) => {
-      input += chunk.toString("utf8");
-      while (true) {
-        const newline = input.indexOf("\n");
-        if (newline < 0) break;
-        let line = input.slice(0, newline);
-        input = input.slice(newline + 1);
-        if (line.endsWith("\r")) line = line.slice(0, -1);
-        if (!line) continue;
-        try { handle(JSON.parse(line)); }
-        catch (cause) { console.error("Malformed runtime host message", cause); }
-      }
-    });
-    socket.on("error", (cause) => { if (!attached) finish({ error: errorValue(cause) }); });
-    socket.on("close", () => {
-      if (!attached) finish({ error: new Error(`Runtime host closed before attach: ${socketPath}`) });
-      else if (!detached && exitCode === null) {
-        exitCode = 1;
-        for (const listener of exitListeners) listener(1);
-        exitListeners.clear();
-        resolveExit(1);
-      }
-    });
+    function end(code: number) {
+      if (exitCode !== null) return;
+      exitCode = code;
+      clearTimeout(reconnectTimer);
+      unsent.length = 0;
+      resolveExit(code);
+      for (const listener of exitListeners) listener(code);
+      exitListeners.clear();
+    }
+
+    function connect() {
+      if (detached || exitCode !== null) return;
+      const current = socket = createConnection(socketPath);
+      connected = false;
+      input = "";
+      decoder = new StringDecoder("utf8");
+      const attachTimer = setTimeout(() => current.destroy(), timeoutMs);
+      current.setNoDelay(true);
+      current.on("connect", () => current.write(`${JSON.stringify({ type: "attach", after: lastSequence })}\n`));
+      current.on("data", (chunk) => {
+        input += decoder.write(chunk);
+        while (true) {
+          const newline = input.indexOf("\n");
+          if (newline < 0) break;
+          let line = input.slice(0, newline);
+          input = input.slice(newline + 1);
+          if (line.endsWith("\r")) line = line.slice(0, -1);
+          if (!line) continue;
+          try { handle(JSON.parse(line)); }
+          catch (cause) { console.error("Malformed runtime host message", cause); }
+        }
+        if (connected) clearTimeout(attachTimer);
+      });
+      current.on("error", (cause: NodeJS.ErrnoException) => {
+        if (!attached) finish({ error: errorValue(cause) });
+        else if (["ENOENT", "ECONNREFUSED"].includes(cause.code ?? "")) end(1);
+      });
+      current.on("close", () => {
+        clearTimeout(attachTimer);
+        connected = false;
+        if (!attached) finish({ error: new Error(`Runtime host closed before attach: ${socketPath}`) });
+        else if (!detached && exitCode === null) {
+          // A shared runner can shed an image-heavy socket while the session
+          // continues. Rejoin its spool, without replaying any sent command.
+          if (shared) reconnectTimer = setTimeout(connect, START_POLL_MS);
+          else end(1);
+        }
+      });
+    }
+    connect();
   });
 }
 
