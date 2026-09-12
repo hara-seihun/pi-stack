@@ -61,7 +61,7 @@ fi
 cd "$root"
 pi_stack_as_root install -d -m 755 "$dependencies_root"
 dependency_hash=$({
-  sha256sum package.json package-lock.json packages/runtime/browser-doctor.mjs packages/runtime/patch-browser-qa.mjs packages/runtime/patch-codex-sse.mjs packages/runtime/patch-compaction-cut.mjs packages/runtime/patch-session-durability.mjs packages/runtime/patch-shared-rpc.mjs
+  sha256sum package.json package-lock.json packages/runtime/browser-doctor.mjs packages/runtime/patch-browser-qa.mjs packages/runtime/patch-codex-sse.mjs packages/runtime/patch-compaction-cut.mjs packages/runtime/patch-compaction-errors.mjs packages/runtime/patch-session-durability.mjs packages/runtime/patch-shared-rpc.mjs
   printf '%s\n' workspace-production-closure-v1-atomic-settings-writes-v1-durable-sessions-v1
 } | sha256sum | cut -d' ' -f1)
 dependency_release="$dependencies_root/$dependency_hash"
@@ -104,6 +104,7 @@ NODE
   node "$runtime_source/patch-browser-qa.mjs" "$browser_job"
   node --check "$browser_job"
   node "$runtime_source/patch-compaction-cut.mjs" "$stage/node_modules"
+  node "$runtime_source/patch-compaction-errors.mjs" "$stage/node_modules"
   node "$runtime_source/patch-session-durability.mjs" "$stage/node_modules"
   node "$runtime_source/patch-shared-rpc.mjs" "$stage/node_modules"
   rm -f "$stage/node_modules/pi-orchestrator" "$stage/node_modules/pi-remote"

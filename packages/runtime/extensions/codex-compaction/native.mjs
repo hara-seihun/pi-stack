@@ -94,7 +94,7 @@ export function compactionPayload(payload) {
 }
 
 /** Observes Pi's SSE bytes without replacing its HTTP or response parser. */
-export function compactionObserver() {
+export function compactionObserver(onEvent = () => {}, onBytes = () => {}) {
   const decoder = new TextDecoder();
   let buffer = "", error, terminal = false, item;
   const accept = candidate => {
@@ -108,6 +108,7 @@ export function compactionObserver() {
     if (!data || data === "[DONE]") return;
     let event;
     try { event = JSON.parse(data); } catch { error = "Malformed compaction SSE event"; return; }
+    onEvent(event);
     if (event.type === "response.output_item.done") accept(event.item);
     if (event.type === "response.completed" || event.type === "response.done") {
       if (event.response?.status && event.response.status !== "completed") error = `Compaction response ${event.response.status}`;
@@ -117,6 +118,7 @@ export function compactionObserver() {
     if (["error", "response.failed", "response.incomplete"].includes(event.type)) error = `Compaction stream ended with ${event.type}`;
   };
   const feed = (bytes, done = false) => {
+    if (bytes) onBytes(bytes.byteLength);
     buffer += decoder.decode(bytes, { stream: !done });
     let match;
     while ((match = /\r?\n\r?\n/u.exec(buffer))) {

@@ -10,8 +10,14 @@ import { openaiCodexProvider } from "@earendil-works/pi-ai/providers/openai-code
 import { createAgentSession, DefaultResourceLoader, ModelRuntime, SessionManager, SettingsManager } from "@earendil-works/pi-coding-agent";
 import codexCompaction from "./index.mjs";
 import { KIND } from "./native.mjs";
+import { readFileSync } from "node:fs";
+import { patchCompactionErrors } from "../../patch-compaction-errors.mjs";
 
-test("Pi compacts a complete parallel tool batch and continues the same run", { timeout: 4000 }, async () => {
+const agentSessionUrl = new URL("core/agent-session.js", import.meta.resolve("@earendil-works/pi-coding-agent"));
+const patchedSource = patchCompactionErrors(readFileSync(agentSessionUrl, "utf8")).replace(/from "([^"]+)"/gu, (_match, specifier) => `from "${specifier.startsWith(".") ? new URL(specifier, agentSessionUrl).href : import.meta.resolve(specifier)}"`);
+const { AgentSession: PatchedSession } = await import(`data:text/javascript;base64,${Buffer.from(patchedSource).toString("base64")}`);
+
+for (const failFirst of [false, true]) test(`Pi completes parallel tools and ${failFirst ? "stops after failed compaction until explicit recovery" : "compacts and continues the same run"}`, { timeout: 4000 }, async () => {
   const root = await mkdtemp(join(tmpdir(), "pi-compaction-lifecycle-"));
   let calls = 0, tools = 0, compacted = 0;
   const bodies = [], failures = [];
@@ -27,12 +33,13 @@ test("Pi compacts a complete parallel tool batch and continues the same run", { 
         assert.equal(tools, 2);
         assert.equal(body.input.filter(item => item.type === "function_call_output").length, 2);
         compacted++;
+        if (failFirst && compacted === 1) { response.writeHead(503); response.end("fixture unavailable"); return; }
         output = [encrypted]; inputTokens = 100;
       } else if (++calls === 1) {
         output = [1, 2].map(n => ({ type: "function_call", id: `fc_${n}`, call_id: `call_${n}`, name: "probe", arguments: "{}", status: "completed" }));
         inputTokens = 9500;
       } else {
-        assert.equal(compacted, 1);
+        assert.equal(compacted, failFirst ? 2 : 1);
         assert.equal(body.input.filter(item => item.type === "compaction").length, 1);
         assert.equal(body.input.filter(item => item.type === "function_call_output").length, 0);
         output = [{ type: "message", id: "msg_final", role: "assistant", content: [{ type: "output_text", text: "finished", annotations: [] }], status: "completed" }];
@@ -58,17 +65,30 @@ test("Pi compacts a complete parallel tool batch and continues the same run", { 
     await resourceLoader.reload();
     const sessionManager = SessionManager.create(root, join(root, "sessions"));
     ({ session } = await createAgentSession({ cwd: root, agentDir: root, model, modelRuntime, resourceLoader, settingsManager, sessionManager, tools: ["probe"], thinkingLevel: "minimal" }));
+    Object.setPrototypeOf(session, PatchedSession.prototype);
     const events = [];
-    session.subscribe(event => events.push(event.type));
+    session.subscribe(event => events.push(event));
     await session.bindExtensions({ mode: "print", onError: error => failures.push(error) });
     await session.prompt("fixture ".repeat(128));
+    if (failFirst) {
+      assert.equal(calls, 1, "no chat request after the failed checkpoint");
+      assert.equal(compacted, 1);
+      assert.equal(tools, 2);
+      assert.equal(sessionManager.getBranch().some(entry => entry.type === "compaction"), false);
+      assert.ok(events.some(event => event.type === "compaction_end" && !event.aborted && /fixture unavailable/.test(event.errorMessage)));
+      await session.prompt("attempt automatic recovery");
+      assert.equal(compacted, 1, "new prompts cannot bypass the persisted fence");
+      assert.equal(calls, 1);
+      await session.compact();
+      await session.prompt("continue after explicit recovery");
+    }
     assert.deepEqual(failures, []);
     assert.equal(calls, 2);
-    assert.equal(compacted, 1);
-    assert.equal(events.filter(type => type === "agent_start").length, 1);
-    assert.equal(events.filter(type => type === "agent_end").length, 1);
+    assert.equal(compacted, failFirst ? 2 : 1);
+    assert.equal(events.filter(event => event.type === "agent_start").length, failFirst ? 3 : 1);
+    assert.equal(events.filter(event => event.type === "agent_end").length, failFirst ? 3 : 1);
     const branch = sessionManager.getBranch();
-    assert.equal(branch.filter(entry => entry.type === "message" && entry.message.role === "user").length, 1);
+    assert.equal(branch.filter(entry => entry.type === "message" && entry.message.role === "user").length, failFirst ? 3 : 1);
     assert.equal(branch.filter(entry => entry.type === "message" && entry.message.role === "toolResult").length, 2);
     assert.equal(branch.find(entry => entry.type === "compaction").details.kind, KIND);
     assert.equal(SessionManager.open(sessionManager.getSessionFile()).getBranch().find(entry => entry.type === "compaction").details.replacementHistory.at(-1).encrypted_content, "checkpoint");

@@ -54,6 +54,12 @@ The supervisor names a thread after its first user message and updates the name 
 
 Model menus, autonomous-agent labels, and plan cards use the catalog exported by `pi-orchestrator/api`. Plan cards project the orchestrator's account and meter facts; Pi Remote carries no provider usage parser or duplicate provider manifest. New Astra threads start in OpenAI's priority service tier. Existing threads keep their saved mode, and other models start in normal mode.
 
+## Compaction recovery
+
+`/compact` uses Pi's compact RPC command, not a model-facing user message. Remote saves and returns its HTTP 202 admission receipt before waiting for completion. Reusing the same request ID returns the saved receipt without dispatching again. The runtime owns the operation deadline; supervisor handoff does not resend it. Compaction events report success or the concrete failure, and the work receipt retains that error even when Pi subsequently aborts its next assistant response.
+
+The [native Codex extension](../../packages/runtime/extensions/codex-compaction/README.md) keeps failed and interrupted attempts in the session JSONL. It blocks automatic resubmission until `/compact` succeeds or the caller selects another model. This prevents the repeated three-minute aborts seen on September 12. An unconfirmed RPC outcome stays with the running session; Remote reconciles its state rather than declaring it idle and starting another compaction.
+
 ## Subagent custody
 
 `thread_read` reads another thread by title or ID, with paginated conversation/actions and full-entry chunking. `thread_subagents` lists a thread's direct children by most recent message, with `includeIdle`, `limit` and `cursor`. Both are available to root agents and children. Idle and archived children remain discoverable through the list tool without appearing in the frontend's active cards. The [session reader](../../tools/read-condensed-session/README.md#native-thread-tools-and-pages) owns the matching shell commands, cursor rules and transcript parsing.

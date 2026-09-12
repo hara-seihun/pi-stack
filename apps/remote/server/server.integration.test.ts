@@ -346,6 +346,12 @@ for line in sys.stdin:
     out({'type':'message_end','message':{'role':'assistant','content':[{'type':'text','text':'later ran'}]}})
     streaming = False
     out({'type':'agent_settled'})
+   elif last == 'compact-fails':
+    out({'type':'compaction_start','reason':'threshold'})
+    out({'type':'compaction_end','reason':'threshold','aborted':False,'willRetry':False,'errorMessage':'native idle-timeout; explicit recovery required'})
+    out({'type':'message_end','message':{'role':'assistant','content':[],'stopReason':'aborted'}})
+    streaming = False
+    out({'type':'agent_settled'})
    elif last == 'compact':
     streaming = False
     compacting = True
@@ -403,6 +409,13 @@ for line in sys.stdin:
     out({'type':'message_end','message':{'role':'assistant','content':[{'type':'text','text':'ack was lost'}]}})
     streaming = False
     out({'type':'agent_settled'})
+ elif kind == 'compact' and request.get('customInstructions') == 'gate failure':
+  compacting = True
+  out({'type':'compaction_start','reason':'manual'})
+  gate('manual-compaction')
+  compacting = False
+  out({'type':'compaction_end','reason':'manual','aborted':False,'willRetry':False,'errorMessage':'native idle-timeout; explicit recovery required'})
+  out({'type':'response','id':rid,'command':'compact','success':False,'error':'native idle-timeout; explicit recovery required'})
  elif kind == 'steer':
   steering.append(request.get('message',''))
   out({'type':'queue_update','steering':steering,'followUp':follow_up})
@@ -1315,6 +1328,41 @@ describe("web and supervisor integration", () => {
     expect(rpcCommands.some((entry: any) => entry.type === "compact")).toBe(true);
     const events = await api("GET", `/v1/sessions/${id}/events?after=0`);
     expect(events.value.events.some((event: any) => event.type === "user")).toBe(false);
+    await api("DELETE", `/v1/sessions/${id}`);
+  });
+
+  test("automatic compaction failure remains on the work receipt after Pi aborts continuation", async () => {
+    const id = await createThread();
+    await api("POST", `/v1/sessions/${id}/prompt`, { requestId: crypto.randomUUID(), text: "compact-fails" });
+    await waitFor(
+      () => api("GET", `/v1/sessions/${id}/events?after=0`).then(result => result.value),
+      value => value.session.state === "IDLE" && value.events.some((event: any) => event.type === "settled"),
+    );
+    const ledger = new Database(join(root, "data", "supervisor.sqlite3"), { readonly: true });
+    try {
+      expect(ledger.query("SELECT state,last_error FROM work_items WHERE session_id=?").get(id)).toEqual({ state: "complete", last_error: "native idle-timeout; explicit recovery required" });
+    } finally { ledger.close(); }
+    await api("DELETE", `/v1/sessions/${id}`);
+  });
+
+  test("manual compaction acknowledges once before completion and preserves terminal failures", async () => {
+    const id = await createThread();
+    resetGate("manual-compaction");
+    const requestId = crypto.randomUUID();
+    try {
+      const result = await api("POST", `/v1/sessions/${id}/command`, { requestId, name: "compact", args: "gate failure" });
+      expect(result.status).toBe(202);
+      await waitForGate("manual-compaction");
+      const duplicate = await api("POST", `/v1/sessions/${id}/command`, { requestId, name: "compact", args: "gate failure" });
+      expect(duplicate.status).toBe(result.status);
+      expect(duplicate.value).toEqual(result.value);
+      expect(readJsonLines(fakeRpcLog).filter((entry: any) => entry.sessionId === id && entry.type === "compact")).toHaveLength(1);
+    } finally { releaseGate("manual-compaction"); }
+    const events = await waitFor(
+      () => api("GET", `/v1/sessions/${id}/events?after=0`).then(result => result.value),
+      value => value.session.state === "IDLE" && value.events.some((event: any) => /native idle-timeout/.test(event.text ?? "")),
+    );
+    expect(events.events.some((event: any) => event.text === "Context compaction cancelled")).toBe(false);
     await api("DELETE", `/v1/sessions/${id}`);
   });
 

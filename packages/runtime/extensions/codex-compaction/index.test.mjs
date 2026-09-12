@@ -26,6 +26,7 @@ function fixture() {
   let aborted = false;
   const pi = {
     on(name, handler) { handlers.set(name, handler); },
+    appendEntry: (type, data) => sm.appendCustomEntry(type, data),
     events: { emit() {} }, getThinkingLevel: () => "high", getActiveTools: () => ["read"],
     getAllTools: () => [{ name: "read", description: "Read a file", parameters: { type: "object", properties: { path: { type: "string" } }, required: ["path"] } }],
   };
@@ -142,14 +143,18 @@ test("malformed checkpoints and missing payload markers abort rather than leakin
   assert.equal(checkpointContext(buildSessionContext(f.sm.getBranch()).messages, f.sm.getBranch(), model).ok, false);
 });
 
-test("failed native compaction cancels Pi's operation and leaves session unchanged", async t => {
+test("failed native compaction retains context and fences automatic retries across reload and aliases", async t => {
   const diagnostic = t.mock.method(console, "error", () => {});
   const f = fixture();
   codexCompaction(f.pi);
-  const before = JSON.stringify(f.sm.getEntries());
+  const before = JSON.stringify(buildSessionContext(f.sm.getBranch()).messages);
   f.ctx.modelRegistry.complete = async () => ({ stopReason: "error", errorMessage: "401 token expired", usage: zero });
-  assert.deepEqual(await f.handlers.get("session_before_compact")(f.event, f.ctx), { cancel: true });
-  assert.equal(JSON.stringify(f.sm.getEntries()), before);
+  let calls = 0;
+  f.ctx.modelRegistry.complete = async () => { calls++; return { stopReason: "error", errorMessage: "401 token expired", usage: zero }; };
+  const result = await f.handlers.get("session_before_compact")(f.event, f.ctx);
+  assert.equal(result.cancel, true);
+  assert.match(result.error, /401 token expired/);
+  assert.equal(JSON.stringify(buildSessionContext(f.sm.getBranch()).messages), before);
   assert.match(f.notifications[0][0], /401 token expired/u);
   const record = JSON.parse(diagnostic.mock.calls[0].arguments[0]);
   assert.equal(record.phase, "compaction-failed");
@@ -157,8 +162,17 @@ test("failed native compaction cancels Pi's operation and leaves session unchang
   assert.equal(record.reason, "threshold");
   assert.equal(record.provider, model.provider);
   f.ctx.ui.notify = () => {};
-  await f.handlers.get("session_before_compact")(f.event, f.ctx);
-  assert.equal(JSON.parse(diagnostic.mock.calls[1].arguments[0]).error, "401 token expired");
+  codexCompaction(f.pi);
+  f.ctx.model = { ...model, provider: "openai-codex-9" };
+  for (let i = 0; i < 32; i++) {
+    const retry = await f.handlers.get("session_before_compact")({ ...f.event, branchEntries: f.sm.getBranch() }, f.ctx);
+    assert.match(retry.error, /Automatic resubmission is blocked/);
+  }
+  assert.equal(calls, 1);
+  f.handlers.get("context")({ messages: buildSessionContext(f.sm.getBranch()).messages }, f.ctx);
+  assert.equal(f.aborted, true);
+  await f.handlers.get("session_before_compact")({ ...f.event, branchEntries: f.sm.getBranch(), reason: "manual" }, f.ctx);
+  assert.equal(calls, 2);
   assert.equal(f.handlers.has("turn_end"), false);
   assert.equal(f.handlers.has("agent_settled"), false);
 });
@@ -173,6 +187,21 @@ for (const stopReason of ["error", "aborted"]) test(`overflow excludes ${stopRea
     return new Response(sse(completed()));
   });
   assert.equal(result.ok, true, result.error);
+});
+
+test("a checkpoint item without terminal completion times out, cancels the reader and cannot commit", async () => {
+  const f = fixture();
+  let cancelled = false;
+  const result = await createCheckpoint(f.pi, f.ctx, f.event, async () => new Response(new ReadableStream({
+    start(controller) { controller.enqueue(new TextEncoder().encode(sse([completed()[0]]))); },
+    cancel() { cancelled = true; },
+  })), { idleMs: 10, deadlineMs: 1000 });
+  assert.equal(result.ok, false);
+  assert.match(result.error, /idle-timeout in stream/);
+  assert.equal(result.diagnostic.lastEvent, "response.output_item.done");
+  assert.equal(result.diagnostic.abortCause, "idle-timeout");
+  assert.equal(cancelled, true);
+  assert.equal(f.sm.getBranch().some(entry => entry.type === "compaction"), false);
 });
 
 test("retention bounds user text without retaining assistant output", () => {

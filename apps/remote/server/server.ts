@@ -226,7 +226,7 @@ beginSupervisorGeneration(db, SUPERVISOR_EPOCH, new Set(pendingHandoff.map((item
 interface Runtime {
   transport: RuntimeTransport | null;
   startupAbort: AbortController;
-  pending: Map<string, { resolve: (value: any) => void; reject: (error: Error) => void; timer: Timer }>;
+  pending: Map<string, { resolve: (value: any) => void; reject: (error: Error) => void; timer: Timer | undefined }>;
   phase: RuntimePhase;
   phaseVersion: number;
   compacting: boolean;
@@ -1019,12 +1019,13 @@ class RpcTimeoutError extends Error {
 function rpc(rt: Runtime, type: string, body: Record<string, unknown> = {}, timeoutMs = 15000): Promise<any> {
   const id = crypto.randomUUID();
   const promise = new Promise((resolve, reject) => {
-    const timer = setTimeout(() => {
+    const timer = timeoutMs > 0 ? setTimeout(() => {
       rt.pending.delete(id);
       reject(new RpcTimeoutError(type));
-    }, timeoutMs);
+    }, timeoutMs) : undefined;
     rt.pending.set(id, { resolve, reject, timer });
-    sendLine(rt, { id, type, ...body });
+    try { sendLine(rt, { id, type, ...body }); }
+    catch (cause) { clearTimeout(timer); rt.pending.delete(id); reject(cause); }
   });
   // Mark the rejection as handled at creation: a caller that forgets to await
   // or catch can never crash the supervisor (each crash orphans mid-turn RPC
@@ -1124,8 +1125,9 @@ function handleRpcEvent(sessionId: string, rt: Runtime, event: any) {
       scheduleThreadNameIfDue(sessionId);
     }
     const failure = modelFailureText(event.message);
-    if (failure) rt.pendingModelFailure = failure;
-    else if (event.message?.role === "assistant") rt.pendingModelFailure = null;
+    if (failure) {
+      if (event.message?.stopReason !== "aborted" || !rt.pendingModelFailure) rt.pendingModelFailure = failure;
+    } else if (event.message?.role === "assistant") rt.pendingModelFailure = null;
   } else if (event.type === "tool_execution_start") {
     proveRunning();
     const toolCallId = String(event.toolCallId ?? crypto.randomUUID());
@@ -1152,14 +1154,18 @@ function handleRpcEvent(sessionId: string, rt: Runtime, event: any) {
     touchSession(sessionId);
     if (!event.success && event.finalError) emit(sessionId, "notice", { text: `Retry failed: ${String(event.finalError)}` });
   } else if (event.type === "compaction_start") {
+    proveRunning();
     rt.compacting = true;
     rt.compactionContextHash = null;
     touchSession(sessionId);
     emit(sessionId, "notice", { text: "Compacting context…" });
   } else if (event.type === "compaction_end") {
     rt.compacting = false;
-    if (event.result) requireCompactionContext(sessionId, rt);
-    else rt.compactionContextHash = null;
+    if (event.result) { requireCompactionContext(sessionId, rt); rt.pendingModelFailure = null; }
+    else {
+      rt.compactionContextHash = null;
+      if (event.errorMessage) rt.pendingModelFailure = String(event.errorMessage);
+    }
     touchSession(sessionId);
     const text = event.aborted
       ? "Context compaction cancelled"
@@ -1635,14 +1641,27 @@ async function runCommand(row: any, requestId: string, name: string, args: strin
     ).get(row.id) as any)?.count ?? 0);
     if (rt.phase !== "IDLE" || pendingWork > 0) throw new Error("Wait for the thread to become idle before compacting");
     setRuntimePhase(row.id, rt, "DISPATCHING", "RUNNING");
-    try {
-      await rpc(rt, "compact", args ? { customInstructions: args } : {}, 120_000);
+    const response = { accepted: true, command: name, session: publicSession(sessionRow.get(row.id)) };
+    saveRequest(requestId, row.id, "command", 202, response);
+    // Compaction owns its deadline. HTTP admission must not time out and invite a duplicate.
+    void rpc(rt, "compact", args ? { customInstructions: args } : {}, 0).then(() => {
+      if (!ownsSupervisorLease() || runtimes.get(row.id) !== rt) return;
       if (phaseOf(rt) === "DISPATCHING") setRuntimePhase(row.id, rt, "RUNNING", "RUNNING");
       if (phaseOf(rt) === "RUNNING") settleRuntime(row.id, rt, true);
-    } catch (cause) {
-      if (phaseOf(rt) === "DISPATCHING") setRuntimePhase(row.id, rt, "IDLE", "IDLE");
-      throw cause;
-    }
+    }, cause => {
+      if (!ownsSupervisorLease() || runtimes.get(row.id) !== rt) return;
+      const detail = `Context compaction failed: ${cause instanceof Error ? cause.message : String(cause)}`;
+      rt.pendingModelFailure = detail;
+      emit(row.id, "notice", { text: detail });
+      // A lost RPC reply does not prove that the operation stopped.
+      void reconcileRuntimeState(row.id, rt).then(state => {
+        if (state && !state.isCompacting && !state.isStreaming && phaseOf(rt) === "DISPATCHING") {
+          setRuntimePhase(row.id, rt, "RUNNING", "RUNNING");
+          settleRuntime(row.id, rt, true);
+        }
+      }).catch(error => console.error("Compaction state reconciliation failed", error));
+    });
+    return { response, status: 202 };
   } else {
     const startsAgent = command.source === "prompt" || command.source === "skill";
     if (startsAgent) {

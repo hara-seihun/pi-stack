@@ -45,6 +45,7 @@ export async function work(runId:string):Promise<void>{
   const delivery=run.context?undefined:new FleetResultDelivery(session,deliveryIds=>post(`/internal/runs/${runId}/acknowledge`,{deliveryIds}),error=>console.error("fleet result receipt will retry:",error));
   let liveText="",liveThinking="",activeTool:string|undefined,lastProgress=0,aborting=false,currentActivity:RunActivity="STARTING";
   let reportPending=false,progressPending=false,reportInFlight=false;
+  let compactionFailure:string|undefined;
   const report=(activity:RunActivity,progress=true)=>{currentActivity=activity;const now=Date.now();if(!progress&&now-lastProgress<5000)return;if(progress)lastProgress=now;reportPending=true;progressPending ||= progress;};
   const reportTimer=setInterval(()=>{
     if(!reportPending||reportInFlight)return;
@@ -64,6 +65,10 @@ export async function work(runId:string):Promise<void>{
     else if(event.type==="tool_execution_end"){activeTool=undefined;report("WORKING");}
     else if(event.type==="message_end"){liveText="";liveThinking="";report("WORKING");}
     else if(event.type==="compaction_start")report("COMPACTING");
+    else if(event.type==="compaction_end"){
+      if(event.result)compactionFailure=undefined;
+      else if(event.errorMessage)compactionFailure=String(event.errorMessage);
+    }
   });
   const heartbeat=setInterval(()=>report(currentActivity,false),15_000);
   const control=setInterval(()=>void (async()=>{
@@ -83,6 +88,10 @@ export async function work(runId:string):Promise<void>{
     const current=(await request(`/internal/runs/${runId}`)).run as Run;
     if(["done","aborted","failed"].includes(current.state))return;
     const last=lastAssistant(session);
+    if(compactionFailure&&!aborting){
+      await post(`/internal/runs/${runId}/state`,{state:"failed",failureKind:"provider",result:compactionFailure});
+      return;
+    }
     if(last?.stopReason==="error"){
       const detail=last.errorMessage??"provider failed";
       if(isRateLimitError(detail)||isCredentialError(detail))await post(`/internal/runs/${runId}/state`,{state:"failed",failureKind:"account",result:detail,cooldownUntil:Date.now()+30*60_000});

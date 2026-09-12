@@ -1,11 +1,11 @@
 import { afterEach, expect, test, vi } from "vitest";
 import { Store } from "../src/store.js";
 import type { SharedOAuthAuth } from "../src/auth/shared-oauth.js";
-import { runProviderOperation, type ProviderOperation } from "../src/extension/provider-operation.js";
+import { installProviderOperations, runProviderOperation, type ProviderOperation } from "../src/extension/provider-operation.js";
 
 const usage = { input: 9, output: 1, cacheRead: 2, cacheWrite: 0, totalTokens: 12, cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 } };
 const stores: Store[] = [];
-afterEach(() => { for (const store of stores.splice(0)) store.close(); vi.unstubAllEnvs(); });
+afterEach(() => { for (const store of stores.splice(0)) store.close(); vi.unstubAllEnvs(); vi.useRealTimers(); });
 function fixture() {
   const store = Store.open(":memory:"); stores.push(store);
   for (const id of ["openai-codex-2", "openai-codex-3"]) store.upsertAccount({ id, provider: "openai-codex" });
@@ -63,6 +63,33 @@ test("fleet operation stays inside its assigned account and does not end the par
   expect((await f.run()).ok).toBe(false);
   expect(f.request.run).toHaveBeenCalledTimes(1);
   expect(f.store.activeLeases().map(lease => lease.id)).toEqual(["run:fixture-run"]);
+});
+
+test("broker leaves deadline ownership with the caller and drains leases on shutdown", async () => {
+  vi.useFakeTimers();
+  const f = fixture();
+  let receive!: (request: ProviderOperation) => void;
+  let shutdown!: () => Promise<void>;
+  const unsubscribe = vi.fn();
+  const pi = {
+    events: { on(_name: string, handler: typeof receive) { receive = handler; return unsubscribe; } },
+    on(_name: string, handler: typeof shutdown) { shutdown = handler; },
+  };
+  installProviderOperations(pi as any, f.store, new Map([["openai-codex", f.auth as unknown as SharedOAuthAuth]]));
+  f.request.handled = false;
+  f.request.resolve = vi.fn();
+  f.request.run = vi.fn(async (_model, options) => await new Promise<Awaited<ReturnType<ProviderOperation["run"]>>>(resolve => {
+    options!.signal.addEventListener("abort", () => resolve({ ok: false, error: "Request was aborted", usage }), { once: true });
+  }));
+  receive(f.request);
+  await vi.advanceTimersByTimeAsync(180_001);
+  expect(f.request.resolve).not.toHaveBeenCalled();
+  expect(f.store.activeLeases()).toHaveLength(1);
+  await shutdown();
+  expect(unsubscribe).toHaveBeenCalledOnce();
+  expect(f.request.resolve).toHaveBeenCalledExactlyOnceWith({ ok: false, error: "Provider operation stopped by session shutdown", usage });
+  expect(f.store.activeLeases()).toHaveLength(0);
+  expect(f.store.db.prepare("SELECT SUM(tokens) n FROM usage_hour").get()).toEqual({ n: 12 });
 });
 
 test("abort and thrown callbacks always release operation leases", async () => {

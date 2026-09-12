@@ -26,7 +26,7 @@ The threshold is `contextWindow - reserveTokens`. This extension does not instal
 
 Only compaction selects Pi's SSE transport, because Pi has no raw WebSocket-event observer. A byte-stream observer captures the encrypted item while Pi's parser handles the same response and computes usage. Pi owns headers, account IDs, request compression, endpoint resolution and errors. Normal chat keeps its configured transport, including WebSockets. Compaction uses the same session/cache identity and short cache retention as the conversation, rather than sending a cold request under a new routing ID.
 
-The [Orchestrator operation broker](../../../orchestrator/src/extension/provider-operation.ts) resolves shared OAuth under its existing lock. It refreshes a refused token once. Interactive rate limits can try another eligible alias, bounded to three accounts. Assigned fleet operations stay on the scheduler's account. The broker reuses an existing parent lease or holds a temporary heartbeat-backed lease, records usage against the actual account, and cancels outstanding work before shutdown closes its store. The operation has a three-minute deadline. Without Orchestrator, Pi's registry resolves the configured provider directly.
+The [Orchestrator operation broker](../../../orchestrator/src/extension/provider-operation.ts) resolves shared OAuth under its existing lock. It refreshes a refused token once. Interactive rate limits can try another eligible alias, bounded to three accounts. Assigned fleet operations stay on the scheduler's account. The broker reuses an existing parent lease or holds a temporary heartbeat-backed lease, records usage against the actual account, and cancels outstanding work before shutdown closes its store. The compaction extension owns cancellation in both brokered and standalone use. It allows three minutes without a parsed SSE event, with a ten-minute total ceiling. Response headers and parsed events reset the idle deadline; arbitrary bytes and SSE keepalive comments do not. The broker forwards that signal and session shutdown, rather than imposing a shorter total deadline. The response reader also observes cancellation, releases its stream and ends its account lease. Without Orchestrator, Pi's registry resolves the configured provider directly.
 
 Successful request usage also lives on `CompactionEntry.usage` for Pi totals. The usage logger does not count that entry again. Failed requests that returned usage are charged by the broker even when no checkpoint can be committed.
 
@@ -40,7 +40,13 @@ A different model receives the factual `native-checkpoint-unavailable` notice, t
 
 Resume, forks, tree navigation and repeated compaction locate the latest compaction on the active branch. A first native compaction starts from Pi's effective context, including any existing summary and kept messages, rather than replaying an oversized raw transcript. Session JSONL remains the source of full historical text; there is no separate recall cache.
 
-Compaction failures cancel Pi's operation and leave the previous context intact. Failures and blocked checkpoint requests emit structured stderr diagnostics containing the concrete error, phase, session, account and model, including in headless and fleet modes. UI notifications are additional, not the diagnostic source. A malformed checkpoint or a missing/duplicated request marker aborts the request. Other extensions may add live context, but changing the checkpoint's retained boundary is rejected rather than silently deleting their messages. Nested compaction uses the current system prompt, tools and model options; it does not replay unrelated extensions' chat-only payload rewrites.
+Before a native request, the extension writes a `codex-compaction-attempt` custom entry to the session JSONL. A failed, cancelled or interrupted attempt blocks further automatic compaction and chat requests for that model until an explicit manual compaction succeeds. Changing account aliases, appending messages, reloading or reopening the session does not reset this record. A committed checkpoint clears it. Tree navigation follows the active branch; another model can use its normal context path. These custom records do not enter model context.
+
+Compaction failures stop Pi's operation and leave the previous context intact. The [`patch-compaction-errors.mjs`](../../patch-compaction-errors.mjs) runtime patch adds an `error` result to the SDK and bundled CLI compaction handlers, including its type declaration. Unlike throwing inside an extension, this result reaches Pi's lifecycle as a failure and prevents the next assistant request. Pi Remote retains that failure on the work receipt; fleet workers report provider failure rather than success or an operator abort.
+
+To retry, use `/compact` in Pi or Pi Remote, or the `compact` RPC command. Remote acknowledges the command with HTTP 202 before the operation finishes and deduplicates the request ID. Its events carry the terminal outcome. It no longer waits on a separate two-minute RPC deadline. An interrupted command is not automatically resent during supervisor handoff.
+
+Failures and blocked checkpoint requests emit structured stderr diagnostics containing the concrete error, phase, session, account and model, including in headless and fleet modes. Each attempted request also records elapsed time, header latency, request size, response status and ID, parsed event count, last event, and timeout cause. No credentials, prompt text or encrypted checkpoint contents enter diagnostics. UI notifications are additional, not the diagnostic source. A malformed checkpoint or a missing/duplicated request marker aborts the request. Other extensions may add live context, but changing the checkpoint's retained boundary is rejected rather than silently deleting their messages. Nested compaction uses the current system prompt, tools and model options; it does not replay unrelated extensions' chat-only payload rewrites.
 
 ## Checks
 
@@ -48,7 +54,8 @@ From the stack root:
 
 ```sh
 node --test packages/runtime/extensions/codex-compaction/*.test.mjs packages/runtime/codex-sse.test.mjs packages/runtime/compaction-cut.test.mjs
-npx vitest run packages/orchestrator/tests/provider-operation.test.ts
+node --test packages/runtime/compaction-errors.test.mjs
+npx vitest run packages/orchestrator/tests/provider-operation.test.ts packages/orchestrator/tests/worker.test.ts
 ```
 
 These tests use mocked HTTP and credentials. They exercise Pi's actual Codex serializer and parser, tool batches, checkpoint persistence, repeated compaction, aliases, model switches, malformed streams, aborts, refresh, account attribution and leases.
@@ -67,6 +74,14 @@ node /srv/pi/runtime/extensions/codex-compaction/smoke.mjs \
 ```
 
 Add `--switch-account` to move Luna to another eligible shared alias after compaction and before continuation. The receipt names both producer and consumer aliases. The caller supplies all model-facing test text. The script prints account/model, checkpoint count, token usage and the continuation's text. It does not print credentials or encrypted checkpoint contents.
+
+## September 12 timeout incident
+
+Local production recorded 32 failures across two Astra sessions. Each failure reached the broker's 180-second total deadline. The extension returned cancellation, so Pi resumed the oversized context and tried compaction again after subsequent tool batches. The longer sequence ran from 01:00:29 UTC until a checkpoint at 02:35:31 UTC, while context grew from about 256k to 283k tokens.
+
+A read-only replay of that session's first failing boundary on the same Astra account produced one valid checkpoint in 217,080 ms. The request contained 645 native input items and 256,042 input tokens. Headers arrived in 1,505 ms, and the stream delivered 11 parsed events. This demonstrated useful native work beyond the former total deadline. No tools ran and the source JSONL stayed unchanged. The new idle deadline allowed the request to complete.
+
+Focused tests cover stalled streams, an encrypted item without terminal completion, total deadlines, shutdown cleanup and usage, durable retry blocking, explicit recovery, and the SDK and bundled CLI error consumers. The full Pi session fixture verifies that both parallel tools finish before compaction and that a failed checkpoint prevents continuation until manual recovery.
 
 ## Provenance
 

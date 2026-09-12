@@ -91,6 +91,15 @@ describe("worker settlement", () => {
     expect(dispose).toHaveBeenCalledOnce();
   });
 
+  it("records native compaction failure instead of reporting done or operator-aborted", async () => {
+    session.prompt.mockImplementation(async () => {
+      for (const [listener] of session.subscribe.mock.calls) listener({ type: "compaction_end", errorMessage: "Native compaction idle-timeout; explicit recovery required", aborted: false });
+      session.messages.push({ role: "assistant", stopReason: "aborted", content: [] });
+    });
+    await work("test-run");
+    expect(patches.at(-1)).toEqual({ state: "failed", failureKind: "provider", result: "Native compaction idle-timeout; explicit recovery required" });
+  });
+
   it("does not overwrite a terminal state set by the daemon", async () => {
     vi.stubEnv("PI_ORCHESTRATOR_ASSIGNED", "");
     session.prompt.mockImplementation(async () => { state = "aborted"; });

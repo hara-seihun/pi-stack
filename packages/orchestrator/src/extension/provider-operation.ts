@@ -48,13 +48,14 @@ export async function runProviderOperation(
         if (last.ok || !isRejectedTokenError(last.error) || attempt !== 0 || !credential.apiKey) break;
         await auth.refreshRejected(account, credential.apiKey, signal);
       }
+      if (signal.aborted) return { ok: false, error: signal.reason?.message ?? "Provider operation aborted", usage: last.usage };
       if (last.ok) {
         if (account !== request.model.provider && onRoute) {
           await onRoute(model);
         }
         return last;
       }
-      if (signal.aborted || !isRateLimitError(last.error)) return last;
+      if (!isRateLimitError(last.error)) return last;
       store.setCooldown(account, Date.now() + rateLimitCooldownMs(last.error));
       if (process.env.PI_ORCHESTRATOR_ASSIGNED === "1") return last;
     } catch (error) {
@@ -79,7 +80,7 @@ export function installProviderOperations(pi: ExtensionAPI, store: Store, shared
     if (request.handled) return;
     request.handled = true;
     const operation = Promise.resolve().then(() => {
-      const signal = AbortSignal.any([request.signal, shutdown.signal, AbortSignal.timeout(180_000)]);
+      const signal = AbortSignal.any([request.signal, shutdown.signal]);
       const family = store.account(request.model.provider)?.provider;
       const auth = family ? shared.get(family) : undefined;
       return auth ? runProviderOperation(request, store, auth, signal, async model => {
@@ -94,7 +95,7 @@ export function installProviderOperations(pi: ExtensionAPI, store: Store, shared
   });
   pi.on("session_shutdown", async () => {
     unsubscribe();
-    shutdown.abort();
+    shutdown.abort(new Error("Provider operation stopped by session shutdown"));
     await Promise.all(pending);
   });
 }
