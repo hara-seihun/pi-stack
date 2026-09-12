@@ -23,11 +23,13 @@ it("imports portable history without replaying user requests or foreign tool cal
     { role: "user", content: "Do not replay this request" },
     { role: "assistant", content: [{ type: "text", text: "Prior answer" }, { type: "toolCall", id: "foreign-call", name: "bash", arguments: { command: "exit 99" } }] },
     { role: "toolResult", toolCallId: "foreign-call", content: "historical result" },
+    { role: "user", content: [{type:"image",url:"https://example.com/image.png"}] },
   ];
   seedPiSession(file, cwd, { version: 1, sourceCore: "codex", messages, agents: [{ id: "foreign-child", parentId: null, name: "Previous worker", state: "idle" }] });
   const manager = SessionManager.open(file);
   const context = manager.buildSessionContext();
-  expect(context.messages).toHaveLength(3);
+  expect(context.messages).toHaveLength(4);
+  expect(context.messages[3]).toMatchObject({role:"custom",customType:"core_transfer_message"});
   expect(context.messages[0]).toMatchObject(messages[0]);
   expect(context.messages[1]).toMatchObject({ role: "custom", customType: "core_transfer_message", content: JSON.stringify(messages[1]) });
   expect(manager.getEntries()[0]).toMatchObject({ type: "custom", customType: "core_transfer", data: { sourceCore: "codex", agents: [{ id: "foreign-child" }] } });

@@ -28,7 +28,9 @@ export function seedPiSession(path: string, cwd: string, transfer?: PortableConv
   for (const message of transfer?.messages ?? []) {
     if (transfer?.sourceCore === "pi" && ["user", "assistant", "toolResult", "custom", "bashExecution"].includes(String(message.role))) {
       manager.appendMessage(message as unknown as Parameters<SessionManager["appendMessage"]>[0]);
-    } else if (message.role === "user" && (typeof message.content === "string" || Array.isArray(message.content))) {
+    } else if (message.role === "user" && (typeof message.content === "string" || Array.isArray(message.content)
+      && message.content.every(block => block?.type === "text" && typeof block.text === "string"
+        || block?.type === "image" && typeof block.data === "string" && typeof block.mimeType === "string"))) {
       manager.appendMessage({ ...message, timestamp: message.timestamp ?? Date.now() } as Parameters<SessionManager["appendMessage"]>[0]);
     } else {
       // Foreign provider reasoning signatures and tool-call IDs must not become

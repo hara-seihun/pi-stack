@@ -3,7 +3,7 @@ import { join } from "node:path";
 import { configuredCore, type CoreAgent, type CoreId } from "pi-orchestrator/api";
 
 export interface SessionCore { core: CoreId; stateDir: string }
-export interface CoreDispatch { type: string; message: string; images: unknown[] }
+export interface CoreDispatch { type: string; message: string; images: unknown[]; resume?: boolean }
 export class SessionCores {
   constructor(private readonly db: Database, private readonly data: string) {
     db.exec(`CREATE TABLE IF NOT EXISTS session_cores (

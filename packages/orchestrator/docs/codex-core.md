@@ -65,13 +65,13 @@ The adapter reads `--provider`, `--model`, `--thinking`, `--name`, and `--sandbo
 
 ## Process ownership and whole-tree stop
 
-The production launcher requires Linux with a running systemd user manager. Each app-server gets a uniquely named transient `pistack-codex-UUID.service` with `KillMode=control-group`, a two-second stop deadline, and SIGKILL escalation. Its `systemd-run --pipe --wait` launcher stays attached to the adapter. Environment values are passed by inherited variable name, never copied into command arguments. Credentials still travel only through stdin. The service receives a private native home, not an auth file.
+The launcher requires Linux and Python 3 with subreaper and pidfd support. A small supervisor inherits the caller's mount namespace, environment, cwd and standard streams. This keeps Remote's private decrypted mount available to the core. Credentials travel only through stdin. The adapter owns a separate lifetime pipe that neither the model nor its tools inherits.
 
-`close()` stops that exact cgroup and awaits its launcher before releasing the account lease or publishing exit. This covers local tool processes that use `setsid`, double-fork, or ignore SIGTERM. Neither process names nor broad PID matching select the stop target, so sibling app-servers remain untouched. Launch registration is awaited before stopping to prevent a late-starting service escaping an early close.
+`close()`, natural app-server exit and abrupt owner death all trigger descendant cleanup. The subreaper adopts detached descendants, freezes their parents before enumeration, signals through pidfds and reaps them before releasing the account lease or publishing exit. This covers local same-user tools that use `setsid`, double-fork or ignore SIGTERM without selecting sibling processes. A stop racing startup is checked before the app-server launches.
 
-Root abort normally leaves the native session open after interrupting all known turns and background terminals. If a pending child has no interruptible turn, or native stop requests fail, it closes the owned cgroup instead and returns `coreClosed: true`. The response precedes the exit callback; the next request needs a reopened runtime. Saved native history is resumed without replaying accepted work.
+Root abort normally leaves the native session open after interrupting all known turns and background terminals. If a pending child has no interruptible turn, or native stop requests fail, it closes the owned process tree instead and returns `coreClosed: true`. The response precedes the exit callback; the next request needs a reopened runtime. Saved native history is resumed without replaying accepted work.
 
-Unsupported stop boundaries are explicit. Non-Linux hosts and hosts without a systemd user manager cannot start this production launcher. Processes deliberately handed to another supervisor or a remote host are outside the local cgroup; the adapter does not stop those external services. A failure to stop the owned cgroup fails cleanup and retains the account lease rather than claiming the tree stopped.
+Non-Linux hosts and Python builds without pidfd support cannot start this launcher. Processes handed to another supervisor or remote host are outside its ownership. Elevated descendants that the supervisor cannot signal need privileged cleanup. Incomplete cleanup retains the supervisor and account lease and returns an error rather than claiming the tree stopped.
 
 ## Events and context
 
@@ -87,7 +87,7 @@ One runtime owner opens a given `stateDir`. `codex-session.json` stores the nati
 
 `stateDir/codex` is the private native `CODEX_HOME`, including native history. The adapter links existing `config.toml`, `AGENTS.md`, `skills`, `agents`, `rules`, and `plugins` from the configured `CODEX_HOME`, or the user's `.codex`, into that directory. It does not copy native auth or unrelated threads. The external token login and ephemeral credential store keep auth out of files. Recovery requires both the adapter state and native home. Deleting either loses native continuation; there is no automatic conversation replay.
 
-A fresh empty thread is not materialized by Codex. History listing is unavailable until the first user message or explicit history injection. Reopening an untouched empty session creates another empty native thread with the same portable identity. Once work may have been accepted, the adapter resumes the recorded thread and never replaces it automatically.
+A fresh empty thread is not materialized by Codex. History listing is unavailable until the first user message or explicit history injection. Reopening an untouched empty session creates another empty native thread with the same portable identity. `get_state.nativeSessionDurable` is false during this empty pre-work period, so fleet custody records the adapter file but does not pin that provisional native ID. Once work may have been accepted, the adapter reports it durable, resumes the recorded thread and never replaces it automatically.
 
 Send a stable `workId` with prompt/steer/follow-up commands. RPC `id` is only the fallback receipt key. The adapter persists a pending receipt before dispatch and records native acceptance before acknowledging. A repeated accepted work ID returns its receipt without another turn. Reusing an ID with different content fails. A crash or transport timeout leaves an unknown outcome. On resume, native `userMessage.clientId` can resolve that receipt. Otherwise `get_state.unresolvedCommands` exposes it and retries fail rather than replaying work.
 
@@ -97,7 +97,7 @@ Transfer acceptance is recorded before returning. A completed transfer is never 
 
 ## Protocol custody and checks
 
-`src/cores/codex-protocol` contains the required dependency closure from the installed binary's TypeScript schema. The only transformation adds `.js` to import specifiers. To regenerate with the pinned binary:
+`src/cores/codex-protocol` contains the required dependency closure from the installed binary's TypeScript schema. The only transformation adds `.js` to import specifiers. The generated upstream schema is covered by the copied [Apache-2.0 license](../src/cores/codex-protocol.LICENSE). To regenerate with the pinned binary:
 
 ```sh
 node packages/orchestrator/src/cores/codex-generate-protocol.mjs
@@ -109,10 +109,10 @@ Focused fixture tests use no accounts or models:
 node_modules/.bin/vitest run packages/orchestrator/tests/codex-core.test.ts packages/orchestrator/tests/codex-rpc.test.ts --maxWorkers=1
 ```
 
-The opt-in local process fixture requires the Linux user manager. It starts two isolated process trees, stops a SIGTERM-resistant tool and its detached grandchild, and checks that the sibling remains alive. It takes about two seconds and makes no backend request:
+The Linux process fixtures check inherited mount identity, detached descendant cleanup, owner SIGKILL, app-server exit, startup races and sibling survival. They take less than a second and make no backend request:
 
 ```sh
-PI_CODEX_CGROUP_TEST=1 node_modules/.bin/vitest run packages/orchestrator/tests/codex-process.test.ts --maxWorkers=1
+node_modules/.bin/vitest run packages/orchestrator/tests/codex-process.test.ts --maxWorkers=1
 ```
 
-The installed 0.146.0 probe used the sibling `openCoreAccount` broker with a read-only sandbox. Authentication, thread creation, catalog/effort/skill discovery, structured transfer, and transfer resume completed through the default `openCodexSession` binding. The catalog contained five models and six skills. No native `auth.json` was created. No model turn was submitted. Real generation, native tool execution, child spawning, and live compaction remain for the single integrated end-to-end model probe, not independent adapter spending.
+The installed 0.146.0 probe used the sibling `openCoreAccount` broker with a read-only sandbox. Authentication, thread creation, catalog/effort/skill discovery, structured transfer, and transfer resume completed through the default `openCodexSession` binding. The catalog contained five models and six skills. No native `auth.json` was created. No model turn was submitted. The integrated core probe then used Luna with one native child, executed a shell command inside that child, waited for its result and returned `core-probe-ok`. The tree reported complete with one child, successful spawn/command/wait events and no core errors.

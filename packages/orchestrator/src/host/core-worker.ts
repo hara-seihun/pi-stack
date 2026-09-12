@@ -35,6 +35,7 @@ class CoreWire {
   private sequence = 0;
   private pending = new Map<string, { resolve(value: any): void; reject(error: Error): void }>();
   private failure?: Error;
+  private closePromise?: Promise<void>;
   constructor(private readonly event: (event: CoreOutput) => void) {}
   output = (event: CoreOutput): void => {
     if (event.type !== "response") { this.event(event); return; }
@@ -65,10 +66,12 @@ class CoreWire {
     catch (error) { this.pending.get(id)?.reject(error instanceof Error ? error : new Error(String(error))); this.pending.delete(id); }
     return waiting;
   }
-  async close(): Promise<void> {
-    for (const waiter of this.pending.values()) waiter.reject(new Error("Worker closed"));
-    this.pending.clear();
-    await this.session?.close();
+  close(): Promise<void> {
+    return this.closePromise ??= Promise.resolve().then(async () => {
+      for (const waiter of this.pending.values()) waiter.reject(new Error("Worker closed"));
+      this.pending.clear();
+      await this.session?.close();
+    });
   }
 }
 
@@ -129,13 +132,14 @@ export async function runCoreWorker(run: Run, options: CoreSessionOptions, open:
     if (value.core !== (run.core ?? "pi")) throw new Error("Factory opened a different core than the run's pinned core");
     if (typeof value.nativeSessionId !== "string" || !value.nativeSessionId) throw new Error("Core get_state did not identify its native session");
     if (nativeSessionId && nativeSessionId !== value.nativeSessionId) throw new Error("Core recovery replaced the run's recorded native session");
-    nativeSessionId = value.nativeSessionId;
-    const refs = { sessionFile: value.sessionFile, nativeSessionId: value.nativeSessionId, portableSessionFile: value.portableSessionFile ?? value.portableFile };
+    if (value.nativeSessionDurable !== false) nativeSessionId = value.nativeSessionId;
+    const refs = { sessionFile: value.sessionFile, nativeSessionId, portableSessionFile: value.portableSessionFile ?? value.portableFile };
     const encoded = JSON.stringify(refs);
     if (encoded !== references) { await post(`${root}/state`, refs); references = encoded; }
     return value;
   };
   let reportTimer: ReturnType<typeof setInterval> | undefined, heartbeatTimer: ReturnType<typeof setInterval> | undefined, controlTimer: ReturnType<typeof setInterval> | undefined;
+  const stopTimers = () => { clearInterval(reportTimer); clearInterval(heartbeatTimer); clearInterval(controlTimer); };
   try {
     wire.session = await open(options, wire.output, wire.exit);
     let current = await state();
@@ -160,6 +164,7 @@ export async function runCoreWorker(run: Run, options: CoreSessionOptions, open:
         } finally { controlling = false; }
       });
     }, 2_000);
+    if (current.terminalError) throw new Error(String(current.terminalError));
     if (current.unresolvedCommands?.length) throw new Error(`Core has unresolved dispatch outcomes: ${current.unresolvedCommands.join(", ")}`);
     const recovered = Boolean(current.messageCount > 0 || current.lastAssistantMessage);
     const active = current.coreBusy || current.isStreaming || current.isCompacting || current.pendingMessageCount > 0 || current.agents?.some((agent: Json) => agent.state === "running");
@@ -180,27 +185,35 @@ export async function runCoreWorker(run: Run, options: CoreSessionOptions, open:
       });
       current = await state();
     }
+    stopTimers();
     const finalUsage = assistantUsage({ type: "message_end", message: current.lastAssistantMessage, usageRecorded: current.usageRecorded });
     if (finalUsage) enqueue(() => post(`${root}/usage`, finalUsage));
     await effects;
     if (effectFailure) throw effectFailure;
     await heartbeat();
     const last = current.lastAssistantMessage;
+    if (current.terminalError) throw new Error(String(current.terminalError));
     if (compactionFailure && !aborting) { providerFailure = true; throw new Error(compactionFailure); }
     if (last?.stopReason === "error") { providerFailure = true; throw new Error(last.errorMessage ?? "Provider failed"); }
     if (aborting || last?.stopReason === "aborted") {
+      await wire.close();
       await post(`${root}/state`, { state: "aborted", failureKind: "operator", result: "aborted" });
       return;
     }
     if (!last) throw new Error("Core completed its tree without a final assistant result");
     const result = Array.isArray(last.content) ? last.content.filter((part: Json) => part.type === "text").map((part: Json) => String(part.text ?? "")).join("").trim() : "";
+    await wire.close();
     await post(`${root}/state`, { state: "done", result });
   } catch (error) {
-    const detail = String(error), account = isRateLimitError(detail) || isCredentialError(detail);
+    stopTimers();
+    await effects;
+    let detail = String(error);
+    try { await wire.close(); } catch (cleanup) { detail += `; core cleanup failed: ${String(cleanup)}`; }
+    const account = isRateLimitError(detail) || isCredentialError(detail);
     await post(`${root}/state`, { state: aborting ? "aborted" : "failed", failureKind: aborting ? "operator" : account ? "account" : providerFailure ? "provider" : "infrastructure", result: detail,
       ...(account ? { cooldownUntil: Date.now() + 30 * 60_000 } : {}) });
   } finally {
-    clearInterval(reportTimer); clearInterval(heartbeatTimer); clearInterval(controlTimer);
+    stopTimers();
     await effects;
     await wire.close();
   }

@@ -13,6 +13,7 @@ export interface PiNode extends CoreAgent {
   provider?: string;
   thinkingLevel?: string;
   busy: boolean;
+  error?: string;
   work?: PiWork;
   workspace?: { repo: string; root: string; path?: string };
 }

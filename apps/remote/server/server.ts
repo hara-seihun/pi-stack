@@ -188,6 +188,7 @@ const DEFAULT_CORE = configuredCore();
 const HANDOFF_PATH = join(DATA, "supervisor-handoff.json");
 type RuntimePhase = "WAITING" | "STARTING" | "IDLE" | "DISPATCHING" | "RUNNING" | "ABORTING" | "STOPPING";
 type RuntimeHandoff = {
+  core?: CoreId;
   sessionId: string;
   socketPath: string;
   pid?: number;
@@ -228,6 +229,7 @@ const pendingHandoff = loadHandoff();
 beginSupervisorGeneration(db, SUPERVISOR_EPOCH, new Set(pendingHandoff.map((item) => item.sessionId)));
 
 interface Runtime {
+  core?: CoreId;
   transport: RuntimeTransport | null;
   startupAbort: AbortController;
   pending: Map<string, { resolve: (value: any) => void; reject: (error: Error) => void; timer: Timer | undefined }>;
@@ -1223,7 +1225,7 @@ function handleRpcEvent(sessionId: string, rt: Runtime, event: any) {
     emit(sessionId, "notice", { text: "Compacting context…" });
   } else if (event.type === "compaction_end") {
     rt.compacting = false;
-    if (event.result) { requireCompactionContext(sessionId, rt); rt.pendingModelFailure = null; }
+    if (event.result) { if (rt.core !== "codex") requireCompactionContext(sessionId, rt); rt.pendingModelFailure = null; }
     else {
       rt.compactionContextHash = null;
       if (event.errorMessage) rt.pendingModelFailure = String(event.errorMessage);
@@ -1323,6 +1325,10 @@ function settleRuntime(sessionId: string, rt: Runtime, emitEvent: boolean): bool
   return true;
 }
 
+function coreStateActive(state: any): boolean {
+  return Boolean(state.coreBusy || state.treeComplete === false || state.isStreaming || state.isCompacting || Number(state.pendingMessageCount ?? 0) > 0);
+}
+
 async function reconcileRuntimeState(sessionId: string, rt: Runtime): Promise<any> {
   if (!rt.transport || rt.reconciling || ["ABORTING", "STOPPING"].includes(rt.phase)) return null;
   rt.reconciling = true;
@@ -1330,6 +1336,8 @@ async function reconcileRuntimeState(sessionId: string, rt: Runtime): Promise<an
   try {
     const state = await rpc(rt, "get_state", {}, 5_000);
     if (!ownsSupervisorLease() || runtimes.get(sessionId) !== rt || rt.phaseVersion !== phaseVersion) return state;
+    if (isCoreId(state.core)) rt.core = state.core;
+    if (state.terminalError && ["RUNNING","DISPATCHING"].includes(rt.phase)) rt.pendingCoreFailure = String(state.terminalError);
     if (state.model?.id) rt.modelId = String(state.model.id);
     if (state.model?.provider) {
       const row = sessionRow.get(sessionId) as any;
@@ -1338,10 +1346,10 @@ async function reconcileRuntimeState(sessionId: string, rt: Runtime): Promise<an
           .run(String(state.model.provider), now(), sessionId);
       }
     }
-    const active = Boolean(state.isStreaming || state.isCompacting || Number(state.pendingMessageCount ?? 0) > 0);
+    const active = coreStateActive(state);
     const wasCompacting = rt.compacting;
     rt.compacting = Boolean(state.isCompacting);
-    if (wasCompacting && !rt.compacting) requireCompactionContext(sessionId, rt);
+    if (wasCompacting && !rt.compacting && rt.core !== "codex") requireCompactionContext(sessionId, rt);
     if (active) {
       if (["IDLE", "DISPATCHING"].includes(rt.phase)) setRuntimePhase(sessionId, rt, "RUNNING", "RUNNING");
     } else if (rt.phase === "RUNNING") {
@@ -1382,6 +1390,7 @@ function runtimeFromHandoff(row: any, handoff?: RuntimeHandoff, initialPhase: Ru
     pendingContextFinalization: handoff?.pendingContextFinalization ?? null,
     pendingModelFailure: handoff?.pendingModelFailure ?? null,
     pendingCoreFailure: handoff?.pendingCoreFailure ?? null,
+    core: handoff?.core,
     expectedExit: false,
     lastActivity: handoff?.lastActivity ?? Date.now(),
     activeTools: new Map(handoff?.activeTools ?? []),
@@ -1497,6 +1506,7 @@ async function startRuntime(row: any): Promise<Runtime> {
     const state = await rpc(rt, "get_state", {}, 120_000);
     if (!ownsSupervisorLease() || rt.expectedExit || rt.startupAbort.signal.aborted
       || runtimes.get(row.id) !== rt || ["ABORTING", "STOPPING"].includes(phaseOf(rt))) throw new Error("Activation cancelled");
+    if (isCoreId(state.core)) rt.core = state.core;
     if (state.model?.id) rt.modelId = String(state.model.id);
     if (state.sessionFile) db.query("UPDATE sessions SET session_path=? WHERE id=?").run(state.sessionFile, row.id);
     if (state.model?.provider) db.query("UPDATE sessions SET current_provider=?,revision=revision+1,updated_at=? WHERE id=?")
@@ -1513,7 +1523,7 @@ async function startRuntime(row: any): Promise<Runtime> {
     // Replayed/live events may advance this runtime while get_state is in flight.
     // That is successful activation, not cancellation; never overwrite it with IDLE.
     if (rt.phase === "STARTING") {
-      const working = Boolean(state.isStreaming || state.isCompacting || Number(state.pendingMessageCount ?? 0));
+      const working = coreStateActive(state);
       setRuntimePhase(row.id, rt, working ? "RUNNING" : "IDLE", working || pendingWork > 0 ? "RUNNING" : "IDLE");
     }
     if (rt.historyNeedsRestore) emit(row.id, "notice", { text: "Conversation context will be restored with the next message" });
@@ -1564,9 +1574,10 @@ async function reconcileAdoptedRuntime(row: any, rt: Runtime) {
     const state = await rpc(rt, "get_state", {}, 5_000);
     if (!ownsSupervisorLease() || runtimes.get(row.id) !== rt) return;
     sessionCores.started(row.id);
+    if (isCoreId(state.core)) rt.core = state.core;
     if (state.model?.id) rt.modelId = String(state.model.id);
     if (state.sessionFile) db.query("UPDATE sessions SET session_path=? WHERE id=?").run(state.sessionFile, row.id);
-    const active = Boolean(state.isStreaming || state.isCompacting || Number(state.pendingMessageCount ?? 0) > 0);
+    const active = coreStateActive(state);
     if (active && !["RUNNING", "ABORTING"].includes(rt.phase)) setRuntimePhase(row.id, rt, "RUNNING", "RUNNING");
     else if (!active && rt.phase === "RUNNING") settleRuntime(row.id, rt, true);
     else if (!active && rt.phase === "STARTING") {
@@ -1734,7 +1745,7 @@ async function runCommand(row: any, requestId: string, name: string, args: strin
       emit(row.id, "notice", { text: detail });
       // A lost RPC reply does not prove that the operation stopped.
       void reconcileRuntimeState(row.id, rt).then(state => {
-        if (state && !state.isCompacting && !state.isStreaming && phaseOf(rt) === "DISPATCHING") {
+        if (state && !coreStateActive(state) && phaseOf(rt) === "DISPATCHING") {
           setRuntimePhase(row.id, rt, "RUNNING", "RUNNING");
           settleRuntime(row.id, rt, true);
         }
@@ -1755,7 +1766,7 @@ async function runCommand(row: any, requestId: string, name: string, args: strin
     }
     if (startsAgent) {
       const state = await reconcileRuntimeState(row.id, rt);
-      if (state && !state.isStreaming && !state.isCompacting && !Number(state.pendingMessageCount ?? 0)
+      if (state && !coreStateActive(state)
         && (rt.phase === "RUNNING" || rt.phase === "DISPATCHING")) {
         if (rt.phase === "DISPATCHING") setRuntimePhase(row.id, rt, "RUNNING", "RUNNING");
         settleRuntime(row.id, rt, true);
@@ -1788,7 +1799,7 @@ async function replaceSessionCore(row: any, core: CoreId): Promise<void> {
     throw new Error("Wait for the whole agent tree and input queue to become idle before switching cores");
   }
   const state = await rpc(rt, "get_state");
-  if (state.isStreaming || state.isCompacting || Number(state.pendingMessageCount ?? 0)) throw new Error("The current core is still working");
+  if (coreStateActive(state)) throw new Error("The current core is still working");
   row = sessionRow.get(row.id);
   const provider = canonicalModelProvider(String(state.model?.provider ?? row.initial_provider));
   if (core === "codex" && !provider.startsWith("openai")) throw new Error("Choose an OpenAI model before switching to Codex");
@@ -1944,7 +1955,7 @@ async function drainSession(sessionId: string) {
       }
       if (!item.inserted_at) db.query("UPDATE work_items SET meeting_transcript=? WHERE id=?").run(JSON.stringify(transcript), item.id);
       let message = item.text;
-      const nativeDispatchRecovery = sessionCores.get(sessionId).core === "codex";
+      const nativeDispatchRecovery = rt.core !== undefined;
       if (rt.historyNeedsRestore && !nativeDispatchRecovery) {
         const beforeSeq = Number((db.query("SELECT coalesce(max(seq),0)+1 before_seq FROM events WHERE session_id=?").get(sessionId) as any)?.before_seq ?? 1);
         const context = restoredContext(sessionId, beforeSeq);
@@ -1969,6 +1980,7 @@ async function drainSession(sessionId: string) {
       rt.retrying = false;
       const wasBusy = rt.phase === "DISPATCHING" || rt.phase === "RUNNING";
       if (!wasBusy) {
+        rt.pendingCoreFailure = null;
         rt.liveText = "";
         rt.liveThinking = "";
         rt.thinkingBlockStart = 0;
@@ -1983,16 +1995,26 @@ async function drainSession(sessionId: string) {
       const delivery = item.delivery === "steer" ? "steer" : "followUp";
       const commandType = wasBusy ? (delivery === "steer" ? "steer" : "follow_up") : "prompt";
       const dispatch = nativeDispatchRecovery
-        ? sessionCores.dispatch(sessionId,item.id,{type:commandType,message,images:JSON.parse(item.images)})
-        : {type:commandType,message,images:JSON.parse(item.images)};
+        ? sessionCores.dispatch(sessionId,item.id,{type:commandType,message,images:JSON.parse(item.images),resume:Boolean(item.resume)})
+        : {type:commandType,message,images:JSON.parse(item.images),resume:undefined};
       db.query("UPDATE work_items SET state='dispatched',updated_at=?,last_error=NULL WHERE id=?").run(now(), item.id);
       rt.dispatchedWorkIds.add(item.id);
       rt.phaseVersion++;
       // A Pi steering/follow-up queue continues inside the current agent run and does
       // not emit a fresh agent_start. The phase remains RUNNING for queued messages;
       // only an idle prompt enters DISPATCHING until agent_start proves the new run.
-      await rpc(rt, dispatch.type, { message:dispatch.message,images:dispatch.images,workId:item.id }, PROMPT_ACK_TIMEOUT_MS);
+      await rpc(rt, dispatch.type, { message:dispatch.message,images:dispatch.images,workId:item.id,resume:dispatch.resume }, PROMPT_ACK_TIMEOUT_MS);
       confirmWorkInserted(sessionId, item.id);
+      if (rt.core) {
+        const version = rt.phaseVersion;
+        const state = await rpc(rt,"get_state");
+        if (ownsSupervisorLease() && runtimes.get(sessionId) === rt && rt.phaseVersion === version
+          && state.treeComplete === true && ["DISPATCHING","RUNNING"].includes(rt.phase)) {
+          if (state.terminalError) rt.pendingCoreFailure = String(state.terminalError);
+          if (rt.phase === "DISPATCHING") setRuntimePhase(sessionId,rt,"RUNNING","RUNNING");
+          settleRuntime(sessionId,rt,true);
+        }
+      }
     } catch (cause: any) {
       if (!ownsSupervisorLease()) return;
       if (String(cause?.message ?? cause).includes("Runner capacity busy")) {
@@ -2239,12 +2261,20 @@ async function abortCurrentOperation(sessionId: string): Promise<AbortOperationR
 
   setRuntimePhase(sessionId, rt, "ABORTING", "ABORTING");
   let abortFailure: unknown = null;
-  try { await rpc(rt, "abort", {}, 10_000); }
-  catch (cause) { abortFailure = cause; }
+  try {
+    await rpc(rt, "abort", {}, 10_000);
+    if (rt.core) {
+      const deadline = Date.now() + 10_000;
+      while (coreStateActive(await rpc(rt,"get_state",{},2_000))) {
+        if (Date.now() >= deadline) throw new Error("The core has not finished stopping its tree");
+        await Bun.sleep(25);
+      }
+    }
+  } catch (cause) { abortFailure = cause; }
   if (abortFailure) {
     try {
       const state = await rpc(rt, "get_state", {}, 2_000);
-      const active = Boolean(state.isStreaming || state.isCompacting || Number(state.pendingMessageCount ?? 0) > 0);
+      const active = coreStateActive(state);
       if (active) {
         setRuntimePhase(sessionId, rt, "RUNNING", "RUNNING", `Could not stop current operation: ${String((abortFailure as any)?.message ?? abortFailure)}`);
         return { ok: false, status: 409, error: "Could not stop the current operation; the agent is still running" };
@@ -2677,6 +2707,7 @@ const server = Bun.serve({
         const parent = body.parentSessionId == null ? null : sessionRow.get(String(body.parentSessionId)) as any;
         if (body.parentSessionId != null && (!parent || parent.archived_at)) return error("Parent thread is unavailable", 409);
         if (parent && subagentIdentity(parent.id)) return error("Subagents cannot delegate; return the work to the parent coordinator", 403);
+        if (parent && (!runtimes.has(parent.id) || runtimes.get(parent.id)?.core)) return error("The selected core owns child delegation; use its native delegation tool", 409);
         const task = parent ? String(body.task ?? "").trim() : "";
         if (parent && !task) return error("A delegated task is required");
         const destination = THREAD_DESTINATIONS.get(String(body.destination ?? parent?.profile_id ?? (body.meetingId ? meetingDestination()?.id : "home")));
@@ -3216,6 +3247,7 @@ function handoffDocument() {
       pendingContextFinalization: rt.pendingContextFinalization,
       pendingModelFailure: rt.pendingModelFailure,
       pendingCoreFailure: rt.pendingCoreFailure,
+      core: rt.core,
       lastActivity: rt.lastActivity,
       activeTools: [...rt.activeTools],
       dispatchedWorkIds: [...rt.dispatchedWorkIds],

@@ -45,6 +45,21 @@ describe("core worker", () => {
     expect(f.close).toHaveBeenCalledOnce();
   });
 
+  it("pins an empty native session only after the core materializes it", async () => {
+    const f = fixture({core:"codex"});
+    f.state.nativeSessionId = "provisional";
+    f.state.nativeSessionDurable = false;
+    f.setPrompt(async () => {
+      f.state.nativeSessionId = "materialized";
+      f.state.nativeSessionDurable = true;
+      f.state.lastAssistantMessage = assistant;
+    });
+    await f.work();
+    expect(f.posts[0].value.nativeSessionId).toBeUndefined();
+    expect(f.posts.some(post => post.value.nativeSessionId === "materialized")).toBe(true);
+    expect(f.posts.at(-1)?.value.state).toBe("done");
+  });
+
   it("settles an already completed recovered tree without another prompt", async () => {
     const f = fixture({ nativeSessionId: "native-id" });
     f.state.lastAssistantMessage = assistant;
@@ -124,6 +139,15 @@ describe("core worker", () => {
     });
     await f.work();
     expect(f.posts.at(-1)?.value).toMatchObject({ state: "failed", failureKind: "provider" });
+  });
+
+  it("does not publish success before native cleanup succeeds", async () => {
+    const f = fixture();
+    f.close.mockRejectedValue(new Error("owned tool still running"));
+    await expect(f.work()).rejects.toThrow("owned tool still running");
+    expect(f.posts.some(post => post.value.state === "done")).toBe(false);
+    expect(f.posts.at(-1)?.value).toMatchObject({state:"failed",result:expect.stringContaining("cleanup failed")});
+    expect(f.close).toHaveBeenCalledOnce();
   });
 
   it("gives replayed usage the same receipt", () => {

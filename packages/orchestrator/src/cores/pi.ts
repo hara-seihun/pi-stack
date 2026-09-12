@@ -23,6 +23,7 @@ export class PiCoreSession implements CoreSession, PiToolsHost {
   private readonly stopping = new Set<string>();
   private readonly failing = new Set<string>();
   private readonly replies = new Map<string, { event?: CoreOutput }>();
+  private readonly dispatchRequests = new Map<string, string>();
   private exitCode = 0;
   private closed = false;
   private started = false;
@@ -66,6 +67,7 @@ export class PiCoreSession implements CoreSession, PiToolsHost {
         else this.settling.set(node.id, { type: "agent_settled" });
       }
     }
+    for (const receipt of this.store.dispatches.values()) if (receipt.state === "pending") receipt.state = "accepted";
     this.store.save();
     this.heartbeat = setInterval(() => {
       for (const node of this.store.nodes.values()) if ((node.busy || node.work?.status === "running") && node.workspace) {
@@ -141,6 +143,18 @@ export class PiCoreSession implements CoreSession, PiToolsHost {
     if (event.type === "response" && typeof event.id === "string") {
       const reply = this.replies.get(event.id);
       if (reply) reply.event = event;
+      const workId = this.dispatchRequests.get(event.id);
+      const receipt = workId && this.store.dispatches.get(workId);
+      if (receipt) {
+        receipt.state = event.success === false ? "rejected" : "accepted";
+        if (event.success === false) {
+          receipt.error = String(event.error ?? "Pi rejected the dispatch");
+          if (node.work?.id === workId) { node.work.status = "complete"; node.work.result = receipt.error; }
+          node.busy = Boolean(this.native.get(node.id)?.snapshot().isStreaming);
+          if (!node.busy) node.state = "failed";
+        }
+        this.store.save();
+      }
     }
     if (event.type === "core_native_session") {
       node.busy = false; node.state = "idle";
@@ -155,14 +169,14 @@ export class PiCoreSession implements CoreSession, PiToolsHost {
       const lastAssistantMessage = snapshot && [...snapshot.messages].reverse().find(message => message.role === "assistant");
       event = { ...event, data: { ...(event.data as object), core: "pi", coreAgents: this.list(),
         nativeSessionId: snapshot?.nativeSessionId ?? node.nativeSessionId,
-        messageCount: snapshot?.messages.length ?? 0, lastAssistantMessage, context: snapshot?.context,
+        messageCount: snapshot?.messages.length ?? 0, lastAssistantMessage, context: snapshot?.context, terminalError: node.error,
         ...this.activity(node.id, event.data as Record<string, unknown>) } };
     }
     if (node.parentId) this.output({ type: "core_child_event", core: "pi", rootId: this.options.sessionId,
       agentId: node.id, parentId: node.parentId, event });
     else if (event.type !== "agent_settled") this.output(event);
     if (event.type === "agent_start") {
-      node.busy = true; node.state = "running"; this.settling.delete(node.id);
+      node.busy = true; node.state = "running"; node.error = undefined; this.settling.delete(node.id);
     } else if (event.type === "agent_settled") {
       node.busy = false;
       this.settling.set(node.id, event);
@@ -204,10 +218,11 @@ export class PiCoreSession implements CoreSession, PiToolsHost {
     node.busy = true;
     const finish = (failure: string) => {
       for (const child of this.children(node.id)) if (child.work) child.work.delivered = true;
-      node.busy = false; node.state = "failed";
+      node.busy = false; node.state = "failed"; node.error = failure;
       if (node.work) { node.work.status = "complete"; node.work.result = failure; }
-      this.output({ type: "core_child_event", core: "pi", rootId: this.options.sessionId,
-        agentId: node.id, parentId: node.parentId, event: { type: "core_error", error: failure } });
+      const event = { type: "core_error", error: failure };
+      this.output(node.parentId ? { type: "core_child_event", core: "pi", rootId: this.options.sessionId,
+        agentId: node.id, parentId: node.parentId, event } : event);
       this.settling.set(node.id, { type: "agent_settled" });
       this.failing.delete(node.id);
       this.store.save(); this.observe(node); this.schedule();
@@ -356,6 +371,7 @@ export class PiCoreSession implements CoreSession, PiToolsHost {
     }
     if (command.type === "abort") { await this.abortTree(id); return; }
     const node = this.node(id);
+    if (["steer","follow_up"].includes(command.type) && !this.activity(id).coreBusy) command = {...command,type:"prompt"};
     if (node.parentId && command.type === "prompt") {
       await this.delegate(node.parentId, command.id ?? randomUUID(), { threadId: id, task: String(command.message ?? "") });
       return;
@@ -392,9 +408,37 @@ export class PiCoreSession implements CoreSession, PiToolsHost {
         case "close": await this.close(); return;
         default: {
           if (this.closed) throw new Error("Pi core is closed");
-          const engine = await this.ensure(this.options.sessionId);
-          await engine.command(command);
-          this.refresh(this.node(this.options.sessionId)); this.store.save();
+          const node = this.node(this.options.sessionId);
+          const engine = await this.ensure(node.id);
+          const workId = typeof command.workId === "string" && ["prompt","steer","follow_up"].includes(command.type) ? command.workId : undefined;
+          if (workId) {
+            const hash = createHash("sha256").update(JSON.stringify({type:command.type,message:command.message,images:command.images ?? []})).digest("hex");
+            const previous = this.store.dispatches.get(workId);
+            if (previous) {
+              if (previous.hash !== hash) throw new Error("Pi dispatch ID was reused with different content");
+              if (previous.state === "rejected") throw new Error(previous.error);
+              respond({accepted:true,reconciled:true}); return;
+            }
+            this.store.dispatches.set(workId,{hash,state:"pending"});
+            node.work = {id:workId,task:String(command.message ?? ""),status:"running"};
+            node.busy = true; node.state = "running";
+            this.store.save(); this.observe(node);
+            if (command.resume === true) {
+              this.store.dispatches.get(workId)!.state = "accepted";
+              const last = engine.snapshot().messages.at(-1);
+              if (last?.role === "assistant" && last.stopReason === "stop") {
+                node.work.status = "complete"; node.busy = false; node.state = "idle";
+                this.store.save(); this.observe(node);
+              } else this.inject(node,engine,"core_recovery",{agentId:node.id,workId,task:node.work.task,status:"interrupted"});
+              respond({accepted:true,reconciled:true}); return;
+            }
+          }
+          const id = command.id ?? randomUUID();
+          if (workId) this.dispatchRequests.set(id,workId);
+          try { await engine.command({...command,id}); }
+          catch (error) { if (workId) this.fail(node,error); throw error; }
+          finally { this.dispatchRequests.delete(id); }
+          this.refresh(node); this.store.save();
         }
       }
     } catch (error) { respond(undefined, textError(error)); }

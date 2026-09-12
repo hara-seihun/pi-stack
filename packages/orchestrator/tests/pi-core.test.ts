@@ -62,6 +62,32 @@ async function setup(existing?: string, configure?: (fixture: Fixture) => void) 
 const childId = (receipt: unknown) => (receipt as { agent: { id: string } }).agent.id;
 
 describe("Pi-owned delegation", () => {
+  it("reconciles root dispatch receipts without replaying the host's request", async () => {
+    const first = await setup();
+    const command = {type:"prompt",message:"Original task",workId:"durable-work"};
+    await first.core.command({...command,id:"rpc-1"});
+    await first.core.command({...command,id:"rpc-2"});
+    expect(first.fixtures.get("root")!.commands.filter(command => command.type === "prompt")).toHaveLength(1);
+    const crashState = readFileSync(join(first.directory,"pi-tree.json"),"utf8");
+    await first.core.close();
+    writeFileSync(join(first.directory,"pi-tree.json"),crashState);
+    const recovered = await setup(first.directory);
+    await recovered.core.command({...command,id:"rpc-3"});
+    expect(recovered.fixtures.get("root")!.commands.filter(command => command.type === "prompt")).toHaveLength(0);
+    expect(recovered.fixtures.get("root")!.injections).toMatchObject([{kind:"core_recovery",data:{workId:"durable-work",task:"Original task"}}]);
+    await recovered.core.command({...command,id:"changed",message:"Different task"});
+    expect(recovered.output.at(-1)).toMatchObject({id:"changed",success:false});
+  });
+
+  it("adopts completed pre-core work without a continuation request", async () => {
+    const {core,fixtures,output} = await setup(undefined,fixture => fixture.state.messages.push({role:"assistant",stopReason:"stop",content:[{type:"text",text:"Already finished"}]}));
+    await core.command({type:"prompt",id:"adopt",workId:"pre-core",message:"Prior task",resume:true});
+    expect(fixtures.get("root")!.commands).toHaveLength(0);
+    expect(fixtures.get("root")!.injections).toHaveLength(0);
+    await core.command({type:"get_state",id:"complete"});
+    expect(output.at(-1)).toMatchObject({data:{treeComplete:true}});
+  });
+
   it("keeps root wire commands and waits for the complete child tree before settling", async () => {
     const { core, fixtures, output } = await setup();
     await core.command({ type: "prompt", id: "root-prompt", message: "work" });

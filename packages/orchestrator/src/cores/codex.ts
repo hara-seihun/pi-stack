@@ -41,7 +41,7 @@ const publicModel = (model: Model) => ({ id: model.model, provider: "openai-code
 /** Bind the account owner once at the integration layer; credentials never become core output. */
 export const openCodexSession: OpenCoreSession = createCodexSession({
   openAccount: options => openCoreAccount({
-    initialProvider: argument(options.args, "--provider") ?? "openai-codex",
+    initialProvider: argument(options.args, "--provider") === "openai" ? "openai-codex" : argument(options.args, "--provider") ?? "openai-codex",
     initialModel: needString(argument(options.args, "--model"), "Starting --model"),
     sessionId: options.sessionId,
     env: options.env,
@@ -74,6 +74,7 @@ export function createCodexSession(dependencies: CodexDependencies): OpenCoreSes
       if (busy === treeWasBusy) return;
       treeWasBusy = busy;
       emit(busy ? { type: "agent_start" } : { type: "agent_end", messages: projection(state.threadId!).entries.map(entry => entry.message) });
+      if (!busy) emit({type:"agent_settled"});
     };
     const subscriptions = new Map<string, Promise<void>>();
     const nativeSettings = new Map<string, { model: string; effort?: string }>();
@@ -81,10 +82,10 @@ export function createCodexSession(dependencies: CodexDependencies): OpenCoreSes
     const active = new Map<string, string>();
     const completedTurns = new Set<string>();
     const compactingThreads = new Set<string>();
-    const setCompacting = (threadId: string, value: boolean) => {
+    const setCompacting = (threadId: string, value: boolean, failure?: {errorMessage:string;aborted?:boolean}) => {
       if (compactingThreads.has(threadId) === value) return;
       if (value) compactingThreads.add(threadId); else compactingThreads.delete(threadId);
-      const event = { type: value ? "compaction_start" : "compaction_end" };
+      const event = value ? {type:"compaction_start"} : {type:"compaction_end", ...(failure ?? {result:{core:"codex",projection:"activity"}})};
       if (threadId === state.threadId) emit(event); else emit({ type: "core_child_event", agentId: threadId, event });
     };
     let closed = false, ready = false, account: CodexAccountLease | undefined, rpc: CodexRpc | undefined;
@@ -219,7 +220,8 @@ export function createCodexSession(dependencies: CodexDependencies): OpenCoreSes
         if (active.get(threadId) === turn.id) active.delete(threadId);
         nativeStatus.set(threadId, "idle");
         projection(threadId).finish(turn);
-        setCompacting(threadId, false);
+        setCompacting(threadId, false, turn.status === "failed" || turn.status === "interrupted"
+          ? {errorMessage:turn.error?.message ?? "Native compaction interrupted",aborted:turn.status === "interrupted"} : undefined);
         const agent = agents.get(threadId);
         if (agent) { agent.state = agentState(turn.status); emit({ type: "core_agent", agent }); }
         save();
@@ -464,7 +466,8 @@ export function createCodexSession(dependencies: CodexDependencies): OpenCoreSes
       const selectedEffort = root ? state.effort : nativeSettings.get(threadId)?.effort;
       switch (command.type) {
         case "get_state": return { core: "codex", sessionId: root ? options.sessionId : threadId, nativeSessionId: threadId,
-          sessionFile: statePath, sessionName: root ? state.name : agents.get(threadId)?.name,
+          sessionFile: statePath, nativeSessionDurable: !root || Boolean(state.materialized || state.transfer === "complete"),
+          sessionName: root ? state.name : agents.get(threadId)?.name,
           model: models.find(model => model.model === selectedModel) ? publicModel(models.find(model => model.model === selectedModel)!) : { id: selectedModel, provider: "openai-codex" },
           thinkingLevel: selectedEffort === "none" ? "off" : selectedEffort,
           isStreaming: root ? treeBusy() : threadBusy(threadId), coreBusy: root ? treeBusy() : threadBusy(threadId),
@@ -573,7 +576,7 @@ export function createCodexSession(dependencies: CodexDependencies): OpenCoreSes
           if (root ? treeBusy() : threadBusy(threadId)) fail("Wait for the Codex native tree to become idle before compacting");
           setCompacting(threadId, true);
           try { await call("thread/compact/start", { threadId }); }
-          catch (error) { setCompacting(threadId, false); throw error; }
+          catch (error) { setCompacting(threadId, false, {errorMessage:error instanceof Error ? error.message : String(error)}); throw error; }
           return { accepted: true };
         }
         case "set_model": {
