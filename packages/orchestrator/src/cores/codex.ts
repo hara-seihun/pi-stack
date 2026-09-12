@@ -6,6 +6,7 @@ import { argument, type CoreAgent, type CoreCommand, type CoreOutput, type OpenC
 import { credentialGuard, type CodexAccountLease, type OpenCodexAccount } from "./codex-auth.js";
 import { openCoreAccount } from "./account.js";
 import { writeCoreState } from "./journal.js";
+import { CoreExecutionLedger, isTerminalOperation } from "./execution.js";
 import { openCodexRpc, type CodexRpc, type Json, type OpenCodexRpc, type RpcResult } from "./codex-rpc.js";
 import { CodexProjection, transferItems } from "./codex-projection.js";
 import { CodexProcessError } from "./codex-process.js";
@@ -19,7 +20,7 @@ import type { ThreadSettings } from "./codex-protocol/v2/ThreadSettings.js";
 import type { ThreadTokenUsage } from "./codex-protocol/v2/ThreadTokenUsage.js";
 import type { SkillsListResponse } from "./codex-protocol/v2/SkillsListResponse.js";
 
-type Receipt = { hash: string; state: "pending" | "accepted" | "rejected"; turnId?: string };
+type Receipt = { hash: string; state: "pending" | "accepted" | "rejected"; threadId?: string; turnId?: string; native?: "child" | "turn" };
 type State = {
   version: 1; sessionId: string; threadId?: string; materialized?: boolean; provider?: string; model?: string; effort?: string; name?: string;
   transfer?: "pending" | "complete"; transferProjection?: Record<string, unknown>[];
@@ -62,30 +63,42 @@ export function createCodexSession(dependencies: CodexDependencies): OpenCoreSes
     const guard = credentialGuard();
     const emit = (event: CoreOutput) => output(guard.clean(event));
     const save = () => writeCoreState(statePath, guard.clean(state));
+    const execution = new CoreExecutionLedger(options.stateDir, emit);
+    execution.recover("Codex restarted without an authoritative turn outcome");
+    const hasStoredOwnership = execution.snapshot().operations.length > 0 || Object.keys(state.receipts).length > 0;
+    for (const [workId, receipt] of Object.entries(state.receipts)) {
+      execution.adopt({ workId, state: receipt.state === "rejected" ? "failed" : "unknown",
+        agentId: receipt.threadId && receipt.threadId !== state.threadId ? receipt.threadId : undefined,
+        error: receipt.state === "rejected" ? "Codex rejected this dispatch" : "Stored Codex dispatch has no authoritative turn outcome" }, receipt.hash);
+    }
     const stamp = (id: string, suggested?: number) => state.timestamps[id] ??= suggested && suggested > 0 ? suggested : Date.now();
     const agents = new Map<string, CoreAgent>();
     const nativeStatus = new Map<string, string>();
     let treeWasBusy = false, settling = 0, abortRequested = false;
     const threadBusy = (id: string) => active.has(id) || compactingThreads.has(id) || nativeStatus.get(id) === "active" || agents.get(id)?.state === "running";
+    const unfinished = (threadId?: string) => execution.snapshot().operations.some(operation => !isTerminalOperation(operation.state)
+      && (!threadId || operation.agentId === (threadId === state.threadId ? undefined : threadId)));
     const treeBusy = () => settling > 0 || aborting.size > 0 || [...new Set([state.threadId!, ...agents.keys(), ...active.keys(), ...compactingThreads])].some(threadBusy);
     const reconcileLifecycle = () => {
       if (!ready || closed) return;
       const busy = treeBusy();
+      if (!busy) execution.setStopping(false);
       if (busy === treeWasBusy) return;
       treeWasBusy = busy;
       emit(busy ? { type: "agent_start" } : { type: "agent_end", messages: projection(state.threadId!).entries.map(entry => entry.message) });
-      if (!busy) emit({type:"agent_settled"});
     };
     const subscriptions = new Map<string, Promise<void>>();
     const nativeSettings = new Map<string, { model: string; effort?: string }>();
     const projections = new Map<string, CodexProjection>();
     const active = new Map<string, string>();
-    const completedTurns = new Set<string>();
+    const completedTurns = new Map<string, Turn>();
+    const settlingTurns = new Set<string>();
+    const turnKey = (threadId: string, turnId: string) => `${threadId}:${turnId}`;
     const compactingThreads = new Set<string>();
     const setCompacting = (threadId: string, value: boolean, failure?: {errorMessage:string;aborted?:boolean}) => {
       if (compactingThreads.has(threadId) === value) return;
       if (value) compactingThreads.add(threadId); else compactingThreads.delete(threadId);
-      const event = value ? {type:"compaction_start"} : {type:"compaction_end", ...(failure ?? {result:{core:"codex",projection:"activity"}})};
+      const event: CoreOutput = value ? {type:"compaction_start"} : {type:"compaction_end", ...(failure ?? {result:{core:"codex",projection:"activity"}})};
       if (threadId === state.threadId) emit(event); else emit({ type: "core_child_event", agentId: threadId, event });
     };
     let closed = false, ready = false, account: CodexAccountLease | undefined, rpc: CodexRpc | undefined;
@@ -126,6 +139,57 @@ export function createCodexSession(dependencies: CodexDependencies): OpenCoreSes
       if (["interrupted", "shutdown"].includes(native)) return "cancelled";
       return "idle";
     };
+    const nativeWork = (threadId: string, turnId?: string) => {
+      const workId = turnId ? `codex:turn:${threadId}:${turnId}` : `codex:child:${threadId}`;
+      const hash = createHash("sha256").update(JSON.stringify(workId)).digest("hex");
+      if (!state.receipts[workId]) {
+        state.receipts[workId] = { hash, state: "accepted", threadId, turnId, native: turnId ? "turn" : "child" };
+        save();
+      }
+      const operation = execution.begin(workId, workId, threadId);
+      if (operation.dispatch) execution.transition(workId, "running");
+      return workId;
+    };
+    const observeTurn = (threadId: string, turn: Turn, view = projection(threadId)) => {
+      const key = turnKey(threadId, turn.id);
+      if (turn.status !== "inProgress") completedTurns.set(key, turn);
+      for (const item of turn.items ?? []) {
+        if (item.type === "collabAgentToolCall") observeChildTool(item);
+        if (item.type !== "userMessage" || !item.clientId) continue;
+        const receipt = state.receipts[item.clientId];
+        if (!receipt || receipt.native || (receipt.threadId && receipt.threadId !== threadId)) continue;
+        receipt.threadId = threadId; receipt.turnId = turn.id; receipt.state = "accepted";
+      }
+      const child = state.receipts[`codex:child:${threadId}`];
+      if (child && !child.turnId) child.turnId = turn.id;
+      if (threadId !== state.threadId && child?.turnId !== turn.id) nativeWork(threadId, turn.id);
+      save();
+      for (const [workId, receipt] of Object.entries(state.receipts)) {
+        if (receipt.turnId !== turn.id || (receipt.threadId && receipt.threadId !== threadId)) continue;
+        receipt.threadId = threadId;
+        if (turn.status === "inProgress") execution.transition(workId, "running");
+        else if (!settlingTurns.has(key)) {
+          const outcome = turn.status === "completed" ? "succeeded" : turn.status === "failed" ? "failed" : turn.status === "interrupted" ? "cancelled" : "unknown";
+          const answers = (turn.items ?? []).filter(item => item.type === "agentMessage");
+          const text = answers.length ? answers.map(item => item.text).join("\n") : view.entries.filter(entry => entry.nativeTurnId === turn.id && entry.message.role === "assistant")
+            .flatMap(entry => entry.message.content.filter(part => part.type === "text").map(part => part.text)).join("\n");
+          execution.transition(workId, outcome, guard.clean(turn.error?.message), guard.clean({ text }));
+        }
+      }
+      save();
+    };
+    function observeChildTool(item: Extract<ThreadItem, { type: "collabAgentToolCall" }>) {
+      for (const id of item.receiverThreadIds) {
+        const status = item.agentsStates[id];
+        if (item.tool !== "spawnAgent" && !state.receipts[`codex:child:${id}`]) continue;
+        const workId = nativeWork(id);
+        if (!status || state.receipts[workId].turnId) continue;
+        const outcome = status.status === "completed" ? "succeeded" : status.status === "errored" || status.status === "notFound" ? "failed"
+          : status.status === "interrupted" || status.status === "shutdown" ? "cancelled" : undefined;
+        if (outcome) execution.transition(workId, outcome, outcome === "failed" ? guard.clean(status.message ?? status.status) : undefined,
+          guard.clean({ text: status.message ?? "" }));
+      }
+    }
     const announce = (thread: Thread) => {
       nativeStatus.set(thread.id, thread.status.type);
       if (thread.status.type === "notLoaded") active.delete(thread.id);
@@ -137,8 +201,9 @@ export function createCodexSession(dependencies: CodexDependencies): OpenCoreSes
           ? agents.get(thread.id)?.state ?? "idle" : agentState(thread.status.type),
         model: nativeSettings.get(thread.id)?.model ?? agents.get(thread.id)?.model };
       agents.set(thread.id, agent);
+      if (thread.status.type === "active") nativeWork(thread.id);
       emit({ type: "core_agent", agent, canAcceptDirectInput: thread.canAcceptDirectInput });
-      if (thread.status.type === "active" && !abortRequested && !closed) background(subscribeChild(thread.id), "child subscription");
+      if (!abortRequested && !closed) background(subscribeChild(thread.id), "child subscription");
       reconcileLifecycle();
     };
     function subscribeChild(threadId: string): Promise<void> {
@@ -151,8 +216,9 @@ export function createCodexSession(dependencies: CodexDependencies): OpenCoreSes
         const history = await turns(threadId);
         projection(threadId).restore(history);
         projection(threadId).context();
+        for (const turn of history) observeTurn(threadId, turn);
         const running = history.find(turn => turn.status === "inProgress");
-        if (running && !completedTurns.has(running.id)) active.set(threadId, running.id);
+        if (running && !completedTurns.has(turnKey(threadId, running.id))) active.set(threadId, running.id);
         reconcileLifecycle();
       })();
       subscriptions.set(threadId, operation);
@@ -173,7 +239,10 @@ export function createCodexSession(dependencies: CodexDependencies): OpenCoreSes
         sourceKinds: ["subAgent", "subAgentReview", "subAgentCompact", "subAgentThreadSpawn", "subAgentOther"], limit: 100 })) announce(thread);
     };
     const background = (work: Promise<unknown>, operation: string) => {
-      void work.catch(() => { if (!closed) emit({ type: "core_error", core: "codex", error: `Codex ${operation} failed` }); });
+      void work.catch(() => {
+        execution.recover(`Codex ${operation} failed before execution could be reconciled`);
+        if (!closed) emit({ type: "core_error", core: "codex", error: `Codex ${operation} failed` });
+      });
     };
     const applyNotification = (method: string, params: Json) => {
       if (method === "thread/started") { announce(params.thread as Thread); return; }
@@ -189,6 +258,7 @@ export function createCodexSession(dependencies: CodexDependencies): OpenCoreSes
       const send = (event: CoreOutput) => root ? emit(event) : emit({ type: "core_child_event", agentId: threadId, event });
       if (method === "thread/closed" || method === "thread/deleted") {
         nativeStatus.set(threadId, "notLoaded"); active.delete(threadId); setCompacting(threadId, false);
+        execution.settleAgent(threadId, "unknown", "Codex child closed without an authoritative turn outcome");
         const agent = agents.get(threadId);
         if (agent) { if (agent.state === "running") agent.state = "cancelled"; emit({ type: "core_agent", agent }); }
       } else if (method === "thread/status/changed") {
@@ -197,7 +267,10 @@ export function createCodexSession(dependencies: CodexDependencies): OpenCoreSes
         if (!root && status.type !== "active") active.delete(threadId);
         const agent = agents.get(threadId);
         if (agent) { agent.state = agentState(status.type); emit({ type: "core_agent", agent }); }
-        if (!root && status.type === "active" && !abortRequested) background(subscribeChild(threadId), "child subscription");
+        if (!root && status.type === "active") {
+          nativeWork(threadId);
+          if (!abortRequested) background(subscribeChild(threadId), "child subscription");
+        }
       } else if (method === "thread/settings/updated") {
         const settings = params.threadSettings as ThreadSettings;
         nativeSettings.set(threadId, { model: settings.model, effort: settings.effort ?? undefined });
@@ -208,6 +281,8 @@ export function createCodexSession(dependencies: CodexDependencies): OpenCoreSes
         else { const agent = agents.get(threadId)!; agent.name = String(params.threadName ?? threadId); emit({ type: "core_agent", agent }); }
       } else if (method === "turn/started") {
         const turn = params.turn as Turn;
+        if (completedTurns.has(turnKey(threadId, turn.id))) return;
+        observeTurn(threadId, { ...turn, status: "inProgress" });
         active.set(threadId, turn.id);
         nativeStatus.set(threadId, "active");
         const agent = agents.get(threadId);
@@ -216,10 +291,14 @@ export function createCodexSession(dependencies: CodexDependencies): OpenCoreSes
         send({ type: "turn_start" });
       } else if (method === "turn/completed") {
         const turn = params.turn as Turn;
-        completedTurns.add(turn.id);
+        const key = turnKey(threadId, turn.id);
+        if (completedTurns.has(key)) { observeTurn(threadId, turn); return; }
+        completedTurns.set(key, turn);
+        if (root) settlingTurns.add(key);
         if (active.get(threadId) === turn.id) active.delete(threadId);
         nativeStatus.set(threadId, "idle");
         projection(threadId).finish(turn);
+        observeTurn(threadId, turn);
         setCompacting(threadId, false, turn.status === "failed" || turn.status === "interrupted"
           ? {errorMessage:turn.error?.message ?? "Native compaction interrupted",aborted:turn.status === "interrupted"} : undefined);
         const agent = agents.get(threadId);
@@ -229,7 +308,10 @@ export function createCodexSession(dependencies: CodexDependencies): OpenCoreSes
         if (!root) send({ type: "agent_end", messages: projection(threadId).entries.map(entry => entry.message) });
         if (root) {
           settling++;
-          background(discover().finally(() => { settling--; reconcileLifecycle(); }), "child discovery");
+          background(discover().then(() => Promise.all(subscriptions.values())).then(() => {
+            settlingTurns.delete(key);
+            observeTurn(threadId, turn);
+          }).finally(() => { settling--; reconcileLifecycle(); }), "child discovery");
         }
       } else if (method === "item/started" || method === "item/completed") {
         const item = params.item as ThreadItem;
@@ -241,17 +323,19 @@ export function createCodexSession(dependencies: CodexDependencies): OpenCoreSes
         if (item.type === "subAgentActivity") {
           if (!agents.has(item.agentThreadId)) {
             const agent: CoreAgent = { id: item.agentThreadId, nativeSessionId: item.agentThreadId, parentId: null, name: item.agentPath, state: "running" };
-            agents.set(agent.id, agent); emit({ type: "core_agent", agent });
+            agents.set(agent.id, agent); nativeWork(agent.id); emit({ type: "core_agent", agent });
           }
           background(discover(), "child discovery");
         }
         if (item.type === "collabAgentToolCall") {
+          observeChildTool(item);
           for (const id of item.receiverThreadIds) {
             const existing = agents.get(id);
             const agent: CoreAgent = { id, nativeSessionId: id, parentId: existing?.parentId ?? (threadId === state.threadId ? options.sessionId : threadId),
               name: existing?.name ?? id, model: item.model ?? existing?.model,
               state: agentState(item.agentsStates[id]?.status ?? "running") };
             agents.set(id, agent);
+            if (agent.state === "running") nativeWork(id);
             if (item.agentsStates[id]) nativeStatus.set(id, agent.state === "running" ? "active" : "idle");
             emit({ type: "core_agent", agent });
           }
@@ -300,11 +384,11 @@ export function createCodexSession(dependencies: CodexDependencies): OpenCoreSes
       if (existing) return existing;
       const operation = Promise.resolve().then(async () => {
         let turnId = active.get(threadId);
-        if (!turnId && threadBusy(threadId)) {
+        if (!turnId && (threadBusy(threadId) || unfinished(threadId))) {
           const history = await turns(threadId);
-          turnId = history.find(turn => turn.status === "inProgress" && !completedTurns.has(turn.id))?.id;
+          turnId = history.find(turn => turn.status === "inProgress" && !completedTurns.has(turnKey(threadId, turn.id)))?.id;
           if (turnId) active.set(threadId, turnId);
-          else if (threadBusy(threadId)) fail("Native Codex child has no interruptible turn");
+          else if (threadBusy(threadId) || unfinished(threadId)) fail("Native Codex work has no interruptible turn or authoritative outcome");
         }
         if (turnId && !interrupted.has(`${threadId}:${turnId}`)) {
           const result = await rpc!.request("turn/interrupt", { threadId, turnId });
@@ -333,6 +417,8 @@ export function createCodexSession(dependencies: CodexDependencies): OpenCoreSes
       closed = true;
       // Do not release account custody until the app-server's process tree is stopped.
       await rpc?.close();
+      execution.recover("Codex runtime stopped before authoritative turn completion");
+      execution.setStopping(false);
       await accounting;
       await Promise.allSettled(subscriptions.values());
       await closeAccount();
@@ -402,19 +488,22 @@ export function createCodexSession(dependencies: CodexDependencies): OpenCoreSes
       // Codex does not materialize a fresh thread until its first user turn.
       const history = resume || state.transfer === "complete" ? await turns(state.threadId) : [];
       projection(state.threadId).restore(history, state.transferProjection);
+      if (history.length && !hasStoredOwnership) {
+        const workId = `native:${options.sessionId}:untracked`;
+        execution.adopt({ workId, state: "unknown", error: "Codex has materialized turns without durable dispatch ownership" },
+          createHash("sha256").update(JSON.stringify({ threadId: state.threadId, untracked: true })).digest("hex"));
+      }
       const running = history.find(turn => turn.status === "inProgress");
       if (running) active.set(state.threadId, running.id);
-      for (const receipt of Object.values(state.receipts)) {
-        if (receipt.state !== "pending") continue;
-        const item = history.flatMap(turn => turn.items.map(item => ({ turn, item }))).find(({ item }) => item.type === "userMessage" && item.clientId && state.receipts[item.clientId] === receipt);
-        if (item) { receipt.state = "accepted"; receipt.turnId = item.turn.id; }
-      }
       save();
       ready = true;
       for (const [method, params] of notifications) applyNotification(method, params);
       notifications.length = 0;
       projection(state.threadId).context();
       await discover();
+      await Promise.all(subscriptions.values());
+      for (const turn of history) observeTurn(state.threadId, turn);
+      emit({ type: "execution_update", execution: execution.snapshot() });
       reconcileLifecycle();
     } catch (error) {
       await close();
@@ -449,7 +538,8 @@ export function createCodexSession(dependencies: CodexDependencies): OpenCoreSes
       const history = await turns(threadId);
       const snapshot = new CodexProjection(() => nativeSettings.get(threadId)?.model ?? agents.get(threadId)?.model ?? "", () => {}, stamp);
       snapshot.restore(history);
-      const running = history.find(turn => turn.status === "inProgress" && !completedTurns.has(turn.id));
+      for (const turn of history) observeTurn(threadId, turn, snapshot);
+      const running = history.find(turn => turn.status === "inProgress" && !completedTurns.has(turnKey(threadId, turn.id)));
       if (running) active.set(threadId, running.id);
       else if (thread.status.type !== "active") active.delete(threadId);
       return { thread, snapshot };
@@ -472,11 +562,12 @@ export function createCodexSession(dependencies: CodexDependencies): OpenCoreSes
           thinkingLevel: selectedEffort === "none" ? "off" : selectedEffort,
           isStreaming: root ? treeBusy() : threadBusy(threadId), coreBusy: root ? treeBusy() : threadBusy(threadId),
           isCompacting: root ? compactingThreads.size > 0 : compactingThreads.has(threadId),
-          treeComplete: !treeBusy(),
+          treeComplete: !treeBusy() && execution.snapshot().status === "idle", execution: execution.snapshot(),
+          operation: command.workId ? execution.snapshot().operations.find(operation => operation.workId === command.workId) : undefined,
           lastAssistantMessage: [...current.entries].reverse().find(entry => entry.message.role === "assistant")?.message,
           pendingMessageCount: 0, messageCount: current.entries.length, autoCompactionEnabled: true,
           contextProjection: "activity", capabilities: { core: "codex", nativeChildren: true, fork: true, compact: true, steer: true },
-          unresolvedCommands: Object.entries(state.receipts).filter(([, receipt]) => receipt.state === "pending").map(([id]) => id) };
+          unresolvedCommands: execution.snapshot().operations.filter(operation => operation.state === "unknown" || operation.state === "pending").map(operation => operation.workId) };
         case "get_available_models": return { models: models.map(publicModel) };
         case "get_available_thinking_levels": return { levels: (models.find(model => model.model === selectedModel)?.supportedReasoningEfforts ?? []).map(value => value.reasoningEffort === "none" ? "off" : value.reasoningEffort) };
         case "get_commands": {
@@ -509,16 +600,16 @@ export function createCodexSession(dependencies: CodexDependencies): OpenCoreSes
         case "get_messages": case "get_entries": {
           const view = root ? current : (await readChild(threadId)).snapshot;
           if (command.type === "get_messages") return { messages: view.entries.map(entry => entry.message) };
-          const since = command.since === undefined ? -1 : view.entries.findIndex(entry => entry.id === command.since);
-          if (command.since !== undefined && since < 0) fail("Codex entry not found");
+          const since = command.since ?? -1;
+          if (!Number.isInteger(since) || since < -1 || since >= view.entries.length) fail("Codex entry cursor is out of range");
           return { entries: view.entries.slice(since + 1), leafId: view.entries.at(-1)?.id ?? null };
         }
         case "prompt": case "follow_up": case "steer": {
           if (accountingFailure) fail("Codex usage accounting needs repair before starting work");
           const content = await input(command);
-          const key = typeof command.workId === "string" ? command.workId : command.id;
+          const key = needString(command.workId ?? command.id, "workId");
           const hash = createHash("sha256").update(JSON.stringify({ threadId, type: command.type, content })).digest("hex");
-          if (key && state.receipts[key]) {
+          if (state.receipts[key]) {
             const receipt = state.receipts[key];
             if (receipt.hash !== hash) fail("Codex command ID was reused with different content");
             if (receipt.state === "accepted") return { accepted: true, nativeTurnId: receipt.turnId };
@@ -531,33 +622,48 @@ export function createCodexSession(dependencies: CodexDependencies): OpenCoreSes
             if (thread.canAcceptDirectInput !== true) fail("This native Codex child does not accept direct input");
             await subscribeChild(threadId);
           }
-          if (root && treeBusy() && (command.type !== "steer" || !active.has(threadId))) fail("Codex native tree is busy; PiStack must queue follow-up work until idle");
-          if (!root && threadBusy(threadId) && command.type !== "steer") fail("Codex thread is busy; PiStack must queue follow-up work until idle");
+          if (execution.snapshot().operations.some(operation => operation.state === "unknown" && (root || operation.agentId === threadId))) fail("Codex execution outcome is unknown; reconcile native history before starting more work");
+          if (root && (treeBusy() || unfinished()) && (command.type !== "steer" || !active.has(threadId))) fail("Codex native tree is busy; PiStack must queue follow-up work until idle");
+          if (!root && (threadBusy(threadId) || unfinished(threadId)) && (command.type !== "steer" || !active.has(threadId))) fail("Codex thread is busy; PiStack must queue follow-up work until idle");
           if (root) { abortRequested = false; interrupted.clear(); }
           const method = command.type === "steer" && active.has(threadId) ? "turn/steer" : "turn/start";
           const wasMaterialized = state.materialized;
           state.materialized = true;
-          if (key) state.receipts[key] = { hash, state: "pending" };
+          const dispatch = execution.begin(key, { threadId, type: command.type, content }, root ? undefined : threadId);
+          if (!dispatch.dispatch) fail("Codex work already has a durable outcome; do not replay");
+          state.receipts[key] = { hash, state: "pending", threadId };
           save();
           const result = await rpc!.request<{ turn?: Turn; turnId?: string }>(method, { threadId, input: content,
-            ...(key ? { clientUserMessageId: key } : {}), ...(method === "turn/steer" ? { expectedTurnId: active.get(threadId) } : {}) });
+            clientUserMessageId: key, ...(method === "turn/steer" ? { expectedTurnId: active.get(threadId) } : {}) });
           if (!result.ok) {
             if (result.error.startsWith("Codex rejected")) {
               state.materialized = wasMaterialized;
-              if (key) state.receipts[key].state = "rejected";
+              state.receipts[key].state = "rejected";
               save();
-            }
+              execution.transition(key, "failed", guard.clean(result.error));
+            } else execution.transition(key, "unknown", guard.clean(result.error));
             fail(result.error);
           }
           const value = (result as { ok: true; value: { turn?: Turn; turnId?: string } }).value;
           const turnId = value.turn?.id ?? value.turnId;
-          if (turnId && !completedTurns.has(turnId)) active.set(threadId, turnId);
-          if (key) { state.receipts[key] = { hash, state: "accepted", turnId }; save(); }
+          if (!turnId) {
+            execution.transition(key, "unknown", "Codex accepted dispatch without a native turn identity");
+            fail("Codex accepted dispatch without a native turn identity; do not replay");
+          }
+          if (!completedTurns.has(turnKey(threadId, turnId))) active.set(threadId, turnId);
+          state.receipts[key] = { hash, state: "accepted", threadId, turnId }; save();
+          execution.transition(key, "accepted");
+          const completed = completedTurns.get(turnKey(threadId, turnId));
+          if (completed) observeTurn(threadId, completed);
+          else if (value.turn?.status === "inProgress") observeTurn(threadId, value.turn);
+          else if (value.turn) applyNotification("turn/completed", { threadId, turn: value.turn });
+          else execution.transition(key, "running");
           return { accepted: true, nativeTurnId: turnId };
         }
         case "abort": {
           if (!root) { await interruptThread(threadId); return { accepted: true }; }
           abortRequested = true;
+          execution.setStopping(true);
           let agentIds: string[] = [];
           try {
             await discover();
@@ -573,7 +679,7 @@ export function createCodexSession(dependencies: CodexDependencies): OpenCoreSes
         }
         case "compact": {
           if (command.customInstructions) fail("Codex native compaction does not accept custom instructions");
-          if (root ? treeBusy() : threadBusy(threadId)) fail("Wait for the Codex native tree to become idle before compacting");
+          if (root ? treeBusy() || unfinished() : threadBusy(threadId) || unfinished(threadId)) fail("Wait for the Codex native tree to become idle before compacting");
           setCompacting(threadId, true);
           try { await call("thread/compact/start", { threadId }); }
           catch (error) { setCompacting(threadId, false, {errorMessage:error instanceof Error ? error.message : String(error)}); throw error; }
@@ -602,14 +708,14 @@ export function createCodexSession(dependencies: CodexDependencies): OpenCoreSes
         }
         case "fork": {
           if (!root) fail("Forking a native child into a PiStack root is not supported");
-          if (treeBusy()) fail("Wait for the Codex native tree to become idle before forking");
+          if (treeBusy() || execution.snapshot().operations.some(operation => !isTerminalOperation(operation.state))) fail("Wait for the Codex native tree to finish before forking");
           const selected = current.entries.find(entry => entry.id === command.entryId);
           if (!selected || selected.message.role !== "user") fail("Codex fork requires a user-message entry");
           if (selected.nativeTurnId === "transfer") fail("Codex cannot fork inside transferred pre-turn history");
           const first = current.entries.find(entry => entry.nativeTurnId === selected.nativeTurnId && entry.message.role === "user");
           if (first?.id !== selected.id) fail("Codex forks at turn boundaries; a mid-turn steering message cannot be edited separately");
           const fork = await call<ThreadStartResponse>("thread/fork", { threadId, beforeTurnId: selected.nativeTurnId, deferGoalContinuation: true });
-          state.threadId = fork.thread.id; state.receipts = {}; save();
+          state.threadId = fork.thread.id; save();
           await call("thread/unsubscribe", { threadId });
           const next = projection(state.threadId); next.restore(await turns(state.threadId), state.transferProjection);
           emit({ type: "conversation_replaced", messages: next.entries.map(entry => entry.message) });

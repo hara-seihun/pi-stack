@@ -1,10 +1,11 @@
 import { afterEach, describe, expect, it } from "vitest";
 import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { createHash } from "node:crypto";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { createCodexSession } from "../src/cores/codex.js";
 import { credentialGuard } from "../src/cores/codex-auth.js";
-import type { CoreOutput, CoreSessionOptions } from "../src/cores/contracts.js";
+import type { CoreCommand, CoreExecutionSnapshot, CoreOutput, CorePresentationEvent, CoreResponse, CoreSessionOptions } from "../src/cores/contracts.js";
 import type { CodexRpcOptions, Json, RpcResult } from "../src/cores/codex-rpc.js";
 
 const dirs: string[] = [];
@@ -25,7 +26,8 @@ function fixture(existingOptions?: CoreSessionOptions) {
   let closeWait = async () => {};
   const order: string[] = [];
   const eventWaiters = new Map<string, (() => void)[]>();
-  let hook: ((method: string, params: Json) => RpcResult<unknown> | undefined) | undefined;
+  const executionWaiters = new Set<{ predicate: (snapshot: CoreExecutionSnapshot) => boolean; resolve: () => void }>();
+  let hook: ((method: string, params: Json) => RpcResult<unknown> | undefined | Promise<RpcResult<unknown> | undefined>) | undefined;
   const open = createCodexSession({
     openAccount: async value => { accountOptions = value; return ({
       credentials: async request => { if (request?.refresh) refreshed++; return { accessToken: token, chatgptAccountId: accountId }; },
@@ -36,7 +38,7 @@ function fixture(existingOptions?: CoreSessionOptions) {
       return {
         async request<T>(method: string, params: Json): Promise<RpcResult<T>> {
           requests.push({ method, params });
-          const custom = hook?.(method, params);
+          const custom = await hook?.(method, params);
           if (custom) return custom as RpcResult<T>;
           let result: unknown = {};
           if (method === "model/list") result = { data: [model], nextCursor: null };
@@ -59,6 +61,9 @@ function fixture(existingOptions?: CoreSessionOptions) {
       events.push(value); if (value.type === "response") order.push(`response:${value.id}`);
       for (const resolve of eventWaiters.get(value.type) ?? []) resolve();
       eventWaiters.delete(value.type);
+      if (value.type === "execution_update") for (const waiter of executionWaiters) {
+        if (waiter.predicate(value.execution)) { executionWaiters.delete(waiter); waiter.resolve(); }
+      }
     }, () => { order.push("exit"); }),
     event(type: string) {
       return events.some(event => event.type === type) ? Promise.resolve() : new Promise<void>(resolve => eventWaiters.set(type, [...eventWaiters.get(type) ?? [], resolve]));
@@ -67,12 +72,17 @@ function fixture(existingOptions?: CoreSessionOptions) {
     get accountOptions() { return accountOptions; }, get rpcCloseCount() { return rpcCloseCount; },
     send(method: string, params: Json) { callbacks.notification(method, params); },
     server(method: string, params: Json = {}) { return callbacks.serverRequest(method, params); },
-    hook(value: typeof hook) { hook = value; }, history(value: unknown[]) {
+    hook(value: typeof hook) { hook = value; }, history(value: unknown[], receipts: Record<string, unknown> = {}) {
       history = value;
-      if (value.length && !existsSync(join(stateDir, "codex-session.json"))) writeFileSync(join(stateDir, "codex-session.json"), JSON.stringify({ version: 1, sessionId: options.sessionId, threadId: "root", materialized: true, receipts: {}, timestamps: {} }));
+      if (value.length && !existsSync(join(stateDir, "codex-session.json"))) writeFileSync(join(stateDir, "codex-session.json"), JSON.stringify({ version: 1, sessionId: options.sessionId, threadId: "root", materialized: true, receipts, timestamps: {} }));
     }, children(value: unknown[]) { children = value; },
     get closeCount() { return closeCount; }, get refreshed() { return refreshed; },
-    response(id: string) { return [...events].reverse().find(event => event.type === "response" && event.id === id); },
+    response(id: string) { return [...events].reverse().find((event): event is CoreResponse => event.type === "response" && event.id === id); },
+    execution() { return [...events].reverse().find(event => event.type === "execution_update")!.execution as CoreExecutionSnapshot; },
+    untilExecution(predicate: (snapshot: CoreExecutionSnapshot) => boolean) {
+      const current = [...events].reverse().find(event => event.type === "execution_update");
+      return current && predicate(current.execution) ? Promise.resolve() : new Promise<void>(resolve => executionWaiters.add({ predicate, resolve }));
+    },
   };
 }
 
@@ -99,7 +109,7 @@ describe("Codex app-server adapter", () => {
     f.send("thread/closed", { threadId: "grandchild" });
     await f.event("agent_end");
     await session.command({ type: "get_state", id: "idle" });
-    expect(f.response("idle")?.data).toMatchObject({ isStreaming: false, coreBusy: false, treeComplete: true });
+    expect(f.response("idle")?.data).toMatchObject({ isStreaming: false, coreBusy: false, treeComplete: false, execution: { status: "blocked" } });
     expect(f.events.filter(event => event.type === "agent_end")).toHaveLength(1);
     await session.close();
   });
@@ -153,7 +163,7 @@ describe("Codex app-server adapter", () => {
     let running = false;
     f.hook((method, params) => {
       if (method === "thread/turns/list" && params.threadId === "child") return { ok: true, value: {
-        data: [{ id: "turn-1", status: running ? "inProgress" : "completed", startedAt: 10, items: [
+        data: [{ id: running ? "turn-1" : "stored-turn", status: running ? "inProgress" : "completed", startedAt: 10, items: [
           { type: "agentMessage", id: "stored-child", text: "Stored child answer" },
         ] }], nextCursor: null,
       } };
@@ -171,9 +181,9 @@ describe("Codex app-server adapter", () => {
       state: { nativeSessionId: "child", messageCount: 1, canAcceptDirectInput: true },
     });
     f.send("item/agentMessage/delta", { threadId: "child", itemId: "stream", delta: "B" });
-    const update = [...f.events].reverse().find(event => event.type === "core_child_event" && (event.event as any)?.type === "message_update");
+    const update = [...f.events].reverse().find((event): event is CorePresentationEvent => event.type === "core_child_event" && (event.event as any)?.type === "message_update");
     expect((update?.event as any).message.content[0].text).toBe("AB");
-    expect(f.requests.some(request => request.method === "thread/resume")).toBe(false);
+    expect(f.requests.filter(request => request.method === "thread/resume").map(request => request.params.threadId)).toEqual(["child", "grandchild"]);
     await session.command({ type: "core_agent_command", id: "continue-child", agentId: "child", action: "steer", message: "Continue" });
     expect(f.response("continue-child")?.data).toMatchObject({ accepted: true, agentId: "child", action: "steer" });
     expect(f.requests.find(request => request.method === "turn/start")?.params.threadId).toBe("child");
@@ -185,7 +195,7 @@ describe("Codex app-server adapter", () => {
     expect(f.requests.find(request => request.method === "turn/interrupt")?.params).toEqual({ threadId: "child", turnId: "turn-1" });
     await session.command({ type: "core_agent_read", id: "missing-id" });
     expect(f.response("missing-id")?.error).toMatch(/agentId is required/);
-    await session.command({ type: "core_agent_command", id: "bad-action", agentId: "child", action: "delete" });
+    await session.command({ type: "core_agent_command", id: "bad-action", agentId: "child", action: "delete" } as unknown as CoreCommand);
     expect(f.response("bad-action")?.error).toMatch(/steer or abort/);
     f.hook(method => method === "thread/read" ? { ok: true, value: { thread: { ...thread("child", "root"), canAcceptDirectInput: false } } } : undefined);
     await session.command({ type: "core_agent_command", id: "unavailable", agentId: "child", action: "steer", message: "Continue" });
@@ -240,6 +250,7 @@ describe("Codex app-server adapter", () => {
       return undefined;
     });
     await session.command({ type: "prompt", id: "fast", message: "Read" });
+    await f.untilExecution(snapshot => snapshot.operations.some(operation => operation.workId === "fast" && operation.state === "succeeded"));
     await session.command({ type: "compact", id: "compact" });
     await session.command({ type: "get_state", id: "state" });
     expect(f.response("state")?.data).toMatchObject({ isStreaming: false, isCompacting: false, treeComplete: true });
@@ -251,6 +262,136 @@ describe("Codex app-server adapter", () => {
     await session.close();
   });
 
+  it("handles an authoritative terminal turn returned directly by dispatch", async () => {
+    const f = fixture(), session = await f.open();
+    f.hook(method => method === "turn/start" ? { ok: true, value: { turn: { id: "fast-turn", status: "completed",
+      items: [{ type: "agentMessage", id: "fast-answer", text: "Complete", phase: "final_answer" }] } } } : undefined);
+    await session.command({ type: "prompt", id: "fast-work", message: "Read" });
+    await f.untilExecution(snapshot => snapshot.operations.some(operation => operation.workId === "fast-work" && operation.state === "succeeded"));
+    expect(f.execution().operations).toContainEqual(expect.objectContaining({ workId: "fast-work", result: { text: "Complete" } }));
+    await session.command({ type: "get_state", id: "finished" });
+    expect(f.response("finished")?.data).toMatchObject({ treeComplete: true, isStreaming: false });
+    await session.close();
+  });
+
+  it("owns each steer outcome and ignores final messages, idle status, and unrelated turns", async () => {
+    const f = fixture(), session = await f.open();
+    await session.command({ type: "prompt", id: "first", workId: "first-work", message: "Read" });
+    await session.command({ type: "steer", id: "second", workId: "second-work", message: "Read README" });
+    await session.command({ type: "steer", id: "third", workId: "third-work", message: "Read tests too" });
+    f.send("item/completed", { threadId: "root", turnId: "turn-1", item: { type: "agentMessage", id: "answer", text: "Done", phase: "final_answer" } });
+    f.send("thread/status/changed", { threadId: "root", status: { type: "idle" } });
+    f.send("turn/completed", { threadId: "root", turn: { id: "unrelated", status: "completed", items: [] } });
+    await session.command({ type: "get_state", id: "still-running" });
+    expect(f.execution().operations.map(operation => [operation.workId, operation.state])).toEqual([
+      ["first-work", "running"], ["second-work", "running"], ["third-work", "running"],
+    ]);
+    f.send("turn/completed", { threadId: "root", turn: { id: "turn-1", status: "failed", error: { message: "Provider failed" }, items: [] } });
+    await session.command({ type: "core_agents", id: "drain-discovery" });
+    expect(f.execution().operations).toEqual(expect.arrayContaining(["first-work", "second-work", "third-work"].map(workId =>
+      expect.objectContaining({ workId, state: "failed", error: "Provider failed" }))));
+    expect(f.events.some(event => event.type === "agent_settled")).toBe(false);
+    await session.close();
+  });
+
+  it("registers descendant execution before publishing a root turn outcome", async () => {
+    const f = fixture(), session = await f.open();
+    await session.command({ type: "prompt", id: "root-work", message: "Delegate" });
+    let release!: (result: RpcResult<unknown>) => void;
+    f.hook(method => method === "thread/list" ? new Promise(resolve => { release = resolve; }) : undefined);
+    f.send("turn/completed", { threadId: "root", turn: { id: "turn-1", status: "completed", items: [] } });
+    expect(f.execution().operations.find(operation => operation.workId === "root-work")?.state).toBe("running");
+    f.hook((method, params) => method === "thread/turns/list" && params.threadId === "child"
+      ? { ok: true, value: { data: [{ id: "child-turn", status: "inProgress", items: [] }], nextCursor: null } } : undefined);
+    release({ ok: true, value: { data: [{ ...thread("child", "root"), status: { type: "active" } }], nextCursor: null } });
+    await session.command({ type: "core_agent_read", id: "registered", agentId: "child" });
+    await session.command({ type: "core_agents", id: "drain-discovery" });
+    expect(f.execution().operations.find(operation => operation.workId === "root-work")?.state).toBe("succeeded");
+    expect(f.execution().operations.some(operation => operation.agentId === "child" && operation.state === "running")).toBe(true);
+    f.send("thread/status/changed", { threadId: "child", status: { type: "idle" } });
+    expect(f.execution().status).toBe("running");
+    await session.command({ type: "prompt", id: "blocked-after-idle", message: "More work" });
+    expect(f.response("blocked-after-idle")?.success).toBe(false);
+    expect(f.requests.filter(request => request.method === "turn/start")).toHaveLength(1);
+    f.send("turn/completed", { threadId: "child", turn: { id: "child-turn", status: "interrupted", items: [] } });
+    expect(f.execution().operations.filter(operation => operation.agentId === "child").every(operation => operation.state === "cancelled")).toBe(true);
+    expect(f.execution().status).toBe("idle");
+    await session.close();
+  });
+
+  it("records native child initialization failure without inventing a completed turn", async () => {
+    const f = fixture(), session = await f.open();
+    const item = { type: "collabAgentToolCall", id: "spawn", tool: "spawnAgent", receiverThreadIds: ["child"], agentsStates: { child: { status: "pendingInit", message: null } } };
+    f.send("item/started", { threadId: "root", turnId: "turn-1", item });
+    expect(f.execution().operations).toContainEqual(expect.objectContaining({ agentId: "child", state: "running" }));
+    f.send("item/completed", { threadId: "root", turnId: "turn-1", item: { ...item, agentsStates: { child: { status: "errored", message: "Child initialization failed" } } } });
+    expect(f.execution().operations).toContainEqual(expect.objectContaining({ agentId: "child", state: "failed", error: "Child initialization failed" }));
+    await session.close();
+  });
+
+  it("distinguishes rejection from unknown dispatch and never replays either", async () => {
+    const f = fixture(), session = await f.open();
+    f.hook(method => method === "turn/start" ? { ok: false, error: "Codex rejected turn/start: invalid input" } : undefined);
+    await session.command({ type: "prompt", id: "rejected", message: "Read" });
+    expect(f.execution().operations).toContainEqual(expect.objectContaining({ workId: "rejected", state: "failed" }));
+    f.hook(method => method === "turn/start" ? { ok: false, error: "Codex turn/start timed out; outcome unknown" } : undefined);
+    await session.command({ type: "prompt", id: "unknown", message: "Read" });
+    expect(f.execution().operations).toContainEqual(expect.objectContaining({ workId: "unknown", state: "unknown" }));
+    await session.close();
+    const resumed = fixture(f.options), next = await resumed.open();
+    for (const id of ["rejected", "unknown"]) await next.command({ type: "prompt", id, message: "Read" });
+    await next.command({ type: "prompt", id: "new-work", message: "Write" });
+    expect(resumed.requests.some(request => request.method === "turn/start")).toBe(false);
+    expect(resumed.execution().status).toBe("blocked");
+    await next.close();
+  });
+
+  it("adopts stored acceptance as unknown until native history proves its outcome", async () => {
+    const f = fixture();
+    const hash = createHash("sha256").update(JSON.stringify({ threadId: "root", type: "prompt", content: [{ type: "text", text: "Read", text_elements: [] }] })).digest("hex");
+    writeFileSync(join(f.options.stateDir, "codex-session.json"), JSON.stringify({ version: 1, sessionId: f.options.sessionId,
+      threadId: "root", materialized: true, receipts: { work: { hash, state: "accepted", turnId: "native-turn" } }, timestamps: {} }));
+    const session = await f.open();
+    expect(f.execution().operations).toContainEqual(expect.objectContaining({ workId: "work", state: "unknown" }));
+    await session.close();
+    const resumed = fixture(f.options);
+    resumed.history([{ id: "native-turn", status: "completed", items: [{ type: "agentMessage", id: "answer", text: "Read complete", phase: "final_answer" }] }]);
+    const next = await resumed.open();
+    expect(resumed.execution().operations).toContainEqual(expect.objectContaining({ workId: "work", state: "succeeded", result: { text: "Read complete" } }));
+    await next.command({ type: "get_state", id: "requested-outcome", workId: "work" });
+    expect(resumed.response("requested-outcome")?.data).toMatchObject({ operation: { workId: "work", state: "succeeded", result: { text: "Read complete" } } });
+    expect(resumed.requests.some(request => request.method === "turn/start")).toBe(false);
+    await next.close();
+  });
+
+  it("adopts materialized history without dispatch ownership as unknown, never idle", async () => {
+    const f = fixture();
+    f.history([{ id: "untracked-turn", status: "completed", items: [{ type: "agentMessage", id: "untracked-answer", text: "Previous answer" }] }]);
+    const session = await f.open();
+    expect(f.events.filter(event => event.type === "execution_update").every(event => event.execution.status === "blocked")).toBe(true);
+    expect(f.execution().operations).toContainEqual(expect.objectContaining({ workId: "native:portable-root:untracked", state: "unknown" }));
+    await session.command({ type: "prompt", id: "unsafe-replay", message: "Read" });
+    expect(f.requests.some(request => request.method === "turn/start")).toBe(false);
+    await session.close();
+    const resumed = fixture(f.options), next = await resumed.open();
+    expect(resumed.execution().status).toBe("blocked");
+    await next.close();
+  });
+
+  it("recovers child steer outcomes by their own durable native thread and turn", async () => {
+    const f = fixture(); f.children([thread("child", "root")]);
+    const session = await f.open();
+    await session.command({ type: "steer", id: "child-steer", agentId: "child", message: "Read" });
+    await session.close();
+    const resumed = fixture(f.options); resumed.children([thread("child", "root")]);
+    resumed.hook((method, params) => method === "thread/turns/list" && params.threadId === "child" ? { ok: true, value: {
+      data: [{ id: "turn-1", status: "failed", error: { message: "Child failed" }, items: [] }], nextCursor: null,
+    } } : undefined);
+    const next = await resumed.open();
+    expect(resumed.execution().operations).toContainEqual(expect.objectContaining({ workId: "child-steer", agentId: "child", state: "failed", error: "Child failed" }));
+    await next.close();
+  });
+
   it("resumes native history without replay and deduplicates a stable work ID across restarts", async () => {
     const f = fixture(), session = await f.open();
     await session.command({ type: "prompt", id: "rpc-1", workId: "work", message: "Read" });
@@ -259,6 +400,7 @@ describe("Codex app-server adapter", () => {
     expect(resumed.requests.some(request => request.method === "thread/start")).toBe(false);
     expect(resumed.requests.find(request => request.method === "thread/resume")?.params.threadId).toBe("root");
     expect(resumed.requests.some(request => request.method === "turn/start")).toBe(false);
+    expect(resumed.execution().operations).toContainEqual(expect.objectContaining({ workId: "work", state: "unknown" }));
     await next.command({ type: "prompt", id: "rpc-2", workId: "work", message: "Read" });
     expect(resumed.response("rpc-2")?.success).toBe(true);
     expect(resumed.requests.some(request => request.method === "turn/start")).toBe(false);
@@ -277,6 +419,7 @@ describe("Codex app-server adapter", () => {
     const next = await resumed.open();
     await next.command({ type: "prompt", id: "again", workId: "work", message: "Read" });
     expect(resumed.response("again")?.data).toEqual({ accepted: true, nativeTurnId: "turn-native" });
+    expect(resumed.execution().operations).toContainEqual(expect.objectContaining({ workId: "work", state: "succeeded" }));
     expect(resumed.requests.some(request => request.method === "turn/start")).toBe(false);
     await next.close();
   });
@@ -295,9 +438,9 @@ describe("Codex app-server adapter", () => {
     f.send("thread/started", { thread: thread("grandchild", "child") });
     f.send("item/started", { threadId: "child", turnId: "child-turn", item: { ...message, id: "child-answer" } });
     f.send("item/completed", { threadId: "child", turnId: "child-turn", item: { ...message, id: "child-answer", text: "Child done" } });
-    expect(f.events.find(event => event.type === "tool_execution_start")?.toolName).toBe("exec_command");
-    expect(f.events.find(event => event.type === "tool_execution_end")?.result).toEqual({ content: [{ type: "text", text: "/repo" }] });
-    const context = [...f.events].reverse().find(event => event.type === "context_update")!;
+    expect(f.events.find((event): event is CorePresentationEvent => event.type === "tool_execution_start")?.toolName).toBe("exec_command");
+    expect(f.events.find((event): event is CorePresentationEvent => event.type === "tool_execution_end")?.result).toEqual({ content: [{ type: "text", text: "/repo" }] });
+    const context = [...f.events].reverse().find((event): event is CorePresentationEvent => event.type === "context_update")!;
     expect(context.projection).toBe("activity");
     expect(context).not.toHaveProperty("finalizedMessage");
     expect(context).not.toHaveProperty("finalizesMessage");
@@ -336,7 +479,8 @@ describe("Codex app-server adapter", () => {
 
   it("maps settings and skills, forks before a user turn, and rejects unsupported operations", async () => {
     const f = fixture();
-    f.history([{ id: "turn-a", startedAt: 10, status: "completed", items: [{ id: "user-a", type: "userMessage", clientId: null, content: [{ type: "text", text: "Read", text_elements: [] }] }] }]);
+    f.history([{ id: "turn-a", startedAt: 10, status: "completed", items: [{ id: "user-a", type: "userMessage", clientId: null, content: [{ type: "text", text: "Read", text_elements: [] }] }] }],
+      { "historical-work": { hash: createHash("sha256").update("historical-work").digest("hex"), state: "accepted", turnId: "turn-a" } });
     const session = await f.open();
     await session.command({ type: "set_thinking_level", id: "effort", level: "off" });
     expect([...f.requests].reverse().find(request => request.method === "thread/settings/update")?.params.effort).toBe("none");
