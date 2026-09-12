@@ -20,13 +20,17 @@ function fixture(existingOptions?: CoreSessionOptions) {
   const options: CoreSessionOptions = existingOptions ?? { cwd: stateDir, args: ["--model", "gpt-codex", "--thinking", "high"], env: { HOME: stateDir }, sessionId: "portable-root", stateDir };
   let callbacks: CodexRpcOptions;
   const events: CoreOutput[] = [], requests: { method: string; params: Json }[] = [], usage: unknown[] = [];
-  let children: unknown[] = [], history: unknown[] = [], closeCount = 0, refreshed = 0;
+  let children: unknown[] = [], history: unknown[] = [], closeCount = 0, refreshed = 0, rpcCloseCount = 0;
+  let accountOptions: CoreSessionOptions | undefined;
+  let closeWait = async () => {};
+  const order: string[] = [];
+  const eventWaiters = new Map<string, (() => void)[]>();
   let hook: ((method: string, params: Json) => RpcResult<unknown> | undefined) | undefined;
   const open = createCodexSession({
-    openAccount: async () => ({
+    openAccount: async value => { accountOptions = value; return ({
       credentials: async request => { if (request?.refresh) refreshed++; return { accessToken: token, chatgptAccountId: accountId }; },
-      recordUsage: value => { usage.push(value); }, close: () => { closeCount++; },
-    }),
+      recordUsage: value => { usage.push(value); }, close: () => { closeCount++; order.push("account-close"); },
+    }); },
     openRpc: value => {
       callbacks = value;
       return {
@@ -40,16 +44,27 @@ function fixture(existingOptions?: CoreSessionOptions) {
           if (method === "thread/read") result = { thread: thread(String(params.threadId), "root") };
           if (method === "thread/turns/list") result = { data: history, nextCursor: null };
           if (method === "thread/list") result = { data: children, nextCursor: null };
+          if (method === "thread/backgroundTerminals/list") result = { data: [], nextCursor: null };
           if (method === "skills/list") result = { data: [{ cwd: stateDir, skills: [{ name: "inspect", path: "/skills/inspect/SKILL.md", description: "Inspect", enabled: true }], errors: [] }] };
           if (method === "turn/start") result = { turn: { id: "turn-1", status: "inProgress", items: [] } };
           if (method === "turn/steer") result = { turnId: "turn-1" };
           return { ok: true, value: result as T };
         },
-        notify() {}, async close() { callbacks.exit(0); },
+        notify() {}, async close() { rpcCloseCount++; await closeWait(); order.push("rpc-close"); callbacks.exit(0); },
       };
     },
   });
-  return { options, events, requests, usage, open: () => open(options, value => events.push(value), () => {}),
+  return { options, events, requests, usage, order,
+    open: () => open(options, value => {
+      events.push(value); if (value.type === "response") order.push(`response:${value.id}`);
+      for (const resolve of eventWaiters.get(value.type) ?? []) resolve();
+      eventWaiters.delete(value.type);
+    }, () => { order.push("exit"); }),
+    event(type: string) {
+      return events.some(event => event.type === type) ? Promise.resolve() : new Promise<void>(resolve => eventWaiters.set(type, [...eventWaiters.get(type) ?? [], resolve]));
+    },
+    crash: () => callbacks.exit(1), closeWait(value: typeof closeWait) { closeWait = value; },
+    get accountOptions() { return accountOptions; }, get rpcCloseCount() { return rpcCloseCount; },
     send(method: string, params: Json) { callbacks.notification(method, params); },
     server(method: string, params: Json = {}) { return callbacks.serverRequest(method, params); },
     hook(value: typeof hook) { hook = value; }, history(value: unknown[]) {
@@ -62,6 +77,75 @@ function fixture(existingOptions?: CoreSessionOptions) {
 }
 
 describe("Codex app-server adapter", () => {
+  it("keeps the root busy for descendants and aborts child-only turns and background terminals", async () => {
+    const f = fixture(); f.children([thread("child", "root"), thread("grandchild", "child")]);
+    const session = await f.open();
+    f.hook((method, params) => method === "thread/backgroundTerminals/list" && params.threadId === "child"
+      ? { ok: true, value: { data: [{ processId: "terminal-child" }], nextCursor: null } } : undefined);
+    for (const id of ["child", "grandchild"]) f.send("turn/started", { threadId: id, turn: { id: `turn-${id}` } });
+    await session.command({ type: "get_state", id: "busy" });
+    expect(f.response("busy")?.data).toMatchObject({ isStreaming: true, coreBusy: true, treeComplete: false });
+    await session.command({ type: "prompt", id: "blocked", message: "New root work" });
+    expect(f.response("blocked")?.error).toMatch(/native tree is busy/);
+    expect(f.requests.some(request => request.method === "turn/start")).toBe(false);
+    await session.command({ type: "abort", id: "tree-abort" });
+    expect(f.response("tree-abort")?.data).toMatchObject({ accepted: true, coreClosed: false });
+    expect(f.requests.filter(request => request.method === "turn/interrupt").map(request => request.params.threadId).sort()).toEqual(["child", "grandchild"]);
+    expect(f.requests.find(request => request.method === "thread/backgroundTerminals/terminate")?.params).toEqual({ threadId: "child", processId: "terminal-child" });
+    expect(f.events.filter(event => event.type === "agent_end")).toHaveLength(0);
+    f.send("turn/completed", { threadId: "child", turn: { id: "turn-child", status: "interrupted" } });
+    await session.command({ type: "get_state", id: "one-left" });
+    expect(f.response("one-left")?.data).toMatchObject({ isStreaming: true, coreBusy: true });
+    f.send("thread/closed", { threadId: "grandchild" });
+    await f.event("agent_end");
+    await session.command({ type: "get_state", id: "idle" });
+    expect(f.response("idle")?.data).toMatchObject({ isStreaming: false, coreBusy: false, treeComplete: true });
+    expect(f.events.filter(event => event.type === "agent_end")).toHaveLength(1);
+    await session.close();
+  });
+
+  it("closes the owned runtime when a native child cannot be interrupted and confirms before exit", async () => {
+    const f = fixture(), session = await f.open();
+    f.send("item/started", { threadId: "root", turnId: "root-turn", item: { type: "collabAgentToolCall", id: "spawn", tool: "spawnAgent",
+      receiverThreadIds: ["pending-child"], agentsStates: { "pending-child": { status: "pendingInit" } } } });
+    await session.command({ type: "abort", id: "hard-tree-stop" });
+    expect(f.response("hard-tree-stop")?.data).toMatchObject({ accepted: true, coreClosed: true });
+    await session.close();
+    expect(f.rpcCloseCount).toBe(1); expect(f.closeCount).toBe(1);
+    expect(f.order.indexOf("response:hard-tree-stop")).toBeLessThan(f.order.indexOf("exit"));
+  });
+
+  it("resolves saved provider/model before leasing on --session-only resume", async () => {
+    const f = fixture(); f.options.args.push("--provider", "openai-codex-7");
+    const session = await f.open();
+    await session.command({ type: "prompt", id: "persist-work", message: "Read" });
+    await session.close();
+    const resumed = fixture({ ...f.options, args: ["--session", join(f.options.stateDir, "codex-session.json")] });
+    const next = await resumed.open();
+    expect(resumed.accountOptions?.args).toContain("gpt-codex");
+    expect(resumed.accountOptions?.args).toContain("openai-codex-7");
+    expect(resumed.requests.find(request => request.method === "thread/resume")?.params).toMatchObject({ threadId: "root", model: "gpt-codex" });
+    await next.close();
+    const override = fixture({ ...f.options, args: ["--session", join(f.options.stateDir, "codex-session.json"), "--model", "override-model"] });
+    const third = await override.open();
+    expect(override.requests.find(request => request.method === "thread/resume")?.params.model).toBe("override-model");
+    await third.close();
+  });
+
+  it("awaits process cleanup before releasing the lease or notifying native exit", async () => {
+    const f = fixture(), session = await f.open();
+    let release!: () => void;
+    f.closeWait(() => new Promise<void>(resolve => { release = resolve; }));
+    f.crash();
+    const closing = session.close();
+    await Promise.resolve(); await Promise.resolve();
+    expect(f.rpcCloseCount).toBe(1); expect(f.closeCount).toBe(0); expect(f.order).not.toContain("exit");
+    release(); await closing; await Promise.resolve();
+    expect(f.closeCount).toBe(1);
+    expect(f.order.indexOf("rpc-close")).toBeLessThan(f.order.indexOf("account-close"));
+    expect(f.order.indexOf("account-close")).toBeLessThan(f.order.indexOf("exit"));
+  });
+
   it("serves the child inspection/control rendezvous without disturbing streamed child messages", async () => {
     const f = fixture();
     f.children([thread("child", "root"), thread("grandchild", "child")]);
@@ -258,7 +342,7 @@ describe("Codex app-server adapter", () => {
     expect([...f.requests].reverse().find(request => request.method === "thread/settings/update")?.params.effort).toBe("none");
     await session.command({ type: "set_model", id: "model", provider: "openai-codex", modelId: "gpt-codex" });
     await session.command({ type: "get_commands", id: "skills" });
-    expect((f.response("skills")?.data as any).commands[0].name).toBe("skill:inspect");
+    expect((f.response("skills")?.data as any).commands.map((command: any) => command.name)).toEqual(["compact", "skill:inspect"]);
     await session.command({ type: "fork", id: "fork", entryId: "user-a" });
     expect(f.requests.find(request => request.method === "thread/fork")?.params.beforeTurnId).toBe("turn-a");
     await session.command({ type: "prompt", id: "skill-prompt", message: "/skill:inspect source" });

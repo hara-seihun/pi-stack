@@ -8,6 +8,7 @@ import { openCoreAccount } from "./account.js";
 import { writeCoreState } from "./journal.js";
 import { openCodexRpc, type CodexRpc, type Json, type OpenCodexRpc, type RpcResult } from "./codex-rpc.js";
 import { CodexProjection, transferItems } from "./codex-projection.js";
+import { CodexProcessError } from "./codex-process.js";
 import type { Thread } from "./codex-protocol/v2/Thread.js";
 import type { ThreadItem } from "./codex-protocol/v2/ThreadItem.js";
 import type { Turn } from "./codex-protocol/v2/Turn.js";
@@ -20,7 +21,7 @@ import type { SkillsListResponse } from "./codex-protocol/v2/SkillsListResponse.
 
 type Receipt = { hash: string; state: "pending" | "accepted" | "rejected"; turnId?: string };
 type State = {
-  version: 1; sessionId: string; threadId?: string; materialized?: boolean; model?: string; effort?: string; name?: string;
+  version: 1; sessionId: string; threadId?: string; materialized?: boolean; provider?: string; model?: string; effort?: string; name?: string;
   transfer?: "pending" | "complete"; transferProjection?: Record<string, unknown>[];
   receipts: Record<string, Receipt>; timestamps: Record<string, number>;
 };
@@ -63,6 +64,17 @@ export function createCodexSession(dependencies: CodexDependencies): OpenCoreSes
     const save = () => writeCoreState(statePath, guard.clean(state));
     const stamp = (id: string, suggested?: number) => state.timestamps[id] ??= suggested && suggested > 0 ? suggested : Date.now();
     const agents = new Map<string, CoreAgent>();
+    const nativeStatus = new Map<string, string>();
+    let treeWasBusy = false, settling = 0, abortRequested = false;
+    const threadBusy = (id: string) => active.has(id) || compactingThreads.has(id) || nativeStatus.get(id) === "active" || agents.get(id)?.state === "running";
+    const treeBusy = () => settling > 0 || aborting.size > 0 || [...new Set([state.threadId!, ...agents.keys(), ...active.keys(), ...compactingThreads])].some(threadBusy);
+    const reconcileLifecycle = () => {
+      if (!ready || closed) return;
+      const busy = treeBusy();
+      if (busy === treeWasBusy) return;
+      treeWasBusy = busy;
+      emit(busy ? { type: "agent_start" } : { type: "agent_end", messages: projection(state.threadId!).entries.map(entry => entry.message) });
+    };
     const subscriptions = new Map<string, Promise<void>>();
     const nativeSettings = new Map<string, { model: string; effort?: string }>();
     const projections = new Map<string, CodexProjection>();
@@ -76,6 +88,12 @@ export function createCodexSession(dependencies: CodexDependencies): OpenCoreSes
       if (threadId === state.threadId) emit(event); else emit({ type: "core_child_event", agentId: threadId, event });
     };
     let closed = false, ready = false, account: CodexAccountLease | undefined, rpc: CodexRpc | undefined;
+    let closePromise: Promise<void> | undefined, handlingCommand = false, pendingExit: { code?: number } | undefined, exitSent = false;
+    const notifyExit = (code?: number) => {
+      if (exitSent) return;
+      if (handlingCommand) { pendingExit = { code }; return; }
+      exitSent = true; exit(code);
+    };
     let accounting = Promise.resolve();
     let accountClosed: Promise<void> | undefined;
     const closeAccount = () => accountClosed ??= Promise.resolve().then(async () => {
@@ -108,6 +126,8 @@ export function createCodexSession(dependencies: CodexDependencies): OpenCoreSes
       return "idle";
     };
     const announce = (thread: Thread) => {
+      nativeStatus.set(thread.id, thread.status.type);
+      if (thread.status.type === "notLoaded") active.delete(thread.id);
       if (!thread.parentThreadId || thread.id === state.threadId) return;
       const agent: CoreAgent = { id: thread.id, nativeSessionId: thread.id,
         parentId: thread.parentThreadId === state.threadId ? options.sessionId : thread.parentThreadId,
@@ -117,7 +137,8 @@ export function createCodexSession(dependencies: CodexDependencies): OpenCoreSes
         model: nativeSettings.get(thread.id)?.model ?? agents.get(thread.id)?.model };
       agents.set(thread.id, agent);
       emit({ type: "core_agent", agent, canAcceptDirectInput: thread.canAcceptDirectInput });
-      if (thread.status.type === "active") background(subscribeChild(thread.id), "child subscription");
+      if (thread.status.type === "active" && !abortRequested && !closed) background(subscribeChild(thread.id), "child subscription");
+      reconcileLifecycle();
     };
     function subscribeChild(threadId: string): Promise<void> {
       const existing = subscriptions.get(threadId);
@@ -131,6 +152,7 @@ export function createCodexSession(dependencies: CodexDependencies): OpenCoreSes
         projection(threadId).context();
         const running = history.find(turn => turn.status === "inProgress");
         if (running && !completedTurns.has(running.id)) active.set(threadId, running.id);
+        reconcileLifecycle();
       })();
       subscriptions.set(threadId, operation);
       return operation;
@@ -150,24 +172,31 @@ export function createCodexSession(dependencies: CodexDependencies): OpenCoreSes
         sourceKinds: ["subAgent", "subAgentReview", "subAgentCompact", "subAgentThreadSpawn", "subAgentOther"], limit: 100 })) announce(thread);
     };
     const background = (work: Promise<unknown>, operation: string) => {
-      void work.catch(() => emit({ type: "core_error", core: "codex", error: `Codex ${operation} failed` }));
+      void work.catch(() => { if (!closed) emit({ type: "core_error", core: "codex", error: `Codex ${operation} failed` }); });
     };
     const applyNotification = (method: string, params: Json) => {
       if (method === "thread/started") { announce(params.thread as Thread); return; }
       const threadId = typeof params.threadId === "string" ? params.threadId : undefined;
       if (!threadId) return;
       const root = threadId === state.threadId;
+      if (!root && !agents.has(threadId) && (method === "thread/closed" || method === "thread/deleted")) return;
       // Child lifecycle events can precede their metadata; discovery supplies parentage.
       if (!root && !agents.has(threadId)) {
         const agent: CoreAgent = { id: threadId, nativeSessionId: threadId, parentId: null, name: threadId, state: "running" };
         agents.set(threadId, agent); emit({ type: "core_agent", agent });
       }
       const send = (event: CoreOutput) => root ? emit(event) : emit({ type: "core_child_event", agentId: threadId, event });
-      if (method === "thread/status/changed") {
+      if (method === "thread/closed" || method === "thread/deleted") {
+        nativeStatus.set(threadId, "notLoaded"); active.delete(threadId); setCompacting(threadId, false);
+        const agent = agents.get(threadId);
+        if (agent) { if (agent.state === "running") agent.state = "cancelled"; emit({ type: "core_agent", agent }); }
+      } else if (method === "thread/status/changed") {
         const status = params.status as { type: string };
+        nativeStatus.set(threadId, status.type);
+        if (!root && status.type !== "active") active.delete(threadId);
         const agent = agents.get(threadId);
         if (agent) { agent.state = agentState(status.type); emit({ type: "core_agent", agent }); }
-        if (!root && status.type === "active") background(subscribeChild(threadId), "child subscription");
+        if (!root && status.type === "active" && !abortRequested) background(subscribeChild(threadId), "child subscription");
       } else if (method === "thread/settings/updated") {
         const settings = params.threadSettings as ThreadSettings;
         nativeSettings.set(threadId, { model: settings.model, effort: settings.effort ?? undefined });
@@ -179,21 +208,27 @@ export function createCodexSession(dependencies: CodexDependencies): OpenCoreSes
       } else if (method === "turn/started") {
         const turn = params.turn as Turn;
         active.set(threadId, turn.id);
+        nativeStatus.set(threadId, "active");
         const agent = agents.get(threadId);
         if (agent) { agent.state = "running"; emit({ type: "core_agent", agent }); }
-        send({ type: "agent_start" }); send({ type: "turn_start" });
+        if (!root) send({ type: "agent_start" });
+        send({ type: "turn_start" });
       } else if (method === "turn/completed") {
         const turn = params.turn as Turn;
         completedTurns.add(turn.id);
         if (active.get(threadId) === turn.id) active.delete(threadId);
+        nativeStatus.set(threadId, "idle");
         projection(threadId).finish(turn);
         setCompacting(threadId, false);
         const agent = agents.get(threadId);
         if (agent) { agent.state = agentState(turn.status); emit({ type: "core_agent", agent }); }
         save();
         send({ type: "turn_end", message: projection(threadId).entries.at(-1)?.message, toolResults: [] });
-        send({ type: "agent_end", messages: projection(threadId).entries.map(entry => entry.message) });
-        if (root) background(discover(), "child discovery");
+        if (!root) send({ type: "agent_end", messages: projection(threadId).entries.map(entry => entry.message) });
+        if (root) {
+          settling++;
+          background(discover().finally(() => { settling--; reconcileLifecycle(); }), "child discovery");
+        }
       } else if (method === "item/started" || method === "item/completed") {
         const item = params.item as ThreadItem;
         const completed = method === "item/completed";
@@ -214,7 +249,9 @@ export function createCodexSession(dependencies: CodexDependencies): OpenCoreSes
             const agent: CoreAgent = { id, nativeSessionId: id, parentId: existing?.parentId ?? (threadId === state.threadId ? options.sessionId : threadId),
               name: existing?.name ?? id, model: item.model ?? existing?.model,
               state: agentState(item.agentsStates[id]?.status ?? "running") };
-            agents.set(id, agent); emit({ type: "core_agent", agent });
+            agents.set(id, agent);
+            if (item.agentsStates[id]) nativeStatus.set(id, agent.state === "running" ? "active" : "idle");
+            emit({ type: "core_agent", agent });
           }
           if (completed) background(discover(), "child discovery");
         }
@@ -254,14 +291,54 @@ export function createCodexSession(dependencies: CodexDependencies): OpenCoreSes
       emit({ type: "core_error", core: "codex", error: `Unsupported Codex client request: ${method}` });
       return { ok: false, error: `PiStack does not support Codex client request ${method}` };
     };
-    const close = async () => {
-      if (closed) return;
-      closed = true;
-      try { await rpc?.close(); await accounting; }
-      finally { await closeAccount(); }
+    const aborting = new Map<string, Promise<void>>();
+    const interrupted = new Set<string>();
+    const interruptThread = (threadId: string): Promise<void> => {
+      const existing = aborting.get(threadId);
+      if (existing) return existing;
+      const operation = Promise.resolve().then(async () => {
+        let turnId = active.get(threadId);
+        if (!turnId && threadBusy(threadId)) {
+          const history = await turns(threadId);
+          turnId = history.find(turn => turn.status === "inProgress" && !completedTurns.has(turn.id))?.id;
+          if (turnId) active.set(threadId, turnId);
+          else if (threadBusy(threadId)) fail("Native Codex child has no interruptible turn");
+        }
+        if (turnId && !interrupted.has(`${threadId}:${turnId}`)) {
+          const result = await rpc!.request("turn/interrupt", { threadId, turnId });
+          if (!result.ok && threadBusy(threadId)) fail(result.error);
+          interrupted.add(`${threadId}:${turnId}`);
+        }
+        if (nativeStatus.get(threadId) !== "notLoaded" && (threadId !== state.threadId || state.materialized || state.transfer)) {
+          const terminals = await pages<{ processId: string }>("thread/backgroundTerminals/list", { threadId, limit: 100 });
+          await Promise.all(terminals.map(terminal => call("thread/backgroundTerminals/terminate", { threadId, processId: terminal.processId })));
+        }
+      }).finally(() => { aborting.delete(threadId); reconcileLifecycle(); });
+      aborting.set(threadId, operation);
+      return operation;
     };
+    function continueTreeAbort() {
+      if (!abortRequested || closed) return;
+      for (const id of [state.threadId!, ...agents.keys()]) if (threadBusy(id) && !aborting.has(id)) {
+        void interruptThread(id).catch(async () => {
+          emit({ type: "core_error", core: "codex", error: "Native tree interrupt requires app-server shutdown" });
+          try { await close(); }
+          catch { emit({ type: "core_error", core: "codex", error: "Codex process-tree cleanup failed; account lease retained" }); }
+        });
+      }
+    }
+    const close = () => closePromise ??= Promise.resolve().then(async () => {
+      closed = true;
+      // Do not release account custody until the app-server's process tree is stopped.
+      await rpc?.close();
+      await accounting;
+      await Promise.allSettled(subscriptions.values());
+      await closeAccount();
+    });
     try {
-      const provider = argument(options.args, "--provider");
+      const provider = argument(options.args, "--provider") ?? state.provider ?? "openai-codex";
+      const startingModel = needString(argument(options.args, "--model") ?? state.model, "Starting --model or saved model");
+      state.provider = provider;
       if (provider && !/^openai-codex(?:-\d+)?$/.test(provider) && provider !== "openai") fail("Codex core requires a ChatGPT account provider");
       const nativeHome = join(options.stateDir, "codex");
       mkdirSync(nativeHome, { recursive: true, mode: 0o700 });
@@ -271,16 +348,25 @@ export function createCodexSession(dependencies: CodexDependencies): OpenCoreSes
         const source = join(sourceHome, resource), target = join(nativeHome, resource);
         if (source !== target && existsSync(source) && !existsSync(target)) symlinkSync(source, target);
       }
-      account = await dependencies.openAccount(options);
+      account = await dependencies.openAccount({ ...options, args: [...options.args, "--provider", provider, "--model", startingModel] });
       rpc = (dependencies.openRpc ?? openCodexRpc)({ cwd: options.cwd,
         env: { ...process.env, ...options.env, CODEX_HOME: nativeHome, OPENAI_API_KEY: undefined, CODEX_API_KEY: undefined },
         binary: dependencies.binary, args: [...(dependencies.appServerArgs ?? []), "-c", 'cli_auth_credentials_store="ephemeral"'],
         sanitizeError: message => guard.clean(message),
         notification(method, params) {
+          if (closed) return;
           if (!ready) notifications.push([method, params]);
-          else { try { applyNotification(method, params); } catch { emit({ type: "core_error", core: "codex", error: "Codex event processing failed" }); background(close(), "cleanup"); } }
+          else {
+            try { applyNotification(method, params); reconcileLifecycle(); continueTreeAbort(); }
+            catch { emit({ type: "core_error", core: "codex", error: "Codex event processing failed" }); background(close(), "cleanup"); }
+          }
         }, serverRequest,
-        exit(code) { closed = true; background(accounting.finally(closeAccount), "account cleanup"); exit(code); },
+        exit(code) {
+          void close().then(() => notifyExit(code), () => {
+            emit({ type: "core_error", core: "codex", error: "Codex process-tree cleanup failed; account lease retained" });
+            notifyExit(1);
+          });
+        },
       });
       await call("initialize", { clientInfo: { name: "pistack", title: "PiStack", version: "1" }, capabilities: { experimentalApi: true } });
       rpc.notify("initialized");
@@ -289,13 +375,13 @@ export function createCodexSession(dependencies: CodexDependencies): OpenCoreSes
       await call("account/login/start", { type: "chatgptAuthTokens", accessToken: credentials.accessToken,
         chatgptAccountId: credentials.chatgptAccountId, chatgptPlanType: credentials.chatgptPlanType ?? null });
       models = await pages<Model>("model/list", { includeHidden: false, limit: 100 });
-      const startingModel = argument(options.args, "--model") ?? state.model;
       const settings = { cwd: options.cwd, model: startingModel, approvalPolicy: "never", sandbox: argument(options.args, "--sandbox") ?? "danger-full-access" };
       const resume = state.threadId && (state.materialized || state.transfer || Object.values(state.receipts).some(receipt => receipt.state !== "rejected"));
       const response = await call<ThreadStartResponse>(resume ? "thread/resume" : "thread/start", {
         ...settings, ...(resume ? { threadId: state.threadId } : { ephemeral: false, historyMode: "paginated" }),
       });
       state.threadId = response.thread.id; state.model = response.model;
+      nativeStatus.set(state.threadId, response.thread.status.type);
       state.effort = argument(options.args, "--thinking") ?? state.effort ?? response.reasoningEffort ?? undefined;
       state.name = argument(options.args, "--name") ?? state.name ?? response.thread.name ?? undefined;
       save();
@@ -327,9 +413,10 @@ export function createCodexSession(dependencies: CodexDependencies): OpenCoreSes
       notifications.length = 0;
       projection(state.threadId).context();
       await discover();
+      reconcileLifecycle();
     } catch (error) {
       await close();
-      throw new Error(error instanceof Failure ? error.message : "Codex session initialization failed");
+      throw new Error(error instanceof Failure || error instanceof CodexProcessError ? guard.clean(error.message) : "Codex session initialization failed");
     }
     function nativeEffort(level: string): string { return level === "off" ? "none" : level; }
     const target = (command: CoreCommand): string => {
@@ -379,8 +466,10 @@ export function createCodexSession(dependencies: CodexDependencies): OpenCoreSes
         case "get_state": return { core: "codex", sessionId: root ? options.sessionId : threadId, nativeSessionId: threadId,
           sessionFile: statePath, sessionName: root ? state.name : agents.get(threadId)?.name,
           model: models.find(model => model.model === selectedModel) ? publicModel(models.find(model => model.model === selectedModel)!) : { id: selectedModel, provider: "openai-codex" },
-          thinkingLevel: selectedEffort === "none" ? "off" : selectedEffort, isStreaming: active.has(threadId), isCompacting: compactingThreads.has(threadId),
-          treeComplete: active.size === 0 && compactingThreads.size === 0 && [...agents.values()].every(agent => agent.state !== "running"),
+          thinkingLevel: selectedEffort === "none" ? "off" : selectedEffort,
+          isStreaming: root ? treeBusy() : threadBusy(threadId), coreBusy: root ? treeBusy() : threadBusy(threadId),
+          isCompacting: root ? compactingThreads.size > 0 : compactingThreads.has(threadId),
+          treeComplete: !treeBusy(),
           lastAssistantMessage: [...current.entries].reverse().find(entry => entry.message.role === "assistant")?.message,
           pendingMessageCount: 0, messageCount: current.entries.length, autoCompactionEnabled: true,
           contextProjection: "activity", capabilities: { core: "codex", nativeChildren: true, fork: true, compact: true, steer: true },
@@ -390,7 +479,8 @@ export function createCodexSession(dependencies: CodexDependencies): OpenCoreSes
         case "get_commands": {
           const list = await call<SkillsListResponse>("skills/list", { cwds: [options.cwd] });
           if (list.data.some(entry => entry.errors.length)) fail("Codex skill discovery reported errors");
-          return { commands: list.data.flatMap(entry => entry.skills.filter(skill => skill.enabled).map(skill => ({ name: `skill:${skill.name}`, description: skill.description, source: "skill" }))) };
+          return { commands: [{ name: "compact", description: "Compact native Codex context", source: "extension" },
+            ...list.data.flatMap(entry => entry.skills.filter(skill => skill.enabled).map(skill => ({ name: `skill:${skill.name}`, description: skill.description, source: "skill" })))] };
         }
         case "core_agents": await discover(); return { agents: [...agents.values()] };
         case "core_agent_read": {
@@ -438,7 +528,9 @@ export function createCodexSession(dependencies: CodexDependencies): OpenCoreSes
             if (thread.canAcceptDirectInput !== true) fail("This native Codex child does not accept direct input");
             await subscribeChild(threadId);
           }
-          if (active.has(threadId) && command.type !== "steer") fail("Codex thread is busy; PiStack must queue follow-up work until idle");
+          if (root && treeBusy() && (command.type !== "steer" || !active.has(threadId))) fail("Codex native tree is busy; PiStack must queue follow-up work until idle");
+          if (!root && threadBusy(threadId) && command.type !== "steer") fail("Codex thread is busy; PiStack must queue follow-up work until idle");
+          if (root) { abortRequested = false; interrupted.clear(); }
           const method = command.type === "steer" && active.has(threadId) ? "turn/steer" : "turn/start";
           const wasMaterialized = state.materialized;
           state.materialized = true;
@@ -461,13 +553,24 @@ export function createCodexSession(dependencies: CodexDependencies): OpenCoreSes
           return { accepted: true, nativeTurnId: turnId };
         }
         case "abort": {
-          const turnId = active.get(threadId);
-          if (turnId) await call("turn/interrupt", { threadId, turnId });
-          return {};
+          if (!root) { await interruptThread(threadId); return { accepted: true }; }
+          abortRequested = true;
+          let agentIds: string[] = [];
+          try {
+            await discover();
+            agentIds = [threadId, ...agents.keys()];
+            const results = await Promise.allSettled(agentIds.map(interruptThread));
+            if (results.some(result => result.status === "rejected")) fail("Native tree interrupt was incomplete");
+          } catch {
+            await close();
+            return { accepted: true, agentIds, coreClosed: true, reason: "Native tree stop required app-server shutdown" };
+          }
+          if (closePromise) await closePromise;
+          return { accepted: true, agentIds, coreClosed: closed };
         }
         case "compact": {
           if (command.customInstructions) fail("Codex native compaction does not accept custom instructions");
-          if (active.has(threadId) || compactingThreads.has(threadId)) fail("Wait for Codex to become idle before compacting");
+          if (root ? treeBusy() : threadBusy(threadId)) fail("Wait for the Codex native tree to become idle before compacting");
           setCompacting(threadId, true);
           try { await call("thread/compact/start", { threadId }); }
           catch (error) { setCompacting(threadId, false); throw error; }
@@ -496,7 +599,7 @@ export function createCodexSession(dependencies: CodexDependencies): OpenCoreSes
         }
         case "fork": {
           if (!root) fail("Forking a native child into a PiStack root is not supported");
-          if (active.has(threadId) || compactingThreads.has(threadId)) fail("Wait for Codex to become idle before forking");
+          if (treeBusy()) fail("Wait for the Codex native tree to become idle before forking");
           const selected = current.entries.find(entry => entry.id === command.entryId);
           if (!selected || selected.message.role !== "user") fail("Codex fork requires a user-message entry");
           if (selected.nativeTurnId === "transfer") fail("Codex cannot fork inside transferred pre-turn history");
@@ -518,9 +621,17 @@ export function createCodexSession(dependencies: CodexDependencies): OpenCoreSes
     return {
       command(command) {
         const work = commands.then(async () => {
-          try { emit({ type: "response", id: command.id, command: command.type, success: true, data: await run(command) }); }
-          catch (error) { emit({ type: "response", id: command.id, command: command.type, success: false,
+          handlingCommand = true;
+          try {
+            const data = await run(command);
+            reconcileLifecycle();
+            emit({ type: "response", id: command.id, command: command.type, success: true, data });
+          } catch (error) { emit({ type: "response", id: command.id, command: command.type, success: false,
             error: error instanceof Failure ? error.message : "Codex command failed" }); }
+          finally {
+            handlingCommand = false;
+            if (pendingExit) { const { code } = pendingExit; pendingExit = undefined; notifyExit(code); }
+          }
         });
         commands = work;
         return work;

@@ -4,7 +4,7 @@
 
 ## Bind the account broker
 
-The registry uses the exported `openCodexSession`, already bound to `openCoreAccount`. It requires PiStack's starting `--model`. For another broker or protocol fixtures, `createCodexSession` returns an injectable `OpenCoreSession`:
+The registry uses the exported `openCodexSession`, already bound to `openCoreAccount`. A new session requires PiStack's starting `--model`. A `--session`-only reopen resolves the saved model and provider before acquiring its lease; explicit starting overrides win. For another broker or protocol fixtures, `createCodexSession` returns an injectable `OpenCoreSession`:
 
 ```ts
 import { argument } from "./contracts.js";
@@ -37,18 +37,18 @@ Every response has `type: "response"`, the original `id`, `command`, and `succes
 
 | Command | Behavior |
 | --- | --- |
-| `get_state` | Portable identity, native identity, model/effort/name, streaming/compaction flags, unresolved dispatch IDs, last assistant message, and native-tree completion. |
-| `prompt` | Sends `turn/start`. Acknowledges native acceptance without waiting for generation. Text and base64 images are supported. |
+| `get_state` | Portable identity, native identity, model/effort/name, unresolved dispatch IDs, and last assistant message. Root `isStreaming`, `coreBusy`, and compaction flags include descendants. `treeComplete` becomes true only when the native tree is idle. |
+| `prompt` | Sends `turn/start` only when the native tree is idle. Acknowledges native acceptance without waiting for generation. Text and base64 images are supported. |
 | `steer` | Sends `turn/steer` with the active turn ID. Starts a turn when idle. |
 | `follow_up` | Starts a turn when idle. Fails while busy so PiStack retains the queue. |
-| `abort` | Sends `turn/interrupt`. Acceptance does not mean interruption has finished; wait for lifecycle events or idle state. |
+| `abort` | Interrupts the root and all discovered descendants, including child-only activity, and terminates their native background terminals. The stop policy also catches children announced while interruption is in progress. Acceptance does not mean interruption has finished; wait for aggregate idle state. |
 | `compact` | Starts native compaction and acknowledges acceptance. Completion arrives through lifecycle events. Custom instructions are unsupported. |
 | `set_model` | Updates the native thread's model for subsequent turns, using the native catalog. |
 | `set_thinking_level` | Updates native effort. Pi `off` maps to Codex `none`; native effort names otherwise remain unchanged. |
 | `set_session_name` | Sets the native thread name and durable adapter setting. |
 | `get_available_models` | Returns the paginated native model catalog in PiStack's model-picker shape. |
 | `get_available_thinking_levels` | Returns the selected native model's supported efforts. |
-| `get_commands` | Lists enabled native skills. `/skill:name` in a prompt resolves to a native skill input. |
+| `get_commands` | Lists `compact` and enabled native skills. `/skill:name` in a prompt resolves to a native skill input. |
 | `get_messages`, `get_entries` | Return the activity projection. Entry IDs derive from native item IDs; entries include native turn IDs. `get_entries` accepts `since`. |
 | `fork` | Switches the adapter to a native fork before the selected user-message turn. Returns the selected text, like Pi's edit-message workflow. Mid-turn steering entries cannot be forked separately. |
 | `core_agents` | Returns `{agents}` after reconciling all descendant native threads, including grandchildren. |
@@ -63,9 +63,19 @@ Queue modes, auto-compaction toggles, Pi session switching, arbitrary slash comm
 
 The adapter reads `--provider`, `--model`, `--thinking`, `--name`, and `--sandbox` from runtime arguments. Other runtime arguments are not passed to Codex. `appServerArgs` on the factory accepts native configuration flags. The defaults are `approvalPolicy: "never"` and `sandbox: "danger-full-access"`; a read-only probe uses `--sandbox read-only`.
 
+## Process ownership and whole-tree stop
+
+The production launcher requires Linux with a running systemd user manager. Each app-server gets a uniquely named transient `pistack-codex-UUID.service` with `KillMode=control-group`, a two-second stop deadline, and SIGKILL escalation. Its `systemd-run --pipe --wait` launcher stays attached to the adapter. Environment values are passed by inherited variable name, never copied into command arguments. Credentials still travel only through stdin. The service receives a private native home, not an auth file.
+
+`close()` stops that exact cgroup and awaits its launcher before releasing the account lease or publishing exit. This covers local tool processes that use `setsid`, double-fork, or ignore SIGTERM. Neither process names nor broad PID matching select the stop target, so sibling app-servers remain untouched. Launch registration is awaited before stopping to prevent a late-starting service escaping an early close.
+
+Root abort normally leaves the native session open after interrupting all known turns and background terminals. If a pending child has no interruptible turn, or native stop requests fail, it closes the owned cgroup instead and returns `coreClosed: true`. The response precedes the exit callback; the next request needs a reopened runtime. Saved native history is resumed without replaying accepted work.
+
+Unsupported stop boundaries are explicit. Non-Linux hosts and hosts without a systemd user manager cannot start this production launcher. Processes deliberately handed to another supervisor or a remote host are outside the local cgroup; the adapter does not stop those external services. A failure to stop the owned cgroup fails cleanup and retains the account lease rather than claiming the tree stopped.
+
 ## Events and context
 
-Root activity emits `agent_start`, `agent_end`, `turn_start`, `turn_end`, `message_start`, `message_update`, `message_end`, `tool_execution_start`, `tool_execution_update`, `tool_execution_end`, and compaction events. Reasoning summaries stream as thinking. Native token usage goes to the broker rather than synthetic message usage fields.
+Root `agent_start`/`agent_end` describe aggregate native-tree activity. A root turn completing does not emit `agent_end` while a descendant is busy. Activity also emits `turn_start`, `turn_end`, `message_start`, `message_update`, `message_end`, `tool_execution_start`, `tool_execution_update`, `tool_execution_end`, and compaction events. Reasoning summaries stream as thinking. Native token usage goes to the broker rather than synthetic message usage fields.
 
 `context_update` contains `context: {systemPrompt, tools, messages}`. It follows finalized `message_end` events. The adapter omits the optional `finalizesMessage` field; Remote derives its finalization key from the last assistant message. It does not send a message object in place of that key. Its `projection: "activity"` and `core: "codex"` fields matter. `systemPrompt` is empty because app-server does not expose the assembled prompt. `tools` lists observed native tool names with `activityOnly: true`, not model-visible tool schemas. The messages are native activity rendered into portable records. Compaction does not erase historical activity from this projection.
 
@@ -73,7 +83,7 @@ Every native child emits `core_agent` with a `CoreAgent` record. Root parent IDs
 
 ## Durable state and continuation
 
-One runtime owner opens a given `stateDir`. `codex-session.json` stores the native thread ID, settings, message timestamps, transfer status, transferred activity records, and dispatch receipts. Writes use atomic replacement. This is adapter state, not a Pi session file. `get_state.sessionFile` points to it so callers must not open it with Pi's session parser.
+One runtime owner opens a given `stateDir`. `codex-session.json` stores the native thread ID, saved provider/model settings, message timestamps, transfer status, transferred activity records, and dispatch receipts. Writes use atomic replacement. This is adapter state, not a Pi session file. `get_state.sessionFile` points to it so callers must not open it with Pi's session parser.
 
 `stateDir/codex` is the private native `CODEX_HOME`, including native history. The adapter links existing `config.toml`, `AGENTS.md`, `skills`, `agents`, `rules`, and `plugins` from the configured `CODEX_HOME`, or the user's `.codex`, into that directory. It does not copy native auth or unrelated threads. The external token login and ephemeral credential store keep auth out of files. Recovery requires both the adapter state and native home. Deleting either loses native continuation; there is no automatic conversation replay.
 
@@ -97,6 +107,12 @@ Focused fixture tests use no accounts or models:
 
 ```sh
 node_modules/.bin/vitest run packages/orchestrator/tests/codex-core.test.ts packages/orchestrator/tests/codex-rpc.test.ts --maxWorkers=1
+```
+
+The opt-in local process fixture requires the Linux user manager. It starts two isolated process trees, stops a SIGTERM-resistant tool and its detached grandchild, and checks that the sibling remains alive. It takes about two seconds and makes no backend request:
+
+```sh
+PI_CODEX_CGROUP_TEST=1 node_modules/.bin/vitest run packages/orchestrator/tests/codex-process.test.ts --maxWorkers=1
 ```
 
 The installed 0.146.0 probe used the sibling `openCoreAccount` broker with a read-only sandbox. Authentication, thread creation, catalog/effort/skill discovery, structured transfer, and transfer resume completed through the default `openCodexSession` binding. The catalog contained five models and six skills. No native `auth.json` was created. No model turn was submitted. Real generation, native tool execution, child spawning, and live compaction remain for the single integrated end-to-end model probe, not independent adapter spending.

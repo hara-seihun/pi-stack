@@ -2,9 +2,17 @@ import { afterEach, expect, it } from "vitest";
 import { chmodSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { spawn } from "node:child_process";
+import type { CodexProcessOptions, CodexProcess } from "../src/cores/codex-process.js";
 import { openCodexRpc } from "../src/cores/codex-rpc.js";
 import { credentialGuard } from "../src/cores/codex-auth.js";
 
+function fixtureProcess(options: CodexProcessOptions): CodexProcess {
+  const child = spawn(options.binary, options.args, { cwd: options.cwd, env: options.env, stdio: ["pipe", "pipe", "pipe"] });
+  let exited = false;
+  const done = new Promise<void>(resolve => child.once("close", () => { exited = true; resolve(); }));
+  return { child, async stop() { if (!exited) child.kill("SIGTERM"); await done; } };
+}
 const roots: string[] = [];
 afterEach(() => { for (const root of roots.splice(0)) rmSync(root, { recursive: true, force: true }); });
 function executable(body: string) {
@@ -33,7 +41,7 @@ createInterface({input:process.stdin}).on('line', line => {
  }
 });`);
   const notifications: unknown[] = [];
-  const rpc = openCodexRpc({ cwd: root, env: process.env, binary: path,
+  const rpc = openCodexRpc({ cwd: root, env: process.env, binary: path, launchProcess: fixtureProcess,
     notification: (method, params) => notifications.push({ method, params }),
     serverRequest: async () => ({ ok: true, value: { accessToken: "never-log-this-token", chatgptAccountId: "account" } }), exit() {},
   });
@@ -44,6 +52,27 @@ createInterface({input:process.stdin}).on('line', line => {
   } finally { await rpc.close(); }
 });
 
+it("awaits owned cleanup after malformed protocol output before announcing exit", async () => {
+  const { root, path } = executable(`process.stdin.on('data',()=>process.stdout.write('not-json\\n'));`);
+  let release!: () => void, started!: () => void, stops = 0, exited = false;
+  const gate = new Promise<void>(resolve => { release = resolve; });
+  const stopping = new Promise<void>(resolve => { started = resolve; });
+  const rpc = openCodexRpc({ cwd: root, env: process.env, binary: path,
+    launchProcess(options) {
+      const owner = fixtureProcess(options);
+      return { child: owner.child, async stop() { stops++; started(); await gate; await owner.stop(); } };
+    }, notification() {}, serverRequest: async () => ({ ok: false, error: "unsupported" }), exit() { exited = true; },
+  });
+  try {
+    expect((await rpc.request("initialize", {})).ok).toBe(false);
+    const closing = rpc.close();
+    await stopping;
+    expect(stops).toBe(1); expect(exited).toBe(false);
+    release(); await closing; await Promise.resolve();
+    expect(stops).toBe(1); expect(exited).toBe(true);
+  } finally { release(); await rpc.close(); }
+});
+
 it("preserves useful sanitized protocol errors and fails pending calls on process exit", async () => {
   const { root, path } = executable(`createInterface({input:process.stdin}).on('line', line => {
 const value=JSON.parse(line);
@@ -51,7 +80,7 @@ if(value.method==='thread/turns/list') send({id:value.id,error:{message:'not mat
 else process.exit(3);
 });`);
   const guard = credentialGuard(); guard.remember({ accessToken: "token-secret", chatgptAccountId: "account-secret" });
-  const rpc = openCodexRpc({ cwd: root, env: process.env, binary: path, sanitizeError: text => guard.clean(text),
+  const rpc = openCodexRpc({ cwd: root, env: process.env, binary: path, launchProcess: fixtureProcess, sanitizeError: text => guard.clean(text),
     notification() {}, serverRequest: async () => ({ ok: false, error: "unsupported" }), exit() {},
   });
   try {

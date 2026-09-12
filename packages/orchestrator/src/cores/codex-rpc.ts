@@ -1,5 +1,5 @@
-import { spawn } from "node:child_process";
 import { createInterface } from "node:readline";
+import { openCodexProcess } from "./codex-process.js";
 
 export type Json = Record<string, unknown>;
 export type RpcResult<T> = { ok: true; value: T } | { ok: false; error: string };
@@ -13,6 +13,7 @@ export interface CodexRpcOptions {
   env: NodeJS.ProcessEnv;
   binary?: string;
   args?: string[];
+  launchProcess?: typeof openCodexProcess;
   sanitizeError?(message: string): string;
   notification(method: string, params: Json): void;
   serverRequest(method: string, params: Json): Promise<RpcResult<unknown>>;
@@ -21,43 +22,48 @@ export interface CodexRpcOptions {
 export type OpenCodexRpc = (options: CodexRpcOptions) => CodexRpc;
 
 export const openCodexRpc: OpenCodexRpc = options => {
-  const child = spawn(options.binary ?? "codex", ["app-server", "--listen", "stdio://", ...(options.args ?? [])], {
-    cwd: options.cwd, env: options.env, stdio: ["pipe", "pipe", "pipe"],
-  });
+  const owner = (options.launchProcess ?? openCodexProcess)({ binary: options.binary ?? "codex",
+    args: ["app-server", "--listen", "stdio://", ...(options.args ?? [])], cwd: options.cwd, env: options.env });
+  const child = owner.child;
   // Native diagnostics can contain request bodies. They never enter portable logs.
   child.stderr.resume();
   const lines = createInterface({ input: child.stdout, crlfDelay: Infinity });
-  let nextId = 0, stopped = false, closing = false;
+  let nextId = 0, stopped = false, closing = false, exitNotified = false;
   let closePromise: Promise<void> | undefined;
-  let killTimer: NodeJS.Timeout | undefined;
-  const terminate = () => {
-    if (!child.pid || child.exitCode !== null || child.signalCode !== null) return;
-    child.kill("SIGTERM");
-    killTimer ??= setTimeout(() => child.kill("SIGKILL"), 2_000);
-  };
   const pending = new Map<number, { method: string; resolve(value: RpcResult<unknown>): void; timer: NodeJS.Timeout }>();
   const write = (value: unknown) => {
-    if (!stopped) child.stdin.write(JSON.stringify(value) + "\n");
+    if (!stopped && !closing) child.stdin.write(JSON.stringify(value) + "\n");
   };
-  const finish = (code?: number) => {
-    if (stopped) return;
+  const rejectPending = () => {
     stopped = true;
     for (const item of pending.values()) {
       clearTimeout(item.timer);
-      item.resolve({ ok: false, error: `Codex app-server exited during ${item.method}; outcome unknown` });
+      item.resolve({ ok: false, error: owner.startupFailure ?? `Codex app-server exited during ${item.method}; outcome unknown` });
     }
     pending.clear();
+  };
+  const close = () => closePromise ??= Promise.resolve().then(async () => {
+    closing = true;
+    rejectPending();
+    await owner.stop();
     lines.close();
-    options.exit(code);
+  });
+  const finish = (code?: number) => {
+    rejectPending();
+    if (exitNotified) return;
+    exitNotified = true;
+    // The adapter learns about process exit only after the owned cgroup is stopped.
+    void close().then(() => options.exit(code), () => options.exit(1));
   };
   child.once("error", () => finish(1));
-  child.stdin.on("error", () => { terminate(); finish(1); });
-  child.once("exit", code => { clearTimeout(killTimer); finish(code ?? undefined); });
+  child.stdin.on("error", () => finish(1));
+  child.once("close", code => finish(code ?? undefined));
   lines.on("line", line => {
+    if (stopped || closing) return;
     let message: Json;
     try { message = JSON.parse(line); }
-    catch { terminate(); finish(1); return; }
-    if (!message || typeof message !== "object" || Array.isArray(message)) { terminate(); finish(1); return; }
+    catch { finish(1); return; }
+    if (!message || typeof message !== "object" || Array.isArray(message)) { finish(1); return; }
     if (typeof message.method === "string") {
       const params = message.params && typeof message.params === "object" ? message.params as Json : {};
       if (message.id !== undefined) {
@@ -86,7 +92,6 @@ export const openCodexRpc: OpenCodexRpc = options => {
         const timer = setTimeout(() => {
           pending.delete(id);
           resolve({ ok: false, error: `Codex ${method} timed out; outcome unknown` });
-          terminate();
           finish(1);
         }, 30_000);
         pending.set(id, { method, resolve: resolve as (value: RpcResult<unknown>) => void, timer });
@@ -94,14 +99,6 @@ export const openCodexRpc: OpenCodexRpc = options => {
       });
     },
     notify: (method, params) => write({ method, params }),
-    close() {
-      return closePromise ??= new Promise<void>(resolve => {
-        closing = true;
-        if (!child.pid || child.exitCode !== null || child.signalCode !== null) { resolve(); return; }
-        child.once("exit", () => resolve());
-        child.stdin.end();
-        terminate();
-      });
-    },
+    close,
   };
 };
