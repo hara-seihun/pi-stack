@@ -24,7 +24,8 @@ class Fixture implements PiNative {
     this.commands.push(command);
     if (command.type === "prompt") this.output({ type: "agent_start" });
     if (command.type === "abort") this.output({ type: "agent_settled" });
-    this.output({ type: "response", id: command.id, command: command.type, success: true });
+    this.output({ type: "response", id: command.id, command: command.type, success: true,
+      ...(command.type === "get_state" ? { data: { isStreaming: false, pendingMessageCount: 0, sessionFile: this.state.sessionFile } } : {}) });
   }
   async inject(kind: string, data: Record<string, unknown>) {
     this.injections.push({ kind, data });
@@ -73,6 +74,11 @@ describe("Pi-owned delegation", () => {
     fixtures.get(first)!.finish("Waiting for my child");
     await turn();
     expect(output.filter(event => event.type === "agent_settled")).toHaveLength(0);
+    await core.command({ type: "get_state", id: "waiting-on-tree" });
+    expect(output.at(-1)).toMatchObject({ id: "waiting-on-tree", data: {
+      isStreaming: true, nativeIsStreaming: false, pendingMessageCount: 2, coreBusy: true,
+      sessionFile: fixtures.get("root")!.state.sessionFile,
+    } });
     fixtures.get(second)!.finish("grandchild result");
     await turn();
     expect(fixtures.get(first)!.injections[0]).toMatchObject({ kind: "core_child_result", data: { agentId: second, result: "grandchild result" } });
@@ -84,6 +90,8 @@ describe("Pi-owned delegation", () => {
     await turn();
     expect(output.filter(event => event.type === "agent_settled")).toHaveLength(1);
     expect(core.list().every(agent => agent.state === "idle")).toBe(true);
+    await core.command({ type: "get_state", id: "idle-tree" });
+    expect(output.at(-1)).toMatchObject({ id: "idle-tree", data: { isStreaming: false, pendingMessageCount: 0, coreBusy: false } });
     expect(output.some(event => event.type === "core_child_event" && event.agentId === second)).toBe(true);
   });
 
@@ -170,13 +178,13 @@ describe("Pi-owned delegation", () => {
     const { core, fixtures, output } = await setup();
     const child = childId(await core.delegate("root", "request", { task: "work" }));
     await turn();
-    await core.command({ type: "get_agents", id: "list" });
-    expect(output.at(-1)).toMatchObject({ command: "get_agents", success: true, data: { agents: [{ id: "root" }, { id: child }] } });
+    await core.command({ type: "core_agents", id: "list" });
+    expect(output.at(-1)).toMatchObject({ command: "core_agents", success: true, data: { agents: [{ id: "root" }, { id: child }] } });
     await core.command({ type: "core_agent_command", id: "control", agentId: child, action: "steer", message: "adjust" });
     expect(fixtures.get(child)!.commands.at(-1)).toMatchObject({ type: "steer", message: "adjust" });
     expect(output.at(-1)).toMatchObject({ command: "core_agent_command", success: true });
     await core.command({ type: "core_agent_read", agentId: child });
-    expect(output.at(-1)).toMatchObject({ success: true, data: { agent: { id: child }, messages: [] } });
+    expect(output.at(-1)).toMatchObject({ success: true, data: { agent: { id: child }, messages: [], state: { isStreaming: true } } });
     await expect(core.read(child, -1)).rejects.toThrow("Invalid Pi read page");
     await expect(core.control("root", { type: "abort" }, child)).rejects.toThrow("only its descendants");
   });

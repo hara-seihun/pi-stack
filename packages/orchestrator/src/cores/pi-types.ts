@@ -24,6 +24,9 @@ export interface PiSnapshot {
   model?: string;
   provider?: string;
   thinkingLevel?: string;
+  isStreaming?: boolean;
+  isCompacting?: boolean;
+  pendingMessageCount?: number;
   messages: Record<string, unknown>[];
   entries: Record<string, unknown>[];
 }

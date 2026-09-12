@@ -120,6 +120,21 @@ export class PiCoreSession implements CoreSession, PiToolsHost {
     try { return await operation; } finally { this.opening.delete(id); }
   }
 
+  private activity(id: string, state: Record<string, unknown> = {}) {
+    const node = this.node(id);
+    const local = this.native.get(id)?.snapshot();
+    const descendants = this.subtree(id).slice(1);
+    const snapshots = descendants.map(child => this.native.get(child.id)?.snapshot());
+    const pendingChildren = descendants.filter(child => child.busy || child.work && !child.work.delivered).length;
+    const nativeIsStreaming = Boolean(state.isStreaming ?? local?.isStreaming ?? node.busy);
+    const isStreaming = nativeIsStreaming || node.busy || pendingChildren > 0;
+    const isCompacting = Boolean(state.isCompacting ?? local?.isCompacting) || snapshots.some(snapshot => snapshot?.isCompacting);
+    const pendingMessageCount = Number(state.pendingMessageCount ?? local?.pendingMessageCount ?? 0)
+      + snapshots.reduce((count, snapshot) => count + (snapshot?.pendingMessageCount ?? 0), 0) + pendingChildren;
+    return { nativeIsStreaming, isStreaming, isCompacting, pendingMessageCount,
+      coreBusy: isStreaming || isCompacting || pendingMessageCount > 0 };
+  }
+
   private event(node: PiNode, event: CoreOutput): void {
     if (event.type === "response" && typeof event.id === "string") {
       const reply = this.replies.get(event.id);
@@ -135,7 +150,7 @@ export class PiCoreSession implements CoreSession, PiToolsHost {
     }
     if (event.type === "response" && event.command === "get_state" && event.success) {
       event = { ...event, data: { ...(event.data as object), core: "pi", coreAgents: this.list(),
-        coreBusy: this.subtree(node.id).some(agent => agent.busy || agent.state === "running" || agent.work && !agent.work.delivered) } };
+        ...this.activity(node.id, event.data as Record<string, unknown>) } };
     }
     if (node.parentId) this.output({ type: "core_child_event", core: "pi", rootId: this.options.sessionId,
       agentId: node.id, parentId: node.parentId, event });
@@ -158,6 +173,7 @@ export class PiCoreSession implements CoreSession, PiToolsHost {
         if (child?.work) child.work.delivered = true;
       }
     }
+    if (event.type === "queue_update") this.schedule();
     if (["agent_start", "agent_settled", "message_end"].includes(event.type)) {
       this.store.save(); this.observe(node); this.schedule();
     }
@@ -206,6 +222,8 @@ export class PiCoreSession implements CoreSession, PiToolsHost {
     if (this.closed) return;
     for (const node of this.store.nodes.values()) {
       if (node.busy || this.stopping.has(node.id) || this.failing.has(node.id) || this.injectingRuns.has(node.id)) continue;
+      const local = this.native.get(node.id)?.snapshot();
+      if (local?.isStreaming || local?.isCompacting) continue;
       const children = this.children(node.id);
       const ready = node.state === "failed" ? undefined : children.find(child => child.work?.status === "complete" && !child.work.delivered && !this.injecting.has(child.work.id));
       if (ready?.work) {
@@ -226,6 +244,7 @@ export class PiCoreSession implements CoreSession, PiToolsHost {
         continue;
       }
       if (children.some(child => child.work?.status === "running" || child.work && !child.work.delivered)) continue;
+      if (local?.pendingMessageCount) continue;
       const settled = this.settling.get(node.id);
       if (!settled) continue;
       this.settling.delete(node.id);
@@ -351,11 +370,13 @@ export class PiCoreSession implements CoreSession, PiToolsHost {
       command: command.type, success: error === undefined, ...(error ? { error } : { data }) });
     try {
       switch (command.type) {
-        case "get_agents": respond({ agents: this.list(command.parentId as string | undefined) }); return;
+        case "core_agents": respond({ agents: this.list(command.parentId as string | undefined) }); return;
         case "core_agent_read": {
           const id = String(command.agentId);
           const engine = await this.ensure(id);
-          respond({ agent: publicAgent(this.node(id)), ...engine.snapshot() }); return;
+          const { messages, entries, ...nativeState } = engine.snapshot();
+          respond({ agent: publicAgent(this.node(id)), messages, entries,
+            state: { ...nativeState, activity: this.node(id).state, ...this.activity(id) } }); return;
         }
         case "core_agent_command": {
           const { agentId, action, id: _id, type: _type, ...parameters } = command;

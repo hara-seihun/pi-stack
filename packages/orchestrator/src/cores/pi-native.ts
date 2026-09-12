@@ -3,7 +3,7 @@ import { existsSync } from "node:fs";
 import { join, resolve } from "node:path";
 import { pathToFileURL } from "node:url";
 import { createAgentSessionRuntime, createAgentSessionServices, createAgentSessionFromServices,
-  createBashTool, getAgentDir, getPackageDir, SessionManager, type AgentSessionRuntime, type CreateAgentSessionRuntimeFactory } from "@earendil-works/pi-coding-agent";
+  createBashTool, convertToLlm, getAgentDir, getPackageDir, SessionManager, type AgentSessionRuntime, type CreateAgentSessionRuntimeFactory } from "@earendil-works/pi-coding-agent";
 import { argument, type CoreOutput, type CoreSession } from "./contracts.js";
 import type { OpenPiNative } from "./pi-types.js";
 import { piChildTools } from "./pi-tools.js";
@@ -42,7 +42,17 @@ export const openPiNative: OpenPiNative = async (options, node, tools, output, e
     const factory: CreateAgentSessionRuntimeFactory = async ({ cwd, sessionManager, sessionStartEvent }) => {
       preparePiSession(sessionManager);
       const services = await createAgentSessionServices({ cwd, agentDir,
-        resourceLoaderOptions: { additionalExtensionPaths: extensions } });
+        resourceLoaderOptions: { additionalExtensionPaths: extensions,
+          extensionFactories: [{ name: "pi-core-context", factory: pi => {
+            pi.on("context", (event, ctx) => {
+              const active = new Set(pi.getActiveTools());
+              output({ type: "context_update", context: { systemPrompt: ctx.getSystemPrompt(),
+                tools: pi.getAllTools().filter(tool => active.has(tool.name))
+                  .map(({ name, description, parameters }) => ({ name, description, parameters })),
+                messages: convertToLlm(event.messages) } });
+            });
+          } }],
+        } });
       const errors = services.resourceLoader.getExtensions().errors;
       if (errors.length) throw new Error(`Session extensions failed: ${JSON.stringify(errors)}`);
       const model = node.provider && node.model ? services.modelRuntime.getModel(node.provider, node.model) : undefined;
@@ -83,6 +93,8 @@ export const openPiNative: OpenPiNative = async (options, node, tools, output, e
       model: runtime.session.model?.provider === "unknown" ? undefined : runtime.session.model?.id,
       provider: runtime.session.model?.provider === "unknown" ? undefined : runtime.session.model?.provider,
       thinkingLevel: runtime.session.thinkingLevel,
+      isStreaming: runtime.session.isStreaming, isCompacting: runtime.session.isCompacting,
+      pendingMessageCount: runtime.session.pendingMessageCount,
       messages: runtime.session.messages as unknown as Record<string, unknown>[],
       entries: runtime.session.sessionManager.getEntries() as unknown as Record<string, unknown>[] });
     runtime.setBeforeSessionInvalidate(() => { generation++; });
