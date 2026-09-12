@@ -180,6 +180,10 @@ button:disabled { cursor: default; opacity: .45; }
 .empty-state strong { font-size: 22px; }
 .empty-state span { color: var(--muted); }
 .conversation { min-height: 0; flex: 1; display: flex; flex-direction: column; }
+.drawing-slot { min-height: 0; flex: 1; display: flex; }
+.drawing-slot[hidden] { display: none; }
+.drawing-toggle[aria-pressed="true"] { color: var(--bg); background: var(--accent); }
+.upload-error { display: flex; align-items: center; justify-content: space-between; gap: 8px; padding: 8px 16px; color: var(--danger); }
 .scrollback { min-height: 0; flex: 1; display: flex; flex-direction: column-reverse; overflow: auto; overflow-anchor: auto; }
 .scroll-content { flex: 0 0 auto; width: 100%; padding: 18px clamp(16px, 3vw, 42px) 16px; }
 .transcript { width: min(100%, 980px); margin: 0 auto; }

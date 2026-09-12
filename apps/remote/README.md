@@ -38,6 +38,8 @@ The drawer reports only measured plan and hardware rows. Each plan row also carr
 
 Drop files anywhere in the client window to attach them to the open conversation's draft. A window-wide overlay names the destination. Dropping never sends a message, and read-only agent views do not accept attachments. Attachments stay with their conversation when switching threads, including while an upload is running.
 
+The paintbrush beside Attach and Paste replaces the transcript with a drawing canvas. Drag with a mouse, finger or pen to draw. The colour wheel chooses the brush colour; mouse-wheel scrolling or a two-finger pinch changes its radius rather than zooming the page. The toolbar also has a radius slider, undo and clear. Back to chat preserves the drawing. Each thread keeps its own drawing while the client stays open, including across thread switches, but reloading the client clears unattached drawings. Attach drawing exports a white-background PNG into that thread's message draft without sending it. A failed upload leaves the drawing open for retry. Both the browser and Android builds use this same component.
+
 Enter sends the composer only where a hardware keyboard is typing. On touch devices the media query `(hover: none) and (pointer: coarse)` matches, Enter inserts a newline, the key is labelled as a return key, and the send button submits. Phone keyboards have no comfortable way to type a newline otherwise, so sending on Enter cost multi-paragraph prompts.
 
 The drawer tabs use an icon and count for Interactive threads, Orchestrator agents, archived threads, and host files.
