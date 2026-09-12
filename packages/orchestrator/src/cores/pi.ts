@@ -131,8 +131,10 @@ export class PiCoreSession implements CoreSession, PiToolsHost {
     const isCompacting = Boolean(state.isCompacting ?? local?.isCompacting) || snapshots.some(snapshot => snapshot?.isCompacting);
     const pendingMessageCount = Number(state.pendingMessageCount ?? local?.pendingMessageCount ?? 0)
       + snapshots.reduce((count, snapshot) => count + (snapshot?.pendingMessageCount ?? 0), 0) + pendingChildren;
-    return { nativeIsStreaming, isStreaming, isCompacting, pendingMessageCount,
-      coreBusy: isStreaming || isCompacting || pendingMessageCount > 0 };
+    const internalBusy = [node, ...descendants].some(agent => this.opening.has(agent.id)
+      || this.injectingRuns.has(agent.id) || this.failing.has(agent.id) || this.settling.has(agent.id) || this.stopping.has(agent.id));
+    const coreBusy = isStreaming || isCompacting || pendingMessageCount > 0 || internalBusy;
+    return { nativeIsStreaming, isStreaming, isCompacting, pendingMessageCount, coreBusy, treeComplete: !coreBusy };
   }
 
   private event(node: PiNode, event: CoreOutput): void {
@@ -149,7 +151,11 @@ export class PiCoreSession implements CoreSession, PiToolsHost {
       this.refresh(node); this.store.save(); this.observe(node); this.schedule(); return;
     }
     if (event.type === "response" && event.command === "get_state" && event.success) {
+      const snapshot = this.native.get(node.id)?.snapshot();
+      const lastAssistantMessage = snapshot && [...snapshot.messages].reverse().find(message => message.role === "assistant");
       event = { ...event, data: { ...(event.data as object), core: "pi", coreAgents: this.list(),
+        nativeSessionId: snapshot?.nativeSessionId ?? node.nativeSessionId,
+        messageCount: snapshot?.messages.length ?? 0, lastAssistantMessage, context: snapshot?.context,
         ...this.activity(node.id, event.data as Record<string, unknown>) } };
     }
     if (node.parentId) this.output({ type: "core_child_event", core: "pi", rootId: this.options.sessionId,

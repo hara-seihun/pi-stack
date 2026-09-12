@@ -7,6 +7,7 @@ import { createAgentSessionRuntime, createAgentSessionServices, createAgentSessi
 import { argument, type CoreOutput, type CoreSession } from "./contracts.js";
 import type { OpenPiNative } from "./pi-types.js";
 import { piChildTools } from "./pi-tools.js";
+import { piIsolatedContext } from "./pi-isolated.js";
 import { checkpointPiSession, preparePiSession, seedPiSession } from "./pi-transfer.js";
 import { SESSION_RETRY } from "../host/session-lifecycle.js";
 
@@ -25,7 +26,6 @@ export const openPiNative: OpenPiNative = async (options, node, tools, output, e
     env.PI_REMOTE_MEETING_ID = undefined;
     env.PI_SUBAGENT_MODEL = undefined;
     env.PI_ORCHESTRATOR_ASSIGNED = undefined;
-    env.PI_ORCHESTRATOR_RUN_ID = undefined;
   }
   return scope.run(env, async () => {
     let generation = 0;
@@ -39,10 +39,16 @@ export const openPiNative: OpenPiNative = async (options, node, tools, output, e
       }
       seedPiSession(node.sessionFile, node.cwd, node.parentId ? undefined : options.transfer);
     }
+    let acceptedContext: { tools: string[]; extensions?: string[] } | undefined;
     const factory: CreateAgentSessionRuntimeFactory = async ({ cwd, sessionManager, sessionStartEvent }) => {
       preparePiSession(sessionManager);
-      const services = await createAgentSessionServices({ cwd, agentDir,
-        resourceLoaderOptions: { additionalExtensionPaths: extensions,
+      const isolated = await piIsolatedContext(options, cwd, sessionManager.getSessionFile()!, env, scope);
+      const services = await createAgentSessionServices({ cwd, agentDir: isolated?.agentDir ?? agentDir,
+        settingsManager: isolated?.settingsManager,
+        resourceLoaderOptions: isolated ? {
+          noExtensions: true, noSkills: true, noPromptTemplates: true, noThemes: true, noContextFiles: true,
+          extensionsOverride: () => isolated.resourceLoader.getExtensions(),
+        } : { additionalExtensionPaths: extensions,
           extensionFactories: [{ name: "pi-core-context", factory: pi => {
             pi.on("context", (event, ctx) => {
               const active = new Set(pi.getActiveTools());
@@ -53,6 +59,10 @@ export const openPiNative: OpenPiNative = async (options, node, tools, output, e
             });
           } }],
         } });
+      if (isolated) {
+        services.resourceLoader = isolated.resourceLoader;
+        acceptedContext = isolated.context;
+      }
       const errors = services.resourceLoader.getExtensions().errors;
       if (errors.length) throw new Error(`Session extensions failed: ${JSON.stringify(errors)}`);
       const model = node.provider && node.model ? services.modelRuntime.getModel(node.provider, node.model) : undefined;
@@ -61,7 +71,8 @@ export const openPiNative: OpenPiNative = async (options, node, tools, output, e
         ...Object.fromEntries(Object.entries(env).filter(([key]) => key.startsWith("PI_REMOTE_") || key.startsWith("PI_STACK_CORE_") || key === "PI_SUBAGENT_MODEL")),
         PI_SESSION_FILE: sessionManager.getSessionFile(), PI_REMOTE_CONTEXT_OWNER_PID: String(process.pid) } }) });
       const created = await createAgentSessionFromServices({ services, sessionManager, sessionStartEvent, model,
-        thinkingLevel: node.thinkingLevel as never, customTools: [bash, ...piChildTools(tools, node.id)] });
+        thinkingLevel: node.thinkingLevel as never, tools: isolated?.tools,
+        customTools: [bash, ...piChildTools(tools, node.id)] });
       const agentPrompt = created.session.agent.prompt.bind(created.session.agent);
       const agentContinue = created.session.agent.continue.bind(created.session.agent);
       const assertRun = () => {
@@ -94,7 +105,7 @@ export const openPiNative: OpenPiNative = async (options, node, tools, output, e
       provider: runtime.session.model?.provider === "unknown" ? undefined : runtime.session.model?.provider,
       thinkingLevel: runtime.session.thinkingLevel,
       isStreaming: runtime.session.isStreaming, isCompacting: runtime.session.isCompacting,
-      pendingMessageCount: runtime.session.pendingMessageCount,
+      pendingMessageCount: runtime.session.pendingMessageCount, context: acceptedContext,
       messages: runtime.session.messages as unknown as Record<string, unknown>[],
       entries: runtime.session.sessionManager.getEntries() as unknown as Record<string, unknown>[] });
     runtime.setBeforeSessionInvalidate(() => { generation++; });

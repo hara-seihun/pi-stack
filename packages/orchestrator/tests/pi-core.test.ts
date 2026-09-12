@@ -76,7 +76,8 @@ describe("Pi-owned delegation", () => {
     expect(output.filter(event => event.type === "agent_settled")).toHaveLength(0);
     await core.command({ type: "get_state", id: "waiting-on-tree" });
     expect(output.at(-1)).toMatchObject({ id: "waiting-on-tree", data: {
-      isStreaming: true, nativeIsStreaming: false, pendingMessageCount: 2, coreBusy: true,
+      isStreaming: true, nativeIsStreaming: false, pendingMessageCount: 2, coreBusy: true, treeComplete: false,
+      nativeSessionId: "native-root",
       sessionFile: fixtures.get("root")!.state.sessionFile,
     } });
     fixtures.get(second)!.finish("grandchild result");
@@ -91,7 +92,8 @@ describe("Pi-owned delegation", () => {
     expect(output.filter(event => event.type === "agent_settled")).toHaveLength(1);
     expect(core.list().every(agent => agent.state === "idle")).toBe(true);
     await core.command({ type: "get_state", id: "idle-tree" });
-    expect(output.at(-1)).toMatchObject({ id: "idle-tree", data: { isStreaming: false, pendingMessageCount: 0, coreBusy: false } });
+    expect(output.at(-1)).toMatchObject({ id: "idle-tree", data: { isStreaming: false, pendingMessageCount: 0, coreBusy: false,
+      treeComplete: true, messageCount: 2, lastAssistantMessage: { role: "assistant", content: [{ type: "text", text: "all done" }] } } });
     expect(output.some(event => event.type === "core_child_event" && event.agentId === second)).toBe(true);
   });
 

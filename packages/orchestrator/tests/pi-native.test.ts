@@ -1,8 +1,9 @@
-import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, expect, it } from "vitest";
 import { SessionManager } from "@earendil-works/pi-coding-agent";
+import { Store } from "../src/store.js";
 import { openPiSession } from "../src/cores/pi.js";
 import { seedPiSession } from "../src/cores/pi-transfer.js";
 import type { CoreCommand, CoreOutput, CoreSessionOptions } from "../src/cores/contracts.js";
@@ -54,7 +55,7 @@ it("retains SDK discovery, core tools, shared RPC commands and durable session r
     return [...output].reverse().find(event => event.type === "response" && event.id === id)!;
   };
   const state = await request({ type: "get_state" });
-  expect(state).toMatchObject({ success: true, data: { sessionName: "Fixture session", messageCount: 1, core: "pi", coreBusy: false } });
+  expect(state).toMatchObject({ success: true, data: { sessionName: "Fixture session", messageCount: 1, core: "pi", coreBusy: false, treeComplete: true } });
   const original = (state.data as { sessionId: string; sessionFile: string });
   const context = await request({ type: "get_core_context" });
   expect((context.data as { systemPrompt: string }).systemPrompt).toContain("fixture context supplied by the project");
@@ -79,4 +80,43 @@ it("retains SDK discovery, core tools, shared RPC commands and durable session r
   expect(output.at(-1)).toMatchObject({ id: "reopened", data: { messages: [{ role: "user", content: "Historical user request" }] } });
   await reopened.close();
   expect(exits).toBe(2);
+});
+
+it("consumes and confirms the isolated fleet context without restoring scrubbed resources", async () => {
+  const originalCwd = process.cwd(), environment = { ...process.env };
+  const cwd = directory();
+  mkdirSync(join(cwd, ".pi/extensions"), { recursive: true });
+  writeFileSync(join(cwd, "AGENTS.md"), "UNSELECTED HOST CONTEXT");
+  writeFileSync(join(cwd, ".pi/extensions/unselected.mjs"), "throw new Error('unselected project extension loaded')");
+  const extension = join(cwd, "selected.mjs");
+  writeFileSync(extension, `export default pi => {
+    for (const name of ['inspect_fixture','unselected_tool']) pi.registerTool({name,label:name,description:name,parameters:{type:'object',properties:{}},execute:async()=>({content:[],details:{}})});
+  }`);
+  const ledger = join(cwd, "ledger.sqlite3");
+  Store.open(ledger).close();
+  const context = { tools: ["read", "inspect_fixture"], extensions: [extension] };
+  const events: CoreOutput[] = [];
+  let core: Awaited<ReturnType<typeof openPiSession>> | undefined;
+  try {
+    core = await openPiSession({ cwd, sessionId: "isolated-root", stateDir: join(cwd, "state"),
+      args: ["--orchestrator-context", JSON.stringify(context)],
+      env: { PI_ORCHESTRATOR_LEDGER: ledger, PI_ORCHESTRATOR_CORE_USAGE: "worker",
+        PI_ORCHESTRATOR_ASSIGNED: undefined, PI_ORCHESTRATOR_RUN_ID: undefined,
+        PI_REMOTE_SESSION_ID: "unrelated-thread", OPENAI_API_KEY: "fixture-key" },
+    }, event => events.push(event), () => {});
+    await core.command({ type: "get_state", id: "isolated-state" });
+    expect(events.at(-1)).toMatchObject({ id: "isolated-state", data: { context, treeComplete: true, messageCount: 0 } });
+    await core.command({ type: "get_core_context", id: "isolated-context" });
+    const selected = events.at(-1)?.data as { systemPrompt: string; tools: { name: string }[] };
+    expect(selected.tools.map(tool => tool.name).sort()).toEqual([...context.tools].sort());
+    expect(selected.systemPrompt).not.toContain("UNSELECTED HOST CONTEXT");
+    expect(process.env.HOME).toBe(join(cwd, ".home"));
+    expect(process.env.PI_REMOTE_SESSION_ID).toBeUndefined();
+    expect(process.env.OPENAI_API_KEY).toBeUndefined();
+  } finally {
+    await core?.close();
+    process.chdir(originalCwd);
+    for (const key of Object.keys(process.env)) if (!(key in environment)) delete process.env[key];
+    Object.assign(process.env, environment);
+  }
 });
