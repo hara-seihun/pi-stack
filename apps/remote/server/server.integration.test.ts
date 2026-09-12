@@ -38,13 +38,64 @@ let startupEventsFixture = false;
 setDefaultTimeout(30_000);
 
 async function api(method: string, path: string, body?: unknown) {
-  const response = await fetch(base + path, {
+  let requestPath = path;
+  let requestBody = body;
+  const route = /^\/v1\/sessions\/([^/]+)\/(context|settings|commands|command|fork|core\/agents\/[^/?]+)(?:\?.*)?$/.exec(path);
+  if (route && (method === "PUT" || method === "PATCH") && route[2] === "context"
+    && requestBody && typeof requestBody === "object" && !("coreGeneration" in requestBody)) {
+    requestBody = { ...runtimeOwner(route[1]), ...requestBody };
+  }
+  const generationRequired = route && (route[2] === "command" || route[2] === "fork"
+    || route[2].startsWith("core/agents/") && method === "POST"
+    || route[2] === "settings" && method === "PUT");
+  if (generationRequired && requestBody && typeof requestBody === "object" && !("coreGeneration" in requestBody)) {
+    requestBody = { coreGeneration: await coreGeneration(route[1]), ...requestBody };
+  }
+  if (route && method === "GET" && (route[2] === "commands" || route[2].startsWith("core/agents/"))
+    && !new URL(requestPath, base).searchParams.has("coreGeneration")) {
+    const separator = requestPath.includes("?") ? "&" : "?";
+    requestPath += `${separator}coreGeneration=${encodeURIComponent(await coreGeneration(route[1]))}`;
+  }
+  if (method === "POST" && path === "/v1/sync" && requestBody && typeof requestBody === "object") {
+    const sync = requestBody as { session?: { id?: unknown; coreGeneration?: unknown } };
+    if (sync.session && typeof sync.session.id === "string" && !("coreGeneration" in sync.session)) {
+      requestBody = { ...sync, session: { ...sync.session, coreGeneration: await coreGeneration(sync.session.id) } };
+    }
+  }
+  const response = await fetch(base + requestPath, {
     method,
-    headers: body === undefined ? undefined : { "content-type": "application/json" },
-    body: body === undefined ? undefined : JSON.stringify(body),
+    headers: requestBody === undefined ? undefined : { "content-type": "application/json" },
+    body: requestBody === undefined ? undefined : JSON.stringify(requestBody),
   });
   const value = await response.json() as any;
   return { status: response.status, value, stateVersion: response.headers.get("x-pi-state-version") };
+}
+
+function runtimeOwner(id: string): { coreGeneration: string; runtimeInstance: string } {
+  const ledger = new Database(join(root, "data", "supervisor.sqlite3"), { readonly: true });
+  try {
+    const owner = ledger.query("SELECT generation,instance FROM execution_observations WHERE session_id=?").get(id) as
+      { generation: string; instance: string } | null;
+    if (!owner) throw new Error(`Session ${id} has no runtime owner`);
+    return { coreGeneration: owner.generation, runtimeInstance: owner.instance };
+  } finally {
+    ledger.close();
+  }
+}
+
+async function coreGeneration(id: string): Promise<string> {
+  const result = await api("GET", `/v1/sessions/${id}`);
+  return result.value.session.coreGeneration;
+}
+
+async function syncSettings(id: string) {
+  const generation = await coreGeneration(id);
+  const result = await api("POST", "/v1/sync", {
+    waitMs: 0,
+    session: { id, coreGeneration: generation, settings: true },
+  });
+  expect(result.value.session).toMatchObject({ id, coreGeneration: generation, revision: expect.any(Number) });
+  return result.value.session.settings;
 }
 
 async function waitFor<T>(read: () => Promise<T>, accept: (value: T) => boolean, timeoutMs = 8_000): Promise<T> {
@@ -181,7 +232,7 @@ model_id = sys.argv[sys.argv.index('--model') + 1] if '--model' in sys.argv else
 thinking_level = sys.argv[sys.argv.index('--thinking') + 1] if '--thinking' in sys.argv else 'off'
 # Published by rename so a reader never catches a half-written launch record.
 with open(os.environ['PI_FAKE_LAUNCH'] + '.writing', 'w') as launch:
- json.dump({'argv': sys.argv, 'pid': os.getpid(), 'sessionId': os.environ.get('PI_REMOTE_SESSION_ID'), 'subagentModel': os.environ.get('PI_SUBAGENT_MODEL'), 'serverUrl': os.environ.get('PI_REMOTE_SERVER_URL'), 'serviceTierFile': os.environ.get('PI_REMOTE_SERVICE_TIER_FILE'), 'bashTimeoutSeconds': os.environ.get('PI_REMOTE_BASH_TIMEOUT_MAX_SECONDS'), 'agentDir': os.environ.get('PI_CODING_AGENT_DIR'), 'offline': os.environ.get('PI_OFFLINE')}, launch)
+ json.dump({'argv': sys.argv, 'pid': os.getpid(), 'sessionId': os.environ.get('PI_REMOTE_SESSION_ID'), 'subagentModel': os.environ.get('PI_SUBAGENT_MODEL'), 'serverUrl': os.environ.get('PI_REMOTE_SERVER_URL'), 'coreGeneration': os.environ.get('PI_REMOTE_CORE_GENERATION'), 'runtimeInstance': os.environ.get('PI_REMOTE_RUNTIME_INSTANCE'), 'serviceTierFile': os.environ.get('PI_REMOTE_SERVICE_TIER_FILE'), 'bashTimeoutSeconds': os.environ.get('PI_REMOTE_BASH_TIMEOUT_MAX_SECONDS'), 'agentDir': os.environ.get('PI_CODING_AGENT_DIR'), 'offline': os.environ.get('PI_OFFLINE')}, launch)
 os.replace(os.environ['PI_FAKE_LAUNCH'] + '.writing', os.environ['PI_FAKE_LAUNCH'])
 streaming = False
 compacting = False
@@ -191,6 +242,11 @@ steering = []
 follow_up = []
 first_state = True
 child = None
+execution_revision = 0
+operations = {}
+operation_kinds = {}
+terminal_candidate = None
+last_operation_error = None
 editable_entries = [
  {'type':'message','id':'edit-u1','parentId':None,'timestamp':'2026-09-02T00:00:00.000Z','message':{'role':'user','content':'keep this','timestamp':100}},
  {'type':'message','id':'edit-a1','parentId':'edit-u1','timestamp':'2026-09-02T00:00:01.000Z','message':{'role':'assistant','content':[{'type':'text','text':'keep reply'}],'timestamp':101}},
@@ -198,7 +254,47 @@ editable_entries = [
  {'type':'message','id':'edit-a2','parentId':'edit-u2','timestamp':'2026-09-02T00:00:03.000Z','message':{'role':'assistant','content':[{'type':'text','text':'remove reply'}],'timestamp':201}},
 ]
 editable_leaf = 'edit-a2'
+def execution_snapshot():
+ states = [operation['state'] for operation in operations.values()]
+ status = 'blocked' if 'unknown' in states else ('running' if any(state in ('pending','accepted','running') for state in states) else 'idle')
+ return {'revision':execution_revision,'status':status,'operations':list(operations.values())}
+def publish_execution():
+ global execution_revision
+ execution_revision += 1
+ print(json.dumps({'type':'execution_update','execution':execution_snapshot()}), flush=True)
+def transition_work(work_id, state, error=None):
+ if not work_id or work_id not in operations or operations[work_id]['state'] in ('succeeded','failed','cancelled'): return
+ operations[work_id] = {'workId':work_id,'state':state,**({'error':error} if error else {})}
+ publish_execution()
+def begin_work(request):
+ global terminal_candidate, last_operation_error
+ work_id = request.get('workId')
+ if not work_id: return
+ terminal_candidate = None
+ last_operation_error = None
+ if work_id not in operations:
+  operations[work_id] = {'workId':work_id,'state':'pending'}
+  operation_kinds[work_id] = request.get('type')
+  publish_execution()
+ transition_work(work_id,'accepted')
+def finish_active(state, error=None):
+ for work_id, operation in list(operations.items()):
+  if operation['state'] in ('pending','accepted','running'): transition_work(work_id,state,error)
 def out(value):
+ global terminal_candidate, last_operation_error
+ kind = value.get('type')
+ if kind == 'agent_start':
+  for work_id, operation in list(operations.items()):
+   if operation['state'] in ('pending','accepted'): transition_work(work_id,'running')
+ elif kind == 'compaction_end' and value.get('errorMessage'):
+  last_operation_error = value.get('errorMessage')
+ elif kind == 'message_end' and value.get('message',{}).get('role') == 'assistant':
+  message = value['message']; reason = message.get('stopReason')
+  terminal_candidate = ('failed', message.get('errorMessage') or last_operation_error or 'Core operation failed') if reason == 'error' else (('cancelled', message.get('errorMessage') or last_operation_error or 'Core operation cancelled') if reason == 'aborted' else ('succeeded', None))
+ elif kind == 'agent_settled' and terminal_candidate:
+  finish_active(*terminal_candidate)
+  terminal_candidate = None
+  last_operation_error = None
  print(json.dumps(value), flush=True)
 def finish_release_later():
  global streaming
@@ -240,7 +336,7 @@ for line in sys.stdin:
    if os.environ.get('PI_FAKE_STARTUP_EVENTS'):
     streaming = True
     out({'type':'agent_start'})
-  out({'type':'response','id':rid,'command':'get_state','success':True,'data':{'isStreaming':streaming,'isCompacting':compacting,'pendingMessageCount':len(steering)+len(follow_up),'messageCount':0,'thinkingLevel':thinking_level,'sessionFile':None,'sessionName':session_name,'model':{'provider':provider,'id':model_id,'name':model_id}}})
+  out({'type':'response','id':rid,'command':'get_state','success':True,'data':{'execution':execution_snapshot(),'isStreaming':streaming,'isCompacting':compacting,'pendingMessageCount':len(steering)+len(follow_up),'messageCount':0,'thinkingLevel':thinking_level,'sessionFile':None,'sessionName':session_name,'model':{'provider':provider,'id':model_id,'name':model_id}}})
  elif kind == 'get_available_models':
   out({'type':'response','id':rid,'command':kind,'success':True,'data':{'models':[
    {'provider':'openai-codex-2','id':'gpt-6-astra','name':'GPT-6 Astra duplicate'},
@@ -270,7 +366,9 @@ for line in sys.stdin:
   out({'type':'response','id':rid,'command':'set_session_name','success':True})
  elif kind == 'prompt':
   last = request.get('message','')
+  begin_work(request)
   if last == 'retry-prompt':
+   transition_work(request.get('workId'),'failed','simulated rejection')
    out({'type':'response','id':rid,'command':'prompt','success':False,'error':'simulated rejection'})
    continue
   streaming = True
@@ -411,14 +509,23 @@ for line in sys.stdin:
     out({'type':'message_end','message':{'role':'assistant','content':[{'type':'text','text':'ack was lost'}]}})
     streaming = False
     out({'type':'agent_settled'})
- elif kind == 'compact' and request.get('customInstructions') == 'gate failure':
+ elif kind == 'compact':
+  begin_work(request)
+  transition_work(request.get('workId'),'running')
+  out({'type':'response','id':rid,'command':'compact','success':True})
   compacting = True
   out({'type':'compaction_start','reason':'manual'})
-  gate('manual-compaction')
-  compacting = False
-  out({'type':'compaction_end','reason':'manual','aborted':False,'willRetry':False,'errorMessage':'native idle-timeout; explicit recovery required'})
-  out({'type':'response','id':rid,'command':'compact','success':False,'error':'native idle-timeout; explicit recovery required'})
+  if request.get('customInstructions') == 'gate failure':
+   gate('manual-compaction')
+   compacting = False
+   out({'type':'compaction_end','reason':'manual','aborted':False,'willRetry':False,'errorMessage':'native idle-timeout; explicit recovery required'})
+   transition_work(request.get('workId'),'failed','native idle-timeout; explicit recovery required')
+  else:
+   compacting = False
+   out({'type':'compaction_end','reason':'manual','result':{'summary':'done'},'aborted':False,'willRetry':False})
+   transition_work(request.get('workId'),'succeeded')
  elif kind == 'steer':
+  begin_work(request)
   steering.append(request.get('message',''))
   out({'type':'queue_update','steering':steering,'followUp':follow_up})
   out({'type':'response','id':rid,'command':'steer','success':True})
@@ -430,6 +537,7 @@ for line in sys.stdin:
     streaming = False
     out({'type':'agent_settled'})
  elif kind == 'follow_up':
+  begin_work(request)
   follow_up.append(request.get('message',''))
   out({'type':'queue_update','steering':steering,'followUp':follow_up})
   out({'type':'response','id':rid,'command':'follow_up','success':True})
@@ -448,6 +556,12 @@ for line in sys.stdin:
     pause(0.3)
     out({'type':'message_end','message':{'role':'assistant','content':[{'type':'text','text':'cancelled queue executed'}]}})
    out({'type':'response','id':rid,'command':'abort','success':True})
+   for work_id, operation in list(operations.items()):
+    if operation['state'] not in ('pending','accepted','running'): continue
+    if (steering or follow_up) and operation_kinds.get(work_id) in ('steer','follow_up'):
+     transition_work(work_id,'succeeded')
+    else:
+     transition_work(work_id,'cancelled','Stopped by user')
    steering.clear()
    follow_up.clear()
    out({'type':'queue_update','steering':steering,'followUp':follow_up})
@@ -537,8 +651,8 @@ describe("web and supervisor integration", () => {
   test("switches an idle core using a saved transfer and pins the selected generation", async () => {
     const id = await createThread("home","astra");
     const switched = await api("PUT",`/v1/sessions/${id}/settings`,{core:"codex"});
-    expect(switched.status).toBe(200);
-    expect(switched.value.settings).toMatchObject({core:"codex",bashTimeoutSupported:false});
+    expect(switched).toMatchObject({ status: 200, value: { accepted: true } });
+    expect(await syncSettings(id)).toMatchObject({ core: "codex", bashTimeoutSupported: false });
     const ledger = new Database(join(root,"data","supervisor.sqlite3"),{readonly:true});
     try {
       const pinned = ledger.query("SELECT core,state_dir FROM session_cores WHERE session_id=?").get(id) as any;
@@ -546,12 +660,43 @@ describe("web and supervisor integration", () => {
       expect(JSON.parse(readFileSync(join(pinned.state_dir,"transfer.json"),"utf8")).messages[0].content[0].text).toBe("Prior conversation");
       expect((ledger.query("SELECT state FROM core_switches WHERE session_id=?").get(id) as any).state).toBe("complete");
       const restored = await api("PUT",`/v1/sessions/${id}/settings`,{core:"pi"});
-      expect(restored.status).toBe(200);
-      expect(restored.value.settings.core).toBe("pi");
+      expect(restored).toMatchObject({ status: 200, value: { accepted: true } });
+      expect((await syncSettings(id)).core).toBe("pi");
     } finally { ledger.close(); }
   },15_000);
 
-  test("live events during activation are not cancellation and preserve RUNNING", async () => {
+  test("rejects controls and context from a stale core owner", async () => {
+    const id = await createThread("home", "astra");
+    const current = runtimeOwner(id);
+    const staleGeneration = `${current.coreGeneration}-retired`;
+
+    expect(await api("PUT", `/v1/sessions/${id}/settings`, {
+      coreGeneration: staleGeneration,
+      thinkingLevel: "low",
+    })).toMatchObject({ status: 409, value: { error: expect.stringContaining("generation changed") } });
+    expect(await api("GET", `/v1/sessions/${id}/commands?coreGeneration=${encodeURIComponent(staleGeneration)}`))
+      .toMatchObject({ status: 409, value: { error: expect.stringContaining("generation changed") } });
+    expect(await api("GET", `/v1/sessions/${id}/core/agents/root?coreGeneration=${encodeURIComponent(staleGeneration)}`))
+      .toMatchObject({ status: 409, value: { error: expect.stringContaining("generation changed") } });
+    expect(await api("POST", `/v1/sessions/${id}/command`, {
+      coreGeneration: staleGeneration,
+      requestId: crypto.randomUUID(),
+      name: "compact",
+    })).toMatchObject({ status: 409, value: { error: expect.stringContaining("generation changed") } });
+    expect(await api("POST", `/v1/sessions/${id}/fork`, {
+      coreGeneration: staleGeneration,
+      requestId: crypto.randomUUID(),
+      messageTimestamp: 200,
+    })).toMatchObject({ status: 409, value: { error: expect.stringContaining("generation changed") } });
+    expect(await api("PUT", `/v1/sessions/${id}/context`, {
+      coreGeneration: staleGeneration,
+      runtimeInstance: current.runtimeInstance,
+      capturedAt: Date.now(),
+      context: { systemPrompt: "stale", tools: [], messages: [] },
+    })).toMatchObject({ status: 410, value: { error: "Context publisher has been retired" } });
+  });
+
+  test("presentation events during activation do not manufacture running execution", async () => {
     server.kill(); await server.exited;
     startupEventsFixture = true;
     await startServer();
@@ -560,10 +705,8 @@ describe("web and supervisor integration", () => {
       const created = await api("POST", "/v1/sessions", {requestId:crypto.randomUUID(),destination:"home",model:"astra"});
       expect(created.status).toBe(201); id = created.value.session.id;
       const read = () => api("GET", `/v1/sessions/${id}`).then(result=>result.value.session);
-      await waitFor(read, session=>session?.state === "RUNNING" || session?.state === "FAILED");
-      await Bun.sleep(100);
-      const session = await read();
-      expect(session.state).toBe("RUNNING");
+      const session = await waitFor(read, value => value?.state === "IDLE" || value?.state === "FAILED");
+      expect(session.state).toBe("IDLE");
       expect(session.lastError).toBeNull();
     } finally {
       if(id)await api("DELETE", `/v1/sessions/${id}`);
@@ -714,8 +857,8 @@ describe("web and supervisor integration", () => {
     const previousPid = Number(JSON.parse(readFileSync(fakeLaunch, "utf8")).pid);
 
     const updated = await api("PUT", `/v1/sessions/${id}/settings`, { bashTimeoutSeconds: 300 });
-    expect(updated.status).toBe(200);
-    expect(updated.value.settings.bashTimeoutSeconds).toBe(300);
+    expect(updated).toMatchObject({ status: 200, value: { accepted: true } });
+    expect((await syncSettings(id)).bashTimeoutSeconds).toBe(300);
     const launch = JSON.parse(readFileSync(fakeLaunch, "utf8"));
     expect(Number(launch.pid)).not.toBe(previousPid);
     expect(launch.bashTimeoutSeconds).toBe("300");
@@ -869,10 +1012,11 @@ describe("web and supervisor integration", () => {
       }],
     };
     await api("PUT", `/v1/sessions/${id}/context`, { capturedAt: 300, context: firstContext });
+    const generation = await coreGeneration(id);
     const firstResponse = await fetch(`${base}/v1/sync`, {
       method: "POST",
       headers: { "content-type": "application/json", "accept-encoding": "gzip" },
-      body: JSON.stringify({ seq: 0, waitMs: 0, session: { id, contextHash: "" } }),
+      body: JSON.stringify({ seq: 0, waitMs: 0, session: { id, coreGeneration: generation, contextHash: "" } }),
     });
     expect(firstResponse.headers.get("content-encoding")).toBe("gzip");
     const first = await firstResponse.json() as any;
@@ -894,7 +1038,21 @@ describe("web and supervisor integration", () => {
     expect((await api("GET", `/v1/sessions/${id}/context`)).value.context).toEqual(firstContext);
 
     const unchanged = await api("POST", "/v1/sync", { seq: first.seq, waitMs: 0, session: { id, contextHash: first.session.context.hash } });
+    expect(unchanged.value.session).toMatchObject({ id, coreGeneration: generation, revision: expect.any(Number), settings: null });
     expect(unchanged.value.session.context).toBeNull();
+
+    const absentGeneration = await fetch(`${base}/v1/sync`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ seq: first.seq, waitMs: 0, session: { id, contextHash: first.session.context.hash } }),
+    }).then(response => response.json()) as any;
+    expect(absentGeneration.session.context).toMatchObject({ kind: "full", hash: first.session.context.hash });
+    const staleGeneration = await api("POST", "/v1/sync", {
+      seq: first.seq,
+      waitMs: 0,
+      session: { id, coreGeneration: `${generation}-retired`, contextHash: first.session.context.hash },
+    });
+    expect(staleGeneration.value.session.context).toMatchObject({ kind: "full", hash: first.session.context.hash });
 
     const secondContext = { ...firstContext, messages: [{ role: "assistant", content: [{ type: "text", text: "first and second" }] }] };
     const baseDocument = JSON.stringify(firstContext);
@@ -1331,7 +1489,7 @@ describe("web and supervisor integration", () => {
     expect(commands.map((entry: any) => entry.type)).toEqual(["prompt"]);
   }, 20_000);
 
-  test("runs /compact through RPC instead of recording a user prompt", async () => {
+  test("tracks /compact as durable work with one stable execution receipt", async () => {
     const id = await createThread();
     const listed = await api("GET", `/v1/sessions/${id}/commands`);
     expect(listed.value.commands).toEqual(expect.arrayContaining([
@@ -1339,12 +1497,24 @@ describe("web and supervisor integration", () => {
     ]));
     const requestId = crypto.randomUUID();
     const result = await api("POST", `/v1/sessions/${id}/command`, { requestId, name: "compact" });
-    expect(result).toMatchObject({ status: 202, value: { accepted: true, command: "compact" } });
+    expect(result).toMatchObject({ status: 202, value: { accepted: true, command: "compact", workId: expect.any(String) } });
+    const repeated = await api("POST", `/v1/sessions/${id}/command`, { requestId, name: "compact" });
+    expect(repeated).toMatchObject({ status: result.status, value: result.value });
     const rpcCommands = await waitFor(
-      async () => readJsonLines(fakeRpcLog).filter((entry: any) => entry.sessionId === id),
-      (entries) => entries.some((entry: any) => entry.type === "compact"),
+      async () => readJsonLines(fakeRpcLog).filter((entry: any) => entry.sessionId === id && entry.type === "compact"),
+      (entries) => entries.length === 1,
     );
-    expect(rpcCommands.some((entry: any) => entry.type === "compact")).toBe(true);
+    expect(rpcCommands[0]).toMatchObject({ workId: result.value.workId });
+    const ledger = new Database(join(root, "data", "supervisor.sqlite3"), { readonly: true });
+    try {
+      const work = await waitFor(
+        async () => ledger.query("SELECT id,command_type,state,last_error FROM work_items WHERE request_id=?").get(requestId) as any,
+        value => value?.state === "complete",
+      );
+      expect(work).toEqual({ id: result.value.workId, command_type: "compact", state: "complete", last_error: null });
+    } finally {
+      ledger.close();
+    }
     const events = await api("GET", `/v1/sessions/${id}/events?after=0`);
     expect(events.value.events.some((event: any) => event.type === "user")).toBe(false);
     await api("DELETE", `/v1/sessions/${id}`);
@@ -1359,29 +1529,40 @@ describe("web and supervisor integration", () => {
     );
     const ledger = new Database(join(root, "data", "supervisor.sqlite3"), { readonly: true });
     try {
-      expect(ledger.query("SELECT state,last_error FROM work_items WHERE session_id=?").get(id)).toEqual({ state: "complete", last_error: "native idle-timeout; explicit recovery required" });
+      expect(ledger.query("SELECT state,last_error FROM work_items WHERE session_id=?").get(id)).toEqual({ state: "cancelled", last_error: "native idle-timeout; explicit recovery required" });
     } finally { ledger.close(); }
     await api("DELETE", `/v1/sessions/${id}`);
   });
 
-  test("manual compaction acknowledges once before completion and preserves terminal failures", async () => {
+  test("manual compaction acknowledges once before its receipt records failure", async () => {
     const id = await createThread();
     resetGate("manual-compaction");
     const requestId = crypto.randomUUID();
+    let result: any;
     try {
-      const result = await api("POST", `/v1/sessions/${id}/command`, { requestId, name: "compact", args: "gate failure" });
-      expect(result.status).toBe(202);
+      result = await api("POST", `/v1/sessions/${id}/command`, { requestId, name: "compact", args: "gate failure" });
+      expect(result).toMatchObject({ status: 202, value: { accepted: true, workId: expect.any(String) } });
       await waitForGate("manual-compaction");
       const duplicate = await api("POST", `/v1/sessions/${id}/command`, { requestId, name: "compact", args: "gate failure" });
-      expect(duplicate.status).toBe(result.status);
-      expect(duplicate.value).toEqual(result.value);
-      expect(readJsonLines(fakeRpcLog).filter((entry: any) => entry.sessionId === id && entry.type === "compact")).toHaveLength(1);
+      expect(duplicate).toMatchObject({ status: result.status, value: result.value });
+      expect(readJsonLines(fakeRpcLog).filter((entry: any) => entry.sessionId === id && entry.type === "compact"))
+        .toEqual([expect.objectContaining({ workId: result.value.workId, customInstructions: "gate failure" })]);
     } finally { releaseGate("manual-compaction"); }
-    const events = await waitFor(
-      () => api("GET", `/v1/sessions/${id}/events?after=0`).then(result => result.value),
-      value => value.session.state === "IDLE" && value.events.some((event: any) => /native idle-timeout/.test(event.text ?? "")),
-    );
-    expect(events.events.some((event: any) => event.text === "Context compaction cancelled")).toBe(false);
+    const ledger = new Database(join(root, "data", "supervisor.sqlite3"), { readonly: true });
+    try {
+      const receipt = await waitFor(
+        async () => ledger.query("SELECT id,command_type,state,last_error FROM work_items WHERE request_id=?").get(requestId) as any,
+        value => value?.state === "complete",
+      );
+      expect(receipt).toEqual({
+        id: result.value.workId,
+        command_type: "compact",
+        state: "complete",
+        last_error: "native idle-timeout; explicit recovery required",
+      });
+    } finally {
+      ledger.close();
+    }
     await api("DELETE", `/v1/sessions/${id}`);
   });
 
@@ -1466,9 +1647,9 @@ describe("web and supervisor integration", () => {
       () => api("GET", `/v1/sessions/${id}/events?after=0`).then((response) => response.value),
       (value) => value.events.some((event: any) => event.type === "notice" && event.text.includes("Blocked by the provider policy")),
     );
-    expect(result.events.some((event: any) => event.type === "notice" && event.text === "Model refused the message: Blocked by the provider policy")).toBe(true);
+    expect(result.events.some((event: any) => event.type === "notice" && event.text === "Blocked by the provider policy")).toBe(true);
     expect(result.events.some((event: any) => event.type === "assistant")).toBe(false);
-    await waitFor(() => api("GET", `/v1/sessions/${id}`).then((response) => response.value.session), (session) => session?.state === "IDLE");
+    await waitFor(() => api("GET", `/v1/sessions/${id}`).then((response) => response.value.session), (session) => session?.state === "FAILED");
   }, 15_000);
 
   test("hides an account-limit failure when failover succeeds", async () => {
@@ -1498,7 +1679,7 @@ describe("web and supervisor integration", () => {
     expect(session.activity).toBe("IDLE");
   }, 15_000);
 
-  test("does not let inactive reconciliation settle the prompt-to-agent_start gap", async () => {
+  test("keeps accepted execution running before any presentation start event", async () => {
     const id = await createThread();
     resetGate("delayed-start");
     const accepted = await api("POST", `/v1/sessions/${id}/prompt`, {
@@ -1508,7 +1689,7 @@ describe("web and supervisor integration", () => {
     expect(accepted.value.session.revision).toBeGreaterThan(0);
     await waitForGate("delayed-start");
     const duringGap = await api("GET", `/v1/sessions/${id}`);
-    expect(duringGap.value.session).toMatchObject({ state: "RUNNING", activity: "QUEUED" });
+    expect(duringGap.value.session).toMatchObject({ state: "RUNNING", activity: "WORKING" });
     const ledger = new Database(join(root, "data", "supervisor.sqlite3"), { readonly: true });
     const workDuringGap = ledger.query("SELECT state FROM work_items WHERE session_id=? ORDER BY event_seq DESC LIMIT 1").get(id) as any;
     ledger.close();
@@ -1585,7 +1766,51 @@ describe("web and supervisor integration", () => {
     expect(work).toMatchObject({ state: "complete", attempts: 0 });
   }, 15_000);
 
-  test("repairs a missing settled event after abort", async () => {
+  test("settles each aborted receipt from the core's reported outcome", async () => {
+    const id = await createThread();
+    rmSync(fakeChildPid, { force: true });
+    const current = await api("POST", `/v1/sessions/${id}/prompt`, {
+      requestId: crypto.randomUUID(),
+      text: "group-child",
+    });
+    await waitFor(async () => existsSync(fakeChildPid), Boolean);
+    const steering = await api("POST", `/v1/sessions/${id}/prompt`, {
+      requestId: crypto.randomUUID(),
+      text: "runs while abort drains the accepted queue",
+      delivery: "steer",
+    });
+    await waitFor(
+      async () => readJsonLines(fakeRpcLog).filter(entry => entry.sessionId === id),
+      entries => entries.some(entry => entry.type === "steer" && entry.workId === steering.value.workId),
+    );
+
+    const aborted = await api("POST", `/v1/sessions/${id}/abort`, {});
+    expect(aborted).toMatchObject({ status: 200, value: { ok: true } });
+    const ledger = new Database(join(root, "data", "supervisor.sqlite3"), { readonly: true });
+    try {
+      const receipts = await waitFor(
+        async () => ledger.query("SELECT id,state,last_error FROM work_items WHERE id IN (?,?) ORDER BY id").all(
+          current.value.workId,
+          steering.value.workId,
+        ) as any[],
+        rows => rows.length === 2 && rows.every(row => row.state === "complete" || row.state === "cancelled"),
+      );
+      expect(receipts.find(receipt => receipt.id === current.value.workId)).toEqual({
+        id: current.value.workId,
+        state: "cancelled",
+        last_error: "Stopped by user",
+      });
+      expect(receipts.find(receipt => receipt.id === steering.value.workId)).toEqual({
+        id: steering.value.workId,
+        state: "complete",
+        last_error: null,
+      });
+    } finally {
+      ledger.close();
+    }
+  }, 15_000);
+
+  test("abort settles from execution state without a presentation event", async () => {
     const id = await createThread();
     await api("POST", `/v1/sessions/${id}/prompt`, { requestId: crypto.randomUUID(), text: "abort-no-settle" });
     await waitFor(() => api("GET", `/v1/sessions/${id}`).then((result) => result.value.session), (session) => session?.state === "RUNNING");

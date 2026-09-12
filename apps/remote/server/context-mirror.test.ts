@@ -6,11 +6,15 @@ import { applyContextSplice, messageFinalizationKey, sha256 } from "./sync";
 type Handler = (event: Record<string, unknown>, context: Record<string, unknown>) => unknown | Promise<unknown>;
 
 const captures: Array<{
+  coreGeneration: string;
+  runtimeInstance: string;
   capturedAt: number;
   context: Record<string, unknown>;
   replacement?: string;
   finalizesMessage?: string;
 }> = [];
+const owningGeneration = "generation-1";
+const owningRuntime = "runtime-1";
 let document = "";
 const requests: Array<{ method: string; bytes: number }> = [];
 let failNextCapture = false;
@@ -22,6 +26,9 @@ const server = Bun.serve({
     const encoded = await request.text();
     requests.push({ method: request.method, bytes: Buffer.byteLength(encoded) });
     const body = JSON.parse(encoded);
+    if (body.coreGeneration !== owningGeneration || body.runtimeInstance !== owningRuntime) {
+      return Response.json({ error: "Context publisher has been retired" }, { status: 410 });
+    }
     if (request.method === "PATCH") {
       if (sha256(document) !== body.splice.targetHash) {
         if (sha256(document) !== body.splice.baseHash) return new Response("Context base changed", { status: 409 });
@@ -29,6 +36,8 @@ const server = Bun.serve({
       }
     } else document = JSON.stringify(body.context);
     captures.push({
+      coreGeneration: body.coreGeneration,
+      runtimeInstance: body.runtimeInstance,
       capturedAt: body.capturedAt,
       context: JSON.parse(document),
       replacement: body.replacement,
@@ -46,10 +55,14 @@ const server = Bun.serve({
 const previousSessionId = process.env.PI_REMOTE_SESSION_ID;
 const previousServer = process.env.PI_REMOTE_SERVER_URL;
 const previousOwner = process.env.PI_REMOTE_CONTEXT_OWNER_PID;
+const previousGeneration = process.env.PI_REMOTE_CORE_GENERATION;
+const previousRuntime = process.env.PI_REMOTE_RUNTIME_INSTANCE;
 
 beforeAll(() => {
   process.env.PI_REMOTE_SESSION_ID = "00000000-0000-0000-0000-000000000001";
   process.env.PI_REMOTE_SERVER_URL = server.url.origin;
+  process.env.PI_REMOTE_CORE_GENERATION = owningGeneration;
+  process.env.PI_REMOTE_RUNTIME_INSTANCE = owningRuntime;
   delete process.env.PI_REMOTE_CONTEXT_OWNER_PID;
 });
 
@@ -60,6 +73,10 @@ afterAll(() => {
   else process.env.PI_REMOTE_SERVER_URL = previousServer;
   if (previousOwner === undefined) delete process.env.PI_REMOTE_CONTEXT_OWNER_PID;
   else process.env.PI_REMOTE_CONTEXT_OWNER_PID = previousOwner;
+  if (previousGeneration === undefined) delete process.env.PI_REMOTE_CORE_GENERATION;
+  else process.env.PI_REMOTE_CORE_GENERATION = previousGeneration;
+  if (previousRuntime === undefined) delete process.env.PI_REMOTE_RUNTIME_INSTANCE;
+  else process.env.PI_REMOTE_RUNTIME_INSTANCE = previousRuntime;
   server.stop(true);
 });
 
@@ -132,10 +149,14 @@ describe("context mirror", () => {
       messages: [{ role: "user", content: [{ type: "text", text: "Hello" }], timestamp: 1 }],
     }, { mode: "rpc", getSystemPrompt: () => "System with AGENTS.md" });
     expect(process.env.PI_REMOTE_CONTEXT_OWNER_PID).toBe(String(process.pid));
-    expect(captures.at(-1)?.context).toMatchObject({
-      systemPrompt: "System with AGENTS.md",
-      tools: [{ name: "read", description: "Read a file", parameters: { type: "object" } }],
-      messages: [{ role: "user", content: [{ type: "text", text: "Hello" }] }],
+    expect(captures.at(-1)).toMatchObject({
+      coreGeneration: owningGeneration,
+      runtimeInstance: owningRuntime,
+      context: {
+        systemPrompt: "System with AGENTS.md",
+        tools: [{ name: "read", description: "Read a file", parameters: { type: "object" } }],
+        messages: [{ role: "user", content: [{ type: "text", text: "Hello" }] }],
+      },
     });
 
     const captureCount = captures.length;
@@ -172,6 +193,31 @@ describe("context mirror", () => {
     await handlers.get("message_end")?.({ message: assistant("After the server lost its base", "stop") }, context);
     expect(requests.slice(-2).map((request) => request.method)).toEqual(["PATCH", "PUT"]);
     expect(JSON.parse(document).messages.at(-1).content[0].text).toBe("After the server lost its base");
+  });
+
+  test("retires a stale context publisher after one 410 response", async () => {
+    captures.length = 0;
+    requests.length = 0;
+    document = "";
+    const handlers = new Map<string, Handler>();
+    process.env.PI_REMOTE_RUNTIME_INSTANCE = "retired-runtime";
+    try {
+      contextMirror({
+        on(type: string, handler: Handler) { handlers.set(type, handler); },
+        getActiveTools() { return []; },
+        getAllTools() { return []; },
+      } as unknown as ExtensionAPI);
+      const extensionContext = { mode: "rpc", getSystemPrompt: () => "System" };
+      await handlers.get("context")?.({
+        type: "context",
+        messages: [{ role: "user", content: [{ type: "text", text: "stale" }], timestamp: 1 }],
+      }, extensionContext);
+      await handlers.get("message_end")?.({ message: assistant("must not retry", "stop") }, extensionContext);
+      expect(requests).toHaveLength(1);
+      expect(captures).toHaveLength(0);
+    } finally {
+      process.env.PI_REMOTE_RUNTIME_INSTANCE = owningRuntime;
+    }
   });
 
   test("retries an unacknowledged final capture instead of losing it", async () => {
