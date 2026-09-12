@@ -1962,8 +1962,10 @@ describe("web and supervisor integration", () => {
     const recoveryCommands = readJsonLines(fakeRpcLog)
       .filter((entry: any) => entry.sessionId === id && entry.type === "prompt");
     expect(recoveryCommands).toHaveLength(2);
-    expect(recoveryCommands[1].message).toContain("Continue the unfinished work");
-    expect(recoveryCommands[1].message).toContain("USER: crash-once");
+    expect(recoveryCommands.map(command => ({ workId: command.workId, message: command.message, resume: command.resume }))).toEqual([
+      { workId: recoveryCommands[0].workId, message: "crash-once", resume: false },
+      { workId: recoveryCommands[0].workId, message: "crash-once", resume: false },
+    ]);
   }, 20_000);
 
   test("a replaced supervisor cannot publish late child-exit state", async () => {
@@ -2088,11 +2090,14 @@ describe("web and supervisor integration", () => {
     const ledger = new Database(join(root, "data", "supervisor.sqlite3"), { readonly: true });
     const work = ledger.query("SELECT state,resume,attempts FROM work_items WHERE session_id=? AND text='restart-once'").all(id) as any[];
     ledger.close();
-    expect(work).toEqual([{ state: "complete", resume: 1, attempts: 0 }]);
+    expect(work).toEqual([{ state: "complete", resume: 1, attempts: 1 }]);
     const prompts = readJsonLines(fakeRpcLog)
       .filter((entry: any) => entry.sessionId === id && entry.type === "prompt");
     expect(prompts).toHaveLength(2);
-    expect(prompts[1].message).toContain("Continue the unfinished work");
+    expect(prompts.map(prompt => ({ workId: prompt.workId, message: prompt.message, resume: prompt.resume }))).toEqual([
+      { workId: prompts[0].workId, message: "restart-once", resume: false },
+      { workId: prompts[0].workId, message: "restart-once", resume: false },
+    ]);
   }, 20_000);
 
   test("release activation finishes an active turn before replacing its runtime", async () => {
