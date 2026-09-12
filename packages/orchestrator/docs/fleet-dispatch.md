@@ -1,6 +1,6 @@
 # Fleet children and coordinator return
 
-A root fleet run assigned Astra or Sol receives `fleet_dispatch`. The tool accepts `task`, an exact `model` from Astra/Sol/Terra/Luna, an optional `requestId`, and an optional `escalatesRunId`. Model descriptions come from Hara's verbatim text in the shared catalog. The worker adds no delegation policy or system prompt.
+A root fleet run assigned Astra or Sol receives `fleet_dispatch`. The tool accepts `task`, an exact `model` from Astra/Sol/Terra/Luna, an optional `requestId`, and an optional `escalatesRunId`. Model descriptions come from Hara's verbatim text in the shared catalog. The tool description includes the [shared Codex-derived delegation guidance](delegation-policy.md), also used by Remote text threads. Delegation is optional, with immediate blocking work kept local and independent work delegated when it can run alongside useful local work. The worker adds no separate system prompt.
 
 The child receives the supplied task, the parent's cwd and budget, and the normal fleet environment. It starts its own transcript. It does not copy the coordinator's transcript. No child can dispatch another child, regardless of its model. Both tool registration and the dispatch endpoint enforce this boundary. Isolated application runs receive no fleet tools, cannot use the dispatch endpoint, and keep their existing context and single-turn completion contract.
 

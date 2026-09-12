@@ -5,7 +5,14 @@ import { SessionManager, type AgentSession } from "@earendil-works/pi-coding-age
 import { expect, it } from "vitest";
 import { FleetResultDelivery, fleetTurnSettled } from "../src/host/fleet-results.js";
 import type { FleetResult, Run } from "../src/domain.js";
-import { recoverFleetDispatches } from "../src/host/fleet-tools.js";
+import { fleetTools, recoverFleetDispatches } from "../src/host/fleet-tools.js";
+import { DELEGATION_POLICY } from "../src/delegation-policy.js";
+
+it("registers the shared delegation guidance without dispatching work", () => {
+  const [tool] = fleetTools(async () => { throw new Error("registration must not dispatch"); });
+  expect(tool.name).toBe("fleet_dispatch");
+  expect(tool.description.startsWith(`${DELEGATION_POLICY}\n\n`)).toBe(true);
+});
 
 function fakeSession(manager:SessionManager):AgentSession {
   const agent={state:{messages:manager.buildSessionContext().messages}};

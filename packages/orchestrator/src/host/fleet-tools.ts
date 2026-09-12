@@ -1,6 +1,7 @@
 import { defineTool, type AgentSession } from "@earendil-works/pi-coding-agent";
 import { Type } from "typebox";
 import { SUBAGENT_MODEL_DESCRIPTIONS } from "../catalog.js";
+import { DELEGATION_POLICY } from "../delegation-policy.js";
 import { syncTranscript } from "./fleet-results.js";
 import { FLEET_MODELS, type FleetDispatch, type Run } from "../domain.js";
 
@@ -33,7 +34,7 @@ export function fleetTools(dispatch:(input:FleetDispatch)=>Promise<{run:Run}>) {
   return [defineTool({
     name:"fleet_dispatch",
     label:"Fleet dispatch",
-    description:"Create a child run and return its ID immediately. Results steer this coordinator after its current tool calls. Delivery survives process restarts. The child model is immutable. Escalation creates a new child with escalatesRunId. Children share this run's cwd and budget, not its transcript.",
+    description:`${DELEGATION_POLICY}\n\nCreate a child run and return its ID immediately. Results steer this coordinator after its current tool calls. Delivery survives process restarts. The child model is immutable. Escalation creates a new child with escalatesRunId. Children share this run's cwd and budget, not its transcript.`,
     parameters:Type.Object({
       task:Type.String({minLength:1}),
       model:Type.Union(FLEET_MODELS.map(model=>Type.Literal(model)),{description:SUBAGENT_MODEL_DESCRIPTIONS}),

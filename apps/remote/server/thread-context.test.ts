@@ -5,8 +5,27 @@ import { join } from "node:path";
 import threadContext from "./thread-context";
 import { threadStateInstructions } from "./thread-context-state";
 import { registerThreadTools } from "./thread-tools";
+import { DELEGATION_POLICY } from "pi-orchestrator/api";
 
 describe("thread lifecycle context", () => {
+  test.each([undefined, "meeting-id"])("root delegation uses shared guidance and scopes meeting details: %s", (meeting) => {
+    const previous = { PI_SUBAGENT_MODEL: process.env.PI_SUBAGENT_MODEL, PI_REMOTE_MEETING_ID: process.env.PI_REMOTE_MEETING_ID };
+    try {
+      delete process.env.PI_SUBAGENT_MODEL;
+      if (meeting) process.env.PI_REMOTE_MEETING_ID = meeting;
+      else delete process.env.PI_REMOTE_MEETING_ID;
+      const tools: { name: string; description: string }[] = [];
+      registerThreadTools({ registerTool: (tool: typeof tools[number]) => tools.push(tool) } as any);
+      const tool = tools.find((tool) => tool.name === "thread_delegate")!;
+      expect(tool.description.startsWith(`${DELEGATION_POLICY}\n\n`)).toBe(true);
+      expect(tool.description.includes("Meeting workers")).toBe(Boolean(meeting));
+    } finally {
+      for (const [key, value] of Object.entries(previous)) {
+        if (value === undefined) delete process.env[key];
+        else process.env[key] = value;
+      }
+    }
+  });
   test("subagents keep thinking control but cannot register delegation", () => {
     const previous = process.env.PI_SUBAGENT_MODEL;
     try {

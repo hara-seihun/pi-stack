@@ -4,7 +4,7 @@ import { promisify } from "node:util";
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 import { StringEnum } from "@earendil-works/pi-ai";
 import { Type } from "typebox";
-import { SUBAGENT_MODEL_DESCRIPTIONS } from "pi-orchestrator/api";
+import { DELEGATION_POLICY, SUBAGENT_MODEL_DESCRIPTIONS } from "pi-orchestrator/api";
 import { API } from "./api";
 import { sessionEnvironment } from "./session-environment";
 
@@ -84,7 +84,7 @@ export function registerThreadTools(pi: ExtensionAPI) {
   pi.registerTool({
     name: "thread_delegate",
     label: "Delegate to a thread",
-    description: "Delegate work to a Pi Stack thread. Reuses the previous suitable worker by default, including for follow-ups. Set threadId to continue a particular worker; set newThread only when a separate concurrent worker is needed. Returns immediately and brings the result back here. Meeting workers receive the meeting transcript they have not already seen, including the latest speech, and share the room and browser.",
+    description: `${DELEGATION_POLICY}\n\nDelegate work to a Pi Stack thread. Reuses the previous suitable worker by default, including for follow-ups. Set threadId to continue a particular worker; set newThread only when a separate concurrent worker is needed. Returns immediately and brings the result back here.${environment.PI_REMOTE_MEETING_ID ? " Meeting workers receive the meeting transcript they have not already seen, including the latest speech, and share the room and browser." : ""}`,
     parameters: Type.Object({
       task: Type.String({ minLength: 1 }),
       threadId: Type.Optional(Type.String({ description: "An existing worker thread to continue." })),
