@@ -1,10 +1,10 @@
 # Codex app-server core
 
-`src/cores/codex.ts` adapts the pinned Codex 0.146.0 app-server to PiStack's runtime wire. The default launcher resolves the executable from Orchestrator's immutable dependency closure, not the caller's PATH. Codex owns instructions, native tools, skills, compaction, and child agents. PiStack chooses the starting model and effort, supplies an account lease, and controls dispatch. No Pi system prompt or Pi tools are installed into Codex.
+`src/cores/codex.ts` adapts the pinned Codex 0.146.0 app-server to PiStack's runtime wire. The default launcher resolves the executable from Orchestrator's immutable dependency closure, not the caller's PATH. Codex owns instructions, native tools, skills, compaction, and child agents. PiStack chooses the starting model and effort, binds an account, reserves capacity during native-tree activity, and controls dispatch. No Pi system prompt or Pi tools are installed into Codex.
 
 ## Bind the account broker
 
-The registry uses the exported `openCodexSession`, already bound to `openCoreAccount`. A new session requires PiStack's starting `--model`. A `--session`-only reopen resolves the saved model and provider before acquiring its lease; explicit starting overrides win. For another broker or protocol fixtures, `createCodexSession` returns an injectable `OpenCoreSession`:
+The registry uses the exported `openCodexSession`, already bound to `openCoreAccount`. A new session requires PiStack's starting `--model`. A `--session`-only reopen resolves the saved model and provider before binding its account; explicit starting overrides win. For another broker or protocol fixtures, `createCodexSession` returns an injectable `OpenCoreSession`:
 
 ```ts
 import { argument } from "./contracts.js";
@@ -25,9 +25,9 @@ const openCodex = createCodexSession({
 });
 ```
 
-`codex-auth.ts` declares the structural lease interface. `credentials()` returns `accessToken`, `chatgptAccountId`, and optional `chatgptPlanType`. Native token-refresh requests call `credentials({refresh: true, previousAccountId})`. The broker retains account selection, refresh locks, heartbeat, and lease release.
+`codex-auth.ts` declares the structural lease interface. `credentials()` returns `accessToken`, `chatgptAccountId`, and optional `chatgptPlanType`. Native token-refresh requests call `credentials({refresh: true, previousAccountId})`. The broker retains account selection and refresh locks. The adapter calls synchronous `setActive(boolean)` before dispatch and as whole-tree activity changes. The broker owns the corresponding interactive heartbeat and lease release. Opening an idle adapter leaves capacity free; assigned fleet leases remain scheduler-owned. See [external core accounts](core-accounts.md) for activity, affinity, and uncertain-outcome rules.
 
-`recordUsage` receives cumulative counters per native thread, including child threads. It must upsert or subtract the previous counter, not sum notifications. Counts include input, cached input, cache-write input, output, reasoning output, and total tokens. Accounting failures emit `core_error` and block new turns. Closing the adapter closes its lease once.
+`recordUsage` receives cumulative counters per native thread, including child threads. It must upsert or subtract the previous counter, not sum notifications. Counts include input, cached input, cache-write input, output, reasoning output, and total tokens. Accounting failures emit `core_error` and block new turns and compaction. Closing the adapter closes its account once, after process-tree cleanup.
 
 Credentials go directly to the private stdio transport. Authentication requests and responses never become portable events. Native stderr is discarded because it can contain request bodies. Non-auth protocol errors pass through the credential guard; auth errors remain opaque. The output callback receives copied, redacted objects. Do not add raw RPC logging at this boundary.
 

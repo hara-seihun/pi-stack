@@ -1,5 +1,5 @@
 import { mkdirSync } from "node:fs";
-import { randomInt } from "node:crypto";
+import { randomInt, randomUUID } from "node:crypto";
 import { dirname, join, resolve } from "node:path";
 import { isCoreId, type CoreId } from "./cores/contracts.js";
 import type { DatabaseSync } from "node:sqlite";
@@ -381,8 +381,19 @@ export class Store {
     return removed.length;
   }
 
-  createLease(id:string,accountId:string,kind:LeaseKind,runId?:string,at=Date.now()):void{this.db.prepare(`INSERT INTO lease(id,account_id,kind,run_id,started_at,heartbeat_at,ended_at) VALUES(?,?,?,?,?,?,NULL)
-    ON CONFLICT(id) DO UPDATE SET account_id=excluded.account_id,kind=excluded.kind,run_id=excluded.run_id,started_at=excluded.started_at,heartbeat_at=excluded.heartbeat_at,ended_at=NULL`).run(id,accountId,kind,runId??null,at,at);}
+  createLease(id:string,accountId:string,kind:LeaseKind,runId?:string,at=Date.now()):void{
+    this.transaction(()=>{
+      const current=this.db.prepare("SELECT account_id,kind,run_id,ended_at FROM lease WHERE id=?").get(id);
+      if(current?.ended_at===null&&current.account_id===accountId&&current.kind===kind&&current.run_id===(runId??null)){
+        this.heartbeatLease(id,at);
+        return;
+      }
+      if(current)this.db.prepare("UPDATE lease SET id=?,ended_at=COALESCE(ended_at,?) WHERE id=?")
+        .run(`${id}:interval:${randomUUID()}`,at,id);
+      this.db.prepare("INSERT INTO lease(id,account_id,kind,run_id,started_at,heartbeat_at,ended_at) VALUES(?,?,?,?,?,?,NULL)")
+        .run(id,accountId,kind,runId??null,at,at);
+    });
+  }
   heartbeatLease(id:string,at=Date.now()):void{this.db.prepare("UPDATE lease SET heartbeat_at=? WHERE id=? AND ended_at IS NULL").run(at,id);}
   endLease(id:string,at=Date.now()):void{this.db.prepare("UPDATE lease SET ended_at=? WHERE id=? AND ended_at IS NULL").run(at,id);}
   activeLeases(accountId?:string,maxAgeMs=120000,now=Date.now()):any[]{const cutoff=now-maxAgeMs;return (accountId?this.db.prepare("SELECT * FROM lease WHERE account_id=? AND ended_at IS NULL AND heartbeat_at>=?").all(accountId,cutoff):this.db.prepare("SELECT * FROM lease WHERE ended_at IS NULL AND heartbeat_at>=?").all(cutoff)) as any[];}

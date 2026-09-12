@@ -65,12 +65,14 @@ export function createCodexSession(dependencies: CodexDependencies): OpenCoreSes
     const stamp = (id: string, suggested?: number) => state.timestamps[id] ??= suggested && suggested > 0 ? suggested : Date.now();
     const agents = new Map<string, CoreAgent>();
     const nativeStatus = new Map<string, string>();
-    let treeWasBusy = false, settling = 0, abortRequested = false;
-    const threadBusy = (id: string) => active.has(id) || compactingThreads.has(id) || nativeStatus.get(id) === "active" || agents.get(id)?.state === "running";
-    const treeBusy = () => settling > 0 || aborting.size > 0 || [...new Set([state.threadId!, ...agents.keys(), ...active.keys(), ...compactingThreads])].some(threadBusy);
+    let treeWasBusy = false, settling = 0, dispatching = 0, abortRequested = false;
+    const uncertainThreads = new Set<string>();
+    const threadBusy = (id: string) => uncertainThreads.has(id) || active.has(id) || compactingThreads.has(id) || nativeStatus.get(id) === "active" || agents.get(id)?.state === "running";
+    const treeBusy = () => dispatching > 0 || settling > 0 || aborting.size > 0 || [...new Set([state.threadId!, ...agents.keys(), ...active.keys(), ...compactingThreads, ...uncertainThreads])].some(threadBusy);
     const reconcileLifecycle = () => {
       if (!ready || closed) return;
       const busy = treeBusy();
+      account!.setActive(busy);
       if (busy === treeWasBusy) return;
       treeWasBusy = busy;
       emit(busy ? { type: "agent_start" } : { type: "agent_end", messages: projection(state.threadId!).entries.map(entry => entry.message) });
@@ -188,11 +190,13 @@ export function createCodexSession(dependencies: CodexDependencies): OpenCoreSes
       }
       const send = (event: CoreOutput) => root ? emit(event) : emit({ type: "core_child_event", agentId: threadId, event });
       if (method === "thread/closed" || method === "thread/deleted") {
+        uncertainThreads.delete(threadId);
         nativeStatus.set(threadId, "notLoaded"); active.delete(threadId); setCompacting(threadId, false);
         const agent = agents.get(threadId);
         if (agent) { if (agent.state === "running") agent.state = "cancelled"; emit({ type: "core_agent", agent }); }
       } else if (method === "thread/status/changed") {
         const status = params.status as { type: string };
+        uncertainThreads.delete(threadId);
         nativeStatus.set(threadId, status.type);
         if (!root && status.type !== "active") active.delete(threadId);
         const agent = agents.get(threadId);
@@ -207,6 +211,7 @@ export function createCodexSession(dependencies: CodexDependencies): OpenCoreSes
         if (root) { state.name = String(params.threadName ?? ""); save(); }
         else { const agent = agents.get(threadId)!; agent.name = String(params.threadName ?? threadId); emit({ type: "core_agent", agent }); }
       } else if (method === "turn/started") {
+        uncertainThreads.delete(threadId);
         const turn = params.turn as Turn;
         active.set(threadId, turn.id);
         nativeStatus.set(threadId, "active");
@@ -215,6 +220,7 @@ export function createCodexSession(dependencies: CodexDependencies): OpenCoreSes
         if (!root) send({ type: "agent_start" });
         send({ type: "turn_start" });
       } else if (method === "turn/completed") {
+        uncertainThreads.delete(threadId);
         const turn = params.turn as Turn;
         completedTurns.add(turn.id);
         if (active.get(threadId) === turn.id) active.delete(threadId);
@@ -235,6 +241,7 @@ export function createCodexSession(dependencies: CodexDependencies): OpenCoreSes
         const item = params.item as ThreadItem;
         const completed = method === "item/completed";
         if (item.type === "contextCompaction") {
+          uncertainThreads.delete(threadId);
           setCompacting(threadId, !completed);
           if (completed) projection(threadId).context();
         }
@@ -536,24 +543,37 @@ export function createCodexSession(dependencies: CodexDependencies): OpenCoreSes
           if (root) { abortRequested = false; interrupted.clear(); }
           const method = command.type === "steer" && active.has(threadId) ? "turn/steer" : "turn/start";
           const wasMaterialized = state.materialized;
-          state.materialized = true;
-          if (key) state.receipts[key] = { hash, state: "pending" };
-          save();
-          const result = await rpc!.request<{ turn?: Turn; turnId?: string }>(method, { threadId, input: content,
-            ...(key ? { clientUserMessageId: key } : {}), ...(method === "turn/steer" ? { expectedTurnId: active.get(threadId) } : {}) });
-          if (!result.ok) {
-            if (result.error.startsWith("Codex rejected")) {
-              state.materialized = wasMaterialized;
-              if (key) state.receipts[key].state = "rejected";
-              save();
+          account!.setActive(true);
+          dispatching++;
+          try {
+            state.materialized = true;
+            if (key) state.receipts[key] = { hash, state: "pending" };
+            save();
+            uncertainThreads.add(threadId);
+            reconcileLifecycle();
+            const result = await rpc!.request<{ turn?: Turn; turnId?: string }>(method, { threadId, input: content,
+              ...(key ? { clientUserMessageId: key } : {}), ...(method === "turn/steer" ? { expectedTurnId: active.get(threadId) } : {}) });
+            if (!result.ok) {
+              if (result.error.startsWith("Codex rejected")) {
+                uncertainThreads.delete(threadId);
+                state.materialized = wasMaterialized;
+                if (key) state.receipts[key].state = "rejected";
+                save();
+              }
+              fail(result.error);
             }
-            fail(result.error);
+            const value = (result as { ok: true; value: { turn?: Turn; turnId?: string } }).value;
+            const turnId = value.turn?.id ?? value.turnId;
+            if (turnId) {
+              uncertainThreads.delete(threadId);
+              if (!completedTurns.has(turnId)) active.set(threadId, turnId);
+            }
+            if (key) { state.receipts[key] = { hash, state: "accepted", turnId }; save(); }
+            return { accepted: true, nativeTurnId: turnId };
+          } finally {
+            dispatching--;
+            reconcileLifecycle();
           }
-          const value = (result as { ok: true; value: { turn?: Turn; turnId?: string } }).value;
-          const turnId = value.turn?.id ?? value.turnId;
-          if (turnId && !completedTurns.has(turnId)) active.set(threadId, turnId);
-          if (key) { state.receipts[key] = { hash, state: "accepted", turnId }; save(); }
-          return { accepted: true, nativeTurnId: turnId };
         }
         case "abort": {
           if (!root) { await interruptThread(threadId); return { accepted: true }; }
@@ -574,10 +594,22 @@ export function createCodexSession(dependencies: CodexDependencies): OpenCoreSes
         case "compact": {
           if (command.customInstructions) fail("Codex native compaction does not accept custom instructions");
           if (root ? treeBusy() : threadBusy(threadId)) fail("Wait for the Codex native tree to become idle before compacting");
+          if (accountingFailure) fail("Codex usage accounting needs repair before starting work");
+          account!.setActive(true);
+          dispatching++;
           setCompacting(threadId, true);
-          try { await call("thread/compact/start", { threadId }); }
-          catch (error) { setCompacting(threadId, false, {errorMessage:error instanceof Error ? error.message : String(error)}); throw error; }
-          return { accepted: true };
+          try {
+            reconcileLifecycle();
+            const result = await rpc!.request("thread/compact/start", { threadId });
+            if (!result.ok) {
+              if (result.error.startsWith("Codex rejected")) setCompacting(threadId, false, { errorMessage: result.error });
+              fail(result.error);
+            }
+            return { accepted: true };
+          } finally {
+            dispatching--;
+            reconcileLifecycle();
+          }
         }
         case "set_model": {
           if (command.provider !== "openai-codex" && command.provider !== "openai") fail("Codex cannot switch provider");

@@ -52,6 +52,7 @@ export interface CoreAccount {
   readonly model: string;
   credentials(request?: CoreAccountCredentialRequest): Promise<CoreAccountCredentials>;
   recordUsage(usage: CoreAccountUsage): void;
+  setActive(active: boolean): void;
   close(): Promise<void>;
 }
 
@@ -158,16 +159,16 @@ export async function openCoreAccount(options: CoreAccountOptions): Promise<Core
     const account = assigned
       ? store.account(assigned.accountId!)
       : store.transaction(() => {
-          const existing = store.activeLeases().find(lease => lease.id === leaseId);
-          const sticky = existing
-            ? eligibleRequestedAccount(store, auth, String(existing.account_id))
-            : undefined;
+          const affinityKey = `core-account:${options.sessionId}`;
+          const existing = store.db.prepare("SELECT account_id FROM lease WHERE id=?").get(leaseId) as { account_id: string } | undefined;
+          const affinity = store.control(affinityKey) ?? existing?.account_id;
+          const sticky = affinity ? eligibleRequestedAccount(store, auth, affinity) : undefined;
           const selected = sticky
             ?? eligibleRequestedAccount(store, auth, options.initialProvider)
             ?? chooseInteractiveAccount(store, auth, provider);
           if (selected) {
-            if (sticky) store.heartbeatLease(leaseId);
-            else store.createLease(leaseId, selected.id, "interactive");
+            store.setControl(affinityKey, selected.id);
+            store.endLease(leaseId);
           }
           return selected;
         });
@@ -186,10 +187,23 @@ export async function openCoreAccount(options: CoreAccountOptions): Promise<Core
     const usageByThread = new Map<string, Required<UsageCounters>>();
     const lifecycle = new AbortController();
     const pendingCredentials = new Set<Promise<CoreAccountCredentials>>();
-    const heartbeat = interactiveLeaseId
-      ? setInterval(() => store.heartbeatLease(interactiveLeaseId!), heartbeatMs)
-      : undefined;
-    heartbeat?.unref?.();
+    let heartbeat: ReturnType<typeof setInterval> | undefined;
+    const setActive = (active: boolean): void => {
+      if (closed) throw new Error("Core account is closed");
+      if (!interactiveLeaseId || active === Boolean(heartbeat)) return;
+      if (active) {
+        if (!eligibleRequestedAccount(store, auth, account.id)) {
+          throw new Error("Core account is no longer eligible; reopen the core before starting work");
+        }
+        store.createLease(interactiveLeaseId, account.id, "interactive");
+        heartbeat = setInterval(() => store.heartbeatLease(interactiveLeaseId!), heartbeatMs);
+        heartbeat.unref?.();
+      } else {
+        store.endLease(interactiveLeaseId);
+        clearInterval(heartbeat);
+        heartbeat = undefined;
+      }
+    };
 
     const credentials = (request: CoreAccountCredentialRequest = {}): Promise<CoreAccountCredentials> => {
       if (closed) return Promise.reject(new Error("Core account is closed"));
@@ -275,7 +289,7 @@ export async function openCoreAccount(options: CoreAccountOptions): Promise<Core
       return closePromise;
     };
 
-    return { accountId: account.id, provider, model, credentials, recordUsage, close };
+    return { accountId: account.id, provider, model, credentials, recordUsage, setActive, close };
   } catch (error) {
     if (interactiveLeaseId) store.endLease(interactiveLeaseId);
     store.close();
