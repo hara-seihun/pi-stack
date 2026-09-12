@@ -59,6 +59,8 @@ queued -> running -> dispatched -> complete
 - Cancellation is terminal. Ordinary abort cancels supervisor-owned queued work directly, but core-owned work needs explicit cancellation receipts. An unconfirmed abort retains custody and reports failure.
 - A live release handoff keeps `dispatched` work attached to its existing runtime instance and releases supervisor-only claims back to the outbox. Crash recovery reconciles the same frozen envelope and native receipt. Remote never reconstructs a prompt from its display history or manufactures a continuation instruction.
 - Slash commands use the same durable outbox. Compaction has its own work ID and receipt; a lost HTTP or RPC response cannot start another compaction.
+- Child controls require a client request ID. Remote freezes the command in `core_dispatches` before sending it with `control:<requestId>` as its work ID. Retries reuse that envelope and its native receipt.
+- The first release with execution receipts requires a host seal with no active pre-contract work. Publication records `metadata.execution_baseline` as `{id,sealedAt}`. Remote passes that seal only to threads created before it. The core retains preceding dispatch IDs as no-replay records; it never guesses outcomes from old messages. An existing execution ledger ignores the baseline, so later restarts cannot clear unknown work.
 
 ## Abort ownership
 

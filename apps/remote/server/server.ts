@@ -1442,6 +1442,10 @@ function monitorRuntime(row: any, rt: Runtime) {
 }
 
 function runtimeEnvironment(row: any, rt: Runtime) {
+  const storedBaseline = db.query("SELECT value FROM metadata WHERE key='execution_baseline'").get() as { value: string } | null;
+  const seal = storedBaseline ? JSON.parse(storedBaseline.value) as { id: string; sealedAt: string } : null;
+  if (seal && (!seal.id || !Number.isFinite(Date.parse(seal.sealedAt)))) throw new Error("Invalid sealed execution baseline");
+  const baseline = seal && Date.parse(row.created_at) <= Date.parse(seal.sealedAt) ? { id: seal.id, sessionId: String(row.id) } : null;
   return {
     ...process.env,
     HOME,
@@ -1452,6 +1456,7 @@ function runtimeEnvironment(row: any, rt: Runtime) {
     PI_SESSION_ID: row.id,
     PI_SESSION_FILE: join(sessionCores.get(row.id).stateDir, "conversation.jsonl"),
     PI_STACK_CORE_OWNS_CHILDREN: "1",
+    PI_STACK_EXECUTION_BASELINE: baseline ? JSON.stringify(baseline) : "",
     PI_SUBAGENT_MODEL: subagentIdentity(row.id)?.model ?? "",
     PI_REMOTE_MEETING_ID: row.meeting_id ?? "",
     PI_REMOTE_CONTEXT_OWNER_PID: "",
@@ -2700,8 +2705,17 @@ async function handleRequest(req: Request): Promise<Response> {
         const body = await readBody(req);
         if (!["steer", "abort"].includes(body.action)) return error("Agent action must be steer or abort");
         if (body.action === "steer" && (typeof body.message !== "string" || !body.message.trim())) return error("A steering message is required");
-        const result = await rpc(rt, "core_agent_command", { agentId: coreAgentMatch.agentId, action: body.action, message: body.message }, 30_000);
-        emit(row.id, "core_agent_control", { agentId: coreAgentMatch.agentId, action: body.action, message: body.message });
+        const requestId = String(body.requestId ?? "");
+        if (!/^[0-9a-f-]{36}$/i.test(requestId)) return error("Valid requestId required");
+        const old = requestResult(requestId);
+        if (old) return json(JSON.parse(old.response), old.status);
+        const workId = `control:${requestId}`;
+        const dispatch = sessionCores.dispatch(row.id, workId, { type: body.action, agentId: coreAgentMatch.agentId, message: body.message ?? "", images: [] });
+        const result = await rpc(rt, "core_agent_command", { workId, agentId: dispatch.agentId, action: dispatch.type, message: dispatch.message }, 30_000);
+        db.transaction(() => {
+          emit(row.id, "core_agent_control", { workId, agentId: dispatch.agentId, action: dispatch.type, message: dispatch.message });
+          saveRequest(requestId, row.id, "core_agent_control", 200, result);
+        })();
         return json(result);
       } catch (cause: any) { return error(cause.message ?? "Core agent command failed", 409); }
     }

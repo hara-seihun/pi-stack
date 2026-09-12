@@ -4,7 +4,7 @@ import { createHash } from "node:crypto";
 import { configuredCore, type CoreAgent, type CoreId, type CoreCommand } from "pi-orchestrator/api";
 
 export interface SessionCore { core: CoreId; stateDir: string }
-export interface CoreDispatch { type: "prompt" | "steer" | "follow_up" | "compact"; message: string; images: NonNullable<CoreCommand["images"]>; resume?: boolean; customInstructions?: string }
+export interface CoreDispatch { type: "prompt" | "steer" | "follow_up" | "compact" | "abort"; agentId?: string; message: string; images: NonNullable<CoreCommand["images"]>; resume?: boolean; customInstructions?: string }
 export class SessionCores {
   constructor(private readonly db: Database, private readonly data: string) {
     db.exec(`CREATE TABLE IF NOT EXISTS session_cores (

@@ -235,7 +235,7 @@ function SettingsPanel({ session, generation, settings, open, onClose, onSettled
         ? await api(API.sessionCoreAgent.method, API.sessionCoreAgent.path(
           { sessionId: captured.id, agentId }, { coreGeneration: captured.coreGeneration }))
         : await api(API.sessionCoreAgentCommand.method, API.sessionCoreAgentCommand.path(
-          { sessionId: captured.id, agentId }), { action, coreGeneration: captured.coreGeneration });
+          { sessionId: captured.id, agentId }), { action, requestId: crypto.randomUUID(), coreGeneration: captured.coreGeneration });
       if (sameSessionGeneration(currentGeneration.current, captured)) setAgentDetail(JSON.stringify(result, null, 2));
     } catch (error) {
       if (sameSessionGeneration(currentGeneration.current, captured)) setFailure(error?.message || String(error));
