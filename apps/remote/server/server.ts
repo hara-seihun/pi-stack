@@ -5,7 +5,8 @@ import { homedir } from "node:os";
 import { basename, dirname, extname, isAbsolute, join, resolve } from "node:path";
 import { parseRunKey } from "./agent-runs";
 import { AgentHost } from "./agent-hosts";
-import { ORCHESTRATOR_CATALOG, OrchestratorClient, catalogAgentType, createSharedImageGenerationService, type SharedImageGenerationService, type PlanUsageSnapshot } from "pi-orchestrator/api";
+import { ORCHESTRATOR_CATALOG, OrchestratorClient, catalogAgentType, createSharedImageGenerationService, CORE_IDS, configuredCore, isCoreId, writeCoreState, type CoreAgent, type CoreId, type PortableConversation, type SharedImageGenerationService, type PlanUsageSnapshot } from "pi-orchestrator/api";
+import { SessionCores } from "./session-cores";
 import { InlineImages } from "./inline-images";
 import { planCards } from "./catalog-presentation";
 import { readMachineUsage } from "./machine-usage";
@@ -182,6 +183,8 @@ const orchestrator = new OrchestratorClient({
 const voice = new VoiceClient(DATA);
 const agentHost = new AgentHost(orchestrator, { key: "local", label: "THIS MACHINE", name: "This machine" });
 ensureSupervisorSchema(db);
+const sessionCores = new SessionCores(db, DATA);
+const DEFAULT_CORE = configuredCore();
 const HANDOFF_PATH = join(DATA, "supervisor-handoff.json");
 type RuntimePhase = "WAITING" | "STARTING" | "IDLE" | "DISPATCHING" | "RUNNING" | "ABORTING" | "STOPPING";
 type RuntimeHandoff = {
@@ -519,6 +522,39 @@ function clearStoredContext(sessionId: string) {
   cacheStoredContext(sessionId, null);
   displayContexts.delete(sessionId);
   signalSync();
+}
+
+function storeContextCapture(id: string, body: any) {
+  const capturedAt = Number(body.capturedAt);
+  const context = body.context;
+  if (!Number.isSafeInteger(capturedAt) || capturedAt <= 0) throw new Error("Valid context capture time required");
+  if (!context || typeof context !== "object" || typeof context.systemPrompt !== "string"
+    || !Array.isArray(context.tools) || !Array.isArray(context.messages)) throw new Error("Valid context required");
+  const document = JSON.stringify(context);
+  const runtime = runtimes.get(id);
+  const compactionReplacement = body.replacement === "compaction" && runtime?.compacting === true;
+  let changed = false;
+  let hash = sha256(document);
+  let time = capturedAt;
+  db.transaction(() => {
+    const current = storedContext(id);
+    if (current && capturedAt <= current.capturedAt) {
+      if (!compactionReplacement) { hash = current.hash; time = current.capturedAt; return; }
+      time = current.capturedAt + 1;
+    }
+    db.query(`INSERT INTO session_contexts(session_id,captured_at,context) VALUES(?,?,?)
+      ON CONFLICT(session_id) DO UPDATE SET captured_at=excluded.captured_at,context=excluded.context`).run(id, time, document);
+    db.query("DELETE FROM session_context_patches WHERE session_id=?").run(id);
+    inlineImages.acceptContext(id, document);
+    changed = true;
+  })();
+  if (changed) {
+    cacheStoredContext(id, { capturedAt: time, document, hash });
+    if (compactionReplacement && runtime) runtime.compactionContextHash = hash;
+    signalSync();
+  }
+  if (hash === sha256(document)) acknowledgeMessageContext(id, body.finalizesMessage);
+  return { ok: true, capturedAt: time, hash };
 }
 
 function requireCompactionContext(sessionId: string, rt: Runtime) {
@@ -892,6 +928,7 @@ function publicSession(row: any, prepared?: PreparedQueue): Session {
   const activity = sessionActivity(row);
   return {
     id: String(row.id),
+    core: sessionCores.get(row.id).core,
     ...(subagent ? { subagent: { parentSessionId: subagent.parent_session_id, model: subagent.model } } : {}),
     name: String(row.name ?? ""),
     cwd,
@@ -1046,6 +1083,24 @@ function handleRpcEvent(sessionId: string, rt: Runtime, event: any) {
     return;
   }
   if (!ownsSupervisorLease() || runtimes.get(sessionId) !== rt || rt.phase === "STOPPING") return;
+  if (event.type === "core_agent") {
+    sessionCores.recordAgent(sessionId, event.agent as CoreAgent);
+    emit(sessionId, "core_agent", { agent: event.agent });
+    touchSession(sessionId);
+    return;
+  }
+  if (event.type === "core_child_event") {
+    emit(sessionId, "core_child_event", { agentId: event.agentId, event: event.event });
+    return;
+  }
+  if (event.type === "context_update") {
+    const last = event.context?.messages?.findLast((message: any) => message.role === "assistant");
+    storeContextCapture(sessionId, { context: event.context,
+      capturedAt: Math.max(Date.now(), (storedContext(sessionId)?.capturedAt ?? 0) + 1),
+      replacement: rt.compacting ? "compaction" : undefined,
+      finalizesMessage: event.finalizesMessage ?? event.finalizedMessage ?? (last ? messageFinalizationKey(last) : undefined) });
+    return;
+  }
   if (event.type === "queue_update") {
     const steering = Array.isArray(event.steering) ? event.steering.length : 0;
     const followUp = Array.isArray(event.followUp) ? event.followUp.length : 0;
@@ -1368,6 +1423,11 @@ function runtimeEnvironment(row: any) {
     HOME,
     PATH: `${join(HOME, ".local/bin")}:${join(HOME, ".bun/bin")}:${process.env.PATH ?? ""}`,
     PI_REMOTE_SESSION_ID: row.id,
+    PI_STACK_CORE: sessionCores.get(row.id).core,
+    PI_STACK_CORE_STATE_DIR: sessionCores.get(row.id).stateDir,
+    PI_SESSION_ID: row.id,
+    PI_SESSION_FILE: join(sessionCores.get(row.id).stateDir, "conversation.jsonl"),
+    PI_STACK_CORE_OWNS_CHILDREN: "1",
     PI_SUBAGENT_MODEL: subagentIdentity(row.id)?.model ?? "",
     PI_REMOTE_MEETING_ID: row.meeting_id ?? "",
     PI_REMOTE_CONTEXT_OWNER_PID: "",
@@ -1688,6 +1748,47 @@ async function runCommand(row: any, requestId: string, name: string, args: strin
   return { response, status: 202 };
 }
 
+async function switchSessionCore(row: any, core: CoreId): Promise<void> {
+  const source = sessionCores.get(row.id);
+  if (source.core === core) return;
+  if (subagentIdentity(row.id)) throw new Error("A child thread's core is owned by its parent");
+  const rt = await activate(row);
+  const pending = db.query("SELECT 1 FROM work_items WHERE session_id=? AND state IN ('queued','running','dispatched') LIMIT 1").get(row.id);
+  if (rt.phase !== "IDLE" || pending || sessionCores.agents(row.id).some(agent => agent.state === "running")) {
+    throw new Error("Wait for the whole agent tree and input queue to become idle before switching cores");
+  }
+  const state = await rpc(rt, "get_state");
+  const provider = canonicalModelProvider(String(state.model?.provider ?? row.initial_provider));
+  if (core === "codex" && !provider.startsWith("openai")) throw new Error("Choose an OpenAI model before switching to Codex");
+  const transfer = await rpc(rt, "get_portable_conversation") as PortableConversation;
+  if (transfer.version !== 1 || !Array.isArray(transfer.messages)) throw new Error("The current core did not export a conversation");
+  const switchId = crypto.randomUUID();
+  const target = { core, stateDir: join(DATA, "core-sessions", row.id, switchId) };
+  writeCoreState(join(target.stateDir, "transfer.json"), transfer);
+  db.query("INSERT INTO core_switches VALUES(?,?,?,?,?,'starting',NULL)").run(switchId,row.id,now(),JSON.stringify(source),JSON.stringify(target));
+  rt.expectedExit = true;
+  rt.suppressOutput = true;
+  setRuntimePhase(row.id, rt, "STOPPING");
+  await terminateRuntimeProcess(rt);
+  if (runtimes.has(row.id)) throw new Error("The source core did not stop");
+  sessionCores.set(row.id, target);
+  db.query("UPDATE sessions SET session_path=NULL,initial_provider=?,initial_model=?,initial_thinking=?,state='STOPPED',revision=revision+1 WHERE id=?")
+    .run(provider, state.model?.id ?? row.initial_model, state.thinkingLevel ?? row.initial_thinking, row.id);
+  try {
+    await activate(sessionRow.get(row.id));
+    db.query("UPDATE core_switches SET state='complete' WHERE id=?").run(switchId);
+    emit(row.id, "notice", { text: `Switched from ${source.core} to ${core} using the saved conversation. Native checkpoints remain with their original core.` });
+  } catch (cause) {
+    const candidate = runtimes.get(row.id);
+    if (candidate) { candidate.expectedExit = true; await terminateRuntimeProcess(candidate); }
+    sessionCores.set(row.id, source);
+    db.query("UPDATE sessions SET session_path=?,initial_provider=?,initial_model=?,initial_thinking=?,state='STOPPED',revision=revision+1 WHERE id=?")
+      .run(row.session_path,row.initial_provider,row.initial_model,row.initial_thinking,row.id);
+    db.query("UPDATE core_switches SET state='failed',error=? WHERE id=?").run(String(cause),switchId);
+    throw cause;
+  }
+}
+
 async function threadSettings(row: any) {
   const rt = await activate(row);
   const [state, availableModels, availableThinking] = await Promise.all([
@@ -1708,10 +1809,14 @@ async function threadSettings(row: any) {
   const selected = subagentIdentity(row.id);
   const models = rolledUpModels(availableModels.models ?? []).filter((model: any) => !selected || model.id === selected.model);
   return {
+    core: sessionCores.get(row.id).core,
+    cores: [...CORE_IDS],
+    agents: sessionCores.agents(row.id),
     model,
     thinkingLevel: state.thinkingLevel ?? "off",
     speedMode: latest?.service_tier === "priority" ? "priority" : "normal",
-    speedModes: supportsPriority ? ["normal", "priority"] : [],
+    speedModes: supportsPriority && sessionCores.get(row.id).core === "pi" ? ["normal", "priority"] : [],
+    bashTimeoutSupported: sessionCores.get(row.id).core === "pi",
     bashTimeoutSeconds: bashTimeoutSeconds(latest?.bash_timeout_seconds),
     models,
     thinkingLevels: availableThinking.levels ?? ["off"],
@@ -1954,13 +2059,14 @@ function meetingDestination() {
 }
 
 function insertThread(id: string, name: string, destination: { workspaceId: string; id: string },
-  preset: { provider: string; modelId: string; thinkingLevel: string }, meetingId: string | null, priority: boolean) {
+  preset: { provider: string; modelId: string; thinkingLevel: string }, meetingId: string | null, priority: boolean, core: CoreId = DEFAULT_CORE) {
   const time = now();
   db.query("UPDATE sessions SET display_order=display_order+1 WHERE archived_at IS NULL").run();
   db.query(`INSERT INTO sessions(id,name,workspace_id,session_path,state,created_at,updated_at,last_error,
     initial_provider,current_provider,initial_model,initial_thinking,profile_id,service_tier,meeting_id,display_order)
     VALUES(?,?,?,?,?,?,?,NULL,?,?,?,?,?,?,?,0)`).run(id, name, destination.workspaceId, null, "STOPPED", time, time,
       preset.provider, preset.provider, preset.modelId, preset.thinkingLevel, destination.id, priority ? "priority" : "default", meetingId);
+  sessionCores.create(id, core);
 }
 
 function relayThreadResults() {
@@ -2517,6 +2623,7 @@ const server = Bun.serve({
         if (parent && !task) return error("A delegated task is required");
         const destination = THREAD_DESTINATIONS.get(String(body.destination ?? parent?.profile_id ?? (body.meetingId ? meetingDestination()?.id : "home")));
         if (!destination) return error("Unknown thread destination");
+        const core = configuredCore(body.core ?? (parent ? sessionCores.get(parent.id).core : destination.core ?? DEFAULT_CORE));
         const meetingId = parent ? parent.meeting_id : body.meetingId == null ? null : String(body.meetingId);
         if (meetingId !== null && !/^[0-9a-f-]{36}$/i.test(meetingId)) return error("Valid meetingId required");
         const modelId = meetingId && !parent ? "astra" : String(body.model ?? (parent ? "astra" : destination.defaultModel));
@@ -2527,6 +2634,7 @@ const server = Bun.serve({
           return error("Model not available at this destination");
         const model = THREAD_MODELS.get(modelId);
         if (!model) return error("Unknown thread model");
+        if (core === "codex" && !model.provider.startsWith("openai")) return error("Codex requires an OpenAI model", 409);
         const preset = {
           provider: model.provider,
           modelId: model.modelId,
@@ -2560,7 +2668,7 @@ const server = Bun.serve({
         if (!/^[0-9a-f-]{36}$/i.test(requestedId)) return error("Valid sessionId required");
         const id = requestedId;
         const response = db.transaction(() => {
-          insertThread(id, name, destination, preset, meetingId, model.id === "astra");
+          insertThread(id, name, destination, preset, meetingId, model.id === "astra", core);
           if (parent) db.query("INSERT INTO subagents(session_id,parent_session_id,provider,model) VALUES(?,?,?,?)")
             .run(id, parent.id, preset.provider, preset.modelId);
           const delegation = parent ? enqueueDelegation(id, parent, task) : null;
@@ -2575,6 +2683,27 @@ const server = Bun.serve({
         });
         return json(response, 201);
       } catch (e: any) { return error(e.message ?? "Invalid request"); }
+    }
+    const coreAgentsMatch = API.sessionCoreAgents.match(req.method, url.pathname);
+    if (coreAgentsMatch) {
+      const row = sessionRow.get(coreAgentsMatch.sessionId);
+      if (!row) return error("Session not found", 404);
+      return json({ core: sessionCores.get(coreAgentsMatch.sessionId).core, agents: sessionCores.agents(coreAgentsMatch.sessionId) });
+    }
+    const coreAgentMatch = API.sessionCoreAgent.match(req.method, url.pathname) ?? API.sessionCoreAgentCommand.match(req.method, url.pathname);
+    if (coreAgentMatch) {
+      const row = sessionRow.get(coreAgentMatch.sessionId) as any;
+      if (!row) return error("Session not found", 404);
+      try {
+        const rt = await activate(row);
+        if (req.method === "GET") return json(await rpc(rt, "core_agent_read", { agentId: coreAgentMatch.agentId }));
+        const body = await readBody(req);
+        if (!["steer", "abort"].includes(body.action)) return error("Agent action must be steer or abort");
+        if (body.action === "steer" && (typeof body.message !== "string" || !body.message.trim())) return error("A steering message is required");
+        const result = await rpc(rt, "core_agent_command", { agentId: coreAgentMatch.agentId, action: body.action, message: body.message }, 30_000);
+        emit(row.id, "core_agent_control", { agentId: coreAgentMatch.agentId, action: body.action, message: body.message });
+        return json(result);
+      } catch (cause: any) { return error(cause.message ?? "Core agent command failed", 409); }
     }
     const queuedItemMatch = API.queueItem.match(req.method, url.pathname);
     if (queuedItemMatch) {
@@ -2761,45 +2890,7 @@ const server = Bun.serve({
     }
     if (action === "context" && req.method === "PUT") {
       try {
-        const body = await readBody(req);
-        const capturedAt = Number(body.capturedAt);
-        const context = body.context;
-        if (!Number.isSafeInteger(capturedAt) || capturedAt <= 0) return error("Valid context capture time required");
-        if (!context || typeof context !== "object" || typeof context.systemPrompt !== "string"
-          || !Array.isArray(context.tools) || !Array.isArray(context.messages)) return error("Valid model context required");
-        const document = JSON.stringify(context);
-        const runtime = runtimes.get(id);
-        const compactionReplacement = body.replacement === "compaction" && runtime?.compacting === true;
-        let changed = false;
-        let acknowledgedHash = sha256(document);
-        let acknowledgedCapturedAt = capturedAt;
-        db.transaction(() => {
-          const current = storedContext(id);
-          if (current && capturedAt <= current.capturedAt) {
-            if (!compactionReplacement) {
-              acknowledgedHash = current.hash;
-              acknowledgedCapturedAt = current.capturedAt;
-              return;
-            }
-            acknowledgedCapturedAt = current.capturedAt + 1;
-          }
-          db.query(`
-            INSERT INTO session_contexts(session_id,captured_at,context) VALUES(?,?,?)
-            ON CONFLICT(session_id) DO UPDATE SET captured_at=excluded.captured_at,context=excluded.context
-          `).run(id, acknowledgedCapturedAt, document);
-          db.query("DELETE FROM session_context_patches WHERE session_id=?").run(id);
-          inlineImages.acceptContext(id, document);
-          changed = true;
-        })();
-        if (changed) {
-          cacheStoredContext(id, { capturedAt: acknowledgedCapturedAt, document, hash: acknowledgedHash });
-          if (compactionReplacement && runtime) runtime.compactionContextHash = acknowledgedHash;
-          if (acknowledgedHash === sha256(document)) acknowledgeMessageContext(id, body.finalizesMessage);
-          signalSync();
-        } else if (acknowledgedHash === sha256(document)) {
-          acknowledgeMessageContext(id, body.finalizesMessage);
-        }
-        return json({ ok: true, capturedAt: acknowledgedCapturedAt, hash: acknowledgedHash });
+        return json(storeContextCapture(id, await readBody(req)));
       } catch (cause: any) { return error(cause?.message ?? "Could not store model context", 400); }
     }
     if (action === "events" && req.method === "GET") {
@@ -2845,6 +2936,12 @@ const server = Bun.serve({
     if (action === "settings" && req.method === "PUT") {
       try {
         const body = await readBody(req);
+        if (body.core != null) {
+          if (!isCoreId(body.core)) return error("Unknown agent core");
+          if (Object.keys(body).some(key => key !== "core")) return error("Change the core separately from other settings");
+          await switchSessionCore(row, body.core);
+          return json({ settings: await threadSettings(sessionRow.get(id)) });
+        }
         const subagent = subagentIdentity(id);
         if (subagent && (body.modelProvider != null || body.modelId != null)
           && (String(body.modelId ?? "") !== subagent.model

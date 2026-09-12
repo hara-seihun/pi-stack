@@ -41,6 +41,7 @@ export interface QueuedMessage {
 
 export interface Session {
   id: string;
+  core?: "pi" | "codex";
   subagent?: { parentSessionId: string; model: string };
   name: string;
   cwd: string;
@@ -254,6 +255,10 @@ export type BashTimeoutSeconds = (typeof BASH_TIMEOUT_OPTIONS)[number];
 export const DEFAULT_BASH_TIMEOUT_SECONDS: BashTimeoutSeconds = 1800;
 
 export interface ThreadSettings {
+  core: "pi" | "codex";
+  cores: Array<"pi" | "codex">;
+  agents: Array<{ id: string; parentId: string | null; name: string; model?: string; state: string }>;
+  bashTimeoutSupported: boolean;
   models: Array<{ id: string; name?: string; provider: string; common?: boolean }>;
   model: { id: string; provider: string } | null;
   thinkingLevels: string[];

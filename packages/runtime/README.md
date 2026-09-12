@@ -8,6 +8,8 @@ Reusable extensions for [Pi](https://pi.dev). The [stack manifest](../../package
 - [Browser runtime](extensions/browser/README.md) loads the native browser tool with its executable from the same immutable dependency tree.
 - [Codex compaction](extensions/codex-compaction/README.md) stores OpenAI's server-side checkpoints in Pi sessions while keeping Pi's tools and account routing. Stored JSONL remains readable through the [shared session reader](../../tools/read-condensed-session/README.md).
 
+PiStack's [agent-core boundary](../../docs/agent-cores.md) separates the engine from Remote and fleet hosting. The Pi adapter retains these native extensions; the Codex adapter owns its app-server protocol and native engine behavior.
+
 The stack also supplies native [Image 2.5 generation](../orchestrator/docs/image-generation.md) through the Orchestrator routing extension, which owns its OpenAI account selection and leases.
 
 ## Install

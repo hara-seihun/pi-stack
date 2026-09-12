@@ -116,6 +116,13 @@ function main() {
         return;
       }
       row = resolveThread(rows, selector);
+      if (db.prepare("SELECT 1 FROM sqlite_master WHERE type='table' AND name='session_cores'").get()) {
+        const core = db.prepare("SELECT core,state_dir FROM session_cores WHERE session_id=?").get(row.id);
+        if (core) {
+          const portable = join(core.state_dir, "conversation.jsonl");
+          if (existsSync(portable)) row = {...row, session_path: portable, core: core.core, representation: "portable-activity"};
+        }
+      }
     }
     if (paged) {
       const page = subagents ? subagentPage(db, row.id, { includeIdle, limit: options.limit, cursor })

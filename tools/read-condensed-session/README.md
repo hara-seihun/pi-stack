@@ -2,6 +2,8 @@
 
 ## Stored history reading and search
 
+For a Remote thread with an [agent-core record](../../docs/agent-cores.md), title/ID lookup selects that core generation's portable `conversation.jsonl` once it exists. This is the shared activity history, including tool records, rather than the native engine's private checkpoints. An explicit native JSONL path continues to read the original file. Native child inspection and control belong to the core APIs; the external Remote-thread listing below describes separately registered threads.
+
 `read-thread` reads the current session and other sessions through the same local command. It makes no model calls and has no recall cache or index. `self` resolves Pi's built-in `PI_SESSION_FILE`, refreshed for each shell-tool invocation. An explicit JSONL path works in ordinary shells and fleet workers without a Remote database. Remote titles and ids resolve through the current person's supervisor database.
 
 ```bash

@@ -79,7 +79,7 @@ export function registerThreadTools(pi: ExtensionAPI) {
     },
   });
 
-  if (environment.PI_SUBAGENT_MODEL) return;
+  if (environment.PI_SUBAGENT_MODEL || environment.PI_STACK_CORE_OWNS_CHILDREN === "1") return;
 
   pi.registerTool({
     name: "thread_delegate",

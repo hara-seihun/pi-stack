@@ -46,4 +46,6 @@ The Kenan drawer switches between them, and would between more. The browser clie
 
 ## Architecture
 
+[Agent cores](docs/agent-cores.md) describes the Pi/Codex runtime boundary, engine selection, portable conversations and core-owned child control.
+
 [`docs/architecture.md`](docs/architecture.md) describes repository boundaries, environment identity, Android state isolation, and the work-thread cutover.
