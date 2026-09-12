@@ -4,6 +4,7 @@ import { createHash } from "node:crypto";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { createCodexSession } from "../src/cores/codex.js";
+import { CoreExecutionLedger } from "../src/cores/execution.js";
 import { credentialGuard } from "../src/cores/codex-auth.js";
 import type { CoreCommand, CoreExecutionSnapshot, CoreOutput, CorePresentationEvent, CoreResponse, CoreSessionOptions } from "../src/cores/contracts.js";
 import type { CodexRpcOptions, Json, RpcResult } from "../src/cores/codex-rpc.js";
@@ -256,10 +257,105 @@ describe("Codex app-server adapter", () => {
     expect(f.response("state")?.data).toMatchObject({ isStreaming: false, isCompacting: false, treeComplete: true });
     expect(f.events.filter(event => event.type === "compaction_start")).toHaveLength(1);
     expect(f.events.filter(event => event.type === "compaction_end")).toHaveLength(1);
+    expect(f.execution().operations).toContainEqual(expect.objectContaining({ workId: "compact", kind: "compact", state: "succeeded" }));
     f.send("turn/completed", { threadId: "root", turn: { id: "failed", status: "failed", error: { message: "Provider failure" } } });
     await session.command({ type: "get_state", id: "failure-state" });
     expect(f.response("failure-state")?.data).toMatchObject({ lastAssistantMessage: { stopReason: "error", errorMessage: "Provider failure" } });
     await session.close();
+  });
+
+  it.each([ ["completed", "succeeded"], ["failed", "failed"], ["interrupted", "cancelled"] ] as const)("owns manual compaction until its matching native turn is %s", async (status, outcome) => {
+    const f = fixture(), session = await f.open();
+    await session.command({ type: "compact", id: "compact-request", workId: "compact-work" });
+    expect(f.execution().operations).toContainEqual(expect.objectContaining({ workId: "compact-work", kind: "compact", state: "running" }));
+    f.send("turn/completed", { threadId: "root", turn: { id: "unrelated", status: "completed", items: [] } });
+    f.send("thread/status/changed", { threadId: "root", status: { type: "idle" } });
+    expect(f.execution().operations.find(operation => operation.workId === "compact-work")?.state).toBe("running");
+    f.send("turn/started", { threadId: "root", turn: { id: "compact-turn", status: "inProgress", items: [] } });
+    f.send("item/started", { threadId: "root", turnId: "compact-turn", item: { type: "contextCompaction", id: "compact-item" } });
+    f.send("turn/completed", { threadId: "root", turn: { id: "compact-turn", status, items: [], error: status === "failed" ? { message: "Compaction failed" } : null } });
+    expect(f.execution().operations.find(operation => operation.workId === "compact-work")?.state).toBe(outcome);
+    await session.command({ type: "compact", id: "duplicate", workId: "compact-work" });
+    expect(f.requests.filter(request => request.method === "thread/compact/start")).toHaveLength(1);
+    await session.command({ type: "get_state", id: "compact-outcome", workId: "compact-work" });
+    expect(f.response("compact-outcome")?.data).toMatchObject({ operation: { workId: "compact-work", kind: "compact", state: outcome } });
+    await session.close();
+  });
+
+  it("keeps ambiguous compaction unknown through later completion and restart", async () => {
+    const f = fixture(), session = await f.open();
+    f.hook(method => method === "thread/compact/start" ? { ok: false, error: "Codex thread/compact/start timed out; outcome unknown" } : undefined);
+    await session.command({ type: "compact", id: "compact-work" });
+    f.send("item/completed", { threadId: "root", turnId: "late-compact", item: { type: "contextCompaction", id: "late-item" } });
+    f.send("turn/completed", { threadId: "root", turn: { id: "late-compact", status: "completed", items: [] } });
+    expect(f.execution().operations).toContainEqual(expect.objectContaining({ workId: "compact-work", kind: "compact", state: "unknown" }));
+    await session.close();
+    const resumed = fixture(f.options), next = await resumed.open();
+    await next.command({ type: "compact", id: "compact-work" });
+    expect(resumed.execution().operations).toContainEqual(expect.objectContaining({ workId: "compact-work", kind: "compact", state: "unknown" }));
+    expect(resumed.requests.some(request => request.method === "thread/compact/start")).toBe(false);
+    await next.close();
+  });
+
+  it("records rejected compaction without disturbing generation ownership", async () => {
+    const f = fixture(), session = await f.open();
+    await session.command({ type: "prompt", id: "generation", message: "Read" });
+    await session.command({ type: "compact", id: "busy-compact" });
+    expect(f.execution().operations).toContainEqual(expect.objectContaining({ workId: "busy-compact", kind: "compact", state: "failed" }));
+    expect(f.execution().operations).toContainEqual(expect.objectContaining({ workId: "generation", kind: "prompt", state: "running" }));
+    expect(f.requests.some(request => request.method === "thread/compact/start")).toBe(false);
+    await session.close();
+  });
+
+  it("settles abort only after native tree termination and preserves a nonempty answer during empty teardown", async () => {
+    const f = fixture(), session = await f.open();
+    await session.command({ type: "prompt", id: "generation", message: "Read" });
+    f.send("item/completed", { threadId: "root", turnId: "turn-1", item: { type: "agentMessage", id: "answer", phase: "final_answer", text: "Substantive answer" } });
+    f.send("turn/started", { threadId: "child", turn: { id: "child-turn", status: "inProgress", items: [] } });
+    await session.command({ type: "abort", id: "stop-work" });
+    expect(f.execution().operations).toContainEqual(expect.objectContaining({ workId: "stop-work", kind: "abort", state: "running" }));
+    for (const threadId of ["root", "child"]) f.send("thread/status/changed", { threadId, status: { type: "idle" } });
+    expect(f.execution().operations.find(operation => operation.workId === "stop-work")?.state).toBe("running");
+    f.send("turn/completed", { threadId: "child", turn: { id: "child-turn", status: "interrupted", items: [] } });
+    f.send("item/completed", { threadId: "root", turnId: "turn-1", item: { type: "agentMessage", id: "answer", phase: "final_answer", text: "" } });
+    f.send("turn/completed", { threadId: "root", turn: { id: "turn-1", status: "interrupted", items: [{ type: "agentMessage", id: "answer", phase: "final_answer", text: "" }] } });
+    await f.untilExecution(snapshot => snapshot.operations.some(operation => operation.workId === "generation" && operation.state === "cancelled"));
+    expect(f.execution().operations).toContainEqual(expect.objectContaining({ workId: "stop-work", kind: "abort", state: "succeeded" }));
+    expect(f.execution().operations).toContainEqual(expect.objectContaining({ workId: "generation", state: "cancelled", result: { text: "Substantive answer" } }));
+    await session.command({ type: "abort", id: "stop-work" });
+    expect(f.requests.filter(request => request.method === "turn/interrupt")).toHaveLength(2);
+    await session.close();
+    const resumed = fixture(f.options), next = await resumed.open();
+    await next.command({ type: "get_state", id: "answer-outcome", workId: "generation" });
+    expect(resumed.response("answer-outcome")?.data).toMatchObject({ operation: { workId: "generation", state: "cancelled", result: { text: "Substantive answer" } } });
+    await next.close();
+  });
+
+  it("does not resolve an ambiguous abort when process exit races its interrupt reply", async () => {
+    const f = fixture(), session = await f.open();
+    await session.command({ type: "prompt", id: "generation", message: "Read" });
+    f.hook(method => {
+      if (method !== "turn/interrupt") return undefined;
+      f.crash();
+      return { ok: false, error: "Codex turn/interrupt timed out; outcome unknown" };
+    });
+    await session.command({ type: "abort", id: "unknown-stop" });
+    expect(f.response("unknown-stop")?.data).toMatchObject({ coreClosed: true });
+    expect(f.execution().operations).toContainEqual(expect.objectContaining({ workId: "unknown-stop", kind: "abort", state: "unknown" }));
+    await session.close();
+  });
+
+  it("owns a no-op abort without pretending an empty native session was materialized", async () => {
+    const f = fixture(), session = await f.open();
+    await session.command({ type: "abort", id: "empty-stop" });
+    expect(f.execution().operations).toContainEqual(expect.objectContaining({ workId: "empty-stop", kind: "abort", state: "succeeded" }));
+    expect(f.rpcCloseCount).toBe(0);
+    await session.close();
+    const resumed = fixture(f.options), next = await resumed.open();
+    expect(resumed.requests.some(request => request.method === "thread/resume")).toBe(false);
+    await next.command({ type: "prompt", id: "first-generation", message: "Read" });
+    expect(resumed.requests.filter(request => request.method === "turn/start")).toHaveLength(1);
+    await next.close();
   });
 
   it("handles an authoritative terminal turn returned directly by dispatch", async () => {
@@ -346,7 +442,7 @@ describe("Codex app-server adapter", () => {
     await next.close();
   });
 
-  it("adopts stored acceptance as unknown until native history proves its outcome", async () => {
+  it("keeps adopted acceptance unknown even when later native history shows completion", async () => {
     const f = fixture();
     const hash = createHash("sha256").update(JSON.stringify({ threadId: "root", type: "prompt", content: [{ type: "text", text: "Read", text_elements: [] }] })).digest("hex");
     writeFileSync(join(f.options.stateDir, "codex-session.json"), JSON.stringify({ version: 1, sessionId: f.options.sessionId,
@@ -357,9 +453,9 @@ describe("Codex app-server adapter", () => {
     const resumed = fixture(f.options);
     resumed.history([{ id: "native-turn", status: "completed", items: [{ type: "agentMessage", id: "answer", text: "Read complete", phase: "final_answer" }] }]);
     const next = await resumed.open();
-    expect(resumed.execution().operations).toContainEqual(expect.objectContaining({ workId: "work", state: "succeeded", result: { text: "Read complete" } }));
+    expect(resumed.execution().operations).toContainEqual(expect.objectContaining({ workId: "work", state: "unknown" }));
     await next.command({ type: "get_state", id: "requested-outcome", workId: "work" });
-    expect(resumed.response("requested-outcome")?.data).toMatchObject({ operation: { workId: "work", state: "succeeded", result: { text: "Read complete" } } });
+    expect(resumed.response("requested-outcome")?.data).toMatchObject({ operation: { workId: "work", state: "unknown" } });
     expect(resumed.requests.some(request => request.method === "turn/start")).toBe(false);
     await next.close();
   });
@@ -378,7 +474,7 @@ describe("Codex app-server adapter", () => {
     await next.close();
   });
 
-  it("recovers child steer outcomes by their own durable native thread and turn", async () => {
+  it("keeps child steer ownership unknown after restart despite a later native failure", async () => {
     const f = fixture(); f.children([thread("child", "root")]);
     const session = await f.open();
     await session.command({ type: "steer", id: "child-steer", agentId: "child", message: "Read" });
@@ -388,7 +484,7 @@ describe("Codex app-server adapter", () => {
       data: [{ id: "turn-1", status: "failed", error: { message: "Child failed" }, items: [] }], nextCursor: null,
     } } : undefined);
     const next = await resumed.open();
-    expect(resumed.execution().operations).toContainEqual(expect.objectContaining({ workId: "child-steer", agentId: "child", state: "failed", error: "Child failed" }));
+    expect(resumed.execution().operations).toContainEqual(expect.objectContaining({ workId: "child-steer", agentId: "child", state: "unknown" }));
     await next.close();
   });
 
@@ -409,7 +505,7 @@ describe("Codex app-server adapter", () => {
     await next.close();
   });
 
-  it("does not retry ambiguous dispatch and reconciles a persisted native client ID", async () => {
+  it("does not retry or resolve ambiguous dispatch after finding its native client ID", async () => {
     const f = fixture(), session = await f.open();
     f.hook(method => method === "turn/start" ? { ok: false, error: "Codex turn/start timed out; outcome unknown" } : undefined);
     await session.command({ type: "prompt", id: "request", workId: "work", message: "Read" });
@@ -419,7 +515,7 @@ describe("Codex app-server adapter", () => {
     const next = await resumed.open();
     await next.command({ type: "prompt", id: "again", workId: "work", message: "Read" });
     expect(resumed.response("again")?.data).toEqual({ accepted: true, nativeTurnId: "turn-native" });
-    expect(resumed.execution().operations).toContainEqual(expect.objectContaining({ workId: "work", state: "succeeded" }));
+    expect(resumed.execution().operations).toContainEqual(expect.objectContaining({ workId: "work", state: "unknown" }));
     expect(resumed.requests.some(request => request.method === "turn/start")).toBe(false);
     await next.close();
   });
@@ -481,6 +577,7 @@ describe("Codex app-server adapter", () => {
     const f = fixture();
     f.history([{ id: "turn-a", startedAt: 10, status: "completed", items: [{ id: "user-a", type: "userMessage", clientId: null, content: [{ type: "text", text: "Read", text_elements: [] }] }] }],
       { "historical-work": { hash: createHash("sha256").update("historical-work").digest("hex"), state: "accepted", turnId: "turn-a" } });
+    new CoreExecutionLedger(f.options.stateDir, () => {}).adopt({ workId: "historical-work", state: "succeeded" }, createHash("sha256").update("historical-work").digest("hex"));
     const session = await f.open();
     await session.command({ type: "set_thinking_level", id: "effort", level: "off" });
     expect([...f.requests].reverse().find(request => request.method === "thread/settings/update")?.params.effort).toBe("none");
