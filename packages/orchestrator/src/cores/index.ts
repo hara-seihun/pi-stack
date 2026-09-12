@@ -22,6 +22,7 @@ export async function openCoreSession(options: CoreSessionOptions, output: (even
   let adapter: CoreSession;
   let closed = false;
   const publish = (event: CoreOutput): void => {
+    if (closed) return;
     journal.record(event);
     if (event.type === "response" && event.command === "get_state" && event.success) {
       const path = (event.data as {sessionFile?: string})?.sessionFile;
