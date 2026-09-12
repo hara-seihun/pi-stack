@@ -39,16 +39,21 @@
   font-weight: 650;
 }
 .drawing-done:disabled { opacity: .65; }
-.drawing-exit {
+.drawing-left-controls {
   position: absolute;
   top: max(14px, env(safe-area-inset-top));
   left: max(14px, env(safe-area-inset-left));
+  display: flex;
+  align-items: center;
+  gap: 10px;
+}
+.drawing-icon-button {
   width: 46px;
   padding: 0;
   display: grid;
   place-items: center;
 }
-.drawing-exit svg { width: 22px; height: 22px; fill: none; stroke: currentColor; stroke-width: 2; stroke-linecap: round; }
+.drawing-icon-button svg { width: 22px; height: 22px; fill: none; stroke: currentColor; stroke-width: 2; stroke-linecap: round; }
 .drawing-error {
   position: absolute;
   left: 14px;

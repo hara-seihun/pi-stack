@@ -83,6 +83,7 @@ export function DrawingCanvas({ onAttach, onClose }: DrawingCanvasProps) {
   const busyRef = useRef(false);
   const [color, setColor] = useState("#202124");
   const [attaching, setAttaching] = useState(false);
+  const [strokeCount, setStrokeCount] = useState(0);
   const [error, setError] = useState<string | null>(null);
 
   const render = useCallback(() => {
@@ -236,8 +237,18 @@ export function DrawingCanvas({ onAttach, onClose }: DrawingCanvasProps) {
       const previous = gesture.stroke.points.at(-1)!;
       if (next.x !== previous.x || next.y !== previous.y) gesture.stroke.points.push(next);
       strokesRef.current.push(gesture.stroke);
+      setStrokeCount(strokesRef.current.length);
     }
     grab();
+  };
+
+  const undo = () => {
+    if (busyRef.current || !strokesRef.current.length) return;
+    resetPointers();
+    strokesRef.current.pop();
+    setStrokeCount(strokesRef.current.length);
+    setError(null);
+    redraw();
   };
 
   const done = async () => {
@@ -267,9 +278,14 @@ export function DrawingCanvas({ onAttach, onClose }: DrawingCanvasProps) {
         onPointerCancel={event => finish(event, true)} onLostPointerCapture={event => finish(event, true)}
         onPointerLeave={() => { cursorRef.current = null; redraw(); }} onContextMenu={event => event.preventDefault()} />
     </div>
-    <button type="button" className="drawing-done drawing-exit" aria-label="Cancel drawing" title="Cancel drawing" disabled={attaching} onClick={() => { resetPointers(); setError(null); onClose(); }}>
-      <svg viewBox="0 0 24 24" aria-hidden="true"><path d="m6 6 12 12M18 6 6 18" /></svg>
-    </button>
+    <div className="drawing-left-controls">
+      <button type="button" className="drawing-done drawing-icon-button" aria-label="Cancel drawing" title="Cancel drawing" disabled={attaching} onClick={() => { resetPointers(); setError(null); onClose(); }}>
+        <svg viewBox="0 0 24 24" aria-hidden="true"><path d="m6 6 12 12M18 6 6 18" /></svg>
+      </button>
+      <button type="button" className="drawing-done drawing-icon-button" aria-label="Undo last stroke" title="Undo last stroke" disabled={attaching || strokeCount === 0} onClick={undo}>
+        <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M9 4 4 9l5 5M4 9h10a6 6 0 0 1 0 12" /></svg>
+      </button>
+    </div>
     <div className="drawing-controls">
       <DrawingColourPicker color={color} onChange={setColor} disabled={attaching} />
       <button type="button" className="drawing-done" onClick={() => void done()} disabled={attaching}>{attaching ? "Saving…" : "Done"}</button>
