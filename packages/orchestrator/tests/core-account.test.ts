@@ -1,13 +1,14 @@
 import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { afterEach, describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 import { SharedOAuthAuth } from "../src/auth/shared-oauth.js";
 import { openCoreAccount, type CoreAccountUsage } from "../src/cores/account.js";
 import { Store } from "../src/store.js";
 
 const roots: string[] = [];
 afterEach(() => {
+  vi.useRealTimers();
   for (const root of roots.splice(0)) rmSync(root, { recursive: true, force: true });
 });
 
@@ -51,6 +52,65 @@ function usage(overrides: Partial<CoreAccountUsage> = {}): CoreAccountUsage {
 }
 
 describe("external core account bridge", () => {
+  it("retains twelve idle cores without capacity and keeps affinity across activity and reopen", async () => {
+    vi.useFakeTimers();
+    const f = fixture({ selected: credential("workspace-selected"), other: credential("workspace-other") });
+    const store = Store.open(f.ledgerPath);
+    store.upsertAccount({ id: "selected", provider: "openai-codex" });
+    const options = { initialProvider: "openai-codex", initialModel: "gpt-5.6-luna", env: {},
+      ledgerPath: f.ledgerPath, auth: auth(f.authPath), heartbeatMs: 10 };
+    const cores = await Promise.all(Array.from({ length: 14 }, (_, i) => openCoreAccount({ ...options, sessionId: `core-${i}` })));
+    try {
+      expect(store.activeLeases()).toEqual([]);
+      expect(vi.getTimerCount()).toBe(0);
+      cores[0]!.setActive(true);
+      cores[1]!.setActive(true);
+      const started = store.activeLeases("selected")[0]!.started_at;
+      vi.advanceTimersByTime(30);
+      cores[0]!.setActive(true);
+      expect(store.activeLeases("selected")).toHaveLength(2);
+      expect(vi.getTimerCount()).toBe(2);
+      expect(store.activeLeases("selected")[0]).toMatchObject({ started_at: started, heartbeat_at: Date.now() });
+      cores[0]!.setActive(false);
+      cores[1]!.setActive(false);
+      expect(store.activeLeases()).toEqual([]);
+      expect(vi.getTimerCount()).toBe(0);
+      vi.advanceTimersByTime(30);
+      cores[0]!.setActive(true);
+      expect(store.activeLeases("selected")[0]!.started_at).toBe(Date.now());
+      await cores[0]!.close();
+      store.upsertAccount({ id: "other", provider: "openai-codex" });
+      const reopened = await openCoreAccount({ ...options, initialProvider: "other", sessionId: "core-0" });
+      expect(reopened.accountId).toBe("selected");
+      expect(store.activeLeases()).toEqual([]);
+      await reopened.close();
+    } finally {
+      await Promise.all(cores.map(core => core.close()));
+      store.close();
+    }
+    expect(vi.getTimerCount()).toBe(0);
+    expect(() => cores[0]!.setActive(true)).toThrow("closed");
+  });
+
+  it("adopts the previous account without reviving a retained process lease", async () => {
+    const f = fixture({ selected: credential("workspace-selected") });
+    const store = Store.open(f.ledgerPath);
+    store.upsertAccount({ id: "selected", provider: "openai-codex" });
+    store.createLease("interactive:retained", "selected", "interactive");
+    const account = await openCoreAccount({ initialProvider: "openai-codex", initialModel: "gpt-5.6-luna", sessionId: "retained",
+      env: {}, ledgerPath: f.ledgerPath, auth: auth(f.authPath) });
+    expect(account.accountId).toBe("selected");
+    expect(store.activeLeases()).toEqual([]);
+    account.setActive(true);
+    expect(store.activeLeases()).toHaveLength(1);
+    account.setActive(false);
+    store.setAccountEnabled("selected", false);
+    expect(() => account.setActive(true)).toThrow("no longer eligible");
+    expect(store.activeLeases()).toEqual([]);
+    await account.close();
+    store.close();
+  });
+
   it("selects an eligible interactive account, leases it, and records cumulative usage once", async () => {
     const f = fixture({
       replacement: credential("workspace-replacement"),
@@ -79,6 +139,10 @@ describe("external core account bridge", () => {
       chatgptAccountId: "workspace-selected",
     });
 
+    const idle = Store.open(f.ledgerPath);
+    expect(idle.activeLeases()).toEqual([]);
+    idle.close();
+    account.setActive(true);
     account.recordUsage(usage());
     account.recordUsage(usage());
     account.recordUsage(usage({ inputTokens: 130, cachedInputTokens: 50, outputTokens: 30, totalTokens: 160, turnId: "turn-2" }));
@@ -127,6 +191,7 @@ describe("external core account bridge", () => {
   });
 
   it("uses but does not own an assigned fleet lease", async () => {
+    vi.useFakeTimers();
     const f = fixture({ assigned: { ...credential("workspace-assigned", "secret-old"), chatgptPlanType: "pro" } });
     const setup = Store.open(f.ledgerPath);
     setup.upsertAccount({ id: "assigned", provider: "openai-codex" });
@@ -153,6 +218,7 @@ describe("external core account bridge", () => {
       ledgerPath: f.ledgerPath,
       authPath: f.authPath,
       auth: shared,
+      heartbeatMs: 10,
     });
     expect(account).toMatchObject({ accountId: "assigned", provider: "openai-codex", model: "gpt-6-astra" });
     await expect(account.credentials()).resolves.toMatchObject({ accessToken: "secret-old", chatgptAccountId: "workspace-assigned", chatgptPlanType: "pro" });
@@ -160,8 +226,17 @@ describe("external core account bridge", () => {
     expect(refreshes).toBe(1);
     expect(readFileSync(f.authPath, "utf8")).toContain("secret-new-1");
 
+    account.setActive(true);
+    vi.advanceTimersByTime(30);
+    account.setActive(false);
+    account.setActive(true);
+    vi.advanceTimersByTime(30);
+    account.setActive(false);
+    expect(vi.getTimerCount()).toBe(0);
     const during = Store.open(f.ledgerPath);
     expect((during.db.prepare("SELECT started_at FROM lease WHERE id=?").get(`run:${runId}`) as any).started_at).toBe(startedAt);
+    expect((during.db.prepare("SELECT heartbeat_at FROM lease WHERE id=?").get(`run:${runId}`) as any).heartbeat_at).toBe(startedAt);
+    expect(during.activeLeases().map(row => row.id)).toEqual([`run:${runId}`]);
     during.close();
     await account.close();
     const after = Store.open(f.ledgerPath);

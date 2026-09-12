@@ -22,6 +22,7 @@ export interface CodexAccountLease {
   credentials(request?: { refresh: boolean; previousAccountId?: string }): Promise<CodexCredentials>;
   /** Cumulative per-thread counters. The broker must upsert, not sum notifications. */
   recordUsage(usage: CodexUsage): void | Promise<void>;
+  setActive(active: boolean): void;
   close(): void | Promise<void>;
 }
 export type OpenCodexAccount = (options: CoreSessionOptions) => Promise<CodexAccountLease>;

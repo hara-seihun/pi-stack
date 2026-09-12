@@ -103,7 +103,7 @@ try{
   assert.equal(session.model.provider,expected);
   assert.equal(session.model.id,'gpt-5.6-luna');
   assert.equal(session.thinkingLevel,'low');
-  assert.equal(store.activeLeases()[0].account_id,expected);
+  assert.deepEqual(store.activeLeases(),[]);
 }finally{await session.extensionRunner.emit({type:'session_shutdown',reason:'quit'});session.dispose();store.close();}
 console.log('fresh naming account selected');
 `);
@@ -112,6 +112,16 @@ console.log('fresh naming account selected');
   try{const result=await promisify(execFile)(process.execPath,[fixture],{cwd:root,env,timeout:4000});expect(result.stdout).toContain('fresh naming account selected');}
   finally{await rm(root,{recursive:true,force:true});}
 },6000);
+
+test('activity leases release retained idle children without releasing their active parent or sibling', async () => {
+  const root = await mkdtemp(join(tmpdir(), 'pi-routing-activity-'));
+  const env = { ...process.env, HOME: root, PI_CODING_AGENT_DIR: join(root, 'agent'), PI_ORCHESTRATOR_LEDGER: join(root, 'ledger.sqlite3'), PI_ORCHESTRATOR_AUTH: join(root, 'auth.json'), PI_ORCHESTRATOR_ASSIGNED: '0', PI_OFFLINE: '1', TEST_SDK: sdk, TEST_AI: ai, TEST_STORE: join(buildRoot, 'compiled/store.js'), TEST_ROUTING: routing };
+  for (const key of Object.keys(env)) if (/^PI_REMOTE_|^PI_SESSION_|^PI_SUBAGENT_MODEL$|^PI_ORCHESTRATOR_RUN_ID$|_API_KEY$/.test(key)) delete env[key as keyof typeof env];
+  try {
+    const result = await promisify(execFile)(process.execPath, [fileURLToPath(new URL('./fixtures/routing-activity.mjs', import.meta.url))], { cwd: root, env, timeout: 4000 });
+    expect(result.stdout).toContain('activity leases released; retained idle child kept affinity');
+  } finally { await rm(root, { recursive: true, force: true }); }
+}, 6000);
 
 beforeAll(async () => {
   buildRoot = await mkdtemp(join(tmpdir(), 'pi-routing-build-'));

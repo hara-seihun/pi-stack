@@ -20,6 +20,8 @@ function fixture(existingOptions?: CoreSessionOptions) {
   const options: CoreSessionOptions = existingOptions ?? { cwd: stateDir, args: ["--model", "gpt-codex", "--thinking", "high"], env: { HOME: stateDir }, sessionId: "portable-root", stateDir };
   let callbacks: CodexRpcOptions;
   const events: CoreOutput[] = [], requests: { method: string; params: Json }[] = [], usage: unknown[] = [];
+  const activity: boolean[] = [];
+  let reserved = false;
   let children: unknown[] = [], history: unknown[] = [], closeCount = 0, refreshed = 0, rpcCloseCount = 0;
   let accountOptions: CoreSessionOptions | undefined;
   let closeWait = async () => {};
@@ -29,7 +31,8 @@ function fixture(existingOptions?: CoreSessionOptions) {
   const open = createCodexSession({
     openAccount: async value => { accountOptions = value; return ({
       credentials: async request => { if (request?.refresh) refreshed++; return { accessToken: token, chatgptAccountId: accountId }; },
-      recordUsage: value => { usage.push(value); }, close: () => { closeCount++; order.push("account-close"); },
+      setActive: active => { if (active !== reserved) activity.push(active); reserved = active; },
+      recordUsage: value => { usage.push(value); }, close: () => { reserved = false; closeCount++; order.push("account-close"); },
     }); },
     openRpc: value => {
       callbacks = value;
@@ -54,7 +57,8 @@ function fixture(existingOptions?: CoreSessionOptions) {
       };
     },
   });
-  return { options, events, requests, usage, order,
+  return { options, events, requests, usage, order, activity,
+    get reserved() { return reserved; },
     open: () => open(options, value => {
       events.push(value); if (value.type === "response") order.push(`response:${value.id}`);
       for (const resolve of eventWaiters.get(value.type) ?? []) resolve();
@@ -77,9 +81,56 @@ function fixture(existingOptions?: CoreSessionOptions) {
 }
 
 describe("Codex app-server adapter", () => {
-  it("keeps the root busy for descendants and aborts child-only turns and background terminals", async () => {
-    const f = fixture(); f.children([thread("child", "root"), thread("grandchild", "child")]);
+  it("does not charge idle inspection or invalid input and releases explicit native rejection", async () => {
+    const f = fixture(), session = await f.open();
+    await session.command({ type: "get_state", id: "state" });
+    await session.command({ type: "get_messages", id: "messages" });
+    await session.command({ type: "prompt", id: "invalid", message: "" });
+    expect(f.activity).toEqual([]);
+    f.hook(method => {
+      if (method === "turn/start" || method === "thread/compact/start") {
+        expect(f.reserved).toBe(true);
+        return { ok: false, error: "Codex rejected request: fixture refusal" };
+      }
+      return undefined;
+    });
+    await session.command({ type: "prompt", id: "rejected", message: "Read" });
+    expect(f.response("rejected")?.success).toBe(false);
+    expect(f.reserved).toBe(false);
+    await session.command({ type: "compact", id: "rejected-compact" });
+    expect(f.response("rejected-compact")?.success).toBe(false);
+    expect(f.activity).toEqual([true, false, true, false]);
+    f.hook(method => method === "thread/compact/start" ? { ok: false, error: "Codex request timed out; outcome unknown" } : undefined);
+    await session.command({ type: "compact", id: "uncertain-compact" });
+    expect(f.reserved).toBe(true);
+    f.send("item/completed", { threadId: "root", turnId: "compact", item: { type: "contextCompaction", id: "compact" } });
+    expect(f.reserved).toBe(false);
+    await session.close();
+  });
+
+  it("charges a restored active native turn but not completed retained history", async () => {
+    const f = fixture();
+    f.history([{ id: "restored", status: "inProgress", items: [] }]);
     const session = await f.open();
+    expect(f.reserved).toBe(true);
+    f.send("turn/completed", { threadId: "root", turn: { id: "restored", status: "completed" } });
+    await f.event("agent_settled");
+    expect(f.reserved).toBe(false);
+    await session.close();
+    const resumed = fixture(f.options);
+    resumed.history([{ id: "restored", status: "completed", items: [] }]);
+    const next = await resumed.open();
+    expect(resumed.activity).toEqual([]);
+    await next.close();
+  });
+
+  it("keeps the root busy for descendants and aborts child-only turns and background terminals", async () => {
+    const f = fixture(); f.children([thread("child", "root"), thread("grandchild", "child"),
+      ...Array.from({ length: 12 }, (_, i) => thread(`idle-${i}`, "root"))]);
+    const session = await f.open();
+    await session.command({ type: "core_agents", id: "retained" });
+    expect((f.response("retained")?.data as any).agents).toHaveLength(14);
+    expect(f.reserved).toBe(false);
     f.hook((method, params) => method === "thread/backgroundTerminals/list" && params.threadId === "child"
       ? { ok: true, value: { data: [{ processId: "terminal-child" }], nextCursor: null } } : undefined);
     for (const id of ["child", "grandchild"]) f.send("turn/started", { threadId: id, turn: { id: `turn-${id}` } });
@@ -93,14 +144,18 @@ describe("Codex app-server adapter", () => {
     expect(f.requests.filter(request => request.method === "turn/interrupt").map(request => request.params.threadId).sort()).toEqual(["child", "grandchild"]);
     expect(f.requests.find(request => request.method === "thread/backgroundTerminals/terminate")?.params).toEqual({ threadId: "child", processId: "terminal-child" });
     expect(f.events.filter(event => event.type === "agent_end")).toHaveLength(0);
+    expect(f.reserved).toBe(true);
     f.send("turn/completed", { threadId: "child", turn: { id: "turn-child", status: "interrupted" } });
     await session.command({ type: "get_state", id: "one-left" });
     expect(f.response("one-left")?.data).toMatchObject({ isStreaming: true, coreBusy: true });
+    expect(f.reserved).toBe(true);
     f.send("thread/closed", { threadId: "grandchild" });
     await f.event("agent_end");
     await session.command({ type: "get_state", id: "idle" });
     expect(f.response("idle")?.data).toMatchObject({ isStreaming: false, coreBusy: false, treeComplete: true });
     expect(f.events.filter(event => event.type === "agent_end")).toHaveLength(1);
+    expect(f.activity).toEqual([true, false]);
+    expect(f.reserved).toBe(false);
     await session.close();
   });
 
@@ -134,16 +189,28 @@ describe("Codex app-server adapter", () => {
 
   it("awaits process cleanup before releasing the lease or notifying native exit", async () => {
     const f = fixture(), session = await f.open();
+    await session.command({ type: "prompt", id: "working", message: "Read" });
     let release!: () => void;
     f.closeWait(() => new Promise<void>(resolve => { release = resolve; }));
     f.crash();
     const closing = session.close();
     await Promise.resolve(); await Promise.resolve();
     expect(f.rpcCloseCount).toBe(1); expect(f.closeCount).toBe(0); expect(f.order).not.toContain("exit");
+    expect(f.reserved).toBe(true);
     release(); await closing; await Promise.resolve();
+    expect(f.reserved).toBe(false);
     expect(f.closeCount).toBe(1);
     expect(f.order.indexOf("rpc-close")).toBeLessThan(f.order.indexOf("account-close"));
     expect(f.order.indexOf("account-close")).toBeLessThan(f.order.indexOf("exit"));
+  });
+
+  it("retains active capacity when owned process cleanup fails", async () => {
+    const f = fixture(), session = await f.open();
+    await session.command({ type: "prompt", id: "work", message: "Read" });
+    f.closeWait(async () => { throw new Error("fixture cleanup failed"); });
+    await expect(session.close()).rejects.toThrow("fixture cleanup failed");
+    expect(f.reserved).toBe(true);
+    expect(f.closeCount).toBe(0);
   });
 
   it("serves the child inspection/control rendezvous without disturbing streamed child messages", async () => {
@@ -230,10 +297,12 @@ describe("Codex app-server adapter", () => {
     const f = fixture(), session = await f.open();
     f.hook(method => {
       if (method === "turn/start") {
+        expect(f.reserved).toBe(true);
         f.send("turn/started", { threadId: "root", turn: { id: "turn-1" } });
         f.send("turn/completed", { threadId: "root", turn: { id: "turn-1", status: "completed" } });
       }
       if (method === "thread/compact/start") {
+        expect(f.reserved).toBe(true);
         f.send("item/started", { threadId: "root", turnId: "compact", item: { type: "contextCompaction", id: "compact" } });
         f.send("item/completed", { threadId: "root", turnId: "compact", item: { type: "contextCompaction", id: "compact" } });
       }
@@ -245,6 +314,7 @@ describe("Codex app-server adapter", () => {
     expect(f.response("state")?.data).toMatchObject({ isStreaming: false, isCompacting: false, treeComplete: true });
     expect(f.events.filter(event => event.type === "compaction_start")).toHaveLength(1);
     expect(f.events.filter(event => event.type === "compaction_end")).toHaveLength(1);
+    expect(f.activity).toEqual([true, false, true, false]);
     f.send("turn/completed", { threadId: "root", turn: { id: "failed", status: "failed", error: { message: "Provider failure" } } });
     await session.command({ type: "get_state", id: "failure-state" });
     expect(f.response("failure-state")?.data).toMatchObject({ lastAssistantMessage: { stopReason: "error", errorMessage: "Provider failure" } });
@@ -271,6 +341,9 @@ describe("Codex app-server adapter", () => {
     const f = fixture(), session = await f.open();
     f.hook(method => method === "turn/start" ? { ok: false, error: "Codex turn/start timed out; outcome unknown" } : undefined);
     await session.command({ type: "prompt", id: "request", workId: "work", message: "Read" });
+    expect(f.reserved).toBe(true);
+    await session.command({ type: "get_state", id: "uncertain" });
+    expect(f.response("uncertain")?.data).toMatchObject({ coreBusy: true, treeComplete: false });
     await session.close();
     const resumed = fixture(f.options);
     resumed.history([{ id: "turn-native", startedAt: 10, status: "completed", items: [{ id: "user", type: "userMessage", clientId: "work", content: [{ type: "text", text: "Read", text_elements: [] }] }] }]);

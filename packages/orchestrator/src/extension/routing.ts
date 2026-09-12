@@ -27,6 +27,8 @@ export function withCustomModels(provider:Provider):Provider{
 }
 
 export default function routing(pi:ExtensionAPI):void{
+  let closed=false;
+  const lifecycle=new AbortController();
   const environment:NodeJS.ProcessEnv=(globalThis as any)[Symbol.for("pi-stack.session-environment")]?.getStore()??process.env;
   const ledgerPath=defaultLedgerPath(),store=Store.open(ledgerPath),families=new Map(builtinProviders().map((raw)=>{const provider=withCustomModels(raw);return[provider.id,provider] as const;}));
   const shared=new Map<string,SharedOAuthAuth>();
@@ -47,8 +49,9 @@ export default function routing(pi:ExtensionAPI):void{
   const resolve=(accountId:string,family:string,modelId:string):Model<never>|undefined=>{const model=families.get(family)?.getModels().find((candidate)=>candidate.id===modelId);return model?(accountId===family?model:{...model,provider:accountId}) as Model<never>:undefined;};
   const choose=(family:string,exclude=new Set<string>())=>chooseInteractiveAccount(store,shared.get(family),family,exclude);
   const select=async(ctx:ExtensionContext,model:Model<never>,thinking:ThinkingLevel):Promise<boolean>=>{
-    await ctx.modelRegistry.refresh({providers:[model.provider],allowNetwork:false});
-    if(!await pi.setModel(model))return false;
+    if(closed)return false;
+    await ctx.modelRegistry.refresh({providers:[model.provider],allowNetwork:false,signal:lifecycle.signal});
+    if(closed||!await pi.setModel(model)||closed)return false;
     pi.setThinkingLevel(thinking);
     return true;
   };
@@ -87,21 +90,37 @@ export default function routing(pi:ExtensionAPI):void{
       if(!matchesPin(ctx)){void ctx.abort();throw new Error(`Model change refused: this run is pinned to ${pinned?.model??requestedPin}`);}
     });
   }
-  if(environment.PI_ORCHESTRATOR_ASSIGNED==="1"){pi.on("session_shutdown",()=>store.close());return;}
-  let leaseId:string|undefined,timer:ReturnType<typeof setInterval>|undefined;
-  const reconcileLease=(ctx:ExtensionContext)=>{
-    const account=ctx.model?.provider;
-    if(store.account(account??"")){
-      leaseId??=`interactive:${ctx.sessionManager.getSessionId()}`;
-      store.createLease(leaseId,account!,"interactive");
-      timer??=setInterval(()=>store.heartbeatLease(leaseId!),30_000);
-    }else{
-      if(timer)clearInterval(timer);
-      if(leaseId)store.endLease(leaseId);
-      timer=undefined;leaseId=undefined;
-    }
+  if(environment.PI_ORCHESTRATOR_ASSIGNED==="1"){pi.on("session_shutdown",()=>{if(closed)return;closed=true;lifecycle.abort();store.close();});return;}
+  let leaseId:string|undefined,leasedAccount:string|undefined,timer:ReturnType<typeof setInterval>|undefined;
+  let running=false,turnActive=false,compacting=false;
+  const releaseLease=()=>{
+    if(timer)clearInterval(timer);
+    if(leaseId)store.endLease(leaseId);
+    timer=undefined;leaseId=undefined;leasedAccount=undefined;
   };
-  pi.on("model_select",(_event,ctx)=>reconcileLease(ctx));
+  const reconcileLease=(ctx:ExtensionContext)=>{
+    if(closed)return;
+    const account=ctx.model?.provider;
+    if((running||compacting)&&store.account(account??"")){
+      if(leasedAccount===account)return;
+      releaseLease();
+      leaseId=`interactive:${ctx.sessionManager.getSessionId()}`;
+      store.createLease(leaseId,account!,"interactive");
+      leasedAccount=account;
+      const id=leaseId;
+      timer=setInterval(()=>store.heartbeatLease(id),30_000);
+      timer.unref?.();
+    }else releaseLease();
+  };
+  // A model selection does not move the request already in flight.
+  pi.on("model_select",(_event,ctx)=>{if(!turnActive&&!compacting)reconcileLease(ctx);});
+  pi.on("agent_start",(_event,ctx)=>{running=true;reconcileLease(ctx);});
+  pi.on("turn_start",(_event,ctx)=>{turnActive=true;reconcileLease(ctx);});
+  pi.on("turn_end",(_event,ctx)=>{turnActive=false;reconcileLease(ctx);});
+  pi.on("session_before_compact",(_event,ctx)=>{compacting=true;reconcileLease(ctx);});
+  const compactEnded=(_event:unknown,ctx:ExtensionContext)=>{compacting=false;reconcileLease(ctx);};
+  pi.on("session_compact",compactEnded);
+  pi.on("session_compact_failed",compactEnded);
   pi.on("session_start",async(event,ctx)=>{
     const branch=ctx.sessionManager.getBranch(),history=branch.some((entry)=>entry.type==="message"&&entry.message.role==="assistant");
     if(hasPin){await enforcePin(ctx);}
@@ -135,7 +154,7 @@ export default function routing(pi:ExtensionAPI):void{
     if(current&&!allowsAccountUse(current,"interactive")){
       const moved=await bind(ctx,new Set([current.id]));
       if(!moved)throw new Error(`Account ${current.id} is unavailable for interactive agents; no shared account is available`);
-      if(leaseId)store.createLease(leaseId,moved,"interactive");
+      reconcileLease(ctx);
     }
   });
   let unresolved:{failure:string;account:string;prompt:(failure:string,account:string)=>string}|undefined;
@@ -159,24 +178,37 @@ export default function routing(pi:ExtensionAPI):void{
     const auth=shared.get(familyOf(account));if(!auth||!store.account(account)||repaired.has(account))return false;
     repaired.add(account);
     try{
-      const signal=AbortSignal.timeout(30_000);
+      const signal=AbortSignal.any([lifecycle.signal,AbortSignal.timeout(30_000)]);
       const current=await auth.credential(account,signal);
       await auth.refreshRejected(account,current.access,signal);
       return true;
     }catch{return false;}
   };
   pi.on("agent_end",async(event,ctx)=>{
+    if(closed)return;
+    turnActive=false;
     unresolved=undefined;
     const last=event.messages.at(-1) as any;
     if(last?.role!=="assistant"||last.stopReason!=="error")return;
     const failure:string=last.errorMessage??"";
-    const failing=ctx.model?.provider;if(!failing)return;
-    if(isRejectedTokenError(failure)&&await repairCredential(failing)){unresolved={failure,account:failing,prompt:credentialRepairPrompt};return;}
+    const failing:string|undefined=last.provider;if(!failing)return;
+    // A user-selected replacement must not be blamed or overwritten by the prior request.
+    if(failing!==ctx.model?.provider)return;
+    if(isRejectedTokenError(failure)){
+      const repairedCredential=await repairCredential(failing);
+      if(closed||ctx.model?.provider!==failing)return;
+      if(repairedCredential){unresolved={failure,account:failing,prompt:credentialRepairPrompt};return;}
+    }
     if(!isRateLimitError(failure))return;
     if(store.account(failing))store.setCooldown(failing,Date.now()+rateLimitCooldownMs(failure));
     const moved=await bind(ctx,new Set([failing]));
-    if(moved)unresolved={failure,account:moved,prompt:failoverPrompt};
+    if(moved&&!closed)unresolved={failure,account:moved,prompt:failoverPrompt};
   });
-  pi.on("agent_settled",()=>{const notice=unresolved;unresolved=undefined;if(notice)pi.sendUserMessage(notice.prompt(notice.failure,notice.account));});
-  pi.on("session_shutdown",()=>{if(timer)clearInterval(timer);if(leaseId)store.endLease(leaseId);store.close();});
+  pi.on("agent_settled",(_event,ctx)=>{
+    if(closed)return;
+    if(ctx.isIdle()){running=false;turnActive=false;reconcileLease(ctx);}
+    const notice=unresolved;unresolved=undefined;
+    if(notice)pi.sendUserMessage(notice.prompt(notice.failure,notice.account));
+  });
+  pi.on("session_shutdown",()=>{if(closed)return;closed=true;lifecycle.abort();unresolved=undefined;releaseLease();store.close();});
 }
