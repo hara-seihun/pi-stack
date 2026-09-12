@@ -35,7 +35,7 @@ On September 12, 2026, a controlled replay of a failed Remote greeting isolated 
 
 ## Deployments
 
-Submit a clean source commit once with `deploy/publication submit "$(git rev-parse HEAD)"`. GMKtec's durable publication service owns checks, serialized integration into `main`, both host release wrappers, deployed proof, restart recovery, and failure alerts. `deploy/host` remains the host-local mechanism the owner calls. It reads a small host file naming the fleet account and any local packages and skills. Persons come from Pi Remote's registry. Commit-addressed releases share one production dependency tree and switch atomically. See [`docs/deployment.md`](docs/deployment.md).
+Submit an explicit source commit once with `deploy/publication submit "$(git rev-parse HEAD)"`. GMKtec's durable publication service owns checks, serialized integration into `main`, both host release wrappers, deployed proof, restart recovery, and failure alerts. `deploy/host` remains the host-local mechanism the owner calls. It reads a small host file naming the fleet account and any local packages and skills. Persons come from Pi Remote's registry. Commit-addressed releases share one production dependency tree and switch atomically. See [`docs/deployment.md`](docs/deployment.md).
 
 Pi Remote environments are independent servers:
 

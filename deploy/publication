@@ -9,7 +9,6 @@ import {
   openSync,
   readFileSync,
   renameSync,
-  statSync,
   writeFileSync,
 } from "node:fs";
 import { dirname, join, resolve } from "node:path";
@@ -24,13 +23,16 @@ const userUnitRoot = process.env.PI_STACK_PUBLICATION_UNIT_ROOT ?? "/home/kenan/
 const requestRoot = join(stateRoot, "requests");
 const logRoot = join(stateRoot, "logs");
 const proofRoot = join(stateRoot, "proofs");
+const contractRoot = join(stateRoot, "contracts");
 const checkout = join(stateRoot, "repository");
+const coreExecutionContract = "core-execution-v1";
+const coreExecutionActivationPath = join(contractRoot, `${coreExecutionContract}.json`);
 const self = fileURLToPath(import.meta.url);
 
 function usage() {
   process.stderr.write(`usage:
   deploy/publication install
-  deploy/publication submit [SHA]
+  deploy/publication submit SHA
   deploy/publication inspect REQUEST
   deploy/publication retry REQUEST
   deploy/publication gate-status
@@ -70,7 +72,7 @@ function checked(command, args, options = {}) {
 }
 
 function ensureState() {
-  for (const path of [stateRoot, requestRoot, logRoot, proofRoot]) mkdirSync(path, { recursive: true, mode: 0o700 });
+  for (const path of [stateRoot, requestRoot, logRoot, proofRoot, contractRoot]) mkdirSync(path, { recursive: true, mode: 0o700 });
 }
 
 function syncDirectory(path) {
@@ -129,11 +131,9 @@ function installFrom(sourceRoot) {
   ensureState();
   mkdirSync(dirname(installedCommand), { recursive: true, mode: 0o750 });
   mkdirSync(userUnitRoot, { recursive: true, mode: 0o700 });
-  copyFileSync(commandSource, installedCommand);
-  copyFileSync(serviceSource, join(userUnitRoot, "pi-stack-publication.service"));
-  copyFileSync(timerSource, join(userUnitRoot, "pi-stack-publication.timer"));
-  checked("chmod", ["0750", installedCommand]);
-  checked("chmod", ["0644", join(userUnitRoot, "pi-stack-publication.service"), join(userUnitRoot, "pi-stack-publication.timer")]);
+  atomicWrite(installedCommand, readFileSync(commandSource), 0o750);
+  atomicWrite(join(userUnitRoot, "pi-stack-publication.service"), readFileSync(serviceSource), 0o644);
+  atomicWrite(join(userUnitRoot, "pi-stack-publication.timer"), readFileSync(timerSource), 0o644);
   checked("systemctl", ["--user", "daemon-reload"]);
   checked("systemctl", ["--user", "enable", "--now", "pi-stack-publication.timer"]);
 }
@@ -149,11 +149,10 @@ function gitRoot() {
 }
 
 function submit(sourceArgument) {
+  if (sourceArgument === undefined) throw new Error("submit requires an explicit source commit");
   const sourceRoot = gitRoot();
-  const sourceSha = checked("git", ["rev-parse", "--verify", `${sourceArgument ?? "HEAD"}^{commit}`], { cwd: sourceRoot });
+  const sourceSha = checked("git", ["rev-parse", "--verify", `${sourceArgument}^{commit}`], { cwd: sourceRoot });
   validateSha(sourceSha);
-  const status = checked("git", ["status", "--porcelain"], { cwd: sourceRoot });
-  if (status !== "") throw new Error(`publication source checkout is dirty: ${sourceRoot}`);
   const remote = checked("git", ["remote", "get-url", "origin"], { cwd: sourceRoot });
   if (!/(^|[:/])hara-seihun\/pi-stack(?:\.git)?$/.test(remote)) throw new Error(`origin is not hara-seihun/pi-stack: ${remote}`);
   if (!existsSync(installedCommand)) throw new Error(`publication owner is not installed at ${installedCommand}`);
@@ -171,8 +170,7 @@ function submit(sourceArgument) {
     timeoutSeconds: 30,
   });
   if (!enqueued.ok) {
-    commandResult("git", ["push", "--quiet", "origin", `:${sourceRef}`], { cwd: sourceRoot, timeoutSeconds: 60 });
-    throw new Error(enqueued.stderr.trim() || `publication owner refused ${requestId}`);
+    throw new Error(`${enqueued.stderr.trim() || `publication owner did not acknowledge ${requestId}`}; source remains at ${sourceRef}`);
   }
   process.stdout.write(enqueued.stdout);
 }
@@ -191,10 +189,11 @@ function enqueue(requestId, sourceSha, sourceRef) {
   if (existsSync(path)) throw new Error(`publication request already exists: ${requestId}`);
   const now = new Date().toISOString();
   const request = {
-    version: 1,
+    version: 2,
     requestId,
     sourceSha,
     sourceRef,
+    contract: coreExecutionContract,
     status: "queued",
     step: "queued",
     owner: "pi-stack-publication.service",
@@ -204,13 +203,18 @@ function enqueue(requestId, sourceSha, sourceRef) {
     failures: [],
   };
   atomicWrite(path, `${JSON.stringify(request, null, 2)}\n`);
-  checked("systemctl", ["--user", "start", "--no-block", "pi-stack-publication.service"]);
+  const wake = commandResult("systemctl", ["--user", "start", "--no-block", "pi-stack-publication.service"]);
+  if (!wake.ok) {
+    request.wake = { status: "deferred-to-timer", at: new Date().toISOString(), error: wake.stderr.trim() || `exit ${wake.status}` };
+    writeRequest(request);
+  }
   process.stdout.write(`${JSON.stringify({
     requestId,
     sourceSha,
     status: "queued",
     owner: request.owner,
     receipt: path,
+    wake: request.wake?.status ?? "started",
   })}\n`);
 }
 
@@ -279,19 +283,8 @@ function updateBlocked(request, censuses, logPath) {
     hosts: censuses,
     log: logPath,
   };
-  const firstNotice = request.blockedNoticeAt === undefined;
-  if (firstNotice) request.blockedNoticeAt = new Date().toISOString();
   writeRequest(request);
-  if (firstNotice) {
-    const body = [
-      `Request: ${request.requestId}`,
-      `Source: ${request.sourceSha}`,
-      `Receipt: ${requestPath(request.requestId)}`,
-      "The current Remote has no quiesce or state.execution contract. The owner will not hand its runtimes to the incompatible release.",
-      "Publication resumes from durable state only after every listed pre-contract runtime and active claim clears.",
-    ].join("\n");
-    commandResult("/run/current-system/sw/bin/alert", ["Pi Stack publication blocked on pre-contract runtimes", body], { timeoutSeconds: 10 });
-  }
+  deliverNotice(request);
 }
 
 function updateFailure(request, message, logPath) {
@@ -305,22 +298,31 @@ function updateFailure(request, message, logPath) {
   request.failures.push(failure);
   request.status = "failed";
   request.failure = failure;
-  request.alert = { status: "pending" };
+  writeRequest(request);
+  deliverNotice(request);
+}
+
+function deliverNotice(request) {
+  if (!["blocked", "failed", "published"].includes(request.status)) return;
+  const key = request.status === "failed" ? `failed:${request.failure.at}` : request.status;
+  if (request.alert?.key === key && request.alert.status === "queued") return;
+  request.alert = { key, status: "pending" };
   writeRequest(request);
   const body = [
     `Request: ${request.requestId}`,
     `Source: ${request.sourceSha}`,
     request.integrationSha ? `Integration: ${request.integrationSha}` : undefined,
     `Step: ${request.step}`,
-    `Failure: ${message}`,
+    `Status: ${request.status}`,
+    request.failure ? `Failure: ${request.failure.message}` : request.blocker?.reason,
     `Receipt: ${requestPath(request.requestId)}`,
-    `Log: ${logPath}`,
+    `Log: ${request.failure?.log ?? request.blocker?.log ?? request.finalProof?.path}`,
     `Repair: ${installedCommand} retry ${request.requestId}`,
   ].filter(Boolean).join("\n");
-  const alert = commandResult("/run/current-system/sw/bin/alert", ["Pi Stack publication failed", body], { timeoutSeconds: 10 });
+  const alert = commandResult("/run/current-system/sw/bin/alert", [`Pi Stack publication ${request.status}`, body], { timeoutSeconds: 10 });
   request.alert = alert.ok
-    ? { status: "queued", at: new Date().toISOString() }
-    : { status: "failed", at: new Date().toISOString(), message: alert.stderr.trim() || `exit ${alert.status}` };
+    ? { key, status: "queued", at: new Date().toISOString() }
+    : { key, status: "failed", at: new Date().toISOString(), message: alert.stderr.trim() || `exit ${alert.status}` };
   writeRequest(request);
 }
 
@@ -329,7 +331,9 @@ function prepareCheckout(request, logPath) {
   if (!existsSync(join(checkout, ".git"))) {
     let result = runLogged(request, "initialize-publication-checkout", "git", ["init", "--quiet", checkout], 30, logPath);
     if (!result.ok) return result;
-    result = runLogged(request, "configure-publication-origin", "git", ["-C", checkout, "remote", "add", "origin", repositoryUrl], 30, logPath);
+  }
+  if (!commandResult("git", ["-C", checkout, "remote", "get-url", "origin"]).ok) {
+    const result = runLogged(request, "configure-publication-origin", "git", ["-C", checkout, "remote", "add", "origin", repositoryUrl], 30, logPath);
     if (!result.ok) return result;
   }
   const remote = runCapture("git", ["-C", checkout, "remote", "get-url", "origin"]);
@@ -384,7 +388,7 @@ function createIntegration(request, logPath) {
     request,
     "checks",
     "bash",
-    ["-c", "source deploy/lib; pi_stack_prepare_dependencies \"$PWD\"; npm run check; npm run android:test --workspace=kenan"],
+    ["-c", "set -euo pipefail\nsource deploy/lib\npi_stack_prepare_dependencies \"$PWD\"\nnpm run check\nnpm run android:test --workspace=kenan"],
     900,
     logPath,
     { cwd: checkout },
@@ -434,6 +438,24 @@ function unitStates(units, remoteHost) {
   return states;
 }
 
+function verifyRemotePeople(remoteHost, expected) {
+  const script = String.raw`
+set -euo pipefail
+expected=$1
+people='[]'
+while IFS= read -r unit; do
+  [[ -n $unit ]] || continue
+  user=$(printf '%s' "$unit" | cut -d@ -f2 | cut -d. -f1)
+  health=$(curl -fsS --max-time 3 -H "x-pi-remote-user: $user" http://127.0.0.1:8788/v1/health)
+  [[ $(jq -r .releaseCommit <<<"$health") == "$expected" ]]
+  properties=$(systemctl show "$unit" -p ExecStart -p ExecReload -p KillMode -p MemoryMax -p MemoryHigh -p PrivateMounts)
+  people=$(jq -c --arg user "$user" --argjson health "$health" --arg properties "$properties" '. + [{user:$user,health:$health,effectiveUnit:$properties}]' <<<"$people")
+done < <(systemctl list-units 'pi-remote@*.service' --state=running --legend=no --plain --no-pager | awk '{print $1}')
+printf '%s\n' "$people"
+`;
+  return JSON.parse(runHostScript(script, remoteHost, [expected], 60));
+}
+
 function verifyGmktec(expected) {
   const remoteCommit = readFileSync("/srv/pi/pi-remote/.pi-stack-commit", "utf8").trim();
   const orchestratorCommit = readFileSync("/srv/pi/pi-orchestrator/.pi-stack-commit", "utf8").trim();
@@ -448,6 +470,7 @@ function verifyGmktec(expected) {
     orchestratorCommit,
     voiceCommit: voice.releaseCommit,
     environmentId: health.environmentId,
+    supervisors: verifyRemotePeople(undefined, expected),
     units: unitStates(["pi-orchestrator@kenan.service", "pi-remote-router.service", "pi-remote@kenan.service", "pi-stack-voice.service"]),
   };
 }
@@ -472,89 +495,206 @@ while IFS= read -r unit; do
   done < <(find "/sys/fs/cgroup$control_group" -name cgroup.procs -type f -exec cat {} + 2>/dev/null | sort -nu)
 done < <(systemctl list-units 'pi-remote@*.service' --state=running --legend=no --plain --no-pager | awk '{print $1}')
 selected=$(cat /srv/pi/pi-remote/.pi-stack-commit 2>/dev/null || true)
-jq -n --arg host "$host" --arg checkedAt "$(date --utc --iso-8601=seconds)" --arg selected "$selected" --argjson runtimes "$items" '{host:$host,checkedAt:$checkedAt,contract:"pre-state.execution",selectedCommit:($selected | if . == "" then null else . end),runtimes:$runtimes}'
+jq -n --arg host "$host" --arg checkedAt "$(date --utc --iso-8601=seconds)" --arg selected "$selected" --argjson runtimes "$items" '{host:$host,checkedAt:$checkedAt,selectedCommit:($selected | if . == "" then null else . end),runtimes:$runtimes}'
 `;
+
+const sealPlanScript = String.raw`
+set -euo pipefail
+host=$1
+router=false
+if systemctl is-active --quiet pi-remote-router.service; then router=true; fi
+supervisors='[]'
+while IFS= read -r unit; do
+  [[ -n $unit ]] || continue
+  user=\${unit#pi-remote@}
+  user=\${user%.service}
+  main_pid=$(systemctl show "$unit" -p MainPID --value)
+  [[ $main_pid =~ ^[1-9][0-9]*$ ]]
+  server_pid=''
+  for candidate in $(cat "/proc/$main_pid/task/$main_pid/children"); do
+    [[ -r /proc/$candidate/cmdline ]] || continue
+    command=$(tr '\0' ' ' < "/proc/$candidate/cmdline")
+    case "$command" in *pi-remote/server/main.ts*)
+      [[ -z $server_pid ]] || { echo "$unit has more than one supervisor server" >&2; exit 1; }
+      server_pid=$candidate
+    esac
+  done
+  [[ $server_pid =~ ^[1-9][0-9]*$ ]] || { echo "$unit has no supervisor server child" >&2; exit 1; }
+  start_time=$(awk '{print $22}' "/proc/$server_pid/stat")
+  control_group=$(systemctl show "$unit" -p ControlGroup --value)
+  data=$(jq -r '.environment.PI_REMOTE_DATA' "/var/lib/pi-remote/persons/$user.json")
+  supervisors=$(jq -c --arg unit "$unit" --arg user "$user" --argjson mainPid "$main_pid" --argjson serverPid "$server_pid" --arg startTime "$start_time" --arg controlGroup "$control_group" --arg data "$data" '. + [{unit:$unit,user:$user,mainPid:$mainPid,serverPid:$serverPid,startTime:$startTime,controlGroup:$controlGroup,data:$data}]' <<<"$supervisors")
+done < <(systemctl list-units 'pi-remote@*.service' --state=running --legend=no --plain --no-pager | awk '{print $1}')
+selected=$(cat /srv/pi/pi-remote/.pi-stack-commit 2>/dev/null || true)
+jq -n --arg host "$host" --arg plannedAt "$(date --utc --iso-8601=seconds)" --arg selected "$selected" --argjson router "$router" --argjson supervisors "$supervisors" '{host:$host,plannedAt:$plannedAt,selectedCommit:($selected | if . == "" then null else . end),routerWasActive:$router,supervisors:$supervisors}'
+`.replaceAll("\\${", "${");
 
 const sealScript = String.raw`
 set -euo pipefail
 host=$1
-mapfile -t units < <(systemctl list-units 'pi-remote@*.service' --state=running --legend=no --plain --no-pager | awk '{print $1}')
+plan=$(base64 --decode <<<"$2")
 restore() {
-  if ((\${#units[@]})); then sudo -n systemctl thaw "\${units[@]}" >/dev/null 2>&1 || true; fi
-  sudo -n systemctl start pi-remote-router.service >/dev/null 2>&1 || true
+  while IFS= read -r supervisor; do
+    pid=$(jq -r .serverPid <<<"$supervisor")
+    start=$(jq -r .startTime <<<"$supervisor")
+    if [[ -r /proc/$pid/stat && $(awk '{print $22}' "/proc/$pid/stat") == "$start" ]]; then sudo -n kill -CONT "$pid" >/dev/null 2>&1 || true; fi
+  done < <(jq -c '.supervisors[]' <<<"$plan")
+  mapfile -t units < <(jq -r '.supervisors[].unit' <<<"$plan")
+  if ((\${#units[@]})); then
+    sudo -n systemctl unmask --runtime "\${units[@]}" >/dev/null 2>&1 || true
+    sudo -n systemctl start "\${units[@]}" >/dev/null 2>&1 || true
+  fi
+  if [[ $(jq -r .routerWasActive <<<"$plan") == true ]]; then sudo -n systemctl start pi-remote-router.service >/dev/null 2>&1 || true; fi
 }
-trap restore ERR
-sudo -n systemctl stop pi-remote-router.service
-if ((\${#units[@]})); then sudo -n systemctl freeze "\${units[@]}"; fi
+trap restore ERR TERM INT
+if [[ $(jq -r .routerWasActive <<<"$plan") == true ]]; then sudo -n systemctl stop pi-remote-router.service; fi
+! systemctl is-active --quiet pi-remote-router.service
+actual_units=$(systemctl list-units 'pi-remote@*.service' --all --state=active,activating,deactivating --legend=no --plain --no-pager | awk '{print $1}' | sort)
+expected_units=$(jq -r '.supervisors[].unit' <<<"$plan" | sort)
+[[ $actual_units == "$expected_units" ]] || { echo 'Supervisor set changed before intake was sealed' >&2; exit 1; }
+if systemctl list-jobs --no-legend --no-pager | grep -q 'pi-remote@'; then echo 'Supervisor transition is still pending' >&2; exit 1; fi
+while IFS= read -r supervisor; do
+  unit=$(jq -r .unit <<<"$supervisor")
+  expected_main=$(jq -r .mainPid <<<"$supervisor")
+  pid=$(jq -r .serverPid <<<"$supervisor")
+  start=$(jq -r .startTime <<<"$supervisor")
+  [[ $(systemctl show "$unit" -p MainPID --value) == "$expected_main" ]]
+  [[ -r /proc/$pid/stat && $(awk '{print $22}' "/proc/$pid/stat") == "$start" ]]
+  sudo -n kill -STOP "$pid"
+  for _ in {1..100}; do
+    [[ $(awk '{print $3}' "/proc/$pid/stat") == T ]] && break
+    sleep 0.01
+  done
+  [[ $(awk '{print $3}' "/proc/$pid/stat") == T ]] || { echo "$unit supervisor server did not stop" >&2; exit 1; }
+done < <(jq -c '.supervisors[]' <<<"$plan")
 sqlite=$(command -v sqlite3)
 people='[]'
 blocked=0
-for unit in "\${units[@]}"; do
-  user=\${unit#pi-remote@}
-  user=\${user%.service}
-  main_pid=$(systemctl show "$unit" -p MainPID --value)
-  data=$(jq -r '.environment.PI_REMOTE_DATA' "/var/lib/pi-remote/persons/$user.json")
-  sql="SELECT json_object(
-    'activeWork',(SELECT count(*) FROM work_items WHERE state IN ('running','dispatched')),
-    'runningCoreAgents',(SELECT count(*) FROM core_agents WHERE json_extract(data,'$.state')='running'),
-    'startingCoreSwitches',(SELECT count(*) FROM core_switches WHERE state='starting'),
-    'generatingImages',(SELECT count(*) FROM inline_images WHERE json_extract(value,'$.state')='generating'),
-    'openMeetings',(SELECT count(*) FROM meet_records WHERE ended_at IS NULL),
-    'activeTranscripts',(SELECT count(*) FROM meet_transcript WHERE status='processing'),
-    'activeUploads',(SELECT count(*) FROM upload_transfers));"
-  claims=$(timeout --foreground --kill-after=2s 5s sudo -n nsenter --target "$main_pid" --mount -- "$sqlite" "$data/supervisor.sqlite3" "$sql")
+sql="SELECT json_object(
+  'activeWork',(SELECT count(*) FROM work_items WHERE state IN ('running','dispatched')),
+  'runningCoreAgents',(SELECT count(*) FROM core_agents WHERE json_extract(data,'$.state')='running'),
+  'startingCoreSwitches',(SELECT count(*) FROM core_switches WHERE state='starting'),
+  'generatingImages',(SELECT count(*) FROM inline_images WHERE json_extract(value,'$.state')='generating'),
+  'openMeetings',(SELECT count(*) FROM meet_records WHERE ended_at IS NULL),
+  'activeTranscripts',(SELECT count(*) FROM meet_transcript WHERE status='processing'),
+  'activeUploads',(SELECT count(*) FROM upload_transfers));"
+while IFS= read -r supervisor; do
+  unit=$(jq -r .unit <<<"$supervisor")
+  user=$(jq -r .user <<<"$supervisor")
+  main_pid=$(jq -r .mainPid <<<"$supervisor")
+  server_pid=$(jq -r .serverPid <<<"$supervisor")
+  data=$(jq -r .data <<<"$supervisor")
+  control_group=$(jq -r .controlGroup <<<"$supervisor")
+  claims=$(timeout --foreground --kill-after=2s 7s sudo -n nsenter --target "$main_pid" --mount -- runuser -u "$user" -- "$sqlite" -readonly -cmd '.timeout 5000' "$data/supervisor.sqlite3" "$sql")
   extras='[]'
-  control_group=$(systemctl show "$unit" -p ControlGroup --value)
   while IFS= read -r pid; do
     [[ $pid =~ ^[0-9]+$ && -r /proc/$pid/cmdline ]] || continue
     command=$(tr '\0' ' ' < "/proc/$pid/cmdline")
-    if [[ $pid == "$main_pid" ]]; then continue; fi
-    case "$command" in
-      *gocryptfs*|*logger\ -t\ gocryptfs-*|*bun\ */srv/pi/pi-remote/server/main.ts*) continue ;;
-    esac
+    [[ $pid == "$main_pid" || $pid == "$server_pid" ]] && continue
+    case "$command" in *gocryptfs*|*logger\ -t\ gocryptfs-*) continue ;; esac
     executable=$(basename "$(readlink -f "/proc/$pid/exe" 2>/dev/null || printf unknown)")
     release=$(printf '%s\n' "$command" | grep -oE '/srv/pi/\.pi-stack-releases/remote/[a-f0-9]{40}' | head -1 || true)
     extras=$(jq -c --argjson pid "$pid" --arg executable "$executable" --arg release "$release" '. + [{pid:$pid,executable:$executable,release:($release | if . == "" then null else . end)}]' <<<"$extras")
   done < <(find "/sys/fs/cgroup$control_group" -name cgroup.procs -type f -exec cat {} + 2>/dev/null | sort -nu)
-  claim_count=$(jq '[.[]] | add' <<<"$(jq -r 'to_entries[].value' <<<"$claims" | jq -s .)")
+  claim_count=$(jq '[.[]] | add' <<<"$claims")
   if ((claim_count > 0)) || [[ $(jq length <<<"$extras") -gt 0 ]]; then blocked=1; fi
   people=$(jq -c --arg user "$user" --argjson claims "$claims" --argjson extraProcesses "$extras" '. + [{user:$user,claims:$claims,extraProcesses:$extraProcesses}]' <<<"$people")
-done
+done < <(jq -c '.supervisors[]' <<<"$plan")
 if ((blocked)); then
   restore
-  trap - ERR
+  trap - ERR TERM INT
   jq -n --arg host "$host" --arg checkedAt "$(date --utc --iso-8601=seconds)" --argjson people "$people" '{host:$host,state:"blocked",checkedAt:$checkedAt,people:$people}'
   exit 0
 fi
-if ((\${#units[@]})); then sudo -n systemctl stop "\${units[@]}"; fi
-trap - ERR
-jq -n --arg host "$host" --arg sealedAt "$(date --utc --iso-8601=seconds)" --argjson people "$people" '{host:$host,state:"sealed",sealedAt:$sealedAt,router:"stopped",supervisors:"stopped",people:$people}'
+sealed_at=$(date --utc --iso-8601=seconds)
+baseline_id=$(jq -r .baselineId <<<"$plan")
+baseline=$(jq -nc --arg id "$baseline_id" --arg sealedAt "$sealed_at" '{id:$id,sealedAt:$sealedAt}')
+while IFS= read -r supervisor; do
+  user=$(jq -r .user <<<"$supervisor")
+  main_pid=$(jq -r .mainPid <<<"$supervisor")
+  data=$(jq -r .data <<<"$supervisor")
+  timeout --foreground --kill-after=2s 7s sudo -n nsenter --target "$main_pid" --mount -- runuser -u "$user" -- "$sqlite" -cmd '.timeout 5000' "$data/supervisor.sqlite3" "PRAGMA synchronous=FULL; INSERT OR REPLACE INTO metadata(key,value) VALUES('execution_baseline','$baseline');"
+done < <(jq -c '.supervisors[]' <<<"$plan")
+mapfile -t units < <(jq -r '.supervisors[].unit' <<<"$plan")
+if ((\${#units[@]})); then
+  sudo -n systemctl mask --runtime "\${units[@]}"
+  sudo -n systemctl kill --kill-whom=all --signal=SIGKILL "\${units[@]}"
+  sudo -n systemctl stop "\${units[@]}"
+  sudo -n systemctl unmask --runtime "\${units[@]}"
+fi
+trap - ERR TERM INT
+jq -n --arg host "$host" --arg sealedAt "$sealed_at" --argjson baseline "$baseline" --argjson people "$people" '{host:$host,state:"sealed",sealedAt:$sealedAt,baseline:$baseline,router:"stopped",supervisors:"stopped",people:$people}'
 `.replaceAll("\\${", "${");
 
+const restoreScript = String.raw`
+set -euo pipefail
+plan=$(base64 --decode <<<"$1")
+while IFS= read -r supervisor; do
+  pid=$(jq -r .serverPid <<<"$supervisor")
+  start=$(jq -r .startTime <<<"$supervisor")
+  if [[ -r /proc/$pid/stat && $(awk '{print $22}' "/proc/$pid/stat") == "$start" ]]; then sudo -n kill -CONT "$pid"; fi
+done < <(jq -c '.supervisors[]' <<<"$plan")
+mapfile -t units < <(jq -r '.supervisors[].unit' <<<"$plan")
+if ((\${#units[@]})); then
+  sudo -n systemctl unmask --runtime "\${units[@]}"
+  sudo -n systemctl start "\${units[@]}"
+fi
+if [[ $(jq -r .routerWasActive <<<"$plan") == true ]]; then sudo -n systemctl start pi-remote-router.service; fi
+`.replaceAll("\\${", "${");
+
+function runHostScript(script, remoteHost, args, timeoutSeconds) {
+  const command = remoteHost ? "ssh" : "bash";
+  const remoteArgs = remoteHost
+    ? ["-o", "BatchMode=yes", remoteHost, "bash", "-s", "--", ...args]
+    : ["-s", "--", ...args];
+  return runCapture(command, remoteArgs, { input: script, timeoutSeconds });
+}
+
 function runtimeCensus(remoteHost) {
-  const host = remoteHost ?? "gmktec";
-  const command = remoteHost ? "ssh" : "bash";
-  const args = remoteHost
-    ? ["-o", "BatchMode=yes", remoteHost, "bash", "-s", "--", host]
-    : ["-s", "--", host];
-  return JSON.parse(runCapture(command, args, { input: runtimeCensusScript, timeoutSeconds: 60 }));
+  return JSON.parse(runHostScript(runtimeCensusScript, remoteHost, [remoteHost ?? "gmktec"], 60));
 }
 
-function sealHost(remoteHost) {
-  const host = remoteHost ?? "gmktec";
-  const command = remoteHost ? "ssh" : "bash";
-  const args = remoteHost
-    ? ["-o", "BatchMode=yes", remoteHost, "bash", "-s", "--", host]
-    : ["-s", "--", host];
-  return JSON.parse(runCapture(command, args, { input: sealScript, timeoutSeconds: 90 }));
+function sealPlan(remoteHost) {
+  return JSON.parse(runHostScript(sealPlanScript, remoteHost, [remoteHost ?? "gmktec"], 60));
 }
 
-function restoreHost(remoteHost) {
-  if (remoteHost) {
-    commandResult("ssh", ["-o", "BatchMode=yes", remoteHost, "sudo", "-n", "systemctl", "start", "pi-remote-router.service"], { timeoutSeconds: 60 });
-  } else {
-    commandResult("sudo", ["-n", "systemctl", "start", "pi-remote-router.service"], { timeoutSeconds: 30 });
-  }
+function planEncoding(plan) {
+  return Buffer.from(JSON.stringify(plan), "utf8").toString("base64");
+}
+
+function sealHost(request, hostKey, remoteHost) {
+  const plan = sealPlan(remoteHost);
+  plan.baselineId = `publication-host-seal:${request.requestId}:${hostKey}`;
+  request.bootstrap ??= { contract: coreExecutionContract, hosts: {} };
+  request.bootstrap.hosts[hostKey] = { state: "restore-required", recordedAt: new Date().toISOString(), plan };
+  writeRequest(request);
+  const outcome = JSON.parse(runHostScript(sealScript, remoteHost, [remoteHost ?? "gmktec", planEncoding(plan)], 90));
+  request.bootstrap.hosts[hostKey].outcome = outcome;
+  request.bootstrap.hosts[hostKey].state = outcome.state === "sealed" ? "sealed" : "restored";
+  request.bootstrap.hosts[hostKey].updatedAt = new Date().toISOString();
+  writeRequest(request);
+  return outcome;
+}
+
+function custodyNeedsRestore(host) {
+  return host && ["restore-required", "sealed", "deploying"].includes(host.state);
+}
+
+function restoreCustody(request, hostKey, remoteHost) {
+  const host = request.bootstrap?.hosts?.[hostKey];
+  if (!custodyNeedsRestore(host)) return;
+  runHostScript(restoreScript, remoteHost, [planEncoding(host.plan)], 90);
+  host.state = "restored";
+  host.restoredAt = new Date().toISOString();
+  writeRequest(request);
+}
+
+function releaseCustody(request, hostKey) {
+  const host = request.bootstrap?.hosts?.[hostKey];
+  if (!host || host.state === "released") return;
+  host.state = "released";
+  host.releasedAt = new Date().toISOString();
+  writeRequest(request);
 }
 
 const convergeProofScript = String.raw`
@@ -571,14 +711,81 @@ jq -n --arg expected "$expected" --arg remote "$remote" --arg orchestrator "$orc
 `.replaceAll("\\${", "${");
 
 function verifyConverge(expected) {
-  return JSON.parse(runCapture("ssh", ["-o", "BatchMode=yes", "converge-kenan", "bash", "-s", "--", expected], {
+  const proof = JSON.parse(runCapture("ssh", ["-o", "BatchMode=yes", "converge-kenan", "bash", "-s", "--", expected], {
     input: convergeProofScript,
     timeoutSeconds: 60,
   }));
+  return { ...proof, supervisors: verifyRemotePeople("converge-kenan", expected) };
 }
 
 function sha256(path) {
   return runCapture("sha256sum", [path]).split(/\s+/)[0];
+}
+
+function validateBootstrapTarget(request) {
+  const required = [
+    ["packages/orchestrator/src/cores/contracts.ts", "export interface CoreExecutionSnapshot"],
+    ["apps/remote/server/server.ts", "Core execution contract is unavailable; its runtime must finish under its owning release"],
+    ["apps/remote/server/server.ts", "PI_STACK_EXECUTION_BASELINE"],
+  ];
+  for (const [path, text] of required) {
+    const result = commandResult("git", ["-C", checkout, "grep", "-q", "-F", text, request.integrationSha, "--", path]);
+    if (!result.ok) throw new Error(`${request.integrationSha} does not implement ${coreExecutionContract}: missing ${text} in ${path}`);
+  }
+}
+
+function activatedContract() {
+  if (!existsSync(coreExecutionActivationPath)) return null;
+  const activation = JSON.parse(readFileSync(coreExecutionActivationPath, "utf8"));
+  if (activation.version !== 1 || activation.contract !== coreExecutionContract) throw new Error(`invalid contract activation receipt: ${coreExecutionActivationPath}`);
+  validateSha(activation.integrationSha);
+  return activation;
+}
+
+function selectedHasContract(selectedCommit, request) {
+  if (!selectedCommit) return false;
+  if (selectedCommit === request.integrationSha) return true;
+  const activation = activatedContract();
+  if (!activation) return false;
+  const ancestry = commandResult("git", ["-C", checkout, "merge-base", "--is-ancestor", activation.integrationSha, selectedCommit]);
+  if (ancestry.status > 1) throw new Error(`cannot compare deployed commit ${selectedCommit} with contract activation ${activation.integrationSha}`);
+  return ancestry.ok;
+}
+
+function recordContractActivation(request) {
+  if (existsSync(coreExecutionActivationPath)) return;
+  atomicWrite(coreExecutionActivationPath, `${JSON.stringify({
+    version: 1,
+    contract: coreExecutionContract,
+    integrationSha: request.integrationSha,
+    activatedAt: new Date().toISOString(),
+    requestId: request.requestId,
+    hosts: {
+      gmktec: request.hosts.gmktec,
+      converge: request.hosts.converge,
+    },
+  }, null, 2)}\n`);
+}
+
+function recoverOutstandingCustody(request) {
+  for (const [hostKey, remoteHost] of [["gmktec", undefined], ["converge", "converge-kenan"]]) {
+    if (!custodyNeedsRestore(request.bootstrap?.hosts?.[hostKey])) continue;
+    request.step = `restore-${hostKey}-intake`;
+    writeRequest(request);
+    try {
+      restoreCustody(request, hostKey, remoteHost);
+      delete request.recoveryFailure;
+      writeRequest(request);
+    } catch (error) {
+      request.recoveryFailure = {
+        at: new Date().toISOString(),
+        host: hostKey,
+        message: error instanceof Error ? error.message : String(error),
+      };
+      writeRequest(request);
+      throw error;
+    }
+  }
 }
 
 function processRequest(request) {
@@ -593,21 +800,19 @@ function processRequest(request) {
   const logPath = join(attemptRoot, `attempt-${request.attempt}.log`);
   appendLog(logPath, `[${new Date().toISOString()}] request=${request.requestId} source=${request.sourceSha} attempt=${request.attempt}\n`);
 
-  const sealedHosts = [];
   try {
     let result = prepareCheckout(request, logPath);
     if (!result.ok) throw new Error(result.stderr.trim() || `checkout preparation exited ${result.status}`);
 
     const remoteMain = runCapture("git", ["-C", checkout, "rev-parse", "refs/remotes/origin/main^{commit}"]);
-    if (request.integrationSha && request.checks?.status === "passed") {
-      if (remoteMain !== request.integrationSha && remoteMain !== request.baseSha) {
-        throw new Error(`checked integration ${request.integrationSha} was superseded by main ${remoteMain}`);
-      }
-      runCapture("git", ["-C", checkout, "cat-file", "-e", `${request.integrationSha}^{commit}`]);
-    } else {
+    const reusableIntegration = request.integrationSha && request.checks?.status === "passed"
+      && (remoteMain === request.integrationSha || remoteMain === request.baseSha)
+      && commandResult("git", ["-C", checkout, "cat-file", "-e", `${request.integrationSha}^{commit}`]).ok;
+    if (!reusableIntegration) {
       delete request.integrationSha;
       delete request.baseSha;
       delete request.checks;
+      delete request.hosts;
       result = createIntegration(request, logPath);
       if (!result.ok) throw new Error(result.stderr.trim() || `integration checks exited ${result.status}`);
     }
@@ -617,42 +822,49 @@ function processRequest(request) {
     if (!deploymentsPassed) {
       const gmktecCensus = runtimeCensus(undefined);
       const convergeCensus = runtimeCensus("converge-kenan");
-      const gateProofPath = join(requestProofRoot, "pre-contract-runtime-gate.json");
-      atomicWrite(gateProofPath, `${JSON.stringify({ checkedAt: new Date().toISOString(), hosts: [gmktecCensus, convergeCensus] }, null, 2)}\n`);
-      request.preContractGate = { proof: gateProofPath, sha256: sha256(gateProofPath) };
-      const gmktecBlocking = gmktecCensus.selectedCommit !== request.integrationSha && gmktecCensus.runtimes.length > 0;
-      const convergeBlocking = convergeCensus.selectedCommit !== request.integrationSha && convergeCensus.runtimes.length > 0;
-      if (gmktecBlocking || convergeBlocking) {
+      const gmktecBootstrap = !selectedHasContract(gmktecCensus.selectedCommit, request);
+      const convergeBootstrap = !selectedHasContract(convergeCensus.selectedCommit, request);
+      gmktecCensus.contract = gmktecBootstrap ? "pre-contract" : coreExecutionContract;
+      convergeCensus.contract = convergeBootstrap ? "pre-contract" : coreExecutionContract;
+      if (!activatedContract() || gmktecBootstrap || convergeBootstrap) validateBootstrapTarget(request);
+      const gateProofPath = join(requestProofRoot, "core-execution-gate.json");
+      atomicWrite(gateProofPath, `${JSON.stringify({ checkedAt: new Date().toISOString(), contract: coreExecutionContract, hosts: [gmktecCensus, convergeCensus] }, null, 2)}\n`);
+      request.contractGate = { proof: gateProofPath, sha256: sha256(gateProofPath) };
+      if ((gmktecBootstrap && gmktecCensus.runtimes.length > 0) || (convergeBootstrap && convergeCensus.runtimes.length > 0)) {
         updateBlocked(request, [gmktecCensus, convergeCensus], logPath);
         return;
       }
 
       request.step = "seal-pre-contract-intake";
       writeRequest(request);
-      if (gmktecCensus.selectedCommit !== request.integrationSha) {
-        request.preContractGate.gmktecSeal = sealHost(undefined);
-        if (request.preContractGate.gmktecSeal.state !== "sealed") {
-          updateBlocked(request, [gmktecCensus, convergeCensus, request.preContractGate.gmktecSeal], logPath);
+      if (gmktecBootstrap) {
+        const outcome = sealHost(request, "gmktec", undefined);
+        if (outcome.state !== "sealed") {
+          updateBlocked(request, [gmktecCensus, convergeCensus, outcome], logPath);
           return;
         }
-        sealedHosts.push(undefined);
       }
-      if (convergeCensus.selectedCommit !== request.integrationSha) {
-        request.preContractGate.convergeSeal = sealHost("converge-kenan");
-        if (request.preContractGate.convergeSeal.state !== "sealed") {
-          for (const host of sealedHosts) restoreHost(host);
-          updateBlocked(request, [gmktecCensus, convergeCensus, request.preContractGate.convergeSeal], logPath);
+      if (convergeBootstrap) {
+        const outcome = sealHost(request, "converge", "converge-kenan");
+        if (outcome.state !== "sealed") {
+          restoreCustody(request, "gmktec", undefined);
+          updateBlocked(request, [gmktecCensus, convergeCensus, outcome], logPath);
           return;
         }
-        sealedHosts.push("converge-kenan");
       }
-      request.preContractGate.sealedAt = new Date().toISOString();
-      writeRequest(request);
+      if (gmktecBootstrap || convergeBootstrap) {
+        request.contractGate.sealedAt = new Date().toISOString();
+        writeRequest(request);
+      }
 
       result = publishIntegration(request, logPath);
       if (!result.ok) throw new Error(result.stderr.trim() || `main integration exited ${result.status}`);
 
       if (request.hosts?.gmktec?.status !== "passed") {
+        if (request.bootstrap?.hosts?.gmktec?.state === "sealed") {
+          request.bootstrap.hosts.gmktec.state = "deploying";
+          writeRequest(request);
+        }
         result = runLogged(request, "deploy-gmktec", "/home/kenan/machine/pi-stack-release", [request.integrationSha], 180, logPath);
         if (!result.ok) throw new Error(`GMKtec release wrapper exited ${result.status}`);
         const gmktecProof = verifyGmktec(request.integrationSha);
@@ -663,9 +875,14 @@ function processRequest(request) {
           gmktec: { status: "passed", proof: gmktecProofPath, sha256: sha256(gmktecProofPath) },
         };
         writeRequest(request);
+        releaseCustody(request, "gmktec");
       }
 
       if (request.hosts?.converge?.status !== "passed") {
+        if (request.bootstrap?.hosts?.converge?.state === "sealed") {
+          request.bootstrap.hosts.converge.state = "deploying";
+          writeRequest(request);
+        }
         result = runLogged(request, "deploy-converge", "ssh", ["-o", "BatchMode=yes", "converge-kenan", "/home/kenan/machine/pi-stack-release", request.integrationSha], 240, logPath);
         if (!result.ok) throw new Error(`Converge release wrapper exited ${result.status}`);
         const convergeProof = verifyConverge(request.integrationSha);
@@ -673,22 +890,25 @@ function processRequest(request) {
         atomicWrite(convergeProofPath, `${JSON.stringify(convergeProof, null, 2)}\n`);
         request.hosts.converge = { status: "passed", proof: convergeProofPath, sha256: sha256(convergeProofPath) };
         writeRequest(request);
+        releaseCustody(request, "converge");
       }
     } else {
       verifyGmktec(request.integrationSha);
       verifyConverge(request.integrationSha);
+      releaseCustody(request, "gmktec");
+      releaseCustody(request, "converge");
     }
+    const finalProofs = { gmktec: verifyGmktec(request.integrationSha), converge: verifyConverge(request.integrationSha) };
+    const finalProofPath = join(requestProofRoot, "final-hosts.json");
+    atomicWrite(finalProofPath, `${JSON.stringify(finalProofs, null, 2)}\n`);
+    request.finalProof = { path: finalProofPath, sha256: sha256(finalProofPath) };
+    writeRequest(request);
+    recordContractActivation(request);
 
     request.status = "finalizing";
     request.step = "adopt-publication-owner";
     writeRequest(request);
     installFrom(canonicalRepository);
-
-    const sourceExists = runCapture("git", ["-C", checkout, "ls-remote", "origin", request.sourceRef], { timeoutSeconds: 60 });
-    if (sourceExists !== "") {
-      result = runLogged(request, "remove-source-ref", "git", ["-C", checkout, "push", "--quiet", "origin", `:${request.sourceRef}`], 60, logPath);
-      if (!result.ok) throw new Error(`source-ref cleanup exited ${result.status}`);
-    }
 
     request.status = "published";
     request.step = "complete";
@@ -698,8 +918,13 @@ function processRequest(request) {
     writeRequest(request);
     appendLog(logPath, `[${new Date().toISOString()}] published integration=${request.integrationSha}\n`);
   } catch (error) {
-    for (const host of sealedHosts) restoreHost(host);
-    const message = error instanceof Error ? error.message : String(error);
+    const restorationFailures = [];
+    for (const [hostKey, remoteHost] of [["gmktec", undefined], ["converge", "converge-kenan"]]) {
+      try { restoreCustody(request, hostKey, remoteHost); }
+      catch (restoreError) { restorationFailures.push(`${hostKey}: ${restoreError instanceof Error ? restoreError.message : String(restoreError)}`); }
+    }
+    let message = error instanceof Error ? error.message : String(error);
+    if (restorationFailures.length) message += `; intake restoration failed: ${restorationFailures.join("; ")}`;
     appendLog(logPath, `[${new Date().toISOString()}] failed step=${request.step}: ${message}\n`);
     updateFailure(request, message, logPath);
   }
@@ -708,18 +933,19 @@ function processRequest(request) {
 function gateStatus() {
   process.stdout.write(`${JSON.stringify({
     checkedAt: new Date().toISOString(),
+    contract: activatedContract(),
     hosts: [runtimeCensus(undefined), runtimeCensus("converge-kenan")],
   }, null, 2)}\n`);
 }
 
 function drain() {
   ensureState();
-  const requests = [];
+  const allRequests = [];
   for (const name of checked("find", [requestRoot, "-maxdepth", "1", "-type", "f", "-name", "PUB-*.json", "-printf", "%p\\n"]).split("\n")) {
-    if (!name) continue;
-    const request = JSON.parse(readFileSync(name, "utf8"));
-    if (["queued", "running", "blocked", "finalizing"].includes(request.status)) requests.push(request);
+    if (name) allRequests.push(JSON.parse(readFileSync(name, "utf8")));
   }
+  for (const request of allRequests) { recoverOutstandingCustody(request); deliverNotice(request); }
+  const requests = allRequests.filter(request => ["queued", "running", "blocked", "finalizing"].includes(request.status));
   requests.sort((left, right) => left.queuedAt.localeCompare(right.queuedAt));
   if (requests.length > 0) processRequest(requests[0]);
 }
@@ -727,7 +953,7 @@ function drain() {
 function main() {
   const [operation, ...args] = process.argv.slice(2);
   if (operation === "install" && args.length === 0) return install();
-  if (operation === "submit" && args.length <= 1) return submit(args[0]);
+  if (operation === "submit" && args.length === 1) return submit(args[0]);
   if (operation === "inspect" && args.length === 1) return inspect(args[0]);
   if (operation === "retry" && args.length === 1) return retry(args[0]);
   if (operation === "gate-status" && args.length === 0) return gateStatus();

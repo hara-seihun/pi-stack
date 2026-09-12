@@ -1,5 +1,5 @@
 [Unit]
-Description=Resume interrupted Pi Stack publications
+Description=Recover and resume interrupted Pi Stack publications
 
 [Timer]
 OnBootSec=30s
