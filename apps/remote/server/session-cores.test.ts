@@ -16,5 +16,16 @@ test("existing threads stay on Pi while new core selections and child state surv
     reopened.recordAgent("new",{id:"child",parentId:"root",name:"Inspect",state:"idle"});
     expect(cores.agents("new")).toHaveLength(1);
     expect(cores.agents("new")[0].state).toBe("idle");
+    const source = cores.get("new"), target = {core:"pi" as const,stateDir:"/state/core-sessions/new/switch"};
+    db.query("INSERT INTO core_switches VALUES(?,?,?, ?,?,'starting',NULL)")
+      .run("interrupted","new","now",JSON.stringify(source),JSON.stringify(target));
+    cores.started("new");
+    expect(db.query("SELECT state FROM core_switches WHERE id='interrupted'").get()).toEqual({state:"failed"});
+    db.query("INSERT INTO core_switches VALUES(?,?,?, ?,?,'starting',NULL)")
+      .run("selected","new","now",JSON.stringify(source),JSON.stringify(target));
+    cores.set("new",target);
+    expect(cores.agents("new")).toEqual([]);
+    cores.started("new");
+    expect(db.query("SELECT state FROM core_switches WHERE id='selected'").get()).toEqual({state:"complete"});
   } finally { db.close(); }
 });

@@ -38,6 +38,18 @@ export class SessionCores {
   create(sessionId: string, core: CoreId): void {
     this.set(sessionId,{core,stateDir:join(this.data,"core-sessions",sessionId)});
   }
+  started(sessionId: string): void {
+    const current = this.get(sessionId);
+    this.db.transaction(() => {
+      const pending = this.db.query("SELECT id,target FROM core_switches WHERE session_id=? AND state='starting'").all(sessionId) as {id:string;target:string}[];
+      for (const operation of pending) {
+        const target = JSON.parse(operation.target) as SessionCore;
+        const complete = target.core === current.core && target.stateDir === current.stateDir;
+        this.db.query("UPDATE core_switches SET state=?,error=? WHERE id=?")
+          .run(complete ? "complete" : "failed",complete ? null : "Switch interrupted before target selection; source core retained",operation.id);
+      }
+    })();
+  }
   recordAgent(sessionId: string, agent: CoreAgent): void {
     if (!agent?.id || !["running","idle","failed","cancelled"].includes(agent.state)) throw new Error("Invalid core agent state");
     this.db.query("INSERT INTO core_agents VALUES(?,?,?,?) ON CONFLICT(session_id,state_dir,agent_id) DO UPDATE SET data=excluded.data")

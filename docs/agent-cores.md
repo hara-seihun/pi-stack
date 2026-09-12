@@ -31,7 +31,7 @@ Each generation contains:
 - `agents.json` and per-child journals, retaining observed agent identities and activity.
 - The core's own files, native IDs and checkpoints.
 
-On a switch, PiStack exports the active conversation and saves `transfer.json` in a new generation. The destination engine creates a new native session from that data. Provider-specific thought signatures and encrypted checkpoint fields are not portable. The source engine's records remain referenced by `core_switches`, which records the source, target and outcome. A failed switch restores the source selection and leaves it stopped, without silently continuing in a different engine.
+On a switch, PiStack exports the active conversation and saves `transfer.json` in a new generation. The destination engine creates a new native session from that data. Provider-specific thought signatures and encrypted checkpoint fields are not portable. The source engine's records remain referenced by `core_switches`, which records the source, target and outcome. Selection and session references change in one database transaction. A failed startup stops the candidate before restoring the source selection. If the candidate cannot stop, its selection stays pinned rather than pointing a live process at the wrong engine. After a supervisor interruption, startup reconciles the switch receipt against the committed selection. Messages and conversation edits wait until the switch finishes.
 
 A fork changes the active portable branch without erasing earlier records. Transfer uses the active branch. Native compaction does not erase the original activity record.
 

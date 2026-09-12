@@ -1501,6 +1501,7 @@ async function startRuntime(row: any): Promise<Runtime> {
       setRuntimePhase(row.id, rt, working ? "RUNNING" : "IDLE", working || pendingWork > 0 ? "RUNNING" : "IDLE");
     }
     if (rt.historyNeedsRestore) emit(row.id, "notice", { text: "Conversation context will be restored with the next message" });
+    sessionCores.started(row.id);
     scheduleThreadNameIfDue(row.id);
     return rt;
   } catch (cause) {
@@ -1546,6 +1547,7 @@ async function reconcileAdoptedRuntime(row: any, rt: Runtime) {
   try {
     const state = await rpc(rt, "get_state", {}, 5_000);
     if (!ownsSupervisorLease() || runtimes.get(row.id) !== rt) return;
+    sessionCores.started(row.id);
     if (state.model?.id) rt.modelId = String(state.model.id);
     if (state.sessionFile) db.query("UPDATE sessions SET session_path=? WHERE id=?").run(state.sessionFile, row.id);
     const active = Boolean(state.isStreaming || state.isCompacting || Number(state.pendingMessageCount ?? 0) > 0);
@@ -1686,6 +1688,7 @@ async function threadCommands(row: any) {
 }
 
 async function runCommand(row: any, requestId: string, name: string, args: string) {
+  if (forkingSessions.has(row.id)) throw new Error("Wait for the conversation edit to finish");
   const old = requestResult(requestId);
   if (old) return { response: JSON.parse(old.response), status: old.status };
   if (!/^[a-zA-Z0-9:_-]+$/.test(name)) throw new Error("Invalid slash command");
@@ -1749,6 +1752,17 @@ async function runCommand(row: any, requestId: string, name: string, args: strin
 }
 
 async function switchSessionCore(row: any, core: CoreId): Promise<void> {
+  if (forkingSessions.has(row.id)) throw new Error("Wait for the conversation edit to finish");
+  forkingSessions.add(row.id);
+  try { await replaceSessionCore(row, core); }
+  finally {
+    forkingSessions.delete(row.id);
+    kickSession(row.id);
+    if (releaseHandoffRequested) queueMicrotask(() => void handoffRelease());
+  }
+}
+
+async function replaceSessionCore(row: any, core: CoreId): Promise<void> {
   const source = sessionCores.get(row.id);
   if (source.core === core) return;
   if (subagentIdentity(row.id)) throw new Error("A child thread's core is owned by its parent");
@@ -1758,6 +1772,8 @@ async function switchSessionCore(row: any, core: CoreId): Promise<void> {
     throw new Error("Wait for the whole agent tree and input queue to become idle before switching cores");
   }
   const state = await rpc(rt, "get_state");
+  if (state.isStreaming || state.isCompacting || Number(state.pendingMessageCount ?? 0)) throw new Error("The current core is still working");
+  row = sessionRow.get(row.id);
   const provider = canonicalModelProvider(String(state.model?.provider ?? row.initial_provider));
   if (core === "codex" && !provider.startsWith("openai")) throw new Error("Choose an OpenAI model before switching to Codex");
   const transfer = await rpc(rt, "get_portable_conversation") as PortableConversation;
@@ -1766,25 +1782,40 @@ async function switchSessionCore(row: any, core: CoreId): Promise<void> {
   const target = { core, stateDir: join(DATA, "core-sessions", row.id, switchId) };
   writeCoreState(join(target.stateDir, "transfer.json"), transfer);
   db.query("INSERT INTO core_switches VALUES(?,?,?,?,?,'starting',NULL)").run(switchId,row.id,now(),JSON.stringify(source),JSON.stringify(target));
-  rt.expectedExit = true;
-  rt.suppressOutput = true;
-  setRuntimePhase(row.id, rt, "STOPPING");
-  await terminateRuntimeProcess(rt);
-  if (runtimes.has(row.id)) throw new Error("The source core did not stop");
-  sessionCores.set(row.id, target);
-  db.query("UPDATE sessions SET session_path=NULL,initial_provider=?,initial_model=?,initial_thinking=?,state='STOPPED',revision=revision+1 WHERE id=?")
-    .run(provider, state.model?.id ?? row.initial_model, state.thinkingLevel ?? row.initial_thinking, row.id);
+  let selectedTarget = false;
   try {
+    rt.expectedExit = true;
+    rt.suppressOutput = true;
+    setRuntimePhase(row.id, rt, "STOPPING");
+    await terminateRuntimeProcess(rt);
+    if (runtimes.has(row.id)) throw new Error("The source core did not stop");
+    if (!ownsSupervisorLease()) throw new Error("Supervisor instance was replaced");
+    db.transaction(() => {
+      sessionCores.set(row.id, target);
+      db.query("UPDATE sessions SET session_path=NULL,initial_provider=?,current_provider=?,initial_model=?,initial_thinking=?,state='STOPPED',revision=revision+1 WHERE id=?")
+        .run(provider,provider,state.model?.id ?? row.initial_model,state.thinkingLevel ?? row.initial_thinking,row.id);
+    })();
+    selectedTarget = true;
     await activate(sessionRow.get(row.id));
     db.query("UPDATE core_switches SET state='complete' WHERE id=?").run(switchId);
     emit(row.id, "notice", { text: `Switched from ${source.core} to ${core} using the saved conversation. Native checkpoints remain with their original core.` });
   } catch (cause) {
-    const candidate = runtimes.get(row.id);
-    if (candidate) { candidate.expectedExit = true; await terminateRuntimeProcess(candidate); }
-    sessionCores.set(row.id, source);
-    db.query("UPDATE sessions SET session_path=?,initial_provider=?,initial_model=?,initial_thinking=?,state='STOPPED',revision=revision+1 WHERE id=?")
-      .run(row.session_path,row.initial_provider,row.initial_model,row.initial_thinking,row.id);
     db.query("UPDATE core_switches SET state='failed',error=? WHERE id=?").run(String(cause),switchId);
+    if (selectedTarget && ownsSupervisorLease()) {
+      const candidate = runtimes.get(row.id);
+      if (candidate) {
+        candidate.expectedExit = true;
+        candidate.suppressOutput = true;
+        setRuntimePhase(row.id,candidate,"STOPPING");
+        await terminateRuntimeProcess(candidate);
+      }
+      if (runtimes.has(row.id)) throw new Error(`Core switch failed and its target is still stopping: ${String(cause)}`);
+      db.transaction(() => {
+        sessionCores.set(row.id, source);
+        db.query("UPDATE sessions SET session_path=?,initial_provider=?,current_provider=?,initial_model=?,initial_thinking=?,state='STOPPED',revision=revision+1 WHERE id=?")
+          .run(row.session_path,row.initial_provider,row.current_provider,row.initial_model,row.initial_thinking,row.id);
+      })();
+    }
     throw cause;
   }
 }
@@ -2693,6 +2724,7 @@ const server = Bun.serve({
     const coreAgentMatch = API.sessionCoreAgent.match(req.method, url.pathname) ?? API.sessionCoreAgentCommand.match(req.method, url.pathname);
     if (coreAgentMatch) {
       const row = sessionRow.get(coreAgentMatch.sessionId) as any;
+      if (forkingSessions.has(coreAgentMatch.sessionId)) return error("Wait for the conversation edit to finish", 409);
       if (!row) return error("Session not found", 404);
       try {
         const rt = await activate(row);
@@ -2930,12 +2962,14 @@ const server = Bun.serve({
       } catch (e: any) { return error(e.message ?? "Slash command failed", 400); }
     }
     if (action === "settings" && req.method === "GET") {
+      if (forkingSessions.has(id)) return error("Wait for the conversation edit to finish", 409);
       try { return json({ settings: await threadSettings(row) }); }
       catch (e: any) { return error(e.message ?? "Could not load thread settings", 500); }
     }
     if (action === "settings" && req.method === "PUT") {
       try {
         const body = await readBody(req);
+        if (forkingSessions.has(id)) return error("Wait for the conversation edit to finish", 409);
         if (body.core != null) {
           if (!isCoreId(body.core)) return error("Unknown agent core");
           if (Object.keys(body).some(key => key !== "core")) return error("Change the core separately from other settings");
@@ -2962,6 +2996,7 @@ const server = Bun.serve({
           await rpc(rt, "set_thinking_level", { level: String(body.thinkingLevel) }, 30000);
         }
         if (body.speedMode != null) {
+          if (sessionCores.get(id).core !== "pi") return error("This core does not support Pi's priority speed setting", 409);
           const speedMode = String(body.speedMode);
           if (speedMode !== "normal" && speedMode !== "priority") return error("speedMode must be normal or priority");
           const provider = String(body.modelProvider ?? (sessionRow.get(id) as any)?.current_provider ?? "");
@@ -2971,6 +3006,7 @@ const server = Bun.serve({
           db.query("UPDATE sessions SET service_tier=?,updated_at=?,revision=revision+1 WHERE id=?").run(tier, now(), id);
         }
         if (body.bashTimeoutSeconds != null) {
+          if (sessionCores.get(id).core !== "pi") return error("This core does not support Pi's bash timeout setting", 409);
           const timeout = Number(body.bashTimeoutSeconds);
           if (!BASH_TIMEOUT_OPTIONS.some((option) => option === timeout)) {
             return error(`bashTimeoutSeconds must be one of ${BASH_TIMEOUT_OPTIONS.join(", ")}`);

@@ -208,6 +208,7 @@ function SettingsPanel({ session, open, onClose }: { session: Session | null; op
     setSettings(null);
     setSaving("");
     setFailure("");
+    setAgentDetail("");
     api(API.sessionSettings.method, API.sessionSettings.path({ sessionId: session.id }))
       .then((result) => { if (!cancelled) setSettings(result.settings); })
       .catch((error) => { if (!cancelled) setFailure(error?.message || String(error)); });
