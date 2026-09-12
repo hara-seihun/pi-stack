@@ -106,9 +106,9 @@ function optionalPlanType(credential: object): string | undefined {
   return undefined;
 }
 
-function recordedCounters(store: Store, accountId: string, source: string, runId: string): Required<UsageCounters> {
+function recordedCounters(store: Store, source: string, runId: string): Required<UsageCounters> {
   const rows = store.db.prepare(`SELECT component,SUM(tokens) tokens FROM usage_hour
-    WHERE account_id=? AND source=? AND run_id=? GROUP BY component`).all(accountId, source, runId) as { component: string; tokens: number }[];
+    WHERE source=? AND run_id=? GROUP BY component`).all(source, runId) as { component: string; tokens: number }[];
   const components = Object.fromEntries(rows.map(row => [row.component, Number(row.tokens)]));
   const inputTokens = (components.input ?? 0) + (components.cacheRead ?? 0) + (components.cacheWrite ?? 0);
   const outputTokens = components.output ?? 0;
@@ -138,7 +138,7 @@ export async function openCoreAccount(options: CoreAccountOptions): Promise<Core
   const assignedRunId = options.env.PI_ORCHESTRATOR_ASSIGNED === "1"
     ? options.env.PI_ORCHESTRATOR_RUN_ID
     : undefined;
-  let openedLeaseId: string | undefined;
+  let interactiveLeaseId: string | undefined;
 
   try {
     if (options.env.PI_ORCHESTRATOR_ASSIGNED === "1" && !assignedRunId) {
@@ -158,23 +158,27 @@ export async function openCoreAccount(options: CoreAccountOptions): Promise<Core
     const account = assigned
       ? store.account(assigned.accountId!)
       : store.transaction(() => {
-          const selected = eligibleRequestedAccount(store, auth, options.initialProvider)
+          const existing = store.activeLeases().find(lease => lease.id === leaseId);
+          const sticky = existing
+            ? eligibleRequestedAccount(store, auth, String(existing.account_id))
+            : undefined;
+          const selected = sticky
+            ?? eligibleRequestedAccount(store, auth, options.initialProvider)
             ?? chooseInteractiveAccount(store, auth, provider);
-          if (selected) store.createLease(leaseId, selected.id, "interactive");
+          if (selected) {
+            if (sticky) store.heartbeatLease(leaseId);
+            else store.createLease(leaseId, selected.id, "interactive");
+          }
           return selected;
         });
-    if (!assignedRunId && account) openedLeaseId = leaseId;
+    if (!assignedRunId && account) interactiveLeaseId = leaseId;
     if (!account || account.provider !== provider || !auth.has(account.id)) {
       throw new Error(`No eligible shared ${provider} account is available`);
     }
 
-    if (assignedRunId) {
-      store.heartbeatLease(leaseId);
-      if (!store.activeLeases(account.id).some(lease => lease.id === leaseId)) {
-        throw new Error(`Assigned run ${assignedRunId} has no active account lease`);
-      }
+    if (assignedRunId && !store.activeLeases(account.id).some(lease => lease.id === leaseId)) {
+      throw new Error(`Assigned run ${assignedRunId} has no active account lease`);
     }
-    openedLeaseId = leaseId;
 
     let closed = false;
     let closePromise: Promise<void> | undefined;
@@ -182,8 +186,10 @@ export async function openCoreAccount(options: CoreAccountOptions): Promise<Core
     const usageByThread = new Map<string, Required<UsageCounters>>();
     const lifecycle = new AbortController();
     const pendingCredentials = new Set<Promise<CoreAccountCredentials>>();
-    const heartbeat = setInterval(() => store.heartbeatLease(leaseId), heartbeatMs);
-    heartbeat.unref?.();
+    const heartbeat = interactiveLeaseId
+      ? setInterval(() => store.heartbeatLease(interactiveLeaseId!), heartbeatMs)
+      : undefined;
+    heartbeat?.unref?.();
 
     const credentials = (request: CoreAccountCredentialRequest = {}): Promise<CoreAccountCredentials> => {
       if (closed) return Promise.reject(new Error("Core account is closed"));
@@ -224,7 +230,7 @@ export async function openCoreAccount(options: CoreAccountOptions): Promise<Core
       const runId = assignedRunId ?? options.sessionId;
       const source = `${assignedRunId ? "fleet" : "interactive"}:core:${usage.nativeThreadId}`;
       const previous = usageByThread.get(usage.nativeThreadId)
-        ?? recordedCounters(store, account.id, source, runId);
+        ?? recordedCounters(store, source, runId);
       for (const key of Object.keys(current) as (keyof Required<UsageCounters>)[]) {
         if (current[key] < previous[key]) throw new Error(`Codex cumulative usage regressed for ${key}`);
       }
@@ -257,11 +263,11 @@ export async function openCoreAccount(options: CoreAccountOptions): Promise<Core
     const close = (): Promise<void> => {
       if (closePromise) return closePromise;
       closed = true;
-      clearInterval(heartbeat);
+      if (heartbeat) clearInterval(heartbeat);
       lifecycle.abort(new Error("Core account closed"));
       closePromise = (async () => {
         await Promise.allSettled([...pendingCredentials]);
-        store.endLease(leaseId);
+        if (interactiveLeaseId) store.endLease(interactiveLeaseId);
         store.close();
         lastAccessToken = undefined;
         usageByThread.clear();
@@ -271,7 +277,7 @@ export async function openCoreAccount(options: CoreAccountOptions): Promise<Core
 
     return { accountId: account.id, provider, model, credentials, recordUsage, close };
   } catch (error) {
-    if (openedLeaseId) store.endLease(openedLeaseId);
+    if (interactiveLeaseId) store.endLease(interactiveLeaseId);
     store.close();
     throw error;
   }

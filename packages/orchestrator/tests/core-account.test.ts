@@ -52,7 +52,11 @@ function usage(overrides: Partial<CoreAccountUsage> = {}): CoreAccountUsage {
 
 describe("external core account bridge", () => {
   it("selects an eligible interactive account, leases it, and records cumulative usage once", async () => {
-    const f = fixture({ reserved: credential("workspace-reserved"), selected: credential("workspace-selected") });
+    const f = fixture({
+      replacement: credential("workspace-replacement"),
+      reserved: credential("workspace-reserved"),
+      selected: credential("workspace-selected"),
+    });
     const setup = Store.open(f.ledgerPath);
     setup.upsertAccount({ id: "reserved", provider: "openai-codex" });
     setup.upsertAccount({ id: "selected", provider: "openai-codex" });
@@ -96,6 +100,10 @@ describe("external core account bridge", () => {
     expect(after.activeLeases("selected")).toEqual([]);
     after.close();
 
+    const changeAccount = Store.open(f.ledgerPath);
+    changeAccount.setAccountEnabled("selected", false);
+    changeAccount.upsertAccount({ id: "replacement", provider: "openai-codex" });
+    changeAccount.close();
     const reopened = await openCoreAccount({
       initialProvider: "openai-codex",
       initialModel: "gpt-5.6-luna",
@@ -105,17 +113,20 @@ describe("external core account bridge", () => {
       authPath: f.authPath,
       auth: auth(f.authPath),
     });
+    expect(reopened.accountId).toBe("replacement");
     reopened.recordUsage(usage({ inputTokens: 130, cachedInputTokens: 50, outputTokens: 30, totalTokens: 160, turnId: "turn-2" }));
+    reopened.recordUsage(usage({ inputTokens: 145, cachedInputTokens: 55, outputTokens: 35, totalTokens: 180, turnId: "turn-3" }));
     await reopened.close();
     const deduplicated = Store.open(f.ledgerPath);
-    expect((deduplicated.db.prepare("SELECT SUM(tokens) tokens FROM usage_hour").get() as any).tokens).toBe(160);
+    expect((deduplicated.db.prepare("SELECT SUM(tokens) tokens FROM usage_hour").get() as any).tokens).toBe(180);
+    expect((deduplicated.db.prepare("SELECT SUM(tokens) tokens FROM usage_hour WHERE account_id='replacement'").get() as any).tokens).toBe(20);
     expect(deduplicated.db.prepare("SELECT DISTINCT source FROM usage_hour").all()).toEqual([
       { source: "interactive:core:native-thread" },
     ]);
     deduplicated.close();
   });
 
-  it("keeps an assigned fleet account and refreshes its rejected token through the shared owner", async () => {
+  it("uses but does not own an assigned fleet lease", async () => {
     const f = fixture({ assigned: { ...credential("workspace-assigned", "secret-old"), chatgptPlanType: "pro" } });
     const setup = Store.open(f.ledgerPath);
     setup.upsertAccount({ id: "assigned", provider: "openai-codex" });
@@ -154,7 +165,8 @@ describe("external core account bridge", () => {
     during.close();
     await account.close();
     const after = Store.open(f.ledgerPath);
-    expect(after.activeLeases("assigned")).toEqual([]);
+    expect(after.activeLeases("assigned").map(row => row.id)).toEqual([`run:${runId}`]);
+    expect((after.db.prepare("SELECT ended_at FROM lease WHERE id=?").get(`run:${runId}`) as any).ended_at).toBeNull();
     after.close();
   });
 });
