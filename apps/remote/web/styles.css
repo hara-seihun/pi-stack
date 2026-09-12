@@ -182,6 +182,8 @@ button:disabled { cursor: default; opacity: .45; }
 .conversation { min-height: 0; flex: 1; display: flex; flex-direction: column; }
 .drawing-slot { min-height: 0; flex: 1; display: flex; }
 .drawing-slot[hidden] { display: none; }
+.conversation.is-drawing > :not(.drawing-slot),
+.drawing-mode > .topbar, .drawing-mode > .agent-banner { display: none; }
 .drawing-toggle[aria-pressed="true"] { color: var(--bg); background: var(--accent); }
 .upload-error { display: flex; align-items: center; justify-content: space-between; gap: 8px; padding: 8px 16px; color: var(--danger); }
 .scrollback { min-height: 0; flex: 1; display: flex; flex-direction: column-reverse; overflow: auto; overflow-anchor: auto; }
