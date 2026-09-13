@@ -1,4 +1,5 @@
 import { messageFinalizationKey } from "./sync";
+import { withToolProgress, type ToolProgress } from "./tool-progress";
 
 type JsonObject = Record<string, unknown>;
 export interface ContextImage { data: string; mimeType: string }
@@ -21,9 +22,9 @@ function restoreStreamedThinking(message: JsonObject, fallback: string | undefin
 }
 
 /** Builds the smaller transcript-only document shared by the browser and Android clients. */
-export function displayContextDocument(document: string, streamedThinking: ReadonlyMap<string, string> = new Map(), imageReference?: ImageReference): string {
+export function displayContextDocument(document: string, streamedThinking: ReadonlyMap<string, string> = new Map(), imageReference?: ImageReference, tools: Iterable<ToolProgress> = []): string {
   const context = JSON.parse(document) as JsonObject;
-  const messages = Array.isArray(context.messages) ? context.messages : [];
+  const messages = withToolProgress(Array.isArray(context.messages) ? context.messages : [], tools);
   const projected = messages.map((value) => {
     const source = object(value);
     if (!source) return value;
@@ -34,7 +35,10 @@ export function displayContextDocument(document: string, streamedThinking: Reado
     if (message.role === "assistant") {
       for (const key of ["api", "provider", "model", "usage", "stopReason", "responseId", "rawStopReason"])
         delete message[key];
-      if (Array.isArray(message.content)) message.content = message.content.map((value) => {
+      if (Array.isArray(message.content)) message.content = message.content.filter((value) => {
+        const block = object(value);
+        return block?.type !== "thinking" || String(block.thinking ?? "").trim().length > 0;
+      }).map((value) => {
         const originalBlock = object(value);
         if (!originalBlock) return value;
         const block = { ...originalBlock };

@@ -76,7 +76,8 @@ test('lifecycle consumers retain state, queue counts, retry failures, compaction
   const state = { model: { id: 'astra', provider: 'openai-codex' }, sessionFile: '/native/session.jsonl', sessionName: 'thread',
     nativeSessionId: 'native', thinkingLevel: 'high', messageCount: 5, isStreaming: false, isCompacting: false,
     coreBusy: true, treeComplete: false, pendingMessageCount: 1, terminalError: 'child failed', unresolvedCommands: ['work'],
-    coreAgents: [{ id: 'child', state: 'running' }] };
+    coreAgents: [{ id: 'child', state: 'running' }],
+    live: { text: '', thinking: '', isThinking: true, tools: [{ toolCallId: 'active', toolName: 'exec_command', args: { command: 'python experiments/discover_objects.py' } }] } };
   const response = { type: 'response', id: 'state', command: 'get_state', success: true, data: { ...state,
     context: { messages: [image] }, lastAssistantMessage: { content: [image] } } };
   expect(projectRuntimeEvent(response)).toEqual({ ...response, data: state });
@@ -95,7 +96,7 @@ test('lifecycle consumers retain state, queue counts, retry failures, compaction
   expect(projectRuntimeEvent({ type: 'compaction_end', errorMessage: 'deadline', aborted: false, willRetry: true }))
     .toEqual({ type: 'compaction_end', result: false, errorMessage: 'deadline', aborted: false, willRetry: true });
   for (const type of ['agent_start', 'agent_end', 'agent_settled', 'turn_start', 'turn_end', 'message_start',
-    'tool_execution_update', 'conversation_replaced', 'extension_error', 'auto_retry_start', 'compaction_start', 'new_native_event']) {
+    'conversation_replaced', 'extension_error', 'auto_retry_start', 'compaction_start', 'new_native_event']) {
     expect(projectRuntimeEvent({ type, messages: [image], partialResult: { content: [image] } })).toEqual({ type });
   }
 });

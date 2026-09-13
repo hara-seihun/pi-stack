@@ -146,7 +146,9 @@ export function modelContextEntries(context: any): ContextEntry[] {
           const result = results.get(String(block.id || ""));
           if (result) pairedResults.add(result);
           entries.push({ key: `toolCall:${block.id || `${message.timestamp || messageIndex}:${blockIndex}`}`, signature: `toolCall:${JSON.stringify(block)}:${JSON.stringify(result || null)}`, kind: "toolCall", toolCall: block, toolResult: result, time: message.timestamp });
-        } else if (block?.type === "thinking") entries.push({ key: `assistant:${message.timestamp || messageIndex}:${blockIndex}:thinking`, signature: `thinking:${JSON.stringify(block)}`, kind: "thinking", label: "Thinking", text: String(block.thinking || "") });
+        } else if (block?.type === "thinking") {
+          if (String(block.thinking || "").trim()) entries.push({ key: `assistant:${message.timestamp || messageIndex}:${blockIndex}:thinking`, signature: `thinking:${JSON.stringify(block)}`, kind: "thinking", label: "Thinking", text: String(block.thinking) });
+        }
         else entries.push({ key: `assistant:${message.timestamp || messageIndex}:${blockIndex}:${block?.type || "content"}`, signature: `assistant:${JSON.stringify(block)}`, kind: "assistant", label: "Assistant", text: contextContentMarkdown([block]) });
       }
       if (message.content.length === 0 && message.errorMessage) entries.push({ key: `assistant:${message.timestamp || messageIndex}:error`, signature: `assistant-error:${message.errorMessage}`, kind: "notice", label: "Assistant error", text: String(message.errorMessage) });
@@ -199,7 +201,7 @@ function shortPath(path: string, home: string) {
 function toolSummary(name: string, args: any, home: string) {
   const tool = (name || "tool").toLowerCase();
   const path = args.path || args.file_path || "";
-  if (tool === "bash") return `$ ${args.command || ""}`;
+  if (tool === "bash" || tool === "exec_command") return args.command || args.cmd ? `$ ${args.command || args.cmd}` : tool;
   if (tool === "read") {
     const start = args.offset ?? 1;
     const range = args.offset !== undefined || args.limit !== undefined ? `:${start}${args.limit !== undefined ? `-${start + args.limit - 1}` : ""}` : "";
@@ -213,7 +215,7 @@ function toolInput(name: string, args: any) {
   const tool = (name || "").toLowerCase();
   if (tool === "write") return args.content || "";
   if (tool === "edit" && Array.isArray(args.edits)) return args.edits.slice(0, 3).map((edit: any) => `− ${edit.oldText || ""}\n+ ${edit.newText || ""}`).join("\n");
-  return ["bash", "read", "grep", "find", "ls"].includes(tool) ? "" : formatJson(args);
+  return ["bash", "exec_command", "read", "grep", "find", "ls"].includes(tool) ? "" : formatJson(args);
 }
 function duration(ms: number) {
   const seconds = Math.max(0, Math.floor(ms / 1000));
@@ -238,14 +240,14 @@ const ToolEntry = memo(function ToolEntry({ entry, home }: { entry: ContextEntry
     return () => clearInterval(timer);
   }, [result]);
   const input = toolInput(call.name, args);
-  const output = result ? contextContentMarkdown(result.content, false) : "";
+  const output = result ? contextContentMarkdown(result.content, false) : String(call.partialOutput || "");
   const images = Array.isArray(result?.content) ? result.content.filter((block: any) => block?.type === "image") : [];
   const body = [input, output].filter(Boolean).join("\n\n");
   const summary = toolSummary(call.name, args, home);
   const expandable = summary.length > 100 || body.length > 320 || body.split("\n").length > 5;
   const timeout = args.timeoutMs !== undefined ? Math.max(0, Number(args.timeoutMs)) : args.timeout !== undefined ? Math.max(0, Number(args.timeout) * 1000) : -1;
   const started = new Date(startedAt).toLocaleString([], { month: "short", day: "numeric", hour: "2-digit", minute: "2-digit", second: "2-digit" });
-  const timing = `Started ${started} · ${result ? "ran" : "elapsed"} ${duration((endedAt || Date.now()) - startedAt)} · ${timeout >= 0 ? `timeout ${duration(timeout)}` : "no timeout"}`;
+  const timing = `${call.observedStart ? "Observed" : "Started"} ${started} · ${result ? "ran" : "elapsed"} ${duration((endedAt || Date.now()) - startedAt)} · ${timeout >= 0 ? `timeout ${duration(timeout)}` : "no timeout"}`;
   return <div className={`tool-card${expanded ? "" : " collapsed"}${result ? result.isError ? " error" : " success" : ""}`}>
     <pre className="tool-header">{result ? result.isError ? "×  " : "✓  " : "…  "}{summary}</pre>
     <div className="tool-timing">{timing}</div>
@@ -266,7 +268,8 @@ function DetailGroup({ entries, newest, sessionId, home, onEdit }: { entries: Co
   const [expanded, setExpanded] = useState(false);
   const count = entries.length;
   const running = entries.some((entry) => entry.streaming || entry.kind === "toolCall" && !entry.toolResult);
-  const latest = entries.at(-1);
+  const active = entries.filter(entry => entry.streaming || entry.kind === "toolCall" && !entry.toolResult);
+  const previews = active.length ? active : newest ? entries.slice(-1) : [];
   return <div className={`detail-group${running ? " running" : ""}`}>
     <details onToggle={(event) => setExpanded(event.currentTarget.open)}>
       <summary>
@@ -276,13 +279,13 @@ function DetailGroup({ entries, newest, sessionId, home, onEdit }: { entries: Co
       </summary>
       {expanded && <div className="detail-group-entries">{entries.map((entry) => <DetailEntry key={entry.key} entry={entry} sessionId={sessionId} home={home} onEdit={onEdit} />)}</div>}
     </details>
-    {!expanded && newest && latest && <div className="detail-group-entries detail-group-latest"><DetailEntry key={latest.key} entry={latest} sessionId={sessionId} home={home} onEdit={onEdit} /></div>}
+    {!expanded && previews.length > 0 && <div className="detail-group-entries detail-group-latest">{previews.map(entry => <DetailEntry key={entry.key} entry={entry} sessionId={sessionId} home={home} onEdit={onEdit} />)}</div>}
   </div>;
 }
 
 const CONTEXT_WINDOW_SIZE = 60;
 export function ContextTranscript({ entries, liveThinking, sessionId, home, onEdit }: { entries: ContextEntry[]; liveThinking?: string; sessionId: string; home: string; onEdit(entry: ContextEntry): void }) {
-  const items = useMemo(() => groupTranscriptEntries(liveThinking ? [...entries, {
+  const items = useMemo(() => groupTranscriptEntries(liveThinking?.trim() ? [...entries, {
     key: "live-thinking", signature: `live-thinking:${liveThinking}`, kind: "thinking", label: "Thinking", text: liveThinking, streaming: true,
   }] : entries), [entries, liveThinking]);
   const newest = Math.max(0, items.length - CONTEXT_WINDOW_SIZE);

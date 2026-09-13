@@ -11,6 +11,7 @@ import { InlineImages } from "./inline-images";
 import { planCards } from "./catalog-presentation";
 import { readMachineUsage } from "./machine-usage";
 import { displayContextDocument, type ContextImage } from "./context-display";
+import { updateToolProgress, type ToolProgress } from "./tool-progress";
 import { contextSplice, DocumentHistory, messageFinalizationKey, sha256, type ContextSplice } from "./sync";
 import { appendContextPatch, readContext } from "./context-journal";
 import { beginSupervisorGeneration, ensureSupervisorSchema } from "./database";
@@ -200,6 +201,8 @@ type RuntimeHandoff = {
   liveText: string;
   liveThinking: string;
   thinkingBlockStart?: number;
+  thinkingActive?: boolean;
+  toolProgress?: ToolProgress[];
   pendingContextTextLength?: number;
   pendingContextThinkingLength?: number;
   pendingContextFinalization: string | null;
@@ -245,6 +248,8 @@ interface Runtime {
   liveText: string;
   liveThinking: string;
   thinkingBlockStart: number;
+  thinkingActive: boolean;
+  toolProgress: Map<string, ToolProgress>;
   pendingContextTextLength: number;
   pendingContextThinkingLength: number;
   pendingContextFinalization: string | null;
@@ -480,12 +485,18 @@ function displayContext(sessionId: string, sourceHash: string, sourceDocument: s
     displayContexts.set(sessionId, cached);
     return cached;
   }
+  const progress = runtimes.get(sessionId)?.toolProgress;
+  if (progress?.size) {
+    for (const message of JSON.parse(sourceDocument).messages ?? []) {
+      if (message?.role === "toolResult") progress.delete(message.toolCallId);
+    }
+  }
   const images = new Map<string, ContextImage>();
   const document = displayContextDocument(sourceDocument, streamedThinkingByMessage(sessionId), (image) => {
     const hash = sha256(`${image.mimeType}\0${image.data}`);
     images.set(hash, image);
     return API.sessionImage.path({ sessionId, hash });
-  });
+  }, runtimes.get(sessionId)?.toolProgress.values());
   const projected = { sourceHash, document, hash: rememberContext(sessionId, document), images };
   displayContexts.delete(sessionId);
   displayContexts.set(sessionId, projected);
@@ -503,6 +514,12 @@ function textUpdate(key: string, baseHash: unknown, target: string): DocumentUpd
 }
 
 function cacheStoredContext(sessionId: string, stored: { capturedAt: number; document: string; hash: string } | null) {
+  const progress = runtimes.get(sessionId)?.toolProgress;
+  if (progress?.size && stored && storedContextCache.get(sessionId)?.hash !== stored.hash) {
+    for (const message of JSON.parse(stored.document).messages ?? []) {
+      if (message?.role === "toolResult") progress.delete(message.toolCallId);
+    }
+  }
   storedContextCache.delete(sessionId);
   storedContextCache.set(sessionId, stored);
   while (storedContextCache.size > 4) storedContextCache.delete(storedContextCache.keys().next().value!);
@@ -887,7 +904,7 @@ function sessionActivity(row: any): Session["activity"] {
     : rt?.compacting ? "COMPACTING"
     : rt?.retrying ? "RETRYING"
     : rt?.phase === "RUNNING" && rt.activeTools.size ? "WAITING_ON_TOOL"
-    : rt?.phase === "RUNNING" && rt.liveThinking ? "THINKING"
+    : rt?.phase === "RUNNING" && rt.thinkingActive ? "THINKING"
     : rt?.phase === "RUNNING" ? "WORKING"
     : rt?.phase === "DISPATCHING" || row.state === "RUNNING" ? "QUEUED"
     : "IDLE";
@@ -1146,8 +1163,10 @@ function handleRpcEvent(sessionId: string, rt: Runtime, event: any) {
     }
   };
   if (event.type === "agent_start") {
+    rt.thinkingActive = false;
     proveRunning();
   } else if (event.type === "message_update" && event.assistantMessageEvent?.type === "text_delta") {
+    if (rt.thinkingActive) { rt.thinkingActive = false; touchSession(sessionId); }
     proveRunning();
     rt.liveText += event.assistantMessageEvent.delta ?? "";
     signalLiveSync();
@@ -1157,16 +1176,20 @@ function handleRpcEvent(sessionId: string, rt: Runtime, event: any) {
     // message. Keep their deltas together until message_end identifies the
     // durable message that owns them.
     rt.thinkingBlockStart = rt.liveThinking.length;
+    rt.thinkingActive = true;
     touchSession(sessionId);
   } else if (event.type === "message_update" && event.assistantMessageEvent?.type === "thinking_delta") {
+    if (!rt.thinkingActive) { rt.thinkingActive = true; touchSession(sessionId); }
     proveRunning();
     rt.liveThinking += event.assistantMessageEvent.delta ?? "";
     signalLiveSync();
   } else if (event.type === "message_update" && event.assistantMessageEvent?.type === "thinking_end") {
+    rt.thinkingActive = false;
     const block = String(event.assistantMessageEvent.content ?? "");
     if (block && rt.liveThinking.length === rt.thinkingBlockStart) rt.liveThinking += block;
     touchSession(sessionId);
   } else if (event.type === "message_end") {
+    if (rt.thinkingActive) { rt.thinkingActive = false; touchSession(sessionId); }
     proveRunning();
     const text = textFromMessage(event.message);
     if (event.message?.role === "assistant") {
@@ -1205,17 +1228,40 @@ function handleRpcEvent(sessionId: string, rt: Runtime, event: any) {
     proveRunning();
     const toolCallId = String(event.toolCallId ?? crypto.randomUUID());
     const name = String(event.toolName ?? "tool");
+    rt.thinkingActive = false;
     rt.activeTools.set(toolCallId, name);
+    const args = boundedJson(event.args);
+    rt.toolProgress.set(toolCallId, { id: toolCallId, name, args, startedAt: Date.now(), output: "" });
+    displayContexts.delete(sessionId);
     touchSession(sessionId);
-    emit(sessionId, "tool_start", { toolCallId, name, args: boundedJson(event.args) });
+    emit(sessionId, "tool_start", { toolCallId, name, args });
+  } else if (event.type === "tool_execution_update") {
+    proveRunning();
+    const toolCallId = String(event.toolCallId ?? "");
+    let tool = rt.toolProgress.get(toolCallId);
+    if (!tool) {
+      const name = String(event.toolName ?? "tool");
+      tool = { id: toolCallId, name, args: undefined, startedAt: Date.now(), observedStart: true, output: "" };
+      rt.activeTools.set(toolCallId, name);
+      touchSession(sessionId);
+    }
+    rt.toolProgress.set(toolCallId, updateToolProgress(tool, toolResultText(event.partialResult), rt.core === "codex"));
+    displayContexts.delete(sessionId);
+    signalLiveSync();
   } else if (event.type === "tool_execution_end") {
     const toolCallId = String(event.toolCallId ?? "");
     rt.activeTools.delete(toolCallId);
+    const output = toolResultText(event.result);
+    const tool = rt.toolProgress.get(toolCallId);
+    if (tool) rt.toolProgress.set(toolCallId, { ...tool, result: {
+      content: [{ type: "text", text: output }], timestamp: Date.now(), isError: Boolean(event.isError),
+    } });
+    displayContexts.delete(sessionId);
     touchSession(sessionId);
     emit(sessionId, "tool_end", {
       toolCallId,
       name: String(event.toolName ?? "tool"),
-      output: toolResultText(event.result),
+      output,
       error: Boolean(event.isError),
     });
   } else if (event.type === "auto_retry_start") {
@@ -1301,6 +1347,9 @@ function settleRuntime(sessionId: string, rt: Runtime, emitEvent: boolean): bool
   rt.compacting = false;
   rt.retrying = false;
   rt.activeTools.clear();
+  rt.thinkingActive = false;
+  for (const [id, tool] of rt.toolProgress) if (!tool.result) rt.toolProgress.delete(id);
+  displayContexts.delete(sessionId);
   rt.steeringQueued = 0;
   rt.followUpQueued = 0;
   if (!rt.pendingContextFinalization) {
@@ -1333,6 +1382,31 @@ function coreStateActive(state: any): boolean {
   return Boolean(state.coreBusy || state.treeComplete === false || state.isStreaming || state.isCompacting || Number(state.pendingMessageCount ?? 0) > 0);
 }
 
+function restoreLiveProgress(sessionId: string, rt: Runtime, live: any) {
+  if (!live) return;
+  const text = rt.liveText.slice(0, rt.pendingContextTextLength) + String(live.text ?? "");
+  const thinking = rt.liveThinking.slice(0, rt.pendingContextThinkingLength) + String(live.thinking ?? "");
+  const tools = Array.isArray(live.tools) ? live.tools : [];
+  const changed = text !== rt.liveText || thinking !== rt.liveThinking || rt.thinkingActive !== Boolean(live.isThinking)
+    || JSON.stringify([...rt.activeTools]) !== JSON.stringify(tools.map((tool: any) => [tool.toolCallId, tool.toolName]))
+    || tools.some((tool: any) => rt.toolProgress.get(String(tool.toolCallId))?.args === undefined);
+  rt.liveText = text;
+  rt.liveThinking = thinking;
+  rt.thinkingActive = Boolean(live.isThinking);
+  rt.thinkingBlockStart = rt.pendingContextThinkingLength;
+  rt.activeTools = new Map(tools.map((tool: any) => [String(tool.toolCallId), String(tool.toolName)]));
+  for (const [id, tool] of rt.toolProgress) if (!tool.result && !rt.activeTools.has(id)) rt.toolProgress.delete(id);
+  for (const tool of tools) {
+    const id = String(tool.toolCallId);
+    const existing = rt.toolProgress.get(id);
+    if (!existing) rt.toolProgress.set(id, {
+      id, name: String(tool.toolName), args: boundedJson(tool.args), startedAt: Date.now(), observedStart: true, output: "",
+    });
+    else if (existing.args === undefined) rt.toolProgress.set(id, { ...existing, args: boundedJson(tool.args) });
+  }
+  if (changed) { displayContexts.delete(sessionId); touchSession(sessionId); }
+}
+
 async function reconcileRuntimeState(sessionId: string, rt: Runtime): Promise<any> {
   if (!rt.transport || rt.reconciling || ["ABORTING", "STOPPING"].includes(rt.phase)) return null;
   rt.reconciling = true;
@@ -1341,6 +1415,7 @@ async function reconcileRuntimeState(sessionId: string, rt: Runtime): Promise<an
     const state = await rpc(rt, "get_state", {}, 5_000);
     if (!ownsSupervisorLease() || runtimes.get(sessionId) !== rt || rt.phaseVersion !== phaseVersion) return state;
     if (isCoreId(state.core)) rt.core = state.core;
+    restoreLiveProgress(sessionId, rt, state.live);
     if (state.terminalError && ["RUNNING","DISPATCHING"].includes(rt.phase)) rt.pendingCoreFailure = String(state.terminalError);
     if (state.model?.id) rt.modelId = String(state.model.id);
     if (state.model?.provider) {
@@ -1373,6 +1448,14 @@ async function reconcileRuntimeState(sessionId: string, rt: Runtime): Promise<an
 }
 
 function runtimeFromHandoff(row: any, handoff?: RuntimeHandoff, initialPhase: RuntimePhase = "STARTING"): Runtime {
+  const toolProgress = new Map((handoff?.toolProgress ?? []).map(tool => [tool.id, tool]));
+  for (const [id, name] of handoff?.activeTools ?? []) {
+    if (toolProgress.has(id)) continue;
+    const event = db.query("SELECT time,payload FROM events WHERE session_id=? AND type='tool_start' AND json_extract(payload,'$.toolCallId')=? ORDER BY seq DESC LIMIT 1")
+      .get(row.id, id) as { time: string; payload: string } | null;
+    toolProgress.set(id, { id, name, args: event ? JSON.parse(event.payload).args : {},
+      startedAt: event ? Date.parse(event.time) : Date.now(), observedStart: !event, output: "" });
+  }
   return {
     sessionId: row.id,
     observation: handoff ? "unreachable" : "current",
@@ -1389,6 +1472,8 @@ function runtimeFromHandoff(row: any, handoff?: RuntimeHandoff, initialPhase: Ru
     liveText: handoff?.liveText ?? "",
     liveThinking: handoff?.liveThinking ?? "",
     thinkingBlockStart: handoff?.thinkingBlockStart ?? handoff?.liveThinking.length ?? 0,
+    thinkingActive: handoff?.thinkingActive ?? false,
+    toolProgress,
     pendingContextTextLength: handoff?.pendingContextTextLength
       ?? (handoff?.pendingContextFinalization ? handoff.liveText.length : 0),
     pendingContextThinkingLength: handoff?.pendingContextThinkingLength
@@ -1422,6 +1507,7 @@ function monitorRuntime(row: any, rt: Runtime) {
     if (runtimes.get(row.id) !== rt) return;
     setRuntimePhase(row.id, rt, "STOPPING");
     runtimes.delete(row.id);
+    displayContexts.delete(row.id);
     runtimeCapacityQueue.wake();
     if (shuttingDown || !ownsSupervisorLease()) return;
     const retryAt = Date.now() + RUNTIME_RESTART_DELAY_MS;
@@ -1509,12 +1595,14 @@ async function startRuntime(row: any): Promise<Runtime> {
     monitorRuntime(row, rt);
     if (rt.expectedExit || rt.startupAbort.signal.aborted) throw new Error("Activation cancelled");
     setRuntimePhase(row.id, rt, "STARTING", "STARTING");
+    const progressVersion = rt.phaseVersion;
     const state = await rpc(rt, "get_state", {}, 120_000);
     if (!ownsSupervisorLease() || rt.expectedExit || rt.startupAbort.signal.aborted
       || runtimes.get(row.id) !== rt || ["ABORTING", "STOPPING"].includes(phaseOf(rt))) throw new Error("Activation cancelled");
     if (isCoreId(state.core)) rt.core = state.core;
     if (state.model?.id) rt.modelId = String(state.model.id);
     if (state.sessionFile) db.query("UPDATE sessions SET session_path=? WHERE id=?").run(state.sessionFile, row.id);
+    if (rt.phaseVersion === progressVersion) restoreLiveProgress(row.id, rt, state.live);
     if (state.model?.provider) db.query("UPDATE sessions SET current_provider=?,revision=revision+1,updated_at=? WHERE id=?")
       .run(String(state.model.provider), now(), row.id);
     const latestRow = sessionRow.get(row.id) as any;
@@ -1541,7 +1629,7 @@ async function startRuntime(row: any): Promise<Runtime> {
     rt.expectedExit = true;
     setRuntimePhase(row.id, rt, "STOPPING");
     await terminateRuntimeProcess(rt);
-    if (runtimes.get(row.id) === rt) runtimes.delete(row.id);
+    if (runtimes.get(row.id) === rt) { runtimes.delete(row.id); displayContexts.delete(row.id); }
     if (!cancelled && ownsSupervisorLease() && String(cause).includes("Runner capacity busy")) {
       setState(row.id, "QUEUED", "Waiting for shared runner capacity");
     }
@@ -1582,6 +1670,7 @@ async function reconcileAdoptedRuntime(row: any, rt: Runtime) {
     if (!ownsSupervisorLease() || runtimes.get(row.id) !== rt || rt.phaseVersion !== phaseVersion
       || ["ABORTING", "STOPPING"].includes(rt.phase)) return;
     sessionCores.started(row.id);
+    restoreLiveProgress(row.id, rt, state.live);
     if (isCoreId(state.core)) rt.core = state.core;
     if (state.model?.id) rt.modelId = String(state.model.id);
     if (state.sessionFile) db.query("UPDATE sessions SET session_path=? WHERE id=?").run(state.sessionFile, row.id);
@@ -1620,6 +1709,7 @@ async function adoptHandoffRuntimes() {
     } catch (cause) {
       console.error(`Could not adopt runtime ${row.id}`, cause);
       runtimes.delete(row.id);
+      displayContexts.delete(row.id);
       void (async () => {
         if (existsSync(handoff.socketPath)) await terminateFailedHandoff(handoff);
         recoverFailedHandoff(row.id);
@@ -2307,6 +2397,9 @@ async function abortCurrentOperation(sessionId: string): Promise<AbortOperationR
   rt.compacting = false;
   rt.retrying = false;
   rt.activeTools.clear();
+  rt.thinkingActive = false;
+  for (const [id, tool] of rt.toolProgress) if (!tool.result) rt.toolProgress.delete(id);
+  displayContexts.delete(sessionId);
   rt.steeringQueued = 0;
   rt.followUpQueued = 0;
   rt.liveText = "";
@@ -3133,6 +3226,9 @@ const server = Bun.serve({
           rt.pendingContextThinkingLength = 0;
           rt.pendingContextFinalization = null;
           rt.activeTools.clear();
+          rt.thinkingActive = false;
+          rt.toolProgress.clear();
+          displayContexts.delete(id);
           rt.phaseVersion++;
           signalSync();
           const response = {
@@ -3250,6 +3346,8 @@ function handoffDocument() {
       liveText: rt.liveText,
       liveThinking: rt.liveThinking,
       thinkingBlockStart: rt.thinkingBlockStart,
+      thinkingActive: rt.thinkingActive,
+      toolProgress: [...rt.toolProgress.values()],
       pendingContextTextLength: rt.pendingContextTextLength,
       pendingContextThinkingLength: rt.pendingContextThinkingLength,
       pendingContextFinalization: rt.pendingContextFinalization,
