@@ -1,6 +1,6 @@
 # Codex app-server core
 
-`src/cores/codex.ts` adapts the pinned Codex 0.146.0 app-server to PiStack's runtime wire. The default launcher resolves the executable from Orchestrator's immutable dependency closure, not the caller's PATH. Codex owns instructions, native tools, skills, compaction, and child agents. PiStack chooses the starting model and effort, binds an account, reserves capacity during native-tree activity, and controls dispatch. No Pi system prompt or Pi tools are installed into Codex.
+`src/cores/codex.ts` adapts the pinned Codex 0.154.0 app-server to PiStack's runtime wire. The default launcher resolves the executable from Orchestrator's immutable dependency closure, not the caller's PATH. Codex owns instructions, native tools, skills, compaction, and child agents. PiStack chooses the starting model and effort, binds an account, reserves capacity during native-tree activity, and controls dispatch. No Pi system prompt or Pi tools are installed into Codex.
 
 ## Bind the account broker
 
@@ -95,9 +95,17 @@ Send a stable `workId` with prompt/steer/follow-up commands. RPC `id` is only th
 
 Transfer acceptance is recorded before returning. A completed transfer is never reinjected. An uncertain transfer blocks startup pending inspection of native history. This is separate from dispatch receipts and never replays the last user request.
 
+## Astra CLI version rejection
+
+On September 13, 2026, Codex 0.146.0 rejected a native Astra turn with HTTP 400 and `The 'gpt-6-astra' model requires a newer version of Codex. Please upgrade to the latest app or CLI and try again.` This was a CLI version gate, not a missing Pi model alias or an account quota failure.
+
+Runtime and Orchestrator now pin 0.154.0, including every platform package in the lockfile. Its native catalog includes Astra, Sol, Terra and Luna. The adapter uses that catalog directly for model and reasoning-effort selection.
+
+A fresh GMKtec request through `openCodexSession` and the normal `openCoreAccount` broker returned `codex-astra-ok` in 4.763 seconds with Astra and high thinking. The request used a disposable read-only directory, no tools, and no copied credentials. Native response `msg_0a32f5f8918aa536016aa6e3544cdc87d196c061a789a2ace3` settled with `treeComplete: true`, no unresolved commands and no core errors. The probe closed its process tree and removed its temporary native state. Typechecking and all 20 adapter/RPC fixture tests passed. Publication owns both host deployments; the failed user turn is not replayed by this update.
+
 ## Protocol custody and checks
 
-`src/cores/codex-protocol` contains the required dependency closure from the installed binary's TypeScript schema. The only transformation adds `.js` to import specifiers. The generated upstream schema is covered by the copied [Apache-2.0 license](../src/cores/codex-protocol.LICENSE). To regenerate with the pinned binary:
+`src/cores/codex-protocol` contains the required dependency closure from the installed binary's TypeScript schema. The only transformation adds `.js` to import specifiers. The generated upstream schema is covered by the copied [Apache-2.0 license](../src/cores/codex-protocol.LICENSE). The generator resolves Orchestrator's installed package, checks its reported version against both workspace pins, and never selects `codex` from PATH. To regenerate with the pinned binary:
 
 ```sh
 node packages/orchestrator/src/cores/codex-generate-protocol.mjs
