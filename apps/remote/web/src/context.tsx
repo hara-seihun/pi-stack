@@ -36,6 +36,8 @@ const defaultImage = markdown.renderer.rules.image!;
 markdown.renderer.rules.image = (tokens, index, options, env, renderer) => {
   tokens[index].attrSet("loading", "lazy");
   tokens[index].attrSet("decoding", "async");
+  tokens[index].attrSet("tabindex", "0");
+  tokens[index].attrSet("role", "button");
   return defaultImage(tokens, index, options, env, renderer);
 };
 const defaultLinkOpen = markdown.renderer.rules.link_open
@@ -50,15 +52,13 @@ installInlineImages(markdown);
 
 const INLINE_IMAGE = /\.(png|jpe?g|gif|webp|avif|svg)$/i;
 
-// A file tag naming an image shows the picture itself; any other file becomes
-// a download link. The link stays under an image so the original can be saved.
 function presentationMarkdown(source: string, sessionId: string) {
   return source.replace(/<pi-remote-file\s+src=["']([^"']+)["']\s*\/\s*>/gi, (_match, path) => {
     const name = String(path).split("/").filter(Boolean).at(-1) || "Download file";
     const label = name.replaceAll("&", "&amp;").replaceAll("[", "&#91;").replaceAll("]", "&#93;").replace(/[\r\n]+/g, " ");
     const link = API.sessionFiles.path({ sessionId }, { path });
     const href = resourceUrl(link);
-    if (INLINE_IMAGE.test(name)) return `\n\n[![${label}](${href})](${href})\n\n`;
+    if (INLINE_IMAGE.test(name)) return `\n\n![${label}](${href})\n\n`;
     return `\n\n[${label}](${href})\n\n`;
   });
 }
@@ -250,7 +250,7 @@ const ToolEntry = memo(function ToolEntry({ entry, home }: { entry: ContextEntry
     <pre className="tool-header">{result ? result.isError ? "×  " : "✓  " : "…  "}{summary}</pre>
     <div className="tool-timing">{timing}</div>
     {body && <pre className="tool-body">{expanded ? body : body.slice(0, 320)}</pre>}
-    {expanded && images.map((image: any, index: number) => <img key={index} className="context-image" src={imageUrl(image)} alt="Tool result" loading="lazy" decoding="async" />)}
+    {expanded && images.map((image: any, index: number) => <img key={index} className="context-image" role="button" tabIndex={0} src={imageUrl(image)} alt="Tool result" loading="lazy" decoding="async" />)}
     {result && (expandable || images.length > 0) && <button type="button" className="tool-toggle" onClick={() => setCompletedExpanded(!completedExpanded)}>{completedExpanded ? "Show less" : "Show more"}</button>}
     <div className="message-actions"><CopyButton text={[summary, body].filter(Boolean).join("\n\n")} /></div>
   </div>;

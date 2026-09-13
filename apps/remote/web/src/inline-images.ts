@@ -23,10 +23,8 @@ function imageHtml(tag: InlineImageTag, sessionId: string, presentation: ImagePr
   if (image?.state === "complete" && image.path) {
     const href = resourceUrl(API.sessionFiles.path({ sessionId }, { path: image.path }));
     const url = escape(href);
-    const content = presentation.failedUrls?.has(href)
-      ? '<span class="inline-image-placeholder inline-image-error" role="alert">Image could not load. Open the original to try again.</span>'
-      : `<img src="${url}" alt="${label}" data-inline-image="true" loading="lazy" decoding="async">`;
-    return shell(`<a href="${url}" target="_blank" rel="noopener noreferrer">${content}</a>`);
+    if (presentation.failedUrls?.has(href)) return shell(`<a href="${url}" target="_blank" rel="noopener noreferrer"><span class="inline-image-placeholder inline-image-error" role="alert">Image could not load. Open the original to try again.</span></a>`);
+    return shell(`<img src="${url}" alt="${label}" role="button" tabindex="0" data-inline-image="true" loading="lazy" decoding="async">`);
   }
   if (!image && !tag.definition && !presentation.streaming && presentation.images) {
     return shell(`<span class="inline-image-placeholder inline-image-error" role="alert">Image “${label}” is not available.</span>`);
