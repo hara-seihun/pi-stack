@@ -8,6 +8,7 @@ import { allowsAccountUse } from "../domain.js";
 import { ORCHESTRATOR_CATALOG } from "../catalog.js";
 import { defaultSharedAuthPath, SharedOAuthAuth, providerOAuth, sharedOAuthProvider } from "../auth/shared-oauth.js";
 import { isRateLimitError, isRejectedTokenError, rateLimitCooldownMs } from "../provider-errors.js";
+import { withAnthropicFiles } from "../auth/anthropic-files-provider.js";
 import { chooseInteractiveAccount } from "../auth/account-selection.js";
 import { installImageGeneration } from "./image-generation.js";
 import { installProviderOperations } from "./provider-operation.js";
@@ -30,7 +31,8 @@ export default function routing(pi:ExtensionAPI):void{
   let closed=false;
   const lifecycle=new AbortController();
   const environment:NodeJS.ProcessEnv=(globalThis as any)[Symbol.for("pi-stack.session-environment")]?.getStore()??process.env;
-  const ledgerPath=defaultLedgerPath(),store=Store.open(ledgerPath),families=new Map(builtinProviders().map((raw)=>{const provider=withCustomModels(raw);return[provider.id,provider] as const;}));
+  const ledgerPath=defaultLedgerPath(),store=Store.open(ledgerPath),families=new Map(builtinProviders().map((raw)=>{const provider=withAnthropicFiles(withCustomModels(raw));return[provider.id,provider] as const;}));
+  pi.registerProvider(families.get("anthropic")!);
   const shared=new Map<string,SharedOAuthAuth>();
   for(const family of families.values()){
     const oauth=family.auth.oauth;if(!oauth)continue;
