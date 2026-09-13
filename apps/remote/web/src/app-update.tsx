@@ -10,24 +10,20 @@ type Availability =
 
 type InstallState = "idle" | "installing" | "installer-opened";
 
-const FOREGROUND_DEDUP_MS = 1_500;
 let activeCheck: Promise<AppUpdateCheck> | null = null;
-let recentCheck: { startedAt: number; promise: Promise<AppUpdateCheck> } | null = null;
 
 function errorMessage(error: unknown) {
   return error instanceof Error ? error.message : String(error);
 }
 
-function checkForUpdate(fresh = false) {
+function checkForUpdate() {
   if (activeCheck) return activeCheck;
-  if (!fresh && recentCheck && Date.now() - recentCheck.startedAt < FOREGROUND_DEDUP_MS) return recentCheck.promise;
   if (!remote.checkAppUpdate) return Promise.reject(new Error("App update checks are unavailable"));
 
-  const promise = deadline(remote.checkAppUpdate(), 8_000, "App update check").finally(() => {
+  const promise = deadline(remote.checkAppUpdate(), 30_000, "App update check").finally(() => {
     if (activeCheck === promise) activeCheck = null;
   });
   activeCheck = promise;
-  recentCheck = { startedAt: Date.now(), promise };
   return promise;
 }
 
@@ -44,13 +40,13 @@ export function AppUpdateControl() {
   const generation = useRef(0);
   const installing = useRef(false);
 
-  const check = useCallback(async (fresh = false) => {
+  const check = useCallback(async () => {
     if (installing.current) return;
     const request = ++generation.current;
     setInstall("idle");
     setAvailable({ status: "checking" });
     try {
-      const checked = await checkForUpdate(fresh);
+      const checked = await checkForUpdate();
       if (generation.current === request) setAvailable(availability(checked));
     } catch (error) {
       if (generation.current === request) setAvailable({ status: "failed", message: errorMessage(error) });
@@ -59,19 +55,11 @@ export function AppUpdateControl() {
 
   useEffect(() => {
     if (!nativePlatform || !remote.checkAppUpdate || !remote.installAppUpdate) return;
-    let lastForegroundCheck = Date.now();
     void check();
-    const foreground = () => {
-      const now = Date.now();
-      if (document.visibilityState !== "visible" || now - lastForegroundCheck < FOREGROUND_DEDUP_MS) return;
-      lastForegroundCheck = now;
-      void check();
-    };
-    document.addEventListener("visibilitychange", foreground);
+    const foreground = () => { void check(); };
     window.addEventListener("pi-app-foreground", foreground);
     return () => {
       generation.current++;
-      document.removeEventListener("visibilitychange", foreground);
       window.removeEventListener("pi-app-foreground", foreground);
     };
   }, [check]);
@@ -84,19 +72,13 @@ export function AppUpdateControl() {
     setInstall("installing");
     setInstallError("");
     try {
-      const result = await remote.installAppUpdate!();
-      if (result.status === "installer-opened") setInstall("installer-opened");
-      else {
-        setInstall("idle");
-        setInstallError("Allow installs from Kenan in Android settings, then return here. The downloaded APK is saved.");
-        installing.current = false;
-        await check(true);
-      }
+      await remote.installAppUpdate!();
+      setInstall("installer-opened");
     } catch (error) {
       setInstall("idle");
       setInstallError(errorMessage(error));
       installing.current = false;
-      await check(true);
+      await check();
     } finally {
       installing.current = false;
     }
@@ -107,13 +89,13 @@ export function AppUpdateControl() {
 
   return <section className="app-update" aria-label="App update">
     {installError && <p className="app-update-error" role="alert">{installError}</p>}
-    {available.status === "failed" && <><p className="app-update-error" role="alert">Update check failed. {available.message}</p><button type="button" onClick={() => void check(true)}>Retry check</button></>}
+    {available.status === "failed" && <><p className="app-update-error" role="alert">Update check failed. {available.message}</p><button type="button" onClick={() => void check()}>Retry check</button></>}
     {available.status === "current" && installError && <p className="app-update-detail">No app update is currently available.</p>}
-    {available.status === "available" && install !== "installer-opened" && <>
+    {available.status === "available" && <>
       <p className="app-update-detail">Update {available.checked.release.revision.slice(0, 12)} is available. Android may ask you to allow installs from Kenan.</p>
       <button type="button" disabled={install === "installing"} onClick={() => void startInstall()}>{install === "installing" ? "Downloading update…" : installError ? "Retry update" : "Update app"}</button>
       {install === "installing" && <p className="app-update-detail" role="status">Downloading the app and opening the Android installer.</p>}
     </>}
-    {install === "installer-opened" && <p className="app-update-detail" role="status">Finish the update in the Android installer.</p>}
+    {install === "installer-opened" && <p className="app-update-detail" role="status">Finish the update in the Android installer. If you cancelled it, tap Update app to reopen it.</p>}
   </section>;
 }

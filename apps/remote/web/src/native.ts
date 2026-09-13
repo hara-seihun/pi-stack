@@ -5,7 +5,7 @@ interface EnvironmentChoice { id: string; name: string }
 export interface AppRelease { revision: string; versionCode: number }
 export interface InstalledApp { revision: string; versionCode: number; applicationId: string }
 export interface AppUpdateCheck { release: AppRelease | null; installed: InstalledApp }
-export interface AppUpdateInstall { status: "installer-opened" | "permission-required" }
+export interface AppUpdateInstall { status: "installer-opened" }
 interface EnvironmentState {
   id: string;
   name: string;
