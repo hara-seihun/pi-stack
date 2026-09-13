@@ -197,6 +197,7 @@ export function createCodexSession(dependencies: CodexDependencies): OpenCoreSes
       if (method === "thread/closed" || method === "thread/deleted") {
         uncertainThreads.delete(threadId);
         nativeStatus.set(threadId, "notLoaded"); active.delete(threadId); setCompacting(threadId, false);
+        projection(threadId).clearLive();
         const agent = agents.get(threadId);
         if (agent) { if (agent.state === "running") agent.state = "cancelled"; emit({ type: "core_agent", agent }); }
       } else if (method === "thread/status/changed") {
@@ -271,7 +272,9 @@ export function createCodexSession(dependencies: CodexDependencies): OpenCoreSes
         }
         projection(threadId).item(item, String(params.turnId), completed);
         if (completed) save();
-      } else if (method === "item/agentMessage/delta" || method === "item/plan/delta" || method === "item/reasoning/summaryTextDelta") {
+      } else if (method === "item/reasoning/summaryPartAdded") {
+        if (Number(params.summaryIndex) > 0) projection(threadId).delta(String(params.itemId), "\n\n", true);
+      } else if (method === "item/agentMessage/delta" || method === "item/plan/delta" || method === "item/reasoning/summaryTextDelta" || method === "item/reasoning/textDelta") {
         projection(threadId).delta(String(params.itemId), String(params.delta ?? ""), method.includes("reasoning"));
       } else if (method === "item/commandExecution/outputDelta" || method === "item/fileChange/outputDelta") {
         send({ type: "tool_execution_update", toolCallId: params.itemId, toolName: method.includes("fileChange") ? "apply_patch" : "exec_command",
@@ -518,6 +521,7 @@ export function createCodexSession(dependencies: CodexDependencies): OpenCoreSes
           sessionName: root ? state.name : agents.get(threadId)?.name,
           model: models.find(model => model.model === selectedModel) ? publicModel(models.find(model => model.model === selectedModel)!, providerFamily()) : { id: selectedModel, provider: providerFamily() },
           thinkingLevel: selectedEffort === "none" ? "off" : selectedEffort,
+          live: current.liveState(),
           isStreaming: root ? treeBusy() : threadBusy(threadId), coreBusy: root ? treeBusy() : threadBusy(threadId),
           isCompacting: root ? compactingThreads.size > 0 : compactingThreads.has(threadId),
           treeComplete: !treeBusy(),

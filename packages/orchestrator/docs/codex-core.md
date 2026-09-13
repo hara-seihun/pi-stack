@@ -37,7 +37,7 @@ Every response has `type: "response"`, the original `id`, `command`, and `succes
 
 | Command | Behavior |
 | --- | --- |
-| `get_state` | Portable identity, native identity, model/effort/name, unresolved dispatch IDs, and last assistant message. Root `isStreaming`, `coreBusy`, and compaction flags include descendants. `treeComplete` becomes true only when the native tree is idle. |
+| `get_state` | Portable identity, native identity, model/effort/name, unresolved dispatch IDs, last assistant message, and `live` text/thinking/tool activity. Root `isStreaming`, `coreBusy`, and compaction flags include descendants. `treeComplete` becomes true only when the native tree is idle. |
 | `prompt` | Sends `turn/start` only when the native tree is idle. Acknowledges native acceptance without waiting for generation. Text and base64 images are supported. |
 | `steer` | Sends `turn/steer` with the active turn ID. Starts a turn when idle. |
 | `follow_up` | Starts a turn when idle. Fails while busy so PiStack retains the queue. |
@@ -78,6 +78,12 @@ Non-Linux hosts and Python builds without pidfd support cannot start this launch
 Root `agent_start`/`agent_end` describe aggregate native-tree activity. A root turn completing does not emit `agent_end` while a descendant is busy. Activity also emits `turn_start`, `turn_end`, `message_start`, `message_update`, `message_end`, `tool_execution_start`, `tool_execution_update`, `tool_execution_end`, and compaction events. Reasoning summaries stream as thinking. Native token usage goes to the broker rather than synthetic message usage fields.
 
 `context_update` contains `context: {systemPrompt, tools, messages}`. It follows finalized `message_end` events. The adapter omits the optional `finalizesMessage` field; Remote derives its finalization key from the last assistant message. It does not send a message object in place of that key. Its `projection: "activity"` and `core: "codex"` fields matter. `systemPrompt` is empty because app-server does not expose the assembled prompt. `tools` lists observed native tool names with `activityOnly: true`, not model-visible tool schemas. The messages are native activity rendered into portable records. Compaction does not erase historical activity from this projection.
+
+`get_state.live` contains `{text, thinking, isThinking, tools}` for active items. Tool entries carry `toolCallId`, `toolName`, and `args`. Native `inProgress` tools remain active when restoring a turn, rather than acquiring a fabricated completed result. A terminal turn or closed thread clears that snapshot. After recovery, a busy native tree with no observable active item remains generic working activity.
+
+Reasoning items emit both `thinking_start` and `thinking_end`, even when no summary text is available. Empty completed reasoning items do not become projected transcript messages. Summary sections retain their boundaries; streamed text survives an empty final item. Native summary and text delta notifications feed the same live projection. No encrypted reasoning is decoded.
+
+The September 13 STP thread had 53 native reasoning records with empty summaries and no raw content. Its native Astra catalog defaulted summaries to `none` and did not advertise `supports_reasoning_summary_parameter`. Codex 0.154.0's [request builder](https://github.com/openai/codex/blob/rust-v0.154.0/codex-rs/core/src/client.rs) omits the summary request parameter without that capability. A separate native Astra request with `model_reasoning_summary="detailed"` still returned no readable reasoning. The UI must show activity without promising text that the provider has not returned. Native history stays unchanged.
 
 Every native child emits `core_agent` with a `CoreAgent` record. Root parent IDs use the stable PiStack session ID; deeper parent IDs use native child IDs. Parentage can be temporarily null when activity precedes metadata. Child activity uses `core_child_event: {agentId, event}` for the portable journal's child stores and never merges into the root's message stream or context. `canAcceptDirectInput` accompanies metadata updates.
 
