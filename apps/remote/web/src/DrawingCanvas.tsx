@@ -1,5 +1,6 @@
 import { useCallback, useEffect, useLayoutEffect, useRef, useState, type PointerEvent as ReactPointerEvent } from "react";
 import { DrawingColourPicker } from "./DrawingColourPicker";
+import type { DrawingBackground } from "./drawing-drafts";
 import { drawingExportSize, fitPaper, grabPaper, paperPoint, screenRadius, zoomPaper, type PaperSize, type PaperView, type Point } from "./drawing-paper";
 import "./drawing-canvas.css";
 
@@ -7,7 +8,7 @@ export type DrawingAttachmentResult = { ok: true } | { ok: false; error: string 
 export interface DrawingCanvasProps {
   onAttach(file: File): Promise<DrawingAttachmentResult>;
   onClose(): void;
-  background?: { src: string; alt: string };
+  background?: DrawingBackground;
 }
 
 type Stroke = { color: string; radius: number; points: Point[] };
@@ -43,9 +44,11 @@ function paintPaper(context: CanvasRenderingContext2D, paper: PaperSize, strokes
     context.beginPath();
     context.rect(-paper.width / 2, -paper.height / 2, paper.width, paper.height);
     context.clip();
-    context.fillStyle = "#fff";
-    context.fillRect(-paper.width / 2, -paper.height / 2, paper.width, paper.height);
     if (background) context.drawImage(background, -paper.width / 2, -paper.height / 2, paper.width, paper.height);
+    else {
+      context.fillStyle = "#fff";
+      context.fillRect(-paper.width / 2, -paper.height / 2, paper.width, paper.height);
+    }
     for (const stroke of strokes) paintStroke(context, stroke);
     if (active) paintStroke(context, active);
   } finally {
@@ -181,7 +184,6 @@ export function DrawingCanvas({ onAttach, onClose, background }: DrawingCanvasPr
       event.preventDefault();
       operationRef.current += 1;
       resetPointers();
-      setError(null);
       onClose();
     };
     window.addEventListener("keydown", cancel);
@@ -299,6 +301,7 @@ export function DrawingCanvas({ onAttach, onClose, background }: DrawingCanvasPr
       canvas.removeEventListener("wheel", wheel);
       window.removeEventListener("blur", resetPointers);
       if (frameRef.current !== null) cancelAnimationFrame(frameRef.current);
+      frameRef.current = null;
     };
   }, [redraw, resetPointers]);
 
@@ -317,7 +320,7 @@ export function DrawingCanvas({ onAttach, onClose, background }: DrawingCanvasPr
   };
 
   const start = (event: ReactPointerEvent<HTMLCanvasElement>) => {
-    if (busyRef.current || event.button !== 0) return;
+    if (busyRef.current || event.button !== 0 || !paperRef.current || (backgroundWantedRef.current && !backgroundRef.current)) return;
     event.preventDefault();
     event.currentTarget.setPointerCapture(event.pointerId);
     const point = localPoint(event.clientX, event.clientY);
@@ -428,10 +431,10 @@ export function DrawingCanvas({ onAttach, onClose, background }: DrawingCanvasPr
         onPointerLeave={() => { cursorRef.current = null; redraw(); }} onContextMenu={event => event.preventDefault()} />
     </div>
     <div className="drawing-left-controls">
-      <button type="button" className="drawing-done drawing-icon-button" aria-label="Cancel drawing" title="Cancel drawing" disabled={attaching} onClick={() => { operationRef.current += 1; resetPointers(); setError(null); onClose(); }}>
+      <button type="button" className="drawing-done drawing-icon-button" aria-label="Cancel drawing" title="Cancel drawing" disabled={attaching} onClick={() => { operationRef.current += 1; resetPointers(); onClose(); }}>
         <svg viewBox="0 0 24 24" aria-hidden="true"><path d="m6 6 12 12M18 6 6 18" /></svg>
       </button>
-      <button type="button" className="drawing-done drawing-icon-button" aria-label="Undo last stroke" title="Undo last stroke" disabled={attaching || strokeCount === 0} onClick={undo}>
+      <button type="button" className="drawing-done drawing-icon-button" aria-label="Undo last stroke" title="Undo last stroke" disabled={attaching || backgroundState !== "ready" || strokeCount === 0} onClick={undo}>
         <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M9 4 4 9l5 5M4 9h10a6 6 0 0 1 0 12" /></svg>
       </button>
     </div>
