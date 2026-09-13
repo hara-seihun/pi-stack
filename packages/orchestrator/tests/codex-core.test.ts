@@ -91,6 +91,29 @@ function fixture(existingOptions?: CoreSessionOptions) {
 }
 
 describe("Codex app-server adapter", () => {
+  it("exposes live native reasoning and tool identity without requiring text", async () => {
+    const f = fixture(), session = await f.open();
+    try {
+      f.send("turn/started", { threadId: "root", turn: { id: "live-turn" } });
+      const item = { type: "reasoning", id: "reason", summary: [], content: [] };
+      f.send("item/started", { threadId: "root", turnId: "live-turn", item });
+      await session.command({ type: "get_state", id: "reasoning-live" });
+      expect(f.response("reasoning-live")?.data).toMatchObject({ isStreaming: true, live: { isThinking: true, thinking: "", tools: [] } });
+      f.send("item/reasoning/summaryTextDelta", { threadId: "root", itemId: "reason", delta: "First." });
+      f.send("item/reasoning/summaryPartAdded", { threadId: "root", itemId: "reason", summaryIndex: 1 });
+      f.send("item/reasoning/summaryTextDelta", { threadId: "root", itemId: "reason", delta: "Second." });
+      f.send("item/completed", { threadId: "root", turnId: "live-turn", item });
+      expect(f.events.find(event => (event.assistantMessageEvent as { type?: string } | undefined)?.type === "thinking_end")?.assistantMessageEvent).toMatchObject({ content: "First.\n\nSecond." });
+      const tool = { type: "commandExecution", id: "tool", command: "run", cwd: "/work", status: "inProgress" };
+      f.send("item/started", { threadId: "root", turnId: "live-turn", item: tool });
+      await session.command({ type: "get_state", id: "tool-live" });
+      expect(f.response("tool-live")?.data).toMatchObject({ live: { isThinking: false, tools: [{ toolCallId: "tool", toolName: "exec_command" }] } });
+      f.send("thread/closed", { threadId: "root" });
+      await session.command({ type: "get_state", id: "closed-live" });
+      expect(f.response("closed-live")?.data).toMatchObject({ live: { isThinking: false, tools: [] } });
+    } finally { await session.close(); }
+  });
+
   it("keeps Anthropic credentials outside Codex and restores its native provider on resume", async () => {
     const f = fixture();
     f.options.args = ["--provider", "anthropic-2", "--model", "claude-fable-5-1", "--thinking", "high"];

@@ -53,6 +53,20 @@ export class CodexProjection {
     private readonly stamp: (id: string, suggested?: number) => number,
     private readonly provider: () => string = () => "openai-codex") {}
 
+  liveState() {
+    const blocks = [...this.live.values()].flatMap(message => message.content);
+    return {
+      text: blocks.filter(block => block.type === "text").map(block => String(block.text ?? "")).join("\n"),
+      thinking: blocks.filter(block => block.type === "thinking").map(block => String(block.thinking ?? "")).join("\n"),
+      isThinking: blocks.some(block => block.type === "thinking"),
+      tools: blocks.filter(block => block.type === "toolCall").map(block => ({
+        toolCallId: String(block.id), toolName: String(block.name), args: block.arguments,
+      })),
+    };
+  }
+
+  clearLive() { this.live.clear(); }
+
   context() {
     this.emit({ type: "context_update", projection: "activity", core: "codex", context: {
       systemPrompt: "", tools: [...this.tools].map(name => ({ name, activityOnly: true })),
@@ -95,7 +109,17 @@ export class CodexProjection {
       }
       return;
     }
+    const streamed = this.live.get(item.id);
     this.live.delete(item.id);
+    if (streamed) for (const [index, block] of message.content.entries()) {
+      const key = block.type === "thinking" ? "thinking" : block.type === "text" ? "text" : undefined;
+      if (key && !block[key] && streamed.content[index]?.type === block.type) block[key] = streamed.content[index][key];
+    }
+    if (item.type === "reasoning") {
+      const content = String(message.content[0]?.thinking ?? "");
+      if (emit) this.emit({ type: "message_update", message, assistantMessageEvent: { type: "thinking_end", contentIndex: 0, content } });
+      if (!content.trim()) return;
+    }
     this.append(message, turnId);
     if (emit) { this.emit({ type: "message_end", message }); this.context(); }
     if (name) {
@@ -119,6 +143,7 @@ export class CodexProjection {
     this.emit({ type: "message_update", message, assistantMessageEvent: { type: thinking ? "thinking_delta" : "text_delta", contentIndex: 0, delta } });
   }
   finish(turn: Turn, emit = true) {
+    if (turn.status !== "inProgress") this.clearLive();
     if (turn.status !== "failed" && turn.status !== "interrupted") return;
     const id = `${turn.id}:failure`;
     const message: Message = { id, role: "assistant", content: [], timestamp: this.stamp(id), model: this.model(), provider: this.provider(),
@@ -136,7 +161,10 @@ export class CodexProjection {
       this.append(message, "transfer");
     }
     for (const turn of turns) {
-      for (const [index, item] of turn.items.entries()) this.item(item, turn.id, true, false, (turn.startedAt ?? 0) * 1000 + index);
+      for (const [index, item] of turn.items.entries()) {
+        const completed = turn.status !== "inProgress" || !("status" in item) || item.status !== "inProgress";
+        this.item(item, turn.id, completed, false, (turn.startedAt ?? 0) * 1000 + index);
+      }
       this.finish(turn, false);
     }
   }

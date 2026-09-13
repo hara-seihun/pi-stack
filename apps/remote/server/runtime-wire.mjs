@@ -57,6 +57,7 @@ export function projectRuntimeEvent(event) {
     case 'message_end': return { type, message: fields(event.message, event.message?.role === 'assistant'
       ? ['role', 'timestamp', 'content', 'stopReason', 'rawStopReason', 'errorMessage'] : ['role']) };
     case 'tool_execution_start': return { type, ...fields(event, ['toolCallId', 'toolName']), args: toolArgs(event.args) };
+    case 'tool_execution_update': return { type, ...fields(event, ['toolCallId', 'toolName']), partialResult: toolOutput(event.partialResult) };
     case 'tool_execution_end': return { type, ...fields(event, ['toolCallId', 'toolName', 'isError']), result: toolOutput(event.result) };
     case 'auto_retry_end': return { type, ...fields(event, ['success', 'finalError']) };
     case 'compaction_end': return { type, ...fields(event, ['aborted', 'willRetry', 'errorMessage']), result: Boolean(event.result) };

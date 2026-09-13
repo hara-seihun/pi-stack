@@ -213,6 +213,12 @@ button:disabled { cursor: default; opacity: .45; }
 .message.notice { color: var(--muted); font-size: 14px; }
 .live-answer { position: relative; width: min(100%, 980px); margin: 18px auto 0; padding-right: 40px; overflow-wrap: anywhere; line-height: 1.45; user-select: text; }
 .live-answer > .message-action { position: absolute; top: 5px; right: 0; }
+.live-activity { display: flex; align-items: center; gap: 9px; margin: 20px 0; color: var(--accent); font-size: 12px; font-weight: 750; }
+.live-activity-dot { width: 8px; height: 8px; border-radius: 50%; background: currentColor; animation: live-progress-pulse 1.5s ease-in-out infinite; }
+.live-activity.disconnected { color: var(--danger); }
+.live-activity.disconnected .live-activity-dot { animation: none; }
+@keyframes live-progress-pulse { 50% { opacity: .3; } }
+@media (prefers-reduced-motion: reduce) { .live-activity-dot { animation: none; } }
 .live-answer::before { display: block; margin-bottom: 5px; color: var(--success); font-size: 11px; font-weight: 850; content: "PI · WORKING"; }
 
 .markdown-body { min-width: 0; white-space: normal; overflow-wrap: anywhere; }

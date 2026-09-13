@@ -245,7 +245,7 @@ for line in sys.stdin:
    if os.environ.get('PI_FAKE_STARTUP_EVENTS'):
     streaming = True
     out({'type':'agent_start'})
-  out({'type':'response','id':rid,'command':'get_state','success':True,'data':{'isStreaming':streaming,'isCompacting':compacting,'pendingMessageCount':len(steering)+len(follow_up),'messageCount':0,'thinkingLevel':thinking_level,'sessionFile':None,'sessionName':session_name,'model':{'provider':provider,'id':model_id,'name':model_id}}})
+  out({'type':'response','id':rid,'command':'get_state','success':True,'data':{'isStreaming':streaming,'isCompacting':compacting,'pendingMessageCount':len(steering)+len(follow_up),'messageCount':0,'thinkingLevel':thinking_level,'sessionFile':None,'sessionName':session_name,'model':{'provider':provider,'id':model_id,'name':model_id}, **({'live':{'text':'','thinking':'','isThinking':True,'tools':[{'toolCallId':'recovered-tool','toolName':'exec_command','args':{'command':'python experiments/discover_objects.py'}}]}} if last == 'native-recovered-progress' and streaming else {})}})
  elif kind == 'get_available_models':
   out({'type':'response','id':rid,'command':kind,'success':True,'data':{'models':[
    {'provider':'openai-codex-2','id':'gpt-6-astra','name':'GPT-6 Astra duplicate'},
@@ -311,6 +311,20 @@ for line in sys.stdin:
     out({'type':'message_update','message':{'role':'assistant','content':[{'type':'text','text':'instant text second'}]},'assistantMessageEvent':{'type':'text_delta','delta':' second'}})
     gate('live-stream')
     out({'type':'message_end','message':{'role':'assistant','content':[{'type':'thinking','thinking':'thinking now'},{'type':'text','text':'instant text second'}]}})
+    streaming = False
+    out({'type':'agent_settled'})
+   elif last == 'native-recovered-progress':
+    pass
+   elif last == 'native-progress-replay':
+    events=json.load(open(${JSON.stringify(resolve(import.meta.dir, "fixtures/codex-live-progress.json"))}))
+    out(events[0])
+    out({'type':'message_update','assistantMessageEvent':{'type':'thinking_start'}})
+    gate('native-thinking')
+    out({'type':'message_update','assistantMessageEvent':{'type':'thinking_end','content':''}})
+    out(events[1])
+    out(events[2])
+    gate('native-tool')
+    out(events[-1])
     streaming = False
     out({'type':'agent_settled'})
    elif last == 'thinking-omitted':
@@ -1039,6 +1053,52 @@ describe("web and supervisor integration", () => {
       releaseGate("live-stream-next");
       releaseGate("live-stream");
     }
+  });
+
+  test("recovers native active-item snapshots without replaying the prompt", async () => {
+    const id = await createThread("home", "astra");
+    await api("PUT", `/v1/sessions/${id}/context`, { capturedAt: 100, context: { systemPrompt: "", tools: [], messages: [] } });
+    try {
+      await api("POST", `/v1/sessions/${id}/prompt`, { requestId: crypto.randomUUID(), text: "native-recovered-progress" });
+      await waitFor(async () => (await api("GET", `/v1/sessions/${id}`)).value.session, session => session.activity === "WAITING_ON_TOOL");
+      const snapshot = (await api("POST", "/v1/sync", { seq: 0, waitMs: 0, session: { id } })).value.session;
+      const call = JSON.parse(snapshot.context.document).messages[0].content[0];
+      expect(call).toMatchObject({ id: "recovered-tool", name: "exec_command", arguments: { command: "python experiments/discover_objects.py" }, observedStart: true });
+      expect(snapshot.liveThinking.document).toBe("");
+      expect(readJsonLines(fakeRpcLog).filter(request => request.sessionId === id && request.type === "prompt")).toHaveLength(1);
+    } finally { await api("POST", `/v1/sessions/${id}/abort`, {}); }
+  });
+
+  test("replays native progress without reasoning text and retains active tools across client reload", async () => {
+    const id = await createThread("home", "astra");
+    const events = JSON.parse(readFileSync(resolve(import.meta.dir, "fixtures/codex-live-progress.json"), "utf8"));
+    resetGate("native-thinking"); resetGate("native-tool");
+    try {
+      await api("PUT", `/v1/sessions/${id}/context`, { capturedAt: 100, context: { systemPrompt: "", tools: [], messages: [events[0].message] } });
+      await api("POST", `/v1/sessions/${id}/prompt`, { requestId: crypto.randomUUID(), text: "native-progress-replay" });
+      await waitForGate("native-thinking");
+      const thinking = (await api("GET", `/v1/sessions/${id}/events`)).value;
+      expect(thinking.session.activity).toBe("THINKING");
+      expect(thinking.liveThinking).toBe("");
+      const snapshot = async () => (await api("POST", "/v1/sync", { seq: 0, waitMs: 0, session: { id } })).value.session;
+      expect(JSON.parse((await snapshot()).context.document).messages[0].content).toEqual([]);
+      releaseGate("native-thinking");
+      await waitForGate("native-tool");
+      const first = await snapshot();
+      expect((await api("GET", `/v1/sessions/${id}`)).value.session.activity).toBe("WAITING_ON_TOOL");
+      const messages = JSON.parse(first.context.document).messages;
+      expect(messages.at(-1).content[0]).toMatchObject({ type: "toolCall", id: events[1].toolCallId, arguments: events[1].args,
+        partialOutput: events[2].partialResult.content[0].text });
+      expect((await snapshot()).context.document).toBe(first.context.document);
+      releaseGate("native-tool");
+      await waitFor(async () => (await api("GET", `/v1/sessions/${id}`)).value.session, session => session.state === "IDLE");
+      const completed = JSON.parse((await snapshot()).context.document).messages;
+      expect(completed.at(-1)).toMatchObject({ role: "toolResult", toolCallId: events[1].toolCallId, isError: false });
+      expect(completed.at(-1).content).toEqual(events.at(-1).result.content);
+      const canonical = { systemPrompt: "", tools: [], messages: completed };
+      await api("PUT", `/v1/sessions/${id}/context`, { capturedAt: 200, context: canonical });
+      expect(JSON.parse((await snapshot()).context.document).messages).toEqual(completed);
+    } finally { releaseGate("native-thinking"); releaseGate("native-tool"); }
   });
 
   test("keeps every thinking content block visible until its message commits", async () => {

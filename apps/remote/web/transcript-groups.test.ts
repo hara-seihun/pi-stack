@@ -2,7 +2,7 @@ import { describe, expect, test } from "bun:test";
 import { groupTranscriptEntries } from "./src/transcript-groups";
 import type { ContextEntry } from "./src/types";
 
-const entry = (key: string, kind: string): ContextEntry => ({ key, kind, signature: key });
+const entry = (key: string, kind: string): ContextEntry => ({ key, kind, signature: key, text: key });
 
 describe("transcript detail groups", () => {
   test("keeps user and assistant messages visible while combining surrounding boxes", () => {

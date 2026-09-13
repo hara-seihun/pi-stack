@@ -16,11 +16,12 @@
 | Assistant `message_end` | Final text/thinking, inline-image declarations, model failure and context finalization | Keep role, timestamp, complete content, stop reason, raw refusal reason and error message. |
 | Other `message_end` | Activity and phase-version fence | Keep role, not the user/tool/custom payload. |
 | `tool_execution_start` | Active tool identity and SQLite argument preview | Keep tool ID/name. Arguments over 12,000 JSON characters become a marked preview that fits within that same limit after escaping. |
+| `tool_execution_update` | Live tool output preview | Keep tool ID/name and bounded `partialResult` text and image markers. Codex updates append deltas; Pi updates replace the partial-result snapshot. |
 | `tool_execution_end` | Active tool removal and SQLite output preview | Keep tool ID/name/error. Render text and image markers, discard native details and image bytes, and retain at most 20,001 text characters. The extra character lets the supervisor apply its existing 20,000-character truncation notice. |
 | `queue_update` | Counts for dispatch acknowledgement and queue state | Replace queued message bodies with null entries, preserving both array lengths. |
 | Retry, compaction and core errors | Lifecycle flags, outcomes and failure text | Keep consumed status/error fields. A compaction result becomes a success boolean rather than another copy of its summary. |
 | `extension_ui_request` | Cancel interactive mobile dialogs | Keep method and request ID. |
-| Other root events | Invalidate in-flight state observations | Keep type only, including agent/turn boundaries, tool updates, native conversation replacements and unknown event types. |
+| Other root events | Invalidate in-flight state observations | Keep type only, including agent/turn boundaries, native conversation replacements and unknown event types. |
 | Successful `get_state` response | Activation, settings, dispatch, abort and recovery reconciliation | Omit unused `context` and `lastAssistantMessage` snapshots. Keep aggregate activity, child records, native identity, session path/name, model/effort, message counts, errors, unresolved command IDs and all other state fields. |
 | Other command responses | Pending RPC callers | Keep complete responses and errors. |
 | Root `context_update` | Canonical context capture and finalization | Keep complete event. |
@@ -35,12 +36,25 @@ Explicit `get_portable_conversation`, `get_entries`, `get_messages`, `get_core_c
 
 Pi child settlement, automatic result delivery and work receipts belong to the core tree. Ordinary Pi usage accounting runs in its native extension; Codex usage goes directly to its account broker. Fleet Pi workers account from root and child message events, so they must continue receiving the complete core wire. This projection belongs only in Remote's shared-session entrypoint, never inside `CoreJournal`, either core adapter, or the shared `openCoreSession` factory.
 
+## Live progress
+
+Remote tracks reasoning activity separately from reasoning text. `thinking_start` makes the thread THINKING even when the provider supplies no summary. `thinking_end`, response text and tool starts close that activity. The transcript shows a running status independently of Markdown. Empty completed thinking blocks are omitted from the shared display document and browser cards; actual textual summaries remain visible. Native and portable history are not rewritten.
+
+`get_state.live` restores current text, thinking activity and active tool IDs/names/arguments after reconnect. The supervisor applies it only when no newer runtime event has crossed the state-query fence. Busy native work without a known active item displays WORKING. It does not turn completed reasoning history into current thinking.
+
+The supervisor retains tool previews until canonical context supplies the tool result. It overlays missing calls and results in the display document, never the editable model context. Browser reloads receive the same display snapshot. Supervisor handoff retains the preview and activity; active calls without a retained preview recover their arguments from the supervisor's `tool_start` ledger. A state snapshot without a start time is labelled Observed. Active tool cards remain visible outside collapsed detail groups, including while another item is thinking.
+
+Live output is a bounded preview, retaining up to 20,000 characters. A dropped output delta cannot be reconstructed from an empty state snapshot. The retained native transcript and completed result remain the sources for full output. An already-running worker using the preceding wire projection must finish before new tool-update forwarding takes effect; Remote does not interrupt or resend its turn.
+
+The STP Superconductor Theory incident, thread `403df198-44ef-4da5-8ea6-3625198b6f80`, supplied [`codex-live-progress.json`](../server/fixtures/codex-live-progress.json). It contains one empty completed reasoning item and the start, two output deltas and completion of `exec-549c7248-2a85-4f08-b4a2-9342691b530b`, copied from that thread's native activity journal on September 13. No reasoning text was present. The fixture contains the research command and its output, not the thread's personal context.
+
 ## Regression checks
 
 From the repository root:
 
 ```sh
-bun test apps/remote/server/runtime-wire.test.ts
+bun test apps/remote/server/runtime-wire.test.ts apps/remote/server/tool-progress.test.ts apps/remote/server/context-display.test.ts apps/remote/web/live-activity.test.ts apps/remote/web/context-progress.test.ts apps/remote/web/transcript-groups.test.ts
+bun test apps/remote/server/server.integration.test.ts -t 'native.*progress|native active-item|thinking|publishes live model text'
 ```
 
 The tests cover a child burst that never reaches the output callback, linear root deltas despite multi-megabyte partial snapshots, bounded tool previews, unchanged finalization keys, lifecycle fields, complete inspection responses, and full root/child journal retention before projection. They make no provider calls.

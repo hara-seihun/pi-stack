@@ -12,6 +12,7 @@ export function groupTranscriptEntries(entries: ContextEntry[]): TranscriptItem[
   const items: TranscriptItem[] = [];
 
   for (const entry of entries) {
+    if (entry.kind === "thinking" && !entry.text?.trim()) continue;
     if (staysVisible(entry)) {
       items.push({ kind: "message", key: entry.key, entry });
       continue;
