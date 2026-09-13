@@ -42,6 +42,10 @@ External Codex app-server processes acquire their account through [`openCoreAcco
 
 The [Codex compaction extension](../runtime/extensions/codex-compaction/README.md) submits its server request through the routing extension's [`pi-stack:provider-operation` broker](src/extension/provider-operation.ts). The broker resolves shared OAuth, repairs a refused token once, owns request leases and records usage through the same function as ordinary assistant messages. Interactive rate limits can select another eligible account without changing the model. Fleet operations stay on the scheduler-assigned account. A three-minute signal bounds the operation, and shutdown cancels pending requests before closing the ledger. Native compaction usage is not counted again when Pi persists its entry. Pi owns the compaction boundary, stored checkpoint and continuation; the broker does not start another agent.
 
+## Image inputs
+
+Anthropic requests use [reusable Files API references](docs/anthropic-files.md) instead of resending image bytes on every turn. The provider wrapper preserves original session images and owns account-scoped upload reuse.
+
 ## Image generation
 
 The routing extension provides a native [`image_generation` tool](docs/image-generation.md) when an OpenAI account is connected. It works from any chat model, defaults to Image 2.5 Flare, and also supports Image 2.5 Sunburst and image editing. Shared requests use the existing account registry, OAuth lock and leases. Pi saves a PNG and returns an image preview.
