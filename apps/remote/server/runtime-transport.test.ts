@@ -123,6 +123,40 @@ describe("runtime host identity", () => {
     }
   });
 
+  test("replaces an unresponsive connection without resending accepted commands", async () => {
+    const root = mkdtempSync(join(tmpdir(), "pi-runtime-reconnect-"));
+    roots.push(root);
+    const path = join(root, "host.sock");
+    const cursors: number[] = [];
+    const commands: string[] = [];
+    const delivered: string[] = [];
+    const server = createServer(socket => {
+      createInterface({ input: socket }).on("line", line => {
+        const value = JSON.parse(line);
+        if (value.type === "attach") {
+          cursors.push(value.after);
+          socket.write(JSON.stringify({type: "attached", pid: process.pid, shared: true}) + "\n");
+          socket.write(JSON.stringify({type: "output", sequence: cursors.length, line: String(cursors.length)}) + "\n");
+        } else if (value.type === "command") commands.push(value.value.type);
+        else if (value.type === "terminate") socket.end('{"type":"exit","code":0}\n');
+      });
+    });
+    await new Promise<void>(resolve => server.listen(path, resolve));
+    try {
+      const host = await attachRuntimeHost(path, line => delivered.push(line));
+      transports.push(host);
+      host.send({type: "prompt"});
+      for (let i = 0; i < 100 && commands.length === 0; i++) await Bun.sleep(5);
+      host.reconnect();
+      for (let i = 0; i < 100 && delivered.length < 2; i++) await Bun.sleep(5);
+      expect(cursors).toEqual([0, 1]);
+      expect(delivered).toEqual(["1", "2"]);
+      expect(commands).toEqual(["prompt"]);
+      await host.terminate();
+      transports.splice(transports.indexOf(host), 1);
+    } finally { await new Promise<void>(resolve => server.close(() => resolve())); }
+  });
+
   test("includes a launch identity in generated paths", () => {
     const first = runtimeSocketPath("/state", "thread", "first");
     const second = runtimeSocketPath("/state", "thread", "second");

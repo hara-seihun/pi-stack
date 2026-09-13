@@ -229,6 +229,8 @@ const pendingHandoff = loadHandoff();
 beginSupervisorGeneration(db, SUPERVISOR_EPOCH, new Set(pendingHandoff.map((item) => item.sessionId)));
 
 interface Runtime {
+  readonly sessionId: string;
+  observation: "current" | "unreachable";
   core?: CoreId;
   transport: RuntimeTransport | null;
   startupAbort: AbortController;
@@ -881,6 +883,7 @@ function sessionActivity(row: any): Session["activity"] {
     : row.state === "QUEUED" || rt?.phase === "WAITING" ? "QUEUED"
     : rt?.phase === "STARTING" || row.state === "STARTING" ? "STARTING"
     : rt?.phase === "ABORTING" || rt?.phase === "STOPPING" || row.state === "ABORTING" ? "ABORTING"
+    : rt?.observation === "unreachable" ? "RECONNECTING"
     : rt?.compacting ? "COMPACTING"
     : rt?.retrying ? "RETRYING"
     : rt?.phase === "RUNNING" && rt.activeTools.size ? "WAITING_ON_TOOL"
@@ -1063,6 +1066,11 @@ function rpc(rt: Runtime, type: string, body: Record<string, unknown> = {}, time
   const promise = new Promise((resolve, reject) => {
     const timer = timeoutMs > 0 ? setTimeout(() => {
       rt.pending.delete(id);
+      if (type === "get_state" && runtimes.get(rt.sessionId) === rt && !rt.expectedExit) {
+        rt.observation = "unreachable";
+        rt.transport?.reconnect();
+        touchSession(rt.sessionId);
+      }
       reject(new RpcTimeoutError(type));
     }, timeoutMs) : undefined;
     rt.pending.set(id, { resolve, reject, timer });
@@ -1083,6 +1091,10 @@ function handleRpcEvent(sessionId: string, rt: Runtime, event: any) {
     if (pending) {
       clearTimeout(pending.timer);
       rt.pending.delete(event.id);
+      if (event.success && event.command === "get_state" && rt.observation === "unreachable") {
+        rt.observation = "current";
+        touchSession(sessionId);
+      }
       event.success ? pending.resolve(event.data ?? {}) : pending.reject(new CoreCommandError(event.error ?? "Core command failed"));
     }
     return;
@@ -1097,10 +1109,7 @@ function handleRpcEvent(sessionId: string, rt: Runtime, event: any) {
     touchSession(sessionId);
     return;
   }
-  if (event.type === "core_child_event") {
-    emit(sessionId, "core_child_event", { agentId: event.agentId, event: event.event });
-    return;
-  }
+  if (event.type === "core_child_event") return;
   if (event.type === "context_update") {
     const last = event.context?.messages?.findLast((message: any) => message.role === "assistant");
     storeContextCapture(sessionId, { context: event.context,
@@ -1365,6 +1374,8 @@ async function reconcileRuntimeState(sessionId: string, rt: Runtime): Promise<an
 
 function runtimeFromHandoff(row: any, handoff?: RuntimeHandoff, initialPhase: RuntimePhase = "STARTING"): Runtime {
   return {
+    sessionId: row.id,
+    observation: handoff ? "unreachable" : "current",
     transport: null,
     startupAbort: new AbortController(),
     pending: new Map(),

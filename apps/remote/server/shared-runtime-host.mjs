@@ -1,9 +1,10 @@
 import { AsyncLocalStorage } from 'node:async_hooks';
 import { createServer } from 'node:net';
-import { appendFileSync, closeSync, createReadStream, existsSync, openSync, truncateSync, unlinkSync } from 'node:fs';
+import { unlinkSync } from 'node:fs';
 import { createInterface } from 'node:readline';
 import { basename, dirname, join } from 'node:path';
 import { underMemoryPressure } from './shared-runtime-memory.mjs';
+import { RuntimeOutput } from './runtime-output.mjs';
 
 const [controlPath] = process.argv.slice(2);
 if (!controlPath) throw new Error('shared-runtime-host requires its control socket');
@@ -42,36 +43,16 @@ async function open(options) {
   // Idempotent session addresses can survive a dead owner. Our kernel lease
   // proves no live runner owns this generation before reclaiming its files.
   for (const path of [socketPath, spoolPath]) { try { unlinkSync(path); } catch (error) { if (error.code !== 'ENOENT') throw error; } }
-  const fd = openSync(spoolPath, 'ax', 0o600);
-  let client = null, sequence = 0, acknowledged = 0, closed = false, replaying = false, adapter;
+  const output = new RuntimeOutput(spoolPath);
+  let client = null, closed = false, adapter;
   const channel = createServer(socket => {
     client?.destroy(); client = socket; socket.setNoDelay(true);
     lines(socket, value => {
       if (value.type === 'attach') {
-        replaying = true;
-        reply(socket, {type: 'attached', pid: process.pid, shared: true, sequence});
-        // Spool replay is streamed, not retained as an unbounded in-memory queue.
-        void (async () => {
-          let after = Math.max(acknowledged, Number(value.after || 0));
-          do {
-            const reader = createInterface({input: createReadStream(spoolPath), crlfDelay: Infinity});
-            for await (const line of reader) {
-              if (!socket.writable || closed || client !== socket) break;
-              const event = JSON.parse(line);
-              if (event.sequence > after) {
-                if (!socket.write(JSON.stringify(event) + '\n')) await new Promise(resolve => {
-                  const done = () => { socket.off('drain', done); socket.off('close', done); resolve(); };
-                  socket.once('drain', done); socket.once('close', done);
-                });
-                after = event.sequence;
-              }
-            }
-          } while (socket.writable && !closed && client === socket && after < sequence);
-          if (client === socket) replaying = false;
-        })().catch(error => { if (!closed) console.error('Runner replay:', error); });
+        reply(socket, {type: 'attached', pid: process.pid, shared: true, sequence: output.sequence});
+        output.attach(socket, Number(value.after || 0));
       } else if (value.type === 'ack') {
-        acknowledged = Math.max(acknowledged, Number(value.sequence || 0));
-        if (!replaying && acknowledged === sequence) truncateSync(spoolPath, 0);
+        output.acknowledge(Number(value.sequence));
       } else if (value.type === 'command') {
         // Initialization is shared with all commands, but prompts themselves
         // acknowledge preflight and continue asynchronously in their own session.
@@ -82,16 +63,13 @@ async function open(options) {
   });
   function publish(value) {
     if (closed) return;
-    const record = {type:'output', sequence:++sequence, line:JSON.stringify(value)};
-    appendFileSync(fd, JSON.stringify(record) + '\n');
-    if (client?.writableLength > 4 * 1024 * 1024) { client.destroy(); client = null; }
-    if (!replaying) reply(client ?? {}, record);
+    output.publish(value);
   }
   function finish(code = 0) {
     if (closed) return;
     closed = true;
     reply(client ?? {}, {type:'exit',code}); client?.end(); channel.close();
-    closeSync(fd);
+    output.close();
     for (const path of [socketPath,spoolPath]) { try { unlinkSync(path); } catch {} }
     sessions.delete(socketPath);
     if (!sessions.size && !stopping) idleTimer = setTimeout(() => void stop(), 5000);
