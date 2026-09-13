@@ -4,14 +4,20 @@ import { tmpdir } from 'node:os';
 import { dirname, join, resolve, relative } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
-const version = execFileSync('codex', ['--version'], { encoding: 'utf8' }).trim();
-if (version !== 'codex-cli 0.146.0') throw new Error(`Expected codex-cli 0.146.0, got ${version}`);
+const packagePath = fileURLToPath(import.meta.resolve('@openai/codex/package.json'));
+const binary = join(dirname(packagePath), 'bin', 'codex.js');
+const manifest = JSON.parse(readFileSync(new URL('../../package.json', import.meta.url), 'utf8'));
+const runtime = JSON.parse(readFileSync(new URL('../../../runtime/package.json', import.meta.url), 'utf8'));
+const pinned = manifest.dependencies['@openai/codex'];
+if (runtime.dependencies['@openai/codex'] !== pinned) throw new Error('Runtime and Orchestrator must pin the same Codex version');
+const version = execFileSync(process.execPath, [binary, '--version'], { encoding: 'utf8' }).trim();
+if (version !== `codex-cli ${pinned}`) throw new Error(`Expected codex-cli ${pinned}, got ${version}`);
 const source = mkdtempSync(join(tmpdir(), 'codex-protocol-'));
 const destination = join(dirname(fileURLToPath(import.meta.url)), 'codex-protocol');
 const roots = ['ThreadItem', 'Thread', 'Model', 'ThreadStartResponse', 'ThreadSettings', 'UserInput', 'SkillsListResponse', 'ThreadTokenUsage'];
 const seen = new Set();
 try {
-  execFileSync('codex', ['app-server', 'generate-ts', '--experimental', '--out', source]);
+  execFileSync(process.execPath, [binary, 'app-server', 'generate-ts', '--experimental', '--out', source]);
   rmSync(destination, { recursive: true, force: true });
   const copy = file => {
     if (seen.has(file)) return;
