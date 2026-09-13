@@ -25,6 +25,7 @@ public class MainActivity extends BridgeActivity {
     public void onResume() {
         super.onResume();
         ThreadNotifications.resume(this, true);
+        if (bridge != null) bridge.triggerWindowJSEvent("pi-app-foreground");
     }
 
     @Override

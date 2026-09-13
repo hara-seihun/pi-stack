@@ -160,6 +160,11 @@ button:disabled { cursor: default; opacity: .45; }
 .environment-control.failed { color: var(--danger); }
 .environment-control label { color: var(--muted); font-size: 10px; font-weight: 800; letter-spacing: .04em; text-transform: uppercase; }
 .environment-control select { min-width: 0; flex: 1; height: 30px; padding: 0 8px; border: 1px solid var(--border); border-radius: 0; color: var(--text); background: var(--surface-2); font: 750 11px/1 sans-serif; }
+.app-update { min-width: 0; display: grid; gap: 6px; padding: 8px; border: 1px solid var(--border); background: var(--bg); }
+.app-update p { margin: 0; overflow-wrap: anywhere; font-size: 11px; line-height: 1.35; }
+.app-update-detail { color: var(--muted); }
+.app-update-error { color: var(--danger); }
+.app-update button { min-height: 34px; padding: 6px 10px; color: var(--bg); background: var(--accent); font-size: 12px; font-weight: 800; }
 .plan-summary, .usage-summary { min-width: 0; font-size: 11px; font-weight: 750; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 .plan-summary { display: grid; gap: 3px; }
 .capacity-row { min-width: 0; display: grid; grid-template-columns: 14px minmax(46px, 1fr) minmax(18px, auto) auto auto; align-items: center; gap: 7px; font-variant-numeric: tabular-nums; }

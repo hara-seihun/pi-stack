@@ -145,6 +145,22 @@ CI runs the same gate from a persistent self-hosted checkout. Deployment does no
 
 ## Kenan
 
+The publication worker also distributes Android updates. After the checked source is integrated and both hosts are deployed, it publishes the APK built on GMKtec to both hosts and verifies the manifest and downloaded bytes through each front door. A release is unfinished if either app download fails. The native client compares the published version code with its installed package and shows Update app only for a newer build.
+
+[`deploy/android-update`](../deploy/android-update) owns artifact preparation, atomic installation and download verification. `apps/kenan/release-info.mjs` supplies the Git revision, application id and monotonic version code. The APK contains that identity at `assets/app-release.json`; preparation checks it against the source and Android package metadata, then records its SHA-256 and byte count. GMKtec is the only APK producer, using the existing Android signing key and host-owned endpoint configuration. Both hosts receive identical bytes. These APKs contain the app's endpoint configuration and forwarding identity, so they stay on the private Pi Remote hosts, never in public GitHub assets.
+
+Each host stores packages in `/var/lib/pi-remote/app-updates/releases/<revision>/`, with `current` selecting the manifest atomically. The installer retains three generations. `PI_REMOTE_APP_UPDATES_DIR` selects a separate root for a rehearsal. The router serves `GET /v1/app-update` and `GET /v1/app-update/<revision>.apk` before person selection or unlock. Missing initial publication returns `release: null`; a broken manifest or package reports an error.
+
+Publication receipts keep the app manifest and each host's verified hash. Failed requests retain their staged APK under the request's proof directory. Successful requests remove that staging copy after both hosts own it. Converge's transfer directory is `/home/kenan/.cache/pi-stack-app-updates/<request>` and is removed after verification. Normal releases build and distribute this automatically through `deploy/publication submit SHA`.
+
+For an artifact repair using an already built, clean source checkout:
+
+```bash
+deploy/android-update prepare /absolute/private/artifact-directory
+sudo deploy/android-update install /absolute/private/artifact-directory
+deploy/android-update verify /absolute/private/artifact-directory/manifest.json
+```
+
 The Android app embeds its endpoint list from a JSON file named in `apps/kenan/android/local.properties`, which is not committed; see [the Kenan README](../apps/kenan/README.md#build-configuration). An SSH endpoint's account must allow local forwarding only to the front door's port. The browser client instead asks the host it was served from for its environment list, declared once as `environments` in `/etc/pi-stack/host.json`.
 
 ## Release verification

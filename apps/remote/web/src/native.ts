@@ -2,6 +2,10 @@ import { API } from "../../server/api";
 import { abortable, deadline } from "./abortable";
 
 interface EnvironmentChoice { id: string; name: string }
+export interface AppRelease { revision: string; versionCode: number }
+export interface InstalledApp { revision: string; versionCode: number; applicationId: string }
+export interface AppUpdateCheck { release: AppRelease | null; installed: InstalledApp }
+export interface AppUpdateInstall { status: "installer-opened" }
 interface EnvironmentState {
   id: string;
   name: string;
@@ -18,6 +22,8 @@ interface RemoteBridge {
   notifications?(options: { user: string; request: boolean }): Promise<{ enabled: boolean }>;
   notificationTarget?(): Promise<{ environment?: string; sessionId?: string; user?: string }>;
   notificationThread?(options: { user: string; environment: string; sessionId: string }): Promise<void>;
+  checkAppUpdate?(): Promise<AppUpdateCheck>;
+  installAppUpdate?(): Promise<AppUpdateInstall>;
 }
 
 const capacitor = window.Capacitor;
@@ -65,6 +71,8 @@ const remote: RemoteBridge = !nativePlatform
         notifications: (options) => capacitor.nativePromise("KenanRemote", "notifications", options),
         notificationTarget: () => capacitor.nativePromise("KenanRemote", "notificationTarget", {}),
         notificationThread: (options) => capacitor.nativePromise("KenanRemote", "notificationThread", options),
+        checkAppUpdate: () => capacitor.nativePromise("KenanRemote", "checkAppUpdate", {}),
+        installAppUpdate: () => capacitor.nativePromise("KenanRemote", "installAppUpdate", {}),
       };
 export { nativePlatform, remote, browserFetch, loadBrowserEnvironments };
 

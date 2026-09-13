@@ -39,7 +39,19 @@ Build and test with:
 npm run android:test --workspace=kenan
 ```
 
-## Deploy
+## In-app updates
+
+Kenan checks the selected native environment's `GET /v1/app-update` when the app opens or returns to the foreground. The drawer shows **Update app** only when the published `versionCode` is greater than the installed one. Browser clients do not show Android updates. Check failures offer a retry instead of implying that a new APK exists.
+
+Tapping **Update app** fetches the current manifest again, downloads `/v1/app-update/<revision>.apk` through the same native transport, and opens Android's install confirmation. The first installation may open Android's "Allow from this source" setting for Kenan. Enable it and return to Kenan to continue. Cancelling or denying installation leaves the checked APK in private app storage, so retrying the same release does not download it again. A failed check or download reports the problem in the drawer. The app accepts at most 100 MiB and bounds the download to three minutes, with seven-second network read timeouts. It verifies the exact size, SHA-256, package ID, version code, and the installed app's signing certificate before opening the installer through FileProvider.
+
+The publisher serves identical APK bytes on both hosts, without requiring a person selection or unlock. Future releases use this button, not APK links in chat. [`../../deploy/android-update`](../../deploy/android-update) owns publication and retention.
+
+[`release-info.mjs`](release-info.mjs) is the build and publisher identity source. `node apps/kenan/release-info.mjs` prints `{ revision, versionCode, applicationId }` for the current checkout. It requires complete Git history and computes `versionCode` as `1000 + git rev-list --count HEAD`. Publish from integrated main so the count increases. Gradle embeds that identity in `BuildConfig` and `assets/app-release.json`. Keep the existing signing key; changing it prevents Android from updating the installed app in place.
+
+## First install and ADB deployment
+
+Routine releases use in-app updates. An authorized ADB connection can install the first update-capable APK or recover an installation:
 
 ```sh
 apps/kenan/deploy
@@ -54,6 +66,6 @@ apps/kenan/deploy
 
 The selected endpoint lives in `${XDG_CACHE_HOME:-$HOME/.cache}/pi-remote/android-adb-endpoint`. ADB starts from that directory so its persistent daemon cannot keep a task checkout referenced. Automatic discovery selects `PI_REMOTE_ANDROID_MODEL`, defaulting to ADB's `Pixel_7` model name. An explicit endpoint takes precedence. Unpaired devices require Android's pairing flow, and discovery across networks requires an explicit reachable endpoint.
 
-The drawer footer shows the Git revision compiled into the shared client, so an installed app can be distinguished from a newer server release even when the Android package version is unchanged.
+The drawer footer shows the Git revision compiled into the shared client. Android's update comparison uses the native package version code, not the revision of a web page served by a newer host.
 
 The deployment tests and builds the APK, verifies its package id, version, and label, updates Kenan in place, launches it, and removes the former side-by-side development package if it is installed.

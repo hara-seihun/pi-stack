@@ -4,6 +4,13 @@ import android.util.Log;
 import android.Manifest;
 import android.content.Intent;
 import android.os.Build;
+import android.net.Uri;
+import android.provider.Settings;
+import androidx.activity.result.ActivityResult;
+import androidx.core.content.FileProvider;
+import com.getcapacitor.annotation.ActivityCallback;
+import java.io.File;
+import java.util.concurrent.atomic.AtomicBoolean;
 import com.getcapacitor.PermissionState;
 import com.getcapacitor.annotation.Permission;
 import com.getcapacitor.annotation.PermissionCallback;
@@ -28,11 +35,15 @@ public final class KenanRemotePlugin extends Plugin {
         return thread;
     });
     private final ExecutorService warmingExecutor = Executors.newCachedThreadPool();
+    private final ExecutorService updateExecutor = Executors.newSingleThreadExecutor();
+    private final AtomicBoolean installingUpdate = new AtomicBoolean();
     private RemoteEnvironment environments;
+    private AppUpdates appUpdates;
 
     @Override
     public void load() {
         environments = new RemoteEnvironment(getContext().getApplicationContext());
+        appUpdates = new AppUpdates(getContext().getApplicationContext());
         for (RemoteEnvironment.Endpoint endpoint : environments.all()) warmingExecutor.execute(() -> {
             try {
                 RemoteConnections.forEndpoint(endpoint).prepare(endpoint);
@@ -59,6 +70,82 @@ public final class KenanRemotePlugin extends Plugin {
                 call.reject(failure.getMessage(), failure);
             }
         });
+    }
+
+    @PluginMethod
+    public void checkAppUpdate(PluginCall call) {
+        RemoteEnvironment.Endpoint endpoint = environments.current();
+        updateExecutor.execute(() -> {
+            try {
+                AppUpdates.Release release = appUpdates.check(endpoint);
+                JSObject result = new JSObject().put("installed", new JSObject()
+                    .put("revision", BuildConfig.RELEASE_REVISION)
+                    .put("versionCode", BuildConfig.VERSION_CODE)
+                    .put("applicationId", BuildConfig.APPLICATION_ID));
+                result.put("release", release == null ? org.json.JSONObject.NULL : new JSObject()
+                    .put("revision", release.revision).put("versionCode", release.versionCode));
+                call.resolve(result);
+            } catch (Exception failure) {
+                call.reject("Could not check for an app update. " + failure.getMessage(), failure);
+            }
+        });
+    }
+
+    @PluginMethod
+    public void installAppUpdate(PluginCall call) {
+        if (!installingUpdate.compareAndSet(false, true)) {
+            call.reject("An app update is already in progress. Return from Android settings or the installer first.");
+            return;
+        }
+        RemoteEnvironment.Endpoint endpoint = environments.current();
+        updateExecutor.execute(() -> {
+            try {
+                File apk = appUpdates.downloadCurrent(endpoint);
+                call.getData().put("updateRevision", apk.getName().replace(".apk", ""));
+                getActivity().runOnUiThread(() -> {
+                    try {
+                        if (Build.VERSION.SDK_INT >= 26 && !getContext().getPackageManager().canRequestPackageInstalls()) {
+                            Intent settings = new Intent(Settings.ACTION_MANAGE_UNKNOWN_APP_SOURCES,
+                                Uri.parse("package:" + getContext().getPackageName()));
+                            startActivityForResult(call, settings, "appInstallPermission");
+                        } else openAppInstaller(call, apk);
+                    } catch (Exception failure) { failAppInstall(call, failure); }
+                });
+            } catch (Exception failure) { failAppInstall(call, failure); }
+        });
+    }
+
+    @ActivityCallback
+    private void appInstallPermission(PluginCall call, ActivityResult result) {
+        if (call == null) {
+            installingUpdate.set(false);
+            return;
+        }
+        if (Build.VERSION.SDK_INT >= 26 && !getContext().getPackageManager().canRequestPackageInstalls()) {
+            installingUpdate.set(false);
+            call.reject("Allow installs from Kenan in Android settings, then tap Update app again. The downloaded APK is saved.");
+            return;
+        }
+        try { openAppInstaller(call, appUpdates.downloadedFile(call.getString("updateRevision"))); }
+        catch (Exception failure) { failAppInstall(call, failure); }
+    }
+
+    private void openAppInstaller(PluginCall call, File apk) throws java.io.IOException {
+        if (!apk.isFile()) throw new java.io.IOException("The saved APK is unavailable. Tap Update app to download it again.");
+        Uri uri = FileProvider.getUriForFile(getContext(), BuildConfig.APPLICATION_ID + ".fileprovider", apk);
+        Intent installer = new Intent(Intent.ACTION_VIEW)
+            .setDataAndType(uri, "application/vnd.android.package-archive")
+            .addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION);
+        installer.setClipData(android.content.ClipData.newRawUri("Kenan update", uri));
+        getActivity().startActivity(installer);
+        installingUpdate.set(false);
+        call.resolve(new JSObject().put("status", "installer-opened"));
+    }
+
+    private void failAppInstall(PluginCall call, Exception failure) {
+        installingUpdate.set(false);
+        call.reject("Could not open the app update. " + failure.getMessage()
+            + " Retry Update app. A checked download is kept until installation.", failure);
     }
 
     @PluginMethod
@@ -159,5 +246,6 @@ public final class KenanRemotePlugin extends Plugin {
     protected void handleOnDestroy() {
         transportExecutor.shutdownNow();
         warmingExecutor.shutdownNow();
+        updateExecutor.shutdownNow();
     }
 }
