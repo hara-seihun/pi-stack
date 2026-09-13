@@ -319,9 +319,9 @@ function noticeBody(request) {
     request.integrationSha ? `Integration: ${request.integrationSha}` : undefined,
     `Step: ${request.step}`,
     `Status: ${request.status}`,
-    request.failure ? `Failure: ${request.failure.message}` : request.blocker?.reason,
+    request.status === "failed" ? `Failure: ${request.failure.message}` : request.status === "blocked" ? request.blocker?.reason : undefined,
     `Receipt: ${requestPath(request.requestId)}`,
-    `Log: ${request.failure?.log ?? request.blocker?.log ?? request.finalProof?.path}`,
+    `Log: ${request.status === "failed" ? request.failure?.log : request.status === "blocked" ? request.blocker?.log : request.finalProof?.path}`,
     request.failure?.command ? `Command: ${request.failure.command}` : undefined,
     request.failure?.excerpt,
     request.status === "failed" ? `Repair source defects in a new commit and submit that commit. Retry ${request.requestId} only after repairing an infrastructure failure of the unchanged source.` : undefined,
@@ -338,8 +338,9 @@ function validateReporter(reporter) {
 
 function requesterFromEnvironment() {
   const url = process.env.PI_STACK_PUBLICATION_REPORT_URL ?? process.env.PI_REMOTE_SERVER_URL;
-  const sessionId = process.env.PI_STACK_PUBLICATION_REPORT_SESSION ?? process.env.PI_REMOTE_SESSION_ID
-    ?? process.env.PI_SESSION_FILE?.match(/\/core-sessions\/([0-9a-f-]{36})\//i)?.[1];
+  const sessionId = process.env.PI_STACK_PUBLICATION_REPORT_SESSION
+    ?? process.env.PI_SESSION_FILE?.match(/\/core-sessions\/([0-9a-f-]{36})\//i)?.[1]
+    ?? process.env.PI_REMOTE_SESSION_ID;
   if (!url && !sessionId) return null;
   if (!url || !sessionId) throw new Error("Cannot identify publication requester; set PI_STACK_PUBLICATION_REPORT_URL and PI_STACK_PUBLICATION_REPORT_SESSION");
   return validateReporter({ url, sessionId });
