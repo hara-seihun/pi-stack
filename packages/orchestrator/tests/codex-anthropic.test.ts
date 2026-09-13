@@ -30,6 +30,22 @@ async function readEvents(response: Response): Promise<Record<string, any>[]> {
 }
 
 describe("Codex Anthropic Responses adapter", () => {
+  it("places resumed instruction updates before the assistant they govern", () => {
+    const {payload}=translateAnthropicRequest(request([
+      {role:"user",content:"first"},
+      {role:"assistant",content:"response"},
+      {role:"developer",content:"updated instructions"},
+      {role:"user",content:"continue"},
+      {role:"assistant",content:"continued"},
+      {role:"developer",content:"latest instructions"},
+      {role:"user",content:"next"},
+    ]));
+    const messages=payload.messages as any[];
+    expect(messages.map(message=>message.role)).toEqual(["user","assistant","user","system","assistant","user","system"]);
+    expect(messages[3].content[0].text).toBe("updated instructions");
+    expect(messages[6].content[0].text).toBe("latest instructions");
+    expect((payload.system as any[]).length).toBe(1);
+  });
   it("keeps Codex's prompt, fingerprints via the subscription package, and emits usage once", async () => {
     const originalFetch = globalThis.fetch;
     const upstream = vi.fn(async () => stream(textEvents()));

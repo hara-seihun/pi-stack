@@ -172,7 +172,8 @@ export async function runCoreWorker(run: Run, options: CoreSessionOptions, open:
     // The durable fleet control, not that native status, owns cancellation intent.
     if (interrupted) aborting = Boolean((await request(`${root}/control`)).abort);
     const active = current.coreBusy || current.isStreaming || current.isCompacting || current.pendingMessageCount > 0 || current.agents?.some((agent: Json) => agent.state === "running");
-    if (!aborting && !active && (!recovered || !current.lastAssistantMessage || !current.treeComplete || interrupted)) {
+    const repairing = run.result === "recovering the recorded core session after infrastructure repair";
+    if (!aborting && !active && (!recovered || !current.lastAssistantMessage || !current.treeComplete || interrupted || repairing)) {
       await wire.command("prompt", { ...(!recovered ? { id: `run:${run.id}:initial` } : {}),
         workId: !recovered ? `run:${run.id}:initial` : `run:${run.id}:continue:${current.nativeSessionId}:${current.messageCount}`,
         message: recovered

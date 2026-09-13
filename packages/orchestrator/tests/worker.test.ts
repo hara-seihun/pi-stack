@@ -33,6 +33,13 @@ function fixture(saved: Partial<Run> = {}) {
 afterEach(() => vi.restoreAllMocks());
 
 describe("core worker", () => {
+  it("continues the recorded failed session when infrastructure recovery explicitly requests it", async () => {
+    const f=fixture({nativeSessionId:"native-id",result:"recovering the recorded core session after infrastructure repair"});
+    f.state.lastAssistantMessage={...assistant,stopReason:"error",errorMessage:"request translation failed"};
+    await f.work();
+    expect(f.calls.some(call=>call.type==="prompt")).toBe(true);
+    expect(f.posts.at(-1)?.value.state).toBe("done");
+  });
   it("continues a native host interruption but respects durable operator cancellation", async () => {
     for (const abort of [false, true]) {
       const f = fixture({ nativeSessionId: "native-id" });

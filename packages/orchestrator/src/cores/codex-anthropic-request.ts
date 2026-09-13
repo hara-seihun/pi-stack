@@ -180,6 +180,22 @@ export function translateAnthropicRequest(raw: unknown): AnthropicRequest {
     }
   }
   if (!messages.length) throw new AnthropicAdapterError("At least one user message is required");
+  // Instruction updates govern the next assistant turn. The mid-conversation
+  // system API requires them immediately before that turn (or at history end),
+  // whereas Codex can insert them before the next user/tool-result message.
+  const ordered: typeof messages = [];
+  let pendingSystem: AnthropicBlock[] = [];
+  for (const message of messages) {
+    if (message.role === "system") { pendingSystem.push(...message.content); continue; }
+    if (message.role === "assistant" && pendingSystem.length) {
+      ordered.push({ role: "system", content: pendingSystem }); pendingSystem = [];
+    }
+    const last = ordered.at(-1);
+    if (last?.role === message.role) last.content.push(...message.content);
+    else ordered.push(message);
+  }
+  if (pendingSystem.length) ordered.push({ role: "system", content: pendingSystem });
+  messages.splice(0, messages.length, ...ordered);
   const maxTokens = request.max_output_tokens === undefined ? model.maxTokens : request.max_output_tokens;
   if (typeof maxTokens !== "number" || !Number.isSafeInteger(maxTokens) || maxTokens <= 0 || maxTokens > model.maxTokens) throw new AnthropicAdapterError(`max_output_tokens must be between 1 and ${model.maxTokens}`);
   const payload: JsonObject = { model: modelId, system, messages, max_tokens: maxTokens, stream: true };

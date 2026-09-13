@@ -368,7 +368,7 @@ export class Daemon {
       if(method==="POST"&&url.pathname.startsWith("/internal/runs/")){
         const parts=url.pathname.split("/"),id=parts[3]!,action=parts[4],input=await body(req);
         // A replay from a replaced worker must not mutate its successor.
-        const workerUnit=req.headers["x-pi-worker-unit"];
+        const workerUnit=req.headers?.["x-pi-worker-unit"];
         if(workerUnit&&workerUnit!==this.store.run(id)?.workerUnit)return json(res,200,{superseded:true});
         if(action==="heartbeat")return this.heartbeats.accept(id,input)?json(res,200,{ok:true}):json(res,404,{error:"run not found"});
         if(!this.store.run(id))return json(res,404,{error:"run not found"});
