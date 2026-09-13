@@ -58,6 +58,8 @@ npm run check
 
 The supported Pi peer is `@earendil-works/pi-coding-agent` 0.85.x. Tests run without account credentials or browser sessions.
 
+The Orchestrator pretest and Remote test setup run `patch-shared-rpc.mjs` to generate the shared RPC module from the installed Pi package. Generation uses atomic replacement and leaves unchanged output alone, so concurrent test processes cannot read a partially written module.
+
 To check thinking precedence against the deployed SDK and bundled RPC without making provider requests:
 
 ```sh

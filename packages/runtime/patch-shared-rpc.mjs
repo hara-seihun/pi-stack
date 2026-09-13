@@ -1,4 +1,5 @@
-import { readFileSync, writeFileSync } from 'node:fs';
+import { existsSync, readFileSync, renameSync, rmSync, writeFileSync } from 'node:fs';
+import { randomUUID } from 'node:crypto';
 import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
@@ -42,5 +43,11 @@ export function sharedRpcSource(source) {
 
 if (process.argv[1] === fileURLToPath(import.meta.url)) {
   const directory = join(process.argv[2], '@earendil-works/pi-coding-agent/dist/modes/rpc');
-  writeFileSync(join(directory, 'shared-rpc-mode.js'), sharedRpcSource(readFileSync(join(directory, 'rpc-mode.js'), 'utf8')));
+  const destination = join(directory, 'shared-rpc-mode.js');
+  const source = sharedRpcSource(readFileSync(join(directory, 'rpc-mode.js'), 'utf8'));
+  if (!existsSync(destination) || readFileSync(destination, 'utf8') !== source) {
+    const temporary = `${destination}.${randomUUID()}`;
+    try { writeFileSync(temporary, source); renameSync(temporary, destination); }
+    finally { rmSync(temporary, { force: true }); }
+  }
 }
