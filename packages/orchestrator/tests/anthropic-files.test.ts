@@ -1,4 +1,4 @@
-import { mkdtempSync, readdirSync, readFileSync, rmSync } from "node:fs";
+import { mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, expect, test, vi } from "vitest";
@@ -96,6 +96,20 @@ test("uploads each byte-identical image once and rewrites only Anthropic content
   ]);
 });
 
+test("validates and uploads a multi-megabyte base64 image without regex recursion", async () => {
+  const bytes = Buffer.alloc(3 * 1024 * 1024, 0xa5);
+  const fetcher = vi.fn(async (_input: string | URL | Request, init?: RequestInit) => {
+    const file = (init?.body as FormData).get("file") as File;
+    expect(file.size).toBe(bytes.byteLength);
+    return response({ id: "file_large", expires_at: EXPIRES_AT });
+  });
+
+  const result = await rewriteAnthropicImages(options(payload(image(bytes)), cacheRoot(), fetcher));
+
+  expect(result.ok && result.uploaded).toBe(1);
+  expect(fetcher).toHaveBeenCalledOnce();
+});
+
 test("reuses a durable mapping after direct metadata validation", async () => {
   const root = cacheRoot();
   const value = payload(image(Buffer.from("same image")));
@@ -143,27 +157,80 @@ test("reuploads a remotely missing file and replaces its durable mapping", async
   ]);
 });
 
-test("removes an expired local mapping before uploading its replacement", async () => {
+test("reuploads when direct metadata reports an expired file", async () => {
   const root = cacheRoot();
-  const value = payload(image(Buffer.from("expires")));
+  const value = payload(image(Buffer.from("metadata expired")));
   await rewriteAnthropicImages(options(
     value,
     root,
-    vi.fn(async () => response({ id: "file_expired", expires_at: new Date(NOW + 3_600_000).toISOString() })),
+    vi.fn(async () => response({ id: "file_expired", expires_at: EXPIRES_AT })),
   ));
+  const fetcher = vi.fn(async (_input: string | URL | Request, init?: RequestInit) => {
+    if (init?.method === "GET") {
+      return response({ id: "file_expired", expires_at: new Date(NOW - 86_400_000).toISOString() });
+    }
+    return response({ id: "file_fresh", expires_at: EXPIRES_AT });
+  });
+
+  const result = await rewriteAnthropicImages(options(value, root, fetcher));
+
+  expect(result.ok && result.uploaded).toBe(1);
+  if (!result.ok) return;
+  expect((result.value.messages[0]!.content[0] as any).source.file_id).toBe("file_fresh");
+  expect(fetcher.mock.calls.map((call: any[]) => call[1]?.method)).toEqual(["GET", "POST"]);
+});
+
+test("removes a near-expiry local mapping before metadata validation", async () => {
+  const root = cacheRoot();
+  const value = payload(image(Buffer.from("expires soon")));
+  await rewriteAnthropicImages(options(
+    value,
+    root,
+    vi.fn(async () => response({ id: "file_expiring", expires_at: EXPIRES_AT })),
+  ));
+  const cachePath = join(root, readdirSync(root).find(name => name.endsWith(".json"))!);
+  const stored = JSON.parse(readFileSync(cachePath, "utf8"));
+  Object.values(stored.files).forEach((entry: any) => { entry.expiresAt = NOW + 4 * 60_000; });
+  writeFileSync(cachePath, JSON.stringify(stored));
   const fetcher = vi.fn(async (_input: string | URL | Request, init?: RequestInit) => {
     expect(init?.method).toBe("POST");
     return response({ id: "file_fresh", expires_at: EXPIRES_AT });
   });
 
-  const result = await rewriteAnthropicImages(options(value, root, fetcher, { now: () => NOW + 3_600_001 }));
+  const result = await rewriteAnthropicImages(options(value, root, fetcher));
 
   expect(result.ok && result.uploaded).toBe(1);
-  expect(fetcher).toHaveBeenCalledTimes(1);
-  const stored = JSON.parse(readFileSync(join(root, readdirSync(root).find(name => name.endsWith(".json"))!), "utf8"));
-  expect(Object.values(stored.files)).toEqual([
+  expect(fetcher).toHaveBeenCalledOnce();
+  const updated = JSON.parse(readFileSync(cachePath, "utf8"));
+  expect(Object.values(updated.files)).toEqual([
     expect.objectContaining({ fileId: "file_fresh" }),
   ]);
+});
+
+test("reads the expiry clock after waiting for the cache lock", async () => {
+  const root = cacheRoot();
+  const value = payload(image(Buffer.from("lock wait")));
+  await rewriteAnthropicImages(options(
+    value,
+    root,
+    vi.fn(async () => response({ id: "file_waiting", expires_at: new Date(NOW + 10 * 60_000).toISOString() })),
+  ));
+  const cachePath = join(root, readdirSync(root).find(name => name.endsWith(".json"))!);
+  mkdirSync(`${cachePath}.lock`);
+  let clock = NOW;
+  const fetcher = vi.fn(async (_input: string | URL | Request, init?: RequestInit) => {
+    expect(init?.method).toBe("POST");
+    return response({ id: "file_after_wait", expires_at: EXPIRES_AT });
+  });
+
+  const pending = rewriteAnthropicImages(options(value, root, fetcher, { now: () => clock }));
+  await new Promise<void>(resolve => setImmediate(resolve));
+  clock = NOW + 6 * 60_000;
+  rmSync(`${cachePath}.lock`, { recursive: true });
+  const result = await pending;
+
+  expect(result.ok && result.uploaded).toBe(1);
+  expect(fetcher).toHaveBeenCalledOnce();
 });
 
 test("serializes concurrent callers so one upload owns a byte digest", async () => {
@@ -192,6 +259,34 @@ test("serializes concurrent callers so one upload owns a byte digest", async () 
   expect(second.ok && second.reused).toBe(1);
   expect(fetcher.mock.calls.filter((call: any[]) => call[1]?.method === "POST")).toHaveLength(1);
   expect(fetcher.mock.calls.filter((call: any[]) => call[1]?.method === "GET")).toHaveLength(1);
+});
+
+test("bounds concurrent image uploads", async () => {
+  const value = payload(...Array.from({ length: 5 }, (_, index) => image(Buffer.from(`upload-${index}`))));
+  let active = 0;
+  let maximum = 0;
+  let nextId = 0;
+  let release!: () => void;
+  const gate = new Promise<void>(resolve => { release = resolve; });
+  let fullBatch!: () => void;
+  const full = new Promise<void>(resolve => { fullBatch = resolve; });
+  const fetcher = vi.fn(async () => {
+    const id = `file_${nextId++}`;
+    active++;
+    maximum = Math.max(maximum, active);
+    if (active === 4) fullBatch();
+    await gate;
+    active--;
+    return response({ id, expires_at: EXPIRES_AT });
+  });
+
+  const pending = rewriteAnthropicImages(options(value, cacheRoot(), fetcher));
+  await full;
+  release();
+  const result = await pending;
+
+  expect(result.ok && result.uploaded).toBe(5);
+  expect(maximum).toBe(4);
 });
 
 test("bounds parallel direct metadata validation", async () => {

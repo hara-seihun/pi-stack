@@ -18,6 +18,8 @@ const DEFAULT_EXPIRY_SECONDS = 7_776_000;
 const MIN_EXPIRY_SECONDS = 3_600;
 const MAX_EXPIRY_SECONDS = 7_776_000;
 const METADATA_CONCURRENCY = 8;
+const UPLOAD_CONCURRENCY = 4;
+const FILE_LIFETIME_MARGIN_MS = 5 * 60_000;
 const IMAGE_MIME_TYPES = new Set(["image/gif", "image/jpeg", "image/png", "image/webp"]);
 
 export type AnthropicFilesFetch = (input: string | URL | Request, init?: RequestInit) => Promise<Response>;
@@ -132,17 +134,38 @@ function requestHeaders(input: HeadersInit): Result<Headers> {
   }
 }
 
+function base64Value(code: number): number {
+  if (code >= 65 && code <= 90) return code - 65;
+  if (code >= 97 && code <= 122) return code - 71;
+  if (code >= 48 && code <= 57) return code + 4;
+  if (code === 43) return 62;
+  if (code === 47) return 63;
+  return -1;
+}
+
+function isCanonicalBase64(data: string): boolean {
+  if (data.length === 0 || data.length % 4 !== 0) return false;
+  const padding = data.endsWith("==") ? 2 : data.endsWith("=") ? 1 : 0;
+  const contentLength = data.length - padding;
+  for (let index = 0; index < contentLength; index++) {
+    if (base64Value(data.charCodeAt(index)) < 0) return false;
+  }
+  for (let index = contentLength; index < data.length; index++) {
+    if (data.charCodeAt(index) !== 61) return false;
+  }
+  if (padding === 2 && (base64Value(data.charCodeAt(contentLength - 1)) & 15) !== 0) return false;
+  if (padding === 1 && (base64Value(data.charCodeAt(contentLength - 1)) & 3) !== 0) return false;
+  return true;
+}
+
 function decodeImage(data: string, mimeType: string): Result<SourceImage> {
   if (!IMAGE_MIME_TYPES.has(mimeType)) {
     return failure("invalid-image", `Anthropic Files does not support image media type ${mimeType}`);
   }
-  if (data.length === 0 || data.length % 4 !== 0 || !/^(?:[A-Za-z0-9+/]{4})*(?:[A-Za-z0-9+/]{2}==|[A-Za-z0-9+/]{3}=)?$/.test(data)) {
+  if (!isCanonicalBase64(data)) {
     return failure("invalid-image", "Anthropic image source contains invalid base64 data");
   }
   const bytes = Buffer.from(data, "base64");
-  if (bytes.toString("base64") !== data) {
-    return failure("invalid-image", "Anthropic image source contains non-canonical base64 data");
-  }
   return {
     ok: true,
     value: {
@@ -307,14 +330,14 @@ async function responseError(response: Response, operation: "metadata" | "upload
   };
 }
 
-function remoteFile(value: unknown, now: number): Result<RemoteFile> {
+function remoteFile(value: unknown, operation: "metadata" | "upload"): Result<RemoteFile> {
   const raw = object(value);
   if (typeof raw?.id !== "string" || raw.id.length === 0 || typeof raw.expires_at !== "string") {
-    return failure("invalid-response", "Anthropic Files response omitted id or expires_at");
+    return failure("invalid-response", "Anthropic Files response omitted id or expires_at", { operation });
   }
   const expiresAt = Date.parse(raw.expires_at);
-  if (!Number.isFinite(expiresAt) || expiresAt <= now) {
-    return failure("invalid-response", "Anthropic Files response contains an invalid or expired expires_at");
+  if (!Number.isFinite(expiresAt)) {
+    return failure("invalid-response", "Anthropic Files response contains an invalid expires_at", { operation });
   }
   return { ok: true, value: { fileId: raw.id, expiresAt } };
 }
@@ -325,7 +348,6 @@ async function fetchMetadata(
   headers: Headers,
   fetcher: AnthropicFilesFetch,
   signal: AbortSignal,
-  now: number,
 ): Promise<Result<RemoteFile | undefined>> {
   const url = new URL(`${endpoint.href.replace(/\/$/, "")}/${encodeURIComponent(fileId)}`);
   if (signal.aborted) return failure("cancelled", "Anthropic Files operation was cancelled", { operation: "metadata" });
@@ -341,7 +363,7 @@ async function fetchMetadata(
   let body: unknown;
   try { body = await response.json(); }
   catch (cause) { return failure("invalid-response", `Anthropic Files metadata response is not valid JSON: ${errorMessage(cause)}`, { operation: "metadata" }); }
-  return remoteFile(body, now);
+  return remoteFile(body, "metadata");
 }
 
 async function validateCachedFiles(
@@ -350,7 +372,7 @@ async function validateCachedFiles(
   headers: Headers,
   fetcher: AnthropicFilesFetch,
   signal: AbortSignal,
-  now: number,
+  minimumExpiresAt: number,
 ): Promise<Result<Map<string, CacheEntry>>> {
   const valid = new Map<string, CacheEntry>();
   for (let offset = 0; offset < files.length; offset += METADATA_CONCURRENCY) {
@@ -358,12 +380,12 @@ async function validateCachedFiles(
     const results = await Promise.all(batch.map(async ([digest, entry]) => ({
       digest,
       entry,
-      metadata: await fetchMetadata(endpoint, entry.fileId, headers, fetcher, signal, now),
+      metadata: await fetchMetadata(endpoint, entry.fileId, headers, fetcher, signal),
     })));
     for (const result of results) {
       if (!result.metadata.ok) return result.metadata;
       const metadata = result.metadata.value;
-      if (metadata === undefined || metadata.fileId !== result.entry.fileId) continue;
+      if (metadata === undefined || metadata.fileId !== result.entry.fileId || metadata.expiresAt <= minimumExpiresAt) continue;
       valid.set(result.digest, { ...result.entry, expiresAt: metadata.expiresAt });
     }
   }
@@ -382,7 +404,7 @@ async function uploadImage(
   fetcher: AnthropicFilesFetch,
   signal: AbortSignal,
   expiresInSeconds: number,
-  now: number,
+  minimumExpiresAt: number,
 ): Promise<Result<CacheEntry>> {
   const form = new FormData();
   form.append("file", new Blob([Uint8Array.from(image.bytes)], { type: image.mimeType }), `${image.digest}.${extension(image.mimeType)}`);
@@ -399,8 +421,11 @@ async function uploadImage(
   let body: unknown;
   try { body = await response.json(); }
   catch (cause) { return failure("invalid-response", `Anthropic Files upload response is not valid JSON: ${errorMessage(cause)}`, { operation: "upload" }); }
-  const file = remoteFile(body, now);
+  const file = remoteFile(body, "upload");
   if (!file.ok) return file;
+  if (file.value.expiresAt <= minimumExpiresAt) {
+    return failure("invalid-response", "Anthropic Files upload returned a file without enough remaining lifetime", { operation: "upload" });
+  }
   return {
     ok: true,
     value: {
@@ -430,7 +455,6 @@ export async function rewriteAnthropicImages<T>(options: AnthropicImagesOptions<
   if (collected.value.size === 0) return { ok: true, value: options.payload, uploaded: 0, reused: 0 };
 
   const now = options.now ?? Date.now;
-  const currentTime = now();
   const scopeKey = createHash("sha256").update(`${endpoint.value.href}\0${options.scope}`).digest("hex");
   const cachePath = join(options.cacheRoot, `${scopeKey}.json`);
   try {
@@ -448,11 +472,13 @@ export async function rewriteAnthropicImages<T>(options: AnthropicImagesOptions<
   }
 
   try {
+    const currentTime = now();
+    const minimumExpiresAt = currentTime + FILE_LIFETIME_MARGIN_MS;
     const cache = readCache(cachePath, scopeKey);
     if (!cache.ok) return cache;
     let changed = false;
     for (const [digest, entry] of Object.entries(cache.value.files)) {
-      if (entry.expiresAt <= currentTime) {
+      if (entry.expiresAt <= minimumExpiresAt) {
         delete cache.value.files[digest];
         changed = true;
       }
@@ -472,7 +498,7 @@ export async function rewriteAnthropicImages<T>(options: AnthropicImagesOptions<
       headers.value,
       options.fetch ?? globalThis.fetch,
       options.signal,
-      currentTime,
+      minimumExpiresAt,
     );
     if (!validated.ok) return validated;
 
@@ -492,22 +518,38 @@ export async function rewriteAnthropicImages<T>(options: AnthropicImagesOptions<
     }
 
     let uploaded = 0;
-    for (const [digest, image] of collected.value) {
-      if (cache.value.files[digest] !== undefined) continue;
-      const result = await uploadImage(
-        endpoint.value,
-        image,
-        headers.value,
-        options.fetch ?? globalThis.fetch,
-        options.signal,
-        expiry,
-        currentTime,
-      );
-      if (!result.ok) return result;
-      cache.value.files[digest] = result.value;
-      const saved = writeCache(cachePath, cache.value);
-      if (!saved.ok) return saved;
-      uploaded++;
+    const missing = [...collected.value]
+      .filter(([digest]) => cache.value.files[digest] === undefined);
+    for (let offset = 0; offset < missing.length; offset += UPLOAD_CONCURRENCY) {
+      const batch = missing.slice(offset, offset + UPLOAD_CONCURRENCY);
+      const results = await Promise.all(batch.map(async ([digest, image]) => ({
+        digest,
+        result: await uploadImage(
+          endpoint.value,
+          image,
+          headers.value,
+          options.fetch ?? globalThis.fetch,
+          options.signal,
+          expiry,
+          minimumExpiresAt,
+        ),
+      })));
+      let batchFailure: Failure | undefined;
+      let batchUploaded = 0;
+      for (const item of results) {
+        if (!item.result.ok) {
+          batchFailure ??= item.result;
+          continue;
+        }
+        cache.value.files[item.digest] = item.result.value;
+        batchUploaded++;
+      }
+      if (batchUploaded > 0) {
+        const saved = writeCache(cachePath, cache.value);
+        if (!saved.ok) return saved;
+        uploaded += batchUploaded;
+      }
+      if (batchFailure !== undefined) return batchFailure;
     }
 
     const used = new Map<string, CacheEntry>();
