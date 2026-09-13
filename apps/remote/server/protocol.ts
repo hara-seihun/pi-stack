@@ -21,7 +21,7 @@ export type DocumentUpdate =
 
 export type Activity =
   | "IDLE" | "FAILED" | "STARTING" | "ABORTING" | "RUNNING" | "WORKING" | "THINKING"
-  | "COMPACTING" | "RETRYING" | "QUEUED" | "WAITING_ON_TOOL" | (string & {});
+  | "COMPACTING" | "RETRYING" | "RECONNECTING" | "QUEUED" | "WAITING_ON_TOOL" | (string & {});
 
 export interface IdleNotification { seq: number; sessionId: string; name: string; time: string }
 export interface IdleNotificationFeed { cursor: number; notifications: IdleNotification[] }
