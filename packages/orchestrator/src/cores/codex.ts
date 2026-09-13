@@ -10,6 +10,7 @@ import { startCodexAnthropicAdapter, type CodexAnthropicAdapter } from "./codex-
 import { writeCoreState } from "./journal.js";
 import { openCodexRpc, type CodexRpc, type Json, type OpenCodexRpc, type RpcResult } from "./codex-rpc.js";
 import { CodexProjection, transferItems } from "./codex-projection.js";
+import { isOutputLimitError } from "./codex-output-limit.js";
 import { CodexProcessError } from "./codex-process.js";
 import type { Thread } from "./codex-protocol/v2/Thread.js";
 import type { ThreadItem } from "./codex-protocol/v2/ThreadItem.js";
@@ -21,7 +22,7 @@ import type { ThreadSettings } from "./codex-protocol/v2/ThreadSettings.js";
 import type { ThreadTokenUsage } from "./codex-protocol/v2/ThreadTokenUsage.js";
 import type { SkillsListResponse } from "./codex-protocol/v2/SkillsListResponse.js";
 
-type Receipt = { hash: string; state: "pending" | "accepted" | "rejected"; turnId?: string };
+type Receipt = { hash: string; state: "pending" | "accepted" | "rejected"; turnId?: string; threadId?: string };
 type State = {
   version: 1; sessionId: string; threadId?: string; materialized?: boolean; provider?: string; model?: string; effort?: string; name?: string;
   transfer?: "pending" | "complete"; transferProjection?: Record<string, unknown>[];
@@ -86,6 +87,7 @@ export function createCodexSession(dependencies: CodexDependencies): OpenCoreSes
     const projections = new Map<string, CodexProjection>();
     const active = new Map<string, string>();
     const completedTurns = new Set<string>();
+    const continuing = new Set<string>();
     const compactingThreads = new Set<string>();
     const setCompacting = (threadId: string, value: boolean, failure?: {errorMessage:string;aborted?:boolean}) => {
       if (compactingThreads.has(threadId) === value) return;
@@ -145,7 +147,7 @@ export function createCodexSession(dependencies: CodexDependencies): OpenCoreSes
         model: nativeSettings.get(thread.id)?.model ?? agents.get(thread.id)?.model };
       agents.set(thread.id, agent);
       emit({ type: "core_agent", agent, canAcceptDirectInput: thread.canAcceptDirectInput });
-      if (thread.status.type === "active" && !abortRequested && !closed) background(subscribeChild(thread.id), "child subscription");
+      if (["active", "systemError"].includes(thread.status.type) && !abortRequested && !closed) background(subscribeChild(thread.id), "child subscription");
       reconcileLifecycle();
     };
     function subscribeChild(threadId: string): Promise<void> {
@@ -156,16 +158,62 @@ export function createCodexSession(dependencies: CodexDependencies): OpenCoreSes
         nativeSettings.set(threadId, { model: joined.model, effort: joined.reasoningEffort ?? undefined });
         announce(joined.thread);
         const history = await turns(threadId);
+        reconcileReceipts(threadId, history);
         projection(threadId).restore(history);
         projection(threadId).context();
         const running = history.find(turn => turn.status === "inProgress");
         if (running && !completedTurns.has(running.id)) active.set(threadId, running.id);
+        if (!running) continueOutputLimit(threadId, history.at(-1));
         reconcileLifecycle();
       })();
       subscriptions.set(threadId, operation);
       return operation;
     }
     const turns = (threadId: string) => pages<Turn>("thread/turns/list", { threadId, sortDirection: "asc", itemsView: "full", limit: 100 });
+    function reconcileReceipts(threadId: string, history: Turn[]) {
+      for (const [key, receipt] of Object.entries(state.receipts)) {
+        if (receipt.state !== "pending" || (receipt.threadId ?? state.threadId) !== threadId) continue;
+        const accepted = history.find(turn => turn.items.some(item => item.type === "userMessage" && item.clientId === key));
+        if (accepted) { receipt.state = "accepted"; receipt.turnId = accepted.id; }
+      }
+      save();
+    }
+    function continueOutputLimit(threadId: string, turn: Turn | undefined) {
+      if (!turn || turn.status !== "failed" || !isOutputLimitError(turn.error) || abortRequested || closed) return;
+      const key = `output-limit:${threadId}:${turn.id}`;
+      if (continuing.has(key) || state.receipts[key]?.state === "accepted") return;
+      continuing.add(key); settling++;
+      const operation = Promise.resolve().then(async () => {
+        if (abortRequested || closed) return;
+        if (accountingFailure) fail("Codex usage accounting needs repair before continuing work");
+        // A persisted pending dispatch must be resolved from native history, never replayed.
+        if (state.receipts[key]) {
+          const history = await turns(threadId);
+          const accepted = history.find(entry => entry.items.some(item => item.type === "userMessage" && item.clientId === key));
+          if (!accepted) fail("Codex output-limit continuation outcome is unknown; inspect native history");
+          state.receipts[key] = { ...state.receipts[key], state: "accepted", turnId: accepted.id };
+          save();
+          if (accepted.status === "inProgress") active.set(threadId, accepted.id);
+          return;
+        }
+        const content: UserInput[] = [{ type: "text", text: "The provider stopped the previous response at its output-token limit. Continue your existing task from the retained conversation and work, preserving any completed actions. This is continuation of the same assignment.", text_elements: [] }];
+        const hash = createHash("sha256").update(JSON.stringify({ threadId, content })).digest("hex");
+        state.receipts[key] = { hash, state: "pending", threadId }; save();
+        uncertainThreads.add(threadId);
+        const result = await rpc!.request<{ turn: Turn }>("turn/start", { threadId, input: content, clientUserMessageId: key });
+        if (!result.ok) {
+          if (result.error.startsWith("Codex rejected")) {
+            uncertainThreads.delete(threadId); state.receipts[key].state = "rejected"; save();
+          }
+          fail(result.error);
+        }
+        const next = result.value.turn;
+        state.receipts[key] = { hash, state: "accepted", threadId, turnId: next.id }; save();
+        uncertainThreads.delete(threadId);
+        if (!completedTurns.has(next.id)) active.set(threadId, next.id);
+      }).finally(() => { continuing.delete(key); settling--; reconcileLifecycle(); });
+      background(operation, "output-limit continuation");
+    }
     async function pages<T>(method: string, params: Json): Promise<T[]> {
       const data: T[] = []; let cursor: string | null = null;
       do {
@@ -238,7 +286,8 @@ export function createCodexSession(dependencies: CodexDependencies): OpenCoreSes
         if (agent) { agent.state = agentState(turn.status); emit({ type: "core_agent", agent }); }
         save();
         send({ type: "turn_end", message: projection(threadId).entries.at(-1)?.message, toolResults: [] });
-        if (!root) send({ type: "agent_end", messages: projection(threadId).entries.map(entry => entry.message) });
+        continueOutputLimit(threadId, turn);
+        if (!root && !isOutputLimitError(turn.error)) send({ type: "agent_end", messages: projection(threadId).entries.map(entry => entry.message) });
         if (root) {
           settling++;
           background(discover().finally(() => { settling--; reconcileLifecycle(); }), "child discovery");
@@ -292,6 +341,7 @@ export function createCodexSession(dependencies: CodexDependencies): OpenCoreSes
         });
       } else if (method === "error") {
         const error = params.error as { message?: string } | undefined;
+        if (isOutputLimitError(error)) return; // turn/completed owns the durable continuation.
         send({ type: "core_error", core: "codex", error: error?.message ?? "Codex turn error", willRetry: params.willRetry === true });
       }
     };
@@ -455,17 +505,15 @@ export function createCodexSession(dependencies: CodexDependencies): OpenCoreSes
       projection(state.threadId).restore(history, state.transferProjection);
       const running = history.find(turn => turn.status === "inProgress");
       if (running) active.set(state.threadId, running.id);
-      for (const receipt of Object.values(state.receipts)) {
-        if (receipt.state !== "pending") continue;
-        const item = history.flatMap(turn => turn.items.map(item => ({ turn, item }))).find(({ item }) => item.type === "userMessage" && item.clientId && state.receipts[item.clientId] === receipt);
-        if (item) { receipt.state = "accepted"; receipt.turnId = item.turn.id; }
-      }
+      reconcileReceipts(state.threadId, history);
       save();
       ready = true;
       for (const [method, params] of notifications) applyNotification(method, params);
       notifications.length = 0;
       projection(state.threadId).context();
       await discover();
+      await Promise.all(subscriptions.values());
+      if (!running) continueOutputLimit(state.threadId, history.at(-1));
       reconcileLifecycle();
     } catch (error) {
       await close();
@@ -528,7 +576,7 @@ export function createCodexSession(dependencies: CodexDependencies): OpenCoreSes
           lastAssistantMessage: [...current.entries].reverse().find(entry => entry.message.role === "assistant")?.message,
           pendingMessageCount: 0, messageCount: current.entries.length, autoCompactionEnabled: true,
           contextProjection: "activity", capabilities: { core: "codex", nativeChildren: true, fork: true, compact: true, steer: true },
-          unresolvedCommands: Object.entries(state.receipts).filter(([, receipt]) => receipt.state === "pending").map(([id]) => id) };
+          unresolvedCommands: Object.entries(state.receipts).filter(([id, receipt]) => receipt.state === "pending" && !continuing.has(id)).map(([id]) => id) };
         case "get_available_models": return { models: models.map(model => publicModel(model, providerFamily())) };
         case "get_available_thinking_levels": return { levels: (models.find(model => model.model === selectedModel)?.supportedReasoningEfforts ?? []).map(value => value.reasoningEffort === "none" ? "off" : value.reasoningEffort) };
         case "get_commands": {

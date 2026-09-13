@@ -19,6 +19,7 @@ export const COMMANDS=[
   ["wave","Start a one-off wave from a declared lane"],
   ["pause / resume","Set or clear the global launch halt"],
   ["abort / kill","Stop one run gracefully or immediately"],
+  ["continue","Continue a Codex run stopped by the provider output-token limit"],
   ["boost","Set a provider pacing multiplier or halt"],
   ["account","Import, refresh, remove, list, reserve, or exclusively transfer pooled accounts"],
 ] as const;
@@ -50,7 +51,7 @@ export async function dispatch(argv:string[]):Promise<void>{
   if(command==="status"){output(await request("/v1/status"));return;}
   if(command==="pause"){output(await request("/v1/control","POST",{key:"launches",value:"paused"}));return;}
   if(command==="resume"){output(await request("/v1/control","POST",{key:"launches",value:"enabled"}));return;}
-  if(command==="abort"||command==="kill"){if(!rest[0])throw new Error(`${command} requires a run id`);output(await request(`/v1/runs/${encodeURIComponent(rest[0])}/${command}`,"POST"));return;}
+  if(command==="abort"||command==="kill"||command==="continue"){if(!rest[0])throw new Error(`${command} requires a run id`);output(await request(`/v1/runs/${encodeURIComponent(rest[0])}/${command}`,"POST"));return;}
   if(command==="run"){const {named,positional}=flags(rest),prompt=named.get("prompt")??positional.join(" ");if(!prompt)throw new Error("run requires --prompt");output(await request("/v1/run","POST",{prompt,cwd:named.get("cwd")??process.cwd(),profile:named.get("profile")??"standard",core:named.get("core"),count:Number(named.get("count")??1),force:named.has("force")}));return;}
   if(command==="wave"){const {named,positional}=flags(rest),lane=named.get("lane")??positional[0];if(!lane)throw new Error("wave requires a lane");output(await request("/v1/wave","POST",{lane,core:named.get("core"),count:Number(named.get("count")??1),force:named.has("force")}));return;}
   if(command==="boost"){const {named,positional}=flags(rest),provider=positional[0],value=positional[1]??named.get("multiplier");if(!provider||value===undefined)throw new Error("boost requires provider and multiplier");output(await request("/v1/control","POST",{key:`boost:${provider}`,value:String(value)}));return;}
