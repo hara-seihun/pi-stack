@@ -1,5 +1,6 @@
 import { existsSync, unlinkSync } from "node:fs";
 import { createServer, type Socket } from "node:net";
+import { RuntimeOutput } from "./runtime-output.mjs";
 
 const [socketPath, cwd, encodedArgs] = process.argv.slice(2);
 if (!socketPath || !cwd || !encodedArgs) throw new Error("runtime-host requires socket path, cwd, and command arguments");
@@ -11,20 +12,16 @@ if (!Array.isArray(args) || args.length === 0 || args.some((value) => typeof val
 if (existsSync(socketPath)) throw new Error(`runtime host socket already exists: ${socketPath}`);
 let client: Socket | null = null;
 let input = "";
-let sequence = 0;
-let acknowledged = 0;
 let stopping = false;
-type Output = { type: "output"; sequence: number; line: string };
-const buffered: Output[] = [];
+const spoolPath = socketPath + ".events";
+const output = new RuntimeOutput(spoolPath);
 
 function send(value: unknown) {
   if (client?.writable) client.write(`${JSON.stringify(value)}\n`);
 }
 
 function publish(line: string) {
-  const output: Output = { type: "output", sequence: ++sequence, line };
-  buffered.push(output);
-  send(output);
+  output.publishLine(line);
 }
 
 async function consume(stream: ReadableStream<Uint8Array>, onLine: (line: string) => void) {
@@ -76,15 +73,12 @@ async function stopChild() {
 
 function handle(value: any) {
   if (value?.type === "attach") {
-    send({ type: "attached", pid: child.pid, sequence });
-    setTimeout(() => {
-      for (const output of buffered) if (output.sequence > Number(value.after ?? 0)) send(output);
-    }, 0);
+    send({ type: "attached", pid: child.pid, sequence: output.sequence });
+    output.attach(client!, Number(value.after ?? 0));
     return;
   }
   if (value?.type === "ack") {
-    acknowledged = Math.max(acknowledged, Number(value.sequence ?? 0));
-    while (buffered[0]?.sequence <= acknowledged) buffered.shift();
+    output.acknowledge(Number(value.sequence));
     return;
   }
   if (value?.type === "command") {
@@ -128,5 +122,7 @@ for (const signal of ["SIGTERM", "SIGINT"] as const) {
 const exitCode = await child.exited;
 send({ type: "exit", code: exitCode });
 server.close();
+output.close();
 try { unlinkSync(socketPath); } catch {}
+try { unlinkSync(spoolPath); } catch {}
 setTimeout(() => process.exit(0), 100).unref();

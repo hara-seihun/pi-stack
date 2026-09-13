@@ -80,6 +80,7 @@ async function waitForGate(name: string) {
 }
 
 function releaseGate(name: string) {
+  mkdirSync(fakeGateRoot, { recursive: true });
   writeFileSync(gatePath(name, "release"), "release");
 }
 
@@ -234,6 +235,9 @@ for line in sys.stdin:
    text = content if isinstance(content, str) else ''.join(block.get('text', '') for block in content if block.get('type') == 'text')
    out({'type':'response','id':rid,'command':'fork','success':True,'data':{'text':text,'cancelled':False}})
  elif kind == 'get_state':
+  if last == 'unreachable-state':
+   if not os.path.exists(os.path.join(os.environ['PI_FAKE_GATE_ROOT'], 'unreachable-state.release')): continue
+   streaming = False
   if first_state:
    first_state = False
    pause(0.12)
@@ -1497,6 +1501,24 @@ describe("web and supervisor integration", () => {
     );
     expect(session.activity).toBe("IDLE");
   }, 15_000);
+
+  test("shows lost state as reconnecting and settles from the core without replaying work", async () => {
+    const id = await createThread();
+    resetGate("unreachable-state");
+    await api("POST", `/v1/sessions/${id}/prompt`, {requestId: crypto.randomUUID(), text: "unreachable-state"});
+    const unavailable = await waitFor(
+      () => api("GET", `/v1/sessions/${id}`).then(result => result.value.session),
+      session => session.activity === "RECONNECTING",
+    );
+    expect(unavailable.state).toBe("RUNNING");
+    releaseGate("unreachable-state");
+    const settled = await waitFor(
+      () => api("GET", `/v1/sessions/${id}`).then(result => result.value.session),
+      session => session.state === "IDLE",
+    );
+    expect(settled.activity).toBe("IDLE");
+    expect(readJsonLines(fakeRpcLog).filter(row => row.type === "prompt" && row.message === "unreachable-state")).toHaveLength(1);
+  });
 
   test("does not let inactive reconciliation settle the prompt-to-agent_start gap", async () => {
     const id = await createThread();

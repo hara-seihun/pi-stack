@@ -13,6 +13,7 @@ export interface RuntimeTransport {
   readonly shared: boolean;
   readonly socketPath: string;
   send(value: unknown): void;
+  reconnect(): void;
   terminate(): Promise<void>;
   detach(): void;
   onExit(listener: RuntimeExit): void;
@@ -69,6 +70,13 @@ async function connectHost(socketPath: string, onOutput: RuntimeOutput, timeoutM
         const line = `${JSON.stringify({ type: "command", value })}\n`;
         if (connected && socket.writable) socket.write(line);
         else unsent.push(line);
+      },
+      reconnect() {
+        if (detached || exitCode !== null) return;
+        connected = false;
+        clearTimeout(reconnectTimer);
+        socket.destroy();
+        connect();
       },
       async terminate() {
         if (!detached && exitCode === null) {
@@ -133,9 +141,11 @@ async function connectHost(socketPath: string, onOutput: RuntimeOutput, timeoutM
       input = "";
       decoder = new StringDecoder("utf8");
       const attachTimer = setTimeout(() => current.destroy(), timeoutMs);
+      const isCurrent = () => current === socket;
       current.setNoDelay(true);
       current.on("connect", () => current.write(`${JSON.stringify({ type: "attach", after: lastSequence })}\n`));
       current.on("data", (chunk) => {
+        if (!isCurrent()) return;
         input += decoder.write(chunk);
         while (true) {
           const newline = input.indexOf("\n");
@@ -149,12 +159,15 @@ async function connectHost(socketPath: string, onOutput: RuntimeOutput, timeoutM
         }
         if (connected) clearTimeout(attachTimer);
       });
+      current.on("end", () => current.destroy());
       current.on("error", (cause: NodeJS.ErrnoException) => {
+        if (!isCurrent()) return;
         if (!attached) finish({ error: errorValue(cause) });
         else if (["ENOENT", "ECONNREFUSED"].includes(cause.code ?? "")) end(1);
       });
       current.on("close", () => {
         clearTimeout(attachTimer);
+        if (!isCurrent()) return;
         connected = false;
         if (!attached) finish({ error: new Error(`Runtime host closed before attach: ${socketPath}`) });
         else if (!detached && exitCode === null) {
