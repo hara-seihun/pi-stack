@@ -54,6 +54,7 @@
   place-items: center;
 }
 .drawing-icon-button svg { width: 22px; height: 22px; fill: none; stroke: currentColor; stroke-width: 2; stroke-linecap: round; }
+.drawing-status,
 .drawing-error {
   position: absolute;
   left: 14px;
@@ -62,6 +63,23 @@
   padding: 10px 14px;
   border-radius: 8px;
   background: #fff;
-  color: #a11b1b;
   box-shadow: 0 2px 10px #0002;
+}
+.drawing-status { color: #202124; }
+.drawing-error {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  color: #a11b1b;
+}
+.drawing-error button {
+  flex: none;
+  min-height: 34px;
+  padding: 0 12px;
+  border: 1px solid #d1d5db;
+  border-radius: 18px;
+  background: #fff;
+  color: #202124;
+  font-weight: 650;
 }

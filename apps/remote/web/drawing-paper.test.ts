@@ -1,5 +1,5 @@
 import { expect, test } from "bun:test";
-import { grabPaper, paperPoint, screenPoint, screenRadius, zoomPaper, type PaperView } from "./src/drawing-paper";
+import { drawingExportSize, fitPaper, grabPaper, paperPoint, screenPoint, screenRadius, zoomPaper, type PaperView } from "./src/drawing-paper";
 
 const view: PaperView = { x: 300, y: 240, scale: 1.7, angle: 0.3 };
 
@@ -27,9 +27,31 @@ test("wheel zoom holds the point beneath the cursor even at the zoom limits", ()
     const next = zoomPaper(view, cursor, factor);
     samePoint(screenPoint(anchor, next), cursor);
     expect(next.angle).toBe(view.angle);
-    expect(next.scale).toBeGreaterThanOrEqual(0.1);
+    expect(next.scale).toBeGreaterThanOrEqual(0.001);
     expect(next.scale).toBeLessThanOrEqual(64);
   }
+});
+
+test("an image is initially centered and contained at its original aspect ratio", () => {
+  expect(fitPaper({ width: 4000, height: 2000 }, { width: 800, height: 600 })).toEqual({
+    x: 400,
+    y: 300,
+    scale: 0.2,
+    angle: 0,
+  });
+  expect(fitPaper({ width: 1000, height: 2000 }, { width: 800, height: 600 })).toEqual({
+    x: 400,
+    y: 300,
+    scale: 0.3,
+    angle: 0,
+  });
+  expect(fitPaper({ width: 32000, height: 18000 }, { width: 640, height: 480 }).scale).toBe(0.02);
+});
+
+test("background exports retain original pixels while white paper keeps high-resolution output", () => {
+  const paper = { width: 4031, height: 3023 };
+  expect(drawingExportSize(paper, true)).toEqual(paper);
+  expect(drawingExportSize(paper, false)).toEqual({ width: 8062, height: 6046 });
 });
 
 test("a viewport-sized brush makes finer paper strokes when zoomed in", () => {
