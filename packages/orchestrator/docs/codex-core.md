@@ -99,6 +99,8 @@ Fleet workers tolerate up to two minutes of daemon transport loss during deploym
 
 Codex instruction updates are placed immediately before the next assistant turn, or at history end, as required by Anthropic's mid-conversation system interface. A run stopped by the prior system-message ordering defect also supports explicit `recover`; its failed provider turn remains in native history and the repaired continuation uses the same session.
 
+Worker restart and adoption preserve an explicit infrastructure-recovery continuation until the worker reads it. Otherwise a retained failed turn could settle again without submitting the repaired request.
+
 `pi-orchestrator recover RUN_ID` restores a core run stopped by a worker transport failure or a native interruption incorrectly recorded as an operator abort. It requires retained native custody and no operator-abort control, retains the original failure under `run-interruption:RUN_ID:TIMESTAMP`, and keeps the original model, thinking level and account on the current release. Previous-release workers reporting either recognized interruption during deployment receive the same recovery automatically. Other failures and completed work are not reopened.
 
 One runtime owner opens a given `stateDir`. `codex-session.json` stores the native thread ID, saved provider/model settings, message timestamps, transfer status, transferred activity records, and dispatch receipts. Writes use atomic replacement. This is adapter state, not a Pi session file. `get_state.sessionFile` points to it so callers must not open it with Pi's session parser.

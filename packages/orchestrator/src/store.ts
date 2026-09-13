@@ -366,7 +366,7 @@ export class Store {
       if(!run?.accountId||!run.provider||!run.model||!run.workerUnit||!run.releasePath)return false;
       const targetAccount=accountId??run.accountId;
       if(this.account(targetAccount)?.provider!==run.provider)return false;
-      const changed=this.db.prepare(`UPDATE run SET account_id=?,state='starting',result='worker process stopped; recovering the recorded core session',updated_at=?,ended_at=NULL WHERE id=? AND state IN ('queued','starting','running')`).run(targetAccount,at,id).changes;
+      const changed=this.db.prepare(`UPDATE run SET account_id=?,state='starting',result=CASE WHEN result='recovering the recorded core session after infrastructure repair' THEN result ELSE 'worker process stopped; recovering the recorded core session' END,updated_at=?,ended_at=NULL WHERE id=? AND state IN ('queued','starting','running')`).run(targetAccount,at,id).changes;
       if(changed!==1)return false;
       this.db.prepare("DELETE FROM control WHERE key=?").run(`fleet-waiting:${id}`);
       this.endLease(`run:${id}`,at);
@@ -395,7 +395,7 @@ export class Store {
       const run=this.run(id);
       if(!run?.accountId||!run.provider||!run.model||!run.workerUnit||!run.releasePath)return false;
       if(run.state==="failed"&&(run.parentRunId||run.childRunIds?.length))return false;
-      const changed=this.db.prepare(`UPDATE run SET state='running',result=NULL,failure_kind=NULL,updated_at=?,ended_at=NULL WHERE id=? AND state IN ('queued','starting','running','failed')`).run(at,id).changes;
+      const changed=this.db.prepare(`UPDATE run SET state='running',result=CASE WHEN result='recovering the recorded core session after infrastructure repair' THEN result ELSE NULL END,failure_kind=NULL,updated_at=?,ended_at=NULL WHERE id=? AND state IN ('queued','starting','running','failed')`).run(at,id).changes;
       if(changed!==1)return false;
       this.endLease(`run:${id}`,at);
       this.createLease(`run:${id}`,run.accountId,"fleet",id,at);

@@ -15,6 +15,10 @@ it("recovers host interruptions with custody while keeping actual operator abort
     expect(JSON.parse(store.control(`run-interruption:${id}:1234`)!)).toMatchObject({result:"aborted",releasePath:"/release/first"});
     store.updateRun(id!,{state:"failed",failureKind:"infrastructure",result:"TypeError: fetch failed"});
     expect(store.recoverInterruptedRun(id!,"/release/next",1235)).toBe(true);
+    expect(store.resumeAssignedRun(id!,1236)).toBe(true);
+    expect(store.run(id!)?.result).toBe("recovering the recorded core session after infrastructure repair");
+    expect(store.adoptAssignedRun(id!,1237)).toBe(true);
+    expect(store.run(id!)?.result).toBe("recovering the recorded core session after infrastructure repair");
     store.updateRun(id!,{state:"aborted",failureKind:"operator",result:"aborted"});
     store.setControl(`abort:${id}`,"abort");
     expect(store.recoverInterruptedRun(id!,"/release/next")).toBe(false);
