@@ -6,7 +6,11 @@ Submit an immutable source commit to the durable publication worker from a write
 deploy/publication submit "$(git rev-parse HEAD)"
 ```
 
-The returned receipt acknowledges custody. The worker owns integration checks, merging `main`, both host deployments and terminal reporting. `deploy/publication inspect REQUEST` reads its progress. Failed requests retain their source ref, logs and repair details. After fixing the recorded cause, use `deploy/publication retry REQUEST`.
+The returned receipt acknowledges custody. The worker owns integration checks, merging `main`, both host deployments and terminal reporting. `deploy/publication inspect REQUEST` reads its progress. Failed requests retain their source ref, integration SHA, failed command, compact error excerpt and full log. Source fixes need a new commit and submission. `deploy/publication retry REQUEST` retries the same immutable source after an infrastructure repair.
+
+A submission from Remote records its supervisor URL and root thread ID. The worker sends blocked, failed and published results back to that thread with a stable request ID. Its receipt distinguishes `report.status: accepted`, when Remote has queued the report, from `delivered`, when the thread's user event confirms dispatch. The timer retries transport failures and checks accepted reports without rerunning publication. Machine alerts are a separate inbox receipt, not proof of thread delivery. Successful publication sends its report before the worker exits.
+
+For an external caller, set `PI_STACK_PUBLICATION_REPORT_URL` and `PI_STACK_PUBLICATION_REPORT_SESSION` to the requesting supervisor and root thread UUID. Without a Remote context, the custody receipt explicitly selects `machine-inbox` reporting. To attach a requester to a request created before thread reporting was available, use `deploy/publication report REQUEST REMOTE_URL SESSION_ID`. `deploy/publication report REQUEST` reconciles reporting only; it never retries checks or deployment.
 
 `deploy/publication install` installs the GMKtec worker and timer from this checkout. Its state lives at `~/.local/state/pi-stack-publication/`. This publisher was introduced in source commit `34fcf7b23c0a6895a574bfc8d90d55f14d3bc878` with the execution-state rewrite. Its current implementation also accepts ordinary releases that do not change that execution contract. Those releases use live handoff. Only a target implementing `core-execution-v1` enters that contract's first-activation gate. Once either host adopts the contract, the worker refuses a target that removes it.
 
