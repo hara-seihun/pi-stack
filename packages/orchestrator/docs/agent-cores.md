@@ -9,7 +9,7 @@ Config defaults to `PI_STACK_DEFAULT_CORE`, or `codex` when unset. `profileCores
 ```json
 {
   "core": "codex",
-  "profileCores": { "opus": "pi" }
+  "profileCores": { "standard": "pi" }
 }
 ```
 
@@ -19,7 +19,7 @@ Creation commits `run-core:<runId>` alongside the run row. It records the select
 
 Core custody is immutable through the worker state API. `get_state` updates only native and portable session references. Account assignment still pins the PiStack model, thinking level and immutable worker release. Recovery reuses that release, the same run ID and its recorded core directory. It never resolves the core from a changed lane or config. The directory holds durable native and portable records and is not part of application workspace cleanup.
 
-Codex admission uses only the profile's `openai-codex` candidates, retaining their order and thinking settings. A profile with no supported candidate fails explicitly. Core selection does not change pacing, concurrency, reservation, budget or account policy. Tool-free completion requests retain their existing executor.
+Codex admission accepts the profile's OpenAI Codex and Anthropic candidates, retaining their order and thinking settings. A profile with no supported candidate fails explicitly. Core selection does not change pacing, concurrency, reservation, budget or account policy. Tool-free completion requests retain their existing executor.
 
 ## Worker wire
 

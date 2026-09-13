@@ -27,6 +27,16 @@ it("resolves run/lane, profile and default core choices without changing model d
   } finally { rmSync(root, { recursive: true, force: true }); }
 });
 
+it("keeps Anthropic Codex runs queued for account admission rather than rejecting their provider", async () => {
+  const store = Store.open(":memory:");
+  const daemon = new Daemon(store, loadConfig("/nonexistent-config"));
+  try {
+    const [id] = store.createRuns({ count: 1, source: "direct", prompt: "work", cwd: "/app", profile: "opus", budget: "force", core: "codex" });
+    expect(await (daemon as any).launch(store.run(id!))).toBe(false);
+    expect(store.run(id!)?.state).toBe("queued");
+  } finally { store.close(); }
+});
+
 it("pins core custody across lane edits, ledger reopening, assignment and recovery", () => {
   const root = mkdtempSync(join(tmpdir(), "core-custody-")), path = join(root, "ledger.sqlite3");
   let store = Store.open(path);

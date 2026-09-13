@@ -22,7 +22,7 @@ export interface CoreAccountOptions {
 
 export interface CoreAccountCredentials {
   readonly accessToken: string;
-  readonly chatgptAccountId: string;
+  readonly chatgptAccountId?: string;
   readonly chatgptPlanType?: string;
 }
 
@@ -64,9 +64,10 @@ function accountFamily(store: Store, provider: string): string {
   return store.account(provider)?.provider ?? provider.replace(/-\d+$/u, "");
 }
 
-function eligibleRequestedAccount(store: Store, auth: SharedOAuthAuth, provider: string) {
-  const account = store.account(provider);
+function eligibleRequestedAccount(store: Store, auth: SharedOAuthAuth, id: string, family: string) {
+  const account = store.account(id);
   return account
+    && account.provider === family
     && allowsAccountUse(account, "interactive")
     && (!account.cooldownUntil || account.cooldownUntil <= Date.now())
     && auth.has(account.id)
@@ -74,9 +75,9 @@ function eligibleRequestedAccount(store: Store, auth: SharedOAuthAuth, provider:
     : undefined;
 }
 
-function codexAuth(path: string): SharedOAuthAuth {
-  const provider = builtinProviders().find(candidate => candidate.id === CODEX_PROVIDER);
-  if (!provider) throw new Error("The OpenAI Codex OAuth provider is unavailable");
+function coreAuth(family: string, path: string): SharedOAuthAuth {
+  const provider = builtinProviders().find(candidate => candidate.id === family);
+  if (!provider) throw new Error(`The ${family} OAuth provider is unavailable`);
   return providerOAuth(provider, path);
 }
 
@@ -135,7 +136,6 @@ export async function openCoreAccount(options: CoreAccountOptions): Promise<Core
     ?? options.env.PI_ORCHESTRATOR_AUTH
     ?? defaultSharedAuthPath(ledgerPath);
   const store = Store.open(ledgerPath);
-  const auth = options.auth ?? codexAuth(authPath);
   const assignedRunId = options.env.PI_ORCHESTRATOR_ASSIGNED === "1"
     ? options.env.PI_ORCHESTRATOR_RUN_ID
     : undefined;
@@ -153,7 +153,8 @@ export async function openCoreAccount(options: CoreAccountOptions): Promise<Core
 
     const provider = assigned?.provider ?? accountFamily(store, options.initialProvider);
     const model = assigned?.model ?? options.initialModel;
-    if (provider !== CODEX_PROVIDER) throw new Error(`External Codex cores require ${CODEX_PROVIDER}, not ${provider}`);
+    if (provider !== CODEX_PROVIDER && provider !== "anthropic") throw new Error(`Unsupported core account provider ${provider}`);
+    const auth = options.auth ?? coreAuth(provider, authPath);
 
     const leaseId = assignedRunId ? `run:${assignedRunId}` : `interactive:${options.sessionId}`;
     const account = assigned
@@ -162,9 +163,9 @@ export async function openCoreAccount(options: CoreAccountOptions): Promise<Core
           const affinityKey = `core-account:${options.sessionId}`;
           const existing = store.db.prepare("SELECT account_id FROM lease WHERE id=?").get(leaseId) as { account_id: string } | undefined;
           const affinity = store.control(affinityKey) ?? existing?.account_id;
-          const sticky = affinity ? eligibleRequestedAccount(store, auth, affinity) : undefined;
+          const sticky = affinity ? eligibleRequestedAccount(store, auth, affinity, provider) : undefined;
           const selected = sticky
-            ?? eligibleRequestedAccount(store, auth, options.initialProvider)
+            ?? eligibleRequestedAccount(store, auth, options.initialProvider, provider)
             ?? chooseInteractiveAccount(store, auth, provider);
           if (selected) {
             store.setControl(affinityKey, selected.id);
@@ -192,7 +193,7 @@ export async function openCoreAccount(options: CoreAccountOptions): Promise<Core
       if (closed) throw new Error("Core account is closed");
       if (!interactiveLeaseId || active === Boolean(heartbeat)) return;
       if (active) {
-        if (!eligibleRequestedAccount(store, auth, account.id)) {
+        if (!eligibleRequestedAccount(store, auth, account.id, provider)) {
           throw new Error("Core account is no longer eligible; reopen the core before starting work");
         }
         store.createLease(interactiveLeaseId, account.id, "interactive");
@@ -213,7 +214,7 @@ export async function openCoreAccount(options: CoreAccountOptions): Promise<Core
       const operation = (async () => {
         let credential = await auth.credential(account.id, signal);
         const accountId = typeof credential.accountId === "string" ? credential.accountId : undefined;
-        if (!accountId) throw new Error(`${account.id} has no ChatGPT account identity`);
+        if (provider === CODEX_PROVIDER && !accountId) throw new Error(`${account.id} has no ChatGPT account identity`);
         if (request.previousAccountId && request.previousAccountId !== accountId) {
           throw new Error(`Codex requested credentials for another ChatGPT account`);
         }
@@ -221,12 +222,12 @@ export async function openCoreAccount(options: CoreAccountOptions): Promise<Core
           credential = await auth.refreshRejected(account.id, lastAccessToken ?? credential.access, signal);
         }
         const refreshedAccountId = typeof credential.accountId === "string" ? credential.accountId : undefined;
-        if (!refreshedAccountId) throw new Error(`${account.id} has no ChatGPT account identity`);
+        if (provider === CODEX_PROVIDER && !refreshedAccountId) throw new Error(`${account.id} has no ChatGPT account identity`);
         lastAccessToken = credential.access;
         const chatgptPlanType = optionalPlanType(credential);
         return {
           accessToken: credential.access,
-          chatgptAccountId: refreshedAccountId,
+          ...(provider === CODEX_PROVIDER ? { chatgptAccountId: refreshedAccountId } : {}),
           ...(chatgptPlanType ? { chatgptPlanType } : {}),
         };
       })();

@@ -1,11 +1,7 @@
 import type { CoreSessionOptions } from "./contracts.js";
+import type { CoreAccountCredentialRequest, CoreAccountCredentials } from "./account.js";
 
-/** This interface belongs at the broker boundary, never on the runtime event wire. */
-export interface CodexCredentials {
-  accessToken: string;
-  chatgptAccountId: string;
-  chatgptPlanType?: string | null;
-}
+export type CodexCredentials = CoreAccountCredentials;
 export interface CodexUsage {
   sessionId: string;
   nativeThreadId: string;
@@ -19,7 +15,7 @@ export interface CodexUsage {
   totalTokens: number;
 }
 export interface CodexAccountLease {
-  credentials(request?: { refresh: boolean; previousAccountId?: string }): Promise<CodexCredentials>;
+  credentials(request?: CoreAccountCredentialRequest): Promise<CodexCredentials>;
   /** Cumulative per-thread counters. The broker must upsert, not sum notifications. */
   recordUsage(usage: CodexUsage): void | Promise<void>;
   setActive(active: boolean): void;
@@ -32,7 +28,7 @@ export function credentialGuard() {
   return {
     remember(credentials: CodexCredentials) {
       secrets.add(credentials.accessToken);
-      secrets.add(credentials.chatgptAccountId);
+      if (credentials.chatgptAccountId) secrets.add(credentials.chatgptAccountId);
     },
     clean<T>(value: T): T {
       const visit = (input: unknown): unknown => {

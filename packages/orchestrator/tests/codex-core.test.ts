@@ -4,6 +4,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { createCodexSession } from "../src/cores/codex.js";
 import { credentialGuard } from "../src/cores/codex-auth.js";
+import type { CodexAnthropicAdapterOptions } from "../src/cores/codex-anthropic.js";
 import type { CoreOutput, CoreSessionOptions } from "../src/cores/contracts.js";
 import type { CodexRpcOptions, Json, RpcResult } from "../src/cores/codex-rpc.js";
 
@@ -24,16 +25,23 @@ function fixture(existingOptions?: CoreSessionOptions) {
   let reserved = false;
   let children: unknown[] = [], history: unknown[] = [], closeCount = 0, refreshed = 0, rpcCloseCount = 0;
   let accountOptions: CoreSessionOptions | undefined;
+  let anthropicOptions: CodexAnthropicAdapterOptions | undefined;
+  let anthropicCloseCount = 0;
   let closeWait = async () => {};
   const order: string[] = [];
   const eventWaiters = new Map<string, (() => void)[]>();
   let hook: ((method: string, params: Json) => RpcResult<unknown> | undefined) | undefined;
   const open = createCodexSession({
     openAccount: async value => { accountOptions = value; return ({
-      credentials: async request => { if (request?.refresh) refreshed++; return { accessToken: token, chatgptAccountId: accountId }; },
+      credentials: async request => { if (request?.refresh) refreshed++; return { accessToken: token,
+        ...(value.args.some(arg => /^anthropic(?:-\d+)?$/.test(arg)) ? {} : { chatgptAccountId: accountId }) }; },
       setActive: active => { if (active !== reserved) activity.push(active); reserved = active; },
       recordUsage: value => { usage.push(value); }, close: () => { reserved = false; closeCount++; order.push("account-close"); },
     }); },
+    openAnthropic: async value => {
+      anthropicOptions = value;
+      return { baseUrl: "http://127.0.0.1:12345", async close() { anthropicCloseCount++; order.push("anthropic-close"); } };
+    },
     openRpc: value => {
       callbacks = value;
       return {
@@ -43,7 +51,7 @@ function fixture(existingOptions?: CoreSessionOptions) {
           if (custom) return custom as RpcResult<T>;
           let result: unknown = {};
           if (method === "model/list") result = { data: [model], nextCursor: null };
-          if (["thread/start", "thread/resume", "thread/fork"].includes(method)) result = { thread: thread(method === "thread/fork" ? "fork" : String(params.threadId ?? "root"), params.threadId && params.threadId !== "root" ? "root" : null), model: model.model, reasoningEffort: "high" };
+          if (["thread/start", "thread/resume", "thread/fork"].includes(method)) result = { thread: thread(method === "thread/fork" ? "fork" : String(params.threadId ?? "root"), params.threadId && params.threadId !== "root" ? "root" : null), model: params.model ?? model.model, reasoningEffort: "high" };
           if (method === "thread/read") result = { thread: thread(String(params.threadId), "root") };
           if (method === "thread/turns/list") result = { data: history, nextCursor: null };
           if (method === "thread/list") result = { data: children, nextCursor: null };
@@ -69,6 +77,8 @@ function fixture(existingOptions?: CoreSessionOptions) {
     },
     crash: () => callbacks.exit(1), closeWait(value: typeof closeWait) { closeWait = value; },
     get accountOptions() { return accountOptions; }, get rpcCloseCount() { return rpcCloseCount; },
+    get anthropicOptions() { return anthropicOptions; }, get anthropicCloseCount() { return anthropicCloseCount; },
+    get rpcOptions() { return callbacks; },
     send(method: string, params: Json) { callbacks.notification(method, params); },
     server(method: string, params: Json = {}) { return callbacks.serverRequest(method, params); },
     hook(value: typeof hook) { hook = value; }, history(value: unknown[]) {
@@ -81,6 +91,46 @@ function fixture(existingOptions?: CoreSessionOptions) {
 }
 
 describe("Codex app-server adapter", () => {
+  it("keeps Anthropic credentials outside Codex and restores its native provider on resume", async () => {
+    const f = fixture();
+    f.options.args = ["--provider", "anthropic-2", "--model", "claude-fable-5-1", "--thinking", "high"];
+    const session = await f.open();
+    expect(f.requests.some(request => request.method === "account/login/start" || request.method === "model/list")).toBe(false);
+    expect(f.requests.find(request => request.method === "thread/start")?.params).toMatchObject({ modelProvider: "pistack-anthropic", model: "claude-fable-5-1" });
+    expect(f.rpcOptions.args?.join(" ")).toContain('requires_openai_auth=false');
+    expect(await f.anthropicOptions!.credentials({ refresh: false, signal: new AbortController().signal })).toEqual({ accessToken: token });
+    await session.command({ type: "get_state", id: "anthropic-state" });
+    expect(f.response("anthropic-state")?.data).toMatchObject({ model: { provider: "anthropic", id: "claude-fable-5-1" } });
+    await session.command({ type: "get_available_models", id: "anthropic-models" });
+    expect((f.response("anthropic-models")?.data as any).models.every((model: any) => model.provider === "anthropic")).toBe(true);
+    await session.command({ type: "set_model", id: "opus", provider: "anthropic", modelId: "claude-opus-5" });
+    expect(f.response("opus")?.success).toBe(true);
+    await session.command({ type: "prompt", id: "native-work", message: "Read" });
+    const saved = readFileSync(join(f.options.stateDir, "codex-session.json"), "utf8");
+    expect(saved).not.toContain(token);
+    expect(JSON.stringify(f.requests)).not.toContain(token);
+    expect(JSON.stringify(f.rpcOptions.env)).not.toContain(token);
+    await session.close();
+    expect(f.order.indexOf("rpc-close")).toBeLessThan(f.order.indexOf("anthropic-close"));
+    expect(f.order.indexOf("anthropic-close")).toBeLessThan(f.order.indexOf("account-close"));
+    expect(f.anthropicCloseCount).toBe(1);
+    const resumed = fixture({ ...f.options, args: ["--session", join(f.options.stateDir, "codex-session.json")] });
+    const next = await resumed.open();
+    expect(resumed.requests.find(request => request.method === "thread/resume")?.params).toMatchObject({ modelProvider: "pistack-anthropic", model: "claude-opus-5" });
+    expect(resumed.accountOptions?.args).toContain("anthropic-2");
+    await next.close();
+  });
+
+  it("closes the Anthropic transport and account after native initialization fails", async () => {
+    const f = fixture();
+    f.options.args = ["--provider", "anthropic", "--model", "claude-fable-5-1"];
+    f.hook(method => method === "initialize" ? { ok: false, error: "fixture initialization failure" } : undefined);
+    await expect(f.open()).rejects.toThrow("fixture initialization failure");
+    expect(f.rpcCloseCount).toBe(1);
+    expect(f.anthropicCloseCount).toBe(1);
+    expect(f.closeCount).toBe(1);
+  });
+
   it("does not charge idle inspection or invalid input and releases explicit native rejection", async () => {
     const f = fixture(), session = await f.open();
     await session.command({ type: "get_state", id: "state" });

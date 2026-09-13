@@ -16,7 +16,7 @@ The shared boundary is [`cores/contracts.ts`](../packages/orchestrator/src/cores
 
 In Remote, Thread settings contains **Agent core**. `POST /v1/sessions` accepts `core: "pi" | "codex"`; an omitted selection uses the destination's `core`, then `PI_STACK_DEFAULT_CORE`, then Codex. Existing threads without a core record remain Pi threads, regardless of the default.
 
-`PUT /v1/sessions/:sessionId/settings` with `{"core":"codex"}` switches an idle root. Core changes are separate from other settings changes. Codex requires an OpenAI starting model. Changing the default does not move existing sessions or replay their work.
+`PUT /v1/sessions/:sessionId/settings` with `{"core":"codex"}` switches an idle root. Core changes are separate from other settings changes. Codex accepts OpenAI and Anthropic starting models. Anthropic uses the session-owned [Messages transport](../packages/orchestrator/docs/codex-anthropic.md) through Codex's custom Responses provider. Model changes within the selected provider family are supported; changing families requires a new thread. Changing the default does not move existing sessions or replay their work.
 
 The settings API returns `core`, `cores` and observed `agents`. Controls unavailable in a core are disabled rather than accepted without effect. Native engine extensions are not interchangeable merely because both engines can run shell commands.
 
