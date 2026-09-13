@@ -17,6 +17,7 @@
 // on a request grants nothing a key does not already grant. A host with one
 // person needs no name at all.
 import { webResponse } from "./files";
+import { appUpdateResponse } from "./app-update";
 import { unlink, writeFile, mkdir, chmod } from "node:fs/promises";
 import { join } from "node:path";
 import { listPersons, publicPerson, type Person } from "./persons";
@@ -181,6 +182,8 @@ async function startOpenPersons() {
 await startOpenPersons();
 
 async function route(req: Request, url: URL): Promise<Response> {
+    const appUpdate = await appUpdateResponse(req);
+    if (appUpdate) return appUpdate;
     if (url.pathname === "/v1/router-health") {
       const people = await Promise.all(PEOPLE.map(async (person) => ({ user: person.user, unlocked: await unitActive(person) })));
       return Response.json({ ok: true, version: VERSION, environmentId: ENVIRONMENT_ID, people });

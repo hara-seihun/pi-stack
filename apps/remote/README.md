@@ -36,6 +36,8 @@ The drawer reports only measured plan and hardware rows. Each plan row also carr
 
 [`apps/kenan`](../kenan/README.md) packages the same compiled React client with Capacitor as the Kenan Android app. A small native plugin owns endpoint selection, haptics, system-bar layout, and the pinned Converge SSH tunnel. The browser's environment selector reads `environments` from `/etc/pi-stack/host.json`, as described in [deployment](../../docs/deployment.md#what-a-host-provides). That list belongs to the host, not to any person; adding a person cannot change the available hosts.
 
+The Android drawer shows Update app only when the selected host advertises a newer installed-package version. The native client downloads the APK, checks its hash and opens Android's installer. App updates do not depend on a person being unlocked. Both hosts serve the same package through the [publication workflow](../../docs/deployment.md#kenan); the browser client has no APK update button.
+
 Drop files anywhere in the client window to attach them to the open conversation's draft. A window-wide overlay names the destination. Dropping never sends a message, and read-only agent views do not accept attachments. Attachments stay with their conversation when switching threads, including while an upload is running.
 
 The paintbrush beside Attach and Paste opens white paper. Tapping an image in an interactive conversation opens that image in the same drawing editor, fitted to the screen. This includes generated images, Markdown images and expanded tool-result images. Drag with a mouse, finger or pen to draw. Two fingers pan, zoom and rotate the paper; the mouse wheel zooms around the pointer. Brush radius stays at 1% of the viewport's shorter side, so zooming in produces finer strokes.

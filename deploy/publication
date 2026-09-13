@@ -9,6 +9,7 @@ import {
   openSync,
   readFileSync,
   renameSync,
+  rmSync,
   writeFileSync,
 } from "node:fs";
 import { dirname, join, resolve } from "node:path";
@@ -405,6 +406,56 @@ function createIntegration(request, logPath) {
   request.step = "checks-passed";
   writeRequest(request);
   return { ok: true, status: 0, stdout: "", stderr: "" };
+}
+
+function prepareAndroidArtifact(request, logPath) {
+  const supported = commandResult("git", ["-C", checkout, "cat-file", "-e", `${request.integrationSha}:deploy/android-update`]);
+  if (!supported.ok) { delete request.android; return; }
+  if (request.android && request.android.release.revision !== request.integrationSha) rmSync(join(request.android.directory, request.android.release.fileName), { force: true });
+  const directory = join(proofRoot, request.requestId, "android-artifact", request.integrationSha);
+  if (request.android?.release?.revision === request.integrationSha && existsSync(join(directory, request.android.release.fileName))) {
+    if (sha256(join(directory, request.android.release.fileName)) !== request.android.release.sha256) throw new Error("Prepared Android artifact is corrupt");
+    return;
+  }
+  let result = runLogged(request, "select-android-source", "git", ["-C", checkout, "checkout", "--quiet", "--detach", request.integrationSha], 30, logPath);
+  if (!result.ok) throw new Error("Could not select the checked Android source");
+  const apk = join(checkout, "apps/kenan/android/app/build/outputs/apk/debug/app-debug.apk");
+  const identity = commandResult("unzip", ["-p", apk, "assets/app-release.json"]);
+  let builtRevision;
+  if (identity.ok) builtRevision = JSON.parse(identity.stdout).revision;
+  if (builtRevision !== request.integrationSha) {
+    copyFileSync(join(canonicalRepository, "apps/kenan/android/local.properties"), join(checkout, "apps/kenan/android/local.properties"));
+    result = runLogged(request, "build-android-update", "bash", ["-c", 'set -euo pipefail\nsource deploy/lib\npi_stack_prepare_dependencies "$PWD"\nnpm run android:build --workspace=kenan'], 180, logPath, { cwd: checkout });
+    if (!result.ok) throw new Error(`Android update build exited ${result.status}`);
+  }
+  result = runLogged(request, "prepare-android-update", join(checkout, "deploy/android-update"), ["prepare", directory], 60, logPath);
+  if (!result.ok) throw new Error(`Android artifact preparation exited ${result.status}`);
+  const manifest = join(directory, "manifest.json");
+  const release = JSON.parse(readFileSync(manifest, "utf8"));
+  if (release.revision !== request.integrationSha) throw new Error("Prepared Android revision does not match the checked integration");
+  request.android = { release, directory, manifest, status: "prepared", hosts: {} };
+  writeRequest(request);
+}
+
+function publishAndroidArtifact(request, logPath) {
+  if (!request.android) return;
+  const { directory, manifest } = request.android;
+  const tool = join(checkout, "deploy/android-update");
+  let result = runLogged(request, "publish-android-gmktec", "sudo", ["-n", tool, "install", directory], 30, logPath);
+  if (!result.ok) throw new Error(`GMKtec Android publication exited ${result.status}`);
+  request.android.hosts.gmktec = JSON.parse(runCapture(tool, ["verify", manifest], { timeoutSeconds: 30 }));
+  writeRequest(request);
+  const remoteDirectory = `/home/kenan/.cache/pi-stack-app-updates/${request.requestId}`;
+  result = runLogged(request, "transfer-android-converge", "bash", ["-c", 'set -euo pipefail\nssh -o BatchMode=yes converge-kenan mkdir -p -m 700 "$2"\nrsync -a --chmod=D700,F600 -e "ssh -o BatchMode=yes" "$1/" "converge-kenan:$2/"', "android-transfer", directory, remoteDirectory], 90, logPath);
+  if (!result.ok) throw new Error(`Converge Android transfer exited ${result.status}`);
+  const remoteTool = "/home/kenan/projects/pi-stack/deploy/android-update";
+  result = runLogged(request, "publish-android-converge", "ssh", ["-o", "BatchMode=yes", "converge-kenan", "sudo", "-n", remoteTool, "install", remoteDirectory], 30, logPath);
+  if (!result.ok) throw new Error(`Converge Android publication exited ${result.status}`);
+  request.android.hosts.converge = JSON.parse(runCapture("ssh", ["-o", "BatchMode=yes", "converge-kenan", remoteTool, "verify", `${remoteDirectory}/manifest.json`], { timeoutSeconds: 30 }));
+  request.android.status = "published";
+  writeRequest(request);
+  result = runLogged(request, "remove-android-transfer", "ssh", ["-o", "BatchMode=yes", "converge-kenan", "rm", "-rf", remoteDirectory], 30, logPath);
+  if (!result.ok) throw new Error(`Converge Android transfer cleanup exited ${result.status}`);
 }
 
 function publishIntegration(request, logPath) {
@@ -823,6 +874,7 @@ function processRequest(request) {
       if (!result.ok) throw new Error(result.stderr.trim() || `integration checks exited ${result.status}`);
     }
 
+    prepareAndroidArtifact(request, logPath);
     request.contract = hasExecutionContract(request.integrationSha) ? coreExecutionContract : null;
     if (!request.contract && activatedContract()) throw new Error("Refusing to remove the activated core execution contract");
     writeRequest(request);
@@ -910,6 +962,7 @@ function processRequest(request) {
       releaseCustody(request, "gmktec");
       releaseCustody(request, "converge");
     }
+    publishAndroidArtifact(request, logPath);
     const finalProofs = { gmktec: verifyGmktec(request.integrationSha), converge: verifyConverge(request.integrationSha) };
     const finalProofPath = join(requestProofRoot, "final-hosts.json");
     atomicWrite(finalProofPath, `${JSON.stringify(finalProofs, null, 2)}\n`);
@@ -929,6 +982,7 @@ function processRequest(request) {
     delete request.failure;
     writeRequest(request);
     appendLog(logPath, `[${new Date().toISOString()}] published integration=${request.integrationSha}\n`);
+    if (request.android) rmSync(join(request.android.directory, request.android.release.fileName), { force: true });
   } catch (error) {
     const restorationFailures = [];
     for (const [hostKey, remoteHost] of [["gmktec", undefined], ["converge", "converge-kenan"]]) {

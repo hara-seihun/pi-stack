@@ -49,7 +49,9 @@ jobs:
             echo "$repository has the wrong origin" >&2
             exit 1
           }
-          git -C "$repository" fetch --quiet --no-tags --depth=1 origin "+$GITHUB_REF:refs/ci/event"
+          history=()
+          if [[ $(git -C "$repository" rev-parse --is-shallow-repository) == true ]]; then history+=(--unshallow); fi
+          git -C "$repository" fetch --quiet --no-tags "${history[@]}" origin "+$GITHUB_REF:refs/ci/event"
           [[ $(git -C "$repository" rev-parse refs/ci/event) == "$GITHUB_SHA" ]]
           git -C "$repository" checkout --quiet --detach --force "$GITHUB_SHA"
           git -C "$repository" clean -dffx -e /node_modules/ -e '**/node_modules/'
