@@ -437,7 +437,7 @@ for line in sys.stdin:
   if last == 'abort-refuse':
    out({'type':'response','id':rid,'command':'abort','success':False,'error':'simulated refusal'})
   else:
-   streaming = False
+   streaming = last == 'abort-stale-streaming'
    compacting = False
    if child is not None:
     child.terminate()
@@ -1593,6 +1593,30 @@ describe("web and supervisor integration", () => {
     expect(aborted).toMatchObject({ status: 200, value: { ok: true } });
     const session = await api("GET", `/v1/sessions/${id}`);
     expect(session.value.session).toMatchObject({ state: "IDLE", activity: "IDLE" });
+  }, 15_000);
+
+  for (const kind of ["subagent", "adopted"] as const) test(`abort retires ${kind} runtimes despite stale native activity`, async () => {
+    const parent = await createThread("home", "astra");
+    const id = kind === "subagent"
+      ? (await api("POST", "/v1/sessions", { requestId: crypto.randomUUID(), parentSessionId: parent, model: "luna", task: "abort-stale-streaming" })).value.session.id
+      : parent;
+    if (kind === "adopted") await api("POST", `/v1/sessions/${id}/prompt`, { requestId: crypto.randomUUID(), text: "abort-stale-streaming" });
+    await waitFor(() => api("GET", `/v1/sessions/${id}`).then(result => result.value.session), session => session.activity === "WORKING");
+    const runtimePid = Number(JSON.parse(readFileSync(fakeLaunch, "utf8")).pid);
+    if (kind === "adopted") {
+      server.kill("SIGHUP");
+      expect(await server.exited).toBe(75);
+      await startServer();
+      await waitFor(() => api("GET", `/v1/sessions/${id}`).then(result => result.value.session), session => session.activity === "WORKING");
+    }
+    const aborted = await api("POST", `/v1/sessions/${id}/abort`, {});
+    expect(aborted).toMatchObject({ status: 200, value: { ok: true, retainedQueued: 0 } });
+    await waitFor(() => api("GET", `/v1/sessions/${id}`).then(result => result.value.session), session => session.state === "STOPPED");
+    await waitFor(async () => { try { process.kill(runtimePid, 0); return false; } catch { return true; } }, Boolean);
+    const ledger = new Database(join(root, "data", "supervisor.sqlite3"), { readonly: true });
+    try { expect(ledger.query("SELECT state FROM work_items WHERE session_id=? AND text='abort-stale-streaming'").get(id)).toEqual({ state: "cancelled" }); }
+    finally { ledger.close(); }
+    expect(readJsonLines(fakeRpcLog).filter(entry => entry.sessionId === id && entry.type === "prompt")).toHaveLength(1);
   }, 15_000);
 
   test("abort stops the active tool without terminating the agent process", async () => {
