@@ -10,6 +10,7 @@ type Availability =
 
 type InstallState = "idle" | "installing" | "installer-opened";
 
+const FOREGROUND_DEDUP_MS = 1_500;
 let activeCheck: Promise<AppUpdateCheck> | null = null;
 let recentCheck: { startedAt: number; promise: Promise<AppUpdateCheck> } | null = null;
 
@@ -19,7 +20,7 @@ function errorMessage(error: unknown) {
 
 function checkForUpdate(fresh = false) {
   if (activeCheck) return activeCheck;
-  if (!fresh && recentCheck && Date.now() - recentCheck.startedAt < 1_500) return recentCheck.promise;
+  if (!fresh && recentCheck && Date.now() - recentCheck.startedAt < FOREGROUND_DEDUP_MS) return recentCheck.promise;
   if (!remote.checkAppUpdate) return Promise.reject(new Error("App update checks are unavailable"));
 
   const promise = deadline(remote.checkAppUpdate(), 8_000, "App update check").finally(() => {
@@ -58,18 +59,20 @@ export function AppUpdateControl() {
 
   useEffect(() => {
     if (!nativePlatform || !remote.checkAppUpdate || !remote.installAppUpdate) return;
+    let lastForegroundCheck = Date.now();
     void check();
     const foreground = () => {
-      if (document.visibilityState === "visible") void check();
+      const now = Date.now();
+      if (document.visibilityState !== "visible" || now - lastForegroundCheck < FOREGROUND_DEDUP_MS) return;
+      lastForegroundCheck = now;
+      void check();
     };
     document.addEventListener("visibilitychange", foreground);
-    window.addEventListener("focus", foreground);
-    window.addEventListener("pageshow", foreground);
+    window.addEventListener("pi-app-foreground", foreground);
     return () => {
       generation.current++;
       document.removeEventListener("visibilitychange", foreground);
-      window.removeEventListener("focus", foreground);
-      window.removeEventListener("pageshow", foreground);
+      window.removeEventListener("pi-app-foreground", foreground);
     };
   }, [check]);
 
