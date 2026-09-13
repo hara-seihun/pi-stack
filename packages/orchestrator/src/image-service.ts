@@ -3,7 +3,7 @@ import { homedir } from "node:os";
 import { join, resolve } from "node:path";
 import type { ModelAuth } from "@earendil-works/pi-ai";
 import { builtinProviders } from "@earendil-works/pi-ai/providers/all";
-import { chooseInteractiveAccount } from "./auth/account-selection.js";
+import { chooseInteractiveAccount, eligibleInteractiveAccounts } from "./auth/account-selection.js";
 import { providerOAuth, type SharedOAuthAuth } from "./auth/shared-oauth.js";
 import { loadConfig } from "./config.js";
 import { Store } from "./store.js";
@@ -11,8 +11,10 @@ import { IMAGE_MODELS, IMAGE_QUALITIES, IMAGE_SIZES, PNG_SIGNATURE, requestImage
 
 export type SharedImageInput = Omit<ImageRequest, "images"> & { inputPaths?: readonly string[] };
 export type SharedImageFailure = ImageFailure | { kind: "invalid-input" | "unavailable" | "authentication" | "storage" | "closed"; message: string };
-export type SharedImageResult = Extract<ImageResult, { ok: true }> | { ok: false; error: SharedImageFailure };
-export type ImageGenerationOptions = { signal?: AbortSignal; cwd?: string };
+export { IMAGE_MODELS, IMAGE_QUALITIES, IMAGE_SIZES, type GeneratedImage } from "./image-generation.js";
+
+export type SharedImageResult = (Extract<ImageResult, { ok: true }> & { accountId: string }) | { ok: false; error: SharedImageFailure };
+export type ImageGenerationOptions = { signal?: AbortSignal; cwd?: string; accountSelection?: "spread" };
 export type SharedImageAccountOwner = { store: Store; shared: SharedOAuthAuth | undefined };
 export type SharedImageServiceOptions = { configPath?: string; ledgerPath?: string; authPath?: string };
 export interface SharedImageGenerationService {
@@ -83,6 +85,22 @@ export function imageAuth(auth: ModelAuth | undefined, kind: ImageAuth["kind"], 
   }
 }
 
+const spreadCursorKey = "image-account-spread-cursor";
+
+function chooseSpreadImageAccount(store: Store, shared: SharedOAuthAuth | undefined) {
+  const loads = new Map<string, number>();
+  for (const lease of store.activeLeases()) {
+    if (lease.kind === "interactive" && lease.id.startsWith("interactive:image:")) {
+      loads.set(lease.account_id, (loads.get(lease.account_id) ?? 0) + 1);
+    }
+  }
+  const cursor = store.control(spreadCursorKey) ?? "";
+  return eligibleInteractiveAccounts(store, shared, "openai-codex").sort((a, b) =>
+    (loads.get(a.id) ?? 0) - (loads.get(b.id) ?? 0)
+    || Number(a.id.localeCompare(cursor) <= 0) - Number(b.id.localeCompare(cursor) <= 0)
+    || a.id.localeCompare(b.id))[0];
+}
+
 export async function generateImageWithSharedAccount(input: SharedImageInput, options: SharedImageAccountOwner & ImageGenerationOptions): Promise<SharedImageResult> {
   const { store, shared } = options;
   const heartbeatFailure = new AbortController();
@@ -96,10 +114,13 @@ export async function generateImageWithSharedAccount(input: SharedImageInput, op
     if (!inputs.ok) return inputs;
     if (signal.aborted) return cancelled();
     const account = store.transaction(() => {
-      const account = chooseInteractiveAccount(store, shared, "openai-codex");
+      const account = options.accountSelection === "spread"
+        ? chooseSpreadImageAccount(store, shared)
+        : chooseInteractiveAccount(store, shared, "openai-codex");
       if (account) {
         const id = `interactive:image:${crypto.randomUUID()}`;
         store.createLease(id, account.id, "interactive");
+        if (options.accountSelection === "spread") store.setControl(spreadCursorKey, account.id);
         lease = id;
       }
       return account;
@@ -115,7 +136,8 @@ export async function generateImageWithSharedAccount(input: SharedImageInput, op
     if (!auth.ok) result = auth;
     else {
       phase = "storage";
-      result = await requestImage({ ...input, images: inputs.value }, auth.value, signal);
+      const response = await requestImage({ ...input, images: inputs.value }, auth.value, signal);
+      result = response.ok ? { ...response, accountId: account.id } : response;
       if (!result.ok && result.error.kind === "http" && result.error.status === 429) {
         store.setCooldown(account.id, Date.now() + (result.error.retryAfterMs ?? 60_000));
       }

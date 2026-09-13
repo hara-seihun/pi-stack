@@ -1,11 +1,12 @@
 import { afterEach, expect, test, vi } from "vitest";
 import { mkdtempSync, writeFileSync } from "node:fs";
+import { execFileSync } from "node:child_process";
 import { readdir, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { Store } from "../src/store.js";
 import { SharedOAuthAuth } from "../src/auth/shared-oauth.js";
-import { createSharedImageGenerationService, generateImageWithSharedAccount, IMAGE_MODELS } from "../src/api.js";
+import { createSharedImageGenerationService, generateImageWithSharedAccount, IMAGE_MODELS } from "../src/image-service.js";
 
 const png = Buffer.from("iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAusB9Wl6kXIAAAAASUVORK5CYII=", "base64");
 const roots: string[] = [];
@@ -18,14 +19,22 @@ afterEach(async () => {
   for (const store of stores.splice(0)) store.close();
   for (const root of roots.splice(0)) await rm(root, { recursive: true, force: true });
 });
-function fixture() {
+function sharedAuth(authPath: string) {
+  return new SharedOAuthAuth({ path: authPath, providerId: "openai-codex", refresh: async credential => credential, toAuth: async credential => ({ apiKey: credential.access }) });
+}
+function writeCredentials(authPath: string, aliases: readonly string[]) {
+  writeFileSync(authPath, JSON.stringify(Object.fromEntries(aliases.map(alias => [alias, {
+    type: "oauth", access: `${alias}-token`, refresh: `${alias}-refresh`, expires: Date.now() + 3600000, accountId: `${alias}-account`,
+  }]))));
+}
+function fixture(aliases: readonly string[] = ["test"]) {
   const root = mkdtempSync(join(tmpdir(), "pi-image-service-")); roots.push(root);
   const ledgerPath = join(root, "ledger.sqlite3");
   const store = Store.open(ledgerPath); stores.push(store);
   const authPath = join(root, "auth.json");
-  const shared = new SharedOAuthAuth({ path: authPath, providerId: "openai-codex", refresh: async credential => credential, toAuth: async credential => ({ apiKey: credential.access }) });
-  store.upsertAccount({ id: "test", provider: "openai-codex", enabled: true });
-  writeFileSync(authPath, JSON.stringify({ test: { type: "oauth", access: "test-token", refresh: "test-refresh", expires: Date.now() + 3600000, accountId: "test-account" } }));
+  const shared = sharedAuth(authPath);
+  for (const id of aliases) store.upsertAccount({ id, provider: "openai-codex", enabled: true });
+  writeCredentials(authPath, aliases);
   return { root, store, shared, ledgerPath, authPath };
 }
 function response() {
@@ -35,6 +44,8 @@ function response() {
 }
 
 test("public service loads existing config and returns bytes without publishing files", async () => {
+  execFileSync("bun", ["-e", `import { createSharedImageGenerationService, IMAGE_MODELS } from "pi-orchestrator/image-service";
+    if (typeof createSharedImageGenerationService !== "function" || !IMAGE_MODELS.length) process.exit(1);`], { cwd: new URL("..", import.meta.url), timeout: 5000 });
   const f = fixture();
   const configPath = join(f.root, "config.json");
   writeFileSync(configPath, JSON.stringify({ authPath: f.authPath }));
@@ -52,13 +63,82 @@ test("public service loads existing config and returns bytes without publishing 
   });
   vi.stubGlobal("fetch", transport);
   const result = await service.generateImageWithSharedAccount({ prompt: "Edit", inputPaths: ["@input.png"] }, { cwd: f.root });
-  expect(result).toEqual({ ok: true, images: [{ id: "image-test", bytes: png }], model: IMAGE_MODELS[0], responseId: "response-test", usage: { input_tokens: 10 } });
+  expect(result).toEqual({ ok: true, accountId: "test", images: [{ id: "image-test", bytes: png }], model: IMAGE_MODELS[0], responseId: "response-test", usage: { input_tokens: 10 } });
   expect(await readdir(f.root)).toEqual(files);
   expect(f.store.activeLeases()).toHaveLength(0);
   await service.close();
   await expect(service.generateImageWithSharedAccount({ prompt: "after shutdown" })).resolves.toMatchObject({ ok: false, error: { kind: "closed" } });
   await service.close();
   expect(transport).toHaveBeenCalledTimes(1);
+});
+
+test("spread balances simultaneous requests across eligible accounts and ignores unrelated load and spend", async () => {
+  const f = fixture(["a", "b", "c", "disabled", "anthropic", "voice", "reserved", "cooled", "missing-auth"]);
+  f.store.setAccountEnabled("disabled", false);
+  f.store.upsertAccount({ id: "anthropic", provider: "anthropic", enabled: true });
+  f.store.setControl("account-use:voice", "voice");
+  f.store.setControl("account-reservation:reserved", JSON.stringify({ reason: "reserved test account", metadata: {} }));
+  f.store.setCooldown("cooled", Date.now() + 60_000);
+  writeCredentials(f.authPath, ["a", "b", "c", "disabled", "anthropic", "voice", "reserved", "cooled"]);
+  f.store.recordMeter("a", "codex-7d", 99, Date.now() + 60_000);
+  f.store.recordMeter("b", "codex-7d", 50, Date.now() + 60_000);
+  f.store.recordMeter("c", "codex-7d", 1, Date.now() + 60_000);
+  f.store.createLease("interactive:image:expired", "a", "interactive", undefined, Date.now() - 120_001);
+  f.store.createLease("interactive:image:ended", "a", "interactive");
+  f.store.endLease("interactive:image:ended");
+  f.store.createLease("interactive:chat", "a", "interactive");
+
+  let release!: () => void;
+  let allStarted!: () => void;
+  const blocked = new Promise<void>(resolve => { release = resolve; });
+  const started = new Promise<void>(resolve => { allStarted = resolve; });
+  const selected: string[] = [];
+  vi.stubGlobal("fetch", vi.fn(async (_url, init) => {
+    selected.push(init.headers.get("chatgpt-account-id"));
+    if (selected.length === 6) allStarted();
+    await blocked;
+    return response();
+  }));
+
+  const owners = Array.from({ length: 6 }, (_, index) => {
+    const store = index === 0 ? f.store : Store.open(f.ledgerPath);
+    if (index > 0) stores.push(store);
+    return { store, shared: sharedAuth(f.authPath) };
+  });
+  const requests = owners.map((owner, index) => generateImageWithSharedAccount(
+    { prompt: `spread ${index}` }, { ...owner, accountSelection: "spread" },
+  ));
+  await started;
+  expect([...selected].sort()).toEqual(["a-account", "a-account", "b-account", "b-account", "c-account", "c-account"]);
+  expect(f.store.activeLeases().filter(lease => lease.id.startsWith("interactive:image:")))
+    .toHaveLength(6);
+  release();
+  const results = await Promise.all(requests);
+  expect(results.map(result => result.ok ? result.accountId : result.error.kind)).toEqual(["a", "b", "c", "a", "b", "c"]);
+
+  vi.stubGlobal("fetch", vi.fn(async () => response()));
+  f.store.createLease("interactive:image:busy", "a", "interactive");
+  await expect(generateImageWithSharedAccount({ prompt: "load before rotation" }, { ...f, accountSelection: "spread" }))
+    .resolves.toMatchObject({ ok: true, accountId: "b" });
+  f.store.endLease("interactive:image:busy");
+  await expect(generateImageWithSharedAccount({ prompt: "default selection" }, f))
+    .resolves.toMatchObject({ ok: true, accountId: "c" });
+});
+
+test("spread round-robin cursor survives new services and stores", async () => {
+  const f = fixture(["a", "b", "c"]);
+  vi.stubGlobal("fetch", vi.fn(async () => response()));
+  const selected: string[] = [];
+  for (let index = 0; index < 4; index++) {
+    const store = index === 0 ? f.store : Store.open(f.ledgerPath);
+    if (index > 0) stores.push(store);
+    const service = createSharedImageGenerationService({ store, shared: sharedAuth(f.authPath) });
+    const result = await service.generateImageWithSharedAccount({ prompt: `rotation ${index}` }, { accountSelection: "spread" });
+    expect(result.ok).toBe(true);
+    if (result.ok) selected.push(result.accountId);
+    await service.close();
+  }
+  expect(selected).toEqual(["a", "b", "c", "a"]);
 });
 
 test("close aborts and drains concurrent calls before returning, leaving a borrowed store open", async () => {
