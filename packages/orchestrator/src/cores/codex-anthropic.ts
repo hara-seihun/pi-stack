@@ -2,13 +2,14 @@ import { createServer, type IncomingMessage, type ServerResponse } from "node:ht
 import { once } from "node:events";
 import { createOAuthEncoder } from "./codex-anthropic-oauth.js";
 import { AnthropicAdapterError, translateAnthropicRequest } from "./codex-anthropic-request.js";
-import { streamAnthropicResponse } from "./codex-anthropic-stream.js";
+import { streamAnthropicResponse, type AnthropicResponseUsage } from "./codex-anthropic-stream.js";
 
 export interface CodexAnthropicAdapterOptions {
   sessionId: string;
   cwd?: string;
   credentials(request: { refresh: boolean; signal: AbortSignal }): Promise<{ accessToken: string }>;
   fetch?: typeof globalThis.fetch;
+  recordUsage?: (usage: AnthropicResponseUsage) => void | Promise<void>;
 }
 export interface CodexAnthropicAdapter {
   baseUrl: string;
@@ -122,7 +123,7 @@ export async function startCodexAnthropicAdapter(options: CodexAnthropicAdapterO
         throw new AnthropicAdapterError("Anthropic did not return an SSE stream", 502, "upstream_protocol_error");
       }
       response.writeHead(200, { "content-type": "text/event-stream", "cache-control": "no-cache", connection: "keep-alive" });
-      await streamAnthropicResponse(upstream, translated, emit, signal);
+      await streamAnthropicResponse(upstream, translated, emit, signal, options.recordUsage);
       response.end();
     } catch (error) {
       if (signal.aborted || response.destroyed) return;
@@ -132,7 +133,7 @@ export async function startCodexAnthropicAdapter(options: CodexAnthropicAdapterO
         response.writeHead(failure.status, { "content-type": "application/json" });
         response.end(JSON.stringify({ error: detail }));
       } else {
-        try { await emit("error", detail); response.end(); }
+        try { await emit("response.failed", { response: { id: `resp_error_${sequence}`, object: "response", status: "failed", error: detail } }); response.end(); }
         catch { response.destroy(); }
       }
     } finally {

@@ -35,7 +35,7 @@ function auth(path: string, refresh = async (value: any) => value, providerId = 
   });
 }
 
-function usage(overrides: Partial<CoreAccountUsage> = {}): CoreAccountUsage {
+function usage(overrides: Partial<Extract<CoreAccountUsage, { nativeThreadId: string }>> = {}): CoreAccountUsage {
   return {
     sessionId: "interactive-session",
     nativeThreadId: "native-thread",
@@ -71,8 +71,10 @@ describe("external core account bridge", () => {
       account.setActive(true);
       expect(store.activeLeases("openai-codex-2")).toEqual([]);
       expect(store.activeLeases("anthropic-2")).toHaveLength(1);
-      account.recordUsage(usage({ model: "claude-fable-5-1" }));
-      account.recordUsage(usage({ model: "claude-fable-5-1" }));
+      const evidence: CoreAccountUsage = { sessionId: "interactive-session", providerResponseId: "msg_anthropic",
+        model: "claude-fable-5-1", inputTokens: 100, cachedInputTokens: 40, cacheWriteInputTokens: 10, outputTokens: 20, totalTokens: 120 };
+      account.recordUsage(evidence);
+      account.recordUsage(evidence);
       expect(store.usageSince(0).reduce((total, row) => total + row.tokens, 0)).toBe(120);
       expect(store.usageSince(0).every(row => row.accountId === "anthropic-2")).toBe(true);
     } finally { await account.close(); }

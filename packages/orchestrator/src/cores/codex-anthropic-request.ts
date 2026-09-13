@@ -84,7 +84,11 @@ function jsonArguments(value: unknown): JsonObject {
 
 export function translateAnthropicRequest(raw: unknown): AnthropicRequest {
   const request = object(raw, "Responses request");
-  fields(request, ["model", "instructions", "input", "tools", "tool_choice", "parallel_tool_calls", "reasoning", "text", "stream", "store", "include", "max_output_tokens", "temperature", "top_p", "service_tier", "prompt_cache_key", "metadata", "previous_response_id", "truncation", "background", "stream_options", "prompt_cache_retention", "safety_identifier"], "Responses request");
+  fields(request, ["model", "instructions", "input", "tools", "tool_choice", "parallel_tool_calls", "reasoning", "text", "stream", "store", "include", "max_output_tokens", "temperature", "top_p", "service_tier", "prompt_cache_key", "metadata", "client_metadata", "previous_response_id", "truncation", "background", "stream_options", "prompt_cache_retention", "safety_identifier"], "Responses request");
+  if (request.client_metadata !== undefined) {
+    const metadata = object(request.client_metadata, "client_metadata");
+    for (const [key, value] of Object.entries(metadata)) string(value, `client_metadata.${key}`);
+  }
   if (request.stream !== true) throw new AnthropicAdapterError("This Codex transport requires stream=true");
   if (request.previous_response_id) throw new AnthropicAdapterError("previous_response_id is not supported; Codex must send full history");
   if (request.background) throw new AnthropicAdapterError("Background Responses are not supported");

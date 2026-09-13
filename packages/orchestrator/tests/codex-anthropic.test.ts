@@ -34,7 +34,7 @@ describe("Codex Anthropic Responses adapter", () => {
     const originalFetch = globalThis.fetch;
     const upstream = vi.fn(async () => stream(textEvents()));
     const adapter = await start(upstream as unknown as typeof fetch);
-    const body = request();
+    const body = request(undefined, { client_metadata: { "x-codex-turn-metadata": '{"turn_id":"native-turn"}', session_id: "native-session" } });
     const events = await readEvents(await post(adapter, body));
     expect(globalThis.fetch).toBe(originalFetch);
     const [url, init] = upstream.mock.calls[0] as unknown as [string, RequestInit];
@@ -46,6 +46,7 @@ describe("Codex Anthropic Responses adapter", () => {
     expect(payload.system.at(-1).cache_control).toEqual({ type: "ephemeral", ttl: "1h" });
     expect(payload.messages).toEqual([{ role: "user", content: [{ type: "text", text: "hello", cache_control: { type: "ephemeral", ttl: "1h" } }] }]);
     expect(JSON.parse(payload.metadata.user_id).session_id).toBe("codex-session");
+    expect(payload.client_metadata).toBeUndefined();
     expect(new Headers(init.headers).get("authorization")).toBe("Bearer subscription-token");
     expect(new Headers(init.headers).get("user-agent")).toContain("claude-cli/");
     expect(new Headers(init.headers).get("x-claude-code-session-id")).toBe("codex-session");
@@ -118,11 +119,11 @@ describe("Codex Anthropic Responses adapter", () => {
     const upstream = vi.fn(async () => stream(textEvents().slice(0, -1)));
     const adapter = await start(upstream as unknown as typeof fetch);
     const truncated = await readEvents(await post(adapter, request()));
-    expect(truncated.at(-1)).toMatchObject({ type: "error", code: "upstream_protocol_error" });
+    expect(truncated.at(-1)).toMatchObject({ type: "response.failed", response: { error: { code: "upstream_protocol_error" } } });
     expect(truncated.some(event => event.type === "response.completed")).toBe(false);
     expect(upstream).toHaveBeenCalledTimes(1);
     upstream.mockImplementation(async () => stream([begin, { type: "error", error: { type: "overloaded_error", message: "busy" } }]));
-    expect((await readEvents(await post(adapter, request()))).at(-1)).toMatchObject({ type: "error", code: "overloaded_error", message: "Anthropic overloaded_error: busy" });
+    expect((await readEvents(await post(adapter, request()))).at(-1)).toMatchObject({ type: "response.failed", response: { error: { code: "overloaded_error", message: "Anthropic overloaded_error: busy" } } });
   });
 
   it("disconnect and close cancel pending upstream reads; close is idempotent", async () => {
@@ -195,11 +196,11 @@ describe("Codex Anthropic Responses adapter", () => {
     expect(incomplete).toMatchObject({ type: "response.incomplete", response: { status: "incomplete", incomplete_details: { reason: "max_output_tokens" }, usage: { total_tokens: 47 } } });
     upstream.mockImplementation(async () => stream([begin, { type: "content_block_start", index: 0, content_block: { type: "thinking", thinking: "Unverifiable", signature: "" } }, { type: "content_block_stop", index: 0 }, ...end()]));
     const unsigned = await readEvents(await post(adapter, request()));
-    expect(unsigned.at(-1)).toMatchObject({ type: "error", message: "Anthropic thinking has no replay signature" });
+    expect(unsigned.at(-1)).toMatchObject({ type: "response.failed", response: { error: { message: "Anthropic thinking has no replay signature" } } });
     expect(unsigned.some(event => event.type === "response.output_item.done")).toBe(false);
     upstream.mockImplementation(async () => stream([begin, { type: "content_block_start", index: 0, content_block: { type: "tool_use", id: "toolu_bad", name: "apply_patch", input: { command: "wrong shape" } } }, { type: "content_block_stop", index: 0 }, ...end("tool_use")]));
     const malformed = await readEvents(await post(adapter, request(undefined, { tools: [{ type: "custom", name: "apply_patch" }] })));
-    expect(malformed.at(-1)).toMatchObject({ type: "error", message: "Anthropic custom tool input must be an object containing only an input string" });
+    expect(malformed.at(-1)).toMatchObject({ type: "response.failed", response: { error: { message: "Anthropic custom tool input must be an object containing only an input string" } } });
     expect(malformed.some(event => event.type === "response.output_item.done")).toBe(false);
   });
 

@@ -1,19 +1,8 @@
 import type { CoreSessionOptions } from "./contracts.js";
-import type { CoreAccountCredentialRequest, CoreAccountCredentials } from "./account.js";
+import type { CoreAccountCredentialRequest, CoreAccountCredentials, CoreAccountUsage } from "./account.js";
 
 export type CodexCredentials = CoreAccountCredentials;
-export interface CodexUsage {
-  sessionId: string;
-  nativeThreadId: string;
-  turnId: string;
-  model: string;
-  inputTokens: number;
-  cachedInputTokens: number;
-  cacheWriteInputTokens: number;
-  outputTokens: number;
-  reasoningOutputTokens: number;
-  totalTokens: number;
-}
+export type CodexUsage = CoreAccountUsage;
 export interface CodexAccountLease {
   credentials(request?: CoreAccountCredentialRequest): Promise<CodexCredentials>;
   /** Cumulative per-thread counters. The broker must upsert, not sum notifications. */

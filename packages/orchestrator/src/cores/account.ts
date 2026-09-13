@@ -32,11 +32,10 @@ export interface CoreAccountCredentialRequest {
   readonly signal?: AbortSignal;
 }
 
-/** Cumulative counters from one native Codex thread. */
-export interface CoreAccountUsage {
+/** Cumulative counters scoped to one native thread or provider response. */
+export type CoreAccountUsage = ({ readonly nativeThreadId: string; readonly turnId: string; readonly providerResponseId?: never }
+  | { readonly providerResponseId: string; readonly nativeThreadId?: never; readonly turnId?: never }) & {
   readonly sessionId: string;
-  readonly nativeThreadId: string;
-  readonly turnId: string;
   readonly model: string;
   readonly inputTokens: number;
   readonly cachedInputTokens: number;
@@ -44,7 +43,7 @@ export interface CoreAccountUsage {
   readonly outputTokens: number;
   readonly reasoningOutputTokens?: number;
   readonly totalTokens: number;
-}
+};
 
 export interface CoreAccount {
   readonly accountId: string;
@@ -239,12 +238,13 @@ export async function openCoreAccount(options: CoreAccountOptions): Promise<Core
     const recordUsage = (usage: CoreAccountUsage): void => {
       if (closed) throw new Error("Core account is closed");
       if (usage.sessionId !== options.sessionId) throw new Error("Codex usage belongs to another PiStack session");
-      if (!usage.nativeThreadId || !usage.turnId || !usage.model) throw new Error("Codex usage requires native thread, turn, and model identities");
+      if ((!usage.providerResponseId && (!usage.nativeThreadId || !usage.turnId)) || !usage.model) throw new Error("Core usage requires a native thread/turn or provider response and model identity");
+      const scope = usage.providerResponseId ? `${provider}:response:${usage.providerResponseId}` : usage.nativeThreadId!;
       const current = counters(usage);
       if (usage.reasoningOutputTokens !== undefined) nonnegativeInteger(usage.reasoningOutputTokens, "reasoningOutputTokens");
       const runId = assignedRunId ?? options.sessionId;
-      const source = `${assignedRunId ? "fleet" : "interactive"}:core:${usage.nativeThreadId}`;
-      const previous = usageByThread.get(usage.nativeThreadId)
+      const source = `${assignedRunId ? "fleet" : "interactive"}:core:${scope}`;
+      const previous = usageByThread.get(scope)
         ?? recordedCounters(store, source, runId);
       for (const key of Object.keys(current) as (keyof Required<UsageCounters>)[]) {
         if (current[key] < previous[key]) throw new Error(`Codex cumulative usage regressed for ${key}`);
@@ -272,7 +272,7 @@ export async function openCoreAccount(options: CoreAccountOptions): Promise<Core
           });
         }
       });
-      usageByThread.set(usage.nativeThreadId, current);
+      usageByThread.set(scope, current);
     };
 
     const close = (): Promise<void> => {

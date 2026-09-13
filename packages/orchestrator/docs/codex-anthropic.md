@@ -1,6 +1,6 @@
 # Anthropic transport for native Codex
 
-`src/cores/codex-anthropic.ts` owns a session-scoped HTTP adapter from Codex's Responses wire protocol to Anthropic Messages. Codex 0.154.0 supports custom Responses providers, not a native Messages provider. The adapter does not run Pi, assemble a Pi prompt, execute tools, start children, or record usage.
+`src/cores/codex-anthropic.ts` owns a session-scoped HTTP adapter from Codex's Responses wire protocol to Anthropic Messages. Codex 0.154.0 supports custom Responses providers, not a native Messages provider. The adapter does not run Pi, assemble a Pi prompt, execute tools or start children. It sends provider-reported usage to the account broker.
 
 ## Integration
 
@@ -43,18 +43,20 @@ The package adds the required subscription identity and billing blocks. Codex's 
 - Thinking and redacted-thinking blocks retain their original Anthropic signatures/data. Responses `reasoning.encrypted_content` contains a versioned `anthropic-thinking-v1:` envelope. It is an opaque protocol field, not adapter-side encryption. Codex persists it in its own transcript and returns it with subsequent full-history requests. The adapter rejects foreign OpenAI encrypted reasoning and unsigned reasoning rather than dropping it.
 - Model IDs, output limits, adaptive-thinking support, strict-tool support, and effort mappings come from `codex-models.ts`'s `anthropicModels()`. Fable supports minimal through max; minimal maps to Anthropic low, while xhigh and max retain their catalog mappings. Unsupported thinking-off requests fail. Older budget-thinking models use explicit token budgets bounded by the requested output cap.
 
+Codex's string-valued `client_metadata` is accepted as tracing metadata. It is not prompt content and is not forwarded to Anthropic's separate identity metadata field.
+
 The adapter emits Responses item/content/delta/done events for text, reasoning summaries, function arguments, and custom-tool input, followed by one terminal response event. Custom-tool input must first finish as valid Anthropic JSON before it can be emitted as a raw string. A provider error or premature stream end emits an error rather than a synthetic successful completion.
 
 ## Usage
 
-Only native Codex's `thread/tokenUsage/updated` notifications feed the account usage path. The adapter emits usage once, on the terminal response:
+Anthropic `message_start` and `message_delta` usage updates feed the account broker, keyed by the provider's response ID. The broker records only new counter deltas. Native Codex usage notifications do not also charge Anthropic accounts. This retains observed spend after a stream failure or output-limit exhaustion, and keeps cache-write attribution intact. The Responses terminal event carries the same usage for Codex's own counters:
 
 - `input_tokens` is uncached input plus cache reads plus cache creation.
 - `input_tokens_details.cached_tokens` is Anthropic cache-read input.
 - `output_tokens` includes thinking. `output_tokens_details.reasoning_tokens` comes from Anthropic `output_tokens_details.thinking_tokens` when supplied; absent detail becomes zero, without adding those tokens again.
 - `total_tokens` is total input plus output.
 
-The Responses object also includes `input_tokens_details.cache_creation_tokens`. Codex 0.154.0 does not retain that extra breakdown in its native usage schema. Cache writes are still counted in total input; they must not be recorded through a second additive usage callback. This prevents duplicate accounting but leaves exact cache-write price attribution unavailable through native Codex counters.
+The Responses object also includes `input_tokens_details.cache_creation_tokens`. Codex 0.154.0 discards that breakdown and omits usage from incomplete responses. PiStack's broker retains the provider's exact cache-write counts and observed incomplete-response usage independently. An incomplete response stays a native failure, never a synthetic success. A streamed error emits `response.failed` with Anthropic's message, rather than the generic `error` event that this Codex version ignores.
 
 ## Unsupported requests
 
@@ -65,7 +67,7 @@ Native provider configuration must keep automatic request and stream retries dis
 ## Focused checks
 
 ```sh
-npx vitest run packages/orchestrator/tests/codex-anthropic.test.ts --maxWorkers=1
+npx vitest run packages/orchestrator/tests/codex-anthropic.test.ts packages/orchestrator/tests/codex-anthropic-native.test.ts --maxWorkers=1
 ```
 
 The fake-upstream tests use the real installed OAuth encoder. They cover instruction preservation, fragmented SSE/UTF-8, signed thinking and function/custom-tool round trips, images and role updates, usage, refresh boundaries, explicit unsupported requests, stream failure, disconnect, and shutdown while credentials or upstream responses are pending.

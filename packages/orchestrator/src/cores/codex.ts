@@ -277,6 +277,7 @@ export function createCodexSession(dependencies: CodexDependencies): OpenCoreSes
         send({ type: "tool_execution_update", toolCallId: params.itemId, toolName: method.includes("fileChange") ? "apply_patch" : "exec_command",
           partialResult: { content: [{ type: "text", text: params.delta }] } });
       } else if (method === "thread/tokenUsage/updated") {
+        if (providerFamily() === "anthropic") return;
         const usage = (params.tokenUsage as ThreadTokenUsage).total;
         accounting = accounting.then(async () => {
           try {
@@ -371,6 +372,14 @@ export function createCodexSession(dependencies: CodexDependencies): OpenCoreSes
         if (!models.some(model => model.model === startingModel)) fail("Anthropic model not found");
         anthropic = await (dependencies.openAnthropic ?? startCodexAnthropicAdapter)({
           sessionId: options.sessionId, cwd: options.cwd,
+          recordUsage: async usage => {
+            const operation = accounting.then(() => account!.recordUsage({ ...usage, sessionId: options.sessionId }));
+            accounting = operation.catch(() => {
+              accountingFailure = true;
+              emit({ type: "core_error", core: "codex", error: "Anthropic account usage recording failed; new turns are blocked" });
+            });
+            await operation;
+          },
           credentials: async request => {
             const credentials = await account!.credentials(request);
             guard.remember(credentials);

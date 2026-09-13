@@ -1,4 +1,5 @@
 import { randomUUID } from "node:crypto";
+import type { CoreAccountUsage } from "./account.js";
 import { createParser } from "eventsource-parser";
 import { AnthropicAdapterError, encodeThinking, object, string, type AnthropicBlock, type AnthropicRequest, type JsonObject } from "./codex-anthropic-request.js";
 
@@ -11,8 +12,10 @@ interface BlockState {
   stopped: boolean;
 }
 export type EmitResponsesEvent = (type: string, fields: JsonObject) => Promise<void>;
+export type AnthropicResponseUsage = Omit<CoreAccountUsage, "sessionId" | "nativeThreadId" | "turnId"> & { providerResponseId: string };
 
-export async function streamAnthropicResponse(response: Response, request: AnthropicRequest, emit: EmitResponsesEvent, signal: AbortSignal): Promise<void> {
+export async function streamAnthropicResponse(response: Response, request: AnthropicRequest, emit: EmitResponsesEvent, signal: AbortSignal,
+  recordUsage?: (usage: AnthropicResponseUsage) => void | Promise<void>): Promise<void> {
   if (!response.body) throw new AnthropicAdapterError("Anthropic returned no response body", 502, "upstream_protocol_error");
   const output: JsonObject[] = [];
   const blocks = new Map<number, BlockState>();
@@ -22,6 +25,14 @@ export async function streamAnthropicResponse(response: Response, request: Anthr
   let stopped = false;
   let stopReason: string | undefined;
   let hasMessageDelta = false;
+  let providerResponseId: string | undefined;
+  const reportUsage = async () => {
+    if (!providerResponseId || usage.input_tokens === undefined || usage.output_tokens === undefined) return;
+    const input = usage.input_tokens + (usage.cache_read_input_tokens ?? 0) + (usage.cache_creation_input_tokens ?? 0);
+    await recordUsage?.({ providerResponseId, model: request.model, inputTokens: input,
+      cachedInputTokens: usage.cache_read_input_tokens ?? 0, cacheWriteInputTokens: usage.cache_creation_input_tokens ?? 0,
+      outputTokens: usage.output_tokens, reasoningOutputTokens: usage.thinking_tokens ?? 0, totalTokens: input + usage.output_tokens });
+  };
   const responseObject = (status: string): JsonObject => ({ id: responseId, object: "response", created_at: Math.floor(Date.now() / 1000), model: request.model, status, output });
   const protocolError = (message: string): never => { throw new AnthropicAdapterError(message, 502, "upstream_protocol_error"); };
   const updateUsage = (raw: unknown) => {
@@ -56,7 +67,9 @@ export async function streamAnthropicResponse(response: Response, request: Anthr
       const message = object(event.message, "Anthropic message");
       if (message.role !== "assistant") protocolError("Anthropic returned a non-assistant message");
       if (Array.isArray(message.content) && message.content.length) protocolError("Anthropic message_start unexpectedly contained content");
+      providerResponseId = string(message.id, "Anthropic response ID");
       updateUsage(message.usage);
+      await reportUsage();
       await emit("response.created", { response: responseObject("in_progress") });
       await emit("response.in_progress", { response: responseObject("in_progress") });
       return;
@@ -66,6 +79,7 @@ export async function streamAnthropicResponse(response: Response, request: Anthr
       const delta = object(event.delta, "Anthropic message delta");
       if (delta.stop_reason !== undefined && delta.stop_reason !== null) stopReason = string(delta.stop_reason, "stop_reason");
       updateUsage(event.usage);
+      await reportUsage();
       hasMessageDelta = true;
       return;
     }
