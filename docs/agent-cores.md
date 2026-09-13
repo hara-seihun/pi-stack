@@ -41,7 +41,7 @@ Remote freezes core dispatch payloads in `core_dispatches` before sending them, 
 
 ## Observing and controlling children
 
-The core publishes `core_agent` and `core_child_event`. Remote stores child metadata in `core_agents`, keyed by the owning thread and core generation, rather than admitting each child as a separate PiStack thread. A core reports whole-tree activity and settlement.
+The core publishes `core_agent` and `core_child_event`. Remote stores child metadata in `core_agents`, keyed by the owning thread and core generation, rather than admitting each child as a separate PiStack thread. Its [runtime wire projection](../apps/remote/docs/runtime-wire.md) drops child event envelopes after the core journal records them. The supervisor does not duplicate those journals in SQLite; child inspection requests still return complete transcripts. Fleet consumers retain the complete core wire for accounting. A core reports whole-tree activity and settlement.
 
 - `GET /v1/sessions/:sessionId/core/agents` reads observed agents without starting the engine.
 - `GET /v1/sessions/:sessionId/core/agents/:agentId` asks the engine for that agent's state and messages.
