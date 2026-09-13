@@ -580,7 +580,7 @@ function acknowledgeMessageContext(sessionId: string, finalizesMessage: unknown)
   rt.pendingContextTextLength = 0;
   rt.pendingContextThinkingLength = 0;
   signalLiveSync();
-  if (!retireSettledSubagent(sessionId, rt)) kickSession(sessionId);
+  if (!retireIdleRuntime(sessionId, rt)) kickSession(sessionId);
 }
 
 const error = (message: string, status = 400) => json({ error: message }, status);
@@ -1269,8 +1269,11 @@ async function verifyRuntimeSettlement(sessionId: string, rt: Runtime) {
   await reconcileRuntimeState(sessionId, rt);
 }
 
-function retireSettledSubagent(sessionId: string, rt: Runtime): boolean {
-  if (!subagentIdentity(sessionId) || rt.phase !== "IDLE" || rt.pendingContextFinalization) return false;
+function retireIdleRuntime(sessionId: string, rt: Runtime): boolean {
+  if (rt.phase !== "IDLE") return false;
+  const subagent = subagentIdentity(sessionId);
+  if (!subagent && !rt.replaceAfterSettle) return false;
+  if (subagent && rt.pendingContextFinalization) return false;
   if (db.query("SELECT 1 FROM work_items WHERE session_id=? AND state IN ('queued','running','dispatched') LIMIT 1").get(sessionId)) return false;
   rt.expectedExit = true;
   rt.suppressOutput = true;
@@ -1313,15 +1316,7 @@ function settleRuntime(sessionId: string, rt: Runtime, emitEvent: boolean): bool
   setState(sessionId, pendingWork > 0 ? "RUNNING" : "IDLE");
   if (emitEvent) emit(sessionId, "settled");
   relayThreadResults();
-  if (retireSettledSubagent(sessionId, rt)) return true;
-  if (rt.replaceAfterSettle && pendingWork === 0) {
-    rt.expectedExit = true;
-    rt.suppressOutput = true;
-    setRuntimePhase(sessionId, rt, "STOPPING");
-    void terminateRuntimeProcess(rt);
-  } else {
-    kickSession(sessionId);
-  }
+  if (!retireIdleRuntime(sessionId, rt)) kickSession(sessionId);
   return true;
 }
 
@@ -1570,9 +1565,11 @@ async function terminateFailedHandoff(handoff: RuntimeHandoff) {
 }
 
 async function reconcileAdoptedRuntime(row: any, rt: Runtime) {
+  const phaseVersion = rt.phaseVersion;
   try {
     const state = await rpc(rt, "get_state", {}, 5_000);
-    if (!ownsSupervisorLease() || runtimes.get(row.id) !== rt) return;
+    if (!ownsSupervisorLease() || runtimes.get(row.id) !== rt || rt.phaseVersion !== phaseVersion
+      || ["ABORTING", "STOPPING"].includes(rt.phase)) return;
     sessionCores.started(row.id);
     if (isCoreId(state.core)) rt.core = state.core;
     if (state.model?.id) rt.modelId = String(state.model.id);
@@ -2252,7 +2249,7 @@ async function abortCurrentOperation(sessionId: string): Promise<AbortOperationR
     } else if (rt.phase === "IDLE") {
       rt.retrying = false;
       setRuntimePhase(sessionId, rt, "IDLE", retainedCount > 0 ? "RUNNING" : "IDLE");
-      if (retainedCount > 0) kickSession(sessionId);
+      if (!retireIdleRuntime(sessionId, rt) && retainedCount > 0) kickSession(sessionId);
     } else {
       touchSession(sessionId);
     }
@@ -2312,7 +2309,7 @@ async function abortCurrentOperation(sessionId: string): Promise<AbortOperationR
     "SELECT COUNT(*) count FROM work_items WHERE session_id=? AND state IN ('queued','running')",
   ).get(sessionId) as any)?.count ?? 0);
   setRuntimePhase(sessionId, rt, "IDLE", supervisorQueued > 0 ? "RUNNING" : "IDLE");
-  if (supervisorQueued > 0) kickSession(sessionId);
+  if (!retireIdleRuntime(sessionId, rt) && supervisorQueued > 0) kickSession(sessionId);
   return { ok: true, retainedQueued: retainedCount };
 }
 
@@ -3216,7 +3213,7 @@ const reaper = setInterval(() => {
   const cutoff = Date.now() - 15 * 60_000;
   pruneUploadTransfers();
   for (const [id, rt] of runtimes) {
-    if (retireSettledSubagent(id, rt)) continue;
+    if (retireIdleRuntime(id, rt)) continue;
     if (rt.phase === "IDLE" && rt.lastActivity < cutoff) {
       rt.expectedExit = true;
       rt.suppressOutput = true;
