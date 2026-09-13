@@ -3,6 +3,24 @@ import { Store } from "../src/store.js";
 import { accountCapacity } from "../src/policy.js";
 import { loadConfig } from "../src/config.js";
 
+it("recovers host interruptions with custody while keeping actual operator aborts terminal", () => {
+  const store=Store.open(":memory:");
+  try {
+    store.upsertAccount({id:"a",provider:"anthropic"});
+    const [id]=store.createRuns({count:1,source:"direct",prompt:"research",cwd:"/tmp",profile:"fable",budget:"force",core:"codex"});
+    store.assignRun(id!,{accountId:"a",provider:"anthropic",model:"claude-fable-5-1",thinking:"max",unit:"worker",releasePath:"/release/first"});
+    store.updateRun(id!,{nativeSessionId:"native",state:"aborted",failureKind:"operator",result:"aborted"});
+    expect(store.recoverInterruptedRun(id!,"/release/next",1234)).toBe(true);
+    expect(store.run(id!)).toMatchObject({state:"starting",nativeSessionId:"native",accountId:"a",thinking:"max",releasePath:"/release/next"});
+    expect(JSON.parse(store.control(`run-interruption:${id}:1234`)!)).toMatchObject({result:"aborted",releasePath:"/release/first"});
+    store.updateRun(id!,{state:"failed",failureKind:"infrastructure",result:"TypeError: fetch failed"});
+    expect(store.recoverInterruptedRun(id!,"/release/next",1235)).toBe(true);
+    store.updateRun(id!,{state:"aborted",failureKind:"operator",result:"aborted"});
+    store.setControl(`abort:${id}`,"abort");
+    expect(store.recoverInterruptedRun(id!,"/release/next")).toBe(false);
+  } finally { store.close(); }
+});
+
 it("continues only provider-output-limited native runs and preserves their assignment and failure receipt", () => {
   const store=Store.open(":memory:");
   try {

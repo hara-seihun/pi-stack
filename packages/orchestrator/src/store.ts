@@ -374,6 +374,22 @@ export class Store {
       return true;
     });
   }
+  recoverInterruptedRun(id:string,releasePath:string,at=Date.now()):boolean{
+    return this.transaction(()=>{
+      const run=this.run(id);
+      if(!run||!run.nativeSessionId||!run.accountId||!run.workerUnit||run.childrenOwner!=="core"||this.control(`abort:${id}`))return false;
+      const interrupted=run.state==="aborted"&&run.result==="aborted"
+        ||run.state==="failed"&&run.failureKind==="infrastructure"&&["TypeError: fetch failed","Error: Core turn interrupted without an operator abort"].includes(run.result??"")
+        ||run.state==="failed"&&(run.result??"").includes("role 'system' must precede an 'assistant' message or end the array");
+      if(!interrupted)return false;
+      this.setControl(`run-interruption:${id}:${at}`,JSON.stringify({result:run.result,failureKind:run.failureKind,
+        endedAt:run.endedAt,releasePath:run.releasePath,workerUnit:run.workerUnit}));
+      this.db.prepare("UPDATE run SET state='starting',release_path=?,worker_unit=?,result='recovering the recorded core session after infrastructure repair',failure_kind=NULL,ended_at=NULL,updated_at=?,progress_at=? WHERE id=?")
+        .run(releasePath,`pi-orchestrator-run-${id.replaceAll('-','')}-${at}`,at,at,id);
+      this.createLease(`run:${id}`,run.accountId,"fleet",id,at);
+      return true;
+    });
+  }
   adoptAssignedRun(id:string,at=Date.now()):boolean{
     return this.transaction(()=>{
       const run=this.run(id);

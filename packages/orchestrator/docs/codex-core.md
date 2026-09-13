@@ -95,6 +95,12 @@ Every native child emits `core_agent` with a `CoreAgent` record. Root parent IDs
 
 ## Durable state and continuation
 
+Fleet workers tolerate up to two minutes of daemon transport loss during deployment. Reads and idempotent heartbeat, state and usage receipts reconnect; dispatch and completion commands are not replayed after an unknown outcome. A recovered native interrupted turn continues in its existing session unless the fleet has a durable operator-abort control. An interruption alone never becomes operator cancellation.
+
+Codex instruction updates are placed immediately before the next assistant turn, or at history end, as required by Anthropic's mid-conversation system interface. A run stopped by the prior system-message ordering defect also supports explicit `recover`; its failed provider turn remains in native history and the repaired continuation uses the same session.
+
+`pi-orchestrator recover RUN_ID` restores a core run stopped by a worker transport failure or a native interruption incorrectly recorded as an operator abort. It requires retained native custody and no operator-abort control, retains the original failure under `run-interruption:RUN_ID:TIMESTAMP`, and keeps the original model, thinking level and account on the current release. Previous-release workers reporting either recognized interruption during deployment receive the same recovery automatically. Other failures and completed work are not reopened.
+
 One runtime owner opens a given `stateDir`. `codex-session.json` stores the native thread ID, saved provider/model settings, message timestamps, transfer status, transferred activity records, and dispatch receipts. Writes use atomic replacement. This is adapter state, not a Pi session file. `get_state.sessionFile` points to it so callers must not open it with Pi's session parser.
 
 `stateDir/codex` is the private native `CODEX_HOME`, including native history. The adapter links existing `config.toml`, `AGENTS.md`, `skills`, `agents`, `rules`, and `plugins` from the configured `CODEX_HOME`, or the user's `.codex`, into that directory. It does not copy native auth or unrelated threads. The OpenAI external token login and ephemeral credential store keep auth out of files. Anthropic's loopback provider endpoint is recreated before native resume; its OAuth token never enters the native home. Recovery requires both the adapter state and native home. Deleting either loses native continuation; there is no automatic conversation replay.
