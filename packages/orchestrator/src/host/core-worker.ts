@@ -167,8 +167,12 @@ export async function runCoreWorker(run: Run, options: CoreSessionOptions, open:
     if (current.terminalError) throw new Error(String(current.terminalError));
     if (current.unresolvedCommands?.length) throw new Error(`Core has unresolved dispatch outcomes: ${current.unresolvedCommands.join(", ")}`);
     const recovered = Boolean(current.messageCount > 0 || current.lastAssistantMessage);
+    const interrupted = current.lastAssistantMessage?.stopReason === "aborted";
+    // Native interruption records process loss as well as operator cancellation.
+    // The durable fleet control, not that native status, owns cancellation intent.
+    if (interrupted) aborting = Boolean((await request(`${root}/control`)).abort);
     const active = current.coreBusy || current.isStreaming || current.isCompacting || current.pendingMessageCount > 0 || current.agents?.some((agent: Json) => agent.state === "running");
-    if (!active && (!recovered || !current.lastAssistantMessage || !current.treeComplete)) {
+    if (!aborting && !active && (!recovered || !current.lastAssistantMessage || !current.treeComplete || interrupted)) {
       await wire.command("prompt", { ...(!recovered ? { id: `run:${run.id}:initial` } : {}),
         workId: !recovered ? `run:${run.id}:initial` : `run:${run.id}:continue:${current.nativeSessionId}:${current.messageCount}`,
         message: recovered
@@ -195,7 +199,9 @@ export async function runCoreWorker(run: Run, options: CoreSessionOptions, open:
     if (current.terminalError) throw new Error(String(current.terminalError));
     if (compactionFailure && !aborting) { providerFailure = true; throw new Error(compactionFailure); }
     if (last?.stopReason === "error") { providerFailure = true; throw new Error(last.errorMessage ?? "Provider failed"); }
-    if (aborting || last?.stopReason === "aborted") {
+    if (last?.stopReason === "aborted" && !aborting) aborting = Boolean((await request(`${root}/control`)).abort);
+    if (last?.stopReason === "aborted" && !aborting) throw new Error("Core turn interrupted without an operator abort");
+    if (aborting) {
       await wire.close();
       await post(`${root}/state`, { state: "aborted", failureKind: "operator", result: "aborted" });
       return;

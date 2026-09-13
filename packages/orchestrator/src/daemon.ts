@@ -367,6 +367,9 @@ export class Daemon {
       }
       if(method==="POST"&&url.pathname.startsWith("/internal/runs/")){
         const parts=url.pathname.split("/"),id=parts[3]!,action=parts[4],input=await body(req);
+        // A replay from a replaced worker must not mutate its successor.
+        const workerUnit=req.headers["x-pi-worker-unit"];
+        if(workerUnit&&workerUnit!==this.store.run(id)?.workerUnit)return json(res,200,{superseded:true});
         if(action==="heartbeat")return this.heartbeats.accept(id,input)?json(res,200,{ok:true}):json(res,404,{error:"run not found"});
         if(!this.store.run(id))return json(res,404,{error:"run not found"});
         if(action==="completion"&&parts[5]==="claim")return completionReply(this.completions.claim(id,input.attemptId));
@@ -405,6 +408,8 @@ export class Daemon {
           // Restore their unfinished turn on this release once that worker has closed it.
           if(input.state==="failed"&&this.store.run(id)?.releasePath!==this.releasePath)
             this.store.continueOutputLimitedRun(id,this.releasePath);
+          if(["failed","aborted"].includes(input.state)&&this.store.run(id)?.releasePath!==this.releasePath)
+            this.store.recoverInterruptedRun(id,this.releasePath);
           const run=this.store.run(id);
           if(input.cooldownUntil&&run?.accountId)this.store.setCooldown(run.accountId,Number(input.cooldownUntil));
           if(input.activity)this.store.setLive(id,input);
@@ -467,6 +472,12 @@ export class Daemon {
         void this.reconcile();return json(res,201,{runIds:ids});
       }
       if(method==="POST"&&url.pathname==="/v1/wave"){const input=await body(req),lane=this.store.lane(String(input.lane));if(!lane)return json(res,404,{error:"lane not found"});if(input.core!==undefined&&!isCoreId(input.core))return json(res,400,{error:"core must be pi or codex"});const ids=this.store.createRuns({count:Number(input.count??1),source:"direct",sourceId:lane.id,prompt:lane.prompt,cwd:lane.cwd,profile:lane.profile,core:resolveCore(this.config,lane.profile,input.core??lane.core),budget:input.force?"force":"background"});void this.reconcile();return json(res,201,{runIds:ids});}
+      const runRecover=/^\/v1\/runs\/([^/]+)\/recover$/.exec(url.pathname);
+      if(method==="POST"&&runRecover){
+        if(!this.store.recoverInterruptedRun(runRecover[1]!,this.releasePath))return json(res,409,{error:"Only a host-interrupted core run without an operator abort can recover"});
+        void this.reconcile();
+        return json(res,200,{run:this.store.run(runRecover[1]!)});
+      }
       const runContinue=/^\/v1\/runs\/([^/]+)\/continue$/.exec(url.pathname);
       if(method==="POST"&&runContinue){
         if(!this.store.continueOutputLimitedRun(runContinue[1]!,this.releasePath))return json(res,409,{error:"Only an output-limited Codex run without an operator abort can continue"});

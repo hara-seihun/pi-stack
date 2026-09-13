@@ -4,6 +4,28 @@ import { Daemon } from "../src/daemon.js";
 import { loadConfig } from "../src/config.js";
 import { Store } from "../src/store.js";
 
+it("recovers a previous worker interruption once and fences its replay from the successor", async () => {
+  const store=Store.open(":memory:");
+  store.upsertAccount({id:"a",provider:"anthropic"});
+  const [id]=store.createRuns({count:1,source:"direct",prompt:"work",cwd:"/tmp",profile:"fable",budget:"force",core:"codex"});
+  store.assignRun(id!,{accountId:"a",provider:"anthropic",model:"claude-fable-5-1",unit:"worker",releasePath:"/previous"});
+  store.updateRun(id!,{nativeSessionId:"native",state:"running"});
+  const daemon=new Daemon(store,loadConfig("/missing"),"/current") as any;
+  const server=createServer((req,res)=>void daemon.request(req,res));
+  try {
+    await new Promise<void>(resolve=>server.listen(0,"127.0.0.1",resolve));
+    const url=`http://127.0.0.1:${(server.address() as {port:number}).port}/internal/runs/${id}/state`;
+    const post=()=>fetch(url,{method:"POST",headers:{"x-pi-worker-unit":"worker"},body:JSON.stringify({state:"failed",failureKind:"infrastructure",result:"TypeError: fetch failed"})});
+    expect((await post()).status).toBe(200);
+    const next=store.run(id!)!;
+    expect(next).toMatchObject({state:"starting",releasePath:"/current",nativeSessionId:"native"});
+    expect(await (await post()).json()).toEqual({superseded:true});
+    expect(store.run(id!)).toEqual(next);
+  } finally {
+    await new Promise<void>(resolve=>server.close(()=>resolve()));store.close();
+  }
+});
+
 it("serves worker abort controls and rejects unknown worker actions", async () => {
   const store = Store.open(":memory:");
   const [id] = store.createRuns({ count: 1, source: "direct", prompt: "work", cwd: "/tmp", profile: "standard", budget: "background" });
