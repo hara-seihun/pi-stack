@@ -37,8 +37,11 @@ endpoints.each { endpoint ->
 def endpointsJson = groovy.json.JsonOutput.toJson(endpoints)
 def javaString = { value -> '"' + value.replace('\\', '\\\\').replace('"', '\\"') + '"' }
 def packageConfig = new JsonSlurper().parse(rootProject.file('../package.json'))
-def capacitorConfig = new JsonSlurper().parse(rootProject.file('../capacitor.config.json'))
-def applicationIdValue = capacitorConfig.appId
+def releaseInfoJson = providers.exec {
+    commandLine 'node', rootProject.file('../release-info.mjs').absolutePath
+}.standardOutput.asText.get().trim()
+def releaseInfo = new JsonSlurper().parseText(releaseInfoJson)
+def applicationIdValue = releaseInfo.applicationId
 def versionNameValue = packageConfig.version
 
 android {
@@ -49,10 +52,11 @@ android {
         applicationId applicationIdValue
         minSdkVersion rootProject.ext.minSdkVersion
         targetSdkVersion rootProject.ext.targetSdkVersion
-        versionCode 97
+        versionCode releaseInfo.versionCode
         versionName versionNameValue
         testInstrumentationRunner "androidx.test.runner.AndroidJUnitRunner"
         buildConfigField "String", "ENDPOINTS", javaString(endpointsJson)
+        buildConfigField "String", "RELEASE_REVISION", javaString(releaseInfo.revision)
         aaptOptions {
              // Files and dirs to omit from the packaged assets dir, modified to accommodate modern web apps.
              // Default: https://android.googlesource.com/platform/frameworks/base/+/282e181b58cf72b6ca770dc7ca5f91f135444502/tools/aapt/AaptAssets.cpp#61
@@ -70,6 +74,21 @@ android {
             proguardFiles getDefaultProguardFile('proguard-android.txt'), 'proguard-rules.pro'
         }
     }
+}
+
+def releaseAssets = layout.buildDirectory.dir('generated/appReleaseAssets')
+def generateAppRelease = tasks.register('generateAppRelease') {
+    inputs.property('releaseInfo', releaseInfoJson)
+    outputs.dir(releaseAssets)
+    doLast {
+        File target = new File(releaseAssets.get().asFile, 'app-release.json')
+        target.parentFile.mkdirs()
+        target.text = releaseInfoJson + '\n'
+    }
+}
+android.sourceSets.main.assets.srcDir(releaseAssets)
+tasks.matching { it.name.startsWith('merge') && it.name.endsWith('Assets') }.configureEach {
+    dependsOn(generateAppRelease)
 }
 
 def liveServerUrl = providers.gradleProperty('piRemoteLiveServerUrl').orElse('').get().trim()
