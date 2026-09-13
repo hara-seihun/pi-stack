@@ -26,7 +26,7 @@ import java.util.HashSet;
 import java.util.Set;
 
 final class AppUpdates {
-    static final long MAX_APK_BYTES = 256L * 1024 * 1024;
+    static final long MAX_APK_BYTES = 100L * 1024 * 1024;
     private final Context context;
     private final File directory;
 
