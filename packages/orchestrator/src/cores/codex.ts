@@ -5,6 +5,8 @@ import { join } from "node:path";
 import { argument, type CoreAgent, type CoreCommand, type CoreOutput, type OpenCoreSession } from "./contracts.js";
 import { credentialGuard, type CodexAccountLease, type OpenCodexAccount } from "./codex-auth.js";
 import { openCoreAccount } from "./account.js";
+import { anthropicCodexModels, codexProviderFamily } from "./codex-models.js";
+import { startCodexAnthropicAdapter, type CodexAnthropicAdapter } from "./codex-anthropic.js";
 import { writeCoreState } from "./journal.js";
 import { openCodexRpc, type CodexRpc, type Json, type OpenCodexRpc, type RpcResult } from "./codex-rpc.js";
 import { CodexProjection, transferItems } from "./codex-projection.js";
@@ -28,6 +30,7 @@ type State = {
 export interface CodexDependencies {
   openAccount: OpenCodexAccount;
   openRpc?: OpenCodexRpc;
+  openAnthropic?: typeof startCodexAnthropicAdapter;
   binary?: string;
   /** Native app-server flags, not Pi runtime arguments. */
   appServerArgs?: string[];
@@ -35,7 +38,7 @@ export interface CodexDependencies {
 class Failure extends Error {}
 function fail(message: string): never { throw new Failure(message); }
 const needString = (value: unknown, name: string): string => typeof value === "string" && value.trim() ? value : fail(`${name} is required`);
-const publicModel = (model: Model) => ({ id: model.model, provider: "openai-codex", name: model.displayName,
+const publicModel = (model: Model, provider: string) => ({ id: model.model, provider, name: model.displayName,
   reasoning: model.supportedReasoningEfforts.length > 0, input: model.inputModalities, nativeCore: "codex" });
 
 /** Bind the account owner once at the integration layer; credentials never become core output. */
@@ -91,6 +94,7 @@ export function createCodexSession(dependencies: CodexDependencies): OpenCoreSes
       if (threadId === state.threadId) emit(event); else emit({ type: "core_child_event", agentId: threadId, event });
     };
     let closed = false, ready = false, account: CodexAccountLease | undefined, rpc: CodexRpc | undefined;
+    let anthropic: CodexAnthropicAdapter | undefined;
     let closePromise: Promise<void> | undefined, handlingCommand = false, pendingExit: { code?: number } | undefined, exitSent = false;
     const notifyExit = (code?: number) => {
       if (exitSent) return;
@@ -106,13 +110,14 @@ export function createCodexSession(dependencies: CodexDependencies): OpenCoreSes
     const notifications: [string, Json][] = [];
     let models: Model[] = [];
     const modelId = () => state.model ?? "";
+    const providerFamily = () => codexProviderFamily(state.provider ?? "openai-codex")!;
     const projection = (threadId: string) => {
       let value = projections.get(threadId);
       if (!value) {
         value = new CodexProjection(() => threadId === state.threadId ? modelId() : nativeSettings.get(threadId)?.model ?? agents.get(threadId)?.model ?? "", event => {
           if (threadId === state.threadId) emit(event);
           else if (agents.has(threadId)) emit({ type: "core_child_event", agentId: threadId, event });
-        }, stamp);
+        }, stamp, providerFamily);
         projections.set(threadId, value);
       }
       return value;
@@ -272,6 +277,7 @@ export function createCodexSession(dependencies: CodexDependencies): OpenCoreSes
         send({ type: "tool_execution_update", toolCallId: params.itemId, toolName: method.includes("fileChange") ? "apply_patch" : "exec_command",
           partialResult: { content: [{ type: "text", text: params.delta }] } });
       } else if (method === "thread/tokenUsage/updated") {
+        if (providerFamily() === "anthropic") return;
         const usage = (params.tokenUsage as ThreadTokenUsage).total;
         accounting = accounting.then(async () => {
           try {
@@ -292,6 +298,7 @@ export function createCodexSession(dependencies: CodexDependencies): OpenCoreSes
           const credentials = await account!.credentials({ refresh: true,
             ...(typeof params.previousAccountId === "string" ? { previousAccountId: params.previousAccountId } : {}) });
           guard.remember(credentials);
+          if (!credentials.chatgptAccountId) fail("This core has no ChatGPT account");
           return { ok: true, value: { accessToken: credentials.accessToken, chatgptAccountId: credentials.chatgptAccountId,
             chatgptPlanType: credentials.chatgptPlanType ?? null } };
         } catch { return { ok: false, error: "Codex account broker refresh failed" }; }
@@ -340,6 +347,7 @@ export function createCodexSession(dependencies: CodexDependencies): OpenCoreSes
       closed = true;
       // Do not release account custody until the app-server's process tree is stopped.
       await rpc?.close();
+      await anthropic?.close();
       await accounting;
       await Promise.allSettled(subscriptions.values());
       await closeAccount();
@@ -348,7 +356,7 @@ export function createCodexSession(dependencies: CodexDependencies): OpenCoreSes
       const provider = argument(options.args, "--provider") ?? state.provider ?? "openai-codex";
       const startingModel = needString(argument(options.args, "--model") ?? state.model, "Starting --model or saved model");
       state.provider = provider;
-      if (provider && !/^openai-codex(?:-\d+)?$/.test(provider) && provider !== "openai") fail("Codex core requires a ChatGPT account provider");
+      if (!codexProviderFamily(provider)) fail("Codex core requires an OpenAI or Anthropic account provider");
       const nativeHome = join(options.stateDir, "codex");
       mkdirSync(nativeHome, { recursive: true, mode: 0o700 });
       const sourceHome = options.env.CODEX_HOME ?? join(options.env.HOME ?? homedir(), ".codex");
@@ -358,9 +366,33 @@ export function createCodexSession(dependencies: CodexDependencies): OpenCoreSes
         if (source !== target && existsSync(source) && !existsSync(target)) symlinkSync(source, target);
       }
       account = await dependencies.openAccount({ ...options, args: [...options.args, "--provider", provider, "--model", startingModel] });
+      const providerArgs: string[] = [];
+      if (providerFamily() === "anthropic") {
+        models = anthropicCodexModels();
+        if (!models.some(model => model.model === startingModel)) fail("Anthropic model not found");
+        anthropic = await (dependencies.openAnthropic ?? startCodexAnthropicAdapter)({
+          sessionId: options.sessionId, cwd: options.cwd,
+          recordUsage: async usage => {
+            const operation = accounting.then(() => account!.recordUsage({ ...usage, sessionId: options.sessionId }));
+            accounting = operation.catch(() => {
+              accountingFailure = true;
+              emit({ type: "core_error", core: "codex", error: "Anthropic account usage recording failed; new turns are blocked" });
+            });
+            await operation;
+          },
+          credentials: async request => {
+            const credentials = await account!.credentials(request);
+            guard.remember(credentials);
+            return credentials;
+          },
+        });
+        providerArgs.push("-c", 'model_provider="pistack-anthropic"', "-c",
+          `model_providers.pistack-anthropic={name="Anthropic",base_url=${JSON.stringify(anthropic.baseUrl)},wire_api="responses",requires_openai_auth=false,request_max_retries=0,stream_max_retries=0,supports_websockets=false}`,
+          "-c", 'web_search="disabled"');
+      }
       rpc = (dependencies.openRpc ?? openCodexRpc)({ cwd: options.cwd,
-        env: { ...process.env, ...options.env, CODEX_HOME: nativeHome, OPENAI_API_KEY: undefined, CODEX_API_KEY: undefined },
-        binary: dependencies.binary, args: [...(dependencies.appServerArgs ?? []), "-c", 'cli_auth_credentials_store="ephemeral"'],
+        env: { ...process.env, ...options.env, CODEX_HOME: nativeHome, OPENAI_API_KEY: undefined, CODEX_API_KEY: undefined, ANTHROPIC_API_KEY: undefined },
+        binary: dependencies.binary, args: [...(dependencies.appServerArgs ?? []), ...providerArgs, "-c", 'cli_auth_credentials_store="ephemeral"'],
         sanitizeError: message => guard.clean(message),
         notification(method, params) {
           if (closed) return;
@@ -379,12 +411,16 @@ export function createCodexSession(dependencies: CodexDependencies): OpenCoreSes
       });
       await call("initialize", { clientInfo: { name: "pistack", title: "PiStack", version: "1" }, capabilities: { experimentalApi: true } });
       rpc.notify("initialized");
-      const credentials = await account.credentials();
-      guard.remember(credentials);
-      await call("account/login/start", { type: "chatgptAuthTokens", accessToken: credentials.accessToken,
-        chatgptAccountId: credentials.chatgptAccountId, chatgptPlanType: credentials.chatgptPlanType ?? null });
-      models = await pages<Model>("model/list", { includeHidden: false, limit: 100 });
-      const settings = { cwd: options.cwd, model: startingModel, approvalPolicy: "never", sandbox: argument(options.args, "--sandbox") ?? "danger-full-access" };
+      if (providerFamily() === "openai-codex") {
+        const credentials = await account.credentials();
+        guard.remember(credentials);
+        if (!credentials.chatgptAccountId) fail("OpenAI credentials require a ChatGPT account identity");
+        await call("account/login/start", { type: "chatgptAuthTokens", accessToken: credentials.accessToken,
+          chatgptAccountId: credentials.chatgptAccountId, chatgptPlanType: credentials.chatgptPlanType ?? null });
+        models = await pages<Model>("model/list", { includeHidden: false, limit: 100 });
+      }
+      const settings = { cwd: options.cwd, model: startingModel, ...(anthropic ? { modelProvider: "pistack-anthropic" } : {}),
+        approvalPolicy: "never", sandbox: argument(options.args, "--sandbox") ?? "danger-full-access" };
       const resume = state.threadId && (state.materialized || state.transfer || Object.values(state.receipts).some(receipt => receipt.state !== "rejected"));
       const response = await call<ThreadStartResponse>(resume ? "thread/resume" : "thread/start", {
         ...settings, ...(resume ? { threadId: state.threadId } : { ephemeral: false, historyMode: "paginated" }),
@@ -394,7 +430,12 @@ export function createCodexSession(dependencies: CodexDependencies): OpenCoreSes
       state.effort = argument(options.args, "--thinking") ?? state.effort ?? response.reasoningEffort ?? undefined;
       state.name = argument(options.args, "--name") ?? state.name ?? response.thread.name ?? undefined;
       save();
-      if (state.effort) await call("thread/settings/update", { threadId: state.threadId, effort: nativeEffort(state.effort) });
+      if (state.effort) {
+        if (anthropic && !models.find(model => model.model === state.model)?.supportedReasoningEfforts.some(option => option.reasoningEffort === nativeEffort(state.effort!))) {
+          fail("Anthropic model does not support this reasoning effort");
+        }
+        await call("thread/settings/update", { threadId: state.threadId, effort: nativeEffort(state.effort) });
+      }
       if (state.name) await call("thread/name/set", { threadId: state.threadId, name: state.name });
       if (state.transfer === "pending") fail("Codex transfer outcome is unknown; inspect native history before continuing");
       if (options.transfer && state.transfer !== "complete") {
@@ -475,7 +516,7 @@ export function createCodexSession(dependencies: CodexDependencies): OpenCoreSes
         case "get_state": return { core: "codex", sessionId: root ? options.sessionId : threadId, nativeSessionId: threadId,
           sessionFile: statePath, nativeSessionDurable: !root || Boolean(state.materialized || state.transfer === "complete"),
           sessionName: root ? state.name : agents.get(threadId)?.name,
-          model: models.find(model => model.model === selectedModel) ? publicModel(models.find(model => model.model === selectedModel)!) : { id: selectedModel, provider: "openai-codex" },
+          model: models.find(model => model.model === selectedModel) ? publicModel(models.find(model => model.model === selectedModel)!, providerFamily()) : { id: selectedModel, provider: providerFamily() },
           thinkingLevel: selectedEffort === "none" ? "off" : selectedEffort,
           isStreaming: root ? treeBusy() : threadBusy(threadId), coreBusy: root ? treeBusy() : threadBusy(threadId),
           isCompacting: root ? compactingThreads.size > 0 : compactingThreads.has(threadId),
@@ -484,7 +525,7 @@ export function createCodexSession(dependencies: CodexDependencies): OpenCoreSes
           pendingMessageCount: 0, messageCount: current.entries.length, autoCompactionEnabled: true,
           contextProjection: "activity", capabilities: { core: "codex", nativeChildren: true, fork: true, compact: true, steer: true },
           unresolvedCommands: Object.entries(state.receipts).filter(([, receipt]) => receipt.state === "pending").map(([id]) => id) };
-        case "get_available_models": return { models: models.map(publicModel) };
+        case "get_available_models": return { models: models.map(model => publicModel(model, providerFamily())) };
         case "get_available_thinking_levels": return { levels: (models.find(model => model.model === selectedModel)?.supportedReasoningEfforts ?? []).map(value => value.reasoningEffort === "none" ? "off" : value.reasoningEffort) };
         case "get_commands": {
           const list = await call<SkillsListResponse>("skills/list", { cwds: [options.cwd] });
@@ -612,12 +653,12 @@ export function createCodexSession(dependencies: CodexDependencies): OpenCoreSes
           }
         }
         case "set_model": {
-          if (command.provider !== "openai-codex" && command.provider !== "openai") fail("Codex cannot switch provider");
+          if (codexProviderFamily(String(command.provider)) !== providerFamily()) fail("Changing provider requires a new Codex thread");
           const model = models.find(model => model.model === command.modelId);
           if (!model) fail("Codex model not found");
           await call("thread/settings/update", { threadId, model: model!.model });
           if (root) { state.model = model!.model; save(); }
-          return publicModel(model!);
+          return publicModel(model!, providerFamily());
         }
         case "set_thinking_level": {
           const effort = nativeEffort(needString(command.level, "level"));

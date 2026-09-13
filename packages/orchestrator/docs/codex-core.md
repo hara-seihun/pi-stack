@@ -1,6 +1,6 @@
 # Codex app-server core
 
-`src/cores/codex.ts` adapts the pinned Codex 0.154.0 app-server to PiStack's runtime wire. The default launcher resolves the executable from Orchestrator's immutable dependency closure, not the caller's PATH. Codex owns instructions, native tools, skills, compaction, and child agents. PiStack chooses the starting model and effort, binds an account, reserves capacity during native-tree activity, and controls dispatch. No Pi system prompt or Pi tools are installed into Codex.
+`src/cores/codex.ts` adapts the pinned Codex 0.154.0 app-server to PiStack's runtime wire. The default launcher resolves the executable from Orchestrator's immutable dependency closure, not the caller's PATH. Codex owns instructions, native tools, skills, compaction, and child agents. PiStack chooses the starting model and effort, binds an account, reserves capacity during native-tree activity, and controls dispatch. No Pi system prompt or Pi tools are installed into Codex. OpenAI models use native ChatGPT authentication. Anthropic models use Codex's custom Responses provider with the session-owned [Anthropic transport](codex-anthropic.md). Both use the Orchestrator's existing subscription account pool.
 
 ## Bind the account broker
 
@@ -25,7 +25,7 @@ const openCodex = createCodexSession({
 });
 ```
 
-`codex-auth.ts` declares the structural lease interface. `credentials()` returns `accessToken`, `chatgptAccountId`, and optional `chatgptPlanType`. Native token-refresh requests call `credentials({refresh: true, previousAccountId})`. The broker retains account selection and refresh locks. The adapter calls synchronous `setActive(boolean)` before dispatch and as whole-tree activity changes. The broker owns the corresponding interactive heartbeat and lease release. Opening an idle adapter leaves capacity free; assigned fleet leases remain scheduler-owned. See [external core accounts](core-accounts.md) for activity, affinity, and uncertain-outcome rules.
+`codex-auth.ts` declares the structural lease interface. `credentials()` returns `accessToken`, with `chatgptAccountId` and optional `chatgptPlanType` for OpenAI accounts. Anthropic credentials stay in the transport process and are not sent to the Codex app-server. Native token-refresh requests call `credentials({refresh: true, previousAccountId})`. The broker retains account selection and refresh locks. The adapter calls synchronous `setActive(boolean)` before dispatch and as whole-tree activity changes. The broker owns the corresponding interactive heartbeat and lease release. Opening an idle adapter leaves capacity free; assigned fleet leases remain scheduler-owned. See [external core accounts](core-accounts.md) for activity, affinity, and uncertain-outcome rules.
 
 `recordUsage` receives cumulative counters per native thread, including child threads. It must upsert or subtract the previous counter, not sum notifications. Counts include input, cached input, cache-write input, output, reasoning output, and total tokens. Accounting failures emit `core_error` and block new turns and compaction. Closing the adapter closes its account once, after process-tree cleanup.
 
@@ -43,10 +43,10 @@ Every response has `type: "response"`, the original `id`, `command`, and `succes
 | `follow_up` | Starts a turn when idle. Fails while busy so PiStack retains the queue. |
 | `abort` | Interrupts the root and all discovered descendants, including child-only activity, and terminates their native background terminals. The stop policy also catches children announced while interruption is in progress. Acceptance does not mean interruption has finished; wait for aggregate idle state. |
 | `compact` | Starts native compaction and acknowledges acceptance. Completion arrives through lifecycle events. Custom instructions are unsupported. |
-| `set_model` | Updates the native thread's model for subsequent turns, using the native catalog. |
+| `set_model` | Updates the native thread's model within its current provider family. Changing provider families requires a new thread. |
 | `set_thinking_level` | Updates native effort. Pi `off` maps to Codex `none`; native effort names otherwise remain unchanged. |
 | `set_session_name` | Sets the native thread name and durable adapter setting. |
-| `get_available_models` | Returns the paginated native model catalog in PiStack's model-picker shape. |
+| `get_available_models` | Returns the selected provider family's models in PiStack's model-picker shape. OpenAI uses the native catalog; Anthropic uses PiStack's provider catalog and deployed model additions. |
 | `get_available_thinking_levels` | Returns the selected native model's supported efforts. |
 | `get_commands` | Lists `compact` and enabled native skills. `/skill:name` in a prompt resolves to a native skill input. |
 | `get_messages`, `get_entries` | Return the activity projection. Entry IDs derive from native item IDs; entries include native turn IDs. `get_entries` accepts `since`. |
@@ -85,7 +85,7 @@ Every native child emits `core_agent` with a `CoreAgent` record. Root parent IDs
 
 One runtime owner opens a given `stateDir`. `codex-session.json` stores the native thread ID, saved provider/model settings, message timestamps, transfer status, transferred activity records, and dispatch receipts. Writes use atomic replacement. This is adapter state, not a Pi session file. `get_state.sessionFile` points to it so callers must not open it with Pi's session parser.
 
-`stateDir/codex` is the private native `CODEX_HOME`, including native history. The adapter links existing `config.toml`, `AGENTS.md`, `skills`, `agents`, `rules`, and `plugins` from the configured `CODEX_HOME`, or the user's `.codex`, into that directory. It does not copy native auth or unrelated threads. The external token login and ephemeral credential store keep auth out of files. Recovery requires both the adapter state and native home. Deleting either loses native continuation; there is no automatic conversation replay.
+`stateDir/codex` is the private native `CODEX_HOME`, including native history. The adapter links existing `config.toml`, `AGENTS.md`, `skills`, `agents`, `rules`, and `plugins` from the configured `CODEX_HOME`, or the user's `.codex`, into that directory. It does not copy native auth or unrelated threads. The OpenAI external token login and ephemeral credential store keep auth out of files. Anthropic's loopback provider endpoint is recreated before native resume; its OAuth token never enters the native home. Recovery requires both the adapter state and native home. Deleting either loses native continuation; there is no automatic conversation replay.
 
 A fresh empty thread is not materialized by Codex. History listing is unavailable until the first user message or explicit history injection. Reopening an untouched empty session creates another empty native thread with the same portable identity. `get_state.nativeSessionDurable` is false during this empty pre-work period, so fleet custody records the adapter file but does not pin that provisional native ID. Once work may have been accepted, the adapter reports it durable, resumes the recorded thread and never replaces it automatically.
 

@@ -50,7 +50,8 @@ export class CodexProjection {
   private readonly tools = new Set<string>();
   private readonly live = new Map<string, Message>();
   constructor(private readonly model: () => string, private readonly emit: (event: CoreOutput) => void,
-    private readonly stamp: (id: string, suggested?: number) => number) {}
+    private readonly stamp: (id: string, suggested?: number) => number,
+    private readonly provider: () => string = () => "openai-codex") {}
 
   context() {
     this.emit({ type: "context_update", projection: "activity", core: "codex", context: {
@@ -60,7 +61,7 @@ export class CodexProjection {
   }
   private message(item: ThreadItem, turnId: string, suggested?: number): Message | undefined {
     const base = { id: item.id, timestamp: this.stamp(item.id, suggested), nativeTurnId: turnId };
-    const assistant = { ...base, role: "assistant", provider: "openai-codex", model: this.model(), api: "codex-app-server", stopReason: "stop" };
+    const assistant = { ...base, role: "assistant", provider: this.provider(), model: this.model(), api: "codex-app-server", stopReason: "stop" };
     switch (item.type) {
       case "userMessage": return { ...base, role: "user", content: portableInput(item.content) };
       case "agentMessage": case "plan": return { ...assistant, content: [text(item.text)] };
@@ -120,7 +121,7 @@ export class CodexProjection {
   finish(turn: Turn, emit = true) {
     if (turn.status !== "failed" && turn.status !== "interrupted") return;
     const id = `${turn.id}:failure`;
-    const message: Message = { id, role: "assistant", content: [], timestamp: this.stamp(id), model: this.model(), provider: "openai-codex",
+    const message: Message = { id, role: "assistant", content: [], timestamp: this.stamp(id), model: this.model(), provider: this.provider(),
       stopReason: turn.status === "interrupted" ? "aborted" : "error", errorMessage: turn.error?.message ?? "Codex turn interrupted" };
     this.append(message, turn.id);
     if (emit) { this.emit({ type: "message_end", message }); this.context(); }

@@ -181,9 +181,10 @@ provider = sys.argv[sys.argv.index('--provider') + 1] if '--provider' in sys.arg
 model_id = sys.argv[sys.argv.index('--model') + 1] if '--model' in sys.argv else 'claude-fable-5-1'
 thinking_level = sys.argv[sys.argv.index('--thinking') + 1] if '--thinking' in sys.argv else 'off'
 # Published by rename so a reader never catches a half-written launch record.
-with open(os.environ['PI_FAKE_LAUNCH'] + '.writing', 'w') as launch:
+launch_path = os.environ['PI_FAKE_LAUNCH'] + '.' + str(os.getpid()) + '.writing'
+with open(launch_path, 'w') as launch:
  json.dump({'argv': sys.argv, 'pid': os.getpid(), 'sessionId': os.environ.get('PI_REMOTE_SESSION_ID'), 'subagentModel': os.environ.get('PI_SUBAGENT_MODEL'), 'serverUrl': os.environ.get('PI_REMOTE_SERVER_URL'), 'serviceTierFile': os.environ.get('PI_REMOTE_SERVICE_TIER_FILE'), 'bashTimeoutSeconds': os.environ.get('PI_REMOTE_BASH_TIMEOUT_MAX_SECONDS'), 'agentDir': os.environ.get('PI_CODING_AGENT_DIR'), 'offline': os.environ.get('PI_OFFLINE')}, launch)
-os.replace(os.environ['PI_FAKE_LAUNCH'] + '.writing', os.environ['PI_FAKE_LAUNCH'])
+os.replace(launch_path, os.environ['PI_FAKE_LAUNCH'])
 streaming = False
 compacting = False
 last = ''
@@ -527,7 +528,7 @@ afterAll(async () => {
 });
 
 async function createThread(destination = "home", model?: string) {
-  const created = await api("POST", "/v1/sessions", { requestId: crypto.randomUUID(), destination, model });
+  const created = await api("POST", "/v1/sessions", { requestId: crypto.randomUUID(), destination, model, core: "pi" });
   expect(created.status).toBe(201);
   const id = created.value.session.id as string;
   await waitFor(
@@ -561,7 +562,7 @@ describe("web and supervisor integration", () => {
     await startServer();
     let id: string | undefined;
     try {
-      const created = await api("POST", "/v1/sessions", {requestId:crypto.randomUUID(),destination:"home",model:"astra"});
+      const created = await api("POST", "/v1/sessions", {requestId:crypto.randomUUID(),destination:"home",model:"astra",core:"pi"});
       expect(created.status).toBe(201); id = created.value.session.id;
       const read = () => api("GET", `/v1/sessions/${id}`).then(result=>result.value.session);
       await waitFor(read, session=>session?.state === "RUNNING" || session?.state === "FAILED");
@@ -582,7 +583,7 @@ describe("web and supervisor integration", () => {
     await startServer();
     let id: string | undefined;
     try {
-      const created = await api("POST", "/v1/sessions", {requestId:crypto.randomUUID(),destination:"home",model:"astra"});
+      const created = await api("POST", "/v1/sessions", {requestId:crypto.randomUUID(),destination:"home",model:"astra",core:"pi"});
       expect(created.status).toBe(201); id = created.value.session.id;
       await api("POST", `/v1/sessions/${id}/prompt`, {requestId:crypto.randomUUID(),text:"capacity fixture"});
       const read = () => api("GET", `/v1/sessions/${id}`).then(result=>result.value.session);
@@ -667,13 +668,13 @@ describe("web and supervisor integration", () => {
     expect(initial.status).toBe(200);
     expect(initial.value.notifications).toEqual([]);
     const id = await createThread();
-    expect((await api("GET", `/v1/notifications?after=${initial.value.cursor}`)).value.notifications).toEqual([]);
+    expect((await api("GET", `/v1/notifications?after=${initial.value.cursor}`)).value.notifications.filter((event: any) => event.sessionId === id)).toEqual([]);
     await api("POST", `/v1/sessions/${id}/prompt`, { requestId: crypto.randomUUID(), text: "later-run" });
     const feed = await waitFor(() => api("GET", `/v1/notifications?after=${initial.value.cursor}`),
       (result) => result.value.notifications?.some((event: any) => event.sessionId === id));
     expect(feed.value.environmentId).toBe((await api("GET", "/v1/health")).value.environmentId);
     expect(feed.value.notifications.filter((event: any) => event.sessionId === id)).toHaveLength(1);
-    expect((await api("GET", `/v1/notifications?after=${feed.value.cursor}`)).value.notifications).toEqual([]);
+    expect((await api("GET", `/v1/notifications?after=${feed.value.cursor}`)).value.notifications.filter((event: any) => event.sessionId === id)).toEqual([]);
     expect((await api("GET", "/v1/notifications?after=-1")).status).toBe(400);
   });
 
@@ -1546,7 +1547,7 @@ describe("web and supervisor integration", () => {
   }, 15_000);
 
   test("aborting during activation cannot resurrect queued work", async () => {
-    const created = await api("POST", "/v1/sessions", { requestId: crypto.randomUUID(), destination: "home" });
+    const created = await api("POST", "/v1/sessions", { requestId: crypto.randomUUID(), destination: "home", core: "pi" });
     const id = created.value.session.id;
     await api("POST", `/v1/sessions/${id}/prompt`, { requestId: crypto.randomUUID(), text: "must not launch" });
     const aborted = await api("POST", `/v1/sessions/${id}/abort`, {});

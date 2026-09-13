@@ -25,17 +25,17 @@ function credential(accountId: string, access = `access-${accountId}`) {
   return { type: "oauth", access, refresh: `refresh-${accountId}`, expires: Date.now() + 3_600_000, accountId };
 }
 
-function auth(path: string, refresh = async (value: any) => value) {
+function auth(path: string, refresh = async (value: any) => value, providerId = "openai-codex") {
   return new SharedOAuthAuth({
     path,
-    providerId: "openai-codex",
+    providerId,
     refresh,
     toAuth: async value => ({ apiKey: value.access }),
     identity: value => typeof value.accountId === "string" ? value.accountId : undefined,
   });
 }
 
-function usage(overrides: Partial<CoreAccountUsage> = {}): CoreAccountUsage {
+function usage(overrides: Partial<Extract<CoreAccountUsage, { nativeThreadId: string }>> = {}): CoreAccountUsage {
   return {
     sessionId: "interactive-session",
     nativeThreadId: "native-thread",
@@ -52,6 +52,36 @@ function usage(overrides: Partial<CoreAccountUsage> = {}): CoreAccountUsage {
 }
 
 describe("external core account bridge", () => {
+  it("binds Anthropic OAuth without a ChatGPT identity and keeps affinity inside its provider family", async () => {
+    const f = fixture({
+      "openai-codex-2": credential("openai-workspace"),
+      "anthropic-2": { type: "oauth", access: "claude-access", refresh: "claude-refresh", expires: Date.now() + 3_600_000 },
+    });
+    const store = Store.open(f.ledgerPath);
+    store.upsertAccount({ id: "openai-codex-2", provider: "openai-codex" });
+    store.upsertAccount({ id: "anthropic-2", provider: "anthropic" });
+    store.setControl("core-account:interactive-session", "openai-codex-2");
+    let refreshes = 0;
+    const account = await openCoreAccount({ initialProvider: "anthropic", initialModel: "claude-fable-5-1", sessionId: "interactive-session",
+      env: {}, ledgerPath: f.ledgerPath, auth: auth(f.authPath, async value => ({ ...value, access: `claude-refreshed-${++refreshes}` }), "anthropic") });
+    try {
+      expect(account).toMatchObject({ accountId: "anthropic-2", provider: "anthropic", model: "claude-fable-5-1" });
+      expect(await account.credentials()).toEqual({ accessToken: "claude-access" });
+      expect(await account.credentials({ refresh: true })).toEqual({ accessToken: "claude-refreshed-1" });
+      account.setActive(true);
+      expect(store.activeLeases("openai-codex-2")).toEqual([]);
+      expect(store.activeLeases("anthropic-2")).toHaveLength(1);
+      const evidence: CoreAccountUsage = { sessionId: "interactive-session", providerResponseId: "msg_anthropic",
+        model: "claude-fable-5-1", inputTokens: 100, cachedInputTokens: 40, cacheWriteInputTokens: 10, outputTokens: 20, totalTokens: 120 };
+      account.recordUsage(evidence);
+      account.recordUsage(evidence);
+      expect(store.usageSince(0).reduce((total, row) => total + row.tokens, 0)).toBe(120);
+      expect(store.usageSince(0).every(row => row.accountId === "anthropic-2")).toBe(true);
+    } finally { await account.close(); }
+    expect(store.activeLeases()).toEqual([]);
+    store.close();
+  });
+
   it("retains twelve idle cores without capacity and keeps affinity across activity and reopen", async () => {
     vi.useFakeTimers();
     const f = fixture({ selected: credential("workspace-selected"), other: credential("workspace-other") });

@@ -11,18 +11,30 @@ import { Readable } from "node:stream";
 
 it("resolves run/lane, profile and default core choices without changing model defaults", () => {
   const config = { core: "pi" as const, profileCores: { astra: "codex" as const } };
-  expect(resolveCore({}, "astra")).toBe("pi");
+  expect(resolveCore({}, "astra")).toBe("codex");
   expect(resolveCore(config, "astra")).toBe("codex");
   expect(resolveCore(config, "astra", "pi")).toBe("pi");
   expect(resolveCore({ core: "codex" }, "sol")).toBe("codex");
   const root = mkdtempSync(join(tmpdir(), "core-config-"));
   try {
     const path = join(root, "config.json");
+    expect(loadConfig(path).core).toBe("codex");
     writeFileSync(path, JSON.stringify(config));
+    expect(loadConfig(path).core).toBe("pi");
     expect(loadConfig(path).profiles.astra?.[0]).toMatchObject({ model: catalogModel("astra")!.model, thinking: "xhigh" });
     writeFileSync(path, '{"profileCores":{"astra":"other"}}');
     expect(() => loadConfig(path)).toThrow("unknown agent core");
   } finally { rmSync(root, { recursive: true, force: true }); }
+});
+
+it("keeps Anthropic Codex runs queued for account admission rather than rejecting their provider", async () => {
+  const store = Store.open(":memory:");
+  const daemon = new Daemon(store, loadConfig("/nonexistent-config"));
+  try {
+    const [id] = store.createRuns({ count: 1, source: "direct", prompt: "work", cwd: "/app", profile: "opus", budget: "force", core: "codex" });
+    expect(await (daemon as any).launch(store.run(id!))).toBe(false);
+    expect(store.run(id!)?.state).toBe("queued");
+  } finally { store.close(); }
 });
 
 it("pins core custody across lane edits, ledger reopening, assignment and recovery", () => {

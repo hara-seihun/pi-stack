@@ -8,6 +8,7 @@ import type { BudgetClass, LaneReadiness, LaneManifest, LaneSpec, OrchestratorCo
 import { isRunContext } from "./isolated-context-contract.js";
 import { resolveCore } from "./config.js";
 import { isCoreId } from "./cores/contracts.js";
+import { codexProviderFamily } from "./cores/codex-models.js";
 import { accountCapacity, assign, assignCompletion, commitMeterAdmission } from "./policy.js";
 import { Store } from "./store.js";
 import { Heartbeats } from "./heartbeats.js";
@@ -223,8 +224,8 @@ export class Daemon {
     const fixed=this.store.fleetChild(run.id)?.assignment;
     const completion=!!this.completions.byRun(run.id);
     const candidates=fixed?[fixed]:this.config.profiles[run.profile]??[];
-    const supported=run.core==="codex"&&!completion?candidates.filter(candidate=>candidate.provider==="openai-codex"):candidates;
-    if(!supported.length&&run.core==="codex"&&!completion){this.store.updateRun(run.id,{state:"failed",failureKind:"task",result:`Codex core requires an openai-codex model in profile ${run.profile}`});return true;}
+    const supported=run.core==="codex"&&!completion?candidates.filter(candidate=>codexProviderFamily(candidate.provider)):candidates;
+    if(!supported.length&&run.core==="codex"&&!completion){this.store.updateRun(run.id,{state:"failed",failureKind:"task",result:`Codex core requires an OpenAI or Anthropic model in profile ${run.profile}`});return true;}
     const config={...this.config,profiles:{...this.config.profiles,[run.profile]:supported}};
     const choice=completion?assignCompletion(this.store,run.id,run.profile,config):assign(this.store,run.profile,run.budget,config,Date.now(),undefined,run.id);
     if(!choice.assignment){this.store.setControl(`refusal:${run.id}`,choice.refusals.map((r)=>`${r.accountId}: ${r.reason}`).join("; "));return false;}

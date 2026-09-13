@@ -1,5 +1,5 @@
 #!/usr/bin/env node
-import { randomUUID } from "node:crypto";
+import { createHash, randomUUID } from "node:crypto";
 import {
   closeSync,
   copyFileSync,
@@ -36,6 +36,7 @@ function usage() {
   deploy/publication submit SHA
   deploy/publication inspect REQUEST
   deploy/publication retry REQUEST
+  deploy/publication report REQUEST [REMOTE_URL SESSION_ID]
   deploy/publication gate-status
 
 The installed systemd user service also invokes the internal enqueue and drain commands.\n`);
@@ -158,6 +159,8 @@ function submit(sourceArgument) {
   if (!/(^|[:/])hara-seihun\/pi-stack(?:\.git)?$/.test(remote)) throw new Error(`origin is not hara-seihun/pi-stack: ${remote}`);
   if (!existsSync(installedCommand)) throw new Error(`publication owner is not installed at ${installedCommand}`);
 
+  const reporter = requesterFromEnvironment();
+  if (reporter) remoteJson(reporter, "", "GET");
   const requestId = `PUB-${randomUUID().replaceAll("-", "").slice(0, 24)}`;
   const sourceRef = `refs/heads/pi-stack-publications/${requestId}`;
   const pushed = commandResult("git", ["push", "--quiet", "origin", `${sourceSha}:${sourceRef}`], {
@@ -167,7 +170,7 @@ function submit(sourceArgument) {
   });
   if (!pushed.ok) throw new Error(`failed to publish immutable source ref ${sourceRef}`);
 
-  const enqueued = commandResult(installedCommand, ["enqueue", requestId, sourceSha, sourceRef], {
+  const enqueued = commandResult(installedCommand, ["enqueue", requestId, sourceSha, sourceRef, ...(reporter ? [JSON.stringify(reporter)] : [])], {
     timeoutSeconds: 30,
   });
   if (!enqueued.ok) {
@@ -176,7 +179,7 @@ function submit(sourceArgument) {
   process.stdout.write(enqueued.stdout);
 }
 
-function enqueue(requestId, sourceSha, sourceRef) {
+function enqueue(requestId, sourceSha, sourceRef, reporterJson) {
   validateRequestId(requestId);
   validateSha(sourceSha);
   if (sourceRef !== `refs/heads/pi-stack-publications/${requestId}`) throw new Error("source ref does not match request id");
@@ -202,6 +205,7 @@ function enqueue(requestId, sourceSha, sourceRef) {
     updatedAt: now,
     attempt: 0,
     failures: [],
+    reporter: reporterJson ? validateReporter(JSON.parse(reporterJson)) : null,
   };
   atomicWrite(path, `${JSON.stringify(request, null, 2)}\n`);
   const wake = commandResult("systemctl", ["--user", "start", "--no-block", "pi-stack-publication.service"]);
@@ -216,6 +220,7 @@ function enqueue(requestId, sourceSha, sourceRef) {
     owner: request.owner,
     receipt: path,
     wake: request.wake?.status ?? "started",
+    reporting: request.reporter ? { status: "pending", ...request.reporter } : { status: "machine-inbox" },
   })}\n`);
 }
 
@@ -295,7 +300,11 @@ function updateFailure(request, message, logPath) {
     step: request.step,
     message,
     log: logPath,
+    command: request.checks?.status === "running" ? request.checks.command : undefined,
+    excerpt: existsSync(logPath) ? readFileSync(logPath, "utf8").split("\n")
+      .filter(line => /\(fail\)|error:|Expected:|Received:|failed with exit|Error:/.test(line)).slice(-50).join("\n").slice(-8000) : "",
   };
+  if (request.checks?.status === "running") request.checks.status = "failed";
   request.failures.push(failure);
   request.status = "failed";
   request.failure = failure;
@@ -303,28 +312,119 @@ function updateFailure(request, message, logPath) {
   deliverNotice(request);
 }
 
-function deliverNotice(request) {
-  if (!["blocked", "failed", "published"].includes(request.status)) return;
-  const key = request.status === "failed" ? `failed:${request.failure.at}` : request.status;
-  if (request.alert?.key === key && request.alert.status === "queued") return;
-  request.alert = { key, status: "pending" };
-  writeRequest(request);
-  const body = [
+function noticeBody(request) {
+  return [
     `Request: ${request.requestId}`,
     `Source: ${request.sourceSha}`,
     request.integrationSha ? `Integration: ${request.integrationSha}` : undefined,
     `Step: ${request.step}`,
     `Status: ${request.status}`,
-    request.failure ? `Failure: ${request.failure.message}` : request.blocker?.reason,
+    request.status === "failed" ? `Failure: ${request.failure.message}` : request.status === "blocked" ? request.blocker?.reason : undefined,
     `Receipt: ${requestPath(request.requestId)}`,
-    `Log: ${request.failure?.log ?? request.blocker?.log ?? request.finalProof?.path}`,
-    `Repair: ${installedCommand} retry ${request.requestId}`,
+    `Log: ${request.status === "failed" ? request.failure?.log : request.status === "blocked" ? request.blocker?.log : request.finalProof?.path}`,
+    request.failure?.command ? `Command: ${request.failure.command}` : undefined,
+    request.failure?.excerpt,
+    request.status === "failed" ? `Repair source defects in a new commit and submit that commit. Retry ${request.requestId} only after repairing an infrastructure failure of the unchanged source.` : undefined,
   ].filter(Boolean).join("\n");
-  const alert = commandResult("/run/current-system/sw/bin/alert", [`Pi Stack publication ${request.status}`, body], { timeoutSeconds: 10 });
-  request.alert = alert.ok
-    ? { key, status: "queued", at: new Date().toISOString() }
-    : { key, status: "failed", at: new Date().toISOString(), message: alert.stderr.trim() || `exit ${alert.status}` };
+}
+
+function validateReporter(reporter) {
+  const url = new URL(reporter.url);
+  if (!["http:", "https:"].includes(url.protocol) || url.username || url.password || url.search || url.hash)
+    throw new Error("Remote report URL must be an HTTP endpoint without credentials, query or fragment");
+  if (!/^[0-9a-f-]{36}$/i.test(reporter.sessionId)) throw new Error("Remote report requires a session UUID");
+  return { url: url.href.replace(/\/$/, ""), sessionId: reporter.sessionId };
+}
+
+function requesterFromEnvironment() {
+  const url = process.env.PI_STACK_PUBLICATION_REPORT_URL ?? process.env.PI_REMOTE_SERVER_URL;
+  const sessionId = process.env.PI_STACK_PUBLICATION_REPORT_SESSION
+    ?? process.env.PI_SESSION_FILE?.match(/\/core-sessions\/([0-9a-f-]{36})\//i)?.[1]
+    ?? process.env.PI_REMOTE_SESSION_ID;
+  if (!url && !sessionId) return null;
+  if (!url || !sessionId) throw new Error("Cannot identify publication requester; set PI_STACK_PUBLICATION_REPORT_URL and PI_STACK_PUBLICATION_REPORT_SESSION");
+  return validateReporter({ url, sessionId });
+}
+
+function remoteJson(reporter, suffix, method, body) {
+  const output = checked("curl", ["--silent", "--show-error", "--fail-with-body", "--max-time", "8",
+    "--request", method, "--header", "content-type: application/json",
+    ...(body === undefined ? [] : ["--data-binary", "@-"]),
+    `${reporter.url}/v1/sessions/${reporter.sessionId}${suffix}`,
+  ], { timeoutSeconds: 10, input: body === undefined ? undefined : JSON.stringify(body) });
+  return JSON.parse(output);
+}
+
+function deliverReport(request, key) {
+  if (!request.reporter) return;
+  if (request.report?.key === key && request.report.status === "delivered") return;
+  if (request.report?.key !== key) {
+    const digest = createHash("sha256").update(`${request.requestId}:${key}`).digest("hex");
+    request.report = { key, status: "pending", requestId: `${digest.slice(0, 8)}-${digest.slice(8, 12)}-4${digest.slice(13, 16)}-a${digest.slice(17, 20)}-${digest.slice(20, 32)}` };
+    writeRequest(request);
+  }
+  const report = request.report;
+  try {
+    if (report.cursor === undefined) {
+      const initial = remoteJson(request.reporter, "/events", "GET");
+      report.cursor = initial.events.at(-1)?.seq ?? 0;
+      writeRequest(request);
+    }
+    if (!report.workId) {
+      const accepted = remoteJson(request.reporter, "/prompt", "POST", {
+        requestId: report.requestId,
+        delivery: "steer",
+        text: `Publication owner report. Please tell the user this result; do not retry or submit a release without a repair.\n\n${noticeBody(request)}`,
+      });
+      if (!accepted.accepted || !accepted.workId) throw new Error("Remote did not acknowledge publication report custody");
+      report.workId = accepted.workId;
+      report.status = "accepted";
+      report.acceptedAt = new Date().toISOString();
+      writeRequest(request);
+    }
+    const page = remoteJson(request.reporter, `/events?after=${report.cursor}`, "GET");
+    if (page.events.some(event => event.type === "user" && event.requestId === report.requestId)) {
+      report.status = "delivered";
+      report.deliveredAt = new Date().toISOString();
+    } else {
+      report.status = "accepted";
+    }
+    report.cursor = page.events.at(-1)?.seq ?? report.cursor;
+    delete report.error;
+  } catch (error) {
+    report.status = "failed";
+    report.error = error instanceof Error ? error.message : String(error);
+  }
+  report.checkedAt = new Date().toISOString();
   writeRequest(request);
+}
+
+function deliverNotice(request) {
+  if (!["blocked", "failed", "published"].includes(request.status)) return;
+  const key = request.status === "failed" ? `failed:${request.failure.at}` : request.status;
+  if (request.alert?.key !== key || !["queued", "filed"].includes(request.alert.status)) {
+    request.alert = { key, status: "pending" };
+    writeRequest(request);
+    const alert = commandResult(process.env.PI_STACK_PUBLICATION_ALERT_COMMAND ?? "/run/current-system/sw/bin/alert", [`Pi Stack publication ${request.status}`, noticeBody(request)], { timeoutSeconds: 10 });
+    request.alert = alert.ok
+      ? { key, status: "filed", path: alert.stdout.trim(), at: new Date().toISOString() }
+      : { key, status: "failed", at: new Date().toISOString(), message: alert.stderr.trim() || `exit ${alert.status}` };
+    writeRequest(request);
+  }
+  deliverReport(request, key);
+}
+
+function report(requestId, url, sessionId) {
+  validateRequestId(requestId);
+  const request = readRequest(requestId);
+  if (url) {
+    const reporter = validateReporter({ url, sessionId });
+    if (request.reporter && JSON.stringify(request.reporter) !== JSON.stringify(reporter)) throw new Error("Publication already has another requester");
+    request.reporter = reporter;
+    writeRequest(request);
+  }
+  deliverNotice(request);
+  inspect(requestId);
 }
 
 function prepareCheckout(request, logPath) {
@@ -385,6 +485,10 @@ function createIntegration(request, logPath) {
   if (!existsSync(localProperties)) return { ok: false, status: 1, stderr: `missing host-owned Android configuration: ${localProperties}` };
   mkdirSync(join(checkout, "apps/kenan/android"), { recursive: true });
   copyFileSync(localProperties, join(checkout, "apps/kenan/android/local.properties"));
+  request.baseSha = baseSha;
+  request.integrationSha = integrationSha;
+  request.checks = { status: "running", command: "npm run check && npm run android:test --workspace=kenan", log: logPath };
+  writeRequest(request);
   result = runLogged(
     request,
     "checks",
@@ -983,6 +1087,7 @@ function processRequest(request) {
     writeRequest(request);
     appendLog(logPath, `[${new Date().toISOString()}] published integration=${request.integrationSha}\n`);
     if (request.android) rmSync(join(request.android.directory, request.android.release.fileName), { force: true });
+    deliverNotice(request);
   } catch (error) {
     const restorationFailures = [];
     for (const [hostKey, remoteHost] of [["gmktec", undefined], ["converge", "converge-kenan"]]) {
@@ -1023,7 +1128,8 @@ function main() {
   if (operation === "inspect" && args.length === 1) return inspect(args[0]);
   if (operation === "retry" && args.length === 1) return retry(args[0]);
   if (operation === "gate-status" && args.length === 0) return gateStatus();
-  if (operation === "enqueue" && args.length === 3) return enqueue(...args);
+  if (operation === "enqueue" && [3, 4].includes(args.length)) return enqueue(...args);
+  if (operation === "report" && [1, 3].includes(args.length)) return report(...args);
   if (operation === "drain" && args.length === 0) return drain();
   usage();
   process.exitCode = 2;

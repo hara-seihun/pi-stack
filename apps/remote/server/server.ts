@@ -5,7 +5,7 @@ import { homedir } from "node:os";
 import { basename, dirname, extname, isAbsolute, join, resolve } from "node:path";
 import { parseRunKey } from "./agent-runs";
 import { AgentHost } from "./agent-hosts";
-import { ORCHESTRATOR_CATALOG, OrchestratorClient, catalogAgentType, createSharedImageGenerationService, CORE_IDS, configuredCore, isCoreId, writeCoreState, type CoreAgent, type CoreId, type PortableConversation, type SharedImageGenerationService, type PlanUsageSnapshot } from "pi-orchestrator/api";
+import { ORCHESTRATOR_CATALOG, OrchestratorClient, catalogAgentType, createSharedImageGenerationService, CORE_IDS, configuredCore, codexProviderFamily, isCoreId, writeCoreState, type CoreAgent, type CoreId, type PortableConversation, type SharedImageGenerationService, type PlanUsageSnapshot } from "pi-orchestrator/api";
 import { SessionCores } from "./session-cores";
 import { InlineImages } from "./inline-images";
 import { planCards } from "./catalog-presentation";
@@ -1810,7 +1810,7 @@ async function replaceSessionCore(row: any, core: CoreId): Promise<void> {
   if (coreStateActive(state)) throw new Error("The current core is still working");
   row = sessionRow.get(row.id);
   const provider = canonicalModelProvider(String(state.model?.provider ?? row.initial_provider));
-  if (core === "codex" && !provider.startsWith("openai")) throw new Error("Choose an OpenAI model before switching to Codex");
+  if (core === "codex" && !codexProviderFamily(provider)) throw new Error("Choose an OpenAI or Anthropic model before switching to Codex");
   const transfer = await rpc(rt, "get_portable_conversation") as PortableConversation;
   if (transfer.version !== 1 || !Array.isArray(transfer.messages)) throw new Error("The current core did not export a conversation");
   const switchId = crypto.randomUUID();
@@ -2731,7 +2731,7 @@ const server = Bun.serve({
           return error("Model not available at this destination");
         const model = THREAD_MODELS.get(modelId);
         if (!model) return error("Unknown thread model");
-        if (core === "codex" && !model.provider.startsWith("openai")) return error("Codex requires an OpenAI model", 409);
+        if (core === "codex" && !codexProviderFamily(model.provider)) return error("Codex requires an OpenAI or Anthropic model", 409);
         const preset = {
           provider: model.provider,
           modelId: model.modelId,

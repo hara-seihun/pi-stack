@@ -7,7 +7,7 @@ export type { CoreId, CoreAgent, CoreCommand, CoreOutput, CoreSession, CoreSessi
 export { CoreJournal, readPortableConversation, writeCoreState } from "./journal.js";
 
 export function configuredCore(value: unknown = process.env.PI_STACK_DEFAULT_CORE): CoreId {
-  if (value === undefined || value === "") return "pi";
+  if (value === undefined || value === "") return "codex";
   if (!isCoreId(value)) throw new Error(`Unknown agent core: ${String(value)}`);
   return value;
 }

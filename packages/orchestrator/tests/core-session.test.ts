@@ -1,8 +1,25 @@
 import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { expect, it } from "vitest";
-import { openCoreSession, type CoreOutput } from "../src/cores/index.js";
+import { expect, it, vi } from "vitest";
+import { configuredCore, openCoreSession, type CoreOutput } from "../src/cores/index.js";
+import { loadConfig, resolveCore } from "../src/config.js";
+
+it("defaults to Codex and shares environment overrides across Remote and fleet selection", () => {
+  try {
+    vi.stubEnv("PI_STACK_DEFAULT_CORE", undefined);
+    expect(configuredCore()).toBe("codex");
+    expect(configuredCore("")).toBe("codex");
+    expect(configuredCore("pi")).toBe("pi");
+    expect(() => configuredCore("unknown")).toThrow("Unknown agent core");
+    vi.stubEnv("PI_STACK_DEFAULT_CORE", "pi");
+    expect(configuredCore()).toBe("pi");
+    expect(loadConfig("/nonexistent-config").core).toBe("pi");
+    expect(resolveCore({}, "astra")).toBe("pi");
+    expect(resolveCore({ core: "codex" }, "astra")).toBe("codex");
+    expect(configuredCore("codex")).toBe("codex");
+  } finally { vi.unstubAllEnvs(); }
+});
 
 it("owns the portable record and preserves native session state behind the adapter", async () => {
   const stateDir=mkdtempSync(join(tmpdir(),"core-host-"));
