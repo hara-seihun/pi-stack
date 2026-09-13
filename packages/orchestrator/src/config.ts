@@ -4,12 +4,10 @@ import { readFileSync } from "node:fs";
 import { catalogModel } from "./catalog.js";
 import type { OrchestratorConfig } from "./domain.js";
 import { defaultSharedAuthPath } from "./auth/shared-oauth.js";
-import { isCoreId, type CoreId } from "./cores/contracts.js";
+import { configuredCore, isCoreId, type CoreId } from "./cores/index.js";
 
 export function resolveCore(config: Pick<OrchestratorConfig, "core" | "profileCores">, profile: string, override?: CoreId): CoreId {
-  const core = override ?? config.profileCores?.[profile] ?? config.core ?? "pi";
-  if (!isCoreId(core)) throw new Error(`Unknown agent core ${String(core)}`);
-  return core;
+  return configuredCore(override ?? config.profileCores?.[profile] ?? config.core);
 }
 
 const standard = catalogModel("astra")!;
@@ -48,7 +46,7 @@ export function loadConfig(
   return {
     listenHost: process.env.PI_ORCHESTRATOR_LISTEN_HOST || local.listenHost,
     profiles,
-    core: local.core ?? "pi",
+    core: configuredCore(local.core),
     profileCores: local.profileCores ?? {},
     backgroundSpendFraction: Number(local.backgroundSpendFraction ?? 0.8),
     maxConcurrentSessions: Number(local.maxConcurrentSessions ?? 40),

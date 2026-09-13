@@ -4,16 +4,16 @@ Orchestrator owns run admission, account assignment, worker processes and recove
 
 ## Choice and custody
 
-Config defaults to `core: "pi"`. `profileCores` sets a core for a named model profile without changing that profile's model candidates or thinking levels:
+Config defaults to `PI_STACK_DEFAULT_CORE`, or `codex` when unset. `profileCores` sets a core for a named model profile without changing that profile's model candidates or thinking levels:
 
 ```json
 {
-  "core": "pi",
-  "profileCores": { "astra": "codex" }
+  "core": "codex",
+  "profileCores": { "opus": "pi" }
 }
 ```
 
-A lane's optional `core` overrides the profile setting. `POST /v1/run` and `POST /v1/wave` accept `core: "pi" | "codex"`; an explicit wave value overrides its lane. CLI `run` and `wave` accept `--core`. Unknown core IDs return HTTP 400. The order is explicit run value, lane value, profile setting, config default, Pi.
+A lane's optional `core` overrides the profile setting. `POST /v1/run` and `POST /v1/wave` accept `core: "pi" | "codex"`; an explicit wave value overrides its lane. CLI `run` and `wave` accept `--core`. Unknown core IDs return HTTP 400. The order is explicit run value, lane value, profile setting, config default, `PI_STACK_DEFAULT_CORE`, Codex.
 
 Creation commits `run-core:<runId>` alongside the run row. It records the selected core, `childrenOwner: "core"`, and `coreStateDir`, an absolute `runs/<runId>` directory beside the ledger. Lane values live in `lane-core:<laneId>`. These use the existing control table; no database schema transition is needed.
 

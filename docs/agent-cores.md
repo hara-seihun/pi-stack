@@ -14,7 +14,7 @@ The shared boundary is [`cores/contracts.ts`](../packages/orchestrator/src/cores
 
 ## Selecting a core
 
-In Remote, Thread settings contains **Agent core**. `POST /v1/sessions` accepts `core: "pi" | "codex"`; an omitted selection uses the destination's `core`, then `PI_STACK_DEFAULT_CORE`, then Pi. Existing threads without a core record remain Pi threads, regardless of the default.
+In Remote, Thread settings contains **Agent core**. `POST /v1/sessions` accepts `core: "pi" | "codex"`; an omitted selection uses the destination's `core`, then `PI_STACK_DEFAULT_CORE`, then Codex. Existing threads without a core record remain Pi threads, regardless of the default.
 
 `PUT /v1/sessions/:sessionId/settings` with `{"core":"codex"}` switches an idle root. Core changes are separate from other settings changes. Codex requires an OpenAI starting model. Changing the default does not move existing sessions or replay their work.
 
