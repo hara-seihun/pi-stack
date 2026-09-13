@@ -91,6 +91,60 @@ function fixture(existingOptions?: CoreSessionOptions) {
 }
 
 describe("Codex app-server adapter", () => {
+  const outputLimited = (id = "limited") => ({ id, status: "failed", items: [],
+    error: { message: "stream disconnected before completion: Incomplete response returned, reason: max_output_tokens" } });
+
+  it("continues output-limited native turns once without settling or emitting a fatal error", async () => {
+    const f = fixture(), session = await f.open();
+    try {
+      f.send("turn/started", { threadId: "root", turn: { id: "limited" } });
+      const endCount = f.events.filter(event => event.type === "agent_end").length;
+      f.send("error", { threadId: "root", error: outputLimited().error, willRetry: false });
+      f.send("turn/completed", { threadId: "root", turn: outputLimited() });
+      await session.command({ type: "get_state", id: "continuing" });
+      expect(f.response("continuing")?.data).toMatchObject({ treeComplete: false, unresolvedCommands: [] });
+      await new Promise(resolve => setTimeout(resolve, 0));
+      expect(f.requests.filter(request => request.method === "turn/start")).toHaveLength(1);
+      expect(f.requests.find(request => request.method === "turn/start")?.params).toMatchObject({ threadId: "root", clientUserMessageId: "output-limit:root:limited" });
+      expect(f.events.filter(event => event.type === "agent_end")).toHaveLength(endCount);
+      expect(f.events.some(event => event.type === "core_error")).toBe(false);
+      f.send("turn/completed", { threadId: "root", turn: outputLimited() });
+      await new Promise(resolve => setTimeout(resolve, 0));
+      expect(f.requests.filter(request => request.method === "turn/start")).toHaveLength(1);
+      f.send("turn/completed", { threadId: "root", turn: { id: "turn-1", status: "completed", items: [] } });
+      await new Promise(resolve => setTimeout(resolve, 0));
+      await session.command({ type: "get_state", id: "finished" });
+      expect(f.response("finished")?.data).toMatchObject({ treeComplete: true });
+    } finally { await session.close(); }
+  });
+
+  it("recovers an output-limited native session without replaying its original task", async () => {
+    const f = fixture(); f.history([outputLimited()]);
+    const session = await f.open();
+    try {
+      await new Promise(resolve => setTimeout(resolve, 0));
+      expect(f.requests.filter(request => request.method === "turn/start")).toHaveLength(1);
+      await session.command({ type: "get_state", id: "recovered" });
+      expect(f.response("recovered")?.data).toMatchObject({ treeComplete: false });
+      const state = JSON.parse(readFileSync(join(f.options.stateDir, "codex-session.json"), "utf8"));
+      expect(state.receipts["output-limit:root:limited"]).toMatchObject({ state: "accepted", turnId: "turn-1" });
+    } finally { await session.close(); }
+  });
+
+  it("continues an output-limited child and leaves unrelated failures terminal", async () => {
+    const f = fixture(), session = await f.open();
+    try {
+      f.send("thread/started", { thread: thread("child", "root") });
+      f.send("turn/started", { threadId: "child", turn: { id: "child-limited" } });
+      f.send("turn/completed", { threadId: "child", turn: outputLimited("child-limited") });
+      await new Promise(resolve => setTimeout(resolve, 0));
+      expect(f.requests.find(request => request.method === "turn/start")?.params).toMatchObject({ threadId: "child", clientUserMessageId: "output-limit:child:child-limited" });
+      f.send("turn/completed", { threadId: "root", turn: { id: "failed", status: "failed", items: [], error: { message: "connection reset" } } });
+      await new Promise(resolve => setTimeout(resolve, 0));
+      expect(f.requests.filter(request => request.method === "turn/start")).toHaveLength(1);
+    } finally { await session.close(); }
+  });
+
   it("exposes live native reasoning and tool identity without requiring text", async () => {
     const f = fixture(), session = await f.open();
     try {

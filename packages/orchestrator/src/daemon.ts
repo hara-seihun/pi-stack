@@ -401,6 +401,10 @@ export class Daemon {
         if(action==="state"){
           if(input.state==="done"&&this.store.run(id)!.childrenOwner!=="core"&&!this.store.run(id)!.context)this.fleet.settle(id,input.result??"");
           else this.store.updateRun(id,input);
+          // Already-admitted workers may still be running a previous immutable release.
+          // Restore their unfinished turn on this release once that worker has closed it.
+          if(input.state==="failed"&&this.store.run(id)?.releasePath!==this.releasePath)
+            this.store.continueOutputLimitedRun(id,this.releasePath);
           const run=this.store.run(id);
           if(input.cooldownUntil&&run?.accountId)this.store.setCooldown(run.accountId,Number(input.cooldownUntil));
           if(input.activity)this.store.setLive(id,input);
@@ -463,6 +467,11 @@ export class Daemon {
         void this.reconcile();return json(res,201,{runIds:ids});
       }
       if(method==="POST"&&url.pathname==="/v1/wave"){const input=await body(req),lane=this.store.lane(String(input.lane));if(!lane)return json(res,404,{error:"lane not found"});if(input.core!==undefined&&!isCoreId(input.core))return json(res,400,{error:"core must be pi or codex"});const ids=this.store.createRuns({count:Number(input.count??1),source:"direct",sourceId:lane.id,prompt:lane.prompt,cwd:lane.cwd,profile:lane.profile,core:resolveCore(this.config,lane.profile,input.core??lane.core),budget:input.force?"force":"background"});void this.reconcile();return json(res,201,{runIds:ids});}
+      const runContinue=/^\/v1\/runs\/([^/]+)\/continue$/.exec(url.pathname);
+      if(method==="POST"&&runContinue){
+        if(!this.store.continueOutputLimitedRun(runContinue[1]!,this.releasePath))return json(res,409,{error:"Only an output-limited Codex run without an operator abort can continue"});
+        void this.reconcile();return json(res,200,{ok:true});
+      }
       const runAbort=/^\/v1\/runs\/([^/]+)\/(abort|kill)$/.exec(url.pathname);if(method==="POST"&&runAbort){const id=runAbort[1]!,action=runAbort[2]!;this.store.setControl(`abort:${id}`,action);const run=this.store.run(id);const completion=this.completions.byRun(id);if(completion){const outcome=this.completions.cancel(completion.requestId);this.stopUnit(run?.workerUnit);return completionReply(outcome);}if(action==="kill"||run?.state==="queued"||run?.state==="waiting"){this.stopUnit(run?.workerUnit);this.store.updateRun(id,{state:"aborted",failureKind:"operator",result:`${action} by operator`});}return json(res,200,{ok:true});}
       if(method==="POST"&&url.pathname==="/v1/control"){const input=await body(req);this.store.setControl(String(input.key),String(input.value));return json(res,200,{ok:true});}
       json(res,404,{error:"not found"});

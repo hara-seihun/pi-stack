@@ -2,6 +2,7 @@ import { mkdirSync } from "node:fs";
 import { randomInt, randomUUID } from "node:crypto";
 import { dirname, join, resolve } from "node:path";
 import { isCoreId, type CoreId } from "./cores/contracts.js";
+import { isOutputLimitError } from "./cores/codex-output-limit.js";
 import type { DatabaseSync } from "node:sqlite";
 import type { Account, BudgetClass, FailureKind, FleetChild, LaneSpec, LeaseKind, ProfileCandidate, Run, RunActivity, RunContext, RunSource, RunState, UsageEntry, UsageTotal } from "./domain.js";
 
@@ -344,6 +345,19 @@ export class Store {
       this.db.prepare(`UPDATE run SET state=?,session_file=COALESCE(?,session_file),progress_at=COALESCE(?,progress_at),result=?,failure_kind=?,worker_unit=COALESCE(?,worker_unit),updated_at=?,ended_at=? WHERE id=?`)
         .run(state,patch.sessionFile??null,patch.progressAt??null,patch.result??current.result??null,state==="done"?null:patch.failureKind??null,patch.workerUnit??null,at,at,id);
       this.endLease(`run:${id}`,at);
+    });
+  }
+  continueOutputLimitedRun(id:string,releasePath:string,at=Date.now()):boolean{
+    return this.transaction(()=>{
+      const run=this.run(id);
+      if(!run||run.state!=="failed"||run.core!=="codex"||!run.nativeSessionId||!run.accountId||!run.workerUnit
+        ||this.control(`abort:${id}`)||!isOutputLimitError({message:run.result}))return false;
+      this.setControl(`run-output-limit:${id}:${at}`,JSON.stringify({result:run.result,failureKind:run.failureKind,
+        endedAt:run.endedAt,releasePath:run.releasePath,workerUnit:run.workerUnit}));
+      this.db.prepare("UPDATE run SET state='starting',release_path=?,worker_unit=?,result=NULL,failure_kind=NULL,ended_at=NULL,updated_at=?,progress_at=? WHERE id=?")
+        .run(releasePath,`pi-orchestrator-run-${id.replaceAll('-','')}-${at}`,at,at,id);
+      this.createLease(`run:${id}`,run.accountId,"fleet",id,at);
+      return true;
     });
   }
   resumeAssignedRun(id:string,at=Date.now(),accountId?:string):boolean{

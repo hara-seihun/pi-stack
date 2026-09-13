@@ -2,6 +2,7 @@ import type { CoreOutput, PortableConversation } from "./contracts.js";
 import type { ThreadItem } from "./codex-protocol/v2/ThreadItem.js";
 import type { Turn } from "./codex-protocol/v2/Turn.js";
 import type { UserInput } from "./codex-protocol/v2/UserInput.js";
+import { isOutputLimitError } from "./codex-output-limit.js";
 
 export type Message = Record<string, unknown> & { id: string; role: string; content: Record<string, unknown>[]; timestamp: number };
 export type Entry = { id: string; parentId: string | null; type: "message"; timestamp: string; message: Message; nativeTurnId: string };
@@ -147,7 +148,7 @@ export class CodexProjection {
     if (turn.status !== "failed" && turn.status !== "interrupted") return;
     const id = `${turn.id}:failure`;
     const message: Message = { id, role: "assistant", content: [], timestamp: this.stamp(id), model: this.model(), provider: this.provider(),
-      stopReason: turn.status === "interrupted" ? "aborted" : "error", errorMessage: turn.error?.message ?? "Codex turn interrupted" };
+      stopReason: turn.status === "interrupted" ? "aborted" : isOutputLimitError(turn.error) ? "length" : "error", errorMessage: turn.error?.message ?? "Codex turn interrupted" };
     this.append(message, turn.id);
     if (emit) { this.emit({ type: "message_end", message }); this.context(); }
   }

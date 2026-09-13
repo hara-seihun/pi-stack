@@ -1,5 +1,11 @@
 # Codex app-server core
 
+## Provider output limits
+
+A native failure ending in `Incomplete response returned, reason: max_output_tokens` is a provider length stop. The core retains it as `stopReason: length` and continues the same native thread, model and thinking level. This applies to roots and children in both Remote and fleet sessions. Ordinary failures, operator interrupts and completed turns remain terminal. Continuation dispatch has a durable per-turn receipt; uncertain dispatches require native-history reconciliation and are never blindly replayed. The account and tree stay active throughout the continuation.
+
+A fleet run already stopped by this condition can be resumed with `pi-orchestrator continue RUN_ID`. It retains its native session, assignment and usage history, records the original failure under `run-output-limit:RUN_ID:TIMESTAMP`, and starts on the current immutable release. An operator abort prevents continuation. Workers still using a preceding release are recovered through this same transition if they subsequently report this length-stop failure. Their completed tool calls are not rerun.
+
 `src/cores/codex.ts` adapts the pinned Codex 0.154.0 app-server to PiStack's runtime wire. The default launcher resolves the executable from Orchestrator's immutable dependency closure, not the caller's PATH. Codex owns instructions, native tools, skills, compaction, and child agents. PiStack chooses the starting model and effort, binds an account, reserves capacity during native-tree activity, and controls dispatch. No Pi system prompt or Pi tools are installed into Codex. OpenAI models use native ChatGPT authentication. Anthropic models use Codex's custom Responses provider with the session-owned [Anthropic transport](codex-anthropic.md). Both use the Orchestrator's existing subscription account pool.
 
 ## Bind the account broker
