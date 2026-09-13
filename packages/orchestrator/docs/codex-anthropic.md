@@ -70,4 +70,6 @@ Native provider configuration must keep automatic request and stream retries dis
 npx vitest run packages/orchestrator/tests/codex-anthropic.test.ts packages/orchestrator/tests/codex-anthropic-native.test.ts --maxWorkers=1
 ```
 
-The fake-upstream tests use the real installed OAuth encoder. They cover instruction preservation, fragmented SSE/UTF-8, signed thinking and function/custom-tool round trips, images and role updates, usage, refresh boundaries, explicit unsupported requests, stream failure, disconnect, and shutdown while credentials or upstream responses are pending.
+The fake-upstream tests use the real installed OAuth encoder. They cover instruction preservation, fragmented SSE/UTF-8, signed thinking and function/custom-tool round trips, images and role updates, usage, refresh boundaries, explicit unsupported requests, stream failure, disconnect, and shutdown while credentials or upstream responses are pending. The pinned native app-server test executes a real shell tool, replays its result and signed thinking, compacts through `/responses`, preserves an upstream overload message, and retains provider usage when Codex reports output-limit failure.
+
+On September 13, 2026, source `39b2fa7` completed a real shared-pool Fable 5.1 request through native Codex 0.154.0 with high thinking and a read-only sandbox. Codex executed `exec_command` to read a marker file and returned `anthropic-codex-ok` in 3.375 seconds. The native tree settled with no core errors. The GMKtec handbook owns the private receipt.
