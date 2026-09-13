@@ -6,7 +6,7 @@ import { withFileMutationQueue, type ExtensionAPI, type ExtensionContext } from 
 import type { Store } from "../store.js";
 import type { SharedOAuthAuth } from "../auth/shared-oauth.js";
 import { chooseInteractiveAccount } from "../auth/account-selection.js";
-import { IMAGE_MODELS, IMAGE_QUALITIES, IMAGE_SIZES, requestImage } from "../image-generation.js";
+import { IMAGE_MODELS, IMAGE_QUALITIES, IMAGE_SIZES, requestImage, type ImageResult } from "../image-generation.js";
 import { createSharedImageGenerationService, imageAuth, imagePath, loadImageInputs, type SharedImageResult } from "../image-service.js";
 
 const parameters = Type.Object({
@@ -31,7 +31,7 @@ export function installImageGeneration(pi: ExtensionAPI, store: Store, shared: S
     }
     return undefined;
   };
-  const generate = async (params: ImageToolInput, ctx: ExtensionContext, signal: AbortSignal): Promise<SharedImageResult> => {
+  const generate = async (params: ImageToolInput, ctx: ExtensionContext, signal: AbortSignal): Promise<SharedImageResult | ImageResult> => {
     const selected = connection(ctx);
     if (!selected || selected.kind === "shared") return service.generateImageWithSharedAccount(params, { cwd: ctx.cwd, signal });
     try {

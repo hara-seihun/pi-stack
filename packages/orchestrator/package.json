@@ -18,6 +18,11 @@
       "bun": "./src/api.ts",
       "default": "./dist/api.js"
     },
+    "./image-service": {
+      "types": "./src/image-service.ts",
+      "bun": "./src/image-service.ts",
+      "default": "./dist/image-service.js"
+    },
     "./boost": {
       "types": "./src/boost.ts",
       "bun": "./src/boost.ts",
