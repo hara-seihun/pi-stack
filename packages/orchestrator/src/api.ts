@@ -11,8 +11,12 @@ export {
   type PlanMetric,
 } from "./catalog.js";
 export { DELEGATION_POLICY } from "./delegation-policy.js";
-export { isCoreId, openCoreSession, readPortableConversation, writeCoreState,
-  type CoreId, type CoreAgent, type CoreSession, type CoreSessionOptions, type PortableConversation } from "./cores/index.js";
+export type { Result, ThreadError, Delivery, ThinkingLevel, Speed, Admission, ThreadState, WorkOutcome,
+  ThreadSettings, SettingsOverrides, Thread, ThreadMessage, SpawnThread, SendThread, ThreadList, ThreadPage,
+  ThreadRead, ThreadHistory, ThreadControl, ThreadApi, PiEvent, PiCommand, PiSession, PiSessionOptions, OpenPiSession } from "./threads/contracts.js";
+export { ThreadService } from "./threads/service.js";
+export { threadHttp, createThreadClient } from "./threads/http.js";
+export { openPiSession } from "./threads/pi-session.js";
 export type { LaneManifest, LaneSpec, LaneReadiness, Run, FleetModel, FleetDispatch, FleetResult } from "./domain.js";
 export { CompletionClient, type CompletionClientOptions, type CompletionCallOptions } from "./completion-client.js";
 export { COMPLETION_OPENAPI } from "./completion-openapi.js";
