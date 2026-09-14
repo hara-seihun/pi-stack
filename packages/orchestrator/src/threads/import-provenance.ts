@@ -144,7 +144,8 @@ export function adoptImportProvenance(options: ImportProvenanceOptions): Result<
         const format = names.has(item.name) ? item.name : [...names].find(name => item.name === `${name}.next` || item.name.startsWith(`${name}.`) && item.name.endsWith(".tmp"));
         if (!format) { if (item.name.endsWith(".jsonl")) nativePaths.add(path); continue; }
         const text = readFileSync(path, "utf8");
-        const records = format.endsWith(".jsonl") ? jsonl(text, path, true) : [JSON.parse(text)];
+        const parsed = format.endsWith(".jsonl") ? jsonl(text, path, true) : [JSON.parse(text)];
+        const records = format === "activity.jsonl" ? parsed.filter(record => !["context_update", "message_update"].includes(record.type)) : parsed;
         let sourceOwner = owner;
         const header = records[0];
         if (format === "conversation.jsonl" && typeof header?.id === "string" && threads.has(header.id)) sourceOwner = header.id;
