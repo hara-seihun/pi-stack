@@ -168,6 +168,8 @@ npm run android:test --workspace=kenan
 
 CI runs the same gate from a persistent self-hosted checkout. Deployment does not repeat tests that already passed on the commit.
 
+`node --test scripts/deploy-lock.test.mjs` checks host activation and rollback in under a second using temporary artifacts and mocked services. Its unlocked router people must have matching person registry files. The HTTP fixture accepts supervisor health only at the registered listener, so it also checks that deployment avoids the authenticated client routes.
+
 ## Kenan
 
 The publication worker also distributes Android updates. After the checked source is integrated and both hosts are deployed, it publishes the APK built on GMKtec to both hosts and verifies the manifest and downloaded bytes through each front door. A release is unfinished if either app download fails. The native client compares the published version code with its installed package and shows Update app only for a newer build.
