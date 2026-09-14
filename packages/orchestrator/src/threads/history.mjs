@@ -1,3 +1,22 @@
+import { existsSync, readFileSync } from "node:fs";
+
+export function readThreadHistory(path, leafId) {
+  if (!existsSync(path)) return [];
+  return activePath(parseSession(readFileSync(path, "utf8")), leafId);
+}
+
+export function visibleThreadHistory(path, leafId) {
+  return readThreadHistory(path, leafId).flatMap(entry => {
+    if (!["message", "custom_message"].includes(entry.type)) return [];
+    if (entry.message?.role !== "assistant" || !Array.isArray(entry.message.content)) return [entry];
+    const content = entry.message.content.filter(block => block.type !== "thinking").map(block => {
+      const { thinkingSignature, textSignature, encrypted_content, encryptedContent, thoughtSignature, ...visible } = block;
+      return visible;
+    });
+    return [{ ...entry, message: { ...entry.message, content } }];
+  });
+}
+
 export function parseSession(text) {
   const entries = [];
   const lines = text.split("\n");

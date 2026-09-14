@@ -1,6 +1,6 @@
 import type { Result, ThreadApi } from "./contracts.js";
 
-const operations = ["spawn", "send", "list", "read", "control"] as const;
+const operations = ["spawn", "send", "list", "read", "control", "inspect", "command", "settlements"] as const;
 type Operation = typeof operations[number];
 const failure = (message: string): Result<never> => ({ ok: false, error: { code: "unavailable", message } });
 
@@ -17,7 +17,11 @@ export async function threadHttp(api: ThreadApi, request: Request, prefix = "/v1
     return Response.json({ ok: false, error: { code: "invalid_request", message: "Expected a JSON object" } }, { status: 400 });
   }
   try {
-    const result = await (api[operation] as (input: unknown) => Promise<Result<unknown>>).call(api, input);
+    const fields = input as Record<string, any>;
+    const result = operation === "settlements" ? await api.settlements(fields.after, fields.limit)
+      : operation === "inspect" ? await api.inspect(fields.threadId)
+      : operation === "command" ? await api.command(fields.threadId, fields.command)
+      : await (api[operation] as (input: unknown) => Promise<Result<unknown>>).call(api, input);
     return Response.json(result);
   } catch (error) {
     return Response.json(failure(error instanceof Error ? error.message : String(error)), { status: 503 });
@@ -41,5 +45,7 @@ export function createThreadClient(baseUrl: string, fetcher: typeof fetch = fetc
   return {
     spawn: input => call("spawn", input), send: input => call("send", input), list: input => call("list", input),
     read: input => call("read", input), control: input => call("control", input),
+    inspect: threadId => call("inspect", { threadId }), command: (threadId, command) => call("command", { threadId, command }),
+    settlements: (after, limit) => call("settlements", { after, limit }),
   };
 }

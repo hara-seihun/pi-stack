@@ -1,3 +1,5 @@
+export const THREAD_EXECUTION_CONTRACT = "unified-threads-v1";
+
 export type Result<T> = { ok: true; value: T } | { ok: false; error: ThreadError };
 export type ThreadError = { code: "not_found" | "invalid_request" | "conflict" | "no_pending_messages" | "unavailable" | "cancellation_failed"; message: string };
 export type Delivery = "queue" | "steer" | "hardSteer";
@@ -39,6 +41,8 @@ export interface ThreadMessage {
   createdAt: number;
   outcome?: WorkOutcome;
   replyTo?: string;
+  state?: "queued" | "running" | "dispatched" | "held" | "complete" | "failed" | "cancelled";
+  insertedAt?: number | null;
 }
 export interface SpawnThread {
   requestId: string;
@@ -63,6 +67,7 @@ export interface SendThread {
   replyTo?: string;
 }
 export interface ThreadList {
+  id?: string;
   parentId?: string | null;
   state?: ThreadState;
   limit?: number;
@@ -71,16 +76,38 @@ export interface ThreadList {
 export interface ThreadPage { threads: Thread[]; nextCursor?: string }
 export interface ThreadRead { threadId: string; cursor?: string; limit?: number; entryId?: string; offset?: number }
 export interface ThreadHistory { entries: Record<string, unknown>[]; nextCursor?: string }
+export interface ThreadSettlement {
+  seq: number;
+  executionId: string;
+  threadId: string;
+  workId: string;
+  outcome: WorkOutcome;
+  time: number;
+  finalMessage: Record<string, unknown> | null;
+}
+export interface ThreadSettlements { items: ThreadSettlement[]; cursor: number }
+export interface ThreadInspection {
+  thread: Thread;
+  pending: ThreadMessage[];
+  context?: Record<string, unknown>;
+  live?: Record<string, unknown>;
+}
 export type ThreadControl =
   | { threadId: string; action: "stop"; descendants: boolean }
   | { threadId: string; action: "resume" }
-  | { threadId: string; action: "settings"; settings: SettingsOverrides };
+  | { threadId: string; action: "settings"; settings: SettingsOverrides }
+  | { threadId: string; action: "cancelMessage"; messageId: string }
+  | { threadId: string; action: "promoteMessage"; messageId: string; delivery: Delivery }
+  | { threadId: string; action: "update"; title?: string; metadata?: Record<string, unknown>; archived?: boolean };
 export interface ThreadApi {
   spawn(input: SpawnThread): Promise<Result<Thread>>;
   send(input: SendThread): Promise<Result<ThreadMessage>>;
   list(input?: ThreadList): Promise<Result<ThreadPage>>;
   read(input: ThreadRead): Promise<Result<ThreadHistory>>;
   control(input: ThreadControl): Promise<Result<Thread>>;
+  inspect(threadId: string): Promise<Result<ThreadInspection>>;
+  command(threadId: string, command: PiCommand): Promise<Result<unknown>>;
+  settlements(after?: number, limit?: number): Result<ThreadSettlements> | Promise<Result<ThreadSettlements>>;
 }
 
 export type PiEvent = Record<string, unknown> & { type: string };

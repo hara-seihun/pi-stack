@@ -46,6 +46,6 @@ The Kenan drawer switches between them, and would between more. The browser clie
 
 ## Architecture
 
-[Pi sessions](docs/agent-cores.md) describes runtime ownership, portable conversations and child control. Pi is the sole agent engine; model selection remains independent.
+[Unified threads](docs/threads.md) describes Orchestrator-owned conversations, shared Pi execution, messaging, cancellation and model defaults. Remote, fleet lanes and agents use the same thread operations.
 
 [`docs/architecture.md`](docs/architecture.md) describes repository boundaries, environment identity, Android state isolation, and the work-thread cutover.

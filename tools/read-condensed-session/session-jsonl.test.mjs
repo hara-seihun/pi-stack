@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { activePath, parseSession, sessionRecords } from "./session-jsonl.mjs";
+import { activePath, parseSession, sessionRecords } from "pi-orchestrator/history";
 
 test("live JSONL tolerates only an unfinished last line and retains source line numbers", () => {
   const text = '{"type":"session","id":"s"}\n\n{"type":"message","id":"a","parentId":null}\n{"type":';

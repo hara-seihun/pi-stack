@@ -13,11 +13,14 @@ export {
 export { DELEGATION_POLICY } from "./delegation-policy.js";
 export type { Result, ThreadError, Delivery, ThinkingLevel, Speed, Admission, ThreadState, WorkOutcome,
   ThreadSettings, SettingsOverrides, Thread, ThreadMessage, SpawnThread, SendThread, ThreadList, ThreadPage,
-  ThreadRead, ThreadHistory, ThreadControl, ThreadApi, PiEvent, PiCommand, PiSession, PiSessionOptions, OpenPiSession } from "./threads/contracts.js";
+  ThreadRead, ThreadHistory, ThreadInspection, ThreadSettlement, ThreadSettlements, ThreadControl, ThreadApi, PiEvent, PiCommand, PiSession, PiSessionOptions, OpenPiSession } from "./threads/contracts.js";
 export { ThreadService } from "./threads/service.js";
 export { threadHttp, createThreadClient } from "./threads/http.js";
 export { openPiSession } from "./threads/pi-session.js";
-export type { LaneManifest, LaneSpec, LaneReadiness, Run, FleetModel, FleetDispatch, FleetResult } from "./domain.js";
+export { createSharedPiSessionOpener } from "./threads/runner-transport.js";
+export { ThreadDirectory, type ThreadOwner } from "./threads/directory.js";
+export { importRemoteThreads } from "./threads/import.js";
+export type { LaneManifest, LaneSpec, LaneReadiness, Run } from "./domain.js";
 export { CompletionClient, type CompletionClientOptions, type CompletionCallOptions } from "./completion-client.js";
 export { COMPLETION_OPENAPI } from "./completion-openapi.js";
 export { CompletionAttemptSchema, CompletionAttemptsSchema, type CompletionAttempt, CompletionInputSchema, CompletionRecordSchema, CompletionResultSchema, CompletionUsageSchema, CompletionErrorResponseSchema,
@@ -39,13 +42,8 @@ export { readUsageEvidence, type UsageEvidence } from "./usage-evidence.js";
 export {
   CACHE_WINDOW_MS,
   OrchestratorClient,
-  tailRange,
-  type ObservedRun,
   type OrchestratorClientOptions,
-  type OrchestratorObserver,
   type PlanMetricUsage,
   type PlanUsage,
   type PlanUsageSnapshot,
-  type RunListing,
-  type TranscriptTail,
 } from "./client.js";

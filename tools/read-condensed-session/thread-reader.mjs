@@ -1,5 +1,5 @@
 import { readFileSync } from "node:fs";
-import { activePath, sessionRecords, timestampMs } from "./session-jsonl.mjs";
+import { activePath, sessionRecords, timestampMs } from "pi-orchestrator/history";
 
 const cap = (text, limit) => text.length > limit
   ? `${text.slice(0, limit)} …[${text.length.toLocaleString("en-US")} chars]`

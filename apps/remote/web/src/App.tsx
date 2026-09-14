@@ -45,6 +45,7 @@ interface AppState {
   attachments: Attachment[];
   slashCommands: SlashCommand[];
   offline: string;
+  ownerErrors: { owner: string; message: string }[];
   syncing: boolean;
 }
 
@@ -52,7 +53,7 @@ const initialState: AppState = {
   selectedId: null, drawerTab: "threads", drawerOpen: innerWidth >= 1000, settingsOpen: false,
   sessions: [], archived: [], archivedTotal: 0, pendingOrder: null, dashboard: null,
   context: null, images: null, liveText: null, liveThinking: null,
-  attachments: [], slashCommands: [], offline: "", syncing: true,
+  attachments: [], slashCommands: [], offline: "", ownerErrors: [], syncing: true,
 };
 
 function threadProvider(session: Session) {
@@ -389,7 +390,7 @@ export default function App() {
       try {
         const update: Partial<AppState> = { offline: "", syncing: false };
         if (response.state) {
-          Object.assign(update, response.state);
+          Object.assign(update, response.state, { ownerErrors: response.state.ownerErrors ?? [] });
           if (meta.orderCommitted) update.pendingOrder = null;
         }
         if (response.dashboard) update.dashboard = response.dashboard;
@@ -627,7 +628,7 @@ export default function App() {
       {state.drawerTab === "threads" && <DndContext sensors={dragSensors} collisionDetection={closestCenter} onDragEnd={(event) => void reorder(event)}><SortableContext items={sessions.map((session) => session.id)} strategy={verticalListSortingStrategy}><div className="thread-list">{sessions.length ? sessions.map((session) => <SortableThreadRow key={session.id} session={session} selected={state.selectedId === session.id} onSelect={(id) => void selectThread(id)} onArchive={(id) => void archive(id)} onUnarchive={() => {}} />) : <div className="thread-empty">No threads</div>}</div></SortableContext></DndContext>}
       {state.drawerTab === "archived" && <div className="thread-list">{state.archived.length ? state.archived.map((session) => <ThreadRow key={session.id} archived session={session} selected={false} onSelect={() => {}} onArchive={() => {}} onUnarchive={(id) => void unarchive(id)} />) : <div className="thread-empty">No archived threads</div>}{state.archived.length < state.archivedTotal && <button type="button" className="archived-more" onClick={() => void loadOlder()}>Show older · {state.archivedTotal - state.archived.length} more</button>}</div>}
       <FileExplorer hidden={state.drawerTab !== "files"} onRootCount={setRootFileCount} />
-      <footer className="drawer-footer"><MachineControls actions={dashboard?.actions ?? []} governors={dashboard?.governors ?? null} onAction={(id) => void toggleAction(id)} onGovernor={(provider) => void toggleGovernor(provider)} /><EnvironmentControl /><AppUpdateControl /><NotificationControl sessionId={state.selectedId} /><PlanSummary plans={dashboard?.plans ?? []} counts={modelCounts} /><div className="usage-summary muted">{machineText}</div><div className="usage-summary muted" title={__PI_REMOTE_REVISION__}>Client {__PI_REMOTE_REVISION__.slice(0, 12)}</div>{state.offline && <div className="connection" style={{ color: "var(--danger)" }}>● Offline · {state.offline}</div>}</footer>
+      <footer className="drawer-footer">{state.ownerErrors.map(({ owner, message }) => <div key={owner} role="status" className="connection" style={{ color: "var(--danger)" }}>{owner}: {message}</div>)}<MachineControls actions={dashboard?.actions ?? []} governors={dashboard?.governors ?? null} onAction={(id) => void toggleAction(id)} onGovernor={(provider) => void toggleGovernor(provider)} /><EnvironmentControl /><AppUpdateControl /><NotificationControl sessionId={state.selectedId} /><PlanSummary plans={dashboard?.plans ?? []} counts={modelCounts} /><div className="usage-summary muted">{machineText}</div><div className="usage-summary muted" title={__PI_REMOTE_REVISION__}>Client {__PI_REMOTE_REVISION__.slice(0, 12)}</div>{state.offline && <div className="connection" style={{ color: "var(--danger)" }}>● Offline · {state.offline}</div>}</footer>
     </aside>
     <main id="main" className={drawingOpen ? "drawing-mode" : undefined}><header className="topbar"><button className="icon-button" aria-label="Open navigation" onClick={() => patch({ drawerOpen: true })}>☰</button><div className="top-title">{title}</div><div className="top-state" style={{ color: state.offline ? "var(--danger)" : activityColor(selectedActivity) }}>{state.offline ? "OFFLINE" : state.syncing ? "SYNCING" : activityLabel(selectedActivity, selectedTool ?? "")}</div>{state.offline && <button type="button" onClick={kick} title={state.offline}>Reconnect</button>}<a className="icon-button" aria-label="Open PiStack Meet" title="PiStack Meet" href={`/meet.html?${new URLSearchParams({ user: window.PiRemotePerson.get() })}`} onClick={async (event) => { event.preventDefault(); const environment = await window.KenanRemote?.getState(); location.href = `/meet.html?${new URLSearchParams({ user: window.PiRemotePerson.get(), environment: environment?.id || "" })}`; }}><svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true"><rect x="3" y="6" width="12" height="12" rx="2"/><path d="m15 10 6-4v12l-6-4z"/></svg></a>{selected && selected.state !== "STOPPING" && <button type="button" disabled={pending} onClick={() => stopThread(selected)}>Stop</button>}<button className="icon-button" aria-label="Open thread settings" disabled={!selected} onClick={() => patch({ settingsOpen: true })}>⚙</button></header>
       {(selected?.parentId || children.length > 0) && <nav className="thread-relations" aria-label="Related threads">

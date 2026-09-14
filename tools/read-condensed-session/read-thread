@@ -16,14 +16,15 @@ function integer(value, label, minimum = 1) {
 }
 
 function defaultDatabase() {
-  if (process.env.PI_REMOTE_DATA) return join(process.env.PI_REMOTE_DATA, "supervisor.sqlite3");
+  if (process.env.PI_THREAD_DATABASE) return process.env.PI_THREAD_DATABASE;
+  if (process.env.PI_REMOTE_DATA) return join(process.env.PI_REMOTE_DATA, "threads.sqlite3");
   const personFile = join(process.env.PI_REMOTE_PERSONS_DIR ?? "/var/lib/pi-remote/persons", `${userInfo().username}.json`);
   if (existsSync(personFile)) {
     const data = JSON.parse(readFileSync(personFile, "utf8")).environment?.PI_REMOTE_DATA;
     if (typeof data !== "string" || !data) throw new Error(`${personFile} must configure PI_REMOTE_DATA`);
-    return join(data, "supervisor.sqlite3");
+    return join(data, "threads.sqlite3");
   }
-  return join(process.env.XDG_STATE_HOME ?? join(homedir(), ".local", "state"), "pi-remote", "supervisor.sqlite3");
+  return join(process.env.XDG_DATA_HOME ?? join(homedir(), ".local", "share"), "pi-orchestrator", "threads.sqlite3");
 }
 
 function main() {
@@ -96,7 +97,7 @@ function main() {
   let db;
   try {
     let selector = args[0];
-    if (subagents && (!selector || selector === "self")) selector = process.env.PI_REMOTE_SESSION_ID;
+    if (subagents && (!selector || selector === "self")) selector = process.env.PI_THREAD_ID ?? process.env.PI_REMOTE_SESSION_ID;
     if (paged && !selector) throw new Error("A thread selector is required; --subagents can use PI_REMOTE_SESSION_ID");
     let row;
     if (selector === "self" || (selector && (isAbsolute(selector) || selector.startsWith("./") || selector.startsWith("../") || selector.endsWith(".jsonl") || existsSync(selector)))) {
@@ -110,19 +111,13 @@ function main() {
       const dbPath = resolve(database ?? defaultDatabase());
       if (!existsSync(dbPath)) throw new Error(`Pi Remote database not found at ${dbPath}; set PI_REMOTE_DATA or pass --db. self and JSONL paths do not need a database`);
       db = new DatabaseSync(dbPath, { readOnly: true });
-      const rows = db.prepare("SELECT id,name,session_path,state,updated_at,archived_at FROM sessions ORDER BY updated_at DESC").all();
+      const rows = db.prepare("SELECT id,title AS name,session_file AS session_path,upper(state) AS state,updated_at,json_extract(metadata,'$.archivedAt') AS archived_at FROM thread ORDER BY updated_at DESC").all()
+        .map(row => ({ ...row, updated_at: new Date(row.updated_at).toISOString() }));
       if (list || !selector) {
         console.log(listThreads(rows));
         return;
       }
       row = resolveThread(rows, selector);
-      if (db.prepare("SELECT 1 FROM sqlite_master WHERE type='table' AND name='session_cores'").get()) {
-        const core = db.prepare("SELECT core,state_dir FROM session_cores WHERE session_id=?").get(row.id);
-        if (core) {
-          const portable = join(core.state_dir, "conversation.jsonl");
-          if (existsSync(portable)) row = {...row, session_path: portable, core: core.core, representation: "portable-activity"};
-        }
-      }
     }
     if (paged) {
       const page = subagents ? subagentPage(db, row.id, { includeIdle, limit: options.limit, cursor })
@@ -140,8 +135,9 @@ function main() {
     if (!hasSession && (options.all || options.leaf || options.raw || options.search !== undefined || options.full)) throw new Error(`thread ${JSON.stringify(row.name)} has no Pi session JSONL to read or search`);
     const transcript = hasSession ? renderThread(row, options) : renderSupervisorRecords(
       row,
-      db.prepare("SELECT text,state,attempts,last_error,created_at FROM work_items WHERE session_id=? ORDER BY created_at").all(row.id),
-      db.prepare("SELECT time,type,payload FROM events WHERE session_id=? ORDER BY seq").all(row.id),
+      db.prepare("SELECT text,status AS state,0 AS attempts,error AS last_error,created_at FROM thread_work WHERE thread_id=? ORDER BY ordinal").all(row.id)
+        .map(item => ({ ...item, created_at: new Date(item.created_at).toISOString() })),
+      [],
       options,
     );
     if (output) {

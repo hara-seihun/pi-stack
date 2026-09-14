@@ -4,53 +4,8 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import threadContext from "./thread-context";
 import { threadStateInstructions } from "./thread-context-state";
-import { registerThreadTools } from "./thread-tools";
-import { DELEGATION_POLICY } from "pi-orchestrator/api";
 
 describe("thread lifecycle context", () => {
-  test.each([undefined, "meeting-id"])("root delegation uses shared guidance and scopes meeting details: %s", (meeting) => {
-    const previous = {
-      PI_SUBAGENT_MODEL: process.env.PI_SUBAGENT_MODEL,
-      PI_REMOTE_MEETING_ID: process.env.PI_REMOTE_MEETING_ID,
-      PI_STACK_CORE_OWNS_CHILDREN: process.env.PI_STACK_CORE_OWNS_CHILDREN,
-    };
-    try {
-      delete process.env.PI_SUBAGENT_MODEL;
-      delete process.env.PI_STACK_CORE_OWNS_CHILDREN;
-      if (meeting) process.env.PI_REMOTE_MEETING_ID = meeting;
-      else delete process.env.PI_REMOTE_MEETING_ID;
-      const tools: { name: string; description: string }[] = [];
-      registerThreadTools({ registerTool: (tool: typeof tools[number]) => tools.push(tool) } as any);
-      const tool = tools.find((tool) => tool.name === "thread_delegate")!;
-      expect(tool.description.startsWith(`${DELEGATION_POLICY}\n\n`)).toBe(true);
-      expect(tool.description.includes("Meeting workers")).toBe(Boolean(meeting));
-    } finally {
-      for (const [key, value] of Object.entries(previous)) {
-        if (value === undefined) delete process.env[key];
-        else process.env[key] = value;
-      }
-    }
-  });
-  test("subagents keep thinking control but cannot register delegation", () => {
-    const previous = {
-      PI_SUBAGENT_MODEL: process.env.PI_SUBAGENT_MODEL,
-      PI_STACK_CORE_OWNS_CHILDREN: process.env.PI_STACK_CORE_OWNS_CHILDREN,
-    };
-    try {
-      delete process.env.PI_STACK_CORE_OWNS_CHILDREN;
-      for (const model of ["gpt-6-astra", "gpt-5.6-sol", "gpt-5.6-terra", "gpt-5.6-luna"]) {
-        process.env.PI_SUBAGENT_MODEL = model;
-        const tools: string[] = [];
-        registerThreadTools({ registerTool: (tool: { name: string }) => tools.push(tool.name) } as any);
-        expect(tools).toEqual(["thread_thinking", "thread_read", "thread_subagents"]);
-      }
-    } finally {
-      for (const [key, value] of Object.entries(previous)) {
-        if (value === undefined) delete process.env[key];
-        else process.env[key] = value;
-      }
-    }
-  });
   test("describes new and continuing threads without a naming tool", () => {
     const fresh = threadStateInstructions({ name: "83", prompt: "Fix it", fileTag: "pi-file", home: "/home/a" });
     expect(fresh).toContain("starting a new thread");
@@ -83,7 +38,6 @@ describe("thread lifecycle context", () => {
       PI_REMOTE_SERVER_URL: remote ? "http://remote.test" : undefined,
       PI_REMOTE_MEETING_ID: undefined,
       PI_SUBAGENT_MODEL: undefined,
-      PI_STACK_CORE_OWNS_CHILDREN: undefined,
     };
     const previous = Object.fromEntries(Object.keys(environment).map((key) => [key, process.env[key]]));
     writeFileSync(alert, "Disk needs attention\n");
@@ -101,7 +55,7 @@ describe("thread lifecycle context", () => {
         else process.env[key] = value;
       }
       threadContext(pi as any);
-      expect(tools).toEqual(remote ? ["thread_thinking", "thread_read", "thread_subagents", "thread_delegate"] : []);
+      expect(tools).toEqual([]);
       const result = await handlers.get("before_agent_start")!(
         { prompt: "Help", systemPrompt: "System" },
         { sessionManager: { getBranch: () => [{ type: "message", message: { role: "user" } }] } },

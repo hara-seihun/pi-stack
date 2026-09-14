@@ -6,6 +6,7 @@ source "$root/deploy/lib"
 pi_stack_enter_deployment "$0" "$root" "$@"
 dest=${PI_STACK_TOOLS_DEST:-/srv/pi/tools}
 runtime=${PI_STACK_RUNTIME_DEST:-/srv/pi/runtime}
+orchestrator=${PI_STACK_ORCHESTRATOR_DEST:-/srv/pi/pi-orchestrator}
 remote=${PI_STACK_REMOTE_DEST:-/srv/pi/pi-remote}
 skip_links=${PI_STACK_SKIP_TOOL_LINKS:-0}
 manifest="$root/config/tools.json"
@@ -30,7 +31,16 @@ while IFS= read -r tool; do
   done < <(jq -r --arg tool "$tool" '.tools[] | select(.id == $tool) | .commands[].entry' "$manifest")
 done < <(jq -r '.tools[].id' "$manifest")
 
-ln -s "$dependencies" "$stage/release/node_modules"
+[[ -f $orchestrator/.pi-stack-commit && $(<"$orchestrator/.pi-stack-commit") == "$commit" ]] || {
+  echo "deploy Pi Orchestrator $commit before Pi tools" >&2
+  exit 66
+}
+mkdir -p "$stage/release/node_modules"
+for dependency in "$dependencies"/*; do
+  ln -s "$dependency" "$stage/release/node_modules/$(basename "$dependency")"
+done
+ln -s "$(readlink -f "$orchestrator")" "$stage/release/node_modules/pi-orchestrator"
+node "$stage/release/read-condensed-session/read-thread" --contract >/dev/null
 printf '%s\n' "$commit" > "$stage/release/.pi-stack-commit"
 pi_stack_publish_release "$root" "$stage/release" "$dest" tools
 

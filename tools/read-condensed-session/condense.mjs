@@ -3,8 +3,8 @@ import { mkdirSync } from "node:fs";
 import { dirname } from "node:path";
 import { DatabaseSync } from "node:sqlite";
 import { promptForJob } from "./prompts.mjs";
-import { timestampMs } from "./session-jsonl.mjs";
-export { activePath, parseSession, timestampMs } from "./session-jsonl.mjs";
+import { timestampMs } from "pi-orchestrator/history";
+export { activePath, parseSession, timestampMs } from "pi-orchestrator/history";
 
 export const DEFAULT_THRESHOLD = 16_000;
 export const VERBATIM_TAIL_CALLS = 10;

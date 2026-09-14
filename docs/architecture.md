@@ -39,4 +39,6 @@ The shared client keeps the selected drawer tab, composer drafts, and Local unlo
 
 ## Session ownership
 
-Each Pi Remote deployment owns its runtime hosts, uploads, and local orchestrator view. [Pi](agent-cores.md) owns native execution, compaction and children. PiStack owns session identity, input delivery and portable activity logs. Local owns Personal and Home; Converge owns work. Kenan combines the two environments at the client boundary. There is no server-to-server agent bridge or remote ledger reader.
+[Orchestrator threads](threads.md) own conversation identity, input delivery, execution state and parent notifications. Pi owns each individual session's native execution, compaction and JSONL transcript. The shared runner keeps many sessions in one process within each existing person and execution boundary. Remote owns presentation, uploads and person routing, not another scheduler.
+
+Local owns Personal and Home; Converge owns work. Kenan combines these environments at the client boundary. Thread directories include only explicitly authorized owners in the selected environment. Fleet control is available to the fleet's configured owning person, not to every person who can observe account usage. There is no cross-machine agent bridge.

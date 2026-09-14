@@ -18,6 +18,10 @@
       "bun": "./src/api.ts",
       "default": "./dist/api.js"
     },
+    "./history": {
+      "types": "./src/threads/history.d.mts",
+      "default": "./src/threads/history.mjs"
+    },
     "./image-service": {
       "types": "./src/image-service.ts",
       "bun": "./src/image-service.ts",

@@ -5,7 +5,6 @@ import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 import { threadStateInstructions } from "./thread-context-state";
 import { API } from "./api";
 import { registerMeetTools } from "./meet/tools";
-import { registerThreadTools } from "./thread-tools";
 import { sessionEnvironment } from "./session-environment";
 
 type Alert = { file: string; path?: string; text: string; error?: string };
@@ -38,7 +37,6 @@ function alertText(alerts: Alert[]): string {
 
 export default function threadContext(pi: ExtensionAPI) {
   const environment = sessionEnvironment();
-  if (environment.PI_REMOTE_SESSION_ID && environment.PI_REMOTE_SERVER_URL) registerThreadTools(pi);
   if (environment.PI_REMOTE_MEETING_ID) registerMeetTools(pi);
   const pendingAlerts = new Map<string, string>();
 

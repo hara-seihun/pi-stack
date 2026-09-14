@@ -8,9 +8,8 @@ import { subagentPage, threadPage } from "./thread-pages.mjs";
 
 function database() {
   const db = new DatabaseSync(":memory:");
-  db.exec(`CREATE TABLE sessions(id TEXT,name TEXT,state TEXT,created_at TEXT,archived_at TEXT);
-    CREATE TABLE subagents(session_id TEXT,parent_session_id TEXT,model TEXT);
-    CREATE TABLE events(seq INTEGER PRIMARY KEY,session_id TEXT,type TEXT,time TEXT,payload TEXT);`);
+  db.exec(`CREATE TABLE thread(id TEXT,title TEXT,state TEXT,created_at INTEGER,parent_id TEXT,settings TEXT,metadata TEXT,updated_at INTEGER);
+    CREATE TABLE thread_work(ordinal INTEGER PRIMARY KEY,id TEXT,thread_id TEXT,status TEXT,created_at INTEGER,text TEXT);`);
   return db;
 }
 
@@ -18,18 +17,19 @@ test("subagent pages use message recency, stable snapshots, direct ownership and
   const db = database();
   try {
     for (const [id, state, parent, archived] of [["a", "RUNNING", "root", null], ["b", "IDLE", "root", null], ["c", "STOPPED", "root", "2026-01-01"], ["nested", "RUNNING", "a", null]]) {
-      db.prepare("INSERT INTO sessions VALUES(?,?,?,?,?)").run(id, id, state, "2025-01-01", archived);
-      db.prepare("INSERT INTO subagents VALUES(?,?,?)").run(id, parent, "luna");
+      db.prepare("INSERT INTO thread VALUES(?,?,?,?,?,?,?,?)").run(id, id, state.toLowerCase(), Date.parse("2025-01-01"), parent,
+        JSON.stringify({model:'luna'}), JSON.stringify({archived:!!archived,archivedAt:archived}), Date.parse("2025-01-01"));
     }
-    const event = db.prepare("INSERT INTO events VALUES(?,?,?,?,?)");
-    event.run(1, "c", "assistant", "2025-01-02", "{}");
-    event.run(2, "a", "user", "2025-01-03", "{}");
-    event.run(3, "b", "assistant", "2025-01-04", "{}");
-    event.run(4, "a", "state", "2025-01-05", "{}");
+    const statement = db.prepare("INSERT INTO thread_work VALUES(?,?,?,'done',?,?)");
+    const event = (id, thread, date) => statement.run(id, `message-${id}`, thread, Date.parse(date), "{}");
+    event(1, "c", "2025-01-02");
+    event(2, "a", "2025-01-03");
+    event(3, "b", "2025-01-04");
+    db.prepare("UPDATE thread SET updated_at=? WHERE id='a'").run(Date.parse("2025-01-05"));
     assert.deepEqual(subagentPage(db, "root").subagents.map(row => row.threadId), ["a"]);
     const first = subagentPage(db, "root", { includeIdle: true, limit: 1 });
     assert.deepEqual(first.subagents.map(row => row.threadId), ["b"]);
-    event.run(5, "c", "assistant", "2025-01-06", "{}");
+    event(5, "c", "2025-01-06");
     const second = subagentPage(db, "root", { includeIdle: true, limit: 1, cursor: first.nextCursor });
     assert.deepEqual(second.subagents.map(row => row.threadId), ["a"]);
     const third = subagentPage(db, "root", { includeIdle: true, limit: 1, cursor: second.nextCursor });

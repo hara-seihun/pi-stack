@@ -83,19 +83,17 @@ test("self and explicit JSONL paths share complete history and bounded search wi
 test("subagent CLI discovers the caller, pages direct children and retains its distinct limits", () => {
   const root = mkdtempSync(join(tmpdir(), "read-thread-subagents-"));
   try {
-    const db = new DatabaseSync(join(root, "supervisor.sqlite3"));
+    const db = new DatabaseSync(join(root, "threads.sqlite3"));
     db.exec(`
-      CREATE TABLE sessions(id,name,session_path,state,updated_at,archived_at,created_at);
-      CREATE TABLE subagents(session_id,parent_session_id,model);
-      CREATE TABLE events(seq INTEGER PRIMARY KEY,session_id,type,time,payload);
-      INSERT INTO sessions VALUES('root','Coordinator',NULL,'RUNNING','2025-01-01',NULL,'2025-01-01');
-      INSERT INTO sessions VALUES('child','Child',NULL,'RUNNING','2025-01-01',NULL,'2025-01-01');
-      INSERT INTO sessions VALUES('settled','Settled',NULL,'IDLE','2025-01-01',NULL,'2025-01-01');
-      INSERT INTO subagents VALUES('child','root','luna'),('settled','root','astra');
-      INSERT INTO events VALUES(1,'child','assistant','2025-01-02','answer'),(2,'settled','assistant','2025-01-03','done');
+      CREATE TABLE thread(id,title,session_file,state,updated_at,created_at,parent_id,settings,metadata);
+      CREATE TABLE thread_work(ordinal INTEGER PRIMARY KEY,id,thread_id,status,created_at,text);
+      INSERT INTO thread VALUES('root','Coordinator',NULL,'running',1735689600000,1735689600000,NULL,'{}','{}');
+      INSERT INTO thread VALUES('child','Child',NULL,'running',1735689600000,1735689600000,'root','{"model":"luna"}','{}');
+      INSERT INTO thread VALUES('settled','Settled',NULL,'idle',1735689600000,1735689600000,'root','{"model":"astra"}','{}');
+      INSERT INTO thread_work VALUES(1,'work1','child','done',1735776000000,'answer'),(2,'work2','settled','done',1735862400000,'done');
     `);
     db.close();
-    const env = { ...process.env, PI_REMOTE_DATA: root, PI_REMOTE_SESSION_ID: "root" };
+    const env = { ...process.env, PI_REMOTE_DATA: root, PI_THREAD_DATABASE: join(root, 'threads.sqlite3'), PI_THREAD_ID: "root", PI_REMOTE_SESSION_ID: "root" };
     const run = (...args) => spawnSync(process.execPath, [new URL("read-thread", import.meta.url).pathname, ...args], { env, encoding: "utf8", timeout: 2000 });
     const active = JSON.parse(run("--subagents").stdout);
     assert.deepEqual(active.subagents.map(child => child.threadId), ["child"]);
@@ -108,7 +106,7 @@ test("subagent CLI discovers the caller, pages direct children and retains its d
     assert.equal(run("--subagents", "--limit", "101").status, 1);
     assert.equal(run("--subagents", "--search", "needle").status, 1);
     const transcript = JSON.parse(run("--json", "Child").stdout);
-    assert.equal(transcript.source, "supervisor-events");
+    assert.equal(transcript.source, "thread-inputs");
     assert.match(transcript.entries[0].text, /answer/);
   } finally {
     rmSync(root, { recursive: true, force: true });
@@ -121,24 +119,22 @@ test("SSH discovery reads the person's registry and reports requests that never 
     const persons = join(root, "persons");
     mkdirSync(persons);
     writeFileSync(join(persons, `${userInfo().username}.json`), JSON.stringify({ environment: { PI_REMOTE_DATA: root } }));
-    const db = new DatabaseSync(join(root, "supervisor.sqlite3"));
+    const db = new DatabaseSync(join(root, "threads.sqlite3"));
     db.exec(`
-      CREATE TABLE sessions(id,name,session_path,state,updated_at,archived_at);
-      CREATE TABLE work_items(session_id,text,state,attempts,last_error,created_at);
-      CREATE TABLE events(seq,session_id,time,type,payload);
-      INSERT INTO sessions VALUES('thread','818',NULL,'IDLE','2026-09-08T19:07:00Z',NULL);
-      INSERT INTO work_items VALUES('thread','Check the jobs','cancelled',2,'Cancelled by user','2026-09-08T19:06:00Z');
-      INSERT INTO events VALUES(1,'thread','2026-09-08T19:06:01Z','notice','Authentication unavailable');
+      CREATE TABLE thread(id,title,session_file,state,updated_at,metadata);
+      CREATE TABLE thread_work(ordinal,thread_id,text,status,error,created_at);
+      INSERT INTO thread VALUES('thread','818',NULL,'idle',1788894420000,'{}');
+      INSERT INTO thread_work VALUES(1,'thread','Check the jobs','done','Cancelled by user',1788894360000);
     `);
     db.close();
     const env = { ...process.env, PI_REMOTE_PERSONS_DIR: persons };
     delete env.PI_REMOTE_DATA;
+    delete env.PI_THREAD_DATABASE;
     const result = spawnSync(process.execPath, [new URL("read-thread", import.meta.url).pathname, "818"], { env, encoding: "utf8", timeout: 2000 });
     assert.equal(result.status, 0, result.stderr);
     assert.match(result.stdout, /not a model transcript/);
     assert.match(result.stdout, /Check the jobs/);
-    assert.match(result.stdout, /cancelled, 2 attempts/);
-    assert.match(result.stdout, /Authentication unavailable/);
+    assert.match(result.stdout, /Cancelled by user/);
   } finally {
     rmSync(root, { recursive: true, force: true });
   }

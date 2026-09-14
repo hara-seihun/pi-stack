@@ -1,5 +1,5 @@
 import { existsSync, readFileSync } from "node:fs";
-import { activePath, parseSession } from "./session-jsonl.mjs";
+import { activePath, parseSession } from "pi-orchestrator/history";
 import { renderEntry } from "./thread-reader.mjs";
 
 const encode = value => Buffer.from(JSON.stringify(value)).toString("base64url");
@@ -21,7 +21,7 @@ export function subagentPage(db, parentId, options = {}) {
   const limit = pageSize(options.limit, 20, 100);
   const cursor = options.cursor ? decode(options.cursor) : {
     kind: "subagents", parentId, includeIdle, asOf: new Date().toISOString(),
-    maxSeq: Number(db.prepare("SELECT COALESCE(MAX(seq),0) n FROM events").get().n), beforeSeq: null, beforeId: "",
+    maxSeq: Number(db.prepare("SELECT COALESCE(MAX(ordinal),0) n FROM thread_work").get().n), beforeSeq: null, beforeId: "",
   };
   if (cursor.kind !== "subagents" || cursor.parentId !== parentId || cursor.includeIdle !== includeIdle
     || !Number.isSafeInteger(cursor.maxSeq) || typeof cursor.asOf !== "string"
@@ -29,23 +29,22 @@ export function subagentPage(db, parentId, options = {}) {
     throw new Error("Cursor does not match this subagent query");
   }
   const rows = db.prepare(`WITH children AS (
-    SELECT s.id,s.name,s.state,s.created_at,s.archived_at,a.model,
-      COALESCE((SELECT MAX(e.seq) FROM events e WHERE e.session_id=s.id
-        AND e.type IN ('user','assistant') AND e.seq<=?),0) message_seq
-    FROM subagents a JOIN sessions s ON s.id=a.session_id
-    WHERE a.parent_session_id=? AND s.created_at<=?
-      ${includeIdle ? "" : "AND s.archived_at IS NULL AND s.state IN ('STARTING','RUNNING','ABORTING')"}
-  ) SELECT children.*,COALESCE((SELECT time FROM events WHERE seq=message_seq),created_at) last_message_at
+    SELECT t.id,t.title AS name,upper(t.state) AS state,t.created_at,
+      json_extract(t.metadata,'$.archivedAt') AS archived_at,json_extract(t.settings,'$.model') AS model,
+      COALESCE((SELECT MAX(w.ordinal) FROM thread_work w WHERE w.thread_id=t.id AND w.ordinal<=?),0) message_seq
+    FROM thread t WHERE t.parent_id=? AND t.created_at<=?
+      ${includeIdle ? "" : "AND COALESCE(json_extract(t.metadata,'$.archived'),0)=0 AND t.state IN ('queued','starting','running','stopping')"}
+  ) SELECT children.*,COALESCE((SELECT created_at FROM thread_work WHERE ordinal=message_seq),created_at) last_message_at
     FROM children WHERE (? IS NULL OR message_seq<? OR (message_seq=? AND id<?))
-    ORDER BY message_seq DESC,id DESC LIMIT ?`).all(cursor.maxSeq, parentId, cursor.asOf,
+    ORDER BY message_seq DESC,id DESC LIMIT ?`).all(cursor.maxSeq, parentId, Date.parse(cursor.asOf),
       cursor.beforeSeq, cursor.beforeSeq, cursor.beforeSeq, cursor.beforeId, limit + 1);
   const page = rows.slice(0, limit);
   const last = page.at(-1);
   return {
     parentThreadId: parentId, includeIdle, order: "most-recent-message", snapshotAt: cursor.asOf,
     subagents: page.map(row => ({ threadId: row.id, name: row.name, model: row.model, state: row.state,
-      active: !row.archived_at && ["STARTING", "RUNNING", "ABORTING"].includes(row.state),
-      lastMessageAt: row.last_message_at, archivedAt: row.archived_at })),
+      active: !row.archived_at && ["QUEUED", "STARTING", "RUNNING", "STOPPING"].includes(row.state),
+      lastMessageAt: new Date(row.last_message_at).toISOString(), archivedAt: row.archived_at })),
     nextCursor: rows.length > limit ? encode({ ...cursor, beforeSeq: last.message_seq, beforeId: last.id }) : null,
   };
 }
@@ -62,9 +61,9 @@ function transcriptEntries(db, row, includeTools) {
       return text ? [{ id: entry.id, text }] : [];
     }) };
   }
-  return { source: "supervisor-events", entries: db.prepare(
-    `SELECT seq,time,type,payload FROM events WHERE session_id=? AND type IN ('user','assistant','notice'${includeTools ? ",'tool_start','tool_end'" : ""}) ORDER BY seq`,
-  ).all(row.id).map(event => ({ id: `event-${event.seq}`, text: `[${event.time}] ${event.type}\n${event.payload}` })) };
+  return { source: "thread-inputs", entries: db.prepare(
+    "SELECT id,created_at,status,text FROM thread_work WHERE thread_id=? ORDER BY ordinal",
+  ).all(row.id).map(work => ({ id: work.id, text: `[${new Date(work.created_at).toISOString()}] input ${work.status}\n${work.text}` })) };
 }
 
 export function threadPage(db, row, options = {}) {
