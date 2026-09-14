@@ -95,6 +95,7 @@ export interface ThreadInspection {
 export type ThreadControl =
   | { threadId: string; action: "stop"; descendants: boolean }
   | { threadId: string; action: "resume" }
+  | { threadId: string; action: "archiveInactive"; inactiveBefore: number }
   | { threadId: string; action: "settings"; settings: SettingsOverrides }
   | { threadId: string; action: "cancelMessage"; messageId: string }
   | { threadId: string; action: "promoteMessage"; messageId: string; delivery: Delivery }

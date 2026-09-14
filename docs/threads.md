@@ -39,6 +39,21 @@ When a child's execution settles, commit its outcome and parent notification dur
 
 ## Defaults
 
+Remote can archive settled threads automatically with the person environment setting
+`PI_REMOTE_AUTO_ARCHIVE_AFTER_MS=3600000` (one hour). The default is `0`, disabled.
+A non-overlapping sweep runs every minute across that person's local and fleet directory.
+Only idle or stopped threads with no pending messages and no activity newer than the
+cutoff qualify. Running, queued, interrupted, and in-flight command work is retained,
+and active/recent nonarchived descendants protect their parents. The owning service's
+`archiveInactive` control rechecks eligibility synchronously without stopping execution;
+older owners reject this action rather than interpreting it as an unconditional archive.
+Archiving hides a thread without deleting history. Restoring resets the inactivity clock
+but does not resume held work. Merely viewing a thread does not reset its clock.
+
+Remote imports the Orchestrator source API through Bun, while shared runners execute
+the compiled Node entrypoint in `dist/threads/runner-host.js`. Both source and compiled
+callers resolve that same executable; build Orchestrator before starting source Remote.
+
 Orchestrator resolves settings centrally. Standard provider speed is the default everywhere. Fable, Opus, Astra, Terra and Sol default to high thinking; Luna defaults to max. Explicit validated overrides are supported and do not accidentally inherit from a parent. Recovery preserves already accepted execution settings.
 
 Subagents always use forced quota admission. Lanes use forced admission by default and can explicitly select background pacing. Readiness, actual quota exhaustion, account reservations, cooldowns, execution limits and explicit pause remain separate from background spending pace and reserves.

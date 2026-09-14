@@ -87,7 +87,7 @@ function finishImport(service: ThreadService, threads: number, messages: number)
   for (const [id, metadata] of Object.entries(adopted.value.metadata)) {
     const current = service.get(id);
     if (!current) return failure(`Imported provenance lost thread ${id}`);
-    const updated = service.update(id, { metadata: { ...current.metadata, ...metadata } });
+    const updated = service.update(id, { metadata: { ...metadata } });
     if (!updated.ok) return updated;
   }
   return { ok: true, value: { threads, messages } };

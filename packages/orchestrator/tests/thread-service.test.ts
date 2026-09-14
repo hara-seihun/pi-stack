@@ -1,7 +1,10 @@
 import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { afterEach, describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
+import { runnerHostEntry } from "../src/threads/runner-transport.js";
+import { DatabaseSync } from "node:sqlite";
+import { importRemoteThreads } from "../src/threads/import.js";
 import type { OpenPiSession, PiCommand, PiEvent, PiSession, PiSessionOptions, Result } from "../src/threads/contracts.js";
 import { ThreadService } from "../src/threads/service.js";
 
@@ -9,6 +12,7 @@ const roots: string[] = [];
 const services: ThreadService[] = [];
 
 afterEach(async () => {
+  vi.restoreAllMocks();
   for (const service of services.splice(0).reverse()) await service.close();
   for (const root of roots.splice(0).reverse()) rmSync(root, { recursive: true, force: true });
 });
@@ -99,6 +103,60 @@ async function settle(session: FakePiSession, service: ThreadService, threadId: 
 }
 
 describe("ThreadService", () => {
+  it("applies import provenance without treating retained archive metadata as a new archive request", async () => {
+    const { service, directory } = fixture();
+    const thread = value(await service.spawn({ requestId: "provenance", cwd: directory, metadata: { importedFrom: { nativeStateDirectory: directory } } }));
+    writeFileSync(thread.sessionFile, JSON.stringify({ type: "session", version: 3, id: thread.id, cwd: directory, timestamp: new Date().toISOString() }) + "\n");
+    value(await service.control({ threadId: thread.id, action: "update", archived: true }));
+    writeFileSync(join(directory, "transfer.json"), JSON.stringify({ version: 1, sourceCore: "pi", messages: [], agents: [] }));
+    const db = new DatabaseSync(":memory:");
+    try { value(importRemoteThreads(service, db, { sessionsDir: directory })); }
+    finally { db.close(); }
+    expect(service.get(thread.id)?.metadata).toMatchObject({ archived: true, importProvenance: { stateDirs: [directory] } });
+  });
+  it("resolves the compiled Node runner from both Bun source and Node builds", () => {
+    expect(runnerHostEntry("file:///release/src/threads/runner-transport.ts")).toBe("/release/dist/threads/runner-host.js");
+    expect(runnerHostEntry("file:///release/dist/threads/runner-transport.js")).toBe("/release/dist/threads/runner-host.js");
+  });
+
+  it("archives only strictly stale settled threads and gives restores a new grace period", async () => {
+    const { service, directory } = fixture();
+    const clock = vi.spyOn(Date, "now").mockReturnValue(10_000);
+    const thread = value(await service.spawn({ requestId: "idle", cwd: directory }));
+    clock.mockReturnValue(3_610_000);
+    expect(value(await service.control({ threadId: thread.id, action: "archiveInactive", inactiveBefore: 10_000 })).metadata?.archived).not.toBe(true);
+    clock.mockReturnValue(3_610_001);
+    expect(value(await service.control({ threadId: thread.id, action: "archiveInactive", inactiveBefore: 10_001 })).metadata?.archived).toBe(true);
+    value(await service.control({ threadId: thread.id, action: "update", archived: false }));
+    expect(value(await service.control({ threadId: thread.id, action: "archiveInactive", inactiveBefore: 10_001 })).metadata?.archived).toBe(false);
+    expect(await service.control({ threadId: thread.id, action: "archiveInactive", inactiveBefore: Date.now() + 1 })).toMatchObject({ ok: false });
+  });
+
+  it("does not archive pending work or a parent of pending work, even when held", async () => {
+    const { service, directory } = fixture();
+    const clock = vi.spyOn(Date, "now").mockReturnValue(10_000);
+    const parent = value(await service.spawn({ requestId: "parent-idle", cwd: directory }));
+    const child = value(await service.spawn({ requestId: "child-held", parentId: parent.id, cwd: directory, message: "preserve this" }));
+    value(await service.control({ threadId: child.id, action: "stop", descendants: false }));
+    clock.mockReturnValue(3_620_000);
+    for (const id of [parent.id, child.id]) expect(value(await service.control({ threadId: id, action: "archiveInactive", inactiveBefore: 20_000 })).metadata?.archived).not.toBe(true);
+    expect(service.pending(child.id)).toHaveLength(1);
+  });
+
+  it("rechecks activity after a stale sweep snapshot and never stops a running model", async () => {
+    const { service, directory, sessions } = fixture();
+    await service.start();
+    const clock = vi.spyOn(Date, "now").mockReturnValue(10_000);
+    const thread = value(await service.spawn({ requestId: "race", cwd: directory }));
+    clock.mockReturnValue(3_620_000);
+    value(await service.send({ requestId: "new-work", threadId: thread.id, text: "new work", delivery: "queue" }));
+    await waitFor(() => sessions[0]?.isStreaming === true);
+    clock.mockReturnValue(7_240_000);
+    expect(value(await service.control({ threadId: thread.id, action: "archiveInactive", inactiveBefore: 3_640_000 })).metadata?.archived).not.toBe(true);
+    expect(sessions[0]?.commands.some(command => command.type === "abort")).toBe(false);
+    await settle(sessions[0]!, service, thread.id);
+  });
+
   it("opens every child with a fresh session and resolves default and Luna settings centrally", async () => {
     const { directory, service, sessions } = fixture();
     await service.start();

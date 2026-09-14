@@ -16,6 +16,7 @@ import { contextSplice, DocumentHistory, messageFinalizationKey, sha256, type Co
 import { appendContextPatch, readContext } from "./context-journal";
 import { beginSupervisorGeneration, ensureSupervisorSchema, ensureThreadView } from "./database";
 import { startLedgerSnapshots } from "./ledger-snapshot";
+import { autoArchiveDelay, startAutoArchive } from "./auto-archive";
 import { VoiceClient } from "./voice/client";
 import { MeetServer } from "./meet/server";
 import { meetingActivity } from "./meet/activity";
@@ -50,6 +51,7 @@ const HOME = homedir();
 const DATA = process.env.PI_REMOTE_DATA ?? join(process.env.XDG_STATE_HOME ?? join(HOME, ".local/state"), "pi-remote");
 const INGESTION = process.env.PI_REMOTE_INGESTION ?? join(DATA, "ingestion");
 const THREAD_NAMING_MODEL = process.env.PI_REMOTE_THREAD_NAMING_MODEL?.trim() || "luna";
+const AUTO_ARCHIVE_AFTER_MS = autoArchiveDelay(process.env.PI_REMOTE_AUTO_ARCHIVE_AFTER_MS);
 const PRIVATE_ID = process.env.PI_REMOTE_PRIVATE_ID ?? "private";
 const PRIVATE_NAME = process.env.PI_REMOTE_PRIVATE_NAME ?? "Private";
 const PRIVATE_DIR = process.env.PI_REMOTE_PRIVATE_DIR ?? join(HOME, PRIVATE_ID);
@@ -1887,6 +1889,7 @@ refreshPlanUsageIfDue();
 void refreshPeers();
 
 unwrap(await threads.start());
+const stopAutoArchive = startAutoArchive(directory, AUTO_ARCHIVE_AFTER_MS, error => console.error("[supervisor] auto-archive failed", error));
 void refreshThreadNotifications();
 
 const stopLedgerSnapshots = startLedgerSnapshots(
@@ -1907,6 +1910,7 @@ const uploadPruner = setInterval(pruneUploadTransfers, 60_000);
 const namingReceipts = setInterval(reconcileThreadNames, 15_000);
 reconcileThreadNames();
 function stopSupervisorTimers() {
+  stopAutoArchive();
   clearInterval(uploadPruner);
   clearInterval(namingReceipts);
   clearInterval(dashboardTicker);

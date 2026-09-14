@@ -305,6 +305,20 @@ export class ThreadService implements ThreadApi {
   async control(input: ThreadControl): Promise<Result<Thread>> {
     if (this.closed || this.suspended) return bad("unavailable", "Thread controller is suspended");
     if (!this.get(input.threadId)) return bad("not_found", "Thread not found");
+    if (input.action === "archiveInactive") {
+      if (!Number.isSafeInteger(input.inactiveBefore) || input.inactiveBefore <= 0 || input.inactiveBefore > Date.now()) return bad("invalid_request", "Invalid inactivity cutoff");
+      const current = this.get(input.threadId)!;
+      if (current.metadata?.archived) return good(current);
+      const descendants = this.db.prepare("WITH RECURSIVE descendants(id) AS (SELECT ? UNION SELECT t.id FROM thread t JOIN descendants d ON t.parent_id=d.id) SELECT thread.* FROM thread JOIN descendants USING(id)").all(input.threadId) as Json[];
+      for (const row of descendants) {
+        const thread = this.project(row);
+        if (thread.metadata?.archived) continue;
+        const runtime = this.runtimes.get(thread.id);
+        if (thread.updatedAt >= input.inactiveBefore || !["idle", "stopped"].includes(thread.state) || thread.pendingMessages > 0 || this.execution(thread.id) || runtime?.busy || runtime?.commandRunning || this.operations.has(thread.id) || this.stops.has(thread.id)) return good(current);
+      }
+      // No await/stop between the authoritative check and mutation: new work cannot race it.
+      return this.update(input.threadId, { archived: true });
+    }
     if (input.action === "update") {
       if (input.archived) { const stopped = await this.control({ threadId: input.threadId, action: "stop", descendants: false }); if (!stopped.ok) return stopped; }
       return this.update(input.threadId, input);

@@ -93,6 +93,10 @@ function connect(path: string, output: (event: PiEvent) => void, exit: (code?: n
   });
 }
 function hash(value: string) { return createHash("sha256").update(value).digest("hex").slice(0, 16); }
+// Bun imports the source API; the shared runner always executes compiled code in Node.
+export function runnerHostEntry(moduleUrl = import.meta.url): string {
+  return fileURLToPath(new URL(moduleUrl.endsWith(".ts") ? "../../dist/threads/runner-host.js" : "./runner-host.js", moduleUrl));
+}
 function boundary(options: PiSessionOptions) {
   const isolation = options.args.includes("--orchestrator-context") ? `isolated:${options.cwd}` : "normal";
   return hash(JSON.stringify([import.meta.url, process.getuid?.(), options.env.HOME ?? process.env.HOME, options.env.PI_CODING_AGENT_DIR ?? "", options.env.PI_ORCHESTRATOR_EXECUTION ?? "user", isolation]));
@@ -109,7 +113,8 @@ async function ensureRunner(control: string, options: PiSessionOptions, durableS
     mkdirSync(env.HOME!, { recursive: true, mode: 0o700 });
   }
   for (const key of Object.keys(env)) if (/^(PI_REMOTE_SESSION_ID|PI_THREAD_ID|PI_REMOTE_CONTEXT_OWNER_PID|PI_SUBAGENT_MODEL|PI_REMOTE_MEETING_ID|PI_REMOTE_SERVICE_TIER_FILE|PI_ORCHESTRATOR_RUN_ID|PI_SESSION_FILE)$/.test(key)) delete env[key];
-  const entry = fileURLToPath(new URL("./runner-host.js", import.meta.url));
+  const entry = runnerHostEntry();
+  if (!existsSync(entry)) throw new Error(`Compiled thread runner is missing: ${entry}; build pi-orchestrator before starting threads`);
   const root = options.env.PI_ORCHESTRATOR_EXECUTION === "root-repair";
   if (root && (!durableScope || options.args.includes("--orchestrator-context"))) throw new Error("Root repair requires the fleet execution boundary without isolated context");
   if (root) { env.PI_ORCHESTRATOR_OWNER_UID = String(process.getuid!()); env.PI_ORCHESTRATOR_OWNER_GID = String(process.getgid!()); }
