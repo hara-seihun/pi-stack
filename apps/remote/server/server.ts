@@ -684,6 +684,11 @@ function touchSession(id: string) {
   db.query("UPDATE sessions SET revision=revision+1,updated_at=? WHERE id=?").run(now(), id);
   signalSync();
 }
+function markSessionViewed(id: string) {
+  if (!ownsSupervisorLease()) return;
+  const result = db.query("UPDATE sessions SET idle_unread=0 WHERE id=? AND idle_unread<>0").run(id);
+  if (result.changes) signalSync();
+}
 function confirmWorkInserted(sessionId: string, workId: string): number {
   if (!ownsSupervisorLease()) return 0;
   let sequence = 0;
@@ -964,6 +969,7 @@ function publicSession(row: any, prepared?: PreparedQueue): Session {
     createdAt: String(row.created_at),
     updatedAt: String(row.updated_at),
     revision: Number(row.revision ?? 0),
+    idleUnread: Boolean(row.idle_unread),
     lastError: row.last_error ?? null,
     steeringQueued: durableSteering + (rt?.steeringQueued ?? 0),
     followUpQueued: durableFollowUps + (rt?.followUpQueued ?? 0),
@@ -2641,6 +2647,7 @@ const server = Bun.serve({
         if (!dashboardSnapshot) await refreshDashboard();
         await awaitSync(request, req.signal);
         if (req.signal.aborted) return new Response(null, { status: 499 });
+        if (request.session?.viewing === true && typeof request.session.id === "string") markSessionViewed(request.session.id);
         const sequence = syncSequence;
         const stateVersion = currentStateVersion();
         const fresh = request.epoch !== SUPERVISOR_EPOCH;

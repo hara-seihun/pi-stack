@@ -5,6 +5,12 @@ import { api } from "./client";
 import { threadStartReducer, threadStartSelection, threadStartStage, type ThreadStartEvent, type ThreadStartState } from "./thread-start-state";
 import type { ThreadStart } from "./types";
 
+function iconFace(icon: string) {
+  return /\p{Extended_Pictographic}/u.test(icon)
+    ? <span className="model-emoji" aria-hidden="true">{icon}</span>
+    : <img src={`/${icon}.svg`} alt="" draggable={false} />;
+}
+
 function darkGlyph(accent = "#89b4fa") {
   if (!/^#[0-9a-f]{6}$/i.test(accent)) return true;
   const [red, green, blue] = [1, 3, 5].map((at) => parseInt(accent.slice(at, at + 2), 16));
@@ -89,7 +95,7 @@ export function ThreadStartMenu({ starts, onCreated, onSettled }: { starts: Thre
         {!open && <MenuButton key="trigger-face" type="button" className="provider-button trigger" aria-label="New thread" aria-expanded={false} disabled={!starts.length} initial={{ scale: 0, opacity: 0 }} animate={{ scale: 1, opacity: 1 }} exit={{ scale: 0, opacity: 0 }} transition={faceTransition} onClick={() => dispatch({ type: "open", starts })} whileTap={{ scale: 0.86 }}><span className="glyph" /></MenuButton>}
         {open && choices.map((choice, index) => {
           const label = chosen ? `Start a ${chosen.label} thread on ${choice.label}` : selection?.starts.find((start) => start.id === choice.id)?.models.length ? `${choice.label} threads` : `Start a ${choice.label} thread`;
-          return <MenuButton key={`${stage}:${choice.id}:face`} type="button" className="provider-button" disabled={busy || state.kind === "failed"} style={{ width: size, height: size, marginTop: -size / 2 }} aria-label={label} title={label} initial={{ x: origin, scale: 0, opacity: 0 }} animate={{ x: target(index), y: 0, scale: 1, opacity: 1 }} exit={{ x: open ? target(index) : 0, y: chosen ? 110 : 0, scale: 0, opacity: 0 }} transition={{ ...faceTransition, delay: index * 0.04 }} whileTap={{ scale: 0.84 }} onClick={() => dispatch({ type: "choose", stage, id: choice.id, origin: target(index), requestId: crypto.randomUUID(), sessionId: crypto.randomUUID() })}><span className={`glyph${darkGlyph(choice.accent) ? " dark" : ""}`}><img src={`/${choice.icon}.svg`} alt="" draggable={false} /></span></MenuButton>;
+          return <MenuButton key={`${stage}:${choice.id}:face`} type="button" className="provider-button" disabled={busy || state.kind === "failed"} style={{ width: size, height: size, marginTop: -size / 2 }} aria-label={label} title={label} initial={{ x: origin, scale: 0, opacity: 0 }} animate={{ x: target(index), y: 0, scale: 1, opacity: 1 }} exit={{ x: open ? target(index) : 0, y: chosen ? 110 : 0, scale: 0, opacity: 0 }} transition={{ ...faceTransition, delay: index * 0.04 }} whileTap={{ scale: 0.84 }} onClick={() => dispatch({ type: "choose", stage, id: choice.id, origin: target(index), requestId: crypto.randomUUID(), sessionId: crypto.randomUUID() })}><span className={`glyph${darkGlyph(choice.accent) ? " dark" : ""}`}>{iconFace(choice.icon)}</span></MenuButton>;
         })}
       </AnimatePresence>
     </div>

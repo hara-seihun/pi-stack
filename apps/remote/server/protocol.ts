@@ -54,6 +54,7 @@ export interface Session {
   createdAt: string;
   updatedAt: string;
   revision: number;
+  idleUnread: boolean;
   lastError: string | null;
   steeringQueued: number;
   followUpQueued: number;
@@ -213,6 +214,8 @@ export interface SyncRequest {
     imagesVersion?: number;
     liveTextHash?: string;
     liveThinkingHash?: string;
+    /** True only while the person can see this conversation. */
+    viewing?: boolean;
     /** Durable event cursor; omit when the caller renders from context. */
     eventsAfter?: number;
   };

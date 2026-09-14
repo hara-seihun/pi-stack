@@ -64,12 +64,12 @@ const DAY = 24 * HOUR;
 
 export const ORCHESTRATOR_CATALOG: OrchestratorCatalog = {
   models: [
-    { id: "astra", provider: "openai-codex", model: "gpt-6-astra", thinking: "xhigh", label: "ASTRA", aliases: ["astra"], icon: "astra", accent: "#5a6673", meterClass: "astra" },
-    { id: "sol", provider: "openai-codex", model: "gpt-5.6-sol", thinking: "max", label: "SOL", aliases: ["sol"], icon: "sol", accent: "#5a6673", meterClass: "sol" },
+    { id: "astra", provider: "openai-codex", model: "gpt-6-astra", thinking: "xhigh", label: "ASTRA", aliases: ["astra"], icon: "⭐", accent: "#5a6673", meterClass: "astra" },
+    { id: "sol", provider: "openai-codex", model: "gpt-5.6-sol", thinking: "max", label: "SOL", aliases: ["sol"], icon: "☀️", accent: "#5a6673", meterClass: "sol" },
     { id: "terra", provider: "openai-codex", model: "gpt-5.6-terra", thinking: "max", label: "TERRA", aliases: ["terra"], icon: "terra", accent: "#5a6673", meterClass: "terra" },
     { id: "luna", provider: "openai-codex", model: "gpt-5.6-luna", thinking: "max", label: "LUNA", aliases: ["luna"], icon: "luna", accent: "#5a6673", meterClass: "luna" },
-    { id: "opus", provider: "anthropic", model: "claude-opus-5", thinking: "xhigh", label: "OPUS", aliases: ["opus"], icon: "opus", accent: "#d9663d", meterClass: "opus" },
-    { id: "fable", provider: "anthropic", model: "claude-fable-5-1", thinking: "high", label: "FABLE", aliases: ["fable"], icon: "fable", accent: "#e6a23c", meterClass: "fable" },
+    { id: "opus", provider: "anthropic", model: "claude-opus-5", thinking: "xhigh", label: "OPUS", aliases: ["opus"], icon: "🎨", accent: "#d9663d", meterClass: "opus" },
+    { id: "fable", provider: "anthropic", model: "claude-fable-5-1", thinking: "high", label: "FABLE", aliases: ["fable"], icon: "🪶", accent: "#e6a23c", meterClass: "fable" },
     { id: "sonnet", provider: "anthropic", model: "claude-sonnet", thinking: "high", label: "SONNET", aliases: ["sonnet"], icon: "sonnet", accent: "#d9663d" },
   ],
   meters: [

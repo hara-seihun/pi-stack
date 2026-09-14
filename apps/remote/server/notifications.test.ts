@@ -8,6 +8,7 @@ test("idle notifications record transitions atomically and replay across reconne
   ensureSupervisorSchema(db);
   db.query("INSERT INTO sessions(id,name,workspace_id,state,created_at,updated_at,profile_id) VALUES('thread','A thread','home','STOPPED','now','now','home')").run();
   const state = db.query("UPDATE sessions SET state=? WHERE id='thread'");
+  const unread = () => Number((db.query("SELECT idle_unread FROM sessions WHERE id='thread'").get() as any).idle_unread);
   const initial = idleNotifications(db, null);
   for (const value of ["STARTING", "IDLE", "IDLE"]) state.run(value);
   expect(idleNotifications(db, initial.cursor).notifications).toEqual([]);
@@ -16,12 +17,16 @@ test("idle notifications record transitions atomically and replay across reconne
   state.run("IDLE");
   const first = idleNotifications(db, initial.cursor);
   expect(first.notifications).toHaveLength(1);
+  expect(unread()).toBe(1);
+  db.query("UPDATE sessions SET idle_unread=0 WHERE id='thread'").run();
+  expect(unread()).toBe(0);
   expect(first.notifications[0].sessionId).toBe("thread");
   expect(idleNotifications(db, first.cursor).notifications).toEqual([]);
   expect(() => db.transaction(() => { state.run("RUNNING"); state.run("IDLE"); throw new Error("rollback"); })()).toThrow();
   expect(idleNotifications(db, first.cursor).notifications).toEqual([]);
   state.run("RUNNING"); state.run("ABORTING"); state.run("IDLE");
   ensureSupervisorSchema(db);
+  expect(unread()).toBe(1);
   expect(idleNotifications(db, first.cursor).notifications).toHaveLength(1);
   expect(idleNotifications(db, null).notifications).toEqual([]);
   expect(idleNotifications(db, initial.cursor).notifications).toHaveLength(2);

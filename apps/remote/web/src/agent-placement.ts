@@ -41,7 +41,8 @@ export function activityLabel(activity = "IDLE", tool = "") {
   if (normalized === "RUNNING") return "WORKING";
   return normalized.replaceAll("_", " ");
 }
-export function activityColor(activity = "IDLE") {
+export function activityColor(activity = "IDLE", idleUnread = false) {
   const normalized = normalizedActivity(activity);
+  if (normalized === "IDLE" && idleUnread) return "var(--success)";
   return ["FAILED", "ERROR", "ABORTING"].includes(normalized) ? "var(--danger)" : ["IDLE", "DONE", "KILLED", "STOPPED"].includes(normalized) ? "var(--muted)" : "var(--accent)";
 }

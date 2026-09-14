@@ -25,7 +25,8 @@ CREATE TABLE IF NOT EXISTS sessions (
   bash_timeout_seconds INTEGER NOT NULL DEFAULT ${DEFAULT_BASH_TIMEOUT_SECONDS},
   archived_at TEXT,
   display_order INTEGER NOT NULL DEFAULT 0,
-  named_at_message_count INTEGER NOT NULL DEFAULT 0
+  named_at_message_count INTEGER NOT NULL DEFAULT 0,
+  idle_unread INTEGER NOT NULL DEFAULT 0
 );
 CREATE TABLE IF NOT EXISTS idle_notifications (
   seq INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -145,7 +146,7 @@ CREATE TABLE IF NOT EXISTS metadata (
 );
 `);
   const sessionColumns = new Set((db.query("PRAGMA table_info(sessions)").all() as any[]).map((column) => String(column.name)));
-  for (const [name, type] of [["initial_provider", "TEXT"], ["current_provider", "TEXT"], ["initial_model", "TEXT"], ["initial_thinking", "TEXT"], ["meeting_id", "TEXT"], ["revision", "INTEGER NOT NULL DEFAULT 0"], ["service_tier", "TEXT NOT NULL DEFAULT 'default'"], ["bash_timeout_seconds", `INTEGER NOT NULL DEFAULT ${DEFAULT_BASH_TIMEOUT_SECONDS}`], ["archived_at", "TEXT"], ["display_order", "INTEGER NOT NULL DEFAULT 0"], ["admission_priority", "INTEGER NOT NULL DEFAULT 0"]]) {
+  for (const [name, type] of [["initial_provider", "TEXT"], ["current_provider", "TEXT"], ["initial_model", "TEXT"], ["initial_thinking", "TEXT"], ["meeting_id", "TEXT"], ["revision", "INTEGER NOT NULL DEFAULT 0"], ["service_tier", "TEXT NOT NULL DEFAULT 'default'"], ["bash_timeout_seconds", `INTEGER NOT NULL DEFAULT ${DEFAULT_BASH_TIMEOUT_SECONDS}`], ["archived_at", "TEXT"], ["display_order", "INTEGER NOT NULL DEFAULT 0"], ["admission_priority", "INTEGER NOT NULL DEFAULT 0"], ["idle_unread", "INTEGER NOT NULL DEFAULT 0"]]) {
     if (!sessionColumns.has(name)) db.exec(`ALTER TABLE sessions ADD COLUMN ${name} ${type}`);
   }
   if (!sessionColumns.has("named_at_message_count")) {
@@ -166,6 +167,11 @@ CREATE TABLE IF NOT EXISTS metadata (
       db.exec("UPDATE sessions SET profile_id = workspace_id");
     }
   }
+  db.exec(`CREATE TRIGGER IF NOT EXISTS session_became_unread AFTER UPDATE OF state ON sessions
+    WHEN NEW.state = 'IDLE' AND OLD.state IN ('RUNNING', 'ABORTING')
+    BEGIN
+      UPDATE sessions SET idle_unread=1 WHERE id=NEW.id;
+    END;`);
   if (sessionColumns.has("remote_cwd")) db.exec("ALTER TABLE sessions DROP COLUMN remote_cwd");
   if (sessionColumns.has("execution_target")) db.exec("ALTER TABLE sessions DROP COLUMN execution_target");
   const uploadColumns = new Set((db.query("PRAGMA table_info(uploads)").all() as any[]).map((column) => String(column.name)));
