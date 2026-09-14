@@ -1,8 +1,6 @@
 import { mkdirSync } from "node:fs";
 import { randomInt, randomUUID } from "node:crypto";
 import { dirname, join, resolve } from "node:path";
-import { isCoreId, type CoreId } from "./cores/contracts.js";
-import { isOutputLimitError } from "./cores/codex-output-limit.js";
 import { isRateLimitError, isCredentialError } from "./provider-errors.js";
 import type { DatabaseSync } from "node:sqlite";
 import type { Account, BudgetClass, FailureKind, FleetChild, LaneSpec, LeaseKind, ProfileCandidate, Run, RunActivity, RunContext, RunSource, RunState, UsageEntry, UsageTotal } from "./domain.js";
@@ -204,10 +202,9 @@ export class Store {
   reconcileLanes(lanes:readonly LaneSpec[], at=Date.now()): void {
     const ids=new Set<string>();
     for(const lane of lanes){
-      for(const key of Object.keys(lane))if(!["id","prompt","cwd","profile","core","weight","priority","doctrineUrl","openingProbe"].includes(key))throw new Error(`unsupported lane field ${key}`);
+      for(const key of Object.keys(lane))if(!["id","prompt","cwd","profile","weight","priority","doctrineUrl","openingProbe"].includes(key))throw new Error(`unsupported lane field ${key}`);
       if(!lane.id||ids.has(lane.id))throw new Error(`invalid or duplicate lane id ${lane.id}`);
       ids.add(lane.id);
-      if(lane.core!==undefined&&!isCoreId(lane.core))throw new Error(`lane ${lane.id}: unknown agent core ${String(lane.core)}`);
       if(!Number.isFinite(lane.weight)||lane.weight<=0)throw new Error(`lane ${lane.id} requires a positive weight`);
       for(const key of ["prompt","cwd","profile"] as const)if(typeof lane[key]!=="string"||!lane[key])throw new Error(`lane ${lane.id} requires ${key}`);
     }
@@ -219,28 +216,22 @@ export class Store {
         opening_probe=excluded.opening_probe,updated_at=excluded.updated_at`)
         .run(lane.id,lane.prompt,lane.cwd,lane.profile,lane.weight,lane.priority??0,lane.doctrineUrl??null,lane.openingProbe??null,at);
       for (const lane of lanes) {
-        if(lane.core)this.setControl(`lane-core:${lane.id}`,lane.core);
-        else this.db.prepare("DELETE FROM control WHERE key=?").run(`lane-core:${lane.id}`);
       }
       for (const row of this.db.prepare("SELECT id FROM lane").all() as {id:string}[]) if(!ids.has(row.id)) {
         this.db.prepare("DELETE FROM lane WHERE id=?").run(row.id);
-        this.db.prepare("DELETE FROM control WHERE key=?").run(`lane-core:${row.id}`);
       }
     });
   }
-  lanes(): LaneSpec[] { return (this.db.prepare("SELECT * FROM lane ORDER BY priority DESC,weight DESC,id").all() as any[]).map((r)=>({id:r.id,prompt:r.prompt,cwd:r.cwd,profile:r.profile,core:this.control(`lane-core:${r.id}`) as CoreId|undefined,weight:r.weight,priority:r.priority,doctrineUrl:maybe(r.doctrine_url),openingProbe:maybe(r.opening_probe)})); }
+  lanes(): LaneSpec[] { return (this.db.prepare("SELECT * FROM lane ORDER BY priority DESC,weight DESC,id").all() as any[]).map((r)=>({id:r.id,prompt:r.prompt,cwd:r.cwd,profile:r.profile,weight:r.weight,priority:r.priority,doctrineUrl:maybe(r.doctrine_url),openingProbe:maybe(r.opening_probe)})); }
   lane(id:string):LaneSpec|undefined{return this.lanes().find((x)=>x.id===id);}
 
   fleetChild(id:string):FleetChild|undefined{return JSON.parse(this.control(`fleet-child:${id}`)??"null")??undefined;}
   childRunIds(id:string):string[]{return (this.db.prepare("SELECT substr(key,13) id FROM control WHERE key LIKE 'fleet-child:%' AND json_extract(value,'$.parentRunId')=? ORDER BY key").all(id) as {id:string}[]).map(row=>row.id);}
   isWaiting(id:string):boolean{return this.control(`fleet-waiting:${id}`)==="1";}
-  createRuns(input:{count:number;source:RunSource;sourceId?:string;prompt:string;cwd:string;profile:string;budget:BudgetClass;core?:CoreId;context?:RunContext;child?:FleetChild}):string[]{
-    const core=input.core??"pi";
-    if(!isCoreId(core))throw new Error(`Unknown agent core ${String(core)}`);
-    if(core==="codex"&&input.context)throw new Error("Codex core does not support isolated tools/extensions contracts");
+  createRuns(input:{count:number;source:RunSource;sourceId?:string;prompt:string;cwd:string;profile:string;budget:BudgetClass;context?:RunContext;child?:FleetChild}):string[]{
     const now=Date.now(),ids:string[]=[];
     this.transaction(()=>{for(let i=0;i<input.count;i++){const id=crypto.randomUUID();ids.push(id);this.db.prepare(`INSERT INTO run(id,source,source_id,prompt,cwd,profile,budget,state,created_at,updated_at)
-      VALUES(?,?,?,?,?,?,?,'queued',?,?)`).run(id,input.source,input.sourceId??null,input.prompt,input.cwd,input.profile,input.budget,now,now);this.setControl(`run-core:${id}`,JSON.stringify({core,coreStateDir:join(dirname(resolve(this.path)),"runs",id),childrenOwner:"core"}));if(input.context)this.setControl(`run-context:${id}`,JSON.stringify(input.context));if(input.child)this.setControl(`fleet-child:${id}`,JSON.stringify(input.child));}});
+      VALUES(?,?,?,?,?,?,?,'queued',?,?)`).run(id,input.source,input.sourceId??null,input.prompt,input.cwd,input.profile,input.budget,now,now);this.setControl(`run-core:${id}`,JSON.stringify({core:"pi",coreStateDir:join(dirname(resolve(this.path)),"runs",id),childrenOwner:"core"}));if(input.context)this.setControl(`run-context:${id}`,JSON.stringify(input.context));if(input.child)this.setControl(`fleet-child:${id}`,JSON.stringify(input.child));}});
     return ids;
   }
   run(id:string):Run|undefined{const r=this.db.prepare("SELECT * FROM run WHERE id=?").get(id) as any;return r?this.mapRuns([r])[0]:undefined;}
@@ -348,19 +339,6 @@ export class Store {
       this.endLease(`run:${id}`,at);
     });
   }
-  continueOutputLimitedRun(id:string,releasePath:string,at=Date.now()):boolean{
-    return this.transaction(()=>{
-      const run=this.run(id);
-      if(!run||run.state!=="failed"||run.core!=="codex"||!run.nativeSessionId||!run.accountId||!run.workerUnit
-        ||this.control(`abort:${id}`)||!isOutputLimitError({message:run.result}))return false;
-      this.setControl(`run-output-limit:${id}:${at}`,JSON.stringify({result:run.result,failureKind:run.failureKind,
-        endedAt:run.endedAt,releasePath:run.releasePath,workerUnit:run.workerUnit}));
-      this.db.prepare("UPDATE run SET state='starting',release_path=?,worker_unit=?,result=NULL,failure_kind=NULL,ended_at=NULL,updated_at=?,progress_at=? WHERE id=?")
-        .run(releasePath,`pi-orchestrator-run-${id.replaceAll('-','')}-${at}`,at,at,id);
-      this.createLease(`run:${id}`,run.accountId,"fleet",id,at);
-      return true;
-    });
-  }
   resumeAssignedRun(id:string,at=Date.now(),accountId?:string):boolean{
     return this.transaction(()=>{
       const run=this.run(id);
@@ -378,7 +356,7 @@ export class Store {
   recoverInterruptedRun(id:string,releasePath:string,at=Date.now(),kind:"host"|"rate-limit"="host"):boolean{
     return this.transaction(()=>{
       const run=this.run(id);
-      if(!run||!run.nativeSessionId||!run.accountId||!run.workerUnit||run.childrenOwner!=="core"||this.control(`abort:${id}`))return false;
+      if(!run||run.core!=="pi"||!run.nativeSessionId||!run.accountId||!run.workerUnit||run.childrenOwner!=="core"||this.control(`abort:${id}`))return false;
       const interrupted=kind==="rate-limit"
         ?run.state==="failed"&&run.failureKind==="account"&&isRateLimitError(run.result??"")&&!isCredentialError(run.result??"")
         :run.state==="aborted"&&run.result==="aborted"

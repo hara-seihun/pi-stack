@@ -53,8 +53,8 @@ describe("core worker", () => {
   it("uses the pinned engine/model/effort and persists native and portable references", async () => {
     const f = fixture();
     await f.work();
-    expect(coreOptions(run, { PI_STACK_CORE: "codex" })).toMatchObject({ stateDir: run.coreStateDir, sessionId: run.id, env: { PI_STACK_CORE: "pi" } });
-    expect(coreOptions(run, {}).args).toEqual(["--core", "pi", "--provider", "openai-codex", "--model", "gpt-6-astra", "--thinking", "xhigh"]);
+    expect(coreOptions(run, {})).toMatchObject({ stateDir: run.coreStateDir, sessionId: run.id });
+    expect(coreOptions(run, {}).args).toEqual(["--provider", "openai-codex", "--model", "gpt-6-astra", "--thinking", "xhigh"]);
     expect(f.calls.find(call => call.type === "prompt")?.message).toBe(run.prompt);
     expect(f.posts[0]?.value).toEqual({ nativeSessionId: "native-id", sessionFile: "/tmp/native.jsonl", portableSessionFile: "/tmp/portable.jsonl" });
     expect(f.posts.at(-1)?.value).toEqual({ state: "done", result: "Finished" });
@@ -63,7 +63,7 @@ describe("core worker", () => {
   });
 
   it("pins an empty native session only after the core materializes it", async () => {
-    const f = fixture({core:"codex"});
+    const f = fixture();
     f.state.nativeSessionId = "provisional";
     f.state.nativeSessionDurable = false;
     f.setPrompt(async () => {
@@ -137,7 +137,7 @@ describe("core worker", () => {
       expect(f.calls.some(call => call.type === "prompt")).toBe(false);
       expect(f.posts.at(-1)?.value.state).toBe("failed");
     }
-    expect(() => coreOptions({ ...run, core: "codex", context: { tools: [] } }, {})).toThrow("does not support isolated");
+    expect(() => coreOptions({ ...run, core: "codex" } as unknown as Run, {})).toThrow("imported into Pi");
   });
 
   it("fails recovery rather than replacing pinned native custody with a fresh session", async () => {

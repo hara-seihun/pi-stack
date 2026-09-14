@@ -54,7 +54,6 @@ export interface LaneSpec {
   readonly prompt: string;
   readonly cwd: string;
   readonly profile: string;
-  readonly core?: CoreId;
   readonly weight: number;
   readonly priority?: number;
   readonly doctrineUrl?: string;
@@ -132,8 +131,6 @@ export type ProfileCandidate = Omit<ModelCandidate, "thinking"> & (
 
 export interface OrchestratorConfig {
   readonly listenHost?: string;
-  readonly core?: CoreId;
-  readonly profileCores?: Readonly<Record<string, CoreId>>;
   readonly profiles: Readonly<Record<string, readonly ProfileCandidate[]>>;
   readonly backgroundSpendFraction: number;
   readonly maxConcurrentSessions: number;

@@ -16,14 +16,14 @@ export interface WorkerState extends Json {
 
 export function coreOptions(run: Run, env: NodeJS.ProcessEnv): CoreSessionOptions {
   if (!run.coreStateDir) throw new Error("Run has no pinned core state directory; recover it with its recorded worker release");
-  if (run.core === "codex" && run.context) throw new Error("Codex core does not support isolated tools/extensions contracts");
-  const args = ["--core", run.core ?? "pi", "--provider", run.provider!, "--model", run.model!];
+  if (run.core !== undefined && run.core !== "pi") throw new Error("Run needs its saved conversation imported into Pi before reopening");
+  const args = ["--provider", run.provider!, "--model", run.model!];
   if (run.thinking) args.push("--thinking", run.thinking);
   if (run.sessionFile) args.push("--session", run.sessionFile);
   if (run.context) args.push("--orchestrator-context", JSON.stringify(run.context));
   return {
     cwd: run.cwd, args, sessionId: run.id, stateDir: run.coreStateDir,
-    env: { ...env, PI_STACK_CORE: run.core ?? "pi", PI_ORCHESTRATOR_CORE_USAGE: "worker", PI_ORCHESTRATOR_ASSIGNED: "1", PI_ORCHESTRATOR_RUN_ID: run.id,
+    env: { ...env, PI_ORCHESTRATOR_CORE_USAGE: "worker", PI_ORCHESTRATOR_ASSIGNED: "1", PI_ORCHESTRATOR_RUN_ID: run.id,
       PI_ORCHESTRATOR_NATIVE_SESSION_ID: run.nativeSessionId, PI_ORCHESTRATOR_PROVIDER: run.provider,
       PI_ORCHESTRATOR_ACCOUNT_ID: run.accountId },
   };
