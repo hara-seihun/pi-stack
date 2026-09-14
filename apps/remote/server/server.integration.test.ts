@@ -2021,13 +2021,8 @@ describe("web and supervisor integration", () => {
       () => api("GET", `/v1/sessions/${id}/events?after=0`).then((result) => result.value),
       (value) => value.events.some((event: any) => event.type === "assistant" && event.text === "current finished"),
     );
-    // The retired runtime stops on its own chain of asynchronous steps: the
-    // turn settles, the supervisor asks the host to terminate, the host signals
-    // the child, and the child exits. Locally that lands in under a second, but
-    // a loaded CI runner has twice spent longer than the default eight-second
-    // wait and failed the whole release gate on scheduling rather than on
-    // behaviour. The assertion is that the old process really goes away, so
-    // give it room to be slow while still failing if it never goes.
+    // The child exits before its host finishes cleanup and reports exit.
+    // Requests in that interval must await replacement, not use the retiring transport.
     await waitFor(
       async () => {
         try { process.kill(runtimePid, 0); return false; }
@@ -2036,8 +2031,9 @@ describe("web and supervisor integration", () => {
       (stopped) => stopped,
       30_000,
     );
-    const settings = await api("GET", `/v1/sessions/${id}/settings`);
-    expect(settings.status).toBe(200);
+    const settings = await Promise.all(Array.from({ length: 3 }, () => api("GET", `/v1/sessions/${id}/settings`)));
+    expect(settings.map((result) => ({ status: result.status, error: result.value.error })))
+      .toEqual(Array.from({ length: 3 }, () => ({ status: 200, error: undefined })));
     expect(Number(JSON.parse(readFileSync(fakeLaunch, "utf8")).pid)).not.toBe(runtimePid);
     const ledger = new Database(join(root, "data", "supervisor.sqlite3"), { readonly: true });
     const work = ledger.query("SELECT state,resume FROM work_items WHERE session_id=? AND text='release-later'").get(id) as any;

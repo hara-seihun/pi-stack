@@ -1780,6 +1780,10 @@ async function activate(row: any): Promise<Runtime> {
   const inProgress = activations.get(row.id);
   if (inProgress) return inProgress;
   const existing = runtimes.get(row.id);
+  if (existing?.phase === "STOPPING" && existing.transport) {
+    await existing.transport.exited;
+    return activate(row);
+  }
   if (existing) return existing;
   const activation = runtimeAdmission.admit(() => admissionPriority(row.id), async () => {
     const current = sessionRow.get(row.id) as any;
