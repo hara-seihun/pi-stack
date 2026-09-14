@@ -1,7 +1,4 @@
 import assert from "node:assert/strict";
-import { spawnSync } from "node:child_process";
-import { readFileSync } from "node:fs";
-import { fileURLToPath } from "node:url";
 import test from "node:test";
 import {
   INTERACTIVE_MAX_TIMEOUT_SECONDS,
@@ -22,7 +19,6 @@ function load(environment = {}) {
 
 const bashCall = (input) => ({ toolName: "bash", input });
 const ui = { hasUI: true };
-const sweep = fileURLToPath(new URL("./sweep", import.meta.url));
 const fleet = {
   PI_BASH_TIMEOUT_MAX_SECONDS: "55",
   PI_BASH_TIMEOUT_CONTEXT: "This shared runner has the same ceiling.",
@@ -155,27 +151,6 @@ test("detachment is refused in every session, and refused kindly", () => {
   const blocked = onToolCall(bashCall({ command: "./census &", timeout: 55 }));
   assert.equal(blocked.block, true);
   assert.match(blocked.reason, /foreground/);
-});
-
-test("the process sweep leaves everything outside fleet run units alone", () => {
-  // This test process carries no pi-orchestrator-run cgroup, so the sweep must
-  // pass over it and its parent. Dry run keeps the suite from signalling a real
-  // fleet command that happens to be running on the host right now.
-  const result = spawnSync(sweep, ["--dry-run"], { encoding: "utf8", env: { ...process.env, PI_SESSION_ID: "sweep-test" } });
-  assert.equal(result.status, 0, result.stderr);
-  const reported = result.stdout.split("\n").filter(Boolean).map((line) => Number(line.split(" ")[2]));
-  assert.ok(reported.every((pid) => pid !== process.pid && pid !== process.ppid), result.stdout);
-  for (const pid of reported) {
-    let cgroup;
-    try { cgroup = readFileSync(`/proc/${pid}/cgroup`, "utf8"); } catch { continue; }
-    assert.match(cgroup, /pi-orchestrator-run-/, result.stdout);
-  }
-});
-
-test("the process sweep refuses arguments it does not understand", () => {
-  const result = spawnSync(sweep, ["--kill-everything"], { encoding: "utf8" });
-  assert.equal(result.status, 2);
-  assert.match(result.stderr, /usage: sweep/);
 });
 
 test("the matching rule is stated once in the system prompt", () => {

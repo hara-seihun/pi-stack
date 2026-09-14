@@ -97,6 +97,10 @@ function hash(value: string) { return createHash("sha256").update(value).digest(
 export function runnerHostEntry(moduleUrl = import.meta.url): string {
   return fileURLToPath(new URL(moduleUrl.endsWith(".ts") ? "../../dist/threads/runner-host.js" : "./runner-host.js", moduleUrl));
 }
+export function userManagerEnvironment(uid: number) {
+  const runtimeDir = `/run/user/${uid}`;
+  return { XDG_RUNTIME_DIR: runtimeDir, DBUS_SESSION_BUS_ADDRESS: `unix:path=${runtimeDir}/bus` };
+}
 function boundary(options: PiSessionOptions) {
   const isolation = options.args.includes("--orchestrator-context") ? `isolated:${options.cwd}` : "normal";
   return hash(JSON.stringify([import.meta.url, process.getuid?.(), options.env.HOME ?? process.env.HOME, options.env.PI_CODING_AGENT_DIR ?? "", options.env.PI_ORCHESTRATOR_EXECUTION ?? "user", isolation]));
@@ -119,7 +123,10 @@ async function ensureRunner(control: string, options: PiSessionOptions, durableS
   if (root && (!durableScope || options.args.includes("--orchestrator-context"))) throw new Error("Root repair requires the fleet execution boundary without isolated context");
   if (root) { env.PI_ORCHESTRATOR_OWNER_UID = String(process.getuid!()); env.PI_ORCHESTRATOR_OWNER_GID = String(process.getgid!()); }
   const command = ["flock", "--no-fork", "--nonblock", "--conflict-exit-code", "75", `${control}.lock`, "node", "--max-old-space-size=8192", entry, control];
-  if (durableScope) command.unshift("systemd-run", ...(root ? [] : ["--user"]), "--scope", "--collect", "--quiet", `--unit=pi-thread-runner-${hash(control)}`);
+  if (durableScope) {
+    if (!root) Object.assign(env, userManagerEnvironment(process.getuid!()));
+    command.unshift("systemd-run", ...(root ? [] : ["--user"]), "--scope", "--collect", "--quiet", `--unit=pi-thread-runner-${hash(control)}`);
+  }
   if (root) command.unshift("sudo", "-n", "--preserve-env");
   const host = spawn(command[0]!, command.slice(1), {
     cwd: env.HOME, detached: true, stdio: ["ignore", "inherit", "inherit"], env,
