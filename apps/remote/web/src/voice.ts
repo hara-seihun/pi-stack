@@ -407,7 +407,7 @@ import { updateDocument } from "./sync";
         await this.handoffContext?.();
         if (generation !== this.generation) return;
         const lines: Array<{ role: string; text: string }> = [];
-        if (!this.handoffContext) for (const fragment of this.transcript.slice(this.sentTranscriptCursor, end)) {
+        for (const fragment of this.transcript.slice(this.sentTranscriptCursor, end)) {
           const last = lines.at(-1);
           if (last && last.role === fragment.role) last.text += fragment.text;
           else lines.push({ role: fragment.role, text: fragment.text });

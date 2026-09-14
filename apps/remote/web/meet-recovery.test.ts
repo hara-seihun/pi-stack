@@ -121,6 +121,41 @@ test("failed startup stops capture and retains its unfinished PCM until recovery
   expect(failure!.recovery.state.status).toBe("closed");
 });
 
+test("meeting handoffs retain Voice's triggering speech alongside the saved meeting transcript", async () => {
+  const prompts: Array<{ text: string; includeMeetingImages: boolean }> = [];
+  let flushed = false;
+  const voice = new VoiceSession({
+    sessionId: "thread",
+    meetingContext: () => "Kenan's outgoing voice is muted.",
+    handoffContext: async () => { flushed = true; },
+    onState() {},
+    onNotice(message) { throw new Error(message); },
+    request: async (_path, init) => {
+      expect(flushed).toBe(true);
+      prompts.push(JSON.parse(String(init.body)));
+      return Response.json({ workId: `work-${prompts.length}` });
+    },
+  });
+  const speech = (id: string, text: string) => voice.handleLiveMessage(JSON.stringify({
+    type: "session.input_transcript.delta", event_id: id, delta: text, start_ms: 0, end_ms: 1000,
+  }));
+  const delegate = async (id: string) => {
+    voice.handleLiveMessage(JSON.stringify({
+      type: "session.delegation.created", event_id: id, delegation: { id, target: "client" }, offset_ms: 1000,
+    }));
+    await voice.delegationQueue;
+  };
+  speech("speech-1", "Kenan, unmute yourself.");
+  await delegate("delegation-1");
+  expect(prompts[0]!.text).toContain("User: Kenan, unmute yourself.");
+  expect(prompts[0]!.includeMeetingImages).toBe(true);
+  speech("speech-2", "Now show the browser.");
+  await delegate("delegation-2");
+  expect(prompts[1]!.text).toContain("User: Now show the browser.");
+  expect(prompts[1]!.text).not.toContain("unmute yourself");
+  expect(voice.delegationsSubmitted).toBe(2);
+});
+
 test("Voice stop silences local capture and playback before remote settlement", async () => {
   let finish!: () => void;
   const settlement = new Promise<void>((resolve) => { finish = resolve; });
