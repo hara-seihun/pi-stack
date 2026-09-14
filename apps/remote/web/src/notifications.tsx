@@ -1,7 +1,7 @@
 import { useEffect, useState } from "react";
 import { API } from "../../server/api";
 import type { IdleNotificationFeed } from "../../server/protocol";
-import { browserFetch, loadBrowserEnvironments, nativePlatform, remote } from "./native";
+import { browserFetch, loadEnvironments, nativePlatform, nativeSessionReady, remote } from "./native";
 import { ThreadNotifications, threadNotificationKey } from "./thread-notifications";
 
 export interface NotificationTarget { environment?: string; sessionId?: string; user?: string }
@@ -33,15 +33,26 @@ export function NotificationControl({ sessionId }: { sessionId: string | null })
   }, []);
   const [enabled, setEnabled] = useState(false);
   const [error, setError] = useState("");
-  const [user, setUser] = useState(window.PiRemotePerson?.get() || "");
   useEffect(() => {
-    const changed = () => setUser(window.PiRemotePerson?.get() || "");
+    const failed = (event: Event) => setError((event as CustomEvent<string>).detail);
+    window.addEventListener("pi-native-auth-error", failed);
+    return () => window.removeEventListener("pi-native-auth-error", failed);
+  }, []);
+  const [identity, setIdentity] = useState(() => ({ user: window.PiRemotePerson.get(), session: window.PiRemotePerson.session() }));
+  const { user, session } = identity;
+  useEffect(() => {
+    const changed = () => setIdentity({ user: window.PiRemotePerson.get(), session: window.PiRemotePerson.session() });
     window.addEventListener("pi-person", changed);
-    return () => window.removeEventListener("pi-person", changed);
+    window.addEventListener("pi-auth", changed);
+    return () => { window.removeEventListener("pi-person", changed); window.removeEventListener("pi-auth", changed); };
   }, []);
   const configure = async (request: boolean) => {
     try {
-      if (nativePlatform) setEnabled((await remote.notifications!({ user, request })).enabled);
+      if (nativePlatform) {
+        await nativeSessionReady();
+        if (user !== window.PiRemotePerson.get() || session !== window.PiRemotePerson.session()) return;
+        setEnabled((await remote.notifications!({ request })).enabled);
+      }
       else if ("Notification" in window) setEnabled((request ? await Notification.requestPermission() : Notification.permission) === "granted");
       else throw new Error("This browser does not support notifications");
       setError("");
@@ -52,11 +63,12 @@ export function NotificationControl({ sessionId }: { sessionId: string | null })
     const refresh = () => { if (document.visibilityState === "visible") void configure(false); };
     document.addEventListener("visibilitychange", refresh);
     return () => document.removeEventListener("visibilitychange", refresh);
-  }, [user]);
+  }, [user, session]);
   useEffect(() => {
     let disposed = false;
     let viewing: AbortController | null = null;
     const update = async () => {
+      if (!session) return;
       viewing?.abort();
       const controller = new AbortController();
       viewing = controller;
@@ -82,9 +94,9 @@ export function NotificationControl({ sessionId }: { sessionId: string | null })
       window.removeEventListener("pagehide", hide);
       window.removeEventListener("pageshow", update);
     };
-  }, [sessionId, user, browserNotifications]);
+  }, [sessionId, user, session, browserNotifications]);
   useEffect(() => {
-    if (nativePlatform || !enabled || !browserNotifications) return;
+    if (nativePlatform || !enabled || !session || !browserNotifications) return;
     const controller = new AbortController();
     const timers = new Set<ReturnType<typeof setTimeout>>();
     const failures = new Map<string, string>();
@@ -94,13 +106,19 @@ export function NotificationControl({ sessionId }: { sessionId: string | null })
         await navigator.locks.request(key, { signal: controller.signal }, async () => {
         const stored = localStorage.getItem(key);
         const response = await browserFetch(`${environment.baseUrl}${API.notifications.path({}, { after: stored })}`, {
-          headers: user ? { "x-pi-remote-user": user } : {}, cache: "no-store",
+          headers: { "x-pi-remote-user": user, "x-pi-remote-session": session }, cache: "no-store", redirect: "error",
           signal: AbortSignal.any([controller.signal, AbortSignal.timeout(15_000)]),
         });
-        if (!response.ok) throw new Error(response.status === 423 ? "Locked. Open this environment to unlock." : `HTTP ${response.status}`);
+        if (response.status === 423) {
+          window.PiRemotePerson.clearSession(session);
+          controller.abort();
+          throw new Error("Locked. Unlock your folder to resume notifications.");
+        }
+        if (!response.ok) throw new Error(`HTTP ${response.status}`);
         const feed = await response.json() as IdleNotificationFeed & { environmentId: string };
         if (feed.environmentId !== environment.id) throw new Error("Environment identity mismatch");
         controller.signal.throwIfAborted();
+        if (user !== window.PiRemotePerson.get() || session !== window.PiRemotePerson.session()) return;
         for (const event of feed.notifications) {
           await browserNotifications.show(threadNotificationKey(user, environment.id, event.sessionId), `${environment.name} · ${event.name}`, () => {
             const url = new URL(location.href);
@@ -122,12 +140,12 @@ export function NotificationControl({ sessionId }: { sessionId: string | null })
         timers.add(timer);
       }
     };
-    void loadBrowserEnvironments().then((environments) => {
+    void loadEnvironments().then((environments) => {
       if (!controller.signal.aborted) for (const environment of environments) void poll(environment);
     }).catch((cause) => { if (!controller.signal.aborted) setError(String(cause)); });
     return () => { controller.abort(); for (const timer of timers) clearTimeout(timer); };
-  }, [enabled, user, browserNotifications]);
-  return <div className="usage-summary" title={error || (nativePlatform ? "Monitors every environment, including in the background" : "Monitors every environment while this page is open")}>
+  }, [enabled, user, session, browserNotifications]);
+  return <div className="usage-summary" title={error || (nativePlatform ? "Monitors allowed environments, including in the background" : "Monitors allowed environments while this page is open")}>
     {!enabled && <button onClick={() => void configure(true)}>Enable notifications</button>}
     {error && <div role="status">{error}</div>}
   </div>;

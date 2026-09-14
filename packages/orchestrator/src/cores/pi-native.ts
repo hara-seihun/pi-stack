@@ -10,6 +10,7 @@ import { piChildTools } from "./pi-tools.js";
 import { piIsolatedContext } from "./pi-isolated.js";
 import { checkpointPiSession, preparePiSession, seedPiSession } from "./pi-transfer.js";
 import { assertPiSessionFile } from "./pi-session-file.js";
+import { piCwdAdmission, requirePiCwd } from "./pi-cwd.js";
 import { SESSION_RETRY } from "../host/session-lifecycle.js";
 import { resolveSessionModel } from "../extension/routing.js";
 
@@ -18,7 +19,10 @@ const globals = globalThis as typeof globalThis & { [scopeKey]?: AsyncLocalStora
 const scope = globals[scopeKey] ??= new AsyncLocalStorage<NodeJS.ProcessEnv>();
 type SharedRpc = (runtime: AgentSessionRuntime, io: { output(event: CoreOutput): void; exit(code?: number): void }) => Promise<CoreSession>;
 
-export const openPiNative: OpenPiNative = async (options, node, tools, output, exit) => {
+export const openPiNative: OpenPiNative = async (options, node, tools, output, exit,
+  admission = piCwdAdmission(options.env.PI_REMOTE_WORKSPACES)) => {
+  options = { ...options, cwd: requirePiCwd(admission, options.cwd, "options.cwd") };
+  const admittedCwd = requirePiCwd(admission, node.cwd, `nodes[${node.id}].cwd`);
   const env: NodeJS.ProcessEnv = { ...process.env, ...options.env, PI_STACK_CORE_OWNS_CHILDREN: "1",
     PI_STACK_CORE_ROOT_ID: options.sessionId, PI_STACK_CORE_AGENT_ID: node.id,
     PI_STACK_CORE_PARENT_ID: node.parentId ?? undefined };
@@ -39,11 +43,12 @@ export const openPiNative: OpenPiNative = async (options, node, tools, output, e
       if (node.nativeSessionId || !node.parentId && argument(options.args, "--session") && !options.transfer) {
         throw new Error(`Native Pi session is missing: ${node.sessionFile}`);
       }
-      seedPiSession(node.sessionFile, node.cwd, node.parentId ? undefined : options.transfer);
+      seedPiSession(node.sessionFile, admittedCwd, node.parentId ? undefined : options.transfer);
     }
-    assertPiSessionFile(node.sessionFile);
+    requirePiCwd(admission, assertPiSessionFile(node.sessionFile).cwd, `${node.sessionFile} header.cwd`);
     let acceptedContext: { tools: string[]; extensions?: string[] } | undefined;
     const factory: CreateAgentSessionRuntimeFactory = async ({ cwd, sessionManager, sessionStartEvent }) => {
+      cwd = requirePiCwd(admission, cwd, `nodes[${node.id}].runtime.cwd`);
       preparePiSession(sessionManager);
       const isolated = await piIsolatedContext(options, cwd, sessionManager.getSessionFile()!, env, scope);
       const services = await createAgentSessionServices({ cwd, agentDir: isolated?.agentDir ?? agentDir,
@@ -109,8 +114,8 @@ export const openPiNative: OpenPiNative = async (options, node, tools, output, e
       created.session.settingsManager.applyOverrides({ retry: { ...SESSION_RETRY } });
       return { ...created, services, diagnostics: services.diagnostics };
     };
-    const runtime = await createAgentSessionRuntime(factory, { cwd: node.cwd, agentDir,
-      sessionManager: SessionManager.open(node.sessionFile, undefined, node.cwd) });
+    const runtime = await createAgentSessionRuntime(factory, { cwd: admittedCwd, agentDir,
+      sessionManager: SessionManager.open(node.sessionFile, undefined, admittedCwd) });
     const snapshot = () => ({ name: runtime.session.sessionName ?? node.name, nativeSessionId: runtime.session.sessionId,
       sessionFile: runtime.session.sessionFile!, cwd: runtime.cwd,
       model: runtime.session.model?.provider === "unknown" ? undefined : runtime.session.model?.id,
@@ -139,12 +144,19 @@ export const openPiNative: OpenPiNative = async (options, node, tools, output, e
     const newSession = runtime.newSession.bind(runtime);
     const switchSession = runtime.switchSession.bind(runtime);
     const fork = runtime.fork.bind(runtime);
+    const importFromJsonl = runtime.importFromJsonl.bind(runtime);
     runtime.newSession = (...args) => replaced(() => newSession(...args));
-    runtime.switchSession = (...args) => {
-      assertPiSessionFile(args[0]);
-      return replaced(() => switchSession(...args));
+    runtime.switchSession = (path, options) => {
+      const header = assertPiSessionFile(path);
+      const cwdOverride = requirePiCwd(admission, options?.cwdOverride ?? header.cwd, `${path} switch.cwd`);
+      return replaced(() => switchSession(path, { ...options, cwdOverride }));
     };
     runtime.fork = (...args) => replaced(() => fork(...args));
+    runtime.importFromJsonl = (path, override) => {
+      const header = assertPiSessionFile(path);
+      const cwd = requirePiCwd(admission, override ?? header.cwd, `${path} import.cwd`);
+      return replaced(() => importFromJsonl(path, cwd));
+    };
     const context = () => ({ systemPrompt: runtime.session.agent.state.systemPrompt,
       messages: runtime.session.messages,
       tools: runtime.session.agent.state.tools.map(({ name, description, parameters }) => ({ name, description, parameters })) });

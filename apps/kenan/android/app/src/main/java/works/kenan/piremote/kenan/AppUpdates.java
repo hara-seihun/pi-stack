@@ -67,9 +67,9 @@ final class AppUpdates {
         }
     }
 
-    Release check(RemoteEnvironment.Endpoint endpoint) throws IOException {
+    Release check() throws IOException {
         ByteArrayOutputStream output = new ByteArrayOutputStream();
-        transfer(endpoint, "/v1/app-update", output, 64 * 1024, 15_000);
+        transfer("/v1/app-update", output, 64 * 1024, 15_000);
         return parseManifest(output.toString(StandardCharsets.UTF_8.name()));
     }
 
@@ -86,8 +86,8 @@ final class AppUpdates {
         }
     }
 
-    File downloadCurrent(RemoteEnvironment.Endpoint endpoint) throws IOException {
-        Release release = check(endpoint);
+    File downloadCurrent() throws IOException {
+        Release release = check();
         if (release == null) throw new IOException("No newer Android app is published now. Check for updates again.");
         if (!directory.isDirectory() && !directory.mkdirs()) throw new IOException("Cannot save the update. Free some phone storage and retry.");
         File apk = downloadedFile(release.revision);
@@ -98,7 +98,7 @@ final class AppUpdates {
         File partial = new File(directory, release.revision + ".partial.apk");
         try {
             try (FileOutputStream output = new FileOutputStream(partial)) {
-                long received = transfer(endpoint, "/v1/app-update/" + release.revision + ".apk", output, release.size, 180_000);
+                long received = transfer("/v1/app-update/" + release.revision + ".apk", output, release.size, 180_000);
                 if (received != release.size) throw new IOException("The update download was incomplete. Retry Update app.");
                 output.getFD().sync();
             }
@@ -164,10 +164,8 @@ final class AppUpdates {
         if (!file.delete()) throw new IOException("Cannot remove an invalid update. Free some phone storage and retry.");
     }
 
-    private static long transfer(RemoteEnvironment.Endpoint endpoint, String path, OutputStream output, long limit, int timeout) throws IOException {
-        RemoteTransport transport = RemoteConnections.forEndpoint(endpoint);
-        transport.prepare(endpoint);
-        HttpURLConnection connection = (HttpURLConnection) new URL(endpoint.baseUrl + path).openConnection();
+    private static long transfer(String path, OutputStream output, long limit, int timeout) throws IOException {
+        HttpURLConnection connection = (HttpURLConnection) new URL(BuildConfig.ROUTER_URL + path).openConnection();
         long deadline = SystemClock.elapsedRealtime() + timeout;
         connection.setConnectTimeout(7_000);
         connection.setReadTimeout(7_000);
@@ -185,7 +183,7 @@ final class AppUpdates {
                 byte[] buffer = new byte[64 * 1024];
                 while (true) {
                     long remaining = deadline - SystemClock.elapsedRealtime();
-                    if (remaining <= 0 || Thread.currentThread().isInterrupted()) throw new IOException("The update request timed out. Check the selected environment's connection and retry.");
+                    if (remaining <= 0 || Thread.currentThread().isInterrupted()) throw new IOException("The update request timed out. Check the router connection and retry.");
                     connection.setReadTimeout((int) Math.min(7_000, remaining));
                     int count = input.read(buffer);
                     if (count < 0) return received;
@@ -195,8 +193,7 @@ final class AppUpdates {
                 }
             }
         } catch (IOException failure) {
-            transport.close();
-            throw new IOException("Could not fetch the Android update from " + endpoint.name + ": " + failure.getMessage(), failure);
+            throw new IOException("Could not fetch the Android update from the bootstrap router: " + failure.getMessage(), failure);
         } finally { connection.disconnect(); }
     }
 }

@@ -96,7 +96,7 @@ wait_for_router() {
   return 1
 }
 supervisor_commit() {
-  curl -fsS --max-time 2 -H "x-pi-remote-user: $1" "$router_base/v1/health" 2>/dev/null | jq -r '.releaseCommit // empty' 2>/dev/null
+  pi_stack_supervisor_health "$1" 2>/dev/null | jq -r '.releaseCommit // empty' 2>/dev/null
 }
 remote_matches_release() {
   local target_commit=$1 user
