@@ -91,7 +91,7 @@ function installLocked(source) {
   const generations = readdirSync(releases).filter(name => /^[a-f0-9]{40}$/.test(name))
     .map(name => ({ path: join(releases, name), release: manifest(join(releases, name)) }))
     .sort((left, right) => right.release.versionCode - left.release.versionCode);
-  for (const generation of generations.slice(3)) {
+  for (const generation of process.env.PI_REMOTE_APP_UPDATES_KEEP_ALL === "1" ? [] : generations.slice(3)) {
     if (generation.release.revision !== release.revision) rmSync(generation.path, { recursive: true });
   }
   return release;
