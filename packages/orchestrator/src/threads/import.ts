@@ -170,7 +170,8 @@ export function importFleetThreads(service: ThreadService, db: DatabaseSync, opt
       const root = tree?.nodes.find((node: Row) => node.id === row.id);
       const relation = parse(controls.get(`fleet-child:${row.id}`), undefined);
       const model = root?.model ?? row.model ?? relation?.assignment?.model;
-      const selected = model ? resolveThreadSettings({ model: catalogModel(model)?.id ?? `${root?.provider ?? row.provider ?? relation?.assignment?.provider}/${model}`,
+      const provider = root?.provider ?? row.provider ?? relation?.assignment?.provider;
+      const selected = model && (provider || model.includes("/") || catalogModel(model)) ? resolveThreadSettings({ model: catalogModel(model)?.id ?? (provider ? `${provider}/${model}` : model),
         thinkingLevel: root?.thinkingLevel ?? row.thinking ?? undefined, speed: "standard" })
         : options.settingsForProfile ? { ok: true as const, value: options.settingsForProfile(row.profile) } : resolveThreadSettings({ model: row.profile });
       if (!selected.ok) return selected;
@@ -182,7 +183,7 @@ export function importFleetThreads(service: ThreadService, db: DatabaseSync, opt
         settings: selected.value, admission: relation ? "force" : row.budget, stopped: row.state === "aborted",
         createdAt: row.created_at, updatedAt: row.updated_at, metadata: { source: row.source, laneId: row.source === "lane" ? row.source_id : undefined,
           profile: row.profile, context, execution, nativeHistoryRequired: Boolean(root?.sessionFile ?? row.session_file),
-          importedFrom: { source: "fleet", id: row.id, nativeStateDirectory: stateDir, accountId: row.account_id,
+          importedFrom: { source: "fleet", id: row.id, nativeStateDirectory: stateDir, accountId: row.account_id, model: row.model, provider: row.provider,
             releasePath: row.release_path, workerUnit: row.worker_unit, failureKind: row.failure_kind, startedAt: row.started_at, endedAt: row.ended_at,
             relationship: relation } } };
       if (threads.has(row.id)) return failure(`Fleet thread ${row.id} has two source owners`);
