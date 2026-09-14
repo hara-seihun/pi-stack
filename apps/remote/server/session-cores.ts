@@ -30,12 +30,9 @@ export class SessionCores {
     if (row && row.core !== "pi") throw new Error(`Thread ${sessionId} needs its saved conversation imported into Pi before reopening`);
     return {core:"pi",stateDir:row?.state_dir ?? join(this.data,"core-sessions",sessionId)};
   }
-  set(sessionId: string, value: SessionCore): void {
-    this.db.query("INSERT INTO session_cores(session_id,core,state_dir) VALUES(?,?,?) ON CONFLICT(session_id) DO UPDATE SET core=excluded.core,state_dir=excluded.state_dir")
-      .run(sessionId,value.core,value.stateDir);
-  }
   create(sessionId: string): void {
-    this.set(sessionId,{core:"pi",stateDir:join(this.data,"core-sessions",sessionId)});
+    this.db.query("INSERT INTO session_cores(session_id,core,state_dir) VALUES(?,'pi',?)")
+      .run(sessionId,join(this.data,"core-sessions",sessionId));
   }
   dispatch(sessionId: string, workId: string, payload: CoreDispatch): CoreDispatch {
     const stateDir = this.get(sessionId).stateDir;

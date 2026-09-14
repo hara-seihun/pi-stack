@@ -19,7 +19,7 @@ test("Pi session custody retains children and immutable dispatches across reopen
     const payload = { type: "prompt", message: "original", images: [] };
     expect(cores.dispatch("new", "work", payload)).toEqual(payload);
     expect(reopened.dispatch("new", "work", { ...payload, message: "changed" })).toEqual(payload);
-    cores.set("new", { core: "pi", stateDir: "/state/core-sessions/new/fork" });
+    db.query("UPDATE session_cores SET state_dir=? WHERE session_id='new'").run("/state/core-sessions/new/fork");
     expect(() => cores.dispatch("new", "work", payload)).toThrow("another session generation");
     expect(cores.agents("new")).toEqual([]);
   } finally { db.close(); }
