@@ -1,0 +1,205 @@
+import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+import { afterEach, describe, expect, it } from "vitest";
+import type { OpenPiSession, PiCommand, PiEvent, PiSession, PiSessionOptions, Result } from "../src/threads/contracts.js";
+import { ThreadService } from "../src/threads/service.js";
+
+const roots: string[] = [];
+const services: ThreadService[] = [];
+
+afterEach(async () => {
+  for (const service of services.splice(0).reverse()) await service.close();
+  for (const root of roots.splice(0).reverse()) rmSync(root, { recursive: true, force: true });
+});
+
+const turn = () => new Promise<void>(resolve => setImmediate(resolve));
+
+async function waitFor(check: () => boolean): Promise<void> {
+  for (let attempt = 0; attempt < 50; attempt++) {
+    if (check()) return;
+    await turn();
+  }
+  throw new Error("Thread service did not reach the expected state");
+}
+
+function value<T>(result: Result<T>): T {
+  if (!result.ok) throw new Error(`${result.error.code}: ${result.error.message}`);
+  return result.value;
+}
+
+class FakePiSession implements PiSession {
+  readonly commands: PiCommand[] = [];
+  readonly acceptedWorkIds = new Set<string>();
+  readonly completedWorkIds = new Set<string>();
+  isStreaming = false;
+  pendingMessageCount = 0;
+  lastAssistantMessage?: Record<string, unknown>;
+  closed = false;
+
+  constructor(readonly options: PiSessionOptions, private readonly output: (event: PiEvent) => void) {}
+
+  async command(command: PiCommand): Promise<void> {
+    this.commands.push(command);
+    if (command.type === "prompt" || command.type === "steer") {
+      if (typeof command.workId === "string") this.acceptedWorkIds.add(command.workId);
+      this.isStreaming = true;
+      this.output({ type: "agent_start" });
+    }
+    if (command.type === "abort") {
+      this.isStreaming = false;
+      this.pendingMessageCount = 0;
+    }
+    const data = command.type === "get_state" ? {
+      isStreaming: this.isStreaming,
+      pendingMessageCount: this.pendingMessageCount,
+      sessionFile: this.options.sessionFile,
+      acceptedWorkIds: [...this.acceptedWorkIds],
+      completedWorkIds: [...this.completedWorkIds],
+      lastAssistantMessage: this.lastAssistantMessage,
+    } : {};
+    this.output({ type: "response", id: command.id, command: command.type, success: true, data });
+  }
+
+  settle(text: string, stopReason = "stop"): void {
+    const message = { role: "assistant", content: [{ type: "text", text }], stopReason, timestamp: Date.now() };
+    this.lastAssistantMessage = message;
+    const workId = [...this.acceptedWorkIds].at(-1);
+    if (workId) this.completedWorkIds.add(workId);
+    this.isStreaming = false;
+    this.pendingMessageCount = 0;
+    this.output({ type: "message_end", message });
+    this.output({ type: "agent_settled" });
+  }
+
+  async close(): Promise<void> { this.closed = true; }
+}
+
+function fixture(root?: string) {
+  const directory = root ?? mkdtempSync(join(tmpdir(), "thread-service-"));
+  if (!root) roots.push(directory);
+  const sessions: FakePiSession[] = [];
+  const openSession: OpenPiSession = async (options, output) => {
+    const session = new FakePiSession(options, output);
+    sessions.push(session);
+    return session;
+  };
+  const service = new ThreadService({
+    databasePath: join(directory, "threads.sqlite"),
+    sessionsDir: join(directory, "sessions"),
+    openSession,
+  });
+  services.push(service);
+  return { directory, service, sessions };
+}
+
+async function settle(session: FakePiSession, service: ThreadService, threadId: string, text = "done") {
+  session.settle(text);
+  await waitFor(() => service.get(threadId)?.state === "idle");
+}
+
+describe("ThreadService", () => {
+  it("opens every child with a fresh session and resolves default and Luna settings centrally", async () => {
+    const { directory, service, sessions } = fixture();
+    await service.start();
+    const parent = value(await service.spawn({ requestId: "parent", id: "parent", cwd: directory, settings: { model: "luna" } }));
+    expect(parent.settings).toEqual({ model: "openai-codex/gpt-5.6-luna", thinkingLevel: "max", speed: "standard" });
+    value(await service.control({ threadId: parent.id, action: "stop", descendants: false }));
+
+    const defaultChild = value(await service.spawn({ requestId: "default-child", id: "default-child", parentId: parent.id, cwd: directory, message: "first assignment" }));
+    const lunaChild = value(await service.spawn({ requestId: "luna-child", id: "luna-child", parentId: parent.id, cwd: directory, message: "second assignment", settings: { model: "luna" }, admission: "background" }));
+    await waitFor(() => sessions.length === 2 && sessions.every(session => session.commands.some(command => command.type === "prompt")));
+
+    expect(defaultChild.settings).toEqual({ model: "openai-codex/gpt-6-astra", thinkingLevel: "high", speed: "standard" });
+    expect(lunaChild.settings).toEqual({ model: "openai-codex/gpt-5.6-luna", thinkingLevel: "max", speed: "standard" });
+    expect([defaultChild.admission, lunaChild.admission]).toEqual(["force", "force"]);
+    expect(new Set(sessions.map(session => session.options.sessionFile)).size).toBe(2);
+    expect(sessions.map(session => session.options.args)).toEqual(expect.arrayContaining([
+      ["--provider", "openai-codex", "--model", "gpt-6-astra", "--thinking", "high"],
+      ["--provider", "openai-codex", "--model", "gpt-5.6-luna", "--thinking", "max"],
+    ]));
+
+    for (const session of sessions) session.settle(`complete ${session.options.threadId}`);
+    await waitFor(() => [defaultChild.id, lunaChild.id].every(id => service.get(id)?.state === "idle"));
+  });
+
+  it("persists a held queue across restart and reports an empty resume", async () => {
+    const first = fixture();
+    const thread = value(await first.service.spawn({ requestId: "thread", id: "thread", cwd: first.directory }));
+    value(await first.service.send({ requestId: "queued", threadId: thread.id, text: "durable input", delivery: "queue" }));
+    value(await first.service.control({ threadId: thread.id, action: "stop", descendants: false }));
+    expect(first.service.pending(thread.id)).toMatchObject([{ id: "queued", state: "held" }]);
+    value(await first.service.close());
+
+    const second = fixture(first.directory);
+    expect(second.service.pending(thread.id)).toMatchObject([{ id: "queued", text: "durable input", state: "held" }]);
+    value(await second.service.control({ threadId: thread.id, action: "resume" }));
+    await second.service.start();
+    await waitFor(() => second.sessions[0]?.commands.some(command => command.type === "prompt"));
+    await settle(second.sessions[0]!, second.service, thread.id);
+    const empty = await second.service.control({ threadId: thread.id, action: "resume" });
+    expect(empty).toMatchObject({ ok: false, error: { code: "no_pending_messages" } });
+  });
+
+  it("holds child notification for a stopped parent and puts an explicit message first", async () => {
+    const first = fixture();
+    await first.service.start();
+    const parent = value(await first.service.spawn({ requestId: "parent", id: "parent", cwd: first.directory }));
+    value(await first.service.control({ threadId: parent.id, action: "stop", descendants: false }));
+    const child = value(await first.service.spawn({ requestId: "child-work", id: "child", parentId: parent.id, cwd: first.directory, message: "child task" }));
+    await waitFor(() => first.sessions[0]?.commands.some(command => command.type === "prompt"));
+    await settle(first.sessions[0]!, first.service, child.id, "child result");
+    await waitFor(() => first.service.pending(parent.id).length === 1);
+    expect(first.service.get(parent.id)?.state).toBe("stopped");
+    expect(first.service.pending(parent.id)).toMatchObject([{ source: "notification", state: "held", senderId: child.id }]);
+    value(await first.service.close());
+
+    const second = fixture(first.directory);
+    value(await second.service.send({ requestId: "explicit", threadId: parent.id, text: "new instruction", delivery: "queue" }));
+    expect(second.service.get(parent.id)?.state).toBe("queued");
+    expect(second.service.pending(parent.id).map(message => ({ id: message.id, source: message.source, text: message.text }))).toEqual([
+      { id: "explicit", source: "explicit", text: "new instruction" },
+      expect.objectContaining({ source: "notification" }),
+    ]);
+  });
+
+  it("reads native history without activating a runtime", async () => {
+    const { directory, service, sessions } = fixture();
+    const transcript = join(directory, "existing.jsonl");
+    writeFileSync(transcript, [
+      { type: "session", id: "session" },
+      { type: "message", id: "user", message: { role: "user", content: "hello" } },
+      { type: "message", id: "assistant", message: { role: "assistant", content: "hi" } },
+    ].map(entry => JSON.stringify(entry)).join("\n") + "\n");
+    value(service.importThread({ id: "imported", title: "Imported", cwd: directory, sessionFile: transcript, settings: { model: "astra", thinkingLevel: "high", speed: "standard" } }));
+
+    const history = value(await service.read({ threadId: "imported" }));
+    expect(history.entries.map(entry => entry.id)).toEqual(["user", "assistant"]);
+    expect(sessions).toHaveLength(0);
+  });
+
+  it("deduplicates request receipts and rejects changed reuse", async () => {
+    const { directory, service } = fixture();
+    const spawn = { requestId: "spawn-request", id: "same-thread", cwd: directory } as const;
+    expect(value(await service.spawn(spawn)).id).toBe("same-thread");
+    expect(value(await service.spawn(spawn)).id).toBe("same-thread");
+    const message = { requestId: "send-request", threadId: "same-thread", text: "once", delivery: "queue" as const };
+    expect(value(await service.send(message)).id).toBe("send-request");
+    expect(value(await service.send(message)).id).toBe("send-request");
+    expect(service.pending("same-thread")).toHaveLength(1);
+    expect(await service.send({ ...message, text: "different" })).toMatchObject({ ok: false, error: { code: "conflict" } });
+  });
+
+  it("does not replay an imported completed message", async () => {
+    const { directory, service, sessions } = fixture();
+    value(service.importThread({ id: "complete-thread", title: "Complete", cwd: directory, sessionFile: join(directory, "complete.jsonl"), settings: { model: "astra", thinkingLevel: "high", speed: "standard" } }));
+    value(service.importMessage({ id: "completed-work", threadId: "complete-thread", text: "already handled", state: "complete", outcome: "complete", finalMessage: { role: "assistant", stopReason: "stop", content: [{ type: "text", text: "finished" }] } }));
+
+    await service.start();
+    await turn();
+    await turn();
+    expect(service.pending("complete-thread")).toHaveLength(0);
+    expect(service.get("complete-thread")?.state).toBe("idle");
+    expect(sessions).toHaveLength(0);
+  });
+});
