@@ -7,7 +7,7 @@ import { parseRunKey } from "./agent-runs";
 import { AgentHost } from "./agent-hosts";
 import { ORCHESTRATOR_CATALOG, OrchestratorClient, catalogAgentType, createSharedImageGenerationService, isCoreId, type CoreAgent, type CoreId, type SharedImageGenerationService, type PlanUsageSnapshot } from "pi-orchestrator/api";
 import { SessionCores } from "./session-cores";
-import { createWorkspaceAdmission } from "./workspace-admission";
+import { createWorkspaceAdmission } from "pi-orchestrator/api";
 import { InlineImages } from "./inline-images";
 import { planCards } from "./catalog-presentation";
 import { readMachineUsage } from "./machine-usage";

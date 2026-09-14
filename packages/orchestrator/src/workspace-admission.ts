@@ -13,6 +13,8 @@ export type WorkspaceAdmissionErrorCode =
   | "relative_workspace_root"
   | "workspace_root_unavailable"
   | "workspace_root_not_directory"
+  | "invalid_cwd"
+  | "relative_cwd"
   | "invalid_workspace_id"
   | "unknown_workspace_id"
   | "cwd_unavailable"
@@ -36,7 +38,11 @@ export interface AdmittedWorkspace {
   workspace: ConfiguredWorkspace;
 }
 
-export interface WorkspaceAdmission {
+export interface CwdAdmission {
+  resolveCwd(cwd: unknown): WorkspaceAdmissionResult<string>;
+}
+
+export interface WorkspaceAdmission extends CwdAdmission {
   readonly workspaces: ReadonlyMap<string, ConfiguredWorkspace>;
   resolve(workspaceId: unknown): WorkspaceAdmissionResult<AdmittedWorkspace>;
 }
@@ -66,6 +72,25 @@ function contains(root: string, cwd: string): boolean {
   return child === "" || (!isAbsolute(child) && child !== ".." && !child.startsWith(`..${sep}`));
 }
 
+function absoluteCwd(cwd: unknown): WorkspaceAdmissionResult<string> {
+  if (typeof cwd !== "string" || !cwd.trim() || cwd.includes("\0")) return { ok: false, error: {
+    code: "invalid_cwd", message: "Session cwd must be an absolute directory path",
+  } };
+  if (!isAbsolute(cwd)) return { ok: false, error: {
+    code: "relative_cwd", message: `Session cwd must be absolute, not a workspace id or relative path: ${cwd}`, path: cwd,
+  } };
+  return directory(cwd, false);
+}
+
+export function createCwdAdmission(configuration: string | undefined): WorkspaceAdmissionResult<CwdAdmission> {
+  if (configuration === undefined) return { ok: true, value: { resolveCwd: absoluteCwd } };
+  let definitions: unknown;
+  try { definitions = JSON.parse(configuration); } catch {
+    return { ok: false, error: { code: "invalid_workspace_config", message: "PI_REMOTE_WORKSPACES must contain valid workspace configuration JSON" } };
+  }
+  return createWorkspaceAdmission(definitions);
+}
+
 export function createWorkspaceAdmission(definitions: unknown): WorkspaceAdmissionResult<WorkspaceAdmission> {
   if (!Array.isArray(definitions)) return { ok: false, error: {
     code: "invalid_workspace_config", message: "Workspace configuration must be an array of { id, name, path } entries",
@@ -92,8 +117,23 @@ export function createWorkspaceAdmission(definitions: unknown): WorkspaceAdmissi
     workspaces.set(id, Object.freeze({ id, name, path: root.value }));
   }
   const roots = [...workspaces.values()].sort((a, b) => b.path.length - a.path.length);
+  function admit(cwd: string, preset?: ConfiguredWorkspace, workspaceId?: string): WorkspaceAdmissionResult<AdmittedWorkspace> {
+    // Keep the admitted roots fixed. Replacing a root with a symlink must not expand policy.
+    const workspace = preset ? (contains(preset.path, cwd) ? preset : undefined)
+      : roots.find(root => contains(root.path, cwd));
+    if (!workspace) return { ok: false, error: {
+      code: "outside_workspace", message: `Session cwd is outside configured workspace roots: ${cwd}`, workspaceId, path: cwd,
+    } };
+    return { ok: true, value: { cwd, workspace } };
+  }
   return { ok: true, value: {
     workspaces,
+    resolveCwd(cwd): WorkspaceAdmissionResult<string> {
+      const result = absoluteCwd(cwd);
+      if (!result.ok) return result;
+      const admitted = admit(result.value);
+      return admitted.ok ? { ok: true, value: admitted.value.cwd } : admitted;
+    },
     resolve(workspaceId): WorkspaceAdmissionResult<AdmittedWorkspace> {
       if (typeof workspaceId !== "string" || !workspaceId.trim() || workspaceId.includes("\0")) {
         return { ok: false, error: { code: "invalid_workspace_id", message: "A configured workspace id or absolute cwd is required" } };
@@ -104,14 +144,7 @@ export function createWorkspaceAdmission(definitions: unknown): WorkspaceAdmissi
       } };
       const result = directory(preset?.path ?? workspaceId, false, workspaceId);
       if (!result.ok) return result;
-      const cwd = result.value;
-      // Keep the admitted roots fixed. Replacing a root with a symlink must not expand policy.
-      const workspace = preset ? (contains(preset.path, cwd) ? preset : undefined)
-        : roots.find(root => contains(root.path, cwd));
-      if (!workspace) return { ok: false, error: {
-        code: "outside_workspace", message: `Session cwd is outside configured workspace roots: ${cwd}`, workspaceId, path: cwd,
-      } };
-      return { ok: true, value: { cwd, workspace } };
+      return admit(result.value, preset, workspaceId);
     },
   } };
 }

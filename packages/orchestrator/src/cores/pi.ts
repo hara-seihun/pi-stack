@@ -1,11 +1,15 @@
 import { createHash, randomUUID } from "node:crypto";
+import { existsSync } from "node:fs";
 import { join } from "node:path";
 import { catalogModel } from "../catalog.js";
+import type { CwdAdmission } from "../workspace-admission.js";
+import { piCwdAdmission, requirePiCwd } from "./pi-cwd.js";
 import { argument, type CoreAgent, type CoreCommand, type CoreOutput, type CoreSession,
   type CoreSessionOptions, type OpenCoreSession } from "./contracts.js";
 import { openPiNative } from "./pi-native.js";
 import { PiTreeStore } from "./pi-store.js";
-import { heartbeatPiWorkspace, preparePiWorkspace } from "./pi-workspace.js";
+import { assertPiSessionFile } from "./pi-session-file.js";
+import { heartbeatPiWorkspace, planPiWorkspace, preparePiWorkspace } from "./pi-workspace.js";
 import type { OpenPiNative, PiDelegate, PiNative, PiNode, PiToolsHost } from "./pi-types.js";
 
 const textError = (error: unknown) => error instanceof Error ? error.message : String(error);
@@ -14,6 +18,7 @@ const publicAgent = (node: PiNode): CoreAgent => ({ id: node.id, parentId: node.
 
 export class PiCoreSession implements CoreSession, PiToolsHost {
   private readonly store: PiTreeStore;
+  private readonly admission: CwdAdmission;
   private readonly native = new Map<string, PiNative>();
   private readonly opening = new Map<string, Promise<PiNative>>();
   private readonly settling = new Map<string, CoreOutput>();
@@ -33,10 +38,22 @@ export class PiCoreSession implements CoreSession, PiToolsHost {
 
   constructor(private readonly options: CoreSessionOptions, private readonly output: (event: CoreOutput) => void,
     private readonly exit: (code?: number) => void, private readonly openNative: OpenPiNative = openPiNative) {
+    this.admission = piCwdAdmission(options.env.PI_REMOTE_WORKSPACES);
+    this.options = { ...options, cwd: requirePiCwd(this.admission, options.cwd, "options.cwd") };
     this.store = new PiTreeStore(options.stateDir, options.sessionId);
   }
 
+  private validateNode(node: PiNode): void {
+    requirePiCwd(this.admission, node.cwd, `nodes[${node.id}].cwd`);
+    planPiWorkspace(node, this.admission);
+    if (existsSync(node.sessionFile)) {
+      requirePiCwd(this.admission, assertPiSessionFile(node.sessionFile).cwd, `${node.sessionFile} header.cwd`);
+    }
+  }
+
   async open(): Promise<this> {
+    // Validate the entire restored tree before any engine opens or saved state changes.
+    for (const node of this.store.nodes.values()) this.validateNode(node);
     let root = this.store.nodes.get(this.options.sessionId);
     const transferHash = this.options.transfer ? createHash("sha256").update(JSON.stringify(this.options.transfer)).digest("hex") : undefined;
     if (transferHash && root && transferHash !== this.store.transferHash) throw new Error("A different portable transfer requires a new Pi state directory");
@@ -47,6 +64,7 @@ export class PiCoreSession implements CoreSession, PiToolsHost {
           : argument(this.options.args, "--session") ?? join(this.options.stateDir, "root.jsonl"),
         state: "idle", busy: false, provider: argument(this.options.args, "--provider"),
         model: argument(this.options.args, "--model"), thinkingLevel: argument(this.options.args, "--thinking") };
+      this.validateNode(root);
       this.store.nodes.set(root.id, root);
       this.store.save();
     }
@@ -71,7 +89,7 @@ export class PiCoreSession implements CoreSession, PiToolsHost {
     this.store.save();
     this.heartbeat = setInterval(() => {
       for (const node of this.store.nodes.values()) if ((node.busy || node.work?.status === "running") && node.workspace) {
-        this.track(heartbeatPiWorkspace(node), node);
+        this.track(heartbeatPiWorkspace(node, this.admission), node);
       }
     }, 60_000);
     this.heartbeat.unref();
@@ -92,16 +110,18 @@ export class PiCoreSession implements CoreSession, PiToolsHost {
   private refresh(node: PiNode): void {
     const snapshot = this.native.get(node.id)?.snapshot();
     if (snapshot) Object.assign(node, { name: snapshot.name ?? node.name, nativeSessionId: snapshot.nativeSessionId, sessionFile: snapshot.sessionFile,
-      cwd: snapshot.cwd, model: snapshot.model, provider: snapshot.provider, thinkingLevel: snapshot.thinkingLevel });
+      cwd: requirePiCwd(this.admission, snapshot.cwd, `nodes[${node.id}].runtime.cwd`),
+      model: snapshot.model, provider: snapshot.provider, thinkingLevel: snapshot.thinkingLevel });
   }
   private async ensure(id: string): Promise<PiNative> {
+    const node = this.node(id);
+    this.validateNode(node);
     const existing = this.native.get(id);
     if (existing) return existing;
     const pending = this.opening.get(id);
     if (pending) return pending;
-    const node = this.node(id);
     const operation = (async () => {
-      await preparePiWorkspace(node);
+      await preparePiWorkspace(node, this.admission);
       this.store.save();
       const engine = await this.openNative(this.options, node, this, event => this.event(node, event), code => {
         if (this.closed || this.stopping.has(id)) return;
@@ -111,7 +131,9 @@ export class PiCoreSession implements CoreSession, PiToolsHost {
           this.exitCode = code ?? 0;
           void this.close().catch(error => this.output({ type: "core_error", error: textError(error) }));
         }
-      });
+      }, this.admission);
+      try { requirePiCwd(this.admission, engine.snapshot().cwd, `nodes[${node.id}].runtime.cwd`); }
+      catch (error) { await engine.close(); throw error; }
       this.native.set(id, engine);
       this.refresh(node);
       this.store.save();
@@ -300,14 +322,22 @@ export class PiCoreSession implements CoreSession, PiToolsHost {
   async delegate(parentId: string, requestId: string, request: PiDelegate): Promise<unknown> {
     if (this.closed || this.stopping.has(parentId)) throw new Error("Pi tree is stopping");
     const parent = this.node(parentId);
+    this.validateNode(parent);
+    const requestedCwd = request.cwd === undefined ? undefined
+      : requirePiCwd(this.admission, request.cwd, "delegation.cwd");
+    if (request.workspace) planPiWorkspace({ ...parent, workspace: request.workspace }, this.admission);
     const key = `${parentId}:${requestId}`;
     const previous = this.store.requests.get(key);
-    if (previous) return { agent: publicAgent(this.node(previous)), workId: requestId, reused: true };
+    if (previous) {
+      this.validateNode(this.node(previous));
+      return { agent: publicAgent(this.node(previous)), workId: requestId, reused: true };
+    }
     if (!request.task.trim()) throw new Error("A child task is required");
     let child = request.threadId ? this.node(request.threadId) : !request.newThread
       ? this.children(parentId).find(node => !node.busy && node.work?.delivered && !request.workspace && !request.cwd
         && (!request.model || node.model === (catalogModel(request.model)?.model ?? request.model.split("/").slice(1).join("/")))) : undefined;
     const reused = !!child;
+    if (child) this.validateNode(child);
     if (child && child.parentId !== parentId) throw new Error("Only a direct child can be continued");
     if (child && (child.busy || child.work && !child.work.delivered)) throw new Error("Child still owns unfinished work");
     if (!child) {
@@ -316,10 +346,11 @@ export class PiCoreSession implements CoreSession, PiToolsHost {
       if (!model && (!provider || !modelParts.length)) throw new Error(`Unknown child model: ${request.model}`);
       const hash = createHash("sha256").update(key).digest("hex");
       const id = `${hash.slice(0, 8)}-${hash.slice(8, 12)}-${hash.slice(12, 16)}-${hash.slice(16, 20)}-${hash.slice(20, 32)}`;
-      child = { id, parentId, name: `Pi child ${id.slice(0, 8)}`, cwd: request.cwd ?? parent.cwd,
+      child = { id, parentId, name: `Pi child ${id.slice(0, 8)}`, cwd: requestedCwd ?? parent.cwd,
         sessionFile: join(this.options.stateDir, "children", `${id}.jsonl`), state: "running", busy: true,
         provider: model?.provider ?? provider, model: model?.model ?? modelParts.join("/"),
         thinkingLevel: request.thinkingLevel ?? "high", workspace: request.workspace };
+      this.validateNode(child);
       this.store.nodes.set(id, child);
     }
     child.work = { id: requestId, task: request.task, status: "running" };
@@ -327,7 +358,7 @@ export class PiCoreSession implements CoreSession, PiToolsHost {
     this.store.requests.set(key, child.id); this.store.save(); this.observe(child);
     const target = child;
     this.track((async () => {
-      if (this.native.has(target.id)) await preparePiWorkspace(target);
+      if (this.native.has(target.id)) await preparePiWorkspace(target, this.admission);
       const engine = await this.ensure(target.id);
       if (this.closed || this.stopping.has(target.id)) return;
       await engine.command({ type: "prompt", id: requestId, message: request.task });

@@ -53,6 +53,16 @@ A completed child result remains in the tree until the parent's native transcrip
 
 For a requested workspace, the engine calls `agent-workspace create` with a deterministic child-specific name. Reopen heartbeats the registered path rather than cloning again. Active workspaces receive a heartbeat each minute. The worker releases its workspace after committing and transferring custody. The engine does not claim custody or discard unmerged changes for it.
 
+## Workspace admission
+
+[`workspace-admission.ts`](../src/workspace-admission.ts), exported through `pi-orchestrator/api`, owns directory canonicalization and configured-root containment for both Remote and native Pi. Remote may resolve a configured workspace ID. Native cwd values must be absolute paths, including saved root/child cwd, delegation input and native session headers. Symlinks are resolved before containment checks; files, missing directories and escapes fail with an error naming the field and admission code.
+
+`CoreSessionOptions.env.PI_REMOTE_WORKSPACES` carries the JSON workspace definitions. When present, every configured root must be an existing absolute directory, and every native cwd must remain within a configured root. Malformed JSON is an error. Remote must pass its effective definitions, including defaults. When the variable is absent, standalone Pi accepts any existing absolute cwd without requiring Remote configuration.
+
+Opening preflights all saved nodes before opening engines or saving the tree. Delegation validates input before accepting or replaying its receipt. Managed checkout preparation checks `workspace.root` before running `agent-workspace`, checks an existing `workspace.path`, and admits the resulting checkout again before storing it. Pool roots must already exist. A missing saved checkout is an error, not permission to recreate it. Session switching and JSONL import validate the target header cwd or an explicit absolute cwd override before replacing the current session.
+
+To repair rejected state, first quiesce its runtime writers and snapshot the affected files. Repair `sessions.workspace_id` in Remote's database to the intended configured ID or admitted absolute directory. In the root's `pi-tree.json`, repair each affected `nodes[].cwd`, `nodes[].workspace.root` and `nodes[].workspace.path` to the intended existing absolute directories. For each `nodes[].sessionFile`, repair an affected first-line native session header `cwd` to the intended absolute directory. Keep node/session IDs, transcript paths, messages, work, requests and dispatch receipts intact. Repair does not require deleting a tree, reseeding a conversation or replaying a prompt. Workspace admission constrains startup locations, not the filesystem access available to coding tools.
+
 ## Fleet context and accounting
 
 `--orchestrator-context` goes through [`isolatedCoreContext`](../src/host/isolated-context.ts). The adapter uses that owner's settings and resource loader, registers its providers with the SDK, applies its exact tool allowlist, and echoes the accepted contract as `get_state.context`. It does not add the ordinary context observer to the isolated extension list. Core delegation tools are not active unless the isolated contract explicitly supplies and selects them.
@@ -75,7 +85,7 @@ The native runtime supplies a session-local async environment with `PI_STACK_COR
 
 Child runtimes clear `PI_REMOTE_SESSION_ID`, `PI_REMOTE_CONTEXT_OWNER_PID` and `PI_REMOTE_MEETING_ID`. Reusing the root's Remote identity would write child context into the root's context mirror. Ordinary SDK resources remain available, but Remote meeting tools, meeting-instruction fetches and inline-image tags are not supplied to native children. Supporting those requires a core-aware Remote identity/context bridge, not a `createSession` call. PiStack observes child activity through the core event wire and can inspect its current context with `get_core_context`.
 
-External tool effects are not transactional. A crash can interrupt a tool after its effect but before its result is persisted; recovery cannot promise exactly-once external effects. There is no additional child scheduler or admission policy in PiStack, and this adapter does not implement a new budget or concurrency limit. Read tools page by entries rather than character chunks. Close and abort await native cleanup and therefore inherit the SDK's cleanup behavior for third-party extension resources.
+External tool effects are not transactional. A crash can interrupt a tool after its effect but before its result is persisted; recovery cannot promise exactly-once external effects. There is no additional child scheduler or quota-admission policy in PiStack, and this adapter does not implement a new budget or concurrency limit. Read tools page by entries rather than character chunks. Close and abort await native cleanup and therefore inherit the SDK's cleanup behavior for third-party extension resources.
 
 ## Focused checks
 

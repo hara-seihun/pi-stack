@@ -1,8 +1,8 @@
-import { afterEach, beforeEach, expect, test } from "bun:test";
+import { afterEach, beforeEach, expect, test } from "vitest";
 import { mkdirSync, mkdtempSync, realpathSync, renameSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { createWorkspaceAdmission, type WorkspaceAdmission, type WorkspaceAdmissionResult } from "./workspace-admission";
+import { createWorkspaceAdmission, type WorkspaceAdmission, type WorkspaceAdmissionResult } from "../src/workspace-admission.js";
 
 let base: string;
 let root: string;

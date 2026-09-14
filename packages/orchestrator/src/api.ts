@@ -11,6 +11,10 @@ export {
   type PlanMetric,
 } from "./catalog.js";
 export { DELEGATION_POLICY } from "./delegation-policy.js";
+export { createWorkspaceAdmission, createCwdAdmission,
+  type WorkspaceAdmission, type WorkspaceAdmissionResult, type WorkspaceAdmissionError,
+  type WorkspaceAdmissionErrorCode, type ConfiguredWorkspace, type AdmittedWorkspace, type CwdAdmission,
+} from "./workspace-admission.js";
 export { isCoreId, openCoreSession, readPortableConversation, writeCoreState,
   type CoreId, type CoreAgent, type CoreSession, type CoreSessionOptions, type PortableConversation } from "./cores/index.js";
 export type { LaneManifest, LaneSpec, LaneReadiness, Run, FleetModel, FleetDispatch, FleetResult } from "./domain.js";
