@@ -71,7 +71,8 @@ export function adoptImportProvenance(options: ImportProvenanceOptions): Result<
     const metadata: Record<string, ImportProvenanceMetadata> = {};
     const directories = new Map<string, string>();
     const sources: Source[] = [], natives = new Map<string, Native>(), scanned = new Set<string>();
-    const nativePaths = new Set<string>();
+    const nativePaths = new Set<string>(), messageKeys = new Set<string>();
+    let indexingNative = false;
     const candidates = new Map<string, Match[]>(), receipts = new Set<string>();
     const knownAgents: Row[] = [];
     const directoryPaths = new Set<string>();
@@ -86,14 +87,18 @@ export function adoptImportProvenance(options: ImportProvenanceOptions): Result<
     }
     function addMessage(value: Row, path: string, entryId: string) {
       if (typeof value.role !== "string") return;
-      const key = messageKey(value), list = candidates.get(key) ?? [];
+      const key = messageKey(value);
+      if (!messageKeys.has(key)) return;
+      const list = candidates.get(key) ?? [];
       list.push({ value: fingerprint(value), path, entryId }); candidates.set(key, list);
     }
     function matched(message: Row): Match | undefined { return candidates.get(messageKey(message))?.find(candidate => subset(fingerprint(message), candidate.value)); }
     function references(value: any): void {
       if (!value || typeof value !== "object") return;
+      if (!indexingNative && typeof value.role === "string" && value.content !== undefined) messageKeys.add(messageKey(value));
+      if (!indexingNative && value.type === "custom_message") messageKeys.add(messageKey({ role: "custom", content: value.content, customType: value.customType, details: value.details, timestamp: Date.parse(value.timestamp) }));
       for (const [key, item] of Object.entries(value)) {
-        if (["sessionFile", "nativeSessionFile", "sessionPath", "parentSession"].includes(key) && typeof item === "string" && isAbsolute(item) && existsSync(item)) addNative(item, false);
+        if (["sessionFile", "nativeSessionFile", "sessionPath", "parentSession"].includes(key) && typeof item === "string" && isAbsolute(item) && existsSync(item)) { if (indexingNative) addNative(item, false); else nativePaths.add(item); }
         else if (item && typeof item === "object") references(item);
       }
     }
@@ -167,6 +172,7 @@ export function adoptImportProvenance(options: ImportProvenanceOptions): Result<
     for (const directory of options.stateDirs ?? []) addDirectory(directory.threadId, directory.path);
     for (const [directory, owner] of directories) scan(directory, owner);
     if (!sources.length) return { ok: true, value: { removedFiles: [], metadata: {} } };
+    indexingNative = true;
     for (const thread of options.threads) addNative(thread.sessionFile, false);
     for (const path of options.nativeFiles ?? []) addNative(path, true);
     for (const path of nativePaths) addNative(path, false);
