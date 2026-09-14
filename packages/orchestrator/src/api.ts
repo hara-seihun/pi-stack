@@ -11,6 +11,9 @@ export {
   type PlanMetric,
 } from "./catalog.js";
 export { DELEGATION_POLICY } from "./delegation-policy.js";
+export { loadConfig } from "./config.js";
+export { modelBrokerUrl } from "./model-broker-contract.js";
+export type { OrchestratorConfig } from "./domain.js";
 export { isCoreId, openCoreSession, readPortableConversation, writeCoreState,
   type CoreId, type CoreAgent, type CoreSession, type CoreSessionOptions, type PortableConversation } from "./cores/index.js";
 export type { LaneManifest, LaneSpec, LaneReadiness, Run, FleetModel, FleetDispatch, FleetResult } from "./domain.js";
