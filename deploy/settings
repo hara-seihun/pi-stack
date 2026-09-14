@@ -11,10 +11,6 @@ export PI_STACK_ROOT_DIR=$root
 source "$root/deploy/lib"
 pi_stack_enter_deployment "$0" "$root" "$@"
 user=${1:-$(id -un)}
-if [[ $user != "$(id -un)" ]]; then
-  pi_stack_run_as "$user" "$0" "$user"
-  exit
-fi
 manifest="$root/config/packages.json"
 runtime=${PI_STACK_RUNTIME_DEST:-/srv/pi/runtime}
 orchestrator=${PI_STACK_ORCHESTRATOR_DEST:-/srv/pi/pi-orchestrator}
@@ -25,28 +21,36 @@ agent_dir=$(pi_stack_home "$user")/.pi/agent
 settings=$agent_dir/settings.json
 lockfile_module="$runtime/node_modules/@earendil-works/pi-coding-agent/node_modules/proper-lockfile/index.js"
 [[ -f $lockfile_module ]] || { echo "deploy Pi Runtime before settings" >&2; exit 66; }
-install -d -m 700 "$agent_dir"
-if [[ ! -e $settings ]]; then
-  printf '{}\n' > "$settings"
-  chmod 600 "$settings"
-fi
 host_packages="[]"
 if [[ -f $(pi_stack_host_file) ]]; then
   host_packages=$(pi_stack_host_value '[.packages[]? // empty]' | jq -c .)
 fi
 
-PI_STACK_MANIFEST="$manifest" \
-PI_STACK_HOST_PACKAGES="$host_packages" \
-PI_STACK_SETTINGS="$settings" \
-PI_STACK_LOCKFILE_MODULE="$lockfile_module" \
-PI_STACK_RUNTIME_DEST="$runtime" \
-PI_STACK_ORCHESTRATOR_DEST="$orchestrator" \
-PI_STACK_REMOTE_DEST="$remote" \
+# Send reviewed code and configuration over stdin. An ordinary account must
+# never need traversal permission on the administrator's source checkout.
+pi_stack_run_as "$user" env \
+  PI_STACK_MANIFEST_JSON="$(<"$manifest")" PI_STACK_HOST_PACKAGES="$host_packages" \
+  PI_STACK_SETTINGS="$settings" PI_STACK_LOCKFILE_MODULE="$lockfile_module" \
+  PI_STACK_RUNTIME_DEST="$runtime" PI_STACK_ORCHESTRATOR_DEST="$orchestrator" \
+  PI_STACK_REMOTE_DEST="$remote" PI_STACK_COMMIT="$(pi_stack_commit)" \
+  bash -s -- "$user" "$agent_dir" <<'ACCOUNT'
+set -euo pipefail
+cd "$HOME"
+user=$1
+agent_dir=$2
+settings=$PI_STACK_SETTINGS
+runtime=$PI_STACK_RUNTIME_DEST
+orchestrator=$PI_STACK_ORCHESTRATOR_DEST
+install -d -m 700 "$agent_dir"
+if [[ ! -e $settings ]]; then
+  printf '{}\n' > "$settings"
+  chmod 600 "$settings"
+fi
 node --input-type=module <<'NODE'
 import { randomUUID } from "node:crypto";
 import { existsSync, readFileSync, renameSync, rmSync, writeFileSync } from "node:fs";
 
-const manifest = JSON.parse(readFileSync(process.env.PI_STACK_MANIFEST, "utf8"));
+const manifest = JSON.parse(process.env.PI_STACK_MANIFEST_JSON);
 const roots = { "/srv/pi/runtime": process.env.PI_STACK_RUNTIME_DEST, "/srv/pi/pi-orchestrator": process.env.PI_STACK_ORCHESTRATOR_DEST, "/srv/pi/pi-remote": process.env.PI_STACK_REMOTE_DEST };
 const isExternalPackage = (source) => source.startsWith("npm:") || source.startsWith("git:") || source.includes("://");
 const deployedPath = (entry) => {
@@ -116,8 +120,9 @@ while IFS= read -r package; do
   # reviewed pin. Keeping them out of the deployment prevents a slow audit
   # endpoint from consuming the host release deadline.
   npm_config_audit=false npm_config_fund=false PI_CODING_AGENT_DIR="$agent_dir" "$runtime/node_modules/.bin/pi" install "$package"
-done < <(jq -r '.packages[].source | select(startswith("npm:") or startswith("git:") or contains("://"))' "$manifest")
+done < <(jq -r '.packages[].source | select(startswith("npm:") or startswith("git:") or contains("://"))' <<<"$PI_STACK_MANIFEST_JSON")
 
-expected=$(( $(jq '.packages | length' "$manifest") + $(jq 'length' <<<"$host_packages") ))
+expected=$(( $(jq '.packages | length' <<<"$PI_STACK_MANIFEST_JSON") + $(jq 'length' <<<"$PI_STACK_HOST_PACKAGES") ))
 jq -e --argjson expected "$expected" '.packages | length == $expected' "$settings" >/dev/null
-printf 'deployed Pi settings from %s for %s\n' "$(pi_stack_commit)" "$user"
+printf 'deployed Pi settings from %s for %s\n' "$PI_STACK_COMMIT" "$user"
+ACCOUNT
