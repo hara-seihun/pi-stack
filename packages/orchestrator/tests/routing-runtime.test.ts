@@ -167,7 +167,7 @@ console.log('all child accounts bound');
   finally {await rm(root,{recursive:true,force:true});}
 },7000);
 
-test('config-only broker discovery supports native startup, numbered model changes and plain CLI', async () => {
+test('config-only broker discovery supports native model changes with stale availability and plain CLI', async () => {
   const root = await mkdtemp(join(tmpdir(), 'pi-broker-startup-'));
   const fixture = join(root, 'fixture.mjs'), probe = join(root, 'probe.mjs');
   await writeFile(fixture, `
@@ -175,6 +175,7 @@ import assert from 'node:assert/strict';
 import {mkdirSync,writeFileSync} from 'node:fs';
 import {join} from 'node:path';
 import {openPiNative} from ${JSON.stringify(join(buildRoot,'compiled/cores/pi-native.js'))};
+import {ModelRuntime} from ${JSON.stringify(sdk)};
 import {modelBrokerUrl,loadConfig} from ${JSON.stringify(join(buildRoot,'compiled/api.js'))};
 import {Store} from ${JSON.stringify(join(buildRoot,'compiled/store.js'))};
 const root=process.env.HOME,agentDir=join(root,'agent');
@@ -184,6 +185,12 @@ writeFileSync(join(root,'.config/pi-orchestrator/config.json'),JSON.stringify({m
 assert.equal(process.env.PI_MODEL_BROKER_URL,undefined);
 assert.equal(modelBrokerUrl(),'http://127.0.0.1:2461');
 assert.equal(loadConfig().modelBrokerUrl,'http://127.0.0.1:2461');
+// Registration refreshes availability asynchronously. Hold its observation snapshot
+// empty while the actual provider catalog and authentication remain ready.
+ModelRuntime.prototype.getAvailableSnapshot=function(){return [];};
+const checkAuth=ModelRuntime.prototype.checkAuth;
+let refuseAuth=false;
+ModelRuntime.prototype.checkAuth=function(provider,options){return refuseAuth?Promise.resolve(undefined):checkAuth.call(this,provider,options);};
 const sessions=[],events=[];
 try {
   for(const parentId of [null,'parent']) {
@@ -196,9 +203,17 @@ try {
     assert.equal(session.snapshot().model,'gpt-6-astra');
     assert.equal(session.snapshot().thinkingLevel,'high');
     await session.command({type:'set_model',id:'select-'+id,provider:'openai-codex-10',modelId:'gpt-5.6-sol'});
-    assert.equal(events.find(event=>event.id==='select-'+id)?.success,true);
+    const reply=events.find(event=>event.id==='select-'+id);
+    assert.equal(reply?.success,true,JSON.stringify(reply));
     assert.equal(session.snapshot().provider,'openai-codex');
     assert.equal(session.snapshot().model,'gpt-5.6-sol');
+    refuseAuth=true;
+    await session.command({type:'set_model',id:'refused-'+id,provider:'openai-codex',modelId:'gpt-5.6-luna'});
+    const refused=events.find(event=>event.id==='refused-'+id);
+    assert.equal(refused?.success,false,JSON.stringify(refused));
+    assert.match(refused?.error??'',/No API key/);
+    assert.equal(session.snapshot().model,'gpt-5.6-sol');
+    refuseAuth=false;
   }
 } finally {for(const session of sessions)await session.close();}
 const store=Store.open(join(root,'.local/share/pi-orchestrator/ledger.sqlite3'));

@@ -183,12 +183,20 @@ export const openPiNative: OpenPiNative = async (options, node, tools, output, e
             return;
           }
           if (command.type === "set_model") {
-            const selection = resolveSessionModel(runtime.session.modelRuntime.getAvailableSnapshot(), String(command.provider), String(command.modelId), env);
+            const selection = resolveSessionModel(runtime.session.modelRuntime.getModels(), String(command.provider), String(command.modelId), env);
             if (!selection.ok) {
               output({ type: "response", id: command.id, command: command.type, success: false, error: selection.error });
               return;
             }
-            command = { ...command, provider: selection.model.provider };
+            try {
+              await runtime.session.setModel(selection.model);
+              output({ type: "response", id: command.id, command: command.type, success: true, data: selection.model });
+            } catch (error) {
+              output({ type: "response", id: command.id, command: command.type, success: false,
+                error: error instanceof Error ? error.message : String(error) });
+            }
+            checkpointPiSession(runtime.session.sessionManager);
+            return;
           }
           if (command.type === "abort") {
             generation++;
