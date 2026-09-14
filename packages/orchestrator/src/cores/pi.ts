@@ -52,8 +52,10 @@ export class PiCoreSession implements CoreSession, PiToolsHost {
   }
 
   async open(): Promise<this> {
-    // Validate the entire restored tree before any engine opens or saved state changes.
-    for (const node of this.store.nodes.values()) this.validateNode(node);
+    // Settled children may retain reclaimed checkouts; validate them when they are reopened.
+    for (const node of this.store.nodes.values()) {
+      if (node.id === this.options.sessionId || node.busy || node.work?.status === "running") this.validateNode(node);
+    }
     let root = this.store.nodes.get(this.options.sessionId);
     const transferHash = this.options.transfer ? createHash("sha256").update(JSON.stringify(this.options.transfer)).digest("hex") : undefined;
     if (transferHash && root && transferHash !== this.store.transferHash) throw new Error("A different portable transfer requires a new Pi state directory");

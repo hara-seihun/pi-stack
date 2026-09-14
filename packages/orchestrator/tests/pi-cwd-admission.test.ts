@@ -169,12 +169,14 @@ describe("Pi native cwd admission", () => {
     expect(relativeOpened).toEqual([]);
   });
 
-  it("validates every restored node, including idle children, before any engine opens or state is saved", async () => {
+  it.each(["busy", "running work"])("validates restored children with %s before any engine opens or state is saved", async active => {
     const { allowed, project, outside, stateDir } = temporaryLayout();
     const root = persistedNode("root", project, stateDir);
     const validChild = persistedNode("valid-child", allowed, stateDir, "root");
-    const invalidIdleChild = persistedNode("idle-child", outside, stateDir, "root");
-    const saved = tree(root, [validChild, invalidIdleChild]);
+    const invalidChild = persistedNode("active-child", outside, stateDir, "root");
+    if (active === "busy") invalidChild.busy = true;
+    else invalidChild.work = { id: "interrupted", task: "resume", status: "running" };
+    const saved = tree(root, [validChild, invalidChild]);
     const statePath = join(stateDir, "pi-tree.json");
     writeFileSync(statePath, saved);
     const opened: string[] = [];
@@ -190,6 +192,7 @@ describe("Pi native cwd admission", () => {
     const root = persistedNode("root", project, stateDir);
     const child = persistedNode("child", project, stateDir, "root");
     (invalidId === "root" ? root : child).cwd = "sibyl";
+    child.busy = true;
     const saved = tree(root, [child]);
     const path = join(stateDir, "pi-tree.json");
     writeFileSync(path, saved);
@@ -198,6 +201,36 @@ describe("Pi native cwd admission", () => {
       .rejects.toThrow(`nodes[${invalidId}].cwd: relative_cwd`);
     expect(opened).toEqual([]);
     expect(readFileSync(path, "utf8")).toBe(saved);
+  });
+
+  it.each(["cwd", "header"])("keeps the root operable when a settled child's %s names a reclaimed checkout", async staleField => {
+    const { allowed, project, stateDir } = temporaryLayout();
+    const reclaimed = join(allowed, "reclaimed-child");
+    const root = persistedNode("root", project, stateDir);
+    const child = persistedNode("child", staleField === "cwd" ? reclaimed : project, stateDir, "root");
+    child.work = { id: "completed", task: "done", status: "complete", result: "retained result", delivered: true };
+    if (staleField === "cwd") child.workspace = { repo: "fixture-repo", root: allowed, path: reclaimed };
+    mkdirSync(join(stateDir, "children"));
+    const history = `${JSON.stringify({ type: "session", version: 3, id: "native-child", cwd: reclaimed })}\n`;
+    writeFileSync(child.sessionFile, history);
+    const statePath = join(stateDir, "pi-tree.json");
+    writeFileSync(statePath, tree(root, [child]));
+    const { core, output, opened } = await openCore(options(project, stateDir, configured(allowed)));
+    await core.command({ type: "get_state", id: "root-operable" });
+    expect(output.at(-1)).toMatchObject({ id: "root-operable", success: true });
+    expect(opened).toEqual(["root"]);
+    const unchanged = readFileSync(statePath, "utf8");
+    const field = staleField === "cwd" ? "nodes[child].cwd" : `${child.sessionFile} header.cwd`;
+    await expect(core.read("child")).rejects.toThrow(`${field}: cwd_unavailable`);
+    await expect(core.delegate("root", "explicit-resume", { threadId: "child", task: "resume" }))
+      .rejects.toThrow(`${field}: cwd_unavailable`);
+    await expect(core.delegate("root", "automatic-reuse", { task: "resume" }))
+      .rejects.toThrow(`${field}: cwd_unavailable`);
+    expect(opened).toEqual(["root"]);
+    expect(existsSync(reclaimed)).toBe(false);
+    expect(readFileSync(statePath, "utf8")).toBe(unchanged);
+    expect(readFileSync(child.sessionFile, "utf8")).toBe(history);
+    expect(JSON.parse(unchanged).nodes.find((node: PiNode) => node.id === "child")).toEqual(child);
   });
 
   it("admits existing absolute cwd values and resumes a restored idle child", async () => {
