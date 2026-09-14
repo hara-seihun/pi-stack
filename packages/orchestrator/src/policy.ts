@@ -1,10 +1,10 @@
 import { completionFeedbackRefusal } from "./completion-feedback.js";
-import { catalogMeter } from "./catalog.js";
+import { admissionThinking, catalogMeter, type ModelCandidate } from "./catalog.js";
 import { reservationMatchesRun } from "./admission-reservation.js";
-import { allowsAccountUse, type BudgetClass, type OrchestratorConfig, type ProfileCandidate } from "./domain.js";
+import { allowsAccountUse, type BudgetClass, type OrchestratorConfig } from "./domain.js";
 import type { Store } from "./store.js";
 
-export type Assignment = ProfileCandidate & { readonly accountId:string; readonly meterAt?:number; };
+export type Assignment = ModelCandidate & { readonly accountId:string; readonly meterAt?:number; };
 export interface Refusal { readonly accountId:string; readonly reason:string; }
 export interface Capacity { readonly sessions:number; readonly spent:number; readonly meterAt?:number; readonly reason:string; }
 
@@ -71,8 +71,11 @@ export function accountCapacity(store:Store,accountId:string,budget:BudgetClass,
   return{sessions:boosted,spent,meterAt,reason:multiplier===1?reason:`${sessions} base × ${multiplier} = ${boosted} sessions; ${reason}`};
 }
 
-export function assign(store:Store,profile:string,budget:BudgetClass,cfg:OrchestratorConfig,now=Date.now(),pinnedAccount?:string,runId?:string):{assignment?:Assignment;refusals:Refusal[]}{
+export function assign(store:Store,profile:string,budget:BudgetClass,cfg:OrchestratorConfig,now=Date.now(),pinnedAccount?:string,runId?:string,execution:"user"|"root-repair"="user"):{assignment?:Assignment;refusals:Refusal[]}{
   if(store.control("launches")==="paused")return{refusals:[{accountId:"*",reason:"emergency halt"}]};
+  const repair=(runId===undefined?execution:store.run(runId)?.execution)==="root-repair";
+  if(!repair&&store.control("ordinary-launches")==="paused")return{refusals:[{accountId:"*",reason:"ordinary work paused"}]};
+  if(repair&&store.control("repair-owner")&&store.control("repair-owner")!==runId)return{refusals:[{accountId:"*",reason:"repair already owned"}]};
   if(store.activeSessionLeases(undefined,120_000,now).length>=cfg.maxConcurrentSessions)return{refusals:[{accountId:"*",reason:"machine session ceiling"}]};
   const candidates=cfg.profiles[profile];if(!candidates?.length)throw new Error(`unknown model profile ${profile}`);
   const refusals:Refusal[]=[];const choices:(Assignment&{spent:number})[]=[];
@@ -93,11 +96,15 @@ export function assign(store:Store,profile:string,budget:BudgetClass,cfg:Orchest
 
 export function assignCompletion(store:Store,runId:string,profile:string,cfg:OrchestratorConfig,now=Date.now()):{assignment?:Assignment;refusals:Refusal[]}{
   if(store.control("launches")==="paused")return{refusals:[{accountId:"*",reason:"emergency halt"}]};
+  if(store.control("ordinary-launches")==="paused")return{refusals:[{accountId:"*",reason:"ordinary work paused"}]};
   const requestId=store.control(`completion-run:${runId}`);
   const saved=requestId?store.control(`completion:${requestId}`):undefined;
   const retryAt=saved?JSON.parse(saved).record.retryAt:undefined;
   if(retryAt>now)return{refusals:[{accountId:"*",reason:`provider retry scheduled at ${retryAt}`} ]};
-  const candidates=cfg.profiles[profile];if(!candidates?.length)throw new Error(`unknown completion profile ${profile}`);
+  const run=store.run(runId);
+  const candidates=run?.provider&&run.model?[{provider:run.provider,model:run.model,thinking:run.thinking}]
+    :cfg.profiles[profile]?.map(candidate=>({...candidate,thinking:admissionThinking(candidate)}));
+  if(!candidates?.length)throw new Error(`unknown completion profile ${profile}`);
   const refusals:Refusal[]=[],choices:(Assignment&{spent:number;reserved:boolean})[]=[];
   for(const candidate of candidates){
     for(const account of store.accounts().filter(account=>account.provider===candidate.provider)){

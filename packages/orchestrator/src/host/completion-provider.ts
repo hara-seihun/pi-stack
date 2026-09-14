@@ -1,4 +1,4 @@
-import type { Api, Context, Model, Provider } from "@earendil-works/pi-ai";
+import type { Api, Context, Model, Provider, ThinkingLevel } from "@earendil-works/pi-ai";
 import { builtinProviders } from "@earendil-works/pi-ai/providers/all";
 import { createParser } from "eventsource-parser";
 import { providerOAuth } from "../auth/shared-oauth.js";
@@ -91,6 +91,7 @@ export async function executeCompletion(input: CompletionInput, run: Run, option
       ...auth,
       signal,
       transport: "sse",
+      reasoningEffort: run.thinking === "off" ? "none" : run.thinking as ThinkingLevel | undefined,
       maxRetries: 0,
       fetch: observedFetch,
       onPayload: payload => completionPayload(payload, input),

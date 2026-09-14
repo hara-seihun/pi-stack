@@ -51,7 +51,7 @@ describe("current orchestrator state",()=>{
 
   it("launches every Fable selection on Claude Fable 5.1",()=>{const anthropic=builtinProviders().find((provider)=>provider.id==="anthropic")!;const models=withCustomModels(anthropic).getModels();expect(models.some((model)=>model.id==="claude-fable-5")).toBe(true);expect(models.find((model)=>model.id==="claude-fable-5-1")?.cost.cacheRead).toBe(.25);expect(catalogModel("fable")?.model).toBe("claude-fable-5-1");});
 
-  it("offers strict Astra and Opus scheduling profiles",()=>{const profiles=loadConfig("/definitely/missing/pi-orchestrator-config.json").profiles;expect(profiles.astra).toEqual([{provider:"openai-codex",model:"gpt-6-astra",thinking:"xhigh"}]);expect(profiles.opus).toEqual([{provider:"anthropic",model:"claude-opus-5",thinking:"xhigh"}]);});
+  it("offers strict Astra and Opus scheduling profiles",()=>{const profiles=loadConfig("/definitely/missing/pi-orchestrator-config.json").profiles;expect(profiles.astra).toEqual([{provider:"openai-codex",model:"gpt-6-astra",thinking:"high"}]);expect(profiles.opus).toEqual([{provider:"anthropic",model:"claude-opus-5",thinking:"high"}]);});
 
   it("continues a provider-truncated turn even when rejected tool calls follow it",()=>{
     const prompt=outputLimitContinuation([
@@ -206,7 +206,7 @@ describe("current orchestrator state",()=>{
     mkdirSync(bin);writeFileSync(counter,"0\n");
     writeFileSync(join(bin,"systemctl"),`#!/bin/sh
 case "$*" in
-  *is-active*) n=$(cat ${JSON.stringify(counter)}); n=$((n+1)); printf '%s\\n' "$n" > ${JSON.stringify(counter)}; test "$n" -ge 3;;
+  *is-active*) n=$(cat ${JSON.stringify(counter)}); n=$((n+1)); printf '%s\\n' "$n" > ${JSON.stringify(counter)}; if test "$n" -ge 3; then exit 0; else exit 3; fi;;
   *start*) exit 0;;
   *) exit 0;;
 esac

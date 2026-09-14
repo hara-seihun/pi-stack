@@ -2,6 +2,7 @@ import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { builtinProviders } from "@earendil-works/pi-ai/providers/all";
+import { getSupportedThinkingLevels } from "@earendil-works/pi-ai";
 import { describe, expect, it } from "vitest";
 import { ORCHESTRATOR_CATALOG, catalogAgentType, catalogModel } from "../src/catalog.js";
 import { loadConfig } from "../src/config.js";
@@ -27,7 +28,7 @@ describe("shared model selection", () => {
       expect(model).toBeDefined();
       const physical = available.find(candidate => candidate.id === model.model);
       expect(physical).toBeDefined();
-      expect(physical!.thinkingLevelMap?.[model.thinking as "max" | "xhigh"]).toEqual(expect.any(String));
+      expect(getSupportedThinkingLevels(physical!)).toContain(model.thinking);
       expect(catalogAgentType(`openai-codex-12/${model.model}:high`).key).toBe(id);
       expect(catalogAgentType(id.toUpperCase()).key).toBe(id);
       for (const meter of ORCHESTRATOR_CATALOG.meters.filter(meter => meter.provider === model.provider)) {
@@ -56,7 +57,7 @@ describe("shared model selection", () => {
       } }));
       const configured = loadConfig(path).profiles;
       expect(configured.standard).toEqual(hostProfiles.standard);
-      expect(configured.review).toEqual(hostProfiles.review);
+      expect(configured.review).toEqual([{ provider: "openai-codex", model: "gpt-6-astra", thinking: "high" }]);
       expect(configured.expert).toBeUndefined();
       for (const id of [...openaiModels, "opus"]) {
         const { provider, model, thinking } = catalogModel(id)!;

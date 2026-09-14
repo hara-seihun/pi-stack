@@ -5,6 +5,7 @@ export async function piIsolatedContext(options: CoreSessionOptions, cwd: string
   environment: NodeJS.ProcessEnv, scope: AsyncLocalStorage<NodeJS.ProcessEnv>) {
   const raw = argument(options.args, "--orchestrator-context");
   if (raw === undefined) return undefined;
+  if (environment.PI_ORCHESTRATOR_EXECUTION === "root-repair") throw new Error("Root-repair workers require the full normal Pi context");
   // The isolated-context owner changes process cwd/environment. Fleet opens it
   // in a dedicated worker, and its extensions must see the scrubbed environment.
   for (const [key, value] of Object.entries(environment)) {

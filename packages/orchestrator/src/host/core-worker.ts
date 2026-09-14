@@ -15,6 +15,7 @@ export interface WorkerState extends Json {
 }
 
 export function coreOptions(run: Run, env: NodeJS.ProcessEnv): CoreSessionOptions {
+  if (run.execution === "root-repair" && run.context) throw new Error("Root-repair workers require the full normal Pi context");
   if (!run.coreStateDir) throw new Error("Run has no pinned core state directory; recover it with its recorded worker release");
   if (run.core !== undefined && run.core !== "pi") throw new Error("Run needs its saved conversation imported into Pi before reopening");
   const args = ["--provider", run.provider!, "--model", run.model!];
@@ -23,7 +24,7 @@ export function coreOptions(run: Run, env: NodeJS.ProcessEnv): CoreSessionOption
   if (run.context) args.push("--orchestrator-context", JSON.stringify(run.context));
   return {
     cwd: run.cwd, args, sessionId: run.id, stateDir: run.coreStateDir,
-    env: { ...env, PI_ORCHESTRATOR_CORE_USAGE: "worker", PI_ORCHESTRATOR_ASSIGNED: "1", PI_ORCHESTRATOR_RUN_ID: run.id,
+    env: { ...env, PI_ORCHESTRATOR_EXECUTION: run.execution ?? "user", PI_ORCHESTRATOR_CORE_USAGE: "worker", PI_ORCHESTRATOR_ASSIGNED: "1", PI_ORCHESTRATOR_RUN_ID: run.id,
       PI_ORCHESTRATOR_NATIVE_SESSION_ID: run.nativeSessionId, PI_ORCHESTRATOR_PROVIDER: run.provider,
       PI_ORCHESTRATOR_ACCOUNT_ID: run.accountId },
   };

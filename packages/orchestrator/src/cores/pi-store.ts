@@ -1,4 +1,5 @@
-import { closeSync, existsSync, fsyncSync, mkdirSync, openSync, readFileSync, renameSync, writeFileSync } from "node:fs";
+import { custodyMkdirSync as mkdirSync, custodyOpenSync as openSync } from "../shared-custody.js";
+import { closeSync, existsSync, fsyncSync, readFileSync, renameSync, writeFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 import type { PiNode } from "./pi-types.js";
 

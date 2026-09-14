@@ -1,5 +1,6 @@
+import { custodyMkdirSync as mkdirSync, custodyOpenSync as openSync } from "../shared-custody.js";
 import { createHash, randomUUID } from "node:crypto";
-import { closeSync, existsSync, fsyncSync, mkdirSync, openSync, readFileSync, renameSync, writeFileSync, writeSync } from "node:fs";
+import { closeSync, existsSync, fsyncSync, readFileSync, renameSync, writeFileSync, writeSync } from "node:fs";
 import { dirname, join } from "node:path";
 import type { ConversationSource, CoreAgent, CoreId, CoreOutput, PortableConversation } from "./contracts.js";
 

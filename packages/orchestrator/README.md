@@ -1,6 +1,6 @@
 # Pi Orchestrator
 
-Pi Orchestrator runs unattended agent cores against pooled subscription accounts. One daemon owns policy and SQLite state. Each admitted run gets a separate transient user systemd unit and keeps the release that launched it until the run ends.
+Pi Orchestrator runs unattended agent cores against pooled subscription accounts. One daemon owns policy and SQLite state. Each admitted run gets a separate transient systemd unit and keeps the release that launched it until the run ends. Ordinary workers use the daemon owner's user manager. Explicit repair lanes use uid0 system units.
 
 ## Runtime model
 
@@ -63,19 +63,17 @@ PI_ORCHESTRATOR_PORT
 
 The JSON config may set model `profiles`, `backgroundSpendFraction`, machine and account concurrency, meter age, reconciliation periods, stall limits, `taskManifest`, `authPath`, and `agentDir`. The strict `astra`, `sol`, `terra`, `luna`, and `opus` profiles are always available alongside configured profiles. Each selects exactly one catalog model, even if a local profile uses the same name.
 
-The [shared catalog](src/catalog.ts) maps Astra to `openai-codex/gpt-6-astra` and Sol, Terra, and Luna to `openai-codex/gpt-5.6-sol`, `gpt-5.6-terra`, and `gpt-5.6-luna`. All four share the Codex five-hour and weekly meters. Their strict profiles use the catalog's thinking defaults, `xhigh` for Astra and `max` for Sol, Terra, and Luna. Host-defined profiles can choose different thinking levels.
+The [shared catalog](src/catalog.ts) maps Astra to `openai-codex/gpt-6-astra` and Sol, Terra, and Luna to `openai-codex/gpt-5.6-sol`, `gpt-5.6-terra`, and `gpt-5.6-luna`. All four share the Codex five-hour and weekly meters. Every new Orchestrator agent and completion admission uses `high`, except catalog Luna uses `max`. This includes repair lanes, direct runs, waves and custom profiles. Profile settings cannot override admission thinking. Interactive Pi sessions retain their own thinking selection.
 
 `SUBAGENT_MODEL_DESCRIPTIONS`, exported through `pi-orchestrator/api`, contains Hara's four verbatim engineering-level descriptions and her classification/inference exception, supplied on September 11, 2026. Tool schemas share that text without adding a model-selection policy.
 
 Model availability does not assign a model to a lane. Autonomous coordinator selection belongs to the submitting application or host lane manifest, which can name `astra` or `sol`. Task workers can select any of the four. Pi Stack leaves configured profile candidate order and lane defaults unchanged, including Converge's. Without configured profiles, `standard` still tries Astra then Opus and `expert` tries Opus then Astra. These general scheduling profiles do not identify coordinator roles.
 
-Profile candidates retain their priority order. A candidate can replace `thinking` with `thinkingPair: ["high", "max"]` to assign equal numbers of new runs to those levels, in randomly ordered pairs. The first admission draws one level; the next admission of that profile/provider/model consumes the other. The pending level lives in the ledger's `control` table and commits atomically with the run and lease, so restarts, quota refusals and failed database transactions do not consume a slot. Different profiles and models have separate pairs. Existing and recovered runs retain their recorded level. Provider and account selection stay unchanged. Configuration changes require a daemon restart.
-
-For an experiment, record the activation time and compare new runs by `run.thinking`. `run.id` joins their token totals in `usage_hour`; session files retain the work and results. Equal admission counts do not imply equal concurrent counts or equal completion counts. A worker-launch failure remains an assigned trial and is recorded as such rather than silently replaced in the allocation.
+Profile candidates declare provider and model, retaining their priority order. The admission owner records thinking with the run and lease. Existing admitted runs keep their recorded level during recovery and retry; deploying this policy does not rewrite an in-flight turn. Provider and account selection stay unchanged. Configuration changes require a daemon restart. `run.thinking` exposes the selected level, and `run.id` joins its token totals in `usage_hour`.
 
 A lane manifest has `version: 2` and a `lanes` array. Every lane declares `id`, `prompt`, `cwd`, `profile`, and positive `weight`. Unknown fields are rejected, including worker targets.
 
-The manifest's optional `budget` is `background` by default. Setting it to `force` makes every lane use the existing urgent admission policy, without background pacing, reserve, meter-age or multiplier gates. This mode requires a non-empty `snapshotCommand`. Its current readiness decides whether another worker is needed; `ready: false` stops new workers until work appears again. Actual provider exhaustion, disabled or reserved accounts, cooldowns, account and machine ceilings, and global pause still apply. The daemon owns continuation, with no repeated waves or waiting model session. Manifest reload changes new admissions only. Each run records its selected budget, so existing runs retain their policy across restarts.
+The manifest's optional `budget` is `background` by default. Setting it to `force` makes every lane use the existing urgent admission policy, without background pacing, reserve, meter-age or multiplier gates. For ordinary lanes, this mode requires a non-empty `snapshotCommand`. Its current readiness decides whether another worker is needed; `ready: false` stops new workers until work appears again. Actual provider exhaustion, disabled or reserved accounts, cooldowns, account and machine ceilings, and global pause still apply. The daemon owns continuation, with no repeated waves or waiting model session. Manifest reload changes new admissions only. Each run records its selected budget, so existing runs retain their policy across restarts.
 
 Without a `snapshotCommand`, background lanes are continuously eligible. An optional command reports whether each queue has unclaimed work, never how many workers to run:
 
@@ -89,7 +87,46 @@ Without a `snapshotCommand`, background lanes are continuously eligible. An opti
 }
 ```
 
-The daemon validates the whole readiness snapshot. Every declared lane needs an explicit readiness value. A missing lane or failed probe reports a readiness error and prevents new lane admissions without interrupting already-assigned sessions. A readiness observation permits at most one launch per lane before the next 30-second refresh, allowing the worker to claim its task. Numerical counts are rejected. Lanes do not preallocate worker queues.
+The daemon validates the whole readiness snapshot. Every ordinary lane needs an explicit readiness value. A missing lane or failed probe reports a readiness error and prevents new ordinary lane admissions without interrupting already-assigned sessions. A readiness observation permits at most one launch per lane before the next 30-second refresh, allowing the worker to claim its task. Numerical counts are rejected. Lanes do not preallocate worker queues.
+
+## Root repair lanes
+
+A repair lane declares its own probe. It does not depend on the ordinary manifest's `snapshotCommand`, checkout admission, or readiness result:
+
+```json
+{
+  "id": "converge-repair",
+  "promptFile": "/usr/local/share/converge-repair/prompt.md",
+  "cwd": "/home/kenan",
+  "profile": "astra",
+  "weight": 1,
+  "repair": {
+    "readinessCommand": "sudo -n /usr/local/sbin/converge-repair probe"
+  }
+}
+```
+
+The command runs as the daemon owner and prints exactly `{ "revision": "host-state-version", "ready": true }`. Use explicit sudo in the command when the probe needs root. Each repair probe refreshes every 30 seconds, fails closed independently, and permits at most one admission per observation. Ordinary snapshots need not mention repair lanes. A repair-only manifest does not need `snapshotCommand`, even with `budget: "force"`.
+
+Repair always uses forced admission and full Pi context. It retains provider exhaustion, disabled-account, reservation, cooldown, account-capacity and machine-capacity gates. One durable `repair-owner` spans all repair lanes, including recovery and the interval between a terminal run report and its unit exiting. Ordinary workers need not drain before repair; pause ordinary admission when that is the intended operation. Direct runs and waves cannot request root. Waves from repair lanes are rejected.
+
+`pause --ordinary` sets `ordinary-launches=paused`; `resume --ordinary` clears it. This blocks ordinary lane admission, unassigned direct runs including existing queued requests, completions, and waiting external coordinators. Already-admitted ordinary turns continue. `pause` still sets the global `launches=paused` halt, which blocks both kinds of admission and worker process restarts. It does not kill a live turn. `abort RUN_ID` requests graceful cancellation; `kill RUN_ID` stops the recorded unit before marking the run aborted.
+
+To move from global halt into repair-only operation, set ordinary pause first:
+
+```bash
+pi-orchestrator pause --ordinary
+pi-orchestrator resume
+pi-orchestrator status
+```
+
+The HTTP controls are `POST /v1/control` with `{"key":"ordinary-launches","value":"paused"}` or `"enabled"`. The existing global control remains `launches`. Status reports `ordinaryLaunches`, `repairOwner`, per-lane `repairReadiness`, and the ordinary `readinessError` separately.
+
+The existing unprivileged daemon launches root workers with `sudo -n -- systemd-run --system --uid=0`. Stop, status, reset-failed and restart use `sudo -n -- systemctl --system`. The host must authorize these commands without a password. A failed sudo status check is an error, not evidence that the worker stopped. Root repair rejects the development process-launch mode. There is no second daemon or account registry.
+
+Creation records `run-execution:<id>` as `user` or `root-repair`; records without it are unprivileged. Admission pins the launch environment in `run-environment:<id>` alongside the account, release and unit. Changing or removing a lane cannot promote or demote its admitted workers. Recovery consults these records, not current lane metadata. Cross-release root recovery records the preceding unit in `run-retiring-unit:<id>` and stops it before starting the replacement, including when the daemon restarts during that transition.
+
+The pinned environment includes `HOME`, `PI_CODING_AGENT_DIR`, `PI_ORCHESTRATOR_AUTH`, `PI_ORCHESTRATOR_CONFIG`, `PI_ORCHESTRATOR_LEDGER`, and the user `XDG_RUNTIME_DIR` and `DBUS_SESSION_BUS_ADDRESS`. It also carries configured XDG paths, tool search paths, daemon address and tool-alert settings. Root workers receive the daemon's numeric `PI_ORCHESTRATOR_OWNER_UID` and `PI_ORCHESTRATOR_OWNER_GID` for shared file custody. They use the same pooled OAuth and SQLite account ledger as ordinary workers; `/root` needs no Pi configuration. [Runtime filesystem custody](../runtime/README.md#root-worker-filesystem-custody) covers session descendants, atomic settings/auth replacement, locks and SQLite files. Deploy the matching runtime dependency patch before Orchestrator; rebuilding Orchestrator alone does not patch Pi's native writers.
 
 ## Operations
 
@@ -101,6 +138,8 @@ pi-orchestrator abort RUN_ID
 pi-orchestrator kill RUN_ID
 pi-orchestrator pause
 pi-orchestrator resume
+pi-orchestrator pause --ordinary
+pi-orchestrator resume --ordinary
 pi-orchestrator boost openai-codex 3
 pi-orchestrator account import openai-codex-3 --provider openai-codex --credential-file credential.json
 pi-orchestrator account disable openai-codex-3
