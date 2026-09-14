@@ -414,7 +414,7 @@ import { updateDocument } from "./sync";
         }
         const conversation = lines.map((line) => `${line.role === "user" ? "User" : "Kenan"}: ${line.text.trim()}`).join("\n");
         delegation.text = ["Voice handoff", this.meetingContext?.(), conversation].filter(Boolean).join("\n\n");
-        const body = JSON.stringify({ requestId: delegation.requestId, text: delegation.text, delivery: "followUp", includeMeetingImages: Boolean(this.meetingContext) });
+        const body = JSON.stringify({ requestId: delegation.requestId, text: delegation.text, delivery: "queue", includeMeetingImages: Boolean(this.meetingContext) });
         const response = await this.request(API.sessionPrompt.path({ sessionId: this.sessionId }), {
           method: "POST", headers: { "content-type": "application/json" }, body,
         });

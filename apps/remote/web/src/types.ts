@@ -1,5 +1,5 @@
 export type {
-  Activity, AgentHostStatus, AgentRun, AgentRunEvent, Dashboard, DocumentUpdate, Governor, GovernorControls,
+  Activity, Dashboard, DocumentUpdate, Governor, GovernorControls,
   MachineActionState, PlanCard, QueuedMessage, Session, SlashCommand, SupervisorState, SyncRequest, SyncResponse,
   ThreadSettings, ThreadStart,
 } from "../../server/protocol";
