@@ -75,6 +75,7 @@ function resetGate(name: string) {
   rmSync(gatePath(name, "release"), { force: true });
 }
 
+// The fixture has paused, but its pipe output may still be in transit to the supervisor.
 async function waitForGate(name: string) {
   await waitFor(async () => existsSync(gatePath(name, "ready")), Boolean);
 }
@@ -1073,14 +1074,19 @@ describe("web and supervisor integration", () => {
       await api("PUT", `/v1/sessions/${id}/context`, { capturedAt: 100, context: { systemPrompt: "", tools: [], messages: [events[0].message] } });
       await api("POST", `/v1/sessions/${id}/prompt`, { requestId: crypto.randomUUID(), text: "native-progress-replay" });
       await waitForGate("native-thinking");
-      const thinking = (await api("GET", `/v1/sessions/${id}/events`)).value;
-      expect(thinking.session.activity).toBe("THINKING");
+      const thinking = await waitFor(
+        async () => (await api("GET", `/v1/sessions/${id}/events`)).value,
+        value => value.session.activity === "THINKING",
+      );
       expect(thinking.liveThinking).toBe("");
       const snapshot = async () => (await api("POST", "/v1/sync", { seq: 0, waitMs: 0, session: { id } })).value.session;
       expect(JSON.parse((await snapshot()).context.document).messages[0].content).toEqual([]);
       releaseGate("native-thinking");
       await waitForGate("native-tool");
-      const first = await snapshot();
+      const first = await waitFor(snapshot, value => {
+        const messages = JSON.parse(value.context.document).messages;
+        return messages.at(-1)?.content?.[0]?.partialOutput === events[2].partialResult.content[0].text;
+      });
       expect((await api("GET", `/v1/sessions/${id}`)).value.session.activity).toBe("WAITING_ON_TOOL");
       const messages = JSON.parse(first.context.document).messages;
       expect(messages.at(-1).content[0]).toMatchObject({ type: "toolCall", id: events[1].toolCallId, arguments: events[1].args,
