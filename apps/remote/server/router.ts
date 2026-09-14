@@ -121,7 +121,7 @@ async function proxy(person: Person, origin: string, req: Request, url: URL, sig
   const headers = new Headers(req.headers);
   for (const name of (headers.get("connection") ?? "").split(",")) if (name.trim()) headers.delete(name.trim());
   for (const name of [...headers.keys()]) {
-    if (HOP_BY_HOP.has(name) || ["host", "cookie", "authorization", "forwarded"].includes(name) || name.startsWith("x-forwarded-") || name.startsWith("x-pi-remote-")) headers.delete(name);
+    if (HOP_BY_HOP.has(name) || ["host", "cookie", "authorization", "forwarded", "referer"].includes(name) || name.startsWith("x-forwarded-") || name.startsWith("x-pi-remote-")) headers.delete(name);
   }
   headers.set("x-pi-remote-user", person.user);
   const query = new URLSearchParams(url.search);

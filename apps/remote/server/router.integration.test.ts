@@ -33,7 +33,7 @@ beforeAll(async () => {
     remoteCalls++;
     const url = new URL(req.url);
     if (url.pathname === "/v1/redirect") return Response.redirect("https://example.org");
-    return Response.json({ path: url.pathname, query: url.search, user: req.headers.get("x-pi-remote-user"), session: req.headers.get("x-pi-remote-session"), authorization: req.headers.get("authorization"), cookie: req.headers.get("cookie") });
+    return Response.json({ path: url.pathname, query: url.search, user: req.headers.get("x-pi-remote-user"), session: req.headers.get("x-pi-remote-session"), authorization: req.headers.get("authorization"), cookie: req.headers.get("cookie"), referer: req.headers.get("referer") });
   } });
   supervisors.push(remote);
   writeFileSync(join(root, "host.json"), JSON.stringify({ environments: [
@@ -59,6 +59,10 @@ case "$1" in
 esac
 `);
   chmodSync(join(bin, "systemctl"), 0o755);
+  await startRouter();
+});
+
+async function startRouter() {
   router = Bun.spawn([process.execPath, join(import.meta.dir, "router.ts")], {
     stdout: "ignore", stderr: "pipe",
     env: { ...process.env, PATH: `${bin}:${process.env.PATH ?? ""}`, PI_REMOTE_ROUTER_PORT: String(port), PI_REMOTE_PERSONS_DIR: persons, PI_STACK_HOST_FILE: join(root, "host.json"), PI_REMOTE_KEY_DIR: keys, PI_REMOTE_UNLOCK_TIMEOUT_MS: "300" },
@@ -70,7 +74,7 @@ esac
   }
   router.kill();
   throw new Error(`router did not start: ${await new Response(router.stderr as ReadableStream).text()}`);
-});
+}
 afterAll(async () => {
   router?.kill();
   await router?.exited;
@@ -130,9 +134,9 @@ test("each person's discovery is policy controlled; open guests receive no remot
 test("remote requests, notifications and downloads share authorization without forwarding credentials", async () => {
   const owner = await token("kenan");
   for (const path of ["/v1/sessions", "/v1/notifications", "/v1/sessions/thread/files"]) {
-    const response = await fetch(`${base}/v1/remotes/lab${path}?session=${owner}&user=kenan&path=%2Ftmp%2Fa`, { headers: { authorization: "Bearer private", cookie: "secret=value" } });
+    const response = await fetch(`${base}/v1/remotes/lab${path}?session=${owner}&user=kenan&path=%2Ftmp%2Fa`, { headers: { authorization: "Bearer private", cookie: "secret=value", referer: `${base}/v1/file?session=${owner}` } });
     expect(response.status).toBe(200);
-    expect(await response.json()).toEqual({ path, query: "?path=%2Ftmp%2Fa", user: "kenan", session: null, authorization: null, cookie: null });
+    expect(await response.json()).toEqual({ path, query: "?path=%2Ftmp%2Fa", user: "kenan", session: null, authorization: null, cookie: null, referer: null });
     expect(response.headers.get("referrer-policy")).toBe("no-referrer");
   }
   expect((await request("/v1/remotes/lab/v1/redirect", owner)).status).toBe(502);
@@ -154,4 +158,15 @@ test("lock requires proof and revokes every session for that person only", async
   expect((await request("/v1/sessions", sybil, "sybil")).status).toBe(200);
   expect((await unlock("kenan", "wrong-key")).status).toBe(400);
   expect(existsSync(join(keys, "kenan"))).toBe(false);
+});
+
+
+test("router restart invalidates tokens but reuses the existing folder identity proof", async () => {
+  const owner = await token("kenan");
+  router.kill();
+  await router.exited;
+  await startRouter();
+  expect((await request("/v1/remotes/lab/v1/sessions", owner, "kenan")).status).toBe(423);
+  expect((await unlock("kenan", "wrong-key-after-restart")).status).toBe(403);
+  expect((await request("/v1/remotes/lab/v1/sessions", await token("kenan"), "kenan")).status).toBe(200);
 });
