@@ -1,7 +1,7 @@
-import type { EnvironmentEndpoint } from "../../server/environments";
+import type { EnvironmentEndpoint } from "../../server/protocol";
 
 export interface RouterIdentity { user: string; session: string }
-export type Endpoint = Omit<EnvironmentEndpoint, "upstreams">;
+export type Endpoint = EnvironmentEndpoint;
 type StorageAccess = Pick<Storage, "getItem" | "setItem" | "removeItem">;
 
 export class RouterAuth {

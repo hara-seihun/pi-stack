@@ -1,13 +1,8 @@
 import { existsSync, readFileSync } from "node:fs";
 import type { Person } from "./persons";
+import type { EnvironmentEndpoint as PublicEndpoint } from "./protocol";
 
-export type EnvironmentEndpoint = {
-  id: string;
-  name: string;
-  icon?: string;
-  baseUrl: string;
-  upstreams?: Record<string, string>;
-};
+export type EnvironmentEndpoint = PublicEndpoint & { upstreams?: Record<string, string> };
 
 export function ownEnvironment(environment: Record<string, unknown> = process.env) {
   return { id: String(environment.PI_REMOTE_ENVIRONMENT_ID ?? "local"), name: String(environment.PI_REMOTE_ENVIRONMENT_NAME ?? "Local"), baseUrl: "" };
