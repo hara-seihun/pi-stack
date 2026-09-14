@@ -2,12 +2,15 @@
 import { createHash, randomUUID } from "node:crypto";
 import {
   closeSync,
+  readSync,
+  fstatSync,
   copyFileSync,
   existsSync,
   fsyncSync,
   mkdirSync,
   openSync,
   readFileSync,
+  readdirSync,
   renameSync,
   rmSync,
   writeFileSync,
@@ -15,6 +18,7 @@ import {
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { spawnSync } from "node:child_process";
+import { policy, stallReason, runnable, repairId, repairUnit, repairPrompt } from "./publication-control.mjs";
 
 const repositoryUrl = "https://github.com/hara-seihun/pi-stack.git";
 const canonicalRepository = process.env.PI_STACK_PUBLICATION_REPOSITORY ?? "/home/kenan/projects/pi-stack";
@@ -29,14 +33,20 @@ const checkout = join(stateRoot, "repository");
 const threadExecutionContract = "unified-threads-v1";
 const threadExecutionActivationPath = join(contractRoot, `${threadExecutionContract}.json`);
 const self = fileURLToPath(import.meta.url);
+const repairRoot = join(stateRoot, "repairs");
+const repairPolicyPath = join(stateRoot, "repair-policy.json");
+let activeRequest;
+let activeLog;
+let trackingCommand = false;
 
 function usage() {
   process.stderr.write(`usage:
   deploy/publication install
   deploy/publication submit SHA
   deploy/publication inspect REQUEST
-  deploy/publication retry REQUEST
   deploy/publication cancel REQUEST
+  deploy/publication repair REQUEST
+  deploy/publication submit SHA --repair-of REQUEST
   deploy/publication report REQUEST [REMOTE_URL SESSION_ID]
   deploy/publication gate-status
 
@@ -45,9 +55,18 @@ The installed systemd user service also invokes the internal enqueue and drain c
 
 function commandResult(command, args, options = {}) {
   const timeoutSeconds = options.timeoutSeconds ?? 60;
+  const tracked = activeRequest && !trackingCommand;
+  if (tracked) {
+    trackingCommand = true;
+    const startedAt = new Date().toISOString();
+    activeRequest.progress = { step: activeRequest.step, command, args, cwd: options.cwd,
+      startedAt, deadlineAt: new Date(Date.now() + timeoutSeconds * 1000).toISOString(), log: activeLog };
+    writeRequest(activeRequest);
+    trackingCommand = false;
+  }
   const invocation = spawnSync(
     "timeout",
-    ["--foreground", "--kill-after=10s", `${timeoutSeconds}s`, command, ...args],
+    ["--kill-after=10s", `${timeoutSeconds}s`, command, ...args],
     {
       cwd: options.cwd,
       encoding: "utf8",
@@ -56,6 +75,11 @@ function commandResult(command, args, options = {}) {
       stdio: options.stdio ?? [options.input === undefined ? "ignore" : "pipe", "pipe", "pipe"],
     },
   );
+  if (tracked) {
+    activeRequest.progress.completedAt = new Date().toISOString();
+    activeRequest.progress.deadlineAt = new Date(Date.now() + policy.betweenStepsMs).toISOString();
+    writeRequest(activeRequest);
+  }
   return {
     ok: invocation.status === 0,
     status: invocation.status ?? 1,
@@ -75,7 +99,7 @@ function checked(command, args, options = {}) {
 }
 
 function ensureState() {
-  for (const path of [stateRoot, requestRoot, logRoot, proofRoot, contractRoot]) mkdirSync(path, { recursive: true, mode: 0o700 });
+  for (const path of [stateRoot, requestRoot, logRoot, proofRoot, contractRoot, repairRoot]) mkdirSync(path, { recursive: true, mode: 0o700 });
 }
 
 function syncDirectory(path) {
@@ -126,19 +150,21 @@ function validateSha(value) {
 
 function installFrom(sourceRoot) {
   const commandSource = join(sourceRoot, "deploy/publication");
-  const serviceSource = join(sourceRoot, "deploy/systemd/pi-stack-publication.service");
-  const timerSource = join(sourceRoot, "deploy/systemd/pi-stack-publication.timer");
-  for (const path of [commandSource, serviceSource, timerSource]) {
+  const unitNames = ["pi-stack-publication.service", "pi-stack-publication.timer", "pi-stack-publication.path",
+    "pi-stack-publication-watchdog.service", "pi-stack-publication-watchdog.timer", "pi-stack-publication-repair@.service", "pi-stack-publication-notices.service"];
+  const moduleSource = join(sourceRoot, "deploy/publication-control.mjs");
+  for (const path of [commandSource, moduleSource, ...unitNames.map(name => join(sourceRoot, "deploy/systemd", name))]) {
     if (!existsSync(path)) throw new Error(`publication installation source is missing: ${path}`);
   }
   ensureState();
   mkdirSync(dirname(installedCommand), { recursive: true, mode: 0o750 });
   mkdirSync(userUnitRoot, { recursive: true, mode: 0o700 });
+  atomicWrite(join(dirname(installedCommand), "publication-control.mjs"), readFileSync(moduleSource), 0o644);
   atomicWrite(installedCommand, readFileSync(commandSource), 0o750);
-  atomicWrite(join(userUnitRoot, "pi-stack-publication.service"), readFileSync(serviceSource), 0o644);
-  atomicWrite(join(userUnitRoot, "pi-stack-publication.timer"), readFileSync(timerSource), 0o644);
+  for (const name of unitNames) atomicWrite(join(userUnitRoot, name), readFileSync(join(sourceRoot, "deploy/systemd", name)), 0o644);
+  if (!existsSync(repairPolicyPath)) atomicWrite(repairPolicyPath, JSON.stringify({ activatedAt: new Date().toISOString(), policy }));
   checked("systemctl", ["--user", "daemon-reload"]);
-  checked("systemctl", ["--user", "enable", "--now", "pi-stack-publication.timer"]);
+  checked("systemctl", ["--user", "enable", "--now", "pi-stack-publication.timer", "pi-stack-publication.path", "pi-stack-publication-watchdog.timer"]);
 }
 
 function install() {
@@ -151,7 +177,7 @@ function gitRoot() {
   return checked("git", ["rev-parse", "--show-toplevel"], { cwd: process.cwd() });
 }
 
-function submit(sourceArgument) {
+function submit(sourceArgument, repairedRequestId) {
   if (sourceArgument === undefined) throw new Error("submit requires an explicit source commit");
   const sourceRoot = gitRoot();
   const sourceSha = checked("git", ["rev-parse", "--verify", `${sourceArgument}^{commit}`], { cwd: sourceRoot });
@@ -160,9 +186,36 @@ function submit(sourceArgument) {
   if (!/(^|[:/])hara-seihun\/pi-stack(?:\.git)?$/.test(remote)) throw new Error(`origin is not hara-seihun/pi-stack: ${remote}`);
   if (!existsSync(installedCommand)) throw new Error(`publication owner is not installed at ${installedCommand}`);
 
-  const reporter = requesterFromEnvironment();
+  let repaired;
+  if (repairedRequestId) {
+    validateRequestId(repairedRequestId);
+    repaired = readRequest(repairedRequestId);
+    const repair = readRepair(repairedRequestId);
+    if (repair?.outcome?.status !== "source-fixed" || repair.outcome.sourceSha !== sourceSha)
+      throw new Error("Repaired submission requires its dedicated owner's source-fixed outcome and matching commit");
+    if (repaired.status !== "failed") throw new Error("Repaired submission requires a failed request");
+    if (sourceSha === repaired.sourceSha) throw new Error("Source repair requires a new commit");
+    if ((repaired.repairDepth ?? 0) >= policy.maxRepairDepth) throw new Error("Repair chain exhausted; report the remaining blocker");
+    checked("git", ["merge-base", "--is-ancestor", repaired.sourceSha, sourceSha], { cwd: sourceRoot });
+  }
+  ensureState();
+  if (!repaired) {
+    const existing = existingSource(sourceSha);
+    if (existing) {
+      if (existing.status === "failed") throw new Error(`${sourceSha} already failed in ${existing.requestId}; use repair ${existing.requestId}, not an unrepaired resubmission`);
+      process.stdout.write(`${JSON.stringify({ requestId: existing.requestId, sourceSha, status: existing.status, receipt: requestPath(existing.requestId), owner: existing.owner })}\n`);
+      return;
+    }
+  }
+  const reporter = repaired?.reporter ?? requesterFromEnvironment();
   if (reporter) remoteJson(reporter, "", "GET");
-  const requestId = `PUB-${randomUUID().replaceAll("-", "").slice(0, 24)}`;
+  const requestId = `PUB-${repaired ? createHash("sha256").update(`repair:${repairedRequestId}`).digest("hex").slice(0, 24) : randomUUID().replaceAll("-", "").slice(0, 24)}`;
+  if (existsSync(requestPath(requestId))) {
+    const existing = readRequest(requestId);
+    if (existing.sourceSha !== sourceSha) throw new Error("This repair already submitted another commit");
+    process.stdout.write(`${JSON.stringify({ requestId, sourceSha, status: existing.status, receipt: requestPath(requestId) })}\n`);
+    return;
+  }
   const sourceRef = `refs/heads/pi-stack-publications/${requestId}`;
   const pushed = commandResult("git", ["push", "--quiet", "origin", `${sourceSha}:${sourceRef}`], {
     cwd: sourceRoot,
@@ -171,7 +224,7 @@ function submit(sourceArgument) {
   });
   if (!pushed.ok) throw new Error(`failed to publish immutable source ref ${sourceRef}`);
 
-  const enqueued = commandResult(installedCommand, ["enqueue", requestId, sourceSha, sourceRef, ...(reporter ? [JSON.stringify(reporter)] : [])], {
+  const enqueued = commandResult(installedCommand, ["enqueue", requestId, sourceSha, sourceRef, JSON.stringify(reporter), ...(repaired ? [repairedRequestId] : [])], {
     timeoutSeconds: 30,
   });
   if (!enqueued.ok) {
@@ -180,16 +233,22 @@ function submit(sourceArgument) {
   process.stdout.write(enqueued.stdout);
 }
 
-function enqueue(requestId, sourceSha, sourceRef, reporterJson) {
+function enqueue(requestId, sourceSha, sourceRef, reporterJson, repairedRequestId) {
   validateRequestId(requestId);
   validateSha(sourceSha);
   if (sourceRef !== `refs/heads/pi-stack-publications/${requestId}`) throw new Error("source ref does not match request id");
   ensureState();
   const loadState = checked("systemctl", ["--user", "show", "pi-stack-publication.service", "-p", "LoadState", "--value"]);
   if (loadState !== "loaded") throw new Error("pi-stack-publication.service is not loaded");
-  checked("systemctl", ["--user", "is-active", "--quiet", "pi-stack-publication.timer"]);
+  checked("systemctl", ["--user", "is-active", "--quiet", "pi-stack-publication-watchdog.timer"]);
   const remoteLine = checked("git", ["ls-remote", repositoryUrl, sourceRef], { timeoutSeconds: 60 });
   if (remoteLine.split(/\s+/)[0] !== sourceSha) throw new Error(`remote source ref does not own ${sourceSha}`);
+  const duplicate = existingSource(sourceSha);
+  if (duplicate) {
+    if (duplicate.status === "failed") throw new Error(`Source already failed in ${duplicate.requestId}; a repair is required`);
+    process.stdout.write(`${JSON.stringify({ requestId: duplicate.requestId, sourceSha, status: duplicate.status, owner: duplicate.owner, receipt: requestPath(duplicate.requestId) })}\n`);
+    return;
+  }
   const path = requestPath(requestId);
   if (existsSync(path)) throw new Error(`publication request already exists: ${requestId}`);
   const now = new Date().toISOString();
@@ -206,21 +265,22 @@ function enqueue(requestId, sourceSha, sourceRef, reporterJson) {
     updatedAt: now,
     attempt: 0,
     failures: [],
-    reporter: reporterJson ? validateReporter(JSON.parse(reporterJson)) : null,
+    reporter: reporterJson && JSON.parse(reporterJson) ? validateReporter(JSON.parse(reporterJson)) : null,
+    ...(repairedRequestId ? { repairOf: repairedRequestId, repairId: repairId(repairedRequestId),
+      repairDepth: (readRequest(repairedRequestId).repairDepth ?? 0) + 1 } : {}),
   };
   atomicWrite(path, `${JSON.stringify(request, null, 2)}\n`);
+  atomicWrite(join(stateRoot, "wake"), `${now}\n`);
   const wake = commandResult("systemctl", ["--user", "start", "--no-block", "pi-stack-publication.service"]);
-  if (!wake.ok) {
-    request.wake = { status: "deferred-to-timer", at: new Date().toISOString(), error: wake.stderr.trim() || `exit ${wake.status}` };
-    writeRequest(request);
-  }
+  if (!wake.ok) atomicWrite(join(stateRoot, "wake-failure.json"), JSON.stringify({ requestId,
+    at: new Date().toISOString(), error: wake.stderr.trim() || `exit ${wake.status}` }));
   process.stdout.write(`${JSON.stringify({
     requestId,
     sourceSha,
     status: "queued",
     owner: request.owner,
     receipt: path,
-    wake: request.wake?.status ?? "started",
+    wake: wake.ok ? "started" : "watchdog-owned",
     reporting: request.reporter ? { status: "pending", ...request.reporter } : { status: "machine-inbox" },
   })}\n`);
 }
@@ -233,13 +293,20 @@ function inspect(requestId) {
 function retry(requestId) {
   validateRequestId(requestId);
   const request = readRequest(requestId);
-  if (request.status !== "failed") throw new Error(`${requestId} is ${request.status}, not failed`);
+  const repair = readRepair(requestId);
+  if (request.repairedRetry?.repairId === repair?.id) return;
+  if (request.status !== "failed" || request.repairedRetry || repair?.outcome?.status !== "infrastructure-fixed")
+    throw new Error("Retry requires the dedicated repair's infrastructure-fixed evidence and is allowed once");
+  request.repairedRetry = { repairId: repair.id, at: new Date().toISOString(), evidence: repair.outcome.evidence };
   request.status = "queued";
-  request.step = "queued-for-repair";
-  request.retryAt = new Date().toISOString();
+  request.recoveryAttempts = 0;
+  request.attemptLimit = request.attempt + 1;
+  delete request.blockedSince;
+  delete request.nextAttemptAt;
+  request.step = "queued-after-repair";
   writeRequest(request);
+  atomicWrite(join(stateRoot, "wake"), `${Date.now()}\n`);
   checked("systemctl", ["--user", "start", "--no-block", "pi-stack-publication.service"]);
-  process.stdout.write(`${JSON.stringify({ requestId, sourceSha: request.sourceSha, status: request.status, receipt: requestPath(requestId) })}\n`);
 }
 
 function cancellationPath(requestId) {
@@ -302,6 +369,8 @@ function runCapture(command, args, options = {}) {
 function updateBlocked(request, censuses, logPath) {
   request.status = "blocked";
   request.step = "pre-contract-runtime-gate";
+  request.blockedSince ??= new Date().toISOString();
+  request.nextAttemptAt = new Date(Date.now() + policy.blockedRetryMs).toISOString();
   request.blocker = {
     at: new Date().toISOString(),
     reason: "Fleet launches are held at their recorded maintenance pause. Existing Remote and fleet owners retain active work. Publication retries the census and final intake seal after they drain; queued input and saved history transfer without replay.",
@@ -312,23 +381,35 @@ function updateBlocked(request, censuses, logPath) {
   deliverNotice(request);
 }
 
-function updateFailure(request, message, logPath) {
+function logTail(path) {
+  if (!existsSync(path)) return "";
+  const fd = openSync(path, "r");
+  try {
+    const size = fstatSync(fd).size;
+    const buffer = Buffer.alloc(Math.min(size, 8000));
+    readSync(fd, buffer, 0, buffer.length, Math.max(0, size - buffer.length));
+    return buffer.toString("utf8");
+  } finally { closeSync(fd); }
+}
+
+function updateFailure(request, message, logPath, notify = true) {
   const failure = {
     at: new Date().toISOString(),
     attempt: request.attempt,
     step: request.step,
     message,
     log: logPath,
-    command: request.checks?.status === "running" ? request.checks.command : undefined,
-    excerpt: existsSync(logPath) ? readFileSync(logPath, "utf8").split("\n")
-      .filter(line => /\(fail\)|error:|Expected:|Received:|failed with exit|Error:/.test(line)).slice(-50).join("\n").slice(-8000) : "",
+    command: request.progress ? [request.progress.command, ...request.progress.args].join(" ") : request.checks?.command,
+    progress: request.progress,
+    excerpt: logTail(logPath),
   };
   if (request.checks?.status === "running") request.checks.status = "failed";
-  request.failures.push(failure);
+  (request.failures ??= []).push(failure);
   request.status = existsSync(cancellationPath(request.requestId)) ? "cancelled" : "failed";
   request.failure = failure;
   writeRequest(request);
-  deliverNotice(request);
+  ensureRepair(request);
+  if (notify) deliverNotice(request);
 }
 
 function noticeBody(request) {
@@ -338,13 +419,15 @@ function noticeBody(request) {
     request.integrationSha ? `Integration: ${request.integrationSha}` : undefined,
     `Step: ${request.step}`,
     `Status: ${request.status}`,
+    request.repairOf ? `Repairs: ${request.repairOf} via ${request.repairId}` : undefined,
+    readRepair(request.requestId) ? `Repair: ${JSON.stringify(readRepair(request.requestId))}` : undefined,
     ["failed", "cancelled"].includes(request.status) ? `Failure: ${request.failure.message}` : request.status === "blocked" ? request.blocker?.reason : undefined,
     request.status === "blocked" ? `Busy custody: ${JSON.stringify(request.blocker.hosts)}` : undefined,
     `Receipt: ${requestPath(request.requestId)}`,
     `Log: ${["failed", "cancelled"].includes(request.status) ? request.failure?.log : request.status === "blocked" ? request.blocker?.log : request.finalProof?.path}`,
     request.failure?.command ? `Command: ${request.failure.command}` : undefined,
     request.failure?.excerpt,
-    request.status === "failed" ? `Repair source defects in a new commit and submit that commit. Retry ${request.requestId} only after repairing an infrastructure failure of the unchanged source.` : undefined,
+    request.status === "failed" ? "The dedicated repair owner retains this failure. A source fix needs a new commit; an unchanged-source retry requires recorded infrastructure repair evidence." : undefined,
   ].filter(Boolean).join("\n");
 }
 
@@ -419,9 +502,28 @@ function deliverReport(request, key) {
   writeRequest(request);
 }
 
+function noticeKey(request) {
+  const repair = readRepair(request.requestId);
+  return (request.status === "failed" ? `failed:${request.failure.at}` : request.status)
+    + (repair ? `:${repair.status}:${repair.successor?.requestId ?? ""}:${repair.successor?.status ?? ""}` : "");
+}
+
+function reconcileNotices() {
+  const candidates = allRequests().filter(request => {
+    if (!["blocked", "failed", "published"].includes(request.status)) return false;
+    const key = noticeKey(request);
+    return request.alert?.key !== key || !["filed", "queued"].includes(request.alert?.status)
+      || request.reporter && (request.report?.key !== key || request.report.status !== "delivered");
+  });
+  candidates.sort((a, b) => (a.noticeCheckedAt ?? "").localeCompare(b.noticeCheckedAt ?? ""));
+  if (candidates[0]) deliverNotice(candidates[0]);
+}
+
 function deliverNotice(request) {
   if (!["blocked", "failed", "cancelled", "published"].includes(request.status)) return;
-  const key = request.status === "failed" ? `failed:${request.failure.at}` : request.status;
+  const key = noticeKey(request);
+  request.noticeCheckedAt = new Date().toISOString();
+  writeRequest(request);
   if (request.alert?.key !== key || !["queued", "filed"].includes(request.alert.status)) {
     request.alert = { key, status: "pending" };
     writeRequest(request);
@@ -617,11 +719,12 @@ function verifyRemotePeople(remoteHost, expected) {
   const script = String.raw`
 set -euo pipefail
 expected=$1
+source /srv/pi/pi-remote/deploy/lib
 people='[]'
 while IFS= read -r unit; do
   [[ -n $unit ]] || continue
   user=$(printf '%s' "$unit" | cut -d@ -f2 | cut -d. -f1)
-  health=$(curl -fsS --max-time 3 -H "x-pi-remote-user: $user" http://127.0.0.1:8788/v1/health)
+  health=$(pi_stack_supervisor_health "$user")
   [[ $(jq -r .releaseCommit <<<"$health") == "$expected" ]]
   properties=$(systemctl show "$unit" -p ExecStart -p ExecReload -p KillMode -p MemoryMax -p MemoryHigh -p PrivateMounts)
   people=$(jq -c --arg user "$user" --argjson health "$health" --arg properties "$properties" '. + [{user:$user,health:$health,effectiveUnit:$properties}]' <<<"$people")
@@ -634,8 +737,10 @@ printf '%s\n' "$people"
 function verifyGmktec(expected) {
   const remoteCommit = readFileSync("/srv/pi/pi-remote/.pi-stack-commit", "utf8").trim();
   const orchestratorCommit = readFileSync("/srv/pi/pi-orchestrator/.pi-stack-commit", "utf8").trim();
-  const voice = JSON.parse(runCapture("curl", ["-fsS", "--max-time", "3", "http://127.0.0.1:8796/status"], { timeoutSeconds: 10 }));
-  const health = JSON.parse(runCapture("curl", ["-fsS", "--max-time", "3", "-H", "x-pi-remote-user: kenan", "http://127.0.0.1:8788/v1/health"], { timeoutSeconds: 10 }));
+  const voice = JSON.parse(runCapture("sudo", ["-n", "curl", "-fsS", "--max-time", "3", "http://127.0.0.1:8796/status"], { timeoutSeconds: 10 }));
+  const supervisors = verifyRemotePeople(undefined, expected);
+  const health = supervisors.find(person => person.user === "kenan")?.health;
+  if (!health) throw new Error("GMKtec: kenan supervisor is not running");
   if (remoteCommit !== expected || orchestratorCommit !== expected || voice.releaseCommit !== expected) throw new Error("GMKtec deployed commit markers do not match integration");
   return {
     host: "gmktec",
@@ -645,7 +750,7 @@ function verifyGmktec(expected) {
     orchestratorCommit,
     voiceCommit: voice.releaseCommit,
     environmentId: health.environmentId,
-    supervisors: verifyRemotePeople(undefined, expected),
+    supervisors,
     units: unitStates(["pi-orchestrator@kenan.service", "pi-remote-router.service", "pi-remote@kenan.service", "pi-stack-voice.service"]),
   };
 }
@@ -1058,8 +1163,9 @@ set -euo pipefail
 expected=$1
 remote=$(< /srv/pi/pi-remote/.pi-stack-commit)
 orchestrator=$(< /srv/pi/pi-orchestrator/.pi-stack-commit)
-voice=$(curl -fsS --max-time 3 http://127.0.0.1:8796/status | jq -r .releaseCommit)
-environment=$(curl -fsS --max-time 3 http://127.0.0.1:8788/v1/health | jq -r .environmentId)
+source /srv/pi/pi-remote/deploy/lib
+voice=$(pi_stack_as_root curl -fsS --max-time 3 http://127.0.0.1:8796/status | jq -r .releaseCommit)
+environment=$(pi_stack_supervisor_health kenan | jq -r .environmentId)
 [[ $remote == "$expected" && $orchestrator == "$expected" && $voice == "$expected" && $environment == converge ]]
 units=(pi-orchestrator@kenan.service pi-remote-router.service pi-remote@kenan.service pi-stack-voice.service)
 for unit in "\${units[@]}"; do systemctl is-active --quiet "$unit"; done
@@ -1125,10 +1231,10 @@ function recordContractActivation(request) {
   }, null, 2)}\n`);
 }
 
-function recoverOutstandingCustody(request) {
+function recoverOutstandingCustody(request, status = request.status) {
   for (const [hostKey, remoteHost] of [["gmktec", undefined], ["converge", "converge-kenan"]]) {
     const restoringSeal = custodyNeedsRestore(request.bootstrap?.hosts?.[hostKey]);
-    const terminal = ["failed", "cancelled", "published"].includes(request.status) || existsSync(cancellationPath(request.requestId));
+    const terminal = ["failed", "cancelled", "published"].includes(status) || existsSync(cancellationPath(request.requestId));
     const maintenance = request.maintenance?.hosts?.[hostKey];
     const restoringMaintenance = terminal && maintenance && !["restored", "released"].includes(maintenance.state);
     if (!restoringSeal && !restoringMaintenance) continue;
@@ -1150,7 +1256,8 @@ function recoverOutstandingCustody(request) {
 }
 
 function processRequest(request) {
-  request.attempt += 1;
+  request.attempt = (request.attempt ?? 0) + 1;
+  activeRequest = request;
   request.status = "running";
   request.startedAt ??= new Date().toISOString();
   request.step = "starting";
@@ -1159,6 +1266,7 @@ function processRequest(request) {
   const attemptRoot = join(logRoot, request.requestId);
   mkdirSync(attemptRoot, { recursive: true, mode: 0o700 });
   const logPath = join(attemptRoot, `attempt-${request.attempt}.log`);
+  activeLog = logPath;
   appendLog(logPath, `[${new Date().toISOString()}] request=${request.requestId} source=${request.sourceSha} attempt=${request.attempt}\n`);
 
   try {
@@ -1300,6 +1408,8 @@ function processRequest(request) {
     if (request.android) rmSync(join(request.android.directory, request.android.release.fileName), { force: true });
     deliverNotice(request);
   } catch (error) {
+    const failedProgress = request.progress;
+    const failedStep = request.step;
     const restorationFailures = [];
     for (const [hostKey, remoteHost] of [["gmktec", undefined], ["converge", "converge-kenan"]]) {
       try {
@@ -1308,10 +1418,15 @@ function processRequest(request) {
       }
       catch (restoreError) { restorationFailures.push(`${hostKey}: ${restoreError instanceof Error ? restoreError.message : String(restoreError)}`); }
     }
+    request.progress = failedProgress;
+    request.step = failedStep;
     let message = error instanceof Error ? error.message : String(error);
     if (restorationFailures.length) message += `; intake restoration failed: ${restorationFailures.join("; ")}`;
     appendLog(logPath, `[${new Date().toISOString()}] failed step=${request.step}: ${message}\n`);
     updateFailure(request, message, logPath);
+  } finally {
+    activeRequest = undefined;
+    activeLog = undefined;
   }
 }
 
@@ -1323,33 +1438,304 @@ function gateStatus() {
   }, null, 2)}\n`);
 }
 
+function allRequests() {
+  return readdirSync(requestRoot).filter(name => /^PUB-[a-f0-9]{24}\.json$/.test(name))
+    .map(name => JSON.parse(readFileSync(join(requestRoot, name), "utf8")))
+    .sort((a, b) => (a.queuedAt ?? "").localeCompare(b.queuedAt ?? ""));
+}
+
+function existingSource(sourceSha) {
+  const matches = allRequests().filter(request => request.sourceSha === sourceSha);
+  return matches.find(request => request.status === "published") ?? matches.at(-1);
+}
+
+function repairPath(requestId) { return join(repairRoot, requestId, "receipt.json"); }
+function readRepair(requestId) {
+  return existsSync(repairPath(requestId)) ? JSON.parse(readFileSync(repairPath(requestId), "utf8")) : null;
+}
+function writeRepair(repair) {
+  repair.updatedAt = new Date().toISOString();
+  atomicWrite(repair.path, `${JSON.stringify(repair, null, 2)}\n`);
+}
+
+function ensureRepair(request) {
+  if (readRepair(request.requestId)) return;
+  const directory = join(repairRoot, request.requestId);
+  const exhausted = (request.repairDepth ?? 0) >= policy.maxRepairDepth;
+  writeRepair({ id: repairId(request.requestId), requestId: request.requestId, sourceSha: request.sourceSha,
+    integrationSha: request.integrationSha, failure: request.failure, status: exhausted ? "blocked" : "pending",
+    ...(exhausted ? { summary: "Automatic repair chain exhausted; Hara must assign the remaining blocker" } : {}),
+    createdAt: new Date().toISOString(), path: repairPath(request.requestId), requestPath: requestPath(request.requestId),
+    session: join(directory, "session.jsonl"), log: join(directory, "agent.log"), result: join(directory, "result.json"),
+    prompt: join(directory, "prompt.md"), unit: repairUnit(request.requestId), launchAttempts: 0 });
+}
+
+function requestRepair(requestId) {
+  validateRequestId(requestId);
+  const request = readRequest(requestId);
+  if (request.status !== "failed") throw new Error("Only failed requests need repair adoption");
+  ensureRepair(request);
+  checked("systemctl", ["--user", "start", "--no-block", "pi-stack-publication-watchdog.service"]);
+  process.stdout.write(`${JSON.stringify(readRepair(requestId))}\n`);
+}
+
+function serviceState(unit) {
+  return checked("systemctl", ["--user", "show", unit, "-p", "ActiveState", "--value"], { timeoutSeconds: 5 });
+}
+function serviceBusy(unit) { return ["active", "activating", "deactivating", "reloading"].includes(serviceState(unit)); }
+
+function failStalled(requestId, reason) {
+  const request = readRequest(requestId);
+  if (!["queued", "running", "recovering", "finalizing"].includes(request.status)) return;
+  const log = request.progress?.log ?? join(logRoot, requestId, `attempt-${request.attempt}.log`);
+  appendLog(log, `\n[${new Date().toISOString()}] watchdog: ${reason}\n`);
+  updateFailure(request, reason, log, false);
+}
+
+function watchdog() {
+  ensureState();
+  const activatedAt = existsSync(repairPolicyPath) ? JSON.parse(readFileSync(repairPolicyPath, "utf8")).activatedAt : new Date().toISOString();
+  for (const request of allRequests()) {
+    const reason = stallReason(request);
+    if (reason) {
+      checked("systemctl", ["--user", "stop", "pi-stack-publication.service"], { timeoutSeconds: 20 });
+      locked("worker", "fail-stalled", [request.requestId, reason]);
+    }
+    if (request.status === "failed" && request.failure?.at >= activatedAt) ensureRepair(request);
+  }
+  const queue = allRequests();
+  const idlePath = join(stateRoot, "worker-watch.json");
+  const idle = existsSync(idlePath) ? JSON.parse(readFileSync(idlePath, "utf8")) : {};
+  const waiting = queue.find(request => request.status === "queued");
+  const custodyOwners = queue.filter(request => Object.values(request.bootstrap?.hosts ?? {}).some(custodyNeedsRestore));
+  idle.blockedBy = custodyOwners.map(request => request.requestId);
+  if (waiting && custodyOwners.length === 0 && !queue.some(request => ["running", "recovering", "finalizing"].includes(request.status))) {
+    idle.since ??= new Date().toISOString();
+    if (Date.now() - Date.parse(idle.since) > policy.betweenStepsMs) {
+      checked("systemctl", ["--user", "stop", "pi-stack-publication.service"], { timeoutSeconds: 20 });
+      locked("worker", "fail-stalled", [waiting.requestId, "Queue made no progress for 90s; worker never claimed a request"]);
+      delete idle.since;
+    }
+  } else { delete idle.since; idle.wakeFailures = 0; }
+  atomicWrite(idlePath, JSON.stringify(idle));
+  const repairs = allRequests().map(request => readRepair(request.requestId)).filter(Boolean);
+  let busy = false;
+  for (const repair of repairs) {
+    if (repair.status === "submitted" && repair.successor) {
+      const successor = readRequest(repair.successor.requestId);
+      if (repair.successor.status !== successor.status) {
+        repair.successor = { ...repair.successor, status: successor.status, integrationSha: successor.integrationSha,
+          failure: successor.failure, publishedAt: successor.publishedAt };
+        writeRepair(repair);
+      }
+    }
+    if (repair.status === "ready-to-retry") {
+      if (locked("worker", "retry", [repair.requestId], true)) {
+        repair.status = "retry-submitted";
+        writeRepair(repair);
+      }
+    }
+    if (["launching", "running", "submitting"].includes(repair.status)) {
+      if (serviceBusy(repair.unit)) { busy = true; continue; }
+      const successorId = `PUB-${createHash("sha256").update(`repair:${repair.requestId}`).digest("hex").slice(0, 24)}`;
+      if (existsSync(requestPath(successorId))) {
+        const successor = readRequest(successorId);
+        repair.successor = { requestId: successorId, sourceSha: successor.sourceSha, receipt: requestPath(successorId) };
+        repair.status = "submitted";
+      } else if (readRequest(repair.requestId).repairedRetry?.repairId === repair.id) {
+        repair.status = "retry-submitted";
+      } else {
+        repair.status = "blocked";
+        repair.summary = "Repair service exited or was interrupted without a terminal receipt; inspect its saved session, agent log and unit result. No automatic replay.";
+        repair.unitResult = commandResult("systemctl", ["--user", "show", repair.unit, "-p", "Result", "-p", "ExecMainStatus"], { timeoutSeconds: 5 }).stdout;
+      }
+      writeRepair(repair);
+    }
+  }
+  const agentLock = commandResult("flock", ["--nonblock", "--conflict-exit-code", "75", join(stateRoot, "repair-agent.lock"), "true"], { timeoutSeconds: 2 });
+  if (!agentLock.ok && agentLock.status !== 75) throw new Error(`Cannot inspect repair-agent ownership: ${agentLock.stderr}`);
+  if (!busy && agentLock.ok) {
+    const repair = repairs.find(candidate => candidate.status === "pending");
+    if (repair) {
+      repair.launchAttempts += 1;
+      repair.status = "launching";
+      repair.launchedAt = new Date().toISOString();
+      writeRepair(repair);
+      const launch = commandResult("systemctl", ["--user", "start", "--no-block", repair.unit], { timeoutSeconds: 5 });
+      if (!launch.ok) {
+        repair.status = repair.launchAttempts >= policy.maxLaunchAttempts ? "blocked" : "pending";
+        repair.summary = `Could not start dedicated repair service: ${launch.stderr || launch.status}`;
+        writeRepair(repair);
+      }
+    }
+  }
+  // This wake is independent of the worker and also closes enqueue's start/exit race.
+  const current = allRequests();
+  const recoveryBlocked = current.some(request => (request.recoveryAttempts ?? 0) >= policy.maxAttempts
+    && Object.values(request.bootstrap?.hosts ?? {}).some(custodyNeedsRestore));
+  if (!recoveryBlocked && current.some(request => runnable(request) || ["running", "recovering", "finalizing"].includes(request.status)
+    || Object.values(request.bootstrap?.hosts ?? {}).some(custodyNeedsRestore))) {
+    const wake = commandResult("systemctl", ["--user", "start", "--no-block", "pi-stack-publication.service"], { timeoutSeconds: 5 });
+    idle.wakeFailures = wake.ok ? 0 : (idle.wakeFailures ?? 0) + 1;
+    idle.wakeError = wake.ok ? undefined : wake.stderr;
+    atomicWrite(idlePath, JSON.stringify(idle));
+    if (!wake.ok && idle.wakeFailures >= policy.maxLaunchAttempts && waiting) {
+      locked("worker", "fail-stalled", [waiting.requestId, `Worker could not start after ${idle.wakeFailures} attempts: ${wake.stderr}`]);
+    }
+  } else {
+    checked("systemctl", ["--user", "start", "--no-block", "pi-stack-publication-notices.service"], { timeoutSeconds: 5 });
+  }
+}
+
+function repairRun(requestId) {
+  validateRequestId(requestId);
+  const repair = readRepair(requestId);
+  if (!repair || repair.status !== "launching") return;
+  const attemptPath = join(dirname(repair.path), "attempt.json");
+  if (existsSync(attemptPath)) return;
+  atomicWrite(attemptPath, JSON.stringify({ repairId: repair.id, startedAt: new Date().toISOString(), session: repair.session }));
+  const request = readRequest(requestId);
+  repair.status = "running";
+  repair.startedAt = new Date().toISOString();
+  writeRepair(repair);
+  try {
+    try {
+      const workspace = JSON.parse(checked("agent-workspace", ["create", "--root", "/home/kenan/work/clones",
+        "--name", `publication-repair-${requestId}`, "--repo", checkout, "--owner", repair.id, "--mode", "writer", "--json"], { timeoutSeconds: 45 }));
+      repair.workspace = workspace.path;
+      writeRepair(repair);
+      if (!commandResult("git", ["cat-file", "-e", `${request.sourceSha}^{commit}`], { cwd: repair.workspace }).ok) {
+        checked("git", ["fetch", "--quiet", "origin", request.sourceRef], { cwd: repair.workspace });
+      }
+      checked("git", ["checkout", "--detach", request.sourceSha], { cwd: repair.workspace });
+    } catch (error) {
+      repair.workspaceError = error instanceof Error ? error.message : String(error);
+      writeRepair(repair);
+    }
+    atomicWrite(repair.prompt, repairPrompt(request, repair, installedCommand));
+    const fd = openSync(repair.log, "a", 0o600);
+    let result;
+    try {
+      result = commandResult(process.env.PI_STACK_PUBLICATION_PI ?? "/home/kenan/.local/bin/pi",
+        ["--print", "--mode", "json", "--model", "openai-codex/gpt-6-astra", "--thinking", "high",
+          "--session", repair.session, `@${repair.prompt}`],
+        { cwd: repair.workspace && existsSync(repair.workspace) ? repair.workspace : dirname(repair.path),
+          timeoutSeconds: policy.repairMs / 1000, stdio: ["ignore", fd, fd] });
+    } finally { closeSync(fd); }
+    if (!result.ok) throw new Error(`Repair agent exited ${result.status}; see ${repair.log}`);
+    if (!existsSync(repair.result)) throw new Error(`Repair agent returned without ${repair.result}`);
+    const outcome = JSON.parse(readFileSync(repair.result, "utf8"));
+    if (!["source-fixed", "infrastructure-fixed", "blocked"].includes(outcome.status) || !outcome.summary?.trim()) throw new Error("Repair result needs a status and cause/repair summary");
+    if (outcome.status !== "blocked" && (!outcome.evidence || !existsSync(outcome.evidence))) throw new Error("Repair result needs an existing focused proof receipt");
+    if (outcome.status !== "blocked") {
+      const evidenceSource = resolve(outcome.evidence);
+      const evidence = join(dirname(repair.path), "evidence");
+      atomicWrite(evidence, readFileSync(evidenceSource));
+      outcome.evidence = evidence;
+      outcome.evidenceSource = evidenceSource;
+      outcome.evidenceSha256 = sha256(evidence);
+    }
+    repair.outcome = outcome;
+    if (outcome.workspace) repair.workspace = resolve(outcome.workspace);
+    repair.status = outcome.status === "blocked" ? "blocked" : "submitting";
+    writeRepair(repair);
+    if (outcome.status === "source-fixed") {
+      validateSha(outcome.sourceSha);
+      if (!repair.workspace) throw new Error("Source repair must identify its registered workspace");
+      repair.successor = JSON.parse(checked(installedCommand, ["submit", outcome.sourceSha, "--repair-of", requestId],
+        { cwd: repair.workspace, timeoutSeconds: 90 }));
+      repair.status = "submitted";
+      writeRepair(repair);
+      checked("agent-workspace", ["release", "--path", repair.workspace], { timeoutSeconds: 10 });
+    } else if (outcome.status === "infrastructure-fixed") {
+      repair.status = "ready-to-retry";
+    }
+    repair.finishedAt = new Date().toISOString();
+    writeRepair(repair);
+  } catch (error) {
+    repair.status = "blocked";
+    repair.summary = error instanceof Error ? error.message : String(error);
+    repair.finishedAt = new Date().toISOString();
+    writeRepair(repair);
+  }
+  checked("systemctl", ["--user", "start", "--no-block", "pi-stack-publication-watchdog.service"], { timeoutSeconds: 5 });
+}
+
 function drain() {
   ensureState();
-  const allRequests = [];
-  for (const name of checked("find", [requestRoot, "-maxdepth", "1", "-type", "f", "-name", "PUB-*.json", "-printf", "%p\\n"]).split("\n")) {
-    if (name) allRequests.push(JSON.parse(readFileSync(name, "utf8")));
+  // Re-read after each request. A submission while this service is active needs no timer turn.
+  for (;;) {
+    const requests = allRequests();
+    let restorationBlocked = false;
+    for (const request of requests) {
+      if (!Object.values(request.bootstrap?.hosts ?? {}).some(custodyNeedsRestore) && !(["failed", "cancelled", "published"].includes(request.status) && Object.values(request.maintenance?.hosts ?? {}).some(host => !["restored", "released"].includes(host.state)))) continue;
+      if ((request.recoveryAttempts ?? 0) >= policy.maxAttempts) { restorationBlocked = true; continue; }
+      request.recoveryAttempts = (request.recoveryAttempts ?? 0) + 1;
+      const previousStatus = request.status;
+      request.status = "recovering";
+      activeRequest = request;
+      activeLog = request.failure?.log ?? join(logRoot, request.requestId, `attempt-${request.attempt}.log`);
+      writeRequest(request);
+      try {
+        recoverOutstandingCustody(request, previousStatus);
+        if (previousStatus === "recovering") updateFailure(request, "Interrupted host recovery completed; repair owns the next publication attempt", activeLog);
+        else { request.status = previousStatus; writeRequest(request); }
+      } catch (error) {
+        updateFailure(request, `Host custody recovery failed: ${error.message}`, activeLog);
+        restorationBlocked = true;
+      } finally { activeRequest = undefined; activeLog = undefined; }
+    }
+    if (restorationBlocked) return;
+    const cancelled = allRequests().find(candidate => !["published", "cancelled"].includes(candidate.status) && existsSync(cancellationPath(candidate.requestId)));
+    if (cancelled) { processRequest(cancelled); continue; }
+    const request = allRequests().find(candidate => runnable(candidate) || ["running", "recovering", "finalizing"].includes(candidate.status));
+    if (!request) return;
+    if (["running", "recovering", "finalizing"].includes(request.status)) {
+      failStalled(request.requestId, "Publication worker interrupted; retained host custody has been recovered. Repair required before retry.");
+      continue;
+    }
+    if ((request.attempt ?? 0) >= (request.attemptLimit ?? policy.maxAttempts)
+      || request.blockedSince && Date.now() - Date.parse(request.blockedSince) > policy.blockedLimitMs) {
+      updateFailure(request, "Publication progress budget exhausted", request.blocker?.log ?? join(logRoot, request.requestId, `attempt-${request.attempt}.log`));
+      continue;
+    }
+    processRequest(request);
   }
-  for (const request of allRequests) {
-    recoverOutstandingCustody(request);
-    if (!["published", "cancelled"].includes(request.status) && existsSync(cancellationPath(request.requestId))) processRequest(request);
-    deliverNotice(request);
-  }
-  const requests = allRequests.filter(request => ["queued", "running", "blocked", "finalizing"].includes(request.status));
-  requests.sort((left, right) => left.queuedAt.localeCompare(right.queuedAt));
-  if (requests.length > 0) processRequest(requests[0]);
+}
+
+function locked(name, operation, args = [], optional = false) {
+  ensureState();
+  const result = spawnSync("flock", ["--nonblock", "--conflict-exit-code", "75", "--close", join(stateRoot, `${name}.lock`),
+    process.execPath, self, `_${operation}`, ...args], { stdio: "inherit" });
+  if (result.status !== 0 && !(optional && result.status === 75)) throw new Error(`${operation}: ${result.status === 75 ? "publication owner is busy" : `exit ${result.status}`}`);
+  return result.status === 0;
 }
 
 function main() {
   const [operation, ...args] = process.argv.slice(2);
+  if (operation === "watchdog" && args.length === 0) return locked("watchdog", "watchdog", [], true);
+  if (operation === "_watchdog" && args.length === 0) return watchdog();
+  if (operation === "_drain" && args.length === 0) return drain();
+  if (operation === "_fail-stalled" && args.length === 2) return failStalled(...args);
+  if (operation === "notices" && args.length === 0) return locked("worker", "notices", [], true);
+  if (operation === "_notices" && args.length === 0) return reconcileNotices();
+  if (operation === "repair-run" && args.length === 1) return locked("repair-agent", "repair-run", args);
+  if (operation === "_repair-run" && args.length === 1) return repairRun(args[0]);
+  if (operation === "repair" && args.length === 1) return locked("worker", "repair", args);
+  if (operation === "_repair" && args.length === 1) return requestRepair(args[0]);
+  if (operation === "_retry" && args.length === 1) return retry(args[0]);
+  if (operation === "_report" && [1, 3].includes(args.length)) return report(...args);
   if (operation === "install" && args.length === 0) return install();
   if (operation === "submit" && args.length === 1) return submit(args[0]);
+  if (operation === "submit" && args.length === 3 && args[1] === "--repair-of") return submit(args[0], args[2]);
   if (operation === "inspect" && args.length === 1) return inspect(args[0]);
-  if (operation === "retry" && args.length === 1) return retry(args[0]);
+  if (operation === "retry") throw new Error("Blind retries are disabled; use repair REQUEST to assign its dedicated repair owner");
   if (operation === "cancel" && args.length === 1) return cancel(args[0]);
   if (operation === "gate-status" && args.length === 0) return gateStatus();
-  if (operation === "enqueue" && [3, 4].includes(args.length)) return enqueue(...args);
-  if (operation === "report" && [1, 3].includes(args.length)) return report(...args);
-  if (operation === "drain" && args.length === 0) return drain();
+  if (operation === "enqueue" && [3, 4, 5].includes(args.length)) return locked("intake", "enqueue", args);
+  if (operation === "_enqueue" && [3, 4, 5].includes(args.length)) return enqueue(...args);
+  if (operation === "report" && [1, 3].includes(args.length)) return locked("worker", "report", args);
+  if (operation === "drain" && args.length === 0) return locked("worker", "drain", [], true);
   usage();
   process.exitCode = 2;
 }

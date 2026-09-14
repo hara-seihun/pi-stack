@@ -92,8 +92,8 @@ export async function dispatch(argv:string[]):Promise<void>{
   }
   if(command==="run"||command==="wave"){
     const {named,positional}=flags(rest),count=positiveInteger(named.get("count")??"1","--count");
-    if(named.has("core"))throw new Error("--core is not supported");
-    if(named.has("profile"))throw new Error("Use --model instead of --profile");
+    const allowed=new Set(["count","force","background","model","thinking","speed",...(command==="run"?["prompt","cwd","title","parent"]:["lane"])]);
+    for(const key of named.keys())if(!allowed.has(key))throw new Error(`Unknown ${command} option --${key}`);
     const force=switchEnabled(named,"force"),background=switchEnabled(named,"background");
     if(force&&background)throw new Error("Choose --force or --background");
     const settings=threadSettings(named),admission=background?"background":"force";

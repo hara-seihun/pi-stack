@@ -1,70 +1,51 @@
 package works.kenan.piremote.kenan;
 
-import org.junit.Test;
-
-import java.io.BufferedReader;
 import java.io.IOException;
-import java.io.InputStreamReader;
-import java.net.InetAddress;
-import java.net.ServerSocket;
-import java.net.Socket;
-import java.nio.charset.StandardCharsets;
-import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.TimeUnit;
-
-import static org.junit.Assert.assertEquals;
-import static org.junit.Assert.assertThrows;
+import okhttp3.mockwebserver.MockResponse;
+import okhttp3.mockwebserver.MockWebServer;
+import okhttp3.mockwebserver.RecordedRequest;
+import org.junit.Rule;
+import org.junit.Test;
+import static org.junit.Assert.*;
 
 public class RemoteTransportTest {
-    @Test
-    public void acceptsTheConfiguredEnvironment() throws Exception {
-        RemoteTransport.verifyHealth("local", 200, "{\"ok\":true,\"environmentId\":\"local\"}");
-    }
+    @Rule public final MockWebServer server = new MockWebServer();
 
-    @Test
-    public void sendsThePersonWhenVerifyingAnEndpoint() throws Exception {
-        CompletableFuture<String> identity = new CompletableFuture<>();
-        try (ServerSocket server = new ServerSocket(0, 1, InetAddress.getLoopbackAddress())) {
-            Thread responder = new Thread(() -> respondToHealthCheck(server, identity));
-            responder.start();
-
-            RemoteEnvironment.Endpoint endpoint = RemoteEnvironment.Endpoint.direct(
-                "local", "Local", "http://127.0.0.1:" + server.getLocalPort(), true);
-            new RemoteTransport().verify(endpoint, "kenan");
-
-            assertEquals("kenan", identity.get(1, TimeUnit.SECONDS));
-            responder.join(1_000);
+    @Test public void authenticatesDiscoveryAndProxiedPollsWithoutUrlCredentials() throws Exception {
+        var identity = new RemoteSession.Identity("person", "test-session");
+        for (String path : new String[] { "/v1/environments", "/remotes/work/v1/notifications?after=2" }) {
+            server.enqueue(new MockResponse().setBody("{\"ok\":true}"));
+            assertTrue(RemoteTransport.get(server.url(path).toString(), identity).getBoolean("ok"));
+            RecordedRequest request = server.takeRequest(1, TimeUnit.SECONDS);
+            assertNotNull(request);
+            assertEquals("GET", request.getMethod());
+            assertEquals(path, request.getPath());
+            assertEquals("person", request.getHeader("x-pi-remote-user"));
+            assertEquals("test-session", request.getHeader("x-pi-remote-session"));
         }
     }
 
-    private static void respondToHealthCheck(ServerSocket server, CompletableFuture<String> identity) {
-        try (Socket socket = server.accept();
-             BufferedReader request = new BufferedReader(new InputStreamReader(socket.getInputStream(), StandardCharsets.US_ASCII))) {
-            String user = "";
-            for (String line = request.readLine(); line != null && !line.isEmpty(); line = request.readLine()) {
-                if (line.toLowerCase().startsWith("x-pi-remote-user:")) user = line.substring(line.indexOf(':') + 1).trim();
-            }
-            identity.complete(user);
-            byte[] body = "{\"ok\":true,\"environmentId\":\"local\"}".getBytes(StandardCharsets.UTF_8);
-            socket.getOutputStream().write((
-                "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: " + body.length +
-                "\r\nConnection: close\r\n\r\n").getBytes(StandardCharsets.US_ASCII));
-            socket.getOutputStream().write(body);
-            socket.getOutputStream().flush();
-        } catch (Exception failure) {
-            identity.completeExceptionally(failure);
+    @Test public void missingSessionNeverConnects() throws Exception {
+        server.enqueue(new MockResponse().setBody("{\"ok\":true}"));
+        assertThrows(RemoteTransport.AccessDenied.class,
+            () -> RemoteTransport.get(server.url("/v1/environments").toString(), null));
+        assertEquals(0, server.getRequestCount());
+    }
+
+    @Test public void redirectsNeverForwardSession() throws Exception {
+        server.enqueue(new MockResponse().setResponseCode(302).setHeader("Location", "/destination"));
+        server.enqueue(new MockResponse().setBody("{\"ok\":true}"));
+        assertThrows(IOException.class, () -> RemoteTransport.get(
+            server.url("/v1/environments").toString(), new RemoteSession.Identity("person", "token")));
+        assertEquals(1, server.getRequestCount());
+    }
+
+    @Test public void deniedSessionHasAnExplicitOutcome() throws Exception {
+        for (int status : new int[] { 401, 403, 423 }) {
+            server.enqueue(new MockResponse().setResponseCode(status));
+            assertThrows(RemoteTransport.AccessDenied.class, () -> RemoteTransport.get(
+                server.url("/").toString(), new RemoteSession.Identity("person", "token")));
         }
-    }
-
-    @Test
-    public void rejectsAnotherEnvironment() {
-        assertThrows(IOException.class, () ->
-            RemoteTransport.verifyHealth("local", 200, "{\"ok\":true,\"environmentId\":\"converge\"}"));
-    }
-
-    @Test
-    public void rejectsFailedAndInvalidHealthResponses() {
-        assertThrows(IOException.class, () -> RemoteTransport.verifyHealth("local", 503, "{}"));
-        assertThrows(IOException.class, () -> RemoteTransport.verifyHealth("local", 200, "not json"));
     }
 }

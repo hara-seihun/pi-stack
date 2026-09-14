@@ -6,7 +6,7 @@ Submit an immutable source commit to the durable publication worker from a write
 deploy/publication submit "$(git rev-parse HEAD)"
 ```
 
-The returned receipt acknowledges custody. The worker owns integration checks, merging `main`, both host deployments and terminal reporting. `deploy/publication inspect REQUEST` reads its progress. Failed requests retain their source ref, integration SHA, failed command, compact error excerpt and full log. Source fixes need a new commit and submission. `deploy/publication retry REQUEST` retries the same immutable source after an infrastructure repair.
+The returned receipt acknowledges custody. The worker owns integration checks, merging `main`, both host deployments and terminal reporting. `deploy/publication inspect REQUEST` reads its progress. Failed requests retain their source ref, integration SHA, exact command arguments, working directory, deadline, compact error excerpt and full log. The owner assigns each new failure one dedicated local repair agent. Submitting the same SHA again returns its existing receipt or rejects an unrepaired failure. Blind `retry` is disabled.
 
 A submission from Remote records its supervisor URL and root thread ID. The worker sends blocked, failed, cancelled and published results back to that thread with a stable request ID. Its receipt distinguishes `report.status: accepted`, when Remote has queued the report, from `delivered`, when the thread's user event confirms dispatch. The timer retries transport failures and checks accepted reports without rerunning publication. Machine alerts are a separate inbox receipt, not proof of thread delivery. Successful publication sends its report before the worker exits.
 
@@ -22,6 +22,28 @@ Failure restores recorded service and fleet admission states. `deploy/publicatio
 
 The worker invokes each host's release wrapper, which calls `deploy/host`. `deploy/host` reads `/etc/pi-stack/host.json`, refuses a dirty checkout, holds one lock on the checkout, and must finish inside 50 seconds. Every artifact it publishes carries the commit in a `.pi-stack-commit` file; the deployed commit on a host is whatever `/srv/pi/pi-remote/.pi-stack-commit` says.
 
+## Publication progress and repair
+
+Enqueue syncs the request and a `wake` marker before acknowledging custody. It starts the worker immediately; the systemd path closes the filesystem wakeup path. The worker re-reads the queue after every request instead of stopping after one item. Both timers run every ten seconds to recover missed wakeups. No general fleet admission is involved.
+
+[`deploy/publication-control.mjs`](../deploy/publication-control.mjs) owns the progress policy. Each subprocess records its exact command, arguments, directory, start and deadline before launch. The independent watchdog stops the publication cgroup after a command deadline plus 15 seconds, after 120 seconds without log progress, or after 90 seconds without a recorded step. It records the failed command before assigning repair. The command timeout also kills its process group; inherited output pipes cannot hold the watchdog. Request and worker locks prevent the watchdog from overwriting a live worker's receipt.
+
+A failure does not automatically rerun publication. A contract gate can be revisited at 30-second intervals, with at most three publication attempts and a five-minute gate budget. Interrupted workers first restore any recorded host intake custody. Failed restoration blocks further deployments, retains the restoration plans and receives at most three recovery attempts before its repair owner must intervene. A proved infrastructure repair grants one further publication attempt. Attempt numbers and logs never reset.
+
+Each new failure has `repairs/REQUEST/receipt.json`, a saved prompt, `session.jsonl`, `agent.log` and `result.json`. The receipt includes the original request, source and integration SHAs, command and log context, agent unit, registered workspace and terminal outcome. The watchdog launches `pi-stack-publication-repair@REQUEST.service` locally. That unit runs the installed Pi CLI with Astra High and normal Kenan model-account routing; it does not submit work to Remote, Orchestrator's paused fleet queue, or Converge. One repair agent runs at a time. It gets one 20-minute attempt, with a 22-minute unit ceiling including workspace creation and handoff. A failed service-start request gets at most three launch attempts. An interrupted agent is terminally blocked with its session and unit result retained, never replayed automatically.
+
+The agent must return a cause/repair summary and a focused evidence file. A `source-fixed` result submits the corrected descendant commit with `submit SHA --repair-of REQUEST`. Its deterministic successor ID makes a repeated handoff idempotent. The successor names `repairOf` and `repairId`; the repair receipt records the successor's custody receipt. An `infrastructure-fixed` result queues the original request once with `repairedRetry` pointing to the evidence. The original failure stays in `failures`. A blocked result reports the remaining dependency. Two source-repair generations are allowed; further failures remain terminal for Hara to assign rather than growing an unbounded agent chain. Repair status and successor links participate in terminal thread-report idempotency keys. Transport retries run in the separate notices service and do not occupy the watchdog.
+
+Installation creates `repair-policy.json` with its activation time. Existing queued and in-flight requests stay owned. Failures predating activation retain their receipts without starting a wave of historical repairs. Use `deploy/publication repair REQUEST` to adopt a specific earlier failure. This command cannot create a second repair for the same request. To inspect repair custody directly, read `~/.local/state/pi-stack-publication/repairs/REQUEST/receipt.json`.
+
+The GMKtec installation needs `node`, `timeout`, `flock`, `systemctl`, `git`, `agent-workspace` and `/home/kenan/.local/bin/pi` in the user service environment, plus Kenan's existing model-account routing and release authority. The installer copies the command and its module into `~/machine`, copies the seven reference units into `~/.config/systemd/user`, reloads systemd and enables the queue path and both timers. It does not restart the worker. When upgrading an in-flight publisher that lacks progress records, coordinate activation first: the new watchdog will classify its missing progress, and the earlier worker's final installation step could overwrite the new command. Source integration and both-host release still belong to the submitting parent and durable publication worker.
+
+Focused checks run in seconds:
+
+```bash
+node --test scripts/publication.test.mjs scripts/publication-gate.test.mjs scripts/publication-progress.test.mjs
+```
+
 ## What a host provides
 
 The stack is the same on every machine. A host supplies three things.
@@ -35,15 +57,20 @@ The stack is the same on every machine. A host supplies three things.
   "version": 1,
   "fleetUser": "kenan",
   "environments": [
-    { "id": "local", "name": "Local", "baseUrl": "" },
-    { "id": "converge", "name": "Converge", "baseUrl": "/converge" }
+    { "id": "local", "name": "Local", "icon": "house" },
+    {
+      "id": "converge",
+      "name": "Converge",
+      "icon": "cloud",
+      "upstreams": { "kenan": "http://127.0.0.1:18792" }
+    }
   ],
   "packages": ["/etc/nixos/pi-agent/extensions/scratch-updates"],
   "skills": ["/etc/nixos/pi-agent/skills/math-research"]
 }
 ```
 
-`environments` lists the browser's host choices and their same-origin path prefixes. It is optional; without it, clients see only this host. The router and supervisors read this list from the host file, independent of the person registry. `PI_STACK_HOST_FILE` selects another host file for tests or custom installations. Restart the router after changing the list.
+`environments` is the router's endpoint catalog. Entries have `id`, `name`, optional `icon`, and remote entries have `upstreams`. This host's own entry has no `upstreams`. Each remote map names a person and the absolute HTTP or HTTPS origin of her supervisor. Origins cannot contain credentials, paths, queries or fragments. The example port `18792` is a host-owned forward to the remote `kenan` supervisor, not its router. Configure the actual listener before granting access. Without a catalog, the router supplies only its own endpoint. `PI_STACK_HOST_FILE` selects another host file for tests or custom installations. Restart the router after configuration changes.
 
 `fleetUser` runs `pi-orchestrator@<user>.service`. `packages` are extra Pi packages every account loads, placed after the reviewed ones and before the Pi Remote context observer. `skills` are extra skill directories linked into every account's skill directory under their own names. Both are optional and point at paths the host owns.
 
@@ -53,6 +80,22 @@ Voice requires `/var/lib/pi-stack-voice/openai-api-key`, root-owned mode `0600` 
 
 Persons are not in the host file. They are Pi Remote's registry, `/var/lib/pi-remote/persons/<user>.json`, created with `pi-remote person add`. See [the Pi Remote README](../apps/remote/README.md#persons).
 
+## Gateway access and host boundaries
+
+Each person registry may set `"remoteAccess": ["local", "converge"]`. Omission allows only this host's own endpoint. The list must include this host's own ID, and every grant must name a catalog entry. Remote grants require an encrypted-folder identity and an `upstreams` mapping for that person or router startup fails. Add each person's mapping explicitly; never send several people's requests to one shared supervisor. Endpoint names and icons do not affect authorization.
+
+`POST /v1/unlock` accepts `{ "key": "..." }` with the `x-pi-remote-user` hint and returns `{ "ok": true, "user": "...", "session": "..." }`. Clients send `session` in `x-pi-remote-session`. A user header or query parameter is only a selection hint, even on a single-person host or while that person's folder is already open. This replaces the previous name-only identity contract. Missing authentication on protected `/v1/*` routes returns `423`. The chooser at `/v1/environment`, `/v1/router-health`, app updates and static assets remain public; unlock is the session bootstrap. Lock revokes all sessions for that person.
+
+Authenticated `GET /v1/environments` returns only that person's allowed endpoints, with an empty `baseUrl` for this host and generated same-origin `/v1/remotes/<id>` prefixes for remote endpoints. Clients never receive upstream origins. The gateway checks the person's grant for every forwarded request and removes client authentication and person hints before reaching the configured supervisor. A host tunnel forwards directly to the matching remote supervisor, not another router.
+
+The router must be the sole published API entrance. Before activating this contract, remove the unauthenticated `/converge` and `/editor` host routes and any direct supervisor publication. Bind supervisor, forwarded upstream and control listeners to loopback and apply UID gates on both hosts. Permit root for deployment, the gateway identity for upstream access, and each owning service identity only where needed. Loopback alone is not a UID boundary. Include Voice/control listeners and the tunnel's local listener; restrict the remote forwarding account to its person's supervisor port. The host handbook and declarative host configuration own these rules and tunnels. Reference units do not install a firewall.
+
+Revoke the restricted Converge SSH key embedded in existing APKs by removing its `authorized_keys` entry at the host's source of truth and deployed account. Removing SSH code from the new app does not revoke installed APKs or copies of their key. Retire active forwards authenticated by that key, and remove its declaration from host provisioning so it cannot return. The gateway tunnel uses a separate server-owned identity that has never been distributed to clients. Record the revocation and new tunnel owner in the host handbook before accepting the deployment.
+
+Deployment health checks use root-run requests to the supervisor port read from the person registry. `deploy/smoke` instead exercises router authentication. It checks unauthenticated rejection, reads existing root-only `/run/pi-remote-keys/<user>` credentials through a pipe, unlocks only people already reported open, and uses the returned session for app calls. Unencrypted people bootstrap with an empty key. `PI_REMOTE_KEY_DIR` selects another credential directory for a rehearsal. Smoke accepts only a loopback router URL, keeps temporary session headers in a private directory, and removes them on exit. It neither prints keys/tokens nor calls lock, which would interrupt the person and revoke her other clients.
+
+Host routing, UID gates, tunnels and Android local build configuration require coordinated host changes. A code release alone does not install them.
+
 ## What deploy/host does
 
 Orchestrator runs threads in shared SDK runners within each person, release and application execution boundary; see [unified threads](threads.md). Remote is a client of that owner. The reference supervisor unit caps its complete process tree at 16 GiB RAM and 1 GiB swap. Hosts with multiple people also declare an aggregate cap on the implicit `system-pi\x2dremote.slice` (GMKtec uses the same 16 GiB / 1 GiB ceiling across all people). The runner checks constrained ancestors before admitting another session, including memory used by browser children. These limits contain runaway subprocesses; sharing SDK sessions does not make browser subprocesses share a heap. Keep `MemoryHigh` at the hard limit on these hosts to avoid the prolonged reclaim stalls seen with a lower soft limit.
@@ -61,7 +104,7 @@ Before publishing anything, `deploy/host` checks that the Voice unit and credent
 
 1. Prepares PiStack Meet's local transcription runtime through `deploy/transcription`. Its pinned Whisper model and hash-locked Python dependencies live under `/srv/pi/.pi-transcription`, selected by `/srv/pi/transcription`. Hosts need `uv`; model preparation runs alongside JavaScript dependency installation. `PI_STACK_TRANSCRIPTION_DEST` selects a separate destination for a rehearsal. Installs the JavaScript dependency tree once per manifest, lockfile and stack doctor source under `/srv/pi/dependencies`. Runtime, Orchestrator, and tools link that tree instead of copying it.
 2. Publishes commit-addressed releases of the runtime (`/srv/pi/runtime`: Pi, `agent-browser`, and the runtime extensions), the Orchestrator, Pi Remote, the tools, and the skills. Each destination is a symlink switched atomically; prior generations stay under `/srv/pi/.pi-stack-releases` for processes that loaded them.
-3. For every account (each person plus the fleet user): links `pi`, `agent-browser`, `pi-agent-browser-doctor`, `pi-orchestrator`, `pi-remote`, and every tool command into `~/.local/bin`; links the reviewed skills and the host's skills into `~/.pi/agent/skills`; rewrites the `packages` list in `~/.pi/agent/settings.json` under Pi's own lock, installs the pinned external packages, and writes the custom model catalog. The manifest selects the stack-owned [Codex compaction extension](../packages/runtime/extensions/codex-compaction/README.md); Pi owns its compaction timing and continuation.
+3. Settings reconciliation runs as the owning account with reviewed code and configuration sent over stdin. It reads installed packages from `/srv/pi`, never the administrator's private checkout. Home traversal permissions stay unchanged. For every account (each person plus the fleet user): links `pi`, `agent-browser`, `pi-agent-browser-doctor`, `pi-orchestrator`, `pi-remote`, and every tool command into `~/.local/bin`; links the reviewed skills and the host's skills into `~/.pi/agent/skills`; rewrites the `packages` list in `~/.pi/agent/settings.json` under Pi's own lock, installs the pinned external packages, and writes the custom model catalog. The manifest selects the stack-owned [Codex compaction extension](../packages/runtime/extensions/codex-compaction/README.md); Pi owns its compaction timing and continuation.
 4. Loads the deployed native browser tool under the fleet account's normal settings and proves open, interactive snapshot, title, and isolated-browser cleanup against a loopback page. A failure blocks service activation. Then restarts the fleet daemon. Live workers keep the release they recorded in their run row.
 5. Enables Voice and starts the selected release when `/status` reports another commit. Voice's notify readiness and `/status.releaseCommit` must match Pi Remote before supervisor activation. Its provider sessions and heartbeat database survive a service restart. If Pi Remote changed, restarts the front door and hands each running supervisor the new release. An interrupted deployment may already have selected the artifact without reaching that handoff; rerunning the same release detects any unlocked supervisor on another commit and performs the missed activation. Active Pi turns keep their process and stream; the replacement supervisor adopts them and replaces each runtime after it settles. The front door starts every open person's supervisor before it listens, so deployment first waits for `/v1/router-health`, then asks only the supervisors reporting another commit to hand over, then waits until every unlocked person's health response names the selected commit. A slow start or handoff therefore cannot race the smoke check or rollback. A rollback resets the supervisor units first, since one that crashed on the rejected release may have exhausted its start limit.
 6. Walks the live front door through `deploy/smoke`: all three web entrypoints, their assets, the standalone Meet adapter, Android CORS, environment/person discovery, and every unlocked person's initial app calls, Voice release identity and transcription availability. A dead router is a failure, not a skipped check. Failure restores the previous Pi Remote selection and its Voice implementation before handing supervisors back. A generation without the shared Voice implementation stops that new unit. Each new Remote release carries its own smoke script and helper so rollback checks the restored release's contract rather than requiring new assets from older code.
@@ -104,7 +147,7 @@ sudo rmdir --ignore-fail-on-non-empty /run/systemd/system/pi-stack-voice.service
 sudo systemctl daemon-reload
 ```
 
-Stopping the live-dev supervisor restores the deployed capture package and resumes its original supervisor wrapper. Do not restart `pi-remote@kenan.service`; that would kill active Pi turns. Change only the root Tailscale route, not the other applications or `/converge` route.
+Stopping the live-dev supervisor restores the deployed capture package and resumes its original supervisor wrapper. Do not restart `pi-remote@kenan.service`; that would kill active Pi turns. Restore only the router as the published API entrance. Remove the `/converge` and `/editor` bypass routes as described under [host boundaries](#gateway-access-and-host-boundaries); do not restore them after live development.
 
 Persist the prepared Nix generation in `/nix/var/nix/profiles/system` and activate it through a separate root transient systemd unit, exactly as the GMKtec handbook describes. Never run the switch inside the supervisor's cgroup. Then release the same final SHA on both machines:
 
@@ -153,11 +196,13 @@ npm run android:test --workspace=kenan
 
 CI runs the same gate from a persistent self-hosted checkout. Deployment does not repeat tests that already passed on the commit.
 
+`node --test scripts/deploy-lock.test.mjs` checks host activation and rollback in under a second using temporary artifacts and mocked services. Its unlocked router people must have matching person registry files. The HTTP fixture accepts supervisor health only at the registered listener, so it also checks that deployment avoids the authenticated client routes.
+
 ## Kenan
 
 The publication worker also distributes Android updates. After the checked source is integrated and both hosts are deployed, it publishes the APK built on GMKtec to both hosts and verifies the manifest and downloaded bytes through each front door. A release is unfinished if either app download fails. The native client compares the published version code with its installed package and shows Update app only for a newer build.
 
-[`deploy/android-update`](../deploy/android-update) owns artifact preparation, atomic installation and download verification. `apps/kenan/release-info.mjs` supplies the Git revision, application id and monotonic version code. The APK contains that identity at `assets/app-release.json`; preparation checks it against the source and Android package metadata, then records its SHA-256 and byte count. GMKtec is the only APK producer, using the existing Android signing key and host-owned endpoint configuration. Both hosts receive identical bytes. These APKs contain the app's endpoint configuration and forwarding identity, so they stay on the private Pi Remote hosts, never in public GitHub assets.
+[`deploy/android-update`](../deploy/android-update) owns artifact preparation, atomic installation and download verification. `apps/kenan/release-info.mjs` supplies the Git revision, application id and monotonic version code. The APK contains that identity at `assets/app-release.json`; preparation checks it against the source and Android package metadata, then records its SHA-256 and byte count. GMKtec is the only APK producer, using the existing Android signing key and host-owned `piRemoteRouterUrl`. Both hosts receive identical bytes. The APK contains the router bootstrap URL, not endpoint lists or SSH identities. Packages remain on the private Pi Remote hosts, not public GitHub assets.
 
 Each host stores packages in `/var/lib/pi-remote/app-updates/releases/<revision>/`, with `current` selecting the manifest atomically. The installer retains three generations. `PI_REMOTE_APP_UPDATES_DIR` selects a separate root for a rehearsal. The router serves `GET /v1/app-update` and `GET /v1/app-update/<revision>.apk` before person selection or unlock. Missing initial publication returns `release: null`; a broken manifest or package reports an error.
 
@@ -171,14 +216,16 @@ sudo deploy/android-update install /absolute/private/artifact-directory
 deploy/android-update verify /absolute/private/artifact-directory/manifest.json
 ```
 
-The Android app embeds its endpoint list from a JSON file named in `apps/kenan/android/local.properties`, which is not committed; see [the Kenan README](../apps/kenan/README.md#build-configuration). An SSH endpoint's account must allow local forwarding only to the front door's port. The browser client instead asks the host it was served from for its environment list, declared once as `environments` in `/etc/pi-stack/host.json`.
+Set `piRemoteRouterUrl` in the ignored `apps/kenan/android/local.properties`; see [the Kenan README](../apps/kenan/README.md#build-configuration). Remove the embedded endpoint/SSH configuration from build inputs. Both clients authenticate at the bootstrap router and fetch their allowed list from `/v1/environments`. Adding or withdrawing a grant requires no APK rebuild.
 
 ## Release verification
 
 - `/srv/pi/pi-remote/.pi-stack-commit` matches on every host;
 - `pi-remote-router.service`, each unlocked `pi-remote@<user>.service`, `pi-stack-voice.service`, and `pi-orchestrator@<fleet>.service` are active;
-- `curl -fsS http://127.0.0.1:8796/status` reports the same `releaseCommit`;
+- `sudo curl -fsS http://127.0.0.1:8796/status` reports the same `releaseCommit`;
 - `/v1/meet` reports `transcriptionAvailable: true`, and `/meet-adapter.js` exports `startMeetAdapter`;
-- `curl -H 'x-pi-remote-user: <user>' http://127.0.0.1:8788/v1/health` reports the intended environment id;
+- `deploy/smoke` authenticates each open person and health reports the intended environment id;
+- name-only API requests return `423`, and each authenticated endpoint list matches that person's grants;
+- no `/converge` or `/editor` bypass is published, and non-owning UIDs cannot reach supervisor, forwarded upstream or control ports;
 - `pi-orchestrator status` answers;
 - Kenan can switch environments without crossing threads, keys, voice, or downloads.

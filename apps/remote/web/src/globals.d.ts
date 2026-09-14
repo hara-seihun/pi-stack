@@ -13,7 +13,16 @@ interface Window {
   texmath: unknown;
   katex: { renderToString(tex: string, options: { displayMode?: boolean }): string };
   normalizeLatexDelimiters(source: string): string;
-  PiRemotePerson: { get(): string; set(user: string): void; header: string; href(path: string): string };
+  PiRemotePerson: {
+    get(): string;
+    set(user: string): void;
+    header: string;
+    session(): string;
+    acceptSession(user: string, session: string): void;
+    clearSession(session?: string): void;
+    headers(initial?: HeadersInit, includeSession?: boolean): Headers;
+    href(path: string): string;
+  };
   PiRemoteVoice: {
     create(options: {
       sessionId: string;

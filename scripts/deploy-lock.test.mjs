@@ -226,18 +226,40 @@ test("the host deployment restarts the daemon and activates a changed Pi Remote"
     const destinations=Object.fromEntries(["RUNTIME","ORCHESTRATOR","REMOTE","TOOLS","SKILLS"].map((name)=>[`PI_STACK_${name}_DEST`,join(directory,name.toLowerCase())]));
     const user=process.env.USER??spawnSync("id",["-un"],{encoding:"utf8"}).stdout.trim();
     const hostFile=join(directory,"host.json");writeFileSync(hostFile,JSON.stringify({version:1,fleetUser:user}));
-    const personsDir=join(directory,"persons");mkdirSync(personsDir);writeFileSync(join(personsDir,"guest.json"),JSON.stringify({version:1,user:"guest-person",displayName:"Guest",port:18799,environment:{}}));
+    const personsDir = join(directory, "persons");
+    mkdirSync(personsDir);
+    for (const person of [
+      { user: "alice", displayName: "Alice", port: 18798 },
+      { user: "guest-person", displayName: "Guest", port: 18799 },
+    ]) {
+      writeFileSync(join(personsDir, `${person.user}.json`), JSON.stringify({ version: 1, ...person, environment: {} }));
+    }
     const activationTrace=join(directory,"activation.trace"),systemctlTrace=join(directory,"systemctl.trace"),settingsTrace=join(directory,"settings.trace"),supervisorCommit=join(directory,"supervisor.commit");
     writeFileSync(join(bin,"systemctl"),"#!/bin/sh\nprintf '%s\\n' \"$*\" >> \"$SYSTEMCTL_TRACE\"\ncase $1 in list-units) echo 'pi-remote@alice.service loaded active running';; is-active) exit 0;; esac\nexit 0\n");chmodSync(join(bin,"systemctl"),0o755);
     // The front door names its unlocked people; each supervisor names the release it runs.
-    writeFileSync(join(bin,"curl"),"#!/bin/sh\nfor arg; do case $arg in */v1/router-health) printf '{\"people\":[{\"user\":\"alice\",\"unlocked\":true}]}\\n'; exit 0;; esac; done\nprintf '{\"releaseCommit\":\"%s\"}\\n' \"$(cat \"$SUPERVISOR_COMMIT\" 2>/dev/null)\"\n");chmodSync(join(bin,"curl"),0o755);
-    const env={...process.env,...destinations,PATH:`${bin}:${process.env.PATH}`,ACTIVATE_TRACE:activationTrace,VOICE_TRACE:join(directory,"voice.trace"),SUPERVISOR_COMMIT:supervisorCommit,SYSTEMCTL_TRACE:systemctlTrace,SETTINGS_TRACE:settingsTrace,PI_REMOTE_PERSONS_DIR:personsDir,PI_STACK_DEPLOY_NO_SUDO:"1",PI_STACK_ALLOW_DIRTY:"1",PI_STACK_SERVICES:"1"};
+    writeFileSync(join(bin, "curl"), `#!/bin/sh
+for arg; do
+  case $arg in
+    http://127.0.0.1:8788/v1/router-health)
+      printf '{"people":[{"user":"alice","unlocked":true},{"user":"guest-person","unlocked":false}]}\\n'
+      exit 0;;
+    http://127.0.0.1:18798/v1/health)
+      printf '%s\\n' "$arg" >> "$HEALTH_TRACE"
+      printf '{"releaseCommit":"%s"}\\n' "$(cat "$SUPERVISOR_COMMIT" 2>/dev/null)"
+      exit 0;;
+  esac
+done
+printf 'Unexpected deployment HTTP request: %s\\n' "$*" >&2
+exit 64
+`, { mode: 0o755 });
+    const env={...process.env,...destinations,PATH:`${bin}:${process.env.PATH}`,ACTIVATE_TRACE:activationTrace,VOICE_TRACE:join(directory,"voice.trace"),SUPERVISOR_COMMIT:supervisorCommit,SYSTEMCTL_TRACE:systemctlTrace,SETTINGS_TRACE:settingsTrace,HEALTH_TRACE:join(directory,"health.trace"),PI_REMOTE_PERSONS_DIR:personsDir,PI_REMOTE_ROUTER_PORT:"8788",PI_STACK_DEPLOY_NO_SUDO:"1",PI_STACK_ALLOW_DIRTY:"1",PI_STACK_SERVICES:"1"};
     const first=spawnSync(join(deploy,"host"),[hostFile],{encoding:"utf8",env});assert.equal(first.status,0,first.stderr);
     const firstUnits=readFileSync(systemctlTrace,"utf8");
     assert.match(firstUnits,new RegExp(`^restart pi-orchestrator@${user}\\.service$`, 'm'));assert.match(firstUnits,/^restart pi-remote-router\.service$/m);
     assert.equal(readFileSync(env.VOICE_TRACE,"utf8"),"--check\n--activate\n");
     assert.equal(readFileSync(activationTrace,"utf8"),"pi-remote@alice.service\n");
-    assert.equal(readFileSync(settingsTrace,"utf8"),`${user}\nguest-person\n`);
+    assert.equal(readFileSync(settingsTrace,"utf8"),`${user}\nalice\nguest-person\n`);
+    assert.equal(readFileSync(env.HEALTH_TRACE, "utf8"), "http://127.0.0.1:18798/v1/health\n".repeat(2));
     rmSync(systemctlTrace,{force:true});
     const unchanged=spawnSync(join(deploy,"host"),[hostFile],{encoding:"utf8",env});assert.equal(unchanged.status,0,unchanged.stderr);
     assert.equal(readFileSync(activationTrace,"utf8"),"pi-remote@alice.service\n");

@@ -2,7 +2,7 @@
 
 Pi Stack sends images to Anthropic through the [Files API](https://platform.claude.com/docs/en/build-with-claude/files). It uploads an image once and sends `{type: "file", file_id: "..."}` in subsequent Messages requests. Image quality, dimensions and model-context token charges do not change.
 
-The routing extension installs the [provider wrapper](../src/auth/anthropic-files-provider.ts) for Anthropic and its shared account aliases. It covers interactive Pi, Remote's Pi core and fleet Pi sessions. Both `stream` and `streamSimple` use the same wrapper. Other model providers and OpenAI image generation are unchanged.
+The routing extension installs the [provider wrapper](../src/auth/anthropic-files-provider.ts) for Anthropic and its shared account aliases. It covers interactive Pi, Remote's Pi sessions and fleet Pi sessions. Both `stream` and `streamSimple` use the same wrapper. Other model providers and OpenAI image generation are unchanged.
 
 ## Request ownership
 

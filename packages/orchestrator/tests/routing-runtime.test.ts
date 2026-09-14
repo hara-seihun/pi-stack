@@ -168,6 +168,81 @@ console.log('all child accounts bound');
   finally {await rm(root,{recursive:true,force:true});}
 },7000);
 
+test('config-only broker discovery supports native model changes with stale availability and plain CLI', async () => {
+  const root = await mkdtemp(join(tmpdir(), 'pi-broker-startup-'));
+  const fixture = join(root, 'fixture.mjs'), probe = join(root, 'probe.mjs');
+  await writeFile(fixture, `
+import assert from 'node:assert/strict';
+import {mkdirSync,writeFileSync} from 'node:fs';
+import {join} from 'node:path';
+import {openPiSession} from ${JSON.stringify(join(buildRoot,'compiled/threads/pi-session.js'))};
+import {ModelRuntime} from ${JSON.stringify(sdk)};
+import {modelBrokerUrl,loadConfig} from ${JSON.stringify(join(buildRoot,'compiled/api.js'))};
+import {Store} from ${JSON.stringify(join(buildRoot,'compiled/store.js'))};
+const root=process.env.HOME,agentDir=join(root,'agent');
+mkdirSync(agentDir);writeFileSync(join(agentDir,'auth.json'),'{}');
+mkdirSync(join(root,'.config/pi-orchestrator'),{recursive:true});
+writeFileSync(join(root,'.config/pi-orchestrator/config.json'),JSON.stringify({modelBrokerUrl:'http://127.0.0.1:2461'}));
+assert.equal(process.env.PI_MODEL_BROKER_URL,undefined);
+assert.equal(modelBrokerUrl(),'http://127.0.0.1:2461');
+assert.equal(loadConfig().modelBrokerUrl,'http://127.0.0.1:2461');
+// Registration refreshes availability asynchronously. Hold its observation snapshot
+// empty while the actual provider catalog and authentication remain ready.
+ModelRuntime.prototype.getAvailableSnapshot=function(){return [];};
+const checkAuth=ModelRuntime.prototype.checkAuth;
+let refuseAuth=false;
+ModelRuntime.prototype.checkAuth=function(provider,options){return refuseAuth?Promise.resolve(undefined):checkAuth.call(this,provider,options);};
+const sessions=[],events=[];
+async function snapshot(session){const id='state-'+events.length;await session.command({type:'get_state',id});return events.find(event=>event.id===id).data;}
+try {
+  for(const parentId of [null,'parent']) {
+    const id=parentId?'child':'root';
+    const session=await openPiSession({cwd:root,threadId:id,sessionFile:join(root,id+'.jsonl'),args:['--provider','openai-codex-11','--model','gpt-6-astra','--thinking','high','--extension',${JSON.stringify(routing)}],env:{}},event=>events.push(event),()=>{});
+    sessions.push(session);
+    assert.equal((await snapshot(session)).model.provider,'openai-codex');
+    assert.equal((await snapshot(session)).model.id,'gpt-6-astra');
+    assert.equal((await snapshot(session)).thinkingLevel,'high');
+    await session.command({type:'set_model',id:'select-'+id,provider:'openai-codex-10',modelId:'gpt-5.6-sol'});
+    const reply=events.find(event=>event.id==='select-'+id);
+    assert.equal(reply?.success,true,JSON.stringify(reply));
+    assert.equal((await snapshot(session)).model.provider,'openai-codex');
+    assert.equal((await snapshot(session)).model.id,'gpt-5.6-sol');
+    refuseAuth=true;
+    await session.command({type:'set_model',id:'refused-'+id,provider:'openai-codex',modelId:'gpt-5.6-luna'});
+    const refused=events.find(event=>event.id==='refused-'+id);
+    assert.equal(refused?.success,false,JSON.stringify(refused));
+    assert.match(refused?.error??'',/No API key/);
+    assert.equal((await snapshot(session)).model.id,'gpt-5.6-sol');
+    refuseAuth=false;
+  }
+} finally {for(const session of sessions)await session.close();}
+const store=Store.open(join(root,'.local/share/pi-orchestrator/ledger.sqlite3'));
+assert.equal(store.accounts().length,0);assert.equal(store.runs().length,0);store.close();
+console.log('config-only native broker ready');
+`);
+  await writeFile(probe, `import assert from 'node:assert/strict';
+export default function(pi){pi.on('input',async(_event,ctx)=>{
+  assert.equal(ctx.model.provider,'openai-codex');
+  const result=await ctx.modelRegistry.getProviderAuth('openai-codex');
+  assert.equal(result.auth.baseUrl,'http://127.0.0.1:2461/backend-api');
+  assert.ok(result.auth.apiKey.endsWith('.not-a-credential'));
+  console.log('config-only CLI broker ready');
+  return {action:'handled'};
+});}
+`);
+  const env: NodeJS.ProcessEnv = { ...process.env, HOME: root, PI_CODING_AGENT_DIR: join(root, 'agent'), PI_OFFLINE: '1', PI_SKIP_VERSION_CHECK: '1' };
+  for(const key of Object.keys(env))if(/^PI_ORCHESTRATOR_|^PI_MODEL_BROKER_URL$|^PI_REMOTE_|^PI_SESSION_|^PI_SUBAGENT_MODEL$|_API_KEY$/.test(key))delete env[key];
+  try {
+    const native=await promisify(execFile)(process.execPath,[fixture],{cwd:root,env,timeout:5000});
+    expect(native.stdout).toContain('config-only native broker ready');
+    const pending=promisify(execFile)(process.execPath,[cli,'--extension',routing,'--extension',probe,'--provider','openai-codex','--model','gpt-5.6-luna','-p','--no-session','fixture'],{cwd:root,env,timeout:5000});
+    pending.child.stdin!.end();
+    const ordinary=await pending;
+    expect(ordinary.stdout + ordinary.stderr).toContain('config-only CLI broker ready');
+    expect(ordinary.stderr).not.toContain('Extension error');
+  } finally {await rm(root,{recursive:true,force:true});}
+},12000);
+
 test('activity leases release retained idle children without releasing their active parent or sibling', async () => {
   const root = await mkdtemp(join(tmpdir(), 'pi-routing-activity-'));
   const env = { ...process.env, HOME: root, PI_CODING_AGENT_DIR: join(root, 'agent'), PI_ORCHESTRATOR_LEDGER: join(root, 'ledger.sqlite3'), PI_ORCHESTRATOR_AUTH: join(root, 'auth.json'), PI_ORCHESTRATOR_ASSIGNED: '0', PI_OFFLINE: '1', TEST_SDK: sdk, TEST_AI: ai, TEST_STORE: join(buildRoot, 'compiled/store.js'), TEST_ROUTING: routing };

@@ -4,8 +4,10 @@ import { completionCanonical, completionError, isCompletionExecution, isCompleti
 import type { Store } from "./store.js";
 import { recordCompletionRejection, recordCompletionSuccess } from "./completion-feedback.js";
 
+export interface CompletionAccess { principal: string; accounts: string[]; models: string[] }
 interface StoredCompletion {
   input: CompletionInput;
+  access?: CompletionAccess;
   record: CompletionRecord;
   attemptId?: string;
   receipt?: CompletionExecution;
@@ -93,7 +95,7 @@ export class CompletionService {
     });
   }
 
-  submit(requestId: string, input: unknown): CompletionOutcome<CompletionRecord> {
+  submit(requestId: string, input: unknown, access?: CompletionAccess): CompletionOutcome<CompletionRecord> {
     if (!isCompletionRequestId(requestId) || !isCompletionInput(input)) return completionError("invalid-request", "Expected a request ID, Luna or Terra, prompt, and supported completion options.");
     if (input.maxOutputTokens !== undefined) return completionError("unsupported-option", "OpenAI Codex rejects max_output_tokens for Luna and Terra. No run was created; a provider-enforced output cap is unavailable.");
     const selected = catalogModel(input.model)!;
@@ -102,14 +104,14 @@ export class CompletionService {
     return this.store.transaction(() => {
       const previous = this.stored(requestId);
       if (previous) {
-        if (completionCanonical(previous.input) !== completionCanonical(input)) return completionError("request-conflict", "This request ID already belongs to different completion input.");
+        if (completionCanonical(previous.input) !== completionCanonical(input) || completionCanonical(previous.access ?? null) !== completionCanonical(access ?? null)) return completionError("request-conflict", "This request ID already belongs to different completion input.");
         this.synchronize(previous);
         return { ok: true, value: previous.record };
       }
       const [runId] = this.store.createRuns({ count: 1, source: "direct", prompt: input.prompt, cwd: this.cwd, profile: input.model, budget: "force", context: { tools: [] } });
       const now = Date.now();
       const record: CompletionRecord = { requestId, runId: runId!, model: input.model, metadata: input.metadata, state: "queued", createdAt: now, updatedAt: now };
-      this.save({ input, record });
+      this.save({ input, record, ...(access ? { access } : {}) });
       this.store.setControl(`completion-run:${runId}`, requestId);
       return { ok: true, value: record };
     });

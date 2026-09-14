@@ -1,10 +1,10 @@
 [Unit]
-Description=Recover and resume interrupted Pi Stack publications
+Description=Recover missed Pi Stack publication wakeups
 
 [Timer]
-OnBootSec=30s
-OnUnitInactiveSec=1min
-Persistent=true
+OnBootSec=5s
+OnUnitInactiveSec=10s
+AccuracySec=1s
 Unit=pi-stack-publication.service
 
 [Install]

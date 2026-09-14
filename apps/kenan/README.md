@@ -4,36 +4,41 @@ Kenan is the Android client for Pi Remote. Its package id is `works.kenan.piremo
 
 The browser and Android app have one React and TypeScript interface source in [`../remote/web/src`](../remote/web/src). `build.mjs` compiles it with Vite into Capacitor's generated assets. Do not edit `dist` or `android/app/src/main/assets/public`; both are generated.
 
-The native layer keeps the WebView below Android's system bars, translates touches into system haptics, remembers the selected environment, opens a pinned SSH forward for endpoints that need one, and tells the shared client which endpoint owns each API call. Synchronization, context rendering, the drawer, composer, uploads, voice, files, and settings run from the same compiled application and CSS as the browser. The shared client bounds native environment discovery and SSH preparation separately. Failed discovery is retryable, and a failed network request marks the tunnel for replacement on the next preparation instead of trusting JSch's stale connected flag. Cancelling a selection does not tear down a healthy tunnel. The launcher artwork comes from the native Kenan implementation this app replaced.
+The native layer keeps the WebView below Android's system bars, translates touches into system haptics, supplies the bootstrap router URL, and handles Android updates and background notifications. Person selection, session persistence, permitted-environment discovery, and environment selection belong to the shared web client. The app contains no SSH implementation, private keys, endpoint inventory, or endpoint warmup.
 
-Idle notifications use a native foreground service that watches every configured environment, even when the WebView is in the background. Enable them once in the drawer and allow Android's notification permission. The enable button disappears after permission is granted. Notifications show the launcher's Kenan head artwork, with a monochrome head for Android's status bar. Opening a thread clears its notifications, and the service suppresses new ones for that thread until the app is backgrounded or another thread is selected. The ongoing monitoring notification reports connection or unlock failures. The service and UI share one independently reconnectable transport per environment. [Pi Remote's notification contract](../remote/README.md#idle-notifications) describes replay, cursor storage, and delivery limits.
+Idle notifications use a native foreground service that discovers the current person's permitted environments through the router before each polling round. Enable them once in the drawer and allow Android's notification permission. Every discovery and notification request carries `x-pi-remote-session`; `x-pi-remote-user` is only a routing hint. An empty session never starts polling. Discovery failure prevents endpoint polling for that round, and rejected discovery credentials clear the native session mirror and stop monitoring.
+
+Changing person or session clears notification cursors, visible thread notifications, selected-thread suppression, and pending notification navigation. In-flight responses from the previous identity cannot publish notifications or save cursors. The service keeps the current session mirror in Android private preferences so Android can restart monitoring while the WebView is absent. Web storage remains the session owner and synchronizes the mirror on restore, unlock, identity change, and logout. Android backup is disabled in the manifest.
+
+Notifications show the launcher's Kenan head artwork, with a monochrome head for Android's status bar. Opening a thread clears its notifications, and the service suppresses new ones for that thread until the app is backgrounded or another thread is selected. The ongoing monitoring notification reports discovery and polling failures. [Pi Remote's notification contract](../remote/README.md#idle-notifications) describes replay, cursor storage, and delivery limits.
+
+## Native bridge
+
+- `KenanRemote.getState()` returns `{routerUrl}`. It performs no network requests.
+- `KenanRemote.syncSession({user, session})` mirrors the web client's authenticated identity. Pass empty strings for both fields to clear it. A user hint without a session is rejected.
+- `notifications`, `notificationThread`, and `notificationTarget` use the mirrored identity. Notification payloads and Android intents never contain the session credential.
+- The web client discovers `GET /v1/environments` itself. Native notification discovery uses the same contract, resolving each returned `baseUrl` against the bootstrap origin. Empty prefixes address the local environment; nonempty prefixes must be same-origin absolute paths. Native environment selection and transport preparation methods do not exist.
 
 ## Build configuration
 
-Ignored [`android/local.properties`](android/local.properties) names the endpoint declaration, a JSON list of every host the app may switch among. The build requires Android SDK 36, Java 21, and Bun for the connection tests.
+Ignored [`android/local.properties`](android/local.properties) supplies one credential-free bootstrap router origin. The build requires Android SDK 36, Java 21, and Bun for the connection tests.
 
 ```properties
-piRemoteEndpointsFile=/owner-only/path/to/endpoints.json
+piRemoteRouterUrl=https://pi-remote.example.ts.net
 ```
 
-A direct endpoint is a URL. An SSH endpoint names a restricted forwarding identity; the build reads the private key file and embeds it, and the app pins the host key and opens only the declared forward. The first entry is the default. Add a host by adding an entry; nothing in the Java layer names a particular machine.
+The field is required. HTTP is also accepted for private-LAN or loopback development, such as `http://127.0.0.1:8788`. Credentials, paths, query strings, and fragments are rejected. Endpoint declarations and SSH key files are not read by the build. The router owns person access policy and remote proxy routing; adding an environment does not require a new APK.
 
-```json
-[
-  { "id": "local", "name": "Local", "auth": "direct", "url": "https://local-pi-remote.example.ts.net", "requiresUnlock": true },
-  {
-    "id": "converge", "name": "Converge", "auth": "ssh", "requiresUnlock": false,
-    "ssh": {
-      "host": "converge.example.net", "port": 22, "user": "pi-remote-android",
-      "privateKeyFile": "/owner-only/path/to/android-converge-key",
-      "hostKey": "ecdsa-sha2-nistp256 <base64-encoded host key>",
-      "localPort": 8789, "remoteHost": "127.0.0.1", "remotePort": 8788
-    }
-  }
-]
+The public `GET /v1/environment` supplies the identity chooser. `POST /v1/unlock` takes the person hint in `x-pi-remote-user` and a JSON key, then returns `{ok:true,user,session}`. Authenticated API requests carry `x-pi-remote-session`; navigations can carry `session=`. `GET /v1/environments` returns only the session's permitted `{id,name,baseUrl,icon?}` entries.
+
+Focused native router tests cover permitted prefixes, session headers, redirects, and identity invalidation. Transport tests use the test-only MockWebServer dependency to exercise real HTTP requests. Android's Java compiler cannot resolve the JDK-only `com.sun.net.httpserver` API, even for local unit tests.
+
+```sh
+cd apps/kenan/android
+./gradlew testDebugUnitTest --tests '*RemoteEnvironmentTest' --tests '*RemoteTransportTest' --tests '*RemoteSessionTest'
 ```
 
-Build and test with:
+Build and run all Android checks with:
 
 ```sh
 npm run android:test --workspace=kenan
@@ -41,9 +46,9 @@ npm run android:test --workspace=kenan
 
 ## In-app updates
 
-Kenan checks the selected native environment's `GET /v1/app-update` when the app opens or returns to the foreground. The drawer shows **Update app** only when the published `versionCode` is greater than the installed one. Browser clients do not show Android updates. Check failures offer a retry instead of implying that a new APK exists.
+Kenan checks the bootstrap router's public `GET /v1/app-update` when the app opens or returns to the foreground. The drawer shows **Update app** only when the published `versionCode` is greater than the installed one. Browser clients do not show Android updates. Check failures offer a retry instead of implying that a new APK exists.
 
-Tapping **Update app** fetches the current manifest again, downloads `/v1/app-update/<revision>.apk` through the same native transport, and opens Android's install confirmation. The first installation may open Android's "Allow from this source" setting for Kenan. Enable it and return to Kenan to continue. Cancelling or denying installation leaves the checked APK in private app storage, so retrying the same release does not download it again. A failed check or download reports the problem in the drawer. The app accepts at most 100 MiB and bounds the download to three minutes, with seven-second network read timeouts. It verifies the exact size, SHA-256, package ID, version code, and the installed app's signing certificate before opening the installer through FileProvider.
+Tapping **Update app** fetches the current manifest again, downloads `/v1/app-update/<revision>.apk` from the same bootstrap origin without a person session, and opens Android's install confirmation. The first installation may open Android's "Allow from this source" setting for Kenan. Enable it and return to Kenan to continue. Cancelling or denying installation leaves the checked APK in private app storage, so retrying the same release does not download it again. A failed check or download reports the problem in the drawer. The app accepts at most 100 MiB and bounds the download to three minutes, with seven-second network read timeouts. It verifies the exact size, SHA-256, package ID, version code, and the installed app's signing certificate before opening the installer through FileProvider.
 
 The publisher serves identical APK bytes on both hosts, without requiring a person selection or unlock. Future releases use this button, not APK links in chat. [`../../deploy/android-update`](../../deploy/android-update) owns publication and retention.
 

@@ -34,7 +34,7 @@ export function checkpointPiSession(manager: SessionManager): void {
   try { fsyncSync(fd); } finally { closeSync(fd); }
 }
 
-export function assertPiSessionFile(path: string): void {
+export function assertPiSessionFile(path: string): Record<string, unknown> {
   const fd = custodyOpenSync(path, "r");
   let header: Record<string, unknown> | undefined;
   try {
@@ -50,6 +50,7 @@ export function assertPiSessionFile(path: string): void {
     || header.representation !== undefined || header.core !== undefined && header.core !== "pi") {
     throw new Error(`Not a native Pi session: ${path}. Import history through the thread import API.`);
   }
+  return header;
 }
 
 export function argument(args: string[], name: string): string | undefined {

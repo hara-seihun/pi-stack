@@ -99,7 +99,9 @@ export function assignCompletion(store:Store,runId:string,profile:string,cfg:Orc
   if(store.control("ordinary-launches")==="paused")return{refusals:[{accountId:"*",reason:"ordinary work paused"}]};
   const requestId=store.control(`completion-run:${runId}`);
   const saved=requestId?store.control(`completion:${requestId}`):undefined;
-  const retryAt=saved?JSON.parse(saved).record.retryAt:undefined;
+  const completion=saved?JSON.parse(saved):undefined;
+  const retryAt=completion?.record.retryAt;
+  const access=completion?.access as {accounts:string[];models:string[]}|undefined;
   if(retryAt>now)return{refusals:[{accountId:"*",reason:`provider retry scheduled at ${retryAt}`} ]};
   const run=store.run(runId);
   const candidates=run?.provider&&run.model?[{provider:run.provider,model:run.model,thinking:run.thinking}]
@@ -109,7 +111,8 @@ export function assignCompletion(store:Store,runId:string,profile:string,cfg:Orc
   for(const candidate of candidates){
     for(const account of store.accounts().filter(account=>account.provider===candidate.provider)){
       const meters=store.latestMeters(account.id);
-      const reason=!allowsAccountUse(account,"fleet")?"account unavailable"
+      const reason=access&&(!access.accounts.includes(account.id)||!access.models.includes(`${candidate.provider}/${candidate.model}`))?"account or model not shared with completion owner"
+        :!allowsAccountUse(account,"fleet")?"account unavailable"
         :account.reservation&&!reservationMatchesRun(store,account.reservation,runId)?"reserved for another completion queue"
         :account.cooldownUntil&&account.cooldownUntil>now?"account cooling down"
         :!meters.length||meters.some(meter=>now-meter.observed_at>cfg.meterMaxAgeMs||meter.observed_at>now+60_000)?"missing or stale provider quota"

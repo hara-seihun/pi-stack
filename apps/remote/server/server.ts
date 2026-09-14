@@ -5,7 +5,7 @@ import { homedir } from "node:os";
 import { basename, dirname, extname, isAbsolute, join, resolve } from "node:path";
 import { configuredFleetThreadUrl } from "./thread-owners";
 import { projectThreadNotifications } from "./thread-notifications";
-import { ORCHESTRATOR_CATALOG, OrchestratorClient, CompletionClient, type CompletionInput, catalogAgentType, createSharedImageGenerationService, ThreadService, ThreadDirectory, createThreadClient, importRemoteThreads, createSharedPiSessionOpener, threadHttp, type ThreadInspection, type Thread, type ThreadMessage, type PiEvent, type Result, type SharedImageGenerationService, type PlanUsageSnapshot } from "pi-orchestrator/api";
+import { modelBrokerUrl, createWorkspaceAdmission, ORCHESTRATOR_CATALOG, OrchestratorClient, CompletionClient, type CompletionInput, catalogAgentType, createSharedImageGenerationService, ThreadService, ThreadDirectory, createThreadClient, importRemoteThreads, createSharedPiSessionOpener, threadHttp, type ThreadInspection, type Thread, type ThreadMessage, type PiEvent, type Result, type SharedImageGenerationService, type PlanUsageSnapshot } from "pi-orchestrator/api";
 import { createLiveProjection, settleLiveProjection, restoreLiveProjection, threadActivity, type LiveProjection } from "./live-projection";
 import { InlineImages } from "./inline-images";
 import { planCards } from "./catalog-presentation";
@@ -26,7 +26,7 @@ import { defaultThreadDestinations, type ThreadDestination } from "./thread-mode
 import { API } from "./api";
 import { idleNotifications } from "./notifications";
 import { listPersons, publicPerson } from "./persons";
-import { knownEnvironments } from "./environments";
+import { ownEnvironment } from "./environments";
 import { API_CORS_HEADERS } from "./cors";
 import { fileBrowserError, listDirectory, localFileResponse, webResponse } from "./files";
 import { governorControls, isGovernorProvider, toggleGovernor } from "./governors";
@@ -153,10 +153,14 @@ const workspaceDefinitions = JSON.parse(process.env.PI_REMOTE_WORKSPACES ?? JSON
   { id: "home", name: "Home", path: HOME },
   { id: PRIVATE_ID, name: PRIVATE_NAME, path: PRIVATE_DIR },
 ])) as Array<{ id: string; name: string; path: string }>;
-const workspaces = new Map(workspaceDefinitions
-  .filter((workspace) => existsSync(workspace.path))
-  .map((workspace) => [workspace.id, workspace]));
-for (const workspace of workspaces.values()) workspace.path = realpathSync(workspace.path);
+const configuredWorkspaceAdmission = createWorkspaceAdmission(workspaceDefinitions);
+if (!configuredWorkspaceAdmission.ok) throw new Error(configuredWorkspaceAdmission.error.message);
+const workspaceAdmission = configuredWorkspaceAdmission.value;
+const workspaces = workspaceAdmission.workspaces;
+for (const destination of THREAD_DESTINATIONS.values()) {
+  const admitted = workspaceAdmission.resolve(destination.workspaceId);
+  if (!admitted.ok) throw new Error(`Thread profile ${destination.id}: ${admitted.error.message}`);
+}
 
 mkdirSync(DATA, { recursive: true, mode: 0o700 });
 mkdirSync(INGESTION, { recursive: true, mode: 0o700 });
@@ -185,7 +189,8 @@ ensureSupervisorSchema(db);
 beginSupervisorGeneration(db, SUPERVISOR_EPOCH);
 const fleetUrl = configuredFleetThreadUrl();
 const fleet = fleetUrl ? createThreadClient(`${fleetUrl}/v1/thread-owner`) : null;
-const namingClient = fleetUrl ? new CompletionClient({ baseUrl: fleetUrl }) : null;
+const namingUrl = modelBrokerUrl() ?? fleetUrl;
+const namingClient = namingUrl ? new CompletionClient({ baseUrl: namingUrl }) : null;
 const directory = new ThreadDirectory({ id: "person", api: threads }, fleet ? [{ id: "fleet", api: fleet }] : []);
 threads.setDirectory(directory);
 const peerThreads = new Map<string, Thread>();
@@ -1140,6 +1145,7 @@ function handlePiEvent(sessionId: string, event: any) {
 function threadEnvironment(thread: Thread) {
   const meta = remotePlacement(thread);
   return { ...process.env, HOME,
+    PI_REMOTE_WORKSPACES: JSON.stringify([...workspaces.values()]),
     PI_REMOTE_SESSION_ID: thread.id, PI_THREAD_API_URL: `http://${HOST}:${PORT}/v1/threads`,
     PI_THREAD_DATABASE: join(DATA, "threads.sqlite3"),
     PI_SESSION_ID: thread.id, PI_SESSION_FILE: thread.sessionFile,
@@ -1271,9 +1277,10 @@ function meetingDestination() {
 }
 async function insertThread(id: string, name: string, destination: ThreadDestination, model: string,
   meetingId: string | null, message?: string, parentId?: string, settings?: Parameters<typeof directory.spawn>[0]["settings"]) {
-  const preset = workspaces.get(destination.workspaceId);
+  const admitted = workspaceAdmission.resolve(destination.workspaceId);
+  if (!admitted.ok) throw new Error(admitted.error.message);
   const thread = unwrap(await directory.spawn({ id, requestId: id, title: name, parentId,
-    cwd: preset?.path ?? destination.workspaceId, message, settings: { model, ...settings },
+    cwd: admitted.value.cwd, message, settings: { model, ...settings },
     metadata: { workspaceId: destination.workspaceId, profileId: destination.id, meetingId },
   }));
   ensureThreadView(db, thread.id);
@@ -1361,7 +1368,7 @@ const server = Bun.serve({
     if (web) return web;
     if (API.health.match(req.method, url.pathname)) return json({ ok: true, version: VERSION, environmentId: ENVIRONMENT_ID, releaseCommit: RELEASE_COMMIT });
     if (API.environment.match(req.method, url.pathname)) return json({ environment: environmentMetadata() });
-    if (API.environments.match(req.method, url.pathname)) return json({ environments: knownEnvironments() });
+    if (API.environments.match(req.method, url.pathname)) return json({ environments: [ownEnvironment()] });
     if (API.files.match(req.method, url.pathname)) {
       const requested = url.searchParams.get("path") ?? "";
       if (!isAbsolute(requested)) return error("Valid absolute folder path required");

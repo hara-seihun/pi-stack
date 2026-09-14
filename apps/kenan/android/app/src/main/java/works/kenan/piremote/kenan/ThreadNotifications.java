@@ -19,6 +19,16 @@ final class ThreadNotifications {
         clearVisible(context);
     }
 
+    static synchronized void clear(Context context) {
+        selected = null;
+        NotificationManager manager = context.getSystemService(NotificationManager.class);
+        for (StatusBarNotification notification : manager.getActiveNotifications()) {
+            if (notification.getNotification().extras.containsKey("piRemoteThread")) {
+                manager.cancel(notification.getTag(), notification.getId());
+            }
+        }
+    }
+
     static synchronized void resume(Context context, boolean active) {
         resumed = active;
         clearVisible(context);

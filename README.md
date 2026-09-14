@@ -25,7 +25,7 @@ npm run check
 npm run android:test --workspace=kenan
 ```
 
-`npm run check` launches builds, static checks, and independent suites together. It takes about four seconds on GMKtec. GitHub runs the same gate from a private persistent checkout whose tracked source is reset for every event. Its lock-validated `node_modules` tree survives runner and machine restarts. The Android project keeps its Gradle build because it has no useful dependency boundary with the JavaScript workspaces.
+`npm run check` launches builds, static checks, and independent suites together. [`scripts/run-jobs.mjs`](scripts/run-jobs.mjs) streams labelled output immediately, bounds each job to two minutes, and fails an exited job whose descendants keep its output streams open. This prevents a detached test runtime from silently keeping publication alive after the tests finish. GitHub runs the same gate from a private persistent checkout whose tracked source is reset for every event. Its lock-validated `node_modules` tree survives runner and machine restarts. The Android project keeps its Gradle build because it has no useful dependency boundary with the JavaScript workspaces.
 
 [`config/packages.json`](config/packages.json) owns the Pi package order every account loads, including upstream `@pi-plugins/claude-oauth` 0.3.5 and the browser runtime entrypoint. The Claude adapter preserves Pi's model-specific output limits and request-specific feature betas. Those upstream fixes replace the temporary `hara-seihun/pi-plugins` fork. That entrypoint loads `pi-agent-browser-native` and pins `agent-browser` from the same immutable dependency tree. [`config/skills.json`](config/skills.json) lists the first-party skills and [`config/tools.json`](config/tools.json) the commands. The checks reject unknown or misplaced entries, including a Pi Remote context observer that is not last.
 
@@ -37,12 +37,9 @@ On September 12, 2026, a controlled replay of a failed Remote greeting isolated 
 
 `deploy/publication submit SHA` hands a source commit to the durable worker for integration and deployment on both hosts. Its host wrappers call `deploy/host`, which reads a small host file naming the fleet account and any local packages and skills. Persons come from Pi Remote's registry. The scripts under [`deploy`](deploy) refuse an uncommitted checkout, serialize work from the same source tree, and enforce a 50-second deadline. Commit-addressed releases share one production dependency tree and switch atomically. See [`docs/deployment.md`](docs/deployment.md).
 
-Pi Remote environments are independent servers:
+Pi Remote exposes one authenticated router entrance. A person unlocks there, then `GET /v1/environments` returns only the endpoints allowed by her `remoteAccess` registry entry. The default is this host alone. Host configuration owns endpoint IDs, names, icons and per-person supervisor upstreams; no endpoint name grants access.
 
-- `local` runs Personal and Home threads on GMKtec.
-- `converge` runs one work profile directly on Converge.
-
-The Kenan drawer switches between them, and would between more. The browser client reads the list from the host that served it; the Android build embeds its own list from a file named in `apps/kenan/android/local.properties`, which is not committed.
+Browser and Android clients switch endpoints through same-origin `/v1/remotes/<id>` routes. Android embeds only `piRemoteRouterUrl`, not endpoint lists or SSH credentials. A name in a header or query is a hint, never authentication. Router sessions replace the previous name-only identity contract. See [gateway configuration](docs/deployment.md#gateway-access-and-host-boundaries).
 
 ## Architecture
 

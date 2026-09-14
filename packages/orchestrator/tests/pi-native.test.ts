@@ -74,6 +74,25 @@ it("retains native history, resources, thread tools and RPC session replacement"
   expect(exits).toBe(2);
 });
 
+it("acknowledges compaction admission before its durable terminal result and replays that result", async () => {
+  const cwd = directory(), events: PiEvent[] = [];
+  let settled!: (event: PiEvent) => void;
+  const completion = new Promise<PiEvent>(resolve => { settled = resolve; });
+  const options: PiSessionOptions = { cwd, args: [], env: { PI_CODING_AGENT_DIR: join(cwd, "agent"), PI_OFFLINE: "1" }, threadId: "compact-thread", sessionFile: join(cwd, "native.jsonl") };
+  const session = await openPiSession(options, event => { events.push(event); if (event.type === "command_settled") settled(event); }, () => {});
+  try {
+    const command = { type: "compact", id: "compact-once" };
+    await session.command(command);
+    expect(events.find(event => event.type === "response" && event.id === command.id)).toMatchObject({ success: true, data: { accepted: true } });
+    await completion;
+    const before = events.filter(event => event.type === "command_settled").length;
+    await session.command(command);
+    expect(events.at(-1)).toMatchObject({ type: "response", id: command.id, success: false });
+    expect(events.filter(event => event.type === "command_settled")).toHaveLength(before);
+    expect(readFileSync(options.sessionFile, "utf8")).toContain("thread_command_result");
+  } finally { await session.close(); }
+});
+
 it("adopts a completed fork from its source receipt after losing the replacement event", async () => {
   const cwd = directory(), events: PiEvent[] = [];
   const options: PiSessionOptions = { cwd, args: [], env: { PI_CODING_AGENT_DIR: join(cwd, "agent"), PI_OFFLINE: "1" }, threadId: "fork-thread", sessionFile: join(cwd, "source.jsonl") };

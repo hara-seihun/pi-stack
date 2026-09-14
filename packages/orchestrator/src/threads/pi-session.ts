@@ -12,6 +12,7 @@ import { threadSpeed } from "./pi-speed.js";
 import { PiCommandReceipts } from "./pi-command-receipts.js";
 import { resolveSessionModel } from "../extension/routing.js";
 import { isolatedPiContext } from "../host/isolated-context.js";
+import { piCwdAdmission, requirePiCwd } from "./pi-cwd.js";
 
 const scopeKey = Symbol.for("pi-stack.session-environment");
 const globals = globalThis as typeof globalThis & { [scopeKey]?: AsyncLocalStorage<NodeJS.ProcessEnv> };
@@ -21,6 +22,8 @@ const inputCommands = new Set(["prompt", "steer", "follow_up"]);
 const retry = { enabled: true, maxRetries: 6, baseDelayMs: 5_000 };
 
 export const openPiSession: OpenPiSession = async (options, output, exit) => {
+  const admission = piCwdAdmission(options.env.PI_REMOTE_WORKSPACES);
+  options = { ...options, cwd: requirePiCwd(admission, options.cwd, "thread.cwd") };
   const env: NodeJS.ProcessEnv = { ...process.env, ...options.env, PI_THREAD_ID: options.threadId };
   for (const key of Object.keys(env)) if (key.startsWith("PI_STACK_CORE_")) delete env[key];
   return piEnvironmentScope.run(env, async () => {
@@ -32,9 +35,10 @@ export const openPiSession: OpenPiSession = async (options, output, exit) => {
       if (env.PI_THREAD_REQUIRE_SESSION === "1") throw new Error(`Native Pi session is missing: ${options.sessionFile}`);
       seedPiSession(options.sessionFile, options.cwd);
     }
-    assertPiSessionFile(options.sessionFile);
+    requirePiCwd(admission, assertPiSessionFile(options.sessionFile).cwd, "native header.cwd");
     let acceptedContext: unknown;
     const factory: CreateAgentSessionRuntimeFactory = async ({ cwd, sessionManager, sessionStartEvent }) => {
+      cwd = requirePiCwd(admission, cwd, "runtime.cwd");
       preparePiSession(sessionManager);
       const isolated = await isolatedPiContext({ ...options, cwd, sessionFile: sessionManager.getSessionFile()! }, env);
       const services = await createAgentSessionServices({ cwd, agentDir: isolated?.agentDir ?? agentDir,
@@ -148,8 +152,16 @@ export const openPiSession: OpenPiSession = async (options, output, exit) => {
     }
     const newSession = runtime.newSession.bind(runtime), switchSession = runtime.switchSession.bind(runtime), fork = runtime.fork.bind(runtime);
     runtime.newSession = (...args) => replace(() => newSession(...args));
-    runtime.switchSession = (...args) => { assertPiSessionFile(args[0]); return replace(() => switchSession(...args)); };
+    runtime.switchSession = (path, options) => {
+      const header = assertPiSessionFile(path), cwdOverride = requirePiCwd(admission, options?.cwdOverride ?? header.cwd, "switch.cwd");
+      return replace(() => switchSession(path, { ...options, cwdOverride }));
+    };
     runtime.fork = (...args) => replace(() => fork(...args));
+    const importFromJsonl = runtime.importFromJsonl.bind(runtime);
+    runtime.importFromJsonl = (path, override) => {
+      const cwd = requirePiCwd(admission, override ?? assertPiSessionFile(path).cwd, "import.cwd");
+      return replace(() => importFromJsonl(path, cwd));
+    };
     try {
       const sdk = join(getPackageDir(), "dist");
       const { runSharedRpcMode } = await import(pathToFileURL(join(sdk, "modes/rpc/shared-rpc-mode.js")).href) as { runSharedRpcMode: SharedRpc };
@@ -193,9 +205,12 @@ export const openPiSession: OpenPiSession = async (options, output, exit) => {
             return;
           }
           if (command.type === "set_model") {
-            const selection = resolveSessionModel(runtime.session.modelRuntime.getAvailableSnapshot(), String(command.provider), String(command.modelId), env);
+            const selection = resolveSessionModel(runtime.session.modelRuntime.getModels(), String(command.provider), String(command.modelId), env);
             if (!selection.ok) { response(false, selection.error); return; }
-            command = { ...command, provider: selection.model.provider };
+            try { await runtime.session.setModel(selection.model); response(true, undefined, selection.model); }
+            catch (error) { response(false, error instanceof Error ? error.message : String(error)); }
+            checkpointPiSession(runtime.session.sessionManager);
+            return;
           }
           if (inputCommands.has(command.type)) {
             if (execution.blocked || cancelling || replacing) { response(false, "Local execution has not confirmed cancellation"); return; }

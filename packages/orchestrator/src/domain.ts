@@ -93,6 +93,7 @@ export interface UsageEntry {
 export type UsageTotal = Pick<UsageEntry, "accountId" | "model" | "component" | "tokens">;
 
 export interface OrchestratorConfig {
+  readonly modelBrokerUrl?: string;
   readonly listenHost?: string;
   readonly profiles: Readonly<Record<string, readonly ModelCandidate[]>>;
   readonly backgroundSpendFraction: number;
