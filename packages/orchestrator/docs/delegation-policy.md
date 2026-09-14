@@ -1,8 +1,8 @@
 # Delegation guidance
 
-[`src/delegation-policy.ts`](../src/delegation-policy.ts) owns the shared tool-description policy for Remote's `thread_delegate` and the fleet's `fleet_dispatch`. It is exported through `pi-orchestrator/api`. Registration includes it only where delegation is available. External Remote threads and fleet runs retain single-level delegation. The [Pi engine](pi-core.md) installs the same policy on every engine-owned agent, so native Pi children can delegate within their own tree.
+[`src/delegation-policy.ts`](../src/delegation-policy.ts) owns the shared tool-description policy for `thread_spawn`. It is exported through `pi-orchestrator/api`. Remote, fleet lanes and ordinary subthreads use the same persistent thread operation rather than host-specific delegation tools. Every ordinary thread can spawn another thread. The [unified thread design](../../../docs/threads.md) owns lifecycle and delivery semantics, and [Pi session execution](pi-sessions.md) owns tool registration.
 
-Regular agents can choose delegation for independent work while they make useful progress locally. Immediate blocking tasks stay local. The policy covers task decomposition, non-overlapping edits, automatic result delivery and integration. Model-selection descriptions do not establish a reason to delegate. Thinking level does not change this policy.
+Agents can choose delegation for independent work while they make useful progress locally. Immediate blocking tasks stay local. The policy covers task decomposition, non-overlapping edits, automatic result delivery and integration. Model-selection descriptions do not establish a reason to delegate. Thinking level does not change this policy. The unified-thread cutover does not change the policy text.
 
 PiStack Voice retains its separate [`delegation-policy.md`](../../../apps/remote/server/voice/delegation-policy.md), loaded by `voiceInstructions()` during Voice negotiation. Its computer-work handoffs keep the voice model available for conversation. A backing text agent, including a meeting-associated root, uses the regular optional policy. Remote adds room/browser handoff details to the tool description only for meeting-associated threads.
 
@@ -23,7 +23,7 @@ Most task-selection and decomposition wording is copied verbatim. Pi Stack chang
 - Forked-workspace and uploaded-change wording becomes agent-workspace and shared-filesystem wording. Results include the changed paths and commit.
 - `wait_agent` guidance becomes automatic-delivery guidance. A parent can end its turn and resume on the result rather than poll. Failures and unfinished work remain visible.
 - Verification guidance respects the user's request and applicable instructions.
-- External Remote/fleet paths retain their model selection, single-level delegation, thread reuse and durable result delivery. The Pi engine reuses the policy for recursive core-owned children and owns their result delivery.
+- Remote and fleet model selection remains available through thread settings. Orchestrator owns persistent parent links, continuation through ordinary sends and durable completion delivery for every nesting level.
 
 ## License and attribution
 
@@ -35,6 +35,6 @@ The adapted policy is licensed under Apache-2.0. The complete upstream [license]
 
 ## Checks and deployment
 
-Remote's thread-context tests check that root tools include the shared policy, meeting-only details stay out of regular threads, and children have no delegation tool. Fleet result tests check the same policy reaches `fleet_dispatch`. These checks compare registration against the shared owner rather than duplicating prompt text.
+Tool-registration checks compare the installed description with the shared owner rather than duplicating prompt text. Voice tests keep meeting-only handoff details out of regular thread delegation.
 
-Release through the [stack deployment procedure](../../../docs/deployment.md). New Remote runtimes load the tool description from the selected release; active turns finish on their loaded generation. New fleet runs use the selected release, while existing runs retain their recorded release.
+Release through the [stack deployment procedure](../../../docs/deployment.md). New Pi sessions load the tool description from the selected release; active turns finish on their loaded generation.

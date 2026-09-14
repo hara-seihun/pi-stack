@@ -2,9 +2,9 @@
 
 ## Stored history reading and search
 
-For a Remote thread with a [session record](../../docs/agent-cores.md), title/ID lookup selects its portable `conversation.jsonl` once it exists. This is the activity history, including tool records. An explicit native JSONL path reads Pi's original session file. Pi child inspection and control use the session APIs; the external Remote-thread listing below describes separately registered threads.
+`read-thread` reads a thread's native Pi JSONL. Native history is authoritative for conversation entries, tool activity and branches. There is no portable conversation journal.
 
-`read-thread` reads the current session and other sessions through the same local command. It makes no model calls and has no recall cache or index. `self` resolves Pi's built-in `PI_SESSION_FILE`, refreshed for each shell-tool invocation. An explicit JSONL path works in ordinary shells and fleet workers without a Remote database. Remote titles and ids resolve through the current person's supervisor database.
+The command reads the current session and other threads without model calls, a recall cache or an index. `self` resolves Pi's built-in `PI_SESSION_FILE`, refreshed for each shell-tool invocation. An explicit JSONL path works in ordinary shells and fleet workers without a thread database. Titles and IDs resolve through the database owned by that thread service.
 
 ```bash
 read-thread --path self
@@ -26,19 +26,21 @@ The default view omits assistant thinking and successful tool results. `--work` 
 
 `--search TEXT` scans complete JSONL records, including tool results, thinking and fields omitted from the rendered view. Matching is case-insensitive literal text unless `--regex` selects a JavaScript regular expression. Search returns one excerpt per matching record, at most 1,000 source characters near the first match, with the source path, line and entry id. It defaults to 20 matches and accepts at most 50. `--offset` pages matches; an explicit continuation marker reports another page. Direct `read`, `rg`, or `--raw` can inspect the complete source. No reader writes or deletes session history; `--output` writes only the requested output file.
 
-Remote discovery reads `$PI_REMOTE_DATA/supervisor.sqlite3`. In an SSH shell, it reads the current Unix user's `PI_REMOTE_DATA` from `/var/lib/pi-remote/persons/<user>.json`. If a request failed before Pi wrote a session file, the default reader displays retained supervisor requests and events, explicitly labelled as supervisor records. JSONL-only options report that no transcript exists. `self` reports an absent persistent file rather than selecting another thread. On a fresh session, Pi may not flush the file until the first assistant message.
+For title and ID lookup, `--db FILE` wins. Otherwise discovery checks `PI_THREAD_DATABASE`, then `PI_REMOTE_DATA/threads.sqlite3`. In an SSH shell it can read the current Unix user's `PI_REMOTE_DATA` from `/var/lib/pi-remote/persons/<user>.json`. Without those settings it uses `$XDG_DATA_HOME/pi-orchestrator/threads.sqlite3`, or `~/.local/share/pi-orchestrator/threads.sqlite3` when `XDG_DATA_HOME` is unset.
+
+If a request failed before Pi wrote a session file, the default reader displays retained thread inputs and labels them as records rather than a model transcript. JSONL-only options report that no transcript exists. `self` reports an absent persistent file rather than selecting another thread. On a fresh session, Pi may not flush the file until the first assistant message.
 
 Stored JSONL is the history source of truth. Compaction changes model context, not this reader's access to earlier entries. Removing VCC does not require deleting or converting JSONL, and reading history does not depend on VCC state.
 
-[`contract.mjs`](contract.mjs) owns the reader's command syntax, option descriptions and exported `HISTORY_MARKER`, `pi-stored-jsonl-history`. It generates `read-thread --help`; `read-thread --contract` emits the same contract as JSON without resolving any session or database. The shared Pi package reads that contract once per extension instance and adds generated JSON metadata containing it and the current session file. The metadata stays byte-identical while the branch advances; it changes only when the session file or loaded contract changes. It contains command facts, not a separate behavioral prompt. An incompatible native compaction checkpoint does not replace the stored history authority: its notice identifies checkpoint availability, while the retained tail and raw JSONL remain accessible.
+[`packages/orchestrator/src/threads/history.mjs`](../../packages/orchestrator/src/threads/history.mjs) owns native parsing, branch selection and timestamps for the reader and thread service. [`contract.mjs`](contract.mjs) owns command syntax, option descriptions and the exported `HISTORY_MARKER`, `pi-stored-jsonl-history`. It generates `read-thread --help`; `read-thread --contract` emits the same contract as JSON without resolving a session or database. The shared Pi package reads that contract once per extension instance and adds generated JSON metadata containing it and the current session file. The metadata stays byte-identical while the branch advances. It contains command facts, not a separate behavioral prompt. An incompatible native compaction checkpoint does not replace stored history. Its notice identifies checkpoint availability, while the retained tail and raw JSONL remain accessible.
 
-## Native thread tools and pages
+## Thread pages
 
-Pi Remote registers `thread_read` and `thread_subagents` for coordinators and children. Both call this reader locally without inference. Children can inspect threads but cannot delegate.
+Every thread can list direct subthreads and read persisted history through the common thread API. These operations do not start the target thread. The shell pages use the same native-history parser and owner database.
 
-`thread_subagents` accepts `thread`, `includeIdle`, `limit` and `cursor`. The default thread is the caller, the default limit is 20, and idle inclusion defaults to false. It lists direct children by their latest user or assistant message, not by runtime heartbeats or title updates. `includeIdle: true` includes settled and archived children. Each row includes its transcript ID, model, state and last-message time. The frontend still shows only active children. `nextCursor` continues a bounded snapshot with the same thread and idle filter.
+`--subagents` lists direct subthreads by their latest user or assistant message, not by runtime heartbeats or title updates. The default limit is 20 and idle inclusion defaults to false. `--include-idle` includes settled and archived subthreads. Each row includes its thread ID, model, state and last-message time. `nextCursor` continues a bounded snapshot with the same parent and idle filter.
 
-`thread_read` accepts a title, UUID or unique prefix in `thread`. Its default page contains the latest ten visible transcript entries, in chronological order within that page. `includeTools` defaults to true. `nextCursor` reads the preceding page on the same active branch. New messages do not shift an ongoing read. A changed branch produces an explicit restart error. Deliberation is omitted from these pages. A preview marked `truncated` supplies `entryId`; reading that entry with `offset` and `maxChars` returns `nextOffset` until every character has been read. Threads without a Pi session file return labelled supervisor events.
+`--json` accepts a title, UUID, unique prefix, `self` or explicit JSONL path. Its default page contains the latest ten visible transcript entries, in chronological order within that page. `nextCursor` reads the preceding page on the same active branch. New messages do not shift an ongoing read. A changed branch produces an explicit restart error. Deliberation is omitted. A preview marked `truncated` supplies `entryId`; reading that entry with `offset` and `maxChars` returns `nextOffset` until every character has been read. Threads without a Pi session file return labelled thread inputs.
 
 The same operations are available from the shell:
 
@@ -51,7 +53,7 @@ read-thread --json --work --entry ENTRY --offset 0 --max-chars 16000 THREAD
 read-thread --json --work --limit 10 self
 ```
 
-`--json` also accepts self or an explicit JSONL path without a Remote database. `--subagents` requires Remote discovery; an omitted selector or `self` uses `PI_REMOTE_SESSION_ID`. Shell JSON pages omit successful tool results unless `--work` is present, while the native `thread_read` tool includes them by default. Deliberation remains omitted from pages in either mode.
+`--json` accepts `self` or an explicit JSONL path without a thread database. `--subagents` requires database discovery; an omitted selector or `self` uses `PI_THREAD_ID`, then `PI_REMOTE_SESSION_ID`. Shell JSON pages omit successful tool results unless `--work` is present, while the model-facing `thread_read` tool includes them by default. Deliberation remains omitted from pages in either mode.
 
 `--limit` defaults to 10 transcript entries with a maximum of 20, or 20 children with a maximum of 100. Search retains its separate default of 20 matches and maximum of 50. `--offset` counts characters with `--json --entry` and matching records with `--search`. Paged reads reject search, raw/full output, alternate branch selection, time/tail filters and output-file flags instead of silently ignoring them. `--entry` chunks use `nextOffset`; ordinary pages use `nextCursor`.
 

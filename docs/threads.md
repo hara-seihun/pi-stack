@@ -4,7 +4,11 @@
 
 Orchestrator owns persistent threads, input admission, execution state and durable message delivery. Remote, fleet lanes, agents and the CLI use the same thread operations. Pi executes individual sessions. There is no selectable core or separate child runtime, scheduler, result relay or registry.
 
+Pi is the only session engine. Astra, Sol, Terra, Luna, Fable and Opus are model choices, while retained names of other engines are import provenance. Session, settings, run and CLI operations do not accept an engine selector.
+
 A thread has a stable ID, optional parent ID, cwd, native Pi transcript reference and settings. Its execution state describes only its own work. An idle parent with active children is idle. Native transcripts remain authoritative history; projections and live output are not additional conversation stores.
+
+The implementation contracts are documented in [Pi session execution](../packages/orchestrator/docs/pi-sessions.md) and the [thread service](../packages/orchestrator/docs/thread-service.md).
 
 Shared-process execution remains essential. Hundreds of threads must not create hundreds of Node processes. Preserve existing machine, Unix-person, encrypted-storage, isolated-application and root-repair boundaries. Runtime resources may unload while durable threads persist.
 
