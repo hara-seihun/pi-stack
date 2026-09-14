@@ -92,7 +92,12 @@ export function adoptImportProvenance(options: ImportProvenanceOptions): Result<
       const list = candidates.get(key) ?? [];
       list.push({ value: fingerprint(value), path, entryId }); candidates.set(key, list);
     }
-    function matched(message: Row): Match | undefined { return candidates.get(messageKey(message))?.find(candidate => subset(fingerprint(message), candidate.value)); }
+    function matched(message: Row): Match | undefined {
+      const list = candidates.get(messageKey(message));
+      if (!list) return undefined;
+      const value = fingerprint(message);
+      return list.find(candidate => subset(value, candidate.value));
+    }
     function references(value: any): void {
       if (!value || typeof value !== "object") return;
       if (!indexingNative && typeof value.role === "string" && value.content !== undefined) messageKeys.add(messageKey(value));
