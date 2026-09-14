@@ -1,63 +1,51 @@
 package works.kenan.piremote.kenan;
 
-import com.sun.net.httpserver.HttpServer;
-import java.net.InetSocketAddress;
-import java.nio.charset.StandardCharsets;
-import java.util.concurrent.atomic.AtomicInteger;
-import java.util.concurrent.atomic.AtomicReference;
+import java.io.IOException;
+import java.util.concurrent.TimeUnit;
+import okhttp3.mockwebserver.MockResponse;
+import okhttp3.mockwebserver.MockWebServer;
+import okhttp3.mockwebserver.RecordedRequest;
+import org.junit.Rule;
 import org.junit.Test;
 import static org.junit.Assert.*;
 
 public class RemoteTransportTest {
+    @Rule public final MockWebServer server = new MockWebServer();
+
     @Test public void authenticatesDiscoveryAndProxiedPollsWithoutUrlCredentials() throws Exception {
-        HttpServer server = HttpServer.create(new InetSocketAddress("127.0.0.1", 0), 0);
-        AtomicReference<String> headers = new AtomicReference<>();
-        server.createContext("/", exchange -> {
-            headers.set(exchange.getRequestHeaders().getFirst("x-pi-remote-user") + ":"
-                + exchange.getRequestHeaders().getFirst("x-pi-remote-session") + ":" + exchange.getRequestURI());
-            byte[] body = "{\"ok\":true}".getBytes(StandardCharsets.UTF_8);
-            exchange.sendResponseHeaders(200, body.length);
-            try (var output = exchange.getResponseBody()) { output.write(body); }
-        });
-        server.start();
-        try {
-            var identity = new RemoteSession.Identity("person", "test-session");
-            for (String path : new String[] { "/v1/environments", "/remotes/work/v1/notifications?after=2" }) {
-                assertTrue(RemoteTransport.get("http://127.0.0.1:" + server.getAddress().getPort() + path, identity).getBoolean("ok"));
-                assertEquals("person:test-session:" + path, headers.get());
-            }
-        } finally { server.stop(0); }
+        var identity = new RemoteSession.Identity("person", "test-session");
+        for (String path : new String[] { "/v1/environments", "/remotes/work/v1/notifications?after=2" }) {
+            server.enqueue(new MockResponse().setBody("{\"ok\":true}"));
+            assertTrue(RemoteTransport.get(server.url(path).toString(), identity).getBoolean("ok"));
+            RecordedRequest request = server.takeRequest(1, TimeUnit.SECONDS);
+            assertNotNull(request);
+            assertEquals("GET", request.getMethod());
+            assertEquals(path, request.getPath());
+            assertEquals("person", request.getHeader("x-pi-remote-user"));
+            assertEquals("test-session", request.getHeader("x-pi-remote-session"));
+        }
     }
 
-    @Test public void missingSessionNeverConnectsAndRedirectsNeverForwardIt() throws Exception {
-        HttpServer server = HttpServer.create(new InetSocketAddress("127.0.0.1", 0), 0);
-        AtomicInteger requests = new AtomicInteger();
-        server.createContext("/", exchange -> {
-            requests.incrementAndGet();
-            exchange.getResponseHeaders().set("Location", "/destination");
-            exchange.sendResponseHeaders(302, -1);
-            exchange.close();
-        });
-        server.start();
-        try {
-            String url = "http://127.0.0.1:" + server.getAddress().getPort() + "/v1/environments";
-            assertThrows(RemoteTransport.AccessDenied.class, () -> RemoteTransport.get(url, null));
-            assertEquals(0, requests.get());
-            assertThrows(java.io.IOException.class, () -> RemoteTransport.get(url, new RemoteSession.Identity("person", "token")));
-            assertEquals(1, requests.get());
-        } finally { server.stop(0); }
+    @Test public void missingSessionNeverConnects() throws Exception {
+        server.enqueue(new MockResponse().setBody("{\"ok\":true}"));
+        assertThrows(RemoteTransport.AccessDenied.class,
+            () -> RemoteTransport.get(server.url("/v1/environments").toString(), null));
+        assertEquals(0, server.getRequestCount());
+    }
+
+    @Test public void redirectsNeverForwardSession() throws Exception {
+        server.enqueue(new MockResponse().setResponseCode(302).setHeader("Location", "/destination"));
+        server.enqueue(new MockResponse().setBody("{\"ok\":true}"));
+        assertThrows(IOException.class, () -> RemoteTransport.get(
+            server.url("/v1/environments").toString(), new RemoteSession.Identity("person", "token")));
+        assertEquals(1, server.getRequestCount());
     }
 
     @Test public void deniedSessionHasAnExplicitOutcome() throws Exception {
-        HttpServer server = HttpServer.create(new InetSocketAddress("127.0.0.1", 0), 0);
-        server.createContext("/", exchange -> {
-            exchange.sendResponseHeaders(403, -1);
-            exchange.close();
-        });
-        server.start();
-        try {
+        for (int status : new int[] { 401, 403, 423 }) {
+            server.enqueue(new MockResponse().setResponseCode(status));
             assertThrows(RemoteTransport.AccessDenied.class, () -> RemoteTransport.get(
-                "http://127.0.0.1:" + server.getAddress().getPort(), new RemoteSession.Identity("person", "token")));
-        } finally { server.stop(0); }
+                server.url("/").toString(), new RemoteSession.Identity("person", "token")));
+        }
     }
 }
