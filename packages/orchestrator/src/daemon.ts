@@ -83,10 +83,10 @@ export class Daemon {
     const imported=importFleetThreads(this.threads,this.store.db,{sessionsDir:join(dirname(this.ledgerPath),"threads")});
     if(!imported.ok)throw new Error(imported.error.message);
     for(const row of this.store.db.prepare("SELECT value FROM control WHERE key LIKE 'thread-boundary:%'").all() as {value:string}[]){const boundary=JSON.parse(row.value);this.isolatedService(boundary.cwd,boundary.context);}
-    for(const service of this.isolated.values()){const result=await service.start();if(!result.ok)throw new Error(result.error.message);}
     for(const run of this.store.runs(["queued","starting","running"]))if(this.completionPool.owns(run))this.completionPool.start(run);
     const server=createServer((req,res)=>void this.request(req,res));
     await new Promise<void>((resolve,reject)=>{server.once("error",reject);server.listen(PORT,this.config.listenHost??HOST,resolve);});
+    for(const service of this.isolated.values()){const result=await service.start();if(!result.ok)throw new Error(result.error.message);}
     const started=await this.threads.start();if(!started.ok)throw new Error(started.error.message);
     const timer=setInterval(()=>void this.reconcile().catch((error)=>console.error("reconcile:",error)),this.config.reconcileIntervalMs);
     const completionTimer=setInterval(()=>this.completionPool.tick(),1_000);
@@ -381,7 +381,7 @@ export class Daemon {
         const threads:Thread[]=[];
         for(let i=0;i<count;i++){
           const result=await this.threads.spawn({requestId:crypto.randomUUID(),cwd:lane.cwd,title:lane.id,message:await this.lanePrompt(lane),
-            settings:{model:this.profileModel(lane.profile)},admission:input.admission??lane.admission??"force",metadata:{source:"direct",laneId:lane.id}});
+            settings:{model:this.profileModel(lane.profile),...input.settings},admission:input.admission??lane.admission??"force",metadata:{source:"direct",laneId:lane.id}});
           if(!result.ok)return json(res,400,result);threads.push(result.value);
         }
         return json(res,201,{threads});

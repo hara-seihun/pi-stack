@@ -36,19 +36,10 @@ it("stops a failed batch and includes the threads already accepted",async()=>{
   expect(JSON.parse(String(vi.mocked(console.log).mock.calls[0]?.[0]))).toEqual({ok:false,error:{code:"unavailable",message:"Paused"},threads:[{id:"accepted"}]});
 });
 
-it("spawns a declared lane through the thread owner",async()=>{
-  const calls=transport([{lanes:[{id:"review",prompt:"review work",cwd:"/repo",profile:"standard",weight:1}]}]);
+it("lets the daemon resolve lane prompts, doctrine and admission before spawning threads",async()=>{
+  const calls=transport([{threads:[{id:"review-thread"}]}]);
   await dispatch(["wave","review"]);
-  expect(calls).toEqual([
-    {path:"/v1/status",method:"GET",body:undefined},
-    {path:"/v1/threads/spawn",method:"POST",body:{requestId:expect.any(String),message:"review work",cwd:"/repo",title:"review",metadata:{laneId:"review"},admission:"force"}},
-  ]);
-});
-
-it("keeps repair lane admission with the daemon",async()=>{
-  const calls=transport([{lanes:[{id:"repair",repair:{readinessCommand:"probe"}}]}]);
-  await expect(dispatch(["wave","repair"])).rejects.toThrow("Repair lanes");
-  expect(calls).toHaveLength(1);
+  expect(calls).toEqual([{path:"/v1/wave",method:"POST",body:{lane:"review",count:1}}]);
 });
 
 it.each([

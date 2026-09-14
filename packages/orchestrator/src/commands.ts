@@ -8,7 +8,6 @@ import { readUsageEvidence } from "./usage-evidence.js";
 import { randomUUID } from "node:crypto";
 import { createThreadClient } from "./threads/http.js";
 import type { Delivery, Result, SettingsOverrides, SpawnThread, Thread, ThreadState } from "./threads/contracts.js";
-import type { LaneSpec } from "./domain.js";
 import { providerOAuth, transactSharedCredential } from "./auth/shared-oauth.js";
 import { builtinProviders } from "@earendil-works/pi-ai/providers/all";
 import { AccountTransfer, transferEndpoint, transferPeer } from "./auth/account-transfer.js";
@@ -104,10 +103,7 @@ export async function dispatch(argv:string[]):Promise<void>{
       await spawnThreads({message,cwd:named.get("cwd")??process.cwd(),title:named.get("title"),parentId:named.get("parent"),settings,admission},count);
     }else{
       const id=named.get("lane")??positional[0];if(!id)throw new Error("wave requires a lane");
-      const status=await request("/v1/status") as {lanes:LaneSpec[]},lane=status.lanes.find(candidate=>candidate.id===id);
-      if(!lane)throw new Error(`lane ${id} not found`);
-      if(lane.repair)throw new Error("Repair lanes admit only from their independent readiness probe");
-      await spawnThreads({message:lane.prompt,cwd:lane.cwd,title:lane.id,metadata:{laneId:lane.id},settings,admission},count);
+      output(await request("/v1/wave","POST",{lane:id,count,settings,...(force||background?{admission}:{})}));
     }
     return;
   }
