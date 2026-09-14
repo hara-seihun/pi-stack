@@ -29,11 +29,12 @@ The stack is the same on every machine. A host supplies three things.
   "version": 1,
   "fleetUser": "kenan",
   "environments": [
-    { "id": "local", "name": "Local" },
+    { "id": "local", "name": "Local", "icon": "house" },
     {
       "id": "converge",
       "name": "Converge",
-      "upstreams": { "kenan": "http://127.0.0.1:18789" }
+      "icon": "cloud",
+      "upstreams": { "kenan": "http://127.0.0.1:18792" }
     }
   ],
   "packages": ["/etc/nixos/pi-agent/extensions/scratch-updates"],
@@ -41,7 +42,7 @@ The stack is the same on every machine. A host supplies three things.
 }
 ```
 
-`environments` is the router's endpoint catalog. Entries have `id`, `name`, optional `icon`, and remote entries have `upstreams`. This host's own entry has no `upstreams`. Each remote map names a person and the absolute HTTP or HTTPS origin of her supervisor. Origins cannot contain credentials, paths, queries or fragments. The example port `18789` is a host-owned forward to the remote `kenan` supervisor, not its router. Configure the actual listener before granting access. Without a catalog, the router supplies only its own endpoint. `PI_STACK_HOST_FILE` selects another host file for tests or custom installations. Restart the router after configuration changes.
+`environments` is the router's endpoint catalog. Entries have `id`, `name`, optional `icon`, and remote entries have `upstreams`. This host's own entry has no `upstreams`. Each remote map names a person and the absolute HTTP or HTTPS origin of her supervisor. Origins cannot contain credentials, paths, queries or fragments. The example port `18792` is a host-owned forward to the remote `kenan` supervisor, not its router. Configure the actual listener before granting access. Without a catalog, the router supplies only its own endpoint. `PI_STACK_HOST_FILE` selects another host file for tests or custom installations. Restart the router after configuration changes.
 
 `fleetUser` runs `pi-orchestrator@<user>.service`. `packages` are extra Pi packages every account loads, placed after the reviewed ones and before the Pi Remote context observer. `skills` are extra skill directories linked into every account's skill directory under their own names. Both are optional and point at paths the host owns.
 

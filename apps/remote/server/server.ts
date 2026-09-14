@@ -7,6 +7,7 @@ import { parseRunKey } from "./agent-runs";
 import { AgentHost } from "./agent-hosts";
 import { ORCHESTRATOR_CATALOG, OrchestratorClient, catalogAgentType, createSharedImageGenerationService, isCoreId, type CoreAgent, type CoreId, type SharedImageGenerationService, type PlanUsageSnapshot } from "pi-orchestrator/api";
 import { SessionCores } from "./session-cores";
+import { createWorkspaceAdmission } from "./workspace-admission";
 import { InlineImages } from "./inline-images";
 import { planCards } from "./catalog-presentation";
 import { readMachineUsage } from "./machine-usage";
@@ -166,10 +167,14 @@ const workspaceDefinitions = JSON.parse(process.env.PI_REMOTE_WORKSPACES ?? JSON
   { id: "home", name: "Home", path: HOME },
   { id: PRIVATE_ID, name: PRIVATE_NAME, path: PRIVATE_DIR },
 ])) as Array<{ id: string; name: string; path: string }>;
-const workspaces = new Map(workspaceDefinitions
-  .filter((workspace) => existsSync(workspace.path))
-  .map((workspace) => [workspace.id, workspace]));
-for (const workspace of workspaces.values()) workspace.path = realpathSync(workspace.path);
+const configuredWorkspaceAdmission = createWorkspaceAdmission(workspaceDefinitions);
+if (!configuredWorkspaceAdmission.ok) throw new Error(configuredWorkspaceAdmission.error.message);
+const workspaceAdmission = configuredWorkspaceAdmission.value;
+const workspaces = workspaceAdmission.workspaces;
+for (const destination of THREAD_DESTINATIONS.values()) {
+  const admitted = workspaceAdmission.resolve(destination.workspaceId);
+  if (!admitted.ok) throw new Error(`Thread profile ${destination.id}: ${admitted.error.message}`);
+}
 
 mkdirSync(DATA, { recursive: true, mode: 0o700 });
 mkdirSync(join(DATA, "sessions"), { recursive: true, mode: 0o700 });
@@ -923,7 +928,7 @@ function publicSession(row: any, prepared?: PreparedQueue): Session {
   const rt = runtimes.get(row.id);
   const subagent = subagentIdentity(row.id);
   const preset = workspaces.get(row.workspace_id);
-  const cwd = preset?.path ?? row.workspace_id;
+  const cwd = preset?.path ?? (isAbsolute(String(row.workspace_id)) ? String(row.workspace_id) : "");
   const toolNames = rt ? [...rt.activeTools.values()] : [];
   const durableQueue = prepared ? [...prepared.counts].map(([delivery, count]) => ({ delivery, count })) : db.query(`
     SELECT delivery,count(*) count FROM work_items
@@ -960,7 +965,7 @@ function publicSession(row: any, prepared?: PreparedQueue): Session {
     ...(subagent ? { subagent: { parentSessionId: subagent.parent_session_id, model: subagent.model } } : {}),
     name: String(row.name ?? ""),
     cwd,
-    workspaceName: preset?.name ?? cwd,
+    workspaceName: preset?.name ?? String(row.workspace_id),
     environment: String(row.profile_id ?? ""),
     state: String(row.state),
     activity,
@@ -970,7 +975,7 @@ function publicSession(row: any, prepared?: PreparedQueue): Session {
     updatedAt: String(row.updated_at),
     revision: Number(row.revision ?? 0),
     idleUnread: Boolean(row.idle_unread),
-    lastError: row.last_error ?? null,
+    lastError: row.last_error ?? (cwd ? null : `Unknown workspace id: ${row.workspace_id}`),
     steeringQueued: durableSteering + (rt?.steeringQueued ?? 0),
     followUpQueued: durableFollowUps + (rt?.followUpQueued ?? 0),
     queuedMessages,
@@ -1082,6 +1087,13 @@ class RpcTimeoutError extends Error {
   constructor(readonly command: string) { super(`${command} timed out`); this.name = "RpcTimeoutError"; }
 }
 class CoreCommandError extends Error {}
+class InvalidSessionWorkspace extends Error {}
+
+function admittedCwd(row: any): string {
+  const result = workspaceAdmission.resolve(row.workspace_id);
+  if (!result.ok) throw new InvalidSessionWorkspace(result.error.message);
+  return result.value.cwd;
+}
 
 function rpc(rt: Runtime, type: string, body: Record<string, unknown> = {}, timeoutMs = 15000): Promise<any> {
   const id = crypto.randomUUID();
@@ -1559,8 +1571,7 @@ function runtimeEnvironment(row: any) {
 }
 
 async function startRuntime(row: any): Promise<Runtime> {
-  const preset = workspaces.get(row.workspace_id);
-  const cwd = realpathSync(preset?.path ?? row.workspace_id);
+  const cwd = admittedCwd(row);
   const resumePath = row.session_path && existsSync(row.session_path) ? row.session_path : null;
   if (row.session_path && !resumePath) {
     db.query("UPDATE sessions SET session_path=NULL WHERE id=?").run(row.id);
@@ -1699,6 +1710,15 @@ async function adoptHandoffRuntimes() {
     try {
       rt.transport = await attachRuntimeHost(handoff.socketPath, (line) => handleRuntimeOutput(row.id, rt, line));
       monitorRuntime(row, rt);
+      const admitted = workspaceAdmission.resolve(row.workspace_id);
+      if (!admitted.ok) {
+        rt.expectedExit = true;
+        rt.suppressOutput = true;
+        setRuntimePhase(row.id, rt, "STOPPING");
+        await terminateRuntimeProcess(rt);
+        setState(row.id, "FAILED", admitted.error.message);
+        return;
+      }
       if (rt.phase === "IDLE") {
         rt.expectedExit = true;
         rt.suppressOutput = true;
@@ -1749,6 +1769,7 @@ async function activate(row: any): Promise<Runtime> {
   const current = sessionRow.get(row.id) as any;
   if (!current || current.archived_at) throw new Error("Thread is archived; unarchive it before continuing");
   row = current;
+  admittedCwd(row);
   const inProgress = activations.get(row.id);
   if (inProgress) return inProgress;
   const existing = runtimes.get(row.id);
@@ -2091,7 +2112,7 @@ async function drainSession(sessionId: string) {
       }
       if (active?.phase === "DISPATCHING") setRuntimePhase(sessionId, active, "IDLE");
       active?.dispatchedWorkIds.delete(item.id);
-      if (cause instanceof CoreCommandError) {
+      if (cause instanceof CoreCommandError || cause instanceof InvalidSessionWorkspace) {
         db.query("UPDATE work_items SET state='complete',updated_at=?,last_error=? WHERE id=?").run(now(),cause.message,item.id);
         setState(sessionId, active?.phase === "RUNNING" ? "RUNNING" : "FAILED", cause.message);
         emit(sessionId,"notice",{text:cause.message});
@@ -2167,6 +2188,7 @@ function meetingDestination() {
 
 function insertThread(id: string, name: string, destination: { workspaceId: string; id: string },
   preset: { provider: string; modelId: string; thinkingLevel: string }, meetingId: string | null, priority: boolean) {
+  admittedCwd({ workspace_id: destination.workspaceId });
   const time = now();
   db.query("UPDATE sessions SET display_order=display_order+1 WHERE archived_at IS NULL").run();
   db.query(`INSERT INTO sessions(id,name,workspace_id,session_path,state,created_at,updated_at,last_error,
