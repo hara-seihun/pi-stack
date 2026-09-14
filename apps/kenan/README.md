@@ -31,7 +31,7 @@ The field is required. HTTP is also accepted for private-LAN or loopback develop
 
 The public `GET /v1/environment` supplies the identity chooser. `POST /v1/unlock` takes the person hint in `x-pi-remote-user` and a JSON key, then returns `{ok:true,user,session}`. Authenticated API requests carry `x-pi-remote-session`; navigations can carry `session=`. `GET /v1/environments` returns only the session's permitted `{id,name,baseUrl,icon?}` entries.
 
-Focused native router tests cover permitted prefixes, session headers, redirects, and identity invalidation:
+Focused native router tests cover permitted prefixes, session headers, redirects, and identity invalidation. Transport tests use the test-only MockWebServer dependency to exercise real HTTP requests. Android's Java compiler cannot resolve the JDK-only `com.sun.net.httpserver` API, even for local unit tests.
 
 ```sh
 cd apps/kenan/android
