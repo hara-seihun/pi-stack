@@ -1081,6 +1081,11 @@ function sendLine(rt: Runtime, value: unknown) {
 
 async function terminateRuntimeProcess(rt: Runtime) {
   rt.startupAbort.abort();
+  for (const pending of rt.pending.values()) {
+    clearTimeout(pending.timer);
+    pending.reject(new Error("Agent stopped"));
+  }
+  rt.pending.clear();
   await rt.transport?.terminate();
 }
 class RpcTimeoutError extends Error {
@@ -1767,6 +1772,7 @@ function admissionPriority(id: string): number {
 
 async function activate(row: any): Promise<Runtime> {
   await runtimeAdoption;
+  if (shuttingDown) throw new CoreCommandError("Supervisor is shutting down");
   const current = sessionRow.get(row.id) as any;
   if (!current || current.archived_at) throw new Error("Thread is archived; unarchive it before continuing");
   row = current;
@@ -1777,7 +1783,7 @@ async function activate(row: any): Promise<Runtime> {
   if (existing) return existing;
   const activation = runtimeAdmission.admit(() => admissionPriority(row.id), async () => {
     const current = sessionRow.get(row.id) as any;
-    if (!current || current.archived_at) throw new Error("Activation cancelled");
+    if (shuttingDown || !current || current.archived_at) throw new Error("Activation cancelled");
     return startRuntime(current);
   }).finally(() => {
     activations.delete(row.id);
@@ -3355,6 +3361,7 @@ async function shutdown() {
   if (shuttingDown) return;
   shuttingDown = true;
   stopSupervisorTimers();
+  await runtimeAdoption;
   if (ownsSupervisorLease()) {
     db.query("UPDATE work_items SET state='queued',resume=CASE WHEN state='dispatched' THEN 1 ELSE resume END,available_at=?,updated_at=?,last_error='Supervisor restarted before settling' WHERE state IN ('running','dispatched')")
       .run(Date.now(), now());
@@ -3368,7 +3375,8 @@ async function shutdown() {
     setRuntimePhase(id, rt, "STOPPING");
     exits.push(terminateRuntimeProcess(rt));
   }
-  await Promise.race([Promise.all(exits), Bun.sleep(3_000)]);
+  await Promise.all(exits);
+  await Promise.allSettled([...activations.values()]);
   await meet.close();
   server.stop();
   await closeImageGeneration();

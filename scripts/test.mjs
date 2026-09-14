@@ -1,6 +1,7 @@
 import { runJobs } from "./run-jobs.mjs";
 
 const jobs = [
+  ["job lifecycle", "node", ["--test", "scripts/run-jobs.test.mjs"]],
   ["orchestrator types", "npm", ["run", "typecheck", "--workspace=pi-orchestrator"]],
   ["Kenan build", "npm", ["run", "build", "--workspace=kenan"]],
   ["manifests", "node", ["scripts/check-manifests.mjs"]],

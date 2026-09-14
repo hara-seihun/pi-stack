@@ -1,7 +1,7 @@
 import { afterAll, beforeAll, describe, expect, setDefaultTimeout, test as bunTest } from "bun:test";
 import { Database } from "bun:sqlite";
 import { OrchestratorClient } from "pi-orchestrator/api";
-import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import { applyContextSplice, contextSplice, messageFinalizationKey, sha256 } from "./sync";
@@ -35,6 +35,7 @@ const base = `http://127.0.0.1:${port}`;
 let server: ReturnType<typeof Bun.spawn>;
 let sharedRunnerFixture = false;
 let startupEventsFixture = false;
+let slowStartupFixture = false;
 setDefaultTimeout(30_000);
 
 async function api(method: string, path: string, body?: unknown) {
@@ -108,7 +109,7 @@ async function startServer() {
       PI_REMOTE_RUNTIME_CONNECT_TIMEOUT_MS: "2000",
       PI_REMOTE_RUNTIME_START_TIMEOUT_MS: "8000",
       PI_REMOTE_RUNTIME_TERMINATE_TIMEOUT_MS: "200",
-      PI_REMOTE_RUNTIME_START_POLL_MS: "2",
+      PI_REMOTE_RUNTIME_START_POLL_MS: slowStartupFixture ? "1000" : "2",
       PI_REMOTE_RUNTIME_RESTART_DELAY_MS: "20",
       PI_REMOTE_INGESTION: join(root, "ingestion"),
       PI_FAKE_LAUNCH: fakeLaunch,
@@ -534,6 +535,28 @@ else: sys.exit(2)
     packages: [join(import.meta.dir, "..")],
   }));
   await startServer();
+});
+
+bunTest("shutdown awaits pending runtime startup cleanup", async () => {
+  server.kill();
+  await server.exited;
+  slowStartupFixture = true;
+  let childPid = 0;
+  try {
+    rmSync(fakeLaunch, { force: true });
+    await startServer();
+    const created = await api("POST", "/v1/sessions", { requestId: crypto.randomUUID(), destination: "home" });
+    expect(created.status).toBe(201);
+    childPid = await waitFor(async () => existsSync(fakeLaunch) ? Number(JSON.parse(readFileSync(fakeLaunch, "utf8")).pid) : 0, pid => pid > 0);
+    server.kill();
+    expect(await server.exited).toBe(0);
+    expect(() => process.kill(childPid, 0)).toThrow();
+    expect(readdirSync(join(root, "data", "runtime-hosts"))).toEqual([]);
+  } finally {
+    if (childPid) { try { process.kill(childPid, "SIGKILL"); } catch {} }
+    slowStartupFixture = false;
+    await startServer();
+  }
 });
 
 afterAll(async () => {
