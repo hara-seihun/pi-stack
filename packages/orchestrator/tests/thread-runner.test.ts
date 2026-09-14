@@ -50,12 +50,18 @@ it("multiplexes native sessions and keeps an accepted execution through controll
       env: { HOME: dataDir, PI_CODING_AGENT_DIR: join(dataDir, "agent"), PI_OFFLINE: "1", PI_THREAD_API_URL: "http://127.0.0.1:1/v1/threads" } });
     first = runtime.createSharedPiSessionOpener({ dataDir });
     const a: PiEvent[] = [], b: PiEvent[] = [];
-    const one = await first.openSession(options("one"), event => a.push(event), () => {});
+    const restored = options("one");
+    restored.env.PI_THREAD_REQUIRE_SESSION = "1";
+    writeFileSync(restored.sessionFile, JSON.stringify({ type: "session", version: 3, id: "restored-one", cwd: dataDir, timestamp: new Date().toISOString() }) + "\n");
+    const one = await first.openSession(restored, event => a.push(event), () => {});
+    sessions.push(one);
     const two = await first.openSession(options("two"), event => b.push(event), () => {});
     sessions.push(two);
     await one.command({ type: "get_state", id: "one-ready" });
     await two.command({ type: "get_state", id: "two-ready" });
     await until(() => a.some(event => event.id === "one-ready") && b.some(event => event.id === "two-ready"));
+    expect(b.find(event => event.id === "two-ready")).toMatchObject({ success: true });
+    expect(existsSync(options("two").sessionFile)).toBe(true);
     const controls = readdirSync(join(dataDir, "thread-runners")).filter(name => name.endsWith(".sock"));
     expect(controls).toHaveLength(1);
     const control = join(dataDir, "thread-runners", controls[0]);
@@ -81,7 +87,7 @@ it("multiplexes native sessions and keeps an accepted execution through controll
     await until(() => replay.some(event => event.id === "duplicate"));
     expect(readFileSync(join(dataDir, "entered"), "utf8")).toBe("one\n");
   } finally {
-    for (const session of sessions) await session.close();
+    for (const session of sessions) await session.close().catch(() => {});
     first?.detach(); second?.detach();
     rmSync(dataDir, { recursive: true, force: true }); rmSync(compiled, { recursive: true, force: true });
   }

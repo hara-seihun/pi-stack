@@ -1,7 +1,7 @@
-import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { afterEach, expect, it } from "vitest";
+import { afterEach, expect, it, vi } from "vitest";
 import { SessionManager } from "@earendil-works/pi-coding-agent";
 import { openPiSession } from "../src/threads/pi-session.js";
 import { seedPiSession } from "../src/threads/pi-session-file.js";
@@ -14,6 +14,20 @@ function directory() {
   cleanups.push(() => rmSync(path, { recursive: true, force: true }));
   return path;
 }
+
+it("does not inherit another thread's restore flag, but still refuses lost required history", async () => {
+  const cwd = directory();
+  const options: PiSessionOptions = { cwd, args: [], env: { PI_CODING_AGENT_DIR: join(cwd, "agent"), PI_OFFLINE: "1" }, threadId: "fresh", sessionFile: join(cwd, "fresh.jsonl") };
+  vi.stubEnv("PI_THREAD_REQUIRE_SESSION", "1");
+  try {
+    const session = await openPiSession(JSON.parse(JSON.stringify(options)), () => {}, () => {});
+    try { expect(existsSync(options.sessionFile)).toBe(true); }
+    finally { await session.close(); }
+    const missing = join(cwd, "missing.jsonl");
+    await expect(openPiSession({ ...options, threadId: "lost", sessionFile: missing, env: { ...options.env, PI_THREAD_REQUIRE_SESSION: "1" } }, () => {}, () => {})).rejects.toThrow("Native Pi session is missing");
+    expect(existsSync(missing)).toBe(false);
+  } finally { vi.unstubAllEnvs(); }
+});
 
 it("retains native history, resources, thread tools and RPC session replacement", async () => {
   const cwd = directory();

@@ -174,6 +174,7 @@ describe("ThreadService", () => {
     expect(defaultChild.metadata).toMatchObject({ meetingId: "room", profileId: "personal" });
     expect(defaultChild.metadata?.nativeHistoryRequired).toBeUndefined();
     expect(new Set(sessions.map(session => session.options.sessionFile)).size).toBe(2);
+    expect(sessions.map(session => session.options.env.PI_THREAD_REQUIRE_SESSION)).toEqual(["0", "0"]);
     expect(sessions.map(session => session.options.args)).toEqual(expect.arrayContaining([
       ["--provider", "openai-codex", "--model", "gpt-6-astra", "--thinking", "high", "--name", defaultChild.title],
       ["--provider", "openai-codex", "--model", "gpt-5.6-luna", "--thinking", "max", "--name", lunaChild.title],

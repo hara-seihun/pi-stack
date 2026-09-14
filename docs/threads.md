@@ -54,6 +54,13 @@ Remote imports the Orchestrator source API through Bun, while shared runners exe
 the compiled Node entrypoint in `dist/threads/runner-host.js`. Both source and compiled
 callers resolve that same executable; build Orchestrator before starting source Remote.
 
+Whether a native session must already exist is a per-thread instruction, never a shared
+runner default. Controllers send `PI_THREAD_REQUIRE_SESSION=0` for fresh threads and
+`1` for recovery or retained history. The explicit zero also works with previously
+launched runners; new runners omit this flag from their process environment. The SDK
+adapter resolves it from the individual open request. Missing required history remains
+an error; a fresh child creates its own file without inheriting the first thread's flag.
+
 Orchestrator resolves settings centrally. Standard provider speed is the default everywhere. Fable, Opus, Astra, Terra and Sol default to high thinking; Luna defaults to max. Explicit validated overrides are supported and do not accidentally inherit from a parent. Recovery preserves already accepted execution settings.
 
 Subagents always use forced quota admission. Lanes use forced admission by default and can explicitly select background pacing. Readiness, actual quota exhaustion, account reservations, cooldowns, execution limits and explicit pause remain separate from background spending pace and reserves.
