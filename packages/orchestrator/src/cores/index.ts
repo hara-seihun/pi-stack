@@ -1,24 +1,23 @@
 import { existsSync, readFileSync } from "node:fs";
 import { join } from "node:path";
-import { argument, isCoreId, type CoreCommand, type CoreId, type CoreOutput, type CoreSession, type CoreSessionOptions, type OpenCoreSession, type PortableConversation } from "./contracts.js";
+import { argument, type CoreCommand, type CoreOutput, type CoreSession, type CoreSessionOptions, type OpenCoreSession, type PortableConversation } from "./contracts.js";
+import { assertPiSessionFile } from "./pi-session-file.js";
 import { CoreJournal, readPortableConversation } from "./journal.js";
-export { CORE_IDS, isCoreId } from "./contracts.js";
-export type { CoreId, CoreAgent, CoreCommand, CoreOutput, CoreSession, CoreSessionOptions, OpenCoreSession, PortableConversation } from "./contracts.js";
+export { isCoreId } from "./contracts.js";
+export type { CoreId, ConversationSource, CoreAgent, CoreCommand, CoreOutput, CoreSession, CoreSessionOptions, OpenCoreSession, PortableConversation } from "./contracts.js";
 export { CoreJournal, readPortableConversation, writeCoreState } from "./journal.js";
-
-export function configuredCore(value: unknown = process.env.PI_STACK_DEFAULT_CORE): CoreId {
-  if (value === undefined || value === "") return "codex";
-  if (!isCoreId(value)) throw new Error(`Unknown agent core: ${String(value)}`);
-  return value;
-}
 
 export async function openCoreSession(options: CoreSessionOptions, output: (event: CoreOutput) => void, exit: (code?: number) => void,
   factory?: OpenCoreSession): Promise<CoreSession> {
-  const core = configuredCore(options.env.PI_STACK_CORE);
+  const core = "pi";
+  if (existsSync(join(options.stateDir, "codex-session.json"))) {
+    throw new Error("Codex-owned state requires a portable transfer into a new Pi state directory");
+  }
   const transferPath = join(options.stateDir, "transfer.json");
   const transfer = options.transfer ?? (existsSync(transferPath) ? JSON.parse(readFileSync(transferPath, "utf8")) as PortableConversation : undefined);
+  let nativePath = transfer ? undefined : argument(options.args, "--session");
+  if (nativePath && existsSync(nativePath)) assertPiSessionFile(nativePath);
   const journal = new CoreJournal(options.stateDir, core, options.sessionId, options.cwd, transfer);
-  let nativePath = argument(options.args, "--session");
   let adapter: CoreSession;
   let closed = false;
   const publish = (event: CoreOutput): void => {
@@ -26,7 +25,7 @@ export async function openCoreSession(options: CoreSessionOptions, output: (even
     journal.record(event);
     if (event.type === "response" && event.command === "get_state" && event.success) {
       const path = (event.data as {sessionFile?: string})?.sessionFile;
-      if (core === "pi" && nativePath && path && path !== nativePath && existsSync(path)) {
+      if (nativePath && path && path !== nativePath && existsSync(path)) {
         journal.replace(readPortableConversation(path, core).messages);
       }
       nativePath = path ?? nativePath;
@@ -34,10 +33,10 @@ export async function openCoreSession(options: CoreSessionOptions, output: (even
     } else output(event);
   };
   try {
-    if (!journal.conversation().messages.length && core === "pi" && nativePath && existsSync(nativePath)) {
+    if (!journal.conversation().messages.length && nativePath && existsSync(nativePath)) {
       journal.seed(readPortableConversation(nativePath, core).messages);
     }
-    const open = factory ?? (core === "pi" ? (await import("./pi.js")).openPiSession : (await import("./codex.js")).openCodexSession);
+    const open = factory ?? (await import("./pi.js")).openPiSession;
     adapter = await open({ ...options, transfer }, publish, code => { if (!closed) { closed = true; journal.close(); } exit(code); });
   } catch (error) { journal.close(); throw error; }
   return {

@@ -7,7 +7,7 @@ it("resumes an exhausted 429 only on explicit request, retaining custody and acc
   const store=Store.open(":memory:");
   try {
     store.upsertAccount({id:"a",provider:"anthropic"});
-    const [id]=store.createRuns({count:1,source:"direct",prompt:"research",cwd:"/tmp",profile:"fable",budget:"force",core:"codex"});
+    const [id]=store.createRuns({count:1,source:"direct",prompt:"research",cwd:"/tmp",profile:"fable",budget:"force"});
     store.assignRun(id!,{accountId:"a",provider:"anthropic",model:"claude-fable-5-1",thinking:"max",unit:"worker",releasePath:"/previous"});
     const error="Error: exceeded retry limit, last status: 429 Too Many Requests";
     store.updateRun(id!,{nativeSessionId:"native",state:"failed",failureKind:"account",result:error});
@@ -32,7 +32,7 @@ it("recovers host interruptions with custody while keeping actual operator abort
   const store=Store.open(":memory:");
   try {
     store.upsertAccount({id:"a",provider:"anthropic"});
-    const [id]=store.createRuns({count:1,source:"direct",prompt:"research",cwd:"/tmp",profile:"fable",budget:"force",core:"codex"});
+    const [id]=store.createRuns({count:1,source:"direct",prompt:"research",cwd:"/tmp",profile:"fable",budget:"force"});
     store.assignRun(id!,{accountId:"a",provider:"anthropic",model:"claude-fable-5-1",thinking:"max",unit:"worker",releasePath:"/release/first"});
     store.updateRun(id!,{nativeSessionId:"native",state:"aborted",failureKind:"operator",result:"aborted"});
     expect(store.recoverInterruptedRun(id!,"/release/next",1234)).toBe(true);
@@ -47,24 +47,6 @@ it("recovers host interruptions with custody while keeping actual operator abort
     store.updateRun(id!,{state:"aborted",failureKind:"operator",result:"aborted"});
     store.setControl(`abort:${id}`,"abort");
     expect(store.recoverInterruptedRun(id!,"/release/next")).toBe(false);
-  } finally { store.close(); }
-});
-
-it("continues only provider-output-limited native runs and preserves their assignment and failure receipt", () => {
-  const store=Store.open(":memory:");
-  try {
-    store.upsertAccount({id:"a",provider:"anthropic"});
-    const [id]=store.createRuns({count:1,source:"direct",prompt:"research",cwd:"/tmp",profile:"fable",budget:"force",core:"codex"});
-    store.assignRun(id!,{accountId:"a",provider:"anthropic",model:"claude-fable-5-1",thinking:"max",unit:"worker",releasePath:"/release/first"});
-    store.updateRun(id!,{nativeSessionId:"native",state:"failed",failureKind:"infrastructure",result:"Error: Incomplete response returned, reason: max_output_tokens"});
-    const before=store.run(id!)!;
-    expect(store.continueOutputLimitedRun(id!,"/release/next",1234)).toBe(true);
-    expect(store.run(id!)).toMatchObject({state:"starting",nativeSessionId:"native",accountId:"a",model:before.model,thinking:"max",releasePath:"/release/next"});
-    expect(JSON.parse(store.control(`run-output-limit:${id}:1234`)!)).toMatchObject({result:before.result,releasePath:"/release/first"});
-    expect(store.continueOutputLimitedRun(id!,"/release/next")).toBe(false);
-    store.updateRun(id!,{state:"failed",result:"Error: Incomplete response returned, reason: max_output_tokens"});
-    store.setControl(`abort:${id}`,"abort");
-    expect(store.continueOutputLimitedRun(id!,"/release/next")).toBe(false);
   } finally { store.close(); }
 });
 

@@ -39,4 +39,4 @@ The shared client keeps the selected drawer tab, composer drafts, and Local unlo
 
 ## Session ownership
 
-Each Pi Remote deployment owns its runtime hosts, uploads, and local orchestrator view. The selected [agent core](agent-cores.md) owns native execution, compaction and children. PiStack owns session identity, input delivery and portable activity logs. Local owns Personal and Home; Converge owns work. Kenan combines the two environments at the client boundary. There is no server-to-server agent bridge or remote ledger reader.
+Each Pi Remote deployment owns its runtime hosts, uploads, and local orchestrator view. [Pi](agent-cores.md) owns native execution, compaction and children. PiStack owns session identity, input delivery and portable activity logs. Local owns Personal and Home; Converge owns work. Kenan combines the two environments at the client boundary. There is no server-to-server agent bridge or remote ledger reader.

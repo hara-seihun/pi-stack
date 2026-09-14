@@ -252,10 +252,6 @@ function SettingsPanel({ session, open, onClose }: { session: Session | null; op
       <div className="settings-body">{failure && <p className="setting-unavailable" role="alert">{failure}</p>}{!settings ? !failure && <div className="settings-loading" aria-label="Loading thread settings"><span /><span /><span /></div> : <>
         {!editable && <p className="setting-unavailable">Settings can be changed when the thread is idle.</p>}
         <section className="setting-card">
-          <div className="setting-heading"><div><h3>Agent core</h3><p>Switch engines using the saved conversation. Native checkpoints stay with their original engine.</p></div>{saving === "core" && <span className="setting-saving">Switching</span>}</div>
-          <div className="setting-options" role="radiogroup" aria-label="Agent core">{settings.cores.map(core => <button key={core} type="button" role="radio" aria-checked={settings.core === core} className={settings.core === core ? "selected" : ""} disabled={Boolean(saving) || !editable || Boolean(session?.subagent)} onClick={() => void update("core", {core})}>{core === "pi" ? "Pi" : "Codex"}</button>)}</div>
-        </section>
-        <section className="setting-card">
           <div className="setting-heading"><div><h3>Model</h3><p>{session?.subagent ? "Subagent models are fixed. Delegate to a new subagent to use another model." : "The model used for new messages"}</p></div>{saving === "model" && <span className="setting-saving">Saving</span>}</div>
           <div className="setting-select"><select aria-label="Model" value={`${settings.model?.provider}\0${settings.model?.id}`} disabled={Boolean(saving) || !editable || Boolean(session?.subagent)} onChange={(event) => { const [modelProvider, modelId] = event.target.value.split("\0"); void update("model", { modelProvider, modelId }); }}>{settings.models.map((model) => <option key={`${model.provider}:${model.id}`} value={`${model.provider}\0${model.id}`}>{model.name || model.id} · {model.provider}</option>)}</select><span aria-hidden="true">⌄</span></div>
         </section>
@@ -269,11 +265,10 @@ function SettingsPanel({ session, open, onClose }: { session: Session | null; op
         </section>
         <section className="setting-card">
           <div className="setting-heading"><div><h3>Bash timeout</h3><p>Maximum time each bash command may run</p></div>{saving === "bash-timeout" && <span className="setting-saving">Saving</span>}</div>
-          {!settings.bashTimeoutSupported && <p className="setting-unavailable">Command timeouts are managed by this core.</p>}
-          <div className="setting-select"><select aria-label="Bash timeout" value={settings.bashTimeoutSeconds} disabled={Boolean(saving) || !editable || !settings.bashTimeoutSupported} onChange={(event) => void update("bash-timeout", { bashTimeoutSeconds: Number(event.target.value) })}>{BASH_TIMEOUT_OPTIONS.map((seconds) => <option key={seconds} value={seconds}>{bashTimeoutLabel(seconds)}</option>)}</select><span aria-hidden="true">⌄</span></div>
+          <div className="setting-select"><select aria-label="Bash timeout" value={settings.bashTimeoutSeconds} disabled={Boolean(saving) || !editable} onChange={(event) => void update("bash-timeout", { bashTimeoutSeconds: Number(event.target.value) })}>{BASH_TIMEOUT_OPTIONS.map((seconds) => <option key={seconds} value={seconds}>{bashTimeoutLabel(seconds)}</option>)}</select><span aria-hidden="true">⌄</span></div>
         </section>
         {settings.agents.length > 0 && <section className="setting-card">
-          <div className="setting-heading"><div><h3>Core agents</h3><p>Children are managed by {settings.core === "pi" ? "Pi" : "Codex"}.</p></div></div>
+          <div className="setting-heading"><div><h3>Subagents</h3><p>Children are managed by Pi.</p></div></div>
           {settings.agents.map(agent => <div key={agent.id}><p>{agent.name} · {agent.state}{agent.model ? ` · ${agent.model}` : ""}</p><div className="setting-options"><button type="button" onClick={() => void agentAction(agent.id, "read")}>Inspect</button>{agent.state === "running" && <button type="button" onClick={() => void agentAction(agent.id, "abort")}>Stop agent</button>}</div></div>)}
           {agentDetail && <pre style={{whiteSpace:"pre-wrap",overflowWrap:"anywhere",maxHeight:400,overflow:"auto"}}>{agentDetail}</pre>}
         </section>}

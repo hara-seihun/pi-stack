@@ -7,17 +7,17 @@ import { CoreJournal, readPortableConversation } from "../src/cores/journal.js";
 it("retains both native-shaped activity and a portable conversation across reopen", () => {
   const directory = mkdtempSync(join(tmpdir(), "core-journal-"));
   try {
-    const journal = new CoreJournal(directory, "codex", "root", directory);
+    const journal = new CoreJournal(directory, "pi", "root", directory);
     const message = {id:"native-item",role:"assistant",content:[{type:"text",text:"done"}],timestamp:12};
     journal.record({type:"message_end",message});
     journal.record({type:"message_end",message});
     journal.record({type:"core_agent",agent:{id:"child",parentId:"root",name:"Child",state:"idle"}});
     journal.record({type:"core_child_event",agentId:"child",event:{type:"message_end",message:{...message,id:"child-item"}}});
     journal.close();
-    const reopened = new CoreJournal(directory, "codex", "root", directory);
+    const reopened = new CoreJournal(directory, "pi", "root", directory);
     expect(reopened.conversation().messages).toEqual([message]);
     expect(reopened.conversation().agents).toHaveLength(1);
-    expect(readPortableConversation(reopened.portableFile,"codex").messages).toEqual([message]);
+    expect(readPortableConversation(reopened.portableFile,"pi").messages).toEqual([message]);
     expect(readFileSync(reopened.eventsFile,"utf8")).toContain("core_agent");
     reopened.close();
   } finally { rmSync(directory,{recursive:true,force:true}); }

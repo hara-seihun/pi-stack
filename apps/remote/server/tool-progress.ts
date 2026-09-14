@@ -9,9 +9,8 @@ export interface ToolProgress {
 }
 
 const OUTPUT_LIMIT = 20_000;
-export function updateToolProgress(tool: ToolProgress, output: string, delta: boolean): ToolProgress {
-  const text = delta ? tool.output + output : output;
-  return { ...tool, output: text.length > OUTPUT_LIMIT ? `…${text.slice(-OUTPUT_LIMIT)}` : text };
+export function updateToolProgress(tool: ToolProgress, output: string): ToolProgress {
+  return { ...tool, output: output.length > OUTPUT_LIMIT ? `…${output.slice(-OUTPUT_LIMIT)}` : output };
 }
 
 /** Overlay execution events until the canonical context contains their results. */

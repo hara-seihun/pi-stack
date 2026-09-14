@@ -4,7 +4,7 @@ import { join } from "node:path";
 import { createContext, runInContext } from "node:vm";
 import { createElement } from "react";
 import { renderToStaticMarkup } from "react-dom/server";
-import events from "../server/fixtures/codex-live-progress.json";
+import events from "../server/fixtures/tool-progress.json";
 import { displayContextDocument } from "../server/context-display";
 
 const browser: Record<string, any> = { atob: (value: string) => Buffer.from(value, "base64").toString("binary") };
@@ -29,8 +29,8 @@ test("active native commands and their output stay visible outside collapsed det
     expect(entries.filter(entry => entry.kind === "thinking")).toHaveLength(0);
     entries.push({ kind: "assistant", key: "reply", signature: "reply", text: "A later reply" });
     const html = renderToStaticMarkup(createElement(ContextTranscript, { entries, liveThinking: "", sessionId: "stp", home: "/home/kenan", onEdit() {} }));
-    expect(html).toContain("python experiments/discover_objects.py");
-    expect(html).toContain("discovered_graph_closed_rank");
+    expect(html).toContain("pwd");
+    expect(html).toContain("/home");
     expect(html).not.toContain('message thinking');
     expect(html).toContain('detail-group-latest');
   } finally { globalThis.window = previous; }

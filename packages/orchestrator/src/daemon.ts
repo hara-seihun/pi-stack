@@ -6,9 +6,6 @@ import { homedir } from "node:os";
 import { createServer, type IncomingMessage, type ServerResponse } from "node:http";
 import type { BudgetClass, LaneReadiness, LaneManifest, LaneSpec, OrchestratorConfig, Run } from "./domain.js";
 import { isRunContext } from "./isolated-context-contract.js";
-import { resolveCore } from "./config.js";
-import { isCoreId } from "./cores/contracts.js";
-import { codexProviderFamily } from "./cores/codex-models.js";
 import { accountCapacity, assign, assignCompletion, commitMeterAdmission } from "./policy.js";
 import { Store } from "./store.js";
 import { Heartbeats } from "./heartbeats.js";
@@ -192,7 +189,7 @@ export class Daemon {
         if(!choice.assignment){this.store.setControl(`refusal:${key}`,choice.refusals.map((r)=>`${r.accountId}: ${r.reason}`).join("; "));continue;}
         try{
           const prompt=await this.lanePrompt(lane);
-          const [id]=this.store.createRuns({count:1,source:"lane",sourceId:lane.id,prompt,cwd:lane.cwd,profile:lane.profile,core:resolveCore(this.config,lane.profile,lane.core),budget:this.laneBudget});
+          const [id]=this.store.createRuns({count:1,source:"lane",sourceId:lane.id,prompt,cwd:lane.cwd,profile:lane.profile,budget:this.laneBudget});
           if(!await this.launch(this.store.run(id!)!)){failed.add(key);this.store.trimQueuedLane(lane.id,0);continue;}
           if(this.snapshotCommand)this.store.setControl(`readiness-admitted:${lane.id}`,String(this.readinessAt));
           this.store.setControl(`refusal:${key}`,"");
@@ -224,9 +221,7 @@ export class Daemon {
     const fixed=this.store.fleetChild(run.id)?.assignment;
     const completion=!!this.completions.byRun(run.id);
     const candidates=fixed?[fixed]:this.config.profiles[run.profile]??[];
-    const supported=run.core==="codex"&&!completion?candidates.filter(candidate=>codexProviderFamily(candidate.provider)):candidates;
-    if(!supported.length&&run.core==="codex"&&!completion){this.store.updateRun(run.id,{state:"failed",failureKind:"task",result:`Codex core requires an OpenAI or Anthropic model in profile ${run.profile}`});return true;}
-    const config={...this.config,profiles:{...this.config.profiles,[run.profile]:supported}};
+    const config={...this.config,profiles:{...this.config.profiles,[run.profile]:candidates}};
     const choice=completion?assignCompletion(this.store,run.id,run.profile,config):assign(this.store,run.profile,run.budget,config,Date.now(),undefined,run.id);
     if(!choice.assignment){this.store.setControl(`refusal:${run.id}`,choice.refusals.map((r)=>`${r.accountId}: ${r.reason}`).join("; "));return false;}
     const unit=completion?`completion:${run.id}`:`pi-orchestrator-run-${run.id.replaceAll("-","")}`;
@@ -406,8 +401,6 @@ export class Daemon {
           else this.store.updateRun(id,input);
           // Already-admitted workers may still be running a previous immutable release.
           // Restore their unfinished turn on this release once that worker has closed it.
-          if(input.state==="failed"&&this.store.run(id)?.releasePath!==this.releasePath)
-            this.store.continueOutputLimitedRun(id,this.releasePath);
           if(["failed","aborted"].includes(input.state)&&this.store.run(id)?.releasePath!==this.releasePath)
             this.store.recoverInterruptedRun(id,this.releasePath);
           const run=this.store.run(id);
@@ -465,13 +458,12 @@ export class Daemon {
         if(url.pathname==="/v1/run/isolated"&&input.context===undefined)return json(res,400,{error:"An isolated run requires context.tools"});
         if(input.context!==undefined&&!isRunContext(input.context))return json(res,400,{error:"context requires a tools allowlist and optional absolute application extension paths"});
         if(input.context&&(!input.cwd||!Number.isInteger(input.count??1)||(input.count??1)!==1))return json(res,400,{error:"Isolated runs require an explicit workspace cwd and count 1"});
-        if(input.core!==undefined&&!isCoreId(input.core))return json(res,400,{error:"core must be pi or codex"});
-        const profile=String(input.profile??"standard"),core=resolveCore(this.config,profile,input.core);
-        if(core==="codex"&&input.context)return json(res,422,{error:"Codex core does not support isolated tools/extensions contracts"});
-        const ids=this.store.createRuns({count:Number(input.count??1),source:"direct",prompt:String(input.prompt),cwd:String(input.cwd??process.cwd()),profile,core,budget:input.force?"force":"background",context:input.context});
+        if("core" in input)return json(res,400,{error:"Pi Stack runs Pi; agent core selection is not supported"});
+        const profile=String(input.profile??"standard");
+        const ids=this.store.createRuns({count:Number(input.count??1),source:"direct",prompt:String(input.prompt),cwd:String(input.cwd??process.cwd()),profile,budget:input.force?"force":"background",context:input.context});
         void this.reconcile();return json(res,201,{runIds:ids});
       }
-      if(method==="POST"&&url.pathname==="/v1/wave"){const input=await body(req),lane=this.store.lane(String(input.lane));if(!lane)return json(res,404,{error:"lane not found"});if(input.core!==undefined&&!isCoreId(input.core))return json(res,400,{error:"core must be pi or codex"});const ids=this.store.createRuns({count:Number(input.count??1),source:"direct",sourceId:lane.id,prompt:lane.prompt,cwd:lane.cwd,profile:lane.profile,core:resolveCore(this.config,lane.profile,input.core??lane.core),budget:input.force?"force":"background"});void this.reconcile();return json(res,201,{runIds:ids});}
+      if(method==="POST"&&url.pathname==="/v1/wave"){const input=await body(req),lane=this.store.lane(String(input.lane));if(!lane)return json(res,404,{error:"lane not found"});if("core" in input)return json(res,400,{error:"Pi Stack runs Pi; agent core selection is not supported"});const ids=this.store.createRuns({count:Number(input.count??1),source:"direct",sourceId:lane.id,prompt:lane.prompt,cwd:lane.cwd,profile:lane.profile,budget:input.force?"force":"background"});void this.reconcile();return json(res,201,{runIds:ids});}
       const runResume=/^\/v1\/runs\/([^/]+)\/resume$/.exec(url.pathname);
       if(method==="POST"&&runResume){
         if(!this.store.recoverInterruptedRun(runResume[1]!,this.releasePath,Date.now(),"rate-limit"))return json(res,409,{error:"Only a rate-limited core run without an operator abort can resume"});
@@ -483,11 +475,6 @@ export class Daemon {
         if(!this.store.recoverInterruptedRun(runRecover[1]!,this.releasePath))return json(res,409,{error:"Only a host-interrupted core run without an operator abort can recover"});
         void this.reconcile();
         return json(res,200,{run:this.store.run(runRecover[1]!)});
-      }
-      const runContinue=/^\/v1\/runs\/([^/]+)\/continue$/.exec(url.pathname);
-      if(method==="POST"&&runContinue){
-        if(!this.store.continueOutputLimitedRun(runContinue[1]!,this.releasePath))return json(res,409,{error:"Only an output-limited Codex run without an operator abort can continue"});
-        void this.reconcile();return json(res,200,{ok:true});
       }
       const runAbort=/^\/v1\/runs\/([^/]+)\/(abort|kill)$/.exec(url.pathname);if(method==="POST"&&runAbort){const id=runAbort[1]!,action=runAbort[2]!;this.store.setControl(`abort:${id}`,action);const run=this.store.run(id);const completion=this.completions.byRun(id);if(completion){const outcome=this.completions.cancel(completion.requestId);this.stopUnit(run?.workerUnit);return completionReply(outcome);}if(action==="kill"||run?.state==="queued"||run?.state==="waiting"){this.stopUnit(run?.workerUnit);this.store.updateRun(id,{state:"aborted",failureKind:"operator",result:`${action} by operator`});}return json(res,200,{ok:true});}
       if(method==="POST"&&url.pathname==="/v1/control"){const input=await body(req);this.store.setControl(String(input.key),String(input.value));return json(res,200,{ok:true});}

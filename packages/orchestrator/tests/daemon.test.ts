@@ -7,7 +7,7 @@ import { Store } from "../src/store.js";
 it("recovers a previous worker interruption once and fences its replay from the successor", async () => {
   const store=Store.open(":memory:");
   store.upsertAccount({id:"a",provider:"anthropic"});
-  const [id]=store.createRuns({count:1,source:"direct",prompt:"work",cwd:"/tmp",profile:"fable",budget:"force",core:"codex"});
+  const [id]=store.createRuns({count:1,source:"direct",prompt:"work",cwd:"/tmp",profile:"fable",budget:"force"});
   store.assignRun(id!,{accountId:"a",provider:"anthropic",model:"claude-fable-5-1",unit:"worker",releasePath:"/previous"});
   store.updateRun(id!,{nativeSessionId:"native",state:"running"});
   const daemon=new Daemon(store,loadConfig("/missing"),"/current") as any;

@@ -16,7 +16,7 @@
 | Assistant `message_end` | Final text/thinking, inline-image declarations, model failure and context finalization | Keep role, timestamp, complete content, stop reason, raw refusal reason and error message. |
 | Other `message_end` | Activity and phase-version fence | Keep role, not the user/tool/custom payload. |
 | `tool_execution_start` | Active tool identity and SQLite argument preview | Keep tool ID/name. Arguments over 12,000 JSON characters become a marked preview that fits within that same limit after escaping. |
-| `tool_execution_update` | Live tool output preview | Keep tool ID/name and bounded `partialResult` text and image markers. Codex updates append deltas; Pi updates replace the partial-result snapshot. |
+| `tool_execution_update` | Live tool output preview | Keep tool ID/name and bounded `partialResult` text and image markers. Pi updates replace the partial-result snapshot. |
 | `tool_execution_end` | Active tool removal and SQLite output preview | Keep tool ID/name/error. Render text and image markers, discard native details and image bytes, and retain at most 20,001 text characters. The extra character lets the supervisor apply its existing 20,000-character truncation notice. |
 | `queue_update` | Counts for dispatch acknowledgement and queue state | Replace queued message bodies with null entries, preserving both array lengths. |
 | Retry, compaction and core errors | Lifecycle flags, outcomes and failure text | Keep consumed status/error fields. A compaction result becomes a success boolean rather than another copy of its summary. |
@@ -32,9 +32,9 @@ The root delta stream grows with new text rather than the accumulated assistant 
 
 This is a bounded preview projection, not a fixed byte limit on every frame. Root context and assistant completion content can still be large. The context view needs complete canonical messages and images. `messageFinalizationKey` hashes the assistant's role, timestamp and entire content, including provider signatures. Stripping those fields from `message_end` would break the acknowledgement that clears live output when context catches up.
 
-Explicit `get_portable_conversation`, `get_entries`, `get_messages`, `get_core_context` and `core_agent_read` responses also remain complete. Core switching exports portable history, message editing needs native entries, and child inspection reads its own transcript. Those are requested document transfers, not repeated unsolicited copies. The transport must continue to support large records with backpressure and reconnect recovery.
+Explicit `get_portable_conversation`, `get_entries`, `get_messages`, `get_core_context` and `core_agent_read` responses also remain complete. History export reads the portable conversation, message editing needs native entries, and child inspection reads its own transcript. Those are requested document transfers, not repeated unsolicited copies. The transport must continue to support large records with backpressure and reconnect recovery.
 
-Pi child settlement, automatic result delivery and work receipts belong to the core tree. Ordinary Pi usage accounting runs in its native extension; Codex usage goes directly to its account broker. Fleet Pi workers account from root and child message events, so they must continue receiving the complete core wire. This projection belongs only in Remote's shared-session entrypoint, never inside `CoreJournal`, either core adapter, or the shared `openCoreSession` factory.
+Pi child settlement, automatic result delivery and work receipts belong to the core tree. Ordinary Pi usage accounting runs in its native extension. Fleet Pi workers account from root and child message events, so they must continue receiving the complete core wire. This projection belongs only in Remote's shared-session entrypoint, never inside `CoreJournal`, the Pi adapter, or the shared `openCoreSession` factory.
 
 ## Live progress
 
@@ -44,9 +44,9 @@ Remote tracks reasoning activity separately from reasoning text. `thinking_start
 
 The supervisor retains tool previews until canonical context supplies the tool result. It overlays missing calls and results in the display document, never the editable model context. Browser reloads receive the same display snapshot. Supervisor handoff retains the preview and activity; active calls without a retained preview recover their arguments from the supervisor's `tool_start` ledger. A state snapshot without a start time is labelled Observed. Active tool cards remain visible outside collapsed detail groups, including while another item is thinking.
 
-Live output is a bounded preview, retaining up to 20,000 characters. A dropped output delta cannot be reconstructed from an empty state snapshot. The retained native transcript and completed result remain the sources for full output. An already-running worker using the preceding wire projection must finish before new tool-update forwarding takes effect; Remote does not interrupt or resend its turn.
+Live output is a bounded preview, retaining up to 20,000 characters. An empty state snapshot cannot reconstruct missing output. The retained native transcript and completed result remain the sources for full output. An already-running worker using the preceding wire projection must finish before new tool-update forwarding takes effect; Remote does not interrupt or resend its turn.
 
-The STP Superconductor Theory incident, thread `403df198-44ef-4da5-8ea6-3625198b6f80`, supplied [`codex-live-progress.json`](../server/fixtures/codex-live-progress.json). It contains one empty completed reasoning item and the start, two output deltas and completion of `exec-549c7248-2a85-4f08-b4a2-9342691b530b`, copied from that thread's native activity journal on September 13. No reasoning text was present. The fixture contains the research command and its output, not the thread's personal context.
+[`tool-progress.json`](../server/fixtures/tool-progress.json) exercises empty reasoning, tool start, partial output and completion through the supervisor. The focused tool-progress test covers replacement snapshots and canonical-context reconciliation.
 
 ## Regression checks
 

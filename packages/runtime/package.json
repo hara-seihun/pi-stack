@@ -19,9 +19,6 @@
   "scripts": {
     "test": "node --test *.test.mjs extensions/*/*.test.mjs"
   },
-  "dependencies": {
-    "@openai/codex": "0.154.0"
-  },
   "peerDependencies": {
     "@earendil-works/pi-coding-agent": ">=0.85.0 <0.86.0",
     "agent-browser": "*",

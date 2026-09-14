@@ -8,11 +8,11 @@ The daemon reconciles provider meters, weighted lanes, optional queue readiness,
 
 A lane has a positive weight, not a worker target. Weights divide available concurrency among eligible lanes. The manifest selects paced background admission or work-driven forced admission. A wave remains a one-off batch, not a standing target. Each run ends when its agent finishes its turn.
 
-Workers write progress through the daemon's loopback API. Each run pins its agent core and durable state directory. If a worker process or machine stops, the next worker reopens that same core state. Native and portable session references remain in run custody. See [agent cores](docs/agent-cores.md) for selection, the worker wire and isolated-context requirements. The run row records the immutable release path and transient unit name, so a daemon deployment does not replace live workers. Recovery adopts a still-active unit when a daemon restart races the user manager; an already-loaded inactive transient unit restarts from its recorded release instead of being redefined.
+Workers write progress through the daemon's loopback API. Each run pins its agent core and durable state directory. If a worker process or machine stops, the next worker reopens that same core state. Native and portable session references remain in run custody. See [Pi sessions](docs/agent-cores.md) for the worker wire and isolated-context requirements. The run row records the immutable release path and transient unit name, so a daemon deployment does not replace live workers. Recovery adopts a still-active unit when a daemon restart races the user manager; an already-loaded inactive transient unit restarts from its recorded release instead of being redefined.
 
 ## Fleet coordination
 
-New runs delegate through their selected core, which owns its child tree and completion. Workers no longer expose `fleet_dispatch`. Existing external-child coordinators retain their recorded worker release and the daemon's receipt, waiting and wakeup path. Parent links, waiting state, terminal children and transcripts remain observable. See [external fleet records](docs/fleet-dispatch.md) for their active recovery contracts. Isolated application runs require Pi; unsupported Codex tools/extensions contracts fail explicitly.
+New runs delegate through Pi, which owns its child tree and completion. Workers no longer expose `fleet_dispatch`. Existing external-child coordinators retain their recorded worker release and the daemon's receipt, waiting and wakeup path. Parent links, waiting state, terminal children and transcripts remain observable. See [external fleet records](docs/fleet-dispatch.md) for their active recovery contracts. Isolated application runs use Pi's explicit tools/extensions contract.
 
 ## Quota policy
 
@@ -33,10 +33,6 @@ The routing extension uses the same account registry for interactive Pi sessions
 Tree summarization needs a separate lifecycle repair. Pi emits `session_tree` on success but has no terminal extension event for failure or cancellation, so routing does not acquire a lease from `session_before_tree`.
 
 Recovery restores both the model and the thinking level from the active transcript branch when Pi has not resolved the saved provider. Otherwise Pi's temporary non-reasoning startup model can turn a saved `high` into `off`, which Astra and Fable clamp to `minimal` on model restoration. A model already restored with a supported level keeps that level, including explicit startup overrides. Account failover carries the current level to the replacement account. Defaults only initialize new sessions. On session shutdown it closes provider resources through the same external `pi-ai` module that supplied its providers. Pi's bundled CLI has a separate resource registry; relying on its cleanup alone leaves a completed Codex WebSocket alive until the five-minute idle timeout, keeping one-shot processes and their callers waiting. A response that reaches the provider's output-token limit is continued inside the same Pi run: the provider ended it with `stopReason=length`, so the agent did not choose to stop and the session must not settle there. This is separate from the removed fleet check-ins, which used to restart turns that agents had ended normally. The usage extension aggregates attribution hourly, one row per input, output, cache read, and cache write, and records provider meter headers. Keeping the components apart is what lets `plans()` report the share of prompt tokens a model read from cache over the last 24 hours.
-
-## External agent cores
-
-External Codex app-server processes acquire their account through [`openCoreAccount`](docs/core-accounts.md). The bridge keeps account selection, assigned fleet identity, OAuth refresh locking, leases, and usage attribution in the Orchestrator. The app server receives its short-lived external-token login only through its private stdin protocol.
 
 ## Compaction requests
 
@@ -65,7 +61,7 @@ PI_ORCHESTRATOR_LISTEN_HOST
 PI_ORCHESTRATOR_PORT
 ```
 
-The JSON config may set `core`, `profileCores`, model `profiles`, `backgroundSpendFraction`, machine and account concurrency, meter age, reconciliation periods, stall limits, `taskManifest`, `authPath`, and `agentDir`. The strict `astra`, `sol`, `terra`, `luna`, and `opus` profiles are always available alongside configured profiles. Each selects exactly one catalog model, even if a local profile uses the same name.
+The JSON config may set model `profiles`, `backgroundSpendFraction`, machine and account concurrency, meter age, reconciliation periods, stall limits, `taskManifest`, `authPath`, and `agentDir`. The strict `astra`, `sol`, `terra`, `luna`, and `opus` profiles are always available alongside configured profiles. Each selects exactly one catalog model, even if a local profile uses the same name.
 
 The [shared catalog](src/catalog.ts) maps Astra to `openai-codex/gpt-6-astra` and Sol, Terra, and Luna to `openai-codex/gpt-5.6-sol`, `gpt-5.6-terra`, and `gpt-5.6-luna`. All four share the Codex five-hour and weekly meters. Their strict profiles use the catalog's thinking defaults, `xhigh` for Astra and `max` for Sol, Terra, and Luna. Host-defined profiles can choose different thinking levels.
 
@@ -77,7 +73,7 @@ Profile candidates retain their priority order. A candidate can replace `thinkin
 
 For an experiment, record the activation time and compare new runs by `run.thinking`. `run.id` joins their token totals in `usage_hour`; session files retain the work and results. Equal admission counts do not imply equal concurrent counts or equal completion counts. A worker-launch failure remains an assigned trial and is recorded as such rather than silently replaced in the allocation.
 
-A lane manifest has `version: 2` and a `lanes` array. Every lane declares `id`, `prompt`, `cwd`, `profile`, and positive `weight`. Optional `core` overrides the profile/config core for new runs. Unknown fields are rejected, including worker targets.
+A lane manifest has `version: 2` and a `lanes` array. Every lane declares `id`, `prompt`, `cwd`, `profile`, and positive `weight`. Unknown fields are rejected, including worker targets.
 
 The manifest's optional `budget` is `background` by default. Setting it to `force` makes every lane use the existing urgent admission policy, without background pacing, reserve, meter-age or multiplier gates. This mode requires a non-empty `snapshotCommand`. Its current readiness decides whether another worker is needed; `ready: false` stops new workers until work appears again. Actual provider exhaustion, disabled or reserved accounts, cooldowns, account and machine ceilings, and global pause still apply. The daemon owns continuation, with no repeated waves or waiting model session. Manifest reload changes new admissions only. Each run records its selected budget, so existing runs retain their policy across restarts.
 

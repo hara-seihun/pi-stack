@@ -11,8 +11,7 @@ export {
   type PlanMetric,
 } from "./catalog.js";
 export { DELEGATION_POLICY } from "./delegation-policy.js";
-export { codexProviderFamily } from "./cores/codex-models.js";
-export { CORE_IDS, configuredCore, isCoreId, openCoreSession, readPortableConversation, writeCoreState,
+export { isCoreId, openCoreSession, readPortableConversation, writeCoreState,
   type CoreId, type CoreAgent, type CoreSession, type CoreSessionOptions, type PortableConversation } from "./cores/index.js";
 export type { LaneManifest, LaneSpec, LaneReadiness, Run, FleetModel, FleetDispatch, FleetResult } from "./domain.js";
 export { CompletionClient, type CompletionClientOptions, type CompletionCallOptions } from "./completion-client.js";

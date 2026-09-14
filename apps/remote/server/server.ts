@@ -5,7 +5,7 @@ import { homedir } from "node:os";
 import { basename, dirname, extname, isAbsolute, join, resolve } from "node:path";
 import { parseRunKey } from "./agent-runs";
 import { AgentHost } from "./agent-hosts";
-import { ORCHESTRATOR_CATALOG, OrchestratorClient, catalogAgentType, createSharedImageGenerationService, CORE_IDS, configuredCore, codexProviderFamily, isCoreId, writeCoreState, type CoreAgent, type CoreId, type PortableConversation, type SharedImageGenerationService, type PlanUsageSnapshot } from "pi-orchestrator/api";
+import { ORCHESTRATOR_CATALOG, OrchestratorClient, catalogAgentType, createSharedImageGenerationService, isCoreId, type CoreAgent, type CoreId, type SharedImageGenerationService, type PlanUsageSnapshot } from "pi-orchestrator/api";
 import { SessionCores } from "./session-cores";
 import { InlineImages } from "./inline-images";
 import { planCards } from "./catalog-presentation";
@@ -185,7 +185,6 @@ const voice = new VoiceClient(DATA);
 const agentHost = new AgentHost(orchestrator, { key: "local", label: "THIS MACHINE", name: "This machine" });
 ensureSupervisorSchema(db);
 const sessionCores = new SessionCores(db, DATA);
-const DEFAULT_CORE = configuredCore();
 const HANDOFF_PATH = join(DATA, "supervisor-handoff.json");
 type RuntimePhase = "WAITING" | "STARTING" | "IDLE" | "DISPATCHING" | "RUNNING" | "ABORTING" | "STOPPING";
 type RuntimeHandoff = {
@@ -1245,7 +1244,7 @@ function handleRpcEvent(sessionId: string, rt: Runtime, event: any) {
       rt.activeTools.set(toolCallId, name);
       touchSession(sessionId);
     }
-    rt.toolProgress.set(toolCallId, updateToolProgress(tool, toolResultText(event.partialResult), rt.core === "codex"));
+    rt.toolProgress.set(toolCallId, updateToolProgress(tool, toolResultText(event.partialResult)));
     displayContexts.delete(sessionId);
     signalLiveSync();
   } else if (event.type === "tool_execution_end") {
@@ -1280,7 +1279,7 @@ function handleRpcEvent(sessionId: string, rt: Runtime, event: any) {
     emit(sessionId, "notice", { text: "Compacting context…" });
   } else if (event.type === "compaction_end") {
     rt.compacting = false;
-    if (event.result) { if (rt.core !== "codex") requireCompactionContext(sessionId, rt); rt.pendingModelFailure = null; }
+    if (event.result) { requireCompactionContext(sessionId, rt); rt.pendingModelFailure = null; }
     else {
       rt.compactionContextHash = null;
       if (event.errorMessage) rt.pendingModelFailure = String(event.errorMessage);
@@ -1428,7 +1427,7 @@ async function reconcileRuntimeState(sessionId: string, rt: Runtime): Promise<an
     const active = coreStateActive(state);
     const wasCompacting = rt.compacting;
     rt.compacting = Boolean(state.isCompacting);
-    if (wasCompacting && !rt.compacting && rt.core !== "codex") requireCompactionContext(sessionId, rt);
+    if (wasCompacting && !rt.compacting) requireCompactionContext(sessionId, rt);
     if (active) {
       if (["IDLE", "DISPATCHING"].includes(rt.phase)) setRuntimePhase(sessionId, rt, "RUNNING", "RUNNING");
     } else if (rt.phase === "RUNNING") {
@@ -1539,7 +1538,6 @@ function runtimeEnvironment(row: any) {
     HOME,
     PATH: `${join(HOME, ".local/bin")}:${join(HOME, ".bun/bin")}:${process.env.PATH ?? ""}`,
     PI_REMOTE_SESSION_ID: row.id,
-    PI_STACK_CORE: sessionCores.get(row.id).core,
     PI_STACK_CORE_STATE_DIR: sessionCores.get(row.id).stateDir,
     PI_SESSION_ID: row.id,
     PI_SESSION_FILE: join(sessionCores.get(row.id).stateDir, "conversation.jsonl"),
@@ -1558,7 +1556,6 @@ async function startRuntime(row: any): Promise<Runtime> {
   const preset = workspaces.get(row.workspace_id);
   const cwd = realpathSync(preset?.path ?? row.workspace_id);
   const resumePath = row.session_path && existsSync(row.session_path) ? row.session_path : null;
-  if (row.session_path && !resumePath && sessionCores.get(row.id).core !== "pi") throw new Error("The recorded native core state is missing; repair its custody before reopening");
   if (row.session_path && !resumePath) {
     db.query("UPDATE sessions SET session_path=NULL WHERE id=?").run(row.id);
     emit(row.id, "notice", { text: "Session file was missing; restoring from saved conversation history" });
@@ -1621,7 +1618,6 @@ async function startRuntime(row: any): Promise<Runtime> {
       setRuntimePhase(row.id, rt, working ? "RUNNING" : "IDLE", working || pendingWork > 0 ? "RUNNING" : "IDLE");
     }
     if (rt.historyNeedsRestore) emit(row.id, "notice", { text: "Conversation context will be restored with the next message" });
-    sessionCores.started(row.id);
     scheduleThreadNameIfDue(row.id);
     return rt;
   } catch (cause) {
@@ -1669,7 +1665,6 @@ async function reconcileAdoptedRuntime(row: any, rt: Runtime) {
     const state = await rpc(rt, "get_state", {}, 5_000);
     if (!ownsSupervisorLease() || runtimes.get(row.id) !== rt || rt.phaseVersion !== phaseVersion
       || ["ABORTING", "STOPPING"].includes(rt.phase)) return;
-    sessionCores.started(row.id);
     restoreLiveProgress(row.id, rt, state.live);
     if (isCoreId(state.core)) rt.core = state.core;
     if (state.model?.id) rt.modelId = String(state.model.id);
@@ -1876,75 +1871,6 @@ async function runCommand(row: any, requestId: string, name: string, args: strin
   return { response, status: 202 };
 }
 
-async function switchSessionCore(row: any, core: CoreId): Promise<void> {
-  if (forkingSessions.has(row.id)) throw new Error("Wait for the conversation edit to finish");
-  forkingSessions.add(row.id);
-  try { await replaceSessionCore(row, core); }
-  finally {
-    forkingSessions.delete(row.id);
-    kickSession(row.id);
-    if (releaseHandoffRequested) queueMicrotask(() => void handoffRelease());
-  }
-}
-
-async function replaceSessionCore(row: any, core: CoreId): Promise<void> {
-  const source = sessionCores.get(row.id);
-  if (source.core === core) return;
-  if (subagentIdentity(row.id)) throw new Error("A child thread's core is owned by its parent");
-  const rt = await activate(row);
-  const pending = db.query("SELECT 1 FROM work_items WHERE session_id=? AND state IN ('queued','running','dispatched') LIMIT 1").get(row.id);
-  if (rt.phase !== "IDLE" || pending || sessionCores.agents(row.id).some(agent => agent.state === "running")) {
-    throw new Error("Wait for the whole agent tree and input queue to become idle before switching cores");
-  }
-  const state = await rpc(rt, "get_state");
-  if (coreStateActive(state)) throw new Error("The current core is still working");
-  row = sessionRow.get(row.id);
-  const provider = canonicalModelProvider(String(state.model?.provider ?? row.initial_provider));
-  if (core === "codex" && !codexProviderFamily(provider)) throw new Error("Choose an OpenAI or Anthropic model before switching to Codex");
-  const transfer = await rpc(rt, "get_portable_conversation") as PortableConversation;
-  if (transfer.version !== 1 || !Array.isArray(transfer.messages)) throw new Error("The current core did not export a conversation");
-  const switchId = crypto.randomUUID();
-  const target = { core, stateDir: join(DATA, "core-sessions", row.id, switchId) };
-  writeCoreState(join(target.stateDir, "transfer.json"), transfer);
-  db.query("INSERT INTO core_switches VALUES(?,?,?,?,?,'starting',NULL)").run(switchId,row.id,now(),JSON.stringify(source),JSON.stringify(target));
-  let selectedTarget = false;
-  try {
-    rt.expectedExit = true;
-    rt.suppressOutput = true;
-    setRuntimePhase(row.id, rt, "STOPPING");
-    await terminateRuntimeProcess(rt);
-    if (runtimes.has(row.id)) throw new Error("The source core did not stop");
-    if (!ownsSupervisorLease()) throw new Error("Supervisor instance was replaced");
-    db.transaction(() => {
-      sessionCores.set(row.id, target);
-      db.query("UPDATE sessions SET session_path=NULL,initial_provider=?,current_provider=?,initial_model=?,initial_thinking=?,state='STOPPED',revision=revision+1 WHERE id=?")
-        .run(provider,provider,state.model?.id ?? row.initial_model,state.thinkingLevel ?? row.initial_thinking,row.id);
-    })();
-    selectedTarget = true;
-    await activate(sessionRow.get(row.id));
-    db.query("UPDATE core_switches SET state='complete' WHERE id=?").run(switchId);
-    emit(row.id, "notice", { text: `Switched from ${source.core} to ${core} using the saved conversation. Native checkpoints remain with their original core.` });
-  } catch (cause) {
-    db.query("UPDATE core_switches SET state='failed',error=? WHERE id=?").run(String(cause),switchId);
-    if (selectedTarget && ownsSupervisorLease()) {
-      const candidate = runtimes.get(row.id);
-      if (candidate) {
-        candidate.expectedExit = true;
-        candidate.suppressOutput = true;
-        setRuntimePhase(row.id,candidate,"STOPPING");
-        await terminateRuntimeProcess(candidate);
-      }
-      if (runtimes.has(row.id)) throw new Error(`Core switch failed and its target is still stopping: ${String(cause)}`);
-      db.transaction(() => {
-        sessionCores.set(row.id, source);
-        db.query("UPDATE sessions SET session_path=?,initial_provider=?,current_provider=?,initial_model=?,initial_thinking=?,state='STOPPED',revision=revision+1 WHERE id=?")
-          .run(row.session_path,row.initial_provider,row.current_provider,row.initial_model,row.initial_thinking,row.id);
-      })();
-    }
-    throw cause;
-  }
-}
-
 async function threadSettings(row: any) {
   const rt = await activate(row);
   const [state, availableModels, availableThinking] = await Promise.all([
@@ -1965,14 +1891,11 @@ async function threadSettings(row: any) {
   const selected = subagentIdentity(row.id);
   const models = rolledUpModels(availableModels.models ?? []).filter((model: any) => !selected || model.id === selected.model);
   return {
-    core: sessionCores.get(row.id).core,
-    cores: [...CORE_IDS],
     agents: sessionCores.agents(row.id),
     model,
     thinkingLevel: state.thinkingLevel ?? "off",
     speedMode: latest?.service_tier === "priority" ? "priority" : "normal",
-    speedModes: supportsPriority && sessionCores.get(row.id).core === "pi" ? ["normal", "priority"] : [],
-    bashTimeoutSupported: sessionCores.get(row.id).core === "pi",
+    speedModes: supportsPriority ? ["normal", "priority"] : [],
     bashTimeoutSeconds: bashTimeoutSeconds(latest?.bash_timeout_seconds),
     models,
     thinkingLevels: availableThinking.levels ?? ["off"],
@@ -2237,14 +2160,14 @@ function meetingDestination() {
 }
 
 function insertThread(id: string, name: string, destination: { workspaceId: string; id: string },
-  preset: { provider: string; modelId: string; thinkingLevel: string }, meetingId: string | null, priority: boolean, core: CoreId = DEFAULT_CORE) {
+  preset: { provider: string; modelId: string; thinkingLevel: string }, meetingId: string | null, priority: boolean) {
   const time = now();
   db.query("UPDATE sessions SET display_order=display_order+1 WHERE archived_at IS NULL").run();
   db.query(`INSERT INTO sessions(id,name,workspace_id,session_path,state,created_at,updated_at,last_error,
     initial_provider,current_provider,initial_model,initial_thinking,profile_id,service_tier,meeting_id,display_order)
     VALUES(?,?,?,?,?,?,?,NULL,?,?,?,?,?,?,?,0)`).run(id, name, destination.workspaceId, null, "STOPPED", time, time,
       preset.provider, preset.provider, preset.modelId, preset.thinkingLevel, destination.id, priority ? "priority" : "default", meetingId);
-  sessionCores.create(id, core);
+  sessionCores.create(id);
 }
 
 function relayThreadResults() {
@@ -2813,7 +2736,7 @@ const server = Bun.serve({
         if (parent && !task) return error("A delegated task is required");
         const destination = THREAD_DESTINATIONS.get(String(body.destination ?? parent?.profile_id ?? (body.meetingId ? meetingDestination()?.id : "home")));
         if (!destination) return error("Unknown thread destination");
-        const core = configuredCore(body.core ?? (parent ? sessionCores.get(parent.id).core : destination.core ?? DEFAULT_CORE));
+        if ("core" in body) return error("Pi Stack runs Pi; agent core selection is not supported");
         const meetingId = parent ? parent.meeting_id : body.meetingId == null ? null : String(body.meetingId);
         if (meetingId !== null && !/^[0-9a-f-]{36}$/i.test(meetingId)) return error("Valid meetingId required");
         const modelId = meetingId && !parent ? "astra" : String(body.model ?? (parent ? "astra" : destination.defaultModel));
@@ -2824,7 +2747,6 @@ const server = Bun.serve({
           return error("Model not available at this destination");
         const model = THREAD_MODELS.get(modelId);
         if (!model) return error("Unknown thread model");
-        if (core === "codex" && !codexProviderFamily(model.provider)) return error("Codex requires an OpenAI or Anthropic model", 409);
         const preset = {
           provider: model.provider,
           modelId: model.modelId,
@@ -2858,7 +2780,7 @@ const server = Bun.serve({
         if (!/^[0-9a-f-]{36}$/i.test(requestedId)) return error("Valid sessionId required");
         const id = requestedId;
         const response = db.transaction(() => {
-          insertThread(id, name, destination, preset, meetingId, model.id === "astra", core);
+          insertThread(id, name, destination, preset, meetingId, model.id === "astra");
           if (parent) db.query("INSERT INTO subagents(session_id,parent_session_id,provider,model) VALUES(?,?,?,?)")
             .run(id, parent.id, preset.provider, preset.modelId);
           const delegation = parent ? enqueueDelegation(id, parent, task) : null;
@@ -3129,12 +3051,7 @@ const server = Bun.serve({
       try {
         const body = await readBody(req);
         if (forkingSessions.has(id)) return error("Wait for the conversation edit to finish", 409);
-        if (body.core != null) {
-          if (!isCoreId(body.core)) return error("Unknown agent core");
-          if (Object.keys(body).some(key => key !== "core")) return error("Change the core separately from other settings");
-          await switchSessionCore(row, body.core);
-          return json({ settings: await threadSettings(sessionRow.get(id)) });
-        }
+        if ("core" in body) return error("Pi Stack runs Pi; agent core selection is not supported");
         const subagent = subagentIdentity(id);
         if (subagent && (body.modelProvider != null || body.modelId != null)
           && (String(body.modelId ?? "") !== subagent.model
@@ -3155,7 +3072,6 @@ const server = Bun.serve({
           await rpc(rt, "set_thinking_level", { level: String(body.thinkingLevel) }, 30000);
         }
         if (body.speedMode != null) {
-          if (sessionCores.get(id).core !== "pi") return error("This core does not support Pi's priority speed setting", 409);
           const speedMode = String(body.speedMode);
           if (speedMode !== "normal" && speedMode !== "priority") return error("speedMode must be normal or priority");
           const provider = String(body.modelProvider ?? (sessionRow.get(id) as any)?.current_provider ?? "");
@@ -3165,7 +3081,6 @@ const server = Bun.serve({
           db.query("UPDATE sessions SET service_tier=?,updated_at=?,revision=revision+1 WHERE id=?").run(tier, now(), id);
         }
         if (body.bashTimeoutSeconds != null) {
-          if (sessionCores.get(id).core !== "pi") return error("This core does not support Pi's bash timeout setting", 409);
           const timeout = Number(body.bashTimeoutSeconds);
           if (!BASH_TIMEOUT_OPTIONS.some((option) => option === timeout)) {
             return error(`bashTimeoutSeconds must be one of ${BASH_TIMEOUT_OPTIONS.join(", ")}`);

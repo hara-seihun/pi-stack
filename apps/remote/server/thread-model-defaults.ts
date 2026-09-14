@@ -7,7 +7,6 @@ export interface ThreadDestination {
   thinkingLevel: string;
   models: string[];
   defaultModel: string;
-  core?: "pi" | "codex";
 }
 
 export function defaultThreadDestinations(personalWorkspaceId?: string): ThreadDestination[] {

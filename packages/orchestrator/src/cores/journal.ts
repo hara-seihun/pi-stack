@@ -1,7 +1,7 @@
 import { createHash, randomUUID } from "node:crypto";
 import { closeSync, existsSync, fsyncSync, mkdirSync, openSync, readFileSync, renameSync, writeFileSync, writeSync } from "node:fs";
 import { dirname, join } from "node:path";
-import type { CoreAgent, CoreId, CoreOutput, PortableConversation } from "./contracts.js";
+import type { ConversationSource, CoreAgent, CoreId, CoreOutput, PortableConversation } from "./contracts.js";
 
 export function writeCoreState(path: string, value: unknown): void {
   mkdirSync(dirname(path), { recursive: true, mode: 0o700 });
@@ -36,7 +36,7 @@ export function portableMessage(message: Record<string, unknown>): Record<string
   return result;
 }
 
-export function readPortableConversation(path: string, core: CoreId): PortableConversation {
+export function readPortableConversation(path: string, core: ConversationSource): PortableConversation {
   const records = readCoreRecords(path);
   const byId = new Map(records.filter(record => typeof record.id === "string").map(record => [record.id, record]));
   const last = [...records].reverse().find(record => typeof record.id === "string" && record.type !== "session");

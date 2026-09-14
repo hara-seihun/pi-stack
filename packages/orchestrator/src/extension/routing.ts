@@ -17,7 +17,33 @@ import customModelConfig from "../models.json" with { type: "json" };
 
 type ThinkingLevel = ReturnType<ExtensionAPI["getThinkingLevel"]>;
 
-export function defaultLedgerPath():string{return process.env.PI_ORCHESTRATOR_LEDGER||join(homedir(),".local/share/pi-orchestrator/ledger.sqlite3");}
+export function defaultLedgerPath(env:NodeJS.ProcessEnv=process.env):string{return env.PI_ORCHESTRATOR_LEDGER||join(homedir(),".local/share/pi-orchestrator/ledger.sqlite3");}
+
+export function resolveSessionModel(models:readonly Model<any>[],provider:string,modelId:string,env:NodeJS.ProcessEnv=process.env):
+  {ok:true;model:Model<any>}|{ok:false;error:string} {
+  const candidates=models.filter(model=>model.id===modelId);
+  const aliases=candidates.filter(model=>baseProvider(model.provider)===provider&&model.provider!==provider);
+  const family=builtinProviders().find(family=>family.id===provider&&family.auth.oauth);
+  if(!aliases.length||!family){
+    const model=candidates.find(model=>model.provider===provider);
+    return model?{ok:true,model}:{ok:false,error:`Model not found: ${provider}/${modelId}`};
+  }
+  const store=Store.open(defaultLedgerPath(env));
+  try{
+    const shared=providerOAuth(family,env.PI_ORCHESTRATOR_AUTH??defaultSharedAuthPath(defaultLedgerPath(env)));
+    const available=new Set(candidates.map(model=>model.provider));
+    const exclude=new Set(store.accounts().filter(account=>!available.has(account.id)).map(account=>account.id));
+    const assigned=env.PI_ORCHESTRATOR_ASSIGNED==="1"&&env.PI_ORCHESTRATOR_RUN_ID?store.run(env.PI_ORCHESTRATOR_RUN_ID):undefined;
+    const account=assigned?.accountId?store.account(assigned.accountId):chooseInteractiveAccount(store,shared,provider,exclude);
+    if(account&&account.provider===provider&&available.has(account.id)&&shared.has(account.id)){
+      const model=candidates.find(model=>model.provider===account.id)!;
+      return {ok:true,model};
+    }
+    const cooling=store.accounts().filter(account=>account.provider===provider&&allowsAccountUse(account,"interactive")&&shared.has(account.id)&&account.cooldownUntil&&account.cooldownUntil>Date.now());
+    const resume=cooling.length?` Earliest cooldown ends at ${new Date(Math.min(...cooling.map(account=>account.cooldownUntil!))).toISOString()}.`:"";
+    return {ok:false,error:`No eligible pooled account for ${provider}/${modelId}.${resume}`};
+  }finally{store.close();}
+}
 export function baseProvider(provider:string):string{return provider.replace(/-\d+$/u,"");}
 export function failoverPrompt(failure:string,account:string):string{return interruptedTurnPrompt(failure,`This session moved to another account (${account}) and is ready to keep going.`);}
 export function credentialRepairPrompt(failure:string,account:string):string{return interruptedTurnPrompt(failure,`The credential for ${account} was refreshed and this session is ready to keep going on the same account.`);}
@@ -31,12 +57,12 @@ export default function routing(pi:ExtensionAPI):void{
   let closed=false;
   const lifecycle=new AbortController();
   const environment:NodeJS.ProcessEnv=(globalThis as any)[Symbol.for("pi-stack.session-environment")]?.getStore()??process.env;
-  const ledgerPath=defaultLedgerPath(),store=Store.open(ledgerPath),families=new Map(builtinProviders().map((raw)=>{const provider=withAnthropicFiles(withCustomModels(raw));return[provider.id,provider] as const;}));
+  const ledgerPath=defaultLedgerPath(environment),store=Store.open(ledgerPath),families=new Map(builtinProviders().map((raw)=>{const provider=withAnthropicFiles(withCustomModels(raw));return[provider.id,provider] as const;}));
   pi.registerProvider(families.get("anthropic")!);
   const shared=new Map<string,SharedOAuthAuth>();
   for(const family of families.values()){
     const oauth=family.auth.oauth;if(!oauth)continue;
-    shared.set(family.id,providerOAuth(family,defaultSharedAuthPath(ledgerPath)));
+    shared.set(family.id,providerOAuth(family,environment.PI_ORCHESTRATOR_AUTH??defaultSharedAuthPath(ledgerPath)));
   }
   const assigned=environment.PI_ORCHESTRATOR_ASSIGNED==="1"&&environment.PI_ORCHESTRATOR_RUN_ID?store.run(environment.PI_ORCHESTRATOR_RUN_ID):undefined;
   for(const account of store.accounts()){
@@ -143,7 +169,7 @@ export default function routing(pi:ExtensionAPI):void{
         }
       }
     }
-    else if(event.reason==="startup"||event.reason==="new"){
+    else{
       const explicit=ctx.model?.provider&&/-\d+$/.test(ctx.model.provider)?store.account(ctx.model.provider):undefined;
       const retain=explicit&&allowsAccountUse(explicit,"interactive")
         &&(!explicit.cooldownUntil||explicit.cooldownUntil<=Date.now())&&shared.get(explicit.provider)?.has(explicit.id);
