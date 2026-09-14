@@ -14,6 +14,8 @@ import { installImageGeneration } from "./image-generation.js";
 import { installProviderOperations } from "./provider-operation.js";
 import { interruptedTurnPrompt } from "../host/continuations.js";
 import customModelConfig from "../models.json" with { type: "json" };
+import { modelBrokerUrl } from "../model-broker-contract.js";
+import { installBrokerRouting } from "./broker-routing.js";
 
 type ThinkingLevel = ReturnType<ExtensionAPI["getThinkingLevel"]>;
 
@@ -21,6 +23,10 @@ export function defaultLedgerPath(env:NodeJS.ProcessEnv=process.env):string{retu
 
 export function resolveSessionModel(models:readonly Model<any>[],provider:string,modelId:string,env:NodeJS.ProcessEnv=process.env):
   {ok:true;model:Model<any>}|{ok:false;error:string} {
+  if(modelBrokerUrl(env)){
+    const model=models.find(model=>model.id===modelId&&model.provider===baseProvider(provider));
+    return model?{ok:true,model}:{ok:false,error:`Model not found through model broker: ${provider}/${modelId}`};
+  }
   const candidates=models.filter(model=>model.id===modelId);
   const aliases=candidates.filter(model=>baseProvider(model.provider)===provider&&model.provider!==provider);
   const family=builtinProviders().find(family=>family.id===provider&&family.auth.oauth);
@@ -57,6 +63,8 @@ export default function routing(pi:ExtensionAPI):void{
   let closed=false;
   const lifecycle=new AbortController();
   const environment:NodeJS.ProcessEnv=(globalThis as any)[Symbol.for("pi-stack.session-environment")]?.getStore()??process.env;
+  const brokerUrl=modelBrokerUrl(environment);
+  if(brokerUrl){installBrokerRouting(pi,brokerUrl,builtinProviders().map(withCustomModels),defaultLedgerPath(environment),environment);return;}
   const ledgerPath=defaultLedgerPath(environment),store=Store.open(ledgerPath),families=new Map(builtinProviders().map((raw)=>{const provider=withAnthropicFiles(withCustomModels(raw));return[provider.id,provider] as const;}));
   pi.registerProvider(families.get("anthropic")!);
   const shared=new Map<string,SharedOAuthAuth>();

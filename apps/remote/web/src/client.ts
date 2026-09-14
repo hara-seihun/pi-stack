@@ -2,32 +2,15 @@ import { API } from "../../server/api";
 import { abortable } from "./abortable";
 import type { SyncRequest, SyncResponse } from "../../server/protocol";
 
-const LEGACY_KEY_STORAGE = "pi-remote-key";
 let unlockHandler: ((message: string) => Promise<string>) | null = null;
 let unlocking: Promise<void> | null = null;
 
-function keyStorage() {
-  const user = window.PiRemotePerson?.get() || "";
-  return user ? `pi-remote-key:${user}` : LEGACY_KEY_STORAGE;
+function storedKey(user: string) {
+  try { return user ? localStorage.getItem(`pi-remote-key:${user}`) || "" : ""; } catch { return ""; }
 }
 
-function storedKey() {
-  try {
-    const key = localStorage.getItem(keyStorage());
-    if (key) return key;
-    const legacy = localStorage.getItem(LEGACY_KEY_STORAGE) ?? "";
-    if (legacy && keyStorage() !== LEGACY_KEY_STORAGE) {
-      localStorage.setItem(keyStorage(), legacy);
-      localStorage.removeItem(LEGACY_KEY_STORAGE);
-    }
-    return legacy;
-  } catch {
-    return "";
-  }
-}
-
-function rememberKey(key: string) {
-  try { localStorage.setItem(keyStorage(), key); } catch {}
+function rememberKey(user: string, key: string) {
+  try { localStorage.setItem(`pi-remote-key:${user}`, key); } catch {}
 }
 
 async function responseJson(response: Response): Promise<any> {
@@ -36,41 +19,51 @@ async function responseJson(response: Response): Promise<any> {
 }
 
 async function sendUnlock(key: string) {
+  const user = window.PiRemotePerson.get();
+  if (!user) throw new Error("Choose a person first");
   const response = await fetch(API.unlock.path(), {
     method: "POST",
-    headers: { accept: "application/json", "content-type": "application/json" },
-    body: JSON.stringify({ key }),
+    headers: { accept: "application/json", "content-type": "application/json", "x-pi-remote-user": user },
+    body: JSON.stringify(key ? { key } : {}),
     cache: "no-store",
   });
   const result = await responseJson(response);
-  if (response.status === 403) {
-    window.PiRemotePerson?.set("");
-    throw new Error(result.error || "This machine does not know you");
-  }
   if (!response.ok) throw new Error(result.error || `HTTP ${response.status}`);
+  if (result.ok !== true || result.user !== user || typeof result.session !== "string" || !result.session) throw new Error("Router returned an invalid unlock session");
+  window.PiRemotePerson.acceptSession(user, result.session);
+  return user;
 }
 
 export function registerUnlockHandler(handler: (message: string) => Promise<string>) {
   unlockHandler = handler;
 }
 
-async function ensureUnlocked() {
+export async function ensureUnlocked() {
+  if (window.PiRemotePerson.session()) return;
   if (unlocking) return unlocking;
   unlocking = (async () => {
-    const saved = storedKey();
+    const saved = storedKey(window.PiRemotePerson.get());
     if (saved) {
       try {
         await sendUnlock(saved);
         return;
       } catch {}
     }
-    if (!unlockHandler) throw new Error("Unlock UI is unavailable");
+    if (!saved && window.PiRemotePerson.get()) {
+      const response = await fetch(API.environment.path(), { cache: "no-store" });
+      if (!response.ok) throw new Error(`Person chooser returned HTTP ${response.status}`);
+      const result = await responseJson(response);
+      const people = result.environment?.persons || result.persons || [];
+      const person = people.find((candidate: { user: string }) => candidate.user === window.PiRemotePerson.get());
+      if (person?.requiresUnlock === false) { await sendUnlock(""); return; }
+    }
+    if (!unlockHandler) throw new Error("Unlock UI is unavailable. Open Pi Remote to choose and unlock your folder.");
     let message = saved ? "The saved key did not open your folder." : "";
     while (true) {
       const key = await unlockHandler(message);
       try {
-        await sendUnlock(key);
-        rememberKey(key);
+        const user = await sendUnlock(key);
+        rememberKey(user, key);
         return;
       } catch (error) {
         message = error instanceof Error ? error.message : String(error);
@@ -83,11 +76,14 @@ async function ensureUnlocked() {
 export async function piFetch(input: RequestInfo | URL, init?: RequestInit, retryOnLock = true): Promise<Response> {
   const signal = init?.signal ?? (input instanceof Request ? input.signal : undefined);
   const wait = <T>(operation: Promise<T>) => signal ? abortable(operation, signal) : operation;
-  const response = await wait(fetch(input, init));
+  const send = () => fetch(input instanceof Request ? input.clone() : input, init);
+  const session = window.PiRemotePerson.session();
+  const response = await wait(send());
   if (response.status !== 423 || !retryOnLock) return response;
+  window.PiRemotePerson.clearSession(session);
   await wait(ensureUnlocked());
   signal?.throwIfAborted();
-  return wait(fetch(input, init));
+  return wait(send());
 }
 
 export async function api(method: string, path: string, body?: unknown, timeout = 20_000): Promise<any> {

@@ -15,9 +15,13 @@ import "./style.css";
 const params = new URLSearchParams(location.search);
 const inviteRoom = params.get("room") || "";
 const owner = params.get("user") || window.PiRemotePerson.get();
-const environmentReady = params.get("environment")
-  ? window.KenanRemote!.select({ id: params.get("environment")!, user: owner })
-  : window.KenanRemote!.getState();
+let environmentPromise: Promise<any> | null = null;
+async function environmentReady() {
+  if (!window.PiRemotePerson.get()) throw new Error("Choose your Pi Remote person on the main page first");
+  return environmentPromise ??= params.get("environment")
+    ? window.KenanRemote!.select({ id: params.get("environment")!, user: owner })
+    : window.KenanRemote!.getState();
+}
 const sourceKey = (source: MeetMediaSource) => `${source.participant.id}:${source.kind}`;
 
 function MediaTile({ source, muted }: { source: MeetMediaSource; muted: boolean }) {
@@ -74,15 +78,17 @@ function MeetPage() {
 
   useEffect(() => {
     registerUnlockHandler((message) => new Promise((resolve) => setUnlock({ message, resolve })));
-    void environmentReady.catch((cause) => setNotice(String(cause.message || cause)));
+    void environmentReady().catch((cause) => setNotice(String(cause.message || cause)));
     const stop = () => leave();
+    const personChanged = () => { leave(); setMeetings([]); setNotice("Person changed. Return to Pi Remote before starting another meeting."); };
     window.addEventListener("pagehide", stop);
-    return () => { window.removeEventListener("pagehide", stop); leave(); };
+    window.addEventListener("pi-person", personChanged);
+    return () => { window.removeEventListener("pagehide", stop); window.removeEventListener("pi-person", personChanged); leave(); };
   }, []);
 
   useEffect(() => {
     if (inviteRoom) return;
-    void environmentReady.then(() => meetRequest<{ meetings: Array<{ id: string; createdAt: number }> }>(meetPath(), owner))
+    void environmentReady().then(() => meetRequest<{ meetings: Array<{ id: string; createdAt: number }> }>(meetPath(), owner))
       .then((result) => setMeetings(result.meetings)).catch((cause) => setNotice(String(cause.message || cause)));
   }, [snapshot?.id]);
 
@@ -238,7 +244,7 @@ function MeetPage() {
       if (!name.trim()) throw new Error("Enter your name");
       if (!owner) throw new Error("Choose your Pi Remote person on the main page first");
       if (!inviteRoom && owner !== window.PiRemotePerson.get()) throw new Error("Switch to this person in Pi Remote before hosting their meeting");
-      await environmentReady;
+      await environmentReady();
       if (attempt !== generation.current) return;
       if (!window.isSecureContext || !navigator.mediaDevices) throw new Error("Meet needs a secure WebView or the Tailscale HTTPS link for microphone and camera access");
       if (!inviteRoom) {
@@ -348,7 +354,7 @@ function MeetPage() {
     if (!snapshot) return;
     const url = new URL(location.href);
     try {
-      const environment = await environmentReady;
+      const environment = await environmentReady();
       if (nativePlatform) {
         const frontend = new URL(environment.baseUrl);
         if (frontend.protocol !== "https:") { setNotice("This environment needs an HTTPS frontend to share meeting invitations outside the app."); return; }

@@ -20,10 +20,11 @@ const parameters = Type.Object({
 export type ImageToolInput = Static<typeof parameters>;
 type Connection = { kind: "shared" } | { kind: "personal"; provider: "openai-codex" | "openai" };
 
-export function installImageGeneration(pi: ExtensionAPI, store: Store, shared: SharedOAuthAuth | undefined) {
-  const service = createSharedImageGenerationService({ store, shared });
+export function installImageGeneration(pi: ExtensionAPI, store: Store, shared: SharedOAuthAuth | undefined, brokerUrl?: string) {
+  const service = createSharedImageGenerationService(brokerUrl ? { brokerUrl } : { store, shared });
   pi.on("session_shutdown", () => service.close());
   const connection = (ctx: ExtensionContext): Connection | undefined => {
+    if (brokerUrl) return { kind: "shared" };
     const account = chooseInteractiveAccount(store, shared, "openai-codex");
     if (account) return { kind: "shared" };
     for (const provider of ["openai-codex", "openai"] as const) {

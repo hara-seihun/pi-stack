@@ -9,9 +9,13 @@ const standard = catalogModel("astra")!;
 const expert = catalogModel("opus")!;
 
 export function loadConfig(
-  path = process.env.PI_ORCHESTRATOR_CONFIG ?? join(homedir(), ".config/pi-orchestrator/config.json"),
-  ledgerPath = process.env.PI_ORCHESTRATOR_LEDGER || join(homedir(), ".local/share/pi-orchestrator/ledger.sqlite3"),
+  path?: string,
+  ledgerPath?: string,
+  env: NodeJS.ProcessEnv = process.env,
 ): OrchestratorConfig {
+  const home = env.HOME || homedir();
+  path ??= env.PI_ORCHESTRATOR_CONFIG ?? join(home, ".config/pi-orchestrator/config.json");
+  ledgerPath ??= env.PI_ORCHESTRATOR_LEDGER || join(home, ".local/share/pi-orchestrator/ledger.sqlite3");
   let local: any = {};
   try { local = JSON.parse(readFileSync(path,"utf8")); } catch (error: any) { if(error?.code!=="ENOENT") throw error; }
   const candidate=({provider,model}:ModelCandidate)=>({provider,model,thinking:admissionThinking({provider,model})});
@@ -22,8 +26,11 @@ export function loadConfig(
     }),
     ...Object.fromEntries(["astra", "sol", "terra", "luna", "opus"].map(id => [id, [catalogModel(id)!]])),
   };
+  const modelBrokerUrl = env.PI_MODEL_BROKER_URL ?? local.modelBrokerUrl;
+  if (modelBrokerUrl !== undefined && typeof modelBrokerUrl !== "string") throw new Error("modelBrokerUrl must be a string");
   return {
-    listenHost: process.env.PI_ORCHESTRATOR_LISTEN_HOST || local.listenHost,
+    modelBrokerUrl,
+    listenHost: env.PI_ORCHESTRATOR_LISTEN_HOST || local.listenHost,
     profiles: Object.fromEntries(Object.entries(profiles).map(([profile, candidates]) => [profile, (candidates as ModelCandidate[]).map(candidate)])),
     backgroundSpendFraction: Number(local.backgroundSpendFraction ?? 0.8),
     maxConcurrentSessions: Number(local.maxConcurrentSessions ?? 40),
@@ -33,7 +40,7 @@ export function loadConfig(
     stallAfterMs: Number(local.stallAfterMs ?? 20*60_000),
     killAfterMs: Number(local.killAfterMs ?? 30*60_000),
     taskManifest: local.taskManifest,
-    authPath: process.env.PI_ORCHESTRATOR_AUTH || local.authPath || defaultSharedAuthPath(ledgerPath),
-    agentDir: process.env.PI_AGENT_DIR || process.env.PI_CODING_AGENT_DIR || local.agentDir || join(homedir(),".pi/agent"),
+    authPath: env.PI_ORCHESTRATOR_AUTH || local.authPath || defaultSharedAuthPath(ledgerPath, env),
+    agentDir: env.PI_AGENT_DIR || env.PI_CODING_AGENT_DIR || local.agentDir || join(home,".pi/agent"),
   };
 }

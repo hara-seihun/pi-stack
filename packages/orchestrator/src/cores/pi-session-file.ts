@@ -1,6 +1,6 @@
 import { closeSync, openSync, readSync } from "node:fs";
 
-export function assertPiSessionFile(path: string): void {
+export function assertPiSessionFile(path: string): Record<string, unknown> {
   const fd = openSync(path, "r");
   let header: Record<string, unknown> | undefined;
   try {
@@ -18,4 +18,5 @@ export function assertPiSessionFile(path: string): void {
     || header.core !== undefined && header.core !== "pi") {
     throw new Error(`Not a native Pi session: ${path}. Import a portable conversation into a new Pi state directory instead.`);
   }
+  return header;
 }

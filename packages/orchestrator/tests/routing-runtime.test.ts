@@ -167,6 +167,67 @@ console.log('all child accounts bound');
   finally {await rm(root,{recursive:true,force:true});}
 },7000);
 
+test('config-only broker discovery supports native startup, numbered model changes and plain CLI', async () => {
+  const root = await mkdtemp(join(tmpdir(), 'pi-broker-startup-'));
+  const fixture = join(root, 'fixture.mjs'), probe = join(root, 'probe.mjs');
+  await writeFile(fixture, `
+import assert from 'node:assert/strict';
+import {mkdirSync,writeFileSync} from 'node:fs';
+import {join} from 'node:path';
+import {openPiNative} from ${JSON.stringify(join(buildRoot,'compiled/cores/pi-native.js'))};
+import {modelBrokerUrl,loadConfig} from ${JSON.stringify(join(buildRoot,'compiled/api.js'))};
+import {Store} from ${JSON.stringify(join(buildRoot,'compiled/store.js'))};
+const root=process.env.HOME,agentDir=join(root,'agent');
+mkdirSync(agentDir);writeFileSync(join(agentDir,'auth.json'),'{}');
+mkdirSync(join(root,'.config/pi-orchestrator'),{recursive:true});
+writeFileSync(join(root,'.config/pi-orchestrator/config.json'),JSON.stringify({modelBrokerUrl:'http://127.0.0.1:2461'}));
+assert.equal(process.env.PI_MODEL_BROKER_URL,undefined);
+assert.equal(modelBrokerUrl(),'http://127.0.0.1:2461');
+assert.equal(loadConfig().modelBrokerUrl,'http://127.0.0.1:2461');
+const sessions=[],events=[];
+try {
+  for(const parentId of [null,'parent']) {
+    const id=parentId?'child':'root';
+    const session=await openPiNative({cwd:root,stateDir:root,sessionId:id,args:['--extension',${JSON.stringify(routing)}],env:{}},
+      {id,parentId,name:id,cwd:root,sessionFile:join(root,id+'.jsonl'),state:'idle',busy:false,provider:'openai-codex-11',model:'gpt-6-astra',thinkingLevel:'high'},
+      {list:()=>[],beforeReplace:async()=>{}},event=>events.push(event),()=>{});
+    sessions.push(session);
+    assert.equal(session.snapshot().provider,'openai-codex');
+    assert.equal(session.snapshot().model,'gpt-6-astra');
+    assert.equal(session.snapshot().thinkingLevel,'high');
+    await session.command({type:'set_model',id:'select-'+id,provider:'openai-codex-10',modelId:'gpt-5.6-sol'});
+    assert.equal(events.find(event=>event.id==='select-'+id)?.success,true);
+    assert.equal(session.snapshot().provider,'openai-codex');
+    assert.equal(session.snapshot().model,'gpt-5.6-sol');
+  }
+} finally {for(const session of sessions)await session.close();}
+const store=Store.open(join(root,'.local/share/pi-orchestrator/ledger.sqlite3'));
+assert.equal(store.accounts().length,0);assert.equal(store.runs().length,0);store.close();
+console.log('config-only native broker ready');
+`);
+  await writeFile(probe, `import assert from 'node:assert/strict';
+export default function(pi){pi.on('input',async(_event,ctx)=>{
+  assert.equal(ctx.model.provider,'openai-codex');
+  const result=await ctx.modelRegistry.getProviderAuth('openai-codex');
+  assert.equal(result.auth.baseUrl,'http://127.0.0.1:2461/backend-api');
+  assert.ok(result.auth.apiKey.endsWith('.not-a-credential'));
+  console.log('config-only CLI broker ready');
+  return {action:'handled'};
+});}
+`);
+  const env: NodeJS.ProcessEnv = { ...process.env, HOME: root, PI_CODING_AGENT_DIR: join(root, 'agent'), PI_OFFLINE: '1', PI_SKIP_VERSION_CHECK: '1' };
+  for(const key of Object.keys(env))if(/^PI_ORCHESTRATOR_|^PI_MODEL_BROKER_URL$|^PI_REMOTE_|^PI_SESSION_|^PI_SUBAGENT_MODEL$|_API_KEY$/.test(key))delete env[key];
+  try {
+    const native=await promisify(execFile)(process.execPath,[fixture],{cwd:root,env,timeout:5000});
+    expect(native.stdout).toContain('config-only native broker ready');
+    const pending=promisify(execFile)(process.execPath,[cli,'--extension',routing,'--extension',probe,'--provider','openai-codex','--model','gpt-5.6-luna','-p','--no-session','fixture'],{cwd:root,env,timeout:5000});
+    pending.child.stdin!.end();
+    const ordinary=await pending;
+    expect(ordinary.stdout + ordinary.stderr).toContain('config-only CLI broker ready');
+    expect(ordinary.stderr).not.toContain('Extension error');
+  } finally {await rm(root,{recursive:true,force:true});}
+},12000);
+
 test('activity leases release retained idle children without releasing their active parent or sibling', async () => {
   const root = await mkdtemp(join(tmpdir(), 'pi-routing-activity-'));
   const env = { ...process.env, HOME: root, PI_CODING_AGENT_DIR: join(root, 'agent'), PI_ORCHESTRATOR_LEDGER: join(root, 'ledger.sqlite3'), PI_ORCHESTRATOR_AUTH: join(root, 'auth.json'), PI_ORCHESTRATOR_ASSIGNED: '0', PI_OFFLINE: '1', TEST_SDK: sdk, TEST_AI: ai, TEST_STORE: join(buildRoot, 'compiled/store.js'), TEST_ROUTING: routing };
