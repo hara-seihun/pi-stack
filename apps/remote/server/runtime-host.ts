@@ -12,7 +12,12 @@ if (!Array.isArray(args) || args.length === 0 || args.some((value) => typeof val
 if (existsSync(socketPath)) throw new Error(`runtime host socket already exists: ${socketPath}`);
 let client: Socket | null = null;
 let input = "";
-let stopping = false;
+let stopping: Promise<void> | undefined;
+// Cancellation can arrive during synchronous startup, before the first await.
+// Install handlers before creating any file or detached child to clean up.
+for (const signal of ["SIGTERM", "SIGINT"] as const) {
+  process.on(signal, () => void stopChild());
+}
 const spoolPath = socketPath + ".events";
 const output = new RuntimeOutput(spoolPath);
 
@@ -59,16 +64,17 @@ function childGroupAlive() {
   catch { return false; }
 }
 
-async function stopChild() {
-  if (stopping) return;
-  stopping = true;
-  try { process.kill(-child.pid, "SIGTERM"); }
-  catch { try { child.kill("SIGTERM"); } catch {} }
-  const deadline = Date.now() + 2_000;
-  while (childGroupAlive() && Date.now() < deadline) await Bun.sleep(50);
-  if (childGroupAlive()) {
-    try { process.kill(-child.pid, "SIGKILL"); } catch {}
-  }
+function stopChild(): Promise<void> {
+  return stopping ??= (async () => {
+    try { process.kill(-child.pid, "SIGTERM"); }
+    catch { try { child.kill("SIGTERM"); } catch {} }
+    const deadline = Date.now() + 2_000;
+    while (childGroupAlive() && Date.now() < deadline) await Bun.sleep(50);
+    if (childGroupAlive()) {
+      try { process.kill(-child.pid, "SIGKILL"); } catch {}
+    }
+    await child.exited;
+  })();
 }
 
 function handle(value: any) {
@@ -115,14 +121,11 @@ server.listen(socketPath);
 void consume(child.stdout, publish);
 void consume(child.stderr, (line) => console.error(line));
 
-for (const signal of ["SIGTERM", "SIGINT"] as const) {
-  process.on(signal, () => void stopChild());
-}
-
 const exitCode = await child.exited;
-send({ type: "exit", code: exitCode });
+await stopping;
 server.close();
 output.close();
 try { unlinkSync(socketPath); } catch {}
 try { unlinkSync(spoolPath); } catch {}
+send({ type: "exit", code: exitCode });
 setTimeout(() => process.exit(0), 100).unref();
