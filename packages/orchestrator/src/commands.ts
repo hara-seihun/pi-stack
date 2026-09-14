@@ -5,7 +5,10 @@ import { loadConfig } from "./config.js";
 import { Daemon } from "./daemon.js";
 import { Store } from "./store.js";
 import { readUsageEvidence } from "./usage-evidence.js";
-import { work } from "./worker.js";
+import { randomUUID } from "node:crypto";
+import { createThreadClient } from "./threads/http.js";
+import type { Delivery, Result, SettingsOverrides, SpawnThread, Thread, ThreadState } from "./threads/contracts.js";
+import type { LaneSpec } from "./domain.js";
 import { providerOAuth, transactSharedCredential } from "./auth/shared-oauth.js";
 import { builtinProviders } from "@earendil-works/pi-ai/providers/all";
 import { AccountTransfer, transferEndpoint, transferPeer } from "./auth/account-transfer.js";
@@ -13,14 +16,16 @@ import { isAccountReservation } from "./admission-reservation.js";
 
 export const COMMANDS=[
   ["daemon","Run reconciliation and the local API"],
-  ["status","Print accounts, lanes, leases, and active runs"],
+  ["status","Print accounts, lanes, leases, and active threads"],
   ["usage-evidence","Print a read-only 24-hour quota and token snapshot; optional --ledger FILE"],
-  ["run","Start one or more direct sessions"],
-  ["wave","Start a one-off wave from a declared lane"],
+  ["run","Spawn fresh threads with --prompt TEXT [--model MODEL] [--count N] [--background]"],
+  ["wave","Spawn a one-off batch from a declared lane [--count N] [--background]"],
+  ["list","List threads [--parent ID] [--state STATE] [--limit N] [--cursor CURSOR]"],
+  ["read","Read a thread's native history: THREAD_ID [--limit N] [--cursor CURSOR]"],
+  ["send","Send to THREAD_ID with --prompt TEXT [--delivery queue|steer|hardSteer]"],
+  ["stop","Stop THREAD_ID; --descendants also stops its descendants"],
   ["pause / resume","Set or clear the global launch halt; --ordinary controls only ordinary work"],
-  ["abort / kill","Stop one run gracefully or immediately"],
-  ["recover","Recover a core run interrupted by loss of its hosting worker"],
-  ["resume RUN_ID","Manually resume a rate-limited core run in its recorded session"],
+  ["resume THREAD_ID","Release a stopped thread's pending messages"],
   ["boost","Set a provider pacing multiplier or halt"],
   ["account","Import, refresh, remove, list, reserve, or exclusively transfer pooled accounts"],
 ] as const;
@@ -29,10 +34,37 @@ export const ACCOUNT_USAGE=`usage: pi-orchestrator account list | import ID --pr
 
 const BASE=`http://${process.env.PI_ORCHESTRATOR_HOST??"127.0.0.1"}:${process.env.PI_ORCHESTRATOR_PORT??"2460"}`;
 const ledgerPath=()=>process.env.PI_ORCHESTRATOR_LEDGER||join(homedir(),".local/share/pi-orchestrator/ledger.sqlite3");
-function flags(args:string[]):{named:Map<string,string>;positional:string[]}{const named=new Map<string,string>(),positional:string[]=[];for(let i=0;i<args.length;i++){const value=args[i]!;if(!value.startsWith("--")){positional.push(value);continue;}const [name,inline]=value.slice(2).split("=",2);if(inline!==undefined)named.set(name!,inline);else if(args[i+1]&&!args[i+1]!.startsWith("--"))named.set(name!,args[++i]!);else named.set(name!,"true");}return{named,positional};}
+function flags(args:string[]):{named:Map<string,string>;positional:string[]}{const named=new Map<string,string>(),positional:string[]=[];for(let i=0;i<args.length;i++){const value=args[i]!;if(!value.startsWith("--")){positional.push(value);continue;}const [name,inline]=value.slice(2).split("=",2);if(inline!==undefined)named.set(name!,inline);else if(["force","background","descendants"].includes(name!))named.set(name!,"true");else if(args[i+1]&&!args[i+1]!.startsWith("--"))named.set(name!,args[++i]!);else named.set(name!,"true");}return{named,positional};}
 function required(named:Map<string,string>,key:string):string{const value=named.get(key);if(!value)throw new Error(`--${key} is required`);return value;}
 async function request(path:string,method="GET",value?:unknown):Promise<any>{const response=await fetch(`${BASE}${path}`,{method,headers:{"content-type":"application/json"},body:value===undefined?undefined:JSON.stringify(value)});const body=await response.json();if(!response.ok)throw new Error(body.error??`orchestrator returned ${response.status}`);return body;}
 function output(value:unknown):void{console.log(JSON.stringify(value,null,2));}
+function threadOutput<T>(result:Result<T>):void{output(result);if(!result.ok)process.exitCode=1;}
+function switchEnabled(named:Map<string,string>,key:string):boolean{
+  const value=named.get(key);
+  if(value!==undefined&&value!=="true"&&value!=="false")throw new Error(`--${key} must be true or false`);
+  return value==="true";
+}
+function positiveInteger(value:string,name:string):number{
+  const number=Number(value);
+  if(!Number.isSafeInteger(number)||number<1)throw new Error(`${name} must be a positive integer`);
+  return number;
+}
+function threadSettings(named:Map<string,string>):SettingsOverrides|undefined{
+  const model=named.get("model"),thinkingLevel=named.get("thinking"),speed=named.get("speed");
+  if(thinkingLevel&&!['off','minimal','low','medium','high','xhigh','max'].includes(thinkingLevel))throw new Error("Invalid --thinking level");
+  if(speed&&speed!=="standard"&&speed!=="priority")throw new Error("--speed must be standard or priority");
+  if(!model&&!thinkingLevel&&!speed)return undefined;
+  return{...(model?{model}:{}),...(thinkingLevel?{thinkingLevel:thinkingLevel as SettingsOverrides["thinkingLevel"]}:{}),...(speed?{speed:speed as SettingsOverrides["speed"]}:{})};
+}
+async function spawnThreads(input:Omit<SpawnThread,"requestId">,count:number):Promise<void>{
+  const api=createThreadClient(`${BASE}/v1/threads`),threads:Thread[]=[];
+  for(let index=0;index<count;index++){
+    const result=await api.spawn({...input,requestId:randomUUID()});
+    if(!result.ok){output({...result,threads});process.exitCode=1;return;}
+    threads.push(result.value);
+  }
+  output({ok:true,value:{threads}});
+}
 export async function dispatch(argv:string[]):Promise<void>{
   const [command,...rest]=argv;
   if(command===undefined||command==="help"||command==="--help"){
@@ -40,7 +72,6 @@ export async function dispatch(argv:string[]):Promise<void>{
     return;
   }
   if(command==="daemon"){const store=Store.open(ledgerPath());try{await new Daemon(store,loadConfig()).start();}finally{store.close();}return;}
-  if(command==="worker"){const id=rest[0];if(!id)throw new Error("worker run id is required");await work(id);return;}
   if(command==="usage-evidence"){
     if(rest.length!==0&&(rest.length!==2||rest[0]!=="--ledger")){
       console.error("usage: pi-orchestrator usage-evidence [--ledger FILE]");process.exitCode=1;return;
@@ -54,9 +85,50 @@ export async function dispatch(argv:string[]):Promise<void>{
     if(rest.length>1||(rest.length===1&&rest[0]!=="--ordinary"))throw new Error(`${command} accepts only --ordinary`);
     output(await request("/v1/control","POST",{key:rest[0]==="--ordinary"?"ordinary-launches":"launches",value:command==="pause"?"paused":"enabled"}));return;
   }
-  if(command==="abort"||command==="kill"||command==="recover"||command==="resume"){if(!rest[0])throw new Error(`${command} requires a run id`);output(await request(`/v1/runs/${encodeURIComponent(rest[0])}/${command}`,"POST"));return;}
-  if(command==="run"){const {named,positional}=flags(rest),prompt=named.get("prompt")??positional.join(" ");if(!prompt)throw new Error("run requires --prompt");if(named.has("core"))throw new Error("Pi Stack runs Pi; --core is not supported");output(await request("/v1/run","POST",{prompt,cwd:named.get("cwd")??process.cwd(),profile:named.get("profile")??"standard",count:Number(named.get("count")??1),force:named.has("force")}));return;}
-  if(command==="wave"){const {named,positional}=flags(rest),lane=named.get("lane")??positional[0];if(!lane)throw new Error("wave requires a lane");if(named.has("core"))throw new Error("Pi Stack runs Pi; --core is not supported");output(await request("/v1/wave","POST",{lane,count:Number(named.get("count")??1),force:named.has("force")}));return;}
+  if(command==="stop"||command==="resume"){
+    const {named,positional}=flags(rest),threadId=positional[0];
+    if(!threadId)throw new Error(`${command} requires a thread id`);
+    if(positional.length!==1||[...named.keys()].some(key=>command!=="stop"||key!=="descendants"))throw new Error(`${command} accepts one thread id${command==="stop"?" and --descendants":""}`);
+    threadOutput(await createThreadClient(`${BASE}/v1/threads`).control(command==="stop"?{threadId,action:"stop",descendants:switchEnabled(named,"descendants")}:{threadId,action:"resume"}));return;
+  }
+  if(command==="run"||command==="wave"){
+    const {named,positional}=flags(rest),count=positiveInteger(named.get("count")??"1","--count");
+    if(named.has("core"))throw new Error("--core is not supported");
+    if(named.has("profile"))throw new Error("Use --model instead of --profile");
+    const force=switchEnabled(named,"force"),background=switchEnabled(named,"background");
+    if(force&&background)throw new Error("Choose --force or --background");
+    const settings=threadSettings(named),admission=background?"background":"force";
+    if(command==="run"){
+      const message=named.get("prompt")??positional.join(" ");
+      if(!message.trim())throw new Error("run requires --prompt");
+      await spawnThreads({message,cwd:named.get("cwd")??process.cwd(),title:named.get("title"),parentId:named.get("parent"),settings,admission},count);
+    }else{
+      const id=named.get("lane")??positional[0];if(!id)throw new Error("wave requires a lane");
+      const status=await request("/v1/status") as {lanes:LaneSpec[]},lane=status.lanes.find(candidate=>candidate.id===id);
+      if(!lane)throw new Error(`lane ${id} not found`);
+      if(lane.repair)throw new Error("Repair lanes admit only from their independent readiness probe");
+      await spawnThreads({message:lane.prompt,cwd:lane.cwd,title:lane.id,metadata:{laneId:lane.id},settings,admission},count);
+    }
+    return;
+  }
+  if(command==="list"){
+    const {named,positional}=flags(rest);
+    if(positional.length)throw new Error("list accepts named options only");
+    const state=named.get("state");
+    if(state&&!['idle','queued','starting','running','stopping','stopped','interrupted'].includes(state))throw new Error("Invalid --state");
+    threadOutput(await createThreadClient(`${BASE}/v1/threads`).list({parentId:named.get("parent"),state:state as ThreadState|undefined,limit:named.has("limit")?positiveInteger(named.get("limit")!,"--limit"):undefined,cursor:named.get("cursor")}));return;
+  }
+  if(command==="read"){
+    const {named,positional}=flags(rest),threadId=positional[0];
+    if(!threadId||positional.length!==1)throw new Error("read requires one thread id");
+    threadOutput(await createThreadClient(`${BASE}/v1/threads`).read({threadId,cursor:named.get("cursor"),limit:named.has("limit")?positiveInteger(named.get("limit")!,"--limit"):undefined}));return;
+  }
+  if(command==="send"){
+    const {named,positional}=flags(rest),threadId=positional[0],text=named.get("prompt")??positional.slice(1).join(" "),delivery=named.get("delivery")??"queue";
+    if(!threadId||!text.trim())throw new Error("send requires a thread id and --prompt");
+    if(!['queue','steer','hardSteer'].includes(delivery))throw new Error("--delivery must be queue, steer, or hardSteer");
+    threadOutput(await createThreadClient(`${BASE}/v1/threads`).send({requestId:randomUUID(),threadId,text,delivery:delivery as Delivery}));return;
+  }
   if(command==="boost"){const {named,positional}=flags(rest),provider=positional[0],value=positional[1]??named.get("multiplier");if(!provider||value===undefined)throw new Error("boost requires provider and multiplier");output(await request("/v1/control","POST",{key:`boost:${provider}`,value:String(value)}));return;}
   if(command==="account"){
     const [action,...tail]=rest;
