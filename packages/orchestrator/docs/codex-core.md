@@ -95,6 +95,8 @@ Every native child emits `core_agent` with a `CoreAgent` record. Root parent IDs
 
 ## Durable state and continuation
 
+`pi-orchestrator resume RUN_ID` manually resumes a core run whose provider rate-limit retries were exhausted. It keeps the same native session, account, model and thinking level, records the failure under `run-rate-limit:RUN_ID:TIMESTAMP`, and continues on the current release. This explicit operator action can resume already-admitted work before its account cooldown expires; it does not clear that cooldown for other admissions. Credential failures, completed work and operator-aborted runs are excluded. Rate-limit failures are not automatically resumed by deployment recovery.
+
 Fleet workers tolerate up to two minutes of daemon transport loss during deployment. Reads and idempotent heartbeat, state and usage receipts reconnect; dispatch and completion commands are not replayed after an unknown outcome. A recovered native interrupted turn continues in its existing session unless the fleet has a durable operator-abort control. An interruption alone never becomes operator cancellation.
 
 Codex instruction updates are placed immediately before the next assistant turn, or at history end, as required by Anthropic's mid-conversation system interface. A run stopped by the prior system-message ordering defect also supports explicit `recover`; its failed provider turn remains in native history and the repaired continuation uses the same session.

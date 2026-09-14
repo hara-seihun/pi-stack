@@ -13,6 +13,7 @@ Run `npm run docs --workspace=pi-orchestrator` after changing commands or durabl
 - `abort / kill`: Stop one run gracefully or immediately.
 - `continue`: Continue a Codex run stopped by the provider output-token limit.
 - `recover`: Recover a core run interrupted by loss of its hosting worker.
+- `resume`: Manually resume a rate-limited core run in its recorded session.
 - `boost`: Set a provider pacing multiplier or halt.
 - `account`: Import, refresh, remove, list, reserve, or exclusively transfer pooled accounts.
 

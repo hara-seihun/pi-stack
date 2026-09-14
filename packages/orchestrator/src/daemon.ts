@@ -472,6 +472,12 @@ export class Daemon {
         void this.reconcile();return json(res,201,{runIds:ids});
       }
       if(method==="POST"&&url.pathname==="/v1/wave"){const input=await body(req),lane=this.store.lane(String(input.lane));if(!lane)return json(res,404,{error:"lane not found"});if(input.core!==undefined&&!isCoreId(input.core))return json(res,400,{error:"core must be pi or codex"});const ids=this.store.createRuns({count:Number(input.count??1),source:"direct",sourceId:lane.id,prompt:lane.prompt,cwd:lane.cwd,profile:lane.profile,core:resolveCore(this.config,lane.profile,input.core??lane.core),budget:input.force?"force":"background"});void this.reconcile();return json(res,201,{runIds:ids});}
+      const runResume=/^\/v1\/runs\/([^/]+)\/resume$/.exec(url.pathname);
+      if(method==="POST"&&runResume){
+        if(!this.store.recoverInterruptedRun(runResume[1]!,this.releasePath,Date.now(),"rate-limit"))return json(res,409,{error:"Only a rate-limited core run without an operator abort can resume"});
+        void this.reconcile();
+        return json(res,200,{run:this.store.run(runResume[1]!)});
+      }
       const runRecover=/^\/v1\/runs\/([^/]+)\/recover$/.exec(url.pathname);
       if(method==="POST"&&runRecover){
         if(!this.store.recoverInterruptedRun(runRecover[1]!,this.releasePath))return json(res,409,{error:"Only a host-interrupted core run without an operator abort can recover"});

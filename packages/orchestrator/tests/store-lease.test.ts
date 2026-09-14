@@ -3,6 +3,31 @@ import { Store } from "../src/store.js";
 import { accountCapacity } from "../src/policy.js";
 import { loadConfig } from "../src/config.js";
 
+it("resumes an exhausted 429 only on explicit request, retaining custody and account cooldown", () => {
+  const store=Store.open(":memory:");
+  try {
+    store.upsertAccount({id:"a",provider:"anthropic"});
+    const [id]=store.createRuns({count:1,source:"direct",prompt:"research",cwd:"/tmp",profile:"fable",budget:"force",core:"codex"});
+    store.assignRun(id!,{accountId:"a",provider:"anthropic",model:"claude-fable-5-1",thinking:"max",unit:"worker",releasePath:"/previous"});
+    const error="Error: exceeded retry limit, last status: 429 Too Many Requests";
+    store.updateRun(id!,{nativeSessionId:"native",state:"failed",failureKind:"account",result:error});
+    store.setCooldown("a",999999);
+    expect(store.recoverInterruptedRun(id!,"/current",1234)).toBe(false);
+    expect(store.recoverInterruptedRun(id!,"/current",1234,"rate-limit")).toBe(true);
+    expect(store.run(id!)).toMatchObject({state:"starting",nativeSessionId:"native",accountId:"a",model:"claude-fable-5-1",thinking:"max",releasePath:"/current"});
+    expect(store.account("a")?.cooldownUntil).toBe(999999);
+    expect(JSON.parse(store.control(`run-rate-limit:${id}:1234`)!)).toMatchObject({result:error,releasePath:"/previous"});
+    expect(store.resumeAssignedRun(id!,1235)).toBe(true);
+    expect(store.run(id!)?.result).toBe("recovering the recorded core session after infrastructure repair");
+    store.updateRun(id!,{state:"failed",failureKind:"account",result:"401 Unauthorized"});
+    expect(store.recoverInterruptedRun(id!,"/current",1236,"rate-limit")).toBe(false);
+    expect(store.adoptAssignedRun(id!,1236)).toBe(true);
+    store.updateRun(id!,{state:"failed",failureKind:"account",result:error});
+    store.setControl(`abort:${id}`,"abort");
+    expect(store.recoverInterruptedRun(id!,"/current",1237,"rate-limit")).toBe(false);
+  } finally {store.close();}
+});
+
 it("recovers host interruptions with custody while keeping actual operator aborts terminal", () => {
   const store=Store.open(":memory:");
   try {
