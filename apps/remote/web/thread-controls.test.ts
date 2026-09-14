@@ -18,6 +18,24 @@ function buttons(node: ReactNode): ReactElement<Record<string, any>>[] {
   return [...(node.type === "button" ? [node] : []), ...buttons(node.props.children)];
 }
 
+async function withThreadClient(fetcher: typeof fetch, run: () => Promise<void>) {
+  const names = ["window", "fetch"] as const;
+  const descriptors = new Map(names.map(name => [name, Object.getOwnPropertyDescriptor(globalThis, name)]));
+  try {
+    Object.defineProperties(globalThis, {
+      window: { configurable: true, writable: true, value: { PiRemotePerson: { session: () => "thread-control-session" } } },
+      fetch: { configurable: true, writable: true, value: fetcher },
+    });
+    await run();
+  } finally {
+    for (const name of names) {
+      const descriptor = descriptors.get(name);
+      if (descriptor) Object.defineProperty(globalThis, name, descriptor);
+      else Reflect.deleteProperty(globalThis, name);
+    }
+  }
+}
+
 describe("thread controls", () => {
   test("keeps active children outside the collapsed inactive section", () => {
     const html = renderToStaticMarkup(createElement(ChildThreadList, { children: [
@@ -29,15 +47,13 @@ describe("thread controls", () => {
     expect(html).not.toContain("<details open");
   });
   test("resume exposes an empty-queue error instead of reporting success", async () => {
-    const original = globalThis.fetch;
-    globalThis.fetch = (async (url, init) => {
+    await withThreadClient((async (url, init) => {
       expect(url).toBe("/v1/sessions/stopped/resume");
       expect(init?.method).toBe("POST");
       return Response.json({ error: "no_pending_messages" }, { status: 409 });
-    }) as typeof fetch;
-    try {
+    }) as typeof fetch, async () => {
       await expect(submitThreadControl({ threadId: "stopped", action: "resume" })).rejects.toThrow("no_pending_messages");
-    } finally { globalThis.fetch = original; }
+    });
   });
 
   test("stops a childless thread directly and asks for scope when children exist", () => {
@@ -64,19 +80,17 @@ describe("thread controls", () => {
   });
 
   test("stop requests always carry scope", async () => {
-    const original = globalThis.fetch;
     const requests: unknown[] = [];
-    globalThis.fetch = (async (url, init) => {
+    await withThreadClient((async (url, init) => {
       requests.push({ url, method: init?.method, body: JSON.parse(String(init?.body)) });
       return Response.json({ ok: true });
-    }) as typeof fetch;
-    try {
+    }) as typeof fetch, async () => {
       await submitThreadControl({ threadId: "parent/1", action: "stop", descendants: true });
       await submitThreadControl({ threadId: "child", action: "stop", descendants: false });
       expect(requests).toEqual([
         { url: "/v1/sessions/parent%2F1/abort", method: "POST", body: { descendants: true } },
         { url: "/v1/sessions/child/abort", method: "POST", body: { descendants: false } },
       ]);
-    } finally { globalThis.fetch = original; }
+    });
   });
 });
