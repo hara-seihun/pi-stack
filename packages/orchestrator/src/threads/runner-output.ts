@@ -1,4 +1,5 @@
 import type { Socket } from 'node:net';
+import { shareFile } from '../shared-custody.js';
 import { closeSync, ftruncateSync, openSync, readSync, writeSync } from 'node:fs';
 
 export class RuntimeOutput {
@@ -12,6 +13,7 @@ export class RuntimeOutput {
   private closed: boolean;
   constructor(path: string) {
     this.fd = openSync(path, 'ax+', 0o600);
+    shareFile(this.fd);
     this.sequence = 0;
     this.acknowledged = 0;
     this.acknowledgedOffset = 0;

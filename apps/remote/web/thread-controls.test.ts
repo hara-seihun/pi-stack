@@ -1,11 +1,13 @@
 import { describe, expect, test } from "bun:test";
-import { isValidElement, type ReactElement, type ReactNode } from "react";
+import { createElement, isValidElement, type ReactElement, type ReactNode } from "react";
+import { renderToStaticMarkup } from "react-dom/server";
+import { ChildThreadList } from "./src/thread-views";
 import { requestStop, StopChoices, submitThreadControl } from "./src/thread-controls";
 import { activityColor, working } from "./src/thread-state";
 import type { Session } from "./src/types";
 
 const session = (id: string, extra: Partial<Session> = {}): Session => ({
-  id, parentId: null, hasChildren: false, name: id, cwd: "/home", workspaceName: "Home", environment: "home", state: "IDLE", activity: "IDLE",
+  id, parentId: null, hasChildren: false, origin: "person", model: "astra", name: id, cwd: "/home", workspaceName: "Home", environment: "home", state: "IDLE", activity: "IDLE",
   activeTool: null, provider: "openai", createdAt: "", updatedAt: "", revision: 1, idleUnread: false, lastError: null,
   steeringQueued: 0, followUpQueued: 0, queuedMessages: [], archivedAt: null, ...extra,
 });
@@ -17,6 +19,15 @@ function buttons(node: ReactNode): ReactElement<Record<string, any>>[] {
 }
 
 describe("thread controls", () => {
+  test("keeps active children outside the collapsed inactive section", () => {
+    const html = renderToStaticMarkup(createElement(ChildThreadList, { children: [
+      session("active-child", { parentId: "parent", state: "RUNNING", activity: "WORKING" }),
+      session("idle-child", { parentId: "parent", state: "IDLE" }),
+    ], loading: false, error: "", onOpen() {} }));
+    expect(html.indexOf("active-child")).toBeLessThan(html.indexOf("<details"));
+    expect(html.indexOf("idle-child")).toBeGreaterThan(html.indexOf("<details"));
+    expect(html).not.toContain("<details open");
+  });
   test("resume exposes an empty-queue error instead of reporting success", async () => {
     const original = globalThis.fetch;
     globalThis.fetch = (async (url, init) => {

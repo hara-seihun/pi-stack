@@ -1,7 +1,20 @@
 import type { Session } from "./types";
 
-export function working(session: Session | null) {
-  return Boolean(session && ["QUEUED", "RUNNING", "STARTING", "STOPPING"].includes(session.state));
+const ACTIVE_THREAD_STATES = new Set(["QUEUED", "STARTING", "RUNNING", "STOPPING"]);
+
+export function activeThread(session: Session | null) {
+  return Boolean(session && ACTIVE_THREAD_STATES.has(normalizedActivity(session.state)));
+}
+
+export const working = activeThread;
+
+export function orchestratorThreads(sessions: Session[]) {
+  const seen = new Set<string>();
+  return sessions.filter(session => {
+    if (seen.has(session.id) || (!session.parentId && session.origin !== "fleet")) return false;
+    seen.add(session.id);
+    return true;
+  });
 }
 
 export function normalizedActivity(activity = "IDLE") {

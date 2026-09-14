@@ -192,3 +192,10 @@ test("the matching rule is stated once in the system prompt", () => {
   assert.match(interactivePrompt, /55 seconds/);
   assert.equal(orchestratorHandler({ systemPrompt: orchestratorPrompt }), undefined);
 });
+
+test("systemd scopes stay foreground but service launches and no-block still detach", () => {
+  assert.equal(findDetachment("systemd-run --user --scope --quiet --unit=proof true"), null);
+  assert.equal(findDetachment("systemd-run --user --unit=proof true"), "`systemd-run`");
+  assert.equal(findDetachment("systemd-run --scope --no-block true"), "`systemd-run`");
+  assert.equal(findDetachment("systemd-run echo --scope"), "`systemd-run`");
+});

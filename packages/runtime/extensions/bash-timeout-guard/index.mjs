@@ -115,7 +115,6 @@ const DETACHERS = [
   { found: "`nohup`", pattern: inCommandPosition("nohup") },
   { found: "`setsid`", pattern: inCommandPosition("setsid") },
   { found: "`disown`", pattern: inCommandPosition("disown") },
-  { found: "`systemd-run`", pattern: inCommandPosition("systemd-run") },
   { found: "`daemonize`", pattern: inCommandPosition("daemonize") },
   { found: "`screen`", pattern: inCommandPosition("screen") },
   { found: "`tmux`", pattern: inCommandPosition("tmux") },
@@ -151,6 +150,10 @@ const NESTED_SHELL = /\b(?:ba|z|k|da)?sh\b[^'"\n]*?-[A-Za-z]*c\s+(?:'([^']*)'|"(
 export function findDetachment(command) {
   if (typeof command !== "string" || command.length === 0) return null;
   const text = unquoted(stripArithmetic(stripHeredocs(command)));
+  for (const match of text.matchAll(new RegExp(`${START}systemd-run\\s+([^;|&\\n]*)`, "g"))) {
+    const flags = match[1].match(/^(?:--[\w-]+(?:=\S+)?(?:\s+|$))*/)?.[0] ?? "";
+    if (!/(?:^|\s)--scope(?:\s|$)/.test(flags) || /(?:^|\s)--no-block(?:\s|$)/.test(flags)) return "`systemd-run`";
+  }
   for (const { found, pattern } of DETACHERS) {
     if (pattern.test(text)) return found;
   }

@@ -24,6 +24,32 @@ reconcile_cli_links() {
   done < <(pi_stack_users)
 }
 
+normalize_model_defaults() {
+  local fleet home config
+  fleet=$(pi_stack_fleet_user)
+  [[ -n $fleet ]] || return 0
+  home=$(pi_stack_home "$fleet")
+  config=${PI_ORCHESTRATOR_CONFIG:-$home/.config/pi-orchestrator/config.json}
+  [[ -f $config ]] || return 0
+  pi_stack_as_root node - "$config" <<'NODE'
+const fs = require('node:fs'), path = require('node:path');
+const file = fs.realpathSync(process.argv[2]), stat = fs.statSync(file);
+const value = JSON.parse(fs.readFileSync(file, 'utf8'));
+let changed = false;
+for (const candidates of Object.values(value.profiles ?? {})) for (const candidate of candidates) {
+  for (const key of ['thinking', 'thinkingPair']) if (key in candidate) { delete candidate[key]; changed = true; }
+}
+if (changed) {
+  const temporary = `${file}.${process.pid}.tmp`, fd = fs.openSync(temporary, 'wx', stat.mode);
+  try { fs.writeFileSync(fd, JSON.stringify(value, null, 2) + '\n'); fs.fchownSync(fd, stat.uid, stat.gid); fs.fsyncSync(fd); }
+  finally { fs.closeSync(fd); }
+  fs.renameSync(temporary, file);
+  const directory = fs.openSync(path.dirname(file), 'r'); try { fs.fsyncSync(directory); } finally { fs.closeSync(directory); }
+}
+NODE
+}
+normalize_model_defaults
+
 # The fleet user's operator config names the lane manifest. A release whose
 # daemon cannot parse the live manifest must not be selected.
 validate_manifest() {

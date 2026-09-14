@@ -233,7 +233,10 @@ async function refreshPeers() {
     for (const thread of next.values()) if (thread.parentId) peerChildren.set(thread.parentId, true);
     for (const [id, thread] of next) { peerThreads.set(id, thread); ensureThreadView(db, id); }
     if (changed) signalSync();
-  })().finally(() => { peerRefresh = null; });
+  })().catch(cause => {
+    const message = cause instanceof Error ? cause.message : String(cause);
+    if (peerError !== message) { peerError = message; signalSync(); }
+  }).finally(() => { peerRefresh = null; });
   return peerRefresh;
 }
 async function refreshThreadInspection(id: string) {
@@ -853,6 +856,7 @@ function publicSession(row: any, hasChildren = threads.snapshot().some(thread =>
   return {
     id: row.id, parentId: row.parentId,
     hasChildren,
+    origin: threads.get(row.id) ? "person" : "fleet",
     model: row.settings.model, name: row.name, cwd: row.cwd,
     workspaceName: workspaces.get(row.workspace_id)?.name ?? row.cwd,
     environment: ENVIRONMENT_ID, state: row.state, activity: sessionActivity(row),
@@ -1196,11 +1200,28 @@ async function runCommand(row: any, requestId: string, name: string, args: strin
   saveRequest(requestId, row.id, "command", 202, response);
   return { response, status: 202 };
 }
+async function directChildren(id: string): Promise<Result<Session[]>> {
+  const owner = await directory.owner(id);
+  if (!owner.ok) return owner;
+  const children: Thread[] = [];
+  let cursor: string | undefined;
+  do {
+    const page = await owner.value.api.list({ parentId: id, limit: 100, cursor });
+    if (!page.ok) return page;
+    children.push(...page.value.threads);
+    cursor = page.value.nextCursor;
+  } while (cursor);
+  for (const thread of children) if (!threads.get(thread.id)) { peerThreads.set(thread.id, thread); ensureThreadView(db, thread.id); }
+  if (!threads.get(id)) peerChildren.set(id, children.length > 0);
+  return { ok: true, value: publicSessions(children.map(threadRow)) };
+}
+
 async function threadSettings(row: any) {
-  const [state, availableModels, availableThinking] = await Promise.all([
-    rpc(row.id, "get_state"), rpc(row.id, "get_available_models"), rpc(row.id, "get_available_thinking_levels"),
+  const [state, availableModels, availableThinking, children] = await Promise.all([
+    rpc(row.id, "get_state"), rpc(row.id, "get_available_models"), rpc(row.id, "get_available_thinking_levels"), directChildren(row.id),
   ]);
   return {
+    children: unwrap(children),
     model: state.model,
     thinkingLevel: row.settings.thinkingLevel,
     speedMode: row.settings.speed,
@@ -1606,6 +1627,11 @@ const server = Bun.serve({
         saveRequest(requestId, id, "create", 201, response);
         return json(response, 201);
       } catch (cause: any) { return error(cause.message); }
+    }
+    const childrenRequest = API.sessionChildren.match(req.method, url.pathname);
+    if (childrenRequest) {
+      const result = await directChildren(childrenRequest.sessionId);
+      return result.ok ? json({ children: result.value }) : threadError(result.error);
     }
     const queueAction = [API.queueItem, API.queueSteer, API.queueHardSteer]
       .map(route => ({ route, match: route.match(req.method, url.pathname) })).find(item => item.match);

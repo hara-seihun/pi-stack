@@ -47,7 +47,7 @@ export async function isolatedPiContext(options: PiSessionOptions, environment: 
   await resourceLoader.reload();
   const { errors, extensions } = resourceLoader.getExtensions();
   if (errors.length) throw new Error(`Isolated context failed to load: ${JSON.stringify(errors)}`);
-  const available = new Set(["read", "write", "edit", "bash", "grep", "find", "ls", "thread_spawn", "thread_send", "thread_list", "thread_read", "thread_control", "thread_thinking", ...extensions.flatMap(extension => [...extension.tools.keys()])]);
+  const available = new Set(["read", "write", "edit", "bash", "grep", "find", "ls", "thread_spawn", "thread_send", "thread_list", "thread_read", "thread_control", ...extensions.flatMap(extension => [...extension.tools.keys()])]);
   const missing = context.tools.filter(name => !available.has(name));
   if (missing.length) throw new Error(`Isolated tools were not registered: ${missing.join(", ")}`);
 

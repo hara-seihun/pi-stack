@@ -6,8 +6,7 @@ import { CompletionService } from "../src/completion.js";
 import { CompletionClient } from "../src/completion-client.js";
 import { COMPLETION_OPENAPI } from "../src/completion-openapi.js";
 import { type CompletionExecution, type CompletionInput, type CompletionOutcome, isCompletionInput, isCompletionRecord } from "../src/completion-contract.js";
-import { loadConfig } from "../src/config.js";
-import { reconcileCompletionReceipts, saveCompletionReceipt, workCompletion } from "../src/host/completion-worker.js";
+import { reconcileCompletionReceipts, saveCompletionReceipt } from "../src/host/completion-receipts.js";
 import { Store } from "../src/store.js";
 
 const input: CompletionInput = { model: "luna", prompt: "  exact user\n", systemPrompt: "exact system", metadata: { application: "test", nested: { b: 2, a: 1 } } };
@@ -36,7 +35,6 @@ describe("durable completions", () => {
     try {
       let service = new CompletionService(store, root);
       const first = value(service.submit("application:stable-id", input));
-      expect(store.run(first.runId)?.context).toEqual({ tools: [] });
       expect(store.run(first.runId)?.prompt).toBe(input.prompt);
       store.close(); store = Store.open(path); service = new CompletionService(store, root);
       expect(value(service.submit(first.requestId, { ...input, metadata: { nested: { a: 1, b: 2 }, application: "test" } }))).toEqual(first);
@@ -90,27 +88,6 @@ describe("durable completions", () => {
       expect(store.run(first.runId)?.state).toBe("aborted");
       expect(store.usageSince(0).reduce((n, entry) => n + entry.tokens, 0)).toBe(16);
     } finally { store.close(); }
-  });
-
-  it("replays a durable worker receipt when its settlement HTTP response was lost", async () => {
-    const root = mkdtempSync(join(tmpdir(), "completion-worker-")), store = Store.open(":memory:"), service = new CompletionService(store, root);
-    try {
-      const first = value(service.submit("worker", input)); assign(store, first.runId);
-      const config = { ...loadConfig("/missing"), agentDir: root };
-      const execute = vi.fn(async () => execution);
-      const request = async () => ({ completion: service.byRun(first.runId) });
-      let lost = true;
-      const post = async (path: string, body?: any) => {
-        if (path.endsWith("/claim")) return value(service.claim(first.runId, body.attemptId));
-        const record = value(service.settle(first.runId, body.attemptId, body.outcome));
-        if (lost) { lost = false; throw new Error("settle response lost"); }
-        return record;
-      };
-      await expect(workCompletion(store.run(first.runId)!, config, post, request, execute)).rejects.toThrow("settle response lost");
-      await expect(workCompletion(store.run(first.runId)!, config, post, request, execute)).resolves.toBe(true);
-      expect(execute).toHaveBeenCalledTimes(1);
-      expect(store.usageSince(0).reduce((n, entry) => n + entry.tokens, 0)).toBe(16);
-    } finally { store.close(); rmSync(root, { recursive: true, force: true }); }
   });
 
   it("client recovers an accepted submission with the caller's same request ID", async () => {

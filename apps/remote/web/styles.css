@@ -126,6 +126,17 @@ button:disabled { cursor: default; opacity: .45; }
 .stop-thread-dialog [role="alert"] { color: var(--danger); }
 .stop-thread-dialog button { padding: 12px; background: var(--surface-2); color: var(--text); }
 .stop-choices { display: grid; gap: 8px; margin-bottom: 12px; }
+.thread-view-list { display: grid; gap: 6px; }
+.orchestrator-list { padding: 12px; overflow: auto; }
+.thread-view-row { display: grid; gap: 6px; width: 100%; padding: 12px; text-align: left; border: 1px solid var(--border); border-radius: 10px; background: var(--surface); color: var(--text); }
+.thread-view-row.selected { background: var(--surface-2); }
+.thread-view-title, .thread-view-meta { display: flex; flex-wrap: wrap; justify-content: space-between; gap: 6px; overflow-wrap: anywhere; }
+.thread-view-kind, .thread-view-meta, .thread-empty { color: var(--muted); font-size: 12px; }
+.thread-view-error { color: var(--danger); font-size: 12px; overflow-wrap: anywhere; }
+.inactive-threads { margin-top: 12px; }
+.inactive-threads summary { padding: 10px 0; cursor: pointer; color: var(--muted); }
+.inactive-threads summary span { margin-left: 6px; }
+.child-thread-card .thread-view-row { background: var(--surface-2); }
 .drawer-footer { flex: 0 0 auto; min-height: 195px; padding: 8px 18px; border-top: 1px solid var(--border); display: grid; gap: 3px; }
 .machine-controls { height: 44px; display: grid; grid-auto-flow: column; grid-auto-columns: 1fr; gap: 4px; }
 .machine-actions { display: contents; }

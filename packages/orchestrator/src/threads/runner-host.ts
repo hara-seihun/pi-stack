@@ -4,6 +4,7 @@ import { createInterface } from "node:readline";
 import { basename, dirname, join } from "node:path";
 import { underMemoryPressure } from "./runner-memory.js";
 import { RuntimeOutput } from "./runner-output.js";
+import { shareFile } from "../shared-custody.js";
 import { openPiSession, piEnvironmentScope } from "./pi-session.js";
 import type { PiEvent, PiSession, PiSessionOptions } from "./contracts.js";
 
@@ -77,7 +78,7 @@ async function open(options: PiSessionOptions & { socketPath: string; priority?:
     finish();
   }
   sessions.set(socketPath, { close, id: options.threadId });
-  try { await new Promise<void>((resolve, reject) => { channel.once("error", reject); channel.listen(socketPath, resolve); }); }
+  try { await new Promise<void>((resolve, reject) => { channel.once("error", reject); channel.listen(socketPath, () => { shareFile(socketPath); resolve(); }); }); }
   catch (error) { finish(1); throw error; }
   ready = piEnvironmentScope.run(env, () => openPiSession(options, publish, finish)).then(value => { adapter = value; }).catch(error => {
     publish({ type: "extension_error", error: String(error) });
@@ -98,7 +99,7 @@ const server = createServer(socket => {
 });
 server.on("error", error => { console.error(error); process.exitCode = 1; });
 remove(controlPath);
-server.listen(controlPath);
+server.listen(controlPath, () => shareFile(controlPath));
 idleTimer = setTimeout(() => { if (!sessions.size) void stop(); }, 5000);
 async function stop() {
   if (stopping) return;

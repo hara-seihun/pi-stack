@@ -775,8 +775,9 @@ for manager in user system; do
   while IFS= read -r unit; do
     [[ -n $unit ]] || continue
     pid=$(systemctl --"$manager" show "$unit" -p MainPID --value)
+    [[ $pid =~ ^[0-9]+$ ]] || pid=0
     items=$(jq -c --arg unit "$unit" --argjson pid "$pid" '. + [{unit:$unit,pid:$pid,release:null}]' <<<"$items")
-  done < <(systemctl --"$manager" list-units 'pi-orchestrator-run-*.service' --state=running --legend=no --plain --no-pager | awk '{print $1}')
+  done < <(systemctl --"$manager" list-units 'pi-orchestrator-run-*.service' 'pi-thread-runner-*.scope' --state=running --legend=no --plain --no-pager | awk '{print $1}')
 done
 selected=$(cat /srv/pi/pi-remote/.pi-stack-commit 2>/dev/null || true)
 jq -n --arg host "$host" --arg checkedAt "$(date --utc --iso-8601=seconds)" --arg selected "$selected" --argjson runtimes "$items" '{host:$host,checkedAt:$checkedAt,selectedCommit:($selected | if . == "" then null else . end),runtimes:$runtimes}'
@@ -906,7 +907,7 @@ fleet_uid=$(id -u "$fleet_user")
 for manager in user system; do
   controller=(systemctl --system)
   if [[ $manager == user ]]; then controller=(sudo -n runuser -u "$fleet_user" -- env "XDG_RUNTIME_DIR=/run/user/$fleet_uid" "DBUS_SESSION_BUS_ADDRESS=unix:path=/run/user/$fleet_uid/bus" systemctl --user); fi
-  listed=$("\${controller[@]}" list-units 'pi-orchestrator-run-*.service' --state=active,activating,deactivating --legend=no --plain --no-pager)
+  listed=$("\${controller[@]}" list-units 'pi-orchestrator-run-*.service' 'pi-thread-runner-*.scope' --state=active,activating,deactivating --legend=no --plain --no-pager)
   while IFS= read -r unit; do
     [[ -n $unit ]] || continue
     fleet_units=$(jq -c --arg manager "$manager" --arg unit "$unit" '. + [{manager:$manager,unit:$unit}]' <<<"$fleet_units")

@@ -25,6 +25,8 @@ Humans and agents have the same operations:
 - An explicit new human or agent message to a stopped thread resumes it with that message ahead of held messages. Held messages retain their relative order.
 - Automatic child-idle notifications do not resume a stopped parent.
 
+Remote's Orchestrator tab lists fleet threads and children using the same thread identities and controls. The right panel lists active direct children, with an expandable Inactive children section. These are presentation filters, not separate agent types.
+
 The UI stops a thread directly when there are no subthreads. Otherwise it asks "Should the subthreads stop too?" with "Yes, stop subthreads" and "No, just stop this thread" choices.
 
 An execution has exclusive ownership of its thread. Cancellation fences late callbacks but must also stop local effects. Failure to confirm cancellation is a visible failure, not permission to start overlapping execution. Tools receive cancellation signals. CPU-blocking work belongs outside the shared event loop, without a separate Node process per agent.

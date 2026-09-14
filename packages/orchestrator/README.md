@@ -100,7 +100,7 @@ A repair lane declares its own probe. It does not depend on the ordinary manifes
 
 The command runs as the daemon owner and prints exactly `{ "revision": "host-state-version", "ready": true }`. Use explicit sudo in the command when the probe needs root. Each repair probe refreshes every 30 seconds, fails closed independently, and permits at most one admission per observation. Ordinary snapshots need not mention repair lanes. A repair-only manifest does not need `snapshotCommand`, even with `budget: "force"`.
 
-Repair threads retain forced admission and full Pi context. The per-run UID0 systemd launcher has been removed. Root repair admission currently returns an explicit unavailable result because the shared runner transport has no UID0 launch boundary. It never substitutes the user daemon's UID. Deployment requires a root-owned shared runner and matching thread service before enabling these lanes.
+Repair threads retain forced admission and full Pi context. The shared runner launches under UID0 in a system scope for this execution boundary. Its sockets and native session files retain the controller account's custody. It does not substitute an ordinary user's UID or share an application-isolated runner.
 
 `pause --ordinary` sets `ordinary-launches=paused`; `resume --ordinary` clears it. The global `launches=paused` control stops all new admission. Neither control cancels an admitted turn. Thread stop and resume use the same API as Remote and agent tools.
 

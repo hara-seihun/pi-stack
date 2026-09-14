@@ -47,6 +47,7 @@ export const API = Object.freeze({
   sessionInstructions: route("GET", "/v1/sessions/:sessionId/instructions"),
   sessionImage: route("GET", "/v1/sessions/:sessionId/images/:hash"),
   sessionImages: route("GET", "/v1/sessions/:sessionId/images"),
+  sessionChildren: route("GET", "/v1/sessions/:sessionId/children"),
   sessionPrompt: route("POST", "/v1/sessions/:sessionId/prompt"), sessionFork: route("POST", "/v1/sessions/:sessionId/fork"), sessionAbort: route("POST", "/v1/sessions/:sessionId/abort"), sessionResume: route("POST", "/v1/sessions/:sessionId/resume"), sessionEvents: route("GET", "/v1/sessions/:sessionId/events"), sessionContext: route("GET", "/v1/sessions/:sessionId/context"), replaceSessionContext: route("PUT", "/v1/sessions/:sessionId/context"), patchSessionContext: route("PATCH", "/v1/sessions/:sessionId/context"),
   sessionAdmission: route("PUT", "/v1/sessions/:sessionId/admission"),
   sessionSettings: route("GET", "/v1/sessions/:sessionId/settings"), updateSessionSettings: route("PUT", "/v1/sessions/:sessionId/settings"), sessionCommands: route("GET", "/v1/sessions/:sessionId/commands"), sessionCommand: route("POST", "/v1/sessions/:sessionId/command"),

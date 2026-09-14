@@ -44,7 +44,7 @@ Normal sessions retain project and user extensions, instructions, skills, prompt
 
 `--orchestrator-context` selects the [isolated loader](../src/host/isolated-context.ts). Its explicit tools and extensions, empty ambient instructions/settings/skills, application HOME and filtered environment remain intact. Thread tools appear there only when explicitly selected. `get_state.context` reports the accepted isolated contract.
 
-The model-facing tools are `thread_spawn`, `thread_send`, `thread_list`, `thread_read`, `thread_control` and `thread_thinking`. The thinking convenience updates persisted thread settings through the same control API. They use injected `ThreadApi` in-process or `PI_THREAD_API_URL` to reach the owning HTTP API. Spawn is fresh and forces admission; continuing work means send. No tool waits for a child to finish. Read never starts its recipient. Its textual previews omit image bytes and signatures, limit pages to eight entries, and chunk large entries through `entryId` and `offset`. UI history remains native content.
+The model-facing tools are `thread_spawn`, `thread_send`, `thread_list`, `thread_read`, and `thread_control`. Thinking, model and speed changes use `thread_control` settings. They use injected `ThreadApi` in-process or `PI_THREAD_API_URL` to reach the owning HTTP API. Spawn is fresh and forces admission; continuing work means send. No tool waits for a child to finish. Read never starts its recipient. Its textual previews omit image bytes and signatures, limit pages to eight entries, and chunk large entries through `entryId` and `offset`. UI history remains native content.
 
 ## Focused checks
 
@@ -55,3 +55,5 @@ npm test --workspace=pi-orchestrator -- tests/pi-native.test.ts tests/pi-executi
 ```
 
 These offline fixtures cover native resource discovery and replacement, accepted-work deduplication, bounded history, actual shell cancellation, cancellation failure, isolated context and shared-process handoff. Publication owns full integration and host deployment.
+
+Fleet runners use one systemd scope per shared execution boundary, so a daemon restart does not kill their sessions. Root repair uses the same runner under UID0 in a system scope, with controller-owned sockets and native files. User and application runners use user scopes. Remote retains its existing supervisor handoff boundary.

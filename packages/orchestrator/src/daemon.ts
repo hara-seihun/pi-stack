@@ -1,9 +1,9 @@
 import { execFile } from "node:child_process";
-import { createHash } from "node:crypto";
-import { readFileSync, realpathSync, statSync } from "node:fs";
+import { createHash, randomUUID } from "node:crypto";
+import { existsSync, readFileSync, realpathSync, statSync } from "node:fs";
 import { fileURLToPath } from "node:url";
 import { dirname, join, resolve } from "node:path";
-import { homedir } from "node:os";
+import { homedir, tmpdir, userInfo } from "node:os";
 import { createServer, type IncomingMessage, type ServerResponse } from "node:http";
 import type { BudgetClass, LaneReadiness, LaneManifest, LaneSpec, OrchestratorConfig, Run } from "./domain.js";
 import { isRunContext } from "./isolated-context-contract.js";
@@ -14,7 +14,7 @@ import { CompletionService } from "./completion.js";
 import { CompletionPool } from "./host/completion-pool.js";
 import { accountReservation, isAccountReservation, prioritizeReservedCompletions, reservationKey } from "./admission-reservation.js";
 import { COMPLETION_OPENAPI } from "./completion-openapi.js";
-import { reconcileCompletionReceipts } from "./host/completion-worker.js";
+import { reconcileCompletionReceipts } from "./host/completion-receipts.js";
 import type { CompletionOutcome } from "./completion-contract.js";
 import { CodexMeterSampler } from "./meters-codex.js";
 import { AnthropicMeterSampler } from "./meters-anthropic.js";
@@ -24,10 +24,12 @@ import { openaiCodexProvider } from "@earendil-works/pi-ai/providers/openai-code
 import { providerOAuth } from "./auth/shared-oauth.js";
 import { ThreadService } from "./threads/service.js";
 import { createSharedPiSessionOpener } from "./threads/runner-transport.js";
-import { threadHttp } from "./threads/http.js";
+import { createThreadClient, threadHttp } from "./threads/http.js";
 import { importFleetThreads } from "./threads/import.js";
 import type { Thread } from "./threads/contracts.js";
 import { ThreadDirectory } from "./threads/directory.js";
+import { resolveThreadSettings } from "./threads/settings.js";
+import { runViews } from "./threads/run-view.js";
 import type { RunContext } from "./domain.js";
 
 const HOST=process.env.PI_ORCHESTRATOR_HOST??"127.0.0.1";
@@ -62,10 +64,10 @@ export class Daemon {
     this.completions=new CompletionService(store,process.cwd());
     this.completionPool=new CompletionPool(store,this.completions,config);
     this.releasePath=releasePath??dirname(dirname(realpathSync(fileURLToPath(import.meta.url))));
-    this.ledgerPath=ledgerPath||process.env.PI_ORCHESTRATOR_LEDGER||join(homedir(),".local/share/pi-orchestrator/ledger.sqlite3");
-    const dataDir=dirname(this.ledgerPath);
-    this.opener=createSharedPiSessionOpener({dataDir});
-    this.threads=new ThreadService({databasePath:join(dataDir,"threads.sqlite3"),sessionsDir:join(dataDir,"threads"),
+    this.ledgerPath=ledgerPath??store.path;
+    const dataDir=this.ledgerPath===":memory:"?tmpdir():dirname(this.ledgerPath);
+    this.opener=createSharedPiSessionOpener({dataDir,durableScope:true});
+    this.threads=new ThreadService({databasePath:this.ledgerPath===":memory:"?":memory:":join(dataDir,"threads.sqlite3"),sessionsDir:join(dataDir,"threads"),
       openSession:(options,output,exit)=>{
         const context=this.threads.get(options.threadId)?.metadata?.context;
         if(context)throw new Error("An isolated thread must be imported into its application ThreadService before execution");
@@ -80,13 +82,17 @@ export class Daemon {
   async start():Promise<void>{
     await this.loadManifest();
     reconcileCompletionReceipts(this.completions,join(this.config.agentDir,"completion-receipts"));
-    const imported=importFleetThreads(this.threads,this.store.db,{sessionsDir:join(dirname(this.ledgerPath),"threads")});
-    if(!imported.ok)throw new Error(imported.error.message);
     for(const row of this.store.db.prepare("SELECT value FROM control WHERE key LIKE 'thread-boundary:%'").all() as {value:string}[]){const boundary=JSON.parse(row.value);this.isolatedService(boundary.cwd,boundary.context);}
+    const imported=importFleetThreads(this.threads,this.store.db,{sessionsDir:join(dirname(this.ledgerPath),"threads"),
+      settingsForProfile:profile=>{const settings=resolveThreadSettings({model:this.profileModel(profile)});if(!settings.ok)throw new Error(settings.error.message);return settings.value;},
+      selectService:thread=>thread.metadata?.context?this.isolatedService(thread.cwd,thread.metadata.context as RunContext).service:this.threads,
+      services:()=>[...this.isolated.values()]});
+    if(!imported.ok)throw new Error(imported.error.message);
     for(const run of this.store.runs(["queued","starting","running"]))if(this.completionPool.owns(run))this.completionPool.start(run);
     const server=createServer((req,res)=>void this.request(req,res));
     await new Promise<void>((resolve,reject)=>{server.once("error",reject);server.listen(PORT,this.config.listenHost??HOST,resolve);});
     for(const service of this.isolated.values()){const result=await service.start();if(!result.ok)throw new Error(result.error.message);}
+    this.directory();
     const started=await this.threads.start();if(!started.ok)throw new Error(started.error.message);
     const timer=setInterval(()=>void this.reconcile().catch((error)=>console.error("reconcile:",error)),this.config.reconcileIntervalMs);
     const completionTimer=setInterval(()=>this.completionPool.tick(),1_000);
@@ -250,7 +256,7 @@ export class Daemon {
     let service=this.isolated.get(id);
     if(!service){
       const dataDir=join(dirname(this.ledgerPath),"applications",id);
-      service=new ThreadService({databasePath:join(dataDir,"threads.sqlite3"),sessionsDir:join(dataDir,"threads"),
+      service=new ThreadService({databasePath:this.ledgerPath===":memory:"?":memory:":join(dataDir,"threads.sqlite3"),sessionsDir:join(dataDir,"threads"),
         openSession:(options,output,exit)=>this.opener.openSession({...options,args:[...options.args,"--orchestrator-context",JSON.stringify(context)]},output,exit),
         environment:thread=>({...this.threadEnvironment(thread),PI_THREAD_API_URL:`http://127.0.0.1:${PORT}/v1/applications/${id}/threads`}),
         admit:(...args)=>this.fleet.admit(...args)});
@@ -260,7 +266,22 @@ export class Daemon {
     }
     return{id,service};
   }
-  private directory():ThreadDirectory{return new ThreadDirectory({id:"fleet",api:this.threads},[...this.isolated].map(([id,api])=>({id,api})));}
+  private directory():ThreadDirectory{
+    const owners=[...this.isolated].map(([id,api])=>({id,api:api as import("./threads/contracts.js").ThreadApi}));
+    const path=process.env.PI_STACK_HOST_CONFIG??"/etc/pi-stack/host.json",person=userInfo().username;
+    if(existsSync(path)&&JSON.parse(readFileSync(path,"utf8")).fleetUser===person){
+      const registryPath=join("/var/lib/pi-remote/persons",`${person}.json`);
+      const environment=process.env.PI_REMOTE_THREAD_OWNER_URL?undefined:JSON.parse(readFileSync(registryPath,"utf8")).environment;
+      const port=Number(environment?.PI_REMOTE_PORT);
+      if(!process.env.PI_REMOTE_THREAD_OWNER_URL&&(!Number.isInteger(port)||port<1||port>65535))throw new Error(`Registered person ${registryPath} has no valid PI_REMOTE_PORT`);
+      const url=new URL(process.env.PI_REMOTE_THREAD_OWNER_URL??`http://${environment?.PI_REMOTE_HOST??"127.0.0.1"}:${port}/v1/thread-owner`);
+      if(!["http:","https:"].includes(url.protocol)||url.pathname!=="/v1/thread-owner")throw new Error("PI_REMOTE_THREAD_OWNER_URL must name the authorized person's local /v1/thread-owner endpoint");
+      owners.push({id:"person",api:createThreadClient(url.toString().replace(/\/$/,""))});
+    }
+    const directory=new ThreadDirectory({id:"fleet",api:this.threads},owners);
+    this.threads.setDirectory(directory);
+    return directory;
+  }
   private laneActive(laneId:string):number{return this.threads.snapshot().filter(thread=>thread.metadata?.laneId===laneId&&["queued","starting","running","stopping"].includes(thread.state)).length;}
   private profileModel(profile:string):string{
     const candidate=this.config.profiles[profile]?.[0];
@@ -283,9 +304,10 @@ export class Daemon {
     try{
       const url=new URL(req.url??"/",`http://${HOST}:${PORT}`),method=req.method??"GET";
       const application=/^\/v1\/applications\/([a-f0-9]+)\/threads\//.exec(url.pathname);
-      if(url.pathname.startsWith("/v1/threads/")||application){
+      const localOwner=url.pathname.startsWith("/v1/thread-owner/");
+      if(url.pathname.startsWith("/v1/threads/")||localOwner||application){
         const input=method==="POST"?await body(req):undefined;
-        let api=application?this.isolated.get(application[1]!):this.directory();
+        let api=application?this.isolated.get(application[1]!):localOwner?this.threads:this.directory();
         if(!api)return json(res,404,{error:"Application thread boundary not found"});
         if(!application&&url.pathname==="/v1/threads/spawn"&&input?.metadata?.context){
           if(!isRunContext(input.metadata.context)||!input.cwd?.startsWith("/"))return json(res,400,{error:"Isolated threads require absolute cwd and a valid context"});
@@ -294,8 +316,32 @@ export class Daemon {
           const started=await boundary.service.start();if(!started.ok)return json(res,503,started);
           api=boundary.service;
         }
-        const response=await threadHttp(api,new Request(url,{method,headers:{"content-type":"application/json"},...(method==="POST"?{body:JSON.stringify(input)}:{})}),application?`/v1/applications/${application[1]}/threads`:"/v1/threads");
+        const response=await threadHttp(api,new Request(url,{method,headers:{"content-type":"application/json"},...(method==="POST"?{body:JSON.stringify(input)}:{})}),application?`/v1/applications/${application[1]}/threads`:localOwner?"/v1/thread-owner":"/v1/threads");
         if(response){res.writeHead(response.status,Object.fromEntries(response.headers));res.end(await response.text());return;}
+      }
+      if(method==="GET"&&url.pathname==="/v1/runs")return json(res,200,runViews([this.threads,...this.isolated.values()]));
+      const runControl=/^\/v1\/runs\/([^/]+)\/(abort|kill)$/.exec(url.pathname);
+      if(method==="POST"&&runControl){
+        const result=await this.directory().control({threadId:decodeURIComponent(runControl[1]!),action:"stop",descendants:false});
+        return json(res,result.ok?200:409,result.ok?{ok:true}:result);
+      }
+      if(method==="POST"&&(url.pathname==="/v1/run"||url.pathname==="/v1/run/isolated")){
+        const input=await body(req),count=input.count??1;
+        if(typeof input.prompt!=="string"||!input.prompt.trim()||typeof input.cwd!=="string"||!input.cwd.startsWith("/")||!Number.isInteger(count)||count<1||count>100||input.core!==undefined)
+          return json(res,400,{error:"Expected prompt, absolute cwd and count 1..100"});
+        const isolated=url.pathname.endsWith("/isolated");
+        if(isolated&&!isRunContext(input.context)||!isolated&&input.context)return json(res,400,{error:"Application context requires the isolated endpoint and a valid tool list"});
+        const owner=isolated?this.isolatedService(input.cwd,input.context).service:this.threads;
+        const started=await owner.start();if(!started.ok)return json(res,503,started);
+        const settings=resolveThreadSettings({model:input.model??this.profileModel(input.profile??"standard"),thinkingLevel:input.thinkingLevel,speed:input.speed});
+        if(!settings.ok)return json(res,400,settings);
+        const runIds:string[]=[];
+        for(let index=0;index<count;index++){
+          const result=await owner.spawn({requestId:input.requestId?`${input.requestId}:${index}`:randomUUID(),cwd:input.cwd,title:input.profile??"Assignment",message:input.prompt,
+            settings:settings.value,admission:input.force===false?"background":"force",metadata:{source:"direct",profile:input.profile,context:isolated?input.context:undefined}});
+          if(!result.ok)return json(res,409,result);runIds.push(result.value.id);
+        }
+        return json(res,202,{runIds});
       }
       const completionReply=(outcome:CompletionOutcome<unknown>)=>{
         if(outcome.ok)return json(res,200,outcome.value);

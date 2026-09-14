@@ -3,7 +3,7 @@ import type { OrchestratorConfig, Run } from "../domain.js";
 import type { Store } from "../store.js";
 import type { CompletionService } from "../completion.js";
 import { executeCompletion } from "./completion-provider.js";
-import { reconcileCompletionReceipts, saveCompletionReceipt } from "./completion-worker.js";
+import { reconcileCompletionReceipts, saveCompletionReceipt } from "./completion-receipts.js";
 
 /** Tool-free requests share the daemon, not an AgentSession or a process per request. */
 export class CompletionPool {

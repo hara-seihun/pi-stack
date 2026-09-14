@@ -3,6 +3,8 @@ import { defineTool } from "@earendil-works/pi-coding-agent";
 import type { PiSessionOptions, Result, ThreadApi } from "./contracts.js";
 import { createThreadClient } from "./http.js";
 import { historyPreview } from "./pi-history-preview.js";
+import { DELEGATION_POLICY } from "../delegation-policy.js";
+import { SUBAGENT_MODEL_DESCRIPTIONS } from "../catalog.js";
 
 const delivery = Type.Union([Type.Literal("queue"), Type.Literal("steer"), Type.Literal("hardSteer")]);
 const settings = Type.Object({
@@ -27,7 +29,7 @@ export function threadTools(options: PiSessionOptions) {
   return [
     defineTool({
       name: "thread_spawn", label: "Start a thread",
-      description: "Start a fresh persistent thread with its own context. It returns immediately; completion arrives as a normal message. To continue an existing conversation use thread_send instead.",
+      description: `${DELEGATION_POLICY}\n\nStart a fresh persistent thread with its own context. It returns immediately; completion arrives as a normal message. To continue an existing conversation use thread_send instead. Defaults: Astra, standard speed, high thinking; Luna defaults to max. Explicit settings override these defaults. ${SUBAGENT_MODEL_DESCRIPTIONS}`,
       parameters: Type.Object({ message: Type.String(), title: Type.Optional(Type.String()), cwd: Type.Optional(Type.String()), settings: Type.Optional(settings) }),
       execute: async (id, input, signal) => result(await api(signal).spawn({ ...input, requestId: `${options.threadId}:${id}`, parentId: options.threadId,
         cwd: input.cwd ?? options.cwd, admission: "force", settings: input.settings as Parameters<ThreadApi["spawn"]>[0]["settings"] })),
@@ -54,26 +56,27 @@ export function threadTools(options: PiSessionOptions) {
       execute: async (_id, input, signal) => {
         const value = await api(signal).read(input.entryId ? { threadId: input.threadId, entryId: input.entryId }
           : { ...input, limit: Math.min(input.limit ?? 8, 8) });
-        return result(value.ok ? { ok: true, value: historyPreview(value.value, input.entryId, input.entryId ? input.offset ?? 0 : 0) } : value);
+        if (!value.ok) return result(value);
+        const inspected = await api(signal).inspect(input.threadId);
+        if (!inspected.ok) return result(inspected);
+        return result({ ok: true, value: { ...historyPreview(value.value, input.entryId, input.entryId ? input.offset ?? 0 : 0),
+          thread: inspected.value.thread, pending: inspected.value.pending.map(({ images: _images, text, ...receipt }) => ({ ...receipt, text: text.slice(0, 2000) })) } });
       },
     }),
     defineTool({
-      name: "thread_thinking", label: "Set thread thinking",
-      description: "Persist this thread's thinking level through its owner. The accepted settings of work already running remain unchanged; new work uses this setting.",
-      parameters: Type.Object({ level: Type.Union(["off", "minimal", "low", "medium", "high", "xhigh", "max"].map(value => Type.Literal(value))) }),
-      execute: async (_id, input, signal) => result(await api(signal).control({ threadId: options.threadId, action: "settings", settings: { thinkingLevel: input.level as import("./contracts.js").ThinkingLevel } })),
-    }),
-    defineTool({
       name: "thread_control", label: "Control a thread",
-      description: "Stop local execution and hold pending messages, resume held messages, or change settings through the same thread owner humans use. Stop requires an explicit descendants choice. Resume with no held messages starts no work.",
+      description: "Stop local execution and hold pending messages, resume held messages, or change settings through the same thread owner humans use. Stop requires an explicit descendants choice. Resume with no held messages returns an error without changing state. Omit threadId for this thread. Thinking, model and speed use settings; pending receipts from thread_read can be cancelled or promoted.",
       parameters: Type.Union([
-        Type.Object({ threadId: Type.String(), action: Type.Literal("stop"), descendants: Type.Boolean() }),
-        Type.Object({ threadId: Type.String(), action: Type.Literal("resume") }),
-        Type.Object({ threadId: Type.String(), action: Type.Literal("settings"), settings }),
+        Type.Object({ threadId: Type.Optional(Type.String()), action: Type.Literal("stop"), descendants: Type.Boolean() }),
+        Type.Object({ threadId: Type.Optional(Type.String()), action: Type.Literal("resume") }),
+        Type.Object({ threadId: Type.Optional(Type.String()), action: Type.Literal("settings"), settings }),
+        Type.Object({ threadId: Type.Optional(Type.String()), action: Type.Literal("cancelMessage"), messageId: Type.String() }),
+        Type.Object({ threadId: Type.Optional(Type.String()), action: Type.Literal("promoteMessage"), messageId: Type.String(), delivery }),
       ]),
       execute: async (_id, input, signal) => {
-        if (input.threadId === options.threadId && input.action === "stop") return result({ ok: false, error: { code: "invalid_request", message: "Return from this turn to stop your own work; stopping it inside a tool would wait on that same tool." } });
-        return result(await api(signal).control(input as Parameters<ThreadApi["control"]>[0]));
+        const threadId = input.threadId ?? options.threadId;
+        if (threadId === options.threadId && input.action === "stop") return result({ ok: false, error: { code: "invalid_request", message: "Return from this turn to stop your own work; stopping it inside a tool would wait on that same tool." } });
+        return result(await api(signal).control({ ...input, threadId } as Parameters<ThreadApi["control"]>[0]));
       },
     }),
   ];

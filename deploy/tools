@@ -37,7 +37,9 @@ done < <(jq -r '.tools[].id' "$manifest")
 }
 mkdir -p "$stage/release/node_modules"
 for dependency in "$dependencies"/*; do
-  ln -s "$dependency" "$stage/release/node_modules/$(basename "$dependency")"
+  name=$(basename "$dependency")
+  [[ $name == pi-orchestrator ]] && continue
+  ln -s "$dependency" "$stage/release/node_modules/$name"
 done
 ln -s "$(readlink -f "$orchestrator")" "$stage/release/node_modules/pi-orchestrator"
 node "$stage/release/read-condensed-session/read-thread" --contract >/dev/null

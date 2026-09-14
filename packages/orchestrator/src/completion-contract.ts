@@ -7,6 +7,8 @@ export const CompletionInputSchema = Type.Object({
   model: CompletionModelSchema,
   prompt: Type.String({ minLength: 1 }),
   systemPrompt: Type.Optional(Type.String()),
+  thinkingLevel: Type.Optional(Type.Union([Type.Literal("off"), Type.Literal("minimal"), Type.Literal("low"), Type.Literal("medium"), Type.Literal("high"), Type.Literal("xhigh"), Type.Literal("max")])),
+  speed: Type.Optional(Type.Union([Type.Literal("standard"), Type.Literal("priority")])),
   maxOutputTokens: Type.Optional(Type.Integer({ minimum: 1, description: "Reserved provider-native output cap. Current Codex Luna/Terra reject this option with HTTP 422 unsupported-option; it is never silently ignored." })),
   responseFormat: Type.Optional(Type.Object({
     type: Type.Literal("json_schema"),

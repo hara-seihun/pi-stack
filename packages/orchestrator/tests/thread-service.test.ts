@@ -102,7 +102,7 @@ describe("ThreadService", () => {
   it("opens every child with a fresh session and resolves default and Luna settings centrally", async () => {
     const { directory, service, sessions } = fixture();
     await service.start();
-    const parent = value(await service.spawn({ requestId: "parent", id: "parent", cwd: directory, settings: { model: "luna" } }));
+    const parent = value(await service.spawn({ requestId: "parent", id: "parent", cwd: directory, settings: { model: "luna" }, metadata: { meetingId: "room", profileId: "personal", nativeHistoryRequired: true } }));
     expect(parent.settings).toEqual({ model: "openai-codex/gpt-5.6-luna", thinkingLevel: "max", speed: "standard" });
     value(await service.control({ threadId: parent.id, action: "stop", descendants: false }));
 
@@ -113,10 +113,12 @@ describe("ThreadService", () => {
     expect(defaultChild.settings).toEqual({ model: "openai-codex/gpt-6-astra", thinkingLevel: "high", speed: "standard" });
     expect(lunaChild.settings).toEqual({ model: "openai-codex/gpt-5.6-luna", thinkingLevel: "max", speed: "standard" });
     expect([defaultChild.admission, lunaChild.admission]).toEqual(["force", "force"]);
+    expect(defaultChild.metadata).toMatchObject({ meetingId: "room", profileId: "personal" });
+    expect(defaultChild.metadata?.nativeHistoryRequired).toBeUndefined();
     expect(new Set(sessions.map(session => session.options.sessionFile)).size).toBe(2);
     expect(sessions.map(session => session.options.args)).toEqual(expect.arrayContaining([
-      ["--provider", "openai-codex", "--model", "gpt-6-astra", "--thinking", "high"],
-      ["--provider", "openai-codex", "--model", "gpt-5.6-luna", "--thinking", "max"],
+      ["--provider", "openai-codex", "--model", "gpt-6-astra", "--thinking", "high", "--name", defaultChild.title],
+      ["--provider", "openai-codex", "--model", "gpt-5.6-luna", "--thinking", "max", "--name", lunaChild.title],
     ]));
 
     for (const session of sessions) session.settle(`complete ${session.options.threadId}`);
@@ -169,7 +171,7 @@ describe("ThreadService", () => {
     writeFileSync(transcript, [
       { type: "session", id: "session" },
       { type: "message", id: "user", message: { role: "user", content: "hello" } },
-      { type: "message", id: "assistant", message: { role: "assistant", content: "hi" } },
+      { type: "message", id: "assistant", parentId: "user", message: { role: "assistant", content: "hi" } },
     ].map(entry => JSON.stringify(entry)).join("\n") + "\n");
     value(service.importThread({ id: "imported", title: "Imported", cwd: directory, sessionFile: transcript, settings: { model: "astra", thinkingLevel: "high", speed: "standard" } }));
 

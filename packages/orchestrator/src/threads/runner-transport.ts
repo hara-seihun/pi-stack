@@ -95,9 +95,9 @@ function connect(path: string, output: (event: PiEvent) => void, exit: (code?: n
 function hash(value: string) { return createHash("sha256").update(value).digest("hex").slice(0, 16); }
 function boundary(options: PiSessionOptions) {
   const isolation = options.args.includes("--orchestrator-context") ? `isolated:${options.cwd}` : "normal";
-  return hash(JSON.stringify([process.getuid?.(), options.env.HOME ?? process.env.HOME, options.env.PI_CODING_AGENT_DIR ?? "", options.env.PI_ORCHESTRATOR_EXECUTION ?? "user", isolation]));
+  return hash(JSON.stringify([import.meta.url, process.getuid?.(), options.env.HOME ?? process.env.HOME, options.env.PI_CODING_AGENT_DIR ?? "", options.env.PI_ORCHESTRATOR_EXECUTION ?? "user", isolation]));
 }
-async function ensureRunner(control: string, options: PiSessionOptions): Promise<void> {
+async function ensureRunner(control: string, options: PiSessionOptions, durableScope: boolean): Promise<void> {
   if (existsSync(control)) {
     try { await runnerRequest(control, { type: "status" }); return; }
     catch (error) { if (!["ENOENT", "ECONNREFUSED"].includes((error as NodeJS.ErrnoException).code ?? "")) throw error; }
@@ -110,7 +110,13 @@ async function ensureRunner(control: string, options: PiSessionOptions): Promise
   }
   for (const key of Object.keys(env)) if (/^(PI_REMOTE_SESSION_ID|PI_THREAD_ID|PI_REMOTE_CONTEXT_OWNER_PID|PI_SUBAGENT_MODEL|PI_REMOTE_MEETING_ID|PI_REMOTE_SERVICE_TIER_FILE|PI_ORCHESTRATOR_RUN_ID|PI_SESSION_FILE)$/.test(key)) delete env[key];
   const entry = fileURLToPath(new URL("./runner-host.js", import.meta.url));
-  const host = spawn("flock", ["--no-fork", "--nonblock", "--conflict-exit-code", "75", `${control}.lock`, "node", "--max-old-space-size=8192", entry, control], {
+  const root = options.env.PI_ORCHESTRATOR_EXECUTION === "root-repair";
+  if (root && (!durableScope || options.args.includes("--orchestrator-context"))) throw new Error("Root repair requires the fleet execution boundary without isolated context");
+  if (root) { env.PI_ORCHESTRATOR_OWNER_UID = String(process.getuid!()); env.PI_ORCHESTRATOR_OWNER_GID = String(process.getgid!()); }
+  const command = ["flock", "--no-fork", "--nonblock", "--conflict-exit-code", "75", `${control}.lock`, "node", "--max-old-space-size=8192", entry, control];
+  if (durableScope) command.unshift("systemd-run", ...(root ? [] : ["--user"]), "--scope", "--collect", "--quiet", `--unit=pi-thread-runner-${hash(control)}`);
+  if (root) command.unshift("sudo", "-n", "--preserve-env");
+  const host = spawn(command[0]!, command.slice(1), {
     cwd: env.HOME, detached: true, stdio: ["ignore", "inherit", "inherit"], env,
   });
   host.unref();
@@ -129,17 +135,19 @@ async function ensureRunner(control: string, options: PiSessionOptions): Promise
   throw new Error("Thread runner startup has not acknowledged ownership");
 }
 
-export function createSharedPiSessionOpener({ dataDir }: { dataDir: string }): { openSession: OpenPiSession; detach(): void } {
+export function createSharedPiSessionOpener({ dataDir, durableScope = false }: { dataDir: string; durableScope?: boolean }): { openSession: OpenPiSession; detach(): void } {
   const connections = new Set<Connection>();
   const openSession: OpenPiSession = async (options, output, exit) => {
+    const retained = options.env.PI_THREAD_RUNNER_REFERENCE ? JSON.parse(options.env.PI_THREAD_RUNNER_REFERENCE) as { control: string; socketPath: string } : undefined;
     const group = boundary(options);
-    const control = join(dataDir, "thread-runners", `${group}.sock`);
-    const socketPath = join(dataDir, "thread-sockets", `${group}.${hash(options.threadId)}.sock`);
+    const control = retained?.control ?? join(dataDir, "thread-runners", `${group}.sock`);
+    const socketPath = retained?.socketPath ?? join(dataDir, "thread-sockets", `${group}.${hash(options.threadId)}.sock`);
+    if (dirname(control) !== join(dataDir, "thread-runners") || dirname(socketPath) !== join(dataDir, "thread-sockets")) throw new Error("Recorded runner is outside this execution boundary");
     mkdirSync(dirname(control), { recursive: true, mode: 0o700 });
     mkdirSync(dirname(socketPath), { recursive: true, mode: 0o700 });
     let starting = starts.get(control);
     if (!starting) {
-      starting = ensureRunner(control, options).finally(() => starts.delete(control));
+      starting = ensureRunner(control, options, durableScope).finally(() => starts.delete(control));
       starts.set(control, starting);
     }
     await starting;
@@ -150,6 +158,7 @@ export function createSharedPiSessionOpener({ dataDir }: { dataDir: string }): {
     connection = await connect(socketPath, output, code => { if (connection) connections.delete(connection); exit(code); });
     const attached = connection;
     connections.add(attached);
+    output({ type: "runner_attached", control, socketPath });
     return {
       command: async command => { attached.send(command); },
       close: async () => {

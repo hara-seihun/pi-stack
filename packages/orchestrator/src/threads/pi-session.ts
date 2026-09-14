@@ -86,6 +86,7 @@ export const openPiSession: OpenPiSession = async (options, output, exit) => {
     const pendingInputs = new Map<string, PiCommand>();
     const internalResponses = new Map<string, PiEvent | undefined>();
     const dialogs = new Set<string>();
+    const backgroundCommands = new Set<string>();
     let replacing = false;
     let cancelling = false;
     let closed = false;
@@ -156,6 +157,11 @@ export const openPiSession: OpenPiSession = async (options, output, exit) => {
         if (event.type === "response") {
           if (internalResponses.has(String(event.id))) { internalResponses.set(String(event.id), event); return; }
           commands.finish(event, runtime.session.sessionManager);
+          if (backgroundCommands.delete(String(event.id))) {
+            output({ type: "compaction_end", commandId: event.id, success: event.success, error: event.error, result: event.data });
+            output({ type: "command_settled", commandId: event.id, response: event });
+            return;
+          }
           const input = pendingInputs.get(String(event.id));
           if (input) {
             pendingInputs.delete(String(event.id));
@@ -167,7 +173,7 @@ export const openPiSession: OpenPiSession = async (options, output, exit) => {
             }
           }
           if (event.command === "get_state" && event.success) event = { ...event, data: { ...event.data as object, ...receipts(),
-            lastAssistantMessage: lastAssistant(), context: acceptedContext, localTools: execution.activeTools,
+            lastAssistantMessage: lastAssistant(), context: acceptedContext, localTools: execution.activeTools, pendingCommandCount: backgroundCommands.size,
             isStreaming: runtime.session.isStreaming || execution.activePrompts > 0 || execution.activeTools > 0 || !!settlement,
             cancellationFailed: execution.blocked } };
         }
@@ -248,12 +254,23 @@ export const openPiSession: OpenPiSession = async (options, output, exit) => {
             output({ ...admission.response, id: command.id });
             return;
           }
-          await rpc.command(command);
+          if (command.type === "compact") {
+            backgroundCommands.add(String(command.id));
+            output({ type: "compaction_start", commandId: command.id });
+            response(true, undefined, { accepted: true, commandId: command.id });
+            void rpc.command(command).catch(error => {
+              const event = { type: "response", id: command.id, command: command.type, success: false, error: String(error) };
+              commands.finish(event, runtime.session.sessionManager);
+              backgroundCommands.delete(String(command.id));
+              output({ type: "compaction_end", commandId: command.id, success: false, error: String(error) });
+              output({ type: "command_settled", commandId: command.id, response: event });
+            });
+          } else await rpc.command(command);
           checkpointPiSession(runtime.session.sessionManager);
         }),
         close: () => piEnvironmentScope.run(env, async () => {
           if (closed) return;
-          if (runtime.session.isStreaming || runtime.session.isCompacting || runtime.session.isBashRunning || execution.activeTools || execution.activePrompts || execution.blocked || settlement) throw new Error("Cannot close active Pi execution; stop and confirm cancellation first");
+          if (backgroundCommands.size || runtime.session.isStreaming || runtime.session.isCompacting || runtime.session.isBashRunning || execution.activeTools || execution.activePrompts || execution.blocked || settlement) throw new Error("Cannot close active Pi execution; stop and confirm cancellation first");
           await execution.cancel(runtime.session, Number(env.PI_THREAD_CANCEL_TIMEOUT_MS ?? 30_000));
           closed = true;
           execution.dispose();

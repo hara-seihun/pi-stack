@@ -8,10 +8,10 @@ export const READ_THREAD_CONTRACT = {
   source: "Stored Pi session JSONL; no model calls, recall cache or index",
   selectors: {
     self: "$PI_SESSION_FILE, resolved by Pi for each shell-tool invocation",
-    JSONL: "Explicit session file path; no Remote database required",
-    THREAD: "Remote title, UUID or unique UUID prefix",
-    omitted: "List Remote threads; --subagents instead uses $PI_REMOTE_SESSION_ID",
-    subagents: "Remote titles and ids only; self uses $PI_REMOTE_SESSION_ID and requires the Remote database",
+    JSONL: "Explicit session file path; no thread database required",
+    THREAD: "Thread title, UUID or unique UUID prefix in the current owner's directory",
+    omitted: "List the owner's threads; --subagents instead uses $PI_THREAD_ID",
+    subagents: "List direct child threads; self uses $PI_THREAD_ID or $PI_REMOTE_SESSION_ID and requires the owner's thread database",
   },
   scope: {
     default: "Parent chain through the newest stored entry, including pre-compaction history",
@@ -22,7 +22,7 @@ export const READ_THREAD_CONTRACT = {
   options: [
     ["--help", "Print this command's help"],
     ["--contract", "Print this command's machine-readable JSON contract; no session or database required"],
-    ["--list", "List Remote threads, newest first"],
+    ["--list", "List the owner's threads, newest first"],
     ["--subagents", "List direct children as paginated JSON, by most recent user or assistant message; active children by default"],
     ["--include-idle", "With --subagents, include settled and archived children"],
     ["--json", "Read paginated conversation/actions as JSON; --work includes tool results, but deliberation remains omitted"],
@@ -42,7 +42,7 @@ export const READ_THREAD_CONTRACT = {
     ["--since TIMESTAMP", "Include entries at or after this ISO timestamp"],
     ["--tail N", "Include only the last N selected entries, before search"],
     ["--output FILE", "Write output to FILE and print its path"],
-    ["--db FILE", "Remote database; default $PI_REMOTE_DATA/supervisor.sqlite3 or the current Unix person's registry"],
+    ["--db FILE", "Thread database; $PI_THREAD_DATABASE, otherwise the current person's Remote threads.sqlite3 or Orchestrator threads.sqlite3"],
   ],
 };
 

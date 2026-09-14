@@ -12,7 +12,8 @@ export class Fleet {
   constructor(private readonly store: Store, private readonly config: OrchestratorConfig) {}
 
   async admit(thread: Thread, settings: ThreadSettings, recovering: boolean, executionId: string): Promise<Result<ThreadAdmission>> {
-    if (thread.metadata?.execution === "root-repair") return { ok: false, error: { code: "unavailable", message: "Root repair requires a UID0 shared thread runner; the user daemon cannot execute this lane" } };
+    const rootRepair = thread.metadata?.execution === "root-repair";
+    if (rootRepair && thread.metadata?.context) return { ok: false, error: { code: "invalid_request", message: "Root repair cannot use an isolated application context" } };
     const slash = settings.model.indexOf("/");
     const candidate = { provider: settings.model.slice(0, slash), model: settings.model.slice(slash + 1), thinking: settings.thinkingLevel };
     return this.store.transaction(() => {
@@ -21,17 +22,18 @@ export class Fleet {
       if (recovering && !held) return { ok: false, error: { code: "unavailable", message: `Execution ${executionId} has no recorded account lease` } };
       const selected = held ? { assignment: { ...candidate, accountId: held.account_id }, refusals: [] }
         : assign(this.store, "thread", thread.parentId ? "force" : thread.admission,
-          { ...this.config, profiles: { thread: [candidate] } }, Date.now(), undefined, thread.id);
+          { ...this.config, profiles: { thread: [candidate] } }, Date.now(), undefined, thread.id, rootRepair ? "root-repair" : "user");
       if (!selected.assignment) return { ok: false, error: { code: "unavailable", message: selected.refusals.map(item => `${item.accountId}: ${item.reason}`).join("; ") } };
       const assignment = selected.assignment;
       this.store.createLease(leaseId, assignment.accountId, "fleet", thread.id);
+      if (rootRepair) this.store.setControl("repair-owner", thread.id);
       if (!recovering) commitMeterAdmission(this.store, assignment);
       this.leases.set(thread.id, { leaseId, accountId: assignment.accountId });
       const timer = setInterval(() => this.store.heartbeatLease(leaseId), 15_000); timer.unref();
       return { ok: true, value: {
         env: { PI_ORCHESTRATOR_ASSIGNED: "1", PI_THREAD_USAGE: "service", PI_ORCHESTRATOR_ACCOUNT_ID: assignment.accountId,
           PI_ORCHESTRATOR_PROVIDER: assignment.provider, PI_THREAD_ADMISSION: thread.parentId ? "force" : thread.admission },
-        release: () => { clearInterval(timer); this.store.endLease(leaseId); if (this.leases.get(thread.id)?.leaseId === leaseId) this.leases.delete(thread.id); },
+        release: () => { clearInterval(timer); this.store.endLease(leaseId); if (this.leases.get(thread.id)?.leaseId === leaseId) this.leases.delete(thread.id); if (rootRepair && this.store.control("repair-owner") === thread.id) this.store.db.prepare("DELETE FROM control WHERE key='repair-owner'").run(); },
       } };
     });
   }

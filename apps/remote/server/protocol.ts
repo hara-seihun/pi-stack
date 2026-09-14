@@ -43,6 +43,7 @@ export interface Session {
   id: string;
   parentId: string | null;
   hasChildren: boolean;
+  origin: "person" | "fleet";
   model: string;
   name: string;
   cwd: string;
@@ -206,6 +207,7 @@ export type BashTimeoutSeconds = (typeof BASH_TIMEOUT_OPTIONS)[number];
 export const DEFAULT_BASH_TIMEOUT_SECONDS: BashTimeoutSeconds = 1800;
 
 export interface ThreadSettings {
+  children: Session[];
   models: Array<{ id: string; name?: string; provider: string; common?: boolean }>;
   model: { id: string; provider: string } | null;
   thinkingLevels: string[];

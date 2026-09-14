@@ -116,7 +116,7 @@ export class Store {
   readonly db: DatabaseSync;
   private transactionDepth=0;
 
-  private constructor(db: DatabaseSync, private readonly path: string) { this.db = db; }
+  private constructor(db: DatabaseSync, readonly path: string) { this.db = db; }
 
   static open(path: string): Store {
     const db = openLedgerDatabase(path);

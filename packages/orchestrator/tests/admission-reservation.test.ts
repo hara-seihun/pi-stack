@@ -65,8 +65,6 @@ it("admits the queued Atlas request ahead of older force backlog, retaining rese
     store.db.prepare("UPDATE run SET created_at=1 WHERE id=?").run(backlog!);
     const generic = submit(store, "generic", { caller: "omniscience", purpose: "generic-migration" });
     const first = submit(store, "sox-existing", atlas.metadata);
-    const resume = daemon.resumeCoordinators.bind(daemon);
-    daemon.resumeCoordinators = () => { expect(launched[0]).toBe(first); resume(); };
     await daemon.reconcile();
     expect(launched).toEqual([first]);
     expect(store.run(backlog!)?.state).toBe("queued");

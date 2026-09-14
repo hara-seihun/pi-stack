@@ -17,7 +17,8 @@ import { listenForFileDrops } from "./file-drop";
 import { createSyncLoop, type SyncLoop } from "./sync-loop";
 import { updateDocument } from "./sync";
 import { threadsInOrder } from "./thread-order";
-import { activityColor, activityLabel, working } from "./thread-state";
+import { activityColor, activityLabel, orchestratorThreads, working } from "./thread-state";
+import { ChildThreadList, OrchestratorThreadList } from "./thread-views";
 import { requestStop, submitThreadControl, ThreadStopDialog } from "./thread-controls";
 import { AppUpdateControl } from "./app-update";
 import { ThreadStartMenu } from "./thread-start-menu";
@@ -34,6 +35,7 @@ interface AppState {
   settingsOpen: boolean;
   sessions: Session[];
   archived: Session[];
+  discovered: Session[];
   archivedTotal: number;
   /** A dropped drawer order shown until the server confirms it. */
   pendingOrder: string[] | null;
@@ -51,7 +53,7 @@ interface AppState {
 
 const initialState: AppState = {
   selectedId: null, drawerTab: "threads", drawerOpen: innerWidth >= 1000, settingsOpen: false,
-  sessions: [], archived: [], archivedTotal: 0, pendingOrder: null, dashboard: null,
+  sessions: [], archived: [], discovered: [], archivedTotal: 0, pendingOrder: null, dashboard: null,
   context: null, images: null, liveText: null, liveThinking: null,
   attachments: [], slashCommands: [], offline: "", ownerErrors: [], syncing: true,
 };
@@ -157,10 +159,11 @@ function PlanSummary({ plans, counts }: { plans: PlanCard[]; counts: Map<string,
   }))}</div>;
 }
 
-type DrawerTab = "threads" | "archived" | "files";
+type DrawerTab = "threads" | "orchestrator" | "archived" | "files";
 
 function DrawerTabIcon({ tab }: { tab: DrawerTab }) {
   if (tab === "threads") return <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M4 5h16v11H9l-5 4V5Zm4 5h8" /></svg>;
+  if (tab === "orchestrator") return <svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="12" cy="5" r="2.5" /><circle cx="6" cy="18" r="2.5" /><circle cx="18" cy="18" r="2.5" /><path d="M12 7.5v4M6 15.5v-4h12v4" /></svg>;
   if (tab === "archived") return <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M4 8h16v12H4V8Zm-1-4h18v4H3V4Zm6 9h6" /></svg>;
   return <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M3 6.5h7l2 2h9v10H3v-12Z" /></svg>;
 }
@@ -193,8 +196,12 @@ function bashTimeoutLabel(seconds: number) {
   return "Half an hour";
 }
 
-function SettingsPanel({ session, open, onClose }: { session: Session | null; open: boolean; onClose(): void }) {
+function SettingsPanel({ session, sessions, open, onClose, onOpenThread }: { session: Session | null; sessions: Session[]; open: boolean; onClose(): void; onOpenThread(session: Session): void }) {
+  const childrenVersion = sessions.filter(child => child.parentId === session?.id).map(child => `${child.id}:${child.revision}`).join(",");
   const [settings, setSettings] = useState<ThreadSettings | null>(null);
+  const [children, setChildren] = useState<Session[]>([]);
+  const [childrenLoading, setChildrenLoading] = useState(false);
+  const [childrenFailure, setChildrenFailure] = useState("");
   const [saving, setSaving] = useState("");
   const [failure, setFailure] = useState("");
   const editable = Boolean(session) && ["IDLE", "STOPPED"].includes(session!.state) && session?.queuedMessages.length === 0;
@@ -209,6 +216,18 @@ function SettingsPanel({ session, open, onClose }: { session: Session | null; op
       .catch((error) => { if (!cancelled) setFailure(error?.message || String(error)); });
     return () => { cancelled = true; };
   }, [open, session?.id]);
+  useEffect(() => {
+    if (!open || !session) return;
+    let cancelled = false;
+    setChildren(previous => previous.filter(child => child.parentId === session.id));
+    setChildrenLoading(true);
+    setChildrenFailure("");
+    api(API.sessionChildren.method, API.sessionChildren.path({ sessionId: session.id }))
+      .then((result) => { if (!cancelled) setChildren(result.children ?? []); })
+      .catch((error) => { if (!cancelled) setChildrenFailure(error?.message || String(error)); })
+      .finally(() => { if (!cancelled) setChildrenLoading(false); });
+    return () => { cancelled = true; };
+  }, [open, session?.id, childrenVersion]);
   const update = async (field: string, body: Record<string, string | number>) => {
     if (!session || saving) return;
     setSaving(field);
@@ -222,7 +241,7 @@ function SettingsPanel({ session, open, onClose }: { session: Session | null; op
   return <><AnimatePresence>{open && <motion.div key="settings-scrim" className="scrim settings-scrim" initial={{ opacity: 0 }} animate={{ opacity: 1 }} exit={{ opacity: 0 }} transition={{ duration: 0.18 }} onClick={onClose} />}</AnimatePresence>
     <AnimatePresence>{open && <motion.aside key="settings-panel" className="settings" aria-label="Thread settings" initial={{ x: "100%" }} animate={{ x: 0 }} exit={{ x: "100%" }} transition={{ type: "spring", stiffness: 520, damping: 42, mass: 0.9 }}>
       <header className="settings-header"><div className="settings-title"><span>Thread settings</span><h2 title={session?.name}>{session?.name || "Thread"}</h2></div><button type="button" className="settings-close" aria-label="Close thread settings" onClick={onClose}>×</button></header>
-      <div className="settings-body">{failure && <p className="setting-unavailable" role="alert">{failure}</p>}{!settings ? !failure && <div className="settings-loading" aria-label="Loading thread settings"><span /><span /><span /></div> : <>
+      <div className="settings-body"><ChildThreadList children={children} loading={childrenLoading} error={childrenFailure} onOpen={onOpenThread} />{failure && <p className="setting-unavailable" role="alert">{failure}</p>}{!settings ? !failure && <div className="settings-loading" aria-label="Loading thread settings"><span /><span /><span /></div> : <>
         {!editable && <p className="setting-unavailable">Settings can be changed when the thread is idle.</p>}
         <section className="setting-card">
           <div className="setting-heading"><div><h3>Model</h3><p>The model used for new messages</p></div>{saving === "model" && <span className="setting-saving">Saving</span>}</div>
@@ -276,7 +295,7 @@ export default function App() {
   }, []);
   const selectedSession = useCallback(() => {
     const current = stateRef.current;
-    return [...current.sessions, ...current.archived].find((session) => session.id === current.selectedId) ?? null;
+    return [...current.sessions, ...current.archived, ...current.discovered].find((session) => session.id === current.selectedId) ?? null;
   }, [stateRef]);
   const resizePrompt = useCallback(() => {
     const textarea = promptElement.current;
@@ -338,9 +357,14 @@ export default function App() {
     return `${environment?.id || location.origin}:${id}`;
   }, []);
 
-  const selectThread = useCallback(async (id: string, closeDrawer = true) => {
+  const selectThread = useCallback(async (id: string, closeDrawer = true, discovered?: Session, drawerTab: DrawerTab = "threads") => {
     setStopTarget(null);
-    patch({ selectedId: id, drawerTab: "threads", settingsOpen: false, context: null, images: null, liveText: null, liveThinking: null, slashCommands: [], syncing: true, ...(closeDrawer ? { drawerOpen: innerWidth >= 1000 } : {}) });
+    patch((current) => ({
+      selectedId: id, drawerTab, settingsOpen: false, context: null, images: null, liveText: null, liveThinking: null, slashCommands: [], syncing: true,
+      discovered: discovered && ![...current.sessions, ...current.archived, ...current.discovered].some(session => session.id === discovered.id)
+        ? [...current.discovered, discovered] : current.discovered,
+      ...(closeDrawer ? { drawerOpen: innerWidth >= 1000 } : {}),
+    }));
     setPrompt(loadDraft(id));
     kick();
     try {
@@ -593,7 +617,8 @@ export default function App() {
   const toggleGovernor = async (provider: GovernorProvider) => { try { await api(API.governorToggle.method, API.governorToggle.path({ provider }), {}); } finally { kick(); } };
 
   const sessions = orderedSessions(state);
-  const selected = [...state.sessions, ...state.archived].find((session) => session.id === state.selectedId) ?? null;
+  const knownSessions = [...state.sessions, ...state.archived, ...state.discovered.filter(discovered => !state.sessions.some(session => session.id === discovered.id) && !state.archived.some(session => session.id === discovered.id))];
+  const selected = knownSessions.find((session) => session.id === state.selectedId) ?? null;
   const visibleAttachments = state.attachments.filter((file) => file.sessionId === state.selectedId);
   const drawingOpen = drawings.some(draft => draft.id === drawingId && draft.sessionId === state.selectedId);
   useLayoutEffect(() => {
@@ -607,15 +632,15 @@ export default function App() {
   const selectedActivity = selected?.activity || "IDLE";
   const selectedTool = selected?.activeTool;
   const title = selected?.name || "Pi Remote";
-  const children = sessions.filter(session => session.parentId === selected?.id);
+  const orchestrator = orchestratorThreads(knownSessions);
   const machine = dashboard?.machine;
   const machineText = machine ? `CPU ${machine.cpuPercent ?? "—"}% · GPU ${machine.gpuPercent ?? "—"}% · RAM ${machine.memory?.percentUsed ?? "—"}% · DISK ${machine.disk?.percentUsed ?? "—"}%` : "CPU — · GPU — · RAM — · DISK —";
   const entries = contextEntries;
   const images = useMemo(() => state.images ? new Map(state.images.images.map(image => [image.id, image])) : null, [state.images]);
   const liveThinking = state.liveThinking?.document || "";
   const liveText = state.liveText?.document || "";
-  const drawerCounts: Record<DrawerTab, number> = { threads: sessions.length, archived: Math.max(state.archivedTotal, state.archived.length), files: rootFileCount };
-  const drawerLabels: Record<DrawerTab, string> = { threads: "Threads", archived: "Archived", files: "Files" };
+  const drawerCounts: Record<DrawerTab, number> = { threads: sessions.length, orchestrator: orchestrator.length, archived: Math.max(state.archivedTotal, state.archived.length), files: rootFileCount };
+  const drawerLabels: Record<DrawerTab, string> = { threads: "Threads", orchestrator: "Orchestrator", archived: "Archived", files: "Files" };
   const slashToken = prompt.startsWith("/") && !/\s/.test(prompt) ? prompt.slice(1).toLowerCase() : null;
   const visibleCommands = slashToken === null ? [] : state.slashCommands.filter((command) => command.source === "skill" && !command.name.toLowerCase().includes("mcp") && command.name.toLowerCase().startsWith(slashToken));
 
@@ -624,17 +649,15 @@ export default function App() {
     {fileDrag && state.selectedId && <div className="file-drop-overlay" role="status">Drop files to attach to {selected?.name || "this conversation"}</div>}
     {state.drawerOpen && innerWidth < 1000 && <div className="scrim" onClick={() => patch({ drawerOpen: false })} />}
     <aside id="drawer" className={state.drawerOpen ? "open" : ""} aria-label="Navigation">
-      <header className="drawer-heading thread-start-heading"><nav className="drawer-tabs" role="tablist" aria-label="Drawer sections">{(["threads", "archived", "files"] as const).map((tab) => <button key={tab} className="drawer-tab" type="button" role="tab" aria-label={`${drawerLabels[tab]}, ${drawerCounts[tab]}`} title={drawerLabels[tab]} aria-selected={state.drawerTab === tab} onClick={() => patch({ drawerTab: tab })}><DrawerTabIcon tab={tab} /><span className="drawer-tab-count">{drawerCounts[tab]}</span></button>)}</nav>{state.drawerOpen && <ThreadStartMenu starts={dashboard?.threadStarts ?? []} onCreated={selectThread} onSettled={kick} />}</header>
+      <header className="drawer-heading thread-start-heading"><nav className="drawer-tabs" role="tablist" aria-label="Drawer sections">{(["threads", "orchestrator", "archived", "files"] as const).map((tab) => <button key={tab} className="drawer-tab" type="button" role="tab" aria-label={`${drawerLabels[tab]}, ${drawerCounts[tab]}`} title={drawerLabels[tab]} aria-selected={state.drawerTab === tab} onClick={() => patch({ drawerTab: tab })}><DrawerTabIcon tab={tab} /><span className="drawer-tab-count">{drawerCounts[tab]}</span></button>)}</nav>{state.drawerOpen && <ThreadStartMenu starts={dashboard?.threadStarts ?? []} onCreated={selectThread} onSettled={kick} />}</header>
       {state.drawerTab === "threads" && <DndContext sensors={dragSensors} collisionDetection={closestCenter} onDragEnd={(event) => void reorder(event)}><SortableContext items={sessions.map((session) => session.id)} strategy={verticalListSortingStrategy}><div className="thread-list">{sessions.length ? sessions.map((session) => <SortableThreadRow key={session.id} session={session} selected={state.selectedId === session.id} onSelect={(id) => void selectThread(id)} onArchive={(id) => void archive(id)} onUnarchive={() => {}} />) : <div className="thread-empty">No threads</div>}</div></SortableContext></DndContext>}
+      {state.drawerTab === "orchestrator" && <OrchestratorThreadList sessions={knownSessions} selectedId={state.selectedId} onOpen={session => void selectThread(session.id, true, session, "orchestrator")} />}
       {state.drawerTab === "archived" && <div className="thread-list">{state.archived.length ? state.archived.map((session) => <ThreadRow key={session.id} archived session={session} selected={false} onSelect={() => {}} onArchive={() => {}} onUnarchive={(id) => void unarchive(id)} />) : <div className="thread-empty">No archived threads</div>}{state.archived.length < state.archivedTotal && <button type="button" className="archived-more" onClick={() => void loadOlder()}>Show older · {state.archivedTotal - state.archived.length} more</button>}</div>}
       <FileExplorer hidden={state.drawerTab !== "files"} onRootCount={setRootFileCount} />
       <footer className="drawer-footer">{state.ownerErrors.map(({ owner, message }) => <div key={owner} role="status" className="connection" style={{ color: "var(--danger)" }}>{owner}: {message}</div>)}<MachineControls actions={dashboard?.actions ?? []} governors={dashboard?.governors ?? null} onAction={(id) => void toggleAction(id)} onGovernor={(provider) => void toggleGovernor(provider)} /><EnvironmentControl /><AppUpdateControl /><NotificationControl sessionId={state.selectedId} /><PlanSummary plans={dashboard?.plans ?? []} counts={modelCounts} /><div className="usage-summary muted">{machineText}</div><div className="usage-summary muted" title={__PI_REMOTE_REVISION__}>Client {__PI_REMOTE_REVISION__.slice(0, 12)}</div>{state.offline && <div className="connection" style={{ color: "var(--danger)" }}>● Offline · {state.offline}</div>}</footer>
     </aside>
     <main id="main" className={drawingOpen ? "drawing-mode" : undefined}><header className="topbar"><button className="icon-button" aria-label="Open navigation" onClick={() => patch({ drawerOpen: true })}>☰</button><div className="top-title">{title}</div><div className="top-state" style={{ color: state.offline ? "var(--danger)" : activityColor(selectedActivity) }}>{state.offline ? "OFFLINE" : state.syncing ? "SYNCING" : activityLabel(selectedActivity, selectedTool ?? "")}</div>{state.offline && <button type="button" onClick={kick} title={state.offline}>Reconnect</button>}<a className="icon-button" aria-label="Open PiStack Meet" title="PiStack Meet" href={`/meet.html?${new URLSearchParams({ user: window.PiRemotePerson.get() })}`} onClick={async (event) => { event.preventDefault(); const environment = await window.KenanRemote?.getState(); location.href = `/meet.html?${new URLSearchParams({ user: window.PiRemotePerson.get(), environment: environment?.id || "" })}`; }}><svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true"><rect x="3" y="6" width="12" height="12" rx="2"/><path d="m15 10 6-4v12l-6-4z"/></svg></a>{selected && selected.state !== "STOPPING" && <button type="button" disabled={pending} onClick={() => stopThread(selected)}>Stop</button>}<button className="icon-button" aria-label="Open thread settings" disabled={!selected} onClick={() => patch({ settingsOpen: true })}>⚙</button></header>
-      {(selected?.parentId || children.length > 0) && <nav className="thread-relations" aria-label="Related threads">
-        {selected?.parentId && <button type="button" onClick={() => void selectThread(selected.parentId!)}>Parent: {[...state.sessions, ...state.archived].find(session => session.id === selected.parentId)?.name || selected.parentId}</button>}
-        {children.length > 0 && <details><summary>{children.length} subthreads · {children.filter(working).length} active</summary>{children.map(child => <button key={child.id} type="button" onClick={() => void selectThread(child.id)}>{child.name} · {activityLabel(child.activity, child.activeTool ?? "")}</button>)}</details>}
-      </nav>}
+      {selected?.parentId && <nav className="thread-relations" aria-label="Related threads"><button type="button" onClick={() => void selectThread(selected.parentId!)}>Parent: {knownSessions.find(session => session.id === selected.parentId)?.name || selected.parentId}</button></nav>}
       {!state.selectedId ? <section className="empty-state"><strong>No threads</strong><span>Open the drawer to create one.</span></section> : <section className={`conversation${drawingOpen ? " is-drawing" : ""}`}><div className="scrollback" onClickCapture={editImage} onKeyDownCapture={event => { if (event.key === "Enter" || event.key === " ") editImage(event); }}><div className="scroll-content"><InlineImagesContext.Provider value={images}><ContextTranscript entries={entries} liveThinking={liveThinking} sessionId={state.selectedId || ""} home={dashboard?.home ?? "/"} onEdit={editFrom} />{liveText && <div className="live-answer"><Markdown source={liveText} sessionId={state.selectedId || ""} streaming assistant /><CopyButton text={liveText} label="Copy response" /></div>}<LiveActivity activity={selectedActivity} tool={selectedTool} offline={state.offline} /></InlineImagesContext.Provider></div></div>
         {drawings.map(draft => <div key={draft.id} className="drawing-slot" hidden={!drawingOpen || drawingId !== draft.id}><DrawingCanvas background={draft.background} onAttach={file => attachDrawing(file, draft)} onClose={() => setDrawingId(current => current === draft.id ? null : current)} /></div>)}
         {uploadError?.sessionId === state.selectedId && <div className="upload-error" role="alert">{uploadError.message}<button type="button" aria-label="Dismiss upload error" onClick={() => setUploadError(null)}>×</button></div>}
@@ -646,7 +669,7 @@ export default function App() {
       </section>}
     </main>
     {stopTarget && <ThreadStopDialog session={stopTarget} pending={pending} error={controlError?.sessionId === stopTarget.id ? controlError.message : ""} onStop={descendants => void controlThread(stopTarget.id, "stop", descendants)} onClose={() => setStopTarget(null)} />}
-    <SettingsPanel session={selected} open={state.settingsOpen} onClose={() => patch({ settingsOpen: false })} />
+    <SettingsPanel session={selected} sessions={knownSessions} open={state.settingsOpen} onClose={() => patch({ settingsOpen: false })} onOpenThread={session => void selectThread(session.id, true, session, "orchestrator")} />
     {pasteOpen && <dialog className="paste-text-dialog" open><form className="paste-text-form" onSubmit={(event) => { event.preventDefault(); const name = /\.[^./\\]+$/.test(pasteName) ? pasteName : `${pasteName}.txt`; void uploadFiles([new File([pasteContent], name, { type: "text/plain;charset=utf-8" })]); setPasteOpen(false); setPasteContent(""); }}><h2>Paste text document</h2><label>Document name</label><input value={pasteName} onChange={(event) => setPasteName(event.target.value)} /><label>Text</label><textarea value={pasteContent} onChange={(event) => setPasteContent(event.target.value)} /><div className="paste-text-actions"><button type="button" onClick={() => setPasteOpen(false)}>Cancel</button><button className="accent" type="submit" disabled={!pasteContent.trim()}>Attach</button></div></form></dialog>}
   </div>;
 }

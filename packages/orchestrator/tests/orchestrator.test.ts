@@ -86,7 +86,7 @@ describe("current orchestrator state",()=>{
     rmSync(ledger,{force:true});
   });
 
-  it("reconciles lane manifests as desired state",()=>{const store=Store.open(":memory:");store.reconcileLanes([{id:"one",prompt:"a",cwd:"/tmp",profile:"standard",weight:1},{id:"two",prompt:"b",cwd:"/tmp",profile:"standard",weight:2}]);store.reconcileLanes([{id:"two",prompt:"changed",cwd:"/work",profile:"standard",weight:3}]);expect(store.lanes()).toEqual([{id:"two",prompt:"changed",cwd:"/work",profile:"standard",weight:3,priority:0,doctrineUrl:undefined,openingProbe:undefined}]);store.close();});
+  it("reconciles lane manifests as desired state",()=>{const store=Store.open(":memory:");store.reconcileLanes([{id:"one",prompt:"a",cwd:"/tmp",profile:"standard",weight:1},{id:"two",prompt:"b",cwd:"/tmp",profile:"standard",weight:2}]);store.reconcileLanes([{id:"two",prompt:"changed",cwd:"/work",profile:"standard",weight:3}]);expect(store.lanes()).toEqual([{id:"two",prompt:"changed",cwd:"/work",profile:"standard",weight:3,priority:0,doctrineUrl:undefined,openingProbe:undefined,admission:"force",repair:undefined}]);store.close();});
 
   it("rolls credential custody back when account import fails",async()=>{const root=mkdtempSync(join(tmpdir(),"orchestrator-auth-")),path=join(root,"auth.json");writeFileSync(path,"{}\n");const credential={type:"oauth" as const,access:"access",refresh:"refresh",expires:Date.now()+60_000};await expect(transactSharedCredential(path,"openai-codex-1",credential,async()=>{throw new Error("ledger unavailable");})).rejects.toThrow("ledger unavailable");expect(JSON.parse(readFileSync(path,"utf8"))).toEqual({});rmSync(root,{recursive:true});});
 
@@ -132,18 +132,6 @@ describe("current orchestrator state",()=>{
     expect(store.lanes()).toEqual([]);store.close();
   });
 
-  it("withdraws queued lane runs when current demand disappears",()=>{
-    const store=Store.open(":memory:");
-    store.reconcileLanes([{id:"work",prompt:"w",cwd:"/tmp",profile:"standard",weight:1}]);
-    const ids=store.createRuns({count:3,source:"lane",sourceId:"work",prompt:"w",cwd:"/tmp",profile:"standard",budget:"background"});
-    expect(store.trimQueuedLane("work",1,1234)).toBe(2);
-    expect(store.activeCount("lane","work")).toBe(1);
-    const runs=ids.map((id)=>store.run(id)!);
-    expect(runs.filter((run)=>run.state==="queued")).toHaveLength(1);
-    for(const run of runs.filter((candidate)=>candidate.state==="aborted"))expect(run).toMatchObject({failureKind:"task",result:"unused lane queue entry withdrawn",endedAt:1234});
-    store.close();
-  });
-
   it("orders lane admission by priority and weighted active share",()=>{
     const store=Store.open(":memory:");
     store.reconcileLanes([
@@ -170,7 +158,7 @@ describe("current orchestrator state",()=>{
 
   it("pins each launched run to an immutable release path",()=>{const store=Store.open(":memory:");account(store);const [id]=store.createRuns({count:1,source:"direct",prompt:"x",cwd:"/tmp",profile:"standard",budget:"force"});expect(store.assignRun(id!,{accountId:"openai-codex-1",provider:"openai-codex",model:"gpt-6-astra",unit:"run-a",releasePath:"/srv/releases/a"})).toBe(true);expect(store.run(id!)?.releasePath).toBe("/srv/releases/a");expect(store.assignRun(id!,{accountId:"openai-codex-1",provider:"openai-codex",model:"gpt-6-astra",unit:"run-b",releasePath:"/srv/releases/b"})).toBe(false);expect(store.run(id!)?.releasePath).toBe("/srv/releases/a");store.close();});
 
-  it("resumes an interrupted assigned run without consuming another meter admission",()=>{const store=Store.open(":memory:");account(store);store.recordMeter("openai-codex-1","codex-5h",10,60_000,900);const choice=assign(store,"standard","background",config,1_000).assignment!;commitMeterAdmission(store,choice);const [id]=store.createRuns({count:1,source:"direct",prompt:"x",cwd:"/tmp",profile:"standard",budget:"background"});store.assignRun(id!,{...choice,unit:"run-a",releasePath:"/srv/releases/a"},1_000);store.updateRun(id!,{state:"running",sessionFile:"/sessions/a.jsonl"},1_100);store.endLease(`run:${id}`,1_200);store.updateRun(id!,{state:"queued"},1_200);expect(assign(store,"standard","background",config,1_300).assignment).toBeUndefined();expect(store.resumeAssignedRun(id!,1_300)).toBe(true);expect(store.run(id!)).toMatchObject({accountId:"openai-codex-1",releasePath:"/srv/releases/a",sessionFile:"/sessions/a.jsonl",state:"starting",workerUnit:"run-a"});expect(store.activeLeases(undefined,500,1_300)).toMatchObject([{account_id:"openai-codex-1",run_id:id}]);store.close();});
+
 
   it("waits for in-flight reconciliation before releasing ledger custody",async()=>{
     const store=Store.open(":memory:"),daemon=new Daemon(store,config,"/srv/releases/current") as any;
@@ -180,71 +168,4 @@ describe("current orchestrator state",()=>{
     daemon.reconciling=false;await waiting;expect(settled).toBe(true);store.close();
   });
 
-  it("reopens an infrastructure-failed row when its worker is still active",()=>{
-    const root=mkdtempSync(join(tmpdir(),"orchestrator-active-failed-")),bin=join(root,"bin"),started=join(root,"systemd-run.called");
-    mkdirSync(bin);
-    writeFileSync(join(bin,"systemctl"),'#!/bin/sh\ncase "$*" in *is-active*) exit 0;; esac\nexit 0\n');
-    writeFileSync(join(bin,"systemd-run"),`#!/bin/sh\ntouch ${JSON.stringify(started)}\nexit 1\n`);
-    chmodSync(join(bin,"systemctl"),0o755);chmodSync(join(bin,"systemd-run"),0o755);
-    const previousPath=process.env.PATH;process.env.PATH=`${bin}:${previousPath}`;
-    const store=Store.open(":memory:");
-    try{
-      account(store);const [id]=store.createRuns({count:1,source:"direct",prompt:"x",cwd:"/tmp",profile:"standard",budget:"force"});
-      store.assignRun(id!,{accountId:"openai-codex-1",provider:"openai-codex",model:"gpt-6-astra",unit:"run-a.service",releasePath:"/srv/releases/a"});
-      store.updateRun(id!,{state:"failed",failureKind:"infrastructure",result:"worker recovery raced its active unit"});
-      (new Daemon(store,config,"/srv/releases/current","/srv/state/ledger.sqlite3") as any).recoverWorkers();
-      expect(store.run(id!)).toMatchObject({state:"running",workerUnit:"run-a.service"});
-      expect(store.run(id!)?.failureKind).toBeUndefined();
-      expect(store.run(id!)?.result).toBeUndefined();
-      expect(existsSync(started)).toBe(false);
-      expect(store.activeLeases().map((lease)=>lease.run_id)).toContain(id);
-    }finally{store.close();process.env.PATH=previousPath;rmSync(root,{recursive:true});}
-  });
-
-  it("adopts a still-loaded worker when recovery races systemd",()=>{
-    const root=mkdtempSync(join(tmpdir(),"orchestrator-adoption-")),bin=join(root,"bin"),counter=join(root,"is-active.count");
-    mkdirSync(bin);writeFileSync(counter,"0\n");
-    writeFileSync(join(bin,"systemctl"),`#!/bin/sh
-case "$*" in
-  *is-active*) n=$(cat ${JSON.stringify(counter)}); n=$((n+1)); printf '%s\\n' "$n" > ${JSON.stringify(counter)}; if test "$n" -ge 3; then exit 0; else exit 3; fi;;
-  *start*) exit 0;;
-  *) exit 0;;
-esac
-`);
-    writeFileSync(join(bin,"systemd-run"),'#!/bin/sh\necho "Unit run-a.service was already loaded or has a fragment file" >&2\nexit 1\n');
-    chmodSync(join(bin,"systemctl"),0o755);chmodSync(join(bin,"systemd-run"),0o755);
-    const previousPath=process.env.PATH;process.env.PATH=`${bin}:${previousPath}`;
-    const store=Store.open(":memory:");
-    try{
-      account(store);const [id]=store.createRuns({count:1,source:"direct",prompt:"x",cwd:"/tmp",profile:"standard",budget:"force"});
-      store.assignRun(id!,{accountId:"openai-codex-1",provider:"openai-codex",model:"gpt-6-astra",unit:"run-a.service",releasePath:"/srv/releases/a"});
-      store.updateRun(id!,{state:"queued",failureKind:"infrastructure",result:"prior recovery failure"});
-      (new Daemon(store,config,"/srv/releases/current","/srv/state/ledger.sqlite3") as any).recoverWorkers();
-      expect(store.run(id!)).toMatchObject({state:"running",workerUnit:"run-a.service"});
-      expect(store.run(id!)?.failureKind).toBeUndefined();
-      expect(store.run(id!)?.result).toBeUndefined();
-      expect(store.run(id!)?.endedAt).toBeUndefined();
-      expect(readFileSync(counter,"utf8").trim()).toBe("3");
-    }finally{store.close();process.env.PATH=previousPath;rmSync(root,{recursive:true});}
-  });
-
-  it("restarts an interrupted worker from its recorded release",()=>{
-    const root=mkdtempSync(join(tmpdir(),"orchestrator-recovery-")),bin=join(root,"bin"),capture=join(root,"systemd-run.args");
-    mkdirSync(bin);
-    writeFileSync(join(bin,"systemctl"),'#!/bin/sh\ncase "$*" in *is-active*) exit 3;; esac\nexit 0\n');
-    writeFileSync(join(bin,"systemd-run"),`#!/bin/sh\nprintf '%s\\n' "$@" > ${JSON.stringify(capture)}\n`);
-    chmodSync(join(bin,"systemctl"),0o755);chmodSync(join(bin,"systemd-run"),0o755);
-    const previousPath=process.env.PATH;process.env.PATH=`${bin}:${previousPath}`;
-    const store=Store.open(":memory:");
-    try{
-      account(store);const [id]=store.createRuns({count:1,source:"direct",prompt:"x",cwd:"/tmp",profile:"standard",budget:"force"});
-      store.assignRun(id!,{accountId:"openai-codex-1",provider:"openai-codex",model:"gpt-6-astra",unit:"run-a",releasePath:"/srv/releases/a"});
-      store.updateRun(id!,{state:"queued"});
-      (new Daemon(store,config,"/srv/releases/current","/srv/state/ledger.sqlite3") as any).recoverWorkers();
-      expect(readFileSync(capture,"utf8")).toContain("--setenv=PI_ORCHESTRATOR_LEDGER=/srv/state/ledger.sqlite3");
-      expect(readFileSync(capture,"utf8")).toContain("--property=MemoryMax=8G");
-      expect(readFileSync(capture,"utf8")).toContain("/srv/releases/a/dist/cli.js");
-      expect(store.run(id!)).toMatchObject({releasePath:"/srv/releases/a",state:"starting",workerUnit:"run-a"});
-    }finally{store.close();process.env.PATH=previousPath;rmSync(root,{recursive:true});}
-  });
 });

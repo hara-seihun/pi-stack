@@ -684,6 +684,50 @@
           "systemPrompt": {
             "type": "string"
           },
+          "thinkingLevel": {
+            "anyOf": [
+              {
+                "type": "string",
+                "const": "off"
+              },
+              {
+                "type": "string",
+                "const": "minimal"
+              },
+              {
+                "type": "string",
+                "const": "low"
+              },
+              {
+                "type": "string",
+                "const": "medium"
+              },
+              {
+                "type": "string",
+                "const": "high"
+              },
+              {
+                "type": "string",
+                "const": "xhigh"
+              },
+              {
+                "type": "string",
+                "const": "max"
+              }
+            ]
+          },
+          "speed": {
+            "anyOf": [
+              {
+                "type": "string",
+                "const": "standard"
+              },
+              {
+                "type": "string",
+                "const": "priority"
+              }
+            ]
+          },
           "maxOutputTokens": {
             "type": "integer",
             "minimum": 1,

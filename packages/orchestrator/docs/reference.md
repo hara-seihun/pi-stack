@@ -5,14 +5,16 @@ Run `npm run docs --workspace=pi-orchestrator` after changing commands or durabl
 ## Commands
 
 - `daemon`: Run reconciliation and the local API.
-- `status`: Print accounts, lanes, leases, and active runs.
+- `status`: Print accounts, lanes, leases, and active threads.
 - `usage-evidence`: Print a read-only 24-hour quota and token snapshot; optional --ledger FILE.
-- `run`: Start one or more direct sessions.
-- `wave`: Start a one-off wave from a declared lane.
+- `run`: Spawn fresh threads with --prompt TEXT [--model MODEL] [--count N] [--background].
+- `wave`: Spawn a one-off batch from a declared lane [--count N] [--background].
+- `list`: List threads [--parent ID] [--state STATE] [--limit N] [--cursor CURSOR].
+- `read`: Read a thread's native history: THREAD_ID [--limit N] [--cursor CURSOR].
+- `send`: Send to THREAD_ID with --prompt TEXT [--delivery queue|steer|hardSteer].
+- `stop`: Stop THREAD_ID; --descendants also stops its descendants.
 - `pause / resume`: Set or clear the global launch halt; --ordinary controls only ordinary work.
-- `abort / kill`: Stop one run gracefully or immediately.
-- `recover`: Recover a core run interrupted by loss of its hosting worker.
-- `resume RUN_ID`: Manually resume a rate-limited core run in its recorded session.
+- `resume THREAD_ID`: Release a stopped thread's pending messages.
 - `boost`: Set a provider pacing multiplier or halt.
 - `account`: Import, refresh, remove, list, reserve, or exclusively transfer pooled accounts.
 

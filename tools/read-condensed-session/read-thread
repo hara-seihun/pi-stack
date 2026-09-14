@@ -4,7 +4,7 @@ import { homedir, userInfo } from "node:os";
 import { basename, isAbsolute, join, resolve } from "node:path";
 import { DatabaseSync } from "node:sqlite";
 import { takeFlag, takeOption } from "../shared/arguments.mjs";
-import { listThreads, renderSupervisorRecords, renderThread, resolveThread } from "./thread-reader.mjs";
+import { listThreads, renderThreadInputs, renderThread, resolveThread } from "./thread-reader.mjs";
 import { subagentPage, threadPage } from "./thread-pages.mjs";
 
 import { READ_THREAD_CONTRACT, readerHelp } from "./contract.mjs";
@@ -109,7 +109,7 @@ function main() {
       row = { id: selector === "self" ? process.env.PI_SESSION_ID ?? path : path, name: basename(path), session_path: path, updated_at: "read from stored JSONL" };
     } else {
       const dbPath = resolve(database ?? defaultDatabase());
-      if (!existsSync(dbPath)) throw new Error(`Pi Remote database not found at ${dbPath}; set PI_REMOTE_DATA or pass --db. self and JSONL paths do not need a database`);
+      if (!existsSync(dbPath)) throw new Error(`Thread database not found at ${dbPath}; set PI_THREAD_DATABASE or pass --db. self and JSONL paths do not need a database`);
       db = new DatabaseSync(dbPath, { readOnly: true });
       const rows = db.prepare("SELECT id,title AS name,session_file AS session_path,upper(state) AS state,updated_at,json_extract(metadata,'$.archivedAt') AS archived_at FROM thread ORDER BY updated_at DESC").all()
         .map(row => ({ ...row, updated_at: new Date(row.updated_at).toISOString() }));
@@ -128,16 +128,15 @@ function main() {
     }
     const hasSession = row.session_path && existsSync(row.session_path);
     if (pathOnly) {
-      if (!hasSession) throw new Error(`thread ${JSON.stringify(row.name)} has no Pi session file; omit --path to inspect its supervisor records`);
+      if (!hasSession) throw new Error(`thread ${JSON.stringify(row.name)} has no Pi session file; omit --path to inspect its accepted inputs`);
       console.log(resolve(row.session_path));
       return;
     }
     if (!hasSession && (options.all || options.leaf || options.raw || options.search !== undefined || options.full)) throw new Error(`thread ${JSON.stringify(row.name)} has no Pi session JSONL to read or search`);
-    const transcript = hasSession ? renderThread(row, options) : renderSupervisorRecords(
+    const transcript = hasSession ? renderThread(row, options) : renderThreadInputs(
       row,
-      db.prepare("SELECT text,status AS state,0 AS attempts,error AS last_error,created_at FROM thread_work WHERE thread_id=? ORDER BY ordinal").all(row.id)
+      db.prepare("SELECT text,status AS state,error AS last_error,created_at FROM thread_work WHERE thread_id=? ORDER BY ordinal").all(row.id)
         .map(item => ({ ...item, created_at: new Date(item.created_at).toISOString() })),
-      [],
       options,
     );
     if (output) {
