@@ -6,6 +6,13 @@
 import type { InlineImage, InlineImageSnapshot } from "./inline-image-contract";
 export type { InlineImage, InlineImageSnapshot };
 
+export interface EnvironmentEndpoint {
+  id: string;
+  name: string;
+  icon?: string;
+  baseUrl: string;
+}
+
 export type ContextSplice = {
   baseHash: string;
   targetHash: string;

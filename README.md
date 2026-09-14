@@ -37,12 +37,9 @@ On September 12, 2026, a controlled replay of a failed Remote greeting isolated 
 
 `deploy/publication submit SHA` hands a source commit to the durable worker for integration and deployment on both hosts. Its host wrappers call `deploy/host`, which reads a small host file naming the fleet account and any local packages and skills. Persons come from Pi Remote's registry. The scripts under [`deploy`](deploy) refuse an uncommitted checkout, serialize work from the same source tree, and enforce a 50-second deadline. Commit-addressed releases share one production dependency tree and switch atomically. See [`docs/deployment.md`](docs/deployment.md).
 
-Pi Remote environments are independent servers:
+Pi Remote exposes one authenticated router entrance. A person unlocks there, then `GET /v1/environments` returns only the endpoints allowed by her `remoteAccess` registry entry. The default is this host alone. Host configuration owns endpoint IDs, names, icons and per-person supervisor upstreams; no endpoint name grants access.
 
-- `local` runs Personal and Home threads on GMKtec.
-- `converge` runs one work profile directly on Converge.
-
-The Kenan drawer switches between them, and would between more. The browser client reads the list from the host that served it; the Android build embeds its own list from a file named in `apps/kenan/android/local.properties`, which is not committed.
+Browser and Android clients switch endpoints through same-origin `/v1/remotes/<id>` routes. Android embeds only `piRemoteRouterUrl`, not endpoint lists or SSH credentials. A name in a header or query is a hint, never authentication. Router sessions replace the previous name-only identity contract. See [gateway configuration](docs/deployment.md#gateway-access-and-host-boundaries).
 
 ## Architecture
 

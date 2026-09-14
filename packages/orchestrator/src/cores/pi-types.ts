@@ -1,4 +1,5 @@
 import type { CoreAgent, CoreCommand, CoreOutput, CoreSessionOptions } from "./contracts.js";
+import type { CwdAdmission } from "../workspace-admission.js";
 
 export interface PiWork {
   id: string;
@@ -55,4 +56,4 @@ export interface PiToolsHost {
   beforeReplace(id: string): Promise<void>;
 }
 export type OpenPiNative = (options: CoreSessionOptions, node: PiNode, tools: PiToolsHost,
-  output: (event: CoreOutput) => void, exit: (code?: number) => void) => Promise<PiNative>;
+  output: (event: CoreOutput) => void, exit: (code?: number) => void, admission?: CwdAdmission) => Promise<PiNative>;

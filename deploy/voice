@@ -32,13 +32,13 @@ case ${1:---activate} in
   --activate)
     pi_stack_as_root systemctl enable pi-stack-voice.service
     expected=$(<"$remote/.pi-stack-commit")
-    current=$(curl -fsS --max-time 2 "$base/status" 2>/dev/null | jq -r '.releaseCommit // empty') || current=""
+    current=$(pi_stack_as_root curl -fsS --max-time 2 "$base/status" 2>/dev/null | jq -r '.releaseCommit // empty') || current=""
     if [[ $current != "$expected" ]]; then
       pi_stack_as_root systemctl reset-failed pi-stack-voice.service
       pi_stack_as_root systemctl restart pi-stack-voice.service
     fi
     systemctl is-active --quiet pi-stack-voice.service
-    curl -fsS --max-time 2 "$base/status" | jq -e --arg commit "$expected" '.enabled == true and .releaseCommit == $commit' >/dev/null
+    pi_stack_as_root curl -fsS --max-time 2 "$base/status" | jq -e --arg commit "$expected" '.enabled == true and .releaseCommit == $commit' >/dev/null
     ;;
   *) echo 'usage: deploy/voice [--check|--activate]' >&2; exit 64 ;;
 esac

@@ -4,9 +4,10 @@ import { SortableContext, arrayMove, sortableKeyboardCoordinates, useSortable, v
 import { CSS } from "@dnd-kit/utilities";
 import { AnimatePresence, motion } from "motion/react";
 import { API } from "../../server/api";
-import { BASH_TIMEOUT_OPTIONS, type GovernorProvider, type GovernorState, type InlineImageSnapshot } from "../../server/protocol";
+import { BASH_TIMEOUT_OPTIONS, type GovernorProvider, type GovernorState, type InlineImageSnapshot, type ThreadStart } from "../../server/protocol";
 import { deleteCachedContext, readCachedContext, writeCachedContext } from "./context-cache";
 import { api, piFetch, registerUnlockHandler, syncRequest } from "./client";
+import { fetchPersonChooser } from "./native";
 import { ContextTranscript, CopyButton, InlineImagesContext, Markdown, modelContextEntries } from "./context";
 import { LiveActivity } from "./live-activity";
 import { FileExplorer } from "./file-explorer";
@@ -62,10 +63,8 @@ const initialState: AppState = {
 };
 
 function working(session: Session | null) { return Boolean(session && ["QUEUED", "RUNNING", "STARTING", "ABORTING"].includes(session.state)); }
-function threadProvider(session: Session) {
-  return session.environment === "work" ? "work" : session.environment === "converge" ? "converge" : session.environment === "personal" ? "personal" : session.provider === "anthropic" ? "anthropic" : "openai";
-}
-function draftKey(id: string) { return `pi-remote-draft:${id}`; }
+function iconUrl(icon: string) { return icon.startsWith("/") || icon.startsWith("data:") || icon.startsWith("https:") ? icon : `/${encodeURIComponent(icon)}.svg`; }
+function draftKey(id: string) { return `pi-remote-draft:${window.PiRemotePerson.get()}:${id}`; }
 function loadDraft(id: string) { try { return localStorage.getItem(draftKey(id)) || ""; } catch { return ""; } }
 function saveDraft(id: string, value: string) { try { value ? localStorage.setItem(draftKey(id), value) : localStorage.removeItem(draftKey(id)); } catch {} }
 
@@ -83,7 +82,7 @@ function useStableState() {
 function UnlockDialog() {
   const dialog = useRef<HTMLDialogElement>(null);
   const resolver = useRef<((key: string) => void) | null>(null);
-  const [people, setPeople] = useState<Array<{ user: string; displayName?: string }>>([]);
+  const [people, setPeople] = useState<Array<{ user: string; displayName?: string; requiresUnlock?: boolean }>>([]);
   const [selectedUser, setSelectedUser] = useState("");
   const [key, setKey] = useState("");
   const [message, setMessage] = useState("");
@@ -92,7 +91,8 @@ function UnlockDialog() {
       setMessage(nextMessage);
       setKey("");
       try {
-        const response = await fetch(API.environment.path(), { cache: "no-store", headers: { accept: "application/json" } });
+        const response = await fetchPersonChooser();
+        if (!response.ok) throw new Error(`Person chooser returned HTTP ${response.status}`);
         const result = await response.json();
         const nextPeople = result?.environment?.persons || result?.persons || [];
         const savedUser = window.PiRemotePerson?.get() || "";
@@ -100,24 +100,25 @@ function UnlockDialog() {
         setPeople(nextPeople);
         setSelectedUser(nextUser);
         window.PiRemotePerson?.set(nextUser);
-      } catch {}
+      } catch (error) { setMessage(`Could not load people: ${String(error)}`); }
       dialog.current?.showModal();
       return new Promise<string>((resolve) => { resolver.current = resolve; });
     });
   }, []);
+  const requiresKey = people.find(person => person.user === selectedUser)?.requiresUnlock !== false;
   const submit = (event: React.FormEvent) => {
     event.preventDefault();
-    if (!key) return;
+    if ((requiresKey && !key) || !selectedUser) return;
     resolver.current?.(key);
     resolver.current = null;
     dialog.current?.close();
   };
-  return <dialog ref={dialog} className="unlock-dialog" aria-labelledby="unlock-title">
+  return <dialog ref={dialog} className="unlock-dialog" aria-labelledby="unlock-title" onCancel={event => event.preventDefault()}>
     <form className="unlock-form" onSubmit={submit}>
       <h2 id="unlock-title">Unlock your folder</h2>
-      <p>Your threads and private folder are encrypted on the machine. This key stays on this device and opens them while your agents are running.</p>
-      {people.length > 1 && <div className="unlock-field"><label htmlFor="unlock-person">Person</label><select id="unlock-person" value={selectedUser} onChange={(event) => { setSelectedUser(event.target.value); window.PiRemotePerson?.set(event.target.value); }}>{people.map((person) => <option key={person.user} value={person.user}>{person.displayName || person.user}</option>)}</select></div>}
-      <div className="unlock-field"><label htmlFor="unlock-key">Key</label><input id="unlock-key" type="password" autoComplete="current-password" spellCheck={false} required value={key} onChange={(event) => setKey(event.target.value)} /></div>
+      <p>{requiresKey ? "Your folder key stays on this device and opens your private folder on the machine." : "Continue as this person to see their allowed environments."}</p>
+      {people.length > 0 && <div className="unlock-field"><label htmlFor="unlock-person">Person</label><select id="unlock-person" value={selectedUser} onChange={(event) => { setSelectedUser(event.target.value); setKey(""); window.PiRemotePerson?.set(event.target.value); }}>{people.map((person) => <option key={person.user} value={person.user}>{person.displayName || person.user}</option>)}</select></div>}
+      {requiresKey && <div className="unlock-field"><label htmlFor="unlock-key">Key</label><input id="unlock-key" type="password" autoComplete="current-password" spellCheck={false} required value={key} onChange={(event) => setKey(event.target.value)} /></div>}
       {message && <p className="unlock-error">{message}</p>}
       <div className="unlock-actions"><button className="accent" type="submit">Unlock</button></div>
     </form>
@@ -127,9 +128,29 @@ function UnlockDialog() {
 function EnvironmentControl() {
   const [environment, setEnvironment] = useState<any>(null);
   const [failed, setFailed] = useState("");
-  useEffect(() => { window.KenanRemote?.getState().then((value) => { setEnvironment(value); document.title = `kenan — ${value.id}`; }).catch((error) => setFailed(String(error?.message || error))); }, []);
+  const [attempt, setAttempt] = useState(0);
+  useEffect(() => {
+    let revision = 0;
+    const refresh = () => {
+      const request = ++revision;
+      setEnvironment(null);
+      setFailed("");
+      void window.KenanRemote?.getState().then(value => {
+        if (request !== revision) return;
+        setEnvironment(value); document.title = `kenan · ${value.name}`;
+      }).catch(error => { if (request === revision) setFailed(String(error?.message || error)); });
+    };
+    const changed = () => {
+      if (window.PiRemotePerson.session()) refresh();
+      else { revision++; setEnvironment(null); setFailed("Folder is locked"); }
+    };
+    refresh();
+    window.addEventListener("pi-auth", changed);
+    return () => { revision++; window.removeEventListener("pi-auth", changed); };
+  }, [attempt]);
   if (!environment && !failed) return null;
   return <div className={`environment-control${failed ? " failed" : ""}`} title={failed}>
+    {environment?.icon && <img width="20" height="20" src={iconUrl(environment.icon)} alt="" />}
     <label htmlFor="environment-select">Environment</label>
     <select id="environment-select" aria-label="Environment" value={environment?.id || ""} disabled={Boolean(failed)} onChange={async (event) => {
       const id = event.target.value;
@@ -138,6 +159,8 @@ function EnvironmentControl() {
         if (selected) location.reload();
       } catch (error: any) { setFailed(error?.message || "Could not switch environment"); }
     }}>{(environment?.environments || []).map((candidate: any) => <option key={candidate.id} value={candidate.id}>{candidate.name}</option>)}</select>
+    {failed && <button type="button" onClick={() => setAttempt(value => value + 1)}>Reconnect</button>}
+    <button type="button" onClick={() => window.PiRemotePerson.set("")}>Change person</button>
   </div>;
 }
 
@@ -172,10 +195,10 @@ function DrawerTabIcon({ tab }: { tab: DrawerTab }) {
   return <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M3 6.5h7l2 2h9v10H3v-12Z" /></svg>;
 }
 
-function ThreadRow({ session, selected, archived, onSelect, onArchive, onUnarchive }: { session: Session; selected: boolean; archived?: boolean; onSelect(id: string): void; onArchive(id: string): void; onUnarchive(id: string): void }) {
-  const provider = threadProvider(session);
-  const alt = provider === "work" ? "Work" : provider === "converge" ? "Cloud" : provider === "personal" ? "Personal" : provider === "anthropic" ? "Anthropic" : "OpenAI";
-  const content = <><span className="thread-name">{session.name || "Agent"}</span><span className="thread-meta"><img className="thread-provider" src={`/${provider}.svg`} alt={alt} title={`${alt} thread`} /><span className="thread-state" style={{ color: activityColor(archived ? "IDLE" : session.activity, !archived && session.idleUnread) }}>{archived ? "ARCHIVED" : activityLabel(session.activity, session.activeTool ?? "")}</span></span></>;
+function ThreadRow({ session, starts, selected, archived, onSelect, onArchive, onUnarchive }: { session: Session; starts: ThreadStart[]; selected: boolean; archived?: boolean; onSelect(id: string): void; onArchive(id: string): void; onUnarchive(id: string): void }) {
+  const start = starts.find(candidate => candidate.id === session.environment);
+  const alt = start?.label || session.provider;
+  const content = <><span className="thread-name">{session.name || "Agent"}</span><span className="thread-meta"><img className="thread-provider" src={iconUrl(start?.icon || session.provider)} alt={alt} title={`${alt} thread`} /><span className="thread-state" style={{ color: activityColor(archived ? "IDLE" : session.activity, !archived && session.idleUnread) }}>{archived ? "ARCHIVED" : activityLabel(session.activity, session.activeTool ?? "")}</span></span></>;
   return <div className={`thread-row${selected ? " selected" : ""}${archived ? " archived" : " can-archive"}`}>
     {archived ? <div className="thread-open">{content}</div> : <button type="button" className="thread-open" onClick={() => onSelect(session.id)}>{content}</button>}
     {archived ? <button type="button" className="unarchive-thread" onClick={() => onUnarchive(session.id)}>Unarchive</button> : <button type="button" className="archive-thread" aria-label={`Archive thread ${session.name}`} title={`Archive ${session.name}`} onClick={() => onArchive(session.id)}>×</button>}
@@ -293,6 +316,17 @@ function eventEntries(current: ContextEntry[], events: AgentRunEvent[]): Context
 }
 
 export default function App() {
+  const [person, setPerson] = useState(window.PiRemotePerson.get());
+  useEffect(() => {
+    const changed = () => setPerson(window.PiRemotePerson.get());
+    window.addEventListener("pi-person", changed);
+    return () => window.removeEventListener("pi-person", changed);
+  }, []);
+  return <><UnlockDialog /><RemoteApp key={person} /></>;
+}
+
+function RemoteApp() {
+  const person = useRef(window.PiRemotePerson.get()).current;
   const { state, stateRef, patch } = useStableState();
   const [prompt, setPrompt] = useState("");
   const [pending, setPending] = useState(false);
@@ -380,8 +414,8 @@ export default function App() {
 
   const cacheKey = useCallback(async (id: string) => {
     const environment = await window.KenanRemote?.getState().catch(() => null);
-    return `${environment?.id || location.origin}:${id}`;
-  }, []);
+    return `${person}:${environment?.id || location.origin}:${id}`;
+  }, [person]);
 
   const selectThread = useCallback(async (id: string, closeDrawer = true) => {
     const session = [...stateRef.current.sessions, ...stateRef.current.archived].find(session => session.id === id);
@@ -405,7 +439,10 @@ export default function App() {
         const environment = await window.KenanRemote?.getState();
         if (target.environment !== environment?.id || target.user !== (window.PiRemotePerson?.get() || "")) {
           retainNotificationTarget(target);
-          window.PiRemotePerson?.set(target.user || "");
+          if (target.user !== window.PiRemotePerson.get()) {
+            window.PiRemotePerson.set(target.user || "");
+            return;
+          }
           await window.KenanRemote?.select({ id: target.environment, user: target.user || "" });
           location.reload();
         } else await selectThread(target.sessionId);
@@ -675,14 +712,13 @@ export default function App() {
   const visibleCommands = slashToken === null ? [] : state.slashCommands.filter((command) => command.source === "skill" && !command.name.toLowerCase().includes("mcp") && command.name.toLowerCase().startsWith(slashToken));
 
   return <div id="app">
-    <UnlockDialog />
     {fileDrag && state.selectedId && !state.agentRunId && <div className="file-drop-overlay" role="status">Drop files to attach to {selected?.name || "this conversation"}</div>}
     {state.drawerOpen && innerWidth < 1000 && <div className="scrim" onClick={() => patch({ drawerOpen: false })} />}
     <aside id="drawer" className={state.drawerOpen ? "open" : ""} aria-label="Navigation">
       <header className="drawer-heading thread-start-heading"><nav className="drawer-tabs" role="tablist" aria-label="Drawer sections">{(["threads", "agents", "archived", "files"] as const).map((tab) => <button key={tab} className="drawer-tab" type="button" role="tab" aria-label={`${drawerLabels[tab]}, ${drawerCounts[tab]}`} title={drawerLabels[tab]} aria-selected={state.drawerTab === tab} onClick={() => patch({ drawerTab: tab })}><DrawerTabIcon tab={tab} /><span className="drawer-tab-count">{drawerCounts[tab]}</span></button>)}</nav>{state.drawerOpen && <ThreadStartMenu starts={dashboard?.threadStarts ?? []} onCreated={selectThread} onSettled={kick} />}</header>
-      {state.drawerTab === "threads" && <DndContext sensors={dragSensors} collisionDetection={closestCenter} onDragEnd={(event) => void reorder(event)}><SortableContext items={sessions.map((session) => session.id)} strategy={verticalListSortingStrategy}><div className="thread-list">{sessions.length ? sessions.map((session) => <SortableThreadRow key={session.id} session={session} selected={!state.agentRunId && state.selectedId === session.id} onSelect={(id) => void selectThread(id)} onArchive={(id) => void archive(id)} onUnarchive={() => {}} />) : <div className="agent-empty">No threads</div>}</div></SortableContext></DndContext>}
+      {state.drawerTab === "threads" && <DndContext sensors={dragSensors} collisionDetection={closestCenter} onDragEnd={(event) => void reorder(event)}><SortableContext items={sessions.map((session) => session.id)} strategy={verticalListSortingStrategy}><div className="thread-list">{sessions.length ? sessions.map((session) => <SortableThreadRow key={session.id} session={session} starts={dashboard?.threadStarts ?? []} selected={!state.agentRunId && state.selectedId === session.id} onSelect={(id) => void selectThread(id)} onArchive={(id) => void archive(id)} onUnarchive={() => {}} />) : <div className="agent-empty">No threads</div>}</div></SortableContext></DndContext>}
       {state.drawerTab === "agents" && <AgentList runs={dashboard?.agents.runs ?? []} hosts={dashboard?.agents.hosts ?? []} subagents={subagents} sessions={[...state.sessions, ...state.archived]} selectedRunId={state.agentRunId} selectedSessionId={state.selectedId} onSelectRun={selectAgent} onSelectThread={(id) => void selectThread(id)} />}
-      {state.drawerTab === "archived" && <div className="thread-list">{state.archived.length ? state.archived.map((session) => <ThreadRow key={session.id} archived session={session} selected={false} onSelect={() => {}} onArchive={() => {}} onUnarchive={(id) => void unarchive(id)} />) : <div className="agent-empty">No archived threads</div>}{state.archived.length < state.archivedTotal && <button type="button" className="archived-more" onClick={() => void loadOlder()}>Show older · {state.archivedTotal - state.archived.length} more</button>}</div>}
+      {state.drawerTab === "archived" && <div className="thread-list">{state.archived.length ? state.archived.map((session) => <ThreadRow key={session.id} archived session={session} starts={dashboard?.threadStarts ?? []} selected={false} onSelect={() => {}} onArchive={() => {}} onUnarchive={(id) => void unarchive(id)} />) : <div className="agent-empty">No archived threads</div>}{state.archived.length < state.archivedTotal && <button type="button" className="archived-more" onClick={() => void loadOlder()}>Show older · {state.archivedTotal - state.archived.length} more</button>}</div>}
       <FileExplorer hidden={state.drawerTab !== "files"} onRootCount={setRootFileCount} />
       <footer className="drawer-footer"><MachineControls actions={dashboard?.actions ?? []} governors={dashboard?.governors ?? null} onAction={(id) => void toggleAction(id)} onGovernor={(provider) => void toggleGovernor(provider)} /><EnvironmentControl /><AppUpdateControl /><NotificationControl sessionId={state.agentRunId ? null : state.selectedId} /><PlanSummary plans={dashboard?.plans ?? []} counts={modelCounts} /><div className="usage-summary muted">{machineText}</div><div className="usage-summary muted" title={__PI_REMOTE_REVISION__}>Client {__PI_REMOTE_REVISION__.slice(0, 12)}</div>{state.offline && <div className="connection" style={{ color: "var(--danger)" }}>● Offline · {state.offline}</div>}</footer>
     </aside>
