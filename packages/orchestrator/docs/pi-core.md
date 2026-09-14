@@ -63,7 +63,9 @@ With `PI_ORCHESTRATOR_CORE_USAGE=worker`, the usage logger does not register its
 
 [`pi-transfer.ts`](../src/cores/pi-transfer.ts) atomically seeds a new native session with the transferred conversation before opening the SDK. It never calls `prompt()` to replay that history. A transfer hash permits reopening the same imported generation without importing twice and rejects a different transfer into an occupied generation.
 
-Pi messages remain native messages. Other engines' user messages with Pi-compatible text or inline-image blocks remain user messages. Their remaining records, including native-only image references, become visible custom history with the complete original record retained. Foreign tool calls and provider reasoning state therefore do not become executable Pi history. Imported agent records remain provenance in `core_transfer`; they do not resurrect another engine's children. Missing recorded native session files are errors, not an invitation to start an empty replacement session.
+`CoreId` is only `"pi"`. Portable `ConversationSource` also accepts `"codex"` for imported provenance. `transfer.json` may retain that source after conversion; reopening does not run a Codex adapter.
+
+Pi messages remain native messages. Imported Codex user messages with Pi-compatible text or inline-image blocks remain user messages. Their remaining records, including native-only image references, become visible custom history with the complete original record retained. Foreign tool calls and provider reasoning state therefore do not become executable Pi history. Imported agent records remain provenance in `core_transfer`; they do not resurrect another engine's children. Missing recorded native session files are errors, not an invitation to start an empty replacement session. Native opens and switches validate the session header before handing the file to the SDK. Codex native files and portable activity journals require explicit transfer into a new Pi state directory.
 
 ## Remote integration and boundaries
 

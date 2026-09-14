@@ -1,5 +1,5 @@
-export const CORE_IDS = ["pi", "codex"] as const;
-export type CoreId = typeof CORE_IDS[number];
+export type CoreId = "pi";
+export type ConversationSource = CoreId | "codex";
 export type CoreOutput = Record<string, unknown> & { type: string };
 export type CoreCommand = Record<string, unknown> & { type: string; id?: string };
 
@@ -11,7 +11,7 @@ export interface CoreSessionOptions {
   sessionId: string;
   /** Private durable directory for this root's native and portable state. */
   stateDir: string;
-  /** An explicit cross-engine handoff, not a replay of the last user request. */
+  /** Imported conversation context, not a replay of the last user request. */
   transfer?: PortableConversation;
 }
 
@@ -27,7 +27,7 @@ export type OpenCoreSession = (
 
 export interface PortableConversation {
   version: 1;
-  sourceCore: CoreId;
+  sourceCore: ConversationSource;
   messages: Record<string, unknown>[];
   agents: CoreAgent[];
 }
@@ -48,7 +48,7 @@ export interface CoreCapabilities {
   steer: boolean;
 }
 
-export const isCoreId = (value: unknown): value is CoreId => CORE_IDS.includes(value as CoreId);
+export const isCoreId = (value: unknown): value is CoreId => value === "pi";
 export function argument(args: string[], name: string): string | undefined {
   const index = args.indexOf(name);
   return index < 0 ? undefined : args[index + 1];

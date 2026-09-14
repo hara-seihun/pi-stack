@@ -9,6 +9,7 @@ import type { OpenPiNative } from "./pi-types.js";
 import { piChildTools } from "./pi-tools.js";
 import { piIsolatedContext } from "./pi-isolated.js";
 import { checkpointPiSession, preparePiSession, seedPiSession } from "./pi-transfer.js";
+import { assertPiSessionFile } from "./pi-session-file.js";
 import { SESSION_RETRY } from "../host/session-lifecycle.js";
 
 const scopeKey = Symbol.for("pi-stack.session-environment");
@@ -39,6 +40,7 @@ export const openPiNative: OpenPiNative = async (options, node, tools, output, e
       }
       seedPiSession(node.sessionFile, node.cwd, node.parentId ? undefined : options.transfer);
     }
+    assertPiSessionFile(node.sessionFile);
     let acceptedContext: { tools: string[]; extensions?: string[] } | undefined;
     const factory: CreateAgentSessionRuntimeFactory = async ({ cwd, sessionManager, sessionStartEvent }) => {
       preparePiSession(sessionManager);
@@ -65,6 +67,8 @@ export const openPiNative: OpenPiNative = async (options, node, tools, output, e
       }
       const errors = services.resourceLoader.getExtensions().errors;
       if (errors.length) throw new Error(`Session extensions failed: ${JSON.stringify(errors)}`);
+      const initializationErrors = services.diagnostics.filter(diagnostic => diagnostic.type === "error");
+      if (initializationErrors.length) throw new Error(`Pi session initialization failed: ${initializationErrors.map(diagnostic => diagnostic.message).join("; ")}`);
       const model = node.provider && node.model ? services.modelRuntime.getModel(node.provider, node.model) : undefined;
       if (node.provider && node.model && !model) throw new Error(`Model not found: ${node.provider}/${node.model}`);
       const bash = createBashTool(cwd, { spawnHook: context => ({ ...context, env: { ...context.env,
@@ -128,7 +132,10 @@ export const openPiNative: OpenPiNative = async (options, node, tools, output, e
     const switchSession = runtime.switchSession.bind(runtime);
     const fork = runtime.fork.bind(runtime);
     runtime.newSession = (...args) => replaced(() => newSession(...args));
-    runtime.switchSession = (...args) => replaced(() => switchSession(...args));
+    runtime.switchSession = (...args) => {
+      assertPiSessionFile(args[0]);
+      return replaced(() => switchSession(...args));
+    };
     runtime.fork = (...args) => replaced(() => fork(...args));
     const context = () => ({ systemPrompt: runtime.session.agent.state.systemPrompt,
       messages: runtime.session.messages,

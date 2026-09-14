@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Publish the pinned Pi, Codex, agent-browser, and the runtime extensions under
+# Publish the pinned Pi, agent-browser, and the runtime extensions under
 # /srv/pi/runtime, backed by one production dependency tree that every other
 # component links instead of copying. Then point each Pi account's ~/.local/bin
 # at the selected release.
@@ -12,7 +12,6 @@ runtime_source="$root/packages/runtime"
 dest=${PI_STACK_RUNTIME_DEST:-/srv/pi/runtime}
 dependencies_root=${PI_STACK_DEPENDENCIES_ROOT:-/srv/pi/dependencies}
 PI_VERSION=0.85.0
-CODEX_VERSION="codex-cli $(node -p 'require(process.argv[1]).dependencies["@openai/codex"]' "$runtime_source/package.json")"
 BROWSER_VERSION="agent-browser $(node -p 'require(process.argv[1]).dependencies["agent-browser"]' "$root/package.json")"
 stage=""
 cleanup() { [[ -z $stage ]] || rm -rf "$stage"; }
@@ -20,13 +19,10 @@ trap cleanup EXIT
 commit=$(git -C "$root" rev-parse HEAD)
 
 check_release() {
-  local release=$1 version codex_version browser_version
-  python3 -I -c 'import ctypes,os,signal,sys; assert sys.platform == "linux"; assert hasattr(signal,"pidfd_send_signal"); fd=os.pidfd_open(os.getpid()); os.close(fd); assert ctypes.CDLL(None).prctl(36,1,0,0,0) == 0' || { echo "Codex requires Python 3 with Linux subreaper and pidfd support" >&2; exit 1; }
+  local release=$1 version browser_version
   version=$("$release/node_modules/.bin/pi" --version)
-  codex_version=$("$release/node_modules/.bin/codex" --version)
   browser_version=$("$release/node_modules/.bin/agent-browser" --version)
   [[ $version == "$PI_VERSION" ]] || { echo "unexpected Pi version: $version" >&2; exit 1; }
-  [[ $codex_version == "$CODEX_VERSION" ]] || { echo "unexpected Codex version: $codex_version" >&2; exit 1; }
   [[ $browser_version == "$BROWSER_VERSION" ]] || { echo "unexpected agent-browser version: $browser_version" >&2; exit 1; }
   node --check "$release/node_modules/@earendil-works/pi-coding-agent/dist/modes/rpc/shared-rpc-mode.js"
   grep -q 'replaceSessionFileDurably(this.sessionFile' "$release/node_modules/@earendil-works/pi-coding-agent/dist/core/session-manager.js"
@@ -47,18 +43,18 @@ reconcile_links() {
     bin="$home/.local/bin"
     owner=$(stat -c %U "$home"); group=$(stat -c %G "$home")
     pi_stack_as_root install -d -m 755 -o "$owner" -g "$group" "$home/.local" "$bin"
-    for name in pi codex agent-browser pi-agent-browser-doctor; do
+    for name in pi agent-browser pi-agent-browser-doctor; do
       pi_stack_as_root ln -sfn "$dest/node_modules/.bin/$name" "$bin/$name"
       pi_stack_as_root chown -h "$owner:$group" "$bin/$name"
     done
-    pi_stack_as_root rm -f "$bin/pro" "$bin/prompt-eval"
+    pi_stack_as_root rm -f "$bin/codex" "$bin/pro" "$bin/prompt-eval"
   done < <(pi_stack_users)
 }
 
-if [[ -f $dest/.pi-stack-commit && $(<"$dest/.pi-stack-commit") == "$commit" && -x $dest/node_modules/.bin/pi && -x $dest/node_modules/.bin/codex ]]; then
+if [[ -f $dest/.pi-stack-commit && $(<"$dest/.pi-stack-commit") == "$commit" && -x $dest/node_modules/.bin/pi ]]; then
   check_release "$dest"
   reconcile_links
-  printf 'Pi %s and %s from %s are already deployed\n' "$PI_VERSION" "$CODEX_VERSION" "$commit"
+  printf 'Pi %s from %s is already deployed\n' "$PI_VERSION" "$commit"
   exit 0
 fi
 
@@ -141,4 +137,4 @@ pi_stack_publish_release "$root" "$stage/release" "$dest" runtime
 
 check_release "$dest"
 reconcile_links
-printf 'deployed Pi %s, %s, and %s from %s to %s\n' "$PI_VERSION" "$CODEX_VERSION" "$BROWSER_VERSION" "$commit" "$dest"
+printf 'deployed Pi %s and %s from %s to %s\n' "$PI_VERSION" "$BROWSER_VERSION" "$commit" "$dest"
