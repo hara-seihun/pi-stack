@@ -82,13 +82,22 @@ export function importRemoteThreads(service: ThreadService, db: DatabaseSync, op
 }
 
 function finishImport(service: ThreadService, threads: number, messages: number): Result<{ threads: number; messages: number }> {
-  const adopted = adoptImportProvenance({ threads: service.snapshot() });
-  if (!adopted.ok) return adopted;
-  for (const [id, metadata] of Object.entries(adopted.value.metadata)) {
-    const current = service.get(id);
-    if (!current) return failure(`Imported provenance lost thread ${id}`);
-    const updated = service.update(id, { metadata: { ...current.metadata, ...metadata } });
-    if (!updated.ok) return updated;
+  const families = new Map<string, ReturnType<ThreadService["snapshot"]>>();
+  for (const thread of service.snapshot()) {
+    const imported = thread.metadata?.importedFrom as Row | undefined;
+    const rootId = imported?.rootId ?? thread.id;
+    const family = families.get(rootId) ?? [];
+    family.push(thread); families.set(rootId, family);
+  }
+  for (const family of families.values()) {
+    const adopted = adoptImportProvenance({ threads: family });
+    if (!adopted.ok) return adopted;
+    for (const [id, metadata] of Object.entries(adopted.value.metadata)) {
+      const current = service.get(id);
+      if (!current) return failure(`Imported provenance lost thread ${id}`);
+      const updated = service.update(id, { metadata: { ...current.metadata, ...metadata } });
+      if (!updated.ok) return updated;
+    }
   }
   return { ok: true, value: { threads, messages } };
 }
