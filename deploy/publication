@@ -26,8 +26,8 @@ const logRoot = join(stateRoot, "logs");
 const proofRoot = join(stateRoot, "proofs");
 const contractRoot = join(stateRoot, "contracts");
 const checkout = join(stateRoot, "repository");
-const coreExecutionContract = "core-execution-v1";
-const coreExecutionActivationPath = join(contractRoot, `${coreExecutionContract}.json`);
+const threadExecutionContract = "unified-threads-v1";
+const threadExecutionActivationPath = join(contractRoot, `${threadExecutionContract}.json`);
 const self = fileURLToPath(import.meta.url);
 
 function usage() {
@@ -36,6 +36,7 @@ function usage() {
   deploy/publication submit SHA
   deploy/publication inspect REQUEST
   deploy/publication retry REQUEST
+  deploy/publication cancel REQUEST
   deploy/publication report REQUEST [REMOTE_URL SESSION_ID]
   deploy/publication gate-status
 
@@ -241,6 +242,23 @@ function retry(requestId) {
   process.stdout.write(`${JSON.stringify({ requestId, sourceSha: request.sourceSha, status: request.status, receipt: requestPath(requestId) })}\n`);
 }
 
+function cancellationPath(requestId) {
+  return join(requestRoot, `${requestId}.cancel`);
+}
+
+function cancel(requestId) {
+  validateRequestId(requestId);
+  const request = readRequest(requestId);
+  if (["published", "cancelled"].includes(request.status)) throw new Error(`${requestId} is already ${request.status}`);
+  atomicWrite(cancellationPath(requestId), `${new Date().toISOString()}\n`);
+  checked("systemctl", ["--user", "start", "--no-block", "pi-stack-publication.service"]);
+  process.stdout.write(`${JSON.stringify({ requestId, status: "cancellation-requested", receipt: cancellationPath(requestId) })}\n`);
+}
+
+function checkCancellation(request) {
+  if (existsSync(cancellationPath(request.requestId))) throw new Error("Publication cancelled; any completed host release remains selected");
+}
+
 function appendLog(path, text) {
   mkdirSync(dirname(path), { recursive: true, mode: 0o700 });
   const descriptor = openSync(path, "a", 0o600);
@@ -253,6 +271,7 @@ function appendLog(path, text) {
 }
 
 function runLogged(request, step, command, args, timeoutSeconds, logPath, options = {}) {
+  checkCancellation(request);
   request.step = step;
   writeRequest(request);
   appendLog(logPath, `\n[${new Date().toISOString()}] ${step}\n`);
@@ -285,7 +304,7 @@ function updateBlocked(request, censuses, logPath) {
   request.step = "pre-contract-runtime-gate";
   request.blocker = {
     at: new Date().toISOString(),
-    reason: "The deployed Remote cannot prove state.execution. Incompatible activation requires every pre-contract runtime and active claim to clear before the owner seals intake.",
+    reason: "Fleet launches are held at their recorded maintenance pause. Existing Remote and fleet owners retain active work. Publication retries the census and final intake seal after they drain; queued input and saved history transfer without replay.",
     hosts: censuses,
     log: logPath,
   };
@@ -306,7 +325,7 @@ function updateFailure(request, message, logPath) {
   };
   if (request.checks?.status === "running") request.checks.status = "failed";
   request.failures.push(failure);
-  request.status = "failed";
+  request.status = existsSync(cancellationPath(request.requestId)) ? "cancelled" : "failed";
   request.failure = failure;
   writeRequest(request);
   deliverNotice(request);
@@ -319,9 +338,10 @@ function noticeBody(request) {
     request.integrationSha ? `Integration: ${request.integrationSha}` : undefined,
     `Step: ${request.step}`,
     `Status: ${request.status}`,
-    request.status === "failed" ? `Failure: ${request.failure.message}` : request.status === "blocked" ? request.blocker?.reason : undefined,
+    ["failed", "cancelled"].includes(request.status) ? `Failure: ${request.failure.message}` : request.status === "blocked" ? request.blocker?.reason : undefined,
+    request.status === "blocked" ? `Busy custody: ${JSON.stringify(request.blocker.hosts)}` : undefined,
     `Receipt: ${requestPath(request.requestId)}`,
-    `Log: ${request.status === "failed" ? request.failure?.log : request.status === "blocked" ? request.blocker?.log : request.finalProof?.path}`,
+    `Log: ${["failed", "cancelled"].includes(request.status) ? request.failure?.log : request.status === "blocked" ? request.blocker?.log : request.finalProof?.path}`,
     request.failure?.command ? `Command: ${request.failure.command}` : undefined,
     request.failure?.excerpt,
     request.status === "failed" ? `Repair source defects in a new commit and submit that commit. Retry ${request.requestId} only after repairing an infrastructure failure of the unchanged source.` : undefined,
@@ -400,7 +420,7 @@ function deliverReport(request, key) {
 }
 
 function deliverNotice(request) {
-  if (!["blocked", "failed", "published"].includes(request.status)) return;
+  if (!["blocked", "failed", "cancelled", "published"].includes(request.status)) return;
   const key = request.status === "failed" ? `failed:${request.failure.at}` : request.status;
   if (request.alert?.key !== key || !["queued", "filed"].includes(request.alert.status)) {
     request.alert = { key, status: "pending" };
@@ -630,6 +650,108 @@ function verifyGmktec(expected) {
   };
 }
 
+const fleetHelpers = String.raw`
+fleet_cli() {
+  fleet_unit=$(jq -r .unit <<<"$fleet")
+  fleet_user=$(jq -r .user <<<"$fleet")
+  fleet_pid=$(systemctl show "$fleet_unit" -p MainPID --value)
+  [[ $fleet_pid =~ ^[1-9][0-9]*$ ]] || { echo "$fleet_unit has no live daemon" >&2; return 1; }
+  sudo -n nsenter --target "$fleet_pid" --mount -- runuser -u "$fleet_user" -- env \
+    "HOME=$(jq -r .home <<<"$fleet")" \
+    "PI_ORCHESTRATOR_HOST=$(jq -r .address <<<"$fleet")" \
+    "PI_ORCHESTRATOR_PORT=$(jq -r .port <<<"$fleet")" \
+    /srv/pi/pi-orchestrator/dist/cli.js "$@"
+}
+fleet_claims() {
+  fleet_pid=$(systemctl show "$(jq -r .unit <<<"$fleet")" -p MainPID --value)
+  timeout --foreground --kill-after=2s 7s sudo -n nsenter --target "$fleet_pid" --mount -- \
+    runuser -u "$(jq -r .user <<<"$fleet")" -- "$(command -v sqlite3)" -readonly -cmd '.timeout 5000' \
+    "$(jq -r .ledger <<<"$fleet")" \
+    "SELECT json_group_array(json_object('id',id,'state',state,'workerUnit',worker_unit,'sessionFile',session_file)) FROM run WHERE state IN ('starting','running');"
+}
+`;
+
+const fleetPlanScript = String.raw`
+set -euo pipefail
+user=$(jq -er '.fleetUser | select(type == "string" and length > 0)' /etc/pi-stack/host.json)
+unit="pi-orchestrator@$user.service"
+systemctl is-active --quiet "$unit" || { echo "$unit must be active to establish the maintenance pause" >&2; exit 1; }
+[[ $(systemctl show "$unit" -p UnitFileState --value) != masked* ]] || { echo "$unit is masked; maintenance cannot own its restart" >&2; exit 1; }
+pid=$(systemctl show "$unit" -p MainPID --value)
+[[ $pid =~ ^[1-9][0-9]*$ ]]
+environment=$(sudo -n cat "/proc/$pid/environ" | tr '\0' '\n' | grep -E '^(HOME|PI_ORCHESTRATOR_LEDGER|PI_ORCHESTRATOR_HOST|PI_ORCHESTRATOR_PORT)=')
+home=$(awk '/^HOME=/{sub(/^HOME=/,"");print}' <<<"$environment")
+[[ -n $home ]]
+ledger=$(awk '/^PI_ORCHESTRATOR_LEDGER=/{sub(/^PI_ORCHESTRATOR_LEDGER=/,"");print}' <<<"$environment")
+ledger=\${ledger:-$home/.local/share/pi-orchestrator/ledger.sqlite3}
+address=$(awk '/^PI_ORCHESTRATOR_HOST=/{sub(/^PI_ORCHESTRATOR_HOST=/,"");print}' <<<"$environment")
+port=$(awk '/^PI_ORCHESTRATOR_PORT=/{sub(/^PI_ORCHESTRATOR_PORT=/,"");print}' <<<"$environment")
+fleet=$(jq -nc --arg unit "$unit" --arg user "$user" --arg home "$home" --arg ledger "$ledger" --arg address "\${address:-127.0.0.1}" --arg port "\${port:-2460}" '{unit:$unit,user:$user,home:$home,ledger:$ledger,address:$address,port:$port,wasActive:true}')
+`.replaceAll("\\${", "${") + fleetHelpers + String.raw`
+status=$(fleet_cli status)
+launches=$(jq -er '.launches | select(. == "enabled" or . == "paused")' <<<"$status")
+if jq -e 'has("runs") and (.runs | type == "array")' >/dev/null <<<"$status"; then
+  pre_contract=true
+elif jq -e 'has("threads") and (.threads | type == "array")' >/dev/null <<<"$status"; then
+  pre_contract=false
+else
+  echo 'Fleet status does not identify its running owner' >&2
+  exit 1
+fi
+jq --arg launches "$launches" --argjson preContract "$pre_contract" '. + {launches:$launches,preContract:$preContract}' <<<"$fleet"
+`;
+
+const fleetControlScript = String.raw`
+set -euo pipefail
+fleet=$(base64 --decode <<<"$1")
+action=$2
+` + fleetHelpers + String.raw`
+case "$action" in
+  pause) fleet_cli pause >/dev/null; expected=paused ;;
+  restore)
+    expected=$(jq -r .launches <<<"$fleet")
+    if [[ $expected == paused ]]; then fleet_cli pause >/dev/null; else fleet_cli resume >/dev/null; fi
+    ;;
+  census)
+    status=$(fleet_cli status)
+    jq '{launches,activeRuns:[.runs[] | select(.state == "starting" or .state == "running" or .state == "waiting") | {id,state,workerUnit,sessionFile}]}' <<<"$status"
+    exit 0
+    ;;
+  *) exit 64 ;;
+esac
+status=$(fleet_cli status)
+[[ $(jq -r .launches <<<"$status") == "$expected" ]]
+`;
+
+function ensureMaintenance(request, hostKey, remoteHost) {
+  request.maintenance ??= { hosts: {} };
+  let host = request.maintenance.hosts[hostKey];
+  if (!host || ["restored", "released"].includes(host.state)) {
+    const plan = JSON.parse(runHostScript(fleetPlanScript, remoteHost, [], 30));
+    host = { state: "restore-required", recordedAt: new Date().toISOString(), plan };
+    request.maintenance.hosts[hostKey] = host;
+    writeRequest(request);
+  }
+  runHostScript(fleetControlScript, remoteHost, [planEncoding(host.plan), "pause"], 30);
+  const currentPlan = JSON.parse(runHostScript(fleetPlanScript, remoteHost, [], 30));
+  if (currentPlan.unit !== host.plan.unit) throw new Error(`${hostKey}: fleet owner changed during maintenance`);
+  host.plan = { ...currentPlan, launches: host.plan.launches };
+  host.state = "paused";
+  writeRequest(request);
+  return host.plan.preContract
+    ? JSON.parse(runHostScript(fleetControlScript, remoteHost, [planEncoding(host.plan), "census"], 30))
+    : { activeRuns: [], contract: threadExecutionContract };
+}
+
+function restoreMaintenance(request, hostKey, remoteHost, state = "restored") {
+  const host = request.maintenance?.hosts?.[hostKey];
+  if (!host || ["restored", "released"].includes(host.state)) return;
+  runHostScript(fleetControlScript, remoteHost, [planEncoding(host.plan), "restore"], 30);
+  host.state = state;
+  host.restoredAt = new Date().toISOString();
+  writeRequest(request);
+}
+
 const runtimeCensusScript = String.raw`
 set -euo pipefail
 host=$1
@@ -642,13 +764,20 @@ while IFS= read -r unit; do
     [[ $pid =~ ^[0-9]+$ && -r /proc/$pid/cmdline ]] || continue
     command=$(tr '\0' ' ' < "/proc/$pid/cmdline")
     case "$command" in
-      *shared-runtime-host.mjs*|*runtime-host.ts*) ;;
+      *shared-runtime-host.mjs*|*runtime-host.ts*|*threads/runner-host.js*) ;;
       *) continue ;;
     esac
     release=$(printf '%s\n' "$command" | grep -oE '/srv/pi/\.pi-stack-releases/remote/[a-f0-9]{40}' | head -1 || true)
     items=$(jq -c --arg unit "$unit" --argjson pid "$pid" --arg release "$release" '. + [{unit:$unit,pid:$pid,release:($release | if . == "" then null else . end)}]' <<<"$items")
   done < <(find "/sys/fs/cgroup$control_group" -name cgroup.procs -type f -exec cat {} + 2>/dev/null | sort -nu)
 done < <(systemctl list-units 'pi-remote@*.service' --state=running --legend=no --plain --no-pager | awk '{print $1}')
+for manager in user system; do
+  while IFS= read -r unit; do
+    [[ -n $unit ]] || continue
+    pid=$(systemctl --"$manager" show "$unit" -p MainPID --value)
+    items=$(jq -c --arg unit "$unit" --argjson pid "$pid" '. + [{unit:$unit,pid:$pid,release:null}]' <<<"$items")
+  done < <(systemctl --"$manager" list-units 'pi-orchestrator-run-*.service' --state=running --legend=no --plain --no-pager | awk '{print $1}')
+done
 selected=$(cat /srv/pi/pi-remote/.pi-stack-commit 2>/dev/null || true)
 jq -n --arg host "$host" --arg checkedAt "$(date --utc --iso-8601=seconds)" --arg selected "$selected" --argjson runtimes "$items" '{host:$host,checkedAt:$checkedAt,selectedCommit:($selected | if . == "" then null else . end),runtimes:$runtimes}'
 `;
@@ -656,6 +785,12 @@ jq -n --arg host "$host" --arg checkedAt "$(date --utc --iso-8601=seconds)" --ar
 const sealPlanScript = String.raw`
 set -euo pipefail
 host=$1
+fleet=$(base64 --decode <<<"$2")
+fleet_unit=$(jq -r .unit <<<"$fleet")
+fleet_pid=$(systemctl show "$fleet_unit" -p MainPID --value)
+[[ $fleet_pid =~ ^[1-9][0-9]*$ ]]
+fleet_start=$(awk '{print $22}' "/proc/$fleet_pid/stat")
+fleet=$(jq --argjson pid "$fleet_pid" --arg startTime "$fleet_start" '. + {pid:$pid,startTime:$startTime}' <<<"$fleet")
 router=false
 if systemctl is-active --quiet pi-remote-router.service; then router=true; fi
 supervisors='[]'
@@ -663,6 +798,7 @@ while IFS= read -r unit; do
   [[ -n $unit ]] || continue
   user=\${unit#pi-remote@}
   user=\${user%.service}
+  [[ $(systemctl show "$unit" -p UnitFileState --value) != masked* ]] || { echo "$unit is masked; maintenance cannot own its restart" >&2; exit 1; }
   main_pid=$(systemctl show "$unit" -p MainPID --value)
   [[ $main_pid =~ ^[1-9][0-9]*$ ]]
   server_pid=''
@@ -681,27 +817,50 @@ while IFS= read -r unit; do
   supervisors=$(jq -c --arg unit "$unit" --arg user "$user" --argjson mainPid "$main_pid" --argjson serverPid "$server_pid" --arg startTime "$start_time" --arg controlGroup "$control_group" --arg data "$data" '. + [{unit:$unit,user:$user,mainPid:$mainPid,serverPid:$serverPid,startTime:$startTime,controlGroup:$controlGroup,data:$data}]' <<<"$supervisors")
 done < <(systemctl list-units 'pi-remote@*.service' --state=running --legend=no --plain --no-pager | awk '{print $1}')
 selected=$(cat /srv/pi/pi-remote/.pi-stack-commit 2>/dev/null || true)
-jq -n --arg host "$host" --arg plannedAt "$(date --utc --iso-8601=seconds)" --arg selected "$selected" --argjson router "$router" --argjson supervisors "$supervisors" '{host:$host,plannedAt:$plannedAt,selectedCommit:($selected | if . == "" then null else . end),routerWasActive:$router,supervisors:$supervisors}'
+jq -n --arg host "$host" --arg plannedAt "$(date --utc --iso-8601=seconds)" --arg selected "$selected" --argjson router "$router" --argjson supervisors "$supervisors" --argjson fleet "$fleet" '{host:$host,plannedAt:$plannedAt,selectedCommit:($selected | if . == "" then null else . end),routerWasActive:$router,supervisors:$supervisors,fleet:$fleet}'
 `.replaceAll("\\${", "${");
 
-const sealScript = String.raw`
+const sealScript = fleetHelpers + String.raw`
 set -euo pipefail
 host=$1
 plan=$(base64 --decode <<<"$2")
+fleet=$(jq -c .fleet <<<"$plan")
 restore() {
+  local failed=0
+  fleet_pid=$(jq -r .pid <<<"$fleet")
+  fleet_start=$(jq -r .startTime <<<"$fleet")
+  if [[ -r /proc/$fleet_pid/stat && $(awk '{print $22}' "/proc/$fleet_pid/stat") == "$fleet_start" ]]; then sudo -n kill -CONT "$fleet_pid" || failed=1; fi
+  sudo -n systemctl unmask --runtime "$(jq -r .unit <<<"$fleet")" >&2 || failed=1
+  sudo -n systemctl start "$(jq -r .unit <<<"$fleet")" >&2 || failed=1
   while IFS= read -r supervisor; do
     pid=$(jq -r .serverPid <<<"$supervisor")
     start=$(jq -r .startTime <<<"$supervisor")
-    if [[ -r /proc/$pid/stat && $(awk '{print $22}' "/proc/$pid/stat") == "$start" ]]; then sudo -n kill -CONT "$pid" >/dev/null 2>&1 || true; fi
+    if [[ -r /proc/$pid/stat && $(awk '{print $22}' "/proc/$pid/stat") == "$start" ]]; then sudo -n kill -CONT "$pid" || failed=1; fi
   done < <(jq -c '.supervisors[]' <<<"$plan")
   mapfile -t units < <(jq -r '.supervisors[].unit' <<<"$plan")
   if ((\${#units[@]})); then
-    sudo -n systemctl unmask --runtime "\${units[@]}" >/dev/null 2>&1 || true
-    sudo -n systemctl start "\${units[@]}" >/dev/null 2>&1 || true
+    sudo -n systemctl unmask --runtime "\${units[@]}" >&2 || failed=1
+    sudo -n systemctl start "\${units[@]}" >&2 || failed=1
   fi
-  if [[ $(jq -r .routerWasActive <<<"$plan") == true ]]; then sudo -n systemctl start pi-remote-router.service >/dev/null 2>&1 || true; fi
+  if [[ $(jq -r .routerWasActive <<<"$plan") == true ]]; then sudo -n systemctl start pi-remote-router.service >&2 || failed=1; fi
+  return "$failed"
 }
-trap restore ERR TERM INT
+trap 'restore >&2' ERR
+trap 'restore >&2; exit 143' TERM INT
+if [[ $(jq -r .preContract <<<"$fleet") == true ]]; then
+fleet_status=$(fleet_cli status)
+[[ $(jq -r .launches <<<"$fleet_status") == paused ]]
+fleet_pid=$(jq -r .pid <<<"$fleet")
+fleet_start=$(jq -r .startTime <<<"$fleet")
+[[ $(systemctl show "$(jq -r .unit <<<"$fleet")" -p MainPID --value) == "$fleet_pid" ]]
+[[ $(awk '{print $22}' "/proc/$fleet_pid/stat") == "$fleet_start" ]]
+sudo -n kill -STOP "$fleet_pid"
+for _ in {1..100}; do
+  [[ $(awk '{print $3}' "/proc/$fleet_pid/stat") == T ]] && break
+  sleep 0.01
+done
+[[ $(awk '{print $3}' "/proc/$fleet_pid/stat") == T ]] || { echo 'Fleet daemon did not stop' >&2; exit 1; }
+fi
 if [[ $(jq -r .routerWasActive <<<"$plan") == true ]]; then sudo -n systemctl stop pi-remote-router.service; fi
 ! systemctl is-active --quiet pi-remote-router.service
 actual_units=$(systemctl list-units 'pi-remote@*.service' --all --state=active,activating,deactivating --legend=no --plain --no-pager | awk '{print $1}' | sort)
@@ -725,14 +884,43 @@ done < <(jq -c '.supervisors[]' <<<"$plan")
 sqlite=$(command -v sqlite3)
 people='[]'
 blocked=0
+fleet_active='[]'
+fleet_processes='[]'
+fleet_units='[]'
+if [[ $(jq -r .preContract <<<"$fleet") == true ]]; then
+fleet_active=$(fleet_claims)
+[[ $(jq length <<<"$fleet_active") == 0 ]] || blocked=1
+fleet_group=$(systemctl show "$(jq -r .unit <<<"$fleet")" -p ControlGroup --value)
+[[ -n $fleet_group ]]
+fleet_pids=$(find "/sys/fs/cgroup$fleet_group" -name cgroup.procs -type f -exec cat {} + | sort -nu)
+while IFS= read -r pid; do
+  [[ $pid =~ ^[0-9]+$ && $pid != "$fleet_pid" && -r /proc/$pid/cmdline ]] || continue
+  command=$(tr '\0' ' ' < "/proc/$pid/cmdline")
+  [[ -n $command ]] || continue
+  executable=$(basename "$(readlink -f "/proc/$pid/exe")")
+  fleet_processes=$(jq -c --argjson pid "$pid" --arg executable "$executable" '. + [{pid:$pid,executable:$executable}]' <<<"$fleet_processes")
+  blocked=1
+done <<<"$fleet_pids"
+fleet_user=$(jq -r .user <<<"$fleet")
+fleet_uid=$(id -u "$fleet_user")
+for manager in user system; do
+  controller=(systemctl --system)
+  if [[ $manager == user ]]; then controller=(sudo -n runuser -u "$fleet_user" -- env "XDG_RUNTIME_DIR=/run/user/$fleet_uid" "DBUS_SESSION_BUS_ADDRESS=unix:path=/run/user/$fleet_uid/bus" systemctl --user); fi
+  listed=$("\${controller[@]}" list-units 'pi-orchestrator-run-*.service' --state=active,activating,deactivating --legend=no --plain --no-pager)
+  while IFS= read -r unit; do
+    [[ -n $unit ]] || continue
+    fleet_units=$(jq -c --arg manager "$manager" --arg unit "$unit" '. + [{manager:$manager,unit:$unit}]' <<<"$fleet_units")
+    blocked=1
+  done <<<"$(awk '{print $1}' <<<"$listed")"
+done
+fi
 sql="SELECT json_object(
-  'activeWork',(SELECT count(*) FROM work_items WHERE state IN ('running','dispatched')),
-  'runningCoreAgents',(SELECT count(*) FROM core_agents WHERE json_extract(data,'$.state')='running'),
-  'startingCoreSwitches',(SELECT count(*) FROM core_switches WHERE state='starting'),
-  'generatingImages',(SELECT count(*) FROM inline_images WHERE json_extract(value,'$.state')='generating'),
-  'openMeetings',(SELECT count(*) FROM meet_records WHERE ended_at IS NULL),
-  'activeTranscripts',(SELECT count(*) FROM meet_transcript WHERE status='processing'),
-  'activeUploads',(SELECT count(*) FROM upload_transfers));"
+  'activeWork',(SELECT json_group_array(json_object('id',id,'sessionId',session_id,'state',state)) FROM work_items WHERE state IN ('running','dispatched')),
+  'runningCoreAgents',(SELECT json_group_array(json_object('sessionId',session_id,'agentId',agent_id)) FROM core_agents WHERE json_extract(data,'$.state')='running'),
+  'generatingImages',(SELECT json_group_array(json_object('sessionId',session_id,'imageId',image_id)) FROM inline_images WHERE json_extract(value,'$.state')='generating'),
+  'openMeetings',(SELECT json_group_array(json_object('id',id,'sessionId',session_id)) FROM meet_records WHERE ended_at IS NULL),
+  'activeTranscripts',(SELECT json_group_array(json_object('id',id,'meetingId',meeting_id)) FROM meet_transcript WHERE status='processing'),
+  'activeUploads',(SELECT json_group_array(json_object('id',id,'sessionId',session_id)) FROM upload_transfers));"
 while IFS= read -r supervisor; do
   unit=$(jq -r .unit <<<"$supervisor")
   user=$(jq -r .user <<<"$supervisor")
@@ -742,6 +930,8 @@ while IFS= read -r supervisor; do
   control_group=$(jq -r .controlGroup <<<"$supervisor")
   claims=$(timeout --foreground --kill-after=2s 7s sudo -n nsenter --target "$main_pid" --mount -- runuser -u "$user" -- "$sqlite" -readonly -cmd '.timeout 5000' "$data/supervisor.sqlite3" "$sql")
   extras='[]'
+  [[ -n $control_group ]]
+  pids=$(find "/sys/fs/cgroup$control_group" -name cgroup.procs -type f -exec cat {} + | sort -nu)
   while IFS= read -r pid; do
     [[ $pid =~ ^[0-9]+$ && -r /proc/$pid/cmdline ]] || continue
     command=$(tr '\0' ' ' < "/proc/$pid/cmdline")
@@ -750,26 +940,25 @@ while IFS= read -r supervisor; do
     executable=$(basename "$(readlink -f "/proc/$pid/exe" 2>/dev/null || printf unknown)")
     release=$(printf '%s\n' "$command" | grep -oE '/srv/pi/\.pi-stack-releases/remote/[a-f0-9]{40}' | head -1 || true)
     extras=$(jq -c --argjson pid "$pid" --arg executable "$executable" --arg release "$release" '. + [{pid:$pid,executable:$executable,release:($release | if . == "" then null else . end)}]' <<<"$extras")
-  done < <(find "/sys/fs/cgroup$control_group" -name cgroup.procs -type f -exec cat {} + 2>/dev/null | sort -nu)
-  claim_count=$(jq '[.[]] | add' <<<"$claims")
+  done <<<"$pids"
+  claim_count=$(jq '[.[] | length] | add' <<<"$claims")
   if ((claim_count > 0)) || [[ $(jq length <<<"$extras") -gt 0 ]]; then blocked=1; fi
   people=$(jq -c --arg user "$user" --argjson claims "$claims" --argjson extraProcesses "$extras" '. + [{user:$user,claims:$claims,extraProcesses:$extraProcesses}]' <<<"$people")
 done < <(jq -c '.supervisors[]' <<<"$plan")
 if ((blocked)); then
   restore
   trap - ERR TERM INT
-  jq -n --arg host "$host" --arg checkedAt "$(date --utc --iso-8601=seconds)" --argjson people "$people" '{host:$host,state:"blocked",checkedAt:$checkedAt,people:$people}'
+  jq -n --arg host "$host" --arg checkedAt "$(date --utc --iso-8601=seconds)" --argjson people "$people" --argjson fleetActive "$fleet_active" --argjson fleetUnits "$fleet_units" --argjson fleetProcesses "$fleet_processes" '{host:$host,state:"blocked",checkedAt:$checkedAt,people:$people,fleet:{activeRuns:$fleetActive,units:$fleetUnits,extraProcesses:$fleetProcesses}}'
   exit 0
 fi
+if [[ $(jq -r .preContract <<<"$fleet") == true ]]; then
+fleet_unit=$(jq -r .unit <<<"$fleet")
+sudo -n systemctl mask --runtime "$fleet_unit"
+sudo -n systemctl kill --kill-whom=all --signal=SIGKILL "$fleet_unit"
+sudo -n systemctl stop "$fleet_unit"
+sudo -n systemctl unmask --runtime "$fleet_unit"
+fi
 sealed_at=$(date --utc --iso-8601=seconds)
-baseline_id=$(jq -r .baselineId <<<"$plan")
-baseline=$(jq -nc --arg id "$baseline_id" --arg sealedAt "$sealed_at" '{id:$id,sealedAt:$sealedAt}')
-while IFS= read -r supervisor; do
-  user=$(jq -r .user <<<"$supervisor")
-  main_pid=$(jq -r .mainPid <<<"$supervisor")
-  data=$(jq -r .data <<<"$supervisor")
-  timeout --foreground --kill-after=2s 7s sudo -n nsenter --target "$main_pid" --mount -- runuser -u "$user" -- "$sqlite" -cmd '.timeout 5000' "$data/supervisor.sqlite3" "PRAGMA synchronous=FULL; INSERT OR REPLACE INTO metadata(key,value) VALUES('execution_baseline','$baseline');"
-done < <(jq -c '.supervisors[]' <<<"$plan")
 mapfile -t units < <(jq -r '.supervisors[].unit' <<<"$plan")
 if ((\${#units[@]})); then
   sudo -n systemctl mask --runtime "\${units[@]}"
@@ -778,12 +967,19 @@ if ((\${#units[@]})); then
   sudo -n systemctl unmask --runtime "\${units[@]}"
 fi
 trap - ERR TERM INT
-jq -n --arg host "$host" --arg sealedAt "$sealed_at" --argjson baseline "$baseline" --argjson people "$people" '{host:$host,state:"sealed",sealedAt:$sealedAt,baseline:$baseline,router:"stopped",supervisors:"stopped",people:$people}'
+jq -n --arg host "$host" --arg sealedAt "$sealed_at" --argjson people "$people" --argjson fleet "$fleet" '{host:$host,state:"sealed",sealedAt:$sealedAt,router:"stopped",supervisors:"stopped",fleet:(if $fleet.preContract then "stopped" else "live-handoff" end),people:$people}'
 `.replaceAll("\\${", "${");
 
 const restoreScript = String.raw`
 set -euo pipefail
 plan=$(base64 --decode <<<"$1")
+if [[ $(jq -r '.fleet // empty' <<<"$plan") != '' ]]; then
+  pid=$(jq -r .fleet.pid <<<"$plan")
+  start=$(jq -r .fleet.startTime <<<"$plan")
+  if [[ -r /proc/$pid/stat && $(awk '{print $22}' "/proc/$pid/stat") == "$start" ]]; then sudo -n kill -CONT "$pid"; fi
+  sudo -n systemctl unmask --runtime "$(jq -r .fleet.unit <<<"$plan")"
+  sudo -n systemctl start "$(jq -r .fleet.unit <<<"$plan")"
+fi
 while IFS= read -r supervisor; do
   pid=$(jq -r .serverPid <<<"$supervisor")
   start=$(jq -r .startTime <<<"$supervisor")
@@ -794,7 +990,11 @@ if ((\${#units[@]})); then
   sudo -n systemctl unmask --runtime "\${units[@]}"
   sudo -n systemctl start "\${units[@]}"
 fi
-if [[ $(jq -r .routerWasActive <<<"$plan") == true ]]; then sudo -n systemctl start pi-remote-router.service; fi
+if [[ $(jq -r .routerWasActive <<<"$plan") == true ]]; then
+  sudo -n systemctl start pi-remote-router.service
+else
+  sudo -n systemctl stop pi-remote-router.service
+fi
 `.replaceAll("\\${", "${");
 
 function runHostScript(script, remoteHost, args, timeoutSeconds) {
@@ -809,8 +1009,8 @@ function runtimeCensus(remoteHost) {
   return JSON.parse(runHostScript(runtimeCensusScript, remoteHost, [remoteHost ?? "gmktec"], 60));
 }
 
-function sealPlan(remoteHost) {
-  return JSON.parse(runHostScript(sealPlanScript, remoteHost, [remoteHost ?? "gmktec"], 60));
+function sealPlan(remoteHost, fleet) {
+  return JSON.parse(runHostScript(sealPlanScript, remoteHost, [remoteHost ?? "gmktec", planEncoding(fleet)], 60));
 }
 
 function planEncoding(plan) {
@@ -818,9 +1018,8 @@ function planEncoding(plan) {
 }
 
 function sealHost(request, hostKey, remoteHost) {
-  const plan = sealPlan(remoteHost);
-  plan.baselineId = `publication-host-seal:${request.requestId}:${hostKey}`;
-  request.bootstrap ??= { contract: coreExecutionContract, hosts: {} };
+  const plan = sealPlan(remoteHost, request.maintenance.hosts[hostKey].plan);
+  request.bootstrap ??= { contract: threadExecutionContract, hosts: {} };
   request.bootstrap.hosts[hostKey] = { state: "restore-required", recordedAt: new Date().toISOString(), plan };
   writeRequest(request);
   const outcome = JSON.parse(runHostScript(sealScript, remoteHost, [remoteHost ?? "gmktec", planEncoding(plan)], 90));
@@ -845,6 +1044,7 @@ function restoreCustody(request, hostKey, remoteHost) {
 }
 
 function releaseCustody(request, hostKey) {
+  restoreMaintenance(request, hostKey, hostKey === "gmktec" ? undefined : "converge-kenan", "released");
   const host = request.bootstrap?.hosts?.[hostKey];
   if (!host || host.state === "released") return;
   host.state = "released";
@@ -878,27 +1078,27 @@ function sha256(path) {
 }
 
 function hasExecutionContract(commit) {
-  const result = commandResult("git", ["-C", checkout, "grep", "-q", "-F", "export interface CoreExecutionSnapshot", commit, "--", "packages/orchestrator/src/cores/contracts.ts"]);
+  const result = commandResult("git", ["-C", checkout, "grep", "-q", "-F", "THREAD_EXECUTION_CONTRACT = \"unified-threads-v1\"", commit, "--", "packages/orchestrator/src/threads/contracts.ts"]);
   if (result.status > 1) throw new Error(`cannot inspect execution contract in ${commit}: ${result.stderr.trim()}`);
   return result.ok;
 }
 
 function validateBootstrapTarget(request) {
   const required = [
-    ["packages/orchestrator/src/cores/contracts.ts", "export interface CoreExecutionSnapshot"],
-    ["apps/remote/server/server.ts", "Core execution contract is unavailable; its runtime must finish under its owning release"],
-    ["apps/remote/server/server.ts", "PI_STACK_EXECUTION_BASELINE"],
+    ["packages/orchestrator/src/threads/contracts.ts", "THREAD_EXECUTION_CONTRACT = \"unified-threads-v1\""],
+    ["packages/orchestrator/src/threads/import.ts", "export function importRemoteThreads"],
+    ["apps/remote/server/server.ts", "importRemoteThreads"],
   ];
   for (const [path, text] of required) {
     const result = commandResult("git", ["-C", checkout, "grep", "-q", "-F", text, request.integrationSha, "--", path]);
-    if (!result.ok) throw new Error(`${request.integrationSha} does not implement ${coreExecutionContract}: missing ${text} in ${path}`);
+    if (!result.ok) throw new Error(`${request.integrationSha} does not implement ${threadExecutionContract}: missing ${text} in ${path}`);
   }
 }
 
 function activatedContract() {
-  if (!existsSync(coreExecutionActivationPath)) return null;
-  const activation = JSON.parse(readFileSync(coreExecutionActivationPath, "utf8"));
-  if (activation.version !== 1 || activation.contract !== coreExecutionContract) throw new Error(`invalid contract activation receipt: ${coreExecutionActivationPath}`);
+  if (!existsSync(threadExecutionActivationPath)) return null;
+  const activation = JSON.parse(readFileSync(threadExecutionActivationPath, "utf8"));
+  if (activation.version !== 1 || activation.contract !== threadExecutionContract) throw new Error(`invalid contract activation receipt: ${threadExecutionActivationPath}`);
   validateSha(activation.integrationSha);
   return activation;
 }
@@ -906,18 +1106,14 @@ function activatedContract() {
 function selectedHasContract(selectedCommit, request) {
   if (!selectedCommit) return false;
   if (selectedCommit === request.integrationSha) return true;
-  const activation = activatedContract();
-  if (!activation) return false;
-  const ancestry = commandResult("git", ["-C", checkout, "merge-base", "--is-ancestor", activation.integrationSha, selectedCommit]);
-  if (ancestry.status > 1) throw new Error(`cannot compare deployed commit ${selectedCommit} with contract activation ${activation.integrationSha}`);
-  return ancestry.ok;
+  return hasExecutionContract(selectedCommit);
 }
 
 function recordContractActivation(request) {
-  if (existsSync(coreExecutionActivationPath)) return;
-  atomicWrite(coreExecutionActivationPath, `${JSON.stringify({
+  if (existsSync(threadExecutionActivationPath)) return;
+  atomicWrite(threadExecutionActivationPath, `${JSON.stringify({
     version: 1,
-    contract: coreExecutionContract,
+    contract: threadExecutionContract,
     integrationSha: request.integrationSha,
     activatedAt: new Date().toISOString(),
     requestId: request.requestId,
@@ -930,11 +1126,14 @@ function recordContractActivation(request) {
 
 function recoverOutstandingCustody(request) {
   for (const [hostKey, remoteHost] of [["gmktec", undefined], ["converge", "converge-kenan"]]) {
-    if (!custodyNeedsRestore(request.bootstrap?.hosts?.[hostKey])) continue;
-    request.step = `restore-${hostKey}-intake`;
-    writeRequest(request);
+    const restoringSeal = custodyNeedsRestore(request.bootstrap?.hosts?.[hostKey]);
+    const terminal = ["failed", "cancelled", "published"].includes(request.status) || existsSync(cancellationPath(request.requestId));
+    const maintenance = request.maintenance?.hosts?.[hostKey];
+    const restoringMaintenance = terminal && maintenance && !["restored", "released"].includes(maintenance.state);
+    if (!restoringSeal && !restoringMaintenance) continue;
     try {
       restoreCustody(request, hostKey, remoteHost);
+      if (terminal) restoreMaintenance(request, hostKey, remoteHost);
       delete request.recoveryFailure;
       writeRequest(request);
     } catch (error) {
@@ -962,6 +1161,7 @@ function processRequest(request) {
   appendLog(logPath, `[${new Date().toISOString()}] request=${request.requestId} source=${request.sourceSha} attempt=${request.attempt}\n`);
 
   try {
+    checkCancellation(request);
     let result = prepareCheckout(request, logPath);
     if (!result.ok) throw new Error(result.stderr.trim() || `checkout preparation exited ${result.status}`);
 
@@ -979,8 +1179,8 @@ function processRequest(request) {
     }
 
     prepareAndroidArtifact(request, logPath);
-    request.contract = hasExecutionContract(request.integrationSha) ? coreExecutionContract : null;
-    if (!request.contract && activatedContract()) throw new Error("Refusing to remove the activated core execution contract");
+    request.contract = hasExecutionContract(request.integrationSha) ? threadExecutionContract : null;
+    if (!request.contract && activatedContract()) throw new Error("Refusing to remove the activated thread execution contract");
     writeRequest(request);
     const requestProofRoot = join(proofRoot, request.requestId);
     const deploymentsPassed = request.hosts?.gmktec?.status === "passed" && request.hosts?.converge?.status === "passed";
@@ -988,17 +1188,26 @@ function processRequest(request) {
       const gmktecCensus = runtimeCensus(undefined);
       const convergeCensus = runtimeCensus("converge-kenan");
       if (!request.contract && [gmktecCensus, convergeCensus].some(host => host.selectedCommit && hasExecutionContract(host.selectedCommit))) {
-        throw new Error("Refusing to replace a host's core execution contract with a target that lacks it");
+        throw new Error("Refusing to replace a host's thread execution contract with a target that lacks it");
       }
       const gmktecBootstrap = !!request.contract && !selectedHasContract(gmktecCensus.selectedCommit, request);
       const convergeBootstrap = !!request.contract && !selectedHasContract(convergeCensus.selectedCommit, request);
       gmktecCensus.contract = gmktecBootstrap ? "pre-contract" : request.contract;
       convergeCensus.contract = convergeBootstrap ? "pre-contract" : request.contract;
       if (request.contract) validateBootstrapTarget(request);
-      const gateProofPath = join(requestProofRoot, "core-execution-gate.json");
+      checkCancellation(request);
+      if (gmktecBootstrap) {
+        gmktecCensus.fleet = ensureMaintenance(request, "gmktec", undefined);
+        Object.assign(gmktecCensus, runtimeCensus(undefined));
+      }
+      if (convergeBootstrap) {
+        convergeCensus.fleet = ensureMaintenance(request, "converge", "converge-kenan");
+        Object.assign(convergeCensus, runtimeCensus("converge-kenan"));
+      }
+      const gateProofPath = join(requestProofRoot, "thread-execution-gate.json");
       atomicWrite(gateProofPath, `${JSON.stringify({ checkedAt: new Date().toISOString(), contract: request.contract, hosts: [gmktecCensus, convergeCensus] }, null, 2)}\n`);
       request.contractGate = { proof: gateProofPath, sha256: sha256(gateProofPath) };
-      if ((gmktecBootstrap && gmktecCensus.runtimes.length > 0) || (convergeBootstrap && convergeCensus.runtimes.length > 0)) {
+      if ((gmktecBootstrap && (gmktecCensus.runtimes.length > 0 || gmktecCensus.fleet.activeRuns.length > 0)) || (convergeBootstrap && (convergeCensus.runtimes.length > 0 || convergeCensus.fleet.activeRuns.length > 0))) {
         updateBlocked(request, [gmktecCensus, convergeCensus], logPath);
         return;
       }
@@ -1074,6 +1283,7 @@ function processRequest(request) {
     writeRequest(request);
     if (request.contract) recordContractActivation(request);
 
+    checkCancellation(request);
     request.status = "finalizing";
     request.step = "adopt-publication-owner";
     writeRequest(request);
@@ -1091,7 +1301,10 @@ function processRequest(request) {
   } catch (error) {
     const restorationFailures = [];
     for (const [hostKey, remoteHost] of [["gmktec", undefined], ["converge", "converge-kenan"]]) {
-      try { restoreCustody(request, hostKey, remoteHost); }
+      try {
+        restoreCustody(request, hostKey, remoteHost);
+        restoreMaintenance(request, hostKey, remoteHost);
+      }
       catch (restoreError) { restorationFailures.push(`${hostKey}: ${restoreError instanceof Error ? restoreError.message : String(restoreError)}`); }
     }
     let message = error instanceof Error ? error.message : String(error);
@@ -1115,7 +1328,11 @@ function drain() {
   for (const name of checked("find", [requestRoot, "-maxdepth", "1", "-type", "f", "-name", "PUB-*.json", "-printf", "%p\\n"]).split("\n")) {
     if (name) allRequests.push(JSON.parse(readFileSync(name, "utf8")));
   }
-  for (const request of allRequests) { recoverOutstandingCustody(request); deliverNotice(request); }
+  for (const request of allRequests) {
+    recoverOutstandingCustody(request);
+    if (!["published", "cancelled"].includes(request.status) && existsSync(cancellationPath(request.requestId))) processRequest(request);
+    deliverNotice(request);
+  }
   const requests = allRequests.filter(request => ["queued", "running", "blocked", "finalizing"].includes(request.status));
   requests.sort((left, right) => left.queuedAt.localeCompare(right.queuedAt));
   if (requests.length > 0) processRequest(requests[0]);
@@ -1127,6 +1344,7 @@ function main() {
   if (operation === "submit" && args.length === 1) return submit(args[0]);
   if (operation === "inspect" && args.length === 1) return inspect(args[0]);
   if (operation === "retry" && args.length === 1) return retry(args[0]);
+  if (operation === "cancel" && args.length === 1) return cancel(args[0]);
   if (operation === "gate-status" && args.length === 0) return gateStatus();
   if (operation === "enqueue" && [3, 4].includes(args.length)) return enqueue(...args);
   if (operation === "report" && [1, 3].includes(args.length)) return report(...args);
