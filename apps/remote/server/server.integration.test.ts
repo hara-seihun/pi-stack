@@ -216,7 +216,7 @@ for line in sys.stdin:
  kind = request.get('type')
  rid = request.get('id')
  if kind == 'get_portable_conversation':
-  out({'type':'response','id':rid,'command':kind,'success':True,'data':{'version':1,'sourceCore':os.environ.get('PI_STACK_CORE','pi'),'messages':[{'role':'user','content':[{'type':'text','text':'Prior conversation'}]}],'agents':[]}})
+  out({'type':'response','id':rid,'command':kind,'success':True,'data':{'version':1,'sourceCore':'pi','messages':[{'role':'user','content':[{'type':'text','text':'Prior conversation'}]}],'agents':[]}})
  elif kind == 'get_entries':
   out({'type':'response','id':rid,'command':'get_entries','success':True,'data':{'entries':editable_entries,'leafId':editable_leaf}})
  elif kind == 'fork':
@@ -316,7 +316,7 @@ for line in sys.stdin:
    elif last == 'native-recovered-progress':
     pass
    elif last == 'native-progress-replay':
-    events=json.load(open(${JSON.stringify(resolve(import.meta.dir, "fixtures/codex-live-progress.json"))}))
+    events=json.load(open(${JSON.stringify(resolve(import.meta.dir, "fixtures/tool-progress.json"))}))
     out(events[0])
     out({'type':'message_update','assistantMessageEvent':{'type':'thinking_start'}})
     gate('native-thinking')
@@ -542,7 +542,7 @@ afterAll(async () => {
 });
 
 async function createThread(destination = "home", model?: string) {
-  const created = await api("POST", "/v1/sessions", { requestId: crypto.randomUUID(), destination, model, core: "pi" });
+  const created = await api("POST", "/v1/sessions", { requestId: crypto.randomUUID(), destination, model });
   expect(created.status).toBe(201);
   const id = created.value.session.id as string;
   await waitFor(
@@ -553,22 +553,18 @@ async function createThread(destination = "home", model?: string) {
 }
 
 describe("web and supervisor integration", () => {
-  test("switches an idle core using a saved transfer and pins the selected generation", async () => {
-    const id = await createThread("home","astra");
-    const switched = await api("PUT",`/v1/sessions/${id}/settings`,{core:"codex"});
-    expect(switched.status).toBe(200);
-    expect(switched.value.settings).toMatchObject({core:"codex",bashTimeoutSupported:false});
-    const ledger = new Database(join(root,"data","supervisor.sqlite3"),{readonly:true});
+  test("rejects engine selection without changing the Pi session", async () => {
+    const id = await createThread("home", "astra");
+    const ledger = new Database(join(root, "data", "supervisor.sqlite3"), { readonly: true });
     try {
-      const pinned = ledger.query("SELECT core,state_dir FROM session_cores WHERE session_id=?").get(id) as any;
-      expect(pinned.core).toBe("codex");
-      expect(JSON.parse(readFileSync(join(pinned.state_dir,"transfer.json"),"utf8")).messages[0].content[0].text).toBe("Prior conversation");
-      expect((ledger.query("SELECT state FROM core_switches WHERE session_id=?").get(id) as any).state).toBe("complete");
-      const restored = await api("PUT",`/v1/sessions/${id}/settings`,{core:"pi"});
-      expect(restored.status).toBe(200);
-      expect(restored.value.settings.core).toBe("pi");
+      const before = ledger.query("SELECT core,state_dir FROM session_cores WHERE session_id=?").get(id);
+      const switched = await api("PUT", `/v1/sessions/${id}/settings`, { core: "codex" });
+      expect(switched.status).toBe(400);
+      expect(ledger.query("SELECT core,state_dir FROM session_cores WHERE session_id=?").get(id)).toEqual(before);
+      const created = await api("POST", "/v1/sessions", { requestId: crypto.randomUUID(), destination: "home", core: "codex" });
+      expect(created.status).toBe(400);
     } finally { ledger.close(); }
-  },15_000);
+  });
 
   test("live events during activation are not cancellation and preserve RUNNING", async () => {
     server.kill(); await server.exited;
@@ -576,7 +572,7 @@ describe("web and supervisor integration", () => {
     await startServer();
     let id: string | undefined;
     try {
-      const created = await api("POST", "/v1/sessions", {requestId:crypto.randomUUID(),destination:"home",model:"astra",core:"pi"});
+      const created = await api("POST", "/v1/sessions", {requestId:crypto.randomUUID(),destination:"home",model:"astra"});
       expect(created.status).toBe(201); id = created.value.session.id;
       const read = () => api("GET", `/v1/sessions/${id}`).then(result=>result.value.session);
       await waitFor(read, session=>session?.state === "RUNNING" || session?.state === "FAILED");
@@ -597,7 +593,7 @@ describe("web and supervisor integration", () => {
     await startServer();
     let id: string | undefined;
     try {
-      const created = await api("POST", "/v1/sessions", {requestId:crypto.randomUUID(),destination:"home",model:"astra",core:"pi"});
+      const created = await api("POST", "/v1/sessions", {requestId:crypto.randomUUID(),destination:"home",model:"astra"});
       expect(created.status).toBe(201); id = created.value.session.id;
       await api("POST", `/v1/sessions/${id}/prompt`, {requestId:crypto.randomUUID(),text:"capacity fixture"});
       const read = () => api("GET", `/v1/sessions/${id}`).then(result=>result.value.session);
@@ -1071,7 +1067,7 @@ describe("web and supervisor integration", () => {
 
   test("replays native progress without reasoning text and retains active tools across client reload", async () => {
     const id = await createThread("home", "astra");
-    const events = JSON.parse(readFileSync(resolve(import.meta.dir, "fixtures/codex-live-progress.json"), "utf8"));
+    const events = JSON.parse(readFileSync(resolve(import.meta.dir, "fixtures/tool-progress.json"), "utf8"));
     resetGate("native-thinking"); resetGate("native-tool");
     try {
       await api("PUT", `/v1/sessions/${id}/context`, { capturedAt: 100, context: { systemPrompt: "", tools: [], messages: [events[0].message] } });
@@ -1607,7 +1603,7 @@ describe("web and supervisor integration", () => {
   }, 15_000);
 
   test("aborting during activation cannot resurrect queued work", async () => {
-    const created = await api("POST", "/v1/sessions", { requestId: crypto.randomUUID(), destination: "home", core: "pi" });
+    const created = await api("POST", "/v1/sessions", { requestId: crypto.randomUUID(), destination: "home" });
     const id = created.value.session.id;
     await api("POST", `/v1/sessions/${id}/prompt`, { requestId: crypto.randomUUID(), text: "must not launch" });
     const aborted = await api("POST", `/v1/sessions/${id}/abort`, {});
