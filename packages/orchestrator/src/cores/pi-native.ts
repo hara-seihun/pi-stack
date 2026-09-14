@@ -11,6 +11,7 @@ import { piIsolatedContext } from "./pi-isolated.js";
 import { checkpointPiSession, preparePiSession, seedPiSession } from "./pi-transfer.js";
 import { assertPiSessionFile } from "./pi-session-file.js";
 import { SESSION_RETRY } from "../host/session-lifecycle.js";
+import { resolveSessionModel } from "../extension/routing.js";
 
 const scopeKey = Symbol.for("pi-stack.session-environment");
 const globals = globalThis as typeof globalThis & { [scopeKey]?: AsyncLocalStorage<NodeJS.ProcessEnv> };
@@ -69,14 +70,21 @@ export const openPiNative: OpenPiNative = async (options, node, tools, output, e
       if (errors.length) throw new Error(`Session extensions failed: ${JSON.stringify(errors)}`);
       const initializationErrors = services.diagnostics.filter(diagnostic => diagnostic.type === "error");
       if (initializationErrors.length) throw new Error(`Pi session initialization failed: ${initializationErrors.map(diagnostic => diagnostic.message).join("; ")}`);
-      const model = node.provider && node.model ? services.modelRuntime.getModel(node.provider, node.model) : undefined;
-      if (node.provider && node.model && !model) throw new Error(`Model not found: ${node.provider}/${node.model}`);
+      const selection = node.provider && node.model
+        ? resolveSessionModel(services.modelRuntime.getModels(), node.provider, node.model, env) : undefined;
+      const model = selection?.ok ? selection.model : node.provider && node.model
+        ? services.modelRuntime.getModel(node.provider, node.model) : undefined;
       const bash = createBashTool(cwd, { spawnHook: context => ({ ...context, env: { ...context.env,
         ...Object.fromEntries(Object.entries(env).filter(([key]) => key.startsWith("PI_REMOTE_") || key.startsWith("PI_STACK_CORE_") || key === "PI_SUBAGENT_MODEL")),
         PI_SESSION_FILE: sessionManager.getSessionFile(), PI_REMOTE_CONTEXT_OWNER_PID: String(process.pid) } }) });
       const created = await createAgentSessionFromServices({ services, sessionManager, sessionStartEvent, model,
         thinkingLevel: node.thinkingLevel as never, tools: isolated?.tools,
         customTools: [bash, ...piChildTools(tools, node.id)] });
+      if (selection && !selection.ok) {
+        try { await created.session.extensionRunner.emit({ type: "session_shutdown", reason: "quit" }); }
+        finally { created.session.dispose(); }
+        throw new Error(selection.error);
+      }
       const agentPrompt = created.session.agent.prompt.bind(created.session.agent);
       const agentContinue = created.session.agent.continue.bind(created.session.agent);
       const assertRun = () => {
@@ -161,6 +169,14 @@ export const openPiNative: OpenPiNative = async (options, node, tools, output, e
           if (command.type === "get_core_context") {
             output({ type: "response", id: command.id, command: command.type, success: true, data: context() });
             return;
+          }
+          if (command.type === "set_model") {
+            const selection = resolveSessionModel(runtime.session.modelRuntime.getAvailableSnapshot(), String(command.provider), String(command.modelId), env);
+            if (!selection.ok) {
+              output({ type: "response", id: command.id, command: command.type, success: false, error: selection.error });
+              return;
+            }
+            command = { ...command, provider: selection.model.provider };
           }
           if (command.type === "abort") {
             generation++;

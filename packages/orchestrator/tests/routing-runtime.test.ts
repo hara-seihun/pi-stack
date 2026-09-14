@@ -70,7 +70,7 @@ console.log('model pin held');
   } finally { await rm(root, { recursive: true, force: true }); }
 }, 6000);
 
-test.each(['explicit', 'family', 'reserved', 'cooldown', 'missing-credential'])('fresh ordinary startup honors eligible explicit naming alias: %s', async kind => {
+test.each(['explicit', 'family', 'resume', 'reserved', 'cooldown', 'missing-credential'])('fresh ordinary startup honors eligible explicit naming alias: %s', async kind => {
   const root=await mkdtemp(join(tmpdir(),'pi-naming-account-')),fixture=join(root,'fixture.mjs');
   await writeFile(fixture, `
 import assert from 'node:assert/strict';
@@ -94,7 +94,7 @@ const settingsManager=SettingsManager.inMemory(),manager=SessionManager.inMemory
 const resourceLoader=new DefaultResourceLoader({cwd:root,agentDir:dir,settingsManager,noExtensions:true,noSkills:true,noContextFiles:true,noPromptTemplates:true,noThemes:true,additionalExtensionPaths:[${JSON.stringify(routing)}]});
 await resourceLoader.reload();
 const base=modelRuntime.getModel('openai-codex','gpt-5.6-luna');
-const {session}=await createAgentSession({cwd:root,agentDir:dir,modelRuntime,settingsManager,resourceLoader,sessionManager:manager,model:{...base,provider:kind==='family'?'openai-codex':'openai-codex-11'},thinkingLevel:'low'});
+const {session}=await createAgentSession({cwd:root,agentDir:dir,modelRuntime,settingsManager,resourceLoader,sessionManager:manager,model:{...base,provider:kind==='family'||kind==='resume'?'openai-codex':'openai-codex-11'},thinkingLevel:'low',sessionStartEvent:{type:'session_start',reason:kind==='resume'?'resume':'startup'}});
 const errors=[];
 try{
   await session.bindExtensions({mode:'print',onError:error=>errors.push(error)});
@@ -112,6 +112,60 @@ console.log('fresh naming account selected');
   try{const result=await promisify(execFile)(process.execPath,[fixture],{cwd:root,env,timeout:4000});expect(result.stdout).toContain('fresh naming account selected');}
   finally{await rm(root,{recursive:true,force:true});}
 },6000);
+
+test('binds child accounts before prompting and resolves canonical model commands', async () => {
+  const root = await mkdtemp(join(tmpdir(), 'pi-child-startup-'));
+  const fixture = join(root, 'fixture.mjs');
+  await writeFile(fixture, `
+import assert from 'node:assert/strict';
+import {mkdirSync,writeFileSync} from 'node:fs';
+import {join} from 'node:path';
+import {openPiNative} from ${JSON.stringify(process.env.PI_TEST_NATIVE_ENTRY??join(buildRoot,'compiled/cores/pi-native.js'))};
+import {Store} from ${JSON.stringify(join(buildRoot,'compiled/store.js'))};
+const root=process.env.HOME,agentDir=join(root,'agent');
+mkdirSync(agentDir);writeFileSync(join(agentDir,'auth.json'),'{}');
+const credential={type:'oauth',access:'test',refresh:'test',expires:Date.now()+3600000};
+const accounts=Array.from({length:12},(_,i)=>'openai-codex-'+(i+2));
+writeFileSync(join(root,'auth.json'),JSON.stringify(Object.fromEntries(accounts.map(id=>[id,credential]))));
+const store=Store.open(process.env.PI_ORCHESTRATOR_LEDGER);
+for(const id of accounts)store.upsertAccount({id,provider:'openai-codex'});
+const sessions=[],events=[];
+const options={cwd:root,stateDir:root,sessionId:'root',args:['--extension',${JSON.stringify(routing)}],env:{PI_CODING_AGENT_DIR:agentDir}};
+const open=child=>openPiNative(options,{id:'child-'+child,parentId:'root',name:'Child',cwd:root,sessionFile:join(root,child+'.jsonl'),state:'idle',busy:false,provider:'openai-codex',model:'gpt-6-astra',thinkingLevel:'high'}, {list:()=>[],beforeReplace:async()=>{}}, event=>events.push(event),()=>{});
+try {
+  for(let child=0;child<4;child++) {
+    const session=await open(child);
+    sessions.push(session);
+    assert.equal(session.snapshot().provider,'openai-codex-10','child '+child);
+  }
+  await sessions[0].command({type:'set_model',id:'canonical',provider:'openai-codex',modelId:'gpt-5.6-sol'});
+  const reply=events.find(event=>event.id==='canonical');
+  assert.equal(reply?.success,true,JSON.stringify(reply));
+  assert.equal(sessions[0].snapshot().provider,'openai-codex-10');
+  assert.equal(sessions[0].snapshot().model,'gpt-5.6-sol');
+  assert.equal(sessions[0].snapshot().thinkingLevel,'high');
+  for(const account of accounts)store.setCooldown(account,Date.now()+600000);
+  await assert.rejects(open(5),/No eligible pooled account.*Earliest cooldown/);
+  await sessions[0].command({type:'set_model',id:'cooling',provider:'openai-codex',modelId:'gpt-6-astra'});
+  assert.match(events.find(event=>event.id==='cooling')?.error??'',/No eligible pooled account/);
+  assert.equal(sessions[0].snapshot().model,'gpt-5.6-sol');
+  const [runId]=store.createRuns({count:1,source:'direct',prompt:'fixture',cwd:root,profile:'astra',budget:'force'});
+  store.assignRun(runId,{accountId:'openai-codex-10',provider:'openai-codex',model:'gpt-6-astra',thinking:'high',unit:'fixture',releasePath:root});
+  store.setControl('account-reservation:openai-codex-10',JSON.stringify({metadata:{purpose:'assigned'},reason:'new admissions only'}));
+  const assigned=await openPiNative({...options,sessionId:runId,env:{...options.env,PI_ORCHESTRATOR_ASSIGNED:'1',PI_ORCHESTRATOR_RUN_ID:runId}}, {id:runId,parentId:null,name:'Assigned',cwd:root,sessionFile:join(root,'assigned.jsonl'),state:'idle',busy:false,provider:'openai-codex',model:'gpt-6-astra',thinkingLevel:'high'}, {list:()=>[],beforeReplace:async()=>{}},event=>events.push(event),()=>{});
+  sessions.push(assigned);
+  assert.equal(assigned.snapshot().provider,'openai-codex-10');
+} finally {
+  for(const session of sessions)await session.close();
+  store.close();
+}
+console.log('all child accounts bound');
+`);
+  const env={...process.env,HOME:root,PI_CODING_AGENT_DIR:join(root,'agent'),PI_ORCHESTRATOR_LEDGER:join(root,'ledger.sqlite3'),PI_ORCHESTRATOR_AUTH:join(root,'auth.json'),PI_ORCHESTRATOR_ASSIGNED:'0',PI_OFFLINE:'1'};
+  for(const key of Object.keys(env))if(/^PI_REMOTE_|^PI_SESSION_|^PI_SUBAGENT_MODEL$|^PI_ORCHESTRATOR_RUN_ID$|_API_KEY$/.test(key))delete env[key as keyof typeof env];
+  try {const result=await promisify(execFile)(process.execPath,[fixture],{cwd:root,env,timeout:5000});expect(result.stdout).toContain('all child accounts bound');}
+  finally {await rm(root,{recursive:true,force:true});}
+},7000);
 
 test('activity leases release retained idle children without releasing their active parent or sibling', async () => {
   const root = await mkdtemp(join(tmpdir(), 'pi-routing-activity-'));
