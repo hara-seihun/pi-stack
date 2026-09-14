@@ -18,7 +18,7 @@ import { listenForFileDrops } from "./file-drop";
 import { createSyncLoop, type SyncLoop } from "./sync-loop";
 import { updateDocument } from "./sync";
 import { threadsInOrder } from "./thread-order";
-import { activityColor, activityLabel, orchestratorThreads, working } from "./thread-state";
+import { activityColor, activityLabel, conversationThreads, orchestratorThreads, working } from "./thread-state";
 import { ChildThreadList, OrchestratorThreadList } from "./thread-views";
 import { requestStop, submitThreadControl, ThreadStopDialog } from "./thread-controls";
 import { AppUpdateControl } from "./app-update";
@@ -505,7 +505,7 @@ function RemoteApp() {
     const sourceIndex = previous.findIndex((session) => session.id === active.id);
     const targetIndex = previous.findIndex((session) => session.id === over.id);
     if (sourceIndex < 0 || targetIndex < 0) return;
-    const ordered = arrayMove(previous, sourceIndex, targetIndex).map((session) => session.id);
+    const ordered = [...arrayMove(previous, sourceIndex, targetIndex), ...orchestratorThreads(stateRef.current.sessions)].map((session) => session.id);
     patch({ pendingOrder: ordered });
     try {
       await api(API.reorderSessions.method, API.reorderSessions.path(), { sessionIds: ordered });
@@ -713,5 +713,5 @@ function RemoteApp() {
 }
 
 function orderedSessions(state: Pick<AppState, "sessions" | "pendingOrder">) {
-  return state.pendingOrder ? threadsInOrder(state.sessions, state.pendingOrder) : state.sessions;
+  return conversationThreads(state.pendingOrder ? threadsInOrder(state.sessions, state.pendingOrder) : state.sessions);
 }

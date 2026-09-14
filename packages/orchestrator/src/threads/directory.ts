@@ -33,7 +33,25 @@ export class ThreadDirectory implements ThreadApi {
   }
   async control(input: ThreadControl): Promise<Result<Thread>> {
     const owner = await this.owner(input.threadId);
-    return owner.ok ? owner.value.api.control(input) : owner;
+    if (!owner.ok) return owner;
+    if (input.action !== "stop" || !input.descendants) return owner.value.api.control(input);
+    // Hold the parent first, closing admission before discovering children in other owners.
+    const root = await owner.value.api.control({ ...input, descendants: false });
+    let failure: Result<Thread> | undefined = root.ok ? undefined : root;
+    const seen = new Set([input.threadId]), queue = [input.threadId];
+    for (const parentId of queue) {
+      let cursor: string | undefined;
+      do {
+        const page = await this.list({ parentId, cursor, limit: 100 });
+        if (!page.ok) { failure ??= page; break; }
+        const children = page.value.threads.filter(thread => !seen.has(thread.id));
+        for (const child of children) { seen.add(child.id); queue.push(child.id); }
+        const stopped = await Promise.all(children.map(child => this.control({ threadId: child.id, action: "stop", descendants: false })));
+        failure ??= stopped.find(result => !result.ok);
+        cursor = page.value.nextCursor;
+      } while (cursor);
+    }
+    return failure ?? root;
   }
   async inspect(threadId: string): Promise<Result<ThreadInspection>> {
     const owner = await this.owner(threadId);

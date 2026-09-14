@@ -2,7 +2,7 @@ import { afterEach, expect, it, vi } from "vitest";
 import { dispatch } from "../src/commands.js";
 
 vi.mock("../src/daemon.js",()=>({Daemon:vi.fn()}));
-afterEach(()=>{vi.restoreAllMocks();process.exitCode=0;});
+afterEach(()=>{vi.restoreAllMocks();vi.unstubAllEnvs();process.exitCode=0;});
 
 function transport(responses:unknown[]=[]){
   const calls:{path:string;method:string;body:any}[]=[];
@@ -13,6 +13,26 @@ function transport(responses:unknown[]=[]){
   });
   return calls;
 }
+
+it("preserves an agent caller as parent and uses its authorized directory",async()=>{
+  vi.stubEnv("PI_THREAD_ID","caller");
+  vi.stubEnv("PI_THREAD_API_URL","http://127.0.0.1:18790/v1/threads");
+  const calls=transport();
+  await dispatch(["run","--prompt","bounded work"]);
+  expect(calls[0]!.body.parentId).toBe("caller");
+  expect(vi.mocked(fetch).mock.calls[0]![0]).toBe("http://127.0.0.1:18790/v1/threads/spawn");
+  await expect(dispatch(["run","--prompt","work","--parent","another"])).rejects.toThrow("own thread");
+  await expect(dispatch(["wave","review"])).rejects.toThrow("unparented waves");
+  expect(calls).toHaveLength(1);
+});
+
+it("workers cannot bypass the missing spawn tool with CLI run or wave",async()=>{
+  vi.stubEnv("PI_THREAD_CAN_SPAWN","0");
+  const calls=transport();
+  await expect(dispatch(["run","--prompt","work"])).rejects.toThrow("cannot spawn");
+  await expect(dispatch(["wave","review"])).rejects.toThrow("unparented waves");
+  expect(calls).toHaveLength(0);
+});
 
 it("spawns fresh forced threads without resolving server settings",async()=>{
   const calls=transport();

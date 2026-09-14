@@ -29,7 +29,7 @@ export function threadTools(options: PiSessionOptions) {
   return [
     defineTool({
       name: "thread_spawn", label: "Start a thread",
-      description: `${DELEGATION_POLICY}\n\nStart a fresh persistent thread with its own context. It returns immediately; completion arrives as a normal message. To continue an existing conversation use thread_send instead. Defaults: Astra, standard speed, high thinking; Luna defaults to max. Explicit settings override these defaults. ${SUBAGENT_MODEL_DESCRIPTIONS}`,
+      description: `${DELEGATION_POLICY}\n\nStart a fresh Orchestrator worker with its own context. Workers cannot spawn subagents; coordinate all delegation from this conversation. It returns immediately; completion arrives as a normal message. To continue an existing conversation use thread_send instead. Defaults: Astra, standard speed, high thinking; Luna defaults to max. Explicit settings override these defaults. ${SUBAGENT_MODEL_DESCRIPTIONS}`,
       parameters: Type.Object({ message: Type.String(), title: Type.Optional(Type.String()), cwd: Type.Optional(Type.String()), settings: Type.Optional(settings) }),
       execute: async (id, input, signal) => result(await api(signal).spawn({ ...input, requestId: `${options.threadId}:${id}`, parentId: options.threadId,
         cwd: input.cwd ?? options.cwd, admission: "force", settings: input.settings as Parameters<ThreadApi["spawn"]>[0]["settings"] })),
@@ -79,5 +79,5 @@ export function threadTools(options: PiSessionOptions) {
         return result(await api(signal).control({ ...input, threadId } as Parameters<ThreadApi["control"]>[0]));
       },
     }),
-  ];
+  ].filter(tool => tool.name !== "thread_spawn" || options.env.PI_THREAD_CAN_SPAWN !== "0");
 }

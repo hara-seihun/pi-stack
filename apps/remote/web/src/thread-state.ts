@@ -8,6 +8,10 @@ export function activeThread(session: Session | null) {
 
 export const working = activeThread;
 
+export function conversationThreads(sessions: Session[]) {
+  return sessions.filter(session => !session.parentId && session.origin !== "fleet");
+}
+
 export function orchestratorThreads(sessions: Session[]) {
   const seen = new Set<string>();
   return sessions.filter(session => {

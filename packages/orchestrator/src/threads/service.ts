@@ -14,6 +14,7 @@ export interface ThreadServiceOptions {
   databasePath: string;
   sessionsDir: string;
   openSession: OpenPiSession;
+  workersOnly?: boolean;
   environment?: (thread: Thread) => Record<string, string | undefined>;
   admit?: (thread: Thread, settings: ThreadSettings, recovering: boolean, executionId: string) => Promise<Result<ThreadAdmission>>;
   prepareMessage?: (thread: Thread, message: ThreadMessage) => Promise<Result<{ text: string; images?: unknown[] }>>;
@@ -54,6 +55,7 @@ export class ThreadService implements ThreadApi {
   private closed = false;
   private suspended = false;
   private directory?: ThreadApi;
+  private workerOwner?: (parent: Thread, input: SpawnThread) => ThreadApi | undefined;
   private routing = false;
   private transactionDepth = 0;
   private readonly projections = new Map<string, { context?: Json; live: Json }>();
@@ -94,7 +96,7 @@ export class ThreadService implements ThreadApi {
   private row(id: string): Json | undefined { return this.db.prepare("SELECT * FROM thread WHERE id=?").get(id) as Json | undefined; }
   private project(row: Json): Thread {
     const pending = row.pending_count ?? (this.db.prepare("SELECT count(*) n FROM thread_work WHERE thread_id=? AND status!='done'").get(row.id) as { n: number }).n;
-    return { id: row.id, parentId: row.parent_id, title: row.title, cwd: row.cwd, sessionFile: row.session_file,
+    return { id: row.id, parentId: row.parent_id, role: this.options.workersOnly || row.parent_id ? "worker" : "conversation", title: row.title, cwd: row.cwd, sessionFile: row.session_file,
       settings: JSON.parse(row.settings), admission: row.admission, state: row.state, revision: row.revision,
       createdAt: row.created_at, updatedAt: row.updated_at, pendingMessages: pending, metadata: JSON.parse(row.metadata) };
   }
@@ -125,7 +127,7 @@ export class ThreadService implements ThreadApi {
       .map(row => ({ ...this.message(row), state: row.status === "queued" ? held ? "held" : "queued" : row.status === "dispatching" ? "running" : "dispatched", insertedAt: row.inserted_at }));
   }
   subscribe(listener: (event: ThreadServiceEvent) => void): () => void { this.listeners.add(listener); return () => this.listeners.delete(listener); }
-  setDirectory(directory: ThreadApi): void { this.directory = directory; }
+  setDirectory(directory: ThreadApi, workerOwner?: (parent: Thread, input: SpawnThread) => ThreadApi | undefined): void { this.directory = directory; this.workerOwner = workerOwner; }
   private changed(id: string): void {
     if (this.suspended || this.closed) return;
     this.db.prepare("UPDATE thread SET revision=revision+1,updated_at=? WHERE id=?").run(Date.now(), id);
@@ -194,9 +196,19 @@ export class ThreadService implements ThreadApi {
       if (prior.value) return good(this.get(prior.value)!);
       if (!input.cwd || typeof input.cwd !== "string" || input.message !== undefined && (typeof input.message !== "string" || !input.message.trim())) return bad("invalid_request", "cwd and a nonempty assignment when supplied are required");
       const settings = resolveThreadSettings(input.settings); if (!settings.ok) return settings;
-      const parent = input.parentId ? this.get(input.parentId) : null;
-      if (input.parentId && !parent) return bad("not_found", "Parent thread is not owned by this service");
+      let parent = input.parentId ? this.get(input.parentId) : null;
+      if (input.parentId && !parent && this.directory) {
+        const found = await this.directory.list({ id: input.parentId, limit: 1 });
+        if (!found.ok) return found;
+        parent = found.value.threads[0] ?? null;
+      }
+      if (input.parentId && !parent) return bad("not_found", "Parent thread is not accessible to this service");
+      if (parent && (parent.parentId || parent.role === "worker")) return bad("invalid_request", "Orchestrator workers cannot spawn subagents. Report the remaining work to the parent conversation.");
       if (parent?.metadata?.archived) return bad("unavailable", "Restore the parent before creating children");
+      if (parent && (this.row(parent.id)?.held || ["stopping", "stopped", "interrupted"].includes(parent.state))) return bad("unavailable", "Resume the parent conversation before creating workers");
+      // Check local receipts first so retries of previously accepted children retain their identity.
+      const workerOwner = parent && this.workerOwner?.(parent, input);
+      if (workerOwner) return workerOwner.spawn(input);
       const metadata = { ...Object.fromEntries(["profileId", "meetingId", "bashTimeoutSeconds", "context", "execution", "source"].filter(key => parent?.metadata?.[key] !== undefined).map(key => [key, parent!.metadata![key]])), ...input.metadata };
       for (const key of ["context", "execution"] as const) if (parent && input.metadata && key in input.metadata && digest(input.metadata[key] ?? null) !== digest(parent.metadata?.[key] ?? null)) return bad("conflict", "A child must remain in its parent's execution boundary");
       if (metadata.context !== undefined && !isRunContext(metadata.context)) return bad("invalid_request", "Invalid isolated context contract");
@@ -457,6 +469,7 @@ export class ThreadService implements ThreadApi {
     const env = { ...this.options.environment?.(thread), ...extraEnv, ...(context ? { HOME: join(thread.cwd, ".home") } : {}), PI_THREAD_ID: id, PI_THREAD_SPEED: settings.speed,
       // Explicit false survives JSON transport and overrides older runners' launch environment.
       PI_THREAD_REQUIRE_SESSION: thread.metadata?.nativeHistoryRequired || recovering ? "1" : "0",
+      PI_THREAD_CAN_SPAWN: thread.role === "worker" ? "0" : "1",
       PI_THREAD_RUNNER_REFERENCE: thread.metadata?.runnerReference ? JSON.stringify(thread.metadata.runnerReference) : undefined };
     this.runtimes.set(id, runtime);
     try {

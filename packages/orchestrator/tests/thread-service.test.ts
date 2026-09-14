@@ -7,6 +7,8 @@ import { DatabaseSync } from "node:sqlite";
 import { importRemoteThreads } from "../src/threads/import.js";
 import type { OpenPiSession, PiCommand, PiEvent, PiSession, PiSessionOptions, Result } from "../src/threads/contracts.js";
 import { ThreadService } from "../src/threads/service.js";
+import { ThreadDirectory } from "../src/threads/directory.js";
+import { threadTools } from "../src/threads/pi-tools.js";
 
 const roots: string[] = [];
 const services: ThreadService[] = [];
@@ -79,7 +81,7 @@ class FakePiSession implements PiSession {
   async close(): Promise<void> { this.closed = true; }
 }
 
-function fixture(root?: string) {
+function fixture(root?: string, workersOnly = false) {
   const directory = root ?? mkdtempSync(join(tmpdir(), "thread-service-"));
   if (!root) roots.push(directory);
   const sessions: FakePiSession[] = [];
@@ -89,6 +91,7 @@ function fixture(root?: string) {
     return session;
   };
   const service = new ThreadService({
+    workersOnly,
     databasePath: join(directory, "threads.sqlite"),
     sessionsDir: join(directory, "sessions"),
     openSession,
@@ -96,6 +99,57 @@ function fixture(root?: string) {
   services.push(service);
   return { directory, service, sessions };
 }
+
+describe("leaf Orchestrator workers", () => {
+  it("routes children to fleet, rejects recursion in both owners, and retains creation receipts", async () => {
+    const person = fixture(), fleet = fixture(undefined, true);
+    const root = value(await person.service.spawn({ requestId: "root", cwd: person.directory }));
+    const existingInput = { requestId: "existing-child", parentId: root.id, cwd: person.directory };
+    const existing = value(await person.service.spawn(existingInput));
+    const directory = new ThreadDirectory({ id: "person", api: person.service }, [{ id: "fleet", api: fleet.service }]);
+    person.service.setDirectory(directory, () => fleet.service);
+    fleet.service.setDirectory(directory);
+    expect(value(await directory.spawn(existingInput)).id).toBe(existing.id);
+    const input = { requestId: "fleet-child", parentId: root.id, cwd: person.directory, message: "Do bounded work" };
+    const child = value(await directory.spawn(input));
+    expect(person.service.get(child.id)).toBeNull();
+    expect(fleet.service.get(child.id)?.role).toBe("worker");
+    expect(value(await directory.spawn(input)).id).toBe(child.id);
+    for (const parentId of [existing.id, child.id]) {
+      for (const api of [directory, person.service, fleet.service]) {
+        const result = await api.spawn({ requestId: `recursive-${parentId}`, parentId, cwd: person.directory });
+        expect(result).toMatchObject({ ok: false, error: { code: "invalid_request" } });
+      }
+    }
+    const lane = value(await fleet.service.spawn({ requestId: "lane", cwd: fleet.directory }));
+    expect(lane.role).toBe("worker");
+    expect(await fleet.service.spawn({ requestId: "lane-child", parentId: lane.id, cwd: fleet.directory })).toMatchObject({ ok: false, error: { code: "invalid_request" } });
+    value(await directory.control({ threadId: root.id, action: "stop", descendants: true }));
+    expect(person.service.get(existing.id)?.state).toBe("stopped");
+    expect(fleet.service.get(child.id)?.state).toBe("stopped");
+    expect(fleet.service.pending(child.id)[0]?.state).toBe("held");
+    expect(await directory.spawn({ requestId: "stopped-child", parentId: root.id, cwd: person.directory })).toMatchObject({ ok: false, error: { code: "unavailable" } });
+    expect(fleet.service.snapshot()).toHaveLength(2);
+  });
+
+  it("removes the spawn tool per session and relays completion to a cross-owner parent", async () => {
+    const person = fixture(), fleet = fixture(undefined, true);
+    const directory = new ThreadDirectory({ id: "person", api: person.service }, [{ id: "fleet", api: fleet.service }]);
+    person.service.setDirectory(directory, () => fleet.service);
+    fleet.service.setDirectory(directory);
+    const root = value(await directory.spawn({ requestId: "parent", cwd: person.directory, message: "Coordinate" }));
+    const child = value(await directory.spawn({ requestId: "child", parentId: root.id, cwd: person.directory, message: "Work" }));
+    value(await person.service.start()); value(await fleet.service.start());
+    await waitFor(() => person.sessions[0]?.isStreaming === true && fleet.sessions[0]?.isStreaming === true);
+    expect(person.sessions[0]!.options.env.PI_THREAD_CAN_SPAWN).toBe("1");
+    expect(fleet.sessions[0]!.options.env.PI_THREAD_CAN_SPAWN).toBe("0");
+    expect(threadTools(person.sessions[0]!.options).some(tool => tool.name === "thread_spawn")).toBe(true);
+    expect(threadTools(fleet.sessions[0]!.options).some(tool => tool.name === "thread_spawn")).toBe(false);
+    fleet.sessions[0]!.settle("Worker result");
+    await waitFor(() => person.sessions[0]!.commands.some(command => command.type === "steer" && JSON.stringify(command).includes("Worker result")));
+    expect(fleet.service.get(child.id)?.state).toBe("idle");
+  });
+});
 
 async function settle(session: FakePiSession, service: ThreadService, threadId: string, text = "done") {
   session.settle(text);
@@ -162,10 +216,9 @@ describe("ThreadService", () => {
     await service.start();
     const parent = value(await service.spawn({ requestId: "parent", id: "parent", cwd: directory, settings: { model: "luna" }, metadata: { meetingId: "room", profileId: "personal", nativeHistoryRequired: true } }));
     expect(parent.settings).toEqual({ model: "openai-codex/gpt-5.6-luna", thinkingLevel: "max", speed: "standard" });
-    value(await service.control({ threadId: parent.id, action: "stop", descendants: false }));
-
     const defaultChild = value(await service.spawn({ requestId: "default-child", id: "default-child", parentId: parent.id, cwd: directory, message: "first assignment" }));
     const lunaChild = value(await service.spawn({ requestId: "luna-child", id: "luna-child", parentId: parent.id, cwd: directory, message: "second assignment", settings: { model: "luna" }, admission: "background" }));
+    value(await service.control({ threadId: parent.id, action: "stop", descendants: false }));
     await waitFor(() => sessions.length === 2 && sessions.every(session => session.commands.some(command => command.type === "prompt")));
 
     expect(defaultChild.settings).toEqual({ model: "openai-codex/gpt-6-astra", thinkingLevel: "high", speed: "standard" });
@@ -206,8 +259,8 @@ describe("ThreadService", () => {
     const first = fixture();
     await first.service.start();
     const parent = value(await first.service.spawn({ requestId: "parent", id: "parent", cwd: first.directory }));
-    value(await first.service.control({ threadId: parent.id, action: "stop", descendants: false }));
     const child = value(await first.service.spawn({ requestId: "child-work", id: "child", parentId: parent.id, cwd: first.directory, message: "child task" }));
+    value(await first.service.control({ threadId: parent.id, action: "stop", descendants: false }));
     await waitFor(() => first.sessions[0]?.commands.some(command => command.type === "prompt"));
     await settle(first.sessions[0]!, first.service, child.id, "child result");
     await waitFor(() => first.service.pending(parent.id).length === 1);

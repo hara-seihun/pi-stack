@@ -25,7 +25,11 @@ Humans and agents have the same operations:
 - An explicit new human or agent message to a stopped thread resumes it with that message ahead of held messages. Held messages retain their relative order.
 - Automatic child-idle notifications do not resume a stopped parent.
 
-Remote's Orchestrator tab lists fleet threads and children using the same thread identities and controls. The right panel lists active direct children, with an expandable Inactive children section. These are presentation filters, not separate agent types.
+Remote's main Threads tab lists only parentless person conversations. The Orchestrator tab lists fleet threads and children using the same thread identities and controls. The right panel lists active direct children, with an expandable Inactive children section.
+
+Delegation has exactly one level. Person conversations create workers in their authorized Orchestrator owner when configured. Ordinary people without access to the administrator's fleet retain workers in their own person boundary. Every parented thread, including existing records, and every fleet or isolated-application thread is a leaf worker. The owning service derives this role from custody and parentage, not client metadata. Workers do not receive `thread_spawn`, and the backend rejects recursive spawning even from already-running sessions with older tool schemas. Stopped, held, interrupted or archived parents cannot create new workers. Local receipts are checked before forwarding creation so retries preserve previously accepted child identities. Existing transcripts and receipts remain with their current owner; they appear only in Orchestrator, not the main drawer.
+
+Encrypted-folder workers also stay in their person's mount namespace and transcript custody. These remain leaf workers in the Orchestrator view. Worker tool eligibility is sent explicitly per session as `PI_THREAD_CAN_SPAWN=0`; conversations receive `1`. Shared runner processes do not carry this setting between sessions. Agent CLI `run` calls preserve the calling thread as parent and use its authorized API; agents cannot use unparented `wave` calls. Stop-with-descendants and child discovery traverse authorized owners, while durable completion notifications return through the directory to the original parent.
 
 The UI stops a thread directly when there are no subthreads. Otherwise it asks "Should the subthreads stop too?" with "Yes, stop subthreads" and "No, just stop this thread" choices.
 
@@ -33,7 +37,7 @@ An execution has exclusive ownership of its thread. Cancellation fences late cal
 
 ## Relationships and notifications
 
-Threads can list all accessible threads in their current environment or their direct children, read persisted history without starting a recipient, and send queue/steer/hard-steer messages to other accessible threads. Children receive the same tools. Parentage determines discovery and automatic notifications, not aggregate execution state.
+Threads can list all accessible threads in their current environment or their direct children, read persisted history without starting a recipient, and send queue/steer/hard-steer messages to other accessible threads. Workers retain these collaboration tools but cannot spawn. Parentage determines discovery and automatic notifications, not aggregate execution state.
 
 When a child's execution settles, commit its outcome and parent notification durably. Include thread/work IDs, normal/error/cancelled outcome, and that execution's final assistant message or an explicit absence. Deliver through ordinary messaging, with stable receipt identity and restart-safe deduplication. Notifications steer busy parents at the next safe boundary and wake idle parents, but remain held for stopped parents. Idle is not proof that an assignment succeeded.
 

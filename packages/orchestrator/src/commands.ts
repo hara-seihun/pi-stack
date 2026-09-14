@@ -56,7 +56,12 @@ function threadSettings(named:Map<string,string>):SettingsOverrides|undefined{
   return{...(model?{model}:{}),...(thinkingLevel?{thinkingLevel:thinkingLevel as SettingsOverrides["thinkingLevel"]}:{}),...(speed?{speed:speed as SettingsOverrides["speed"]}:{})};
 }
 async function spawnThreads(input:Omit<SpawnThread,"requestId">,count:number):Promise<void>{
-  const api=createThreadClient(`${BASE}/v1/threads`),threads:Thread[]=[];
+  if(process.env.PI_THREAD_CAN_SPAWN==="0")throw new Error("Orchestrator workers cannot spawn subagents; report remaining work to the parent conversation");
+  if(process.env.PI_THREAD_ID){
+    if(input.parentId&&input.parentId!==process.env.PI_THREAD_ID)throw new Error("Agent spawning must use its own thread as parent");
+    input={...input,parentId:process.env.PI_THREAD_ID};
+  }
+  const api=createThreadClient(process.env.PI_THREAD_API_URL??`${BASE}/v1/threads`),threads:Thread[]=[];
   for(let index=0;index<count;index++){
     const result=await api.spawn({...input,requestId:randomUUID()});
     if(!result.ok){output({...result,threads});process.exitCode=1;return;}
@@ -102,6 +107,7 @@ export async function dispatch(argv:string[]):Promise<void>{
       if(!message.trim())throw new Error("run requires --prompt");
       await spawnThreads({message,cwd:named.get("cwd")??process.cwd(),title:named.get("title"),parentId:named.get("parent"),settings,admission},count);
     }else{
+      if(process.env.PI_THREAD_ID||process.env.PI_THREAD_CAN_SPAWN==="0")throw new Error("Agents cannot launch unparented waves; use thread_spawn from the parent conversation");
       const id=named.get("lane")??positional[0];if(!id)throw new Error("wave requires a lane");
       output(await request("/v1/wave","POST",{lane:id,count,settings,...(force||background?{admission}:{})}));
     }

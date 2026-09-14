@@ -194,7 +194,11 @@ const fleet = fleetUrl ? createThreadClient(`${fleetUrl}/v1/thread-owner`) : nul
 const namingUrl = modelBrokerUrl() ?? fleetUrl;
 const namingClient = namingUrl ? new CompletionClient({ baseUrl: namingUrl }) : null;
 const directory = new ThreadDirectory({ id: "person", api: threads }, fleet ? [{ id: "fleet", api: fleet }] : []);
-threads.setDirectory(directory);
+threads.setDirectory(directory, (parent, input) => {
+  // Encrypted-folder sessions must retain their mount namespace and transcript custody.
+  const privatePath = (path: string) => resolve(path) === resolve(PRIVATE_DIR) || resolve(path).startsWith(`${resolve(PRIVATE_DIR)}/`);
+  return privatePath(parent.cwd) || privatePath(input.cwd) ? undefined : fleet ?? undefined;
+});
 const peerThreads = new Map<string, Thread>();
 const peerChildren = new Map<string, boolean>();
 const peerInspections = new Map<string, ThreadInspection>();
@@ -1214,7 +1218,7 @@ async function directChildren(id: string): Promise<Result<Session[]>> {
   const children: Thread[] = [];
   let cursor: string | undefined;
   do {
-    const page = await owner.value.api.list({ parentId: id, limit: 100, cursor });
+    const page = await directory.list({ parentId: id, limit: 100, cursor });
     if (!page.ok) return page;
     children.push(...page.value.threads);
     cursor = page.value.nextCursor;

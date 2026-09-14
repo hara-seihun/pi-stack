@@ -3,7 +3,7 @@ import { createElement, isValidElement, type ReactElement, type ReactNode } from
 import { renderToStaticMarkup } from "react-dom/server";
 import { ChildThreadList } from "./src/thread-views";
 import { requestStop, StopChoices, submitThreadControl } from "./src/thread-controls";
-import { activityColor, working } from "./src/thread-state";
+import { activityColor, conversationThreads, orchestratorThreads, working } from "./src/thread-state";
 import type { Session } from "./src/types";
 
 const session = (id: string, extra: Partial<Session> = {}): Session => ({
@@ -37,6 +37,11 @@ async function withThreadClient(fetcher: typeof fetch, run: () => Promise<void>)
 }
 
 describe("thread controls", () => {
+  test("main conversations and Orchestrator workers have disjoint drawer membership", () => {
+    const rows = [session("root"), session("existing-worker", { parentId: "root" }), session("fleet-worker", { parentId: "root", origin: "fleet" }), session("lane", { origin: "fleet" })];
+    expect(conversationThreads(rows).map(row => row.id)).toEqual(["root"]);
+    expect(orchestratorThreads(rows).map(row => row.id)).toEqual(["existing-worker", "fleet-worker", "lane"]);
+  });
   test("keeps active children outside the collapsed inactive section", () => {
     const html = renderToStaticMarkup(createElement(ChildThreadList, { children: [
       session("active-child", { parentId: "parent", state: "RUNNING", activity: "WORKING" }),

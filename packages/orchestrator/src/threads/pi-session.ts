@@ -25,7 +25,8 @@ export const openPiSession: OpenPiSession = async (options, output, exit) => {
   const admission = piCwdAdmission(options.env.PI_REMOTE_WORKSPACES);
   options = { ...options, cwd: requirePiCwd(admission, options.cwd, "thread.cwd") };
   const env: NodeJS.ProcessEnv = { ...process.env, ...options.env, PI_THREAD_ID: options.threadId,
-    PI_THREAD_REQUIRE_SESSION: options.env.PI_THREAD_REQUIRE_SESSION === "1" ? "1" : "0" };
+    PI_THREAD_REQUIRE_SESSION: options.env.PI_THREAD_REQUIRE_SESSION === "1" ? "1" : "0",
+    PI_THREAD_CAN_SPAWN: options.env.PI_THREAD_CAN_SPAWN === "0" ? "0" : "1" };
   for (const key of Object.keys(env)) if (key.startsWith("PI_STACK_CORE_")) delete env[key];
   return piEnvironmentScope.run(env, async () => {
     const execution = new PiExecution();

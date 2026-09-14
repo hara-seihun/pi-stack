@@ -18,6 +18,7 @@ export type SettingsOverrides = Partial<ThreadSettings>;
 export interface Thread {
   id: string;
   parentId: string | null;
+  role?: "conversation" | "worker";
   title: string;
   cwd: string;
   sessionFile: string;

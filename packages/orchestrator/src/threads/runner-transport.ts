@@ -112,7 +112,7 @@ async function ensureRunner(control: string, options: PiSessionOptions, durableS
     isolatePiEnvironment(options.cwd, env);
     mkdirSync(env.HOME!, { recursive: true, mode: 0o700 });
   }
-  for (const key of Object.keys(env)) if (/^(PI_REMOTE_SESSION_ID|PI_THREAD_ID|PI_THREAD_REQUIRE_SESSION|PI_REMOTE_CONTEXT_OWNER_PID|PI_SUBAGENT_MODEL|PI_REMOTE_MEETING_ID|PI_REMOTE_SERVICE_TIER_FILE|PI_ORCHESTRATOR_RUN_ID|PI_SESSION_FILE)$/.test(key)) delete env[key];
+  for (const key of Object.keys(env)) if (/^(PI_REMOTE_SESSION_ID|PI_THREAD_ID|PI_THREAD_REQUIRE_SESSION|PI_THREAD_CAN_SPAWN|PI_REMOTE_CONTEXT_OWNER_PID|PI_SUBAGENT_MODEL|PI_REMOTE_MEETING_ID|PI_REMOTE_SERVICE_TIER_FILE|PI_ORCHESTRATOR_RUN_ID|PI_SESSION_FILE)$/.test(key)) delete env[key];
   const entry = runnerHostEntry();
   if (!existsSync(entry)) throw new Error(`Compiled thread runner is missing: ${entry}; build pi-orchestrator before starting threads`);
   const root = options.env.PI_ORCHESTRATOR_EXECUTION === "root-repair";
