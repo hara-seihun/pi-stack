@@ -264,6 +264,8 @@ test("creates and releases a clean review checkout", () => {
       "**/.ruff_cache",
       ".lake",
       "**/.lake",
+      "target",
+      "**/target",
       "ignored-output",
     ]);
     assert.equal(existsSync(created.path), true);

@@ -41,6 +41,12 @@ const DEFAULT_CACHE_PATHS = [
   "**/.ruff_cache",
   ".lake",
   "**/.lake",
+  // Cargo's build directory. Without it every Rust checkout fails release with "unclassified
+  // ignored output" the first time anyone builds in it, which is every time. `stripCaches`
+  // refuses to remove anything holding tracked files, so a repository that really does track a
+  // directory called `target` is unaffected.
+  "target",
+  "**/target",
 ];
 const DEFAULT_LEASE_SECONDS = 6 * 60 * 60;
 const DEFAULT_MAX_COUNT = 0;
