@@ -69,6 +69,7 @@ code=$(get /v1/router-health "$scratch/router")
 persons_dir=$(pi_stack_persons_dir)
 for file in "$persons_dir"/*.json; do
   [[ -f $file ]] || continue
+  person_failures=$failures
   user=$(pi_stack_as_root jq -r '.user' "$file")
   [[ $user =~ ^[a-z_][a-z0-9_-]*$ ]] || { fail 'invalid person user'; continue; }
   code=$(get /v1/health "$body" -H "x-pi-remote-user: $user")
@@ -110,7 +111,9 @@ for file in "$persons_dir"/*.json; do
   [[ $code == 200 ]] && jq -e --arg commit "$release" '.enabled == true and .releaseCommit == $commit' "$body" >/dev/null 2>&1 || fail "$user: Voice is not running the supervisor release"
   code=$(get /v1/meet "$body" -H "@$headers")
   [[ $code == 200 ]] && jq -e '.transcriptionAvailable == true' "$body" >/dev/null 2>&1 || fail "$user: Meet transcription runtime is unavailable"
-  echo "smoke: $user is unlocked and her supervisor, Meet and Voice answer"
+  if (( failures == person_failures )); then
+    echo "smoke: $user is unlocked and her supervisor, Meet and Voice answer"
+  fi
 done
 
 if (( failures > 0 )); then

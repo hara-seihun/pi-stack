@@ -13,10 +13,12 @@ const base = `http://127.0.0.1:${port}`;
 let router: ReturnType<typeof Bun.spawn>;
 const supervisors: ReturnType<typeof Bun.serve>[] = [];
 let remoteCalls = 0;
+const healthChecks = new Map<string, () => Promise<Response>>();
 
 function person(user: string, encrypted: boolean, remoteAccess: string[]) {
   const server = Bun.serve({ hostname: "127.0.0.1", port: 0, fetch(req) {
     if (!existsSync(join(units, `pi-remote@${user}.service`))) return new Response("Stopped", { status: 503 });
+    if (new URL(req.url).pathname === "/v1/health" && healthChecks.has(user)) return healthChecks.get(user)!();
     return Response.json({ user, path: new URL(req.url).pathname });
   } });
   supervisors.push(server);
@@ -103,6 +105,55 @@ test("bootstrap exposes persons, not endpoint access; Android can preflight sess
   const preflight = await fetch(`${base}/v1/environment`, { method: "OPTIONS", headers: { origin: "http://localhost", "access-control-request-headers": "x-pi-remote-session" } });
   expect(preflight.status).toBe(204);
   expect(preflight.headers.get("access-control-allow-headers")).toContain("x-pi-remote-session");
+});
+
+test.each([
+  { user: "jodie", active: false },
+  { user: "sybil", active: true },
+  { user: "guest", active: true },
+])("unlock waits for supervisor readiness: %j", async ({ user, active }) => {
+  const unit = join(units, `pi-remote@${user}.service`);
+  if (active) {
+    writeFileSync(unit, "");
+    if (user !== "guest") writeFileSync(join(keys, user), `${user}-key`);
+  }
+  const probed = Promise.withResolvers<void>();
+  const ready = Promise.withResolvers<Response>();
+  healthChecks.set(user, () => { probed.resolve(); return ready.promise; });
+  let settled = false;
+  const starting = unlock(user, user === "guest" ? "" : `${user}-key`).then(response => {
+    settled = true;
+    return response;
+  });
+  try {
+    const first = await Promise.race([probed.promise.then(() => "probe"), starting.then(() => "unlock")]);
+    expect(first).toBe("probe");
+    expect(existsSync(unit)).toBe(true);
+    expect(settled).toBe(false);
+    ready.resolve(Response.json({ ok: true }));
+    const response = await starting;
+    expect(response.status).toBe(200);
+    const { session } = await response.json();
+    healthChecks.delete(user);
+    for (const path of ["/v1/health", "/v1/environment", "/v1/sessions"]) {
+      expect((await request(path, session, user)).status).toBe(200);
+    }
+  } finally {
+    ready.resolve(new Response("Test ended", { status: 503 }));
+    healthChecks.delete(user);
+    await starting;
+  }
+});
+
+test("an active supervisor that never becomes ready cannot mint a session", async () => {
+  healthChecks.set("sybil", async () => new Response("Starting", { status: 503 }));
+  try {
+    const response = await unlock("sybil");
+    expect(response.status).toBe(503);
+    expect((await response.json()).session).toBeUndefined();
+    expect(existsSync(join(keys, "sybil"))).toBe(true);
+    expect(existsSync(join(units, "pi-remote@sybil.service"))).toBe(true);
+  } finally { healthChecks.delete("sybil"); }
 });
 
 test("header and query changes never inherit an already-unlocked owner's identity", async () => {

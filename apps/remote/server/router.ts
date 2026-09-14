@@ -70,18 +70,32 @@ async function supervisorHealthy(person: Person): Promise<boolean> {
   } catch { return false; }
 }
 
+async function waitForSupervisor(person: Person): Promise<boolean> {
+  const deadline = Date.now() + UNLOCK_TIMEOUT_MS;
+  while (Date.now() < deadline) {
+    if (await supervisorHealthy(person)) return true;
+    const state = await activeState(person);
+    if (state === "failed" || state === "inactive") break;
+    await Bun.sleep(200);
+  }
+  activeUsers.delete(person.user);
+  return false;
+}
+
 type StartResult = { ok: true } | { ok: false; error: string; status: number };
 async function start(person: Person, key: string): Promise<StartResult> {
   if (person.unlock && !key) return { ok: false, error: "Key required", status: 400 };
   if (await unitActive(person)) {
-    if (!person.unlock) return { ok: true };
-    // A mounted folder proves the retained credential, not a new caller's key.
-    const retained = await readFile(join(KEY_DIR, person.user)).catch(() => null);
-    if (!retained) return { ok: false, error: "Active folder has no retained unlock credential; stop its unit before unlocking", status: 503 };
-    const supplied = Buffer.from(key);
-    return retained.length === supplied.length && timingSafeEqual(retained, supplied)
+    if (person.unlock) {
+      // A mounted folder proves the retained credential, not a new caller's key.
+      const retained = await readFile(join(KEY_DIR, person.user)).catch(() => null);
+      if (!retained) return { ok: false, error: "Active folder has no retained unlock credential; stop its unit before unlocking", status: 503 };
+      const supplied = Buffer.from(key);
+      if (retained.length !== supplied.length || !timingSafeEqual(retained, supplied)) return { ok: false, error: "Wrong key", status: 403 };
+    }
+    return await waitForSupervisor(person)
       ? { ok: true }
-      : { ok: false, error: "Wrong key", status: 403 };
+      : { ok: false, error: "The supervisor did not become ready", status: 503 };
   }
   await mkdir(KEY_DIR, { recursive: true, mode: 0o700 });
   await chmod(KEY_DIR, 0o700);
@@ -92,13 +106,7 @@ async function start(person: Person, key: string): Promise<StartResult> {
       await forget(person);
       return { ok: false, error: "Wrong key, or the supervisor could not start", status: 400 };
     }
-    const deadline = Date.now() + UNLOCK_TIMEOUT_MS;
-    while (Date.now() < deadline) {
-      if (await supervisorHealthy(person)) return { ok: true };
-      const state = await activeState(person);
-      if (state === "failed" || state === "inactive") break;
-      await Bun.sleep(200);
-    }
+    if (await waitForSupervisor(person)) return { ok: true };
     await forget(person);
     return { ok: false, error: person.unlock ? "Wrong key, or the folder would not open" : "The supervisor did not come up", status: 400 };
   } catch {
