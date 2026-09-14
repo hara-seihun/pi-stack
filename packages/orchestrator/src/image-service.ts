@@ -7,6 +7,7 @@ import { chooseInteractiveAccount, eligibleInteractiveAccounts } from "./auth/ac
 import { providerOAuth, type SharedOAuthAuth } from "./auth/shared-oauth.js";
 import { loadConfig } from "./config.js";
 import { Store } from "./store.js";
+import { modelBrokerUrl, brokerModelAuth, BROKER_ROUTES } from "./model-broker-contract.js";
 import { IMAGE_MODELS, IMAGE_QUALITIES, IMAGE_SIZES, PNG_SIGNATURE, requestImage, type ImageAuth, type ImageFailure, type ImageRequest, type ImageResult } from "./image-generation.js";
 
 export type SharedImageInput = Omit<ImageRequest, "images"> & { inputPaths?: readonly string[] };
@@ -16,7 +17,7 @@ export { IMAGE_MODELS, IMAGE_QUALITIES, IMAGE_SIZES, type GeneratedImage } from 
 export type SharedImageResult = (Extract<ImageResult, { ok: true }> & { accountId: string }) | { ok: false; error: SharedImageFailure };
 export type ImageGenerationOptions = { signal?: AbortSignal; cwd?: string; accountSelection?: "spread" };
 export type SharedImageAccountOwner = { store: Store; shared: SharedOAuthAuth | undefined };
-export type SharedImageServiceOptions = { configPath?: string; ledgerPath?: string; authPath?: string };
+export type SharedImageServiceOptions = { configPath?: string; ledgerPath?: string; authPath?: string; brokerUrl?: string };
 export interface SharedImageGenerationService {
   generateImageWithSharedAccount(input: SharedImageInput, options?: ImageGenerationOptions): Promise<SharedImageResult>;
   close(): Promise<void>;
@@ -154,7 +155,34 @@ export async function generateImageWithSharedAccount(input: SharedImageInput, op
   return result;
 }
 
+function createBrokerImageService(url: string): SharedImageGenerationService {
+  const shutdown = new AbortController();
+  const pending = new Set<Promise<SharedImageResult>>();
+  return {
+    generateImageWithSharedAccount(input, options = {}) {
+      if (shutdown.signal.aborted) return Promise.resolve({ ok: false, error: { kind: "closed", message: "Image generation service is closed." } });
+      const run = async (): Promise<SharedImageResult> => {
+        const signal = AbortSignal.any([shutdown.signal, AbortSignal.timeout(300_000), ...(options.signal ? [options.signal] : [])]);
+        const inputs = await loadImageInputs(input, options.cwd ?? process.cwd(), signal);
+        if (!inputs.ok) return inputs;
+        const auth = imageAuth(brokerModelAuth("openai-codex", url), "codex", "pi-model-broker");
+        if (!auth.ok) return auth;
+        const result = await requestImage({ ...input, images: inputs.value }, auth.value, signal,
+          (_upstream, init) => fetch(`${url}${BROKER_ROUTES["openai-codex"].path}`, init));
+        return result.ok ? { ...result, accountId: "model-broker" } : result;
+      };
+      const work = run();
+      pending.add(work);
+      void work.then(() => pending.delete(work), () => pending.delete(work));
+      return work;
+    },
+    async close() { shutdown.abort(); await Promise.allSettled(pending); },
+  };
+}
+
 export function createSharedImageGenerationService(options: SharedImageServiceOptions | SharedImageAccountOwner = {}): SharedImageGenerationService {
+  const brokerUrl = ("brokerUrl" in options ? options.brokerUrl : undefined) ?? modelBrokerUrl();
+  if (brokerUrl) return createBrokerImageService(brokerUrl);
   let owner: SharedImageAccountOwner;
   let ownsStore = false;
   if ("store" in options) owner = options;
