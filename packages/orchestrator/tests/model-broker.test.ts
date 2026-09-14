@@ -1,5 +1,5 @@
 import { afterEach, expect, test, vi } from "vitest";
-import { mkdtempSync, writeFileSync } from "node:fs";
+import { mkdirSync, mkdtempSync, writeFileSync } from "node:fs";
 import { rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -8,6 +8,7 @@ import { Store } from "../src/store.js";
 import { brokerProvider, modelBrokerUrl, validateBrokerBody } from "../src/model-broker-contract.js";
 import { createModelBroker, validateBrokerConfig, type BrokerTransport } from "../src/model-broker.js";
 import { createSharedImageGenerationService } from "../src/image-service.js";
+import { loadConfig, modelBrokerUrl as publicModelBrokerUrl } from "../src/api.js";
 
 const cleanup: (() => Promise<void>)[] = [];
 afterEach(async () => { for (const close of cleanup.splice(0).reverse()) await close(); vi.unstubAllEnvs(); });
@@ -31,7 +32,7 @@ async function fixture(transport: BrokerTransport) {
   const [port] = await broker.listen();
   const url = `http://127.0.0.1:${port}`;
   const post = (data: unknown, path = "/backend-api/codex/responses") => fetch(`${url}${path}`, { method: "POST", headers: { "content-type": "application/json", authorization: "Bearer attacker", "chatgpt-account-id": "owner-only", cookie: "owner-cookie", session_id: "kenan-session" }, body: JSON.stringify(data) });
-  return { store, token, post, url };
+  return { root, store, token, post, url };
 }
 
 test("model-only routes inject granted credentials, namespace affinity and retain only broker usage", async () => {
@@ -106,7 +107,9 @@ test("image service uses broker transport without local OAuth or owner filesyste
     return sse({ id: "image-response", status: "completed", output: [{ id: "image", type: "image_generation_call", status: "completed", result: png.toString("base64") }], usage: {} });
   });
   const f = await fixture(transport);
-  const service = createSharedImageGenerationService({ brokerUrl: f.url, ledgerPath: "/unreadable/owner-ledger", authPath: "/unreadable/owner-auth" });
+  const configPath = join(f.root, "client-config.json");
+  writeFileSync(configPath, JSON.stringify({ modelBrokerUrl: f.url }));
+  const service = createSharedImageGenerationService({ configPath, ledgerPath: "/unreadable/owner-ledger", authPath: "/unreadable/owner-auth" });
   cleanup.push(() => service.close());
   expect(await service.generateImageWithSharedAccount({ prompt: "hello" })).toMatchObject({ ok: true, accountId: "model-broker", images: [{ bytes: png }] });
 });
@@ -131,6 +134,25 @@ test("Anthropic native requests and signed request bytes survive the broker", as
   const response = await fetch(`${f.url}/v1/messages?beta=true`, { method: "POST", headers: { "content-type": "application/json" }, body: signedBytes });
   expect(response.status).toBe(200);
   await response.text();
+});
+
+test("per-user config discovers the broker without shell environment and explicit overrides win", () => {
+  const home = mkdtempSync(join(tmpdir(), "pi-broker-config-"));
+  cleanup.push(() => rm(home, { recursive: true, force: true }));
+  const path = join(home, ".config/pi-orchestrator/config.json");
+  mkdirSync(join(home, ".config/pi-orchestrator"), { recursive: true });
+  writeFileSync(path, JSON.stringify({ modelBrokerUrl: "http://127.0.0.1:2461" }));
+  const env = { HOME: home };
+  expect(publicModelBrokerUrl(env)).toBe("http://127.0.0.1:2461");
+  expect(loadConfig(undefined, undefined, env).modelBrokerUrl).toBe("http://127.0.0.1:2461");
+  expect(publicModelBrokerUrl({ ...env, PI_MODEL_BROKER_URL: "http://127.0.0.1:2462" })).toBe("http://127.0.0.1:2462");
+  const other = join(home, "other.json");
+  writeFileSync(other, JSON.stringify({ modelBrokerUrl: "http://127.0.0.1:2463" }));
+  expect(publicModelBrokerUrl({ ...env, PI_ORCHESTRATOR_CONFIG: other })).toBe("http://127.0.0.1:2463");
+  expect(publicModelBrokerUrl(env, other)).toBe("http://127.0.0.1:2463");
+  writeFileSync(path, JSON.stringify({ modelBrokerUrl: 2461 }));
+  expect(() => publicModelBrokerUrl(env)).toThrow("modelBrokerUrl must be a string");
+  expect(() => publicModelBrokerUrl({ ...env, PI_MODEL_BROKER_URL: "" })).toThrow();
 });
 
 test("broker configuration and inline Anthropic tools reject ambiguous trust boundaries", () => {

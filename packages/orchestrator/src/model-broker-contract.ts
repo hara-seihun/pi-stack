@@ -1,4 +1,5 @@
 import type { ModelAuth, Provider } from "@earendil-works/pi-ai";
+import { loadConfig } from "./config.js";
 
 export const BROKER_ENV = "PI_MODEL_BROKER_URL";
 export const BROKER_ROUTES = {
@@ -7,12 +8,12 @@ export const BROKER_ROUTES = {
 } as const;
 export type BrokerFamily = keyof typeof BROKER_ROUTES;
 
-export function modelBrokerUrl(env: NodeJS.ProcessEnv = process.env): string | undefined {
-  const value = env[BROKER_ENV];
+export function modelBrokerUrl(env: NodeJS.ProcessEnv = process.env, configPath?: string): string | undefined {
+  const value = env[BROKER_ENV] ?? loadConfig(configPath, undefined, env).modelBrokerUrl;
   if (value === undefined) return undefined;
   const url = new URL(value);
   if (url.protocol !== "http:" || url.hostname !== "127.0.0.1" || !url.port || url.username || url.password || url.pathname !== "/" || url.search || url.hash) {
-    throw new Error(`${BROKER_ENV} must be http://127.0.0.1:PORT`);
+    throw new Error(`modelBrokerUrl / ${BROKER_ENV} must be http://127.0.0.1:PORT`);
   }
   return url.origin;
 }

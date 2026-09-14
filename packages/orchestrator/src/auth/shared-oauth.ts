@@ -19,8 +19,8 @@ const TOKEN_MIN_LIFETIME_MS = 5 * 60_000;
 type RefreshCredential = (credential: OAuthCredential, signal: AbortSignal) => Promise<OAuthCredential>;
 type CredentialIdentity = (credential: OAuthCredential) => string | undefined;
 
-export function defaultSharedAuthPath(ledgerPath: string): string {
-  if (process.env.PI_ORCHESTRATOR_AUTH !== undefined) return process.env.PI_ORCHESTRATOR_AUTH;
+export function defaultSharedAuthPath(ledgerPath: string, env: NodeJS.ProcessEnv = process.env): string {
+  if (env.PI_ORCHESTRATOR_AUTH !== undefined) return env.PI_ORCHESTRATOR_AUTH;
   try {
     return join(dirname(realpathSync(ledgerPath)), "auth.json");
   } catch {

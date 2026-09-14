@@ -130,6 +130,7 @@ export type ProfileCandidate = Omit<ModelCandidate, "thinking"> & (
 );
 
 export interface OrchestratorConfig {
+  readonly modelBrokerUrl?: string;
   readonly listenHost?: string;
   readonly profiles: Readonly<Record<string, readonly ProfileCandidate[]>>;
   readonly backgroundSpendFraction: number;

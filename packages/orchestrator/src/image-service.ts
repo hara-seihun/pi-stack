@@ -181,7 +181,7 @@ function createBrokerImageService(url: string): SharedImageGenerationService {
 }
 
 export function createSharedImageGenerationService(options: SharedImageServiceOptions | SharedImageAccountOwner = {}): SharedImageGenerationService {
-  const brokerUrl = ("brokerUrl" in options ? options.brokerUrl : undefined) ?? modelBrokerUrl();
+  const brokerUrl = ("brokerUrl" in options ? options.brokerUrl : undefined) ?? modelBrokerUrl(process.env, "configPath" in options ? options.configPath : undefined);
   if (brokerUrl) return createBrokerImageService(brokerUrl);
   let owner: SharedImageAccountOwner;
   let ownsStore = false;

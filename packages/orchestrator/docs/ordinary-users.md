@@ -58,24 +58,25 @@ Granting an alias explicitly permits that person's requests to spend that accoun
 
 ## Client contract
 
-For Sybil, set:
+Set `modelBrokerUrl` in Sybil's existing `/home/sybil/.config/pi-orchestrator/config.json`:
 
-```text
-PI_MODEL_BROKER_URL=http://127.0.0.1:2461
-PI_ORCHESTRATOR_LEDGER=/home/sybil/.local/share/pi-orchestrator/ledger.sqlite3
-PI_ORCHESTRATOR_CONFIG=/home/sybil/.config/pi-orchestrator/config.json
-PI_ORCHESTRATOR_AUTH=/home/sybil/.local/share/pi-orchestrator/auth.json
+```json
+{
+  "modelBrokerUrl": "http://127.0.0.1:2461"
+}
 ```
 
-Use Jodie's own paths and port for Jodie. Do not point any of these paths, `PI_AGENT_DIR`, `PI_CODING_AGENT_DIR`, or Remote state paths into the owner's home or shared owner state. Per-user paths are already Orchestrator defaults; explicit paths help service definitions avoid inherited overrides. The local auth file needs no shared credential. The owner keeps the sole issued OAuth credentials and refresh lock.
+Use Jodie's own config and port for Jodie. This is the client endpoint selection, not another grant registry. Plain CLI invocations and agent tools read it without a login-shell export. `PI_MODEL_BROKER_URL` explicitly overrides this field; `PI_ORCHESTRATOR_CONFIG` selects another config file. Invalid configured values fail rather than selecting direct shared credentials. Restart or reload an existing agent after changing its broker endpoint.
 
-The ordinary routing extension detects `PI_MODEL_BROKER_URL` before opening shared account state. It registers canonical `openai-codex` and `anthropic` models through the broker. Select canonical model names, not owner account aliases. Saved numbered model selections resolve to the canonical family through `resolveSessionModel`. Subagent model pins still apply.
+Local ledger and auth paths default to `~/.local/share/pi-orchestrator/ledger.sqlite3` and its adjacent `auth.json`. Their optional overrides are `PI_ORCHESTRATOR_LEDGER` and `PI_ORCHESTRATOR_AUTH`. Do not point these paths, the config path, `PI_AGENT_DIR`, `PI_CODING_AGENT_DIR`, or Remote state paths into the owner's home or shared owner state. Per-user paths are already Orchestrator defaults; explicit paths help service definitions avoid inherited overrides. The local auth file needs no shared credential. The owner keeps the sole issued OAuth credentials and refresh lock.
+
+The ordinary routing extension discovers the broker endpoint from the environment override or per-user config before opening shared account state. It registers canonical `openai-codex` and `anthropic` models through the broker. Select canonical model names, not owner account aliases. Saved numbered model selections resolve to the canonical family through `resolveSessionModel`. Subagent model pins still apply.
 
 The native adapters receive public format markers so their existing OAuth request formatting runs. Those strings cannot authenticate to a provider, are not copied OAuth sessions, and do not authenticate to the broker. The host's UID filter authenticates the connection. Changing the environment cannot grant access to another principal's port or the owner's files.
 
 Normal chat streams, client-side tools, native Codex compaction and image generation use the broker. SSE keeps the native request/response hooks used by compaction. Codex's zstd request bodies are decoded with a bounded output size. Image edits load input files in the user's process and send image bytes; the broker never receives a path to open. Image generation requires the `openai-codex/gpt-5.6-luna` model grant because Luna routes the image tool request.
 
-`createSharedImageGenerationService` automatically uses the broker environment. Its explicit `brokerUrl` option supports callers which already have the person's environment. In broker mode it never opens an owner ledger or auth file. Remote's observation client stays local, so its fleet list and account plans do not reveal the owner's fleet or pool. A local ledger has no shared account rows and does not duplicate the broker's account usage attribution.
+The public API exports `modelBrokerUrl(env?, configPath?)`, `loadConfig` and the `OrchestratorConfig` type, including its optional `modelBrokerUrl` field. `createSharedImageGenerationService` uses that same endpoint discovery and honors its explicit `configPath` option. Its explicit `brokerUrl` option supports callers which already resolved the person's endpoint. In broker mode it never opens an owner ledger or auth file. Remote's observation client stays local, so its fleet list and account plans do not reveal the owner's fleet or pool. A local ledger has no shared account rows and does not duplicate the broker's account usage attribution.
 
 ## Broker request boundary
 
@@ -94,4 +95,4 @@ Codex cache keys and provider affinity headers are namespaced by the configured 
 
 The host owner should prove the actual UID boundary before enabling users. As each ordinary UID, confirm that owner files and runtime sockets are inaccessible, the fleet API and other person's broker port are refused, and their own broker port accepts a granted model request. Then make one ordinary agent turn, one native compaction and one image request through the installed runtime. These are deployment checks, not substitutes for the UID filter.
 
-The focused source tests use fake upstream responses and finish in seconds. They cover route and grant refusal, stored-resource refusal, credential replacement, scoped affinity, leases, usage, native transport hooks and image transport without owner files. They make no provider calls.
+The focused source tests use fake upstream responses and finish in seconds. They cover route and grant refusal, stored-resource refusal, credential replacement, scoped affinity, leases, usage, native transport hooks and image transport without owner files. A config-only startup test opens native parent and child sessions, switches from numbered provider aliases to canonical broker models, and exercises the bundled CLI without broker or Orchestrator path environment overrides. They make no provider calls.
