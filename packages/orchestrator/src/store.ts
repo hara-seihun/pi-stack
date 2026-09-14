@@ -3,6 +3,7 @@ import { randomInt, randomUUID } from "node:crypto";
 import { dirname, join, resolve } from "node:path";
 import { isCoreId, type CoreId } from "./cores/contracts.js";
 import { isOutputLimitError } from "./cores/codex-output-limit.js";
+import { isRateLimitError, isCredentialError } from "./provider-errors.js";
 import type { DatabaseSync } from "node:sqlite";
 import type { Account, BudgetClass, FailureKind, FleetChild, LaneSpec, LeaseKind, ProfileCandidate, Run, RunActivity, RunContext, RunSource, RunState, UsageEntry, UsageTotal } from "./domain.js";
 
@@ -374,15 +375,17 @@ export class Store {
       return true;
     });
   }
-  recoverInterruptedRun(id:string,releasePath:string,at=Date.now()):boolean{
+  recoverInterruptedRun(id:string,releasePath:string,at=Date.now(),kind:"host"|"rate-limit"="host"):boolean{
     return this.transaction(()=>{
       const run=this.run(id);
       if(!run||!run.nativeSessionId||!run.accountId||!run.workerUnit||run.childrenOwner!=="core"||this.control(`abort:${id}`))return false;
-      const interrupted=run.state==="aborted"&&run.result==="aborted"
+      const interrupted=kind==="rate-limit"
+        ?run.state==="failed"&&run.failureKind==="account"&&isRateLimitError(run.result??"")&&!isCredentialError(run.result??"")
+        :run.state==="aborted"&&run.result==="aborted"
         ||run.state==="failed"&&run.failureKind==="infrastructure"&&["TypeError: fetch failed","Error: Core turn interrupted without an operator abort"].includes(run.result??"")
         ||run.state==="failed"&&(run.result??"").includes("role 'system' must precede an 'assistant' message or end the array");
       if(!interrupted)return false;
-      this.setControl(`run-interruption:${id}:${at}`,JSON.stringify({result:run.result,failureKind:run.failureKind,
+      this.setControl(`${kind==="rate-limit"?"run-rate-limit":"run-interruption"}:${id}:${at}`,JSON.stringify({result:run.result,failureKind:run.failureKind,
         endedAt:run.endedAt,releasePath:run.releasePath,workerUnit:run.workerUnit}));
       this.db.prepare("UPDATE run SET state='starting',release_path=?,worker_unit=?,result='recovering the recorded core session after infrastructure repair',failure_kind=NULL,ended_at=NULL,updated_at=?,progress_at=? WHERE id=?")
         .run(releasePath,`pi-orchestrator-run-${id.replaceAll('-','')}-${at}`,at,at,id);
