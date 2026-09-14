@@ -1,13 +1,13 @@
 import { describe, expect, test } from "bun:test";
 import { renderToStaticMarkup } from "react-dom/server";
 import { isValidElement, type ReactElement, type ReactNode } from "react";
-import { partitionThreads, threadDrawerTab, subagentRoot, isActiveAgentRun } from "./src/agent-placement";
+import { activityColor, partitionThreads, threadDrawerTab, subagentRoot, isActiveAgentRun } from "./src/agent-placement";
 import { AgentList } from "./src/agent-list";
 import type { AgentRun, Session } from "./src/types";
 
 const session = (id: string, extra: Partial<Session> = {}): Session => ({
   id, name: id, cwd: "/home", workspaceName: "Home", environment: "home", state: "IDLE", activity: "IDLE",
-  activeTool: null, provider: "openai", createdAt: "", updatedAt: "", revision: 1, lastError: null,
+  activeTool: null, provider: "openai", createdAt: "", updatedAt: "", revision: 1, idleUnread: false, lastError: null,
   steeringQueued: 0, followUpQueued: 0, queuedMessages: [], archivedAt: null, ...extra,
 });
 const parent = session("coordinator");
@@ -27,6 +27,12 @@ function buttons(node: ReactNode): ReactElement<Record<string, any>>[] {
 }
 
 describe("subagent placement", () => {
+  test("shows an unread idle completion in green", () => {
+    expect(activityColor("IDLE", true)).toBe("var(--success)");
+    expect(activityColor("IDLE", false)).toBe("var(--muted)");
+    expect(activityColor("WORKING", true)).toBe("var(--accent)");
+  });
+
   test("keeps children out of Interactive across lifecycle updates, including nested and meeting workers", () => {
     for (const state of ["QUEUED", "STARTING", "RUNNING", "IDLE", "STOPPED", "FAILED"]) {
       const worker = { ...child, state };

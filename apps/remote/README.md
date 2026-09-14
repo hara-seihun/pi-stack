@@ -64,7 +64,7 @@ The globally loaded `server/context-mirror.ts` also registers [`server/session-h
 
 The supervisor names a thread after its first user message and updates the name every 20 user or assistant messages. It gives the latest 12 messages to a short-lived, tool-free `pi --print` process and applies the process's first output line to both the Pi session and the supervisor database. `PI_REMOTE_THREAD_NAMING_MODEL` is required and must explicitly select an OpenAI provider, model, and thinking level, such as `openai-codex/gpt-5.6-luna:low`. Numbered OpenAI account aliases from the shared pool are also accepted, for example `openai-codex-12/gpt-5.6-luna:low`.
 
-Model menus, autonomous-agent labels, and plan cards use the catalog exported by `pi-orchestrator/api`. Plan cards project the orchestrator's account and meter facts; Pi Remote carries no provider usage parser or duplicate provider manifest. New Astra threads start in OpenAI's priority service tier. Existing threads keep their saved mode, and other models start in normal mode.
+Model menus, autonomous-agent labels, and plan cards use the catalog exported by `pi-orchestrator/api`. The thread picker shows Sol as ☀️, Astra as ⭐, Fable as 🪶, and Opus as 🎨. Plan cards project the orchestrator's account and meter facts; Pi Remote carries no provider usage parser or duplicate provider manifest. New Astra threads start in OpenAI's priority service tier. Existing threads keep their saved mode, and other models start in normal mode.
 
 ## Compaction recovery
 
@@ -89,6 +89,8 @@ The supervisor's `subagents` table owns the parent and selected model. Settings 
 The thread header's centered camera icon beside the settings gear opens `/meet.html`. Meet keeps each person's camera and microphone separate, connects the room to the shared PiStack Voice service, publishes a camera dashboard of Kenan and worker activity, and shares an agent-controlled browser. Local recognition saves speaker-labelled transcripts in the person's supervisor database. The server delivers each worker's missing transcript after flushing unfinished speech; follow-ups reuse existing threads. The host tab owns the Voice connection and stays open for the meeting. The same renderer, Voice, transcription and delegation code builds into `meet-adapter.js` for Converge's thin Recall/calendar wrapper. Its mixed input is explicitly labelled. [Meet operations and adapter contract](docs/meet.md) covers media, module bootstrap, browser control, configuration and cleanup.
 
 ## Idle notifications
+
+The drawer shows an IDLE status in green when a running thread has finished and the person has not viewed it. Selecting that thread in a visible client clears the stored unread marker, so every client returns the status to muted.
 
 The drawer's **Enable notifications** button asks for notification permission and disappears once notifications are enabled. Both clients then monitor every configured environment, not just the selected one. Notifications use the Kenan head artwork and name the environment and thread. Tapping one selects that environment and opens the thread. Viewing a thread clears its notifications and suppresses new ones while it stays visible. Backgrounding the app restores delivery. Other threads, environments and people are unaffected. Browser tabs share visible-thread locks and broadcast dismissal to each other; Android's activity lifecycle and notification service share the selected thread.
 

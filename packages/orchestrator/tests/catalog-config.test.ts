@@ -10,6 +10,15 @@ import { loadConfig } from "../src/config.js";
 const openaiModels = ["astra", "sol", "terra", "luna"];
 
 describe("shared model selection", () => {
+  it("uses the model glyphs shown by thread pickers", () => {
+    expect(Object.fromEntries(["sol", "astra", "fable", "opus"].map(id => [id, catalogModel(id)?.icon]))).toEqual({
+      sol: "☀️",
+      astra: "⭐",
+      fable: "🪶",
+      opus: "🎨",
+    });
+  });
+
   it("resolves all four OpenAI choices through the provider and shared quota meters", () => {
     const provider = builtinProviders().find(provider => provider.id === "openai-codex")!;
     const available = provider.getModels();
