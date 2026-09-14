@@ -1556,6 +1556,7 @@ function runtimeEnvironment(row: any) {
     HOME,
     PATH: `${join(HOME, ".local/bin")}:${join(HOME, ".bun/bin")}:${process.env.PATH ?? ""}`,
     PI_REMOTE_SESSION_ID: row.id,
+    PI_REMOTE_WORKSPACES: JSON.stringify([...workspaces.values()]),
     PI_STACK_CORE_STATE_DIR: sessionCores.get(row.id).stateDir,
     PI_SESSION_ID: row.id,
     PI_SESSION_FILE: join(sessionCores.get(row.id).stateDir, "conversation.jsonl"),
