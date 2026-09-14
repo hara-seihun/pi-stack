@@ -2,10 +2,11 @@ import { createHash } from "node:crypto";
 import { closeSync, existsSync, fsyncSync, openSync, readFileSync, readdirSync, realpathSync, rmdirSync, unlinkSync } from "node:fs";
 import { basename, dirname, isAbsolute, join, resolve } from "node:path";
 import { custodyReplaceFileSync } from "../shared-custody.js";
+import { seedPiSession } from "./pi-session-file.js";
 import type { Result } from "./contracts.js";
 
 type Row = Record<string, any>;
-export interface ProvenanceThread { id: string; sessionFile: string; metadata?: Record<string, unknown> }
+export interface ProvenanceThread { id: string; sessionFile: string; cwd?: string; metadata?: Record<string, unknown> }
 export interface ImportProvenanceOptions {
   threads: ProvenanceThread[];
   stateDirs?: { threadId: string; path: string }[];
@@ -110,7 +111,7 @@ export function adoptImportProvenance(options: ImportProvenanceOptions): Result<
     function addNative(path: string, required: boolean): void {
       if (!existsSync(path)) { if (required) throw new Error(`Required native history is missing: ${path}`); return; }
       const real = realpathSync(path);
-      if (scanned.has(real)) return;
+      if (scanned.has(real)) { if (required && !natives.has(real)) throw new Error(`Not native Pi history: ${path}`); return; }
       scanned.add(real);
       const text = readFileSync(real, "utf8");
       const first = text.split("\n", 1)[0];
@@ -200,6 +201,7 @@ export function adoptImportProvenance(options: ImportProvenanceOptions): Result<
     for (const source of sources) {
       if (receipts.has(`${source.path}:${source.hash}`)) continue;
       const thread = threads.get(source.owner)!;
+      if (!existsSync(thread.sessionFile) && thread.metadata?.nativeHistoryRequired === false && thread.cwd) seedPiSession(thread.sessionFile, thread.cwd);
       addNative(thread.sessionFile, true);
       const target = natives.get(realpathSync(thread.sessionFile))!;
       const facts: Row[] = [], matchedFiles = new Set<string>();

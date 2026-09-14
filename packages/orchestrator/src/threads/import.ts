@@ -178,12 +178,13 @@ export function importFleetThreads(service: ThreadService, db: DatabaseSync, opt
       const context = parse(controls.get(`run-context:${row.id}`), undefined);
       const execution = controls.get(`run-execution:${row.id}`) ?? "user";
       if (context && execution === "root-repair") return failure(`Fleet ${row.id} combines isolated context with root repair`);
+      const nativeFile = root?.sessionFile ?? (row.session_file?.endsWith(".jsonl") ? row.session_file : undefined);
       const thread: ImportThread = { id: row.id, parentId: relation?.parentRunId ?? null, title: row.source_id ?? row.profile,
-        cwd: root?.cwd ?? row.cwd, sessionFile: root?.sessionFile ?? row.session_file ?? join(options.sessionsDir, `${row.id}.jsonl`),
+        cwd: root?.cwd ?? row.cwd, sessionFile: nativeFile ?? join(options.sessionsDir, `${row.id}.jsonl`),
         settings: selected.value, admission: relation ? "force" : row.budget, stopped: row.state === "aborted",
         createdAt: row.created_at, updatedAt: row.updated_at, metadata: { source: row.source, laneId: row.source === "lane" ? row.source_id : undefined,
-          profile: row.profile, context, execution, nativeHistoryRequired: Boolean(root?.sessionFile ?? row.session_file),
-          importedFrom: { source: "fleet", id: row.id, nativeStateDirectory: stateDir, accountId: row.account_id, model: row.model, provider: row.provider,
+          profile: row.profile, context, execution, nativeHistoryRequired: Boolean(nativeFile),
+          importedFrom: { source: "fleet", id: row.id, nativeStateDirectory: stateDir, accountId: row.account_id, model: row.model, provider: row.provider, sessionFile: row.session_file,
             releasePath: row.release_path, workerUnit: row.worker_unit, failureKind: row.failure_kind, startedAt: row.started_at, endedAt: row.ended_at,
             relationship: relation } } };
       if (threads.has(row.id)) return failure(`Fleet thread ${row.id} has two source owners`);
