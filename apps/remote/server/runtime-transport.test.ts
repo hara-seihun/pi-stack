@@ -26,6 +26,49 @@ describe("runtime host identity", () => {
     await expect(starting).rejects.toThrow("Startup cancelled");
     expect(readdirSync(join(root, "runtime-hosts"))).toEqual([]);
   });
+  test("handles termination between acquiring the spool and spawning the child", async () => {
+    const root = mkdtempSync(join(tmpdir(), "pi-runtime-startup-signal-"));
+    roots.push(root);
+    const socketPath = join(root, "host.sock");
+    const preload = join(root, "interrupt-startup.ts");
+    const outputModule = join(import.meta.dir, "runtime-output.mjs");
+    writeFileSync(preload, `
+      import { mock } from "bun:test";
+      import { RuntimeOutput } from ${JSON.stringify(outputModule)};
+      mock.module(${JSON.stringify(outputModule)}, () => ({
+        RuntimeOutput: class extends RuntimeOutput {
+          constructor(path) {
+            super(path);
+            process.kill(process.pid, "SIGTERM");
+          }
+        },
+      }));
+    `);
+    const host = Bun.spawn([process.execPath, "--preload", preload,
+      join(import.meta.dir, "runtime-host.ts"), socketPath, root,
+      Buffer.from(JSON.stringify([process.execPath, "-e", "setInterval(() => {}, 10000)"])).toString("base64url")],
+    { stdout: "ignore", stderr: "inherit" });
+    expect(await host.exited).toBe(0);
+    expect(existsSync(socketPath)).toBe(false);
+    expect(existsSync(socketPath + ".events")).toBe(false);
+  });
+
+  test("termination reaps the child and removes its files before returning", async () => {
+    const root = mkdtempSync(join(tmpdir(), "pi-runtime-terminate-"));
+    roots.push(root);
+    let reportPid!: (pid: number) => void;
+    const output = new Promise<number>(resolve => { reportPid = resolve; });
+    const host = await startRuntimeHost({ data: root, sessionId: "terminated", cwd: root,
+      args: [process.execPath, "-e", "console.log(process.pid); setInterval(() => {}, 10000)"], env: process.env,
+      onOutput(line) { reportPid(Number(line)); } });
+    transports.push(host);
+    const pid = await output;
+    await host.terminate();
+    expect(pid).toBeGreaterThan(1);
+    expect(() => process.kill(pid, 0)).toThrow();
+    expect(readdirSync(join(root, "runtime-hosts"))).toEqual([]);
+  });
+
   test("gives every launch its own socket even for the same thread", async () => {
     const root = mkdtempSync(join(tmpdir(), "pi-remote-runtime-"));
     roots.push(root);
