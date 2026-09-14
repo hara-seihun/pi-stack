@@ -24,13 +24,14 @@ export async function prepareMeetingHandoff(db: Database, transcripts: MeetTrans
   const failed = turns.find((turn) => turn.status === "failed");
   if (failed) throw new Error(`Meeting transcript needs recovery: ${failed.speaker}: ${failed.error}`);
   const delivered = new Map<string, string>();
-  const receipts = db.query(`SELECT w.meeting_transcript,e.payload,e.time FROM events e LEFT JOIN work_items w
-    ON w.event_seq=e.seq AND w.session_id=e.session_id AND w.inserted_at IS NOT NULL
-    WHERE e.session_id=? AND e.type='user' ORDER BY e.seq`).all(sessionId) as Array<{ meeting_transcript: string | null; payload: string; time: string }>;
+  const receipts = db.query(`SELECT e.payload,e.time,a.meeting_transcript FROM events e
+    LEFT JOIN message_annotations a ON a.work_id=json_extract(e.payload,'$.workId')
+    WHERE e.session_id=? AND e.type='user' ORDER BY e.seq`).all(sessionId) as Array<{ payload: string; time: string; meeting_transcript: string | null }>;
   const existingMessages: Array<{ text: string; time: number }> = [];
   for (const receipt of receipts) {
+    const payload = JSON.parse(receipt.payload);
     for (const turn of JSON.parse(receipt.meeting_transcript ?? "[]") as DeliveredTurn[]) delivered.set(turn.id, turn.text);
-    const text = String(JSON.parse(receipt.payload).text ?? "");
+    const text = String(payload.text ?? "");
     if (text.includes("Meeting transcript not yet in this thread:") || text.includes("Conversation since the last handoff:")) {
       existingMessages.push({ text, time: Date.parse(receipt.time) });
     }

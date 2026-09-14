@@ -1,12 +1,12 @@
 import { Database } from "bun:sqlite";
 import type { ImageContent } from "@earendil-works/pi-ai";
-import { closeSync, existsSync, mkdirSync, mkdtempSync, openSync, readFileSync, readdirSync, realpathSync, renameSync, rmSync, statSync, unlinkSync, writeFileSync, writeSync } from "node:fs";
+import { closeSync, existsSync, mkdirSync, openSync, readFileSync, readdirSync, realpathSync, renameSync, rmSync, statSync, unlinkSync, writeFileSync, writeSync } from "node:fs";
 import { homedir } from "node:os";
 import { basename, dirname, extname, isAbsolute, join, resolve } from "node:path";
-import { parseRunKey } from "./agent-runs";
-import { AgentHost } from "./agent-hosts";
-import { ORCHESTRATOR_CATALOG, OrchestratorClient, catalogAgentType, createSharedImageGenerationService, isCoreId, type CoreAgent, type CoreId, type SharedImageGenerationService, type PlanUsageSnapshot } from "pi-orchestrator/api";
-import { SessionCores } from "./session-cores";
+import { configuredFleetThreadUrl } from "./thread-owners";
+import { projectThreadNotifications } from "./thread-notifications";
+import { ORCHESTRATOR_CATALOG, OrchestratorClient, CompletionClient, type CompletionInput, catalogAgentType, createSharedImageGenerationService, ThreadService, ThreadDirectory, createThreadClient, importRemoteThreads, createSharedPiSessionOpener, threadHttp, type ThreadInspection, type Thread, type ThreadMessage, type PiEvent, type Result, type SharedImageGenerationService, type PlanUsageSnapshot } from "pi-orchestrator/api";
+import { createLiveProjection, settleLiveProjection, restoreLiveProjection, threadActivity, type LiveProjection } from "./live-projection";
 import { InlineImages } from "./inline-images";
 import { planCards } from "./catalog-presentation";
 import { readMachineUsage } from "./machine-usage";
@@ -14,7 +14,7 @@ import { displayContextDocument, type ContextImage } from "./context-display";
 import { updateToolProgress, type ToolProgress } from "./tool-progress";
 import { contextSplice, DocumentHistory, messageFinalizationKey, sha256, type ContextSplice } from "./sync";
 import { appendContextPatch, readContext } from "./context-journal";
-import { beginSupervisorGeneration, ensureSupervisorSchema } from "./database";
+import { beginSupervisorGeneration, ensureSupervisorSchema, ensureThreadView } from "./database";
 import { startLedgerSnapshots } from "./ledger-snapshot";
 import { VoiceClient } from "./voice/client";
 import { MeetServer } from "./meet/server";
@@ -22,11 +22,7 @@ import { meetingActivity } from "./meet/activity";
 import { meetingHandoffText, prepareMeetingHandoff } from "./meet/handoff";
 import { externalMeetingRequest } from "./meet/external";
 import { liveDevInstructions } from "./skills";
-import { THREAD_THINKING_LEVELS } from "./thread-tools";
 import { defaultThreadDestinations, type ThreadDestination } from "./thread-model-defaults";
-import { attachRuntimeHost, startRuntimeHost, runtimeCapacity, type RuntimeTransport } from "./runtime-transport";
-import { RuntimeAdmission } from "./runtime-admission";
-import { RuntimeCapacityQueue } from "./runtime-capacity-queue";
 import { API } from "./api";
 import { idleNotifications } from "./notifications";
 import { listPersons, publicPerson } from "./persons";
@@ -42,7 +38,6 @@ import {
   shouldNameThread,
   THREAD_NAMING_HISTORY,
   THREAD_NAMING_INSTRUCTION,
-  threadNamingModel,
 } from "./thread-naming";
 
 const VERSION = (JSON.parse(readFileSync(join(import.meta.dir, "../package.json"), "utf8")) as { version: string }).version;
@@ -54,17 +49,12 @@ const SUPERVISOR_EPOCH = crypto.randomUUID();
 const HOME = homedir();
 const DATA = process.env.PI_REMOTE_DATA ?? join(process.env.XDG_STATE_HOME ?? join(HOME, ".local/state"), "pi-remote");
 const INGESTION = process.env.PI_REMOTE_INGESTION ?? join(DATA, "ingestion");
-const PI = process.env.PI_BIN ?? "pi";
-const THREAD_NAMING_MODEL = threadNamingModel(process.env.PI_REMOTE_THREAD_NAMING_MODEL);
-const THREAD_NAMING_DIR = join(DATA, "thread-naming");
+const THREAD_NAMING_MODEL = process.env.PI_REMOTE_THREAD_NAMING_MODEL?.trim() || "luna";
 const PRIVATE_ID = process.env.PI_REMOTE_PRIVATE_ID ?? "private";
 const PRIVATE_NAME = process.env.PI_REMOTE_PRIVATE_NAME ?? "Private";
 const PRIVATE_DIR = process.env.PI_REMOTE_PRIVATE_DIR ?? join(HOME, PRIVATE_ID);
-const SERVICE_TIER_EXTENSION = join(import.meta.dir, "service-tier.ts");
 const THREAD_CONTEXT_EXTENSION = join(import.meta.dir, "thread-context.ts");
-const SERVICE_TIER_DIR = join(DATA, "service-tiers");
 const ORCHESTRATOR_DB_PATH = process.env.PI_REMOTE_ORCHESTRATOR_DB ?? join(HOME, ".local/share/pi-orchestrator/ledger.sqlite3");
-const ORCHESTRATOR_RUNS_ROOT = process.env.PI_REMOTE_ORCHESTRATOR_RUNS ?? join(HOME, ".local/share/pi-orchestrator/runs");
 const HOST = process.env.PI_REMOTE_HOST ?? "127.0.0.1";
 const PORT = Number(process.env.PI_REMOTE_PORT ?? "8788");
 const AGENT_DIR = process.env.PI_AGENT_DIR ?? join(HOME, ".pi/agent");
@@ -159,9 +149,6 @@ function environmentMetadata() {
 }
 
 const PLAN_USAGE_REFRESH_MS = Math.max(15_000, Number(process.env.PI_REMOTE_PLAN_USAGE_REFRESH_MS ?? "60000"));
-const PROMPT_ACK_TIMEOUT_MS = Math.max(5, Number(process.env.PI_REMOTE_PROMPT_ACK_TIMEOUT_MS ?? "30000"));
-const STATE_RECONCILE_MS = Math.max(5, Number(process.env.PI_REMOTE_STATE_RECONCILE_MS ?? "15000"));
-const RUNTIME_RESTART_DELAY_MS = Math.max(5, Number(process.env.PI_REMOTE_RUNTIME_RESTART_DELAY_MS ?? "2000"));
 const workspaceDefinitions = JSON.parse(process.env.PI_REMOTE_WORKSPACES ?? JSON.stringify([
   { id: "home", name: "Home", path: HOME },
   { id: PRIVATE_ID, name: PRIVATE_NAME, path: PRIVATE_DIR },
@@ -172,117 +159,114 @@ const workspaces = new Map(workspaceDefinitions
 for (const workspace of workspaces.values()) workspace.path = realpathSync(workspace.path);
 
 mkdirSync(DATA, { recursive: true, mode: 0o700 });
-mkdirSync(join(DATA, "sessions"), { recursive: true, mode: 0o700 });
-mkdirSync(SERVICE_TIER_DIR, { recursive: true, mode: 0o700 });
-mkdirSync(THREAD_NAMING_DIR, { recursive: true, mode: 0o700 });
 mkdirSync(INGESTION, { recursive: true, mode: 0o700 });
 const db = new Database(join(DATA, "supervisor.sqlite3"), { create: true, strict: true });
 const orchestrator = new OrchestratorClient({
   ledgerPath: ORCHESTRATOR_DB_PATH,
-  runsRoot: ORCHESTRATOR_RUNS_ROOT,
 });
 const voice = new VoiceClient(DATA);
-const agentHost = new AgentHost(orchestrator, { key: "local", label: "THIS MACHINE", name: "This machine" });
-ensureSupervisorSchema(db);
-const sessionCores = new SessionCores(db, DATA);
-const HANDOFF_PATH = join(DATA, "supervisor-handoff.json");
-type RuntimePhase = "WAITING" | "STARTING" | "IDLE" | "DISPATCHING" | "RUNNING" | "ABORTING" | "STOPPING";
-type RuntimeHandoff = {
-  core?: CoreId;
-  sessionId: string;
-  socketPath: string;
-  pid?: number;
-  shared?: boolean;
-  phase: RuntimePhase;
-  compacting: boolean;
-  compactionContextHash: string | null;
-  retrying: boolean;
-  liveText: string;
-  liveThinking: string;
-  thinkingBlockStart?: number;
-  thinkingActive?: boolean;
-  toolProgress?: ToolProgress[];
-  pendingContextTextLength?: number;
-  pendingContextThinkingLength?: number;
-  pendingContextFinalization: string | null;
-  pendingModelFailure: string | null;
-  pendingCoreFailure?: string | null;
-  lastActivity: number;
-  activeTools: Array<[string, string]>;
-  dispatchedWorkIds: string[];
-  steeringQueued: number;
-  followUpQueued: number;
-  historyNeedsRestore: boolean;
-  modelId: string;
-};
-function loadHandoff(): RuntimeHandoff[] {
-  if (!existsSync(HANDOFF_PATH)) return [];
-  try {
-    const document = JSON.parse(readFileSync(HANDOFF_PATH, "utf8"));
-    if (document?.version !== 1 || !Array.isArray(document.runtimes)) throw new Error("invalid handoff document");
-    return document.runtimes.filter((item: any) => typeof item?.sessionId === "string"
-      && typeof item?.socketPath === "string");
-  } catch (cause) {
-    console.error("Could not read supervisor handoff", cause);
-    return [];
-  }
-}
-const pendingHandoff = loadHandoff();
-beginSupervisorGeneration(db, SUPERVISOR_EPOCH, new Set(pendingHandoff.map((item) => item.sessionId)));
-
-interface Runtime {
-  readonly sessionId: string;
-  observation: "current" | "unreachable";
-  core?: CoreId;
-  transport: RuntimeTransport | null;
-  startupAbort: AbortController;
-  pending: Map<string, { resolve: (value: any) => void; reject: (error: Error) => void; timer: Timer | undefined }>;
-  phase: RuntimePhase;
-  phaseVersion: number;
-  compacting: boolean;
-  compactionContextHash: string | null;
-  retrying: boolean;
-  reconciling: boolean;
-  suppressOutput: boolean;
-  liveText: string;
-  liveThinking: string;
-  thinkingBlockStart: number;
-  thinkingActive: boolean;
-  toolProgress: Map<string, ToolProgress>;
-  pendingContextTextLength: number;
-  pendingContextThinkingLength: number;
-  pendingContextFinalization: string | null;
-  pendingModelFailure: string | null;
-  pendingCoreFailure: string | null;
-  expectedExit: boolean;
-  lastActivity: number;
-  activeTools: Map<string, string>;
-  dispatchedWorkIds: Set<string>;
-  steeringQueued: number;
-  followUpQueued: number;
-  historyNeedsRestore: boolean;
-  modelId: string;
-  replaceAfterSettle: boolean;
-}
-const runtimes = new Map<string, Runtime>();
-let runtimeAdoption = Promise.resolve();
+const liveProjections = new Map<string, LiveProjection>();
 const contextFinalizedMessages = new Map<string, string>();
-// A runtime's phase changes underneath awaits and inside callees; reading it
-// through a call keeps TypeScript from narrowing a value that has moved on.
-const phaseOf = (rt: Runtime): RuntimePhase => rt.phase;
-const activations = new Map<string, Promise<Runtime>>();
-const sessionWorkers = new Map<string, Promise<void>>();
 const forkingSessions = new Set<string>();
-const retryTimers = new Map<string, Timer>();
-const runtimeCapacityQueue = new RuntimeCapacityQueue(priority => runtimeCapacity(DATA, priority > 0));
 let shuttingDown = false;
-let releaseHandoffRequested = false;
+const runner = createSharedPiSessionOpener({ dataDir: DATA });
+const threads = new ThreadService({
+  databasePath: join(DATA, "threads.sqlite3"),
+  sessionsDir: join(DATA, "threads"),
+  openSession: (options, output, exit) => runner.openSession({ ...options,
+    args: [...options.args, "--extension", THREAD_CONTEXT_EXTENSION],
+  }, output, exit),
+  environment: threadEnvironment,
+  prepareMessage: prepareThreadMessage,
+});
+unwrap(importRemoteThreads(threads, db as any, { sessionsDir: join(DATA, "threads"),
+  resolveCwd: workspace => workspaces.get(workspace)?.path ?? workspace }));
+ensureSupervisorSchema(db);
+beginSupervisorGeneration(db, SUPERVISOR_EPOCH);
+const fleetUrl = configuredFleetThreadUrl();
+const fleet = fleetUrl ? createThreadClient(`${fleetUrl}/v1/thread-owner`) : null;
+const namingClient = fleetUrl ? new CompletionClient({ baseUrl: fleetUrl }) : null;
+const directory = new ThreadDirectory({ id: "person", api: threads }, fleet ? [{ id: "fleet", api: fleet }] : []);
+threads.setDirectory(directory);
+const peerThreads = new Map<string, Thread>();
+const peerChildren = new Map<string, boolean>();
+const peerInspections = new Map<string, ThreadInspection>();
+let peerError: string | null = null;
+const notificationErrors = new Map<string, string>();
+let peerRefresh: Promise<void> | null = null;
+const notificationRefreshes = new Map<string, Promise<void>>();
+function refreshThreadNotifications(): Promise<void> {
+  return Promise.all(directory.owners.map(owner => {
+    const existing = notificationRefreshes.get(owner.id);
+    if (existing) return existing;
+    const before = currentStateVersion();
+    const refresh = projectThreadNotifications(db, owner.id, owner.api)
+      .then(() => { if (notificationErrors.delete(owner.id)) signalSync(); })
+      .catch(cause => {
+        const message = cause instanceof Error ? cause.message : String(cause);
+        if (notificationErrors.get(owner.id) !== message) { notificationErrors.set(owner.id, message); signalSync(); }
+      })
+      .finally(() => { notificationRefreshes.delete(owner.id); if (currentStateVersion() !== before) signalSync(); });
+    notificationRefreshes.set(owner.id, refresh);
+    return refresh;
+  })).then(() => {});
+}
+async function refreshPeers() {
+  if (!fleet) return;
+  if (peerRefresh) return peerRefresh;
+  peerRefresh = (async () => {
+    const next = new Map<string, Thread>();
+    let cursor: string | undefined;
+    do {
+      const page = await fleet.list({ limit: 100, cursor });
+      if (!page.ok) { if (peerError !== page.error.message) { peerError = page.error.message; signalSync(); } return; }
+      for (const thread of page.value.threads) {
+        if (threads.get(thread.id)) throw new Error(`Thread ${thread.id} has two owners`);
+        next.set(thread.id, thread);
+      }
+      cursor = page.value.nextCursor;
+    } while (cursor);
+    const changed = peerError !== null || JSON.stringify([...next]) !== JSON.stringify([...peerThreads]);
+    peerError = null;
+    peerThreads.clear();
+    peerChildren.clear();
+    for (const thread of next.values()) if (thread.parentId) peerChildren.set(thread.parentId, true);
+    for (const [id, thread] of next) { peerThreads.set(id, thread); ensureThreadView(db, id); }
+    if (changed) signalSync();
+  })().finally(() => { peerRefresh = null; });
+  return peerRefresh;
+}
+async function refreshThreadInspection(id: string) {
+  const local = threads.get(id);
+  if (local && !peerInspections.has(id) && storedContext(id)) return;
+  const result = await directory.inspect(id);
+  if (!result.ok) throw new Error(result.error.message);
+  const inspection = result.value;
+  if (!local) {
+    const children = unwrap(await directory.list({ parentId: id, limit: 1 }));
+    peerChildren.set(id, children.threads.length > 0);
+  }
+  const changed = !local && (peerThreads.get(id)?.revision !== inspection.thread.revision
+    || JSON.stringify(peerInspections.get(id)?.pending) !== JSON.stringify(inspection.pending));
+  if (!local) peerThreads.set(id, inspection.thread);
+  peerInspections.delete(id);
+  peerInspections.set(id, inspection);
+  while (peerInspections.size > 12) peerInspections.delete(peerInspections.keys().next().value!);
+  ensureThreadView(db, id);
+  if (changed) signalSync();
+  if (inspection.live) restoreLiveProjection(liveFor(id), inspection.live);
+}
+function unwrap<T>(result: Result<T>): T {
+  if (!result.ok) throw new Error(`${result.error.code}: ${result.error.message}`);
+  return result.value;
+}
+function liveFor(id: string): LiveProjection {
+  let live = liveProjections.get(id);
+  if (!live) { live = createLiveProjection(id); liveProjections.set(id, live); }
+  return live;
+}
 
 const now = () => new Date().toISOString();
-const serviceTierPath = (sessionId: string) => join(SERVICE_TIER_DIR, sessionId);
-function writeServiceTier(sessionId: string, tier: "default" | "priority") {
-  writeFileSync(serviceTierPath(sessionId), tier + "\n", { mode: 0o600 });
-}
 let planUsage: PlanUsageSnapshot | null = null;
 let planUsageRefresh: Promise<void> | null = null;
 let nextPlanUsageRefresh = 0;
@@ -364,13 +348,13 @@ let dashboardRefreshes = Promise.resolve();
 let dashboardBusy = false;
 let lastSyncRequestAt = 0;
 async function buildDashboard(): Promise<Dashboard> {
+  void refreshPeers();
   const [agents, actions] = await Promise.all([activeAgents(), machineActions.refresh()]);
   return {
     plans: planCards(planUsage),
     governors: governorControls(orchestrator),
     actions,
     machine: readMachineUsage(),
-    agents: { runs: agents.runs, hosts: agents.hosts, running: agents.running },
     modelCounts: agents.models,
     threadStarts: threadStartProfiles(),
     home: HOME,
@@ -428,10 +412,10 @@ async function awaitSync(request: SyncRequest, signal: AbortSignal) {
     if (request.epoch !== SUPERVISOR_EPOCH
       || request.stateVersion !== undefined && request.stateVersion !== currentStateVersion()
       || request.dashboardVersion !== undefined && request.dashboardVersion !== dashboardVersion) return false;
-    if (request.agent || request.session?.eventsAfter !== undefined || !request.session) return after === syncSequence;
+    if (request.session?.eventsAfter !== undefined || !request.session) return after === syncSequence;
     const { id, contextHash, liveTextHash, liveThinkingHash } = request.session;
     const stored = storedContext(id);
-    const runtime = runtimes.get(id);
+    const runtime = liveProjections.get(id);
     return (stored ? displayContext(id, stored.hash, stored.document).hash === contextHash : !contextHash)
       && sha256(runtime?.liveText ?? "") === liveTextHash
       && sha256(runtime?.liveThinking ?? "") === liveThinkingHash
@@ -484,7 +468,7 @@ function displayContext(sessionId: string, sourceHash: string, sourceDocument: s
     displayContexts.set(sessionId, cached);
     return cached;
   }
-  const progress = runtimes.get(sessionId)?.toolProgress;
+  const progress = liveProjections.get(sessionId)?.toolProgress;
   if (progress?.size) {
     for (const message of JSON.parse(sourceDocument).messages ?? []) {
       if (message?.role === "toolResult") progress.delete(message.toolCallId);
@@ -495,7 +479,7 @@ function displayContext(sessionId: string, sourceHash: string, sourceDocument: s
     const hash = sha256(`${image.mimeType}\0${image.data}`);
     images.set(hash, image);
     return API.sessionImage.path({ sessionId, hash });
-  }, runtimes.get(sessionId)?.toolProgress.values());
+  }, liveProjections.get(sessionId)?.toolProgress.values());
   const projected = { sourceHash, document, hash: rememberContext(sessionId, document), images };
   displayContexts.delete(sessionId);
   displayContexts.set(sessionId, projected);
@@ -513,7 +497,8 @@ function textUpdate(key: string, baseHash: unknown, target: string): DocumentUpd
 }
 
 function cacheStoredContext(sessionId: string, stored: { capturedAt: number; document: string; hash: string } | null) {
-  const progress = runtimes.get(sessionId)?.toolProgress;
+  if (stored && threads.get(sessionId)) peerInspections.delete(sessionId);
+  const progress = liveProjections.get(sessionId)?.toolProgress;
   if (progress?.size && stored && storedContextCache.get(sessionId)?.hash !== stored.hash) {
     for (const message of JSON.parse(stored.document).messages ?? []) {
       if (message?.role === "toolResult") progress.delete(message.toolCallId);
@@ -525,6 +510,12 @@ function cacheStoredContext(sessionId: string, stored: { capturedAt: number; doc
 }
 
 function storedContext(sessionId: string): { capturedAt: number; document: string; hash: string } | null {
+  const peer = peerInspections.get(sessionId);
+  if (peer) {
+    if (!peer.context) return null;
+    const document = JSON.stringify(peer.context);
+    return { capturedAt: peer.thread.updatedAt, document, hash: sha256(document) };
+  }
   if (storedContextCache.has(sessionId)) {
     const stored = storedContextCache.get(sessionId) ?? null;
     cacheStoredContext(sessionId, stored);
@@ -553,7 +544,7 @@ function storeContextCapture(id: string, body: any) {
   if (!context || typeof context !== "object" || typeof context.systemPrompt !== "string"
     || !Array.isArray(context.tools) || !Array.isArray(context.messages)) throw new Error("Valid context required");
   const document = JSON.stringify(context);
-  const runtime = runtimes.get(id);
+  const runtime = liveProjections.get(id);
   const compactionReplacement = body.replacement === "compaction" && runtime?.compacting === true;
   let changed = false;
   let hash = sha256(document);
@@ -579,7 +570,7 @@ function storeContextCapture(id: string, body: any) {
   return { ok: true, capturedAt: time, hash };
 }
 
-function requireCompactionContext(sessionId: string, rt: Runtime) {
+function requireCompactionContext(sessionId: string, rt: LiveProjection) {
   const stored = storedContext(sessionId);
   if (!rt.compactionContextHash || stored?.hash !== rt.compactionContextHash) clearStoredContext(sessionId);
   rt.compactionContextHash = null;
@@ -588,7 +579,7 @@ function requireCompactionContext(sessionId: string, rt: Runtime) {
 function acknowledgeMessageContext(sessionId: string, finalizesMessage: unknown) {
   if (typeof finalizesMessage !== "string" || !finalizesMessage) return;
   contextFinalizedMessages.set(sessionId, finalizesMessage);
-  const rt = runtimes.get(sessionId);
+  const rt = liveProjections.get(sessionId);
   if (!rt || rt.pendingContextFinalization !== finalizesMessage) return;
   rt.pendingContextFinalization = null;
   rt.liveText = rt.liveText.slice(Math.min(rt.pendingContextTextLength, rt.liveText.length));
@@ -598,10 +589,13 @@ function acknowledgeMessageContext(sessionId: string, finalizesMessage: unknown)
   rt.pendingContextTextLength = 0;
   rt.pendingContextThinkingLength = 0;
   signalLiveSync();
-  if (!retireIdleRuntime(sessionId, rt)) kickSession(sessionId);
 }
 
 const error = (message: string, status = 400) => json({ error: message }, status);
+function threadError(failure: { code: string; message: string }) {
+  return json({ error: failure.message, code: failure.code }, failure.code === "not_found" ? 404
+    : failure.code === "invalid_request" ? 400 : failure.code === "unavailable" ? 503 : 409);
+}
 
 async function sessionFileResponse(url: URL, method: string, req: Request): Promise<Response | null> {
   const match = API.sessionFiles.match(method, url.pathname) ?? API.sessionFilesHead.match(method, url.pathname);
@@ -643,32 +637,59 @@ function voiceInstructions(row: any): string {
   ].filter(Boolean).join("\n\n");
 }
 
-const sessionRow = db.query("SELECT * FROM sessions WHERE id=?");
-const activeSessionRows = db.query(
-  "SELECT * FROM sessions WHERE archived_at IS NULL ORDER BY display_order ASC, created_at DESC",
-);
-// Archived threads accumulate without bound, so every poll carries only the newest page;
-// clients ask for older pages explicitly.
-const ARCHIVED_PAGE_SIZE = 20;
+function remotePlacement(thread: Thread): Record<string, unknown> {
+  const seen = new Set<string>();
+  const placement: Record<string, unknown> = {};
+  let current: Thread | null = thread;
+  while (current && !seen.has(current.id)) {
+    seen.add(current.id);
+    for (const key of ["workspaceId", "profileId", "meetingId", "bashTimeoutSeconds"]) {
+      if (!(key in placement) && current.metadata && key in current.metadata) placement[key] = current.metadata[key];
+    }
+    current = current.parentId ? threads.get(current.parentId) : null;
+  }
+  return placement;
+}
+function threadRow(thread: Thread): any {
+  const meta = { ...remotePlacement(thread), ...thread.metadata };
+  const view = db.query("SELECT * FROM thread_views WHERE id=?").get(thread.id) as any;
+  const [provider, ...modelParts] = thread.settings.model.split("/");
+  const model = { provider, modelId: modelParts.join("/") };
+  return { ...thread, name: thread.title, workspace_id: meta.workspaceId ?? thread.cwd,
+    session_path: thread.sessionFile, state: thread.state.toUpperCase(),
+    initial_model: model?.modelId ?? thread.settings.model, current_provider: model?.provider ?? "",
+    initial_provider: model?.provider ?? "", initial_thinking: thread.settings.thinkingLevel,
+    meeting_id: meta.meetingId ?? null, profile_id: meta.profileId ?? "home",
+    service_tier: thread.settings.speed === "priority" ? "priority" : "default",
+    bash_timeout_seconds: meta.bashTimeoutSeconds ?? DEFAULT_BASH_TIMEOUT_SECONDS,
+    archived_at: meta.archived ? meta.archivedAt ?? new Date(thread.updatedAt).toISOString() : null, display_order: view?.display_order ?? 0,
+    idle_unread: view?.idle_unread ?? 0, named_at_message_count: view?.named_at_message_count ?? 0,
+    last_error: meta.executionError ?? view?.naming_error ?? null,
+    created_at: new Date(thread.createdAt).toISOString(), updated_at: new Date(thread.updatedAt).toISOString() };
+}
+const sessionRow = { get(id: string) { const found = threads.get(id) ?? peerThreads.get(id); return found ? threadRow(found) : null; } };
+function allThreadRows() { return [...threads.snapshot(), ...peerThreads.values()].map(threadRow); }
+const activeSessionRows = { all: () => allThreadRows().filter(row => !row.archived_at)
+  .sort((a,b) => a.display_order - b.display_order || b.createdAt - a.createdAt) };
+const ARCHIVED_PAGE_SIZE = 50;
 const ARCHIVED_MAX_PAGE_SIZE = 100;
-const archivedPageRows = db.query(
-  "SELECT * FROM sessions WHERE archived_at IS NOT NULL ORDER BY archived_at DESC, id DESC LIMIT ? OFFSET ?",
-);
-const archivedCountRow = db.query("SELECT COUNT(*) AS total FROM sessions WHERE archived_at IS NOT NULL");
-const archivedPage = (offset: number, limit: number) => archivedPageRows.all(limit, offset) as any[];
-const archivedCount = () => Number((archivedCountRow.get() as any)?.total ?? 0);
+const archivedRows = () => allThreadRows().filter(row => row.archived_at)
+  .sort((a,b) => String(b.archived_at).localeCompare(String(a.archived_at)));
+const archivedPage = (offset: number, limit: number) => archivedRows().slice(offset, offset + limit);
+const archivedCount = () => archivedRows().length;
+
 const supervisorEpochRow = db.query("SELECT value FROM metadata WHERE key='supervisor_epoch'");
 function ownsSupervisorLease(): boolean {
   try { return (supervisorEpochRow.get() as any)?.value === SUPERVISOR_EPOCH; }
   catch { return false; }
 }
 
-function emit(sessionId: string, type: string, payload: unknown = {}): number {
+function emit(sessionId: string, type: string, payload: unknown = {}, receiptId: string | null = null): number {
   if (!ownsSupervisorLease()) return 0;
-  const time = now();
-  const encoded = JSON.stringify(payload);
-  const result = db.query("INSERT INTO events(session_id,time,type,payload) VALUES(?,?,?,?)")
-    .run(sessionId, time, type, encoded);
+  ensureThreadView(db, sessionId);
+  const result = db.query("INSERT OR IGNORE INTO events(session_id,time,type,payload,receipt_id) VALUES(?,?,?,?,?)")
+    .run(sessionId, now(), type, JSON.stringify(payload), receiptId ? `${sessionId}:${receiptId}` : null);
+  if (!result.changes) return 0;
   signalSync();
   return Number(result.lastInsertRowid);
 }
@@ -676,78 +697,30 @@ function emit(sessionId: string, type: string, payload: unknown = {}): number {
 function recordThinkingEvent(sessionId: string, text: string, finalizesMessage: string) {
   if (!ownsSupervisorLease() || !text) return;
   displayContexts.delete(sessionId);
-  emit(sessionId, "thinking", { text, finalizesMessage });
+  emit(sessionId, "thinking", { text, finalizesMessage }, `thinking:${finalizesMessage}`);
 }
 
-function touchSession(id: string) {
-  if (!ownsSupervisorLease()) return;
-  db.query("UPDATE sessions SET revision=revision+1,updated_at=? WHERE id=?").run(now(), id);
-  signalSync();
-}
+function touchSession(_id: string) { signalSync(); }
 function markSessionViewed(id: string) {
-  if (!ownsSupervisorLease()) return;
-  const result = db.query("UPDATE sessions SET idle_unread=0 WHERE id=? AND idle_unread<>0").run(id);
+  const result = db.query("UPDATE thread_views SET idle_unread=0 WHERE id=? AND idle_unread<>0").run(id);
   if (result.changes) signalSync();
-}
-function confirmWorkInserted(sessionId: string, workId: string): number {
-  if (!ownsSupervisorLease()) return 0;
-  let sequence = 0;
-  db.transaction(() => {
-    const work = db.query("SELECT text,delivery,request_id,inserted_at,meeting_transcript FROM work_items WHERE id=? AND session_id=?").get(workId, sessionId) as any;
-    if (!work || work.inserted_at) return;
-    const time = now();
-    const result = db.query("INSERT INTO events(session_id,time,type,payload) VALUES(?,?,?,?)")
-      .run(sessionId, time, "user", JSON.stringify({ text: [String(work.text), meetingHandoffText(JSON.parse(work.meeting_transcript))].filter(Boolean).join("\n\n"), delivery: String(work.delivery), workId, requestId: String(work.request_id) }));
-    sequence = Number(result.lastInsertRowid);
-    db.query("UPDATE work_items SET event_seq=?,inserted_at=?,updated_at=? WHERE id=? AND inserted_at IS NULL")
-      .run(sequence, time, time, workId);
-    db.query("UPDATE sessions SET revision=revision+1,updated_at=? WHERE id=?").run(time, sessionId);
-  })();
-  if (sequence) scheduleThreadNameIfDue(sessionId);
-  return sequence;
-}
-function confirmDispatchedWork(sessionId: string, delivery?: string, limit = Number.POSITIVE_INFINITY) {
-  let confirmed = 0;
-  for (const work of db.query(`
-    SELECT id,delivery FROM work_items
-    WHERE session_id=? AND state='dispatched' AND inserted_at IS NULL
-    ORDER BY created_at,rowid
-  `).all(sessionId) as any[]) {
-    if (delivery ? work.delivery !== delivery : work.delivery === "steer") continue;
-    confirmWorkInserted(sessionId, String(work.id));
-    if (++confirmed >= limit) break;
-  }
-}
-function setState(id: string, state: string, lastError: string | null = null) {
-  if (!ownsSupervisorLease()) return;
-  const row = sessionRow.get(id) as any;
-  if (!row) return;
-  if (row.state === state && (row.last_error ?? null) === lastError) return;
-  db.query("UPDATE sessions SET state=?,updated_at=?,last_error=?,revision=revision+1 WHERE id=?")
-    .run(state, now(), lastError, id);
-}
-function setRuntimePhase(id: string, rt: Runtime, phase: RuntimePhase, state?: string, lastError: string | null = null) {
-  if (rt.phase !== phase) {
-    rt.phase = phase;
-    rt.phaseVersion++;
-    touchSession(id);
-  }
-  if (state) setState(id, state, lastError);
-  if (releaseHandoffRequested && ![...runtimes.values()].some((runtime) => runtime.phase === "ABORTING")) {
-    queueMicrotask(() => void handoffRelease());
-  }
-}
-function runtimeWorking(rt: Runtime | undefined): boolean {
-  return !!rt && ["STARTING", "DISPATCHING", "RUNNING", "ABORTING"].includes(rt.phase);
 }
 function nextThreadName(): string {
   const current = Number((db.query("SELECT value FROM metadata WHERE key='last_thread_number'").get() as any)?.value ?? 0);
-  const next = current + 1;
-  db.query("UPDATE metadata SET value=? WHERE key='last_thread_number'").run(String(next));
-  return String(next);
+  db.query("INSERT OR REPLACE INTO metadata(key,value) VALUES('last_thread_number',?)").run(String(current + 1));
+  return String(current + 1);
 }
 
-const pendingThreadNames = new Map<string, number>();
+function creationName(requestId: string): string {
+  return db.transaction(() => {
+    const saved = db.query("SELECT title FROM thread_creation_names WHERE request_id=?").get(requestId) as { title: string } | null;
+    if (saved) return saved.title;
+    const title = nextThreadName();
+    db.query("INSERT INTO thread_creation_names(request_id,title) VALUES(?,?)").run(requestId, title);
+    return title;
+  })();
+}
+
 const namingThreads = new Set<string>();
 
 function recentThreadTranscript(sessionId: string): string {
@@ -761,86 +734,68 @@ function recentThreadTranscript(sessionId: string): string {
   }).join("\n\n");
 }
 
-async function nameThread(sessionId: string): Promise<void> {
-  const transcript = recentThreadTranscript(sessionId);
-  if (!transcript) return;
-  const scratch = mkdtempSync(join(THREAD_NAMING_DIR, `${sessionId}-`));
-  const transcriptPath = join(scratch, "messages.txt");
-  writeFileSync(transcriptPath, transcript, { mode: 0o600 });
-  try {
-    const child = Bun.spawn([
-      PI,
-      "--print",
-      "--no-session",
-      "--no-tools",
-      "--no-skills",
-      "--no-context-files",
-      "--model", THREAD_NAMING_MODEL,
-      "--system-prompt", THREAD_NAMING_INSTRUCTION,
-      `@${transcriptPath}`,
-    ], {
-      cwd: HOME,
-      env: {
-        ...process.env,
-        HOME,
-        PATH: `${join(HOME, ".local/bin")}:${join(HOME, ".bun/bin")}:${process.env.PATH ?? ""}`,
-        PI_CODING_AGENT_DIR: AGENT_DIR,
-      },
-      stdin: "ignore",
-      stdout: "pipe",
-      stderr: "pipe",
-    });
-    const timeout = setTimeout(() => child.kill(), 60_000);
-    const [stdout, stderr, exitCode] = await Promise.all([
-      new Response(child.stdout).text(),
-      new Response(child.stderr).text(),
-      child.exited,
-    ]).finally(() => clearTimeout(timeout));
-    if (exitCode !== 0) throw new Error(stderr.trim() || `Pi exited ${exitCode}`);
-    const name = generatedThreadName(stdout);
-    const row = sessionRow.get(sessionId) as any;
-    if (!row || !ownsSupervisorLease()) return;
-    const messageCount = Number((db.query("SELECT COUNT(*) count FROM events WHERE session_id=? AND type IN ('user','assistant')").get(sessionId) as any)?.count ?? 0);
-    db.query("UPDATE sessions SET name=?,named_at_message_count=?,updated_at=?,revision=revision+1 WHERE id=?")
-      .run(name, messageCount, now(), sessionId);
-    signalSync();
-    const runtime = runtimes.get(sessionId);
-    if (runtime && runtime.phase !== "STOPPING") {
-      try { await rpc(runtime, "set_session_name", { name }, 10_000); }
-      catch (cause) { console.error(`Pi Remote could not copy thread name into runtime ${sessionId}: ${cause instanceof Error ? cause.message : cause}`); }
-    }
-  } finally {
-    rmSync(scratch, { recursive: true, force: true });
-  }
+type NamingReceipt = { requestId: string; messageCount: number; input: CompletionInput };
+function namingInput(transcript: string): CompletionInput {
+  const parts = THREAD_NAMING_MODEL.split(":");
+  if (parts.length > 2) throw new Error("Invalid naming model selection");
+  const physical = parts[0]!.split("/").at(-1)!;
+  const model = ORCHESTRATOR_CATALOG.models.find(candidate => candidate.id === physical || candidate.model === physical);
+  if (!model || !["luna", "terra"].includes(model.id)) throw new Error("Thread naming completion currently supports Luna or Terra");
+  const thinkingLevel = parts[1];
+  if (thinkingLevel && !["off", "minimal", "low", "medium", "high", "xhigh", "max"].includes(thinkingLevel)) throw new Error("Invalid naming thinking level");
+  return { model: model.id as "luna" | "terra", systemPrompt: THREAD_NAMING_INSTRUCTION, prompt: transcript,
+    speed: "standard", ...(thinkingLevel ? { thinkingLevel } : {}) } as CompletionInput;
 }
-
-async function drainThreadNames(sessionId: string): Promise<void> {
-  if (namingThreads.has(sessionId)) return;
+function namingError(id: string, message: string | null) {
+  const result = db.query("UPDATE thread_views SET naming_error=? WHERE id=? AND naming_error IS NOT ?").run(message, id, message);
+  if (result.changes) signalSync();
+}
+async function nameThread(sessionId: string): Promise<void> {
+  if (namingThreads.has(sessionId) || shuttingDown) return;
   namingThreads.add(sessionId);
   try {
-    while (pendingThreadNames.delete(sessionId)) {
-      const row = sessionRow.get(sessionId) as any;
-      if (!row) continue;
-      const count = Number((db.query("SELECT COUNT(*) count FROM events WHERE session_id=? AND type IN ('user','assistant')").get(sessionId) as any)?.count ?? 0);
-      if (!shouldNameThread(String(row.name), count, Number(row.named_at_message_count ?? 0))) continue;
-      try {
-        await nameThread(sessionId);
-      } catch (cause) {
-        console.error(`Pi Remote could not name thread ${sessionId}: ${cause instanceof Error ? cause.message : cause}`);
-      }
+    const row = sessionRow.get(sessionId);
+    if (!row) return;
+    ensureThreadView(db, sessionId);
+    const view = db.query("SELECT * FROM thread_views WHERE id=?").get(sessionId) as any;
+    const messageCount = Number((db.query("SELECT count(*) count FROM events WHERE session_id=? AND type IN ('user','assistant')").get(sessionId) as any).count);
+    let receipt = view.naming_request ? JSON.parse(view.naming_request) as NamingReceipt : null;
+    if (!receipt && (!shouldNameThread(row.name, messageCount, view.named_at_message_count) || messageCount <= view.naming_attempted_count)) return;
+    if (!namingClient) {
+      db.query("UPDATE thread_views SET naming_attempted_count=? WHERE id=?").run(messageCount, sessionId);
+      namingError(sessionId, "Thread naming has no explicitly permitted same-person completion owner");
+      return;
     }
-  } finally {
-    namingThreads.delete(sessionId);
-  }
+    let submitted = false;
+    if (!receipt) {
+      db.query("UPDATE thread_views SET naming_attempted_count=? WHERE id=?").run(messageCount, sessionId);
+      const input = namingInput(recentThreadTranscript(sessionId));
+      receipt = { requestId: `remote-name:${sessionId}:${messageCount}`, messageCount, input };
+      db.query("UPDATE thread_views SET naming_request=?,naming_attempted_count=? WHERE id=?")
+        .run(JSON.stringify(receipt), messageCount, sessionId);
+      submitted = true;
+    }
+    let result = submitted ? await namingClient.submit(receipt.requestId, receipt.input) : await namingClient.get(receipt.requestId);
+    if (!result.ok && result.error.code === "not-found") result = await namingClient.submit(receipt.requestId, receipt.input);
+    if (!ownsSupervisorLease() || shuttingDown) return;
+    if (!result.ok) { namingError(sessionId, result.error.message); return; }
+    if (result.value.state === "queued" || result.value.state === "running") { namingError(sessionId, null); return; }
+    db.query("UPDATE thread_views SET naming_request=NULL WHERE id=?").run(sessionId);
+    if (result.value.state !== "completed") {
+      if ("error" in result.value) namingError(sessionId, result.value.error.message);
+      return;
+    }
+    const title = generatedThreadName(result.value.result.text);
+    unwrap(threads.update(sessionId, { title }));
+    db.query("UPDATE thread_views SET named_at_message_count=?,naming_error=NULL WHERE id=?").run(receipt.messageCount, sessionId);
+    signalSync();
+  } catch (cause) {
+    if (ownsSupervisorLease()) namingError(sessionId, cause instanceof Error ? cause.message : String(cause));
+  } finally { namingThreads.delete(sessionId); }
 }
-
-function scheduleThreadNameIfDue(sessionId: string) {
-  const row = sessionRow.get(sessionId) as any;
-  if (!row || !runtimes.has(sessionId)) return;
-  const count = Number((db.query("SELECT COUNT(*) count FROM events WHERE session_id=? AND type IN ('user','assistant')").get(sessionId) as any)?.count ?? 0);
-  if (!shouldNameThread(String(row.name), count, Number(row.named_at_message_count ?? 0))) return;
-  pendingThreadNames.set(sessionId, count);
-  void drainThreadNames(sessionId);
+function scheduleThreadNameIfDue(sessionId: string) { void nameThread(sessionId); }
+function reconcileThreadNames() {
+  for (const row of db.query("SELECT id FROM thread_views WHERE naming_request IS NOT NULL").all() as {id: string}[]) void nameThread(row.id);
 }
 
 const agentModelOrder = new Map(ORCHESTRATOR_CATALOG.agentOrder.map((key, index) => [key, index]));
@@ -856,127 +811,61 @@ function sortedAgentModels(models: Map<string, AgentModelCount>): AgentModelCoun
     (agentModelOrder.get(left.key) ?? 999) - (agentModelOrder.get(right.key) ?? 999) || left.label.localeCompare(right.label));
 }
 async function activeAgents() {
-  await agentHost.refresh();
-  const snapshot = agentHost.cached();
   const models = new Map<string, AgentModelCount>();
-  for (const row of snapshot.models) addAgentModel(models, row.model, row.count);
-  for (const rt of runtimes.values()) if (runtimeWorking(rt)) addAgentModel(models, rt.modelId || "unknown");
-  return {
-    runs: snapshot.runs,
-    running: snapshot.running,
-    models: sortedAgentModels(models),
-    hosts: [{ ...agentHost.ref, running: snapshot.running, updatedAt: snapshot.updatedAt, error: snapshot.error }],
-  };
+  let running = 0;
+  for (const row of allThreadRows()) if (["STARTING", "RUNNING"].includes(row.state)) {
+    running++; addAgentModel(models, row.settings.model);
+  }
+  return { running, models: sortedAgentModels(models) };
 }
+
 function supervisorState(): SupervisorState {
   return {
     sessions: publicSessions(activeSessionRows.all() as any[]),
     archived: publicSessions(archivedPage(0, ARCHIVED_PAGE_SIZE)),
     archivedTotal: archivedCount(),
+    ownerErrors: [...(peerError ? [{ owner: "fleet", message: peerError }] : []),
+      ...[...notificationErrors].map(([owner, message]) => ({ owner, message })),
+      ...(db.query("SELECT id,naming_error FROM thread_views WHERE naming_error IS NOT NULL").all() as any[])
+        .map(row => ({ owner: `Thread ${sessionRow.get(row.id)?.name ?? row.id} naming`, message: row.naming_error }))],
   };
 }
 
-type PreparedQueue = { counts: Map<string, number>; messages: any[] };
-function preparedQueues(rows: any[]): Map<string, PreparedQueue> {
-  const wanted = new Set(rows.map((row) => String(row.id)));
-  const prepared = new Map<string, PreparedQueue>();
-  for (const id of wanted) prepared.set(id, { counts: new Map(), messages: [] });
-  for (const item of db.query(`
-    SELECT rowid queue_order,id,session_id,text,delivery,state,created_at,last_error,inserted_at
-    FROM work_items WHERE state IN ('queued','running','dispatched') ORDER BY created_at,rowid
-  `).all() as any[]) {
-    const queue = prepared.get(String(item.session_id));
-    if (!queue) continue;
-    queue.counts.set(String(item.delivery), (queue.counts.get(String(item.delivery)) ?? 0) + (item.state === "dispatched" ? 0 : 1));
-    if (!item.inserted_at && queue.messages.length < 50) queue.messages.push(item);
-  }
-  return prepared;
+function publicSessions(rows: any[]): Session[] {
+  const parents = new Set(threads.snapshot().map(thread => thread.parentId));
+  return rows.map(row => publicSession(row, parents.has(row.id) || Boolean(peerChildren.get(row.id))));
 }
-
-function publicSessions(rows: any[]): any[] {
-  const queues = preparedQueues(rows);
-  return rows.map((row) => publicSession(row, queues.get(String(row.id))));
-}
-
 function sessionActivity(row: any): Session["activity"] {
-  const rt = runtimes.get(row.id);
-  return row.state === "FAILED" ? "FAILED"
-    : row.state === "QUEUED" || rt?.phase === "WAITING" ? "QUEUED"
-    : rt?.phase === "STARTING" || row.state === "STARTING" ? "STARTING"
-    : rt?.phase === "ABORTING" || rt?.phase === "STOPPING" || row.state === "ABORTING" ? "ABORTING"
-    : rt?.observation === "unreachable" ? "RECONNECTING"
-    : rt?.compacting ? "COMPACTING"
-    : rt?.retrying ? "RETRYING"
-    : rt?.phase === "RUNNING" && rt.activeTools.size ? "WAITING_ON_TOOL"
-    : rt?.phase === "RUNNING" && rt.thinkingActive ? "THINKING"
-    : rt?.phase === "RUNNING" ? "WORKING"
-    : rt?.phase === "DISPATCHING" || row.state === "RUNNING" ? "QUEUED"
-    : "IDLE";
+  return threadActivity(row.state, liveProjections.get(row.id));
 }
-
-function subagentIdentity(sessionId: string) {
-  return db.query("SELECT parent_session_id,provider,model FROM subagents WHERE session_id=?").get(sessionId) as
-    { parent_session_id: string; provider: string; model: string } | null;
-}
-
-function publicSession(row: any, prepared?: PreparedQueue): Session {
-  const rt = runtimes.get(row.id);
-  const subagent = subagentIdentity(row.id);
-  const preset = workspaces.get(row.workspace_id);
-  const cwd = preset?.path ?? row.workspace_id;
-  const toolNames = rt ? [...rt.activeTools.values()] : [];
-  const durableQueue = prepared ? [...prepared.counts].map(([delivery, count]) => ({ delivery, count })) : db.query(`
-    SELECT delivery,count(*) count FROM work_items
-    WHERE session_id=? AND state IN ('queued','running') GROUP BY delivery
-  `).all(row.id) as any[];
-  const durableSteering = Number(durableQueue.find((item) => item.delivery === "steer")?.count ?? 0);
-  const durableFollowUps = Number(durableQueue.find((item) => item.delivery === "followUp")?.count ?? 0);
-  const queuedSource = prepared?.messages ?? db.query(`
-    SELECT id,text,delivery,state,created_at,last_error FROM work_items
-    WHERE session_id=? AND state IN ('queued','running','dispatched') AND inserted_at IS NULL
-    ORDER BY created_at,rowid LIMIT 50
-  `).all(row.id) as any[];
-  const queuedMessages: QueuedMessage[] = queuedSource.map((item) => ({
-    id: String(item.id),
-    text: String(item.text),
-    delivery: String(item.delivery),
-    state: String(item.state),
-    status: item.state === "dispatched" ? "Sent · awaiting confirmation"
-      : item.state === "running" ? "Sending to agent"
-      : item.delivery === "hardSteer" ? "Aborting current operation · steering next"
-      : item.delivery === "steer" ? "Steering after current tool calls"
-      : item.delivery === "followUp" ? "Queued for after completion"
-      : "Sending to agent",
-    canSteer: item.state === "queued" && item.delivery === "followUp",
-    canHardSteer: item.state === "queued" && item.delivery === "followUp",
-    canCancel: item.state === "queued",
-    createdAt: String(item.created_at),
-    lastError: item.last_error ?? null,
+function publicSession(row: any, hasChildren = threads.snapshot().some(thread => thread.parentId === row.id) || Boolean(peerChildren.get(row.id))): Session {
+  const pending = threads.get(row.id) ? threads.pending(row.id) : peerInspections.get(row.id)?.pending ?? [];
+  const live = liveProjections.get(row.id);
+  const queuedMessages: QueuedMessage[] = pending.filter(message => !message.insertedAt).map(message => ({
+    id: message.id, text: message.text, delivery: message.delivery, state: message.state ?? "queued",
+    status: message.state === "held" ? "Held until resumed" : message.state === "dispatched" ? "Sent to agent"
+      : message.delivery === "steer" ? "Steering after current tool calls" : "Queued for after completion",
+    canSteer: ["queued", "held"].includes(message.state ?? "queued") && message.delivery === "queue",
+    canHardSteer: ["queued", "held"].includes(message.state ?? "queued"),
+    canCancel: ["queued", "held"].includes(message.state ?? "queued"),
+    createdAt: new Date(message.createdAt).toISOString(), lastError: null,
   }));
-  const activity = sessionActivity(row);
   return {
-    id: String(row.id),
-    core: sessionCores.get(row.id).core,
-    ...(subagent ? { subagent: { parentSessionId: subagent.parent_session_id, model: subagent.model } } : {}),
-    name: String(row.name ?? ""),
-    cwd,
-    workspaceName: preset?.name ?? cwd,
-    environment: String(row.profile_id ?? ""),
-    state: String(row.state),
-    activity,
-    activeTool: toolNames.at(-1) ?? null,
-    provider: String(row.current_provider ?? row.initial_provider ?? "").toLowerCase().startsWith("anthropic") ? "anthropic" : "openai",
-    createdAt: String(row.created_at),
-    updatedAt: String(row.updated_at),
-    revision: Number(row.revision ?? 0),
-    idleUnread: Boolean(row.idle_unread),
-    lastError: row.last_error ?? null,
-    steeringQueued: durableSteering + (rt?.steeringQueued ?? 0),
-    followUpQueued: durableFollowUps + (rt?.followUpQueued ?? 0),
-    queuedMessages,
-    archivedAt: row.archived_at ?? null,
+    id: row.id, parentId: row.parentId,
+    hasChildren,
+    model: row.settings.model, name: row.name, cwd: row.cwd,
+    workspaceName: workspaces.get(row.workspace_id)?.name ?? row.cwd,
+    environment: ENVIRONMENT_ID, state: row.state, activity: sessionActivity(row),
+    activeTool: [...(live?.activeTools.values() ?? [])].at(-1) ?? null,
+    provider: String(row.current_provider).startsWith("anthropic") ? "anthropic" : "openai",
+    createdAt: row.created_at, updatedAt: row.updated_at, revision: row.revision,
+    idleUnread: Boolean(row.idle_unread), lastError: row.last_error ?? null,
+    steeringQueued: pending.filter(message => message.delivery === "steer").length,
+    followUpQueued: pending.filter(message => message.delivery === "queue").length,
+    queuedMessages, archivedAt: row.archived_at,
   };
 }
+
 function contentText(content: unknown): string {
   if (typeof content === "string") return content;
   if (!Array.isArray(content)) return "";
@@ -1069,114 +958,57 @@ function toolResultText(result: any): string {
   return text.slice(0, 20_000) + "\n… output truncated in mobile transcript";
 }
 
-function sendLine(rt: Runtime, value: unknown) {
-  if (!rt.transport) throw new Error("Agent transport is not connected");
-  rt.transport.send(value);
+async function rpc(id: string, type: string, body: Record<string, unknown> = {}): Promise<any> {
+  return unwrap(await directory.command(id, { type, ...body }));
 }
 
-async function terminateRuntimeProcess(rt: Runtime) {
-  rt.startupAbort.abort();
-  await rt.transport?.terminate();
-}
-class RpcTimeoutError extends Error {
-  constructor(readonly command: string) { super(`${command} timed out`); this.name = "RpcTimeoutError"; }
-}
-class CoreCommandError extends Error {}
-
-function rpc(rt: Runtime, type: string, body: Record<string, unknown> = {}, timeoutMs = 15000): Promise<any> {
-  const id = crypto.randomUUID();
-  const promise = new Promise((resolve, reject) => {
-    const timer = timeoutMs > 0 ? setTimeout(() => {
-      rt.pending.delete(id);
-      if (type === "get_state" && runtimes.get(rt.sessionId) === rt && !rt.expectedExit) {
-        rt.observation = "unreachable";
-        rt.transport?.reconnect();
-        touchSession(rt.sessionId);
-      }
-      reject(new RpcTimeoutError(type));
-    }, timeoutMs) : undefined;
-    rt.pending.set(id, { resolve, reject, timer });
-    try { sendLine(rt, { id, type, ...body }); }
-    catch (cause) { clearTimeout(timer); rt.pending.delete(id); reject(cause); }
-  });
-  // Mark the rejection as handled at creation: a caller that forgets to await
-  // or catch can never crash the supervisor (each crash orphans mid-turn RPC
-  // children and re-dispatches their work — the double-agent bug class).
-  // Awaiting callers still receive the rejection normally.
-  promise.catch(() => {});
-  return promise;
-}
-
-function handleRpcEvent(sessionId: string, rt: Runtime, event: any) {
-  if (event.type === "response" && event.id) {
-    const pending = rt.pending.get(event.id);
-    if (pending) {
-      clearTimeout(pending.timer);
-      rt.pending.delete(event.id);
-      if (event.success && event.command === "get_state" && rt.observation === "unreachable") {
-        rt.observation = "current";
-        touchSession(sessionId);
-      }
-      event.success ? pending.resolve(event.data ?? {}) : pending.reject(new CoreCommandError(event.error ?? "Core command failed"));
-    }
+function handlePiEvent(sessionId: string, event: any) {
+  if (!ownsSupervisorLease()) return;
+  ensureThreadView(db, sessionId);
+  const rt = liveFor(sessionId);
+  if (event.type === "response" && event.command === "get_state" && event.success && event.data?.live) {
+    restoreLiveProjection(rt, event.data.live);
+    displayContexts.delete(sessionId);
+    signalLiveSync();
     return;
   }
-  if (!ownsSupervisorLease() || runtimes.get(sessionId) !== rt || rt.phase === "STOPPING") return;
-  if (event.type === "core_agent") {
-    rt.phaseVersion++;
-    sessionCores.recordAgent(sessionId, event.agent as CoreAgent);
-    emit(sessionId, "core_agent", { agent: event.agent });
-    if (event.agent?.state === "running" && ["IDLE","DISPATCHING"].includes(rt.phase)) setRuntimePhase(sessionId,rt,"RUNNING","RUNNING");
-    else if (event.agent?.state !== "running") void verifyRuntimeSettlement(sessionId,rt).catch(cause => console.error("Core tree reconciliation failed",cause));
-    touchSession(sessionId);
+  if (event.type === "thread_error") {
+    emit(sessionId, "notice", { text: String(event.error) });
     return;
   }
-  if (event.type === "core_child_event") return;
   if (event.type === "context_update") {
     const last = event.context?.messages?.findLast((message: any) => message.role === "assistant");
     storeContextCapture(sessionId, { context: event.context,
       capturedAt: Math.max(Date.now(), (storedContext(sessionId)?.capturedAt ?? 0) + 1),
       replacement: rt.compacting ? "compaction" : undefined,
-      finalizesMessage: typeof event.finalizesMessage === "string" ? event.finalizesMessage
-        : messageFinalizationKey(event.finalizedMessage?.role === "assistant" ? event.finalizedMessage : last) });
+      finalizesMessage: event.finalizesMessage ?? messageFinalizationKey(last) });
     return;
   }
-  if (event.type === "queue_update") {
-    const steering = Array.isArray(event.steering) ? event.steering.length : 0;
-    const followUp = Array.isArray(event.followUp) ? event.followUp.length : 0;
-    if (steering > rt.steeringQueued) confirmDispatchedWork(sessionId, "steer", steering - rt.steeringQueued);
-    if (followUp > rt.followUpQueued) confirmDispatchedWork(sessionId, "followUp", followUp - rt.followUpQueued);
-    if (steering !== rt.steeringQueued || followUp !== rt.followUpQueued) {
-      rt.steeringQueued = steering;
-      rt.followUpQueued = followUp;
-      rt.phaseVersion++;
-      touchSession(sessionId);
-    }
+  if (event.type === "thread_message_inserted") {
+    const annotation = db.query("SELECT meeting_transcript FROM message_annotations WHERE work_id=?").get(event.workId) as { meeting_transcript: string } | null;
+    const handoff = annotation ? meetingHandoffText(JSON.parse(annotation.meeting_transcript)) : "";
+    emit(sessionId, "user", { text: [event.message.text, handoff].filter(Boolean).join("\n\n"),
+      delivery: event.message.delivery, workId: event.workId }, `inserted:${event.workId}`);
+    scheduleThreadNameIfDue(sessionId);
     return;
   }
-  // Abort owns the lifecycle transition, but Pi can finish already accepted
-  // steering before abort() returns. Keep those real transcript events; only a
-  // process that is actually stopping suppresses output.
-  if (phaseOf(rt) === "STOPPING" || rt.suppressOutput) return;
-  // Any agent event invalidates an in-flight get_state snapshot taken before it.
-  rt.phaseVersion++;
+  if (event.type === "thread_settled") {
+    settleLiveProjection(rt);
+    void refreshThreadNotifications();
+    emit(sessionId, "settled", { workId: event.workId, outcome: event.outcome }, `settled:${event.executionId}`);
+    if (event.outcome === "failed") emit(sessionId, "notice", {
+      text: modelFailureText(event.finalMessage) ?? "The thread execution failed",
+    }, `failure:${event.executionId}`);
+    return;
+  }
 
-  const proveRunning = () => {
-    confirmDispatchedWork(sessionId);
-    if (["STARTING", "IDLE", "DISPATCHING"].includes(rt.phase)) {
-      setRuntimePhase(sessionId, rt, "RUNNING", "RUNNING");
-    }
-  };
   if (event.type === "agent_start") {
     rt.thinkingActive = false;
-    proveRunning();
   } else if (event.type === "message_update" && event.assistantMessageEvent?.type === "text_delta") {
     if (rt.thinkingActive) { rt.thinkingActive = false; touchSession(sessionId); }
-    proveRunning();
     rt.liveText += event.assistantMessageEvent.delta ?? "";
     signalLiveSync();
   } else if (event.type === "message_update" && event.assistantMessageEvent?.type === "thinking_start") {
-    proveRunning();
     // A provider can open several thinking content blocks in one assistant
     // message. Keep their deltas together until message_end identifies the
     // durable message that owns them.
@@ -1185,7 +1017,6 @@ function handleRpcEvent(sessionId: string, rt: Runtime, event: any) {
     touchSession(sessionId);
   } else if (event.type === "message_update" && event.assistantMessageEvent?.type === "thinking_delta") {
     if (!rt.thinkingActive) { rt.thinkingActive = true; touchSession(sessionId); }
-    proveRunning();
     rt.liveThinking += event.assistantMessageEvent.delta ?? "";
     signalLiveSync();
   } else if (event.type === "message_update" && event.assistantMessageEvent?.type === "thinking_end") {
@@ -1195,7 +1026,6 @@ function handleRpcEvent(sessionId: string, rt: Runtime, event: any) {
     touchSession(sessionId);
   } else if (event.type === "message_end") {
     if (rt.thinkingActive) { rt.thinkingActive = false; touchSession(sessionId); }
-    proveRunning();
     const text = textFromMessage(event.message);
     if (event.message?.role === "assistant") {
       inlineImages.accept(sessionId, sha256(text), text);
@@ -1221,16 +1051,11 @@ function handleRpcEvent(sessionId: string, rt: Runtime, event: any) {
         rt.thinkingBlockStart = rt.liveThinking.length;
       }
     }
-    if (text) {
-      emit(sessionId, "assistant", { text });
+    if (text && event.message?.role === "assistant") {
+      emit(sessionId, "assistant", { text }, `assistant:${messageFinalizationKey(event.message)}`);
       scheduleThreadNameIfDue(sessionId);
     }
-    const failure = modelFailureText(event.message);
-    if (failure) {
-      if (event.message?.stopReason !== "aborted" || !rt.pendingModelFailure) rt.pendingModelFailure = failure;
-    } else if (event.message?.role === "assistant") rt.pendingModelFailure = null;
   } else if (event.type === "tool_execution_start") {
-    proveRunning();
     const toolCallId = String(event.toolCallId ?? crypto.randomUUID());
     const name = String(event.toolName ?? "tool");
     rt.thinkingActive = false;
@@ -1241,7 +1066,6 @@ function handleRpcEvent(sessionId: string, rt: Runtime, event: any) {
     touchSession(sessionId);
     emit(sessionId, "tool_start", { toolCallId, name, args });
   } else if (event.type === "tool_execution_update") {
-    proveRunning();
     const toolCallId = String(event.toolCallId ?? "");
     let tool = rt.toolProgress.get(toolCallId);
     if (!tool) {
@@ -1278,17 +1102,15 @@ function handleRpcEvent(sessionId: string, rt: Runtime, event: any) {
     touchSession(sessionId);
     if (!event.success && event.finalError) emit(sessionId, "notice", { text: `Retry failed: ${String(event.finalError)}` });
   } else if (event.type === "compaction_start") {
-    proveRunning();
     rt.compacting = true;
     rt.compactionContextHash = null;
     touchSession(sessionId);
     emit(sessionId, "notice", { text: "Compacting context…" });
   } else if (event.type === "compaction_end") {
     rt.compacting = false;
-    if (event.result) { requireCompactionContext(sessionId, rt); rt.pendingModelFailure = null; }
+    if (event.result) requireCompactionContext(sessionId, rt);
     else {
       rt.compactionContextHash = null;
-      if (event.errorMessage) rt.pendingModelFailure = String(event.errorMessage);
     }
     touchSession(sessionId);
     const text = event.aborted
@@ -1299,469 +1121,28 @@ function handleRpcEvent(sessionId: string, rt: Runtime, event: any) {
           ? "Context compaction failed; retrying…"
           : `Context compaction failed${event.errorMessage ? `: ${String(event.errorMessage)}` : ""}`;
     emit(sessionId, "notice", { text });
-  } else if (event.type === "core_error") {
-    const detail = String(event.error ?? "Agent core failed");
-    if (!event.willRetry) rt.pendingCoreFailure = detail;
-    rt.retrying = event.willRetry === true;
-    emit(sessionId, "notice", {text:detail});
-    touchSession(sessionId);
+
+
   } else if (event.type === "extension_error") {
     emit(sessionId, "notice", { text: "Extension error" });
   } else if (event.type === "extension_ui_request") {
     if (["select", "confirm", "input", "editor"].includes(event.method)) {
-      sendLine(rt, { type: "extension_ui_response", id: event.id, cancelled: true });
+      void rpc(sessionId, "extension_ui_response", { id: event.id, cancelled: true }).catch(cause => console.error(cause));
       emit(sessionId, "notice", { text: "An interactive extension dialog was cancelled on mobile." });
     }
-  } else if (event.type === "agent_settled") {
-    if (rt.phase === "DISPATCHING" && rt.dispatchedWorkIds.size > 0) {
-      emit(sessionId, "notice", { text: "Ignored a stale settled event while the new message was starting" });
-    } else if (rt.phase === "RUNNING") {
-      void verifyRuntimeSettlement(sessionId, rt).catch((cause) => {
-        console.error(`Settlement verification failed for ${sessionId}`, cause);
-      });
-    }
   }
 }
 
-async function verifyRuntimeSettlement(sessionId: string, rt: Runtime) {
-  await new Promise((resolve) => setTimeout(resolve, 0));
-  if (!ownsSupervisorLease() || runtimes.get(sessionId) !== rt || rt.phase !== "RUNNING") return;
-  await reconcileRuntimeState(sessionId, rt);
-}
-
-function retireIdleRuntime(sessionId: string, rt: Runtime): boolean {
-  if (rt.phase !== "IDLE") return false;
-  const subagent = subagentIdentity(sessionId);
-  if (!subagent && !rt.replaceAfterSettle) return false;
-  if (subagent && rt.pendingContextFinalization) return false;
-  if (db.query("SELECT 1 FROM work_items WHERE session_id=? AND state IN ('queued','running','dispatched') LIMIT 1").get(sessionId)) return false;
-  rt.expectedExit = true;
-  rt.suppressOutput = true;
-  setRuntimePhase(sessionId, rt, "STOPPING");
-  void terminateRuntimeProcess(rt);
-  return true;
-}
-
-function settleRuntime(sessionId: string, rt: Runtime, emitEvent: boolean): boolean {
-  if (rt.phase !== "RUNNING") return false;
-  const modelFailure = rt.pendingCoreFailure ?? rt.pendingModelFailure;
-  if (modelFailure) emit(sessionId, "notice", { text: modelFailure });
-  rt.pendingCoreFailure = null;
-  rt.pendingModelFailure = null;
-  setRuntimePhase(sessionId, rt, "IDLE");
-  rt.compacting = false;
-  rt.retrying = false;
-  rt.activeTools.clear();
-  rt.thinkingActive = false;
-  for (const [id, tool] of rt.toolProgress) if (!tool.result) rt.toolProgress.delete(id);
-  displayContexts.delete(sessionId);
-  rt.steeringQueued = 0;
-  rt.followUpQueued = 0;
-  if (!rt.pendingContextFinalization) {
-    rt.liveText = "";
-    rt.liveThinking = "";
-    rt.thinkingBlockStart = 0;
-    rt.pendingContextTextLength = 0;
-    rt.pendingContextThinkingLength = 0;
-  }
-  rt.lastActivity = Date.now();
-  if (rt.dispatchedWorkIds.size > 0) {
-    const completedAt = now();
-    for (const workId of rt.dispatchedWorkIds) {
-      db.query("UPDATE work_items SET state='complete',updated_at=?,last_error=? WHERE id=? AND state='dispatched'")
-        .run(completedAt, modelFailure, workId);
-    }
-    rt.dispatchedWorkIds.clear();
-  }
-  const pendingWork = Number((db.query(
-    "SELECT COUNT(*) count FROM work_items WHERE session_id=? AND state IN ('queued','running')",
-  ).get(sessionId) as any)?.count ?? 0);
-  setState(sessionId, pendingWork > 0 ? "RUNNING" : "IDLE");
-  if (emitEvent) emit(sessionId, "settled");
-  relayThreadResults();
-  if (!retireIdleRuntime(sessionId, rt)) kickSession(sessionId);
-  return true;
-}
-
-function coreStateActive(state: any): boolean {
-  return Boolean(state.coreBusy || state.treeComplete === false || state.isStreaming || state.isCompacting || Number(state.pendingMessageCount ?? 0) > 0);
-}
-
-function restoreLiveProgress(sessionId: string, rt: Runtime, live: any) {
-  if (!live) return;
-  const text = rt.liveText.slice(0, rt.pendingContextTextLength) + String(live.text ?? "");
-  const thinking = rt.liveThinking.slice(0, rt.pendingContextThinkingLength) + String(live.thinking ?? "");
-  const tools = Array.isArray(live.tools) ? live.tools : [];
-  const changed = text !== rt.liveText || thinking !== rt.liveThinking || rt.thinkingActive !== Boolean(live.isThinking)
-    || JSON.stringify([...rt.activeTools]) !== JSON.stringify(tools.map((tool: any) => [tool.toolCallId, tool.toolName]))
-    || tools.some((tool: any) => rt.toolProgress.get(String(tool.toolCallId))?.args === undefined);
-  rt.liveText = text;
-  rt.liveThinking = thinking;
-  rt.thinkingActive = Boolean(live.isThinking);
-  rt.thinkingBlockStart = rt.pendingContextThinkingLength;
-  rt.activeTools = new Map(tools.map((tool: any) => [String(tool.toolCallId), String(tool.toolName)]));
-  for (const [id, tool] of rt.toolProgress) if (!tool.result && !rt.activeTools.has(id)) rt.toolProgress.delete(id);
-  for (const tool of tools) {
-    const id = String(tool.toolCallId);
-    const existing = rt.toolProgress.get(id);
-    if (!existing) rt.toolProgress.set(id, {
-      id, name: String(tool.toolName), args: boundedJson(tool.args), startedAt: Date.now(), observedStart: true, output: "",
-    });
-    else if (existing.args === undefined) rt.toolProgress.set(id, { ...existing, args: boundedJson(tool.args) });
-  }
-  if (changed) { displayContexts.delete(sessionId); touchSession(sessionId); }
-}
-
-async function reconcileRuntimeState(sessionId: string, rt: Runtime): Promise<any> {
-  if (!rt.transport || rt.reconciling || ["ABORTING", "STOPPING"].includes(rt.phase)) return null;
-  rt.reconciling = true;
-  const phaseVersion = rt.phaseVersion;
-  try {
-    const state = await rpc(rt, "get_state", {}, 5_000);
-    if (!ownsSupervisorLease() || runtimes.get(sessionId) !== rt || rt.phaseVersion !== phaseVersion) return state;
-    if (isCoreId(state.core)) rt.core = state.core;
-    restoreLiveProgress(sessionId, rt, state.live);
-    if (state.terminalError && ["RUNNING","DISPATCHING"].includes(rt.phase)) rt.pendingCoreFailure = String(state.terminalError);
-    if (state.model?.id) rt.modelId = String(state.model.id);
-    if (state.model?.provider) {
-      const row = sessionRow.get(sessionId) as any;
-      if (row && row.current_provider !== String(state.model.provider)) {
-        db.query("UPDATE sessions SET current_provider=?,revision=revision+1,updated_at=? WHERE id=?")
-          .run(String(state.model.provider), now(), sessionId);
-      }
-    }
-    const active = coreStateActive(state);
-    const wasCompacting = rt.compacting;
-    rt.compacting = Boolean(state.isCompacting);
-    if (wasCompacting && !rt.compacting) requireCompactionContext(sessionId, rt);
-    if (active) {
-      if (["IDLE", "DISPATCHING"].includes(rt.phase)) setRuntimePhase(sessionId, rt, "RUNNING", "RUNNING");
-    } else if (rt.phase === "RUNNING") {
-      settleRuntime(sessionId, rt, true);
-    } else if (rt.phase === "IDLE") {
-      const pendingWork = Number((db.query(
-        "SELECT COUNT(*) AS count FROM work_items WHERE session_id=? AND state IN ('queued','running','dispatched')",
-      ).get(sessionId) as any)?.count ?? 0);
-      setState(sessionId, pendingWork > 0 ? "RUNNING" : "IDLE");
-    }
-    // DISPATCHING + inactive is intentionally not settlement: a get_state request
-    // can sample the gap between prompt acknowledgement and agent_start.
-    return state;
-  } finally {
-    rt.reconciling = false;
-  }
-}
-
-function runtimeFromHandoff(row: any, handoff?: RuntimeHandoff, initialPhase: RuntimePhase = "STARTING"): Runtime {
-  const toolProgress = new Map((handoff?.toolProgress ?? []).map(tool => [tool.id, tool]));
-  for (const [id, name] of handoff?.activeTools ?? []) {
-    if (toolProgress.has(id)) continue;
-    const event = db.query("SELECT time,payload FROM events WHERE session_id=? AND type='tool_start' AND json_extract(payload,'$.toolCallId')=? ORDER BY seq DESC LIMIT 1")
-      .get(row.id, id) as { time: string; payload: string } | null;
-    toolProgress.set(id, { id, name, args: event ? JSON.parse(event.payload).args : {},
-      startedAt: event ? Date.parse(event.time) : Date.now(), observedStart: !event, output: "" });
-  }
-  return {
-    sessionId: row.id,
-    observation: handoff ? "unreachable" : "current",
-    transport: null,
-    startupAbort: new AbortController(),
-    pending: new Map(),
-    phase: handoff?.phase ?? initialPhase,
-    phaseVersion: 0,
-    compacting: handoff?.compacting ?? false,
-    compactionContextHash: handoff?.compactionContextHash ?? null,
-    retrying: handoff?.retrying ?? false,
-    reconciling: false,
-    suppressOutput: false,
-    liveText: handoff?.liveText ?? "",
-    liveThinking: handoff?.liveThinking ?? "",
-    thinkingBlockStart: handoff?.thinkingBlockStart ?? handoff?.liveThinking.length ?? 0,
-    thinkingActive: handoff?.thinkingActive ?? false,
-    toolProgress,
-    pendingContextTextLength: handoff?.pendingContextTextLength
-      ?? (handoff?.pendingContextFinalization ? handoff.liveText.length : 0),
-    pendingContextThinkingLength: handoff?.pendingContextThinkingLength
-      ?? (handoff?.pendingContextFinalization ? handoff.liveThinking.length : 0),
-    pendingContextFinalization: handoff?.pendingContextFinalization ?? null,
-    pendingModelFailure: handoff?.pendingModelFailure ?? null,
-    pendingCoreFailure: handoff?.pendingCoreFailure ?? null,
-    core: handoff?.core,
-    expectedExit: false,
-    lastActivity: handoff?.lastActivity ?? Date.now(),
-    activeTools: new Map(handoff?.activeTools ?? []),
-    dispatchedWorkIds: new Set(handoff?.dispatchedWorkIds ?? []),
-    steeringQueued: handoff?.steeringQueued ?? 0,
-    followUpQueued: handoff?.followUpQueued ?? 0,
-    historyNeedsRestore: handoff?.historyNeedsRestore ?? false,
-    modelId: handoff?.modelId ?? String(row.initial_model ?? "unknown"),
-    replaceAfterSettle: handoff !== undefined,
+function threadEnvironment(thread: Thread) {
+  const meta = remotePlacement(thread);
+  return { ...process.env, HOME,
+    PI_REMOTE_SESSION_ID: thread.id, PI_THREAD_API_URL: `http://${HOST}:${PORT}/v1/threads`,
+    PI_THREAD_DATABASE: join(DATA, "threads.sqlite3"),
+    PI_SESSION_ID: thread.id, PI_SESSION_FILE: thread.sessionFile,
+    PI_REMOTE_MEETING_ID: String(meta.meetingId ?? ""), PI_REMOTE_CONTEXT_OWNER_PID: "",
+    PI_REMOTE_BASH_TIMEOUT_MAX_SECONDS: String(bashTimeoutSeconds(meta.bashTimeoutSeconds)),
+    PI_REMOTE_SERVER_URL: `http://${HOST}:${PORT}`, PI_CODING_AGENT_DIR: AGENT_DIR,
   };
-}
-
-function handleRuntimeOutput(sessionId: string, rt: Runtime, line: string) {
-  try { handleRpcEvent(sessionId, rt, JSON.parse(line)); }
-  catch { emit(sessionId, "notice", { text: "Malformed agent event ignored" }); }
-}
-
-function monitorRuntime(row: any, rt: Runtime) {
-  if (!rt.transport) throw new Error("Cannot monitor an unconnected runtime");
-  rt.transport.onExit((code) => {
-    for (const pending of rt.pending.values()) { clearTimeout(pending.timer); pending.reject(new Error("Agent stopped")); }
-    rt.pending.clear();
-    if (runtimes.get(row.id) !== rt) return;
-    setRuntimePhase(row.id, rt, "STOPPING");
-    runtimes.delete(row.id);
-    displayContexts.delete(row.id);
-    runtimeCapacityQueue.wake();
-    if (shuttingDown || !ownsSupervisorLease()) return;
-    const retryAt = Date.now() + RUNTIME_RESTART_DELAY_MS;
-    if (!rt.expectedExit) {
-      db.query("UPDATE work_items SET state='queued',resume=1,available_at=?,updated_at=?,last_error='Agent stopped before settling' WHERE session_id=? AND state='dispatched'")
-        .run(retryAt, now(), row.id);
-    }
-    rt.dispatchedWorkIds.clear();
-    if (!sessionRow.get(row.id)) return;
-    const pendingWork = Number((db.query(
-      "SELECT COUNT(*) count FROM work_items WHERE session_id=? AND state IN ('queued','running')",
-    ).get(row.id) as any)?.count ?? 0);
-    if (rt.expectedExit) {
-      setState(row.id, "STOPPED");
-    } else if (pendingWork > 0) {
-      setState(row.id, "RUNNING", `Agent exited ${code}; resuming queued work`);
-      emit(row.id, "notice", { text: `Agent disconnected (exit ${code}); resuming queued work` });
-      scheduleSession(row.id, RUNTIME_RESTART_DELAY_MS);
-    } else {
-      setState(row.id, "STOPPED", code === 0 ? null : `Agent exited ${code}`);
-      emit(row.id, "notice", { text: `Agent disconnected while idle (exit ${code}); thread remains resumable` });
-    }
-  });
-}
-
-function runtimeEnvironment(row: any) {
-  return {
-    ...process.env,
-    HOME,
-    PATH: `${join(HOME, ".local/bin")}:${join(HOME, ".bun/bin")}:${process.env.PATH ?? ""}`,
-    PI_REMOTE_SESSION_ID: row.id,
-    PI_STACK_CORE_STATE_DIR: sessionCores.get(row.id).stateDir,
-    PI_SESSION_ID: row.id,
-    PI_SESSION_FILE: join(sessionCores.get(row.id).stateDir, "conversation.jsonl"),
-    PI_STACK_CORE_OWNS_CHILDREN: "1",
-    PI_SUBAGENT_MODEL: subagentIdentity(row.id)?.model ?? "",
-    PI_REMOTE_MEETING_ID: row.meeting_id ?? "",
-    PI_REMOTE_CONTEXT_OWNER_PID: "",
-    PI_REMOTE_BASH_TIMEOUT_MAX_SECONDS: String(bashTimeoutSeconds(row.bash_timeout_seconds)),
-    PI_REMOTE_SERVICE_TIER_FILE: serviceTierPath(row.id),
-    PI_REMOTE_SERVER_URL: `http://${HOST}:${PORT}`,
-    PI_CODING_AGENT_DIR: AGENT_DIR,
-  };
-}
-
-async function startRuntime(row: any): Promise<Runtime> {
-  const preset = workspaces.get(row.workspace_id);
-  const cwd = realpathSync(preset?.path ?? row.workspace_id);
-  const resumePath = row.session_path && existsSync(row.session_path) ? row.session_path : null;
-  if (row.session_path && !resumePath) {
-    db.query("UPDATE sessions SET session_path=NULL WHERE id=?").run(row.id);
-    emit(row.id, "notice", { text: "Session file was missing; restoring from saved conversation history" });
-  }
-  writeServiceTier(row.id, row.service_tier === "priority" ? "priority" : "default");
-  const args = [
-    PI, "--mode", "rpc", "--session-dir", join(DATA, "sessions"),
-    "--extension", SERVICE_TIER_EXTENSION,
-    "--extension", THREAD_CONTEXT_EXTENSION,
-  ];
-  const subagent = subagentIdentity(row.id);
-  if (resumePath) {
-    args.push("--session", resumePath);
-    if (subagent) args.push("--provider", subagent.provider, "--model", subagent.model);
-  } else {
-    args.push("--name", row.name);
-    if (row.initial_provider && row.initial_model) args.push("--provider", row.initial_provider, "--model", row.initial_model);
-    if (row.initial_thinking) args.push("--thinking", row.initial_thinking);
-  }
-  setState(row.id, "QUEUED", row.state === "QUEUED" ? row.last_error : null);
-  const rt = runtimeFromHandoff(row, undefined, "WAITING");
-  runtimes.set(row.id, rt);
-  try {
-    rt.transport = await startRuntimeHost({
-      data: DATA,
-      sessionId: row.id,
-      cwd,
-      args,
-      priority: admissionPriority(row.id) > 0,
-      env: runtimeEnvironment(row),
-      signal: rt.startupAbort.signal,
-      onOutput: (line) => handleRuntimeOutput(row.id, rt, line),
-    });
-    monitorRuntime(row, rt);
-    if (rt.expectedExit || rt.startupAbort.signal.aborted) throw new Error("Activation cancelled");
-    setRuntimePhase(row.id, rt, "STARTING", "STARTING");
-    const progressVersion = rt.phaseVersion;
-    const state = await rpc(rt, "get_state", {}, 120_000);
-    if (!ownsSupervisorLease() || rt.expectedExit || rt.startupAbort.signal.aborted
-      || runtimes.get(row.id) !== rt || ["ABORTING", "STOPPING"].includes(phaseOf(rt))) throw new Error("Activation cancelled");
-    if (isCoreId(state.core)) rt.core = state.core;
-    if (state.model?.id) rt.modelId = String(state.model.id);
-    if (state.sessionFile) db.query("UPDATE sessions SET session_path=? WHERE id=?").run(state.sessionFile, row.id);
-    if (rt.phaseVersion === progressVersion) restoreLiveProgress(row.id, rt, state.live);
-    if (state.model?.provider) db.query("UPDATE sessions SET current_provider=?,revision=revision+1,updated_at=? WHERE id=?")
-      .run(String(state.model.provider), now(), row.id);
-    const latestRow = sessionRow.get(row.id) as any;
-    if (latestRow && !/^\d+$/.test(String(latestRow.name)) && state.sessionName !== latestRow.name) {
-      await rpc(rt, "set_session_name", { name: String(latestRow.name) }, 10_000);
-    }
-    const historyCount = (db.query("SELECT count(*) count FROM events WHERE session_id=? AND type IN ('user','assistant')").get(row.id) as any)?.count ?? 0;
-    rt.historyNeedsRestore = Number(state.messageCount ?? 0) === 0 && historyCount > 0;
-    const pendingWork = Number((db.query(
-      "SELECT COUNT(*) AS count FROM work_items WHERE session_id=? AND state IN ('queued','running')",
-    ).get(row.id) as any)?.count ?? 0);
-    // Replayed/live events may advance this runtime while get_state is in flight.
-    // That is successful activation, not cancellation; never overwrite it with IDLE.
-    if (rt.phase === "STARTING") {
-      const working = coreStateActive(state);
-      setRuntimePhase(row.id, rt, working ? "RUNNING" : "IDLE", working || pendingWork > 0 ? "RUNNING" : "IDLE");
-    }
-    if (rt.historyNeedsRestore) emit(row.id, "notice", { text: "Conversation context will be restored with the next message" });
-    scheduleThreadNameIfDue(row.id);
-    return rt;
-  } catch (cause) {
-    const cancelled = rt.expectedExit;
-    rt.expectedExit = true;
-    setRuntimePhase(row.id, rt, "STOPPING");
-    await terminateRuntimeProcess(rt);
-    if (runtimes.get(row.id) === rt) { runtimes.delete(row.id); displayContexts.delete(row.id); }
-    if (!cancelled && ownsSupervisorLease() && String(cause).includes("Runner capacity busy")) {
-      setState(row.id, "QUEUED", "Waiting for shared runner capacity");
-    }
-    if (cancelled || !ownsSupervisorLease() || String(cause).includes("Runner capacity busy")) throw cause;
-    // A transport, capacity, or extension failure does not invalidate a saved
-    // session file. Retry that exact file; only the missing-file check above
-    // switches to reconstruction from the conversation ledger.
-    throw cause;
-  }
-}
-
-function recoverFailedHandoff(sessionId: string) {
-  const time = now();
-  db.query("UPDATE sessions SET state='STOPPED',updated_at=?,last_error=NULL,revision=revision+1 WHERE id=?").run(time, sessionId);
-  db.query("UPDATE work_items SET state='queued',resume=CASE WHEN state='dispatched' THEN 1 ELSE resume END,available_at=?,updated_at=? WHERE session_id=? AND state IN ('running','dispatched')")
-    .run(Date.now(), time, sessionId);
-}
-
-async function terminateFailedHandoff(handoff: RuntimeHandoff) {
-  // A session socket is the lifecycle boundary. Its PID may also own other
-  // conversations; failed adoption must never kill those siblings.
-  if (handoff.shared) return;
-  const pid = Number(handoff.pid ?? 0);
-  if (!Number.isSafeInteger(pid) || pid <= 1) return;
-  try { process.kill(-pid, "SIGTERM"); } catch { return; }
-  const deadline = Date.now() + 2_000;
-  while (Date.now() < deadline) {
-    try { process.kill(-pid, 0); } catch { return; }
-    await Bun.sleep(50);
-  }
-  try { process.kill(-pid, "SIGKILL"); } catch {}
-}
-
-async function reconcileAdoptedRuntime(row: any, rt: Runtime) {
-  const phaseVersion = rt.phaseVersion;
-  try {
-    const state = await rpc(rt, "get_state", {}, 5_000);
-    if (!ownsSupervisorLease() || runtimes.get(row.id) !== rt || rt.phaseVersion !== phaseVersion
-      || ["ABORTING", "STOPPING"].includes(rt.phase)) return;
-    restoreLiveProgress(row.id, rt, state.live);
-    if (isCoreId(state.core)) rt.core = state.core;
-    if (state.model?.id) rt.modelId = String(state.model.id);
-    if (state.sessionFile) db.query("UPDATE sessions SET session_path=? WHERE id=?").run(state.sessionFile, row.id);
-    const active = coreStateActive(state);
-    if (active && !["RUNNING", "ABORTING"].includes(rt.phase)) setRuntimePhase(row.id, rt, "RUNNING", "RUNNING");
-    else if (!active && rt.phase === "RUNNING") settleRuntime(row.id, rt, true);
-    else if (!active && rt.phase === "STARTING") {
-      setRuntimePhase(row.id, rt, "IDLE", "IDLE");
-      rt.expectedExit = true;
-      rt.suppressOutput = true;
-      setRuntimePhase(row.id, rt, "STOPPING");
-      void terminateRuntimeProcess(rt);
-    }
-  } catch (cause) {
-    console.error(`Could not reconcile adopted runtime ${row.id}`, cause);
-  }
-}
-
-async function adoptHandoffRuntimes() {
-  await Promise.all(pendingHandoff.map(async (handoff) => {
-    const row = sessionRow.get(handoff.sessionId) as any;
-    if (!row) return;
-    const rt = runtimeFromHandoff(row, handoff);
-    runtimes.set(row.id, rt);
-    try {
-      rt.transport = await attachRuntimeHost(handoff.socketPath, (line) => handleRuntimeOutput(row.id, rt, line));
-      monitorRuntime(row, rt);
-      if (rt.phase === "IDLE") {
-        rt.expectedExit = true;
-        rt.suppressOutput = true;
-        setRuntimePhase(row.id, rt, "STOPPING");
-        void terminateRuntimeProcess(rt);
-      } else {
-        void reconcileAdoptedRuntime(row, rt);
-      }
-    } catch (cause) {
-      console.error(`Could not adopt runtime ${row.id}`, cause);
-      runtimes.delete(row.id);
-      displayContexts.delete(row.id);
-      void (async () => {
-        if (existsSync(handoff.socketPath)) await terminateFailedHandoff(handoff);
-        recoverFailedHandoff(row.id);
-        kickSession(row.id);
-      })().catch((recoveryCause) => console.error(`Could not recover runtime ${row.id}`, recoveryCause));
-    }
-  }));
-  try { unlinkSync(HANDOFF_PATH); } catch {}
-  for (const sessionId of runtimes.keys()) scheduleThreadNameIfDue(sessionId);
-}
-
-async function reapUnclaimedRuntimeHosts() {
-  const directory = join(DATA, "runtime-hosts");
-  if (!existsSync(directory)) return;
-  const claimed = new Set([...runtimes.values()].flatMap((rt) => rt.transport ? [rt.transport.socketPath] : []));
-  await Promise.all(readdirSync(directory).filter((name) => name.endsWith(".sock")).map(async (name) => {
-    const socketPath = join(directory, name);
-    if (claimed.has(socketPath)) return;
-    try {
-      const transport = await attachRuntimeHost(socketPath, () => {});
-      await transport.terminate();
-    } catch {
-      try { unlinkSync(socketPath); } catch {}
-    }
-  }));
-}
-
-const runtimeAdmission = new RuntimeAdmission();
-function admissionPriority(id: string): number {
-  const row = sessionRow.get(id) as any;
-  return row?.admission_priority ? 2 : subagentIdentity(id) ? 0 : 1;
-}
-
-async function activate(row: any): Promise<Runtime> {
-  await runtimeAdoption;
-  const current = sessionRow.get(row.id) as any;
-  if (!current || current.archived_at) throw new Error("Thread is archived; unarchive it before continuing");
-  row = current;
-  const inProgress = activations.get(row.id);
-  if (inProgress) return inProgress;
-  const existing = runtimes.get(row.id);
-  if (existing) return existing;
-  const activation = runtimeAdmission.admit(() => admissionPriority(row.id), async () => {
-    const current = sessionRow.get(row.id) as any;
-    if (!current || current.archived_at) throw new Error("Activation cancelled");
-    return startRuntime(current);
-  }).finally(() => {
-    activations.delete(row.id);
-  });
-  activations.set(row.id, activation);
-  return activation;
 }
 
 function canonicalModelProvider(provider: string): string {
@@ -1803,108 +1184,29 @@ const BUILTIN_COMMANDS = [{
 }];
 
 async function threadCommands(row: any) {
-  const rt = await activate(row);
-  const result = await rpc(rt, "get_commands");
-  const commands = Array.isArray(result.commands) ? result.commands : [];
-  const names = new Set(commands.map((command: any) => String(command?.name ?? "")));
-  return { commands: [
-    ...BUILTIN_COMMANDS,
-    ...commands.filter((command: any) => !names.has("compact") || String(command?.name ?? "") !== "compact"),
-  ] };
+  const commands = await rpc(row.id, "get_commands");
+  return { commands: commands.commands ?? [] };
 }
-
 async function runCommand(row: any, requestId: string, name: string, args: string) {
-  if (forkingSessions.has(row.id)) throw new Error("Wait for the conversation edit to finish");
-  const old = requestResult(requestId);
-  if (old) return { response: JSON.parse(old.response), status: old.status };
-  if (!/^[a-zA-Z0-9:_-]+$/.test(name)) throw new Error("Invalid slash command");
-  const rt = await activate(row);
-  if (["ABORTING", "STOPPING"].includes(rt.phase)) throw new Error("Thread is stopping; wait for it to become resumable");
-  const available = await threadCommands(row);
-  const command = available.commands.find((candidate: any) => String(candidate.name) === name);
-  if (!command) throw new Error(`Unknown slash command: /${name}`);
-  const text = `/${name}${args ? ` ${args}` : ""}`;
-  if (name === "compact") {
-    const pendingWork = Number((db.query(
-      "SELECT COUNT(*) AS count FROM work_items WHERE session_id=? AND state IN ('queued','running','dispatched')",
-    ).get(row.id) as any)?.count ?? 0);
-    if (rt.phase !== "IDLE" || pendingWork > 0) throw new Error("Wait for the thread to become idle before compacting");
-    setRuntimePhase(row.id, rt, "DISPATCHING", "RUNNING");
-    const response = { accepted: true, command: name, session: publicSession(sessionRow.get(row.id)) };
-    saveRequest(requestId, row.id, "command", 202, response);
-    // Compaction owns its deadline. HTTP admission must not time out and invite a duplicate.
-    void rpc(rt, "compact", args ? { customInstructions: args } : {}, 0).then(() => {
-      if (!ownsSupervisorLease() || runtimes.get(row.id) !== rt) return;
-      if (phaseOf(rt) === "DISPATCHING") setRuntimePhase(row.id, rt, "RUNNING", "RUNNING");
-      if (phaseOf(rt) === "RUNNING") settleRuntime(row.id, rt, true);
-    }, cause => {
-      if (!ownsSupervisorLease() || runtimes.get(row.id) !== rt) return;
-      const detail = `Context compaction failed: ${cause instanceof Error ? cause.message : String(cause)}`;
-      rt.pendingModelFailure = detail;
-      emit(row.id, "notice", { text: detail });
-      // A lost RPC reply does not prove that the operation stopped.
-      void reconcileRuntimeState(row.id, rt).then(state => {
-        if (state && !coreStateActive(state) && phaseOf(rt) === "DISPATCHING") {
-          setRuntimePhase(row.id, rt, "RUNNING", "RUNNING");
-          settleRuntime(row.id, rt, true);
-        }
-      }).catch(error => console.error("Compaction state reconciliation failed", error));
-    });
-    return { response, status: 202 };
-  } else {
-    const startsAgent = command.source === "prompt" || command.source === "skill";
-    if (startsAgent) {
-      if (rt.phase !== "IDLE") throw new Error("Wait for the thread to become idle before running this command");
-      setRuntimePhase(row.id, rt, "DISPATCHING", "RUNNING");
-    }
-    try {
-      await rpc(rt, "prompt", { message: text, workId: requestId }, PROMPT_ACK_TIMEOUT_MS);
-    } catch (cause) {
-      if (startsAgent && rt.phase === "DISPATCHING") setRuntimePhase(row.id, rt, "IDLE", "IDLE");
-      throw cause;
-    }
-    if (startsAgent) {
-      const state = await reconcileRuntimeState(row.id, rt);
-      if (state && !coreStateActive(state)
-        && (rt.phase === "RUNNING" || rt.phase === "DISPATCHING")) {
-        if (rt.phase === "DISPATCHING") setRuntimePhase(row.id, rt, "RUNNING", "RUNNING");
-        settleRuntime(row.id, rt, true);
-      }
-    }
-  }
-  const response = { accepted: true, command: name, session: publicSession(sessionRow.get(row.id)) };
+  const previous = requestResult(requestId);
+  if (previous) return { response: JSON.parse(previous.response), status: previous.status };
+  const response = name === "compact"
+    ? await rpc(row.id, "compact", { id: requestId, customInstructions: args || undefined })
+    : await enqueuePrompt(row.id, requestId, `/${name}${args ? ` ${args}` : ""}`, "queue");
   saveRequest(requestId, row.id, "command", 202, response);
   return { response, status: 202 };
 }
-
 async function threadSettings(row: any) {
-  const rt = await activate(row);
   const [state, availableModels, availableThinking] = await Promise.all([
-    rpc(rt, "get_state"),
-    rpc(rt, "get_available_models"),
-    rpc(rt, "get_available_thinking_levels"),
+    rpc(row.id, "get_state"), rpc(row.id, "get_available_models"), rpc(row.id, "get_available_thinking_levels"),
   ]);
-  if (!ownsSupervisorLease()) throw new Error("Supervisor instance was replaced");
-  rt.lastActivity = Date.now();
-  const model = state.model ? { ...state.model, provider: canonicalModelProvider(String(state.model.provider ?? "")) } : null;
-  if (state.model?.id) rt.modelId = String(state.model.id);
-  if (state.model?.provider && row.current_provider !== String(state.model.provider)) {
-    db.query("UPDATE sessions SET current_provider=?,revision=revision+1,updated_at=? WHERE id=?")
-      .run(String(state.model.provider), now(), row.id);
-  }
-  const latest = sessionRow.get(row.id) as any;
-  const supportsPriority = String(state.model?.provider ?? latest?.current_provider ?? "").startsWith("openai");
-  const selected = subagentIdentity(row.id);
-  const models = rolledUpModels(availableModels.models ?? []).filter((model: any) => !selected || model.id === selected.model);
   return {
-    agents: sessionCores.agents(row.id),
-    model,
-    thinkingLevel: state.thinkingLevel ?? "off",
-    speedMode: latest?.service_tier === "priority" ? "priority" : "normal",
-    speedModes: supportsPriority ? ["normal", "priority"] : [],
-    bashTimeoutSeconds: bashTimeoutSeconds(latest?.bash_timeout_seconds),
-    models,
-    thinkingLevels: availableThinking.levels ?? ["off"],
+    model: state.model,
+    thinkingLevel: row.settings.thinkingLevel,
+    speedMode: row.settings.speed,
+    speedModes: String(state.model?.provider).startsWith("openai") ? ["standard", "priority"] : [],
+    bashTimeoutSeconds: bashTimeoutSeconds(row.bash_timeout_seconds),
+    models: rolledUpModels(availableModels.models ?? []), thinkingLevels: availableThinking.levels ?? [],
   };
 }
 
@@ -1922,466 +1224,55 @@ function saveRequest(requestId: string, sessionId: string, kind: string, status:
     .run(requestId, sessionId, kind, status, JSON.stringify(response), now());
 }
 
-function restoredContext(sessionId: string, beforeSeq: number, limit = 120_000): string {
-  const rows = db.query(`
-    SELECT type,payload FROM events
-    WHERE session_id=? AND seq<? AND type IN ('user','assistant')
-    ORDER BY seq DESC LIMIT 100
-  `).all(sessionId, beforeSeq) as any[];
-  const parts = rows.reverse().map((event) => {
-    const payload = JSON.parse(event.payload);
-    return `${event.type === "user" ? "USER" : "ASSISTANT"}: ${String(payload.text ?? "")}`;
-  });
-  let value = parts.join("\n\n");
-  if (value.length > limit) value = "[Earlier context omitted]\n" + value.slice(-limit);
-  return value;
-}
-
-function scheduleSession(sessionId: string, delayMs: number) {
-  if (runtimeCapacityQueue.has(sessionId)) return;
-  const session = sessionRow.get(sessionId) as any;
-  if (!session || session.archived_at) return;
-  const old = retryTimers.get(sessionId);
-  if (old) clearTimeout(old);
-  const timer = setTimeout(() => {
-    retryTimers.delete(sessionId);
-    kickSession(sessionId);
-  }, Math.max(0, delayMs));
-  retryTimers.set(sessionId, timer);
-}
-
-async function drainSession(sessionId: string) {
-  while (true) {
-    if (!ownsSupervisorLease() || forkingSessions.has(sessionId)) return;
-    const knownRuntime = runtimes.get(sessionId);
-    if (knownRuntime && ["ABORTING", "STOPPING"].includes(knownRuntime.phase)) return;
-    const runtimeBusy = knownRuntime && ["DISPATCHING", "RUNNING"].includes(knownRuntime.phase);
-    const item = db.query(`
-      SELECT * FROM work_items
-      WHERE session_id=? AND state='queued' AND available_at<=?
-        ${runtimeBusy ? "AND delivery='steer'" : ""}
-      ORDER BY CASE WHEN delivery='hardSteer' THEN 0 ELSE 1 END,created_at,rowid LIMIT 1
-    `).get(sessionId, Date.now()) as any;
-    if (!item) return;
-    db.query("UPDATE work_items SET state='running',updated_at=? WHERE id=?").run(now(), item.id);
-    try {
-      const row = sessionRow.get(sessionId) as any;
-      if (!row || row.archived_at) return;
-      const rt = await activate(row);
-      if (row.meeting_id && !item.inserted_at) await meet.flushTranscript(row.meeting_id);
-      const transcript = row.meeting_id && !item.inserted_at
-        ? await prepareMeetingHandoff(db, meet.transcripts, row.meeting_id, sessionId) : [];
-      if (!ownsSupervisorLease()) return;
-      // Abort can run while this worker is suspended in activation. Re-check the
-      // durable claim before changing runtime phase or consuming restore context.
-      const current = db.query("SELECT state FROM work_items WHERE id=?").get(item.id) as any;
-      if (current?.state !== "running") continue;
-      if (item.delivery === "followUp" && ["DISPATCHING", "RUNNING"].includes(rt.phase)) {
-        db.query("UPDATE work_items SET state='queued',updated_at=? WHERE id=? AND state='running'").run(now(), item.id);
-        return;
-      }
-      if (!item.inserted_at) db.query("UPDATE work_items SET meeting_transcript=? WHERE id=?").run(JSON.stringify(transcript), item.id);
-      let message = item.text;
-      const nativeDispatchRecovery = rt.core !== undefined;
-      if (rt.historyNeedsRestore && !nativeDispatchRecovery) {
-        const beforeSeq = Number((db.query("SELECT coalesce(max(seq),0)+1 before_seq FROM events WHERE session_id=?").get(sessionId) as any)?.before_seq ?? 1);
-        const context = restoredContext(sessionId, beforeSeq);
-        if (context) {
-          message = item.resume
-            ? `This Pi thread was interrupted and is being restored from its durable conversation ledger. Continue the unfinished work for the final user request in the transcript. Do not repeat completed actions or merely summarize the transcript.\n\n<prior_conversation>\n${context}\n</prior_conversation>`
-            : `This Pi thread is being restored from its durable conversation ledger. Use the transcript below as prior context. Do not summarize or respond to the transcript itself; answer only the new user message after it.\n\n<prior_conversation>\n${context}\n</prior_conversation>\n\n<new_user_message>\n${item.text}\n</new_user_message>`;
-        }
-        rt.historyNeedsRestore = false;
-      } else if (item.resume && !nativeDispatchRecovery) {
-        message = `The previous agent operation was interrupted after this request entered the conversation. Continue its unfinished work from the current session state without repeating completed actions.\n\n<interrupted_user_request>\n${item.text}\n</interrupted_user_request>`;
-      }
-      if (item.resume && !nativeDispatchRecovery) {
-        const accepted = db.query(`SELECT w.id workId,w.session_id threadId,w.text task,w.state,s.model
-          FROM thread_delegations d JOIN work_items w ON w.id=d.work_id JOIN subagents s ON s.session_id=w.session_id
-          WHERE d.parent_session_id=? AND w.created_at>=? ORDER BY w.rowid`).all(sessionId, item.created_at);
-        if (accepted.length) message += `\n\n${JSON.stringify({ type: "accepted_delegations", delegations: accepted })}`;
-      }
-      const meetingContext = meetingHandoffText(transcript);
-      if (meetingContext) message += `\n\n${meetingContext}`;
-      if (["ABORTING", "STOPPING"].includes(rt.phase)) return;
-      rt.retrying = false;
-      const wasBusy = rt.phase === "DISPATCHING" || rt.phase === "RUNNING";
-      if (!wasBusy) {
-        rt.pendingCoreFailure = null;
-        rt.liveText = "";
-        rt.liveThinking = "";
-        rt.thinkingBlockStart = 0;
-        rt.pendingContextTextLength = 0;
-        rt.pendingContextThinkingLength = 0;
-        rt.pendingContextFinalization = null;
-        setRuntimePhase(sessionId, rt, "DISPATCHING", "RUNNING");
-      } else {
-        setState(sessionId, "RUNNING");
-      }
-      rt.lastActivity = Date.now();
-      const delivery = item.delivery === "steer" ? "steer" : "followUp";
-      const commandType = wasBusy ? (delivery === "steer" ? "steer" : "follow_up") : "prompt";
-      const dispatch = nativeDispatchRecovery
-        ? sessionCores.dispatch(sessionId,item.id,{type:commandType,message,images:JSON.parse(item.images),resume:Boolean(item.resume)})
-        : {type:commandType,message,images:JSON.parse(item.images),resume:undefined};
-      db.query("UPDATE work_items SET state='dispatched',updated_at=?,last_error=NULL WHERE id=?").run(now(), item.id);
-      rt.dispatchedWorkIds.add(item.id);
-      rt.phaseVersion++;
-      // A Pi steering/follow-up queue continues inside the current agent run and does
-      // not emit a fresh agent_start. The phase remains RUNNING for queued messages;
-      // only an idle prompt enters DISPATCHING until agent_start proves the new run.
-      await rpc(rt, dispatch.type, { message:dispatch.message,images:dispatch.images,workId:item.id,resume:dispatch.resume }, PROMPT_ACK_TIMEOUT_MS);
-      confirmWorkInserted(sessionId, item.id);
-      if (rt.core) {
-        const version = rt.phaseVersion;
-        const state = await rpc(rt,"get_state");
-        if (ownsSupervisorLease() && runtimes.get(sessionId) === rt && rt.phaseVersion === version
-          && state.treeComplete === true && ["DISPATCHING","RUNNING"].includes(rt.phase)) {
-          if (state.terminalError) rt.pendingCoreFailure = String(state.terminalError);
-          if (rt.phase === "DISPATCHING") setRuntimePhase(sessionId,rt,"RUNNING","RUNNING");
-          settleRuntime(sessionId,rt,true);
-        }
-      }
-    } catch (cause: any) {
-      if (!ownsSupervisorLease()) return;
-      if (String(cause?.message ?? cause).includes("Runner capacity busy")) {
-        // Make room by unloading a durable idle session, never an active turn
-        // or one whose final context has not been committed yet.
-        const idle = [...runtimes].filter(([id, rt]) => rt.phase === "IDLE" && !rt.pendingContextFinalization
-          && !db.query("SELECT 1 FROM work_items WHERE session_id=? AND state IN ('queued','running','dispatched') LIMIT 1").get(id))
-          .sort((a, b) => a[1].lastActivity - b[1].lastActivity)[0];
-        if (idle) {
-          const [id, rt] = idle;
-          rt.expectedExit = true;
-          rt.suppressOutput = true;
-          setRuntimePhase(id, rt, "STOPPING");
-          await terminateRuntimeProcess(rt);
-        }
-        db.query("UPDATE work_items SET state='queued',available_at=?,updated_at=?,last_error=? WHERE id=? AND state='running'")
-          .run(Date.now(), now(), "Waiting for shared runner capacity", item.id);
-        setState(sessionId, "QUEUED", "Waiting for shared runner capacity");
-        const retry = retryTimers.get(sessionId);
-        if (retry) clearTimeout(retry);
-        retryTimers.delete(sessionId);
-        runtimeCapacityQueue.block(sessionId, () => kickSession(sessionId), () => admissionPriority(sessionId));
-        return;
-      }
-      const active = runtimes.get(sessionId);
-      const latest = db.query("SELECT state FROM work_items WHERE id=?").get(item.id) as any;
-      const session = sessionRow.get(sessionId) as any;
-      if (!active && String(session?.last_error ?? "").includes("resuming queued work")) {
-        if (latest?.state === "running") {
-          db.query("UPDATE work_items SET state='queued',available_at=?,updated_at=?,last_error='Agent stopped before dispatch' WHERE id=?")
-            .run(Date.now() + 2_000, now(), item.id);
-        }
-        scheduleSession(sessionId, 2_000);
-        return;
-      }
-      if (cause instanceof RpcTimeoutError && ["prompt", "steer", "follow_up"].includes(cause.command) && active && latest?.state === "dispatched") {
-        // stdin was written successfully, so a missing acknowledgement is ambiguous:
-        // Pi may already be running or have queued the message. Keep exactly one
-        // dispatched copy and let settled/process-exit reconciliation decide.
-        setState(sessionId, "RUNNING", "Prompt acknowledgement delayed; monitoring Pi without resending");
-        emit(sessionId, "notice", { text: "Prompt acknowledgement delayed; monitoring Pi without resending" });
-        return;
-      }
-      if (["cancelled", "complete"].includes(String(latest?.state ?? ""))) {
-        active?.dispatchedWorkIds.delete(item.id);
-        return;
-      }
-      if (active?.phase === "DISPATCHING") setRuntimePhase(sessionId, active, "IDLE");
-      active?.dispatchedWorkIds.delete(item.id);
-      if (cause instanceof CoreCommandError) {
-        db.query("UPDATE work_items SET state='complete',updated_at=?,last_error=? WHERE id=?").run(now(),cause.message,item.id);
-        setState(sessionId, active?.phase === "RUNNING" ? "RUNNING" : "FAILED", cause.message);
-        emit(sessionId,"notice",{text:cause.message});
-        relayThreadResults();
-        return;
-      }
-      const attempts = Number(item.attempts ?? 0) + 1;
-      const delay = Math.min(300_000, 5_000 * (2 ** Math.min(6, attempts - 1)));
-      db.query("UPDATE work_items SET state='queued',attempts=?,available_at=?,updated_at=?,last_error=? WHERE id=?")
-        .run(attempts, Date.now() + delay, now(), String(cause?.message ?? cause), item.id);
-      const retryError = `Queued work retrying: ${String(cause?.message ?? cause)}`;
-      setState(sessionId, active?.phase === "RUNNING" ? "RUNNING" : "FAILED", retryError);
-      if (active) { active.retrying = true; touchSession(sessionId); }
-      emit(sessionId, "notice", { text: `Message retained; retrying in ${Math.round(delay / 1000)} seconds: ${String(cause?.message ?? cause)}` });
-      scheduleSession(sessionId, delay);
-      return;
-    }
-  }
-}
-
-function kickSession(sessionId: string) {
-  if (runtimeCapacityQueue.has(sessionId)) return;
-  const session = sessionRow.get(sessionId) as any;
-  if (!session || session.archived_at || sessionWorkers.has(sessionId)) return;
-  const worker = drainSession(sessionId)
-    .catch((cause) => console.error(`Session worker ${sessionId} failed`, cause))
-    .finally(() => {
-      sessionWorkers.delete(sessionId);
-      const rt = runtimes.get(sessionId);
-      const busy = rt && ["DISPATCHING", "RUNNING"].includes(rt.phase);
-      const next = db.query(`
-        SELECT min(available_at) available_at FROM work_items
-        WHERE session_id=? AND state='queued' ${busy ? "AND delivery='steer'" : ""}
-      `).get(sessionId) as any;
-      if (next?.available_at != null && !runtimeCapacityQueue.has(sessionId)) scheduleSession(sessionId, Math.max(0, Number(next.available_at) - Date.now()));
-    });
-  sessionWorkers.set(sessionId, worker);
-}
-
-function enqueuePrompt(sessionId: string, requestId: string, text: string, delivery: "steer" | "followUp", images: ImageContent[] = [], start = true) {
-  const workId = crypto.randomUUID();
-  const time = now();
-  const activeWork = Number((db.query("SELECT count(*) count FROM work_items WHERE session_id=? AND state IN ('queued','running','dispatched')").get(sessionId) as any)?.count ?? 0);
-  const phase = runtimes.get(sessionId)?.phase;
-  const queuedBehindWork = phase === "DISPATCHING" || phase === "RUNNING" || activeWork > 0;
-  const effectiveDelivery = queuedBehindWork ? delivery : "prompt";
-  db.query("INSERT INTO work_items(id,session_id,request_id,event_seq,text,delivery,images,state,attempts,available_at,created_at,updated_at,last_error,inserted_at) VALUES(?,?,?,?,?,?,?,'queued',0,?,?,?,NULL,NULL)")
-    .run(workId, sessionId, requestId, 0, text, effectiveDelivery, JSON.stringify(images), Date.now(), time, time);
-  setState(sessionId, runtimeWorking(runtimes.get(sessionId)) ? "RUNNING" : "QUEUED");
-  const response = {
-    accepted: true,
-    queued: queuedBehindWork,
-    delivery: effectiveDelivery,
-    workId,
-    session: publicSession(sessionRow.get(sessionId)),
-  };
-  saveRequest(requestId, sessionId, "prompt", 202, response);
-  if (start) kickSession(sessionId);
-  return response;
-}
-
-function enqueueDelegation(sessionId: string, parent: any, task: string) {
-  const cameras = parent.meeting_id ? meet.captureDelegation(parent.meeting_id) : { images: [], note: "" };
-  const work = enqueuePrompt(sessionId, crypto.randomUUID(), task + (cameras.note ? `\n\n${cameras.note}` : ""), "followUp", cameras.images, false);
-  db.query("INSERT INTO thread_delegations(work_id,parent_session_id) VALUES(?,?)").run(work.workId, parent.id);
-  return { workId: work.workId, parentSessionId: parent.id, notification: "automatic" };
-}
-
-function meetingDestination() {
-  const candidates = [...THREAD_DESTINATIONS.values()].filter((destination) => destination.defaultModel === "astra" || destination.models.includes("astra"));
-  return candidates.find((destination) => destination.id === "home") ?? candidates[0];
-}
-
-function insertThread(id: string, name: string, destination: { workspaceId: string; id: string },
-  preset: { provider: string; modelId: string; thinkingLevel: string }, meetingId: string | null, priority: boolean) {
-  const time = now();
-  db.query("UPDATE sessions SET display_order=display_order+1 WHERE archived_at IS NULL").run();
-  db.query(`INSERT INTO sessions(id,name,workspace_id,session_path,state,created_at,updated_at,last_error,
-    initial_provider,current_provider,initial_model,initial_thinking,profile_id,service_tier,meeting_id,display_order)
-    VALUES(?,?,?,?,?,?,?,NULL,?,?,?,?,?,?,?,0)`).run(id, name, destination.workspaceId, null, "STOPPED", time, time,
-      preset.provider, preset.provider, preset.modelId, preset.thinkingLevel, destination.id, priority ? "priority" : "default", meetingId);
-  sessionCores.create(id);
-}
-
-function relayThreadResults() {
-  if (!ownsSupervisorLease()) return;
-  const ready = db.query(`
-    SELECT d.work_id,d.parent_session_id,w.session_id,w.text,r.status,r.result,r.error,s.name
-    FROM thread_delegations d JOIN work_items w ON w.id=d.work_id
-    JOIN delegation_results r ON r.work_id=d.work_id
-    JOIN sessions s ON s.id=w.session_id JOIN sessions p ON p.id=d.parent_session_id
-    WHERE d.reply_work_id IS NULL AND p.archived_at IS NULL
-  `).all() as Array<{ work_id: string; parent_session_id: string; session_id: string; text: string; status: string; result: string; error: string | null; name: string }>;
-  for (const work of ready) {
-    db.transaction(() => {
-      const text = JSON.stringify({
-        type: "thread_result", threadId: work.session_id, threadName: work.name,
-        workId: work.work_id, model: subagentIdentity(work.session_id)?.model,
-        status: work.status,
-        task: work.text, result: work.result.slice(0, 32_000), resultTruncated: work.result.length > 32_000,
-        error: work.error,
-      });
-      const reply = enqueuePrompt(work.parent_session_id, `thread-result-${work.work_id}`, text, "steer", [], false);
-      db.query("UPDATE thread_delegations SET reply_work_id=? WHERE work_id=? AND reply_work_id IS NULL").run(reply.workId, work.work_id);
-    })();
-    kickSession(work.parent_session_id);
-  }
-}
-
-type AbortOperationResult =
-  | { ok: true; aborting?: true; retainedQueued?: number }
-  | { ok: false; status: 409; error: string };
-
-async function hardSteerCurrentOperation(sessionId: string, workId: string): Promise<AbortOperationResult> {
-  const rt = runtimes.get(sessionId);
-  if (rt?.phase === "ABORTING") return { ok: false, status: 409, error: "Another abort is already in progress" };
-  if (rt?.phase === "STOPPING") return { ok: false, status: 409, error: "Agent is already stopping" };
-  const wasActive = !!rt && ["DISPATCHING", "RUNNING"].includes(rt.phase);
-
-  if (rt && wasActive) {
-    // Pi's ordinary abort waits for its already accepted steering queue to run.
-    // Hard steer means preemption, so retire that process group instead: this
-    // stops the provider request and every active tool before a new Pi process
-    // receives the selected message.
-    rt.expectedExit = true;
-    rt.suppressOutput = true;
-    setRuntimePhase(sessionId, rt, "STOPPING", "ABORTING");
-    await terminateRuntimeProcess(rt);
-    if (runtimes.get(sessionId) === rt) {
-      rt.expectedExit = false;
-      rt.suppressOutput = false;
-      setRuntimePhase(sessionId, rt, "RUNNING", "RUNNING", "Could not stop the current operation for hard steer");
-      return { ok: false, status: 409, error: "Could not stop the current operation; the agent is still running" };
-    }
-    await sessionWorkers.get(sessionId);
-  }
-
-  const fallbackCurrent = !wasActive ? db.query(`
-    SELECT id FROM work_items
-    WHERE session_id=? AND id<>? AND state IN ('queued','running','dispatched')
-    ORDER BY created_at,rowid LIMIT 1
-  `).get(sessionId, workId) as { id: string } | null : null;
-  const changedAt = now();
-  db.query(`
-    UPDATE work_items
-    SET state='cancelled',updated_at=?,last_error='Current turn stopped by hard steer'
-    WHERE session_id=? AND id<>?
-      AND (state IN ('running','dispatched') OR id=?)
-  `).run(changedAt, sessionId, workId, fallbackCurrent?.id ?? "");
-  const retainedQueued = Number((db.query(`
-    SELECT COUNT(*) count FROM work_items
-    WHERE session_id=? AND id<>? AND state='queued'
-  `).get(sessionId, workId) as any)?.count ?? 0);
-  setState(sessionId, "RUNNING");
-  kickSession(sessionId);
-  return { ok: true, retainedQueued };
-}
-
-async function abortCurrentOperation(sessionId: string): Promise<AbortOperationResult> {
-  const activeItems = db.query(`
-    SELECT rowid queue_order,id,state,inserted_at FROM work_items
-    WHERE session_id=? AND state IN ('queued','running','dispatched')
-    ORDER BY created_at,rowid
-  `).all(sessionId) as any[];
-  const rt = runtimes.get(sessionId);
-  const activeRuntime = !!rt && ["DISPATCHING", "RUNNING", "ABORTING"].includes(rt.phase);
-  const currentWork = activeItems.find((item) => item.state === "running" || item.state === "dispatched")
-    ?? (!activeRuntime ? activeItems[0] : undefined);
-  const retainedCount = activeItems.filter((item) => item.id !== currentWork?.id).length;
-  if (rt?.phase === "ABORTING") return { ok: true, aborting: true };
-  if (rt?.phase === "STOPPING") return { ok: false, status: 409, error: "Agent is pausing after inactivity" };
-
-  if (!rt || rt.phase === "WAITING" || rt.phase === "STARTING" || rt.phase === "IDLE") {
-    if (currentWork) {
-      db.query("UPDATE work_items SET state='cancelled',updated_at=?,last_error='Current turn stopped by user' WHERE id=?")
-        .run(now(), currentWork.id);
-    }
-    const retryTimer = retryTimers.get(sessionId);
-    if (retryTimer) clearTimeout(retryTimer);
-    retryTimers.delete(sessionId);
-    runtimeCapacityQueue.cancel(sessionId);
-    if (!rt) {
-      setState(sessionId, retainedCount > 0 ? "RUNNING" : "STOPPED");
-      if (retainedCount > 0) kickSession(sessionId);
-    } else if (rt.phase === "IDLE") {
-      rt.retrying = false;
-      setRuntimePhase(sessionId, rt, "IDLE", retainedCount > 0 ? "RUNNING" : "IDLE");
-      if (!retireIdleRuntime(sessionId, rt) && retainedCount > 0) kickSession(sessionId);
-    } else {
-      touchSession(sessionId);
-    }
-    return { ok: true, retainedQueued: retainedCount };
-  }
-
-  setRuntimePhase(sessionId, rt, "ABORTING", "ABORTING");
-  let abortFailure: unknown = null;
+async function prepareThreadMessage(thread: Thread, message: ThreadMessage): Promise<Result<{text: string; images?: unknown[]}>> {
+  const meetingId = remotePlacement(thread).meetingId;
+  if (typeof meetingId !== "string" || !meetingId) return { ok: true, value: { text: message.text, images: message.images } };
   try {
-    await rpc(rt, "abort", {}, 10_000);
-    if (rt.core) {
-      const deadline = Date.now() + 10_000;
-      while (coreStateActive(await rpc(rt,"get_state",{},2_000))) {
-        if (Date.now() >= deadline) throw new Error("The core has not finished stopping its tree");
-        await Bun.sleep(25);
-      }
-    }
-  } catch (cause) { abortFailure = cause; }
-  if (abortFailure) {
-    try {
-      const state = await rpc(rt, "get_state", {}, 2_000);
-      const active = coreStateActive(state);
-      if (active) {
-        setRuntimePhase(sessionId, rt, "RUNNING", "RUNNING", `Could not stop current operation: ${String((abortFailure as any)?.message ?? abortFailure)}`);
-        return { ok: false, status: 409, error: "Could not stop the current operation; the agent is still running" };
-      }
-    } catch {
-      setRuntimePhase(sessionId, rt, "RUNNING", "RUNNING", `Could not confirm stop: ${String((abortFailure as any)?.message ?? abortFailure)}`);
-      return { ok: false, status: 409, error: "Could not confirm that the current operation stopped; the agent process was left running" };
-    }
-  }
-
-  const changedAt = now();
-  if (currentWork) {
-    db.query("UPDATE work_items SET state='cancelled',updated_at=?,last_error='Current turn stopped by user' WHERE id=?")
-      .run(changedAt, currentWork.id);
-    rt.dispatchedWorkIds.delete(String(currentWork.id));
-  }
-  for (const workId of rt.dispatchedWorkIds) {
-    db.query("UPDATE work_items SET state='complete',updated_at=?,last_error=NULL WHERE id=? AND state='dispatched'")
-      .run(changedAt, workId);
-  }
-  rt.dispatchedWorkIds.clear();
-  rt.compacting = false;
-  rt.retrying = false;
-  rt.activeTools.clear();
-  rt.thinkingActive = false;
-  for (const [id, tool] of rt.toolProgress) if (!tool.result) rt.toolProgress.delete(id);
-  displayContexts.delete(sessionId);
-  rt.steeringQueued = 0;
-  rt.followUpQueued = 0;
-  rt.liveText = "";
-  rt.liveThinking = "";
-  rt.thinkingBlockStart = 0;
-  rt.pendingContextTextLength = 0;
-  rt.pendingContextThinkingLength = 0;
-  rt.pendingContextFinalization = null;
-  rt.lastActivity = Date.now();
-  const supervisorQueued = Number((db.query(
-    "SELECT COUNT(*) count FROM work_items WHERE session_id=? AND state IN ('queued','running')",
-  ).get(sessionId) as any)?.count ?? 0);
-  setRuntimePhase(sessionId, rt, "IDLE", supervisorQueued > 0 ? "RUNNING" : "IDLE");
-  if (!retireIdleRuntime(sessionId, rt) && supervisorQueued > 0) kickSession(sessionId);
-  return { ok: true, retainedQueued: retainedCount };
-}
-
-function recoverUnansweredPrompts() {
-  const rows = db.query(`
-    SELECT e.session_id,e.seq,e.payload
-    FROM events e JOIN sessions s ON s.id=e.session_id
-    WHERE e.type='user' AND s.archived_at IS NULL
-      AND NOT EXISTS (SELECT 1 FROM events later WHERE later.session_id=e.session_id AND later.seq>e.seq AND later.type IN ('assistant','settled'))
-      AND NOT EXISTS (SELECT 1 FROM work_items work WHERE work.event_seq=e.seq)
-    ORDER BY e.seq
-  `).all() as any[];
-  for (const event of rows) {
-    const payload = JSON.parse(event.payload);
-    const text = String(payload.text ?? "").trim();
-    if (!text) continue;
-    const delivery = payload.delivery === "steer" ? "steer" : "followUp";
-    const time = now();
-    db.query("INSERT OR IGNORE INTO work_items(id,session_id,request_id,event_seq,text,delivery,state,attempts,available_at,created_at,updated_at,last_error,inserted_at) VALUES(?,?,?,?,?,?,'queued',0,?,?,?,NULL,?)")
-      .run(crypto.randomUUID(), event.session_id, `recovered-${event.seq}`, event.seq, text, delivery, Date.now(), time, time, time);
+    await meet.flushTranscript(meetingId);
+    const transcript = await prepareMeetingHandoff(db, meet.transcripts, meetingId, thread.id);
+    db.query("INSERT OR REPLACE INTO message_annotations(work_id,meeting_transcript) VALUES(?,?)")
+      .run(message.id, JSON.stringify(transcript));
+    const handoff = meetingHandoffText(transcript);
+    return { ok: true, value: { text: [message.text, handoff].filter(Boolean).join("\n\n"), images: message.images } };
+  } catch (cause) {
+    return { ok: false, error: { code: "unavailable", message: cause instanceof Error ? cause.message : String(cause) } };
   }
 }
 
-recoverUnansweredPrompts();
-
+async function enqueuePrompt(sessionId: string, requestId: string, text: string, delivery: "queue" | "steer" | "hardSteer", images: ImageContent[] = []) {
+  const sent = await directory.send({ threadId: sessionId, requestId, text, delivery, images });
+  const message = unwrap(sent);
+  return { accepted: true, workId: message.id, delivery: message.delivery, session: publicSession(sessionRow.get(sessionId)) };
+}
+function meetingDestination() {
+  return [...THREAD_DESTINATIONS.values()].find(destination => destination.id === "home")
+    ?? [...THREAD_DESTINATIONS.values()][0];
+}
+async function insertThread(id: string, name: string, destination: ThreadDestination, model: string,
+  meetingId: string | null, message?: string, parentId?: string, settings?: Parameters<typeof directory.spawn>[0]["settings"]) {
+  const preset = workspaces.get(destination.workspaceId);
+  const thread = unwrap(await directory.spawn({ id, requestId: id, title: name, parentId,
+    cwd: preset?.path ?? destination.workspaceId, message, settings: { model, ...settings },
+    metadata: { workspaceId: destination.workspaceId, profileId: destination.id, meetingId },
+  }));
+  ensureThreadView(db, thread.id);
+  return thread;
+}
+const unsubscribeThreads = threads.subscribe(change => {
+  if ("event" in change) handlePiEvent(change.threadId, change.event);
+  else { ensureThreadView(db, change.threadId); signalSync(); }
+});
+for (const thread of threads.snapshot()) ensureThreadView(db, thread.id);
 await inlineImages.start();
-runtimeAdoption = adoptHandoffRuntimes();
-void runtimeAdoption.then(reapUnclaimedRuntimeHosts)
-  .catch((cause) => console.error("Could not finish runtime adoption", cause));
 
 const meet = new MeetServer((id) => {
   const row = sessionRow.get(id) as any;
   return Boolean(row && !row.archived_at);
-}, undefined, db, (meetingId, rootId) => meetingActivity(db, meetingId, rootId, (row) => {
-  const runtime = runtimes.get(row.id);
+}, undefined, db, (meetingId, rootId) => meetingActivity(db, allThreadRows().filter(row => row.meeting_id === meetingId), rootId, (row) => {
+  const runtime = liveProjections.get(row.id);
   return { state: sessionActivity(row), tools: [...(runtime?.activeTools.values() ?? [])], output: runtime?.liveText ?? "" };
 }));
-db.query(`UPDATE sessions SET meeting_id=(SELECT id FROM meet_records WHERE session_id=sessions.id ORDER BY created_at DESC LIMIT 1)
-  WHERE meeting_id IS NULL AND EXISTS (SELECT 1 FROM meet_records WHERE session_id=sessions.id)`).run();
+
 
 const server = Bun.serve({
   hostname: HOST,
@@ -2396,7 +1287,11 @@ const server = Bun.serve({
       });
     }
     if (!ownsSupervisorLease()) return error("Supervisor instance was replaced", 503);
-    const externalResponse = await externalMeetingRequest(req, meet, (sessionId, meetingId, name) => {
+    const ownedThreadResponse = await threadHttp(threads, req, "/v1/thread-owner");
+    if (ownedThreadResponse) return ownedThreadResponse;
+    const threadResponse = await threadHttp(directory, req);
+    if (threadResponse) return threadResponse;
+    const externalResponse = await externalMeetingRequest(req, meet, async (sessionId, meetingId, name) => {
       const existing = sessionRow.get(sessionId) as any;
       if (existing) {
         if (existing.archived_at || existing.meeting_id !== meetingId) throw new Error("The external meeting's thread is unavailable");
@@ -2405,8 +1300,7 @@ const server = Bun.serve({
       const destination = meetingDestination();
       const model = THREAD_MODELS.get("astra")!;
       if (!destination) throw new Error("This host needs a configured Astra destination for meetings");
-      db.transaction(() => insertThread(sessionId, name, destination,
-        { provider: model.provider, modelId: model.modelId, thinkingLevel: "off" }, meetingId, true))();
+      await insertThread(sessionId, name, destination, model.id, meetingId);
     });
     if (externalResponse) return externalResponse;
     const meetingResponse = await meet.handle(req);
@@ -2610,50 +1504,32 @@ const server = Bun.serve({
         return json({ ok: true });
       } catch (cause: any) { return error(cause?.message ?? "Could not remove upload", 400); }
     }
-    // Read-only observation of this host's autonomous agents. There is no
-    // prompt, steer, or abort surface here: the orchestrator owns their work.
-    if (API.agentRuns.match(req.method, url.pathname)) {
-      try { return json(await activeAgents()); }
-      catch (cause: any) { return error(cause?.message ?? "Could not read agent runs", 503); }
-    }
-    const agentEvents = API.agentEvents.match(req.method, url.pathname);
-    if (agentEvents) {
-      const addressed = parseRunKey(agentEvents.runId);
-      if (!addressed || addressed.host !== agentHost.key) return error("Invalid agent run", 400);
-      try {
-        const after = Math.max(0, Number(url.searchParams.get("after") ?? 0) || 0);
-        const stream = await agentHost.events(addressed.runId, after);
-        if (!stream.run) return error("Agent run not found", 404);
-        return json({
-          run: stream.run,
-          events: stream.events,
-          liveText: stream.liveText,
-          liveThinking: stream.liveThinking,
-        });
-      } catch (cause: any) { return error(cause?.message ?? "Could not read the agent transcript", 503); }
-    }
+
     if (API.notifications.match(req.method, url.pathname)) {
       const after = url.searchParams.has("after") ? Number(url.searchParams.get("after")) : null;
-      if (after !== null && (!Number.isSafeInteger(after) || after < 0)) return error("Invalid notification cursor", 400);
+      if (after !== null && (!Number.isSafeInteger(after) || after < 0)) return error("Invalid notification cursor");
+      await refreshThreadNotifications();
       return json({ environmentId: ENVIRONMENT_ID, ...idleNotifications(db, after) });
     }
     if (API.workspaces.match(req.method, url.pathname)) {
-      return json({ workspaces: [...workspaces.values()].map(({ id, name, path }) => ({ id, name, path })) });
+      return json({ workspaces: [...workspaces.values()] });
     }
     if (API.sync.match(req.method, url.pathname)) {
       try {
         const request = await readBody(req) as SyncRequest;
         lastSyncRequestAt = Date.now();
         if (!dashboardSnapshot) await refreshDashboard();
+        if (request.session?.id) await refreshThreadInspection(request.session.id);
         await awaitSync(request, req.signal);
         if (req.signal.aborted) return new Response(null, { status: 499 });
+        if (request.session?.id) await refreshThreadInspection(request.session.id);
         if (request.session?.viewing === true && typeof request.session.id === "string") markSessionViewed(request.session.id);
         const sequence = syncSequence;
         const stateVersion = currentStateVersion();
         const fresh = request.epoch !== SUPERVISOR_EPOCH;
         const state = request.stateVersion !== undefined && (fresh || request.stateVersion !== stateVersion) ? supervisorState() : null;
         const dashboard = request.dashboardVersion !== undefined && (fresh || request.dashboardVersion !== dashboardVersion) ? dashboardSnapshot : null;
-        const response: SyncResponse = { epoch: SUPERVISOR_EPOCH, seq: sequence, stateVersion, dashboardVersion, state, dashboard, session: null, agent: null };
+        const response: SyncResponse = { epoch: SUPERVISOR_EPOCH, seq: sequence, stateVersion, dashboardVersion, state, dashboard, session: null };
         const sessionId = typeof request.session?.id === "string" ? request.session.id : "";
         if (sessionId && sessionRow.get(sessionId)) {
           const id = sessionId;
@@ -2671,7 +1547,7 @@ const server = Bun.serve({
                 : { kind: "splice", capturedAt: stored.capturedAt, hash: display.hash, splice: contextSplice(base, display.document) };
             }
           }
-          const runtime = runtimes.get(id);
+          const runtime = liveProjections.get(id);
           const events = eventsAfter === undefined ? [] : (db.query("SELECT seq,time,type,payload FROM events WHERE session_id=? AND seq>? ORDER BY seq LIMIT 150")
             .all(id, Math.max(0, Number(eventsAfter) || 0)) as any[]).map((entry) => ({ seq: entry.seq, time: entry.time, type: entry.type, ...JSON.parse(entry.payload) }));
           response.session = {
@@ -2682,22 +1558,13 @@ const server = Bun.serve({
             events,
           };
         }
-        if (typeof request.agent?.id === "string") {
-          const addressed = parseRunKey(request.agent.id);
-          if (addressed?.host === agentHost.key) {
-            const stream = await agentHost.events(addressed.runId, Math.max(0, Number(request.agent.after ?? 0) || 0));
-            if (stream.run) response.agent = {
-              run: stream.run,
-              events: stream.events,
-              liveText: textUpdate(`agent:${request.agent.id}:text`, request.agent.liveTextHash, stream.liveText),
-              liveThinking: textUpdate(`agent:${request.agent.id}:thinking`, request.agent.liveThinkingHash, stream.liveThinking),
-            };
-          }
-        }
+
+
         return compressedJson(req, response);
       } catch (cause: any) { return error(cause?.message ?? "Could not synchronize", 400); }
     }
     if (API.sessions.match(req.method, url.pathname)) {
+      void refreshPeers();
       return json(supervisorState());
     }
     if (API.archivedSessions.match(req.method, url.pathname)) {
@@ -2709,207 +1576,54 @@ const server = Bun.serve({
       return json({ sessions, total, offset, limit, hasMore: offset + sessions.length < total });
     }
     if (API.reorderSessions.match(req.method, url.pathname)) {
-      try {
-        const body = await readBody(req);
-        const requested: string[] | null = Array.isArray(body.sessionIds)
-          ? body.sessionIds.map((id: unknown) => String(id))
-          : null;
-        if (!requested || new Set(requested).size !== requested.length) return error("Complete unique sessionIds required");
-        const current = (activeSessionRows.all() as any[]).filter((row) => !subagentIdentity(row.id));
-        const currentIds = new Set(current.map((row) => String(row.id)));
-        if (requested.length !== currentIds.size || requested.some((id) => !currentIds.has(id)))
-          return error("Thread list changed; refresh before reordering", 409);
-        if (!ownsSupervisorLease()) return error("Supervisor instance was replaced", 503);
-        db.transaction(() => {
-          const update = db.query("UPDATE sessions SET display_order=? WHERE id=? AND archived_at IS NULL");
-          requested.forEach((id, index) => update.run(index, id));
-        })();
-        signalSync();
-        return json({ ok: true, sessions: publicSessions(activeSessionRows.all() as any[]) });
-      } catch (cause: any) { return error(cause?.message ?? "Could not reorder threads", 400); }
+      const body = await readBody(req);
+      const requested = body.sessionIds;
+      if (!Array.isArray(requested) || new Set(requested).size !== requested.length) return error("Unique sessionIds required");
+      const current = activeSessionRows.all();
+      if (requested.length !== current.length || requested.some(id => !current.some(row => row.id === id))) return error("Thread list changed", 409);
+      db.transaction(() => requested.forEach((id, index) => {
+        ensureThreadView(db, id);
+        db.query("UPDATE thread_views SET display_order=? WHERE id=?").run(index, id);
+      }))();
+      signalSync();
+      return json({ ok: true });
     }
     if (API.createSession.match(req.method, url.pathname)) {
       try {
         const body = await readBody(req);
         const requestId = String(body.requestId ?? "");
-        const old = requestResult(requestId);
-        if (old) return json(JSON.parse(old.response), old.status);
+        const saved = requestResult(requestId);
+        if (saved) return json(JSON.parse(saved.response), saved.status);
         if (!/^[0-9a-f-]{36}$/i.test(requestId)) return error("Valid requestId required");
-        const parent = body.parentSessionId == null ? null : sessionRow.get(String(body.parentSessionId)) as any;
-        if (body.parentSessionId != null && (!parent || parent.archived_at)) return error("Parent thread is unavailable", 409);
-        if (parent && subagentIdentity(parent.id)) return error("Subagents cannot delegate; return the work to the parent coordinator", 403);
-        if (parent && (!runtimes.has(parent.id) || runtimes.get(parent.id)?.core)) return error("The selected core owns child delegation; use its native delegation tool", 409);
-        const task = parent ? String(body.task ?? "").trim() : "";
-        if (parent && !task) return error("A delegated task is required");
-        const destination = THREAD_DESTINATIONS.get(String(body.destination ?? parent?.profile_id ?? (body.meetingId ? meetingDestination()?.id : "home")));
-        if (!destination) return error("Unknown thread destination");
-        if ("core" in body) return error("Pi Stack runs Pi; agent core selection is not supported");
-        const meetingId = parent ? parent.meeting_id : body.meetingId == null ? null : String(body.meetingId);
-        if (meetingId !== null && !/^[0-9a-f-]{36}$/i.test(meetingId)) return error("Valid meetingId required");
-        const modelId = meetingId && !parent ? "astra" : String(body.model ?? (parent ? "astra" : destination.defaultModel));
-        // A destination only starts the models it actually offers, so an out-of-date client
-        // cannot place an Anthropic thread on a machine that has no Anthropic access.
-        if (!(parent && ["astra", "sol", "terra", "luna"].includes(modelId))
-          && modelId !== destination.defaultModel && !destination.models.includes(modelId))
-          return error("Model not available at this destination");
-        const model = THREAD_MODELS.get(modelId);
-        if (!model) return error("Unknown thread model");
-        const preset = {
-          provider: model.provider,
-          modelId: model.modelId,
-          thinkingLevel: meetingId && !parent ? "off" : String(body.thinkingLevel ?? (parent ? "high" : destination.thinkingLevel)),
-        };
-        if (!THREAD_THINKING_LEVELS.some((level) => level === preset.thinkingLevel)) return error("Unknown thinking level");
-        if (parent && body.threadId && body.newThread === true) return error("Choose threadId or newThread, not both");
-        if (parent && body.newThread !== true) {
-          const candidates = db.query(`SELECT s.* FROM subagents child JOIN sessions s ON s.id=child.session_id
-            WHERE child.parent_session_id=? AND s.archived_at IS NULL AND s.profile_id=?
-            AND s.meeting_id IS ? ORDER BY s.updated_at DESC,s.created_at DESC`).all(parent.id, destination.id, meetingId) as any[];
-          const target = body.threadId ? candidates.find((candidate) => candidate.id === String(body.threadId))
-            : candidates.find((candidate) => (!body.model || candidate.initial_model === model.modelId)
-              && !["ABORTING", "STOPPING"].includes(runtimes.get(candidate.id)?.phase ?? candidate.state));
-          if (body.threadId && !target) return error("That worker does not belong to this thread's destination and meeting", 409);
-          if (target) {
-            if (body.model && target.initial_model !== model.modelId) return error("That worker uses another model; omit model to keep it or request a new thread", 409);
-            if (["ABORTING", "STOPPING"].includes(runtimes.get(target.id)?.phase ?? target.state)) return error("That worker is stopping; continue it after it settles", 409);
-            const response = db.transaction(() => {
-              const delegation = enqueueDelegation(target.id, parent, task);
-              const response = { session: publicSession(sessionRow.get(target.id)), delegation, reused: true };
-              saveRequest(requestId, target.id, "delegate", 200, response);
-              return response;
-            })();
-            kickSession(target.id);
-            return json(response);
-          }
-        }
-        const name = nextThreadName();
-        const requestedId = body.sessionId == null ? crypto.randomUUID() : String(body.sessionId);
-        if (!/^[0-9a-f-]{36}$/i.test(requestedId)) return error("Valid sessionId required");
-        const id = requestedId;
-        const response = db.transaction(() => {
-          insertThread(id, name, destination, preset, meetingId, model.id === "astra");
-          if (parent) db.query("INSERT INTO subagents(session_id,parent_session_id,provider,model) VALUES(?,?,?,?)")
-            .run(id, parent.id, preset.provider, preset.modelId);
-          const delegation = parent ? enqueueDelegation(id, parent, task) : null;
-          const response = { session: publicSession(sessionRow.get(id)), ...(delegation ? { delegation, reused: false } : {}) };
-          saveRequest(requestId, id, "create", 201, response);
-          return response;
-        })();
-        if (parent) kickSession(id);
-        else activate(sessionRow.get(id)).catch((e) => {
-          const latest = sessionRow.get(id) as any;
-          if (latest && !["STOPPED", "IDLE", "QUEUED"].includes(String(latest.state))) setState(id, "FAILED", String(e.message ?? e));
-        });
+        const destination = THREAD_DESTINATIONS.get(String(body.destination ?? "home"));
+        if (!destination) return error("Unknown destination");
+        const model = String(body.model ?? destination.defaultModel);
+        if (!destination.models.includes(model)) return error("Model not available at this destination");
+        const id = String(body.sessionId ?? requestId);
+        const thread = await insertThread(id, creationName(requestId), destination, model, body.meetingId ?? null, body.message, body.parentId,
+          { thinkingLevel: body.thinkingLevel, speed: body.speedMode });
+        const response = { session: publicSession(threadRow(thread)) };
+        saveRequest(requestId, id, "create", 201, response);
         return json(response, 201);
-      } catch (e: any) { return error(e.message ?? "Invalid request"); }
+      } catch (cause: any) { return error(cause.message); }
     }
-    const coreAgentsMatch = API.sessionCoreAgents.match(req.method, url.pathname);
-    if (coreAgentsMatch) {
-      const row = sessionRow.get(coreAgentsMatch.sessionId);
-      if (!row) return error("Session not found", 404);
-      return json({ core: sessionCores.get(coreAgentsMatch.sessionId).core, agents: sessionCores.agents(coreAgentsMatch.sessionId) });
+    const queueAction = [API.queueItem, API.queueSteer, API.queueHardSteer]
+      .map(route => ({ route, match: route.match(req.method, url.pathname) })).find(item => item.match);
+    if (queueAction?.match) {
+      const { sessionId, workId } = queueAction.match;
+      const before = unwrap(await directory.inspect(sessionId));
+      const message = before.pending.find(item => item.id === workId);
+      if (!message) return error("Pending message not found", 404);
+      const result = await directory.control(queueAction.route === API.queueItem
+        ? { threadId: sessionId, action: "cancelMessage", messageId: workId }
+        : { threadId: sessionId, action: "promoteMessage", messageId: workId, delivery: queueAction.route === API.queueHardSteer ? "hardSteer" : "steer" });
+      if (!result.ok) return threadError(result.error);
+      return json({ ok: true, workId, text: message.text });
     }
-    const coreAgentMatch = API.sessionCoreAgent.match(req.method, url.pathname) ?? API.sessionCoreAgentCommand.match(req.method, url.pathname);
-    if (coreAgentMatch) {
-      const row = sessionRow.get(coreAgentMatch.sessionId) as any;
-      if (forkingSessions.has(coreAgentMatch.sessionId)) return error("Wait for the conversation edit to finish", 409);
-      if (!row) return error("Session not found", 404);
-      try {
-        const rt = await activate(row);
-        if (req.method === "GET") return json(await rpc(rt, "core_agent_read", { agentId: coreAgentMatch.agentId }));
-        const body = await readBody(req);
-        if (!["steer", "abort"].includes(body.action)) return error("Agent action must be steer or abort");
-        if (body.action === "steer" && (typeof body.message !== "string" || !body.message.trim())) return error("A steering message is required");
-        const result = await rpc(rt, "core_agent_command", { agentId: coreAgentMatch.agentId, action: body.action, message: body.message }, 30_000);
-        emit(row.id, "core_agent_control", { agentId: coreAgentMatch.agentId, action: body.action, message: body.message });
-        return json(result);
-      } catch (cause: any) { return error(cause.message ?? "Core agent command failed", 409); }
-    }
-    const queuedItemMatch = API.queueItem.match(req.method, url.pathname);
-    if (queuedItemMatch) {
-      const { sessionId, workId } = queuedItemMatch;
-      const row = sessionRow.get(sessionId) as any;
-      if (!row) return error("Session not found", 404);
-      let found = false;
-      // Assigned inside the transaction callback, which TypeScript cannot see.
-      let cancelled = null as { text: string } | null;
-      db.transaction(() => {
-        const work = db.query("SELECT text,state,inserted_at FROM work_items WHERE id=? AND session_id=?").get(workId, sessionId) as any;
-        if (!work) return;
-        found = true;
-        if (work.state !== "queued" || work.inserted_at) return;
-        const changedAt = now();
-        const result = db.query(`
-          UPDATE work_items SET state='cancelled',updated_at=?,last_error='Queued message cancelled by user'
-          WHERE id=? AND session_id=? AND state='queued' AND inserted_at IS NULL
-        `).run(changedAt, workId, sessionId);
-        if (result.changes !== 1) return;
-        db.query("UPDATE sessions SET revision=revision+1,updated_at=? WHERE id=?").run(changedAt, sessionId);
-        cancelled = { text: String(work.text) };
-      })();
-      if (!found) return error("Queued message not found", 404);
-      if (!cancelled) return error("Message has already started", 409);
-      return json({ ok: true, workId, text: cancelled.text, session: publicSession(sessionRow.get(sessionId)) });
-    }
-    const hardSteerMatch = API.queueHardSteer.match(req.method, url.pathname);
-    if (hardSteerMatch) {
-      const { sessionId, workId } = hardSteerMatch;
-      const row = sessionRow.get(sessionId) as any;
-      if (!row) return error("Session not found", 404);
-      const work = db.query("SELECT rowid queue_order,* FROM work_items WHERE id=? AND session_id=?").get(workId, sessionId) as any;
-      if (!work) return error("Queued message not found", 404);
-      if (work.state !== "queued" || work.delivery !== "followUp") return error("Message has already started", 409);
-      const earlierWork = Number((db.query(`
-        SELECT COUNT(*) count FROM work_items
-        WHERE session_id=? AND rowid<? AND state IN ('queued','running','dispatched')
-      `).get(sessionId, work.queue_order) as any)?.count ?? 0);
-      const rt = runtimes.get(sessionId);
-      const canHardSteer = earlierWork > 0 || !!rt && ["STARTING", "DISPATCHING", "RUNNING"].includes(rt.phase);
-      if (!canHardSteer) return error("The agent has already finished; this message will start normally", 409);
-      db.query("UPDATE work_items SET delivery='hardSteer',updated_at=? WHERE id=? AND state='queued'").run(now(), workId);
-      touchSession(sessionId);
-      const aborted = await hardSteerCurrentOperation(sessionId, workId);
-      if (!aborted.ok) {
-        const reverted = db.query("UPDATE work_items SET delivery='followUp',updated_at=? WHERE id=? AND state='queued' AND delivery='hardSteer'")
-          .run(now(), workId);
-        if (reverted.changes > 0) touchSession(sessionId);
-        return error(aborted.error, aborted.status);
-      }
-      kickSession(sessionId);
-      return json({ ...aborted, hardSteer: true, workId, delivery: "hardSteer", session: publicSession(sessionRow.get(sessionId)) });
-    }
-    const queueMatch = API.queueSteer.match(req.method, url.pathname);
-    if (queueMatch) {
-      const { sessionId, workId } = queueMatch;
-      const row = sessionRow.get(sessionId) as any;
-      if (!row) return error("Session not found", 404);
-      const work = db.query("SELECT rowid queue_order,* FROM work_items WHERE id=? AND session_id=?").get(workId, sessionId) as any;
-      if (!work) return error("Queued message not found", 404);
-      if (work.state !== "queued" || work.delivery !== "followUp") return error("Message has already started", 409);
-      const earlierWork = Number((db.query(`
-        SELECT COUNT(*) count FROM work_items
-        WHERE session_id=? AND rowid<? AND state IN ('queued','running','dispatched')
-      `).get(sessionId, work.queue_order) as any)?.count ?? 0);
-      const rt = runtimes.get(sessionId);
-      const canSteer = earlierWork > 0 || !!rt && ["STARTING", "DISPATCHING", "RUNNING"].includes(rt.phase);
-      if (!canSteer) return error("The agent has already finished; this message will start normally", 409);
-      db.query("UPDATE work_items SET delivery='steer',updated_at=? WHERE id=? AND state='queued'").run(now(), workId);
-      if (work.inserted_at && Number(work.event_seq) > 0) {
-        const event = db.query("SELECT payload FROM events WHERE seq=? AND session_id=? AND type='user'").get(work.event_seq, sessionId) as any;
-        if (event?.payload) {
-          const payload = JSON.parse(event.payload);
-          payload.delivery = "steer";
-          db.query("UPDATE events SET payload=? WHERE seq=?").run(JSON.stringify(payload), work.event_seq);
-          emit(sessionId, "user_delivery", { eventSeq: Number(work.event_seq), workId, delivery: "steer" });
-        }
-      }
-      touchSession(sessionId);
-      kickSession(sessionId);
-      return json({ ok: true, workId, delivery: "steer", session: publicSession(sessionRow.get(sessionId)) });
-    }
+
     const sessionRoutes: Array<[string | undefined, (typeof API)[keyof typeof API]]> = [
       [undefined, API.session], [undefined, API.archiveSession], [undefined, API.rejectSessionEdit],
-      ["unarchive", API.unarchiveSession], ["prompt", API.sessionPrompt], ["fork", API.sessionFork], ["abort", API.sessionAbort],
+      ["unarchive", API.unarchiveSession], ["prompt", API.sessionPrompt], ["fork", API.sessionFork], ["abort", API.sessionAbort], ["resume", API.sessionResume],
       ["events", API.sessionEvents], ["context", API.sessionContext], ["context", API.patchSessionContext],
       ["context", API.replaceSessionContext], ["settings", API.sessionSettings], ["settings", API.updateSessionSettings],
       ["commands", API.sessionCommands], ["command", API.sessionCommand], ["admission", API.sessionAdmission],
@@ -2923,54 +1637,21 @@ const server = Bun.serve({
     if (!row) return error("Session not found", 404);
     if (!action && req.method === "GET") return json({ session: publicSession(row) });
     if (action === "unarchive" && req.method === "POST") {
-      if (!row.archived_at) return json({ ok: true, session: publicSession(row) });
-      const changedAt = now();
-      db.transaction(() => {
-        db.query("UPDATE sessions SET display_order=display_order+1 WHERE archived_at IS NULL").run();
-        db.query("UPDATE sessions SET archived_at=NULL,display_order=0,state='STOPPED',last_error=NULL,updated_at=?,revision=revision+1 WHERE id=?")
-          .run(changedAt, id);
-      })();
-      return json({ ok: true, session: publicSession(sessionRow.get(id)) });
+      const result = await directory.control({ threadId: id, action: "update", archived: false });
+      return result.ok ? json({ ok: true, session: publicSession(threadRow(result.value)) }) : threadError(result.error);
     }
     if (!action && req.method === "PUT") return error("Threads cannot be edited", 405);
     if (!action && req.method === "DELETE") {
-      if (!row.archived_at) {
-        const changedAt = now();
-        db.transaction(() => {
-          db.query("UPDATE work_items SET state='cancelled',updated_at=?,last_error='Thread archived by user' WHERE session_id=? AND state IN ('queued','running','dispatched')")
-            .run(changedAt, id);
-          db.query("UPDATE sessions SET archived_at=?,state='STOPPED',last_error=NULL,updated_at=?,revision=revision+1 WHERE id=?")
-            .run(changedAt, changedAt, id);
-        })();
-      }
-      const timer = retryTimers.get(id); if (timer) clearTimeout(timer);
-      retryTimers.delete(id);
-      runtimeCapacityQueue.cancel(id);
-      const rt = runtimes.get(id);
-      if (rt) {
-        rt.expectedExit = true;
-        rt.suppressOutput = true;
-        setRuntimePhase(id, rt, "STOPPING");
-        try { if (runtimeWorking(rt)) sendLine(rt, { type: "abort" }); } catch {}
-        await terminateRuntimeProcess(rt);
-      }
-      if (!ownsSupervisorLease()) return error("Supervisor instance was replaced", 503);
-      return json({ ok: true, archived: true, session: publicSession(sessionRow.get(id)) });
+      const stopped = await directory.control({ threadId: id, action: "stop", descendants: false });
+      if (!stopped.ok) return threadError(stopped.error);
+      const archived = await directory.control({ threadId: id, action: "update", archived: true });
+      return archived.ok ? json({ ok: true, archived: true, session: publicSession(threadRow(archived.value)) }) : threadError(archived.error);
     }
-    if (row.archived_at && action !== "events" && !(action === "context" && req.method === "GET"))
-      return error("Thread is archived; unarchive it before continuing", 409);
-    if (action === "admission" && req.method === "PUT") {
-      const body = await readBody(req);
-      if (typeof body.priority !== "boolean") return error("priority must be a boolean", 400);
-      db.query("UPDATE sessions SET admission_priority=?,updated_at=?,revision=revision+1 WHERE id=?")
-        .run(body.priority ? 1 : 0, now(), id);
-      db.query("UPDATE work_items SET available_at=? WHERE session_id=? AND state='queued'")
-        .run(Date.now(), id);
-      runtimeCapacityQueue.wake();
-      kickSession(id);
-      return json({ sessionId: id, priority: body.priority, state: (sessionRow.get(id) as any).state });
-    }
+    if (row.archived_at && action !== "events" && !(action === "context" && req.method === "GET")) return error("Thread is archived", 409);
+    if (action === "admission" && req.method === "PUT") return error("Admission belongs to Orchestrator", 405);
+
     if (action === "context" && req.method === "GET") {
+      await refreshThreadInspection(id);
       const stored = storedContext(id);
       const hash = stored?.hash ?? "empty";
       const etag = `\"${hash}\"`;
@@ -3026,7 +1707,7 @@ const server = Bun.serve({
       }
       const events = db.query("SELECT seq,time,type,payload FROM events WHERE session_id=? AND seq>? ORDER BY seq LIMIT 150").all(id, floor)
         .map((e: any) => ({ seq: e.seq, time: e.time, type: e.type, ...JSON.parse(e.payload) }));
-      const rt = runtimes.get(id);
+      const rt = liveProjections.get(id);
       return json({
         events,
         liveText: rt?.liveText ?? "",
@@ -3055,58 +1736,21 @@ const server = Bun.serve({
       catch (e: any) { return error(e.message ?? "Could not load thread settings", 500); }
     }
     if (action === "settings" && req.method === "PUT") {
-      try {
-        const body = await readBody(req);
-        if (forkingSessions.has(id)) return error("Wait for the conversation edit to finish", 409);
-        if ("core" in body) return error("Pi Stack runs Pi; agent core selection is not supported");
-        const subagent = subagentIdentity(id);
-        if (subagent && (body.modelProvider != null || body.modelId != null)
-          && (String(body.modelId ?? "") !== subagent.model
-            || canonicalModelProvider(String(body.modelProvider ?? "")) !== canonicalModelProvider(subagent.provider)))
-          return error("Subagent models are immutable; dispatch a new subagent instead", 409);
-        const rt = await activate(row);
-        const pendingWork = Number((db.query(
-          "SELECT COUNT(*) AS count FROM work_items WHERE session_id=? AND state IN ('queued','running','dispatched')",
-        ).get(id) as any)?.count ?? 0);
-        if (rt.phase !== "IDLE" || pendingWork > 0) return error("Wait for the thread to become idle before changing settings", 409);
-        if (body.modelProvider != null || body.modelId != null) {
-          const provider = String(body.modelProvider ?? "");
-          const modelId = String(body.modelId ?? "");
-          if (!provider || !modelId) return error("modelProvider and modelId are required");
-          await rpc(rt, "set_model", { provider, modelId }, 30000);
-        }
-        if (body.thinkingLevel != null) {
-          await rpc(rt, "set_thinking_level", { level: String(body.thinkingLevel) }, 30000);
-        }
-        if (body.speedMode != null) {
-          const speedMode = String(body.speedMode);
-          if (speedMode !== "normal" && speedMode !== "priority") return error("speedMode must be normal or priority");
-          const provider = String(body.modelProvider ?? (sessionRow.get(id) as any)?.current_provider ?? "");
-          if (!provider.startsWith("openai")) return error("Priority speed is available only for OpenAI threads", 409);
-          const tier = speedMode === "priority" ? "priority" : "default";
-          writeServiceTier(id, tier);
-          db.query("UPDATE sessions SET service_tier=?,updated_at=?,revision=revision+1 WHERE id=?").run(tier, now(), id);
-        }
-        if (body.bashTimeoutSeconds != null) {
-          const timeout = Number(body.bashTimeoutSeconds);
-          if (!BASH_TIMEOUT_OPTIONS.some((option) => option === timeout)) {
-            return error(`bashTimeoutSeconds must be one of ${BASH_TIMEOUT_OPTIONS.join(", ")}`);
-          }
-          const current = sessionRow.get(id) as any;
-          if (bashTimeoutSeconds(current?.bash_timeout_seconds) !== timeout) {
-            db.query("UPDATE sessions SET bash_timeout_seconds=?,updated_at=?,revision=revision+1 WHERE id=?")
-              .run(timeout, now(), id);
-            rt.expectedExit = true;
-            rt.suppressOutput = true;
-            setRuntimePhase(id, rt, "STOPPING");
-            await terminateRuntimeProcess(rt);
-            if (runtimes.get(id) === rt) return error("Could not restart the thread with its new bash timeout", 500);
-            await activate(sessionRow.get(id));
-          }
-        }
-        return json({ settings: await threadSettings(sessionRow.get(id)) });
-      } catch (e: any) { return error(e.message ?? "Could not update thread settings", 500); }
+      const body = await readBody(req);
+      const settings: any = {};
+      if (body.modelId != null) settings.model = `${body.modelProvider}/${body.modelId}`;
+      if (body.thinkingLevel != null) settings.thinkingLevel = body.thinkingLevel;
+      if (body.speedMode != null) settings.speed = body.speedMode;
+      const result = await directory.control({ threadId: id, action: "settings", settings });
+      if (!result.ok) return threadError(result.error);
+      if (body.bashTimeoutSeconds != null) {
+        if (!BASH_TIMEOUT_OPTIONS.includes(body.bashTimeoutSeconds)) return error("Invalid bash timeout");
+        const changed = await directory.control({ threadId: id, action: "update", metadata: { ...row.metadata, bashTimeoutSeconds: body.bashTimeoutSeconds } });
+        if (!changed.ok) return threadError(changed.error);
+      }
+      return json({ settings: await threadSettings(sessionRow.get(id)) });
     }
+
     if (action === "fork" && req.method === "POST") {
       try {
         const body = await readBody(req);
@@ -3119,28 +1763,24 @@ const server = Bun.serve({
         if (forkingSessions.has(id)) return error("The conversation is already being edited", 409);
         forkingSessions.add(id);
         try {
-          const rt = await activate(row);
+          const rt = liveFor(id);
           if (!ownsSupervisorLease()) return error("Supervisor instance was replaced", 503);
-          const pendingWork = Number((db.query(
-            "SELECT COUNT(*) AS count FROM work_items WHERE session_id=? AND state IN ('queued','running','dispatched')",
-          ).get(id) as any)?.count ?? 0);
-          if (rt.phase !== "IDLE" || pendingWork > 0) return error("Wait for the thread to become idle before editing an earlier message", 409);
-          const before = await rpc(rt, "get_entries", {}, 10_000) as any;
+          if (row.state !== "IDLE" || row.pendingMessages) return error("Wait for the thread to become idle before editing", 409);
+
+          const before = await rpc(id, "get_entries") as any;
           const branch = activeSessionEntries(Array.isArray(before.entries) ? before.entries : [], before.leafId);
           const selected = branch.findLast((entry) => entry?.type === "message"
             && entry.message?.role === "user"
             && Number(entry.message.timestamp) === messageTimestamp);
           if (!selected) return error("That user message is no longer on the active conversation branch", 409);
-          const forked = await rpc(rt, "fork", { entryId: selected.id }, 30_000) as any;
+          const forked = await rpc(id, "fork", { id: requestId, entryId: selected.id }) as any;
           if (!ownsSupervisorLease()) return error("Supervisor instance was replaced", 503);
           if (forked.cancelled) return error("Editing from that message was cancelled", 409);
-          const after = await rpc(rt, "get_entries", {}, 10_000) as any;
+          const after = await rpc(id, "get_entries") as any;
           if (!ownsSupervisorLease()) return error("Supervisor instance was replaced", 503);
           replaceConversationEvents(id, activeSessionEntries(Array.isArray(after.entries) ? after.entries : [], after.leafId));
-          const runtimeState = await rpc(rt, "get_state", {}, 10_000) as any;
-          const changedAt = now();
-          db.query("UPDATE sessions SET session_path=?,state='IDLE',last_error=NULL,updated_at=?,revision=revision+1 WHERE id=?")
-            .run(runtimeState.sessionFile ? String(runtimeState.sessionFile) : row.session_path, changedAt, id);
+
+
           rt.liveText = "";
           rt.liveThinking = "";
           rt.thinkingBlockStart = 0;
@@ -3151,7 +1791,6 @@ const server = Bun.serve({
           rt.thinkingActive = false;
           rt.toolProgress.clear();
           displayContexts.delete(id);
-          rt.phaseVersion++;
           signalSync();
           const response = {
             ok: true,
@@ -3162,8 +1801,6 @@ const server = Bun.serve({
           return json(response);
         } finally {
           forkingSessions.delete(id);
-          kickSession(id);
-          if (releaseHandoffRequested) queueMicrotask(() => void handoffRelease());
         }
       } catch (e: any) { return error(e.message ?? "Could not edit from that message", 400); }
     }
@@ -3177,22 +1814,27 @@ const server = Bun.serve({
         const text = String(body.text ?? "").trim();
         if (!text) return error("Prompt is empty");
         if (forkingSessions.has(id)) return error("Wait for the conversation edit to finish", 409);
-        const rt = runtimes.get(id);
-        if (rt && ["ABORTING", "STOPPING"].includes(rt.phase)) return error("Thread is stopping; wait for it to become resumable", 409);
-        const delivery = body.delivery === "steer" ? "steer" : body.delivery == null || body.delivery === "followUp" ? "followUp" : null;
-        if (!delivery) return error("delivery must be steer or followUp");
+        const delivery = body.delivery ?? "queue";
+        if (!["queue", "steer", "hardSteer"].includes(delivery)) return error("delivery must be queue, steer or hardSteer");
+
         const roomImages = body.includeMeetingImages === true && row.meeting_id
           ? meet.captureDelegation(row.meeting_id)
           : { images: [], note: "" };
         const message = text + (roomImages.note ? `\n\n${roomImages.note}` : "");
-        return json(enqueuePrompt(id, requestId, message, delivery, roomImages.images), 202);
+        return json(await enqueuePrompt(id, requestId, message, delivery, roomImages.images), 202);
       } catch (e: any) { return error(e.message ?? "Prompt failed", 400); }
     }
     if (action === "abort" && req.method === "POST") {
-      const aborted = await abortCurrentOperation(id);
-      if (!aborted.ok) return error(aborted.error, aborted.status);
-      return json({ ...aborted, session: publicSession(sessionRow.get(id)) });
+      const body = await readBody(req);
+      if (typeof body.descendants !== "boolean") return error("descendants boolean required");
+      const result = await directory.control({ threadId: id, action: "stop", descendants: body.descendants });
+      return result.ok ? json({ ok: true, session: publicSession(threadRow(result.value)) }) : threadError(result.error);
     }
+    if (action === "resume" && req.method === "POST") {
+      const result = await directory.control({ threadId: id, action: "resume" });
+      return result.ok ? json({ ok: true, session: publicSession(threadRow(result.value)) }) : threadError(result.error);
+    }
+
     return error("Not found", 404);
   },
 });
@@ -3209,20 +1851,10 @@ process.on("uncaughtException", (cause) => {
 });
 
 refreshPlanUsageIfDue();
-void agentHost.refresh();
-for (const row of db.query("SELECT DISTINCT session_id FROM work_items WHERE state='queued'").all() as any[]) kickSession(row.session_id);
+void refreshPeers();
 
-// Sessions are on-demand rather than a permanent process fleet. Preserve the
-// Pi JSONL session, but reap an idle RPC child after fifteen minutes.
-// Periodically reconcile the in-memory projection with Pi's own state. This
-// repairs dropped settled/compaction events and prevents stale mobile controls.
-const stateReconciler = setInterval(() => {
-  relayThreadResults();
-  for (const [id, rt] of runtimes) {
-    if (["ABORTING", "STOPPING"].includes(rt.phase) || rt.reconciling) continue;
-    void reconcileRuntimeState(id, rt).catch((cause) => console.error(`State reconciliation failed for ${id}`, cause));
-  }
-}, STATE_RECONCILE_MS);
+unwrap(await threads.start());
+void refreshThreadNotifications();
 
 const stopLedgerSnapshots = startLedgerSnapshots(
   join(DATA, "supervisor.sqlite3"), join(DATA, "backup", "supervisor.sqlite3"),
@@ -3238,65 +1870,14 @@ function pruneUploadTransfers() {
 }
 pruneUploadTransfers();
 
-const reaper = setInterval(() => {
-  const cutoff = Date.now() - 15 * 60_000;
-  pruneUploadTransfers();
-  for (const [id, rt] of runtimes) {
-    if (retireIdleRuntime(id, rt)) continue;
-    if (rt.phase === "IDLE" && rt.lastActivity < cutoff) {
-      rt.expectedExit = true;
-      rt.suppressOutput = true;
-      setRuntimePhase(id, rt, "STOPPING");
-      emit(id, "notice", { text: "Agent paused after inactivity" });
-      void terminateRuntimeProcess(rt);
-    }
-  }
-}, 60_000);
-
-function handoffDocument() {
-  const runtimeSnapshots: RuntimeHandoff[] = [...runtimes].flatMap(([sessionId, rt]) => {
-    if (!rt.transport?.pid || rt.phase === "STOPPING") return [];
-    return [{
-      sessionId,
-      socketPath: rt.transport.socketPath,
-      pid: rt.transport.pid,
-      shared: rt.transport.shared,
-      phase: rt.phase,
-      compacting: rt.compacting,
-      compactionContextHash: rt.compactionContextHash,
-      retrying: rt.retrying,
-      liveText: rt.liveText,
-      liveThinking: rt.liveThinking,
-      thinkingBlockStart: rt.thinkingBlockStart,
-      thinkingActive: rt.thinkingActive,
-      toolProgress: [...rt.toolProgress.values()],
-      pendingContextTextLength: rt.pendingContextTextLength,
-      pendingContextThinkingLength: rt.pendingContextThinkingLength,
-      pendingContextFinalization: rt.pendingContextFinalization,
-      pendingModelFailure: rt.pendingModelFailure,
-      pendingCoreFailure: rt.pendingCoreFailure,
-      core: rt.core,
-      lastActivity: rt.lastActivity,
-      activeTools: [...rt.activeTools],
-      dispatchedWorkIds: [...rt.dispatchedWorkIds],
-      steeringQueued: rt.steeringQueued,
-      followUpQueued: rt.followUpQueued,
-      historyNeedsRestore: rt.historyNeedsRestore,
-      modelId: rt.modelId,
-    }];
-  });
-  return { version: 1, createdAt: now(), runtimes: runtimeSnapshots };
-}
-
+const uploadPruner = setInterval(pruneUploadTransfers, 60_000);
+const namingReceipts = setInterval(reconcileThreadNames, 15_000);
+reconcileThreadNames();
 function stopSupervisorTimers() {
-  runtimeCapacityQueue.stop();
-  inlineImages.stop();
-  clearInterval(reaper);
-  clearInterval(stateReconciler);
+  clearInterval(uploadPruner);
+  clearInterval(namingReceipts);
   clearInterval(dashboardTicker);
   stopLedgerSnapshots();
-  for (const timer of retryTimers.values()) clearTimeout(timer);
-  retryTimers.clear();
 }
 
 async function closeImageGeneration() {
@@ -3305,55 +1886,21 @@ async function closeImageGeneration() {
   finally { await inlineImages.close(); }
 }
 
-async function handoffRelease() {
+async function releaseSupervisor(exitCode: number) {
   if (shuttingDown) return;
-  releaseHandoffRequested = true;
-  await runtimeAdoption;
-  if ([...runtimes.values()].some((runtime) => runtime.phase === "ABORTING") || forkingSessions.size > 0) {
-    console.log("Pi Remote release handoff waiting for an in-flight session operation to resolve");
-    return;
-  }
   shuttingDown = true;
+  server.stop();
   stopSupervisorTimers();
-  const staging = `${HANDOFF_PATH}.writing`;
-  writeFileSync(staging, `${JSON.stringify(handoffDocument())}\n`, { mode: 0o600 });
-  renameSync(staging, HANDOFF_PATH);
-  for (const rt of runtimes.values()) rt.transport?.detach();
-  await meet.close();
-  server.stop(true);
+  unsubscribeThreads();
+  threads.suspend();
+  runner.detach();
+  unwrap(await threads.detach());
   await closeImageGeneration();
-  agentHost.close();
   db.close();
-  console.log("Pi Remote supervisor handed active runtimes to the selected release");
-  process.exit(75);
+  process.exit(exitCode);
 }
 
-async function shutdown() {
-  if (shuttingDown) return;
-  shuttingDown = true;
-  stopSupervisorTimers();
-  if (ownsSupervisorLease()) {
-    db.query("UPDATE work_items SET state='queued',resume=CASE WHEN state='dispatched' THEN 1 ELSE resume END,available_at=?,updated_at=?,last_error='Supervisor restarted before settling' WHERE state IN ('running','dispatched')")
-      .run(Date.now(), now());
-  }
-  const exits: Promise<unknown>[] = [];
-  for (const [id, rt] of runtimes) {
-    const wasWorking = runtimeWorking(rt);
-    rt.expectedExit = true;
-    rt.suppressOutput = true;
-    try { if (wasWorking) sendLine(rt, { type: "abort" }); } catch {}
-    setRuntimePhase(id, rt, "STOPPING");
-    exits.push(terminateRuntimeProcess(rt));
-  }
-  await Promise.race([Promise.all(exits), Bun.sleep(3_000)]);
-  await meet.close();
-  server.stop();
-  await closeImageGeneration();
-  agentHost.close();
-  db.close();
-  process.exit(0);
-}
-process.on("SIGTERM", shutdown);
-process.on("SIGINT", shutdown);
-process.on("SIGUSR2", handoffRelease);
-process.on("SIGHUP", handoffRelease);
+process.on("SIGTERM", () => void releaseSupervisor(0));
+process.on("SIGINT", () => void releaseSupervisor(0));
+process.on("SIGUSR2", () => void releaseSupervisor(75));
+process.on("SIGHUP", () => void releaseSupervisor(75));

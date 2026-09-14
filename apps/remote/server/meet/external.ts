@@ -9,7 +9,7 @@ function identity(namespace: string, eventKey: string, kind: string): string {
 const json = (value: unknown, status = 200) => Response.json(value, { status, headers: { ...API_CORS_HEADERS, "cache-control": "no-store" } });
 
 export async function externalMeetingRequest(req: Request, meet: MeetServer,
-  ensureThread: (sessionId: string, meetingId: string, name: string) => void): Promise<Response | null> {
+  ensureThread: (sessionId: string, meetingId: string, name: string) => void | Promise<void>): Promise<Response | null> {
   const url = new URL(req.url);
   if (!/^\/v1\/meet\/external(?:\/|$)/.test(url.pathname)) return null;
   try {
@@ -35,7 +35,7 @@ export async function externalMeetingRequest(req: Request, meet: MeetServer,
       response.headers.set("x-pi-session-id", sessionId);
       return response;
     }
-    ensureThread(sessionId, meetingId, typeof body.name === "string" && body.name.trim() ? body.name.trim().slice(0, 120) : `${body.namespace} meeting`);
+    await ensureThread(sessionId, meetingId, typeof body.name === "string" && body.name.trim() ? body.name.trim().slice(0, 120) : `${body.namespace} meeting`);
     return json(meet.openExternal(meetingId, sessionId, `${url.origin}/v1/meet/${meetingId}`));
   } catch (cause) {
     return json({ error: cause instanceof Error ? cause.message : String(cause) }, 400);

@@ -1,35 +1,27 @@
 import { test, expect } from "bun:test";
 import { Database } from "bun:sqlite";
-import { ensureSupervisorSchema } from "./database";
+import { ensureSupervisorSchema, recordIdleNotification } from "./database";
 import { idleNotifications } from "./notifications";
 
-test("idle notifications record transitions atomically and replay across reconnects", () => {
+test("notification projection is atomic and replayable across reconnects", () => {
   const db = new Database(":memory:");
   ensureSupervisorSchema(db);
-  db.query("INSERT INTO sessions(id,name,workspace_id,state,created_at,updated_at,profile_id) VALUES('thread','A thread','home','STOPPED','now','now','home')").run();
-  const state = db.query("UPDATE sessions SET state=? WHERE id='thread'");
-  const unread = () => Number((db.query("SELECT idle_unread FROM sessions WHERE id='thread'").get() as any).idle_unread);
+  const thread = { id: "thread", title: "A thread" };
   const initial = idleNotifications(db, null);
-  for (const value of ["STARTING", "IDLE", "IDLE"]) state.run(value);
-  expect(idleNotifications(db, initial.cursor).notifications).toEqual([]);
-  state.run("RUNNING");
-  state.run("IDLE");
-  state.run("IDLE");
+  recordIdleNotification(db, "execution-1", thread, 1000);
+  recordIdleNotification(db, "execution-1", thread, 1000);
   const first = idleNotifications(db, initial.cursor);
   expect(first.notifications).toHaveLength(1);
-  expect(unread()).toBe(1);
-  db.query("UPDATE sessions SET idle_unread=0 WHERE id='thread'").run();
-  expect(unread()).toBe(0);
-  expect(first.notifications[0].sessionId).toBe("thread");
+  expect(first.notifications[0].sessionId).toBe(thread.id);
+  expect(() => db.transaction(() => {
+    recordIdleNotification(db, "execution-2", thread, 2000);
+    throw new Error("rollback");
+  })()).toThrow();
   expect(idleNotifications(db, first.cursor).notifications).toEqual([]);
-  expect(() => db.transaction(() => { state.run("RUNNING"); state.run("IDLE"); throw new Error("rollback"); })()).toThrow();
-  expect(idleNotifications(db, first.cursor).notifications).toEqual([]);
-  state.run("RUNNING"); state.run("ABORTING"); state.run("IDLE");
+  recordIdleNotification(db, "execution-2", thread, 2000);
   ensureSupervisorSchema(db);
-  expect(unread()).toBe(1);
   expect(idleNotifications(db, first.cursor).notifications).toHaveLength(1);
   expect(idleNotifications(db, null).notifications).toEqual([]);
-  expect(idleNotifications(db, initial.cursor).notifications).toHaveLength(2);
   db.close();
 });
 

@@ -1,5 +1,4 @@
 import { expect, test } from "bun:test";
-import { projectRuntimeEvent } from "./runtime-wire.mjs";
 import { displayContextDocument } from "./context-display";
 import { updateToolProgress, type ToolProgress } from "./tool-progress";
 
@@ -28,6 +27,4 @@ test("keeps textual reasoning and bounds live output without duplicating Pi snap
   const bounded = updateToolProgress(tool, "x".repeat(40_000) + "latest").output;
   expect(bounded.length).toBe(20_001);
   expect(bounded.endsWith("latest")).toBe(true);
-  const wire = projectRuntimeEvent({ type: "tool_execution_update", toolCallId: "tool", partialResult: { content: [{ type: "text", text: "x".repeat(100_000) }] } });
-  expect(wire.partialResult.content[0].text.length).toBe(20_001);
 });

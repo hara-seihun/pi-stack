@@ -18,7 +18,7 @@ function deferred() {
 async function fixture(generate: InlineImageGenerator, concurrency = 2) {
   const root = await mkdtemp(join(tmpdir(), "pi-inline-images-"));
   const db = new Database(join(root, "state.sqlite3"));
-  db.exec("PRAGMA journal_mode=WAL; PRAGMA foreign_keys=ON; CREATE TABLE sessions(id TEXT PRIMARY KEY); INSERT INTO sessions VALUES('thread'),('other');");
+  db.exec("PRAGMA journal_mode=WAL; PRAGMA foreign_keys=ON; CREATE TABLE thread_views(id TEXT PRIMARY KEY); INSERT INTO thread_views VALUES('thread'),('other');");
   const listeners = new Set<() => void>();
   const changed = () => { for (const listener of listeners) listener(); };
   const service = new InlineImages(db, join(root, "images"), generate, changed, concurrency);
@@ -195,7 +195,7 @@ test.each([true, false])("session deletion during provider completion cannot res
   f.service.accept("other", "retained", '<pi-remote-image id="retained" prompt="Keep me" />');
   await f.service.start();
   await claimed;
-  f.db.query("DELETE FROM sessions WHERE id='thread'").run();
+  f.db.query("DELETE FROM thread_views WHERE id='thread'").run();
   release();
   await f.until(() => f.service.snapshot("other").images[0]?.state === "complete");
   expect(f.service.snapshot("thread")).toEqual({ version: 0, images: [] });

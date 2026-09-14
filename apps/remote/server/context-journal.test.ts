@@ -8,7 +8,7 @@ let db: Database;
 beforeEach(() => {
   db = new Database(":memory:");
   ensureSupervisorSchema(db);
-  db.query("INSERT INTO sessions(id,name,workspace_id,state,created_at,updated_at,profile_id) VALUES('s','Test','home','IDLE','now','now','home')").run();
+  db.query("INSERT INTO thread_views(id) VALUES('s')").run();
 });
 afterEach(() => db.close());
 

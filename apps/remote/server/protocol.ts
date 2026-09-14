@@ -20,7 +20,7 @@ export type DocumentUpdate =
   | { kind: "clear"; capturedAt: 0; hash: "" };
 
 export type Activity =
-  | "IDLE" | "FAILED" | "STARTING" | "ABORTING" | "RUNNING" | "WORKING" | "THINKING"
+  | "IDLE" | "FAILED" | "STARTING" | "STOPPING" | "STOPPED" | "INTERRUPTED" | "RUNNING" | "WORKING" | "THINKING"
   | "COMPACTING" | "RETRYING" | "RECONNECTING" | "QUEUED" | "WAITING_ON_TOOL" | (string & {});
 
 export interface IdleNotification { seq: number; sessionId: string; name: string; time: string }
@@ -41,8 +41,9 @@ export interface QueuedMessage {
 
 export interface Session {
   id: string;
-  core?: "pi";
-  subagent?: { parentSessionId: string; model: string };
+  parentId: string | null;
+  hasChildren: boolean;
+  model: string;
   name: string;
   cwd: string;
   workspaceName: string;
@@ -63,47 +64,6 @@ export interface Session {
 }
 
 export interface SessionEvent {
-  seq: number;
-  time: string;
-  type: string;
-  [key: string]: unknown;
-}
-
-export interface AgentHostRef {
-  key: string;
-  label: string;
-  name: string;
-}
-
-export interface AgentHostStatus extends AgentHostRef {
-  running: number;
-  updatedAt: string | null;
-  error: string | null;
-}
-
-export interface AgentRun {
-  id: string;
-  host: string;
-  hostLabel: string;
-  hostName: string;
-  runId: string;
-  parentRunId?: string;
-  taskId: string;
-  model: string;
-  thinking: string;
-  provider: string;
-  label: string;
-  key: string;
-  status: string;
-  activity: Activity;
-  activeTool: string | null;
-  startedAt: string;
-  finishedAt: string | null;
-  observable: boolean;
-  error: string | null;
-}
-
-export interface AgentRunEvent {
   seq: number;
   time: string;
   type: string;
@@ -185,7 +145,6 @@ export interface Dashboard {
   governors: GovernorControls | null;
   actions: MachineActionState[];
   machine: MachineUsage | null;
-  agents: { runs: AgentRun[]; hosts: AgentHostStatus[]; running: number };
   modelCounts: AgentModelCount[];
   threadStarts: ThreadStart[];
   home: string;
@@ -197,6 +156,7 @@ export interface SupervisorState {
   sessions: Session[];
   archived: Session[];
   archivedTotal: number;
+  ownerErrors?: Array<{ owner: string; message: string }>;
 }
 
 export interface SyncRequest {
@@ -219,12 +179,6 @@ export interface SyncRequest {
     /** Durable event cursor; omit when the caller renders from context. */
     eventsAfter?: number;
   };
-  agent?: {
-    id: string;
-    after?: number;
-    liveTextHash?: string;
-    liveThinkingHash?: string;
-  };
 }
 
 export interface SyncResponse {
@@ -245,12 +199,6 @@ export interface SyncResponse {
     liveThinking: DocumentUpdate | null;
     events: SessionEvent[];
   } | null;
-  agent: {
-    run: AgentRun;
-    events: AgentRunEvent[];
-    liveText: DocumentUpdate | null;
-    liveThinking: DocumentUpdate | null;
-  } | null;
 }
 
 export const BASH_TIMEOUT_OPTIONS = [60, 300, 1800] as const;
@@ -258,7 +206,6 @@ export type BashTimeoutSeconds = (typeof BASH_TIMEOUT_OPTIONS)[number];
 export const DEFAULT_BASH_TIMEOUT_SECONDS: BashTimeoutSeconds = 1800;
 
 export interface ThreadSettings {
-  agents: Array<{ id: string; parentId: string | null; name: string; model?: string; state: string }>;
   models: Array<{ id: string; name?: string; provider: string; common?: boolean }>;
   model: { id: string; provider: string } | null;
   thinkingLevels: string[];

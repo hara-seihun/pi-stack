@@ -12,7 +12,7 @@ export function threadNamingModel(value: string | undefined): string {
 
 export function shouldNameThread(name: string, messageCount: number, namedAtMessageCount: number): boolean {
   if (messageCount < 1) return false;
-  if (/^\d+$/.test(name)) return true;
+  if (/^\d+$/.test(name) || /^Thread [0-9a-f]{8}$/i.test(name)) return true;
   const latestInterval = Math.floor(messageCount / THREAD_NAMING_INTERVAL) * THREAD_NAMING_INTERVAL;
   return latestInterval >= THREAD_NAMING_INTERVAL && namedAtMessageCount < latestInterval;
 }

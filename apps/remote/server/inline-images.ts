@@ -30,13 +30,13 @@ export class InlineImages {
     private changed: () => void, private concurrency = 2, private isOwner: () => boolean = () => true) {
     if (!Number.isSafeInteger(concurrency) || concurrency < 1 || concurrency > 8) throw new Error("Image concurrency must be an integer from 1 to 8");
     db.exec(`CREATE TABLE IF NOT EXISTS inline_images (
-      session_id TEXT NOT NULL REFERENCES sessions(id) ON DELETE CASCADE,
+      session_id TEXT NOT NULL REFERENCES thread_views(id) ON DELETE CASCADE,
       image_id TEXT NOT NULL, value TEXT NOT NULL, attempt_dir TEXT,
       PRIMARY KEY(session_id,image_id));
       CREATE TABLE IF NOT EXISTS inline_image_versions (
-      session_id TEXT PRIMARY KEY REFERENCES sessions(id) ON DELETE CASCADE, version INTEGER NOT NULL);
+      session_id TEXT PRIMARY KEY REFERENCES thread_views(id) ON DELETE CASCADE, version INTEGER NOT NULL);
       CREATE TABLE IF NOT EXISTS inline_image_messages (
-      session_id TEXT NOT NULL REFERENCES sessions(id) ON DELETE CASCADE,
+      session_id TEXT NOT NULL REFERENCES thread_views(id) ON DELETE CASCADE,
       message_key TEXT NOT NULL, PRIMARY KEY(session_id,message_key));`);
   }
 
@@ -52,7 +52,7 @@ export class InlineImages {
   accept(sessionId: string, messageKey: string, text: string) {
     if (!text.includes("<pi-remote-image")) return;
     const accepted = this.db.transaction(() => {
-      if (!this.db.query("SELECT 1 FROM sessions WHERE id=?").get(sessionId)) return false;
+      if (!this.db.query("SELECT 1 FROM thread_views WHERE id=?").get(sessionId)) return false;
       if (this.db.query("SELECT 1 FROM inline_image_messages WHERE session_id=? AND message_key=?").get(sessionId, messageKey)) return false;
       this.db.query("INSERT INTO inline_image_messages VALUES(?,?)").run(sessionId, messageKey);
       for (const tag of parseInlineImageTags(text)) {
@@ -122,7 +122,7 @@ export class InlineImages {
   private save(sessionId: string, image: InlineImage, attemptDir?: string): boolean {
     return this.db.transaction(() => {
       const result = this.db.query(`INSERT INTO inline_images(session_id,image_id,value,attempt_dir)
-        SELECT ?,?,?,? WHERE EXISTS(SELECT 1 FROM sessions WHERE id=?)
+        SELECT ?,?,?,? WHERE EXISTS(SELECT 1 FROM thread_views WHERE id=?)
         ON CONFLICT(session_id,image_id) DO UPDATE SET value=excluded.value,attempt_dir=COALESCE(excluded.attempt_dir,inline_images.attempt_dir)`)
         .run(sessionId, image.id, JSON.stringify({ ...image, updatedAt: time() }), attemptDir ?? null, sessionId);
       if (!result.changes) return false;

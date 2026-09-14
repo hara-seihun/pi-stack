@@ -1,160 +1,87 @@
-# Pi Remote state machine
+# Thread state and Remote presentation
 
-Pi Remote treats SQLite and one per-thread runtime projection as the authority. Clients are projections only: they may show a short-lived local action overlay, but they never invent an authoritative lifecycle transition.
+The [unified thread design](../../../docs/threads.md) owns execution semantics. Orchestrator's `ThreadService` owns every persistent thread, its input queue, settings, cancellation and parent notifications. Remote has no execution phase machine, work dispatcher, child registry or result relay.
 
-Each supervisor process first writes a random `supervisor_epoch` lease to SQLite. Every API request, runtime event, reconciliation, activation continuation, work worker, and child-exit callback verifies that lease before durable mutation. This fences an old supervisor incarnation that is still unwinding while its replacement has already reset and adopted the database; its late `SIGTERM` child exit cannot overwrite the replacement's `STOPPED` state with `FAILED`.
+## Ownership and access
 
-## Server lifecycle
+`server/server.ts` creates one person-owned `ThreadService` over `DATA/threads.sqlite3`, using Orchestrator's multiplexed shared Pi runner. Native JSONL files remain the conversation store. Thread IDs and parent IDs do not change when sessions unload or the supervisor restarts.
 
-Each live RPC child has exactly one phase:
+The common `/v1/threads` API is the same directory for humans, agent tools and offline-reader discovery. `/v1/thread-owner` exposes only this person's local service for explicitly configured peer wiring, so owner directories cannot recursively list each other. Remote's existing `/v1/sessions` routes translate presentation operations into that API. Root, child and fleet threads share the same `Session` response shape and transcript view.
 
-| Phase | Meaning | Public state |
-|---|---|---|
-| `STARTING` | Child exists; initial `get_state` has not completed | `STARTING` |
-| `IDLE` | Child is ready and Pi has no active or pending run | `IDLE` |
-| `DISPATCHING` | An idle `prompt` was durably dispatched, but `agent_start` has not proved the run yet | `RUNNING` / `QUEUED` |
-| `RUNNING` | Pi has proved an active run; steering/follow-up messages stay in this phase | `RUNNING` |
-| `ABORTING` | Pi is stopping the active operation in the existing child; accepted steering may still complete | `ABORTING` |
-| `STOPPING` | Hard steer, the idle reaper, archiving, or supervisor shutdown is removing the child process group | `ABORTING` until process exit, then `STOPPED` |
+The local service runs inside the person's existing Unix account and mount namespace. A fleet peer is included only when `/etc/pi-stack/host.json` names that Unix person as `fleetUser`. Readable fleet ledgers and previous observation access grant no control authority. `PI_REMOTE_ORCHESTRATOR_URL` selects the fleet owner endpoint, defaulting to `http://127.0.0.1:2460`. A peer failure retains its last listing and exposes an owner error; it does not change local thread execution state.
 
-`phaseVersion` changes on phase transitions, dispatches, queue changes, and Pi activity. A `get_state` reconciliation captures this version before its RPC request and discards the response if the version changed while it was in flight. This prevents an old inactive snapshot from settling newer work.
+## Execution state is an observation
 
-### Valid transitions
+Remote publishes the service's thread state in uppercase. A thread's own `RUNNING` activity can display THINKING, WAITING ON TOOL, COMPACTING or RETRYING from its live Pi events. An idle parent remains IDLE while its children run. Child relationships never change parent execution state.
 
-```text
-(no runtime) -> STARTING -> IDLE
-IDLE -> DISPATCHING -> RUNNING -> IDLE
-RUNNING -> RUNNING                 queued steer/follow-up
-STARTING -> STARTING                   cancel claimed work before dispatch
-DISPATCHING|RUNNING -> ABORTING -> IDLE
-DISPATCHING|RUNNING -> STOPPING -> STARTING   hard steer
-IDLE -> STOPPING                       fifteen-minute inactivity reaper
-any live phase -> STOPPING -> STOPPED|FAILED
-FAILED|STOPPED -> STARTING         later activation/retry
-```
+`server/live-projection.ts` stores disposable text, thinking and bounded tool previews. These fields neither admit nor complete work. No GET request or browser selection starts a thread merely to read history. Owner inspection returns cached context or persisted native history without opening Pi.
 
-Only `RUNNING -> IDLE` can ordinarily settle dispatched work. `agent_settled` in `DISPATCHING` is stale and ignored. In `RUNNING`, it starts a next-tick `get_state` check rather than settling by itself. Pi owns retry, compaction and queued continuation. The state check keeps dispatched work alive while Pi reports any pending activity, independently of the runtime's compaction policy. During `ABORTING`, the abort handler owns the phase transition, while Pi may finish steering it already accepted before `abort()` returns. `STOPPING` suppresses output. An assistant message with `stopReason=error|aborted` is held until confirmed settlement: a later successful assistant message in the same run clears it, so automatic retry, account failover, or compaction does not expose a false terminal failure. If the run settles without recovery, the provider error remains in the supervisor event ledger for voice and diagnosis. The interactive view comes from Pi's model context rather than this event projection.
+## Messages and controls
 
-## Durable work
+Human and agent messages use `queue`, `steer` or `hardSteer` delivery. The service owns admission and dispatch receipts. Remote renders uninserted pending messages above the composer using their queued, running, dispatched or held state.
 
-Work items move through:
+- Queue waits for the recipient's execution to finish.
+- Steer waits for the current local tools without cancelling them.
+- Hard steer confirms cancellation of current local execution before sending the selected message first. Other pending messages retain their order.
+- Stop requires an explicit `descendants` boolean, cancels the selected execution scope and holds pending messages.
+- Resume returns `no_pending_messages` when nothing is held. It starts no empty work.
+- An explicit new message resumes a stopped thread with that message first. Automatic notifications stay held.
 
-```text
-queued -> running -> dispatched -> complete
-   |         |            |
-   +---------+------------+-> cancelled
-   +---------+------------+-> queued (retry/process recovery)
-```
+The owner also handles pending-message cancellation/promotion, settings and native session commands. Editing a user message forks through the owner, then Remote replaces its display-event projection and returns the original text to the composer. Sending is a separate operation.
 
-- SQLite contains the message before the API acknowledges it, but Pi's model context does not. Until Pi confirms insertion, clients show the work item above the composer with its canonical `queued`, `running`, or `dispatched` status.
-- `running` means the worker has claimed it but has not handed it to Pi.
-- `dispatched` means exactly one RPC command was written; acknowledgement loss never causes a duplicate send. Pi's next context snapshot contains the user message after RPC acknowledgement or subsequent Pi activity proves insertion, and the pending composer card disappears in the same durable update.
-- A `followUp` created during `RUNNING` remains `queued` under supervisor ownership. It is not handed to Pi until the current run settles, so it can be atomically promoted to `steer` or cancelled. While busy, the worker skips held follow-ups and dispatches only promoted steering items; while idle, it starts the oldest queued item as the next prompt.
-- Cancellation succeeds only while the supervisor still owns an item in `queued`; it atomically marks the item `cancelled` before any Pi insertion. Client-side Edit uses this same cancellation endpoint and copies the returned canonical text into the composer without creating a second server-side message.
-- Soft steer promotes a pending follow-up into Pi's current run. Hard steer marks the chosen follow-up as next, terminates the active Pi process group immediately, and starts a fresh process on the same session with that message. Work already dispatched into the interrupted run is cancelled; supervisor-owned follow-ups retain their relative order.
-- Promotion normally updates a still-pending durable work item before it has any event entry. An already-inserted item keeps its delivery event accurate for voice consumers.
-- All dispatched items in one Pi run complete only when reconciliation confirms Pi inactive from the `RUNNING` phase. An `agent_settled` event requests that reconciliation but cannot complete work on its own.
-- Cancellation is terminal for the active item. Stop requeues every later queued/running/dispatched item with `resume=0`; a dispatch error checks each durable state before retrying, so the cancelled active turn cannot resurrect while retained messages remain sendable.
-- A live release handoff keeps `dispatched` work attached to its existing runtime host and releases a supervisor-only `running` claim back to `queued`. A crash or full service restart terminates unclaimed runtime hosts, requeues `running`/`dispatched` work, and resumes an interrupted inserted turn through the supported RPC `prompt` command with an explicit continuation instruction. Startup never invents protocol commands that Pi does not support.
+Defaults come from Orchestrator. Remote's model picker restricts which configured models a destination offers; it does not resolve reasoning effort or provider speed independently.
 
-## Abort ownership
+## Remote data
 
-Abort stops only the current operation through Pi's RPC `abort`; it never terminates the Pi RPC child. This propagates cancellation into the active local or remote tool while preserving the thread process, model state, and session. A claimed message can be cancelled during `STARTING` before dispatch without cancelling activation. A prompt waiting in retry backoff has no active Pi operation, so abort cancels that durable item directly, clears its retry timer, and returns the existing child to `IDLE` instead of briefly displaying `ABORTING` and resuming the retry loop.
+`server/database.ts` stores presentation data in `supervisor.sqlite3`:
 
-Pi owns steering it has already acknowledged, while the supervisor continues to own uninserted follow-ups. An ordinary abort uses Pi's RPC command and keeps the process alive. Because `session.abort()` waits for Pi to become idle, accepted steering may complete before that response; its real transcript output remains visible and its work becomes complete.
+- `thread_views` contains drawer order, unread markers, naming counters and completion receipt references.
+- Context documents and patches contain the provider-neutral display source.
+- Events contain the bounded presentation and voice projection, not conversation recovery state.
+- Message annotations retain meeting-transcript attachment receipts.
+- Upload, inline-image and request records retain those Remote features' own custody.
+- Notification rows and per-owner cursors deliver durable owner settlement receipts to clients.
 
-Hard steer is deliberately stronger. Pi has no RPC command that can clear or reprioritize an accepted steering queue, so waiting for its ordinary abort would let those messages run first. Hard steer instead suppresses late output, terminates the Pi process group and active tools, cancels every item dispatched into that run, and starts a new Pi process from the same JSONL session. The selected message is the first dispatch to that process. Supervisor-owned follow-ups remain queued behind it. If process-group termination cannot be confirmed, the endpoint restores the selected message as an ordinary follow-up and reports failure instead of claiming it was preempted.
+The supervisor epoch fences replaced Remote instances from publishing presentation writes. It does not own execution. The Orchestrator importer transfers existing thread identities, native paths, parent links and pending/result receipts before removing the former execution tables and rebuilding presentation references. Active work must settle under its existing owner before the incompatible first cutover.
 
-The normal passive runtime termination path is the idle reaper. After fifteen minutes in `IDLE`, it preserves the Pi JSONL session and stops the child and its runtime host. Every runtime launch owns a unique Unix socket. A later launch for the same thread cannot replace that socket, and a departing host cannot unlink another host's socket. Release activation replaces the supervisor immediately while runtime hosts keep active children alive. The old supervisor writes one handoff document, disconnects, and exits with status 75. The replacement publishes health and state projections while it reconnects those hosts in parallel; an operation that needs a runtime waits for adoption to finish. If adoption fails, the handoff's child process group is terminated before its work returns to the queue. Ledger snapshots run in an owned worker with a separate read-only SQLite connection, never on the supervisor event loop. A snapshot younger than six hours is reused across release handoffs. The worker atomically replaces the previous good copy and reports failures; supervisor shutdown stops it. This avoids the September 7 failure where a synchronous 1.1 GB startup snapshot blocked runtime attachments past their deadlines.
+## Thread naming
 
-A handoff waits only for an in-flight ordinary abort operation because its durable cancellation decision belongs to the supervisor that started it. Explicit hard steer, thread retirement, full service shutdown, activation failure, and unexpected child failure remain distinct termination paths. Archiving an ordinary thread sets `sessions.archived_at`, cancels unfinished durable work, and stops the child while preserving events, settings, and Pi JSONL resume state. Archived threads cannot activate or accept new work until unarchived.
+Naming uses Orchestrator's durable tool-free `CompletionClient`, not a Pi process or a hidden thread. Remote saves a stable thread/message-count request ID and immutable input before submission, then reconciles the owner's receipt. Orchestrator owns provider execution and retry policy. A supervisor restart reuses the receipt rather than submitting another inference.
 
-## Revision ordering
+The completion owner must be explicitly permitted for the same Unix person. Without one, the thread keeps its current name and exposes a naming error. Naming currently supports the completion facility's Luna and Terra models. Defaults come from that facility; an explicit effort in `PI_REMOTE_THREAD_NAMING_MODEL`, such as `:low`, is forwarded. Speed is standard. Unsupported models and failed naming results are visible in the drawer's owner errors.
 
-Every externally meaningful lifecycle mutation increments `sessions.revision`. Session snapshots in list, event, prompt, and abort responses carry this revision.
+## Handoff
 
-The shared React client keeps its rendered state and a current-state ref in lockstep. Polling and action callbacks read the ref rather than a render-time closure, and each selected context or agent response is applied only if the selected ID still matches the ID captured when the request began. Selecting a thread clears the previous context and live documents before it requests an immediate reconciliation. The client never copies server-owned state out of a mutation response: a prompt, abort, archive, toggle, or reorder returns, the client requests an immediate reconciliation, and the next synchronization response replaces the affected section whole. The selected thread is looked up in the synchronized list by ID rather than held as a second copy. The one local overlay is a dropped drawer order, shown until the state response that follows the committed reorder arrives or the request fails.
+Orchestrator owns shared runners and session adoption. Release handoff suspends service dispatch and callbacks, detaches the shared runner connections and closes the controller database. Native execution remains with the runner. Remote stops its presentation subscriptions, HTTP server and feature workers, then exits with the supervisor's handoff code.
 
-This keeps thread identity, lifecycle, context capture time, and local actions separate. A response for thread A cannot mutate thread B, and a synchronization request made before a selection change cannot put its context into the new view.
+Session cleanup uses session-scoped runner commands, never a shared process PID. Hundreds of threads do not create hundreds of Node processes.
 
-## New thread picker
+## Notifications
 
-The shared browser and Android picker has one local state machine in [`web/src/thread-start-state.ts`](../web/src/thread-start-state.ts): closed, destinations, models, creating, or failed. Opening captures the current destination and model catalogue for that interaction. Dashboard replacements never close the picker or move the choices under a finger. The next opening uses the latest catalogue; the server still validates each creation request.
+Child-idle notifications are Orchestrator messages with durable execution/work IDs, outcome and final assistant message or explicit absence. They use the same delivery operations as other input. Remote does not extract a child result from its event table or create a second parent relay.
 
-Tapping anywhere except a picker button dismisses it. This includes empty space inside the heading and the gaps between choices. The dismissing tap does not activate the control underneath. There are no Back or Cancel buttons. Escape and closing the drawer also dismiss the picker. Buttons leaving through an animation are disabled immediately, and choice events name their stage so an outgoing destination cannot be mistaken for a model selection.
-
-Creation keeps the picker visible and disables further choices until the request settles. Failure shows an error and Retry reuses the same request and session IDs. A successful request selects its new thread only while that interaction is still open. Dismissal does not undo a request already sent to the server; its thread will appear through synchronization, but a late response cannot reopen the drawer or replace a newer selection.
+Human notifications project each authorized owner's sequenced settlement feed. `server/thread-notifications.ts` commits the notification receipt and that owner's cursor together. Receipt IDs prevent replay from marking a viewed thread unread again. One owner's cursor cannot skip another owner's completions. `GET /v1/notifications` without a cursor establishes the current position; later requests replay up to 100 notifications. Viewing a thread clears its unread marker.
 
 ## Network synchronization
 
-The shared client uses one resumable long poll for the visible environment. Selecting a thread or observed agent aborts that request and starts an immediate reconciliation; it never waits for the previous selection's 25-second idle poll to expire. The Android shell warms SSH-backed environments before the web client uses them, and the client reconciles immediately when its page becomes visible again.
+Remote still uses resumable long polling, with an epoch and wake sequence. Thread state and dashboard data have separate versions. The selected context and live text are compared by content hash on every response. A response carries only changed sections and complete documents or verified byte splices.
 
-`server/protocol.ts` defines the request and response. The server identifies each incarnation with `epoch` and orders wakeups with `seq`. The response has four sections, and whether each is sent depends only on what the client says it already has, never on wake timing:
+Clients commit section versions only after all document updates verify. Selection changes and reconnects cancel the preceding request. A response for another selection cannot replace the current conversation. Mutation responses request reconciliation instead of creating a second client-side copy of thread state.
 
-- `state` (threads, archived threads) is sent when the client's `stateVersion` differs. That version combines every SQLite change with explicit in-memory state signals, so a write cannot be omitted merely because its call site forgot to wake the long poll.
-- `dashboard` (plan meters, governors, host toggles, machine usage, orchestrator agents, thread-start profiles) is sent when the client's `dashboardVersion` differs. A server tick rebuilds the dashboard while clients are connected and bumps that version only when the encoded snapshot changed; a governor or action toggle rebuilds it before responding. Rebuilds are serialized so a toggle's rebuild always observes the toggle.
-- `session` is evaluated on every request that names a thread: the display projection of its stored context and its live text and thinking are each compared by hash and returned as nothing, a splice, or a full document. Voice adds a durable event cursor to the same section.
-- `agent` likewise follows the named orchestrator run.
+Peer listings and inspections are derived caches. They are not another registry or execution owner. Local thread snapshots come directly from the person-owned service.
 
-A long poll remains asleep when another thread emits only live tokens. It compares the selected documents as well as the requested section versions, and removes its timer and waiter when the caller disconnects. The router forwards that cancellation.
+## Context and live output
 
-The client verifies the whole response before committing any section version or agent event cursor. Cancellation during hashing commits nothing. Verification failure keeps the last displayed documents but sends no document hashes on the retry, requesting a full replacement instead of repeating a damaged patch indefinitely. A new selection, foreground event, online event or Reconnect supersedes the pending attempt immediately. Late completions cannot publish state. The attempt deadline includes native discovery, SSH preparation, response reads and document application, even when the underlying promise ignores cancellation. Failed attempts retry after one to five seconds; an explicit reconciliation bypasses that delay.
+Pi's model context is the interactive view. The context mirror publishes durable message boundaries; live deltas take an in-memory path. Final live text remains until the matching context replacement acknowledges it. Compaction must acknowledge its replacement, otherwise Remote clears the stale document rather than displaying removed messages.
 
-A response computed while live tokens are flowing therefore still carries a newly selected thread's context; the earlier design gated context on the same condition as the thread list and starved a selection change for as long as any thread kept streaming. A client reconnects with the wake sequence and its versions and hashes; an epoch change needs no client reset because a fresh epoch sends every versioned section and every document is content-addressed.
+The display projection strips provider continuation metadata and replaces inline image bytes with thread-scoped content-addressed URLs. Canonical context remains unchanged. Tool-result images load when expanded. Context patch journals checkpoint before their configured entry/byte limits, and clients verify every splice before rendering it.
 
-Canonical interactive context remains the exact JSON document captured by Pi. The mirror rebuilds it from Pi's active session branch on startup, successful compaction, and tree navigation instead of waiting for another model request. It also captures finalized assistant and tool-result messages. After the first acknowledged document, ordinary captures use verified byte splices when smaller than a full replacement. Identical captures are skipped unless they carry a finalization acknowledgement. Compaction always replaces the complete document. Live assistant text stays in the runtime projection. Its first delta wakes waiting clients immediately, and later deltas are coalesced to one wake per 16 milliseconds. When an assistant message ends, its final text remains in that projection until the server acknowledges the context document containing the same message. The mirror retains its latest desired document and retries transient request failures, so a lost response cannot discard the only finalized copy or leave a blank handoff. This keeps token streaming out of SQLite and avoids serializing the full model context for each delta. A successful compaction carries an explicit replacement acknowledgement. The supervisor accepts that replacement while Pi reports compaction in progress even when its capture clock is behind the stored document, then assigns it the next capture time. If that acknowledgement is missing or does not match the stored document, the supervisor clears the old context before notifying clients. The client renders that clear as an empty context and deletes its cached copy. Its display projection removes schema-known provider continuation metadata and replaces inline image bytes with thread-scoped content-addressed URLs. Canonical context is unchanged. Images are fetched only when viewed and cached privately by hash. The image endpoint resolves bytes from current context, so a reference removed by compaction can return 404. Display and live patch history shares a 32 MiB and 128-entry ceiling, with at most 12 versions per document. Canonical and display context caches each retain at most four threads. Canonical documents are not retained as client patch bases. Compaction state comes from Pi's lifecycle events and replacement acknowledgements, not synthetic user-message text. Each projection has its own SHA-256 history over UTF-8 bytes. A context update is either a complete document or one byte splice naming its base and target hashes. The client checks the base, applies the splice, verifies the target, and only then parses it. A missing base is an explicit complete resynchronization. The server keeps recent versions for this purpose. Compaction clears the canonical patch chain. Ordinary captures checkpoint transactionally before accumulating 32 patches, 1 MiB of base64 insertions, or a quarter of the current document size. A cold read checks the persisted hash chain, assembles shared byte ranges, then verifies the final hash once. It does not rebuild and hash every image-heavy intermediate document.
+`server/live-projection.ts` and `server/tool-progress.ts` preserve current tool cards until canonical context contains their results. `server/context-journal.ts`, `server/context-display.ts` and `server/sync.ts` own document storage and transport details.
 
-Live text for observed orchestrator agents and GPT-Live delegation follows the same verified splice rule. Event rows still use their durable sequence cursor.
+## New thread picker
 
-Up to 32 verified display documents remain in app-private IndexedDB across process restarts. Each document has a 2 MiB UTF-16 storage budget, so cached document text cannot exceed 64 MiB. Larger documents load from the server without retaining a stale smaller copy. Cache schema 2 discards the earlier image-heavy canonical caches. Reads verify the document hash and JSON before hydration; damaged records are deleted and the normal server synchronization supplies the replacement. Failed opens can be retried, each caller waits at most two seconds, and connections close on version changes so another tab can upgrade the cache. When a thread is selected, the client reads its cached document while requesting an immediate reconciliation and sends the cached hash on the next poll. Cache hydration is accepted only before the selection's first server response, so a delayed read cannot resurrect cleared context. The server returns only a splice if it changed. The transcript renders the latest 60 entries first and reveals earlier entries in 60-entry pages, so opening a long thread does not lay out hundreds of off-screen messages before its first paint. A reverse-column scroll container anchors the latest entry at the bottom without assigning `scrollTop` after renders. Native scroll anchoring holds the visible message still when live content grows below it. Active thread order is durable supervisor state; the client applies a dropped order immediately, restores the previous order if the request fails, and accepts the server's returned order when it commits.
+The shared browser/Android picker in `web/src/thread-start-state.ts` has local closed, destinations, models, creating and failed states. Opening captures the current choices. Dashboard updates do not move them during an interaction. Creation retries reuse the accepted request and thread IDs. Dismissing the picker does not cancel an accepted thread or let a late response replace a newer selection.
 
-## React context rendering
+## Files and attachments
 
-Every context entry has a stable key and a content signature. Reconciliation retains the common prefix, updates a surviving keyed message in place, and creates only the changed suffix. Every message, tool card, queued message, and live model block exposes its source text through a copy action. Tool arguments, results, timing, and status update inside the existing card, so a new context capture does not recreate unchanged Markdown or lose an expanded tool card. Compaction replaces entries whose keys no longer survive.
-
-Live model output is Markdown from its first chunk and updates at most once per display frame. Every partial document is completed before it is parsed: an open fence, code span, or emphasis run gets its closer, and a construct whose meaning is still undecided waits out of sight until the text that settles it arrives. Half a link, a formula KaTeX cannot compile yet, a table without its delimiter row, and a bare block marker are all held back rather than shown as source. A render that throws keeps the previous output, and the rendered nodes are patched instead of replaced, so a growing message never drops back to its source text, loses a selection, or blinks its images and formulas. The finalized context then replaces the live block with the identical rendering. Thread selection has no entrance animation; navigation never hides content behind a decorative transition.
-
-The drawer's plan summary renders only cards with a measured percentage. Environments without an account for a plan's provider do not get empty provider rows. Machine usage likewise omits unavailable hardware, such as the GPU row on a CPU-only VM. The server samples CPU every second independently of the 25-second client poll, so an idle connection does not turn the reading back into an unavailable value.
-
-Thread naming is reconciled from the durable conversational message count. A numeric thread remains due after a malformed model response, so the assistant's first reply retries it instead of leaving the number until message 20. Named threads become due once per completed 20-message interval. A supervisor or runtime restart checks the same counters rather than relying on an in-memory naming event.
-
-Slash-command discovery is lazy. Selecting or switching to an idle thread reads its context without starting its Pi runtime; typing `/` requests runtime-owned commands when they are actually needed.
-
-Attachments upload in hash-checked chunks. Initialization by request ID returns the committed byte offset, so reconnecting resumes rather than creates another file. Completion checks the whole-file hash before the file enters ingestion. Downloads carry validators and byte-range support.
-
-Editing a finalized user message is an idle-only session transition. The server reads Pi's append-only entries, resolves the displayed message timestamp on the active branch, and uses Pi's supported `fork` command to create history immediately before it. The thread adopts the forked session file, its recovery and voice event projection is rebuilt from that branch, and the context mirror replaces the visible transcript. The client clears its old cached projection and puts Pi's returned original text in the composer. Sending remains a separate user action.
-
-## File browsing
-
-The Files drawer tab belongs to the selected environment, not to a thread. Its lazy Headless Tree root is `/`; opening a folder requests only that directory. The server includes dotfiles and sorts folders before regular and special files. The client preserves loaded branches and expansion state while switching tabs. TanStack Virtual renders only the visible rows, so opening a directory with tens of thousands of entries does not create tens of thousands of DOM elements.
-
-Selecting a folder expands or collapses it. Selecting a regular file uses the host-file endpoint to download it. Special files remain visible but cannot be downloaded. A failed directory read appears as an error child beneath that folder, and the toolbar can retry the selected folder.
-
-## Stored history
-
-The interactive context and its display caches are not the transcript store. Pi's JSONL retains the entries before compaction and entries on other branches. The globally loaded context-mirror package adds generated JSON metadata with the current session file, even without a Remote publisher. The changing branch leaf is omitted so conversation growth does not invalidate the system-prompt prefix; `--leaf ID` remains an explicit reader selection. Reader syntax and option descriptions come from `read-thread --contract`, the same source as its CLI help. The metadata uses the exported `pi-stored-jsonl-history` marker. [`read-thread`](../../../tools/read-condensed-session/README.md) reads `self`, an explicit JSONL file, or another Remote thread through the same local implementation. Search scans complete records and reports bounded excerpts with source line numbers. `--leaf` selects a parent chain and `--all --raw` exposes every complete stored record. This path has no model requests or recall cache.
-
-## Observed orchestrator agents
-
-Autonomous orchestrator agents are outside this state machine. They have no supervisor epoch, no RPC child, no runtime phase, and no durable work queue here, because Pi Remote does not own them: the orchestrator's SQLite ledger owns their lifecycle and its agent hosts own their sessions.
-
-The observation surface is therefore a pure projection with three rules:
-
-1. Pi Remote never writes agent lifecycle state. Workers publish live state through the orchestrator daemon, and settled history comes from the Pi session JSONL. Worker activity uses the same uppercase public vocabulary as interactive threads. The observation boundary normalizes activity from workers that survived a release handoff, and clients render an unknown activity literally instead of misreporting it as idle.
-2. An observed agent's transcript is applied only to the selection generation that requested it, exactly as for threads, and a per-run byte cursor makes replay incremental. Opening an agent leaves thread selection untouched, and opening a thread ends observation.
-3. The list projects active orchestrator runs. Settlement is not a client state transition. A settled run leaves the list, and one already open remains readable by ID.
-
-## Core invariants
-
-1. Exactly one supervisor epoch may publish durable state; callbacks from replaced incarnations are read-only and terminate locally.
-2. One server runtime at most per thread ID. Each RPC wrapper and all descendants run in a dedicated process group; stop waits for the whole group and escalates from `SIGTERM` to `SIGKILL`.
-3. One serialized durable worker at most per thread ID.
-4. A runtime event is bound to the thread ID captured when that child was spawned.
-5. Only an inactive Pi state confirmed from `RUNNING` may settle and complete dispatched work.
-6. `ABORTING` preserves real transcript output while owning settlement; only `STOPPING` suppresses output.
-7. A stale reconciliation response cannot change phase.
-8. An ordinary abort never retries its cancelled active item. A hard steer cancels every item owned by the retired Pi process and dispatches the selected supervisor-owned message first in its replacement.
-9. A completed compaction can expose only the replacement context acknowledged during that compaction. A missing or mismatched replacement clears the prior document.
-10. Client context snapshots are applied only to the selection generation that requested them; their capture times never move backward.
-11. Client authoritative lifecycle snapshots never move backward in revision.
-12. Final live assistant text remains visible until the matching message is acknowledged in the durable context or newer model activity supersedes its live projection.
+File browsing remains an environment-level lazy tree. Uploads resume from committed offsets and verify the completed hash. Draft attachments belong to their selected thread. Downloads support validators and byte ranges. Inline-image generation remains a Remote-owned feature worker with its own durable receipts; it does not keep the thread executing while an image provider works.

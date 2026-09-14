@@ -7,8 +7,7 @@ const preview = (value: unknown, limit = 2400): string => {
   return text.length > limit ? `${text.slice(0, limit)}\n… continued in thread` : text;
 };
 
-export function meetingActivity(db: Database, meetingId: string, rootId: string, live: (row: any) => LiveActivity): MeetThreadState[] {
-  const rows = db.query("SELECT * FROM sessions WHERE meeting_id=? ORDER BY CASE WHEN id=? THEN 0 ELSE 1 END,created_at,id").all(meetingId, rootId) as any[];
+export function meetingActivity(db: Database, rows: Array<{ id: string; name: string; last_error?: string | null }>, rootId: string, live: (row: any) => LiveActivity): MeetThreadState[] {
   return rows.map((row) => {
     const activity = live(row);
     const records = db.query(`SELECT seq,type,payload FROM events WHERE session_id=?
