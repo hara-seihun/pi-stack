@@ -2,6 +2,10 @@
 
 Pi Orchestrator runs unattended agent cores against pooled subscription accounts. One daemon owns policy and SQLite state. Each admitted run gets a separate transient systemd unit and keeps the release that launched it until the run ends. Ordinary workers use the daemon owner's user manager. Explicit repair lanes use uid0 system units.
 
+## Ordinary users
+
+[Ordinary Unix users](docs/ordinary-users.md) use separate local state and a model-only broker. The host binds each broker listener to a Unix UID through packet filtering and explicitly grants account aliases. Ordinary users never receive owner OAuth credentials, owner ledger access or fleet API access. The same native providers supply chat, compaction and image generation.
+
 ## Runtime model
 
 The daemon reconciles provider meters, weighted lanes, optional queue readiness, and explicit requests for direct runs.
@@ -59,6 +63,7 @@ PI_ORCHESTRATOR_AUTH
 PI_ORCHESTRATOR_HOST
 PI_ORCHESTRATOR_LISTEN_HOST
 PI_ORCHESTRATOR_PORT
+PI_MODEL_BROKER_URL
 ```
 
 The JSON config may set model `profiles`, `backgroundSpendFraction`, machine and account concurrency, meter age, reconciliation periods, stall limits, `taskManifest`, `authPath`, and `agentDir`. The strict `astra`, `sol`, `terra`, `luna`, and `opus` profiles are always available alongside configured profiles. Each selects exactly one catalog model, even if a local profile uses the same name.
@@ -154,7 +159,7 @@ Import reads credentials from a file so tokens do not enter process arguments. `
 
 `account transfer ID --to SSH_HOST` moves exclusive Codex ownership to another host, preserving account identity, quota observations and attribution. It disables source admission, reports active users that must drain, then reads current quota before handing off the credential. It leaves source capacity for ongoing work. [Account transfer](docs/account-transfer.md) owns preconditions, the SSH receiver, durable custody and restart recovery.
 
-The daemon serves its public API on `127.0.0.1:2460` by default. Config `listenHost` or `PI_ORCHESTRATOR_LISTEN_HOST` changes only the bind address; worker and CLI connections retain `PI_ORCHESTRATOR_HOST`, which defaults to loopback. A private-network deployment can bind `0.0.0.0` behind its existing VPC ingress firewall, without a credentials proxy. The daemon API is a trusted-network API, not a public endpoint. Pi Remote consumes the package's observation API and does not query private tables.
+The daemon serves its public API on `127.0.0.1:2460` by default. Config `listenHost` or `PI_ORCHESTRATOR_LISTEN_HOST` changes only the bind address; worker and CLI connections retain `PI_ORCHESTRATOR_HOST`, which defaults to loopback. A private-network deployment can bind `0.0.0.0` behind its existing VPC ingress firewall, without a credentials proxy. The daemon API is an administrator API, not a public or ordinary-user endpoint. Loopback does not isolate Unix users; hosts with ordinary users must restrict it by UID as described in the [ordinary-user contract](docs/ordinary-users.md). Pi Remote consumes the package's observation API and does not query private tables.
 
 ## Tool-free completion API
 
