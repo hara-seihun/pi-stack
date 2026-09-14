@@ -685,6 +685,9 @@ describe("web and supervisor integration", () => {
       (result) => result.value.notifications?.some((event: any) => event.sessionId === id));
     expect(feed.value.environmentId).toBe((await api("GET", "/v1/health")).value.environmentId);
     expect(feed.value.notifications.filter((event: any) => event.sessionId === id)).toHaveLength(1);
+    expect((await api("GET", `/v1/sessions/${id}`)).value.session.idleUnread).toBe(true);
+    const viewed = await api("POST", "/v1/sync", { seq: 0, stateVersion: 0, waitMs: 0, session: { id, viewing: true } });
+    expect(viewed.value.state.sessions.find((session: any) => session.id === id).idleUnread).toBe(false);
     expect((await api("GET", `/v1/notifications?after=${feed.value.cursor}`)).value.notifications.filter((event: any) => event.sessionId === id)).toEqual([]);
     expect((await api("GET", "/v1/notifications?after=-1")).status).toBe(400);
   });

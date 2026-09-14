@@ -175,7 +175,7 @@ function DrawerTabIcon({ tab }: { tab: DrawerTab }) {
 function ThreadRow({ session, selected, archived, onSelect, onArchive, onUnarchive }: { session: Session; selected: boolean; archived?: boolean; onSelect(id: string): void; onArchive(id: string): void; onUnarchive(id: string): void }) {
   const provider = threadProvider(session);
   const alt = provider === "work" ? "Work" : provider === "converge" ? "Cloud" : provider === "personal" ? "Personal" : provider === "anthropic" ? "Anthropic" : "OpenAI";
-  const content = <><span className="thread-name">{session.name || "Agent"}</span><span className="thread-meta"><img className="thread-provider" src={`/${provider}.svg`} alt={alt} title={`${alt} thread`} /><span className="thread-state" style={{ color: activityColor(archived ? "IDLE" : session.activity) }}>{archived ? "ARCHIVED" : activityLabel(session.activity, session.activeTool ?? "")}</span></span></>;
+  const content = <><span className="thread-name">{session.name || "Agent"}</span><span className="thread-meta"><img className="thread-provider" src={`/${provider}.svg`} alt={alt} title={`${alt} thread`} /><span className="thread-state" style={{ color: activityColor(archived ? "IDLE" : session.activity, !archived && session.idleUnread) }}>{archived ? "ARCHIVED" : activityLabel(session.activity, session.activeTool ?? "")}</span></span></>;
   return <div className={`thread-row${selected ? " selected" : ""}${archived ? " archived" : " can-archive"}`}>
     {archived ? <div className="thread-open">{content}</div> : <button type="button" className="thread-open" onClick={() => onSelect(session.id)}>{content}</button>}
     {archived ? <button type="button" className="unarchive-thread" onClick={() => onUnarchive(session.id)}>Unarchive</button> : <button type="button" className="archive-thread" aria-label={`Archive thread ${session.name}`} title={`Archive ${session.name}`} onClick={() => onArchive(session.id)}>×</button>}
@@ -430,7 +430,7 @@ export default function App() {
       const meta = syncMeta.current;
       const { selectedId, agentRunId } = current;
       const request: SyncRequest = { epoch: meta.epoch, seq: meta.seq, stateVersion: meta.stateVersion, dashboardVersion: meta.dashboardVersion, waitMs };
-      if (selectedId && !agentRunId) request.session = { id: selectedId, contextHash: current.context?.hash, imagesVersion: current.images?.version, liveTextHash: current.liveText?.hash, liveThinkingHash: current.liveThinking?.hash };
+      if (selectedId && !agentRunId) request.session = { id: selectedId, contextHash: current.context?.hash, imagesVersion: current.images?.version, liveTextHash: current.liveText?.hash, liveThinkingHash: current.liveThinking?.hash, viewing: document.visibilityState === "visible" };
       if (agentRunId) request.agent = { id: agentRunId, after: meta.agentSeq, liveTextHash: current.agentText?.hash, liveThinkingHash: current.agentThinking?.hash };
       if (fullResync) {
         request.stateVersion = 0;
