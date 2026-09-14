@@ -17,8 +17,8 @@ export interface ImportProvenanceMetadata {
   importProvenance: { stateDirs: string[] };
 }
 export interface ImportProvenanceResult { removedFiles: string[]; metadata: Record<string, ImportProvenanceMetadata> }
-type Source = { path: string; owner: string; text: string; hash: string; format: string; records: Row[] };
-type Native = { path: string; text: string; records: Row[]; additions: Row[] };
+type Source = { path: string; owner: string; hash: string; format: string; records: Row[] };
+type Native = { path: string; hash: string; records: Row[]; additions: Row[] };
 type Match = { value: Row; path: string; entryId: string };
 const names = new Set(["pi-tree.json", "agents.json", "conversation.jsonl", "activity.jsonl", "transfer.json", "codex-session.json"]);
 const signature = /^(thinkingSignature|textSignature|encrypted_content|encryptedContent|thoughtSignature)$/;
@@ -31,6 +31,11 @@ function content(value: any): any {
     return value.map(content);
   }
   return value && typeof value === "object" ? Object.fromEntries(Object.entries(value).filter(([key]) => !signature.test(key)).map(([key, item]) => [key, content(item)])) : value;
+}
+function fingerprint(value: any): any {
+  if (typeof value === "string") return hash(value);
+  if (Array.isArray(value)) return value.map(fingerprint);
+  return value && typeof value === "object" ? Object.fromEntries(Object.entries(value).map(([key, item]) => [key, fingerprint(key === "content" ? content(item) : item)])) : value;
 }
 function messageKey(message: Row) { return hash(canonical({ role: message.role, content: content(message.content), toolCallId: message.toolCallId, toolName: message.toolName })); }
 function subset(source: any, target: any): boolean {
@@ -77,9 +82,9 @@ export function adoptImportProvenance(options: ImportProvenanceOptions): Result<
     function addMessage(value: Row, path: string, entryId: string) {
       if (typeof value.role !== "string") return;
       const key = messageKey(value), list = candidates.get(key) ?? [];
-      list.push({ value, path, entryId }); candidates.set(key, list);
+      list.push({ value: fingerprint(value), path, entryId }); candidates.set(key, list);
     }
-    function matched(message: Row): Match | undefined { return candidates.get(messageKey(message))?.find(candidate => subset(message, candidate.value)); }
+    function matched(message: Row): Match | undefined { return candidates.get(messageKey(message))?.find(candidate => subset(fingerprint(message), candidate.value)); }
     function references(value: any): void {
       if (!value || typeof value !== "object") return;
       for (const [key, item] of Object.entries(value)) {
@@ -98,7 +103,7 @@ export function adoptImportProvenance(options: ImportProvenanceOptions): Result<
       try { header = JSON.parse(first); } catch { if (required) throw new Error(`Invalid native history header: ${path}`); return; }
       if (!nativeHeader([header])) { if (required) throw new Error(`Not native Pi history: ${path}`); return; }
       const records = jsonl(text, real);
-      const native: Native = { path: real, text, records, additions: [] }; natives.set(real, native);
+      const native: Native = { path: real, hash: hash(text), records: [header, ...records.length > 1 ? [records.at(-1)!] : []], additions: [] }; natives.set(real, native);
       for (const entry of records) {
         if (entry.type === "message" && entry.message) addMessage(entry.message, real, entry.id);
         if (entry.type === "custom_message") {
@@ -143,7 +148,7 @@ export function adoptImportProvenance(options: ImportProvenanceOptions): Result<
         let sourceOwner = owner;
         const header = records[0];
         if (format === "conversation.jsonl" && typeof header?.id === "string" && threads.has(header.id)) sourceOwner = header.id;
-        sources.push({ path, owner: sourceOwner, text, hash: hash(text), format, records });
+        sources.push({ path, owner: sourceOwner, hash: hash(text), format, records });
         references(records);
       }
     }
@@ -160,8 +165,8 @@ export function adoptImportProvenance(options: ImportProvenanceOptions): Result<
     for (const path of options.nativeFiles ?? []) addNative(path, true);
     for (const path of nativePaths) addNative(path, false);
     // A switched SDK session's siblings can retain earlier native branches.
-    for (const native of [...natives.values()]) for (const item of readdirSync(dirname(native.path), { withFileTypes: true })) {
-      if (item.isFile() && item.name.endsWith(".jsonl") && !names.has(item.name)) addNative(join(dirname(native.path), item.name), false);
+    for (const directory of new Set([...natives.values()].map(native => dirname(native.path)))) for (const item of readdirSync(directory, { withFileTypes: true })) {
+      if (item.isFile() && item.name.endsWith(".jsonl") && !names.has(item.name)) addNative(join(directory, item.name), false);
     }
     for (const source of sources) if (source.format === "pi-tree.json") {
       const tree = source.records[0];
@@ -188,7 +193,7 @@ export function adoptImportProvenance(options: ImportProvenanceOptions): Result<
         if (match) { matchedMessages++; matchedFiles.add(match.path); return; }
         const sameContent = candidates.get(messageKey(message))?.[0];
         if (sameContent) {
-          const extra = Object.fromEntries(Object.entries(message).filter(([key, value]) => key !== "content" && !subset(value, sameContent.value[key])));
+          const extra = Object.fromEntries(Object.entries(message).filter(([key, value]) => key !== "content" && !subset(fingerprint(value), sameContent.value[key])));
           facts.push({ kind: "message-facts", native: { path: sameContent.path, entryId: sameContent.entryId }, value: extra, ...(sourceEntry ? { sourceEntry } : {}) });
           matchedFiles.add(sameContent.path); addMessage(message, target.path, entryId); return;
         }
@@ -235,8 +240,9 @@ export function adoptImportProvenance(options: ImportProvenanceOptions): Result<
           matchedMessages, matchedNativeFiles: [...matchedFiles] } });
     }
     for (const native of natives.values()) if (native.additions.length) {
-      if (readFileSync(native.path, "utf8") !== native.text) throw new Error(`Native history changed during provenance transfer: ${native.path}`);
-      custodyReplaceFileSync(native.path, native.text + (native.text.endsWith("\n") ? "" : "\n") + native.additions.map(entry => JSON.stringify(entry)).join("\n") + "\n");
+      const text = readFileSync(native.path, "utf8");
+      if (hash(text) !== native.hash) throw new Error(`Native history changed during provenance transfer: ${native.path}`);
+      custodyReplaceFileSync(native.path, text + (text.endsWith("\n") ? "" : "\n") + native.additions.map(entry => JSON.stringify(entry)).join("\n") + "\n");
     }
     for (const source of sources) if (hash(readFileSync(source.path, "utf8")) !== source.hash) throw new Error(`Source changed during provenance transfer: ${source.path}`);
     const removedFiles: string[] = [];
