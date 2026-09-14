@@ -1,14 +1,12 @@
+import { custodyMkdirSync as mkdirSync, custodyOpenSync as openSync, custodyWriteFileSync as writeFileSync } from "../shared-custody.js";
 import {
   chmodSync,
   closeSync,
   fsyncSync,
-  openSync,
   existsSync,
-  mkdirSync,
   readFileSync,
   realpathSync,
   renameSync,
-  writeFileSync,
 } from "node:fs";
 import { dirname, join } from "node:path";
 import type { ModelAuth, OAuthAuth, OAuthCredential, Provider } from "@earendil-works/pi-ai";

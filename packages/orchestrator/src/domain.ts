@@ -4,6 +4,7 @@ import type { CoreId } from "./cores/contracts.js";
 
 export type BudgetClass = "background" | "force";
 export type RunSource = "direct" | "lane";
+export type RunExecution = "user" | "root-repair";
 export const ISOLATED_TOOLS = ["read", "write", "edit", "bash", "grep", "find", "ls", "agent_browser"] as const;
 export type RunContext = { readonly tools: readonly string[]; readonly extensions?: readonly string[] };
 export type RunState = "queued" | "starting" | "running" | "waiting" | "done" | "failed" | "aborted";
@@ -58,6 +59,7 @@ export interface LaneSpec {
   readonly priority?: number;
   readonly doctrineUrl?: string;
   readonly openingProbe?: string;
+  readonly repair?: { readonly readinessCommand: string };
 }
 
 export interface LaneReadiness {
@@ -80,6 +82,7 @@ export interface Run {
   readonly cwd: string;
   readonly profile: string;
   readonly budget: BudgetClass;
+  readonly execution?: RunExecution;
   readonly core?: CoreId;
   readonly coreStateDir?: string;
   readonly nativeSessionId?: string;
@@ -124,14 +127,9 @@ export interface UsageEntry {
 
 export type UsageTotal = Pick<UsageEntry, "accountId" | "model" | "component" | "tokens">;
 
-export type ProfileCandidate = Omit<ModelCandidate, "thinking"> & (
-  | { readonly thinking?: string; readonly thinkingPair?: never }
-  | { readonly thinking?: never; readonly thinkingPair: readonly [string, string] }
-);
-
 export interface OrchestratorConfig {
   readonly listenHost?: string;
-  readonly profiles: Readonly<Record<string, readonly ProfileCandidate[]>>;
+  readonly profiles: Readonly<Record<string, readonly ModelCandidate[]>>;
   readonly backgroundSpendFraction: number;
   readonly maxConcurrentSessions: number;
   readonly defaultAccountConcurrency: number;

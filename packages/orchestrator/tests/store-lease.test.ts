@@ -9,6 +9,7 @@ it("resumes an exhausted 429 only on explicit request, retaining custody and acc
     store.upsertAccount({id:"a",provider:"anthropic"});
     const [id]=store.createRuns({count:1,source:"direct",prompt:"research",cwd:"/tmp",profile:"fable",budget:"force"});
     store.assignRun(id!,{accountId:"a",provider:"anthropic",model:"claude-fable-5-1",thinking:"max",unit:"worker",releasePath:"/previous"});
+    store.db.prepare("UPDATE run SET thinking='max' WHERE id=?").run(id!);
     const error="Error: exceeded retry limit, last status: 429 Too Many Requests";
     store.updateRun(id!,{nativeSessionId:"native",state:"failed",failureKind:"account",result:error});
     store.setCooldown("a",999999);
@@ -34,6 +35,7 @@ it("recovers host interruptions with custody while keeping actual operator abort
     store.upsertAccount({id:"a",provider:"anthropic"});
     const [id]=store.createRuns({count:1,source:"direct",prompt:"research",cwd:"/tmp",profile:"fable",budget:"force"});
     store.assignRun(id!,{accountId:"a",provider:"anthropic",model:"claude-fable-5-1",thinking:"max",unit:"worker",releasePath:"/release/first"});
+    store.db.prepare("UPDATE run SET thinking='max' WHERE id=?").run(id!);
     store.updateRun(id!,{nativeSessionId:"native",state:"aborted",failureKind:"operator",result:"aborted"});
     expect(store.recoverInterruptedRun(id!,"/release/next",1234)).toBe(true);
     expect(store.run(id!)).toMatchObject({state:"starting",nativeSessionId:"native",accountId:"a",thinking:"max",releasePath:"/release/next"});

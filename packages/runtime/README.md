@@ -8,7 +8,7 @@ Reusable extensions for [Pi](https://pi.dev). The [stack manifest](../../package
 - [Browser runtime](extensions/browser/README.md) loads the native browser tool with its executable from the same immutable dependency tree.
 - [Codex compaction](extensions/codex-compaction/README.md) stores OpenAI's server-side checkpoints in Pi sessions while keeping Pi's tools and account routing. Stored JSONL remains readable through the [shared session reader](../../tools/read-condensed-session/README.md).
 
-PiStack's [agent-core boundary](../../docs/agent-cores.md) separates the engine from Remote and fleet hosting. The Pi adapter retains these native extensions; the Codex adapter owns its app-server protocol and native engine behavior.
+PiStack's [agent-core boundary](../../docs/agent-cores.md) separates the engine from Remote and fleet hosting. Pi is the engine for both hosts and retains these native extensions. Codex is a model provider, not a separate session engine.
 
 The stack also supplies native [Image 2.5 generation](../orchestrator/docs/image-generation.md) through the Orchestrator routing extension, which owns its OpenAI account selection and leases.
 
@@ -41,6 +41,24 @@ That version's QA text predicate misses phrases split across React text nodes, i
 ## Session crash durability
 
 Pi 0.85 closes JSONL files after writes without syncing them. A hard host reset can therefore persist a new gocryptfs file length without the complete authenticated final block, making every later read that reaches that block fail with `EIO`. [`patch-session-durability.mjs`](patch-session-durability.mjs) repairs both the SDK and bundled CLI copies. Appends are synced before returning, initial and fork writes are completed and synced as one file, and rewrites use a synced temporary file followed by an atomic rename and parent-directory sync. [`session-durability.test.mjs`](session-durability.test.mjs) checks both deployed source forms and their syntax.
+
+## Root worker filesystem custody
+
+Root-repair workers keep UID 0, the daemon owner's HOME and normal Pi configuration. They inherit `PI_ORCHESTRATOR_OWNER_UID` and `PI_ORCHESTRATOR_OWNER_GID` from their recorded worker environment. [`shared-custody.ts`](../orchestrator/src/shared-custody.ts) transfers file and directory ownership at the writers, without changing process credentials or adding a chown timer. Atomic replacements transfer ownership before rename, so mode `0600` still permits daemon-owner access. The same helper owns orchestrator state, journal, OAuth credential and lock writes.
+
+[`patch-shared-custody.mjs`](patch-shared-custody.mjs) embeds that helper into both Pi runtime copies. It patches SessionManager, settings, native auth and the model cache that uses native auth storage. Settings replacements are atomic in both the SDK and bundled CLI. Native auth and settings supply proper-lockfile with an ownership-aware filesystem implementation, transferring lock directories before acquisition returns. Pi tools retain root privileges and the shared environment. SQLite's Unix VFS transfers its WAL and shared-memory files to the database owner; the root fixture checks this through a root writer and an ordinary-user reopen.
+
+Deploy with the existing [`deploy/runtime`](../../deploy/runtime) path before `deploy/orchestrator`. Its immutable dependency hash includes the helper and patch, and it applies session durability before shared custody. Rebuilding only orchestrator is insufficient. For a focused root proof against a development dependency tree:
+
+```sh
+node packages/runtime/patch-session-durability.mjs node_modules
+node packages/runtime/patch-shared-custody.mjs node_modules
+node --test packages/runtime/shared-custody.test.mjs packages/runtime/session-durability.test.mjs
+cd packages/orchestrator
+PI_TEST_ROOT_CUSTODY=1 npx vitest run tests/worker-custody.test.ts --maxWorkers=1
+```
+
+The root fixture uses passwordless sudo and a temporary tree, not real credentials. Without `PI_TEST_ROOT_CUSTODY=1`, ordinary test runs still check execution and custody validation but skip privileged subprocesses.
 
 ## Configuration
 

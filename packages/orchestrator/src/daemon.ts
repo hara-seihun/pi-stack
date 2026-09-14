@@ -36,6 +36,7 @@ export class Daemon {
   private snapshotCommand?:string;
   private readinessAt=0;
   private readiness?:LaneReadiness;
+  private repairReadiness=new Map<string,{at:number;revision?:string;ready:boolean}>();
   private reconciling=false;
   private stopped=false;
   private releasePath:string;
@@ -100,12 +101,13 @@ export class Daemon {
     const budget=manifest.budget===undefined?"background":manifest.budget;
     if(budget!=="background"&&budget!=="force")throw new Error("lane manifest budget must be background or force");
     if(manifest.snapshotCommand!==undefined&&(typeof manifest.snapshotCommand!=="string"||!manifest.snapshotCommand.trim()))throw new Error("snapshotCommand must be a non-empty command");
-    if(budget==="force"&&!manifest.snapshotCommand)throw new Error("force lane budget requires a snapshotCommand that reports unfinished work");
+    if(budget==="force"&&!manifest.snapshotCommand&&manifest.lanes.some(lane=>!lane.repair))throw new Error("force lane budget requires a snapshotCommand that reports unfinished work");
     const lanes=manifest.lanes.map((lane)=>{if("prompt" in lane)return lane;const {promptFile,...spec}=lane;return{...spec,prompt:readFileSync(resolve(dirname(path),promptFile),"utf8")};});
     this.store.reconcileLanes(lanes);
     this.laneBudget=budget;
     this.snapshotCommand=manifest.snapshotCommand;
-    this.readinessAt=0;this.readiness=undefined;
+    if(!this.snapshotCommand)this.store.setControl("readiness_error","");
+    this.readinessAt=0;this.readiness=undefined;this.repairReadiness.clear();
     this.manifestMtime=mtime;
   }
 
@@ -133,7 +135,8 @@ export class Daemon {
           console.error(`meter ${account.id}: ${error||"recovered"}`);
         }
       }
-      await this.refreshReadiness();
+      await Promise.all([this.refreshReadiness(),this.refreshRepairReadiness()]);
+      this.releaseRepairOwner();
       for(const run of prioritizeReservedCompletions(this.store,this.store.admissionQueue())){
         if(run.source==="lane"){this.store.trimQueuedLane(run.sourceId!,0);continue;}
         await this.launch(run);
@@ -161,13 +164,40 @@ export class Daemon {
       const snapshot=JSON.parse(await exec(this.snapshotCommand)) as LaneReadiness;
       if(typeof snapshot.revision!=="string"||!snapshot.lanes||typeof snapshot.lanes!=="object"||Array.isArray(snapshot.lanes))throw new Error("invalid lane readiness snapshot");
       for(const [id,value] of Object.entries(snapshot.lanes))if(!value||typeof value.ready!=="boolean"||Object.keys(value).some((key)=>key!=="ready"))throw new Error(`lane ${id} requires ready: boolean, not a worker count`);
-      for(const lane of this.store.lanes())if(!Object.hasOwn(snapshot.lanes,lane.id))throw new Error(`readiness snapshot omitted lane ${lane.id}`);
+      for(const lane of this.store.lanes().filter(lane=>!lane.repair))if(!Object.hasOwn(snapshot.lanes,lane.id))throw new Error(`readiness snapshot omitted lane ${lane.id}`);
       this.readiness=snapshot;this.store.setControl("readiness_error","");
     }catch(error){this.readiness=undefined;this.store.setControl("readiness_error",String(error));}
   }
 
+  private async refreshRepairReadiness():Promise<void>{
+    await Promise.all(this.store.lanes().filter(lane=>lane.repair).map(async lane=>{
+      const previous=this.repairReadiness.get(lane.id);
+      if(previous&&Date.now()-previous.at<30_000)return;
+      const at=Date.now();
+      try{
+        const probe=JSON.parse(await exec(lane.repair!.readinessCommand)) as {revision:string;ready:boolean};
+        if(!probe||typeof probe.revision!=="string"||typeof probe.ready!=="boolean"||Object.keys(probe).some(key=>key!=="revision"&&key!=="ready"))throw new Error("repair readiness requires {revision:string,ready:boolean}");
+        this.repairReadiness.set(lane.id,{at,...probe});this.store.setControl(`repair-readiness-error:${lane.id}`,"");
+      }catch(error){this.repairReadiness.set(lane.id,{at,ready:false});this.store.setControl(`repair-readiness-error:${lane.id}`,String(error));}
+    }));
+  }
+
+  private releaseRepairOwner():void{
+    const id=this.store.control("repair-owner");if(!id)return;
+    const run=this.store.run(id);
+    if(!run)throw new Error(`repair owner ${id} has no run`);
+    if(!["done","failed","aborted"].includes(run.state))return;
+    this.retirePrecedingUnit(run);
+    if(run.workerUnit&&this.unitIsActive(run.workerUnit))return;
+    this.store.setControl("repair-owner","");
+  }
+
   private laneReady(id:string):boolean{
-    return !this.snapshotCommand||(this.readiness?.lanes[id]?.ready===true&&Number(this.store.control(`readiness-admitted:${id}`)??0)<this.readinessAt);
+    if(this.store.lane(id)?.repair){
+      const probe=this.repairReadiness.get(id);
+      return !this.store.control("repair-owner")&&probe?.ready===true&&Number(this.store.control(`readiness-admitted:${id}`)??0)<probe.at;
+    }
+    return this.store.control("ordinary-launches")!=="paused"&&(!this.snapshotCommand||(this.readiness?.lanes[id]?.ready===true&&Number(this.store.control(`readiness-admitted:${id}`)??0)<this.readinessAt));
   }
 
   private laneEnabled(id:string):boolean{return !!this.store.lane(id)&&this.store.control(`complete:${id}`)===undefined;}
@@ -177,21 +207,22 @@ export class Daemon {
   }
 
   private async fillCapacity():Promise<void>{
+    if(this.store.control("launches")==="paused")return;
     const failed=new Set<string>();
     for(let slot=0;slot<this.config.maxConcurrentSessions;slot++){
       const lanes=this.store.lanes().filter((lane)=>this.laneEnabled(lane.id)&&this.laneReady(lane.id));
-      lanes.sort((a,b)=>this.share(a)-this.share(b)||a.id.localeCompare(b.id));
+      lanes.sort((a,b)=>Number(!!b.repair)-Number(!!a.repair)||this.share(a)-this.share(b)||a.id.localeCompare(b.id));
       let admitted=false;
       for(const lane of lanes){
         const key=`lane:${lane.id}`;
         if(failed.has(key))continue;
-        const choice=assign(this.store,lane.profile,this.laneBudget,this.config);
-        if(!choice.assignment){this.store.setControl(`refusal:${key}`,choice.refusals.map((r)=>`${r.accountId}: ${r.reason}`).join("; "));continue;}
+        const choice=assign(this.store,lane.profile,lane.repair?"force":this.laneBudget,this.config,Date.now(),undefined,undefined,lane.repair?"root-repair":"user");
+        if(!choice.assignment){this.store.setControl(`refusal:${key}`,choice.refusals.map(r=>`${r.accountId}: ${r.reason}`).join("; "));continue;}
         try{
           const prompt=await this.lanePrompt(lane);
-          const [id]=this.store.createRuns({count:1,source:"lane",sourceId:lane.id,prompt,cwd:lane.cwd,profile:lane.profile,budget:this.laneBudget});
+          const [id]=this.store.createRuns({count:1,source:"lane",sourceId:lane.id,prompt,cwd:lane.cwd,profile:lane.profile,budget:lane.repair?"force":this.laneBudget,execution:lane.repair?"root-repair":"user"});
           if(!await this.launch(this.store.run(id!)!)){failed.add(key);this.store.trimQueuedLane(lane.id,0);continue;}
-          if(this.snapshotCommand)this.store.setControl(`readiness-admitted:${lane.id}`,String(this.readinessAt));
+          if(lane.repair||this.snapshotCommand)this.store.setControl(`readiness-admitted:${lane.id}`,String(lane.repair?this.repairReadiness.get(lane.id)!.at:this.readinessAt));
           this.store.setControl(`refusal:${key}`,"");
         }catch(error){failed.add(key);this.store.setControl(`refusal:${key}`,String(error));continue;}
         admitted=true;break;
@@ -225,57 +256,103 @@ export class Daemon {
     const choice=completion?assignCompletion(this.store,run.id,run.profile,config):assign(this.store,run.profile,run.budget,config,Date.now(),undefined,run.id);
     if(!choice.assignment){this.store.setControl(`refusal:${run.id}`,choice.refusals.map((r)=>`${r.accountId}: ${r.reason}`).join("; "));return false;}
     const unit=completion?`completion:${run.id}`:`pi-orchestrator-run-${run.id.replaceAll("-","")}`;
-    if(!this.store.assignRun(run.id,{...choice.assignment,unit,releasePath:this.releasePath}))return false;
+    if(!this.store.assignRun(run.id,{...choice.assignment,unit,releasePath:this.releasePath,...(completion?{}:{environment:this.workerEnvironment(run)})}))return false;
     this.store.setControl(`refusal:${run.id}`,"");
     if(completion){this.completionPool.start(this.store.run(run.id)!);return true;}
     commitMeterAdmission(this.store,choice.assignment);
     try{this.startUnit(unit,run.id,this.releasePath);return true;}catch(error){this.store.updateRun(run.id,{state:"failed",failureKind:"infrastructure",result:`worker launch failed: ${String(error)}`});return false;}
   }
 
-  private startUnit(unit:string,runId:string,releasePath:string):void{
-    const cli=join(releasePath,"dist/cli.js");
-    const args=[
-      "--user","--collect",`--unit=${unit}`,
-      "--property=Type=exec","--property=Restart=no","--property=KillMode=mixed","--property=TimeoutStopSec=20",
-      "--property=CPUWeight=20","--property=MemoryHigh=6G","--property=MemoryMax=8G","--property=TasksMax=4096","--property=LimitNOFILE=1048576",
-      "--setenv=PI_ORCHESTRATOR_ASSIGNED=1",`--setenv=PI_ORCHESTRATOR_RUN_ID=${runId}`,
-      `--setenv=PI_ORCHESTRATOR_LEDGER=${this.ledgerPath}`,
-      `--setenv=PI_CODING_AGENT_DIR=${this.config.agentDir}`,
-      "--setenv=PI_BASH_TIMEOUT_MAX_SECONDS=55",
-    ];
-    for(const name of ["PATH","PYTHONPATH","CPATH","LIBRARY_PATH","PKG_CONFIG_PATH","PI_ORCHESTRATOR_CONFIG","PI_ORCHESTRATOR_HOST","PI_ORCHESTRATOR_PORT","PI_MCP_SIZE_ALERTS_INBOX","PI_MCP_SIZE_ALERT_COMMAND"]){
-      const value=process.env[name];if(value!==undefined)args.push(`--setenv=${name}=${value}`);
+  private workerEnvironment(run:Run):Record<string,string>{
+    const env:Record<string,string>={
+      HOME:process.env.HOME??homedir(),PI_ORCHESTRATOR_ASSIGNED:"1",PI_ORCHESTRATOR_RUN_ID:run.id,
+      PI_ORCHESTRATOR_LEDGER:this.ledgerPath,PI_CODING_AGENT_DIR:this.config.agentDir,
+      PI_ORCHESTRATOR_AUTH:this.config.authPath,PI_BASH_TIMEOUT_MAX_SECONDS:"55",
+      PI_ORCHESTRATOR_CONFIG:process.env.PI_ORCHESTRATOR_CONFIG??join(homedir(),".config/pi-orchestrator/config.json"),
+    };
+    for(const name of ["XDG_RUNTIME_DIR","DBUS_SESSION_BUS_ADDRESS","XDG_CONFIG_HOME","XDG_DATA_HOME","XDG_CACHE_HOME","PATH","PYTHONPATH","CPATH","LIBRARY_PATH","PKG_CONFIG_PATH","PI_ORCHESTRATOR_HOST","PI_ORCHESTRATOR_PORT","PI_MCP_SIZE_ALERTS_INBOX","PI_MCP_SIZE_ALERT_COMMAND"]){
+      const value=process.env[name];if(value!==undefined)env[name]=value;
     }
-    args.push(process.execPath,cli,"worker",runId);
-    if(process.env.PI_ORCHESTRATOR_WORKER_LAUNCH==="process"){
-      const child=spawn(process.execPath,[cli,"worker",runId],{detached:true,stdio:"ignore",env:{...process.env,PI_ORCHESTRATOR_ASSIGNED:"1",PI_ORCHESTRATOR_RUN_ID:runId,PI_ORCHESTRATOR_LEDGER:this.ledgerPath}});child.unref();return;
+    if(run.execution==="root-repair"){
+      const uid=process.getuid?.(),gid=process.getgid?.();
+      if(uid===undefined||gid===undefined||uid===0)throw new Error("Root repair must be launched by the unprivileged ledger owner");
+      env.PI_ORCHESTRATOR_OWNER_UID=String(uid);env.PI_ORCHESTRATOR_OWNER_GID=String(gid);
+      env.XDG_RUNTIME_DIR??=`/run/user/${uid}`;env.DBUS_SESSION_BUS_ADDRESS??=`unix:path=${env.XDG_RUNTIME_DIR}/bus`;
     }
-    const result=spawnSync("systemd-run",args,{encoding:"utf8"});
-    if(result.status!==0)throw new Error(result.stderr.trim()||`systemd-run exited ${result.status}`);
+    return env;
   }
 
-  private stopUnit(unit?:string):void{
+  private startUnit(unit:string,runId:string,releasePath:string):void{
+    const cli=join(releasePath,"dist/cli.js");
+    const run=this.store.run(runId)!;
+    const root=run.execution==="root-repair";
+    const recorded=this.store.control(`run-environment:${runId}`);
+    if(root&&!recorded)throw new Error("Root repair is missing its pinned worker environment");
+    this.retirePrecedingUnit(run);
+    const environment:Record<string,string>=recorded?JSON.parse(recorded):this.workerEnvironment(run);
+    if(root&&process.env.PI_ORCHESTRATOR_WORKER_LAUNCH==="process")throw new Error("Root repair requires a system unit, not process launch");
+    const args=[
+      ...(root?["--system","--uid=0"]:["--user"]),"--collect",`--unit=${unit}`,
+      "--property=Type=exec","--property=Restart=no","--property=KillMode=mixed","--property=TimeoutStopSec=20",
+      "--property=CPUWeight=20","--property=MemoryHigh=6G","--property=MemoryMax=8G","--property=TasksMax=4096","--property=LimitNOFILE=1048576",
+      ...Object.entries(environment).map(([name,value])=>`--setenv=${name}=${value}`),
+    ];
+    args.push(process.execPath,cli,"worker",runId);
+    if(process.env.PI_ORCHESTRATOR_WORKER_LAUNCH==="process"){
+      const child=spawn(process.execPath,[cli,"worker",runId],{detached:true,stdio:"ignore",env:{...process.env,...environment}});child.unref();return;
+    }
+    const result=spawnSync(root?"sudo":"systemd-run",root?["-n","--","systemd-run",...args]:args,{encoding:"utf8",timeout:30_000});
+    if(result.error||result.status!==0)throw new Error(`worker launch failed: ${result.error??(result.stderr?.trim()||`systemd-run exited ${result.status}`)}`);
+  }
+
+  private retirePrecedingUnit(run:Run):void{
+    const key=`run-retiring-unit:${run.id}`,unit=this.store.control(key);if(!unit)return;
+    if(run.execution!=="root-repair")throw new Error("Only root repair recovery retires a preceding system unit");
+    if(this.unitIsActive(unit,run.execution))this.stopUnit(unit,run.execution);
+    this.store.setControl(key,"");
+  }
+
+  private unitCommand(unit:string,args:string[],execution?:Run["execution"]):{command:string;args:string[]}{
+    const row=execution===undefined?this.store.db.prepare("SELECT id FROM run WHERE worker_unit=?").get(unit) as {id:string}|undefined:undefined;
+    const root=(execution??(row&&this.store.run(row.id)?.execution))==="root-repair";
+    return root?{command:"sudo",args:["-n","--","systemctl","--system",...args,unit]}:{command:"systemctl",args:["--user",...args,unit]};
+  }
+
+  private stopUnit(unit?:string,execution?:Run["execution"]):void{
     if(!unit||unit.startsWith("completion:")){this.completionPool.tick();return;}
-    const result=spawnSync("systemctl",["--user","--no-block","stop",unit],{encoding:"utf8",timeout:10_000});
-    if(result.error||result.status!==0)throw new Error(`worker stop failed: ${result.error??result.stderr.trim()}`);
+    const cmd=this.unitCommand(unit,["stop"],execution);
+    const result=spawnSync(cmd.command,cmd.args,{encoding:"utf8",timeout:30_000});
+    if(result.status===5&&!this.unitIsActive(unit,execution))return;
+    if(result.error||result.status!==0)throw new Error(`worker stop failed: ${result.error??result.stderr?.trim()}`);
   }
   private unitIsActiveAsync(unit:string):Promise<boolean>{
-    return new Promise((resolve,reject)=>execFile("systemctl",["--user","is-active","--quiet",unit],{timeout:10_000},error=>{
+    const cmd=this.unitCommand(unit,["is-active"]);
+    return new Promise((resolve,reject)=>execFile(cmd.command,cmd.args,{timeout:10_000},(error,stdout)=>{
       if(!error)return resolve(true);
-      if(error.code===3||error.code===4)return resolve(false);
+      if(error.code===3||error.code===4)return resolve(this.unitTransitioning(stdout));
       reject(error);
     }));
   }
-  private unitIsActive(unit:string):boolean{
-    return spawnSync("systemctl",["--user","is-active","--quiet",unit]).status===0;
+  private unitIsActive(unit:string,execution?:Run["execution"]):boolean{
+    const cmd=this.unitCommand(unit,["is-active"],execution),result=spawnSync(cmd.command,cmd.args,{encoding:"utf8",timeout:10_000});
+    if(result.status===0)return true;
+    if(result.status===3||result.status===4)return this.unitTransitioning(result.stdout);
+    throw new Error(`worker status failed: ${result.error??result.stderr?.trim()}`);
+  }
+  private unitTransitioning(stdout:string):boolean{
+    return ["activating","deactivating","reloading","refreshing"].includes(stdout.trim());
   }
   private startExistingUnit(unit:string):boolean{
-    const started=spawnSync("systemctl",["--user","start",unit],{stdio:"ignore"});
+    const row=this.store.db.prepare("SELECT id FROM run WHERE worker_unit=?").get(unit) as {id:string}|undefined;
+    if(row)this.retirePrecedingUnit(this.store.run(row.id)!);
+    const cmd=this.unitCommand(unit,["start"]);
+    const started=spawnSync(cmd.command,cmd.args,{stdio:"ignore",timeout:30_000});
     return started.status===0&&this.unitIsActive(unit);
   }
   private resumeCoordinators():void{
     if(this.store.control("launches")==="paused")return;
     for(const run of this.store.runs(["waiting"])){
+      if(run.execution!=="root-repair"&&this.store.control("ordinary-launches")==="paused")continue;
       if(!this.fleet.pending(run.id).length||!run.accountId||!run.workerUnit||!run.releasePath)continue;
       if(this.unitIsActive(run.workerUnit))continue;
       if(this.store.activeSessionLeases().length>=this.config.maxConcurrentSessions)return;
@@ -296,19 +373,27 @@ export class Daemon {
         continue;
       }
       if(!run.accountId||!run.provider||!run.model||!run.workerUnit||!run.releasePath)continue;
+      if(run.execution==="root-repair"&&run.state==="failed"&&run.failureKind!=="infrastructure")continue;
       if(this.unitIsActive(run.workerUnit)){
         if(run.state!=="running")this.store.adoptAssignedRun(run.id);
       }else if(run.state!=="failed")this.restartAssignedWorker(run);
     }
   }
   private restartAssignedWorker(run:Run,at=Date.now()):void{
+    const abort=this.store.control(`abort:${run.id}`);
+    if(abort){
+      this.store.updateRun(run.id,{state:abort==="stalled"?"failed":"aborted",failureKind:abort==="stalled"?"infrastructure":"operator",result:`worker stopped after ${abort}`},at);
+      return;
+    }
+    if(this.store.control("launches")==="paused")return;
     const progress=run.progressAt??run.startedAt??run.createdAt;
     if(at-progress>this.config.killAfterMs){this.store.updateRun(run.id,{state:"failed",failureKind:"infrastructure",result:"session made no progress"},at);return;}
     if(!this.store.resumeAssignedRun(run.id,at))return;
     // A daemon restart can race the user manager's state transition for a worker that never stopped.
     // Adopt it instead of trying to redefine its still-loaded transient unit.
     if(this.unitIsActive(run.workerUnit!)){this.store.adoptAssignedRun(run.id,at);return;}
-    spawnSync("systemctl",["--user","reset-failed",run.workerUnit!],{stdio:"ignore"});
+    const reset=this.unitCommand(run.workerUnit!,["reset-failed"]);
+    spawnSync(reset.command,reset.args,{stdio:"ignore",timeout:10_000});
     try{this.startUnit(run.workerUnit!,run.id,run.releasePath!);}
     catch(error){
       // systemd-run refuses an existing transient unit. `start` is a no-op when that unit is already
@@ -353,7 +438,7 @@ export class Daemon {
       }
       if(method==="GET"&&url.pathname==="/v1/status")return json(res,200,this.status());
       if(method==="GET"&&url.pathname==="/v1/runs")return json(res,200,{runs:this.store.runs(),live:this.store.live()});
-      if(method==="GET"&&url.pathname==="/v1/plans")return json(res,200,{accounts:this.store.accounts(),meters:this.store.meters(),leases:this.store.activeLeases(),controls:Object.fromEntries((this.store.db.prepare("SELECT key,value FROM control INDEXED BY sqlite_autoindex_control_1 WHERE key NOT GLOB 'completion:*' AND key NOT GLOB 'completion-attempt:*' AND key NOT GLOB 'completion-receipt:*' AND key NOT GLOB 'completion-recovery:*' AND key NOT GLOB 'run-context:*' AND key NOT GLOB 'run-core:*' AND key NOT GLOB 'run-usage:*' AND key NOT GLOB 'fleet-child:*'").all() as any[]).map((r)=>[r.key,r.value]))});
+      if(method==="GET"&&url.pathname==="/v1/plans")return json(res,200,{accounts:this.store.accounts(),meters:this.store.meters(),leases:this.store.activeLeases(),controls:Object.fromEntries((this.store.db.prepare("SELECT key,value FROM control INDEXED BY sqlite_autoindex_control_1 WHERE key NOT GLOB 'completion:*' AND key NOT GLOB 'completion-attempt:*' AND key NOT GLOB 'completion-receipt:*' AND key NOT GLOB 'completion-recovery:*' AND key NOT GLOB 'run-context:*' AND key NOT GLOB 'run-core:*' AND key NOT GLOB 'run-environment:*' AND key NOT GLOB 'run-execution:*' AND key NOT GLOB 'run-usage:*' AND key NOT GLOB 'fleet-child:*'").all() as any[]).map((r)=>[r.key,r.value]))});
       if(method==="GET"&&url.pathname.startsWith("/internal/runs/")){
         const parts=url.pathname.split("/"),id=parts[3]!,action=parts[4];const run=this.store.run(id);if(!run)return json(res,404,{error:"run not found"});
         if(action==="completion"&&parts.length===5)return json(res,200,{completion:this.completions.byRun(id)});
@@ -463,7 +548,7 @@ export class Daemon {
         const ids=this.store.createRuns({count:Number(input.count??1),source:"direct",prompt:String(input.prompt),cwd:String(input.cwd??process.cwd()),profile,budget:input.force?"force":"background",context:input.context});
         void this.reconcile();return json(res,201,{runIds:ids});
       }
-      if(method==="POST"&&url.pathname==="/v1/wave"){const input=await body(req),lane=this.store.lane(String(input.lane));if(!lane)return json(res,404,{error:"lane not found"});if("core" in input)return json(res,400,{error:"Pi Stack runs Pi; agent core selection is not supported"});const ids=this.store.createRuns({count:Number(input.count??1),source:"direct",sourceId:lane.id,prompt:lane.prompt,cwd:lane.cwd,profile:lane.profile,budget:input.force?"force":"background"});void this.reconcile();return json(res,201,{runIds:ids});}
+      if(method==="POST"&&url.pathname==="/v1/wave"){const input=await body(req),lane=this.store.lane(String(input.lane));if(!lane)return json(res,404,{error:"lane not found"});if(lane.repair)return json(res,400,{error:"Repair lanes admit only from their independent readiness probe"});if("core" in input)return json(res,400,{error:"Pi Stack runs Pi; agent core selection is not supported"});const ids=this.store.createRuns({count:Number(input.count??1),source:"direct",sourceId:lane.id,prompt:lane.prompt,cwd:lane.cwd,profile:lane.profile,budget:input.force?"force":"background"});void this.reconcile();return json(res,201,{runIds:ids});}
       const runResume=/^\/v1\/runs\/([^/]+)\/resume$/.exec(url.pathname);
       if(method==="POST"&&runResume){
         if(!this.store.recoverInterruptedRun(runResume[1]!,this.releasePath,Date.now(),"rate-limit"))return json(res,409,{error:"Only a rate-limited core run without an operator abort can resume"});
@@ -476,14 +561,15 @@ export class Daemon {
         void this.reconcile();
         return json(res,200,{run:this.store.run(runRecover[1]!)});
       }
-      const runAbort=/^\/v1\/runs\/([^/]+)\/(abort|kill)$/.exec(url.pathname);if(method==="POST"&&runAbort){const id=runAbort[1]!,action=runAbort[2]!;this.store.setControl(`abort:${id}`,action);const run=this.store.run(id);const completion=this.completions.byRun(id);if(completion){const outcome=this.completions.cancel(completion.requestId);this.stopUnit(run?.workerUnit);return completionReply(outcome);}if(action==="kill"||run?.state==="queued"||run?.state==="waiting"){this.stopUnit(run?.workerUnit);this.store.updateRun(id,{state:"aborted",failureKind:"operator",result:`${action} by operator`});}return json(res,200,{ok:true});}
+      const runAbort=/^\/v1\/runs\/([^/]+)\/(abort|kill)$/.exec(url.pathname);if(method==="POST"&&runAbort){const id=runAbort[1]!,action=runAbort[2]!;this.store.setControl(`abort:${id}`,action);const run=this.store.run(id);const completion=this.completions.byRun(id);if(completion){const outcome=this.completions.cancel(completion.requestId);this.stopUnit(run?.workerUnit);return completionReply(outcome);}if(action==="kill"||run?.state==="queued"||run?.state==="waiting"){if(run)this.retirePrecedingUnit(run);this.stopUnit(run?.workerUnit);this.store.updateRun(id,{state:"aborted",failureKind:"operator",result:`${action} by operator`});}return json(res,200,{ok:true});}
       if(method==="POST"&&url.pathname==="/v1/control"){const input=await body(req);this.store.setControl(String(input.key),String(input.value));return json(res,200,{ok:true});}
       json(res,404,{error:"not found"});
     }catch(error){json(res,500,{error:String(error)});}
   }
 
   private status():unknown{return{
-    launches:this.store.control("launches")??"enabled",laneBudget:this.laneBudget,
+    launches:this.store.control("launches")??"enabled",ordinaryLaunches:this.store.control("ordinary-launches")??"enabled",repairOwner:this.store.control("repair-owner")||undefined,laneBudget:this.laneBudget,
+    repairReadiness:this.store.lanes().filter(lane=>lane.repair).map(lane=>({lane:lane.id,...this.repairReadiness.get(lane.id),error:this.store.control(`repair-readiness-error:${lane.id}`)||undefined})),
     readinessError:this.store.control("readiness_error")||undefined,
     meterErrors:this.store.accounts().flatMap((account)=>{const error=this.store.control(`meter-error:${account.id}`);return error?JSON.parse(error):[];}),
     capacity:this.store.accounts().map((account)=>({accountId:account.id,...accountCapacity(this.store,account.id,this.laneBudget,this.config)})),

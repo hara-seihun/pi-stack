@@ -34,7 +34,7 @@ it("pins Pi custody across lane edits, ledger reopening, assignment and recovery
     store.updateRun(id!, { state: "running", nativeSessionId: "native", portableSessionFile: "/durable/portable.jsonl" });
     store.close(); store = Store.open(path);
     expect(store.resumeAssignedRun(id!)).toBe(true);
-    expect(store.run(id!)).toMatchObject({ core: "pi", coreStateDir: before.coreStateDir, budget: before.budget, childrenOwner: "core", state: "starting", nativeSessionId: "native", portableSessionFile: "/durable/portable.jsonl", releasePath: "/immutable/release", model: catalogModel("astra")!.model, thinking: "xhigh" });
+    expect(store.run(id!)).toMatchObject({ core: "pi", coreStateDir: before.coreStateDir, budget: before.budget, childrenOwner: "core", state: "starting", nativeSessionId: "native", portableSessionFile: "/durable/portable.jsonl", releasePath: "/immutable/release", model: catalogModel("astra")!.model, thinking: "high" });
     expect(store.activeLeases()).toHaveLength(1);
     store.updateRun(id!, { state: "running" });
     expect(new Fleet(store).dispatch(id!, { requestId: "child", model: "luna", task: "work" })).toEqual({ ok: false, error: "not-coordinator" });

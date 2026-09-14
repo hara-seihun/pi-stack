@@ -192,6 +192,8 @@ function patchBundle(source) {
 }
 
 export function patchSessionDurability(source) {
+  // Shared custody rewrites these already-installed write boundaries.
+  if (source.startsWith("// PiStack shared filesystem custody\n") && source.includes("function writeSessionFileDurably")) return source;
   if (source.includes("export class SessionManager")) return patchSdk(source);
   if (source.includes("var SessionManager=class _SessionManager")) return patchBundle(source);
   throw new Error("Pinned Pi SessionManager source not found");

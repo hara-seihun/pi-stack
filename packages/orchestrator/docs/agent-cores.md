@@ -4,7 +4,7 @@ Orchestrator owns run admission, account assignment, worker processes and recove
 
 ## Durable custody
 
-Creation commits `run-core:<runId>` alongside the run row. It records Pi, `childrenOwner: "core"`, and `coreStateDir`, an absolute `runs/<runId>` directory beside the ledger. Custody is immutable through the worker state API. `get_state` updates native and portable session references. Account assignment pins the model, thinking level and immutable worker release. Recovery reuses that release, run ID and state directory.
+Creation commits `run-core:<runId>` alongside the run row. It records Pi, `childrenOwner: "core"`, and `coreStateDir`, an absolute `runs/<runId>` directory beside the ledger. Custody is immutable through the worker state API. `get_state` updates native and portable session references. Account assignment pins the model, thinking level, immutable worker release and launch environment. New admissions use `high` thinking except catalog Luna uses `max`; recovery keeps an existing admission's thinking unchanged. Recovery reuses that release, run ID and state directory. Execution identity is recorded at creation as `user` or `root-repair`, independently of later manifest edits. [Root repair lanes](../README.md#root-repair-lanes) describe system-unit scope, shared filesystem custody and pause controls.
 
 The directory holds native sessions, the Pi child tree, portable conversation records and activity. Workspace cleanup does not remove it. A persisted non-Pi owner requires explicit conversation transfer before Pi can continue it. Changing a stored engine label does not convert a transcript.
 

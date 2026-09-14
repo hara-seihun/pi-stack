@@ -4,6 +4,9 @@ import { dispatch } from "../src/commands.js";
 afterEach(()=>vi.restoreAllMocks());
 
 it.each([
+  {argv:["pause","--ordinary"],path:"/v1/control",body:{key:"ordinary-launches",value:"paused"}},
+  {argv:["resume","--ordinary"],path:"/v1/control",body:{key:"ordinary-launches",value:"enabled"}},
+  {argv:["pause"],path:"/v1/control",body:{key:"launches",value:"paused"}},
   {argv:["resume"],path:"/v1/control",body:{key:"launches",value:"enabled"}},
   {argv:["resume","RUN-123"],path:"/v1/runs/RUN-123/resume",body:undefined},
   {argv:["resume","run/with space"],path:"/v1/runs/run%2Fwith%20space/resume",body:undefined},

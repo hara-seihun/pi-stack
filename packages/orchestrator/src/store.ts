@@ -1,9 +1,10 @@
 import { mkdirSync } from "node:fs";
-import { randomInt, randomUUID } from "node:crypto";
+import { randomUUID } from "node:crypto";
+import { admissionThinking, type ModelCandidate } from "./catalog.js";
 import { dirname, join, resolve } from "node:path";
 import { isRateLimitError, isCredentialError } from "./provider-errors.js";
 import type { DatabaseSync } from "node:sqlite";
-import type { Account, BudgetClass, FailureKind, FleetChild, LaneSpec, LeaseKind, ProfileCandidate, Run, RunActivity, RunContext, RunSource, RunState, UsageEntry, UsageTotal } from "./domain.js";
+import type { Account, BudgetClass, FailureKind, FleetChild, LaneSpec, LeaseKind, Run, RunActivity, RunContext, RunSource, RunState, UsageEntry, UsageTotal } from "./domain.js";
 
 import { openSqlite } from "./sqlite.js";
 
@@ -202,7 +203,8 @@ export class Store {
   reconcileLanes(lanes:readonly LaneSpec[], at=Date.now()): void {
     const ids=new Set<string>();
     for(const lane of lanes){
-      for(const key of Object.keys(lane))if(!["id","prompt","cwd","profile","weight","priority","doctrineUrl","openingProbe"].includes(key))throw new Error(`unsupported lane field ${key}`);
+      for(const key of Object.keys(lane))if(!["id","prompt","cwd","profile","weight","priority","doctrineUrl","openingProbe","repair"].includes(key))throw new Error(`unsupported lane field ${key}`);
+      if(lane.repair!==undefined&&(!lane.repair||typeof lane.repair!=="object"||Object.keys(lane.repair).some(key=>key!=="readinessCommand")||typeof lane.repair.readinessCommand!=="string"||!lane.repair.readinessCommand.trim()))throw new Error(`lane ${lane.id} repair requires a readinessCommand`);
       if(!lane.id||ids.has(lane.id))throw new Error(`invalid or duplicate lane id ${lane.id}`);
       ids.add(lane.id);
       if(!Number.isFinite(lane.weight)||lane.weight<=0)throw new Error(`lane ${lane.id} requires a positive weight`);
@@ -215,23 +217,24 @@ export class Store {
         weight=excluded.weight,priority=excluded.priority,doctrine_url=excluded.doctrine_url,
         opening_probe=excluded.opening_probe,updated_at=excluded.updated_at`)
         .run(lane.id,lane.prompt,lane.cwd,lane.profile,lane.weight,lane.priority??0,lane.doctrineUrl??null,lane.openingProbe??null,at);
-      for (const lane of lanes) {
-      }
+      for (const lane of lanes) this.setControl(`lane-repair:${lane.id}`,JSON.stringify(lane.repair??null));
       for (const row of this.db.prepare("SELECT id FROM lane").all() as {id:string}[]) if(!ids.has(row.id)) {
         this.db.prepare("DELETE FROM lane WHERE id=?").run(row.id);
+        this.db.prepare("DELETE FROM control WHERE key=?").run(`lane-repair:${row.id}`);
       }
     });
   }
-  lanes(): LaneSpec[] { return (this.db.prepare("SELECT * FROM lane ORDER BY priority DESC,weight DESC,id").all() as any[]).map((r)=>({id:r.id,prompt:r.prompt,cwd:r.cwd,profile:r.profile,weight:r.weight,priority:r.priority,doctrineUrl:maybe(r.doctrine_url),openingProbe:maybe(r.opening_probe)})); }
+  lanes(): LaneSpec[] { return (this.db.prepare("SELECT * FROM lane ORDER BY priority DESC,weight DESC,id").all() as any[]).map((r)=>({id:r.id,prompt:r.prompt,cwd:r.cwd,profile:r.profile,weight:r.weight,priority:r.priority,doctrineUrl:maybe(r.doctrine_url),openingProbe:maybe(r.opening_probe),repair:JSON.parse(this.control(`lane-repair:${r.id}`)??"null")??undefined})); }
   lane(id:string):LaneSpec|undefined{return this.lanes().find((x)=>x.id===id);}
 
   fleetChild(id:string):FleetChild|undefined{return JSON.parse(this.control(`fleet-child:${id}`)??"null")??undefined;}
   childRunIds(id:string):string[]{return (this.db.prepare("SELECT substr(key,13) id FROM control WHERE key LIKE 'fleet-child:%' AND json_extract(value,'$.parentRunId')=? ORDER BY key").all(id) as {id:string}[]).map(row=>row.id);}
   isWaiting(id:string):boolean{return this.control(`fleet-waiting:${id}`)==="1";}
-  createRuns(input:{count:number;source:RunSource;sourceId?:string;prompt:string;cwd:string;profile:string;budget:BudgetClass;context?:RunContext;child?:FleetChild}):string[]{
+  createRuns(input:{count:number;source:RunSource;sourceId?:string;prompt:string;cwd:string;profile:string;budget:BudgetClass;execution?:Run["execution"];context?:RunContext;child?:FleetChild}):string[]{
+    if(input.execution==="root-repair"&&(input.source!=="lane"||input.budget!=="force"||input.context||input.child||input.count!==1))throw new Error("Root repair requires one forced full-context lane run");
     const now=Date.now(),ids:string[]=[];
     this.transaction(()=>{for(let i=0;i<input.count;i++){const id=crypto.randomUUID();ids.push(id);this.db.prepare(`INSERT INTO run(id,source,source_id,prompt,cwd,profile,budget,state,created_at,updated_at)
-      VALUES(?,?,?,?,?,?,?,'queued',?,?)`).run(id,input.source,input.sourceId??null,input.prompt,input.cwd,input.profile,input.budget,now,now);this.setControl(`run-core:${id}`,JSON.stringify({core:"pi",coreStateDir:join(dirname(resolve(this.path)),"runs",id),childrenOwner:"core"}));if(input.context)this.setControl(`run-context:${id}`,JSON.stringify(input.context));if(input.child)this.setControl(`fleet-child:${id}`,JSON.stringify(input.child));}});
+      VALUES(?,?,?,?,?,?,?,'queued',?,?)`).run(id,input.source,input.sourceId??null,input.prompt,input.cwd,input.profile,input.budget,now,now);this.setControl(`run-core:${id}`,JSON.stringify({core:"pi",coreStateDir:join(dirname(resolve(this.path)),"runs",id),childrenOwner:"core"}));this.setControl(`run-execution:${id}`,input.execution??"user");if(input.context)this.setControl(`run-context:${id}`,JSON.stringify(input.context));if(input.child)this.setControl(`fleet-child:${id}`,JSON.stringify(input.child));}});
     return ids;
   }
   run(id:string):Run|undefined{const r=this.db.prepare("SELECT * FROM run WHERE id=?").get(id) as any;return r?this.mapRuns([r])[0]:undefined;}
@@ -260,7 +263,7 @@ export class Store {
     const controls=new Map<string,string>();
     for(let offset=0;offset<rows.length;offset+=200){
       const ids=rows.slice(offset,offset+200).map(row=>row.id as string);
-      const keys=ids.flatMap(id=>[`fleet-child:${id}`,`fleet-delivered:${id}`,`fleet-waiting:${id}`,`run-context:${id}`,`run-core:${id}`]);
+      const keys=ids.flatMap(id=>[`fleet-child:${id}`,`fleet-delivered:${id}`,`fleet-waiting:${id}`,`run-context:${id}`,`run-core:${id}`,`run-execution:${id}`]);
       const own=this.db.prepare(`SELECT key,value FROM control WHERE key IN (${keys.map(()=>'?').join(',')})`).all(...keys) as {key:string;value:string}[];
       const children=this.db.prepare(`SELECT key,value FROM control WHERE key >= 'fleet-child:' AND key < 'fleet-child;' AND json_extract(value,'$.parentRunId') IN (${ids.map(()=>'?').join(',')})`).all(...ids) as {key:string;value:string}[];
       for(const row of [...own,...children])controls.set(row.key,row.value);
@@ -275,31 +278,30 @@ export class Store {
       const child=children.get(r.id),ids=childIds.get(r.id)??[];
       return{parentRunId:child?.parentRunId,rootRunId:child?.rootRunId??(ids.length?r.id:undefined),requestedModel:child?.model,escalatesRunId:child?.escalatesRunId,childRunIds:ids,
         deliveryState:child?(controls.has(`fleet-delivered:${r.id}`)?"delivered":"pending"):undefined,
-        id:r.id,source:r.source,sourceId:maybe(r.source_id),prompt:r.prompt,cwd:r.cwd,profile:r.profile,budget:r.budget,
+        id:r.id,source:r.source,sourceId:maybe(r.source_id),prompt:r.prompt,cwd:r.cwd,profile:r.profile,budget:r.budget,execution:(controls.get(`run-execution:${r.id}`)??"user") as Run["execution"],
         ...JSON.parse(controls.get(`run-core:${r.id}`)??'{"core":"pi","childrenOwner":"orchestrator"}'),
         context:JSON.parse(controls.get(`run-context:${r.id}`)??"null")??undefined,accountId:maybe(r.account_id),provider:maybe(r.provider),model:maybe(r.model),thinking:maybe(r.thinking),sessionFile:maybe(r.session_file),
         state:r.state==="running"&&controls.get(`fleet-waiting:${r.id}`)==="1"?"waiting":r.state,failureKind:maybe(r.failure_kind),result:maybe(r.result),workerUnit:maybe(r.worker_unit),releasePath:maybe(r.release_path),
         createdAt:r.created_at,startedAt:maybe(r.started_at),updatedAt:r.updated_at,progressAt:maybe(r.progress_at),endedAt:maybe(r.ended_at)};
     });
   }
-  assignRun(id:string,assignment:ProfileCandidate & {accountId:string;unit:string;releasePath:string},at=Date.now()):boolean{
+  assignRun(id:string,assignment:ModelCandidate & {accountId:string;unit:string;releasePath:string;environment?:Readonly<Record<string,string>>},at=Date.now()):boolean{
     return this.transaction(()=>{
       const run=this.run(id);
       if(!run || run.state!=="queued" || run.accountId)return false;
-      const fixed=this.fleetChild(id)?.assignment;
-      if(fixed&&(fixed.provider!==assignment.provider||fixed.model!==assignment.model||fixed.thinking!==assignment.thinking||assignment.thinkingPair))return false;
-      if(!this.control(`run-core:${id}`))this.setControl(`run-core:${id}`,JSON.stringify({core:"pi",coreStateDir:join(dirname(resolve(this.path)),"runs",id),childrenOwner:"core"}));
-      let thinking=assignment.thinking;
-      if(assignment.thinkingPair){
-        const pair=assignment.thinkingPair;
-        const key=`thinking-pair:${JSON.stringify([run.profile,assignment.provider,assignment.model,[...pair].sort()])}`;
-        const pending=this.control(key);
-        if(pending && !pair.includes(pending))throw new Error(`invalid pending thinking level for ${key}`);
-        thinking=pending || pair[randomInt(2)]!;
-        this.setControl(key,pending ? "" : pair.find(level=>level!==thinking)!);
+      if(run.execution==="root-repair"){
+        const owner=this.control("repair-owner");
+        if(owner&&owner!==id)return false;
       }
+      const fixed=this.fleetChild(id)?.assignment;
+      if(fixed&&(fixed.provider!==assignment.provider||fixed.model!==assignment.model))return false;
+      if(run.provider&&run.model&&(run.provider!==assignment.provider||run.model!==assignment.model))return false;
+      if(!this.control(`run-core:${id}`))this.setControl(`run-core:${id}`,JSON.stringify({core:"pi",coreStateDir:join(dirname(resolve(this.path)),"runs",id),childrenOwner:"core"}));
+      const thinking=run.provider&&run.model?run.thinking:admissionThinking(assignment);
+      if(assignment.environment&&!this.control(`run-environment:${id}`))this.setControl(`run-environment:${id}`,JSON.stringify(assignment.environment));
       this.db.prepare(`UPDATE run SET account_id=?,provider=?,model=?,thinking=?,worker_unit=?,release_path=?,state='starting',started_at=COALESCE(started_at,?),updated_at=?,progress_at=? WHERE id=?`)
         .run(assignment.accountId,assignment.provider,assignment.model,thinking??null,assignment.unit,assignment.releasePath,at,at,at,id);
+      if(run.execution==="root-repair")this.setControl("repair-owner",id);
       this.createLease(`run:${id}`,assignment.accountId,"fleet",id,at);
       return true;
     });
@@ -343,10 +345,15 @@ export class Store {
     return this.transaction(()=>{
       const run=this.run(id);
       if(!run?.accountId||!run.provider||!run.model||!run.workerUnit||!run.releasePath)return false;
+      if(run.execution==="root-repair"){
+        const owner=this.control("repair-owner");
+        if(owner&&owner!==id)return false;
+      }
       const targetAccount=accountId??run.accountId;
       if(this.account(targetAccount)?.provider!==run.provider)return false;
       const changed=this.db.prepare(`UPDATE run SET account_id=?,state='starting',result=CASE WHEN result='recovering the recorded core session after infrastructure repair' THEN result ELSE 'worker process stopped; recovering the recorded core session' END,updated_at=?,ended_at=NULL WHERE id=? AND state IN ('queued','starting','running')`).run(targetAccount,at,id).changes;
       if(changed!==1)return false;
+      if(run.execution==="root-repair")this.setControl("repair-owner",id);
       this.db.prepare("DELETE FROM control WHERE key=?").run(`fleet-waiting:${id}`);
       this.endLease(`run:${id}`,at);
       this.createLease(`run:${id}`,targetAccount,"fleet",id,at);
@@ -363,6 +370,12 @@ export class Store {
         ||run.state==="failed"&&run.failureKind==="infrastructure"&&["TypeError: fetch failed","Error: Core turn interrupted without an operator abort"].includes(run.result??"")
         ||run.state==="failed"&&(run.result??"").includes("role 'system' must precede an 'assistant' message or end the array");
       if(!interrupted)return false;
+      if(run.execution==="root-repair"){
+        const owner=this.control("repair-owner");
+        if(owner&&owner!==id)return false;
+        this.setControl("repair-owner",id);
+        this.setControl(`run-retiring-unit:${id}`,run.workerUnit);
+      }
       this.setControl(`${kind==="rate-limit"?"run-rate-limit":"run-interruption"}:${id}:${at}`,JSON.stringify({result:run.result,failureKind:run.failureKind,
         endedAt:run.endedAt,releasePath:run.releasePath,workerUnit:run.workerUnit}));
       this.db.prepare("UPDATE run SET state='starting',release_path=?,worker_unit=?,result='recovering the recorded core session after infrastructure repair',failure_kind=NULL,ended_at=NULL,updated_at=?,progress_at=? WHERE id=?")
@@ -376,8 +389,13 @@ export class Store {
       const run=this.run(id);
       if(!run?.accountId||!run.provider||!run.model||!run.workerUnit||!run.releasePath)return false;
       if(run.state==="failed"&&(run.parentRunId||run.childRunIds?.length))return false;
+      if(run.execution==="root-repair"){
+        const owner=this.control("repair-owner");
+        if(owner&&owner!==id)return false;
+      }
       const changed=this.db.prepare(`UPDATE run SET state='running',result=CASE WHEN result='recovering the recorded core session after infrastructure repair' THEN result ELSE NULL END,failure_kind=NULL,updated_at=?,ended_at=NULL WHERE id=? AND state IN ('queued','starting','running','failed')`).run(at,id).changes;
       if(changed!==1)return false;
+      if(run.execution==="root-repair")this.setControl("repair-owner",id);
       this.endLease(`run:${id}`,at);
       this.createLease(`run:${id}`,run.accountId,"fleet",id,at);
       return true;

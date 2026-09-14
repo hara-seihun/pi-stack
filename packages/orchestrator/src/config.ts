@@ -1,7 +1,7 @@
 import { homedir } from "node:os";
 import { join } from "node:path";
 import { readFileSync } from "node:fs";
-import { catalogModel } from "./catalog.js";
+import { admissionThinking, catalogModel, type ModelCandidate } from "./catalog.js";
 import type { OrchestratorConfig } from "./domain.js";
 import { defaultSharedAuthPath } from "./auth/shared-oauth.js";
 
@@ -14,28 +14,17 @@ export function loadConfig(
 ): OrchestratorConfig {
   let local: any = {};
   try { local = JSON.parse(readFileSync(path,"utf8")); } catch (error: any) { if(error?.code!=="ENOENT") throw error; }
-  const candidate=({provider,model,thinking}:{provider:string;model:string;thinking?:string})=>({provider,model,thinking});
+  const candidate=({provider,model}:ModelCandidate)=>({provider,model,thinking:admissionThinking({provider,model})});
   const profiles = {
     ...(local.profiles ?? {
-      standard: [candidate(standard),candidate(expert)],
-      expert: [candidate(expert),candidate(standard)],
+      standard: [standard,expert],
+      expert: [expert,standard],
     }),
-    ...Object.fromEntries(["astra", "sol", "terra", "luna", "opus"].map(id => [id, [candidate(catalogModel(id)!)]])),
+    ...Object.fromEntries(["astra", "sol", "terra", "luna", "opus"].map(id => [id, [catalogModel(id)!]])),
   };
-  const levels = new Set(["off", "minimal", "low", "medium", "high", "xhigh", "max"]);
-  for (const [profile, candidates] of Object.entries(profiles)) {
-    for (const entry of candidates as any[]) {
-      if (entry.thinkingPair === undefined) continue;
-      const pair = entry.thinkingPair;
-      if (entry.thinking !== undefined || !Array.isArray(pair) || pair.length !== 2 ||
-          pair[0] === pair[1] || pair.some(level => !levels.has(level))) {
-        throw new Error(`profile ${profile}: thinkingPair requires two distinct thinking levels and no thinking field`);
-      }
-    }
-  }
   return {
     listenHost: process.env.PI_ORCHESTRATOR_LISTEN_HOST || local.listenHost,
-    profiles,
+    profiles: Object.fromEntries(Object.entries(profiles).map(([profile, candidates]) => [profile, (candidates as ModelCandidate[]).map(candidate)])),
     backgroundSpendFraction: Number(local.backgroundSpendFraction ?? 0.8),
     maxConcurrentSessions: Number(local.maxConcurrentSessions ?? 40),
     defaultAccountConcurrency: Number(local.defaultAccountConcurrency ?? 4),

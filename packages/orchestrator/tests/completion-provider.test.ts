@@ -4,7 +4,7 @@ import type { CompletionInput, CompletionFetch } from "../src/completion-contrac
 import type { Run } from "../src/domain.js";
 import { executeCompletion, type CompletionProviderOptions } from "../src/host/completion-provider.js";
 
-const run = { id: "run-test", provider: "openai-codex", model: "gpt-5.6-luna", accountId: "openai-codex-9" } as Run;
+const run = { id: "run-test", provider: "openai-codex", model: "gpt-5.6-luna", thinking: "max", accountId: "openai-codex-9" } as Run;
 const input: CompletionInput = { model: "luna", prompt: "  original user\n", systemPrompt: "original system\n", responseFormat: { type: "json_schema", name: "answer", schema: { type: "object", properties: { ok: { type: "boolean" } }, required: ["ok"], additionalProperties: false } } };
 const token = `test.${Buffer.from(JSON.stringify({ "https://api.openai.com/auth": { chatgpt_account_id: "test-account" } })).toString("base64url")}.test`;
 const options = (fetch: CompletionFetch, extra: Partial<CompletionProviderOptions> = {}): CompletionProviderOptions => ({ authPath: "/not-read", signal: new AbortController().signal, fetch, resolveAuth: async () => ({ apiKey: token }), ...extra });
@@ -34,6 +34,18 @@ it("sends exact separate caller prompts and native strict schema, returning only
   expect(sent.tool_choice).toBe("none");
   expect(sent.max_output_tokens).toBeUndefined();
   expect(transport).toHaveBeenCalledTimes(1);
+});
+
+it.each([
+  ["luna", "max", "max"],
+  ["terra", "high", "high"],
+  ["terra", "medium", "medium"],
+  ["luna", undefined, undefined],
+] as const)("sends admitted %s thinking %s without replacing recovery pins", async (model, thinking, effort) => {
+  let sent: any;
+  const transport = async (_url: unknown, init?: RequestInit) => { sent = body(init!); return new Response(events()); };
+  expect((await executeCompletion({ ...input, model }, { ...run, model: `gpt-5.6-${model}`, thinking }, options(transport))).state).toBe("completed");
+  expect(sent.reasoning?.effort).toBe(effort);
 });
 
 it("does not insert a system prompt when the caller supplies none or an empty string", async () => {

@@ -27,6 +27,11 @@ check_release() {
   node --check "$release/node_modules/@earendil-works/pi-coding-agent/dist/modes/rpc/shared-rpc-mode.js"
   grep -q 'replaceSessionFileDurably(this.sessionFile' "$release/node_modules/@earendil-works/pi-coding-agent/dist/core/session-manager.js"
   grep -rlq 'replaceSessionFileDurably(this.sessionFile' "$release/node_modules/@earendil-works/pi-coding-agent/dist/bundle/chunks"
+  for writer in session-manager settings-manager auth-storage; do
+    grep -q 'PiStack shared filesystem custody' "$release/node_modules/@earendil-works/pi-coding-agent/dist/core/$writer.js"
+    node --check "$release/node_modules/@earendil-works/pi-coding-agent/dist/core/$writer.js"
+  done
+  grep -rlq 'PiStack shared filesystem custody' "$release/node_modules/@earendil-works/pi-coding-agent/dist/bundle/chunks"
   cmp -s "$runtime_source/browser-doctor.mjs" "$release/node_modules/.bin/pi-agent-browser-doctor" || {
     echo "the browser doctor does not match this release" >&2; exit 1;
   }
@@ -61,7 +66,7 @@ fi
 cd "$root"
 pi_stack_as_root install -d -m 755 "$dependencies_root"
 dependency_hash=$({
-  sha256sum package.json package-lock.json packages/runtime/browser-doctor.mjs packages/runtime/patch-browser-qa.mjs packages/runtime/patch-codex-sse.mjs packages/runtime/patch-compaction-cut.mjs packages/runtime/patch-compaction-errors.mjs packages/runtime/patch-session-durability.mjs packages/runtime/patch-shared-rpc.mjs
+  sha256sum package.json package-lock.json packages/runtime/browser-doctor.mjs packages/runtime/patch-browser-qa.mjs packages/runtime/patch-codex-sse.mjs packages/runtime/patch-compaction-cut.mjs packages/runtime/patch-compaction-errors.mjs packages/runtime/patch-session-durability.mjs packages/runtime/patch-shared-custody.mjs packages/orchestrator/src/shared-custody.ts packages/runtime/patch-shared-rpc.mjs
   printf '%s\n' workspace-production-closure-v1-atomic-settings-writes-v1-durable-sessions-v1
 } | sha256sum | cut -d' ' -f1)
 dependency_release="$dependencies_root/$dependency_hash"
@@ -77,28 +82,6 @@ if [[ ! -x $dependency_release/node_modules/.bin/pi ]]; then
   (cd "$stage" && npm ci --omit=dev --ignore-scripts --prefer-offline --no-audit --no-fund)
   install -m 755 packages/runtime/browser-doctor.mjs "$stage/browser-doctor.mjs"
   ln -sfn ../../browser-doctor.mjs "$stage/node_modules/.bin/pi-agent-browser-doctor"
-  # Pi rewrites settings.json in place. Two sessions starting together used to
-  # observe a truncated file, so the pinned copy writes a temporary and renames.
-  settings_manager="$stage/node_modules/@earendil-works/pi-coding-agent/dist/core/settings-manager.js"
-  SETTINGS_MANAGER="$settings_manager" node --input-type=module <<'NODE'
-import { readFileSync, writeFileSync } from "node:fs";
-const path = process.env.SETTINGS_MANAGER;
-const source = readFileSync(path, "utf8");
-const patched = source
-  .replace(
-    'import { existsSync, mkdirSync, readFileSync, writeFileSync } from "fs";',
-    'import { existsSync, mkdirSync, readFileSync, renameSync, rmSync, writeFileSync } from "fs";',
-  )
-  .replace(
-    '                writeFileSync(path, next, "utf-8");',
-    '                const temporary = `${path}.${process.pid}.${randomUUID()}.tmp`;\n                try {\n                    writeFileSync(temporary, next, { encoding: "utf-8", mode: 0o600 });\n                    renameSync(temporary, path);\n                }\n                finally {\n                    rmSync(temporary, { force: true });\n                }',
-  );
-if (patched === source || !patched.includes("renameSync(temporary, path)")) {
-  throw new Error("Pi settings atomic-write patch no longer matches the pinned dependency");
-}
-writeFileSync(path, patched);
-NODE
-  node --check "$settings_manager"
   node "$runtime_source/patch-codex-sse.mjs" "$stage/node_modules"
   browser_job="$stage/node_modules/pi-agent-browser-native/dist/extensions/agent-browser/lib/input-modes/job.js"
   node "$runtime_source/patch-browser-qa.mjs" "$browser_job"
@@ -106,6 +89,7 @@ NODE
   node "$runtime_source/patch-compaction-cut.mjs" "$stage/node_modules"
   node "$runtime_source/patch-compaction-errors.mjs" "$stage/node_modules"
   node "$runtime_source/patch-session-durability.mjs" "$stage/node_modules"
+  node "$runtime_source/patch-shared-custody.mjs" "$stage/node_modules"
   node "$runtime_source/patch-shared-rpc.mjs" "$stage/node_modules"
   rm -f "$stage/node_modules/pi-orchestrator" "$stage/node_modules/pi-remote"
   rm -rf "$stage/node_modules/@hara-seihun"

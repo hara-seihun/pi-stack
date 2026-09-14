@@ -4,6 +4,7 @@ import { openCoreSession } from "./cores/index.js";
 import { coreOptions, runCoreWorker } from "./host/core-worker.js";
 import { workCompletion } from "./host/completion-worker.js";
 import { workerTransport } from "./host/worker-transport.js";
+import { assertWorkerExecution } from "./host/worker-execution.js";
 
 const BASE=`http://${process.env.PI_ORCHESTRATOR_HOST??"127.0.0.1"}:${process.env.PI_ORCHESTRATOR_PORT??"2460"}`;
 let workerUnit:string|undefined;
@@ -19,6 +20,12 @@ export async function work(runId:string):Promise<void>{
   const config=loadConfig();
   const {run}=await request(`/internal/runs/${runId}`) as {run:Run};
   workerUnit=run.workerUnit;
+  try { assertWorkerExecution(run); }
+  catch (error) {
+    await post(`/internal/runs/${runId}/state`,{state:"failed",failureKind:"infrastructure",result:String(error)});
+    return;
+  }
+  process.env.PI_ORCHESTRATOR_EXECUTION=run.execution??"user";
   if(await workCompletion(run,config,post,request))return;
   if(["done","failed","aborted","waiting"].includes(run.state))return;
   if(!run.accountId||!run.provider||!run.model)throw new Error("run has no account assignment");

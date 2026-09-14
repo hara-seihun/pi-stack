@@ -1,4 +1,5 @@
-import { mkdirSync, rmSync, statSync, utimesSync } from "node:fs";
+import { custodyMkdirSync as mkdirSync } from "../shared-custody.js";
+import { rmSync, statSync, utimesSync } from "node:fs";
 
 const LOCK_STALE_MS = 30_000;
 
