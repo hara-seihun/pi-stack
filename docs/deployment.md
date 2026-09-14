@@ -29,15 +29,19 @@ The stack is the same on every machine. A host supplies three things.
   "version": 1,
   "fleetUser": "kenan",
   "environments": [
-    { "id": "local", "name": "Local", "baseUrl": "" },
-    { "id": "converge", "name": "Converge", "baseUrl": "/converge" }
+    { "id": "local", "name": "Local" },
+    {
+      "id": "converge",
+      "name": "Converge",
+      "upstreams": { "kenan": "http://127.0.0.1:18789" }
+    }
   ],
   "packages": ["/etc/nixos/pi-agent/extensions/scratch-updates"],
   "skills": ["/etc/nixos/pi-agent/skills/math-research"]
 }
 ```
 
-`environments` lists the browser's host choices and their same-origin path prefixes. It is optional; without it, clients see only this host. The router and supervisors read this list from the host file, independent of the person registry. `PI_STACK_HOST_FILE` selects another host file for tests or custom installations. Restart the router after changing the list.
+`environments` is the router's endpoint catalog. Entries have `id`, `name`, optional `icon`, and remote entries have `upstreams`. This host's own entry has no `upstreams`. Each remote map names a person and the absolute HTTP or HTTPS origin of her supervisor. Origins cannot contain credentials, paths, queries or fragments. The example port `18789` is a host-owned forward to the remote `kenan` supervisor, not its router. Configure the actual listener before granting access. Without a catalog, the router supplies only its own endpoint. `PI_STACK_HOST_FILE` selects another host file for tests or custom installations. Restart the router after configuration changes.
 
 `fleetUser` runs `pi-orchestrator@<user>.service`. `packages` are extra Pi packages every account loads, placed after the reviewed ones and before the Pi Remote context observer. `skills` are extra skill directories linked into every account's skill directory under their own names. Both are optional and point at paths the host owns.
 
@@ -46,6 +50,22 @@ The stack is the same on every machine. A host supplies three things.
 Voice requires `/var/lib/pi-stack-voice/openai-api-key`, root-owned mode `0600` in a root-owned `0700` directory. The host credential owner provisions it; deployment never fetches or copies a key. `LoadCredential` gives the dynamic service user a private copy. Its persistent session leases and expiry state live in `/var/lib/pi-stack-voice-runtime/sessions.sqlite3`. This is an OpenAI API connection, independent of Orchestrator OAuth credentials. Its loopback listener is `127.0.0.1:8796`; supervisors use `PI_STACK_VOICE_URL` to select another endpoint. Browser clients never receive the key.
 
 Persons are not in the host file. They are Pi Remote's registry, `/var/lib/pi-remote/persons/<user>.json`, created with `pi-remote person add`. See [the Pi Remote README](../apps/remote/README.md#persons).
+
+## Gateway access and host boundaries
+
+Each person registry may set `"remoteAccess": ["local", "converge"]`. Omission allows only this host's own endpoint. The list must include this host's own ID, and every grant must name a catalog entry. Remote grants require an encrypted-folder identity and an `upstreams` mapping for that person or router startup fails. Add each person's mapping explicitly; never send several people's requests to one shared supervisor. Endpoint names and icons do not affect authorization.
+
+`POST /v1/unlock` accepts `{ "key": "..." }` with the `x-pi-remote-user` hint and returns `{ "ok": true, "user": "...", "session": "..." }`. Clients send `session` in `x-pi-remote-session`. A user header or query parameter is only a selection hint, even on a single-person host or while that person's folder is already open. This replaces the previous name-only identity contract. Missing authentication on protected `/v1/*` routes returns `423`. The chooser at `/v1/environment`, `/v1/router-health`, app updates and static assets remain public; unlock is the session bootstrap. Lock revokes all sessions for that person.
+
+Authenticated `GET /v1/environments` returns only that person's allowed endpoints, with an empty `baseUrl` for this host and generated same-origin `/v1/remotes/<id>` prefixes for remote endpoints. Clients never receive upstream origins. The gateway checks the person's grant for every forwarded request and removes client authentication and person hints before reaching the configured supervisor. A host tunnel forwards directly to the matching remote supervisor, not another router.
+
+The router must be the sole published API entrance. Before activating this contract, remove the unauthenticated `/converge` and `/editor` host routes and any direct supervisor publication. Bind supervisor, forwarded upstream and control listeners to loopback and apply UID gates on both hosts. Permit root for deployment, the gateway identity for upstream access, and each owning service identity only where needed. Loopback alone is not a UID boundary. Include Voice/control listeners and the tunnel's local listener; restrict the remote forwarding account to its person's supervisor port. The host handbook and declarative host configuration own these rules and tunnels. Reference units do not install a firewall.
+
+Revoke the restricted Converge SSH key embedded in existing APKs by removing its `authorized_keys` entry at the host's source of truth and deployed account. Removing SSH code from the new app does not revoke installed APKs or copies of their key. Retire active forwards authenticated by that key, and remove its declaration from host provisioning so it cannot return. The gateway tunnel uses a separate server-owned identity that has never been distributed to clients. Record the revocation and new tunnel owner in the host handbook before accepting the deployment.
+
+Deployment health checks use root-run requests to the supervisor port read from the person registry. `deploy/smoke` instead exercises router authentication. It checks unauthenticated rejection, reads existing root-only `/run/pi-remote-keys/<user>` credentials through a pipe, unlocks only people already reported open, and uses the returned session for app calls. Unencrypted people bootstrap with an empty key. `PI_REMOTE_KEY_DIR` selects another credential directory for a rehearsal. Smoke accepts only a loopback router URL, keeps temporary session headers in a private directory, and removes them on exit. It neither prints keys/tokens nor calls lock, which would interrupt the person and revoke her other clients.
+
+Host routing, UID gates, tunnels and Android local build configuration require coordinated host changes. A code release alone does not install them.
 
 ## What deploy/host does
 
@@ -98,7 +118,7 @@ sudo rmdir --ignore-fail-on-non-empty /run/systemd/system/pi-stack-voice.service
 sudo systemctl daemon-reload
 ```
 
-Stopping the live-dev supervisor restores the deployed capture package and resumes its original supervisor wrapper. Do not restart `pi-remote@kenan.service`; that would kill active Pi turns. Change only the root Tailscale route, not the other applications or `/converge` route.
+Stopping the live-dev supervisor restores the deployed capture package and resumes its original supervisor wrapper. Do not restart `pi-remote@kenan.service`; that would kill active Pi turns. Restore only the router as the published API entrance. Remove the `/converge` and `/editor` bypass routes as described under [host boundaries](#gateway-access-and-host-boundaries); do not restore them after live development.
 
 Persist the prepared Nix generation in `/nix/var/nix/profiles/system` and activate it through a separate root transient systemd unit, exactly as the GMKtec handbook describes. Never run the switch inside the supervisor's cgroup. Then release the same final SHA on both machines:
 
@@ -151,7 +171,7 @@ CI runs the same gate from a persistent self-hosted checkout. Deployment does no
 
 The publication worker also distributes Android updates. After the checked source is integrated and both hosts are deployed, it publishes the APK built on GMKtec to both hosts and verifies the manifest and downloaded bytes through each front door. A release is unfinished if either app download fails. The native client compares the published version code with its installed package and shows Update app only for a newer build.
 
-[`deploy/android-update`](../deploy/android-update) owns artifact preparation, atomic installation and download verification. `apps/kenan/release-info.mjs` supplies the Git revision, application id and monotonic version code. The APK contains that identity at `assets/app-release.json`; preparation checks it against the source and Android package metadata, then records its SHA-256 and byte count. GMKtec is the only APK producer, using the existing Android signing key and host-owned endpoint configuration. Both hosts receive identical bytes. These APKs contain the app's endpoint configuration and forwarding identity, so they stay on the private Pi Remote hosts, never in public GitHub assets.
+[`deploy/android-update`](../deploy/android-update) owns artifact preparation, atomic installation and download verification. `apps/kenan/release-info.mjs` supplies the Git revision, application id and monotonic version code. The APK contains that identity at `assets/app-release.json`; preparation checks it against the source and Android package metadata, then records its SHA-256 and byte count. GMKtec is the only APK producer, using the existing Android signing key and host-owned `piRemoteRouterUrl`. Both hosts receive identical bytes. The APK contains the router bootstrap URL, not endpoint lists or SSH identities. Packages remain on the private Pi Remote hosts, not public GitHub assets.
 
 Each host stores packages in `/var/lib/pi-remote/app-updates/releases/<revision>/`, with `current` selecting the manifest atomically. The installer retains three generations. `PI_REMOTE_APP_UPDATES_DIR` selects a separate root for a rehearsal. The router serves `GET /v1/app-update` and `GET /v1/app-update/<revision>.apk` before person selection or unlock. Missing initial publication returns `release: null`; a broken manifest or package reports an error.
 
@@ -165,14 +185,16 @@ sudo deploy/android-update install /absolute/private/artifact-directory
 deploy/android-update verify /absolute/private/artifact-directory/manifest.json
 ```
 
-The Android app embeds its endpoint list from a JSON file named in `apps/kenan/android/local.properties`, which is not committed; see [the Kenan README](../apps/kenan/README.md#build-configuration). An SSH endpoint's account must allow local forwarding only to the front door's port. The browser client instead asks the host it was served from for its environment list, declared once as `environments` in `/etc/pi-stack/host.json`.
+Set `piRemoteRouterUrl` in the ignored `apps/kenan/android/local.properties`; see [the Kenan README](../apps/kenan/README.md#build-configuration). Remove the embedded endpoint/SSH configuration from build inputs. Both clients authenticate at the bootstrap router and fetch their allowed list from `/v1/environments`. Adding or withdrawing a grant requires no APK rebuild.
 
 ## Release verification
 
 - `/srv/pi/pi-remote/.pi-stack-commit` matches on every host;
 - `pi-remote-router.service`, each unlocked `pi-remote@<user>.service`, `pi-stack-voice.service`, and `pi-orchestrator@<fleet>.service` are active;
-- `curl -fsS http://127.0.0.1:8796/status` reports the same `releaseCommit`;
+- `sudo curl -fsS http://127.0.0.1:8796/status` reports the same `releaseCommit`;
 - `/v1/meet` reports `transcriptionAvailable: true`, and `/meet-adapter.js` exports `startMeetAdapter`;
-- `curl -H 'x-pi-remote-user: <user>' http://127.0.0.1:8788/v1/health` reports the intended environment id;
+- `deploy/smoke` authenticates each open person and health reports the intended environment id;
+- name-only API requests return `423`, and each authenticated endpoint list matches that person's grants;
+- no `/converge` or `/editor` bypass is published, and non-owning UIDs cannot reach supervisor, forwarded upstream or control ports;
 - `pi-orchestrator status` answers;
 - Kenan can switch environments without crossing threads, keys, voice, or downloads.

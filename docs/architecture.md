@@ -16,7 +16,7 @@ Pi applies extensions in package order. Pi Remote's `context-mirror.ts` records 
 
 ## Environments
 
-A Pi Remote server has a stable lowercase ID and a display name. `GET /v1/environment` returns that identity, its thread profiles, and client capabilities. Health responses carry the same ID.
+A Pi Remote server has a stable lowercase ID and a display name. Public `GET /v1/environment` supplies the person chooser and host identity. Authenticated responses supply the selected person's profiles and client capabilities. Health responses carry the supervisor's environment ID.
 
 The two current environments are:
 
@@ -27,16 +27,18 @@ The two current environments are:
 
 Both hosts run the same front door and one supervisor per person. A person's registry file says whether her folder is encrypted; the front door starts an open person's supervisor at boot and an encrypted person's when her key arrives.
 
-Kenan's build carries the list of endpoints it can reach because it cannot discover a server before choosing one; the browser client asks the host that served it. It verifies the reported ID before sending ordinary requests. A connection aimed at the wrong server fails instead of mixing state.
+The router is the sole published API entrance. `POST /v1/unlock` with `{key}` and the `x-pi-remote-user` hint mints a person-bound session. Requests authenticate with `x-pi-remote-session`; headers and query parameters naming a person grant no authority. This supersedes the previous claim that choosing a name was sufficient while a folder was open. Locking revokes that person's sessions.
 
-An endpoint can use direct network access or an SSH local-forward. Local uses its existing Tailscale Serve URL. Converge binds Pi Remote to loopback and accepts only the app's restricted SSH identity, which may forward to that listener but cannot open a shell or reach another port. An ignored endpoint declaration supplies each SSH endpoint's host, pinned host key, user, and owner-only private-key path. The build embeds that key in the app artifact.
+Authenticated `GET /v1/environments` intersects the host's endpoint catalog with the person's `remoteAccess` list, which defaults to the host's own endpoint. Remote entries carry server-only `upstreams` maps keyed by person. Each value is an absolute HTTP or HTTPS origin for that person's supervisor, never another router. Remote grants require an encrypted-folder identity; a grant without a matching upstream is a startup error. IDs, names and icons are configuration, not access branches.
+
+Clients receive an empty prefix for their own host and generated `/v1/remotes/<id>` prefixes for remotes, not upstream addresses. The gateway checks each request against the authenticated person's grants and strips client authentication before forwarding to her supervisor. Host-owned tunnels may reach another machine, but no tunnel identity or endpoint list is embedded in the app. Their server-owned SSH identity replaces the previously distributed client identity. Hosts must revoke that key's `authorized_keys` grant and close its active forwards; updating the app cannot revoke existing APKs. Host UID rules admit only the router, the owning service identities and root to private supervisor, upstream and control listeners. See [deployment boundaries](deployment.md#gateway-access-and-host-boundaries).
 
 ## Kenan state
 
-The native `RemoteEnvironment` owns the selected endpoint in Android preferences. It prepares the direct connection or pinned SSH tunnel and verifies `/v1/health` before the shared client sends ordinary requests. Switching environments reloads the page, which cancels requests owned by the previous endpoint.
+Android bootstraps from `piRemoteRouterUrl` and shares the router's person/session identity with native downloads and notifications. Browser and Android clients discover allowed endpoints only after authentication. Switching endpoints cancels requests owned by the previous endpoint. Switching person clears the previous session and endpoint state.
 
-The shared client keeps the selected drawer tab, composer drafts, and Local unlock key in WebView storage. Session lists and context come from the selected server after every reload. The thread-start menu uses that server's profile list.
+Drafts, notification cursors and selected threads are scoped by person and endpoint. Session lists and context come from the selected supervisor. The thread-start menu uses that supervisor's profile list.
 
 ## Session ownership
 
-Each Pi Remote deployment owns its runtime hosts, uploads, and local orchestrator view. [Pi](agent-cores.md) owns native execution, compaction and children. PiStack owns session identity, input delivery and portable activity logs. Local owns Personal and Home; Converge owns work. Kenan combines the two environments at the client boundary. There is no server-to-server agent bridge or remote ledger reader.
+Each Pi Remote deployment owns its runtime hosts, uploads, and local orchestrator view. [Pi](agent-cores.md) owns native execution, compaction and children. PiStack owns session identity, input delivery and portable activity logs. Local owns Personal and Home; Converge owns work. The router forwards client API requests to the selected person's supervisor. This is not an agent bridge or a remote ledger reader.

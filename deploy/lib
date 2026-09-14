@@ -85,6 +85,15 @@ pi_stack_host_value() {
 }
 pi_stack_persons_dir() { printf '%s\n' "${PI_REMOTE_PERSONS_DIR:-/var/lib/pi-remote/persons}"; }
 pi_stack_fleet_user() { pi_stack_host_value '.fleetUser // empty'; }
+
+# Deployment reads the private supervisor listener as root, not as a named
+# client. Host UID rules admit root on every supervisor/control port.
+pi_stack_supervisor_health() {
+  local user=$1 port
+  [[ $user =~ ^[a-z_][a-z0-9_-]*$ ]] || return 64
+  port=$(pi_stack_as_root jq -er '.port | select(type == "number" and . > 0 and . < 65536)' "$(pi_stack_persons_dir)/$user.json") || return
+  pi_stack_as_root curl -fsS --max-time 2 "http://127.0.0.1:$port/v1/health"
+}
 # Every unix account that runs Pi here: each Pi Remote person plus the fleet user.
 pi_stack_users() {
   local dir file

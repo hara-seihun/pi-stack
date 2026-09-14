@@ -597,11 +597,12 @@ function verifyRemotePeople(remoteHost, expected) {
   const script = String.raw`
 set -euo pipefail
 expected=$1
+source /srv/pi/pi-remote/deploy/lib
 people='[]'
 while IFS= read -r unit; do
   [[ -n $unit ]] || continue
   user=$(printf '%s' "$unit" | cut -d@ -f2 | cut -d. -f1)
-  health=$(curl -fsS --max-time 3 -H "x-pi-remote-user: $user" http://127.0.0.1:8788/v1/health)
+  health=$(pi_stack_supervisor_health "$user")
   [[ $(jq -r .releaseCommit <<<"$health") == "$expected" ]]
   properties=$(systemctl show "$unit" -p ExecStart -p ExecReload -p KillMode -p MemoryMax -p MemoryHigh -p PrivateMounts)
   people=$(jq -c --arg user "$user" --argjson health "$health" --arg properties "$properties" '. + [{user:$user,health:$health,effectiveUnit:$properties}]' <<<"$people")
@@ -614,8 +615,10 @@ printf '%s\n' "$people"
 function verifyGmktec(expected) {
   const remoteCommit = readFileSync("/srv/pi/pi-remote/.pi-stack-commit", "utf8").trim();
   const orchestratorCommit = readFileSync("/srv/pi/pi-orchestrator/.pi-stack-commit", "utf8").trim();
-  const voice = JSON.parse(runCapture("curl", ["-fsS", "--max-time", "3", "http://127.0.0.1:8796/status"], { timeoutSeconds: 10 }));
-  const health = JSON.parse(runCapture("curl", ["-fsS", "--max-time", "3", "-H", "x-pi-remote-user: kenan", "http://127.0.0.1:8788/v1/health"], { timeoutSeconds: 10 }));
+  const voice = JSON.parse(runCapture("sudo", ["-n", "curl", "-fsS", "--max-time", "3", "http://127.0.0.1:8796/status"], { timeoutSeconds: 10 }));
+  const supervisors = verifyRemotePeople(undefined, expected);
+  const health = supervisors.find(person => person.user === "kenan")?.health;
+  if (!health) throw new Error("GMKtec: kenan supervisor is not running");
   if (remoteCommit !== expected || orchestratorCommit !== expected || voice.releaseCommit !== expected) throw new Error("GMKtec deployed commit markers do not match integration");
   return {
     host: "gmktec",
@@ -625,7 +628,7 @@ function verifyGmktec(expected) {
     orchestratorCommit,
     voiceCommit: voice.releaseCommit,
     environmentId: health.environmentId,
-    supervisors: verifyRemotePeople(undefined, expected),
+    supervisors,
     units: unitStates(["pi-orchestrator@kenan.service", "pi-remote-router.service", "pi-remote@kenan.service", "pi-stack-voice.service"]),
   };
 }
@@ -857,8 +860,9 @@ set -euo pipefail
 expected=$1
 remote=$(< /srv/pi/pi-remote/.pi-stack-commit)
 orchestrator=$(< /srv/pi/pi-orchestrator/.pi-stack-commit)
-voice=$(curl -fsS --max-time 3 http://127.0.0.1:8796/status | jq -r .releaseCommit)
-environment=$(curl -fsS --max-time 3 http://127.0.0.1:8788/v1/health | jq -r .environmentId)
+source /srv/pi/pi-remote/deploy/lib
+voice=$(pi_stack_as_root curl -fsS --max-time 3 http://127.0.0.1:8796/status | jq -r .releaseCommit)
+environment=$(pi_stack_supervisor_health kenan | jq -r .environmentId)
 [[ $remote == "$expected" && $orchestrator == "$expected" && $voice == "$expected" && $environment == converge ]]
 units=(pi-orchestrator@kenan.service pi-remote-router.service pi-remote@kenan.service pi-stack-voice.service)
 for unit in "\${units[@]}"; do systemctl is-active --quiet "$unit"; done
