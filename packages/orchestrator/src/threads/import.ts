@@ -97,6 +97,8 @@ function replacePresentationParents(db: DatabaseSync, views: Row[]): void {
   const schemas = db.prepare("SELECT name,sql FROM sqlite_master WHERE type='table' AND sql IS NOT NULL").all() as Row[];
   db.exec("PRAGMA foreign_keys=OFF; BEGIN IMMEDIATE");
   try {
+    const triggers = db.prepare("SELECT name,tbl_name FROM sqlite_master WHERE type='trigger'").all() as Row[];
+    for (const trigger of triggers) if (sourceTables.includes(trigger.tbl_name)) db.exec(`DROP TRIGGER "${String(trigger.name).replaceAll('"', '""')}"`);
     db.exec("CREATE TABLE IF NOT EXISTS thread_views (id TEXT PRIMARY KEY, display_order INTEGER NOT NULL DEFAULT 0, idle_unread INTEGER NOT NULL DEFAULT 0, named_at_message_count INTEGER NOT NULL DEFAULT 0)");
     db.exec("CREATE TABLE IF NOT EXISTS message_annotations (work_id TEXT PRIMARY KEY, meeting_transcript TEXT NOT NULL DEFAULT '[]')");
     if (schemas.some(schema => schema.name === "work_items")) db.exec("INSERT OR IGNORE INTO message_annotations SELECT id,meeting_transcript FROM work_items");

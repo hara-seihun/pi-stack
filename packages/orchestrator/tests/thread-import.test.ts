@@ -18,7 +18,8 @@ function fixture() {
     CREATE TABLE events(seq INTEGER PRIMARY KEY,session_id REFERENCES sessions(id) ON DELETE CASCADE,payload);
     CREATE INDEX events_session ON events(session_id);
     CREATE TABLE work_items(id TEXT PRIMARY KEY,session_id REFERENCES sessions(id),request_id,text,images,delivery,state,created_at,inserted_at,last_error,meeting_transcript);
-    CREATE TABLE metadata(key TEXT PRIMARY KEY,value TEXT);`);
+    CREATE TABLE metadata(key TEXT PRIMARY KEY,value TEXT);
+    CREATE TRIGGER delegation_completed AFTER UPDATE OF state ON work_items BEGIN SELECT payload FROM events WHERE session_id=NEW.session_id; END;`);
   db.prepare("INSERT INTO sessions VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?)").run("thread", "Research", root, native, "STOPPED", "2026-09-01", "2026-09-01", "astra", "high", "default", "personal", 8, 1, 20);
   db.prepare("INSERT INTO events VALUES(1,'thread',?)").run("retained presentation");
   const insert = db.prepare("INSERT INTO work_items VALUES(?,'thread',?,?,'[]','followUp',?,'2026-09-01',NULL,NULL,?)");
