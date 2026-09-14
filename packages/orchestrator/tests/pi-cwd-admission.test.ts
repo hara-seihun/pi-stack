@@ -100,7 +100,7 @@ function persistedNode(id: string, cwd: string, stateDir: string, parentId: stri
     parentId,
     name: id === "root" ? "Pi" : `Pi child ${id}`,
     cwd,
-    sessionFile: join(stateDir, id === "root" ? "root.jsonl" : "children", `${id}.jsonl`),
+    sessionFile: id === "root" ? join(stateDir, "root.jsonl") : join(stateDir, "children", `${id}.jsonl`),
     state: "idle",
     busy: false,
     provider: "fixture",
@@ -183,6 +183,21 @@ describe("Pi native cwd admission", () => {
 
     expect(opened).toEqual([]);
     expect(readFileSync(statePath, "utf8")).toBe(saved);
+  });
+
+  it.each(["root", "child"])("does not replace saved relative cwd for %s with an admitted startup cwd", async invalidId => {
+    const { allowed, project, stateDir } = temporaryLayout();
+    const root = persistedNode("root", project, stateDir);
+    const child = persistedNode("child", project, stateDir, "root");
+    (invalidId === "root" ? root : child).cwd = "sibyl";
+    const saved = tree(root, [child]);
+    const path = join(stateDir, "pi-tree.json");
+    writeFileSync(path, saved);
+    const opened: string[] = [];
+    await expect(openingFailure(options(project, stateDir, configured(allowed)), opened))
+      .rejects.toThrow(`nodes[${invalidId}].cwd: relative_cwd`);
+    expect(opened).toEqual([]);
+    expect(readFileSync(path, "utf8")).toBe(saved);
   });
 
   it("admits existing absolute cwd values and resumes a restored idle child", async () => {
