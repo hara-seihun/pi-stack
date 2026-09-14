@@ -30,7 +30,7 @@ import { RuntimeCapacityQueue } from "./runtime-capacity-queue";
 import { API } from "./api";
 import { idleNotifications } from "./notifications";
 import { listPersons, publicPerson } from "./persons";
-import { knownEnvironments } from "./environments";
+import { ownEnvironment } from "./environments";
 import { API_CORS_HEADERS } from "./cors";
 import { fileBrowserError, listDirectory, localFileResponse, webResponse } from "./files";
 import { governorControls, isGovernorProvider, toggleGovernor } from "./governors";
@@ -2446,7 +2446,7 @@ const server = Bun.serve({
     if (web) return web;
     if (API.health.match(req.method, url.pathname)) return json({ ok: true, version: VERSION, environmentId: ENVIRONMENT_ID, releaseCommit: RELEASE_COMMIT });
     if (API.environment.match(req.method, url.pathname)) return json({ environment: environmentMetadata() });
-    if (API.environments.match(req.method, url.pathname)) return json({ environments: knownEnvironments() });
+    if (API.environments.match(req.method, url.pathname)) return json({ environments: [ownEnvironment()] });
     if (API.files.match(req.method, url.pathname)) {
       const requested = url.searchParams.get("path") ?? "";
       if (!isAbsolute(requested)) return error("Valid absolute folder path required");

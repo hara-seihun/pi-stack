@@ -13,6 +13,7 @@ export type Person = {
   user: string;
   displayName: string;
   port: number;
+  remoteAccess?: string[];
   /** Present when the person's folder is a gocryptfs directory that needs her key. */
   unlock?: { cipherDir: string; mountpoint: string };
   environment: Record<string, string | number | boolean | object>;
@@ -27,6 +28,7 @@ export function readPerson(path: string): Person {
   if (person.version !== 1) throw new Error(`${path}: unsupported person file version`);
   if (!/^[a-z_][a-z0-9_-]{0,31}$/.test(person.user)) throw new Error(`${path}: invalid unix user ${person.user}`);
   if (!Number.isInteger(person.port) || person.port <= 0) throw new Error(`${path}: port must be a positive integer`);
+  if (person.remoteAccess !== undefined && (!Array.isArray(person.remoteAccess) || person.remoteAccess.some((id) => typeof id !== "string" || !/^[a-z][a-z0-9-]{0,31}$/.test(id)) || new Set(person.remoteAccess).size !== person.remoteAccess.length)) throw new Error(`${path}: remoteAccess must contain unique endpoint ids`);
   if (!person.environment || typeof person.environment !== "object") throw new Error(`${path}: environment object required`);
   if (person.unlock && (!person.unlock.cipherDir || !person.unlock.mountpoint)) throw new Error(`${path}: unlock needs cipherDir and mountpoint`);
   return person;
