@@ -40,11 +40,12 @@ it.each([
   ["luna", "max", "max"],
   ["terra", "high", "high"],
   ["terra", "medium", "medium"],
+  ["luna", "off", "none"],
   ["luna", undefined, undefined],
 ] as const)("sends admitted %s thinking %s without replacing recovery pins", async (model, thinking, effort) => {
   let sent: any;
   const transport = async (_url: unknown, init?: RequestInit) => { sent = body(init!); return new Response(events()); };
-  expect((await executeCompletion({ ...input, model }, { ...run, model: `gpt-5.6-${model}`, thinking }, options(transport))).state).toBe("completed");
+  expect((await executeCompletion({ ...input, model, thinkingLevel: "high" }, { ...run, model: `gpt-5.6-${model}`, thinking }, options(transport))).state).toBe("completed");
   expect(sent.reasoning?.effort).toBe(effort);
 });
 

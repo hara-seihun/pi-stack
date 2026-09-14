@@ -8,6 +8,8 @@ import { COMPLETION_OPENAPI } from "../src/completion-openapi.js";
 import { type CompletionExecution, type CompletionInput, type CompletionOutcome, isCompletionInput, isCompletionRecord } from "../src/completion-contract.js";
 import { reconcileCompletionReceipts, saveCompletionReceipt } from "../src/host/completion-receipts.js";
 import { Store } from "../src/store.js";
+import { loadConfig } from "../src/config.js";
+import { assignCompletion } from "../src/policy.js";
 
 const input: CompletionInput = { model: "luna", prompt: "  exact user\n", systemPrompt: "exact system", metadata: { application: "test", nested: { b: 2, a: 1 } } };
 const execution: CompletionExecution = { state: "completed", result: { text: "  exact result\n", provider: "openai-codex", model: "gpt-5.6-luna", responseId: "resp-provider", usage: { input: 10, output: 4, cacheRead: 2, cacheWrite: 0, totalTokens: 16, reasoning: 1 }, stopReason: "stop" } };
@@ -45,6 +47,33 @@ describe("durable completions", () => {
       write.mockRestore();
       expect(store.runs()).toHaveLength(1);
     } finally { store.close(); rmSync(root, { recursive: true, force: true }); }
+  });
+
+  it.each([
+    ["luna", undefined, "max"],
+    ["terra", undefined, "high"],
+    ["terra", "medium", "medium"],
+    ["luna", "off", "off"],
+  ] as const)("persists %s thinking %s at admission and retains it on retry", (model, thinkingLevel, expected) => {
+    const store = Store.open(":memory:"), service = new CompletionService(store, "/tmp");
+    const config = loadConfig("/missing");
+    try {
+      store.upsertAccount({ id: "account", provider: "openai-codex" });
+      store.recordMeter("account", "weekly", 1, Date.now() + 60_000);
+      const record = value(service.submit("thinking", { ...input, model, thinkingLevel }));
+      const first = assignCompletion(store, record.runId, model, config).assignment!;
+      expect(first).toMatchObject({ model: `gpt-5.6-${model}`, thinking: expected });
+      expect(store.assignRun(record.runId, { ...first, unit: "completion", releasePath: "/release" })).toBe(true);
+      expect(store.run(record.runId)?.thinking).toBe(expected);
+      value(service.claim(record.runId, "rejected"));
+      const queued = value(service.settle(record.runId, "rejected", { state: "failed", error: { code: "rate-limited", httpStatus: 429, message: "rejected", retryAfterMs: 1000 } }));
+      const changed = { ...config, profiles: { [model]: [{ provider: "openai-codex", model: "gpt-6-astra", thinking: "low" }] } };
+      const retry = assignCompletion(store, record.runId, model, changed, queued.retryAt! + 1).assignment!;
+      expect(retry).toMatchObject({ model: first.model, thinking: expected });
+      expect(store.assignRun(record.runId, { ...retry, unit: "retry", releasePath: "/next-release" })).toBe(true);
+      expect(store.run(record.runId)?.thinking).toBe(expected);
+      expect(service.attempts("thinking")?.[0]?.outcome).toMatchObject({ state: "failed", error: { httpStatus: 429 } });
+    } finally { store.close(); }
   });
 
   it("fences an interrupted provider attempt without creating another spend", () => {

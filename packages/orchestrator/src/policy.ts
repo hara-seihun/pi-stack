@@ -105,7 +105,7 @@ export function assignCompletion(store:Store,runId:string,profile:string,cfg:Orc
   if(retryAt>now)return{refusals:[{accountId:"*",reason:`provider retry scheduled at ${retryAt}`} ]};
   const run=store.run(runId);
   const candidates=run?.provider&&run.model?[{provider:run.provider,model:run.model,thinking:run.thinking}]
-    :cfg.profiles[profile]?.map(candidate=>({...candidate,thinking:admissionThinking(candidate)}));
+    :cfg.profiles[profile]?.map(candidate=>({...candidate,thinking:completion?.input.thinkingLevel??admissionThinking(candidate)}));
   if(!candidates?.length)throw new Error(`unknown completion profile ${profile}`);
   const refusals:Refusal[]=[],choices:(Assignment&{spent:number;reserved:boolean})[]=[];
   for(const candidate of candidates){

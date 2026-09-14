@@ -64,7 +64,7 @@ Ordinary-user clients discover `modelBrokerUrl` in `~/.config/pi-orchestrator/co
 
 The JSON config may set `modelBrokerUrl`, model `profiles`, `backgroundSpendFraction`, machine and account concurrency, meter age, reconciliation periods, stall limits, `taskManifest`, `authPath`, and `agentDir`. The strict `astra`, `sol`, `terra`, `luna`, and `opus` profiles are always available alongside configured profiles. Each selects exactly one catalog model, even if a local profile uses the same name.
 
-The [shared catalog](src/catalog.ts) maps Astra to `openai-codex/gpt-6-astra` and Sol, Terra, and Luna to `openai-codex/gpt-5.6-sol`, `gpt-5.6-terra`, and `gpt-5.6-luna`. All four share the Codex five-hour and weekly meters. Every new Orchestrator agent and completion admission uses `high`, except catalog Luna uses `max`. This includes repair lanes, direct runs, waves and custom profiles. Thread settings accept explicit thinking and speed overrides. Standard speed is the default.
+The [shared catalog](src/catalog.ts) maps Astra to `openai-codex/gpt-6-astra` and Sol, Terra, and Luna to `openai-codex/gpt-5.6-sol`, `gpt-5.6-terra`, and `gpt-5.6-luna`. All four share the Codex five-hour and weekly meters. Every new Orchestrator agent and completion admission defaults to `high`, except catalog Luna defaults to `max`. This includes repair lanes, direct runs, waves and custom profiles. Thread settings and completion requests accept explicit thinking and speed overrides. Standard speed is the default.
 
 `SUBAGENT_MODEL_DESCRIPTIONS`, exported through `pi-orchestrator/api`, contains Hara's four verbatim engineering-level descriptions and her classification/inference exception, supplied on September 11, 2026. Tool schemas share that text without adding a model-selection policy.
 
@@ -107,7 +107,7 @@ A repair lane declares its own probe. It does not depend on the ordinary manifes
 
 The command runs as the daemon owner and prints exactly `{ "revision": "host-state-version", "ready": true }`. Use explicit sudo in the command when the probe needs root. Each repair probe refreshes every 30 seconds, fails closed independently, and permits at most one admission per observation. Ordinary snapshots need not mention repair lanes. A repair-only manifest does not need `snapshotCommand`, even with `budget: "force"`.
 
-Repair threads retain forced admission and full Pi context. The shared runner launches under UID0 in a system scope for this execution boundary. Its sockets and native session files retain the controller account's custody. It does not substitute an ordinary user's UID or share an application-isolated runner.
+Repair threads retain forced admission and full Pi context. Fleet admission holds one repair owner and rejects isolated application contexts. Recovery requires the execution's recorded account lease, even when launches are paused. The shared runner launches under UID0 in a system scope for this execution boundary. Its sockets and native session files retain the controller account's custody. It does not substitute an ordinary user's UID or share an application-isolated runner.
 
 `pause --ordinary` sets `ordinary-launches=paused`; `resume --ordinary` clears it. The global `launches=paused` control stops all new admission. Neither control cancels an admitted turn. Thread stop and resume use the same API as Remote and agent tools.
 

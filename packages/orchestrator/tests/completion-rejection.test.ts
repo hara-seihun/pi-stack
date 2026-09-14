@@ -58,6 +58,8 @@ it("recovers the exact deployed Codex rejection envelope without editing origina
 it("serves retry and immutable attempt history without weakening the indeterminate fence",async()=>{
   const store=Store.open(":memory:"),service=new CompletionService(store,"/tmp"),daemon=new Daemon(store,loadConfig("/missing"),"/release") as any;
   daemon.reconcile=async()=>{};
+  expect(store.path).toBe(":memory:");
+  expect(daemon.threads.db.prepare("PRAGMA database_list").all()).toMatchObject([{ name: "main", file: "" }]);
   const server=createServer((req,res)=>void daemon.request(req,res));
   try{
     const first=value(service.submit("api-rejection",input));assign(store,first.runId);value(service.claim(first.runId,"first"));
@@ -69,7 +71,7 @@ it("serves retry and immutable attempt history without weakening the indetermina
     const plans=await(await fetch(base.replace('/completions/api-rejection','/plans'))).json();
     expect(Object.keys(plans.controls).some(key=>key.startsWith('completion-attempt:')||key.startsWith('completion-receipt:'))).toBe(false);
     await fetch(base+'/cancel',{method:'POST'});expect((await fetch(base+'/retry',{method:'POST'})).status).toBe(409);
-  }finally{await new Promise<void>(resolve=>server.close(()=>resolve()));store.close();}
+  }finally{await new Promise<void>(resolve=>server.close(()=>resolve()));await daemon.threads.close();store.close();}
 });
 
 it("uses observed rejection concurrency once per wave, honors cooldown, and expands after success",()=>{

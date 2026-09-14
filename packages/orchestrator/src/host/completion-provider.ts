@@ -4,7 +4,6 @@ import { createParser } from "eventsource-parser";
 import { providerOAuth } from "../auth/shared-oauth.js";
 import type { CompletionExecution, CompletionFetch, CompletionInput, CompletionUsage } from "../completion-contract.js";
 import type { Run } from "../domain.js";
-import { resolveThreadSettings } from "../threads/settings.js";
 
 interface NativeResponse {
   id?: string;
@@ -45,8 +44,6 @@ function usage(response: NativeResponse): CompletionUsage | undefined {
 }
 
 export async function executeCompletion(input: CompletionInput, run: Run, options: CompletionProviderOptions): Promise<CompletionExecution> {
-  const settings = resolveThreadSettings({ model: input.model, thinkingLevel: input.thinkingLevel, speed: input.speed });
-  if (!settings.ok) return { state: "failed", error: { code: "unsupported-option", message: settings.error.message } };
   if (input.maxOutputTokens !== undefined) return { state: "failed", error: { code: "unsupported-option", message: "OpenAI Codex rejects max_output_tokens for Luna and Terra. No provider request was sent." } };
   const provider = options.provider ?? builtinProviders().find(provider => provider.id === "openai-codex");
   const model = provider?.getModels().find(model => model.id === run.model);
@@ -95,7 +92,7 @@ export async function executeCompletion(input: CompletionInput, run: Run, option
       ...auth,
       signal,
       transport: "sse",
-      reasoningEffort: settings.value.thinkingLevel === "off" ? "none" : settings.value.thinkingLevel as ThinkingLevel,
+      reasoningEffort: run.thinking === "off" ? "none" : run.thinking as ThinkingLevel | undefined,
       maxRetries: 0,
       fetch: observedFetch,
       onPayload: payload => completionPayload(payload, input),

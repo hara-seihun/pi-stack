@@ -32,7 +32,7 @@ it("leases executions without creating fleet runs and enforces account capacity"
   } finally { store.close(); }
 });
 
-it("forces children but never bypasses exhausted quota or the root UID boundary", async () => {
+it("forces children but never bypasses exhausted quota, including root repair", async () => {
   const store = Store.open(":memory:");
   store.upsertAccount({ id: "a", provider: "openai-codex", concurrency: 1 });
   store.setControl("boost:openai-codex", "0");
@@ -43,8 +43,41 @@ it("forces children but never bypasses exhausted quota or the root UID boundary"
     if (child.ok) await child.value.release();
     store.recordMeter("a", "weekly", 100, Date.now() + 1000);
     expect((await fleet.admit(thread, thread.settings, false, "exhausted")).ok).toBe(false);
-    const root = await fleet.admit({ ...thread, metadata: { execution: "root-repair" } }, thread.settings, true, "root-work");
-    expect(root).toMatchObject({ ok: false, error: { code: "unavailable", message: expect.stringContaining("UID0") } });
+    const root = await fleet.admit({ ...thread, metadata: { execution: "root-repair" } }, thread.settings, false, "root-work");
+    expect(root).toMatchObject({ ok: false, error: { code: "unavailable", message: expect.stringContaining("provider quota exhausted") } });
+    expect(store.control("repair-owner")).toBeUndefined();
+  } finally { store.close(); }
+});
+
+it("owns root repair leases and recovers only recorded executions without isolated context", async () => {
+  const store = Store.open(":memory:");
+  store.upsertAccount({ id: "a", provider: "openai-codex", concurrency: 2 });
+  store.setControl("ordinary-launches", "paused");
+  const fleet = new Fleet(store, loadConfig("/missing"));
+  const root = { ...thread, metadata: { execution: "root-repair" } };
+  try {
+    expect(await fleet.admit(root, root.settings, true, "missing")).toMatchObject({ ok: false, error: { code: "unavailable", message: expect.stringContaining("no recorded account lease") } });
+    expect(await fleet.admit({ ...root, metadata: { ...root.metadata, context: { tools: [] } } }, root.settings, false, "isolated")).toMatchObject({ ok: false, error: { code: "invalid_request" } });
+    expect(store.activeSessionLeases()).toEqual([]);
+    const admitted = await fleet.admit(root, root.settings, false, "root-work");
+    expect(admitted.ok).toBe(true);
+    if (!admitted.ok) throw new Error(admitted.error.message);
+    try {
+      expect(store.control("repair-owner")).toBe(root.id);
+      expect(await fleet.admit({ ...root, id: "other-root" }, root.settings, false, "other-work")).toMatchObject({ ok: false, error: { message: expect.stringContaining("repair already owned") } });
+      expect(await fleet.admit({ ...root, id: "other-root" }, root.settings, true, "root-work")).toMatchObject({ ok: false, error: { message: expect.stringContaining("no recorded account lease") } });
+    } finally { await admitted.value.release(); }
+    expect(store.control("repair-owner")).toBeUndefined();
+    store.setControl("launches", "paused");
+    const recovered = await fleet.admit(root, root.settings, true, "root-work");
+    expect(recovered.ok).toBe(true);
+    if (!recovered.ok) throw new Error(recovered.error.message);
+    try {
+      expect(store.control("repair-owner")).toBe(root.id);
+      expect(store.activeSessionLeases().map(lease => lease.id)).toEqual(["thread:root-work"]);
+    } finally { await recovered.value.release(); }
+    expect(store.control("repair-owner")).toBeUndefined();
+    expect(store.activeSessionLeases()).toEqual([]);
   } finally { store.close(); }
 });
 

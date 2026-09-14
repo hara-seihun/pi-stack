@@ -1,6 +1,7 @@
 import { mkdirSync } from "node:fs";
 import { randomUUID } from "node:crypto";
 import { admissionThinking, type ModelCandidate } from "./catalog.js";
+import type { CompletionInput } from "./completion-contract.js";
 import { dirname, resolve } from "node:path";
 import type { DatabaseSync } from "node:sqlite";
 import type { Account, BudgetClass, FailureKind, LaneSpec, LeaseKind, Run, RunActivity, RunContext, RunSource, RunState, UsageEntry, UsageTotal } from "./domain.js";
@@ -124,7 +125,7 @@ export class Store {
     if (!meta) db.exec(SCHEMA);
     const row = db.prepare("SELECT version FROM meta").get() as { version: number };
     if (row.version !== SCHEMA_VERSION) { db.close(); throw new Error(`unsupported orchestrator schema ${row.version}`); }
-    return new Store(db, resolve(path));
+    return new Store(db, path === ":memory:" ? path : resolve(path));
   }
 
   close(): void { this.db.close(); }
@@ -256,7 +257,9 @@ export class Store {
     return this.transaction(()=>{
       const run=this.run(id);
       if(!run || run.state!=="queued" || run.accountId)return false;
-      const thinking=run.provider&&run.model?run.thinking:admissionThinking(assignment);
+      const requestId=this.control(`completion-run:${id}`);
+      const completion=requestId?JSON.parse(this.control(`completion:${requestId}`)!) as {input:CompletionInput}:undefined;
+      const thinking=run.provider&&run.model?run.thinking:completion?.input.thinkingLevel??admissionThinking(assignment);
       this.db.prepare(`UPDATE run SET account_id=?,provider=?,model=?,thinking=?,worker_unit=?,release_path=?,state='starting',started_at=COALESCE(started_at,?),updated_at=?,progress_at=? WHERE id=?`)
         .run(assignment.accountId,assignment.provider,assignment.model,thinking??null,assignment.unit,assignment.releasePath,at,at,at,id);
       this.createLease(`run:${id}`,assignment.accountId,"fleet",id,at);
