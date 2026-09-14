@@ -17,8 +17,8 @@ export interface ImportProvenanceMetadata {
   importProvenance: { stateDirs: string[] };
 }
 export interface ImportProvenanceResult { removedFiles: string[]; metadata: Record<string, ImportProvenanceMetadata> }
-type Source = { path: string; owner: string; hash: string; format: string; records: Row[] };
-type Native = { path: string; hash: string; records: Row[]; additions: Row[] };
+type Source = { path: string; owner: string; hash: string; format: string; header: Row };
+type Native = { path: string; hash: string; records: Row[] };
 type Match = { value: Row; path: string; entryId: string };
 const names = new Set(["pi-tree.json", "agents.json", "conversation.jsonl", "activity.jsonl", "transfer.json", "codex-session.json"]);
 const signature = /^(thinkingSignature|textSignature|encrypted_content|encryptedContent|thoughtSignature)$/;
@@ -55,6 +55,11 @@ function jsonl(text: string, path: string, partial = false): Row[] {
     }
   }
   return records;
+}
+function sourceRecords(source: Source): Row[] {
+  const text = readFileSync(source.path, "utf8");
+  const records = source.format.endsWith(".jsonl") ? jsonl(text, source.path, true) : [JSON.parse(text)];
+  return source.format === "activity.jsonl" ? records.filter(record => !["context_update", "message_update", "tool_execution_update"].includes(record.type)) : records;
 }
 function nativeHeader(records: Row[]) { const header = records[0]; return header?.type === "session" && typeof header.id === "string" && header.representation === undefined && (!header.core || header.core === "pi"); }
 function syncDirectory(path: string) { const fd = openSync(path, "r"); try { fsyncSync(fd); } finally { closeSync(fd); } }
@@ -103,7 +108,7 @@ export function adoptImportProvenance(options: ImportProvenanceOptions): Result<
       try { header = JSON.parse(first); } catch { if (required) throw new Error(`Invalid native history header: ${path}`); return; }
       if (!nativeHeader([header])) { if (required) throw new Error(`Not native Pi history: ${path}`); return; }
       const records = jsonl(text, real);
-      const native: Native = { path: real, hash: hash(text), records: [header, ...records.length > 1 ? [records.at(-1)!] : []], additions: [] }; natives.set(real, native);
+      const native: Native = { path: real, hash: hash(text), records: [header, ...records.length > 1 ? [{ id: records.at(-1)!.id }] : []] }; natives.set(real, native);
       for (const entry of records) {
         if (entry.type === "message" && entry.message) addMessage(entry.message, real, entry.id);
         if (entry.type === "custom_message") {
@@ -149,7 +154,7 @@ export function adoptImportProvenance(options: ImportProvenanceOptions): Result<
         let sourceOwner = owner;
         const header = records[0];
         if (format === "conversation.jsonl" && typeof header?.id === "string" && threads.has(header.id)) sourceOwner = header.id;
-        sources.push({ path, owner: sourceOwner, hash: hash(text), format, records });
+        sources.push({ path, owner: sourceOwner, hash: hash(text), format, header: header?.type === "session" ? header : {} });
         references(records);
       }
     }
@@ -170,7 +175,7 @@ export function adoptImportProvenance(options: ImportProvenanceOptions): Result<
       if (item.isFile() && item.name.endsWith(".jsonl") && !names.has(item.name)) addNative(join(directory, item.name), false);
     }
     for (const source of sources) if (source.format === "pi-tree.json") {
-      const tree = source.records[0];
+      const tree = sourceRecords(source)[0];
       if (!tree || !Array.isArray(tree.nodes)) throw new Error(`Invalid Pi tree: ${source.path}`);
       for (const node of tree.nodes) {
         if (!threads.has(node.id)) throw new Error(`Source child ${node.id} has not transferred to threads: ${source.path}`);
@@ -201,7 +206,8 @@ export function adoptImportProvenance(options: ImportProvenanceOptions): Result<
         facts.push({ kind: "message", message, ...(sourceEntry ? { sourceEntry } : {}) });
         addMessage(message, target.path, entryId);
       }
-      for (const record of source.records) {
+      const records = sourceRecords(source);
+      for (const record of records) {
         if (source.format === "conversation.jsonl") {
           if (record.type === "message") preserve(record.message, { id: record.id, parentId: record.parentId, timestamp: record.timestamp });
           else if (record.type === "custom_message") preserve({ role: "custom", content: record.content, customType: record.customType, details: record.details, timestamp: Date.parse(record.timestamp) });
@@ -234,16 +240,17 @@ export function adoptImportProvenance(options: ImportProvenanceOptions): Result<
           if (unmatched.length) { facts.push({ kind: "agents", value: unmatched }); knownAgents.push(...unmatched); }
         } else facts.push({ kind: "source-metadata", value: record });
       }
-      const metadataForSource = Object.fromEntries(Object.entries(metadata).filter(([id]) => id === source.owner || source.format === "pi-tree.json" && source.records[0].nodes.some((node: Row) => node.id === id)));
-      const parent = target.additions.at(-1)?.id ?? [...target.records].reverse().find(entry => entry.type !== "session" && entry.id)?.id ?? null;
-      target.additions.push({ type: "custom", id: entryId, parentId: parent, timestamp: new Date().toISOString(), customType: "thread_import_provenance",
-        data: { source: { path: source.path, sha256: source.hash, format: source.format, ...(source.records[0]?.type === "session" ? { header: source.records[0] } : {}) }, facts, metadata: metadataForSource,
-          matchedMessages, matchedNativeFiles: [...matchedFiles] } });
-    }
-    for (const native of natives.values()) if (native.additions.length) {
-      const text = readFileSync(native.path, "utf8");
-      if (hash(text) !== native.hash) throw new Error(`Native history changed during provenance transfer: ${native.path}`);
-      custodyReplaceFileSync(native.path, text + (text.endsWith("\n") ? "" : "\n") + native.additions.map(entry => JSON.stringify(entry)).join("\n") + "\n");
+      const metadataForSource = Object.fromEntries(Object.entries(metadata).filter(([id]) => id === source.owner || source.format === "pi-tree.json" && records[0].nodes.some((node: Row) => node.id === id)));
+      const parent = target.records.length > 1 ? target.records.at(-1)?.id ?? null : null;
+      const addition = { type: "custom", id: entryId, parentId: parent, timestamp: new Date().toISOString(), customType: "thread_import_provenance",
+        data: { source: { path: source.path, sha256: source.hash, format: source.format, ...(source.header.type === "session" ? { header: source.header } : {}) }, facts, metadata: metadataForSource,
+          matchedMessages, matchedNativeFiles: [...matchedFiles] } };
+      const text = readFileSync(target.path, "utf8");
+      if (hash(text) !== target.hash) throw new Error(`Native history changed during provenance transfer: ${target.path}`);
+      const updated = text + (text.endsWith("\n") ? "" : "\n") + JSON.stringify(addition) + "\n";
+      custodyReplaceFileSync(target.path, updated);
+      target.hash = hash(updated);
+      target.records = [target.records[0], { id: entryId }];
     }
     for (const source of sources) if (hash(readFileSync(source.path, "utf8")) !== source.hash) throw new Error(`Source changed during provenance transfer: ${source.path}`);
     const removedFiles: string[] = [];
