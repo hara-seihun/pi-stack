@@ -120,7 +120,7 @@ test('binds child accounts before prompting and resolves canonical model command
 import assert from 'node:assert/strict';
 import {mkdirSync,writeFileSync} from 'node:fs';
 import {join} from 'node:path';
-import {openPiNative} from ${JSON.stringify(process.env.PI_TEST_NATIVE_ENTRY??join(buildRoot,'compiled/cores/pi-native.js'))};
+import {openPiSession} from ${JSON.stringify(process.env.PI_TEST_NATIVE_ENTRY??join(buildRoot,'compiled/threads/pi-session.js'))};
 import {Store} from ${JSON.stringify(join(buildRoot,'compiled/store.js'))};
 const root=process.env.HOME,agentDir=join(root,'agent');
 mkdirSync(agentDir);writeFileSync(join(agentDir,'auth.json'),'{}');
@@ -130,31 +130,32 @@ writeFileSync(join(root,'auth.json'),JSON.stringify(Object.fromEntries(accounts.
 const store=Store.open(process.env.PI_ORCHESTRATOR_LEDGER);
 for(const id of accounts)store.upsertAccount({id,provider:'openai-codex'});
 const sessions=[],events=[];
-const options={cwd:root,stateDir:root,sessionId:'root',args:['--extension',${JSON.stringify(routing)}],env:{PI_CODING_AGENT_DIR:agentDir}};
-const open=child=>openPiNative(options,{id:'child-'+child,parentId:'root',name:'Child',cwd:root,sessionFile:join(root,child+'.jsonl'),state:'idle',busy:false,provider:'openai-codex',model:'gpt-6-astra',thinkingLevel:'high'}, {list:()=>[],beforeReplace:async()=>{}}, event=>events.push(event),()=>{});
+const options={cwd:root,args:['--extension',${JSON.stringify(routing)},'--provider','openai-codex','--model','gpt-6-astra','--thinking','high'],env:{PI_CODING_AGENT_DIR:agentDir}};
+const open=child=>openPiSession({...options,threadId:'child-'+child,sessionFile:join(root,child+'.jsonl')},event=>events.push(event),()=>{});
+const state=async session=>{const id=crypto.randomUUID();await session.command({type:'get_state',id});const data=events.find(event=>event.id===id).data;return {...data,provider:data.model?.provider,model:data.model?.id};};
 try {
   for(let child=0;child<4;child++) {
     const session=await open(child);
     sessions.push(session);
-    assert.equal(session.snapshot().provider,'openai-codex-10','child '+child);
+    assert.equal((await state(session)).provider,'openai-codex-10','child '+child);
   }
   await sessions[0].command({type:'set_model',id:'canonical',provider:'openai-codex',modelId:'gpt-5.6-sol'});
   const reply=events.find(event=>event.id==='canonical');
   assert.equal(reply?.success,true,JSON.stringify(reply));
-  assert.equal(sessions[0].snapshot().provider,'openai-codex-10');
-  assert.equal(sessions[0].snapshot().model,'gpt-5.6-sol');
-  assert.equal(sessions[0].snapshot().thinkingLevel,'high');
+  assert.equal((await state(sessions[0])).provider,'openai-codex-10');
+  assert.equal((await state(sessions[0])).model,'gpt-5.6-sol');
+  assert.equal((await state(sessions[0])).thinkingLevel,'high');
   for(const account of accounts)store.setCooldown(account,Date.now()+600000);
   await assert.rejects(open(5),/No eligible pooled account.*Earliest cooldown/);
   await sessions[0].command({type:'set_model',id:'cooling',provider:'openai-codex',modelId:'gpt-6-astra'});
   assert.match(events.find(event=>event.id==='cooling')?.error??'',/No eligible pooled account/);
-  assert.equal(sessions[0].snapshot().model,'gpt-5.6-sol');
+  assert.equal((await state(sessions[0])).model,'gpt-5.6-sol');
   const [runId]=store.createRuns({count:1,source:'direct',prompt:'fixture',cwd:root,profile:'astra',budget:'force'});
   store.assignRun(runId,{accountId:'openai-codex-10',provider:'openai-codex',model:'gpt-6-astra',thinking:'high',unit:'fixture',releasePath:root});
   store.setControl('account-reservation:openai-codex-10',JSON.stringify({metadata:{purpose:'assigned'},reason:'new admissions only'}));
-  const assigned=await openPiNative({...options,sessionId:runId,env:{...options.env,PI_ORCHESTRATOR_ASSIGNED:'1',PI_ORCHESTRATOR_RUN_ID:runId}}, {id:runId,parentId:null,name:'Assigned',cwd:root,sessionFile:join(root,'assigned.jsonl'),state:'idle',busy:false,provider:'openai-codex',model:'gpt-6-astra',thinkingLevel:'high'}, {list:()=>[],beforeReplace:async()=>{}},event=>events.push(event),()=>{});
+  const assigned=await openPiSession({...options,threadId:runId,sessionFile:join(root,'assigned.jsonl'),env:{...options.env,PI_ORCHESTRATOR_ASSIGNED:'1',PI_ORCHESTRATOR_RUN_ID:runId}},event=>events.push(event),()=>{});
   sessions.push(assigned);
-  assert.equal(assigned.snapshot().provider,'openai-codex-10');
+  assert.equal((await state(assigned)).provider,'openai-codex-10');
 } finally {
   for(const session of sessions)await session.close();
   store.close();

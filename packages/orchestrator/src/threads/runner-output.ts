@@ -1,7 +1,16 @@
+import type { Socket } from 'node:net';
 import { closeSync, ftruncateSync, openSync, readSync, writeSync } from 'node:fs';
 
 export class RuntimeOutput {
-  constructor(path) {
+  private fd: number;
+  sequence: number;
+  private acknowledged: number;
+  private acknowledgedOffset: number;
+  private end: number;
+  private ends: Map<number, number>;
+  private client: {socket: Socket; offset: number; pumping: boolean} | null;
+  private closed: boolean;
+  constructor(path: string) {
     this.fd = openSync(path, 'ax+', 0o600);
     this.sequence = 0;
     this.acknowledged = 0;
@@ -12,9 +21,9 @@ export class RuntimeOutput {
     this.closed = false;
   }
 
-  publish(value) { this.publishLine(JSON.stringify(value)); }
+  publish(value: unknown) { this.publishLine(JSON.stringify(value)); }
 
-  publishLine(line) {
+  publishLine(line: string) {
     if (this.closed) return;
     const record = JSON.stringify({type: 'output', sequence: ++this.sequence, line}) + '\n';
     const bytes = Buffer.from(record);
@@ -25,7 +34,7 @@ export class RuntimeOutput {
     this.pump();
   }
 
-  attach(socket, after) {
+  attach(socket: Socket, after: number) {
     if (!Number.isSafeInteger(after) || after < 0 || after > this.sequence) throw new Error('Invalid runtime output cursor');
     const sequence = Math.max(after, this.acknowledged);
     const offset = sequence === this.acknowledged ? this.acknowledgedOffset : this.ends.get(sequence);
@@ -36,7 +45,7 @@ export class RuntimeOutput {
     this.pump();
   }
 
-  acknowledge(sequence) {
+  acknowledge(sequence: number) {
     if (!Number.isSafeInteger(sequence) || sequence < this.acknowledged || sequence > this.sequence) return;
     if (sequence === this.acknowledged) return;
     const offset = this.ends.get(sequence);
@@ -67,7 +76,7 @@ export class RuntimeOutput {
         const count = readSync(this.fd, buffer, 0, size, client.offset);
         if (!count) throw new Error('Runtime output spool ended before its committed boundary');
         client.offset += count;
-        if (!client.socket.write(Buffer.from(buffer.subarray(0, count)))) await new Promise(resolve => {
+        if (!client.socket.write(Buffer.from(buffer.subarray(0, count)))) await new Promise<void>(resolve => {
           const done = () => { client.socket.off('drain', done); client.socket.off('close', done); resolve(); };
           client.socket.once('drain', done);
           client.socket.once('close', done);

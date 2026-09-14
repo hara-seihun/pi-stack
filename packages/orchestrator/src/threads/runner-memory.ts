@@ -3,7 +3,7 @@ import { dirname, join } from 'node:path';
 
 // Includes sibling sessions' browsers and every constrained ancestor, not
 // merely this Node process's heap. Unsupported hosts retain RSS/residency caps.
-export function underMemoryPressure(read = path => readFileSync(path, 'utf8')) {
+export function underMemoryPressure(read: (path: string) => string = path => readFileSync(path, 'utf8')) {
   try {
     const path = read('/proc/self/cgroup').split('\n').find(line => line.startsWith('0::'))?.slice(3);
     if (!path) return false;

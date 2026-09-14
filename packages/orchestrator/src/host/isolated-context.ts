@@ -6,13 +6,10 @@ import routing from "../extension/routing.js";
 import usageLogger from "../extension/usage-logger.js";
 import outputLimitContinuation from "../extension/output-limit-continuation.js";
 import type { PiSessionOptions } from "../threads/contracts.js";
+import { threadSpeed } from "../threads/pi-speed.js";
+import { argument } from "../threads/pi-session-file.js";
 
-const privateEnvironment = /^(PI_REMOTE_|PI_SESSION_|AGENT_BROWSER_|SSH_|GIT_|GH_|GITHUB_|MCP_|PI_MCP_)|(?:API_KEY|TOKEN|SECRET|PASSWORD)$/;
-
-function argument(args: string[], name: string): string | undefined {
-  const index = args.indexOf(name);
-  return index < 0 ? undefined : args[index + 1];
-}
+import { isolatePiEnvironment } from "../threads/pi-environment.js";
 
 export async function isolatedPiContext(options: PiSessionOptions, environment: NodeJS.ProcessEnv) {
   const raw = argument(options.args, "--orchestrator-context");
@@ -26,18 +23,7 @@ export async function isolatedPiContext(options: PiSessionOptions, environment: 
   await mkdir(agentDir, { recursive: true });
   await mkdir(tmpDir, { recursive: true });
 
-  const scopedEnvironment = environment;
-  Object.assign(scopedEnvironment, {
-    HOME: home,
-    PI_CODING_AGENT_DIR: agentDir,
-    TMPDIR: tmpDir,
-    XDG_CONFIG_HOME: join(home, ".config"),
-    XDG_CACHE_HOME: join(home, ".cache"),
-    XDG_DATA_HOME: join(home, ".local/share"),
-  });
-  for (const key of Object.keys(scopedEnvironment)) {
-    if (privateEnvironment.test(key)) delete scopedEnvironment[key];
-  }
+  const scopedEnvironment = isolatePiEnvironment(options.cwd, environment);
 
   const settingsManager = SettingsManager.inMemory();
   const runtime = scopedEnvironment.PI_STACK_RUNTIME_DEST ?? "/srv/pi/runtime";
@@ -56,12 +42,12 @@ export async function isolatedPiContext(options: PiSessionOptions, environment: 
     systemPromptOverride: () => undefined,
     appendSystemPromptOverride: () => [],
     additionalExtensionPaths,
-    extensionFactories: [routing, usageLogger, outputLimitContinuation],
+    extensionFactories: [routing, usageLogger, outputLimitContinuation, threadSpeed],
   });
   await resourceLoader.reload();
   const { errors, extensions } = resourceLoader.getExtensions();
   if (errors.length) throw new Error(`Isolated context failed to load: ${JSON.stringify(errors)}`);
-  const available = new Set(["read", "write", "edit", "bash", "grep", "find", "ls", ...extensions.flatMap(extension => [...extension.tools.keys()])]);
+  const available = new Set(["read", "write", "edit", "bash", "grep", "find", "ls", "thread_spawn", "thread_send", "thread_list", "thread_read", "thread_control", "thread_thinking", ...extensions.flatMap(extension => [...extension.tools.keys()])]);
   const missing = context.tools.filter(name => !available.has(name));
   if (missing.length) throw new Error(`Isolated tools were not registered: ${missing.join(", ")}`);
 
