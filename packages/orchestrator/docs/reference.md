@@ -9,11 +9,11 @@ Run `npm run docs --workspace=pi-orchestrator` after changing commands or durabl
 - `usage-evidence`: Print a read-only 24-hour quota and token snapshot; optional --ledger FILE.
 - `run`: Start one or more direct sessions.
 - `wave`: Start a one-off wave from a declared lane.
-- `pause / resume`: Set or clear the global launch halt.
+- `pause / resume`: Set or clear the global launch halt without a run id.
 - `abort / kill`: Stop one run gracefully or immediately.
 - `continue`: Continue a Codex run stopped by the provider output-token limit.
 - `recover`: Recover a core run interrupted by loss of its hosting worker.
-- `resume`: Manually resume a rate-limited core run in its recorded session.
+- `resume RUN_ID`: Manually resume a rate-limited core run in its recorded session.
 - `boost`: Set a provider pacing multiplier or halt.
 - `account`: Import, refresh, remove, list, reserve, or exclusively transfer pooled accounts.
 
