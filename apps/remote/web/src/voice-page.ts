@@ -42,4 +42,9 @@ if (!sessionId) {
   element("hush").addEventListener("click", () => voice.hush());
   element("hangup").addEventListener("click", () => voice.stop());
   window.addEventListener("pagehide", () => voice.stop());
+  window.addEventListener("pi-person", () => {
+    void voice.stop();
+    start.disabled = true;
+    status.textContent = "Person changed. Open voice again from your thread.";
+  });
 }
