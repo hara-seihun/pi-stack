@@ -1,0 +1,9 @@
+[Unit]
+Description=Wake Pi Stack publication immediately after durable enqueue
+
+[Path]
+PathChanged=/home/kenan/.local/state/pi-stack-publication/wake
+Unit=pi-stack-publication.service
+
+[Install]
+WantedBy=default.target
