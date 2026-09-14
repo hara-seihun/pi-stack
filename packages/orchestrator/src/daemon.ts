@@ -1,4 +1,5 @@
-import { execFile, spawn, spawnSync } from "node:child_process";
+import { execFile } from "node:child_process";
+import { createHash } from "node:crypto";
 import { readFileSync, realpathSync, statSync } from "node:fs";
 import { fileURLToPath } from "node:url";
 import { dirname, join, resolve } from "node:path";
@@ -6,9 +7,8 @@ import { homedir } from "node:os";
 import { createServer, type IncomingMessage, type ServerResponse } from "node:http";
 import type { BudgetClass, LaneReadiness, LaneManifest, LaneSpec, OrchestratorConfig, Run } from "./domain.js";
 import { isRunContext } from "./isolated-context-contract.js";
-import { accountCapacity, assign, assignCompletion, commitMeterAdmission } from "./policy.js";
+import { accountCapacity, assign, assignCompletion } from "./policy.js";
 import { Store } from "./store.js";
-import { Heartbeats } from "./heartbeats.js";
 import { Fleet } from "./fleet.js";
 import { CompletionService } from "./completion.js";
 import { CompletionPool } from "./host/completion-pool.js";
@@ -22,6 +22,13 @@ import { ORCHESTRATOR_CATALOG } from "./catalog.js";
 import { anthropicProvider } from "@earendil-works/pi-ai/providers/anthropic";
 import { openaiCodexProvider } from "@earendil-works/pi-ai/providers/openai-codex";
 import { providerOAuth } from "./auth/shared-oauth.js";
+import { ThreadService } from "./threads/service.js";
+import { createSharedPiSessionOpener } from "./threads/runner-transport.js";
+import { threadHttp } from "./threads/http.js";
+import { importFleetThreads } from "./threads/import.js";
+import type { Thread } from "./threads/contracts.js";
+import { ThreadDirectory } from "./threads/directory.js";
+import type { RunContext } from "./domain.js";
 
 const HOST=process.env.PI_ORCHESTRATOR_HOST??"127.0.0.1";
 const PORT=Number(process.env.PI_ORCHESTRATOR_PORT??"2460");
@@ -32,7 +39,7 @@ function exec(command:string,cwd?:string,timeout=30_000):Promise<string>{return 
 
 export class Daemon {
   private manifestMtime=0;
-  private laneBudget:BudgetClass="background";
+  private laneBudget:BudgetClass="force";
   private snapshotCommand?:string;
   private readinessAt=0;
   private readiness?:LaneReadiness;
@@ -46,33 +53,41 @@ export class Daemon {
   private readonly fleet:Fleet;
   private readonly completions:CompletionService;
   private readonly completionPool:CompletionPool;
-  private readonly heartbeats:Heartbeats;
+  readonly threads:ThreadService;
+  private readonly isolated=new Map<string,ThreadService>();
+  private readonly opener:ReturnType<typeof createSharedPiSessionOpener>;
 
   constructor(readonly store:Store,readonly config:OrchestratorConfig,releasePath?:string,ledgerPath?:string){
-    this.fleet=new Fleet(store);
-    this.heartbeats=new Heartbeats(store);
+    this.fleet=new Fleet(store,config);
     this.completions=new CompletionService(store,process.cwd());
     this.completionPool=new CompletionPool(store,this.completions,config);
     this.releasePath=releasePath??dirname(dirname(realpathSync(fileURLToPath(import.meta.url))));
     this.ledgerPath=ledgerPath||process.env.PI_ORCHESTRATOR_LEDGER||join(homedir(),".local/share/pi-orchestrator/ledger.sqlite3");
+    const dataDir=dirname(this.ledgerPath);
+    this.opener=createSharedPiSessionOpener({dataDir});
+    this.threads=new ThreadService({databasePath:join(dataDir,"threads.sqlite3"),sessionsDir:join(dataDir,"threads"),
+      openSession:(options,output,exit)=>{
+        const context=this.threads.get(options.threadId)?.metadata?.context;
+        if(context)throw new Error("An isolated thread must be imported into its application ThreadService before execution");
+        return this.opener.openSession(options,output,exit);
+      },
+      environment:thread=>this.threadEnvironment(thread),admit:(...args)=>this.fleet.admit(...args)});
+    this.threads.subscribe(event=>{if("event" in event)this.fleet.event(event.threadId,event.event);});
     this.codexMeters=new CodexMeterSampler(store,{auth:providerOAuth(openaiCodexProvider(),config.authPath),meters:ORCHESTRATOR_CATALOG.meters.filter((meter)=>meter.provider==="openai-codex")});
     this.anthropicMeters=new AnthropicMeterSampler(store,{auth:providerOAuth(anthropicProvider(),config.authPath)});
   }
 
   async start():Promise<void>{
-    // Workers are transient units in this account's own user manager. A system
-    // unit with User= does not point systemctl at that manager, so derive the
-    // runtime directory from the real uid when the environment does not say.
-    const uid=process.getuid?.();
-    if(uid!==undefined){
-      process.env.XDG_RUNTIME_DIR??=`/run/user/${uid}`;
-      process.env.DBUS_SESSION_BUS_ADDRESS??=`unix:path=${process.env.XDG_RUNTIME_DIR}/bus`;
-    }
     await this.loadManifest();
     reconcileCompletionReceipts(this.completions,join(this.config.agentDir,"completion-receipts"));
-    this.recoverWorkers();
+    const imported=importFleetThreads(this.threads,this.store.db,{sessionsDir:join(dirname(this.ledgerPath),"threads")});
+    if(!imported.ok)throw new Error(imported.error.message);
+    for(const row of this.store.db.prepare("SELECT value FROM control WHERE key LIKE 'thread-boundary:%'").all() as {value:string}[]){const boundary=JSON.parse(row.value);this.isolatedService(boundary.cwd,boundary.context);}
+    for(const service of this.isolated.values()){const result=await service.start();if(!result.ok)throw new Error(result.error.message);}
+    for(const run of this.store.runs(["queued","starting","running"]))if(this.completionPool.owns(run))this.completionPool.start(run);
     const server=createServer((req,res)=>void this.request(req,res));
     await new Promise<void>((resolve,reject)=>{server.once("error",reject);server.listen(PORT,this.config.listenHost??HOST,resolve);});
+    const started=await this.threads.start();if(!started.ok)throw new Error(started.error.message);
     const timer=setInterval(()=>void this.reconcile().catch((error)=>console.error("reconcile:",error)),this.config.reconcileIntervalMs);
     const completionTimer=setInterval(()=>this.completionPool.tick(),1_000);
     await this.reconcile();
@@ -81,7 +96,10 @@ export class Daemon {
     this.stopped=true;clearInterval(timer);clearInterval(completionTimer);
     await this.waitForReconcile();
     await this.completionPool.close();
-    this.heartbeats.flush();
+    this.threads.suspend();
+    const detached=await this.threads.detach();if(!detached.ok)throw new Error(detached.error.message);
+    for(const service of this.isolated.values()){const result=await service.detach();if(!result.ok)throw new Error(result.error.message);}
+    this.opener.detach();
     await new Promise<void>((resolve)=>server.close(()=>resolve()));
   }
 
@@ -98,12 +116,11 @@ export class Daemon {
     const manifest=JSON.parse(readFileSync(path,"utf8")) as LaneManifest;
     if(manifest.version!==2||!Array.isArray(manifest.lanes))throw new Error("lane manifest version 2 required");
     for(const key of Object.keys(manifest))if(!["version","budget","lanes","snapshotCommand"].includes(key))throw new Error(`unsupported lane manifest field ${key}`);
-    const budget=manifest.budget===undefined?"background":manifest.budget;
+    const budget=manifest.budget===undefined?"force":manifest.budget;
     if(budget!=="background"&&budget!=="force")throw new Error("lane manifest budget must be background or force");
     if(manifest.snapshotCommand!==undefined&&(typeof manifest.snapshotCommand!=="string"||!manifest.snapshotCommand.trim()))throw new Error("snapshotCommand must be a non-empty command");
-    if(budget==="force"&&!manifest.snapshotCommand&&manifest.lanes.some(lane=>!lane.repair))throw new Error("force lane budget requires a snapshotCommand that reports unfinished work");
     const lanes=manifest.lanes.map((lane)=>{if("prompt" in lane)return lane;const {promptFile,...spec}=lane;return{...spec,prompt:readFileSync(resolve(dirname(path),promptFile),"utf8")};});
-    this.store.reconcileLanes(lanes);
+    this.store.reconcileLanes(lanes.map(lane=>({...lane,admission:lane.admission??budget})));
     this.laneBudget=budget;
     this.snapshotCommand=manifest.snapshotCommand;
     if(!this.snapshotCommand)this.store.setControl("readiness_error","");
@@ -136,24 +153,11 @@ export class Daemon {
         }
       }
       await Promise.all([this.refreshReadiness(),this.refreshRepairReadiness()]);
-      this.releaseRepairOwner();
       for(const run of prioritizeReservedCompletions(this.store,this.store.admissionQueue())){
-        if(run.source==="lane"){this.store.trimQueuedLane(run.sourceId!,0);continue;}
-        await this.launch(run);
+        if(this.completions.byRun(run.id))await this.launch(run);
       }
-      this.resumeCoordinators();
+      this.threads.reconcile();
       await this.fillCapacity();
-      const now=Date.now();
-      for(const run of this.store.runs(["starting","running"])){
-        if(this.completionPool.owns(run))continue;
-        const progress=run.progressAt??run.startedAt??run.createdAt;
-        if(now-progress>this.config.killAfterMs){this.stopUnit(run.workerUnit);this.store.updateRun(run.id,{state:"failed",failureKind:"infrastructure",result:"session made no progress"});continue;}
-        if(process.env.PI_ORCHESTRATOR_WORKER_LAUNCH!=="process"&&run.workerUnit&&!await this.unitIsActiveAsync(run.workerUnit)){
-          this.restartAssignedWorker(run,now);
-          continue;
-        }
-        if(now-progress>this.config.stallAfterMs)this.store.setControl(`abort:${run.id}`,"stalled");
-      }
     }finally{this.reconciling=false;}
   }
 
@@ -182,20 +186,10 @@ export class Daemon {
     }));
   }
 
-  private releaseRepairOwner():void{
-    const id=this.store.control("repair-owner");if(!id)return;
-    const run=this.store.run(id);
-    if(!run)throw new Error(`repair owner ${id} has no run`);
-    if(!["done","failed","aborted"].includes(run.state))return;
-    this.retirePrecedingUnit(run);
-    if(run.workerUnit&&this.unitIsActive(run.workerUnit))return;
-    this.store.setControl("repair-owner","");
-  }
-
   private laneReady(id:string):boolean{
     if(this.store.lane(id)?.repair){
       const probe=this.repairReadiness.get(id);
-      return !this.store.control("repair-owner")&&probe?.ready===true&&Number(this.store.control(`readiness-admitted:${id}`)??0)<probe.at;
+      return !this.threads.snapshot().some(thread=>thread.metadata?.execution==="root-repair"&&["queued","starting","running","stopping"].includes(thread.state))&&probe?.ready===true&&Number(this.store.control(`readiness-admitted:${id}`)??0)<probe.at;
     }
     return this.store.control("ordinary-launches")!=="paused"&&(!this.snapshotCommand||(this.readiness?.lanes[id]?.ready===true&&Number(this.store.control(`readiness-admitted:${id}`)??0)<this.readinessAt));
   }
@@ -203,25 +197,28 @@ export class Daemon {
   private laneEnabled(id:string):boolean{return !!this.store.lane(id)&&this.store.control(`complete:${id}`)===undefined;}
 
   private share(lane:LaneSpec):number{
-    return (1+this.store.admittedLaneCount(lane.id))/lane.weight;
+    return (1+this.laneActive(lane.id))/lane.weight;
   }
 
   private async fillCapacity():Promise<void>{
     if(this.store.control("launches")==="paused")return;
     const failed=new Set<string>();
     for(let slot=0;slot<this.config.maxConcurrentSessions;slot++){
+      if(this.threads.snapshot().filter(thread=>["queued","starting","running","stopping"].includes(thread.state)).length>=this.config.maxConcurrentSessions)break;
       const lanes=this.store.lanes().filter((lane)=>this.laneEnabled(lane.id)&&this.laneReady(lane.id));
       lanes.sort((a,b)=>Number(!!b.repair)-Number(!!a.repair)||this.share(a)-this.share(b)||a.id.localeCompare(b.id));
       let admitted=false;
       for(const lane of lanes){
         const key=`lane:${lane.id}`;
         if(failed.has(key))continue;
-        const choice=assign(this.store,lane.profile,lane.repair?"force":this.laneBudget,this.config,Date.now(),undefined,undefined,lane.repair?"root-repair":"user");
+        const choice=assign(this.store,lane.profile,lane.repair?"force":lane.admission??"force",this.config,Date.now(),undefined,undefined,lane.repair?"root-repair":"user");
         if(!choice.assignment){this.store.setControl(`refusal:${key}`,choice.refusals.map(r=>`${r.accountId}: ${r.reason}`).join("; "));continue;}
         try{
           const prompt=await this.lanePrompt(lane);
-          const [id]=this.store.createRuns({count:1,source:"lane",sourceId:lane.id,prompt,cwd:lane.cwd,profile:lane.profile,budget:lane.repair?"force":this.laneBudget,execution:lane.repair?"root-repair":"user"});
-          if(!await this.launch(this.store.run(id!)!)){failed.add(key);this.store.trimQueuedLane(lane.id,0);continue;}
+          const spawned=await this.threads.spawn({requestId:crypto.randomUUID(),cwd:lane.cwd,title:lane.id,message:prompt,
+            settings:{model:`${choice.assignment.provider}/${choice.assignment.model}`},admission:lane.repair?"force":lane.admission??"force",
+            metadata:{source:"lane",laneId:lane.id,execution:lane.repair?"root-repair":"user"}});
+          if(!spawned.ok)throw new Error(spawned.error.message);
           if(lane.repair||this.snapshotCommand)this.store.setControl(`readiness-admitted:${lane.id}`,String(lane.repair?this.repairReadiness.get(lane.id)!.at:this.readinessAt));
           this.store.setControl(`refusal:${key}`,"");
         }catch(error){failed.add(key);this.store.setControl(`refusal:${key}`,String(error));continue;}
@@ -248,164 +245,58 @@ export class Daemon {
     return prompt;
   }
 
+  private isolatedService(cwd:string,context:RunContext):{id:string;service:ThreadService}{
+    const id=createHash("sha256").update(JSON.stringify({cwd,context})).digest("hex").slice(0,24);
+    let service=this.isolated.get(id);
+    if(!service){
+      const dataDir=join(dirname(this.ledgerPath),"applications",id);
+      service=new ThreadService({databasePath:join(dataDir,"threads.sqlite3"),sessionsDir:join(dataDir,"threads"),
+        openSession:(options,output,exit)=>this.opener.openSession({...options,args:[...options.args,"--orchestrator-context",JSON.stringify(context)]},output,exit),
+        environment:thread=>({...this.threadEnvironment(thread),PI_THREAD_API_URL:`http://127.0.0.1:${PORT}/v1/applications/${id}/threads`}),
+        admit:(...args)=>this.fleet.admit(...args)});
+      service.subscribe(event=>{if("event" in event)this.fleet.event(event.threadId,event.event);});
+      this.isolated.set(id,service);
+      this.store.setControl(`thread-boundary:${id}`,JSON.stringify({cwd,context}));
+    }
+    return{id,service};
+  }
+  private directory():ThreadDirectory{return new ThreadDirectory({id:"fleet",api:this.threads},[...this.isolated].map(([id,api])=>({id,api})));}
+  private laneActive(laneId:string):number{return this.threads.snapshot().filter(thread=>thread.metadata?.laneId===laneId&&["queued","starting","running","stopping"].includes(thread.state)).length;}
+  private profileModel(profile:string):string{
+    const candidate=this.config.profiles[profile]?.[0];
+    if(!candidate)throw new Error(`Unknown model profile ${profile}`);
+    return `${candidate.provider}/${candidate.model}`;
+  }
+  private threadEnvironment(thread:Thread):Record<string,string|undefined>{
+    return {HOME:process.env.HOME??homedir(),PI_CODING_AGENT_DIR:this.config.agentDir,PI_ORCHESTRATOR_AUTH:this.config.authPath,
+      PI_ORCHESTRATOR_LEDGER:this.ledgerPath,PI_BASH_TIMEOUT_MAX_SECONDS:"55",PI_ORCHESTRATOR_EXECUTION:String(thread.metadata?.execution??"user"),
+      PI_THREAD_API_URL:`http://127.0.0.1:${PORT}/v1/threads`,PI_THREAD_ADMISSION:thread.admission};
+  }
   private async launch(run:Run):Promise<boolean>{
-    const fixed=this.store.fleetChild(run.id)?.assignment;
-    const completion=!!this.completions.byRun(run.id);
-    const candidates=fixed?[fixed]:this.config.profiles[run.profile]??[];
-    const config={...this.config,profiles:{...this.config.profiles,[run.profile]:candidates}};
-    const choice=completion?assignCompletion(this.store,run.id,run.profile,config):assign(this.store,run.profile,run.budget,config,Date.now(),undefined,run.id);
-    if(!choice.assignment){this.store.setControl(`refusal:${run.id}`,choice.refusals.map((r)=>`${r.accountId}: ${r.reason}`).join("; "));return false;}
-    const unit=completion?`completion:${run.id}`:`pi-orchestrator-run-${run.id.replaceAll("-","")}`;
-    if(!this.store.assignRun(run.id,{...choice.assignment,unit,releasePath:this.releasePath,...(completion?{}:{environment:this.workerEnvironment(run)})}))return false;
-    this.store.setControl(`refusal:${run.id}`,"");
-    if(completion){this.completionPool.start(this.store.run(run.id)!);return true;}
-    commitMeterAdmission(this.store,choice.assignment);
-    try{this.startUnit(unit,run.id,this.releasePath);return true;}catch(error){this.store.updateRun(run.id,{state:"failed",failureKind:"infrastructure",result:`worker launch failed: ${String(error)}`});return false;}
-  }
-
-  private workerEnvironment(run:Run):Record<string,string>{
-    const env:Record<string,string>={
-      HOME:process.env.HOME??homedir(),PI_ORCHESTRATOR_ASSIGNED:"1",PI_ORCHESTRATOR_RUN_ID:run.id,
-      PI_ORCHESTRATOR_LEDGER:this.ledgerPath,PI_CODING_AGENT_DIR:this.config.agentDir,
-      PI_ORCHESTRATOR_AUTH:this.config.authPath,PI_BASH_TIMEOUT_MAX_SECONDS:"55",
-      PI_ORCHESTRATOR_CONFIG:process.env.PI_ORCHESTRATOR_CONFIG??join(homedir(),".config/pi-orchestrator/config.json"),
-    };
-    for(const name of ["XDG_RUNTIME_DIR","DBUS_SESSION_BUS_ADDRESS","XDG_CONFIG_HOME","XDG_DATA_HOME","XDG_CACHE_HOME","PATH","PYTHONPATH","CPATH","LIBRARY_PATH","PKG_CONFIG_PATH","PI_ORCHESTRATOR_HOST","PI_ORCHESTRATOR_PORT","PI_MCP_SIZE_ALERTS_INBOX","PI_MCP_SIZE_ALERT_COMMAND"]){
-      const value=process.env[name];if(value!==undefined)env[name]=value;
-    }
-    if(run.execution==="root-repair"){
-      const uid=process.getuid?.(),gid=process.getgid?.();
-      if(uid===undefined||gid===undefined||uid===0)throw new Error("Root repair must be launched by the unprivileged ledger owner");
-      env.PI_ORCHESTRATOR_OWNER_UID=String(uid);env.PI_ORCHESTRATOR_OWNER_GID=String(gid);
-      env.XDG_RUNTIME_DIR??=`/run/user/${uid}`;env.DBUS_SESSION_BUS_ADDRESS??=`unix:path=${env.XDG_RUNTIME_DIR}/bus`;
-    }
-    return env;
-  }
-
-  private startUnit(unit:string,runId:string,releasePath:string):void{
-    const cli=join(releasePath,"dist/cli.js");
-    const run=this.store.run(runId)!;
-    const root=run.execution==="root-repair";
-    const recorded=this.store.control(`run-environment:${runId}`);
-    if(root&&!recorded)throw new Error("Root repair is missing its pinned worker environment");
-    this.retirePrecedingUnit(run);
-    const environment:Record<string,string>=recorded?JSON.parse(recorded):this.workerEnvironment(run);
-    if(root&&process.env.PI_ORCHESTRATOR_WORKER_LAUNCH==="process")throw new Error("Root repair requires a system unit, not process launch");
-    const args=[
-      ...(root?["--system","--uid=0"]:["--user"]),"--collect",`--unit=${unit}`,
-      "--property=Type=exec","--property=Restart=no","--property=KillMode=mixed","--property=TimeoutStopSec=20",
-      "--property=CPUWeight=20","--property=MemoryHigh=6G","--property=MemoryMax=8G","--property=TasksMax=4096","--property=LimitNOFILE=1048576",
-      ...Object.entries(environment).map(([name,value])=>`--setenv=${name}=${value}`),
-    ];
-    args.push(process.execPath,cli,"worker",runId);
-    if(process.env.PI_ORCHESTRATOR_WORKER_LAUNCH==="process"){
-      const child=spawn(process.execPath,[cli,"worker",runId],{detached:true,stdio:"ignore",env:{...process.env,...environment}});child.unref();return;
-    }
-    const result=spawnSync(root?"sudo":"systemd-run",root?["-n","--","systemd-run",...args]:args,{encoding:"utf8",timeout:30_000});
-    if(result.error||result.status!==0)throw new Error(`worker launch failed: ${result.error??(result.stderr?.trim()||`systemd-run exited ${result.status}`)}`);
-  }
-
-  private retirePrecedingUnit(run:Run):void{
-    const key=`run-retiring-unit:${run.id}`,unit=this.store.control(key);if(!unit)return;
-    if(run.execution!=="root-repair")throw new Error("Only root repair recovery retires a preceding system unit");
-    if(this.unitIsActive(unit,run.execution))this.stopUnit(unit,run.execution);
-    this.store.setControl(key,"");
-  }
-
-  private unitCommand(unit:string,args:string[],execution?:Run["execution"]):{command:string;args:string[]}{
-    const row=execution===undefined?this.store.db.prepare("SELECT id FROM run WHERE worker_unit=?").get(unit) as {id:string}|undefined:undefined;
-    const root=(execution??(row&&this.store.run(row.id)?.execution))==="root-repair";
-    return root?{command:"sudo",args:["-n","--","systemctl","--system",...args,unit]}:{command:"systemctl",args:["--user",...args,unit]};
-  }
-
-  private stopUnit(unit?:string,execution?:Run["execution"]):void{
-    if(!unit||unit.startsWith("completion:")){this.completionPool.tick();return;}
-    const cmd=this.unitCommand(unit,["stop"],execution);
-    const result=spawnSync(cmd.command,cmd.args,{encoding:"utf8",timeout:30_000});
-    if(result.status===5&&!this.unitIsActive(unit,execution))return;
-    if(result.error||result.status!==0)throw new Error(`worker stop failed: ${result.error??result.stderr?.trim()}`);
-  }
-  private unitIsActiveAsync(unit:string):Promise<boolean>{
-    const cmd=this.unitCommand(unit,["is-active"]);
-    return new Promise((resolve,reject)=>execFile(cmd.command,cmd.args,{timeout:10_000},(error,stdout)=>{
-      if(!error)return resolve(true);
-      if(error.code===3||error.code===4)return resolve(this.unitTransitioning(stdout));
-      reject(error);
-    }));
-  }
-  private unitIsActive(unit:string,execution?:Run["execution"]):boolean{
-    const cmd=this.unitCommand(unit,["is-active"],execution),result=spawnSync(cmd.command,cmd.args,{encoding:"utf8",timeout:10_000});
-    if(result.status===0)return true;
-    if(result.status===3||result.status===4)return this.unitTransitioning(result.stdout);
-    throw new Error(`worker status failed: ${result.error??result.stderr?.trim()}`);
-  }
-  private unitTransitioning(stdout:string):boolean{
-    return ["activating","deactivating","reloading","refreshing"].includes(stdout.trim());
-  }
-  private startExistingUnit(unit:string):boolean{
-    const row=this.store.db.prepare("SELECT id FROM run WHERE worker_unit=?").get(unit) as {id:string}|undefined;
-    if(row)this.retirePrecedingUnit(this.store.run(row.id)!);
-    const cmd=this.unitCommand(unit,["start"]);
-    const started=spawnSync(cmd.command,cmd.args,{stdio:"ignore",timeout:30_000});
-    return started.status===0&&this.unitIsActive(unit);
-  }
-  private resumeCoordinators():void{
-    if(this.store.control("launches")==="paused")return;
-    for(const run of this.store.runs(["waiting"])){
-      if(run.execution!=="root-repair"&&this.store.control("ordinary-launches")==="paused")continue;
-      if(!this.fleet.pending(run.id).length||!run.accountId||!run.workerUnit||!run.releasePath)continue;
-      if(this.unitIsActive(run.workerUnit))continue;
-      if(this.store.activeSessionLeases().length>=this.config.maxConcurrentSessions)return;
-      const resumeConfig={...this.config,profiles:{...this.config.profiles,[run.profile]:[{provider:run.provider!,model:run.model!,thinking:run.thinking}]}};
-      const preferred=assign(this.store,run.profile,"force",resumeConfig,Date.now(),run.accountId,run.id);
-      const choice=preferred.assignment?preferred:assign(this.store,run.profile,"force",resumeConfig,Date.now(),undefined,run.id);
-      if(!choice.assignment){this.store.setControl(`refusal:${run.id}`,choice.refusals.map(refusal=>`${refusal.accountId}: ${refusal.reason}`).join("; "));continue;}
-      if(!this.store.resumeAssignedRun(run.id,Date.now(),choice.assignment.accountId))continue;
-      this.store.updateRun(run.id,{progressAt:Date.now()});
-      try{this.startUnit(run.workerUnit,run.id,run.releasePath);}
-      catch(error){if(!this.startExistingUnit(run.workerUnit))this.store.updateRun(run.id,{state:"failed",failureKind:"infrastructure",result:`coordinator resume failed: ${String(error)}`});}
-    }
-  }
-  private recoverWorkers():void{
-    for(const run of this.store.runs(["queued","starting","running","failed"])){
-      if(this.completionPool.owns(run)){
-        if(run.state!=="failed")this.completionPool.start(run);
-        continue;
-      }
-      if(!run.accountId||!run.provider||!run.model||!run.workerUnit||!run.releasePath)continue;
-      if(run.execution==="root-repair"&&run.state==="failed"&&run.failureKind!=="infrastructure")continue;
-      if(this.unitIsActive(run.workerUnit)){
-        if(run.state!=="running")this.store.adoptAssignedRun(run.id);
-      }else if(run.state!=="failed")this.restartAssignedWorker(run);
-    }
-  }
-  private restartAssignedWorker(run:Run,at=Date.now()):void{
-    const abort=this.store.control(`abort:${run.id}`);
-    if(abort){
-      this.store.updateRun(run.id,{state:abort==="stalled"?"failed":"aborted",failureKind:abort==="stalled"?"infrastructure":"operator",result:`worker stopped after ${abort}`},at);
-      return;
-    }
-    if(this.store.control("launches")==="paused")return;
-    const progress=run.progressAt??run.startedAt??run.createdAt;
-    if(at-progress>this.config.killAfterMs){this.store.updateRun(run.id,{state:"failed",failureKind:"infrastructure",result:"session made no progress"},at);return;}
-    if(!this.store.resumeAssignedRun(run.id,at))return;
-    // A daemon restart can race the user manager's state transition for a worker that never stopped.
-    // Adopt it instead of trying to redefine its still-loaded transient unit.
-    if(this.unitIsActive(run.workerUnit!)){this.store.adoptAssignedRun(run.id,at);return;}
-    const reset=this.unitCommand(run.workerUnit!,["reset-failed"]);
-    spawnSync(reset.command,reset.args,{stdio:"ignore",timeout:10_000});
-    try{this.startUnit(run.workerUnit!,run.id,run.releasePath!);}
-    catch(error){
-      // systemd-run refuses an existing transient unit. `start` is a no-op when that unit is already
-      // active and restarts its recorded immutable release when it is loaded but inactive.
-      if(this.startExistingUnit(run.workerUnit!)){this.store.adoptAssignedRun(run.id,at);return;}
-      this.store.updateRun(run.id,{state:"failed",failureKind:"infrastructure",result:`worker recovery failed: ${String(error)}`},at);
-    }
+    const choice=assignCompletion(this.store,run.id,run.profile,this.config);
+    if(!choice.assignment){this.store.setControl(`refusal:${run.id}`,choice.refusals.map(r=>`${r.accountId}: ${r.reason}`).join("; "));return false;}
+    if(!this.store.assignRun(run.id,{...choice.assignment,unit:`completion:${run.id}`,releasePath:this.releasePath}))return false;
+    this.store.setControl(`refusal:${run.id}`,"");this.completionPool.start(this.store.run(run.id)!);return true;
   }
 
   private async request(req:IncomingMessage,res:ServerResponse):Promise<void>{
     try{
       const url=new URL(req.url??"/",`http://${HOST}:${PORT}`),method=req.method??"GET";
+      const application=/^\/v1\/applications\/([a-f0-9]+)\/threads\//.exec(url.pathname);
+      if(url.pathname.startsWith("/v1/threads/")||application){
+        const input=method==="POST"?await body(req):undefined;
+        let api=application?this.isolated.get(application[1]!):this.directory();
+        if(!api)return json(res,404,{error:"Application thread boundary not found"});
+        if(!application&&url.pathname==="/v1/threads/spawn"&&input?.metadata?.context){
+          if(!isRunContext(input.metadata.context)||!input.cwd?.startsWith("/"))return json(res,400,{error:"Isolated threads require absolute cwd and a valid context"});
+          if(input.parentId)return json(res,400,{error:"Spawn children through their parent's application boundary"});
+          const boundary=this.isolatedService(input.cwd,input.metadata.context);
+          const started=await boundary.service.start();if(!started.ok)return json(res,503,started);
+          api=boundary.service;
+        }
+        const response=await threadHttp(api,new Request(url,{method,headers:{"content-type":"application/json"},...(method==="POST"?{body:JSON.stringify(input)}:{})}),application?`/v1/applications/${application[1]}/threads`:"/v1/threads");
+        if(response){res.writeHead(response.status,Object.fromEntries(response.headers));res.end(await response.text());return;}
+      }
       const completionReply=(outcome:CompletionOutcome<unknown>)=>{
         if(outcome.ok)return json(res,200,outcome.value);
         const statuses:Record<string,number>={"invalid-request":400,"not-found":404,"request-conflict":409,"invalid-state":409,"unsupported-option":422};
@@ -432,68 +323,12 @@ export class Daemon {
         }
         if(method==="POST"&&completionRoute[2]==="/cancel"){
           const outcome=this.completions.cancel(id);
-          if(outcome.ok&&outcome.value.state==="cancelled")this.stopUnit(this.store.run(outcome.value.runId)?.workerUnit);
+          if(outcome.ok&&outcome.value.state==="cancelled")this.completionPool.tick();
           return completionReply(outcome);
         }
       }
       if(method==="GET"&&url.pathname==="/v1/status")return json(res,200,this.status());
-      if(method==="GET"&&url.pathname==="/v1/runs")return json(res,200,{runs:this.store.runs(),live:this.store.live()});
       if(method==="GET"&&url.pathname==="/v1/plans")return json(res,200,{accounts:this.store.accounts(),meters:this.store.meters(),leases:this.store.activeLeases(),controls:Object.fromEntries((this.store.db.prepare("SELECT key,value FROM control INDEXED BY sqlite_autoindex_control_1 WHERE key NOT GLOB 'completion:*' AND key NOT GLOB 'completion-attempt:*' AND key NOT GLOB 'completion-receipt:*' AND key NOT GLOB 'completion-recovery:*' AND key NOT GLOB 'run-context:*' AND key NOT GLOB 'run-core:*' AND key NOT GLOB 'run-environment:*' AND key NOT GLOB 'run-execution:*' AND key NOT GLOB 'run-usage:*' AND key NOT GLOB 'fleet-child:*'").all() as any[]).map((r)=>[r.key,r.value]))});
-      if(method==="GET"&&url.pathname.startsWith("/internal/runs/")){
-        const parts=url.pathname.split("/"),id=parts[3]!,action=parts[4];const run=this.store.run(id);if(!run)return json(res,404,{error:"run not found"});
-        if(action==="completion"&&parts.length===5)return json(res,200,{completion:this.completions.byRun(id)});
-        if(action==="control"&&parts.length===5){const results=this.fleet.pending(id);return json(res,200,{abort:this.store.control(`abort:${id}`),...(results.length?{results}:{})});}
-        if(parts.length===4)return json(res,200,{run,results:this.fleet.pending(id)});
-      }
-      if(method==="POST"&&url.pathname.startsWith("/internal/runs/")){
-        const parts=url.pathname.split("/"),id=parts[3]!,action=parts[4],input=await body(req);
-        // A replay from a replaced worker must not mutate its successor.
-        const workerUnit=req.headers?.["x-pi-worker-unit"];
-        if(workerUnit&&workerUnit!==this.store.run(id)?.workerUnit)return json(res,200,{superseded:true});
-        if(action==="heartbeat")return this.heartbeats.accept(id,input)?json(res,200,{ok:true}):json(res,404,{error:"run not found"});
-        if(!this.store.run(id))return json(res,404,{error:"run not found"});
-        if(action==="completion"&&parts[5]==="claim")return completionReply(this.completions.claim(id,input.attemptId));
-        if(action==="completion"&&parts[5]==="settle")return completionReply(this.completions.settle(id,input.attemptId,input.outcome));
-        if(action==="usage"){
-          const run=this.store.run(id)!;
-          if(run.childrenOwner!=="core"||!run.accountId)return json(res,409,{error:"Run does not use worker-owned core accounting"});
-          if(typeof input.receiptId!=="string"||! /^[a-f0-9]{64}$/.test(input.receiptId)||!input.usage||typeof input.usage!=="object")return json(res,400,{error:"Invalid core usage receipt"});
-          const accountId=input.accountId===undefined||input.accountId===run.provider?run.accountId:String(input.accountId);
-          if(!this.store.account(accountId))return json(res,400,{error:"Unknown core usage account"});
-          const components=["input","output","cacheRead","cacheWrite"] as const;
-          if(components.some(component=>input.usage[component]!==undefined&&(!Number.isFinite(input.usage[component])||input.usage[component]<0)))return json(res,400,{error:"Invalid core token usage"});
-          this.store.transaction(()=>{
-            const key=`run-usage:${id}:${input.receiptId}`;
-            if(this.store.control(key))return;
-            const hour=Math.floor(Date.now()/3_600_000)*3_600_000;
-            for(const component of components)if(input.usage[component]>0)this.store.recordUsage({accountId,hour,source:"fleet",runId:id,model:String(input.model??run.model),component,tokens:input.usage[component]});
-            this.store.setControl(key,"1");
-          });
-          return json(res,200,{ok:true});
-        }
-        if(action==="dispatch"){
-          const outcome=this.fleet.dispatch(id,input);
-          if(!outcome.ok)return json(res,400,{error:outcome.error});
-          void this.reconcile();
-          return json(res,201,{run:outcome.value});
-        }
-        if(action==="acknowledge"){
-          const outcome=this.fleet.acknowledge(id,input.deliveryIds);
-          return outcome.ok?json(res,200,{ok:true}):json(res,400,{error:outcome.error});
-        }
-        if(action==="state"){
-          if(input.state==="done"&&this.store.run(id)!.childrenOwner!=="core"&&!this.store.run(id)!.context)this.fleet.settle(id,input.result??"");
-          else this.store.updateRun(id,input);
-          // Already-admitted workers may still be running a previous immutable release.
-          // Restore their unfinished turn on this release once that worker has closed it.
-          if(["failed","aborted"].includes(input.state)&&this.store.run(id)?.releasePath!==this.releasePath)
-            this.store.recoverInterruptedRun(id,this.releasePath);
-          const run=this.store.run(id);
-          if(input.cooldownUntil&&run?.accountId)this.store.setCooldown(run.accountId,Number(input.cooldownUntil));
-          if(input.activity)this.store.setLive(id,input);
-          return json(res,200,{ok:true});
-        }
-      }
       if(method==="POST"&&url.pathname==="/v1/accounts"){
         const input=await body(req);
         this.store.upsertAccount({id:String(input.id),provider:input.provider,label:input.label,enabled:true,concurrency:Number(input.concurrency??this.config.defaultAccountConcurrency)});
@@ -538,42 +373,31 @@ export class Daemon {
       }
       const accountRemove=/^\/v1\/accounts\/([^/]+)$/.exec(url.pathname);
       if(method==="DELETE"&&accountRemove){this.store.setAccountEnabled(decodeURIComponent(accountRemove[1]!),false);return json(res,200,{ok:true});}
-      if(method==="POST"&&(url.pathname==="/v1/run"||url.pathname==="/v1/run/isolated")){
-        const input=await body(req);
-        if(url.pathname==="/v1/run/isolated"&&input.context===undefined)return json(res,400,{error:"An isolated run requires context.tools"});
-        if(input.context!==undefined&&!isRunContext(input.context))return json(res,400,{error:"context requires a tools allowlist and optional absolute application extension paths"});
-        if(input.context&&(!input.cwd||!Number.isInteger(input.count??1)||(input.count??1)!==1))return json(res,400,{error:"Isolated runs require an explicit workspace cwd and count 1"});
-        if("core" in input)return json(res,400,{error:"Pi Stack runs Pi; agent core selection is not supported"});
-        const profile=String(input.profile??"standard");
-        const ids=this.store.createRuns({count:Number(input.count??1),source:"direct",prompt:String(input.prompt),cwd:String(input.cwd??process.cwd()),profile,budget:input.force?"force":"background",context:input.context});
-        void this.reconcile();return json(res,201,{runIds:ids});
+      if(method==="POST"&&url.pathname==="/v1/wave"){
+        const input=await body(req),lane=this.store.lane(String(input.lane));
+        if(!lane)return json(res,404,{error:"lane not found"});
+        if(lane.repair)return json(res,400,{error:"Repair lanes admit only from their independent readiness probe"});
+        const count=input.count??1;if(!Number.isInteger(count)||count<1||count>100)return json(res,400,{error:"count must be between 1 and 100"});
+        const threads:Thread[]=[];
+        for(let i=0;i<count;i++){
+          const result=await this.threads.spawn({requestId:crypto.randomUUID(),cwd:lane.cwd,title:lane.id,message:await this.lanePrompt(lane),
+            settings:{model:this.profileModel(lane.profile)},admission:input.admission??lane.admission??"force",metadata:{source:"direct",laneId:lane.id}});
+          if(!result.ok)return json(res,400,result);threads.push(result.value);
+        }
+        return json(res,201,{threads});
       }
-      if(method==="POST"&&url.pathname==="/v1/wave"){const input=await body(req),lane=this.store.lane(String(input.lane));if(!lane)return json(res,404,{error:"lane not found"});if(lane.repair)return json(res,400,{error:"Repair lanes admit only from their independent readiness probe"});if("core" in input)return json(res,400,{error:"Pi Stack runs Pi; agent core selection is not supported"});const ids=this.store.createRuns({count:Number(input.count??1),source:"direct",sourceId:lane.id,prompt:lane.prompt,cwd:lane.cwd,profile:lane.profile,budget:input.force?"force":"background"});void this.reconcile();return json(res,201,{runIds:ids});}
-      const runResume=/^\/v1\/runs\/([^/]+)\/resume$/.exec(url.pathname);
-      if(method==="POST"&&runResume){
-        if(!this.store.recoverInterruptedRun(runResume[1]!,this.releasePath,Date.now(),"rate-limit"))return json(res,409,{error:"Only a rate-limited core run without an operator abort can resume"});
-        void this.reconcile();
-        return json(res,200,{run:this.store.run(runResume[1]!)});
-      }
-      const runRecover=/^\/v1\/runs\/([^/]+)\/recover$/.exec(url.pathname);
-      if(method==="POST"&&runRecover){
-        if(!this.store.recoverInterruptedRun(runRecover[1]!,this.releasePath))return json(res,409,{error:"Only a host-interrupted core run without an operator abort can recover"});
-        void this.reconcile();
-        return json(res,200,{run:this.store.run(runRecover[1]!)});
-      }
-      const runAbort=/^\/v1\/runs\/([^/]+)\/(abort|kill)$/.exec(url.pathname);if(method==="POST"&&runAbort){const id=runAbort[1]!,action=runAbort[2]!;this.store.setControl(`abort:${id}`,action);const run=this.store.run(id);const completion=this.completions.byRun(id);if(completion){const outcome=this.completions.cancel(completion.requestId);this.stopUnit(run?.workerUnit);return completionReply(outcome);}if(action==="kill"||run?.state==="queued"||run?.state==="waiting"){if(run)this.retirePrecedingUnit(run);this.stopUnit(run?.workerUnit);this.store.updateRun(id,{state:"aborted",failureKind:"operator",result:`${action} by operator`});}return json(res,200,{ok:true});}
       if(method==="POST"&&url.pathname==="/v1/control"){const input=await body(req);this.store.setControl(String(input.key),String(input.value));return json(res,200,{ok:true});}
       json(res,404,{error:"not found"});
     }catch(error){json(res,500,{error:String(error)});}
   }
 
   private status():unknown{return{
-    launches:this.store.control("launches")??"enabled",ordinaryLaunches:this.store.control("ordinary-launches")??"enabled",repairOwner:this.store.control("repair-owner")||undefined,laneBudget:this.laneBudget,
+    launches:this.store.control("launches")??"enabled",ordinaryLaunches:this.store.control("ordinary-launches")??"enabled",repairOwner:this.threads.snapshot().find(thread=>thread.metadata?.execution==="root-repair"&&["starting","running","stopping"].includes(thread.state))?.id,laneBudget:this.laneBudget,
     repairReadiness:this.store.lanes().filter(lane=>lane.repair).map(lane=>({lane:lane.id,...this.repairReadiness.get(lane.id),error:this.store.control(`repair-readiness-error:${lane.id}`)||undefined})),
     readinessError:this.store.control("readiness_error")||undefined,
     meterErrors:this.store.accounts().flatMap((account)=>{const error=this.store.control(`meter-error:${account.id}`);return error?JSON.parse(error):[];}),
     capacity:this.store.accounts().map((account)=>({accountId:account.id,...accountCapacity(this.store,account.id,this.laneBudget,this.config)})),
-    accounts:this.store.accounts(),lanes:this.store.lanes().map((lane)=>({...lane,active:this.store.admittedLaneCount(lane.id)})),
-    runs:this.store.runs(["queued","starting","running","waiting"]),leases:this.store.activeLeases(),
+    accounts:this.store.accounts(),lanes:this.store.lanes().map((lane)=>({...lane,active:this.laneActive(lane.id)})),
+    threads:this.threads.snapshot(),leases:this.store.activeLeases(),
   };}
 }

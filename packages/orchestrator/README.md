@@ -1,30 +1,24 @@
 # Pi Orchestrator
 
-Pi Orchestrator runs unattended agent cores against pooled subscription accounts. One daemon owns policy and SQLite state. Each admitted run gets a separate transient systemd unit and keeps the release that launched it until the run ends. Ordinary workers use the daemon owner's user manager. Explicit repair lanes use uid0 system units.
+Pi Orchestrator runs persistent Pi threads against pooled subscription accounts. Fleet lanes, direct assignments and children use the same [ThreadService and API](../../docs/threads.md). Shared runners execute many sessions without a process per thread.
 
 ## Runtime model
 
-The daemon reconciles provider meters, weighted lanes, optional queue readiness, and explicit requests for direct runs.
+The daemon reconciles provider meters, weighted lanes and optional readiness probes. A lane has a positive weight, not a worker target. Eligible lanes spawn threads through the ordinary API. A wave is a one-off batch.
 
-A lane has a positive weight, not a worker target. Weights divide available concurrency among eligible lanes. The manifest selects paced background admission or work-driven forced admission. A wave remains a one-off batch, not a standing target. Each run ends when its agent finishes its turn.
+`threads.sqlite3` beside the account ledger owns thread identities, pending input, executions and result delivery. Native Pi JSONL files own conversation history. Account policy holds a `thread:<executionId>` activity lease until local execution settles. An idle parent releases its lease even when children continue.
 
-Workers write progress through the daemon's loopback API. Each run pins its agent core and durable state directory. If a worker process or machine stops, the next worker reopens that same core state. Native and portable session references remain in run custody. See [Pi sessions](docs/agent-cores.md) for the worker wire and isolated-context requirements. The run row records the immutable release path and transient unit name, so a daemon deployment does not replace live workers. Recovery adopts a still-active unit when a daemon restart races the user manager; an already-loaded inactive transient unit restarts from its recorded release instead of being redefined.
-
-## Fleet coordination
-
-New runs delegate through Pi, which owns its child tree and completion. Workers no longer expose `fleet_dispatch`. Existing external-child coordinators retain their recorded worker release and the daemon's receipt, waiting and wakeup path. Parent links, waiting state, terminal children and transcripts remain observable. See [external fleet records](docs/fleet-dispatch.md) for their active recovery contracts. Isolated application runs use Pi's explicit tools/extensions contract.
+Children use ordinary thread messages and forced admission. There is no external fleet coordinator, waiting run, receipt endpoint or worker restart lifecycle. The daemon detaches from shared runners on shutdown; ThreadService recovers durable execution when it reconnects. Cutover imports existing fleet records before starting the service and must refuse active source custody rather than replay it.
 
 ## Quota policy
 
-At 1×, ordinary work stays within the elapsed share of each provider window's allowance, including the configured reserve. A whole-percentage-point tolerance accounts for provider rounding. Every binding meter must be fresh. A flat pair of readings cannot erase earlier overspending.
+For explicit background admission at 1×, work stays within the elapsed share of each provider window's allowance, including the configured reserve. A whole-percentage-point tolerance accounts for provider rounding. Every binding meter must be fresh. A flat pair of readings cannot erase earlier overspending.
 
 The account concurrency ceiling also uses up to six hours of same-window consumption divided by recorded session-hours, with one percentage point added for meter uncertainty. Meter history is retained for 24 hours rather than a fixed sample count. At least 15 minutes of evidence is required to move beyond one calibration session. While spend remains within calendar pace, the ceiling keeps one discrete admission even when the measured rate cannot sustain one continuously; the next meter observation and calendar gate decide whether a successor may start. Fleet, interactive, and voice leases share the account and machine ceilings. At 1×, new work consumes at most one admission per meter observation.
 
-These ceilings govern admission only. Already admitted workers finish even when pacing, reserves, account reservations, provider boosts, or machine limits would refuse new work. Their leases remain charged, so replacements cannot bypass those limits. Worker recovery retains the same run, account, release, model, thinking level, core and native/portable state without a new quota admission. Explicit operator aborts and stall handling still apply.
+Account and machine ceilings govern admission. Idle threads do not reserve capacity. ThreadService preserves accepted model, thinking and speed settings during recovery. The account policy still enforces pauses, account availability, reservations, cooldowns and actual provider exhaustion.
 
-`status` exposes the manifest's `laneBudget`, account ceilings and reasons under that budget, and each lane's active count. Pi Remote includes every starting or running session in its running total.
-
-`run --force` and `wave --force` are operator-authorized urgent work. API callers select the same policy with `force: true`, including EverythingLIVE's author/review jobs. These runs bypass background pacing, reserves, meter freshness, observation throttling, and provider multipliers, including 0×. Exhausted provider quota, cooldowns, disabled or reserved accounts, account and machine concurrency ceilings, and the global `pause` still apply.
+Forced admission is the default for direct work, children and lanes. It bypasses background pacing, reserves, meter freshness, observation throttling and provider multipliers, including 0×. Select `admission: "background"` explicitly for paced spending. Status reports each lane's admission policy and active thread count.
 
 Provider boosts multiply the calculated session ceiling directly, after the base account ceiling and consumption estimate. A base capacity of 2 becomes 20 at 10×, not 4 because of an unscaled account cap. Boosts above 1 bypass calendar pacing and the one-admission-per-observation gate, so the scheduler fills the boosted capacity immediately. They do not raise the quota allowance. Fresh meters, provider exhaustion, cooldowns, reservations, the background reserve and the machine ceiling still apply. A multiplier of zero halts new background launches for that provider, not forced runs. Ten times the sustainable rate aims to spend a week's allowance in about 16.8 hours; rounding, changing measured consumption and other binding windows affect the actual duration.
 
@@ -63,19 +57,17 @@ PI_ORCHESTRATOR_PORT
 
 The JSON config may set model `profiles`, `backgroundSpendFraction`, machine and account concurrency, meter age, reconciliation periods, stall limits, `taskManifest`, `authPath`, and `agentDir`. The strict `astra`, `sol`, `terra`, `luna`, and `opus` profiles are always available alongside configured profiles. Each selects exactly one catalog model, even if a local profile uses the same name.
 
-The [shared catalog](src/catalog.ts) maps Astra to `openai-codex/gpt-6-astra` and Sol, Terra, and Luna to `openai-codex/gpt-5.6-sol`, `gpt-5.6-terra`, and `gpt-5.6-luna`. All four share the Codex five-hour and weekly meters. Every new Orchestrator agent and completion admission uses `high`, except catalog Luna uses `max`. This includes repair lanes, direct runs, waves and custom profiles. Profile settings cannot override admission thinking. Interactive Pi sessions retain their own thinking selection.
+The [shared catalog](src/catalog.ts) maps Astra to `openai-codex/gpt-6-astra` and Sol, Terra, and Luna to `openai-codex/gpt-5.6-sol`, `gpt-5.6-terra`, and `gpt-5.6-luna`. All four share the Codex five-hour and weekly meters. Every new Orchestrator agent and completion admission uses `high`, except catalog Luna uses `max`. This includes repair lanes, direct runs, waves and custom profiles. Thread settings accept explicit thinking and speed overrides. Standard speed is the default.
 
 `SUBAGENT_MODEL_DESCRIPTIONS`, exported through `pi-orchestrator/api`, contains Hara's four verbatim engineering-level descriptions and her classification/inference exception, supplied on September 11, 2026. Tool schemas share that text without adding a model-selection policy.
 
 Model availability does not assign a model to a lane. Autonomous coordinator selection belongs to the submitting application or host lane manifest, which can name `astra` or `sol`. Task workers can select any of the four. Pi Stack leaves configured profile candidate order and lane defaults unchanged, including Converge's. Without configured profiles, `standard` still tries Astra then Opus and `expert` tries Opus then Astra. These general scheduling profiles do not identify coordinator roles.
 
-Profile candidates declare provider and model, retaining their priority order. The admission owner records thinking with the run and lease. Existing admitted runs keep their recorded level during recovery and retry; deploying this policy does not rewrite an in-flight turn. Provider and account selection stay unchanged. Configuration changes require a daemon restart. `run.thinking` exposes the selected level, and `run.id` joins its token totals in `usage_hour`.
+Profile candidates declare provider and model in preference order. Lane admission selects a candidate, then the central thread settings resolver chooses its defaults. Each execution retains its accepted settings during recovery. Configuration changes require a daemon restart.
 
 A lane manifest has `version: 2` and a `lanes` array. Every lane declares `id`, `prompt`, `cwd`, `profile`, and positive `weight`. Unknown fields are rejected, including worker targets.
 
-The manifest's optional `budget` is `background` by default. Setting it to `force` makes every lane use the existing urgent admission policy, without background pacing, reserve, meter-age or multiplier gates. For ordinary lanes, this mode requires a non-empty `snapshotCommand`. Its current readiness decides whether another worker is needed; `ready: false` stops new workers until work appears again. Actual provider exhaustion, disabled or reserved accounts, cooldowns, account and machine ceilings, and global pause still apply. The daemon owns continuation, with no repeated waves or waiting model session. Manifest reload changes new admissions only. Each run records its selected budget, so existing runs retain their policy across restarts.
-
-Without a `snapshotCommand`, background lanes are continuously eligible. An optional command reports whether each queue has unclaimed work, never how many workers to run:
+The manifest defaults to forced admission. Its optional `budget` selects the manifest default, and each lane can override it with `admission: "background"` or `"force"`. Readiness is independent of quota policy. Without `snapshotCommand`, lanes remain eligible. A snapshot reports whether each queue has unclaimed work, never how many threads to run:
 
 ```json
 {
@@ -108,34 +100,17 @@ A repair lane declares its own probe. It does not depend on the ordinary manifes
 
 The command runs as the daemon owner and prints exactly `{ "revision": "host-state-version", "ready": true }`. Use explicit sudo in the command when the probe needs root. Each repair probe refreshes every 30 seconds, fails closed independently, and permits at most one admission per observation. Ordinary snapshots need not mention repair lanes. A repair-only manifest does not need `snapshotCommand`, even with `budget: "force"`.
 
-Repair always uses forced admission and full Pi context. It retains provider exhaustion, disabled-account, reservation, cooldown, account-capacity and machine-capacity gates. One durable `repair-owner` spans all repair lanes, including recovery and the interval between a terminal run report and its unit exiting. Ordinary workers need not drain before repair; pause ordinary admission when that is the intended operation. Direct runs and waves cannot request root. Waves from repair lanes are rejected.
+Repair threads retain forced admission and full Pi context. The per-run UID0 systemd launcher has been removed. Root repair admission currently returns an explicit unavailable result because the shared runner transport has no UID0 launch boundary. It never substitutes the user daemon's UID. Deployment requires a root-owned shared runner and matching thread service before enabling these lanes.
 
-`pause --ordinary` sets `ordinary-launches=paused`; `resume --ordinary` clears it. This blocks ordinary lane admission, unassigned direct runs including existing queued requests, completions, and waiting external coordinators. Already-admitted ordinary turns continue. `pause` still sets the global `launches=paused` halt, which blocks both kinds of admission and worker process restarts. It does not kill a live turn. `abort RUN_ID` requests graceful cancellation; `kill RUN_ID` stops the recorded unit before marking the run aborted.
-
-To move from global halt into repair-only operation, set ordinary pause first:
-
-```bash
-pi-orchestrator pause --ordinary
-pi-orchestrator resume
-pi-orchestrator status
-```
-
-The HTTP controls are `POST /v1/control` with `{"key":"ordinary-launches","value":"paused"}` or `"enabled"`. The existing global control remains `launches`. Status reports `ordinaryLaunches`, `repairOwner`, per-lane `repairReadiness`, and the ordinary `readinessError` separately.
-
-The existing unprivileged daemon launches root workers with `sudo -n -- systemd-run --system --uid=0`. Stop, status, reset-failed and restart use `sudo -n -- systemctl --system`. The host must authorize these commands without a password. A failed sudo status check is an error, not evidence that the worker stopped. Root repair rejects the development process-launch mode. There is no second daemon or account registry.
-
-Creation records `run-execution:<id>` as `user` or `root-repair`; records without it are unprivileged. Admission pins the launch environment in `run-environment:<id>` alongside the account, release and unit. Changing or removing a lane cannot promote or demote its admitted workers. Recovery consults these records, not current lane metadata. Cross-release root recovery records the preceding unit in `run-retiring-unit:<id>` and stops it before starting the replacement, including when the daemon restarts during that transition.
-
-The pinned environment includes `HOME`, `PI_CODING_AGENT_DIR`, `PI_ORCHESTRATOR_AUTH`, `PI_ORCHESTRATOR_CONFIG`, `PI_ORCHESTRATOR_LEDGER`, and the user `XDG_RUNTIME_DIR` and `DBUS_SESSION_BUS_ADDRESS`. It also carries configured XDG paths, tool search paths, daemon address and tool-alert settings. Root workers receive the daemon's numeric `PI_ORCHESTRATOR_OWNER_UID` and `PI_ORCHESTRATOR_OWNER_GID` for shared file custody. They use the same pooled OAuth and SQLite account ledger as ordinary workers; `/root` needs no Pi configuration. [Runtime filesystem custody](../runtime/README.md#root-worker-filesystem-custody) covers session descendants, atomic settings/auth replacement, locks and SQLite files. Deploy the matching runtime dependency patch before Orchestrator; rebuilding Orchestrator alone does not patch Pi's native writers.
+`pause --ordinary` sets `ordinary-launches=paused`; `resume --ordinary` clears it. The global `launches=paused` control stops all new admission. Neither control cancels an admitted turn. Thread stop and resume use the same API as Remote and agent tools.
 
 ## Operations
 
 ```bash
 pi-orchestrator status
-pi-orchestrator run --prompt "..." --profile standard
+pi-orchestrator run --prompt "..." --model astra
 pi-orchestrator wave review --count 3
-pi-orchestrator abort RUN_ID
-pi-orchestrator kill RUN_ID
+pi-orchestrator stop THREAD_ID
 pi-orchestrator pause
 pi-orchestrator resume
 pi-orchestrator pause --ordinary
@@ -146,7 +121,7 @@ pi-orchestrator account disable openai-codex-3
 pi-orchestrator account enable openai-codex-3
 ```
 
-`pi-orchestrator account use ID voice` excludes a Codex account from fleet admission, including forced and pinned runs, and interactive routing. `account use ID shared` returns it to the shared pool. PiStack Voice uses its own OpenAI API credential and session leases, not the Orchestrator's OAuth accounts or client APIs. See [Voice deployment](../../docs/deployment.md). The reservation lives in the ledger's `control` table under `account-use:ID` and appears as `use` in account listings. Existing runs are not killed by this command; stop them with `kill RUN_ID` after reserving the account. Interactive sessions move off a reserved account before their next turn.
+`pi-orchestrator account use ID voice` excludes a Codex account from fleet admission, including forced and pinned runs, and interactive routing. `account use ID shared` returns it to the shared pool. PiStack Voice uses its own OpenAI API credential and session leases, not the Orchestrator's OAuth accounts or client APIs. See [Voice deployment](../../docs/deployment.md). The reservation lives in the ledger's `control` table under `account-use:ID` and appears as `use` in account listings. Existing runs are not killed by this command; stop their threads after reserving the account. Interactive sessions move off a reserved account before their next turn.
 
 Import reads credentials from a file so tokens do not enter process arguments. `account disable ID` takes an account out of fleet admission, interactive routing and meter sampling while keeping its credential and readings, which is what a lapsed subscription or a login awaiting replacement needs; `account enable ID` puts it back. A disabled account reports `disabled` in `status` capacity and produces no meter errors. `account remove` is the destructive path: it disables admission and deletes the credential while historical attribution remains intact. `account refresh ID` exchanges the account's refresh token for a new access token whatever the stored expiry claims, for the case where an operator already knows a credential is dead; the samplers and interactive routing do this on their own when a provider refuses one.
 
@@ -162,13 +137,15 @@ Applications can submit durable Luna or Terra inference through [`CompletionClie
 
 ## Application-owned workspaces
 
-`POST /v1/run/isolated` requires the Pi core and `context: { tools: ["read", "write", "edit", "bash", "agent_browser"] }`. This selects an isolated context rather than the fleet's normal environment. The dedicated endpoint fails without launching anything on a host that has not deployed this feature. `/v1/run` also accepts the same context contract. It requires an explicit `cwd` and one run. An empty tool list creates a tool-free agent. Built-in names are declared in `src/domain.ts`. Applications can also supply `extensions: ["/absolute/path/to/tool.ts"]` and select their registered tool names in `tools`. The worker fails before prompting if any requested tool did not load. Other context fields are rejected. Application extensions execute as the fleet user, just like the application's bash tool; these paths are an explicit trusted-code input.
+`POST /v1/threads/spawn` accepts an absolute `cwd` and `metadata.context: { tools: ["read", "write", "edit", "bash", "agent_browser"] }`. Applications can also supply absolute `extensions` paths and select their registered tool names. Unknown context fields or unloaded tools fail before prompting.
 
-The daemon stores the contract atomically with the run in its `run-context:<id>` control record. Recovery uses the same contract. The worker creates its HOME, temporary files, XDG directories, and Pi configuration inside `cwd/.home`. Sessions remain in the run's durable core directory, outside the disposable workspace. Pi loads no discovered instructions, skills, templates, settings, or extensions. Only pooled authentication, usage accounting, output-limit continuation, and the extensions required by the requested tools load. Remote-thread identifiers and inherited credential environment variables are removed.
+Each distinct workspace and context has a separate ThreadService under `applications/<boundary-id>` beside the ledger. Its native tools use `/v1/applications/<boundary-id>/threads`, so children remain in the same application service and retain its tool contract. The public thread directory can observe all services owned by this Unix person. The ledger's `thread-boundary:<id>` record retains the context needed to reopen the application service.
+
+The runner creates HOME, temporary files, XDG directories and Pi configuration inside `cwd/.home`. Sessions stay outside the disposable workspace. Pi loads no discovered instructions, skills, templates, settings or extensions. Only the selected application resources and required account support load.
 
 This is context isolation for trusted agents, not an OS security boundary. Bash still executes arbitrary code as the fleet user and can address files or services outside the workspace. The submitting application owns workspace creation, allowed reference files, result validation, accepted artifact storage, and cleanup after completion or failure. The orchestrator never deletes a caller-supplied `cwd`.
 
-EverythingLIVE uses this API for its commercial author/review jobs. Each turn gets a fresh folder containing scene definitions, authoring helpers, brand references, and the preceding turn's draft. Its service exposes generation, inspection, and preview operations through the workspace CLI, accepts validated JSON and its media/components, and reclaims workspaces during normal operation and restart recovery.
+Applications such as EverythingLIVE submit author/review jobs through this thread API. Each turn gets a fresh folder containing scene definitions, authoring helpers, brand references, and the preceding turn's draft. Its service exposes generation, inspection, and preview operations through the workspace CLI, accepts validated JSON and its media/components, and reclaims workspaces during normal operation and restart recovery.
 
 ## Meter authentication
 

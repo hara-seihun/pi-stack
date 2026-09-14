@@ -1,36 +1,12 @@
 import type { ModelCandidate } from "./catalog.js";
 import type { AccountReservation } from "./admission-reservation.js";
-import type { CoreId } from "./cores/contracts.js";
 
 export type BudgetClass = "background" | "force";
 export type RunSource = "direct" | "lane";
 export type RunExecution = "user" | "root-repair";
 export const ISOLATED_TOOLS = ["read", "write", "edit", "bash", "grep", "find", "ls", "agent_browser"] as const;
 export type RunContext = { readonly tools: readonly string[]; readonly extensions?: readonly string[] };
-export type RunState = "queued" | "starting" | "running" | "waiting" | "done" | "failed" | "aborted";
-export const FLEET_MODELS = ["astra", "sol", "terra", "luna"] as const;
-export type FleetModel = typeof FLEET_MODELS[number];
-export interface FleetDispatch {
-  readonly requestId: string;
-  readonly task: string;
-  readonly model: FleetModel;
-  readonly escalatesRunId?: string;
-}
-export interface FleetChild extends FleetDispatch {
-  readonly parentRunId: string;
-  readonly rootRunId: string;
-  readonly assignment: ModelCandidate;
-}
-export interface FleetResult {
-  readonly deliveryId: string;
-  readonly runId: string;
-  readonly parentRunId: string;
-  readonly model: string;
-  readonly state: "done" | "failed" | "aborted";
-  readonly result: string;
-  readonly failureKind?: FailureKind;
-  readonly sessionFile?: string;
-}
+export type RunState = "queued" | "starting" | "running" | "done" | "failed" | "aborted";
 export type LeaseKind = "fleet" | "interactive" | "voice";
 export type FailureKind = "provider" | "account" | "infrastructure" | "operator" | "task";
 export type RunActivity = "IDLE" | "STARTING" | "WORKING" | "THINKING" | "COMPACTING" | "WAITING_ON_TOOL";
@@ -57,6 +33,7 @@ export interface LaneSpec {
   readonly profile: string;
   readonly weight: number;
   readonly priority?: number;
+  readonly admission?: BudgetClass;
   readonly doctrineUrl?: string;
   readonly openingProbe?: string;
   readonly repair?: { readonly readinessCommand: string };
@@ -83,18 +60,6 @@ export interface Run {
   readonly profile: string;
   readonly budget: BudgetClass;
   readonly execution?: RunExecution;
-  readonly core?: CoreId;
-  readonly coreStateDir?: string;
-  readonly nativeSessionId?: string;
-  readonly portableSessionFile?: string;
-  readonly childrenOwner?: "core" | "orchestrator";
-  readonly context?: RunContext;
-  readonly parentRunId?: string;
-  readonly rootRunId?: string;
-  readonly childRunIds?: readonly string[];
-  readonly requestedModel?: FleetModel;
-  readonly escalatesRunId?: string;
-  readonly deliveryState?: "pending" | "delivered";
   readonly accountId?: string;
   readonly provider?: string;
   readonly model?: string;

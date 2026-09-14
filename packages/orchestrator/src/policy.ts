@@ -73,7 +73,7 @@ export function accountCapacity(store:Store,accountId:string,budget:BudgetClass,
 
 export function assign(store:Store,profile:string,budget:BudgetClass,cfg:OrchestratorConfig,now=Date.now(),pinnedAccount?:string,runId?:string,execution:"user"|"root-repair"="user"):{assignment?:Assignment;refusals:Refusal[]}{
   if(store.control("launches")==="paused")return{refusals:[{accountId:"*",reason:"emergency halt"}]};
-  const repair=(runId===undefined?execution:store.run(runId)?.execution)==="root-repair";
+  const repair=execution==="root-repair";
   if(!repair&&store.control("ordinary-launches")==="paused")return{refusals:[{accountId:"*",reason:"ordinary work paused"}]};
   if(repair&&store.control("repair-owner")&&store.control("repair-owner")!==runId)return{refusals:[{accountId:"*",reason:"repair already owned"}]};
   if(store.activeSessionLeases(undefined,120_000,now).length>=cfg.maxConcurrentSessions)return{refusals:[{accountId:"*",reason:"machine session ceiling"}]};
