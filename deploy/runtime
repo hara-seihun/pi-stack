@@ -12,7 +12,7 @@ runtime_source="$root/packages/runtime"
 dest=${PI_STACK_RUNTIME_DEST:-/srv/pi/runtime}
 dependencies_root=${PI_STACK_DEPENDENCIES_ROOT:-/srv/pi/dependencies}
 PI_VERSION=0.85.0
-BROWSER_VERSION="agent-browser $(node -p 'require(process.argv[1]).dependencies["agent-browser"]' "$root/package.json")"
+BROWSER_VERSION="agent-browser $(node -p 'require(process.argv[1]).packages["node_modules/agent-browser"].version' "$root/package-lock.json")"
 stage=""
 cleanup() { [[ -z $stage ]] || rm -rf "$stage"; }
 trap cleanup EXIT
