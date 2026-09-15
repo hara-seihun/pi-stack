@@ -1,11 +1,10 @@
 import { useEffect, useRef, useState } from "react";
-import type { publicPerson } from "../../server/persons";
 import { fetchPersonChooser, loadEnvironments, type EnvironmentState } from "./native";
 import type { Endpoint } from "./router-auth";
 import { DismissibleError } from "./dismissible-error";
 import "./EnvironmentControl.css";
 
-type Person = ReturnType<typeof publicPerson>;
+interface Person { user: string; displayName: string }
 const message = (error: unknown) => error instanceof Error ? error.message : String(error);
 
 export function EnvironmentControl() {
