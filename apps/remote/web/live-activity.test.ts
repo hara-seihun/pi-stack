@@ -12,11 +12,11 @@ test("reasoning without text is activity, not a blank transcript card", () => {
   ]);
   expect(entries).toHaveLength(1);
   expect(entries[0].kind === "details" && entries[0].entries.map(entry => entry.key)).toEqual(["actual"]);
-  const thinking = renderToStaticMarkup(createElement(LiveActivity, { activity: "THINKING" }));
+  const thinking = renderToStaticMarkup(createElement(LiveActivity, { activity: "thinking" }));
   expect(thinking).toContain('role="status"');
   expect(thinking).toContain("THINKING");
-  expect(renderToStaticMarkup(createElement(LiveActivity, { activity: "WORKING" }))).toContain('role="status"');
-  expect(renderToStaticMarkup(createElement(LiveActivity, { activity: "WAITING_ON_TOOL", tool: "exec_command" }))).toContain("EXEC_COMMAND");
-  expect(renderToStaticMarkup(createElement(LiveActivity, { activity: "THINKING", offline: "network" }))).not.toContain("THINKING");
-  expect(renderToStaticMarkup(createElement(LiveActivity, { activity: "IDLE" }))).toBe("");
+  expect(renderToStaticMarkup(createElement(LiveActivity, { activity: "running" }))).toContain('role="status"');
+  expect(renderToStaticMarkup(createElement(LiveActivity, { activity: "waiting_on_tool", tool: "exec_command" }))).toContain("EXEC_COMMAND");
+  expect(renderToStaticMarkup(createElement(LiveActivity, { activity: "thinking", offline: "network" }))).not.toContain("THINKING");
+  expect(renderToStaticMarkup(createElement(LiveActivity, { activity: "idle" }))).toBe("");
 });

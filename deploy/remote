@@ -33,7 +33,7 @@ orchestrator_release=$(readlink -f "$orchestrator")
   exit 66
 }
 
-npm run build --workspace=pi-remote
+node "$root/scripts/build-workspace.mjs" remote
 mkdir -p "$stage/release/node_modules" "$stage/release/web" "$stage/release/deploy"
 rsync -a --chmod=D755,Fu=rwX,Fgo=rX deploy/lib deploy/smoke "$stage/release/deploy/"
 rsync -a --chmod=D755,Fu=rwX,Fgo=rX apps/remote/package.json apps/remote/server "$stage/release/"

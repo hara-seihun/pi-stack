@@ -4,7 +4,7 @@
 
 Agents can choose delegation for independent work while they make useful progress locally. Immediate blocking tasks stay local. The policy covers task decomposition, non-overlapping edits, automatic result delivery and integration. Model-selection descriptions do not establish a reason to delegate. Thinking level does not change this policy. The unified-thread cutover does not change the policy text.
 
-PiStack Voice retains its separate [`delegation-policy.md`](../../../apps/remote/server/voice/delegation-policy.md), loaded by `voiceInstructions()` during Voice negotiation. Its computer-work handoffs keep the voice model available for conversation. A backing text agent, including a meeting-associated root, uses the regular optional policy. Remote adds room/browser handoff details to the tool description only for meeting-associated threads.
+PiStack Voice retains its separate [`delegation-policy.md`](../../../apps/remote/server/voice/delegation-policy.md), loaded by `voiceInstructions()` during Voice negotiation. Its computer-work handoffs keep the voice model available for conversation. A backing text agent uses the regular optional policy, with one exception: the root thread a meeting is attached to also receives Remote's [meeting root policy](../../../apps/remote/server/meet/root-thread-policy.md) in its system prompt, which requires delegation for anything longer than one or two tool calls because Voice hard-steers that thread on every handoff. [Meet](../../../apps/remote/docs/meet.md#meeting-thread-and-workers) owns that policy.
 
 ## Authorization and source
 

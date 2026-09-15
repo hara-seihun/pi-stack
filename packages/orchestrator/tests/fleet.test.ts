@@ -6,7 +6,7 @@ import type { Thread } from "../src/threads/contracts.js";
 
 const thread: Thread = { id: "thread", parentId: null, title: "work", cwd: "/tmp", sessionFile: "/tmp/thread.jsonl",
   settings: { model: "openai-codex/gpt-6-astra", thinkingLevel: "high", speed: "standard" }, admission: "force",
-  state: "queued", revision: 1, createdAt: 1, updatedAt: 1, pendingMessages: 1 };
+  state: "running", revision: 1, createdAt: 1, updatedAt: 1, pendingMessages: 1 };
 
 it("leases executions without creating fleet runs and enforces account capacity", async () => {
   const store = Store.open(":memory:");
@@ -78,6 +78,19 @@ it("owns root repair leases and recovers only recorded executions without isolat
     } finally { await recovered.value.release(); }
     expect(store.control("repair-owner")).toBeUndefined();
     expect(store.activeSessionLeases()).toEqual([]);
+  } finally { store.close(); }
+});
+
+it("releases a retained lease on settlement without readmitting its stopped execution", () => {
+  const store = Store.open(":memory:");
+  store.upsertAccount({ id: "a", provider: "openai-codex", concurrency: 1 });
+  store.createLease("thread:retained", "a", "fleet", thread.id);
+  store.setControl("repair-owner", thread.id);
+  const fleet = new Fleet(store, loadConfig("/missing"));
+  try {
+    fleet.event(thread.id, { type: "thread_settled", executionId: "retained", outcome: "cancelled" });
+    expect(store.activeSessionLeases()).toEqual([]);
+    expect(store.control("repair-owner")).toBeUndefined();
   } finally { store.close(); }
 });
 

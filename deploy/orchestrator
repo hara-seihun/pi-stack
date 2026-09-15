@@ -73,10 +73,15 @@ for (const lane of manifest.lanes) {
 NODE
 }
 
+# Loading the CLI takes about two seconds; it overlaps the manifest and link work.
+check_cli() { "$dest/dist/cli.js" help | grep -q '^usage: pi-orchestrator'; }
+
 if [[ -f $dest/.pi-stack-commit && $(<"$dest/.pi-stack-commit") == "$commit" && -x $dest/dist/cli.js ]]; then
+  check_cli &
+  cli_pid=$!
   validate_manifest
-  "$dest/dist/cli.js" help | grep -q '^usage: pi-orchestrator'
   reconcile_cli_links
+  wait "$cli_pid" || { echo "deployed Pi Orchestrator CLI does not answer: $dest/dist/cli.js" >&2; exit 1; }
   printf 'Pi Orchestrator from %s is already deployed\n' "$commit"
   exit 0
 fi
@@ -91,8 +96,7 @@ pi_stack_prepare_dependencies "$root"
 }
 dependencies=$(readlink -f "$runtime/node_modules")
 [[ -d $dependencies ]] || { echo "Pi Runtime dependencies are missing at $dependencies" >&2; exit 66; }
-rm -rf packages/orchestrator/dist
-npm run build --workspace=pi-orchestrator
+node "$root/scripts/build-workspace.mjs" orchestrator
 
 mkdir -p "$stage/release"
 rsync -a --chmod=D755,Fu=rwX,Fgo=rX packages/orchestrator/dist packages/orchestrator/src \
@@ -103,6 +107,8 @@ printf '%s\n' "$commit" > "$stage/release/.pi-stack-commit"
 validate_manifest
 pi_stack_publish_release "$root" "$stage/release" "$dest" orchestrator
 
-"$dest/dist/cli.js" help | grep -q '^usage: pi-orchestrator'
+check_cli &
+cli_pid=$!
 reconcile_cli_links
+wait "$cli_pid" || { echo "deployed Pi Orchestrator CLI does not answer: $dest/dist/cli.js" >&2; exit 1; }
 printf 'deployed Pi Orchestrator from %s to %s\n' "$commit" "$dest"

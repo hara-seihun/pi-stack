@@ -46,6 +46,7 @@ function usage() {
   deploy/publication inspect REQUEST
   deploy/publication cancel REQUEST
   deploy/publication repair REQUEST
+  deploy/publication repair-result REQUEST
   deploy/publication submit SHA --repair-of REQUEST
   deploy/publication report REQUEST [REMOTE_URL SESSION_ID]
   deploy/publication gate-status
@@ -1623,35 +1624,7 @@ function repairRun(requestId) {
           timeoutSeconds: policy.repairMs / 1000, stdio: ["ignore", fd, fd] });
     } finally { closeSync(fd); }
     if (!result.ok) throw new Error(`Repair agent exited ${result.status}; see ${repair.log}`);
-    if (!existsSync(repair.result)) throw new Error(`Repair agent returned without ${repair.result}`);
-    const outcome = JSON.parse(readFileSync(repair.result, "utf8"));
-    if (!["source-fixed", "infrastructure-fixed", "blocked"].includes(outcome.status) || !outcome.summary?.trim()) throw new Error("Repair result needs a status and cause/repair summary");
-    if (outcome.status !== "blocked" && (!outcome.evidence || !existsSync(outcome.evidence))) throw new Error("Repair result needs an existing focused proof receipt");
-    if (outcome.status !== "blocked") {
-      const evidenceSource = resolve(outcome.evidence);
-      const evidence = join(dirname(repair.path), "evidence");
-      atomicWrite(evidence, readFileSync(evidenceSource));
-      outcome.evidence = evidence;
-      outcome.evidenceSource = evidenceSource;
-      outcome.evidenceSha256 = sha256(evidence);
-    }
-    repair.outcome = outcome;
-    if (outcome.workspace) repair.workspace = resolve(outcome.workspace);
-    repair.status = outcome.status === "blocked" ? "blocked" : "submitting";
-    writeRepair(repair);
-    if (outcome.status === "source-fixed") {
-      validateSha(outcome.sourceSha);
-      if (!repair.workspace) throw new Error("Source repair must identify its registered workspace");
-      repair.successor = JSON.parse(checked(installedCommand, ["submit", outcome.sourceSha, "--repair-of", requestId],
-        { cwd: repair.workspace, timeoutSeconds: 90 }));
-      repair.status = "submitted";
-      writeRepair(repair);
-      checked("agent-workspace", ["release", "--path", repair.workspace], { timeoutSeconds: 10 });
-    } else if (outcome.status === "infrastructure-fixed") {
-      repair.status = "ready-to-retry";
-    }
-    repair.finishedAt = new Date().toISOString();
-    writeRepair(repair);
+    acceptRepairResult(repair);
   } catch (error) {
     repair.status = "blocked";
     repair.summary = error instanceof Error ? error.message : String(error);
@@ -1659,6 +1632,67 @@ function repairRun(requestId) {
     writeRepair(repair);
   }
   checked("systemctl", ["--user", "start", "--no-block", "pi-stack-publication-watchdog.service"], { timeoutSeconds: 5 });
+}
+
+function acceptRepairResult(repair) {
+  if (!existsSync(repair.result)) throw new Error(`Repair agent returned without ${repair.result}`);
+  const outcome = JSON.parse(readFileSync(repair.result, "utf8"));
+  if (!["source-fixed", "infrastructure-fixed", "blocked"].includes(outcome.status) || !outcome.summary?.trim()) throw new Error("Repair result needs a status and cause/repair summary");
+  if (outcome.status !== "blocked" && (!outcome.evidence || !existsSync(outcome.evidence))) throw new Error("Repair result needs an existing focused proof receipt");
+  if (outcome.status === "source-fixed") {
+    validateSha(outcome.sourceSha);
+    if (!(outcome.workspace ?? repair.workspace)) throw new Error("Source repair must identify its registered workspace");
+  }
+  if (outcome.status !== "blocked") {
+    const evidenceSource = resolve(outcome.evidence);
+    const evidence = join(dirname(repair.path), "evidence");
+    atomicWrite(evidence, readFileSync(evidenceSource));
+    outcome.evidence = evidence;
+    outcome.evidenceSource = evidenceSource;
+    outcome.evidenceSha256 = sha256(evidence);
+  }
+  repair.outcome = outcome;
+  if (outcome.workspace) repair.workspace = resolve(outcome.workspace);
+  repair.status = outcome.status === "blocked" ? "blocked" : "submitting";
+  writeRepair(repair);
+  if (outcome.status === "source-fixed") {
+    repair.successor = JSON.parse(checked(installedCommand, ["submit", outcome.sourceSha, "--repair-of", repair.requestId],
+      { cwd: repair.workspace, timeoutSeconds: 45 }));
+    repair.status = "submitted";
+    writeRepair(repair);
+    checked("agent-workspace", ["release", "--path", repair.workspace], { timeoutSeconds: 10 });
+  } else if (outcome.status === "infrastructure-fixed") {
+    repair.status = "ready-to-retry";
+  }
+  repair.finishedAt = new Date().toISOString();
+  writeRepair(repair);
+}
+
+function completeRepair(requestId) {
+  validateRequestId(requestId);
+  const repair = readRepair(requestId);
+  if (!repair) throw new Error("No dedicated repair receipt exists for this request");
+  if (["submitted", "retry-submitted", "ready-to-retry"].includes(repair.status)) {
+    process.stdout.write(`${JSON.stringify(repair)}\n`);
+    return;
+  }
+  if (readRequest(requestId).status !== "failed") throw new Error("Only a failed publication can accept a repair result");
+  if (serviceBusy(repair.unit)) throw new Error("Repair service is still active; its owner will accept the result");
+  if (!["blocked", "submitting"].includes(repair.status)) throw new Error("Only an interrupted or blocked repair can be completed explicitly");
+  const recovery = { at: new Date().toISOString(), status: repair.status, summary: repair.summary, unitResult: repair.unitResult };
+  try {
+    acceptRepairResult(repair);
+    repair.resultRecovery = [...(repair.resultRecovery ?? []), recovery];
+    delete repair.summary;
+    writeRepair(repair);
+  } catch (error) {
+    repair.status = "blocked";
+    repair.summary = error instanceof Error ? error.message : String(error);
+    writeRepair(repair);
+    throw error;
+  }
+  checked("systemctl", ["--user", "start", "--no-block", "pi-stack-publication-watchdog.service"], { timeoutSeconds: 5 });
+  process.stdout.write(`${JSON.stringify(repair)}\n`);
 }
 
 function drain() {
@@ -1721,6 +1755,9 @@ function main() {
   if (operation === "_notices" && args.length === 0) return reconcileNotices();
   if (operation === "repair-run" && args.length === 1) return locked("repair-agent", "repair-run", args);
   if (operation === "_repair-run" && args.length === 1) return repairRun(args[0]);
+  if (operation === "repair-result" && args.length === 1) return locked("watchdog", "repair-result", args);
+  if (operation === "_repair-result" && args.length === 1) return locked("repair-agent", "complete-repair", args);
+  if (operation === "_complete-repair" && args.length === 1) return completeRepair(args[0]);
   if (operation === "repair" && args.length === 1) return locked("worker", "repair", args);
   if (operation === "_repair" && args.length === 1) return requestRepair(args[0]);
   if (operation === "_retry" && args.length === 1) return retry(args[0]);

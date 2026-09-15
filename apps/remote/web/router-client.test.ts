@@ -5,7 +5,18 @@ function storage() {
   return { getItem: (key: string) => values.get(key) ?? null, setItem: (key: string, value: string) => { values.set(key, value); }, removeItem: (key: string) => { values.delete(key); } };
 }
 
-test("shared client unlocks at bootstrap, discovers by session, renews expired tokens, and drops another person's endpoints", async () => {
+if (!process.env.PI_ROUTER_TEST_CASE) {
+  test.each(["browser-root", "browser-prefix", "android-root", "android-prefix"])("router transport and auth at %s", (scenario) => {
+    const result = Bun.spawnSync([process.execPath, "test", import.meta.path], {
+      env: { ...process.env, PI_ROUTER_TEST_CASE: scenario }, stdout: "pipe", stderr: "pipe",
+    });
+    expect({ exitCode: result.exitCode, error: result.exitCode ? result.stderr.toString() : "" }).toEqual({ exitCode: 0, error: "" });
+  });
+} else test("shared client unlocks at bootstrap, discovers by session, renews expired tokens, and drops another person's endpoints", async () => {
+  const nativePlatform = process.env.PI_ROUTER_TEST_CASE!.startsWith("android");
+  const prefix = process.env.PI_ROUTER_TEST_CASE!.endsWith("prefix") ? "/pi-stack" : "";
+  const bootstrap = nativePlatform ? `https://router.test${prefix}` : prefix;
+  const page = nativePlatform ? "https://localhost/" : `https://router.test${prefix}/`;
   const names = ["window", "location", "document", "localStorage", "sessionStorage", "fetch", "addEventListener", "removeEventListener", "dispatchEvent", "PiRemotePerson", "KenanRemote", "Capacitor"] as const;
   const descriptors = new Map(names.map(name => [name, Object.getOwnPropertyDescriptor(globalThis, name)]));
   const events = new EventTarget();
@@ -17,7 +28,7 @@ test("shared client unlocks at bootstrap, discovers by session, renews expired t
   let wrongCloud = false;
   const synced: Array<{ user: string; session: string }> = [];
   const bridge = {
-    getState: async () => ({ routerUrl: "" }),
+    getState: async () => ({ routerUrl: bootstrap }),
     syncSession: async (identity: { user: string; session: string }) => {
       if (Boolean(identity.user) !== Boolean(identity.session)) throw new Error("Native rejects incomplete identity");
       synced.push(identity);
@@ -25,8 +36,10 @@ test("shared client unlocks at bootstrap, discovers by session, renews expired t
   };
   const json = (body: unknown, status = 200) => Response.json(body, { status });
   const fetcher = async (input: RequestInfo | URL, init?: RequestInit) => {
-    const request = new Request(input instanceof Request ? input : new URL(String(input), "https://router.test"), init);
-    const path = new URL(request.url).pathname;
+    const request = new Request(input instanceof Request ? input : new URL(String(input), page), init);
+    const wire = new URL(request.url);
+    if (wire.origin === "https://router.test") expect(wire.pathname.startsWith(`${prefix}/v1/`)).toBe(true);
+    const path = wire.pathname.slice(wire.origin === "https://router.test" ? prefix.length : 0);
     const body = request.method === "POST" ? await request.json() : null;
     calls.push({ path, search: new URL(request.url).search, headers: request.headers, body });
     if (new URL(request.url).origin !== "https://router.test") return json({ external: true });
@@ -49,13 +62,13 @@ test("shared client unlocks at bootstrap, discovers by session, renews expired t
     return json({ ok: true, user });
   };
   try {
-    Object.assign(globalThis, { window: globalThis, location: new URL("https://router.test/"), document: new EventTarget(), localStorage: peopleStorage, sessionStorage: tabs, fetch: fetcher,
-      Capacitor: { isNativePlatform: () => true, registerPlugin: () => bridge },
+    Object.assign(globalThis, { window: globalThis, location: new URL(page), document: new EventTarget(), localStorage: peopleStorage, sessionStorage: tabs, fetch: fetcher,
+      Capacitor: { isNativePlatform: () => nativePlatform, registerPlugin: () => bridge },
       addEventListener: events.addEventListener.bind(events), removeEventListener: events.removeEventListener.bind(events), dispatchEvent: events.dispatchEvent.bind(events) });
     const client = await import("./src/client");
     const native = await import("./src/native");
     await native.nativeSessionReady();
-    expect(synced).toEqual([{ user: "", session: "" }]);
+    expect(synced).toEqual(nativePlatform ? [{ user: "", session: "" }] : []);
     let prompts = 0;
     client.registerUnlockHandler(async () => { prompts++; window.PiRemotePerson.set("sybil"); return "sybil-key"; });
     expect(calls).toHaveLength(0);
@@ -74,7 +87,7 @@ test("shared client unlocks at bootstrap, discovers by session, renews expired t
     await client.piFetch("/v1/sync", { method: "POST", body: "{}" });
     expect(calls.at(-1)!.path).toBe("/v1/remotes/cloud/v1/sync");
     const download = window.KenanRemote!.resolveApiUrl("/v1/files?path=a");
-    expect(download).toBe("/v1/remotes/cloud/v1/files?path=a&session=token-1");
+    expect(download).toBe(`${bootstrap}/v1/remotes/cloud/v1/files?path=a&session=token-1`);
     expect(window.KenanRemote!.resolveApiUrl(download)).toBe(download);
     await fetch("/v1/environment");
     expect(calls.at(-1)!.path).toBe("/v1/remotes/cloud/v1/environment");
@@ -82,10 +95,10 @@ test("shared client unlocks at bootstrap, discovers by session, renews expired t
     await native.fetchPersonChooser();
     expect(calls.at(-1)!.path).toBe("/v1/environment");
     expect(calls.at(-1)!.headers.has("x-pi-remote-session")).toBe(false);
-    await fetch("/v1/lock-status");
+    await fetch(`${bootstrap}/v1/lock-status`);
     expect(calls.at(-1)!.path).toBe("/v1/lock-status");
     sessions.clear();
-    await client.piFetch(new Request("https://router.test/v1/sync", { method: "POST", body: JSON.stringify({ probe: "replayed-body" }) }));
+    await client.piFetch(new Request(`${page}v1/sync`, { method: "POST", body: JSON.stringify({ probe: "replayed-body" }) }));
     expect(calls.filter(call => call.path.endsWith("/sync")).slice(-2).map(call => call.body)).toEqual([{ probe: "replayed-body" }, { probe: "replayed-body" }]);
     expect(window.PiRemotePerson.session()).toBe("token-2");
     await client.piFetch(download);
@@ -100,19 +113,19 @@ test("shared client unlocks at bootstrap, discovers by session, renews expired t
     expect(window.PiRemotePerson.href("https://outside.example/v1/files")).toBe("https://outside.example/v1/files");
     window.PiRemotePerson.set("guest");
     await native.nativeSessionReady();
-    expect(synced.at(-1)).toEqual({ user: "", session: "" });
+    if (nativePlatform) expect(synced.at(-1)).toEqual({ user: "", session: "" });
     expect(window.PiRemotePerson.session()).toBe("");
-    expect(tabs.getItem("pi-remote-environment:sybil")).toBeNull();
+    expect(tabs.getItem(`${!nativePlatform && prefix ? `${prefix}:` : ""}pi-remote-environment:sybil`)).toBeNull();
     const guest = await window.KenanRemote!.getState();
     expect(guest.environments.map((endpoint: { id: string }) => endpoint.id)).toEqual(["local"]);
     expect(calls.filter(call => call.path === "/v1/unlock").at(-1)!.body).toEqual({});
     await expect(window.KenanRemote!.select({ id: "cloud", user: "guest" })).rejects.toThrow("not allowed");
     expect(prompts).toBe(1);
     await native.nativeSessionReady();
-    expect(synced.at(-1)).toEqual({ user: "guest", session: window.PiRemotePerson.session() });
+    if (nativePlatform) expect(synced.at(-1)).toEqual({ user: "guest", session: window.PiRemotePerson.session() });
     window.PiRemotePerson.clearSession();
     await native.nativeSessionReady();
-    expect(synced.at(-1)).toEqual({ user: "", session: "" });
+    if (nativePlatform) expect(synced.at(-1)).toEqual({ user: "", session: "" });
   } finally {
     for (const name of names) {
       const descriptor = descriptors.get(name);

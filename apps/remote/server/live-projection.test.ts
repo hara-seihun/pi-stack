@@ -6,9 +6,9 @@ test("an idle parent's display does not inherit active child or stale local prog
   const child = createLiveProjection("child");
   child.activeTools.set("tool", "bash");
   parent.thinkingActive = true;
-  expect(threadActivity("IDLE", parent)).toBe("IDLE");
-  expect(threadActivity("RUNNING", child)).toBe("WAITING_ON_TOOL");
-  expect(threadActivity("STOPPED", child)).toBe("STOPPED");
+  expect(threadActivity("idle", parent)).toBe("idle");
+  expect(threadActivity("running", child)).toBe("waiting_on_tool");
+  expect(threadActivity("stopped", child)).toBe("stopped");
 });
 
 test("settlement keeps final output until canonical context acknowledges it", () => {

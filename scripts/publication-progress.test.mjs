@@ -344,6 +344,40 @@ test("watchdog stops a bounded stall and launches one independent repair", t => 
   assert.equal(systemctl.filter(line => line === `--user start --no-block ${repair.unit}`).length, 1);
 });
 
+test("repair-result completes an interrupted repair once without launching another agent", t => {
+  const f = repairFixture(t, "blocked");
+  const summary = "service exited without a terminal receipt";
+  writeJson(f.repairPath, { ...f.repair, workspace: f.workspace, summary });
+  const evidence = join(f.root, "focused-proof.json");
+  writeJson(evidence, { passed: true });
+  writeJson(f.repair.result, { status: "source-fixed", sourceSha: f.repairedSha, summary: "repair completed", evidence });
+  const result = runPublication(f.root, f.bin, "repair-result", f.environment);
+  assert.equal(result.status, 0, result.stderr);
+  const repair = JSON.parse(readFileSync(f.repairPath, "utf8"));
+  assert.equal(repair.status, "submitted");
+  assert.equal(repair.resultRecovery[0].summary, summary);
+  assert.equal(repair.summary, undefined);
+  assert.equal(repair.outcome.sourceSha, f.repairedSha);
+  assert.match(repair.outcome.evidenceSha256, /^[a-f0-9]{64}$/);
+  assert.equal(existsSync(f.environment.PI_STUB_LOG), false);
+  assert.equal(runPublication(f.root, f.bin, "repair-result", f.environment).status, 0);
+  assert.equal(readFileSync(f.environment.PUBLICATION_SUBMIT_LOG, "utf8").trim().split("\n").length, 1);
+  assert.deepEqual(JSON.parse(readFileSync(f.requestPath, "utf8")), f.request);
+});
+
+test("repair-result refuses an active owner and requires a saved proof", t => {
+  const f = repairFixture(t, "blocked");
+  let result = runPublication(f.root, f.bin, "repair-result", { ...f.environment, SYSTEMCTL_ACTIVE_STATE: "active" });
+  assert.notEqual(result.status, 0);
+  assert.match(result.stderr, /still active/);
+  writeJson(f.repair.result, { status: "source-fixed", sourceSha: f.repairedSha, summary: "repair", evidence: "/missing-proof" });
+  result = runPublication(f.root, f.bin, "repair-result", f.environment);
+  assert.notEqual(result.status, 0);
+  assert.match(result.stderr, /existing focused proof/);
+  assert.equal(existsSync(f.environment.PUBLICATION_SUBMIT_LOG), false);
+  assert.equal(existsSync(f.environment.PI_STUB_LOG), false);
+});
+
 test("repair-run launches the registered local Pi process once and accepts each terminal result", async t => {
   const cases = [
     { status: "blocked", summary: "upstream credentials are required", expected: "blocked" },

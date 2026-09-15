@@ -7,7 +7,7 @@ import { activityColor, conversationThreads, orchestratorThreads, working } from
 import type { Session } from "./src/types";
 
 const session = (id: string, extra: Partial<Session> = {}): Session => ({
-  id, parentId: null, hasChildren: false, origin: "person", model: "astra", name: id, cwd: "/home", workspaceName: "Home", environment: "home", state: "IDLE", activity: "IDLE",
+  id, parentId: null, hasChildren: false, origin: "person", model: "astra", name: id, cwd: "/home", workspaceName: "Home", environment: "home", state: "idle", activity: "idle",
   activeTool: null, provider: "openai", createdAt: "", updatedAt: "", revision: 1, idleUnread: false, lastError: null,
   steeringQueued: 0, followUpQueued: 0, queuedMessages: [], archivedAt: null, ...extra,
 });
@@ -44,8 +44,8 @@ describe("thread controls", () => {
   });
   test("keeps active children outside the collapsed inactive section", () => {
     const html = renderToStaticMarkup(createElement(ChildThreadList, { children: [
-      session("active-child", { parentId: "parent", state: "RUNNING", activity: "WORKING" }),
-      session("idle-child", { parentId: "parent", state: "IDLE" }),
+      session("active-child", { parentId: "parent", state: "running", activity: "running" }),
+      session("idle-child", { parentId: "parent", state: "idle" }),
     ], loading: false, error: "", onOpen() {} }));
     expect(html.indexOf("active-child")).toBeLessThan(html.indexOf("<details"));
     expect(html.indexOf("idle-child")).toBeGreaterThan(html.indexOf("<details"));
@@ -77,11 +77,11 @@ describe("thread controls", () => {
 
   test("an idle parent stays idle while its child is working", () => {
     const parent = session("parent", { hasChildren: true, idleUnread: true });
-    const child = session("child", { parentId: parent.id, state: "RUNNING", activity: "THINKING" });
+    const child = session("child", { parentId: parent.id, state: "running", activity: "thinking" });
     expect(working(parent)).toBe(false);
     expect(working(child)).toBe(true);
     expect(activityColor(parent.activity, parent.idleUnread)).toBe("var(--success)");
-    expect(working({ ...child, state: "STOPPED" })).toBe(false);
+    expect(working({ ...child, state: "stopped" })).toBe(false);
   });
 
   test("stop requests always carry scope", async () => {

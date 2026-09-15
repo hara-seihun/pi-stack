@@ -1,6 +1,6 @@
 import { Type } from "typebox";
 import { defineTool } from "@earendil-works/pi-coding-agent";
-import type { PiSessionOptions, Result, ThreadApi } from "./contracts.js";
+import { resolveDelivery, type PiSessionOptions, type Result, type ThreadApi } from "./contracts.js";
 import { createThreadClient } from "./http.js";
 import { historyPreview } from "./pi-history-preview.js";
 import { DELEGATION_POLICY } from "../delegation-policy.js";
@@ -36,11 +36,11 @@ export function threadTools(options: PiSessionOptions) {
     }),
     defineTool({
       name: "thread_send", label: "Send to a thread",
-      description: "Send to an existing accessible thread. Queue waits for current execution; steer waits for current tools; hardSteer cancels and confirms local work stopped before running the message. Sending explicitly resumes a stopped recipient. It does not stop descendants.",
-      parameters: Type.Object({ threadId: Type.String(), text: Type.String(), delivery: Type.Optional(delivery), replyTo: Type.Optional(Type.String()) }),
+      description: "Send to an existing accessible thread. Defaults to steer; an explicit delivery mode overrides the default. Queue waits for current execution; steer waits for current tools; hardSteer cancels and confirms local work stopped before running the message. Sending explicitly resumes a stopped recipient. It does not stop descendants.",
+      parameters: Type.Object({ threadId: Type.String(), text: Type.String(), delivery: Type.Optional(Type.Union(delivery.anyOf, { default: "steer", description: "Defaults to steer. Explicit queue, steer or hardSteer is preserved." })), replyTo: Type.Optional(Type.String()) }),
       execute: async (id, input, signal) => {
         if (input.threadId === options.threadId && input.delivery === "hardSteer") return result({ ok: false, error: { code: "invalid_request", message: "Hard steer cannot wait for the tool that requested it. Return and continue in this thread instead." } });
-        return result(await api(signal).send({ ...input, requestId: `${options.threadId}:${id}`, senderId: options.threadId, delivery: input.delivery ?? "queue", source: "explicit" }));
+        return result(await api(signal).send({ ...input, requestId: `${options.threadId}:${id}`, senderId: options.threadId, delivery: resolveDelivery({ ...input, senderId: options.threadId }), source: "explicit" }));
       },
     }),
     defineTool({

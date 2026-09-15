@@ -1,16 +1,13 @@
-import type { Session } from "./types";
-
-const ACTIVE_THREAD_STATES = new Set(["QUEUED", "STARTING", "RUNNING", "STOPPING"]);
+import type { Activity, Session } from "./types";
 
 export function activeThread(session: Session | null) {
-  return Boolean(session && ACTIVE_THREAD_STATES.has(normalizedActivity(session.state)));
+  return session?.state === "running";
 }
 
 export const working = activeThread;
 
-export function composerAction(session: Session | null): "send" | "stop" | "stopping" {
-  if (session && normalizedActivity(session.state) === "STOPPING") return "stopping";
-  return activeThread(session) ? "stop" : "send";
+export function composerAction(session: Session | null, draft: string): "send" | "stop" {
+  return activeThread(session) && !draft.trim() ? "stop" : "send";
 }
 
 export function conversationThreads(sessions: Session[]) {
@@ -26,17 +23,11 @@ export function orchestratorThreads(sessions: Session[]) {
   });
 }
 
-export function normalizedActivity(activity = "IDLE") {
-  return activity.trim().toUpperCase().replace(/[\s-]+/g, "_") || "IDLE";
+export function activityLabel(activity: Activity = "idle", tool = "") {
+  if (activity === "waiting_on_tool" && tool) return `WAITING ON ${tool.toUpperCase()}`;
+  return activity.replaceAll("_", " ").toUpperCase();
 }
-export function activityLabel(activity = "IDLE", tool = "") {
-  const normalized = normalizedActivity(activity);
-  if (normalized === "WAITING_ON_TOOL") return tool ? `WAITING ON ${tool.toUpperCase()}` : "WAITING ON TOOL";
-  if (normalized === "RUNNING") return "WORKING";
-  return normalized.replaceAll("_", " ");
-}
-export function activityColor(activity = "IDLE", idleUnread = false) {
-  const normalized = normalizedActivity(activity);
-  if (normalized === "IDLE" && idleUnread) return "var(--success)";
-  return ["FAILED", "ERROR", "STOPPING", "INTERRUPTED"].includes(normalized) ? "var(--danger)" : ["IDLE", "DONE", "KILLED", "STOPPED"].includes(normalized) ? "var(--muted)" : "var(--accent)";
+export function activityColor(activity: Activity = "idle", idleUnread = false) {
+  if (activity === "idle" && idleUnread) return "var(--success)";
+  return activity === "idle" || activity === "stopped" ? "var(--muted)" : "var(--accent)";
 }

@@ -216,7 +216,6 @@ export function importFleetThreads(service: ThreadService, db: DatabaseSync, opt
     db.exec("BEGIN IMMEDIATE");
     try {
       for (const row of runs) {
-        db.prepare("DELETE FROM live_state WHERE run_id=?").run(row.id);
         db.prepare("UPDATE lease SET ended_at=COALESCE(ended_at,?) WHERE run_id=?").run(Date.now(), row.id);
         db.prepare("DELETE FROM run WHERE id=?").run(row.id);
         db.prepare("DELETE FROM control WHERE key='repair-owner' AND value=?").run(row.id);

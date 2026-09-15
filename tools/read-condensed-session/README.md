@@ -38,7 +38,7 @@ Stored JSONL is the history source of truth. Compaction changes model context, n
 
 Every thread can list direct subthreads and read persisted history through the common thread API. These operations do not start the target thread. The shell pages use the same native-history parser and owner database.
 
-`--subagents` lists direct subthreads by their latest user or assistant message, not by runtime heartbeats or title updates. The default limit is 20 and idle inclusion defaults to false. `--include-idle` includes settled and archived subthreads. Each row includes its thread ID, model, state and last-message time. `nextCursor` continues a bounded snapshot with the same parent and idle filter.
+`--subagents` lists direct subthreads by their latest user or assistant message, not by runtime heartbeats or title updates. The default limit is 20 and only unarchived `running` threads appear. `--include-idle` also includes idle, stopped and archived subthreads. Each row includes its thread ID, model, shared lowercase thread state and last-message time. `nextCursor` continues a bounded snapshot with the same parent and idle filter.
 
 `--json` accepts a title, UUID, unique prefix, `self` or explicit JSONL path. Its default page contains the latest ten visible transcript entries, in chronological order within that page. `nextCursor` reads the preceding page on the same active branch. New messages do not shift an ongoing read. A changed branch produces an explicit restart error. Deliberation is omitted. A preview marked `truncated` supplies `entryId`; reading that entry with `offset` and `maxChars` returns `nextOffset` until every character has been read. Threads without a Pi session file return labelled thread inputs.
 

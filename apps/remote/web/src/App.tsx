@@ -4,7 +4,8 @@ import { SortableContext, arrayMove, sortableKeyboardCoordinates, useSortable, v
 import { CSS } from "@dnd-kit/utilities";
 import { AnimatePresence, motion } from "motion/react";
 import { API } from "../../server/api";
-import { BASH_TIMEOUT_OPTIONS, type GovernorProvider, type GovernorState, type InlineImageSnapshot, type ThreadStart } from "../../server/protocol";
+import { appPath, appStorageKey } from "./app-path";
+import type { GovernorProvider, GovernorState, InlineImageSnapshot, ThreadStart } from "../../server/protocol";
 import { deleteCachedContext, readCachedContext, writeCachedContext } from "./context-cache";
 import { api, piFetch, registerUnlockHandler, syncRequest } from "./client";
 import { fetchPersonChooser } from "./native";
@@ -15,6 +16,7 @@ import { DrawingCanvas } from "./DrawingCanvas";
 import { EnvironmentControl } from "./EnvironmentControl";
 import { PasteTextDialog } from "./PasteTextDialog";
 import { DismissibleError } from "./dismissible-error";
+import { dismissServerError } from "./error-feedback";
 import { drawingImage, findDrawingDraft, type DrawingBackground, type DrawingDraft } from "./drawing-drafts";
 import { NotificationControl, takeNotificationTarget, retainNotificationTarget } from "./notifications";
 import { listenForFileDrops } from "./file-drop";
@@ -22,11 +24,12 @@ import { createSyncLoop, type SyncLoop } from "./sync-loop";
 import { updateDocument } from "./sync";
 import { threadsInOrder } from "./thread-order";
 import { activityColor, activityLabel, composerAction, conversationThreads, orchestratorThreads, working } from "./thread-state";
-import { ChildThreadList, OrchestratorThreadList } from "./thread-views";
+import { OrchestratorThreadList } from "./thread-views";
+import { SettingsPanel } from "./thread-settings";
 import { requestStop, submitThreadControl, ThreadStopDialog } from "./thread-controls";
 import { AppUpdateControl } from "./app-update";
 import { ThreadStartMenu } from "./thread-start-menu";
-import type { Attachment, ContextEntry, Dashboard, Governor, GovernorControls, MachineActionState, PlanCard, QueuedMessage, Session, SlashCommand, SyncRequest, ThreadSettings } from "./types";
+import type { Attachment, ContextEntry, Dashboard, Governor, GovernorControls, MachineActionState, PlanCard, QueuedMessage, Session, SlashCommand, SyncRequest } from "./types";
 
 // Everything the server owns arrives through one long poll and is replaced
 // wholesale per section; the client never patches a server-owned value from a
@@ -51,7 +54,7 @@ interface AppState {
   attachments: Attachment[];
   slashCommands: SlashCommand[];
   offline: string;
-  ownerErrors: { owner: string; message: string }[];
+  ownerErrors: { id: string; owner: string; message: string }[];
   syncing: boolean;
 }
 
@@ -63,9 +66,9 @@ const initialState: AppState = {
 };
 
 function iconUrl(icon: string) {
-  return icon.startsWith("/") || icon.startsWith("data:") || icon.startsWith("https:") ? icon : `/${encodeURIComponent(icon)}.svg`;
+  return /^(data:|https?:|\/\/)/.test(icon) ? icon : appPath(icon.startsWith("/") ? icon : `${encodeURIComponent(icon)}.svg`);
 }
-function draftKey(id: string) { return `pi-remote-draft:${window.PiRemotePerson.get()}:${id}`; }
+function draftKey(id: string) { return appStorageKey(`pi-remote-draft:${window.PiRemotePerson.get()}:${id}`); }
 function loadDraft(id: string) { try { return localStorage.getItem(draftKey(id)) || ""; } catch { return ""; } }
 function saveDraft(id: string, value: string) { try { value ? localStorage.setItem(draftKey(id), value) : localStorage.removeItem(draftKey(id)); } catch {} }
 
@@ -133,10 +136,10 @@ function governorDescription(name: string, governor: Governor) {
 }
 function MachineControls({ actions, governors, onAction, onGovernor }: { actions: MachineActionState[]; governors: GovernorControls | null; onAction(id: string): void; onGovernor(provider: GovernorProvider): void }) {
   return <div className="machine-controls" aria-label="This machine controls">
-    {actions.map((action) => <button key={action.id} className={`machine-control${action.active ? " active" : ""}`} type="button" aria-label={`${action.label} is ${action.active ? "on" : "off"}. Select to turn it ${action.active ? "off" : "on"}`} onClick={() => onAction(action.id)}><img src={action.icon.startsWith("/") || action.icon.startsWith("data:") ? action.icon : `/${action.icon}.svg`} alt="" /></button>)}
+    {actions.map((action) => <button key={action.id} className={`machine-control${action.active ? " active" : ""}`} type="button" aria-label={`${action.label} is ${action.active ? "on" : "off"}. Select to turn it ${action.active ? "off" : "on"}`} onClick={() => onAction(action.id)}><img src={iconUrl(action.icon)} alt="" /></button>)}
     {governors && (["openai", "anthropic"] as const).map((provider) => {
       const description = governorDescription(provider === "openai" ? "OpenAI" : "Anthropic", governors[provider]);
-      return <button key={provider} className={`machine-control${GOVERNOR_CLASS[governors[provider].state]}`} type="button" aria-label={description} title={description} onClick={() => onGovernor(provider)}><img src={`/${provider}.svg`} alt="" /></button>;
+      return <button key={provider} className={`machine-control${GOVERNOR_CLASS[governors[provider].state]}`} type="button" aria-label={description} title={description} onClick={() => onGovernor(provider)}><img src={appPath(`${provider}.svg`)} alt="" /></button>;
     })}
   </div>;
 }
@@ -144,7 +147,7 @@ function MachineControls({ actions, governors, onAction, onGovernor }: { actions
 function PlanSummary({ plans, counts }: { plans: PlanCard[]; counts: Map<string, number> }) {
   return <div className="plan-summary muted">{plans.flatMap((card) => card.metrics.filter((metric) => metric.text !== "—").map((metric) => {
     const description = `${card.label} ${metric.modelLabel}, ${counts.get(metric.model) || 0} in use, ${metric.description}`;
-    return <div className="capacity-row" key={`${card.icon}:${metric.model}`} title={description} aria-label={description}><img src={`/${encodeURIComponent(card.icon)}.svg`} alt={card.label} /><span className="capacity-model">{metric.modelLabel}</span><span className="capacity-count">{counts.get(metric.model) || 0}</span><span className="capacity-cache">{metric.cacheText}</span><span className="capacity-value">{metric.text}</span></div>;
+    return <div className="capacity-row" key={`${card.icon}:${metric.model}`} title={description} aria-label={description}><img src={iconUrl(card.icon)} alt={card.label} /><span className="capacity-model">{metric.modelLabel}</span><span className="capacity-count">{counts.get(metric.model) || 0}</span><span className="capacity-cache">{metric.cacheText}</span><span className="capacity-value">{metric.text}</span></div>;
   }))}</div>;
 }
 
@@ -160,7 +163,7 @@ function DrawerTabIcon({ tab }: { tab: DrawerTab }) {
 function ThreadRow({ session, starts, selected, archived, onSelect, onArchive, onUnarchive }: { session: Session; starts: ThreadStart[]; selected: boolean; archived?: boolean; onSelect(id: string): void; onArchive(id: string): void; onUnarchive(id: string): void }) {
   const start = starts.find(candidate => candidate.id === session.environment);
   const alt = start?.label || session.provider;
-  const content = <><span className="thread-name">{session.name || "Agent"}</span><span className="thread-meta"><img className="thread-provider" src={iconUrl(start?.icon || session.provider)} alt={alt} title={`${alt} thread`} /><span className="thread-state" style={{ color: activityColor(archived ? "IDLE" : session.activity, !archived && session.idleUnread) }}>{archived ? "ARCHIVED" : activityLabel(session.activity, session.activeTool ?? "")}</span></span></>;
+  const content = <><span className="thread-name">{session.name || "Agent"}</span><span className="thread-meta"><img className="thread-provider" src={iconUrl(start?.icon || session.provider)} alt={alt} title={`${alt} thread`} /><span className="thread-state" style={{ color: activityColor(archived ? "idle" : session.activity, !archived && session.idleUnread) }}>{archived ? "ARCHIVED" : activityLabel(session.activity, session.activeTool ?? "")}</span></span></>;
   return <div className={`thread-row${selected ? " selected" : ""}${archived ? " archived" : " can-archive"}`}>
     {archived ? <div className="thread-open">{content}</div> : <button type="button" className="thread-open" onClick={() => onSelect(session.id)}>{content}</button>}
     {archived ? <button type="button" className="unarchive-thread" onClick={() => onUnarchive(session.id)}>Unarchive</button> : <button type="button" className="archive-thread" aria-label={`Archive thread ${session.name}`} title={`Archive ${session.name}`} onClick={() => onArchive(session.id)}>×</button>}
@@ -172,85 +175,6 @@ function SortableThreadRow({ session, ...props }: Omit<React.ComponentProps<type
   return <div ref={setNodeRef} className={isDragging ? "sortable-thread dragging" : "sortable-thread"} style={{ transform: CSS.Transform.toString(transform), transition }} {...attributes} {...listeners}>
     <ThreadRow session={session} {...props} />
   </div>;
-}
-
-function settingLabel(value: string) {
-  if (value === "xhigh") return "Extra high";
-  return value ? value[0].toUpperCase() + value.slice(1).replaceAll("_", " ") : "";
-}
-
-function bashTimeoutLabel(seconds: number) {
-  if (seconds === 60) return "60 seconds";
-  if (seconds === 300) return "5 minutes";
-  return "Half an hour";
-}
-
-function SettingsPanel({ session, sessions, open, onClose, onOpenThread }: { session: Session | null; sessions: Session[]; open: boolean; onClose(): void; onOpenThread(session: Session): void }) {
-  const childrenVersion = sessions.filter(child => child.parentId === session?.id).map(child => `${child.id}:${child.revision}`).join(",");
-  const [settings, setSettings] = useState<ThreadSettings | null>(null);
-  const [children, setChildren] = useState<Session[]>([]);
-  const [childrenLoading, setChildrenLoading] = useState(false);
-  const [childrenFailure, setChildrenFailure] = useState("");
-  const [saving, setSaving] = useState("");
-  const [failure, setFailure] = useState("");
-  const editable = Boolean(session) && ["IDLE", "STOPPED"].includes(session!.state) && session?.queuedMessages.length === 0;
-  useEffect(() => {
-    if (!open || !session) return;
-    let cancelled = false;
-    setSettings(null);
-    setSaving("");
-    setFailure("");
-    api(API.sessionSettings.method, API.sessionSettings.path({ sessionId: session.id }))
-      .then((result) => { if (!cancelled) setSettings(result.settings); })
-      .catch((error) => { if (!cancelled) setFailure(error?.message || String(error)); });
-    return () => { cancelled = true; };
-  }, [open, session?.id]);
-  useEffect(() => {
-    if (!open || !session) return;
-    let cancelled = false;
-    setChildren(previous => previous.filter(child => child.parentId === session.id));
-    setChildrenLoading(true);
-    setChildrenFailure("");
-    api(API.sessionChildren.method, API.sessionChildren.path({ sessionId: session.id }))
-      .then((result) => { if (!cancelled) setChildren(result.children ?? []); })
-      .catch((error) => { if (!cancelled) setChildrenFailure(error?.message || String(error)); })
-      .finally(() => { if (!cancelled) setChildrenLoading(false); });
-    return () => { cancelled = true; };
-  }, [open, session?.id, childrenVersion]);
-  const update = async (field: string, body: Record<string, string | number>) => {
-    if (!session || saving) return;
-    setSaving(field);
-    setFailure("");
-    try {
-      const result = await api(API.updateSessionSettings.method, API.updateSessionSettings.path({ sessionId: session.id }), body);
-      setSettings(result.settings);
-    } catch (error) { setFailure(error?.message || String(error)); }
-    finally { setSaving(""); }
-  };
-  return <><AnimatePresence>{open && <motion.div key="settings-scrim" className="scrim settings-scrim" initial={{ opacity: 0 }} animate={{ opacity: 1 }} exit={{ opacity: 0 }} transition={{ duration: 0.18 }} onClick={onClose} />}</AnimatePresence>
-    <AnimatePresence>{open && <motion.aside key="settings-panel" className="settings" aria-label="Thread settings" initial={{ x: "100%" }} animate={{ x: 0 }} exit={{ x: "100%" }} transition={{ type: "spring", stiffness: 520, damping: 42, mass: 0.9 }}>
-      <header className="settings-header"><div className="settings-title"><span>Thread settings</span><h2 title={session?.name}>{session?.name || "Thread"}</h2></div><button type="button" className="settings-close" aria-label="Close thread settings" onClick={onClose}>×</button></header>
-      <div className="settings-body"><ChildThreadList children={children} loading={childrenLoading} error={childrenFailure} onOpen={onOpenThread} /><DismissibleError className="setting-unavailable" message={failure} />{!settings ? !failure && <div className="settings-loading" aria-label="Loading thread settings"><span /><span /><span /></div> : <>
-        {!editable && <p className="setting-unavailable">Settings can be changed when the thread is idle.</p>}
-        <section className="setting-card">
-          <div className="setting-heading"><div><h3>Model</h3><p>The model used for new messages</p></div>{saving === "model" && <span className="setting-saving">Saving</span>}</div>
-          <div className="setting-select"><select aria-label="Model" value={`${settings.model?.provider}\0${settings.model?.id}`} disabled={Boolean(saving) || !editable} onChange={(event) => { const [modelProvider, modelId] = event.target.value.split("\0"); void update("model", { modelProvider, modelId }); }}>{settings.models.map((model) => <option key={`${model.provider}:${model.id}`} value={`${model.provider}\0${model.id}`}>{model.name || model.id} · {model.provider}</option>)}</select><span aria-hidden="true">⌄</span></div>
-        </section>
-        <section className="setting-card">
-          <div className="setting-heading"><div><h3>Thinking</h3><p>How much reasoning the model can use</p></div>{saving === "thinking" && <span className="setting-saving">Saving</span>}</div>
-          <div className="setting-options thinking-options" role="radiogroup" aria-label="Thinking level">{settings.thinkingLevels.map((level) => <button key={level} type="button" role="radio" aria-checked={settings.thinkingLevel === level} className={settings.thinkingLevel === level ? "selected" : ""} disabled={Boolean(saving) || !editable} onClick={() => void update("thinking", { thinkingLevel: level })}>{settingLabel(level)}</button>)}</div>
-        </section>
-        <section className="setting-card">
-          <div className="setting-heading"><div><h3>Speed</h3><p>Request scheduling priority</p></div>{saving === "speed" && <span className="setting-saving">Saving</span>}</div>
-          {settings.speedModes.length ? <div className="setting-options speed-options" role="radiogroup" aria-label="Speed mode">{settings.speedModes.map((mode) => <button key={mode} type="button" role="radio" aria-checked={settings.speedMode === mode} className={settings.speedMode === mode ? "selected" : ""} disabled={Boolean(saving) || !editable} onClick={() => void update("speed", { speedMode: mode })}>{settingLabel(mode)}</button>)}</div> : <p className="setting-unavailable">This model does not offer speed controls.</p>}
-        </section>
-        <section className="setting-card">
-          <div className="setting-heading"><div><h3>Bash timeout</h3><p>Maximum time each bash command may run</p></div>{saving === "bash-timeout" && <span className="setting-saving">Saving</span>}</div>
-          <div className="setting-select"><select aria-label="Bash timeout" value={settings.bashTimeoutSeconds} disabled={Boolean(saving) || !editable} onChange={(event) => void update("bash-timeout", { bashTimeoutSeconds: Number(event.target.value) })}>{BASH_TIMEOUT_OPTIONS.map((seconds) => <option key={seconds} value={seconds}>{bashTimeoutLabel(seconds)}</option>)}</select><span aria-hidden="true">⌄</span></div>
-        </section>
-      </>}</div>
-    </motion.aside>}</AnimatePresence>
-  </>;
 }
 
 export default function App() {
@@ -576,11 +500,8 @@ function RemoteApp() {
   const send = async () => {
     const session = selectedSession();
     if (!session || pending) return;
-    const action = composerAction(session);
-    if (action !== "send") {
-      if (action === "stop") stopThread(session);
-      return;
-    }
+    const action = composerAction(session, prompt);
+    if (action === "stop") return stopThread(session);
     const sessionAttachments = stateRef.current.attachments.filter((file) => file.sessionId === session.id);
     if (sessionAttachments.some((file) => file.uploading)) return;
     const attachments = sessionAttachments.filter((file) => file.path);
@@ -626,7 +547,7 @@ function RemoteApp() {
   const knownSessions = [...state.sessions, ...state.archived, ...state.discovered.filter(discovered => !state.sessions.some(session => session.id === discovered.id) && !state.archived.some(session => session.id === discovered.id))];
   const selected = knownSessions.find((session) => session.id === state.selectedId) ?? null;
   const visibleAttachments = state.attachments.filter((file) => file.sessionId === state.selectedId);
-  const action = composerAction(selected);
+  const action = composerAction(selected, prompt);
   const drawingOpen = drawings.some(draft => draft.id === drawingId && draft.sessionId === state.selectedId);
   useLayoutEffect(() => {
     if (drawingOpen) document.querySelector<HTMLButtonElement>('.drawing-slot:not([hidden]) button[aria-label="Cancel drawing"]')?.focus({ preventScroll: true });
@@ -636,7 +557,7 @@ function RemoteApp() {
   const contextEntries = useMemo(() => modelContextEntries(state.context ? JSON.parse(state.context.document) : null), [state.context]);
   const modelCounts = useMemo(() => new Map((state.dashboard?.modelCounts ?? []).map((model) => [model.key, model.count])), [state.dashboard]);
   const dashboard = state.dashboard;
-  const selectedActivity = selected?.activity || "IDLE";
+  const selectedActivity = selected?.activity || "idle";
   const selectedTool = selected?.activeTool;
   const title = selected?.name || "Pi Remote";
   const activeOrchestratorCount = orchestratorThreads(knownSessions).filter(working).length;
@@ -660,22 +581,23 @@ function RemoteApp() {
       {state.drawerTab === "orchestrator" && <OrchestratorThreadList sessions={knownSessions} selectedId={state.selectedId} onOpen={session => void selectThread(session.id, true, session, "orchestrator")} />}
       {state.drawerTab === "archived" && <div className="thread-list">{state.archived.length ? state.archived.map((session) => <ThreadRow key={session.id} starts={dashboard?.threadStarts ?? []} archived session={session} selected={false} onSelect={() => {}} onArchive={() => {}} onUnarchive={(id) => void unarchive(id)} />) : <div className="thread-empty">No archived threads</div>}{state.archived.length < state.archivedTotal && <button type="button" className="archived-more" onClick={() => void loadOlder()}>Show older · {state.archivedTotal - state.archived.length} more</button>}</div>}
       <FileExplorer hidden={state.drawerTab !== "files"} onRootCount={setRootFileCount} />
-      <footer className="drawer-footer">{state.ownerErrors.map(({ owner, message }) => <DismissibleError key={owner} role="status" className="connection" message={`${owner}: ${message}`} />)}<MachineControls actions={dashboard?.actions ?? []} governors={dashboard?.governors ?? null} onAction={(id) => void toggleAction(id)} onGovernor={(provider) => void toggleGovernor(provider)} /><EnvironmentControl /><AppUpdateControl /><NotificationControl sessionId={state.selectedId} /><PlanSummary plans={dashboard?.plans ?? []} counts={modelCounts} /><div className="usage-summary muted">{machineText}</div><div className="usage-summary muted" title={__PI_REMOTE_REVISION__}>Client {__PI_REMOTE_REVISION__.slice(0, 12)}</div><DismissibleError className="connection" message={state.offline ? `Offline · ${state.offline}` : ""} /></footer>
+      <footer className="drawer-footer">{state.ownerErrors.map(({ id, owner, message }) => <DismissibleError key={id} resetKey={id} role="status" className="connection" message={`${owner}: ${message}`} onDismiss={() => dismissServerError(id)} />)}<MachineControls actions={dashboard?.actions ?? []} governors={dashboard?.governors ?? null} onAction={(id) => void toggleAction(id)} onGovernor={(provider) => void toggleGovernor(provider)} /><EnvironmentControl /><AppUpdateControl /><NotificationControl sessionId={state.selectedId} /><PlanSummary plans={dashboard?.plans ?? []} counts={modelCounts} /><div className="usage-summary muted">{machineText}</div><div className="usage-summary muted" title={__PI_REMOTE_REVISION__}>Client {__PI_REMOTE_REVISION__.slice(0, 12)}</div><DismissibleError className="connection" message={state.offline ? `Offline · ${state.offline}` : ""} /></footer>
     </aside>
-    <main id="main" className={drawingOpen ? "drawing-mode" : undefined}><header className="topbar"><button className="icon-button" aria-label="Open navigation" onClick={() => patch({ drawerOpen: true })}>☰</button><div className="top-title">{title}</div><div className="top-state" style={{ color: state.offline ? "var(--danger)" : activityColor(selectedActivity) }}>{state.offline ? "OFFLINE" : state.syncing ? "SYNCING" : activityLabel(selectedActivity, selectedTool ?? "")}</div>{state.offline && <button type="button" onClick={kick} title={state.offline}>Reconnect</button>}<a className="icon-button" aria-label="Open PiStack Meet" title="PiStack Meet" href={`/meet.html?${new URLSearchParams({ user: window.PiRemotePerson.get() })}`} onClick={async (event) => { event.preventDefault(); const environment = await window.KenanRemote?.getState(); location.href = `/meet.html?${new URLSearchParams({ user: window.PiRemotePerson.get(), environment: environment?.id || "" })}`; }}><svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true"><rect x="3" y="6" width="12" height="12" rx="2"/><path d="m15 10 6-4v12l-6-4z"/></svg></a><button className="icon-button" aria-label="Open thread settings" disabled={!selected} onClick={() => patch({ settingsOpen: true })}>⚙</button></header>
+    <main id="main" className={drawingOpen ? "drawing-mode" : undefined}><header className="topbar"><button className="icon-button" aria-label="Open navigation" onClick={() => patch({ drawerOpen: true })}>☰</button><div className="top-title">{title}</div><div className="top-state" style={{ color: state.offline ? "var(--danger)" : activityColor(selectedActivity) }}>{state.offline ? "OFFLINE" : state.syncing ? "SYNCING" : activityLabel(selectedActivity, selectedTool ?? "")}</div>{state.offline && <button type="button" onClick={kick} title={state.offline}>Reconnect</button>}<a className="icon-button" aria-label="Open PiStack Meet" title="PiStack Meet" href={`${appPath("meet.html")}?${new URLSearchParams({ user: window.PiRemotePerson.get() })}`} onClick={async (event) => { event.preventDefault(); const environment = await window.KenanRemote?.getState(); location.href = `${appPath("meet.html")}?${new URLSearchParams({ user: window.PiRemotePerson.get(), environment: environment?.id || "" })}`; }}><svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true"><rect x="3" y="6" width="12" height="12" rx="2"/><path d="m15 10 6-4v12l-6-4z"/></svg></a><button className="icon-button" aria-label="Open thread settings" disabled={!selected} onClick={() => patch({ settingsOpen: true })}>⚙</button></header>
       {selected?.parentId && <nav className="thread-relations" aria-label="Related threads"><button type="button" onClick={() => void selectThread(selected.parentId!)}>Parent: {knownSessions.find(session => session.id === selected.parentId)?.name || selected.parentId}</button></nav>}
       {!state.selectedId ? <section className="empty-state"><strong>No threads</strong><span>Open the drawer to create one.</span></section> : <section className={`conversation${drawingOpen ? " is-drawing" : ""}`}><div className="scrollback" onClickCapture={editImage} onKeyDownCapture={event => { if (event.key === "Enter" || event.key === " ") editImage(event); }}><div className="scroll-content"><InlineImagesContext.Provider value={images}><ContextTranscript entries={entries} liveThinking={liveThinking} sessionId={state.selectedId || ""} home={dashboard?.home ?? "/"} onEdit={editFrom} />{liveText && <div className="live-answer"><Markdown source={liveText} sessionId={state.selectedId || ""} streaming assistant /><CopyButton text={liveText} label="Copy response" /></div>}<LiveActivity activity={selectedActivity} tool={selectedTool} offline={state.offline} /></InlineImagesContext.Provider></div></div>
         {drawings.map(draft => <div key={draft.id} className="drawing-slot" hidden={!drawingOpen || drawingId !== draft.id}><DrawingCanvas background={draft.background} onAttach={file => attachDrawing(file, draft)} onClose={() => setDrawingId(current => current === draft.id ? null : current)} /></div>)}
+        <DismissibleError className="upload-error" dismissLabel="Dismiss thread failure" message={selected?.lastError} resetKey={selected?.lastErrorId ?? selected?.id} onDismiss={selected?.lastErrorId ? () => dismissServerError(selected.lastErrorId!) : undefined} />
         <DismissibleError className="upload-error" dismissLabel="Dismiss upload error" message={uploadError?.sessionId === state.selectedId ? uploadError.message : ""} resetKey={state.selectedId || ""} />
-        {selected?.queuedMessages.length ? <div className="message-queue">{selected.queuedMessages.map((message) => <div className="queued-message" key={message.id}><div className="queued-message-copy"><span className="queued-message-label">{selected.state === "STOPPED" ? "Held" : message.status || "Queued"}</span><span className="queued-message-preview">{message.text.split("\n").find((line) => line.trim()) || "Attached files"}</span></div><div className="queued-message-actions"><CopyButton text={message.text} className="queued-message-action icon-message-action" />{message.canSteer && <button className="queued-message-action steer-instead" type="button" onClick={() => void mutateQueued(message, API.queueSteer)}>STEER</button>}{message.canHardSteer && <button className="queued-message-action hard-steer" type="button" onClick={() => void mutateQueued(message, API.queueHardSteer)}>HARD STEER</button>}{message.canCancel && <><button className="queued-message-action edit-queued" type="button" onClick={() => void mutateQueued(message, API.queueItem, true)}>EDIT</button><button className="queued-message-action cancel-queued" type="button" onClick={() => void mutateQueued(message, API.queueItem)}>CANCEL</button></>}</div></div>)}</div> : null}
+        {selected?.queuedMessages.length ? <div className="message-queue">{selected.queuedMessages.map((message) => <div className="queued-message" key={message.id}><div className="queued-message-copy"><span className="queued-message-label">{message.status}</span><span className="queued-message-preview">{message.text.split("\n").find((line) => line.trim()) || "Attached files"}</span></div><div className="queued-message-actions"><CopyButton text={message.text} className="queued-message-action icon-message-action" />{message.canSteer && <button className="queued-message-action steer-instead" type="button" onClick={() => void mutateQueued(message, API.queueSteer)}>STEER</button>}{message.canHardSteer && <button className="queued-message-action hard-steer" type="button" onClick={() => void mutateQueued(message, API.queueHardSteer)}>HARD STEER</button>}{message.canCancel && <><button className="queued-message-action edit-queued" type="button" onClick={() => void mutateQueued(message, API.queueItem, true)}>EDIT</button><button className="queued-message-action cancel-queued" type="button" onClick={() => void mutateQueued(message, API.queueItem)}>CANCEL</button></>}</div></div>)}</div> : null}
         <DismissibleError className="upload-error" dismissLabel="Dismiss thread error" message={controlError?.sessionId === state.selectedId && !stopTarget ? controlError.message : ""} resetKey={state.selectedId || ""} />
-        {selected?.state === "STOPPED" && <div className="thread-held"><span>{selected.queuedMessages.length ? "Pending messages are held." : "Thread stopped."}</span>{selected.queuedMessages.length > 0 && <button type="button" disabled={pending} onClick={() => void controlThread(selected.id, "resume")}>Resume</button>}</div>}
+        {selected?.state === "stopped" && <div className="thread-held"><span>{selected.queuedMessages.length ? "Pending messages are held." : "Thread stopped."}</span>{selected.queuedMessages.length > 0 && <button type="button" disabled={pending} onClick={() => void controlThread(selected.id, "resume")}>Resume</button>}</div>}
         {visibleAttachments.length > 0 && <div className="attachments">{visibleAttachments.map((attachment) => <div className={`attachment-chip${attachment.uploading ? " uploading" : ""}`} key={attachment.localId}><span className="attachment-name">{attachment.name}{attachment.uploading ? " · uploading" : ""}</span><button className="attachment-remove" type="button" onClick={() => void removeAttachment(attachment)}>×</button></div>)}</div>}
-        <form className="composer" onSubmit={(event) => { event.preventDefault(); void send(); }}>{visibleCommands.length > 0 && <div className="slash-commands" role="listbox">{visibleCommands.map((command) => <button key={command.name} type="button" className="slash-command" onClick={() => setPrompt(`/${command.name} `)}><strong className="slash-command-name">/{command.name}</strong>{command.description && <span className="slash-command-description">{command.description}</span>}</button>)}</div>}<textarea ref={promptElement} id="prompt" rows={1} maxLength={200000} placeholder={`Message ${selected?.name || "Agent"}`} value={prompt} onChange={(event) => { setPrompt(event.target.value); if (state.selectedId) saveDraft(state.selectedId, event.target.value); }} onKeyDown={(event) => { if (event.key === "Enter" && !event.shiftKey && !event.nativeEvent.isComposing && matchMedia("(hover: hover) and (pointer: fine)").matches) { event.preventDefault(); void send(); } }} /><div className="composer-actions"><label className="composer-icon" aria-label="Attach files"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M16.5 6.5 8.7 14.3a2.5 2.5 0 0 0 3.5 3.5l8.1-8.1a4.5 4.5 0 0 0-6.4-6.4L5.5 11.7a6.5 6.5 0 0 0 9.2 9.2l6.1-6.1"/></svg><input type="file" multiple hidden onChange={(event) => { void uploadFiles([...event.target.files || []]); event.target.value = ""; }} /></label><button className="composer-icon" type="button" aria-label="Paste text document" onClick={() => setPasteSessionId(state.selectedId)}><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M9 5.5V4h6v1.5M9 5.5h6M9 5.5H7v15h10v-15h-2M9 10h6m-6 4h6m-6 4h4"/></svg></button><button className="composer-icon drawing-toggle" type="button" aria-label="Draw a picture" title="Draw a picture" onClick={() => openDrawing()}><svg viewBox="0 0 24 24" aria-hidden="true"><path d="m14 13 7-9a1.5 1.5 0 0 0-2-2l-9 7 4 4Z"/><path d="M10 9c-3-1-5 1-5 4 0 2-1 3-3 4 4 3 10 2 11-3l1-1"/></svg></button><span className="composer-spacer"/>{voiceState === "live" && <button type="button" onClick={() => void voice.current?.resumePlayback()}>Play Kenan audio</button>}<button id="voice" className={`composer-icon voice${voiceState === "idle" ? "" : ` ${voiceState}`}`} type="button" aria-label={voiceState === "live" ? "Hang up voice" : "Start voice"} title={voiceDetail || undefined} onClick={() => void toggleVoice()}><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 3a3 3 0 0 0-3 3v6a3 3 0 0 0 6 0V6a3 3 0 0 0-3-3Z"/><path d="M5.5 11.5a6.5 6.5 0 0 0 13 0M12 18v3m-3 0h6"/></svg></button><button id="action" className={`composer-icon send${action !== "send" ? " abort" : ""}`} type="submit" disabled={!selected || pending || action === "stopping" || (action === "send" && visibleAttachments.some((file) => file.uploading))} aria-label={action === "send" ? "Send message" : action === "stopping" ? "Stopping thread" : "Stop thread"}><svg className="send-icon" viewBox="0 0 24 24" aria-hidden="true"><path d="m3 3 18 9-18 9 4-9-4-9Zm4 9h14"/></svg><span className="stop-icon" aria-hidden="true">{action === "stopping" ? "Stopping…" : "Stop"}</span></button></div></form>
+        <form className="composer" onSubmit={(event) => { event.preventDefault(); void send(); }}>{visibleCommands.length > 0 && <div className="slash-commands" role="listbox">{visibleCommands.map((command) => <button key={command.name} type="button" className="slash-command" onClick={() => setPrompt(`/${command.name} `)}><strong className="slash-command-name">/{command.name}</strong>{command.description && <span className="slash-command-description">{command.description}</span>}</button>)}</div>}<textarea ref={promptElement} id="prompt" rows={1} maxLength={200000} placeholder={`Message ${selected?.name || "Agent"}`} value={prompt} onChange={(event) => { setPrompt(event.target.value); if (state.selectedId) saveDraft(state.selectedId, event.target.value); }} onKeyDown={(event) => { if (event.key === "Enter" && !event.shiftKey && !event.nativeEvent.isComposing && matchMedia("(hover: hover) and (pointer: fine)").matches) { event.preventDefault(); void send(); } }} /><div className="composer-actions"><label className="composer-icon" aria-label="Attach files"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M16.5 6.5 8.7 14.3a2.5 2.5 0 0 0 3.5 3.5l8.1-8.1a4.5 4.5 0 0 0-6.4-6.4L5.5 11.7a6.5 6.5 0 0 0 9.2 9.2l6.1-6.1"/></svg><input type="file" multiple hidden onChange={(event) => { void uploadFiles([...event.target.files || []]); event.target.value = ""; }} /></label><button className="composer-icon" type="button" aria-label="Paste text document" onClick={() => setPasteSessionId(state.selectedId)}><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M9 5.5V4h6v1.5M9 5.5h6M9 5.5H7v15h10v-15h-2M9 10h6m-6 4h6m-6 4h4"/></svg></button><button className="composer-icon drawing-toggle" type="button" aria-label="Draw a picture" title="Draw a picture" onClick={() => openDrawing()}><svg viewBox="0 0 24 24" aria-hidden="true"><path d="m14 13 7-9a1.5 1.5 0 0 0-2-2l-9 7 4 4Z"/><path d="M10 9c-3-1-5 1-5 4 0 2-1 3-3 4 4 3 10 2 11-3l1-1"/></svg></button><span className="composer-spacer"/>{voiceState === "live" && <button type="button" onClick={() => void voice.current?.resumePlayback()}>Play Kenan audio</button>}<button id="voice" className={`composer-icon voice${voiceState === "idle" ? "" : ` ${voiceState}`}`} type="button" aria-label={voiceState === "live" ? "Hang up voice" : "Start voice"} title={voiceDetail || undefined} onClick={() => void toggleVoice()}><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 3a3 3 0 0 0-3 3v6a3 3 0 0 0 6 0V6a3 3 0 0 0-3-3Z"/><path d="M5.5 11.5a6.5 6.5 0 0 0 13 0M12 18v3m-3 0h6"/></svg></button><button id="action" className={`composer-icon send${action !== "send" ? " abort" : ""}`} type="submit" disabled={!selected || pending || (action === "send" && visibleAttachments.some((file) => file.uploading))} aria-label={action === "send" ? "Send message" : "Stop thread"}><svg className="send-icon" viewBox="0 0 24 24" aria-hidden="true"><path d="m3 3 18 9-18 9 4-9-4-9Zm4 9h14"/></svg><svg className="stop-icon" viewBox="0 0 24 24" aria-hidden="true"><rect x="6" y="6" width="12" height="12" rx="1"/></svg></button></div></form>
       </section>}
     </main>
     {stopTarget && <ThreadStopDialog session={stopTarget} pending={pending} error={controlError?.sessionId === stopTarget.id ? controlError.message : ""} onStop={descendants => void controlThread(stopTarget.id, "stop", descendants)} onClose={() => setStopTarget(null)} />}
-    <SettingsPanel session={selected} sessions={knownSessions} open={state.settingsOpen} onClose={() => patch({ settingsOpen: false })} onOpenThread={session => void selectThread(session.id, true, session, "orchestrator")} />
+    {selected && <SettingsPanel key={selected.id} session={selected} sessions={knownSessions} open={state.settingsOpen} onClose={() => patch({ settingsOpen: false })} onOpenThread={session => void selectThread(session.id, true, session, "orchestrator")} />}
     {pasteSessionId && <PasteTextDialog name={pasteName} content={pasteContent} onNameChange={setPasteName} onContentChange={setPasteContent} onAttach={file => uploadFile(file, pasteSessionId)} onClose={() => setPasteSessionId(null)} />}
   </div>;
 }

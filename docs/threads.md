@@ -8,6 +8,8 @@ Pi is the only session engine. Astra, Sol, Terra, Luna, Fable and Opus are model
 
 A thread has a stable ID, optional parent ID, cwd, native Pi transcript reference and settings. Its execution state describes only its own work. An idle parent with active children is idle. Native transcripts remain authoritative history; projections and live output are not additional conversation stores.
 
+`ThreadState` is exactly `idle | running | stopped`, defined in [`contracts.ts`](../packages/orchestrator/src/threads/contracts.ts). `running` includes pending input, admission, startup, execution and cancellation until confirmed. `stopped` means held with cancellation confirmed. `idle` means no current work and no hold. Errors stay in details and execution outcomes; they do not add a lifecycle state. Queue labels describe pending messages, not threads.
+
 The implementation contracts are documented in [Pi session execution](../packages/orchestrator/docs/pi-sessions.md) and the [thread service](../packages/orchestrator/docs/thread-service.md).
 
 Shared-process execution remains essential. Hundreds of threads must not create hundreds of Node processes. Preserve existing machine, Unix-person, encrypted-storage, isolated-application and root-repair boundaries. Runtime resources may unload while durable threads persist.
@@ -17,6 +19,7 @@ Shared-process execution remains essential. Hundreds of threads must not create 
 Humans and agents have the same operations:
 
 - Spawn always creates a fresh thread with a fresh context and initial assignment. Continuing an existing thread means sending it a message.
+- Agent-to-agent messages default to steer, including tool and CLI sends, child assignments and Voice delegation. Human messages default to queue. An explicit delivery mode overrides the default.
 - Queue waits for the recipient's current execution to finish.
 - Steer delivers at a safe boundary after current tool calls without cancelling them.
 - Hard steer cancels current execution and its local tools, confirms cancellation, then runs the selected message first in the same conversation. Other pending messages retain their order. It does not cancel descendants or undo external effects.
@@ -27,7 +30,7 @@ Humans and agents have the same operations:
 
 Remote's main Threads tab lists only parentless person conversations. The Orchestrator tab lists fleet threads and children using the same thread identities and controls. The right panel lists active direct children, with an expandable Inactive children section.
 
-Delegation has exactly one level. Person conversations create workers in their authorized Orchestrator owner when configured. Ordinary people without access to the administrator's fleet retain workers in their own person boundary. Every parented thread, including existing records, and every fleet or isolated-application thread is a leaf worker. The owning service derives this role from custody and parentage, not client metadata. Workers do not receive `thread_spawn`, and the backend rejects recursive spawning even from already-running sessions with older tool schemas. Stopped, held, interrupted or archived parents cannot create new workers. Local receipts are checked before forwarding creation so retries preserve previously accepted child identities. Existing transcripts and receipts remain with their current owner; they appear only in Orchestrator, not the main drawer.
+Delegation has exactly one level. Person conversations create workers in their authorized Orchestrator owner when configured. Ordinary people without access to the administrator's fleet retain workers in their own person boundary. Every parented thread, including existing records, and every fleet or isolated-application thread is a leaf worker. The owning service derives this role from custody and parentage, not client metadata. Workers do not receive `thread_spawn`, and the backend rejects recursive spawning even from already-running sessions with older tool schemas. Held or archived parents cannot create new workers, including while cancellation is unconfirmed. Local receipts are checked before forwarding creation so retries preserve previously accepted child identities. Existing transcripts and receipts remain with their current owner; they appear only in Orchestrator, not the main drawer.
 
 Encrypted-folder workers also stay in their person's mount namespace and transcript custody. These remain leaf workers in the Orchestrator view. Worker tool eligibility is sent explicitly per session as `PI_THREAD_CAN_SPAWN=0`; conversations receive `1`. Shared runner processes do not carry this setting between sessions. Agent CLI `run` calls preserve the calling thread as parent and use its authorized API; agents cannot use unparented `wave` calls. Stop-with-descendants and child discovery traverse authorized owners, while durable completion notifications return through the directory to the original parent.
 
@@ -38,6 +41,8 @@ An execution has exclusive ownership of its thread. Cancellation fences late cal
 ## Relationships and notifications
 
 Threads can list all accessible threads in their current environment or their direct children, read persisted history without starting a recipient, and send queue/steer/hard-steer messages to other accessible threads. Workers retain these collaboration tools but cannot spawn. Parentage determines discovery and automatic notifications, not aggregate execution state.
+
+The thread service wraps every agent input in the same [`<agent_message>` envelope](../packages/orchestrator/src/threads/message-format.ts) before passing it to Pi. It explicitly identifies the input as an agent-to-agent message, not a user message, and carries the sender thread, recipient thread, message receipt, source and reply reference. Explicit messages, initial child assignments and automatic completion reports use this format across local and fleet owners. Senderless human inputs remain unchanged. Formatting happens after context preparation on both first delivery and recovery, so pending inputs prepared by an earlier release gain the envelope without changing receipts or replaying completed work.
 
 When a child's execution settles, commit its outcome and parent notification durably. Include thread/work IDs, normal/error/cancelled outcome, and that execution's final assistant message or an explicit absence. Deliver through ordinary messaging, with stable receipt identity and restart-safe deduplication. Notifications steer busy parents at the next safe boundary and wake idle parents, but remain held for stopped parents. Idle is not proof that an assignment succeeded.
 
@@ -55,7 +60,7 @@ Remote can archive settled threads automatically with the person environment set
 `PI_REMOTE_AUTO_ARCHIVE_AFTER_MS=3600000` (one hour). The default is `0`, disabled.
 A non-overlapping sweep runs every minute across that person's local and fleet directory.
 Only idle or stopped threads with no pending messages and no activity newer than the
-cutoff qualify. Running, queued, interrupted, and in-flight command work is retained,
+cutoff qualify. Running threads, pending messages and in-flight command work are retained,
 and active/recent nonarchived descendants protect their parents. The owning service's
 `archiveInactive` control rechecks eligibility synchronously without stopping execution;
 older owners reject this action rather than interpreting it as an unconditional archive.

@@ -4,8 +4,12 @@ import { sha256 } from "../server/sync";
 import { readCachedContext, writeCachedContext } from "./src/context-cache";
 
 const original = globalThis.indexedDB;
+const originalLocation = Object.getOwnPropertyDescriptor(globalThis, "location");
 let factory: IDBFactory;
-beforeEach(() => { factory = new IDBFactory(); globalThis.indexedDB = factory; });
+beforeEach(() => {
+  Object.defineProperty(globalThis, "location", { configurable: true, value: new URL("https://router.test/") });
+  factory = new IDBFactory(); globalThis.indexedDB = factory;
+});
 afterEach(async () => {
   await new Promise<void>((resolve, reject) => {
     const request = factory.deleteDatabase("pi-remote-contexts");
@@ -13,6 +17,8 @@ afterEach(async () => {
     request.onerror = () => reject(request.error);
   });
   globalThis.indexedDB = original;
+  if (originalLocation) Object.defineProperty(globalThis, "location", originalLocation);
+  else delete (globalThis as any).location;
 });
 function document(text: string) {
   return { document: text, hash: sha256(text), capturedAt: 1 };

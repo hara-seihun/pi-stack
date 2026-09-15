@@ -6,7 +6,9 @@ export type Delivery = "queue" | "steer" | "hardSteer";
 export type ThinkingLevel = "off" | "minimal" | "low" | "medium" | "high" | "xhigh" | "max";
 export type Speed = "standard" | "priority";
 export type Admission = "force" | "background";
-export type ThreadState = "idle" | "queued" | "starting" | "running" | "stopping" | "stopped" | "interrupted";
+export const THREAD_STATES = ["idle", "running", "stopped"] as const;
+export type ThreadState = typeof THREAD_STATES[number];
+export const isThreadState = (state: unknown): state is ThreadState => THREAD_STATES.some(value => value === state);
 export type WorkOutcome = "complete" | "failed" | "cancelled";
 
 export interface ThreadSettings {
@@ -63,9 +65,12 @@ export interface SendThread {
   senderId?: string;
   text: string;
   images?: unknown[];
-  delivery: Delivery;
+  delivery?: Delivery;
   source?: "explicit" | "notification";
   replyTo?: string;
+}
+export function resolveDelivery(input: Pick<SendThread, "senderId" | "delivery">): Delivery {
+  return input.delivery ?? (input.senderId ? "steer" : "queue");
 }
 export interface ThreadList {
   id?: string;
@@ -127,3 +132,5 @@ export interface PiSessionOptions {
   threads?: ThreadApi;
 }
 export type OpenPiSession = (options: PiSessionOptions, output: (event: PiEvent) => void, exit: (code?: number) => void) => Promise<PiSession>;
+export interface PiRunnerReference { control: string; socketPath: string }
+export type AttachPiSession = (reference: PiRunnerReference | undefined, output: (event: PiEvent) => void, exit: (code: number | null) => void) => Promise<PiSession | null>;

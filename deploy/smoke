@@ -27,7 +27,9 @@ trap 'rm -rf "$scratch"' EXIT
 for page in / /meet.html /voice.html; do
   code=$(get "$page" "$body")
   [[ $code == 200 ]] && grep -q '<html' "$body" || fail "GET $page returned $code without the web client"
-  mapfile -t assets < <(grep -oE '(src|href)="/[^"]+"' "$body" | cut -d\" -f2 | sort -u)
+  # The client is built for a browser mount path, so its assets are relative
+  # (`./assets/...`); at the front door's root they resolve against `/`.
+  mapfile -t assets < <(grep -oE '(src|href)="\.?/[^"]+"' "$body" | cut -d\" -f2 | sed 's#^\./#/#' | sort -u)
   (( ${#assets[@]} > 0 )) || fail "GET $page named no client assets"
   for asset in "${assets[@]}"; do
     code=$(get "$asset" "$body")

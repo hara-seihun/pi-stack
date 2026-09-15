@@ -4,7 +4,7 @@ import { admissionThinking, type ModelCandidate } from "./catalog.js";
 import type { CompletionInput } from "./completion-contract.js";
 import { dirname, resolve } from "node:path";
 import type { DatabaseSync } from "node:sqlite";
-import type { Account, BudgetClass, FailureKind, LaneSpec, LeaseKind, Run, RunActivity, RunContext, RunSource, RunState, UsageEntry, UsageTotal } from "./domain.js";
+import type { Account, BudgetClass, FailureKind, LaneSpec, LeaseKind, Run, RunContext, RunSource, RunState, UsageEntry, UsageTotal } from "./domain.js";
 
 import { openSqlite } from "./sqlite.js";
 
@@ -93,14 +93,6 @@ CREATE TABLE lease (
   ended_at INTEGER
 ) STRICT;
 CREATE INDEX lease_active ON lease(account_id,ended_at,heartbeat_at);
-CREATE TABLE live_state (
-  run_id TEXT PRIMARY KEY REFERENCES run(id) ON DELETE CASCADE,
-  activity TEXT NOT NULL,
-  text TEXT NOT NULL,
-  thinking TEXT NOT NULL,
-  tool TEXT,
-  updated_at INTEGER NOT NULL
-) STRICT;
 ${USAGE_HOUR_SCHEMA}`;
 
 function maybe<T>(value: T | null): T | undefined { return value === null ? undefined : value; }
@@ -125,6 +117,7 @@ export class Store {
     if (!meta) db.exec(SCHEMA);
     const row = db.prepare("SELECT version FROM meta").get() as { version: number };
     if (row.version !== SCHEMA_VERSION) { db.close(); throw new Error(`unsupported orchestrator schema ${row.version}`); }
+    db.exec("DROP TABLE IF EXISTS live_state");
     return new Store(db, path === ":memory:" ? path : resolve(path));
   }
 
@@ -316,6 +309,4 @@ export class Store {
       AND NOT EXISTS (SELECT 1 FROM control c WHERE c.key='completion-run:'||l.run_id)`).all(now-maxAgeMs,accountId??null,accountId??null) as any[];
   }
 
-  setLive(runId:string,input:{activity:RunActivity;text?:string;thinking?:string;tool?:string},at=Date.now()):void{this.db.prepare(`INSERT INTO live_state(run_id,activity,text,thinking,tool,updated_at) VALUES(?,?,?,?,?,?) ON CONFLICT(run_id) DO UPDATE SET activity=excluded.activity,text=excluded.text,thinking=excluded.thinking,tool=excluded.tool,updated_at=excluded.updated_at`).run(runId,input.activity,input.text??"",input.thinking??"",input.tool??null,at);}
-  live():any[]{return this.db.prepare("SELECT * FROM live_state").all() as any[];}
 }

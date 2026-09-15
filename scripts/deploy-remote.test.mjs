@@ -19,15 +19,16 @@ function fixture() {
     mkdirSync(dirname(path), { recursive: true });
     writeFileSync(path, text, { mode });
   };
-  for (const file of ["deploy/remote", "deploy/lib", "deploy/smoke", "scripts/check-remote-imports.ts"]) {
+  for (const file of ["deploy/remote", "deploy/lib", "deploy/smoke", "scripts/check-remote-imports.ts", "scripts/build-workspace.mjs"]) {
     mkdirSync(dirname(join(repo, file)), { recursive: true });
     cpSync(join(root, file), join(repo, file));
   }
-  put(join(bin, "npm"), "#!/bin/sh\nexit 0\n", 0o755);
+  put(join(bin, "npm"), '#!/bin/sh\nmkdir -p apps/remote/web/dist\ncp "$BUILD_ASSETS"/* apps/remote/web/dist/\n', 0o755);
   put(join(repo, "apps/remote/package.json"), JSON.stringify({type: "module", dependencies: {"pi-orchestrator": "1.0.0", "playwright-core": "1.0.0"}}));
   for (const resource of releaseResources.filter((path) => !path.startsWith("deploy/"))) {
     put(join(repo, "apps/remote", resource), "fixture\n");
   }
+  cpSync(join(repo, "apps/remote/web/dist"), join(dir, "build-assets"), { recursive: true });
   put(join(repo, "apps/remote/server/main.ts"), 'import { chromium } from "playwright-core"; import { ok } from "pi-orchestrator/api"; console.log(chromium, ok);');
   for (const entry of ["router.ts", "person-cli.ts", "voice/service.ts"]) put(join(repo, "apps/remote/server", entry), "export {};");
   for (const entry of ["pi-remote", "pi-remote-launch", "pi-remote-supervise"]) put(join(repo, "apps/remote/server", entry), "#!/bin/sh\nexit 0\n", 0o755);
@@ -44,7 +45,7 @@ function fixture() {
   const commit = execFileSync("git", ["-C", repo, "rev-parse", "HEAD"], {encoding: "utf8"}).trim();
   put(join(orchestrator, ".pi-stack-commit"), commit + "\n");
   const run = () => spawnSync("bash", [join(repo, "deploy/remote")], {encoding: "utf8", env: {
-    ...process.env, PATH: `${bin}:${process.env.PATH}`, PI_STACK_DEPLOY_NO_SUDO: "1",
+    ...process.env, PATH: `${bin}:${process.env.PATH}`, BUILD_ASSETS: join(dir, "build-assets"), PI_STACK_DEPLOY_NO_SUDO: "1",
     PI_STACK_ALLOW_DIRTY: "1", PI_STACK_REMOTE_DEST: dest, PI_STACK_ORCHESTRATOR_DEST: orchestrator,
   }});
   return {dir, repo, dest, orchestrator, dependencies, put, run};

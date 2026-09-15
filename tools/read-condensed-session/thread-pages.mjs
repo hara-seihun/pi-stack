@@ -29,11 +29,11 @@ export function subagentPage(db, parentId, options = {}) {
     throw new Error("Cursor does not match this subagent query");
   }
   const rows = db.prepare(`WITH children AS (
-    SELECT t.id,t.title AS name,upper(t.state) AS state,t.created_at,
+    SELECT t.id,t.title AS name,t.state,t.created_at,
       json_extract(t.metadata,'$.archivedAt') AS archived_at,json_extract(t.settings,'$.model') AS model,
       COALESCE((SELECT MAX(w.ordinal) FROM thread_work w WHERE w.thread_id=t.id AND w.ordinal<=?),0) message_seq
     FROM thread t WHERE t.parent_id=? AND t.created_at<=?
-      ${includeIdle ? "" : "AND COALESCE(json_extract(t.metadata,'$.archived'),0)=0 AND t.state IN ('queued','starting','running','stopping')"}
+      ${includeIdle ? "" : "AND COALESCE(json_extract(t.metadata,'$.archived'),0)=0 AND t.state='running'"}
   ) SELECT children.*,COALESCE((SELECT created_at FROM thread_work WHERE ordinal=message_seq),created_at) last_message_at
     FROM children WHERE (? IS NULL OR message_seq<? OR (message_seq=? AND id<?))
     ORDER BY message_seq DESC,id DESC LIMIT ?`).all(cursor.maxSeq, parentId, Date.parse(cursor.asOf),
@@ -43,7 +43,7 @@ export function subagentPage(db, parentId, options = {}) {
   return {
     parentThreadId: parentId, includeIdle, order: "most-recent-message", snapshotAt: cursor.asOf,
     subagents: page.map(row => ({ threadId: row.id, name: row.name, model: row.model, state: row.state,
-      active: !row.archived_at && ["QUEUED", "STARTING", "RUNNING", "STOPPING"].includes(row.state),
+      active: !row.archived_at && row.state === "running",
       lastMessageAt: new Date(row.last_message_at).toISOString(), archivedAt: row.archived_at })),
     nextCursor: rows.length > limit ? encode({ ...cursor, beforeSeq: last.message_seq, beforeId: last.id }) : null,
   };

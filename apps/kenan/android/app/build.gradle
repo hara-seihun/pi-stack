@@ -8,8 +8,10 @@ if (remoteFile.exists()) remoteFile.withInputStream { remote.load(it) }
 def routerUrl = remote.getProperty('piRemoteRouterUrl', '').trim().replaceAll('/+$', '')
 if (routerUrl.isEmpty()) throw new GradleException('Set piRemoteRouterUrl in android/local.properties')
 def routerUri = new URI(routerUrl)
-if (!(routerUri.scheme in ['http', 'https']) || !routerUri.host || routerUri.userInfo || routerUri.query || routerUri.fragment || routerUri.rawPath) {
-    throw new GradleException('piRemoteRouterUrl must be a credential-free HTTP(S) origin without a path, query, or fragment')
+if (!(routerUri.scheme in ['http', 'https']) || !routerUri.host || routerUri.userInfo || routerUri.query || routerUri.fragment
+    || !(routerUri.rawPath ==~ /(?:\/[A-Za-z0-9_~.-]+)*/) || routerUri.normalize() != routerUri
+    || routerUri.rawPath.tokenize('/').any { it == '.' || it == '..' }) {
+    throw new GradleException('piRemoteRouterUrl must be a credential-free HTTP(S) URL with an optional plain directory prefix, without a query or fragment')
 }
 def javaString = { value -> '"' + value.replace('\\', '\\\\').replace('"', '\\"') + '"' }
 def packageConfig = new JsonSlurper().parse(rootProject.file('../package.json'))

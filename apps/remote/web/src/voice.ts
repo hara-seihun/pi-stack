@@ -414,7 +414,9 @@ import { updateDocument } from "./sync";
         }
         const conversation = lines.map((line) => `${line.role === "user" ? "User" : "Kenan"}: ${line.text.trim()}`).join("\n");
         delegation.text = ["Voice handoff", this.meetingContext?.(), conversation].filter(Boolean).join("\n\n");
-        const body = JSON.stringify({ requestId: delegation.requestId, text: delegation.text, delivery: "queue", includeMeetingImages: Boolean(this.meetingContext) });
+        // A handoff must reach the backing thread immediately: it cancels the thread's local work rather than waiting on it.
+        // The meeting root keeps long work in worker threads, which a hard steer to the root does not stop.
+        const body = JSON.stringify({ requestId: delegation.requestId, text: delegation.text, delivery: "hardSteer", includeMeetingImages: Boolean(this.meetingContext) });
         const response = await this.request(API.sessionPrompt.path({ sessionId: this.sessionId }), {
           method: "POST", headers: { "content-type": "application/json" }, body,
         });
@@ -466,7 +468,7 @@ import { updateDocument } from "./sync";
       if (!response.ok) throw new Error(await responseError(response, "Could not open the thread"));
       const snapshot = await response.json();
       this.cursor = Math.max(0, ...(snapshot.events || []).map((event) => Number(event.seq) || 0));
-      this.threadWorking = snapshot.session?.state === "RUNNING";
+      this.threadWorking = snapshot.session?.state === "running";
       this.lastLiveText = String(snapshot.liveText || "");
     }
 

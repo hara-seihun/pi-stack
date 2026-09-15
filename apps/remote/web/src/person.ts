@@ -1,9 +1,7 @@
 import { RouterAuth, sessionUrl } from "./router-auth";
+import { appStorage, appStorageKey } from "./app-path";
 
-localStorage.removeItem("pi-remote-key");
-localStorage.removeItem("kenan-environment");
-
-export const auth = new RouterAuth(localStorage, sessionStorage, (kind) => {
+export const auth = new RouterAuth(appStorage(localStorage), appStorage(sessionStorage), (kind) => {
   window.dispatchEvent(new Event(`pi-${kind}`));
 });
 
@@ -15,9 +13,9 @@ window.PiRemotePerson = Object.freeze({
   acceptSession: (user: string, session: string) => auth.accept(user, session),
   clearSession: (session?: string) => auth.clear(session),
   headers: (initial?: HeadersInit, includeSession = true) => auth.headers(initial, includeSession),
-  href: (path: string) => sessionUrl(path, location.href, auth.session),
+  href: (path: string) => window.KenanRemote?.resolveApiUrl(path) ?? sessionUrl(path, location.href, auth.session),
 });
 
 window.addEventListener("storage", (event) => {
-  if (event.key === "pi-remote-person") auth.setPerson(event.newValue || "");
+  if (event.key === appStorageKey("pi-remote-person")) auth.setPerson(event.newValue || "");
 });

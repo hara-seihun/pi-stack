@@ -11,7 +11,7 @@ Run `npm run docs --workspace=pi-orchestrator` after changing commands or durabl
 - `wave`: Spawn a one-off batch from a declared lane [--count N] [--background].
 - `list`: List threads [--parent ID] [--state STATE] [--limit N] [--cursor CURSOR].
 - `read`: Read a thread's native history: THREAD_ID [--limit N] [--cursor CURSOR].
-- `send`: Send to THREAD_ID with --prompt TEXT [--delivery queue|steer|hardSteer].
+- `send`: Send to THREAD_ID with --prompt TEXT [--delivery queue|steer|hardSteer]; defaults to steer with PI_THREAD_ID, otherwise queue.
 - `stop`: Stop THREAD_ID; --descendants also stops its descendants.
 - `pause / resume`: Set or clear the global launch halt; --ordinary controls only ordinary work.
 - `resume THREAD_ID`: Release a stopped thread's pending messages.
@@ -33,5 +33,4 @@ usage: pi-orchestrator account list | import ID --provider openai-codex|anthropi
 - `lane`
 - `run`
 - `lease`
-- `live_state`
 - `usage_hour`

@@ -21,7 +21,7 @@ export async function archiveInactiveThreads(api: ThreadApi, afterMs: number, no
   const blocked = new Set<string>();
   for (const thread of threads.values()) {
     if (thread.metadata?.archived) continue;
-    if (thread.updatedAt < cutoff && ["idle", "stopped"].includes(thread.state) && thread.pendingMessages === 0) continue;
+    if (thread.updatedAt < cutoff && thread.state !== "running" && thread.pendingMessages === 0) continue;
     let id: string | null = thread.id;
     const visited = new Set<string>();
     while (id && !visited.has(id)) {

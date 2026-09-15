@@ -1,7 +1,7 @@
 import type { Database } from "bun:sqlite";
 import type { MeetThreadState } from "./protocol";
 
-type LiveActivity = { state: string; tools: string[]; output: string };
+type LiveActivity = Pick<MeetThreadState, "state" | "tools" | "output">;
 const preview = (value: unknown, limit = 2400): string => {
   const text = typeof value === "string" ? value : value == null ? "" : JSON.stringify(value, null, 2);
   return text.length > limit ? `${text.slice(0, limit)}\n… continued in thread` : text;

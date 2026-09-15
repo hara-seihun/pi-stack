@@ -6,7 +6,11 @@
 
 [`openPiSession`](../src/threads/pi-session.ts) implements `OpenPiSession` from the [thread contract](../src/threads/contracts.ts). It hosts one SDK session in the current process and exposes native RPC commands and events through `command`, `output` and `exit`. Session replacement emits `session_changed` with `sessionFile`, `sessionId` and `cwd`, followed by a conversation projection.
 
-Production controllers use [`createSharedPiSessionOpener({dataDir})`](../src/threads/runner-transport.ts). It returns `{openSession, detach}`. The runner hosts many SDK sessions in one Node process. Unix person, execution identity and isolated application cwd determine its grouping. It does not start one process per thread. `flock` owns the runner endpoint for its process lifetime. A control timeout never authorizes another owner.
+Production controllers use [`createSharedPiSessionOpener({dataDir})`](../src/threads/runner-transport.ts). It returns `{openSession, attachSession, detach}`. The runner hosts many SDK sessions in one Node process. Unix person, execution identity and isolated application cwd determine its grouping. It does not start one process per thread. `flock` owns the runner endpoint for its process lifetime. A control timeout never authorizes another owner.
+
+`attachSession(reference, output, exit)` reconnects only to an existing session using its recorded `{control, socketPath}`. Both socket paths must belong to this controller's data directory. Attachment makes a control `status` request and attaches to the session socket; it never checks cwd, requests admission, launches a runner, or sends `open`. A missing reference or a socket connection rejected with `ENOENT` or `ECONNREFUSED` returns `null`. Timeouts, premature disconnects, malformed replies and other errors throw because they do not establish absence. This lets Stop reach a retained native session after its checkout has been reclaimed, without recreating that checkout or initializing Pi.
+
+Both opening and attachment emit `runner_attached` and use the same command, output replay, close and connection ownership code. `close` requests native disposal before detaching its connection; opener `detach` only disconnects.
 
 The controller calls `detach` during handoff. This disconnects its channels without stopping accepted work. Reopening the same thread attaches to the same session and replays unacknowledged output. Each channel's output spool is transient delivery state, not conversation history. Native JSONL and the thread database remain authoritative. A dead runner loses its in-memory tools and queues; the controller recovers using native work receipts.
 
@@ -34,9 +38,23 @@ These are native execution receipts; the thread service still owns command admis
 
 ## Cancellation
 
-[`PiExecution`](../src/threads/pi-execution.ts) supplies local tool signals, tracks tools and prompt preflight, and fences callbacks from cancelled generations. Abort cancels the agent, compaction, shell commands and dialogs, then waits for local execution to stop. The acknowledgement follows confirmed cleanup. The timeout is `PI_THREAD_CANCEL_TIMEOUT_MS`, default 30 seconds.
+[`PiExecution`](../src/threads/pi-execution.ts) owns one `halt` operation. Abort, SDK abort aliases, replacement and idle disposal use it. Halt closes admission, signals tools, cancels native agent work, retry, compaction and shell commands, dismisses dialogs, and waits for every tracked call to return. Concurrent abort requests share that operation. Settlement runs before admission reopens and before the abort acknowledgement. Native halt has a fixed 20-second deadline, below the controller's 30-second RPC timeout, so native cancellation failure reaches the controller before its request expires.
 
-If a tool ignores cancellation, abort reports failure and leaves execution blocked. Finishing later does not silently authorize another generation; a subsequent cancellation must confirm the stop. Hard steer uses this same abort boundary before the selected new message runs. It does not cancel descendants or undo external effects.
+Tracking covers prompt preflight, native agent runs, queued inputs, custom-message turns, tools, shell commands, compaction and tree navigation. Each operation inherits its cancellation signal through async-local scope, so a callback from a cancelled run cannot start work after a later run is admitted. Plain prompts cannot overlap preflight or an unsettled turn. Streaming steering still uses Pi's queue.
+
+Settlement is synchronous and runs only when native and tracked work are idle. It never waits on a prompt promise. Prompt cleanup schedules the idle notification outside that promise, after rejection receipts can run. Native `agent_settled` is another notification, not a second settlement owner. During halt, only halt may write the cancelled receipt. Each accepted batch emits one settlement; repeated aborts on idle work emit none.
+
+If a tool or extension ignores cancellation, abort reports failure and leaves execution blocked. Pi's prompt API does not provide an abort signal for arbitrary extension preflight, so halt must wait for that callback to return. Finishing later does not silently authorize another run; a subsequent halt must confirm the stop. A halt invoked from its own tracked callback is rejected immediately rather than waiting on itself. Extension commands that replace their own session need an SDK handoff outside the running callback.
+
+Hard steer uses this same abort boundary before the selected new message runs. It does not cancel descendants or undo external effects.
+
+The focused cancellation checks take seconds and make no provider requests:
+
+```sh
+npm test --workspace=pi-orchestrator -- tests/pi-execution.test.ts tests/pi-session-halt.test.ts tests/pi-native.test.ts
+```
+
+They cover a real shell inside a native prompt, prompt preflight, extension dialogs, compaction cleanup, concurrent halt, failed cancellation, and single settlement.
 
 ## Resources, routing and tools
 
@@ -44,7 +62,7 @@ Normal sessions retain project and user extensions, instructions, skills, prompt
 
 `--orchestrator-context` selects the [isolated loader](../src/host/isolated-context.ts). Its explicit tools and extensions, empty ambient instructions/settings/skills, application HOME and filtered environment remain intact. Thread tools appear there only when explicitly selected. `get_state.context` reports the accepted isolated contract.
 
-The model-facing tools are `thread_spawn`, `thread_send`, `thread_list`, `thread_read`, and `thread_control`. Thinking, model and speed changes use `thread_control` settings. They use injected `ThreadApi` in-process or `PI_THREAD_API_URL` to reach the owning HTTP API. Spawn is fresh and forces admission; continuing work means send. No tool waits for a child to finish. Read never starts its recipient. Its textual previews omit image bytes and signatures, limit pages to eight entries, and chunk large entries through `entryId` and `offset`. UI history remains native content.
+The model-facing tools are `thread_spawn`, `thread_send`, `thread_list`, `thread_read`, and `thread_control`. Thinking, model and speed changes use `thread_control` settings. They use injected `ThreadApi` in-process or `PI_THREAD_API_URL` to reach the owning HTTP API. Spawn is fresh and forces admission; continuing work means send. `thread_send` defaults to `steer` and preserves explicit delivery modes. CLI `send` uses `PI_THREAD_ID` as sender and `PI_THREAD_API_URL` as its directory, defaulting to `steer` for agent callers and `queue` without a sender. No tool waits for a child to finish. Read never starts its recipient. Its textual previews omit image bytes and signatures, limit pages to eight entries, and chunk large entries through `entryId` and `offset`. UI history remains native content.
 
 ## Focused checks
 

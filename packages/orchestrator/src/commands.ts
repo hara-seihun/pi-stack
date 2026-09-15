@@ -7,7 +7,7 @@ import { Store } from "./store.js";
 import { readUsageEvidence } from "./usage-evidence.js";
 import { randomUUID } from "node:crypto";
 import { createThreadClient } from "./threads/http.js";
-import type { Delivery, Result, SettingsOverrides, SpawnThread, Thread, ThreadState } from "./threads/contracts.js";
+import { isThreadState, resolveDelivery, type Delivery, type Result, type SettingsOverrides, type SpawnThread, type Thread } from "./threads/contracts.js";
 import { providerOAuth, transactSharedCredential } from "./auth/shared-oauth.js";
 import { builtinProviders } from "@earendil-works/pi-ai/providers/all";
 import { AccountTransfer, transferEndpoint, transferPeer } from "./auth/account-transfer.js";
@@ -21,7 +21,7 @@ export const COMMANDS=[
   ["wave","Spawn a one-off batch from a declared lane [--count N] [--background]"],
   ["list","List threads [--parent ID] [--state STATE] [--limit N] [--cursor CURSOR]"],
   ["read","Read a thread's native history: THREAD_ID [--limit N] [--cursor CURSOR]"],
-  ["send","Send to THREAD_ID with --prompt TEXT [--delivery queue|steer|hardSteer]"],
+  ["send","Send to THREAD_ID with --prompt TEXT [--delivery queue|steer|hardSteer]; defaults to steer with PI_THREAD_ID, otherwise queue"],
   ["stop","Stop THREAD_ID; --descendants also stops its descendants"],
   ["pause / resume","Set or clear the global launch halt; --ordinary controls only ordinary work"],
   ["resume THREAD_ID","Release a stopped thread's pending messages"],
@@ -117,8 +117,8 @@ export async function dispatch(argv:string[]):Promise<void>{
     const {named,positional}=flags(rest);
     if(positional.length)throw new Error("list accepts named options only");
     const state=named.get("state");
-    if(state&&!['idle','queued','starting','running','stopping','stopped','interrupted'].includes(state))throw new Error("Invalid --state");
-    threadOutput(await createThreadClient(`${BASE}/v1/threads`).list({parentId:named.get("parent"),state:state as ThreadState|undefined,limit:named.has("limit")?positiveInteger(named.get("limit")!,"--limit"):undefined,cursor:named.get("cursor")}));return;
+    if(state!==undefined&&!isThreadState(state))throw new Error("Invalid --state");
+    threadOutput(await createThreadClient(`${BASE}/v1/threads`).list({parentId:named.get("parent"),state,limit:named.has("limit")?positiveInteger(named.get("limit")!,"--limit"):undefined,cursor:named.get("cursor")}));return;
   }
   if(command==="read"){
     const {named,positional}=flags(rest),threadId=positional[0];
@@ -126,10 +126,10 @@ export async function dispatch(argv:string[]):Promise<void>{
     threadOutput(await createThreadClient(`${BASE}/v1/threads`).read({threadId,cursor:named.get("cursor"),limit:named.has("limit")?positiveInteger(named.get("limit")!,"--limit"):undefined}));return;
   }
   if(command==="send"){
-    const {named,positional}=flags(rest),threadId=positional[0],text=named.get("prompt")??positional.slice(1).join(" "),delivery=named.get("delivery")??"queue";
+    const {named,positional}=flags(rest),threadId=positional[0],text=named.get("prompt")??positional.slice(1).join(" "),senderId=process.env.PI_THREAD_ID||undefined,delivery=named.get("delivery")??resolveDelivery({senderId});
     if(!threadId||!text.trim())throw new Error("send requires a thread id and --prompt");
     if(!['queue','steer','hardSteer'].includes(delivery))throw new Error("--delivery must be queue, steer, or hardSteer");
-    threadOutput(await createThreadClient(`${BASE}/v1/threads`).send({requestId:randomUUID(),threadId,text,delivery:delivery as Delivery}));return;
+    threadOutput(await createThreadClient(process.env.PI_THREAD_API_URL??`${BASE}/v1/threads`).send({requestId:randomUUID(),threadId,senderId,text,delivery:delivery as Delivery}));return;
   }
   if(command==="boost"){const {named,positional}=flags(rest),provider=positional[0],value=positional[1]??named.get("multiplier");if(!provider||value===undefined)throw new Error("boost requires provider and multiplier");output(await request("/v1/control","POST",{key:`boost:${provider}`,value:String(value)}));return;}
   if(command==="account"){

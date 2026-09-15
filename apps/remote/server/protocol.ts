@@ -3,7 +3,8 @@
 // imports the same file, so a field renamed on one side fails to compile on
 // the other instead of silently reading undefined at runtime.
 
-import type { InlineImage, InlineImageSnapshot } from "./inline-image-contract";
+import type { ThreadState } from "pi-orchestrator/api";
+import type { InlineImage, InlineImageSnapshot } from "./inline-image-contract.js";
 export type { InlineImage, InlineImageSnapshot };
 
 export interface EnvironmentEndpoint {
@@ -26,9 +27,7 @@ export type DocumentUpdate =
   | { kind: "splice"; capturedAt: number; hash: string; splice: ContextSplice }
   | { kind: "clear"; capturedAt: 0; hash: "" };
 
-export type Activity =
-  | "IDLE" | "FAILED" | "STARTING" | "STOPPING" | "STOPPED" | "INTERRUPTED" | "RUNNING" | "WORKING" | "THINKING"
-  | "COMPACTING" | "RETRYING" | "RECONNECTING" | "QUEUED" | "WAITING_ON_TOOL" | (string & {});
+export type Activity = ThreadState | "thinking" | "compacting" | "retrying" | "waiting_on_tool";
 
 export interface IdleNotification { seq: number; sessionId: string; name: string; time: string }
 export interface IdleNotificationFeed { cursor: number; notifications: IdleNotification[] }
@@ -56,7 +55,7 @@ export interface Session {
   cwd: string;
   workspaceName: string;
   environment: string;
-  state: string;
+  state: ThreadState;
   activity: Activity;
   activeTool: string | null;
   provider: "anthropic" | "openai";
@@ -65,6 +64,7 @@ export interface Session {
   revision: number;
   idleUnread: boolean;
   lastError: string | null;
+  lastErrorId?: string | null;
   steeringQueued: number;
   followUpQueued: number;
   queuedMessages: QueuedMessage[];
@@ -164,7 +164,7 @@ export interface SupervisorState {
   sessions: Session[];
   archived: Session[];
   archivedTotal: number;
-  ownerErrors?: Array<{ owner: string; message: string }>;
+  ownerErrors?: Array<{ id: string; owner: string; message: string }>;
 }
 
 export interface SyncRequest {
@@ -214,7 +214,6 @@ export type BashTimeoutSeconds = (typeof BASH_TIMEOUT_OPTIONS)[number];
 export const DEFAULT_BASH_TIMEOUT_SECONDS: BashTimeoutSeconds = 1800;
 
 export interface ThreadSettings {
-  children: Session[];
   models: Array<{ id: string; name?: string; provider: string; common?: boolean }>;
   model: { id: string; provider: string } | null;
   thinkingLevels: string[];

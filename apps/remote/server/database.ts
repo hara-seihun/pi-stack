@@ -13,6 +13,13 @@ CREATE TABLE IF NOT EXISTS thread_views (
   naming_attempted_count INTEGER NOT NULL DEFAULT 0,
   naming_error TEXT
 );
+CREATE TABLE IF NOT EXISTS error_feedback (
+  source TEXT PRIMARY KEY,
+  id TEXT NOT NULL UNIQUE,
+  message TEXT NOT NULL,
+  occurrence TEXT NOT NULL,
+  dismissed_at INTEGER
+);
 CREATE TABLE IF NOT EXISTS idle_notifications (
   seq INTEGER PRIMARY KEY AUTOINCREMENT,
   session_id TEXT NOT NULL,

@@ -100,6 +100,42 @@ function fixture(root?: string, workersOnly = false) {
   return { directory, service, sessions };
 }
 
+it("preserves the running account and model when future settings change", async () => {
+  const f = fixture();
+  await f.service.start();
+  const thread = value(await f.service.spawn({ requestId: "settings-attribution", cwd: f.directory, message: "active" }));
+  await waitFor(() => f.sessions.some(session => session.isStreaming));
+  const db = new DatabaseSync(join(f.directory, "threads.sqlite"));
+  try {
+    db.prepare("UPDATE thread_execution SET settings=json_set(settings,'$.model','openai-codex-8/gpt-6-astra') WHERE thread_id=?").run(thread.id);
+    value(await f.service.control({ threadId: thread.id, action: "settings", settings: { thinkingLevel: "low" } }));
+    const active = () => JSON.parse((db.prepare("SELECT settings FROM thread_execution WHERE thread_id=?").get(thread.id) as { settings: string }).settings);
+    expect(active()).toMatchObject({ model: "openai-codex-8/gpt-6-astra", thinkingLevel: "low" });
+    const count = f.sessions[0].commands.length;
+    value(await f.service.control({ threadId: thread.id, action: "settings", settings: { model: "fable" } }));
+    value(await f.service.control({ threadId: thread.id, action: "settings", settings: { thinkingLevel: "high", speed: "priority" } }));
+    expect(f.service.get(thread.id)!.settings).toEqual({ model: "anthropic/claude-fable-5-1", thinkingLevel: "high", speed: "priority" });
+    expect(active()).toEqual({ model: "openai-codex-8/gpt-6-astra", thinkingLevel: "low", speed: "standard" });
+    expect(f.sessions[0].commands).toHaveLength(count);
+  } finally { db.close(); }
+});
+
+it("reports persisted settings when the running session rejects their application", async () => {
+  const f = fixture();
+  await f.service.start();
+  const thread = value(await f.service.spawn({ requestId: "settings-partial", cwd: f.directory, message: "active" }));
+  await waitFor(() => f.sessions.some(session => session.isStreaming));
+  const session = f.sessions[0], command = session.command.bind(session);
+  vi.spyOn(session, "command").mockImplementation(async input => {
+    if (input.type === "set_thinking_level") throw new Error("Native session unavailable");
+    return command(input);
+  });
+  expect(await f.service.control({ threadId: thread.id, action: "settings", settings: { thinkingLevel: "low" } })).toMatchObject({
+    ok: false, error: { message: expect.stringContaining("Thread settings were saved, but the running session did not confirm") },
+  });
+  expect(f.service.get(thread.id)!.settings.thinkingLevel).toBe("low");
+});
+
 describe("leaf Orchestrator workers", () => {
   it("routes children to fleet, rejects recursion in both owners, and retains creation receipts", async () => {
     const person = fixture(), fleet = fixture(undefined, true);
@@ -143,10 +179,26 @@ describe("leaf Orchestrator workers", () => {
     await waitFor(() => person.sessions[0]?.isStreaming === true && fleet.sessions[0]?.isStreaming === true);
     expect(person.sessions[0]!.options.env.PI_THREAD_CAN_SPAWN).toBe("1");
     expect(fleet.sessions[0]!.options.env.PI_THREAD_CAN_SPAWN).toBe("0");
+    expect(fleet.sessions[0]!.options.env.PI_THREAD_DATABASE).toBe(join(fleet.directory, "threads.sqlite"));
+    expect(person.sessions[0]!.options.env.PI_THREAD_DATABASE).toBe(join(person.directory, "threads.sqlite"));
     expect(threadTools(person.sessions[0]!.options).some(tool => tool.name === "thread_spawn")).toBe(true);
     expect(threadTools(fleet.sessions[0]!.options).some(tool => tool.name === "thread_spawn")).toBe(false);
+    expect(person.sessions[0]!.commands.find(command => command.type === "prompt")?.message).toBe("Coordinate");
+    const assignment = String(fleet.sessions[0]!.commands.find(command => command.type === "prompt")?.message);
+    expect(assignment).toContain("<agent_message>");
+    expect(assignment).toContain(JSON.stringify(root.id));
+    value(await directory.send({ requestId: "progress", threadId: root.id, senderId: child.id, text: "Still working", delivery: "steer" }));
+    await waitFor(() => person.sessions[0]!.commands.some(command => command.workId === "progress"));
+    const progress = String(person.sessions[0]!.commands.find(command => command.workId === "progress")?.message);
     fleet.sessions[0]!.settle("Worker result");
     await waitFor(() => person.sessions[0]!.commands.some(command => command.type === "steer" && JSON.stringify(command).includes("Worker result")));
+    const completion = String(person.sessions[0]!.commands.find(command => command.type === "steer" && String(command.message).includes("Worker result"))?.message);
+    for (const text of [progress, completion]) {
+      expect(text.split("\n").slice(0, 2)).toEqual(assignment.split("\n").slice(0, 2));
+      expect(JSON.parse(text.split("\n")[2]!)).toMatchObject({ senderThreadId: child.id, recipientThreadId: root.id });
+      expect(text).toMatch(/<\/agent_message>$/);
+    }
+    expect(JSON.parse(completion.split("\n")[2]!)).toMatchObject({ source: "notification", replyTo: "child" });
     expect(fleet.service.get(child.id)?.state).toBe("idle");
   });
 });
@@ -270,11 +322,155 @@ describe("ThreadService", () => {
 
     const second = fixture(first.directory);
     value(await second.service.send({ requestId: "explicit", threadId: parent.id, text: "new instruction", delivery: "queue" }));
-    expect(second.service.get(parent.id)?.state).toBe("queued");
+    expect(second.service.get(parent.id)?.state).toBe("running");
     expect(second.service.pending(parent.id).map(message => ({ id: message.id, source: message.source, text: message.text }))).toEqual([
       { id: "explicit", source: "explicit", text: "new instruction" },
       expect.objectContaining({ source: "notification" }),
     ]);
+  });
+
+  it("normalizes stored phases without losing active execution or held input", async () => {
+    const first = fixture();
+    value(first.service.importThread({ id: "active", title: "active", cwd: first.directory, sessionFile: join(first.directory, "active.jsonl"), settings: { model: "openai-codex/gpt-6-astra", thinkingLevel: "high", speed: "standard" } }));
+    value(first.service.importMessage({ id: "accepted", threadId: "active", text: "accepted", state: "dispatched" }));
+    value(first.service.importMessage({ id: "held", threadId: "active", text: "preserve", state: "queued" }));
+    value(await first.service.detach());
+    const db = new DatabaseSync(join(first.directory, "threads.sqlite"));
+    db.exec("UPDATE thread SET held=1,state='interrupted'"); db.close();
+    const second = fixture(first.directory);
+    expect(second.service.get("active")?.state).toBe("running");
+    expect(second.service.pending("active").map(message => message.id)).toEqual(["accepted", "held"]);
+    expect(await second.service.list({ state: "interrupted" as never })).toMatchObject({ ok: false, error: { code: "invalid_request" } });
+    expect(second.sessions).toHaveLength(0);
+    value(await second.service.control({ threadId: "active", action: "stop", descendants: false }));
+    expect(second.service.get("active")?.state).toBe("stopped");
+    expect(second.service.pending("active")).toMatchObject([{ id: "held", state: "held" }]);
+    expect(second.sessions).toHaveLength(0);
+  });
+
+  it("halts retained execution without cwd, credentials, admission or session initialization", async () => {
+    const directory = mkdtempSync(join(tmpdir(), "thread-cold-halt-")); roots.push(directory);
+    const openSession = vi.fn(async () => { throw new Error("Stop must not initialize a session"); });
+    const admit = vi.fn(async () => { throw new Error("Stop must not request admission"); });
+    const attachSession = vi.fn(async () => null);
+    const service = new ThreadService({ databasePath: join(directory, "threads.sqlite"), sessionsDir: directory, openSession, admit, attachSession }); services.push(service);
+    const reference = { control: "/absent/runner.sock", socketPath: "/absent/session.sock" };
+    value(service.importThread({ id: "gone", title: "gone", cwd: "/reclaimed/checkout", sessionFile: "/missing/session.jsonl", metadata: { runnerReference: reference }, settings: { model: "openai-codex/gpt-6-astra", thinkingLevel: "high", speed: "standard" } }));
+    value(service.importMessage({ id: "accepted", threadId: "gone", text: "work", state: "dispatched" }));
+    value(service.importMessage({ id: "next", threadId: "gone", text: "keep", state: "queued" }));
+    expect(value(await service.control({ threadId: "gone", action: "stop", descendants: false })).state).toBe("stopped");
+    expect(attachSession).toHaveBeenCalledWith(reference, expect.any(Function), expect.any(Function));
+    expect(openSession).not.toHaveBeenCalled(); expect(admit).not.toHaveBeenCalled();
+    expect(service.latestSettlement("gone")?.outcome).toBe("cancelled");
+    expect(service.pending("gone")).toMatchObject([{ id: "next", state: "held" }]);
+  });
+
+  it("deduplicates halt, holds pending input, and does not confirm stopped before native acknowledgement", async () => {
+    const { service, directory, sessions } = fixture();
+    await service.start();
+    const thread = value(await service.spawn({ requestId: "active", cwd: directory, message: "work" }));
+    await waitFor(() => sessions[0]?.isStreaming === true);
+    const native = sessions[0]!, command = native.command.bind(native);
+    let release!: () => void, aborts = 0;
+    const gate = new Promise<void>(resolve => { release = resolve; });
+    native.command = async input => { if (input.type === "abort") { aborts++; await gate; } await command(input); };
+    value(await service.send({ requestId: "pending", threadId: thread.id, text: "next", delivery: "queue" }));
+    const first = service.control({ threadId: thread.id, action: "stop", descendants: false });
+    const second = service.control({ threadId: thread.id, action: "stop", descendants: false });
+    await waitFor(() => aborts === 1);
+    expect(service.get(thread.id)?.state).toBe("running");
+    expect(service.pending(thread.id).find(message => message.id === "pending")?.state).toBe("held");
+    expect(native.closed).toBe(false);
+    release();
+    expect(value(await first).state).toBe("stopped");
+    expect(value(await second).state).toBe("stopped");
+    expect(aborts).toBe(1);
+    expect(native.closed).toBe(true);
+    value(await service.control({ threadId: thread.id, action: "resume" }));
+    await waitFor(() => sessions[1]?.commands.some(input => input.workId === "pending") === true);
+    await settle(sessions[1]!, service, thread.id);
+  });
+
+  it("uses the same halt before hard steering and preserves the rest of the queue", async () => {
+    const { service, directory, sessions } = fixture();
+    await service.start();
+    const thread = value(await service.spawn({ requestId: "active", cwd: directory, message: "work" }));
+    await waitFor(() => sessions[0]?.isStreaming === true);
+    value(await service.send({ requestId: "later", threadId: thread.id, text: "later", delivery: "queue" }));
+    value(await service.send({ requestId: "now", threadId: thread.id, text: "now", delivery: "hardSteer" }));
+    await waitFor(() => sessions[1]?.commands.some(input => input.workId === "now") === true);
+    expect(sessions[0]!.commands.filter(input => input.type === "abort")).toHaveLength(1);
+    expect(sessions[0]!.closed).toBe(true);
+    expect(service.pending(thread.id).some(message => message.id === "later")).toBe(true);
+    expect(service.latestSettlement(thread.id)?.outcome).toBe("cancelled");
+    sessions[1]!.settle("now done");
+    await waitFor(() => sessions[2]?.commands.some(input => input.workId === "later") === true);
+    await settle(sessions[2]!, service, thread.id);
+  });
+
+  it("reconciles an unconfirmed halt instead of stranding its held queue", async () => {
+    const { service, directory, sessions } = fixture();
+    await service.start();
+    const thread = value(await service.spawn({ requestId: "active", cwd: directory, message: "work" }));
+    await waitFor(() => sessions[0]?.isStreaming === true);
+    const native = sessions[0]!, command = native.command.bind(native);
+    let failed = false;
+    native.command = async input => {
+      if (input.type === "abort" && !failed) { failed = true; throw new Error("Tool has not stopped"); }
+      await command(input);
+    };
+    value(await service.send({ requestId: "pending", threadId: thread.id, text: "next", delivery: "queue" }));
+    expect(await service.control({ threadId: thread.id, action: "stop", descendants: false })).toMatchObject({ ok: false });
+    expect(service.get(thread.id)).toMatchObject({ state: "running", metadata: { executionError: "Tool has not stopped" } });
+    service.reconcile();
+    await waitFor(() => service.get(thread.id)?.state === "stopped");
+    expect(service.pending(thread.id)).toMatchObject([{ id: "pending", state: "held" }]);
+    expect(service.get(thread.id)?.metadata?.executionError).toBeUndefined();
+  });
+
+  it("hard steers a native command without waiting behind that command's serial operation", async () => {
+    const directory = mkdtempSync(join(tmpdir(), "thread-command-halt-")); roots.push(directory);
+    let native: FakePiSession | undefined, release!: () => void;
+    const gate = new Promise<void>(resolve => { release = resolve; });
+    const sessions: FakePiSession[] = [];
+    const service = new ThreadService({ databasePath: join(directory, "threads.sqlite"), sessionsDir: join(directory, "sessions"),
+      openSession: async (options, output) => {
+        const session = new FakePiSession(options, output), command = session.command.bind(session);
+        sessions.push(session);
+        session.command = async input => {
+          if (input.type === "bash") { native = session; session.isStreaming = true; await gate; }
+          if (input.type === "abort") release();
+          await command(input);
+        };
+        return session;
+      } });
+    services.push(service); await service.start();
+    const thread = value(await service.spawn({ requestId: "thread", cwd: directory }));
+    const shell = service.command(thread.id, { id: "shell", type: "bash", command: "sleep 600" });
+    await waitFor(() => !!native);
+    expect(service.get(thread.id)?.state).toBe("running");
+    value(await service.send({ requestId: "new", threadId: thread.id, text: "new work", delivery: "hardSteer" }));
+    value(await shell);
+    await waitFor(() => sessions[1]?.commands.some(input => input.workId === "new") === true);
+    expect(native!.commands.filter(input => input.type === "abort")).toHaveLength(1);
+    expect(native!.closed).toBe(true);
+    await settle(sessions[1]!, service, thread.id);
+  });
+
+  it("halts an opening session without submitting its queued input", async () => {
+    const directory = mkdtempSync(join(tmpdir(), "thread-opening-")); roots.push(directory);
+    let release!: () => void, native: FakePiSession | undefined;
+    const gate = new Promise<void>(resolve => { release = resolve; });
+    const service = new ThreadService({ databasePath: join(directory, "threads.sqlite"), sessionsDir: join(directory, "sessions"),
+      openSession: async (options, output) => { native = new FakePiSession(options, output); await gate; return native; } });
+    services.push(service); await service.start();
+    const thread = value(await service.spawn({ requestId: "pending", cwd: directory, message: "work" }));
+    await waitFor(() => !!native);
+    const stopped = service.control({ threadId: thread.id, action: "stop", descendants: false });
+    release();
+    expect(value(await stopped).state).toBe("stopped");
+    expect(native!.commands.some(input => input.type === "prompt")).toBe(false);
+    expect(service.pending(thread.id)).toMatchObject([{ id: "pending", state: "held" }]);
   });
 
   it("reads native history without activating a runtime", async () => {
@@ -292,6 +488,21 @@ describe("ThreadService", () => {
     expect(sessions).toHaveLength(0);
   });
 
+  it("defaults agent inputs to steer while retaining human queues and explicit choices", async () => {
+    const { directory, service } = fixture();
+    const parent = value(await service.spawn({ requestId: "parent", cwd: directory, message: "Coordinate" }));
+    const child = value(await service.spawn({ requestId: "child", cwd: directory, parentId: parent.id, message: "Assignment" }));
+    expect(service.pending(parent.id)[0]?.delivery).toBe("queue");
+    expect(service.pending(child.id)[0]?.delivery).toBe("steer");
+    const agent = { requestId: "agent", threadId: parent.id, senderId: child.id, text: "Progress" };
+    expect(value(await service.send(agent)).delivery).toBe("steer");
+    expect(value(await service.send({ ...agent, delivery: "steer" })).id).toBe("agent");
+    expect(value(await service.send({ requestId: "human", threadId: parent.id, text: "More work" })).delivery).toBe("queue");
+    for (const delivery of ["queue", "steer", "hardSteer"] as const) {
+      expect(value(await service.send({ ...agent, requestId: delivery, delivery })).delivery).toBe(delivery);
+    }
+  });
+
   it("deduplicates request receipts and rejects changed reuse", async () => {
     const { directory, service } = fixture();
     const spawn = { requestId: "spawn-request", id: "same-thread", cwd: directory } as const;
@@ -302,6 +513,26 @@ describe("ThreadService", () => {
     expect(value(await service.send(message)).id).toBe("send-request");
     expect(service.pending("same-thread")).toHaveLength(1);
     expect(await service.send({ ...message, text: "different" })).toMatchObject({ ok: false, error: { code: "conflict" } });
+  });
+
+  it("keeps sender attribution when recovering previously prepared agent input", async () => {
+    const first = fixture();
+    value(first.service.importThread({ id: "recipient", title: "Recipient", cwd: first.directory, sessionFile: join(first.directory, "recipient.jsonl"), settings: { model: "astra", thinkingLevel: "high", speed: "standard" } }));
+    value(first.service.importMessage({ id: "accepted-agent-input", threadId: "recipient", senderId: "sender", text: "Keep working", state: "dispatched", insertedAt: Date.now() }));
+    value(await first.service.detach());
+    const db = new DatabaseSync(join(first.directory, "threads.sqlite"));
+    db.prepare("UPDATE thread_work SET prepared=? WHERE id=?").run(JSON.stringify({ text: "Keep working\nPrepared context", images: [] }), "accepted-agent-input");
+    db.close();
+    const second = fixture(first.directory);
+    value(await second.service.start());
+    await waitFor(() => second.sessions[0]?.commands.some(command => command.workId === "accepted-agent-input") === true);
+    const command = second.sessions[0]!.commands.find(command => command.workId === "accepted-agent-input")!;
+    const text = String(command.message);
+    expect(command.resume).toBe(true);
+    expect(JSON.parse(text.split("\n")[2]!)).toMatchObject({ senderThreadId: "sender", messageId: "accepted-agent-input" });
+    expect(text).toContain("Keep working\nPrepared context");
+    expect(text.match(/<agent_message>/g)).toHaveLength(1);
+    await settle(second.sessions[0]!, second.service, "recipient");
   });
 
   it("does not replay an imported completed message", async () => {

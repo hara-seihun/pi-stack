@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import { AnimatePresence, MotionConfig, motion, useIsPresent, type HTMLMotionProps } from "motion/react";
 import { API } from "../../server/api";
+import { appPath } from "./app-path";
 import { api } from "./client";
 import { DismissibleError } from "./dismissible-error";
 import { threadStartReducer, threadStartSelection, threadStartStage, type ThreadStartEvent, type ThreadStartState } from "./thread-start-state";
@@ -9,7 +10,7 @@ import type { ThreadStart } from "./types";
 function iconFace(icon: string) {
   return /\p{Extended_Pictographic}/u.test(icon)
     ? <span className="model-emoji" aria-hidden="true">{icon}</span>
-    : <img src={`/${icon}.svg`} alt="" draggable={false} />;
+    : <img src={appPath(`${icon}.svg`)} alt="" draggable={false} />;
 }
 
 function darkGlyph(accent = "#89b4fa") {
