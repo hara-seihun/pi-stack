@@ -11,5 +11,5 @@ TimeoutStopSec=10s
 KillMode=control-group
 Restart=no
 UMask=0077
-Environment=PATH=/home/kenan/.local/bin:/run/current-system/sw/bin:/usr/bin:/bin
+Environment=PATH=/home/kenan/.local/bin:/run/wrappers/bin:/run/current-system/sw/bin:/usr/bin:/bin
 Environment=PI_SKIP_VERSION_CHECK=1

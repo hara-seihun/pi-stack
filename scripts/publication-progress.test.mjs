@@ -5,6 +5,7 @@ import {
   mkdtempSync,
   mkdirSync,
   readFileSync,
+  readdirSync,
   rmSync,
   utimesSync,
   writeFileSync,
@@ -166,6 +167,44 @@ function repairFixture(t, status = "launching") {
   t.after(() => rmSync(root, { recursive: true, force: true }));
   return { root, bin, workspace, request, requestPath, repair, repairPath, repairedSha, environment };
 }
+
+test("installed publication services resolve NixOS privilege wrappers before package binaries", t => {
+  const root = mkdtempSync(join(tmpdir(), "publication-install-"));
+  t.after(() => rmSync(root, { recursive: true, force: true }));
+  const bin = makeCommandStubs(root);
+  const units = join(root, "units");
+  const result = run(process.execPath, [publication, "install"], {
+    env: {
+      ...process.env,
+      PATH: `${bin}:${process.env.PATH}`,
+      SYSTEMCTL_LOG: join(root, "systemctl.log"),
+      PI_STACK_PUBLICATION_STATE: join(root, "state"),
+      PI_STACK_PUBLICATION_COMMAND: join(root, "machine", "publication"),
+      PI_STACK_PUBLICATION_UNIT_ROOT: units,
+    },
+  });
+  assert.equal(result.status, 0, result.stderr);
+  const services = readdirSync(units).filter(name => name.endsWith(".service"));
+  assert.equal(services.length, 4);
+  const wrapperBin = join(root, "run/wrappers/bin");
+  const packageBin = join(root, "run/current-system/sw/bin");
+  mkdirSync(wrapperBin, { recursive: true });
+  mkdirSync(packageBin, { recursive: true });
+  executable(join(wrapperBin, "sudo"), "#!/bin/sh\nprintf 'wrapper\\n'\n");
+  executable(join(packageBin, "sudo"), "#!/bin/sh\nexit 66\n");
+  const shell = run("sh", ["-c", "command -v sh"]).stdout.trim();
+  for (const name of services) {
+    const unit = readFileSync(join(units, name), "utf8");
+    const path = unit.match(/^Environment=PATH=(.+)$/m)?.[1];
+    assert.ok(path, `${name} must declare its command environment`);
+    // Mirror the installed search order without relying on the test host's sudo.
+    const probe = run(shell, ["-c", "sudo -n true"], {
+      env: { PATH: path.split(":").map(entry => join(root, entry)).join(":") },
+    });
+    assert.equal(probe.status, 0, `${name}: ${probe.stderr}`);
+    assert.equal(probe.stdout.trim(), "wrapper", name);
+  }
+});
 
 test("stall policy puts a finite bound on commands, idle logs, and time between steps", t => {
   const root = mkdtempSync(join(tmpdir(), "publication-stall-policy-"));
