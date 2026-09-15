@@ -1,5 +1,6 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import { deadline } from "./abortable";
+import { DismissibleError } from "./dismissible-error";
 import { nativePlatform, remote, type AppUpdateCheck } from "./native";
 
 type Availability =
@@ -88,8 +89,8 @@ export function AppUpdateControl() {
   if (available.status === "current" && !installError && install !== "installer-opened") return null;
 
   return <section className="app-update" aria-label="App update">
-    {installError && <p className="app-update-error" role="alert">{installError}</p>}
-    {available.status === "failed" && <><p className="app-update-error" role="alert">Update check failed. {available.message}</p><button type="button" onClick={() => void check()}>Retry check</button></>}
+    <DismissibleError message={installError} dismissLabel="Dismiss update install error" />
+    {available.status === "failed" && <><DismissibleError message={`Update check failed. ${available.message}`} dismissLabel="Dismiss update check error" /><button type="button" onClick={() => void check()}>Retry check</button></>}
     {available.status === "current" && installError && <p className="app-update-detail">No app update is currently available.</p>}
     {available.status === "available" && <>
       <p className="app-update-detail">Update {available.checked.release.revision.slice(0, 12)} is available. Android may ask you to allow installs from Kenan.</p>

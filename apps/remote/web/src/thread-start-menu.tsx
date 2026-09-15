@@ -2,6 +2,7 @@ import { useCallback, useEffect, useRef, useState } from "react";
 import { AnimatePresence, MotionConfig, motion, useIsPresent, type HTMLMotionProps } from "motion/react";
 import { API } from "../../server/api";
 import { api } from "./client";
+import { DismissibleError } from "./dismissible-error";
 import { threadStartReducer, threadStartSelection, threadStartStage, type ThreadStartEvent, type ThreadStartState } from "./thread-start-state";
 import type { ThreadStart } from "./types";
 
@@ -44,7 +45,7 @@ export function ThreadStartMenu({ starts, onCreated, onSettled }: { starts: Thre
   useEffect(() => {
     if (!open) return;
     const onOutsidePress = (event: PointerEvent | MouseEvent) => {
-      const button = event.target instanceof Element ? event.target.closest("button[data-thread-start-button]") : null;
+      const button = event.target instanceof Element ? event.target.closest("button[data-thread-start-button], button.dismissible-error-dismiss") : null;
       if (button && root.current?.contains(button)) return;
       event.preventDefault();
       event.stopPropagation();
@@ -101,7 +102,7 @@ export function ThreadStartMenu({ starts, onCreated, onSettled }: { starts: Thre
     </div>
     {(busy || state.kind === "failed") && <div className="thread-start-status">
       {busy && <span role="status">Creating thread…</span>}
-      {state.kind === "failed" && <><span role="alert">{state.error}</span><button type="button" data-thread-start-button onClick={() => dispatch({ type: "retry" })}>Retry</button></>}
+      {state.kind === "failed" && <><DismissibleError message={state.error} dismissLabel="Dismiss thread creation error" /><button type="button" data-thread-start-button onClick={() => dispatch({ type: "retry" })}>Retry</button></>}
     </div>}
   </div></MotionConfig>;
 }
