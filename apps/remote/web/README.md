@@ -24,9 +24,13 @@ API fetches reject redirects so custom session headers cannot follow a router re
 
 ## Dismissible errors
 
-[`DismissibleError`](src/dismissible-error.tsx) imports its own [CSS](src/dismissible-error.css). Pass `message` as a string, or an empty/null/undefined value to remove feedback. Optional props are `dismissLabel`, `className`, `role` (`alert` by default, or `status` for background feedback), and `resetKey` for a new attempt with the same message.
+[`DismissibleError`](src/dismissible-error.tsx) imports its own [CSS](src/dismissible-error.css). Pass `message` as a string, or an empty/null/undefined value to remove feedback. Optional props are `dismissLabel`, `className`, `role`, `resetKey` for a new attempt with the same message, and `onDismiss` for server-owned errors. The default role is `alert`; background feedback uses `status`.
 
-Dismissal only hides the message. Keep failure state and retry actions in the caller, outside this component. Changed messages, changed reset keys, or clearing the message reset dismissal. Repeated background reports with the same message stay dismissed. The dismiss button has a 44px touch target and a visible keyboard focus outline.
+Server-owned errors carry an occurrence ID. The client posts it to `POST /v1/errors/:errorId/dismiss` and hides the message after the server acknowledges it. While saving, the button is disabled. A failed save keeps the original error visible with a retryable dismissal error. Server synchronization removes dismissed errors from every client, including drawer and thread summaries. Browser reloads and supervisor restarts retain dismissal.
+
+The supervisor's `error_feedback` table owns acknowledgements. Repeated reports of the same unresolved error keep their ID; recovery, changed messages and new naming attempts create a new occurrence. A stale dismissal cannot acknowledge a newer occurrence or an error from another thread. Dismissal does not change execution state, retry policy, native history or work outcomes.
+
+Client-only errors, such as upload and connection failures, still dismiss locally. Keep failure state and retry actions in the caller. Changed messages, changed reset keys, or clearing the message reset local dismissal. The dismiss button has a 44px touch target and a visible keyboard focus outline.
 
 ## Focused checks
 

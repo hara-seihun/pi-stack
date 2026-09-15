@@ -64,6 +64,7 @@ export interface Session {
   revision: number;
   idleUnread: boolean;
   lastError: string | null;
+  lastErrorId?: string | null;
   steeringQueued: number;
   followUpQueued: number;
   queuedMessages: QueuedMessage[];
@@ -163,7 +164,7 @@ export interface SupervisorState {
   sessions: Session[];
   archived: Session[];
   archivedTotal: number;
-  ownerErrors?: Array<{ owner: string; message: string }>;
+  ownerErrors?: Array<{ id: string; owner: string; message: string }>;
 }
 
 export interface SyncRequest {

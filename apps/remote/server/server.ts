@@ -15,6 +15,7 @@ import { updateToolProgress, type ToolProgress } from "./tool-progress";
 import { contextSplice, DocumentHistory, messageFinalizationKey, sha256, type ContextSplice } from "./sync";
 import { appendContextPatch, readContext } from "./context-journal";
 import { beginSupervisorGeneration, ensureSupervisorSchema, ensureThreadView } from "./database";
+import { dismissError, observeError } from "./error-feedback";
 import { startLedgerSnapshots } from "./ledger-snapshot";
 import { autoArchiveDelay, startAutoArchive } from "./auto-archive";
 import { VoiceClient } from "./voice/client";
@@ -213,9 +214,10 @@ function refreshThreadNotifications(): Promise<void> {
     if (existing) return existing;
     const before = currentStateVersion();
     const refresh = projectThreadNotifications(db, owner.id, owner.api)
-      .then(() => { if (notificationErrors.delete(owner.id)) signalSync(); })
+      .then(() => { observeError(db, `notifications:${owner.id}`, null); if (notificationErrors.delete(owner.id)) signalSync(); })
       .catch(cause => {
         const message = cause instanceof Error ? cause.message : String(cause);
+        observeError(db, `notifications:${owner.id}`, message);
         if (notificationErrors.get(owner.id) !== message) { notificationErrors.set(owner.id, message); signalSync(); }
       })
       .finally(() => { notificationRefreshes.delete(owner.id); if (currentStateVersion() !== before) signalSync(); });
@@ -231,7 +233,7 @@ async function refreshPeers() {
     let cursor: string | undefined;
     do {
       const page = await fleet.list({ limit: 100, cursor });
-      if (!page.ok) { if (peerError !== page.error.message) { peerError = page.error.message; signalSync(); } return; }
+      if (!page.ok) { observeError(db, "peer:fleet", page.error.message); if (peerError !== page.error.message) { peerError = page.error.message; signalSync(); } return; }
       for (const thread of page.value.threads) {
         if (threads.get(thread.id)) throw new Error(`Thread ${thread.id} has two owners`);
         next.set(thread.id, thread);
@@ -240,13 +242,15 @@ async function refreshPeers() {
     } while (cursor);
     const changed = peerError !== null || JSON.stringify([...next]) !== JSON.stringify([...peerThreads]);
     peerError = null;
+    observeError(db, "peer:fleet", null);
     peerThreads.clear();
     peerChildren.clear();
     for (const thread of next.values()) if (thread.parentId) peerChildren.set(thread.parentId, true);
-    for (const [id, thread] of next) { peerThreads.set(id, thread); ensureThreadView(db, id); }
+    for (const [id, thread] of next) { peerThreads.set(id, thread); ensureThreadView(db, id); threadRow(thread); }
     if (changed) signalSync();
   })().catch(cause => {
     const message = cause instanceof Error ? cause.message : String(cause);
+    observeError(db, "peer:fleet", message);
     if (peerError !== message) { peerError = message; signalSync(); }
   }).finally(() => { peerRefresh = null; });
   return peerRefresh;
@@ -670,6 +674,9 @@ function threadRow(thread: Thread): any {
   const view = db.query("SELECT * FROM thread_views WHERE id=?").get(thread.id) as any;
   const [provider, ...modelParts] = thread.settings.model.split("/");
   const model = { provider, modelId: modelParts.join("/") };
+  const executionError = observeError(db, `execution:${thread.id}`, typeof meta.executionError === "string" ? meta.executionError : null);
+  const namingFailure = observeError(db, `naming:${thread.id}`, view?.naming_error, String(view?.naming_attempted_count ?? 0));
+  const feedback = executionError ?? namingFailure;
   return { ...thread, name: thread.title, workspace_id: meta.workspaceId ?? thread.cwd,
     session_path: thread.sessionFile,
     initial_model: model?.modelId ?? thread.settings.model, current_provider: model?.provider ?? "",
@@ -679,7 +686,7 @@ function threadRow(thread: Thread): any {
     bash_timeout_seconds: meta.bashTimeoutSeconds ?? DEFAULT_BASH_TIMEOUT_SECONDS,
     archived_at: meta.archived ? meta.archivedAt ?? new Date(thread.updatedAt).toISOString() : null, display_order: view?.display_order ?? 0,
     idle_unread: view?.idle_unread ?? 0, named_at_message_count: view?.named_at_message_count ?? 0,
-    last_error: meta.executionError ?? view?.naming_error ?? null,
+    last_error: feedback?.message ?? null, last_error_id: feedback?.id ?? null,
     created_at: new Date(thread.createdAt).toISOString(), updated_at: new Date(thread.updatedAt).toISOString() };
 }
 const sessionRow = { get(id: string) { const found = threads.get(id) ?? peerThreads.get(id); return found ? threadRow(found) : null; } };
@@ -762,6 +769,8 @@ function namingInput(transcript: string): CompletionInput {
     speed: "standard", ...(thinkingLevel ? { thinkingLevel } : {}) } as CompletionInput;
 }
 function namingError(id: string, message: string | null) {
+  const view = db.query("SELECT naming_attempted_count FROM thread_views WHERE id=?").get(id) as any;
+  observeError(db, `naming:${id}`, message, String(view?.naming_attempted_count ?? 0));
   const result = db.query("UPDATE thread_views SET naming_error=? WHERE id=? AND naming_error IS NOT ?").run(message, id, message);
   if (result.changes) signalSync();
 }
@@ -839,10 +848,13 @@ function supervisorState(): SupervisorState {
     sessions: publicSessions(activeSessionRows.all() as any[]),
     archived: publicSessions(archivedPage(0, ARCHIVED_PAGE_SIZE)),
     archivedTotal: archivedCount(),
-    ownerErrors: [...(peerError ? [{ owner: "fleet", message: peerError }] : []),
-      ...[...notificationErrors].map(([owner, message]) => ({ owner, message })),
-      ...(db.query("SELECT id,naming_error FROM thread_views WHERE naming_error IS NOT NULL").all() as any[])
-        .map(row => ({ owner: `Thread ${sessionRow.get(row.id)?.name ?? row.id} naming`, message: row.naming_error }))],
+    ownerErrors: [
+      { owner: "fleet", feedback: peerError ? observeError(db, "peer:fleet", peerError) : null },
+      ...[...notificationErrors].map(([owner, message]) => ({ owner, feedback: observeError(db, `notifications:${owner}`, message) })),
+      ...(db.query("SELECT id,naming_error,naming_attempted_count FROM thread_views WHERE naming_error IS NOT NULL").all() as any[])
+        .map(row => ({ owner: `Thread ${sessionRow.get(row.id)?.name ?? row.id} naming`,
+          feedback: observeError(db, `naming:${row.id}`, row.naming_error, String(row.naming_attempted_count)) })),
+    ].flatMap(({ owner, feedback }) => feedback ? [{ owner, ...feedback }] : []),
   };
 }
 
@@ -875,7 +887,7 @@ function publicSession(row: any, hasChildren = threads.snapshot().some(thread =>
     activeTool: [...(live?.activeTools.values() ?? [])].at(-1) ?? null,
     provider: String(row.current_provider).startsWith("anthropic") ? "anthropic" : "openai",
     createdAt: row.created_at, updatedAt: row.updated_at, revision: row.revision,
-    idleUnread: Boolean(row.idle_unread), lastError: row.last_error ?? null,
+    idleUnread: Boolean(row.idle_unread), lastError: row.last_error ?? null, lastErrorId: row.last_error_id ?? null,
     steeringQueued: pending.filter(message => message.delivery === "steer").length,
     followUpQueued: pending.filter(message => message.delivery === "queue").length,
     queuedMessages, archivedAt: row.archived_at,
@@ -1294,7 +1306,7 @@ async function insertThread(id: string, name: string, destination: ThreadDestina
 }
 const unsubscribeThreads = threads.subscribe(change => {
   if ("event" in change) handlePiEvent(change.threadId, change.event);
-  else { ensureThreadView(db, change.threadId); signalSync(); }
+  else { ensureThreadView(db, change.threadId); const thread = threads.get(change.threadId); if (thread) threadRow(thread); signalSync(); }
 });
 for (const thread of threads.snapshot()) ensureThreadView(db, thread.id);
 await inlineImages.start();
@@ -1596,6 +1608,11 @@ const server = Bun.serve({
 
         return compressedJson(req, response);
       } catch (cause: any) { return error(cause?.message ?? "Could not synchronize", 400); }
+    }
+    const errorDismissal = API.dismissError.match(req.method, url.pathname);
+    if (errorDismissal) {
+      if (dismissError(db, errorDismissal.errorId)) signalSync();
+      return json({ ok: true });
     }
     if (API.sessions.match(req.method, url.pathname)) {
       void refreshPeers();
