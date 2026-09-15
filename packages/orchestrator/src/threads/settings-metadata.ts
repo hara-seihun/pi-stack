@@ -8,7 +8,8 @@ const models = builtinProviders().filter(provider => provider.id === "openai-cod
 
 export function threadSettingsMetadata(settings: ThreadSettings) {
   const separator = settings.model.indexOf("/");
-  const provider = settings.model.slice(0, separator), id = settings.model.slice(separator + 1);
+  const provider = settings.model.slice(0, separator).replace(/^(openai-codex|anthropic)-\d+$/, "$1");
+  const id = settings.model.slice(separator + 1);
   const model = models.find(model => model.provider === provider && model.id === id);
   return {
     model: model ?? { provider, id },

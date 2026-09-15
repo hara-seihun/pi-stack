@@ -37,6 +37,13 @@ test.each([false, true])("cold settings read/write needs neither a workspace nor
   expect(admit).not.toHaveBeenCalled();
 });
 
+test("a saved pooled account selects the same canonical option as the model list", () => {
+  const settings = threadSettingsMetadata({ model: "openai-codex-8/gpt-6-astra", thinkingLevel: "high", speed: "standard" });
+  expect(settings.model).toMatchObject({ provider: "openai-codex", id: "gpt-6-astra" });
+  expect(settings.models).toContainEqual(settings.model);
+  expect(settings.speedModes).toEqual(["standard", "priority"]);
+});
+
 test("unlisted saved models remain visible without replacing the accepted selection", () => {
   expect(threadSettingsMetadata({ model: "private/local-model", thinkingLevel: "medium", speed: "standard" })).toMatchObject({
     model: { provider: "private", id: "local-model" }, thinkingLevel: "medium", thinkingLevels: ["medium"],
