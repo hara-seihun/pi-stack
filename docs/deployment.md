@@ -22,6 +22,22 @@ Failure restores recorded service and fleet admission states. `deploy/publicatio
 
 The worker invokes each host's release wrapper, which calls [`deploy/prepare`](../deploy/prepare) and then `deploy/host`. `deploy/prepare` installs checkout dependencies, builds Orchestrator and Remote, and installs the runtime and transcription trees under the checkout lock but without the deployment deadline; every step is receipt-cached and touches no running service. `deploy/host` reads `/etc/pi-stack/host.json`, refuses a dirty checkout, holds one lock on the checkout, and must finish inside 50 seconds. Its own preparation then reuses the prepared results, so the deadline covers publishing, activation and smoke checks. On September 15, `PUB-9beb82e8ca4b412da6a4eebd` failed on Converge because a fresh build inside `deploy/host` consumed the whole budget; even a fully cached Converge release took 36 to 44 seconds before this split. Every artifact it publishes carries the commit in a `.pi-stack-commit` file; the deployed commit on a host is whatever `/srv/pi/pi-remote/.pi-stack-commit` says.
 
+## Publication requests from another host
+
+A host without an installed publisher can send a request through the existing GMKtec Actions runner. Push the source ref and request ref atomically. The request ref names an explicit release request, unlike an ordinary branch push:
+
+```bash
+sha=$(git rev-parse HEAD)
+request="PUB-${sha:0:24}"
+git push --atomic origin \
+  "$sha:refs/heads/pi-stack-publications/$request" \
+  "$sha:refs/heads/pi-stack-publication-requests/$request"
+```
+
+[The request workflow](../.github/workflows/publication-request.yml) validates the request and calls the installed publisher's `enqueue` operation as its Kenan service identity. The runner must have that sudo grant. It does not install a publisher, change credentials, run deployments or resume queues. The publisher verifies the immutable source ref and deduplicates source custody before writing its receipt.
+
+A successful push proves transport submission only. The Actions log must contain the publisher's JSON acknowledgement naming the source SHA, request, owner and receipt before custody has transferred. A denied runner grant or unavailable publisher is a failed handoff, not a queued release. Both refs remain source evidence until terminal publication acceptance. The existing publisher owns checks, both host deployments and failure repair. A rerun uses the same request and source, never another publication.
+
 ## Publication progress and repair
 
 Enqueue syncs the request and a `wake` marker before acknowledging custody. It starts the worker immediately; the systemd path closes the filesystem wakeup path. The worker re-reads the queue after every request instead of stopping after one item. Both timers run every ten seconds to recover missed wakeups. No general fleet admission is involved.

@@ -21,6 +21,8 @@ jobs:
           CI_GITHUB_TOKEN: ${{ github.token }}
         run: |
           set -euo pipefail
+          export PATH="/run/wrappers/bin:/run/current-system/sw/bin:$PATH"
+          command -v curl
           repository="$PI_STACK_CI_CACHE/repository"
           origin="$GITHUB_SERVER_URL/$GITHUB_REPOSITORY.git"
           askpass=$(mktemp)
