@@ -4,7 +4,7 @@
 // the other instead of silently reading undefined at runtime.
 
 import type { ThreadState } from "pi-orchestrator/api";
-import type { InlineImage, InlineImageSnapshot } from "./inline-image-contract";
+import type { InlineImage, InlineImageSnapshot } from "./inline-image-contract.js";
 export type { InlineImage, InlineImageSnapshot };
 
 export interface EnvironmentEndpoint {

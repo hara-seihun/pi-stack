@@ -1,5 +1,5 @@
 import type { Result, SettingsOverrides, Thread, ThreadApi } from "pi-orchestrator/api";
-import { BASH_TIMEOUT_OPTIONS } from "./protocol";
+import { BASH_TIMEOUT_OPTIONS } from "./protocol.js";
 
 export async function updateThreadSettings(owner: Pick<ThreadApi, "control">, thread: Thread, body: unknown): Promise<Result<Thread>> {
   const invalid = (message: string): Result<Thread> => ({ ok: false, error: { code: "invalid_request", message } });

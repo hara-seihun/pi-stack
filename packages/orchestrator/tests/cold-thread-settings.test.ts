@@ -2,6 +2,7 @@ import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, expect, test, vi } from "vitest";
+import type { Thread, ThreadApi } from "../src/api.js";
 import { ThreadService } from "../src/threads/service.js";
 import { threadSettingsMetadata } from "../src/threads/settings-metadata.js";
 import { updateThreadSettings } from "../../../apps/remote/server/thread-settings.js";
@@ -56,8 +57,13 @@ test("unlisted saved models remain selectable without replacing the accepted sel
 });
 
 test("a failed second write identifies the settings already saved", async () => {
-  const thread = { id: "cold", metadata: { retain: true } } as Parameters<typeof updateThreadSettings>[1];
-  const control = vi.fn().mockResolvedValueOnce({ ok: true, value: thread })
+  const thread: Thread = {
+    id: "cold", parentId: null, title: "Cold", cwd: "/missing/checkout", sessionFile: "/missing/native.jsonl",
+    settings: { model: "openai-codex/gpt-6-astra", thinkingLevel: "high", speed: "standard" },
+    admission: "force", state: "idle", revision: 1, createdAt: 0, updatedAt: 0, pendingMessages: 0,
+    metadata: { retain: true },
+  };
+  const control = vi.fn<ThreadApi["control"]>().mockResolvedValueOnce({ ok: true, value: thread })
     .mockResolvedValueOnce({ ok: false, error: { code: "unavailable", message: "Controller handed off" } });
   expect(await updateThreadSettings({ control }, thread, { thinkingLevel: "high", bashTimeoutSeconds: 300 })).toMatchObject({
     ok: false, error: { code: "unavailable", message: expect.stringContaining("settings were saved, but the bash timeout update was not confirmed") },
