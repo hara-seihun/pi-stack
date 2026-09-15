@@ -4,7 +4,8 @@ import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 import type { Store } from "../store.js";
 import type { SharedOAuthAuth } from "../auth/shared-oauth.js";
 import { chooseInteractiveAccount } from "../auth/account-selection.js";
-import { isRateLimitError, isRejectedTokenError, rateLimitCooldownMs } from "../provider-errors.js";
+import { isRateLimitError, rateLimitCooldownMs } from "../provider-errors.js";
+import { isCodexNotFoundError, repairProviderCredential } from "../auth/provider-rejection.js";
 import { recordModelUsage } from "./usage-logger.js";
 
 export const PROVIDER_OPERATION_EVENT = "pi-stack:provider-operation";
@@ -35,6 +36,7 @@ export async function runProviderOperation(
   while (!signal.aborted && excluded.size < 3) {
     const lease = store.activeLeases(account).some(entry => entry.id === parentLease) ? undefined : `operation:${randomUUID()}`;
     let timer: ReturnType<typeof setInterval> | undefined;
+    let repairDetail: string | undefined;
     try {
       if (lease) {
         store.createLease(lease, account, runId ? "fleet" : "interactive", runId);
@@ -44,9 +46,16 @@ export async function runProviderOperation(
       for (let attempt = 0; attempt < 2 && !signal.aborted; attempt++) {
         const credential = await auth.resolve(account, signal);
         last = await request.run(model, { ...credential, signal });
+        if (!last.ok && repairDetail) last = { ...last, error: `${repairDetail}; after shared OAuth repair: ${last.error}` };
         if (last.usage) recordModelUsage(store, account, model.id, last.usage, request.sessionId);
-        if (last.ok || !isRejectedTokenError(last.error) || attempt !== 0 || !credential.apiKey) break;
-        await auth.refreshRejected(account, credential.apiKey, signal);
+        if (last.ok || attempt !== 0 || !credential.apiKey) break;
+        const repair = await repairProviderCredential(auth, account, last.error,
+          family === "openai-codex" && !last.usage?.totalTokens && isCodexNotFoundError(last.error, model), signal, credential.apiKey);
+        if (repair.outcome !== "repaired") {
+          last = { ...last, error: repair.detail };
+          break;
+        }
+        repairDetail = repair.detail;
       }
       if (signal.aborted) return { ok: false, error: signal.reason?.message ?? "Provider operation aborted", usage: last.usage };
       if (last.ok) {
@@ -59,7 +68,8 @@ export async function runProviderOperation(
       store.setCooldown(account, Date.now() + rateLimitCooldownMs(last.error));
       if (process.env.PI_ORCHESTRATOR_ASSIGNED === "1") return last;
     } catch (error) {
-      return { ok: false, error: error instanceof Error ? error.message : String(error) };
+      const detail = error instanceof Error ? error.message : String(error);
+      return { ok: false, error: repairDetail ? `${repairDetail}; after shared OAuth repair: ${detail}` : detail };
     } finally {
       if (timer) clearInterval(timer);
       if (lease) store.endLease(lease);

@@ -41,7 +41,7 @@ function runPublication(root, bin, operation, extraEnvironment = {}) {
       ...process.env,
       PATH: `${bin}:${process.env.PATH}`,
       PI_STACK_PUBLICATION_STATE: root,
-      PI_STACK_PUBLICATION_ALERT_COMMAND: join(bin, "alert"),
+      PI_STACK_PUBLICATION_ALERT_INBOX: join(root, "inbox"),
       PI_STACK_PUBLICATION_COMMAND: join(bin, "publication-submit"),
       ...extraEnvironment,
     },
@@ -57,7 +57,6 @@ if [ "$1" = "--user" ] && [ "$2" = "show" ]; then
   printf '%s\\n' "\${SYSTEMCTL_ACTIVE_STATE:-inactive}"
 fi
 `);
-  executable(join(bin, "alert"), "#!/bin/sh\nprintf '%s\\n' /fixture/alert.md\n");
   executable(join(bin, "agent-workspace"), `#!/bin/sh
 printf '%s\\n' "$*" >> "$AGENT_WORKSPACE_LOG"
 if [ "$1" = "create" ]; then

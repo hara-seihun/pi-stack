@@ -5,6 +5,7 @@ import { dirname, join } from "node:path";
 import type { DatabaseSync } from "node:sqlite";
 import { openSqlite } from "../sqlite.js";
 import { isRunContext } from "../isolated-context-contract.js";
+import { isModelConfigurationError } from "../provider-errors.js";
 import { resolveThreadSettings } from "./settings.js";
 import { formatThreadMessage, serializeThreadNotification } from "./message-format.js";
 import { isThreadState, resolveDelivery } from "./contracts.js";
@@ -157,7 +158,13 @@ export class ThreadService implements ThreadApi {
   }
   private wake(id: string): void {
     if (!this.started || this.closed || this.suspended) return;
-    void this.serial(id, () => this.drain(id)).catch(error => {
+    void this.serial(id, async () => {
+      try { await this.drain(id); }
+      catch (error) {
+        if (!this.closed && !this.suspended && !this.runtimes.has(id) && isModelConfigurationError(errorText(error))) await this.rejectModelStartup(id, errorText(error));
+        else throw error;
+      }
+    }).catch(error => {
       if (this.closed || this.suspended || !this.row(id)) return;
       this.db.prepare("UPDATE thread SET metadata=json_set(metadata,'$.executionError',?) WHERE id=?").run(errorText(error), id);
       this.changed(id);
@@ -364,7 +371,19 @@ export class ThreadService implements ThreadApi {
     }
     if (input.action === "settings") {
       const current = this.get(input.threadId)!, settings = resolveThreadSettings(input.settings, current.settings); if (!settings.ok) return settings;
-      this.db.prepare("UPDATE thread SET settings=? WHERE id=?").run(JSON.stringify(settings.value), input.threadId);
+      this.transaction(() => {
+        this.db.prepare("UPDATE thread SET settings=? WHERE id=?").run(JSON.stringify(settings.value), input.threadId);
+        if (input.settings.model !== undefined) {
+          const queued = this.db.prepare("SELECT id,settings FROM thread_work WHERE thread_id=? AND status='queued' AND execution_id IS NULL").all(input.threadId) as Json[];
+          for (const work of queued) {
+            const accepted = JSON.parse(work.settings) as ThreadSettings;
+            if (resolveThreadSettings({ model: accepted.model }).ok) continue;
+            const repair = { workId: work.id, previousModel: accepted.model, model: settings.value.model, time: Date.now() };
+            this.db.prepare("UPDATE thread_work SET settings=? WHERE id=?").run(JSON.stringify({ ...accepted, model: settings.value.model }), work.id);
+            this.db.prepare("UPDATE thread SET metadata=json_insert(json_set(metadata,'$.modelSettingsRepairs',json(COALESCE(json_extract(metadata,'$.modelSettingsRepairs'),'[]'))),'$.modelSettingsRepairs[#]',json(?)) WHERE id=?").run(JSON.stringify(repair), input.threadId);
+          }
+        }
+      });
       this.changed(input.threadId);
       const runtime = this.runtimes.get(input.threadId), execution = this.execution(input.threadId);
       const activeSettings: ThreadSettings | undefined = execution ? JSON.parse(execution.settings) : runtime?.settings;
@@ -560,7 +579,14 @@ export class ThreadService implements ThreadApi {
         }
       }
       return runtime;
-    } catch (error) { if (!this.suspended) { this.runtimes.delete(id); if (runtime.session && !runtime.busy) await runtime.session.close(); } throw error; }
+    } catch (error) {
+      if (!this.suspended) {
+        this.runtimes.delete(id);
+        try { if (runtime.session && !runtime.busy) await runtime.session.close(); }
+        finally { await recoveredAdmission?.release(); }
+      }
+      throw error;
+    }
   }
   private output(id: string, runtime: Runtime, event: PiEvent): void {
     if (this.runtimes.get(id) !== runtime || this.closed || this.suspended) return;
@@ -683,18 +709,34 @@ export class ThreadService implements ThreadApi {
       } else throw error;
     }
   }
-  private async finish(id: string, runtime: Runtime | undefined, outcome: WorkOutcome, finalMessage: Json | null): Promise<void> {
+  private async rejectModelStartup(id: string, error: string): Promise<void> {
+    this.transaction(() => {
+      this.db.prepare("UPDATE thread SET held=1 WHERE id=?").run(id);
+      if (this.execution(id)) return;
+      const work = this.db.prepare("SELECT id,settings FROM thread_work WHERE thread_id=? AND status='queued' ORDER BY front DESC,ordinal LIMIT 1").get(id) as Json | undefined;
+      if (!work) return;
+      const executionId = randomUUID();
+      this.db.prepare("INSERT INTO thread_execution(id,thread_id,work_id,settings,state,created_at) VALUES(?,?,?,?,'running',?)").run(executionId, id, work.id, work.settings, Date.now());
+      this.db.prepare("UPDATE thread_work SET status='dispatching',execution_id=? WHERE id=?").run(executionId, work.id);
+    });
+    await this.finish(id, undefined, "failed", null, error);
+    const halted = await this.halt(id);
+    if (this.closed || this.suspended) return;
+    this.db.prepare("UPDATE thread SET metadata=json_set(metadata,'$.executionError',?) WHERE id=?").run(halted.ok ? error : `${error}; ${halted.error.message}`, id);
+    this.changed(id);
+  }
+  private async finish(id: string, runtime: Runtime | undefined, outcome: WorkOutcome, finalMessage: Json | null, error?: string): Promise<void> {
     if (this.suspended || this.closed) return;
     const execution = this.execution(id); if (!execution || runtime && runtime.executionId !== execution.id) { if (runtime) runtime.busy = false; return; }
     const thread = this.get(id)!, workIds = (this.db.prepare("SELECT id FROM thread_work WHERE execution_id=? AND status!='done'").all(execution.id) as { id: string }[]).map(work => work.id);
     this.transaction(() => {
-      this.db.prepare("UPDATE thread_execution SET state='settled',outcome=?,final_message=?,ended_at=?,settlement_seq=(SELECT COALESCE(MAX(settlement_seq),0)+1 FROM thread_execution) WHERE id=? AND state='running'").run(outcome, JSON.stringify(finalMessage), Date.now(), execution.id);
-      this.db.prepare("UPDATE thread_work SET status='done',outcome=?,final_message=? WHERE execution_id=? AND status!='done'").run(outcome, JSON.stringify(finalMessage), execution.id);
+      this.db.prepare("UPDATE thread_execution SET state='settled',outcome=?,final_message=?,error=?,ended_at=?,settlement_seq=(SELECT COALESCE(MAX(settlement_seq),0)+1 FROM thread_execution) WHERE id=? AND state='running'").run(outcome, JSON.stringify(finalMessage), error ?? null, Date.now(), execution.id);
+      this.db.prepare("UPDATE thread_work SET status='done',outcome=?,final_message=?,error=? WHERE execution_id=? AND status!='done'").run(outcome, JSON.stringify(finalMessage), error ?? null, execution.id);
       this.db.prepare("UPDATE thread SET state=CASE WHEN held=1 THEN 'stopped' WHEN EXISTS(SELECT 1 FROM thread_work w WHERE w.thread_id=thread.id AND w.status!='done') THEN 'running' ELSE 'idle' END,revision=revision+1,updated_at=? WHERE id=?").run(Date.now(), id);
       if (thread.parentId) {
         const receipt = `thread-result:${execution.id}`;
         if (!this.db.prepare("SELECT 1 FROM thread_work WHERE id=?").get(receipt)) this.insertMessage(receipt, {
-          requestId: receipt, threadId: thread.parentId, senderId: id, text: serializeThreadNotification({ type: "thread_idle", threadId: id, workId: execution.work_id, executionId: execution.id, outcome, finalMessage }),
+          requestId: receipt, threadId: thread.parentId, senderId: id, text: serializeThreadNotification({ type: "thread_idle", threadId: id, workId: execution.work_id, executionId: execution.id, outcome, finalMessage, ...(error ? { error } : {}) }),
           delivery: "steer", source: "notification", replyTo: execution.work_id,
         }, this.get(thread.parentId)?.settings ?? thread.settings);
       }

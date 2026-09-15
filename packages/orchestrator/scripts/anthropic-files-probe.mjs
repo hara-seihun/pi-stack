@@ -7,7 +7,8 @@ import { builtinProviders } from "@earendil-works/pi-ai/providers/all";
 import { withAnthropicFiles, anthropicFilesHeaders } from "../dist/auth/anthropic-files-provider.js";
 import { aliasProvider } from "../dist/auth/provider-alias.js";
 import { providerOAuth, defaultSharedAuthPath } from "../dist/auth/shared-oauth.js";
-import { defaultLedgerPath, withCustomModels } from "../dist/extension/routing.js";
+import { defaultLedgerPath } from "../dist/extension/routing.js";
+import { withCustomModels } from "../dist/models.js";
 
 const { values } = parseArgs({ options: {
   account: { type: "string" }, image: { type: "string" }, prompt: { type: "string" },

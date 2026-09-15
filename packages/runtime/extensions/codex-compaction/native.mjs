@@ -95,7 +95,7 @@ export function compactionPayload(payload) {
 
 /** Observes Pi's SSE bytes without replacing its HTTP or response parser. */
 export function compactionObserver(onEvent = () => {}, onBytes = () => {}) {
-  const decoder = new TextDecoder();
+  let decoder = new TextDecoder();
   let buffer = "", error, terminal = false, item;
   const accept = candidate => {
     if (candidate?.type !== "compaction") return;
@@ -129,6 +129,11 @@ export function compactionObserver(onEvent = () => {}, onBytes = () => {}) {
   };
   return {
     wrap(response) {
+      decoder = new TextDecoder();
+      buffer = "";
+      error = undefined;
+      terminal = false;
+      item = undefined;
       if (!response.ok || !response.body) return response;
       const body = response.body.pipeThrough(new TransformStream({
         transform(bytes, controller) { feed(bytes); controller.enqueue(bytes); },

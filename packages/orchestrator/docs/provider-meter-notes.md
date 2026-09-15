@@ -90,5 +90,46 @@ tests).
   `User-Agent: node` is refused the same way; send a real client name.
   Expect any new node client of a chatgpt.com backend route to need both.
 
+### Codex credential rejection reported as 404
+
+On September 15, 2026, `openai-codex-11` served Astra through about
+17:08 UTC, then began returning `Not Found` at 17:11:32 UTC. Twelve failed
+inference attempts recorded zero tokens. Native diagnostics showed a WebSocket
+failure followed by SSE failure. The same account's fixed usage endpoint also
+returned HTTP 404, while another account remained healthy. The rejected token
+had not reached its stored expiry.
+
+`pi-orchestrator account refresh openai-codex-11` rotated the shared credential
+at 17:20:47 UTC. An immediate request through Node HTTPS to the same usage
+endpoint returned HTTP 200 for the same account identity, with Pro, Astra
+availability and 72% weekly use. The original meter retained only the HTTP
+status, so there is no known rejection-body signature from this incident.
+
+The fixed `https://chatgpt.com/backend-api/codex/usage` route now treats 401
+and 404 as grounds for one `SharedOAuthAuth.refreshRejected` operation and
+one repeat poll. Other statuses do not trigger refresh. Failure reports retain
+the initial status, request ID and a bounded response excerpt alongside the
+repair or second-request error. Failed attempts still obey the sampling interval.
+
+Interactive inference only considers bare `Not Found` from the official Codex
+endpoint with zero reported tokens. Native compaction applies the same endpoint
+check. The ordinary-user broker owns a fixed Codex inference route and can inspect
+the HTTP status directly. These consumers first check the usage endpoint with
+the token used by the failed request. A 401 or 404 there corroborates credential
+rejection. A healthy usage response, another status or a failed probe leaves the
+inference failure intact without refreshing or replaying it. Unknown models,
+custom endpoints and missing response references are not credential failures.
+
+Each poll, broker request and compaction operation permits one repair. Interactive
+sessions permit one repair per account until a request succeeds. Native
+provider streams capture the token actually submitted, so a concurrent meter
+refresh makes the shared lock return the replacement rather than rotate it again.
+Interactive diagnostics persist as `credential-repair` session entries. A
+successful repair queues the existing same-account continuation only after
+settlement; a failed repair never queues another turn. The broker preserves the
+upstream error body and request ID, and returns URL-encoded repair diagnostics
+in `x-pi-credential-repair`. Neither path changes account affinity or spends a
+usage reset.
+
 Randomized/early usage resets and their exploitation statistics are covered
 in [openai-reset-statistics.md](openai-reset-statistics.md).

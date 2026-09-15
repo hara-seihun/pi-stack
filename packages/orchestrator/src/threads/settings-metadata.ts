@@ -1,10 +1,8 @@
 import { getSupportedThinkingLevels } from "@earendil-works/pi-ai";
-import { builtinProviders } from "@earendil-works/pi-ai/providers/all";
-import { withCustomModels } from "../extension/routing.js";
+import { nativeModels } from "../models.js";
 import { ORCHESTRATOR_CATALOG } from "../catalog.js";
 import type { ThreadSettings } from "./contracts.js";
 
-const nativeModels = builtinProviders().flatMap(provider => [...withCustomModels(provider).getModels()]);
 const models = nativeModels.filter(model => ORCHESTRATOR_CATALOG.models.some(candidate =>
   candidate.provider === model.provider && candidate.model === model.id));
 

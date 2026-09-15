@@ -6,7 +6,7 @@ import { basename, dirname, extname, isAbsolute, join, resolve } from "node:path
 import { configuredFleetThreadUrl } from "./thread-owners";
 import { projectThreadNotifications } from "./thread-notifications";
 import { threadSettingsMetadata, modelBrokerUrl, createWorkspaceAdmission, ORCHESTRATOR_CATALOG, OrchestratorClient, CompletionClient, type CompletionInput, catalogAgentType, createSharedImageGenerationService, ThreadService, ThreadDirectory, createThreadClient, importRemoteThreads, createSharedPiSessionOpener, threadHttp, type ThreadInspection, type Thread, type ThreadMessage, type PiEvent, type Result, type SharedImageGenerationService, type PlanUsageSnapshot } from "pi-orchestrator/api";
-import { createLiveProjection, settleLiveProjection, restoreLiveProjection, threadActivity, type LiveProjection } from "./live-projection";
+import { createLiveProjection, settleLiveProjection, restoreLiveProjection, runningChildParents, threadActivity, type LiveProjection } from "./live-projection";
 import { InlineImages } from "./inline-images";
 import { planCards } from "./catalog-presentation";
 import { updateThreadSettings } from "./thread-settings";
@@ -867,13 +867,15 @@ function supervisorState(): SupervisorState {
 }
 
 function publicSessions(rows: any[]): Session[] {
-  const parents = new Set(threads.snapshot().map(thread => thread.parentId));
-  return rows.map(row => publicSession(row, parents.has(row.id) || Boolean(peerChildren.get(row.id))));
+  const local = threads.snapshot();
+  const parents = new Set(local.map(thread => thread.parentId));
+  const runningParents = runningChildParents(local, peerThreads.values());
+  return rows.map(row => publicSession(row, parents.has(row.id) || Boolean(peerChildren.get(row.id)), runningParents.has(row.id)));
 }
-function sessionActivity(row: any): Session["activity"] {
-  return threadActivity(row.state, liveProjections.get(row.id));
-}
-function publicSession(row: any, hasChildren = threads.snapshot().some(thread => thread.parentId === row.id) || Boolean(peerChildren.get(row.id))): Session {
+function publicSession(row: any,
+  hasChildren = threads.snapshot().some(thread => thread.parentId === row.id) || Boolean(peerChildren.get(row.id)),
+  hasRunningChildren = runningChildParents(threads.snapshot(), peerThreads.values()).has(row.id),
+): Session {
   const pending = threads.get(row.id) ? threads.pending(row.id) : peerInspections.get(row.id)?.pending ?? [];
   const live = liveProjections.get(row.id);
   const queuedMessages: QueuedMessage[] = pending.filter(message => !message.insertedAt).map(message => ({
@@ -892,7 +894,7 @@ function publicSession(row: any, hasChildren = threads.snapshot().some(thread =>
     origin: threads.get(row.id) ? "person" : "fleet",
     model: row.settings.model, name: row.name, cwd: row.cwd,
     workspaceName: workspaces.get(row.workspace_id)?.name ?? row.cwd,
-    environment: ENVIRONMENT_ID, state: row.state, activity: sessionActivity(row),
+    environment: ENVIRONMENT_ID, state: row.state, activity: threadActivity(row.state, live, hasRunningChildren),
     activeTool: [...(live?.activeTools.values() ?? [])].at(-1) ?? null,
     provider: String(row.current_provider).startsWith("anthropic") ? "anthropic" : "openai",
     createdAt: row.created_at, updatedAt: row.updated_at, revision: row.revision,
