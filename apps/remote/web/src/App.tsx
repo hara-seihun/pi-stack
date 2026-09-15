@@ -4,7 +4,7 @@ import { SortableContext, arrayMove, sortableKeyboardCoordinates, useSortable, v
 import { CSS } from "@dnd-kit/utilities";
 import { AnimatePresence, motion } from "motion/react";
 import { API } from "../../server/api";
-import { BASH_TIMEOUT_OPTIONS, type GovernorProvider, type GovernorState, type InlineImageSnapshot, type ThreadStart } from "../../server/protocol";
+import type { GovernorProvider, GovernorState, InlineImageSnapshot, ThreadStart } from "../../server/protocol";
 import { deleteCachedContext, readCachedContext, writeCachedContext } from "./context-cache";
 import { api, piFetch, registerUnlockHandler, syncRequest } from "./client";
 import { fetchPersonChooser } from "./native";
@@ -23,11 +23,12 @@ import { createSyncLoop, type SyncLoop } from "./sync-loop";
 import { updateDocument } from "./sync";
 import { threadsInOrder } from "./thread-order";
 import { activityColor, activityLabel, composerAction, conversationThreads, orchestratorThreads, working } from "./thread-state";
-import { ChildThreadList, OrchestratorThreadList } from "./thread-views";
+import { OrchestratorThreadList } from "./thread-views";
+import { SettingsPanel } from "./thread-settings";
 import { requestStop, submitThreadControl, ThreadStopDialog } from "./thread-controls";
 import { AppUpdateControl } from "./app-update";
 import { ThreadStartMenu } from "./thread-start-menu";
-import type { Attachment, ContextEntry, Dashboard, Governor, GovernorControls, MachineActionState, PlanCard, QueuedMessage, Session, SlashCommand, SyncRequest, ThreadSettings } from "./types";
+import type { Attachment, ContextEntry, Dashboard, Governor, GovernorControls, MachineActionState, PlanCard, QueuedMessage, Session, SlashCommand, SyncRequest } from "./types";
 
 // Everything the server owns arrives through one long poll and is replaced
 // wholesale per section; the client never patches a server-owned value from a
@@ -173,85 +174,6 @@ function SortableThreadRow({ session, ...props }: Omit<React.ComponentProps<type
   return <div ref={setNodeRef} className={isDragging ? "sortable-thread dragging" : "sortable-thread"} style={{ transform: CSS.Transform.toString(transform), transition }} {...attributes} {...listeners}>
     <ThreadRow session={session} {...props} />
   </div>;
-}
-
-function settingLabel(value: string) {
-  if (value === "xhigh") return "Extra high";
-  return value ? value[0].toUpperCase() + value.slice(1).replaceAll("_", " ") : "";
-}
-
-function bashTimeoutLabel(seconds: number) {
-  if (seconds === 60) return "60 seconds";
-  if (seconds === 300) return "5 minutes";
-  return "Half an hour";
-}
-
-function SettingsPanel({ session, sessions, open, onClose, onOpenThread }: { session: Session | null; sessions: Session[]; open: boolean; onClose(): void; onOpenThread(session: Session): void }) {
-  const childrenVersion = sessions.filter(child => child.parentId === session?.id).map(child => `${child.id}:${child.revision}`).join(",");
-  const [settings, setSettings] = useState<ThreadSettings | null>(null);
-  const [children, setChildren] = useState<Session[]>([]);
-  const [childrenLoading, setChildrenLoading] = useState(false);
-  const [childrenFailure, setChildrenFailure] = useState("");
-  const [saving, setSaving] = useState("");
-  const [failure, setFailure] = useState("");
-  const editable = Boolean(session) && !working(session) && session?.queuedMessages.length === 0;
-  useEffect(() => {
-    if (!open || !session) return;
-    let cancelled = false;
-    setSettings(null);
-    setSaving("");
-    setFailure("");
-    api(API.sessionSettings.method, API.sessionSettings.path({ sessionId: session.id }))
-      .then((result) => { if (!cancelled) setSettings(result.settings); })
-      .catch((error) => { if (!cancelled) setFailure(error?.message || String(error)); });
-    return () => { cancelled = true; };
-  }, [open, session?.id]);
-  useEffect(() => {
-    if (!open || !session) return;
-    let cancelled = false;
-    setChildren(previous => previous.filter(child => child.parentId === session.id));
-    setChildrenLoading(true);
-    setChildrenFailure("");
-    api(API.sessionChildren.method, API.sessionChildren.path({ sessionId: session.id }))
-      .then((result) => { if (!cancelled) setChildren(result.children ?? []); })
-      .catch((error) => { if (!cancelled) setChildrenFailure(error?.message || String(error)); })
-      .finally(() => { if (!cancelled) setChildrenLoading(false); });
-    return () => { cancelled = true; };
-  }, [open, session?.id, childrenVersion]);
-  const update = async (field: string, body: Record<string, string | number>) => {
-    if (!session || saving) return;
-    setSaving(field);
-    setFailure("");
-    try {
-      const result = await api(API.updateSessionSettings.method, API.updateSessionSettings.path({ sessionId: session.id }), body);
-      setSettings(result.settings);
-    } catch (error) { setFailure(error?.message || String(error)); }
-    finally { setSaving(""); }
-  };
-  return <><AnimatePresence>{open && <motion.div key="settings-scrim" className="scrim settings-scrim" initial={{ opacity: 0 }} animate={{ opacity: 1 }} exit={{ opacity: 0 }} transition={{ duration: 0.18 }} onClick={onClose} />}</AnimatePresence>
-    <AnimatePresence>{open && <motion.aside key="settings-panel" className="settings" aria-label="Thread settings" initial={{ x: "100%" }} animate={{ x: 0 }} exit={{ x: "100%" }} transition={{ type: "spring", stiffness: 520, damping: 42, mass: 0.9 }}>
-      <header className="settings-header"><div className="settings-title"><span>Thread settings</span><h2 title={session?.name}>{session?.name || "Thread"}</h2></div><button type="button" className="settings-close" aria-label="Close thread settings" onClick={onClose}>×</button></header>
-      <div className="settings-body"><ChildThreadList children={children} loading={childrenLoading} error={childrenFailure} onOpen={onOpenThread} /><DismissibleError className="setting-unavailable" message={failure} />{!settings ? !failure && <div className="settings-loading" aria-label="Loading thread settings"><span /><span /><span /></div> : <>
-        {!editable && <p className="setting-unavailable">Settings can be changed when the thread is idle.</p>}
-        <section className="setting-card">
-          <div className="setting-heading"><div><h3>Model</h3><p>The model used for new messages</p></div>{saving === "model" && <span className="setting-saving">Saving</span>}</div>
-          <div className="setting-select"><select aria-label="Model" value={`${settings.model?.provider}\0${settings.model?.id}`} disabled={Boolean(saving) || !editable} onChange={(event) => { const [modelProvider, modelId] = event.target.value.split("\0"); void update("model", { modelProvider, modelId }); }}>{settings.models.map((model) => <option key={`${model.provider}:${model.id}`} value={`${model.provider}\0${model.id}`}>{model.name || model.id} · {model.provider}</option>)}</select><span aria-hidden="true">⌄</span></div>
-        </section>
-        <section className="setting-card">
-          <div className="setting-heading"><div><h3>Thinking</h3><p>How much reasoning the model can use</p></div>{saving === "thinking" && <span className="setting-saving">Saving</span>}</div>
-          <div className="setting-options thinking-options" role="radiogroup" aria-label="Thinking level">{settings.thinkingLevels.map((level) => <button key={level} type="button" role="radio" aria-checked={settings.thinkingLevel === level} className={settings.thinkingLevel === level ? "selected" : ""} disabled={Boolean(saving) || !editable} onClick={() => void update("thinking", { thinkingLevel: level })}>{settingLabel(level)}</button>)}</div>
-        </section>
-        <section className="setting-card">
-          <div className="setting-heading"><div><h3>Speed</h3><p>Request scheduling priority</p></div>{saving === "speed" && <span className="setting-saving">Saving</span>}</div>
-          {settings.speedModes.length ? <div className="setting-options speed-options" role="radiogroup" aria-label="Speed mode">{settings.speedModes.map((mode) => <button key={mode} type="button" role="radio" aria-checked={settings.speedMode === mode} className={settings.speedMode === mode ? "selected" : ""} disabled={Boolean(saving) || !editable} onClick={() => void update("speed", { speedMode: mode })}>{settingLabel(mode)}</button>)}</div> : <p className="setting-unavailable">This model does not offer speed controls.</p>}
-        </section>
-        <section className="setting-card">
-          <div className="setting-heading"><div><h3>Bash timeout</h3><p>Maximum time each bash command may run</p></div>{saving === "bash-timeout" && <span className="setting-saving">Saving</span>}</div>
-          <div className="setting-select"><select aria-label="Bash timeout" value={settings.bashTimeoutSeconds} disabled={Boolean(saving) || !editable} onChange={(event) => void update("bash-timeout", { bashTimeoutSeconds: Number(event.target.value) })}>{BASH_TIMEOUT_OPTIONS.map((seconds) => <option key={seconds} value={seconds}>{bashTimeoutLabel(seconds)}</option>)}</select><span aria-hidden="true">⌄</span></div>
-        </section>
-      </>}</div>
-    </motion.aside>}</AnimatePresence>
-  </>;
 }
 
 export default function App() {
@@ -674,7 +596,7 @@ function RemoteApp() {
       </section>}
     </main>
     {stopTarget && <ThreadStopDialog session={stopTarget} pending={pending} error={controlError?.sessionId === stopTarget.id ? controlError.message : ""} onStop={descendants => void controlThread(stopTarget.id, "stop", descendants)} onClose={() => setStopTarget(null)} />}
-    <SettingsPanel session={selected} sessions={knownSessions} open={state.settingsOpen} onClose={() => patch({ settingsOpen: false })} onOpenThread={session => void selectThread(session.id, true, session, "orchestrator")} />
+    {selected && <SettingsPanel key={selected.id} session={selected} sessions={knownSessions} open={state.settingsOpen} onClose={() => patch({ settingsOpen: false })} onOpenThread={session => void selectThread(session.id, true, session, "orchestrator")} />}
     {pasteSessionId && <PasteTextDialog name={pasteName} content={pasteContent} onNameChange={setPasteName} onContentChange={setPasteContent} onAttach={file => uploadFile(file, pasteSessionId)} onClose={() => setPasteSessionId(null)} />}
   </div>;
 }

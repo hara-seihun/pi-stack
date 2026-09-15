@@ -32,6 +32,12 @@ The supervisor's `error_feedback` table owns acknowledgements. Repeated reports 
 
 Client-only errors, such as upload and connection failures, still dismiss locally. Keep failure state and retry actions in the caller. Changed messages, changed reset keys, or clearing the message reset local dismissal. The dismiss button has a 44px touch target and a visible keyboard focus outline.
 
+## Thread settings
+
+[`SettingsPanel`](src/thread-settings.tsx) owns the right-side tray. Model, thinking, speed and bash-timeout controls remain available while a thread runs or holds queued messages. Model changes select the next execution without interrupting current work. Archived threads must be restored before editing.
+
+The selected option uses the server's saved model identity, not a pooled account alias from a running provider request. Each thread mounts its own panel state, so a late save response cannot replace another thread's settings. The open panel refreshes when the thread revision changes. Failed settings and child-list loads retain a Retry button even after dismissing the error; a failed save leaves the controls available.
+
 ## Focused checks
 
 Run `bun test apps/remote/web/router-auth.test.ts apps/remote/web/router-client.test.ts apps/remote/web/meet-adapter.test.ts` from the repository root. The client test covers the native session bridge, initial authentication, token renewal, open-person sessions, endpoint identity checks and external URL handling.
