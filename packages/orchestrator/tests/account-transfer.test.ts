@@ -2,12 +2,13 @@ import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { describe, expect, it } from "vitest";
+import type { OAuthCredential } from "@earendil-works/pi-ai";
 import { Store } from "../src/store.js";
 import { CodexMeterSampler } from "../src/meters-codex.js";
 import { AccountTransfer, type TransferPacket } from "../src/auth/account-transfer.js";
 import { SharedOAuthAuth, dropLocalCredential, oauthCredential, transactSharedCredential } from "../src/auth/shared-oauth.js";
 
-const credential = (account = "provider-account", suffix = "original") => ({type:"oauth",access:`head.${Buffer.from(JSON.stringify({"https://api.openai.com/auth":{chatgpt_account_id:account}})).toString("base64url")}.${suffix}`,refresh:`refresh-${suffix}`,accountId:account,expires:Date.now()+3600000});
+const credential = (account = "provider-account", suffix = "original"): OAuthCredential => ({type:"oauth",access:`head.${Buffer.from(JSON.stringify({"https://api.openai.com/auth":{chatgpt_account_id:account}})).toString("base64url")}.${suffix}`,refresh:`refresh-${suffix}`,accountId:account,expires:Date.now()+3600000});
 function fixture() {
   const dir=mkdtempSync(join(tmpdir(),"account-transfer-")),source=Store.open(join(dir,"source.db")),target=Store.open(join(dir,"target.db"));
   const sourceAuth=join(dir,"source-auth.json"),targetAuth=join(dir,"target-auth.json");
@@ -223,7 +224,7 @@ describe("exclusive account transfer",()=>{
       const auth=new SharedOAuthAuth({path:f.targetAuth,providerId:"openai-codex",refresh:async value=>value,toAuth:async value=>({apiKey:value.access})});
       expect(auth.has(packet.alias)).toBe(false);
       await expect(auth.credential(packet.alias,f.signal)).rejects.toThrow("no shared");
-      await expect(auth.set(packet.alias,credential() as any,f.signal)).rejects.toThrow("exclusive transfer");
+      await expect(auth.set(packet.alias,credential(),f.signal)).rejects.toThrow("exclusive transfer");
       await expect(auth.remove(packet.alias,f.signal)).rejects.toThrow("exclusive transfer");
       expect(()=>dropLocalCredential(f.targetAuth,packet.alias)).toThrow("exclusive transfer");
       f.target.db.exec("DROP TRIGGER fail_import");
