@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
-import { spawn } from "node:child_process";
-import { mkdtempSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { spawn, spawnSync } from "node:child_process";
+import { existsSync, mkdtempSync, mkdirSync, readFileSync, readdirSync, rmSync, writeFileSync } from "node:fs";
 import { createServer } from "node:http";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -15,8 +15,8 @@ async function fixture(t, status = "failed") {
   const root = mkdtempSync(join(tmpdir(), "publication-report-"));
   mkdirSync(join(root, "requests"));
   const receipt = join(root, "requests", `${requestId}.json`);
-  const alert = join(root, "alert");
-  writeFileSync(alert, '#!/bin/sh\nprintf "%s\\n" /fixture/alert.md\n', { mode: 0o700 });
+  const inbox = join(root, "inbox");
+  mkdirSync(inbox);
   const request = {
     requestId, sourceSha: "a".repeat(40), status, step: status === "failed" ? "checks" : "complete",
     failures: [], alert: { key: status === "failed" ? "failed:2026-09-13" : status, status: "queued" },
@@ -49,7 +49,7 @@ async function fixture(t, status = "failed") {
   });
   async function run(...args) {
     const child = spawn(process.execPath, [command, "report", requestId, ...args], {
-      env: { ...process.env, PI_STACK_PUBLICATION_STATE: root, PI_STACK_PUBLICATION_ALERT_COMMAND: alert },
+      env: { ...process.env, PI_STACK_PUBLICATION_STATE: root, PI_STACK_PUBLICATION_ALERT_INBOX: inbox },
       stdio: ["ignore", "pipe", "pipe"],
     });
     let stdout = "", stderr = "";
@@ -58,7 +58,7 @@ async function fixture(t, status = "failed") {
     const code = await new Promise(resolve => child.on("close", resolve));
     return { code, stdout, stderr, receipt: JSON.parse(readFileSync(receipt, "utf8")) };
   }
-  return { run, url, state, receipt };
+  return { run, url, state, receipt, root, inbox };
 }
 
 test("a filed machine alert does not suppress requester delivery; acceptance is not delivery", async t => {
@@ -115,4 +115,81 @@ test("published requests deliver completion and reject changing the requester", 
   const changed = await run(url, "11234567-0123-4123-a123-0123456789ab");
   assert.equal(changed.code, 1);
   assert.match(changed.stderr, /another requester/);
+});
+
+
+test("repair transitions replace one bounded issue index; completion removes it", async t => {
+  const { run, url, state, receipt, root, inbox } = await fixture(t);
+  const directory = join(root, "repairs", requestId);
+  mkdirSync(directory, { recursive: true });
+  const repairPath = join(directory, "receipt.json");
+  const repair = { status: "running", path: repairPath, failure: { excerpt: "nested log".repeat(100_000) } };
+  writeFileSync(repairPath, JSON.stringify(repair));
+  const request = JSON.parse(readFileSync(receipt, "utf8"));
+  request.failure.excerpt = "log output".repeat(100_000);
+  writeFileSync(receipt, JSON.stringify(request));
+  let result = await run(url, sessionId);
+  assert.equal(result.code, 0, result.stderr);
+  assert.ok(state.requests[0].text.length < 2000);
+  assert.doesNotMatch(state.requests[0].text, /nested log|log output/);
+  const successorId = "PUB-1123456789abcdef01234567";
+  writeFileSync(join(root, "requests", `${successorId}.json`), JSON.stringify({
+    ...request, requestId: successorId, sourceSha: "b".repeat(40), status: "failed",
+  }));
+  repair.status = "submitted";
+  repair.successor = { requestId: successorId };
+  writeFileSync(repairPath, JSON.stringify(repair));
+  result = await run();
+  assert.equal(result.code, 0, result.stderr);
+  assert.deepEqual(readdirSync(inbox), ["pi-stack-publication-issues.md"]);
+  const index = JSON.parse(readFileSync(join(root, "issues.json"), "utf8"));
+  assert.deepEqual(index.issues.map(issue => issue.requestId), [successorId]);
+  writeFileSync(join(root, "requests", `${successorId}.json`), JSON.stringify({
+    requestId: successorId, sourceSha: "b".repeat(40), status: "published", step: "complete",
+  }));
+  result = await run();
+  assert.equal(result.code, 0, result.stderr);
+  assert.equal(existsSync(join(inbox, "pi-stack-publication-issues.md")), false);
+  assert.equal(JSON.parse(readFileSync(receipt, "utf8")).status, "failed");
+});
+
+test("proved source ancestry clears failures but never hides host restoration custody", async t => {
+  const { run, root, receipt, inbox } = await fixture(t);
+  const repository = join(root, "repository");
+  mkdirSync(repository);
+  for (const args of [["init", "--quiet"], ["-c", "user.name=Fixture", "-c", "user.email=fixture@example.test", "commit", "--quiet", "--allow-empty", "-m", "proved source"]]) {
+    const result = spawnSync("git", args, { cwd: repository, encoding: "utf8" });
+    assert.equal(result.status, 0, result.stderr);
+  }
+  const sha = spawnSync("git", ["rev-parse", "HEAD"], { cwd: repository, encoding: "utf8" }).stdout.trim();
+  const request = JSON.parse(readFileSync(receipt, "utf8"));
+  request.sourceSha = sha;
+  writeFileSync(receipt, JSON.stringify(request));
+  const publishedId = "PUB-1123456789abcdef01234567";
+  const published = { requestId: publishedId, sourceSha: sha, integrationSha: sha, status: "published", publishedAt: "2026-09-15", step: "complete", finalProof: { path: "/fixture/both-host-proof.json" } };
+  const publishedPath = join(root, "requests", `${publishedId}.json`);
+  writeFileSync(publishedPath, JSON.stringify(published));
+  let result = await run();
+  assert.equal(result.code, 0, result.stderr);
+  assert.equal(existsSync(join(inbox, "pi-stack-publication-issues.md")), false);
+  assert.equal(JSON.parse(readFileSync(join(root, "issues.json"), "utf8")).resolved[0].resolution.proof, published.finalProof.path);
+  published.maintenance = { hosts: { gmktec: { state: "paused" } } };
+  writeFileSync(publishedPath, JSON.stringify(published));
+  result = await run();
+  assert.equal(result.code, 0, result.stderr);
+  assert.deepEqual(JSON.parse(readFileSync(join(root, "issues.json"), "utf8")).issues.map(issue => issue.requestId), [publishedId]);
+});
+
+test("an unattended failure backlog stays bounded and preserves every issue in its owner", async t => {
+  const { run, root, inbox, receipt } = await fixture(t);
+  const request = JSON.parse(readFileSync(receipt, "utf8"));
+  for (let n = 1; n <= 90; n++) {
+    const id = `PUB-${n.toString(16).padStart(24, "0")}`;
+    writeFileSync(join(root, "requests", `${id}.json`), JSON.stringify({ ...request, requestId: id }));
+  }
+  const result = await run();
+  assert.equal(result.code, 0, result.stderr);
+  assert.deepEqual(readdirSync(inbox), ["pi-stack-publication-issues.md"]);
+  assert.ok(readFileSync(join(inbox, "pi-stack-publication-issues.md")).length < 6000);
+  assert.equal(JSON.parse(readFileSync(join(root, "issues.json"), "utf8")).issues.length, 91);
 });

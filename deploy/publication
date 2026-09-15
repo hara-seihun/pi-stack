@@ -30,6 +30,9 @@ const logRoot = join(stateRoot, "logs");
 const proofRoot = join(stateRoot, "proofs");
 const contractRoot = join(stateRoot, "contracts");
 const checkout = join(stateRoot, "repository");
+const alertInbox = process.env.PI_STACK_PUBLICATION_ALERT_INBOX ?? "/var/lib/machine-alerts/inbox";
+const issueIndexPath = join(stateRoot, "issues.json");
+const issueAlertPath = join(alertInbox, "pi-stack-publication-issues.md");
 const threadExecutionContract = "unified-threads-v1";
 const threadExecutionActivationPath = join(contractRoot, `${threadExecutionContract}.json`);
 const self = fileURLToPath(import.meta.url);
@@ -44,6 +47,7 @@ function usage() {
   deploy/publication install
   deploy/publication submit SHA
   deploy/publication inspect REQUEST
+  deploy/publication issues
   deploy/publication cancel REQUEST
   deploy/publication repair REQUEST
   deploy/publication repair-result REQUEST
@@ -282,7 +286,7 @@ function enqueue(requestId, sourceSha, sourceRef, reporterJson, repairedRequestI
     owner: request.owner,
     receipt: path,
     wake: wake.ok ? "started" : "watchdog-owned",
-    reporting: request.reporter ? { status: "pending", ...request.reporter } : { status: "machine-inbox" },
+    reporting: request.reporter ? { status: "pending", ...request.reporter } : { status: "receipt", issues: issueIndexPath },
   })}\n`);
 }
 
@@ -414,6 +418,8 @@ function updateFailure(request, message, logPath, notify = true) {
 }
 
 function noticeBody(request) {
+  const repair = readRepair(request.requestId);
+  const compact = value => String(value ?? "").replace(/\s+/g, " ").slice(0, 400);
   return [
     `Request: ${request.requestId}`,
     `Source: ${request.sourceSha}`,
@@ -421,13 +427,12 @@ function noticeBody(request) {
     `Step: ${request.step}`,
     `Status: ${request.status}`,
     request.repairOf ? `Repairs: ${request.repairOf} via ${request.repairId}` : undefined,
-    readRepair(request.requestId) ? `Repair: ${JSON.stringify(readRepair(request.requestId))}` : undefined,
-    ["failed", "cancelled"].includes(request.status) ? `Failure: ${request.failure.message}` : request.status === "blocked" ? request.blocker?.reason : undefined,
-    request.status === "blocked" ? `Busy custody: ${JSON.stringify(request.blocker.hosts)}` : undefined,
+    repair ? `Repair: ${repair.status}; receipt: ${repair.path}` : undefined,
+    repair?.successor ? `Successor: ${repair.successor.requestId}` : undefined,
+    ["failed", "cancelled"].includes(request.status) ? `Failure: ${compact(request.failure?.message)}` : request.status === "blocked" ? compact(request.blocker?.reason) : undefined,
     `Receipt: ${requestPath(request.requestId)}`,
     `Log: ${["failed", "cancelled"].includes(request.status) ? request.failure?.log : request.status === "blocked" ? request.blocker?.log : request.finalProof?.path}`,
-    request.failure?.command ? `Command: ${request.failure.command}` : undefined,
-    request.failure?.excerpt,
+    request.failure?.command ? `Command: ${compact(request.failure.command)}` : undefined,
     request.status === "failed" ? "The dedicated repair owner retains this failure. A source fix needs a new commit; an unchanged-source retry requires recorded infrastructure repair evidence." : undefined,
   ].filter(Boolean).join("\n");
 }
@@ -509,12 +514,50 @@ function noticeKey(request) {
     + (repair ? `:${repair.status}:${repair.successor?.requestId ?? ""}:${repair.successor?.status ?? ""}` : "");
 }
 
+function reconcileIssueIndex() {
+  const requests = allRequests();
+  const byId = new Map(requests.map(request => [request.requestId, request]));
+  const repairs = new Map(requests.map(request => [request.requestId, readRepair(request.requestId)]));
+  const published = requests.filter(request => request.status === "published" && request.integrationSha)
+    .sort((a, b) => b.publishedAt.localeCompare(a.publishedAt))[0];
+  const deployedSources = new Set(published ? checked("git", ["-C", checkout, "rev-list", published.integrationSha], { timeoutSeconds: 5 }).split("\n") : []);
+  function resolution(request, seen = new Set()) {
+    if (!request || seen.has(request.requestId)) return null;
+    seen.add(request.requestId);
+    if (request.status === "published") return { requestId: request.requestId, integrationSha: request.integrationSha, proof: request.finalProof?.path };
+    if (deployedSources.has(request.sourceSha)) return { requestId: published.requestId, integrationSha: published.integrationSha, proof: published.finalProof?.path };
+    return resolution(byId.get(repairs.get(request.requestId)?.successor?.requestId), seen);
+  }
+  const resolved = [], issues = [];
+  for (const request of requests) {
+    const custody = Object.values(request.bootstrap?.hosts ?? {}).some(custodyNeedsRestore)
+      || Object.values(request.maintenance?.hosts ?? {}).some(host => !["restored", "released"].includes(host.state));
+    if (request.status !== "failed" && !(custody && ["published", "cancelled"].includes(request.status))) continue;
+    const proof = custody ? null : resolution(request);
+    if (proof) { resolved.push({ requestId: request.requestId, resolution: proof }); continue; }
+    const repair = repairs.get(request.requestId);
+    if (!custody && repair?.successor && byId.has(repair.successor.requestId) && byId.get(repair.successor.requestId).status !== "cancelled") continue;
+    issues.push({ requestId: request.requestId, sourceSha: request.sourceSha, step: custody ? "restore-host-custody" : request.step,
+      failure: custody ? "Host restoration remains outstanding; inspect the receipt's restoration plans." : String(request.failure?.message ?? "").replace(/\s+/g, " ").slice(0, 300),
+      repair: repair?.status ?? "unassigned", receipt: requestPath(request.requestId), repairReceipt: repair?.path });
+  }
+  atomicWrite(issueIndexPath, `${JSON.stringify({ issues, resolved }, null, 2)}\n`);
+  if (issues.length === 0) { rmSync(issueAlertPath, { force: true }); return; }
+  const body = ["# Pi Stack publication needs repair", "", "Repository: hara-seihun/pi-stack",
+    "Deployment/proof target: gmktec and converge-kenan",
+    `${issues.length} unresolved publication issue(s). Current owner index: ${issueIndexPath}`,
+    "Read the named receipt before acting. Repair owners retain their work; do not replay requests.", "",
+    ...issues.slice(0, 8).map(issue => `- ${issue.requestId}: ${issue.step}; repair ${issue.repair}. ${issue.failure}\n  Receipt: ${issue.receipt}`),
+    ...(issues.length > 8 ? [`${issues.length - 8} further issues are listed in the owner index.`] : []), ""].join("\n");
+  if (!existsSync(issueAlertPath) || readFileSync(issueAlertPath, "utf8") !== body) atomicWrite(issueAlertPath, body, 0o660);
+}
+
 function reconcileNotices() {
+  reconcileIssueIndex();
   const candidates = allRequests().filter(request => {
     if (!["blocked", "failed", "published"].includes(request.status)) return false;
     const key = noticeKey(request);
-    return request.alert?.key !== key || !["filed", "queued"].includes(request.alert?.status)
-      || request.reporter && (request.report?.key !== key || request.report.status !== "delivered");
+    return request.reporter && (request.report?.key !== key || request.report.status !== "delivered");
   });
   candidates.sort((a, b) => (a.noticeCheckedAt ?? "").localeCompare(b.noticeCheckedAt ?? ""));
   if (candidates[0]) deliverNotice(candidates[0]);
@@ -525,15 +568,7 @@ function deliverNotice(request) {
   const key = noticeKey(request);
   request.noticeCheckedAt = new Date().toISOString();
   writeRequest(request);
-  if (request.alert?.key !== key || !["queued", "filed"].includes(request.alert.status)) {
-    request.alert = { key, status: "pending" };
-    writeRequest(request);
-    const alert = commandResult(process.env.PI_STACK_PUBLICATION_ALERT_COMMAND ?? "/run/current-system/sw/bin/alert", [`Pi Stack publication ${request.status}`, noticeBody(request)], { timeoutSeconds: 10 });
-    request.alert = alert.ok
-      ? { key, status: "filed", path: alert.stdout.trim(), at: new Date().toISOString() }
-      : { key, status: "failed", at: new Date().toISOString(), message: alert.stderr.trim() || `exit ${alert.status}` };
-    writeRequest(request);
-  }
+  reconcileIssueIndex();
   deliverReport(request, key);
 }
 
@@ -1751,6 +1786,8 @@ function main() {
   if (operation === "_watchdog" && args.length === 0) return watchdog();
   if (operation === "_drain" && args.length === 0) return drain();
   if (operation === "_fail-stalled" && args.length === 2) return failStalled(...args);
+  if (operation === "issues" && args.length === 0) return locked("worker", "issues");
+  if (operation === "_issues" && args.length === 0) { reconcileIssueIndex(); process.stdout.write(`${issueIndexPath}\n`); return; }
   if (operation === "notices" && args.length === 0) return locked("worker", "notices", [], true);
   if (operation === "_notices" && args.length === 0) return reconcileNotices();
   if (operation === "repair-run" && args.length === 1) return locked("repair-agent", "repair-run", args);
