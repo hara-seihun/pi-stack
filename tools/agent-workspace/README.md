@@ -53,6 +53,8 @@ A path that matches no record has no retained registration. Before creation requ
 
 ## Reconciliation
 
+Registry connections install SQLite's five-second busy handler before reading journal or schema state. Schema version 1 initializes WAL and the workspace schema once under the `registry-schema` resource fence and an immediate transaction. Already-initialized connections read the version and journal mode without acquiring the writer lock. On September 15, unconditional migration transactions made status and setup calls compete with every native writer, producing `database is locked` before creation could reserve a row. The registry keeps existing rows and source custody during version adoption.
+
 The manager fences checkout mutations and group lifecycle operations with advisory locks under the registry's `locks/` directory. Heartbeat, adoption, release and reconciliation use the same fences. Root admission holds a separate lock only while checking capacity and reserving a creation row. A pending row counts toward an explicit checkout-count limit even before its directory exists.
 
 Mirror mutation holds its own lock only while resolving source. A previously fetched exact commit reuses its retained source ref without refreshing the remote; moving refs still refresh. Clone and checkout run outside the mirror lock, so unrelated creations and lease operations can proceed together. Git children inherit the held lock descriptors, so killing only the creator does not expose a still-writing checkout. Lock ownership ends when the last descriptor closes, not at a timestamp. Lock files contain no source and remain reusable after their owner exits. A lock wait exhausts its 30-second budget with exit 75, without changing the fenced record.

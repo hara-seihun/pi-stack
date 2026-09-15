@@ -165,36 +165,44 @@ function git(workspace, args, options = {}) {
 
 const registryPaths = new WeakMap();
 
-function openRegistry(statePath = DEFAULT_STATE) {
-  mkdirSync(path.dirname(statePath), { recursive: true, mode: 0o700 });
-  const database = new DatabaseSync(statePath);
-  registryPaths.set(database, statePath);
-  database.exec(`
-    PRAGMA journal_mode = WAL;
-    PRAGMA busy_timeout = 5000;
-    CREATE TABLE IF NOT EXISTS workspace (
-      id TEXT PRIMARY KEY,
-      path TEXT NOT NULL UNIQUE,
-      root TEXT NOT NULL,
-      kind TEXT NOT NULL,
-      mode TEXT NOT NULL CHECK (mode IN ('writer', 'review')),
-      owner TEXT NOT NULL,
-      repository TEXT,
-      source_commit TEXT,
-      checkout_type TEXT NOT NULL CHECK (checkout_type IN ('clone', 'worktree')),
-      cache_paths TEXT NOT NULL,
-      created_at INTEGER NOT NULL,
-      updated_at INTEGER NOT NULL,
-      lease_expires_at INTEGER NOT NULL,
-      state TEXT NOT NULL,
-      detail TEXT NOT NULL,
-      group_id TEXT
-    );
-    CREATE INDEX IF NOT EXISTS workspace_root ON workspace(root);
-    CREATE INDEX IF NOT EXISTS workspace_lease ON workspace(lease_expires_at);
-  `);
+const REGISTRY_SCHEMA_VERSION = 1;
+
+function registrySchemaVersion(database) {
+  const version = database.prepare("PRAGMA user_version").get().user_version;
+  if (version > REGISTRY_SCHEMA_VERSION) fail(`workspace registry schema ${version} needs a newer agent-workspace`);
+  return version;
+}
+
+function initializeRegistry(database) {
+  if (database.prepare("PRAGMA journal_mode").get().journal_mode !== "wal") {
+    database.exec("PRAGMA journal_mode = WAL");
+  }
+  if (registrySchemaVersion(database) === REGISTRY_SCHEMA_VERSION) return;
   database.exec("BEGIN IMMEDIATE");
   try {
+    database.exec(`
+      CREATE TABLE IF NOT EXISTS workspace (
+        id TEXT PRIMARY KEY,
+        path TEXT NOT NULL UNIQUE,
+        root TEXT NOT NULL,
+        kind TEXT NOT NULL,
+        mode TEXT NOT NULL CHECK (mode IN ('writer', 'review')),
+        owner TEXT NOT NULL,
+        repository TEXT,
+        source_commit TEXT,
+        checkout_type TEXT NOT NULL CHECK (checkout_type IN ('clone', 'worktree')),
+        cache_paths TEXT NOT NULL,
+        created_at INTEGER NOT NULL,
+        updated_at INTEGER NOT NULL,
+        lease_expires_at INTEGER NOT NULL,
+        state TEXT NOT NULL,
+        detail TEXT NOT NULL,
+        group_id TEXT,
+        creation_request TEXT
+      );
+      CREATE INDEX IF NOT EXISTS workspace_root ON workspace(root);
+      CREATE INDEX IF NOT EXISTS workspace_lease ON workspace(lease_expires_at);
+    `);
     const columns = database.prepare("PRAGMA table_info(workspace)").all();
     if (!columns.some((column) => column.name === "group_id")) {
       database.exec("ALTER TABLE workspace ADD COLUMN group_id TEXT");
@@ -202,13 +210,29 @@ function openRegistry(statePath = DEFAULT_STATE) {
     if (!columns.some((column) => column.name === "creation_request")) {
       database.exec("ALTER TABLE workspace ADD COLUMN creation_request TEXT");
     }
-    database.exec("CREATE INDEX IF NOT EXISTS workspace_group ON workspace(group_id)");
-    database.exec("COMMIT");
+    database.exec(`CREATE INDEX IF NOT EXISTS workspace_group ON workspace(group_id);
+      PRAGMA user_version = ${REGISTRY_SCHEMA_VERSION}; COMMIT`);
   } catch (error) {
     database.exec("ROLLBACK");
     throw error;
   }
-  return database;
+}
+
+function openRegistry(statePath = DEFAULT_STATE) {
+  mkdirSync(path.dirname(statePath), { recursive: true, mode: 0o700 });
+  const database = new DatabaseSync(statePath);
+  registryPaths.set(database, statePath);
+  try {
+    database.exec("PRAGMA busy_timeout = 5000");
+    if (registrySchemaVersion(database) !== REGISTRY_SCHEMA_VERSION ||
+      database.prepare("PRAGMA journal_mode").get().journal_mode !== "wal") {
+      withResourceLock(statePath, "registry-schema", () => initializeRegistry(database));
+    }
+    return database;
+  } catch (error) {
+    database.close();
+    throw error;
+  }
 }
 
 function rowToRecord(row) {

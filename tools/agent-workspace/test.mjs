@@ -311,6 +311,63 @@ test("migrates a registry created before workspace groups", () => {
   }
 });
 
+test("initialized registry reads do not acquire the SQLite writer lock", () => {
+  const f = fixture();
+  let database;
+  try {
+    const created = JSON.parse(run(["create", "--root", f.workspaces, "--name", "writer-held",
+      "--repo", f.remote, "--min-free-gib", "0", "--json"], f.env));
+    database = new DatabaseSync(f.env.PI_WORKSPACE_STATE);
+    database.exec("BEGIN IMMEDIATE");
+    database.prepare("UPDATE workspace SET detail='uncommitted writer' WHERE id=?").run(created.id);
+    const output = execFileSync(entry, ["status", "--json"], {
+      env: { ...process.env, ...f.env }, encoding: "utf8", timeout: 1500,
+    });
+    const [observed] = JSON.parse(output);
+    assert.equal(observed.id, created.id);
+    assert.equal(observed.detail, "creation completed");
+    database.exec("ROLLBACK");
+    database.close();
+    database = undefined;
+  } finally {
+    database?.close();
+    f.close();
+  }
+});
+
+test("forty cold registry clients initialize one WAL schema without contention failures", async () => {
+  const f = fixture();
+  try {
+    const results = await Promise.all(Array.from({ length: 40 }, () => runAsync(["status", "--json"], f.env)));
+    for (const result of results) assert.deepEqual(JSON.parse(result), []);
+    const database = new DatabaseSync(f.env.PI_WORKSPACE_STATE);
+    assert.equal(database.prepare("PRAGMA journal_mode").get().journal_mode, "wal");
+    assert.equal(database.prepare("PRAGMA user_version").get().user_version, 1);
+    assert.ok(database.prepare("PRAGMA table_info(workspace)").all().some(column => column.name === "creation_request"));
+    database.close();
+  } finally { f.close(); }
+});
+
+test("forty concurrent create and heartbeat clients share registry writes", async () => {
+  const f = fixture();
+  try {
+    const commit = git(f.source, "rev-parse", "HEAD");
+    const records = await Promise.all(Array.from({ length: 40 }, async (_, index) => JSON.parse(await runAsync([
+      "create", "--root", f.workspaces, "--name", `concurrent-${index}`, "--repo", f.remote,
+      "--ref", commit, "--min-free-gib", "0", "--json",
+    ], f.env))));
+    assert.equal(new Set(records.map(record => record.id)).size, 40);
+    const renewed = await Promise.all(records.map(async record => JSON.parse(await runAsync([
+      "heartbeat", "--path", record.path, "--json",
+    ], f.env))));
+    for (const record of renewed) {
+      assert.equal(record.state, "active");
+      assert.equal(record.sourceCommit, commit);
+    }
+    assert.equal(JSON.parse(run(["status", "--json"], f.env)).length, 40);
+  } finally { f.close(); }
+});
+
 test("ignores containers removed during the Docker ownership snapshot", () => {
   const snapshot = workspaceTesting.dockerSnapshot((_executable, args) => {
     if (args[0] === "ps") return { status: 0, stdout: "vanished\nlive", stderr: "" };
