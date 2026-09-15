@@ -8,6 +8,11 @@ export function activeThread(session: Session | null) {
 
 export const working = activeThread;
 
+export function composerAction(session: Session | null): "send" | "stop" | "stopping" {
+  if (session && normalizedActivity(session.state) === "STOPPING") return "stopping";
+  return activeThread(session) ? "stop" : "send";
+}
+
 export function conversationThreads(sessions: Session[]) {
   return sessions.filter(session => !session.parentId && session.origin !== "fleet");
 }
