@@ -2,7 +2,9 @@
 import { spawn, spawnSync } from "node:child_process";
 import { createHash, randomUUID } from "node:crypto";
 import {
+  closeSync,
   existsSync,
+  openSync,
   lstatSync,
   mkdirSync,
   readFileSync,
@@ -54,6 +56,7 @@ const DEFAULT_MIN_FREE_GIB = 30;
 const DEFAULT_MIN_FREE_INODES_PERCENT = 10;
 
 class CliError extends Error {}
+class ResourceBusyError extends CliError {}
 
 function fail(message) {
   throw new CliError(message);
@@ -134,7 +137,8 @@ function command(executable, commandArgs, options = {}) {
     // Git operands are resolved before launch; a released caller directory may vanish mid-command.
     cwd: options.cwd ?? homedir(),
     encoding: "utf8",
-    env: { ...process.env, GIT_TERMINAL_PROMPT: "0" },
+    stdio: ["pipe", "pipe", "pipe", ...heldResourceLocks.values()],
+    env: { ...process.env, ...options.env, GIT_TERMINAL_PROMPT: "0" },
     maxBuffer: 16 * 1024 * 1024,
     timeout: options.timeout ?? 30_000,
   });
@@ -159,9 +163,12 @@ function git(workspace, args, options = {}) {
   return run("git", ["-C", workspace, ...args], options);
 }
 
+const registryPaths = new WeakMap();
+
 function openRegistry(statePath = DEFAULT_STATE) {
   mkdirSync(path.dirname(statePath), { recursive: true, mode: 0o700 });
   const database = new DatabaseSync(statePath);
+  registryPaths.set(database, statePath);
   database.exec(`
     PRAGMA journal_mode = WAL;
     PRAGMA busy_timeout = 5000;
@@ -186,11 +193,21 @@ function openRegistry(statePath = DEFAULT_STATE) {
     CREATE INDEX IF NOT EXISTS workspace_root ON workspace(root);
     CREATE INDEX IF NOT EXISTS workspace_lease ON workspace(lease_expires_at);
   `);
-  const columns = database.prepare("PRAGMA table_info(workspace)").all();
-  if (!columns.some((column) => column.name === "group_id")) {
-    database.exec("ALTER TABLE workspace ADD COLUMN group_id TEXT");
+  database.exec("BEGIN IMMEDIATE");
+  try {
+    const columns = database.prepare("PRAGMA table_info(workspace)").all();
+    if (!columns.some((column) => column.name === "group_id")) {
+      database.exec("ALTER TABLE workspace ADD COLUMN group_id TEXT");
+    }
+    if (!columns.some((column) => column.name === "creation_request")) {
+      database.exec("ALTER TABLE workspace ADD COLUMN creation_request TEXT");
+    }
+    database.exec("CREATE INDEX IF NOT EXISTS workspace_group ON workspace(group_id)");
+    database.exec("COMMIT");
+  } catch (error) {
+    database.exec("ROLLBACK");
+    throw error;
   }
-  database.exec("CREATE INDEX IF NOT EXISTS workspace_group ON workspace(group_id)");
   return database;
 }
 
@@ -212,6 +229,7 @@ function rowToRecord(row) {
     state: row.state,
     detail: row.detail,
     groupId: row.group_id ?? null,
+    ...(row.state === "creating" ? { creation: JSON.parse(row.creation_request) } : {}),
   };
 }
 
@@ -303,10 +321,15 @@ function maintainReferenceClone(workspace, execute) {
 }
 
 function register(database, input) {
+  return withWorkspaceLock(database, input.path, () => registerWorkspace(database, input), input.groupId);
+}
+
+function registerWorkspace(database, input) {
   const info = gitInfo(input.path);
   maintainReferenceClone(input.path, true);
   const now = Date.now();
   const existing = database.prepare("SELECT * FROM workspace WHERE path = ?").get(path.resolve(input.path));
+  if (existing?.state === "creating") return rowToRecord(existing);
   if (existing !== undefined && existing.state !== "released") {
     const cachePaths = [...new Set([...JSON.parse(existing.cache_paths), ...input.cachePaths])];
     database.prepare("UPDATE workspace SET cache_paths = ?, updated_at = ? WHERE id = ?")
@@ -795,6 +818,9 @@ function removeEmptyWorkspaceContainer(record) {
 }
 
 function inspectRecord(record, options = {}) {
+  if (record.state === "creating") {
+    return { classification: "blocked", reason: "creation is pending; repeat the original create command to resume", processes: [], containers: [], systemdUnits: [] };
+  }
   const now = options.now ?? Date.now();
   if (!existsSync(record.path)) return { classification: "missing", reason: "checkout path is absent", processes: [], containers: [], systemdUnits: [] };
   if (record.leaseExpiresAt > now && !options.ignoreLease) {
@@ -974,7 +1000,7 @@ function groupReconciliation(database, records, options) {
 function blockedReconciliation(database, records, error, execute) {
   const detail = error instanceof Error ? error.message : String(error);
   return records.map((record) => {
-    if (execute) updateState(database, record, "blocked", detail);
+    if (execute && record.state !== "creating" && !(error instanceof ResourceBusyError)) updateState(database, record, "blocked", detail);
     return {
       record,
       inspection: { classification: "blocked", reason: detail, processes: [], containers: [], systemdUnits: [] },
@@ -990,11 +1016,21 @@ function reconcileRecords(database, selected, options) {
     if (visited.has(selectedRecord.id)) continue;
     const records = recordsInGroup(database, selectedRecord);
     records.forEach((record) => visited.add(record.id));
+    if (records.some((record) => record.state === "creating")) {
+      results.push(...records.map((record) => ({ record, inspection: {
+        classification: "blocked", reason: "workspace creation is pending; repeat its original create command",
+        processes: [], containers: [], systemdUnits: [],
+      }, action: "none" })));
+      continue;
+    }
     try {
-      const maintenance = new Map(records.map((record) => [record.id, maintainReferenceClone(record.path, options.execute)]));
-      const reconciled = records.length > 1 ? groupReconciliation(database, records, options)
-        : records.length === 1 ? [reconcileRecord(database, records[0], options)] : [];
-      results.push(...reconciled.map((result) => ({ ...result, gitMaintenance: maintenance.get(result.record.id) })));
+      results.push(...withWorkspaceLock(database, selectedRecord.path, () => {
+        const current = recordsInGroup(database, recordBy(database, { id: selectedRecord.id }));
+        const maintenance = new Map(current.map((record) => [record.id, maintainReferenceClone(record.path, options.execute)]));
+        const reconciled = current.length > 1 ? groupReconciliation(database, current, options)
+          : current.length === 1 ? [reconcileRecord(database, current[0], options)] : [];
+        return reconciled.map((result) => ({ ...result, gitMaintenance: maintenance.get(result.record.id) }));
+      }, selectedRecord.groupId));
     } catch (error) {
       results.push(...blockedReconciliation(database, records, error, options.execute));
     }
@@ -1050,13 +1086,19 @@ function adoptionCandidates(root, nestedGroups) {
   for (const entry of readdirSync(root, { withFileTypes: true })) {
     if (!entry.isDirectory()) continue;
     const candidate = path.join(root, entry.name);
+    if (!existsSync(candidate)) continue;
     if (gitRoot(candidate)) {
       candidates.push({ path: candidate, groupId: null });
       continue;
     }
     if (!nestedGroups) continue;
     const groupId = `adopted-${createHash("sha256").update(candidate).digest("hex").slice(0, 20)}`;
-    for (const child of readdirSync(candidate, { withFileTypes: true })) {
+    let children;
+    try { children = readdirSync(candidate, { withFileTypes: true }); } catch (error) {
+      if (error.code === "ENOENT") continue;
+      throw error;
+    }
+    for (const child of children) {
       if (!child.isDirectory()) continue;
       const nested = path.join(candidate, child.name);
       if (gitRoot(nested)) candidates.push({ path: nested, groupId });
@@ -1094,9 +1136,12 @@ function adoptCommand(database, args, statePath) {
   print(results, bool(args, "json"));
 }
 
-function assertCapacity(root, args) {
+function assertCapacity(root, args, database, reservedPath) {
   mkdirSync(root, { recursive: true });
-  const count = readdirSync(root, { withFileTypes: true }).filter((entry) => entry.isDirectory()).length;
+  const pending = database?.prepare("SELECT path FROM workspace WHERE root=? AND state='creating'").all(root) ?? [];
+  const count = readdirSync(root, { withFileTypes: true })
+    .filter((entry) => entry.isDirectory() && path.join(root, entry.name) !== reservedPath).length +
+    pending.filter((record) => record.path !== reservedPath && !existsSync(record.path)).length;
   const maxCount = numberFlag(args, "max-count", DEFAULT_MAX_COUNT);
   if (maxCount > 0 && count >= maxCount) fail(`workspace root has ${count} checkouts; limit is ${maxCount}. Reconcile it before creating another.`);
   const stats = statfsSync(root);
@@ -1152,6 +1197,58 @@ function configurePushUrl(gitArgs, upstream) {
   }
 }
 
+const heldResourceLocks = new Map();
+
+function withWorkspaceLock(database, workspacePath, action, requestedGroupId) {
+  const statePath = registryPaths.get(database);
+  const resolved = path.resolve(workspacePath);
+  const existing = database.prepare("SELECT group_id, state FROM workspace WHERE path = ?").get(resolved);
+  const groupId = existing?.state !== "released" ? existing?.group_id ?? requestedGroupId : requestedGroupId;
+  const checkout = () => withResourceLock(statePath, `checkout:${resolved}`, action);
+  return groupId ? withResourceLock(statePath, `group:${groupId}`, checkout) : checkout();
+}
+
+function withResourceLock(statePath, key, action) {
+  const identity = `${statePath}\0${key}`;
+  if (heldResourceLocks.has(identity)) return action();
+  const directory = path.join(path.dirname(statePath), "locks");
+  mkdirSync(directory, { recursive: true, mode: 0o700 });
+  const file = path.join(directory, createHash("sha256").update(key).digest("hex"));
+  const descriptor = openSync(file, "a", 0o600);
+  try {
+    const result = spawnSync("flock", ["--exclusive", "--wait", "30", "3"], {
+      stdio: ["ignore", "pipe", "pipe", descriptor], encoding: "utf8", timeout: 31_000,
+    });
+    if (result.status !== 0) throw new ResourceBusyError(`workspace resource busy: ${key}: ${result.error?.message || result.stderr?.trim() || "30s lock budget exhausted"}`);
+    heldResourceLocks.set(identity, descriptor);
+    return action();
+  } finally {
+    heldResourceLocks.delete(identity);
+    closeSync(descriptor);
+  }
+}
+
+function sourceRefFor(repository, ref) {
+  return `refs/pi-workspace/sources/${createHash("sha256").update(`${repository}\0${ref}`).digest("hex")}`;
+}
+
+function cachedImmutableSource(mirror, repository, ref) {
+  if (!/^[0-9a-f]{40}$/u.test(ref) || !existsSync(mirror)) return null;
+  const cached = command("git", ["--git-dir", mirror, "rev-parse", "--verify", `${sourceRefFor(repository, ref)}^{commit}`]);
+  return cached.status === 0 && cached.stdout === ref ? ref : null;
+}
+
+function resolveSource(statePath, mirror, repository, upstream, ref) {
+  const cached = cachedImmutableSource(mirror, repository, ref);
+  if (cached !== null) return cached;
+  return withResourceLock(statePath, `mirror:${mirror}`, () => {
+    const shared = cachedImmutableSource(mirror, repository, ref);
+    if (shared !== null) return shared;
+    prepareMirror(mirror, repository, upstream);
+    return fetchSource(mirror, repository, ref);
+  });
+}
+
 function prepareMirror(mirror, repository, upstream) {
   mkdirSync(path.dirname(mirror), { recursive: true, mode: 0o700 });
   if (!existsSync(mirror)) run("git", ["init", "--bare", mirror]);
@@ -1172,58 +1269,117 @@ function prepareMirror(mirror, repository, upstream) {
 }
 
 function fetchSource(mirror, repository, ref) {
-  const digest = createHash("sha256").update(`${repository}\0${ref}`).digest("hex");
-  const sourceRef = `refs/pi-workspace/sources/${digest}`;
+  const sourceRef = sourceRefFor(repository, ref);
   run("git", ["--git-dir", mirror, "fetch", "--no-tags", "workspace-source", `+${ref}:${sourceRef}`], { timeout: 120_000 });
   return run("git", ["--git-dir", mirror, "rev-parse", sourceRef]);
 }
 
 function createCommand(database, args, statePath) {
+  const destination = path.join(path.resolve(required(args, "root")), safeName(required(args, "name")));
+  return withWorkspaceLock(database, destination, () => createWorkspace(database, args, statePath), one(args, "group"));
+}
+
+function createWorkspace(database, args, statePath) {
   assertOnly(args, ["root", "name", "repo", "ref", "branch", "kind", "mode", "owner", "group", "strategy", "lease-seconds", "cache", "max-count", "min-free-gib", "min-free-inodes-percent", "json"]);
   const root = path.resolve(required(args, "root"));
-  assertCapacity(root, args);
   const name = safeName(required(args, "name"));
   const destination = path.join(root, name);
-  if (existsSync(destination)) fail(`workspace already exists: ${destination}`);
   const repository = repositoryLocation(required(args, "repo"), currentDirectory());
   const ref = one(args, "ref", "HEAD");
   const mode = one(args, "mode", "writer");
   if (!["writer", "review"].includes(mode)) fail("--mode must be writer or review");
   const strategy = one(args, "strategy", "clone");
   if (!["clone", "worktree"].includes(strategy)) fail("--strategy must be clone or worktree");
+  const branch = one(args, "branch", `agent/${name}`);
+  const request = JSON.stringify({ repository, ref, mode, strategy, branch,
+    owner: one(args, "owner", name), kind: one(args, "kind", "agent"), groupId: one(args, "group", null),
+    cachePaths: normalizeCachePaths(many(args, "cache")),
+    leaseSeconds: numberFlag(args, "lease-seconds", DEFAULT_LEASE_SECONDS) });
+  const input = JSON.parse(request);
+  let row = database.prepare("SELECT * FROM workspace WHERE path = ?").get(destination);
+  if (row !== undefined && row.state !== "released") {
+    if (row.creation_request !== request) fail(`workspace already exists with a different creation request: ${destination}`);
+    if (row.state === "active" && existsSync(destination)) {
+      print(rowToRecord(row), bool(args, "json"));
+      return;
+    }
+    if (row.state !== "creating") fail(`workspace cannot resume creation from state ${row.state}: ${destination}`);
+  } else {
+    if (existsSync(destination)) fail(`workspace already exists: ${destination}`);
+    withResourceLock(statePath, `admission:${root}`, () => {
+      assertCapacity(root, args, database);
+      const now = Date.now();
+      database.prepare(`INSERT INTO workspace
+        (id,path,root,kind,mode,owner,repository,source_commit,checkout_type,cache_paths,
+         created_at,updated_at,lease_expires_at,state,detail,group_id,creation_request)
+        VALUES (?,?,?,?,?,?,?,NULL,?,?,?,?,?,'creating','creation reserved',?,?)
+        ON CONFLICT(path) DO UPDATE SET id=excluded.id, kind=excluded.kind, mode=excluded.mode,
+        owner=excluded.owner, repository=excluded.repository, source_commit=NULL,
+        checkout_type=excluded.checkout_type, cache_paths=excluded.cache_paths,
+        created_at=excluded.created_at, updated_at=excluded.updated_at, lease_expires_at=excluded.lease_expires_at,
+        state=excluded.state, detail=excluded.detail, group_id=excluded.group_id, creation_request=excluded.creation_request
+        WHERE workspace.state='released'`).run(randomUUID(), destination, root, input.kind, mode,
+        input.owner, repository, strategy, JSON.stringify(input.cachePaths), now, now,
+        now + input.leaseSeconds * 1000, input.groupId, request);
+    });
+    row = database.prepare("SELECT * FROM workspace WHERE path = ?").get(destination);
+    if (row.creation_request !== request) fail(`workspace creation was claimed by another request: ${destination}`);
+  }
   const mirror = mirrorFor(statePath, repository);
   const upstream = repositoryRemotes(repository);
-  prepareMirror(mirror, repository, upstream);
-  const sourceCommit = fetchSource(mirror, repository, ref);
-  const branch = one(args, "branch", `agent/${name}`);
+  let sourceCommit = row.source_commit;
+  if (sourceCommit === null) {
+    sourceCommit = resolveSource(statePath, mirror, repository, upstream, ref);
+    database.prepare("UPDATE workspace SET source_commit=?, updated_at=? WHERE id=?")
+      .run(sourceCommit, Date.now(), row.id);
+  }
   try {
-    if (strategy === "worktree") {
-      const worktreeArgs = ["--git-dir", mirror, "worktree", "add"];
-      if (mode === "review") worktreeArgs.push("--detach", destination, sourceCommit);
-      else worktreeArgs.push("-b", branch, destination, sourceCommit);
-      run("git", worktreeArgs);
-    } else {
-      run("git", ["clone", ...Object.entries(REFERENCE_CLONE_CONFIG).flatMap(([name, value]) => ["--config", `${name}=${value}`]),
-        "--reference-if-able", mirror, "--no-checkout", repository, destination], { timeout: 120_000 });
+    if (!existsSync(destination) || readdirSync(destination).length === 0) {
+      assertCapacity(root, args, database, destination);
+      if (strategy === "worktree") {
+        const worktreeArgs = ["--git-dir", mirror, "worktree", "add"];
+        if (mode === "review") worktreeArgs.push("--detach", destination, sourceCommit);
+        else worktreeArgs.push("-b", branch, destination, sourceCommit);
+        run("git", worktreeArgs);
+      } else {
+        run("git", ["clone", "--no-local", ...Object.entries(REFERENCE_CLONE_CONFIG)
+          .flatMap(([name, value]) => ["--config", `${name}=${value}`]),
+          "--reference-if-able", mirror, "--no-checkout", repository, destination], { timeout: 40_000 });
+      }
+    }
+    const info = gitInfo(destination);
+    if (info.checkoutType !== strategy) fail("pending checkout type changed");
+    if (strategy === "clone") {
+      const entries = readdirSync(destination).filter((entry) => entry !== ".git");
+      if (entries.length === 0 && !existsSync(path.join(destination, ".git", "index"))) {
+        if (mode === "review") git(destination, ["checkout", "--detach", sourceCommit]);
+        else {
+          const existing = command("git", ["-C", destination, "rev-parse", "--verify", `refs/heads/${branch}`]);
+          if (existing.status === 0 && existing.stdout !== sourceCommit) fail("pending checkout branch has different source");
+          git(destination, existing.status === 0 ? ["checkout", branch] : ["checkout", "-b", branch, sourceCommit]);
+        }
+      }
+    }
+    const head = git(destination, ["rev-parse", "HEAD"]);
+    const selectedBranch = command("git", ["-C", destination, "symbolic-ref", "--quiet", "--short", "HEAD"]);
+    if (head !== sourceCommit || (mode === "writer" ? selectedBranch.stdout !== branch : selectedBranch.status === 0)) {
+      fail("pending checkout HEAD or branch differs from the reserved source");
+    }
+    if (git(destination, ["status", "--porcelain=v1", "--untracked-files=all", "--ignored=matching"])) {
+      fail("pending checkout contains changes; preserve and repair them before resuming creation");
+    }
+    if (strategy === "clone") {
       git(destination, ["remote", "set-url", "origin", upstream.fetch]);
       configurePushUrl(["-C", destination], upstream);
-      if (mode === "review") git(destination, ["checkout", "--detach", sourceCommit]);
-      else git(destination, ["checkout", "-b", branch, sourceCommit]);
+      maintainReferenceClone(destination, true);
     }
-    const record = register(database, {
-      path: destination,
-      root,
-      kind: one(args, "kind", "agent"),
-      mode,
-      owner: one(args, "owner", name),
-      groupId: one(args, "group"),
-      sourceCommit,
-      leaseSeconds: numberFlag(args, "lease-seconds", DEFAULT_LEASE_SECONDS),
-      cachePaths: normalizeCachePaths(many(args, "cache")),
-    });
-    print(record, bool(args, "json"));
+    const now = Date.now();
+    database.prepare("UPDATE workspace SET repository=?, state='active', detail='creation completed', updated_at=?, lease_expires_at=? WHERE id=?")
+      .run(upstream.fetch, now, now + input.leaseSeconds * 1000, row.id);
+    print(recordBy(database, { id: row.id }), bool(args, "json"));
   } catch (error) {
-    if (existsSync(destination)) rmSync(destination, { recursive: true, force: true });
+    database.prepare("UPDATE workspace SET detail=?, updated_at=? WHERE id=? AND state='creating'")
+      .run(`creation retained: ${error.message}`, Date.now(), row.id);
     throw error;
   }
 }
@@ -1231,11 +1387,12 @@ function createCommand(database, args, statePath) {
 function heartbeatCommand(database, args) {
   assertOnly(args, ["id", "path", "lease-seconds", "json"]);
   const record = recordBy(database, selectorFrom(args));
-  if (record.state === "released" || record.state === "reclaiming") fail(`workspace cannot renew from state ${record.state}`);
+  if (["released", "reclaiming", "creating"].includes(record.state)) fail(`workspace cannot renew from state ${record.state}`);
   if (!existsSync(record.path)) fail(`workspace path is absent: ${record.path}`);
   const now = Date.now();
   const expires = now + numberFlag(args, "lease-seconds", DEFAULT_LEASE_SECONDS) * 1000;
   const records = recordsInGroup(database, record);
+  if (records.some((candidate) => candidate.state === "creating")) fail("workspace group has a pending creation; resume it before renewal");
   const statement = database.prepare("UPDATE workspace SET lease_expires_at = ?, updated_at = ?, state = 'active', detail = 'lease renewed' WHERE id = ?");
   for (const candidate of records) statement.run(expires, now, candidate.id);
   const renewed = records.map((candidate) => recordBy(database, { id: candidate.id }));
@@ -1304,7 +1461,7 @@ function maintainCommand(database, args) {
   const results = [];
   for (const record of records) {
     try {
-      const result = maintainReferenceClone(record.path, bool(args, "execute"));
+      const result = withWorkspaceLock(database, record.path, () => maintainReferenceClone(record.path, bool(args, "execute")), record.groupId);
       if (result) results.push(result);
     } catch (error) {
       results.push({ path: record.path, error: error instanceof Error ? error.message : String(error) });
@@ -1387,14 +1544,35 @@ export function main(argv = process.argv.slice(2), statePath = DEFAULT_STATE) {
   }
   const args = parseArgs(rest);
   if (args.positional.length > 0) fail(`unexpected argument: ${args.positional[0]}`);
+  if (commandName === "create") {
+    const repository = repositoryLocation(required(args, "repo"), currentDirectory());
+    if (process.env.PI_WORKSPACE_CREATE_CHILD !== statePath) {
+      args.named.set("root", [path.resolve(required(args, "root"))]);
+      args.named.set("repo", [repository]);
+      const normalized = [...args.named].flatMap(([name, values]) => values.map((value) => `--${name}=${value}`));
+      const result = command("timeout", ["--kill-after=1", "45",
+        process.execPath, new URL(import.meta.url).pathname, "create", ...normalized], {
+        timeout: 48_000,
+        env: { PI_WORKSPACE_STATE: statePath, PI_WORKSPACE_CREATE_CHILD: statePath },
+      });
+      if (result.status === 75) throw new ResourceBusyError(result.stderr);
+      if (result.status !== 0) fail(result.stderr || result.error?.message ||
+        "creation interrupted; repeat the same command to resume");
+      process.stdout.write(`${result.stdout}\n`);
+      return;
+    }
+  }
   if (commandName !== "maintain") drainGc(statePath);
   const database = openRegistry(statePath);
   try {
     if (commandName === "create") createCommand(database, args, statePath);
     else if (commandName === "register") registerCommand(database, args);
     else if (commandName === "adopt") adoptCommand(database, args, statePath);
-    else if (commandName === "heartbeat") heartbeatCommand(database, args);
-    else if (commandName === "release") releaseCommand(database, args, statePath);
+    else if (commandName === "heartbeat" || commandName === "release") {
+      const record = recordBy(database, selectorFrom(args));
+      withWorkspaceLock(database, record.path, () => commandName === "heartbeat"
+        ? heartbeatCommand(database, args) : releaseCommand(database, args, statePath), record.groupId);
+    }
     else if (commandName === "reconcile") reconcileCommand(database, args, statePath);
     else if (commandName === "maintain") maintainCommand(database, args);
     else if (commandName === "status" || commandName === "list") statusCommand(database, args);
@@ -1419,6 +1597,6 @@ if (process.argv[1] !== undefined && existsSync(process.argv[1])
     main();
   } catch (error) {
     process.stderr.write(`agent-workspace: ${error instanceof Error ? error.message : String(error)}\n`);
-    process.exit(error instanceof CliError ? 2 : 1);
+    process.exit(error instanceof ResourceBusyError ? 75 : error instanceof CliError ? 2 : 1);
   }
 }
