@@ -63,11 +63,22 @@ it("sends explicit model, thinking, speed and admission overrides",async()=>{
 });
 
 it("stops a failed batch and includes the threads already accepted",async()=>{
-  transport([{ok:true,value:{id:"accepted"}},{ok:false,error:{code:"unavailable",message:"Paused"}}]);
+  const calls=transport([{ok:true,value:{id:"accepted"}},{ok:false,error:{code:"unavailable",message:"Paused"}}]);
   await dispatch(["run","--prompt","work","--count","3"]);
   expect(fetch).toHaveBeenCalledTimes(2);
   expect(process.exitCode).toBe(1);
-  expect(JSON.parse(String(vi.mocked(console.log).mock.calls[0]?.[0]))).toEqual({ok:false,error:{code:"unavailable",message:"Paused"},threads:[{id:"accepted"}]});
+  expect(calls[1]!.body.requestId).toEqual(expect.any(String));
+  expect(calls[1]!.body.requestId).not.toBe(calls[0]!.body.requestId);
+  expect(JSON.parse(String(vi.mocked(console.log).mock.calls[0]?.[0]))).toEqual({ok:false,error:{code:"unavailable",message:"Paused",retryable:false,requestId:calls[1]!.body.requestId},threads:[{id:"accepted"}]});
+});
+
+it("reports a terminal send rejection with the submitted request identity",async()=>{
+  const calls=transport([{ok:false,error:{code:"conflict",message:"Identity already used"}}]);
+  await dispatch(["send","recipient","--prompt","work"]);
+  expect(calls).toHaveLength(1);
+  expect(calls[0]!.body.requestId).toEqual(expect.any(String));
+  expect(process.exitCode).toBe(1);
+  expect(JSON.parse(String(vi.mocked(console.log).mock.calls[0]?.[0]))).toEqual({ok:false,error:{code:"conflict",message:"Identity already used",retryable:false,requestId:calls[0]!.body.requestId}});
 });
 
 it("lets the daemon resolve lane prompts, doctrine and admission before spawning threads",async()=>{
