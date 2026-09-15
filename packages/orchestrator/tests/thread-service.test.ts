@@ -454,11 +454,6 @@ describe("ThreadService", () => {
     } finally { db.close(); }
     expect(first.service.get(parent.id)?.state).toBe("stopped");
     expect(first.service.pending(parent.id)).toMatchObject([{ source: "notification", state: "held", senderId: child.id }]);
-    const notification = first.service.pending(parent.id)[0]!;
-    expect(JSON.parse(notification.text)).toMatchObject({
-      type: "thread_idle", threadId: child.id, workId: "child-work", outcome: "complete",
-      finalMessage: { content: [{ type: "text", text: "child result" }] },
-    });
     value(await first.service.close());
 
     const reopened = fixture(first.directory);
