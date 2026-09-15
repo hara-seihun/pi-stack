@@ -3,11 +3,14 @@ import { spawn, spawnSync } from "node:child_process";
 import { chmodSync, copyFileSync, existsSync, mkdirSync, mkdtempSync, readFileSync, readlinkSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join, resolve } from "node:path";
-import test from "node:test";
+import test, { after } from "node:test";
 import { fileURLToPath } from "node:url";
 
 const root = resolve(dirname(fileURLToPath(import.meta.url)), "..");
 const helper = join(root, "deploy", "lib");
+const hostLock = join(mkdtempSync(join(tmpdir(), "pi-host-lock-")), "deploy.lock");
+process.env.PI_STACK_HOST_LOCK_PATH = hostLock;
+after(() => rmSync(dirname(hostLock), { recursive: true, force: true }));
 
 function start(script, args) {
   return spawn("bash", ["-c", script, "deploy-lock-test", ...args], {
@@ -213,6 +216,7 @@ test("the host deployment restarts the daemon and activates a changed Pi Remote"
     const repository = join(directory, "repo"), deploy = join(repository, "deploy"), remoteApp = join(repository, "apps", "remote"), bin = join(directory, "bin");
     mkdirSync(deploy, { recursive: true });mkdirSync(remoteApp, { recursive: true });mkdirSync(bin);
     copyFileSync(join(root, "deploy", "host"), join(deploy, "host"));chmodSync(join(deploy, "host"), 0o755);
+    copyFileSync(join(root, "deploy", "release-checkout"), join(deploy, "release-checkout"));
     writeFileSync(join(deploy, "lib"), `${readFileSync(join(root, "deploy", "lib"), "utf8")}\npi_stack_prepare_builds() { return "\${BUILD_EXIT:-0}"; }\n`);
     const component=`#!/usr/bin/env bash\nset -euo pipefail\nname=$(basename "$0")\ncommit=$(git -C "$(cd "$(dirname "$0")/.." && pwd)" rev-parse HEAD)\ncase "$name" in transcription) exit 0;; runtime) destination=$PI_STACK_RUNTIME_DEST;; orchestrator) destination=$PI_STACK_ORCHESTRATOR_DEST;; tools) destination=$PI_STACK_TOOLS_DEST;; skills) destination=$PI_STACK_SKILLS_DEST;; settings) printf '%s\\n' "$1" >> "$SETTINGS_TRACE"; exit 0;;\n remote) destination=$PI_STACK_REMOTE_DEST; release="$(dirname "$destination")/.pi-stack-releases/remote/$commit"; mkdir -p "$release/dist" "$release/server/voice"; touch "$release/server/voice/service.ts"; printf '%s\\n' "$commit" > "$release/.pi-stack-commit"; ln -sfn "$release" "$destination.tmp"; mv -Tf "$destination.tmp" "$destination"; exit 0;; esac\nmkdir -p "$destination/dist"\nprintf '%s\\n' "$commit" > "$destination/.pi-stack-commit"\n`;
     for(const name of ["runtime","transcription","orchestrator","remote","tools","skills","settings"]){writeFileSync(join(deploy,name),component);chmodSync(join(deploy,name),0o755);}
@@ -293,13 +297,15 @@ exit 64
   } finally { rmSync(directory,{recursive:true,force:true}); }
 });
 
-test("deploys from one checkout serialize before reading or changing source", async () => {
+for (const separateCheckout of [false, true]) test(`deploys from ${separateCheckout ? "different checkouts" : "one checkout"} serialize before reading or changing source`, async () => {
   const directory = mkdtempSync(join(tmpdir(), "pi-stack-deploy-lock-"));
   try {
     const repository = join(directory, "repo");
     const initialized = spawnSync("git", ["init", "-q", repository]);
     assert.equal(initialized.status, 0);
 
+    const otherRepository = separateCheckout ? join(directory, "other-repo") : repository;
+    if (separateCheckout) assert.equal(spawnSync("git", ["init", "-q", otherRepository]).status, 0);
     const firstReady = join(directory, "first-ready");
     const releaseFirst = join(directory, "release-first");
     const secondStarted = join(directory, "second-started");
@@ -321,7 +327,7 @@ test("deploys from one checkout serialize before reading or changing source", as
       source "$1"
       pi_stack_acquire_deploy_lock "$2"
       : > "$4"
-    `, [helper, repository, secondStarted, secondAcquired]);
+    `, [helper, otherRepository, secondStarted, secondAcquired]);
     await waitForFile(secondStarted);
     await new Promise((resolveDelay) => setTimeout(resolveDelay, 100));
     assert.equal(existsSync(secondAcquired), false);

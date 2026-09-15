@@ -7,7 +7,7 @@ import { test } from "node:test";
 
 const root = resolve(import.meta.dirname, "..");
 const releaseResources = [
-  "deploy/lib", "deploy/smoke", "skills/livedev/SKILL.md", "server/voice/delegation-policy.md",
+  "deploy/lib", "deploy/release-checkout", "deploy/smoke", "skills/livedev/SKILL.md", "server/voice/delegation-policy.md",
   "server/meet/asr/worker.py", "server/meet/asr/model.json", "server/meet/asr/requirements.lock",
   "web/dist/index.html", "web/dist/meet.html", "web/dist/meet-adapter.js", "web/dist/voice.html", "web/dist/kenan.png",
 ];
@@ -19,7 +19,7 @@ function fixture() {
     mkdirSync(dirname(path), { recursive: true });
     writeFileSync(path, text, { mode });
   };
-  for (const file of ["deploy/remote", "deploy/lib", "deploy/smoke", "scripts/check-remote-imports.ts", "scripts/build-workspace.mjs"]) {
+  for (const file of ["deploy/remote", "deploy/lib", "deploy/release-checkout", "deploy/smoke", "scripts/check-remote-imports.ts", "scripts/build-workspace.mjs"]) {
     mkdirSync(dirname(join(repo, file)), { recursive: true });
     cpSync(join(root, file), join(repo, file));
   }
@@ -46,6 +46,7 @@ function fixture() {
   put(join(orchestrator, ".pi-stack-commit"), commit + "\n");
   const run = () => spawnSync("bash", [join(repo, "deploy/remote")], {encoding: "utf8", env: {
     ...process.env, PATH: `${bin}:${process.env.PATH}`, BUILD_ASSETS: join(dir, "build-assets"), PI_STACK_DEPLOY_NO_SUDO: "1",
+    PI_STACK_HOST_LOCK_PATH: join(dir, "host.lock"),
     PI_STACK_ALLOW_DIRTY: "1", PI_STACK_REMOTE_DEST: dest, PI_STACK_ORCHESTRATOR_DEST: orchestrator,
   }});
   return {dir, repo, dest, orchestrator, dependencies, put, run};

@@ -35,7 +35,7 @@ On September 12, 2026, a controlled replay of a failed Remote greeting isolated 
 
 ## Deployments
 
-`deploy/publication submit SHA` hands a source commit to the durable worker for integration and deployment on both hosts. Its host wrappers call `deploy/host`, which reads a small host file naming the fleet account and any local packages and skills. Persons come from Pi Remote's registry. The scripts under [`deploy`](deploy) refuse an uncommitted checkout, serialize work from the same source tree, and enforce a 50-second deadline. Commit-addressed releases share one production dependency tree and switch atomically. See [`docs/deployment.md`](docs/deployment.md).
+`deploy/publication submit SHA` hands a source commit to the durable worker for integration and deployment on both hosts. Its host wrappers call `deploy/host`, which reads a small host file naming the fleet account and any local packages and skills. Persons come from Pi Remote's registry. The scripts under [`deploy`](deploy) refuse an uncommitted checkout, serialize host deployment across source checkouts, and enforce a 50-second deadline. Commit-addressed releases share one production dependency tree and switch atomically. See [`docs/deployment.md`](docs/deployment.md).
 
 Pi Remote exposes one authenticated router entrance. A person unlocks there, then `GET /v1/environments` returns only the endpoints allowed by her `remoteAccess` registry entry. The default is this host alone. Host configuration owns endpoint IDs, names, icons and per-person supervisor upstreams; no endpoint name grants access.
 
