@@ -1422,9 +1422,16 @@ function prepareMirror(mirror, repository, upstream) {
 }
 
 function fetchSource(mirror, repository, ref) {
+  let resolved = ref;
+  if (/^[0-9a-f]{4,39}$/u.test(ref)) {
+    const source = existsSync(repository) ? ["-C", repository] : ["--git-dir", mirror];
+    const commit = command("git", [...source, "rev-parse", "--verify", `${ref}^{commit}`]);
+    if (commit.status !== 0) fail(`cannot resolve abbreviated source ${ref}; provide an unambiguous full commit or remote ref: ${commit.stderr}`);
+    resolved = commit.stdout;
+  }
   const sourceRef = sourceRefFor(repository, ref);
-  run("git", ["--git-dir", mirror, "fetch", "--no-tags", "workspace-source", `+${ref}:${sourceRef}`], { timeout: 120_000 });
-  return run("git", ["--git-dir", mirror, "rev-parse", sourceRef]);
+  run("git", ["--git-dir", mirror, "fetch", "--no-tags", "workspace-source", `+${resolved}:${sourceRef}`], { timeout: 120_000 });
+  return run("git", ["--git-dir", mirror, "rev-parse", "--verify", `${sourceRef}^{commit}`]);
 }
 
 function createCommand(database, args, statePath) {
@@ -1449,9 +1456,11 @@ function createWorkspace(database, args, statePath) {
     cachePaths: normalizeCachePaths(many(args, "cache")),
     leaseSeconds: numberFlag(args, "lease-seconds", DEFAULT_LEASE_SECONDS) });
   const input = JSON.parse(request);
+  const mirror = mirrorFor(statePath, repository);
+  const upstream = repositoryRemotes(repository);
   let row = database.prepare("SELECT * FROM workspace WHERE path = ?").get(destination);
   if (row !== undefined && row.state !== "released") {
-    if (row.creation_request !== request) fail(`workspace already exists with a different creation request: ${destination}`);
+    if (row.creation_request !== request) fail(`workspace already exists with a different creation request: ${destination}${row.state === "creating" ? "; resume the original request, or use cancel-creation if its destination is absent" : ""}`);
     if (row.state === "active" && existsSync(destination)) {
       print(rowToRecord(row), bool(args, "json"));
       return;
@@ -1459,27 +1468,27 @@ function createWorkspace(database, args, statePath) {
     if (row.state !== "creating") fail(`workspace cannot resume creation from state ${row.state}: ${destination}`);
   } else {
     if (existsSync(destination)) fail(`workspace already exists: ${destination}`);
+    assertCapacity(root, args, database);
+    const sourceCommit = resolveSource(statePath, mirror, repository, upstream, ref);
     withResourceLock(statePath, `admission:${root}`, () => {
       assertCapacity(root, args, database);
       const now = Date.now();
       database.prepare(`INSERT INTO workspace
         (id,path,root,kind,mode,owner,repository,source_commit,checkout_type,cache_paths,
          created_at,updated_at,lease_expires_at,state,detail,group_id,creation_request)
-        VALUES (?,?,?,?,?,?,?,NULL,?,?,?,?,?,'creating','creation reserved',?,?)
+        VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?, 'creating','creation reserved',?,?)
         ON CONFLICT(path) DO UPDATE SET id=excluded.id, kind=excluded.kind, mode=excluded.mode,
-        owner=excluded.owner, repository=excluded.repository, source_commit=NULL,
+        owner=excluded.owner, repository=excluded.repository, source_commit=excluded.source_commit,
         checkout_type=excluded.checkout_type, cache_paths=excluded.cache_paths,
         created_at=excluded.created_at, updated_at=excluded.updated_at, lease_expires_at=excluded.lease_expires_at,
         state=excluded.state, detail=excluded.detail, group_id=excluded.group_id, creation_request=excluded.creation_request
         WHERE workspace.state='released'`).run(randomUUID(), destination, root, input.kind, mode,
-        input.owner, repository, strategy, JSON.stringify(input.cachePaths), now, now,
+        input.owner, repository, sourceCommit, strategy, JSON.stringify(input.cachePaths), now, now,
         now + input.leaseSeconds * 1000, input.groupId, request);
     });
     row = database.prepare("SELECT * FROM workspace WHERE path = ?").get(destination);
     if (row.creation_request !== request) fail(`workspace creation was claimed by another request: ${destination}`);
   }
-  const mirror = mirrorFor(statePath, repository);
-  const upstream = repositoryRemotes(repository);
   let sourceCommit = row.source_commit;
   if (sourceCommit === null) {
     sourceCommit = resolveSource(statePath, mirror, repository, upstream, ref);
@@ -1535,6 +1544,22 @@ function createWorkspace(database, args, statePath) {
       .run(`creation retained: ${error.message}`, Date.now(), row.id);
     throw error;
   }
+}
+
+function cancelCreationCommand(database, args) {
+  assertOnly(args, ["id", "path", "json"]);
+  const record = recordBy(database, selectorFrom(args));
+  if (record.state !== "creating") fail(`workspace cannot cancel creation from state ${record.state}`);
+  // lstat also protects dangling symlinks. Cancellation never removes filesystem entries.
+  try {
+    lstatSync(record.path);
+    fail(`pending checkout exists; repeat the original create command to resume and preserve its source: ${record.path}`);
+  } catch (error) {
+    if (error.code !== "ENOENT") throw error;
+  }
+  database.prepare("UPDATE workspace SET state='released', lease_expires_at=0, updated_at=?, detail='creation cancelled; destination absent' WHERE id=? AND state='creating'")
+    .run(Date.now(), record.id);
+  print(recordBy(database, { id: record.id }), bool(args, "json"));
 }
 
 function heartbeatCommand(database, args) {
@@ -1665,6 +1690,7 @@ function help() {
   agent-workspace create --root PATH --name NAME --repo URL [--ref GIT_REF] [--mode writer|review] [--group ID] [--cache PATH,...]
   agent-workspace register --path PATH [--owner ID] [--source-commit SHA] [--group ID] [--cache PATH,...] [--cache-owned OUTPUT=TRACKED_SOURCE] [--replace-cache]
   agent-workspace adopt --root PATH [--mode writer|review] [--nested-groups] [--cache PATH,...] [--cache-owned OUTPUT=TRACKED_SOURCE] [--replace-cache] [--execute]
+  agent-workspace cancel-creation (--id ID|--path PATH)
   agent-workspace heartbeat (--id ID|--path PATH) [--lease-seconds N]
   agent-workspace release (--id ID|--path PATH) [--reap-expired]
   agent-workspace reconcile [--root PATH] [--execute] [--reap-expired]
@@ -1715,16 +1741,19 @@ export function main(argv = process.argv.slice(2), statePath = DEFAULT_STATE) {
       return;
     }
   }
-  if (commandName !== "maintain") drainGc(statePath);
+  if (!["maintain", "cancel-creation"].includes(commandName)) drainGc(statePath);
   const database = openRegistry(statePath);
   try {
     if (commandName === "create") createCommand(database, args, statePath);
     else if (commandName === "register") registerCommand(database, args);
     else if (commandName === "adopt") adoptCommand(database, args, statePath);
-    else if (commandName === "heartbeat" || commandName === "release") {
+    else if (["heartbeat", "release", "cancel-creation"].includes(commandName)) {
       const record = recordBy(database, selectorFrom(args));
-      withWorkspaceLock(database, record.path, () => commandName === "heartbeat"
-        ? heartbeatCommand(database, args) : releaseCommand(database, args, statePath), record.groupId);
+      withWorkspaceLock(database, record.path, () => {
+        if (commandName === "heartbeat") heartbeatCommand(database, args);
+        else if (commandName === "cancel-creation") cancelCreationCommand(database, args);
+        else releaseCommand(database, args, statePath);
+      }, record.groupId);
     }
     else if (commandName === "reconcile") reconcileCommand(database, args, statePath);
     else if (commandName === "maintain") maintainCommand(database, args);

@@ -119,20 +119,63 @@ for (const stage of ["clone", "checkout"]) test(`creation resumes after interrup
   } finally { f.close(); }
 });
 
-test("creation reserved before source fetch remains discoverable and resumes without a directory", () => {
+test("source preparation interruption leaves no destination reservation", () => {
   const f = fixture();
   try {
     const args = ["create", "--root", f.workspaces, "--name", "preparing", "--repo", f.source,
       "--min-free-gib", "0", "--json"];
     assert.throws(() => run(args, interruptCreation(f, "config")));
-    const [pending] = JSON.parse(run(["status", "--json"], f.env));
-    assert.equal(pending.state, "creating");
-    assert.equal(pending.sourceCommit, null);
-    assert.equal(existsSync(pending.path), false);
-    run(["reconcile", "--execute", "--reap-expired", "--json"], f.env);
-    const resumed = JSON.parse(run(args, f.env));
-    assert.equal(resumed.id, pending.id);
-    assert.equal(resumed.state, "active");
+    assert.deepEqual(JSON.parse(run(["status", "--json"], f.env)), []);
+    assert.equal(existsSync(path.join(f.workspaces, "preparing")), false);
+    assert.equal(JSON.parse(run(args, f.env)).state, "active");
+  } finally { f.close(); }
+});
+
+test("invalid sources never reserve a destination and corrected sources resolve to commits", () => {
+  const f = fixture();
+  try {
+    const commit = git(f.source, "rev-parse", "HEAD");
+    const blob = git(f.source, "rev-parse", "HEAD:file.txt");
+    git(f.source, "tag", "not-a-commit", blob);
+    for (const repository of [f.source, `file://${f.remote}`]) {
+      const args = ["create", "--root", f.workspaces, "--name", "validated", "--repo", repository,
+        "--min-free-gib", "0", "--json"];
+      for (const ref of ["no-such-ref", "012345678", ...(repository === f.source ? ["not-a-commit"] : [])]) {
+        assert.throws(() => run([...args, "--ref", ref], f.env));
+        assert.equal(JSON.parse(run(["status", "--json"], f.env)).some(row => row.state === "creating"), false);
+        assert.equal(existsSync(path.join(f.workspaces, "validated")), false);
+      }
+      const created = JSON.parse(run([...args, "--ref", commit.slice(0, 9)], f.env));
+      assert.equal(created.sourceCommit, commit);
+      assert.equal(git(created.path, "rev-parse", "HEAD"), commit);
+      run(["release", "--id", created.id, "--json"], f.env);
+    }
+  } finally { f.close(); }
+});
+
+test("explicit cancellation retires an absent creation without changing grouped peers", () => {
+  const f = fixture();
+  try {
+    const args = ["create", "--root", f.workspaces, "--repo", f.source,
+      "--group", "paired", "--min-free-gib", "0", "--json"];
+    const pending = JSON.parse(run([...args, "--name", "failed"], f.env));
+    const peer = JSON.parse(run([...args, "--name", "peer"], f.env));
+    const database = new DatabaseSync(f.env.PI_WORKSPACE_STATE);
+    database.prepare("UPDATE workspace SET state='creating', source_commit=NULL, lease_expires_at=0 WHERE id=?").run(pending.id);
+    database.close();
+    rmSync(pending.path, { recursive: true });
+    symlinkSync(path.join(f.root, "absent-target"), pending.path);
+    assert.throws(() => run(["cancel-creation", "--id", pending.id], f.env), /pending checkout exists/);
+    rmSync(pending.path);
+    const cancelled = JSON.parse(run(["cancel-creation", "--id", pending.id, "--json"], f.env));
+    assert.equal(cancelled.state, "released");
+    assert.equal(cancelled.sourceCommit, null);
+    const [unchanged] = JSON.parse(run(["status", "--path", peer.path, "--json"], f.env));
+    assert.deepEqual(unchanged, peer);
+    const recovered = JSON.parse(run([...args, "--name", "failed", "--ref", peer.sourceCommit], f.env));
+    assert.notEqual(recovered.id, pending.id);
+    assert.equal(recovered.state, "active");
+    assert.throws(() => run(["cancel-creation", "--id", recovered.id], f.env), /cannot cancel creation from state active/);
   } finally { f.close(); }
 });
 
@@ -147,6 +190,7 @@ test("pending creation preserves edits and ignored output instead of deleting a 
     mkdirSync(path.join(destination, "ignored-output"));
     writeFileSync(path.join(destination, "ignored-output", "proof"), "retain\n");
     assert.throws(() => run(args, f.env), /pending checkout contains changes/);
+    assert.throws(() => run(["cancel-creation", "--path", destination], f.env), /pending checkout exists/);
     const retained = JSON.parse(run(["release", "--path", destination, "--json"], f.env));
     assert.equal(retained.action, "none");
     assert.equal(readFileSync(path.join(destination, "file.txt"), "utf8"), "unique source\n");
