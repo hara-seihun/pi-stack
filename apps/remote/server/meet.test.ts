@@ -50,6 +50,21 @@ describe("PiStack Meet", () => {
     } finally { await server.close(); }
   });
 
+  test("ordinary peer-to-peer rooms retain their twelve-person limit", async () => {
+    const server = new MeetServer(() => true);
+    try {
+      const host = await start(server);
+      const root = `/${host.room.id}`;
+      for (let i = 0; i < 11; i++) {
+        expect((await server.handle(request(`${root}/join`, "POST", { name: `Guest ${i}` })))!.status).toBe(201);
+      }
+      const rejected = await server.handle(request(`${root}/join`, "POST", { name: "Overflow", external: true }));
+      expect(rejected!.status).toBe(409);
+      expect((await rejected!.json()).error).toContain("maximum 12 people");
+      expect((await (await server.handle(request(root)))!.json()).participants).toHaveLength(12);
+    } finally { await server.close(); }
+  });
+
   test("leaving during browser startup closes the candidate instead of leaking it", async () => {
     let ready!: (value: { ok: true; value: MeetBrowser }) => void;
     let closed = 0;
