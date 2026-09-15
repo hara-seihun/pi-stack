@@ -14,7 +14,7 @@ function fixture(t) {
     mkdirSync(dirname(join(repo, path)), { recursive: true });
     writeFileSync(join(repo, path), text);
   };
-  for (const file of ["scripts/build-workspace.mjs", "deploy/lib"]) {
+  for (const file of ["scripts/build-workspace.mjs", "deploy/lib", "deploy/release-checkout"]) {
     put(file, "");
     copyFileSync(join(root, file), join(repo, file));
   }

@@ -23,6 +23,7 @@ function fixture(t) {
   git(repo, "config", "user.email", "test@example.test");
   mkdirSync(join(repo, "deploy"));
   copyFileSync(lib, join(repo, "deploy/lib"));
+  copyFileSync(helper, join(repo, "deploy/release-checkout"));
   writeFileSync(join(repo, "source"), "first\n");
   git(repo, "add", ".");
   git(repo, "commit", "-qm", "first");
@@ -33,8 +34,10 @@ function fixture(t) {
   const state = join(dir, "release");
   const marker = join(dir, "live-commit");
   const args = (sha, rollback = "0") => ["-c", selectScript, "release-test", helper, state, repo, sha, marker, rollback];
-  const select = (sha, rollback) => spawnSync("bash", args(sha, rollback), { encoding: "utf8", timeout: 5000 });
-  return { dir, repo, state, marker, first, second, args, select };
+  const hostLock = join(dir, "host.lock");
+  const env = { ...process.env, PI_STACK_HOST_LOCK_PATH: hostLock };
+  const select = (sha, rollback) => spawnSync("bash", args(sha, rollback), { encoding: "utf8", timeout: 5000, env });
+  return { dir, repo, state, marker, first, second, args, select, env, hostLock };
 }
 
 test("release selects committed source without changing a dirty writer or its refs", (t) => {
@@ -85,7 +88,7 @@ test("selection recovers interrupted initialization and refuses an incorrect ori
 test("the wrapper retains the checkout lock until its proof finishes", async (t) => {
   const f = fixture(t);
   const child = spawn("bash", ["-c", `${selectScript}; read -r release_lock`, ...f.args(f.first).slice(2)], {
-    stdio: ["pipe", "pipe", "pipe"],
+    stdio: ["pipe", "pipe", "pipe"], env: f.env,
   });
   t.after(() => child.kill());
   const finished = new Promise((resolveExit, reject) => {
@@ -97,6 +100,7 @@ test("the wrapper retains the checkout lock until its proof finishes", async (t)
     child.once("error", reject);
     child.once("exit", () => reject(new Error("wrapper exited before selecting source")));
   });
+  assert.equal(spawnSync("flock", ["-n", f.hostLock, "true"]).status, 1);
   const lock = join(f.state, "repository/.git/pi-stack-deploy.lock");
   assert.equal(spawnSync("flock", ["-n", lock, "true"]).status, 1);
   assert.equal(spawnSync("flock", ["-n", join(f.state, "release.lock"), "true"]).status, 1);
