@@ -38,7 +38,7 @@ export interface ImportMessage {
 }
 class NativeRejection extends Error {}
 interface Runtime {
-  session: PiSession; epoch: string; executionId?: string; lease?: ThreadAdmission; busy: boolean;
+  session: PiSession; epoch: string; executionId?: string; lease?: ThreadAdmission; busy: boolean; settings?: ThreadSettings;
   finalMessage?: Json; outcome?: WorkOutcome; commandRunning?: string; commandNumber: number; waiters: Map<string, { resolve(value: any): void; reject(error: Error): void; timer: ReturnType<typeof setTimeout> }>;
 }
 const good = <T>(value: T): Result<T> => ({ ok: true, value });
@@ -366,14 +366,25 @@ export class ThreadService implements ThreadApi {
       const current = this.get(input.threadId)!, settings = resolveThreadSettings(input.settings, current.settings); if (!settings.ok) return settings;
       this.db.prepare("UPDATE thread SET settings=? WHERE id=?").run(JSON.stringify(settings.value), input.threadId);
       this.changed(input.threadId);
-      const runtime = this.runtimes.get(input.threadId);
-      if (runtime && current.settings.model === settings.value.model) {
+      const runtime = this.runtimes.get(input.threadId), execution = this.execution(input.threadId);
+      const activeSettings: ThreadSettings | undefined = execution ? JSON.parse(execution.settings) : runtime?.settings;
+      const activeSelection = activeSettings && resolveThreadSettings({}, activeSettings);
+      if (runtime && activeSettings && activeSelection?.ok && activeSelection.value.model === settings.value.model) {
+        const applied = { ...activeSettings };
+        const remember = () => {
+          runtime.settings = { ...applied };
+          if (execution) this.db.prepare("UPDATE thread_execution SET settings=? WHERE id=?").run(JSON.stringify(applied), execution.id);
+        };
         try {
-          const execution = this.execution(input.threadId);
-          if (execution) this.db.prepare("UPDATE thread_execution SET settings=? WHERE id=?").run(JSON.stringify(settings.value), execution.id);
-          if (input.settings.speed !== undefined) await this.rpc(runtime, { type: "set_speed", speed: settings.value.speed });
-          if (input.settings.thinkingLevel !== undefined) await this.rpc(runtime, { type: "set_thinking_level", level: settings.value.thinkingLevel });
-        } catch (error) { return bad("unavailable", errorText(error)); }
+          if (input.settings.speed !== undefined) {
+            await this.rpc(runtime, { type: "set_speed", speed: settings.value.speed });
+            applied.speed = settings.value.speed; remember();
+          }
+          if (input.settings.thinkingLevel !== undefined) {
+            await this.rpc(runtime, { type: "set_thinking_level", level: settings.value.thinkingLevel });
+            applied.thinkingLevel = settings.value.thinkingLevel; remember();
+          }
+        } catch (error) { return bad("unavailable", `Thread settings were saved, but the running session did not confirm applying them: ${errorText(error)}`); }
       }
       return good(this.get(input.threadId)!);
     }
@@ -516,7 +527,7 @@ export class ThreadService implements ThreadApi {
       if (!admitted.ok) throw new Error(admitted.error.message);
       recoveredAdmission = admitted.value; extraEnv = { ...extraEnv, ...admitted.value.env }; settings = admitted.value.settings ?? settings;
     }
-    const runtime: Runtime = { session: undefined as unknown as PiSession, epoch: randomUUID(), busy: false, commandNumber: 0, waiters: new Map(), lease: recoveredAdmission };
+    const runtime: Runtime = { session: undefined as unknown as PiSession, epoch: randomUUID(), busy: false, commandNumber: 0, waiters: new Map(), lease: recoveredAdmission, settings };
     const [provider, ...model] = settings.model.split("/");
     const context = thread.metadata?.context;
     if (context !== undefined && (!isRunContext(context) || thread.metadata?.execution === "root-repair")) throw new Error("Invalid recorded isolated execution boundary");

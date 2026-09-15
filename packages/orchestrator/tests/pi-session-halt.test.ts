@@ -26,7 +26,7 @@ function deferred() {
 
 const cleanups: (() => Promise<void>)[] = [];
 afterEach(async () => { for (const cleanup of cleanups.splice(0).reverse()) await cleanup(); vi.restoreAllMocks(); });
-async function fixture(prepare?: (session: AgentSession) => void, extension?: string) {
+async function fixture(prepare?: (session: AgentSession) => void, extension?: string, env: NodeJS.ProcessEnv = {}) {
   captured.prepare = prepare;
   const cwd = mkdtempSync(join(tmpdir(), "pi-halt-")), events: PiEvent[] = [];
   const args: string[] = [];
@@ -36,7 +36,7 @@ async function fixture(prepare?: (session: AgentSession) => void, extension?: st
     args.push("--extension", path);
   }
   const waiters = new Set<() => void>();
-  const session = await openPiSession({ cwd, args, env: { PI_CODING_AGENT_DIR: join(cwd, "agent"), PI_OFFLINE: "1" }, threadId: "halt-fixture", sessionFile: join(cwd, "native.jsonl") }, event => {
+  const session = await openPiSession({ cwd, args, env: { PI_CODING_AGENT_DIR: join(cwd, "agent"), PI_OFFLINE: "1", ...env }, threadId: "halt-fixture", sessionFile: join(cwd, "native.jsonl") }, event => {
     events.push(event);
     for (const notify of waiters) notify();
   }, () => {});
@@ -67,6 +67,17 @@ async function fixture(prepare?: (session: AgentSession) => void, extension?: st
   };
   return { session, native, events, command, waitFor, reply, message };
 }
+
+it.each([false, true])("identifies capture ownership without losing runner observation: Remote=%s", async remote => {
+  const f = await fixture(undefined, undefined, remote
+    ? { PI_REMOTE_SESSION_ID: "mirror-owner", PI_REMOTE_SERVER_URL: "http://127.0.0.1:1" }
+    : { PI_REMOTE_SESSION_ID: "", PI_REMOTE_SERVER_URL: "" });
+  expect(await f.command("prompt", { workId: "capture", message: "capture" })).toMatchObject({ success: true });
+  await f.waitFor(event => event.type === "agent_settled");
+  expect(f.events.filter(event => event.type === "context_update")).toMatchObject([
+    { contextOwner: remote ? "remote-mirror" : "runner", context: { tools: expect.any(Array), messages: expect.any(Array) } },
+  ]);
+}, 3000);
 
 it("settles normal completion once, then admits the next turn", async () => {
   const f = await fixture();

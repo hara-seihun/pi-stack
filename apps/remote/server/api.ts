@@ -37,6 +37,7 @@ export const API = Object.freeze({
   voice: route("GET", "/v1/voice"), voiceOffer: route("POST", "/v1/voice/offer"), voiceSessionUpdate: route("PATCH", "/v1/sessions/:sessionId/voice/:voiceId"), voiceSessionClose: route("DELETE", "/v1/sessions/:sessionId/voice/:voiceId"),
   governorToggle: route("POST", "/v1/governor-controls/:provider/toggle"),
   actions: route("GET", "/v1/actions"), actionToggle: route("POST", "/v1/actions/:id/toggle"), uploadInit: route("POST", "/v1/uploads/init"), upload: route("PUT", "/v1/uploads/:id"), uploadComplete: route("POST", "/v1/uploads/:id/complete"), uploads: route("POST", "/v1/uploads"), removeUploads: route("DELETE", "/v1/uploads"),
+  dismissError: route("POST", "/v1/errors/:errorId/dismiss"),
   workspaces: route("GET", "/v1/workspaces"), sync: route("POST", "/v1/sync"), sessions: route("GET", "/v1/sessions"), createSession: route("POST", "/v1/sessions"), reorderSessions: route("PUT", "/v1/sessions/order"), archivedSessions: route("GET", "/v1/sessions/archived"),
   session: route("GET", "/v1/sessions/:sessionId"), archiveSession: route("DELETE", "/v1/sessions/:sessionId"), rejectSessionEdit: route("PUT", "/v1/sessions/:sessionId"), sessionFiles: route("GET", "/v1/sessions/:sessionId/files"), sessionFilesHead: route("HEAD", "/v1/sessions/:sessionId/files"), unarchiveSession: route("POST", "/v1/sessions/:sessionId/unarchive"),
   sessionMeeting: route("GET", "/v1/sessions/:sessionId/meeting"),

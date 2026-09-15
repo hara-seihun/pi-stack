@@ -11,7 +11,6 @@ import { isCompletionInput, isCompletionRequestId } from "./completion-contract.
 import { catalogModel } from "./catalog.js";
 import type { UsageComponent } from "./domain.js";
 import { imageAuth } from "./image-service.js";
-import { loadConfig } from "./config.js";
 import { chooseInteractiveAccount, eligibleInteractiveAccounts } from "./auth/account-selection.js";
 import { providerOAuth } from "./auth/shared-oauth.js";
 import { BROKER_ROUTES, validateBrokerBody, type BrokerFamily } from "./model-broker-contract.js";
@@ -56,7 +55,6 @@ const json = (res: ServerResponse, status: number, error: string) => {
 export type BrokerTransport = (url: string, init: RequestInit) => Promise<Response>;
 export function createModelBroker(config: ModelBrokerConfig, transport: BrokerTransport = fetch) {
   const store = Store.open(config.ledgerPath);
-  const policy = loadConfig(undefined, config.ledgerPath);
   const completions = new CompletionService(store, process.cwd());
   const providers = new Map(builtinProviders().filter(provider => provider.id in BROKER_ROUTES).map(provider => [provider.id, provider]));
   const auth = new Map([...providers].map(([id, provider]) => [id, providerOAuth(provider, config.authPath)]));
@@ -98,7 +96,7 @@ export function createModelBroker(config: ModelBrokerConfig, transport: BrokerTr
     if (req.method !== "POST" || !family) { json(res, 404, "Only new model requests are available"); return; }
     if (!String(req.headers["content-type"]).startsWith("application/json")) { json(res, 415, "Expected application/json"); return; }
     const count = inflight.get(listener.principal) ?? 0;
-    if (count >= listener.maxInFlight) { json(res, 429, "Your model request limit is full"); return; }
+    if (count >= listener.maxInFlight) { json(res, 503, "Your shared model request limit is full. Wait for an active request to finish."); return; }
     inflight.set(listener.principal, count + 1);
     const cancel = new AbortController();
     const signal = AbortSignal.any([shutdown.signal, cancel.signal, AbortSignal.timeout(30 * 60_000)]);
@@ -128,16 +126,14 @@ export function createModelBroker(config: ModelBrokerConfig, transport: BrokerTr
       const invalid = validateBrokerBody(family, body);
       if (invalid) { json(res, 400, invalid); return; }
       if (!listener.models.includes(`${family}/${body.model}`)) { json(res, 403, "This model is not shared with your Unix account"); return; }
-      if (store.activeLeases().length >= policy.maxConcurrentSessions) { json(res, 429, "Shared model admission is full"); return; }
       const shared = auth.get(family)!;
       const exclude = new Set(store.accounts().filter(account => !listener.accounts.includes(account.id)
-        || store.activeLeases(account.id).length >= policy.defaultAccountConcurrency
         || store.latestMeters(account.id).some(meter => Number(meter.used_percent) >= 100 && (!meter.reset_at || Number(meter.reset_at) > Date.now()))).map(account => account.id));
       const affinity = scoped(listener.principal, body.prompt_cache_key ?? req.headers["session-id"] ?? req.headers["session_id"] ?? req.headers["x-claude-code-session-id"]);
       const retained = sticky.get(affinity);
       const account = eligibleInteractiveAccounts(store, shared, family, exclude).find(account => account.id === retained)
         ?? chooseInteractiveAccount(store, shared, family, exclude);
-      if (!account) { json(res, 429, "No eligible shared model account"); return; }
+      if (!account) { json(res, 503, "No eligible shared model account. The granted pool is unavailable, cooling down or out of quota."); return; }
       if (sticky.size >= 4096) sticky.delete(sticky.keys().next().value!);
       sticky.set(affinity, account.id);
       lease = `broker:${listener.principal}:${randomUUID()}`;

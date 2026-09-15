@@ -4,7 +4,7 @@
 // the other instead of silently reading undefined at runtime.
 
 import type { ThreadState } from "pi-orchestrator/api";
-import type { InlineImage, InlineImageSnapshot } from "./inline-image-contract";
+import type { InlineImage, InlineImageSnapshot } from "./inline-image-contract.js";
 export type { InlineImage, InlineImageSnapshot };
 
 export interface EnvironmentEndpoint {
@@ -64,6 +64,7 @@ export interface Session {
   revision: number;
   idleUnread: boolean;
   lastError: string | null;
+  lastErrorId?: string | null;
   steeringQueued: number;
   followUpQueued: number;
   queuedMessages: QueuedMessage[];
@@ -163,7 +164,7 @@ export interface SupervisorState {
   sessions: Session[];
   archived: Session[];
   archivedTotal: number;
-  ownerErrors?: Array<{ owner: string; message: string }>;
+  ownerErrors?: Array<{ id: string; owner: string; message: string }>;
 }
 
 export interface SyncRequest {
@@ -213,7 +214,6 @@ export type BashTimeoutSeconds = (typeof BASH_TIMEOUT_OPTIONS)[number];
 export const DEFAULT_BASH_TIMEOUT_SECONDS: BashTimeoutSeconds = 1800;
 
 export interface ThreadSettings {
-  children: Session[];
   models: Array<{ id: string; name?: string; provider: string; common?: boolean }>;
   model: { id: string; provider: string } | null;
   thinkingLevels: string[];
