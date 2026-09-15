@@ -15,5 +15,8 @@ export async function updateThreadSettings(owner: Pick<ThreadApi, "control">, th
   if (input.speedMode != null) settings.speed = input.speedMode as SettingsOverrides["speed"];
   const changed = await owner.control({ threadId: thread.id, action: "settings", settings });
   if (!changed.ok || input.bashTimeoutSeconds == null) return changed;
-  return owner.control({ threadId: thread.id, action: "update", metadata: { ...changed.value.metadata, bashTimeoutSeconds: input.bashTimeoutSeconds } });
+  const timeout = await owner.control({ threadId: thread.id, action: "update", metadata: { ...changed.value.metadata, bashTimeoutSeconds: input.bashTimeoutSeconds } });
+  if (!timeout.ok) return { ok: false, error: { ...timeout.error,
+    message: `Model, thinking and speed settings were saved, but the bash timeout update was not confirmed: ${timeout.error.message}` } };
+  return timeout;
 }

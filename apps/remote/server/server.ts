@@ -1246,7 +1246,6 @@ async function threadSettings(row: any) {
   const metadata = threadSettingsMetadata(row.settings);
   return {
     ...metadata,
-    children: unwrap(await directChildren(row.id)),
     bashTimeoutSeconds: bashTimeoutSeconds(row.bash_timeout_seconds),
     models: rolledUpModels(metadata.models),
   };

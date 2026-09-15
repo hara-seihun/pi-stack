@@ -41,11 +41,25 @@ test("a saved pooled account selects the same canonical option as the model list
   const settings = threadSettingsMetadata({ model: "openai-codex-8/gpt-6-astra", thinkingLevel: "high", speed: "standard" });
   expect(settings.model).toMatchObject({ provider: "openai-codex", id: "gpt-6-astra" });
   expect(settings.models).toContainEqual(settings.model);
+  expect(settings.models).toHaveLength(6);
   expect(settings.speedModes).toEqual(["standard", "priority"]);
 });
 
-test("unlisted saved models remain visible without replacing the accepted selection", () => {
-  expect(threadSettingsMetadata({ model: "private/local-model", thinkingLevel: "medium", speed: "standard" })).toMatchObject({
-    model: { provider: "private", id: "local-model" }, thinkingLevel: "medium", thinkingLevels: ["medium"],
+test("unlisted saved models remain selectable without replacing the accepted selection", () => {
+  for (const model of ["private/local-model", "anthropic/claude-sonnet-4-5"]) {
+    const settings = threadSettingsMetadata({ model, thinkingLevel: "medium", speed: "standard" });
+    expect(`${settings.model.provider}/${settings.model.id}`).toBe(model);
+    expect(settings.models).toContainEqual(settings.model);
+    expect(settings.models).toHaveLength(7);
+    expect(settings.thinkingLevels).toContain("medium");
+  }
+});
+
+test("a failed second write identifies the settings already saved", async () => {
+  const thread = { id: "cold", metadata: { retain: true } } as Parameters<typeof updateThreadSettings>[1];
+  const control = vi.fn().mockResolvedValueOnce({ ok: true, value: thread })
+    .mockResolvedValueOnce({ ok: false, error: { code: "unavailable", message: "Controller handed off" } });
+  expect(await updateThreadSettings({ control }, thread, { thinkingLevel: "high", bashTimeoutSeconds: 300 })).toMatchObject({
+    ok: false, error: { code: "unavailable", message: expect.stringContaining("settings were saved, but the bash timeout update was not confirmed") },
   });
 });

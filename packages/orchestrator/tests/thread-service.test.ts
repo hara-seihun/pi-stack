@@ -100,6 +100,42 @@ function fixture(root?: string, workersOnly = false) {
   return { directory, service, sessions };
 }
 
+it("preserves the running account and model when future settings change", async () => {
+  const f = fixture();
+  await f.service.start();
+  const thread = value(await f.service.spawn({ requestId: "settings-attribution", cwd: f.directory, message: "active" }));
+  await waitFor(() => f.sessions.some(session => session.isStreaming));
+  const db = new DatabaseSync(join(f.directory, "threads.sqlite"));
+  try {
+    db.prepare("UPDATE thread_execution SET settings=json_set(settings,'$.model','openai-codex-8/gpt-6-astra') WHERE thread_id=?").run(thread.id);
+    value(await f.service.control({ threadId: thread.id, action: "settings", settings: { thinkingLevel: "low" } }));
+    const active = () => JSON.parse((db.prepare("SELECT settings FROM thread_execution WHERE thread_id=?").get(thread.id) as { settings: string }).settings);
+    expect(active()).toMatchObject({ model: "openai-codex-8/gpt-6-astra", thinkingLevel: "low" });
+    const count = f.sessions[0].commands.length;
+    value(await f.service.control({ threadId: thread.id, action: "settings", settings: { model: "fable" } }));
+    value(await f.service.control({ threadId: thread.id, action: "settings", settings: { thinkingLevel: "high", speed: "priority" } }));
+    expect(f.service.get(thread.id)!.settings).toEqual({ model: "anthropic/claude-fable-5-1", thinkingLevel: "high", speed: "priority" });
+    expect(active()).toEqual({ model: "openai-codex-8/gpt-6-astra", thinkingLevel: "low", speed: "standard" });
+    expect(f.sessions[0].commands).toHaveLength(count);
+  } finally { db.close(); }
+});
+
+it("reports persisted settings when the running session rejects their application", async () => {
+  const f = fixture();
+  await f.service.start();
+  const thread = value(await f.service.spawn({ requestId: "settings-partial", cwd: f.directory, message: "active" }));
+  await waitFor(() => f.sessions.some(session => session.isStreaming));
+  const session = f.sessions[0], command = session.command.bind(session);
+  vi.spyOn(session, "command").mockImplementation(async input => {
+    if (input.type === "set_thinking_level") throw new Error("Native session unavailable");
+    return command(input);
+  });
+  expect(await f.service.control({ threadId: thread.id, action: "settings", settings: { thinkingLevel: "low" } })).toMatchObject({
+    ok: false, error: { message: expect.stringContaining("Thread settings were saved, but the running session did not confirm") },
+  });
+  expect(f.service.get(thread.id)!.settings.thinkingLevel).toBe("low");
+});
+
 describe("leaf Orchestrator workers", () => {
   it("routes children to fleet, rejects recursion in both owners, and retains creation receipts", async () => {
     const person = fixture(), fleet = fixture(undefined, true);
