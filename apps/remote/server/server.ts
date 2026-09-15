@@ -177,6 +177,7 @@ const forkingSessions = new Set<string>();
 let shuttingDown = false;
 const runner = createSharedPiSessionOpener({ dataDir: DATA });
 const threads = new ThreadService({
+  attachSession: runner.attachSession,
   databasePath: join(DATA, "threads.sqlite3"),
   sessionsDir: join(DATA, "threads"),
   openSession: (options, output, exit) => runner.openSession({ ...options,

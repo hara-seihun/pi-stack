@@ -67,6 +67,7 @@ export class Daemon {
     const dataDir=this.ledgerPath===":memory:"?tmpdir():dirname(this.ledgerPath);
     this.opener=createSharedPiSessionOpener({dataDir,durable:true});
     this.threads=new ThreadService({workersOnly:true,databasePath:this.ledgerPath===":memory:"?":memory:":join(dataDir,"threads.sqlite3"),sessionsDir:join(dataDir,"threads"),
+      attachSession:this.opener.attachSession,
       openSession:(options,output,exit)=>{
         const context=this.threads.get(options.threadId)?.metadata?.context;
         if(context)throw new Error("An isolated thread must be imported into its application ThreadService before execution");
@@ -256,6 +257,7 @@ export class Daemon {
     if(!service){
       const dataDir=join(dirname(this.ledgerPath),"applications",id);
       service=new ThreadService({workersOnly:true,databasePath:this.ledgerPath===":memory:"?":memory:":join(dataDir,"threads.sqlite3"),sessionsDir:join(dataDir,"threads"),
+        attachSession:this.opener.attachSession,
         openSession:(options,output,exit)=>this.opener.openSession({...options,args:[...options.args,"--orchestrator-context",JSON.stringify(context)]},output,exit),
         environment:thread=>({...this.threadEnvironment(thread),PI_THREAD_API_URL:`http://127.0.0.1:${PORT}/v1/applications/${id}/threads`}),
         admit:(...args)=>this.fleet.admit(...args)});
