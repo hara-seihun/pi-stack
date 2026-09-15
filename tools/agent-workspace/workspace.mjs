@@ -137,6 +137,7 @@ function command(executable, commandArgs, options = {}) {
     // Git operands are resolved before launch; a released caller directory may vanish mid-command.
     cwd: options.cwd ?? homedir(),
     encoding: "utf8",
+    input: options.input,
     stdio: ["pipe", "pipe", "pipe", ...heldResourceLocks.values()],
     env: { ...process.env, ...options.env, GIT_TERMINAL_PROMPT: "0" },
     maxBuffer: 16 * 1024 * 1024,
@@ -283,19 +284,26 @@ function normalizeCachePaths(values) {
 }
 
 function repositoryOwnedCachePaths(repository, values) {
-  return values.map((value) => {
+  const specifications = values.map((value) => {
     const separator = value.indexOf("=");
     if (separator < 1 || separator === value.length - 1) fail(`cache owner must be OUTPUT=TRACKED_SOURCE: ${value}`);
     const output = normalizeCachePath(value.slice(0, separator).trim());
     const source = normalizeCachePath(value.slice(separator + 1).trim());
     if (source.includes("*")) fail(`cache owner source must be an exact path: ${source}`);
-    const tracked = command("git", ["-C", repository, "ls-files", "--error-unmatch", "--", source]);
-    if (tracked.status !== 0) return null;
-    if (output.startsWith("**/")) return output;
-    const ignored = [output, `${output}/.agent-workspace-cache-probe`].some((candidate) =>
-      command("git", ["-C", repository, "check-ignore", "--no-index", "--quiet", "--", candidate]).status === 0);
-    return ignored ? output : null;
-  }).filter(Boolean);
+    return { output, source, probes: [output, `${output}/.agent-workspace-cache-probe`] };
+  });
+  if (specifications.length === 0) return [];
+  const sources = [...new Set(specifications.map(({ source }) => source))];
+  const tracked = new Set(git(repository, ["ls-files", "-z", "--", ...sources]).split("\0").filter(Boolean));
+  const probes = [...new Set(specifications.flatMap(({ output, probes: candidates, source }) =>
+    tracked.has(source) && !output.startsWith("**/") ? candidates : []))];
+  const ignored = probes.length === 0 ? new Set() : new Set(command("git", [
+    "-C", repository, "check-ignore", "--no-index", "-z", "--stdin",
+  ], { input: `${probes.join("\0")}\0` }).stdout.split("\0").filter(Boolean));
+  return specifications
+    .filter(({ output, source, probes: candidates }) => tracked.has(source)
+      && (output.startsWith("**/") || candidates.some((candidate) => ignored.has(candidate))))
+    .map(({ output }) => output);
 }
 
 function cachePathsForRepository(repository, args) {
