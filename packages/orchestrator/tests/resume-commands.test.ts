@@ -35,8 +35,11 @@ it("rejects an empty thread id without clearing the global launch halt",async()=
 it("reports a held-message resume failure without clearing the global launch halt",async()=>{
   const log=vi.spyOn(console,"log").mockImplementation(()=>{});
   const failure={ok:false,error:{code:"no_pending_messages",message:"No pending messages"}};
-  vi.spyOn(globalThis,"fetch").mockResolvedValue(Response.json(failure));
+  const fetch=vi.spyOn(globalThis,"fetch").mockResolvedValue(Response.json(failure));
   await dispatch(["resume","stopped"]);
+  expect(fetch).toHaveBeenCalledTimes(1);
+  expect(new URL(String(fetch.mock.calls[0]![0])).pathname).toBe("/v1/threads/control");
+  expect(JSON.parse(String(fetch.mock.calls[0]![1]?.body))).toEqual({threadId:"stopped",action:"resume"});
   expect(process.exitCode).toBe(1);
-  expect(JSON.parse(String(log.mock.calls[0]?.[0]))).toEqual(failure);
+  expect(JSON.parse(String(log.mock.calls[0]?.[0]))).toEqual({ok:false,error:{...failure.error,retryable:false}});
 });

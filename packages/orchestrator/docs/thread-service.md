@@ -4,6 +4,20 @@ The [accepted thread design](../../../docs/threads.md) defines behavior. [`Threa
 
 `send()` accepts an optional `delivery`. The shared `resolveDelivery()` keeps explicit modes, defaults messages with `senderId` to `steer`, and defaults senderless human messages to `queue`. HTTP and directory routing preserve the sender and selected mode; the destination service resolves omitted delivery before validation and persistence.
 
+## HTTP acceptance across activation
+
+`createThreadClient()` retains one serialized request and its identity while reconnecting. Sends and spawns require their existing stable `requestId` before transport replay is allowed. Read-only operations can reconnect too. Connection loss, HTTP 502/503/504 and an explicitly retryable suspended-controller response use delays of 100, 200, 400, 800 and then 1,000 milliseconds, within one 60-second deadline. Ordinary owner decisions, including archived recipients and identity conflicts, are terminal. Commands and controls are never automatically replayed.
+
+Every failure returned by the client carries `retryable: false` because the client has finished retrying or received a terminal decision. Send and spawn failures also carry the submitted `requestId`. The CLI preserves these fields, and a failed spawn batch reports the failed request's identity alongside the threads already accepted. Control failures have no generated request identity.
+
+The native tool passes its cancellation signal into that client. HTTP directory hops inherit the original deadline through `x-pi-thread-deadline` and the incoming request's cancellation signal, rather than starting another minute of retries. The daemon's Node HTTP adapter forwards both. Cancellation or deadline expiry ends reconnect and returns an error carrying the original request ID. An interrupted response does not prove rejection; its error says acceptance is unconfirmed. The sender's native tool call retains the input and identity. It must not become a new instruction with a new ID.
+
+The destination commits the input and request receipt together. A retry after acceptance returns that receipt without waking the recipient again, even if Stop intervened. Admission rechecks receipts after asynchronous parent discovery or cancellation, so overlapping retries cannot create a second child or input. Peer routing and Unix-person boundaries are unchanged.
+
+The September 15 incident exposed the missing reconnect. A send failed at 21:21:47 UTC while the fleet daemon restarted, then began listening at 21:21:49. The caller received `unavailable` after one fetch and had to issue another instruction. `tests/thread-http.test.ts` now exercises an actual refused loopback connection, loss of the response after the SQLite commit, owner replacement and an intervening Stop. It also covers deadline propagation, native tool cancellation, identity conflicts and non-replayable operations. No model or live thread is involved.
+
+From `packages/orchestrator`, run `npx vitest run tests/thread-http.test.ts`. To exercise an installed release with the same proof, set `PI_THREAD_TEST_RELEASE=/srv/pi/pi-orchestrator/dist`. Active native sessions retain their loaded tool generation until normal session replacement; newly activated directory owners use the new peer transport immediately.
+
 ## Construction and lifetime
 
 Create a service with `databasePath`, `sessionsDir` and the shared runner's `openSession` and `attachSession`. Optional hooks supply boundary-specific environment, quota admission and message preparation. Set its authorized directory with `setDirectory()` before starting it. The service supplies `PI_THREAD_DATABASE` from its own `databasePath` to every session, so `read-thread` uses the thread's owner rather than the account's Remote store.
