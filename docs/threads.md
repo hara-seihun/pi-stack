@@ -6,7 +6,7 @@ Orchestrator owns persistent threads, input admission, execution state and durab
 
 Pi is the only session engine. Astra, Sol, Terra, Luna, Fable and Opus are model choices, while retained names of other engines are import provenance. Session, settings, run and CLI operations do not accept an engine selector.
 
-A thread has a stable ID, optional parent ID, cwd, native Pi transcript reference and settings. Its execution state describes only its own work. An idle parent with active children is idle. Native transcripts remain authoritative history; projections and live output are not additional conversation stores.
+A thread has a stable ID, optional parent ID, cwd, native Pi transcript reference and settings. Its execution state describes only its own work. An idle parent with running children keeps execution state `idle`, but Remote displays `AWAITING` in the drawer, thread header and live activity indicator. This display includes direct children in either the person or fleet owner and returns to `IDLE` when the last running child settles. Running and stopped parents keep their own activity labels. Native transcripts remain authoritative history; projections and live output are not additional conversation stores.
 
 `ThreadState` is exactly `idle | running | stopped`, defined in [`contracts.ts`](../packages/orchestrator/src/threads/contracts.ts). `running` includes pending input, admission, startup, execution and cancellation until confirmed. `stopped` means held with cancellation confirmed. `idle` means no current work and no hold. Errors stay in details and execution outcomes; they do not add a lifecycle state. Queue labels describe pending messages, not threads.
 

@@ -1,14 +1,32 @@
 import { expect, test } from "bun:test";
-import { createLiveProjection, settleLiveProjection, threadActivity } from "./live-projection";
+import { createLiveProjection, runningChildParents, settleLiveProjection, threadActivity } from "./live-projection";
 
-test("an idle parent's display does not inherit active child or stale local progress", () => {
+test("awaiting describes child work without inheriting progress or overriding the parent's execution", () => {
   const parent = createLiveProjection("parent");
   const child = createLiveProjection("child");
   child.activeTools.set("tool", "bash");
   parent.thinkingActive = true;
   expect(threadActivity("idle", parent)).toBe("idle");
+  expect(threadActivity("idle", parent, true)).toBe("awaiting");
+  expect(threadActivity("running", parent, true)).toBe("thinking");
   expect(threadActivity("running", child)).toBe("waiting_on_tool");
-  expect(threadActivity("stopped", child)).toBe("stopped");
+  expect(threadActivity("stopped", child, true)).toBe("stopped");
+});
+
+test("running children from either owner keep a parent awaiting until the last one settles", () => {
+  const local = [{ parentId: "parent", state: "running" as const }];
+  const fleet = [
+    { parentId: "parent", state: "running" as "running" | "idle" },
+    { parentId: "other", state: "running" as const },
+    { parentId: "settled", state: "idle" as const },
+    { parentId: "held", state: "stopped" as const },
+    { parentId: null, state: "running" as const },
+  ];
+  expect([...runningChildParents(local, fleet)]).toEqual(["parent", "other"]);
+  local.pop();
+  expect(threadActivity("idle", undefined, runningChildParents(local, fleet).has("parent"))).toBe("awaiting");
+  fleet[0]!.state = "idle";
+  expect(threadActivity("idle", undefined, runningChildParents(local, fleet).has("parent"))).toBe("idle");
 });
 
 test("settlement keeps final output until canonical context acknowledges it", () => {
