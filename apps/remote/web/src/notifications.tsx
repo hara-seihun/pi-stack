@@ -3,6 +3,7 @@ import { API } from "../../server/api";
 import type { IdleNotificationFeed } from "../../server/protocol";
 import { browserFetch, loadEnvironments, nativePlatform, nativeSessionReady, remote } from "./native";
 import { ThreadNotifications, threadNotificationKey } from "./thread-notifications";
+import { DismissibleError } from "./dismissible-error";
 
 export interface NotificationTarget { environment?: string; sessionId?: string; user?: string }
 const TARGET = "pi-notification-target";
@@ -47,6 +48,7 @@ export function NotificationControl({ sessionId }: { sessionId: string | null })
     return () => { window.removeEventListener("pi-person", changed); window.removeEventListener("pi-auth", changed); };
   }, []);
   const configure = async (request: boolean) => {
+    if (request) setError("");
     try {
       if (nativePlatform) {
         await nativeSessionReady();
@@ -145,8 +147,8 @@ export function NotificationControl({ sessionId }: { sessionId: string | null })
     }).catch((cause) => { if (!controller.signal.aborted) setError(String(cause)); });
     return () => { controller.abort(); for (const timer of timers) clearTimeout(timer); };
   }, [enabled, user, session, browserNotifications]);
-  return <div className="usage-summary" title={error || (nativePlatform ? "Monitors allowed environments, including in the background" : "Monitors allowed environments while this page is open")}>
+  return <div className="usage-summary" title={nativePlatform ? "Monitors allowed environments, including in the background" : "Monitors allowed environments while this page is open"}>
     {!enabled && <button onClick={() => void configure(true)}>Enable notifications</button>}
-    {error && <div role="status">{error}</div>}
+    <DismissibleError message={error} role="status" dismissLabel="Dismiss notification error" />
   </div>;
 }

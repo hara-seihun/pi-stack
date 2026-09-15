@@ -3,6 +3,7 @@ import type { Session } from "./types";
 import type { ThreadControl } from "../../../../packages/orchestrator/src/threads/contracts";
 import { API } from "../../server/api";
 import { api } from "./client";
+import { DismissibleError } from "./dismissible-error";
 
 export async function submitThreadControl(command: Extract<ThreadControl, { action: "stop" | "resume" }>) {
   const route = command.action === "stop" ? API.sessionAbort : API.sessionResume;
@@ -37,7 +38,7 @@ export function ThreadStopDialog({ session, pending, error, onStop, onClose }: {
   return <dialog ref={dialog} className="stop-thread-dialog" aria-labelledby="stop-thread-title" onCancel={event => { event.preventDefault(); if (!pending) onClose(); }}>
     <h2 id="stop-thread-title">Should the subthreads stop too?</h2>
     <p>{session.name}</p>
-    {error && <p role="alert">{error}</p>}
+    <DismissibleError message={error} resetKey={session.id} dismissLabel="Dismiss stop error" />
     <StopChoices pending={pending} onStop={onStop} />
     <button type="button" disabled={pending} onClick={onClose}>Cancel</button>
   </dialog>;

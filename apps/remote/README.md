@@ -38,6 +38,10 @@ The drawer reports only measured plan and hardware rows. Each plan row also carr
 
 The Android drawer shows Update app only when the bootstrap router advertises a newer installed-package version. The native client downloads the APK, checks its hash and opens Android's installer. App updates do not depend on a person being unlocked. Both hosts serve the same package through the [publication workflow](../../docs/deployment.md#kenan); the browser client has no APK update button.
 
+The bottom-right composer button shows Stop while its thread is queued, starting or running, even with a draft or an upload in progress. Stopping keeps that draft and its attachments. The button disables while cancellation finishes, then returns to Send. There is no separate header Stop button. Threads with children still ask whether to stop those children too.
+
+Paste opens a modal text-document editor above the app. Attach uploads the document to the thread that opened it without sending a message. Upload failures keep the editor and pasted text open for retry; the error can be dismissed.
+
 Drop files anywhere in the client window to attach them to the open conversation's draft. A window-wide overlay names the destination. Dropping never sends a message. Attachments stay with their conversation when switching threads, including while an upload is running.
 
 The paintbrush beside Attach and Paste opens white paper. Tapping an image in an interactive conversation opens that image in the same drawing editor, fitted to the screen. This includes generated images, Markdown images and expanded tool-result images. Drag with a mouse, finger or pen to draw. Two fingers pan, zoom and rotate the paper; the mouse wheel zooms around the pointer. Brush radius stays at 1% of the viewport's shorter side, so zooming in produces finer strokes.

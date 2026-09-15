@@ -12,13 +12,16 @@ import { ContextTranscript, CopyButton, InlineImagesContext, Markdown, modelCont
 import { LiveActivity } from "./live-activity";
 import { FileExplorer } from "./file-explorer";
 import { DrawingCanvas } from "./DrawingCanvas";
+import { EnvironmentControl } from "./EnvironmentControl";
+import { PasteTextDialog } from "./PasteTextDialog";
+import { DismissibleError } from "./dismissible-error";
 import { drawingImage, findDrawingDraft, type DrawingBackground, type DrawingDraft } from "./drawing-drafts";
 import { NotificationControl, takeNotificationTarget, retainNotificationTarget } from "./notifications";
 import { listenForFileDrops } from "./file-drop";
 import { createSyncLoop, type SyncLoop } from "./sync-loop";
 import { updateDocument } from "./sync";
 import { threadsInOrder } from "./thread-order";
-import { activityColor, activityLabel, conversationThreads, orchestratorThreads, working } from "./thread-state";
+import { activityColor, activityLabel, composerAction, conversationThreads, orchestratorThreads, working } from "./thread-state";
 import { ChildThreadList, OrchestratorThreadList } from "./thread-views";
 import { requestStop, submitThreadControl, ThreadStopDialog } from "./thread-controls";
 import { AppUpdateControl } from "./app-update";
@@ -117,49 +120,10 @@ function UnlockDialog() {
       <p>{requiresKey ? "Your folder key stays on this device and opens your private folder on the machine." : "Continue as this person to see their allowed environments."}</p>
       {people.length > 0 && <div className="unlock-field"><label htmlFor="unlock-person">Person</label><select id="unlock-person" value={selectedUser} onChange={(event) => { setSelectedUser(event.target.value); setKey(""); window.PiRemotePerson?.set(event.target.value); }}>{people.map((person) => <option key={person.user} value={person.user}>{person.displayName || person.user}</option>)}</select></div>}
       {requiresKey && <div className="unlock-field"><label htmlFor="unlock-key">Key</label><input id="unlock-key" type="password" autoComplete="current-password" spellCheck={false} required value={key} onChange={(event) => setKey(event.target.value)} /></div>}
-      {message && <p className="unlock-error">{message}</p>}
+      <DismissibleError className="unlock-error" message={message} />
       <div className="unlock-actions"><button className="accent" type="submit">Unlock</button></div>
     </form>
   </dialog>;
-}
-
-function EnvironmentControl() {
-  const [environment, setEnvironment] = useState<any>(null);
-  const [failed, setFailed] = useState("");
-  const [attempt, setAttempt] = useState(0);
-  useEffect(() => {
-    let revision = 0;
-    const refresh = () => {
-      const request = ++revision;
-      setEnvironment(null);
-      setFailed("");
-      void window.KenanRemote?.getState().then(value => {
-        if (request !== revision) return;
-        setEnvironment(value); document.title = `kenan · ${value.name}`;
-      }).catch(error => { if (request === revision) setFailed(String(error?.message || error)); });
-    };
-    const changed = () => {
-      if (window.PiRemotePerson.session()) refresh();
-      else { revision++; setEnvironment(null); setFailed("Folder is locked"); }
-    };
-    refresh();
-    window.addEventListener("pi-auth", changed);
-    return () => { revision++; window.removeEventListener("pi-auth", changed); };
-  }, [attempt]);
-  if (!environment && !failed) return null;
-  return <div className={`environment-control${failed ? " failed" : ""}`} title={failed}>
-    {environment?.icon && <img width="20" height="20" src={iconUrl(environment.icon)} alt="" />}
-    <label htmlFor="environment-select">Environment</label>
-    <select id="environment-select" aria-label="Environment" value={environment?.id || ""} disabled={Boolean(failed)} onChange={async (event) => {
-      const id = event.target.value;
-      try {
-        const selected = await window.KenanRemote?.select?.({ id, user: window.PiRemotePerson?.get() || "" });
-        if (selected) location.reload();
-      } catch (error: any) { setFailed(error?.message || "Could not switch environment"); }
-    }}>{(environment?.environments || []).map((candidate: any) => <option key={candidate.id} value={candidate.id}>{candidate.name}</option>)}</select>
-    {failed && <button type="button" onClick={() => setAttempt(value => value + 1)}>Reconnect</button>}
-    <button type="button" onClick={() => window.PiRemotePerson.set("")}>Change person</button>
-  </div>;
 }
 
 const GOVERNOR_CLASS: Record<GovernorState, string> = { off: "", green: " active boost-green", blue: " active boost-blue", red: " active halted" };
@@ -266,7 +230,7 @@ function SettingsPanel({ session, sessions, open, onClose, onOpenThread }: { ses
   return <><AnimatePresence>{open && <motion.div key="settings-scrim" className="scrim settings-scrim" initial={{ opacity: 0 }} animate={{ opacity: 1 }} exit={{ opacity: 0 }} transition={{ duration: 0.18 }} onClick={onClose} />}</AnimatePresence>
     <AnimatePresence>{open && <motion.aside key="settings-panel" className="settings" aria-label="Thread settings" initial={{ x: "100%" }} animate={{ x: 0 }} exit={{ x: "100%" }} transition={{ type: "spring", stiffness: 520, damping: 42, mass: 0.9 }}>
       <header className="settings-header"><div className="settings-title"><span>Thread settings</span><h2 title={session?.name}>{session?.name || "Thread"}</h2></div><button type="button" className="settings-close" aria-label="Close thread settings" onClick={onClose}>×</button></header>
-      <div className="settings-body"><ChildThreadList children={children} loading={childrenLoading} error={childrenFailure} onOpen={onOpenThread} />{failure && <p className="setting-unavailable" role="alert">{failure}</p>}{!settings ? !failure && <div className="settings-loading" aria-label="Loading thread settings"><span /><span /><span /></div> : <>
+      <div className="settings-body"><ChildThreadList children={children} loading={childrenLoading} error={childrenFailure} onOpen={onOpenThread} /><DismissibleError className="setting-unavailable" message={failure} />{!settings ? !failure && <div className="settings-loading" aria-label="Loading thread settings"><span /><span /><span /></div> : <>
         {!editable && <p className="setting-unavailable">Settings can be changed when the thread is idle.</p>}
         <section className="setting-card">
           <div className="setting-heading"><div><h3>Model</h3><p>The model used for new messages</p></div>{saving === "model" && <span className="setting-saving">Saving</span>}</div>
@@ -306,7 +270,7 @@ function RemoteApp() {
   const [pending, setPending] = useState(false);
   const [stopTarget, setStopTarget] = useState<Session | null>(null);
   const [controlError, setControlError] = useState<{ sessionId: string; message: string } | null>(null);
-  const [pasteOpen, setPasteOpen] = useState(false);
+  const [pasteSessionId, setPasteSessionId] = useState<string | null>(null);
   const [drawings, setDrawings] = useState<DrawingDraft[]>([]);
   const [drawingId, setDrawingId] = useState<string | null>(null);
   const drawingOpener = useRef<{ sessionId: string; element: HTMLElement } | null>(null);
@@ -395,6 +359,7 @@ function RemoteApp() {
 
   const selectThread = useCallback(async (id: string, closeDrawer = true, discovered?: Session, drawerTab: DrawerTab = "threads") => {
     setStopTarget(null);
+    setPasteSessionId(null);
     patch((current) => ({
       selectedId: id, drawerTab, settingsOpen: false, context: null, images: null, liveText: null, liveThinking: null, slashCommands: [], syncing: true,
       discovered: discovered && ![...current.sessions, ...current.archived, ...current.discovered].some(session => session.id === discovered.id)
@@ -611,14 +576,16 @@ function RemoteApp() {
   const send = async () => {
     const session = selectedSession();
     if (!session || pending) return;
+    const action = composerAction(session);
+    if (action !== "send") {
+      if (action === "stop") stopThread(session);
+      return;
+    }
     const sessionAttachments = stateRef.current.attachments.filter((file) => file.sessionId === session.id);
     if (sessionAttachments.some((file) => file.uploading)) return;
     const attachments = sessionAttachments.filter((file) => file.path);
     const text = prompt.trim();
-    if (!text && !attachments.length) {
-      if (working(session)) stopThread(session);
-      return;
-    }
+    if (!text && !attachments.length) return;
     const command = text.startsWith("/") ? state.slashCommands.find((candidate) => candidate.name === text.slice(1).split(/\s/, 1)[0]) : null;
     setControlError(null);
     setPrompt(""); saveDraft(session.id, ""); setPending(true);
@@ -659,6 +626,7 @@ function RemoteApp() {
   const knownSessions = [...state.sessions, ...state.archived, ...state.discovered.filter(discovered => !state.sessions.some(session => session.id === discovered.id) && !state.archived.some(session => session.id === discovered.id))];
   const selected = knownSessions.find((session) => session.id === state.selectedId) ?? null;
   const visibleAttachments = state.attachments.filter((file) => file.sessionId === state.selectedId);
+  const action = composerAction(selected);
   const drawingOpen = drawings.some(draft => draft.id === drawingId && draft.sessionId === state.selectedId);
   useLayoutEffect(() => {
     if (drawingOpen) document.querySelector<HTMLButtonElement>('.drawing-slot:not([hidden]) button[aria-label="Cancel drawing"]')?.focus({ preventScroll: true });
@@ -692,23 +660,23 @@ function RemoteApp() {
       {state.drawerTab === "orchestrator" && <OrchestratorThreadList sessions={knownSessions} selectedId={state.selectedId} onOpen={session => void selectThread(session.id, true, session, "orchestrator")} />}
       {state.drawerTab === "archived" && <div className="thread-list">{state.archived.length ? state.archived.map((session) => <ThreadRow key={session.id} starts={dashboard?.threadStarts ?? []} archived session={session} selected={false} onSelect={() => {}} onArchive={() => {}} onUnarchive={(id) => void unarchive(id)} />) : <div className="thread-empty">No archived threads</div>}{state.archived.length < state.archivedTotal && <button type="button" className="archived-more" onClick={() => void loadOlder()}>Show older · {state.archivedTotal - state.archived.length} more</button>}</div>}
       <FileExplorer hidden={state.drawerTab !== "files"} onRootCount={setRootFileCount} />
-      <footer className="drawer-footer">{state.ownerErrors.map(({ owner, message }) => <div key={owner} role="status" className="connection" style={{ color: "var(--danger)" }}>{owner}: {message}</div>)}<MachineControls actions={dashboard?.actions ?? []} governors={dashboard?.governors ?? null} onAction={(id) => void toggleAction(id)} onGovernor={(provider) => void toggleGovernor(provider)} /><EnvironmentControl /><AppUpdateControl /><NotificationControl sessionId={state.selectedId} /><PlanSummary plans={dashboard?.plans ?? []} counts={modelCounts} /><div className="usage-summary muted">{machineText}</div><div className="usage-summary muted" title={__PI_REMOTE_REVISION__}>Client {__PI_REMOTE_REVISION__.slice(0, 12)}</div>{state.offline && <div className="connection" style={{ color: "var(--danger)" }}>● Offline · {state.offline}</div>}</footer>
+      <footer className="drawer-footer">{state.ownerErrors.map(({ owner, message }) => <DismissibleError key={owner} role="status" className="connection" message={`${owner}: ${message}`} />)}<MachineControls actions={dashboard?.actions ?? []} governors={dashboard?.governors ?? null} onAction={(id) => void toggleAction(id)} onGovernor={(provider) => void toggleGovernor(provider)} /><EnvironmentControl /><AppUpdateControl /><NotificationControl sessionId={state.selectedId} /><PlanSummary plans={dashboard?.plans ?? []} counts={modelCounts} /><div className="usage-summary muted">{machineText}</div><div className="usage-summary muted" title={__PI_REMOTE_REVISION__}>Client {__PI_REMOTE_REVISION__.slice(0, 12)}</div><DismissibleError className="connection" message={state.offline ? `Offline · ${state.offline}` : ""} /></footer>
     </aside>
-    <main id="main" className={drawingOpen ? "drawing-mode" : undefined}><header className="topbar"><button className="icon-button" aria-label="Open navigation" onClick={() => patch({ drawerOpen: true })}>☰</button><div className="top-title">{title}</div><div className="top-state" style={{ color: state.offline ? "var(--danger)" : activityColor(selectedActivity) }}>{state.offline ? "OFFLINE" : state.syncing ? "SYNCING" : activityLabel(selectedActivity, selectedTool ?? "")}</div>{state.offline && <button type="button" onClick={kick} title={state.offline}>Reconnect</button>}<a className="icon-button" aria-label="Open PiStack Meet" title="PiStack Meet" href={`/meet.html?${new URLSearchParams({ user: window.PiRemotePerson.get() })}`} onClick={async (event) => { event.preventDefault(); const environment = await window.KenanRemote?.getState(); location.href = `/meet.html?${new URLSearchParams({ user: window.PiRemotePerson.get(), environment: environment?.id || "" })}`; }}><svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true"><rect x="3" y="6" width="12" height="12" rx="2"/><path d="m15 10 6-4v12l-6-4z"/></svg></a>{selected && selected.state !== "STOPPING" && <button type="button" disabled={pending} onClick={() => stopThread(selected)}>Stop</button>}<button className="icon-button" aria-label="Open thread settings" disabled={!selected} onClick={() => patch({ settingsOpen: true })}>⚙</button></header>
+    <main id="main" className={drawingOpen ? "drawing-mode" : undefined}><header className="topbar"><button className="icon-button" aria-label="Open navigation" onClick={() => patch({ drawerOpen: true })}>☰</button><div className="top-title">{title}</div><div className="top-state" style={{ color: state.offline ? "var(--danger)" : activityColor(selectedActivity) }}>{state.offline ? "OFFLINE" : state.syncing ? "SYNCING" : activityLabel(selectedActivity, selectedTool ?? "")}</div>{state.offline && <button type="button" onClick={kick} title={state.offline}>Reconnect</button>}<a className="icon-button" aria-label="Open PiStack Meet" title="PiStack Meet" href={`/meet.html?${new URLSearchParams({ user: window.PiRemotePerson.get() })}`} onClick={async (event) => { event.preventDefault(); const environment = await window.KenanRemote?.getState(); location.href = `/meet.html?${new URLSearchParams({ user: window.PiRemotePerson.get(), environment: environment?.id || "" })}`; }}><svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true"><rect x="3" y="6" width="12" height="12" rx="2"/><path d="m15 10 6-4v12l-6-4z"/></svg></a><button className="icon-button" aria-label="Open thread settings" disabled={!selected} onClick={() => patch({ settingsOpen: true })}>⚙</button></header>
       {selected?.parentId && <nav className="thread-relations" aria-label="Related threads"><button type="button" onClick={() => void selectThread(selected.parentId!)}>Parent: {knownSessions.find(session => session.id === selected.parentId)?.name || selected.parentId}</button></nav>}
       {!state.selectedId ? <section className="empty-state"><strong>No threads</strong><span>Open the drawer to create one.</span></section> : <section className={`conversation${drawingOpen ? " is-drawing" : ""}`}><div className="scrollback" onClickCapture={editImage} onKeyDownCapture={event => { if (event.key === "Enter" || event.key === " ") editImage(event); }}><div className="scroll-content"><InlineImagesContext.Provider value={images}><ContextTranscript entries={entries} liveThinking={liveThinking} sessionId={state.selectedId || ""} home={dashboard?.home ?? "/"} onEdit={editFrom} />{liveText && <div className="live-answer"><Markdown source={liveText} sessionId={state.selectedId || ""} streaming assistant /><CopyButton text={liveText} label="Copy response" /></div>}<LiveActivity activity={selectedActivity} tool={selectedTool} offline={state.offline} /></InlineImagesContext.Provider></div></div>
         {drawings.map(draft => <div key={draft.id} className="drawing-slot" hidden={!drawingOpen || drawingId !== draft.id}><DrawingCanvas background={draft.background} onAttach={file => attachDrawing(file, draft)} onClose={() => setDrawingId(current => current === draft.id ? null : current)} /></div>)}
-        {uploadError?.sessionId === state.selectedId && <div className="upload-error" role="alert">{uploadError.message}<button type="button" aria-label="Dismiss upload error" onClick={() => setUploadError(null)}>×</button></div>}
+        <DismissibleError className="upload-error" dismissLabel="Dismiss upload error" message={uploadError?.sessionId === state.selectedId ? uploadError.message : ""} resetKey={state.selectedId || ""} />
         {selected?.queuedMessages.length ? <div className="message-queue">{selected.queuedMessages.map((message) => <div className="queued-message" key={message.id}><div className="queued-message-copy"><span className="queued-message-label">{selected.state === "STOPPED" ? "Held" : message.status || "Queued"}</span><span className="queued-message-preview">{message.text.split("\n").find((line) => line.trim()) || "Attached files"}</span></div><div className="queued-message-actions"><CopyButton text={message.text} className="queued-message-action icon-message-action" />{message.canSteer && <button className="queued-message-action steer-instead" type="button" onClick={() => void mutateQueued(message, API.queueSteer)}>STEER</button>}{message.canHardSteer && <button className="queued-message-action hard-steer" type="button" onClick={() => void mutateQueued(message, API.queueHardSteer)}>HARD STEER</button>}{message.canCancel && <><button className="queued-message-action edit-queued" type="button" onClick={() => void mutateQueued(message, API.queueItem, true)}>EDIT</button><button className="queued-message-action cancel-queued" type="button" onClick={() => void mutateQueued(message, API.queueItem)}>CANCEL</button></>}</div></div>)}</div> : null}
-        {controlError?.sessionId === state.selectedId && !stopTarget && <div className="upload-error" role="alert">{controlError.message}<button type="button" aria-label="Dismiss thread error" onClick={() => setControlError(null)}>×</button></div>}
+        <DismissibleError className="upload-error" dismissLabel="Dismiss thread error" message={controlError?.sessionId === state.selectedId && !stopTarget ? controlError.message : ""} resetKey={state.selectedId || ""} />
         {selected?.state === "STOPPED" && <div className="thread-held"><span>{selected.queuedMessages.length ? "Pending messages are held." : "Thread stopped."}</span>{selected.queuedMessages.length > 0 && <button type="button" disabled={pending} onClick={() => void controlThread(selected.id, "resume")}>Resume</button>}</div>}
         {visibleAttachments.length > 0 && <div className="attachments">{visibleAttachments.map((attachment) => <div className={`attachment-chip${attachment.uploading ? " uploading" : ""}`} key={attachment.localId}><span className="attachment-name">{attachment.name}{attachment.uploading ? " · uploading" : ""}</span><button className="attachment-remove" type="button" onClick={() => void removeAttachment(attachment)}>×</button></div>)}</div>}
-        <form className="composer" onSubmit={(event) => { event.preventDefault(); void send(); }}>{visibleCommands.length > 0 && <div className="slash-commands" role="listbox">{visibleCommands.map((command) => <button key={command.name} type="button" className="slash-command" onClick={() => setPrompt(`/${command.name} `)}><strong className="slash-command-name">/{command.name}</strong>{command.description && <span className="slash-command-description">{command.description}</span>}</button>)}</div>}<textarea ref={promptElement} id="prompt" rows={1} maxLength={200000} placeholder={`Message ${selected?.name || "Agent"}`} value={prompt} onChange={(event) => { setPrompt(event.target.value); if (state.selectedId) saveDraft(state.selectedId, event.target.value); }} onKeyDown={(event) => { if (event.key === "Enter" && !event.shiftKey && !event.nativeEvent.isComposing && matchMedia("(hover: hover) and (pointer: fine)").matches) { event.preventDefault(); void send(); } }} /><div className="composer-actions"><label className="composer-icon" aria-label="Attach files"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M16.5 6.5 8.7 14.3a2.5 2.5 0 0 0 3.5 3.5l8.1-8.1a4.5 4.5 0 0 0-6.4-6.4L5.5 11.7a6.5 6.5 0 0 0 9.2 9.2l6.1-6.1"/></svg><input type="file" multiple hidden onChange={(event) => { void uploadFiles([...event.target.files || []]); event.target.value = ""; }} /></label><button className="composer-icon" type="button" aria-label="Paste text document" onClick={() => setPasteOpen(true)}><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M9 5.5V4h6v1.5M9 5.5h6M9 5.5H7v15h10v-15h-2M9 10h6m-6 4h6m-6 4h4"/></svg></button><button className="composer-icon drawing-toggle" type="button" aria-label="Draw a picture" title="Draw a picture" onClick={() => openDrawing()}><svg viewBox="0 0 24 24" aria-hidden="true"><path d="m14 13 7-9a1.5 1.5 0 0 0-2-2l-9 7 4 4Z"/><path d="M10 9c-3-1-5 1-5 4 0 2-1 3-3 4 4 3 10 2 11-3l1-1"/></svg></button><span className="composer-spacer"/>{voiceState === "live" && <button type="button" onClick={() => void voice.current?.resumePlayback()}>Play Kenan audio</button>}<button id="voice" className={`composer-icon voice${voiceState === "idle" ? "" : ` ${voiceState}`}`} type="button" aria-label={voiceState === "live" ? "Hang up voice" : "Start voice"} title={voiceDetail || undefined} onClick={() => void toggleVoice()}><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 3a3 3 0 0 0-3 3v6a3 3 0 0 0 6 0V6a3 3 0 0 0-3-3Z"/><path d="M5.5 11.5a6.5 6.5 0 0 0 13 0M12 18v3m-3 0h6"/></svg></button><button id="action" className={`composer-icon send${working(selected) && !prompt.trim() && !visibleAttachments.length ? " abort" : ""}`} type="submit" disabled={pending || visibleAttachments.some((file) => file.uploading)} aria-label={working(selected) && !prompt.trim() && !visibleAttachments.length ? "Stop thread" : "Send message"}><svg className="send-icon" viewBox="0 0 24 24" aria-hidden="true"><path d="m3 3 18 9-18 9 4-9-4-9Zm4 9h14"/></svg><span className="stop-icon" aria-hidden="true">■</span></button></div></form>
+        <form className="composer" onSubmit={(event) => { event.preventDefault(); void send(); }}>{visibleCommands.length > 0 && <div className="slash-commands" role="listbox">{visibleCommands.map((command) => <button key={command.name} type="button" className="slash-command" onClick={() => setPrompt(`/${command.name} `)}><strong className="slash-command-name">/{command.name}</strong>{command.description && <span className="slash-command-description">{command.description}</span>}</button>)}</div>}<textarea ref={promptElement} id="prompt" rows={1} maxLength={200000} placeholder={`Message ${selected?.name || "Agent"}`} value={prompt} onChange={(event) => { setPrompt(event.target.value); if (state.selectedId) saveDraft(state.selectedId, event.target.value); }} onKeyDown={(event) => { if (event.key === "Enter" && !event.shiftKey && !event.nativeEvent.isComposing && matchMedia("(hover: hover) and (pointer: fine)").matches) { event.preventDefault(); void send(); } }} /><div className="composer-actions"><label className="composer-icon" aria-label="Attach files"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M16.5 6.5 8.7 14.3a2.5 2.5 0 0 0 3.5 3.5l8.1-8.1a4.5 4.5 0 0 0-6.4-6.4L5.5 11.7a6.5 6.5 0 0 0 9.2 9.2l6.1-6.1"/></svg><input type="file" multiple hidden onChange={(event) => { void uploadFiles([...event.target.files || []]); event.target.value = ""; }} /></label><button className="composer-icon" type="button" aria-label="Paste text document" onClick={() => setPasteSessionId(state.selectedId)}><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M9 5.5V4h6v1.5M9 5.5h6M9 5.5H7v15h10v-15h-2M9 10h6m-6 4h6m-6 4h4"/></svg></button><button className="composer-icon drawing-toggle" type="button" aria-label="Draw a picture" title="Draw a picture" onClick={() => openDrawing()}><svg viewBox="0 0 24 24" aria-hidden="true"><path d="m14 13 7-9a1.5 1.5 0 0 0-2-2l-9 7 4 4Z"/><path d="M10 9c-3-1-5 1-5 4 0 2-1 3-3 4 4 3 10 2 11-3l1-1"/></svg></button><span className="composer-spacer"/>{voiceState === "live" && <button type="button" onClick={() => void voice.current?.resumePlayback()}>Play Kenan audio</button>}<button id="voice" className={`composer-icon voice${voiceState === "idle" ? "" : ` ${voiceState}`}`} type="button" aria-label={voiceState === "live" ? "Hang up voice" : "Start voice"} title={voiceDetail || undefined} onClick={() => void toggleVoice()}><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 3a3 3 0 0 0-3 3v6a3 3 0 0 0 6 0V6a3 3 0 0 0-3-3Z"/><path d="M5.5 11.5a6.5 6.5 0 0 0 13 0M12 18v3m-3 0h6"/></svg></button><button id="action" className={`composer-icon send${action !== "send" ? " abort" : ""}`} type="submit" disabled={!selected || pending || action === "stopping" || (action === "send" && visibleAttachments.some((file) => file.uploading))} aria-label={action === "send" ? "Send message" : action === "stopping" ? "Stopping thread" : "Stop thread"}><svg className="send-icon" viewBox="0 0 24 24" aria-hidden="true"><path d="m3 3 18 9-18 9 4-9-4-9Zm4 9h14"/></svg><span className="stop-icon" aria-hidden="true">{action === "stopping" ? "Stopping…" : "Stop"}</span></button></div></form>
       </section>}
     </main>
     {stopTarget && <ThreadStopDialog session={stopTarget} pending={pending} error={controlError?.sessionId === stopTarget.id ? controlError.message : ""} onStop={descendants => void controlThread(stopTarget.id, "stop", descendants)} onClose={() => setStopTarget(null)} />}
     <SettingsPanel session={selected} sessions={knownSessions} open={state.settingsOpen} onClose={() => patch({ settingsOpen: false })} onOpenThread={session => void selectThread(session.id, true, session, "orchestrator")} />
-    {pasteOpen && <dialog className="paste-text-dialog" open><form className="paste-text-form" onSubmit={(event) => { event.preventDefault(); const name = /\.[^./\\]+$/.test(pasteName) ? pasteName : `${pasteName}.txt`; void uploadFiles([new File([pasteContent], name, { type: "text/plain;charset=utf-8" })]); setPasteOpen(false); setPasteContent(""); }}><h2>Paste text document</h2><label>Document name</label><input value={pasteName} onChange={(event) => setPasteName(event.target.value)} /><label>Text</label><textarea value={pasteContent} onChange={(event) => setPasteContent(event.target.value)} /><div className="paste-text-actions"><button type="button" onClick={() => setPasteOpen(false)}>Cancel</button><button className="accent" type="submit" disabled={!pasteContent.trim()}>Attach</button></div></form></dialog>}
+    {pasteSessionId && <PasteTextDialog name={pasteName} content={pasteContent} onNameChange={setPasteName} onContentChange={setPasteContent} onAttach={file => uploadFile(file, pasteSessionId)} onClose={() => setPasteSessionId(null)} />}
   </div>;
 }
 
