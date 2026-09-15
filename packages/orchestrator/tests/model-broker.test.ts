@@ -12,9 +12,11 @@ import { brokerProvider, modelBrokerUrl, validateBrokerBody } from "../src/model
 import { createModelBroker, validateBrokerConfig, type BrokerTransport } from "../src/model-broker.js";
 import { createSharedImageGenerationService } from "../src/image-service.js";
 import { loadConfig, modelBrokerUrl as publicModelBrokerUrl } from "../src/api.js";
+import * as codexUsage from "../src/meters-codex.js";
+import { SharedOAuthAuth, withSharedAuth } from "../src/auth/shared-oauth.js";
 
 const cleanup: (() => Promise<void>)[] = [];
-afterEach(async () => { for (const close of cleanup.splice(0).reverse()) await close(); vi.unstubAllEnvs(); });
+afterEach(async () => { for (const close of cleanup.splice(0).reverse()) await close(); vi.unstubAllEnvs(); vi.restoreAllMocks(); });
 const anthropic = builtinProviders().find(provider => provider.id === "anthropic")!;
 const anthropicModel = anthropic.getModels()[0];
 const body = () => ({ model: "gpt-5.6-luna", store: false, stream: true, input: [{ role: "user", content: "hello" }], tools: [] });
@@ -29,7 +31,7 @@ async function fixture(transport: BrokerTransport) {
   const token = `test.${Buffer.from(JSON.stringify({ "https://api.openai.com/auth": { chatgpt_account_id: "shared-account" } })).toString("base64url")}.signature`;
   for (const id of ["shared", "owner-only"]) store.upsertAccount({ id, provider: "openai-codex", enabled: true });
   store.upsertAccount({ id: "anthropic-shared", provider: "anthropic", enabled: true });
-  writeFileSync(authPath, JSON.stringify(Object.fromEntries(["shared", "owner-only", "anthropic-shared"].map(id => [id, { type: "oauth", access: token, refresh: "fixture-refresh", expires: Date.now() + 3600000 }]))));
+  writeFileSync(authPath, JSON.stringify(Object.fromEntries(["shared", "owner-only", "anthropic-shared"].map(id => [id, { type: "oauth", access: token, refresh: "fixture-refresh", accountId: "shared-account", expires: Date.now() + 3600000 }]))));
   const broker = createModelBroker({ ledgerPath, authPath, listeners: [{ principal: "sybil", port: 0, accounts: ["shared", "anthropic-shared"], models: ["openai-codex/gpt-5.6-luna", `anthropic/${anthropicModel.id}`], maxInFlight: 2 }] }, transport);
   cleanup.push(() => broker.close());
   const [port] = await broker.listen();
@@ -56,6 +58,39 @@ test("model-only routes inject granted credentials, namespace affinity and retai
   expect(f.store.activeLeases()).toHaveLength(0);
   expect(f.store.runs()).toHaveLength(0);
   expect(f.store.usageSince(0).reduce((sum, row) => sum + row.tokens, 0)).toBe(17);
+});
+
+test.each(["repaired", "still-rejected", "usage-healthy", "usage-failed"])("broker bounds corroborated Codex 404 repair and preserves the response: %s", async kind => {
+  const probe = vi.spyOn(codexUsage, "fetchCodexUsage").mockImplementation(async () => {
+    if (kind === "usage-healthy") return [];
+    if (kind === "usage-failed") throw new Error("usage connection failed");
+    throw new codexUsage.CodexUnauthorizedError(404, " request-id=usage-rejection");
+  });
+  const refresh = vi.spyOn(SharedOAuthAuth.prototype, "refreshRejected").mockImplementation(async function(this: SharedOAuthAuth, account, rejected, signal) {
+    const credential = await this.credential(account, signal);
+    expect(credential.access).toBe(rejected);
+    const fresh = { ...credential, access: `${credential.access}-fresh` };
+    await withSharedAuth(this.path, signal, (auth, save) => { auth[account] = fresh; save(); });
+    return fresh;
+  });
+  let attempts = 0;
+  const transport = vi.fn(async (_url: string, init: RequestInit) => {
+    expect(new Headers(init.headers).get("authorization")).toBe(`Bearer ${f.token}${attempts ? "-fresh" : ""}`);
+    return ++attempts === 2 && kind === "repaired" ? sse({}) : new Response("Not Found", { status: 404, headers: { "x-request-id": "inference-rejection" } });
+  });
+  const f = await fixture(transport);
+  const response = await f.post(body());
+  expect(response.status).toBe(kind === "repaired" ? 200 : 404);
+  expect(probe).toHaveBeenCalledOnce();
+  expect(probe.mock.calls[0][0]).toBe(f.token);
+  expect(refresh).toHaveBeenCalledTimes(kind.startsWith("usage-") ? 0 : 1);
+  expect(transport).toHaveBeenCalledTimes(kind.startsWith("usage-") ? 1 : 2);
+  expect(decodeURIComponent(response.headers.get("x-pi-credential-repair")!)).toContain("HTTP 404");
+  if (kind !== "repaired") {
+    expect(await response.text()).toBe("Not Found");
+    expect(response.headers.get("x-request-id")).toBe("inference-rejection");
+  } else await response.text();
+  expect(f.store.activeLeases()).toHaveLength(0);
 });
 
 test("fleet, transcripts, credentials, ungranted models and provider-resource references never reach upstream", async () => {
