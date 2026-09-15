@@ -8,7 +8,7 @@ import type { ThreadAdmission } from "./threads/service.js";
 
 /** Account policy for thread execution. ThreadService owns work and settlement. */
 export class Fleet {
-  private readonly leases = new Map<string, { leaseId: string; accountId: string }>();
+  private readonly leases = new Map<string, { leaseId: string; accountId: string; timer: ReturnType<typeof setInterval> }>();
   constructor(private readonly store: Store, private readonly config: OrchestratorConfig) {}
 
   async admit(thread: Thread, settings: ThreadSettings, recovering: boolean, executionId: string): Promise<Result<ThreadAdmission>> {
@@ -28,17 +28,25 @@ export class Fleet {
       this.store.createLease(leaseId, assignment.accountId, "fleet", thread.id);
       if (rootRepair) this.store.setControl("repair-owner", thread.id);
       if (!recovering) commitMeterAdmission(this.store, assignment);
-      this.leases.set(thread.id, { leaseId, accountId: assignment.accountId });
       const timer = setInterval(() => this.store.heartbeatLease(leaseId), 15_000); timer.unref();
+      this.leases.set(thread.id, { leaseId, accountId: assignment.accountId, timer });
       return { ok: true, value: {
         env: { PI_ORCHESTRATOR_ASSIGNED: "1", PI_THREAD_USAGE: "service", PI_ORCHESTRATOR_ACCOUNT_ID: assignment.accountId,
           PI_ORCHESTRATOR_PROVIDER: assignment.provider, PI_THREAD_ADMISSION: thread.parentId ? "force" : thread.admission },
-        release: () => { clearInterval(timer); this.store.endLease(leaseId); if (this.leases.get(thread.id)?.leaseId === leaseId) this.leases.delete(thread.id); if (rootRepair && this.store.control("repair-owner") === thread.id) this.store.db.prepare("DELETE FROM control WHERE key='repair-owner'").run(); },
+        release: () => this.release(thread.id, executionId),
       } };
     });
   }
 
+  private release(threadId: string, executionId: string): void {
+    const leaseId = `thread:${executionId}`, lease = this.leases.get(threadId);
+    if (lease?.leaseId === leaseId) { clearInterval(lease.timer); this.leases.delete(threadId); }
+    this.store.endLease(leaseId);
+    if (!this.leases.has(threadId) && this.store.control("repair-owner") === threadId) this.store.db.prepare("DELETE FROM control WHERE key='repair-owner'").run();
+  }
+
   event(threadId: string, event: PiEvent): void {
+    if (event.type === "thread_settled") { this.release(threadId, String(event.executionId)); return; }
     if (event.type !== "message_end") return;
     const lease = this.leases.get(threadId), message = event.message as Record<string, any> | undefined;
     if (!lease || message?.role !== "assistant") return;

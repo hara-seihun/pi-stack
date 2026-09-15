@@ -295,7 +295,24 @@ describe("ThreadService", () => {
     value(await second.service.control({ threadId: "active", action: "stop", descendants: false }));
     expect(second.service.get("active")?.state).toBe("stopped");
     expect(second.service.pending("active")).toMatchObject([{ id: "held", state: "held" }]);
-    expect(second.sessions[0]!.commands.some(command => command.type === "prompt")).toBe(false);
+    expect(second.sessions).toHaveLength(0);
+  });
+
+  it("halts retained execution without cwd, credentials, admission or session initialization", async () => {
+    const directory = mkdtempSync(join(tmpdir(), "thread-cold-halt-")); roots.push(directory);
+    const openSession = vi.fn(async () => { throw new Error("Stop must not initialize a session"); });
+    const admit = vi.fn(async () => { throw new Error("Stop must not request admission"); });
+    const attachSession = vi.fn(async () => null);
+    const service = new ThreadService({ databasePath: join(directory, "threads.sqlite"), sessionsDir: directory, openSession, admit, attachSession }); services.push(service);
+    const reference = { control: "/absent/runner.sock", socketPath: "/absent/session.sock" };
+    value(service.importThread({ id: "gone", title: "gone", cwd: "/reclaimed/checkout", sessionFile: "/missing/session.jsonl", metadata: { runnerReference: reference }, settings: { model: "openai-codex/gpt-6-astra", thinkingLevel: "high", speed: "standard" } }));
+    value(service.importMessage({ id: "accepted", threadId: "gone", text: "work", state: "dispatched" }));
+    value(service.importMessage({ id: "next", threadId: "gone", text: "keep", state: "queued" }));
+    expect(value(await service.control({ threadId: "gone", action: "stop", descendants: false })).state).toBe("stopped");
+    expect(attachSession).toHaveBeenCalledWith(reference, expect.any(Function), expect.any(Function));
+    expect(openSession).not.toHaveBeenCalled(); expect(admit).not.toHaveBeenCalled();
+    expect(service.latestSettlement("gone")?.outcome).toBe("cancelled");
+    expect(service.pending("gone")).toMatchObject([{ id: "next", state: "held" }]);
   });
 
   it("deduplicates halt, holds pending input, and does not confirm stopped before native acknowledgement", async () => {

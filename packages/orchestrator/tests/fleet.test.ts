@@ -81,6 +81,19 @@ it("owns root repair leases and recovers only recorded executions without isolat
   } finally { store.close(); }
 });
 
+it("releases a retained lease on settlement without readmitting its stopped execution", () => {
+  const store = Store.open(":memory:");
+  store.upsertAccount({ id: "a", provider: "openai-codex", concurrency: 1 });
+  store.createLease("thread:retained", "a", "fleet", thread.id);
+  store.setControl("repair-owner", thread.id);
+  const fleet = new Fleet(store, loadConfig("/missing"));
+  try {
+    fleet.event(thread.id, { type: "thread_settled", executionId: "retained", outcome: "cancelled" });
+    expect(store.activeSessionLeases()).toEqual([]);
+    expect(store.control("repair-owner")).toBeUndefined();
+  } finally { store.close(); }
+});
+
 it("records each native assistant usage receipt once against its admitted account", async () => {
   const store = Store.open(":memory:");
   store.upsertAccount({ id: "a", provider: "openai-codex", concurrency: 1 });
