@@ -33,23 +33,41 @@ export function isRateLimitError(message: string): boolean {
 }
 
 /**
- * A rate-limit error that named no window. Ten minutes suits a plan-metered
- * family, where an unnamed 429 usually means some window is empty and the
- * next minute will not refill it. It is two orders of magnitude too long for
- * a family that throttles bursts instead of metering plans, so those families
- * declare their own class in operator config (`throttleCooldownMs`).
+ * A 429 that reported no exhausted window at all. Providers throttle bursts
+ * with the same status they use for plan limits, and a burst clears in
+ * seconds, so this is short on purpose: a wave of parallel sessions that
+ * briefly outruns an endpoint should cost the account the next minute, not
+ * the next ten. On 2026-09-15 the ten-minute reading took four Codex accounts
+ * out within five minutes and left the machine with no account to start a
+ * session on.
  */
-export const DEFAULT_THROTTLE_COOLDOWN_MS = 10 * 60_000;
+export const DEFAULT_THROTTLE_COOLDOWN_MS = 60_000;
+
+/**
+ * A refusal that named an empty allowance rather than a busy endpoint. The
+ * window it belongs to is usually hours long, so the next minute will not
+ * refill it and retrying that soon just burns turns.
+ */
+export const PLAN_LIMIT_COOLDOWN_MS = 10 * 60_000;
+
+const PLAN_LIMIT_PATTERNS = [
+  /usage.?limit/i,
+  /limit.*reached/i,
+  /quota/i,
+  /extra usage/i,
+];
 
 /**
  * Cooldown scaled to the limit class the provider named. A transient 429
- * clears in minutes, but a monthly spend ceiling will still be exhausted ten
+ * clears in seconds, but a monthly spend ceiling will still be exhausted ten
  * minutes from now — retrying it every cooldown burns a failed turn per task
  * wave for the rest of the month. Long classes still expire (limits get
  * raised, windows roll over), just on the cadence of the window itself.
  *
- * A named window beats the family's declared throttle: a provider that says
- * "weekly" is reporting an empty window whatever its usual 429s mean.
+ * A named window beats everything else: a provider that says "weekly" is
+ * reporting an empty window whatever its usual 429s mean. `throttleCooldownMs`
+ * lets a caller that knows its endpoint's burst behaviour override the
+ * unnamed case.
  */
 export function rateLimitCooldownMs(
   message: string,
@@ -57,17 +75,9 @@ export function rateLimitCooldownMs(
 ): number {
   if (/monthly|per.month|spend.?limit/i.test(message)) return 24 * 60 * 60_000;
   if (/weekly|per.week|seven.?day|7.?day/i.test(message)) return 6 * 60 * 60_000;
+  if (PLAN_LIMIT_PATTERNS.some((p) => p.test(message))) return PLAN_LIMIT_COOLDOWN_MS;
   return throttleCooldownMs;
 }
-
-/** Resolves the cooldown for an error against the provider family that
- * raised it, so the same 429 text can mean ten minutes on a metered plan and
- * half a minute on a burst-throttled endpoint. */
-export type CooldownPolicy = (family: string | undefined, message: string) => number;
-
-/** The policy for a deployment that declares nothing: every family's unnamed
- * 429 is a plan limit. */
-export const uniformCooldown: CooldownPolicy = (_family, message) => rateLimitCooldownMs(message);
 
 const CREDENTIAL_PATTERNS = [
   /no api key found/i,

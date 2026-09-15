@@ -7,6 +7,7 @@ import { Store } from "../store.js";
 import { allowsAccountUse } from "../domain.js";
 import { ORCHESTRATOR_CATALOG } from "../catalog.js";
 import { defaultSharedAuthPath, SharedOAuthAuth, providerOAuth, sharedOAuthProvider } from "../auth/shared-oauth.js";
+import { pooledOnlyProvider } from "../auth/pooled-only.js";
 import { isRateLimitError, isRejectedTokenError, rateLimitCooldownMs } from "../provider-errors.js";
 import { isCodexNotFoundError, repairProviderCredential, type CredentialRepair } from "../auth/provider-rejection.js";
 import { withAnthropicFiles } from "../auth/anthropic-files-provider.js";
@@ -20,6 +21,9 @@ import { installBrokerRouting } from "./broker-routing.js";
 
 type ThinkingLevel = ReturnType<ExtensionAPI["getThinkingLevel"]>;
 
+/** Families whose credentials live in shared custody rather than with a person. */
+const POOLED_FAMILIES=new Set(["openai-codex","anthropic"]);
+
 export function defaultLedgerPath(env:NodeJS.ProcessEnv=process.env):string{return env.PI_ORCHESTRATOR_LEDGER||join(homedir(),".local/share/pi-orchestrator/ledger.sqlite3");}
 
 export function resolveSessionModel(models:readonly Model<any>[],provider:string,modelId:string,env:NodeJS.ProcessEnv=process.env):
@@ -29,9 +33,10 @@ export function resolveSessionModel(models:readonly Model<any>[],provider:string
     return model?{ok:true,model}:{ok:false,error:`Model not found through model broker: ${provider}/${modelId}`};
   }
   const candidates=models.filter(model=>model.id===modelId);
-  const aliases=candidates.filter(model=>baseProvider(model.provider)===provider&&model.provider!==provider);
   const family=builtinProviders().find(family=>family.id===provider&&family.auth.oauth);
-  if(!aliases.length||!family){
+  // Pooled families answer only through an account, even when the family id is
+  // the one the caller named: the family provider itself holds no credential.
+  if(!family||!candidates.length){
     const model=candidates.find(model=>model.provider===provider);
     return model?{ok:true,model}:{ok:false,error:`Model not found: ${provider}/${modelId}`};
   }
@@ -41,11 +46,14 @@ export function resolveSessionModel(models:readonly Model<any>[],provider:string
     const available=new Set(candidates.map(model=>model.provider));
     const exclude=new Set(store.accounts().filter(account=>!available.has(account.id)).map(account=>account.id));
     const assigned=env.PI_ORCHESTRATOR_ASSIGNED==="1"&&env.PI_ORCHESTRATOR_RUN_ID?store.run(env.PI_ORCHESTRATOR_RUN_ID):undefined;
-    const account=assigned?.accountId?store.account(assigned.accountId):chooseInteractiveAccount(store,shared,provider,exclude);
+    const account=assigned?.accountId?store.account(assigned.accountId):chooseInteractiveAccount(store,shared,provider,exclude,{includeCooling:true});
     if(account&&account.provider===provider&&available.has(account.id)&&shared.has(account.id)){
       const model=candidates.find(model=>model.provider===account.id)!;
       return {ok:true,model};
     }
+    // Cooling accounts are admitted above, so reaching here means the pool has
+    // nothing this session could use at all. Name the wait anyway when an
+    // assigned run is pinned to an account that is cooling.
     const cooling=store.accounts().filter(account=>account.provider===provider&&allowsAccountUse(account,"interactive")&&shared.has(account.id)&&account.cooldownUntil&&account.cooldownUntil>Date.now());
     const resume=cooling.length?` Earliest cooldown ends at ${new Date(Math.min(...cooling.map(account=>account.cooldownUntil!))).toISOString()}.`:"";
     return {ok:false,error:`No eligible pooled account for ${provider}/${modelId}.${resume}`};
@@ -62,7 +70,10 @@ export default function routing(pi:ExtensionAPI):void{
   const brokerUrl=modelBrokerUrl(environment);
   if(brokerUrl){installBrokerRouting(pi,brokerUrl,builtinProviders().map(withCustomModels),defaultLedgerPath(environment),environment);return;}
   const ledgerPath=defaultLedgerPath(environment),store=Store.open(ledgerPath),families=new Map(builtinProviders().map((raw)=>{const provider=withAnthropicFiles(withCustomModels(raw));return[provider.id,provider] as const;}));
-  pi.registerProvider(families.get("anthropic")!);
+  // Pooled families answer only through their numbered aliases. Registering the
+  // family id with pool-only auth keeps the model catalog intact while removing
+  // the ambient API-key and per-person credential routes upstream provides.
+  for(const family of families.values())if(family.auth.oauth&&POOLED_FAMILIES.has(family.id))pi.registerProvider(pooledOnlyProvider(family));
   const shared=new Map<string,SharedOAuthAuth>();
   const requestTokens=new Map<string,string>();
   pi.on("session_shutdown",()=>requestTokens.clear());
@@ -81,7 +92,7 @@ export default function routing(pi:ExtensionAPI):void{
   pi.on("session_shutdown",(_event,ctx)=>cleanupSessionResources(ctx.sessionManager.getSessionId()));
   const familyOf=(provider:string)=>store.account(provider)?.provider??baseProvider(provider);
   const resolve=(accountId:string,family:string,modelId:string):Model<never>|undefined=>{const model=families.get(family)?.getModels().find((candidate)=>candidate.id===modelId);return model?(accountId===family?model:{...model,provider:accountId}) as Model<never>:undefined;};
-  const choose=(family:string,exclude=new Set<string>())=>chooseInteractiveAccount(store,shared.get(family),family,exclude);
+  const choose=(family:string,exclude=new Set<string>(),includeCooling=false)=>chooseInteractiveAccount(store,shared.get(family),family,exclude,{includeCooling});
   const select=async(ctx:ExtensionContext,model:Model<never>,thinking:ThinkingLevel):Promise<boolean>=>{
     if(closed)return false;
     await ctx.modelRegistry.refresh({providers:[model.provider],allowNetwork:false,signal:lifecycle.signal});
@@ -89,9 +100,11 @@ export default function routing(pi:ExtensionAPI):void{
     pi.setThinkingLevel(thinking);
     return true;
   };
-  const bind=async(ctx:ExtensionContext,exclude?:Set<string>,requested?:{family:string;modelId:string;thinking:ThinkingLevel}):Promise<string|undefined>=>{
+  // Admission may fall back to a cooling account; a rate-limit failover may not,
+  // because there the point is to leave the account that just refused the turn.
+  const bind=async(ctx:ExtensionContext,exclude?:Set<string>,requested?:{family:string;modelId:string;thinking:ThinkingLevel},includeCooling=!exclude?.size):Promise<string|undefined>=>{
     const current=ctx.model,thinking=requested?.thinking??pi.getThinkingLevel();if(!current&&!requested)return;
-    const family=requested?.family??familyOf(current!.provider),modelId=requested?.modelId??current!.id,choice=choose(family,exclude);
+    const family=requested?.family??familyOf(current!.provider),modelId=requested?.modelId??current!.id,choice=choose(family,exclude,includeCooling);
     if(!choice)return;
     if(!requested&&choice.id===current?.provider&&modelId===current.id)return choice.id;
     const next=resolve(choice.id,family,modelId);if(!next)return;
@@ -110,7 +123,7 @@ export default function routing(pi:ExtensionAPI):void{
     if(matchesPin(ctx))return;
     if(!pinned){void ctx.abort();throw new Error(`Unknown subagent model pin ${requestedPin}`);}
     const current=store.account(ctx.model?.provider??"");
-    const accountId=assigned?.accountId??(current?.provider===pinned.provider&&allowsAccountUse(current,"interactive")?current.id:choose(pinned.provider)?.id);
+    const accountId=assigned?.accountId??(current?.provider===pinned.provider&&allowsAccountUse(current,"interactive")?current.id:choose(pinned.provider,undefined,true)?.id);
     const model=accountId?resolve(accountId,pinned.provider,pinned.model):undefined;
     if(!model||!await select(ctx,model,assigned?.thinking as ThinkingLevel??(pi.getThinkingLevel()==="off"?pinned.thinking as ThinkingLevel:pi.getThinkingLevel()))){
       void ctx.abort();throw new Error(`Pinned model ${pinned.provider}/${pinned.model} has no available account`);
@@ -186,7 +199,7 @@ export default function routing(pi:ExtensionAPI):void{
   pi.on("before_agent_start",async(_event,ctx)=>{
     const current=store.account(ctx.model?.provider??"");
     if(current&&!allowsAccountUse(current,"interactive")){
-      const moved=await bind(ctx,new Set([current.id]));
+      const moved=await bind(ctx,new Set([current.id]),undefined,true);
       if(!moved)throw new Error(`Account ${current.id} is unavailable for interactive agents; no shared account is available`);
       reconcileLease(ctx);
     }
