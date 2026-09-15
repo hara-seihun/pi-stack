@@ -1,7 +1,9 @@
 import assert from "node:assert/strict";
 import { execFile, execFileSync, spawn } from "node:child_process";
+import { createHash } from "node:crypto";
 import { chmodSync, existsSync, mkdtempSync, mkdirSync, readFileSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
+import { createServer } from "node:net";
 import path from "node:path";
 import { DatabaseSync } from "node:sqlite";
 import { test as nodeTest } from "node:test";
@@ -829,6 +831,118 @@ test("status answers what became of a checkout whose directory is gone", () => {
     const missing = run(["status", "--path", "never-registered-anywhere"], f.env);
     assert.match(missing, /no registered workspace matches that filter/);
   } finally {
+    f.close();
+  }
+});
+
+test("a surviving Git child retains its checkout fence after creator termination", async () => {
+  const f = fixture();
+  let connection;
+  let accept;
+  let completed;
+  const gate = new Promise(resolve => { accept = resolve; });
+  const done = new Promise(resolve => { completed = resolve; });
+  const server = createServer(socket => {
+    connection = socket;
+    let buffer = "";
+    socket.setEncoding("utf8");
+    socket.on("data", chunk => {
+      buffer += chunk;
+      let end;
+      while ((end = buffer.indexOf("\n")) >= 0) {
+        const event = JSON.parse(buffer.slice(0, end));
+        buffer = buffer.slice(end + 1);
+        if (event.pid) accept(event.pid);
+        else completed(event.code);
+      }
+    });
+  });
+  try {
+    const bin = path.join(f.root, "bin");
+    mkdirSync(bin);
+    const socketPath = path.join(f.root, "child.sock");
+    const realGit = execFileSync("which", ["git"], { encoding: "utf8" }).trim();
+    writeFileSync(path.join(bin, "git"), `#!${process.execPath}
+const { spawnSync } = require('node:child_process');
+const args = process.argv.slice(2);
+if (args[0] !== 'clone') process.exit(spawnSync(${JSON.stringify(realGit)}, args, {stdio:'inherit'}).status ?? 1);
+const socket = require('node:net').createConnection(${JSON.stringify(socketPath)});
+socket.on('connect', () => socket.write(JSON.stringify({pid:process.ppid})+'\\n'));
+socket.once('data', () => {
+  const code = spawnSync(${JSON.stringify(realGit)}, args, {stdio:'ignore'}).status;
+  socket.end(JSON.stringify({code})+'\\n');
+});
+`, { mode: 0o755 });
+    await new Promise(resolve => server.listen(socketPath, resolve));
+    const args = ["create", "--root", f.workspaces, "--name", "surviving-child", "--repo", f.source,
+      "--min-free-gib", "0", "--json"];
+    const first = runAsync(args, { ...f.env, PATH: `${bin}:${process.env.PATH}` }).catch(error => error);
+    const pid = await Promise.race([gate, first.then(() => { throw Error("creation exited before child gate"); })]);
+    process.kill(pid, "SIGKILL");
+    assert.ok(await first instanceof Error);
+    const key = createHash("sha256").update(`checkout:${path.join(f.workspaces, "surviving-child")}`).digest("hex");
+    const lock = path.join(path.dirname(f.env.PI_WORKSPACE_STATE), "locks", key);
+    assert.throws(() => execFileSync("flock", ["--nonblock", lock, "true"]), error => error.status === 1);
+    connection.write("continue");
+    assert.equal(await done, 0);
+    const resumed = JSON.parse(await runAsync(args, f.env));
+    assert.equal(resumed.state, "active");
+    assert.equal(readFileSync(path.join(resumed.path, "file.txt"), "utf8"), "source\n");
+  } finally {
+    connection?.destroy();
+    await new Promise(resolve => server.close(resolve));
+    f.close();
+  }
+});
+
+test("parallel immutable creations leave unrelated custody usable and fence duplicate destinations", async () => {
+  const f = fixture();
+  const sockets = [];
+  const children = [];
+  const server = createServer(socket => sockets.push(socket));
+  try {
+    const commit = git(f.source, "rev-parse", "HEAD");
+    const create = ["create", "--root", f.workspaces, "--repo", f.remote,
+      "--ref", commit, "--min-free-gib", "0", "--json"];
+    const retained = JSON.parse(run([...create, "--name", "retained"], f.env));
+    const released = JSON.parse(run([...create, "--name", "released"], f.env));
+    const bin = path.join(f.root, "bin");
+    mkdirSync(bin);
+    const socketPath = path.join(f.root, "create.sock");
+    const gitPath = execFileSync("which", ["git"], { encoding: "utf8" }).trim();
+    const log = path.join(f.root, "git.jsonl");
+    writeFileSync(path.join(bin, "git"), `#!${process.execPath}
+const { appendFileSync } = require("node:fs");
+const { spawn } = require("node:child_process");
+const args = process.argv.slice(2);
+appendFileSync(${JSON.stringify(log)}, JSON.stringify(args) + "\\n");
+const run = () => { const child = spawn(${JSON.stringify(gitPath)}, args, {stdio:"inherit"}); child.on("exit", code => process.exit(code ?? 1)); };
+if (args[0] === "clone") { const socket = require("node:net").createConnection(${JSON.stringify(socketPath)}); socket.on("end", run); socket.on("error", error => {console.error(error);process.exit(1);}); socket.resume(); } else run();
+`, { mode: 0o755 });
+    await new Promise(resolve => server.listen(socketPath, resolve));
+    const env = { ...f.env, PATH: `${bin}:${process.env.PATH}` };
+    const ready = new Promise(resolve => {
+      server.on("connection", () => { if (sockets.length === 8) resolve(); });
+    });
+    for (let index = 0; index < 8; index += 1) children.push(runAsync([...create, "--name", `parallel-${index}`], env));
+    await Promise.race([ready, Promise.all(children).then(() => { throw Error("creations escaped the clone gate"); })]);
+    const renewed = JSON.parse(await runAsync(["heartbeat", "--path", retained.path, "--json"], f.env));
+    assert.equal(renewed.state, "active");
+    assert.equal(JSON.parse(await runAsync(["release", "--path", released.path, "--json"], f.env)).action, "released");
+    const duplicate = runAsync([...create, "--name", "parallel-0"], env);
+    for (const socket of sockets) socket.end();
+    const records = (await Promise.all(children)).map(value => JSON.parse(value));
+    assert.equal(JSON.parse(await duplicate).id, records[0].id);
+    await assert.rejects(runAsync([...create, "--name", "parallel-0", "--owner", "different-request"], env),
+      /different creation request/);
+    assert.equal(new Set(records.map(record => record.id)).size, 8);
+    for (const record of records) assert.equal(git(record.path, "rev-parse", "HEAD"), commit);
+    const commands = readFileSync(log, "utf8").trim().split("\n").map(line => JSON.parse(line));
+    assert.equal(commands.some(args => args.includes("fetch")), false);
+  } finally {
+    for (const socket of sockets) socket.end();
+    await Promise.allSettled(children);
+    await new Promise(resolve => server.close(resolve));
     f.close();
   }
 });
