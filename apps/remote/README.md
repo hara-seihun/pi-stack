@@ -192,7 +192,11 @@ sudo systemctl start pi-remote-router
 
 The reference units in [`../../deploy/systemd`](../../deploy/systemd) show what the front door and supervisor need. Pi Remote must be the last configured Pi package so its read-only context mirror is the final `context` handler; the supervisor refuses to start otherwise.
 
-A release handoff suspends thread dispatch, fences Remote callbacks, detaches runner channels and closes the controller database. Shared runners remain in the same service cgroup and mount namespace, so accepted native execution continues. The replacement supervisor opens the same thread database and session files, then reconnects unacknowledged output. Stopping the unit still kills every process and destroys the private mount. The encrypted ledger backup runs in an owned worker on a separate SQLite connection. It retains the last good snapshot on failure and reuses snapshots younger than six hours across restarts. Copying a large database cannot block thread handoff or client requests.
+A release handoff suspends thread dispatch, fences Remote callbacks and detaches runner channels. The supervisor refuses new client requests with HTTP 503 but keeps context PUT/PATCH ingestion available until idle Pi sessions finish their shutdown hooks, including final captures for archived threads. Only then does it close image publication, the HTTP listener and the presentation database. If cleanup fails, the supervisor reports the failure, retains context ingestion and allows another explicit activation signal to retry cleanup without reopening intake.
+
+Shared runners remain in the same service cgroup and mount namespace, so accepted native execution continues. The replacement supervisor opens the same thread database and session files, then reconnects unacknowledged output. Stopping the unit still kills every process and destroys the private mount.
+
+The encrypted ledger backup runs in an owned worker on a separate SQLite connection. It retains the last good snapshot on failure and reuses snapshots younger than six hours across restarts. Copying a large database cannot block thread handoff or client requests.
 
 ## Test
 

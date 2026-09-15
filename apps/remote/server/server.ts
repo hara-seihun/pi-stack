@@ -18,6 +18,7 @@ import { appendContextPatch, readContext } from "./context-journal";
 import { beginSupervisorGeneration, ensureSupervisorSchema, ensureThreadView } from "./database";
 import { dismissError, observeError } from "./error-feedback";
 import { startLedgerSnapshots } from "./ledger-snapshot";
+import { SupervisorRelease } from "./supervisor-release";
 import { autoArchiveDelay, startAutoArchive } from "./auto-archive";
 import { VoiceClient } from "./voice/client";
 import { MeetServer } from "./meet/server";
@@ -1329,6 +1330,7 @@ const server = Bun.serve({
       });
     }
     if (!ownsSupervisorLease()) return error("Supervisor instance was replaced", 503);
+    if (shuttingDown && !supervisorRelease.accepts(req.method, url.pathname)) return error("Supervisor is handing over; retry after activation", 503);
     const ownedThreadResponse = await threadHttp(threads, req, "/v1/thread-owner");
     if (ownedThreadResponse) return ownedThreadResponse;
     const threadResponse = await threadHttp(directory, req);
@@ -1699,7 +1701,7 @@ const server = Bun.serve({
       const archived = await directory.control({ threadId: id, action: "update", archived: true });
       return archived.ok ? json({ ok: true, archived: true, session: publicSession(threadRow(archived.value)) }) : threadError(archived.error);
     }
-    if (row.archived_at && action !== "events" && !(action === "context" && req.method === "GET")) return error("Thread is archived", 409);
+    if (row.archived_at && action !== "events" && action !== "context") return error("Thread is archived", 409);
     if (action === "admission" && req.method === "PUT") return error("Admission belongs to Orchestrator", 405);
 
     if (action === "context" && req.method === "GET") {
@@ -1932,18 +1934,23 @@ async function closeImageGeneration() {
   finally { await inlineImages.close(); }
 }
 
+const supervisorRelease = new SupervisorRelease({
+  suspend() {
+    shuttingDown = true;
+    stopSupervisorTimers();
+    unsubscribeThreads();
+    threads.suspend();
+    runner.detach();
+  },
+  detach: () => threads.detach(),
+  closeImages: closeImageGeneration,
+  stopServer: () => { server.stop(true); },
+  closeDatabase: () => db.close(),
+  exit: code => process.exit(code),
+});
 async function releaseSupervisor(exitCode: number) {
-  if (shuttingDown) return;
-  shuttingDown = true;
-  server.stop();
-  stopSupervisorTimers();
-  unsubscribeThreads();
-  threads.suspend();
-  runner.detach();
-  unwrap(await threads.detach());
-  await closeImageGeneration();
-  db.close();
-  process.exit(exitCode);
+  const result = await supervisorRelease.release(exitCode);
+  if (!result.ok) console.error("Supervisor handoff failed; context ingestion remains available for recovery:", result.error);
 }
 
 process.on("SIGTERM", () => void releaseSupervisor(0));
