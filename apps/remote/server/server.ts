@@ -1553,7 +1553,7 @@ const server = Bun.serve({
       const after = url.searchParams.has("after") ? Number(url.searchParams.get("after")) : null;
       if (after !== null && (!Number.isSafeInteger(after) || after < 0)) return error("Invalid notification cursor");
       await refreshThreadNotifications();
-      return json({ environmentId: ENVIRONMENT_ID, ...idleNotifications(db, after) });
+      return json({ environmentId: ENVIRONMENT_ID, ...idleNotifications(db, after, id => threads.get(id)) });
     }
     if (API.workspaces.match(req.method, url.pathname)) {
       return json({ workspaces: [...workspaces.values()] });
