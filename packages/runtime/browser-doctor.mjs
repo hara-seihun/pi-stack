@@ -35,9 +35,19 @@ const sessionFile = join(directory, "session.jsonl");
 if (values["session-file"]) copyFileSync(values["session-file"], sessionFile);
 else writeFileSync(sessionFile, `${JSON.stringify({ type: "session", version: 3, id: randomUUID(), timestamp: new Date().toISOString(), cwd: directory })}\n`);
 const title = `pi-browser-${randomUUID()}`;
-const server = createServer((_req, res) => {
+const downloadContent = `browser-download-${randomUUID()}\n`;
+const downloadPath = join(directory, "browser-download.txt");
+const server = createServer((req, res) => {
+  if (req.url === "/download") {
+    res.writeHead(200, {
+      "content-disposition": "attachment; filename=browser-download.txt",
+      "content-type": "text/plain",
+    });
+    res.end(downloadContent);
+    return;
+  }
   res.writeHead(200, { "content-type": "text/html" });
-  res.end(`<title>${title}</title><h1><span>${title.slice(0, 5)}</span><span>${title.slice(5)}</span></h1><button>Probe</button>`);
+  res.end(`<title>${title}</title><h1><span>${title.slice(0, 5)}</span><span>${title.slice(5)}</span></h1><button>Probe</button><a href="/download" download>Download probe</a>`);
 });
 let session;
 let accepted = false;
@@ -79,16 +89,26 @@ try {
       if (!visibleText.ok) throw new Error(visibleText.error);
       const title = await browser({ args: ["get", "title"] });
       if (!title.ok) throw new Error(title.error);
-      emit({ title: title.data.title, refs: Object.keys(snapshot.data.refs).length });
+      const downloadRef = Object.entries(snapshot.data.refs).find(([, ref]) => ref.name === "Download probe")?.[0];
+      if (!downloadRef) throw new Error("Download probe ref missing");
+      const download = await browser({ args: ["download", "@" + downloadRef, ${JSON.stringify(downloadPath)}] });
+      if (!download.ok) throw new Error(download.error);
+      emit({
+        title: title.data.title,
+        refs: Object.keys(snapshot.data.refs).length,
+        downloadVerified: download.details.artifactVerification.verified,
+      });
     `,
     timeoutMs: 20000,
   }, AbortSignal.timeout(25000));
   assert.equal(result.details.resultCategory, "success", JSON.stringify(result));
   assert.equal(result.details.data.title, title);
-  assert.ok(result.details.data.refs >= 2);
+  assert.ok(result.details.data.refs >= 3);
+  assert.equal(result.details.data.downloadVerified, true, "the native download artifact must be verified");
+  assert.equal(readFileSync(downloadPath, "utf8"), downloadContent, "the native download must preserve file bytes");
   assert.equal(result.details.scriptSession.cleanup, "closed", "the probe browser must be closed");
   accepted = true;
-  console.log(JSON.stringify({ host: hostname(), sdk, runtime, bin, wrapperVersion, browserVersion, recovered: !!values["session-file"], nativeOpen: true, snapshot: true, visibleText: true, cleanup: "closed" }));
+  console.log(JSON.stringify({ host: hostname(), sdk, runtime, bin, wrapperVersion, browserVersion, recovered: !!values["session-file"], nativeOpen: true, snapshot: true, visibleText: true, download: true, cleanup: "closed" }));
 } finally {
   try {
     if (session) await session.extensionRunner.emit({ type: "session_shutdown", reason: "quit" });
