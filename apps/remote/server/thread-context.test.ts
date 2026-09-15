@@ -43,7 +43,10 @@ describe("thread lifecycle context", () => {
     writeFileSync(alert, "Disk needs attention\n");
     const handlers = new Map<string, (...args: any[]) => Promise<any>>();
     const tools: string[] = [];
-    const network = spyOn(globalThis, "fetch").mockImplementation(async () => Response.json({ instructions: "Thread instructions" }));
+    const network = spyOn(globalThis, "fetch").mockImplementation(Object.assign(
+      async () => Response.json({ instructions: "Thread instructions" }),
+      { preconnect: globalThis.fetch.preconnect },
+    ));
     const pi = {
       getSessionName: () => "Already named before its first prompt",
       registerTool: (tool: { name: string }) => tools.push(tool.name),
