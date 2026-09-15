@@ -7,7 +7,7 @@ import { openSqlite } from "../sqlite.js";
 import { isRunContext } from "../isolated-context-contract.js";
 import { isModelConfigurationError } from "../provider-errors.js";
 import { resolveThreadSettings } from "./settings.js";
-import { formatThreadMessage } from "./message-format.js";
+import { formatThreadMessage, serializeThreadNotification } from "./message-format.js";
 import { isThreadState, resolveDelivery } from "./contracts.js";
 import type { AttachPiSession, Delivery, OpenPiSession, PiCommand, PiEvent, PiSession, Result, SendThread, SpawnThread, Thread, ThreadApi, ThreadControl, ThreadHistory, ThreadInspection, ThreadList, ThreadMessage, ThreadPage, ThreadRead, ThreadSettings, ThreadSettlements, WorkOutcome } from "./contracts.js";
 
@@ -736,7 +736,7 @@ export class ThreadService implements ThreadApi {
       if (thread.parentId) {
         const receipt = `thread-result:${execution.id}`;
         if (!this.db.prepare("SELECT 1 FROM thread_work WHERE id=?").get(receipt)) this.insertMessage(receipt, {
-          requestId: receipt, threadId: thread.parentId, senderId: id, text: JSON.stringify({ type: "thread_idle", threadId: id, workId: execution.work_id, executionId: execution.id, outcome, finalMessage, ...(error ? { error } : {}) }),
+          requestId: receipt, threadId: thread.parentId, senderId: id, text: serializeThreadNotification({ type: "thread_idle", threadId: id, workId: execution.work_id, executionId: execution.id, outcome, finalMessage, ...(error ? { error } : {}) }),
           delivery: "steer", source: "notification", replyTo: execution.work_id,
         }, this.get(thread.parentId)?.settings ?? thread.settings);
       }

@@ -68,7 +68,10 @@ class FakePiSession implements PiSession {
   }
 
   settle(text: string, stopReason = "stop"): void {
-    const message = { role: "assistant", content: [{ type: "text", text }], stopReason, timestamp: Date.now() };
+    this.settleMessage({ role: "assistant", content: [{ type: "text", text }], stopReason, timestamp: Date.now() });
+  }
+
+  settleMessage(message: Record<string, unknown>): void {
     this.lastAssistantMessage = message;
     const workId = [...this.acceptedWorkIds].at(-1);
     if (workId) this.completedWorkIds.add(workId);
@@ -79,6 +82,28 @@ class FakePiSession implements PiSession {
   }
 
   async close(): Promise<void> { this.closed = true; }
+}
+
+function signedFinalMessage() {
+  return {
+    role: "assistant", stopReason: "stop", timestamp: 1234,
+    content: [
+      { type: "thinking", thinking: "Readable child reasoning", thinkingSignature: "opaque-thinking-signature" },
+      { type: "text", text: "Readable child result", textSignature: "opaque-text-signature" },
+      { type: "reasoning", summary: [{ type: "summary_text", text: "Readable reasoning summary" }], encrypted_content: "opaque-encrypted-snake" },
+      { type: "thinking", thinking: "More readable reasoning", encryptedContent: "opaque-encrypted-camel", thoughtSignature: "opaque-thought-signature", signature: "opaque-signature" },
+      { type: "redacted_thinking", data: "opaque-redacted-thinking" },
+      { type: "toolCall", id: "child-tool", name: "inspect", arguments: { signature: "application-signature", encrypted_content: "application-value" } },
+    ],
+  };
+}
+
+function expectReadableCompletion(text: string): void {
+  for (const readable of ["Readable child reasoning", "Readable child result", "Readable reasoning summary", "More readable reasoning", "application-signature", "application-value"]) {
+    expect(text).toContain(readable);
+  }
+  expect(text).not.toContain("opaque-");
+  for (const field of ["thinkingSignature", "textSignature", "thoughtSignature", "encryptedContent", "redacted_thinking"]) expect(text).not.toContain(field);
 }
 
 function fixture(root?: string, workersOnly = false) {
@@ -155,7 +180,8 @@ it.each([false, true])("settles a missing runtime model once, holds remaining wo
   expect(release).toHaveBeenCalledTimes(1);
   expect(service.pending("child")).toMatchObject([{ id: "later", state: "held" }]);
   expect(service.latestSettlement("child")).toMatchObject({ outcome: "failed", workId: "assignment", finalMessage: null });
-  expect(JSON.parse(service.pending(parent.id)[0].text)).toMatchObject({ outcome: "failed", workId: "assignment", error });
+  const notification = service.pending(parent.id)[0];
+  expect(JSON.parse(notification.text)).toMatchObject({ outcome: "failed", workId: "assignment", finalMessage: null, error });
   service.reconcile(); await turn();
   expect(openSession).toHaveBeenCalledTimes(1);
   await service.close();
@@ -163,7 +189,7 @@ it.each([false, true])("settles a missing runtime model once, holds remaining wo
   await restored.start(); await turn();
   expect(openSession).toHaveBeenCalledTimes(1);
   expect(restored.get("child")).toMatchObject({ state: "stopped", metadata: { executionError: error } });
-  expect(restored.pending(parent.id)).toHaveLength(1);
+  expect(restored.pending(parent.id)).toEqual([notification]);
 });
 
 it("preserves the running account and model when future settings change", async () => {
@@ -373,15 +399,30 @@ describe("ThreadService", () => {
     expect(empty).toMatchObject({ ok: false, error: { code: "no_pending_messages" } });
   });
 
-  it("holds child notification for a stopped parent and puts an explicit message first", async () => {
+  it("holds readable child completion across restart without changing native final-message storage", async () => {
     const first = fixture();
     await first.service.start();
     const parent = value(await first.service.spawn({ requestId: "parent", id: "parent", cwd: first.directory }));
     const child = value(await first.service.spawn({ requestId: "child-work", id: "child", parentId: parent.id, cwd: first.directory, message: "child task" }));
     value(await first.service.control({ threadId: parent.id, action: "stop", descendants: false }));
     await waitFor(() => first.sessions[0]?.commands.some(command => command.type === "prompt"));
-    await settle(first.sessions[0]!, first.service, child.id, "child result");
+    const finalMessage = signedFinalMessage();
+    const nativeFinalMessage = structuredClone(finalMessage);
+    first.sessions[0]!.settleMessage(finalMessage);
     await waitFor(() => first.service.pending(parent.id).length === 1);
+    const settlement = first.service.latestSettlement(child.id)!;
+    expect(settlement.finalMessage).toEqual(nativeFinalMessage);
+    expect(finalMessage).toEqual(nativeFinalMessage);
+    const notification = first.service.pending(parent.id)[0]!;
+    expectReadableCompletion(notification.text);
+    expect(JSON.parse(notification.text)).toMatchObject({
+      type: "thread_idle", threadId: child.id, workId: "child-work", executionId: settlement.executionId, outcome: "complete",
+    });
+    const db = new DatabaseSync(join(first.directory, "threads.sqlite"));
+    try {
+      const work = db.prepare("SELECT final_message FROM thread_work WHERE id=?").get("child-work") as { final_message: string };
+      expect(JSON.parse(work.final_message)).toEqual(nativeFinalMessage);
+    } finally { db.close(); }
     expect(first.service.get(parent.id)?.state).toBe("stopped");
     expect(first.service.pending(parent.id)).toMatchObject([{ source: "notification", state: "held", senderId: child.id }]);
     value(await first.service.close());
@@ -393,6 +434,18 @@ describe("ThreadService", () => {
       { id: "explicit", source: "explicit", text: "new instruction" },
       expect.objectContaining({ source: "notification" }),
     ]);
+    expect(second.service.latestSettlement(child.id)?.finalMessage).toEqual(nativeFinalMessage);
+    value(await second.service.start());
+    await waitFor(() => second.sessions[0]?.commands.some(command => command.workId === "explicit") === true);
+    second.sessions[0]!.settle("instruction handled");
+    await waitFor(() => second.sessions.some(session => session.commands.some(command => command.workId === notification.id)));
+    const command = second.sessions.flatMap(session => session.commands).find(command => command.workId === notification.id)!;
+    const text = String(command.message);
+    expectReadableCompletion(text);
+    expect(JSON.parse(text.split("\n")[2]!)).toMatchObject({
+      source: "notification", senderThreadId: child.id, recipientThreadId: parent.id, messageId: notification.id, replyTo: "child-work",
+    });
+    expect(text).toContain(notification.text);
   });
 
   it("normalizes stored phases without losing active execution or held input", async () => {
@@ -599,6 +652,42 @@ describe("ThreadService", () => {
     expect(text).toContain("Keep working\nPrepared context");
     expect(text.match(/<agent_message>/g)).toHaveLength(1);
     await settle(second.sessions[0]!, second.service, "recipient");
+  });
+
+  it.each(["queued", "dispatched"] as const)("projects a persisted %s completion with prepared meeting context on recovery", async state => {
+    const first = fixture();
+    const parent = value(await first.service.spawn({ requestId: "parent", cwd: first.directory }));
+    const finalMessage = signedFinalMessage();
+    const error = "Model not found: private/removed-model";
+    const report = { type: "thread_idle", threadId: "child", workId: "child-work", executionId: "child-execution", outcome: "failed", finalMessage, error };
+    const rawText = JSON.stringify(report);
+    const meetingContext = "\n\nMeeting context: keep this appended context.";
+    value(first.service.importMessage({
+      id: "persisted-completion", threadId: parent.id, senderId: "child", source: "notification", replyTo: "child-work",
+      text: rawText, state, ...(state === "dispatched" ? { insertedAt: Date.now() } : {}),
+    }));
+    value(await first.service.detach());
+    const db = new DatabaseSync(join(first.directory, "threads.sqlite"));
+    try {
+      db.prepare("UPDATE thread_work SET prepared=? WHERE id=?").run(JSON.stringify({ text: rawText + meetingContext, images: [] }), "persisted-completion");
+    } finally { db.close(); }
+
+    const second = fixture(first.directory);
+    value(await second.service.start());
+    await waitFor(() => second.sessions[0]?.commands.some(command => command.workId === "persisted-completion") === true);
+    const command = second.sessions[0]!.commands.find(command => command.workId === "persisted-completion")!;
+    if (state === "dispatched") expect(command.resume).toBe(true);
+    const text = String(command.message);
+    expectReadableCompletion(text);
+    expect(text).toContain(meetingContext);
+    expect(text.match(/<agent_message>/g)).toHaveLength(1);
+    expect(JSON.parse(text.split("\n")[2]!)).toMatchObject({
+      senderThreadId: "child", recipientThreadId: parent.id, source: "notification", messageId: "persisted-completion", replyTo: "child-work",
+    });
+    const body = JSON.parse(text.split("\n")[4]!);
+    expect(body).toMatchObject({ type: "thread_idle", threadId: "child", workId: "child-work", executionId: "child-execution", outcome: "failed", error });
+    expect(body.finalMessage.content.at(-1)).toEqual(finalMessage.content.at(-1));
+    await settle(second.sessions[0]!, second.service, parent.id);
   });
 
   it("does not replay an imported completed message", async () => {

@@ -6,6 +6,7 @@ import type { ImportMessage, ImportThread, ThreadService } from "./service.js";
 import { resolveThreadSettings } from "./settings.js";
 import { catalogModel } from "../catalog.js";
 import { adoptImportProvenance } from "./import-provenance.js";
+import { serializeThreadNotification } from "./message-format.js";
 
 type Row = Record<string, any>;
 const sourceTables = ["sessions", "work_items", "subagents", "thread_delegations", "delegation_results", "session_cores", "core_agents", "core_dispatches", "core_switches"];
@@ -72,7 +73,7 @@ export function importRemoteThreads(service: ThreadService, db: DatabaseSync, op
       const receipt = `import-result:${child.session_id}:${result.work_id}`;
       messages.set(receipt, { id: receipt, threadId: relation.parent_session_id, senderId: child.session_id,
         source: "notification", delivery: "steer", replyTo: result.work_id,
-        text: JSON.stringify({ type: "thread_idle", threadId: child.session_id, workId: result.work_id, outcome: result.status, finalMessage: result.result, error: result.error }) });
+        text: serializeThreadNotification({ type: "thread_idle", threadId: child.session_id, workId: result.work_id, outcome: result.status, finalMessage: result.result, error: result.error }) });
     }
     const imported = service.importState([...threads.values()], [...messages.values()]);
     if (!imported.ok) return imported;
@@ -141,7 +142,7 @@ function importNativeChildren(rootId: string, nodes: Row[], threads: Map<string,
         if (!node.work.delivered && node.parentId) {
           const receipt = `import-result:${node.id}:${node.work.id}`;
           messages.set(receipt, { id: receipt, threadId: node.parentId, senderId: node.id, source: "notification", delivery: "steer", replyTo: node.work.id,
-            text: JSON.stringify({ type: "thread_idle", threadId: node.id, workId: node.work.id, outcome, finalMessage: node.work.result ?? null }) });
+            text: serializeThreadNotification({ type: "thread_idle", threadId: node.id, workId: node.work.id, outcome, finalMessage: node.work.result ?? null }) });
         }
       }
   }
@@ -198,7 +199,7 @@ export function importFleetThreads(service: ThreadService, db: DatabaseSync, opt
       if (relation && row.state !== "queued" && !controls.has(`fleet-delivered:${row.id}`)) {
         const id = `fleet-result:${row.id}`;
         messages.set(id, { id, threadId: relation.parentRunId, senderId: row.id, source: "notification", delivery: "steer", replyTo: workId,
-          text: JSON.stringify({ type: "thread_idle", threadId: row.id, workId, outcome, finalMessage: row.result ?? null }) });
+          text: serializeThreadNotification({ type: "thread_idle", threadId: row.id, workId, outcome, finalMessage: row.result ?? null }) });
       }
       if (tree) importNativeChildren(row.id, tree.nodes, threads, messages);
     }
