@@ -29,7 +29,6 @@ import { importFleetThreads } from "./threads/import.js";
 import type { Thread } from "./threads/contracts.js";
 import { ThreadDirectory } from "./threads/directory.js";
 import { resolveThreadSettings } from "./threads/settings.js";
-import { runViews } from "./threads/run-view.js";
 import type { RunContext } from "./domain.js";
 
 const HOST=process.env.PI_ORCHESTRATOR_HOST??"127.0.0.1";
@@ -195,7 +194,7 @@ export class Daemon {
   private laneReady(id:string):boolean{
     if(this.store.lane(id)?.repair){
       const probe=this.repairReadiness.get(id);
-      return !this.threads.snapshot().some(thread=>thread.metadata?.execution==="root-repair"&&["queued","starting","running","stopping"].includes(thread.state))&&probe?.ready===true&&Number(this.store.control(`readiness-admitted:${id}`)??0)<probe.at;
+      return !this.threads.snapshot().some(thread=>thread.metadata?.execution==="root-repair"&&thread.state==="running")&&probe?.ready===true&&Number(this.store.control(`readiness-admitted:${id}`)??0)<probe.at;
     }
     return this.store.control("ordinary-launches")!=="paused"&&(!this.snapshotCommand||(this.readiness?.lanes[id]?.ready===true&&Number(this.store.control(`readiness-admitted:${id}`)??0)<this.readinessAt));
   }
@@ -210,7 +209,7 @@ export class Daemon {
     if(this.store.control("launches")==="paused")return;
     const failed=new Set<string>();
     for(let slot=0;slot<this.config.maxConcurrentSessions;slot++){
-      if(this.threads.snapshot().filter(thread=>["queued","starting","running","stopping"].includes(thread.state)).length>=this.config.maxConcurrentSessions)break;
+      if(this.threads.snapshot().filter(thread=>thread.state==="running").length>=this.config.maxConcurrentSessions)break;
       const lanes=this.store.lanes().filter((lane)=>this.laneEnabled(lane.id)&&this.laneReady(lane.id));
       lanes.sort((a,b)=>Number(!!b.repair)-Number(!!a.repair)||this.share(a)-this.share(b)||a.id.localeCompare(b.id));
       let admitted=false;
@@ -282,7 +281,7 @@ export class Daemon {
     this.threads.setDirectory(directory);
     return directory;
   }
-  private laneActive(laneId:string):number{return this.threads.snapshot().filter(thread=>thread.metadata?.laneId===laneId&&["queued","starting","running","stopping"].includes(thread.state)).length;}
+  private laneActive(laneId:string):number{return this.threads.snapshot().filter(thread=>thread.metadata?.laneId===laneId&&thread.state==="running").length;}
   private profileModel(profile:string):string{
     const candidate=this.config.profiles[profile]?.[0];
     if(!candidate)throw new Error(`Unknown model profile ${profile}`);
@@ -319,7 +318,6 @@ export class Daemon {
         const response=await threadHttp(api,new Request(url,{method,headers:{"content-type":"application/json"},...(method==="POST"?{body:JSON.stringify(input)}:{})}),application?`/v1/applications/${application[1]}/threads`:localOwner?"/v1/thread-owner":"/v1/threads");
         if(response){res.writeHead(response.status,Object.fromEntries(response.headers));res.end(await response.text());return;}
       }
-      if(method==="GET"&&url.pathname==="/v1/runs")return json(res,200,runViews([this.threads,...this.isolated.values()]));
       const runControl=/^\/v1\/runs\/([^/]+)\/(abort|kill)$/.exec(url.pathname);
       if(method==="POST"&&runControl){
         const result=await this.directory().control({threadId:decodeURIComponent(runControl[1]!),action:"stop",descendants:false});
@@ -438,7 +436,7 @@ export class Daemon {
   }
 
   private status():unknown{return{
-    launches:this.store.control("launches")??"enabled",ordinaryLaunches:this.store.control("ordinary-launches")??"enabled",repairOwner:this.threads.snapshot().find(thread=>thread.metadata?.execution==="root-repair"&&["starting","running","stopping"].includes(thread.state))?.id,laneBudget:this.laneBudget,
+    launches:this.store.control("launches")??"enabled",ordinaryLaunches:this.store.control("ordinary-launches")??"enabled",repairOwner:this.threads.snapshot().find(thread=>thread.metadata?.execution==="root-repair"&&thread.state==="running")?.id,laneBudget:this.laneBudget,
     repairReadiness:this.store.lanes().filter(lane=>lane.repair).map(lane=>({lane:lane.id,...this.repairReadiness.get(lane.id),error:this.store.control(`repair-readiness-error:${lane.id}`)||undefined})),
     readinessError:this.store.control("readiness_error")||undefined,
     meterErrors:this.store.accounts().flatMap((account)=>{const error=this.store.control(`meter-error:${account.id}`);return error?JSON.parse(error):[];}),

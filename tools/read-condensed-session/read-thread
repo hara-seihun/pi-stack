@@ -111,7 +111,7 @@ function main() {
       const dbPath = resolve(database ?? defaultDatabase());
       if (!existsSync(dbPath)) throw new Error(`Thread database not found at ${dbPath}; set PI_THREAD_DATABASE or pass --db. self and JSONL paths do not need a database`);
       db = new DatabaseSync(dbPath, { readOnly: true });
-      const rows = db.prepare("SELECT id,title AS name,session_file AS session_path,upper(state) AS state,updated_at,json_extract(metadata,'$.archivedAt') AS archived_at FROM thread ORDER BY updated_at DESC").all()
+      const rows = db.prepare("SELECT id,title AS name,session_file AS session_path,state,updated_at,json_extract(metadata,'$.archivedAt') AS archived_at FROM thread ORDER BY updated_at DESC").all()
         .map(row => ({ ...row, updated_at: new Date(row.updated_at).toISOString() }));
       if (list || !selector) {
         console.log(listThreads(rows));

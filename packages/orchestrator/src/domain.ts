@@ -9,7 +9,6 @@ export type RunContext = { readonly tools: readonly string[]; readonly extension
 export type RunState = "queued" | "starting" | "running" | "done" | "failed" | "aborted";
 export type LeaseKind = "fleet" | "interactive" | "voice";
 export type FailureKind = "provider" | "account" | "infrastructure" | "operator" | "task";
-export type RunActivity = "IDLE" | "STARTING" | "WORKING" | "THINKING" | "COMPACTING" | "WAITING_ON_TOOL";
 
 export interface Account {
   readonly id: string;

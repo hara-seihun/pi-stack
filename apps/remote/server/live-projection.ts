@@ -1,10 +1,11 @@
+import type { ThreadState } from "pi-orchestrator/api";
 import type { ToolProgress } from "./tool-progress";
 import type { Activity } from "./protocol";
 
-export function threadActivity(state: string, live?: LiveProjection): Activity {
-  if (state !== "RUNNING") return state;
-  return live?.compacting ? "COMPACTING" : live?.retrying ? "RETRYING"
-    : live?.activeTools.size ? "WAITING_ON_TOOL" : live?.thinkingActive ? "THINKING" : "WORKING";
+export function threadActivity(state: ThreadState, live?: LiveProjection): Activity {
+  if (state !== "running") return state;
+  return live?.compacting ? "compacting" : live?.retrying ? "retrying"
+    : live?.activeTools.size ? "waiting_on_tool" : live?.thinkingActive ? "thinking" : state;
 }
 
 /** Disposable visual state. None of these fields admits or completes work. */

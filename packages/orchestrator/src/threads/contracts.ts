@@ -6,7 +6,9 @@ export type Delivery = "queue" | "steer" | "hardSteer";
 export type ThinkingLevel = "off" | "minimal" | "low" | "medium" | "high" | "xhigh" | "max";
 export type Speed = "standard" | "priority";
 export type Admission = "force" | "background";
-export type ThreadState = "idle" | "queued" | "starting" | "running" | "stopping" | "stopped" | "interrupted";
+export const THREAD_STATES = ["idle", "running", "stopped"] as const;
+export type ThreadState = typeof THREAD_STATES[number];
+export const isThreadState = (state: unknown): state is ThreadState => THREAD_STATES.some(value => value === state);
 export type WorkOutcome = "complete" | "failed" | "cancelled";
 
 export interface ThreadSettings {

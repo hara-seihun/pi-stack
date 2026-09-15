@@ -1,3 +1,5 @@
+import type { ThreadState } from "pi-orchestrator/api";
+
 export type MeetTrackKind = "camera" | "screen" | "pi-camera" | "pi-screen";
 export interface MeetParticipant { id: string; name: string; host: boolean }
 export interface MeetSignal {
@@ -10,7 +12,7 @@ export interface MeetIceServer { urls: string[]; username: string; credential: s
 export interface MeetThreadState {
   id: string;
   name: string;
-  state: string;
+  state: ThreadState;
   tools: string[];
   output: string;
   events: Array<{ id: number; kind: string; name: string; text: string }>;

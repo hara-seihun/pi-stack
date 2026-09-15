@@ -25,7 +25,7 @@ Accepted and inserted work remains durable. `close()` instead closes idle native
 
 Input commands carry a stable `workId`. Pi records `thread_input` and `thread_settled` receipts in its native session. `get_state` exposes accepted and completed work IDs. Reopening an accepted, incomplete input uses native continuation; it does not replay the user's message. A completed receipt settles the database without another model request.
 
-Stop and hard steer await native cancellation and check that streaming, compaction, queued native input and local tools have stopped. Failure holds queued work and reports an interrupted thread. A late callback from a replaced or suspended controller cannot start replacement execution.
+Stop and hard steer await native cancellation and check that streaming, compaction, queued native input and local tools have stopped. Failure holds queued work, records the cancellation error and leaves the thread running until cancellation is confirmed. Only then is it stopped. A late callback from a replaced or suspended controller cannot start replacement execution.
 
 Each execution captures its effective settings. Defaults come from [`resolveThreadSettings`](../src/threads/settings.ts). Isolated context and execution identity are immutable thread metadata. Isolated context reaches the runner through `--orchestrator-context`; root repair cannot combine it with privileged execution. Once native file custody exists, `nativeHistoryRequired` prevents reopening a missing transcript as a fresh session.
 

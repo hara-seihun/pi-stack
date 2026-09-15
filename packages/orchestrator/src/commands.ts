@@ -7,7 +7,7 @@ import { Store } from "./store.js";
 import { readUsageEvidence } from "./usage-evidence.js";
 import { randomUUID } from "node:crypto";
 import { createThreadClient } from "./threads/http.js";
-import type { Delivery, Result, SettingsOverrides, SpawnThread, Thread, ThreadState } from "./threads/contracts.js";
+import { isThreadState, type Delivery, type Result, type SettingsOverrides, type SpawnThread, type Thread } from "./threads/contracts.js";
 import { providerOAuth, transactSharedCredential } from "./auth/shared-oauth.js";
 import { builtinProviders } from "@earendil-works/pi-ai/providers/all";
 import { AccountTransfer, transferEndpoint, transferPeer } from "./auth/account-transfer.js";
@@ -117,8 +117,8 @@ export async function dispatch(argv:string[]):Promise<void>{
     const {named,positional}=flags(rest);
     if(positional.length)throw new Error("list accepts named options only");
     const state=named.get("state");
-    if(state&&!['idle','queued','starting','running','stopping','stopped','interrupted'].includes(state))throw new Error("Invalid --state");
-    threadOutput(await createThreadClient(`${BASE}/v1/threads`).list({parentId:named.get("parent"),state:state as ThreadState|undefined,limit:named.has("limit")?positiveInteger(named.get("limit")!,"--limit"):undefined,cursor:named.get("cursor")}));return;
+    if(state!==undefined&&!isThreadState(state))throw new Error("Invalid --state");
+    threadOutput(await createThreadClient(`${BASE}/v1/threads`).list({parentId:named.get("parent"),state,limit:named.has("limit")?positiveInteger(named.get("limit")!,"--limit"):undefined,cursor:named.get("cursor")}));return;
   }
   if(command==="read"){
     const {named,positional}=flags(rest),threadId=positional[0];
