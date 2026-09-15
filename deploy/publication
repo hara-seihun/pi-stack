@@ -30,6 +30,7 @@ const logRoot = join(stateRoot, "logs");
 const proofRoot = join(stateRoot, "proofs");
 const contractRoot = join(stateRoot, "contracts");
 const checkout = join(stateRoot, "repository");
+const releaseRepository = process.env.PI_STACK_PUBLICATION_RELEASE_REPOSITORY ?? "/home/kenan/.local/state/pi-stack-release/repository";
 const threadExecutionContract = "unified-threads-v1";
 const threadExecutionActivationPath = join(contractRoot, `${threadExecutionContract}.json`);
 const self = fileURLToPath(import.meta.url);
@@ -1185,7 +1186,21 @@ function sha256(path) {
   return runCapture("sha256sum", [path]).split(/\s+/)[0];
 }
 
-function hasExecutionContract(commit) {
+export function retainSelectedSource(census, remoteHost) {
+  const commit = census.selectedCommit;
+  if (!commit) return;
+  validateSha(commit);
+  const repository = remoteHost ? `${remoteHost}:${releaseRepository}` : releaseRepository;
+  const ref = `refs/pi-stack-publication/selected/${commit}`;
+  if (!commandResult("git", ["-C", checkout, "cat-file", "-e", `${commit}^{commit}`]).ok) {
+    checked("git", ["-C", checkout, "fetch", "--quiet", "--no-tags", repository, `${commit}:${ref}`], { timeoutSeconds: 45 });
+  }
+  checked("git", ["-C", checkout, "cat-file", "-e", `${commit}^{commit}`]);
+  checked("git", ["-C", checkout, "update-ref", ref, commit]);
+  census.selectedSource = { repository, ref, commit };
+}
+
+export function hasExecutionContract(commit) {
   const result = commandResult("git", ["-C", checkout, "grep", "-q", "-F", "THREAD_EXECUTION_CONTRACT = \"unified-threads-v1\"", commit, "--", "packages/orchestrator/src/threads/contracts.ts"]);
   if (result.status > 1) throw new Error(`cannot inspect execution contract in ${commit}: ${result.stderr.trim()}`);
   return result.ok;
@@ -1289,6 +1304,8 @@ function processRequest(request) {
     }
 
     prepareAndroidArtifact(request, logPath);
+    request.step = "inspect-thread-execution-contract";
+    writeRequest(request);
     request.contract = hasExecutionContract(request.integrationSha) ? threadExecutionContract : null;
     if (!request.contract && activatedContract()) throw new Error("Refusing to remove the activated thread execution contract");
     writeRequest(request);
@@ -1297,6 +1314,8 @@ function processRequest(request) {
     if (!deploymentsPassed) {
       const gmktecCensus = runtimeCensus(undefined);
       const convergeCensus = runtimeCensus("converge-kenan");
+      retainSelectedSource(gmktecCensus);
+      retainSelectedSource(convergeCensus, "converge-kenan");
       if (!request.contract && [gmktecCensus, convergeCensus].some(host => host.selectedCommit && hasExecutionContract(host.selectedCommit))) {
         throw new Error("Refusing to replace a host's thread execution contract with a target that lacks it");
       }
@@ -1777,9 +1796,11 @@ function main() {
   process.exitCode = 2;
 }
 
-try {
-  main();
-} catch (error) {
-  process.stderr.write(`${error instanceof Error ? error.message : String(error)}\n`);
-  process.exitCode = 1;
+if (process.argv[1] && resolve(process.argv[1]) === self) {
+  try {
+    main();
+  } catch (error) {
+    process.stderr.write(`${error instanceof Error ? error.message : String(error)}\n`);
+    process.exitCode = 1;
+  }
 }

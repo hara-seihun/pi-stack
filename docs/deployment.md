@@ -14,6 +14,8 @@ For an external caller, set `PI_STACK_PUBLICATION_REPORT_URL` and `PI_STACK_PUBL
 
 `deploy/publication install` installs the GMKtec worker and timer from this checkout. Its state lives at `~/.local/state/pi-stack-publication/`. The `unified-threads-v1` contract has a first-activation gate. Before waiting for old runners, publication records each host's fleet launch control in `request.maintenance.hosts`, then uses the deployed `pi-orchestrator pause` command. The pause survives blocked reconciles and worker restarts. An existing operator pause stays paused, including after successful deployment. The fleet daemon must be active and unmasked when publication takes custody.
 
+Before inspecting a selected host's execution contract, publication retains its commit under `refs/pi-stack-publication/selected/<sha>` in the publication repository. A selected commit missing locally is fetched by exact SHA from that host's release-owned `~/.local/state/pi-stack-release/repository`, over SSH for Converge. Host releases need not be reachable from GitHub `main`. The gate proof records the source repository and retained ref. Missing source is an inspection failure, not evidence that a host lacks the contract. This repairs publication `PUB-b53eb76384ee4fbf8079b1f6`, whose Converge selection existed only in Converge's repository. `PI_STACK_PUBLICATION_RELEASE_REPOSITORY` overrides the repository path for isolated checks.
+
 Remote remains available while active work drains. The worker waits for native runners, fleet worker units and admitted fleet runs, including waiting parents and in-process completions. Once those clear, it stops the router and freezes the Remote supervisors and old fleet daemon. With admission unable to race the final census, it reads their active claims and checks both user and system worker units and remaining child processes. A busy census thaws the owners and restores the router, retaining only the fleet launch pause. Receipts identify the host, units, PIDs, run IDs and Remote claim IDs. The timer retries without model polling. Idle runner residency and open meetings can keep the gate blocked; publication never aborts them to force a release.
 
 Only an empty final census permits stopping the old owners and invoking the host release wrappers. The importer transfers native transcript references, held messages, pending result notifications and presentation references without model calls. A fleet daemon already running ThreadService uses live handoff, including recovery from a partial two-host deployment. After either host adopts unified threads, publication refuses a target that removes the contract. Ordinary later releases preserve shared runners through controller handoff and do not take a maintenance pause.
@@ -43,7 +45,7 @@ The GMKtec installation needs `node`, `timeout`, `flock`, `systemctl`, `git`, `a
 Focused checks run in seconds:
 
 ```bash
-node --test scripts/publication.test.mjs scripts/publication-gate.test.mjs scripts/publication-progress.test.mjs
+node --test scripts/publication.test.mjs scripts/publication-gate.test.mjs scripts/publication-source.test.mjs scripts/publication-progress.test.mjs
 ```
 
 ## Release checkout ownership
