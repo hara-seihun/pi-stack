@@ -34,9 +34,23 @@ These are native execution receipts; the thread service still owns command admis
 
 ## Cancellation
 
-[`PiExecution`](../src/threads/pi-execution.ts) supplies local tool signals, tracks tools and prompt preflight, and fences callbacks from cancelled generations. Abort cancels the agent, compaction, shell commands and dialogs, then waits for local execution to stop. The acknowledgement follows confirmed cleanup. The timeout is `PI_THREAD_CANCEL_TIMEOUT_MS`, default 30 seconds.
+[`PiExecution`](../src/threads/pi-execution.ts) owns one `halt` operation. Abort, SDK abort aliases, replacement and idle disposal use it. Halt closes admission, signals tools, cancels native agent work, retry, compaction and shell commands, dismisses dialogs, and waits for every tracked call to return. Concurrent abort requests share that operation. Settlement runs before admission reopens and before the abort acknowledgement. Native halt has a fixed 20-second deadline, below the controller's 30-second RPC timeout, so native cancellation failure reaches the controller before its request expires.
 
-If a tool ignores cancellation, abort reports failure and leaves execution blocked. Finishing later does not silently authorize another generation; a subsequent cancellation must confirm the stop. Hard steer uses this same abort boundary before the selected new message runs. It does not cancel descendants or undo external effects.
+Tracking covers prompt preflight, native agent runs, queued inputs, custom-message turns, tools, shell commands, compaction and tree navigation. Each operation inherits its cancellation signal through async-local scope, so a callback from a cancelled run cannot start work after a later run is admitted. Plain prompts cannot overlap preflight or an unsettled turn. Streaming steering still uses Pi's queue.
+
+Settlement is synchronous and runs only when native and tracked work are idle. It never waits on a prompt promise. Prompt cleanup schedules the idle notification outside that promise, after rejection receipts can run. Native `agent_settled` is another notification, not a second settlement owner. During halt, only halt may write the cancelled receipt. Each accepted batch emits one settlement; repeated aborts on idle work emit none.
+
+If a tool or extension ignores cancellation, abort reports failure and leaves execution blocked. Pi's prompt API does not provide an abort signal for arbitrary extension preflight, so halt must wait for that callback to return. Finishing later does not silently authorize another run; a subsequent halt must confirm the stop. A halt invoked from its own tracked callback is rejected immediately rather than waiting on itself. Extension commands that replace their own session need an SDK handoff outside the running callback.
+
+Hard steer uses this same abort boundary before the selected new message runs. It does not cancel descendants or undo external effects.
+
+The focused cancellation checks take seconds and make no provider requests:
+
+```sh
+npm test --workspace=pi-orchestrator -- tests/pi-execution.test.ts tests/pi-session-halt.test.ts tests/pi-native.test.ts
+```
+
+They cover a real shell inside a native prompt, prompt preflight, extension dialogs, compaction cleanup, concurrent halt, failed cancellation, and single settlement.
 
 ## Resources, routing and tools
 

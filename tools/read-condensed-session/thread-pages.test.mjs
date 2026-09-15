@@ -16,8 +16,8 @@ function database() {
 test("subagent pages use message recency, stable snapshots, direct ownership and explicit idle inclusion", () => {
   const db = database();
   try {
-    for (const [id, state, parent, archived] of [["a", "RUNNING", "root", null], ["b", "IDLE", "root", null], ["c", "STOPPED", "root", "2026-01-01"], ["nested", "RUNNING", "a", null]]) {
-      db.prepare("INSERT INTO thread VALUES(?,?,?,?,?,?,?,?)").run(id, id, state.toLowerCase(), Date.parse("2025-01-01"), parent,
+    for (const [id, state, parent, archived] of [["a", "running", "root", null], ["b", "idle", "root", null], ["c", "stopped", "root", "2026-01-01"], ["nested", "running", "a", null]]) {
+      db.prepare("INSERT INTO thread VALUES(?,?,?,?,?,?,?,?)").run(id, id, state, Date.parse("2025-01-01"), parent,
         JSON.stringify({model:'luna'}), JSON.stringify({archived:!!archived,archivedAt:archived}), Date.parse("2025-01-01"));
     }
     const statement = db.prepare("INSERT INTO thread_work VALUES(?,?,?,'done',?,?)");
@@ -26,7 +26,7 @@ test("subagent pages use message recency, stable snapshots, direct ownership and
     event(2, "a", "2025-01-03");
     event(3, "b", "2025-01-04");
     db.prepare("UPDATE thread SET updated_at=? WHERE id='a'").run(Date.parse("2025-01-05"));
-    assert.deepEqual(subagentPage(db, "root").subagents.map(row => row.threadId), ["a"]);
+    assert.deepEqual(subagentPage(db, "root").subagents.map(row => [row.threadId, row.state, row.active]), [["a", "running", true]]);
     const first = subagentPage(db, "root", { includeIdle: true, limit: 1 });
     assert.deepEqual(first.subagents.map(row => row.threadId), ["b"]);
     event(5, "c", "2025-01-06");
@@ -53,7 +53,7 @@ test("thread pages retain branch and snapshot, and large entries can be read wit
     { type: "message", id: "c", parentId: "b", timestamp: "2025-01-03", message: { role: "user", content: "Last" } },
   ];
   const save = () => writeFileSync(path, entries.map(JSON.stringify).join("\n") + "\n");
-  const row = { id: "root", name: "Root", state: "IDLE", session_path: path };
+  const row = { id: "root", name: "Root", state: "idle", session_path: path };
   try {
     save();
     const first = threadPage(db, row, { limit: 1 });

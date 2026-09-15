@@ -6,9 +6,9 @@ import test from "node:test";
 import { listThreads, renderThread, resolveThread } from "./thread-reader.mjs";
 
 const rows = [
-  { id: "aaaaaaaa-0000", name: "Build runtime", state: "STOPPED", updated_at: "2026-08-29T10:00:00Z" },
-  { id: "bbbbbbbb-0000", name: "Build runtime", state: "RUNNING", updated_at: "2026-08-30T10:00:00Z" },
-  { id: "cccccccc-0000", name: "Fix storage", state: "STOPPED", updated_at: "2026-08-28T10:00:00Z" },
+  { id: "aaaaaaaa-0000", name: "Build runtime", state: "stopped", updated_at: "2026-08-29T10:00:00Z" },
+  { id: "bbbbbbbb-0000", name: "Build runtime", state: "running", updated_at: "2026-08-30T10:00:00Z" },
+  { id: "cccccccc-0000", name: "Fix storage", state: "stopped", updated_at: "2026-08-28T10:00:00Z" },
 ];
 
 test("thread selectors prefer ids and the newest exact title", () => {

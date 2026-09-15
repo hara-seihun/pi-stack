@@ -12,7 +12,7 @@ The local service runs inside the person's existing Unix account and mount names
 
 ## Execution state is an observation
 
-Remote publishes the service's thread state in uppercase. A thread's own `RUNNING` activity can display THINKING, WAITING ON TOOL, COMPACTING or RETRYING from its live Pi events. An idle parent remains IDLE while its children run. Child relationships never change parent execution state.
+Remote publishes the shared `ThreadState` unchanged as `idle`, `running` or `stopped`. Live Pi events can add thinking, tool, compaction or retry display details while the thread is running. These details do not control execution or add lifecycle states. An idle parent stays idle while its children run.
 
 `server/live-projection.ts` stores disposable text, thinking and bounded tool previews. These fields neither admit nor complete work. No GET request or browser selection starts a thread merely to read history. Owner inspection returns cached context or persisted native history without opening Pi.
 

@@ -670,7 +670,7 @@ function threadRow(thread: Thread): any {
   const [provider, ...modelParts] = thread.settings.model.split("/");
   const model = { provider, modelId: modelParts.join("/") };
   return { ...thread, name: thread.title, workspace_id: meta.workspaceId ?? thread.cwd,
-    session_path: thread.sessionFile, state: thread.state.toUpperCase(),
+    session_path: thread.sessionFile,
     initial_model: model?.modelId ?? thread.settings.model, current_provider: model?.provider ?? "",
     initial_provider: model?.provider ?? "", initial_thinking: thread.settings.thinkingLevel,
     meeting_id: meta.meetingId ?? null, profile_id: meta.profileId ?? "home",
@@ -827,7 +827,7 @@ function sortedAgentModels(models: Map<string, AgentModelCount>): AgentModelCoun
 async function activeAgents() {
   const models = new Map<string, AgentModelCount>();
   let running = 0;
-  for (const row of allThreadRows()) if (["STARTING", "RUNNING"].includes(row.state)) {
+  for (const row of allThreadRows()) if (row.state === "running") {
     running++; addAgentModel(models, row.settings.model);
   }
   return { running, models: sortedAgentModels(models) };
@@ -1153,7 +1153,6 @@ function threadEnvironment(thread: Thread) {
   return { ...process.env, HOME,
     PI_REMOTE_WORKSPACES: JSON.stringify([...workspaces.values()]),
     PI_REMOTE_SESSION_ID: thread.id, PI_THREAD_API_URL: `http://${HOST}:${PORT}/v1/threads`,
-    PI_THREAD_DATABASE: join(DATA, "threads.sqlite3"),
     PI_SESSION_ID: thread.id, PI_SESSION_FILE: thread.sessionFile,
     PI_REMOTE_MEETING_ID: String(meta.meetingId ?? ""), PI_REMOTE_CONTEXT_OWNER_PID: "",
     PI_REMOTE_BASH_TIMEOUT_MAX_SECONDS: String(bashTimeoutSeconds(meta.bashTimeoutSeconds)),
@@ -1304,7 +1303,7 @@ const meet = new MeetServer((id) => {
   return Boolean(row && !row.archived_at);
 }, undefined, db, (meetingId, rootId) => meetingActivity(db, allThreadRows().filter(row => row.meeting_id === meetingId), rootId, (row) => {
   const runtime = liveProjections.get(row.id);
-  return { state: sessionActivity(row), tools: [...(runtime?.activeTools.values() ?? [])], output: runtime?.liveText ?? "" };
+  return { state: row.state, tools: [...(runtime?.activeTools.values() ?? [])], output: runtime?.liveText ?? "" };
 }));
 
 
@@ -1804,7 +1803,7 @@ const server = Bun.serve({
         try {
           const rt = liveFor(id);
           if (!ownsSupervisorLease()) return error("Supervisor instance was replaced", 503);
-          if (row.state !== "IDLE" || row.pendingMessages) return error("Wait for the thread to become idle before editing", 409);
+          if (row.state === "running" || row.pendingMessages) return error("Wait for the thread to become idle before editing", 409);
 
           const before = await rpc(id, "get_entries") as any;
           const branch = activeSessionEntries(Array.isArray(before.entries) ? before.entries : [], before.leafId);

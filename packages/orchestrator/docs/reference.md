@@ -33,5 +33,4 @@ usage: pi-orchestrator account list | import ID --provider openai-codex|anthropi
 - `lane`
 - `run`
 - `lease`
-- `live_state`
 - `usage_hour`

@@ -466,7 +466,7 @@ import { updateDocument } from "./sync";
       if (!response.ok) throw new Error(await responseError(response, "Could not open the thread"));
       const snapshot = await response.json();
       this.cursor = Math.max(0, ...(snapshot.events || []).map((event) => Number(event.seq) || 0));
-      this.threadWorking = snapshot.session?.state === "RUNNING";
+      this.threadWorking = snapshot.session?.state === "running";
       this.lastLiveText = String(snapshot.liveText || "");
     }
 
