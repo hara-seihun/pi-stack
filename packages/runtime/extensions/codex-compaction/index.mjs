@@ -106,6 +106,8 @@ async function requestCheckpoint(pi, ctx, event, fetchImpl, scope) {
           return compacted.value;
         },
       });
+      const serviceRetries = response.diagnostics?.filter(item => item.type === "provider_service_retry");
+      if (serviceRetries?.length) scope.trace.serviceRetries = serviceRetries;
       if (payloadError) return failure(payloadError);
       if (response.stopReason !== "stop") return { ...failure(response.errorMessage || `Codex compaction stopped with ${response.stopReason}`), usage: response.usage };
       const observed = observer.result();
