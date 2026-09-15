@@ -1,5 +1,6 @@
 import "../person";
-import { nativePlatform, remote } from "../native";
+import { bootstrapUrl, nativePlatform, remote } from "../native";
+import { appPath, appStorageKey } from "../app-path";
 import "../voice";
 import React, { useEffect, useRef, useState } from "react";
 import { createRoot } from "react-dom/client";
@@ -45,7 +46,7 @@ function MediaTile({ source, muted }: { source: MeetMediaSource; muted: boolean 
 
 function MeetPage() {
   const [meetingStart] = useState(() => new MeetingStart(owner));
-  const [name, setName] = useState(localStorage.getItem("pi-meet-name") || "Hara");
+  const [name, setName] = useState(localStorage.getItem(appStorageKey("pi-meet-name")) || "Hara");
   const [camera, setCamera] = useState(true);
   const [microphone, setMicrophone] = useState(true);
   const [busy, setBusy] = useState(false);
@@ -257,7 +258,7 @@ function MeetPage() {
       }) : new MediaStream();
       if (attempt !== generation.current) { stream.getTracks().forEach((track) => track.stop()); return; }
       local.current = stream; owned.current.push(stream);
-      localStorage.setItem("pi-meet-name", name.trim());
+      localStorage.setItem(appStorageKey("pi-meet-name"), name.trim());
       const joined = inviteRoom
         ? await meetRequest<MeetJoined>(meetPath(inviteRoom, "/join"), owner, post({ name: name.trim() }))
         : await meetingStart.start(name.trim());
@@ -296,7 +297,7 @@ function MeetPage() {
         void uploadCamera(current, video);
       }
       if (joined.participant.host) {
-        const avatar = await avatarStream("/kenan.png", () => ({
+        const avatar = await avatarStream(appPath("kenan.png"), () => ({
           ...cameraStatus.current, muted: current.snapshot.voiceMuted, threads: current.snapshot.threads,
         }));
         if (room.current !== current || ending.current) { avatar.close(); return; }
@@ -356,21 +357,21 @@ function MeetPage() {
     try {
       const environment = await environmentReady();
       if (nativePlatform) {
-        const frontend = new URL(environment.baseUrl);
+        const frontend = new URL(`${await bootstrapUrl()}/`);
         if (frontend.protocol !== "https:") { setNotice("This environment needs an HTTPS frontend to share meeting invitations outside the app."); return; }
-        url.href = new URL("/meet.html", frontend).href;
+        url.href = new URL("meet.html", frontend).href;
       }
       url.search = new URLSearchParams({ room: snapshot.id, user: owner, environment: environment.id }).toString();
-      await navigator.clipboard.writeText(url.href); setNotice("Invite link copied. Guests need access to this Tailscale host.");
+      await navigator.clipboard.writeText(url.href); setNotice("Invite link copied. Guests need access to this Pi Remote host.");
     } catch { setNotice(url.href); }
   }
 
   return <main className="meet">
-    <header className="meet-header"><a className="brand" href="/"><img src="/kenan.png" alt="Kenan"/><span>PiStack <strong>Meet</strong></span></a><a className="back" href="/">Pi Remote ↗</a></header>
+    <header className="meet-header"><a className="brand" href={appPath("")}><img src={appPath("kenan.png")} alt="Kenan"/><span>PiStack <strong>Meet</strong></span></a><a className="back" href={appPath("")}>Pi Remote ↗</a></header>
     {notice && <div className="notice" role="status">{notice}<button onClick={() => setNotice("")} aria-label="Dismiss notice">×</button></div>}
     {snapshot?.browser?.error && <div className="notice" role="status">{snapshot.browser.error}</div>}
     {snapshot?.browser?.watchError && <div className="notice" role="status">{snapshot.browser.watchError}</div>}
-    {!snapshot ? <section className="lobby"><div><p className="eyebrow">A room for you and your agent</p><h1>{inviteRoom ? "Join the conversation." : "Let's meet."}</h1><p>Talk with Kenan and other people. Keep each person's camera and microphone separate, and watch Kenan work in a shared browser.</p><div className="lobby-avatar"><img src="/kenan.png" alt="Kenan's meeting avatar"/></div></div>
+    {!snapshot ? <section className="lobby"><div><p className="eyebrow">A room for you and your agent</p><h1>{inviteRoom ? "Join the conversation." : "Let's meet."}</h1><p>Talk with Kenan and other people. Keep each person's camera and microphone separate, and watch Kenan work in a shared browser.</p><div className="lobby-avatar"><img src={appPath("kenan.png")} alt="Kenan's meeting avatar"/></div></div>
       <form onSubmit={(event) => { event.preventDefault(); void join(); }}><h2>{inviteRoom ? "Join meeting" : "Start a meeting"}</h2>
         <label>Your name<input value={name} maxLength={80} onChange={(event) => setName(event.target.value)} required/></label>
         {!inviteRoom && <p className="hint">Starting a meeting creates a new Pi Remote thread for its conversation and agent work.</p>}

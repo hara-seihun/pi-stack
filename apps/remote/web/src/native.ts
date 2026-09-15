@@ -1,4 +1,5 @@
 import { API } from "../../server/api";
+import { appBase, appStorageKey } from "./app-path";
 import { abortable, deadline } from "./abortable";
 import { ensureUnlocked } from "./client";
 import { auth } from "./person";
@@ -25,7 +26,7 @@ const capacitor = window.Capacitor;
 export const nativePlatform = capacitor?.isNativePlatform?.() === true;
 export const browserFetch = window.fetch.bind(window);
 export const remote: RemoteBridge = !nativePlatform
-  ? { getState: async () => ({ routerUrl: "" }) }
+  ? { getState: async () => ({ routerUrl: appBase() }) }
   : typeof capacitor.registerPlugin === "function"
     ? capacitor.registerPlugin("KenanRemote")
     : {
@@ -74,7 +75,7 @@ window.addEventListener("pi-person", () => {
   resetEndpoints();
 });
 
-async function bootstrapUrl() {
+export async function bootstrapUrl() {
   bootstrapPromise ??= deadline(remote.getState(), 10_000, "Bootstrap connection").then(state => {
     if (typeof state.routerUrl !== "string") throw new Error("Native bridge did not supply a bootstrap URL");
     bootstrap = state.routerUrl.replace(/\/$/, "");
@@ -130,7 +131,7 @@ async function verifiedState(selected: Endpoint, endpoints: Endpoint[]): Promise
 async function getState(): Promise<EnvironmentState> {
   const endpoints = await loadEnvironments();
   if (current) return current;
-  const selectedId = sessionStorage.getItem(`pi-remote-environment:${auth.user}`);
+  const selectedId = sessionStorage.getItem(appStorageKey(`pi-remote-environment:${auth.user}`));
   const selected = endpoints.find(endpoint => endpoint.id === selectedId) ?? endpoints[0]!;
   current = await verifiedState(selected, endpoints);
   return current;
@@ -138,7 +139,23 @@ async function getState(): Promise<EnvironmentState> {
 
 function apiPath(input: RequestInfo | URL) {
   const value = typeof input === "string" || input instanceof URL ? String(input) : input.url;
-  return routerApiPath(value, location.href);
+  const prefix = new URL(bootstrap || "/", location.href).pathname.replace(/\/$/, "");
+  return routerApiPath(value, location.href, ["", appBase()])
+    ?? (bootstrap ? routerApiPath(value, new URL(bootstrap, location.href).href, [prefix]) : null);
+}
+
+function rootPath(path: string, root: string) {
+  const prefix = new URL(root || "/", location.href).pathname.replace(/\/$/, "");
+  return prefix && path.startsWith(`${prefix}/v1/`) ? path.slice(prefix.length) : path;
+}
+
+function explicitTarget(path: string, root: string): string | null {
+  const explicit = environments?.some(endpoint => {
+    const prefix = new URL(endpoint.baseUrl || "/", location.href).pathname.replace(/\/$/, "");
+    return prefix && path.startsWith(`${prefix}/v1/`);
+  });
+  if (!explicit) return null;
+  return /^https?:/.test(root) ? new URL(path, root).href : path;
 }
 
 window.fetch = async (input, init) => {
@@ -148,13 +165,13 @@ window.fetch = async (input, init) => {
   const signal = init?.signal ?? request?.signal;
   const combined = signal ? AbortSignal.any([signal, personRequests.signal]) : personRequests.signal;
   const run = async () => {
-    const pathname = new URL(path, location.href).pathname;
+    const root = await bootstrapUrl();
+    const operation = rootPath(path, root);
+    const pathname = new URL(operation, location.href).pathname;
     const publicRoute = (pathname === API.environment.path() && !auth.session) || pathname === API.unlock.path();
     const rootRoute = publicRoute || pathname === API.environments.path() || pathname === "/v1/lock" || pathname === "/v1/lock-status";
-    const root = await bootstrapUrl();
     const selected = rootRoute || !auth.session ? null : await getState();
-    const explicitEndpoint = environments?.find(endpoint => endpoint.baseUrl && path.startsWith(`${endpoint.baseUrl}/v1/`));
-    const target = explicitEndpoint ? path : `${selected?.baseUrl ?? root}${path}`;
+    const target = rootRoute ? `${root}${operation}` : explicitTarget(path, root) ?? `${selected?.baseUrl ?? root}${operation}`;
     combined.throwIfAborted();
     const headers = auth.headers(init?.headers ?? request?.headers, !publicRoute);
     const token = headers.get("x-pi-remote-session") || "";
@@ -171,9 +188,9 @@ window.fetch = async (input, init) => {
 };
 
 function resolveApiUrl(path: string) {
-  if (!apiPath(path)) return path;
-  const explicitEndpoint = environments?.find(endpoint => endpoint.baseUrl && path.startsWith(`${endpoint.baseUrl}/v1/`));
-  const target = explicitEndpoint ? path : `${current?.baseUrl ?? bootstrap}${path}`;
+  const route = apiPath(path);
+  if (!route) return path;
+  const target = explicitTarget(route, bootstrap) ?? `${current?.baseUrl ?? bootstrap}${rootPath(route, bootstrap)}`;
   const root = new URL(bootstrap || "/", location.href);
   const prefixes = [root.pathname.replace(/\/$/, ""), ...(environments || []).map(endpoint => new URL(endpoint.baseUrl || "/", location.href).pathname.replace(/\/$/, ""))];
   return sessionUrl(target, root.href, auth.session, prefixes);
@@ -188,7 +205,7 @@ window.KenanRemote = {
     const selected = endpoints.find(endpoint => endpoint.id === id);
     if (!selected) throw new Error(`Environment is not allowed: ${id}`);
     const verified = await verifiedState(selected, endpoints);
-    sessionStorage.setItem(`pi-remote-environment:${user}`, id);
+    sessionStorage.setItem(appStorageKey(`pi-remote-environment:${user}`), id);
     current = verified;
     return current;
   },

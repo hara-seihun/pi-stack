@@ -80,6 +80,16 @@ Voice requires `/var/lib/pi-stack-voice/openai-api-key`, root-owned mode `0600` 
 
 Persons are not in the host file. They are Pi Remote's registry, `/var/lib/pi-remote/persons/<user>.json`, created with `pi-remote person add`. See [the Pi Remote README](../apps/remote/README.md#persons).
 
+## Browser prefix hosting
+
+Publish the router at `/` or a directory prefix such as `/pi-stack/`. The same release works at either path without a rebuild or a base-path setting:
+
+1. Redirect `/pi-stack` to `/pi-stack/` and retain its query string.
+2. Proxy every `/pi-stack/*` request to the router with `/pi-stack` removed. For example, `/pi-stack/meet.html` becomes `/meet.html`, and `/pi-stack/v1/environment` becomes `/v1/environment`.
+3. Apply the host's access policy to the entire prefix. Do not expose a supervisor or add root `/v1`, asset or Meet aliases.
+
+The [shared client](../apps/remote/web/README.md#browser-mount-path) derives its mount from the page URL. Static assets and the manifest are relative; API bootstrap, downloads and Meet links use that mount. No service worker is installed. The host ingress owns routing and any external identity check. An unencrypted person can obtain a router session with an empty unlock request, so an open-person deployment needs the ingress to enforce its intended audience.
+
 ## Gateway access and host boundaries
 
 Each person registry may set `"remoteAccess": ["local", "converge"]`. Omission allows only this host's own endpoint. The list must include this host's own ID, and every grant must name a catalog entry. Remote grants require an encrypted-folder identity and an `upstreams` mapping for that person or router startup fails. Add each person's mapping explicitly; never send several people's requests to one shared supervisor. Endpoint names and icons do not affect authorization.

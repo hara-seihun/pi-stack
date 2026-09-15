@@ -1,4 +1,5 @@
 import { API } from "../../server/api";
+import { appStorageKey } from "./app-path";
 import { abortable } from "./abortable";
 import type { SyncRequest, SyncResponse } from "../../server/protocol";
 
@@ -6,11 +7,11 @@ let unlockHandler: ((message: string) => Promise<string>) | null = null;
 let unlocking: Promise<void> | null = null;
 
 function storedKey(user: string) {
-  try { return user ? localStorage.getItem(`pi-remote-key:${user}`) || "" : ""; } catch { return ""; }
+  try { return user ? localStorage.getItem(appStorageKey(`pi-remote-key:${user}`)) || "" : ""; } catch { return ""; }
 }
 
 function rememberKey(user: string, key: string) {
-  try { localStorage.setItem(`pi-remote-key:${user}`, key); } catch {}
+  try { localStorage.setItem(appStorageKey(`pi-remote-key:${user}`), key); } catch {}
 }
 
 async function responseJson(response: Response): Promise<any> {

@@ -4,6 +4,7 @@ import { SortableContext, arrayMove, sortableKeyboardCoordinates, useSortable, v
 import { CSS } from "@dnd-kit/utilities";
 import { AnimatePresence, motion } from "motion/react";
 import { API } from "../../server/api";
+import { appPath, appStorageKey } from "./app-path";
 import type { GovernorProvider, GovernorState, InlineImageSnapshot, ThreadStart } from "../../server/protocol";
 import { deleteCachedContext, readCachedContext, writeCachedContext } from "./context-cache";
 import { api, piFetch, registerUnlockHandler, syncRequest } from "./client";
@@ -65,9 +66,9 @@ const initialState: AppState = {
 };
 
 function iconUrl(icon: string) {
-  return icon.startsWith("/") || icon.startsWith("data:") || icon.startsWith("https:") ? icon : `/${encodeURIComponent(icon)}.svg`;
+  return /^(data:|https?:|\/\/)/.test(icon) ? icon : appPath(icon.startsWith("/") ? icon : `${encodeURIComponent(icon)}.svg`);
 }
-function draftKey(id: string) { return `pi-remote-draft:${window.PiRemotePerson.get()}:${id}`; }
+function draftKey(id: string) { return appStorageKey(`pi-remote-draft:${window.PiRemotePerson.get()}:${id}`); }
 function loadDraft(id: string) { try { return localStorage.getItem(draftKey(id)) || ""; } catch { return ""; } }
 function saveDraft(id: string, value: string) { try { value ? localStorage.setItem(draftKey(id), value) : localStorage.removeItem(draftKey(id)); } catch {} }
 
@@ -135,10 +136,10 @@ function governorDescription(name: string, governor: Governor) {
 }
 function MachineControls({ actions, governors, onAction, onGovernor }: { actions: MachineActionState[]; governors: GovernorControls | null; onAction(id: string): void; onGovernor(provider: GovernorProvider): void }) {
   return <div className="machine-controls" aria-label="This machine controls">
-    {actions.map((action) => <button key={action.id} className={`machine-control${action.active ? " active" : ""}`} type="button" aria-label={`${action.label} is ${action.active ? "on" : "off"}. Select to turn it ${action.active ? "off" : "on"}`} onClick={() => onAction(action.id)}><img src={action.icon.startsWith("/") || action.icon.startsWith("data:") ? action.icon : `/${action.icon}.svg`} alt="" /></button>)}
+    {actions.map((action) => <button key={action.id} className={`machine-control${action.active ? " active" : ""}`} type="button" aria-label={`${action.label} is ${action.active ? "on" : "off"}. Select to turn it ${action.active ? "off" : "on"}`} onClick={() => onAction(action.id)}><img src={iconUrl(action.icon)} alt="" /></button>)}
     {governors && (["openai", "anthropic"] as const).map((provider) => {
       const description = governorDescription(provider === "openai" ? "OpenAI" : "Anthropic", governors[provider]);
-      return <button key={provider} className={`machine-control${GOVERNOR_CLASS[governors[provider].state]}`} type="button" aria-label={description} title={description} onClick={() => onGovernor(provider)}><img src={`/${provider}.svg`} alt="" /></button>;
+      return <button key={provider} className={`machine-control${GOVERNOR_CLASS[governors[provider].state]}`} type="button" aria-label={description} title={description} onClick={() => onGovernor(provider)}><img src={appPath(`${provider}.svg`)} alt="" /></button>;
     })}
   </div>;
 }
@@ -146,7 +147,7 @@ function MachineControls({ actions, governors, onAction, onGovernor }: { actions
 function PlanSummary({ plans, counts }: { plans: PlanCard[]; counts: Map<string, number> }) {
   return <div className="plan-summary muted">{plans.flatMap((card) => card.metrics.filter((metric) => metric.text !== "—").map((metric) => {
     const description = `${card.label} ${metric.modelLabel}, ${counts.get(metric.model) || 0} in use, ${metric.description}`;
-    return <div className="capacity-row" key={`${card.icon}:${metric.model}`} title={description} aria-label={description}><img src={`/${encodeURIComponent(card.icon)}.svg`} alt={card.label} /><span className="capacity-model">{metric.modelLabel}</span><span className="capacity-count">{counts.get(metric.model) || 0}</span><span className="capacity-cache">{metric.cacheText}</span><span className="capacity-value">{metric.text}</span></div>;
+    return <div className="capacity-row" key={`${card.icon}:${metric.model}`} title={description} aria-label={description}><img src={iconUrl(card.icon)} alt={card.label} /><span className="capacity-model">{metric.modelLabel}</span><span className="capacity-count">{counts.get(metric.model) || 0}</span><span className="capacity-cache">{metric.cacheText}</span><span className="capacity-value">{metric.text}</span></div>;
   }))}</div>;
 }
 
@@ -582,7 +583,7 @@ function RemoteApp() {
       <FileExplorer hidden={state.drawerTab !== "files"} onRootCount={setRootFileCount} />
       <footer className="drawer-footer">{state.ownerErrors.map(({ id, owner, message }) => <DismissibleError key={id} resetKey={id} role="status" className="connection" message={`${owner}: ${message}`} onDismiss={() => dismissServerError(id)} />)}<MachineControls actions={dashboard?.actions ?? []} governors={dashboard?.governors ?? null} onAction={(id) => void toggleAction(id)} onGovernor={(provider) => void toggleGovernor(provider)} /><EnvironmentControl /><AppUpdateControl /><NotificationControl sessionId={state.selectedId} /><PlanSummary plans={dashboard?.plans ?? []} counts={modelCounts} /><div className="usage-summary muted">{machineText}</div><div className="usage-summary muted" title={__PI_REMOTE_REVISION__}>Client {__PI_REMOTE_REVISION__.slice(0, 12)}</div><DismissibleError className="connection" message={state.offline ? `Offline · ${state.offline}` : ""} /></footer>
     </aside>
-    <main id="main" className={drawingOpen ? "drawing-mode" : undefined}><header className="topbar"><button className="icon-button" aria-label="Open navigation" onClick={() => patch({ drawerOpen: true })}>☰</button><div className="top-title">{title}</div><div className="top-state" style={{ color: state.offline ? "var(--danger)" : activityColor(selectedActivity) }}>{state.offline ? "OFFLINE" : state.syncing ? "SYNCING" : activityLabel(selectedActivity, selectedTool ?? "")}</div>{state.offline && <button type="button" onClick={kick} title={state.offline}>Reconnect</button>}<a className="icon-button" aria-label="Open PiStack Meet" title="PiStack Meet" href={`/meet.html?${new URLSearchParams({ user: window.PiRemotePerson.get() })}`} onClick={async (event) => { event.preventDefault(); const environment = await window.KenanRemote?.getState(); location.href = `/meet.html?${new URLSearchParams({ user: window.PiRemotePerson.get(), environment: environment?.id || "" })}`; }}><svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true"><rect x="3" y="6" width="12" height="12" rx="2"/><path d="m15 10 6-4v12l-6-4z"/></svg></a><button className="icon-button" aria-label="Open thread settings" disabled={!selected} onClick={() => patch({ settingsOpen: true })}>⚙</button></header>
+    <main id="main" className={drawingOpen ? "drawing-mode" : undefined}><header className="topbar"><button className="icon-button" aria-label="Open navigation" onClick={() => patch({ drawerOpen: true })}>☰</button><div className="top-title">{title}</div><div className="top-state" style={{ color: state.offline ? "var(--danger)" : activityColor(selectedActivity) }}>{state.offline ? "OFFLINE" : state.syncing ? "SYNCING" : activityLabel(selectedActivity, selectedTool ?? "")}</div>{state.offline && <button type="button" onClick={kick} title={state.offline}>Reconnect</button>}<a className="icon-button" aria-label="Open PiStack Meet" title="PiStack Meet" href={`${appPath("meet.html")}?${new URLSearchParams({ user: window.PiRemotePerson.get() })}`} onClick={async (event) => { event.preventDefault(); const environment = await window.KenanRemote?.getState(); location.href = `${appPath("meet.html")}?${new URLSearchParams({ user: window.PiRemotePerson.get(), environment: environment?.id || "" })}`; }}><svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true"><rect x="3" y="6" width="12" height="12" rx="2"/><path d="m15 10 6-4v12l-6-4z"/></svg></a><button className="icon-button" aria-label="Open thread settings" disabled={!selected} onClick={() => patch({ settingsOpen: true })}>⚙</button></header>
       {selected?.parentId && <nav className="thread-relations" aria-label="Related threads"><button type="button" onClick={() => void selectThread(selected.parentId!)}>Parent: {knownSessions.find(session => session.id === selected.parentId)?.name || selected.parentId}</button></nav>}
       {!state.selectedId ? <section className="empty-state"><strong>No threads</strong><span>Open the drawer to create one.</span></section> : <section className={`conversation${drawingOpen ? " is-drawing" : ""}`}><div className="scrollback" onClickCapture={editImage} onKeyDownCapture={event => { if (event.key === "Enter" || event.key === " ") editImage(event); }}><div className="scroll-content"><InlineImagesContext.Provider value={images}><ContextTranscript entries={entries} liveThinking={liveThinking} sessionId={state.selectedId || ""} home={dashboard?.home ?? "/"} onEdit={editFrom} />{liveText && <div className="live-answer"><Markdown source={liveText} sessionId={state.selectedId || ""} streaming assistant /><CopyButton text={liveText} label="Copy response" /></div>}<LiveActivity activity={selectedActivity} tool={selectedTool} offline={state.offline} /></InlineImagesContext.Provider></div></div>
         {drawings.map(draft => <div key={draft.id} className="drawing-slot" hidden={!drawingOpen || drawingId !== draft.id}><DrawingCanvas background={draft.background} onAttach={file => attachDrawing(file, draft)} onClose={() => setDrawingId(current => current === draft.id ? null : current)} /></div>)}

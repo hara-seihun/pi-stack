@@ -1,4 +1,5 @@
 import { abortable } from "./abortable";
+import { appStorageKey } from "./app-path";
 import { updateDocument } from "./sync";
 
 const DATABASE = "pi-remote-contexts";
@@ -12,7 +13,7 @@ let databasePromise: Promise<IDBDatabase> | null = null;
 function database() {
   if (!databasePromise) {
     const opening = new Promise<IDBDatabase>((resolve, reject) => {
-      const request = indexedDB.open(DATABASE, 2);
+      const request = indexedDB.open(appStorageKey(DATABASE), 2);
       request.onupgradeneeded = () => {
         // Cache only the small display projection, not prior canonical images.
         if (request.result.objectStoreNames.contains(STORE)) request.result.deleteObjectStore(STORE);
