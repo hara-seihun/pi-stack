@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { execFile, execFileSync, spawn } from "node:child_process";
-import { existsSync, mkdtempSync, mkdirSync, readFileSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
+import { chmodSync, existsSync, mkdtempSync, mkdirSync, readFileSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { DatabaseSync } from "node:sqlite";
@@ -70,6 +70,100 @@ function fixture() {
     close() { rmSync(root, { recursive: true, force: true }); },
   };
 }
+
+function interruptCreation(f, stage) {
+  const bin = path.join(f.root, "bin");
+  mkdirSync(bin);
+  const realGit = execFileSync("which", ["git"], { encoding: "utf8" }).trim();
+  const marker = path.join(f.root, "interrupted");
+  const wrapper = path.join(bin, "git");
+  writeFileSync(wrapper, `#!${process.execPath}
+const { spawnSync } = require('node:child_process');
+const fs = require('node:fs');
+const args = process.argv.slice(2);
+const result = spawnSync(${JSON.stringify(realGit)}, args, {stdio:'inherit'});
+if (result.status === 0 && args.includes(${JSON.stringify(stage)}) && !fs.existsSync(${JSON.stringify(marker)})) {
+  fs.writeFileSync(${JSON.stringify(marker)}, 'interrupted');
+  process.kill(process.ppid, 'SIGKILL');
+}
+process.exit(result.status ?? 1);
+`);
+  chmodSync(wrapper, 0o755);
+  return { ...f.env, PATH: `${bin}:${process.env.PATH}` };
+}
+
+for (const stage of ["clone", "checkout"]) test(`creation resumes after interruption following ${stage}`, () => {
+  const f = fixture();
+  try {
+    const args = ["create", "--root", f.workspaces, "--name", "resumable", "--repo", f.source,
+      "--owner", "original-owner", "--min-free-gib", "0", "--json"];
+    assert.throws(() => run(args, interruptCreation(f, stage)));
+    const [pending] = JSON.parse(run(["status", "--json"], f.env));
+    assert.equal(pending.state, "creating");
+    assert.equal(pending.owner, "original-owner");
+    const [inspection] = JSON.parse(run(["reconcile", "--execute", "--reap-expired", "--json"], f.env));
+    assert.equal(inspection.action, "none");
+    assert.equal(existsSync(pending.path), true);
+    assert.throws(() => run([...args, "--group", "another-owner"], f.env), /different creation request/);
+    writeFileSync(path.join(f.source, "later.txt"), "later source\n");
+    git(f.source, "add", "later.txt");
+    git(f.source, "commit", "-m", "advance source after interruption");
+    const resumed = JSON.parse(run(args, f.env));
+    assert.equal(resumed.id, pending.id);
+    assert.equal(resumed.sourceCommit, pending.sourceCommit);
+    assert.equal(resumed.state, "active");
+    assert.equal(readFileSync(path.join(resumed.path, "file.txt"), "utf8"), "source\n");
+    assert.deepEqual(JSON.parse(run(args, f.env)), resumed);
+  } finally { f.close(); }
+});
+
+test("creation reserved before source fetch remains discoverable and resumes without a directory", () => {
+  const f = fixture();
+  try {
+    const args = ["create", "--root", f.workspaces, "--name", "preparing", "--repo", f.source,
+      "--min-free-gib", "0", "--json"];
+    assert.throws(() => run(args, interruptCreation(f, "config")));
+    const [pending] = JSON.parse(run(["status", "--json"], f.env));
+    assert.equal(pending.state, "creating");
+    assert.equal(pending.sourceCommit, null);
+    assert.equal(existsSync(pending.path), false);
+    run(["reconcile", "--execute", "--reap-expired", "--json"], f.env);
+    const resumed = JSON.parse(run(args, f.env));
+    assert.equal(resumed.id, pending.id);
+    assert.equal(resumed.state, "active");
+  } finally { f.close(); }
+});
+
+test("pending creation preserves edits and ignored output instead of deleting a failed checkout", () => {
+  const f = fixture();
+  try {
+    const args = ["create", "--root", f.workspaces, "--name", "preserved", "--repo", f.source,
+      "--min-free-gib", "0", "--json"];
+    assert.throws(() => run(args, interruptCreation(f, "checkout")));
+    const destination = path.join(f.workspaces, "preserved");
+    writeFileSync(path.join(destination, "file.txt"), "unique source\n");
+    mkdirSync(path.join(destination, "ignored-output"));
+    writeFileSync(path.join(destination, "ignored-output", "proof"), "retain\n");
+    assert.throws(() => run(args, f.env), /pending checkout contains changes/);
+    const retained = JSON.parse(run(["release", "--path", destination, "--json"], f.env));
+    assert.equal(retained.action, "none");
+    assert.equal(readFileSync(path.join(destination, "file.txt"), "utf8"), "unique source\n");
+    assert.equal(readFileSync(path.join(destination, "ignored-output", "proof"), "utf8"), "retain\n");
+  } finally { f.close(); }
+});
+
+test("local reference creation does not copy unreachable source objects", () => {
+  const f = fixture();
+  try {
+    const object = execFileSync("git", ["-C", f.source, "hash-object", "-w", "--stdin"], {
+      input: "unreferenced cache object\n", encoding: "utf8",
+    }).trim();
+    const created = JSON.parse(run(["create", "--root", f.workspaces, "--name", "negotiated",
+      "--repo", f.source, "--min-free-gib", "0", "--json"], f.env));
+    assert.equal(existsSync(path.join(created.path, ".git", "objects", object.slice(0, 2), object.slice(2))), false);
+    assert.equal(readFileSync(path.join(created.path, "file.txt"), "utf8"), "source\n");
+  } finally { f.close(); }
+});
 
 test("capacity follows available storage unless a caller imposes a count limit", () => {
   const f = fixture();
