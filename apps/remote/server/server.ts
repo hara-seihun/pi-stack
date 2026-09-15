@@ -5,10 +5,11 @@ import { homedir } from "node:os";
 import { basename, dirname, extname, isAbsolute, join, resolve } from "node:path";
 import { configuredFleetThreadUrl } from "./thread-owners";
 import { projectThreadNotifications } from "./thread-notifications";
-import { modelBrokerUrl, createWorkspaceAdmission, ORCHESTRATOR_CATALOG, OrchestratorClient, CompletionClient, type CompletionInput, catalogAgentType, createSharedImageGenerationService, ThreadService, ThreadDirectory, createThreadClient, importRemoteThreads, createSharedPiSessionOpener, threadHttp, type ThreadInspection, type Thread, type ThreadMessage, type PiEvent, type Result, type SharedImageGenerationService, type PlanUsageSnapshot } from "pi-orchestrator/api";
+import { threadSettingsMetadata, modelBrokerUrl, createWorkspaceAdmission, ORCHESTRATOR_CATALOG, OrchestratorClient, CompletionClient, type CompletionInput, catalogAgentType, createSharedImageGenerationService, ThreadService, ThreadDirectory, createThreadClient, importRemoteThreads, createSharedPiSessionOpener, threadHttp, type ThreadInspection, type Thread, type ThreadMessage, type PiEvent, type Result, type SharedImageGenerationService, type PlanUsageSnapshot } from "pi-orchestrator/api";
 import { createLiveProjection, settleLiveProjection, restoreLiveProjection, threadActivity, type LiveProjection } from "./live-projection";
 import { InlineImages } from "./inline-images";
 import { planCards } from "./catalog-presentation";
+import { updateThreadSettings } from "./thread-settings";
 import { readMachineUsage } from "./machine-usage";
 import { displayContextDocument, type ContextImage } from "./context-display";
 import { updateToolProgress, type ToolProgress } from "./tool-progress";
@@ -1242,17 +1243,12 @@ async function directChildren(id: string): Promise<Result<Session[]>> {
 }
 
 async function threadSettings(row: any) {
-  const [state, availableModels, availableThinking, children] = await Promise.all([
-    rpc(row.id, "get_state"), rpc(row.id, "get_available_models"), rpc(row.id, "get_available_thinking_levels"), directChildren(row.id),
-  ]);
+  const metadata = threadSettingsMetadata(row.settings);
   return {
-    children: unwrap(children),
-    model: state.model,
-    thinkingLevel: row.settings.thinkingLevel,
-    speedMode: row.settings.speed,
-    speedModes: String(state.model?.provider).startsWith("openai") ? ["standard", "priority"] : [],
+    ...metadata,
+    children: unwrap(await directChildren(row.id)),
     bashTimeoutSeconds: bashTimeoutSeconds(row.bash_timeout_seconds),
-    models: rolledUpModels(availableModels.models ?? []), thinkingLevels: availableThinking.levels ?? [],
+    models: rolledUpModels(metadata.models),
   };
 }
 
@@ -1793,19 +1789,11 @@ const server = Bun.serve({
       catch (e: any) { return error(e.message ?? "Could not load thread settings", 500); }
     }
     if (action === "settings" && req.method === "PUT") {
-      const body = await readBody(req);
-      const settings: any = {};
-      if (body.modelId != null) settings.model = `${body.modelProvider}/${body.modelId}`;
-      if (body.thinkingLevel != null) settings.thinkingLevel = body.thinkingLevel;
-      if (body.speedMode != null) settings.speed = body.speedMode;
-      const result = await directory.control({ threadId: id, action: "settings", settings });
-      if (!result.ok) return threadError(result.error);
-      if (body.bashTimeoutSeconds != null) {
-        if (!BASH_TIMEOUT_OPTIONS.includes(body.bashTimeoutSeconds)) return error("Invalid bash timeout");
-        const changed = await directory.control({ threadId: id, action: "update", metadata: { ...row.metadata, bashTimeoutSeconds: body.bashTimeoutSeconds } });
-        if (!changed.ok) return threadError(changed.error);
-      }
-      return json({ settings: await threadSettings(sessionRow.get(id)) });
+      try {
+        const result = await updateThreadSettings(directory, row, await readBody(req));
+        if (!result.ok) return threadError(result.error);
+        return json({ settings: await threadSettings(threadRow(result.value)) });
+      } catch (cause: any) { return error(cause?.message ?? "Could not update thread settings", 400); }
     }
 
     if (action === "fork" && req.method === "POST") {
