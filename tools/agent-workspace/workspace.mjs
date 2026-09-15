@@ -1239,11 +1239,13 @@ function adoptCommand(database, args, statePath) {
     replaceCachePaths: bool(args, "replace-cache"),
   }));
   withAdoptionLocks(database, registrations, () => {
-    const prepared = registrations.map((registration) => ({
-      ...registration,
-      cachePaths: cachePathsForRepository(registration.path, args),
-      inspection: registrationInspection(registration.path),
-    }));
+    const prepared = registrations
+      .filter((registration) => existsSync(registration.path) && gitRoot(registration.path))
+      .map((registration) => ({
+        ...registration,
+        cachePaths: cachePathsForRepository(registration.path, args),
+        inspection: registrationInspection(registration.path),
+      }));
     database.exec("BEGIN IMMEDIATE");
     try {
       for (const { inspection, ...registration } of prepared) {
