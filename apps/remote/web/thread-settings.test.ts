@@ -4,7 +4,7 @@ import { SettingsFields } from "./src/thread-settings";
 import type { Session, ThreadSettings } from "./src/types";
 
 const settings: ThreadSettings = {
-  children: [], models: [{ provider: "anthropic", id: "claude-fable-5-1" }, { provider: "openai-codex", id: "gpt-6-astra" }],
+  models: [{ provider: "anthropic", id: "claude-fable-5-1" }, { provider: "openai-codex", id: "gpt-6-astra" }],
   model: { provider: "openai-codex", id: "gpt-6-astra" }, thinkingLevels: ["high", "max"], thinkingLevel: "high",
   speedModes: ["standard", "priority"], speedMode: "standard", bashTimeoutSeconds: 1800,
 };
