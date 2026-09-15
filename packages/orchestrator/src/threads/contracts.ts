@@ -90,6 +90,7 @@ export interface ThreadSettlement {
   outcome: WorkOutcome;
   time: number;
   finalMessage: Record<string, unknown> | null;
+  error?: string;
 }
 export interface ThreadSettlements { items: ThreadSettlement[]; cursor: number }
 export interface ThreadInspection {

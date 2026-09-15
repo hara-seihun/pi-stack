@@ -115,12 +115,12 @@ export class ThreadService implements ThreadApi {
   settlements(after = 0, limit = 100): Result<ThreadSettlements> {
     if (!Number.isSafeInteger(after) || after < 0 || !Number.isInteger(limit) || limit < 1 || limit > 1000) return bad("invalid_request", "Invalid settlement cursor or limit");
     const rows = this.db.prepare("SELECT * FROM thread_execution WHERE settlement_seq>? ORDER BY settlement_seq LIMIT ?").all(after, limit) as Json[];
-    return good({ items: rows.map(row => ({ seq: row.settlement_seq, executionId: row.id, threadId: row.thread_id, workId: row.work_id, outcome: row.outcome, time: row.ended_at, finalMessage: JSON.parse(row.final_message ?? "null") })), cursor: rows.at(-1)?.settlement_seq ?? after });
+    return good({ items: rows.map(row => ({ seq: row.settlement_seq, executionId: row.id, threadId: row.thread_id, workId: row.work_id, outcome: row.outcome, time: row.ended_at, finalMessage: JSON.parse(row.final_message ?? "null"), ...(row.error ? { error: row.error } : {}) })), cursor: rows.at(-1)?.settlement_seq ?? after });
   }
   live(id: string): Json | undefined { return this.projections.get(id)?.live; }
   latestSettlement(id: string): import("./contracts.js").ThreadSettlement | null {
     const row = this.db.prepare("SELECT * FROM thread_execution WHERE thread_id=? AND state='settled' ORDER BY ended_at DESC,id DESC LIMIT 1").get(id) as Json | undefined;
-    return row ? { seq: row.settlement_seq ?? 0, executionId: row.id, threadId: row.thread_id, workId: row.work_id, outcome: row.outcome, time: row.ended_at, finalMessage: JSON.parse(row.final_message ?? "null") } : null;
+    return row ? { seq: row.settlement_seq ?? 0, executionId: row.id, threadId: row.thread_id, workId: row.work_id, outcome: row.outcome, time: row.ended_at, finalMessage: JSON.parse(row.final_message ?? "null"), ...(row.error ? { error: row.error } : {}) } : null;
   }
   async inspect(id: string): Promise<Result<ThreadInspection>> {
     const thread = this.get(id); if (!thread) return bad("not_found", "Thread not found");
@@ -648,7 +648,8 @@ export class ThreadService implements ThreadApi {
         if (!runtime.executionId) { runtime.busy = false; this.state(id, this.row(id)?.held ? "stopped" : this.pending(id).length ? "running" : "idle"); await this.retire(id, runtime); return; }
         const last = "lastAssistantMessage" in event ? event.lastAssistantMessage as Json | null : state.lastAssistantMessage ?? runtime.finalMessage;
         const outcome = ["complete", "failed", "cancelled"].includes(String(event.outcome)) ? event.outcome as WorkOutcome : last?.stopReason === "error" ? "failed" : last?.stopReason === "aborted" ? "cancelled" : "complete";
-        await this.finish(id, runtime, this.row(id)?.held ? "cancelled" : outcome, last ?? null);
+        const settledOutcome = this.row(id)?.held ? "cancelled" : outcome;
+        await this.finish(id, runtime, settledOutcome, last ?? null, settledOutcome === "failed" ? last?.errorMessage : undefined);
       }).then(() => this.wake(id)).catch(error => {
         if (this.closed || this.suspended) return;
         this.db.prepare("UPDATE thread SET metadata=json_set(metadata,'$.executionError',?) WHERE id=?").run(errorText(error), id); this.changed(id);
@@ -748,7 +749,7 @@ export class ThreadService implements ThreadApi {
     if (thread.parentId && this.row(thread.parentId)) { this.changed(thread.parentId); this.wake(thread.parentId); }
     void this.routeNotifications();
     const settled = this.db.prepare("SELECT settlement_seq,ended_at FROM thread_execution WHERE id=?").get(execution.id) as Json;
-    for (const listener of this.listeners) listener({ threadId: id, event: { type: "thread_settled", seq: settled.settlement_seq, executionId: execution.id, workId: execution.work_id, workIds, outcome, time: settled.ended_at, finalMessage } });
+    for (const listener of this.listeners) listener({ threadId: id, event: { type: "thread_settled", seq: settled.settlement_seq, executionId: execution.id, workId: execution.work_id, workIds, outcome, time: settled.ended_at, finalMessage, ...(error ? { error } : {}) } });
     if (runtime) await this.retire(id, runtime);
   }
   private async retire(id: string, runtime: Runtime): Promise<void> {
