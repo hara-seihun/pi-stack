@@ -29,6 +29,7 @@ interface TransferReceipt {
 }
 const key = (id: string) => `account-transfer:${id}`;
 const receiptKey = (id: string) => `account-transfer-received:${id}`;
+const sentKey = (id: string) => `account-transfer-sent:${id}`;
 const object = (value: unknown): Record<string, any> => value && typeof value === "object" && !Array.isArray(value) ? value as Record<string, any> : {};
 const sameEndpoint = (a: TransferEndpoint, b: TransferEndpoint) => a.host === b.host && a.ledger === b.ledger;
 export function transferEndpoint(ledger: string): TransferEndpoint {
@@ -64,6 +65,24 @@ function facts(store: Store, alias: string, now: number): Facts {
     controls: store.db.prepare("SELECT * FROM control WHERE key IN (?,?,?)").all(`account-use:${alias}`, `meter-error:${alias}`, `account-lifecycle:${alias}`) as Row[],
   };
 }
+function matchesReceipt(accepted: TransferReceipt, packet: TransferPacket | TransferReceipt): boolean {
+  return accepted.type === "account-transfer-receipt" && accepted.id === packet.id && accepted.alias === packet.alias
+    && accepted.identity === packet.identity && sameEndpoint(accepted.source, packet.source)
+    && sameEndpoint(accepted.destination, packet.destination);
+}
+function departedAccount(store: Store, alias: string, accountIdentity: string): boolean {
+  const account = store.account(alias);
+  const state = object(JSON.parse(store.control(key(alias)) ?? "null"));
+  return account?.provider === "openai-codex" && !account.enabled && state.identity === accountIdentity
+    && (state.phase === "outgoing" || state.phase === "transferred");
+}
+function returnReceipt(store: Store, alias: string, value: unknown, endpoint: TransferEndpoint): TransferReceipt | undefined {
+  const prior = object(value);
+  const state = object(JSON.parse(store.control(key(alias)) ?? "null"));
+  if (prior.type === "account-transfer-receipt" && prior.alias === alias && sameEndpoint(prior.source, endpoint)
+    && state.id === prior.id && departedAccount(store, alias, prior.identity)) return prior as TransferReceipt;
+  return undefined;
+}
 function receipt(packet: TransferPacket): TransferReceipt {
   return { type: "account-transfer-receipt", id: packet.id, alias: packet.alias, source: packet.source, destination: packet.destination,
     identity: packet.identity, createdAt: packet.createdAt, completedAt: Date.now() };
@@ -87,7 +106,8 @@ export class AccountTransfer {
 
   async inspect(alias: string, signal: AbortSignal) {
     return withSharedAuth(this.authPath, signal, auth => {
-      if (this.store.account(alias) || auth[alias]) throw new Error(`Destination already has account alias ${alias}`);
+      if ((this.store.account(alias) || auth[alias]) && !returnReceipt(this.store, alias, auth[alias], this.endpoint))
+        throw new Error(`Destination already has account alias ${alias}`);
       return this.endpoint;
     });
   }
@@ -110,7 +130,10 @@ export class AccountTransfer {
         const registered = this.store.account(alias);
         if (registered?.provider !== "openai-codex") throw new Error("Only Codex ownership transfer is supported");
         const saved = this.store.control(key(alias));
-        const preparing = saved ? JSON.parse(saved) as TransferDrain : undefined;
+        const previous = saved ? JSON.parse(saved) : undefined;
+        const preparing = previous?.phase === "preparing" ? previous as TransferDrain : undefined;
+        if (previous && !preparing && (previous.phase !== "received" || previous.identity !== accountIdentity))
+          throw new Error("Account transfer custody is not ready for a new departure");
         if (preparing && (!sameEndpoint(preparing.destination, destination) || preparing.identity !== accountIdentity)) throw new Error("Preparation already belongs to another destination or identity");
         if (!preparing && registered.use !== "shared") throw new Error("Account needs shared eligibility");
         const remaining = this.store.accounts().filter(account => account.id !== alias && account.provider === "openai-codex" && quotaReady(this.store, account.id, now, maxAgeMs));
@@ -167,9 +190,7 @@ export class AccountTransfer {
       const recorded = this.store.control(receiptKey(packet.id));
       if (recorded) {
         const accepted = JSON.parse(recorded) as TransferReceipt;
-        const currentCredential = oauthCredential(auth[packet.alias]);
-        if (accepted.alias !== packet.alias || accepted.identity !== packet.identity || !sameEndpoint(accepted.source, packet.source)) throw new Error("Transfer receipt conflict");
-        if (!currentCredential || identity(currentCredential) !== packet.identity) throw new Error("Received account identity changed; source outbox was retained");
+        if (!matchesReceipt(accepted, packet)) throw new Error("Transfer receipt conflict");
         return accepted;
       }
       const importedKey = `account-transfer-imported:${packet.id}`;
@@ -179,11 +200,12 @@ export class AccountTransfer {
       if (staged.type === "account-transfer-in" || imported) {
         accepted = imported ? JSON.parse(imported) : staged.receipt;
         const currentCredential = staged.type === "account-transfer-in" ? oauthCredential(staged.credential) : oauthCredential(staged);
-        if (!accepted || accepted.id !== packet.id || accepted.alias !== packet.alias || accepted.identity !== packet.identity
-          || !sameEndpoint(accepted.source, packet.source) || !currentCredential || identity(currentCredential) !== packet.identity)
+        if (!accepted || !matchesReceipt(accepted, packet) || !currentCredential || identity(currentCredential) !== packet.identity)
           throw new Error("Transfer staging identity changed; destination credential was not replaced");
       } else {
-        if (this.store.account(packet.alias) || auth[packet.alias]) throw new Error("Destination account alias collision");
+        const prior = returnReceipt(this.store, packet.alias, auth[packet.alias], this.endpoint);
+        if ((this.store.account(packet.alias) || auth[packet.alias]) && (!prior || prior.identity !== packet.identity))
+          throw new Error("Destination account alias collision");
         for (const value of Object.values(auth)) {
           const existing = oauthCredential(value);
           if (existing) {
@@ -192,17 +214,22 @@ export class AccountTransfer {
             if (existingIdentity === packet.identity) throw new Error("Destination already owns this Codex identity under another alias");
           }
         }
+        if (prior) this.store.setControl(sentKey(prior.id), JSON.stringify(prior));
         accepted = receipt(packet);
         staged = {type: "account-transfer-in", receipt: accepted, credential: packet.credential};
         auth[packet.alias] = staged;
         save();
       }
       if (!imported) this.store.transaction(() => {
-        if (this.store.account(packet.alias)) throw new Error("Destination account appeared during transfer");
-        insertRows(this.store, "account", [{...packet.facts.account, enabled: 0}]);
-        insertRows(this.store, "meter", packet.facts.meters);
-        insertRows(this.store, "usage_hour", packet.facts.usage);
-        insertRows(this.store, "lease", packet.facts.leases);
+        const returning = Boolean(this.store.account(packet.alias));
+        if (returning && !departedAccount(this.store, packet.alias, packet.identity))
+          throw new Error("Destination account appeared during transfer");
+        insertRows(this.store, "account", [{...packet.facts.account, enabled: 0}], returning);
+        insertRows(this.store, "meter", packet.facts.meters, returning);
+        insertRows(this.store, "usage_hour", packet.facts.usage, returning);
+        insertRows(this.store, "lease", packet.facts.leases, returning);
+        for (const name of ["account-use", "meter-error", "account-lifecycle"])
+          this.store.db.prepare("DELETE FROM control WHERE key=?").run(`${name}:${packet.alias}`);
         for (const row of packet.facts.controls) this.store.setControl(String(row.key), String(row.value));
         this.store.setControl(importedKey, JSON.stringify(accepted));
         this.store.setControl(key(packet.alias), JSON.stringify({...accepted, phase: "receiving"}));
@@ -224,7 +251,15 @@ export class AccountTransfer {
     return withSharedAuth(this.authPath, signal, (auth, save) => {
       const current = object(auth[alias]);
       const packet = current.type === "account-transfer-out" ? current.packet as TransferPacket : current as TransferReceipt;
-      if (packet.id !== accepted.id || packet.identity !== accepted.identity || !sameEndpoint(packet.destination, accepted.destination)) throw new Error("Destination receipt does not match outgoing transfer");
+      const recorded = this.store.control(sentKey(accepted.id));
+      if (recorded) {
+        const prior = JSON.parse(recorded) as TransferReceipt;
+        if (alias !== accepted.alias || !matchesReceipt(prior, accepted)) throw new Error("Transfer receipt conflict");
+        if (packet.id !== accepted.id) return prior;
+      }
+      if (alias !== accepted.alias || (current.type !== "account-transfer-out" && current.type !== "account-transfer-receipt")
+        || !matchesReceipt(accepted, packet)) throw new Error("Destination receipt does not match outgoing transfer");
+      this.store.setControl(sentKey(accepted.id), JSON.stringify(accepted));
       auth[alias] = accepted;
       save();
       this.store.setControl(key(alias), JSON.stringify({...accepted, phase: "transferred"}));
@@ -246,10 +281,31 @@ const COLUMNS: Record<string, string[]> = {
   usage_hour: ["account_id", "hour", "source", "run_id", "model", "component", "tokens"],
   lease: ["id", "account_id", "kind", "run_id", "started_at", "heartbeat_at", "ended_at"],
 };
-function insertRows(store: Store, table: string, rows: Row[]) {
+const HISTORY_KEYS: Record<string, string[]> = {
+  meter: ["account_id", "meter_id", "observed_at"],
+  usage_hour: ["account_id", "hour", "source", "run_id", "model", "component"],
+  lease: ["id"],
+};
+function insertRows(store: Store, table: string, rows: Row[], returning = false) {
   const columns = COLUMNS[table]!;
-  const statement = store.db.prepare(`INSERT INTO ${table}(${columns.join(",")}) VALUES(${columns.map(() => "?").join(",")})`);
-  for (const row of rows) statement.run(...columns.map(column => row[column] ?? null));
+  const conflict = table === "account" && returning
+    ? ` ON CONFLICT(id) DO UPDATE SET ${columns.filter(column => column !== "id").map(column => `${column}=excluded.${column}`).join(",")}` : "";
+  const statement = store.db.prepare(`INSERT INTO ${table}(${columns.join(",")}) VALUES(${columns.map(() => "?").join(",")})${conflict}`);
+  const keys = HISTORY_KEYS[table];
+  const where = keys?.map(column => `${column}=?`).join(" AND ");
+  const find = returning && keys ? store.db.prepare(`SELECT * FROM ${table} WHERE ${where}`) : undefined;
+  for (const row of rows) {
+    const values = keys?.map(column => row[column] ?? null) ?? [];
+    const existing = find?.get(...values) as Row | undefined;
+    if (!existing) { statement.run(...columns.map(column => row[column] ?? null)); continue; }
+    const mutable = table === "usage_hour" ? ["tokens"] : table === "lease" ? ["heartbeat_at", "ended_at"] : [];
+    if (columns.some(column => !mutable.includes(column) && existing[column] !== (row[column] ?? null)))
+      throw new Error(`Destination ${table} history collision`);
+    // Each owner inherits the cumulative snapshot before adding its own usage.
+    if (table === "usage_hour") store.db.prepare(`UPDATE usage_hour SET tokens=MAX(tokens,?) WHERE ${where}`).run(row.tokens!, ...values);
+    if (table === "lease") store.db.prepare(`UPDATE lease SET heartbeat_at=MAX(heartbeat_at,?),ended_at=MAX(COALESCE(ended_at,0),?) WHERE ${where}`)
+      .run(row.heartbeat_at!, row.ended_at!, ...values);
+  }
 }
 
 export async function transferPeer(host: string, action: "inspect" | "receive", input: unknown, signal: AbortSignal): Promise<any> {
