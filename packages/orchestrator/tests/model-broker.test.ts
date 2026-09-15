@@ -75,8 +75,51 @@ test("fleet, transcripts, credentials, ungranted models and provider-resource re
   ]) expect((await f.post(payload)).status).toBe(400);
   expect(transport).not.toHaveBeenCalled();
   f.store.setAccountEnabled("shared", false);
-  expect((await f.post(body())).status).toBe(429);
+  expect((await f.post(body())).status).toBe(503);
   expect(transport).not.toHaveBeenCalled();
+});
+
+test("foreground broker requests admit while fleet account and machine session slots are full", async () => {
+  const transport = vi.fn(async () => sse({}));
+  const f = await fixture(transport);
+  const policy = loadConfig(undefined, f.store.path);
+  for (let i = 0; i < Math.max(policy.maxConcurrentSessions, policy.defaultAccountConcurrency); i++) {
+    f.store.createLease(`thread:busy-${i}`, "shared", "fleet");
+  }
+  const before = f.store.activeLeases().length;
+  const response = await f.post(body());
+  expect(response.status).toBe(200);
+  await response.text();
+  expect(transport).toHaveBeenCalledOnce();
+  expect(f.store.activeLeases()).toHaveLength(before);
+  f.store.recordMeter("shared", "codex-7d", 100, Date.now() + 60_000, Date.now());
+  expect((await f.post(body())).status).toBe(503);
+  expect(transport).toHaveBeenCalledOnce();
+});
+
+test("the principal request ceiling survives busy fleets and keeps its error through native Codex", async () => {
+  let release!: () => void;
+  const held = new Promise<void>(resolve => { release = resolve; });
+  const transport = vi.fn(async () => { await held; return sse({}); });
+  const f = await fixture(transport);
+  const pending = [f.post(body()), f.post(body())];
+  try {
+    await vi.waitFor(() => expect(transport).toHaveBeenCalledTimes(2));
+    const family = builtinProviders().find(provider => provider.id === "openai-codex")!;
+    const provider = brokerProvider(family, f.url);
+    const result = await provider.stream(provider.getModels().find(model => model.id === "gpt-5.6-luna")!, {
+      messages: [{ role: "user", content: "hello", timestamp: Date.now() }],
+    }, { maxRetries: 0 }).result();
+    expect(result.errorMessage).toContain("Your shared model request limit is full");
+    expect(result.errorMessage).not.toContain("ChatGPT usage limit");
+    expect(transport).toHaveBeenCalledTimes(2);
+  } finally {
+    release();
+    await Promise.all(pending.map(async request => (await request).text()));
+  }
+  expect(f.store.activeLeases()).toHaveLength(0);
+  await (await f.post(body())).text();
+  expect(transport).toHaveBeenCalledTimes(3);
 });
 
 test("durable completions share the completion owner without sharing its identities or account grants", async () => {
