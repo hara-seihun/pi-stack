@@ -8,4 +8,4 @@ TimeoutStartSec=45s
 TimeoutStopSec=5s
 KillMode=control-group
 UMask=0077
-Environment=PATH=/home/kenan/.local/bin:/run/current-system/sw/bin:/usr/bin:/bin
+Environment=PATH=/home/kenan/.local/bin:/run/wrappers/bin:/run/current-system/sw/bin:/usr/bin:/bin
