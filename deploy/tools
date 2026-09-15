@@ -48,27 +48,35 @@ pi_stack_publish_release "$root" "$stage/release" "$dest" tools
 
 # Every Pi account gets every command, plus the Pi Remote person CLI, through
 # ~/.local/bin. Links this deployment no longer declares are removed.
+# One privileged shell per account: a sudo round trip per link made this the
+# slowest part of an unchanged release on Converge.
 reconcile_links() {
-  local home=$1 bin="$1/.local/bin" owner group link target name
+  local home=$1 owner group expected
   owner=$(stat -c %U "$home"); group=$(stat -c %G "$home")
-  declare -A expected=()
-  while IFS=$'\t' read -r tool name entry; do
-    expected["$name"]="$dest/$tool/$entry"
-  done < <(jq -r '.tools[] | .id as $tool | .commands[] | [$tool,.name,.entry] | @tsv' "$manifest")
-  expected["pi-remote"]="$remote/server/pi-remote"
-
-  pi_stack_as_root install -d -m 755 -o "$owner" -g "$group" "$home/.local" "$bin"
-  while IFS= read -r -d '' link; do
-    target=$(pi_stack_as_root readlink "$link")
-    name=$(basename "$link")
-    if [[ ( $target == "$dest/"* || $target == "$remote/"* ) && ${expected[$name]:-} != "$target" ]]; then
-      pi_stack_as_root rm -- "$link"
-    fi
-  done < <(pi_stack_as_root find "$bin" -maxdepth 1 -type l -print0)
-  for name in "${!expected[@]}"; do
-    pi_stack_as_root ln -sfn "${expected[$name]}" "$bin/$name"
-    pi_stack_as_root chown -h "$owner:$group" "$bin/$name"
-  done
+  expected=$({
+    jq -r --arg dest "$dest" '.tools[] | .id as $tool | .commands[] | [.name, "\($dest)/\($tool)/\(.entry)"] | @tsv' "$manifest"
+    printf 'pi-remote\t%s/server/pi-remote\n' "$remote"
+  })
+  pi_stack_as_root env PI_STACK_TOOL_LINKS="$expected" bash -s -- "$home" "$owner" "$group" "$dest" "$remote" <<'ROOT'
+set -euo pipefail
+home=$1 owner=$2 group=$3 dest=$4 remote=$5 bin="$1/.local/bin"
+declare -A expected=()
+while IFS=$'\t' read -r name target; do
+  [[ -n $name ]] && expected["$name"]=$target
+done <<<"$PI_STACK_TOOL_LINKS"
+install -d -m 755 -o "$owner" -g "$group" "$home/.local" "$bin"
+while IFS= read -r -d '' link; do
+  target=$(readlink "$link")
+  name=$(basename "$link")
+  if [[ ( $target == "$dest/"* || $target == "$remote/"* ) && ${expected[$name]:-} != "$target" ]]; then
+    rm -- "$link"
+  fi
+done < <(find "$bin" -maxdepth 1 -type l -print0)
+for name in "${!expected[@]}"; do
+  ln -sfn "${expected[$name]}" "$bin/$name"
+  chown -h "$owner:$group" "$bin/$name"
+done
+ROOT
 }
 
 if [[ $skip_links != 1 ]]; then

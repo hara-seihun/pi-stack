@@ -263,7 +263,7 @@ exit 64
     assert.match(firstUnits,new RegExp(`^restart pi-orchestrator@${user}\\.service$`, 'm'));assert.match(firstUnits,/^restart pi-remote-router\.service$/m);
     assert.equal(readFileSync(env.VOICE_TRACE,"utf8"),"--check\n--activate\n");
     assert.equal(readFileSync(activationTrace,"utf8"),"pi-remote@alice.service\n");
-    assert.equal(readFileSync(settingsTrace,"utf8"),`${user}\nalice\nguest-person\n`);
+    assert.deepEqual(readFileSync(settingsTrace,"utf8").trim().split("\n").sort(),[user,"alice","guest-person"].sort(),"settings reconcile every account, concurrently");
     assert.equal(readFileSync(env.HEALTH_TRACE, "utf8"), "http://127.0.0.1:18798/v1/health\n".repeat(2));
     rmSync(systemctlTrace,{force:true});
     const unchanged=spawnSync(join(deploy,"host"),[hostFile],{encoding:"utf8",env});assert.equal(unchanged.status,0,unchanged.stderr);
@@ -274,9 +274,11 @@ exit 64
     const voiceFailure=spawnSync(join(deploy,"host"),[hostFile],{encoding:"utf8",env:{...env,VOICE_CHECK_EXIT:"1"}});
     assert.notEqual(voiceFailure.status,0);
     assert.equal(existsSync(systemctlTrace),false,"Voice preflight blocks service activation");
+    // The browser doctor runs alongside activation against the already selected runtime; its failure fails the release.
     const browserFailure=spawnSync(join(deploy,"host"),[hostFile],{encoding:"utf8",env:{...env,BROWSER_SMOKE_EXIT:"1"}});
     assert.notEqual(browserFailure.status,0);
-    assert.equal(existsSync(systemctlTrace),false,"a missing native browser blocks service activation");
+    assert.match(browserFailure.stderr,/browser doctor failed/);
+    rmSync(systemctlTrace,{force:true});
 
     // A release the clients cannot use goes back to the previous Pi Remote.
     const before=readlinkSync(destinations.PI_STACK_REMOTE_DEST);
