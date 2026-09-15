@@ -1,4 +1,4 @@
-.environment-control.environment-picker {
+.environment-picker {
   display: grid;
   width: 100%;
   min-width: 0;
@@ -6,7 +6,7 @@
   gap: 6px;
 }
 
-.environment-control.environment-picker select {
+.environment-picker select {
   display: block;
   box-sizing: border-box;
   width: 100%;
@@ -35,5 +35,3 @@
 }
 
 .environment-picker-status { color: var(--muted); }
-.environment-picker-error { color: var(--danger); }
-.environment-picker-error p { margin: 0; }

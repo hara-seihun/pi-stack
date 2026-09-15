@@ -18,6 +18,16 @@ Unlock, lock, lock-status and endpoint discovery always use bootstrap, regardles
 
 API fetches reject redirects so custom session headers cannot follow a router response to an external origin. Meet invitations contain no router session; the router does not authorize a guest by accepting the host's person name.
 
+## Environment and person picker
+
+[`EnvironmentControl`](src/EnvironmentControl.tsx) renders one full-width dropdown containing the current person's authorized environments and every other person from the bootstrap chooser. It has an accessible name but no visible label, icon, or separate person button. People load independently of authenticated environment discovery and remain selectable during environment failures or switching. Choosing an environment uses `KenanRemote.select` to verify its identity before reloading; choosing a person uses `PiRemotePerson.set` to clear the previous session and endpoint selection, leaving authentication to the existing unlock flow. Auth and person events refresh the environment list and invalidate stale results. Each error can be dismissed through the shared [`DismissibleError`](src/dismissible-error.tsx) without clearing the failure or removing the dropdown's Reconnect option. Reconnect retries discovery and shows any renewed failure.
+
+## Dismissible errors
+
+[`DismissibleError`](src/dismissible-error.tsx) imports its own [CSS](src/dismissible-error.css). Pass `message` as a string, or an empty/null/undefined value to remove feedback. Optional props are `dismissLabel`, `className`, `role` (`alert` by default, or `status` for background feedback), and `resetKey` for a new attempt with the same message.
+
+Dismissal only hides the message. Keep failure state and retry actions in the caller, outside this component. Changed messages, changed reset keys, or clearing the message reset dismissal. Repeated background reports with the same message stay dismissed. The dismiss button has a 44px touch target and a visible keyboard focus outline.
+
 ## Focused checks
 
 Run `bun test apps/remote/web/router-auth.test.ts apps/remote/web/router-client.test.ts apps/remote/web/meet-adapter.test.ts` from the repository root. The client test covers the native session bridge, initial authentication, token renewal, open-person sessions, endpoint identity checks and external URL handling.

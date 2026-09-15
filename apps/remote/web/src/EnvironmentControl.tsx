@@ -1,7 +1,8 @@
-import { useEffect, useId, useRef, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import type { publicPerson } from "../../server/persons";
 import { fetchPersonChooser, loadEnvironments, type EnvironmentState } from "./native";
 import type { Endpoint } from "./router-auth";
+import { DismissibleError } from "./dismissible-error";
 import "./EnvironmentControl.css";
 
 type Person = ReturnType<typeof publicPerson>;
@@ -20,7 +21,6 @@ export function EnvironmentControl() {
   const [attempt, setAttempt] = useState(0);
   const revision = useRef(0);
   const switching = useRef(false);
-  const errorId = useId();
 
   useEffect(() => {
     let cancelled = false;
@@ -123,8 +123,8 @@ export function EnvironmentControl() {
   };
 
   const errors = [peopleError, environmentError, switchError].filter(Boolean);
-  return <div className="environment-control environment-picker">
-    <select aria-label="Environment or person" aria-describedby={errors.length ? errorId : undefined}
+  return <div className="environment-picker">
+    <select aria-label="Environment or person"
       value={pending ? `environment:${pending}` : environment ? `environment:${environment.id}` : ""}
       onChange={event => { void choose(event.target.value); }}>
       {!environment && !pending && <option value="" disabled>{loading ? "Loading environments…" : "Choose an environment or person"}</option>}
@@ -133,6 +133,8 @@ export function EnvironmentControl() {
       {errors.length > 0 && <option value="retry" disabled={Boolean(pending)}>Reconnect</option>}
     </select>
     {pending && <div className="environment-picker-status" role="status">Switching environment…</div>}
-    {errors.length > 0 && <div id={errorId} className="environment-picker-error" role="alert">{errors.map(error => <p key={error}>{error}</p>)}</div>}
+    <DismissibleError message={peopleError} resetKey={`${person}:${attempt}`} className="environment-picker-error" dismissLabel="Dismiss person list error" />
+    <DismissibleError message={environmentError} resetKey={`${person}:${attempt}`} className="environment-picker-error" dismissLabel="Dismiss environment list error" />
+    <DismissibleError message={switchError} resetKey={`${person}:${attempt}`} className="environment-picker-error" dismissLabel="Dismiss switching error" />
   </div>;
 }
