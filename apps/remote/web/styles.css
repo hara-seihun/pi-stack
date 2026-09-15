@@ -278,7 +278,7 @@ button:disabled { cursor: default; opacity: .45; }
 .composer-icon.voice.live { color: var(--bg); background: var(--accent); }
 .composer-icon.voice.error { color: var(--danger); }
 .composer-icon.send { color: var(--bg); background: var(--accent); }
-.stop-icon { display: none; font-size: 13px; font-weight: 750; }
+.composer-icon .stop-icon { display: none; fill: currentColor; stroke: none; }
 @keyframes voice-pulse { to { opacity: .4; } }
 .composer-icon.abort { width: auto; min-width: 56px; padding: 0 10px; color: var(--bg); background: var(--danger); }
 .composer-icon.abort .send-icon { display: none; }
