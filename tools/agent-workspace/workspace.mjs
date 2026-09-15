@@ -357,9 +357,14 @@ function register(database, input) {
   return withWorkspaceLock(database, input.path, () => registerWorkspace(database, input), input.groupId);
 }
 
-function registerWorkspace(database, input) {
-  const info = gitInfo(input.path);
-  maintainReferenceClone(input.path, true);
+function registrationInspection(workspace) {
+  const info = gitInfo(workspace);
+  maintainReferenceClone(workspace, true);
+  return info;
+}
+
+function registerWorkspace(database, input, inspectedInfo) {
+  const info = inspectedInfo ?? registrationInspection(input.path);
   const now = Date.now();
   const existing = database.prepare("SELECT * FROM workspace WHERE path = ?").get(path.resolve(input.path));
   if (existing?.state === "creating") return rowToRecord(existing);
@@ -1186,6 +1191,17 @@ function adoptionCandidates(root, nestedGroups) {
   return candidates;
 }
 
+function withAdoptionLocks(database, candidates, action, index = 0) {
+  if (index >= candidates.length) return action();
+  const candidate = candidates[index];
+  return withWorkspaceLock(
+    database,
+    candidate.path,
+    () => withAdoptionLocks(database, candidates, action, index + 1),
+    candidate.groupId,
+  );
+}
+
 function adoptCommand(database, args, statePath) {
   assertOnly(args, ["root", "kind", "mode", "owner", "group", "nested-groups", "lease-seconds", "cache", "cache-owned", "replace-cache", "execute", "reap-expired", "json"]);
   const root = path.resolve(required(args, "root"));
@@ -1210,26 +1226,35 @@ function adoptCommand(database, args, statePath) {
       inheritedGroupLeases.set(desired, Math.max(inheritedGroupLeases.get(desired) ?? 0, existing.lease_expires_at));
     }
   });
-  database.exec("BEGIN IMMEDIATE");
-  try {
-    candidates.forEach((candidate, index) => records.push(register(database, {
-      path: candidate.path,
-      root,
-      kind: one(args, "kind", "agent"),
-      mode,
-      owner: one(args, "owner", "unowned"),
-      groupId: desiredGroups[index],
-      sourceCommit: null,
-      leaseSeconds: numberFlag(args, "lease-seconds", 0),
-      leaseExpiresAt: desiredGroups[index] === null ? undefined : inheritedGroupLeases.get(desiredGroups[index]),
-      cachePaths: cachePathsForRepository(candidate.path, args),
-      replaceCachePaths: bool(args, "replace-cache"),
-    })));
-    database.exec("COMMIT");
-  } catch (error) {
-    try { database.exec("ROLLBACK"); } catch {}
-    throw error;
-  }
+  const registrations = candidates.map((candidate, index) => ({
+    path: candidate.path,
+    root,
+    kind: one(args, "kind", "agent"),
+    mode,
+    owner: one(args, "owner", "unowned"),
+    groupId: desiredGroups[index],
+    sourceCommit: null,
+    leaseSeconds: numberFlag(args, "lease-seconds", 0),
+    leaseExpiresAt: desiredGroups[index] === null ? undefined : inheritedGroupLeases.get(desiredGroups[index]),
+    replaceCachePaths: bool(args, "replace-cache"),
+  }));
+  withAdoptionLocks(database, registrations, () => {
+    const prepared = registrations.map((registration) => ({
+      ...registration,
+      cachePaths: cachePathsForRepository(registration.path, args),
+      inspection: registrationInspection(registration.path),
+    }));
+    database.exec("BEGIN IMMEDIATE");
+    try {
+      for (const { inspection, ...registration } of prepared) {
+        records.push(registerWorkspace(database, registration, inspection));
+      }
+      database.exec("COMMIT");
+    } catch (error) {
+      try { database.exec("ROLLBACK"); } catch {}
+      throw error;
+    }
+  });
   const execute = bool(args, "execute");
   const safety = execute ? safetySnapshot(database) : undefined;
   const results = execute
