@@ -3,7 +3,7 @@ import { createElement, isValidElement, type ReactElement, type ReactNode } from
 import { renderToStaticMarkup } from "react-dom/server";
 import { ChildThreadList } from "./src/thread-views";
 import { requestStop, StopChoices, submitThreadControl } from "./src/thread-controls";
-import { activityColor, conversationThreads, orchestratorThreads, working } from "./src/thread-state";
+import { activityColor, activityLabel, composerAction, conversationThreads, orchestratorThreads, working } from "./src/thread-state";
 import type { Session } from "./src/types";
 
 const session = (id: string, extra: Partial<Session> = {}): Session => ({
@@ -75,12 +75,14 @@ describe("thread controls", () => {
     expect(buttons(StopChoices({ pending: true, onStop() {} })).every(button => button.props.disabled)).toBe(true);
   });
 
-  test("an idle parent stays idle while its child is working", () => {
-    const parent = session("parent", { hasChildren: true, idleUnread: true });
+  test("an awaiting parent displays child activity but remains available for messages", () => {
+    const parent = session("parent", { hasChildren: true, idleUnread: true, activity: "awaiting" });
     const child = session("child", { parentId: parent.id, state: "running", activity: "thinking" });
     expect(working(parent)).toBe(false);
     expect(working(child)).toBe(true);
-    expect(activityColor(parent.activity, parent.idleUnread)).toBe("var(--success)");
+    expect(activityLabel(parent.activity)).toBe("AWAITING");
+    expect(activityColor(parent.activity, parent.idleUnread)).toBe("var(--accent)");
+    expect(composerAction(parent, "")).toBe("send");
     expect(working({ ...child, state: "stopped" })).toBe(false);
   });
 
