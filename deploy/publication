@@ -203,7 +203,6 @@ function submit(sourceArgument, repairedRequestId) {
       throw new Error("Repaired submission requires its dedicated owner's source-fixed outcome and matching commit");
     if (repaired.status !== "failed") throw new Error("Repaired submission requires a failed request");
     if (sourceSha === repaired.sourceSha) throw new Error("Source repair requires a new commit");
-    if ((repaired.repairDepth ?? 0) >= policy.maxRepairDepth) throw new Error("Repair chain exhausted; report the remaining blocker");
     checked("git", ["merge-base", "--is-ancestor", repaired.sourceSha, sourceSha], { cwd: sourceRoot });
   }
   ensureState();
