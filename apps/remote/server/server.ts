@@ -24,6 +24,7 @@ import { VoiceClient } from "./voice/client";
 import { MeetServer } from "./meet/server";
 import { meetingActivity } from "./meet/activity";
 import { meetingHandoffText, prepareMeetingHandoff } from "./meet/handoff";
+import { meetingThreadInstructions } from "./meet/instructions";
 import { externalMeetingRequest } from "./meet/external";
 import { liveDevInstructions } from "./skills";
 import { defaultThreadDestinations, type ThreadDestination } from "./thread-model-defaults";
@@ -626,15 +627,20 @@ async function sessionFileResponse(url: URL, method: string, req: Request): Prom
   return localFileResponse(url.searchParams.get("path") ?? "", method, req);
 }
 
-function meetingInstructions(sessionId: string): string {
-  return (sessionRow.get(sessionId) as any)?.meeting_id ? liveDevInstructions() : "";
+// The meeting root is the conversation thread the room is attached to; Voice hard-steers it on
+// every handoff, so it routes work to worker threads. Workers inherit the meeting through their parent.
+function meetingInstructions(sessionId: string, audience: "thread" | "voice" = "thread"): string {
+  const thread = threads.get(sessionId) ?? peerThreads.get(sessionId);
+  if (!thread || !remotePlacement(thread).meetingId) return "";
+  if (audience === "voice") return liveDevInstructions();
+  return meetingThreadInstructions(thread.role === "worker" ? "worker" : "root");
 }
 
-function threadInstructions(sessionId: string): string {
+function threadInstructions(sessionId: string, audience: "thread" | "voice" = "thread"): string {
   const snapshot = inlineImages.snapshot(sessionId);
   const registry = snapshot.images.map(({ id, state, refs, path, paths, error, conflict }) => ({ id, state, refs, path, paths, error, conflict }));
   return [
-    meetingInstructions(sessionId),
+    meetingInstructions(sessionId, audience),
     registry.length ? `Pi Remote image registry: ${JSON.stringify({ version: snapshot.version, images: registry })}` : "",
   ].filter(Boolean).join("\n\n");
 }
@@ -653,7 +659,7 @@ function voiceInstructions(row: any): string {
   return [
     policy,
     `Connected Pi thread: ${JSON.stringify({ id: row.id, name: row.name, meeting: Boolean(row.meeting_id) })}`,
-    threadInstructions(row.id),
+    threadInstructions(row.id, "voice"),
     history ? `Recent thread transcript:\n${history}` : "",
   ].filter(Boolean).join("\n\n");
 }
@@ -873,7 +879,8 @@ function publicSession(row: any, hasChildren = threads.snapshot().some(thread =>
   const queuedMessages: QueuedMessage[] = pending.filter(message => !message.insertedAt).map(message => ({
     id: message.id, text: message.text, delivery: message.delivery, state: message.state ?? "queued",
     status: message.state === "held" ? "Held until resumed" : message.state === "dispatched" ? "Sent to agent"
-      : message.delivery === "steer" ? "Steering after current tool calls" : "Queued for after completion",
+      : message.delivery === "steer" ? "Steering after current tool calls"
+      : message.delivery === "hardSteer" ? "Interrupting current work" : "Queued for after completion",
     canSteer: ["queued", "held"].includes(message.state ?? "queued") && message.delivery === "queue",
     canHardSteer: ["queued", "held"].includes(message.state ?? "queued"),
     canCancel: ["queued", "held"].includes(message.state ?? "queued"),

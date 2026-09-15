@@ -149,7 +149,7 @@ test("meeting handoffs retain Voice's triggering speech alongside the saved meet
   await delegate("delegation-1");
   expect(prompts[0]!.text).toContain("User: Kenan, unmute yourself.");
   expect(prompts[0]!.includeMeetingImages).toBe(true);
-  expect(prompts[0]!.delivery).toBe("steer");
+  expect(prompts[0]!.delivery).toBe("hardSteer");
   speech("speech-2", "Now show the browser.");
   await delegate("delegation-2");
   expect(prompts[1]!.text).toContain("User: Now show the browser.");
