@@ -425,9 +425,21 @@ describe("ThreadService", () => {
     } finally { db.close(); }
     expect(first.service.get(parent.id)?.state).toBe("stopped");
     expect(first.service.pending(parent.id)).toMatchObject([{ source: "notification", state: "held", senderId: child.id }]);
+    const notification = first.service.pending(parent.id)[0]!;
+    expect(JSON.parse(notification.text)).toMatchObject({
+      type: "thread_idle", threadId: child.id, workId: "child-work", outcome: "complete",
+      finalMessage: { content: [{ type: "text", text: "child result" }] },
+    });
     value(await first.service.close());
 
+    const reopened = fixture(first.directory);
+    await reopened.service.start();
+    expect(reopened.service.pending(parent.id)).toEqual([notification]);
+    expect(reopened.sessions).toHaveLength(0);
+    value(await reopened.service.close());
+
     const second = fixture(first.directory);
+    expect(second.service.pending(parent.id)).toEqual([notification]);
     value(await second.service.send({ requestId: "explicit", threadId: parent.id, text: "new instruction", delivery: "queue" }));
     expect(second.service.get(parent.id)?.state).toBe("running");
     expect(second.service.pending(parent.id).map(message => ({ id: message.id, source: message.source, text: message.text }))).toEqual([

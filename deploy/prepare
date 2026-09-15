@@ -29,8 +29,10 @@ runtime_pid=$!
 "$root/deploy/transcription" &
 transcription_pid=$!
 failed=0
-wait "$builds_pid" || failed=1
-wait "$runtime_pid" || failed=1
-wait "$transcription_pid" || failed=1
+for job in "builds:$builds_pid" "runtime:$runtime_pid" "transcription:$transcription_pid"; do
+  if wait "${job#*:}"; then continue; else status=$?; fi
+  printf 'Pi stack preparation %s exited %s\n' "${job%%:*}" "$status" >&2
+  failed=1
+done
 (( failed == 0 )) || { echo "Pi stack preparation failed" >&2; exit 1; }
 printf 'prepared Pi stack %s in %ss\n' "$(git -C "$root" rev-parse --short HEAD)" "$((SECONDS - started))"

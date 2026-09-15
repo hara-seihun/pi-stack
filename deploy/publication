@@ -1375,7 +1375,7 @@ function processRequest(request) {
       delete request.checks;
       delete request.hosts;
       result = createIntegration(request, logPath);
-      if (!result.ok) throw new Error(result.stderr.trim() || `integration checks exited ${result.status}`);
+      if (!result.ok) throw new Error(result.stderr.trim() || `${request.step} exited ${result.status}`);
     }
 
     prepareAndroidArtifact(request, logPath);
