@@ -1,5 +1,5 @@
 import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
-import { cleanupSessionResources, getSupportedThinkingLevels, type Model, type Provider } from "@earendil-works/pi-ai";
+import { cleanupSessionResources, getSupportedThinkingLevels, type Model } from "@earendil-works/pi-ai";
 import { builtinProviders } from "@earendil-works/pi-ai/providers/all";
 import { homedir } from "node:os";
 import { join } from "node:path";
@@ -13,7 +13,7 @@ import { chooseInteractiveAccount } from "../auth/account-selection.js";
 import { installImageGeneration } from "./image-generation.js";
 import { installProviderOperations } from "./provider-operation.js";
 import { interruptedTurnPrompt } from "../host/continuations.js";
-import customModelConfig from "../models.json" with { type: "json" };
+import { withCustomModels } from "../models.js";
 import { modelBrokerUrl } from "../model-broker-contract.js";
 import { installBrokerRouting } from "./broker-routing.js";
 
@@ -53,11 +53,6 @@ export function resolveSessionModel(models:readonly Model<any>[],provider:string
 export function baseProvider(provider:string):string{return provider.replace(/-\d+$/u,"");}
 export function failoverPrompt(failure:string,account:string):string{return interruptedTurnPrompt(failure,`This session moved to another account (${account}) and is ready to keep going.`);}
 export function credentialRepairPrompt(failure:string,account:string):string{return interruptedTurnPrompt(failure,`The credential for ${account} was refreshed and this session is ready to keep going on the same account.`);}
-export function withCustomModels(provider:Provider):Provider{
-  if(provider.id!=="anthropic")return provider;
-  const custom=customModelConfig.providers.anthropic.models as unknown as Model<"anthropic-messages">[];
-  return{...provider,getModels:()=>{const replacements=new Map(custom.map((model)=>[model.id,model]));return[...provider.getModels().filter((model)=>!replacements.has(model.id)),...custom];}};
-}
 
 export default function routing(pi:ExtensionAPI):void{
   let closed=false;

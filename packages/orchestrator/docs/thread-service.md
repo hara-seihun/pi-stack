@@ -29,7 +29,13 @@ Input commands carry a stable `workId`. Pi records `thread_input` and `thread_se
 
 Stop and hard steer use the existing runtime or attach to its recorded runner without opening a session. Cancellation does not need the workspace, credentials or model admission. Confirmed runner absence permits cancellation of the retained execution claim; a transport failure does not. Settlement also releases a retained fleet lease without readmission. Stop and hard steer await native cancellation of streaming, compaction, queued native input and local tools. Failure holds queued work, records the cancellation error and leaves the thread running until cancellation is confirmed. Only then is it stopped. A late callback from a replaced or suspended controller cannot start replacement execution.
 
-Each execution captures its effective settings. Defaults come from [`resolveThreadSettings`](../src/threads/settings.ts). Isolated context and execution identity are immutable thread metadata. Isolated context reaches the runner through `--orchestrator-context`; root repair cannot combine it with privileged execution. Once native file custody exists, `nativeHistoryRequired` prevents reopening a missing transcript as a fresh session.
+Each execution captures its effective settings. Defaults come from [`resolveThreadSettings`](../src/threads/settings.ts). It validates built-in provider IDs, including numbered pool aliases, against the same native model definitions used by routing and cold settings. Sol resolves to `gpt-5.6-sol`; `gpt-6-sol` is rejected before a spawn or settings write. Explicit private provider names remain subject to runtime model registration.
+
+A model-configuration failure during native startup settles that assignment as failed, records the error in its execution and work receipts, and sends the parent a failure notification. The thread holds its remaining input across controller restarts instead of reopening the same missing model every five seconds. Account admission and transport failures remain retryable.
+
+Setting an explicit model also repairs queued, undispatched snapshots whose model now fails validation. It changes only their model, preserves thinking, speed and queue state, and records `modelSettingsRepairs` provenance in thread metadata with the work ID, previous model, selected model and timestamp. Valid accepted snapshots and active executions retain their settings. Correcting a stopped thread does not resume it.
+
+Isolated context and execution identity are immutable thread metadata. Isolated context reaches the runner through `--orchestrator-context`; root repair cannot combine it with privileged execution. Once native file custody exists, `nativeHistoryRequired` prevents reopening a missing transcript as a fresh session.
 
 ## Observation and controls
 

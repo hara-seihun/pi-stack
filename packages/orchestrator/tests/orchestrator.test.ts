@@ -7,7 +7,7 @@ import { assign, commitMeterAdmission } from "../src/policy.js";
 import { allowsAccountUse, type OrchestratorConfig } from "../src/domain.js";
 import { transactSharedCredential } from "../src/auth/shared-oauth.js";
 import { builtinProviders } from "@earendil-works/pi-ai/providers/all";
-import { withCustomModels } from "../src/extension/routing.js";
+import { withCustomModels } from "../src/models.js";
 import { catalogModel } from "../src/catalog.js";
 import { Daemon } from "../src/daemon.js";
 import { loadConfig } from "../src/config.js";

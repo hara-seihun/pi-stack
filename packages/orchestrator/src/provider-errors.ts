@@ -128,7 +128,7 @@ export function isPermanentError(message: string): boolean {
  * distinct from generic permanent request failures so a stale model cannot
  * trip every task's circuit breaker. */
 const MODEL_CONFIGURATION_PATTERNS = [
-  /unknown model|no such model|cannot alias/i,
+  /unknown model|no such model|model not found|cannot alias/i,
   /model.{0,200}(does not exist|retired|unavailable|testing period)/is,
   /\b404\b.{0,500}\bmodel\b|\bmodel\b.{0,500}\b404\b/is,
 ];
