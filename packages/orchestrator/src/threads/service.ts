@@ -404,6 +404,7 @@ export class ThreadService implements ThreadApi {
           await this.finish(id, runtime, "cancelled", runtime.finalMessage ?? null);
           await this.retire(id, runtime);
         }
+        if (this.suspended || this.closed) return bad("unavailable", "Halt remains with the thread owner during handoff");
         this.db.prepare("UPDATE thread SET metadata=json_remove(metadata,'$.executionError') WHERE id=?").run(id);
         this.state(id, this.row(id)?.held ? "stopped" : this.pending(id).length ? "running" : "idle");
         return good(this.get(id)!);
@@ -421,7 +422,7 @@ export class ThreadService implements ThreadApi {
     if (this.suspended || this.closed) return bad("unavailable", "Thread controller is suspended");
     if (!this.get(id)) return bad("not_found", "Thread not found");
     if (this.get(id)?.metadata?.archived) return bad("unavailable", "Restore this archived thread before using its native session");
-    if (["prompt", "steer", "follow_up", "abort", "clear_queue", "set_model", "set_thinking_level", "set_speed", "set_session_name", "cycle_model", "cycle_thinking_level"].includes(command.type)) return bad("invalid_request", "Use thread messaging or control(settings/update) so the durable owner records this change");
+    if (["prompt", "steer", "follow_up", "abort", "abort_bash", "abort_retry", "clear_queue", "set_model", "set_thinking_level", "set_speed", "set_session_name", "cycle_model", "cycle_thinking_level"].includes(command.type)) return bad("invalid_request", "Use thread messaging or control(settings/update) so the durable owner records this change");
     const durable = ["fork", "clone", "compact", "new_session", "switch_session", "navigate_tree", "bash", "cycle_model", "cycle_thinking_level", "export_html"].includes(command.type);
     if (durable && !command.id) return bad("invalid_request", "Conversation mutations require a stable command.id for receipt replay");
     return this.serial(id, async () => {

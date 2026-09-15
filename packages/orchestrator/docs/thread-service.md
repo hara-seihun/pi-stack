@@ -4,7 +4,7 @@ The [accepted thread design](../../../docs/threads.md) defines behavior. [`Threa
 
 ## Construction and lifetime
 
-Create a service with `databasePath`, `sessionsDir` and the shared runner's `openSession`. Optional hooks supply boundary-specific environment, quota admission and message preparation. Set its authorized directory with `setDirectory()` before starting it.
+Create a service with `databasePath`, `sessionsDir` and the shared runner's `openSession`. Optional hooks supply boundary-specific environment, quota admission and message preparation. Set its authorized directory with `setDirectory()` before starting it. The service supplies `PI_THREAD_DATABASE` from its own `databasePath` to every session, so `read-thread` uses the thread's owner rather than the account's Remote store.
 
 `admit(thread, settings, recovering, executionId)` returns a domain result containing optional effective settings/environment and a `release()` function. New work acquires a lease; recovery retains admitted execution ownership. Settlement releases that lease. Session identity and queue ownership remain with the service, not the quota hook.
 

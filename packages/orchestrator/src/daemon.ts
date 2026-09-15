@@ -318,11 +318,6 @@ export class Daemon {
         const response=await threadHttp(api,new Request(url,{method,headers:{"content-type":"application/json"},...(method==="POST"?{body:JSON.stringify(input)}:{})}),application?`/v1/applications/${application[1]}/threads`:localOwner?"/v1/thread-owner":"/v1/threads");
         if(response){res.writeHead(response.status,Object.fromEntries(response.headers));res.end(await response.text());return;}
       }
-      const runControl=/^\/v1\/runs\/([^/]+)\/(abort|kill)$/.exec(url.pathname);
-      if(method==="POST"&&runControl){
-        const result=await this.directory().control({threadId:decodeURIComponent(runControl[1]!),action:"stop",descendants:false});
-        return json(res,result.ok?200:409,result.ok?{ok:true}:result);
-      }
       if(method==="POST"&&(url.pathname==="/v1/run"||url.pathname==="/v1/run/isolated")){
         const input=await body(req),count=input.count??1;
         if(typeof input.prompt!=="string"||!input.prompt.trim()||typeof input.cwd!=="string"||!input.cwd.startsWith("/")||!Number.isInteger(count)||count<1||count>100||input.core!==undefined)
