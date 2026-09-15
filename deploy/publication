@@ -33,6 +33,7 @@ const checkout = join(stateRoot, "repository");
 const releaseRepository = process.env.PI_STACK_PUBLICATION_RELEASE_REPOSITORY ?? "/home/kenan/.local/state/pi-stack-release/repository";
 const alertInbox = process.env.PI_STACK_PUBLICATION_ALERT_INBOX ?? "/var/lib/machine-alerts/inbox";
 const issueIndexPath = join(stateRoot, "issues.json");
+const issueAcknowledgementsPath = join(stateRoot, "issue-acknowledgements.json");
 const issueAlertPath = join(alertInbox, "pi-stack-publication-issues.md");
 const threadExecutionContract = "unified-threads-v1";
 const threadExecutionActivationPath = join(contractRoot, `${threadExecutionContract}.json`);
@@ -49,6 +50,7 @@ function usage() {
   deploy/publication submit SHA
   deploy/publication inspect REQUEST
   deploy/publication issues
+  deploy/publication acknowledge-issues
   deploy/publication cancel REQUEST
   deploy/publication repair REQUEST
   deploy/publication repair-result REQUEST
@@ -538,19 +540,36 @@ function reconcileIssueIndex() {
     if (proof) { resolved.push({ requestId: request.requestId, resolution: proof }); continue; }
     const repair = repairs.get(request.requestId);
     if (!custody && repair?.successor && byId.has(repair.successor.requestId) && byId.get(repair.successor.requestId).status !== "cancelled") continue;
-    issues.push({ requestId: request.requestId, sourceSha: request.sourceSha, step: custody ? "restore-host-custody" : request.step,
+    const condition = createHash("sha256").update(JSON.stringify({ source: request.sourceSha,
+      status: request.status, failureAt: request.failure?.at, failure: request.failure?.message,
+      step: request.step, custody, repair: repair?.status, successor: repair?.successor?.requestId })).digest("hex");
+    issues.push({ requestId: request.requestId, condition, sourceSha: request.sourceSha, step: custody ? "restore-host-custody" : request.step,
       failure: custody ? "Host restoration remains outstanding; inspect the receipt's restoration plans." : String(request.failure?.message ?? "").replace(/\s+/g, " ").slice(0, 300),
       repair: repair?.status ?? "unassigned", receipt: requestPath(request.requestId), repairReceipt: repair?.path });
   }
-  atomicWrite(issueIndexPath, `${JSON.stringify({ issues, resolved }, null, 2)}\n`);
-  if (issues.length === 0) { rmSync(issueAlertPath, { force: true }); return; }
+  const acknowledgements = existsSync(issueAcknowledgementsPath) ? JSON.parse(readFileSync(issueAcknowledgementsPath, "utf8")) : {};
+  const acknowledged = issues.filter(issue => acknowledgements[issue.requestId]?.condition === issue.condition);
+  const visible = issues.filter(issue => acknowledgements[issue.requestId]?.condition !== issue.condition);
+  atomicWrite(issueIndexPath, `${JSON.stringify({ issues, resolved, acknowledged: acknowledged.map(issue => issue.requestId) }, null, 2)}\n`);
+  if (visible.length === 0) { rmSync(issueAlertPath, { force: true }); return; }
   const body = ["# Pi Stack publication needs repair", "", "Repository: hara-seihun/pi-stack",
     "Deployment/proof target: gmktec and converge-kenan",
-    `${issues.length} unresolved publication issue(s). Current owner index: ${issueIndexPath}`,
+    `${visible.length} unacknowledged publication issue(s). Current owner index: ${issueIndexPath}`,
     "Read the named receipt before acting. Repair owners retain their work; do not replay requests.", "",
-    ...issues.slice(0, 8).map(issue => `- ${issue.requestId}: ${issue.step}; repair ${issue.repair}. ${issue.failure}\n  Receipt: ${issue.receipt}`),
-    ...(issues.length > 8 ? [`${issues.length - 8} further issues are listed in the owner index.`] : []), ""].join("\n");
+    ...visible.slice(0, 8).map(issue => `- ${issue.requestId}: ${issue.step}; repair ${issue.repair}. ${issue.failure}\n  Receipt: ${issue.receipt}`),
+    ...(visible.length > 8 ? [`${visible.length - 8} further issues are listed in the owner index.`] : []), ""].join("\n");
   if (!existsSync(issueAlertPath) || readFileSync(issueAlertPath, "utf8") !== body) atomicWrite(issueAlertPath, body, 0o660);
+}
+
+function acknowledgeIssues() {
+  reconcileIssueIndex();
+  const { issues } = JSON.parse(readFileSync(issueIndexPath, "utf8"));
+  const acknowledgements = existsSync(issueAcknowledgementsPath) ? JSON.parse(readFileSync(issueAcknowledgementsPath, "utf8")) : {};
+  const at = new Date().toISOString();
+  for (const issue of issues) acknowledgements[issue.requestId] = { condition: issue.condition, at, receipt: issue.receipt };
+  atomicWrite(issueAcknowledgementsPath, `${JSON.stringify(acknowledgements, null, 2)}\n`);
+  reconcileIssueIndex();
+  process.stdout.write(`${issueAcknowledgementsPath}\n`);
 }
 
 function reconcileNotices() {
@@ -1485,7 +1504,9 @@ function processRequest(request) {
     request.status = "finalizing";
     request.step = "adopt-publication-owner";
     writeRequest(request);
-    installFrom(canonicalRepository);
+    const ownerSource = checked("git", ["-C", checkout, "rev-parse", "HEAD"]);
+    if (ownerSource !== request.integrationSha) throw new Error(`Publication owner checkout ${ownerSource} differs from checked integration ${request.integrationSha}`);
+    installFrom(checkout);
 
     request.status = "published";
     request.step = "complete";
@@ -1839,6 +1860,8 @@ function main() {
   if (operation === "_watchdog" && args.length === 0) return watchdog();
   if (operation === "_drain" && args.length === 0) return drain();
   if (operation === "_fail-stalled" && args.length === 2) return failStalled(...args);
+  if (operation === "acknowledge-issues" && args.length === 0) return locked("worker", "acknowledge-issues");
+  if (operation === "_acknowledge-issues" && args.length === 0) return acknowledgeIssues();
   if (operation === "issues" && args.length === 0) return locked("worker", "issues");
   if (operation === "_issues" && args.length === 0) { reconcileIssueIndex(); process.stdout.write(`${issueIndexPath}\n`); return; }
   if (operation === "notices" && args.length === 0) return locked("worker", "notices", [], true);
