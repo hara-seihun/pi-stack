@@ -1,7 +1,8 @@
-import { afterEach, expect, it, vi } from "vitest";
+import { afterEach, beforeEach, expect, it, vi } from "vitest";
 import { dispatch } from "../src/commands.js";
 
 vi.mock("../src/daemon.js",()=>({Daemon:vi.fn()}));
+beforeEach(()=>{for(const key of ["PI_THREAD_ID","PI_THREAD_CAN_SPAWN","PI_THREAD_API_URL"])vi.stubEnv(key,undefined);});
 afterEach(()=>{vi.restoreAllMocks();vi.unstubAllEnvs();process.exitCode=0;});
 
 function transport(responses:unknown[]=[]){
