@@ -24,7 +24,9 @@ The root package enables every extension. Use Pi's package filters when only som
 
 ## Browser dependency
 
-The stack manifest pins `agent-browser` and `pi-agent-browser-native` together. [`config/packages.json`](../../config/packages.json) loads the browser runtime entrypoint instead of installing the native package into each account's mutable npm tree. Deployment derives the expected executable version from the manifest.
+The stack manifest pins `agent-browser` and `pi-agent-browser-native` together. [`config/packages.json`](../../config/packages.json) loads the browser runtime entrypoint instead of installing the native package into each account's mutable npm tree. Deployment derives the executable version from the locked package metadata, so an immutable package URL cannot be mistaken for a version string.
+
+The current `agent-browser` package comes from Hara's immutable [download-scope repair](https://github.com/hara-seihun/agent-browser/releases/tag/download-browser-scope-784d655). Upstream 0.36.0 and 0.37.1 sent `Browser.setDownloadBehavior` through the active target session. Chrome wrote a UUID-named file, but the browser-level completion event did not reach the command subscriber, so direct downloads timed out and never moved the file to the requested path. The repaired build sends that Browser-domain command without a target session. [Upstream pull request 1858](https://github.com/vercel-labs/agent-browser/pull/1858) owns the source correction. Replace the package URL with the first upstream release that contains that change.
 
 On 2026-09-05, a running worker retained a native extension requiring 0.34.0 while a release switched its shared executable to 0.36.0. The entrypoint now resolves both packages and pins the process's executable path when the extension loads. The 0.6.6 native package also includes upstream's stdout-spill ordering repair for large JSON diagnostics.
 
