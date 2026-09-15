@@ -43,6 +43,14 @@ When a child's execution settles, commit its outcome and parent notification dur
 
 ## Defaults
 
+Remote asks its naming model for one to three words. That is a style preference,
+not a validity condition. Generated titles must contain 3–60 characters, cannot be
+purely numeric, and cannot contain control characters. The parser removes heading
+and quote wrappers and skips colon-ended introductions. Thread 1665 exposed the
+word-count defect when three completed requests returned useful four- or five-word
+AI Summit titles. Completed naming outputs remain in the completion ledger; repair
+reuses that output rather than submitting another inference.
+
 Remote can archive settled threads automatically with the person environment setting
 `PI_REMOTE_AUTO_ARCHIVE_AFTER_MS=3600000` (one hour). The default is `0`, disabled.
 A non-overlapping sweep runs every minute across that person's local and fleet directory.

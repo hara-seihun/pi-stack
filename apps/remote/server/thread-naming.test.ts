@@ -38,6 +38,13 @@ describe("thread naming", () => {
     expect(generatedThreadName("Title: Alert Delivery")).toBe("Alert Delivery");
     expect(generatedThreadName("Here is the title:\nEndpoint Workflow")).toBe("Endpoint Workflow");
     expect(() => generatedThreadName("1")).toThrow("invalid title");
-    expect(() => generatedThreadName("This title has too many words")).toThrow("invalid title");
+    expect(() => generatedThreadName("x".repeat(61))).toThrow("invalid title");
+    expect(() => generatedThreadName("Title:\n\"\"\n12")).toThrow("invalid title");
+  });
+
+  test("accepts short descriptive titles beyond the requested word count", () => {
+    expect(generatedThreadName("AI Summit 2026 Website")).toBe("AI Summit 2026 Website");
+    expect(generatedThreadName("AI Summit 2026 Landing Page")).toBe("AI Summit 2026 Landing Page");
+    expect(generatedThreadName("x".repeat(60))).toBe("x".repeat(60));
   });
 });
