@@ -265,19 +265,44 @@ function gitInfo(workspacePath) {
   };
 }
 
+function normalizeCachePath(value) {
+  if (path.isAbsolute(value) || value.split(path.sep).includes("..")) fail(`cache path must be relative: ${value}`);
+  const normalized = value.replace(/^\.\//, "").replace(/\/$/, "");
+  if (!normalized || /[?\[\]]/u.test(normalized) || (normalized.includes("*") && !/^\*\*\/[^*]+$/u.test(normalized))) {
+    fail(`cache path supports only an exact path or **/directory: ${value}`);
+  }
+  return normalized;
+}
+
 function normalizeCachePaths(values) {
   const selected = [
     ...DEFAULT_CACHE_PATHS,
     ...values.flatMap((value) => value.split(",")),
   ];
-  return [...new Set(selected.map((value) => value.trim()).filter(Boolean).map((value) => {
-    if (path.isAbsolute(value) || value.split(path.sep).includes("..")) fail(`cache path must be relative: ${value}`);
-    const normalized = value.replace(/^\.\//, "").replace(/\/$/, "");
-    if (/[?\[\]]/u.test(normalized) || (normalized.includes("*") && !/^\*\*\/[^*]+$/u.test(normalized))) {
-      fail(`cache path supports only an exact path or **/directory: ${value}`);
-    }
-    return normalized;
-  }))];
+  return [...new Set(selected.map((value) => value.trim()).filter(Boolean).map(normalizeCachePath))];
+}
+
+function repositoryOwnedCachePaths(repository, values) {
+  return values.map((value) => {
+    const separator = value.indexOf("=");
+    if (separator < 1 || separator === value.length - 1) fail(`cache owner must be OUTPUT=TRACKED_SOURCE: ${value}`);
+    const output = normalizeCachePath(value.slice(0, separator).trim());
+    const source = normalizeCachePath(value.slice(separator + 1).trim());
+    if (source.includes("*")) fail(`cache owner source must be an exact path: ${source}`);
+    const tracked = command("git", ["-C", repository, "ls-files", "--error-unmatch", "--", source]);
+    if (tracked.status !== 0) return null;
+    if (output.startsWith("**/")) return output;
+    const ignored = [output, `${output}/.agent-workspace-cache-probe`].some((candidate) =>
+      command("git", ["-C", repository, "check-ignore", "--no-index", "--quiet", "--", candidate]).status === 0);
+    return ignored ? output : null;
+  }).filter(Boolean);
+}
+
+function cachePathsForRepository(repository, args) {
+  return normalizeCachePaths([
+    ...many(args, "cache"),
+    ...repositoryOwnedCachePaths(repository, many(args, "cache-owned")),
+  ]);
 }
 
 const REFERENCE_CLONE_CONFIG = {
@@ -331,9 +356,15 @@ function registerWorkspace(database, input) {
   const existing = database.prepare("SELECT * FROM workspace WHERE path = ?").get(path.resolve(input.path));
   if (existing?.state === "creating") return rowToRecord(existing);
   if (existing !== undefined && existing.state !== "released") {
-    const cachePaths = [...new Set([...JSON.parse(existing.cache_paths), ...input.cachePaths])];
-    database.prepare("UPDATE workspace SET cache_paths = ?, updated_at = ? WHERE id = ?")
-      .run(JSON.stringify(cachePaths), now, existing.id);
+    if (input.groupId != null && existing.group_id !== null && existing.group_id !== input.groupId) {
+      fail(`workspace ${path.resolve(input.path)} already belongs to group ${existing.group_id}; requested ${input.groupId}`);
+    }
+    const cachePaths = input.replaceCachePaths
+      ? input.cachePaths
+      : [...new Set([...JSON.parse(existing.cache_paths), ...input.cachePaths])];
+    const groupId = input.groupId ?? existing.group_id;
+    database.prepare("UPDATE workspace SET cache_paths = ?, group_id = ?, updated_at = ? WHERE id = ?")
+      .run(JSON.stringify(cachePaths), groupId, now, existing.id);
     return recordBy(database, { id: existing.id });
   }
   if (existing !== undefined) database.prepare("DELETE FROM workspace WHERE id = ?").run(existing.id);
@@ -631,12 +662,23 @@ function directoryHasEntries(directory) {
   return false;
 }
 
-function gitDisposition(record) {
-  const status = git(record.path, ["status", "--porcelain=v1", "--untracked-files=normal"]);
+function gitStatusExcludingNested(record, args, nestedWorkspaces = []) {
+  const exclusions = nestedWorkspaces.flatMap((workspace) => {
+    const relative = path.relative(record.path, workspace);
+    if (!relative || relative.startsWith("..") || path.isAbsolute(relative)) fail(`nested workspace is outside ${record.path}: ${workspace}`);
+    return [`:(exclude,top,literal)${relative}`, `:(exclude,top,glob)${relative}/**`];
+  });
+  return git(record.path, [...args, "--", ".", ...exclusions]);
+}
+
+function gitDisposition(record, nestedWorkspaces = []) {
+  const status = gitStatusExcludingNested(record, ["status", "--porcelain=v1", "--untracked-files=normal"], nestedWorkspaces);
   if (status.length > 0) return { safe: false, reason: `working tree has changes: ${status.split("\n").slice(0, 8).join(" | ")}` };
-  const ignored = git(record.path, ["status", "--porcelain=v1", "--ignored=matching", "--untracked-files=normal"])
+  const nestedRelativePaths = nestedWorkspaces.map((workspace) => path.relative(record.path, workspace));
+  const ignored = gitStatusExcludingNested(record, ["status", "--porcelain=v1", "--ignored=matching", "--untracked-files=normal"], nestedWorkspaces)
     .split("\n")
     .filter((line) => line.startsWith("!! "))
+    .filter((line) => !nestedRelativePaths.includes(line.slice(3).replace(/\/$/u, "")))
     .filter((line) => {
       const candidate = path.resolve(record.path, line.slice(3).replace(/\/$/u, ""));
       try { return existsSync(candidate) && directoryHasEntries(candidate); } catch { return true; }
@@ -853,7 +895,7 @@ function inspectRecord(record, options = {}) {
       systemdUnits: systemd.references,
     };
   }
-  const disposition = gitDisposition(record);
+  const disposition = gitDisposition(record, options.nestedWorkspaces);
   return {
     classification: disposition.safe ? "reclaimable" : "repair-required",
     reason: disposition.reason,
@@ -917,6 +959,15 @@ function recordsInGroup(database, record) {
     .filter((candidate) => candidate.state !== "released" || existsSync(candidate.path));
 }
 
+function groupInspectionOptions(record, records, options) {
+  return {
+    ...options,
+    nestedWorkspaces: records
+      .filter((candidate) => candidate.id !== record.id && within(record.path, candidate.path))
+      .map((candidate) => candidate.path),
+  };
+}
+
 function groupReconciliation(database, records, options) {
   const now = Date.now();
   let safety = options.safety;
@@ -930,7 +981,8 @@ function groupReconciliation(database, records, options) {
     }));
   }
 
-  let inspections = records.map((record) => inspectRecord(record, { ignoreLease: true, safety }));
+  let inspections = records.map((record) => inspectRecord(record,
+    groupInspectionOptions(record, records, { ignoreLease: true, safety })));
   if (options.execute && options.reapExpired && inspections.some((inspection) => inspection.classification === "referenced")) {
     const current = records.map((record) => recordBy(database, { id: record.id }));
     if (!options.ignoreLease && current.some((record) => record.leaseExpiresAt > Date.now())) {
@@ -941,7 +993,8 @@ function groupReconciliation(database, records, options) {
     removeDockerReferences(inspections.flatMap((inspection) => inspection.containers));
     killProcessReferences(inspections.flatMap((inspection) => inspection.processes));
     safety = safetySnapshot(database);
-    inspections = records.map((record) => inspectRecord(record, { ignoreLease: true, safety }));
+    inspections = records.map((record) => inspectRecord(record,
+      groupInspectionOptions(record, records, { ignoreLease: true, safety })));
   }
 
   const removedCaches = new Map();
@@ -949,7 +1002,8 @@ function groupReconciliation(database, records, options) {
     records.forEach((record, index) => {
       if (inspections[index].classification !== "missing") removedCaches.set(record.id, stripCaches(record, options.statePath));
     });
-    inspections = records.map((record) => inspectRecord(record, { ignoreLease: true, safety }));
+    inspections = records.map((record) => inspectRecord(record,
+      groupInspectionOptions(record, records, { ignoreLease: true, safety })));
   }
 
   const releasable = inspections.every((inspection) => ["missing", "reclaimable"].includes(inspection.classification));
@@ -989,10 +1043,13 @@ function groupReconciliation(database, records, options) {
     throw error;
   }
 
-  records.forEach((record, index) => {
-    if (inspections[index].classification === "reclaimable") removeWorkspace(record, options.statePath);
-    updateState(database, record, "released", `workspace group ${groupId} released: ${inspections[index].reason}`);
-  });
+  records
+    .map((record, index) => ({ record, inspection: inspections[index] }))
+    .sort((left, right) => right.record.path.length - left.record.path.length)
+    .forEach(({ record, inspection }) => {
+      if (inspection.classification === "reclaimable" && existsSync(record.path)) removeWorkspace(record, options.statePath);
+      updateState(database, record, "released", `workspace group ${groupId} released: ${inspection.reason}`);
+    });
   for (const record of records) removeEmptyWorkspaceContainer(record);
   return records.map((record, index) => ({ record, inspection: inspections[index], action: "released-group" }));
 }
@@ -1058,7 +1115,7 @@ function print(value, json) {
 }
 
 function registerCommand(database, args) {
-  assertOnly(args, ["path", "root", "kind", "mode", "owner", "group", "source-commit", "lease-seconds", "cache", "json"]);
+  assertOnly(args, ["path", "root", "kind", "mode", "owner", "group", "source-commit", "lease-seconds", "cache", "cache-owned", "replace-cache", "json"]);
   const mode = one(args, "mode", "writer");
   if (!["writer", "review"].includes(mode)) fail("--mode must be writer or review");
   const selectedPath = path.resolve(required(args, "path"));
@@ -1071,7 +1128,8 @@ function registerCommand(database, args) {
     groupId: one(args, "group"),
     sourceCommit: one(args, "source-commit"),
     leaseSeconds: numberFlag(args, "lease-seconds", DEFAULT_LEASE_SECONDS),
-    cachePaths: normalizeCachePaths(many(args, "cache")),
+    cachePaths: cachePathsForRepository(selectedPath, args),
+    replaceCachePaths: bool(args, "replace-cache"),
   });
   print(record, bool(args, "json"));
 }
@@ -1081,52 +1139,81 @@ function gitRoot(candidate) {
   return probe.status === 0 && path.resolve(probe.stdout) === candidate;
 }
 
+function adoptedGroupId(container) {
+  return `adopted-${createHash("sha256").update(container).digest("hex").slice(0, 20)}`;
+}
+
+function directNestedGitRoots(container) {
+  let entries;
+  try { entries = readdirSync(container, { withFileTypes: true }); } catch (error) {
+    if (error.code === "ENOENT") return [];
+    throw error;
+  }
+  return entries
+    .filter((entry) => entry.isDirectory() && !entry.isSymbolicLink())
+    .map((entry) => path.join(container, entry.name))
+    .filter((candidate) => existsSync(path.join(candidate, ".git")) && gitRoot(candidate));
+}
+
 function adoptionCandidates(root, nestedGroups) {
   const candidates = [];
   for (const entry of readdirSync(root, { withFileTypes: true })) {
-    if (!entry.isDirectory()) continue;
+    if (!entry.isDirectory() || entry.isSymbolicLink()) continue;
     const candidate = path.join(root, entry.name);
     if (!existsSync(candidate)) continue;
-    if (gitRoot(candidate)) {
+    const candidateIsGitRoot = gitRoot(candidate);
+    if (!nestedGroups) {
+      if (candidateIsGitRoot) candidates.push({ path: candidate, groupId: null });
+      continue;
+    }
+    const nested = directNestedGitRoots(candidate);
+    if (candidateIsGitRoot && nested.length === 0) {
       candidates.push({ path: candidate, groupId: null });
       continue;
     }
-    if (!nestedGroups) continue;
-    const groupId = `adopted-${createHash("sha256").update(candidate).digest("hex").slice(0, 20)}`;
-    let children;
-    try { children = readdirSync(candidate, { withFileTypes: true }); } catch (error) {
-      if (error.code === "ENOENT") continue;
-      throw error;
-    }
-    for (const child of children) {
-      if (!child.isDirectory()) continue;
-      const nested = path.join(candidate, child.name);
-      if (gitRoot(nested)) candidates.push({ path: nested, groupId });
-    }
+    const groupId = adoptedGroupId(candidate);
+    if (candidateIsGitRoot) candidates.push({ path: candidate, groupId });
+    candidates.push(...nested.map((nestedPath) => ({ path: nestedPath, groupId })));
   }
   return candidates;
 }
 
 function adoptCommand(database, args, statePath) {
-  assertOnly(args, ["root", "kind", "mode", "owner", "group", "nested-groups", "lease-seconds", "cache", "execute", "reap-expired", "json"]);
+  assertOnly(args, ["root", "kind", "mode", "owner", "group", "nested-groups", "lease-seconds", "cache", "cache-owned", "replace-cache", "execute", "reap-expired", "json"]);
   const root = path.resolve(required(args, "root"));
   const mode = one(args, "mode", "writer");
   if (!["writer", "review"].includes(mode)) fail("--mode must be writer or review");
   if (!existsSync(root)) fail(`root does not exist: ${root}`);
   const records = [];
   const requestedGroup = one(args, "group");
-  for (const candidate of adoptionCandidates(root, bool(args, "nested-groups"))) {
-    records.push(register(database, {
+  const candidates = adoptionCandidates(root, bool(args, "nested-groups"));
+  const desiredGroups = candidates.map((candidate) => requestedGroup ?? candidate.groupId);
+  candidates.forEach((candidate, index) => {
+    const existing = database.prepare("SELECT group_id, state FROM workspace WHERE path = ?").get(path.resolve(candidate.path));
+    const desired = desiredGroups[index];
+    if (existing !== undefined && existing.state !== "released" && desired !== null
+      && existing.group_id !== null && existing.group_id !== desired) {
+      fail(`workspace ${path.resolve(candidate.path)} already belongs to group ${existing.group_id}; requested ${desired}`);
+    }
+  });
+  database.exec("BEGIN IMMEDIATE");
+  try {
+    candidates.forEach((candidate, index) => records.push(register(database, {
       path: candidate.path,
       root,
       kind: one(args, "kind", "agent"),
       mode,
       owner: one(args, "owner", "unowned"),
-      groupId: requestedGroup ?? candidate.groupId,
+      groupId: desiredGroups[index],
       sourceCommit: null,
       leaseSeconds: numberFlag(args, "lease-seconds", 0),
-      cachePaths: normalizeCachePaths(many(args, "cache")),
-    }));
+      cachePaths: cachePathsForRepository(candidate.path, args),
+      replaceCachePaths: bool(args, "replace-cache"),
+    })));
+    database.exec("COMMIT");
+  } catch (error) {
+    try { database.exec("ROLLBACK"); } catch {}
+    throw error;
   }
   const execute = bool(args, "execute");
   const safety = execute ? safetySnapshot(database) : undefined;
@@ -1510,8 +1597,8 @@ function statusCommand(database, args) {
 function help() {
   process.stdout.write(`Usage:
   agent-workspace create --root PATH --name NAME --repo URL [--ref GIT_REF] [--mode writer|review] [--group ID] [--cache PATH,...]
-  agent-workspace register --path PATH [--owner ID] [--source-commit SHA] [--group ID] [--cache PATH,...]
-  agent-workspace adopt --root PATH [--mode writer|review] [--nested-groups] [--cache PATH,...] [--execute]
+  agent-workspace register --path PATH [--owner ID] [--source-commit SHA] [--group ID] [--cache PATH,...] [--cache-owned OUTPUT=TRACKED_SOURCE] [--replace-cache]
+  agent-workspace adopt --root PATH [--mode writer|review] [--nested-groups] [--cache PATH,...] [--cache-owned OUTPUT=TRACKED_SOURCE] [--replace-cache] [--execute]
   agent-workspace heartbeat (--id ID|--path PATH) [--lease-seconds N]
   agent-workspace release (--id ID|--path PATH) [--reap-expired]
   agent-workspace reconcile [--root PATH] [--execute] [--reap-expired]
