@@ -153,6 +153,27 @@ test("repair transitions replace one bounded issue index; completion removes it"
   assert.equal(JSON.parse(readFileSync(receipt, "utf8")).status, "failed");
 });
 
+test("acknowledgement survives reconciliation and a changed failure returns to the inbox", async t => {
+  const { run, root, receipt, inbox } = await fixture(t);
+  let result = await run();
+  assert.equal(result.code, 0, result.stderr);
+  const ack = spawnSync(process.execPath, [command, "acknowledge-issues"], {
+    encoding: "utf8", env: { ...process.env, PI_STACK_PUBLICATION_STATE: root, PI_STACK_PUBLICATION_ALERT_INBOX: inbox },
+  });
+  assert.equal(ack.status, 0, ack.stderr);
+  assert.equal(existsSync(join(inbox, "pi-stack-publication-issues.md")), false);
+  result = await run();
+  assert.equal(result.code, 0, result.stderr);
+  assert.equal(existsSync(join(inbox, "pi-stack-publication-issues.md")), false);
+  assert.equal(result.receipt.status, "failed");
+  result.receipt.failure.at = "2026-09-16";
+  writeFileSync(receipt, JSON.stringify(result.receipt));
+  result = await run();
+  assert.equal(result.code, 0, result.stderr);
+  assert.equal(existsSync(join(inbox, "pi-stack-publication-issues.md")), true);
+  assert.ok(JSON.parse(readFileSync(join(root, "issue-acknowledgements.json"), "utf8"))[requestId]);
+});
+
 test("proved source ancestry clears failures but never hides host restoration custody", async t => {
   const { run, root, receipt, inbox } = await fixture(t);
   const repository = join(root, "repository");
