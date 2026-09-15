@@ -6,8 +6,8 @@ export function activeThread(session: Session | null) {
 
 export const working = activeThread;
 
-export function composerAction(session: Session | null): "send" | "stop" {
-  return activeThread(session) ? "stop" : "send";
+export function composerAction(session: Session | null, draft: string): "send" | "stop" {
+  return activeThread(session) && !draft.trim() ? "stop" : "send";
 }
 
 export function conversationThreads(sessions: Session[]) {
