@@ -25,8 +25,7 @@ function titleFromLine(line: string): string | null {
     .replace(/^[`"']+|[`"'.!?]+$/g, "")
     .replace(/\s+/g, " ")
     .trim();
-  const words = name.split(" ");
-  return name.length >= 3 && name.length <= 60 && words.length <= 3
+  return name.length >= 3 && name.length <= 60 && !name.endsWith(":")
     && !/^\d+$/.test(name) && !/[\u0000-\u001f\u007f]/.test(name) ? name : null;
 }
 
