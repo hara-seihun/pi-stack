@@ -2,12 +2,13 @@ import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { describe, expect, it } from "vitest";
+import type { OAuthCredential } from "@earendil-works/pi-ai";
 import { Store } from "../src/store.js";
 import { CodexMeterSampler } from "../src/meters-codex.js";
 import { AccountTransfer, type TransferPacket } from "../src/auth/account-transfer.js";
 import { SharedOAuthAuth, dropLocalCredential, oauthCredential, transactSharedCredential } from "../src/auth/shared-oauth.js";
 
-const credential = (account = "provider-account", suffix = "original") => ({type:"oauth",access:`head.${Buffer.from(JSON.stringify({"https://api.openai.com/auth":{chatgpt_account_id:account}})).toString("base64url")}.${suffix}`,refresh:`refresh-${suffix}`,accountId:account,expires:Date.now()+3600000});
+const credential = (account = "provider-account", suffix = "original"): OAuthCredential => ({type:"oauth",access:`head.${Buffer.from(JSON.stringify({"https://api.openai.com/auth":{chatgpt_account_id:account}})).toString("base64url")}.${suffix}`,refresh:`refresh-${suffix}`,accountId:account,expires:Date.now()+3600000});
 function fixture() {
   const dir=mkdtempSync(join(tmpdir(),"account-transfer-")),source=Store.open(join(dir,"source.db")),target=Store.open(join(dir,"target.db"));
   const sourceAuth=join(dir,"source-auth.json"),targetAuth=join(dir,"target-auth.json");
@@ -22,10 +23,140 @@ function fixture() {
     if(probe.fail)throw new Error("provider unavailable");
     for(const meter of source.latestMeters(alias))source.recordMeter(alias,meter.meter_id,probe.spent,meter.reset_at,Math.max(Date.now(),meter.observed_at+1));
   }),to=new AccountTransfer(target,targetAuth,{host:"target",ledger:"/target.db"});
-  return {source,target,from,to,probe,sourceAuth,targetAuth,signal:AbortSignal.timeout(5000),close(){source.close();target.close();rmSync(dir,{recursive:true,force:true});}};
+  return {dir,source,target,from,to,probe,sourceAuth,targetAuth,signal:AbortSignal.timeout(5000),close(){source.close();target.close();rmSync(dir,{recursive:true,force:true});}};
+}
+
+function departing(store: Store, authPath: string, endpoint: AccountTransfer["endpoint"]) {
+  for (const id of ["keep-a", "keep-b"]) {
+    store.upsertAccount({id, provider:"openai-codex"});
+    store.recordMeter(id,"codex-7d",20,Date.now()+86400000);
+  }
+  return new AccountTransfer(store,authPath,endpoint,async alias=>{
+    for (const meter of store.latestMeters(alias))
+      store.recordMeter(alias,meter.meter_id,83,meter.reset_at,Math.max(Date.now(),meter.observed_at+1));
+  });
+}
+
+function addUsage(store: Store, tokens: number) {
+  store.recordUsage({accountId:"openai-codex-12",hour:1,source:"pi",runId:"historical",model:"gpt-6-astra",component:"output",tokens});
 }
 
 describe("exclusive account transfer",()=>{
+  it("returns A -> B -> A with cumulative history and keeps past receipts inert",async()=>{
+    const f=fixture();try{
+      const first=await f.from.prepare("openai-codex-12",f.to.endpoint,f.signal) as TransferPacket;
+      const firstReceipt=await f.to.receive(first,f.signal);
+      await f.from.finish(first.alias,firstReceipt,f.signal);
+      // Receipts written before per-transfer sent history must also survive a return.
+      f.source.db.prepare("DELETE FROM control WHERE key=?").run(`account-transfer-sent:${first.id}`);
+      addUsage(f.target,77);
+      await transactSharedCredential(f.targetAuth,first.alias,credential("provider-account","at-b"),async()=>{});
+      const back=departing(f.target,f.targetAuth,f.to.endpoint);
+      const second=await back.prepare(first.alias,await f.from.inspect(first.alias,f.signal),f.signal) as TransferPacket;
+      expect(second.id).not.toBe(first.id);
+      expect(second.source).toEqual(f.to.endpoint);
+      expect(f.target.account(first.alias)?.enabled).toBe(false);
+      expect(await back.receive(first,f.signal)).toEqual(firstReceipt);
+      expect(oauthCredential(JSON.parse(readFileSync(f.targetAuth,"utf8"))[first.alias])).toBeUndefined();
+      const returned=await f.from.receive(second,f.signal);
+      expect(f.source.account(first.alias)?.enabled).toBe(true);
+      expect(f.source.usageSince(0)[0]?.tokens).toBe(200);
+      expect(f.source.db.prepare("SELECT COUNT(*) n FROM lease").get()).toEqual({n:1});
+      expect(f.source.meters(first.alias)).toEqual(f.target.meters(first.alias));
+      await back.finish(first.alias,returned,f.signal);
+      await transactSharedCredential(f.sourceAuth,first.alias,credential("provider-account","returned"),async()=>{});
+      addUsage(f.source,19);
+      expect(await f.from.finish(first.alias,firstReceipt,f.signal)).toEqual(firstReceipt);
+      expect(await back.receive(first,f.signal)).toEqual(firstReceipt);
+      expect(await f.from.receive(second,f.signal)).toEqual(returned);
+      expect(JSON.parse(readFileSync(f.sourceAuth,"utf8"))[first.alias].refresh).toBe("refresh-returned");
+      expect(oauthCredential(JSON.parse(readFileSync(f.targetAuth,"utf8"))[first.alias])).toBeUndefined();
+      expect(f.source.usageSince(0)[0]?.tokens).toBe(219);
+      expect(f.target.usageSince(0)[0]?.tokens).toBe(200);
+      expect(()=>f.target.setAccountEnabled(first.alias,true)).toThrow("source cannot enable");
+      const third=await f.from.prepare(first.alias,await back.inspect(first.alias,f.signal),f.signal) as TransferPacket;
+      expect(third.id).not.toBe(first.id);
+      const thirdReceipt=await back.receive(third,f.signal);
+      await f.from.finish(first.alias,thirdReceipt,f.signal);
+      expect(await back.finish(first.alias,returned,f.signal)).toEqual(returned);
+      expect(f.target.account(first.alias)?.enabled).toBe(true);
+      expect(f.target.usageSince(0)[0]?.tokens).toBe(219);
+      expect(JSON.parse(readFileSync(f.targetAuth,"utf8"))[first.alias].refresh).toBe("refresh-returned");
+    }finally{f.close();}
+  });
+
+  it("moves A -> B -> C and acknowledges earlier deliveries after B no longer owns credentials",async()=>{
+    const f=fixture(),third=Store.open(join(f.dir,"third.db"));try{
+      const thirdAuth=join(f.dir,"third-auth.json");writeFileSync(thirdAuth,"{}");
+      const c=new AccountTransfer(third,thirdAuth,{host:"third",ledger:"/third.db"});
+      const first=await f.from.prepare("openai-codex-12",f.to.endpoint,f.signal) as TransferPacket;
+      const firstReceipt=await f.to.receive(first,f.signal);
+      addUsage(f.target,77);
+      const b=departing(f.target,f.targetAuth,f.to.endpoint);
+      const second=await b.prepare(first.alias,await c.inspect(first.alias,f.signal),f.signal) as TransferPacket;
+      expect(second.id).not.toBe(first.id);
+      const secondReceipt=await c.receive(second,f.signal);
+      await b.finish(second.alias,secondReceipt,f.signal);
+      expect(await b.receive(first,f.signal)).toEqual(firstReceipt);
+      await f.from.finish(first.alias,firstReceipt,f.signal);
+      expect(oauthCredential(JSON.parse(readFileSync(f.sourceAuth,"utf8"))[first.alias])).toBeUndefined();
+      expect(oauthCredential(JSON.parse(readFileSync(f.targetAuth,"utf8"))[first.alias])).toBeUndefined();
+      expect(oauthCredential(JSON.parse(readFileSync(thirdAuth,"utf8"))[first.alias])).toBeDefined();
+      expect(third.usageSince(0)[0]?.tokens).toBe(200);
+      expect(f.source.usageSince(0)[0]?.tokens).toBe(123);
+      expect(f.target.usageSince(0)[0]?.tokens).toBe(200);
+      await expect(b.receive({...first,source:{host:"imposter",ledger:"/source.db"}},f.signal)).rejects.toThrow("receipt conflict");
+    }finally{third.close();f.close();}
+  });
+
+  it.each(["metadata", "promotion"])("resumes a returning transfer after a %s crash",async phase=>{
+    const f=fixture();try{
+      const first=await f.from.prepare("openai-codex-12",f.to.endpoint,f.signal) as TransferPacket;
+      await f.from.finish(first.alias,await f.to.receive(first,f.signal),f.signal);
+      addUsage(f.target,77);
+      const b=departing(f.target,f.targetAuth,f.to.endpoint);
+      const second=await b.prepare(first.alias,f.from.endpoint,f.signal) as TransferPacket;
+      f.source.db.exec(phase==="metadata"
+        ? "CREATE TRIGGER fail_return BEFORE UPDATE ON account BEGIN SELECT RAISE(ABORT,'return crash'); END;"
+        : "CREATE TRIGGER fail_return BEFORE UPDATE OF enabled ON account WHEN NEW.enabled=1 BEGIN SELECT RAISE(ABORT,'return crash'); END;");
+      await expect(f.from.receive(second,f.signal)).rejects.toThrow("return crash");
+      expect(f.source.account(first.alias)?.enabled).toBe(false);
+      expect(f.target.account(first.alias)?.enabled).toBe(false);
+      expect(f.source.usageSince(0)[0]?.tokens).toBe(phase==="metadata"?123:200);
+      if(phase==="metadata")expect(oauthCredential(JSON.parse(readFileSync(f.sourceAuth,"utf8"))[first.alias])).toBeUndefined();
+      else await transactSharedCredential(f.sourceAuth,first.alias,credential("provider-account","rotated-return"),async()=>{});
+      f.source.db.exec("DROP TRIGGER fail_return");
+      const restarted=new AccountTransfer(f.source,f.sourceAuth,f.from.endpoint);
+      const accepted=await restarted.receive(second,f.signal);
+      await b.finish(second.alias,accepted,f.signal);
+      expect(f.source.usageSince(0)[0]?.tokens).toBe(200);
+      expect(f.source.account(first.alias)?.enabled).toBe(true);
+      if(phase==="promotion")expect(JSON.parse(readFileSync(f.sourceAuth,"utf8"))[first.alias].refresh).toBe("refresh-rotated-return");
+    }finally{f.close();}
+  });
+
+  it("rejects live aliases, unproved disabled aliases, pending departures and a different returning identity",async()=>{
+    const f=fixture();try{
+      await expect(f.from.inspect("openai-codex-12",f.signal)).rejects.toThrow("already has");
+      f.target.upsertAccount({id:"openai-codex-12",provider:"openai-codex",enabled:false});
+      await expect(f.to.inspect("openai-codex-12",f.signal)).rejects.toThrow("already has");
+      const first=await f.from.prepare("openai-codex-12",f.to.endpoint,f.signal) as TransferPacket;
+      await expect(f.from.inspect(first.alias,f.signal)).rejects.toThrow("already has");
+      await expect(f.to.receive(first,f.signal)).rejects.toThrow("alias collision");
+      f.target.removeAccount(first.alias);
+      await f.from.finish(first.alias,await f.to.receive(first,f.signal),f.signal);
+      const b=departing(f.target,f.targetAuth,f.to.endpoint);
+      const second=await b.prepare(first.alias,f.from.endpoint,f.signal) as TransferPacket;
+      await expect(f.from.receive({...second,credential:credential("different"),identity:"not-the-provider-identity"},f.signal)).rejects.toThrow("Invalid account transfer");
+      const other=fixture();try{
+        await transactSharedCredential(other.sourceAuth,first.alias,credential("different"),async()=>{});
+        const different=await other.from.prepare(first.alias,f.to.endpoint,f.signal) as TransferPacket;
+        await expect(f.from.receive({...different,source:f.to.endpoint,destination:f.from.endpoint},f.signal)).rejects.toThrow("alias collision");
+      }finally{other.close();}
+      expect(f.source.account(first.alias)?.enabled).toBe(false);
+      expect(oauthCredential(JSON.parse(readFileSync(f.sourceAuth,"utf8"))[first.alias])).toBeUndefined();
+    }finally{f.close();}
+  });
   it("explicit owning sampler reads a disabled account without changing admission",async()=>{
     const f=fixture();try{
       f.source.setAccountEnabled("openai-codex-12",false);
@@ -93,7 +224,7 @@ describe("exclusive account transfer",()=>{
       const auth=new SharedOAuthAuth({path:f.targetAuth,providerId:"openai-codex",refresh:async value=>value,toAuth:async value=>({apiKey:value.access})});
       expect(auth.has(packet.alias)).toBe(false);
       await expect(auth.credential(packet.alias,f.signal)).rejects.toThrow("no shared");
-      await expect(auth.set(packet.alias,credential() as any,f.signal)).rejects.toThrow("exclusive transfer");
+      await expect(auth.set(packet.alias,credential(),f.signal)).rejects.toThrow("exclusive transfer");
       await expect(auth.remove(packet.alias,f.signal)).rejects.toThrow("exclusive transfer");
       expect(()=>dropLocalCredential(f.targetAuth,packet.alias)).toThrow("exclusive transfer");
       f.target.db.exec("DROP TRIGGER fail_import");
