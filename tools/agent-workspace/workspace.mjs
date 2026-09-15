@@ -2,7 +2,9 @@
 import { spawn, spawnSync } from "node:child_process";
 import { createHash, randomUUID } from "node:crypto";
 import {
+  closeSync,
   existsSync,
+  openSync,
   lstatSync,
   mkdirSync,
   readFileSync,
@@ -159,9 +161,12 @@ function git(workspace, args, options = {}) {
   return run("git", ["-C", workspace, ...args], options);
 }
 
+const registryPaths = new WeakMap();
+
 function openRegistry(statePath = DEFAULT_STATE) {
   mkdirSync(path.dirname(statePath), { recursive: true, mode: 0o700 });
   const database = new DatabaseSync(statePath);
+  registryPaths.set(database, statePath);
   database.exec(`
     PRAGMA journal_mode = WAL;
     PRAGMA busy_timeout = 5000;
@@ -303,6 +308,10 @@ function maintainReferenceClone(workspace, execute) {
 }
 
 function register(database, input) {
+  return withWorkspaceLock(database, input.path, () => registerWorkspace(database, input), input.groupId);
+}
+
+function registerWorkspace(database, input) {
   const info = gitInfo(input.path);
   maintainReferenceClone(input.path, true);
   const now = Date.now();
@@ -991,10 +1000,13 @@ function reconcileRecords(database, selected, options) {
     const records = recordsInGroup(database, selectedRecord);
     records.forEach((record) => visited.add(record.id));
     try {
-      const maintenance = new Map(records.map((record) => [record.id, maintainReferenceClone(record.path, options.execute)]));
-      const reconciled = records.length > 1 ? groupReconciliation(database, records, options)
-        : records.length === 1 ? [reconcileRecord(database, records[0], options)] : [];
-      results.push(...reconciled.map((result) => ({ ...result, gitMaintenance: maintenance.get(result.record.id) })));
+      results.push(...withWorkspaceLock(database, selectedRecord.path, () => {
+        const current = recordsInGroup(database, recordBy(database, { id: selectedRecord.id }));
+        const maintenance = new Map(current.map((record) => [record.id, maintainReferenceClone(record.path, options.execute)]));
+        const reconciled = current.length > 1 ? groupReconciliation(database, current, options)
+          : current.length === 1 ? [reconcileRecord(database, current[0], options)] : [];
+        return reconciled.map((result) => ({ ...result, gitMaintenance: maintenance.get(result.record.id) }));
+      }, selectedRecord.groupId));
     } catch (error) {
       results.push(...blockedReconciliation(database, records, error, options.execute));
     }
@@ -1050,13 +1062,19 @@ function adoptionCandidates(root, nestedGroups) {
   for (const entry of readdirSync(root, { withFileTypes: true })) {
     if (!entry.isDirectory()) continue;
     const candidate = path.join(root, entry.name);
+    if (!existsSync(candidate)) continue;
     if (gitRoot(candidate)) {
       candidates.push({ path: candidate, groupId: null });
       continue;
     }
     if (!nestedGroups) continue;
     const groupId = `adopted-${createHash("sha256").update(candidate).digest("hex").slice(0, 20)}`;
-    for (const child of readdirSync(candidate, { withFileTypes: true })) {
+    let children;
+    try { children = readdirSync(candidate, { withFileTypes: true }); } catch (error) {
+      if (error.code === "ENOENT") continue;
+      throw error;
+    }
+    for (const child of children) {
       if (!child.isDirectory()) continue;
       const nested = path.join(candidate, child.name);
       if (gitRoot(nested)) candidates.push({ path: nested, groupId });
@@ -1152,6 +1170,58 @@ function configurePushUrl(gitArgs, upstream) {
   }
 }
 
+const heldResourceLocks = new Set();
+
+function withWorkspaceLock(database, workspacePath, action, requestedGroupId) {
+  const statePath = registryPaths.get(database);
+  const resolved = path.resolve(workspacePath);
+  const existing = database.prepare("SELECT group_id FROM workspace WHERE path = ?").get(resolved);
+  const groupId = existing?.group_id ?? requestedGroupId;
+  const checkout = () => withResourceLock(statePath, `checkout:${resolved}`, action);
+  return groupId ? withResourceLock(statePath, `group:${groupId}`, checkout) : checkout();
+}
+
+function withResourceLock(statePath, key, action) {
+  const identity = `${statePath}\0${key}`;
+  if (heldResourceLocks.has(identity)) return action();
+  const directory = path.join(path.dirname(statePath), "locks");
+  mkdirSync(directory, { recursive: true, mode: 0o700 });
+  const file = path.join(directory, createHash("sha256").update(key).digest("hex"));
+  const descriptor = openSync(file, "a", 0o600);
+  try {
+    const result = spawnSync("flock", ["--exclusive", "--wait", "30", "3"], {
+      stdio: ["ignore", "pipe", "pipe", descriptor], encoding: "utf8", timeout: 31_000,
+    });
+    if (result.status !== 0) fail(`workspace resource busy: ${key}: ${result.error?.message || result.stderr?.trim() || "30s lock budget exhausted"}`);
+    heldResourceLocks.add(identity);
+    return action();
+  } finally {
+    heldResourceLocks.delete(identity);
+    closeSync(descriptor);
+  }
+}
+
+function sourceRefFor(repository, ref) {
+  return `refs/pi-workspace/sources/${createHash("sha256").update(`${repository}\0${ref}`).digest("hex")}`;
+}
+
+function cachedImmutableSource(mirror, repository, ref) {
+  if (!/^[0-9a-f]{40}$/u.test(ref) || !existsSync(mirror)) return null;
+  const cached = command("git", ["--git-dir", mirror, "rev-parse", "--verify", `${sourceRefFor(repository, ref)}^{commit}`]);
+  return cached.status === 0 && cached.stdout === ref ? ref : null;
+}
+
+function resolveSource(statePath, mirror, repository, upstream, ref) {
+  const cached = cachedImmutableSource(mirror, repository, ref);
+  if (cached !== null) return cached;
+  return withResourceLock(statePath, `mirror:${mirror}`, () => {
+    const shared = cachedImmutableSource(mirror, repository, ref);
+    if (shared !== null) return shared;
+    prepareMirror(mirror, repository, upstream);
+    return fetchSource(mirror, repository, ref);
+  });
+}
+
 function prepareMirror(mirror, repository, upstream) {
   mkdirSync(path.dirname(mirror), { recursive: true, mode: 0o700 });
   if (!existsSync(mirror)) run("git", ["init", "--bare", mirror]);
@@ -1172,13 +1242,17 @@ function prepareMirror(mirror, repository, upstream) {
 }
 
 function fetchSource(mirror, repository, ref) {
-  const digest = createHash("sha256").update(`${repository}\0${ref}`).digest("hex");
-  const sourceRef = `refs/pi-workspace/sources/${digest}`;
+  const sourceRef = sourceRefFor(repository, ref);
   run("git", ["--git-dir", mirror, "fetch", "--no-tags", "workspace-source", `+${ref}:${sourceRef}`], { timeout: 120_000 });
   return run("git", ["--git-dir", mirror, "rev-parse", sourceRef]);
 }
 
 function createCommand(database, args, statePath) {
+  const destination = path.join(path.resolve(required(args, "root")), safeName(required(args, "name")));
+  return withWorkspaceLock(database, destination, () => createWorkspace(database, args, statePath), one(args, "group"));
+}
+
+function createWorkspace(database, args, statePath) {
   assertOnly(args, ["root", "name", "repo", "ref", "branch", "kind", "mode", "owner", "group", "strategy", "lease-seconds", "cache", "max-count", "min-free-gib", "min-free-inodes-percent", "json"]);
   const root = path.resolve(required(args, "root"));
   assertCapacity(root, args);
@@ -1193,9 +1267,12 @@ function createCommand(database, args, statePath) {
   if (!["clone", "worktree"].includes(strategy)) fail("--strategy must be clone or worktree");
   const mirror = mirrorFor(statePath, repository);
   const upstream = repositoryRemotes(repository);
-  prepareMirror(mirror, repository, upstream);
-  const sourceCommit = fetchSource(mirror, repository, ref);
+  const sourceCommit = resolveSource(statePath, mirror, repository, upstream, ref);
   const branch = one(args, "branch", `agent/${name}`);
+  withResourceLock(statePath, `admission:${root}`, () => {
+    assertCapacity(root, args);
+    mkdirSync(destination);
+  });
   try {
     if (strategy === "worktree") {
       const worktreeArgs = ["--git-dir", mirror, "worktree", "add"];
@@ -1304,7 +1381,7 @@ function maintainCommand(database, args) {
   const results = [];
   for (const record of records) {
     try {
-      const result = maintainReferenceClone(record.path, bool(args, "execute"));
+      const result = withWorkspaceLock(database, record.path, () => maintainReferenceClone(record.path, bool(args, "execute")), record.groupId);
       if (result) results.push(result);
     } catch (error) {
       results.push({ path: record.path, error: error instanceof Error ? error.message : String(error) });
@@ -1393,8 +1470,11 @@ export function main(argv = process.argv.slice(2), statePath = DEFAULT_STATE) {
     if (commandName === "create") createCommand(database, args, statePath);
     else if (commandName === "register") registerCommand(database, args);
     else if (commandName === "adopt") adoptCommand(database, args, statePath);
-    else if (commandName === "heartbeat") heartbeatCommand(database, args);
-    else if (commandName === "release") releaseCommand(database, args, statePath);
+    else if (commandName === "heartbeat" || commandName === "release") {
+      const record = recordBy(database, selectorFrom(args));
+      withWorkspaceLock(database, record.path, () => commandName === "heartbeat"
+        ? heartbeatCommand(database, args) : releaseCommand(database, args, statePath), record.groupId);
+    }
     else if (commandName === "reconcile") reconcileCommand(database, args, statePath);
     else if (commandName === "maintain") maintainCommand(database, args);
     else if (commandName === "status" || commandName === "list") statusCommand(database, args);
