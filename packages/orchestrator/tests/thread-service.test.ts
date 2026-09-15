@@ -192,6 +192,35 @@ it.each([false, true])("settles a missing runtime model once, holds remaining wo
   expect(restored.pending(parent.id)).toEqual([notification]);
 });
 
+it("retains native failure causes in settlement receipts without treating cancellation as failure", async () => {
+  const f = fixture();
+  await f.service.start();
+  for (const [stopReason, errorMessage] of [
+    ["error", "Auto-compaction failed: Native compaction failed: exceeded request buffer limit while retrying upstream"],
+    ["error", "Context rejected: Native compaction failed: fetch failed. Retry with /compact."],
+    ["aborted", "This operation was aborted"],
+  ]) {
+    const thread = value(await f.service.spawn({ requestId: errorMessage, cwd: f.directory, message: "work" }));
+    await waitFor(() => f.sessions.some(session => session.options.threadId === thread.id && session.isStreaming));
+    const session = f.sessions.find(session => session.options.threadId === thread.id)!;
+    session.settleMessage({ role: "assistant", content: [], stopReason, errorMessage, timestamp: Date.now() });
+    await waitFor(() => f.service.latestSettlement(thread.id) !== null);
+    const receipt = f.service.latestSettlement(thread.id)!;
+    expect(receipt.outcome).toBe(stopReason === "error" ? "failed" : "cancelled");
+    expect(receipt.error).toBe(stopReason === "error" ? errorMessage : undefined);
+    expect(receipt.finalMessage?.errorMessage).toBe(errorMessage);
+    expect(value(f.service.settlements()).items.find(item => item.threadId === thread.id)).toEqual(receipt);
+    const db = new DatabaseSync(join(f.directory, "threads.sqlite"));
+    try { expect(db.prepare("SELECT error FROM thread_execution WHERE id=?").get(receipt.executionId)?.error).toBe(stopReason === "error" ? errorMessage : null); }
+    finally { db.close(); }
+    value(await f.service.control({ threadId: thread.id, action: "stop", descendants: false }));
+    f.service.reconcile();
+    await turn();
+    expect(f.service.get(thread.id)?.state).toBe("stopped");
+    expect(f.service.pending(thread.id)).toEqual([]);
+  }
+});
+
 it("preserves the running account and model when future settings change", async () => {
   const f = fixture();
   await f.service.start();

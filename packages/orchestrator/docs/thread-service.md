@@ -44,9 +44,9 @@ Isolated context and execution identity are immutable thread metadata. Isolated 
 `subscribe()` emits `{threadId,type:"changed"}` or `{threadId,event}`. Native events remain available to presentation consumers. Service receipts are:
 
 - `thread_message_inserted`, including the message, work ID, execution ID and insertion timestamp.
-- `thread_settled`, including settlement sequence, execution/work IDs, outcome, time and final assistant message or null.
+- `thread_settled`, including settlement sequence, execution/work IDs, outcome, time, final assistant message or null, and `error` for failed work with a concrete cause.
 
-Listeners are notifications, not durable delivery. `settlements(after, limit)` reads ordered settlement records from the execution table and returns `{items,cursor}`. Sequence numbers are assigned during settlement, not execution creation. Consumers retain their cursor and can deduplicate on execution ID.
+Listeners are notifications, not durable delivery. `settlements(after, limit)` reads ordered settlement records from the execution table and returns `{items,cursor}`. Sequence numbers are assigned during settlement, not execution creation. Consumers retain their cursor and can deduplicate on execution ID. Failed assistant `errorMessage` values also populate execution/work receipt errors, settlement API errors and parent notifications. Cancelled work remains cancellation without a failure error; reporting never releases held input.
 
 `command()` owns native activation and serialization for inspection, compaction and conversation editing. Durable input and cancellation use `send()` and `control()` instead. Native conversation changes update the owned session-file reference.
 
