@@ -24,19 +24,9 @@ The worker invokes each host's release wrapper, which calls [`deploy/prepare`](.
 
 ## Publication requests from another host
 
-A host without an installed publisher can send a request through the existing GMKtec Actions runner. Push the source ref and request ref atomically. The request ref names an explicit release request, unlike an ordinary branch push:
+Submission requires an authenticated connection to GMKtec's Kenan publication owner. Push the immutable source, then run `deploy/publication submit SHA` from a registered source checkout there. A source push or passing Actions run does not acknowledge publication custody.
 
-```bash
-sha=$(git rev-parse HEAD)
-request="PUB-${sha:0:24}"
-git push --atomic origin \
-  "$sha:refs/heads/pi-stack-publications/$request" \
-  "$sha:refs/heads/pi-stack-publication-requests/$request"
-```
-
-[The request workflow](../.github/workflows/publication-request.yml) validates the request and calls the installed publisher's `enqueue` operation as its Kenan service identity. The runner must have that sudo grant. It does not install a publisher, change credentials, run deployments or resume queues. The publisher verifies the immutable source ref and deduplicates source custody before writing its receipt.
-
-A successful push proves transport submission only. The Actions log must contain the publisher's JSON acknowledgement naming the source SHA, request, owner and receipt before custody has transferred. A denied runner grant or unavailable publisher is a failed handoff, not a queued release. Both refs remain source evidence until terminal publication acceptance. The existing publisher owns checks, both host deployments and failure repair. A rerun uses the same request and source, never another publication.
+The September 15 camera-capacity repair tested an Actions-to-publisher request. GitHub run `35001805141` failed because runner identity `pi-stack-ci` has `NoNewPrivileges` enabled and cannot switch to Kenan. That transport was removed rather than weakening the runner boundary. Its failed source and request refs remain incident evidence. Restore an authorized connection to the existing publisher; do not install another publisher on the submitting host.
 
 ## Publication progress and repair
 
