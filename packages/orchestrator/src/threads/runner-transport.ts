@@ -105,7 +105,7 @@ function boundary(options: PiSessionOptions) {
   const isolation = options.args.includes("--orchestrator-context") ? `isolated:${options.cwd}` : "normal";
   return hash(JSON.stringify([import.meta.url, process.getuid?.(), options.env.HOME ?? process.env.HOME, options.env.PI_CODING_AGENT_DIR ?? "", options.env.PI_ORCHESTRATOR_EXECUTION ?? "user", isolation]));
 }
-async function ensureRunner(control: string, options: PiSessionOptions, durableScope: boolean): Promise<void> {
+async function ensureRunner(control: string, options: PiSessionOptions, durable: boolean): Promise<void> {
   if (existsSync(control)) {
     try { await runnerRequest(control, { type: "status" }); return; }
     catch (error) { if (!["ENOENT", "ECONNREFUSED"].includes((error as NodeJS.ErrnoException).code ?? "")) throw error; }
@@ -120,12 +120,18 @@ async function ensureRunner(control: string, options: PiSessionOptions, durableS
   const entry = runnerHostEntry();
   if (!existsSync(entry)) throw new Error(`Compiled thread runner is missing: ${entry}; build pi-orchestrator before starting threads`);
   const root = options.env.PI_ORCHESTRATOR_EXECUTION === "root-repair";
-  if (root && (!durableScope || options.args.includes("--orchestrator-context"))) throw new Error("Root repair requires the fleet execution boundary without isolated context");
+  if (root && (!durable || options.args.includes("--orchestrator-context"))) throw new Error("Root repair requires the fleet execution boundary without isolated context");
   if (root) { env.PI_ORCHESTRATOR_OWNER_UID = String(process.getuid!()); env.PI_ORCHESTRATOR_OWNER_GID = String(process.getgid!()); }
   const command = ["flock", "--no-fork", "--nonblock", "--conflict-exit-code", "75", `${control}.lock`, "node", "--max-old-space-size=8192", entry, control];
-  if (durableScope) {
+  if (durable) {
     if (!root) Object.assign(env, userManagerEnvironment(process.getuid!()));
-    command.unshift("systemd-run", ...(root ? [] : ["--user"]), "--scope", "--collect", "--quiet", `--unit=pi-thread-runner-${hash(control)}`);
+    const validKey = (key: string) => /^[A-Za-z_][A-Za-z0-9_]*$/.test(key);
+    const unset = Object.keys(process.env).filter(key => validKey(key) && !(key in env));
+    command.unshift("systemd-run", ...(root ? [] : ["--user"]), "--collect", "--quiet", "--wait", "--service-type=exec",
+      "--property=KillMode=control-group", `--working-directory=${env.HOME}`,
+      ...Object.keys(env).filter(key => validKey(key) && env[key] !== undefined).map(key => `--setenv=${key}`),
+      ...(unset.length ? [`--property=UnsetEnvironment=${unset.join(" ")}`] : []),
+      `--unit=pi-thread-runner-${hash(control)}`);
   }
   if (root) command.unshift("sudo", "-n", "--preserve-env");
   const host = spawn(command[0]!, command.slice(1), {
@@ -147,7 +153,7 @@ async function ensureRunner(control: string, options: PiSessionOptions, durableS
   throw new Error("Thread runner startup has not acknowledged ownership");
 }
 
-export function createSharedPiSessionOpener({ dataDir, durableScope = false }: { dataDir: string; durableScope?: boolean }): { openSession: OpenPiSession; detach(): void } {
+export function createSharedPiSessionOpener({ dataDir, durable = false }: { dataDir: string; durable?: boolean }): { openSession: OpenPiSession; detach(): void } {
   const connections = new Set<Connection>();
   const openSession: OpenPiSession = async (options, output, exit) => {
     const retained = options.env.PI_THREAD_RUNNER_REFERENCE ? JSON.parse(options.env.PI_THREAD_RUNNER_REFERENCE) as { control: string; socketPath: string } : undefined;
@@ -159,7 +165,7 @@ export function createSharedPiSessionOpener({ dataDir, durableScope = false }: {
     mkdirSync(dirname(socketPath), { recursive: true, mode: 0o700 });
     let starting = starts.get(control);
     if (!starting) {
-      starting = ensureRunner(control, options, durableScope).finally(() => starts.delete(control));
+      starting = ensureRunner(control, options, durable).finally(() => starts.delete(control));
       starts.set(control, starting);
     }
     await starting;

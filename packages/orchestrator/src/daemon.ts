@@ -66,7 +66,7 @@ export class Daemon {
     this.releasePath=releasePath??dirname(dirname(realpathSync(fileURLToPath(import.meta.url))));
     this.ledgerPath=ledgerPath??store.path;
     const dataDir=this.ledgerPath===":memory:"?tmpdir():dirname(this.ledgerPath);
-    this.opener=createSharedPiSessionOpener({dataDir,durableScope:true});
+    this.opener=createSharedPiSessionOpener({dataDir,durable:true});
     this.threads=new ThreadService({workersOnly:true,databasePath:this.ledgerPath===":memory:"?":memory:":join(dataDir,"threads.sqlite3"),sessionsDir:join(dataDir,"threads"),
       openSession:(options,output,exit)=>{
         const context=this.threads.get(options.threadId)?.metadata?.context;
