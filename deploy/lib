@@ -65,6 +65,19 @@ pi_stack_prepare_dependencies() {
   export PI_STACK_DEPENDENCIES_READY=$key
 }
 
+pi_stack_prepare_builds() (
+  set -euo pipefail
+  local root=$1 orchestrator_pid remote_pid failed=0
+  pi_stack_prepare_dependencies "$root"
+  node "$root/scripts/build-workspace.mjs" orchestrator &
+  orchestrator_pid=$!
+  node "$root/scripts/build-workspace.mjs" remote &
+  remote_pid=$!
+  wait "$orchestrator_pid" || failed=1
+  wait "$remote_pid" || failed=1
+  return "$failed"
+)
+
 pi_stack_as_root() {
   if [[ $EUID == 0 || ${PI_STACK_DEPLOY_NO_SUDO:-0} == 1 ]]; then
     "$@"

@@ -91,8 +91,7 @@ pi_stack_prepare_dependencies "$root"
 }
 dependencies=$(readlink -f "$runtime/node_modules")
 [[ -d $dependencies ]] || { echo "Pi Runtime dependencies are missing at $dependencies" >&2; exit 66; }
-rm -rf packages/orchestrator/dist
-npm run build --workspace=pi-orchestrator
+node "$root/scripts/build-workspace.mjs" orchestrator
 
 mkdir -p "$stage/release"
 rsync -a --chmod=D755,Fu=rwX,Fgo=rX packages/orchestrator/dist packages/orchestrator/src \

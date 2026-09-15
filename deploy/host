@@ -26,17 +26,16 @@ if (( services )); then
   "$root/deploy/voice" --check
 fi
 
-# A changed lockfile requires both the checkout's build dependencies and the
-# production runtime tree. They are independent npm installations, so doing
-# them serially can consume the whole machine-wide deployment deadline.
-pi_stack_prepare_dependencies "$root" &
-build_dependencies_pid=$!
+# Builds share checkout dependencies, not output directories. Prepare them
+# together while the independent production runtime and transcription install.
+pi_stack_prepare_builds "$root" &
+builds_pid=$!
 "$root/deploy/runtime" &
 runtime_pid=$!
 "$root/deploy/transcription" &
 transcription_pid=$!
 preparation_failed=0
-wait "$build_dependencies_pid" || preparation_failed=1
+wait "$builds_pid" || preparation_failed=1
 wait "$runtime_pid" || preparation_failed=1
 wait "$transcription_pid" || preparation_failed=1
 (( preparation_failed == 0 )) || exit 1
