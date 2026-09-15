@@ -5,7 +5,7 @@ import { tmpdir } from "node:os";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
 import { expect, it } from "vitest";
-import type { PiEvent, PiSession, PiSessionOptions } from "../src/threads/contracts.js";
+import type { PiEvent, PiRunnerReference, PiSession, PiSessionOptions } from "../src/threads/contracts.js";
 import type { createSharedPiSessionOpener } from "../src/threads/runner-transport.js";
 
 async function until(check: () => boolean) {
@@ -51,8 +51,10 @@ it("multiplexes native sessions and keeps an accepted execution through controll
     first = runtime.createSharedPiSessionOpener({ dataDir });
     const a: PiEvent[] = [], b: PiEvent[] = [];
     const restored = options("one");
+    restored.cwd = join(dataDir, "reclaimed-checkout");
+    mkdirSync(restored.cwd);
     restored.env.PI_THREAD_REQUIRE_SESSION = "1";
-    writeFileSync(restored.sessionFile, JSON.stringify({ type: "session", version: 3, id: "restored-one", cwd: dataDir, timestamp: new Date().toISOString() }) + "\n");
+    writeFileSync(restored.sessionFile, JSON.stringify({ type: "session", version: 3, id: "restored-one", cwd: restored.cwd, timestamp: new Date().toISOString() }) + "\n");
     const one = await first.openSession(restored, event => a.push(event), () => {});
     sessions.push(one);
     const two = await first.openSession(options("two"), event => b.push(event), () => {});
@@ -73,9 +75,13 @@ it("multiplexes native sessions and keeps an accepted execution through controll
     await until(() => a.some(event => event.id === "preflight"));
     expect(a.find(event => event.id === "preflight")).toMatchObject({ data: { isStreaming: true, acceptedWorkIds: ["work-one"], completedWorkIds: [] } });
     first.detach();
+    rmSync(restored.cwd, { recursive: true });
     second = runtime.createSharedPiSessionOpener({ dataDir });
     const replay: PiEvent[] = [];
-    const resumed = await second.openSession(options("one"), event => replay.push(event), () => {});
+    const reference = a.find(event => event.type === "runner_attached") as PiEvent & PiRunnerReference;
+    const resumed = (await second.attachSession(reference, event => replay.push(event), () => {}))!;
+    expect(resumed).not.toBeNull();
+    expect(existsSync(restored.cwd)).toBe(false);
     sessions.push(resumed);
     await until(() => replay.some(event => event.type === "agent_settled"));
     await resumed.command({ type: "get_state", id: "recovered" });

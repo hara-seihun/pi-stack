@@ -2,16 +2,20 @@ import { spawn } from "node:child_process";
 import { createHash } from "node:crypto";
 import { existsSync, mkdirSync } from "node:fs";
 import { createConnection, type Socket } from "node:net";
-import { dirname, join } from "node:path";
+import { dirname, join, resolve } from "node:path";
 import { StringDecoder } from "node:string_decoder";
 import { setTimeout as delay } from "node:timers/promises";
 import { fileURLToPath } from "node:url";
-import type { OpenPiSession, PiCommand, PiEvent, PiSessionOptions } from "./contracts.js";
+import type { AttachPiSession, OpenPiSession, PiCommand, PiEvent, PiRunnerReference, PiSession, PiSessionOptions } from "./contracts.js";
 import { underMemoryPressure } from "./runner-memory.js";
 import { isolatePiEnvironment } from "./pi-environment.js";
 
 interface Connection { send(command: PiCommand): void; detach(): void }
 const starts = new Map<string, Promise<void>>();
+function socketAbsent(error: unknown): boolean {
+  const failure = error as NodeJS.ErrnoException;
+  return failure?.syscall === "connect" && ["ENOENT", "ECONNREFUSED"].includes(failure.code ?? "");
+}
 function runnerRequest(path: string, value: unknown, timeout = 5000): Promise<any> {
   return new Promise((resolve, reject) => {
     const socket = createConnection(path);
@@ -30,7 +34,7 @@ function runnerRequest(path: string, value: unknown, timeout = 5000): Promise<an
     socket.on("close", () => { clearTimeout(timer); reject(new Error("Thread runner control closed")); });
   });
 }
-function connect(path: string, output: (event: PiEvent) => void, exit: (code?: number) => void): Promise<Connection> {
+function connect(path: string, output: (event: PiEvent) => void, exit: (code: number) => void): Promise<Connection> {
   return new Promise((resolve, reject) => {
     let socket: Socket;
     let connected = false, attached = false, detached = false, ended = false;
@@ -81,7 +85,7 @@ function connect(path: string, output: (event: PiEvent) => void, exit: (code?: n
       current.on("end", () => current.destroy());
       current.on("error", (error: NodeJS.ErrnoException) => {
         if (!attached) reject(error);
-        else if (["ENOENT", "ECONNREFUSED"].includes(error.code ?? "")) finish();
+        else if (socketAbsent(error)) finish();
       });
       current.on("close", () => {
         clearTimeout(timer); connected = false;
@@ -153,14 +157,44 @@ async function ensureRunner(control: string, options: PiSessionOptions, durable:
   throw new Error("Thread runner startup has not acknowledged ownership");
 }
 
-export function createSharedPiSessionOpener({ dataDir, durable = false }: { dataDir: string; durable?: boolean }): { openSession: OpenPiSession; detach(): void } {
+export function createSharedPiSessionOpener({ dataDir, durable = false }: { dataDir: string; durable?: boolean }): { openSession: OpenPiSession; attachSession: AttachPiSession; detach(): void } {
   const connections = new Set<Connection>();
+  function validate(reference: PiRunnerReference): PiRunnerReference {
+    if (!reference || typeof reference.control !== "string" || typeof reference.socketPath !== "string") throw new Error("Invalid recorded runner reference");
+    const control = resolve(reference.control), socketPath = resolve(reference.socketPath);
+    if (dirname(control) !== resolve(dataDir, "thread-runners") || dirname(socketPath) !== resolve(dataDir, "thread-sockets")) throw new Error("Recorded runner is outside this execution boundary");
+    return { control, socketPath };
+  }
+  async function attach({ control, socketPath }: PiRunnerReference, output: (event: PiEvent) => void, exit: (code: number) => void): Promise<PiSession> {
+    let connection: Connection | undefined;
+    connection = await connect(socketPath, output, code => { if (connection) connections.delete(connection); exit(code); });
+    const attached = connection;
+    connections.add(attached);
+    try { output({ type: "runner_attached", control, socketPath }); }
+    catch (error) { attached.detach(); connections.delete(attached); throw error; }
+    return {
+      command: async command => { attached.send(command); },
+      close: async () => {
+        await runnerRequest(control, { type: "close", socketPath }, 35_000);
+        attached.detach(); connections.delete(attached);
+      },
+    };
+  }
+  const attachSession: AttachPiSession = async (reference, output, exit) => {
+    if (reference === undefined) return null;
+    const recorded = validate(reference);
+    try {
+      const status = await runnerRequest(recorded.control, { type: "status" });
+      if (status?.ok !== true) throw new Error("Thread runner did not acknowledge status");
+      return await attach(recorded, output, exit);
+    } catch (error) { if (socketAbsent(error)) return null; throw error; }
+  };
   const openSession: OpenPiSession = async (options, output, exit) => {
-    const retained = options.env.PI_THREAD_RUNNER_REFERENCE ? JSON.parse(options.env.PI_THREAD_RUNNER_REFERENCE) as { control: string; socketPath: string } : undefined;
+    const retained = options.env.PI_THREAD_RUNNER_REFERENCE ? validate(JSON.parse(options.env.PI_THREAD_RUNNER_REFERENCE)) : undefined;
     const group = boundary(options);
     const control = retained?.control ?? join(dataDir, "thread-runners", `${group}.sock`);
     const socketPath = retained?.socketPath ?? join(dataDir, "thread-sockets", `${group}.${hash(options.threadId)}.sock`);
-    if (dirname(control) !== join(dataDir, "thread-runners") || dirname(socketPath) !== join(dataDir, "thread-sockets")) throw new Error("Recorded runner is outside this execution boundary");
+    const reference = validate({ control, socketPath });
     mkdirSync(dirname(control), { recursive: true, mode: 0o700 });
     mkdirSync(dirname(socketPath), { recursive: true, mode: 0o700 });
     let starting = starts.get(control);
@@ -172,18 +206,7 @@ export function createSharedPiSessionOpener({ dataDir, durable = false }: { data
     const { threads: _threads, ...serializable } = options;
     if (!options.env.PI_THREAD_API_URL) throw new Error("Shared Pi sessions require their owning PI_THREAD_API_URL");
     await runnerRequest(control, { type: "open", options: { ...serializable, socketPath, priority: options.env.PI_THREAD_ADMISSION !== "background" } });
-    let connection: Connection | undefined;
-    connection = await connect(socketPath, output, code => { if (connection) connections.delete(connection); exit(code); });
-    const attached = connection;
-    connections.add(attached);
-    output({ type: "runner_attached", control, socketPath });
-    return {
-      command: async command => { attached.send(command); },
-      close: async () => {
-        await runnerRequest(control, { type: "close", socketPath }, 35_000);
-        attached.detach(); connections.delete(attached);
-      },
-    };
+    return attach(reference, output, exit);
   };
-  return { openSession, detach() { for (const connection of connections) connection.detach(); connections.clear(); } };
+  return { openSession, attachSession, detach() { for (const connection of connections) connection.detach(); connections.clear(); } };
 }

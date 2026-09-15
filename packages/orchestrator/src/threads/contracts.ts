@@ -129,3 +129,5 @@ export interface PiSessionOptions {
   threads?: ThreadApi;
 }
 export type OpenPiSession = (options: PiSessionOptions, output: (event: PiEvent) => void, exit: (code?: number) => void) => Promise<PiSession>;
+export interface PiRunnerReference { control: string; socketPath: string }
+export type AttachPiSession = (reference: PiRunnerReference | undefined, output: (event: PiEvent) => void, exit: (code: number | null) => void) => Promise<PiSession | null>;
