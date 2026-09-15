@@ -1,7 +1,8 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { readFileSync, readdirSync, writeFileSync, unlinkSync } from "node:fs";
-import { dirname, join } from "node:path";
+import { cpSync, mkdtempSync, readFileSync, readdirSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { dirname, join, relative } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
 import { zstdDecompressSync } from "node:zlib";
 import { patchCodexServiceRecovery } from "./patch-codex-service-recovery.mjs";
@@ -18,12 +19,24 @@ const created = { type: "response.created", response: { id: "resp_failed", statu
 const failure = { type: "response.failed", response: { id: "resp_failed", error: { code: "server_error", message: "no_biscuit_no_service" }, output: [] } };
 const completed = { type: "response.completed", response: { id: "resp_success", status: "completed", output: [], usage: { input_tokens: 1, output_tokens: 0, total_tokens: 1 } } };
 
-for (const [name, path] of [["SDK", sdk], ["bundled CLI", bundle]]) test(`${name} bounded Codex service recovery`, async () => {
-  const source = patchCodexServiceRecovery(patchCodexSse(readFileSync(path, "utf8")));
+for (const [name, path, packageRoot] of [
+  ["SDK", sdk, dirname(dirname(dirname(sdk)))],
+  ["bundled CLI", bundle, dirname(dirname(dirname(chunks)))],
+]) test(`${name} bounded Codex service recovery`, async (t) => {
+  const installedSource = readFileSync(path, "utf8");
+  const installedFiles = readdirSync(dirname(path));
+  const source = patchCodexServiceRecovery(patchCodexSse(installedSource));
   assert.equal(patchCodexServiceRecovery(source), source);
-  const temporary = join(dirname(path), `codex-service-test-${process.pid}.js`);
+  const fixture = mkdtempSync(join(tmpdir(), "pi-codex-service-"));
+  t.after(() => rmSync(fixture, { recursive: true, force: true }));
+  const fixturePackage = join(fixture, "provider");
+  cpSync(packageRoot, fixturePackage, { recursive: true });
+  symlinkSync(fileURLToPath(new URL("../../node_modules", import.meta.url)), join(fixture, "node_modules"), "dir");
+  const temporary = join(fixturePackage, relative(packageRoot, path));
   writeFileSync(temporary, source);
   const provider = await import(pathToFileURL(temporary).href);
+  assert.deepEqual(readdirSync(dirname(path)), installedFiles, "provider fixtures must not enter the installed module directory");
+  assert.equal(readFileSync(path, "utf8"), installedSource, "provider fixtures must not modify installed source");
   const originalWebSocket = globalThis.WebSocket;
   try {
     for (const transport of ["sse", "websocket-cached"]) {
@@ -94,5 +107,5 @@ for (const [name, path] of [["SDK", sdk], ["bundled CLI", bundle]]) test(`${name
         provider.closeOpenAICodexWebSocketSessions();
       }
     }
-  } finally { globalThis.WebSocket = originalWebSocket; provider.closeOpenAICodexWebSocketSessions(); unlinkSync(temporary); }
+  } finally { globalThis.WebSocket = originalWebSocket; provider.closeOpenAICodexWebSocketSessions(); }
 });

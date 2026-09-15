@@ -82,6 +82,8 @@ npm run check
 
 The supported Pi peer is `@earendil-works/pi-coding-agent` 0.85.x. Tests run without account credentials or browser sessions.
 
+Codex service-recovery tests patch disposable package copies under the system temporary directory and link their dependencies to the installed tree. They leave installed source and directory entries unchanged. Writing temporary providers into installed bundle chunks caused publication PUB-cd9008bcaeaf81804e960873 to fail when a concurrent custody test listed a fixture that disappeared before it could read it. Fixture cleanup is registered before copying or importing, so setup failures also remove the temporary tree.
+
 The Orchestrator pretest and Remote test setup run `patch-shared-rpc.mjs` to generate the shared RPC module from the installed Pi package. Generation uses atomic replacement and leaves unchanged output alone, so concurrent test processes cannot read a partially written module.
 
 To check thinking precedence against the deployed SDK and bundled RPC without making provider requests:
