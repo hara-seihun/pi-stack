@@ -143,6 +143,8 @@ describe("leaf Orchestrator workers", () => {
     await waitFor(() => person.sessions[0]?.isStreaming === true && fleet.sessions[0]?.isStreaming === true);
     expect(person.sessions[0]!.options.env.PI_THREAD_CAN_SPAWN).toBe("1");
     expect(fleet.sessions[0]!.options.env.PI_THREAD_CAN_SPAWN).toBe("0");
+    expect(fleet.sessions[0]!.options.env.PI_THREAD_DATABASE).toBe(join(fleet.directory, "threads.sqlite"));
+    expect(person.sessions[0]!.options.env.PI_THREAD_DATABASE).toBe(join(person.directory, "threads.sqlite"));
     expect(threadTools(person.sessions[0]!.options).some(tool => tool.name === "thread_spawn")).toBe(true);
     expect(threadTools(fleet.sessions[0]!.options).some(tool => tool.name === "thread_spawn")).toBe(false);
     fleet.sessions[0]!.settle("Worker result");

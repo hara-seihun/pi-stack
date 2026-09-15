@@ -503,6 +503,7 @@ export class ThreadService implements ThreadApi {
     const context = thread.metadata?.context;
     if (context !== undefined && (!isRunContext(context) || thread.metadata?.execution === "root-repair")) throw new Error("Invalid recorded isolated execution boundary");
     const env = { ...this.options.environment?.(thread), ...extraEnv, ...(context ? { HOME: join(thread.cwd, ".home") } : {}), PI_THREAD_ID: id, PI_THREAD_SPEED: settings.speed,
+      PI_THREAD_DATABASE: this.options.databasePath,
       // Explicit false survives JSON transport and overrides older runners' launch environment.
       PI_THREAD_REQUIRE_SESSION: thread.metadata?.nativeHistoryRequired || recovering ? "1" : "0",
       PI_THREAD_CAN_SPAWN: thread.role === "worker" ? "0" : "1",

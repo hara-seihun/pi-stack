@@ -1153,7 +1153,6 @@ function threadEnvironment(thread: Thread) {
   return { ...process.env, HOME,
     PI_REMOTE_WORKSPACES: JSON.stringify([...workspaces.values()]),
     PI_REMOTE_SESSION_ID: thread.id, PI_THREAD_API_URL: `http://${HOST}:${PORT}/v1/threads`,
-    PI_THREAD_DATABASE: join(DATA, "threads.sqlite3"),
     PI_SESSION_ID: thread.id, PI_SESSION_FILE: thread.sessionFile,
     PI_REMOTE_MEETING_ID: String(meta.meetingId ?? ""), PI_REMOTE_CONTEXT_OWNER_PID: "",
     PI_REMOTE_BASH_TIMEOUT_MAX_SECONDS: String(bashTimeoutSeconds(meta.bashTimeoutSeconds)),
