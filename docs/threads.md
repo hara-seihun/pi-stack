@@ -19,6 +19,7 @@ Shared-process execution remains essential. Hundreds of threads must not create 
 Humans and agents have the same operations:
 
 - Spawn always creates a fresh thread with a fresh context and initial assignment. Continuing an existing thread means sending it a message.
+- Agent-to-agent messages default to steer, including tool and CLI sends, child assignments and Voice delegation. Human messages default to queue. An explicit delivery mode overrides the default.
 - Queue waits for the recipient's current execution to finish.
 - Steer delivers at a safe boundary after current tool calls without cancelling them.
 - Hard steer cancels current execution and its local tools, confirms cancellation, then runs the selected message first in the same conversation. Other pending messages retain their order. It does not cancel descendants or undo external effects.
@@ -40,6 +41,8 @@ An execution has exclusive ownership of its thread. Cancellation fences late cal
 ## Relationships and notifications
 
 Threads can list all accessible threads in their current environment or their direct children, read persisted history without starting a recipient, and send queue/steer/hard-steer messages to other accessible threads. Workers retain these collaboration tools but cannot spawn. Parentage determines discovery and automatic notifications, not aggregate execution state.
+
+The thread service wraps every agent input in the same [`<agent_message>` envelope](../packages/orchestrator/src/threads/message-format.ts) before passing it to Pi. It explicitly identifies the input as an agent-to-agent message, not a user message, and carries the sender thread, recipient thread, message receipt, source and reply reference. Explicit messages, initial child assignments and automatic completion reports use this format across local and fleet owners. Senderless human inputs remain unchanged. Formatting happens after context preparation on both first delivery and recovery, so pending inputs prepared by an earlier release gain the envelope without changing receipts or replaying completed work.
 
 When a child's execution settles, commit its outcome and parent notification durably. Include thread/work IDs, normal/error/cancelled outcome, and that execution's final assistant message or an explicit absence. Deliver through ordinary messaging, with stable receipt identity and restart-safe deduplication. Notifications steer busy parents at the next safe boundary and wake idle parents, but remain held for stopped parents. Idle is not proof that an assignment succeeded.
 

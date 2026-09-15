@@ -2,6 +2,8 @@
 
 The [accepted thread design](../../../docs/threads.md) defines behavior. [`ThreadService`](../src/threads/service.ts) is the durable owner inside each Unix-person or execution boundary. The shared [contracts](../src/threads/contracts.ts) serve Remote, fleet, CLI and model tools. A directory routes authorized peer operations; it does not schedule work.
 
+`send()` accepts an optional `delivery`. The shared `resolveDelivery()` keeps explicit modes, defaults messages with `senderId` to `steer`, and defaults senderless human messages to `queue`. HTTP and directory routing preserve the sender and selected mode; the destination service resolves omitted delivery before validation and persistence.
+
 ## Construction and lifetime
 
 Create a service with `databasePath`, `sessionsDir` and the shared runner's `openSession` and `attachSession`. Optional hooks supply boundary-specific environment, quota admission and message preparation. Set its authorized directory with `setDirectory()` before starting it. The service supplies `PI_THREAD_DATABASE` from its own `databasePath` to every session, so `read-thread` uses the thread's owner rather than the account's Remote store.

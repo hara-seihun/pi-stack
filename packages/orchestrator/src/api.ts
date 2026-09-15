@@ -21,7 +21,7 @@ export { createWorkspaceAdmission, createCwdAdmission,
 export type { Result, ThreadError, Delivery, ThinkingLevel, Speed, Admission, ThreadState, WorkOutcome,
   ThreadSettings, SettingsOverrides, Thread, ThreadMessage, SpawnThread, SendThread, ThreadList, ThreadPage,
   ThreadRead, ThreadHistory, ThreadInspection, ThreadSettlement, ThreadSettlements, ThreadControl, ThreadApi, PiEvent, PiCommand, PiSession, PiSessionOptions, OpenPiSession, PiRunnerReference, AttachPiSession } from "./threads/contracts.js";
-export { THREAD_STATES, isThreadState } from "./threads/contracts.js";
+export { THREAD_STATES, isThreadState, resolveDelivery } from "./threads/contracts.js";
 export { ThreadService } from "./threads/service.js";
 export { threadHttp, createThreadClient } from "./threads/http.js";
 export { openPiSession } from "./threads/pi-session.js";

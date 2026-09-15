@@ -6,7 +6,8 @@ import type { DatabaseSync } from "node:sqlite";
 import { openSqlite } from "../sqlite.js";
 import { isRunContext } from "../isolated-context-contract.js";
 import { resolveThreadSettings } from "./settings.js";
-import { isThreadState } from "./contracts.js";
+import { formatThreadMessage } from "./message-format.js";
+import { isThreadState, resolveDelivery } from "./contracts.js";
 import type { AttachPiSession, Delivery, OpenPiSession, PiCommand, PiEvent, PiSession, Result, SendThread, SpawnThread, Thread, ThreadApi, ThreadControl, ThreadHistory, ThreadInspection, ThreadList, ThreadMessage, ThreadPage, ThreadRead, ThreadSettings, ThreadSettlements, WorkOutcome } from "./contracts.js";
 
 type Json = Record<string, any>;
@@ -196,7 +197,7 @@ export class ThreadService implements ThreadApi {
   private recordRequest(id: string, value: unknown, kind: string, target: string): void { this.db.prepare("INSERT INTO thread_request(id,hash,kind,target) VALUES(?,?,?,?)").run(id, digest(value), kind, target); }
   private insertMessage(id: string, input: SendThread, settings: ThreadSettings, front = false): ThreadMessage {
     this.db.prepare("INSERT INTO thread_work(id,thread_id,sender_id,text,images,delivery,source,reply_to,front,settings,created_at) VALUES(?,?,?,?,?,?,?,?,?,?,?)")
-      .run(id, input.threadId, input.senderId ?? null, input.text, JSON.stringify(input.images ?? []), input.delivery, input.source ?? "explicit", input.replyTo ?? null, front ? Date.now() : 0, JSON.stringify(settings), Date.now());
+      .run(id, input.threadId, input.senderId ?? null, input.text, JSON.stringify(input.images ?? []), resolveDelivery(input), input.source ?? "explicit", input.replyTo ?? null, front ? Date.now() : 0, JSON.stringify(settings), Date.now());
     return this.message(this.db.prepare("SELECT * FROM thread_work WHERE id=?").get(id) as Json);
   }
   async spawn(input: SpawnThread): Promise<Result<Thread>> {
@@ -232,13 +233,14 @@ export class ThreadService implements ThreadApi {
         const now = Date.now();
         this.db.prepare("INSERT INTO thread(id,parent_id,title,cwd,session_file,settings,admission,state,created_at,updated_at,metadata) VALUES(?,?,?,?,?,?,?,?,?,?,?)")
           .run(id, input.parentId ?? null, input.title ?? `Thread ${id.slice(0, 8)}`, input.cwd, join(this.options.sessionsDir, `${id}.jsonl`), JSON.stringify(settings.value), input.parentId ? "force" : input.admission ?? "force", input.message ? "running" : "idle", now, now, JSON.stringify(metadata));
-        if (input.message) this.insertMessage(input.requestId, { requestId: input.requestId, threadId: id, senderId: input.parentId, text: input.message, images: input.images, delivery: "queue" }, settings.value);
+        if (input.message) this.insertMessage(input.requestId, { requestId: input.requestId, threadId: id, senderId: input.parentId, text: input.message, images: input.images, delivery: resolveDelivery({ senderId: input.parentId }) }, settings.value);
         this.recordRequest(input.requestId, input, "spawn", id);
       });
       this.changed(id); this.wake(id); return good(this.get(id)!);
     } catch (error) { return bad("unavailable", errorText(error)); }
   }
-  async send(input: SendThread): Promise<Result<ThreadMessage>> {
+  async send(request: SendThread): Promise<Result<ThreadMessage>> {
+    const input = { ...request, delivery: resolveDelivery(request) };
     if (this.closed || this.suspended) return bad("unavailable", "Thread controller is suspended");
     try {
       const prior = this.request(input.requestId, input, "send"); if (!prior.ok) return prior;
@@ -542,7 +544,7 @@ export class ThreadService implements ThreadApi {
           await this.finish(id, runtime, last?.stopReason === "error" ? "failed" : last?.stopReason === "aborted" ? "cancelled" : "complete", last ?? null);
         } else if (!runtime.busy && works.length && !this.row(id)?.held && !this.halts.has(id)) {
           const work = works[0]!, prepared = work.prepared ? JSON.parse(work.prepared) : { text: work.text, images: JSON.parse(work.images) };
-          await this.rpc(runtime, { type: "prompt", workId: work.id, message: prepared.text, images: prepared.images, resume: accepted.has(work.id) || work.inserted_at !== null });
+          await this.rpc(runtime, { type: "prompt", workId: work.id, message: formatThreadMessage(this.message(work), prepared.text), images: prepared.images, resume: accepted.has(work.id) || work.inserted_at !== null });
           runtime.busy = true;
         }
       }
@@ -656,7 +658,7 @@ export class ThreadService implements ThreadApi {
     } else this.db.prepare("UPDATE thread_work SET status='dispatching',execution_id=? WHERE id=?").run(execution.id, work.id);
     try {
       const prepared = JSON.parse(work.prepared);
-      await this.rpc(runtime!, { type: runtime!.busy ? "steer" : "prompt", workId: work.id, message: prepared.text, images: prepared.images ?? [] });
+      await this.rpc(runtime!, { type: runtime!.busy ? "steer" : "prompt", workId: work.id, message: formatThreadMessage(this.message(work), prepared.text), images: prepared.images ?? [] });
       const insertedAt = Date.now();
       if (this.suspended || this.row(id)?.held) return;
       this.db.prepare("UPDATE thread_work SET status='inserted',inserted_at=COALESCE(inserted_at,?) WHERE id=? AND status='dispatching'").run(insertedAt, work.id);
@@ -729,7 +731,7 @@ export class ThreadService implements ThreadApi {
       const prior = this.db.prepare("SELECT * FROM thread_work WHERE id=?").get(input.id) as Json | undefined;
       if (prior) return prior.thread_id === input.threadId && prior.text === input.text ? good(this.message(prior)) : bad("conflict", "Imported message identity has different input");
       this.transaction(() => {
-        this.insertMessage(input.id, { requestId: input.requestId ?? input.id, threadId: input.threadId, senderId: input.senderId ?? undefined, text: input.text, images: input.images, delivery: input.delivery ?? "queue", source: input.source, replyTo: input.replyTo }, input.settings ?? thread.settings);
+        this.insertMessage(input.id, { requestId: input.requestId ?? input.id, threadId: input.threadId, senderId: input.senderId ?? undefined, text: input.text, images: input.images, delivery: resolveDelivery({ senderId: input.senderId ?? undefined, delivery: input.delivery }), source: input.source, replyTo: input.replyTo }, input.settings ?? thread.settings);
         this.db.prepare("INSERT INTO thread_request(id,hash,kind,target) VALUES(?,'import','import-message',?)").run(input.requestId ?? input.id, input.id);
         const done = input.state === "complete" || input.state === "cancelled";
         const executionId = input.executionId ?? `import:${input.id}`;

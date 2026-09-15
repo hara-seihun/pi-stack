@@ -122,7 +122,7 @@ test("failed startup stops capture and retains its unfinished PCM until recovery
 });
 
 test("meeting handoffs retain Voice's triggering speech alongside the saved meeting transcript", async () => {
-  const prompts: Array<{ text: string; includeMeetingImages: boolean }> = [];
+  const prompts: Array<{ text: string; includeMeetingImages: boolean; delivery: string }> = [];
   let flushed = false;
   const voice = new VoiceSession({
     sessionId: "thread",
@@ -149,6 +149,7 @@ test("meeting handoffs retain Voice's triggering speech alongside the saved meet
   await delegate("delegation-1");
   expect(prompts[0]!.text).toContain("User: Kenan, unmute yourself.");
   expect(prompts[0]!.includeMeetingImages).toBe(true);
+  expect(prompts[0]!.delivery).toBe("steer");
   speech("speech-2", "Now show the browser.");
   await delegate("delegation-2");
   expect(prompts[1]!.text).toContain("User: Now show the browser.");

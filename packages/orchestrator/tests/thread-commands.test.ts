@@ -27,6 +27,19 @@ it("preserves an agent caller as parent and uses its authorized directory",async
   expect(calls).toHaveLength(1);
 });
 
+it.each([
+  {senderId:undefined,selected:undefined,expected:"queue"},
+  {senderId:"caller",selected:undefined,expected:"steer"},
+  ...[undefined,"caller"].flatMap(senderId=>["queue","steer","hardSteer"].map(selected=>({senderId,selected,expected:selected}))),
+])("sends with sender $senderId and delivery $selected as $expected",async({senderId,selected,expected})=>{
+  vi.stubEnv("PI_THREAD_ID",senderId);
+  vi.stubEnv("PI_THREAD_API_URL","http://127.0.0.1:18790/v1/threads");
+  const calls=transport();
+  await dispatch(["send","recipient","--prompt","work",...(selected?["--delivery",selected]:[])]);
+  expect(calls[0]!.body).toEqual({requestId:expect.any(String),threadId:"recipient",text:"work",delivery:expected,...(senderId?{senderId}:{})});
+  expect(vi.mocked(fetch).mock.calls[0]![0]).toBe("http://127.0.0.1:18790/v1/threads/send");
+});
+
 it("workers cannot bypass the missing spawn tool with CLI run or wave",async()=>{
   vi.stubEnv("PI_THREAD_CAN_SPAWN","0");
   const calls=transport();

@@ -65,9 +65,12 @@ export interface SendThread {
   senderId?: string;
   text: string;
   images?: unknown[];
-  delivery: Delivery;
+  delivery?: Delivery;
   source?: "explicit" | "notification";
   replyTo?: string;
+}
+export function resolveDelivery(input: Pick<SendThread, "senderId" | "delivery">): Delivery {
+  return input.delivery ?? (input.senderId ? "steer" : "queue");
 }
 export interface ThreadList {
   id?: string;
