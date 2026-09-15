@@ -34,7 +34,7 @@ These are native execution receipts; the thread service still owns command admis
 
 ## Cancellation
 
-[`PiExecution`](../src/threads/pi-execution.ts) owns one `halt` operation. Abort, SDK abort aliases, replacement and idle disposal use it. Halt closes admission, signals tools, cancels native agent work, retry, compaction and shell commands, dismisses dialogs, and waits for every tracked call to return. Concurrent abort requests share that operation. Settlement runs before admission reopens and before the abort acknowledgement. The timeout is `PI_THREAD_CANCEL_TIMEOUT_MS`, default 30 seconds.
+[`PiExecution`](../src/threads/pi-execution.ts) owns one `halt` operation. Abort, SDK abort aliases, replacement and idle disposal use it. Halt closes admission, signals tools, cancels native agent work, retry, compaction and shell commands, dismisses dialogs, and waits for every tracked call to return. Concurrent abort requests share that operation. Settlement runs before admission reopens and before the abort acknowledgement. Native halt has a fixed 20-second deadline, below the controller's 30-second RPC timeout, so native cancellation failure reaches the controller before its request expires.
 
 Tracking covers prompt preflight, native agent runs, queued inputs, custom-message turns, tools, shell commands, compaction and tree navigation. Each operation inherits its cancellation signal through async-local scope, so a callback from a cancelled run cannot start work after a later run is admitted. Plain prompts cannot overlap preflight or an unsettled turn. Streaming steering still uses Pi's queue.
 

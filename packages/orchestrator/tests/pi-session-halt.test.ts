@@ -36,7 +36,7 @@ async function fixture(prepare?: (session: AgentSession) => void, extension?: st
     args.push("--extension", path);
   }
   const waiters = new Set<() => void>();
-  const session = await openPiSession({ cwd, args, env: { PI_CODING_AGENT_DIR: join(cwd, "agent"), PI_OFFLINE: "1", PI_THREAD_CANCEL_TIMEOUT_MS: "1000" }, threadId: "halt-fixture", sessionFile: join(cwd, "native.jsonl") }, event => {
+  const session = await openPiSession({ cwd, args, env: { PI_CODING_AGENT_DIR: join(cwd, "agent"), PI_OFFLINE: "1" }, threadId: "halt-fixture", sessionFile: join(cwd, "native.jsonl") }, event => {
     events.push(event);
     for (const notify of waiters) notify();
   }, () => {});
@@ -129,6 +129,28 @@ it("rejects overlap during preflight and waits for that preflight before acknowl
   finish.resolve();
   expect(await stopped).toMatchObject({ success: true });
   expect(await f.command("get_state")).toMatchObject({ data: { isStreaming: false, acceptedWorkIds: [], completedWorkIds: [] } });
+}, 3000);
+
+it("reports native halt failure at 20 seconds before the controller's 30-second timeout", async () => {
+  const entered = deferred(), finish = deferred();
+  const f = await fixture(native => {
+    vi.spyOn(native, "prompt").mockImplementation(async () => { entered.resolve(); await finish.promise; });
+  });
+  await f.session.command({ type: "prompt", id: "deadline", workId: "deadline", message: "wait" });
+  await entered.promise;
+  vi.useFakeTimers();
+  try {
+    const stopped = f.command("abort");
+    await vi.advanceTimersByTimeAsync(19_999);
+    expect(f.events.some(event => event.type === "response" && event.command === "abort")).toBe(false);
+    await vi.advanceTimersByTimeAsync(1);
+    expect(await stopped).toMatchObject({ success: false, error: expect.stringContaining("did not stop within 20000ms") });
+    expect(await f.command("get_state")).toMatchObject({ data: { cancellationFailed: true, isStreaming: true } });
+  } finally {
+    finish.resolve();
+    vi.useRealTimers();
+  }
+  expect(await f.command("abort")).toMatchObject({ success: true });
 }, 3000);
 
 it("halts manual compaction and waits for its native command result", async () => {

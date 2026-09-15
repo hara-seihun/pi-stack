@@ -123,7 +123,7 @@ export const openPiSession: OpenPiSession = async (options, output, exit) => {
       output({ type: "agent_settled", workIds, outcome, lastAssistantMessage: message });
     }
     async function halt(): Promise<void> {
-      const stopped = execution.halt(runtime.session, Number(env.PI_THREAD_CANCEL_TIMEOUT_MS ?? 30_000), () => settle(true));
+      const stopped = execution.halt(runtime.session, 20_000, () => settle(true));
       const dismissed = [...dialogs].map(id => rpc.command({ type: "extension_ui_response", id, cancelled: true }));
       dialogs.clear();
       await Promise.all([stopped, ...dismissed]);
