@@ -25,6 +25,7 @@ jobs:
           set -euo pipefail
           export PATH="/run/wrappers/bin:/run/current-system/sw/bin:$PATH"
           [[ "$GITHUB_REPOSITORY" == hara-seihun/pi-stack ]]
+          [[ "$REQUEST_REF" == pi-stack-publication-requests/* ]]
           request=${REQUEST_REF#pi-stack-publication-requests/}
           [[ "$request" =~ ^PUB-[a-f0-9]{24}$ ]]
           [[ "$SOURCE_SHA" =~ ^[a-f0-9]{40}$ ]]
