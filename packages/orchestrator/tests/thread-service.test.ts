@@ -147,8 +147,22 @@ describe("leaf Orchestrator workers", () => {
     expect(person.sessions[0]!.options.env.PI_THREAD_DATABASE).toBe(join(person.directory, "threads.sqlite"));
     expect(threadTools(person.sessions[0]!.options).some(tool => tool.name === "thread_spawn")).toBe(true);
     expect(threadTools(fleet.sessions[0]!.options).some(tool => tool.name === "thread_spawn")).toBe(false);
+    expect(person.sessions[0]!.commands.find(command => command.type === "prompt")?.message).toBe("Coordinate");
+    const assignment = String(fleet.sessions[0]!.commands.find(command => command.type === "prompt")?.message);
+    expect(assignment).toContain("<agent_message>");
+    expect(assignment).toContain(JSON.stringify(root.id));
+    value(await directory.send({ requestId: "progress", threadId: root.id, senderId: child.id, text: "Still working", delivery: "steer" }));
+    await waitFor(() => person.sessions[0]!.commands.some(command => command.workId === "progress"));
+    const progress = String(person.sessions[0]!.commands.find(command => command.workId === "progress")?.message);
     fleet.sessions[0]!.settle("Worker result");
     await waitFor(() => person.sessions[0]!.commands.some(command => command.type === "steer" && JSON.stringify(command).includes("Worker result")));
+    const completion = String(person.sessions[0]!.commands.find(command => command.type === "steer" && String(command.message).includes("Worker result"))?.message);
+    for (const text of [progress, completion]) {
+      expect(text.split("\n").slice(0, 2)).toEqual(assignment.split("\n").slice(0, 2));
+      expect(JSON.parse(text.split("\n")[2]!)).toMatchObject({ senderThreadId: child.id, recipientThreadId: root.id });
+      expect(text).toMatch(/<\/agent_message>$/);
+    }
+    expect(JSON.parse(completion.split("\n")[2]!)).toMatchObject({ source: "notification", replyTo: "child" });
     expect(fleet.service.get(child.id)?.state).toBe("idle");
   });
 });
@@ -438,6 +452,21 @@ describe("ThreadService", () => {
     expect(sessions).toHaveLength(0);
   });
 
+  it("defaults agent inputs to steer while retaining human queues and explicit choices", async () => {
+    const { directory, service } = fixture();
+    const parent = value(await service.spawn({ requestId: "parent", cwd: directory, message: "Coordinate" }));
+    const child = value(await service.spawn({ requestId: "child", cwd: directory, parentId: parent.id, message: "Assignment" }));
+    expect(service.pending(parent.id)[0]?.delivery).toBe("queue");
+    expect(service.pending(child.id)[0]?.delivery).toBe("steer");
+    const agent = { requestId: "agent", threadId: parent.id, senderId: child.id, text: "Progress" };
+    expect(value(await service.send(agent)).delivery).toBe("steer");
+    expect(value(await service.send({ ...agent, delivery: "steer" })).id).toBe("agent");
+    expect(value(await service.send({ requestId: "human", threadId: parent.id, text: "More work" })).delivery).toBe("queue");
+    for (const delivery of ["queue", "steer", "hardSteer"] as const) {
+      expect(value(await service.send({ ...agent, requestId: delivery, delivery })).delivery).toBe(delivery);
+    }
+  });
+
   it("deduplicates request receipts and rejects changed reuse", async () => {
     const { directory, service } = fixture();
     const spawn = { requestId: "spawn-request", id: "same-thread", cwd: directory } as const;
@@ -448,6 +477,26 @@ describe("ThreadService", () => {
     expect(value(await service.send(message)).id).toBe("send-request");
     expect(service.pending("same-thread")).toHaveLength(1);
     expect(await service.send({ ...message, text: "different" })).toMatchObject({ ok: false, error: { code: "conflict" } });
+  });
+
+  it("keeps sender attribution when recovering previously prepared agent input", async () => {
+    const first = fixture();
+    value(first.service.importThread({ id: "recipient", title: "Recipient", cwd: first.directory, sessionFile: join(first.directory, "recipient.jsonl"), settings: { model: "astra", thinkingLevel: "high", speed: "standard" } }));
+    value(first.service.importMessage({ id: "accepted-agent-input", threadId: "recipient", senderId: "sender", text: "Keep working", state: "dispatched", insertedAt: Date.now() }));
+    value(await first.service.detach());
+    const db = new DatabaseSync(join(first.directory, "threads.sqlite"));
+    db.prepare("UPDATE thread_work SET prepared=? WHERE id=?").run(JSON.stringify({ text: "Keep working\nPrepared context", images: [] }), "accepted-agent-input");
+    db.close();
+    const second = fixture(first.directory);
+    value(await second.service.start());
+    await waitFor(() => second.sessions[0]?.commands.some(command => command.workId === "accepted-agent-input") === true);
+    const command = second.sessions[0]!.commands.find(command => command.workId === "accepted-agent-input")!;
+    const text = String(command.message);
+    expect(command.resume).toBe(true);
+    expect(JSON.parse(text.split("\n")[2]!)).toMatchObject({ senderThreadId: "sender", messageId: "accepted-agent-input" });
+    expect(text).toContain("Keep working\nPrepared context");
+    expect(text.match(/<agent_message>/g)).toHaveLength(1);
+    await settle(second.sessions[0]!, second.service, "recipient");
   });
 
   it("does not replay an imported completed message", async () => {
