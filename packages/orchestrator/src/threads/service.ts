@@ -193,6 +193,7 @@ export class ThreadService implements ThreadApi {
   }
 
   private request(id: string, value: unknown, kind: string): Result<string | null> {
+    if (this.closed || this.suspended) return { ok: false, error: { code: "unavailable", message: "Thread controller is suspended", retryable: true } };
     if (typeof id !== "string" || !id.trim()) return bad("invalid_request", "A stable requestId is required");
     const receipt = this.db.prepare("SELECT * FROM thread_request WHERE id=?").get(id) as Json | undefined;
     if (receipt?.kind === "import-message" && kind === "send") {
@@ -208,7 +209,6 @@ export class ThreadService implements ThreadApi {
     return this.message(this.db.prepare("SELECT * FROM thread_work WHERE id=?").get(id) as Json);
   }
   async spawn(input: SpawnThread): Promise<Result<Thread>> {
-    if (this.closed || this.suspended) return bad("unavailable", "Thread controller is suspended");
     try {
       const prior = this.request(input.requestId, input, "spawn"); if (!prior.ok) return prior;
       if (prior.value) return good(this.get(prior.value)!);
@@ -219,6 +219,8 @@ export class ThreadService implements ThreadApi {
         const found = await this.directory.list({ id: input.parentId, limit: 1 });
         if (!found.ok) return found;
         parent = found.value.threads[0] ?? null;
+        const accepted = this.request(input.requestId, input, "spawn"); if (!accepted.ok) return accepted;
+        if (accepted.value) return good(this.get(accepted.value)!);
       }
       if (input.parentId && !parent) return bad("not_found", "Parent thread is not accessible to this service");
       if (parent && (parent.parentId || parent.role === "worker")) return bad("invalid_request", "Orchestrator workers cannot spawn subagents. Report the remaining work to the parent conversation.");
@@ -248,7 +250,6 @@ export class ThreadService implements ThreadApi {
   }
   async send(request: SendThread): Promise<Result<ThreadMessage>> {
     const input = { ...request, delivery: resolveDelivery(request) };
-    if (this.closed || this.suspended) return bad("unavailable", "Thread controller is suspended");
     try {
       const prior = this.request(input.requestId, input, "send"); if (!prior.ok) return prior;
       if (prior.value) return good(this.message(this.db.prepare("SELECT * FROM thread_work WHERE id=?").get(prior.value) as Json));
@@ -258,6 +259,8 @@ export class ThreadService implements ThreadApi {
       if (typeof input.text !== "string" || !input.text.trim() || !["queue", "steer", "hardSteer"].includes(input.delivery) || input.source !== undefined && !["explicit", "notification"].includes(input.source)) return bad("invalid_request", "Nonempty text and a valid delivery mode and source are required");
       if (input.source !== "notification" && this.row(thread.id)?.held && thread.state === "running") {
         const halted = await this.halt(thread.id); if (!halted.ok) return halted;
+        const accepted = this.request(input.requestId, input, "send"); if (!accepted.ok) return accepted;
+        if (accepted.value) return good(this.message(this.db.prepare("SELECT * FROM thread_work WHERE id=?").get(accepted.value) as Json));
       }
       const message = this.transaction(() => {
         const held = !!this.row(thread.id)?.held, explicit = input.source !== "notification";
