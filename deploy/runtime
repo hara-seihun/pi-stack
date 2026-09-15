@@ -14,8 +14,15 @@ dependencies_root=${PI_STACK_DEPENDENCIES_ROOT:-/srv/pi/dependencies}
 PI_VERSION=0.85.0
 BROWSER_VERSION="agent-browser $(node -p 'require(process.argv[1]).packages["node_modules/agent-browser"].version' "$root/package-lock.json")"
 stage=""
-cleanup() { [[ -z $stage ]] || rm -rf "$stage"; }
+dependency_stage=""
+cleanup() {
+  [[ -z $stage ]] || rm -rf "$stage"
+  [[ -z $dependency_stage ]] || pi_stack_as_root rm -rf "$dependency_stage"
+}
 trap cleanup EXIT
+trap 'exit 143' TERM
+trap 'exit 130' INT
+trap 'exit 129' HUP
 commit=$(git -C "$root" rev-parse HEAD)
 
 check_release() {
@@ -96,14 +103,9 @@ if [[ ! -x $dependency_release/node_modules/.bin/pi ]]; then
   rm -rf "$stage/node_modules/@hara-seihun"
   dependency_stage="$dependencies_root/.stage.$$.${RANDOM}"
   pi_stack_as_root install -d -m 755 "$dependency_stage"
-  if ! pi_stack_as_root rsync -a --delete --chmod=D755,Fu=rwX,Fgo=rX "$stage/" "$dependency_stage/"; then
-    pi_stack_as_root rm -rf "$dependency_stage"
-    exit 1
-  fi
-  if ! pi_stack_as_root mv -T "$dependency_stage" "$dependency_release"; then
-    pi_stack_as_root rm -rf "$dependency_stage"
-    exit 1
-  fi
+  pi_stack_as_root rsync -a --delete --chmod=D755,Fu=rwX,Fgo=rX "$stage/" "$dependency_stage/"
+  pi_stack_as_root mv -T "$dependency_stage" "$dependency_release"
+  dependency_stage=""
   rm -rf "$stage"
   stage=""
 fi

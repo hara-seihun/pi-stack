@@ -364,6 +364,59 @@ test("repair-result completes an interrupted repair once without launching anoth
   assert.deepEqual(JSON.parse(readFileSync(f.requestPath, "utf8")), f.request);
 });
 
+test("assigned repair at the automatic depth limit transfers real source custody without restarting agents", t => {
+  const f = repairFixture(t, "blocked");
+  const request = { ...f.request, repairDepth: policy.maxRepairDepth };
+  writeJson(f.requestPath, request);
+  const remote = join(f.root, "hara-seihun", "pi-stack.git");
+  mkdirSync(join(f.root, "hara-seihun"));
+  assert.equal(run("git", ["clone", "--bare", "--quiet", f.workspace, remote]).status, 0);
+  assert.equal(run("git", ["remote", "add", "origin", remote], { cwd: f.workspace }).status, 0);
+  executable(join(f.bin, "publication-submit"), `#!/bin/sh
+printf '%s\\n' "$*" >> "$PUBLICATION_SUBMIT_LOG"
+exec ${JSON.stringify(process.execPath)} ${JSON.stringify(publication)} "$@"
+`);
+  executable(join(f.bin, "systemctl"), `#!/bin/sh
+printf '%s\\n' "$*" >> "$SYSTEMCTL_LOG"
+case "$*" in
+  *LoadState*) echo loaded ;;
+  *ActiveState*) echo inactive ;;
+esac
+`);
+  const evidence = join(f.root, "focused-proof.json");
+  writeJson(evidence, { passed: true });
+  writeJson(f.repair.result, { status: "source-fixed", sourceSha: f.repairedSha, workspace: f.workspace, summary: "assigned repair completed", evidence });
+  const environment = {
+    ...f.environment,
+    PI_STACK_PUBLICATION_REPORT_URL: "",
+    PI_STACK_PUBLICATION_REPORT_SESSION: "",
+    GIT_CONFIG_COUNT: "1",
+    GIT_CONFIG_KEY_0: `url.${remote}.insteadOf`,
+    GIT_CONFIG_VALUE_0: "https://github.com/hara-seihun/pi-stack.git",
+  };
+  const result = runPublication(f.root, f.bin, "repair-result", environment);
+  assert.equal(result.status, 0, result.stderr);
+  const repair = JSON.parse(readFileSync(f.repairPath, "utf8"));
+  assert.equal(repair.status, "submitted");
+  const successor = JSON.parse(readFileSync(repair.successor.receipt, "utf8"));
+  assert.equal(successor.sourceSha, f.repairedSha);
+  assert.equal(successor.repairOf, requestId);
+  assert.equal(successor.repairDepth, policy.maxRepairDepth + 1);
+  assert.equal(run("git", ["rev-parse", successor.sourceRef], { cwd: remote }).stdout.trim(), f.repairedSha);
+  assert.equal(runPublication(f.root, f.bin, "repair-result", environment).status, 0);
+  assert.equal(readFileSync(environment.PUBLICATION_SUBMIT_LOG, "utf8").trim().split("\n").length, 2);
+  assert.deepEqual(JSON.parse(readFileSync(f.requestPath, "utf8")), request);
+
+  writeJson(repair.successor.receipt, { ...successor, status: "failed", failure: request.failure });
+  writeJson(join(f.root, "repair-policy.json"), { activatedAt: "2026-01-01T00:00:00.000Z", policy });
+  const watchdog = runPublication(f.root, f.bin, "watchdog", environment);
+  assert.equal(watchdog.status, 0, watchdog.stderr);
+  const successorRepair = JSON.parse(readFileSync(join(f.root, "repairs", successor.requestId, "receipt.json"), "utf8"));
+  assert.equal(successorRepair.status, "blocked");
+  assert.equal(successorRepair.launchAttempts, 0);
+  assert.equal(existsSync(environment.PI_STUB_LOG), false);
+});
+
 test("repair-result refuses an active owner and requires a saved proof", t => {
   const f = repairFixture(t, "blocked");
   let result = runPublication(f.root, f.bin, "repair-result", { ...f.environment, SYSTEMCTL_ACTIVE_STATE: "active" });

@@ -456,7 +456,14 @@ describe("ThreadService", () => {
     expect(first.service.pending(parent.id)).toMatchObject([{ source: "notification", state: "held", senderId: child.id }]);
     value(await first.service.close());
 
+    const reopened = fixture(first.directory);
+    await reopened.service.start();
+    expect(reopened.service.pending(parent.id)).toEqual([notification]);
+    expect(reopened.sessions).toHaveLength(0);
+    value(await reopened.service.close());
+
     const second = fixture(first.directory);
+    expect(second.service.pending(parent.id)).toEqual([notification]);
     value(await second.service.send({ requestId: "explicit", threadId: parent.id, text: "new instruction", delivery: "queue" }));
     expect(second.service.get(parent.id)?.state).toBe("running");
     expect(second.service.pending(parent.id).map(message => ({ id: message.id, source: message.source, text: message.text }))).toEqual([
