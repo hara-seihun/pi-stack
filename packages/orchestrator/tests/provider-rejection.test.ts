@@ -17,7 +17,7 @@ test("only official Codex bare Not Found errors are credential-check candidates"
   for (const message of ["404 model missing", "previous_response_id not found", "Model Not Found", "404", "Not Found: unsupported model"]) {
     expect(isCodexNotFoundError(message, model)).toBe(false);
   }
-  for (const baseUrl of [undefined, "https://example.com/backend-api", `${model.baseUrl}/codex/codex/responses`, `${model.baseUrl}?path=missing`]) {
+  for (const baseUrl of ["", "https://example.com/backend-api", `${model.baseUrl}/codex/codex/responses`, `${model.baseUrl}?path=missing`]) {
     expect(isCodexNotFoundError("Not Found", { ...model, baseUrl })).toBe(false);
   }
   expect(isCodexNotFoundError("Not Found", { ...model, api: "anthropic-messages" })).toBe(false);
