@@ -654,6 +654,38 @@ test("keeps a unique detached HEAD even when local branches are remote", () => {
   }
 });
 
+test("existing registration adopts one requested group and rejects a conflicting replacement", () => {
+  const f = fixture();
+  try {
+    mkdirSync(f.workspaces, { recursive: true });
+    const workspace = path.join(f.workspaces, "existing");
+    execFileSync("git", ["clone", f.remote, workspace]);
+    const first = JSON.parse(run(["register", "--path", workspace, "--lease-seconds", "0", "--json"], f.env));
+    assert.equal(first.groupId, null);
+
+    const grouped = JSON.parse(run([
+      "register", "--path", workspace, "--group", "task-one", "--cache", "generated-one", "--lease-seconds", "0", "--json",
+    ], f.env));
+    assert.equal(grouped.id, first.id);
+    assert.equal(grouped.groupId, "task-one");
+    assert.equal(grouped.cachePaths.includes("generated-one"), true);
+
+    assert.throws(() => run([
+      "register", "--path", workspace, "--group", "task-two", "--lease-seconds", "0", "--json",
+    ], f.env), /already belongs to group task-one; requested task-two/);
+    const retained = JSON.parse(run(["status", "--path", workspace, "--json"], f.env))[0];
+    assert.equal(retained.groupId, "task-one");
+
+    const replaced = JSON.parse(run([
+      "register", "--path", workspace, "--group", "task-one", "--cache", "generated-two", "--replace-cache", "--lease-seconds", "0", "--json",
+    ], f.env));
+    assert.equal(replaced.cachePaths.includes("generated-one"), false);
+    assert.equal(replaced.cachePaths.includes("generated-two"), true);
+  } finally {
+    f.close();
+  }
+});
+
 test("keeps every repository in a group until all are recoverable", () => {
   const f = fixture();
   try {
@@ -716,7 +748,7 @@ test("keeps an object source until registered alternate borrowers are released",
   }
 });
 
-test("adopts nested repositories as one workspace group", () => {
+test("adopts new and existing sibling repositories as one workspace group", () => {
   const f = fixture();
   try {
     const container = path.join(f.workspaces, "link-change");
@@ -725,6 +757,8 @@ test("adopts nested repositories as one workspace group", () => {
     const frontend = path.join(container, "frontend");
     execFileSync("git", ["clone", f.remote, backend]);
     execFileSync("git", ["clone", f.remote, frontend]);
+    const existing = JSON.parse(run(["register", "--path", frontend, "--lease-seconds", "0", "--json"], f.env));
+    assert.equal(existing.groupId, null);
     writeFileSync(path.join(backend, "file.txt"), "uncommitted work\n");
 
     const held = JSON.parse(run([
@@ -732,6 +766,7 @@ test("adopts nested repositories as one workspace group", () => {
     ], f.env));
     assert.equal(held.length, 2);
     assert.equal(new Set(held.map((result) => result.record.groupId)).size, 1);
+    assert.equal(held.find((result) => result.record.path === frontend).record.id, existing.id);
     assert.equal(held.some((result) => result.inspection.classification === "repair-required"), true);
     assert.equal(existsSync(backend), true);
     assert.equal(existsSync(frontend), true);
@@ -742,6 +777,74 @@ test("adopts nested repositories as one workspace group", () => {
     ], f.env));
     assert.equal(released.every((result) => result.action === "released-group"), true);
     assert.equal(existsSync(container), false);
+  } finally {
+    f.close();
+  }
+});
+
+test("conditional cache ownership follows each repository's tracked source", () => {
+  const f = fixture();
+  try {
+    const container = path.join(f.workspaces, "link-change");
+    mkdirSync(container, { recursive: true });
+    const backend = path.join(container, "backend");
+    const frontend = path.join(container, "frontend");
+    for (const repository of [backend, frontend]) {
+      execFileSync("git", ["clone", f.remote, repository]);
+      git(repository, "config", "user.name", "Test");
+      git(repository, "config", "user.email", "test@example.invalid");
+      writeFileSync(path.join(repository, ".gitignore"), "generated.json\n");
+    }
+    writeFileSync(path.join(backend, "generator.js"), "writeGeneratedOutput();\n");
+    git(backend, "add", ".gitignore", "generator.js");
+    git(backend, "commit", "-m", "own generated output");
+    git(frontend, "add", ".gitignore");
+    git(frontend, "commit", "-m", "ignore foreign output");
+
+    const records = JSON.parse(run([
+      "adopt", "--root", f.workspaces, "--nested-groups", "--cache-owned", "generated.json=generator.js", "--replace-cache", "--json",
+    ], f.env));
+    assert.equal(records.find((record) => record.path === backend).cachePaths.includes("generated.json"), true);
+    assert.equal(records.find((record) => record.path === frontend).cachePaths.includes("generated.json"), false);
+  } finally {
+    f.close();
+  }
+});
+
+test("adopts an independent repository nested inside a checkout without classifying it as cache", () => {
+  const f = fixture();
+  try {
+    mkdirSync(f.workspaces, { recursive: true });
+    const parent = path.join(f.workspaces, "agent-parent");
+    execFileSync("git", ["clone", f.remote, parent]);
+    writeFileSync(path.join(parent, ".gitignore"), ".link-ui-review/\n");
+    git(parent, "add", ".gitignore");
+    git(parent, "commit", "-m", "ignore nested review checkout");
+    git(parent, "push", "origin", "HEAD:main");
+    const nested = path.join(parent, ".link-ui-review");
+    execFileSync("git", ["clone", f.remote, nested]);
+    const existing = JSON.parse(run(["register", "--path", parent, "--lease-seconds", "0", "--json"], f.env));
+    assert.equal(existing.groupId, null);
+
+    writeFileSync(path.join(nested, "file.txt"), "nested unique work\n");
+    const held = JSON.parse(run([
+      "adopt", "--root", f.workspaces, "--nested-groups", "--lease-seconds", "21600", "--execute", "--json",
+    ], f.env));
+    assert.equal(held.length, 2);
+    assert.equal(new Set(held.map((result) => result.record.groupId)).size, 1);
+    assert.equal(held.find((result) => result.record.path === parent).record.id, existing.id);
+    assert.equal(held.find((result) => result.record.path === nested).record.leaseExpiresAt <= Date.now(), true);
+    assert.equal(held.find((result) => result.record.path === nested).inspection.classification, "repair-required");
+    assert.equal(existsSync(parent), true);
+    assert.equal(existsSync(nested), true);
+
+    git(nested, "checkout", "--", "file.txt");
+    const released = JSON.parse(run([
+      "reconcile", "--root", f.workspaces, "--execute", "--json",
+    ], f.env));
+    assert.equal(released.every((result) => result.action === "released-group"), true, JSON.stringify(released));
+    assert.equal(existsSync(parent), false);
+    assert.equal(existsSync(nested), false);
   } finally {
     f.close();
   }
