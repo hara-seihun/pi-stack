@@ -50,9 +50,10 @@ export const openPiSession: OpenPiSession = async (options, output, exit) => {
           extensionsOverride: () => isolated.resourceLoader.getExtensions(),
         } : { additionalExtensionPaths: extensions,
           extensionFactories: [threadSpeed, { name: "thread-context", factory: pi => {
+            const contextOwner = env.PI_REMOTE_SESSION_ID && env.PI_REMOTE_SERVER_URL ? "remote-mirror" : "runner";
             pi.on("context", (event, ctx) => {
               const active = new Set(pi.getActiveTools());
-              output({ type: "context_update", context: { systemPrompt: ctx.getSystemPrompt(),
+              output({ type: "context_update", contextOwner, context: { systemPrompt: ctx.getSystemPrompt(),
                 tools: pi.getAllTools().filter(tool => active.has(tool.name)).map(({ name, description, parameters }) => ({ name, description, parameters })),
                 messages: convertToLlm(event.messages) } });
             });

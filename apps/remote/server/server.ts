@@ -1005,6 +1005,7 @@ function handlePiEvent(sessionId: string, event: any) {
     return;
   }
   if (event.type === "context_update") {
+    if (event.contextOwner === "remote-mirror") return;
     const last = event.context?.messages?.findLast((message: any) => message.role === "assistant");
     storeContextCapture(sessionId, { context: event.context,
       capturedAt: Math.max(Date.now(), (storedContext(sessionId)?.capturedAt ?? 0) + 1),

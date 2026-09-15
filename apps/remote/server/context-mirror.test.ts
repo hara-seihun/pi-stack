@@ -14,6 +14,8 @@ const captures: Array<{
 let document = "";
 const requests: Array<{ method: string; bytes: number }> = [];
 let failNextCapture = false;
+let supersedeNextCapture = false;
+let supersedingCaptureTime = 0;
 let captureStarted: (() => void) | undefined;
 let blockedCapture: Promise<void> | undefined;
 const server = Bun.serve({
@@ -34,6 +36,12 @@ const server = Bun.serve({
       replacement: body.replacement,
       finalizesMessage: body.finalizesMessage,
     });
+    if (supersedeNextCapture) {
+      supersedeNextCapture = false;
+      document = JSON.stringify({ systemPrompt: "Newer capture", tools: [], messages: [] });
+      supersedingCaptureTime = body.capturedAt + 60_000;
+      return Response.json({ ok: true, capturedAt: supersedingCaptureTime, hash: sha256(document) });
+    }
     if (failNextCapture) {
       failNextCapture = false;
       captureStarted?.();
@@ -203,6 +211,30 @@ describe("context mirror", () => {
     expect(JSON.stringify(captures.at(-1)?.context)).toContain("must survive");
     captureStarted = undefined;
     blockedCapture = undefined;
+  });
+
+  test("a newer acknowledged capture supersedes pending work without retrying or rolling it back", async () => {
+    captures.length = 0;
+    requests.length = 0;
+    document = "";
+    const handlers = new Map<string, Handler>();
+    contextMirror({
+      on(type: string, handler: Handler) { handlers.set(type, handler); },
+      getActiveTools() { return []; },
+      getAllTools() { return []; },
+    } as unknown as ExtensionAPI);
+    const ctx = { mode: "rpc", getSystemPrompt: () => "System" };
+    const event = { messages: [{ role: "user", content: "Existing history", timestamp: 1 }] };
+    await handlers.get("context")?.(event, ctx);
+    supersedeNextCapture = true;
+    await handlers.get("message_end")?.({ message: assistant("Superseded", "stop") }, ctx);
+    expect(requests).toHaveLength(2);
+    expect(JSON.parse(document).systemPrompt).toBe("Newer capture");
+    await handlers.get("context")?.({ messages: [{ role: "user", content: "Next boundary", timestamp: 2 }] }, ctx);
+    expect(requests).toHaveLength(3);
+    expect(requests.at(-1)?.method).toBe("PUT");
+    expect(captures.at(-1)!.capturedAt).toBeGreaterThan(supersedingCaptureTime);
+    expect(JSON.parse(document).messages[0].content).toBe("Next boundary");
   });
 
   test("replaces the visible document as soon as Pi commits a compaction", async () => {

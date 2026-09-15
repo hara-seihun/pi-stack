@@ -79,8 +79,16 @@ export default function contextMirror(pi: ExtensionAPI) {
             });
           }
           if (!response.ok) throw new Error(await response.text() || `Context mirror failed (${response.status})`);
-          const result = await response.json() as { hash?: string };
-          if (result.hash && result.hash !== sha256(document)) throw new Error("Context mirror acknowledgement hash does not match");
+          const result = await response.json() as { hash?: string; capturedAt?: number };
+          if (result.hash && result.hash !== sha256(document)) {
+            if (typeof result.capturedAt === "number" && Number.isSafeInteger(result.capturedAt) && result.capturedAt >= snapshot.capturedAt) {
+              capturedAt = Math.max(capturedAt, result.capturedAt);
+              publishedDocument = null;
+              if (pending === snapshot) pending = null;
+              continue;
+            }
+            throw new Error("Context mirror acknowledgement hash does not match");
+          }
           publishedDocument = document;
           if (pending === snapshot) pending = null;
           retryDelay = 25;
