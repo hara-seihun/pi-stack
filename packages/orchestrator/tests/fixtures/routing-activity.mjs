@@ -2,6 +2,9 @@ import assert from 'node:assert/strict';
 import { mkdirSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { mock } from 'node:test';
+import https from 'node:https';
+import { EventEmitter } from 'node:events';
+import { syncBuiltinESMExports } from 'node:module';
 
 const { createAgentSession, DefaultResourceLoader, ModelRuntime, SessionManager, SettingsManager } = await import(process.env.TEST_SDK);
 const { AssistantMessageEventStream } = await import(process.env.TEST_AI);
@@ -10,7 +13,7 @@ const { SharedOAuthAuth } = await import(new URL('./auth/shared-oauth.js', `file
 const root = process.env.HOME, dir = join(root, 'agent');
 mkdirSync(dir);
 writeFileSync(join(dir, 'auth.json'), '{}');
-const credential = { type: 'oauth', access: 'test', refresh: 'test', expires: Date.now() + 3600000 };
+const credential = { type: 'oauth', access: 'test', refresh: 'test', expires: Date.now() + 3600000, accountId: 'account' };
 writeFileSync(join(root, 'auth.json'), JSON.stringify({ 'openai-codex-2': credential, 'openai-codex-3': credential }));
 const store = Store.open(process.env.PI_ORCHESTRATOR_LEDGER);
 for (const id of ['openai-codex-2', 'openai-codex-3']) store.upsertAccount({ id, provider: 'openai-codex' });
@@ -32,7 +35,7 @@ async function open(parent) {
     const stream = new AssistantMessageEventStream();
     const message = { role: 'assistant', content: [{ type: 'text', text: 'done' }], api: model.api, provider: model.provider, model: model.id, usage, stopReason: 'stop', timestamp: Date.now() };
     resolveRequest({ model, finish(stopReason = 'stop', errorMessage) {
-      const result = { ...message, stopReason, ...(errorMessage ? { errorMessage } : {}) };
+      const result = { ...message, stopReason, ...(errorMessage ? { errorMessage } : {}), ...(errorMessage === 'Not Found' ? { usage: { ...usage, input: 0, output: 0, totalTokens: 0 } } : {}) };
       stream.push(stopReason === 'error' || stopReason === 'aborted' ? { type: 'error', reason: stopReason, error: result } : { type: 'done', reason: stopReason, message: result });
       stream.end(result);
     } });
@@ -97,21 +100,45 @@ try {
   await child.session.waitForIdle();
   assert.equal(leases().length, 2, 'failover continuation releases on settlement');
 
-  let repairs = 0;
+  let repairs = 0, usageChecks = 0;
   const refreshRejected = SharedOAuthAuth.prototype.refreshRejected;
   SharedOAuthAuth.prototype.refreshRejected = async () => { repairs++; return credential; };
+  const usageRequest = mock.method(https, 'request', (url, options, callback) => {
+    assert.equal(url, 'https://chatgpt.com/backend-api/codex/usage');
+    assert.equal(options.headers.Authorization, 'Bearer test');
+    usageChecks++;
+    const request = new EventEmitter();
+    request.end = () => queueMicrotask(() => {
+      const response = new EventEmitter();
+      response.statusCode = 404;
+      response.headers = { 'x-request-id': 'fixture-usage-rejection' };
+      callback(response);
+      response.emit('end');
+    });
+    return request;
+  });
+  syncBuiltinESMExports();
   try {
-    const rejected = child.session.prompt('repair token'), rejectedRequest = await child.request();
-    rejectedRequest.finish('error', '401 unauthorized');
-    await rejected;
-    const repairedRequest = await child.request();
-    assert.equal(repairs, 1);
-    assert.equal(repairedRequest.model.provider, 'openai-codex-3');
-    assert.equal(leases().length, 3);
-    repairedRequest.finish();
-    await child.session.waitForIdle();
-    assert.equal(leases().length, 2, 'credential repair continuation releases on settlement');
-  } finally { SharedOAuthAuth.prototype.refreshRejected = refreshRejected; }
+    for (const [index, failure] of ['401 unauthorized', 'Not Found', 'Not Found'].entries()) {
+      const rejected = child.session.prompt('repair token'), rejectedRequest = await child.request();
+      rejectedRequest.finish('error', failure);
+      await rejected;
+      const repairedRequest = await child.request();
+      assert.equal(repairs, index + 1);
+      assert.equal(repairedRequest.model.provider, 'openai-codex-3');
+      assert.equal(leases().length, 3);
+      repairedRequest.finish(index === 2 ? 'error' : 'stop', index === 2 ? 'Not Found' : undefined);
+      await child.session.waitForIdle();
+      assert.equal(repairs, index + 1, 'a second rejection does not refresh or continue again');
+      assert.equal(leases().length, 2, 'credential repair continuation releases on settlement');
+    }
+    assert.equal(usageChecks, 2, '401 does not need corroboration; repeated 404 does not probe again');
+    assert.ok(child.session.sessionManager.getEntries().some(entry => entry.customType === 'credential-repair' && entry.data.detail.includes('fixture-usage-rejection')), 'corroboration diagnostic persists in the session');
+  } finally {
+    SharedOAuthAuth.prototype.refreshRejected = refreshRejected;
+    usageRequest.mock.restore();
+    syncBuiltinESMExports();
+  }
   const exhausted = child.session.prompt('no remaining account'), exhaustedRequest = await child.request();
   exhaustedRequest.finish('error', '429 rate limit');
   await exhausted;

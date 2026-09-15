@@ -2,16 +2,18 @@ import { afterEach, expect, test, vi } from "vitest";
 import { Store } from "../src/store.js";
 import type { SharedOAuthAuth } from "../src/auth/shared-oauth.js";
 import { installProviderOperations, runProviderOperation, type ProviderOperation } from "../src/extension/provider-operation.js";
+import * as codexUsage from "../src/meters-codex.js";
 
 const usage = { input: 9, output: 1, cacheRead: 2, cacheWrite: 0, totalTokens: 12, cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 } };
 const stores: Store[] = [];
-afterEach(() => { for (const store of stores.splice(0)) store.close(); vi.unstubAllEnvs(); vi.useRealTimers(); });
+afterEach(() => { for (const store of stores.splice(0)) store.close(); vi.unstubAllEnvs(); vi.useRealTimers(); vi.restoreAllMocks(); });
 function fixture() {
   const store = Store.open(":memory:"); stores.push(store);
   for (const id of ["openai-codex-2", "openai-codex-3"]) store.upsertAccount({ id, provider: "openai-codex" });
   let generation = 0;
   const auth = {
     resolve: vi.fn(async (account: string) => ({ apiKey: `${account}:token-${generation}` })),
+    credential: vi.fn(async (account: string) => ({ type: "oauth", access: `${account}:token-${generation}`, accountId: "account", expires: Date.now() + 3_600_000 })),
     refreshRejected: vi.fn(async () => { generation++; }),
     has: () => true,
   };
@@ -35,6 +37,25 @@ test("nested operation refreshes the exact refused credential once and records s
   expect(f.request.run).toHaveBeenCalledTimes(2);
   expect(f.store.activeLeases()).toHaveLength(0);
   expect(f.store.db.prepare("SELECT SUM(tokens) n FROM usage_hour").get()).toEqual({ n: 12 });
+});
+
+test.each(["repaired", "still-rejected", "usage-healthy"])("compaction uses corroborated 404 repair once: %s", async kind => {
+  const f = fixture();
+  f.request.model.baseUrl = "https://chatgpt.com/backend-api";
+  const probe = vi.spyOn(codexUsage, "fetchCodexUsage").mockImplementation(async () => {
+    if (kind === "usage-healthy") return [];
+    throw new codexUsage.CodexUnauthorizedError(404);
+  });
+  f.request.run = vi.fn(async (_model, options) => kind === "repaired" && options?.apiKey?.endsWith("token-1")
+    ? { ok: true as const, value: "checkpoint", usage }
+    : { ok: false as const, error: "Not Found" });
+  const result = await f.run();
+  expect(result.ok).toBe(kind === "repaired");
+  expect(probe).toHaveBeenCalledOnce();
+  expect(probe.mock.calls[0][0]).toBe("openai-codex-2:token-0");
+  expect(f.auth.refreshRejected).toHaveBeenCalledTimes(kind === "usage-healthy" ? 0 : 1);
+  expect(f.request.run).toHaveBeenCalledTimes(kind === "usage-healthy" ? 1 : 2);
+  expect(f.store.activeLeases()).toHaveLength(0);
 });
 
 test("interactive rate limits choose another alias without changing the model", async () => {

@@ -13,6 +13,7 @@ import type { UsageComponent } from "./domain.js";
 import { imageAuth } from "./image-service.js";
 import { chooseInteractiveAccount, eligibleInteractiveAccounts } from "./auth/account-selection.js";
 import { providerOAuth } from "./auth/shared-oauth.js";
+import { repairProviderCredential } from "./auth/provider-rejection.js";
 import { BROKER_ROUTES, validateBrokerBody, type BrokerFamily } from "./model-broker-contract.js";
 import { anthropicMeterReadings } from "./extension/usage-logger.js";
 
@@ -163,12 +164,16 @@ export function createModelBroker(config: ModelBrokerConfig, transport: BrokerTr
       authorize();
       const send = () => transport(BROKER_ROUTES[family].upstream, { method: "POST", headers, body: family === "anthropic" ? Uint8Array.from(requestBytes) : JSON.stringify(body), signal, redirect: "error" });
       let response = await send();
-      if (response.status === 401 && credential.apiKey) {
-        await response.body?.cancel();
-        await shared.refreshRejected(account.id, credential.apiKey, signal);
-        credential = await shared.resolve(account.id, signal);
-        authorize();
-        response = await send();
+      if ((response.status === 401 || family === "openai-codex" && response.status === 404) && credential.apiKey) {
+        const repair = await repairProviderCredential(shared, account.id, `HTTP ${response.status}`,
+          family === "openai-codex" && response.status === 404, signal, credential.apiKey);
+        res.setHeader("x-pi-credential-repair", encodeURIComponent(repair.detail));
+        if (repair.outcome === "repaired") {
+          await response.body?.cancel();
+          credential = await shared.resolve(account.id, signal);
+          authorize();
+          response = await send();
+        }
       }
       if (response.status === 429) store.setCooldown(account.id, Date.now() + 60_000);
       for (const { meterId, reading } of anthropicMeterReadings(Object.fromEntries(response.headers), Date.now())) {

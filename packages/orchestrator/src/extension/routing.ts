@@ -8,6 +8,7 @@ import { allowsAccountUse } from "../domain.js";
 import { ORCHESTRATOR_CATALOG } from "../catalog.js";
 import { defaultSharedAuthPath, SharedOAuthAuth, providerOAuth, sharedOAuthProvider } from "../auth/shared-oauth.js";
 import { isRateLimitError, isRejectedTokenError, rateLimitCooldownMs } from "../provider-errors.js";
+import { isCodexNotFoundError, repairProviderCredential, type CredentialRepair } from "../auth/provider-rejection.js";
 import { withAnthropicFiles } from "../auth/anthropic-files-provider.js";
 import { chooseInteractiveAccount } from "../auth/account-selection.js";
 import { installImageGeneration } from "./image-generation.js";
@@ -68,6 +69,8 @@ export default function routing(pi:ExtensionAPI):void{
   const ledgerPath=defaultLedgerPath(environment),store=Store.open(ledgerPath),families=new Map(builtinProviders().map((raw)=>{const provider=withAnthropicFiles(withCustomModels(raw));return[provider.id,provider] as const;}));
   pi.registerProvider(families.get("anthropic")!);
   const shared=new Map<string,SharedOAuthAuth>();
+  const requestTokens=new Map<string,string>();
+  pi.on("session_shutdown",()=>requestTokens.clear());
   for(const family of families.values()){
     const oauth=family.auth.oauth;if(!oauth)continue;
     shared.set(family.id,providerOAuth(family,environment.PI_ORCHESTRATOR_AUTH??defaultSharedAuthPath(ledgerPath)));
@@ -75,7 +78,7 @@ export default function routing(pi:ExtensionAPI):void{
   const assigned=environment.PI_ORCHESTRATOR_ASSIGNED==="1"&&environment.PI_ORCHESTRATOR_RUN_ID?store.run(environment.PI_ORCHESTRATOR_RUN_ID):undefined;
   for(const account of store.accounts()){
     const family=families.get(account.provider),auth=shared.get(account.provider);if(!family||!auth||(!allowsAccountUse(account,"interactive")&&assigned?.accountId!==account.id))continue;
-    pi.registerProvider(sharedOAuthProvider(family,account.id,account.label,auth));
+    pi.registerProvider(sharedOAuthProvider(family,account.id,account.label,auth,token=>requestTokens.set(account.id,token)));
   }
   installImageGeneration(pi, store, shared.get("openai-codex"));
   installProviderOperations(pi, store, shared);
@@ -195,7 +198,7 @@ export default function routing(pi:ExtensionAPI):void{
   });
   let unresolved:{failure:string;account:string;prompt:(failure:string,account:string)=>string}|undefined;
   /**
-   * Accounts this session has already had a token refreshed for. A provider
+   * Accounts repaired since their last successful request. A provider
    * that keeps refusing a freshly issued token is not going to be talked
    * round by a third one, and retrying would spin the session between the
    * same two states forever, so the second rejection falls through to
@@ -210,30 +213,36 @@ export default function routing(pi:ExtensionAPI):void{
    * has context and quota on, instead of failing the turn or migrating it
    * away over a token.
    */
-  const repairCredential=async(account:string):Promise<boolean>=>{
-    const auth=shared.get(familyOf(account));if(!auth||!store.account(account)||repaired.has(account))return false;
+  const repairCredential=async(account:string,failure:string,codexNotFound:boolean):Promise<CredentialRepair|undefined>=>{
+    const auth=shared.get(familyOf(account));if(!auth||!store.account(account)||repaired.has(account))return;
     repaired.add(account);
-    try{
-      const signal=AbortSignal.any([lifecycle.signal,AbortSignal.timeout(30_000)]);
-      const current=await auth.credential(account,signal);
-      await auth.refreshRejected(account,current.access,signal);
-      return true;
-    }catch{return false;}
+    const signal=AbortSignal.any([lifecycle.signal,AbortSignal.timeout(30_000)]);
+    return repairProviderCredential(auth,account,failure,codexNotFound,signal,requestTokens.get(account));
   };
   pi.on("agent_end",async(event,ctx)=>{
     if(closed)return;
     turnActive=false;
     unresolved=undefined;
     const last=event.messages.at(-1) as any;
-    if(last?.role!=="assistant"||last.stopReason!=="error")return;
+    if(last?.role!=="assistant")return;
+    if(last.stopReason!=="error"){
+      if(last.stopReason!=="aborted")repaired.delete(last.provider);
+      return;
+    }
     const failure:string=last.errorMessage??"";
     const failing:string|undefined=last.provider;if(!failing)return;
     // A user-selected replacement must not be blamed or overwritten by the prior request.
     if(failing!==ctx.model?.provider)return;
-    if(isRejectedTokenError(failure)){
-      const repairedCredential=await repairCredential(failing);
+    const codexNotFound=familyOf(failing)==="openai-codex"&&last.usage?.totalTokens===0
+      &&isCodexNotFoundError(failure,ctx.model);
+    if(isRejectedTokenError(failure)||codexNotFound){
+      const result=await repairCredential(failing,failure,codexNotFound);
       if(closed||ctx.model?.provider!==failing)return;
-      if(repairedCredential){unresolved={failure,account:failing,prompt:credentialRepairPrompt};return;}
+      if(result){
+        pi.appendEntry("credential-repair",{account:failing,...result});
+        if(result.outcome!=="repaired")ctx.ui.notify(result.detail,"warning");
+        if(result.outcome==="repaired"){unresolved={failure:result.detail,account:failing,prompt:credentialRepairPrompt};return;}
+      }
     }
     if(!isRateLimitError(failure))return;
     if(store.account(failing))store.setCooldown(failing,Date.now()+rateLimitCooldownMs(failure));

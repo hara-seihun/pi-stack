@@ -69,6 +69,7 @@ function httpsFetch(input: string | URL | Request, init?: RequestInit): Promise<
               // A status outside Response's legal range would throw here and
               // lose the real outcome; 502 says "upstream, unusable".
               status: res.statusCode !== undefined && res.statusCode >= 200 ? res.statusCode : 502,
+              headers: Object.fromEntries(Object.entries(res.headers).filter((entry): entry is [string, string] => typeof entry[1] === "string")),
             }),
           ),
         );
@@ -151,8 +152,8 @@ export function parseCodexUsage(value: unknown, now = Date.now()): CodexWindowUs
 
 /** A usage request the provider refused on the credential, not the request. */
 export class CodexUnauthorizedError extends Error {
-  constructor(readonly status: number) {
-    super(`codex usage HTTP ${status}`);
+  constructor(readonly status: number, detail = "") {
+    super(`codex usage HTTP ${status}${detail}`);
     this.name = "CodexUnauthorizedError";
   }
 }
@@ -160,9 +161,10 @@ export class CodexUnauthorizedError extends Error {
 export async function fetchCodexUsage(
   accessToken: string,
   chatgptAccountId: string,
-  fetchFn: FetchLike,
-  requestTimeoutMs: number,
+  fetchFn: FetchLike = httpsFetch,
+  requestTimeoutMs = DEFAULT_REQUEST_TIMEOUT_MS,
   now = Date.now(),
+  signal?: AbortSignal,
 ): Promise<CodexWindowUsage[]> {
   const response = await fetchFn(USAGE_URL, {
     headers: {
@@ -172,10 +174,17 @@ export async function fetchCodexUsage(
       "User-Agent": USER_AGENT,
       originator: USER_AGENT,
     },
-    signal: AbortSignal.timeout(requestTimeoutMs),
+    signal: AbortSignal.any([AbortSignal.timeout(requestTimeoutMs), ...(signal ? [signal] : [])]),
+    redirect: "error",
   });
-  if (response.status === 401) throw new CodexUnauthorizedError(response.status);
-  if (!response.ok) throw new Error(`codex usage HTTP ${response.status}`);
+  if (!response.ok) {
+    const body = (await response.text()).replaceAll(accessToken, "[credential]").replaceAll(chatgptAccountId, "[account]").replace(/\s+/g, " ").trim().slice(0, 512);
+    const requestId = response.headers.get("x-request-id") ?? response.headers.get("cf-ray");
+    const detail = `${requestId ? ` request-id=${requestId}` : ""}${body ? `: ${body}` : ""}`;
+    // This fixed account route returned 404 for an unexpired rejected token on 2026-09-15.
+    if (response.status === 401 || response.status === 404) throw new CodexUnauthorizedError(response.status, detail);
+    throw new Error(`codex usage HTTP ${response.status}${detail}`);
+  }
   return parseCodexUsage(await response.json(), now);
 }
 
@@ -243,12 +252,16 @@ export class CodexMeterSampler {
       return await fetchCodexUsage(credential.access, chatgptAccountId, this.fetchFn, this.requestTimeoutMs, now);
     } catch (thrown) {
       if (!(thrown instanceof CodexUnauthorizedError)) throw thrown;
-      const repaired = await this.auth.refreshRejected(
-        accountId,
-        credential.access,
-        AbortSignal.timeout(this.requestTimeoutMs),
-      );
-      return await fetchCodexUsage(repaired.access, chatgptAccountId, this.fetchFn, this.requestTimeoutMs, now);
+      try {
+        const repaired = await this.auth.refreshRejected(
+          accountId,
+          credential.access,
+          AbortSignal.timeout(this.requestTimeoutMs),
+        );
+        return await fetchCodexUsage(repaired.access, chatgptAccountId, this.fetchFn, this.requestTimeoutMs, now);
+      } catch (error) {
+        throw new Error(`${thrown.message}; after shared OAuth repair: ${String(error)}`);
+      }
     }
   }
 

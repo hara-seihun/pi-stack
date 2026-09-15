@@ -41,7 +41,7 @@ it.each(["anthropic", "openai-codex"] as const)("refreshes idle %s credentials o
   }
 });
 
-it.each(["anthropic", "openai-codex"] as const)("replaces an unexpired %s token the provider refuses and samples with the new one", async provider => {
+it.each([["anthropic", 401], ["openai-codex", 401], ["openai-codex", 404]] as const)("replaces an unexpired %s token refused with HTTP %s and samples with the new one", async (provider, status) => {
   const root = mkdtempSync(join(tmpdir(), "meter-auth-rejected-")), path = join(root, "auth.json"), now = Date.now();
   const store = Store.open(":memory:");
   try {
@@ -55,7 +55,7 @@ it.each(["anthropic", "openai-codex"] as const)("replaces an unexpired %s token 
     const auth = new SharedOAuthAuth({ path, providerId: provider, refresh, toAuth: async () => ({ apiKey: "unused" }) });
     const fetch = vi.fn(async (_url: unknown, init?: RequestInit) => {
       const authorization = (init?.headers as Record<string, string>).Authorization;
-      if (authorization === "Bearer rejected") return new Response("", { status: 401 });
+      if (authorization === "Bearer rejected") return new Response("", { status });
       expect(authorization).toBe("Bearer fresh");
       return Response.json(provider === "anthropic"
         ? { limits: [{ kind: "weekly_all", percent: 42, resets_at: new Date(now + 86_400_000).toISOString() }] }

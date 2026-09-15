@@ -304,9 +304,10 @@ export function sharedOAuthProvider(
   alias: string,
   label: string | undefined,
   auth: SharedOAuthAuth,
+  onRequestToken?: (accessToken: string) => void,
 ): Provider {
   const authName = `Shared ${family.name} OAuth`;
-  return aliasProvider(family, alias, label, {
+  const provider = aliasProvider(family, alias, label, {
     apiKey: {
       name: authName,
       async check() {
@@ -328,4 +329,15 @@ export function sharedOAuthProvider(
       toAuth: () => auth.resolve(alias, new AbortController().signal),
     },
   });
+  return {
+    ...provider,
+    stream(model, context, options) {
+      if (options?.apiKey) onRequestToken?.(options.apiKey);
+      return provider.stream(model, context, options);
+    },
+    streamSimple(model, context, options) {
+      if (options?.apiKey) onRequestToken?.(options.apiKey);
+      return provider.streamSimple(model, context, options);
+    },
+  };
 }
