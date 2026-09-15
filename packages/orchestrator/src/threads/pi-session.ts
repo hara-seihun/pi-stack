@@ -29,7 +29,7 @@ export const openPiSession: OpenPiSession = async (options, output, exit) => {
     PI_THREAD_CAN_SPAWN: options.env.PI_THREAD_CAN_SPAWN === "0" ? "0" : "1" };
   for (const key of Object.keys(env)) if (key.startsWith("PI_STACK_CORE_")) delete env[key];
   return piEnvironmentScope.run(env, async () => {
-    const execution = new PiExecution();
+    const execution = new PiExecution(() => settle());
     const extensions = options.args.flatMap((arg, index) => arg === "--extension" ? [resolve(options.cwd, options.args[index + 1])] : []);
     const agentDir = env.PI_CODING_AGENT_DIR ?? getAgentDir();
     if (options.args.includes("--orchestrator-context") && process.env.HOME !== join(options.cwd, ".home")) throw new Error("Isolated Pi sessions require their application runner environment");
@@ -72,15 +72,6 @@ export const openPiSession: OpenPiSession = async (options, output, exit) => {
         model: selection?.ok ? selection.model : undefined, thinkingLevel: argument(options.args, "--thinking") as never,
         tools: isolated?.tools, customTools: [bash, ...threadTools({ ...options, cwd, env })] });
       execution.bind(created.session);
-      const prompt = created.session.prompt.bind(created.session);
-      created.session.prompt = async (...args) => {
-        let activity = false;
-        const unsubscribe = created.session.subscribe(event => { if (event.type === "agent_start" || event.type === "agent_settled") activity = true; });
-        try {
-          await prompt(...args);
-          if (!activity && !created.session.isStreaming && !execution.blocked) settle();
-        } finally { unsubscribe(); }
-      };
       created.session.settingsManager.applyOverrides({ retry });
       return { ...created, services, diagnostics: services.diagnostics };
     };
@@ -88,15 +79,13 @@ export const openPiSession: OpenPiSession = async (options, output, exit) => {
       sessionManager: SessionManager.open(options.sessionFile, undefined, options.cwd) });
     const commands = new PiCommandReceipts();
     const activeWork = new Set<string>();
-    let executionStart: string | null = null;
+    let executionStart: string | null | undefined;
     const pendingInputs = new Map<string, PiCommand>();
     const internalResponses = new Map<string, PiEvent | undefined>();
     const dialogs = new Set<string>();
     const backgroundCommands = new Set<string>();
     let replacing = false;
-    let cancelling = false;
     let closed = false;
-    let settlement: Promise<void> | undefined;
     function branch() { return runtime.session.sessionManager.getBranch(); }
     function receipts() {
       const acceptedWorkIds = new Set<string>(), completedWorkIds = new Set<string>();
@@ -117,11 +106,10 @@ export const openPiSession: OpenPiSession = async (options, output, exit) => {
         : [...entries].reverse().find(entry => entry.type === "message" && entry.message.role === "assistant");
       return entry?.type === "message" ? entry.message : null;
     }
-    function settle(cancelled = false): Promise<void> {
-      if (closed || replacing || cancelling && !cancelled) return Promise.resolve();
-      if (settlement) return settlement;
-      const current = execution.whenIdle().then(() => {
-      if (closed || replacing) return;
+    function settle(cancelled = false): void {
+      if (closed || replacing && !cancelled || executionStart === undefined && !activeWork.size) return;
+      if (execution.active || !runtime.session.isIdle || runtime.session.isBashRunning) return;
+      if (!cancelled && (execution.blocked || runtime.session.getSteeringMessages().length || runtime.session.getFollowUpMessages().length)) return;
       const entries = branch();
       const firstInput = entries.findIndex(entry => entry.id === executionStart);
       const final = entries.slice(firstInput < 0 ? entries.length : firstInput + 1).reverse().find(entry => entry.type === "message" && entry.message.role === "assistant");
@@ -129,23 +117,25 @@ export const openPiSession: OpenPiSession = async (options, output, exit) => {
       const outcome = cancelled ? "cancelled" : message?.role === "assistant" && ["error", "aborted"].includes(message.stopReason) ? "failed" : "complete";
       const workIds = [...activeWork];
       if (workIds.length) runtime.session.sessionManager.appendCustomEntry("thread_settled", { workIds, outcome, assistantEntryId: final?.id ?? null });
-      activeWork.clear();
       checkpointPiSession(runtime.session.sessionManager);
-      if (settlement === current) settlement = undefined;
+      activeWork.clear();
+      executionStart = undefined;
       output({ type: "agent_settled", workIds, outcome, lastAssistantMessage: message });
-      }).finally(() => { if (settlement === current) settlement = undefined; });
-      settlement = current;
-      return current;
+    }
+    async function halt(): Promise<void> {
+      const stopped = execution.halt(runtime.session, Number(env.PI_THREAD_CANCEL_TIMEOUT_MS ?? 30_000), () => settle(true));
+      const dismissed = [...dialogs].map(id => rpc.command({ type: "extension_ui_response", id, cancelled: true }));
+      dialogs.clear();
+      await Promise.all([stopped, ...dismissed]);
     }
     async function replace<T>(operation: () => Promise<T>): Promise<T> {
       if (execution.blocked) throw new Error("Local execution has not confirmed cancellation");
       replacing = true;
       try {
-        await execution.cancel(runtime.session, 30_000);
+        await halt();
         const result = await operation();
         preparePiSession(runtime.session.sessionManager);
         checkpointPiSession(runtime.session.sessionManager);
-        activeWork.clear();
         commands.attach(runtime.session.sessionManager);
         output({ type: "session_changed", sessionFile: runtime.session.sessionFile, sessionId: runtime.session.sessionId, cwd: runtime.cwd });
         output({ type: "conversation_replaced", messages: runtime.session.messages });
@@ -164,10 +154,11 @@ export const openPiSession: OpenPiSession = async (options, output, exit) => {
       const cwd = requirePiCwd(admission, override ?? assertPiSessionFile(path).cwd, "import.cwd");
       return replace(() => importFromJsonl(path, cwd));
     };
+    let rpc: PiSession;
     try {
       const sdk = join(getPackageDir(), "dist");
       const { runSharedRpcMode } = await import(pathToFileURL(join(sdk, "modes/rpc/shared-rpc-mode.js")).href) as { runSharedRpcMode: SharedRpc };
-      const rpc = await runSharedRpcMode(runtime, { exit, output: event => {
+      rpc = await runSharedRpcMode(runtime, { exit, output: event => {
         if (event.type === "response") {
           if (internalResponses.has(String(event.id))) { internalResponses.set(String(event.id), event); return; }
           commands.finish(event, runtime.session.sessionManager);
@@ -183,16 +174,18 @@ export const openPiSession: OpenPiSession = async (options, output, exit) => {
               const workId = String(input.workId);
               runtime.session.sessionManager.appendCustomEntry("thread_rejected", { workId, error: event.error });
               activeWork.delete(workId);
+              if (!activeWork.size && runtime.session.isIdle) executionStart = undefined;
               checkpointPiSession(runtime.session.sessionManager);
             }
           }
           if (event.command === "get_state" && event.success) event = { ...event, data: { ...event.data as object, ...receipts(),
             lastAssistantMessage: lastAssistant(), context: acceptedContext, localTools: execution.activeTools, pendingCommandCount: backgroundCommands.size,
-            isStreaming: runtime.session.isStreaming || execution.activePrompts > 0 || execution.activeTools > 0 || !!settlement,
+            isStreaming: !runtime.session.isIdle || execution.active || executionStart !== undefined,
             cancellationFailed: execution.blocked } };
         }
         if (event.type === "extension_ui_request" && ["select", "confirm", "input", "editor"].includes(String(event.method))) dialogs.add(String(event.id));
-        if (event.type === "agent_settled") { settle(); return; }
+        if (event.type === "agent_start" && executionStart === undefined) executionStart = runtime.session.sessionManager.getLeafId();
+        if (event.type === "agent_settled") { queueMicrotask(() => settle()); return; }
         if (event.type === "message_end") checkpointPiSession(runtime.session.sessionManager);
         output(event);
       } });
@@ -215,13 +208,13 @@ export const openPiSession: OpenPiSession = async (options, output, exit) => {
             return;
           }
           if (inputCommands.has(command.type)) {
-            if (execution.blocked || cancelling || replacing) { response(false, "Local execution has not confirmed cancellation"); return; }
+            if (execution.blocked || replacing) { response(false, "Local execution has not confirmed cancellation"); return; }
             if (command.workId) {
               const workId = String(command.workId);
               const existing = receipts();
               if (existing.acceptedWorkIds.includes(workId)) {
                 if (command.resume === true && !existing.completedWorkIds.includes(workId)) {
-                  if (runtime.session.isStreaming || runtime.session.isCompacting || execution.activePrompts || execution.activeTools || settlement) { response(false, "Cannot resume active Pi execution"); return; }
+                  if (!runtime.session.isIdle || execution.active || executionStart !== undefined) { response(false, "Cannot resume active Pi execution"); return; }
                   const receipt = branch().find(entry => entry.type === "custom" && entry.customType === "thread_input" && (entry.data as { workId?: string }).workId === workId);
                   activeWork.add(workId);
                   runtime.session.sessionManager.appendCustomEntry("thread_resume", { workId });
@@ -235,23 +228,20 @@ export const openPiSession: OpenPiSession = async (options, output, exit) => {
                 } else response(true, undefined, { alreadyAccepted: true, completed: existing.completedWorkIds.includes(workId) });
                 return;
               }
+            }
+            if (command.type === "prompt" && (execution.active || !runtime.session.isIdle || executionStart !== undefined) && !(command.streamingBehavior && runtime.session.isStreaming)) { response(false, "Cannot overlap active Pi execution"); return; }
+            if (command.workId) {
+              const workId = String(command.workId);
               runtime.session.sessionManager.appendCustomEntry("thread_input", { workId, message: command.message, images: command.images, delivery: command.type });
-              if (!activeWork.size) executionStart = runtime.session.sessionManager.getLeafId();
+              if (command.type === "prompt" && executionStart === undefined) executionStart = runtime.session.sessionManager.getLeafId();
               activeWork.add(workId);
               checkpointPiSession(runtime.session.sessionManager);
               pendingInputs.set(String(command.id), command);
             }
           }
-          if (command.type === "abort") {
-            cancelling = true;
-            try {
-              for (const id of dialogs) await rpc.command({ type: "extension_ui_response", id, cancelled: true });
-              dialogs.clear();
-              await execution.cancel(runtime.session, Number(env.PI_THREAD_CANCEL_TIMEOUT_MS ?? 30_000));
-              await settle(true);
-              response(true);
-            } catch (error) { response(false, String(error)); }
-            finally { cancelling = false; }
+          if (["abort", "abort_bash", "abort_retry"].includes(command.type)) {
+            try { await halt(); response(true); }
+            catch (error) { response(false, String(error)); }
             return;
           }
           if (command.type === "extension_ui_response") dialogs.delete(String(command.id));
@@ -287,8 +277,8 @@ export const openPiSession: OpenPiSession = async (options, output, exit) => {
         }),
         close: () => piEnvironmentScope.run(env, async () => {
           if (closed) return;
-          if (backgroundCommands.size || runtime.session.isStreaming || runtime.session.isCompacting || runtime.session.isBashRunning || execution.activeTools || execution.activePrompts || execution.blocked || settlement) throw new Error("Cannot close active Pi execution; stop and confirm cancellation first");
-          await execution.cancel(runtime.session, Number(env.PI_THREAD_CANCEL_TIMEOUT_MS ?? 30_000));
+          if (backgroundCommands.size || !runtime.session.isIdle || runtime.session.isBashRunning || execution.active || execution.blocked) throw new Error("Cannot close active Pi execution; stop and confirm cancellation first");
+          await halt();
           closed = true;
           execution.dispose();
           await rpc.close();
