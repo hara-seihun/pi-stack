@@ -34,16 +34,16 @@ cat >> "$TRACE/host-scripts"
 printf '%s\\n' '{"host":"${host}","selectedCommit":"${selected}","checkoutCommit":"${selected}","runtimes":[]}'
 `, { mode: 0o700 });
   }
-  writeFileSync(join(root, "bin/alert"), '#!/bin/sh\necho /fixture/alert.md\n', { mode: 0o700 });
   const result = spawnSync(process.execPath, [fileURLToPath(new URL("../deploy/publication", import.meta.url)), "drain"], {
     encoding: "utf8", timeout: 5000,
     env: { ...process.env, PATH: `${join(root, "bin")}:${process.env.PATH}`, TRACE: root,
-      PI_STACK_PUBLICATION_STATE: root, PI_STACK_PUBLICATION_ALERT_COMMAND: join(root, "bin/alert") },
+      PI_STACK_PUBLICATION_STATE: root, PI_STACK_PUBLICATION_ALERT_INBOX: join(root, "inbox") },
   });
   assert.equal(result.status, 0, result.stderr);
   const failed = JSON.parse(readFileSync(receipt, "utf8"));
   assert.equal(failed.status, "failed");
   assert.equal(failed.failure.step, "inspect-release-ancestry");
+  assert.match(readFileSync(join(root, "inbox/pi-stack-publication-issues.md"), "utf8"), new RegExp(`converge-kenan live ${divergent}`));
   assert.match(failed.failure.message, new RegExp(`converge-kenan live ${divergent}`));
   assert.equal(failed.integrationSha, integration);
   assert.equal(failed.checks.status, "passed");
@@ -79,10 +79,9 @@ case "$*" in
 esac
 `, { mode: 0o700 });
   writeFileSync(join(root, "bin/npm"), '#!/bin/sh\necho "(fail) integration fixture rejects wrong core" >&2\necho "Expected: 201" >&2\necho "Received: 409" >&2\nexit 1\n', { mode: 0o700 });
-  writeFileSync(join(root, "bin/alert"), '#!/bin/sh\necho /fixture/alert.md\n', { mode: 0o700 });
   const result = spawnSync(process.execPath, [fileURLToPath(new URL("../deploy/publication", import.meta.url)), "drain"], {
     encoding: "utf8", timeout: 5000,
-    env: { ...process.env, PATH: `${join(root, "bin")}:${process.env.PATH}`, PI_STACK_PUBLICATION_STATE: root, PI_STACK_PUBLICATION_REPOSITORY: join(root, "canonical"), PI_STACK_PUBLICATION_ALERT_COMMAND: join(root, "bin/alert") },
+    env: { ...process.env, PATH: `${join(root, "bin")}:${process.env.PATH}`, PI_STACK_PUBLICATION_STATE: root, PI_STACK_PUBLICATION_REPOSITORY: join(root, "canonical"), PI_STACK_PUBLICATION_ALERT_INBOX: join(root, "inbox") },
   });
   assert.equal(result.status, 0, result.stderr);
   const failed = JSON.parse(readFileSync(receipt, "utf8"));
@@ -96,7 +95,7 @@ esac
   assert.equal(failed.failure.progress.cwd, join(root, "repository"));
   assert.match(failed.failure.excerpt, /integration fixture rejects wrong core/);
   assert.match(failed.failure.excerpt, /Received: 409/);
-  assert.equal(failed.alert.status, "filed");
+  assert.match(readFileSync(join(root, "inbox/pi-stack-publication-issues.md"), "utf8"), /integration checks exited 1/);
   assert.equal(failed.hosts, undefined);
   assert.equal(failed.integratedAt, undefined);
   assert.match(readFileSync(failed.failure.log, "utf8"), /checks/);

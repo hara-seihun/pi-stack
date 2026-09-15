@@ -100,6 +100,72 @@ function fixture(root?: string, workersOnly = false) {
   return { directory, service, sessions };
 }
 
+it("rejects nonexistent built-in models before creating a thread or saving settings", async () => {
+  const { service, directory, sessions } = fixture();
+  const settings = { model: "openai-codex/gpt-6-sol" };
+  expect(await service.spawn({ requestId: "invalid", cwd: directory, message: "assignment", settings })).toMatchObject({ ok: false, error: { code: "invalid_request" } });
+  expect(service.snapshot()).toEqual([]);
+  const thread = value(await service.spawn({ requestId: "invalid", cwd: directory, settings: { model: "sol" } }));
+  expect(await service.control({ threadId: thread.id, action: "settings", settings })).toMatchObject({ ok: false, error: { code: "invalid_request" } });
+  expect(service.get(thread.id)!.settings.model).toBe("openai-codex/gpt-5.6-sol");
+  expect(sessions).toEqual([]);
+});
+
+it("repairs only invalid undispatched model snapshots and retains their provenance without resuming", async () => {
+  const { service, directory } = fixture();
+  const thread = value(await service.spawn({ requestId: "initial", cwd: directory, message: "bad model", settings: { model: "sol", thinkingLevel: "low", speed: "priority" } }));
+  value(await service.send({ requestId: "valid", threadId: thread.id, text: "valid selection" }));
+  value(await service.control({ threadId: thread.id, action: "stop", descendants: false }));
+  const db = new DatabaseSync(join(directory, "threads.sqlite"));
+  try {
+    db.prepare("UPDATE thread_work SET settings=json_set(settings,'$.model','openai-codex/gpt-6-sol') WHERE id='initial'").run();
+    const pending = service.pending(thread.id);
+    const repaired = value(await service.control({ threadId: thread.id, action: "settings", settings: { model: "astra" } }));
+    expect(repaired.state).toBe("stopped");
+    expect(service.pending(thread.id)).toEqual(pending);
+    const settings = (id: string) => JSON.parse((db.prepare("SELECT settings FROM thread_work WHERE id=?").get(id) as { settings: string }).settings);
+    expect(settings("initial")).toEqual({ model: "openai-codex/gpt-6-astra", thinkingLevel: "low", speed: "priority" });
+    expect(settings("valid").model).toBe("openai-codex/gpt-5.6-sol");
+    expect(repaired.metadata?.modelSettingsRepairs).toEqual([{ workId: "initial", previousModel: "openai-codex/gpt-6-sol", model: "openai-codex/gpt-6-astra", time: expect.any(Number) }]);
+    const repeated = value(await service.control({ threadId: thread.id, action: "settings", settings: { model: "astra" } }));
+    expect(repeated.metadata?.modelSettingsRepairs).toEqual(repaired.metadata?.modelSettingsRepairs);
+  } finally { db.close(); }
+});
+
+it.each([false, true])("settles a missing runtime model once, holds remaining work, and informs the parent across restart, recovering=%s", async recovering => {
+  const directory = mkdtempSync(join(tmpdir(), "thread-model-failure-")); roots.push(directory);
+  const error = "Error: Model not found: private/removed-model";
+  const openSession = vi.fn<OpenPiSession>(async (_options, output) => {
+    output({ type: "runner_attached", control: "control.sock", socketPath: "session.sock" });
+    throw new Error(error);
+  });
+  const attachSession = vi.fn(async () => null);
+  const release = vi.fn();
+  const service = new ThreadService({ databasePath: join(directory, "threads.sqlite"), sessionsDir: directory, openSession, attachSession, admit: async () => ({ ok: true, value: { release } }) }); services.push(service);
+  const parent = value(await service.spawn({ requestId: "parent", cwd: directory }));
+  value(await service.control({ threadId: parent.id, action: "stop", descendants: false }));
+  value(service.importThread({ id: "child", parentId: parent.id, title: "Child", cwd: directory, sessionFile: join(directory, "child.jsonl"), settings: { model: "private/removed-model", thinkingLevel: "high", speed: "standard" } }));
+  value(service.importMessage({ id: "assignment", threadId: "child", text: "first", state: recovering ? "dispatched" : "queued", ...(recovering ? { executionId: "retained-execution" } : {}) }));
+  value(service.importMessage({ id: "later", threadId: "child", text: "second", state: "queued" }));
+  attachSession.mockClear();
+  await service.start();
+  await waitFor(() => service.get("child")?.state === "stopped" && service.get("child")?.metadata?.executionError === error);
+  expect(openSession).toHaveBeenCalledTimes(1);
+  expect(attachSession).toHaveBeenCalledTimes(1);
+  expect(release).toHaveBeenCalledTimes(1);
+  expect(service.pending("child")).toMatchObject([{ id: "later", state: "held" }]);
+  expect(service.latestSettlement("child")).toMatchObject({ outcome: "failed", workId: "assignment", finalMessage: null });
+  expect(JSON.parse(service.pending(parent.id)[0].text)).toMatchObject({ outcome: "failed", workId: "assignment", error });
+  service.reconcile(); await turn();
+  expect(openSession).toHaveBeenCalledTimes(1);
+  await service.close();
+  const restored = new ThreadService({ databasePath: join(directory, "threads.sqlite"), sessionsDir: directory, openSession, attachSession }); services.push(restored);
+  await restored.start(); await turn();
+  expect(openSession).toHaveBeenCalledTimes(1);
+  expect(restored.get("child")).toMatchObject({ state: "stopped", metadata: { executionError: error } });
+  expect(restored.pending(parent.id)).toHaveLength(1);
+});
+
 it("preserves the running account and model when future settings change", async () => {
   const f = fixture();
   await f.service.start();
