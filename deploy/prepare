@@ -20,6 +20,9 @@ if [[ ${PI_STACK_ALLOW_DIRTY:-0} != 1 && -n $(git -C "$root" status --porcelain)
   exit 65
 fi
 
+# Preparation and its children share the caller's deadline. Only deploy/host
+# starts the 50-second activation timer, after this process has returned.
+export PI_STACK_DEPLOY_DEADLINE_ACTIVE=1
 started=$SECONDS
 pi_stack_prepare_builds "$root" &
 builds_pid=$!
@@ -28,8 +31,10 @@ runtime_pid=$!
 "$root/deploy/transcription" &
 transcription_pid=$!
 failed=0
-wait "$builds_pid" || failed=1
-wait "$runtime_pid" || failed=1
-wait "$transcription_pid" || failed=1
+for job in "builds:$builds_pid" "runtime:$runtime_pid" "transcription:$transcription_pid"; do
+  if wait "${job#*:}"; then continue; else status=$?; fi
+  printf 'Pi stack preparation %s exited %s\n' "${job%%:*}" "$status" >&2
+  failed=1
+done
 (( failed == 0 )) || { echo "Pi stack preparation failed" >&2; exit 1; }
 printf 'prepared Pi stack %s in %ss\n' "$(git -C "$root" rev-parse --short HEAD)" "$((SECONDS - started))"
