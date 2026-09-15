@@ -29,7 +29,7 @@ describe("thread lifecycle context", () => {
     expect(instructions).toContain("without repeating setup or completed actions");
   });
 
-  test.each([false, true])("injects machine alerts into the first request with remote tools enabled=%s", async (remote) => {
+  test.each([false, true])("indexes alerts on the first request and never consumes them, remote=%s", async (remote) => {
     const inbox = mkdtempSync(join(tmpdir(), "pi-remote-alerts-"));
     const alert = join(inbox, "disk.txt");
     const environment = {
@@ -43,9 +43,9 @@ describe("thread lifecycle context", () => {
     writeFileSync(alert, "Disk needs attention\n");
     const handlers = new Map<string, (...args: any[]) => Promise<any>>();
     const tools: string[] = [];
-    const network = spyOn(globalThis, "fetch").mockResolvedValue(Response.json({ instructions: "Thread instructions" }));
+    const network = spyOn(globalThis, "fetch").mockImplementation(async () => Response.json({ instructions: "Thread instructions" }));
     const pi = {
-      getSessionName: () => "83",
+      getSessionName: () => "Already named before its first prompt",
       registerTool: (tool: { name: string }) => tools.push(tool.name),
       on: (name: string, handler: (...args: any[]) => Promise<any>) => handlers.set(name, handler),
     };
@@ -58,10 +58,12 @@ describe("thread lifecycle context", () => {
       expect(tools).toEqual([]);
       const result = await handlers.get("before_agent_start")!(
         { prompt: "Help", systemPrompt: "System" },
-        { sessionManager: { getBranch: () => [{ type: "message", message: { role: "user" } }] } },
+        { sessionManager: { getBranch: () => [{ type: "session_info", name: "83" }] } },
       );
       expect(result.message).toMatchObject({ customType: "pi-remote-machine-alerts", display: true });
-      expect(result.message.content).toContain("Disk needs attention");
+      expect(result.message.content).toContain("disk.txt");
+      expect(result.message.content).toContain(inbox);
+      expect(result.message.content).not.toContain("Disk needs attention");
       expect(network).toHaveBeenCalledTimes(remote ? 1 : 0);
       if (remote) {
         expect(result.systemPrompt).toContain("Thread instructions");
@@ -70,8 +72,30 @@ describe("thread lifecycle context", () => {
         expect(result.systemPrompt).not.toContain("<pi-remote-image");
       }
       expect(existsSync(alert)).toBe(true);
-      await handlers.get("agent_start")!();
-      expect(existsSync(alert)).toBe(false);
+      expect(handlers.has("agent_start")).toBe(false);
+      for (const prior of [
+        { type: "message", message: { role: "user" } },
+        { type: "custom_message", customType: "pi-remote-machine-alerts" },
+        { type: "branch_summary" },
+        { type: "compaction" },
+      ]) {
+        const followup = await handlers.get("before_agent_start")!(
+          { prompt: "Hard-steer follow-up", systemPrompt: "System" },
+          { sessionManager: { getBranch: () => [prior] } },
+        );
+        expect(followup.message).toBeUndefined();
+      }
+      expect(existsSync(alert)).toBe(true);
+
+      for (let i = 0; i < 200; i++) writeFileSync(join(inbox, `failure-${i}.txt`), "large alert".repeat(1000));
+      const backlog = await handlers.get("before_agent_start")!(
+        { prompt: "Fresh prompt", systemPrompt: "System" },
+        { sessionManager: { getBranch: () => [] } },
+      );
+      expect(backlog.message.content).toContain("201 machine alerts");
+      expect(backlog.message.content).toContain("191 more files");
+      expect(Buffer.byteLength(backlog.message.content)).toBeLessThan(8192);
+      expect(backlog.message.content).not.toContain("large alert");
     } finally {
       network.mockRestore();
       for (const [key, value] of Object.entries(previous)) {
