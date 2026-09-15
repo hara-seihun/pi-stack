@@ -671,14 +671,14 @@ function RemoteApp() {
   const selectedActivity = selected?.activity || "IDLE";
   const selectedTool = selected?.activeTool;
   const title = selected?.name || "Pi Remote";
-  const orchestrator = orchestratorThreads(knownSessions);
+  const activeOrchestratorCount = orchestratorThreads(knownSessions).filter(working).length;
   const machine = dashboard?.machine;
   const machineText = machine ? `CPU ${machine.cpuPercent ?? "—"}% · GPU ${machine.gpuPercent ?? "—"}% · RAM ${machine.memory?.percentUsed ?? "—"}% · DISK ${machine.disk?.percentUsed ?? "—"}%` : "CPU — · GPU — · RAM — · DISK —";
   const entries = contextEntries;
   const images = useMemo(() => state.images ? new Map(state.images.images.map(image => [image.id, image])) : null, [state.images]);
   const liveThinking = state.liveThinking?.document || "";
   const liveText = state.liveText?.document || "";
-  const drawerCounts: Record<DrawerTab, number> = { threads: sessions.length, orchestrator: orchestrator.length, archived: Math.max(state.archivedTotal, state.archived.length), files: rootFileCount };
+  const drawerCounts: Record<DrawerTab, number> = { threads: sessions.length, orchestrator: activeOrchestratorCount, archived: Math.max(state.archivedTotal, state.archived.length), files: rootFileCount };
   const drawerLabels: Record<DrawerTab, string> = { threads: "Threads", orchestrator: "Orchestrator", archived: "Archived", files: "Files" };
   const slashToken = prompt.startsWith("/") && !/\s/.test(prompt) ? prompt.slice(1).toLowerCase() : null;
   const visibleCommands = slashToken === null ? [] : state.slashCommands.filter((command) => command.source === "skill" && !command.name.toLowerCase().includes("mcp") && command.name.toLowerCase().startsWith(slashToken));
