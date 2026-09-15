@@ -1,16 +1,17 @@
 import { useEffect, useState } from "react";
 import { API } from "../../server/api";
+import { appStorageKey } from "./app-path";
 import type { IdleNotificationFeed } from "../../server/protocol";
 import { browserFetch, loadEnvironments, nativePlatform, nativeSessionReady, remote } from "./native";
 import { ThreadNotifications, threadNotificationKey } from "./thread-notifications";
 import { DismissibleError } from "./dismissible-error";
 
 export interface NotificationTarget { environment?: string; sessionId?: string; user?: string }
-const TARGET = "pi-notification-target";
+const targetKey = () => appStorageKey("pi-notification-target");
 
 export async function takeNotificationTarget(): Promise<NotificationTarget | null> {
-  const saved = sessionStorage.getItem(TARGET);
-  if (saved) { sessionStorage.removeItem(TARGET); return JSON.parse(saved); }
+  const saved = sessionStorage.getItem(targetKey());
+  if (saved) { sessionStorage.removeItem(targetKey()); return JSON.parse(saved); }
   if (nativePlatform) return await remote.notificationTarget?.() ?? null;
   const url = new URL(location.href);
   if (!url.searchParams.has("idleSession")) return null;
@@ -21,7 +22,7 @@ export async function takeNotificationTarget(): Promise<NotificationTarget | nul
 }
 
 export function retainNotificationTarget(target: NotificationTarget) {
-  sessionStorage.setItem(TARGET, JSON.stringify(target));
+  sessionStorage.setItem(targetKey(), JSON.stringify(target));
 }
 
 export function NotificationControl({ sessionId }: { sessionId: string | null }) {
@@ -103,7 +104,7 @@ export function NotificationControl({ sessionId }: { sessionId: string | null })
     const timers = new Set<ReturnType<typeof setTimeout>>();
     const failures = new Map<string, string>();
     const poll = async (environment: { id: string; name: string; baseUrl: string }) => {
-      const key = `pi-idle-cursor:${user}:${environment.id}`;
+      const key = appStorageKey(`pi-idle-cursor:${user}:${environment.id}`);
       try {
         await navigator.locks.request(key, { signal: controller.signal }, async () => {
         const stored = localStorage.getItem(key);

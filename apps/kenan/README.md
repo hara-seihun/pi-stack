@@ -24,10 +24,12 @@ Notifications show the launcher's Kenan head artwork, with a monochrome head for
 Ignored [`android/local.properties`](android/local.properties) supplies one credential-free bootstrap router origin. The build requires Android SDK 36, Java 21, and Bun for the connection tests.
 
 ```properties
-piRemoteRouterUrl=https://pi-remote.example.ts.net
+piRemoteRouterUrl=https://pi-remote.example.ts.net/pi-stack
 ```
 
 The field is required. HTTP is also accepted for private-LAN or loopback development, such as `http://127.0.0.1:8788`. Credentials, paths, query strings, and fragments are rejected. Endpoint declarations and SSH key files are not read by the build. The router owns person access policy and remote proxy routing; adding an environment does not require a new APK.
+
+The bootstrap URL accepts an optional plain directory prefix and no credentials, query or fragment. A root-hosted router uses just its origin. The [browser hosting contract](../../docs/deployment.md#browser-prefix-hosting) describes prefix stripping; native API, notification and app-update requests retain this prefix. Android assets still load from the bundled app root.
 
 The public `GET /v1/environment` supplies the identity chooser. `POST /v1/unlock` takes the person hint in `x-pi-remote-user` and a JSON key, then returns `{ok:true,user,session}`. Authenticated API requests carry `x-pi-remote-session`; navigations can carry `session=`. `GET /v1/environments` returns only the session's permitted `{id,name,baseUrl,icon?}` entries.
 

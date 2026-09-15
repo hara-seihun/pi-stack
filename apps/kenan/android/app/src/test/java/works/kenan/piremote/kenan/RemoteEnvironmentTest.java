@@ -18,6 +18,11 @@ public class RemoteEnvironmentTest {
         assertTrue(RemoteEnvironment.parse("https://router.example", new JSONObject("{\"environments\":[]}")).isEmpty());
     }
 
+    @Test public void retainsBootstrapMountForLocalAndRemoteNotificationEndpoints() {
+        assertEquals("https://router.example/pi-stack", RemoteEnvironment.resolve("https://router.example/pi-stack", ""));
+        assertEquals("https://router.example/pi-stack/v1/remotes/work", RemoteEnvironment.resolve("https://router.example/pi-stack", "/v1/remotes/work"));
+    }
+
     @Test public void rejectsPathsThatCouldSendTheSessionElsewhere() {
         for (String prefix : new String[] { "https://other.example", "//other.example", "remotes/work", "/a/../work", "/../work", "/..", "/%2e%2e/work", "/work?session=x", "/work#fragment", "/work/", "/a//b", "/a\\b" }) {
             assertThrows(prefix, IllegalArgumentException.class, () -> RemoteEnvironment.resolve("https://router.example", prefix));

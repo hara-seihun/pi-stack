@@ -1,7 +1,13 @@
-import { afterEach, expect, test } from "bun:test";
+import { afterEach, beforeEach, expect, test } from "bun:test";
 import { ThreadNotifications, threadNotificationKey } from "./src/thread-notifications";
 
 const originals = { Notification: globalThis.Notification, BroadcastChannel: globalThis.BroadcastChannel, locks: navigator.locks };
+const originalLocation = Object.getOwnPropertyDescriptor(globalThis, "location");
+beforeEach(() => Object.defineProperty(globalThis, "location", { configurable: true, value: new URL("https://router.test/") }));
+afterEach(() => {
+  if (originalLocation) Object.defineProperty(globalThis, "location", originalLocation);
+  else delete (globalThis as any).location;
+});
 const held = new Map<string, number>();
 const shown: FakeNotification[] = [];
 const channels = new Set<FakeChannel>();

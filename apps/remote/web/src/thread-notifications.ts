@@ -1,11 +1,13 @@
+import { appPath, appStorageKey } from "./app-path";
+
 export function threadNotificationKey(user: string, environment: string, session: string) {
-  return `pi-visible-thread:${JSON.stringify([user, environment, session])}`;
+  return appStorageKey(`pi-visible-thread:${JSON.stringify([user, environment, session])}`);
 }
 
 export class ThreadNotifications {
   private notifications = new Map<string, Notification>();
   private disposed = false;
-  private channel = new BroadcastChannel("pi-thread-notifications");
+  private channel = new BroadcastChannel(appStorageKey("pi-thread-notifications"));
 
   constructor() {
     this.channel.onmessage = (event) => {
@@ -33,7 +35,7 @@ export class ThreadNotifications {
     await navigator.locks.request(key, { ifAvailable: true }, (lock) => {
       if (!lock || this.disposed) return;
       this.clear(key);
-      const notification = new Notification(title, { body: "Session is idle", tag: key, icon: "/kenan.png" });
+      const notification = new Notification(title, { body: "Session is idle", tag: key, icon: appPath("kenan.png") });
       this.notifications.set(key, notification);
       notification.onclick = () => { onClick(); this.clear(key); };
       notification.onclose = () => {
