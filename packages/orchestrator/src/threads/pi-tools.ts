@@ -3,6 +3,7 @@ import { defineTool } from "@earendil-works/pi-coding-agent";
 import { resolveDelivery, type PiSessionOptions, type Result, type ThreadApi } from "./contracts.js";
 import { createThreadClient } from "./http.js";
 import { historyPreview } from "./pi-history-preview.js";
+import { readableNotificationText } from "./message-format.js";
 import { DELEGATION_POLICY } from "../delegation-policy.js";
 import { SUBAGENT_MODEL_DESCRIPTIONS } from "../catalog.js";
 
@@ -60,7 +61,7 @@ export function threadTools(options: PiSessionOptions) {
         const inspected = await api(signal).inspect(input.threadId);
         if (!inspected.ok) return result(inspected);
         return result({ ok: true, value: { ...historyPreview(value.value, input.entryId, input.entryId ? input.offset ?? 0 : 0),
-          thread: inspected.value.thread, pending: inspected.value.pending.map(({ images: _images, text, ...receipt }) => ({ ...receipt, text: text.slice(0, 2000) })) } });
+          thread: inspected.value.thread, pending: inspected.value.pending.map(({ images: _images, text, ...receipt }) => ({ ...receipt, text: readableNotificationText({ ...receipt, text }).slice(0, 2000) })) } });
       },
     }),
     defineTool({
