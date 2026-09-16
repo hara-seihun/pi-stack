@@ -1,4 +1,5 @@
-import type { Result, ThreadApi, ThreadControl, ThreadHistory, ThreadInspection, ThreadSettlements, PiCommand, ThreadList, ThreadMessage, ThreadPage, ThreadRead, SendThread, SpawnThread, Thread } from "./contracts.js";
+import { validateThreadAwait } from "./contracts.js";
+import type { AwaitThreads, ThreadAwaitResult, Result, ThreadApi, ThreadControl, ThreadHistory, ThreadInspection, ThreadSettlements, PiCommand, ThreadList, ThreadMessage, ThreadPage, ThreadRead, SendThread, SpawnThread, Thread } from "./contracts.js";
 
 export interface ThreadOwner { id: string; api: ThreadApi }
 const error = (code: "not_found" | "invalid_request" | "conflict", message: string): Result<never> => ({ ok: false, error: { code, message } });
@@ -60,6 +61,61 @@ export class ThreadDirectory implements ThreadApi {
   async command(threadId: string, command: PiCommand): Promise<Result<unknown>> {
     const owner = await this.owner(threadId);
     return owner.ok ? owner.value.api.command(threadId, command) : owner;
+  }
+  async await(input: AwaitThreads, signal?: AbortSignal): Promise<Result<ThreadAwaitResult>> {
+    const valid = validateThreadAwait(input);
+    if (!valid.ok) return valid;
+    const controller = new AbortController();
+    const cancelled: Result<never> = { ok: false, error: { code: "unavailable", message: "Thread await cancelled" } };
+    let onAbort: () => void = () => {};
+    const aborted = new Promise<Result<ThreadAwaitResult>>(resolve => {
+      onAbort = () => { controller.abort(); resolve(cancelled); };
+      signal?.addEventListener("abort", onAbort, { once: true });
+      if (signal?.aborted) onAbort();
+    });
+    const wait = async (): Promise<Result<ThreadAwaitResult>> => {
+      if (controller.signal.aborted) return cancelled;
+      const resolved = await Promise.all(input.threadIds.map(async threadId => {
+        const owner = await this.owner(threadId);
+        if (!owner.ok || controller.signal.aborted) return owner.ok ? cancelled : owner;
+        const page = await owner.value.api.list({ id: threadId, limit: 1 });
+        if (!page.ok) return page;
+        const thread = page.value.threads.find(thread => thread.id === threadId);
+        if (!thread) return error("not_found", `Thread ${threadId} was not found`);
+        if (thread.parentId !== input.parentId) return error("invalid_request", `Thread ${threadId} is not a direct child of ${input.parentId}`);
+        return { ok: true as const, value: { owner: owner.value, threadId } };
+      }));
+      if (controller.signal.aborted) return cancelled;
+      const groups = new Map<ThreadOwner, string[]>();
+      for (const item of resolved) {
+        if (!item.ok) return item;
+        const ids = groups.get(item.value.owner) ?? [];
+        ids.push(item.value.threadId);
+        groups.set(item.value.owner, ids);
+      }
+      const after = Object.fromEntries([
+        ...Object.entries(input.after ?? {}),
+        ...input.threadIds.map(threadId => [threadId, input.after && Object.hasOwn(input.after, threadId) ? input.after[threadId]! : 0] as const),
+      ]);
+      const waits = new Map([...groups].map(([owner, threadIds]) => [owner, owner.api.await({ ...input, threadIds, after }, controller.signal)
+        .then(result => ({ owner, result }))]));
+      while (waits.size) {
+        const { owner, result } = await Promise.race(waits.values());
+        waits.delete(owner);
+        if (!result.ok) return result;
+        if (result.value.settlement) {
+          const settlement = result.value.settlement;
+          after[settlement.threadId] = settlement.seq;
+          return { ok: true, value: { settlement, after, remainingThreadIds: input.threadIds.filter(id => id !== settlement.threadId) } };
+        }
+      }
+      return { ok: true, value: { settlement: null, after, remainingThreadIds: [...input.threadIds] } };
+    };
+    try { return await Promise.race([wait(), aborted]); }
+    finally {
+      signal?.removeEventListener("abort", onAbort);
+      controller.abort();
+    }
   }
   async settlements(after = 0, limit = 100): Promise<Result<ThreadSettlements>> {
     return this.owners[0]!.api.settlements(after, limit);

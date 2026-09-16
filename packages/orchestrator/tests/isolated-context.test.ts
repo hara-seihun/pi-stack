@@ -18,7 +18,7 @@ it.each(["browser", "application"])("builds an isolated %s Pi context without mu
   const application = join(root, "application.mjs");
   writeFileSync(application, `export default pi => { for (const name of ['inspect_scene', 'unselected_tool']) pi.registerTool({ name, label: name, description: name, parameters: {type:'object',properties:{}}, execute: async () => ({content:[{type:'text',text:'frame'}],details:{}}) }); }`);
   const context = kind === "application"
-    ? { tools: ["read", "write", "edit", "bash", "inspect_scene"], extensions: [application] }
+    ? { tools: ["read", "write", "edit", "bash", "thread_await", "inspect_scene"], extensions: [application] }
     : { tools: ["read", "write", "edit", "bash", "agent_browser"] };
   const options: PiSessionOptions = {
     threadId: "isolated-thread",

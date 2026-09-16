@@ -180,6 +180,8 @@ it.each([false, true])("settles a missing runtime model once, holds remaining wo
   expect(release).toHaveBeenCalledTimes(1);
   expect(service.pending("child")).toMatchObject([{ id: "later", state: "held" }]);
   expect(service.latestSettlement("child")).toMatchObject({ outcome: "failed", workId: "assignment", finalMessage: null });
+  expect(value(await service.await({ parentId: parent.id, threadIds: ["child"], timeoutMs: 0 })).settlement)
+    .toEqual(service.latestSettlement("child"));
   const notification = service.pending(parent.id)[0];
   expect(JSON.parse(notification.text)).toMatchObject({ outcome: "failed", workId: "assignment", finalMessage: null, error });
   service.reconcile(); await turn();
@@ -255,6 +257,86 @@ it("reports persisted settings when the running session rejects their applicatio
     ok: false, error: { message: expect.stringContaining("Thread settings were saved, but the running session did not confirm") },
   });
   expect(f.service.get(thread.id)!.settings.thinkingLevel).toBe("low");
+});
+
+describe("await child settlements", () => {
+  async function children() {
+    const f = fixture();
+    const parent = value(await f.service.spawn({ requestId: "await-parent", cwd: f.directory }));
+    const a = value(await f.service.spawn({ requestId: "await-a", cwd: f.directory, parentId: parent.id, message: "A" }));
+    const b = value(await f.service.spawn({ requestId: "await-b", cwd: f.directory, parentId: parent.id, message: "B" }));
+    value(await f.service.control({ threadId: parent.id, action: "stop", descendants: false }));
+    value(await f.service.start());
+    await waitFor(() => f.sessions.filter(session => session.isStreaming).length === 2);
+    return { ...f, parent, a, b, session: (id: string) => f.sessions.find(session => session.options.threadId === id)! };
+  }
+
+  it("returns the first child and keeps a simultaneous second completion available across restart", async () => {
+    const f = await children();
+    const input = { parentId: f.parent.id, threadIds: [f.a.id, f.b.id] };
+    const waiting = f.service.await(input);
+    f.session(f.b.id).settle("B returned first");
+    const first = value(await waiting);
+    expect(first).toMatchObject({ settlement: { threadId: f.b.id, outcome: "complete", finalMessage: { content: [{ text: "B returned first" }] } }, remainingThreadIds: [f.a.id] });
+    expect(f.session(f.a.id).isStreaming).toBe(true);
+    f.session(f.a.id).settle("A returned too");
+    await waitFor(() => f.service.latestSettlement(f.a.id) !== null);
+    value(await f.service.detach());
+    const next = fixture(f.directory);
+    const second = value(await next.service.await({ ...input, threadIds: first.remainingThreadIds, after: first.after }));
+    expect(second).toMatchObject({ settlement: { threadId: f.a.id, outcome: "complete" }, remainingThreadIds: [] });
+    expect(second.after[f.b.id]).toBe(first.settlement!.seq);
+    expect(value(await next.service.await({ ...input, after: second.after, timeoutMs: 0 })).settlement).toBeNull();
+    expect(next.sessions).toHaveLength(0);
+  });
+
+  it("reports failed and cancelled executions without treating idle as success", async () => {
+    const f = await children();
+    const input = { parentId: f.parent.id, threadIds: [f.a.id, f.b.id] };
+    const waiting = f.service.await(input);
+    f.session(f.a.id).settleMessage({ role: "assistant", content: [], stopReason: "error", errorMessage: "Provider failed" });
+    const first = value(await waiting);
+    expect(first.settlement).toMatchObject({ threadId: f.a.id, outcome: "failed", error: "Provider failed" });
+    expect(first.settlement).toEqual(f.service.latestSettlement(f.a.id));
+    const next = f.service.await({ ...input, threadIds: first.remainingThreadIds });
+    value(await f.service.control({ threadId: f.b.id, action: "stop", descendants: false }));
+    expect(value(await next).settlement).toMatchObject({ threadId: f.b.id, outcome: "cancelled" });
+  });
+
+  it("cleans up waits on cancellation, timeout and controller handoff without stopping children", async () => {
+    const f = await children();
+    const input = { parentId: f.parent.id, threadIds: [f.a.id] };
+    const subscriptionCount = () => (f.service as any).listeners.size;
+    const before = subscriptionCount();
+    const controller = new AbortController();
+    const cancelled = f.service.await(input, controller.signal);
+    expect(subscriptionCount()).toBe(before + 1);
+    controller.abort();
+    expect(await cancelled).toMatchObject({ ok: false, error: { message: "Thread await cancelled" } });
+    expect(subscriptionCount()).toBe(before);
+    expect(value(await f.service.await({ ...input, timeoutMs: 0 }))).toMatchObject({ settlement: null, remainingThreadIds: input.threadIds });
+    expect(subscriptionCount()).toBe(before);
+    expect(f.session(f.a.id).commands.some(command => command.type === "abort")).toBe(false);
+    const handoff = f.service.await(input);
+    f.service.suspend();
+    expect(await handoff).toMatchObject({ ok: false, error: { code: "unavailable" } });
+    expect(subscriptionCount()).toBe(before);
+    value(await f.service.detach());
+  });
+
+  it("validates the whole group and child relationship before returning a stored result", async () => {
+    const f = await children();
+    f.session(f.a.id).settle("done");
+    await waitFor(() => f.service.latestSettlement(f.a.id) !== null);
+    const input = { parentId: f.parent.id, threadIds: [f.a.id] };
+    for (const patch of [{ threadIds: [] }, { threadIds: [f.a.id, f.a.id] }, { threadIds: [f.parent.id] },
+      { threadIds: Array.from({ length: 101 }, (_, i) => String(i)) }, { after: { [f.a.id]: -1 } },
+      { timeoutMs: 30_001 }, { parentId: "another-parent" }]) {
+      expect(await f.service.await({ ...input, ...patch })).toMatchObject({ ok: false, error: { code: "invalid_request" } });
+    }
+    expect(await f.service.await({ ...input, threadIds: [f.a.id, "missing"] })).toMatchObject({ ok: false, error: { code: "not_found" } });
+    value(await f.service.control({ threadId: f.b.id, action: "stop", descendants: false }));
+  });
 });
 
 describe("leaf Orchestrator workers", () => {

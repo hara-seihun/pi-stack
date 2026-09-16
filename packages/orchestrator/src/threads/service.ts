@@ -8,8 +8,8 @@ import { isRunContext } from "../isolated-context-contract.js";
 import { isModelConfigurationError } from "../provider-errors.js";
 import { resolveThreadSettings } from "./settings.js";
 import { formatThreadMessage, serializeThreadNotification } from "./message-format.js";
-import { isThreadState, resolveDelivery } from "./contracts.js";
-import type { AttachPiSession, Delivery, OpenPiSession, PiCommand, PiEvent, PiSession, Result, SendThread, SpawnThread, Thread, ThreadApi, ThreadControl, ThreadHistory, ThreadInspection, ThreadList, ThreadMessage, ThreadPage, ThreadRead, ThreadSettings, ThreadSettlements, WorkOutcome } from "./contracts.js";
+import { isThreadState, resolveDelivery, validateThreadAwait, THREAD_AWAIT_TIMEOUT_MS } from "./contracts.js";
+import type { AttachPiSession, AwaitThreads, Delivery, OpenPiSession, PiCommand, PiEvent, PiSession, Result, SendThread, SpawnThread, Thread, ThreadApi, ThreadAwaitResult, ThreadControl, ThreadHistory, ThreadInspection, ThreadList, ThreadMessage, ThreadPage, ThreadRead, ThreadSettings, ThreadSettlement, ThreadSettlements, WorkOutcome } from "./contracts.js";
 
 type Json = Record<string, any>;
 export interface ThreadAdmission { env?: Record<string, string | undefined>; settings?: ThreadSettings; release(): void | Promise<void> }
@@ -55,6 +55,7 @@ export class ThreadService implements ThreadApi {
   private readonly halts = new Map<string, Promise<Result<Thread>>>();
   private readonly opening = new Map<string, Promise<Runtime>>();
   private readonly listeners = new Set<(event: ThreadServiceEvent) => void>();
+  private readonly awaiting = new Set<() => void>();
   private timer?: ReturnType<typeof setInterval>;
   private started = false;
   private closed = false;
@@ -86,6 +87,7 @@ export class ThreadService implements ThreadApi {
         id TEXT PRIMARY KEY, thread_id TEXT NOT NULL REFERENCES thread(id), work_id TEXT NOT NULL,
         settings TEXT NOT NULL, state TEXT NOT NULL, created_at INTEGER NOT NULL, ended_at INTEGER, settlement_seq INTEGER UNIQUE, outcome TEXT, final_message TEXT, error TEXT);
       CREATE INDEX IF NOT EXISTS thread_execution_settlements ON thread_execution(thread_id,ended_at DESC,id DESC);
+      CREATE INDEX IF NOT EXISTS thread_execution_await ON thread_execution(thread_id,settlement_seq);
       CREATE UNIQUE INDEX IF NOT EXISTS thread_execution_active ON thread_execution(thread_id) WHERE state='running';
       CREATE TABLE IF NOT EXISTS thread_request (id TEXT PRIMARY KEY, hash TEXT NOT NULL, kind TEXT NOT NULL, target TEXT NOT NULL, response TEXT);
       UPDATE thread SET state=CASE
@@ -116,6 +118,55 @@ export class ThreadService implements ThreadApi {
     if (!Number.isSafeInteger(after) || after < 0 || !Number.isInteger(limit) || limit < 1 || limit > 1000) return bad("invalid_request", "Invalid settlement cursor or limit");
     const rows = this.db.prepare("SELECT * FROM thread_execution WHERE settlement_seq>? ORDER BY settlement_seq LIMIT ?").all(after, limit) as Json[];
     return good({ items: rows.map(row => ({ seq: row.settlement_seq, executionId: row.id, threadId: row.thread_id, workId: row.work_id, outcome: row.outcome, time: row.ended_at, finalMessage: JSON.parse(row.final_message ?? "null"), ...(row.error ? { error: row.error } : {}) })), cursor: rows.at(-1)?.settlement_seq ?? after });
+  }
+  async await(input: AwaitThreads, signal?: AbortSignal): Promise<Result<ThreadAwaitResult>> {
+    const valid = validateThreadAwait(input); if (!valid.ok) return valid;
+    if (this.closed || this.suspended) return bad("unavailable", "Thread controller is suspended");
+    if (signal?.aborted) return bad("unavailable", "Thread await cancelled");
+    const ids = new Set(input.threadIds);
+    for (const id of ids) {
+      const thread = this.get(id);
+      if (!thread) return bad("not_found", `Thread ${id} was not found`);
+      if (thread.parentId !== input.parentId) return bad("invalid_request", `Thread ${id} is not a direct child of ${input.parentId}`);
+    }
+    const cursors = Object.fromEntries(input.threadIds.map(id => [id, input.after && Object.hasOwn(input.after, id) ? input.after[id]! : 0]));
+    const query = JSON.stringify(cursors);
+    const response = (settlement: ThreadSettlement | null): Result<ThreadAwaitResult> => good({
+      settlement,
+      remainingThreadIds: input.threadIds.filter(id => id !== settlement?.threadId),
+      after: { ...input.after, ...cursors, ...(settlement ? { [settlement.threadId]: settlement.seq } : {}) },
+    });
+    const completed = (): ThreadSettlement | null => {
+      const row = this.db.prepare(`SELECT e.* FROM json_each(?) target JOIN thread_execution e ON e.thread_id=target.key
+        WHERE e.settlement_seq>target.value ORDER BY e.settlement_seq LIMIT 1`).get(query) as Json | undefined;
+      return row ? { seq: row.settlement_seq, executionId: row.id, threadId: row.thread_id, workId: row.work_id,
+        outcome: row.outcome, time: row.ended_at, finalMessage: JSON.parse(row.final_message ?? "null"), ...(row.error ? { error: row.error } : {}) } : null;
+    };
+    return new Promise(resolve => {
+      let settled = false;
+      let timer: ReturnType<typeof setTimeout> | undefined;
+      const finish = (result: Result<ThreadAwaitResult>) => {
+        if (settled) return;
+        settled = true;
+        clearTimeout(timer);
+        this.listeners.delete(changed);
+        this.awaiting.delete(suspended);
+        signal?.removeEventListener("abort", aborted);
+        resolve(result);
+      };
+      const check = () => {
+        try { const settlement = completed(); if (settlement) finish(response(settlement)); }
+        catch (error) { finish(bad("unavailable", errorText(error))); }
+      };
+      const changed = (event: ThreadServiceEvent) => { if (ids.has(event.threadId)) check(); };
+      const suspended = () => finish(bad("unavailable", "Thread controller is suspended"));
+      const aborted = () => finish(bad("unavailable", "Thread await cancelled"));
+      this.listeners.add(changed);
+      this.awaiting.add(suspended);
+      signal?.addEventListener("abort", aborted, { once: true });
+      check();
+      if (!settled) timer = setTimeout(() => { check(); if (!settled) finish(response(null)); }, input.timeoutMs ?? THREAD_AWAIT_TIMEOUT_MS);
+    });
   }
   live(id: string): Json | undefined { return this.projections.get(id)?.live; }
   latestSettlement(id: string): import("./contracts.js").ThreadSettlement | null {
@@ -819,6 +870,7 @@ export class ThreadService implements ThreadApi {
   suspend(): void {
     if (this.suspended || this.closed) return;
     this.suspended = true; this.started = false; clearInterval(this.timer);
+    for (const cancel of this.awaiting) cancel();
     for (const runtime of this.runtimes.values()) {
       for (const waiter of runtime.waiters.values()) { clearTimeout(waiter.timer); waiter.reject(new Error("Thread controller suspended; execution remains with its runner")); }
       runtime.waiters.clear();
@@ -840,7 +892,9 @@ export class ThreadService implements ThreadApi {
     this.started = false; clearInterval(this.timer);
     try {
       for (const [id, runtime] of this.runtimes) { this.runtimes.delete(id); await runtime.session.close(); }
-      this.closed = true; this.db.close(); this.listeners.clear(); return good(undefined);
+      this.closed = true;
+      for (const cancel of this.awaiting) cancel();
+      this.db.close(); this.listeners.clear(); return good(undefined);
     } catch (error) { return bad("unavailable", errorText(error)); }
   }
 }

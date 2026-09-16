@@ -1,8 +1,8 @@
 import { Type } from "typebox";
 import { defineTool } from "@earendil-works/pi-coding-agent";
-import { resolveDelivery, type PiSessionOptions, type Result, type ThreadApi } from "./contracts.js";
+import { resolveDelivery, THREAD_AWAIT_TIMEOUT_MS, type PiSessionOptions, type Result, type ThreadApi } from "./contracts.js";
 import { createThreadClient } from "./http.js";
-import { historyPreview } from "./pi-history-preview.js";
+import { historyPreview, visibleEntry } from "./pi-history-preview.js";
 import { readableNotificationText } from "./message-format.js";
 import { DELEGATION_POLICY } from "../delegation-policy.js";
 import { SUBAGENT_MODEL_DESCRIPTIONS } from "../catalog.js";
@@ -40,6 +40,29 @@ export function threadTools(options: PiSessionOptions) {
       execute: async (id, input, signal) => {
         if (input.threadId === options.threadId && input.delivery === "hardSteer") return result({ ok: false, error: { code: "invalid_request", message: "Hard steer cannot wait for the tool that requested it. Return and continue in this thread instead." } });
         return result(await api(signal).send({ ...input, requestId: `${options.threadId}:${id}`, senderId: options.threadId, delivery: resolveDelivery({ ...input, senderId: options.threadId }), source: "explicit" }));
+      },
+    }),
+    defineTool({
+      name: "thread_await", label: "Await a child result",
+      description: "Wait for the first settlement from one or more direct children without polling. Returns its outcome and final message, remaining thread IDs and per-thread after cursors. Pass the returned after when waiting again, including after resuming the same worker, to skip results already seen. Other children keep running. Final message text is preserved; thinking, image bytes and signatures are omitted. Stop or hard steer cancels the wait; ordinary steer waits for this tool boundary.",
+      parameters: Type.Object({
+        threadIds: Type.Array(Type.String({ minLength: 1 }), { minItems: 1, maxItems: 100, uniqueItems: true }),
+        after: Type.Optional(Type.Record(Type.String(), Type.Integer({ minimum: 0, maximum: Number.MAX_SAFE_INTEGER }))),
+      }),
+      execute: async (_id, input, signal) => {
+        const owner = api(signal);
+        let after = input.after;
+        while (true) {
+          signal?.throwIfAborted();
+          const value = await owner.await({ ...input, parentId: options.threadId, after, timeoutMs: THREAD_AWAIT_TIMEOUT_MS }, signal);
+          signal?.throwIfAborted();
+          if (!value.ok) return result(value);
+          const settlement = value.value.settlement;
+          if (settlement) return result({ ok: true, value: { ...value.value, settlement: { ...settlement,
+            finalMessage: settlement.finalMessage ? JSON.parse(visibleEntry(settlement.finalMessage)) : null,
+          } } });
+          after = value.value.after;
+        }
       },
     }),
     defineTool({

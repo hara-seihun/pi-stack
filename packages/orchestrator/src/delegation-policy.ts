@@ -24,7 +24,7 @@ Model descriptions help choose a worker after deciding to delegate; they are not
 - Results arrive automatically. Do not poll or repeatedly read a worker's transcript just to wait for it.
 - Do not redo delegated subagent tasks yourself; focus on integrating results or tackling non-overlapping work.
 - While the subagent is running in the background, do meaningful non-overlapping work immediately.
-- If no useful local work remains, end your turn; the result will resume you. Do not claim the overall task is complete while delegated work is outstanding.
+- If no useful local work remains, use thread_await for one or more direct children to continue on the first result, or end your turn and let automatic result delivery resume you. Do not claim the overall task is complete while delegated work is outstanding.
 - When a delegated coding task returns, quickly review the changes, then integrate or refine them. Report failed or incomplete work plainly.
 
 ### Parallel delegation patterns

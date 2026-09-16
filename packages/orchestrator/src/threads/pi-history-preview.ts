@@ -2,7 +2,7 @@ import type { ThreadHistory } from "./contracts.js";
 
 const chunkSize = 24_000;
 const previewSize = 4_000;
-function visibleEntry(entry: Record<string, unknown>): string {
+export function visibleEntry(entry: Record<string, unknown>): string {
   return JSON.stringify(entry, (key, value: unknown) => {
     if (/^(?:thinkingSignature|textSignature|thoughtSignature|signature|encrypted_content|encryptedContent)$/i.test(key)) return undefined;
     if (typeof value === "string" && /^data:image\//.test(value)) return "[image bytes omitted]";
@@ -11,7 +11,7 @@ function visibleEntry(entry: Record<string, unknown>): string {
       if (block.type === "image" || block.type === "image_url") {
         return { type: block.type, mimeType: block.mimeType, image: "[image bytes omitted]" };
       }
-      if (block.type === "thinking") return undefined;
+      if (block.type === "thinking" || block.type === "redacted_thinking") return undefined;
     }
     return value;
   });

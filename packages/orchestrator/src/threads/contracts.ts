@@ -93,6 +93,34 @@ export interface ThreadSettlement {
   error?: string;
 }
 export interface ThreadSettlements { items: ThreadSettlement[]; cursor: number }
+export const THREAD_AWAIT_TIMEOUT_MS = 25_000;
+export interface AwaitThreads {
+  parentId: string;
+  threadIds: string[];
+  after?: Record<string, number>;
+  timeoutMs?: number;
+}
+export interface ThreadAwaitResult {
+  settlement: ThreadSettlement | null;
+  remainingThreadIds: string[];
+  after: Record<string, number>;
+}
+export function validateThreadAwait(input: AwaitThreads): Result<void> {
+  if (!input || typeof input.parentId !== "string" || !input.parentId.trim()
+    || !Array.isArray(input.threadIds) || input.threadIds.length < 1 || input.threadIds.length > 100
+    || input.threadIds.some(id => typeof id !== "string" || !id.trim() || id === input.parentId)
+    || new Set(input.threadIds).size !== input.threadIds.length) {
+    return { ok: false, error: { code: "invalid_request", message: "Await requires a parent and 1..100 unique child thread IDs, excluding the parent" } };
+  }
+  if (input.after !== undefined && (!input.after || typeof input.after !== "object" || Array.isArray(input.after)
+    || Object.values(input.after).some(cursor => !Number.isSafeInteger(cursor) || cursor < 0))) {
+    return { ok: false, error: { code: "invalid_request", message: "Await cursors must be nonnegative safe integers keyed by thread ID" } };
+  }
+  if (input.timeoutMs !== undefined && (!Number.isInteger(input.timeoutMs) || input.timeoutMs < 0 || input.timeoutMs > THREAD_AWAIT_TIMEOUT_MS)) {
+    return { ok: false, error: { code: "invalid_request", message: `Await timeoutMs must be 0..${THREAD_AWAIT_TIMEOUT_MS}` } };
+  }
+  return { ok: true, value: undefined };
+}
 export interface ThreadInspection {
   thread: Thread;
   pending: ThreadMessage[];
@@ -116,6 +144,7 @@ export interface ThreadApi {
   inspect(threadId: string): Promise<Result<ThreadInspection>>;
   command(threadId: string, command: PiCommand): Promise<Result<unknown>>;
   settlements(after?: number, limit?: number): Result<ThreadSettlements> | Promise<Result<ThreadSettlements>>;
+  await(input: AwaitThreads, signal?: AbortSignal): Promise<Result<ThreadAwaitResult>>;
 }
 
 export type PiEvent = Record<string, unknown> & { type: string };

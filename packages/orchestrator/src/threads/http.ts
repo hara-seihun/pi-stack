@@ -8,7 +8,7 @@ const requestTimeout = 60_000;
 export interface ThreadClientOptions { signal?: AbortSignal; timeoutMs?: number }
 type ThreadFetch = (input: string | URL | Request, init?: RequestInit) => Promise<Response>;
 
-const operations = ["spawn", "send", "list", "read", "control", "inspect", "command", "settlements"] as const;
+const operations = ["spawn", "send", "list", "read", "control", "inspect", "command", "settlements", "await"] as const;
 type Operation = typeof operations[number];
 const failure = (message: string): Result<never> => ({ ok: false, error: { code: "unavailable", message } });
 
@@ -31,7 +31,8 @@ export async function threadHttp(api: ThreadApi, request: Request, prefix = "/v1
     const signal = AbortSignal.any([request.signal, AbortSignal.timeout(Math.max(0, deadline - Date.now()))]);
     if (signal.aborted || deadline <= Date.now()) return Response.json(failure("Thread request deadline expired"), { status: 408 });
     const result = await requestContext.run({ deadline, signal }, () =>
-      operation === "settlements" ? api.settlements(fields.after, fields.limit)
+      operation === "await" ? api.await(fields as Parameters<ThreadApi["await"]>[0], signal)
+      : operation === "settlements" ? api.settlements(fields.after, fields.limit)
       : operation === "inspect" ? api.inspect(fields.threadId)
       : operation === "command" ? api.command(fields.threadId, fields.command)
       : (api[operation] as (input: unknown) => Promise<Result<unknown>>).call(api, input));
@@ -43,7 +44,7 @@ export async function threadHttp(api: ThreadApi, request: Request, prefix = "/v1
 
 export function createThreadClient(baseUrl: string, fetcher: ThreadFetch = fetch, options: ThreadClientOptions = {}): ThreadApi {
   const base = baseUrl.replace(/\/$/, "");
-  async function call<T>(operation: Operation, input: unknown): Promise<Result<T>> {
+  async function call<T>(operation: Operation, input: unknown, callSignal?: AbortSignal): Promise<Result<T>> {
     const body = JSON.stringify(input ?? {});
     const requestId = (operation === "send" || operation === "spawn") ? (input as { requestId?: string })?.requestId : undefined;
     const replayable = typeof requestId === "string" && !!requestId.trim() || ["list", "read", "inspect", "settlements"].includes(operation);
@@ -52,7 +53,7 @@ export function createThreadClient(baseUrl: string, fetcher: ThreadFetch = fetch
     const inherited = requestContext.getStore();
     const deadline = Math.min(Date.now() + (options.timeoutMs ?? requestTimeout), inherited?.deadline ?? Infinity);
     const signal = AbortSignal.any([AbortSignal.timeout(Math.max(0, deadline - Date.now())),
-      ...(options.signal ? [options.signal] : []), ...(inherited ? [inherited.signal] : [])]);
+      ...(options.signal ? [options.signal] : []), ...(inherited ? [inherited.signal] : []), ...(callSignal ? [callSignal] : [])]);
     let lastError = "Thread owner did not acknowledge the request", attempt = 0;
     while (!signal.aborted && Date.now() < deadline) {
       let retry = false;
@@ -81,7 +82,7 @@ export function createThreadClient(baseUrl: string, fetcher: ThreadFetch = fetch
       try { await delay(Math.min(100 * 2 ** Math.min(attempt++, 4), 1_000, Math.max(0, deadline - Date.now())), undefined, { signal }); }
       catch { break; }
     }
-    const reason = options.signal?.aborted || inherited?.signal.aborted && Date.now() < deadline ? "cancelled"
+    const reason = callSignal?.aborted || options.signal?.aborted || inherited?.signal.aborted && Date.now() < deadline ? "cancelled"
       : Date.now() >= deadline || signal.aborted ? "deadline expired" : "failed";
     return { ok: false, error: { code: "unavailable", retryable: false, ...(requestId ? { requestId } : {}),
       message: `Thread ${operation} ${reason}: ${lastError}.${requestId ? ` Acceptance is unconfirmed for request ${requestId}; reconcile this identity rather than issuing a new instruction.` : ""}` } };
@@ -91,5 +92,6 @@ export function createThreadClient(baseUrl: string, fetcher: ThreadFetch = fetch
     read: input => call("read", input), control: input => call("control", input),
     inspect: threadId => call("inspect", { threadId }), command: (threadId, command) => call("command", { threadId, command }),
     settlements: (after, limit) => call("settlements", { after, limit }),
+    await: (input, signal) => call("await", input, signal),
   };
 }

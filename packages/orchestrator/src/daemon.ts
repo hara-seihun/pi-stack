@@ -323,6 +323,7 @@ export class Daemon {
         try{
           const headers=new Headers(Object.entries(req.headers).flatMap(([key,value])=>value===undefined?[]:[[key,Array.isArray(value)?value.join(","):value] as [string,string]]));
           const response=await threadHttp(api,new Request(url,{method,headers,signal:cancellation.signal,...(method==="POST"?{body:JSON.stringify(input)}:{})}),application?`/v1/applications/${application[1]}/threads`:localOwner?"/v1/thread-owner":"/v1/threads");
+          if(res.destroyed)return;
           if(response){res.writeHead(response.status,Object.fromEntries(response.headers));res.end(await response.text());return;}
         }finally{res.off("close",cancel);}
       }
