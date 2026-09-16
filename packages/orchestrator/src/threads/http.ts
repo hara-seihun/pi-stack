@@ -1,6 +1,6 @@
 import type { Result, ThreadApi } from "./contracts.js";
 
-const operations = ["spawn", "send", "list", "read", "control", "inspect", "command", "settlements"] as const;
+const operations = ["spawn", "send", "list", "read", "control", "inspect", "command", "settlements", "await"] as const;
 type Operation = typeof operations[number];
 const failure = (message: string): Result<never> => ({ ok: false, error: { code: "unavailable", message } });
 
@@ -18,7 +18,8 @@ export async function threadHttp(api: ThreadApi, request: Request, prefix = "/v1
   }
   try {
     const fields = input as Record<string, any>;
-    const result = operation === "settlements" ? await api.settlements(fields.after, fields.limit)
+    const result = operation === "await" ? await api.await(fields as Parameters<ThreadApi["await"]>[0], request.signal)
+      : operation === "settlements" ? await api.settlements(fields.after, fields.limit)
       : operation === "inspect" ? await api.inspect(fields.threadId)
       : operation === "command" ? await api.command(fields.threadId, fields.command)
       : await (api[operation] as (input: unknown) => Promise<Result<unknown>>).call(api, input);
@@ -30,10 +31,10 @@ export async function threadHttp(api: ThreadApi, request: Request, prefix = "/v1
 
 export function createThreadClient(baseUrl: string, fetcher: typeof fetch = fetch): ThreadApi {
   const base = baseUrl.replace(/\/$/, "");
-  async function call<T>(operation: Operation, input: unknown): Promise<Result<T>> {
+  async function call<T>(operation: Operation, input: unknown, signal?: AbortSignal): Promise<Result<T>> {
     try {
       const response = await fetcher(`${base}/${operation}`, { method: "POST", headers: { "content-type": "application/json" },
-        body: JSON.stringify(input ?? {}), signal: AbortSignal.timeout(60_000) });
+        body: JSON.stringify(input ?? {}), signal: signal ? AbortSignal.any([signal, AbortSignal.timeout(60_000)]) : AbortSignal.timeout(60_000) });
       const value = await response.json() as Result<T>;
       if (typeof value?.ok !== "boolean" || (!value.ok && (!value.error || typeof value.error.message !== "string"))) {
         return failure(`Thread owner returned an invalid response (${response.status})`);
@@ -47,5 +48,6 @@ export function createThreadClient(baseUrl: string, fetcher: typeof fetch = fetc
     read: input => call("read", input), control: input => call("control", input),
     inspect: threadId => call("inspect", { threadId }), command: (threadId, command) => call("command", { threadId, command }),
     settlements: (after, limit) => call("settlements", { after, limit }),
+    await: (input, signal) => call("await", input, signal),
   };
 }
