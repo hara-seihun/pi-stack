@@ -1652,29 +1652,41 @@ function maintainCommand(database, args) {
 
 function statusCommand(database, args) {
   assertOnly(args, ["root", "json", "path", "owner"]);
-  const all = listRecords(database, one(args, "root"));
+  const root = one(args, "root");
   const pathFilter = one(args, "path");
   const ownerFilter = one(args, "owner");
-  let records = all;
+  const predicates = [];
+  const parameters = [];
+  if (root !== undefined) {
+    predicates.push("root = ?");
+    parameters.push(path.resolve(root));
+  }
   if (pathFilter !== undefined) {
-    const resolved = path.resolve(pathFilter);
-    records = records.filter((record) => record.path === resolved || record.path.includes(pathFilter));
+    predicates.push("(path = ? OR instr(path, ?) > 0)");
+    parameters.push(path.resolve(pathFilter), pathFilter);
   }
   if (ownerFilter !== undefined) {
-    records = records.filter((record) => (record.owner ?? "").includes(ownerFilter));
+    predicates.push("instr(coalesce(owner, ''), ?) > 0");
+    parameters.push(ownerFilter);
   }
+  const where = predicates.length > 0 ? ` WHERE ${predicates.join(" AND ")}` : "";
+  const records = database.prepare(`SELECT * FROM workspace${where} ORDER BY root, path`)
+    .all(...parameters).map(rowToRecord);
   if (bool(args, "json")) {
     print(records, true);
     return;
   }
   const filtered = pathFilter !== undefined || ownerFilter !== undefined;
+  const total = !filtered ? records.length : root === undefined
+    ? database.prepare("SELECT count(*) AS count FROM workspace").get().count
+    : database.prepare("SELECT count(*) AS count FROM workspace WHERE root = ?").get(path.resolve(root)).count;
   if (filtered && records.length === 0) {
-    process.stdout.write(`no registered workspace matches that filter; ${all.length} record(s) are known, and a checkout absent from all of them was never registered\n`);
+    process.stdout.write(`no registered workspace matches that filter; ${total} record(s) are known, and a checkout absent from all of them was never registered\n`);
     return;
   }
   const summary = new Map();
   for (const record of records) summary.set(record.state, (summary.get(record.state) ?? 0) + 1);
-  const scope = filtered ? ` (filtered from ${all.length})` : "";
+  const scope = filtered ? ` (filtered from ${total})` : "";
   process.stdout.write(`${records.length} registered workspace(s)${scope}: ${[...summary].map(([state, count]) => `${state}=${count}`).join(" ")}\n`);
   if (filtered) {
     for (const record of records) {
@@ -1741,7 +1753,7 @@ export function main(argv = process.argv.slice(2), statePath = DEFAULT_STATE) {
       return;
     }
   }
-  if (!["maintain", "cancel-creation"].includes(commandName)) drainGc(statePath);
+  if (!["status", "list", "maintain", "cancel-creation"].includes(commandName)) drainGc(statePath);
   const database = openRegistry(statePath);
   try {
     if (commandName === "create") createCommand(database, args, statePath);

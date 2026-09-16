@@ -47,7 +47,7 @@ agent-workspace status --owner some-task --json
 agent-workspace status                               # the whole pool
 ```
 
-`list` is accepted as an alias, since that is what people reach for first.
+`list` is accepted as an alias, since that is what people reach for first. Both commands leave the disposal queue alone; lifecycle commands own collection. Root, path and owner filters run in SQLite before decoding matched records. Path and owner substrings are literal and case-sensitive, including `%` and `_`; a relative path also matches its resolved absolute path. Text output counts the root-scoped pool separately without loading its cache declarations. This prevents a narrow custody lookup from decoding unrelated history. The September 16 Converge registry held 8,193 records with 298 MB of cache declarations; filtering after decoding took 6.42 seconds.
 
 The answer that matters is the `state` and its `detail`. `released` with `every local branch commit exists on a remote ref` means the manager proved the work was on a remote before removing the tree: the commits are safe, and a local hash that no longer resolves was almost certainly rewritten by a rebase before the push. Look for the content on `main` rather than for the hash. `repair-required` is the opposite, and means unique local work is still there and the tree was kept.
 
