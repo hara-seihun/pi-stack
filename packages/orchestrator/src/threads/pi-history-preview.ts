@@ -11,7 +11,7 @@ export function visibleEntry(entry: Record<string, unknown>): string {
       if (block.type === "image" || block.type === "image_url") {
         return { type: block.type, mimeType: block.mimeType, image: "[image bytes omitted]" };
       }
-      if (block.type === "thinking") return undefined;
+      if (block.type === "thinking" || block.type === "redacted_thinking") return undefined;
     }
     return value;
   });

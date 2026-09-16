@@ -317,14 +317,15 @@ export class Daemon {
           const started=await boundary.service.start();if(!started.ok)return json(res,503,started);
           api=boundary.service;
         }
-        const disconnected=new AbortController(),abort=()=>disconnected.abort();
-        res.once("close",abort);
-        if(res.destroyed)abort();
+        const cancellation=new AbortController(),cancel=()=>cancellation.abort();
+        res.once("close",cancel);
+        if(res.destroyed)cancel();
         try{
-          const response=await threadHttp(api,new Request(url,{method,signal:disconnected.signal,headers:{"content-type":"application/json"},...(method==="POST"?{body:JSON.stringify(input)}:{})}),application?`/v1/applications/${application[1]}/threads`:localOwner?"/v1/thread-owner":"/v1/threads");
+          const headers=new Headers(Object.entries(req.headers).flatMap(([key,value])=>value===undefined?[]:[[key,Array.isArray(value)?value.join(","):value] as [string,string]]));
+          const response=await threadHttp(api,new Request(url,{method,headers,signal:cancellation.signal,...(method==="POST"?{body:JSON.stringify(input)}:{})}),application?`/v1/applications/${application[1]}/threads`:localOwner?"/v1/thread-owner":"/v1/threads");
           if(res.destroyed)return;
           if(response){res.writeHead(response.status,Object.fromEntries(response.headers));res.end(await response.text());return;}
-        }finally{res.off("close",abort);}
+        }finally{res.off("close",cancel);}
       }
       if(method==="POST"&&(url.pathname==="/v1/run"||url.pathname==="/v1/run/isolated")){
         const input=await body(req),count=input.count??1;

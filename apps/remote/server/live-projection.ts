@@ -1,8 +1,17 @@
-import type { ThreadState } from "pi-orchestrator/api";
+import type { Thread, ThreadState } from "pi-orchestrator/api";
 import type { ToolProgress } from "./tool-progress";
 import type { Activity } from "./protocol";
 
-export function threadActivity(state: ThreadState, live?: LiveProjection): Activity {
+export function runningChildParents(...sources: Iterable<Pick<Thread, "parentId" | "state">>[]): Set<string> {
+  const parents = new Set<string>();
+  for (const source of sources) for (const thread of source) {
+    if (thread.parentId && thread.state === "running") parents.add(thread.parentId);
+  }
+  return parents;
+}
+
+export function threadActivity(state: ThreadState, live?: LiveProjection, hasRunningChildren = false): Activity {
+  if (state === "idle" && hasRunningChildren) return "awaiting";
   if (state !== "running") return state;
   return live?.compacting ? "compacting" : live?.retrying ? "retrying"
     : live?.activeTools.size ? "waiting_on_tool" : live?.thinkingActive ? "thinking" : state;

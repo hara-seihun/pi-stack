@@ -106,6 +106,8 @@ async function requestCheckpoint(pi, ctx, event, fetchImpl, scope) {
           return compacted.value;
         },
       });
+      const serviceRetries = response.diagnostics?.filter(item => item.type === "provider_service_retry");
+      if (serviceRetries?.length) scope.trace.serviceRetries = serviceRetries;
       if (payloadError) return failure(payloadError);
       if (response.stopReason !== "stop") return { ...failure(response.errorMessage || `Codex compaction stopped with ${response.stopReason}`), usage: response.usage };
       const observed = observer.result();
@@ -151,9 +153,11 @@ export default function codexCompaction(pi) {
   };
   pi.on("context", (event, ctx) => {
     const held = isCodex(ctx.model) && blockedAttempt(ctx.sessionManager.getBranch(), modelKey(ctx.model));
-    if (held) { block(ctx, recoveryMessage(held)); return; }
-    const result = checkpointContext(event.messages, ctx.sessionManager.getBranch(), ctx.model);
-    if (!result.ok) { block(ctx, result.error); return; }
+    const result = held ? failure(recoveryMessage(held)) : checkpointContext(event.messages, ctx.sessionManager.getBranch(), ctx.model);
+    if (!result.ok) {
+      reportDiagnostic(ctx, "request-blocked", result.error);
+      return { error: result.error };
+    }
     return { messages: result.value.messages };
   });
   pi.on("before_provider_headers", (event, ctx) => {
@@ -175,7 +179,7 @@ export default function codexCompaction(pi) {
     if (!isCodex(ctx.model)) return;
     const key = modelKey(ctx.model);
     const held = blockedAttempt(event.branchEntries, key);
-    if (held && event.reason !== "manual") return { cancel: true, error: recoveryMessage(held) };
+    if (held && event.reason !== "manual") return { error: recoveryMessage(held) };
     const attempt = { attemptId: randomUUID(), modelKey: key, state: "started", reason: event.reason };
     pi.appendEntry(ATTEMPT, attempt);
     let result;
@@ -184,7 +188,7 @@ export default function codexCompaction(pi) {
       const failed = { ...attempt, state: event.signal.aborted ? "cancelled" : "failed", error: result.error, diagnostic: result.diagnostic };
       pi.appendEntry(ATTEMPT, failed);
       reportDiagnostic(ctx, "compaction-failed", result.error, event.reason, result.diagnostic);
-      return { cancel: true, error: recoveryMessage(failed) };
+      return event.signal.aborted ? { cancel: true } : { error: recoveryMessage(failed) };
     }
     console.error(JSON.stringify({ component: "codex-compaction", phase: "checkpoint-ready", sessionId: ctx.sessionManager.getSessionId(), diagnostic: result.diagnostic }));
     return {

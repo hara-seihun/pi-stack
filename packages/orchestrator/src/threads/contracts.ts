@@ -1,7 +1,7 @@
 export const THREAD_EXECUTION_CONTRACT = "unified-threads-v1";
 
 export type Result<T> = { ok: true; value: T } | { ok: false; error: ThreadError };
-export type ThreadError = { code: "not_found" | "invalid_request" | "conflict" | "no_pending_messages" | "unavailable" | "cancellation_failed"; message: string };
+export type ThreadError = { code: "not_found" | "invalid_request" | "conflict" | "no_pending_messages" | "unavailable" | "cancellation_failed"; message: string; retryable?: boolean; requestId?: string };
 export type Delivery = "queue" | "steer" | "hardSteer";
 export type ThinkingLevel = "off" | "minimal" | "low" | "medium" | "high" | "xhigh" | "max";
 export type Speed = "standard" | "priority";
@@ -90,6 +90,7 @@ export interface ThreadSettlement {
   outcome: WorkOutcome;
   time: number;
   finalMessage: Record<string, unknown> | null;
+  error?: string;
 }
 export interface ThreadSettlements { items: ThreadSettlement[]; cursor: number }
 export const THREAD_AWAIT_TIMEOUT_MS = 25_000;

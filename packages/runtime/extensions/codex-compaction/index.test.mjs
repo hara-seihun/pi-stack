@@ -152,7 +152,7 @@ test("failed native compaction retains context and fences automatic retries acro
   let calls = 0;
   f.ctx.modelRegistry.complete = async () => { calls++; return { stopReason: "error", errorMessage: "401 token expired", usage: zero }; };
   const result = await f.handlers.get("session_before_compact")(f.event, f.ctx);
-  assert.equal(result.cancel, true);
+  assert.equal(result.cancel, undefined);
   assert.match(result.error, /401 token expired/);
   assert.equal(JSON.stringify(buildSessionContext(f.sm.getBranch()).messages), before);
   assert.match(f.notifications[0][0], /401 token expired/u);
@@ -169,8 +169,9 @@ test("failed native compaction retains context and fences automatic retries acro
     assert.match(retry.error, /Automatic resubmission is blocked/);
   }
   assert.equal(calls, 1);
-  f.handlers.get("context")({ messages: buildSessionContext(f.sm.getBranch()).messages }, f.ctx);
-  assert.equal(f.aborted, true);
+  const rejected = f.handlers.get("context")({ messages: buildSessionContext(f.sm.getBranch()).messages }, f.ctx);
+  assert.match(rejected.error, /401 token expired/);
+  assert.equal(f.aborted, false);
   await f.handlers.get("session_before_compact")({ ...f.event, branchEntries: f.sm.getBranch(), reason: "manual" }, f.ctx);
   assert.equal(calls, 2);
   assert.equal(f.handlers.has("turn_end"), false);

@@ -30,6 +30,11 @@ const logRoot = join(stateRoot, "logs");
 const proofRoot = join(stateRoot, "proofs");
 const contractRoot = join(stateRoot, "contracts");
 const checkout = join(stateRoot, "repository");
+const releaseRepository = process.env.PI_STACK_PUBLICATION_RELEASE_REPOSITORY ?? "/home/kenan/.local/state/pi-stack-release/repository";
+const alertInbox = process.env.PI_STACK_PUBLICATION_ALERT_INBOX ?? "/var/lib/machine-alerts/inbox";
+const issueIndexPath = join(stateRoot, "issues.json");
+const issueAcknowledgementsPath = join(stateRoot, "issue-acknowledgements.json");
+const issueAlertPath = join(alertInbox, "pi-stack-publication-issues.md");
 const threadExecutionContract = "unified-threads-v1";
 const threadExecutionActivationPath = join(contractRoot, `${threadExecutionContract}.json`);
 const self = fileURLToPath(import.meta.url);
@@ -44,6 +49,8 @@ function usage() {
   deploy/publication install
   deploy/publication submit SHA
   deploy/publication inspect REQUEST
+  deploy/publication issues
+  deploy/publication acknowledge-issues
   deploy/publication cancel REQUEST
   deploy/publication repair REQUEST
   deploy/publication repair-result REQUEST
@@ -196,7 +203,6 @@ function submit(sourceArgument, repairedRequestId) {
       throw new Error("Repaired submission requires its dedicated owner's source-fixed outcome and matching commit");
     if (repaired.status !== "failed") throw new Error("Repaired submission requires a failed request");
     if (sourceSha === repaired.sourceSha) throw new Error("Source repair requires a new commit");
-    if ((repaired.repairDepth ?? 0) >= policy.maxRepairDepth) throw new Error("Repair chain exhausted; report the remaining blocker");
     checked("git", ["merge-base", "--is-ancestor", repaired.sourceSha, sourceSha], { cwd: sourceRoot });
   }
   ensureState();
@@ -282,7 +288,7 @@ function enqueue(requestId, sourceSha, sourceRef, reporterJson, repairedRequestI
     owner: request.owner,
     receipt: path,
     wake: wake.ok ? "started" : "watchdog-owned",
-    reporting: request.reporter ? { status: "pending", ...request.reporter } : { status: "machine-inbox" },
+    reporting: request.reporter ? { status: "pending", ...request.reporter } : { status: "receipt", issues: issueIndexPath },
   })}\n`);
 }
 
@@ -414,6 +420,8 @@ function updateFailure(request, message, logPath, notify = true) {
 }
 
 function noticeBody(request) {
+  const repair = readRepair(request.requestId);
+  const compact = value => String(value ?? "").replace(/\s+/g, " ").slice(0, 400);
   return [
     `Request: ${request.requestId}`,
     `Source: ${request.sourceSha}`,
@@ -421,13 +429,12 @@ function noticeBody(request) {
     `Step: ${request.step}`,
     `Status: ${request.status}`,
     request.repairOf ? `Repairs: ${request.repairOf} via ${request.repairId}` : undefined,
-    readRepair(request.requestId) ? `Repair: ${JSON.stringify(readRepair(request.requestId))}` : undefined,
-    ["failed", "cancelled"].includes(request.status) ? `Failure: ${request.failure.message}` : request.status === "blocked" ? request.blocker?.reason : undefined,
-    request.status === "blocked" ? `Busy custody: ${JSON.stringify(request.blocker.hosts)}` : undefined,
+    repair ? `Repair: ${repair.status}; receipt: ${repair.path}` : undefined,
+    repair?.successor ? `Successor: ${repair.successor.requestId}` : undefined,
+    ["failed", "cancelled"].includes(request.status) ? `Failure: ${compact(request.failure?.message)}` : request.status === "blocked" ? compact(request.blocker?.reason) : undefined,
     `Receipt: ${requestPath(request.requestId)}`,
     `Log: ${["failed", "cancelled"].includes(request.status) ? request.failure?.log : request.status === "blocked" ? request.blocker?.log : request.finalProof?.path}`,
-    request.failure?.command ? `Command: ${request.failure.command}` : undefined,
-    request.failure?.excerpt,
+    request.failure?.command ? `Command: ${compact(request.failure.command)}` : undefined,
     request.status === "failed" ? "The dedicated repair owner retains this failure. A source fix needs a new commit; an unchanged-source retry requires recorded infrastructure repair evidence." : undefined,
   ].filter(Boolean).join("\n");
 }
@@ -509,12 +516,67 @@ function noticeKey(request) {
     + (repair ? `:${repair.status}:${repair.successor?.requestId ?? ""}:${repair.successor?.status ?? ""}` : "");
 }
 
+function reconcileIssueIndex() {
+  const requests = allRequests();
+  const byId = new Map(requests.map(request => [request.requestId, request]));
+  const repairs = new Map(requests.map(request => [request.requestId, readRepair(request.requestId)]));
+  const published = requests.filter(request => request.status === "published" && request.integrationSha)
+    .sort((a, b) => b.publishedAt.localeCompare(a.publishedAt))[0];
+  const deployedSources = new Set(published ? checked("git", ["-C", checkout, "rev-list", published.integrationSha], { timeoutSeconds: 5 }).split("\n") : []);
+  function resolution(request, seen = new Set()) {
+    if (!request || seen.has(request.requestId)) return null;
+    seen.add(request.requestId);
+    if (request.status === "published") return { requestId: request.requestId, integrationSha: request.integrationSha, proof: request.finalProof?.path };
+    if (deployedSources.has(request.sourceSha)) return { requestId: published.requestId, integrationSha: published.integrationSha, proof: published.finalProof?.path };
+    return resolution(byId.get(repairs.get(request.requestId)?.successor?.requestId), seen);
+  }
+  const resolved = [], issues = [];
+  for (const request of requests) {
+    const custody = Object.values(request.bootstrap?.hosts ?? {}).some(custodyNeedsRestore)
+      || Object.values(request.maintenance?.hosts ?? {}).some(host => !["restored", "released"].includes(host.state));
+    if (request.status !== "failed" && !(custody && ["published", "cancelled"].includes(request.status))) continue;
+    const proof = custody ? null : resolution(request);
+    if (proof) { resolved.push({ requestId: request.requestId, resolution: proof }); continue; }
+    const repair = repairs.get(request.requestId);
+    if (!custody && repair?.successor && byId.has(repair.successor.requestId) && byId.get(repair.successor.requestId).status !== "cancelled") continue;
+    const condition = createHash("sha256").update(JSON.stringify({ source: request.sourceSha,
+      status: request.status, failureAt: request.failure?.at, failure: request.failure?.message,
+      step: request.step, custody, repair: repair?.status, successor: repair?.successor?.requestId })).digest("hex");
+    issues.push({ requestId: request.requestId, condition, sourceSha: request.sourceSha, step: custody ? "restore-host-custody" : request.step,
+      failure: custody ? "Host restoration remains outstanding; inspect the receipt's restoration plans." : String(request.failure?.message ?? "").replace(/\s+/g, " ").slice(0, 300),
+      repair: repair?.status ?? "unassigned", receipt: requestPath(request.requestId), repairReceipt: repair?.path });
+  }
+  const acknowledgements = existsSync(issueAcknowledgementsPath) ? JSON.parse(readFileSync(issueAcknowledgementsPath, "utf8")) : {};
+  const acknowledged = issues.filter(issue => acknowledgements[issue.requestId]?.condition === issue.condition);
+  const visible = issues.filter(issue => acknowledgements[issue.requestId]?.condition !== issue.condition);
+  atomicWrite(issueIndexPath, `${JSON.stringify({ issues, resolved, acknowledged: acknowledged.map(issue => issue.requestId) }, null, 2)}\n`);
+  if (visible.length === 0) { rmSync(issueAlertPath, { force: true }); return; }
+  const body = ["# Pi Stack publication needs repair", "", "Repository: hara-seihun/pi-stack",
+    "Deployment/proof target: gmktec and converge-kenan",
+    `${visible.length} unacknowledged publication issue(s). Current owner index: ${issueIndexPath}`,
+    "Read the named receipt before acting. Repair owners retain their work; do not replay requests.", "",
+    ...visible.slice(0, 8).map(issue => `- ${issue.requestId}: ${issue.step}; repair ${issue.repair}. ${issue.failure}\n  Receipt: ${issue.receipt}`),
+    ...(visible.length > 8 ? [`${visible.length - 8} further issues are listed in the owner index.`] : []), ""].join("\n");
+  if (!existsSync(issueAlertPath) || readFileSync(issueAlertPath, "utf8") !== body) atomicWrite(issueAlertPath, body, 0o660);
+}
+
+function acknowledgeIssues() {
+  reconcileIssueIndex();
+  const { issues } = JSON.parse(readFileSync(issueIndexPath, "utf8"));
+  const acknowledgements = existsSync(issueAcknowledgementsPath) ? JSON.parse(readFileSync(issueAcknowledgementsPath, "utf8")) : {};
+  const at = new Date().toISOString();
+  for (const issue of issues) acknowledgements[issue.requestId] = { condition: issue.condition, at, receipt: issue.receipt };
+  atomicWrite(issueAcknowledgementsPath, `${JSON.stringify(acknowledgements, null, 2)}\n`);
+  reconcileIssueIndex();
+  process.stdout.write(`${issueAcknowledgementsPath}\n`);
+}
+
 function reconcileNotices() {
+  reconcileIssueIndex();
   const candidates = allRequests().filter(request => {
     if (!["blocked", "failed", "published"].includes(request.status)) return false;
     const key = noticeKey(request);
-    return request.alert?.key !== key || !["filed", "queued"].includes(request.alert?.status)
-      || request.reporter && (request.report?.key !== key || request.report.status !== "delivered");
+    return request.reporter && (request.report?.key !== key || request.report.status !== "delivered");
   });
   candidates.sort((a, b) => (a.noticeCheckedAt ?? "").localeCompare(b.noticeCheckedAt ?? ""));
   if (candidates[0]) deliverNotice(candidates[0]);
@@ -525,15 +587,7 @@ function deliverNotice(request) {
   const key = noticeKey(request);
   request.noticeCheckedAt = new Date().toISOString();
   writeRequest(request);
-  if (request.alert?.key !== key || !["queued", "filed"].includes(request.alert.status)) {
-    request.alert = { key, status: "pending" };
-    writeRequest(request);
-    const alert = commandResult(process.env.PI_STACK_PUBLICATION_ALERT_COMMAND ?? "/run/current-system/sw/bin/alert", [`Pi Stack publication ${request.status}`, noticeBody(request)], { timeoutSeconds: 10 });
-    request.alert = alert.ok
-      ? { key, status: "filed", path: alert.stdout.trim(), at: new Date().toISOString() }
-      : { key, status: "failed", at: new Date().toISOString(), message: alert.stderr.trim() || `exit ${alert.status}` };
-    writeRequest(request);
-  }
+  reconcileIssueIndex();
   deliverReport(request, key);
 }
 
@@ -886,7 +940,11 @@ for manager in user system; do
   done < <(systemctl --"$manager" list-units 'pi-orchestrator-run-*.service' 'pi-thread-runner-*.scope' --state=running --legend=no --plain --no-pager | awk '{print $1}')
 done
 selected=$(cat /srv/pi/pi-remote/.pi-stack-commit 2>/dev/null || true)
-jq -n --arg host "$host" --arg checkedAt "$(date --utc --iso-8601=seconds)" --arg selected "$selected" --argjson runtimes "$items" '{host:$host,checkedAt:$checkedAt,selectedCommit:($selected | if . == "" then null else . end),runtimes:$runtimes}'
+checkout_commit=
+if [[ -d "$2/.git" ]]; then
+  checkout_commit=$(git -C "$2" rev-parse --verify 'HEAD^{commit}')
+fi
+jq -n --arg host "$host" --arg checkedAt "$(date --utc --iso-8601=seconds)" --arg selected "$selected" --arg checkout "$checkout_commit" --argjson runtimes "$items" '{host:$host,checkedAt:$checkedAt,selectedCommit:($selected | if . == "" then null else . end),checkoutCommit:($checkout | if . == "" then null else . end),runtimes:$runtimes}'
 `;
 
 const sealPlanScript = String.raw`
@@ -1113,7 +1171,7 @@ function runHostScript(script, remoteHost, args, timeoutSeconds) {
 }
 
 function runtimeCensus(remoteHost) {
-  return JSON.parse(runHostScript(runtimeCensusScript, remoteHost, [remoteHost ?? "gmktec"], 60));
+  return JSON.parse(runHostScript(runtimeCensusScript, remoteHost, [remoteHost ?? "gmktec", releaseRepository], 60));
 }
 
 function sealPlan(remoteHost, fleet) {
@@ -1185,7 +1243,38 @@ function sha256(path) {
   return runCapture("sha256sum", [path]).split(/\s+/)[0];
 }
 
-function hasExecutionContract(commit) {
+export function retainSelectedSource(census, remoteHost) {
+  const commit = census.selectedCommit;
+  if (!commit) return;
+  validateSha(commit);
+  const repository = remoteHost ? `${remoteHost}:${releaseRepository}` : releaseRepository;
+  const ref = `refs/pi-stack-publication/selected/${commit}`;
+  if (!commandResult("git", ["-C", checkout, "cat-file", "-e", `${commit}^{commit}`]).ok) {
+    checked("git", ["-C", checkout, "fetch", "--quiet", "--no-tags", repository, `${commit}:${ref}`], { timeoutSeconds: 45 });
+  }
+  checked("git", ["-C", checkout, "cat-file", "-e", `${commit}^{commit}`]);
+  checked("git", ["-C", checkout, "update-ref", ref, commit]);
+  census.selectedSource = { repository, ref, commit };
+}
+
+export function inspectReleaseAncestry(census, target, remoteHost) {
+  validateSha(target);
+  const baselines = [];
+  for (const [kind, commit] of [["live", census.selectedCommit], ["checkout", census.checkoutCommit]]) {
+    if (!commit) continue;
+    const source = { selectedCommit: commit };
+    retainSelectedSource(source, remoteHost);
+    if (kind === "live") census.selectedSource = source.selectedSource;
+    const result = commandResult("git", ["-C", checkout, "merge-base", "--is-ancestor", commit, target]);
+    if (result.status !== 0 && result.status !== 1) {
+      throw new Error(`cannot inspect release ancestry for ${commit}: ${result.stderr.trim()}`);
+    }
+    baselines.push({ kind, ...source.selectedSource, included: result.ok });
+  }
+  return { host: census.host, target, baselines, ok: baselines.every(baseline => baseline.included) };
+}
+
+export function hasExecutionContract(commit) {
   const result = commandResult("git", ["-C", checkout, "grep", "-q", "-F", "THREAD_EXECUTION_CONTRACT = \"unified-threads-v1\"", commit, "--", "packages/orchestrator/src/threads/contracts.ts"]);
   if (result.status > 1) throw new Error(`cannot inspect execution contract in ${commit}: ${result.stderr.trim()}`);
   return result.ok;
@@ -1285,18 +1374,35 @@ function processRequest(request) {
       delete request.checks;
       delete request.hosts;
       result = createIntegration(request, logPath);
-      if (!result.ok) throw new Error(result.stderr.trim() || `integration checks exited ${result.status}`);
+      if (!result.ok) throw new Error(result.stderr.trim() || `${request.step} exited ${result.status}`);
     }
 
     prepareAndroidArtifact(request, logPath);
+    request.step = "inspect-thread-execution-contract";
+    writeRequest(request);
     request.contract = hasExecutionContract(request.integrationSha) ? threadExecutionContract : null;
     if (!request.contract && activatedContract()) throw new Error("Refusing to remove the activated thread execution contract");
     writeRequest(request);
     const requestProofRoot = join(proofRoot, request.requestId);
     const deploymentsPassed = request.hosts?.gmktec?.status === "passed" && request.hosts?.converge?.status === "passed";
     if (!deploymentsPassed) {
+      request.step = "inspect-release-ancestry";
+      writeRequest(request);
       const gmktecCensus = runtimeCensus(undefined);
       const convergeCensus = runtimeCensus("converge-kenan");
+      const ancestry = [
+        inspectReleaseAncestry(gmktecCensus, request.integrationSha),
+        inspectReleaseAncestry(convergeCensus, request.integrationSha, "converge-kenan"),
+      ];
+      const ancestryProofPath = join(requestProofRoot, "release-ancestry.json");
+      atomicWrite(ancestryProofPath, `${JSON.stringify({ checkedAt: new Date().toISOString(), hosts: ancestry }, null, 2)}\n`);
+      request.releaseAncestry = { proof: ancestryProofPath, sha256: sha256(ancestryProofPath) };
+      writeRequest(request);
+      const missing = ancestry.flatMap(host => host.baselines.filter(baseline => !baseline.included)
+        .map(baseline => `${host.host} ${baseline.kind} ${baseline.commit}`));
+      if (missing.length) throw new Error(`Integration ${request.integrationSha} omits host source: ${missing.join(", ")}; merge the retained commits into the repair source before publication`);
+      request.step = "inspect-thread-execution-contract";
+      writeRequest(request);
       if (!request.contract && [gmktecCensus, convergeCensus].some(host => host.selectedCommit && hasExecutionContract(host.selectedCommit))) {
         throw new Error("Refusing to replace a host's thread execution contract with a target that lacks it");
       }
@@ -1397,7 +1503,9 @@ function processRequest(request) {
     request.status = "finalizing";
     request.step = "adopt-publication-owner";
     writeRequest(request);
-    installFrom(canonicalRepository);
+    const ownerSource = checked("git", ["-C", checkout, "rev-parse", "HEAD"]);
+    if (ownerSource !== request.integrationSha) throw new Error(`Publication owner checkout ${ownerSource} differs from checked integration ${request.integrationSha}`);
+    installFrom(checkout);
 
     request.status = "published";
     request.step = "complete";
@@ -1751,6 +1859,10 @@ function main() {
   if (operation === "_watchdog" && args.length === 0) return watchdog();
   if (operation === "_drain" && args.length === 0) return drain();
   if (operation === "_fail-stalled" && args.length === 2) return failStalled(...args);
+  if (operation === "acknowledge-issues" && args.length === 0) return locked("worker", "acknowledge-issues");
+  if (operation === "_acknowledge-issues" && args.length === 0) return acknowledgeIssues();
+  if (operation === "issues" && args.length === 0) return locked("worker", "issues");
+  if (operation === "_issues" && args.length === 0) { reconcileIssueIndex(); process.stdout.write(`${issueIndexPath}\n`); return; }
   if (operation === "notices" && args.length === 0) return locked("worker", "notices", [], true);
   if (operation === "_notices" && args.length === 0) return reconcileNotices();
   if (operation === "repair-run" && args.length === 1) return locked("repair-agent", "repair-run", args);
@@ -1777,9 +1889,11 @@ function main() {
   process.exitCode = 2;
 }
 
-try {
-  main();
-} catch (error) {
-  process.stderr.write(`${error instanceof Error ? error.message : String(error)}\n`);
-  process.exitCode = 1;
+if (process.argv[1] && resolve(process.argv[1]) === self) {
+  try {
+    main();
+  } catch (error) {
+    process.stderr.write(`${error instanceof Error ? error.message : String(error)}\n`);
+    process.exitCode = 1;
+  }
 }

@@ -11,13 +11,17 @@ import { createAgentSession, DefaultResourceLoader, ModelRuntime, SessionManager
 import codexCompaction from "./index.mjs";
 import { KIND } from "./native.mjs";
 import { readFileSync } from "node:fs";
-import { patchCompactionErrors } from "../../patch-compaction-errors.mjs";
+import { patchCompactionErrors, patchContextErrors } from "../../patch-compaction-errors.mjs";
 
 const agentSessionUrl = new URL("core/agent-session.js", import.meta.resolve("@earendil-works/pi-coding-agent"));
 const patchedSource = patchCompactionErrors(readFileSync(agentSessionUrl, "utf8")).replace(/from "([^"]+)"/gu, (_match, specifier) => `from "${specifier.startsWith(".") ? new URL(specifier, agentSessionUrl).href : import.meta.resolve(specifier)}"`);
 const { AgentSession: PatchedSession } = await import(`data:text/javascript;base64,${Buffer.from(patchedSource).toString("base64")}`);
+const runnerUrl = new URL("core/extensions/runner.js", import.meta.resolve("@earendil-works/pi-coding-agent"));
+const runnerSource = patchContextErrors(readFileSync(runnerUrl, "utf8")).replace(/from "([^"]+)"/gu, (_match, specifier) => `from "${specifier.startsWith(".") ? new URL(specifier, runnerUrl).href : import.meta.resolve(specifier)}"`);
+const { ExtensionRunner: PatchedRunner } = await import(`data:text/javascript;base64,${Buffer.from(runnerSource).toString("base64")}`);
 
-for (const failFirst of [false, true]) test(`Pi completes parallel tools and ${failFirst ? "stops after failed compaction until explicit recovery" : "compacts and continues the same run"}`, { timeout: 4000 }, async () => {
+for (const outcome of ["success", "failure", "post-failure", "cancel"]) test(`Pi completes parallel tools and handles native compaction ${outcome}`, { timeout: 4000 }, async () => {
+  const failFirst = outcome !== "success", cancelFirst = outcome === "cancel";
   const root = await mkdtemp(join(tmpdir(), "pi-compaction-lifecycle-"));
   let calls = 0, tools = 0, compacted = 0;
   const bodies = [], failures = [];
@@ -33,7 +37,8 @@ for (const failFirst of [false, true]) test(`Pi completes parallel tools and ${f
         assert.equal(tools, 2);
         assert.equal(body.input.filter(item => item.type === "function_call_output").length, 2);
         compacted++;
-        if (failFirst && compacted === 1) { response.writeHead(503); response.end("fixture unavailable"); return; }
+        if (cancelFirst && compacted === 1) { void session.abort(); response.end(); return; }
+        if (failFirst && compacted === 1) { response.writeHead(503); response.end("fixture unavailable: fetch failed"); return; }
         output = [encrypted]; inputTokens = 100;
       } else if (++calls === 1) {
         output = [1, 2].map(n => ({ type: "function_call", id: `fc_${n}`, call_id: `call_${n}`, name: "probe", arguments: "{}", status: "completed" }));
@@ -60,8 +65,8 @@ for (const failFirst of [false, true]) test(`Pi completes parallel tools and ${f
     const modelRuntime = await ModelRuntime.create({ authPath: join(root, "auth.json"), modelsPath: join(root, "models.json") });
     modelRuntime.registerNativeProvider({ ...family, id: model.provider, baseUrl: model.baseUrl, auth: { apiKey: { name: "fixture", check: async () => ({ type: "api_key", source: "fixture" }), resolve: async () => ({ auth: { apiKey: token }, source: "fixture" }), login: async () => ({ type: "api_key", key: token }) } }, getModels: () => [model], stream: (m, context, options) => family.stream(m, context, { ...options, transport: "sse" }), streamSimple: (m, context, options) => family.streamSimple(m, context, { ...options, transport: "sse" }) });
     await modelRuntime.refresh({ providers: [model.provider], allowNetwork: false });
-    const settingsManager = SettingsManager.inMemory({ compaction: { enabled: true, reserveTokens: 1000, keepRecentTokens: 8 }, retry: { enabled: false } });
-    const resourceLoader = new DefaultResourceLoader({ cwd: root, agentDir: root, settingsManager, noExtensions: true, noSkills: true, noContextFiles: true, noPromptTemplates: true, noThemes: true, extensionFactories: [codexCompaction, pi => pi.registerTool({ name: "probe", label: "Probe", description: "Return fixture data", parameters: Type.Object({}), async execute() { tools++; return { content: [{ type: "text", text: "tool result" }] }; } })] });
+    const settingsManager = SettingsManager.inMemory({ compaction: { enabled: true, reserveTokens: 1000, keepRecentTokens: 8 }, retry: { enabled: true, maxRetries: 2, baseDelayMs: 1 } });
+    const resourceLoader = new DefaultResourceLoader({ cwd: root, agentDir: root, settingsManager, noExtensions: true, noSkills: true, noContextFiles: true, noPromptTemplates: true, noThemes: true, extensionFactories: [codexCompaction, pi => pi.registerTool({ name: "probe", label: "Probe", description: "Return fixture data", parameters: Type.Object({}), async execute() { tools++; return { content: [{ type: "text", text: "tool result" }], terminate: outcome === "post-failure" }; } })] });
     await resourceLoader.reload();
     const sessionManager = SessionManager.create(root, join(root, "sessions"));
     ({ session } = await createAgentSession({ cwd: root, agentDir: root, model, modelRuntime, resourceLoader, settingsManager, sessionManager, tools: ["probe"], thinkingLevel: "minimal" }));
@@ -69,14 +74,23 @@ for (const failFirst of [false, true]) test(`Pi completes parallel tools and ${f
     const events = [];
     session.subscribe(event => events.push(event));
     await session.bindExtensions({ mode: "print", onError: error => failures.push(error) });
+    Object.setPrototypeOf(session.extensionRunner, PatchedRunner.prototype);
     await session.prompt("fixture ".repeat(128));
     if (failFirst) {
       assert.equal(calls, 1, "no chat request after the failed checkpoint");
       assert.equal(compacted, 1);
       assert.equal(tools, 2);
       assert.equal(sessionManager.getBranch().some(entry => entry.type === "compaction"), false);
-      assert.ok(events.some(event => event.type === "compaction_end" && !event.aborted && /fixture unavailable/.test(event.errorMessage)));
+      assert.ok(events.some(event => event.type === "compaction_end" && (cancelFirst ? event.aborted : !event.aborted && /fixture unavailable/.test(event.errorMessage))));
+      let last = session.messages.at(-1);
+      assert.equal(last.stopReason, cancelFirst ? "aborted" : "error");
+      if (!cancelFirst) assert.match(last.errorMessage, /fixture unavailable: fetch failed/);
+      assert.equal(sessionManager.getBranch().filter(entry => entry.customType === "codex-compaction-attempt").at(-1).data.state, cancelFirst ? "cancelled" : "failed");
       await session.prompt("attempt automatic recovery");
+      last = session.messages.at(-1);
+      assert.equal(last.stopReason, "error");
+      assert.match(last.errorMessage, cancelFirst ? /Context rejected: Native compaction cancelled:/ : /Context rejected: Native compaction failed: fixture unavailable: fetch failed/);
+      assert.equal(events.filter(event => event.type === "auto_retry_start").length, 0);
       assert.equal(compacted, 1, "new prompts cannot bypass the persisted fence");
       assert.equal(calls, 1);
       await session.compact();
@@ -85,8 +99,8 @@ for (const failFirst of [false, true]) test(`Pi completes parallel tools and ${f
     assert.deepEqual(failures, []);
     assert.equal(calls, 2);
     assert.equal(compacted, failFirst ? 2 : 1);
-    assert.equal(events.filter(event => event.type === "agent_start").length, failFirst ? 3 : 1);
-    assert.equal(events.filter(event => event.type === "agent_end").length, failFirst ? 3 : 1);
+    assert.equal(events.filter(event => event.type === "agent_start").length, outcome === "post-failure" ? 4 : failFirst ? 3 : 1);
+    assert.equal(events.filter(event => event.type === "agent_end").length, outcome === "post-failure" ? 4 : failFirst ? 3 : 1);
     const branch = sessionManager.getBranch();
     assert.equal(branch.filter(entry => entry.type === "message" && entry.message.role === "user").length, failFirst ? 3 : 1);
     assert.equal(branch.filter(entry => entry.type === "message" && entry.message.role === "toolResult").length, 2);

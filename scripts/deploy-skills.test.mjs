@@ -29,6 +29,7 @@ test("skill deployment replaces a stale managed directory with the reviewed rele
         HOME: home,
         PI_STACK_ALLOW_DIRTY: "1",
         PI_STACK_DEPLOY_NO_SUDO: "1",
+        PI_STACK_HOST_LOCK_PATH: join(workspace, "host.lock"),
         PI_STACK_SKILLS_DEST: destination,
         PI_STACK_HOST_FILE: join(workspace, "host.json"),
         PI_STACK_HOME_OVERRIDE: home,

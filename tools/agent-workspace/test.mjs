@@ -1,7 +1,9 @@
 import assert from "node:assert/strict";
 import { execFile, execFileSync, spawn } from "node:child_process";
-import { existsSync, mkdtempSync, mkdirSync, readFileSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
+import { createHash } from "node:crypto";
+import { chmodSync, existsSync, mkdtempSync, mkdirSync, readFileSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
+import { createServer } from "node:net";
 import path from "node:path";
 import { DatabaseSync } from "node:sqlite";
 import { test as nodeTest } from "node:test";
@@ -70,6 +72,144 @@ function fixture() {
     close() { rmSync(root, { recursive: true, force: true }); },
   };
 }
+
+function interruptCreation(f, stage) {
+  const bin = path.join(f.root, "bin");
+  mkdirSync(bin);
+  const realGit = execFileSync("which", ["git"], { encoding: "utf8" }).trim();
+  const marker = path.join(f.root, "interrupted");
+  const wrapper = path.join(bin, "git");
+  writeFileSync(wrapper, `#!${process.execPath}
+const { spawnSync } = require('node:child_process');
+const fs = require('node:fs');
+const args = process.argv.slice(2);
+const result = spawnSync(${JSON.stringify(realGit)}, args, {stdio:'inherit'});
+if (result.status === 0 && args.includes(${JSON.stringify(stage)}) && !fs.existsSync(${JSON.stringify(marker)})) {
+  fs.writeFileSync(${JSON.stringify(marker)}, 'interrupted');
+  process.kill(process.ppid, 'SIGKILL');
+}
+process.exit(result.status ?? 1);
+`);
+  chmodSync(wrapper, 0o755);
+  return { ...f.env, PATH: `${bin}:${process.env.PATH}` };
+}
+
+for (const stage of ["clone", "checkout"]) test(`creation resumes after interruption following ${stage}`, () => {
+  const f = fixture();
+  try {
+    const args = ["create", "--root", f.workspaces, "--name", "resumable", "--repo", f.source,
+      "--owner", "original-owner", "--min-free-gib", "0", "--json"];
+    assert.throws(() => run(args, interruptCreation(f, stage)));
+    const [pending] = JSON.parse(run(["status", "--json"], f.env));
+    assert.equal(pending.state, "creating");
+    assert.equal(pending.owner, "original-owner");
+    const [inspection] = JSON.parse(run(["reconcile", "--execute", "--reap-expired", "--json"], f.env));
+    assert.equal(inspection.action, "none");
+    assert.equal(existsSync(pending.path), true);
+    assert.throws(() => run([...args, "--group", "another-owner"], f.env), /different creation request/);
+    writeFileSync(path.join(f.source, "later.txt"), "later source\n");
+    git(f.source, "add", "later.txt");
+    git(f.source, "commit", "-m", "advance source after interruption");
+    const resumed = JSON.parse(run(args, f.env));
+    assert.equal(resumed.id, pending.id);
+    assert.equal(resumed.sourceCommit, pending.sourceCommit);
+    assert.equal(resumed.state, "active");
+    assert.equal(readFileSync(path.join(resumed.path, "file.txt"), "utf8"), "source\n");
+    assert.deepEqual(JSON.parse(run(args, f.env)), resumed);
+  } finally { f.close(); }
+});
+
+test("source preparation interruption leaves no destination reservation", () => {
+  const f = fixture();
+  try {
+    const args = ["create", "--root", f.workspaces, "--name", "preparing", "--repo", f.source,
+      "--min-free-gib", "0", "--json"];
+    assert.throws(() => run(args, interruptCreation(f, "config")));
+    assert.deepEqual(JSON.parse(run(["status", "--json"], f.env)), []);
+    assert.equal(existsSync(path.join(f.workspaces, "preparing")), false);
+    assert.equal(JSON.parse(run(args, f.env)).state, "active");
+  } finally { f.close(); }
+});
+
+test("invalid sources never reserve a destination and corrected sources resolve to commits", () => {
+  const f = fixture();
+  try {
+    const commit = git(f.source, "rev-parse", "HEAD");
+    const blob = git(f.source, "rev-parse", "HEAD:file.txt");
+    git(f.source, "tag", "not-a-commit", blob);
+    for (const repository of [f.source, `file://${f.remote}`]) {
+      const args = ["create", "--root", f.workspaces, "--name", "validated", "--repo", repository,
+        "--min-free-gib", "0", "--json"];
+      for (const ref of ["no-such-ref", "012345678", ...(repository === f.source ? ["not-a-commit"] : [])]) {
+        assert.throws(() => run([...args, "--ref", ref], f.env));
+        assert.equal(JSON.parse(run(["status", "--json"], f.env)).some(row => row.state === "creating"), false);
+        assert.equal(existsSync(path.join(f.workspaces, "validated")), false);
+      }
+      const created = JSON.parse(run([...args, "--ref", commit.slice(0, 9)], f.env));
+      assert.equal(created.sourceCommit, commit);
+      assert.equal(git(created.path, "rev-parse", "HEAD"), commit);
+      run(["release", "--id", created.id, "--json"], f.env);
+    }
+  } finally { f.close(); }
+});
+
+test("explicit cancellation retires an absent creation without changing grouped peers", () => {
+  const f = fixture();
+  try {
+    const args = ["create", "--root", f.workspaces, "--repo", f.source,
+      "--group", "paired", "--min-free-gib", "0", "--json"];
+    const pending = JSON.parse(run([...args, "--name", "failed"], f.env));
+    const peer = JSON.parse(run([...args, "--name", "peer"], f.env));
+    const database = new DatabaseSync(f.env.PI_WORKSPACE_STATE);
+    database.prepare("UPDATE workspace SET state='creating', source_commit=NULL, lease_expires_at=0 WHERE id=?").run(pending.id);
+    database.close();
+    rmSync(pending.path, { recursive: true });
+    symlinkSync(path.join(f.root, "absent-target"), pending.path);
+    assert.throws(() => run(["cancel-creation", "--id", pending.id], f.env), /pending checkout exists/);
+    rmSync(pending.path);
+    const cancelled = JSON.parse(run(["cancel-creation", "--id", pending.id, "--json"], f.env));
+    assert.equal(cancelled.state, "released");
+    assert.equal(cancelled.sourceCommit, null);
+    const [unchanged] = JSON.parse(run(["status", "--path", peer.path, "--json"], f.env));
+    assert.deepEqual(unchanged, peer);
+    const recovered = JSON.parse(run([...args, "--name", "failed", "--ref", peer.sourceCommit], f.env));
+    assert.notEqual(recovered.id, pending.id);
+    assert.equal(recovered.state, "active");
+    assert.throws(() => run(["cancel-creation", "--id", recovered.id], f.env), /cannot cancel creation from state active/);
+  } finally { f.close(); }
+});
+
+test("pending creation preserves edits and ignored output instead of deleting a failed checkout", () => {
+  const f = fixture();
+  try {
+    const args = ["create", "--root", f.workspaces, "--name", "preserved", "--repo", f.source,
+      "--min-free-gib", "0", "--json"];
+    assert.throws(() => run(args, interruptCreation(f, "checkout")));
+    const destination = path.join(f.workspaces, "preserved");
+    writeFileSync(path.join(destination, "file.txt"), "unique source\n");
+    mkdirSync(path.join(destination, "ignored-output"));
+    writeFileSync(path.join(destination, "ignored-output", "proof"), "retain\n");
+    assert.throws(() => run(args, f.env), /pending checkout contains changes/);
+    assert.throws(() => run(["cancel-creation", "--path", destination], f.env), /pending checkout exists/);
+    const retained = JSON.parse(run(["release", "--path", destination, "--json"], f.env));
+    assert.equal(retained.action, "none");
+    assert.equal(readFileSync(path.join(destination, "file.txt"), "utf8"), "unique source\n");
+    assert.equal(readFileSync(path.join(destination, "ignored-output", "proof"), "utf8"), "retain\n");
+  } finally { f.close(); }
+});
+
+test("local reference creation does not copy unreachable source objects", () => {
+  const f = fixture();
+  try {
+    const object = execFileSync("git", ["-C", f.source, "hash-object", "-w", "--stdin"], {
+      input: "unreferenced cache object\n", encoding: "utf8",
+    }).trim();
+    const created = JSON.parse(run(["create", "--root", f.workspaces, "--name", "negotiated",
+      "--repo", f.source, "--min-free-gib", "0", "--json"], f.env));
+    assert.equal(existsSync(path.join(created.path, ".git", "objects", object.slice(0, 2), object.slice(2))), false);
+    assert.equal(readFileSync(path.join(created.path, "file.txt"), "utf8"), "source\n");
+  } finally { f.close(); }
+});
 
 test("capacity follows available storage unless a caller imposes a count limit", () => {
   const f = fixture();
@@ -213,6 +353,63 @@ test("migrates a registry created before workspace groups", () => {
   } finally {
     rmSync(root, { recursive: true, force: true });
   }
+});
+
+test("initialized registry reads do not acquire the SQLite writer lock", () => {
+  const f = fixture();
+  let database;
+  try {
+    const created = JSON.parse(run(["create", "--root", f.workspaces, "--name", "writer-held",
+      "--repo", f.remote, "--min-free-gib", "0", "--json"], f.env));
+    database = new DatabaseSync(f.env.PI_WORKSPACE_STATE);
+    database.exec("BEGIN IMMEDIATE");
+    database.prepare("UPDATE workspace SET detail='uncommitted writer' WHERE id=?").run(created.id);
+    const output = execFileSync(entry, ["status", "--json"], {
+      env: { ...process.env, ...f.env }, encoding: "utf8", timeout: 1500,
+    });
+    const [observed] = JSON.parse(output);
+    assert.equal(observed.id, created.id);
+    assert.equal(observed.detail, "creation completed");
+    database.exec("ROLLBACK");
+    database.close();
+    database = undefined;
+  } finally {
+    database?.close();
+    f.close();
+  }
+});
+
+test("forty cold registry clients initialize one WAL schema without contention failures", async () => {
+  const f = fixture();
+  try {
+    const results = await Promise.all(Array.from({ length: 40 }, () => runAsync(["status", "--json"], f.env)));
+    for (const result of results) assert.deepEqual(JSON.parse(result), []);
+    const database = new DatabaseSync(f.env.PI_WORKSPACE_STATE);
+    assert.equal(database.prepare("PRAGMA journal_mode").get().journal_mode, "wal");
+    assert.equal(database.prepare("PRAGMA user_version").get().user_version, 1);
+    assert.ok(database.prepare("PRAGMA table_info(workspace)").all().some(column => column.name === "creation_request"));
+    database.close();
+  } finally { f.close(); }
+});
+
+test("forty concurrent create and heartbeat clients share registry writes", async () => {
+  const f = fixture();
+  try {
+    const commit = git(f.source, "rev-parse", "HEAD");
+    const records = await Promise.all(Array.from({ length: 40 }, async (_, index) => JSON.parse(await runAsync([
+      "create", "--root", f.workspaces, "--name", `concurrent-${index}`, "--repo", f.remote,
+      "--ref", commit, "--min-free-gib", "0", "--json",
+    ], f.env))));
+    assert.equal(new Set(records.map(record => record.id)).size, 40);
+    const renewed = await Promise.all(records.map(async record => JSON.parse(await runAsync([
+      "heartbeat", "--path", record.path, "--json",
+    ], f.env))));
+    for (const record of renewed) {
+      assert.equal(record.state, "active");
+      assert.equal(record.sourceCommit, commit);
+    }
+    assert.equal(JSON.parse(run(["status", "--json"], f.env)).length, 40);
+  } finally { f.close(); }
 });
 
 test("ignores containers removed during the Docker ownership snapshot", () => {
@@ -558,6 +755,38 @@ test("keeps a unique detached HEAD even when local branches are remote", () => {
   }
 });
 
+test("existing registration adopts one requested group and rejects a conflicting replacement", () => {
+  const f = fixture();
+  try {
+    mkdirSync(f.workspaces, { recursive: true });
+    const workspace = path.join(f.workspaces, "existing");
+    execFileSync("git", ["clone", f.remote, workspace]);
+    const first = JSON.parse(run(["register", "--path", workspace, "--lease-seconds", "0", "--json"], f.env));
+    assert.equal(first.groupId, null);
+
+    const grouped = JSON.parse(run([
+      "register", "--path", workspace, "--group", "task-one", "--cache", "generated-one", "--lease-seconds", "0", "--json",
+    ], f.env));
+    assert.equal(grouped.id, first.id);
+    assert.equal(grouped.groupId, "task-one");
+    assert.equal(grouped.cachePaths.includes("generated-one"), true);
+
+    assert.throws(() => run([
+      "register", "--path", workspace, "--group", "task-two", "--lease-seconds", "0", "--json",
+    ], f.env), /already belongs to group task-one; requested task-two/);
+    const retained = JSON.parse(run(["status", "--path", workspace, "--json"], f.env))[0];
+    assert.equal(retained.groupId, "task-one");
+
+    const replaced = JSON.parse(run([
+      "register", "--path", workspace, "--group", "task-one", "--cache", "generated-two", "--replace-cache", "--lease-seconds", "0", "--json",
+    ], f.env));
+    assert.equal(replaced.cachePaths.includes("generated-one"), false);
+    assert.equal(replaced.cachePaths.includes("generated-two"), true);
+  } finally {
+    f.close();
+  }
+});
+
 test("keeps every repository in a group until all are recoverable", () => {
   const f = fixture();
   try {
@@ -620,7 +849,7 @@ test("keeps an object source until registered alternate borrowers are released",
   }
 });
 
-test("adopts nested repositories as one workspace group", () => {
+test("adopts new and existing sibling repositories as one workspace group", () => {
   const f = fixture();
   try {
     const container = path.join(f.workspaces, "link-change");
@@ -629,6 +858,8 @@ test("adopts nested repositories as one workspace group", () => {
     const frontend = path.join(container, "frontend");
     execFileSync("git", ["clone", f.remote, backend]);
     execFileSync("git", ["clone", f.remote, frontend]);
+    const existing = JSON.parse(run(["register", "--path", frontend, "--lease-seconds", "0", "--json"], f.env));
+    assert.equal(existing.groupId, null);
     writeFileSync(path.join(backend, "file.txt"), "uncommitted work\n");
 
     const held = JSON.parse(run([
@@ -636,6 +867,7 @@ test("adopts nested repositories as one workspace group", () => {
     ], f.env));
     assert.equal(held.length, 2);
     assert.equal(new Set(held.map((result) => result.record.groupId)).size, 1);
+    assert.equal(held.find((result) => result.record.path === frontend).record.id, existing.id);
     assert.equal(held.some((result) => result.inspection.classification === "repair-required"), true);
     assert.equal(existsSync(backend), true);
     assert.equal(existsSync(frontend), true);
@@ -646,6 +878,74 @@ test("adopts nested repositories as one workspace group", () => {
     ], f.env));
     assert.equal(released.every((result) => result.action === "released-group"), true);
     assert.equal(existsSync(container), false);
+  } finally {
+    f.close();
+  }
+});
+
+test("conditional cache ownership follows each repository's tracked source", () => {
+  const f = fixture();
+  try {
+    const container = path.join(f.workspaces, "link-change");
+    mkdirSync(container, { recursive: true });
+    const backend = path.join(container, "backend");
+    const frontend = path.join(container, "frontend");
+    for (const repository of [backend, frontend]) {
+      execFileSync("git", ["clone", f.remote, repository]);
+      git(repository, "config", "user.name", "Test");
+      git(repository, "config", "user.email", "test@example.invalid");
+      writeFileSync(path.join(repository, ".gitignore"), "generated.json\n");
+    }
+    writeFileSync(path.join(backend, "generator.js"), "writeGeneratedOutput();\n");
+    git(backend, "add", ".gitignore", "generator.js");
+    git(backend, "commit", "-m", "own generated output");
+    git(frontend, "add", ".gitignore");
+    git(frontend, "commit", "-m", "ignore foreign output");
+
+    const records = JSON.parse(run([
+      "adopt", "--root", f.workspaces, "--nested-groups", "--cache-owned", "generated.json=generator.js", "--replace-cache", "--json",
+    ], f.env));
+    assert.equal(records.find((record) => record.path === backend).cachePaths.includes("generated.json"), true);
+    assert.equal(records.find((record) => record.path === frontend).cachePaths.includes("generated.json"), false);
+  } finally {
+    f.close();
+  }
+});
+
+test("adopts an independent repository nested inside a checkout without classifying it as cache", () => {
+  const f = fixture();
+  try {
+    mkdirSync(f.workspaces, { recursive: true });
+    const parent = path.join(f.workspaces, "agent-parent");
+    execFileSync("git", ["clone", f.remote, parent]);
+    writeFileSync(path.join(parent, ".gitignore"), ".link-ui-review/\n");
+    git(parent, "add", ".gitignore");
+    git(parent, "commit", "-m", "ignore nested review checkout");
+    git(parent, "push", "origin", "HEAD:main");
+    const nested = path.join(parent, ".link-ui-review");
+    execFileSync("git", ["clone", f.remote, nested]);
+    const existing = JSON.parse(run(["register", "--path", parent, "--lease-seconds", "0", "--json"], f.env));
+    assert.equal(existing.groupId, null);
+
+    writeFileSync(path.join(nested, "file.txt"), "nested unique work\n");
+    const held = JSON.parse(run([
+      "adopt", "--root", f.workspaces, "--nested-groups", "--lease-seconds", "21600", "--execute", "--json",
+    ], f.env));
+    assert.equal(held.length, 2);
+    assert.equal(new Set(held.map((result) => result.record.groupId)).size, 1);
+    assert.equal(held.find((result) => result.record.path === parent).record.id, existing.id);
+    assert.equal(held.find((result) => result.record.path === nested).record.leaseExpiresAt <= Date.now(), true);
+    assert.equal(held.find((result) => result.record.path === nested).inspection.classification, "repair-required");
+    assert.equal(existsSync(parent), true);
+    assert.equal(existsSync(nested), true);
+
+    git(nested, "checkout", "--", "file.txt");
+    const released = JSON.parse(run([
+      "reconcile", "--root", f.workspaces, "--execute", "--json",
+    ], f.env));
+    assert.equal(released.every((result) => result.action === "released-group"), true, JSON.stringify(released));
+    assert.equal(existsSync(parent), false);
+    assert.equal(existsSync(nested), false);
   } finally {
     f.close();
   }
@@ -735,6 +1035,167 @@ test("status answers what became of a checkout whose directory is gone", () => {
     const missing = run(["status", "--path", "never-registered-anywhere"], f.env);
     assert.match(missing, /no registered workspace matches that filter/);
   } finally {
+    f.close();
+  }
+});
+
+test("status filters in SQL before decoding unrelated records and preserves literal matching", () => {
+  const f = fixture();
+  try {
+    mkdirSync(f.workspaces);
+    run(["status", "--json"], f.env);
+    const database = new DatabaseSync(f.env.PI_WORKSPACE_STATE);
+    const insert = database.prepare(`INSERT INTO workspace
+      (id,path,root,kind,mode,owner,checkout_type,cache_paths,created_at,updated_at,lease_expires_at,state,detail)
+      VALUES (?,?,?,'agent','writer',?,'clone',?,1,1,0,'released','retained history')`);
+    const rows = [
+      ["one", path.join(f.workspaces, "Case_%'雪"), f.workspaces, "Owner_%'雪", "[]"],
+      ["two", path.join(f.workspaces, "case-other"), f.workspaces, "other", "[]"],
+      ["three", path.join(f.root, "other-pool", "Case_%'雪"), path.join(f.root, "other-pool"), "other", "[]"],
+      ["unrelated", path.join(f.root, "unrelated"), path.join(f.root, "other-pool"), "unrelated", "not JSON"],
+    ];
+    for (const row of rows) insert.run(...row);
+    database.close();
+    const ids = (args, cwd) => JSON.parse(run(["status", ...args, "--json"], f.env, cwd)).map(row => row.id);
+    assert.deepEqual(ids(["--path", "_%'雪"]), ["three", "one"]);
+    assert.deepEqual(ids(["--root", f.workspaces, "--path", "_%'雪"]), ["one"]);
+    assert.deepEqual(ids(["--owner", "Owner_%'"]), ["one"]);
+    assert.deepEqual(ids(["--owner", "owner"]), []);
+    assert.deepEqual(ids(["--path", "Case", "--owner", "other"]), ["three"]);
+    assert.deepEqual(ids(["--path", "./Case_%'雪"], f.workspaces), ["one"]);
+    assert.match(run(["status", "--root", f.workspaces, "--path", "Case"], f.env), /filtered from 2/);
+    assert.match(run(["list", "--path", "missing"], f.env), /4 record\(s\) are known/);
+    assert.throws(() => run(["status", "--path", "unrelated", "--json"], f.env), /JSON/);
+  } finally { f.close(); }
+});
+
+test("status and list never launch disposal while lifecycle commands retain collection", () => {
+  const f = fixture();
+  try {
+    run(["status", "--json"], f.env);
+    const garbage = path.join(path.dirname(f.env.PI_WORKSPACE_STATE), "gc", "pending");
+    mkdirSync(garbage, { recursive: true });
+    const retained = path.join(garbage, "payload");
+    writeFileSync(retained, "pending lifecycle cleanup");
+    const guard = path.join(f.root, "spawn-guard.mjs");
+    writeFileSync(guard, `import cp from "node:child_process";\nimport { syncBuiltinESMExports } from "node:module";\ncp.spawn = () => { throw new Error("disposal subprocess attempted"); };\nsyncBuiltinESMExports();\n`);
+    const env = { ...f.env, NODE_OPTIONS: `--import=${guard}` };
+    for (const name of ["status", "list"]) {
+      assert.deepEqual(JSON.parse(run([name, "--path", "missing", "--json"], env)), []);
+      assert.equal(readFileSync(retained, "utf8"), "pending lifecycle cleanup");
+    }
+    assert.throws(() => run(["reconcile", "--json"], env), /disposal subprocess attempted/);
+  } finally { f.close(); }
+});
+
+test("a surviving Git child retains its checkout fence after creator termination", async () => {
+  const f = fixture();
+  let connection;
+  let accept;
+  let completed;
+  const gate = new Promise(resolve => { accept = resolve; });
+  const done = new Promise(resolve => { completed = resolve; });
+  const server = createServer(socket => {
+    connection = socket;
+    let buffer = "";
+    socket.setEncoding("utf8");
+    socket.on("data", chunk => {
+      buffer += chunk;
+      let end;
+      while ((end = buffer.indexOf("\n")) >= 0) {
+        const event = JSON.parse(buffer.slice(0, end));
+        buffer = buffer.slice(end + 1);
+        if (event.pid) accept(event.pid);
+        else completed(event.code);
+      }
+    });
+  });
+  try {
+    const bin = path.join(f.root, "bin");
+    mkdirSync(bin);
+    const socketPath = path.join(f.root, "child.sock");
+    const realGit = execFileSync("which", ["git"], { encoding: "utf8" }).trim();
+    writeFileSync(path.join(bin, "git"), `#!${process.execPath}
+const { spawnSync } = require('node:child_process');
+const args = process.argv.slice(2);
+if (args[0] !== 'clone') process.exit(spawnSync(${JSON.stringify(realGit)}, args, {stdio:'inherit'}).status ?? 1);
+const socket = require('node:net').createConnection(${JSON.stringify(socketPath)});
+socket.on('connect', () => socket.write(JSON.stringify({pid:process.ppid})+'\\n'));
+socket.once('data', () => {
+  const code = spawnSync(${JSON.stringify(realGit)}, args, {stdio:'ignore'}).status;
+  socket.end(JSON.stringify({code})+'\\n');
+});
+`, { mode: 0o755 });
+    await new Promise(resolve => server.listen(socketPath, resolve));
+    const args = ["create", "--root", f.workspaces, "--name", "surviving-child", "--repo", f.source,
+      "--min-free-gib", "0", "--json"];
+    const first = runAsync(args, { ...f.env, PATH: `${bin}:${process.env.PATH}` }).catch(error => error);
+    const pid = await Promise.race([gate, first.then(() => { throw Error("creation exited before child gate"); })]);
+    process.kill(pid, "SIGKILL");
+    assert.ok(await first instanceof Error);
+    const key = createHash("sha256").update(`checkout:${path.join(f.workspaces, "surviving-child")}`).digest("hex");
+    const lock = path.join(path.dirname(f.env.PI_WORKSPACE_STATE), "locks", key);
+    assert.throws(() => execFileSync("flock", ["--nonblock", lock, "true"]), error => error.status === 1);
+    connection.write("continue");
+    assert.equal(await done, 0);
+    const resumed = JSON.parse(await runAsync(args, f.env));
+    assert.equal(resumed.state, "active");
+    assert.equal(readFileSync(path.join(resumed.path, "file.txt"), "utf8"), "source\n");
+  } finally {
+    connection?.destroy();
+    await new Promise(resolve => server.close(resolve));
+    f.close();
+  }
+});
+
+test("parallel immutable creations leave unrelated custody usable and fence duplicate destinations", async () => {
+  const f = fixture();
+  const sockets = [];
+  const children = [];
+  const server = createServer(socket => sockets.push(socket));
+  try {
+    const commit = git(f.source, "rev-parse", "HEAD");
+    const create = ["create", "--root", f.workspaces, "--repo", f.remote,
+      "--ref", commit, "--min-free-gib", "0", "--json"];
+    const retained = JSON.parse(run([...create, "--name", "retained"], f.env));
+    const released = JSON.parse(run([...create, "--name", "released"], f.env));
+    const bin = path.join(f.root, "bin");
+    mkdirSync(bin);
+    const socketPath = path.join(f.root, "create.sock");
+    const gitPath = execFileSync("which", ["git"], { encoding: "utf8" }).trim();
+    const log = path.join(f.root, "git.jsonl");
+    writeFileSync(path.join(bin, "git"), `#!${process.execPath}
+const { appendFileSync } = require("node:fs");
+const { spawn } = require("node:child_process");
+const args = process.argv.slice(2);
+appendFileSync(${JSON.stringify(log)}, JSON.stringify(args) + "\\n");
+const run = () => { const child = spawn(${JSON.stringify(gitPath)}, args, {stdio:"inherit"}); child.on("exit", code => process.exit(code ?? 1)); };
+if (args[0] === "clone") { const socket = require("node:net").createConnection(${JSON.stringify(socketPath)}); socket.on("end", run); socket.on("error", error => {console.error(error);process.exit(1);}); socket.resume(); } else run();
+`, { mode: 0o755 });
+    await new Promise(resolve => server.listen(socketPath, resolve));
+    const env = { ...f.env, PATH: `${bin}:${process.env.PATH}` };
+    const ready = new Promise(resolve => {
+      server.on("connection", () => { if (sockets.length === 8) resolve(); });
+    });
+    for (let index = 0; index < 8; index += 1) children.push(runAsync([...create, "--name", `parallel-${index}`], env));
+    await Promise.race([ready, Promise.all(children).then(() => { throw Error("creations escaped the clone gate"); })]);
+    const renewed = JSON.parse(await runAsync(["heartbeat", "--path", retained.path, "--json"], f.env));
+    assert.equal(renewed.state, "active");
+    assert.equal(JSON.parse(await runAsync(["release", "--path", released.path, "--json"], f.env)).action, "released");
+    const duplicate = runAsync([...create, "--name", "parallel-0"], env);
+    for (const socket of sockets) socket.end();
+    const records = (await Promise.all(children)).map(value => JSON.parse(value));
+    assert.equal(JSON.parse(await duplicate).id, records[0].id);
+    await assert.rejects(runAsync([...create, "--name", "parallel-0", "--owner", "different-request"], env),
+      /different creation request/);
+    assert.equal(new Set(records.map(record => record.id)).size, 8);
+    for (const record of records) assert.equal(git(record.path, "rev-parse", "HEAD"), commit);
+    const commands = readFileSync(log, "utf8").trim().split("\n").map(line => JSON.parse(line));
+    assert.equal(commands.some(args => args.includes("fetch")), false);
+  } finally {
+    for (const socket of sockets) socket.end();
+    await Promise.allSettled(children);
+    await new Promise(resolve => server.close(resolve));
     f.close();
   }
 });

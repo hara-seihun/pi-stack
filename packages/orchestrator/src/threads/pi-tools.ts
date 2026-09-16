@@ -3,6 +3,7 @@ import { defineTool } from "@earendil-works/pi-coding-agent";
 import { resolveDelivery, THREAD_AWAIT_TIMEOUT_MS, type PiSessionOptions, type Result, type ThreadApi } from "./contracts.js";
 import { createThreadClient } from "./http.js";
 import { historyPreview, visibleEntry } from "./pi-history-preview.js";
+import { readableNotificationText } from "./message-format.js";
 import { DELEGATION_POLICY } from "../delegation-policy.js";
 import { SUBAGENT_MODEL_DESCRIPTIONS } from "../catalog.js";
 
@@ -22,9 +23,7 @@ export function threadTools(options: PiSessionOptions) {
     if (options.threads) return options.threads;
     const url = options.env.PI_THREAD_API_URL;
     if (!url) throw new Error("Thread owner is unavailable: PI_THREAD_API_URL is not configured");
-    return createThreadClient(url, ((input, init) => fetch(input, { ...init,
-      signal: signal ? AbortSignal.any([signal, ...(init?.signal ? [init.signal] : [])]) : init?.signal,
-    })) as typeof fetch);
+    return createThreadClient(url, fetch, { signal });
   }
   return [
     defineTool({
@@ -83,7 +82,7 @@ export function threadTools(options: PiSessionOptions) {
         const inspected = await api(signal).inspect(input.threadId);
         if (!inspected.ok) return result(inspected);
         return result({ ok: true, value: { ...historyPreview(value.value, input.entryId, input.entryId ? input.offset ?? 0 : 0),
-          thread: inspected.value.thread, pending: inspected.value.pending.map(({ images: _images, text, ...receipt }) => ({ ...receipt, text: text.slice(0, 2000) })) } });
+          thread: inspected.value.thread, pending: inspected.value.pending.map(({ images: _images, text, ...receipt }) => ({ ...receipt, text: readableNotificationText({ ...receipt, text }).slice(0, 2000) })) } });
       },
     }),
     defineTool({

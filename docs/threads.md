@@ -6,7 +6,7 @@ Orchestrator owns persistent threads, input admission, execution state and durab
 
 Pi is the only session engine. Astra, Sol, Terra, Luna, Fable and Opus are model choices, while retained names of other engines are import provenance. Session, settings, run and CLI operations do not accept an engine selector.
 
-A thread has a stable ID, optional parent ID, cwd, native Pi transcript reference and settings. Its execution state describes only its own work. An idle parent with active children is idle. Native transcripts remain authoritative history; projections and live output are not additional conversation stores.
+A thread has a stable ID, optional parent ID, cwd, native Pi transcript reference and settings. Its execution state describes only its own work. An idle parent with running children keeps execution state `idle`, but Remote displays `AWAITING` in the drawer, thread header and live activity indicator. This display includes direct children in either the person or fleet owner and returns to `IDLE` when the last running child settles. Running and stopped parents keep their own activity labels. Native transcripts remain authoritative history; projections and live output are not additional conversation stores.
 
 `ThreadState` is exactly `idle | running | stopped`, defined in [`contracts.ts`](../packages/orchestrator/src/threads/contracts.ts). `running` includes pending input, admission, startup, execution and cancellation until confirmed. `stopped` means held with cancellation confirmed. `idle` means no current work and no hold. Errors stay in details and execution outcomes; they do not add a lifecycle state. Queue labels describe pending messages, not threads.
 
@@ -46,7 +46,9 @@ The thread service wraps every agent input in the same [`<agent_message>` envelo
 
 A parent can call `thread_await` with one child ID or a group of direct child IDs. The first settlement returns its outcome, final message, remaining IDs and per-thread `after` cursors. Pass the returned cursors into subsequent waits, including after sending another assignment to the same worker. Results already persisted are available immediately; waiting does not consume results or stop other children. The tool waits without model polling and cancels on stop or hard steer. Ordinary steer waits for the tool boundary, so completion notifications remain ordinary messages rather than interrupting the await.
 
-When a child's execution settles, commit its outcome and parent notification durably. Include thread/work IDs, normal/error/cancelled outcome, and that execution's final assistant message or an explicit absence. Deliver through ordinary messaging, with stable receipt identity and restart-safe deduplication. Notifications steer busy parents at the next safe boundary and wake idle parents, but remain held for stopped parents. Idle is not proof that an assignment succeeded.
+When a child's execution settles, commit its outcome and parent notification durably. Include thread/work IDs, normal/error/cancelled outcome, and that execution's readable final assistant message or an explicit absence. Reports keep readable text and thinking but omit provider signatures, encrypted fields and redacted-thinking blocks because the recipient cannot use those payloads. Native transcripts and stored execution results retain the original message for continuation and inspection. Dispatch and recovery also project queued reports prepared by an earlier release, preserving appended meeting context and receipt identity. Agent tool previews apply the same projection to pending reports.
+
+Deliver through ordinary messaging, with stable receipt identity and restart-safe deduplication. Notifications steer busy parents at the next safe boundary and wake idle parents, but remain held for stopped parents. Idle is not proof that an assignment succeeded.
 
 ## Defaults
 

@@ -1,9 +1,33 @@
 # shellcheck shell=bash
 
-# Sourced by the host wrapper, which keeps this lock through activation and proof.
+pi_stack_acquire_host_lock() {
+  if [[ ${PI_STACK_HOST_LOCK_HELD:-0} == 1 ]]; then
+    return
+  fi
+  local lock=${PI_STACK_HOST_LOCK_PATH:-/srv/pi/.pi-stack-deploy.lock}
+  if [[ -n ${PI_STACK_HOST_LOCK_PATH:-} ]]; then
+    mkdir -p "$(dirname "$lock")" || return
+    touch "$lock" || return
+  elif [[ ! -e $lock ]]; then
+    local -a become=()
+    [[ $EUID == 0 ]] || become=(sudo -n)
+    "${become[@]}" mkdir -p /srv/pi || return
+    "${become[@]}" touch "$lock" || return
+    "${become[@]}" chmod 644 "$lock" || return
+  fi
+  exec {PI_STACK_HOST_LOCK_FD}<"$lock" || return
+  flock -w 40 "$PI_STACK_HOST_LOCK_FD" || {
+    echo "another Pi stack deployment owns $lock" >&2
+    return 75
+  }
+  export PI_STACK_HOST_LOCK_FD PI_STACK_HOST_LOCK_HELD=1
+}
+
+# Sourced by the host wrapper, which keeps these locks through activation and proof.
 pi_stack_select_release_checkout() {
   local state=$1 repository=$2 requested=$3 live_marker=$4 allow_rollback=${5:-0}
   local previous baseline origin lock
+  pi_stack_acquire_host_lock || return
   mkdir -p "$state"
   exec {PI_STACK_RELEASE_LOCK_FD}>"$state/release.lock"
   flock "$PI_STACK_RELEASE_LOCK_FD"

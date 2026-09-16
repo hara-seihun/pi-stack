@@ -68,7 +68,10 @@ class FakePiSession implements PiSession {
   }
 
   settle(text: string, stopReason = "stop"): void {
-    const message = { role: "assistant", content: [{ type: "text", text }], stopReason, timestamp: Date.now() };
+    this.settleMessage({ role: "assistant", content: [{ type: "text", text }], stopReason, timestamp: Date.now() });
+  }
+
+  settleMessage(message: Record<string, unknown>): void {
     this.lastAssistantMessage = message;
     const workId = [...this.acceptedWorkIds].at(-1);
     if (workId) this.completedWorkIds.add(workId);
@@ -79,6 +82,28 @@ class FakePiSession implements PiSession {
   }
 
   async close(): Promise<void> { this.closed = true; }
+}
+
+function signedFinalMessage() {
+  return {
+    role: "assistant", stopReason: "stop", timestamp: 1234,
+    content: [
+      { type: "thinking", thinking: "Readable child reasoning", thinkingSignature: "opaque-thinking-signature" },
+      { type: "text", text: "Readable child result", textSignature: "opaque-text-signature" },
+      { type: "reasoning", summary: [{ type: "summary_text", text: "Readable reasoning summary" }], encrypted_content: "opaque-encrypted-snake" },
+      { type: "thinking", thinking: "More readable reasoning", encryptedContent: "opaque-encrypted-camel", thoughtSignature: "opaque-thought-signature", signature: "opaque-signature" },
+      { type: "redacted_thinking", data: "opaque-redacted-thinking" },
+      { type: "toolCall", id: "child-tool", name: "inspect", arguments: { signature: "application-signature", encrypted_content: "application-value" } },
+    ],
+  };
+}
+
+function expectReadableCompletion(text: string): void {
+  for (const readable of ["Readable child reasoning", "Readable child result", "Readable reasoning summary", "More readable reasoning", "application-signature", "application-value"]) {
+    expect(text).toContain(readable);
+  }
+  expect(text).not.toContain("opaque-");
+  for (const field of ["thinkingSignature", "textSignature", "thoughtSignature", "encryptedContent", "redacted_thinking"]) expect(text).not.toContain(field);
 }
 
 function fixture(root?: string, workersOnly = false) {
@@ -99,6 +124,104 @@ function fixture(root?: string, workersOnly = false) {
   services.push(service);
   return { directory, service, sessions };
 }
+
+it("rejects nonexistent built-in models before creating a thread or saving settings", async () => {
+  const { service, directory, sessions } = fixture();
+  const settings = { model: "openai-codex/gpt-6-sol" };
+  expect(await service.spawn({ requestId: "invalid", cwd: directory, message: "assignment", settings })).toMatchObject({ ok: false, error: { code: "invalid_request" } });
+  expect(service.snapshot()).toEqual([]);
+  const thread = value(await service.spawn({ requestId: "invalid", cwd: directory, settings: { model: "sol" } }));
+  expect(await service.control({ threadId: thread.id, action: "settings", settings })).toMatchObject({ ok: false, error: { code: "invalid_request" } });
+  expect(service.get(thread.id)!.settings.model).toBe("openai-codex/gpt-5.6-sol");
+  expect(sessions).toEqual([]);
+});
+
+it("repairs only invalid undispatched model snapshots and retains their provenance without resuming", async () => {
+  const { service, directory } = fixture();
+  const thread = value(await service.spawn({ requestId: "initial", cwd: directory, message: "bad model", settings: { model: "sol", thinkingLevel: "low", speed: "priority" } }));
+  value(await service.send({ requestId: "valid", threadId: thread.id, text: "valid selection" }));
+  value(await service.control({ threadId: thread.id, action: "stop", descendants: false }));
+  const db = new DatabaseSync(join(directory, "threads.sqlite"));
+  try {
+    db.prepare("UPDATE thread_work SET settings=json_set(settings,'$.model','openai-codex/gpt-6-sol') WHERE id='initial'").run();
+    const pending = service.pending(thread.id);
+    const repaired = value(await service.control({ threadId: thread.id, action: "settings", settings: { model: "astra" } }));
+    expect(repaired.state).toBe("stopped");
+    expect(service.pending(thread.id)).toEqual(pending);
+    const settings = (id: string) => JSON.parse((db.prepare("SELECT settings FROM thread_work WHERE id=?").get(id) as { settings: string }).settings);
+    expect(settings("initial")).toEqual({ model: "openai-codex/gpt-6-astra", thinkingLevel: "low", speed: "priority" });
+    expect(settings("valid").model).toBe("openai-codex/gpt-5.6-sol");
+    expect(repaired.metadata?.modelSettingsRepairs).toEqual([{ workId: "initial", previousModel: "openai-codex/gpt-6-sol", model: "openai-codex/gpt-6-astra", time: expect.any(Number) }]);
+    const repeated = value(await service.control({ threadId: thread.id, action: "settings", settings: { model: "astra" } }));
+    expect(repeated.metadata?.modelSettingsRepairs).toEqual(repaired.metadata?.modelSettingsRepairs);
+  } finally { db.close(); }
+});
+
+it.each([false, true])("settles a missing runtime model once, holds remaining work, and informs the parent across restart, recovering=%s", async recovering => {
+  const directory = mkdtempSync(join(tmpdir(), "thread-model-failure-")); roots.push(directory);
+  const error = "Error: Model not found: private/removed-model";
+  const openSession = vi.fn<OpenPiSession>(async (_options, output) => {
+    output({ type: "runner_attached", control: "control.sock", socketPath: "session.sock" });
+    throw new Error(error);
+  });
+  const attachSession = vi.fn(async () => null);
+  const release = vi.fn();
+  const service = new ThreadService({ databasePath: join(directory, "threads.sqlite"), sessionsDir: directory, openSession, attachSession, admit: async () => ({ ok: true, value: { release } }) }); services.push(service);
+  const parent = value(await service.spawn({ requestId: "parent", cwd: directory }));
+  value(await service.control({ threadId: parent.id, action: "stop", descendants: false }));
+  value(service.importThread({ id: "child", parentId: parent.id, title: "Child", cwd: directory, sessionFile: join(directory, "child.jsonl"), settings: { model: "private/removed-model", thinkingLevel: "high", speed: "standard" } }));
+  value(service.importMessage({ id: "assignment", threadId: "child", text: "first", state: recovering ? "dispatched" : "queued", ...(recovering ? { executionId: "retained-execution" } : {}) }));
+  value(service.importMessage({ id: "later", threadId: "child", text: "second", state: "queued" }));
+  attachSession.mockClear();
+  await service.start();
+  await waitFor(() => service.get("child")?.state === "stopped" && service.get("child")?.metadata?.executionError === error);
+  expect(openSession).toHaveBeenCalledTimes(1);
+  expect(attachSession).toHaveBeenCalledTimes(1);
+  expect(release).toHaveBeenCalledTimes(1);
+  expect(service.pending("child")).toMatchObject([{ id: "later", state: "held" }]);
+  expect(service.latestSettlement("child")).toMatchObject({ outcome: "failed", workId: "assignment", finalMessage: null });
+  expect(value(await service.await({ parentId: parent.id, threadIds: ["child"], timeoutMs: 0 })).settlement)
+    .toEqual(service.latestSettlement("child"));
+  const notification = service.pending(parent.id)[0];
+  expect(JSON.parse(notification.text)).toMatchObject({ outcome: "failed", workId: "assignment", finalMessage: null, error });
+  service.reconcile(); await turn();
+  expect(openSession).toHaveBeenCalledTimes(1);
+  await service.close();
+  const restored = new ThreadService({ databasePath: join(directory, "threads.sqlite"), sessionsDir: directory, openSession, attachSession }); services.push(restored);
+  await restored.start(); await turn();
+  expect(openSession).toHaveBeenCalledTimes(1);
+  expect(restored.get("child")).toMatchObject({ state: "stopped", metadata: { executionError: error } });
+  expect(restored.pending(parent.id)).toEqual([notification]);
+});
+
+it("retains native failure causes in settlement receipts without treating cancellation as failure", async () => {
+  const f = fixture();
+  await f.service.start();
+  for (const [stopReason, errorMessage] of [
+    ["error", "Auto-compaction failed: Native compaction failed: exceeded request buffer limit while retrying upstream"],
+    ["error", "Context rejected: Native compaction failed: fetch failed. Retry with /compact."],
+    ["aborted", "This operation was aborted"],
+  ]) {
+    const thread = value(await f.service.spawn({ requestId: errorMessage, cwd: f.directory, message: "work" }));
+    await waitFor(() => f.sessions.some(session => session.options.threadId === thread.id && session.isStreaming));
+    const session = f.sessions.find(session => session.options.threadId === thread.id)!;
+    session.settleMessage({ role: "assistant", content: [], stopReason, errorMessage, timestamp: Date.now() });
+    await waitFor(() => f.service.latestSettlement(thread.id) !== null);
+    const receipt = f.service.latestSettlement(thread.id)!;
+    expect(receipt.outcome).toBe(stopReason === "error" ? "failed" : "cancelled");
+    expect(receipt.error).toBe(stopReason === "error" ? errorMessage : undefined);
+    expect(receipt.finalMessage?.errorMessage).toBe(errorMessage);
+    expect(value(f.service.settlements()).items.find(item => item.threadId === thread.id)).toEqual(receipt);
+    const db = new DatabaseSync(join(f.directory, "threads.sqlite"));
+    try { expect(db.prepare("SELECT error FROM thread_execution WHERE id=?").get(receipt.executionId)?.error).toBe(stopReason === "error" ? errorMessage : null); }
+    finally { db.close(); }
+    value(await f.service.control({ threadId: thread.id, action: "stop", descendants: false }));
+    f.service.reconcile();
+    await turn();
+    expect(f.service.get(thread.id)?.state).toBe("stopped");
+    expect(f.service.pending(thread.id)).toEqual([]);
+  }
+});
 
 it("preserves the running account and model when future settings change", async () => {
   const f = fixture();
@@ -171,9 +294,10 @@ describe("await child settlements", () => {
     const f = await children();
     const input = { parentId: f.parent.id, threadIds: [f.a.id, f.b.id] };
     const waiting = f.service.await(input);
-    f.session(f.a.id).settle("Provider failed", "error");
+    f.session(f.a.id).settleMessage({ role: "assistant", content: [], stopReason: "error", errorMessage: "Provider failed" });
     const first = value(await waiting);
-    expect(first.settlement).toMatchObject({ threadId: f.a.id, outcome: "failed" });
+    expect(first.settlement).toMatchObject({ threadId: f.a.id, outcome: "failed", error: "Provider failed" });
+    expect(first.settlement).toEqual(f.service.latestSettlement(f.a.id));
     const next = f.service.await({ ...input, threadIds: first.remainingThreadIds });
     value(await f.service.control({ threadId: f.b.id, action: "stop", descendants: false }));
     expect(value(await next).settlement).toMatchObject({ threadId: f.b.id, outcome: "cancelled" });
@@ -386,26 +510,60 @@ describe("ThreadService", () => {
     expect(empty).toMatchObject({ ok: false, error: { code: "no_pending_messages" } });
   });
 
-  it("holds child notification for a stopped parent and puts an explicit message first", async () => {
+  it("holds readable child completion across restart without changing native final-message storage", async () => {
     const first = fixture();
     await first.service.start();
     const parent = value(await first.service.spawn({ requestId: "parent", id: "parent", cwd: first.directory }));
     const child = value(await first.service.spawn({ requestId: "child-work", id: "child", parentId: parent.id, cwd: first.directory, message: "child task" }));
     value(await first.service.control({ threadId: parent.id, action: "stop", descendants: false }));
     await waitFor(() => first.sessions[0]?.commands.some(command => command.type === "prompt"));
-    await settle(first.sessions[0]!, first.service, child.id, "child result");
+    const finalMessage = signedFinalMessage();
+    const nativeFinalMessage = structuredClone(finalMessage);
+    first.sessions[0]!.settleMessage(finalMessage);
     await waitFor(() => first.service.pending(parent.id).length === 1);
+    const settlement = first.service.latestSettlement(child.id)!;
+    expect(settlement.finalMessage).toEqual(nativeFinalMessage);
+    expect(finalMessage).toEqual(nativeFinalMessage);
+    const notification = first.service.pending(parent.id)[0]!;
+    expectReadableCompletion(notification.text);
+    expect(JSON.parse(notification.text)).toMatchObject({
+      type: "thread_idle", threadId: child.id, workId: "child-work", executionId: settlement.executionId, outcome: "complete",
+    });
+    const db = new DatabaseSync(join(first.directory, "threads.sqlite"));
+    try {
+      const work = db.prepare("SELECT final_message FROM thread_work WHERE id=?").get("child-work") as { final_message: string };
+      expect(JSON.parse(work.final_message)).toEqual(nativeFinalMessage);
+    } finally { db.close(); }
     expect(first.service.get(parent.id)?.state).toBe("stopped");
     expect(first.service.pending(parent.id)).toMatchObject([{ source: "notification", state: "held", senderId: child.id }]);
     value(await first.service.close());
 
+    const reopened = fixture(first.directory);
+    await reopened.service.start();
+    expect(reopened.service.pending(parent.id)).toEqual([notification]);
+    expect(reopened.sessions).toHaveLength(0);
+    value(await reopened.service.close());
+
     const second = fixture(first.directory);
+    expect(second.service.pending(parent.id)).toEqual([notification]);
     value(await second.service.send({ requestId: "explicit", threadId: parent.id, text: "new instruction", delivery: "queue" }));
     expect(second.service.get(parent.id)?.state).toBe("running");
     expect(second.service.pending(parent.id).map(message => ({ id: message.id, source: message.source, text: message.text }))).toEqual([
       { id: "explicit", source: "explicit", text: "new instruction" },
       expect.objectContaining({ source: "notification" }),
     ]);
+    expect(second.service.latestSettlement(child.id)?.finalMessage).toEqual(nativeFinalMessage);
+    value(await second.service.start());
+    await waitFor(() => second.sessions[0]?.commands.some(command => command.workId === "explicit") === true);
+    second.sessions[0]!.settle("instruction handled");
+    await waitFor(() => second.sessions.some(session => session.commands.some(command => command.workId === notification.id)));
+    const command = second.sessions.flatMap(session => session.commands).find(command => command.workId === notification.id)!;
+    const text = String(command.message);
+    expectReadableCompletion(text);
+    expect(JSON.parse(text.split("\n")[2]!)).toMatchObject({
+      source: "notification", senderThreadId: child.id, recipientThreadId: parent.id, messageId: notification.id, replyTo: "child-work",
+    });
+    expect(text).toContain(notification.text);
   });
 
   it("normalizes stored phases without losing active execution or held input", async () => {
@@ -612,6 +770,42 @@ describe("ThreadService", () => {
     expect(text).toContain("Keep working\nPrepared context");
     expect(text.match(/<agent_message>/g)).toHaveLength(1);
     await settle(second.sessions[0]!, second.service, "recipient");
+  });
+
+  it.each(["queued", "dispatched"] as const)("projects a persisted %s completion with prepared meeting context on recovery", async state => {
+    const first = fixture();
+    const parent = value(await first.service.spawn({ requestId: "parent", cwd: first.directory }));
+    const finalMessage = signedFinalMessage();
+    const error = "Model not found: private/removed-model";
+    const report = { type: "thread_idle", threadId: "child", workId: "child-work", executionId: "child-execution", outcome: "failed", finalMessage, error };
+    const rawText = JSON.stringify(report);
+    const meetingContext = "\n\nMeeting context: keep this appended context.";
+    value(first.service.importMessage({
+      id: "persisted-completion", threadId: parent.id, senderId: "child", source: "notification", replyTo: "child-work",
+      text: rawText, state, ...(state === "dispatched" ? { insertedAt: Date.now() } : {}),
+    }));
+    value(await first.service.detach());
+    const db = new DatabaseSync(join(first.directory, "threads.sqlite"));
+    try {
+      db.prepare("UPDATE thread_work SET prepared=? WHERE id=?").run(JSON.stringify({ text: rawText + meetingContext, images: [] }), "persisted-completion");
+    } finally { db.close(); }
+
+    const second = fixture(first.directory);
+    value(await second.service.start());
+    await waitFor(() => second.sessions[0]?.commands.some(command => command.workId === "persisted-completion") === true);
+    const command = second.sessions[0]!.commands.find(command => command.workId === "persisted-completion")!;
+    if (state === "dispatched") expect(command.resume).toBe(true);
+    const text = String(command.message);
+    expectReadableCompletion(text);
+    expect(text).toContain(meetingContext);
+    expect(text.match(/<agent_message>/g)).toHaveLength(1);
+    expect(JSON.parse(text.split("\n")[2]!)).toMatchObject({
+      senderThreadId: "child", recipientThreadId: parent.id, source: "notification", messageId: "persisted-completion", replyTo: "child-work",
+    });
+    const body = JSON.parse(text.split("\n")[4]!);
+    expect(body).toMatchObject({ type: "thread_idle", threadId: "child", workId: "child-work", executionId: "child-execution", outcome: "failed", error });
+    expect(body.finalMessage.content.at(-1)).toEqual(finalMessage.content.at(-1));
+    await settle(second.sessions[0]!, second.service, parent.id);
   });
 
   it("does not replay an imported completed message", async () => {

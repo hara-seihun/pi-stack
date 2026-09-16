@@ -27,7 +27,7 @@ export type DocumentUpdate =
   | { kind: "splice"; capturedAt: number; hash: string; splice: ContextSplice }
   | { kind: "clear"; capturedAt: 0; hash: "" };
 
-export type Activity = ThreadState | "thinking" | "compacting" | "retrying" | "waiting_on_tool";
+export type Activity = ThreadState | "awaiting" | "thinking" | "compacting" | "retrying" | "waiting_on_tool";
 
 export interface IdleNotification { seq: number; sessionId: string; name: string; time: string }
 export interface IdleNotificationFeed { cursor: number; notifications: IdleNotification[] }

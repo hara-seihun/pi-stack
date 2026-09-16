@@ -44,12 +44,13 @@ it("preserves final text while omitting opaque content without changing the nati
     { type: "text", text, textSignature: "OPAQUE_SIGNATURE" },
     { type: "thinking", thinking: "OPAQUE_THINKING" },
     { type: "image", mimeType: "image/png", data: "OPAQUE_BYTES" },
+    { type: "redacted_thinking", data: "OPAQUE_REDACTED_THINKING" },
   ] } };
   const wait = vi.fn<ThreadApi["await"]>().mockImplementation(async input => response(input, native));
   const tool = threadTools({ threadId: "parent", cwd: "/work", sessionFile: "/work/session.jsonl", args: [], env: {}, threads: { await: wait } as unknown as ThreadApi })
     .find(tool => tool.name === "thread_await")!;
   const result = await tool.execute("call", { threadIds: ["child"] }, undefined, undefined, {} as never);
-  expect(result.details).toMatchObject({ ok: true, value: { settlement: { finalMessage: { content: [{ type: "text", text }, null, { type: "image", mimeType: "image/png", image: "[image bytes omitted]" }] } } } });
+  expect(result.details).toMatchObject({ ok: true, value: { settlement: { finalMessage: { content: [{ type: "text", text }, null, { type: "image", mimeType: "image/png", image: "[image bytes omitted]" }, null] } } } });
   expect(JSON.stringify(result)).not.toContain("OPAQUE");
   expect(native.finalMessage.content[0]).toHaveProperty("textSignature", "OPAQUE_SIGNATURE");
 });
@@ -90,6 +91,41 @@ it("routes HTTP await and propagates per-call cancellation through Request.signa
   controller.abort();
   expect((await waiting).ok).toBe(false);
   expect(requestSignal?.aborted).toBe(true);
+});
+
+it.each(["call", "client", "deadline"])("cancels directory HTTP awaits through the %s signal without dropping the forwarded deadline", async source => {
+  const entered = deferred<void>();
+  const controller = new AbortController();
+  let ownerSignal: AbortSignal | undefined;
+  const wait = vi.fn<ThreadApi["await"]>().mockImplementation((_input, signal) => {
+    ownerSignal = signal;
+    entered.resolve();
+    return new Promise(resolve => signal!.addEventListener("abort", () => resolve({ ok: false, error: { code: "unavailable", message: "cancelled" } }), { once: true }));
+  });
+  const local = owner([{ id: "child", parentId: "parent" }]);
+  local.api.await = wait;
+  const deadlines: string[] = [];
+  const peerFetch = vi.fn(async (url: string | URL | Request, init?: RequestInit) => {
+    deadlines.push(new Headers(init?.headers).get("x-pi-thread-deadline")!);
+    return (await threadHttp(local.api, new Request(url, init)))!;
+  });
+  const directory = new ThreadDirectory({ id: "owner", api: createThreadClient("http://owner/v1/threads", peerFetch) });
+  let deadline: string | null = null;
+  const directoryFetch = async (url: string | URL | Request, init?: RequestInit) => {
+    deadline = new Headers(init?.headers).get("x-pi-thread-deadline");
+    return (await threadHttp(directory, new Request(url, init)))!;
+  };
+  const client = createThreadClient("http://directory/v1/threads", directoryFetch, {
+    ...(source === "client" ? { signal: controller.signal } : {}), timeoutMs: source === "deadline" ? 100 : 1_000,
+  });
+  const waiting = client.await({ parentId: "parent", threadIds: ["child"], timeoutMs: 25_000 }, source === "call" ? controller.signal : undefined);
+  await entered.promise;
+  if (source !== "deadline") controller.abort();
+  expect(await waiting).toMatchObject({ ok: false, error: { code: "unavailable" } });
+  expect(ownerSignal?.aborted).toBe(true);
+  expect(wait).toHaveBeenCalledOnce();
+  expect(deadlines.length).toBeGreaterThan(1);
+  expect(deadlines.every(value => value === deadline)).toBe(true);
 });
 
 describe("directory await", () => {

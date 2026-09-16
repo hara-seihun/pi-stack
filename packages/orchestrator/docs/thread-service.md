@@ -4,6 +4,20 @@ The [accepted thread design](../../../docs/threads.md) defines behavior. [`Threa
 
 `send()` accepts an optional `delivery`. The shared `resolveDelivery()` keeps explicit modes, defaults messages with `senderId` to `steer`, and defaults senderless human messages to `queue`. HTTP and directory routing preserve the sender and selected mode; the destination service resolves omitted delivery before validation and persistence.
 
+## HTTP acceptance across activation
+
+`createThreadClient()` retains one serialized request and its identity while reconnecting. Sends and spawns require their existing stable `requestId` before transport replay is allowed. Read-only operations can reconnect too. Connection loss, HTTP 502/503/504 and an explicitly retryable suspended-controller response use delays of 100, 200, 400, 800 and then 1,000 milliseconds, within one 60-second deadline. Ordinary owner decisions, including archived recipients and identity conflicts, are terminal. Commands and controls are never automatically replayed.
+
+Every failure returned by the client carries `retryable: false` because the client has finished retrying or received a terminal decision. Send and spawn failures also carry the submitted `requestId`. The CLI preserves these fields, and a failed spawn batch reports the failed request's identity alongside the threads already accepted. Control failures have no generated request identity.
+
+The native tool passes its cancellation signal into that client. HTTP directory hops inherit the original deadline through `x-pi-thread-deadline` and the incoming request's cancellation signal, rather than starting another minute of retries. The daemon's Node HTTP adapter forwards both. Cancellation or deadline expiry ends reconnect and returns an error carrying the original request ID. An interrupted response does not prove rejection; its error says acceptance is unconfirmed. The sender's native tool call retains the input and identity. It must not become a new instruction with a new ID.
+
+The destination commits the input and request receipt together. A retry after acceptance returns that receipt without waking the recipient again, even if Stop intervened. Admission rechecks receipts after asynchronous parent discovery or cancellation, so overlapping retries cannot create a second child or input. Peer routing and Unix-person boundaries are unchanged.
+
+The September 15 incident exposed the missing reconnect. A send failed at 21:21:47 UTC while the fleet daemon restarted, then began listening at 21:21:49. The caller received `unavailable` after one fetch and had to issue another instruction. `tests/thread-http.test.ts` now exercises an actual refused loopback connection, loss of the response after the SQLite commit, owner replacement and an intervening Stop. It also covers deadline propagation, native tool cancellation, identity conflicts and non-replayable operations. No model or live thread is involved.
+
+From `packages/orchestrator`, run `npx vitest run tests/thread-http.test.ts`. To exercise an installed release with the same proof, set `PI_THREAD_TEST_RELEASE=/srv/pi/pi-orchestrator/dist`. Active native sessions retain their loaded tool generation until normal session replacement; newly activated directory owners use the new peer transport immediately.
+
 ## Construction and lifetime
 
 Create a service with `databasePath`, `sessionsDir` and the shared runner's `openSession` and `attachSession`. Optional hooks supply boundary-specific environment, quota admission and message preparation. Set its authorized directory with `setDirectory()` before starting it. The service supplies `PI_THREAD_DATABASE` from its own `databasePath` to every session, so `read-thread` uses the thread's owner rather than the account's Remote store.
@@ -29,7 +43,13 @@ Input commands carry a stable `workId`. Pi records `thread_input` and `thread_se
 
 Stop and hard steer use the existing runtime or attach to its recorded runner without opening a session. Cancellation does not need the workspace, credentials or model admission. Confirmed runner absence permits cancellation of the retained execution claim; a transport failure does not. Settlement also releases a retained fleet lease without readmission. Stop and hard steer await native cancellation of streaming, compaction, queued native input and local tools. Failure holds queued work, records the cancellation error and leaves the thread running until cancellation is confirmed. Only then is it stopped. A late callback from a replaced or suspended controller cannot start replacement execution.
 
-Each execution captures its effective settings. Defaults come from [`resolveThreadSettings`](../src/threads/settings.ts). Isolated context and execution identity are immutable thread metadata. Isolated context reaches the runner through `--orchestrator-context`; root repair cannot combine it with privileged execution. Once native file custody exists, `nativeHistoryRequired` prevents reopening a missing transcript as a fresh session.
+Each execution captures its effective settings. Defaults come from [`resolveThreadSettings`](../src/threads/settings.ts). It validates built-in provider IDs, including numbered pool aliases, against the same native model definitions used by routing and cold settings. Sol resolves to `gpt-5.6-sol`; `gpt-6-sol` is rejected before a spawn or settings write. Explicit private provider names remain subject to runtime model registration.
+
+A model-configuration failure during native startup settles that assignment as failed, records the error in its execution and work receipts, and sends the parent a failure notification. The thread holds its remaining input across controller restarts instead of reopening the same missing model every five seconds. Account admission and transport failures remain retryable.
+
+Setting an explicit model also repairs queued, undispatched snapshots whose model now fails validation. It changes only their model, preserves thinking, speed and queue state, and records `modelSettingsRepairs` provenance in thread metadata with the work ID, previous model, selected model and timestamp. Valid accepted snapshots and active executions retain their settings. Correcting a stopped thread does not resume it.
+
+Isolated context and execution identity are immutable thread metadata. Isolated context reaches the runner through `--orchestrator-context`; root repair cannot combine it with privileged execution. Once native file custody exists, `nativeHistoryRequired` prevents reopening a missing transcript as a fresh session.
 
 ## Observation and controls
 
@@ -38,13 +58,13 @@ Each execution captures its effective settings. Defaults come from [`resolveThre
 `subscribe()` emits `{threadId,type:"changed"}` or `{threadId,event}`. Native events remain available to presentation consumers. Service receipts are:
 
 - `thread_message_inserted`, including the message, work ID, execution ID and insertion timestamp.
-- `thread_settled`, including settlement sequence, execution/work IDs, outcome, time and final assistant message or null.
+- `thread_settled`, including settlement sequence, execution/work IDs, outcome, time, final assistant message or null, and `error` for failed work with a concrete cause.
 
-Listeners are notifications, not durable delivery. `settlements(after, limit)` reads ordered settlement records from the execution table and returns `{items,cursor}`. Sequence numbers are assigned during settlement, not execution creation. Consumers retain their cursor and can deduplicate on execution ID.
+Listeners are notifications, not durable delivery. `settlements(after, limit)` reads ordered settlement records from the execution table and returns `{items,cursor}`. Sequence numbers are assigned during settlement, not execution creation. Consumers retain their cursor and can deduplicate on execution ID. Failed assistant `errorMessage` values also populate execution/work receipt errors, settlement API errors and parent notifications. Cancelled work remains cancellation without a failure error; reporting never releases held input.
 
 `await({parentId, threadIds, after?, timeoutMs?}, signal?)` waits for the first settlement from 1..100 distinct direct children. Each `after` value is a settlement sequence in that child's owner, defaults to zero and must be a nonnegative safe integer. Already-persisted results are returned before waiting for events. `timeoutMs` defaults to 25000 and accepts 0..25000; zero performs an immediate read. The model tool uses 25000 to respond before Remote's 30-second HTTP idle timeout. Timeout returns `{settlement:null, remainingThreadIds, after}`. A result advances only its child's cursor and excludes that child from `remainingThreadIds`. Extra cursor keys are preserved for later subset waits. Observing a result does not consume or acknowledge it.
 
-The directory validates every requested parent-child relationship before starting owner waits. It races authorized owner groups, cancels losing waits and returns the first settlement without advancing other cursors. An owner's timeout is not a settlement; all groups must time out before the directory returns null. Abort cancels every pending group. HTTP `POST /v1/threads/await` forwards the request signal, and the client accepts a signal per await. Stopped children with no unseen settlement remain waiting until resumed or the caller cancels. Holding a child does not fabricate a result.
+The directory validates every requested parent-child relationship before starting owner waits. It races authorized owner groups, cancels losing waits and returns the first settlement without advancing other cursors. An owner's timeout is not a settlement; all groups must time out before the directory returns null. Abort cancels every pending group. HTTP `POST /v1/threads/await` forwards cancellation and the caller's deadline through directory hops. The client combines its configured signal, the per-await signal and the inherited request deadline. Await settlements retain the same error details as `settlements()` and `latestSettlement()`. Stopped children with no unseen settlement remain waiting until resumed or the caller cancels. Holding a child does not fabricate a result.
 
 `command()` owns native activation and serialization for inspection, compaction and conversation editing. Durable input and cancellation use `send()` and `control()` instead. Native conversation changes update the owned session-file reference.
 

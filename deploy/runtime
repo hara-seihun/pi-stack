@@ -12,10 +12,17 @@ runtime_source="$root/packages/runtime"
 dest=${PI_STACK_RUNTIME_DEST:-/srv/pi/runtime}
 dependencies_root=${PI_STACK_DEPENDENCIES_ROOT:-/srv/pi/dependencies}
 PI_VERSION=0.85.0
-BROWSER_VERSION="agent-browser $(node -p 'require(process.argv[1]).dependencies["agent-browser"]' "$root/package.json")"
+BROWSER_VERSION="agent-browser $(node -p 'require(process.argv[1]).packages["node_modules/agent-browser"].version' "$root/package-lock.json")"
 stage=""
-cleanup() { [[ -z $stage ]] || rm -rf "$stage"; }
+dependency_stage=""
+cleanup() {
+  [[ -z $stage ]] || rm -rf "$stage"
+  [[ -z $dependency_stage ]] || pi_stack_as_root rm -rf "$dependency_stage"
+}
 trap cleanup EXIT
+trap 'exit 143' TERM
+trap 'exit 130' INT
+trap 'exit 129' HUP
 commit=$(git -C "$root" rev-parse HEAD)
 
 check_release() {
@@ -66,7 +73,7 @@ fi
 cd "$root"
 pi_stack_as_root install -d -m 755 "$dependencies_root"
 dependency_hash=$({
-  sha256sum package.json package-lock.json packages/runtime/browser-doctor.mjs packages/runtime/patch-browser-qa.mjs packages/runtime/patch-codex-sse.mjs packages/runtime/patch-compaction-cut.mjs packages/runtime/patch-compaction-errors.mjs packages/runtime/patch-session-durability.mjs packages/runtime/patch-shared-custody.mjs packages/orchestrator/src/shared-custody.ts packages/runtime/patch-shared-rpc.mjs
+  sha256sum package.json package-lock.json packages/runtime/browser-doctor.mjs packages/runtime/patch-browser-qa.mjs packages/runtime/patch-codex-sse.mjs packages/runtime/patch-codex-service-recovery.mjs packages/runtime/codex-service-recovery.js packages/runtime/patch-compaction-cut.mjs packages/runtime/patch-compaction-errors.mjs packages/runtime/patch-session-durability.mjs packages/runtime/patch-shared-custody.mjs packages/orchestrator/src/shared-custody.ts packages/runtime/patch-shared-rpc.mjs
   printf '%s\n' workspace-production-closure-v1-atomic-settings-writes-v1-durable-sessions-v1
 } | sha256sum | cut -d' ' -f1)
 dependency_release="$dependencies_root/$dependency_hash"
@@ -83,6 +90,7 @@ if [[ ! -x $dependency_release/node_modules/.bin/pi ]]; then
   install -m 755 packages/runtime/browser-doctor.mjs "$stage/browser-doctor.mjs"
   ln -sfn ../../browser-doctor.mjs "$stage/node_modules/.bin/pi-agent-browser-doctor"
   node "$runtime_source/patch-codex-sse.mjs" "$stage/node_modules"
+  node "$runtime_source/patch-codex-service-recovery.mjs" "$stage/node_modules"
   browser_job="$stage/node_modules/pi-agent-browser-native/dist/extensions/agent-browser/lib/input-modes/job.js"
   node "$runtime_source/patch-browser-qa.mjs" "$browser_job"
   node --check "$browser_job"
@@ -95,14 +103,9 @@ if [[ ! -x $dependency_release/node_modules/.bin/pi ]]; then
   rm -rf "$stage/node_modules/@hara-seihun"
   dependency_stage="$dependencies_root/.stage.$$.${RANDOM}"
   pi_stack_as_root install -d -m 755 "$dependency_stage"
-  if ! pi_stack_as_root rsync -a --delete --chmod=D755,Fu=rwX,Fgo=rX "$stage/" "$dependency_stage/"; then
-    pi_stack_as_root rm -rf "$dependency_stage"
-    exit 1
-  fi
-  if ! pi_stack_as_root mv -T "$dependency_stage" "$dependency_release"; then
-    pi_stack_as_root rm -rf "$dependency_stage"
-    exit 1
-  fi
+  pi_stack_as_root rsync -a --delete --chmod=D755,Fu=rwX,Fgo=rX "$stage/" "$dependency_stage/"
+  pi_stack_as_root mv -T "$dependency_stage" "$dependency_release"
+  dependency_stage=""
   rm -rf "$stage"
   stage=""
 fi
