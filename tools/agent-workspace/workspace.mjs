@@ -791,27 +791,30 @@ function moveToGc(target, destination) {
   }
 }
 
-function matchingCacheTargets(workspacePath, relative) {
-  if (!relative.startsWith("**/")) return [path.resolve(workspacePath, relative)];
-  const directoryName = relative.slice("**/".length);
-  const matches = [];
-  const pending = [workspacePath];
+function* cacheTargets(workspacePath, cachePaths, readDirectory = readdirSync) {
+  const directoryNames = new Set();
+  for (const relative of cachePaths) {
+    if (relative.startsWith("**/")) directoryNames.add(relative.slice(3));
+    else yield path.resolve(workspacePath, relative);
+  }
+  const pending = directoryNames.size === 0 ? [] : [workspacePath];
   while (pending.length > 0) {
     const current = pending.pop();
     let entries;
     try {
-      entries = readdirSync(current, { withFileTypes: true });
+      entries = readDirectory(current, { withFileTypes: true });
     } catch {
       continue;
     }
     for (const entry of entries) {
       if (!entry.isDirectory() || entry.isSymbolicLink() || entry.name === ".git") continue;
       const candidate = path.join(current, entry.name);
-      if (entry.name === directoryName) matches.push(candidate);
-      else pending.push(candidate);
+      if (directoryNames.has(entry.name)) yield candidate;
+      // The consumer removes generated trees before traversal resumes. Tracked
+      // directories stay in place and may contain other generated caches.
+      if (existsSync(candidate)) pending.push(candidate);
     }
   }
-  return matches;
 }
 
 /* A declared cache path may collide with a directory the repository actually tracks, such as a
@@ -828,16 +831,14 @@ function holdsTrackedFiles(target) {
 function stripCaches(record, statePath) {
   const removed = [];
   const seen = new Set();
-  for (const relative of record.cachePaths) {
-    for (const target of matchingCacheTargets(record.path, relative)) {
-      if (seen.has(target) || !within(record.path, target) || target === record.path || !existsSync(target)) continue;
-      if (holdsTrackedFiles(target)) continue;
-      seen.add(target);
-      const cacheKey = createHash("sha256").update(path.relative(record.path, target)).digest("hex").slice(0, 12);
-      const destination = gcDestination(statePath, record, `${path.basename(target)}-${cacheKey}`);
-      moveToGc(target, destination);
-      removed.push(path.relative(record.path, target));
-    }
+  for (const target of cacheTargets(record.path, record.cachePaths)) {
+    if (seen.has(target) || !within(record.path, target) || target === record.path || !existsSync(target)) continue;
+    seen.add(target);
+    if (holdsTrackedFiles(target)) continue;
+    const cacheKey = createHash("sha256").update(path.relative(record.path, target)).digest("hex").slice(0, 12);
+    const destination = gcDestination(statePath, record, `${path.basename(target)}-${cacheKey}`);
+    moveToGc(target, destination);
+    removed.push(path.relative(record.path, target));
   }
   return removed;
 }
@@ -1720,7 +1721,7 @@ Records outlive the directory, so status explains what became of a checkout that
 `);
 }
 
-export const workspaceTesting = { dockerSnapshot, maintainReferenceClone, parseSystemdUnits, pruneReleased, systemdManagerSnapshot, systemdReferences };
+export const workspaceTesting = { cacheTargets, dockerSnapshot, maintainReferenceClone, parseSystemdUnits, pruneReleased, systemdManagerSnapshot, systemdReferences };
 
 export function main(argv = process.argv.slice(2), statePath = DEFAULT_STATE) {
   const [commandName, ...rest] = argv;

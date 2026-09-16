@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import { execFile, execFileSync, spawn } from "node:child_process";
 import { createHash } from "node:crypto";
-import { chmodSync, existsSync, mkdtempSync, mkdirSync, readFileSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
+import { chmodSync, existsSync, mkdtempSync, mkdirSync, readFileSync, readdirSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { createServer } from "node:net";
 import path from "node:path";
@@ -610,6 +610,53 @@ test("a linked worktree ignores branches owned by its peers", () => {
   } finally {
     f.close();
   }
+});
+
+test("cache discovery walks each directory once across recursive declarations", () => {
+  const root = mkdtempSync(path.join(tmpdir(), "workspace-cache-walk-"));
+  try {
+    for (let index = 0; index < 200; index += 1) mkdirSync(path.join(root, `source-${index}`, "nested"), { recursive: true });
+    mkdirSync(path.join(root, "source-0", "build"));
+    mkdirSync(path.join(root, ".git", "build"), { recursive: true });
+    symlinkSync(path.join(root, "source-0"), path.join(root, "linked"));
+    const reads = new Map();
+    const targets = [...workspaceTesting.cacheTargets(root,
+      ["**/build", "**/dist", "**/target", "**/node_modules", "**/__pycache__"],
+      (directory, options) => {
+        reads.set(directory, (reads.get(directory) ?? 0) + 1);
+        return readdirSync(directory, options);
+      })];
+    assert.deepEqual(targets, [path.join(root, "source-0", "build")]);
+    assert.equal(reads.size, 402);
+    assert.equal(Math.max(...reads.values()), 1);
+    assert.equal(reads.has(path.join(root, ".git")), false);
+    assert.equal(reads.has(path.join(root, "linked")), false);
+  } finally { rmSync(root, { recursive: true, force: true }); }
+});
+
+test("cache discovery skips removed trees and descends into retained cache names", () => {
+  const root = mkdtempSync(path.join(tmpdir(), "workspace-cache-consumer-"));
+  try {
+    const removed = path.join(root, "node_modules");
+    const retained = path.join(root, "source", "build");
+    const nested = path.join(retained, "__pycache__");
+    mkdirSync(path.join(removed, "huge", "build"), { recursive: true });
+    mkdirSync(nested, { recursive: true });
+    const reads = [];
+    const targets = [];
+    for (const target of workspaceTesting.cacheTargets(root,
+      ["node_modules", "**/build", "**/__pycache__"], (directory, options) => {
+        reads.push(directory);
+        return readdirSync(directory, options);
+      })) {
+      targets.push(target);
+      if (target === removed || target === nested) rmSync(target, { recursive: true });
+    }
+    assert.deepEqual(targets, [removed, retained, nested]);
+    assert.equal(reads.some(directory => directory.startsWith(removed)), false);
+    assert.equal(reads.includes(nested), false);
+    assert.equal(existsSync(retained), true);
+  } finally { rmSync(root, { recursive: true, force: true }); }
 });
 
 test("keeps local commits but strips declared caches", () => {
