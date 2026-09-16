@@ -38,6 +38,22 @@ it("keeps one tool call open across bounded waits, injecting its parent and forw
   expect(result.details).toEqual(response({ parentId: "parent", threadIds: ["child", "other"], after: { prior: 3 } }, settlement("child")));
 });
 
+it("preserves final text while omitting opaque content without changing the native result", async () => {
+  const text = "Full final message. ".repeat(3000);
+  const native = { ...settlement("child"), finalMessage: { role: "assistant", content: [
+    { type: "text", text, textSignature: "OPAQUE_SIGNATURE" },
+    { type: "thinking", thinking: "OPAQUE_THINKING" },
+    { type: "image", mimeType: "image/png", data: "OPAQUE_BYTES" },
+  ] } };
+  const wait = vi.fn<ThreadApi["await"]>().mockImplementation(async input => response(input, native));
+  const tool = threadTools({ threadId: "parent", cwd: "/work", sessionFile: "/work/session.jsonl", args: [], env: {}, threads: { await: wait } as unknown as ThreadApi })
+    .find(tool => tool.name === "thread_await")!;
+  const result = await tool.execute("call", { threadIds: ["child"] }, undefined, undefined, {} as never);
+  expect(result.details).toMatchObject({ ok: true, value: { settlement: { finalMessage: { content: [{ type: "text", text }, null, { type: "image", mimeType: "image/png", image: "[image bytes omitted]" }] } } } });
+  expect(JSON.stringify(result)).not.toContain("OPAQUE");
+  expect(native.finalMessage.content[0]).toHaveProperty("textSignature", "OPAQUE_SIGNATURE");
+});
+
 it("aborts an in-process tool wait without another API call", async () => {
   const entered = deferred<void>();
   const wait = vi.fn<ThreadApi["await"]>().mockImplementation((input, signal) => new Promise(resolve => {

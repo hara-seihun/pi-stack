@@ -1,8 +1,8 @@
 # Delegation guidance
 
-[`src/delegation-policy.ts`](../src/delegation-policy.ts) owns the shared tool-description policy for `thread_spawn`. It is exported through `pi-orchestrator/api`. Remote, fleet lanes and ordinary subthreads use the same persistent thread operation rather than host-specific delegation tools. Every ordinary thread can spawn another thread. The [unified thread design](../../../docs/threads.md) owns lifecycle and delivery semantics, and [Pi session execution](pi-sessions.md) owns tool registration.
+[`src/delegation-policy.ts`](../src/delegation-policy.ts) owns the shared tool-description policy for `thread_spawn`. It is exported through `pi-orchestrator/api`. Remote, fleet lanes and ordinary subthreads use the same persistent thread operation rather than host-specific delegation tools. Parent conversations can spawn workers; workers cannot spawn subagents. The [unified thread design](../../../docs/threads.md) owns lifecycle and delivery semantics, and [Pi session execution](pi-sessions.md) owns tool registration.
 
-Agents can choose delegation for independent work while they make useful progress locally. Immediate blocking tasks stay local. The policy covers task decomposition, non-overlapping edits, automatic result delivery and integration. Model-selection descriptions do not establish a reason to delegate. Thinking level does not change this policy. The unified-thread cutover does not change the policy text.
+Agents can choose delegation for independent work while they make useful progress locally. Immediate blocking tasks stay local. The policy covers task decomposition, non-overlapping edits, automatic result delivery and integration. Model-selection descriptions do not establish a reason to delegate. Thinking level does not change this policy. When local work is finished, a parent can await the first result from selected children or end its turn and resume on automatic result delivery.
 
 PiStack Voice retains its separate [`delegation-policy.md`](../../../apps/remote/server/voice/delegation-policy.md), loaded by `voiceInstructions()` during Voice negotiation. Its computer-work handoffs keep the voice model available for conversation. A backing text agent uses the regular optional policy, with one exception: the root thread a meeting is attached to also receives Remote's [meeting root policy](../../../apps/remote/server/meet/root-thread-policy.md) in its system prompt, which requires delegation for anything longer than one or two tool calls because Voice hard-steers that thread on every handoff. [Meet](../../../apps/remote/docs/meet.md#meeting-thread-and-workers) owns that policy.
 
@@ -21,9 +21,9 @@ Most task-selection and decomposition wording is copied verbatim. Pi Stack chang
 - Delegation remains optional without requiring an explicit request each time. Codex's explicit-request gate and Ultra-triggered proactive mode are not imported, preserving Hara's distinction between optional text delegation and required voice handoffs.
 - "Main rollout" becomes "main agent".
 - Forked-workspace and uploaded-change wording becomes agent-workspace and shared-filesystem wording. Results include the changed paths and commit.
-- `wait_agent` guidance becomes automatic-delivery guidance. A parent can end its turn and resume on the result rather than poll. Failures and unfinished work remain visible.
+- `wait_agent` guidance uses `thread_await` for the first result from one or more direct children, or automatic delivery after the parent ends its turn. Neither path requires polling. Failures and unfinished work remain visible.
 - Verification guidance respects the user's request and applicable instructions.
-- Remote and fleet model selection remains available through thread settings. Orchestrator owns persistent parent links, continuation through ordinary sends and durable completion delivery for every nesting level.
+- Remote and fleet model selection remains available through thread settings. Orchestrator owns persistent parent links, continuation through ordinary sends and durable completion delivery between parent conversations and their workers.
 
 ## License and attribution
 
