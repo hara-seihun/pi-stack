@@ -1039,6 +1039,55 @@ test("status answers what became of a checkout whose directory is gone", () => {
   }
 });
 
+test("status filters in SQL before decoding unrelated records and preserves literal matching", () => {
+  const f = fixture();
+  try {
+    mkdirSync(f.workspaces);
+    run(["status", "--json"], f.env);
+    const database = new DatabaseSync(f.env.PI_WORKSPACE_STATE);
+    const insert = database.prepare(`INSERT INTO workspace
+      (id,path,root,kind,mode,owner,checkout_type,cache_paths,created_at,updated_at,lease_expires_at,state,detail)
+      VALUES (?,?,?,'agent','writer',?,'clone',?,1,1,0,'released','retained history')`);
+    const rows = [
+      ["one", path.join(f.workspaces, "Case_%'雪"), f.workspaces, "Owner_%'雪", "[]"],
+      ["two", path.join(f.workspaces, "case-other"), f.workspaces, "other", "[]"],
+      ["three", path.join(f.root, "other-pool", "Case_%'雪"), path.join(f.root, "other-pool"), "other", "[]"],
+      ["unrelated", path.join(f.root, "unrelated"), path.join(f.root, "other-pool"), "unrelated", "not JSON"],
+    ];
+    for (const row of rows) insert.run(...row);
+    database.close();
+    const ids = (args, cwd) => JSON.parse(run(["status", ...args, "--json"], f.env, cwd)).map(row => row.id);
+    assert.deepEqual(ids(["--path", "_%'雪"]), ["three", "one"]);
+    assert.deepEqual(ids(["--root", f.workspaces, "--path", "_%'雪"]), ["one"]);
+    assert.deepEqual(ids(["--owner", "Owner_%'"]), ["one"]);
+    assert.deepEqual(ids(["--owner", "owner"]), []);
+    assert.deepEqual(ids(["--path", "Case", "--owner", "other"]), ["three"]);
+    assert.deepEqual(ids(["--path", "./Case_%'雪"], f.workspaces), ["one"]);
+    assert.match(run(["status", "--root", f.workspaces, "--path", "Case"], f.env), /filtered from 2/);
+    assert.match(run(["list", "--path", "missing"], f.env), /4 record\(s\) are known/);
+    assert.throws(() => run(["status", "--path", "unrelated", "--json"], f.env), /JSON/);
+  } finally { f.close(); }
+});
+
+test("status and list never launch disposal while lifecycle commands retain collection", () => {
+  const f = fixture();
+  try {
+    run(["status", "--json"], f.env);
+    const garbage = path.join(path.dirname(f.env.PI_WORKSPACE_STATE), "gc", "pending");
+    mkdirSync(garbage, { recursive: true });
+    const retained = path.join(garbage, "payload");
+    writeFileSync(retained, "pending lifecycle cleanup");
+    const guard = path.join(f.root, "spawn-guard.mjs");
+    writeFileSync(guard, `import cp from "node:child_process";\nimport { syncBuiltinESMExports } from "node:module";\ncp.spawn = () => { throw new Error("disposal subprocess attempted"); };\nsyncBuiltinESMExports();\n`);
+    const env = { ...f.env, NODE_OPTIONS: `--import=${guard}` };
+    for (const name of ["status", "list"]) {
+      assert.deepEqual(JSON.parse(run([name, "--path", "missing", "--json"], env)), []);
+      assert.equal(readFileSync(retained, "utf8"), "pending lifecycle cleanup");
+    }
+    assert.throws(() => run(["reconcile", "--json"], env), /disposal subprocess attempted/);
+  } finally { f.close(); }
+});
+
 test("a surviving Git child retains its checkout fence after creator termination", async () => {
   const f = fixture();
   let connection;
