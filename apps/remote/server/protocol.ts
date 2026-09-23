@@ -305,6 +305,7 @@ interface TranscriptItemBase {
 export interface InlineTextItem extends TranscriptItemBase {
   identity?: import("./message-protocol.js").MessageIdentity;
   reactions?: import("./message-protocol.js").MessageReaction[];
+  reply?: import("./message-protocol.js").MessageReply;
   kind: "user" | "assistant" | "notice";
   label?: string;
   text: string;
