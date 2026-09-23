@@ -94,8 +94,11 @@ describe("JSON reconciliation", () => {
     expect(replica.get("directory")!.value).toEqual(next);
     const corrupted = JSON.parse(JSON.stringify(frame));
     if (corrupted.kind === "patch" && corrupted.patch.op === "keyed") {
+      const unmodified = new ReconcileReplica();
+      unmodified.seed("directory", corrupted.base, base);
       corrupted.patch.order.push(corrupted.patch.order[0]);
-      expect(replica.apply(corrupted).ok).toBe(false);
+      expect(unmodified.apply(corrupted)).toEqual({ ok: false, reason: "Invalid or oversized JSON frame" });
+      expect(unmodified.get("directory")!.value).toEqual(base);
     }
   });
 
