@@ -726,10 +726,20 @@ export class MessagingService {
       ...(reply ? { reply } : {}),
     };
   }
-  history(conversationId: string, before?: number, limit = 60): MessagingHistory {
+  history(conversationId: string, before?: number, limit = 60, since?: number): MessagingHistory {
     this.conversationRow(conversationId);
     if (before !== undefined && (!Number.isSafeInteger(before) || before < 1)) throw new MessagingFailure("Invalid message cursor");
     if (!Number.isSafeInteger(limit) || limit < 1 || limit > 100) throw new MessagingFailure("Message limit must be between 1 and 100");
+    if (since !== undefined && (!Number.isSafeInteger(since) || since < 0)) throw new MessagingFailure("Invalid message timestamp");
+    if (before !== undefined && since !== undefined) throw new MessagingFailure("before and since cannot be combined");
+    if (since !== undefined) {
+      const recent = this.db.query("SELECT seq FROM messages WHERE conversation_id=? ORDER BY seq DESC LIMIT 1 OFFSET ?").get(conversationId, limit - 1) as { seq: number } | null;
+      const dated = this.db.query("SELECT MIN(seq) AS seq FROM messages WHERE conversation_id=? AND timestamp>=?").get(conversationId, since) as { seq: number | null };
+      const start = Math.min(recent?.seq ?? 0, dated.seq ?? Number.MAX_SAFE_INTEGER);
+      const rows = this.db.query("SELECT * FROM messages WHERE conversation_id=? AND seq>=? ORDER BY seq ASC").all(conversationId, start) as MessageRow[];
+      const more = rows.length > 0 && !!this.db.query("SELECT 1 FROM messages WHERE conversation_id=? AND seq<? LIMIT 1").get(conversationId, rows[0].seq);
+      return { messages: rows.map(row => this.message(row)), before: more ? rows[0].seq : null };
+    }
     const rows = this.db.query("SELECT * FROM messages WHERE conversation_id=? AND seq<? ORDER BY seq DESC LIMIT ?").all(conversationId, before ?? Number.MAX_SAFE_INTEGER, limit + 1) as MessageRow[];
     const more = rows.length > limit;
     if (more) rows.pop();
@@ -923,7 +933,11 @@ export class MessagingService {
       const close = API.messagingClose.match(req.method, url.pathname);
       if (close) { this.closeConversation(close.conversationId); return json({ ok: true }); }
       const history = API.messagingHistory.match(req.method, url.pathname);
-      if (history) return json(this.history(history.conversationId, url.searchParams.has("before") ? Number(url.searchParams.get("before")) : undefined, url.searchParams.has("limit") ? Number(url.searchParams.get("limit")) : 60));
+      if (history) {
+        const since = url.searchParams.get("since");
+        if (since !== null && !/^(0|[1-9]\d*)$/.test(since)) throw new MessagingFailure("Invalid message timestamp");
+        return json(this.history(history.conversationId, url.searchParams.has("before") ? Number(url.searchParams.get("before")) : undefined, url.searchParams.has("limit") ? Number(url.searchParams.get("limit")) : 60, since === null ? undefined : Number(since)));
+      }
       const previews = API.messagingLinkPreviews.match(req.method, url.pathname);
       if (previews) return json(await this.linkPreviews(previews.messageId));
       const send = API.messagingSend.match(req.method, url.pathname);

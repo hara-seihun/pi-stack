@@ -452,6 +452,39 @@ describe("messaging custody", () => {
     expect(fixture.service.snapshot().conversations[0].unread).toBe(0);
     expect(fixture.sends()).toBe(0);
   });
+  test("since history includes every recent message in seq order and keeps older cursor paging gapless", async () => {
+    const fixture = await setup();
+    const conversation = { id: fixture.conversation.externalId, title: "Friend", kind: "direct" as const };
+    const receive = (index: number, timestamp: number) => fixture.context.message({ id: String(index), conversation, direction: "incoming" as const, sender: "Friend", text: String(index), timestamp, attachments: [] });
+    for (let index = 0; index < 6; index++) await receive(index, 999);
+    for (let index = 6; index < 132; index++) await receive(index, index === 112 ? 998 : 1000 + index);
+
+    const page = fixture.service.history(fixture.conversation.id, undefined, 50, 1006);
+    expect(page.messages.map(message => Number(message.text))).toEqual(Array.from({ length: 126 }, (_, index) => index + 6));
+    expect(page.before).toBe(7);
+    expect(fixture.service.snapshot().conversations[0].unread).toBe(132);
+    const older = fixture.service.history(fixture.conversation.id, page.before!, 50);
+    expect(older.messages.map(message => Number(message.text))).toEqual([0, 1, 2, 3, 4, 5]);
+    expect(older.before).toBeNull();
+    expect(fixture.service.history(fixture.conversation.id, undefined, 2).messages.map(message => message.text)).toEqual(["130", "131"]);
+    expect(fixture.service.history(fixture.conversation.id, undefined, 3, 999999).messages.map(message => message.text)).toEqual(["129", "130", "131"]);
+    expect(fixture.service.history(fixture.conversation.id, undefined, 3, 0).messages).toHaveLength(132);
+  });
+  test("history rejects invalid since values and conflicting cursors through both service and HTTP", async () => {
+    const fixture = await setup();
+    const id = fixture.conversation.id;
+    for (const since of [NaN, Infinity, -1, 1.5, Number.MAX_SAFE_INTEGER + 1]) {
+      expect(() => fixture.service.history(id, undefined, 60, since)).toThrow("Invalid message timestamp");
+    }
+    expect(() => fixture.service.history(id, 2, 60, 0)).toThrow("before and since cannot be combined");
+    for (const query of ["since=", "since=bad", "since=-1", "since=%20", "since=1e3", "before=2&since=0"]) {
+      const response = (await fixture.service.handle(new Request(`http://local/v1/messaging/conversations/${id}/messages?${query}`)))!;
+      expect(response.status).toBe(400);
+    }
+    const response = (await fixture.service.handle(new Request(`http://local/v1/messaging/conversations/${id}/messages?since=0`)))!;
+    expect(response.status).toBe(200);
+    expect(await response.json()).toEqual({ messages: [], before: null });
+  });
   test("contact and group pictures reach the inbox, message headers and an image route that reads the type from the bytes", async () => {
     const root = directory();
     const fixture = await setup(root);

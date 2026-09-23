@@ -25,6 +25,9 @@ import type { Attachment, Bootstrap, ContextEntry, Dashboard, QueuedMessage, Ses
 import { Shell, TabNav } from "./app/Shell";
 import { useLayout } from "./app/layout";
 import { messagingAvatarUrl } from "./messaging-avatar";
+import { messagingClient } from "./messaging-client";
+import { MessagingHistoryCache } from "./messaging-history";
+import { MessagingConversations } from "./Messages";
 import { MessagingCallProvider, SignalCallButton } from "./messaging-call";
 import { RequestIndicator } from "./RequestIndicator";
 import { hideClosing, reconcileCloses, withClose, withoutClose, type PendingCloses } from "./pending-closes";
@@ -47,7 +50,6 @@ import { SpeechBar } from "./SpeechBar";
 // What the first paint does not need waits for the screen that shows it. Each
 // import below is one chunk: a screen or a feature, never a component at a
 // time, so opening Files or the inspector is one request rather than six.
-const MessagingConversations = lazy(() => import("./Messages").then(module => ({ default: module.MessagingConversations })));
 const PasteTextDialog = lazy(() => import("./PasteTextDialog").then(module => ({ default: module.PasteTextDialog })));
 const InspectorSheet = lazy(() => import("./features/inspector/InspectorSheet").then(module => ({ default: module.InspectorSheet })));
 const QueueSheet = lazy(() => import("./features/queue/QueueSheet").then(module => ({ default: module.QueueSheet })));
@@ -269,6 +271,18 @@ function RemoteApp() {
     })());
   }, [person]);
   useEffect(() => () => cache.dispose(), [cache]);
+  const messagingHistory = useMemo(() => new MessagingHistoryCache((id, signal, since) => messagingClient.history(id, signal, undefined, since)), [person]);
+  useEffect(() => {
+    messagingHistory.start();
+    const refresh = () => { if (document.visibilityState === "visible") messagingHistory.refresh(); };
+    window.addEventListener("online", refresh);
+    document.addEventListener("visibilitychange", refresh);
+    return () => {
+      window.removeEventListener("online", refresh);
+      document.removeEventListener("visibilitychange", refresh);
+      messagingHistory.dispose();
+    };
+  }, [messagingHistory]);
 
   // Navigation. Opening anything pushes history so back returns to where the
   // person was; panels remember whether they pushed so closing a deep-linked
@@ -416,6 +430,7 @@ function RemoteApp() {
           break;
         }
         case "messaging": {
+          messagingHistory.reconcile(event.snapshot);
           const current = stateRef.current;
           const update: Partial<AppState> = { messaging: event.snapshot, syncing: false };
           const closed = selectionAfterSync(current.selectedChatId, current, { sessions: current.sessions, messaging: event.snapshot }) !== current.selectedChatId;
@@ -476,7 +491,7 @@ function RemoteApp() {
       client.stop();
       stream.current = null;
     };
-  }, [cache, liveText, patch, person, stateRef, undoCloses]);
+  }, [cache, messagingHistory, liveText, patch, person, stateRef, undoCloses]);
 
   // What the stream carries follows the route: the open thread, whether the
   // person can see it, and the Machine screen only while it is showing.
@@ -806,7 +821,7 @@ function RemoteApp() {
         onRemoveAttachment={id => { const file = visibleAttachments.find(item => item.localId === id); if (file) void removeAttachment(file); }} onUpload={files => void uploadFiles(files)} onPaste={() => setPasteSessionId(aiId)} onDraw={() => drawing.open()} onDismissControlError={() => setControlError(null)} /></ItemBodiesContext.Provider>
     : messagingActive && humanConversation
       ? <div className="conversation-screen"><ConversationHeader title={humanConversation.title} avatar={messagingAvatarUrl(humanConversation.backendId, humanConversation.externalId, humanConversation.avatar)} showIdentity={showConversationIdentity} meta={<span className="conversation-meta">{humanBackend?.label || "Messaging"}{humanBackend && humanBackend.status !== "ready" ? ` · ${humanBackend.status}` : ""}</span>} trailing={<SignalCallButton conversation={humanConversation} available={humanBackend?.plugin === "signal"} enabled={humanBackend?.status === "ready" && humanBackend.capabilities.calls === true} />} onBack={layout === "phone" ? closeDetail : null} onOpenInspector={null} />
-        <Suspense fallback={<Loading label="Opening…" />}><MessagingConversations selected={humanConversation} snapshot={state.messaging} onRead={kick} /></Suspense></div>
+        <MessagingConversations selected={humanConversation} snapshot={state.messaging} history={messagingHistory} onRead={kick} /></div>
       : routeChat && state.syncing
         ? <section className="empty-state"><strong>Opening…</strong></section>
         : <section className="empty-state"><strong>{route.tab === "workers" ? "Choose a worker" : "Choose a chat"}</strong></section>;
