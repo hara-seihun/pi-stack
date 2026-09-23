@@ -1,4 +1,5 @@
 import { messageFinalizationKey } from "./sync";
+import { projectMessageReply } from "./message-replies";
 import type { ResponseMetrics } from "./protocol";
 import { withToolProgress, type ToolProgress } from "./tool-progress";
 
@@ -47,7 +48,7 @@ export function displayContextDocument(document: string, streamedThinking: Reado
     const original = source.role === "assistant"
       ? restoreStreamedThinking(displayAssistantMessage(source), streamedThinking.get(finalization))
       : source;
-    const message = { ...original };
+    const message = { ...projectMessageReply(original) };
     if (message.role === "assistant") {
       for (const key of ["api", "provider", "model", "usage", "stopReason", "responseId", "rawStopReason"])
         delete message[key];

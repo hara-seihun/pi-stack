@@ -183,6 +183,32 @@ test("discovers contacts and groups, sends named attachments, and uses matching 
   expect(sync.direction).toBe("outgoing");
 });
 
+test("Signal receives native quotes and sends a reply with Signal quote fields", async () => {
+  const f = await fixture(`
+    if(request.method==='subscribeReceive') {
+      reply(request,0);
+      incoming('reply',201,{quote:{id:101,author:'+12025550101',text:'quoted on the phone'}});
+      receive({sourceNumber:account,syncMessage:{sentMessage:{destinationUuid:friend,timestamp:202,message:'linked reply',quote:{id:101,author:friend,text:'quoted on desktop'}}}});
+      return;
+    }
+    if(request.method==='send') {
+      if(request.params.quoteTimestamp!==101 || request.params.quoteAuthor!==friend || request.params.quoteMessage!=='stored message' || request.params.message!=='response') process.exit(2);
+      return reply(request,{timestamp:203,results:[{type:'SUCCESS'}]});
+    }
+  `);
+  await start(f.plugin, f.context);
+  const conversation = await f.plugin.openConversation(friend);
+  expect(conversation.ok).toBe(true);
+  if (!conversation.ok) return;
+  const sent = await f.plugin.send(conversation.value, { requestId: 'reply', text: 'response', attachments: [], reply: { author: friend, timestamp: 101, text: 'stored message' } });
+  expect(sent).toMatchObject({ ok: true, value: { timestamp: 203 } });
+  await f.plugin.close();
+  expect(f.messages.map(item => item.reply)).toEqual([
+    { author: '+12025550101', timestamp: 101, text: 'quoted on the phone' },
+    { author: friend, timestamp: 101, text: 'quoted on desktop' },
+  ]);
+});
+
 test("Signal reaction-only events use target author and timestamp, preserve group routing, and never become blank messages", async () => {
   const f = await fixture(`
     if(request.method==='subscribeReceive') {

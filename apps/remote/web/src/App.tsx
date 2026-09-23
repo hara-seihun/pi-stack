@@ -6,6 +6,8 @@ import { ClientCache } from "./client-cache";
 import { api, piFetch, registerUnlockHandler } from "./client";
 import { fetchPersonChooser, reportWebReady } from "./native";
 import { useChatDrawing } from "./chat-drawing";
+import type { ReplyTarget } from "./message-reply";
+import { ReplyDrafts } from "./reply-drafts";
 import type { MessagingSnapshot } from "../../server/messaging/protocol";
 import { inboxRows, reconcileDiscoveredSessions, selectedAiId, selectionAfterSync, type Chat, type ChatId } from "./chats";
 import { SignInDialog } from "./SignInDialog";
@@ -93,6 +95,7 @@ const initialState: AppState = {
 function draftKey(id: string) { return appStorageKey(`pi-remote-draft:${window.PiRemotePerson.get()}:${id}`); }
 function loadDraft(id: string) { try { return localStorage.getItem(draftKey(id)) || ""; } catch { return ""; } }
 function saveDraft(id: string, value: string) { try { value ? localStorage.setItem(draftKey(id), value) : localStorage.removeItem(draftKey(id)); } catch {} }
+function replyKey(id: string) { return appStorageKey(`pi-remote-reply:${window.PiRemotePerson.get()}:${id}`); }
 
 function useStableState() {
   const [state, setRenderedState] = useState(initialState);
@@ -195,6 +198,9 @@ function RemoteApp() {
   const undoCloses = useMemo(() => new UndoCloses(), []);
   const undoState = useSyncExternalStore(undoCloses.subscribe, undoCloses.snapshot, undoCloses.snapshot);
   const [prompt, setPrompt] = useState("");
+  const [reply, setReply] = useState<ReplyTarget | null>(null);
+  const replyRef = useRef<ReplyTarget | null>(null);
+  const replyDrafts = useMemo(() => new ReplyDrafts(localStorage, replyKey), []);
   const [pending, setPending] = useState(false);
   const [pendingAction, setPendingAction] = useState<string | null>(null);
   const [stopTarget, setStopTarget] = useState<Session | null>(null);
@@ -323,6 +329,8 @@ function RemoteApp() {
         ? [...current.discovered, discovered] : current.discovered,
     }));
     setPrompt(loadDraft(id));
+    replyRef.current = replyDrafts.load(id);
+    setReply(replyRef.current);
     if (remembered?.transcript) stream.current?.restore({ type: "transcript", sessionId: id, ...remembered.transcript });
     kick();
     // Memory paints synchronously. Disk may fill a cold opening, but never
@@ -666,14 +674,20 @@ function RemoteApp() {
     const attachments = sessionAttachments.filter((file) => file.path);
     const text = prompt.trim();
     if (!text && !attachments.length) return;
+    const selectedReply = replyRef.current;
+    const replyVersion = replyDrafts.version(session.id);
     const command = text.startsWith("/") ? state.slashCommands.find((candidate) => candidate.name === text.slice(1).split(/\s/, 1)[0]) : null;
     setControlError(null);
     setPrompt(""); saveDraft(session.id, ""); setPending(true);
     try {
       const attachmentText = attachments.length ? `The following files were attached to this message:\n${attachments.map((file) => `- ${file.path}`).join("\n")}` : "";
       const bodyText = [text, attachmentText].filter(Boolean).join("\n\n");
-      if (command && !attachments.length) await api(API.sessionCommand.method, API.sessionCommand.path({ sessionId: session.id }), { requestId: crypto.randomUUID(), name: command.name, args: text.slice(command.name.length + 2).trim() }, 130_000);
-      else await api(API.sessionPrompt.method, API.sessionPrompt.path({ sessionId: session.id }), { requestId: crypto.randomUUID(), text: bodyText, delivery: session.state === "running" ? delivery : "queue" });
+      if (command && !attachments.length && !selectedReply) await api(API.sessionCommand.method, API.sessionCommand.path({ sessionId: session.id }), { requestId: crypto.randomUUID(), name: command.name, args: text.slice(command.name.length + 2).trim() }, 130_000);
+      else await api(API.sessionPrompt.method, API.sessionPrompt.path({ sessionId: session.id }), { requestId: crypto.randomUUID(), text: bodyText, delivery: session.state === "running" ? delivery : "queue", replyTo: selectedReply?.identity.id });
+      if (replyDrafts.accept(session.id, replyVersion) && selectedAiId(stateRef.current) === session.id) {
+        replyRef.current = null;
+        setReply(null);
+      }
       const sentIds = new Set(attachments.map((file) => file.localId));
       patch((current) => ({ attachments: current.attachments.filter((file) => !sentIds.has(file.localId)) }));
     } catch (error) { if (selectedAiId(stateRef.current) === session.id) setPrompt(text); saveDraft(session.id, text); setControlError({ sessionId: session.id, message: error instanceof Error ? error.message : String(error) }); }
@@ -788,7 +802,7 @@ function RemoteApp() {
     ? <ItemBodiesContext.Provider value={bodies}><LiveConversation live={liveText} session={selected} ancestors={ancestors} entries={contextEntries} images={images} offline={state.offline} pending={pending} home={home} prompt={prompt}
         earlierAvailable={hasEarlier(state.transcript)} loadingEarlier={state.loadingEarlier} earlierError={state.earlierError} onShowEarlier={showEarlier} onThinkingOpen={thinkingOpen}
         attachments={visibleAttachments.map(file => ({ id: file.localId, name: file.name, uploading: file.uploading }))} slashCommands={state.slashCommands} drawing={drawing} uploadError={uploadError?.sessionId === aiId ? uploadError.message : ""} controlError={controlError?.sessionId === aiId && !stopTarget ? controlError.message : ""} showBack={layout === "phone"} showIdentity={showConversationIdentity}
-        onBack={closeDetail} onOpenInspector={() => openPanel("inspector")} onOpenAncestor={session => openThreadId(session.id)} onOpenQueue={() => openPanel("queue")} onEdit={editFrom} onPrompt={text => { setPrompt(text); if (aiId) saveDraft(aiId, text); }} onSend={delivery => void send(delivery)} onStop={() => stopThread(selected)} onResume={() => void controlThread(selected.id, "resume")} onReconnect={reconnect}
+        onBack={closeDetail} onOpenInspector={() => openPanel("inspector")} onOpenAncestor={session => openThreadId(session.id)} onOpenQueue={() => openPanel("queue")} onEdit={editFrom} reply={reply} onReply={target => { replyRef.current = target; setReply(target); replyDrafts.save(selected.id, target); }} onCancelReply={() => { replyRef.current = null; setReply(null); replyDrafts.save(selected.id, null); }} onPrompt={text => { setPrompt(text); if (aiId) saveDraft(aiId, text); }} onSend={delivery => void send(delivery)} onStop={() => stopThread(selected)} onResume={() => void controlThread(selected.id, "resume")} onReconnect={reconnect}
         onRemoveAttachment={id => { const file = visibleAttachments.find(item => item.localId === id); if (file) void removeAttachment(file); }} onUpload={files => void uploadFiles(files)} onPaste={() => setPasteSessionId(aiId)} onDraw={() => drawing.open()} onDismissControlError={() => setControlError(null)} /></ItemBodiesContext.Provider>
     : messagingActive && humanConversation
       ? <div className="conversation-screen"><ConversationHeader title={humanConversation.title} avatar={messagingAvatarUrl(humanConversation.backendId, humanConversation.externalId, humanConversation.avatar)} showIdentity={showConversationIdentity} meta={<span className="conversation-meta">{humanBackend?.label || "Messaging"}{humanBackend && humanBackend.status !== "ready" ? ` · ${humanBackend.status}` : ""}</span>} trailing={<SignalCallButton conversation={humanConversation} available={humanBackend?.plugin === "signal"} enabled={humanBackend?.status === "ready" && humanBackend.capabilities.calls === true} />} onBack={layout === "phone" ? closeDetail : null} onOpenInspector={null} />

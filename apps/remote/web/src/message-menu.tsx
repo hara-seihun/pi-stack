@@ -18,7 +18,9 @@ export function useMessageMenu(items: MessageMenuItem[] | undefined) {
   const start = useRef<Anchor | null>(null);
   const cancel = () => { if (timer.current) { clearTimeout(timer.current); timer.current = null; } start.current = null; };
   useEffect(() => cancel, []);
-  if (!items?.length) return { menu: null, handlers: {} };
+  if (!items?.length) return { menu: null, handlers: {
+    onContextMenu: undefined, onPointerDown: undefined, onPointerMove: undefined, onPointerUp: undefined, onPointerCancel: undefined,
+  } };
   const handlers = {
     onContextMenu(event: React.MouseEvent) {
       if (window.getSelection()?.toString()) return;

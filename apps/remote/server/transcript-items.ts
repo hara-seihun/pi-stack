@@ -173,6 +173,7 @@ export function deriveTranscriptItems(context: any): DerivedItem[] {
       if (head.kind !== "user" && head.kind !== "assistant") continue;
       head.identity = message.identity;
       head.reactions = message.reactions ?? [];
+      if (message.reply) head.reply = message.reply;
       head.label = message.identity.sender.name || message.identity.sender.id;
       break;
     }

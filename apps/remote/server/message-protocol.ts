@@ -6,6 +6,14 @@ export interface MessageIdentity {
   sender: MessageSender;
 }
 
+/** A quote travels with a reply even when its original is not stored here. */
+export interface MessageReply {
+  messageId: string | null;
+  sender: MessageSender;
+  text: string;
+  timestamp?: number;
+}
+
 export interface MessageReaction {
   emoji: string;
   sender: MessageSender;

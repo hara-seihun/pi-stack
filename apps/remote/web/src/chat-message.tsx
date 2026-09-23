@@ -3,7 +3,8 @@ import { API } from "../../server/api";
 import type { MessagingMessage } from "../../server/messaging/protocol";
 import { extractMessageLinks } from "../../server/messaging/links";
 import type { ResponseMetrics } from "../../server/protocol";
-import type { MessageIdentity, MessageReaction } from "../../server/message-protocol";
+import type { MessageIdentity, MessageReaction, MessageReply } from "../../server/message-protocol";
+import { ReplyQuote, replyTarget, type ReplyTarget } from "./message-reply";
 import { MessageReactions } from "./message-reactions";
 import { AGENT_AVATAR } from "../../server/agent-identity";
 import { appPath } from "./app-path";
@@ -43,6 +44,8 @@ export type ChatMessageSegment = {
   previewMessageId?: string;
   identity?: MessageIdentity;
   reactions?: MessageReaction[];
+  reply?: MessageReply;
+  onReply?(target: ReplyTarget): void;
   attachments?: ChatAttachment[];
   delivery?: ChatDelivery;
   onCheck?(): void;
@@ -63,6 +66,8 @@ export type ChatMessageProps = {
   previewMessageId?: string;
   identity?: MessageIdentity;
   reactions?: MessageReaction[];
+  reply?: MessageReply;
+  onReply?(target: ReplyTarget): void;
   /** Extra long-press / right-click actions after Copy. */
   menu?: MessageMenuItem[];
   attachments?: ChatAttachment[];
@@ -73,13 +78,15 @@ export type ChatMessageProps = {
   onEditImage?(image: HTMLImageElement): void;
 } & ({ contentFormat: "literal"; renderMarkdown?: never } | { contentFormat: "markdown"; renderMarkdown(text: string): ReactNode });
 
-function MessageFrame({ kind, label, avatar, text, timestamp, menu = [], children }: {
+function MessageFrame({ kind, label, avatar, text, timestamp, menu = [], identity, onReply, children }: {
   kind: string;
   label: string;
   avatar?: string;
   text: string;
   timestamp?: number;
   menu?: MessageMenuItem[];
+  identity?: MessageIdentity;
+  onReply?(target: ReplyTarget): void;
   children: ReactNode;
 }) {
   const time = timestamp === undefined ? undefined : new Date(timestamp);
@@ -87,9 +94,10 @@ function MessageFrame({ kind, label, avatar, text, timestamp, menu = [], childre
   const { menu: openMenu, handlers } = useMessageMenu([
     { label: "Copy", onSelect: () => copyText(text) },
     ...(reader && text.trim() ? [{ label: "Speak", onSelect: () => speech.speak(text, speechTitle(text)) }] : []),
+    ...(identity && onReply ? [{ label: "Reply", onSelect: () => onReply(replyTarget(identity, text)) }] : []),
     ...menu,
   ]);
-  return <article className={`message ${kind}`} {...handlers}>
+  return <article className={`message ${kind}`} data-message-id={identity?.id} tabIndex={identity ? -1 : undefined} {...handlers}>
     <header className="message-header">
       {avatar && <img className="message-avatar" src={avatar} alt="" loading="lazy" decoding="async" />}
       <span className="message-label">{label.toUpperCase()}</span>
@@ -123,13 +131,15 @@ function MessageBody({ attachments = [], delivery, checking = false, onCheck, on
 }
 
 export function ChatMessage(props: ChatMessageProps) {
-  const { kind, label, avatar, text, timestamp, responseMetrics, menu, attachments, delivery, checking, onCheck, onRetry, onEditImage, identity, reactions } = props;
-  return <MessageFrame kind={kind} label={label} avatar={avatar} text={text} timestamp={timestamp} menu={menu}>
+  const { kind, label, avatar, text, timestamp, responseMetrics, menu, attachments, delivery, checking, onCheck, onRetry, onEditImage, identity, reactions, reply, onReply } = props;
+  return <MessageFrame kind={kind} label={label} avatar={avatar} text={text} timestamp={timestamp} menu={menu} identity={identity} onReply={onReply}>
     <MessageBody attachments={attachments} delivery={delivery} checking={checking} onCheck={onCheck} onRetry={onRetry} onEditImage={onEditImage}>
+      {reply && <ReplyQuote reply={reply} />}
       {props.contentFormat === "markdown" ? props.renderMarkdown(text) : text && <div className="message-text">{text}</div>}
       {props.previewMessageId && <MessageLinkPreviews key={props.previewMessageId} messageId={props.previewMessageId} />}
       {responseMetrics && <footer className="message-metrics">{formatResponseMetrics(responseMetrics)}</footer>}
     </MessageBody>
+    {identity && onReply && <button type="button" className="message-reply-action" aria-label={`Reply to ${label}`} onClick={() => onReply(replyTarget(identity, text))}>Reply</button>}
     {identity && <MessageReactions identity={identity} reactions={reactions} />}
   </MessageFrame>;
 }
@@ -156,21 +166,45 @@ export function ChatMessageGroup({ kind, label, avatar, segments, checking = fal
       const last = index === segments.length - 1;
       const delivery = segment.delivery && (last || segment.delivery.status !== "sent") ? segment.delivery : undefined;
       const time = segment.timestamp === undefined ? undefined : new Date(segment.timestamp);
-      return <div className="message-segment" key={segment.id} data-message-id={segment.id} title={time?.toLocaleString()}>
-        <MessageBody attachments={segment.attachments} delivery={delivery} checking={checking} onCheck={segment.onCheck} onRetry={segment.onRetry} onEditImage={onEditImage}>
-          {segment.text && <p className="message-text">{segment.text}</p>}
-          {segment.previewMessageId && <MessageLinkPreviews key={segment.previewMessageId} messageId={segment.previewMessageId} />}
-        </MessageBody>
-        {segment.identity && <MessageReactions identity={segment.identity} reactions={segment.reactions} />}
-      </div>;
+      return <GroupSegment key={segment.id} segment={segment} label={label} time={time} delivery={delivery} checking={checking} onEditImage={onEditImage} />;
     })}
   </MessageFrame>;
 }
 
+function GroupSegment({ segment, label, time, delivery, checking, onEditImage }: {
+  segment: ChatMessageSegment;
+  label: string;
+  time?: Date;
+  delivery?: ChatDelivery;
+  checking: boolean;
+  onEditImage?(image: HTMLImageElement): void;
+}) {
+  const { identity, onReply } = segment;
+  const { menu, handlers } = useMessageMenu([
+    { label: "Copy", onSelect: () => copyText(segment.text) },
+    ...(identity && onReply ? [{ label: "Reply", onSelect: () => onReply(replyTarget(identity, segment.text)) }] : []),
+  ]);
+  return <div className="message-segment" data-message-id={identity?.id ?? segment.id} tabIndex={identity ? -1 : undefined} title={time?.toLocaleString()}
+    {...handlers} onContextMenu={event => { event.stopPropagation(); handlers.onContextMenu?.(event); }}
+    onPointerDown={event => { event.stopPropagation(); handlers.onPointerDown?.(event); }}
+    onPointerMove={event => { event.stopPropagation(); handlers.onPointerMove?.(event); }}
+    onPointerUp={event => { event.stopPropagation(); handlers.onPointerUp?.(); }}
+    onPointerCancel={event => { event.stopPropagation(); handlers.onPointerCancel?.(); }}>
+    {menu}
+    <MessageBody attachments={segment.attachments} delivery={delivery} checking={checking} onCheck={segment.onCheck} onRetry={segment.onRetry} onEditImage={onEditImage}>
+      {segment.reply && <ReplyQuote reply={segment.reply} />}
+      {segment.text && <p className="message-text">{segment.text}</p>}
+      {segment.previewMessageId && <MessageLinkPreviews key={segment.previewMessageId} messageId={segment.previewMessageId} />}
+    </MessageBody>
+    {identity && onReply && <button type="button" className="message-reply-action" aria-label={`Reply to ${label}`} onClick={() => onReply(replyTarget(identity, segment.text))}>Reply</button>}
+    {identity && <MessageReactions identity={identity} reactions={segment.reactions} />}
+  </div>;
+}
+
 /** One Signal message as a segment of a sender's block; check/retry handlers are wired by the caller. */
-export function messagingMessageSegment(message: MessagingMessage, handlers: { onCheck?(): void; onRetry?(): void } = {}): ChatMessageSegment {
-  const { text, timestamp, attachments, delivery, previewMessageId, identity, reactions } = messagingMessageProps(message);
-  return { id: message.id, text, timestamp, attachments, delivery, previewMessageId, identity, reactions, ...handlers };
+export function messagingMessageSegment(message: MessagingMessage, handlers: { onCheck?(): void; onRetry?(): void; onReply?(target: ReplyTarget): void } = {}): ChatMessageSegment {
+  const { text, timestamp, attachments, delivery, previewMessageId, identity, reactions, reply } = messagingMessageProps(message);
+  return { id: message.id, text, timestamp, attachments, delivery, previewMessageId, identity, reactions, reply, ...handlers };
 }
 
 export function messagingMessageProps(message: MessagingMessage, backendId = ""): ChatMessageProps {
@@ -185,6 +219,7 @@ export function messagingMessageProps(message: MessagingMessage, backendId = "")
     timestamp: message.timestamp,
     identity: message.identity,
     reactions: message.reactions,
+    reply: message.reply,
     attachments: message.attachments.map(attachment => ({
       id: attachment.id,
       name: attachment.name,

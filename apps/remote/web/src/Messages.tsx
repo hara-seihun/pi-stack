@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import type { MessagingBackendInfo, MessagingConversation, MessagingMessage, MessagingSnapshot } from "../../server/messaging/protocol";
 import { Composer } from "./Composer";
+import { ReplyComposer } from "./message-reply";
 import { useChatDrawing } from "./chat-drawing";
 import { ConversationView } from "./ConversationView";
 import { ChatMessageGroup, messagingMessageProps, messagingMessageSegment } from "./chat-message";
@@ -144,13 +145,18 @@ function MessagingConversationController({ conversation, backend, active, versio
   };
   const send = async () => {
     if (uploads.current || (!currentDraft.current.text.trim() && !currentDraft.current.attachments.length)) return;
-    const { message, request } = beginHumanSend(currentDraft.current, conversation.id, crypto.randomUUID());
+    const sentDraft = currentDraft.current;
+    const { message, request } = beginHumanSend(sentDraft, conversation.id, crypto.randomUUID());
     setMessages(current => mergeHumanMessages(current, [message]));
-    save(emptyHumanDraft());
+    save({ ...emptyHumanDraft(), reply: sentDraft.reply });
     setError("");
     const result = await messagingClient.send(conversation.id, request, lifetime.current.signal);
     if (lifetime.current.signal.aborted) return;
-    if (result.ok) { applyMessage(result.value.message); setRevision(current => current + 1); }
+    if (result.ok) {
+      applyMessage(result.value.message);
+      if (currentDraft.current.reply === sentDraft.reply) save({ ...currentDraft.current, reply: undefined });
+      setRevision(current => current + 1);
+    }
     else setMessages(current => unconfirmedHumanSend(current, message, result.error.message));
   };
   const checkRequest = async (message: MessagingMessage) => {
@@ -173,6 +179,7 @@ function MessagingConversationController({ conversation, backend, active, versio
         {groupHumanMessages(messages).map(group => {
           const { kind, label, avatar } = messagingMessageProps(group[0], conversation.backendId);
           return <ChatMessageGroup key={group[0].id} kind={kind} label={label} avatar={avatar} checking={group.some(message => pendingChecks.includes(message.id))} segments={group.map(message => messagingMessageSegment(message, {
+            onReply: target => save({ ...currentDraft.current, reply: target }),
             onCheck: () => void checkRequest(message),
             onRetry: () => {
               if (currentDraft.current.text || currentDraft.current.attachments.length) { setError("Keep or send your current draft before restoring the failed message."); return; }
@@ -186,6 +193,7 @@ function MessagingConversationController({ conversation, backend, active, versio
     <DismissibleError message={error} />
     {error && <button type="button" onClick={() => setRevision(current => current + 1)}>Refresh conversation</button>}
     <Composer value={draft.text} onChange={text => save({ ...currentDraft.current, text })} placeholder={`Message ${conversation.title}`} layoutKey={`${active}:${drawing.isOpen}`} disabled={!ready || !!uploading.length || (!draft.text.trim() && !draft.attachments.length)} attachmentDisabled={!backend?.capabilities.attachments}
+      before={draft.reply && <ReplyComposer target={draft.reply} onCancel={() => save({ ...currentDraft.current, reply: undefined })} />}
       attachments={[...draft.attachments, ...uploading.map(item => ({ ...item, uploading: true }))]} onRemove={id => void remove(id)} onUpload={files => void uploadFiles(files)} onPaste={() => setPaste(true)} onDraw={() => drawing.open()} onSend={() => void send()} />
     {active && paste && <PasteTextDialog name={pasteName} content={pasteContent} onNameChange={setPasteName} onContentChange={setPasteContent} onAttach={uploadFile} onClose={() => setPaste(false)} />}
   </ConversationView>;

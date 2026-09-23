@@ -49,6 +49,8 @@ import { TranscriptItems, transcriptPage, transcriptWindow } from "./transcript-
 import { MachineActions } from "./machine-actions";
 import { createMessagingService, openCallAudio } from "./messaging";
 import { PiReactions, nativeMessageExists, reactToMessage } from "./reactions";
+import { parseMessageReference } from "./message-protocol";
+import { decodeMessageReply, encodeMessageReply, replyFromNativeEntry } from "./message-replies";
 import { SlackReactions } from "./slack-reactions";
 import { AGENT_NAME } from "./agent-identity";
 import { createSpeechService } from "./speech/service";
@@ -1063,7 +1065,7 @@ function queuedMessagesFor(id: string): QueuedMessage[] {
     // one still waiting can be all three, whether or not the thread is held.
     const waiting = (message.state ?? "queued") === "queued";
     return {
-      id: message.id, text: message.text, delivery: message.delivery,
+      id: message.id, text: decodeMessageReply(message.text).text, delivery: message.delivery,
       state: waiting ? "queued" as const : "dispatched" as const,
       canSteer: waiting && message.delivery === "queue",
       canHardSteer: waiting,
@@ -2352,7 +2354,16 @@ const server = Bun.serve<AudioSocketData>({
         const roomImages = body.includeMeetingImages === true && row.meeting_id
           ? meet.captureDelegation(row.meeting_id)
           : { images: [], note: "" };
-        const message = text + (roomImages.note ? `\n\n${roomImages.note}` : "");
+        let message = text + (roomImages.note ? `\n\n${roomImages.note}` : "");
+        if (body.replyTo !== undefined) {
+          const target = typeof body.replyTo === "string" ? parseMessageReference(body.replyTo) : null;
+          if (target?.transport !== "pi" || target.sessionId !== id) return error("Reply must reference a message in this conversation");
+          const history = await directory.read({ threadId: id, entryId: target.messageId });
+          if (!history.ok) return threadError(history.error);
+          const reply = replyFromNativeEntry(body.replyTo, history.value.entries[0], MESSAGE_OWNER, AGENT_NAME);
+          if (!reply) return error("Reply target is not a user or assistant message");
+          message = encodeMessageReply(message, reply);
+        }
         return json(await enqueuePrompt(id, requestId, message, delivery, roomImages.images), 202);
       } catch (e: any) { return error(e.message ?? "Prompt failed", 400); }
     }

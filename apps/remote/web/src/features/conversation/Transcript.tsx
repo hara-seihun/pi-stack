@@ -2,6 +2,7 @@ import { memo, useEffect, useMemo, useRef, useState } from "react";
 
 import type { InlineImage } from "../../../../server/inline-image-contract";
 import { agentAvatar, AttachmentImage, ChatMessage, CopyButton } from "../../chat-message";
+import type { ReplyTarget } from "../../message-reply";
 import { InlineImagesContext, Markdown } from "../../context";
 import { resourceUrl } from "../../resource-url";
 import { formatResponseMetrics } from "../../response-metrics";
@@ -28,6 +29,7 @@ export interface TranscriptProps {
   /** Opening the live thinking card subscribes to its text; closing it stops. */
   onThinkingOpen?(open: boolean): void;
   onEdit(entry: ContextEntry): void;
+  onReply(target: ReplyTarget): void;
 }
 
 function json(value: unknown) {
@@ -82,10 +84,11 @@ function useElapsed(startedAt: number | undefined, running: boolean) {
   return startedAt ? Math.max(0, Date.now() - startedAt) : undefined;
 }
 
-const MessageEntry = memo(function MessageEntry({ entry, sessionId, onEdit }: {
+const MessageEntry = memo(function MessageEntry({ entry, sessionId, onEdit, onReply }: {
   entry: ContextEntry;
   sessionId: string;
   onEdit(entry: ContextEntry): void;
+  onReply(target: ReplyTarget): void;
 }) {
   const text = entry.text || "";
   return <ChatMessage
@@ -96,12 +99,14 @@ const MessageEntry = memo(function MessageEntry({ entry, sessionId, onEdit }: {
     timestamp={entry.messageTimestamp || undefined}
     identity={entry.identity}
     reactions={entry.reactions}
+    reply={entry.reply}
+    onReply={onReply}
     responseMetrics={entry.kind === "assistant" ? entry.responseMetrics : undefined}
     contentFormat="markdown"
     renderMarkdown={source => <Markdown source={source} sessionId={sessionId} streaming={entry.streaming} assistant={entry.kind === "assistant"} />}
     menu={entry.kind === "user" && Number(entry.messageTimestamp) > 0 ? [{ label: "Edit and resend from here", onSelect: () => onEdit(entry) }] : []}
   />;
-}, (before, after) => before.entry.signature === after.entry.signature && before.sessionId === after.sessionId && before.onEdit === after.onEdit);
+}, (before, after) => before.entry.signature === after.entry.signature && before.sessionId === after.sessionId && before.onEdit === after.onEdit && before.onReply === after.onReply);
 
 function outcome(entry: ContextEntry) {
   if (entry.kind === "toolCall") {
@@ -276,7 +281,7 @@ const WorkCard = memo(function WorkCard({ item, newest, sessionId, home, onThink
 
 const CONTEXT_WINDOW_SIZE = 60;
 
-export function Transcript({ entries, liveThinking, thinkingActive, sessionId, home, images, earlierAvailable, loadingEarlier, earlierError, onShowEarlier, onThinkingOpen, onEdit }: TranscriptProps) {
+export function Transcript({ entries, liveThinking, thinkingActive, sessionId, home, images, earlierAvailable, loadingEarlier, earlierError, onShowEarlier, onThinkingOpen, onEdit, onReply }: TranscriptProps) {
   const items = useMemo(() => buildTranscript(entries, liveThinking, thinkingActive), [entries, liveThinking, thinkingActive]);
   const newest = Math.max(0, items.length - CONTEXT_WINDOW_SIZE);
   const [start, setStart] = useState(newest);
@@ -302,7 +307,7 @@ export function Transcript({ entries, liveThinking, thinkingActive, sessionId, h
       {earlierError && <p className="context-earlier-error" role="status">{earlierError}</p>}
       {visible.map((item, index) => item.kind === "work"
         ? <WorkCard key={`${sessionId}:${item.key}`} item={item} newest={index === newestWork} sessionId={sessionId} home={home} onThinkingOpen={onThinkingOpen} />
-        : <MessageEntry key={item.entry.key} entry={item.entry} sessionId={sessionId} onEdit={onEdit} />)}
+        : <MessageEntry key={item.entry.key} entry={item.entry} sessionId={sessionId} onEdit={onEdit} onReply={onReply} />)}
     </div>
   </InlineImagesContext.Provider>;
 }
