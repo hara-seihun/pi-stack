@@ -45,7 +45,7 @@ async function download(input: string, maxBytes: number, deadline: number, hops 
   if (Date.now() >= deadline) throw new Error("Preview timed out");
   const response = await new Promise<{ body: Buffer; type: string; redirect?: string }>((resolve, reject) => {
     const request = (url.protocol === "https:" ? httpsRequest : httpRequest)(url, {
-      method: "GET", agent: false, autoSelectFamily: false,
+      method: "GET", agent: false, family: 4,
       lookup: (_host, options, callback) => {
         if (options.all) callback(null, [{ address, family: 4 }]);
         else callback(null, address, 4);
