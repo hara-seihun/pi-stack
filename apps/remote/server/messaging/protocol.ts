@@ -1,4 +1,4 @@
-import type { MessageIdentity, MessageReaction } from "../message-protocol";
+import type { MessageIdentity, MessageReaction } from "../message-protocol.js";
 
 export type MessagingResult<T> = { ok: true; value: T } | { ok: false; error: { code: string; message: string } };
 
