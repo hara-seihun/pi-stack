@@ -100,35 +100,32 @@ describe("transcript item derivation", () => {
 describe("generations", () => {
   const messages = [{ role: "user", timestamp: 1, content: [{ type: "text", text: "hello" }] }, call("c1")];
 
-  test("a landing result keeps the generation and reports only what changed", () => {
+  test("a landing result keeps the generation without retaining the previous diff", () => {
     const items = new TranscriptItems();
     const first = items.derive("s", "hash-1", () => context(messages));
-    expect(first.reset).toBe(true);
     const unchanged = items.derive("s", "hash-1", () => { throw new Error("should not rebuild"); });
-    expect(unchanged.changed).toEqual([]);
+    expect(unchanged.current).toBe(first.current);
     const second = items.derive("s", "hash-2", () => context([...messages, result("c1", "README.md")]));
-    expect(second.reset).toBe(false);
+    expect(Object.keys(second)).toEqual(["current"]);
     expect(second.current.generation).toBe(first.current.generation);
-    expect(second.changed.map(head => head.kind)).toEqual(["toolCall"]);
-    expect(second.changed[0].seq).toBe(first.current.items.at(-1)!.head.seq);
-    expect(second.changed[0].id).not.toBe(first.current.items.at(-1)!.head.id);
+    expect(second.current.items.at(-1)!.head.id).not.toBe(first.current.items.at(-1)!.head.id);
   });
 
   test("appended messages extend the generation", () => {
     const items = new TranscriptItems();
     const first = items.derive("s", "hash-1", () => context(messages));
     const second = items.derive("s", "hash-2", () => context([...messages, { role: "user", timestamp: 9, content: "next" }]));
-    expect(second.reset).toBe(false);
-    expect(second.changed.map(head => head.seq)).toEqual([first.current.items.length]);
+    expect(second.current.generation).toBe(first.current.generation);
+    expect(second.current.items).toHaveLength(first.current.items.length + 1);
   });
 
-  test("a compaction that replaces the prefix mints a new generation", () => {
+  test("a compaction or branch replacement mints a new generation", () => {
     const items = new TranscriptItems();
     const first = items.derive("s", "hash-1", () => context(messages));
     const compacted = items.derive("s", "hash-3", () => context([{ role: "user", timestamp: 50, content: "summary" }]));
-    expect(compacted.reset).toBe(true);
     expect(compacted.current.generation).not.toBe(first.current.generation);
-    expect(compacted.changed).toEqual([]);
+    const branch = items.derive("s", "hash-4", () => context([{ role: "user", timestamp: 51, content: "another branch" }]));
+    expect(branch.current.generation).not.toBe(compacted.current.generation);
   });
 
   test("bodies are addressed by their hash and forgotten with the session", () => {
@@ -139,18 +136,46 @@ describe("generations", () => {
     items.derive("other", "hash-1", () => context(messages));
     expect(items.get("s")).toBeNull();
   });
+
+  test("the byte budget evicts cold sessions while keeping cached bodies", () => {
+    const items = new TranscriptItems(8, 1_000);
+    const first = items.derive("first", "h1", () => context([{ role: "user", timestamp: 1, content: "x".repeat(180) }], []));
+    items.derive("second", "h2", () => context([{ role: "user", timestamp: 2, content: "y".repeat(180) }], []));
+    expect(items.get("first")).toBeNull();
+    expect(items.get("second")?.bodies.get(first.current.items[1].head.id)).toBeUndefined();
+    const second = items.get("second")!;
+    expect(second.bodies.get(second.items[1].head.id)).toBe(second.items[1].body);
+  });
+
+  test("oversized contexts stay page-able without occupying the cache", () => {
+    const items = new TranscriptItems(8, 100);
+    const load = () => context([{ role: "user", timestamp: 1, content: "x".repeat(500) }]);
+    const first = items.derive("large", "hash", load);
+    const second = items.derive("large", "hash", load);
+    expect(items.get("large")).toBeNull();
+    expect(second.current.generation).toBe(first.current.generation);
+    const appended = items.derive("large", "hash-2", () => context([
+      { role: "user", timestamp: 1, content: "x".repeat(500) },
+      { role: "user", timestamp: 2, content: "later" },
+    ]));
+    expect(appended.current.generation).toBe(first.current.generation);
+    expect(second.current.bodies.get(second.current.items.at(-1)!.head.id)).toBeTruthy();
+  });
 });
 
 describe("windows and pages", () => {
   const many = deriveTranscriptItems(context(Array.from({ length: 200 }, (_, index) =>
     ({ role: "user", timestamp: index + 1, content: `message ${index}` }))));
 
-  test("the newest window keeps the system prompt and tool schemas", () => {
-    const window = transcriptWindow(many, 120);
-    expect(window).toHaveLength(122);
-    expect(window.slice(0, 2).map(head => head.kind)).toEqual(["system", "tool"]);
+  test("the opening window has only the newest 60 items; older context is page-able", () => {
+    const window = transcriptWindow(many);
+    expect(window).toHaveLength(60);
+    expect(window[0].seq).toBe(many.length - 60);
     expect(window.at(-1)!.seq).toBe(many.length - 1);
-    expect(transcriptWindow(many.slice(0, 10), 120)).toHaveLength(10);
+    expect(window.at(-1)!.body).toEqual(JSON.parse(many.at(-1)!.body));
+    const older = transcriptPage(many, window[0].seq, 60);
+    expect(older.at(-1)!.seq).toBe(window[0].seq - 1);
+    expect(transcriptWindow(many.slice(0, 10))).toHaveLength(10);
   });
 
   test("a page returns the heads before a cursor", () => {
