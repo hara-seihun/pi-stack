@@ -1,3 +1,4 @@
+import { hash } from "fast-sha256";
 import { ResourceCache } from "./resource-cache";
 
 export type Revision = string;
@@ -7,7 +8,8 @@ type Patch =
   | { op: "replace"; value: Json }
   | { op: "string"; start: number; deleteCount: number; insert: string }
   | { op: "object"; set: Record<string, Json>; remove: string[]; edit: Record<string, Patch> }
-  | { op: "array"; start: number; deleteCount: number; insert: Json[]; edit: Record<string, Patch> };
+  | { op: "array"; start: number; deleteCount: number; insert: Json[]; edit: Record<string, Patch> }
+  | { op: "keyed"; keyField: "seq" | "id"; order: string[]; set: Record<string, Json>; edit: Record<string, Patch> }; 
 
 export type ReconcileFrame =
   | { resource: string; revision: Revision; base: null; kind: "full"; value: unknown }
@@ -20,7 +22,7 @@ export interface ReconcileOptions {
   maxHistoryPerResource?: number;
 }
 
-const defaults = { maxEntries: 256, maxBytes: 16 * 1024 * 1024, maxValueBytes: 4 * 1024 * 1024, maxHistoryPerResource: 4 };
+const defaults = { maxEntries: 256, maxBytes: 128 * 1024 * 1024, maxValueBytes: 32 * 1024 * 1024, maxHistoryPerResource: 4 };
 const maxDepth = 80;
 const own = (object: object, key: string) => Object.prototype.hasOwnProperty.call(object, key);
 const record = <T>(): Record<string, T> => Object.create(null) as Record<string, T>;
@@ -56,18 +58,51 @@ function encode(value: unknown, limit: number): string {
   return result;
 }
 
-// Four independent 32-bit streams over UTF-16 code units. These are content identities, not MACs.
 function revision(text: string): Revision {
-  let a = 0x811c9dc5, b = 0x9e3779b9, c = 0x85ebca6b, d = 0xc2b2ae35;
-  for (let i = 0; i < text.length; i++) {
-    const code = text.charCodeAt(i);
-    a = Math.imul(a ^ code, 0x01000193);
-    b = Math.imul(b ^ code, 0x27d4eb2d);
-    c = Math.imul(c ^ code, 0x165667b1);
-    d = Math.imul(d ^ code, 0x9e3779b1);
+  return Array.from(hash(new TextEncoder().encode(text)), byte => byte.toString(16).padStart(2, "0")).join("");
+}
+
+function itemKey(item: unknown, field: "seq" | "id"): string | undefined {
+  if (!object(item) || !own(item, field)) return undefined;
+  const id = item[field];
+  if (typeof id === "string") return `s:${id}`;
+  if (typeof id === "number" && Number.isFinite(id)) return `n:${id}`;
+  return undefined;
+}
+
+function keyed(items: Json[], field: "seq" | "id"): Map<string, Json> | undefined {
+  const result = new Map<string, Json>();
+  for (const item of items) {
+    const key = itemKey(item, field);
+    if (key === undefined || result.has(key)) return undefined;
+    result.set(key, item);
   }
-  const hex = (n: number) => (n >>> 0).toString(16).padStart(8, "0");
-  return `${text.length.toString(36)}-${hex(a)}${hex(b)}${hex(c)}${hex(d)}`;
+  return result;
+}
+
+function keyedDiff(before: Json[], after: Json[], depth: number): Patch | undefined {
+  for (const keyField of ["seq", "id"] as const) {
+    const oldItems = keyed(before, keyField);
+    const newItems = keyed(after, keyField);
+    if (!oldItems || !newItems) continue;
+    const set = record<Json>();
+    const edit = record<Patch>();
+    for (const [key, item] of newItems) {
+      if (!oldItems.has(key)) put(set, key, item);
+      else {
+        const change = diff(oldItems.get(key)!, item, depth + 1);
+        if (change) put(edit, key, change);
+      }
+    }
+    const order = [...newItems.keys()];
+    if (!Object.keys(set).length && !Object.keys(edit).length &&
+      order.length === oldItems.size) {
+      const oldOrder = [...oldItems.keys()];
+      if (order.every((key, index) => key === oldOrder[index])) return undefined;
+    }
+    return { op: "keyed", keyField, order, set, edit };
+  }
+  return undefined;
 }
 
 function diff(before: Json, after: Json, depth = 0): Patch | null {
@@ -81,6 +116,8 @@ function diff(before: Json, after: Json, depth = 0): Patch | null {
     return { op: "string", start, deleteCount: before.length - start - end, insert: after.slice(start, after.length - end) };
   }
   if (Array.isArray(before) && Array.isArray(after)) {
+    const keyedChange = keyedDiff(before, after, depth);
+    if (keyedChange) return keyedChange;
     let start = 0;
     while (start < before.length && start < after.length && JSON.stringify(before[start]) === JSON.stringify(after[start])) start++;
     let end = 0;
@@ -94,7 +131,7 @@ function diff(before: Json, after: Json, depth = 0): Patch | null {
         const change = diff(before[i], after[i], depth + 1);
         if (change) put(edit, String(i), change);
       }
-      return { op: "array", start, deleteCount: 0, insert: [], edit };
+      return Object.keys(edit).length ? { op: "array", start, deleteCount: 0, insert: [], edit } : null;
     }
     return { op: "array", start, deleteCount: oldCount, insert: after.slice(start, after.length - end), edit };
   }
@@ -110,7 +147,8 @@ function diff(before: Json, after: Json, depth = 0): Patch | null {
         if (change) put(edit, key, change);
       }
     }
-    return { op: "object", set, remove, edit };
+    return Object.keys(set).length || remove.length || Object.keys(edit).length ?
+      { op: "object", set, remove, edit } : null;
   }
   return { op: "replace", value: after };
 }
@@ -122,6 +160,34 @@ function patchValue(before: Json, patch: Patch, depth = 0): Json {
     if (typeof before !== "string" || typeof patch.insert !== "string" || !index(patch.start, before.length) ||
       !index(patch.deleteCount, before.length - patch.start)) throw new Error("Invalid string patch");
     return before.slice(0, patch.start) + patch.insert + before.slice(patch.start + patch.deleteCount);
+  }
+  if (patch.op === "keyed") {
+    if (!Array.isArray(before) || (patch.keyField !== "seq" && patch.keyField !== "id") ||
+      !Array.isArray(patch.order) || !object(patch.set) || !object(patch.edit)) throw new Error("Invalid keyed patch");
+    const previous = keyed(before, patch.keyField);
+    if (!previous) throw new Error("Non-unique base keys");
+    const remaining = new Set(Object.keys(patch.set));
+    const edits = new Set(Object.keys(patch.edit));
+    const seen = new Set<string>();
+    const next: Json[] = [];
+    for (const key of patch.order) {
+      if (typeof key !== "string" || seen.has(key)) throw new Error("Duplicate or invalid keyed order");
+      seen.add(key);
+      const old = previous.get(key);
+      if (old !== undefined) {
+        if (remaining.has(key)) throw new Error("Existing keyed item replaced as new");
+        const change = edits.has(key) ? patchValue(old, patch.edit[key], depth + 1) : old;
+        edits.delete(key);
+        if (itemKey(change, patch.keyField) !== key) throw new Error("Edited keyed identity changed");
+        next.push(change);
+      } else {
+        if (!remaining.has(key) || itemKey(patch.set[key], patch.keyField) !== key) throw new Error("Invalid inserted keyed item");
+        next.push(patch.set[key]);
+        remaining.delete(key);
+      }
+    }
+    if (remaining.size || edits.size) throw new Error("Unused keyed edits");
+    return next;
   }
   if (patch.op === "array") {
     if (!Array.isArray(before) || !Array.isArray(patch.insert) || !object(patch.edit) ||

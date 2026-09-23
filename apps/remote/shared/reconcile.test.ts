@@ -64,6 +64,41 @@ describe("JSON reconciliation", () => {
     }
   });
 
+  test("sliding transcript window sends only the appended keyed item and its order", () => {
+    const publisher = new ReconcilePublisher();
+    const replica = new ReconcileReplica();
+    const items = Array.from({ length: 60 }, (_, seq) => ({ seq, text: "body".repeat(400) }));
+    publisher.publish("thread", items);
+    transfer(publisher, replica);
+    const next = [...items.slice(1), { seq: 60, text: "new".repeat(500) }];
+    publisher.publish("thread", next);
+    const { frame } = transfer(publisher, replica);
+    expect(frame.kind).toBe("patch");
+    expect(frame.kind === "patch" && frame.patch.op).toBe("keyed");
+    expect(JSON.stringify(frame).length).toBeLessThan(JSON.stringify(next).length / 20);
+    expect(replica.get("thread")!.value).toEqual(next);
+  });
+
+  test("keyed row reorder, removal, insertion and selective update preserve identities", () => {
+    const publisher = new ReconcilePublisher();
+    const replica = new ReconcileReplica();
+    const base = Array.from({ length: 12 }, (_, id) => ({ id, body: "large".repeat(300) }));
+    publisher.publish("directory", base);
+    transfer(publisher, replica, "directory");
+    const next = [{ id: 11, body: base[11].body + "!" }, ...base.slice(1, 11), { id: 99, body: "new" }];
+    publisher.publish("directory", next);
+    const { frame } = transfer(publisher, replica, "directory");
+    expect(frame.kind).toBe("patch");
+    expect(frame.kind === "patch" && frame.patch.op).toBe("keyed");
+    expect(JSON.stringify(frame).length).toBeLessThan(JSON.stringify(next).length / 4);
+    expect(replica.get("directory")!.value).toEqual(next);
+    const corrupted = JSON.parse(JSON.stringify(frame));
+    if (corrupted.kind === "patch" && corrupted.patch.op === "keyed") {
+      corrupted.patch.order.push(corrupted.patch.order[0]);
+      expect(replica.apply(corrupted).ok).toBe(false);
+    }
+  });
+
   test("wrong base and tampered result leave prior state intact; full repairs it", () => {
     const publisher = new ReconcilePublisher();
     const replica = new ReconcileReplica();
