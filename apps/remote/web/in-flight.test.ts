@@ -1,6 +1,6 @@
 import { expect, test } from "bun:test";
 import { readFileSync } from "node:fs";
-import { ACTIVATION_WINDOW_MS, NATIVE_METHOD, attributedOrigin, beginRequest, inFlight, noteActivation, reportingBridge, requestVisibility } from "./src/in-flight";
+import { ACTIVATION_WINDOW_MS, NATIVE_METHOD, SLOW_REQUEST_MS, TIMING_HISTORY_LIMIT, attributedOrigin, beginRequest, inFlight, noteActivation, reportingBridge, requestVisibility, setRequestTimingReporter, type RequestTiming } from "./src/in-flight";
 
 class FakeControl {
   attributes = new Map<string, string>();
@@ -24,6 +24,7 @@ test("writes always show; reads show only within the press window; the stream ne
   expect(requestVisibility("GET", "/v1/sessions", ACTIVATION_WINDOW_MS + 1)).toBe("background");
   expect(requestVisibility("POST", "/v1/stream", 5)).toBe("background");
   expect(requestVisibility("POST", "/v1/stream/abc", 5)).toBe("shown");
+  expect(requestVisibility("POST", "/v1/diagnostics/requests", 5)).toBe("background");
   expect(requestVisibility(NATIVE_METHOD, "native:getState", null)).toBe("background");
   expect(requestVisibility(NATIVE_METHOD, "native:installAppUpdate", 50)).toBe("shown");
   expect(requestVisibility(NATIVE_METHOD, "native:haptic", 50)).toBe("background");
@@ -95,6 +96,47 @@ test("requests retain attribution without changing the pressed control", () => {
   expect(button.busy).toBe(false);
   noteActivation(null);
   noteActivation("not an element" as unknown as EventTarget);
+});
+
+test("slow foreground requests report pending and settled without leaking query values", async () => {
+  const reported: RequestTiming[] = [];
+  setRequestTimingReporter(timing => reported.push(timing));
+  try {
+    const fast = beginRequest("POST", "/v1/sessions?message=secret");
+    fast();
+    const background = beginRequest("POST", "/v1/diagnostics/requests?secret=value");
+    background();
+    expect(reported).toEqual([]);
+
+    const start = Date.now();
+    const settle = beginRequest("post", "/v1/sessions/123?message=secret#private");
+    await new Promise(resolve => setTimeout(resolve, SLOW_REQUEST_MS + 20));
+    expect(inFlight.count()).toBe(1);
+    expect(reported).toHaveLength(1);
+    expect(reported[0]).toMatchObject({ method: "POST", path: "/v1/sessions/123", state: "pending" });
+    expect(reported[0]!.startedAt).toBeGreaterThanOrEqual(start);
+    expect(reported[0]!.durationMs).toBeGreaterThanOrEqual(SLOW_REQUEST_MS);
+    settle(); settle();
+    expect(reported).toHaveLength(2);
+    expect(reported[1]).toMatchObject({ id: reported[0]!.id, state: "settled" });
+    expect(reported[1]!.durationMs).toBeGreaterThanOrEqual(reported[0]!.durationMs);
+    expect(inFlight.count()).toBe(0);
+    expect(inFlight.timings().slice(-2)).toEqual(reported);
+  } finally { setRequestTimingReporter(null); }
+});
+
+test("late timer callbacks and reporter failure do not alter request settlement; timing history is bounded", () => {
+  setRequestTimingReporter(() => { throw new Error("diagnostic transport unavailable"); });
+  try {
+    for (let i = 0; i < TIMING_HISTORY_LIMIT; i++) {
+      const settle = beginRequest("POST", `/v1/sessions/${i}`, performance.now() - SLOW_REQUEST_MS - 1);
+      settle();
+    }
+    expect(inFlight.count()).toBe(0);
+    expect(inFlight.timings()).toHaveLength(TIMING_HISTORY_LIMIT);
+    expect(inFlight.timings().every(timing => !timing.path.includes("?"))).toBe(true);
+    expect(inFlight.timings().at(-1)?.state).toBe("settled");
+  } finally { setRequestTimingReporter(null); }
 });
 
 test("pointerdown prefetch leaves control attributes and styles to the component", () => {
