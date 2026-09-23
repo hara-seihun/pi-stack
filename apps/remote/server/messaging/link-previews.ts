@@ -18,9 +18,6 @@ const MAX_IMAGE = 256 * 1024;
 const DEADLINE_MS = 1_800;
 const MAX_REDIRECTS = 3;
 const CACHE_LIMIT = 256;
-const cache = new Map<string, { expires: number; value: MessagingLinkPreview }>();
-const pending = new Map<string, Promise<MessagingLinkPreview>>();
-let active = 0;
 
 function safeUrl(input: string): URL {
   const url = new URL(input);
@@ -41,15 +38,18 @@ async function pinnedAddress(url: URL, deadline: number): Promise<string> {
   return ipv4[0].address;
 }
 
-async function download(input: string, maxBytes: number, deadline: number, hops = 0): Promise<{ body: Buffer; type: string; url: URL }> {
+async function download(input: string, maxBytes: number, deadline: number, hops = 0, addressForUrl = pinnedAddress): Promise<{ body: Buffer; type: string; url: URL }> {
   if (Date.now() >= deadline) throw new Error("Preview timed out");
   const url = safeUrl(input);
-  const address = await pinnedAddress(url, deadline);
+  const address = await addressForUrl(url, deadline);
   if (Date.now() >= deadline) throw new Error("Preview timed out");
   const response = await new Promise<{ body: Buffer; type: string; redirect?: string }>((resolve, reject) => {
     const request = (url.protocol === "https:" ? httpsRequest : httpRequest)(url, {
-      method: "GET", agent: false,
-      lookup: (_host, _options, callback) => callback(null, address, 4),
+      method: "GET", agent: false, autoSelectFamily: false,
+      lookup: (_host, options, callback) => {
+        if (options.all) callback(null, [{ address, family: 4 }]);
+        else callback(null, address, 4);
+      },
       headers: { "accept": maxBytes === MAX_HTML ? "text/html,application/xhtml+xml" : "image/png,image/jpeg,image/webp,image/gif", "accept-encoding": "identity", "user-agent": "PiStack-LinkPreview/1.0" },
     }, res => {
       const status = res.statusCode ?? 0;
@@ -59,16 +59,23 @@ async function download(input: string, maxBytes: number, deadline: number, hops 
         return;
       }
       if (status !== 200) { res.resume(); reject(new Error(`Preview HTTP ${status}`)); return; }
+      const prefixOnly = maxBytes === MAX_HTML;
+      const type = String(res.headers["content-type"] ?? "").split(";", 1)[0].toLowerCase();
       const declared = Number(res.headers["content-length"]);
-      if (declared > maxBytes) { res.destroy(); reject(new Error("Preview exceeds byte limit")); return; }
+      if (!prefixOnly && declared > maxBytes) { res.destroy(); reject(new Error("Preview exceeds byte limit")); return; }
       const chunks: Buffer[] = [];
       let length = 0;
       res.on("data", (chunk: Buffer) => {
         length += chunk.length;
-        if (length > maxBytes) { res.destroy(); reject(new Error("Preview exceeds byte limit")); }
-        else chunks.push(chunk);
+        if (length > maxBytes) {
+          if (prefixOnly) { chunks.push(chunk.subarray(0, maxBytes - (length - chunk.length))); resolve({ body: Buffer.concat(chunks), type }); res.destroy(); }
+          else { res.destroy(); reject(new Error("Preview exceeds byte limit")); }
+        } else {
+          chunks.push(chunk);
+          if (prefixOnly && length === maxBytes) { resolve({ body: Buffer.concat(chunks), type }); res.destroy(); }
+        }
       });
-      res.on("end", () => resolve({ body: Buffer.concat(chunks), type: String(res.headers["content-type"] ?? "").split(";", 1)[0].toLowerCase() }));
+      res.on("end", () => resolve({ body: Buffer.concat(chunks), type }));
       res.on("error", reject);
     });
     const timer = setTimeout(() => request.destroy(new Error("Preview timed out")), Math.max(1, Math.min(DEADLINE_MS, deadline - Date.now())));
@@ -78,7 +85,7 @@ async function download(input: string, maxBytes: number, deadline: number, hops 
   });
   if (response.redirect) {
     if (hops >= MAX_REDIRECTS) throw new Error("Too many preview redirects");
-    return download(new URL(response.redirect, url).href, maxBytes, deadline, hops + 1);
+    return download(new URL(response.redirect, url).href, maxBytes, deadline, hops + 1, addressForUrl);
   }
   return { body: response.body, type: response.type, url };
 }
@@ -112,11 +119,11 @@ function raster(body: Buffer, type: string): boolean {
   return false;
 }
 
-async function resolvePreview(url: string): Promise<MessagingLinkPreview> {
+async function resolvePreview(url: string, addressForUrl = pinnedAddress): Promise<MessagingLinkPreview> {
   const fallback = simpleLinkPreview(url);
   const deadline = Date.now() + 7_000;
   try {
-    const page = await download(url, MAX_HTML, deadline);
+    const page = await download(url, MAX_HTML, deadline, 0, addressForUrl);
     if (!/^(text\/html|application\/xhtml\+xml)$/.test(page.type)) return fallback;
     const html = page.body.toString("utf8");
     const meta = new Map<string, string>();
@@ -133,7 +140,7 @@ async function resolvePreview(url: string): Promise<MessagingLinkPreview> {
     if (image) {
       try {
         const imageTarget = new URL(image, page.url).href;
-        const response = await download(imageTarget, MAX_IMAGE, deadline);
+        const response = await download(imageTarget, MAX_IMAGE, deadline, 0, addressForUrl);
         if (raster(response.body, response.type)) imageUrl = `data:${response.type};base64,${response.body.toString("base64")}`;
       } catch { /* Text metadata is still useful if an image cannot be fetched. */ }
     }
@@ -141,19 +148,39 @@ async function resolvePreview(url: string): Promise<MessagingLinkPreview> {
   } catch { return fallback; }
 }
 
-export function linkPreview(url: string): Promise<MessagingLinkPreview> {
-  const existing = cache.get(url);
-  if (existing && existing.expires > Date.now()) return Promise.resolve(existing.value);
-  const inflight = pending.get(url);
-  if (inflight) return inflight;
-  if (active >= 4) return Promise.resolve(simpleLinkPreview(url));
-  active++;
-  const task = resolvePreview(url).then(value => {
-    cache.delete(url);
-    cache.set(url, { value, expires: Date.now() + (value.title === new URL(url).hostname ? 5 * 60_000 : 60 * 60_000) });
-    if (cache.size > CACHE_LIMIT) cache.delete(cache.keys().next().value!);
-    return value;
-  }).finally(() => { active--; pending.delete(url); });
-  pending.set(url, task);
-  return task;
+export class PreviewOverloaded extends Error {}
+
+export function createLinkPreviewResolver(addressForUrl = pinnedAddress) {
+  const cache = new Map<string, { expires: number; value: MessagingLinkPreview }>();
+  const pending = new Map<string, Promise<MessagingLinkPreview>>();
+  const waiting: Array<() => void> = [];
+  let active = 0;
+  return (url: string): Promise<MessagingLinkPreview> => {
+    const existing = cache.get(url);
+    if (existing && existing.expires > Date.now()) return Promise.resolve(existing.value);
+    const inflight = pending.get(url);
+    if (inflight) return inflight;
+    if (active >= 4 && waiting.length >= 8) return Promise.reject(new PreviewOverloaded("Link previews are busy. Retry shortly."));
+    const task = new Promise<MessagingLinkPreview>((resolve, reject) => {
+      const run = () => {
+        active++;
+        void resolvePreview(url, addressForUrl).then(value => {
+          cache.delete(url);
+          cache.set(url, { value, expires: Date.now() + (value.title === new URL(url).hostname ? 5 * 60_000 : 60 * 60_000) });
+          if (cache.size > CACHE_LIMIT) cache.delete(cache.keys().next().value!);
+          resolve(value);
+        }, reject).finally(() => {
+          active--;
+          pending.delete(url);
+          waiting.shift()?.();
+        });
+      };
+      if (active < 4) run();
+      else waiting.push(run);
+    });
+    pending.set(url, task);
+    return task;
+  };
 }
+
+export const linkPreview = createLinkPreviewResolver();

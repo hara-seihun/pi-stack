@@ -4,7 +4,7 @@ import { isAbsolute, join, relative } from "node:path";
 import { pathToFileURL } from "node:url";
 import { API } from "../api";
 import { extractMessageLinks } from "./links";
-import { linkPreview } from "./link-previews";
+import { linkPreview, PreviewOverloaded } from "./link-previews";
 import { API_CORS_HEADERS } from "../cors";
 import { storeUpload, uploadName } from "../uploads";
 import type { BackendAttachment, BackendAvatar, BackendCall, BackendCallAudio, BackendConversation, BackendMessage, BackendSender, MessagingCallSupport, MessagingPlugin, MessagingPluginFactory } from "./plugin";
@@ -853,7 +853,7 @@ export class MessagingService {
       if (cancelLink) return json({ link: await this.cancelLink(cancelLink.backendId) });
       return json({ error: "Messaging route not found" }, 404);
     } catch (cause) {
-      return json({ error: failureText(cause), ...(cause instanceof MessagingFailure && cause.code ? { code: cause.code } : {}) }, cause instanceof MessagingFailure ? cause.status : 400);
+      return json({ error: failureText(cause), ...(cause instanceof MessagingFailure && cause.code ? { code: cause.code } : {}) }, cause instanceof PreviewOverloaded ? 429 : cause instanceof MessagingFailure ? cause.status : 400);
     }
   }
   close(): Promise<void> {
