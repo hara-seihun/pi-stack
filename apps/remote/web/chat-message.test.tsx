@@ -50,8 +50,24 @@ test("only stable messages show shared per-message reactions, including grouped 
     messagingMessageSegment({ ...message, id: "three", status: "sending" }),
   ]} />);
   expect(group.match(/aria-label="Add reaction"/g)).toHaveLength(2);
-  expect(group).toContain('data-message-id="one"');
-  expect(group).toContain('data-message-id="two"');
+  expect(group).toContain('data-message-id="messaging/one"');
+  expect(group).toContain('data-message-id="messaging/two"');
+});
+
+test("replies quote the actual target and offer a per-segment action only for stable identities", () => {
+  const first = { id: "messaging/one", timestamp: 1, sender: { id: "sam", name: "Sam" } };
+  const second = { ...first, id: "messaging/two" };
+  const reply = { messageId: first.id, sender: first.sender, text: "the first message" };
+  const group = renderToStaticMarkup(<ChatMessageGroup kind="assistant" label="Sam" segments={[
+    messagingMessageSegment({ ...message, id: "one", identity: first }, { onReply: () => {} }),
+    messagingMessageSegment({ ...message, id: "two", identity: second, reply }, { onReply: () => {} }),
+    messagingMessageSegment({ ...message, id: "three", status: "sending" }, { onReply: () => {} }),
+  ]} />);
+  expect(group.match(/aria-label="Reply to Sam"/g)).toHaveLength(2);
+  expect(group).toContain('data-message-id="messaging/two"');
+  expect(group).toContain("the first message");
+  expect(group).toContain('aria-label="Go to message from Sam"');
+  expect(renderToStaticMarkup(<ChatMessage kind="user" label="You" text="quoted answer" contentFormat="literal" identity={second} reply={reply} onReply={() => {}} />)).toContain("the first message");
 });
 
 test("unconfirmed receipts retain checking and failed receipts retain explicit draft recovery", () => {

@@ -1,5 +1,6 @@
 import { useEffect, useRef, useState, type ReactNode } from "react";
 import { agentAvatar, ChatMessage } from "../../chat-message";
+import { ReplyComposer, type ReplyTarget } from "../../message-reply";
 import { AGENT_NAME } from "../../../../server/agent-identity";
 import { Composer, type ComposerAttachment } from "../../Composer";
 import { ConversationView } from "../../ConversationView";
@@ -34,7 +35,7 @@ export function ConversationHeader({ title, status, onBack, onOpenInspector, tra
   </header>;
 }
 
-export function ConversationScreen({ session, ancestors, entries, liveText, liveThinking, thinkingActive, images, offline, pending, home, prompt, attachments, slashCommands, drawing, uploadError, controlError, earlierAvailable, loadingEarlier, earlierError, onShowEarlier, onThinkingOpen, onBack, onOpenInspector, onOpenAncestor, onOpenQueue, onEdit, onPrompt, onSend, onStop, onResume, onReconnect, onRemoveAttachment, onUpload, onPaste, onDraw, onDismissControlError, showBack, showIdentity = true }: {
+export function ConversationScreen({ session, ancestors, entries, liveText, liveThinking, thinkingActive, images, offline, pending, home, prompt, attachments, slashCommands, drawing, uploadError, controlError, earlierAvailable, loadingEarlier, earlierError, onShowEarlier, onThinkingOpen, onBack, onOpenInspector, onOpenAncestor, onOpenQueue, onEdit, reply, onReply, onCancelReply, onPrompt, onSend, onStop, onResume, onReconnect, onRemoveAttachment, onUpload, onPaste, onDraw, onDismissControlError, showBack, showIdentity = true }: {
   session: Session;
   ancestors: Session[];
   entries: ContextEntry[];
@@ -63,6 +64,9 @@ export function ConversationScreen({ session, ancestors, entries, liveText, live
   onOpenAncestor(session: Session): void;
   onOpenQueue(): void;
   onEdit(entry: ContextEntry): void;
+  reply: ReplyTarget | null;
+  onReply(target: ReplyTarget): void;
+  onCancelReply(): void;
   onPrompt(text: string): void;
   onSend(delivery: Delivery): void;
   onStop(): void;
@@ -101,14 +105,14 @@ export function ConversationScreen({ session, ancestors, entries, liveText, live
     {ancestors.length > 0 && <nav className="ancestry" aria-label="Parent threads">{ancestors.map(ancestor => <button key={ancestor.id} type="button" onClick={() => onOpenAncestor(ancestor)}>{ancestor.name || ancestor.id}</button>)}</nav>}
     <ConversationView key={session.id} active label={`Chat with ${session.name || "Agent"}`} drawing={drawing} transcript={<InlineImagesContext.Provider value={images}>
       <Transcript entries={entries} liveThinking={liveThinking} thinkingActive={thinkingActive} sessionId={session.id} home={home} images={images}
-        earlierAvailable={earlierAvailable} loadingEarlier={loadingEarlier} earlierError={earlierError} onShowEarlier={onShowEarlier} onThinkingOpen={onThinkingOpen} onEdit={onEdit} />
+        earlierAvailable={earlierAvailable} loadingEarlier={loadingEarlier} earlierError={earlierError} onShowEarlier={onShowEarlier} onThinkingOpen={onThinkingOpen} onEdit={onEdit} onReply={onReply} />
       {liveText && <div className="live-answer"><ChatMessage kind="assistant" label={AGENT_NAME} avatar={agentAvatar()} text={liveText} contentFormat="markdown" renderMarkdown={text => <Markdown source={text} sessionId={session.id} streaming assistant />} /></div>}
     </InlineImagesContext.Provider>}>
       <DismissibleError className="conversation-error" dismissLabel="Dismiss upload error" message={uploadError} resetKey={session.id} />
       <DismissibleError className="conversation-error" dismissLabel="Dismiss thread error" message={controlError} resetKey={session.id} onDismiss={async () => { onDismissControlError(); return { ok: true as const }; }} />
       <Composer id="prompt" value={prompt} onChange={onPrompt} onSend={() => action === "stop" ? onStop() : action === "resume" ? onResume() : onSend(delivery)} placeholder={`Message ${session.name || "Agent"}`} action={action} disabled={pending || (action === "send" && (attachments.some(file => file.uploading) || !hasText))} layoutKey={session.id}
         attachments={attachments} onRemove={onRemoveAttachment} onUpload={onUpload} onPaste={onPaste} onDraw={onDraw}
-        before={visibleCommands.length > 0 && <div className="slash-commands" role="listbox">{visibleCommands.map(command => <button key={command.name} type="button" className="slash-command" onClick={() => onPrompt(`/${command.name} `)}><strong className="slash-command-name">/{command.name}</strong>{command.description && <span className="slash-command-description">{command.description}</span>}</button>)}</div>}
+        before={<>{reply && <ReplyComposer target={reply} onCancel={onCancelReply} />}{visibleCommands.length > 0 && <div className="slash-commands" role="listbox">{visibleCommands.map(command => <button key={command.name} type="button" className="slash-command" onClick={() => onPrompt(`/${command.name} `)}><strong className="slash-command-name">/{command.name}</strong>{command.description && <span className="slash-command-description">{command.description}</span>}</button>)}</div>}</>}
         actions={running && hasText && <div className="delivery-mode" ref={modeRef}>
           <button ref={modeToggleRef} type="button" className="delivery-toggle" aria-haspopup="menu" aria-expanded={modeOpen} aria-label={`Change delivery. Current: ${DELIVERY_LABELS[delivery].label}`} onClick={() => setModeOpen(open => !open)} onKeyDown={event => { if (event.key === "ArrowDown" || event.key === "ArrowUp") { event.preventDefault(); setModeOpen(true); } }}><span>{DELIVERY_LABELS[delivery].label}</span><ChevronIcon /></button>
           {modeOpen && <div ref={modeMenuRef} className="delivery-menu" role="menu" aria-label="Change delivery" onKeyDown={event => {
