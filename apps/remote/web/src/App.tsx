@@ -323,6 +323,7 @@ function RemoteApp() {
         ? [...current.discovered, discovered] : current.discovered,
     }));
     setPrompt(loadDraft(id));
+    if (remembered?.transcript) stream.current?.restore({ type: "transcript", sessionId: id, ...remembered.transcript });
     kick();
     // Memory paints synchronously. Disk may fill a cold opening, but never
     // replace a newer stream frame.
@@ -331,6 +332,7 @@ function RemoteApp() {
     void cache.restoreThread(id).then((window) => {
       if (window && usable() && !stateRef.current.transcript) {
         cache.rememberThread(id, { transcript: window });
+        stream.current?.restore({ type: "transcript", sessionId: id, ...window });
         patch({ transcript: window });
         stream.current?.update({ transcriptFrom: window.items[0]?.seq ?? null });
       }
@@ -458,6 +460,9 @@ function RemoteApp() {
       },
     });
     stream.current = client;
+    const selectedId = routeThreadId(opening);
+    const remembered = selectedId ? cache.thread(selectedId)?.transcript : null;
+    if (selectedId && remembered) client.restore({ type: "transcript", sessionId: selectedId, ...remembered });
     client.start();
     return () => {
       client.stop();

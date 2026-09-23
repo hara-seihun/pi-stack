@@ -8,9 +8,9 @@
 // dropped the body), so the watchdog aborts it and the backoff reconnects.
 
 import { API } from "../../server/api";
-import type { StreamEvent, StreamSubscription, StreamWireEvent } from "../../server/protocol";
-import { ReconcileReplica } from "../../shared/reconcile";
-import { isStreamSnapshot, streamWants } from "../../shared/stream-resources";
+import type { StreamEvent, StreamSnapshot, StreamSubscription, StreamWireEvent } from "../../server/protocol";
+import { ReconcileReplica, revisionOf } from "../../shared/reconcile";
+import { isStreamSnapshot, streamResource, streamWants } from "../../shared/stream-resources";
 import { piFetch } from "./client";
 
 export type StreamState = "connecting" | "open" | "offline";
@@ -84,6 +84,8 @@ export interface StreamClient {
   reconnect(): void;
   subscription(): StreamSubscription;
   invalidate(resource: string): void;
+  /** Seed a resource from an actual memory or disk snapshot, not a guessed server revision. */
+  restore(snapshot: StreamSnapshot): void;
   state(): StreamState;
 }
 
@@ -292,6 +294,12 @@ export function createStreamClient(options: StreamClientOptions): StreamClient {
     invalidate(resource) {
       replica.forget(resource);
       if (!stopped) post();
+    },
+    restore(snapshot) {
+      const resource = streamResource(snapshot);
+      if (replica.get(resource)) return;
+      replica.seed(resource, revisionOf(snapshot), snapshot);
+      if (!stopped && streamWants(subscription).includes(resource)) post();
     },
     state: () => state,
   };

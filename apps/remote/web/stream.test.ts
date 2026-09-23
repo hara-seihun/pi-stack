@@ -1,5 +1,5 @@
 import { expect, test } from "bun:test";
-import { ReconcilePublisher } from "../shared/reconcile";
+import { ReconcilePublisher, revisionOf } from "../shared/reconcile";
 import { createStreamClient, EventStreamParser, streamEventFromFrame } from "./src/stream";
 import type { StreamEvent } from "../server/protocol";
 
@@ -35,6 +35,19 @@ test("the replica applies generic frames, filters another session, and resumes f
   expect(calls[0].body).toMatchObject({ have: {}, want: ["bootstrap", "state", "messaging", "live:mine", "transcript:mine", "images:mine"] });
   client.reconnect(); await settle(); client.stop();
   expect(calls.at(-1)?.body.have["transcript:mine"]).toBe(first);
+});
+
+test("restored transcript heads declare only their actual local revision", async () => {
+  const cached = { type: "transcript" as const, sessionId: "mine", generation: "g", total: 1, items: [] };
+  const calls: any[] = [];
+  const client = createStreamClient({ subscription: { session: "mine", viewing: true }, listen: false, onEvent: () => {}, onStatus: () => {}, fetch: async (path, init) => {
+    calls.push({ path, body: JSON.parse(String(init.body)) });
+    return sse([hello]);
+  } });
+  client.restore(cached);
+  client.start(); await settle(); client.stop();
+  expect(calls[0].body.have).toEqual({ "transcript:mine": revisionOf(cached) });
+  expect(calls[0].body.want).toContain("transcript:mine");
 });
 
 test("a missing patch base requests a full resource without retaining its revision", async () => {
