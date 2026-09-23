@@ -19,7 +19,7 @@ import {
   statfsSync,
   statSync,
 } from "node:fs";
-import { homedir } from "node:os";
+import { homedir, userInfo } from "node:os";
 import path from "node:path";
 import { DatabaseSync } from "node:sqlite";
 import { pathToFileURL } from "node:url";
@@ -706,27 +706,78 @@ function systemdReferences(workspacePath, snapshot = systemdSnapshot()) {
   };
 }
 
-function gitAlternateSnapshot(database) {
-  const references = [];
+function gitDependencySnapshot(database) {
+  const alternates = [];
+  const linkedWorktrees = [];
   for (const record of listRecords(database)) {
     if (!existsSync(record.path)) continue;
-    let objectDirectory;
-    if (record.checkoutType === "clone") objectDirectory = path.join(record.path, ".git", "objects");
-    else {
+    let commonDirectory = path.join(record.path, ".git");
+    if (record.checkoutType === "worktree") {
       const common = command("git", ["-C", record.path, "rev-parse", "--git-common-dir"]);
-      if (common.status !== 0) continue;
-      objectDirectory = path.join(path.resolve(record.path, common.stdout), "objects");
+      if (common.status !== 0) fail(`cannot inspect linked worktree ${record.path}: ${common.stderr || common.error?.message || `exit ${common.status}`}`);
+      commonDirectory = path.resolve(record.path, common.stdout);
+      linkedWorktrees.push({ recordId: record.id, workspacePath: record.path, commonDirectory });
     }
+    const objectDirectory = path.join(commonDirectory, "objects");
     const alternatesPath = path.join(objectDirectory, "info", "alternates");
     if (!existsSync(alternatesPath)) continue;
     let contents;
     try { contents = readFileSync(alternatesPath, "utf8"); } catch { continue; }
     for (const alternate of contents.split("\n").filter(Boolean)) {
-      references.push({
+      alternates.push({
         recordId: record.id,
         workspacePath: record.path,
         objectDirectory: path.resolve(objectDirectory, alternate),
       });
+    }
+  }
+  return { alternates, linkedWorktrees };
+}
+
+function optionalOwnerPath(candidate) {
+  try { statSync(candidate); return true; }
+  catch (error) {
+    if (error?.code === "ENOENT") return false;
+    throw error;
+  }
+}
+
+function ownerThreadDatabases() {
+  const databases = new Set();
+  const fleetDir = path.dirname(process.env.PI_ORCHESTRATOR_LEDGER ??
+    path.join(homedir(), ".local", "share", "pi-orchestrator", "ledger.sqlite3"));
+  databases.add(path.join(fleetDir, "threads.sqlite3"));
+  const applications = path.join(fleetDir, "applications");
+  if (optionalOwnerPath(applications)) {
+    for (const entry of readdirSync(applications, { withFileTypes: true })) {
+      if (entry.isDirectory() && !entry.isSymbolicLink()) databases.add(path.join(applications, entry.name, "threads.sqlite3"));
+    }
+  }
+  const owner = userInfo().username;
+  const person = path.join("/var/lib/pi-remote/persons", `${owner}.json`);
+  let remoteData = process.env.PI_REMOTE_DATA;
+  if (!remoteData && optionalOwnerPath(person)) {
+    const registration = JSON.parse(readFileSync(person, "utf8"));
+    if (registration.user === owner) remoteData = registration.environment?.PI_REMOTE_DATA;
+  }
+  remoteData ??= path.join(process.env.XDG_STATE_HOME ?? path.join(homedir(), ".local", "state"), "pi-remote");
+  databases.add(path.join(remoteData, "threads.sqlite3"));
+  if (process.env.PI_THREAD_DATABASE) databases.add(process.env.PI_THREAD_DATABASE);
+  return [...databases];
+}
+
+function threadSnapshot(paths = ownerThreadDatabases()) {
+  const references = [];
+  for (const databasePath of paths) {
+    if (!optionalOwnerPath(databasePath)) continue;
+    const database = new DatabaseSync(databasePath, { readOnly: true });
+    try {
+      references.push(...database.prepare(`SELECT t.id, t.cwd FROM thread t WHERE t.state='running'
+        OR EXISTS(SELECT 1 FROM thread_work w WHERE w.thread_id=t.id AND w.status!='done')
+        OR EXISTS(SELECT 1 FROM thread_execution e WHERE e.thread_id=t.id AND e.ended_at IS NULL)`)
+        .all().map((row) => ({ id: row.id, cwd: row.cwd, database: databasePath })));
+    } finally {
+      database.close();
     }
   }
   return references;
@@ -735,12 +786,21 @@ function gitAlternateSnapshot(database) {
 function safetySnapshot(database) {
   const isolated = process.env.NODE_TEST_CONTEXT !== undefined &&
     process.env.PI_WORKSPACE_TEST_EXTERNAL_SAFETY === "empty";
+  const gitDependencies = gitDependencySnapshot(database);
   return {
     processes: isolated ? [] : processSnapshot(),
     docker: isolated ? { containers: [], available: false } : dockerSnapshot(),
     systemd: isolated ? { units: [], available: false } : systemdSnapshot(),
-    gitAlternates: gitAlternateSnapshot(database),
+    threads: isolated && !process.env.PI_THREAD_DATABASE ? [] : threadSnapshot(),
+    gitAlternates: gitDependencies.alternates,
+    linkedWorktrees: gitDependencies.linkedWorktrees,
   };
+}
+
+function freshThreadSafety(safety) {
+  if (process.env.NODE_TEST_CONTEXT !== undefined && process.env.PI_WORKSPACE_TEST_EXTERNAL_SAFETY === "empty" &&
+    !process.env.PI_THREAD_DATABASE) return safety;
+  return { ...safety, threads: [...(safety?.threads ?? []), ...threadSnapshot()] };
 }
 
 function directoryHasEntries(directory) {
@@ -997,20 +1057,29 @@ function inspectRecord(record, options = {}) {
   if (record.leaseExpiresAt > now && !options.ignoreLease) {
     return { classification: "active", reason: `lease valid until ${new Date(record.leaseExpiresAt).toISOString()}`, processes: [], containers: [], systemdUnits: [] };
   }
+  const threads = (options.safety?.threads ?? []).filter((thread) => within(record.path, thread.cwd));
+  if (threads.length > 0) {
+    return { classification: "referenced", reason: `${threads.length} pending or running thread(s) use this checkout: ${threads.map((thread) => thread.id).join(", ")}`,
+      threads, processes: [], containers: [], systemdUnits: [] };
+  }
   const processes = processReferences(record.path, options.safety?.processes);
   const docker = dockerReferences(record.path, options.safety?.docker);
   const systemd = systemdReferences(record.path, options.safety?.systemd);
   const objectDirectory = record.checkoutType === "clone" ? path.join(record.path, ".git", "objects") : null;
   const gitDependents = objectDirectory === null ? [] : (options.safety?.gitAlternates ?? [])
     .filter((reference) => reference.recordId !== record.id && reference.objectDirectory === objectDirectory);
-  if (gitDependents.length > 0) {
+  const linkedDependents = record.checkoutType === "clone" ? (options.safety?.linkedWorktrees ?? [])
+    .filter((reference) => reference.recordId !== record.id && reference.commonDirectory === path.join(record.path, ".git")) : [];
+  if (gitDependents.length > 0 || linkedDependents.length > 0) {
     return {
       classification: "referenced",
-      reason: `${gitDependents.length} registered Git checkout(s) still borrow this checkout's objects: ${gitDependents.map((reference) => reference.workspacePath).join(", ")}`,
+      reason: linkedDependents.length === 0
+        ? `${gitDependents.length} registered Git checkout(s) still borrow this checkout's objects: ${gitDependents.map((reference) => reference.workspacePath).join(", ")}`
+        : `${linkedDependents.length} registered linked worktree(s) still use this checkout's Git directory: ${linkedDependents.map((reference) => reference.workspacePath).join(", ")}${gitDependents.length ? `; ${gitDependents.length} alternate object borrower(s)` : ""}`,
       processes,
       containers: docker.references,
       systemdUnits: systemd.references,
-      gitDependents,
+      gitDependents: [...gitDependents, ...linkedDependents],
     };
   }
   if (docker.error !== undefined) return { classification: "blocked", reason: `cannot prove container safety: ${docker.error}`, processes, containers: [], systemdUnits: [] };
@@ -1062,6 +1131,12 @@ function reconcileRecord(database, record, options) {
   }
   let removedCaches = [];
   if (options.execute) {
+    safety = freshThreadSafety(safety);
+    inspection = inspectRecord(record, { ignoreLease: true, safety, deadline: options.deadline });
+    if (inspection.classification === "referenced" || inspection.classification === "blocked") {
+      updateState(database, record, inspection.classification, inspection.reason);
+      return { record, inspection, action: "none" };
+    }
     removedCaches = stripCaches(record, options.statePath);
     inspection = inspectRecord(record, { ignoreLease: true, safety, deadline: options.deadline });
   }
@@ -1073,7 +1148,12 @@ function reconcileRecord(database, record, options) {
   if (!options.execute) return { record, inspection, action: "would-release" };
   const current = recordBy(database, { id: record.id });
   if (!options.ignoreLease && current.leaseExpiresAt > Date.now()) return { record: current, inspection: inspectRecord(current), action: "lease-renewed" };
-  updateState(database, current, "reclaiming", inspection.reason);
+  const latest = inspectRecord(current, { ignoreLease: true, safety: freshThreadSafety(safety), deadline: options.deadline });
+  if (latest.classification !== "reclaimable") {
+    updateState(database, current, latest.classification, latest.reason);
+    return { record: current, inspection: latest, action: "none" };
+  }
+  updateState(database, current, "reclaiming", latest.reason);
   removeWorkspace(current, options.statePath);
   removeEmptyWorkspaceContainer(current);
   updateState(database, current, "released", inspection.reason);
@@ -1128,6 +1208,11 @@ function groupReconciliation(database, records, options) {
 
   const removedCaches = new Map();
   if (options.execute && !inspections.some((inspection) => ["referenced", "blocked"].includes(inspection.classification))) {
+    safety = freshThreadSafety(safety);
+    inspections = records.map((record) => inspectRecord(record,
+      groupInspectionOptions(record, records, { ignoreLease: true, safety, deadline: options.deadline })));
+  }
+  if (options.execute && !inspections.some((inspection) => ["referenced", "blocked"].includes(inspection.classification))) {
     records.forEach((record, index) => {
       if (inspections[index].classification !== "missing") removedCaches.set(record.id, stripCaches(record, options.statePath));
     });
@@ -1135,6 +1220,11 @@ function groupReconciliation(database, records, options) {
       groupInspectionOptions(record, records, { ignoreLease: true, safety, deadline: options.deadline })));
   }
 
+  if (options.execute && !inspections.some((inspection) => ["referenced", "blocked"].includes(inspection.classification))) {
+    safety = freshThreadSafety(safety);
+    inspections = records.map((record) => inspectRecord(record,
+      groupInspectionOptions(record, records, { ignoreLease: true, safety, deadline: options.deadline })));
+  }
   const releasable = inspections.every((inspection) => ["missing", "reclaimable"].includes(inspection.classification));
   if (!releasable) {
     if (options.execute) {
@@ -1857,7 +1947,7 @@ Records outlive the directory, so status explains what became of a checkout that
 `);
 }
 
-export const workspaceTesting = { cacheTargets, dockerEndpointScope, dockerSnapshot, groupReconciliation, maintainReferenceClone, parseSystemdUnits, pruneReleased, systemdManagerSnapshot, systemdReferences };
+export const workspaceTesting = { cacheTargets, dockerEndpointScope, dockerSnapshot, groupReconciliation, maintainReferenceClone, parseSystemdUnits, pruneReleased, systemdManagerSnapshot, systemdReferences, ownerThreadDatabases, threadSnapshot };
 
 export function main(argv = process.argv.slice(2), statePath = DEFAULT_STATE) {
   const [commandName, ...rest] = argv;

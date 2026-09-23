@@ -79,7 +79,7 @@ If startup fails and cleanup cannot finish, `MeetAdapterStartError.recovery` ret
 
 ### External room API
 
-`POST /v1/meet/external` takes `{namespace,eventKey,name?}` and returns the ordinary `{room,participant}` shape. The namespace and stable event key select deterministic room/thread identities. Repeated starts reuse their stored history. The host participant is explicitly `Mixed meeting audio`. `POST /v1/meet/external/ROOM/stop` ends that room. `GET /v1/meet/external/transcript?namespace=NS&eventKey=KEY`, optionally `format=text`, exports its saved transcript and reports the room/thread IDs in response headers.
+`POST /v1/meet/external` takes `{namespace,eventKey,name?}` and returns the ordinary `{room,participant}` shape. The namespace and stable event key select deterministic room/thread identities. Repeated starts reuse their stored history. External rooms admit 32 camera image sources plus their host; these sources do not form a WebRTC peer mesh. Ordinary peer-to-peer rooms retain their twelve-person limit. The host participant is explicitly `Mixed meeting audio`. `POST /v1/meet/external/ROOM/stop` ends that room. `GET /v1/meet/external/transcript?namespace=NS&eventKey=KEY`, optionally `format=text`, exports its saved transcript and reports the room/thread IDs in response headers.
 
 The supervisor owns these endpoints, all below `/v1/meet`:
 
