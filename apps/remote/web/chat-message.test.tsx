@@ -3,6 +3,7 @@ import { renderToStaticMarkup } from "react-dom/server";
 import type { MessagingMessage } from "../server/messaging/protocol";
 import { AttachmentImage, ChatMessage, ChatMessageGroup, messagingMessageProps, messagingMessageSegment } from "./src/chat-message";
 import { DrawingCanvas } from "./src/DrawingCanvas";
+import { MessageReactions } from "./src/message-reactions";
 
 const message: MessagingMessage = {
   id: "a", conversationId: "chat", externalId: null, requestId: "request",
@@ -40,8 +41,9 @@ test("only stable messages show shared per-message reactions, including grouped 
   const identity = { id: "messaging/one", timestamp: 1, sender: { id: "sam", name: "Sam" } };
   const reactions = [{ emoji: "❤️", sender: { id: "me", name: "You" }, timestamp: 2, own: true }];
   const agent = renderToStaticMarkup(<ChatMessage kind="assistant" label="Agent" text="answer" contentFormat="literal" identity={identity} reactions={reactions} />);
-  expect(agent).toContain('aria-label="Add reaction"');
-  expect(agent).toContain('aria-pressed="true"');
+  expect(agent).not.toContain('aria-label="Add reaction"');
+  expect(agent).toContain('data-own="true"');
+  expect(agent).not.toContain('<button');
   expect(agent).toContain("You");
   expect(renderToStaticMarkup(<ChatMessage kind="assistant" label="Agent" text="streaming" contentFormat="literal" />)).not.toContain('aria-label="Add reaction"');
   const group = renderToStaticMarkup(<ChatMessageGroup kind="assistant" label="Sam" segments={[
@@ -49,7 +51,8 @@ test("only stable messages show shared per-message reactions, including grouped 
     messagingMessageSegment({ ...message, id: "two", identity: { ...identity, id: "messaging/two" }, reactions: [] }),
     messagingMessageSegment({ ...message, id: "three", status: "sending" }),
   ]} />);
-  expect(group.match(/aria-label="Add reaction"/g)).toHaveLength(2);
+  expect(group).not.toContain('aria-label="Add reaction"');
+  expect(group.match(/class="message-reactions"/g)).toHaveLength(1);
   expect(group).toContain('data-message-id="messaging/one"');
   expect(group).toContain('data-message-id="messaging/two"');
 });
@@ -63,11 +66,24 @@ test("replies quote the actual target and offer a per-segment action only for st
     messagingMessageSegment({ ...message, id: "two", identity: second, reply }, { onReply: () => {} }),
     messagingMessageSegment({ ...message, id: "three", status: "sending" }, { onReply: () => {} }),
   ]} />);
-  expect(group.match(/aria-label="Reply to Sam"/g)).toHaveLength(2);
+  expect(group).not.toContain('aria-label="Reply to Sam"');
+  expect(group).not.toContain('message-reply-action');
+  expect(group).not.toContain('message-reaction-add');
   expect(group).toContain('data-message-id="messaging/two"');
   expect(group).toContain("the first message");
   expect(group).toContain('aria-label="Go to message from Sam"');
   expect(renderToStaticMarkup(<ChatMessage kind="user" label="You" text="quoted answer" contentFormat="literal" identity={second} reply={reply} onReply={() => {}} />)).toContain("the first message");
+});
+
+test("menu-opened reaction picker includes owned custom emoji for removal", () => {
+  const identity = { id: "messaging/one", timestamp: 1, sender: { id: "sam" } };
+  const props = { identity, reactions: [{ emoji: "🦦", sender: { id: "me" }, timestamp: 2, own: true }], onOpenChange: () => {} };
+  const closed = renderToStaticMarkup(<MessageReactions {...props} open={false} />);
+  expect(closed).not.toContain("<button");
+  const opened = renderToStaticMarkup(<MessageReactions {...props} open={true} />);
+  expect(opened).toContain('aria-label="Choose a reaction"');
+  expect(opened).toContain('aria-label="Remove 🦦" aria-pressed="true"');
+  expect(opened).toContain('aria-label="React with 👍"');
 });
 
 test("unconfirmed receipts retain checking and failed receipts retain explicit draft recovery", () => {

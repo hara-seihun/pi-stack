@@ -26,15 +26,13 @@ async function saveReaction(request: ReactionRequest, signal: AbortSignal): Prom
   }
 }
 
-export function MessageReactions({ identity, reactions = emptyReactions }: { identity: MessageIdentity; reactions?: MessageReaction[] }) {
+export function MessageReactions({ identity, reactions = emptyReactions, open, onOpenChange: setOpen }: { identity: MessageIdentity; reactions?: MessageReaction[]; open: boolean; onOpenChange(open: boolean): void }) {
   const [current, setCurrent] = useState(reactions);
-  const [open, setOpen] = useState(false);
   const [custom, setCustom] = useState("");
   const [error, setError] = useState("");
   const [pending, setPending] = useState(false);
   const controller = useRef<AbortController | null>(null);
   const container = useRef<HTMLDivElement>(null);
-  const addButton = useRef<HTMLButtonElement>(null);
   useEffect(() => { setCurrent(reactions); }, [identity.id, reactions]);
   useEffect(() => {
     setOpen(false);
@@ -45,6 +43,7 @@ export function MessageReactions({ identity, reactions = emptyReactions }: { ide
   useEffect(() => () => controller.current?.abort(), []);
   useEffect(() => {
     if (!open) return;
+    container.current?.querySelector<HTMLButtonElement>(".message-reaction-picker button")?.focus();
     const outside = (event: PointerEvent) => {
       if (!container.current?.contains(event.target as Node)) setOpen(false);
     };
@@ -52,7 +51,7 @@ export function MessageReactions({ identity, reactions = emptyReactions }: { ide
       if (event.key !== "Escape") return;
       event.preventDefault();
       setOpen(false);
-      addButton.current?.focus();
+      container.current?.closest<HTMLElement>("[data-message-id]")?.focus();
     };
     document.addEventListener("pointerdown", outside, true);
     document.addEventListener("keydown", escape);
@@ -80,15 +79,15 @@ export function MessageReactions({ identity, reactions = emptyReactions }: { ide
     else setError(result.message);
   };
 
-  return <div ref={container} className="message-reactions" aria-label={`Reactions to ${identity.sender.name || identity.sender.id}'s message`} onPointerDown={event => event.stopPropagation()} onContextMenu={event => event.stopPropagation()}>
+  if (!grouped.size && !open && !error) return null;
+  return <div ref={container} className="message-reactions" aria-label={`Reactions to ${identity.sender.name || identity.sender.id}'s message`}>
     {Array.from(grouped, ([emoji, senders]) => {
       const mine = senders.some(isMine);
       const names = senders.map(reaction => reaction.sender.name || reaction.sender.id).join(", ");
-      return <button key={emoji} type="button" className="message-reaction-chip" aria-label={`${emoji}, ${senders.length} ${senders.length === 1 ? "reaction" : "reactions"} from ${names}. ${mine ? "Remove your reaction" : "Add your reaction"}`} aria-pressed={mine} title={names} disabled={pending} onClick={() => void toggle(emoji)}>{emoji} <span>{senders.length}</span></button>;
+      return <span key={emoji} className="message-reaction-chip" aria-label={`${emoji}, ${senders.length} ${senders.length === 1 ? "reaction" : "reactions"} from ${names}`} data-own={mine || undefined} title={names}>{emoji} <span>{senders.length}</span></span>;
     })}
-    <button ref={addButton} type="button" className="message-reaction-add" aria-label="Add reaction" aria-expanded={open} disabled={pending} onClick={() => setOpen(value => !value)}>+</button>
-    {open && <div className="message-reaction-picker" role="group" aria-label="Choose a reaction">
-      {choices.map(emoji => <button key={emoji} type="button" aria-label={`React with ${emoji}`} disabled={pending} onClick={() => void toggle(emoji)}>{emoji}</button>)}
+    {open && <div className="message-reaction-picker" role="group" aria-label="Choose a reaction" onPointerDown={event => event.stopPropagation()} onContextMenu={event => event.stopPropagation()}>
+      {Array.from(new Set([...choices, ...current.filter(isMine).map(reaction => reaction.emoji)])).map(emoji => <button key={emoji} type="button" aria-label={`${current.some(reaction => reaction.emoji === emoji && isMine(reaction)) ? "Remove" : "React with"} ${emoji}`} aria-pressed={current.some(reaction => reaction.emoji === emoji && isMine(reaction))} disabled={pending} onClick={() => void toggle(emoji)}>{emoji}</button>)}
       <form onSubmit={event => { event.preventDefault(); void toggle(custom.trim()); }}>
         <input type="text" aria-label="Other emoji" placeholder="Other emoji" value={custom} onChange={event => setCustom(event.target.value)} maxLength={16} />
         <button type="submit" disabled={!custom.trim() || pending}>React</button>

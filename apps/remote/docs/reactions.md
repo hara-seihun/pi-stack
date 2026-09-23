@@ -34,7 +34,7 @@ Pi reactions live in `supervisor.sqlite3`'s `message_reactions` table, keyed by 
 
 [Slack](slack-reactions.md) delegates to the Work host's existing Converge command and preserves its permission and audience checks. That command currently supports adding reactions only. Its result confirms the requested reaction, not a complete Slack reaction history. Incoming Slack topics and their reaction history remain with Converge's Slack integration; this does not add a second Slack client or inbox to Remote.
 
-The common message renderer provides reaction chips, actor names, an emoji picker and a remove toggle for owned reactions. It is shared by AI messages and Signal message groups.
+The common message renderer shows reaction badges and actor names. React in its long-press/right-click menu opens the emoji picker, where choosing an owned reaction removes it. It is shared by AI messages and Signal message groups.
 
 ## Focused checks
 
