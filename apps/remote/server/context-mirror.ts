@@ -2,6 +2,8 @@ import { buildSessionContext, convertToLlm, type ExtensionAPI, type ExtensionCon
 import { contextSplice, messageFinalizationKey, sha256 } from "./sync";
 import { registerSessionHistory } from "./session-history";
 import { sessionEnvironment } from "./session-environment";
+import { AGENT_NAME } from "./agent-identity";
+import { identifyMessages, modelVisibleMessages } from "./message-context";
 
 type ModelMessage = ReturnType<typeof convertToLlm>[number];
 type ModelTool = { name: string; description: string; parameters: unknown };
@@ -137,7 +139,10 @@ export default function contextMirror(pi: ExtensionAPI) {
     // the parent thread merely because they inherited its Remote environment.
     environment.PI_REMOTE_CONTEXT_OWNER_PID = String(process.pid);
     const active = new Set(pi.getActiveTools());
-    baseMessages = convertToLlm(messages);
+    baseMessages = identifyMessages(convertToLlm(messages), ctx, sessionId, {
+      id: environment.PI_REMOTE_SENDER_ID || "user",
+      ...(environment.PI_REMOTE_SENDER_NAME ? { name: environment.PI_REMOTE_SENDER_NAME } : {}),
+    }, AGENT_NAME);
     context = {
       systemPrompt: ctx.getSystemPrompt(),
       tools: pi.getAllTools()
@@ -155,6 +160,7 @@ export default function contextMirror(pi: ExtensionAPI) {
 
   pi.on("context", async (event, ctx) => {
     await replaceContext(event.messages, ctx);
+    if (ctx.mode === "rpc" && context) return { messages: modelVisibleMessages(baseMessages) };
   });
 
   pi.on("session_start", async (_event, ctx) => {
@@ -177,6 +183,16 @@ export default function contextMirror(pi: ExtensionAPI) {
       undefined,
       event.message.role === "assistant" ? messageFinalizationKey(event.message) : undefined,
     );
+  });
+
+  pi.on("turn_end", async (_event, ctx) => {
+    if (ctx.mode !== "rpc" || !context) return;
+    baseMessages = identifyMessages(baseMessages, ctx, sessionId, {
+      id: environment.PI_REMOTE_SENDER_ID || "user",
+      ...(environment.PI_REMOTE_SENDER_NAME ? { name: environment.PI_REMOTE_SENDER_NAME } : {}),
+    }, AGENT_NAME);
+    context = { ...context, messages: baseMessages };
+    await publishCurrent();
   });
 
   pi.on("session_shutdown", async (_event, ctx) => {

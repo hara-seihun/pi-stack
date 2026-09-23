@@ -1,7 +1,7 @@
 import { expect, test } from "bun:test";
 import { renderToStaticMarkup } from "react-dom/server";
 import type { MessagingMessage } from "../server/messaging/protocol";
-import { AttachmentImage, ChatMessage, messagingMessageProps } from "./src/chat-message";
+import { AttachmentImage, ChatMessage, ChatMessageGroup, messagingMessageProps, messagingMessageSegment } from "./src/chat-message";
 import { DrawingCanvas } from "./src/DrawingCanvas";
 
 const message: MessagingMessage = {
@@ -34,6 +34,24 @@ test("human and agent messages use the same header and direction styling, with a
   expect(renderMessage({ senderName: undefined })).toContain(message.sender);
   expect(renderMessage({ senderName: "" })).toContain(message.sender);
   expect(renderMessage({ direction: "outgoing", status: "sent" })).toContain('class="message user"');
+});
+
+test("only stable messages show shared per-message reactions, including grouped human messages", () => {
+  const identity = { id: "messaging/one", timestamp: 1, sender: { id: "sam", name: "Sam" } };
+  const reactions = [{ emoji: "❤️", sender: { id: "me", name: "You" }, timestamp: 2, own: true }];
+  const agent = renderToStaticMarkup(<ChatMessage kind="assistant" label="Agent" text="answer" contentFormat="literal" identity={identity} reactions={reactions} />);
+  expect(agent).toContain('aria-label="Add reaction"');
+  expect(agent).toContain('aria-pressed="true"');
+  expect(agent).toContain("You");
+  expect(renderToStaticMarkup(<ChatMessage kind="assistant" label="Agent" text="streaming" contentFormat="literal" />)).not.toContain('aria-label="Add reaction"');
+  const group = renderToStaticMarkup(<ChatMessageGroup kind="assistant" label="Sam" segments={[
+    messagingMessageSegment({ ...message, id: "one", identity, reactions }),
+    messagingMessageSegment({ ...message, id: "two", identity: { ...identity, id: "messaging/two" }, reactions: [] }),
+    messagingMessageSegment({ ...message, id: "three", status: "sending" }),
+  ]} />);
+  expect(group.match(/aria-label="Add reaction"/g)).toHaveLength(2);
+  expect(group).toContain('data-message-id="one"');
+  expect(group).toContain('data-message-id="two"');
 });
 
 test("unconfirmed receipts retain checking and failed receipts retain explicit draft recovery", () => {
