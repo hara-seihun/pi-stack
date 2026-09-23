@@ -1,4 +1,4 @@
-import { useEffect, useId, useRef, useState, type CSSProperties } from "react";
+import { useEffect, useId, useRef, useState, type CSSProperties, type PointerEvent as ReactPointerEvent, type MouseEvent, type KeyboardEvent as ReactKeyboardEvent } from "react";
 import { createPortal } from "react-dom";
 import { API } from "../../../../server/api";
 import { THREAD_COLORS as COLOR_VALUES, type ThreadColor } from "../../../../server/protocol";
@@ -20,9 +20,21 @@ export function threadColorStyle(color?: ThreadColor | null): CSSProperties {
 }
 
 type Position = { left: number; top: number; originX: number; originY: number };
-export function ThreadColorButton({ id, name, color, onPreview }: { id: string; name: string; color?: ThreadColor | null; onPreview(color: ThreadColor | null): void }) {
+export function useThreadColor({ id, name, color, onPreview }: { id?: string; name: string; color?: ThreadColor | null; onPreview(color: ThreadColor | null): void }) {
   const button = useRef<HTMLButtonElement>(null);
   const palette = useRef<HTMLDivElement>(null);
+  const press = useRef<{ timer: ReturnType<typeof setTimeout>; x: number; y: number } | null>(null);
+  const suppressClick = useRef(false);
+  const cancelPress = () => { if (press.current) clearTimeout(press.current.timer); press.current = null; };
+  useEffect(() => {
+    document.addEventListener("scroll", cancelPress, true);
+    window.addEventListener("blur", cancelPress);
+    return () => {
+      cancelPress();
+      document.removeEventListener("scroll", cancelPress, true);
+      window.removeEventListener("blur", cancelPress);
+    };
+  }, []);
   const menuId = useId();
   const [position, setPosition] = useState<Position | null>(null);
   const [open, setOpen] = useState(false);
@@ -60,9 +72,10 @@ export function ThreadColorButton({ id, name, color, onPreview }: { id: string; 
     };
   }, [open]);
 
-  const toggle = () => {
-    if (open) return close();
-    const rect = button.current!.getBoundingClientRect();
+  const show = () => {
+    cancelPress();
+    if (!id || busy || !button.current) return;
+    const rect = (button.current.querySelector(".inbox-glyph") ?? button.current).getBoundingClientRect();
     const viewport = window.visualViewport;
     const width = viewport?.width ?? innerWidth, height = viewport?.height ?? innerHeight;
     const x = rect.left + rect.width / 2, y = rect.top + rect.height / 2;
@@ -72,7 +85,7 @@ export function ThreadColorButton({ id, name, color, onPreview }: { id: string; 
     setOpen(true);
   };
   const choose = async (next: ThreadColor | null) => {
-    if (busy) return;
+    if (!id || busy) return;
     close(true);
     setBusy(true); setError(""); onPreview(next);
     try {
@@ -82,8 +95,37 @@ export function ThreadColorButton({ id, name, color, onPreview }: { id: string; 
       setError(`Could not save thread colour: ${cause instanceof Error ? cause.message : String(cause)}`);
     } finally { setBusy(false); }
   };
-  return <>
-    <button ref={button} type="button" className="thread-color-toggle" aria-label={`Thread colour for ${name}: ${color ?? "none"}`} title="Thread colour" aria-expanded={open} aria-controls={position ? menuId : undefined} disabled={busy} onClick={toggle}><span className="thread-color-dot" /></button>
+  const handlers = {
+    onPointerDown(event: ReactPointerEvent<HTMLButtonElement>) {
+      cancelPress();
+      suppressClick.current = false;
+      if (!id || busy || event.button !== 0 || !event.isPrimary) return;
+      press.current = { x: event.clientX, y: event.clientY, timer: setTimeout(() => { suppressClick.current = true; show(); }, 450) };
+    },
+    onPointerMove(event: ReactPointerEvent<HTMLButtonElement>) {
+      if (press.current && Math.hypot(event.clientX - press.current.x, event.clientY - press.current.y) > 10) cancelPress();
+    },
+    onPointerUp: cancelPress,
+    onPointerCancel: cancelPress,
+    onPointerLeave: cancelPress,
+    onClick(event: MouseEvent<HTMLButtonElement>) {
+      if (suppressClick.current) {
+        event.preventDefault();
+        suppressClick.current = false;
+      } else close();
+    },
+    onContextMenu(event: MouseEvent<HTMLButtonElement>) {
+      if (!id) return;
+      event.preventDefault();
+      show();
+    },
+    onKeyDown(event: ReactKeyboardEvent<HTMLButtonElement>) {
+      if (!id) return;
+      if (event.key === "ContextMenu" || (event.shiftKey && event.key === "F10")) { event.preventDefault(); show(); }
+      else if (event.key === "Enter" || event.key === " ") suppressClick.current = false;
+    },
+  };
+  const menu = <>
     {position && createPortal(<div ref={palette} id={menuId} className={`thread-color-palette${open ? " is-open" : ""}`} role="group" aria-label={`Colour for ${name}`} inert={!open} style={{ left: position.left, top: position.top, "--origin-x": `${position.originX - 22}px`, "--origin-y": `${position.originY - 22}px` } as CSSProperties} onBlur={event => { if (event.relatedTarget instanceof Node && !event.currentTarget.contains(event.relatedTarget) && event.relatedTarget !== button.current) close(); }} onKeyDown={event => {
       if (!["ArrowRight", "ArrowLeft", "ArrowDown", "ArrowUp", "Home", "End"].includes(event.key)) return;
       event.preventDefault();
@@ -100,4 +142,5 @@ export function ThreadColorButton({ id, name, color, onPreview }: { id: string; 
     </div>, document.body)}
     {error && <div className="thread-color-error"><DismissibleError message={error} /></div>}
   </>;
+  return { button, handlers, menu, expanded: id ? open : undefined, controls: position ? menuId : undefined };
 }
