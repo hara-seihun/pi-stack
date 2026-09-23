@@ -1,0 +1,28 @@
+.toast-viewport[data-sonner-toaster][data-sonner-theme] {
+  --normal-bg: var(--surface-2);
+  --normal-bg-hover: var(--surface);
+  --normal-text: var(--text);
+  --normal-border: var(--border);
+  --normal-border-hover: var(--border);
+  --border-radius: var(--radius-3);
+  font-family: inherit;
+  z-index: 60;
+}
+.toast-viewport .toast[data-sonner-toast] { gap: 12px; padding: 12px; user-select: none; box-shadow: 0 8px 32px rgb(0 0 0 / 45%); }
+.toast-viewport .toast[data-sonner-toast] .toast-description { color: var(--muted); }
+.toast-viewport .toast[data-sonner-toast][data-type="error"] { border-color: var(--danger); }
+.toast-viewport .toast[data-sonner-toast] .toast-action { min-height: 44px; padding: 0 12px; border-radius: var(--radius-2); font-weight: 700; }
+.toast-viewport .toast[data-sonner-toast] .toast-dismiss {
+  position: static;
+  transform: none;
+  order: 1;
+  width: 44px;
+  height: 44px;
+  flex-shrink: 0;
+  border: 0;
+  border-radius: var(--radius-2);
+  color: var(--muted);
+  background: transparent;
+}
+.toast-viewport .toast[data-sonner-toast] button:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+.layout-phone:has(> .tabbar) { --toast-bottom: calc(var(--tabbar) + 8px); }
