@@ -63,6 +63,39 @@ test("a missing patch base requests a full resource without retaining its revisi
   expect(calls[1].body.have).toEqual({});
 });
 
+test("reconnect aborts pending subscription posts and never lets an old post block or alter the new connection", async () => {
+  const posts: Array<{ body: any; signal: AbortSignal }> = [];
+  const statuses: string[] = [];
+  let connects = 0;
+  const client = createStreamClient({ subscription: { session: "a", viewing: true }, listen: false,
+    onEvent: () => {}, onStatus: status => statuses.push(status.state),
+    fetch: async (path, init) => {
+      if (path === "/v1/stream") {
+        connects++;
+        return sse([hello]);
+      }
+      const signal = init.signal as AbortSignal;
+      posts.push({ body: JSON.parse(String(init.body)), signal });
+      if (connects > 1) return new Response(null, { status: 204 });
+      return new Promise<Response>((_, reject) => signal.addEventListener("abort", () => reject(signal.reason), { once: true }));
+    },
+  });
+  client.start(); await settle();
+  client.update({ session: "b" }); await settle();
+  expect(posts[0].body.session).toBe("b");
+  expect(posts[0].signal.aborted).toBe(false);
+  client.update({ session: "c" });
+  client.reconnect(); await settle();
+  expect(posts[0].signal.aborted).toBe(true);
+  client.update({ session: "d" }); await settle();
+  expect(posts).toHaveLength(2);
+  expect(posts[1].body.session).toBe("d");
+  expect(posts[1].signal.aborted).toBe(false);
+  expect(statuses).not.toContain("offline");
+  client.stop();
+  expect(posts[1].signal.aborted).toBe(true);
+});
+
 test("selection changed before hello posts the latest subscription rather than reconnecting", async () => {
   const calls: Array<{ path: string; body: any }> = [];
   let resolve!: (value: Response) => void;

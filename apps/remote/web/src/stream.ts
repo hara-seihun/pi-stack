@@ -205,6 +205,7 @@ export function createStreamClient(options: StreamClientOptions): StreamClient {
     if (stopped) return;
     if (retry) { clearTimeout(retry); retry = null; }
     controller?.abort();
+    posting = Promise.resolve();
     const mine = ++generation;
     void connect(mine).then(
       () => {}, // Returns only when a newer connection replaced this one or the client stopped.
@@ -220,9 +221,10 @@ export function createStreamClient(options: StreamClientOptions): StreamClient {
   function post() {
     const id = streamId;
     const mine = generation;
-    if (!id) return;
+    const active = controller;
+    if (!id || !active) return;
     posting = posting.then(async () => {
-      if (stopped || streamId !== id || generation !== mine) return;
+      if (stopped || streamId !== id || generation !== mine || active.signal.aborted) return;
       const next = declaration();
       const encoded = JSON.stringify(next);
       if (encoded === sentSubscription) return;
@@ -232,7 +234,9 @@ export function createStreamClient(options: StreamClientOptions): StreamClient {
           headers: { "content-type": "application/json" },
           body: encoded,
           cache: "no-store",
+          signal: active.signal,
         });
+        if (stopped || streamId !== id || generation !== mine || active.signal.aborted) return;
         if (response.status === 404) { open(); return; }
         if (!response.ok) throw new Error(`The stream rejected the change with HTTP ${response.status}`);
         sentSubscription = encoded;

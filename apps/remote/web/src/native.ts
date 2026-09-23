@@ -2,7 +2,8 @@ import { API } from "../../server/api";
 import { appBase, appStorageKey } from "./app-path";
 import { abortable, deadline } from "./abortable";
 import { ensureUnlocked, registerAuthenticationBootstrap } from "./client";
-import { beginRequest, reportingBridge } from "./in-flight";
+import { beginRequest, reportingBridge, setRequestTimingReporter } from "./in-flight";
+import type { RequestTimingReport } from "../../server/request-timings";
 import { auth } from "./person";
 import { resolveEndpoints, routerApiPath, sessionUrl, type Endpoint } from "./router-auth";
 
@@ -28,6 +29,22 @@ interface RemoteBridge {
 const capacitor = window.Capacitor;
 export const nativePlatform = capacitor?.isNativePlatform?.() === true;
 export const browserFetch = window.fetch.bind(window);
+const timingClientId = (() => {
+  if (crypto.randomUUID) return crypto.randomUUID();
+  const bytes = crypto.getRandomValues(new Uint8Array(16));
+  bytes[6] = (bytes[6]! & 0x0f) | 0x40;
+  bytes[8] = (bytes[8]! & 0x3f) | 0x80;
+  const hex = [...bytes].map(byte => byte.toString(16).padStart(2, "0")).join("");
+  return `${hex.slice(0, 8)}-${hex.slice(8, 12)}-${hex.slice(12, 16)}-${hex.slice(16, 20)}-${hex.slice(20)}`;
+})();
+setRequestTimingReporter(timing => {
+  const report: RequestTimingReport = {
+    clientId: timingClientId, platform: nativePlatform ? "android" : "browser", requests: [timing],
+  };
+  void window.fetch(API.requestTimings.path(), {
+    method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify(report),
+  }).catch(() => undefined);
+});
 export const remote: RemoteBridge = !nativePlatform
   ? { getState: async () => ({ routerUrl: appBase() }) }
   : reportingBridge<RemoteBridge>(typeof capacitor.registerPlugin === "function"
