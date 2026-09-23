@@ -11,6 +11,7 @@ type Member = { participant: MeetParticipant; seen: number; messages: MeetEnvelo
 type PendingFlush = { resolve(): void; reject(error: Error): void; timer: ReturnType<typeof setTimeout> };
 type Room = {
   id: string; sessionId: string; apiUrl: string; members: Map<string, Member>; speakers: Map<string, MeetParticipant>; seq: number;
+  kind: "peer-to-peer" | "external";
   browser: MeetBrowser | null; opening: Promise<void> | null; closed: boolean;
   voiceMuted: boolean; voiceRevision: number; threads(): MeetThreadState[];
   transcriptFlushRevision: number; flushes: Map<number, PendingFlush>;
@@ -53,8 +54,9 @@ export class MeetServer {
     this.timer.unref();
   }
 
-  private createRoom(id: string, sessionId: string, apiUrl: string, name: string, participantId: string = crypto.randomUUID()): MeetJoined {
-    const room: Room = { id, sessionId, apiUrl, members: new Map(), speakers: new Map(), seq: 0,
+  private createRoom(id: string, sessionId: string, apiUrl: string, name: string, kind: Room["kind"] = "peer-to-peer"): MeetJoined {
+    const participantId = kind === "external" ? "external-host" : crypto.randomUUID();
+    const room: Room = { id, sessionId, apiUrl, kind, members: new Map(), speakers: new Map(), seq: 0,
       browser: null, opening: null, closed: false, voiceMuted: true, voiceRevision: 0,
       transcriptFlushRevision: 0, flushes: new Map(), threads: () => this.threadActivity(id, sessionId) };
     const participant: MeetParticipant = { id: participantId, name: name.slice(0, 80), host: true };
@@ -74,7 +76,7 @@ export class MeetServer {
       return { room: snapshot(room), participant: host.participant };
     }
     if (this.rooms.size >= 16) throw new Error("This supervisor already has 16 meetings");
-    return this.createRoom(id, sessionId, apiUrl, "Mixed meeting audio", "external-host");
+    return this.createRoom(id, sessionId, apiUrl, "Mixed meeting audio", "external");
   }
 
   stopExternal(id: string) {
@@ -210,7 +212,10 @@ export class MeetServer {
     if (parts[3] === "join" && req.method === "POST") {
       const body = await this.body(req);
       if (!body || typeof body.name !== "string" || !body.name.trim()) return fail("Your name is required");
-      if (room.members.size >= 12) return fail("This peer-to-peer room is full, maximum 12 people", 409);
+      const capacity = room.kind === "external" ? 33 : 12;
+      if (room.members.size >= capacity) return fail(room.kind === "external"
+        ? "This external room is full, maximum 32 camera sources plus the host"
+        : "This peer-to-peer room is full, maximum 12 people", 409);
       const participant: MeetParticipant = { id: crypto.randomUUID(), name: body.name.trim().slice(0, 80), host: false };
       room.members.set(participant.id, { participant, seen: Date.now(), messages: [], frame: null, frameAt: 0 });
       room.speakers.set(participant.id, participant);
