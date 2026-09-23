@@ -1,6 +1,9 @@
 import { API } from "../../server/api";
 import type { MessagingAttachment, MessagingCall, MessagingConversation, MessagingHistory, MessagingLink, MessagingLinkPreview, MessagingMessage, MessagingResult, MessagingSend } from "../../server/messaging/protocol";
 import { piFetch } from "./client";
+import { PreviewQueue } from "./preview-queue";
+
+const previewQueue = new PreviewQueue();
 
 async function request<T>(path: string, init: RequestInit, signal: AbortSignal): Promise<MessagingResult<T>> {
   const controller = new AbortController();
@@ -25,7 +28,12 @@ const json = (body: unknown): RequestInit => ({ method: "POST", headers: { "cont
 export const messagingClient = {
   open: (backendId: string, target: string, signal: AbortSignal) => request<{ conversation: MessagingConversation }>(API.messagingOpen.path(), json({ backendId, target }), signal),
   history: (conversationId: string, signal: AbortSignal, before?: number) => request<MessagingHistory>(API.messagingHistory.path({ conversationId }, { limit: 50, ...(before === undefined ? {} : { before }) }), {}, signal),
-  linkPreviews: (messageId: string, signal: AbortSignal) => request<{ previews: MessagingLinkPreview[] }>(API.messagingLinkPreviews.path({ messageId }), {}, signal),
+  linkPreviews: async (messageId: string, signal: AbortSignal): Promise<MessagingResult<{ previews: MessagingLinkPreview[] }>> => {
+    const release = await previewQueue.acquire(signal);
+    if (!release) return { ok: false, error: { code: "aborted", message: "Preview request cancelled" } };
+    try { return await request<{ previews: MessagingLinkPreview[] }>(API.messagingLinkPreviews.path({ messageId }), {}, signal); }
+    finally { release(); }
+  },
   send: (conversationId: string, body: MessagingSend, signal: AbortSignal) => request<{ message: MessagingMessage }>(API.messagingSend.path({ conversationId }), json(body), signal),
   read: (conversationId: string, signal: AbortSignal) => request<{ ok: true }>(API.messagingRead.path({ conversationId }), json({}), signal),
   upload: (conversationId: string, file: File, signal: AbortSignal) => request<{ attachment: MessagingAttachment }>(API.messagingUpload.path({ conversationId }, { name: file.name }), { method: "POST", headers: { "content-type": file.type || "application/octet-stream" }, body: file }, signal),
