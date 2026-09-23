@@ -24,6 +24,11 @@ export interface BackendAttachment {
   mimeType: string;
   size: number;
 }
+export interface BackendReply {
+  author: string;
+  timestamp: number;
+  text: string;
+}
 export interface BackendMessage {
   id: string;
   conversation: BackendConversation;
@@ -32,6 +37,7 @@ export interface BackendMessage {
   text: string;
   timestamp: number;
   attachments: BackendAttachment[];
+  reply?: BackendReply;
 }
 export interface BackendReaction {
   conversation: BackendConversation;
@@ -93,7 +99,7 @@ export interface MessagingPlugin {
   cancelLink?(): Promise<MessagingLink>;
   start(context: MessagingPluginContext): Promise<MessagingResult<void>>;
   openConversation(target: string): Promise<MessagingResult<BackendConversation>>;
-  send(conversation: BackendConversation, message: { requestId: string; text: string; attachments: BackendAttachment[] }): Promise<MessagingResult<{ externalId: string; timestamp: number }>>;
+  send(conversation: BackendConversation, message: { requestId: string; text: string; attachments: BackendAttachment[]; reply?: BackendReply }): Promise<MessagingResult<{ externalId: string; timestamp: number }>>;
   react?(conversation: BackendConversation, target: { author: string; timestamp: number }, emoji: string, remove: boolean): Promise<MessagingResult<{ timestamp: number; sender: string }>>;
   close(): Promise<void>;
 }

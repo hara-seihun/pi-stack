@@ -3,12 +3,12 @@ import { copyFileSync, existsSync, mkdirSync, realpathSync, rmSync, statSync } f
 import { isAbsolute, join, relative } from "node:path";
 import { pathToFileURL } from "node:url";
 import { API } from "../api";
-import { isReactionEmoji, messageReference, type MessageReaction } from "../message-protocol";
+import { isReactionEmoji, messageReference, parseMessageReference, type MessageReaction, type MessageReply } from "../message-protocol";
 import { extractMessageLinks } from "./links";
 import { linkPreview, PreviewOverloaded } from "./link-previews";
 import { API_CORS_HEADERS } from "../cors";
 import { storeUpload, uploadName } from "../uploads";
-import type { BackendAttachment, BackendAvatar, BackendCall, BackendCallAudio, BackendConversation, BackendMessage, BackendReaction, BackendSender, MessagingCallSupport, MessagingPlugin, MessagingPluginFactory } from "./plugin";
+import type { BackendAttachment, BackendAvatar, BackendCall, BackendCallAudio, BackendConversation, BackendMessage, BackendReaction, BackendReply, BackendSender, MessagingCallSupport, MessagingPlugin, MessagingPluginFactory } from "./plugin";
 import type { MessagingAttachment, MessagingBackendConfig, MessagingBackendInfo, MessagingCall, MessagingCallState, MessagingConversation, MessagingHistory, MessagingLink, MessagingMessage, MessagingResult, MessagingSend, MessagingSnapshot } from "./protocol";
 
 const DEVICE_NAME = /^[\p{L}\p{N} .,'()_-]{1,64}$/u;
@@ -38,7 +38,7 @@ class MessagingFailure extends Error {
   constructor(message: string, readonly status = 400, readonly code?: string) { super(message); }
 }
 interface ConversationRow { id: string; backend_id: string; external_id: string; title: string; kind: "direct" | "group"; updated_at: number; unread: number; current: number }
-interface MessageRow { seq: number; id: string; conversation_id: string; external_id: string | null; direction: "incoming" | "outgoing"; sender: string; text: string; timestamp: number; status: MessagingMessage["status"]; error: string | null; request_body: string | null }
+interface MessageRow { seq: number; id: string; conversation_id: string; external_id: string | null; direction: "incoming" | "outgoing"; sender: string; text: string; timestamp: number; status: MessagingMessage["status"]; error: string | null; request_body: string | null; quote_author: string | null; quote_timestamp: number | null; quote_text: string | null; quote_message_id: string | null }
 interface AttachmentRow { id: string; conversation_id: string; message_id: string | null; name: string; mime_type: string; size: number; path: string }
 interface Backend { config: MessagingBackendConfig; info: MessagingBackendInfo; plugin?: MessagingPlugin; attempts: number; retry?: ReturnType<typeof setTimeout> }
 export interface CallAudioSocket {
@@ -137,6 +137,14 @@ export class MessagingService {
         this.db.exec(`ALTER TABLE conversations ADD COLUMN current INTEGER NOT NULL DEFAULT 0;
           UPDATE conversations SET current=1 WHERE EXISTS(SELECT 1 FROM messages WHERE conversation_id=conversations.id);`);
       }
+      const messageColumns = this.db.query("PRAGMA table_info(messages)").all() as { name: string }[];
+      if (!messageColumns.some(column => column.name === "quote_author")) {
+        this.db.exec(`ALTER TABLE messages ADD COLUMN quote_author TEXT;
+          ALTER TABLE messages ADD COLUMN quote_timestamp INTEGER;
+          ALTER TABLE messages ADD COLUMN quote_text TEXT;
+          ALTER TABLE messages ADD COLUMN quote_message_id TEXT;`);
+      }
+      this.db.exec("CREATE INDEX IF NOT EXISTS message_quote_target ON messages(conversation_id,timestamp)");
       this.db.exec(`UPDATE messages SET status='unknown',error='Supervisor stopped before the backend confirmed this send. Check the recipient before sending again.' WHERE status='sending';
         UPDATE conversations SET updated_at=COALESCE((SELECT MAX(timestamp) FROM messages WHERE conversation_id=conversations.id),0);
         UPDATE messaging_state SET version=version+1;`);
@@ -679,6 +687,24 @@ export class MessagingService {
     await this.receiveReaction(conversation.backend_id, { conversation: { id: conversation.external_id, title: conversation.title, kind: conversation.kind }, target: { author: row.direction === "outgoing" ? result.value.sender : row.sender, timestamp: row.timestamp }, account: result.value.sender, sender: result.value.sender, emoji, remove, timestamp: result.value.timestamp });
     return { ok: true, value: this.reactions(row) };
   }
+  private messageSender(row: MessageRow, backendId: string): string {
+    if (row.direction === "outgoing" && row.sender === "You") {
+      const account = this.db.query("SELECT sender_id FROM messaging_accounts WHERE backend_id=?").get(backendId) as { sender_id: string } | null;
+      return account?.sender_id ?? row.sender;
+    }
+    return this.canonical(backendId, row.sender);
+  }
+  private reply(row: MessageRow): MessageReply | undefined {
+    if (row.quote_author === null || row.quote_timestamp === null || row.quote_text === null) return undefined;
+    const conversation = this.conversationRow(row.conversation_id);
+    const author = this.canonical(conversation.backend_id, row.quote_author);
+    const target = (this.db.query("SELECT * FROM messages WHERE id=? AND conversation_id=? AND status IN ('received','sent')").get(row.quote_message_id, row.conversation_id) as MessageRow | null)
+      ?? (this.db.query("SELECT * FROM messages WHERE conversation_id=? AND timestamp=? AND status IN ('received','sent')").all(row.conversation_id, row.quote_timestamp) as MessageRow[])
+        .find(candidate => this.messageSender(candidate, conversation.backend_id) === author);
+    const sender = this.db.query("SELECT name FROM messaging_senders WHERE backend_id=? AND id=?").get(conversation.backend_id, author) as { name: string | null } | null;
+    return { messageId: target ? messageReference({ transport: "messaging", messageId: target.id }) : null,
+      sender: { id: author, ...(sender?.name ? { name: sender.name } : {}) }, text: row.quote_text, timestamp: row.quote_timestamp };
+  }
   private message(row: MessageRow): MessagingMessage {
     const attachments = (this.db.query("SELECT a.* FROM attachments a JOIN message_attachments ma ON ma.attachment_id=a.id WHERE ma.message_id=? ORDER BY a.rowid").all(row.id) as AttachmentRow[]).map(item => this.attachment(item));
     if (row.request_body) {
@@ -691,11 +717,13 @@ export class MessagingService {
       LEFT JOIN messaging_avatars v ON v.backend_id=s.backend_id AND v.id=s.id WHERE c.id=?`).get(row.sender, row.conversation_id) as { name: string | null; avatar: number | null } | null;
     const account = row.direction === "outgoing" && row.sender === "You"
       ? this.db.query(`SELECT sender_id FROM messaging_accounts WHERE backend_id=(SELECT backend_id FROM conversations WHERE id=?)`).get(row.conversation_id) as { sender_id: string } | null : null;
+    const reply = this.reply(row);
     return { id: row.id, requestId: row.request_body ? row.id : null, conversationId: row.conversation_id, externalId: row.external_id, direction: row.direction, sender: row.sender, ...(sender?.name ? { senderName: sender.name } : {}), ...(sender?.avatar ? { senderAvatar: sender.avatar } : {}), text: row.text, timestamp: row.timestamp, status: row.status, error: row.error, attachments,
       ...((row.status === "received" || row.status === "sent") && row.external_id ? {
         identity: { id: messageReference({ transport: "messaging", messageId: row.id }), timestamp: row.timestamp, sender: { id: account?.sender_id ?? row.sender, ...(sender?.name ? { name: sender.name } : {}) } },
       } : {}),
       reactions: this.reactions(row),
+      ...(reply ? { reply } : {}),
     };
   }
   history(conversationId: string, before?: number, limit = 60): MessagingHistory {
@@ -757,21 +785,28 @@ export class MessagingService {
     const row = this.conversationRow(conversationId);
     if (!input || typeof input.requestId !== "string" || !ID.test(input.requestId) || typeof input.text !== "string" || input.text.length > 200_000
       || !Array.isArray(input.attachmentIds) || input.attachmentIds.length > 32 || input.attachmentIds.some(id => typeof id !== "string")
-      || new Set(input.attachmentIds).size !== input.attachmentIds.length || (!input.text.trim() && !input.attachmentIds.length)) throw new MessagingFailure("Valid requestId and a message or attachments are required");
-    const body = JSON.stringify({ conversationId, text: input.text, attachmentIds: input.attachmentIds });
+      || new Set(input.attachmentIds).size !== input.attachmentIds.length || (!input.text.trim() && !input.attachmentIds.length)
+      || (input.replyTo !== undefined && (typeof input.replyTo !== "string" || !parseMessageReference(input.replyTo)))) throw new MessagingFailure("Valid requestId, reply reference and a message or attachments are required");
+    const body = JSON.stringify({ conversationId, text: input.text, attachmentIds: input.attachmentIds, ...(input.replyTo !== undefined ? { replyTo: input.replyTo } : {}) });
     const existing = this.db.query("SELECT * FROM messages WHERE id=?").get(input.requestId) as MessageRow | null;
     if (existing) {
       if (existing.request_body !== body) throw new MessagingFailure("This requestId belongs to a different message", 409);
       const message = this.message(existing);
       return { message, settled: this.sends.get(input.requestId) ?? Promise.resolve(message) };
     }
+    const reference = input.replyTo ? parseMessageReference(input.replyTo) : null;
+    if (input.replyTo && reference?.transport !== "messaging") throw new MessagingFailure("Reply target must be a messaging message", 400);
+    const target = reference?.transport === "messaging" ? this.db.query("SELECT * FROM messages WHERE id=? AND conversation_id=? AND status IN ('received','sent') AND external_id IS NOT NULL")
+      .get(reference.messageId, conversationId) as MessageRow | null : null;
+    if (input.replyTo && !target) throw new MessagingFailure("Reply target must be a confirmed message in this conversation", 409);
+    const reply: BackendReply | undefined = target ? { author: this.messageSender(target, row.backend_id), timestamp: target.timestamp, text: target.text } : undefined;
     const backend = this.readyBackend(row.backend_id);
     if (input.attachmentIds.length && !backend.info.capabilities.attachments) throw new MessagingFailure("This backend does not support attachments");
     const attachments = input.attachmentIds.map(id => this.attachmentRow(id));
     if (attachments.some(item => item.conversation_id !== conversationId || (item.message_id && !(this.db.query("SELECT id FROM messages WHERE id=? AND status='failed'").get(item.message_id))))) throw new MessagingFailure("Attachments must belong to this conversation's draft or a confirmed failed send", 409);
     const timestamp = Date.now();
     this.db.transaction(() => {
-      this.db.query("INSERT INTO messages(id,conversation_id,direction,sender,text,timestamp,status,request_body) VALUES(?,?,'outgoing','You',?,?,'sending',?)").run(input.requestId, conversationId, input.text, timestamp, body);
+      this.db.query("INSERT INTO messages(id,conversation_id,direction,sender,text,timestamp,status,request_body,quote_author,quote_timestamp,quote_text,quote_message_id) VALUES(?,?,'outgoing','You',?,?,'sending',?,?,?,?,?)").run(input.requestId, conversationId, input.text, timestamp, body, reply?.author ?? null, reply?.timestamp ?? null, reply?.text ?? null, target?.id ?? null);
       for (const item of attachments) {
         this.db.query("UPDATE attachments SET message_id=? WHERE id=?").run(input.requestId, item.id);
         this.db.query("INSERT INTO message_attachments VALUES(?,?)").run(input.requestId, item.id);
@@ -780,14 +815,14 @@ export class MessagingService {
     })();
     this.changed();
     const message = this.message(this.db.query("SELECT * FROM messages WHERE id=?").get(input.requestId) as MessageRow);
-    const task = this.dispatch(backend.plugin, row, input, attachments);
+    const task = this.dispatch(backend.plugin, row, input, attachments, reply);
     this.sends.set(input.requestId, task);
     void task.then(() => this.sends.delete(input.requestId), () => this.sends.delete(input.requestId));
     return { message, settled: task };
   }
-  private async dispatch(plugin: MessagingPlugin, conversation: ConversationRow, input: MessagingSend, attachments: AttachmentRow[]): Promise<MessagingMessage> {
+  private async dispatch(plugin: MessagingPlugin, conversation: ConversationRow, input: MessagingSend, attachments: AttachmentRow[], reply?: BackendReply): Promise<MessagingMessage> {
     try {
-      const result = await plugin.send({ id: conversation.external_id, title: conversation.title, kind: conversation.kind }, { requestId: input.requestId, text: input.text, attachments: attachments.map(item => ({ path: item.path, name: item.name, mimeType: item.mime_type, size: item.size })) });
+      const result = await plugin.send({ id: conversation.external_id, title: conversation.title, kind: conversation.kind }, { requestId: input.requestId, text: input.text, attachments: attachments.map(item => ({ path: item.path, name: item.name, mimeType: item.mime_type, size: item.size })), ...(reply ? { reply } : {}) });
       if (result.ok) {
         const redundant: AttachmentRow[] = [];
         this.db.transaction(() => {
@@ -800,6 +835,7 @@ export class MessagingService {
             }
             this.db.query("DELETE FROM message_attachments WHERE message_id=?").run(synced.id);
             for (const item of redundant) this.db.query("DELETE FROM attachments WHERE id=?").run(item.id);
+            this.db.query("UPDATE messages SET quote_message_id=? WHERE quote_message_id=?").run(input.requestId, synced.id);
             this.db.query("DELETE FROM messages WHERE id=?").run(synced.id);
           }
           this.db.query("UPDATE messages SET external_id=?,timestamp=?,status='sent',error=NULL WHERE id=?").run(result.value.externalId, result.value.timestamp, input.requestId);
@@ -822,6 +858,7 @@ export class MessagingService {
   private async receive(backendId: string, value: BackendMessage): Promise<void> {
     const conversation = this.upsertConversation(backendId, value.conversation);
     if (!value.id || !Number.isFinite(value.timestamp)) throw new Error("Backend returned an invalid message identity");
+    if (value.reply && (!value.reply.author || !Number.isSafeInteger(value.reply.timestamp) || value.reply.timestamp <= 0 || typeof value.reply.text !== "string")) throw new Error("Backend returned an invalid reply");
     if (this.db.query("SELECT id FROM messages WHERE conversation_id=? AND external_id=?").get(conversation.id, value.id)) return;
     const files: Array<BackendAttachment & { id: string }> = [];
     try {
@@ -838,7 +875,7 @@ export class MessagingService {
       this.db.transaction(() => {
         if (this.db.query("SELECT id FROM messages WHERE conversation_id=? AND external_id=?").get(conversation.id, value.id)) throw new Error("Duplicate receive in progress");
         const id = crypto.randomUUID();
-        this.db.query("INSERT INTO messages(id,conversation_id,external_id,direction,sender,text,timestamp,status) VALUES(?,?,?,?,?,?,?,?)").run(id, conversation.id, value.id, value.direction, value.sender, value.text, value.timestamp, value.direction === "incoming" ? "received" : "sent");
+        this.db.query("INSERT INTO messages(id,conversation_id,external_id,direction,sender,text,timestamp,status,quote_author,quote_timestamp,quote_text) VALUES(?,?,?,?,?,?,?,?,?,?,?)").run(id, conversation.id, value.id, value.direction, value.sender, value.text, value.timestamp, value.direction === "incoming" ? "received" : "sent", value.reply?.author ?? null, value.reply?.timestamp ?? null, value.reply?.text ?? null);
         for (const item of files) {
           this.db.query("INSERT INTO attachments VALUES(?,?,?,?,?,?,?)").run(item.id, conversation.id, id, uploadName(item.name), item.mimeType, item.size, item.path);
           this.db.query("INSERT INTO message_attachments VALUES(?,?)").run(id, item.id);

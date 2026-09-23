@@ -3,7 +3,7 @@ import { accessSync, constants, statSync } from "node:fs";
 import { mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { delimiter, isAbsolute, join, resolve } from "node:path";
 import type { Readable, Writable } from "node:stream";
-import type { BackendAttachment, BackendAvatar, BackendCall, BackendCallAudio, BackendConversation, MessagingCallSupport, MessagingPlugin, MessagingPluginContext, MessagingPluginFactory } from "./plugin";
+import type { BackendAttachment, BackendAvatar, BackendCall, BackendCallAudio, BackendConversation, BackendReply, MessagingCallSupport, MessagingPlugin, MessagingPluginContext, MessagingPluginFactory } from "./plugin";
 import type { MessagingBackendConfig, MessagingCallState, MessagingCapabilities, MessagingLink, MessagingResult } from "./protocol";
 import { qrSvg } from "./qr";
 import { openSignalCallAudio } from "./signal-call-audio";
@@ -634,7 +634,7 @@ class SignalPlugin implements MessagingPlugin {
     return success(managed);
   }
 
-  async send(conversation: BackendConversation, message: { requestId: string; text: string; attachments: BackendAttachment[] }): Promise<MessagingResult<{ externalId: string; timestamp: number }>> {
+  async send(conversation: BackendConversation, message: { requestId: string; text: string; attachments: BackendAttachment[]; reply?: BackendReply }): Promise<MessagingResult<{ externalId: string; timestamp: number }>> {
     const rpc = this.rpc;
     if (!this.ready || !rpc) return failure("unconfigured", "Signal is not connected to a linked account");
     const attachments: string[] = [];
@@ -650,6 +650,7 @@ class SignalPlugin implements MessagingPlugin {
       ...(conversation.kind === "group" ? { groupId: conversation.id.replace(/^group:/, "") } : { recipient: [conversation.id] }),
       message: message.text,
       attachments,
+      ...(message.reply ? { quoteTimestamp: message.reply.timestamp, quoteAuthor: message.reply.author === "You" ? this.account : message.reply.author, quoteMessage: message.reply.text } : {}),
     });
     if (!result.ok) return result;
     const value = object(result.value);
@@ -721,6 +722,10 @@ class SignalPlugin implements MessagingPlugin {
     }
     const body = text(data.message);
     const attached = list(data.attachments);
+    const quote = object(data.quote);
+    const reply = Object.keys(quote).length && typeof quote.id === "number" && Number.isSafeInteger(quote.id) && quote.id > 0 && text(quote.author)
+      ? { author: text(quote.author), timestamp: quote.id, text: text(quote.text) } : undefined;
+    if (Object.keys(quote).length && !reply) this.context?.status("error", "Signal quote has an invalid author or timestamp");
     const reaction = object(data.reaction);
     if (Object.keys(reaction).length) {
       const targetAuthor = text(reaction.targetAuthor);
@@ -768,7 +773,7 @@ class SignalPlugin implements MessagingPlugin {
       await this.context!.message({
         id: outgoing ? this.sentId(timestamp) : `${this.account}:${sender}:${timestamp}`,
         conversation, direction: outgoing ? "outgoing" : "incoming", sender: outgoing ? this.account : sender,
-        text: body, timestamp, attachments,
+        text: body, timestamp, attachments, ...(reply ? { reply } : {}),
       });
     } finally {
       if (stage) await rm(stage, { recursive: true, force: true });

@@ -1,4 +1,4 @@
-import type { MessageIdentity, MessageReaction } from "../message-protocol.js";
+import type { MessageIdentity, MessageReaction, MessageReply } from "../message-protocol.js";
 
 export type MessagingResult<T> = { ok: true; value: T } | { ok: false; error: { code: string; message: string } };
 
@@ -116,6 +116,7 @@ export interface MessagingMessage {
   attachments: MessagingAttachment[];
   identity?: MessageIdentity;
   reactions?: MessageReaction[];
+  reply?: MessageReply;
 }
 
 export interface MessagingSnapshot {
@@ -132,6 +133,8 @@ export interface MessagingSend {
   requestId: string;
   text: string;
   attachmentIds: string[];
+  /** Universal `messaging/<local-message-id>` reference in this conversation. */
+  replyTo?: string;
 }
 export interface MessagingBackendConfig {
   id: string;
