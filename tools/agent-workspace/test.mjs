@@ -717,6 +717,44 @@ test("releases and can recreate a linked worktree name", () => {
   }
 });
 
+test("a registered linked worktree prevents release of its parent clone", () => {
+  const f = fixture();
+  try {
+    const parent = JSON.parse(run([
+      "create", "--root", f.workspaces, "--name", "parent", "--repo", f.remote,
+      "--mode", "writer", "--min-free-gib", "0", "--json",
+    ], f.env));
+    const childPath = path.join(f.workspaces, "child");
+    git(parent.path, "worktree", "add", "-b", "child", childPath, "HEAD");
+    const child = JSON.parse(run(["register", "--path", childPath, "--json"], f.env));
+    writeFileSync(path.join(childPath, "unique.txt"), "unfinished child work\n");
+
+    const database = new DatabaseSync(f.env.PI_WORKSPACE_STATE);
+    database.prepare("UPDATE workspace SET lease_expires_at=0 WHERE id=?").run(parent.id);
+    database.close();
+    const planned = JSON.parse(run(["reconcile", "--root", f.workspaces, "--json"], f.env));
+    const parentPlan = planned.find(({ record }) => record.id === parent.id);
+    assert.equal(parentPlan.inspection.classification, "referenced");
+    assert.equal(parentPlan.inspection.gitDependents[0].recordId, child.id);
+    const executed = JSON.parse(run(["reconcile", "--root", f.workspaces, "--execute", "--reap-expired", "--json"], f.env));
+    assert.equal(executed.find(({ record }) => record.id === parent.id).action, "none");
+    assert.equal(existsSync(parent.path), true);
+    const held = JSON.parse(run(["release", "--id", parent.id, "--json"], f.env));
+    assert.equal(held.inspection.classification, "referenced");
+    assert.equal(held.action, "none");
+    assert.equal(held.inspection.gitDependents[0].recordId, child.id);
+    assert.equal(git(childPath, "rev-parse", "HEAD"), parent.sourceCommit);
+    assert.equal(readFileSync(path.join(childPath, "unique.txt"), "utf8"), "unfinished child work\n");
+    assert.equal(existsSync(parent.path), true);
+
+    const childRelease = JSON.parse(run(["release", "--id", child.id, "--json"], f.env));
+    assert.equal(childRelease.inspection.classification, "repair-required");
+    rmSync(path.join(childPath, "unique.txt"));
+    assert.equal(JSON.parse(run(["release", "--id", child.id, "--json"], f.env)).action, "released");
+    assert.equal(JSON.parse(run(["release", "--id", parent.id, "--json"], f.env)).action, "released");
+  } finally { f.close(); }
+});
+
 test("a linked worktree ignores branches owned by its peers", () => {
   const f = fixture();
   try {

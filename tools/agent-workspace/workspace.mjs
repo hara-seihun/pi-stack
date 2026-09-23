@@ -706,40 +706,44 @@ function systemdReferences(workspacePath, snapshot = systemdSnapshot()) {
   };
 }
 
-function gitAlternateSnapshot(database) {
-  const references = [];
+function gitDependencySnapshot(database) {
+  const alternates = [];
+  const linkedWorktrees = [];
   for (const record of listRecords(database)) {
     if (!existsSync(record.path)) continue;
-    let objectDirectory;
-    if (record.checkoutType === "clone") objectDirectory = path.join(record.path, ".git", "objects");
-    else {
+    let commonDirectory = path.join(record.path, ".git");
+    if (record.checkoutType === "worktree") {
       const common = command("git", ["-C", record.path, "rev-parse", "--git-common-dir"]);
-      if (common.status !== 0) continue;
-      objectDirectory = path.join(path.resolve(record.path, common.stdout), "objects");
+      if (common.status !== 0) fail(`cannot inspect linked worktree ${record.path}: ${common.stderr || common.error?.message || `exit ${common.status}`}`);
+      commonDirectory = path.resolve(record.path, common.stdout);
+      linkedWorktrees.push({ recordId: record.id, workspacePath: record.path, commonDirectory });
     }
+    const objectDirectory = path.join(commonDirectory, "objects");
     const alternatesPath = path.join(objectDirectory, "info", "alternates");
     if (!existsSync(alternatesPath)) continue;
     let contents;
     try { contents = readFileSync(alternatesPath, "utf8"); } catch { continue; }
     for (const alternate of contents.split("\n").filter(Boolean)) {
-      references.push({
+      alternates.push({
         recordId: record.id,
         workspacePath: record.path,
         objectDirectory: path.resolve(objectDirectory, alternate),
       });
     }
   }
-  return references;
+  return { alternates, linkedWorktrees };
 }
 
 function safetySnapshot(database) {
   const isolated = process.env.NODE_TEST_CONTEXT !== undefined &&
     process.env.PI_WORKSPACE_TEST_EXTERNAL_SAFETY === "empty";
+  const gitDependencies = gitDependencySnapshot(database);
   return {
     processes: isolated ? [] : processSnapshot(),
     docker: isolated ? { containers: [], available: false } : dockerSnapshot(),
     systemd: isolated ? { units: [], available: false } : systemdSnapshot(),
-    gitAlternates: gitAlternateSnapshot(database),
+    gitAlternates: gitDependencies.alternates,
+    linkedWorktrees: gitDependencies.linkedWorktrees,
   };
 }
 
@@ -1003,14 +1007,18 @@ function inspectRecord(record, options = {}) {
   const objectDirectory = record.checkoutType === "clone" ? path.join(record.path, ".git", "objects") : null;
   const gitDependents = objectDirectory === null ? [] : (options.safety?.gitAlternates ?? [])
     .filter((reference) => reference.recordId !== record.id && reference.objectDirectory === objectDirectory);
-  if (gitDependents.length > 0) {
+  const linkedDependents = record.checkoutType === "clone" ? (options.safety?.linkedWorktrees ?? [])
+    .filter((reference) => reference.recordId !== record.id && reference.commonDirectory === path.join(record.path, ".git")) : [];
+  if (gitDependents.length > 0 || linkedDependents.length > 0) {
     return {
       classification: "referenced",
-      reason: `${gitDependents.length} registered Git checkout(s) still borrow this checkout's objects: ${gitDependents.map((reference) => reference.workspacePath).join(", ")}`,
+      reason: linkedDependents.length === 0
+        ? `${gitDependents.length} registered Git checkout(s) still borrow this checkout's objects: ${gitDependents.map((reference) => reference.workspacePath).join(", ")}`
+        : `${linkedDependents.length} registered linked worktree(s) still use this checkout's Git directory: ${linkedDependents.map((reference) => reference.workspacePath).join(", ")}${gitDependents.length ? `; ${gitDependents.length} alternate object borrower(s)` : ""}`,
       processes,
       containers: docker.references,
       systemdUnits: systemd.references,
-      gitDependents,
+      gitDependents: [...gitDependents, ...linkedDependents],
     };
   }
   if (docker.error !== undefined) return { classification: "blocked", reason: `cannot prove container safety: ${docker.error}`, processes, containers: [], systemdUnits: [] };
