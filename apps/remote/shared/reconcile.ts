@@ -1,5 +1,5 @@
 import { hash } from "fast-sha256";
-import { ResourceCache } from "./resource-cache";
+import { ResourceCache } from "./resource-cache.js";
 
 export type Revision = string;
 
