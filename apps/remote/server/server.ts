@@ -14,6 +14,7 @@ import { updateThreadSettings } from "./thread-settings";
 import { readMachineUsage } from "./machine-usage";
 import { displayAssistantMessage, displayContextDocument, type ContextImage } from "./context-display";
 import { LandedWork } from "./queue-landing";
+import { RequestTimings } from "./request-timings";
 import { updateToolProgress, type ToolProgress } from "./tool-progress";
 import { isResponseMetrics, ResponseTiming, type ResponseMetrics } from "./response-metrics";
 import { messageFinalizationKey, sha256, type ContextSplice } from "./sync";
@@ -1717,6 +1718,7 @@ const meet = new MeetServer((id) => {
 const messaging = createMessagingService(DATA, PRIVATE_DIR, ENVIRONMENT_REQUIRES_UNLOCK, signalSync);
 const AUDIO_SOCKET_BACKPRESSURE_BYTES = 64 * 1024;
 type AudioSocketData = { callId: string; audio?: ReturnType<typeof openCallAudio> };
+const requestTimings = new RequestTimings();
 const server = Bun.serve<AudioSocketData>({
   hostname: HOST,
   port: PORT,
@@ -1871,6 +1873,11 @@ const server = Bun.serve<AudioSocketData>({
     const web = webResponse(WEB_DIR, url.pathname, req.method, req);
     if (web) return web;
     if (API.health.match(req.method, url.pathname)) return json({ ok: true, version: VERSION, environmentId: ENVIRONMENT_ID, releaseCommit: RELEASE_COMMIT });
+    if (API.requestTimingsRead.match(req.method, url.pathname)) return json({ requests: requestTimings.list() });
+    if (API.requestTimings.match(req.method, url.pathname)) {
+      const result = requestTimings.receive(await readBody(req));
+      return json(result, result.ok ? 200 : 400);
+    }
     if (API.profile.match(req.method, url.pathname)) {
       const seconds = Math.min(60, Math.max(1, Number(url.searchParams.get("seconds")) || 10));
       const report = await profileMainThread(seconds * 1000);
