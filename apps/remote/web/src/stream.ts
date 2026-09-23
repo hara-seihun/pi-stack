@@ -8,7 +8,9 @@
 // dropped the body), so the watchdog aborts it and the backoff reconnects.
 
 import { API } from "../../server/api";
-import type { StreamEvent, StreamSubscription } from "../../server/protocol";
+import type { StreamEvent, StreamSnapshot, StreamSubscription, StreamWireEvent } from "../../server/protocol";
+import { ReconcileReplica, revisionOf } from "../../shared/reconcile";
+import { isStreamSnapshot, streamResource, streamWants } from "../../shared/stream-resources";
 import { piFetch } from "./client";
 
 export type StreamState = "connecting" | "open" | "offline";
@@ -59,14 +61,14 @@ export class EventStreamParser {
   }
 }
 
-/** A frame carries one JSON `StreamEvent`; `event:` names the variant. */
-export function streamEventFromFrame(frame: StreamFrame): StreamEvent | null {
+/** A wire frame is a direct event or a generic reconciliation frame. */
+export function streamEventFromFrame(frame: StreamFrame): StreamWireEvent | null {
   if (!frame.data) return null;
   let value: any;
   try { value = JSON.parse(frame.data); } catch { return null; }
   if (!value || typeof value !== "object") return null;
   if (typeof value.type !== "string" && frame.event) value.type = frame.event;
-  return typeof value.type === "string" ? value as StreamEvent : null;
+  return ["hello", "reconcile", "notifications", "events", "error"].includes(value.type) ? value as StreamWireEvent : null;
 }
 
 const SESSION_SCOPED = new Set(["transcript", "live", "images", "events"]);
@@ -81,6 +83,9 @@ export interface StreamClient {
   /** Drop the current connection and subscribe again immediately. */
   reconnect(): void;
   subscription(): StreamSubscription;
+  invalidate(resource: string): void;
+  /** Seed a resource from an actual memory or disk snapshot, not a guessed server revision. */
+  restore(snapshot: StreamSnapshot): void;
   state(): StreamState;
 }
 
@@ -98,6 +103,7 @@ export interface StreamClientOptions {
 export function createStreamClient(options: StreamClientOptions): StreamClient {
   const send = options.fetch ?? ((path, init) => piFetch(path, init));
   let subscription: StreamSubscription = { ...options.subscription };
+  const replica = new ReconcileReplica();
   let streamId = "";
   let stopped = true;
   let state: StreamState = "connecting";
@@ -107,6 +113,13 @@ export function createStreamClient(options: StreamClientOptions): StreamClient {
   let failures = 0;
   let generation = 0;
   let posting: Promise<void> = Promise.resolve();
+  let sentSubscription = "";
+  const declaration = (): StreamSubscription => {
+    const want = streamWants(subscription);
+    const resident = replica.have();
+    const have = Object.fromEntries(want.filter(resource => resource in resident).map(resource => [resource, resident[resource]]));
+    return { ...subscription, have, want };
+  };
 
   const setStatus = (next: StreamState, error = "") => {
     state = next;
@@ -118,12 +131,27 @@ export function createStreamClient(options: StreamClientOptions): StreamClient {
     watchdog = setTimeout(() => active.abort(new Error("The stream went silent")), DEAD_STREAM_MS);
   };
 
-  const deliver = (event: StreamEvent) => {
-    if (event.type === "hello") streamId = event.streamId;
-    if (SESSION_SCOPED.has(event.type)) {
-      const scoped = event as Extract<StreamEvent, { sessionId: string }>;
-      if (scoped.sessionId !== subscription.session) return;
+  const deliver = (event: StreamWireEvent) => {
+    if (event.type === "hello") {
+      streamId = event.streamId;
+      options.onEvent(event);
+      if (JSON.stringify(declaration()) !== sentSubscription) post();
+      return;
     }
+    if (event.type === "reconcile") {
+      if (!streamWants(subscription).includes(event.resource)) return;
+      if (/^(transcript|live|images):/.test(event.resource) && event.resource.slice(event.resource.indexOf(":") + 1) !== subscription.session) return;
+      const result = replica.apply(event);
+      if (!result.ok || !isStreamSnapshot(event.resource, result.value)) {
+        replica.forget(event.resource);
+        sentSubscription = "";
+        post();
+        return;
+      }
+      options.onEvent(result.value);
+      return;
+    }
+    if (SESSION_SCOPED.has(event.type) && "sessionId" in event && event.sessionId !== subscription.session) return;
     options.onEvent(event);
   };
 
@@ -132,10 +160,12 @@ export function createStreamClient(options: StreamClientOptions): StreamClient {
     controller = active;
     streamId = "";
     setStatus("connecting");
+    const initial = declaration();
+    sentSubscription = JSON.stringify(initial);
     const response = await send(API.stream.path(), {
       method: "POST",
       headers: { accept: "text/event-stream", "content-type": "application/json" },
-      body: JSON.stringify(subscription),
+      body: sentSubscription,
       signal: active.signal,
       cache: "no-store",
     });
@@ -155,12 +185,13 @@ export function createStreamClient(options: StreamClientOptions): StreamClient {
         if (done) throw new Error("The stream closed");
         armWatchdog(active);
         for (const frame of parser.push(decoder.decode(value, { stream: true }))) {
+          if (mine !== generation || stopped) return;
           const event = streamEventFromFrame(frame);
           if (event) deliver(event);
         }
       }
     } finally {
-      clearWatchdog();
+      if (mine === generation) clearWatchdog();
       reader.cancel().catch(() => {});
     }
   }
@@ -186,22 +217,27 @@ export function createStreamClient(options: StreamClientOptions): StreamClient {
     );
   }
 
-  function post(change: Partial<StreamSubscription>) {
+  function post() {
     const id = streamId;
+    const mine = generation;
     if (!id) return;
     posting = posting.then(async () => {
-      if (stopped || streamId !== id) return;
+      if (stopped || streamId !== id || generation !== mine) return;
+      const next = declaration();
+      const encoded = JSON.stringify(next);
+      if (encoded === sentSubscription) return;
       try {
         const response = await send(API.streamUpdate.path({ streamId: id }), {
           method: "POST",
           headers: { "content-type": "application/json" },
-          body: JSON.stringify(change),
+          body: encoded,
           cache: "no-store",
         });
         if (response.status === 404) { open(); return; }
         if (!response.ok) throw new Error(`The stream rejected the change with HTTP ${response.status}`);
+        sentSubscription = encoded;
       } catch (error) {
-        if (stopped || streamId !== id) return;
+        if (stopped || streamId !== id || generation !== mine) return;
         setStatus("offline", error instanceof Error ? error.message : String(error));
         open();
       }
@@ -242,14 +278,29 @@ export function createStreamClient(options: StreamClientOptions): StreamClient {
       }
     },
     update(change) {
+      const previous = streamWants(subscription);
       subscription = { ...subscription, ...change };
       if (stopped) return;
-      if (streamId) post(change);
-      else open();
+      for (const resource of streamWants(subscription)) {
+        if (previous.includes(resource)) continue;
+        const held = replica.get(resource);
+        if (held && isStreamSnapshot(resource, held.value)) options.onEvent(held.value);
+      }
+      if (streamId) post();
     },
     remember(change) { subscription = { ...subscription, ...change }; },
     reconnect() { failures = 0; open(); },
     subscription: () => ({ ...subscription }),
+    invalidate(resource) {
+      replica.forget(resource);
+      if (!stopped) post();
+    },
+    restore(snapshot) {
+      const resource = streamResource(snapshot);
+      if (replica.get(resource)) return;
+      replica.seed(resource, revisionOf(snapshot), snapshot);
+      if (!stopped && streamWants(subscription).includes(resource)) post();
+    },
     state: () => state,
   };
 }

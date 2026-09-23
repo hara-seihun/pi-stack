@@ -36,7 +36,7 @@ orchestrator_release=$(readlink -f "$orchestrator")
 node "$root/scripts/build-workspace.mjs" remote
 mkdir -p "$stage/release/node_modules" "$stage/release/web" "$stage/release/deploy"
 rsync -a --chmod=D755,Fu=rwX,Fgo=rX deploy/lib deploy/release-checkout deploy/smoke "$stage/release/deploy/"
-rsync -a --chmod=D755,Fu=rwX,Fgo=rX apps/remote/package.json apps/remote/server "$stage/release/"
+rsync -a --chmod=D755,Fu=rwX,Fgo=rX apps/remote/package.json apps/remote/server apps/remote/shared "$stage/release/"
 rsync -aL --chmod=D755,Fu=rwX,Fgo=rX apps/remote/skills "$stage/release/"
 rsync -a --chmod=D755,Fu=rwX,Fgo=rX apps/remote/web/dist "$stage/release/web/"
 for executable in pi-remote pi-remote-launch pi-remote-supervise; do

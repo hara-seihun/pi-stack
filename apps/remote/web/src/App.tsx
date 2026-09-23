@@ -7,8 +7,9 @@ import { api, piFetch, registerUnlockHandler } from "./client";
 import { fetchPersonChooser, reportWebReady } from "./native";
 import { useChatDrawing } from "./chat-drawing";
 import type { ReplyTarget } from "./message-reply";
+import { ReplyDrafts } from "./reply-drafts";
 import type { MessagingSnapshot } from "../../server/messaging/protocol";
-import { applySessionDelta, inboxRows, reconcileDiscoveredSessions, selectedAiId, selectionAfterSync, type Chat, type ChatId } from "./chats";
+import { inboxRows, reconcileDiscoveredSessions, selectedAiId, selectionAfterSync, type Chat, type ChatId } from "./chats";
 import { SignInDialog } from "./SignInDialog";
 import { DismissibleError } from "./dismissible-error";
 import { dismissServerError } from "./error-feedback";
@@ -37,8 +38,7 @@ import { ItemBodies, ItemBodiesContext } from "./features/conversation/item-bodi
 import { createLiveText, type LiveTextStore } from "./features/conversation/live-text";
 import { ThreadDirectoryProvider, type ThreadDirectory } from "./features/conversation/thread-chips";
 import { entriesFromHeads, WAITING_ENTRY } from "./features/conversation/transcript-entries";
-import { forgetPrefetchedTranscripts, prefetchTranscript, prefetchUnreadThreads, takePrefetchedWindow } from "./features/conversation/transcript-prefetch";
-import { applyTranscriptEvent, hasEarlier, loadEarlier, transcriptCursor, type TranscriptWindow } from "./features/conversation/transcript-store";
+import { applyTranscriptEvent, hasEarlier, loadEarlier, mergeHeads, type TranscriptWindow } from "./features/conversation/transcript-store";
 import type { QueueAction } from "./features/queue/delivery";
 import { threadStatus } from "./features/status/thread-status";
 import { speech } from "./speech";
@@ -60,8 +60,8 @@ function Loading({ label }: { label: string }) {
 }
 
 // Everything the server owns arrives on one push stream. Sections replace
-// wholesale, sessions arrive as per-id deltas, and the transcript arrives as
-// item heads; the client never patches a server-owned value from a mutation
+// wholesale, including sessions and the recent transcript window; the client
+// never patches a server-owned value from a mutation
 // response. What remains local is the view (the route), the window of items it
 // holds, and composer scratch.
 interface AppState {
@@ -96,15 +96,6 @@ function draftKey(id: string) { return appStorageKey(`pi-remote-draft:${window.P
 function loadDraft(id: string) { try { return localStorage.getItem(draftKey(id)) || ""; } catch { return ""; } }
 function saveDraft(id: string, value: string) { try { value ? localStorage.setItem(draftKey(id), value) : localStorage.removeItem(draftKey(id)); } catch {} }
 function replyKey(id: string) { return appStorageKey(`pi-remote-reply:${window.PiRemotePerson.get()}:${id}`); }
-function loadReply(id: string): ReplyTarget | null {
-  try {
-    const value = JSON.parse(localStorage.getItem(replyKey(id)) || "null");
-    return typeof value?.identity?.id === "string" && typeof value?.text === "string" ? value as ReplyTarget : null;
-  } catch { return null; }
-}
-function saveReply(id: string, value: ReplyTarget | null) {
-  try { value ? localStorage.setItem(replyKey(id), JSON.stringify(value)) : localStorage.removeItem(replyKey(id)); } catch {}
-}
 
 function useStableState() {
   const [state, setRenderedState] = useState(initialState);
@@ -189,8 +180,6 @@ const LiveConversation = memo(function LiveConversation({ live, ...props }: { li
 
 function RemoteApp() {
   const person = useRef(window.PiRemotePerson.get()).current;
-  // Windows fetched for another person or environment mean nothing here.
-  useEffect(() => forgetPrefetchedTranscripts, []);
   const { state, stateRef, patch } = useStableState();
   const layout = useLayout();
   const route = useRoute();
@@ -211,6 +200,7 @@ function RemoteApp() {
   const [prompt, setPrompt] = useState("");
   const [reply, setReply] = useState<ReplyTarget | null>(null);
   const replyRef = useRef<ReplyTarget | null>(null);
+  const replyDrafts = useMemo(() => new ReplyDrafts(localStorage, replyKey), []);
   const [pending, setPending] = useState(false);
   const [pendingAction, setPendingAction] = useState<string | null>(null);
   const [stopTarget, setStopTarget] = useState<Session | null>(null);
@@ -227,16 +217,14 @@ function RemoteApp() {
   const stream = useRef<StreamClient | null>(null);
   // Live answer and thinking text, thirty frames a second, kept out of the
   // app's state so only the open conversation re-renders for them.
-  const resync = useRef(() => {});
   const live = useRef<LiveTextStore | null>(null);
-  live.current ??= createLiveText(() => resync.current());
+  live.current ??= createLiveText();
   const panelPushed = useRef(false);
   const [visible, setVisible] = useState(() => typeof document === "undefined" || document.visibilityState === "visible");
   // Reconnect now. The stream pushes on its own, so this only matters when it
   // is not carrying anything: after a mutation the server sends the change.
   const kick = useCallback(() => { if (stream.current?.state() !== "open") stream.current?.reconnect(); }, []);
-  const reconnect = useCallback(() => { stream.current?.reconnect(); }, []);
-  resync.current = reconnect;
+  const reconnect = useCallback(() => stream.current?.reconnect(), []);
   const liveText = live.current;
   const selectedSession = useCallback(() => {
     const current = stateRef.current;
@@ -341,26 +329,22 @@ function RemoteApp() {
         ? [...current.discovered, discovered] : current.discovered,
     }));
     setPrompt(loadDraft(id));
-    replyRef.current = loadReply(id);
+    replyRef.current = replyDrafts.load(id);
     setReply(replyRef.current);
+    if (remembered?.transcript) stream.current?.restore({ type: "transcript", sessionId: id, ...remembered.transcript });
     kick();
-    // Memory paints synchronously. Disk and speculative fetches may fill a
-    // cold opening, but never replace a newer stream frame.
+    // Memory paints synchronously. Disk may fill a cold opening, but never
+    // replace a newer stream frame.
     if (remembered?.transcript) return;
-    let painted: TranscriptWindow | null = null;
     const usable = () => !signal?.aborted && selectedAiId(stateRef.current) === id && generation === selectionGeneration.current;
     void cache.restoreThread(id).then((window) => {
       if (window && usable() && !stateRef.current.transcript) {
-        painted = window;
         cache.rememberThread(id, { transcript: window });
+        stream.current?.restore({ type: "transcript", sessionId: id, ...window });
         patch({ transcript: window });
+        stream.current?.update({ transcriptFrom: window.items[0]?.seq ?? null });
       }
     });
-    const prefetched = await takePrefetchedWindow(id);
-    if (prefetched && usable() && (!stateRef.current.transcript || stateRef.current.transcript === painted)) {
-      cache.rememberThread(id, { transcript: prefetched });
-      patch({ transcript: prefetched });
-    }
   }, [cache, kick, liveText, patch, stateRef]);
   useLayoutEffect(() => {
     if (routeChat === stateRef.current.selectedChatId) return;
@@ -384,8 +368,6 @@ function RemoteApp() {
           await window.KenanRemote?.select({ id: target.environment, user: target.user || "" });
           location.reload();
         } else {
-          // The window is on its way before the route changes.
-          prefetchTranscript(target.sessionId);
           openThreadId(target.sessionId, "chats");
         }
       } catch (cause) { patch({ offline: `Could not open notification: ${String(cause)}` }); }
@@ -399,7 +381,6 @@ function RemoteApp() {
   // person left are dropped by the client before they reach this handler.
   const notificationsSubscribed = useRef(false);
   const carrying = useRef(false);
-  const arrived = useRef(false);
   useEffect(() => {
     const handle = (event: StreamEvent) => {
       carrying.current = true;
@@ -417,13 +398,14 @@ function RemoteApp() {
         }
         case "state": {
           const current = stateRef.current;
-          const sessions = applySessionDelta(current.sessions, event);
-          for (const id of event.removed) cache.forgetThread(id);
+          const sessions = event.sessions;
+          const present = new Set(sessions.map(session => session.id));
+          for (const previous of current.sessions) if (!present.has(previous.id)) cache.forgetThread(previous.id);
           const update: Partial<AppState> = {
             sessions,
             archivedTotal: event.archivedTotal,
             ownerErrors: event.ownerErrors ?? [],
-            discovered: reconcileDiscoveredSessions(current.discovered, sessions, event),
+            discovered: reconcileDiscoveredSessions(current.discovered, sessions),
             syncing: false,
           };
           // A thread closed on another device leaves this client's view too.
@@ -431,13 +413,6 @@ function RemoteApp() {
           if (closed) { liveText.reset(); Object.assign(update, { selectedChatId: null, transcript: null, images: null }); }
           patch(update);
           if (closed) navigate(routeHome(currentRoute()), { replace: true });
-          // The threads that settled while the person was away are the ones
-          // they open; their windows are worth having before the tap, on a
-          // connection that is not counting bytes.
-          if (!arrived.current) {
-            arrived.current = true;
-            prefetchUnreadThreads(sessions.filter(session => session.id !== routeThreadId(currentRoute())));
-          }
           break;
         }
         case "messaging": {
@@ -451,9 +426,10 @@ function RemoteApp() {
         }
         case "dashboard": patch({ dashboard: event.dashboard }); break;
         case "transcript": {
-          const transcript = applyTranscriptEvent(stateRef.current.transcript, event);
+          const previous = stateRef.current.transcript;
+          const transcript = applyTranscriptEvent(previous, event);
           patch({ transcript, syncing: false, earlierError: "" });
-          stream.current?.remember({ transcript: transcriptCursor(transcript) });
+          if (previous && previous.generation !== transcript.generation) stream.current?.update({ transcriptFrom: null });
           cache.rememberThread(event.sessionId, { transcript });
           break;
         }
@@ -480,6 +456,7 @@ function RemoteApp() {
         session: routeThreadId(opening),
         viewing: document.visibilityState === "visible" && !!routeThreadId(opening),
         dashboard: opening.tab === "machine",
+        transcriptFrom: cache.thread(routeThreadId(opening) ?? "")?.transcript?.items[0]?.seq ?? null,
       },
       onEvent: handle,
       onStatus: (status) => {
@@ -491,6 +468,9 @@ function RemoteApp() {
       },
     });
     stream.current = client;
+    const selectedId = routeThreadId(opening);
+    const remembered = selectedId ? cache.thread(selectedId)?.transcript : null;
+    if (selectedId && remembered) client.restore({ type: "transcript", sessionId: selectedId, ...remembered });
     client.start();
     return () => {
       client.stop();
@@ -509,11 +489,11 @@ function RemoteApp() {
       viewing: visible && !messagingActive && !!aiId,
       thinking: false,
       dashboard: route.tab === "machine",
+      transcriptFrom: aiId === held.session ? held.transcriptFrom ?? null : cache.thread(aiId ?? "")?.transcript?.items[0]?.seq ?? null,
     };
     const same = (held.session ?? null) === next.session && !!held.viewing === next.viewing && !!held.dashboard === next.dashboard && !held.thinking;
     if (same) return;
-    // A different thread starts a fresh window; the server decides what to send.
-    client.update(held.session === next.session ? next : { ...next, transcript: null });
+    client.update(next);
   }, [aiId, messagingActive, route.tab, visible]);
 
   const showEarlier = useCallback(() => {
@@ -523,9 +503,14 @@ function RemoteApp() {
     patch({ loadingEarlier: true, earlierError: "" });
     void loadEarlier(id, window).then((result) => {
       if (selectedAiId(stateRef.current) !== id) return;
-      cache.rememberThread(id, { transcript: result.window });
-      patch({ transcript: result.window, loadingEarlier: false });
-      stream.current?.remember({ transcript: transcriptCursor(result.window) });
+      const latest = stateRef.current.transcript;
+      const changedWhilePaging = latest?.generation !== window.generation;
+      const updated = !result.reset && latest?.generation === result.window.generation
+        ? { ...latest, items: mergeHeads(result.window.items, latest.items) }
+        : changedWhilePaging ? latest ?? result.window : result.window;
+      cache.rememberThread(id, { transcript: updated });
+      patch({ transcript: updated, loadingEarlier: false });
+      stream.current?.update({ transcriptFrom: result.reset || changedWhilePaging ? null : updated.items[0]?.seq ?? null });
     }, (cause: unknown) => {
       if (selectedAiId(stateRef.current) !== id) return;
       patch({ loadingEarlier: false, earlierError: cause instanceof Error ? cause.message : String(cause) });
@@ -537,14 +522,10 @@ function RemoteApp() {
     if (!open) liveText.clearThinking();
   }, [liveText]);
 
-  // A press starts before the tap lands, and the conversation needs its newest
-  // window either way: ask for it now so it paints from the answer, and start
-  // the Markdown renderer in the same beat since the thread will want it.
-  const prefetchThread = useCallback((id: string) => {
-    if (id === selectedAiId(stateRef.current)) return;
-    if (!cache.thread(id)?.transcript) prefetchTranscript(id);
+  // Start the renderer before opening a thread; the stream supplies its window.
+  const prefetchThread = useCallback((_id: string) => {
     void ensureMarkdown().catch(console.error);
-  }, [cache, stateRef]);
+  }, []);
   const prefetchChat = useCallback((chat: Chat) => { if (chat.kind === "ai") prefetchThread(chat.session.id); }, [prefetchThread]);
   const prefetchSession = useCallback((session: Session) => prefetchThread(session.id), [prefetchThread]);
 
@@ -625,7 +606,7 @@ function RemoteApp() {
       // The fork starts a new generation; drop the window and take the server's.
       cache.forgetThread(id);
       patch({ transcript: null });
-      stream.current?.update({ transcript: null });
+      stream.current?.invalidate(`transcript:${id}`);
     } finally { setPending(false); kick(); }
   }, [cache, kick, patch, pending, stateRef]);
 
@@ -694,6 +675,7 @@ function RemoteApp() {
     const text = prompt.trim();
     if (!text && !attachments.length) return;
     const selectedReply = replyRef.current;
+    const replyVersion = replyDrafts.version(session.id);
     const command = text.startsWith("/") ? state.slashCommands.find((candidate) => candidate.name === text.slice(1).split(/\s/, 1)[0]) : null;
     setControlError(null);
     setPrompt(""); saveDraft(session.id, ""); setPending(true);
@@ -702,10 +684,9 @@ function RemoteApp() {
       const bodyText = [text, attachmentText].filter(Boolean).join("\n\n");
       if (command && !attachments.length && !selectedReply) await api(API.sessionCommand.method, API.sessionCommand.path({ sessionId: session.id }), { requestId: crypto.randomUUID(), name: command.name, args: text.slice(command.name.length + 2).trim() }, 130_000);
       else await api(API.sessionPrompt.method, API.sessionPrompt.path({ sessionId: session.id }), { requestId: crypto.randomUUID(), text: bodyText, delivery: session.state === "running" ? delivery : "queue", replyTo: selectedReply?.identity.id });
-      if (replyRef.current === selectedReply) {
+      if (replyDrafts.accept(session.id, replyVersion) && selectedAiId(stateRef.current) === session.id) {
         replyRef.current = null;
-        saveReply(session.id, null);
-        if (selectedAiId(stateRef.current) === session.id) setReply(null);
+        setReply(null);
       }
       const sentIds = new Set(attachments.map((file) => file.localId));
       patch((current) => ({ attachments: current.attachments.filter((file) => !sentIds.has(file.localId)) }));
@@ -821,7 +802,7 @@ function RemoteApp() {
     ? <ItemBodiesContext.Provider value={bodies}><LiveConversation live={liveText} session={selected} ancestors={ancestors} entries={contextEntries} images={images} offline={state.offline} pending={pending} home={home} prompt={prompt}
         earlierAvailable={hasEarlier(state.transcript)} loadingEarlier={state.loadingEarlier} earlierError={state.earlierError} onShowEarlier={showEarlier} onThinkingOpen={thinkingOpen}
         attachments={visibleAttachments.map(file => ({ id: file.localId, name: file.name, uploading: file.uploading }))} slashCommands={state.slashCommands} drawing={drawing} uploadError={uploadError?.sessionId === aiId ? uploadError.message : ""} controlError={controlError?.sessionId === aiId && !stopTarget ? controlError.message : ""} showBack={layout === "phone"} showIdentity={showConversationIdentity}
-        onBack={closeDetail} onOpenInspector={() => openPanel("inspector")} onOpenAncestor={session => openThreadId(session.id)} onOpenQueue={() => openPanel("queue")} onEdit={editFrom} reply={reply} onReply={target => { replyRef.current = target; setReply(target); saveReply(selected.id, target); }} onCancelReply={() => { replyRef.current = null; setReply(null); saveReply(selected.id, null); }} onPrompt={text => { setPrompt(text); if (aiId) saveDraft(aiId, text); }} onSend={delivery => void send(delivery)} onStop={() => stopThread(selected)} onResume={() => void controlThread(selected.id, "resume")} onReconnect={reconnect}
+        onBack={closeDetail} onOpenInspector={() => openPanel("inspector")} onOpenAncestor={session => openThreadId(session.id)} onOpenQueue={() => openPanel("queue")} onEdit={editFrom} reply={reply} onReply={target => { replyRef.current = target; setReply(target); replyDrafts.save(selected.id, target); }} onCancelReply={() => { replyRef.current = null; setReply(null); replyDrafts.save(selected.id, null); }} onPrompt={text => { setPrompt(text); if (aiId) saveDraft(aiId, text); }} onSend={delivery => void send(delivery)} onStop={() => stopThread(selected)} onResume={() => void controlThread(selected.id, "resume")} onReconnect={reconnect}
         onRemoveAttachment={id => { const file = visibleAttachments.find(item => item.localId === id); if (file) void removeAttachment(file); }} onUpload={files => void uploadFiles(files)} onPaste={() => setPasteSessionId(aiId)} onDraw={() => drawing.open()} onDismissControlError={() => setControlError(null)} /></ItemBodiesContext.Provider>
     : messagingActive && humanConversation
       ? <div className="conversation-screen"><ConversationHeader title={humanConversation.title} avatar={messagingAvatarUrl(humanConversation.backendId, humanConversation.externalId, humanConversation.avatar)} showIdentity={showConversationIdentity} meta={<span className="conversation-meta">{humanBackend?.label || "Messaging"}{humanBackend && humanBackend.status !== "ready" ? ` · ${humanBackend.status}` : ""}</span>} trailing={<SignalCallButton conversation={humanConversation} available={humanBackend?.plugin === "signal"} enabled={humanBackend?.status === "ready" && humanBackend.capabilities.calls === true} />} onBack={layout === "phone" ? closeDetail : null} onOpenInspector={null} />

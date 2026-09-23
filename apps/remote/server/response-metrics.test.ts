@@ -107,11 +107,9 @@ describe("delivery to the transcript", () => {
     const metrics = { ttftMs: 900, generationMs: 1_000, outputTokens: 30, tokensPerSecond: 30 };
     const items = new TranscriptItems();
     const first = items.derive("session", "hash-1", () => ({ messages: [assistant()] }));
-    expect(first.reset).toBe(true);
     const second = items.derive("session", "hash-2", () => ({ messages: [assistant(metrics)] }));
-    expect(second.reset).toBe(false);
     expect(second.current.generation).toBe(first.current.generation);
-    expect(second.changed).toHaveLength(1);
-    expect(second.changed[0]).toMatchObject({ kind: "assistant", responseMetrics: metrics });
+    expect(second.current.items.at(-1)!.head).toMatchObject({ kind: "assistant", responseMetrics: metrics });
+    expect(first.current.items.at(-1)!.head.responseMetrics).toBeUndefined();
   });
 });

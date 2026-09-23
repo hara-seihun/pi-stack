@@ -483,7 +483,7 @@ import { createStreamClient } from "./stream";
       if (this.state !== "live") return;
       try {
         if (event.type === "live") {
-          if (event.text) this.liveTextValue = "reset" in event.text ? event.text.reset : this.liveTextValue + event.text.append;
+          this.liveTextValue = event.text;
           this.observeLiveText(this.liveTextValue);
         } else if (event.type === "events") {
           this.consumeEvents(event.events || []);
