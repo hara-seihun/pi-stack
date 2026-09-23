@@ -48,24 +48,46 @@ export function threadTools(options: PiSessionOptions) {
     }),
     defineTool({
       name: "thread_await", label: "Await a child result",
-      description: "Wait for the first settlement from one or more direct children without polling. Returns its outcome and final message, remaining thread IDs and per-thread after cursors. Pass the returned after when waiting again, including after resuming the same worker, to skip results already seen. Other children keep running. Final message text is preserved; thinking, image bytes and signatures are omitted. Stop or hard steer cancels the wait; ordinary steer waits for this tool boundary.",
+      description: "Wait up to 25 seconds for the first settlement from direct children. A timeout returns settlement:null, timedOut:true, remaining IDs, after cursors and current child statuses; it does not settle or stop children. Use the statuses to decide whether to intervene, continue other work or call again with the returned after. Settlements include outcome and final message; thinking, image bytes and signatures are omitted. Stop or hard steer cancels the wait; ordinary steer waits for this tool boundary.",
       parameters: Type.Object({
         threadIds: Type.Array(Type.String({ minLength: 1 }), { minItems: 1, maxItems: 100, uniqueItems: true }),
         after: Type.Optional(Type.Record(Type.String(), Type.Integer({ minimum: 0, maximum: Number.MAX_SAFE_INTEGER }))),
       }),
       execute: async (_id, input, signal) => {
-        const owner = api(signal);
-        let after = input.after;
-        while (true) {
+        const value = await api(signal).await({ ...input, parentId: options.threadId, timeoutMs: THREAD_AWAIT_TIMEOUT_MS }, signal);
+        signal?.throwIfAborted();
+        if (!value.ok) return result(value);
+        const settlement = value.value.settlement;
+        if (settlement) return result({ ok: true, value: { ...value.value, settlement: { ...settlement,
+          finalMessage: settlement.finalMessage ? JSON.parse(visibleEntry(settlement.finalMessage)) : null,
+        } } });
+
+        const diagnostics = new AbortController();
+        const timer = setTimeout(() => diagnostics.abort(), 2_000);
+        const statusSignal = signal ? AbortSignal.any([signal, diagnostics.signal]) : diagnostics.signal;
+        try {
+          const statuses = await Promise.race([
+            Promise.all(value.value.remainingThreadIds.map(async threadId => {
+              try {
+                const page = await api(statusSignal).list({ id: threadId, limit: 1 });
+                if (!page.ok) return { threadId, error: page.error };
+                const thread = page.value.threads.find(item => item.id === threadId && item.parentId === options.threadId);
+                if (!thread) return { threadId, error: { code: "not_found", message: "Direct child status unavailable" } };
+                return { threadId, state: thread.state, held: thread.held, pendingMessages: thread.pendingMessages,
+                  ...(thread.metadata?.admissionWait ? { admissionWait: thread.metadata.admissionWait } : {}),
+                  ...(thread.metadata?.executionError ? { executionError: thread.metadata.executionError } : {}) };
+              } catch (error) {
+                return { threadId, error: { code: "unavailable", message: error instanceof Error ? error.message : String(error) } };
+              }
+            })),
+            new Promise<null>(resolve => statusSignal.addEventListener("abort", () => resolve(null), { once: true })),
+          ]);
           signal?.throwIfAborted();
-          const value = await owner.await({ ...input, parentId: options.threadId, after, timeoutMs: THREAD_AWAIT_TIMEOUT_MS }, signal);
-          signal?.throwIfAborted();
-          if (!value.ok) return result(value);
-          const settlement = value.value.settlement;
-          if (settlement) return result({ ok: true, value: { ...value.value, settlement: { ...settlement,
-            finalMessage: settlement.finalMessage ? JSON.parse(visibleEntry(settlement.finalMessage)) : null,
-          } } });
-          after = value.value.after;
+          return result({ ok: true, value: { ...value.value, timedOut: true,
+            statuses: statuses ?? value.value.remainingThreadIds.map(threadId => ({ threadId, error: { code: "unavailable", message: "Status lookup timed out; use thread_read to inspect this child" } })) } });
+        } finally {
+          clearTimeout(timer);
+          diagnostics.abort();
         }
       },
     }),

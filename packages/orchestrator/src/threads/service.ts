@@ -39,6 +39,7 @@ export interface ImportMessage {
   executionId?: string; finalMessage?: Record<string, unknown> | null; settings?: ThreadSettings;
 }
 class NativeRejection extends Error {}
+class AdmissionWait extends Error {}
 interface Runtime {
   session: PiSession; epoch: string; executionId?: string; lease?: ThreadAdmission; busy: boolean; settings?: ThreadSettings;
   finalMessage?: Json; outcome?: WorkOutcome; commandRunning?: string; commandNumber: number; waiters: Map<string, { resolve(value: any): void; reject(error: Error): void; timer: ReturnType<typeof setTimeout> }>;
@@ -245,8 +246,18 @@ export class ThreadService implements ThreadApi {
     void this.serial(id, async () => {
       try { await this.drain(id); }
       catch (error) {
-        if (!this.closed && !this.suspended && !this.runtimes.has(id) && isModelConfigurationError(errorText(error))) await this.rejectModelStartup(id, errorText(error));
-        else throw error;
+        if (this.closed || this.suspended || error instanceof AdmissionWait) return;
+        if (this.runtimes.has(id) || this.row(id)?.held || this.halts.has(id)) throw error;
+        const message = errorText(error);
+        const work = this.execution(id)?.work_id ?? this.pending(id)[0]?.id;
+        if (!work) throw error;
+        const prior = this.get(id)?.metadata?.startupFailure as Json | undefined;
+        const attempts = prior && prior.workId === work ? Number(prior.attempts) + 1 : 1;
+        const permanent = isModelConfigurationError(message) || /Pi cwd admission rejected|Invalid recorded (?:runner|isolated)|Compiled thread runner is missing/.test(message);
+        const failure = { workId: work, attempts, error: message, retryAt: Date.now() + Math.min(attempts * 5_000, 30_000) };
+        this.sql("UPDATE thread SET metadata=json_set(metadata,'$.startupFailure',json(?),'$.executionError',?) WHERE id=?").run(JSON.stringify(failure), message, id);
+        this.changed(id);
+        if (permanent || attempts >= 3) await this.rejectStartup(id, message);
       }
     }).catch(error => {
       if (this.closed || this.suspended || !this.row(id)) return;
@@ -531,7 +542,8 @@ export class ThreadService implements ThreadApi {
     const current = this.halts.get(id); if (current) return current;
     const operation = Promise.resolve().then(async (): Promise<Result<Thread>> => {
       try {
-        await this.opening.get(id);
+        // A rejected startup is not a failed cancellation: inspect the retained runner directly.
+        await this.opening.get(id)?.catch(() => undefined);
         const runtime = this.runtimes.get(id) ?? await this.attach(id);
         if (runtime) await this.rpc(runtime, { type: "abort" });
         await this.finish(id, runtime, runtime?.outcome ?? "cancelled", runtime?.finalMessage ?? null);
@@ -646,7 +658,14 @@ export class ThreadService implements ThreadApi {
     let recoveredAdmission: ThreadAdmission | undefined;
     if (recoveredExecution && this.options.admit) {
       const admitted = await this.options.admit(thread, settings, true, recoveredExecution.id);
-      if (!admitted.ok) throw new Error(admitted.error.message);
+      if (!admitted.ok) {
+        if (admitted.error.code === "unavailable") {
+          this.admissionWait(id, admitted.error);
+          throw new AdmissionWait(admitted.error.message);
+        }
+        throw new Error(admitted.error.message);
+      }
+      this.clearAdmissionWait(id);
       recoveredAdmission = admitted.value; extraEnv = { ...extraEnv, ...admitted.value.env }; settings = admitted.value.settings ?? settings;
     }
     const runtime: Runtime = { session: undefined as unknown as PiSession, epoch: randomUUID(), busy: false, commandNumber: 0, waiters: new Map(), lease: recoveredAdmission, settings };
@@ -765,6 +784,9 @@ export class ThreadService implements ThreadApi {
   private async drain(id: string): Promise<void> {
     if (this.suspended || this.closed) return;
     const thread = this.get(id); if (!thread || this.row(id)?.held || this.halts.has(id) || this.closed) return;
+    const startup = thread.metadata?.startupFailure as Json | undefined;
+    const nextWork = this.execution(id)?.work_id ?? this.pending(id)[0]?.id;
+    if (startup && startup.workId === nextWork && Number(startup.retryAt) > Date.now()) return;
     let execution = this.execution(id), runtime = this.runtimes.get(id);
     if ((execution || runtime || thread.metadata?.runnerReference) && this.pending(id).some(work => work.delivery === "hardSteer" && work.state === "queued")) {
       const halted = await this.halt(id); if (!halted.ok) return;
@@ -787,7 +809,7 @@ export class ThreadService implements ThreadApi {
       const admission = this.options.admit ? await this.options.admit(thread, settings, false, executionId) : good<ThreadAdmission>({ release() {} });
       if (!admission.ok) {
         // Capacity refusals are retried by reconcile; anything else will refuse identically forever.
-        if (admission.error.code !== "unavailable") { await this.rejectModelStartup(id, admission.error.message); return; }
+        if (admission.error.code !== "unavailable") { await this.rejectStartup(id, admission.error.message); return; }
         this.admissionWait(id, admission.error); return;
       }
       this.clearAdmissionWait(id);
@@ -796,6 +818,7 @@ export class ThreadService implements ThreadApi {
       this.state(id, "running");
       try { runtime = await this.open(id, admission.value.settings ?? settings, false, admission.value.env); }
       catch (error) { await admission.value.release(); throw error; }
+      this.sql("UPDATE thread SET metadata=json_remove(metadata,'$.startupFailure') WHERE id=?").run(id);
       runtime.lease = admission.value;
       if (this.suspended || this.row(id)?.held || this.halts.has(id)) { await admission.value.release(); runtime.lease = undefined; await this.retire(id, runtime); return; }
       this.transaction(() => {
@@ -820,9 +843,12 @@ export class ThreadService implements ThreadApi {
       } else throw error;
     }
   }
-  private async rejectModelStartup(id: string, error: string): Promise<void> {
+  private async rejectStartup(id: string, error: string): Promise<void> {
+    // Startup acknowledgements can be lost. Confirm absence or cancellation before settling.
+    this.sql("UPDATE thread SET held=1 WHERE id=?").run(id);
+    const runtime = this.runtimes.get(id) ?? await this.attach(id);
+    if (runtime) await this.rpc(runtime, { type: "abort" });
     this.transaction(() => {
-      this.sql("UPDATE thread SET held=1 WHERE id=?").run(id);
       if (this.execution(id)) return;
       const work = this.sql("SELECT id,settings FROM thread_work WHERE thread_id=? AND status='queued' ORDER BY front DESC,ordinal LIMIT 1").get(id) as Json | undefined;
       if (!work) return;
@@ -830,10 +856,10 @@ export class ThreadService implements ThreadApi {
       this.sql("INSERT INTO thread_execution(id,thread_id,work_id,settings,created_at) VALUES(?,?,?,?,?)").run(executionId, id, work.id, work.settings, Date.now());
       this.sql("UPDATE thread_work SET status='dispatched',execution_id=? WHERE id=?").run(executionId, work.id);
     });
-    await this.finish(id, undefined, "failed", null, error);
-    const halted = await this.halt(id);
+    if (runtime) runtime.executionId = this.execution(id)?.id;
+    await this.finish(id, runtime, "failed", null, error);
     if (this.closed || this.suspended) return;
-    this.sql("UPDATE thread SET metadata=json_set(metadata,'$.executionError',?) WHERE id=?").run(halted.ok ? error : `${error}; ${halted.error.message}`, id);
+    this.sql("UPDATE thread SET state='idle',metadata=json_set(metadata,'$.executionError',?) WHERE id=?").run(error, id);
     this.changed(id);
   }
   private async finish(id: string, runtime: Runtime | undefined, outcome: WorkOutcome, finalMessage: Json | null, error?: string): Promise<void> {
