@@ -1,4 +1,4 @@
-import type { ChatId, SessionPatch } from "../../server/protocol";
+import type { ChatId } from "../../server/protocol";
 export type { ChatId } from "../../server/protocol";
 import type { MessagingBackendInfo, MessagingConversation, MessagingSnapshot } from "../../server/messaging/protocol";
 import type { Session, ThreadStart } from "./types";
@@ -59,38 +59,10 @@ export function currentChats(sessions: Session[], starts: ThreadStart[], messagi
   return inboxRows(sessions, starts, messaging).map(row => row.chat);
 }
 
-/**
- * The stream sends rows the client does not hold, patches for the rows it
- * does, and removed ids, rather than the whole list. A reset replaces it: the
- * server is telling the client to forget what it has.
- *
- * A patch names only the fields whose value changed; a field that became
- * undefined arrives as `null`, which is how the client stores it too. A patch
- * for a row the client does not hold is dropped: the server sends the full row
- * for anything it has not seen, and half a row would render as blanks.
- */
-export function applySessionDelta(current: Session[], delta: { reset: boolean; sessions: Session[]; patches?: SessionPatch[]; removed: string[] }): Session[] {
-  if (delta.reset) return [...delta.sessions];
-  const removed = new Set(delta.removed);
-  const changed = new Map<string, Session>(delta.sessions.map(session => [session.id, session]));
-  const patches = new Map((delta.patches ?? []).map(patch => [patch.id, patch]));
-  const next = current.filter(session => !removed.has(session.id)).map((session) => {
-    const replacement = changed.get(session.id);
-    if (replacement) return replacement;
-    const patch = patches.get(session.id);
-    return patch ? { ...session, ...patch } as Session : session;
-  });
-  for (const session of delta.sessions) if (!current.some(item => item.id === session.id) && !removed.has(session.id)) next.push(session);
-  return next;
-}
-
-/** Directly fetched rows bridge the gap until the stream carries them. A reset
- * is the complete directory, so no side-loaded row may survive it. */
-export function reconcileDiscoveredSessions(discovered: Session[], sessions: Session[], delta: { reset: boolean; removed: string[] }): Session[] {
-  if (delta.reset) return [];
+/** Directly fetched rows bridge the gap until the authoritative directory carries them. */
+export function reconcileDiscoveredSessions(discovered: Session[], sessions: Session[]): Session[] {
   const present = new Set(sessions.map(session => session.id));
-  const removed = new Set(delta.removed);
-  return discovered.filter(session => !present.has(session.id) && !removed.has(session.id));
+  return discovered.filter(session => !present.has(session.id));
 }
 
 export interface ChatSnapshot { sessions: Session[]; messaging: MessagingSnapshot }

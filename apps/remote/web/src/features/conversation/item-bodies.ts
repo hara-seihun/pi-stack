@@ -11,7 +11,7 @@ import type { BodyCache } from "../../client-cache";
 export type BodyFetch = (sessionId: string, id: string) => Promise<TranscriptItemBody>;
 
 const requestBody: BodyFetch = async (sessionId, id) => {
-  const response = await piFetch(API.sessionItem.path({ sessionId, itemId: id }), { headers: { accept: "application/json" }, cache: "no-store" });
+  const response = await piFetch(API.sessionItem.path({ sessionId, itemId: id }), { headers: { accept: "application/json" } });
   const text = await response.text();
   const body = text ? JSON.parse(text) : {};
   if (!response.ok) throw new Error(body.error || `Transcript item returned HTTP ${response.status}`);

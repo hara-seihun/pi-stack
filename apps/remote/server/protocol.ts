@@ -5,6 +5,7 @@
 
 import type { ThreadState } from "pi-orchestrator/api";
 import type { MessagingSnapshot } from "./messaging/protocol.js";
+import type { ReconcileFrame } from "../shared/reconcile.js";
 export type ChatId = `ai:${string}` | `human:${string}`;
 export type FileBrowserEntry = { name: string; path: string; kind: "directory" | "file" | "other" };
 import type { InlineImage, InlineImageSnapshot } from "./inline-image-contract.js";
@@ -77,9 +78,6 @@ export interface Session {
   queuedMessages: QueuedMessage[];
   archivedAt: string | null;
 }
-
-/** The changed fields of a row the client already holds. */
-export type SessionPatch = Pick<Session, "id"> & Partial<Session>;
 
 export interface SessionEvent {
   seq: number;
@@ -227,7 +225,7 @@ export interface Dashboard {
 }
 
 /** Every thread the inbox and worker tree list, as `GET /v1/sessions` returns
- * it. The stream delivers the same rows as per-session deltas. */
+ * it. The stream delivers the same directory as a reconciled snapshot. */
 export interface SupervisorState {
   sessions: Session[];
   archivedTotal: number;
@@ -376,8 +374,12 @@ export interface StreamSubscription {
   session?: string | null;
   /** True only while the person can see that conversation. */
   viewing?: boolean;
-  /** Generation and highest seq the client already holds for `session`; omit for a fresh window. */
-  transcript?: { generation: string; after: number } | null;
+  /** Earliest transcript seq the selected thread has loaded; null requests the latest 60. */
+  transcriptFrom?: number | null;
+  /** Revisions actually held in the client replica. */
+  have?: Record<string, string>;
+  /** Resources to carry. Session-scoped resources also require `session` authorization. */
+  want?: string[];
   /** Stream live thinking text. Off by default; the client turns it on when the thinking card is opened. */
   thinking?: boolean;
   /** Carry the Machine screen. */
@@ -388,25 +390,21 @@ export interface StreamSubscription {
   eventsAfter?: number | null;
 }
 
-export type StreamEvent =
-  /** First event. A new stream always follows with full `state` and `messaging` events. */
-  | { type: "hello"; epoch: string; streamId: string; bootstrap: Bootstrap }
+export type StreamSnapshot =
   | { type: "bootstrap"; bootstrap: Bootstrap }
-  /** Inbox rows: `sessions` are rows the client does not hold, `patches` name
-   * only the changed fields of rows it does, `removed` are gone. `queuedMessages`
-   * is populated only for the subscribed session. */
-  | { type: "state"; version: number; reset: boolean; sessions: Session[]; patches: SessionPatch[]; removed: string[]; archivedTotal: number; ownerErrors: SupervisorState["ownerErrors"] }
+  | ({ type: "state" } & SupervisorState)
   | { type: "messaging"; snapshot: MessagingSnapshot }
   | { type: "dashboard"; dashboard: Dashboard }
-  /** Newest window or incremental change. `reset` replaces everything the client holds for this generation. */
-  | { type: "transcript"; sessionId: string; generation: string; total: number; reset: boolean; items: TranscriptItemHead[] }
-  | { type: "live"; sessionId: string; text?: LiveTextChange; thinking?: LiveTextChange }
-  | { type: "images"; sessionId: string; snapshot: InlineImageSnapshot }
+  | ({ type: "transcript" } & TranscriptPage)
+  | { type: "live"; sessionId: string; text: string; thinking?: string }
+  | { type: "images"; sessionId: string; snapshot: InlineImageSnapshot };
+
+export type StreamEvent =
+  | { type: "hello"; epoch: string; streamId: string; bootstrap: Bootstrap }
+  | ({ type: "reconcile" } & ReconcileFrame)
+  | StreamSnapshot
   | { type: "notifications"; feed: IdleNotificationFeed }
   | { type: "events"; sessionId: string; events: SessionEvent[] }
   | { type: "error"; message: string };
 
-/** Live text is append-only until the server shortens or replaces it. */
-export type LiveTextChange =
-  | { append: string; length: number }
-  | { reset: string };
+export type StreamWireEvent = Exclude<StreamEvent, StreamSnapshot>;

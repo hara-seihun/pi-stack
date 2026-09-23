@@ -1,7 +1,7 @@
 import { afterAll, expect, test } from "bun:test";
 import { IDBFactory, IDBKeyRange } from "fake-indexeddb";
 import { ClientCache } from "./src/client-cache";
-import { ResourceCache } from "./src/resource-cache";
+import { ResourceCache } from "../shared/resource-cache";
 import { ItemBodies } from "./src/features/conversation/item-bodies";
 import { readCachedBody, readCachedWindow, writeCachedBody, writeCachedWindow } from "./src/transcript-cache";
 import type { TranscriptItemBody } from "../server/protocol";
