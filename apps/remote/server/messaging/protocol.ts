@@ -89,6 +89,14 @@ export interface MessagingAttachment {
   size: number;
 }
 
+export interface MessagingLinkPreview {
+  url: string;
+  title: string;
+  description: string | null;
+  imageUrl: string | null;
+  siteName: string | null;
+}
+
 export interface MessagingMessage {
   id: string;
   requestId: string | null;

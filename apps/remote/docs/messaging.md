@@ -115,6 +115,12 @@ Message `sender` and external IDs remain stable identities. History adds `sender
 
 Contact and group pictures come from the files signal-cli has already fetched into its `avatars/` directory (`profile-<uuid>`, `profile-<number>` or `group-<id>`, without extensions). The adapter records the picture's path and modification time with the sender or conversation at discovery, contact synchronization and receive events; a contact whose photo lands after discovery shows it the next time they write. The service serves them at `GET /v1/messaging/backends/:backendId/avatars/:id`, where `id` is a conversation's `externalId` or a message's `sender`, resolving sender aliases and reading the image type from the file's first bytes; only JPEG, PNG, GIF and WebP are served. Conversations carry `avatar` and messages `senderAvatar`, the picture's version, or null/absent when there is none; a client puts the version in the URL query so a changed photo is fetched again. The inbox, the conversation header and each sender's block show the picture, falling back to the Signal glyph.
 
+### Link previews
+
+The chat shows cards for up to three distinct HTTP(S) URLs in a stored message, including messages received before this feature existed. `GET /v1/messaging/messages/:messageId/link-previews` returns `{previews: MessagingLinkPreview[]}`; the router authenticates the person and the service reads only that person's encrypted message store. A missing message returns 404. The shared [`extractMessageLinks`](../server/messaging/links.ts) function keeps browser linkification and preview selection aligned. Previews are resolved on demand, not written into Signal history.
+
+The service reads Open Graph, Twitter and page-title metadata with a bounded HTML download. Each DNS answer is checked for private IPv4 destinations, and the request pins the checked address, including on redirects; IPv6-only targets get a plain hostname card. Metadata images are fetched with the same restrictions and returned only as capped inline raster data, never as a browser request to the publisher. The in-memory cache holds at most 256 links, expires successful cards after an hour and simple cards after five minutes. Four external preview jobs can run at once. A failed or slow site gets a plain hostname card without affecting the message.
+
 ### Voice calls
 
 A direct Signal chat has a call button. The person calls, the contact's phone rings, and they talk

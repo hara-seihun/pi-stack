@@ -52,6 +52,16 @@ async function setup(root = directory(), onChange?: () => void) {
 }
 
 describe("messaging custody", () => {
+  test("historical message previews are scoped to stored text and refuse loopback targets", async () => {
+    const { service, context, conversation } = await setup();
+    await context.message({ id: "preview", conversation: { id: conversation.externalId, title: conversation.title, kind: "direct" }, direction: "incoming", sender: "Friend", text: "Look at http://127.0.0.1:8899/secret. Again http://127.0.0.1:8899/secret", timestamp: 123, attachments: [] });
+    const id = service.history(conversation.id).messages[0].id;
+    const response = await service.handle(new Request(`http://local/v1/messaging/messages/${id}/link-previews`));
+    expect(response?.status).toBe(200);
+    expect(await response?.json()).toEqual({ previews: [{ url: "http://127.0.0.1:8899/secret", title: "127.0.0.1", description: null, imageUrl: null, siteName: null }] });
+    const missing = await service.handle(new Request("http://local/v1/messaging/messages/not-stored/link-previews"));
+    expect(missing?.status).toBe(404);
+  });
   test("stored sender identities resolve on discovery, survive restart, and rename without touching history", async () => {
     const root = directory();
     const { service, context, conversation } = await setup(root);

@@ -3,6 +3,8 @@ import { copyFileSync, existsSync, mkdirSync, realpathSync, rmSync, statSync } f
 import { isAbsolute, join, relative } from "node:path";
 import { pathToFileURL } from "node:url";
 import { API } from "../api";
+import { extractMessageLinks } from "./links";
+import { linkPreview } from "./link-previews";
 import { API_CORS_HEADERS } from "../cors";
 import { storeUpload, uploadName } from "../uploads";
 import type { BackendAttachment, BackendAvatar, BackendCall, BackendCallAudio, BackendConversation, BackendMessage, BackendSender, MessagingCallSupport, MessagingPlugin, MessagingPluginFactory } from "./plugin";
@@ -627,6 +629,11 @@ export class MessagingService {
     if (more) rows.pop();
     return { messages: rows.reverse().map(row => this.message(row)), before: more ? rows[0].seq : null };
   }
+  async linkPreviews(messageId: string) {
+    const row = this.db.query("SELECT text FROM messages WHERE id=?").get(messageId) as { text: string } | null;
+    if (!row) throw new MessagingFailure("Messaging message not found", 404);
+    return { previews: await Promise.all(extractMessageLinks(row.text).map(linkPreview)) };
+  }
   markRead(id: string) {
     this.conversationRow(id);
     if (this.db.query("UPDATE conversations SET unread=0 WHERE id=? AND unread<>0").run(id).changes) this.changed();
@@ -802,6 +809,8 @@ export class MessagingService {
       if (close) { this.closeConversation(close.conversationId); return json({ ok: true }); }
       const history = API.messagingHistory.match(req.method, url.pathname);
       if (history) return json(this.history(history.conversationId, url.searchParams.has("before") ? Number(url.searchParams.get("before")) : undefined, url.searchParams.has("limit") ? Number(url.searchParams.get("limit")) : 60));
+      const previews = API.messagingLinkPreviews.match(req.method, url.pathname);
+      if (previews) return json(await this.linkPreviews(previews.messageId));
       const send = API.messagingSend.match(req.method, url.pathname);
       if (send) {
         // Answer with the durable receipt, not the backend's verdict: Signal's
