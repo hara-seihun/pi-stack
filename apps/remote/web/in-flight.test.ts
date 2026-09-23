@@ -26,6 +26,7 @@ test("writes always show; reads show only within the press window; the stream ne
   expect(requestVisibility("POST", "/v1/stream/abc", 5)).toBe("shown");
   expect(requestVisibility(NATIVE_METHOD, "native:getState", null)).toBe("background");
   expect(requestVisibility(NATIVE_METHOD, "native:installAppUpdate", 50)).toBe("shown");
+  expect(requestVisibility(NATIVE_METHOD, "native:haptic", 50)).toBe("background");
 });
 
 test("a native bridge call after a press shows like a request and settles with its promise", async () => {
@@ -40,6 +41,21 @@ test("a native bridge call after a press shows like a request and settles with i
   expect(inFlight.count()).toBe(1);
   resolve(); await pending;
   expect(button.busy).toBe(false);
+  expect(inFlight.count()).toBe(0);
+});
+
+test("a delayed tactile confirmation does not prolong the server progress bar", async () => {
+  const button = new FakeControl("button");
+  let resolve!: () => void;
+  const bridge = reportingBridge({ haptic: () => new Promise<void>(done => { resolve = done; }) });
+  noteActivation(button as unknown as EventTarget);
+  const server = beginRequest("GET", "/v1/sessions/thread/item", performance.now());
+  const haptic = bridge.haptic();
+  expect(inFlight.count()).toBe(1);
+  server();
+  expect(inFlight.count()).toBe(0);
+  resolve();
+  await haptic;
   expect(inFlight.count()).toBe(0);
 });
 

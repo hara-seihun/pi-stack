@@ -18,7 +18,7 @@ const WRITES = new Set(["POST", "PUT", "PATCH", "DELETE"]);
 export const NATIVE_METHOD = "NATIVE";
 
 export function requestVisibility(method: string, pathname: string, activationAgeMs: number | null): "shown" | "background" {
-  if (/\/v1\/stream$/.test(pathname)) return "background";
+  if (/\/v1\/stream$/.test(pathname) || pathname === "native:haptic") return "background";
   if (WRITES.has(method)) return "shown";
   return activationAgeMs !== null && activationAgeMs >= 0 && activationAgeMs <= ACTIVATION_WINDOW_MS ? "shown" : "background";
 }
